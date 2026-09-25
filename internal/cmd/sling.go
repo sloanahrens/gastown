@@ -677,7 +677,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			// discarded, never silently re-created.
 			if slingResumeBranch == "" {
 				if branch, ok := survivingBranchForBeadFn(townRoot, beadID); ok {
-					return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, but its branch still exists on origin:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
+					return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
 						beadID, info.Assignee, branch, beadID, branch, beadID)
 				}
 			}

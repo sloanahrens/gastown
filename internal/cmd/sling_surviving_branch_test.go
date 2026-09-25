@@ -203,17 +203,26 @@ func TestSurvivingBranchForBead_ResolvesRigRepo(t *testing.T) {
 	runGit(t, townRoot, "init", "--bare", originDir)
 
 	seed := filepath.Join(townRoot, "seed")
-	runGit(t, townRoot, "init", seed)
+	runGit(t, townRoot, "init", "--initial-branch=main", seed)
 	runGit(t, seed, "config", "user.email", "test@example.com")
 	runGit(t, seed, "config", "user.name", "test")
 	if err := os.WriteFile(filepath.Join(seed, "f.txt"), []byte("hello\n"), 0644); err != nil {
 		t.Fatalf("write seed file: %v", err)
 	}
 	runGit(t, seed, "add", "f.txt")
-	runGit(t, seed, "commit", "-m", "seed (gt-ibt8)")
-	runGit(t, seed, "branch", "polecat/pearl/gt-ibt8+mu72g5cz")
+	runGit(t, seed, "commit", "-m", "base")
+	// Surviving work (the shared predicate, polecat.WorkSurvival): a branch
+	// with a patch that is not on main. A branch equal to main carries no
+	// work and must not block a re-sling.
+	runGit(t, seed, "branch", "polecat/agate/gt-empty+mu72g5cz")
+	runGit(t, seed, "checkout", "-q", "-b", "polecat/pearl/gt-ibt8+mu72g5cz")
+	if err := os.WriteFile(filepath.Join(seed, "work.txt"), []byte("work\n"), 0644); err != nil {
+		t.Fatalf("write work file: %v", err)
+	}
+	runGit(t, seed, "add", "work.txt")
+	runGit(t, seed, "commit", "-m", "work (gt-ibt8)")
 	runGit(t, seed, "remote", "add", "origin", originDir)
-	runGit(t, seed, "push", "origin", "polecat/pearl/gt-ibt8+mu72g5cz")
+	runGit(t, seed, "push", "origin", "main", "polecat/pearl/gt-ibt8+mu72g5cz", "polecat/agate/gt-empty+mu72g5cz")
 
 	// The rig root the daemon and sling both use: <town>/<rigName>.
 	rigRoot := filepath.Join(townRoot, "gastown")
@@ -230,6 +239,11 @@ func TestSurvivingBranchForBead_ResolvesRigRepo(t *testing.T) {
 	}
 	if branch != "polecat/pearl/gt-ibt8+mu72g5cz" {
 		t.Errorf("survivingBranchForBead() = %q, want the pushed branch", branch)
+	}
+
+	// A branch equal to main is not surviving work.
+	if branch, ok := survivingBranchForBead(townRoot, "gt-empty"); ok {
+		t.Errorf("a branch equal to main must not count as surviving work, got %q", branch)
 	}
 
 	// A bead with no branch reports unknown, not a false positive.

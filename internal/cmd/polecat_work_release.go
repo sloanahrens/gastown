@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
-	"os/exec"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
@@ -107,10 +105,6 @@ func releaseHeldBead(r polecatWorkReleaser, agentID, beadID string) workReleaseO
 	return out
 }
 
-// bdGuardNotHeldExit is bd's exit code when an --if-assignee/--if-status
-// precondition no longer holds: nothing was written.
-const bdGuardNotHeldExit = 13
-
 // bdPolecatWorkReleaser is the production polecatWorkReleaser.
 type bdPolecatWorkReleaser struct {
 	townRoot    string
@@ -126,18 +120,8 @@ func (r bdPolecatWorkReleaser) HookState(beadID string) (string, string, error) 
 }
 
 func (r bdPolecatWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (bool, error) {
-	err := BdCmd("update", beadID, "--status=open", "--assignee=", "--if-assignee="+expectedAssignee).
-		Dir(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).
-		WithAutoCommit().
-		Run()
-	if err == nil {
-		return true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == bdGuardNotHeldExit {
-		return false, nil
-	}
-	return false, err
+	// The same guarded write polecat removal uses (beads.ReleaseIfAssignee).
+	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).ReleaseIfAssignee(beadID, expectedAssignee)
 }
 
 func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {

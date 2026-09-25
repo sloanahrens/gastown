@@ -166,65 +166,90 @@ func TestBdPolecatWorkReleaserUsesAssigneeGuard(t *testing.T) {
 
 // --- gt polecat nuke (gt-vm5g4) ---------------------------------------------
 
-func stubSurvivingBranch(t *testing.T, branch string) {
-	t.Helper()
-	prev := survivingBranchForBeadFn
-	survivingBranchForBeadFn = func(string, string) (string, bool) { return branch, branch != "" }
-	t.Cleanup(func() { survivingBranchForBeadFn = prev })
+func survivesWith(branch string, err error) func(string) (string, error) {
+	return func(string) (string, error) { return branch, err }
 }
 
-func TestNukeReleaseHookedWorkOnlyWhileAssigneeMatches(t *testing.T) {
-	p := &polecat.Polecat{Name: "basalt", Rig: "gastown", Issue: "gt-elvf4"}
+func TestNukeHookedWorkEndToEnd(t *testing.T) {
+	const me = "gastown/polecats/basalt"
+	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
+	working := &polecat.Polecat{Name: "basalt", Rig: "gastown", Issue: "gt-elvf4"}
 
-	t.Run("in_progress on the nuked polecat, no preserved work", func(t *testing.T) {
-		stubSurvivingBranch(t, "")
-		rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-elvf4": {"in_progress", "gastown/polecats/basalt"}}}
-		out := nukeReleaseHookedWork(rel, "/town", "gastown", p, "")
-		if !out.Released || len(rel.released) != 1 {
-			t.Fatalf("nuke must release its hooked bead: %+v %v", out, rel.released)
-		}
-		if len(rel.resets) != 0 {
-			t.Fatal("nuke leaves the agent-bead reset to sandbox removal")
-		}
-	})
-	t.Run("already re-slung elsewhere", func(t *testing.T) {
-		stubSurvivingBranch(t, "polecat/granite/gt-elvf4+1")
-		rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-elvf4": {"hooked", "gastown/polecats/granite"}}}
-		out := nukeReleaseHookedWork(rel, "/town", "gastown", p, "")
-		if out.Released || len(rel.released) != 0 || len(rel.annotated) != 0 {
-			t.Fatalf("nuke must not touch another polecat's bead: %+v %v", out, rel.annotated)
-		}
-	})
-	t.Run("no hooked work", func(t *testing.T) {
-		rel := &fakeWorkReleaser{readErr: errors.New("must not be read")}
-		if out := nukeReleaseHookedWork(rel, "/town", "gastown", &polecat.Polecat{Name: "basalt", Rig: "gastown"}, ""); out != (workReleaseOutcome{}) {
-			t.Fatalf("no issue, no work: %+v", out)
-		}
-	})
-}
-
-// Work the nuke preserved (or found) on origin keeps the hook, so sling's
-// surviving-branch guard still stops a fresh re-sling from main (gt-ibt8), and
-// the bead says how to resume it.
-func TestNukeKeepsHookWhenWorkIsPreserved(t *testing.T) {
-	p := &polecat.Polecat{Name: "basalt", Rig: "gastown", Issue: "gt-elvf4"}
 	for _, tc := range []struct {
-		name, pushedRef, surviving, wantBranch string
+		name         string
+		status, who  string
+		p            *polecat.Polecat
+		readHook     func() string
+		survives     func(string) (string, error)
+		wantHeld     bool // still hooked to the nuked polecat at the end
+		wantComment  bool
+		wantAttempts int // release writes attempted
 	}{
-		{name: "this nuke pushed the branch", pushedRef: "origin/polecat/basalt/gt-elvf4+123", wantBranch: "polecat/basalt/gt-elvf4+123"},
-		{name: "branch already on origin", surviving: "polecat/basalt/gt-elvf4+99", wantBranch: "polecat/basalt/gt-elvf4+99"},
+		{name: "hooked, surviving work: still hooked after removal", status: "hooked", who: me, p: working,
+			survives: survivesWith(branch, nil), wantHeld: true, wantComment: true},
+		{name: "in_progress, surviving work: kept, one comment, no release attempts", status: "in_progress", who: me, p: working,
+			survives: survivesWith(branch, nil), wantHeld: true, wantComment: true},
+		{name: "hooked, merged branch: released", status: "hooked", who: me, p: working,
+			survives: survivesWith("", nil), wantAttempts: 1},
+		{name: "survival unknown: kept, no comment", status: "in_progress", who: me, p: working,
+			survives: survivesWith("", errors.New("origin unreachable")), wantHeld: true},
+		{name: "rig with no git repo: released", status: "hooked", who: me, p: working,
+			survives: survivesWith("", polecat.ErrNoRigRepo), wantAttempts: 1},
+		{name: "reaped before the nuke: hook read off the agent bead, released", status: "hooked", who: me,
+			readHook: func() string { return "gt-elvf4" }, survives: survivesWith("", nil), wantAttempts: 1},
+		{name: "reaped before the nuke with surviving work: kept", status: "hooked", who: me,
+			readHook: func() string { return "gt-elvf4" }, survives: survivesWith(branch, nil), wantHeld: true, wantComment: true},
+		{name: "already re-slung elsewhere: untouched", status: "hooked", who: "gastown/polecats/granite", p: working,
+			survives: survivesWith(branch, nil)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stubSurvivingBranch(t, tc.surviving)
-			rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-elvf4": {"in_progress", "gastown/polecats/basalt"}}}
-			out := nukeReleaseHookedWork(rel, "/town", "gastown", p, tc.pushedRef)
-			if out.Released || len(rel.released) != 0 {
-				t.Fatalf("preserved work must keep the hook: %+v", out)
+			rel := &countingReleaser{fakeWorkReleaser: fakeWorkReleaser{beads: map[string][2]string{"gt-elvf4": {tc.status, tc.who}}}}
+			runNukeHookFlowCounting(rel, tc.p, tc.readHook, tc.survives)
+
+			cur := rel.beads["gt-elvf4"]
+			if held := cur[1] == me; held != tc.wantHeld {
+				t.Fatalf("held by nuked polecat = %v (%v), want %v", held, cur, tc.wantHeld)
 			}
-			note := rel.annotated["gt-elvf4"]
-			if !strings.Contains(note, "gt sling gt-elvf4 gastown --branch "+tc.wantBranch) {
-				t.Fatalf("bead comment lacks the resume hint for %s:\n%s", tc.wantBranch, note)
+			if tc.who != me && cur[1] != tc.who {
+				t.Fatalf("another agent's bead changed: %v", cur)
+			}
+			note, commented := rel.annotated["gt-elvf4"]
+			if commented != tc.wantComment {
+				t.Fatalf("commented = %v (%q), want %v", commented, note, tc.wantComment)
+			}
+			if commented && !strings.Contains(note, "gt sling gt-elvf4 gastown --branch "+branch) {
+				t.Fatalf("comment lacks the resume hint:\n%s", note)
+			}
+			if rel.attempts != tc.wantAttempts {
+				t.Fatalf("release attempts = %d, want %d", rel.attempts, tc.wantAttempts)
 			}
 		})
 	}
+}
+
+// countingReleaser counts release writes, so "kept" also means "never tried".
+type countingReleaser struct {
+	fakeWorkReleaser
+	attempts int
+}
+
+func (c *countingReleaser) ReleaseBead(beadID, expected string) (bool, error) {
+	c.attempts++
+	return c.fakeWorkReleaser.ReleaseBead(beadID, expected)
+}
+
+// runNukeHookFlowCounting drives the nuke's hooked-work steps in order: decide
+// before removal, remove (mgr.RemoveWithOptions' unassignWorkBeads keeps
+// surviving or unknown work and otherwise makes the same guarded release), then
+// report after.
+func runNukeHookFlowCounting(rel *countingReleaser, p *polecat.Polecat, readHook func() string, survives func(string) (string, error)) {
+	h := startNukeHookedWork(rel, survives, "gastown", "basalt", p, readHook)
+	branch, err := survives("gt-elvf4")
+	if err == nil && branch == "" || errors.Is(err, polecat.ErrNoRigRepo) {
+		// Removal's own guarded release: a no-op when the start already released.
+		if held, _ := heldBy(rel, "gastown/polecats/basalt", "gt-elvf4"); held {
+			_, _ = rel.ReleaseBead("gt-elvf4", "gastown/polecats/basalt")
+		}
+	}
+	h.finish()
 }

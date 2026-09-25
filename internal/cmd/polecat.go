@@ -2636,36 +2636,26 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// alone. It runs after the preserve gate (a refused nuke keeps its work) and
 	// before removal, which resets the agent bead itself.
 	//
-	// A branch with work on origin keeps the hook instead (gt-ibt8, gt-da2x):
-	// releasing it would let a re-sling start a fresh polecat from main over the
-	// preserved work, bypassing sling's surviving-branch guard. The bead gets a
-	// comment naming the branch and the --branch resume command.
-	nukeTownRoot := beads.FindTownRoot(r.Path)
-	nukeRel := newPolecatWorkReleaserFn(nukeTownRoot, "")
-	hookHandled := false
-	if getErr == nil && polecatInfo != nil && polecatInfo.Issue != "" {
-		pushedRef := ""
-		if preservedRef != "" && !alreadyOnRemote {
-			pushedRef = preservedRef
-		}
-		if out := nukeReleaseHookedWork(nukeRel, nukeTownRoot, rigName, polecatInfo, pushedRef); !out.Released && out.SkipNote != "" {
-			fmt.Printf("  %s hooked work %s not released: %s\n", style.Dim.Render("○"), polecatInfo.Issue, out.SkipNote)
-		}
-		hookHandled = true
+	// Work that survives on a polecat branch (polecat.WorkSurvival: unmerged
+	// patches, local or on origin) keeps the hook instead, as does an unknown
+	// answer: releasing it would let a re-sling start a fresh polecat from main
+	// over that work (gt-ibt8, gt-da2x). Removal below applies the same rule.
+	// The resume comment is written only once the final state is known.
+	var infoForHook *polecat.Polecat
+	if getErr == nil {
+		infoForHook = polecatInfo
 	}
+	hookedWork := startNukeHookedWork(
+		newPolecatWorkReleaserFn(beads.FindTownRoot(r.Path), ""),
+		func(beadID string) (string, error) { return nukeSurvivingWorkFn(r.Path, beadID) },
+		rigName, polecatName, infoForHook,
+		func() string { return readAgentHookBeadFn(r, rigName, polecatName) },
+	)
 
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)
 	if err := mgr.RemoveWithOptions(polecatName, opts.Force, true, false); err != nil {
 		if errors.Is(err, polecat.ErrPolecatNotFound) {
 			fmt.Printf("  %s worktree already gone\n", style.Dim.Render("○"))
-			// Reaped before this nuke: the polecat record could not name its
-			// work, so read it off the agent bead before the reset clears it.
-			if !hookHandled {
-				if hook := readAgentHookBeadFn(r, rigName, polecatName); hook != "" {
-					nukeReleaseHookedWork(nukeRel, nukeTownRoot, rigName,
-						&polecat.Polecat{Name: polecatName, Rig: rigName, Issue: hook}, "")
-				}
-			}
 			resetPolecatAgentBeadForReuse(r, rigName, polecatName)
 		} else {
 			return fmt.Errorf("worktree removal failed: %w", err)
@@ -2704,6 +2694,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		}
 	}
 
+	// Step 4.5: Report the hooked work bead's final state; a kept hook gets the
+	// resume comment now that removal can no longer change it.
+	hookedWork.finish()
+
 	// Step 5: Purge closed ephemeral beads (wisps) accumulated during sessions.
 	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol
 	// cycles, etc. accumulate across sessions and pollute bd ready/list (hq-6161m).
@@ -2722,46 +2716,83 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	return nil
 }
 
-// nukeReleaseHookedWork gives the nuked polecat's hooked work bead back
-// through the shared compare-and-release helper — unless the work survives on
-// an origin branch, in which case the hook stays and the bead is annotated
-// with the resume command. pushedRef is the remote ref this nuke's preserve
-// step pushed ("" when it pushed nothing). The slot is not reset here: the
-// sandbox removal that follows resets the agent bead.
-func nukeReleaseHookedWork(rel polecatWorkReleaser, townRoot, rigName string, p *polecat.Polecat, pushedRef string) workReleaseOutcome {
-	if p == nil || p.Issue == "" {
-		return workReleaseOutcome{}
-	}
-	polecatRig := p.Rig
-	if polecatRig == "" {
-		polecatRig = rigName
-	}
-	agentID := fmt.Sprintf("%s/polecats/%s", polecatRig, p.Name)
-	if held, note := heldBy(rel, agentID, p.Issue); !held {
-		return workReleaseOutcome{SkipNote: note}
-	}
+// nukeSurvivingWorkFn is the shared surviving-work predicate for a rig; a
+// seam for tests.
+var nukeSurvivingWorkFn = polecat.SurvivingWorkForIssue
 
-	preserved := strings.TrimPrefix(pushedRef, "origin/")
-	if preserved == "" {
-		if branch, ok := survivingBranchForBeadFn(townRoot, p.Issue); ok {
-			preserved = branch
-		}
+// nukeHookedWork carries a nuke's hooked work bead from the release decision
+// (before the sandbox is removed) to the final report (after).
+type nukeHookedWork struct {
+	rel      polecatWorkReleaser
+	agentID  string
+	beadID   string
+	kept     bool   // the hook was deliberately kept
+	branch   string // where the work survives ("" when survival was unknown)
+	keepNote string
+}
+
+// startNukeHookedWork decides what happens to the nuked polecat's hooked work
+// bead. The bead is the polecat record's issue or, for a polecat reaped before
+// its nuke, the agent bead's hook_bead (readHook). Only a bead still held by
+// this polecat is touched. Surviving work — or an unknown answer, except for a
+// rig with no git repo — keeps the hook; otherwise the bead is released through
+// the shared compare-and-release helper. Returns nil when there is nothing to
+// report later.
+func startNukeHookedWork(rel polecatWorkReleaser, survives func(beadID string) (string, error),
+	rigName, polecatName string, p *polecat.Polecat, readHook func() string) *nukeHookedWork {
+	beadID := ""
+	if p != nil {
+		beadID = p.Issue
 	}
-	if preserved != "" {
-		text := fmt.Sprintf("gt polecat nuke: %s was nuked with its work preserved on origin branch %s. "+
-			"The bead stays hooked so a re-sling does not start a fresh polecat from main over that work.\n"+
-			"Resume it:          gt sling %s %s --branch %s\n"+
-			"Discard and redo:   gt sling %s %s --force",
-			agentID, preserved, p.Issue, polecatRig, preserved, p.Issue, polecatRig)
-		if err := rel.Annotate(p.Issue, text); err != nil {
-			fmt.Printf("  %s Could not annotate %s with preserved branch %s: %v\n",
-				style.Dim.Render("Warning:"), p.Issue, preserved, err)
-		}
-		fmt.Printf("  %s Kept %s hooked: work preserved on %s (resume with --branch %s)\n",
-			style.Dim.Render("○"), p.Issue, preserved, preserved)
-		return workReleaseOutcome{SkipNote: "work preserved on " + preserved}
+	if beadID == "" && readHook != nil {
+		beadID = readHook()
 	}
-	return releasePolecatWork(rel, agentID, p.Issue, false)
+	if beadID == "" {
+		return nil
+	}
+	h := &nukeHookedWork{rel: rel, agentID: fmt.Sprintf("%s/polecats/%s", rigName, polecatName), beadID: beadID}
+	if held, _ := heldBy(rel, h.agentID, beadID); !held {
+		return nil
+	}
+	branch, err := survives(beadID)
+	switch {
+	case err != nil && !errors.Is(err, polecat.ErrNoRigRepo):
+		h.kept, h.keepNote = true, fmt.Sprintf("could not check for surviving work: %v", err)
+	case branch != "":
+		h.kept, h.branch = true, branch
+		h.keepNote = fmt.Sprintf("work survives on %s", branch)
+	default:
+		if out := releasePolecatWork(rel, h.agentID, beadID, false); !out.Released && out.SkipNote != "" {
+			fmt.Printf("  %s hooked work %s not released: %s\n", style.Dim.Render("○"), beadID, out.SkipNote)
+		}
+		return nil
+	}
+	return h
+}
+
+// finish reports a kept hook once removal is over, and writes the resume
+// comment only when the bead is in fact still hooked to this polecat.
+func (h *nukeHookedWork) finish() {
+	if h == nil || !h.kept {
+		return
+	}
+	if held, _ := heldBy(h.rel, h.agentID, h.beadID); !held {
+		return
+	}
+	rigName := strings.SplitN(h.agentID, "/", 2)[0]
+	fmt.Printf("  %s Kept %s hooked: %s\n", style.Dim.Render("○"), h.beadID, h.keepNote)
+	if h.branch == "" {
+		return
+	}
+	text := fmt.Sprintf("gt polecat nuke: %s was nuked with its work preserved on branch %s. "+
+		"The bead stays hooked so a re-sling does not start a fresh polecat from main over that work.\n"+
+		"Resume it:          gt sling %s %s --branch %s\n"+
+		"Discard and redo:   gt sling %s %s --force",
+		h.agentID, h.branch, h.beadID, rigName, h.branch, h.beadID, rigName)
+	if err := h.rel.Annotate(h.beadID, text); err != nil {
+		fmt.Printf("  %s Could not annotate %s with preserved branch %s: %v\n",
+			style.Dim.Render("Warning:"), h.beadID, h.branch, err)
+	}
 }
 
 // readAgentHookBeadFn is a seam for tests.

@@ -1,0 +1,59 @@
+package cmd
+
+import (
+	"errors"
+	"fmt"
+	"io"
+
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/workspace"
+)
+
+var polecatSurvivingWorkCmd = &cobra.Command{
+	Use:   "surviving-work <bead-id>",
+	Short: "Print the polecat branch that still carries a bead's unmerged work",
+	Long: `Print the newest polecat branch for a bead that still carries a commit whose
+patch is not on the rig's default branch (local in the rig repo or on origin).
+
+This is the check to run before resetting a hooked bead whose polecat is gone:
+if it prints a branch, keep the bead hooked and resume the work with
+  gt sling <bead-id> <rig> --branch <branch>
+
+Exit codes:
+  0  work survives; the branch is printed
+  1  no surviving work (nothing printed)
+  2  cannot tell (for example, origin unreachable); keep the bead hooked`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPolecatSurvivingWork,
+}
+
+func init() {
+	polecatCmd.AddCommand(polecatSurvivingWorkCmd)
+}
+
+func runPolecatSurvivingWork(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "surviving-work: %v\n", err)
+		return NewSilentExit(2)
+	}
+	return reportSurvivingWork(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0])
+}
+
+// reportSurvivingWork prints the surviving branch and maps the answer to the
+// command's exit contract.
+func reportSurvivingWork(stdout, stderr io.Writer, townRoot, beadID string) error {
+	branch, err := survivingWorkForBeadFn(townRoot, beadID)
+	switch {
+	case errors.Is(err, polecat.ErrNoRigRepo):
+		return NewSilentExit(1) // no git repo: no branch to protect
+	case err != nil:
+		fmt.Fprintf(stderr, "surviving-work: cannot tell for %s: %v\n", beadID, err)
+		return NewSilentExit(2)
+	case branch == "":
+		return NewSilentExit(1)
+	}
+	fmt.Fprintln(stdout, branch)
+	return nil
+}

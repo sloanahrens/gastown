@@ -1404,17 +1404,28 @@ func rigRootForBead(townRoot, beadID string) string {
 	return filepath.Join(townRoot, rigName)
 }
 
-// survivingBranchForBead returns the most recent polecat branch still on the
-// rig's origin remote that encodes beadID, or "" when there is none. The
-// second return is false whenever the answer is unknown (no rig route, no git
-// repo, unreachable remote), so callers never read an unreachable remote as
-// "no surviving branch".
-func survivingBranchForBead(townRoot, beadID string) (string, bool) {
+// survivingWorkForBead is the shared surviving-work predicate
+// (polecat.WorkSurvival) for beadID: the newest polecat branch — local in the
+// rig repo or on origin — carrying a patch that is not on the rig's default
+// branch, or "" when none does. A non-nil error means the answer is unknown
+// (no rig route, unreachable origin, ...); polecat.ErrNoRigRepo means the rig
+// has no git repo, so there is no branch to protect.
+func survivingWorkForBead(townRoot, beadID string) (string, error) {
 	rigRoot := rigRootForBead(townRoot, beadID)
 	if rigRoot == "" {
-		return "", false
+		return "", fmt.Errorf("bead %s routes to no rig", beadID)
 	}
-	branch, err := polecat.SurvivingBranchForIssue(rigRoot, beadID)
+	return polecat.SurvivingWorkForIssue(rigRoot, beadID)
+}
+
+// survivingWorkForBeadFn is a seam for tests.
+var survivingWorkForBeadFn = survivingWorkForBead
+
+// survivingBranchForBead is sling's view of survivingWorkForBead: the branch
+// and true when the bead's work survives. It reads an unknown answer as "no
+// surviving work" (false), so an unreachable remote never blocks a re-sling.
+func survivingBranchForBead(townRoot, beadID string) (string, bool) {
+	branch, err := survivingWorkForBeadFn(townRoot, beadID)
 	if err != nil || branch == "" {
 		return "", false
 	}
