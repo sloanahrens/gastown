@@ -781,6 +781,39 @@ func TestReentrantMarkGrants(t *testing.T) {
 	}
 }
 
+// TestInheritedRole pins what a nested wrap gets back when it asks "what
+// role am I nested under" instead of guessing (gt-cet2): the whole point is
+// letting a caller that omits --role ride its true ancestor's hold rather
+// than a per-invocation placeholder that guarantees a mismatch and
+// reintroduces the gt-tuiy deadlock class.
+func TestInheritedRole(t *testing.T) {
+	townRoot := t.TempDir()
+	foreignPID := strconv.Itoa(os.Getpid() + 100000)
+	lockPath := LockPath(townRoot)
+
+	tests := []struct {
+		name     string
+		envValue string
+		wantRole string
+		wantOK   bool
+	}{
+		{"genuine ancestor hold", lockPath + "|" + foreignPID + "|gastown/refinery-batch", "gastown/refinery-batch", true},
+		{"no marker at all", "", "", false},
+		{"legacy marker has no role to hand back", lockPath + "|" + foreignPID, "", false},
+		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/refinery", "", false},
+		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/refinery", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(ReentrantEnvVar, tt.envValue)
+			role, ok := InheritedRole(townRoot)
+			if ok != tt.wantOK || role != tt.wantRole {
+				t.Errorf("InheritedRole() = (%q, %v), want (%q, %v)", role, ok, tt.wantRole, tt.wantOK)
+			}
+		})
+	}
+}
+
 // TestAcquire_TimesOutWhileUnwrappedContainersPersist is the timeout-side
 // complement: Acquire must not succeed (or silently hand out the slot)
 // while unwrapped containers never clear.

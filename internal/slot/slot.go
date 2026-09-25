@@ -83,13 +83,21 @@ const dockerPSTimeout = 5 * time.Second
 // different work contends for the real lock and queues fairly.
 //
 // The cost of that narrowing is deliberate: a nested acquire that names
-// DIFFERENT work — including an unnamed `gt slot run`, whose role is the
-// per-invocation "pid-<pid>" placeholder — now waits for the holder to
-// release instead of skipping its lock. It is a wait, not a failure: the
-// caller prints "Waiting for container-gate slot ..." and reports slot
-// contention, which is the outcome a lock is supposed to produce for
-// unrelated work. A caller that legitimately nests inside a hold must pass
-// that hold's role to stay reentrant.
+// DIFFERENT work now waits for the holder to release instead of skipping
+// its lock. It is a wait, not a failure: the caller prints "Waiting for
+// container-gate slot ..." and reports slot contention, which is the
+// outcome a lock is supposed to produce for unrelated work. A caller that
+// legitimately nests inside a hold must pass that hold's role to stay
+// reentrant — but the exact role string is an internal detail assembled by
+// whichever Go call path took the ancestor hold (acquireBatchGateSlot,
+// acquireMainBranchTestSlot, ...), not something a nested formula wrap or
+// Makefile target can know in advance. `gt slot run` resolves an omitted
+// --role to InheritedRole's answer before falling back to the
+// per-invocation "pid-<pid>" placeholder, so the common case — a nested
+// wrap that never names a role at all — rides its true ancestor's hold
+// instead of reintroducing the gt-tuiy deadlock class against it. Nothing
+// changes for a caller that DOES pass an explicit role naming different
+// work: it still contends, exactly as designed.
 //
 // A marker written before roles were recorded is just "<lockPath>|<pid>"
 // (an older gt binary holding the slot mid-rollover). It parses with an
@@ -144,9 +152,13 @@ func reentrantHolder() (reentrantMark, bool) {
 	return parseReentrantMark(os.Getenv(ReentrantEnvVar))
 }
 
-// grants reports whether this marker licenses a caller acquiring role in
-// townRoot to take the reentrant fast path instead of locking for real.
-func (m reentrantMark) grants(townRoot, role string) bool {
+// validAncestor reports whether this marker names a genuine ancestor hold
+// on townRoot's slot — as opposed to this process's own (or a sibling
+// goroutine's) hold, or a marker naming some other town entirely. It is the
+// townRoot-scoped half of grants, split out so InheritedRole can reuse it
+// without also requiring a caller to already know the role to compare
+// against.
+func (m reentrantMark) validAncestor(townRoot string) bool {
 	// A marker naming THIS process is its own (or a sibling goroutine's)
 	// hold, not an ancestor's: it must still contend, or mutual exclusion
 	// would not survive two callers in one process (gt-tuiy).
@@ -154,12 +166,39 @@ func (m reentrantMark) grants(townRoot, role string) bool {
 		return false
 	}
 	// A path outside this town's lock directory is somebody else's slot.
-	if _, ok := slotIndexFromLockPath(townRoot, m.lockPath); !ok {
+	_, ok := slotIndexFromLockPath(townRoot, m.lockPath)
+	return ok
+}
+
+// grants reports whether this marker licenses a caller acquiring role in
+// townRoot to take the reentrant fast path instead of locking for real.
+func (m reentrantMark) grants(townRoot, role string) bool {
+	if !m.validAncestor(townRoot) {
 		return false
 	}
 	// Legacy markers predate the role field and keep the old permissive
 	// reading; otherwise the caller has to be doing the same work.
 	return m.role == "" || m.role == role
+}
+
+// InheritedRole returns the role of a genuine ancestor hold this process
+// inherited on townRoot's container-gate slot, if any. It is what a nested
+// wrap should pass as its own --role to ride that hold's reentrant fast
+// path instead of contending against the very ancestor it is nested under
+// (see ReentrantEnvVar and gt-off9) — the role-scoping that fast path now
+// requires is otherwise a contract a caller has no way to discharge, since
+// the ancestor's exact role string ("<rig>/refinery-batch",
+// "<rig>/main-branch-test", ...) is assembled deep in Go call paths a
+// shell-level nested wrap never sees. The second return is false when this
+// process holds no marker, the marker names a different town, or the
+// marker predates roles (an empty role carries no value to hand back, even
+// though grants() still treats it as reentrant for any role).
+func InheritedRole(townRoot string) (string, bool) {
+	m, ok := reentrantHolder()
+	if !ok || !m.validAncestor(townRoot) || m.role == "" {
+		return "", false
+	}
+	return m.role, true
 }
 
 // reentrantEnvValue renders the marker a holder writes for its descendants.
