@@ -122,6 +122,45 @@ func jsonlGitBackupInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultJsonlGitBackupInterval
 }
 
+// triggerJsonlGitBackup runs a jsonl_git_backup cycle when the patrol is due,
+// on its own goroutine.
+//
+// The ticker that drives this call is a check cadence, not a run cadence: an
+// in-process ticker resets its countdown on every daemon restart, so due-ness
+// is instead decided from the persisted last-run time in
+// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
+//
+// Dispatched onto its own goroutine, like the gt-ima2 fix for compactor_dog:
+// a cycle can hold for several minutes (git add/commit/push), and running it
+// inline would stall every other tick behind it.
+func (d *Daemon) triggerJsonlGitBackup() {
+	if !d.isPatrolActive("jsonl_git_backup") {
+		return
+	}
+
+	dec := evaluatePatrolDue(d.config.TownRoot, "jsonl_git_backup", time.Time{}, time.Now(), jsonlGitBackupInterval(d.patrolConfig))
+	if !dec.due {
+		d.logger.Printf("jsonl_git_backup: not due — %s", dec.note)
+		return
+	}
+
+	if !d.jsonlGitBackupRunning.CompareAndSwap(false, true) {
+		d.logger.Printf("jsonl_git_backup: previous cycle still running — skipping this check")
+		return
+	}
+
+	if dec.warn != "" {
+		d.logger.Printf("jsonl_git_backup: WARNING: %s — %s", dec.warn, dec.note)
+	} else {
+		d.logger.Printf("jsonl_git_backup: due — %s", dec.note)
+	}
+
+	go func() {
+		defer d.jsonlGitBackupRunning.Store(false)
+		d.syncJsonlGitBackup()
+	}()
+}
+
 // syncJsonlGitBackup exports issues from each database to JSONL, scrubs ephemeral data,
 // and commits/pushes to a git repository.
 // Non-fatal: errors are logged but don't stop the daemon.
@@ -134,6 +173,17 @@ func (d *Daemon) syncJsonlGitBackup() {
 		return
 	}
 	defer release()
+
+	// Record that a cycle was attempted, regardless of outcome below — the
+	// same "attempted" semantics as the ticker firing before gt-ima2/gt-gxpwc.
+	// An unwritable daemon directory only means the next restart or tick
+	// re-checks; it does not fail the cycle itself.
+	defer func() {
+		if err := savePatrolLastRun(d.config.TownRoot, "jsonl_git_backup", time.Now()); err != nil {
+			d.logger.Printf("jsonl_git_backup: WARNING: cannot persist last-run time (%v) — "+
+				"the next check may re-run sooner than expected", err)
+		}
+	}()
 
 	// Pour molecule for observability (nil-safe — all methods are no-ops on nil).
 	mol := d.pourDogMolecule(constants.MolDogJSONL, nil)

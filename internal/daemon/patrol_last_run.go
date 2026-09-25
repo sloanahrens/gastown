@@ -62,6 +62,54 @@ func loadPatrolLastRun(townRoot, patrol string) (time.Time, bool, error) {
 	return lastRun, true, nil
 }
 
+// patrolDueDecision is one due-ness evaluation for a ticker-driven patrol
+// whose run interval is enforced against a persisted last-run time rather
+// than an in-process countdown that a restart resets (gt-ima2).
+type patrolDueDecision struct {
+	// due is whether the patrol should run now.
+	due bool
+	// note explains the decision for the log. Never empty.
+	note string
+	// warn is set when the decision came from a broken last-run record rather
+	// than from a comparison. A broken record runs the patrol *and* says so:
+	// silent skipping is the failure being fixed, and a run without a word
+	// would hide a corrupt state file behind a patrol that looks merely on
+	// schedule.
+	warn string
+}
+
+// evaluatePatrolDue decides whether a patrol should run now, given its
+// persisted last-run time on disk. inMemory is the latest completion this
+// process itself recorded (which can be newer than the disk record when a
+// previous write failed); pass the zero time.Time when the caller keeps no
+// in-memory record of its own.
+func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interval time.Duration) patrolDueDecision {
+	lastRun, found, err := loadPatrolLastRun(townRoot, patrol)
+	switch {
+	case err != nil:
+		return patrolDueDecision{
+			due:  true,
+			note: "running the check because the last-run state cannot be read",
+			warn: fmt.Sprintf("last-run state unreadable (%v)", err),
+		}
+	case !found:
+		return patrolDueDecision{due: true, note: "no last-run record"}
+	}
+
+	// A cycle this process ran can be newer than the file when the write
+	// failed; take the later of the two so a known completion is not
+	// repeated on the next check.
+	if inMemory.After(lastRun) {
+		lastRun = inMemory
+	}
+
+	elapsed := now.Sub(lastRun).Round(time.Minute)
+	if elapsed >= interval {
+		return patrolDueDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+	}
+	return patrolDueDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+}
+
 // savePatrolLastRun records a patrol's completion time, preserving the entries
 // of other patrols.
 func savePatrolLastRun(townRoot, patrol string, at time.Time) error {
