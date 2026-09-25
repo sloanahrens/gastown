@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func TestIsDoltSQLServerArgs(t *testing.T) {
@@ -116,6 +118,17 @@ func TestClassifyDoltOrphan(t *testing.T) {
 			entry:  doltProcEntry{PID: 103, PPID: 1, Etime: "00:05", Args: "dolt sql-server --port 3307"},
 			wantOK: false,
 		},
+		{
+			// A daemonized production server is also reparented to PPID 1
+			// once its launching shell exits, but runs from a real,
+			// persistent --config rather than a test scratch dir or no
+			// --config at all. PPID<=1 alone must not tag it "orphan" —
+			// that's the shape Fix() SIGTERMs (gt-l7za1).
+			name:       "ppid 1 with real non-test config is unexpected not orphan",
+			entry:      doltProcEntry{PID: 104, PPID: 1, Etime: "18:39:00", Args: "dolt sql-server --config /Users/x/gt/.dolt-data/config.yaml"},
+			wantOK:     true,
+			wantReason: "unexpected",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -145,6 +158,35 @@ func TestTownDoltServerPID(t *testing.T) {
 	}
 	if pid := townDoltServerPID(dir); pid != 54321 {
 		t.Errorf("townDoltServerPID() = %d, want 54321", pid)
+	}
+}
+
+// TestTownServerPIDsUsesForbiddenTownRoot reproduces gt-l7za1: a hermetic
+// sandbox townRoot has no daemon/dolt.pid of its own, so the real live
+// town's server PID must still be recognized via workspace.
+// ForbiddenTownRoot, or the process table scan (which isn't sandboxed) finds
+// it with nothing to match against.
+func TestTownServerPIDsUsesForbiddenTownRoot(t *testing.T) {
+	sandboxRoot := t.TempDir() // no daemon/dolt.pid — mirrors a hermetic town
+
+	realRoot := t.TempDir()
+	realDaemonDir := filepath.Join(realRoot, "daemon")
+	if err := os.MkdirAll(realDaemonDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDaemonDir, "dolt.pid"), []byte("35519\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if pids := townServerPIDs(sandboxRoot); len(pids) != 0 {
+		t.Errorf("townServerPIDs() without ForbiddenTownRoot set = %v, want empty", pids)
+	}
+
+	t.Setenv(workspace.EnvForbiddenTownRoot, realRoot)
+
+	pids := townServerPIDs(sandboxRoot)
+	if !pids[35519] {
+		t.Errorf("townServerPIDs() = %v, want to include the real town's PID 35519", pids)
 	}
 }
 
