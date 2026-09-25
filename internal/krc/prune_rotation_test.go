@@ -225,3 +225,38 @@ func TestPruneFile_ConcurrentAppendsSurviveRotation(t *testing.T) {
 		}
 	}
 }
+
+// A .tmp left behind by a crashed prune must not donate its mode to the
+// replacement: O_TRUNC on an existing file keeps that file's permissions.
+func TestPruneFile_LeftoverTmpDoesNotChangeMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, events.EventsFile)
+	now := time.Now()
+	writeEventLines(t, path,
+		eventLine(t, now.Add(-30*24*time.Hour), "sling", "expired"),
+		eventLine(t, now.Add(-time.Minute), "sling", "kept"),
+	)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".tmp", []byte("stale partial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path+".tmp", 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewPruner(dir, DefaultConfig()).Prune(); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("events file mode = %o after prune, want 644", got)
+	}
+	if data, _ := os.ReadFile(path); strings.Contains(string(data), "stale partial") {
+		t.Fatalf("leftover tmp content leaked into the events file:\n%s", data)
+	}
+}

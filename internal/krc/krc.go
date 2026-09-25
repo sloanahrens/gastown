@@ -372,7 +372,12 @@ func (p *Pruner) scanRetained(filePath string, result *PruneResult) ([]string, e
 // returns the new size.
 func replaceWithLines(filePath string, perm os.FileMode, lines []string) (size int64, err error) {
 	tmpPath := filePath + ".tmp"
-	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm) //nolint:gosec // G304: sibling of the town's own events/feed file
+	// Remove a .tmp left by a crashed prune and create a fresh one: opening
+	// an existing file with O_TRUNC would keep its old permissions.
+	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+		return 0, fmt.Errorf("removing stale temp file: %w", err)
+	}
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm) //nolint:gosec // G304: sibling of the town's own events/feed file
 	if err != nil {
 		return 0, err
 	}
