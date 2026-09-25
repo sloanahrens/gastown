@@ -179,6 +179,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure is logged with its category, so a timeout no longer reads like a
   missing bead, and a rig whose status cannot be verified is escalated instead
   of only warned about.
+- **A grep/rg/ag/fd search pattern is no longer read as a scan root**
+  (gt-yts7) — the unbounded-scan rule ran every non-flag argument through
+  `scanRootPath`, which reads a relative token as a path whenever the directory
+  it names exists. A pattern that collided with a real directory name at cwd —
+  `grep -rn polecats ./docs` run from a rig root, which does hold a `polecats/`
+  — was blocked as a scan of that directory. The pattern slot is now identified
+  per tool and that one argument is exempt from the path-based root checks,
+  judged by existence instead: a pattern with any root argument behind it
+  (positionally, or as the value of a path-taking flag such as fd's
+  `--search-path`/`-C`) is never a scan root, whatever it spells, and the root
+  behind it is what the rule checks. With no root anywhere in the invocation
+  the walker runs over cwd, so the pattern is judged the way a root is. The
+  flag model is per tool — rg and fd take a value flag's argument as a
+  separate token (`rg -e --foo /`), and a bare `--` ends flag parsing, so
+  `grep -rn -- --recursive /` still checks `/` — and it is read
+  conservatively: an unrecognized flag is assumed to take no value, which can
+  only re-block a command that was already blocked, never the reverse. fd's
+  pattern is optional (a lone `fd /` or `fd $HOME` is its search root) and
+  `rg --files` takes paths and no pattern. The host-root denylist still
+  judges every argument's spelling, so no `/`, `~` or `$HOME` spelling
+  became reachable that was not before.
 
 ### Changed
 

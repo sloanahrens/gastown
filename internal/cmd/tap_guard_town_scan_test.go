@@ -262,6 +262,110 @@ func TestMatchesUnboundedScanTownTree(t *testing.T) {
 	}
 }
 
+// TestMatchesUnboundedScanPatternNotRoot pins gt-yts7 from both sides: a
+// search pattern is not a scan root — except when the invocation has no root
+// argument anywhere, in which case it is one — and detecting the pattern must
+// not skip the root that follows it.
+//
+// The false positive it fixes: scanRootPath reads a relative token as a path
+// whenever the directory it names exists, so `grep -rn polecats ./elsewhere`
+// run from a rig root — which really does hold a polecats/ directory — was
+// blocked as a scan of that directory.
+//
+// The bypasses the exemption could open, and which the blocked cases here
+// pin: fd reads a lone positional argument that names an existing path as
+// its search root rather than its pattern (`fd /`, `fd $HOME`), fd's
+// path-taking flags and rg --files carry paths instead of a pattern, a
+// value-taking flag's argument is part of the flag (so `grep -A 3 polecats
+// /` does not hand the pattern slot to the root), and a pattern escaped
+// with "--" must not hand the pattern slot to the root argument behind it.
+func TestMatchesUnboundedScanPatternNotRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+	worktree := filepath.Join(rig, "polecats", "lapis", "gastown")
+	other := t.TempDir()
+
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		// The pattern names a directory that exists at cwd, and the root
+		// argument behind it is bounded — the gt-yts7 false positive.
+		{"grep pattern collides with a rig agent dir", rig, `grep -rn polecats ` + other, false},
+		{"rg pattern collides with a rig agent dir", rig, `rg polecats ` + other, false},
+		{"ag pattern collides with a rig agent dir", rig, `ag polecats ` + other, false},
+		{"fd pattern collides with a rig agent dir", rig, `fd polecats ` + other, false},
+		{"grep pattern collides with the rig name", town, `grep -rn ` + fakeRigName + ` ` + other, false},
+		// fd alone in a cwd with no such entry: the pattern is not a root.
+		{"fd pattern with no path argument", other, `fd polecats`, false},
+		// fd alone in a cwd that does hold such an entry: it is one.
+		{"fd pattern with no path argument over a rig agent dir", rig, `fd polecats`, true},
+
+		// fd's pattern is optional: an existing lone path is its search root,
+		// so these must still reach the root checks.
+		{"fd rooted at /", worktree, `fd /`, true},
+		{"fd rooted at ~", worktree, `fd ~`, true},
+		{"fd rooted at the home directory", worktree, `fd $HOME`, true},
+		{"fd rooted at /Users", worktree, `fd /Users`, true},
+		{"fd rooted at the town tree", worktree, `fd --hidden ` + town, true},
+		{"fd rooted at a rig's agent dir", rig, `fd polecats`, true},
+
+		// fd's path-taking flags supply the paths to walk, so their value is
+		// the root and the pattern argument after it is still the pattern.
+		{"fd --search-path over /", worktree, `fd --search-path / foo`, true},
+		{"fd -C over the town tree", worktree, `fd -C ` + town + ` foo`, true},
+		{"fd --search-path over a rig agent dir", rig, `fd --search-path polecats foo`, true},
+		{"fd --search-path before a bounded pattern", worktree, `fd --search-path ./internal foo`, false},
+
+		// rg --files searches paths without a pattern.
+		{"rg --files over /", worktree, `rg --files /`, true},
+		{"rg --files over the town tree", worktree, `rg --files ` + town, true},
+
+		// A pattern escaped with "--" is positional, so the root behind it is
+		// still the root.
+		{"grep dash-led pattern before /", worktree, `grep -rn -- --recursive /`, true},
+		{"grep dash-led pattern before the town tree", worktree, `grep -rn -- --recursive ` + town, true},
+		{"grep dash-led pattern before a bounded root", worktree, `grep -rn -- --recursive ./internal`, false},
+		// "--" settles what the slot holds, so a path spelled there is the
+		// pattern and this searches ./internal rather than the town.
+		{"path spelled as the pattern after --", worktree, `grep -rn -- ` + town + ` ./internal`, false},
+
+		// The root argument *after* the pattern is what the guard is for.
+		{"grep root after a pattern", rig, `grep -rn TODO polecats`, true},
+		{"rg root after a pattern", rig, `rg TODO polecats`, true},
+		{"grep root after a dash-led pattern", rig, `grep -rn -- TODO polecats`, true},
+
+		// A value-taking flag's argument is part of the flag, not the first
+		// positional — reading it as a positional shifts what the guard
+		// examines (gt-yts7 rejection): the phantom value would swallow the
+		// pattern slot when the value is dash-led, and re-flag the real
+		// pattern when the value is not.
+		{"grep value-flag then a bounded pattern", worktree, `grep -rn -A 3 polecats ./internal`, false},
+		{"grep value-flag then /", worktree, `grep -rn -A 3 polecats /`, true},
+		{"grep value-flag over a rig agent dir", rig, `grep -rn -A 3 polecats /`, true},
+		{"rg dash-led value then a bounded root", worktree, `rg -rn -e --foo ./internal`, false},
+		{"rg dash-led value then /", worktree, `rg -e --foo /`, true},
+		{"rg -f value then a bounded root", worktree, `rg -rn -f patterns ./internal`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(tt.cwd)
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+}
+
 // TestNestedTownScanPayloadIsBlocked covers the shapes only the recursive
 // evaluator can see: a town-root scan hidden inside bash -c, eval, or a
 // command substitution. matchesUnboundedScan judges one token list and never
