@@ -48,7 +48,10 @@ This guard blocks operations that could cause irreversible damage:
     (polecats/crew/refinery/witness/mayor), or any .repo.git — see gt-6e2l,
     where a dog's 'grep -R ... /Users/sloan/gt' ran unblocked and walked
     every rig and every worktree on the host. A path inside a single repo or
-    worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed.
+    worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed, as is
+    a search pattern that shares a name with a directory there: 'grep -rn
+    polecats ./docs' searches ./docs, not the polecats/ directory at cwd
+    (gt-yts7).
   - go clean -cache/-testcache/-modcache/-fuzzcache (wipes the Go build
     cache SHARED by every agent on the host — see gt-nqcy follow-up).
   - a loop or watcher around 'gt done' or 'gt slot': a for/while/until block
@@ -764,6 +767,224 @@ var alwaysRecursiveScanTools = map[string]bool{
 	"find": true, "bfs": true, "fd": true, "du": true, "rg": true, "ag": true,
 }
 
+// scanOptionRole is the part a dash-led argument plays in locating a scan
+// tool's search pattern (gt-yts7).
+type scanOptionRole int
+
+const (
+	// roleBoolean is an option taking no value — including one no grammar
+	// entry covers, so an unrecognized option never consumes the argument
+	// after it.
+	roleBoolean scanOptionRole = iota
+	// rolePattern supplies the pattern as its value: `grep -e TODO ./docs`
+	// searches ./docs, so no positional argument there is a pattern.
+	rolePattern
+	// rolePath supplies a directory to walk as its value (fd's
+	// --search-path), which is a scan root like any other.
+	rolePath
+	// roleValue supplies a count, a file type, a glob, an encoding — a value
+	// that is neither the pattern nor, in practice, a directory.
+	roleValue
+	// roleCount supplies a count only when the next argument is a number:
+	// ag's -A/-B/-C keep any other token for the pattern (ag/src/options.c).
+	roleCount
+)
+
+// scanArgGrammar is a scan tool's option grammar as it bears on which
+// argument the tool reads as its search pattern (gt-yts7).
+type scanArgGrammar struct {
+	// flagRoles maps each option that takes a value to the role its value
+	// plays. Options absent from it take no value.
+	flagRoles map[string]scanOptionRole
+	// listsPaths names options after which the tool has no pattern argument
+	// at all (rg --files prints paths and searches for nothing).
+	listsPaths []string
+}
+
+// scanGrammars is keyed by tool base name. Only the tools that take a search
+// pattern appear: find, bfs, du and ls have none, so every non-flag argument
+// of theirs is a path and stays judged as one.
+var scanGrammars = map[string]scanArgGrammar{
+	"grep": {flagRoles: mergeScanRoles(
+		// The pattern options, including ugrep's additional-pattern family,
+		// which also leave the positional arguments as files.
+		scanRoles(rolePattern, "-e", "--regexp", "-f", "--file", "--and", "--andnot", "--not"),
+		scanRoles(roleValue,
+			"-A", "-B", "-C", "-m", "-d", "-D", "-J", "-K", "-g",
+			"--after-context", "--before-context", "--context", "--max-count",
+			"--directories", "--devices", "--jobs", "--range", "--min-line",
+			"--max-line", "--glob", "--iglob", "--include", "--include-dir",
+			"--include-from", "--exclude", "--exclude-dir", "--exclude-from",
+			"--include-fs", "--exclude-fs", "--label", "--binary-files",
+			"--encoding", "--depth"),
+	)},
+	"rg": {flagRoles: mergeScanRoles(
+		scanRoles(rolePattern, "-e", "--regexp", "-f", "--file"),
+		scanRoles(roleValue,
+			"-A", "-B", "-C", "-m", "-M", "-j", "-g", "-t", "-T", "-d", "-r", "-E",
+			"--after-context", "--before-context", "--context", "--max-count",
+			"--max-columns", "--threads", "--glob", "--iglob", "--type",
+			"--type-not", "--type-add", "--type-clear", "--max-depth",
+			"--max-filesize", "--replace", "--encoding", "--engine", "--sort",
+			"--sortr", "--ignore-file", "--pre", "--pre-glob", "--color",
+			"--colors", "--context-separator", "--field-context-separator",
+			"--field-match-separator", "--hostname-bin", "--hyperlink-format",
+			"--path-separator", "--dfa-size-limit", "--regex-size-limit",
+			"--generate"),
+	), listsPaths: []string{"--files"}},
+	"ag": {flagRoles: mergeScanRoles(
+		// ag takes no pattern option: its pattern is always the first
+		// positional argument, and -g/-G filter filenames instead.
+		scanRoles(roleCount, "-A", "-B", "-C", "--after", "--before", "--context"),
+		scanRoles(roleValue,
+			"-m", "-g", "-G", "-p", "-W", "--depth", "--max-count",
+			"--file-search-regex", "--ignore", "--ignore-dir", "--path-to-ignore",
+			"--pager", "--workers", "--width", "--color-line-number",
+			"--color-match", "--color-path"),
+	)},
+	"fd": {flagRoles: mergeScanRoles(
+		// fd's pattern is optional but always first; -e is its extension
+		// filter, and -x takes the rest of the line as another command's
+		// arguments, which this grammar reads as ordinary arguments.
+		scanRoles(rolePath, "--search-path", "-C", "--base-directory"),
+		scanRoles(roleValue,
+			"-d", "-t", "-e", "-E", "-c", "-j", "-S", "-o", "-x", "-X",
+			"--max-depth", "--min-depth", "--exact-depth", "--type", "--extension",
+			"--exclude", "--ignore-contain", "--ignore-file", "--color",
+			"--threads", "--size", "--changed-within", "--changed-before",
+			"--owner", "--path-separator", "--format", "--batch-size",
+			"--max-results", "--and", "--exec", "--exec-batch",
+			"--max-buffer-time"),
+	)},
+}
+
+// scanRoles returns options mapped to the role their value plays.
+func scanRoles(role scanOptionRole, options ...string) map[string]scanOptionRole {
+	m := make(map[string]scanOptionRole, len(options))
+	for _, o := range options {
+		m[o] = role
+	}
+	return m
+}
+
+// mergeScanRoles combines option tables.
+func mergeScanRoles(tables ...map[string]scanOptionRole) map[string]scanOptionRole {
+	m := make(map[string]scanOptionRole)
+	for _, t := range tables {
+		for option, role := range t {
+			m[option] = role
+		}
+	}
+	return m
+}
+
+// isFlagToken reports whether an argument reads as an option rather than a
+// positional argument: any dash-led token, a lone "-" included, which
+// scanRootPath also declines to resolve as a path.
+func isFlagToken(arg string) bool {
+	return strings.HasPrefix(arg, "-")
+}
+
+// scanOption returns token's role for gram, and whether the argument after
+// token is that option's value. A long option carries its value inline
+// ("--type=go") and otherwise takes the next argument; a short option is read
+// as a getopt cluster, where the letter taking a value ends the cluster
+// ("-rn", "-A 3") or carries the value inline ("-A3").
+func scanOption(gram scanArgGrammar, token string) (scanOptionRole, bool) {
+	if !isFlagToken(token) {
+		return roleBoolean, false
+	}
+	if strings.HasPrefix(token, "--") {
+		name := token
+		if eq := strings.IndexByte(token, '='); eq >= 0 {
+			name = token[:eq]
+		}
+		role := gram.flagRoles[name]
+		return role, role != roleBoolean && !strings.ContainsRune(token, '=')
+	}
+	letters := token[1:]
+	for i := 0; i < len(letters); i++ {
+		role := gram.flagRoles["-"+string(letters[i])]
+		if role == roleBoolean {
+			continue
+		}
+		return role, i == len(letters)-1
+	}
+	return roleBoolean, false
+}
+
+// scanPatternSlot returns the index in args of the argument tool reads as its
+// search pattern, or -1 when the invocation has no pattern argument, and
+// whether the invocation names a path for the scan to start from.
+//
+// Every other argument is left for the caller to judge as a scan root, a
+// value-taking option's separate argument included. So a grammar that is
+// wrong about an option re-blocks rather than spares: the pattern slot lands
+// on that option's value and the pattern it displaced is judged as a path.
+// The exception is a value that is itself a path the scan walks — fd's
+// --search-path, -C and --base-directory — so those are all listed.
+func scanPatternSlot(gram scanArgGrammar, args []string) (patternIdx int, hasRoot bool) {
+	var positionals []int
+	patternValue, pathValue := -1, false
+	flagsDone, valueNext := false, false
+	valueRole := roleBoolean
+	for i, arg := range args {
+		if valueNext {
+			valueNext = false
+			if valueRole == roleCount && !isCount(arg) {
+				positionals = append(positionals, i) // ag keeps it for the pattern
+				continue
+			}
+			switch valueRole {
+			case rolePattern:
+				if patternValue < 0 {
+					patternValue = i
+				}
+			case rolePath:
+				pathValue = true
+			}
+			continue
+		}
+		if !flagsDone {
+			if arg == "--" {
+				flagsDone = true
+				continue
+			}
+			if isFlagToken(arg) {
+				if role, next := scanOption(gram, arg); next {
+					valueNext, valueRole = true, role
+				}
+				continue
+			}
+		}
+		positionals = append(positionals, i)
+	}
+
+	switch {
+	case patternValue >= 0:
+		return patternValue, len(positionals) > 0 || pathValue
+	case hasExactArg(args, gram.listsPaths...):
+		return -1, len(positionals) > 0 || pathValue
+	case len(positionals) > 0:
+		return positionals[0], len(positionals) > 1 || pathValue
+	}
+	return -1, pathValue
+}
+
+// isCount reports whether token is a whole number: the shape ag's -A/-B/-C
+// accept as their value.
+func isCount(token string) bool {
+	if token == "" {
+		return false
+	}
+	for _, r := range token {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // commandArgs returns the arguments of the command starting at i — its
 // tokens up to the next shell command separator, the same delimiting the
 // other per-command matchers use (see shellCommandSeparators, gt-wisp-52y4).
@@ -820,7 +1041,18 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 			continue
 		}
 
-		for _, arg := range rest {
+		// The pattern argument is not the directory that shares its spelling
+		// (gt-yts7), but only where another argument names the path the walk
+		// starts from. With no path argument the walker runs over cwd
+		// (gt-3e6wa) and the pattern keeps its old reading, so this only ever
+		// un-blocks a scan that names its root elsewhere.
+		patternSkip := -1
+		if gram, isPatternTool := scanGrammars[base]; isPatternTool {
+			if pattern, hasRoot := scanPatternSlot(gram, rest); pattern >= 0 && hasRoot {
+				patternSkip = pattern
+			}
+		}
+		for j, arg := range rest {
 			resolved := resolveShellVar(arg, vars)
 			if isUnboundedScanRoot(resolved) {
 				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)
@@ -829,6 +1061,9 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 				return reason, alternative
 			}
 			root := scanRootPath(resolved)
+			if j == patternSkip {
+				root = scanPatternPath(resolved)
+			}
 			// The expanded home directory names the same root as ~ / $HOME.
 			if isHomeDirScanRoot(root) {
 				reason = fmt.Sprintf("Unbounded scan (%s rooted at the home directory %s)", base, arg)

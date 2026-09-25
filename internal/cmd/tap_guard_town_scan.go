@@ -237,6 +237,39 @@ func hasGlobMeta(token string) bool {
 	return strings.ContainsAny(token, "*?[")
 }
 
+// scanPatternPath is scanRootPath for the argument a scan tool reads as its
+// search pattern, which is not a path merely because a directory of that name
+// exists at cwd (gt-yts7).
+//
+// A bare relative name is the collision that filed gt-yts7: `grep -rn polecats
+// ./docs` searches ./docs, but a polecats/ directory at cwd made the pattern
+// read as a scan of it. So a bare name resolves to nothing here. Every
+// spelling that names a path by its form — absolute, ~/$HOME, a glob, or a
+// relative path carrying a separator or a . / .. segment — resolves exactly
+// as scanRootPath resolves it, which keeps the denylist, home-directory and
+// town-tree rules judging a pattern that is one of their roots.
+func scanPatternPath(token string) string {
+	if token == "" || strings.HasPrefix(token, "-") {
+		return ""
+	}
+	expanded, ok := expandHomePath(token)
+	if !ok || expanded == "" || strings.Contains(expanded, "$") || !isPathSpelling(expanded) {
+		return ""
+	}
+	return scanRootPath(token)
+}
+
+// isPathSpelling reports whether token names a path by its form alone: an
+// absolute path, a glob, or a relative path with a separator or a . / ..
+// segment. A bare relative name is not one — that is the shape a search
+// pattern and a cwd-relative directory share.
+func isPathSpelling(token string) bool {
+	if token == "." || token == ".." {
+		return true
+	}
+	return filepath.IsAbs(token) || hasGlobMeta(token) || strings.ContainsRune(token, '/')
+}
+
 // expandHomePath applies the shell's ~ / $HOME / ${HOME} prefix rules to a
 // token, returning it unchanged when it names no home-relative path. ok is
 // false only when the token *did* reference the home directory but this
