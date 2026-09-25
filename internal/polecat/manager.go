@@ -1802,6 +1802,11 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	if !m.exists(name) {
 		return nil, ErrPolecatNotFound
 	}
+	// A parked polecat is refused before anything below touches it — the
+	// idle-session kill included (gt-0r29l).
+	if reason, parked := m.parkedReuseBlocker(name); parked {
+		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, reason)
+	}
 	current, err := m.loadFromBeads(name, nil)
 	if err != nil {
 		return nil, err
@@ -2388,6 +2393,20 @@ func (m *Manager) FindIdlePolecat() (*Polecat, error) {
 	return nil, nil
 }
 
+// parkedReuseBlocker reports whether the polecat carries an agentpause marker
+// (gt agent pause, gt session stop) and, if so, the refusal reason. A parked
+// slot is never handed new work: its marker mutes every crash scanner, so a
+// reused session would run unwatched (gt-0r29l). Reuse never clears the
+// marker — undoing an operator's park is for gt session start / gt agent
+// resume. PauseGate fails closed, so an unreadable marker also blocks reuse.
+func (m *Manager) parkedReuseBlocker(name string) (string, bool) {
+	paused, st, _ := agentpause.PauseGate(m.townRoot, m.rig.Name, constants.RolePolecat, name)
+	if !paused {
+		return "", false
+	}
+	return "parked (" + agentpause.Reason(st) + ")", true
+}
+
 // ReuseDecisionForPolecat exposes the same reuse verdict used by FindIdlePolecat
 // so admission planning cannot drift from the destructive reuse gate.
 func (m *Manager) ReuseDecisionForPolecat(name string, state State) SlotReuseDecision {
@@ -2401,6 +2420,9 @@ func (m *Manager) WorkstateDispositionForPolecat(name string, state State, issue
 }
 
 func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDecision {
+	if reason, parked := m.parkedReuseBlocker(name); parked {
+		return SlotReuseDecision{Reusable: false, Reason: reason}
+	}
 	d := m.WorkstateDispositionForPolecat(name, state, "")
 	return SlotReuseDecision{Reusable: d.Reusable, Reason: d.Reason}
 }
