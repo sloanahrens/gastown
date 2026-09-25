@@ -130,10 +130,7 @@ func TestIsPatrolEnabledMainBranchTest(t *testing.T) {
 
 func TestLoadRigGateConfig(t *testing.T) {
 	t.Run("no config file", func(t *testing.T) {
-		cfg, err := loadRigGateConfig("/nonexistent/path")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		cfg := loadRigGateConfig("/nonexistent/path")
 		if cfg != nil {
 			t.Errorf("expected nil config for nonexistent path, got %+v", cfg)
 		}
@@ -145,10 +142,7 @@ func TestLoadRigGateConfig(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(data), 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := loadRigGateConfig(dir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		cfg := loadRigGateConfig(dir)
 		if cfg != nil {
 			t.Errorf("expected nil config for no merge_queue, got %+v", cfg)
 		}
@@ -165,10 +159,7 @@ func TestLoadRigGateConfig(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := loadRigGateConfig(dir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		cfg := loadRigGateConfig(dir)
 		if cfg == nil {
 			t.Fatal("expected non-nil config")
 		}
@@ -192,10 +183,7 @@ func TestLoadRigGateConfig(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := loadRigGateConfig(dir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		cfg := loadRigGateConfig(dir)
 		if cfg == nil {
 			t.Fatal("expected non-nil config")
 		}
@@ -219,10 +207,7 @@ func TestLoadRigGateConfig(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := loadRigGateConfig(dir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		cfg := loadRigGateConfig(dir)
 		if cfg == nil {
 			t.Fatal("expected non-nil config")
 		}
@@ -245,10 +230,7 @@ func TestLoadRigGateConfig(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := loadRigGateConfig(dir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		cfg := loadRigGateConfig(dir)
 		if cfg == nil {
 			t.Fatal("expected non-nil config")
 		}
@@ -271,12 +253,51 @@ func TestLoadRigGateConfig(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0644); err != nil {
 			t.Fatal(err)
 		}
-		cfg, err := loadRigGateConfig(dir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
+		cfg := loadRigGateConfig(dir)
 		if cfg != nil {
 			t.Errorf("expected nil for no test commands, got %+v", cfg)
+		}
+	})
+
+	// TestLoadRigGateConfig/setup_command_from_repo_settings_tier is the
+	// regression test for gt-kh4w: loadRigGateConfig used to parse rig-root
+	// config.json directly, so a setup_command set only at the
+	// repo-committed mayor/rig/.gastown/settings.json tier — which every
+	// other gate-command site resolves via rig.ResolveMergeQueueConfig's
+	// three-tier precedence — was invisible to this patrol.
+	t.Run("setup_command from repo settings tier (gt-kh4w)", func(t *testing.T) {
+		dir := t.TempDir()
+		// Rig-root config.json has no merge_queue section at all.
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"type":"rig","version":1,"name":"test"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		repoSettingsDir := filepath.Join(dir, "mayor", "rig", ".gastown")
+		if err := os.MkdirAll(repoSettingsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		repoSettings := map[string]interface{}{
+			"type":    "rig-settings",
+			"version": 1,
+			"merge_queue": map[string]interface{}{
+				"setup_command": "npm ci",
+				"test_command":  "npx jest",
+			},
+		}
+		raw, _ := json.Marshal(repoSettings)
+		if err := os.WriteFile(filepath.Join(repoSettingsDir, "settings.json"), raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := loadRigGateConfig(dir)
+		if cfg == nil {
+			t.Fatal("expected non-nil config: setup/test commands set only at the repo-committed settings tier must still resolve")
+		}
+		if cfg.SetupCommand != "npm ci" {
+			t.Errorf("expected setup command 'npm ci' resolved from repo-committed settings, got %q", cfg.SetupCommand)
+		}
+		if cfg.TestCommand != "npx jest" {
+			t.Errorf("expected test command 'npx jest' resolved from repo-committed settings, got %q", cfg.TestCommand)
 		}
 	})
 }

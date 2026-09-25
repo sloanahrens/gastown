@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -683,67 +682,44 @@ type rigGateConfig struct {
 	Gates        map[string]string // gate name → command
 }
 
-// loadRigGateConfig reads the merge_queue section from a rig's config.json
-// to discover what test/gate commands to run.
-func loadRigGateConfig(rigPath string) (*rigGateConfig, error) {
-	configPath := filepath.Join(rigPath, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // No config, skip
-		}
-		return nil, err
-	}
-
-	var raw struct {
-		MergeQueue json.RawMessage `json:"merge_queue"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing config.json: %w", err)
-	}
-
-	if raw.MergeQueue == nil {
-		return nil, nil // No merge_queue section
-	}
-
-	var mq struct {
-		SetupCommand *string                    `json:"setup_command"`
-		TestCommand  *string                    `json:"test_command"`
-		Gates        map[string]json.RawMessage `json:"gates"`
-	}
-	if err := json.Unmarshal(raw.MergeQueue, &mq); err != nil {
-		return nil, fmt.Errorf("parsing merge_queue: %w", err)
-	}
+// loadRigGateConfig discovers what setup/test/gate commands to run for a
+// rig's main-branch patrol.
+//
+// SetupCommand and TestCommand go through rig.ResolveMergeQueueConfig, the
+// same three-tier resolver (rig root config.json -> repo-committed
+// mayor/rig/.gastown/settings.json -> rig-local settings/config.json) every
+// other gate-command site uses. This used to read rig-root config.json
+// directly, so an override set at either of the other two tiers was invisible
+// to this patrol while every other command site honored it (gt-kh4w).
+//
+// Gates are resolved separately via rig.LoadNamedGateCommands, which reads
+// only the rig-root tier: named gates live outside config.MergeQueueConfig
+// (see LoadNamedGateCommands's doc comment), so ResolveMergeQueueConfig
+// cannot see them — the same rig-root-only read the refinery's
+// currentGateSetSHAFn uses for the same reason (internal/refinery/engineer.go).
+//
+// Both resolvers swallow their own read/parse errors (returning nil/empty),
+// so unlike the old direct-JSON-parsing version, this can no longer fail.
+func loadRigGateConfig(rigPath string) *rigGateConfig {
+	townRoot := filepath.Dir(rigPath)
+	rigName := filepath.Base(rigPath)
 
 	cfg := &rigGateConfig{}
 
-	// Extract gates (preferred over legacy test_command)
-	if len(mq.Gates) > 0 {
-		cfg.Gates = make(map[string]string, len(mq.Gates))
-		for name, rawGate := range mq.Gates {
-			var gate struct {
-				Cmd string `json:"cmd"`
-			}
-			if err := json.Unmarshal(rawGate, &gate); err == nil && gate.Cmd != "" {
-				cfg.Gates[name] = gate.Cmd
-			}
-		}
+	if mq := rig.ResolveMergeQueueConfig(townRoot, rigName); mq != nil {
+		cfg.SetupCommand = mq.SetupCommand
+		cfg.TestCommand = mq.TestCommand
 	}
 
-	// Fall back to legacy test_command
-	if mq.TestCommand != nil && *mq.TestCommand != "" {
-		cfg.TestCommand = *mq.TestCommand
-	}
-
-	if mq.SetupCommand != nil && *mq.SetupCommand != "" {
-		cfg.SetupCommand = *mq.SetupCommand
+	if gates := rig.LoadNamedGateCommands(townRoot, rigName); len(gates) > 0 {
+		cfg.Gates = gates
 	}
 
 	if len(cfg.Gates) == 0 && cfg.TestCommand == "" {
-		return nil, nil // No runnable commands
+		return nil // No runnable commands
 	}
 
-	return cfg, nil
+	return cfg
 }
 
 // triggerMainBranchTests starts a main_branch_test cycle on its own
@@ -985,10 +961,7 @@ func (d *Daemon) clearGateBusySkip(rigName string) bool {
 // testRigMainBranch tests a single rig's main branch.
 func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duration) error {
 	// Load gate config from the rig's config.json
-	gateCfg, err := loadRigGateConfig(rigPath)
-	if err != nil {
-		return fmt.Errorf("loading gate config: %w", err)
-	}
+	gateCfg := loadRigGateConfig(rigPath)
 	if gateCfg == nil {
 		d.logger.Printf("main_branch_test: %s: no test commands configured, skipping", rigName)
 		return nil
