@@ -89,6 +89,12 @@ The header is what stops an agent citing a 900-line proposal as current truth, a
 
 This is the rule behind the others. When a line survives every rule above, ask this one.
 
+### Observed and static claims
+
+**R14. A claim that code fails at runtime names the run that observed it. Without a run, state the defect and its location as a static hypothesis.**
+
+An agent that ran the suite reports what it saw and can point at the command. A reviewer that has only read the tree and the diff — the om editorial gate executes nothing (gt-jq95) — has no run to cite, so "the tests fail" is unfalsifiable from where it stands; operators discount a finding that overstates certainty. "This will fail when run because `<defect>` at `<path>:<n>`" is the same claim with evidence the reader can check.
+
 ## Applying the rules
 
 An audit run records, per file, which rule ids produced edits. A finding it cannot act on (a deletion proposal, rot outside its slice, a rule that needs sharpening) goes in the run bead comment, not in the file.
