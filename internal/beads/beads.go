@@ -1304,6 +1304,14 @@ func (b *Beads) Run(args ...string) ([]byte, error) {
 func (b *Beads) wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
 
+	// An --if-assignee/--if-status precondition that no longer held: bd
+	// wrote nothing. Checked first, so a guard message never reads as a
+	// "not found" or a generic failure.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == bdGuardNotHeldExit {
+		return fmt.Errorf("bd %s: %s: %w", strings.Join(args, " "), stderr, ErrGuardNotHeld)
+	}
+
 	// Check for bd not installed
 	if execErr, ok := err.(*exec.Error); ok && errors.Is(execErr.Err, exec.ErrNotFound) {
 		return ErrNotInstalled
