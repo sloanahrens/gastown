@@ -463,13 +463,23 @@ func TestStandaloneFormulaRigTargetAcquiresSingleAdmission(t *testing.T) {
 	oldAcquire := acquirePolecatAdmissionFn
 	oldSpawn := spawnPolecatForSling
 	oldFind := findHookedFormulaSingletonFn
+	oldRollback := rollbackSlingArtifactsFn
+	oldBurn := burnSlingWispFn
 	oldDryRun, oldNoBoot := slingDryRun, slingNoBoot
 	t.Cleanup(func() {
 		acquirePolecatAdmissionFn = oldAcquire
 		spawnPolecatForSling = oldSpawn
 		findHookedFormulaSingletonFn = oldFind
+		rollbackSlingArtifactsFn = oldRollback
+		burnSlingWispFn = oldBurn
 		slingDryRun, slingNoBoot = oldDryRun, oldNoBoot
 	})
+	// A formula wisp hooked to a just-spawned polecat is stale and is burned
+	// before dispatch (gt-7evi4). Fail that burn so the sling stops before any
+	// bd call, and record the rollback instead of running the real one.
+	rollbacks := 0
+	rollbackSlingArtifactsFn = func(*SpawnedPolecatInfo, string, string, string) { rollbacks++ }
+	burnSlingWispFn = func(string, string) error { return errors.New("stop before bd") }
 	slingDryRun = false
 	slingNoBoot = true
 	admissions := 0
@@ -495,11 +505,14 @@ func TestStandaloneFormulaRigTargetAcquiresSingleAdmission(t *testing.T) {
 		return &beads.Issue{ID: "gt-wisp-existing"}, nil
 	}
 
-	if err := runSlingFormula(context.Background(), []string{"test-formula", "gastown"}); err != nil {
-		t.Fatalf("runSlingFormula: %v", err)
+	if err := runSlingFormula(context.Background(), []string{"test-formula", "gastown"}); err == nil || !strings.Contains(err.Error(), "stop before bd") {
+		t.Fatalf("runSlingFormula: want the injected burn failure, got %v", err)
 	}
 	if admissions != 1 {
 		t.Fatalf("admissions = %d, want 1", admissions)
+	}
+	if rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, want 1 (a failed sling must not strand the spawned polecat)", rollbacks)
 	}
 }
 

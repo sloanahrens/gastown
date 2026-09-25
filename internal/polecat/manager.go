@@ -2803,6 +2803,13 @@ func (m *Manager) ClearIssue(name string) error {
 // This must be called during polecat removal to prevent orphaned beads (gt-e4u1).
 // Agent beads are skipped (handled separately by ResetAgentBeadForReuse).
 // Errors are logged as warnings but do not block removal.
+//
+// A bead whose work survives on a polecat branch (WorkSurvival) stays hooked:
+// releasing it would let a re-sling start a fresh polecat from main over that
+// work (gt-ibt8, gt-da2x). When survival cannot be determined the bead also
+// stays hooked, with a warning — except for a rig with no git repo, which has
+// no branch to protect. The release itself is the guarded compare-and-release
+// (--if-assignee), so a bead re-slung meanwhile is left with its new owner.
 func (m *Manager) unassignWorkBeads(name string) {
 	assignee := m.assigneeID(name)
 	issues, err := m.beads.ListByAssignee(assignee)
@@ -2810,15 +2817,22 @@ func (m *Manager) unassignWorkBeads(name string) {
 		style.PrintWarning("could not list assigned beads for %s: %v", name, err)
 		return
 	}
+	work := activeWorkBeadsForCleanup(issues)
+	if len(work) == 0 {
+		return
+	}
 
 	// One origin listing for every bead being released: each per-issue lookup is
 	// its own ls-remote, and an unreachable remote costs the full query timeout
 	// (see ListOriginPolecatBranches).
 	originBranches, originErr := ListOriginPolecatBranches(m.rig.Path)
+	survival, survivalErr := NewWorkSurvival(m.rig.Path)
 
-	for _, issue := range activeWorkBeadsForCleanup(issues) {
-		openStatus := "open"
-		empty := ""
+	for _, issue := range work {
+		if keep, why := keepForSurvivingWork(survival, survivalErr, issue.ID); keep {
+			fmt.Printf("  Keeping %s hooked to %s: %s\n", issue.ID, assignee, why)
+			continue
+		}
 		// Record the assignment before clearing it. Without this the bead
 		// keeps no trace of the polecat being removed, and the branch that
 		// polecat left on origin is unreachable from the bead — the same
@@ -2832,13 +2846,29 @@ func (m *Manager) unassignWorkBeads(name string) {
 		if err := m.beads.RecordReassignment(issue.ID, assignee, "", name, branches); err != nil {
 			style.PrintWarning("could not record assignment of bead %s to %s: %v", issue.ID, name, err)
 		}
-		if err := m.beads.Update(issue.ID, beads.UpdateOptions{
-			Status:   &openStatus,
-			Assignee: &empty,
-		}); err != nil {
+		if _, err := m.beads.ReleaseIfAssignee(issue.ID, assignee); err != nil {
 			style.PrintWarning("could not unassign bead %s from %s: %v", issue.ID, name, err)
 		}
 	}
+}
+
+// keepForSurvivingWork decides whether a removed polecat's work bead must stay
+// hooked because its work survives, returning the reason when it must.
+func keepForSurvivingWork(survival *WorkSurvival, survivalErr error, issueID string) (bool, string) {
+	if survivalErr != nil {
+		if errors.Is(survivalErr, ErrNoRigRepo) {
+			return false, ""
+		}
+		return true, fmt.Sprintf("could not check for surviving work: %v", survivalErr)
+	}
+	branch, err := survival.ForIssue(issueID)
+	switch {
+	case err != nil:
+		return true, fmt.Sprintf("could not check for surviving work: %v", err)
+	case branch != "":
+		return true, fmt.Sprintf("work survives on %s (resume with gt sling %s <rig> --branch %s)", branch, issueID, branch)
+	}
+	return false, ""
 }
 
 func activeWorkBeadsForCleanup(issues []*beads.Issue) []*beads.Issue {

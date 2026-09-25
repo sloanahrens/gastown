@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // writeGastownRoutes maps the gt- prefix to the gastown rig, which is what
@@ -88,12 +92,12 @@ exit 0
 	return townRoot
 }
 
-// withSurvivingBranchForBead replaces the branch-lookup seam for a test.
-func withSurvivingBranchForBead(t *testing.T, fn func(townRoot, beadID string) (string, bool)) {
+// withSurvivingWork replaces the surviving-work seam for a test.
+func withSurvivingWork(t *testing.T, branch string, err error) {
 	t.Helper()
-	prev := survivingBranchForBeadFn
-	t.Cleanup(func() { survivingBranchForBeadFn = prev })
-	survivingBranchForBeadFn = fn
+	prev := survivingWorkForBeadFn
+	t.Cleanup(func() { survivingWorkForBeadFn = prev })
+	survivingWorkForBeadFn = func(string, string) (string, error) { return branch, err }
 }
 
 // TestSlingDeadAgentRefusesWhenBranchSurvives is the guard half of the gt-3qfp
@@ -107,9 +111,7 @@ func TestSlingDeadAgentRefusesWhenBranchSurvives(t *testing.T) {
 	}
 
 	_ = setupDeadHolderSlingFixture(t)
-	withSurvivingBranchForBead(t, func(townRoot, beadID string) (string, bool) {
-		return "polecat/pearl/gt-ibt8+mu72g5cz", true
-	})
+	withSurvivingWork(t, "polecat/pearl/gt-ibt8+mu72g5cz", nil)
 
 	var err error
 	stdout := captureStdout(t, func() {
@@ -143,9 +145,7 @@ func TestSlingDeadAgentResumesWithBranchFlag(t *testing.T) {
 
 	_ = setupDeadHolderSlingFixture(t)
 	slingResumeBranch = "polecat/pearl/gt-ibt8+mu72g5cz"
-	withSurvivingBranchForBead(t, func(townRoot, beadID string) (string, bool) {
-		return "polecat/pearl/gt-ibt8+mu72g5cz", true
-	})
+	withSurvivingWork(t, "polecat/pearl/gt-ibt8+mu72g5cz", nil)
 
 	var err error
 	stdout := captureStdout(t, func() {
@@ -160,29 +160,66 @@ func TestSlingDeadAgentResumesWithBranchFlag(t *testing.T) {
 	}
 }
 
-// TestSlingDeadAgentForcesWhenBranchUnknown pins the fail-open behaviour: if
-// the surviving-branch lookup cannot answer (no repo, unreachable remote), the
-// long-standing dead-holder auto-force must still work.
-func TestSlingDeadAgentForcesWhenBranchUnknown(t *testing.T) {
+// TestSlingDeadAgentRefusesWhenSurvivalUnknown: when surviving work cannot
+// be verified (unreachable remote, timeout), the guard refuses rather than
+// risk a second polecat from main over preserved work; --branch or --force are
+// the ways forward.
+func TestSlingDeadAgentRefusesWhenSurvivalUnknown(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
 
 	_ = setupDeadHolderSlingFixture(t)
-	withSurvivingBranchForBead(t, func(townRoot, beadID string) (string, bool) {
-		return "", false
-	})
+	withSurvivingWork(t, "", errors.New("origin unreachable"))
 
 	var err error
 	stdout := captureStdout(t, func() {
 		err = runSling(nil, []string{"gt-ibt8", "gastown/polecats/pearl"})
 	})
-
-	if err != nil && strings.Contains(err.Error(), "refusing to re-sling") {
-		t.Fatalf("unknown branch state must not refuse, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "cannot verify surviving work (origin unreachable)") {
+		t.Fatalf("want a cannot-verify refusal, got %v", err)
 	}
-	if !strings.Contains(stdout, "auto-forcing re-sling") {
-		t.Errorf("expected auto-force when no branch is known, stdout: %q", stdout)
+	if !strings.Contains(err.Error(), "resume with --branch or override with --force") {
+		t.Fatalf("refusal must name both ways forward, got %v", err)
+	}
+	if strings.Contains(stdout, "auto-forcing re-sling") {
+		t.Errorf("must not auto-force on an unknown answer, stdout: %q", stdout)
+	}
+}
+
+// TestSlingDeadAgentForcesWhenNothingToProtect: no rig repo, or a bead that
+// routes to no rig, means there is no branch to protect, so the dead-holder
+// auto-force still runs. So does an explicit --force on an unknown answer.
+func TestSlingDeadAgentForcesWhenNothingToProtect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	for _, tc := range []struct {
+		name  string
+		err   error
+		force bool
+	}{
+		{name: "no rig repo", err: polecat.ErrNoRigRepo},
+		{name: "routes to no rig", err: fmt.Errorf("gt-ibt8: %w", errBeadRoutesToNoRig)},
+		{name: "no surviving work"},
+		{name: "explicit --force on an unknown answer", err: errors.New("origin unreachable"), force: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = setupDeadHolderSlingFixture(t)
+			withSurvivingWork(t, "", tc.err)
+			slingForce = tc.force
+
+			var err error
+			stdout := captureStdout(t, func() {
+				err = runSling(nil, []string{"gt-ibt8", "gastown/polecats/pearl"})
+			})
+			if err != nil && strings.Contains(err.Error(), "refusing to re-sling") {
+				t.Fatalf("must not refuse, got: %v", err)
+			}
+			if !tc.force && !strings.Contains(stdout, "auto-forcing re-sling") {
+				t.Errorf("expected the dead-holder auto-force, stdout: %q", stdout)
+			}
+		})
 	}
 }
 
@@ -203,17 +240,26 @@ func TestSurvivingBranchForBead_ResolvesRigRepo(t *testing.T) {
 	runGit(t, townRoot, "init", "--bare", originDir)
 
 	seed := filepath.Join(townRoot, "seed")
-	runGit(t, townRoot, "init", seed)
+	runGit(t, townRoot, "init", "--initial-branch=main", seed)
 	runGit(t, seed, "config", "user.email", "test@example.com")
 	runGit(t, seed, "config", "user.name", "test")
 	if err := os.WriteFile(filepath.Join(seed, "f.txt"), []byte("hello\n"), 0644); err != nil {
 		t.Fatalf("write seed file: %v", err)
 	}
 	runGit(t, seed, "add", "f.txt")
-	runGit(t, seed, "commit", "-m", "seed (gt-ibt8)")
-	runGit(t, seed, "branch", "polecat/pearl/gt-ibt8+mu72g5cz")
+	runGit(t, seed, "commit", "-m", "base")
+	// Surviving work (the shared predicate, polecat.WorkSurvival): a branch
+	// with a patch that is not on main. A branch equal to main carries no
+	// work and must not block a re-sling.
+	runGit(t, seed, "branch", "polecat/agate/gt-empty+mu72g5cz")
+	runGit(t, seed, "checkout", "-q", "-b", "polecat/pearl/gt-ibt8+mu72g5cz")
+	if err := os.WriteFile(filepath.Join(seed, "work.txt"), []byte("work\n"), 0644); err != nil {
+		t.Fatalf("write work file: %v", err)
+	}
+	runGit(t, seed, "add", "work.txt")
+	runGit(t, seed, "commit", "-m", "work (gt-ibt8)")
 	runGit(t, seed, "remote", "add", "origin", originDir)
-	runGit(t, seed, "push", "origin", "polecat/pearl/gt-ibt8+mu72g5cz")
+	runGit(t, seed, "push", "origin", "main", "polecat/pearl/gt-ibt8+mu72g5cz", "polecat/agate/gt-empty+mu72g5cz")
 
 	// The rig root the daemon and sling both use: <town>/<rigName>.
 	rigRoot := filepath.Join(townRoot, "gastown")
@@ -224,21 +270,296 @@ func TestSurvivingBranchForBead_ResolvesRigRepo(t *testing.T) {
 	runGit(t, townRoot, "init", "--bare", bare)
 	runGit(t, bare, "remote", "add", "origin", originDir)
 
-	branch, ok := survivingBranchForBead(townRoot, "gt-ibt8")
-	if !ok {
-		t.Fatalf("expected a surviving branch for gt-ibt8, got none")
+	branch, err := survivingWorkForBead(townRoot, "gt-ibt8")
+	if err != nil {
+		t.Fatalf("survivingWorkForBead(gt-ibt8): %v", err)
 	}
 	if branch != "polecat/pearl/gt-ibt8+mu72g5cz" {
-		t.Errorf("survivingBranchForBead() = %q, want the pushed branch", branch)
+		t.Errorf("survivingWorkForBead() = %q, want the pushed branch", branch)
+	}
+
+	// A branch equal to main is not surviving work.
+	if branch, err := survivingWorkForBead(townRoot, "gt-empty"); err != nil || branch != "" {
+		t.Errorf("a branch equal to main must not count as surviving work, got %q (%v)", branch, err)
 	}
 
 	// A bead with no branch reports unknown, not a false positive.
-	if branch, ok := survivingBranchForBead(townRoot, "gt-nobranch"); ok {
+	if branch, err := survivingWorkForBead(townRoot, "gt-nobranch"); err != nil || branch != "" {
 		t.Errorf("expected no branch for gt-nobranch, got %q", branch)
 	}
 
 	// A prefix with no route reports unknown rather than guessing a path.
-	if branch, ok := survivingBranchForBead(townRoot, "zz-unrouted"); ok {
+	if branch, err := survivingWorkForBead(townRoot, "zz-unrouted"); !errors.Is(err, errBeadRoutesToNoRig) || branch != "" {
 		t.Errorf("expected no branch for unrouted prefix, got %q", branch)
+	}
+}
+
+// executeSling's dead-holder auto-force (batch sling, convoy and epic
+// feeders, scheduler dispatch) runs the same surviving-work guard as runSling
+// (gt-vm5g4): it refuses when the work survives or survival is unknown, unless
+// --force or --branch, and the refusal is recognizable as errReslingRefused.
+func TestExecuteSlingDeadHolderRunsSurvivalGuard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	const branch = "polecat/pearl/gt-ibt8+mu72g5cz"
+	cases := []struct {
+		name        string
+		branch      string
+		survErr     error
+		force       bool
+		resume      string
+		wantRefused bool
+		wantCalls   int
+	}{
+		{name: "work survives", branch: branch, wantRefused: true, wantCalls: 1},
+		{name: "survival unknown", survErr: errors.New("git ls-remote timed out"), wantRefused: true, wantCalls: 1},
+		{name: "nothing survives", wantCalls: 1},
+		{name: "no rig repo", survErr: polecat.ErrNoRigRepo, wantCalls: 1},
+		{name: "explicit force skips the guard", branch: branch, force: true},
+		{name: "resume branch skips the guard", branch: branch, resume: branch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := setupDeadHolderSlingFixture(t)
+			calls := 0
+			prev := survivingWorkForBeadFn
+			t.Cleanup(func() { survivingWorkForBeadFn = prev })
+			survivingWorkForBeadFn = func(string, string) (string, error) {
+				calls++
+				return tc.branch, tc.survErr
+			}
+
+			var (
+				result *SlingResult
+				err    error
+			)
+			stdout := captureStdout(t, func() {
+				result, err = executeSling(SlingParams{
+					BeadID:             "gt-ibt8",
+					RigName:            "norig", // unresolvable: stops right after the guard, before any side effect
+					Force:              tc.force,
+					ResumeBranch:       tc.resume,
+					TownRoot:           townRoot,
+					SkipDuplicateCheck: true,
+				})
+			})
+			if calls != tc.wantCalls {
+				t.Fatalf("survival checks = %d, want %d", calls, tc.wantCalls)
+			}
+			if err == nil {
+				t.Fatal("want an error (refusal, or the unresolvable rig after the guard)")
+			}
+			wrapped := fmt.Errorf("sling failed: %w", err) // as dispatchSingleBead wraps it
+			if got := errors.Is(wrapped, errReslingRefused); got != tc.wantRefused {
+				t.Fatalf("refused = %v, want %v (err: %v)", got, tc.wantRefused, err)
+			}
+			if tc.wantRefused {
+				if !strings.Contains(err.Error(), "refusing to re-sling gt-ibt8") || result == nil || result.ErrMsg != err.Error() {
+					t.Fatalf("refusal text/result wrong: err=%v result=%+v", err, result)
+				}
+				if tc.branch != "" && !strings.Contains(err.Error(), tc.branch) {
+					t.Fatalf("refusal must name the surviving branch: %v", err)
+				}
+				if strings.Contains(stdout, "auto-forcing") {
+					t.Fatalf("refused sling still auto-forced:\n%s", stdout)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), "cannot resolve target rig") {
+				t.Fatalf("want to reach the rig check after the guard, got %v", err)
+			}
+			if !tc.force && !strings.Contains(stdout, "auto-forcing dispatch") {
+				t.Fatalf("dead holder with nothing to protect must auto-force:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// Convoy and epic feeders count a resling refusal as a deferral: not a
+// success, not a failed attempt, and a run of only deferrals is not an error.
+func TestFeederDispatchTallyTreatsReslingRefusalAsDeferral(t *testing.T) {
+	refusal := &reslingRefusal{msg: "refusing to re-sling gt-a: ..."}
+	cases := []struct {
+		name    string
+		errs    []error
+		wantErr string
+	}{
+		{name: "all deferred", errs: []error{refusal, fmt.Errorf("wrapped: %w", refusal)}},
+		{name: "deferred and dispatched", errs: []error{refusal, nil}},
+		{name: "deferred and failed", errs: []error{refusal, errors.New("spawn failed")}, wantErr: "all 1 dispatch attempts failed for convoy hq-cv-1"},
+		{name: "all failed", errs: []error{errors.New("x"), errors.New("y")}, wantErr: "all 2 dispatch attempts failed for convoy hq-cv-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tally feederDispatchTally
+			var err error
+			out := captureStdout(t, func() {
+				for i, e := range tc.errs {
+					ok := tally.record(fmt.Sprintf("gt-%d", i), e)
+					if ok != (e == nil) {
+						t.Errorf("record(%v) = %v", e, ok)
+					}
+				}
+				err = tally.result("convoy", "hq-cv-1")
+			})
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("want no error, got %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if errors.Is(tc.errs[0], errReslingRefused) && strings.Contains(out, "✗ gt-0") {
+				t.Fatalf("a refusal was printed as a failure:\n%s", out)
+			}
+		})
+	}
+}
+
+// The scheduler leaves a refused dispatch queued without recording a failure,
+// so a preserved-work bead never trips the circuit breaker.
+func TestCapacityDispatchDeferralRecognizesReslingRefusal(t *testing.T) {
+	refusal := &reslingRefusal{msg: "refusing to re-sling gt-a: ..."}
+	if _, ok := capacityDispatchDeferral(fmt.Errorf("sling failed: %w", refusal)); !ok {
+		t.Fatal("a wrapped resling refusal must be a deferral")
+	}
+	if _, ok := capacityDispatchDeferral(fmt.Errorf("sling failed: %w", &polecatCapacityAdmissionError{})); !ok {
+		t.Fatal("a capacity admission refusal must stay a deferral")
+	}
+	if _, ok := capacityDispatchDeferral(errors.New("sling failed: spawn failed")); ok {
+		t.Fatal("an ordinary failure must not be a deferral")
+	}
+}
+
+// clearOrphanEpisodeLabels removes only the episode labels the bead carries,
+// writes nothing when it carries none, and never fails the caller.
+func TestClearOrphanEpisodeLabels(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX bd stub")
+	}
+	cases := []struct {
+		name       string
+		labels     string
+		showFails  bool
+		wantUpdate string // "" = no update call
+	}{
+		{name: "all three present", labels: `"gt:preserved-orphan","keep-me","gt:survival-unknown","gt:survival-escalated"`,
+			wantUpdate: "update gt-lbl1 --remove-label=gt:preserved-orphan --remove-label=gt:survival-unknown --remove-label=gt:survival-escalated"},
+		{name: "one present", labels: `"gt:survival-unknown"`, wantUpdate: "update gt-lbl1 --remove-label=gt:survival-unknown"},
+		{name: "none present", labels: `"keep-me"`},
+		{name: "read fails", showFails: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			binDir := filepath.Join(townRoot, "bin")
+			for _, d := range []string{filepath.Join(townRoot, ".beads"), binDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			logPath := filepath.Join(townRoot, "bd.log")
+			fail := ""
+			if tc.showFails {
+				fail = "1"
+			}
+			script := `#!/bin/sh
+echo "$*" >> "` + logPath + `"
+for a in "$@"; do
+  case "$a" in
+  show)
+    [ -n "` + fail + `" ] && { echo "boom" >&2; exit 1; }
+    echo '[{"id":"gt-lbl1","title":"t","status":"hooked","labels":[` + tc.labels + `]}]'
+    exit 0 ;;
+  update) exit 0 ;;
+  esac
+done
+exit 0
+`
+			_ = writeBDStub(t, binDir, script, "")
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "gt-lbl1", "") })
+
+			data, _ := os.ReadFile(logPath)
+			var updates []string
+			for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if i := strings.Index(l, "update "); i >= 0 {
+					updates = append(updates, l[i:])
+				}
+			}
+			if tc.wantUpdate == "" {
+				if len(updates) != 0 {
+					t.Fatalf("want no update, got %v", updates)
+				}
+				return
+			}
+			if len(updates) != 1 || !strings.HasPrefix(updates[0], tc.wantUpdate) {
+				t.Fatalf("updates = %v, want one starting %q\nlog:\n%s", updates, tc.wantUpdate, data)
+			}
+		})
+	}
+}
+
+// An unrouted bead is cleared in the hook write's work dir, not the town
+// root: the labels live in the database the hook just wrote.
+func TestClearOrphanEpisodeLabelsUsesHookWorkDir(t *testing.T) {
+	townRoot := t.TempDir()
+	workDir := t.TempDir()
+	binDir := filepath.Join(townRoot, "bin")
+	for _, d := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(workDir, ".beads"), binDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(townRoot, "bd-cwd.log")
+	script := `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+  show)
+    pwd -P >> "` + logPath + `"
+    echo '[{"id":"zz-lbl2","title":"t","status":"hooked","labels":["gt:preserved-orphan"]}]'
+    exit 0 ;;
+  update) exit 0 ;;
+  esac
+done
+exit 0
+`
+	_ = writeBDStub(t, binDir, script, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "zz-lbl2", workDir) })
+
+	data, _ := os.ReadFile(logPath)
+	want, _ := filepath.EvalSymlinks(workDir)
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("bd show ran in %q, want hook work dir %q", got, want)
+	}
+}
+
+// The refusal text leads with the shared marker the daemon's convoy feeder
+// matches on stderr (dispatch.ReslingRefusalMarker).
+func TestReslingRefusalStartsWithSharedMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+		err    error
+	}{
+		{name: "work survives", branch: "polecat/pearl/gt-ibt8+mu72g5cz"},
+		{name: "survival unknown", err: errors.New("timed out")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withSurvivingWork(t, tc.branch, tc.err)
+			err := reslingSurvivingWorkGuard(t.TempDir(), "gt-ibt8", "gastown/polecats/pearl")
+			if err == nil {
+				t.Fatal("want a refusal")
+			}
+			if !strings.HasPrefix(err.Error(), dispatch.ReslingRefusalMarker+" ") {
+				t.Fatalf("refusal %q does not start with %q", err.Error(), dispatch.ReslingRefusalMarker)
+			}
+			if !errors.Is(err, errReslingRefused) {
+				t.Fatal("refusal must match errReslingRefused")
+			}
+		})
 	}
 }

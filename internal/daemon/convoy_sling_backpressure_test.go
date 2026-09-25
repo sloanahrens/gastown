@@ -22,6 +22,13 @@ const refusalStderr = "Error: spawning polecat: sling refused: gastown has 13 re
 // the feeder called nothing else on a deferred bead.
 func backpressureFeedRig(t *testing.T, refuseFlag string) (townRoot, gtPath, slingLogPath string) {
 	t.Helper()
+	return refusingFeedRig(t, refuseFlag, refusalStderr)
+}
+
+// refusingFeedRig is backpressureFeedRig with the refusal's stderr chosen by
+// the caller.
+func refusingFeedRig(t *testing.T, refuseFlag, refusal string) (townRoot, gtPath, slingLogPath string) {
+	t.Helper()
 
 	binDir := t.TempDir()
 	townRoot = t.TempDir()
@@ -38,7 +45,9 @@ func backpressureFeedRig(t *testing.T, refuseFlag string) (townRoot, gtPath, sli
 echo "$@" >> "` + slingLogPath + `"
 if [ "$1" = "sling" ]; then
   if [ -f "` + refuseFlag + `" ]; then
-    echo "` + refusalStderr + `" >&2
+    cat >&2 <<'REFUSAL'
+` + refusal + `
+REFUSAL
     exit 1
   fi
 fi
@@ -242,5 +251,104 @@ func TestSlingBackpressureReason(t *testing.T) {
 				t.Errorf("slingBackpressureReason(%q) = %q, want %q", tt.stderr, got, tt.want)
 			}
 		})
+	}
+}
+
+// survivingWorkRefusalStderr is sling's refusal to re-sling a bead whose dead
+// holder's branch still carries work (internal/cmd reslingSurvivingWorkGuard,
+// gt-vm5g4), wrapped by cobra.
+const survivingWorkRefusalStderr = `Error: refusing to re-sling gt-issue1: previous holder gt/polecats/pearl has no active session, but its branch still carries work that is not on main:
+  polecat/pearl/gt-issue1+mu72g5cz
+Re-slinging would start a second polecat from main on work that is already preserved.
+  Resume the preserved work:  gt sling gt-issue1 <target> --branch polecat/pearl/gt-issue1+mu72g5cz
+  Start fresh anyway:         gt sling gt-issue1 <target> --force`
+
+func TestSlingDeferralReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		stderr string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "backpressure refusal",
+			stderr: refusalStderr,
+			want:   "sling refused: gastown has 13 ready MRs (> 12); pass --force or label the bead rework",
+			wantOK: true,
+		},
+		{
+			name:   "surviving work refusal",
+			stderr: survivingWorkRefusalStderr,
+			want:   "refusing to re-sling gt-issue1: previous holder gt/polecats/pearl has no active session, but its branch still carries work that is not on main:",
+			wantOK: true,
+		},
+		{
+			name:   "unverifiable survival refusal after timing lines",
+			stderr: "[sling] step pool took 1.3s\nError: refusing to re-sling gt-issue1: previous holder gt/polecats/pearl has no active session, and sling cannot verify surviving work (timed out); resume with --branch or override with --force",
+			want:   "refusing to re-sling gt-issue1: previous holder gt/polecats/pearl has no active session, and sling cannot verify surviving work (timed out); resume with --branch or override with --force",
+			wantOK: true,
+		},
+		{
+			name:   "any other failure is not a deferral",
+			stderr: "Error: spawning polecat: pre-spawn health check failed: connection refused",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := slingDeferralReason(tt.stderr)
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("slingDeferralReason() = %q, %v; want %q, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestFeedFirstReady_DefersOnSurvivingWorkRefusal: a bead whose dead holder's
+// work survives is deferred by the feeder, never logged as a failed sling, and
+// nothing but the sling ran against it.
+func TestFeedFirstReady_DefersOnSurvivingWorkRefusal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+	refuseFlag := filepath.Join(t.TempDir(), "refuse")
+	if err := os.WriteFile(refuseFlag, []byte("1"), 0644); err != nil {
+		t.Fatalf("write refuse flag: %v", err)
+	}
+	townRoot, gtPath, slingLogPath := refusingFeedRig(t, refuseFlag, survivingWorkRefusalStderr)
+	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("no git repo under %s", rigRoot)
+	})
+
+	logged, logger := newBackpressureLogger()
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.feedFirstReady(strandedConvoyInfo{
+		ID:          "hq-cv1",
+		Title:       "Preserved work",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	})
+
+	want := "Convoy hq-cv1: deferring gt-issue1: refusing to re-sling gt-issue1: previous holder gt/polecats/pearl has no active session, but its branch still carries work that is not on main:"
+	found := false
+	for _, l := range *logged {
+		if l == want {
+			found = true
+		}
+		if strings.Contains(l, "failed") {
+			t.Errorf("a surviving-work refusal must not be logged as a failure, got: %q", l)
+		}
+	}
+	if !found {
+		t.Errorf("expected deferral line %q, got: %v", want, *logged)
+	}
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" && !strings.HasPrefix(line, "sling ") {
+			t.Errorf("deferral invoked a non-sling command: %q", line)
+		}
 	}
 }

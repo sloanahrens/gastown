@@ -3132,6 +3132,16 @@ func getBeadStatus(bd *BdCli, workDir, beadID string) (string, bool) {
 	return issues[0].Status, true
 }
 
+// survivingWorkForBead is the shared surviving-work predicate
+// (polecat.WorkSurvival) for a bead in rigName. A seam for tests.
+var survivingWorkForBead = func(workDir, rigName, beadID string) (string, error) {
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+	return polecat.SurvivingWorkForIssue(filepath.Join(townRoot, rigName), beadID)
+}
+
 // resetAbandonedBead resets a dead polecat's hooked bead so it can be re-dispatched.
 // If the bead is in "hooked" or "in_progress" status, it:
 //  0. Checks if the polecat's work is already on main — if so, closes
@@ -3167,6 +3177,21 @@ func resetAbandonedBead(bd *BdCli, workDir, rigName, hookBead, polecatName strin
 		if err := bd.Run(workDir, "close", hookBead, "-r", reason); err != nil {
 			fmt.Fprintf(os.Stderr, "witness: failed to close bead %s (work already on main): %v\n", hookBead, err)
 		}
+		return false
+	}
+
+	// Guard: work that survives on a polecat branch (unmerged patches) keeps
+	// the hook. Resetting it would let the deacon re-dispatch the bead to a
+	// fresh polecat starting from main over that work (gt-ibt8, gt-da2x). The
+	// re-sling guard in gt sling then points the operator at --branch. An
+	// unknown answer also keeps the hook; a rig with no git repo has no branch
+	// to protect.
+	if branch, err := survivingWorkForBead(workDir, rigName, hookBead); err != nil && !errors.Is(err, polecat.ErrNoRigRepo) {
+		fmt.Fprintf(os.Stderr, "witness: keeping %s hooked to %s/%s: could not check for surviving work: %v\n", hookBead, rigName, polecatName, err)
+		return false
+	} else if branch != "" {
+		fmt.Fprintf(os.Stderr, "witness: keeping %s hooked to %s/%s: work survives on %s (resume with gt sling %s %s --branch %s)\n",
+			hookBead, rigName, polecatName, branch, hookBead, rigName, branch)
 		return false
 	}
 
@@ -3208,8 +3233,12 @@ then either close the bead or reset the respawn counter.`,
 	// Track respawn count for audit and storm detection.
 	respawnCount := RecordBeadRespawn(workDir, hookBead)
 
-	// Reset bead status to open and clear assignee
-	if err := bd.Run(workDir, "update", hookBead, "--status=open", "--assignee="); err != nil {
+	// Reset bead status to open and clear assignee — guarded on the dead
+	// polecat still holding it (--if-assignee): a bead re-slung since the scan
+	// stays with its new owner, and the guarded write is the claim transfer bd
+	// permits on an in_progress bead that another agent holds.
+	if err := bd.Run(workDir, "update", hookBead, "--status=open", "--assignee=",
+		"--if-assignee="+fmt.Sprintf("%s/polecats/%s", rigName, polecatName)); err != nil {
 		return false
 	}
 

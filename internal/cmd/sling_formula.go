@@ -79,6 +79,11 @@ func closeFormulaWisp(wispRootID, formulaWorkDir, reason string) error {
 var cleanupFailedDogFormulaWispFn = cleanupFailedDogFormulaWisp
 var cleanupStaleDogFormulaWispFn = cleanupStaleDogFormulaWisp
 
+// burnSlingWispFn closes a formula wisp a failed or superseded sling owns.
+var burnSlingWispFn = func(wispRootID, formulaWorkDir string) error {
+	return closeFormulaWisp(wispRootID, formulaWorkDir, "burned: formula sling rolled back")
+}
+
 func cleanupDelayedDogFormulaFailure(currentErr error, delayedDogInfo *DogDispatchInfo, wispRootID, formulaWorkDir string) error {
 	var cleanupErr error
 	if wispRootID != "" {
@@ -345,21 +350,44 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 
 	fmt.Printf("%s Slinging formula %s to %s...\n", style.Bold.Render("🎯"), formulaName, targetAgent)
 
-	rollbackSpawned := func(beadID string) {
-		if resolved.NewPolecatInfo == nil {
+	// Rollback guard (gt-7evi4): once resolveTarget has spawned or reused a
+	// polecat, every exit that does not reach the commit point rolls it back
+	// exactly once. rollbackBeadID names the wisp only once this sling is about
+	// to hook it; earlier failures touch no bead. A wisp this sling created and
+	// did not commit is burned, so it cannot stay hooked to a removed or idle
+	// polecat; a delayed dog's wisp is left to its own failure cleanup.
+	slingCommitted := false
+	rollbackBeadID := ""
+	rollbackWorkDir := formulaWorkDir
+	var wispRootID string
+	rollbackUnlessCommitted := func() {
+		if slingCommitted {
 			return
 		}
-		fmt.Printf("%s Rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), resolved.NewPolecatInfo.PolecatName)
-		rollbackSlingArtifactsFn(resolved.NewPolecatInfo, beadID, formulaWorkDir, "")
+		// Burn first: the rollback below may remove the sandbox the wisp's
+		// bd commands run from.
+		if wispRootID != "" && delayedDogInfo == nil {
+			if err := burnSlingWispFn(wispRootID, rollbackWorkDir); err != nil {
+				fmt.Printf("  %s Could not burn wisp %s from the failed sling: %v\n", style.Dim.Render("Warning:"), wispRootID, err)
+			} else {
+				fmt.Printf("  %s Burned wisp %s from the failed sling\n", style.Dim.Render("○"), wispRootID)
+			}
+		}
+		if resolved.NewPolecatInfo != nil {
+			fmt.Printf("%s Rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), resolved.NewPolecatInfo.PolecatName)
+			rollbackSlingArtifactsFn(resolved.NewPolecatInfo, rollbackBeadID, rollbackWorkDir, "")
+		}
 	}
+	defer rollbackUnlessCommitted()
 
 	// Resolve working directory for bd commands (routes to correct rig beads)
 	// Fall back to townRoot (HQ beads) if no specific rig directory was determined
 	if formulaWorkDir == "" {
 		formulaWorkDir = townRoot
 	}
-
-	var wispRootID string
+	if rollbackWorkDir == "" {
+		rollbackWorkDir = formulaWorkDir
+	}
 
 	if slingDryRun {
 		existing, err := findHookedFormulaSingletonFn(formulaWorkDir, targetAgent, formulaName)
@@ -413,13 +441,25 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return fmt.Errorf("checking existing hooked formulas for %s: %w", targetAgent, err)
 	}
+	// A polecat this sling just spawned or reused has no running session, so
+	// a formula wisp still hooked to its identity is left over from an earlier
+	// holder of the slot. Reporting "already hooked, no-op" would leave that
+	// wisp hooked to a polecat nobody starts; burn it and dispatch fresh.
+	if existing != nil && resolved.NewPolecatInfo != nil {
+		fmt.Printf("  %s Burning stale formula wisp %s left hooked to %s\n",
+			style.Warning.Render("⚠"), existing.ID, targetAgent)
+		if err := burnSlingWispFn(existing.ID, formulaWorkDir); err != nil {
+			return fmt.Errorf("burning stale formula wisp %s on %s: %w", existing.ID, targetAgent, err)
+		}
+		existing = nil
+	}
 	if shouldReuseExistingFormula(existing, delayedDogInfo, slingForce) {
 		existingMode := ""
 		if fields := beads.ParseAttachmentFields(existing); fields != nil {
 			existingMode = fields.Mode
 		}
 		if existingMode != mode {
-			if err := storeFieldsInBeadFromTownRoot(townRoot, existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
+			if err := storeRawSlingMetadataFn(townRoot, existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
 				return fmt.Errorf("updating existing formula mode: %w", err)
 			}
 			if mode != "" || existingMode != "" {
@@ -465,7 +505,6 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		WithGTRoot(townRoot).
 		Run(); err != nil {
 		telemetry.RecordMolCook(ctx, formulaName, err)
-		rollbackSpawned("")
 		return fmt.Errorf("cooking formula: %w", err)
 	}
 	telemetry.RecordMolCook(ctx, formulaName, nil)
@@ -484,7 +523,6 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		WithGTRoot(townRoot).
 		Output()
 	if err != nil {
-		rollbackSpawned("")
 		return fmt.Errorf("creating wisp: %w", err)
 	}
 
@@ -492,7 +530,6 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	wispRootID, err = parseWispIDFromJSON(wispOut)
 	if err != nil {
 		telemetry.RecordMolWisp(ctx, formulaName, "", "", err)
-		rollbackSpawned("")
 		return fmt.Errorf("parsing wisp output: %w", err)
 	}
 	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, "", nil)
@@ -502,6 +539,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// Step 3: Hook the wisp bead with retry and verification.
 	// See: https://github.com/steveyegge/gastown/issues/148.
 	hookDir := beads.ResolveHookDir(townRoot, wispRootID, "")
+	rollbackBeadID = wispRootID
 	if err := hookBeadWithRetryFn(wispRootID, targetAgent, hookDir); err != nil {
 		return err
 	}
@@ -553,14 +591,17 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// Start spawned polecat session now that hook is set.
 	// This ensures polecat sees the wisp when gt prime runs on session start.
 	if resolved.NewPolecatInfo != nil {
-		pane, err := resolved.NewPolecatInfo.StartSession()
+		pane, err := startSpawnedPolecatSessionFn(resolved.NewPolecatInfo)
 		if err != nil {
-			// Rollback: unhook wisp, delete Dolt branch, clean up polecat worktree/agent bead
-			rollbackSlingArtifactsFn(resolved.NewPolecatInfo, wispRootID, "", "")
+			// The guard rolls back: releases the wisp, cleans up the polecat.
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
 	}
+
+	// Commit point (gt-7evi4): the wisp is hooked and any polecat this sling
+	// spawned is running it. Nothing after this is rolled back.
+	slingCommitted = true
 
 	// Step 4: Nudge to start (graceful if no tmux)
 	// Skip for self-sling - agent is currently processing the sling command and will see

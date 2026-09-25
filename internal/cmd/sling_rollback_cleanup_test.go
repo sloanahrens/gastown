@@ -104,6 +104,9 @@ exit 0
 		PolecatName: "Toast",
 		ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "Toast"),
 		Branch:      "p-toast-123",
+		// A fresh spawn with a branch this sling created: the removal path.
+		FreshSpawn:    true,
+		BranchCreated: true,
 	}
 
 	// This should not panic and should attempt to delete the branch
@@ -176,6 +179,7 @@ exit 0
 		PolecatName: "Toast",
 		ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "Toast"),
 		Branch:      "", // Empty branch
+		FreshSpawn:  true,
 	}
 
 	// This should complete without attempting branch deletion
@@ -290,6 +294,9 @@ exit 0
 		PolecatName: "Toast",
 		ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "Toast"),
 		Branch:      "p-toast-123",
+		// A fresh spawn with a branch this sling created: the removal path.
+		FreshSpawn:    true,
+		BranchCreated: true,
 	}
 
 	cleanupSpawnedPolecat(spawnInfo, "gastown", "convoy-test-123")
@@ -397,6 +404,9 @@ exit 0
 		PolecatName: "Toast",
 		ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "Toast"),
 		Branch:      "p-toast-123",
+		// A fresh spawn with a branch this sling created: the removal path.
+		FreshSpawn:    true,
+		BranchCreated: true,
 	}
 
 	cleanupSpawnedPolecat(spawnInfo, "gastown", "")
@@ -521,6 +531,9 @@ exit 0
 		PolecatName: "Toast",
 		ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "Toast"),
 		Branch:      "p-toast-123",
+		// A fresh spawn with a branch this sling created: the removal path.
+		FreshSpawn:    true,
+		BranchCreated: true,
 	}
 
 	rollbackSlingArtifacts(spawnInfo, "gt-abc123", "", "convoy-rollback-123")
@@ -638,6 +651,9 @@ exit 0
 		PolecatName: "Toast",
 		ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "Toast"),
 		Branch:      "p-toast-123",
+		// A fresh spawn with a branch this sling created: the removal path.
+		FreshSpawn:    true,
+		BranchCreated: true,
 	}
 
 	rollbackSlingArtifacts(spawnInfo, "gt-abc123", "", "") // Empty convoyID
@@ -758,6 +774,9 @@ exit 0
 		PolecatName: "Toast",
 		ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "Toast"),
 		Branch:      "p-toast-123",
+		// A fresh spawn with a branch this sling created: the removal path.
+		FreshSpawn:    true,
+		BranchCreated: true,
 	}
 
 	rollbackSlingArtifacts(spawnInfo, "gt-abc123", "", "")

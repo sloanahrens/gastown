@@ -2629,6 +2629,29 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		}
 	}
 
+	// Step 2.9: Give the hooked work bead back (gt-vm5g4). Without this the
+	// bead stays hooked to a polecat that no longer exists: `gt session restart`
+	// fails with "polecat not found" and the work waits for a witness patrol to
+	// notice. Compare-and-release, so a bead already re-slung elsewhere is left
+	// alone. It runs after the preserve gate (a refused nuke keeps its work) and
+	// before removal, which resets the agent bead itself.
+	//
+	// Work that survives on a polecat branch (polecat.WorkSurvival: unmerged
+	// patches, local or on origin) keeps the hook instead, as does an unknown
+	// answer: releasing it would let a re-sling start a fresh polecat from main
+	// over that work (gt-ibt8, gt-da2x). Removal below applies the same rule.
+	// The resume comment is written only once the final state is known.
+	var infoForHook *polecat.Polecat
+	if getErr == nil {
+		infoForHook = polecatInfo
+	}
+	hookedWork := startNukeHookedWork(
+		newPolecatWorkReleaserFn(beads.FindTownRoot(r.Path), ""),
+		func(beadID string) (string, error) { return nukeSurvivingWorkFn(r.Path, beadID) },
+		rigName, polecatName, infoForHook,
+		func() string { return readAgentHookBeadFn(r, rigName, polecatName) },
+	)
+
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)
 	if err := mgr.RemoveWithOptions(polecatName, opts.Force, true, false); err != nil {
 		if errors.Is(err, polecat.ErrPolecatNotFound) {
@@ -2671,6 +2694,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		}
 	}
 
+	// Step 4.5: Report the hooked work bead's final state; a kept hook gets the
+	// resume comment now that removal can no longer change it.
+	hookedWork.finish()
+
 	// Step 5: Purge closed ephemeral beads (wisps) accumulated during sessions.
 	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol
 	// cycles, etc. accumulate across sessions and pollute bd ready/list (hq-6161m).
@@ -2687,6 +2714,119 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	_ = events.LogFeed(events.TypeKill, nukeActorIdentity(), events.KillPayload(rigName, polecatName, reason))
 
 	return nil
+}
+
+// nukeSurvivingWorkFn is the shared surviving-work predicate for a rig; a
+// seam for tests.
+var nukeSurvivingWorkFn = polecat.SurvivingWorkForIssue
+
+// nukeHookedWork carries a nuke's hooked work bead from the release decision
+// (before the sandbox is removed) to the final report (after).
+type nukeHookedWork struct {
+	rel      polecatWorkReleaser
+	survives func(beadID string) (string, error)
+	agentID  string
+	beadID   string
+}
+
+// workSurvivalVerdict classifies a survival answer: the branch the work
+// survives on, or unknown (an error other than "the rig has no git repo").
+func workSurvivalVerdict(branch string, err error) (survivesOn string, unknown bool) {
+	if err != nil && !errors.Is(err, polecat.ErrNoRigRepo) {
+		return "", true
+	}
+	return branch, false
+}
+
+// startNukeHookedWork decides what happens to the nuked polecat's hooked work
+// bead before the sandbox is removed. The bead is the polecat record's issue
+// or, for a polecat reaped before its nuke, the agent bead's hook_bead
+// (readHook). Only a bead still held by this polecat is touched. Surviving work
+// — or an unknown answer — keeps the hook for now; otherwise the bead is
+// released through the shared compare-and-release helper. Returns nil when
+// there is nothing left to settle after removal.
+func startNukeHookedWork(rel polecatWorkReleaser, survives func(beadID string) (string, error),
+	rigName, polecatName string, p *polecat.Polecat, readHook func() string) *nukeHookedWork {
+	beadID := ""
+	if p != nil {
+		beadID = p.Issue
+	}
+	if beadID == "" && readHook != nil {
+		beadID = readHook()
+	}
+	if beadID == "" {
+		return nil
+	}
+	h := &nukeHookedWork{rel: rel, survives: survives, agentID: fmt.Sprintf("%s/polecats/%s", rigName, polecatName), beadID: beadID}
+	if held, _ := heldBy(rel, h.agentID, beadID); !held {
+		return nil
+	}
+	if branch, unknown := workSurvivalVerdict(survives(beadID)); branch != "" || unknown {
+		return h
+	}
+	h.release()
+	return nil
+}
+
+func (h *nukeHookedWork) release() {
+	if out := releasePolecatWork(h.rel, h.agentID, h.beadID, false); !out.Released && out.SkipNote != "" {
+		fmt.Printf("  %s hooked work %s not released: %s\n", style.Dim.Render("○"), h.beadID, out.SkipNote)
+	}
+}
+
+// finish settles a kept hook once removal (and the local branch delete) is
+// over. Survival is asked again, because removal can change the answer: work
+// that no longer survives is released (guarded), and a hook that stays gets a
+// comment built from the final answer — the resume command for a branch, or
+// the command to re-check an unknown answer.
+func (h *nukeHookedWork) finish() {
+	if h == nil {
+		return
+	}
+	if held, _ := heldBy(h.rel, h.agentID, h.beadID); !held {
+		return
+	}
+	branch, unknown := workSurvivalVerdict(h.survives(h.beadID))
+	rigName := strings.SplitN(h.agentID, "/", 2)[0]
+	var note, text string
+	switch {
+	case branch != "":
+		note = "work survives on " + branch
+		text = fmt.Sprintf("gt polecat nuke: %s was nuked with its work preserved on branch %s. "+
+			"The bead stays hooked so a re-sling does not start a fresh polecat from main over that work.\n"+
+			"Resume it:          gt sling %s %s --branch %s\n"+
+			"Discard and redo:   gt sling %s %s --force",
+			h.agentID, branch, h.beadID, rigName, branch, h.beadID, rigName)
+	case unknown:
+		note = "could not verify surviving work"
+		text = fmt.Sprintf("gt polecat nuke: %s was nuked; hook kept: could not verify surviving work; "+
+			"run gt polecat surviving-work %s", h.agentID, h.beadID)
+	default:
+		h.release()
+		return
+	}
+	fmt.Printf("  %s Kept %s hooked: %s\n", style.Dim.Render("○"), h.beadID, note)
+	if err := h.rel.Annotate(h.beadID, text); err != nil {
+		fmt.Printf("  %s Could not annotate %s: %v\n", style.Dim.Render("Warning:"), h.beadID, err)
+	}
+}
+
+// readAgentHookBeadFn is a seam for tests.
+var readAgentHookBeadFn = readAgentHookBead
+
+// readAgentHookBead returns the hook_bead recorded on a polecat's agent bead,
+// or "" when it cannot be read.
+func readAgentHookBead(r *rig.Rig, rigName, polecatName string) string {
+	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
+	issue, err := beads.New(r.Path).ForAgentBead().Show(agentBeadID)
+	if err != nil || issue == nil {
+		return ""
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	if fields == nil {
+		return ""
+	}
+	return fields.HookBead
 }
 
 // nukeActorIdentity returns a best-effort identity string for the agent or

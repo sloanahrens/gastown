@@ -227,10 +227,59 @@ func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error 
 	return nil
 }
 
-// cleanupSpawnedPolecat removes a polecat that was spawned but whose session/hook failed,
-// preventing orphaned polecats from accumulating. Cleans up worktree, agent bead, git branch,
-// and optionally the associated auto-convoy.
+// cleanupSpawnedPolecat undoes a spawn whose session/hook failed before any
+// work bead was hooked to it. See cleanupSpawnedPolecatWork.
 func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, rigName, convoyID string) {
+	cleanupSpawnedPolecatWork(spawnInfo, rigName, "", "", convoyID)
+}
+
+// spawnedPolecatSandbox is the rig surface a rollback may touch: the polecat's
+// sandbox and the local branch the sling created.
+type spawnedPolecatSandbox interface {
+	RemovePolecat(name string) error
+	DeleteBranch(branch string)
+}
+
+type rigPolecatSandbox struct {
+	mgr     *polecat.Manager
+	rigPath string
+}
+
+func (s rigPolecatSandbox) RemovePolecat(name string) error { return s.mgr.Remove(name, true) }
+
+// DeleteBranch keeps any branch whose tip has no remote copy (gt-yxys).
+func (s rigPolecatSandbox) DeleteBranch(branch string) {
+	deletePolecatBranch(branch, getRepoGitForRig(s.rigPath), false)
+}
+
+// openSpawnedPolecatSandboxFn is a seam for tests.
+var openSpawnedPolecatSandboxFn = openSpawnedPolecatSandbox
+
+func openSpawnedPolecatSandbox(townRoot, rigName string) (spawnedPolecatSandbox, error) {
+	rigsConfig, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return nil, err
+	}
+	rigMgr := rig.NewManager(townRoot, rigsConfig, git.NewGit(townRoot))
+	r, err := rigMgr.GetRig(rigName)
+	if err != nil {
+		return nil, err
+	}
+	mgr := polecat.NewManager(r, git.NewGit(r.Path), tmux.NewTmux())
+	return rigPolecatSandbox{mgr: mgr, rigPath: r.Path}, nil
+}
+
+// cleanupSpawnedPolecatWork undoes what a failed sling did to the polecat it
+// spawned or reused, and nothing else (gt-7evi4):
+//
+//   - The work bead is released only while it is still hooked to this polecat
+//     (releasePolecatWork's compare-and-release).
+//   - A freshly spawned sandbox is removed; a reused persistent sandbox is kept
+//     and its slot reset to idle.
+//   - Only a branch this sling created, on a sandbox this sling created, is a
+//     candidate for deletion, and deletePolecatBranch still keeps it when its
+//     tip is not on a remote. A resumed branch is never deleted.
+func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, rigName, beadID, hookWorkDir, convoyID string) {
 	// The spawn's seat claim goes with the spawn: no session will ever exist
 	// for this polecat, so the seat it reserved must not stay reserved. This is
 	// the one path every caller-side failure after a spawn comes through —
@@ -238,36 +287,47 @@ func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, rigName, convoyID stri
 	// early when the workspace or rig cannot be read (gt-t8q5).
 	releasePoolSeatClaim()
 
+	if spawnInfo == nil {
+		return
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return
 	}
-	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
-	if err != nil {
-		return
+
+	// Give the work back first: the sandbox removal below resets a fresh
+	// polecat's agent bead, and a kept sandbox needs its slot reset here.
+	// Work that survives on a branch goes back to its pre-sling holder rather
+	// than being released (the shared work-survival rule).
+	rel := newPolecatWorkReleaserFn(townRoot, hookWorkDir)
+	if restoreOriginalHoldIfWorkSurvives(rel, townRoot, spawnInfo.AgentID(), beadID, spawnInfo.originalHold) {
+		beadID = ""
 	}
-	g := git.NewGit(townRoot)
-	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
-	r, err := rigMgr.GetRig(rigName)
-	if err != nil {
-		return
-	}
-	polecatGit := git.NewGit(r.Path)
-	t := tmux.NewTmux()
-	polecatMgr := polecat.NewManager(r, polecatGit, t)
-	if err := polecatMgr.Remove(spawnInfo.PolecatName, true); err != nil {
-		fmt.Printf("  %s Could not clean up orphaned polecat %s: %v\n",
-			style.Dim.Render("Warning:"), spawnInfo.PolecatName, err)
+	releasePolecatWork(rel, spawnInfo.AgentID(), beadID, !spawnInfo.FreshSpawn)
+
+	if spawnInfo.FreshSpawn {
+		if sandbox, err := openSpawnedPolecatSandboxFn(townRoot, rigName); err != nil {
+			fmt.Printf("  %s Could not open rig %s to clean up polecat %s: %v\n",
+				style.Dim.Render("Warning:"), rigName, spawnInfo.PolecatName, err)
+		} else {
+			if err := sandbox.RemovePolecat(spawnInfo.PolecatName); err != nil {
+				fmt.Printf("  %s Could not clean up orphaned polecat %s: %v\n",
+					style.Dim.Render("Warning:"), spawnInfo.PolecatName, err)
+			} else {
+				fmt.Printf("  %s Cleaned up orphaned polecat %s\n",
+					style.Dim.Render("○"), spawnInfo.PolecatName)
+			}
+			if spawnInfo.Branch != "" && spawnInfo.BranchCreated {
+				sandbox.DeleteBranch(spawnInfo.Branch)
+			}
+		}
 	} else {
-		fmt.Printf("  %s Cleaned up orphaned polecat %s\n",
+		fmt.Printf("  %s Kept reused polecat %s (sandbox predates this sling)\n",
 			style.Dim.Render("○"), spawnInfo.PolecatName)
 	}
-
-	// Delete the git branch if we know it (following nukePolecatFull pattern)
-	if spawnInfo.Branch != "" {
-		repoGit := getRepoGitForRig(r.Path)
-		deletePolecatBranch(spawnInfo.Branch, repoGit, false)
+	if spawnInfo.Branch != "" && !spawnInfo.BranchCreated {
+		fmt.Printf("  %s Kept branch %s (not created by this sling)\n",
+			style.Dim.Render("○"), spawnInfo.Branch)
 	}
 
 	// Close the auto-convoy if one was created

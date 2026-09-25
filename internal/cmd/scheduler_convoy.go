@@ -289,7 +289,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 
 	jobs := planConvoyDispatch(candidates, convoyDescription, townRoot)
 
-	successCount := 0
+	var tally feederDispatchTally
 	successfulRigs := make(map[string]bool)
 	for i, job := range jobs {
 		if slingMaxConcurrent > 0 && i >= slingMaxConcurrent {
@@ -318,11 +318,9 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 			// Feeder replay of work already chosen for dispatch; see SlingParams.
 			SkipDuplicateCheck: true,
 		})
-		if err != nil {
-			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), c.ID, err)
+		if !tally.record(c.ID, err) {
 			continue
 		}
-		successCount++
 		successfulRigs[c.RigName] = true
 
 		// Brief delay between spawns to avoid Dolt contention
@@ -339,14 +337,11 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 	}
 
 	fmt.Printf("\n%s Dispatched %d/%d issue(s) from convoy %s\n",
-		style.Bold.Render("📊"), successCount, len(candidates), convoyID)
+		style.Bold.Render("📊"), tally.success, len(candidates), convoyID)
 	if skippedClosed > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
 		fmt.Printf("  Skipped: %d closed, %d assigned, %d no rig\n",
 			skippedClosed, skippedAssigned, skippedNoRig)
 	}
 
-	if successCount == 0 {
-		return fmt.Errorf("all %d dispatch attempts failed for convoy %s", len(candidates), convoyID)
-	}
-	return nil
+	return tally.result("convoy", convoyID)
 }

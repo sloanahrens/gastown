@@ -4281,3 +4281,57 @@ func TestRestartPolecatSessionPanicsWithoutFakeExecutor(t *testing.T) {
 	_ = RestartPolecatSession(t.TempDir(), "gastown", "flint")
 	t.Fatal("RestartPolecatSession returned without panicking — the real restart path ran unguarded")
 }
+
+// Work that survives on a polecat branch keeps the hook: the witness must not
+// reset it for a fresh re-dispatch from main (gt-vm5g4). An unknown answer
+// keeps it too; a rig with no git repo resets as before. The reset itself is
+// guarded on the dead polecat still holding the bead.
+func TestResetAbandonedBead_SurvivingWorkKeepsHook(t *testing.T) {
+	// Not parallel: overrides package-level seams.
+	oldVerify, oldSurviving := verifyCommitOnMain, survivingWorkForBead
+	verifyCommitOnMain = func(string, string, string) (bool, error) { return false, nil }
+	t.Cleanup(func() { verifyCommitOnMain, survivingWorkForBead = oldVerify, oldSurviving })
+
+	for _, tc := range []struct {
+		name      string
+		branch    string
+		err       error
+		wantReset bool
+	}{
+		{name: "work survives", branch: "polecat/alpha/gt-work123+mu5wzd6q"},
+		{name: "survival unknown", err: errors.New("origin unreachable")},
+		{name: "no surviving work", wantReset: true},
+		{name: "rig has no git repo", err: polecat.ErrNoRigRepo, wantReset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			survivingWorkForBead = func(_, rigName, beadID string) (string, error) {
+				if rigName != "testrig" || beadID != "gt-work123" {
+					t.Fatalf("predicate asked about %s/%s", rigName, beadID)
+				}
+				return tc.branch, tc.err
+			}
+			bd, mock := mockBd(
+				func(args []string) (string, error) {
+					if len(args) >= 1 && args[0] == "show" {
+						return `[{"status":"in_progress"}]`, nil
+					}
+					return "", nil
+				},
+				func([]string) error { return nil },
+			)
+			got := resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil)
+			var resets []string
+			for _, call := range mock.calls {
+				if strings.Contains(call, "update") && strings.Contains(call, "--status=open") {
+					resets = append(resets, call)
+				}
+			}
+			if got != tc.wantReset || (len(resets) == 1) != tc.wantReset {
+				t.Fatalf("reset = %v (calls %v), want %v", got, resets, tc.wantReset)
+			}
+			if tc.wantReset && !strings.Contains(resets[0], "--if-assignee=testrig/polecats/alpha") {
+				t.Fatalf("reset is not guarded on the dead polecat: %s", resets[0])
+			}
+		})
+	}
+}

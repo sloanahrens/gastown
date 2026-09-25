@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -20,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
@@ -1386,10 +1388,6 @@ func isHookedAgentDead(assignee string) bool {
 	return !alive
 }
 
-// survivingBranchForBeadFn is a seam for tests. Production uses
-// survivingBranchForBead.
-var survivingBranchForBeadFn = survivingBranchForBead
-
 // rigRootForBead resolves the rig directory owning beadID through the prefix
 // routes, or "" when the bead's prefix routes nowhere.
 func rigRootForBead(townRoot, beadID string) string {
@@ -1404,22 +1402,146 @@ func rigRootForBead(townRoot, beadID string) string {
 	return filepath.Join(townRoot, rigName)
 }
 
-// survivingBranchForBead returns the most recent polecat branch still on the
-// rig's origin remote that encodes beadID, or "" when there is none. The
-// second return is false whenever the answer is unknown (no rig route, no git
-// repo, unreachable remote), so callers never read an unreachable remote as
-// "no surviving branch".
-func survivingBranchForBead(townRoot, beadID string) (string, bool) {
+// errBeadRoutesToNoRig means a bead's prefix maps to no rig, so there is no
+// rig repo that could hold its polecat branches.
+var errBeadRoutesToNoRig = errors.New("bead routes to no rig")
+
+// survivingWorkForBead is the shared surviving-work predicate
+// (polecat.WorkSurvival) for beadID: the newest polecat branch — local in the
+// rig repo or on origin — carrying a patch that is on neither the rig's
+// default branch nor an integration branch, or "" when none does. A non-nil
+// error means the answer is unknown, except for polecat.ErrNoRigRepo and
+// errBeadRoutesToNoRig, which mean there is no repo, so no branch to protect.
+func survivingWorkForBead(townRoot, beadID string) (string, error) {
 	rigRoot := rigRootForBead(townRoot, beadID)
 	if rigRoot == "" {
-		return "", false
+		return "", fmt.Errorf("%s: %w", beadID, errBeadRoutesToNoRig)
 	}
-	branch, err := polecat.SurvivingBranchForIssue(rigRoot, beadID)
-	if err != nil || branch == "" {
-		return "", false
-	}
-	return branch, true
+	return polecat.SurvivingWorkForIssue(rigRoot, beadID)
 }
+
+// survivingWorkForBeadFn is a seam for tests.
+var survivingWorkForBeadFn = survivingWorkForBead
+
+// noRepoToProtect reports whether a survival error only says there is no repo
+// (and therefore no branch) for the bead.
+func noRepoToProtect(err error) bool {
+	return errors.Is(err, polecat.ErrNoRigRepo) || errors.Is(err, errBeadRoutesToNoRig)
+}
+
+// reslingSurvivingWorkGuard is sling's re-sling guard for a bead whose
+// holder is dead (gt-3qfp): it refuses when the work survives on a branch, and
+// also when survival cannot be verified — an outage must not turn into a
+// second polecat started from main over preserved work. It returns nil only
+// when there is verifiably nothing to protect. --force bypasses it (caller).
+func reslingSurvivingWorkGuard(townRoot, beadID, holder string) error {
+	branch, err := survivingWorkForBeadFn(townRoot, beadID)
+	switch {
+	case err != nil && !noRepoToProtect(err):
+		return &reslingRefusal{msg: fmt.Sprintf("%s %s: previous holder %s has no active session, and sling cannot verify surviving work (%v); resume with --branch or override with --force",
+			dispatch.ReslingRefusalMarker, beadID, holder, err)}
+	case branch != "":
+		return &reslingRefusal{msg: fmt.Sprintf("%s %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
+			dispatch.ReslingRefusalMarker, beadID, holder, branch, beadID, branch, beadID)}
+	}
+	return nil
+}
+
+// errReslingRefused matches every reslingSurvivingWorkGuard refusal
+// (errors.Is). Automated dispatchers (scheduler, convoy and epic feeders)
+// treat it as a deferral, not a failure: the bead waits for an operator to
+// resume (--branch) or discard (--force) the work, or for survival to become
+// verifiable again, and must not burn a dispatch attempt meanwhile.
+var errReslingRefused = errors.New(dispatch.ReslingRefusalMarker)
+
+// reslingRefusal is the guard's refusal. Its text starts with
+// dispatch.ReslingRefusalMarker, which the daemon's convoy feeder (running gt
+// sling as a subprocess) matches on stderr.
+type reslingRefusal struct{ msg string }
+
+func (e *reslingRefusal) Error() string { return e.msg }
+
+func (e *reslingRefusal) Is(target error) bool { return target == errReslingRefused }
+
+// feederDispatchTally counts one convoy or epic feeder run's executeSling
+// outcomes. A resling refusal is a deferral: it is neither a success nor a
+// failed attempt, and a run whose every attempt was deferred is not an error.
+type feederDispatchTally struct {
+	success, deferred, failed int
+}
+
+// record counts err (nil = dispatched), prints a line for a deferral or a
+// failure, and reports whether the dispatch succeeded.
+func (t *feederDispatchTally) record(beadID string, err error) bool {
+	switch {
+	case err == nil:
+		t.success++
+		return true
+	case errors.Is(err, errReslingRefused):
+		t.deferred++
+		fmt.Printf("  %s %s deferred: %v\n", style.Dim.Render("○"), beadID, err)
+	default:
+		t.failed++
+		fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)
+	}
+	return false
+}
+
+// result prints the deferral count and returns an error only when nothing
+// was dispatched and at least one attempt really failed.
+func (t *feederDispatchTally) result(kind, id string) error {
+	if t.deferred > 0 {
+		fmt.Printf("  Deferred: %d (a dead holder's work survives or cannot be verified)\n", t.deferred)
+	}
+	if t.success == 0 && t.failed > 0 {
+		return fmt.Errorf("all %d dispatch attempts failed for %s %s", t.failed, kind, id)
+	}
+	return nil
+}
+
+// orphanEpisodeLabels are the witness's cross-cycle memory for an orphaned
+// bead (mol-witness-patrol survey-workers step 5): the mayor was told its work
+// survives, the last survival answer was unknown, and that unknown run was
+// escalated. Each suppresses a repeat notice while present.
+var orphanEpisodeLabels = []string{"gt:preserved-orphan", "gt:survival-unknown", "gt:survival-escalated"}
+
+// clearOrphanEpisodeLabels removes the orphan-episode labels from a bead that
+// sling just hooked to a new holder. A successful sling ends the episode —
+// including one an operator ended with --branch or --force — so a later
+// orphaning of the same bead must mail and escalate afresh (gt-vm5g4).
+// Best-effort: every bd call is bounded by the beads subprocess timeout, a
+// failure only warns, and a bead carrying none of the labels costs one read
+// and no write. workDir is the hook write's work dir, so an unrouted bead is
+// read from the same database the hook just wrote.
+func clearOrphanEpisodeLabels(townRoot, beadID, workDir string) {
+	if beadID == "" {
+		return
+	}
+	b := beads.New(beads.ResolveHookDir(townRoot, beadID, workDir))
+	issue, err := b.Show(beadID)
+	if err != nil {
+		fmt.Printf("  %s Could not read %s to clear orphan labels: %v\n", style.Dim.Render("Warning:"), beadID, err)
+		return
+	}
+	var present []string
+	for _, want := range orphanEpisodeLabels {
+		for _, have := range issue.Labels {
+			if have == want {
+				present = append(present, want)
+				break
+			}
+		}
+	}
+	if len(present) == 0 {
+		return
+	}
+	if err := b.Update(beadID, beads.UpdateOptions{RemoveLabels: present}); err != nil {
+		fmt.Printf("  %s Could not clear orphan labels %v on %s: %v\n", style.Dim.Render("Warning:"), present, beadID, err)
+	}
+}
+
+// clearOrphanEpisodeLabelsFn is a seam for tests.
+var clearOrphanEpisodeLabelsFn = clearOrphanEpisodeLabels
 
 // survivingBranchesForBead lists every polecat branch on the rig's origin
 // remote that encodes beadID, newest first. Unlike survivingBranchForBead it
