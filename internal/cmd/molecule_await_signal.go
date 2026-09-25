@@ -85,7 +85,7 @@ EXAMPLES:
 
   # Backoff mode with agent bead tracking:
   gt mol await-signal --agent-bead gt-gastown-witness \
-    --backoff-base 30s --backoff-mult 2 --backoff-max 15m
+    --backoff-base 30s --backoff-mult 2 --backoff-max 5m
 
   # Explicit rig scope (default: GT_RIG, else the rig containing cwd)
   gt mol await-signal --rig om --agent-bead om-witness --backoff-base 30s
@@ -184,6 +184,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 
 	// Read current idle cycles and backoff window from agent bead (if specified)
 	var idleCycles int
+	idleKnown := false         // false when the agent bead could not be read
 	var backoffUntil time.Time // zero value means no active window
 	if awaitSignalAgentBead != "" {
 		labels, err := getAgentLabels(awaitSignalAgentBead, beadsDir)
@@ -194,6 +195,7 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 					style.Dim.Render("⚠"), err)
 			}
 		} else {
+			idleKnown = true
 			if idleStr, ok := labels["idle"]; ok {
 				if n, err := parseIntSimple(idleStr); err == nil {
 					idleCycles = n
@@ -311,13 +313,16 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 		// wait starts at the base interval. This used to be left to the
 		// agent, which skipped it (0 of 20 in one deacon session), so every
 		// wait sat at the backoff cap (claude-9jq).
+		//
+		// When the idle read failed the counter is unknown (and may be high),
+		// so the reset is attempted anyway. A failed reset is reported on
+		// stderr even under --quiet or --json: the patrol formulas tell the
+		// agent to reset by hand only when it sees this warning.
 		result.IdleCycles = idleCycles
-		if idleCycles > 0 {
+		if idleCycles > 0 || !idleKnown {
 			if err := setAgentIdleCycles(awaitSignalAgentBead, beadsDir, 0); err != nil {
-				if !awaitSignalQuiet {
-					fmt.Printf("%s Failed to reset agent bead idle count: %v\n",
-						style.Dim.Render("⚠"), err)
-				}
+				fmt.Fprintf(os.Stderr, "%s Failed to reset agent bead idle count: %v\n",
+					style.Dim.Render("⚠"), err)
 			} else {
 				result.IdleCycles = 0
 			}

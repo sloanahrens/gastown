@@ -882,10 +882,16 @@ func awaitSignalFakeTown(t *testing.T, labels string) (townRoot, bdLog string) {
 		t.Fatal(err)
 	}
 	bdLog = filepath.Join(tmp, "bd.log")
+	// BD_SHOW_FAIL lists the 1-based show calls that fail (e.g. " 1 " or
+	// " 2 3 4 5 "), so a test can model a transient or lasting read failure.
 	bdScript := `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$1" in
-  show) printf '[{"labels":` + labels + `}]\n' ;;
+  show)
+    n=$(( $(cat "$BD_LOG.shows" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$BD_LOG.shows"
+    case "${BD_SHOW_FAIL-}" in *" $n "*) echo "show $n failed" >&2; exit 1 ;; esac
+    printf '[{"labels":` + labels + `}]\n' ;;
   update) ;;
   *) printf 'unexpected bd command: %s\n' "$1" >&2; exit 1 ;;
 esac
@@ -895,6 +901,7 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("BD_LOG", bdLog)
+	t.Setenv("BD_SHOW_FAIL", "")
 	t.Setenv("BEADS_DIR", "")
 
 	oldWd, err := os.Getwd()
@@ -1019,5 +1026,59 @@ func TestRunMoleculeAwaitSignal_SignalAtIdleZeroSkipsWrite(t *testing.T) {
 	}
 	if n := strings.Count(string(data), "update "); n != 2 {
 		t.Fatalf("bd updates = %d, want 2 (backoff-until set, heartbeat); an idle reset at idle 0 is a wasted write\n%s", n, data)
+	}
+}
+
+// appendEventAfter appends one town event to the events file after delay.
+func appendEventAfter(townRoot string, delay time.Duration) {
+	go func() {
+		time.Sleep(delay)
+		f, err := os.OpenFile(filepath.Join(townRoot, ".events.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"ts":"now","type":"mail","actor":"mayor"}` + "\n")
+	}()
+}
+
+// When the idle read failed (a transient bd error), the counter is unknown and
+// may be high: a real wake must still try to reset it.
+func TestRunMoleculeAwaitSignal_SignalResetsIdleWhenReadFailed(t *testing.T) {
+	townRoot, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
+	t.Setenv("BD_SHOW_FAIL", " 1 ") // only the initial idle read fails
+	awaitSignalBackoffBase = "30s"
+	awaitSignalBackoffMult = 2
+	awaitSignalBackoffMax = "5m"
+
+	appendEventAfter(townRoot, time.Second)
+	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitSignal: %v", err)
+	}
+	if got := idleLabelChanges(t, bdLog, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
+		t.Fatalf("idle label changes = %q, want exactly [idle:0]", got)
+	}
+}
+
+// A failed reset is reported on stderr even under --quiet: the formula tells
+// the agent to reset by hand only when it sees this warning.
+func TestRunMoleculeAwaitSignal_ResetFailureWarnsUnderQuiet(t *testing.T) {
+	townRoot, _ := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
+	// Show calls: 1 idle read, 2 backoff-until set, 3 heartbeat, 4 idle
+	// reset. Fail the reset's read so the reset itself fails.
+	t.Setenv("BD_SHOW_FAIL", " 4 ")
+	awaitSignalBackoffBase = "30s"
+	awaitSignalBackoffMult = 2
+	awaitSignalBackoffMax = "5m"
+	awaitSignalQuiet = true
+
+	appendEventAfter(townRoot, time.Second)
+	var runErr error
+	stderr := captureStderr(t, func() { runErr = runMoleculeAwaitSignal(nil, nil) })
+	if runErr != nil {
+		t.Fatalf("runMoleculeAwaitSignal: %v", runErr)
+	}
+	if !strings.Contains(stderr, "Failed to reset agent bead idle count") {
+		t.Fatalf("stderr = %q, want the reset-failure warning", stderr)
 	}
 }
