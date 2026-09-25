@@ -38,10 +38,12 @@ func TestDecideSessionReconcile_LivenessErrorIsNotDeath(t *testing.T) {
 // made the burst the common path rather than a race: Claude's process tree is
 // undetectable for the whole bootstrap window, so every concurrent start path
 // (daemon heartbeat, gt up, gt start --all, patrol formulas) saw the session
-// its predecessor had just created as a zombie and killed it.
+// its predecessor had just created as a zombie and killed it. One age is
+// absolute (ClaudeStartTimeout-1s), so a grace shorter than the window fails
+// here instead of only at its own moving boundary.
 func TestDecideSessionReconcile_BootingSessionIsNotAZombie(t *testing.T) {
 	t.Parallel()
-	for _, age := range []time.Duration{0, time.Second, 10 * time.Second, constants.SessionBootGracePeriod - time.Millisecond} {
+	for _, age := range []time.Duration{0, time.Second, 10 * time.Second, time.Minute, constants.ClaudeStartTimeout - time.Second, constants.SessionBootGracePeriod - time.Millisecond} {
 		outcome, reason, _ := DecideSessionReconcile(SessionReconcileFacts{
 			LivenessKnown:   true,
 			Alive:           false,

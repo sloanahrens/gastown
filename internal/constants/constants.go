@@ -45,14 +45,13 @@ const (
 
 	// SessionBootGracePeriod is how long a just-created session is presumed to
 	// be mid-boot, so a second caller arriving during bootstrap must not tear it
-	// down as a "zombie". Claude's process tree is not detectable for the whole
-	// bootstrap window (ClaudeStartTimeout, up to 180s while the first turn's
-	// API round-trip runs), so any liveness probe in that window reports "dead"
-	// for a perfectly healthy session. Without this, concurrent start paths
-	// (daemon heartbeat, gt up, gt start --all, boot/deacon patrol formulas)
-	// each kill the session the previous one just created — the refinery
-	// respawn burst of gt-uj9k.
-	SessionBootGracePeriod = 60 * time.Second
+	// down as a "zombie". It spans the whole first API round-trip, the window in
+	// which a liveness probe still reports a healthy booting session as dead and
+	// the window the spawning path waits out in ClaudeStartTimeout. A shorter
+	// grace reads those sessions as corpses and respawns them (the refinery
+	// burst of gt-uj9k); a longer one leaves a refinery that died during its
+	// first three minutes in place for an extra recovery heartbeat.
+	SessionBootGracePeriod = ClaudeStartTimeout
 
 	// EnvSessionStartReason is set by a spawner to record why it started an
 	// agent session. Read by `gt prime --hook` when it emits the session_start
