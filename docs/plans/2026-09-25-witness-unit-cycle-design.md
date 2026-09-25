@@ -77,6 +77,7 @@ on one host.
       "polecat": "opal",
       "session": "gt-gastown-opal",
       "sampled_at": "2026-09-25T14:00:00Z",
+      "last_observed_at": "2026-09-25T14:25:00Z",
       "transcript_path": "/…/opal.jsonl",
       "transcript_mtime": "2026-09-25T13:58:12Z",
       "transcript_bytes": 812345,
@@ -87,26 +88,38 @@ on one host.
 ```
 
 The fields the bead asked for are `polecat`, `sampled_at`, `transcript_mtime`
-and `pane_signature`. Three more are there because `witness.AssessStall`
-needs them or because they guard identity:
+and `pane_signature`. Four more are there because `witness.AssessStall`
+needs them or because they guard identity or the clock:
 
 - `transcript_bytes`: `AssessStall` treats a size change as progress, since a
   same-second write can keep the mtime.
 - `session` and `transcript_path`: a sample from another tmux session or
   another transcript (a restarted polecat, a reused name) is never compared.
   The scan records a fresh sample 1 instead.
+- `last_observed_at`: the latest scan that saw the polecat, updated even when
+  sample 1 is kept. The scan-gap guard below reads it.
 
 ### Write and read rules
 
-- **Atomic write.** Write to a temp file and rename it
+- **Atomic write under a lock.** Write to a temp file and rename it
   (`atomicfile.EnsureDirAndWriteJSON`), so a reader never sees a half-written
-  file. Two scans at once (the witness plus a human) can race; the last
-  writer wins, and either result is a valid sample.
-- **Unreadable or corrupt file.** The scan treats it as "no samples",
-  records fresh ones and warns on stderr. It never fails the scan.
+  file. Load, compute and save run under an flock on a sibling
+  `stall_samples.json.lock`. A scan that cannot take the lock within 10 s
+  still judges against what it read, but saves nothing and warns.
+- **Unreadable, corrupt or unknown-version file.** The scan treats it as "no
+  samples", records fresh ones and warns on stderr. It never fails the scan.
 - **When sample 1 is replaced:**
-  - there is no sample, or it is from another session or transcript, or it
-    has no transcript date → record the current observation as sample 1;
+  - there is no sample; or it is from another session or transcript; or it
+    has no transcript date; or it has no pane signature (one capture error
+    must not disable detection for the rest of the session); or its
+    `sampled_at` is missing or in the future → record the current observation
+    as sample 1;
+  - no scan saw the polecat for more than `stallSampleMaxScanGap` (15m) →
+    nobody watched the window (host asleep, witness down), so re-record rather
+    than report every quiet polecat stalled on wake. 15m is 3× the 5m cap,
+    not 2×: a quiet witness scans once per cap interval plus the cycle's own
+    duration and, after step 3, its boot, and a bound that ordinary cycles
+    exceed would re-record on every scan and silently disable detection;
   - the transcript advanced (mtime or size) or the pane signature changed →
     the agent is working, so re-record sample 1 now;
   - otherwise keep sample 1. This covers "too soon", a missing signal on the
@@ -166,9 +179,9 @@ Respawning every `N` cycles averages `C0/N + k·r·(C0 + g·N/2)` per cycle. Tha
 is smallest at `N* = sqrt(2·C0 / (k·r·g))`, about 3.5 with the numbers above,
 where it is about 32k per cycle. Today's session averages about `k·r·100k` =
 50k per cycle, plus the compactions (each a large uncached call). Respawning
-every cycle costs about 45k, no better than today: a cold 30k start against
-cheap cache reads of a long context. Respawning every 12 cycles costs about
-47k.
+every cycle (`N = 1`) costs about 47.5k, no better than today: a cold 30k
+start against cheap cache reads of a long context. Respawning every 12 cycles
+also costs about 47.5k.
 
 So the saving comes from **how often** the witness respawns, and the best
 frequency is every few cycles. Respawning every cycle wastes the saving on
@@ -181,8 +194,9 @@ cap, once the session has run at least 3 cycles. As a backstop, respawn after
 8 cycles whatever the effort level.**
 
 - **(b) is the cheapest place to respawn.** The next cycle is a full cap
-  interval away, so the boot latency is hidden, and a quiet rig is where the
-  long session's tokens are spent on nothing. The 3-cycle minimum keeps a
+  interval away, so the boot latency mostly overlaps time the witness would
+  have spent waiting (it still delays a wake-up that arrives mid-boot), and a
+  quiet rig is where the long session's tokens are spent on nothing. The 3-cycle minimum keeps a
   quiet stretch to about one respawn every 15 minutes at a 5m cap, near `N*`,
   and not every cycle, where cold starts cost more than they save.
 - **(c) bounds a rig that is never idle.** A busy gastown may never reach the
@@ -313,8 +327,9 @@ window.
   compactions per hour and the effort level of each cycle.
 
 **After** (flag on for gastown, 24 h): the same numbers, plus respawns per
-hour by trigger (cap or backstop), the cold-start tokens of each respawn's
-first call, the boot time (handoff event to the first tool call), and skipped
+hour by trigger (cap or backstop), the prefix-cache cold-start cost of each
+respawn (uncached tokens and price of the fresh session's first calls, which
+tests the `C0` and `r` assumptions above), the boot time (handoff event to the first tool call), and skipped
 respawns by reason (cooldown, guard).
 
 **Success criteria:**
