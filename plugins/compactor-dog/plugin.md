@@ -289,8 +289,10 @@ The table above is for `monitor` and `flatten` modes. **In `gc` mode:**
   runaway writer, not as a compaction request.
 - gc failures and skipped windows are escalated by the daemon's
   scheduled_maintenance patrol, not by this dog.
-- Never recommend compaction or flatten in gc mode; that is an operator
-  decision outside this plugin.
+- In the escalation, report what you saw (the database, its commit count
+  or growth rate, and whether a swarm explains it) and leave the remedy to
+  the operator. Do not recommend compaction or flatten in gc mode: the daemon's
+  gc already handles disk, and rewriting history is an operator decision.
 
 **But override the table if context warrants it:**
 - 400 commits after a 10-polecat swarm = normal, will settle

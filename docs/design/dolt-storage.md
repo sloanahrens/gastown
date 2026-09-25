@@ -339,9 +339,10 @@ commits local no longer has.
 `scheduled_maintenance` acts on `maintenance.mode`. `monitor` (the default)
 escalates with the commit counts and rewrites nothing; `flatten` runs
 `gt maintain --force`, which is still subject to the pre-flight above. Set it
-with `gt config set maintenance.mode flatten`; any value other than the exact
-word `flatten` — including a typo — is treated as `monitor`, so a misspelling
-cannot arm the destructive path.
+with `gt config set maintenance.mode flatten`. The daemon recognizes only
+`flatten` and `gc` (below), trimmed and case-insensitive; any other value,
+including a typo, is treated as `monitor`, so a misspelling cannot arm the
+destructive path.
 
 `gc` is the history-preserving mode (claude-05o; design in
 `docs/plans/2026-09-25-dolt-gc-maintenance-design.md`). It ignores commit
