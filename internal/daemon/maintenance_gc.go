@@ -402,16 +402,14 @@ func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 	defer conn.Close()
 	conn.SetMaxOpenConns(1)
 
-	var status int
-	err = conn.QueryRowContext(ctx, "CALL dolt_gc('--full')").Scan(&status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if status != 0 {
-		return fmt.Errorf("dolt_gc returned status %d", status)
+	// ExecContext, as internal/cmd/maintain.go runs CALL dolt_gc(): the
+	// procedure reports failure as a SQL error, and its status row carries
+	// nothing more. TestDoltGCFullAgainstRealServer runs this on a server.
+	if _, err := conn.ExecContext(ctx, "CALL dolt_gc('--full')"); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("dolt_gc --full: timeout: %w", err)
+		}
+		return fmt.Errorf("dolt_gc --full: %w", err)
 	}
 	return nil
 }
