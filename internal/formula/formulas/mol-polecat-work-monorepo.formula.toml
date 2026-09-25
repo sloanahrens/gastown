@@ -594,7 +594,7 @@ gt done --target {{base_branch}}
 
 Check your base_branch variable:
 - If `{{base_branch}}` is `main` (or `master`) → **Mode A** (PR-only, `--no-merge`)
-- If `{{base_branch}}` is anything else → **Mode B** (merge queue, `--pre-verified`)
+- If `{{base_branch}}` is anything else → **Mode B** (merge queue, `gt done --target {{base_branch}}`)
 
 You are GONE after `gt done`. Done means gone.
 
