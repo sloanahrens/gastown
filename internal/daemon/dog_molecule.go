@@ -457,20 +457,25 @@ func (dm *dogMol) closeRemainingSteps() {
 }
 
 // discoverSteps lists children of the root wisp and maps step slugs to IDs.
-// Step titles in the formula are like "Scan databases for stale wisps" — we
-// match on the step ID embedded in the wisp title or metadata.
 //
-// A failure here is returned, not just logged: the molecule exists but cannot be
-// read back, so every closeStep this cycle makes is a no-op and the cycle has no
-// receipt. The caller records that as dogCycleFailed, because a receipt that was
-// never written is not the same observable as a clean run (gt-i3rpw).
+// The slug for a child is the formula step ID it instantiates, and the child's
+// title is the only handle back to it: a poured step is a wisp with a fresh
+// random ID and the formula's step title, and nothing else of the step survives
+// the pour. So the map comes from the formula's own step list, asked of bd —
+// the same resolver, from the same working directory, that poured the molecule.
+// A step the map misses is closed by closeRemainingSteps' sweep instead of by
+// the code that ran it (gt-i9la).
+//
+// A failure to list or parse the children is returned, not just logged: the
+// molecule exists but cannot be read back, so every closeStep this cycle makes
+// is a no-op and the cycle has no receipt. The caller records that as
+// dogCycleFailed, because a receipt that was never written is not the same
+// observable as a clean run (gt-i3rpw).
 func (dm *dogMol) discoverSteps() error {
 	if dm.rootID == "" {
 		return nil
 	}
 
-	// Use bd show to get children. The mol wisp command creates child wisps
-	// whose titles include the step ID from the formula.
 	out, err := dm.runBd("show", dm.rootID, "--children", "--json")
 	if err != nil {
 		dm.logger.Printf("dog_molecule: discover steps for %s failed: %v", dm.rootID, err)
@@ -483,57 +488,101 @@ func (dm *dogMol) discoverSteps() error {
 		return fmt.Errorf("parse children of %s: %w", dm.rootID, parseErr)
 	}
 
-	// Map known step slugs from each child's title. The wisp title typically starts
-	// with the step title from the formula.
+	if len(children) == 0 {
+		// Nothing was poured to map. Asking bd for a formula whose children do
+		// not exist would only add a subprocess and a warning.
+		return nil
+	}
+
+	slugsByTitle, err := dm.stepSlugsByTitle()
+	if err != nil {
+		// Not fatal, and not returned: the molecule is readable, so the cycle
+		// still runs and every step is still closed — by closeRemainingSteps'
+		// sweep rather than by the step that ran it. That is a worse receipt,
+		// not a broken one, and the log line names the cause.
+		dm.logger.Printf("dog_molecule: cannot read the steps of %s (%v); this cycle's steps will be closed by the sweep", dm.formula, err)
+	}
+
 	for _, child := range children {
 		if child.ID == "" || child.Title == "" {
 			continue
 		}
 
-		titleLower := strings.ToLower(child.Title)
-		switch {
-		case strings.Contains(titleLower, "scan"):
-			dm.stepIDs["scan"] = child.ID
-		case strings.Contains(titleLower, "reap"):
-			dm.stepIDs["reap"] = child.ID
-		case strings.Contains(titleLower, "purge"):
-			dm.stepIDs["purge"] = child.ID
-		case strings.Contains(titleLower, "report"):
-			dm.stepIDs["report"] = child.ID
-		case strings.Contains(titleLower, "export"):
-			dm.stepIDs["export"] = child.ID
-		case strings.Contains(titleLower, "push"):
-			dm.stepIDs["push"] = child.ID
-		case strings.Contains(titleLower, "diagnos"):
-			dm.stepIDs["diagnose"] = child.ID
-		case strings.Contains(titleLower, "backup"):
-			dm.stepIDs["backup"] = child.ID
-		case strings.Contains(titleLower, "probe"):
-			dm.stepIDs["probe"] = child.ID
-		case strings.Contains(titleLower, "inspect"):
-			dm.stepIDs["inspect"] = child.ID
-		case strings.Contains(titleLower, "clean"):
-			dm.stepIDs["clean"] = child.ID
-		case strings.Contains(titleLower, "verif"):
-			dm.stepIDs["verify"] = child.ID
-		case strings.Contains(titleLower, "compact"):
-			dm.stepIDs["compact"] = child.ID
-		case strings.Contains(titleLower, "checkpoint"):
-			dm.stepIDs["checkpoint"] = child.ID
-		case strings.Contains(titleLower, "auto-close") || strings.Contains(titleLower, "auto close"):
-			dm.stepIDs["auto-close"] = child.ID
-		case strings.Contains(titleLower, "sync"):
-			dm.stepIDs["sync"] = child.ID
-		case strings.Contains(titleLower, "offsite"):
-			dm.stepIDs["offsite"] = child.ID
-		case strings.Contains(titleLower, "rotat"):
-			dm.stepIDs["rotate"] = child.ID
-		case strings.Contains(titleLower, "nudge"):
-			dm.stepIDs["nudge"] = child.ID
+		slug, ok := slugsByTitle[stepTitleKey(child.Title)]
+		if !ok {
+			dm.logger.Printf("dog_molecule: %s: child %s (%q) matches no step of the formula — it will be closed by the sweep", dm.formula, child.ID, child.Title)
+			continue
 		}
+		if other, dup := dm.stepIDs[slug]; dup {
+			dm.logger.Printf("dog_molecule: %s: step %q is already mapped to %s; %s left to the sweep", dm.formula, slug, other, child.ID)
+			continue
+		}
+		dm.stepIDs[slug] = child.ID
 	}
 
 	return nil
+}
+
+// stepSlugsByTitle returns the formula's step IDs keyed by normalized step
+// title, so a child wisp can be traced back to the step it instantiates.
+func (dm *dogMol) stepSlugsByTitle() (map[string]string, error) {
+	out, err := dm.runBd("formula", "show", dm.formula, "--json")
+	if err != nil {
+		return nil, fmt.Errorf("bd formula show %s: %w", dm.formula, err)
+	}
+
+	steps, err := parseFormulaStepsJSON(out)
+	if err != nil {
+		return nil, fmt.Errorf("bd formula show %s: %w", dm.formula, err)
+	}
+
+	byTitle := make(map[string]string, len(steps))
+	for _, step := range steps {
+		if step.ID == "" || step.Title == "" {
+			continue
+		}
+		key := stepTitleKey(step.Title)
+		if existing, dup := byTitle[key]; dup {
+			// Two steps with one title are indistinguishable from their children,
+			// so the first keeps the title and the other's child falls to the
+			// sweep. Naming the shadowed step is the only way to see it (gt-i9la).
+			dm.logger.Printf("dog_molecule: %s: steps %q and %q share the title %q; only %q is matched", dm.formula, existing, step.ID, step.Title, existing)
+			continue
+		}
+		byTitle[key] = step.ID
+	}
+
+	return byTitle, nil
+}
+
+// stepTitleKey normalizes a step title for matching a child wisp against the
+// formula. bd pours a child with the step's title verbatim, so folding case and
+// whitespace is what keeps a stray extra space from unmapping the step.
+func stepTitleKey(title string) string {
+	return strings.Join(strings.Fields(strings.ToLower(title)), " ")
+}
+
+// formulaStep is the part of `bd formula show --json` this package reads: the
+// formula's step IDs and their titles.
+type formulaStep struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// parseFormulaStepsJSON extracts the steps from `bd formula show <name> --json`.
+// The envelope carries the whole formula (description, vars, composition rules);
+// only the steps matter here.
+func parseFormulaStepsJSON(raw string) ([]formulaStep, error) {
+	var envelope struct {
+		Steps []formulaStep `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		return nil, fmt.Errorf("parse formula steps JSON: %w", err)
+	}
+	if len(envelope.Steps) == 0 {
+		return nil, fmt.Errorf("formula has no steps")
+	}
+	return envelope.Steps, nil
 }
 
 // childInfo holds fields from child wisp JSON used by discoverSteps and
