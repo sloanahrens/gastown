@@ -739,3 +739,87 @@ esac
 		}
 	}
 }
+
+// TestWaitForEventsFile_WakesAfterRenameRotation reproduces the 19:42 incident
+// (claude-9jq): the KRC pruner renamed a rewritten events file over the path
+// mid-wait and the waiter, still reading the old inode, slept to its timeout.
+// A line written to the new file must wake it, and the history the pruner
+// retained must not.
+func TestWaitForEventsFile_WakesAfterRenameRotation(t *testing.T) {
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	old := `{"ts":"old","type":"patrol_started","actor":"expired"}` + "\n" +
+		`{"ts":"kept","type":"mail","actor":"kept"}` + "\n"
+	if err := os.WriteFile(eventsPath, []byte(old), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fresh := `{"ts":"new","type":"sling","actor":"after-rotation"}`
+	go func() {
+		time.Sleep(pollerEntryGrace)
+		tmp := eventsPath + ".tmp"
+		if err := os.WriteFile(tmp, []byte(`{"ts":"kept","type":"mail","actor":"kept"}`+"\n"), 0644); err != nil {
+			return
+		}
+		if err := os.Rename(tmp, eventsPath); err != nil {
+			return
+		}
+		// Let at least one poll see the rotation with nothing new, so a
+		// replay of retained history would surface as a wrong signal.
+		time.Sleep(pollerEntryGrace)
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(fresh + "\n")
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "signal" {
+		t.Fatalf("expected signal after rotation, got %q", result.Reason)
+	}
+	if result.Signal != fresh {
+		t.Fatalf("woke on %q, want the post-rotation line %q", result.Signal, fresh)
+	}
+}
+
+// TestWaitForEventsFile_WakesAfterTruncateInPlace covers the other rotation
+// shape: the file is truncated in place, so the old offset is past its end.
+func TestWaitForEventsFile_WakesAfterTruncateInPlace(t *testing.T) {
+	eventsPath := filepath.Join(t.TempDir(), ".events.jsonl")
+	old := strings.Repeat(`{"ts":"old","type":"patrol_started","actor":"old"}`+"\n", 5)
+	if err := os.WriteFile(eventsPath, []byte(old), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fresh := `{"ts":"new","type":"nudge","actor":"after-truncate"}`
+	go func() {
+		time.Sleep(pollerEntryGrace)
+		if err := os.Truncate(eventsPath, 0); err != nil {
+			return
+		}
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(fresh + "\n")
+	}()
+
+	result, err := waitForEventsFile(ctx, eventsPath, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Reason != "signal" || result.Signal != fresh {
+		t.Fatalf("got reason=%q signal=%q, want signal %q", result.Reason, result.Signal, fresh)
+	}
+}

@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -433,29 +431,21 @@ func waitForActivitySignal(ctx context.Context, townRoot, rig string) (*AwaitSig
 // Lines belonging to other rigs are consumed and discarded so the wait
 // continues; only a relevant line ends it. This replaces the former
 // bd activity --follow subprocess approach.
+//
+// The tail follows the path, not the descriptor: the daemon's KRC pruner
+// replaces the file (tmp + rename) on start and hourly, and a waiter still
+// reading the old inode used to sleep through every event to its timeout
+// (claude-9jq). events.Tail reopens the new file and resumes after the last
+// line already seen, so retained history is not replayed.
 func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSignalResult, error) {
-
-	f, err := os.OpenFile(eventsPath, os.O_RDONLY|os.O_CREATE, 0644)
+	tail, err := events.OpenTail(eventsPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening events file %s: %w", eventsPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = tail.Close() }()
 
-	// Seek to end — we only want new events, not historical ones
-	if _, err := f.Seek(0, 2); err != nil {
-		return nil, fmt.Errorf("seeking to end of events file: %w", err)
-	}
-
-	// Poll for new lines using bufio.Reader (not Scanner, which doesn't
-	// resume after EOF). Reader.ReadString properly retries the underlying
-	// file reader, picking up appended data between polls.
-	reader := bufio.NewReader(f)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
-
-	// A line can be observed mid-write. Hold the prefix until its newline
-	// arrives, so the match below never runs on a truncated event.
-	var partial string
 
 	for {
 		select {
@@ -464,30 +454,21 @@ func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSigna
 				Reason: "timeout",
 			}, nil
 		case <-ticker.C:
-			// Drain every complete line appended so far. Reading one line per
-			// tick would let a busy town outrun the reader, delaying a signal
-			// for this rig indefinitely — cross-rig lines are now skipped
-			// rather than returned, so the backlog that used to end the wait
-			// no longer drains itself.
-			for {
-				chunk, err := reader.ReadString('\n')
-				if err != nil && err != io.EOF {
-					return nil, fmt.Errorf("reading events file: %w", err)
+			// Poll drains every complete line appended so far (partial lines
+			// are held until their newline arrives). Reading one line per tick
+			// would let a busy town outrun the reader, delaying a signal for
+			// this rig indefinitely, since cross-rig lines are skipped.
+			lines, err := tail.Poll()
+			for _, line := range lines {
+				if eventRelevantToRig(line, rig) {
+					return &AwaitSignalResult{
+						Reason: "signal",
+						Signal: line,
+					}, nil
 				}
-				partial += chunk
-				if strings.HasSuffix(partial, "\n") {
-					line := strings.TrimSuffix(partial, "\n")
-					partial = ""
-					if line != "" && eventRelevantToRig(line, rig) {
-						return &AwaitSignalResult{
-							Reason: "signal",
-							Signal: line,
-						}, nil
-					}
-				}
-				if err != nil {
-					break // io.EOF: nothing more buffered this tick.
-				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("reading events file: %w", err)
 			}
 		}
 	}
