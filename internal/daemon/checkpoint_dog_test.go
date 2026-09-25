@@ -550,3 +550,33 @@ func TestCheckpointWorktreeCheckpointsTrackedFileMatchingTheRule(t *testing.T) {
 		t.Fatalf("checkpoint commit changed %q, want zz_fixture_test.go", got)
 	}
 }
+
+// TestTriggerCheckpointDog_SkipsWhenNotDue is the regression test for
+// gt-ima2/gt-gxpwc applied to checkpoint_dog: with a recent last-run record
+// on disk, the trigger must decline to start a cycle rather than firing on
+// every tick (or every restart) regardless of the persisted schedule.
+func TestTriggerCheckpointDog_SkipsWhenNotDue(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := savePatrolLastRun(townRoot, "checkpoint_dog", time.Now()); err != nil {
+		t.Fatalf("seed last run: %v", err)
+	}
+
+	var buf strings.Builder
+	d := &Daemon{
+		logger: log.New(&buf, "", 0),
+		config: &Config{TownRoot: townRoot},
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				CheckpointDog: &CheckpointDogConfig{Enabled: true},
+			},
+		},
+	}
+
+	d.triggerCheckpointDog()
+	if d.checkpointDogRunning.Load() {
+		t.Error("a declined trigger must not set the running guard")
+	}
+	if !strings.Contains(buf.String(), "not due") {
+		t.Errorf("expected a not-due log line, got: %q", buf.String())
+	}
+}

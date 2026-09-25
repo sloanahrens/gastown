@@ -325,6 +325,23 @@ type Daemon struct {
 	// tmux liveness check, and any Fail also shells out to `gt escalate` and
 	// `gt nudge` — running inline would hold the tick loop (gt-4z3b7).
 	patrolWatchdogRunning atomic.Bool
+
+	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
+	// the single-flight guards for their patrols, on their own goroutines —
+	// the same gt-ima2 shape as compactor_dog and mainBranchTestRunning
+	// above, applied by gt-gxpwc so a restart cannot starve these patrols by
+	// resetting an in-process ticker's countdown. Due-ness for all three is
+	// decided against the persisted last-run time (patrol_last_run.go), not
+	// against the ticker.
+	jsonlGitBackupRunning atomic.Bool
+	wispReaperRunning     atomic.Bool
+	checkpointDogRunning  atomic.Bool
+
+	// doltBackupRunning is the single-flight guard for the dolt_backup patrol,
+	// on its own goroutine — same gt-ima2/gt-gxpwc shape as the three above,
+	// converted in the gt-gxpwc rework after crew review found this patrol was
+	// still starved (no persisted last-run or startup catch-up at all).
+	doltBackupRunning atomic.Bool
 }
 
 // sessionDeath records a detected session death for mass death analysis.
@@ -823,38 +840,58 @@ func (d *Daemon) Run() (err error) {
 
 	// Start dedicated Dolt backup ticker if configured.
 	// Runs filesystem backup sync (dolt backup sync) for production databases.
+	// The ticker is a check cadence — due-ness comes from a persisted
+	// last-run time, because a run interval enforced by an in-process ticker
+	// resets on every restart (gt-ima2, gt-gxpwc).
 	var doltBackupTicker *time.Ticker
 	var doltBackupChan <-chan time.Time
 	if d.isPatrolActive("dolt_backup") {
 		interval := doltBackupInterval(d.patrolConfig)
-		doltBackupTicker = time.NewTicker(interval)
+		doltBackupTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		doltBackupChan = doltBackupTicker.C
 		defer doltBackupTicker.Stop()
-		d.logger.Printf("Dolt backup ticker started (interval %v)", interval)
+		d.logger.Printf("Dolt backup ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		// Catch up at startup (gt-ima2, gt-gxpwc).
+		d.triggerDoltBackup()
 	}
 
 	// Start JSONL git backup ticker if configured.
 	// Exports issues to JSONL, scrubs ephemeral data, pushes to git repo.
+	// The ticker is a check cadence — due-ness comes from a persisted
+	// last-run time, because a run interval enforced by an in-process ticker
+	// resets on every restart (gt-ima2, gt-gxpwc).
 	var jsonlGitBackupTicker *time.Ticker
 	var jsonlGitBackupChan <-chan time.Time
 	if d.isPatrolActive("jsonl_git_backup") {
 		interval := jsonlGitBackupInterval(d.patrolConfig)
-		jsonlGitBackupTicker = time.NewTicker(interval)
+		jsonlGitBackupTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		jsonlGitBackupChan = jsonlGitBackupTicker.C
 		defer jsonlGitBackupTicker.Stop()
-		d.logger.Printf("JSONL git backup ticker started (interval %v)", interval)
+		d.logger.Printf("JSONL git backup ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		// Catch up at startup rather than waiting for the first tick: due-ness
+		// is a wall-clock question and a restart must not postpone the answer
+		// (gt-ima2, gt-gxpwc).
+		d.triggerJsonlGitBackup()
 	}
 
 	// Start wisp reaper ticker if configured.
 	// Closes stale wisps (abandoned molecule steps, old patrol data) across all databases.
+	// The ticker is a check cadence — due-ness comes from a persisted
+	// last-run time, because a run interval enforced by an in-process ticker
+	// resets on every restart (gt-ima2, gt-gxpwc).
 	var wispReaperTicker *time.Ticker
 	var wispReaperChan <-chan time.Time
 	if d.isPatrolActive("wisp_reaper") {
 		interval := wispReaperInterval(d.patrolConfig)
-		wispReaperTicker = time.NewTicker(interval)
+		wispReaperTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		wispReaperChan = wispReaperTicker.C
 		defer wispReaperTicker.Stop()
-		d.logger.Printf("Wisp reaper ticker started (interval %v)", interval)
+		d.logger.Printf("Wisp reaper ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		// Catch up at startup (gt-ima2, gt-gxpwc).
+		d.triggerWispReaper()
 	}
 
 	// Start doctor dog ticker if configured.
@@ -891,14 +928,20 @@ func (d *Daemon) Run() (err error) {
 
 	// Start checkpoint dog ticker if configured.
 	// Auto-commits WIP changes in active polecat worktrees to prevent data loss.
+	// The ticker is a check cadence — due-ness comes from a persisted
+	// last-run time, because a run interval enforced by an in-process ticker
+	// resets on every restart (gt-ima2, gt-gxpwc).
 	var checkpointDogTicker *time.Ticker
 	var checkpointDogChan <-chan time.Time
 	if d.isPatrolActive("checkpoint_dog") {
 		interval := checkpointDogInterval(d.patrolConfig)
-		checkpointDogTicker = time.NewTicker(interval)
+		checkpointDogTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		checkpointDogChan = checkpointDogTicker.C
 		defer checkpointDogTicker.Stop()
-		d.logger.Printf("Checkpoint dog ticker started (interval %v)", interval)
+		d.logger.Printf("Checkpoint dog ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		// Catch up at startup (gt-ima2, gt-gxpwc).
+		d.triggerCheckpointDog()
 	}
 
 	// Start scheduled maintenance ticker if configured.
@@ -917,14 +960,24 @@ func (d *Daemon) Run() (err error) {
 
 	// Start main-branch test runner ticker if configured.
 	// Periodically runs quality gates on each rig's main branch to catch regressions.
+	// The ticker is a check cadence — due-ness comes from a persisted
+	// last-run time, because a run interval enforced by an in-process ticker
+	// resets on every restart (gt-ima2, gt-gxpwc).
 	var mainBranchTestTicker *time.Ticker
 	var mainBranchTestChan <-chan time.Time
 	if d.isPatrolActive("main_branch_test") {
 		interval := mainBranchTestInterval(d.patrolConfig)
-		mainBranchTestTicker = time.NewTicker(interval)
+		mainBranchTestTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		mainBranchTestChan = mainBranchTestTicker.C
 		defer mainBranchTestTicker.Stop()
-		d.logger.Printf("Main branch test ticker started (interval %v)", interval)
+		d.logger.Printf("Main branch test ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		// Catch up at startup (gt-ima2, gt-gxpwc). triggerMainBranchTests logs
+		// its own due-ness decision; the startup log line below just names
+		// whether this specific check kicked off a cycle.
+		if d.triggerMainBranchTests() {
+			d.logger.Printf("Main branch test startup catch-up started a cycle")
+		}
 	}
 
 	// Start the scheduled_slings ticker if configured. Each tick evaluates
@@ -969,27 +1022,43 @@ func (d *Daemon) Run() (err error) {
 	// event-driven and a "no dispatch" decision opens no slot, so once it
 	// declines with no polecats running nothing wakes it again; this ticker is
 	// the timer that decision does not self-provide (gt-59o9).
+	// The ticker is a check cadence — due-ness comes from a persisted
+	// last-run time, because a run interval enforced by an in-process ticker
+	// resets on every restart (gt-ima2, gt-gxpwc).
 	var mayorDispatchTicker *time.Ticker
 	var mayorDispatchChan <-chan time.Time
 	if d.isPatrolActive("mayor_dispatch") {
 		interval := mayorDispatchInterval(d.patrolConfig)
-		mayorDispatchTicker = time.NewTicker(interval)
+		mayorDispatchTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		mayorDispatchChan = mayorDispatchTicker.C
 		defer mayorDispatchTicker.Stop()
-		d.logger.Printf("Mayor dispatch ticker started (interval %v)", interval)
+		d.logger.Printf("Mayor dispatch ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		// Catch up at startup (gt-ima2, gt-gxpwc). triggerMayorDispatch logs
+		// its own due-ness decision; the startup log line below just names
+		// whether this specific check kicked off a cycle.
+		if d.triggerMayorDispatch() {
+			d.logger.Printf("Mayor dispatch startup catch-up started a cycle")
+		}
 	}
 
 	// Start the patrol watchdog ticker if configured. Flags a patrol role
 	// (witness, deacon, refinery) whose session is alive but whose last
 	// COMPLETED patrol cycle is older than N x its cadence (gt-4z3b7).
+	// The ticker is a check cadence — due-ness comes from a persisted
+	// last-run time, because a run interval enforced by an in-process ticker
+	// resets on every restart (gt-ima2, gt-gxpwc).
 	var patrolWatchdogTicker *time.Ticker
 	var patrolWatchdogChan <-chan time.Time
 	if d.isPatrolActive("patrol_watchdog") {
 		interval := patrolWatchdogInterval(d.patrolConfig)
-		patrolWatchdogTicker = time.NewTicker(interval)
+		patrolWatchdogTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		patrolWatchdogChan = patrolWatchdogTicker.C
 		defer patrolWatchdogTicker.Stop()
-		d.logger.Printf("Patrol watchdog ticker started (interval %v)", interval)
+		d.logger.Printf("Patrol watchdog ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		// Catch up at startup (gt-ima2, gt-gxpwc).
+		d.triggerPatrolWatchdog()
 	}
 
 	// Note: PATCH-010 uses per-session hooks in deacon/manager.go (SetAutoRespawnHook).
@@ -1043,23 +1112,27 @@ func (d *Daemon) Run() (err error) {
 
 		case <-doltBackupChan:
 			// Periodic Dolt filesystem backup — syncs production databases to
-			// local backup directory on a 15-minute cadence.
+			// local backup directory. Fires only when the persisted last run
+			// is a full interval old (gt-ima2, gt-gxpwc).
 			if !d.isShutdownInProgress() {
-				d.syncDoltBackups()
+				d.triggerDoltBackup()
 			}
 
 		case <-jsonlGitBackupChan:
-			// Periodic JSONL git backup — exports issues, scrubs ephemeral data,
-			// commits and pushes to git repo.
+			// Periodic JSONL git backup check — exports issues, scrubs ephemeral
+			// data, commits and pushes to git repo. Fires only when the
+			// persisted last run is a full interval old (gt-ima2, gt-gxpwc).
 			if !d.isShutdownInProgress() {
-				d.syncJsonlGitBackup()
+				d.triggerJsonlGitBackup()
 			}
 
 		case <-wispReaperChan:
-			// Periodic wisp reaper — closes stale wisps (abandoned molecule steps,
-			// old patrol data) to prevent unbounded table growth (Clown Show audit).
+			// Periodic wisp reaper check — closes stale wisps (abandoned
+			// molecule steps, old patrol data) to prevent unbounded table
+			// growth (Clown Show audit). Fires only when the persisted last
+			// run is a full interval old (gt-ima2, gt-gxpwc).
 			if !d.isShutdownInProgress() {
-				d.reapWisps()
+				d.triggerWispReaper()
 			}
 
 		case <-doctorDogChan:
@@ -1085,10 +1158,12 @@ func (d *Daemon) Run() (err error) {
 			}
 
 		case <-checkpointDogChan:
-			// Checkpoint dog — auto-commits WIP changes in active polecat
-			// worktrees to prevent data loss from session crashes.
+			// Checkpoint dog check — auto-commits WIP changes in active
+			// polecat worktrees to prevent data loss from session crashes.
+			// Fires only when the persisted last run is a full interval old
+			// (gt-ima2, gt-gxpwc).
 			if !d.isShutdownInProgress() {
-				d.runCheckpointDog()
+				d.triggerCheckpointDog()
 			}
 
 		case <-scheduledMaintenanceChan:

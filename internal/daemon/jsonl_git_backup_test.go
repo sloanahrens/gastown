@@ -1635,3 +1635,33 @@ func TestCommitAndPushJsonlBackup_RecoversFromStaleIndexLock(t *testing.T) {
 		t.Errorf("expected the backup commit to reach the remote, got: %q", out)
 	}
 }
+
+// TestTriggerJsonlGitBackup_SkipsWhenNotDue is the regression test for
+// gt-ima2/gt-gxpwc applied to jsonl_git_backup: with a recent last-run record
+// on disk, the trigger must decline to start a cycle rather than firing on
+// every tick (or every restart) regardless of the persisted schedule.
+func TestTriggerJsonlGitBackup_SkipsWhenNotDue(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := savePatrolLastRun(townRoot, "jsonl_git_backup", time.Now()); err != nil {
+		t.Fatalf("seed last run: %v", err)
+	}
+
+	var buf strings.Builder
+	d := &Daemon{
+		logger: log.New(&buf, "", 0),
+		config: &Config{TownRoot: townRoot},
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{
+				JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true},
+			},
+		},
+	}
+
+	d.triggerJsonlGitBackup()
+	if d.jsonlGitBackupRunning.Load() {
+		t.Error("a declined trigger must not set the running guard")
+	}
+	if !contains(buf.String(), "not due") {
+		t.Errorf("expected a not-due log line, got: %q", buf.String())
+	}
+}

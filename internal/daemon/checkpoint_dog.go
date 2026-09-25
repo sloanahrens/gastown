@@ -41,6 +41,45 @@ func checkpointDogInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultCheckpointDogInterval
 }
 
+// triggerCheckpointDog runs a checkpoint_dog cycle when the patrol is due, on
+// its own goroutine.
+//
+// The ticker that drives this call is a check cadence, not a run cadence: an
+// in-process ticker resets its countdown on every daemon restart, so due-ness
+// is instead decided from the persisted last-run time in
+// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
+//
+// Dispatched onto its own goroutine, like the gt-ima2 fix for compactor_dog:
+// a cycle shells out to git in every active polecat worktree across every
+// rig, and running it inline would stall every other tick behind it.
+func (d *Daemon) triggerCheckpointDog() {
+	if !d.isPatrolActive("checkpoint_dog") {
+		return
+	}
+
+	dec := evaluatePatrolDue(d.config.TownRoot, "checkpoint_dog", time.Time{}, time.Now(), checkpointDogInterval(d.patrolConfig))
+	if !dec.due {
+		d.logger.Printf("checkpoint_dog: not due — %s", dec.note)
+		return
+	}
+
+	if !d.checkpointDogRunning.CompareAndSwap(false, true) {
+		d.logger.Printf("checkpoint_dog: previous cycle still running — skipping this check")
+		return
+	}
+
+	if dec.warn != "" {
+		d.logger.Printf("checkpoint_dog: WARNING: %s — %s", dec.warn, dec.note)
+	} else {
+		d.logger.Printf("checkpoint_dog: due — %s", dec.note)
+	}
+
+	go func() {
+		defer d.checkpointDogRunning.Store(false)
+		d.runCheckpointDog()
+	}()
+}
+
 // runCheckpointDog auto-commits WIP changes in active polecat worktrees.
 // This protects against data loss when sessions crash or hit context limits.
 //
@@ -52,6 +91,15 @@ func (d *Daemon) runCheckpointDog() {
 	if !d.isPatrolActive("checkpoint_dog") {
 		return
 	}
+
+	// Record that a cycle was attempted, regardless of outcome below — the
+	// same "attempted" semantics as the ticker firing before gt-ima2/gt-gxpwc.
+	defer func() {
+		if err := savePatrolLastRun(d.config.TownRoot, "checkpoint_dog", time.Now()); err != nil {
+			d.logger.Printf("checkpoint_dog: WARNING: cannot persist last-run time (%v) — "+
+				"the next check may re-run sooner than expected", err)
+		}
+	}()
 
 	d.logger.Printf("checkpoint_dog: starting cycle")
 

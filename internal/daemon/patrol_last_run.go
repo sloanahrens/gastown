@@ -62,6 +62,80 @@ func loadPatrolLastRun(townRoot, patrol string) (time.Time, bool, error) {
 	return lastRun, true, nil
 }
 
+// patrolDueDecision is one due-ness evaluation for a ticker-driven patrol
+// whose run interval is enforced against a persisted last-run time rather
+// than an in-process countdown that a restart resets (gt-ima2).
+type patrolDueDecision struct {
+	// due is whether the patrol should run now.
+	due bool
+	// note explains the decision for the log. Never empty.
+	note string
+	// warn is set when the decision came from a broken last-run record rather
+	// than from a comparison. A broken record runs the patrol *and* says so:
+	// silent skipping is the failure being fixed, and a run without a word
+	// would hide a corrupt state file behind a patrol that looks merely on
+	// schedule.
+	warn string
+}
+
+// evaluatePatrolDue decides whether a patrol should run now, given its
+// persisted last-run time on disk. inMemory is the latest completion this
+// process itself recorded (which can be newer than the disk record when a
+// previous write failed); pass the zero time.Time when the caller keeps no
+// in-memory record of its own.
+func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interval time.Duration) patrolDueDecision {
+	lastRun, found, err := loadPatrolLastRun(townRoot, patrol)
+	switch {
+	case err != nil:
+		return patrolDueDecision{
+			due:  true,
+			note: "running the check because the last-run state cannot be read",
+			warn: fmt.Sprintf("last-run state unreadable (%v)", err),
+		}
+	case !found:
+		return patrolDueDecision{due: true, note: "no last-run record"}
+	}
+
+	// A cycle this process ran can be newer than the file when the write
+	// failed; take the later of the two so a known completion is not
+	// repeated on the next check.
+	if inMemory.After(lastRun) {
+		lastRun = inMemory
+	}
+
+	elapsed := now.Sub(lastRun).Round(time.Minute)
+	if elapsed >= interval {
+		return patrolDueDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+	}
+	return patrolDueDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+}
+
+// shortPatrolCheckTick returns a check cadence for a due-ness-gated patrol
+// (evaluatePatrolDue) that is shorter than its run interval.
+//
+// A ticker set to the run interval itself starves the patrol to half its
+// intended rate once a cycle takes non-negligible wall-clock time: last-run is
+// recorded at cycle END, so the elapsed time the NEXT tick sees is
+// interval-minus-cycle-duration. Once that drops below interval, the tick
+// reads as "not due" and is skipped — and the tick after that repeats the
+// pattern, so a patrol runs on every other tick instead of every tick (crew
+// review of gt-gxpwc: a 15m interval with a 2m cycle produced 4 runs in 8
+// ticks instead of 8). A quarter of the interval keeps that rounding error
+// from ever accumulating to a full skip; the 5m cap keeps a long-interval
+// patrol (main_branch_test, 60m+) checking often enough to catch up quickly
+// after a restart, matching compactor_dog's existing fixed 15m tick against
+// its 24h interval.
+func shortPatrolCheckTick(interval time.Duration) time.Duration {
+	tick := interval / 4
+	if tick > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	if tick < time.Minute {
+		return time.Minute
+	}
+	return tick
+}
+
 // savePatrolLastRun records a patrol's completion time, preserving the entries
 // of other patrols.
 func savePatrolLastRun(townRoot, patrol string, at time.Time) error {
