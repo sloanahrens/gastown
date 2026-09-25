@@ -3,7 +3,6 @@ package doltserver
 import (
 	"bufio"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -24,23 +23,9 @@ import (
 // removed a regression can only kill the test's own child, never the test
 // binary or a host process.
 
-const portHolderHelperEnv = "DOLTSERVER_TEST_PORT_HOLDER" // not GT_*: the hermetic harness scrubs those in the child
-
-// TestPortHolderHelperProcess is the helper body: listen on a loopback port,
-// print it, and wait to be killed (or exit on its own after a minute).
-func TestPortHolderHelperProcess(t *testing.T) {
-	if os.Getenv(portHolderHelperEnv) != "1" {
-		return
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		fmt.Printf("ERR=%v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("PORT=%d\n", ln.Addr().(*net.TCPAddr).Port)
-	time.Sleep(time.Minute)
-	os.Exit(0)
-}
+// portHolderHelperEnv is shared with hermetic_main_test.go, whose TestMain
+// runs the helper body before the harness starts.
+const portHolderHelperEnv = "DOLTSERVER_TEST_PORT_HOLDER" // not GT_*: the hermetic harness scrubs those
 
 type child struct {
 	cmd  *exec.Cmd
@@ -94,7 +79,7 @@ func startPortHolder(t *testing.T, dir string) (*child, int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(self, "-test.run=^TestPortHolderHelperProcess$")
+	cmd := exec.Command(self)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	cmd.Env = append(os.Environ(), portHolderHelperEnv+"=1")
@@ -303,27 +288,39 @@ func TestStopRefusesReachableServerWithoutLocalPID(t *testing.T) {
 }
 
 // F1: the orphaned-server fallback after a failed Stop force-kills only a
-// verified dolt. A non-dolt PID is left alone and its pid file removed.
+// verified dolt. The PID here is a live non-dolt port holder that IsRunning
+// claims for the town (cwd = town root, answers on the port), so Stop refuses
+// without touching the pid file and IsRunning keeps it: the pid file removal
+// asserted below can only come from stopOrphanedServer itself.
 func TestStopOrphanedServerNeverKillsNonDolt(t *testing.T) {
 	skipOnWindows(t)
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(closedPort(t))) // Stop fails: not running
 	townRoot := resolvedTempDir(t)
-	victim := startSleep(t)
+	holder, port := startPortHolder(t, townRoot)
+	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
 	cfg := DefaultConfig(townRoot)
 	if err := os.MkdirAll(filepath.Dir(cfg.PidFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(victim.pid())), 0o644); err != nil {
+	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(holder.pid())), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if running, pid, _ := IsRunning(townRoot); !running || pid != holder.pid() {
+		t.Fatalf("IsRunning = %v/%d; setup did not reach the pid-file branch", running, pid)
+	}
+	if err := Stop(townRoot); !errors.Is(err, ErrNotDoltSQLServer) {
+		t.Fatalf("Stop = %v, want a refusal", err)
+	}
+	if _, err := os.Stat(cfg.PidFile); err != nil {
+		t.Fatalf("precondition: Stop's refusal must leave the pid file: %v", err)
+	}
 
-	stopOrphanedServer(townRoot, victim.pid())
+	stopOrphanedServer(townRoot, holder.pid())
 
-	if victim.exited(500 * time.Millisecond) {
-		t.Fatalf("orphan fallback killed a non-dolt PID: %v", victim.err)
+	if holder.exited(500 * time.Millisecond) {
+		t.Fatalf("orphan fallback killed a non-dolt PID: %v", holder.err)
 	}
 	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
-		t.Errorf("stale pid file naming a non-dolt process was kept: %v", err)
+		t.Errorf("stopOrphanedServer kept a pid file naming a non-dolt process: %v", err)
 	}
 }
 

@@ -1489,7 +1489,9 @@ func ReapOwnedTestServers(townRoot string) (int, error) {
 			}
 		}
 		if processIsAlive(pid) {
-			_ = proc.Kill()
+			// Re-verified: the PID may have exited and been reused during
+			// the wait (gt-p7zy0).
+			_ = killVerifiedDolt(pid)
 			time.Sleep(100 * time.Millisecond)
 			stopped++
 		}
