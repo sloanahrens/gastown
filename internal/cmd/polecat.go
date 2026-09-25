@@ -1418,7 +1418,6 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		Issue:   p.Issue,
 	}
 	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
-	workTerminal := beadTerminal
 	// targetRefs is resolved once below, inside whichever branch actually
 	// applies (no-agent-bead vs. agent-bead-found) — the agent-bead-found
 	// branch has an extra sourceHint input, so resolving it here unconditionally
@@ -1477,6 +1476,9 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 			facts.HookBead = hookBead
 			facts.HookBeadSafe = false
 		}
+		// Read straight off p.Issue, so it stands even when the agent bead
+		// could not be read (gt-pldt).
+		facts.AssignedBeadTerminal = beadTerminal
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
 	} else {
@@ -1493,7 +1495,6 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		facts.ActiveMR = fields.ActiveMR
 		hookBead := recoveryHookBead(bd, assignee, agentIssue, fields, p)
 		hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
-		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
 		targetRefs, targetRefLookupFailed, mrForBranch, mrForBranchErr = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
 		if status.Issue == "" && sourceHint != "" {
@@ -1501,10 +1502,10 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 		}
 		if !beadTerminal && sourceHint != "" {
 			beadTerminal = isAssignedBeadTerminal(bd, sourceHint)
-			workTerminal = beadTerminal || hookTerminal
 		}
 		facts.HookBead = hookBead
 		facts.HookBeadSafe = hookSafe
+		facts.HookBeadTerminal = hookTerminal
 		facts.PushFailed = fields.PushFailed
 		facts.MRFailed = fields.MRFailed
 		partialSpawn, diagnostic := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
@@ -1530,15 +1531,18 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 				status.Issue = activeMRAssessment.SourceIssue
 			}
 			if activeMRAssessment.SourceTerminal {
-				beadTerminal = true
-				workTerminal = true
+				facts.ActiveMRSourceTerminal = true
 			}
 			if activeMRAssessment.Pending {
 				facts.ActiveMRBlocker = activeMRAssessment.Reason
 			}
 		}
 		facts.PartialSpawnWithoutDurableHook = partialSpawn
-		facts.AssignedBeadTerminal = workTerminal
+		// Settled here, before the ignore-gate diagnostic below reads
+		// facts.WorkTerminal(), so that diagnostic and the classifier agree;
+		// the MQ verdict reads this one fact as submission evidence, so a
+		// terminal hook bead or active-MR source is not folded in (gt-pldt).
+		facts.AssignedBeadTerminal = beadTerminal
 		// gt-hsg: cleanup-status ignoring for BOTH the "partial spawn never
 		// durably hooked" case and the "stale dirty status, live facts prove
 		// safe" case used to be decided here, ad hoc, with the partial-spawn
@@ -1562,7 +1566,7 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 			switch {
 			case !polecat.RecordedCleanupBlocks(facts.CleanupStatus, facts.GitStateSource):
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s cleanup_status_source=%s git_state_source=%s live_git_supersedes=recorded", facts.CleanupStatus, polecat.CleanupStatusSourceRecorded, facts.GitStateSource))
-			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead, liveGitProbeRan, workTerminal, hookSafe, !activeMRAssessment.Pending, directGitSafe):
+			case polecat.ResolveIgnoreCleanupStatus(facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead, liveGitProbeRan, facts.WorkTerminal(), hookSafe, !activeMRAssessment.Pending, directGitSafe):
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_cleanup_status=%s partial_spawn=%v worktree_missing=%v agent_bead_read=%v direct_git_state=safe work_ref=terminal", facts.CleanupStatus, partialSpawn, worktreeStructurallyMissing, facts.AgentBeadRead))
 			}
 		}
@@ -1570,7 +1574,7 @@ func checkRecoveryForPolecat(bd *beads.Beads, r *rig.Rig, rigName, polecatName s
 	input := polecat.NewWorkstateInput(facts)
 
 	status.CleanupStatus = input.CleanupStatus
-	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr, mrForBranch, mrForBranchErr)
+	applyMQFactsToWorkstateInput(&input, &status, bd, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr, mrForBranch, mrForBranchErr)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1730,12 +1734,17 @@ func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath s
 // then reaches isMQNotRequiredSource's nil guard as a live pointer, so the
 // guard passes and Show is called on a nil receiver. Narrowing the parameter to
 // the interface keeps that guard meaningful and lets tests inject a fake.
-func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd issueShower, beadTerminal bool, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error, mrForBranch *beads.Issue, mrForBranchErr error) {
+//
+// The assigned-bead terminality is read off the input rather than passed in as
+// its own argument: it is a fact about the bead, and a caller-free parameter
+// slot is somewhere a wider notion of "terminal work ref" can be handed in
+// unnoticed — that is exactly how the MQ verdict widened to "submitted" for a
+// terminal hook bead (gt-pldt).
+func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd issueShower, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error, mrForBranch *beads.Issue, mrForBranchErr error) {
 	if status.Branch == "" {
 		return
 	}
 	input.MQCheckRequired = true
-	input.AssignedBeadTerminal = beadTerminal
 	input.HasSubmittableWork = hasSubmittableWorkForRecovery(worktreePath, targetRefs, gitState, gitErr)
 	input.MQNotRequired = isMQNotRequiredSource(bd, status.Issue)
 	if targetRefLookupFailed {

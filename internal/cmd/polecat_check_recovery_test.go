@@ -229,18 +229,18 @@ func TestDecideWorkstate_ClosedSourceWithSubmittableWork(t *testing.T) {
 	// false. Note the fake is a non-nil interface holding a zero struct; a
 	// typed-nil *beads.Beads would instead reach Show on a nil receiver.
 	bdNone := fakeIssueShower{}
+	input.AssignedBeadTerminal = true // source issue CLOSED
 	applyMQFactsToWorkstateInput(
 		&input,
 		&status,
-		bdNone,         // no attachment → MQNotRequired=false
-		true,           // beadTerminal
-		"/tmp/gt-nkyy-fake-wt", // worktreePath (doesn't exist; fallback path)
-		nil,            // targetRefs
-		false,          // targetRefLookupFailed
+		bdNone,                        // no attachment → MQNotRequired=false
+		"/tmp/gt-nkyy-fake-wt",        // worktreePath (doesn't exist; fallback path)
+		nil,                           // targetRefs
+		false,                         // targetRefLookupFailed
 		&GitState{UnpushedCommits: 3}, // triggers HasSubmittableWork via fallback
-		nil,            // gitErr
-		nil,            // mrForBranch
-		nil,            // mrForBranchErr
+		nil,                           // gitErr
+		nil,                           // mrForBranch
+		nil,                           // mrForBranchErr
 	)
 
 	// Core fix: AssignedBeadTerminal is true, so MRSubmitted stays false but
@@ -276,6 +276,108 @@ func TestDecideWorkstate_ClosedSourceWithSubmittableWork(t *testing.T) {
 	}
 	if d.CountsTowardCapacity {
 		t.Fatal("CountsTowardCapacity must be false")
+	}
+}
+
+// TestRecoveryMQVerdictReadsAssignedBeadTerminalAlone is the gt-pldt
+// regression. checkRecoveryForPolecat used to hand applyMQFactsToWorkstateInput
+// the OR of all three terminal work refs, so a terminal hook bead (or a
+// terminal active-MR source) stood in for a found MR: a polecat with pushed,
+// never-enqueued work came back mq_status="submitted" and SAFE_TO_NUKE on the
+// CLI path while the Manager and witness paths, which keep the three facts
+// distinct, called the same polecat NEEDS_MQ_SUBMIT. Only the assigned bead is
+// submission evidence; the OR is what the cleanup-status ignore gate needs.
+func TestRecoveryMQVerdictReadsAssignedBeadTerminalAlone(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/amber/gt-pldt+muhd905u"
+
+	tests := []struct {
+		name                   string
+		assignedBeadTerminal   bool
+		hookBeadTerminal       bool
+		activeMRSourceTerminal bool
+		wantVerdict            string
+		wantMQStatus           string
+	}{
+		{
+			name:             "terminal hook bead alone is not submission evidence",
+			hookBeadTerminal: true,
+			wantVerdict:      polecat.WorkstateVerdictNeedsMQSubmit,
+			wantMQStatus:     "not_submitted",
+		},
+		{
+			name:                   "terminal active-MR source alone is not submission evidence",
+			activeMRSourceTerminal: true,
+			wantVerdict:            polecat.WorkstateVerdictNeedsMQSubmit,
+			wantMQStatus:           "not_submitted",
+		},
+		{
+			// The gt-nkyy control: a CLOSED assigned bead still means there is
+			// nothing left to enqueue, so narrowing this fact must not break it.
+			name:                 "terminal assigned bead is submission evidence",
+			assignedBeadTerminal: true,
+			wantVerdict:          polecat.WorkstateVerdictSafeToNuke,
+			wantMQStatus:         "submitted",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			facts := polecat.WorkstateFacts{
+				State:                  polecat.StateIdle,
+				CleanupStatus:          polecat.CleanupClean,
+				Branch:                 branch,
+				AssignedBeadTerminal:   tt.assignedBeadTerminal,
+				HookBeadTerminal:       tt.hookBeadTerminal,
+				ActiveMRSourceTerminal: tt.activeMRSourceTerminal,
+			}
+			if tt.hookBeadTerminal {
+				// A terminal hook bead is a safe one (hookBeadSafeForCleanup
+				// returns safe and terminal together), so it contributes no
+				// hook-still-set blocker: this case isolates the MQ verdict.
+				facts.HookBead = "gt-hook"
+				facts.HookBeadSafe = true
+			}
+			input := polecat.NewWorkstateInput(facts)
+			status := RecoveryStatus{Branch: branch, Issue: "gt-pldt"}
+			// No MR bead exists for the branch in any case here, and the
+			// worktree path does not exist, so HasSubmittableWork comes from
+			// the unpushed-commit fallback.
+			applyMQFactsToWorkstateInput(
+				&input,
+				&status,
+				fakeIssueShower{}, // no attachment → MQNotRequired=false
+				"/tmp/gt-pldt-fake-wt",
+				nil,   // targetRefs
+				false, // targetRefLookupFailed
+				&GitState{UnpushedCommits: 3},
+				nil, // gitErr
+				nil, // mrForBranch — the work was never submitted
+				nil, // mrForBranchErr
+			)
+
+			if !input.MQCheckRequired || !input.HasSubmittableWork {
+				t.Fatalf("MQCheckRequired/HasSubmittableWork = %v/%v, want true/true — otherwise this case cannot exercise the MQ verdict", input.MQCheckRequired, input.HasSubmittableWork)
+			}
+			// The ignore gate still sees a terminal work ref: the OR is what
+			// ResolveIgnoreCleanupStatus asks for, and narrowing the MQ fact
+			// must not have narrowed this one.
+			if !facts.WorkTerminal() {
+				t.Fatal("WorkTerminal must be true — a terminal hook bead or active-MR source is still a terminal work ref for the cleanup-status ignore gate")
+			}
+
+			d := polecat.DecideWorkstate(input)
+			if d.Verdict != tt.wantVerdict {
+				t.Fatalf("verdict = %q, want %q", d.Verdict, tt.wantVerdict)
+			}
+			if d.MQStatus != tt.wantMQStatus {
+				t.Fatalf("MQStatus = %q, want %q", d.MQStatus, tt.wantMQStatus)
+			}
+			if wantSafe := tt.wantVerdict == polecat.WorkstateVerdictSafeToNuke; d.SafeToNuke != wantSafe {
+				t.Fatalf("SafeToNuke = %v, want %v — pushed work that was never enqueued must not be cleared for cleanup", d.SafeToNuke, wantSafe)
+			}
+		})
 	}
 }
 
@@ -860,29 +962,27 @@ func TestCheckRecoveryElseBranchEndToEndFromRealAgentBeadDescription(t *testing.
 			facts := polecat.WorkstateFacts{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch, HookBeadSafe: true}
 			status := RecoveryStatus{Branch: p.Branch, Issue: p.Issue}
 			beadTerminal := isAssignedBeadTerminal(nil, status.Issue)
-			workTerminal := beadTerminal
 
 			facts.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 			status.ActiveMR = fields.ActiveMR
 			facts.ActiveMR = fields.ActiveMR
 			hookBead := recoveryHookBead(bd, assignee, agentIssue, fields, p)
 			hookSafe, hookTerminal, _ := hookBeadSafeForCleanup(bd, hookBead)
-			workTerminal = beadTerminal || hookTerminal
 			sourceHint := agentSourceIssueHint(status.Issue, fields)
 			if status.Issue == "" && sourceHint != "" {
 				status.Issue = sourceHint
 			}
 			if !beadTerminal && sourceHint != "" {
 				beadTerminal = isAssignedBeadTerminal(nil, sourceHint)
-				workTerminal = beadTerminal || hookTerminal
 			}
 			facts.HookBead = hookBead
 			facts.HookBeadSafe = hookSafe
+			facts.HookBeadTerminal = hookTerminal
 			facts.PushFailed = fields.PushFailed
 			facts.MRFailed = fields.MRFailed
 			partialSpawn, _ := partialSpawnWithoutDurableHook(bd, fields, assignee, status.Issue)
 			facts.PartialSpawnWithoutDurableHook = partialSpawn
-			facts.AssignedBeadTerminal = workTerminal
+			facts.AssignedBeadTerminal = beadTerminal
 			applyGitStateToWorkstateFacts(&facts, p.ClonePath, &GitState{Clean: true}, nil)
 
 			input := polecat.NewWorkstateInput(facts)

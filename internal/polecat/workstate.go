@@ -453,12 +453,24 @@ type WorkstateFacts struct {
 	ActiveMR                       string
 	ActiveMRBlocker                string
 	ActiveMRSourceTerminal         bool
-	AssignedBeadTerminal           bool
-	MQCheckRequired                bool
-	HasSubmittableWork             bool
-	MQNotRequired                  bool
-	MRSubmitted                    bool
-	MQLookupFailed                 bool
+	// AssignedBeadTerminal is the assigned bead's terminality alone. The MQ
+	// verdict reads it as submission evidence of its own (aa-55d8), so it must
+	// not be populated with a wider "some work ref is terminal" value — see
+	// WorkTerminal for that (gt-pldt).
+	AssignedBeadTerminal bool
+	MQCheckRequired      bool
+	HasSubmittableWork   bool
+	MQNotRequired        bool
+	MRSubmitted          bool
+	MQLookupFailed       bool
+}
+
+// WorkTerminal reports whether any work ref the polecat can hold — its assigned
+// bead, its hook bead, or the source issue of its active MR — is terminal: the
+// cleanup-status ignore gate's precondition, deliberately wider than the MQ
+// verdict's AssignedBeadTerminal (gt-pldt).
+func (f WorkstateFacts) WorkTerminal() bool {
+	return f.AssignedBeadTerminal || f.ActiveMRSourceTerminal || f.HookBeadTerminal
 }
 
 // NewWorkstateInput is the single production constructor for WorkstateInput.
@@ -469,7 +481,7 @@ type WorkstateFacts struct {
 func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 	gitSafe := !f.GitCheckFailed && !f.GitDirty && f.StashCount == 0 && f.UnpushedCommits == 0
 	activeMRSafe := f.ActiveMRBlocker == ""
-	workTerminal := f.AssignedBeadTerminal || f.ActiveMRSourceTerminal || f.HookBeadTerminal
+	workTerminal := f.WorkTerminal()
 
 	input := WorkstateInput{
 		State:                          f.State,
