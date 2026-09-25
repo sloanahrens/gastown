@@ -21,6 +21,25 @@ type HookEntry struct {
 	Hooks   []Hook `json:"hooks"`
 }
 
+// shellExecutingToolMatcher is the bare-tool-name PreToolUse matcher for
+// every Claude Code tool whose tool_input carries a "command" field a
+// self-filtering guard can read (extractCommand's tool_input.command path,
+// tap_guard_dangerous.go). Bash is the original synchronous tool; Monitor
+// runs the same command shape as a background/streaming watch and was
+// invisible to every guard below until it was added here — a polecat could
+// run 'rm -rf', a force push, or an unwrapped test suite through Monitor and
+// skip pr-workflow, dangerous-command, container-suite and bd-close-invariant
+// entirely, since Claude Code's hooks[].matcher only ever matches the tool
+// name (gt-5ihs) and none of these matchers named "Monitor" (gt-vx2mm).
+//
+// Add a tool here whenever Claude Code ships another one whose tool_input
+// carries a "command" field for a shell invocation (e.g. a future
+// BashOutput-style variant that re-executes rather than only reading
+// output). A guard that instead switches on tool_name (polecat-paths,
+// permission-request) needs its own case added alongside this matcher —
+// widening the matcher alone does not teach those guards a new tool shape.
+const shellExecutingToolMatcher = "Bash|Monitor"
+
 // Hook represents an individual hook command.
 type Hook struct {
 	Type    string `json:"type"` // "command"
@@ -354,7 +373,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// internal/cmd/rig_config.go). The guard reads tool_input off stdin and
 		// self-filters to its own session, so it needs no If — and the two
 		// matchers are bare tool names, which mergeEntries unions into the base
-		// "Bash" entry rather than replacing it, so the town-wide guards (pr-
+		// shellExecutingToolMatcher entry rather than replacing it, so the town-wide guards (pr-
 		// workflow, dangerous-command, container-suite) stay in force here.
 		"polecats": {
 			Stop: []HookEntry{
@@ -370,7 +389,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 			},
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{{
 						Type:    "command",
 						Command: gtCommand("gt tap guard polecat-paths"),
@@ -442,7 +461,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 			// (gt-qqfy).
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{
 						{
 							Type:    "command",
@@ -465,7 +484,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 			// (see tap_guard_boot_sendkeys.go) — no If needed.
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{
 						{
 							Type:    "command",
@@ -484,7 +503,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{{
 						Type:    "command",
 						Command: gtCommand("gt tap guard formula-allowlist"),
@@ -521,7 +540,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 			UserPromptSubmit: []HookEntry{{Matcher: ""}},
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{
 						{
 							Type:    "command",
@@ -539,7 +558,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 			// (gt-qqfy). See the witness override above.
 			PreToolUse: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{
 						{
 							Type:    "command",
@@ -1090,10 +1109,10 @@ func ValidTarget(target string) bool {
 // This includes resolved gt hook commands that all agents need.
 func DefaultBase() *HooksConfig {
 	return &HooksConfig{
-		// PreToolUse guards all route through the bare "Bash" tool-name
-		// matcher (gt-5ihs): Claude Code's hooks[].matcher matches the TOOL
-		// NAME only — a permission-rule pattern like "Bash(gh pr create*)"
-		// written into Matcher never fires.
+		// PreToolUse guards all route through the bare shellExecutingToolMatcher
+		// tool-name matcher (gt-5ihs, gt-vx2mm): Claude Code's hooks[].matcher
+		// matches the TOOL NAME only — a permission-rule pattern like
+		// "Bash(gh pr create*)" written into Matcher never fires.
 		//
 		// No guard here carries an If field (gt-3mp1). Claude Code's "if"
 		// evaluator treats a command it cannot statically resolve — a brace
@@ -1123,7 +1142,7 @@ func DefaultBase() *HooksConfig {
 		// else, so it is a no-op for every other close in the town.
 		PreToolUse: []HookEntry{
 			{
-				Matcher: "Bash",
+				Matcher: shellExecutingToolMatcher,
 				Hooks: []Hook{
 					{
 						Type:    "command",

@@ -1166,14 +1166,30 @@ func bashHookFires(h hooks.Hook, command string) bool {
 	return bashMatcherGlob(h.If, command)
 }
 
+// preToolUseMatcherAppliesToTool reports whether a bare tool-name PreToolUse
+// matcher (e.g. "Bash", "Bash|Monitor", "Edit|Write|MultiEdit|NotebookEdit")
+// dispatches for the given tool, matching Claude Code's own semantics: the
+// matcher is a regex matched against the tool name (gt-5ihs) — so
+// "Bash|Monitor" fires for either "Bash" or "Monitor", not only the exact
+// string "Bash" (gt-vx2mm added Monitor to the base guards' matcher, which
+// broke an exact-string comparison here).
+func preToolUseMatcherAppliesToTool(matcher, tool string) bool {
+	re, err := regexp.Compile("^(?:" + matcher + ")$")
+	if err != nil {
+		return matcher == tool
+	}
+	return re.MatchString(tool)
+}
+
 // dangerousCommandGuardMatcher reports whether the given command is routed
 // by hooks.DefaultBase()'s PreToolUse config to the dangerous-command guard
 // specifically, using Claude Code's real dispatch semantics: the entry's
-// Matcher must be the bare "Bash" tool name — a pattern written into Matcher
-// never fires (gt-5ihs) — and each hook's If (if any) gates it further.
+// Matcher must apply to the "Bash" tool name — a permission-rule pattern
+// written into Matcher never fires (gt-5ihs) — and each hook's If (if any)
+// gates it further.
 func dangerousCommandGuardMatcher(command string) bool {
 	for _, entry := range hooks.DefaultBase().PreToolUse {
-		if entry.Matcher != "Bash" {
+		if !preToolUseMatcherAppliesToTool(entry.Matcher, "Bash") {
 			continue
 		}
 		for _, h := range entry.Hooks {
