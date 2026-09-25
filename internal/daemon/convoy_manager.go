@@ -646,7 +646,7 @@ func (m *ConvoyManager) tryBeginTick() bool {
 // each database's dolt_gc('--full').
 //
 // It polls TryLock rather than blocking in Lock: an abandoned Lock cannot be
-// cancelled, and behind a hung tick it would leave a pending writer that
+// canceled, and behind a hung tick it would leave a pending writer that
 // blocks every later tick and a goroutine per attempt. Polling alone could
 // starve, since a tick that runs longer than its interval re-takes the read
 // side right after releasing it; the pausing flag closes that by making
