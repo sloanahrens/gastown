@@ -15,6 +15,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
 )
@@ -168,12 +169,20 @@ func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) 
 // data dir is tmpfs by default: each bd init DOLT_COMMITs 66 migrations, and
 // on the Docker Desktop VM disk every commit's fsync reaches the host SSD
 // (claude-yfj). A container's data is ~18 MB; the 2g cap bounds a runaway.
+//
+// Every container is labeled with this test process's pid, host and start time
+// (slot.TestContainerOwnerLabels, gt-ehlga), so the container-gate can tell a
+// container a killed or failed run left behind from a live suite's by
+// ownership instead of by age, and remove it before the next gate waits on it.
 func doltContainerOpts() []testcontainers.ContainerCustomizer {
 	opts := []testcontainers.ContainerCustomizer{
 		// WithEnv must precede dolt.WithDatabase: dolt.WithDatabase writes
 		// req.Env without a nil check, so it needs the map already set.
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
 		dolt.WithDatabase("gt_test"),
+	}
+	if labels := slot.TestContainerOwnerLabels(); labels != nil {
+		opts = append(opts, testcontainers.WithLabels(labels))
 	}
 	if os.Getenv(DoltTmpfsEnv) != "0" {
 		opts = append(opts, testcontainers.WithTmpfs(map[string]string{doltDataDir: "rw,size=2g"}))

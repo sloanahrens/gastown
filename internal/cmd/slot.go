@@ -93,7 +93,18 @@ var slotReapCmd = &cobra.Command{
 	Short: "Delete stale gate containers and the owner files dead suites left behind",
 	Long: `Removes the container-gate's debris: containers the gate matches that are older
 than the staleness window with no live testcontainers ryuk reaper for their
-session, and owner metadata files whose slot nobody holds anymore.
+session, containers whose owner labels name a test process on this host that
+is provably gone (at any age), and owner metadata files whose slot nobody
+holds anymore.
+
+Test containers started by internal/testutil carry gastown.test.owner-pid,
+gastown.test.owner-host and gastown.test.owner-start labels. An owner is
+provably gone when its pid no longer exists, or when the pid now names a
+process with a different start time (the pid was reused). A labeled container
+whose owner is confirmed alive (same pid and start time) is never debris,
+whatever its age. When the start time cannot be compared, the owner counts as
+alive only while the container is younger than the staleness window; past it
+the age/ryuk rules below decide (gt-ehlga).
 
 A container-backed suite that dies uncleanly leaves its containers running. The
 gate used to read any matching container as a live suite, so a single hours-old
@@ -103,8 +114,18 @@ evidence-printing way to actually delete it.
 
 Reaping is the mayor's and the doctor's call, not a polecat's: a polecat's slot
 token is its promise that its own suite cleans up after itself, and reaping
-another holder's containers mid-run would break that suite. Use --dry-run to
-read the verdicts first.`,
+another holder's containers mid-run would break that suite. The one exception
+is a container whose owner is provably gone: nothing can be using it, so a slot
+acquisition ('gt slot run', gt done's gates, the refinery) that checks docker,
+which it does whenever no slot is held, removes those automatically and logs
+each removal on stderr. Use --dry-run to
+read the verdicts first.
+
+An unlabeled container (started by an older build, or outside internal/testutil)
+is judged by age alone. To clear a young unlabeled orphan without waiting out the
+window, confirm with 'gt slot reap --dry-run --older-than 1m' that it is the one
+you mean and that no live test process owns it, then run
+'gt slot reap --older-than 1m'.`,
 	Args: cobra.NoArgs,
 	RunE: runSlotReap,
 }
@@ -483,9 +504,9 @@ func printSlotReapReport(cmd *cobra.Command, report slot.ReapReport) {
 	}
 
 	if len(report.Debris) == 0 {
-		fmt.Fprintf(out, "No gate debris older than %s.\n", report.OlderThan)
+		fmt.Fprintf(out, "No gate debris older than %s, and no container whose owning test process is gone.\n", report.OlderThan)
 	} else {
-		fmt.Fprintf(out, "%s %d gate container(s) older than %s with no live reaper:\n", verb, len(report.Debris), report.OlderThan)
+		fmt.Fprintf(out, "%s %d gate container(s) that are debris (older than %s with no live reaper, or their owning test process is gone):\n", verb, len(report.Debris), report.OlderThan)
 		for _, v := range report.Debris {
 			fmt.Fprintf(out, "  %s — %s; labels: %s\n", v.Container.Display(), v.Reason, v.Container.LabelSummary())
 		}

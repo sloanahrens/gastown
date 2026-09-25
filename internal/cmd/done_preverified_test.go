@@ -23,7 +23,7 @@ func TestRunPreVerificationGates(t *testing.T) {
 		dir := t.TempDir()
 		mq := &config.MergeQueueConfig{TestCommand: "false"}
 
-		result, err := runPreVerificationGates(dir, mq)
+		result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
 		if err != nil {
 			t.Fatalf("runPreVerificationGates: %v", err)
 		}
@@ -53,7 +53,7 @@ func TestRunPreVerificationGates(t *testing.T) {
 			TestCommand:  "echo test >> " + marker,
 		}
 
-		result, err := runPreVerificationGates(dir, mq)
+		result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
 		if err != nil {
 			t.Fatalf("runPreVerificationGates: %v", err)
 		}
@@ -86,7 +86,7 @@ func TestRunPreVerificationGates(t *testing.T) {
 			TestCommand:  "echo test >> " + marker,
 		}
 
-		result, err := runPreVerificationGates(dir, mq)
+		result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
 		if err != nil {
 			t.Fatalf("runPreVerificationGates: %v", err)
 		}
@@ -120,7 +120,7 @@ func TestRunPreVerificationGates(t *testing.T) {
 			counter, counter)
 		mq := &config.MergeQueueConfig{LintCommand: lint, TestCommand: "true"}
 
-		result, err := runPreVerificationGates(dir, mq)
+		result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
 		if err != nil {
 			t.Fatalf("runPreVerificationGates: %v", err)
 		}
@@ -141,7 +141,7 @@ func TestRunPreVerificationGates(t *testing.T) {
 
 	t.Run("no configured gate commands is a no-op success", func(t *testing.T) {
 		dir := t.TempDir()
-		result, err := runPreVerificationGates(dir, &config.MergeQueueConfig{})
+		result, err := runPreVerificationGates(dir, &config.MergeQueueConfig{}, fakePreVerifySlot(t).slot)
 		if err != nil {
 			t.Fatalf("runPreVerificationGates: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestRunPreVerificationGates(t *testing.T) {
 		initPreVerifyTestGitRepo(t, dir)
 		mq := &config.MergeQueueConfig{TestCommand: "true"}
 
-		result, err := runPreVerificationGates(dir, mq)
+		result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
 		if err != nil {
 			t.Fatalf("runPreVerificationGates: %v", err)
 		}
@@ -206,7 +206,7 @@ func TestRunPreVerificationGates_TimeoutKillsTheWholeGroup(t *testing.T) {
 	}
 
 	start := time.Now()
-	result, err := runPreVerificationGates(dir, mq)
+	result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
 	if err != nil {
 		t.Fatalf("runPreVerificationGates: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestResolvePreVerification(t *testing.T) {
 	mq := &config.MergeQueueConfig{TestCommand: "true"}
 
 	t.Run("HEAD contains the resolved target base: stamps", func(t *testing.T) {
-		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq, config.GateSetSHA(mq))
+		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq, config.GateSetSHA(mq), fakePreVerifySlot(t).slot)
 		if !ok {
 			t.Fatalf("expected ok=true, got warning=%q", warning)
 		}
@@ -285,7 +285,7 @@ func TestResolvePreVerification(t *testing.T) {
 		runGit("update-ref", "refs/remotes/origin/main", c2)
 		t.Cleanup(func() { runGit("update-ref", "refs/remotes/origin/main", c1) })
 
-		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq, config.GateSetSHA(mq))
+		stamp, ok, warning := resolvePreVerification(g, dir, "main", "main", mq, config.GateSetSHA(mq), fakePreVerifySlot(t).slot)
 		if ok {
 			t.Fatalf("expected ok=false when HEAD does not contain the target base, got stamp=%+v", stamp)
 		}

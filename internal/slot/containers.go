@@ -161,9 +161,13 @@ func parseDockerCreatedAt(s string) time.Time {
 }
 
 // parseDockerLabels splits docker's comma-joined "k=v,k=v" label string. A
-// comma inside a label value splits wrong; the gate reads session ids out of
-// this map and nothing else, and a session id is a UUID, so the loss cannot
-// turn a container the gate could judge into one it cannot.
+// comma inside a label value splits wrong. The gate reads two kinds of label
+// out of this map: testcontainers session ids (UUIDs) and gastown's owner
+// labels (a pid, a hostname and a start time, see owner_labels.go), none of
+// which contains a comma. A value that did split would leave its label
+// malformed or missing, which makes the owner labels decline to decide and
+// the age/reaper rules apply instead, so the loss can never make a container
+// look owner-gone.
 func parseDockerLabels(s string) map[string]string {
 	if s == "" {
 		return nil
@@ -208,6 +212,12 @@ type ContainerVerdict struct {
 	Container GateContainer
 	Verdict   Verdict
 	Reason    string
+
+	// OwnerGone is set on debris whose owner labels name a test process on
+	// this host that no longer exists (gt-ehlga). It is the one debris verdict
+	// that is certain rather than inferred, so it is the one Acquire removes
+	// on its own instead of leaving to 'gt slot reap'.
+	OwnerGone bool
 }
 
 // Blocks reports whether the container still occupies the gate: a live suite
@@ -255,6 +265,12 @@ func debrisLogger() func(ContainerVerdict) {
 // itself debris: it is the last thing to exit a session, so one that outlived
 // its session leaked, and leaving it would reproduce exactly the deadlock this
 // classification exists to clear.
+//
+// Owner labels outrank all of that (gt-ehlga, see owner_labels.go): a
+// container whose labeled owner process on this host is certainly gone is
+// debris at any age, and one whose owner is confirmed alive (same pid and
+// start time) is live at any age. An owner that only looks alive decides only
+// inside the window. Everything else is judged by age and reaper.
 func Classify(containers []GateContainer, now time.Time, window time.Duration) []ContainerVerdict {
 	if window <= 0 {
 		window = StaleContainerWindow
@@ -278,28 +294,32 @@ func Classify(containers []GateContainer, now time.Time, window time.Duration) [
 
 	out := make([]ContainerVerdict, 0, len(containers))
 	for _, c := range containers {
+		if verdict, ok := ownerVerdict(c, now, window); ok {
+			out = append(out, verdict)
+			continue
+		}
 		age, ok := c.Age(now)
 		switch {
 		case !ok:
-			out = append(out, ContainerVerdict{c, VerdictUnknown,
-				"docker reported no start time, so its age is unverifiable"})
+			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictUnknown,
+				Reason: "docker reported no start time, so its age is unverifiable"})
 		case age < window:
-			out = append(out, ContainerVerdict{c, VerdictLive,
-				fmt.Sprintf("age %s is under the %s staleness window", age.Round(time.Second), window)})
+			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictLive,
+				Reason: fmt.Sprintf("age %s is under the %s staleness window", age.Round(time.Second), window)})
 		case c.IsReaper():
-			out = append(out, ContainerVerdict{c, VerdictDebris,
-				fmt.Sprintf("reaper age %s exceeds the %s staleness window, so the session it reaped for is over",
+			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictDebris,
+				Reason: fmt.Sprintf("reaper age %s exceeds the %s staleness window, so the session it reaped for is over",
 					age.Round(time.Second), window)})
 		default:
 			// An empty session id never maps to a reaper, so a container that
 			// names no session falls straight through to debris.
 			if reaper := liveReapers[c.SessionID()]; reaper != "" {
-				out = append(out, ContainerVerdict{c, VerdictLive,
-					fmt.Sprintf("reaper %s is still running for its session", reaper)})
+				out = append(out, ContainerVerdict{Container: c, Verdict: VerdictLive,
+					Reason: fmt.Sprintf("reaper %s is still running for its session", reaper)})
 				continue
 			}
-			out = append(out, ContainerVerdict{c, VerdictDebris,
-				fmt.Sprintf("age %s exceeds the %s staleness window with no reaper running for its session",
+			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictDebris,
+				Reason: fmt.Sprintf("age %s exceeds the %s staleness window with no reaper running for its session",
 					age.Round(time.Second), window)})
 		}
 	}

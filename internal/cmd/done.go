@@ -227,7 +227,7 @@ type preVerificationStamp struct {
 // check the stamp would record pre_verified_base=<target HEAD the branch
 // never rebased onto>, and the refinery's fast-path would then skip gates
 // on a merged tree nothing ever verified (om-gate T8).
-func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig, gateSetSHA string) (preVerificationStamp, bool, string) {
+func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig, gateSetSHA string, gateSlot preVerifySlot) (preVerificationStamp, bool, string) {
 	verifiedBaseRef := g.CleanBaseRef("origin", defaultBranch, target)
 	verifiedBase, baseErr := g.Rev(verifiedBaseRef)
 	if baseErr != nil {
@@ -242,7 +242,7 @@ func resolvePreVerification(g *git.Git, worktree, defaultBranch, target string, 
 		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: HEAD does not contain %s (branch is behind %s and --pre-verified skips auto-rebase) — refusing to stamp a base the branch was never verified against; rebase onto %s and retry", shortSHA(verifiedBase), target, target)
 	}
 
-	result, runErr := runPreVerificationGates(worktree, mq)
+	result, runErr := runPreVerificationGates(worktree, mq, gateSlot)
 	if runErr != nil {
 		return preVerificationStamp{}, false, fmt.Sprintf("--pre-verified: could not run gates: %v (MR will not carry the pre-verified stamp)", runErr)
 	}
@@ -309,13 +309,55 @@ func runPreVerificationGate(ctx context.Context, worktree, script string, logFil
 	return preVerificationGateOutcome{err: err, timedOut: ctx.Err() == context.DeadlineExceeded}
 }
 
+// runPreVerificationGateHeld runs one pre-verification gate under its own
+// preVerificationGateTimeout budget, holding the container-gate slot for the
+// test gate when gateSlot.hold says it needs one (gt-l6by). The slot is taken
+// before the budget starts, so its wait is never charged to the gate, and it
+// is released by defer however the gate ends. A non-nil error means the slot
+// could not be taken and the gate did not run.
+func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile *os.File, mq *config.MergeQueueConfig, gateSlot preVerifySlot) (preVerificationGateOutcome, error) {
+	if name == "test" {
+		release, err := gateSlot.hold(worktree, script, mq, logFile)
+		if err != nil {
+			return preVerificationGateOutcome{}, err
+		}
+		defer release()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), preVerificationGateTimeout)
+	defer cancel()
+	var got preVerificationGateOutcome
+	runGate := func() lintlock.Attempt {
+		from := fileSize(logFile)
+		got = runPreVerificationGate(ctx, worktree, script, logFile)
+		return lintlock.Attempt{Err: got.err, Output: readLogFrom(logPath, from)}
+	}
+	if name == "lint" {
+		// gt-xsty: lint is the only gate with a cross-process lock
+		// (golangci-lint's), so a concurrent lint is waited out rather
+		// than costing the submission its pre-verified stamp. This gate's
+		// own 10m bound is the retry budget.
+		_ = lintlock.Retry(ctx, runGate, func(attempt, attempts int, wait time.Duration) {
+			fmt.Fprintf(logFile, "=== gate lint: another golangci-lint holds the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
+		})
+	} else {
+		runGate()
+	}
+	return got, nil
+}
+
 // runPreVerificationGates performs the verification `gt done --pre-verified`
 // stamps: it runs each of the rig's configured gate commands, in
 // setup/typecheck/lint/build/test order, in worktree, streaming combined
 // output to <worktree>/.runtime/gt-preverify.log. It stops at the first
 // failing gate. There is no path that reports success without this function
 // having actually executed every configured command (om-gate T8).
-func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preVerificationResult, error) {
+//
+// The test gate runs inside a container-gate slot whenever it may start a
+// container-backed suite (gt-l6by, see resolvePreVerifyTestSlot): a stamped MR
+// skips the refinery's gate, so this run is the one that exercises the Docker
+// suite and it must hold a slot like every other suite that does. The slot
+// wait is not counted against the gate's preVerificationGateTimeout budget.
+func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig, gateSlot preVerifySlot) (preVerificationResult, error) {
 	type namedGate struct {
 		name string
 		cmd  string
@@ -352,25 +394,10 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig) (preV
 
 	for _, ng := range gates {
 		fmt.Fprintf(logFile, "=== gate %s: %s ===\n", ng.name, ng.cmd)
-		ctx, cancel := context.WithTimeout(context.Background(), preVerificationGateTimeout)
-		var got preVerificationGateOutcome
-		runGate := func() lintlock.Attempt {
-			from := fileSize(logFile)
-			got = runPreVerificationGate(ctx, worktree, ng.cmd, logFile)
-			return lintlock.Attempt{Err: got.err, Output: readLogFrom(logPath, from)}
+		got, slotErr := runPreVerificationGateHeld(ng.name, ng.cmd, worktree, logPath, logFile, mq, gateSlot)
+		if slotErr != nil {
+			return preVerificationResult{}, slotErr
 		}
-		if ng.name == "lint" {
-			// gt-xsty: lint is the only gate with a cross-process lock
-			// (golangci-lint's), so a concurrent lint is waited out rather
-			// than costing the submission its pre-verified stamp. This gate's
-			// own 10m bound is the retry budget.
-			_ = lintlock.Retry(ctx, runGate, func(attempt, attempts int, wait time.Duration) {
-				fmt.Fprintf(logFile, "=== gate lint: another golangci-lint holds the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
-			})
-		} else {
-			runGate()
-		}
-		cancel()
 		if got.timedOut {
 			// A hung gate (e.g. a test waiting on a port) must not wedge gt
 			// done indefinitely at a point where the branch is already
@@ -2397,7 +2424,11 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// run (up to five 10m gates), exactly as the default test-verify
 				// below does — see StartExitingHeartbeatKeepAlive.
 				stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(townRoot, heartbeatSession, "gt done", issueID)
-				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq, gateSetSHA)
+				// gt-l6by: the pre-verified test gate may start the rig's
+				// container-backed suite, so it takes a container-gate slot
+				// under the same polecat role the default gate uses.
+				gateSlot := preVerifySlot{townRoot: townRoot, role: fmt.Sprintf("%s/%s", rigName, polecatName)}
+				stamp, ok, warning := resolvePreVerification(g, cwd, defaultBranch, target, mq, gateSetSHA, gateSlot)
 				stopHeartbeat()
 				if warning != "" {
 					style.PrintWarning("%s", warning)

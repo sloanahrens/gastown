@@ -202,11 +202,19 @@ const dockerTestsEnv = "GT_TEST_DOCKER"
 // GT_TEST_DOCKER=1 in the session reaches `go test` without appearing in
 // the command text.
 func commandEnablesDockerTests(tokens []string) bool {
+	return commandSetsDockerTests(tokens, "1")
+}
+
+// commandSetsDockerTests reports whether any token assigns the container
+// opt-in switch the given value (bare, quoted, or as an export/env value).
+// It is commandEnablesDockerTests' parser, shared with gt done's
+// --pre-verified slot decision, which also needs to see an explicit "0".
+func commandSetsDockerTests(tokens []string, value string) bool {
 	prefix := dockerTestsEnv + "="
 	for _, t := range tokens {
 		if i := strings.Index(t, prefix); i >= 0 && (i == 0 || t[i-1] == ' ') {
 			v := strings.Trim(t[i+len(prefix):], `"'`)
-			if v == "1" {
+			if v == value {
 				return true
 			}
 		}
