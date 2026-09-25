@@ -42,12 +42,7 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 		return nil
 	}
 
-	type scheduleCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []scheduleCandidate
+	var candidates []epicDispatchCandidate
 	skippedClosed := 0
 	skippedAssigned := 0
 	skippedScheduled := 0
@@ -85,7 +80,7 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 			continue
 		}
 
-		candidates = append(candidates, scheduleCandidate{ID: c.ID, Title: c.Title, RigName: rigName})
+		candidates = append(candidates, epicDispatchCandidate{ID: c.ID, Title: c.Title, RigName: rigName})
 	}
 
 	if len(candidates) == 0 {
@@ -149,6 +144,33 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 	return nil
 }
 
+// epicDispatchCandidate is an epic child resolved to the rig that will run it,
+// the input both epic paths dispatch from.
+type epicDispatchCandidate struct {
+	ID      string
+	Title   string
+	RigName string
+}
+
+// epicSlingParams builds the SlingParams for one child's immediate dispatch.
+// This is the child's first dispatch, so the content duplicate check runs: two
+// children of one epic that name the same failing tests are the pair the check
+// exists to catch, and --force is the documented override (gt-skk7).
+func epicSlingParams(c epicDispatchCandidate, formula string, opts epicScheduleOpts, townRoot string) SlingParams {
+	return SlingParams{
+		BeadID:        c.ID,
+		RigName:       c.RigName,
+		FormulaName:   formula,
+		Force:         opts.Force,
+		HookRawBead:   opts.HookRawBead,
+		NoConvoy:      true, // Epic is the organizing structure
+		NoBoot:        opts.NoBoot,
+		CallerContext: "epic-sling",
+		TownRoot:      townRoot,
+		BeadsDir:      filepath.Join(townRoot, ".beads"),
+	}
+}
+
 // runEpicSlingByID immediately dispatches all open children of an epic.
 // Used when max_polecats=-1 (direct dispatch mode). Each child gets its own
 // polecat via executeSling(). Respects --max-concurrent throttling.
@@ -172,12 +194,7 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 		return nil
 	}
 
-	type slingCandidate struct {
-		ID      string
-		Title   string
-		RigName string
-	}
-	var candidates []slingCandidate
+	var candidates []epicDispatchCandidate
 	skippedClosed := 0
 	skippedAssigned := 0
 	skippedNoRig := 0
@@ -199,7 +216,7 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 				style.Dim.Render("○"), c.ID, prefix)
 			continue
 		}
-		candidates = append(candidates, slingCandidate{ID: c.ID, Title: c.Title, RigName: rigName})
+		candidates = append(candidates, epicDispatchCandidate{ID: c.ID, Title: c.Title, RigName: rigName})
 	}
 
 	if len(candidates) == 0 {
@@ -239,21 +256,7 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 		}
 
 		fmt.Printf("\n[%d/%d] Dispatching %s → %s...\n", i+1, len(candidates), c.ID, c.RigName)
-		_, err := executeSling(SlingParams{
-			BeadID:        c.ID,
-			RigName:       c.RigName,
-			FormulaName:   formula,
-			Force:         opts.Force,
-			HookRawBead:   opts.HookRawBead,
-			NoConvoy:      true, // Epic is the organizing structure
-			NoBoot:        opts.NoBoot,
-			CallerContext: "epic-sling",
-			TownRoot:      townRoot,
-			BeadsDir:      filepath.Join(townRoot, ".beads"),
-
-			// Feeder replay of work already chosen for dispatch; see SlingParams.
-			SkipDuplicateCheck: true,
-		})
+		_, err := executeSling(epicSlingParams(c, formula, opts, townRoot))
 		if !tally.record(c.ID, err) {
 			continue
 		}

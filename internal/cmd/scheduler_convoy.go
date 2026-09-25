@@ -86,6 +86,29 @@ func convoyScheduleOptionsFor(opts convoyScheduleOpts, agent string) ScheduleOpt
 	}
 }
 
+// convoySlingParams builds the SlingParams for one candidate's immediate
+// dispatch. This is the bead's first dispatch, so the content duplicate check
+// runs: two beads of one convoy are the same-vantage-point pair the check exists
+// to catch, and --force is the documented override. The agent carries the
+// convoy's sling-time record; re-dispatching with the rig default instead would
+// override the routing decision (gt-mxyk, gt-skk7).
+func convoySlingParams(job convoyDispatchJob, opts convoyScheduleOpts, townRoot string) SlingParams {
+	c := job.candidate
+	return SlingParams{
+		BeadID:        c.ID,
+		RigName:       c.RigName,
+		FormulaName:   opts.Formula,
+		Force:         opts.Force,
+		HookRawBead:   opts.HookRawBead,
+		NoConvoy:      true, // Already tracked by this convoy
+		NoBoot:        opts.NoBoot,
+		CallerContext: "convoy-sling",
+		TownRoot:      townRoot,
+		BeadsDir:      filepath.Join(townRoot, ".beads"),
+		Agent:         job.agent,
+	}
+}
+
 // runConvoyScheduleByID schedules all open tracked issues of a convoy.
 func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -300,24 +323,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		c := job.candidate
 		fmt.Printf("\n[%d/%d] Dispatching %s → %s...\n", i+1, len(jobs), c.ID, c.RigName)
 		fmt.Printf("  %s %s\n", style.Dim.Render("→"), job.agentDesc)
-		// Agent carries the convoy's sling-time record: re-dispatching with the
-		// rig default instead would override the routing decision (gt-mxyk).
-		_, err := executeSling(SlingParams{
-			BeadID:        c.ID,
-			RigName:       c.RigName,
-			FormulaName:   opts.Formula,
-			Force:         opts.Force,
-			HookRawBead:   opts.HookRawBead,
-			NoConvoy:      true, // Already tracked by this convoy
-			NoBoot:        opts.NoBoot,
-			CallerContext: "convoy-sling",
-			TownRoot:      townRoot,
-			BeadsDir:      filepath.Join(townRoot, ".beads"),
-			Agent:         job.agent,
-
-			// Feeder replay of work already chosen for dispatch; see SlingParams.
-			SkipDuplicateCheck: true,
-		})
+		_, err := executeSling(convoySlingParams(job, opts, townRoot))
 		if !tally.record(c.ID, err) {
 			continue
 		}
