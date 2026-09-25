@@ -187,6 +187,16 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		// Mirrors the dead-agent detection in runSling (sling.go) so that
 		// programmatic dispatch also handles stale hooks from nuked polecats.
 		if (info.Status == "hooked" || info.Status == "in_progress") && info.Assignee != "" && isHookedAgentDeadFn(info.Assignee) {
+			// A dead holder does not mean dead work: refuse when the work
+			// survives on a branch or survival cannot be verified, exactly as
+			// runSling does (gt-3qfp, gt-vm5g4). Scheduler callers read the
+			// refusal (errReslingRefused) as a deferral.
+			if params.ResumeBranch == "" {
+				if err := reslingSurvivingWorkGuard(townRoot, params.BeadID, info.Assignee); err != nil {
+					result.ErrMsg = err.Error()
+					return result, err
+				}
+			}
 			fmt.Printf("  %s Hooked agent %s has no active session, auto-forcing dispatch...\n",
 				style.Warning.Render("⚠"), info.Assignee)
 			params.Force = true

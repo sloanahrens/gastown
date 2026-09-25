@@ -1067,7 +1067,10 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// offers it again — once the queue drains, the same bead feeds.
 			// Logging it as a deferral keeps "the town is at capacity"
 			// distinguishable from "the sling broke" in daemon.log.
-			if reason, ok := slingBackpressureReason(stderr.String()); ok {
+			// A surviving-work refusal (the dead holder's work is on a
+			// branch, or cannot be verified; gt-vm5g4) is deferred the same
+			// way: it waits for an operator, it is not a failure.
+			if reason, ok := slingDeferralReason(stderr.String()); ok {
 				m.logger("Convoy %s: deferring %s: %s", c.ID, issueID, reason)
 				continue
 			}

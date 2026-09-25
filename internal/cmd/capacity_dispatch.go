@@ -251,7 +251,6 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 		},
 		OnFailure: func(b capacity.PendingBead, err error) {
 			var onSuccessErr *capacity.ErrOnSuccessFailed
-			var admissionErr *polecatCapacityAdmissionError
 			if errors.As(err, &onSuccessErr) {
 				// Polecat launched but context close failed — not a true dispatch failure.
 				// Log a distinct warning so operators can distinguish from "polecat never launched".
@@ -271,9 +270,9 @@ func dispatchScheduledWork(townRoot, actor string, batchOverride int, dryRun boo
 					// Skip recordDispatchFailure to avoid writing to a closed context.
 					return
 				}
-			} else if errors.As(err, &admissionErr) {
-				fmt.Fprintf(os.Stderr, "%s Capacity full while dispatching %s; leaving context queued: %v\n",
-					style.Dim.Render("○"), b.WorkBeadID, err)
+			} else if why, deferred := capacityDispatchDeferral(err); deferred {
+				fmt.Fprintf(os.Stderr, "%s %s while dispatching %s; leaving context queued: %v\n",
+					style.Dim.Render("○"), why, b.WorkBeadID, err)
 				return
 			} else {
 				_ = events.LogFeed(events.TypeSchedulerDispatchFailed, actor,
@@ -703,6 +702,22 @@ func readySlingContextsFromAssessments(assessments []scheduledContextAssessment)
 	}
 
 	return result
+}
+
+// capacityDispatchDeferral reports whether a failed scheduled dispatch is a
+// deferral: the context stays queued and no dispatch failure is recorded, so
+// it never counts toward the circuit breaker. Capacity admission refusals and
+// sling's surviving-work refusal (a dead holder's work survives or cannot be
+// verified, gt-vm5g4) are deferrals; everything else is a failure.
+func capacityDispatchDeferral(err error) (why string, deferred bool) {
+	var admissionErr *polecatCapacityAdmissionError
+	switch {
+	case errors.As(err, &admissionErr):
+		return "Capacity full", true
+	case errors.Is(err, errReslingRefused):
+		return "Surviving work of a dead holder", true
+	}
+	return "", false
 }
 
 // dispatchSingleBead dispatches one scheduled bead via executeSling.

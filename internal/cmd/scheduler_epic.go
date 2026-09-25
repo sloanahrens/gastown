@@ -230,7 +230,7 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 	fmt.Printf("%s Dispatching %d child(ren) from epic %s...\n",
 		style.Bold.Render("▶"), len(candidates), epicID)
 
-	successCount := 0
+	var tally feederDispatchTally
 	successfulRigs := make(map[string]bool)
 	for i, c := range candidates {
 		if slingMaxConcurrent > 0 && i >= slingMaxConcurrent {
@@ -254,11 +254,9 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 			// Feeder replay of work already chosen for dispatch; see SlingParams.
 			SkipDuplicateCheck: true,
 		})
-		if err != nil {
-			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), c.ID, err)
+		if !tally.record(c.ID, err) {
 			continue
 		}
-		successCount++
 		successfulRigs[c.RigName] = true
 
 		// Brief delay between spawns to avoid Dolt contention
@@ -275,16 +273,13 @@ func runEpicSlingByID(epicID string, opts epicScheduleOpts) error {
 	}
 
 	fmt.Printf("\n%s Dispatched %d/%d child(ren) from epic %s\n",
-		style.Bold.Render("📊"), successCount, len(candidates), epicID)
+		style.Bold.Render("📊"), tally.success, len(candidates), epicID)
 	if skippedClosed > 0 || skippedAssigned > 0 || skippedNoRig > 0 {
 		fmt.Printf("  Skipped: %d closed, %d assigned, %d no rig\n",
 			skippedClosed, skippedAssigned, skippedNoRig)
 	}
 
-	if successCount == 0 {
-		return fmt.Errorf("all %d dispatch attempts failed for epic %s", len(candidates), epicID)
-	}
-	return nil
+	return tally.result("epic", epicID)
 }
 
 // epicChild holds info about a child issue of an epic.

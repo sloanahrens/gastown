@@ -1437,11 +1437,63 @@ func reslingSurvivingWorkGuard(townRoot, beadID, holder string) error {
 	branch, err := survivingWorkForBeadFn(townRoot, beadID)
 	switch {
 	case err != nil && !noRepoToProtect(err):
-		return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, and sling cannot verify surviving work (%v); resume with --branch or override with --force",
-			beadID, holder, err)
+		return &reslingRefusal{msg: fmt.Sprintf("refusing to re-sling %s: previous holder %s has no active session, and sling cannot verify surviving work (%v); resume with --branch or override with --force",
+			beadID, holder, err)}
 	case branch != "":
-		return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
-			beadID, holder, branch, beadID, branch, beadID)
+		return &reslingRefusal{msg: fmt.Sprintf("refusing to re-sling %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
+			beadID, holder, branch, beadID, branch, beadID)}
+	}
+	return nil
+}
+
+// errReslingRefused matches every reslingSurvivingWorkGuard refusal
+// (errors.Is). Automated dispatchers (scheduler, convoy and epic feeders)
+// treat it as a deferral, not a failure: the bead waits for an operator to
+// resume (--branch) or discard (--force) the work, or for survival to become
+// verifiable again, and must not burn a dispatch attempt meanwhile.
+var errReslingRefused = errors.New("refusing to re-sling")
+
+// reslingRefusal is the guard's refusal. Its text starts with "refusing to
+// re-sling", which the daemon's convoy feeder (a gt sling subprocess) also
+// recognizes.
+type reslingRefusal struct{ msg string }
+
+func (e *reslingRefusal) Error() string { return e.msg }
+
+func (e *reslingRefusal) Is(target error) bool { return target == errReslingRefused }
+
+// feederDispatchTally counts one convoy or epic feeder run's executeSling
+// outcomes. A resling refusal is a deferral: it is neither a success nor a
+// failed attempt, and a run whose every attempt was deferred is not an error.
+type feederDispatchTally struct {
+	success, deferred, failed int
+}
+
+// record counts err (nil = dispatched), prints a line for a deferral or a
+// failure, and reports whether the dispatch succeeded.
+func (t *feederDispatchTally) record(beadID string, err error) bool {
+	switch {
+	case err == nil:
+		t.success++
+		return true
+	case errors.Is(err, errReslingRefused):
+		t.deferred++
+		fmt.Printf("  %s %s deferred: %v\n", style.Dim.Render("○"), beadID, err)
+	default:
+		t.failed++
+		fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)
+	}
+	return false
+}
+
+// result prints the deferral count and returns an error only when nothing
+// was dispatched and at least one attempt really failed.
+func (t *feederDispatchTally) result(kind, id string) error {
+	if t.deferred > 0 {
+		fmt.Printf("  Deferred: %d (a dead holder's work survives or cannot be verified)\n", t.deferred)
+	}
+	if t.success == 0 && t.failed > 0 {
+		return fmt.Errorf("all %d dispatch attempts failed for %s %s", t.failed, kind, id)
 	}
 	return nil
 }

@@ -292,3 +292,140 @@ func TestSurvivingBranchForBead_ResolvesRigRepo(t *testing.T) {
 		t.Errorf("expected no branch for unrouted prefix, got %q", branch)
 	}
 }
+
+// executeSling's dead-holder auto-force (batch sling, convoy and epic
+// feeders, scheduler dispatch) runs the same surviving-work guard as runSling
+// (gt-vm5g4): it refuses when the work survives or survival is unknown, unless
+// --force or --branch, and the refusal is recognizable as errReslingRefused.
+func TestExecuteSlingDeadHolderRunsSurvivalGuard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	const branch = "polecat/pearl/gt-ibt8+mu72g5cz"
+	cases := []struct {
+		name        string
+		branch      string
+		survErr     error
+		force       bool
+		resume      string
+		wantRefused bool
+		wantCalls   int
+	}{
+		{name: "work survives", branch: branch, wantRefused: true, wantCalls: 1},
+		{name: "survival unknown", survErr: errors.New("git ls-remote timed out"), wantRefused: true, wantCalls: 1},
+		{name: "nothing survives", wantCalls: 1},
+		{name: "no rig repo", survErr: polecat.ErrNoRigRepo, wantCalls: 1},
+		{name: "explicit force skips the guard", branch: branch, force: true},
+		{name: "resume branch skips the guard", branch: branch, resume: branch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := setupDeadHolderSlingFixture(t)
+			calls := 0
+			prev := survivingWorkForBeadFn
+			t.Cleanup(func() { survivingWorkForBeadFn = prev })
+			survivingWorkForBeadFn = func(string, string) (string, error) {
+				calls++
+				return tc.branch, tc.survErr
+			}
+
+			var (
+				result *SlingResult
+				err    error
+			)
+			stdout := captureStdout(t, func() {
+				result, err = executeSling(SlingParams{
+					BeadID:             "gt-ibt8",
+					RigName:            "norig", // unresolvable: stops right after the guard, before any side effect
+					Force:              tc.force,
+					ResumeBranch:       tc.resume,
+					TownRoot:           townRoot,
+					SkipDuplicateCheck: true,
+				})
+			})
+			if calls != tc.wantCalls {
+				t.Fatalf("survival checks = %d, want %d", calls, tc.wantCalls)
+			}
+			if err == nil {
+				t.Fatal("want an error (refusal, or the unresolvable rig after the guard)")
+			}
+			wrapped := fmt.Errorf("sling failed: %w", err) // as dispatchSingleBead wraps it
+			if got := errors.Is(wrapped, errReslingRefused); got != tc.wantRefused {
+				t.Fatalf("refused = %v, want %v (err: %v)", got, tc.wantRefused, err)
+			}
+			if tc.wantRefused {
+				if !strings.Contains(err.Error(), "refusing to re-sling gt-ibt8") || result == nil || result.ErrMsg != err.Error() {
+					t.Fatalf("refusal text/result wrong: err=%v result=%+v", err, result)
+				}
+				if tc.branch != "" && !strings.Contains(err.Error(), tc.branch) {
+					t.Fatalf("refusal must name the surviving branch: %v", err)
+				}
+				if strings.Contains(stdout, "auto-forcing") {
+					t.Fatalf("refused sling still auto-forced:\n%s", stdout)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), "cannot resolve target rig") {
+				t.Fatalf("want to reach the rig check after the guard, got %v", err)
+			}
+			if !tc.force && !strings.Contains(stdout, "auto-forcing dispatch") {
+				t.Fatalf("dead holder with nothing to protect must auto-force:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// Convoy and epic feeders count a resling refusal as a deferral: not a
+// success, not a failed attempt, and a run of only deferrals is not an error.
+func TestFeederDispatchTallyTreatsReslingRefusalAsDeferral(t *testing.T) {
+	refusal := &reslingRefusal{msg: "refusing to re-sling gt-a: ..."}
+	cases := []struct {
+		name    string
+		errs    []error
+		wantErr string
+	}{
+		{name: "all deferred", errs: []error{refusal, fmt.Errorf("wrapped: %w", refusal)}},
+		{name: "deferred and dispatched", errs: []error{refusal, nil}},
+		{name: "deferred and failed", errs: []error{refusal, errors.New("spawn failed")}, wantErr: "all 1 dispatch attempts failed for convoy hq-cv-1"},
+		{name: "all failed", errs: []error{errors.New("x"), errors.New("y")}, wantErr: "all 2 dispatch attempts failed for convoy hq-cv-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tally feederDispatchTally
+			var err error
+			out := captureStdout(t, func() {
+				for i, e := range tc.errs {
+					ok := tally.record(fmt.Sprintf("gt-%d", i), e)
+					if ok != (e == nil) {
+						t.Errorf("record(%v) = %v", e, ok)
+					}
+				}
+				err = tally.result("convoy", "hq-cv-1")
+			})
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("want no error, got %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if errors.Is(tc.errs[0], errReslingRefused) && strings.Contains(out, "✗ gt-0") {
+				t.Fatalf("a refusal was printed as a failure:\n%s", out)
+			}
+		})
+	}
+}
+
+// The scheduler leaves a refused dispatch queued without recording a failure,
+// so a preserved-work bead never trips the circuit breaker.
+func TestCapacityDispatchDeferralRecognizesReslingRefusal(t *testing.T) {
+	refusal := &reslingRefusal{msg: "refusing to re-sling gt-a: ..."}
+	if _, ok := capacityDispatchDeferral(fmt.Errorf("sling failed: %w", refusal)); !ok {
+		t.Fatal("a wrapped resling refusal must be a deferral")
+	}
+	if _, ok := capacityDispatchDeferral(fmt.Errorf("sling failed: %w", &polecatCapacityAdmissionError{})); !ok {
+		t.Fatal("a capacity admission refusal must stay a deferral")
+	}
+	if _, ok := capacityDispatchDeferral(errors.New("sling failed: spawn failed")); ok {
+		t.Fatal("an ordinary failure must not be a deferral")
+	}
+}
