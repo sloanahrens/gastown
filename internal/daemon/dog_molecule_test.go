@@ -10,13 +10,16 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/formula"
 )
 
 func TestParseWispID(t *testing.T) {
@@ -836,5 +839,379 @@ func TestPourDogMolecule_RetriesAnEscalationThatFailedToSend(t *testing.T) {
 
 	if got := attempts(); got <= before {
 		t.Errorf("dropped escalation records = %d, want more than %d — the next failed cycle must retry the alarm", got, before)
+	}
+}
+
+// fakeFormulaBd serves the two bd calls discoverSteps makes: the child listing
+// for a poured molecule, and the formula definition whose step titles those
+// children were titled from. Children are returned in a shuffled order, the way
+// they are read back from bd, so a mapping that depends on listing order fails.
+type fakeFormulaBd struct {
+	children []childInfo              // the poured step wisps, in listing order
+	steps    map[string][]formulaStep // formula name -> steps
+	showErr  error                    // `bd formula show` failure
+	closed   []string
+}
+
+func (f *fakeFormulaBd) run(args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", fmt.Errorf("fakeFormulaBd: no args")
+	}
+	switch args[0] {
+	case "show":
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "{%q:[", "hq-wisp-root")
+		for i, child := range f.children {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, `{"id":%q,"title":%q,"status":"open"}`, child.ID, child.Title)
+		}
+		sb.WriteString("]}")
+		return sb.String(), nil
+	case "formula":
+		if f.showErr != nil {
+			return "", f.showErr
+		}
+		if len(args) < 3 {
+			return "", fmt.Errorf("fakeFormulaBd: formula show needs a name: %v", args)
+		}
+		steps, ok := f.steps[args[2]]
+		if !ok {
+			return "", fmt.Errorf("fakeFormulaBd: unknown formula %q", args[2])
+		}
+		payload, err := json.Marshal(map[string]interface{}{
+			"schema_version": 1,
+			"formula":        args[2],
+			"steps":          steps,
+		})
+		if err != nil {
+			return "", err
+		}
+		return string(payload), nil
+	case "close":
+		f.closed = append(f.closed, args[len(args)-1])
+		return "", nil
+	default:
+		return "", fmt.Errorf("fakeFormulaBd: unexpected command: %v", args)
+	}
+}
+
+// loadDogFormulaSteps reads a dog formula's steps from the repo, so the test
+// titles are the ones bd actually pours rather than a fixture that can drift
+// from them.
+func loadDogFormulaSteps(t *testing.T, name string) []formulaStep {
+	t.Helper()
+	f, err := formula.ParseFile(filepath.Join("..", "formula", "formulas", name+".formula.toml"))
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	steps := make([]formulaStep, 0, len(f.Steps))
+	for _, s := range f.Steps {
+		steps = append(steps, formulaStep{ID: s.ID, Title: s.Title})
+	}
+	return steps
+}
+
+// pouredChildren models what a pour leaves behind: one wisp per step, titled
+// with the step's title, in reverse formula order with a unique ID each — the
+// order bd lists them in carries no information, so the mapping can only come
+// from the titles.
+func pouredChildren(steps []formulaStep) (children []childInfo, want map[string]string) {
+	children = make([]childInfo, 0, len(steps))
+	want = make(map[string]string, len(steps))
+	for i := len(steps) - 1; i >= 0; i-- {
+		id := fmt.Sprintf("hq-wisp-%02d", len(steps)-1-i)
+		children = append(children, childInfo{ID: id, Title: steps[i].Title})
+		want[steps[i].ID] = id
+	}
+	return children, want
+}
+
+// TestDiscoverStepsMapsStepsByFormulaTitle is the regression test for gt-i9la.
+//
+// A poured step wisp carries the formula's step title and nothing else of the
+// step, so the matcher has to resolve titles against the formula. The keyword
+// matcher it replaced missed "monitor" (no keyword in "Escalate for databases
+// over threshold") and mapped "sync"/"offsite" onto "backup" and "verify" onto
+// "export", which made closeStep a silent no-op and left those steps to the
+// abandoned-tail sweep.
+func TestDiscoverStepsMapsStepsByFormulaTitle(t *testing.T) {
+	// want is the set of slugs the daemon's call sites close for that formula —
+	// including the four the keyword matcher failed to map.
+	tests := []struct {
+		formula string
+		want    []string
+	}{
+		{formula: "mol-dog-compactor", want: []string{"inspect", "monitor", "report"}},
+		{formula: "mol-dog-backup", want: []string{"sync", "offsite", "report"}},
+		{formula: "mol-dog-jsonl", want: []string{"export", "verify", "push", "report"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.formula, func(t *testing.T) {
+			steps := loadDogFormulaSteps(t, tt.formula)
+			children, want := pouredChildren(steps)
+
+			fake := &fakeFormulaBd{
+				children: children,
+				steps:    map[string][]formulaStep{tt.formula: steps},
+			}
+			dm := &dogMol{
+				rootID:  "hq-wisp-root",
+				formula: tt.formula,
+				stepIDs: make(map[string]string),
+				logger:  log.New(io.Discard, "", 0),
+				runBdFn: fake.run,
+			}
+
+			if err := dm.discoverSteps(); err != nil {
+				t.Fatalf("discoverSteps: %v", err)
+			}
+
+			if !reflect.DeepEqual(dm.stepIDs, want) {
+				t.Errorf("stepIDs = %v, want %v", dm.stepIDs, want)
+			}
+			for _, slug := range tt.want {
+				if _, ok := dm.stepIDs[slug]; !ok {
+					t.Errorf("step %q did not map to a child — closeStep(%q) would be a no-op", slug, slug)
+				}
+			}
+		})
+	}
+}
+
+// TestDiscoverStepsWithoutFormulaLeavesStepsToTheSweep covers the degradation
+// path: the molecule is readable but the formula is not, so the cycle still
+// runs and its steps are closed by closeRemainingSteps instead of silently
+// vanishing. The cause has to be in the log, or the next reader sees only
+// "unknown step" and no reason.
+func TestDiscoverStepsWithoutFormulaLeavesStepsToTheSweep(t *testing.T) {
+	var logged bytes.Buffer
+	fake := &fakeFormulaBd{
+		children: []childInfo{{ID: "hq-wisp-00", Title: "Inspect databases for commit count"}},
+		showErr:  fmt.Errorf("dolt server unreachable"),
+	}
+	dm := &dogMol{
+		rootID:  "hq-wisp-root",
+		formula: "mol-dog-compactor",
+		stepIDs: make(map[string]string),
+		logger:  log.New(&logged, "", 0),
+		runBdFn: fake.run,
+	}
+
+	if err := dm.discoverSteps(); err != nil {
+		t.Fatalf("discoverSteps must not fail the cycle when only the formula is unreadable: %v", err)
+	}
+	if len(dm.stepIDs) != 0 {
+		t.Errorf("stepIDs = %v, want none", dm.stepIDs)
+	}
+	if !strings.Contains(logged.String(), "cannot read the steps of mol-dog-compactor") {
+		t.Errorf("log must name the unreadable formula, got:\n%s", logged.String())
+	}
+
+	dm.closeStep("inspect")
+	if !strings.Contains(logged.String(), "unknown step") {
+		t.Errorf("with no mapping, closeStep still has to say the step is unknown, got:\n%s", logged.String())
+	}
+}
+
+// TestDiscoverStepsLogsUnmatchedChild is the drift guard: a child whose title is
+// not a step of the formula cannot be mapped, and must say so rather than being
+// skipped in silence — that silence is what hid the gt-i9la bug for months.
+func TestDiscoverStepsLogsUnmatchedChild(t *testing.T) {
+	var logged bytes.Buffer
+	steps := loadDogFormulaSteps(t, "mol-dog-compactor")
+	fake := &fakeFormulaBd{
+		children: []childInfo{
+			{ID: "hq-wisp-00", Title: steps[0].Title},
+			{ID: "hq-wisp-01", Title: "Escalate databases, rewritten title"},
+		},
+		steps: map[string][]formulaStep{"mol-dog-compactor": steps},
+	}
+	dm := &dogMol{
+		rootID:  "hq-wisp-root",
+		formula: "mol-dog-compactor",
+		stepIDs: make(map[string]string),
+		logger:  log.New(&logged, "", 0),
+		runBdFn: fake.run,
+	}
+
+	if err := dm.discoverSteps(); err != nil {
+		t.Fatalf("discoverSteps: %v", err)
+	}
+	if got := dm.stepIDs["inspect"]; got != "hq-wisp-00" {
+		t.Errorf("inspect mapped to %q, want hq-wisp-00 — one unmatched child must not stop the others", got)
+	}
+	if _, ok := dm.stepIDs["monitor"]; ok {
+		t.Errorf("a child title that is not a formula step mapped to monitor: %v", dm.stepIDs)
+	}
+	if !strings.Contains(logged.String(), "matches no step of the formula") || !strings.Contains(logged.String(), "rewritten title") {
+		t.Errorf("the unmatched child must be logged with its title, got:\n%s", logged.String())
+	}
+}
+
+// TestStepTitleKeyFoldsCaseAndWhitespace pins the normalization the title match
+// depends on.
+func TestStepTitleKeyFoldsCaseAndWhitespace(t *testing.T) {
+	tests := []struct{ a, b string }{
+		{"Report findings and return to kennel", "report findings and return to kennel"},
+		{"Sync  backups  to offsite storage", "Sync backups to offsite storage"},
+		{"  Monitor Dolt growth\n", "monitor dolt growth"},
+	}
+	for _, tt := range tests {
+		if got, want := stepTitleKey(tt.a), stepTitleKey(tt.b); got != want {
+			t.Errorf("stepTitleKey(%q) = %q, stepTitleKey(%q) = %q", tt.a, got, tt.b, want)
+		}
+	}
+}
+
+func TestParseFormulaStepsJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []formulaStep
+		wantErr bool
+	}{
+		{
+			name: "envelope from bd formula show",
+			input: `{"schema_version":1,"formula":"mol-dog-compactor","source":"/town/.beads/formulas/mol-dog-compactor.formula.toml",` +
+				`"description":"...","steps":[{"id":"inspect","title":"Inspect databases for commit count"},` +
+				`{"id":"monitor","title":"Escalate for databases over threshold","needs":["inspect"]}]}`,
+			want: []formulaStep{
+				{ID: "inspect", Title: "Inspect databases for commit count"},
+				{ID: "monitor", Title: "Escalate for databases over threshold"},
+			},
+		},
+		{
+			name:    "no steps",
+			input:   `{"schema_version":1,"formula":"empty","steps":[]}`,
+			wantErr: true,
+		},
+		{
+			name:    "steps key missing",
+			input:   `{"schema_version":1,"formula":"empty"}`,
+			wantErr: true,
+		},
+		{
+			name:    "not json",
+			input:   `Error: formula not found`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseFormulaStepsJSON(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseFormulaStepsJSON: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("steps = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStepSlugsByTitleKeepsFirstOfDuplicateTitles: two steps with one title are
+// indistinguishable from their children, so the first wins and the shadowed one
+// is named in the log rather than silently unreachable.
+func TestStepSlugsByTitleKeepsFirstOfDuplicateTitles(t *testing.T) {
+	var logged bytes.Buffer
+	fake := &fakeFormulaBd{steps: map[string][]formulaStep{
+		"mol-dog-dup": {
+			{ID: "first", Title: "Same title"},
+			{ID: "second", Title: "same  title"},
+		},
+	}}
+	dm := &dogMol{
+		formula: "mol-dog-dup",
+		stepIDs: make(map[string]string),
+		logger:  log.New(&logged, "", 0),
+		runBdFn: fake.run,
+	}
+
+	got, err := dm.stepSlugsByTitle()
+	if err != nil {
+		t.Fatalf("stepSlugsByTitle: %v", err)
+	}
+	if want := map[string]string{"same title": "first"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("slugs = %v, want %v", got, want)
+	}
+	if !strings.Contains(logged.String(), "share the title") {
+		t.Errorf("the shadowed step must be named in the log, got:\n%s", logged.String())
+	}
+}
+
+// TestDaemonDogCallSitesUseRealStepIDs guards the other half of the gt-i9la
+// failure. discoverSteps now resolves a child from the formula's declared
+// steps, so a closeStep slug that is not one of them is a permanent no-op: the
+// step the dog ran is left to the sweep, and the cycle's receipt reads as if
+// the dog abandoned it. The slugs are string literals at the call sites, so the
+// only thing that can be wrong about them is the name — and reading them back
+// from the source is what checks it.
+func TestDaemonDogCallSitesUseRealStepIDs(t *testing.T) {
+	// Every dog the daemon pours, by the constant the call site names. A new dog
+	// fails this test until its formula is added here, which is the point.
+	formulas := map[string]string{
+		"MolDogReaper":        constants.MolDogReaper,
+		"MolDogJSONL":         constants.MolDogJSONL,
+		"MolDogCompactor":     constants.MolDogCompactor,
+		"MolDogCheckpoint":    constants.MolDogCheckpoint,
+		"MolDogDoctor":        constants.MolDogDoctor,
+		"MolDogBackup":        constants.MolDogBackup,
+		"MolDogMayorDispatch": constants.MolDogMayorDispatch,
+	}
+
+	pourRe := regexp.MustCompile(`pourDogMolecule\(constants\.(\w+)`)
+	stepRe := regexp.MustCompile(`(?:closeStep|failStep|skipStep)\("([^"]+)"`)
+
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob package sources: %v", err)
+	}
+
+	checked := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+
+		pour := pourRe.FindSubmatch(src)
+		if pour == nil {
+			continue // not a dog's executor
+		}
+		formulaName, ok := formulas[string(pour[1])]
+		if !ok {
+			t.Fatalf("%s pours constants.%s — add it to this test's table", file, pour[1])
+		}
+
+		steps := make(map[string]bool)
+		for _, step := range loadDogFormulaSteps(t, formulaName) {
+			steps[step.ID] = true
+		}
+
+		checked++
+		for _, call := range stepRe.FindAllSubmatch(src, -1) {
+			slug := string(call[1])
+			if !steps[slug] {
+				t.Errorf("%s: step %q is not a step of %s — the matcher cannot resolve it, so the step will be closed by the sweep instead of by the code that ran it",
+					file, slug, formulaName)
+			}
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("no dog call sites found — this test is not covering anything")
 	}
 }
