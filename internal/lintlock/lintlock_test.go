@@ -79,9 +79,9 @@ func TestRetry_RealFailureAfterContentionIsReported(t *testing.T) {
 }
 
 // TestRetry_ContentionIsWaitedOut pins the behaviour the retry exists for, in
-// both shapes a contended lint takes: the marker an ordinary golangci-lint
-// prints, and the timeout a rig with run.allow-serial-runners reaches instead
-// because it blocks on the lock rather than giving up on it (gt-taoz, gt-ijqw).
+// both shapes a lint that never reported findings takes: the marker a contended
+// golangci-lint prints, and the timeout of one that took the lock and outran
+// run.timeout (gt-taoz, gt-ijqw).
 //
 // Serial because stubDelay swaps the package-level RetryDelay and restores it
 // (gt-k317). Install-once is not available here: each test shortens the delay

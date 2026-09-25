@@ -23,9 +23,9 @@ import (
 const Marker = "parallel golangci-lint is running"
 
 // TimeoutSentinel is what golangci-lint prints when it stops at its own
-// --timeout without reporting findings. A rig that sets
-// run.allow-serial-runners blocks on the lock instead of printing Marker, so a
-// contended lint there leaves this as its only evidence (gt-taoz, gt-ijqw).
+// --timeout without reporting findings. run.timeout's clock starts only once
+// the module lock is held, so this covers a lint that took the lock and ran too
+// long — never one that was still waiting for it (gt-ijqw, gt-kqwu).
 const TimeoutSentinel = "Timeout exceeded: try increasing it by passing --timeout option"
 
 // RetryDelay is how long to wait before each re-run of a contended lint: one
@@ -72,10 +72,11 @@ const ContendedAttempt = 5 * time.Second
 // RoomForRetry refuses early waits and the retry quietly stops happening
 // (gt-xsty).
 //
-// It is a floor for the shape where a contended attempt fails fast. A rig that
-// sets run.allow-serial-runners makes one cost its own lint timeout instead, so
-// its budget affords fewer retries; what bounds the loop either way is the
-// caller's budget, not this.
+// It is a floor for the shape where a contended attempt fails fast. A lint
+// command that hides the lock — a serial runner, or a wrapper that waits
+// internally — reports no contention at all, so its budget buys no retries and
+// the waiting has to happen inside that command, where no caller can attribute
+// or bound it (gt-kqwu).
 func MinBudget() time.Duration {
 	return Schedule() + Reserve + ContendedAttempt
 }
@@ -107,9 +108,9 @@ func Contended(output string) bool {
 
 // Unfinished reports whether a failed attempt's output says the lint never
 // analyzed anything: the lock marker, or golangci-lint's own timeout, which is
-// how a serial runner's blocked wait ends (gt-ijqw). Retrying on this is safe
-// from the opposite error, because a lint that ran and found something prints
-// findings rather than either sentinel.
+// how a lint that held the lock and outran run.timeout ends (gt-ijqw). Retrying
+// on this is safe from the opposite error, because a lint that ran and found
+// something prints findings rather than either sentinel.
 func Unfinished(output string) bool {
 	return Contended(output) || strings.Contains(output, TimeoutSentinel)
 }

@@ -3,13 +3,14 @@ version: "2"
 run:
   timeout: 5m
   tests: false
-  # Block on the module-wide flock ($TMPDIR/golangci-lint.lock) instead of
-  # giving up on it after 5s with "parallel golangci-lint is running", which
-  # analyzes nothing and which the refinery's batch gate — chaining this rig's
-  # `make lint` verbatim, with no retry of its own — cannot tell from a real
-  # failure (gt-taoz, gt-xsty). golangci-lint prints nothing while it waits, so
-  # the lint target announces the wait before starting it.
-  allow-serial-runners: true
+  # Leave the module-wide flock ($TMPDIR/golangci-lint.lock) failing fast:
+  # golangci-lint's 5s "parallel golangci-lint is running" exit is the evidence
+  # internal/lintlock attributes a contended lint from, and the gate and gt done
+  # wait that out and retry. run.allow-serial-runners would make a contended
+  # lint block silently instead — it prints neither that line nor its own
+  # timeout, because run.timeout's clock starts only once the lock is held — so
+  # the gate would read a lint it killed at its budget as one that had run
+  # (gt-kqwu).
 
 linters:
   default: 'none'
