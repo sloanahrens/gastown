@@ -33,10 +33,11 @@ const tailAnchorDepth = 8
 //
 // A rotated file usually starts with history the rotator kept. To avoid
 // replaying it, the tail remembers the last complete line it has passed (the
-// anchor) and resumes after the anchor's last occurrence in the new content.
-// It keeps the last few lines as anchors and uses the newest one present. If
-// none is there, it reads the new content from the start: a spurious wake is
-// recoverable, a missed event is not.
+// anchor) and resumes after the retained copy of it in the new content. It
+// keeps the last few lines as anchors and matches them as a run (see
+// offsetAfterAnchors), so a new event whose text repeats an anchor is still
+// delivered. If none is there, it reads the new content from the start: a
+// spurious wake is recoverable, a missed event is not.
 //
 // Limitation: a truncate-in-place that regrows past the read offset between
 // two polls is indistinguishable from appends and is not detected.
@@ -189,28 +190,52 @@ func (t *Tail) resumeAfterAnchor(f *os.File) error {
 	return nil
 }
 
-// offsetAfterAnchors returns the offset just past the last occurrence of the
-// newest anchor (anchors are ordered oldest first) found as a complete line in
-// f, or 0 when none is found.
+// offsetAfterAnchors returns where to resume reading f after a rotation: just
+// past the retained copy of the lines the tail has already passed, or 0 when
+// none of them is in f.
+//
+// anchors are the recently passed lines, oldest first. Retained history ends
+// with a run of them, so each line position in f is scored by the run of f's
+// lines ending there that equals a run of anchors ending at anchor j:
+//   - a higher j wins (the newest anchor present; the newest anchors can be
+//     missing when an unlocked writer appended to the old file after the copy);
+//   - for equal j, a longer run wins. An event whose text repeats the newest
+//     anchor, appended right after the rotation, only matches a run of one,
+//     so it is delivered instead of skipped as history;
+//   - for equal scores the earliest position wins: an extra line delivered is
+//     recoverable, a missed one is not.
 func offsetAfterAnchors(f *os.File, anchors []string) (int64, error) {
 	if len(anchors) == 0 {
 		return 0, nil
-	}
-	want := make(map[string]int64, len(anchors))
-	for _, a := range anchors {
-		want[a] = -1
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}
 	r := bufio.NewReader(f)
-	var pos int64
+	var (
+		pos     int64
+		window  []string // f's most recent lines, oldest first, at most len(anchors)
+		best    int64
+		bestJ   = -1
+		bestRun int
+	)
 	for {
-		line, err := r.ReadString('\n')
-		pos += int64(len(line))
-		if strings.HasSuffix(line, "\n") {
-			if _, ok := want[strings.TrimSuffix(line, "\n")]; ok {
-				want[strings.TrimSuffix(line, "\n")] = pos
+		raw, err := r.ReadString('\n')
+		pos += int64(len(raw))
+		if strings.HasSuffix(raw, "\n") {
+			window = append(window, strings.TrimSuffix(raw, "\n"))
+			if len(window) > len(anchors) {
+				window = window[1:]
+			}
+			for j := len(anchors) - 1; j >= bestJ && j >= 0; j-- {
+				run := matchingRun(window, anchors[:j+1])
+				if run == 0 {
+					continue
+				}
+				if j > bestJ || run > bestRun {
+					best, bestJ, bestRun = pos, j, run
+				}
+				break // lower j cannot beat a match at this j
 			}
 		}
 		if err == io.EOF {
@@ -220,12 +245,19 @@ func offsetAfterAnchors(f *os.File, anchors []string) (int64, error) {
 			return 0, err
 		}
 	}
-	for i := len(anchors) - 1; i >= 0; i-- {
-		if off := want[anchors[i]]; off >= 0 {
-			return off, nil
-		}
+	if bestJ < 0 {
+		return 0, nil
 	}
-	return 0, nil
+	return best, nil
+}
+
+// matchingRun returns how many trailing elements of a and b are equal.
+func matchingRun(a, b []string) int {
+	n := 0
+	for n < len(a) && n < len(b) && a[len(a)-1-n] == b[len(b)-1-n] {
+		n++
+	}
+	return n
 }
 
 // lastCompleteLine returns the last newline-terminated, non-empty line ending

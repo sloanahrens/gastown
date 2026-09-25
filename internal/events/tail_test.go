@@ -245,3 +245,42 @@ func TestTail_PathTemporarilyMissing(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+// An event identical to the last line already seen, appended right after a
+// rotation, must not be mistaken for the retained copy of that line. The tail
+// resumes after the longest run of recent lines it matches, not after the
+// last copy of the newest one.
+func TestTail_DuplicateOfAnchorAppendedAfterRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".events.jsonl")
+	writeLines(t, path, "expired", "w", "x")
+	tail := openTestTail(t, path)
+	appendLines(t, path, "y", "z")
+	if got, want := poll(t, tail), []string{"y", "z"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	rotate(t, path, "w", "x", "y", "z")
+	appendLines(t, path, "z") // same text as the anchor, but a new event
+
+	if got, want := poll(t, tail), []string{"z"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q, want %q (duplicate of the anchor must still be delivered)", got, want)
+	}
+}
+
+// Identical consecutive lines at the end of the old file are all retained
+// history: none of them may replay.
+func TestTail_RepeatedAnchorRunDoesNotReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".events.jsonl")
+	writeLines(t, path, "expired")
+	tail := openTestTail(t, path)
+	appendLines(t, path, "a", "a", "a")
+	if got := poll(t, tail); len(got) != 3 {
+		t.Fatalf("got %q, want three lines", got)
+	}
+
+	rotate(t, path, "a", "a", "a")
+	appendLines(t, path, "b")
+	if got, want := poll(t, tail), []string{"b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
