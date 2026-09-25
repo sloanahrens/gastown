@@ -76,11 +76,12 @@ owner cannot see, which is how gt-hmaf's incident happened.
   - Edit / Write / MultiEdit / NotebookEdit are denied when the resolved
     file_path (or notebook_path) is outside the polecat's own worktree. Temp
     directories and the session scratchpad stay writable.
-  - Bash is denied when a write-capable command (cp/mv/rm/mkdir/tee/chmod/..., an
-    interpreter, curl -o/wget), a shell write redirection, a cd, or a git -C
-    target names a path inside the town that is not the polecat's own worktree,
-    its own polecat directory, or its rig's .repo.git. Read-only commands
-    (grep/cat/ls) are allowed anywhere.
+  - Bash (and Monitor, which carries the same tool_input.command shape as a
+    background/streaming watch) is denied when a write-capable command
+    (cp/mv/rm/mkdir/tee/chmod/..., an interpreter, curl -o/wget), a shell write
+    redirection, a cd, or a git -C target names a path inside the town that is
+    not the polecat's own worktree, its own polecat directory, or its rig's
+    .repo.git. Read-only commands (grep/cat/ls) are allowed anywhere.
 
 Paths are expanded (~, $HOME, and any variable this process can see), resolved
 against the session cwd, symlink-resolved through their longest existing
@@ -161,7 +162,12 @@ func (s polecatPathScope) evaluate(hook polecatPathsInput) string {
 			target = hook.ToolInput.FilePath
 		}
 		return s.checkFileTarget(target, hook.ToolName)
-	case "Bash":
+	case "Bash", "Monitor":
+		// Monitor runs the same command shape as Bash (a shell command in
+		// tool_input.command) as a background/streaming watch, and was
+		// invisible to this guard until this case existed — the matcher
+		// alone (shellExecutingToolMatcher) only routes the call here, it
+		// doesn't teach the guard the tool's shape (gt-vx2mm).
 		return s.checkBashCommand(hook.ToolInput.Command, 0)
 	default:
 		// Anything else that can write (an MCP filesystem tool, a future

@@ -401,6 +401,25 @@ func TestPolecatPathGuardBash(t *testing.T) {
 	}
 }
 
+// TestPolecatPathGuardMonitorSameAsBash pins gt-vx2mm: the Monitor tool
+// carries the same tool_input.command shape as Bash (a shell command in
+// tool_input.command run as a background/streaming watch), and this guard's
+// switch on tool_name must treat it identically — a polecat should not be
+// able to reach a sibling's worktree just by routing the same command
+// through Monitor instead of Bash.
+func TestPolecatPathGuardMonitorSameAsBash(t *testing.T) {
+	p := newPolecatTestTown(t)
+	blocked := "rm -rf " + filepath.Join(p.sibling, "internal.go")
+	if err := p.run(t, "Monitor", commandInput(blocked)); err == nil {
+		t.Errorf("Monitor command %q: expected BLOCK (same as Bash), got allow", blocked)
+	}
+
+	allowed := "cd " + p.worktree + " && go build ./..."
+	if err := p.run(t, "Monitor", commandInput(allowed)); err != nil {
+		t.Errorf("Monitor command %q: expected allow, got block: %v", allowed, err)
+	}
+}
+
 // TestPolecatPathGuardBashHeredocFedInterpreter pins the one shape where a
 // heredoc body really is code: a script handed to an interpreter on stdin
 // cannot be inspected, so it is denied rather than waved through.

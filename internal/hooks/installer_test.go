@@ -185,16 +185,17 @@ func TestInstallForRole_BootClaudeSettingsUseManagedHooks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadSettings: %v", err)
 			}
-			// Post gt-5ihs/gt-3mp1 the guard lives under the bare "Bash"
-			// tool-name matcher — Claude Code's matcher only ever matches the
-			// tool name — and carries NO If: it is the self-filtering
-			// boot-sendkeys guard, which reads tool_input.command off stdin.
-			// Match on the guard command, not on an If value: asserting "the
-			// hook with an empty If" is what let a regression through before,
-			// because it named whichever ungated hook happened to be last.
-			entry, ok := findPreToolUse(&settings.Hooks, "Bash")
+			// Post gt-5ihs/gt-3mp1/gt-vx2mm the guard lives under the bare
+			// shellExecutingToolMatcher tool-name matcher — Claude Code's
+			// matcher only ever matches the tool name — and carries NO If:
+			// it is the self-filtering boot-sendkeys guard, which reads
+			// tool_input.command off stdin. Match on the guard command, not
+			// on an If value: asserting "the hook with an empty If" is what
+			// let a regression through before, because it named whichever
+			// ungated hook happened to be last.
+			entry, ok := findPreToolUse(&settings.Hooks, shellExecutingToolMatcher)
 			if !ok {
-				t.Fatal("boot install did not write the bare Bash PreToolUse entry")
+				t.Fatalf("boot install did not write the bare %q PreToolUse entry", shellExecutingToolMatcher)
 			}
 			var tmuxGuardCommand string
 			for _, h := range entry.Hooks {

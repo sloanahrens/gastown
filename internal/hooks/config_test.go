@@ -587,13 +587,14 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	}
 
 	// Witness should get DefaultBase + built-in patrol-loop guard (gt-e47hxn,
-	// gt-qqfy). Post gt-5ihs, every PreToolUse Bash guard shares the bare
-	// "Bash" tool-name matcher — Claude Code's matcher only ever matches the
-	// tool name. patrol-loop self-filters on tool_input.command (gt-qqfy),
-	// so it needs no If — witness must have exactly one PreToolUse entry
-	// (matcher "Bash") whose Hooks accumulate the base guards (pr-workflow,
-	// dangerous-command, container-suite) AND witness's own ungated
-	// patrol-loop hook.
+	// gt-qqfy). Post gt-5ihs/gt-vx2mm, every PreToolUse shell-command guard
+	// shares the bare shellExecutingToolMatcher tool-name matcher — Claude
+	// Code's matcher only ever matches the tool name. patrol-loop
+	// self-filters on tool_input.command (gt-qqfy), so it needs no If —
+	// witness must have exactly one PreToolUse entry (matcher
+	// shellExecutingToolMatcher) whose Hooks accumulate the base guards
+	// (pr-workflow, dangerous-command, container-suite) AND witness's own
+	// ungated patrol-loop hook.
 	witness, err := ComputeExpected("witness")
 	if err != nil {
 		t.Fatalf("ComputeExpected(witness) failed: %v", err)
@@ -676,25 +677,25 @@ func TestBuiltinHooksNeverUseIf(t *testing.T) {
 	}
 }
 
-// requireUngatedGuardCommand asserts that cfg's PreToolUse has a bare-"Bash"
-// matcher entry with a Hook whose Command contains commandSubstring and
-// whose If field is empty — the shape a self-filtering guard (one that
-// reads tool_input.command off stdin and inspects it directly, like
-// dangerous-command and patrol-loop) needs, since it must run
+// requireUngatedGuardCommand asserts that cfg's PreToolUse has a bare
+// shellExecutingToolMatcher entry with a Hook whose Command contains
+// commandSubstring and whose If field is empty — the shape a self-filtering
+// guard (one that reads tool_input.command off stdin and inspects it
+// directly, like dangerous-command and patrol-loop) needs, since it must run
 // unconditionally rather than depend on an "if" permission-glob to decide
 // when it's even invoked (gt-qqfy).
 func requireUngatedGuardCommand(t *testing.T, label string, cfg *HooksConfig, commandSubstring string) {
 	t.Helper()
-	entry, ok := findPreToolUse(cfg, "Bash")
+	entry, ok := findPreToolUse(cfg, shellExecutingToolMatcher)
 	if !ok {
-		t.Fatalf("%s: missing bare \"Bash\" PreToolUse matcher entry", label)
+		t.Fatalf("%s: missing bare %q PreToolUse matcher entry", label, shellExecutingToolMatcher)
 	}
 	for _, h := range entry.Hooks {
 		if strings.Contains(h.Command, commandSubstring) && h.If == "" {
 			return
 		}
 	}
-	t.Errorf("%s: missing ungated (If=\"\") PreToolUse hook with Command containing %q under matcher \"Bash\", got: %+v", label, commandSubstring, entry.Hooks)
+	t.Errorf("%s: missing ungated (If=\"\") PreToolUse hook with Command containing %q under matcher %q, got: %+v", label, commandSubstring, shellExecutingToolMatcher, entry.Hooks)
 }
 
 // TestComputeExpectedWitnessRigSpecific verifies patrol-formula-guard propagates
@@ -712,7 +713,7 @@ func TestComputeExpectedWitnessRigSpecific(t *testing.T) {
 
 	// Should have the ungated patrol-loop guard (self-filters, no If —
 	// gt-qqfy) from DefaultOverrides["witness"], accumulated under the bare
-	// "Bash" matcher entry.
+	// shellExecutingToolMatcher entry.
 	requireUngatedGuardCommand(t, "sky/witness", skyWitness, "tap guard patrol-loop")
 
 	// Should also inherit base hooks (pr-workflow-guard, etc.)
@@ -751,12 +752,13 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 	}
 
 	// Post gt-5ihs, dog's formula-allowlist guard and the base's pr-workflow
-	// / dangerous-command guards all share the bare "Bash" matcher — Claude
-	// Code's matcher only ever matches the tool name — and accumulate as
+	// / dangerous-command guards all share the bare shellExecutingToolMatcher
+	// matcher — Claude Code's matcher only ever matches the tool name — and
+	// accumulate as
 	// separate Hooks rather than one replacing the other (merge.go's
 	// unionHooks). formula-allowlist has no If (it self-filters, like
 	// dangerous-command), so it must appear among the hooks with an empty If.
-	entry, ok := findPreToolUse(dog, "Bash")
+	entry, ok := findPreToolUse(dog, shellExecutingToolMatcher)
 	if !ok {
 		t.Fatal("dog missing PreToolUse guard on bare Bash matcher")
 	}
@@ -785,13 +787,13 @@ func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
 	}
 
 	// Other roles must not receive the dog guard. Mayor still has its own
-	// bare "Bash" entry (base's pr-workflow/dangerous-command guards), but
-	// it must not contain formula-allowlist.
+	// bare shellExecutingToolMatcher entry (base's pr-workflow/dangerous-command
+	// guards), but it must not contain formula-allowlist.
 	mayorCfg, err := ComputeExpected("mayor")
 	if err != nil {
 		t.Fatalf("ComputeExpected(mayor): %v", err)
 	}
-	mayorEntry, ok := findPreToolUse(mayorCfg, "Bash")
+	mayorEntry, ok := findPreToolUse(mayorCfg, shellExecutingToolMatcher)
 	if !ok {
 		t.Fatal("mayor should still have the base Bash guard entry")
 	}
@@ -818,7 +820,7 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	}
 
 	const guardCommand = "tap guard polecat-paths"
-	bashEntry, ok := findPreToolUse(polecats, "Bash")
+	bashEntry, ok := findPreToolUse(polecats, shellExecutingToolMatcher)
 	if !ok {
 		t.Fatal("polecats missing the base bare \"Bash\" PreToolUse entry")
 	}
@@ -834,8 +836,8 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	if !hasPolecatPaths {
 		t.Errorf("polecats Bash entry missing %q, got: %+v", guardCommand, bashEntry.Hooks)
 	}
-	// The base's own guards share the bare "Bash" matcher and must survive the
-	// union (gt-5ihs, gt-3mp1): pr-workflow, dangerous-command,
+	// The base's own guards share the bare shellExecutingToolMatcher matcher
+	// and must survive the union (gt-5ihs, gt-3mp1): pr-workflow, dangerous-command,
 	// container-suite and bd-close-invariant are all self-filtering hooks with
 	// no If.
 	requireUngatedGuardCommand(t, "gastown/polecats", polecats, "tap guard pr-workflow")
@@ -896,6 +898,61 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	}
 }
 
+// TestPreToolUseGuardsCoverMonitorTool pins gt-vx2mm: Claude Code's Monitor
+// tool carries the same tool_input.command shape as Bash (both take a
+// "command" string), but every self-filtering PreToolUse guard (pr-workflow,
+// dangerous-command, container-suite, bd-close-invariant, polecat-paths,
+// patrol-loop, boot-sendkeys, formula-allowlist) used to route through a
+// bare "Bash" matcher — invisible to Monitor, since Claude Code's
+// hooks[].matcher only ever matches the tool name (gt-5ihs). A polecat could
+// run any guard-blocked command (rm -rf, a force push, an unwrapped test
+// suite, a raw bd close) through Monitor and skip every one of those guards.
+// This test both pins that shellExecutingToolMatcher actually names Bash and
+// Monitor, and regression-guards against any PreToolUse entry — built-in or
+// computed — reverting to the narrower bare "Bash" matcher the bug shipped
+// with.
+func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	tools := strings.Split(shellExecutingToolMatcher, "|")
+	for _, want := range []string{"Bash", "Monitor"} {
+		found := false
+		for _, tool := range tools {
+			if tool == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("shellExecutingToolMatcher %q is missing tool %q — a shell-executing Claude Code tool must be listed here or its guard-blocked commands bypass every guard (gt-vx2mm)", shellExecutingToolMatcher, want)
+		}
+	}
+
+	assertNoBareBashMatcher := func(label string, cfg *HooksConfig) {
+		t.Helper()
+		for _, entry := range cfg.PreToolUse {
+			if entry.Matcher == "Bash" {
+				t.Errorf("%s: PreToolUse matcher is bare \"Bash\" — Monitor-run commands bypass this guard entirely (gt-vx2mm); use shellExecutingToolMatcher instead. Hooks: %+v", label, entry.Hooks)
+			}
+		}
+	}
+
+	assertNoBareBashMatcher("DefaultBase", DefaultBase())
+	for role, override := range DefaultOverrides() {
+		assertNoBareBashMatcher("DefaultOverrides["+role+"]", override)
+	}
+
+	// End-to-end: every role's fully computed config must expose its
+	// self-filtering guards under shellExecutingToolMatcher.
+	for _, target := range []string{"mayor", "deacon", "crew", "witness", "refinery", "gastown/polecats", "dog", "boot"} {
+		cfg, err := ComputeExpected(target)
+		if err != nil {
+			t.Fatalf("ComputeExpected(%s): %v", target, err)
+		}
+		assertNoBareBashMatcher("ComputeExpected("+target+")", cfg)
+	}
+}
+
 func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
@@ -905,13 +962,13 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 		t.Fatalf("ComputeExpected(boot): %v", err)
 	}
 
-	// Post gt-5ihs/gt-3mp1 the guard lives under the bare "Bash" tool-name
-	// matcher (Claude Code's matcher only ever matches the tool name) and
+	// Post gt-5ihs/gt-3mp1 the guard lives under the bare shellExecutingToolMatcher
+	// tool-name matcher (Claude Code's matcher only ever matches the tool name) and
 	// carries no If: it is the self-filtering boot-sendkeys guard, which
 	// reads tool_input.command off stdin and blocks only a real tmux
 	// send-keys invocation. An If-gated inline echo+exit-2 here is what
 	// blocked every unrelated boot command (gt-3mp1).
-	entry, ok := findPreToolUse(boot, "Bash")
+	entry, ok := findPreToolUse(boot, shellExecutingToolMatcher)
 	if !ok {
 		t.Fatal("boot missing bare Bash PreToolUse entry")
 	}
@@ -937,7 +994,7 @@ func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeExpected(mayor): %v", err)
 	}
-	mayorEntry, ok := findPreToolUse(mayor, "Bash")
+	mayorEntry, ok := findPreToolUse(mayor, shellExecutingToolMatcher)
 	if !ok {
 		t.Fatal("mayor should still have the base Bash guard entry")
 	}
