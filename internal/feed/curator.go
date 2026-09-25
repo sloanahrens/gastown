@@ -98,22 +98,18 @@ func (c *Curator) Start() error {
 	c.startOnce.Do(func() {
 		eventsPath := filepath.Join(c.townRoot, events.EventsFile)
 
-		// Open events file, creating if needed
-		file, err := os.OpenFile(eventsPath, os.O_RDONLY|os.O_CREATE, 0600)
+		// Tail from the end, creating the file if needed. The tail follows
+		// the path: the KRC pruner replaces the file (tmp + rename), and a
+		// descriptor-bound reader went deaf until the next daemon restart
+		// (claude-9jq).
+		tail, err := events.OpenTail(eventsPath)
 		if err != nil {
 			c.startErr = fmt.Errorf("opening events file: %w", err)
 			return
 		}
 
-		// Seek to end to only process new events
-		if _, err := file.Seek(0, io.SeekEnd); err != nil {
-			_ = file.Close() //nolint:gosec // G104: best effort cleanup on error
-			c.startErr = fmt.Errorf("seeking to end: %w", err)
-			return
-		}
-
 		c.wg.Add(1)
-		go c.run(file)
+		go c.run(tail)
 	})
 	return c.startErr
 }
@@ -126,11 +122,10 @@ func (c *Curator) Stop() {
 
 // run is the main curator loop.
 // ZFC: No in-memory state to clean up - state is derived from the events file.
-func (c *Curator) run(file *os.File) {
+func (c *Curator) run(tail *events.Tail) {
 	defer c.wg.Done()
-	defer file.Close()
+	defer func() { _ = tail.Close() }()
 
-	reader := bufio.NewReader(file)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -140,13 +135,14 @@ func (c *Curator) run(file *os.File) {
 			return
 
 		case <-ticker.C:
-			// Read available lines
-			for {
-				line, err := reader.ReadString('\n')
-				if err != nil {
-					break // No more data available
-				}
+			// Poll returns every complete line appended so far and holds a
+			// partial line until its newline arrives.
+			lines, err := tail.Poll()
+			for _, line := range lines {
 				c.processLine(line)
+			}
+			if err != nil {
+				log.Printf("warning: reading events file: %v", err)
 			}
 		}
 	}
