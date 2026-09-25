@@ -340,7 +340,9 @@ func namedPolecatRefusal(rigName, name, hookBead, heldIssue string, err error) e
 	var hint string
 	switch {
 	case errors.Is(err, polecat.ErrPolecatParked):
-		hint = fmt.Sprintf("Resume the park, then retry: gt agent resume %s && gt sling %s %s", addr, bead, addr)
+		// Retry with the full <rig>/polecats/<name> form: the <rig>/<name>
+		// shorthand only reaches a sessionless polecat under --create.
+		hint = fmt.Sprintf("Resume the park, then retry: gt agent resume %s && gt sling %s %s/polecats/%s", addr, bead, rigName, name)
 	case hookBead != "" && heldIssue == hookBead:
 		hint = fmt.Sprintf("It already holds %s; resume that work: gt session start %s --issue %s", hookBead, addr, hookBead)
 	default:

@@ -55,8 +55,9 @@ Target Resolution:
   gt sling gt-abc                       # Self (current agent)
   gt sling gt-abc crew                  # Crew worker in current rig
   gt sling gp-abc greenplace               # Auto-spawn polecat in rig
-  gt sling gt-abc greenplace/Toast         # Specific polecat (exactly Toast, or refused;
-                                        #   --create makes it if missing)
+  gt sling gt-abc greenplace/polecats/toast  # Specific polecat: exactly toast, or refused
+  gt sling gt-abc greenplace/polecats/toast --create  # ...created as toast if missing
+                                        # (new names: lowercase a-z0-9-, >3 chars, not reserved)
   gt sling gt-abc gastown --crew mel    # Crew member mel in gastown
   gt sling gt-abc mayor                 # Mayor
   gt sling gt-abc deacon/dogs           # Auto-dispatch to idle dog

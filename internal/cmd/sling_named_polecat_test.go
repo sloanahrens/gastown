@@ -342,8 +342,8 @@ func TestNamedPolecatRefusal_HintPerCause(t *testing.T) {
 		{
 			name:    "parked",
 			err:     fmt.Errorf("%w: %w: parked (operator parked)", polecat.ErrPolecatNeedsRecovery, polecat.ErrPolecatParked),
-			want:    []string{"gt agent resume rig/garnet", "gt sling gt-new rig/garnet", "gt sling gt-new rig"},
-			notWant: []string{"gt session start"},
+			want:    []string{"gt agent resume rig/garnet", "gt sling gt-new rig/polecats/garnet", "gt sling gt-new rig"},
+			notWant: []string{"gt session start", "gt sling gt-new rig/garnet"},
 		},
 		{
 			name:      "holds the slung bead",
