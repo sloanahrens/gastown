@@ -2,6 +2,9 @@ package doctor
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/formula"
@@ -61,7 +64,7 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 	for _, f := range report.Formulas {
 		switch f.Status {
 		case "outdated":
-			details = append(details, fmt.Sprintf("  %s: update available", f.Name))
+			details = append(details, fmt.Sprintf("  %s: update available%s", f.Name, sameVersionClause(ctx.TownRoot, f.Name)))
 			needsFix = true
 		case "missing":
 			details = append(details, fmt.Sprintf("  %s: missing (will reinstall)", f.Name))
@@ -71,13 +74,13 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 			if f.EmbeddedHash != f.InstalledHash {
 				blocked = "blocking newer content this binary carries"
 			}
-			details = append(details, fmt.Sprintf("  %s: hand-edited (%s, NOT delivered)", f.Name, blocked))
+			details = append(details, fmt.Sprintf("  %s: hand-edited (%s, NOT delivered)%s", f.Name, blocked, sameVersionClause(ctx.TownRoot, f.Name)))
 			modified = append(modified, f.Name)
 		case "new":
 			details = append(details, fmt.Sprintf("  %s: new formula available", f.Name))
 			needsFix = true
 		case "untracked":
-			details = append(details, fmt.Sprintf("  %s: untracked (will update)", f.Name))
+			details = append(details, fmt.Sprintf("  %s: untracked (will update)%s", f.Name, sameVersionClause(ctx.TownRoot, f.Name)))
 			needsFix = true
 		}
 	}
@@ -133,4 +136,50 @@ func (c *FormulaCheck) Run(ctx *CheckContext) *CheckResult {
 func (c *FormulaCheck) Fix(ctx *CheckContext) error {
 	_, err := formula.UpdateFormulas(ctx.TownRoot)
 	return err
+}
+
+// sameVersionClause names the version and both sizes for a town-tier copy that
+// declares the same version as the embedded one: no version bump announces that
+// divergence, so the sizes are the signal a reader has to go on (gt-aydo).
+// Empty when the versions differ or either copy does not parse — those findings
+// already say everything a version comparison would add.
+func sameVersionClause(townRoot, name string) string {
+	townData, err := os.ReadFile(filepath.Join(townRoot, ".beads", "formulas", name)) //nolint:gosec // G304: name comes from the embedded formula list
+	if err != nil {
+		return ""
+	}
+	embedded, err := formula.GetEmbeddedFormulaContent(name)
+	if err != nil {
+		return ""
+	}
+
+	townF, err := formula.Parse(townData)
+	if err != nil {
+		return ""
+	}
+	embeddedF, err := formula.Parse(embedded)
+	if err != nil {
+		return ""
+	}
+	if townF.Version != embeddedF.Version {
+		return ""
+	}
+
+	return fmt.Sprintf("; same version as embedded (%d), different bytes: town %s vs embedded %s",
+		townF.Version, exactBytes(len(townData)), exactBytes(len(embedded)))
+}
+
+// exactBytes groups a byte count for a detail line ("30,870 B"). The package's
+// formatBytes rounds to the nearest unit, which would render two different
+// formula sizes as the same string and hide the divergence being reported.
+func exactBytes(n int) string {
+	digits := strconv.Itoa(n)
+	var b strings.Builder
+	for i := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte(digits[i])
+	}
+	return b.String() + " B"
 }
