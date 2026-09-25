@@ -225,3 +225,23 @@ func TestAcceptWorkspaceTrustDialog_StaleDialogTextIgnoresPrompt(t *testing.T) {
 		t.Errorf("recorded keys = %q, want none: stale dialog text is not a dialog", got)
 	}
 }
+
+// TestAcceptWorkspaceTrustDialog_StaleOptionsIgnorePrompt covers the same stale
+// pane carrying a *parseable* option list, which is what a fully rendered and
+// then dismissed dialog leaves behind. The list parses, so the stale state has to
+// be caught before navigation or the function sends Down+Enter into the agent's
+// live composer (gt-sd1o).
+func TestAcceptWorkspaceTrustDialog_StaleOptionsIgnorePrompt(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-trust-stale-options-" + t.Name()
+	keysPath := startTrustDialogSession(t, tm, sessionName,
+		claudeTrustDialogCancelFirst, trustFixtureOptions{promptFirst: true})
+
+	if err := tm.AcceptWorkspaceTrustDialog(sessionName); err != nil {
+		t.Fatalf("AcceptWorkspaceTrustDialog: %v", err)
+	}
+
+	if got := readRecordedKeys(t, keysPath); got != "" {
+		t.Errorf("recorded keys = %q, want none: a stale option list is not a dialog to answer", got)
+	}
+}

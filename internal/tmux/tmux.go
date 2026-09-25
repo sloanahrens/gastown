@@ -2279,6 +2279,9 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 // selectTrustDialogOption moves the dialog's selection onto the trust-granting
 // option and confirms it.
 //
+// It returns nil without pressing a key when the pane's dialog text is stale
+// output scrolled above a live prompt, which is not a dialog to answer.
+//
 // It returns an error, leaving the dialog untouched, when the pane does not show
 // a single focused option and a single trust-granting option: every keypress
 // into an unread dialog is a coin flip between granting trust and exiting the
@@ -2286,16 +2289,17 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 // leaves the pane alive for CheckStartupBlocked to report, which fails the spawn
 // loudly and lets the caller roll back.
 func (t *Tmux) selectTrustDialogOption(session, content string) error {
+	// Stale dialog output above a live prompt carries the same option list a
+	// live dialog does, so it has to be ruled out before the list is read:
+	// navigation would otherwise succeed and send the keys into the agent's
+	// composer. A live dialog renders at the bottom of the pane, so a prompt
+	// drawn below the dialog markers is what separates the two (gt-sd1o).
+	if promptAppearsAfterStartupBlocker(content) {
+		return nil
+	}
+
 	key, presses, err := trustNavigation(content)
 	if err != nil {
-		// Dialog text with a prompt rendered below it is stale output from an
-		// earlier dialog, not a blocking one: there is nothing to select, and
-		// pressing keys would type into whatever is live. This check runs only
-		// on the path that has already decided not to press anything, so a
-		// misjudgement here can never suppress a needed keystroke.
-		if promptAppearsAfterStartupBlocker(content) {
-			return nil
-		}
 		return fmt.Errorf("cannot select the trust option in %s: %w", session, err)
 	}
 

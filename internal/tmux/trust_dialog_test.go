@@ -315,3 +315,44 @@ func TestParseTrustOptionLineCursorMarkers(t *testing.T) {
 		})
 	}
 }
+
+// TestLiveDialogsAreNotStale guards the order selectTrustDialogOption reads the
+// pane in: the stale check runs before the option list is parsed, so a live
+// dialog judged stale would go unanswered and fail the spawn. None of these
+// render a prompt below their option list (gt-sd1o).
+func TestLiveDialogsAreNotStale(t *testing.T) {
+	t.Parallel()
+
+	dialogs := map[string]string{
+		"claude cancel-first": claudeTrustDialogCancelFirst,
+		"claude yes-first":    claudeTrustDialogYesFirst,
+		"claude warning":      claudeTrustDialogWarning,
+		"codex":               codexTrustDialog,
+		"bypass permissions":  bypassPermissionsDialog,
+	}
+
+	for name, content := range dialogs {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if promptAppearsAfterStartupBlocker(content) {
+				t.Error("live dialog read as stale scrollback: it would go unanswered")
+			}
+		})
+	}
+}
+
+// TestStaleDialogWithOptionsIsStale is the state the stale check exists for: the
+// pane holds a whole dismissed dialog, option list included, above a live prompt.
+// The list still parses, so the prompt's position is the only signal that nothing
+// on screen is waiting to be answered (gt-sd1o).
+func TestStaleDialogWithOptionsIsStale(t *testing.T) {
+	t.Parallel()
+
+	content := claudeTrustDialogCancelFirst + "\n\n❯ "
+	if !promptAppearsAfterStartupBlocker(content) {
+		t.Fatal("dialog text above a live prompt must read as stale")
+	}
+	if key, presses, err := trustNavigation(content); err != nil || key != "Down" || presses != 1 {
+		t.Fatalf("trustNavigation() = (%q, %d, %v), want (Down, 1, nil): the option list still parses, which is why the stale check cannot wait for a parse failure", key, presses, err)
+	}
+}
