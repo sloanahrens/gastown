@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -3110,6 +3112,38 @@ func (t *Tmux) CapturePaneLines(session string, lines int) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
+// capturePaneVisibleTail captures the trailing busyCaptureLines lines of a
+// pane's CURRENTLY VISIBLE screen only — never scrollback history. This is
+// what busy/idle detection (IsBusy, IsIdle, WaitForIdle, shouldSendEscape)
+// scans, in place of CapturePaneLines(session, busyCaptureLines).
+//
+// CapturePaneLines(session, N) passes N to CapturePane's "-S -N" (start-line)
+// flag, but tmux's -S addresses a line N rows above the top of the visible
+// pane and, absent an explicit -E, still ends at the bottom of the visible
+// pane. On a pane taller than N rows that returns the ENTIRE visible screen
+// plus N lines of history — not the last N lines — so a caller asking for
+// "the last 20 lines" to scan for a busy marker actually receives the whole
+// screen (e.g. 40-63 visible rows) plus 20 history rows on top (gt-dq6pi). A
+// quoted busy-spinner readout sitting anywhere in that much older transcript
+// content then reads as live and never ages out.
+//
+// Capturing with no -S/-E returns exactly the visible pane (line 0 to the
+// bottom), so slicing the tail here can never reach into history.
+func (t *Tmux) capturePaneVisibleTail(session string) ([]string, error) {
+	out, err := t.run("capture-pane", "-p", "-t", session)
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	all := strings.Split(out, "\n")
+	if len(all) <= busyCaptureLines {
+		return all, nil
+	}
+	return all[len(all)-busyCaptureLines:], nil
+}
+
 // AttachSession attaches to an existing session.
 // Note: This replaces the current process with tmux attach.
 func (t *Tmux) AttachSession(session string) error {
@@ -3793,6 +3827,34 @@ var busyIndicators = []string{"esc to interrupt", "to run in background"}
 // readout, but survives verb churn that a literal list cannot.
 var busyTokenSpinnerPattern = regexp.MustCompile(`↓\s*[0-9][0-9,.]*\s*[kKmM]?\s*tokens\b`)
 
+// looksLikeProseLine reports whether a trimmed line opens the way ordinary
+// sentence prose or a transcript quote does — with an ASCII letter, digit, or
+// common quoting/bracketing punctuation — rather than one of the pictographic
+// glyphs Claude Code's live spinner and subagent status lines render at their
+// start (e.g. "✽", "◯", "·", "⏺" — a curated whitelist of these keeps proving
+// incomplete as the spinner's glyph rotates, so this checks the shape of a
+// prose opener instead of enumerating every glyph).
+//
+// This anchors busyTokenSpinnerPattern to an actual status line: transcript
+// prose that merely quotes another pane's spinner text (e.g. a relayed nudge
+// rendering `live turn "Sautéing… 8m16s · ↓14.6k tokens"`) contains the same
+// token-count substring but opens like a sentence, not a status line, so it
+// must not be read as busy (gt-dq6pi).
+func looksLikeProseLine(trimmed string) bool {
+	if trimmed == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(trimmed)
+	if r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
+		return true
+	}
+	switch r {
+	case '"', '\'', '`', '(', '[', '-', '*', '>', '#':
+		return true
+	}
+	return false
+}
+
 func hasBusyIndicator(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -3807,7 +3869,10 @@ func hasBusyIndicator(line string) bool {
 			return true
 		}
 	}
-	return busyTokenSpinnerPattern.MatchString(trimmed)
+	// The token-count pattern alone is not enough: it must appear on the live
+	// spinner line itself, not on transcript content that quotes one
+	// (gt-dq6pi).
+	return busyTokenSpinnerPattern.MatchString(trimmed) && !looksLikeProseLine(trimmed)
 }
 
 // busyCaptureLines is how many trailing pane lines to scan for a busy
@@ -3819,6 +3884,13 @@ func hasBusyIndicator(line string) bool {
 // 5-line capture landed entirely inside the footer and never saw the spinner.
 // 20 lines comfortably covers the deepest observed busy block (tool-status
 // line + "run in background" hint + spinner + tip + footer).
+//
+// This must be read with capturePaneVisibleTail, not CapturePaneLines: tmux's
+// "-S -N" flag (which CapturePaneLines/CapturePane pass N to) starts N lines
+// into history and still ends at the bottom of the visible pane, so it
+// returns the whole visible screen plus N history lines rather than the last
+// N lines — letting old transcript content that merely quotes a busy marker
+// sit inside the scanned window indefinitely (gt-dq6pi).
 const busyCaptureLines = 20
 
 // shouldSendEscapeForLines reports whether the vim-mode Escape keystroke
@@ -3855,7 +3927,7 @@ func shouldSendEscapeForLines(lines []string) bool {
 // interrupting an active agent and is harmless for the common (non-vim) case
 // where Enter alone submits.
 func (t *Tmux) shouldSendEscape(target string) bool {
-	lines, err := t.CapturePaneLines(target, busyCaptureLines)
+	lines, err := t.capturePaneVisibleTail(target)
 	if err != nil {
 		return false
 	}
@@ -3930,7 +4002,7 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		lines, err := t.CapturePaneLines(session, busyCaptureLines)
+		lines, err := t.capturePaneVisibleTail(session)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
@@ -4020,7 +4092,7 @@ func (t *Tmux) IsAtPrompt(session string, rc *config.RuntimeConfig) bool {
 // hasBusyIndicator). When the agent is actively working, one of those markers
 // is present. When idle, none is.
 func (t *Tmux) IsIdle(session string) bool {
-	lines, err := t.CapturePaneLines(session, busyCaptureLines)
+	lines, err := t.capturePaneVisibleTail(session)
 	if err != nil {
 		return false
 	}
@@ -4059,7 +4131,7 @@ func (t *Tmux) IsIdle(session string) bool {
 // observed, treat it as busy so callers refuse rather than risk interrupting
 // a session in an unknown state.
 func (t *Tmux) IsBusy(target string) bool {
-	lines, err := t.CapturePaneLines(target, busyCaptureLines)
+	lines, err := t.capturePaneVisibleTail(target)
 	if err != nil {
 		return true
 	}
