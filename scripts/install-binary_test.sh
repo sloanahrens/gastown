@@ -11,21 +11,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALLER="$SCRIPT_DIR/install-binary.sh"
 
-TMPDIR=""
+WORK_DIR=""
 DEST=""
 PASS=0
 FAIL=0
 
 cleanup() {
-  if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
-    rm -rf "$TMPDIR"
+  if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    rm -rf "$WORK_DIR"
   fi
 }
 trap cleanup EXIT
 
 setup() {
-  TMPDIR="$(mktemp -d)"
-  DEST="$TMPDIR/home/.local/bin"
+  WORK_DIR="$(mktemp -d)"
+  DEST="$WORK_DIR/home/.local/bin"
 }
 
 assert_eq() {
@@ -56,10 +56,10 @@ echo "=== install-binary.sh tests ==="
 
 # --- Installs into a missing directory and makes the result executable --------
 setup
-printf '#!/bin/sh\necho hi\n' > "$TMPDIR/built-gt"
-chmod 755 "$TMPDIR/built-gt"
+printf '#!/bin/sh\necho hi\n' > "$WORK_DIR/built-gt"
+chmod 755 "$WORK_DIR/built-gt"
 rc=0
-bash "$INSTALLER" "$TMPDIR/built-gt" "$DEST" gt || rc=$?
+bash "$INSTALLER" "$WORK_DIR/built-gt" "$DEST" gt || rc=$?
 assert_ok "succeeds when the install dir does not exist yet" "$rc"
 assert_eq "installs the source content" "#!/bin/sh echo hi" "$(tr '\n' ' ' < "$DEST/gt" | sed 's/ $//')"
 if [[ -x "$DEST/gt" ]]; then
@@ -76,7 +76,7 @@ setup
 mkdir -p "$DEST"
 printf 'OLD\n' > "$DEST/gt"
 rc=0
-bash "$INSTALLER" "$TMPDIR/does-not-exist" "$DEST" gt 2>/dev/null || rc=$?
+bash "$INSTALLER" "$WORK_DIR/does-not-exist" "$DEST" gt 2>/dev/null || rc=$?
 if [[ "$rc" -ne 0 ]]; then
   echo "  PASS: missing source exits non-zero"
   PASS=$((PASS + 1))
@@ -99,9 +99,9 @@ cleanup
 setup
 mkdir -p "$DEST"
 printf 'OLD-COMPLETE-BINARY\n' > "$DEST/gt"
-printf 'NEW-COMPLETE-BINARY\n' > "$TMPDIR/built-gt"
+printf 'NEW-COMPLETE-BINARY\n' > "$WORK_DIR/built-gt"
 
-shim="$TMPDIR/shim"
+shim="$WORK_DIR/shim"
 mkdir -p "$shim"
 real_cp="$(command -v cp)"
 cat > "$shim/cp" <<EOF
@@ -111,7 +111,7 @@ exec "$real_cp" "\$@"
 EOF
 chmod +x "$shim/cp"
 
-PATH="$shim:$PATH" bash "$INSTALLER" "$TMPDIR/built-gt" "$DEST" gt &
+PATH="$shim:$PATH" bash "$INSTALLER" "$WORK_DIR/built-gt" "$DEST" gt &
 installer_pid=$!
 
 sleep 1 # well inside the shimmed copy's 2s stall
@@ -139,7 +139,7 @@ cleanup
 # result detectable: the final file must match exactly one input, never a mix.
 setup
 mkdir -p "$DEST"
-payload_a="$TMPDIR/a" payload_b="$TMPDIR/b" payload_c="$TMPDIR/c"
+payload_a="$WORK_DIR/a" payload_b="$WORK_DIR/b" payload_c="$WORK_DIR/c"
 head -c 1048576 /dev/zero | tr '\0' 'A' > "$payload_a"
 head -c 1048576 /dev/zero | tr '\0' 'B' > "$payload_b"
 head -c 524288 /dev/zero | tr '\0' 'C' > "$payload_c"
