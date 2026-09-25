@@ -1264,6 +1264,14 @@ func KillImposters(townRoot string) error {
 		return nil // No server on port
 	}
 
+	// The port holder is only a candidate: never signal it before proving it
+	// is a dolt sql-server. On macOS Docker Desktop's com.docker.backend holds
+	// every published container port, so a test pointed at a Dolt container
+	// port found — and SIGTERMed — Docker itself (gt-p7zy0).
+	if err := VerifyDoltSQLServerPID(pid); err != nil {
+		return fmt.Errorf("port %d holder is not a verified dolt sql-server, not killing it: %w", config.Port, err)
+	}
+
 	if doltProcessMatchesTown(townRoot, pid, config) {
 		return nil
 	}
@@ -1551,6 +1559,52 @@ func isDoltSQLServerArgs(args []string) bool {
 	return len(args) >= 2 && filepath.Base(args[0]) == "dolt" && args[1] == "sql-server"
 }
 
+// processArgsForIdentity reads a process's argv for identity checks. A var so
+// tests can present any command line without spawning a real dolt.
+var processArgsForIdentity = getProcessArgs
+
+// looksLikeDoltSQLServer reports whether argv is a dolt sql-server, allowing
+// global flags between the binary and the subcommand
+// (`dolt --data-dir x sql-server`), which externally started servers use.
+func looksLikeDoltSQLServer(args []string) bool {
+	if len(args) < 2 || filepath.Base(args[0]) != "dolt" {
+		return false
+	}
+	for _, a := range args[1:] {
+		if a == "sql-server" {
+			return true
+		}
+	}
+	return false
+}
+
+// VerifyDoltSQLServerPID returns nil only when pid is a running dolt
+// sql-server. Every path that signals a PID it did not start itself — one read
+// from a pid file, or found listening on a port — must call this first: a
+// port can be held by anything (Docker Desktop's com.docker.backend holds
+// every published container port on macOS), and a pid file can outlive its
+// process and name a reused PID (gt-p7zy0). On Windows there is no ps(1) and
+// no argv to check; callers keep their previous behavior there.
+func VerifyDoltSQLServerPID(pid int) error {
+	if pid <= 0 {
+		return fmt.Errorf("invalid PID %d", pid)
+	}
+	if pid == os.Getpid() {
+		return fmt.Errorf("PID %d is this process, not a dolt sql-server", pid)
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	args := processArgsForIdentity(pid)
+	if len(args) == 0 {
+		return fmt.Errorf("cannot read the command line of PID %d; not signaling a process whose identity is unverified", pid)
+	}
+	if !looksLikeDoltSQLServer(args) {
+		return fmt.Errorf("PID %d is not a dolt sql-server (command: %q)", pid, strings.Join(args, " "))
+	}
+	return nil
+}
+
 // CheckPortAvailable verifies that a TCP port is free for use as a Dolt server.
 // Returns a user-friendly error if the port is already in use.
 func CheckPortAvailable(port int) error {
@@ -1794,8 +1848,18 @@ func Start(townRoot string) error {
 	// correctly returns false, but we need to evict the squatter before we can
 	// bind the port. (fix: start-kills-unowned-port-holder)
 	if !running {
-		if squatterPID := findDoltServerOnPort(config.Port); squatterPID > 0 {
-			fmt.Fprintf(os.Stderr, "Warning: port %d held by unowned dolt process (PID %d) — killing before start\n", config.Port, squatterPID)
+		squatterPID := findDoltServerOnPort(config.Port)
+		if squatterPID > 0 {
+			if verifyErr := VerifyDoltSQLServerPID(squatterPID); verifyErr != nil {
+				// Not provably dolt: leave it alone and let the start fail on
+				// the busy port with a clear message (gt-p7zy0).
+				fmt.Fprintf(os.Stderr, "Warning: port %d is held by PID %d, not killing it: %v\n", config.Port, squatterPID, verifyErr)
+				squatterPID = 0
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: port %d held by unowned dolt process (PID %d) — killing before start\n", config.Port, squatterPID)
+			}
+		}
+		if squatterPID > 0 {
 			if proc, findErr := os.FindProcess(squatterPID); findErr == nil {
 				_ = proc.Kill()
 				if err := waitForPortRelease(config.Port, 5*time.Second); err != nil {
@@ -2119,6 +2183,14 @@ func Stop(townRoot string) error {
 	}
 	if !running {
 		return fmt.Errorf("Dolt server is not running")
+	}
+	if pid <= 0 {
+		// Reachable over TCP with no local process we can name (a Docker
+		// port forward, a remote host): there is nothing we own to signal.
+		return fmt.Errorf("Dolt server is reachable but has no verifiable local process to stop")
+	}
+	if err := VerifyDoltSQLServerPID(pid); err != nil {
+		return fmt.Errorf("refusing to stop PID %d: %w", pid, err)
 	}
 
 	process, err := os.FindProcess(pid)

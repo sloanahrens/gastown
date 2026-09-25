@@ -3111,6 +3111,14 @@ func StopDaemon(townRoot string) error {
 		return nil
 	}
 
+	// The lock proves a daemon is running; the pid file only claims which PID
+	// it is. Never signal that PID until it is shown to be `gt daemon run`
+	// (gt-p7zy0). Nothing is removed on refusal: the lock holder is live.
+	if err := verifyGTDaemonPID(pid); err != nil {
+		return fmt.Errorf("refusing to signal PID %d from %s: %w",
+			pid, filepath.Join(townRoot, "daemon", "daemon.pid"), err)
+	}
+
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("finding process: %w", err)
@@ -3198,6 +3206,12 @@ func KillOrphanedDaemons(townRoot string) (int, error) {
 
 	killed := 0
 	for _, pid := range pids {
+		// FindOrphanedDaemons reports PIDs whose process looked dead: any
+		// live process now holding that number is someone else unless it
+		// is provably `gt daemon run` (gt-p7zy0).
+		if verifyGTDaemonPID(pid) != nil {
+			continue
+		}
 		process, err := os.FindProcess(pid)
 		if err != nil {
 			continue

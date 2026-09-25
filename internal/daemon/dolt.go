@@ -162,6 +162,19 @@ type DoltServerManager struct {
 	readOnlyAlertFn   func(error)
 	crashAlertFn      func(int)
 	listDatabasesFn   func() ([]string, error)
+	// killImpostersFn replaces doltserver.KillImposters, which signals
+	// whatever holds the configured port. A test whose identity check fails
+	// must not reach it: under the hermetic harness that port is a Docker
+	// container's, held on the host by Docker Desktop (gt-p7zy0).
+	killImpostersFn func() error
+}
+
+// killImposters evicts a non-town Dolt server from the configured port.
+func (m *DoltServerManager) killImposters() error {
+	if m.killImpostersFn != nil {
+		return m.killImpostersFn()
+	}
+	return doltserver.KillImposters(m.townRoot)
 }
 
 // NewDoltServerManager creates a new Dolt server manager.
@@ -485,7 +498,7 @@ func (m *DoltServerManager) EnsureRunning() error {
 				}
 				m.stopLocked()
 				// Also kill any imposters before restarting
-				if killErr := doltserver.KillImposters(m.townRoot); killErr != nil {
+				if killErr := m.killImposters(); killErr != nil {
 					m.logger("Warning: failed to kill imposters: %v", killErr)
 				}
 				time.Sleep(500 * time.Millisecond)
@@ -1016,6 +1029,15 @@ func (m *DoltServerManager) stopLocked() {
 	}
 	pid, running := m.isRunning()
 	if !running {
+		return
+	}
+
+	// isRunning trusts the pid file plus "something answers on the port" —
+	// neither says what the PID is. Prove it is a dolt sql-server before
+	// signaling it (gt-p7zy0).
+	if err := verifyDoltSQLServerFn(pid); err != nil {
+		m.logger("Not stopping PID %d: %v", pid, err)
+		m.process = nil
 		return
 	}
 
