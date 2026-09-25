@@ -41,6 +41,13 @@ setup_repo() {
   commit_at 2026-03-01T00:00:00Z .
 }
 
+# A root with no AGENTS.md, plugins/, internal/ or docs/: every glob a tier
+# scans matches nothing. Reuses cleanup's mktemp-and-trap, like setup_repo.
+setup_globless_root() {
+  cleanup
+  TMP="$(mktemp -d)"
+}
+
 echo "docs-lint: findings"
 setup_repo
 set +e
@@ -66,6 +73,35 @@ printf '> Status: historical (2026-01). Abandoned: none. Not maintained.\n\n# Ol
 sed -i.bak -e '/missing.md/d' -e '/make nope/d' "$TMP/docs/guides/guide.md" && rm "$TMP/docs/guides/guide.md.bak"
 set +e; DOCS_LINT_ROOT="$TMP" bash "$LINT" >/dev/null 2>&1; rc=$?; set -e
 assert_eq "exit 0 when clean" "0" "$rc"
+
+echo "docs-lint: an empty glob is an empty tier, not a failure (gt-et39)"
+# With the formula glob unmatched, the check pipeline's non-zero status used to
+# reach run_checks' assignment, where set -e aborted the run: a tree full of
+# findings reported exit 1 with no findings listed, and a clean tree reported
+# exit 1 with nothing to explain it.
+setup_globless_root
+printf '# Agents\n\nSee [missing](docs/nope.md).\n' > "$TMP/AGENTS.md"
+set +e
+actual="$(DOCS_LINT_ROOT="$TMP" bash "$LINT" 2>&1)"; rc=$?
+set -e
+assert_eq "a finding still prints with an empty formula glob" \
+  "AGENTS.md:3: dead-link: docs/nope.md does not exist" "$actual"
+assert_eq "and the verdict is that finding" "1" "$rc"
+
+printf '# Agents\n\nNo links here.\n' > "$TMP/AGENTS.md"
+set +e
+actual="$(DOCS_LINT_ROOT="$TMP" bash "$LINT" 2>&1)"; rc=$?
+set -e
+assert_eq "a clean tree with empty globs is silent" "" "$actual"
+assert_eq "and exits 0" "0" "$rc"
+
+assert_eq "agent-facing tier lists what is there" "AGENTS.md" \
+  "$(DOCS_LINT_ROOT="$TMP" bash "$LINT" --list agent-facing)"
+set +e
+actual="$(DOCS_LINT_ROOT="$TMP" bash "$LINT" --list go)"; rc=$?
+set -e
+assert_eq "go tier is empty without cmd/ or internal/" "" "$actual"
+assert_eq "and exits 0" "0" "$rc"
 
 echo "docs-lint: --list"
 setup_repo

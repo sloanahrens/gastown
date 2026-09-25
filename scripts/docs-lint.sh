@@ -4,7 +4,8 @@
 #
 # Usage:
 #   docs-lint.sh                 run all checks; one line per finding
-#                                (path:line: rule: message); exit 1 on any
+#                                (path:line: rule: message); exit 1 on any,
+#                                exit 2 when a check could not run
 #   docs-lint.sh --list <tier>   agent-facing | reference | historical | go
 #   docs-lint.sh --slice N M     N docs (agent-facing+reference) and M go files,
 #                                least recently modified first (git log date,
@@ -31,17 +32,29 @@ is_historical() {
   esac
 }
 
+# glob_paths <pattern>...: emit the path each shell glob matches, and nothing
+# when one matches nothing. `ls <pattern>` instead prints an error and exits
+# non-zero on an unmatched glob, and as the last command of the agent-facing
+# group that status rode `pipefail` up to run_checks' assignment, where `set -e`
+# aborted the run before it printed a single finding (gt-et39). A glob that
+# matches nothing is an empty tier, not a failure.
+glob_paths() {
+  local p
+  for p in "$@"; do compgen -G "$p" || true; done
+}
+
 tier_agent_facing() {
   { [[ -f AGENTS.md ]] && echo AGENTS.md
     [[ -f internal/templates/polecat-CLAUDE.md ]] && echo internal/templates/polecat-CLAUDE.md
     [[ -f docs/HOOKS.md ]] && echo docs/HOOKS.md
-    ls plugins/*/plugin.md 2>/dev/null
-    ls internal/formula/formulas/*.formula.toml 2>/dev/null
+    glob_paths 'plugins/*/plugin.md' 'internal/formula/formulas/*.formula.toml'
   } | LC_ALL=C sort
 }
 
 # Always-loaded files the gate holds to the ceiling (formulas are audited, not gated).
-tier_ceiling() { tier_agent_facing | grep -v '\.formula\.toml$'; }
+# sed, not `grep -v`: grep exits 1 when it filters every line, so a root with an
+# empty agent-facing tier would take the same pipefail path the glob did (gt-et39).
+tier_ceiling() { tier_agent_facing | sed '/\.formula\.toml$/d'; }
 
 tier_historical() {
   find docs/plans docs/research docs/design -name '*.md' 2>/dev/null | sed 's#^\./##' | LC_ALL=C sort \
@@ -57,7 +70,9 @@ tier_reference() {
     done || true
 }
 
-tier_go() { find cmd internal -name '*.go' -not -name '*_test.go' 2>/dev/null | sed 's#^\./##' | LC_ALL=C sort; }
+# `|| true` for the docs-only root: find exits 1 on a missing cmd/ or internal/,
+# which is the same pipefail path out of `--list go` and `--slice` (gt-et39).
+tier_go() { find cmd internal -name '*.go' -not -name '*_test.go' 2>/dev/null | sed 's#^\./##' | LC_ALL=C sort || true; }
 
 list_tier() {
   case "$1" in
@@ -197,9 +212,19 @@ check_word_ceiling() {
 }
 
 run_checks() {
-  # Checks run in subshell pipelines, so the verdict is read from their output.
-  out="$( { check_dead_links; check_dead_make_targets; check_status_headers; check_status_conflict; check_stray_markup; check_polecat_main_push; check_word_ceiling; } | LC_ALL=C sort -t: -k1,1 -k2,2n )"
+  # Checks run in subshell pipelines, so the verdict is read from their output
+  # and never from the pipeline's status. `|| rc=$?` keeps that status out of
+  # `set -e`, which aborted at this assignment and printed none of the findings
+  # the checks had already collected (gt-et39). A status that arrives with no
+  # findings is a check that could not run, not a clean tree: it says so on
+  # stderr rather than exiting 1 for a reader to misread as a verdict.
+  local out rc=0
+  out="$( { check_dead_links; check_dead_make_targets; check_status_headers; check_status_conflict; check_stray_markup; check_polecat_main_push; check_word_ceiling; } | LC_ALL=C sort -t: -k1,1 -k2,2n )" || rc=$?
   if [[ -n "$out" ]]; then printf '%s\n' "$out"; exit 1; fi
+  if [[ "$rc" -ne 0 ]]; then
+    echo "docs-lint: a check exited $rc and reported no findings" >&2
+    exit 2
+  fi
   exit 0
 }
 
