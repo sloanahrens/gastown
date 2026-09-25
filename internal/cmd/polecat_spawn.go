@@ -104,6 +104,11 @@ type SlingSpawnOptions struct {
 	BaseBranch    string // Override base branch for polecat worktree (e.g., "develop", "release/v2")
 	ResumeBranch  string // Resume an existing branch (e.g. PR head) instead of creating polecat/<name>/<bead>+<ts>
 	SkipAdmission bool   // Caller already holds a polecat admission reservation
+	// Name is the exact polecat a named sling targets (gt sling <bead>
+	// <rig>/<name>). Set, it is reused or — with Create — created by that
+	// name, or the sling is refused; the pool never substitutes another
+	// polecat (gt-2w4f9). Empty lets the pool choose.
+	Name string
 }
 
 func effectivePolecatDirCap(configured int) int {
@@ -126,7 +131,28 @@ func polecatIntegrationEnabled(townRoot, rigName string) bool {
 	return true
 }
 
-func reclaimBrokenIdlePolecatForSling(polecatMgr *polecat.Manager) (bool, error) {
+// brokenIdleReclaimer is the polecat-manager surface the pre-allocation
+// broken-idle reclaim sweep needs.
+type brokenIdleReclaimer interface {
+	List() ([]*polecat.Polecat, error)
+	ReclaimBrokenIdlePolecat(name string) error
+}
+
+// reclaimBrokenIdleUnlessNamed runs the pool-wide broken-idle reclaim before
+// a rig sling allocates. A named sling touches no polecat but its own
+// (gt-2w4f9), so it skips the sweep.
+func reclaimBrokenIdleUnlessNamed(polecatMgr brokenIdleReclaimer, opts SlingSpawnOptions) {
+	if opts.Name != "" {
+		return
+	}
+	if reclaimed, err := reclaimBrokenIdlePolecatForSling(polecatMgr); err != nil {
+		style.PrintWarning("could not reclaim broken idle polecat before allocation: %v", err)
+	} else if reclaimed {
+		fmt.Println("  Allocating fresh polecat after reclaiming broken idle sandbox...")
+	}
+}
+
+func reclaimBrokenIdlePolecatForSling(polecatMgr brokenIdleReclaimer) (bool, error) {
 	polecats, err := polecatMgr.List()
 	if err != nil {
 		return false, err
@@ -165,7 +191,8 @@ type idlePolecatReuse interface {
 // A refusal to take a branch another worktree holds stops the sling: the
 // fresh-allocation fallback attaches a worktree to that same branch by forcing
 // past git's own check, which builds the two-worktrees-one-ref state the refusal
-// detected (gt-0kk2).
+// detected (gt-0kk2). With opts.Name set, only that polecat is considered and
+// any refusal stops the sling (gt-2w4f9).
 func reuseIdlePolecatForSling(
 	polecatMgr idlePolecatReuse,
 	t *tmux.Tmux,
@@ -174,12 +201,26 @@ func reuseIdlePolecatForSling(
 	opts SlingSpawnOptions,
 	recordRespawn func(),
 ) (*SpawnedPolecatInfo, error) {
-	idlePolecat, findErr := polecatMgr.FindIdlePolecat()
-	if findErr != nil || idlePolecat == nil {
-		return nil, nil
+	polecatName := opts.Name
+	heldIssue := "" // work the named polecat already holds, for the refusal hint
+	if polecatName != "" {
+		// A named sling reuses that polecat or nothing (gt-2w4f9). An absent
+		// one returns (nil, nil) only under --create, so the caller creates
+		// it by that name.
+		named, err := namedPolecatExistsForSling(polecatMgr, rigName, opts)
+		if err != nil || named == nil {
+			return nil, err
+		}
+		heldIssue = named.Issue
+		fmt.Printf("Reusing named polecat: %s\n", polecatName)
+	} else {
+		idlePolecat, findErr := polecatMgr.FindIdlePolecat()
+		if findErr != nil || idlePolecat == nil {
+			return nil, nil
+		}
+		polecatName = idlePolecat.Name
+		fmt.Printf("Reusing idle polecat: %s\n", polecatName)
 	}
-	polecatName := idlePolecat.Name
-	fmt.Printf("Reusing idle polecat: %s\n", polecatName)
 
 	// ResumeBranch takes precedence over BaseBranch / integration auto-detection:
 	// when the user (or scheduler) wants to resume an existing PR branch, we
@@ -214,6 +255,9 @@ func reuseIdlePolecatForSling(
 		ResumeBranch: opts.ResumeBranch,
 	}
 	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
+		if opts.Name != "" {
+			return nil, namedPolecatRefusal(rigName, polecatName, opts.HookBead, heldIssue, err)
+		}
 		// Only a resume can end up on a branch someone already holds: a fresh
 		// sling names a new branch, so its fallback cannot collide (gt-0kk2).
 		if errors.Is(err, polecat.ErrBranchHeld) && opts.ResumeBranch != "" {
@@ -260,9 +304,96 @@ func reuseIdlePolecatForSling(
 	}, nil
 }
 
-// SpawnPolecatForSling creates a fresh polecat and optionally starts its session.
-// This is used by gt sling when the target is a rig name.
-// The caller (sling) handles hook attachment and nudging.
+// namedPolecatExistsForSling returns the polecat a named sling targets, or
+// nil when it does not exist (gt-2w4f9). A missing polecat is acceptable only
+// with --create; a lookup that fails refuses, because guessing is how a named
+// sling ends up on another polecat.
+func namedPolecatExistsForSling(polecatMgr idlePolecatReuse, rigName string, opts SlingSpawnOptions) (*polecat.Polecat, error) {
+	p, err := polecatMgr.Get(opts.Name)
+	switch {
+	case err == nil:
+		return p, nil
+	case errors.Is(err, polecat.ErrPolecatNotFound):
+		if opts.Create {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("polecat %s/%s does not exist; not substituting another polecat\n"+
+			"Create it by that name: add --create\n"+
+			"Let the pool choose:    gt sling %s %s",
+			rigName, opts.Name, beadOrPlaceholder(opts.HookBead), rigName)
+	default:
+		return nil, fmt.Errorf("reading named polecat %s/%s: %w", rigName, opts.Name, err)
+	}
+}
+
+// namedPolecatRefusal explains why a named polecat cannot take this sling.
+// The sling stops here: falling back to the pool is the silent substitution
+// gt-2w4f9 forbids. The hint depends on the cause, and never suggests hooking
+// the new bead onto a polecat that holds other work:
+//   - parked: resume the park, then retry the same sling;
+//   - already holding the bead being slung: resume that session;
+//   - anything else (busy, other or unpushed work, broken worktree): inspect
+//     it with check-recovery, or let the pool choose.
+func namedPolecatRefusal(rigName, name, hookBead, heldIssue string, err error) error {
+	bead := beadOrPlaceholder(hookBead)
+	addr := rigName + "/" + name
+	var hint string
+	switch {
+	case errors.Is(err, polecat.ErrPolecatParked):
+		// Retry with the full <rig>/polecats/<name> form: the <rig>/<name>
+		// shorthand only reaches a sessionless polecat under --create.
+		hint = fmt.Sprintf("Resume the park, then retry: gt agent resume %s && gt sling %s %s/polecats/%s", addr, bead, rigName, name)
+	case hookBead != "" && heldIssue == hookBead:
+		hint = fmt.Sprintf("It already holds %s; resume that work: gt session start %s --issue %s", hookBead, addr, hookBead)
+	default:
+		if heldIssue != "" {
+			hint = fmt.Sprintf("It holds %s. ", heldIssue)
+		}
+		hint += fmt.Sprintf("Inspect it: gt polecat check-recovery %s", addr)
+	}
+	return fmt.Errorf("named polecat %s cannot take this sling: %w\n"+
+		"Not substituting another polecat.\n"+
+		"%s\n"+
+		"Let the pool choose: gt sling %s %s",
+		addr, err, hint, bead, rigName)
+}
+
+func beadOrPlaceholder(bead string) string {
+	if bead == "" {
+		return "<bead>"
+	}
+	return bead
+}
+
+// polecatAllocator is the polecat-manager surface that creates a new polecat.
+type polecatAllocator interface {
+	AllocateAndAdd(opts polecat.AddOptions) (string, *polecat.Polecat, error)
+	AddNamedWithOptions(name string, opts polecat.AddOptions) (*polecat.Polecat, error)
+}
+
+// allocatePolecatForSling creates the polecat a sling will use. The pool picks
+// the name unless the sling named one, which is created by exactly that name
+// or refused (gt-2w4f9). Both paths reserve the name under the pool lock
+// before building the worktree (AllocateAndAdd / AddNamedWithOptions), so a
+// concurrent allocation cannot be handed it; a name another process already
+// holds is ErrPolecatExists.
+func allocatePolecatForSling(polecatMgr polecatAllocator, rigName, name string, addOpts polecat.AddOptions) (string, error) {
+	if name == "" {
+		allocated, _, err := polecatMgr.AllocateAndAdd(addOpts)
+		return allocated, err
+	}
+	if _, err := polecatMgr.AddNamedWithOptions(name, addOpts); err != nil {
+		return "", fmt.Errorf("creating named polecat %s/%s: %w", rigName, name, err)
+	}
+	return name, nil
+}
+
+// SpawnPolecatForSling prepares a polecat for a sling, session start deferred.
+// For a rig target (opts.Name empty) it reuses an idle polecat from the pool
+// or allocates a fresh one. For a named target (gt sling <bead>
+// <rig>/<name> with no live session) it reuses exactly that polecat, creates
+// it by that name under --create, or refuses (gt-2w4f9).
+// The caller (sling) handles hook attachment, session start and nudging.
 func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	// Find workspace
 	townRoot := opts.TownRoot
@@ -399,11 +530,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		}
 	}
 
-	if reclaimed, err := reclaimBrokenIdlePolecatForSling(polecatMgr); err != nil {
-		style.PrintWarning("could not reclaim broken idle polecat before allocation: %v", err)
-	} else if reclaimed {
-		fmt.Println("  Allocating fresh polecat after reclaiming broken idle sandbox...")
-	}
+	reclaimBrokenIdleUnlessNamed(polecatMgr, opts)
 
 	// Persistent polecat model (gt-4ac): reuse an idle polecat's sandbox before
 	// paying for a new worktree.
@@ -468,10 +595,11 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		ResumeBranch: opts.ResumeBranch,
 	}
 
-	// No idle polecat available — allocate and create atomically (GH#2215).
-	// AllocateAndAdd holds the pool lock through directory creation, preventing
-	// concurrent processes from allocating the same name.
-	polecatName, _, err := polecatMgr.AllocateAndAdd(addOpts)
+	// Nothing to reuse — create the polecat. The pool path (AllocateAndAdd,
+	// GH#2215) and the named path (AddNamedWithOptions, gt-2w4f9) both hold the
+	// pool lock through directory creation, so no concurrent process can be
+	// handed the same name.
+	polecatName, err := allocatePolecatForSling(polecatMgr, rigName, opts.Name, addOpts)
 	if err != nil {
 		return nil, fmt.Errorf("allocating and creating polecat: %w", err)
 	}
