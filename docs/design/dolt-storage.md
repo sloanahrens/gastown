@@ -268,9 +268,14 @@ All six stages are implemented in code. DECAY runs in the Reaper Dog
 monitors and escalates; FLATTEN is the operator-invoked destructive step that
 follows the escalation, and it lives in exactly one place — the plugin's
 `--compact` flag, whose escalation policy is `plugins/compactor-dog/plugin.md`.
-All lifecycle tickers are enabled by default via `EnsureLifecycleDefaults()`
-(lifecycle_defaults.go), which auto-populates daemon.json with sensible
-defaults on `gt init` or `gt up`. Explicitly disabled patrols are preserved.
+All lifecycle tickers are populated by `EnsureLifecycleDefaults()`
+(lifecycle_defaults.go), which auto-writes missing patrol blocks to daemon.json
+on `gt init` or `gt up` and never overwrites existing ones. dolt_remotes is the
+one exception to "enabled by default": its block is written with
+`enabled: false`, the opt-in default `IsPatrolEnabled` also enforces, so a town
+whose databases have no remote configured sees no behavior change — towns that
+want the scheduled push (see "Dolt Remotes Patrol" below) flip `enabled` to
+true.
 
 ### Two Data Streams
 
@@ -658,10 +663,45 @@ rebuild is acceptable.
 
 ### Sync Procedure
 
-`gt dolt sync` parks all rigs (stops witnesses/refineries), stops the Dolt
-server, runs `dolt push` for each database with a configured remote, then
-restarts the server and unparks rigs. The parking prevents witnesses from
-detecting the server outage and restarting it mid-push.
+`gt dolt sync` is the operator-invoked, full-coverage push: it pushes every
+database with a configured remote, with optional `--gc` purge. It has two
+modes: when the Dolt server is running it pushes each database via
+`CALL DOLT_PUSH` over SQL (no downtime); when the server is down it falls back
+to `dolt push` per database directory, which requires the server stopped.
+
+### Dolt Remotes Patrol
+
+The daemon's `dolt_remotes` patrol (internal/daemon/dolt_remotes.go) keeps
+remotes current on a schedule without any operator action. Every interval it
+discovers the databases under the data dir that have a remote configured
+(`dolt_remotes` view), stages and commits pending changes, and runs
+`CALL DOLT_PUSH` over a live connection to the running Dolt SQL server — never
+a competing `dolt` CLI process against the on-disk data dir (gt-74gz).
+
+It is opt-in: absent from, or `enabled: false` in, daemon.json, it does
+nothing — that default is locked in by `TestIsPatrolEnabled_DoltRemotes`.
+`gt init` / `gt up` fill in the block with `enabled: false`, so existing towns
+see no behavior change until they opt in:
+
+```json
+"patrols": {
+  "dolt_remotes": {
+    "enabled": true,
+    "interval": "15m"
+  }
+}
+```
+
+Omitted fields use code defaults (15m interval, branch `main`, remote
+auto-detected per database). Optional fields: `databases` (explicit list;
+empty = auto-discover), `remote` (push every listed database to this named
+remote instead of auto-detecting), `branch`. Databases whose names start with
+a test prefix (`test`, `beads_t`, `beads_pt`, `doctest_`) are refused — that
+is the guard against pushing orphan test databases to GitHub.
+
+`gt dolt sync` remains the full-coverage escape hatch (all databases, optional
+`--gc`); the patrol is the scheduled one. Both run under the daemon's
+Dolt-task lock, so they skip their tick when the maintenance gc is in flight.
 
 ### Force Push
 
@@ -674,8 +714,11 @@ remote with local state. Subsequent pushes should work without `--force`.
 - **Slow**: Git-protocol remotes are orders of magnitude slower than DoltHub
   native remotes. A 71MB database takes ~90s; larger ones take 20+ minutes.
 - **Cache growth**: No automatic garbage collection. Orphan pruning TBD.
-- **Server downtime**: Push requires exclusive access to the data directory,
-  so the server must be stopped during push. This creates a maintenance window.
+
+The old "server must be stopped during push" constraint applies only to
+`gt dolt sync`'s CLI fallback (server-down path). SQL-mode pushes — `sync`
+while the server runs and the `dolt_remotes` patrol — go through the running
+server and never take it down (gt-74gz).
 
 ### DoltHub Remotes (Planned)
 
