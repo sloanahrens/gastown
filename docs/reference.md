@@ -229,6 +229,12 @@ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 DEVELOPER_DIR=/Library/Developer/CommandLineTools
 ```
 
+`MacOSX.sdk` above is a symlink to whichever SDK Command Line Tools installed
+most recently, so a CLT whose SDK declares architectures `ld` rejects makes
+every cgo build fail with `tapi error: malformed file`. When that happens, run
+`gt doctor`: its `macos-sdk` check names the offending stubs, and the fix is to
+pin `SDKROOT` to a versioned SDK that passes it (gt-1a0t).
+
 A manually-started daemon (`gt daemon start`) inherits the operator's shell
 environment. A daemon launched by an external supervisor (launchd on macOS,
 systemd on Linux, via `gt daemon enable-supervisor`) starts with a bare

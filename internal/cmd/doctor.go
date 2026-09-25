@@ -230,6 +230,11 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// fix is the same reap 'gt slot reap' runs (gt-ul1k).
 	d.Register(doctor.NewSlotDebrisCheck())
 
+	// macOS SDK: a cgo build fails on any SDK whose stubs declare an
+	// architecture ld rejects, and the linker names neither the SDK nor the
+	// remedy (gt-1a0t).
+	d.Register(doctor.NewMacOSSDKCheck())
+
 	// Infrastructure prerequisites — these must pass before any check that
 	// shells out to bd/dolt or queries the database. Order matters:
 	// 1. gt binary freshness
