@@ -444,9 +444,10 @@ func fetchDuplicatePool(beadsDir string) ([]duplicateCandidate, error) {
 }
 
 // listDuplicateCandidates runs one bd list and reduces every row to its
-// comparison fields. bd list --json omits design and notes and --closed-after
-// excludes rows that were never closed, so live and closed work take separate
-// queries; neither can be folded into the other.
+// comparison fields, then enriches every row with a batched bd show for
+// design and notes text. bd list --json never carries those two fields, and
+// --closed-after excludes rows that were never closed, so live and closed
+// work take separate list queries; neither can be folded into the other.
 func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter time.Time) ([]duplicateCandidate, error) {
 	args := []string{
 		"list",
@@ -477,24 +478,83 @@ func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter tim
 		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.ID != "" {
+			ids = append(ids, row.ID)
+		}
+	}
+	// A bead whose overlap signal lives only in design or notes — the real
+	// gt-g6b case (gt-mcq): the failing test names arrived as the polecat
+	// worked, in design and notes, never in title or description — would
+	// otherwise be invisible on the pool side forever, since bd list cannot
+	// carry those fields (gt-hgvu). A failed enrichment degrades to
+	// list-only refs rather than failing the whole pool fetch: the same
+	// bd-hiccup-is-not-a-duplicate contract fetchDuplicatePool already holds.
+	fullText, ftErr := fetchDuplicateFullText(beadsDir, ids)
+	if ftErr != nil {
+		fullText = nil
+	}
+
 	candidates := make([]duplicateCandidate, 0, len(rows))
 	for _, row := range rows {
 		if row.ID == "" {
 			continue
 		}
+		text := fullText[row.ID]
 		candidates = append(candidates, duplicateCandidate{
 			ID:       row.ID,
 			Title:    row.Title,
 			Status:   row.Status,
 			ClosedAt: row.ClosedAt,
-			// Only the fields bd list returns are available here. The candidate
-			// side is read with bd show and carries its full text, which is the
-			// richer comparison in practice: a bead that already exists has
-			// accumulated notes by the time a duplicate of it gets filed.
-			Refs: extractContentRefs(row.Title, row.Description, row.CloseReason),
+			Refs: extractContentRefs(row.Title, row.Description, row.CloseReason,
+				text.Design, text.Notes),
 		})
 	}
 	return candidates, nil
+}
+
+// duplicateFullText holds the design and notes text bd show returns for one
+// bead — the two fields bd list never carries.
+type duplicateFullText struct {
+	Design string
+	Notes  string
+}
+
+// fetchDuplicateFullText recovers design and notes text for a pool of beads
+// with a single batched "bd show <ids...>" call, so the pool comparison sees
+// the same fields the sling-time candidate already does (checkSlingDuplicates
+// reads its candidate via bd show, which carries design and notes; bd list
+// does not). Returns nil, nil for an empty pool — nothing to enrich.
+func fetchDuplicateFullText(beadsDir string, ids []string) (map[string]duplicateFullText, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"show"}, ids...)
+	args = append(args, "--json")
+
+	out, err := runBdJSONAllowStale(beadsDir, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fetching design/notes for %d bead(s): %w", len(ids), err)
+	}
+
+	var rows []struct {
+		ID     string `json:"id"`
+		Design string `json:"design"`
+		Notes  string `json:"notes"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("parsing bd show output: %w", err)
+	}
+
+	text := make(map[string]duplicateFullText, len(rows))
+	for _, row := range rows {
+		if row.ID == "" {
+			continue
+		}
+		text[row.ID] = duplicateFullText{Design: row.Design, Notes: row.Notes}
+	}
+	return text, nil
 }
 
 // intersectTests returns the entries of a that name the same test as some entry
