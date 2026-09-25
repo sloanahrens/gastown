@@ -216,7 +216,7 @@ type ConvoyManager struct {
 	// pollGate lets a scheduled_maintenance gc pause this manager's Dolt
 	// reads: the event poll tick and the stranded scan take the read side
 	// through tryBeginTick and skip the tick while Pause holds the write side
-	// (the 09-17 Dolt panic was a Convoy events read racing a gc).
+	// (a live reader racing gc; see the gc design doc, Problem).
 	pollGate sync.RWMutex
 
 	// pausing is set while Pause waits for the write side, so no new tick

@@ -1,4 +1,4 @@
-> Status: design approved (2026-09-25), claude-05o.
+> Status: historical (2026-09). Merged in: gt-pmawc. Not maintained.
 
 # Scheduled Dolt maintenance: gc mode — design
 
@@ -135,8 +135,8 @@ Minor fixes:
 ## compactor_dog.threshold
 
 The compactor dog only escalates; it never compacts. With gc mode handling
-disk by size, its commit threshold only guards history-query latency: about
-1s per `dolt_history_*` query near 23k commits. At 2000 it escalates daily on
+disk by size, its commit threshold only guards history-query latency (see
+Problem). At 2000 it escalates daily on
 every busy database without a real problem behind it. A town running gc mode
 sets it to 20000.
 

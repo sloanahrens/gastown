@@ -421,9 +421,9 @@ An older `gt config set maintenance.*` rewrites daemon.json without the
 
 `patrols.compactor_dog.threshold` is an escalation line only; the compactor
 dog never compacts. Under gc mode, disk is handled by size, so the commit
-threshold only guards history-walking query latency (~44us per commit,
-about 1s per `dolt_history_*` query near 23k commits). Towns running gc mode
-set it to 20000 rather than the 2000 default.
+threshold only guards history-walking query latency (measurements in the gc
+design doc, Problem). Towns running gc mode set it to 20000 rather than the
+2000 default.
 
 All compaction operations are safe on a running server — no downtime
 needed. Can also be wired as a Dolt scheduled event (MySQL-style cron):

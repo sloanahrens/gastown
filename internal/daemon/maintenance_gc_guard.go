@@ -18,7 +18,7 @@ import (
 //     and defers while any task holds the read side. Neither side ever blocks,
 //     so the select loop never waits on a gc.
 //   - The ConvoyManager's event poll and stranded scan are paused around each
-//     database's gc (the 09-17 panic was a live Convoy events read during gc).
+//     database's gc (a live reader racing gc; design doc, Problem).
 //   - The Dolt health check defers a restart while a gc call is in flight and
 //     under its timeout (doltRestartHeldForGC).
 //   - Windows that close with gc still deferred are counted, and escalated

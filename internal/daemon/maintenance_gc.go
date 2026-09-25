@@ -33,9 +33,8 @@ import (
 // never rewrites a commit, never pushes — see
 // docs/plans/2026-09-25-dolt-gc-maintenance-design.md (claude-05o).
 //
-// The trigger is size, not commit count: the 2026-09-24 measurement showed
-// ~80% of a large database was unreferenced chunk data that plain auto-gc
-// leaves in the old generation, while the history itself was a few MB.
+// The trigger is size, not commit count; the measurements behind that are in
+// the design doc's Problem section.
 
 const (
 	// MaintenanceModeGC runs CALL dolt_gc('--full') on each database that
@@ -50,8 +49,9 @@ const (
 	// last post-gc size before the next gc.
 	DefaultGCGrowthRatio = 2.0
 
-	// maintenanceGCTimeout bounds one CALL dolt_gc('--full'). The 2026-09-24
-	// prod run took 0-2s per database; ten minutes is a hang, not a slow gc.
+	// maintenanceGCTimeout bounds one CALL dolt_gc('--full'). A prod --full
+	// gc takes seconds per database (design doc, Problem); ten minutes is a
+	// hang, not a slow gc.
 	maintenanceGCTimeout = 10 * time.Minute
 
 	// maintenancePolecatFreshness is how recent a polecat's "working"
@@ -316,9 +316,8 @@ var maintenanceGCDispatchFn = func(fn func()) { go fn() }
 // --- quiet-window guard -----------------------------------------------------------
 
 // maintenanceQuiet reports whether gc may run now, with the reason when not.
-// A --full gc is the one step that has correlated with a Dolt panic (the
-// 09-17 03:05 nil deref was a live reader during the nightly gc), so it runs
-// only when nothing else in the town is doing work:
+// A --full gc is the one step that has correlated with a Dolt panic (design
+// doc, Problem), so it runs only when nothing else in the town is doing work:
 //   - the daemon's own in-flight work is idle (the upgrade-restart predicate),
 //   - no main_branch_test, including one still waiting for a slot,
 //   - no container-gate slot or in-flight marker held by anyone (refinery gate,
