@@ -1728,25 +1728,22 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 }
 
 // isReadyIssue checks if an issue is ready for dispatch (stranded).
-// An issue is ready if:
+// Readiness is an allowlist of statuses, not a list of the ones that are not
+// ready (gt-t08jn): anything else — blocked, deferred, pinned, a custom status
+// — is work the tracker says is not ready, assigned or not. An issue is ready
+// if it is not blocked by a dependency, not scheduled, and:
 // - status = "open" AND (no assignee OR assignee session is dead)
-// - OR status = "in_progress"/"hooked" AND assignee session is dead (orphaned molecule)
-// - AND not blocked (cross-rig-aware from issue details)
+// - OR status = "in_progress"/"hooked" AND (no assignee OR assignee session is
+//   dead) — an orphaned molecule, whose recovery is a re-dispatch
 // scheduledSet is a pre-computed set of bead IDs with open sling contexts (from areScheduled).
 func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
-	status := strings.TrimSpace(t.Status)
-
-	// Unresolved issues are not safe to dispatch.
-	if status == "" || status == trackedStatusUnknown {
+	status := beads.IssueStatus(strings.TrimSpace(t.Status))
+	if status != beads.StatusOpen && !status.IsAssigned() {
 		return false
 	}
 
-	// Closed issues are never ready
-	if status == "closed" || status == "tombstone" {
-		return false
-	}
-
-	// Must not be blocked
+	// Must not be blocked (dependency blockers, cross-rig-aware from issue
+	// details: applyFreshIssueDetails)
 	if t.Blocked {
 		return false
 	}
@@ -1756,16 +1753,9 @@ func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 		return false
 	}
 
-	// Open issues with no assignee are trivially ready
-	if status == "open" && t.Assignee == "" {
-		return true
-	}
-
-	// For issues with an assignee (or non-open status with molecule attached),
-	// check if the worker session is still alive
+	// No assignee: an open issue is trivially ready, and an in_progress/hooked
+	// one is a molecule that detached improperly and needs re-dispatch.
 	if t.Assignee == "" {
-		// Non-open status but no assignee is an edge case (shouldn't happen
-		// normally, but could occur if molecule detached improperly)
 		return true
 	}
 
