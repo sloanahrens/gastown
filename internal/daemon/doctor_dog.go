@@ -245,6 +245,13 @@ func (d *Daemon) runDoctorDog() {
 	if !d.isPatrolActive("doctor_dog") {
 		return
 	}
+	// Its probes query Dolt (latency, connections, databases); skip the tick
+	// while a scheduled_maintenance gc holds the write side.
+	release, ok := d.tryDoltTask("doctor_dog")
+	if !ok {
+		return
+	}
+	defer release()
 
 	latencyMs, orphanCount, backupStaleSec := doctorDogThresholds(d.patrolConfig)
 	r := doctorDogFindings(doctorDogProbes(d.config.TownRoot), doctorLimits{

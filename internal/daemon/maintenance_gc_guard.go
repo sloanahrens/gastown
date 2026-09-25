@@ -77,11 +77,15 @@ func (d *Daemon) doltRestartHeldForGC() bool {
 		return true
 	}
 	if d.maintenanceGCOverdueEscalated.CompareAndSwap(false, true) {
-		maintenanceEscalateFn(d, "scheduled_maintenance", fmt.Sprintf(
+		msg := fmt.Sprintf(
 			"scheduled_maintenance: a CALL dolt_gc('--full') has been in flight for %v, past its %v timeout, "+
 				"and the Dolt health check is failing. No longer deferring the health restart. "+
 				"Collect gt dolt status / gt dolt dump now.",
-			elapsed.Round(time.Second), maintenanceGCTimeout))
+			elapsed.Round(time.Second), maintenanceGCTimeout)
+		// Dispatched: this runs under the Dolt manager's lock on the daemon
+		// loop, and gt escalate can take minutes (60s x retries). The restart
+		// it is releasing must not wait on the alert.
+		go maintenanceEscalateFn(d, "scheduled_maintenance", msg)
 	}
 	return false
 }

@@ -93,7 +93,16 @@ func TestEnsureRunningStartsDeadServerEvenWhileSuppressed(t *testing.T) {
 
 func TestDoltRestartHeldForGC(t *testing.T) {
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	withGCFakes(t)
+
+	// The escalation sink blocks until released, as a slow gt escalate would.
+	escalated := make(chan string, 4)
+	unblock := make(chan struct{})
+	maintenanceEscalateFn = func(_ *Daemon, source, message string) {
+		<-unblock
+		escalated <- source + "|" + message
+	}
+	defer close(unblock)
 
 	if d.doltRestartHeldForGC() {
 		t.Error("held with no gc cycle running")
@@ -107,13 +116,54 @@ func TestDoltRestartHeldForGC(t *testing.T) {
 		t.Error("not held while a gc call is in flight and under its timeout")
 	}
 
-	// Past timeout + grace: release the restart and escalate exactly once.
+	// Past timeout + grace: release the restart promptly even though the
+	// escalation blocks, and escalate exactly once per call.
 	d.maintenanceGCCallStartedAt.Store(time.Now().Add(-(maintenanceGCTimeout + maintenanceGCRestartGrace + time.Minute)).UnixNano())
-	if d.doltRestartHeldForGC() || d.doltRestartHeldForGC() {
-		t.Error("still held for a gc call past its timeout")
+	returned := make(chan bool, 2)
+	go func() {
+		returned <- d.doltRestartHeldForGC()
+		returned <- d.doltRestartHeldForGC()
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case held := <-returned:
+			if held {
+				t.Error("still held for a gc call past its timeout")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("doltRestartHeldForGC blocked on the escalation (it runs under the Dolt manager lock)")
+		}
 	}
-	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "past its") {
-		t.Errorf("overdue gc escalations = %v, want exactly one", f.escalations)
+
+	unblock <- struct{}{}
+	select {
+	case msg := <-escalated:
+		if !strings.Contains(msg, "past its") {
+			t.Errorf("overdue escalation = %q", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("overdue escalation never sent")
+	}
+	select {
+	case msg := <-escalated:
+		t.Errorf("second escalation for the same call: %q", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestDoctorDogSkipsWhileGCHoldsLock(t *testing.T) {
+	d, logs := gcTestDaemon(t)
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		DoctorDog: &DoctorDogConfig{Enabled: true},
+	}}
+	d.doltMaintMu.Lock()
+	d.runDoctorDog()
+	d.doltMaintMu.Unlock()
+	if !strings.Contains(logs.String(), "doctor_dog: skipped: gc in flight") {
+		t.Errorf("doctor_dog did not skip while a gc held the lock:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "all clear") || strings.Contains(logs.String(), "finding(s)") {
+		t.Errorf("doctor_dog probed Dolt while a gc held the lock:\n%s", logs.String())
 	}
 }
 
