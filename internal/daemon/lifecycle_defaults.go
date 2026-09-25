@@ -1,5 +1,7 @@
 package daemon
 
+import "time"
+
 // DefaultLifecycleConfig returns a DaemonPatrolConfig with sensible defaults
 // for the six-stage Dolt lifecycle (CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN).
 //
@@ -12,6 +14,7 @@ package daemon
 //   - Dolt Filesystem Backup: every 15m
 //   - Scheduled Maintenance (FLATTEN): daily at 03:00, threshold 1000
 //   - Main Branch Test: every 30m, 10m timeout per rig
+//   - Dolt Remotes: every 15m, pushes databases that have a configured remote
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
 	threshold := 1000
 	scrub := true
@@ -68,6 +71,14 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				// above is visible in a generated config, next to the knob
 				// that turns it on (gt-lf2r).
 				GateBusyStarveAfterStr: defaultGateBusyStarveAfter.String(),
+			},
+			// dolt_remotes defaults to disabled in IsPatrolEnabled (opt-in), so
+			// a freshly generated daemon.json stays a no-op for towns whose
+			// databases have no remote configured. A town that wants scheduled
+			// remote pushes flips enabled to true.
+			DoltRemotes: &DoltRemotesConfig{
+				Enabled:  false,
+				Interval: 15 * time.Minute,
 			},
 			Handler: &PatrolConfig{
 				Enabled: true,
@@ -127,6 +138,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.MainBranchTest == nil {
 		p.MainBranchTest = d.MainBranchTest
+		changed = true
+	}
+	if p.DoltRemotes == nil {
+		p.DoltRemotes = d.DoltRemotes
 		changed = true
 	}
 	if p.Handler == nil {
