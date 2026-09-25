@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -259,6 +262,83 @@ func TestWrappedDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log missing %q:\n%s", want, logs.String())
 		}
+	}
+}
+
+// triggerCompactorDog's goroutine takes the read side before its cycle: with
+// a gc holding the write side, the cycle neither runs nor records a run, and
+// it runs on the next check once the gc is done.
+func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
+	origCycle := compactorDogCycleFn
+	t.Cleanup(func() { compactorDogCycleFn = origCycle })
+	var mu sync.Mutex
+	cycles := 0
+	compactorDogCycleFn = func(*Daemon) {
+		mu.Lock()
+		cycles++
+		mu.Unlock()
+	}
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return cycles
+	}
+
+	var logs bytes.Buffer
+	d := compactorDogTestDaemon(t.TempDir(), &logs)
+	d.doltMaintMu.Lock()
+	d.triggerCompactorDog()
+	awaitCompactorDogIdle(t, d)
+	d.doltMaintMu.Unlock()
+
+	if n := count(); n != 0 {
+		t.Fatalf("compactor_dog cycle ran %d time(s) while a gc held the lock", n)
+	}
+	if !strings.Contains(logs.String(), "compactor_dog: skipped: gc in flight") {
+		t.Errorf("skip not logged:\n%s", logs.String())
+	}
+	d.compactorDogMu.Lock()
+	recorded := d.lastCompactorDogRun
+	d.compactorDogMu.Unlock()
+	if !recorded.IsZero() {
+		t.Errorf("a skipped cycle recorded a run at %v; the next check would not retry", recorded)
+	}
+
+	d.triggerCompactorDog()
+	awaitCompactorDogIdle(t, d)
+	if n := count(); n != 1 {
+		t.Errorf("after the gc: %d cycle(s), want 1", n)
+	}
+}
+
+// syncDoltBackups skips before pouring its molecule or touching the data dir
+// while a gc holds the write side. macOS only: the backup patrol returns
+// before the guard on every other OS.
+func TestDoltBackupSkipsWhileGCHoldsLock(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("dolt_backup runs only on darwin")
+	}
+	d, logs := gcTestDaemon(t)
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		DoltBackup: &DoltBackupConfig{Enabled: true},
+	}}
+	var bdCalls []string
+	d.dogPourBdFn = func(args ...string) (string, error) {
+		bdCalls = append(bdCalls, strings.Join(args, " "))
+		return "", errors.New("fake bd: unavailable")
+	}
+	d.doltMaintMu.Lock()
+	d.syncDoltBackups()
+	d.doltMaintMu.Unlock()
+
+	if !strings.Contains(logs.String(), "dolt_backup: skipped: gc in flight") {
+		t.Errorf("skip not logged:\n%s", logs.String())
+	}
+	if len(bdCalls) != 0 {
+		t.Errorf("dolt_backup poured its molecule while a gc held the lock: %v", bdCalls)
+	}
+	if strings.Contains(logs.String(), "data dir") {
+		t.Errorf("dolt_backup reached its data dir while a gc held the lock:\n%s", logs.String())
 	}
 }
 
