@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,7 +32,7 @@ exit 0
 func daemonShellingOutToGt(t *testing.T) *Daemon {
 	t.Helper()
 	return &Daemon{
-		logger: log.New(os.Stderr, "alert-keys: ", log.LstdFlags),
+		logger: discardLogger,
 		config: &Config{TownRoot: t.TempDir()},
 	}
 }

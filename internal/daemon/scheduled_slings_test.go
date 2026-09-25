@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,7 +202,7 @@ func newScheduledTestDaemon(t *testing.T, entries []ScheduledSlingEntry, runner 
 	var escalations []string
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(os.Stderr, "", 0),
+		logger: discardLogger,
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 			ScheduledSlings: &ScheduledSlingsConfig{Enabled: true, Entries: entries},
 		}},
@@ -306,7 +305,7 @@ func TestRunScheduledSlings_InvalidEntryIsSkippedNotFatal(t *testing.T) {
 }
 
 func TestTriggerScheduledSlings_SingleFlight(t *testing.T) {
-	d := &Daemon{logger: log.New(os.Stderr, "", 0)} // patrol inactive: run returns at once
+	d := &Daemon{logger: discardLogger} // patrol inactive: run returns at once
 	if !d.triggerScheduledSlings() {
 		t.Fatal("first trigger should start")
 	}

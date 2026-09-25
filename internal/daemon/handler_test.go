@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,7 +41,7 @@ func testHandlerDaemon(t *testing.T, townRoot string) *Daemon {
 	t.Helper()
 	return &Daemon{
 		config: &Config{TownRoot: townRoot},
-		logger: log.New(os.Stderr, "test: ", log.LstdFlags),
+		logger: discardLogger,
 	}
 }
 
