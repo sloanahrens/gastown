@@ -266,7 +266,7 @@ func TestBuildActivityOutput(t *testing.T) {
 		},
 	}
 
-	out := buildActivityOutput(observed, now)
+	out := buildActivityOutput(observed, nil, now)
 	if out.Checked != 3 {
 		t.Errorf("Checked = %d, want 3", out.Checked)
 	}
@@ -303,6 +303,82 @@ func TestBuildActivityOutput(t *testing.T) {
 	}
 	if undated.LastActivityAgeSeconds != nil {
 		t.Errorf("undated session reported an age: %v", *undated.LastActivityAgeSeconds)
+	}
+}
+
+// TestBuildActivityOutput_CarriesPersistedStallCheck: the JSON exposes the
+// persisted sample 1 and the verdict against it, so a respawned witness reads
+// the stall rule's state instead of remembering it (claude-8w7).
+func TestBuildActivityOutput_CarriesPersistedStallCheck(t *testing.T) {
+	now := time.Date(2026, 9, 25, 15, 0, 0, 0, time.UTC)
+	observed := []witness.RealActivity{
+		{Polecat: "opal", Session: "gt-opal", AgentAlive: true, ObservedAt: now},
+		{Polecat: "lapis", Session: "gt-lapis", AgentAlive: true, ObservedAt: now},
+	}
+	checks := []witness.StallCheck{
+		{Polecat: "opal", Stalled: true, Reason: "no transcript change and no pane content change for 31m0s",
+			Baseline: witness.StallSample{Polecat: "opal", SampledAt: now.Add(-31 * time.Minute)}},
+		{Polecat: "lapis", Recorded: true, Reason: "sample 1 recorded; compare after 30m0s",
+			Baseline: witness.StallSample{Polecat: "lapis", SampledAt: now}},
+	}
+
+	out := buildActivityOutput(observed, checks, now)
+	if out.Stalled != 1 {
+		t.Errorf("Stalled = %d, want 1", out.Stalled)
+	}
+	opal, lapis := out.Items[0], out.Items[1]
+	if !opal.Stalled || !strings.Contains(opal.StallReason, "no pane content change") {
+		t.Errorf("opal must carry the stall verdict: %+v", opal)
+	}
+	if opal.StallSampleAt != now.Add(-31*time.Minute).Format(time.RFC3339) {
+		t.Errorf("opal stall_sample_at = %q", opal.StallSampleAt)
+	}
+	if opal.StallSampleAgeSeconds == nil || *opal.StallSampleAgeSeconds != (31*time.Minute).Seconds() {
+		t.Errorf("opal stall_sample_age_seconds = %v, want 1860", opal.StallSampleAgeSeconds)
+	}
+	if lapis.Stalled || lapis.StallSampleAgeSeconds == nil || *lapis.StallSampleAgeSeconds != 0 {
+		t.Errorf("lapis just recorded sample 1 and is not stalled: %+v", lapis)
+	}
+
+	data, err := json.Marshal(opal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"stalled":true`, `"stall_reason"`, `"stall_sample_at"`, `"stall_sample_age_seconds"`} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("JSON item missing %s: %s", key, data)
+		}
+	}
+}
+
+// TestPatrolScanHumanPrintsStallVerdict: the human output flags a positive stall
+// signal with the policy (nudge, escalate, never restart alone), and stays
+// quiet for a polecat that merely has a sample 1.
+func TestPatrolScanHumanPrintsStallVerdict(t *testing.T) {
+	now := time.Now()
+	observed := []witness.RealActivity{
+		{Polecat: "opal", Session: "gt-opal", AgentAlive: true, ObservedAt: now, PaneSignature: "sig"},
+		{Polecat: "lapis", Session: "gt-lapis", AgentAlive: true, ObservedAt: now, PaneSignature: "sig2"},
+	}
+	checks := []witness.StallCheck{
+		{Polecat: "opal", Stalled: true, Reason: "no transcript change and no pane content change for 31m0s",
+			Baseline: witness.StallSample{SampledAt: now.Add(-31 * time.Minute)}},
+		{Polecat: "lapis", Recorded: true, Reason: "sample 1 recorded; compare after 30m0s",
+			Baseline: witness.StallSample{SampledAt: now}},
+	}
+	printed := captureStdout(t, func() {
+		if err := outputPatrolScanHuman("gastown", nil, nil, nil, nil, observed, nil, checks); err != nil {
+			t.Errorf("outputPatrolScanHuman: %v", err)
+		}
+	})
+	if !strings.Contains(printed, "STALLED") || !strings.Contains(printed, "no pane content change") {
+		t.Errorf("output must flag opal's stall:\n%s", printed)
+	}
+	if !strings.Contains(printed, "escalate") {
+		t.Errorf("stall line must carry the escalate-not-restart policy:\n%s", printed)
+	}
+	if strings.Count(printed, "STALLED") != 1 {
+		t.Errorf("only opal is stalled:\n%s", printed)
 	}
 }
 
@@ -354,7 +430,7 @@ func TestPatrolScanHumanRefineryLineReportsOnlyTheClocksItHas(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := tt.result
 			printed := captureStdout(t, func() {
-				if err := outputPatrolScanHuman("gastown", nil, nil, &result, nil, nil, nil); err != nil {
+				if err := outputPatrolScanHuman("gastown", nil, nil, &result, nil, nil, nil, nil); err != nil {
 					t.Errorf("outputPatrolScanHuman: %v", err)
 				}
 			})

@@ -22,6 +22,7 @@ var (
 	patrolScanRig               string
 	patrolScanVerbose           bool
 	patrolScanActivityThreshold time.Duration
+	patrolScanStallWindow       time.Duration
 )
 
 var patrolScanCmd = &cobra.Command{
@@ -48,11 +49,16 @@ Actions taken automatically:
   - Completion routing: MR cleanup wisps created, refinery nudged
 
 The activity section is report-only: it never restarts anything. It exists so
-that a "hung session" judgement can be backed by evidence. To act on it, take
-two scans at least --activity-threshold apart and compare the pane_signature
-and last_activity_age_seconds of the same polecat; only if BOTH are unchanged
-is there a positive stall signal (gt-xb27). A polecat deep inside one long turn
-looks busy on every other signal and must be left alone.
+that a "hung session" judgement can be backed by evidence. Each scan applies
+the gt-xb27 stall rule for you: the first observation of a polecat is saved
+as sample 1 in <rig>/witness/stall_samples.json, and every later scan compares
+against it. Only when a full --stall-window has passed with the transcript not
+advancing AND the pane signature byte-identical does an item report
+stalled=true. Sample 1 survives witness restarts. Work since sample 1, a
+new session, or a gap of more than 15m between scans (host asleep) re-records
+it, and samples of polecats with no live session are pruned.
+A polecat deep inside one long turn looks busy on every other signal and must
+be left alone.
 
 Use --notify to send mail when zombies with active work are detected.
 Long-running scan phases emit progress diagnostics to stderr so JSON stdout
@@ -73,6 +79,8 @@ func init() {
 	patrolScanCmd.Flags().BoolVarP(&patrolScanVerbose, "verbose", "v", false, "Verbose output")
 	patrolScanCmd.Flags().DurationVar(&patrolScanActivityThreshold, "activity-threshold", constants.HungSessionThreshold,
 		"Age of last real activity that marks a polecat as a stall candidate (report-only)")
+	patrolScanCmd.Flags().DurationVar(&patrolScanStallWindow, "stall-window", constants.HungSessionThreshold,
+		"Minimum time between the persisted sample 1 and a later scan for a stall verdict (gt-xb27)")
 
 	patrolCmd.AddCommand(patrolScanCmd)
 }
@@ -178,10 +186,13 @@ type PatrolScanCompleteItem struct {
 // PatrolScanActivityOutput holds real-activity observations for live sessions.
 // Report-only: no restart is ever driven by this section alone (gt-xb27).
 type PatrolScanActivityOutput struct {
-	Checked         int                      `json:"checked"`
-	Threshold       string                   `json:"threshold"`
-	StaleCandidates int                      `json:"stale_candidates"`
-	Items           []PatrolScanActivityItem `json:"items,omitempty"`
+	Checked         int    `json:"checked"`
+	Threshold       string `json:"threshold"`
+	StaleCandidates int    `json:"stale_candidates"`
+	// Stalled counts items with a positive stall signal against the persisted
+	// sample 1 (claude-8w7).
+	Stalled int                      `json:"stalled"`
+	Items   []PatrolScanActivityItem `json:"items,omitempty"`
 }
 
 // PatrolScanActivityItem is one live session's real-activity snapshot.
@@ -204,6 +215,14 @@ type PatrolScanActivityItem struct {
 	StallCandidate         bool     `json:"stall_candidate"`
 	Note                   string   `json:"note,omitempty"`
 	Errors                 []string `json:"errors,omitempty"`
+
+	// The persisted stall rule (claude-8w7): sample 1 is kept on disk by the
+	// scan, so these survive a witness respawn. Stalled is the only field a
+	// stall judgement may rest on; the policy is still nudge, then escalate.
+	StallSampleAt         string   `json:"stall_sample_at,omitempty"`
+	StallSampleAgeSeconds *float64 `json:"stall_sample_age_seconds,omitempty"`
+	Stalled               bool     `json:"stalled"`
+	StallReason           string   `json:"stall_reason,omitempty"`
 }
 
 func runPatrolScan(cmd *cobra.Command, args []string) error {
@@ -256,6 +275,14 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	activityResult := runPatrolScanPhase(diagnostics, "real-activity observation", func() []witness.RealActivity {
 		return witness.ObserveRigRealActivity(workDir, rigName)
 	})
+	// The stall rule's sample 1 is persisted, so the comparison survives a
+	// witness respawn (claude-8w7). A store failure is warned, never fatal:
+	// the worst case is a fresh sample 1, which delays a verdict one window.
+	stallChecks, stallErr := witness.TrackStalls(witness.NewStallSampleStore(townRoot, rigName),
+		activityResult, patrolScanStallWindow, time.Now())
+	if stallErr != nil {
+		fmt.Fprintf(diagnostics, "gt patrol scan: stall samples: %v\n", stallErr)
+	}
 
 	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
@@ -272,10 +299,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts, stallChecks)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts, stallChecks)
 }
 
 func runPatrolScanPhase[T any](diagnostics io.Writer, name string, fn func() T) T {
@@ -374,7 +401,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, receipts []witness.PatrolReceipt) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, receipts []witness.PatrolReceipt, stallChecks []witness.StallCheck) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -479,7 +506,7 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 	}
 
 	// Activity
-	output.Activity = buildActivityOutput(activityResult, time.Now())
+	output.Activity = buildActivityOutput(activityResult, stallChecks, time.Now())
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -488,11 +515,13 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 
 // buildActivityOutput projects real-activity snapshots into scan output.
 // now is a parameter so callers and tests agree on the reference instant.
-func buildActivityOutput(observed []witness.RealActivity, now time.Time) *PatrolScanActivityOutput {
+// checks are the persisted stall-rule results, matched to items by polecat.
+func buildActivityOutput(observed []witness.RealActivity, checks []witness.StallCheck, now time.Time) *PatrolScanActivityOutput {
 	out := &PatrolScanActivityOutput{
 		Checked:   len(observed),
 		Threshold: patrolScanActivityThreshold.String(),
 	}
+	byPolecat := stallChecksByPolecat(checks)
 	for _, act := range observed {
 		item := PatrolScanActivityItem{
 			Polecat:         act.Polecat,
@@ -510,17 +539,41 @@ func buildActivityOutput(observed []witness.RealActivity, now time.Time) *Patrol
 			item.LastActivityAgeSeconds = &seconds
 		}
 		if item.StallCandidate {
-			item.Note = "candidate only — re-scan after the full threshold and require an unchanged pane_signature before any restart"
+			item.Note = "candidate only — act only on stalled=true, which needs an unchanged pane_signature and transcript since the persisted sample 1"
+		}
+		if check, ok := byPolecat[act.Polecat]; ok {
+			item.Stalled = check.Stalled
+			item.StallReason = check.Reason
+			if !check.Baseline.SampledAt.IsZero() {
+				item.StallSampleAt = check.Baseline.SampledAt.UTC().Format(time.RFC3339)
+				age := now.Sub(check.Baseline.SampledAt)
+				if age < 0 {
+					age = 0
+				}
+				seconds := age.Seconds()
+				item.StallSampleAgeSeconds = &seconds
+			}
 		}
 		out.Items = append(out.Items, item)
 		if item.StallCandidate {
 			out.StaleCandidates++
 		}
+		if item.Stalled {
+			out.Stalled++
+		}
 	}
 	return out
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, _ []witness.PatrolReceipt) error {
+func stallChecksByPolecat(checks []witness.StallCheck) map[string]witness.StallCheck {
+	m := make(map[string]witness.StallCheck, len(checks))
+	for _, c := range checks {
+		m[c.Polecat] = c
+	}
+	return m
+}
+
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, _ []witness.PatrolReceipt, stallChecks []witness.StallCheck) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -645,16 +698,24 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Printf("%s Real Activity: %d live session(s), threshold %s\n",
 			style.Bold.Render("⏱"), len(activityResult), patrolScanActivityThreshold)
 
+		byPolecat := stallChecksByPolecat(stallChecks)
 		for _, act := range activityResult {
 			candidate := act.IsStaleCandidate(now, patrolScanActivityThreshold)
+			check := byPolecat[act.Polecat]
 			icon := "●"
 			if candidate {
 				icon = "⚠"
 			}
+			if check.Stalled {
+				icon = "🚨"
+			}
 			fmt.Printf("  %s %s: %s\n", icon, act.Polecat, act.Describe(now))
-			if candidate {
+			if check.Stalled {
+				fmt.Printf("      STALLED (positive signal vs sample 1 at %s): %s — nudge, then escalate to the Mayor with both samples; never restart on this alone\n",
+					check.Baseline.SampledAt.UTC().Format(time.RFC3339), check.Reason)
+			} else if candidate {
 				fmt.Printf("      %s\n", style.Dim.Render(
-					"candidate only — re-scan after the full threshold and require an unchanged pane signature before any restart"))
+					"candidate only — act only on a STALLED verdict (unchanged pane signature and transcript since the persisted sample 1)"))
 			}
 			if len(act.Errors) > 0 && patrolScanVerbose {
 				for _, e := range act.Errors {
@@ -691,11 +752,18 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		refineryStallCount = len(refineryResult.Stalls)
 	}
 
-	if zombieCount == 0 && stallCount == 0 && refineryStallCount == 0 && completionCount == 0 {
+	stalledCount := 0
+	for _, c := range stallChecks {
+		if c.Stalled {
+			stalledCount++
+		}
+	}
+
+	if zombieCount == 0 && stallCount == 0 && refineryStallCount == 0 && completionCount == 0 && stalledCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d refinery stall(s), %d completion(s), %d activity candidate(s)\n",
-			zombieCount, activeCount, stallCount, refineryStallCount, completionCount, staleCandidates)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d refinery stall(s), %d completion(s), %d activity candidate(s), %d stalled vs sample 1\n",
+			zombieCount, activeCount, stallCount, refineryStallCount, completionCount, staleCandidates, stalledCount)
 	}
 
 	return nil
