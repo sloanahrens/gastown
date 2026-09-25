@@ -727,47 +727,14 @@ func loadRigGateConfig(rigPath string) *rigGateConfig {
 // skipped rather than stacking a second concurrent cycle on top of one still
 // waiting on a container-gate slot or mid-run (gt-uvxy). Returns true if a
 // cycle was started, false if one was already in progress.
-//
-// The ticker that drives this call is a check cadence, not a run cadence: an
-// in-process ticker resets its countdown on every daemon restart, so due-ness
-// is instead decided from the persisted last-run time in
-// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
 func (d *Daemon) triggerMainBranchTests() bool {
-	// d.config is nil in TestTriggerMainBranchTests_SingleFlight, which
-	// exercises only the guard below (patrolConfig is also nil there, so
-	// runMainBranchTests returns immediately without touching rigs); without
-	// a TownRoot there is no last-run file to consult, so the check runs
-	// unconditionally rather than dereferencing a nil config.
-	dec := patrolDueDecision{due: true, note: "no town root available — running unconditionally"}
-	if d.config != nil {
-		dec = evaluatePatrolDue(d.config.TownRoot, "main_branch_test", time.Time{}, time.Now(), mainBranchTestInterval(d.patrolConfig))
-	}
-	if !dec.due {
-		d.logger.Printf("main_branch_test: not due — %s", dec.note)
-		return false
-	}
-
 	if !d.mainBranchTestRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("main_branch_test: previous cycle still running, skipping this tick")
 		return false
 	}
-
-	if dec.warn != "" {
-		d.logger.Printf("main_branch_test: WARNING: %s — %s", dec.warn, dec.note)
-	} else {
-		d.logger.Printf("main_branch_test: due — %s", dec.note)
-	}
-
 	go func() {
 		defer d.mainBranchTestRunning.Store(false)
 		d.runMainBranchTests()
-		if d.config == nil {
-			return
-		}
-		if err := savePatrolLastRun(d.config.TownRoot, "main_branch_test", time.Now()); err != nil {
-			d.logger.Printf("main_branch_test: WARNING: cannot persist last-run time (%v) — "+
-				"the next check may re-run sooner than expected", err)
-		}
 	}()
 	return true
 }

@@ -156,45 +156,6 @@ func ParseAgeDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// triggerWispReaper runs a wisp_reaper cycle when the patrol is due, on its
-// own goroutine.
-//
-// The ticker that drives this call is a check cadence, not a run cadence: an
-// in-process ticker resets its countdown on every daemon restart, so due-ness
-// is instead decided from the persisted last-run time in
-// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
-//
-// Dispatched onto its own goroutine, like the gt-ima2 fix for compactor_dog:
-// dispatchReaperDog shells out to `gt sling`, and running that inline would
-// stall every other tick behind it.
-func (d *Daemon) triggerWispReaper() {
-	if !d.isPatrolActive("wisp_reaper") {
-		return
-	}
-
-	dec := evaluatePatrolDue(d.config.TownRoot, "wisp_reaper", time.Time{}, time.Now(), wispReaperInterval(d.patrolConfig))
-	if !dec.due {
-		d.logger.Printf("wisp_reaper: not due — %s", dec.note)
-		return
-	}
-
-	if !d.wispReaperRunning.CompareAndSwap(false, true) {
-		d.logger.Printf("wisp_reaper: previous cycle still running — skipping this check")
-		return
-	}
-
-	if dec.warn != "" {
-		d.logger.Printf("wisp_reaper: WARNING: %s — %s", dec.warn, dec.note)
-	} else {
-		d.logger.Printf("wisp_reaper: due — %s", dec.note)
-	}
-
-	go func() {
-		defer d.wispReaperRunning.Store(false)
-		d.reapWisps()
-	}()
-}
-
 // reapWisps is the thin orchestrator for the wisp_reaper patrol.
 // It pours a mol-dog-reaper molecule, then dispatches a Dog to execute it.
 // The Dog reads the formula steps and calls `gt reaper` CLI helpers.
@@ -208,15 +169,6 @@ func (d *Daemon) reapWisps() {
 		return
 	}
 	defer release()
-
-	// Record that a cycle was attempted, regardless of outcome below — the
-	// same "attempted" semantics as the ticker firing before gt-ima2/gt-gxpwc.
-	defer func() {
-		if err := savePatrolLastRun(d.config.TownRoot, "wisp_reaper", time.Now()); err != nil {
-			d.logger.Printf("wisp_reaper: WARNING: cannot persist last-run time (%v) — "+
-				"the next check may re-run sooner than expected", err)
-		}
-	}()
 
 	config := d.patrolConfig.Patrols.WispReaper
 	maxAge := wispReaperMaxAge(d.patrolConfig)

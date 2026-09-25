@@ -280,33 +280,3 @@ func TestDoltServerHostUsesConfiguredTownHost(t *testing.T) {
 		t.Fatalf("doltServerHost() = %q, want configured host", got)
 	}
 }
-
-// TestTriggerWispReaper_SkipsWhenNotDue is the regression test for
-// gt-ima2/gt-gxpwc applied to wisp_reaper: with a recent last-run record on
-// disk, the trigger must decline to start a cycle rather than firing on
-// every tick (or every restart) regardless of the persisted schedule.
-func TestTriggerWispReaper_SkipsWhenNotDue(t *testing.T) {
-	townRoot := t.TempDir()
-	if err := savePatrolLastRun(townRoot, "wisp_reaper", time.Now()); err != nil {
-		t.Fatalf("seed last run: %v", err)
-	}
-
-	var buf strings.Builder
-	d := &Daemon{
-		logger: log.New(&buf, "", 0),
-		config: &Config{TownRoot: townRoot},
-		patrolConfig: &DaemonPatrolConfig{
-			Patrols: &PatrolsConfig{
-				WispReaper: &WispReaperConfig{Enabled: true},
-			},
-		},
-	}
-
-	d.triggerWispReaper()
-	if d.wispReaperRunning.Load() {
-		t.Error("a declined trigger must not set the running guard")
-	}
-	if !strings.Contains(buf.String(), "not due") {
-		t.Errorf("expected a not-due log line, got: %q", buf.String())
-	}
-}

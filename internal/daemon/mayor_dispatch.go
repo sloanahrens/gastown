@@ -70,47 +70,14 @@ type dispatchCheckResult struct {
 // shells out (a subprocess that reads Dolt and tmux) and then nudges, which can
 // each take tens of seconds; running either inline would hold the tick loop.
 // Same shape as triggerMainBranchTests (gt-uvxy, gt-59o9).
-//
-// The ticker that drives this call is a check cadence, not a run cadence: an
-// in-process ticker resets its countdown on every daemon restart, so due-ness
-// is instead decided from the persisted last-run time in
-// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
 func (d *Daemon) triggerMayorDispatch() bool {
-	// d.config is nil in unit tests that exercise only the single-flight
-	// guard below (e.g. with the patrol disabled, so runMayorDispatch
-	// returns immediately without shelling out); without a TownRoot there is
-	// no last-run file to consult, so the check runs unconditionally rather
-	// than dereferencing a nil config.
-	dec := patrolDueDecision{due: true, note: "no town root available — running unconditionally"}
-	if d.config != nil {
-		dec = evaluatePatrolDue(d.config.TownRoot, "mayor_dispatch", time.Time{}, time.Now(), mayorDispatchInterval(d.patrolConfig))
-	}
-	if !dec.due {
-		d.logger.Printf("mayor_dispatch: not due — %s", dec.note)
-		return false
-	}
-
 	if !d.mayorDispatchRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("mayor_dispatch: previous cycle still running, skipping this tick")
 		return false
 	}
-
-	if dec.warn != "" {
-		d.logger.Printf("mayor_dispatch: WARNING: %s — %s", dec.warn, dec.note)
-	} else {
-		d.logger.Printf("mayor_dispatch: due — %s", dec.note)
-	}
-
 	go func() {
 		defer d.mayorDispatchRunning.Store(false)
 		d.runMayorDispatch()
-		if d.config == nil {
-			return
-		}
-		if err := savePatrolLastRun(d.config.TownRoot, "mayor_dispatch", time.Now()); err != nil {
-			d.logger.Printf("mayor_dispatch: WARNING: cannot persist last-run time (%v) — "+
-				"the next check may re-run sooner than expected", err)
-		}
 	}()
 	return true
 }
