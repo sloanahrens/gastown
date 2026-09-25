@@ -34,14 +34,10 @@ Two teardown paths leave the bead and the polecat out of step.
    closed or released stays as it is.
    - Nuke calls the helper after the preserve gate and before removal,
      because removal resets the agent bead itself.
-   - When the polecat's work survives on an origin branch, nuke keeps the
-     hook. The branch may be one this nuke pushed, or one
-     `survivingBranchForBead` finds. The bead gets a comment with the
-     `--branch` resume command. Sling's surviving-branch guard (gt-ibt8)
-     then still stops a fresh re-sling from main.
    - A polecat reaped before its nuke has no record of its work. Nuke reads
-     the work bead off the agent bead's `hook_bead` before the reset clears
-     it.
+     the work bead off the agent bead's `hook_bead` instead.
+   - Before any release, every path asks the work-survival predicate (rule 4).
+     Surviving work keeps the hook.
 2. **One deferred guard per sling.** `runSling` and `runSlingFormula` arm a
    guard right after `resolveTarget`. They mark success at a single commit
    point: the work is hooked and any polecat this sling spawned has a running
@@ -66,6 +62,29 @@ Two teardown paths leave the bead and the polecat out of step.
    - Release or burn bead state only after this sling has written to that
      bead. Before that point the rollback bead is empty.
 
+4. **One work-survival predicate.** Work survives for bead B when two things
+   hold. A generated `polecat/*` branch for B exists, either in the rig repo
+   or on origin. And `git cherry origin/<default> <branch>` shows at least one
+   `+` line, meaning a patch that is not on main. Patch identity stays correct
+   under rebase and squash merges, where an ancestry check reports merged work
+   as unmerged. A branch equal to main, fully merged or empty does not survive.
+   - The predicate is `polecat.WorkSurvival` / `SurvivingWorkForIssue`.
+   - Every path that releases a hooked bead asks it first:
+     - `gt polecat nuke`;
+     - polecat removal (`unassignWorkBeads`);
+     - the witness `resetAbandonedBead` and `DetectOrphanedBeads`;
+     - the witness formula's orphan step, through
+       `gt polecat surviving-work <bead>` (exit 0 = branch printed, 1 = none,
+       2 = unknown);
+     - sling's re-sling guard.
+   - Surviving work keeps the hook. An unknown answer keeps it too, except in
+     sling, which proceeds so a network outage cannot block dispatch. A rig
+     with no git repo has no branch to protect.
+   - Every release, including removal's and the witness's, is the guarded
+     `--if-assignee` write.
+   - Nuke writes the "resume with `--branch`" comment only after removal, and
+     only if the bead is still hooked to the nuked polecat.
+
 ## Invariants the tests pin
 
 - Each post-spawn early exit that a test can reach runs the rollback exactly
@@ -87,7 +106,19 @@ Two teardown paths leave the bead and the polecat out of step.
   polecat and its status is held. This holds for `in_progress` beads under
   bd's write fence, and when the bead is re-assigned between the read and
   the write.
-- Nuke keeps the hook, and comments the resume command, when work survives
-  on origin.
+- The predicate pins these cases against a local bare origin:
+  - an unmerged branch survives;
+  - a branch equal to main does not;
+  - a merged branch does not;
+  - a rebase-merged branch does not;
+  - a local-only branch with unpushed work survives;
+  - an unreachable origin is unknown.
+- Polecat removal keeps a bead whose work survives and releases one whose
+  branch is merged, using the guarded write.
+- The witness keeps surviving and unknown work hooked, and makes a guarded
+  reset otherwise.
+- The nuke flow runs decide, remove, report in order. Kept work gets exactly
+  one comment and no release attempts. Merged work is released. A polecat
+  reaped before its nuke is handled through its `hook_bead`.
 - A failure before the sling writes to the bead neither burns the bead's
   molecules nor releases its hook.
