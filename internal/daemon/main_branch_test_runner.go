@@ -727,14 +727,58 @@ func loadRigGateConfig(rigPath string) *rigGateConfig {
 // skipped rather than stacking a second concurrent cycle on top of one still
 // waiting on a container-gate slot or mid-run (gt-uvxy). Returns true if a
 // cycle was started, false if one was already in progress.
+//
+// The ticker that drives this call is a check cadence, not a run cadence: an
+// in-process ticker resets its countdown on every daemon restart, so due-ness
+// is instead decided from the persisted last-run time in
+// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
 func (d *Daemon) triggerMainBranchTests() bool {
+	// d.config is nil in TestTriggerMainBranchTests_SingleFlight, which
+	// exercises only the guard below (patrolConfig is also nil there, so
+	// runMainBranchTests returns immediately without touching rigs); without
+	// a TownRoot there is no last-run file to consult, so the check runs
+	// unconditionally rather than dereferencing a nil config.
+	dec := patrolDueDecision{due: true, note: "no town root available — running unconditionally"}
+	if d.config != nil {
+		dec = evaluatePatrolDue(d.config.TownRoot, "main_branch_test", time.Time{}, time.Now(), mainBranchTestInterval(d.patrolConfig))
+	}
+	if !dec.due {
+		d.logger.Printf("main_branch_test: not due — %s", dec.note)
+		return false
+	}
+
 	if !d.mainBranchTestRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("main_branch_test: previous cycle still running, skipping this tick")
 		return false
 	}
+
+	if dec.warn != "" {
+		d.logger.Printf("main_branch_test: WARNING: %s — %s", dec.warn, dec.note)
+	} else {
+		d.logger.Printf("main_branch_test: due — %s", dec.note)
+	}
+
 	go func() {
 		defer d.mainBranchTestRunning.Store(false)
-		d.runMainBranchTests()
+		tested := d.runMainBranchTests()
+		if d.config == nil {
+			return
+		}
+		if tested == 0 {
+			// Nothing was actually checked this cycle (host busy, no rigs
+			// configured, every rig gate-busy) — recording a last-run here
+			// would read as "main was verified" and silence the next check for
+			// a full interval. Leaving the last-run time untouched means the
+			// next short check tick sees the same overdue state and retries
+			// instead of waiting out the interval again (gt-gxpwc rework,
+			// crew review point 3).
+			d.logger.Printf("main_branch_test: no rig was tested this cycle — not recording a last-run")
+			return
+		}
+		if err := savePatrolLastRun(d.config.TownRoot, "main_branch_test", time.Now()); err != nil {
+			d.logger.Printf("main_branch_test: WARNING: cannot persist last-run time (%v) — "+
+				"the next check may re-run sooner than expected", err)
+		}
 	}()
 	return true
 }
@@ -780,10 +824,17 @@ var mainBranchTestEscalateFn = func(d *Daemon, key, source, message string) {
 }
 
 // runMainBranchTests runs quality gates on each rig's main branch.
-// It fetches the latest main, runs configured gates/tests, and escalates failures.
-func (d *Daemon) runMainBranchTests() {
+// It fetches the latest main, runs configured gates/tests, and escalates
+// failures. Returns the number of rigs actually tested (ran, failed, or was
+// interrupted counts do not apply — see below), so triggerMainBranchTests can
+// decide whether this cycle earned a persisted last-run: a cycle that skipped
+// every rig (host busy, no rigs configured, every rig gate-busy) checked
+// nothing about main, and recording it as done would leave main unverified
+// for a full interval — up to 6h at the default — before the next check even
+// looks again (gt-gxpwc rework, crew review point 3).
+func (d *Daemon) runMainBranchTests() int {
 	if !d.isPatrolActive("main_branch_test") {
-		return
+		return 0
 	}
 
 	d.logger.Printf("main_branch_test: starting patrol cycle")
@@ -798,7 +849,7 @@ func (d *Daemon) runMainBranchTests() {
 		host := measureHostLoadFn()
 		if reason := hostBusyReason(minIdle, host); reason != "" {
 			d.logger.Printf("main_branch_test: skipped: %s", reason)
-			return
+			return 0
 		}
 		// Say which of the two "did not skip" cases this is: a floor above
 		// 100 is a config typo the gate ignores, and reporting it as a
@@ -813,7 +864,7 @@ func (d *Daemon) runMainBranchTests() {
 	rigNames := d.getKnownRigs()
 	if len(rigNames) == 0 {
 		d.logger.Printf("main_branch_test: no rigs found")
-		return
+		return 0
 	}
 
 	allowedRigs := mainBranchTestRigs(d.patrolConfig)
@@ -889,6 +940,7 @@ func (d *Daemon) runMainBranchTests() {
 	}
 
 	d.logger.Printf("main_branch_test: patrol cycle complete (%d tested, %d failed, %d skipped)", tested, failed, skipped)
+	return tested
 }
 
 // mainBranchTestGateBusyAlertKey is the alert fingerprint for a rig starved off

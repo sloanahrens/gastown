@@ -1762,6 +1762,98 @@ func TestTriggerMainBranchTests_SingleFlight(t *testing.T) {
 	}
 }
 
+// waitForMainBranchTestCycle blocks until triggerMainBranchTests's goroutine
+// clears mainBranchTestRunning (the cycle, and the persistence decision after
+// it, have both completed) or the deadline passes.
+func waitForMainBranchTestCycle(t *testing.T, d *Daemon) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for d.mainBranchTestRunning.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for main_branch_test cycle to finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestTriggerMainBranchTests_OverdueRunsAndPersists exercises the actual
+// production trigger path daemon.go's startup catch-up and ticker case both
+// call — not evaluatePatrolDue in isolation — end to end: with no last-run
+// record (overdue), triggerMainBranchTests must start a cycle, and a cycle
+// that tests at least one rig must persist a last-run so the next check does
+// not fire again immediately. This is the positive half review point 4 on
+// gt-gxpwc asked for: prior coverage only proved the trigger declines when
+// NOT due (TestTriggerCheckpointDog_SkipsWhenNotDue and siblings); deleting
+// the startup trigger call in daemon.go, or breaking the "actually run and
+// save" branch, left every existing test green.
+//
+// The rig is configured with no gate/test commands, so testRigMainBranch
+// returns a vacuous pass without touching git, Docker, or the container-gate
+// slot (loadRigGateConfig returns nil at the top of testRigMainBranch) — safe
+// and fast, while still exercising the same tested>0 accounting path a real
+// pass takes.
+func TestTriggerMainBranchTests_OverdueRunsAndPersists(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", false)
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	if _, found, _ := loadPatrolLastRun(townRoot, "main_branch_test"); found {
+		t.Fatal("test setup: last-run should not exist yet")
+	}
+
+	if started := d.triggerMainBranchTests(); !started {
+		t.Fatal("expected the trigger to start a cycle when no last-run is recorded")
+	}
+	waitForMainBranchTestCycle(t, d)
+
+	if _, found, err := loadPatrolLastRun(townRoot, "main_branch_test"); err != nil {
+		t.Fatalf("loadPatrolLastRun: %v", err)
+	} else if !found {
+		t.Fatal("expected a persisted last-run after a cycle that tested a rig")
+	}
+
+	// Immediately re-checking must now decline: the cycle just ran, so nothing
+	// is due yet. This is what stops a restart-reset ticker from re-running the
+	// patrol every restart (gt-ima2, gt-gxpwc) once a real interval is wired up.
+	if started := d.triggerMainBranchTests(); started {
+		t.Error("expected the trigger to decline immediately after a completed cycle")
+	}
+	if !strings.Contains(logged.String(), "not due") {
+		t.Errorf("expected a not-due log line on the immediate re-check:\n%s", logged.String())
+	}
+}
+
+// TestTriggerMainBranchTests_AllSkippedDoesNotPersist is the regression test
+// for crew review point 3 on gt-gxpwc: a cycle that skipped every rig (here,
+// a busy merge gate) tested nothing about main, so recording a last-run would
+// silence the next check for a full interval — up to 6h at the default —
+// before anything looks at main again. triggerMainBranchTests must leave the
+// last-run file untouched so the next short check tick retries instead.
+func TestTriggerMainBranchTests_AllSkippedDoesNotPersist(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", true)
+	stubGatePool(t, poolHeldBy("gastown/refinery"))
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	if started := d.triggerMainBranchTests(); !started {
+		t.Fatal("expected the trigger to start a cycle when no last-run is recorded")
+	}
+	waitForMainBranchTestCycle(t, d)
+
+	if _, found, err := loadPatrolLastRun(townRoot, "main_branch_test"); err != nil {
+		t.Fatalf("loadPatrolLastRun: %v", err)
+	} else if found {
+		t.Error("expected no persisted last-run after a cycle that tested no rig (all gate-busy)")
+	}
+	if !strings.Contains(logged.String(), "no rig was tested this cycle") {
+		t.Errorf("expected the trigger to log why it withheld the last-run:\n%s", logged.String())
+	}
+}
+
 func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
 	config := DefaultLifecycleConfig()
 	if config.Patrols.MainBranchTest == nil {

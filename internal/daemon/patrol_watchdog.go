@@ -231,16 +231,46 @@ func patrolWatchdogEscalationMessage(finding patrolWatchdogFinding) string {
 // (single-flight): each target's bd read and tmux liveness check, plus any
 // `gt escalate`/`gt nudge` subprocess a Fail verdict triggers, can take real
 // wall-clock time, and running them inline would hold the tick loop.
-func (d *Daemon) triggerPatrolWatchdog() bool {
+//
+// The ticker that drives this call is a check cadence, not a run cadence: an
+// in-process ticker resets its countdown on every daemon restart, so due-ness
+// is instead decided from the persisted last-run time in
+// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
+func (d *Daemon) triggerPatrolWatchdog() {
+	// d.config may be nil in unit tests that exercise only the single-flight
+	// guard; without a TownRoot there is no last-run file to consult, so the
+	// check runs unconditionally rather than dereferencing a nil config.
+	dec := patrolDueDecision{due: true, note: "no town root available — running unconditionally"}
+	if d.config != nil {
+		dec = evaluatePatrolDue(d.config.TownRoot, "patrol_watchdog", time.Time{}, time.Now(), patrolWatchdogInterval(d.patrolConfig))
+	}
+	if !dec.due {
+		d.logger.Printf("patrol_watchdog: not due — %s", dec.note)
+		return
+	}
+
 	if !d.patrolWatchdogRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("patrol_watchdog: previous cycle still running, skipping this tick")
-		return false
+		return
 	}
+
+	if dec.warn != "" {
+		d.logger.Printf("patrol_watchdog: WARNING: %s — %s", dec.warn, dec.note)
+	} else {
+		d.logger.Printf("patrol_watchdog: due — %s", dec.note)
+	}
+
 	go func() {
 		defer d.patrolWatchdogRunning.Store(false)
 		d.runPatrolWatchdog()
+		if d.config == nil {
+			return
+		}
+		if err := savePatrolLastRun(d.config.TownRoot, "patrol_watchdog", time.Now()); err != nil {
+			d.logger.Printf("patrol_watchdog: WARNING: cannot persist last-run time (%v) — "+
+				"the next check may re-run sooner than expected", err)
+		}
 	}()
-	return true
 }
 
 // runPatrolWatchdog checks every known patrol role instance and escalates any

@@ -39,6 +39,45 @@ func doltBackupInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultDoltBackupInterval
 }
 
+// triggerDoltBackup runs a dolt_backup cycle when the patrol is due, on its
+// own goroutine.
+//
+// The ticker that drives this call is a check cadence, not a run cadence: an
+// in-process ticker resets its countdown on every daemon restart, so due-ness
+// is instead decided from the persisted last-run time in
+// daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
+//
+// Dispatched onto its own goroutine, like the gt-ima2 fix for compactor_dog:
+// a sync can hold for minutes on a large commit delta, and running it inline
+// would stall every other tick behind it.
+func (d *Daemon) triggerDoltBackup() {
+	if !d.isPatrolActive("dolt_backup") {
+		return
+	}
+
+	dec := evaluatePatrolDue(d.config.TownRoot, "dolt_backup", time.Time{}, time.Now(), doltBackupInterval(d.patrolConfig))
+	if !dec.due {
+		d.logger.Printf("dolt_backup: not due — %s", dec.note)
+		return
+	}
+
+	if !d.doltBackupRunning.CompareAndSwap(false, true) {
+		d.logger.Printf("dolt_backup: previous cycle still running — skipping this check")
+		return
+	}
+
+	if dec.warn != "" {
+		d.logger.Printf("dolt_backup: WARNING: %s — %s", dec.warn, dec.note)
+	} else {
+		d.logger.Printf("dolt_backup: due — %s", dec.note)
+	}
+
+	go func() {
+		defer d.doltBackupRunning.Store(false)
+		d.syncDoltBackups()
+	}()
+}
+
 // syncDoltBackups syncs each production database to its configured backup location.
 // Non-fatal: errors are logged but don't stop the daemon.
 func (d *Daemon) syncDoltBackups() {
@@ -55,6 +94,17 @@ func (d *Daemon) syncDoltBackups() {
 		return
 	}
 	defer release()
+
+	// Record that a cycle was attempted, regardless of outcome below — the
+	// same "attempted" semantics as the ticker firing before gt-ima2/gt-gxpwc.
+	// An unwritable daemon directory only means the next restart or tick
+	// re-checks; it does not fail the cycle itself.
+	defer func() {
+		if err := savePatrolLastRun(d.config.TownRoot, "dolt_backup", time.Now()); err != nil {
+			d.logger.Printf("dolt_backup: WARNING: cannot persist last-run time (%v) — "+
+				"the next check may re-run sooner than expected", err)
+		}
+	}()
 
 	// Pour molecule for observability (nil-safe — all methods are no-ops on nil).
 	mol := d.pourDogMolecule(constants.MolDogBackup, nil)

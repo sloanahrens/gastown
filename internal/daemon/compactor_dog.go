@@ -103,32 +103,11 @@ type compactorDogDecision struct {
 }
 
 // compactorDogDue decides whether the patrol should run, given the last-run
-// state on disk.
+// state on disk. Delegates to the shared evaluatePatrolDue (gt-gxpwc), which
+// now backs every ticker-driven patrol in this package.
 func (d *Daemon) compactorDogDue(now time.Time, interval time.Duration) compactorDogDecision {
-	lastRun, found, err := loadPatrolLastRun(d.config.TownRoot, "compactor_dog")
-	switch {
-	case err != nil:
-		return compactorDogDecision{
-			due:  true,
-			note: "running the check because the last-run state cannot be read",
-			warn: fmt.Sprintf("last-run state unreadable (%v)", err),
-		}
-	case !found:
-		return compactorDogDecision{due: true, note: "no last-run record"}
-	}
-
-	// A cycle this process ran can be newer than the file when the write
-	// failed; take the later of the two so a known completion is not repeated
-	// 15 minutes later.
-	if d.lastCompactorDogRun.After(lastRun) {
-		lastRun = d.lastCompactorDogRun
-	}
-
-	elapsed := now.Sub(lastRun).Round(time.Minute)
-	if elapsed >= interval {
-		return compactorDogDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
-	}
-	return compactorDogDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+	dec := evaluatePatrolDue(d.config.TownRoot, "compactor_dog", d.lastCompactorDogRun, now, interval)
+	return compactorDogDecision{due: dec.due, note: dec.note, warn: dec.warn}
 }
 
 // triggerCompactorDog runs a monitoring cycle when the patrol is due, on its
