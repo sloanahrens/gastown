@@ -345,13 +345,22 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 
 	fmt.Printf("%s Slinging formula %s to %s...\n", style.Bold.Render("🎯"), formulaName, targetAgent)
 
-	rollbackSpawned := func(beadID string) {
-		if resolved.NewPolecatInfo == nil {
+	// Rollback guard (gt-7evi4): once resolveTarget has spawned or reused a
+	// polecat, every exit that does not reach the commit point rolls it back
+	// exactly once — including the existing-formula no-op, which returns nil
+	// without ever starting the polecat. rollbackBeadID names the wisp only
+	// once this sling is about to hook it; earlier failures touch no bead.
+	slingCommitted := false
+	rollbackBeadID := ""
+	rollbackWorkDir := formulaWorkDir
+	rollbackUnlessCommitted := func() {
+		if slingCommitted || resolved.NewPolecatInfo == nil {
 			return
 		}
 		fmt.Printf("%s Rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), resolved.NewPolecatInfo.PolecatName)
-		rollbackSlingArtifactsFn(resolved.NewPolecatInfo, beadID, formulaWorkDir, "")
+		rollbackSlingArtifactsFn(resolved.NewPolecatInfo, rollbackBeadID, rollbackWorkDir, "")
 	}
+	defer rollbackUnlessCommitted()
 
 	// Resolve working directory for bd commands (routes to correct rig beads)
 	// Fall back to townRoot (HQ beads) if no specific rig directory was determined
@@ -419,7 +428,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 			existingMode = fields.Mode
 		}
 		if existingMode != mode {
-			if err := storeFieldsInBeadFromTownRoot(townRoot, existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
+			if err := storeRawSlingMetadataFn(townRoot, existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
 				return fmt.Errorf("updating existing formula mode: %w", err)
 			}
 			if mode != "" || existingMode != "" {
@@ -465,7 +474,6 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		WithGTRoot(townRoot).
 		Run(); err != nil {
 		telemetry.RecordMolCook(ctx, formulaName, err)
-		rollbackSpawned("")
 		return fmt.Errorf("cooking formula: %w", err)
 	}
 	telemetry.RecordMolCook(ctx, formulaName, nil)
@@ -484,7 +492,6 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 		WithGTRoot(townRoot).
 		Output()
 	if err != nil {
-		rollbackSpawned("")
 		return fmt.Errorf("creating wisp: %w", err)
 	}
 
@@ -492,7 +499,6 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	wispRootID, err = parseWispIDFromJSON(wispOut)
 	if err != nil {
 		telemetry.RecordMolWisp(ctx, formulaName, "", "", err)
-		rollbackSpawned("")
 		return fmt.Errorf("parsing wisp output: %w", err)
 	}
 	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, "", nil)
@@ -502,6 +508,7 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// Step 3: Hook the wisp bead with retry and verification.
 	// See: https://github.com/steveyegge/gastown/issues/148.
 	hookDir := beads.ResolveHookDir(townRoot, wispRootID, "")
+	rollbackBeadID, rollbackWorkDir = wispRootID, ""
 	if err := hookBeadWithRetryFn(wispRootID, targetAgent, hookDir); err != nil {
 		return err
 	}
@@ -553,14 +560,17 @@ func runSlingFormula(ctx context.Context, args []string) (err error) {
 	// Start spawned polecat session now that hook is set.
 	// This ensures polecat sees the wisp when gt prime runs on session start.
 	if resolved.NewPolecatInfo != nil {
-		pane, err := resolved.NewPolecatInfo.StartSession()
+		pane, err := startSpawnedPolecatSessionFn(resolved.NewPolecatInfo)
 		if err != nil {
-			// Rollback: unhook wisp, delete Dolt branch, clean up polecat worktree/agent bead
-			rollbackSlingArtifactsFn(resolved.NewPolecatInfo, wispRootID, "", "")
+			// The guard rolls back: releases the wisp, cleans up the polecat.
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
 	}
+
+	// Commit point (gt-7evi4): the wisp is hooked and any polecat this sling
+	// spawned is running it. Nothing after this is rolled back.
+	slingCommitted = true
 
 	// Step 4: Nudge to start (graceful if no tmux)
 	// Skip for self-sling - agent is currently processing the sling command and will see

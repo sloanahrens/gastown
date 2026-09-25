@@ -463,13 +463,20 @@ func TestStandaloneFormulaRigTargetAcquiresSingleAdmission(t *testing.T) {
 	oldAcquire := acquirePolecatAdmissionFn
 	oldSpawn := spawnPolecatForSling
 	oldFind := findHookedFormulaSingletonFn
+	oldRollback := rollbackSlingArtifactsFn
 	oldDryRun, oldNoBoot := slingDryRun, slingNoBoot
 	t.Cleanup(func() {
 		acquirePolecatAdmissionFn = oldAcquire
 		spawnPolecatForSling = oldSpawn
 		findHookedFormulaSingletonFn = oldFind
+		rollbackSlingArtifactsFn = oldRollback
 		slingDryRun, slingNoBoot = oldDryRun, oldNoBoot
 	})
+	// The existing-formula no-op never starts the spawned polecat, so the
+	// rollback guard undoes the spawn (gt-7evi4). Record it instead of running
+	// the real rollback, which would shell out to bd.
+	rollbacks := 0
+	rollbackSlingArtifactsFn = func(*SpawnedPolecatInfo, string, string, string) { rollbacks++ }
 	slingDryRun = false
 	slingNoBoot = true
 	admissions := 0
@@ -500,6 +507,9 @@ func TestStandaloneFormulaRigTargetAcquiresSingleAdmission(t *testing.T) {
 	}
 	if admissions != 1 {
 		t.Fatalf("admissions = %d, want 1", admissions)
+	}
+	if rollbacks != 1 {
+		t.Fatalf("rollbacks = %d, want 1 (no-op must not strand the spawned polecat)", rollbacks)
 	}
 }
 

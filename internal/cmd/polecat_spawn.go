@@ -38,6 +38,17 @@ type SpawnedPolecatInfo struct {
 	// (see Branch below) but still merges back to the rig's normal target.
 	Branch string // Git branch name actually checked out (for cleanup on rollback; equals ResumeBranch on a resume dispatch)
 
+	// Provenance for rollback (gt-7evi4). A rollback undoes only what this
+	// sling created, so both fields default to the safe answer: false means
+	// "not ours", and the sandbox or branch is kept.
+	//
+	// FreshSpawn is true when this sling allocated the polecat's sandbox. A
+	// reused persistent sandbox (gt-4ac) is never removed by a rollback.
+	FreshSpawn bool
+	// BranchCreated is true when this sling created Branch. A resumed branch
+	// (--branch / --pr) existed before the sling and is never deleted by it.
+	BranchCreated bool
+
 	// Internal fields for deferred session start
 	account string
 	agent   string
@@ -229,8 +240,12 @@ func reuseIdlePolecatForSling(
 		Pane:        "",
 		BaseBranch:  resolveSpawnBaseBranch(baseBranch, r.DefaultBranch()),
 		Branch:      polecatObj.Branch,
-		account:     opts.Account,
-		agent:       opts.Agent,
+		// A reused sandbox predates this sling: rollback keeps it. Its new
+		// branch stays checked out there, so rollback leaves that too.
+		FreshSpawn:    false,
+		BranchCreated: opts.ResumeBranch == "",
+		account:       opts.Account,
+		agent:         opts.Agent,
 	}, nil
 }
 
@@ -492,8 +507,11 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		Pane:        "", // Empty until StartSession is called
 		BaseBranch:  effectiveBranch,
 		Branch:      polecatObj.Branch,
-		account:     opts.Account,
-		agent:       opts.Agent,
+		FreshSpawn:  true,
+		// A resume dispatch checks out a branch that already existed.
+		BranchCreated: opts.ResumeBranch == "",
+		account:       opts.Account,
+		agent:         opts.Agent,
 	}, nil
 }
 
