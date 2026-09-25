@@ -2347,13 +2347,14 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Resume: skip MR creation if already completed in a previous run (gt-aufru).
 		// Mirrors the push checkpoint pattern above. Without this, every retry
 		// re-attempts bd.Create which hits unique constraints or creates duplicates.
-		// Validate that the checkpoint MR corresponds to the current branch (ge-sbo:
-		// stale checkpoint on polecat reassignment would reuse old MR for new work).
+		// Validate that the checkpoint MR still describes this run before resuming
+		// onto it (ge-sbo); mrCheckpointStaleReason states what that requires.
 		if checkpoints[CheckpointMRCreated] != "" {
 			cpMRID := checkpoints[CheckpointMRCreated]
 			if cpMR, cpErr := bd.Show(cpMRID); cpErr == nil && cpMR != nil {
-				branchPrefix := "branch: " + branch + "\n"
-				if strings.HasPrefix(cpMR.Description, branchPrefix) {
+				if reason := mrCheckpointStaleReason(cpMR, branch, commitSHA); reason != "" {
+					fmt.Printf("→ Discarding stale MR checkpoint %s (%s)\n", cpMRID, reason)
+				} else {
 					if err := validateMergeRequestSource(cpMR, issueID, sourceIssueForNoMerge); err != nil {
 						mrFailed = true
 						errMsg := fmt.Sprintf("checkpoint MR validation failed: %v", err)
@@ -2365,8 +2366,6 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					fmt.Printf("%s MR already created (resumed from checkpoint: %s)\n", style.Bold.Render("✓"), mrID)
 					goto afterMR
 				}
-				// Checkpoint MR is for a different branch — discard and create fresh.
-				fmt.Printf("→ Discarding stale MR checkpoint %s (was for different branch)\n", cpMRID)
 			}
 			// If MR lookup fails, fall through to create/find MR normally.
 		}
@@ -3138,6 +3137,39 @@ func pushedCheckpointMatches(value, branch, sha string) bool {
 		return false
 	}
 	return value == pushedCheckpointValue(branch, sha)
+}
+
+// mrCheckpointStaleReason reports why a checkpointed merge-request bead no
+// longer describes the submission this run is about to make, or "" when it
+// still does.
+//
+// The checkpoint records an MR id and nothing else, so the bead is asked the
+// questions FindMRForBranchAndSHA asks a fresh search: same branch, same
+// commit, still in the queue. A checkpoint is a claim about a submission rather
+// than about a name (gt-2wqt), and a rerun after an interrupted gt done reads a
+// bead that may have been rejected and closed in between. Reading a closed MR
+// as live reports "MR already created" and queues nothing, stranding the pushed
+// work (gt-xgbv).
+func mrCheckpointStaleReason(mr *beads.Issue, branch, commitSHA string) string {
+	switch {
+	case mr == nil:
+		return "MR bead not found"
+	case mr.Status != string(beads.StatusOpen):
+		return "MR is " + mr.Status
+	case !strings.HasPrefix(mr.Description, "branch: "+branch+"\n"):
+		return "was for different branch"
+	}
+	// A legacy MR records no commit_sha, and an unreadable HEAD leaves nothing
+	// to compare against: the branch and the queue status are all there is to
+	// go on, the same fallback FindMRForBranchAndSHA makes.
+	fields := beads.ParseMRFields(mr)
+	if fields == nil || fields.CommitSHA == "" || commitSHA == "" {
+		return ""
+	}
+	if fields.CommitSHA != commitSHA {
+		return "was for commit " + shortSHA(fields.CommitSHA)
+	}
+	return ""
 }
 
 // resumedWork is what a push checkpoint means for a gt done that has been
