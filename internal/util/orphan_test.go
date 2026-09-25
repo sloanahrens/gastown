@@ -129,6 +129,27 @@ func TestUnownedCandidates_Ownership(t *testing.T) {
 	}
 }
 
+// TestUnownedCandidates_StrandedTmuxSurvivor is the gt-tbtx regression: a
+// pane process forks directly under the tmux server, so once its session is
+// killed a survivor that ignored the resulting SIGHUP keeps the
+// still-running server as its ppid. The server hosts unrelated sessions and
+// says nothing about whether THIS process is still owned, so it must not
+// count as a live parent the way the gt-h1tq `om review` case does.
+func TestUnownedCandidates_StrandedTmuxSurvivor(t *testing.T) {
+	entries := parseProcessTable(psTable(
+		// tmux server: alive, hosting other (unrelated) sessions
+		"   50     1 ??       tmux     05:00:00",
+		// stranded survivor of a session the server already killed
+		"  210    50 ??       claude   01:00:00",
+	))
+
+	got := candidatePIDs(unownedCandidates(entries, nil))
+
+	if _, ok := got[210]; !ok {
+		t.Error("PID 210 (survivor parented to the tmux server): want candidate")
+	}
+}
+
 // TestUnownedCandidates_LiveParentChain documents the cascade: a claude whose
 // parent is itself a candidate is not signaled while the parent is; the
 // parent is signaled this cycle and the child reparents to launchd, so the
