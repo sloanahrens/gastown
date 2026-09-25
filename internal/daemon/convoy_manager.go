@@ -120,6 +120,11 @@ type strandedConvoyInfo struct {
 	// with the rig default, silently overriding the routing decision that put
 	// the bead on a specific agent (gt-yg24).
 	Agent string `json:"agent,omitempty"`
+	// Formula is the formula requested when the convoy's beads were slung
+	// (--formula). Re-feeding must use it: without it the daemon re-dispatches
+	// under gt sling's default formula, silently overriding the formula the
+	// original sling asked for (gt-4lor).
+	Formula string `json:"formula,omitempty"`
 	// Owned reports whether the convoy carries the gt:owned label. Owned
 	// convoys have a designated owner responsible for their own dispatch
 	// cadence; the stranded scan must not auto-feed them (gt-qw4u).
@@ -1116,6 +1121,15 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 		}
 		if agent != "" {
 			slingArgs = append(slingArgs, "--agent="+agent)
+		}
+		// Re-dispatch with the formula the bead was slung with, never gt
+		// sling's own default: a formula bond that fails and rolls back
+		// leaves the convoy open, and re-feeding it without --formula ran
+		// the bead under mol-polecat-work instead of the formula the
+		// original sling asked for (gt-4lor).
+		if formula := strings.TrimSpace(c.Formula); formula != "" {
+			slingArgs = append(slingArgs, "--formula="+formula)
+			m.logger("Convoy %s: feeding %s with formula %q recorded on convoy at sling time", c.ID, issueID, formula)
 		}
 		cmd := exec.CommandContext(m.ctx, m.gtPath, slingArgs...)
 		cmd.Dir = m.townRoot

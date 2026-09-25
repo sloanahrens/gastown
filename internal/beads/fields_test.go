@@ -416,6 +416,7 @@ func TestConvoyFieldsParseFormatRoundTrip(t *testing.T) {
 		Molecule:             "gt-wisp-abc",
 		BaseBranch:           "feat/extraction-review",
 		Agent:                "deepseek-flash",
+		Formula:              "mol-doc-audit",
 		CompletionNotifiedAt: "2026-05-25T02:30:00Z",
 	}
 	formatted := FormatConvoyFields(original)
@@ -444,11 +445,19 @@ func TestConvoyFieldsParseFormatRoundTrip(t *testing.T) {
 	if parsed.Agent != original.Agent {
 		t.Errorf("Agent: got %q, want %q", parsed.Agent, original.Agent)
 	}
+	if parsed.Formula != original.Formula {
+		t.Errorf("Formula: got %q, want %q", parsed.Formula, original.Formula)
+	}
 
-	// A re-format must not duplicate or drop the agent line (the field is
-	// rewritten by SetConvoyFields whenever a convoy's fields change).
-	if reformatted := FormatConvoyFields(parsed); strings.Count(reformatted, "agent: ") != 1 {
+	// A re-format must not duplicate or drop the agent/formula lines (the
+	// fields are rewritten by SetConvoyFields whenever a convoy's fields
+	// change).
+	reformatted := FormatConvoyFields(parsed)
+	if strings.Count(reformatted, "agent: ") != 1 {
 		t.Errorf("expected exactly one agent line after round-trip, got:\n%s", reformatted)
+	}
+	if strings.Count(reformatted, "formula: ") != 1 {
+		t.Errorf("expected exactly one formula line after round-trip, got:\n%s", reformatted)
 	}
 }
 

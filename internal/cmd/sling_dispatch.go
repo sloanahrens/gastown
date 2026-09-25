@@ -349,8 +349,9 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		existingConvoy := isTrackedByConvoy(params.BeadID)
 		if existingConvoy == "" {
 			var err error
-			// Persist the requested agent so a convoy re-feed keeps it (gt-yg24).
-			convoyID, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge, params.BaseBranch, params.Agent)
+			// Persist the requested agent and formula so a convoy re-feed
+			// keeps them (gt-yg24, gt-4lor).
+			convoyID, err = createAutoConvoy(params.BeadID, info.Title, params.Owned, params.Merge, params.BaseBranch, params.Agent, params.FormulaName)
 			if err != nil {
 				fmt.Printf("  %s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {
