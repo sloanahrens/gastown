@@ -1056,16 +1056,18 @@ exit 0
 	}
 }
 
-// TestDoneClosesHookedBeadWithPendingMRReason verifies that gt done closes
-// the hooked source bead with a close_reason naming the MR it just
-// submitted (via the agent bead's active_mr field), rather than a bare
-// close with no reason. Every polecat on this rig is transient — gt done
-// closes the source issue seconds after creating its MR, well before the
-// MR reaches the merge queue. Without a recognizable reason, the refinery's
-// pre-merge eligibility check cannot tell that ordinary self-close apart
-// from a source issue a human closed for real abandonment, and rejects
-// every such MR (gt-di2t).
-func TestDoneClosesHookedBeadWithPendingMRReason(t *testing.T) {
+// TestDoneLeavesHookedBeadOpenWithPendingMRNote verifies that gt done does
+// NOT close the hooked source bead when it just submitted an MR (via the
+// agent bead's active_mr field) — it records a comment naming the MR
+// instead and leaves the bead's status untouched. "Closed" now means
+// "merged" everywhere a human or a dependency check reads it: the
+// refinery's closeMergedWorkBead is the only thing that closes the source
+// bead, at real merge success (gt-pqqz). Before this, every polecat on this
+// rig being transient meant gt done closed the source issue seconds after
+// creating its MR, well before the MR reached the merge queue, making a
+// dependency or a human reading "closed" as "landed" when it only meant
+// "submitted."
+func TestDoneLeavesHookedBeadOpenWithPendingMRNote(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script bd stub not supported on Windows")
 	}
@@ -1126,15 +1128,21 @@ case "$cmd" in
     echo '[]'
     ;;
   close)
-    # Log the full close invocation (id + flags) so the reason is visible.
+    # Log the full close invocation (id + flags) so the test can fail
+    # loudly if the hooked bead is ever closed here again.
     echo "close $*" >> "%s"
+    ;;
+  comments)
+    # Log the full "comments add" invocation so the test can verify the
+    # pending-MR note gt done records instead of closing the bead.
+    echo "comments $*" >> "%s"
     ;;
   agent|update|slot)
     exit 0
     ;;
 esac
 exit 0
-`, closesLog)
+`, closesLog, closesLog)
 
 	bdPath := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
@@ -1159,22 +1167,25 @@ exit 0
 
 	updateAgentStateOnDone(filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123")
 
-	closesBytes, err := os.ReadFile(closesLog)
+	callsBytes, err := os.ReadFile(closesLog)
 	if err != nil {
-		t.Fatalf("no beads were closed: %v", err)
+		t.Fatalf("no bd comments/close calls were recorded: %v", err)
 	}
-	closes := string(closesBytes)
+	calls := string(callsBytes)
 
-	baseLine := ""
-	for _, line := range strings.Split(strings.TrimSpace(closes), "\n") {
-		if strings.Contains(line, "gt-base-123") {
-			baseLine = line
+	commentLine := ""
+	for _, line := range strings.Split(strings.TrimSpace(calls), "\n") {
+		if strings.HasPrefix(line, "close ") && strings.Contains(line, "gt-base-123") {
+			t.Fatalf("hooked bead gt-base-123 was closed at MR-submission time — it must stay open until the refinery closes it at merge (gt-pqqz)\nCalls:\n%s", calls)
+		}
+		if strings.HasPrefix(line, "comments ") && strings.Contains(line, "gt-base-123") {
+			commentLine = line
 		}
 	}
-	if baseLine == "" {
-		t.Fatalf("hooked bead gt-base-123 was NOT closed\nClose calls:\n%s", closes)
+	if commentLine == "" {
+		t.Fatalf("hooked bead gt-base-123 got no pending-MR comment\nCalls:\n%s", calls)
 	}
-	if !strings.Contains(baseLine, "--reason=pending_mr: gt-mr-42") {
-		t.Errorf("close reason did not name the pending MR, got: %q", baseLine)
+	if !strings.Contains(commentLine, "gt-mr-42") {
+		t.Errorf("pending-MR comment did not name the MR, got: %q", commentLine)
 	}
 }

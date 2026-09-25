@@ -343,12 +343,17 @@ func ConcreteWorkIssueRejectReason(issue *Issue) string {
 	return ""
 }
 
-// PendingMergeCloseReason returns the close_reason gt done writes on a
-// source issue when it self-closes the issue immediately after creating
-// mrID's merge request — before the request has actually merged. Every
-// polecat on a rig can be transient (gt done exits the session right after
-// submitting), so the source issue is routinely closed while its MR is
-// still queued; that is expected completion, not abandonment.
+// PendingMergeCloseReason returns the close_reason gt done used to write on
+// a source issue when it self-closed the issue immediately after creating
+// mrID's merge request — before the request had actually merged. As of
+// gt-pqqz, gt done no longer closes the source issue at submission time: the
+// issue stays open through the merge queue and the refinery's
+// closeMergedWorkBead closes it once, at real merge success, with a "Merged
+// in <mrID>" reason instead. This helper and IsPendingMergeCloseReason
+// remain only to recognize the legacy shape on a source issue that was
+// already closed this way before the change rolled out, and to keep
+// recheckMRSourceStillMergeable's pre-merge eligibility check backward
+// compatible with any such in-flight MR.
 //
 // The attempt number is carried in an "(attempt N)" suffix: the source
 // issue's branch is reused across every attempt of an issue, and the

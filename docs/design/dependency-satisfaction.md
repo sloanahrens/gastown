@@ -96,6 +96,17 @@ That was **explicitly rejected for gt-0r0z** — it touches the polecat exit pat
 capacity accounting, and the done-state semantics that gt-uu6/gt-iljx had just
 stabilized. It is recorded as follow-up work in **gt-pqqz**.
 
-If gt-pqqz lands, the merge-aware gate becomes redundant and can be removed.
-The injected dependency context stays useful either way: it also covers the
-window from the worker's own point of view.
+**Status: gt-pqqz has landed.** `gt done` no longer closes the source issue at
+MR-submission time; the refinery's `closeMergedWorkBead`
+(`internal/refinery/work_bead_close.go`) closes it once, at real merge
+success. A source issue therefore no longer goes through a "closed but MR
+still open" state on the normal path, which is the state this file's
+merge-aware gate exists to detect.
+
+The gate itself (`merge_pending.go` and its call sites listed above) has
+deliberately not been removed: `IsPendingMergeCloseReason` still recognizes
+the legacy closed-with-`pending_mr`-reason shape for any issue closed that
+way before gt-pqqz rolled out, and the gate is harmless dead weight rather
+than a correctness risk once that shape stops occurring. Removing it is a
+follow-up, not a prerequisite. The injected dependency context stays useful
+either way: it also covers the window from the worker's own point of view.
