@@ -3,9 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -18,25 +16,16 @@ import (
 // container port). Before signaling such a PID we check its command line is
 // the process we mean to stop, and refuse otherwise (gt-p7zy0).
 
-// processArgsFn reads a live process's argv. A var so tests can present any
-// command line; production uses ps(1).
-var processArgsFn = processArgs
+// processArgsFn reads a live process's argv (nil if unreadable). A var so
+// tests can present any command line; production uses ps(1) via
+// doltserver.ProcessArgs, the one ps reader for identity checks. Command-line
+// matching here is a safety gate before a signal, not state inference; see
+// doltserver.ProcessArgs for why it survives the gt-utuk ZFC cleanup.
+var processArgsFn = doltserver.ProcessArgs
 
 // verifyDoltSQLServerFn proves a PID is a dolt sql-server before the Dolt
 // manager signals it. A var for the same reason as processArgsFn.
 var verifyDoltSQLServerFn = doltserver.VerifyDoltSQLServerPID
-
-func processArgs(pid int) ([]string, error) {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "args=").Output() //nolint:gosec // G204: numeric pid, fixed args
-	if err != nil {
-		return nil, fmt.Errorf("ps -p %d: %w", pid, err)
-	}
-	fields := strings.Fields(strings.TrimSpace(string(out)))
-	if len(fields) == 0 {
-		return nil, fmt.Errorf("no process %d", pid)
-	}
-	return fields, nil
-}
 
 // isGTDaemonArgs reports whether argv is `gt daemon run`, the only way the
 // daemon is launched (spawnDaemonProcess, the launchd plist, doctor's fix).
@@ -46,6 +35,7 @@ func isGTDaemonArgs(args []string) bool {
 }
 
 // verifyGTDaemonPID returns nil only when pid is a running `gt daemon run`.
+// Like the dolt matcher it fails closed: an unreadable argv is refused.
 // On Windows there is no ps(1); the daemon.lock flock is the guard there, as
 // it was before this check existed.
 func verifyGTDaemonPID(pid int) error {
@@ -58,9 +48,9 @@ func verifyGTDaemonPID(pid int) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	args, err := processArgsFn(pid)
-	if err != nil {
-		return fmt.Errorf("cannot verify PID %d is the gt daemon: %w", pid, err)
+	args := processArgsFn(pid)
+	if len(args) == 0 {
+		return fmt.Errorf("cannot verify PID %d is the gt daemon: command line unreadable", pid)
 	}
 	if !isGTDaemonArgs(args) {
 		return fmt.Errorf("PID %d is not the gt daemon (command: %q)", pid, strings.Join(args, " "))

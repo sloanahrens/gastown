@@ -3134,8 +3134,11 @@ func StopDaemon(townRoot string) error {
 
 	// Check if still running
 	if isProcessAlive(process) {
-		// Still running, force kill
-		_ = sendKillSignal(process)
+		// Still running, force kill — re-verified: the PID may have exited
+		// and been reused during the wait (gt-p7zy0).
+		if verifyGTDaemonPID(pid) == nil {
+			_ = sendKillSignal(process)
+		}
 	}
 
 	// Clean up PID file
@@ -3227,8 +3230,10 @@ func KillOrphanedDaemons(townRoot string) (int, error) {
 
 		// Check if still alive
 		if isProcessAlive(process) {
-			// Still alive, force kill
-			_ = sendKillSignal(process)
+			// Still alive, force kill — re-verified first.
+			if verifyGTDaemonPID(pid) == nil {
+				_ = sendKillSignal(process)
+			}
 		}
 
 		killed++

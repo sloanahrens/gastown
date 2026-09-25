@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // gt-p7zy0: every stop path that signals a PID it did not just start must
@@ -159,17 +161,17 @@ func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
 	orig := processArgsFn
 	t.Cleanup(func() { processArgsFn = orig })
 
-	processArgsFn = func(int) ([]string, error) { return nil, fmt.Errorf("ps unavailable") }
+	processArgsFn = func(int) []string { return nil }
 	if err := verifyGTDaemonPID(4242); err == nil {
 		t.Error("an unreadable command line was accepted as the daemon")
 	}
-	processArgsFn = func(int) ([]string, error) {
-		return []string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend"}, nil
+	processArgsFn = func(int) []string {
+		return []string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend"}
 	}
 	if err := verifyGTDaemonPID(4242); err == nil || !strings.Contains(err.Error(), "not the gt daemon") {
 		t.Errorf("Docker's backend accepted as the daemon: %v", err)
 	}
-	processArgsFn = func(int) ([]string, error) { return []string{"gt", "daemon", "run"}, nil }
+	processArgsFn = func(int) []string { return []string{"gt", "daemon", "run"} }
 	if err := verifyGTDaemonPID(4242); err != nil {
 		t.Errorf("gt daemon run rejected: %v", err)
 	}
@@ -242,6 +244,12 @@ func TestDoltStopDoesNotSignalUnrelatedProcess(t *testing.T) {
 	skipOnWindows(t)
 	victim := startUnrelatedSleep(t)
 	m, logs := newStopTestManager(t, victim.pid())
+	if err := os.MkdirAll(filepath.Join(m.townRoot, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writePIDFile(m.pidFile(), victim.pid()); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := m.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -251,6 +259,39 @@ func TestDoltStopDoesNotSignalUnrelatedProcess(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "Not stopping PID") {
 		t.Errorf("refusal not logged: %q", logs.String())
+	}
+	// The pid file names a process that is provably not dolt: stale (F8).
+	if _, err := os.Stat(m.pidFile()); !os.IsNotExist(err) {
+		t.Errorf("stale pid file naming a non-dolt process was kept: %v", err)
+	}
+}
+
+// When ps cannot read the PID's argv nothing is known about it: no signal,
+// and the pid file stays for a later attempt.
+func TestDoltStopKeepsPIDFileWhenIdentityUnverified(t *testing.T) {
+	skipOnWindows(t)
+	victim := startUnrelatedSleep(t)
+	m, _ := newStopTestManager(t, victim.pid())
+	if err := os.MkdirAll(filepath.Join(m.townRoot, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writePIDFile(m.pidFile(), victim.pid()); err != nil {
+		t.Fatal(err)
+	}
+	orig := verifyDoltSQLServerFn
+	t.Cleanup(func() { verifyDoltSQLServerFn = orig })
+	verifyDoltSQLServerFn = func(pid int) error {
+		return fmt.Errorf("ps failed: %w", doltserver.ErrIdentityUnverified)
+	}
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if victim.exited(300 * time.Millisecond) {
+		t.Fatalf("unverified PID was signaled: %v", victim.err)
+	}
+	if _, err := os.Stat(m.pidFile()); err != nil {
+		t.Errorf("pid file removed although identity was only unverified: %v", err)
 	}
 }
 

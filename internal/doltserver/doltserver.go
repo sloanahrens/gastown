@@ -1264,15 +1264,21 @@ func KillImposters(townRoot string) error {
 		return nil // No server on port
 	}
 
-	// The port holder is only a candidate: never signal it before proving it
-	// is a dolt sql-server. On macOS Docker Desktop's com.docker.backend holds
-	// every published container port, so a test pointed at a Dolt container
-	// port found — and SIGTERMed — Docker itself (gt-p7zy0).
-	if err := VerifyDoltSQLServerPID(pid); err != nil {
-		return fmt.Errorf("port %d holder is not a verified dolt sql-server, not killing it: %w", config.Port, err)
+	// Our own server: nothing to do, and nothing is signaled, so this check
+	// needs no identity proof (and ps failing on it is not an error).
+	if doltProcessMatchesTown(townRoot, pid, config) {
+		return nil
 	}
 
-	if doltProcessMatchesTown(townRoot, pid, config) {
+	// Any other port holder is only a candidate: never signal it before
+	// proving it is a dolt sql-server. On macOS Docker Desktop's
+	// com.docker.backend holds every published container port, so a test
+	// pointed at a Dolt container port found — and SIGTERMed — Docker itself
+	// (gt-p7zy0). A holder that is not provably dolt (Docker fronting a
+	// containerized Dolt, say) is skipped with a warning, not an error: there
+	// is no imposter we can act on, and `gt down` must not report a failure.
+	if err := VerifyDoltSQLServerPID(pid); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: port %d holder PID %d is not a verified dolt sql-server, skipping imposter check: %v\n", config.Port, pid, err)
 		return nil
 	}
 
@@ -1301,8 +1307,11 @@ func KillImposters(townRoot string) error {
 		}
 	}
 
-	// Force kill
-	_ = process.Kill()
+	// Force kill — re-verified: the PID may have exited and been reused
+	// during the wait.
+	if err := killVerifiedDolt(pid); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
+	}
 	time.Sleep(100 * time.Millisecond)
 	_ = os.Remove(config.PidFile)
 
@@ -1552,21 +1561,19 @@ func findOwnedDoltTestServerCandidatesFromPS(output, townRoot, dataDir string) [
 }
 
 func isDoltSQLServerProcess(pid int) bool {
-	return isDoltSQLServerArgs(getProcessArgs(pid))
+	return isDoltSQLServerArgs(ProcessArgs(pid))
 }
 
+// isDoltSQLServerArgs is the one dolt sql-server argv matcher, shared by the
+// owned-test-server scan and the pre-signal identity check. Global flags
+// between the binary and the subcommand (`dolt --data-dir x sql-server`) are
+// allowed: externally started servers use them.
+//
+// It fails closed: a dolt whose argv cannot be read (another uid, a zombie),
+// whose binary path contains a space (strings.Fields splits it), or whose
+// wrapper renames argv0 is not matched, and callers then refuse to signal it.
+// Refusing to stop a genuine wedged dolt is the safe direction.
 func isDoltSQLServerArgs(args []string) bool {
-	return len(args) >= 2 && filepath.Base(args[0]) == "dolt" && args[1] == "sql-server"
-}
-
-// processArgsForIdentity reads a process's argv for identity checks. A var so
-// tests can present any command line without spawning a real dolt.
-var processArgsForIdentity = getProcessArgs
-
-// looksLikeDoltSQLServer reports whether argv is a dolt sql-server, allowing
-// global flags between the binary and the subcommand
-// (`dolt --data-dir x sql-server`), which externally started servers use.
-func looksLikeDoltSQLServer(args []string) bool {
 	if len(args) < 2 || filepath.Base(args[0]) != "dolt" {
 		return false
 	}
@@ -1578,31 +1585,115 @@ func looksLikeDoltSQLServer(args []string) bool {
 	return false
 }
 
+// ProcessArgs returns pid's argv as ps(1) reports it, or nil if it cannot be
+// read (no such process, ps missing, Windows).
+//
+// Command-line matching was removed from state inference on purpose (ZFC
+// rules 1 and 4, gt-utuk): whether a server is running is decided by flocks,
+// nonced pid files and port probes, never by ps strings. This is a different
+// use. It is a safety gate in front of a signal to a PID we did not start —
+// one read from a pid file or found on a port — and the only cheap way to
+// know what that PID is now (gt-p7zy0). Do not remove it in a ZFC sweep.
+func ProcessArgs(pid int) []string {
+	return getProcessArgs(pid)
+}
+
+// processArgsForIdentity is ProcessArgs, as a var so tests can present any
+// command line without spawning a real dolt.
+var processArgsForIdentity = ProcessArgs
+
+// ErrNotDoltSQLServer means the PID's argv was read and it is not a dolt
+// sql-server: a pid file naming it is stale by definition.
+var ErrNotDoltSQLServer = errors.New("not a dolt sql-server")
+
+// ErrIdentityUnverified means the PID's argv could not be read, so nothing is
+// known about it either way.
+var ErrIdentityUnverified = errors.New("process identity could not be verified")
+
 // VerifyDoltSQLServerPID returns nil only when pid is a running dolt
 // sql-server. Every path that signals a PID it did not start itself — one read
-// from a pid file, or found listening on a port — must call this first: a
-// port can be held by anything (Docker Desktop's com.docker.backend holds
-// every published container port on macOS), and a pid file can outlive its
-// process and name a reused PID (gt-p7zy0). On Windows there is no ps(1) and
-// no argv to check; callers keep their previous behavior there.
+// from a pid file, or found listening on a port — must call this first, and
+// again right before any SIGKILL escalation: a port can be held by anything
+// (Docker Desktop's com.docker.backend holds every published container port
+// on macOS), and a pid file can outlive its process and name a reused PID
+// (gt-p7zy0). On Windows there is no ps(1) and no argv to check; callers keep
+// their previous behavior there.
 func VerifyDoltSQLServerPID(pid int) error {
 	if pid <= 0 {
-		return fmt.Errorf("invalid PID %d", pid)
+		return fmt.Errorf("invalid PID %d: %w", pid, ErrIdentityUnverified)
 	}
 	if pid == os.Getpid() {
-		return fmt.Errorf("PID %d is this process, not a dolt sql-server", pid)
+		return fmt.Errorf("PID %d is this process: %w", pid, ErrNotDoltSQLServer)
 	}
 	if runtime.GOOS == "windows" {
 		return nil
 	}
 	args := processArgsForIdentity(pid)
 	if len(args) == 0 {
-		return fmt.Errorf("cannot read the command line of PID %d; not signaling a process whose identity is unverified", pid)
+		return fmt.Errorf("cannot read the command line of PID %d: %w", pid, ErrIdentityUnverified)
 	}
-	if !looksLikeDoltSQLServer(args) {
-		return fmt.Errorf("PID %d is not a dolt sql-server (command: %q)", pid, strings.Join(args, " "))
+	if !isDoltSQLServerArgs(args) {
+		return fmt.Errorf("PID %d (command: %q): %w", pid, strings.Join(args, " "), ErrNotDoltSQLServer)
 	}
 	return nil
+}
+
+// killVerifiedDolt SIGKILLs pid only if it is still a verified dolt
+// sql-server at this moment. Used for every force-kill so neither a first
+// SIGKILL nor an escalation after a wait can land on a reused PID.
+func killVerifiedDolt(pid int) error {
+	if err := VerifyDoltSQLServerPID(pid); err != nil {
+		return err
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Kill()
+}
+
+// stopOrphanedServer stops a server IsRunning reported whose data directory
+// is gone. When Stop refuses or fails it force-kills — but only a verified
+// dolt. A PID that is not dolt means the pid file is stale: it is removed and
+// nothing is signaled (gt-p7zy0).
+func stopOrphanedServer(townRoot string, pid int) {
+	stopErr := Stop(townRoot)
+	if stopErr == nil || pid <= 0 {
+		return
+	}
+	if err := killVerifiedDolt(pid); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
+		if errors.Is(err, ErrNotDoltSQLServer) {
+			_ = os.Remove(DefaultConfig(townRoot).PidFile)
+		}
+		return
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+// evictPortSquatter force-kills a dolt holding port that IsRunning did not
+// claim for this town. Anything not provably dolt is left alone, and the
+// start then fails on the busy port with a clear message (gt-p7zy0).
+// Returns the PID it acted on, or 0.
+func evictPortSquatter(port int) int {
+	squatterPID := findDoltServerOnPort(port)
+	if squatterPID <= 0 {
+		return 0
+	}
+	if err := VerifyDoltSQLServerPID(squatterPID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: port %d is held by PID %d, not killing it: %v\n", port, squatterPID, err)
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "Warning: port %d held by unowned dolt process (PID %d) — killing before start\n", port, squatterPID)
+	_ = killVerifiedDolt(squatterPID)
+	if err := waitForPortRelease(port, 5*time.Second); err != nil {
+		// Kill didn't work, try again — re-verified inside killVerifiedDolt.
+		_ = killVerifiedDolt(squatterPID)
+		if err := waitForPortRelease(port, 3*time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: port %d still occupied after killing PID %d: %v\n", port, squatterPID, err)
+		}
+	}
+	return squatterPID
 }
 
 // CheckPortAvailable verifies that a TCP port is free for use as a Dolt server.
@@ -1848,29 +1939,7 @@ func Start(townRoot string) error {
 	// correctly returns false, but we need to evict the squatter before we can
 	// bind the port. (fix: start-kills-unowned-port-holder)
 	if !running {
-		squatterPID := findDoltServerOnPort(config.Port)
-		if squatterPID > 0 {
-			if verifyErr := VerifyDoltSQLServerPID(squatterPID); verifyErr != nil {
-				// Not provably dolt: leave it alone and let the start fail on
-				// the busy port with a clear message (gt-p7zy0).
-				fmt.Fprintf(os.Stderr, "Warning: port %d is held by PID %d, not killing it: %v\n", config.Port, squatterPID, verifyErr)
-				squatterPID = 0
-			} else {
-				fmt.Fprintf(os.Stderr, "Warning: port %d held by unowned dolt process (PID %d) — killing before start\n", config.Port, squatterPID)
-			}
-		}
-		if squatterPID > 0 {
-			if proc, findErr := os.FindProcess(squatterPID); findErr == nil {
-				_ = proc.Kill()
-				if err := waitForPortRelease(config.Port, 5*time.Second); err != nil {
-					// Kill didn't work, try again
-					_ = proc.Kill()
-					if err := waitForPortRelease(config.Port, 3*time.Second); err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: port %d still occupied after killing PID %d: %v\n", config.Port, squatterPID, err)
-					}
-				}
-			}
-		}
+		evictPortSquatter(config.Port)
 	}
 
 	if running {
@@ -1878,14 +1947,7 @@ func Start(townRoot string) error {
 		// deleted ~/gt and re-ran gt install). Kill it so we can start fresh.
 		if _, statErr := os.Stat(config.DataDir); os.IsNotExist(statErr) {
 			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", pid, config.DataDir)
-			if stopErr := Stop(townRoot); stopErr != nil {
-				if pid > 0 {
-					if proc, findErr := os.FindProcess(pid); findErr == nil {
-						_ = proc.Kill()
-						time.Sleep(100 * time.Millisecond)
-					}
-				}
-			}
+			stopOrphanedServer(townRoot, pid)
 			// Fall through to start a new server
 		} else {
 			// Server is running with valid data dir — check if it's an imposter
@@ -2220,8 +2282,11 @@ func Stop(townRoot string) error {
 
 	// Check if still running
 	if processIsAlive(pid) {
-		// Still running, force kill
-		_ = process.Kill()
+		// Still running, force kill — re-verified: the PID may have exited
+		// and been reused during the wait.
+		if err := killVerifiedDolt(pid); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -2717,14 +2782,7 @@ func InitRig(townRoot, rigName string) (serverWasRunning bool, created bool, err
 		// Stop the orphaned server and fall through to the offline init path.
 		if _, err := os.Stat(config.DataDir); os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Warning: Dolt server (PID %d) is running but data directory %s does not exist — stopping orphaned server\n", runningPID, config.DataDir)
-			if stopErr := Stop(townRoot); stopErr != nil {
-				// Force-kill if graceful stop fails (no PID file for orphaned server)
-				if runningPID > 0 {
-					if proc, err := os.FindProcess(runningPID); err == nil {
-						_ = proc.Kill()
-					}
-				}
-			}
+			stopOrphanedServer(townRoot, runningPID)
 			running = false
 		}
 	}

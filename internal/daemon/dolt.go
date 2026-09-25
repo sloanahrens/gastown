@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -1038,6 +1039,12 @@ func (m *DoltServerManager) stopLocked() {
 	if err := verifyDoltSQLServerFn(pid); err != nil {
 		m.logger("Not stopping PID %d: %v", pid, err)
 		m.process = nil
+		// A pid file naming a process that is provably not dolt is stale by
+		// definition; left in place it makes every tick see a "running"
+		// server it can never stop. Keep it when ps could not read the argv.
+		if errors.Is(err, doltserver.ErrNotDoltSQLServer) {
+			_ = os.Remove(m.pidFile())
+		}
 		return
 	}
 
@@ -1073,7 +1080,12 @@ func (m *DoltServerManager) stopLocked() {
 		// under load. A SIGKILL mid-journal-write causes corruption requiring
 		// dolt fsck to recover.
 		m.logger("Dolt SQL server did not stop gracefully after %s, forcing termination", doltServerStopBudget)
-		_ = sendKillSignal(process)
+		// Re-verify: the PID may have exited and been reused during the wait.
+		if err := verifyDoltSQLServerFn(pid); err != nil {
+			m.logger("Not force-killing PID %d: %v", pid, err)
+		} else {
+			_ = sendKillSignal(process)
+		}
 	}
 
 	// Clean up
