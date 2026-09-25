@@ -92,6 +92,15 @@ func TestRunResultConstants(t *testing.T) {
 	if ResultSkipped != "skipped" {
 		t.Errorf("expected ResultSkipped to be 'skipped', got %q", ResultSkipped)
 	}
+	// ResultWarning must stay distinct from ResultSuccess: it is what a
+	// plugin records for a run that found something and escalated it, and
+	// collapsing the two would report an escalated signal as a quiet run.
+	if ResultWarning != "warning" {
+		t.Errorf("expected ResultWarning to be 'warning', got %q", ResultWarning)
+	}
+	if ResultWarning == ResultSuccess {
+		t.Error("ResultWarning must not equal ResultSuccess")
+	}
 	// ResultPrinted must stay distinct from ResultSuccess: it is what `gt
 	// plugin run` records for a merely-printed, not-yet-executed run
 	// (gt-o1z7). Collapsing the two back together is the fail-open bug.

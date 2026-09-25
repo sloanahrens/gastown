@@ -241,8 +241,8 @@ if $CHECK_ONLY; then
     # means the script warns and exits 0: the operator decides whether
     # --compact runs, and the daemon's compactor_dog patrol already escalates
     # its own 2000-commits line, so a per-DB warning is the <2000 band with
-    # no double alert at the top of it (gt-hrt9). On gt failure, one HIGH
-    # failover covers the whole run; the loop keeps counting.
+    # no double alert at the top of it (gt-hrt9). The loop keeps counting
+    # across a failure so one broken call cannot hide the rest.
     for entry in "${CANDIDATES[@]}"; do
       ESC_NAME="${entry%%:*}"
       ESC_COUNT="${entry##*:}"
@@ -258,24 +258,30 @@ if $CHECK_ONLY; then
     if [[ $ESCALATE_FAILOVER -gt 0 ]]; then
       gt escalate "compactor-dog: failed to raise $ESCALATE_FAILOVER of ${#CANDIDATES[@]} per-DB escalations" \
         -s HIGH \
-        --reason "gt escalate failed during the check-only run. Per-DB escalations were not raised; the signal in the run record may be stale." \
+        --reason "gt escalate failed during the check-only run. Per-DB escalations were not raised; the run record carries result=failure." \
         2>/dev/null || true
     fi
   fi
-  SUMMARY="compactor-dog: ${#CANDIDATES[@]} DBs exceed threshold ($COMMIT_THRESHOLD commits)"
+  CANDIDATE_COUNT=${#CANDIDATES[@]}
+  SUMMARY="compactor-dog: $CANDIDATE_COUNT DBs exceed threshold ($COMMIT_THRESHOLD commits)"
   if [[ $ESCALATED -gt 0 ]]; then
-    log "Escalated $ESCALATED of ${#CANDIDATES[@]} candidate(s) to the Mayor"
-    SUMMARY="$SUMMARY — escalated"
+    log "Escalated $ESCALATED of $CANDIDATE_COUNT candidate(s) to the Mayor"
+    SUMMARY="$SUMMARY — escalated $ESCALATED of $CANDIDATE_COUNT"
     # A signal that reached the Mayor is a warning, not a quiet check-only:
     # history and cooldown accounting must distinguish "raised" from "saw
-    # nothing". When gt failed for every candidate, the record keeps the
-    # check-only result and the HIGH failover escalation is the only signal.
+    # nothing".
     gt plugin record-run --plugin compactor-dog --result warning \
       --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
   elif [[ $ESCALATE_FAILOVER -gt 0 ]]; then
-    log "WARNING: gt escalate failed for all ${#CANDIDATES[@]} candidate(s)"
-    gt plugin record-run --plugin compactor-dog --result check-only \
-      --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+    log "ERROR: gt escalate failed for all $CANDIDATE_COUNT candidate(s)"
+    # record-run writes through bd, while the HIGH failover above rides the
+    # same gt escalate call that just failed for every candidate — so the
+    # receipt is what survives a broken escalation path. A check-only result
+    # here would read as "nothing over threshold", the fail-open shape this
+    # branch exists to close (gt-hrt9).
+    gt plugin record-run --plugin compactor-dog --result failure \
+      --title "compactor-dog: FAILED to escalate — $SUMMARY" \
+      --description "gt escalate failed for all $CANDIDATE_COUNT candidate(s): no per-DB signal reached the Mayor. $SUMMARY. Compaction is operator-only: run plugins/compactor-dog/run.sh --compact." >/dev/null 2>&1 || true
   else
     gt plugin record-run --plugin compactor-dog --result check-only \
       --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true

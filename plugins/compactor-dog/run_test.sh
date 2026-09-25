@@ -54,20 +54,10 @@ if ! grep -q '^CHECK_ONLY=true' "$SCRIPT_DIR/run.sh"; then
   echo "FAIL: run.sh no longer defaults CHECK_ONLY=true — destructive compaction is the default"
   FAILURES=$((FAILURES + 1))
 fi
-# --compact is parsed inside the argument loop; the flag's line shape can
-# move, so locate it and bound the false-setter count to the loop that
-# contains it.
-COMPACT_FLAG_LINE=$(grep -n -- '--compact' "$SCRIPT_DIR/run.sh" | head -1 | sed -n 's/^[0-9]*://p')
-ARG_LOOP_START=$(grep -n '^while \[\[ \$# -gt 0 \]\]' "$SCRIPT_DIR/run.sh" | head -1 | sed -n 's/^[0-9]*://p')
-grep -n '' "$SCRIPT_DIR/run.sh" | awk -v start="${ARG_LOOP_START:-0}" '$1 ~ /^[0-9]+:done$/ && $1+0 > start {print $1; exit}' > /tmp/compactor-dog-loopend.$$ 2>/dev/null
-ARG_LOOP_END=$(cat /tmp/compactor-dog-loopend.$$ 2>/dev/null)
-rm -f /tmp/compactor-dog-loopend.$$
-ARG_LOOP_END=${ARG_LOOP_END:-999999}
-FALSE_SETTERS=$(awk -v s="$COMPACT_FLAG_LINE" -v e="$ARG_LOOP_END" '
-  $1+0 >= s && $1+0 <= e && /CHECK_ONLY=false/ {n++}
-  END {print n+0}' "$SCRIPT_DIR/run.sh")
-if [[ "$FALSE_SETTERS" != "1" ]]; then
-  echo "FAIL: CHECK_ONLY is cleared on $FALSE_SETTERS line(s) of the argument loop — only the --compact flag may do that"
+FALSE_SETTERS=$(grep -c 'CHECK_ONLY=false' "$SCRIPT_DIR/run.sh" || true)
+COMPACT_FLAG=$(grep -c -- '--compact).*CHECK_ONLY=false' "$SCRIPT_DIR/run.sh" || true)
+if [[ "$FALSE_SETTERS" != "$COMPACT_FLAG" ]]; then
+  echo "FAIL: run.sh clears CHECK_ONLY on $FALSE_SETTERS line(s) but only $COMPACT_FLAG is the --compact flag"
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -205,9 +195,9 @@ fi
 # so the old doc contract (a dog reads plugin.md and escalates on any
 # over-threshold signal) could never fire — the plugin raised nothing. The
 # escalation loop now lives in run.sh's check-only branch: one gt escalate
-# per candidate DB, a warning receipt when any candidate was escalated, and
-# exit 0 either way. Drive the real script with faked dolt and gt commands
-# and assert the branch's behavior.
+# per candidate DB, a warning receipt when any candidate was escalated, a
+# failure receipt when none was, and exit 0 either way. Drive the real
+# script with faked dolt and gt commands and assert the branch's behavior.
 echo ""
 echo "=== check-only escalation tests ==="
 
@@ -276,19 +266,24 @@ FAKE_GT
 # subshell. Do NOT call this from $(...) — the function must run in the
 # parent shell for RUN_LOG_DIRS to reach the EXIT trap.
 run_with_fakes() {
-  local dir="$1" rc d
+  local dir="$1" d
   shift
   d=$(run_log_dir)
   RUN_LOG_DIR="$d"
   RUN_LOG_DIRS="$RUN_LOG_DIRS $d"
-  (
+  # The run sits in an `if` so its status cannot end the harness through
+  # set -e: the caller asserts on RUN_RC instead.
+  if (
     export PATH="$dir:$PATH"
     export RUN_LOG="$d/ops"
     bash "$SCRIPT_DIR/run.sh" "$@"
-  ) >/dev/null 2>&1
-  rc=$?
-  if [[ $rc -ne 0 ]]; then
-    echo "HARNESS: run.sh exited $rc (see ops in $d)" >&2
+  ) >/dev/null 2>&1; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+  if [[ $RUN_RC -ne 0 ]]; then
+    echo "HARNESS: run.sh exited $RUN_RC (see ops in $d)" >&2
   fi
   return 0
 }
@@ -301,12 +296,12 @@ write_fakes "$FAKE_DIR_RC1" 1
 
 # (a) One over-threshold DB: the check-only branch escalates exactly one
 # DB, records a warning receipt, and exits 0 (the run stays a success —
-# escalation is the happy path, not a failure). The runner always returns 0
-# so a run.sh failure cannot kill the harness mid-test; check exit 0 here.
+# escalation is the happy path, not a failure).
 run_with_fakes "$FAKE_DIR"
+RC=$RUN_RC
 LOG="$RUN_LOG_DIR"
-if [[ $? -ne 0 ]]; then
-  echo "FAIL: check-only with a candidate did not exit 0 (runner reports the code on stderr)"
+if [[ "$RC" -ne 0 ]]; then
+  echo "FAIL: check-only with a candidate exited $RC, want 0"
   FAILURES=$((FAILURES + 1))
 fi
 ESC_COUNT=$( (grep -c '^ESCALATE ' "$LOG/ops" 2>/dev/null) || true )
@@ -332,18 +327,27 @@ if [[ "$REC_COUNT" -lt 1 ]]; then
   FAILURES=$((FAILURES + 1))
 fi
 
-# (b) gt escalate fails (Dolt down): the script must NOT exit nonzero —
-# a nonzero exit would dispatch a dog to investigate a failure whose
-# signal was already in the run record. One HIGH failover escalation
-# covers the run; the receipt is still written.
+# (b) gt escalate fails for every candidate: one HIGH failover escalation
+# covers the run, the receipt records `failure` — distinct from the
+# `check-only` a run with nothing to report writes — and the script still
+# exits 0, because the run itself completed and only its signal path failed.
 run_with_fakes "$FAKE_DIR_RC1"
+RC=$RUN_RC
 LOG="$RUN_LOG_DIR"
-if [[ $? -ne 0 ]]; then
-  echo "FAIL: check-only with failed escalations did not exit 0 (runner reports the code on stderr)"
+if [[ "$RC" -ne 0 ]]; then
+  echo "FAIL: check-only with failed escalations exited $RC, want 0"
   FAILURES=$((FAILURES + 1))
 fi
 if ! grep -q -- '-s HIGH' "$LOG/ops"; then
   echo "FAIL: failed per-DB escalations must trigger the HIGH failover escalation"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q -- '--result failure' "$LOG/ops"; then
+  echo "FAIL: a run whose escalations all failed must record a failure receipt"
+  FAILURES=$((FAILURES + 1))
+fi
+if grep -q -- '--result check-only' "$LOG/ops"; then
+  echo "FAIL: total escalation failure recorded check-only — indistinguishable from a run with nothing to report"
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -351,9 +355,9 @@ fi
 # the destructive path escalates only on integrity/compaction errors,
 # never per candidate.
 # The fake dolt serves the same counts in every mode, so --compact goes
-# through the full flatten cycle: exit is nonzero, but the branch
-# distinguisher is that the per-candidate escalation message never appears
-# (that wording belongs to the check-only branch only).
+# through the full flatten cycle; the branch distinguisher is that the
+# per-candidate escalation message never appears (that wording belongs to
+# the check-only branch only).
 run_with_fakes "$FAKE_DIR" --compact
 LOG="$RUN_LOG_DIR"
 # grep -c prints "0" on no match but exits 1, which under set -e would kill

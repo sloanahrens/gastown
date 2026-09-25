@@ -38,9 +38,12 @@ to decide if maintenance is needed.** Consider:
 The daemon runs `run.sh` directly in its default monitor-only mode
 (`[execution] type = "script"`, claude-l5w). The script records per-DB commit
 counts; when a DB exceeds the threshold it raises one MEDIUM `gt escalate`
-per candidate and records a `warning` receipt (a run with no candidates
-records `check-only`). The 30-minute cooldown gate deduplicates: a steady
-over-threshold DB re-warns once per 30 minutes, not per daemon heartbeat.
+per candidate and records a `warning` receipt. A run with no candidates
+records `check-only`; a run whose escalations all fail records `failure`,
+so "found work, could not report it" never reads as "found nothing" (the
+outcome list under Record Result has the detail). The 30-minute cooldown gate
+deduplicates: a steady over-threshold DB re-warns once per 30 minutes, not
+per daemon heartbeat.
 The daemon's `compactor_dog` patrol (`internal/daemon/compactor_dog.go`,
 threshold 2000, chosen to stay clear of the escalation-commit loop described
 there) owns the hard line, so the plugin's per-DB warnings are the <2000 band
@@ -335,12 +338,20 @@ Receipt outcomes, with who records them:
 
 - `run.sh` check-only, no candidates: records `check-only` itself.
 - `run.sh` check-only, one or more candidates: raises the per-DB
-  `gt escalate` calls itself (see "How this runs") and records `warning`.
+  `gt escalate` calls itself (see "How this runs") and records `warning`, or
+  `failure` when every one of those calls failed. The script exits 0 either
+  way, so this `failure` means the checks found work and could not report it,
+  not that the script crashed.
 - `run.sh --compact`: records `success` or `warning` (the compaction-error
   escalation) itself.
 - `run.sh` exits nonzero: the daemon records `failure` and dispatches a dog
   with the output attached. The dog investigates, records `failure`, and
   escalates if the failure looks permanent.
+
+A run the daemon starts leaves two receipts: the daemon's, from the script's
+exit status, and the script's own from the list above. A `failure` from the
+script beside a `success` from the daemon means the process finished and the
+run still failed to deliver its signal.
 
 Dog escalation (only after a failed run):
 ```bash
