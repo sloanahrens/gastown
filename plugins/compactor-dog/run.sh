@@ -82,6 +82,21 @@ if [[ -z "$DAEMON_THRESHOLD" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$DAEM
 fi
 [[ "$DAEMON_THRESHOLD" =~ ^[0-9]+$ ]] || DAEMON_THRESHOLD=2000
 
+# scheduled_maintenance.mode gates whether commit count is an escalation signal
+# at all. In gc mode the daemon runs a history-preserving dolt_gc('--full') by
+# disk size and never flattens, so commit count grows between gc runs by
+# design and is not a disk signal below the daemon's own line (plugin.md,
+# Step 6: "Do not escalate on commit count... in gc mode"). Without this gate
+# the script's fixed COMMIT_THRESHOLD (500) escalated every DB in the
+# 500..daemon-threshold band on every 30-minute cooldown cycle — ~5
+# escalation beads/mails per run with no dedupe (gt-124a6). COMPACTOR_MAINT_MODE
+# overrides for tests.
+MAINT_MODE="${COMPACTOR_MAINT_MODE:-}"
+if [[ -z "$MAINT_MODE" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$DAEMON_JSON" ]]; then
+  MAINT_MODE=$(jq -r '.patrols.scheduled_maintenance.mode // "monitor"' "$DAEMON_JSON" 2>/dev/null)
+fi
+[[ -n "$MAINT_MODE" ]] || MAINT_MODE="monitor"
+
 # --- Lock acquisition --------------------------------------------------------
 
 # Prevent concurrent compaction runs (e.g., cron + manual).
@@ -161,7 +176,7 @@ wait_with_timeout() {
 
 # --- Step 1: Discover production databases ------------------------------------
 
-log "Starting compaction cycle (threshold=$COMMIT_THRESHOLD, dry_run=$DRY_RUN, check_only=$CHECK_ONLY)"
+log "Starting compaction cycle (threshold=$COMMIT_THRESHOLD, dry_run=$DRY_RUN, check_only=$CHECK_ONLY, maint_mode=$MAINT_MODE)"
 
 # If databases were explicitly provided, use those. Otherwise, auto-discover
 # from the server and filter out system/test databases.
@@ -258,6 +273,9 @@ if $CHECK_ONLY; then
       if [[ "$ESC_COUNT" -ge "$DAEMON_THRESHOLD" ]]; then
         log "  $ESC_NAME ($ESC_COUNT commits) — at/above the daemon threshold ($DAEMON_THRESHOLD); its own compactor_dog patrol escalates this, not warning again"
         DEFERRED=$((DEFERRED + 1))
+      elif [[ "$MAINT_MODE" == "gc" ]]; then
+        log "  $ESC_NAME ($ESC_COUNT commits) — below the daemon threshold ($DAEMON_THRESHOLD), but gc mode means commit count isn't a disk signal here; deferring to the daemon's own line (plugin.md Step 6)"
+        DEFERRED=$((DEFERRED + 1))
       else
         log "  $ESC_NAME ($ESC_COUNT commits) — recommends compaction"
         ESCALATABLE="${ESCALATABLE}${entry}"$'\n'
@@ -291,7 +309,7 @@ if $CHECK_ONLY; then
   CANDIDATE_COUNT=${#CANDIDATES[@]}
   SUMMARY="compactor-dog: $CANDIDATE_COUNT DBs exceed threshold ($COMMIT_THRESHOLD commits)"
   if [[ $DEFERRED -gt 0 ]]; then
-    SUMMARY="$SUMMARY — $DEFERRED at/above the daemon threshold ($DAEMON_THRESHOLD), deferred to its own patrol"
+    SUMMARY="$SUMMARY — $DEFERRED deferred to the daemon's own patrol (threshold $DAEMON_THRESHOLD, mode $MAINT_MODE)"
   fi
   if [[ $ESCALATED -gt 0 ]]; then
     log "Escalated $ESCALATED of $ESCALATABLE_COUNT escalatable candidate(s) to the Mayor"

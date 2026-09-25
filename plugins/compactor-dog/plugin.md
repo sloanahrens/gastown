@@ -49,9 +49,15 @@ threshold 2000 by default) owns the hard line. `run.sh` reads that same
 threshold from `mayor/daemon.json`'s `patrols.compactor_dog.threshold`
 (falling back to 2000) and defers — logs, doesn't escalate — any candidate at
 or above it, since the daemon raises it on its own cadence; the script's
-warnings cover only the band below, no double alert at the top. A dog reads
-the judgment steps below only when `run.sh` exits nonzero (Dolt unreachable,
-no databases).
+warnings cover only the band below, no double alert at the top.
+
+In `gc` mode (`patrols.scheduled_maintenance.mode`), commit count below the
+daemon threshold isn't a disk signal either, so those candidates defer too —
+otherwise a gc-mode town with the threshold raised to 20000 (this town's
+setting) re-escalates every DB from 500 to 20000 each 30-minute cycle (gt-124a6).
+
+A dog reads the judgment steps below only when `run.sh` exits nonzero (Dolt
+unreachable, no databases).
 
 **First, check the maintenance mode.** The judgment table in Step 6 depends
 on it:
@@ -102,11 +108,12 @@ bash plugins/compactor-dog/run.sh --compact --dry-run
 bash plugins/compactor-dog/run.sh --compact
 ```
 
-`run.sh`'s default threshold (500) is the "Escalate" column in Step 6, so the
-script's candidate list and this doc's escalation rule are the same rule: if
-the script reports no candidates, every DB is under 500 and no escalation is
-due. A DB over the 1000 hard line is always a candidate. Do not pass
-`--threshold` to quiet a real signal.
+In `monitor` or `flatten` mode, `run.sh`'s default threshold (500) is the
+"Escalate" column in Step 6: no candidates means every DB is under 500 and no
+escalation is due. A DB over 1000 is always a candidate. Do not pass
+`--threshold` to quiet a real signal. In `gc` mode, 500 still marks a
+"candidate" for the report, but the script doesn't escalate it (see "How this
+runs").
 
 ## Step 1: Discover production databases
 
@@ -131,12 +138,11 @@ echo "Production databases: $(echo "$PROD_DBS" | tr '\n' ' ')"
 ```
 
 **Keep this list in sync with the town.** This grep blocklist is a name-pattern
-heuristic. `gt dolt list` derives the production set from each rig's
+heuristic; `gt dolt list` derives the production set from each rig's
 `metadata.json`, and `gt dolt cleanup` treats anything *not* in that set as an
-orphan — so a database can be "production" here and "orphan" there. That is how
-`beads` was counted as production here while `gt dolt status` called it an
-orphan; the rig is now named `be`. When a rig is added or renamed, update this
-pattern to match, and cross-check against `gt dolt list`.
+orphan, so a database can be "production" here and "orphan" there (that's how
+`beads`, since renamed `be`, was miscounted). Update this pattern when a rig is
+added or renamed, and cross-check against `gt dolt list`.
 
 ## Step 2: Count commits per database
 
@@ -289,20 +295,18 @@ without escalating if context justifies it.
 
 The table above is for `monitor` and `flatten` modes. **In `gc` mode:**
 
-- Do not escalate on commit count, growth rate, or time since flatten. Commit
-  growth between daily gc runs is expected, and gc does not reduce it.
-- Escalate on commit count only above 20000 in one database (the daemon's
-  gc-mode `compactor_dog.threshold`). That is a history-query latency concern,
-  not a disk one. The daemon already escalates it, so check `gt escalate list`
-  before raising a duplicate.
+- Do not escalate on commit count, growth rate, or time since flatten — growth
+  between daily gc runs is expected and gc does not reduce it.
+- Escalate on commit count only above 20000 (the daemon's gc-mode
+  `compactor_dog.threshold`) — a history-query latency concern, not a disk
+  one. The daemon already escalates it; check `gt escalate list` first.
 - Runaway growth (e.g. >300/hr with no swarm) is still worth escalating, as a
-  runaway writer, not as a compaction request.
-- gc failures and skipped windows are escalated by the daemon's
+  runaway writer, not a compaction request.
+- gc failures and skipped windows are escalated by the daemon's own
   scheduled_maintenance patrol, not by this dog.
-- In the escalation, report what you saw (the database, its commit count
-  or growth rate, and whether a swarm explains it) and leave the remedy to
-  the operator. Do not recommend compaction or flatten in gc mode: the daemon's
-  gc already handles disk, and rewriting history is an operator decision.
+- Report what you saw (database, commit count or growth rate, whether a swarm
+  explains it) and leave the remedy to the operator — never recommend
+  compaction or flatten in gc mode.
 
 **But override the table if context warrants it:**
 - 400 commits after a 10-polecat swarm = normal, will settle
@@ -340,13 +344,13 @@ echo "=== $SUMMARY ==="
 Receipt outcomes, with who records them:
 
 - `run.sh` check-only, no candidates: records `check-only` itself.
-- `run.sh` check-only, every candidate deferred to the daemon (see "How this
-  runs"): the script raises nothing and records `check-only`, but the
-  description still names the deferred count — not "nothing found".
-- `run.sh` check-only, one or more candidates below the daemon threshold:
-  raises the per-DB `gt escalate` calls itself and records `warning`, or
-  `failure` when every call failed. The script exits 0 either way, so
-  `failure` means the checks found work and could not report it, not a crash.
+- `run.sh` check-only, every candidate deferred (see "How this runs" — at/above
+  the daemon threshold, or gc mode): raises nothing, records `check-only`, but
+  the description still names the deferred count, not "nothing found".
+- `run.sh` check-only, one or more escalatable candidates: raises the per-DB
+  `gt escalate` calls itself and records `warning`, or `failure` when every
+  call failed — the script still exits 0, so `failure` means the checks found
+  work and could not report it, not a crash.
 - `run.sh --compact`: records `success` or `warning` (the compaction-error
   escalation) itself.
 - `run.sh` exits nonzero: the daemon records `failure` and dispatches a dog
