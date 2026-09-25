@@ -320,6 +320,52 @@ func TestConvoyManagerPauseResume(t *testing.T) {
 	}
 }
 
+// Back-to-back ticks (a tick slower than its interval re-takes the read side
+// the moment it releases it) must not starve Pause: while Pause waits, no new
+// tick may start, so the one in flight drains and Pause wins.
+func TestConvoyManagerPauseNotStarvedByBackToBackTicks(t *testing.T) {
+	m := &ConvoyManager{logger: func(string, ...interface{}) {}}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	started := make(chan struct{})
+	go func() {
+		defer close(done)
+		once := false
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if m.tryBeginTick() {
+				if !once {
+					once = true
+					close(started)
+				}
+				time.Sleep(20 * time.Millisecond) // the tick's Dolt reads
+				m.pollGate.RUnlock()
+				continue // the next tick is already due
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	<-started
+
+	ok := m.Pause(time.Second)
+	close(stop)
+	if ok {
+		m.Resume()
+	}
+	<-done
+	if !ok {
+		t.Fatal("Pause timed out under back-to-back ticks; want it to drain the in-flight tick and win")
+	}
+	if m.pausing.Load() {
+		t.Error("pausing still set after Pause returned")
+	}
+}
+
 // --- discovery and external servers ------------------------------------------------
 
 func TestDiscoverMaintenanceDatabases(t *testing.T) {

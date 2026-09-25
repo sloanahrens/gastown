@@ -214,10 +214,14 @@ type ConvoyManager struct {
 	scanMu sync.Mutex
 
 	// pollGate lets a scheduled_maintenance gc pause this manager's Dolt
-	// reads: the event poll tick and the stranded scan take the read side with
-	// TryRLock and skip the tick while Pause holds the write side (the 09-17
-	// Dolt panic was a Convoy events read racing a gc).
+	// reads: the event poll tick and the stranded scan take the read side
+	// through tryBeginTick and skip the tick while Pause holds the write side
+	// (the 09-17 Dolt panic was a Convoy events read racing a gc).
 	pollGate sync.RWMutex
+
+	// pausing is set while Pause waits for the write side, so no new tick
+	// starts and the in-flight one can drain; see Pause.
+	pausing atomic.Bool
 
 	// lastEventIDs tracks per-store high-water marks for event polling.
 	// Key matches stores map keys ("hq", "gastown", etc.).
@@ -570,7 +574,7 @@ func (m *ConvoyManager) runEventPoll() {
 		case <-m.ctx.Done():
 			return
 		case <-ticker.C:
-			if !m.pollGate.TryRLock() {
+			if !m.tryBeginTick() {
 				continue // paused for a scheduled gc; the next tick polls
 			}
 			currentInterval = m.pollTick(currentInterval, ticker)
@@ -625,12 +629,33 @@ func (m *ConvoyManager) pollTick(currentInterval time.Duration, ticker *time.Tic
 	return currentInterval
 }
 
+// tryBeginTick takes pollGate's read side for one poll or scan tick. It
+// fails, and the tick is skipped, while Pause holds or is waiting for the
+// write side. A successful call must be followed by pollGate.RUnlock.
+func (m *ConvoyManager) tryBeginTick() bool {
+	if m.pausing.Load() {
+		return false
+	}
+	return m.pollGate.TryRLock()
+}
+
 // Pause stops the event poll and stranded scan from starting a new tick, and
 // waits up to timeout for one already running to finish. It reports false
 // (and holds nothing) when the in-flight tick outlasts timeout. A successful
 // Pause must be followed by Resume. Used by scheduled_maintenance gc around
 // each database's dolt_gc('--full').
+//
+// It polls TryLock rather than blocking in Lock: an abandoned Lock cannot be
+// cancelled, and behind a hung tick it would leave a pending writer that
+// blocks every later tick and a goroutine per attempt. Polling alone could
+// starve, since a tick that runs longer than its interval re-takes the read
+// side right after releasing it; the pausing flag closes that by making
+// tryBeginTick refuse new ticks while Pause waits, so only the ticks already
+// in flight have to drain. Pause assumes a single caller (the gc cycle,
+// serialized by maintenanceGCRunning).
 func (m *ConvoyManager) Pause(timeout time.Duration) bool {
+	m.pausing.Store(true)
+	defer m.pausing.Store(false)
 	deadline := time.Now().Add(timeout)
 	for {
 		if m.pollGate.TryLock() {
@@ -872,7 +897,7 @@ func (m *ConvoyManager) runStrandedScan() {
 // scan runs one stranded scan cycle: find stranded convoys, feed or close each.
 // Serialized by scanMu to prevent concurrent scans from spawning duplicate checks.
 func (m *ConvoyManager) scan() {
-	if !m.pollGate.TryRLock() {
+	if !m.tryBeginTick() {
 		m.logger("Convoy: stranded scan skipped: paused for scheduled gc")
 		return
 	}
