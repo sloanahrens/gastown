@@ -69,7 +69,7 @@ type ScheduledMaintenanceConfig struct {
 	// Mode selects what happens to a database at or above the threshold.
 	// MaintenanceModeMonitor (the default) escalates with the counts and
 	// rewrites nothing; MaintenanceModeFlatten runs `gt maintain --force`.
-	// Only the exact string "flatten" arms the destructive path — see
+	// Only the trimmed string "flatten" arms the destructive path — see
 	// maintenanceMode. MaintenanceModeGC ("gc") runs a history-preserving
 	// CALL dolt_gc('--full') per database on a size trigger instead of the
 	// commit threshold; see maintenance_gc.go.
@@ -129,18 +129,22 @@ func maintenanceInterval(config *DaemonPatrolConfig) string {
 
 // maintenanceMode returns the configured compaction mode.
 //
-// Only the exact string "flatten" selects the destructive path and only the
-// exact string "gc" selects garbage collection; everything else — an empty
-// field, a typo, a missing config — is MaintenanceModeMonitor. The negative
-// test is deliberate: a misspelling must fail toward escalation, never toward
-// rewriting every database's history at 03:00.
+// Only the trimmed string "flatten" selects the destructive path and only the
+// trimmed string "gc" selects garbage collection; everything else — an empty
+// field, a typo, a case variation like "Flatten", a missing config — is
+// MaintenanceModeMonitor. The negative test is deliberate: a misspelling or a
+// hand-edited case difference must fail toward escalation, never toward
+// rewriting every database's history at 03:00. This matches setMaintenanceConfig
+// (internal/cmd/config.go), which writes only the exact lowercase constants and
+// rejects everything else at `gt config set` time — the two entry points must
+// agree on what arms the destructive path, since daemon.json can also be
+// hand-edited directly.
 func maintenanceMode(config *DaemonPatrolConfig) string {
 	if config != nil && config.Patrols != nil && config.Patrols.ScheduledMaintenance != nil {
-		mode := strings.TrimSpace(config.Patrols.ScheduledMaintenance.Mode)
-		switch {
-		case strings.EqualFold(mode, MaintenanceModeFlatten):
+		switch strings.TrimSpace(config.Patrols.ScheduledMaintenance.Mode) {
+		case MaintenanceModeFlatten:
 			return MaintenanceModeFlatten
-		case strings.EqualFold(mode, MaintenanceModeGC):
+		case MaintenanceModeGC:
 			return MaintenanceModeGC
 		}
 	}

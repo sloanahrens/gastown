@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,8 +32,8 @@ func TestFetchAndVerify(t *testing.T) {
 		if err != nil {
 			skipOrFailContainerLost(t, err, "FetchAndVerify on a remote-less database")
 		}
-		if got.Remote != "" {
-			t.Errorf("Remote = %q, want empty for a database with no remote", got.Remote)
+		if len(got.Remotes) != 0 {
+			t.Errorf("Remotes = %v, want empty for a database with no remote", got.Remotes)
 		}
 		if got.Diverged {
 			t.Error("a database with no remote reported divergence — nothing can be lost to a flatten")
@@ -48,8 +49,8 @@ func TestFetchAndVerify(t *testing.T) {
 		if err != nil {
 			skipOrFailContainerLost(t, err, "FetchAndVerify after a push")
 		}
-		if got.Remote != "origin" {
-			t.Errorf("Remote = %q, want origin", got.Remote)
+		if len(got.Remotes) != 1 || got.Remotes[0] != "origin" {
+			t.Errorf("Remotes = %v, want [origin]", got.Remotes)
 		}
 		if got.RemoteHead == "" {
 			t.Error("RemoteHead is empty after a push — the remote main branch was not read")
@@ -90,11 +91,11 @@ func TestFetchAndVerify(t *testing.T) {
 			skipOrFailContainerLost(t, err, "FetchAndVerify on a diverged consumer")
 		}
 		if !got.Diverged {
-			t.Fatalf("consumer reported no divergence against a remote whose history it does not share (remote=%q head=%q) — the fetch did not run, or the tracking ref was read from the wrong name",
-				got.Remote, got.RemoteHead)
+			t.Fatalf("consumer reported no divergence against a remote whose history it does not share (remotes=%v head=%q) — the fetch did not run, or the tracking ref was read from the wrong name",
+				got.Remotes, got.RemoteHead)
 		}
-		if got.Remote != "origin" {
-			t.Errorf("Remote = %q, want origin", got.Remote)
+		if len(got.Remotes) != 1 || got.Remotes[0] != "origin" {
+			t.Errorf("Remotes = %v, want [origin]", got.Remotes)
 		}
 		if got.RemoteHead == "" {
 			t.Error("Diverged is set but RemoteHead is empty — the verdict is not attributable")
@@ -125,6 +126,102 @@ func TestFetchAndVerify(t *testing.T) {
 		}
 		if !after.Diverged {
 			t.Fatalf("flatten left the remote holding commits local no longer has, but the pre-flight cleared it (head=%s)", after.RemoteHead)
+		}
+	})
+
+	// The fail-open this guard must not have: a database can have more than
+	// one remote, and a check that only looked at the alphabetically-first
+	// one would clear the whole database on that remote's say-so alone,
+	// leaving a second, genuinely diverged remote unexamined.
+	t.Run("divergence on a remote that does not sort first is still caught", func(t *testing.T) {
+		consumer, consumerName := createDivergenceTestDB(t, admin)
+		seedHistory(t, consumer, consumerName)
+
+		// "aardvark" sorts before "zzremote". Push the consumer's own current
+		// history there, so this remote is provably not diverged.
+		execSQL(t, consumer, "CALL DOLT_REMOTE('add','aardvark',?)", remoteURL(consumerName+"-aardvark"))
+		execSQL(t, consumer, "CALL DOLT_PUSH('aardvark','main')")
+
+		// "zzremote" points at a producer database with unrelated history the
+		// consumer does not have.
+		producer, producerName := createDivergenceTestDB(t, admin)
+		seedHistory(t, producer, producerName)
+		addRemoteAndPush(t, producer, producerName)
+		execSQL(t, consumer, "CALL DOLT_REMOTE('add','zzremote',?)", remoteURL(producerName))
+
+		got, err := fetchAndVerify(t, consumer, consumerName)
+		if err != nil {
+			t.Fatalf("FetchAndVerify with two remotes: %v", err)
+		}
+		if !got.Diverged {
+			t.Fatalf("consumer has a second, diverged remote (zzremote) but the guard cleared it — only the first remote (aardvark) was examined")
+		}
+		if len(got.Remotes) != 1 || got.Remotes[0] != "zzremote" {
+			t.Errorf("Remotes = %v, want [zzremote] (the remote the divergence was found on)", got.Remotes)
+		}
+	})
+
+	// The clean path's field shape: every configured remote cleared, so
+	// Remotes lists them all in check order — the two-remote case this guard
+	// exists for must not collapse to a single name.
+	t.Run("two clean remotes list both in check order", func(t *testing.T) {
+		conn, name := createDivergenceTestDB(t, admin)
+		seedHistory(t, conn, name)
+		// "aardvark" sorts before "origin"; check order is name order.
+		execSQL(t, conn, "CALL DOLT_REMOTE('add','aardvark',?)", remoteURL(name+"-aardvark"))
+		execSQL(t, conn, "CALL DOLT_PUSH('aardvark','main')")
+		addRemoteAndPush(t, conn, name)
+
+		got, err := fetchAndVerify(t, conn, name)
+		if err != nil {
+			t.Fatalf("FetchAndVerify with two clean remotes: %v", err)
+		}
+		if got.Diverged {
+			t.Error("two remotes both holding the pushed history reported divergence")
+		}
+		if len(got.Remotes) != 2 || got.Remotes[0] != "aardvark" || got.Remotes[1] != "origin" {
+			t.Errorf("Remotes = %v, want [aardvark origin]", got.Remotes)
+		}
+	})
+
+	// The per-remote budget contract: each DOLT_FETCH gets its own
+	// DivergenceFetchTimeout derived from the caller's context, so N remotes
+	// spend N budgets and the last one's fetch still runs. A single shared
+	// deadline across the whole loop would start the second remote's fetch
+	// late enough to starve it. The override shrinks the per-fetch budget
+	// to 5s and the fake remote's path is unresolvable, so the first
+	// fetch's fate (fast failure, or held to the 5s budget) does not
+	// matter: only the per-remote derivation lets the check proceed past
+	// it and complete the second remote's fetch with the rest of the
+	// caller's deadline intact.
+	t.Run("a slow first remote does not starve the second remote's fetch", func(t *testing.T) {
+		t.Setenv("GASTOWN_DIVERGENCE_FETCH_TIMEOUT", "5s")
+
+		conn, name := createDivergenceTestDB(t, admin)
+		seedHistory(t, conn, name)
+		addRemoteAndPush(t, conn, name)
+
+		// The consumer's "aardvark" points at a dolt dir that has never been
+		// written to — DOLT_FETCH must actually run (a no-ref fetch would
+		// complete instantly) and it fails, exercising the per-remote timeout.
+		// (The remote-tracking ref is left at the consumer's own pushed main
+		// by the producer's earlier push, so after the failed fetch the
+		// verdict against aardvark is "no matching branch" — clean.)
+		producer, producerName := createDivergenceTestDB(t, admin)
+		seedHistory(t, producer, producerName)
+		execSQL(t, conn, "CALL DOLT_REMOTE('add','aardvark',?)",
+			filepath.Join(remoteURL(producerName), "nonexistent-dolt-dir"))
+
+		got, err := fetchAndVerify(t, conn, name)
+		if err != nil {
+			t.Fatalf("FetchAndVerify with a slow first remote: %v", err)
+		}
+		// zzremote sorts after origin; order is [aardvark, origin].
+		if len(got.Remotes) != 2 || got.Remotes[0] != "aardvark" || got.Remotes[1] != "origin" {
+			t.Errorf("Remotes = %v, want [aardvark origin] — the second remote's fetch did not complete", got.Remotes)
+		}
+		if got.Diverged {
+			t.Errorf("divergence = true with no remote holding foreign commits (head=%s)", got.RemoteHead)
 		}
 	})
 }

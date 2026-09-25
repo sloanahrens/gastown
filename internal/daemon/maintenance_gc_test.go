@@ -34,11 +34,13 @@ func TestMaintenanceModeGC(t *testing.T) {
 		want string
 	}{
 		{"gc", MaintenanceModeGC},
-		{" GC ", MaintenanceModeGC},
+		{" gc ", MaintenanceModeGC},
 		{"flatten", MaintenanceModeFlatten},
 		{"", MaintenanceModeMonitor},
 		{"monitor", MaintenanceModeMonitor},
-		// Typos fail toward monitor, never toward an action.
+		// Typos, and case variations, fail toward monitor, never toward an
+		// action (gt-aku6: matching used to be case-insensitive here).
+		{"GC", MaintenanceModeMonitor},
 		{"gcc", MaintenanceModeMonitor},
 		{"gc-full", MaintenanceModeMonitor},
 	}
