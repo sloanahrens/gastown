@@ -1992,22 +1992,35 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// branch-only key let a retry after new commits skip the push, so the
 		// MR declared a commit origin never received — the
 		// "gate fails → fix commit → re-run gt done" cycle reproduced it every
-		// time). The verification below still runs on the resume path: a
-		// checkpoint records an intention to push, not proof that origin
-		// received it.
+		// time). A matching checkpoint records a push of this exact commit that
+		// gt-2wqt's assertion already proved landed; classifyResumedPush reads
+		// what that means for this run.
 		checkpointHead, checkpointHeadErr := g.Rev("HEAD")
 		if checkpointHeadErr != nil {
 			return fmt.Errorf("resolving HEAD for push checkpoint: %w", checkpointHeadErr)
 		}
 		if checkpoints[CheckpointPushed] != "" {
-			if pushedCheckpointMatches(checkpoints[CheckpointPushed], branch, checkpointHead) {
+			// Only the --target override is resolved this early; a run whose MR
+			// targets another source of it (a formula_vars base_branch) misses
+			// the landed classification, which costs it only that outcome.
+			landedTarget := defaultBranch
+			if doneTarget != "" {
+				landedTarget = doneTarget
+			}
+			switch classifyResumedPush(g, "origin", landedTarget, checkpoints[CheckpointPushed], branch, checkpointHead) {
+			case resumedWorkLanded:
+				fmt.Printf("%s Branch %s already landed on origin/%s — nothing left to submit\n",
+					style.Bold.Render("✓"), branch, landedTarget)
+				goto notifyWitness
+			case resumedWorkPushed:
 				fmt.Printf("%s Branch already pushed (resumed from checkpoint)\n", style.Bold.Render("✓"))
 				goto afterPush
+			default:
+				// Stale checkpoint — either a previous assignment's branch (ge-sbo) or
+				// this branch at an earlier commit (gt-2wqt) — discard and push normally.
+				fmt.Printf("→ Discarding stale push checkpoint (%s, now on %s@%s)\n",
+					checkpoints[CheckpointPushed], branch, shortSHA(checkpointHead))
 			}
-			// Stale checkpoint — either a previous assignment's branch (ge-sbo) or
-			// this branch at an earlier commit (gt-2wqt) — discard and push normally.
-			fmt.Printf("→ Discarding stale push checkpoint (%s, now on %s@%s)\n",
-				checkpoints[CheckpointPushed], branch, shortSHA(checkpointHead))
 		}
 
 		// CRITICAL: Push branch BEFORE creating MR bead (hq-6dk53, hq-a4ksk)
@@ -2060,8 +2073,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// in the MR before anything downstream trusts the push (gt-2wqt).
 		//
 		// This runs on EVERY path into afterPush — including the checkpoint
-		// resume above — because a checkpoint records an intention to push, not
-		// proof that origin received the commit. The failure it closes: origin
+		// resume above — because a recorded push is a fact about the past and
+		// origin can move off it afterwards. The failure it closes: origin
 		// holding an older tip than the commit the MR declares, so the refinery
 		// gates and merges the old tree while the MR looks ready
 		// (gt-wisp-i2vk amber/gt-uoqg, gt-wisp-qjy slate, gt-wisp-yle marble).
@@ -3125,6 +3138,48 @@ func pushedCheckpointMatches(value, branch, sha string) bool {
 		return false
 	}
 	return value == pushedCheckpointValue(branch, sha)
+}
+
+// resumedWork is what a push checkpoint means for a gt done that has been
+// re-invoked on the same branch and commit.
+type resumedWork string
+
+const (
+	// resumedWorkStale: the checkpoint names another branch or another commit,
+	// so it is no evidence about this run's push and the push must run.
+	resumedWorkStale resumedWork = "stale"
+	// resumedWorkPushed: the checkpoint names this commit, so the push belongs
+	// to an earlier run of this session.
+	resumedWorkPushed resumedWork = "pushed"
+	// resumedWorkLanded: the commit is on the run's merge target, so the work
+	// was submitted and the merge deleted origin/<branch> — there is nothing
+	// left to submit.
+	resumedWorkLanded resumedWork = "landed"
+)
+
+// landedOnTargetGit is the single query classifyResumedPush asks, so a test can
+// answer it without a remote.
+type landedOnTargetGit interface {
+	CommitLandedOnTarget(remote, target, commit string) bool
+}
+
+// classifyResumedPush decides what a push checkpoint on a re-invoked gt done
+// means for the branch the run is about to push.
+//
+// The landed case exists because the merge that lands a branch deletes it from
+// origin: a re-run of gt done the checkpoint then matches would push the branch
+// back and read the missing ref as an unlanded push, reporting pushFailed for a
+// submission that completed (gt-mik3). A commit on the target is proof of the
+// opposite, so it is asked only once the checkpoint has named this commit —
+// a stale checkpoint says nothing about where the work is.
+func classifyResumedPush(g landedOnTargetGit, remote, target, checkpoint, branch, sha string) resumedWork {
+	if !pushedCheckpointMatches(checkpoint, branch, sha) {
+		return resumedWorkStale
+	}
+	if g.CommitLandedOnTarget(remote, target, sha) {
+		return resumedWorkLanded
+	}
+	return resumedWorkPushed
 }
 
 // readDoneCheckpoints reads all done-cp:* labels from the agent bead.
