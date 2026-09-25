@@ -26,10 +26,17 @@ const (
 	// that a wedged Dolt does not strand the patrol.
 	mayorDispatchTimeout = 2 * time.Minute
 
-	// mayorNudgeTimeout bounds `gt nudge`. Its own wait-idle mode falls back to
-	// queueing after 15s, so this is the subprocess's startup and teardown
-	// budget, not a second delivery window.
-	mayorNudgeTimeout = 60 * time.Second
+	// mayorNudgeTimeout bounds `gt nudge`. Its default wait-idle mode does not
+	// return the instant it queues: it polls for idle up to waitIdleTimeout
+	// (15s), and on timeout queues *and then watches synchronously* for up to
+	// idleWatcherTimeout (60s) more before giving up (internal/cmd/nudge.go).
+	// A 60s bound here killed that watch mid-flight — cmd.Run's error read
+	// back as "signal: killed: Watching hq-mayor for idle" — which reported a
+	// nudge that had already queued as a hard failure instead of letting the
+	// watcher either deliver it or leave it for the next drain (gt-8hi4w,
+	// same shape as the seat-refill plugin's own bound, gt-hen4o). 90s covers
+	// 15s+60s with slack.
+	mayorNudgeTimeout = 90 * time.Second
 )
 
 // MayorDispatchConfig holds configuration for the mayor_dispatch patrol.

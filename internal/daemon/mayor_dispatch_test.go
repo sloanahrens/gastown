@@ -33,6 +33,22 @@ func TestMayorDispatchInterval(t *testing.T) {
 	}
 }
 
+// gt nudge's default wait-idle mode polls for idle up to 15s, then on timeout
+// queues *and* watches synchronously for up to 60s more before returning
+// (internal/cmd/nudge.go waitIdleTimeout, idleWatcherTimeout). A daemon bound
+// at or under that 75s budget kills the subprocess mid-watch — cmd.Run's error
+// reads back as "signal: killed: Watching <target> for idle" — and reports a
+// nudge that had already queued as a hard failure instead of letting the
+// watcher finish (gt-8hi4w, same shape as the seat-refill plugin's own bound,
+// gt-hen4o).
+func TestMayorNudgeTimeoutExceedsWaitIdleBudget(t *testing.T) {
+	const waitIdleBudget = 15*time.Second + 60*time.Second
+	if mayorNudgeTimeout <= waitIdleBudget {
+		t.Fatalf("mayorNudgeTimeout (%s) must exceed gt nudge's own wait-idle budget (%s)",
+			mayorNudgeTimeout, waitIdleBudget)
+	}
+}
+
 func TestIsPatrolEnabled_MayorDispatchDefaultsOn(t *testing.T) {
 	// Default-ON is the point of this patrol: the failure it exists for is
 	// silence on a town whose config says nothing about dispatch.
