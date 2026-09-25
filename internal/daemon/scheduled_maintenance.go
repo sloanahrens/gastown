@@ -220,28 +220,40 @@ func parseWindowTime(window string) (hour, minute int, err error) {
 	return hour, minute, nil
 }
 
-// isInMaintenanceWindow checks if the given time falls within the maintenance window.
-// The window is 1 hour starting at the configured HH:MM.
-func isInMaintenanceWindow(now time.Time, window string) bool {
+// maintenanceWindowLength is how long the maintenance window stays open after
+// its configured HH:MM start.
+const maintenanceWindowLength = time.Hour
+
+// maintenanceWindowBounds returns the start and end of the window on now's
+// day. Both isInMaintenanceWindow and maintenanceWindowEnd derive from it, so
+// the deferral streak can never disagree with the window it counts.
+func maintenanceWindowBounds(now time.Time, window string) (start, end time.Time, err error) {
 	hour, minute, err := parseWindowTime(window)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	start = time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+	return start, start.Add(maintenanceWindowLength), nil
+}
+
+// isInMaintenanceWindow checks if the given time falls within the maintenance
+// window: maintenanceWindowLength starting at the configured HH:MM.
+func isInMaintenanceWindow(now time.Time, window string) bool {
+	start, end, err := maintenanceWindowBounds(now, window)
 	if err != nil {
 		return false
 	}
-
-	windowStart := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
-	windowEnd := windowStart.Add(1 * time.Hour)
-
-	return !now.Before(windowStart) && now.Before(windowEnd)
+	return !now.Before(start) && now.Before(end)
 }
 
-// maintenanceWindowEnd returns when the window containing now closes (the
-// window is one hour from its HH:MM start). Only meaningful in-window.
+// maintenanceWindowEnd returns when the window containing now closes. Only
+// meaningful in-window.
 func maintenanceWindowEnd(now time.Time, window string) time.Time {
-	hour, minute, err := parseWindowTime(window)
+	_, end, err := maintenanceWindowBounds(now, window)
 	if err != nil {
 		return now
 	}
-	return time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()).Add(time.Hour)
+	return end
 }
 
 // shouldRunMaintenance checks if maintenance should run based on the interval
