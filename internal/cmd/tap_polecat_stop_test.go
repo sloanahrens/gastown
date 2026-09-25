@@ -292,6 +292,18 @@ func TestPolecatStopVerificationArgv(t *testing.T) {
 			expect: true,
 		},
 		{
+			name:   "bare go vet from the polecat completion protocol",
+			argv:   "go vet ./...",
+			want:   "go vet",
+			expect: true,
+		},
+		{
+			name:   "go vet at the absolute path it was exec'd with",
+			argv:   "/usr/local/go/bin/go vet ./internal/cmd/...",
+			want:   "go vet",
+			expect: true,
+		},
+		{
 			name:   "go test behind an env prefix the formula uses",
 			argv:   "gt slot run --role gastown/diamond -- env GT_TEST_DOCKER=1 go test ./internal/beads/",
 			want:   "gt slot run",

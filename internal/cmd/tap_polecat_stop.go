@@ -513,12 +513,27 @@ func polecatStopVerificationArgv(argv string, gates []stopCheckGate) (string, bo
 		}
 	}
 	// A rig whose config names no gate, or names its suite some other way,
-	// must not silence the check: a bare `go test` is a suite however the rig
-	// spells its test command.
-	if findInvocation(tokens, "go", "test") >= 0 {
-		return "go test", true
+	// must not silence the check: these invocations are a live suite however
+	// the rig spells its own gate commands. "go vet" is the concrete gap
+	// this list closes — the polecat completion protocol runs "go test ./...
+	// && go vet ./..." as the Go quality gate, but only "go test" was
+	// recognized here, so a bare go vet in the pane read as an idle polecat
+	// mid-vet (gt-jn89).
+	for _, gate := range commonBareVerificationInvocations {
+		if stopCheckGateMatches(tokens, gate) {
+			return strings.TrimSpace(gate.Program + " " + gate.Target), true
+		}
 	}
 	return "", false
+}
+
+// commonBareVerificationInvocations are verification commands recognized in
+// a polecat's pane even when the rig's own gate config doesn't name them —
+// commands a polecat runs bare as part of its own quality-gate habits
+// regardless of what the rig configured for test/lint/build.
+var commonBareVerificationInvocations = []stopCheckGate{
+	{Program: "go", Target: "test"},
+	{Program: "go", Target: "vet"},
 }
 
 // stopCheckInvocationTokens reduces argv to the tokens the invocation
