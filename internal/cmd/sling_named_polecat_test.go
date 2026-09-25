@@ -57,7 +57,7 @@ func (f *namedSlingFake) AllocateAndAdd(opts polecat.AddOptions) (string, *polec
 	return f.allocatedAs, &polecat.Polecat{Name: f.allocatedAs}, nil
 }
 
-func (f *namedSlingFake) AddWithOptions(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
+func (f *namedSlingFake) AddNamedWithOptions(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
 	f.addNames = append(f.addNames, name)
 	return &polecat.Polecat{Name: name}, nil
 }
@@ -144,6 +144,9 @@ func TestNamedSling_RefusesIneligibleNamedPolecat(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := newNamedSlingFake(t)
 			fake.reuseErr["garnet"] = fmt.Errorf("%w: %s", polecat.ErrPolecatNeedsRecovery, tt.reason)
+			if tt.name == "parked" {
+				fake.reuseErr["garnet"] = fmt.Errorf("%w: %w: %s", polecat.ErrPolecatNeedsRecovery, polecat.ErrPolecatParked, tt.reason)
+			}
 
 			info, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "garnet", HookBead: "gt-0cp3", Create: true})
 			if err == nil {
@@ -268,7 +271,7 @@ func TestAllocatePolecatForSling_NamedCreateRaceRefuses(t *testing.T) {
 
 type namedSlingAddErrFake struct{ *namedSlingFake }
 
-func (f *namedSlingAddErrFake) AddWithOptions(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
+func (f *namedSlingAddErrFake) AddNamedWithOptions(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
 	return nil, polecat.ErrPolecatExists
 }
 
@@ -318,5 +321,197 @@ func TestResolveTarget_DeadNamedPolecatKeepsItsName(t *testing.T) {
 				t.Fatalf("Agent = %q", res.Agent)
 			}
 		})
+	}
+}
+
+// TestNamedPolecatRefusal_HintPerCause: the refusal's hint must fit the
+// cause. A parked polecat is resumed with gt agent resume; a polecat already
+// holding the slung bead resumes that session; any other refusal must not
+// suggest hooking the new bead onto a polecat that holds other work.
+func TestNamedPolecatRefusal_HintPerCause(t *testing.T) {
+	needsRecovery := func(reason string) error {
+		return fmt.Errorf("%w: %s", polecat.ErrPolecatNeedsRecovery, reason)
+	}
+	for _, tt := range []struct {
+		name      string
+		heldIssue string
+		err       error
+		want      []string
+		notWant   []string
+	}{
+		{
+			name:    "parked",
+			err:     fmt.Errorf("%w: %w: parked (operator parked)", polecat.ErrPolecatNeedsRecovery, polecat.ErrPolecatParked),
+			want:    []string{"gt agent resume rig/garnet", "gt sling gt-new rig/garnet", "gt sling gt-new rig"},
+			notWant: []string{"gt session start"},
+		},
+		{
+			name:      "holds the slung bead",
+			heldIssue: "gt-new",
+			err:       needsRecovery("unpushed commits"),
+			want:      []string{"gt session start rig/garnet --issue gt-new"},
+			notWant:   []string{"gt agent resume"},
+		},
+		{
+			name:      "holds other work",
+			heldIssue: "gt-other",
+			err:       needsRecovery("unpushed commits"),
+			want:      []string{"It holds gt-other", "gt polecat check-recovery rig/garnet", "gt sling gt-new rig"},
+			notWant:   []string{"gt session start", "--issue gt-new", "gt agent resume"},
+		},
+		{
+			name:    "busy",
+			err:     needsRecovery("not-idle"),
+			want:    []string{"gt polecat check-recovery rig/garnet"},
+			notWant: []string{"gt session start", "gt agent resume"},
+		},
+		{
+			name:    "broken worktree",
+			err:     errors.New("idle polecat worktree not found at /x: no such file"),
+			want:    []string{"gt polecat check-recovery rig/garnet"},
+			notWant: []string{"gt session start", "gt agent resume"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := namedPolecatRefusal("rig", "garnet", "gt-new", tt.heldIssue, tt.err).Error()
+			for _, w := range tt.want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("refusal lacks %q:\n%s", w, msg)
+				}
+			}
+			for _, nw := range tt.notWant {
+				if strings.Contains(msg, nw) {
+					t.Errorf("refusal must not contain %q:\n%s", nw, msg)
+				}
+			}
+			if strings.Count(msg, "rig/garnet cannot take") != 1 {
+				t.Errorf("polecat named more than once in the headline:\n%s", msg)
+			}
+		})
+	}
+}
+
+// TestNamedSling_HeldIssueReachesTheHint: the reuse path reads the named
+// polecat's current work and hands it to the refusal.
+func TestNamedSling_HeldIssueReachesTheHint(t *testing.T) {
+	fake := newNamedSlingFake(t)
+	fake.polecats["garnet"].Issue = "gt-0cp3"
+	fake.reuseErr["garnet"] = fmt.Errorf("%w: unpushed commits", polecat.ErrPolecatNeedsRecovery)
+
+	_, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "garnet", HookBead: "gt-0cp3"})
+	if err == nil || !strings.Contains(err.Error(), "gt session start rig/garnet --issue gt-0cp3") {
+		t.Fatalf("refusal for garnet's own bead does not offer to resume it: %v", err)
+	}
+}
+
+// TestResolveTarget_NamedPolecatTargetRefusals covers targets that must not
+// reach the spawn: a malformed or empty name (which would otherwise fall back
+// to the pool), and the <rig>/<name> shorthand without --create, which stays
+// a resolve error as before.
+func TestResolveTarget_NamedPolecatTargetRefusals(t *testing.T) {
+	for _, tt := range []struct {
+		target string
+		create bool
+		want   string
+	}{
+		{"gastown/polecats/", true, "invalid polecat name"},
+		{"gastown/polecats/", false, "invalid polecat name"},
+		{"gastown/polecats/..", true, "invalid polecat name"},
+		{"gastown/polecats/garnet/extra", true, "invalid polecat target"},
+		{"gastown/garnet", false, "resolving target"},
+	} {
+		t.Run(fmt.Sprintf("%s create=%v", tt.target, tt.create), func(t *testing.T) {
+			townRoot := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			prevResolve := resolveTargetAgentFn
+			prevSpawn := spawnPolecatForSling
+			t.Cleanup(func() {
+				resolveTargetAgentFn = prevResolve
+				spawnPolecatForSling = prevSpawn
+			})
+			resolveTargetAgentFn = func(string) (string, string, string, error) {
+				return "", "", "", errors.New("no session")
+			}
+			spawned := false
+			spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				spawned = true
+				return nil, errors.New("unexpected spawn")
+			}
+
+			_, err := resolveTarget(tt.target, ResolveTargetOptions{Create: tt.create, NoBoot: true, TownRoot: townRoot})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v; want it to contain %q", err, tt.want)
+			}
+			if spawned {
+				t.Fatal("spawn was called for a target that must be refused")
+			}
+		})
+	}
+}
+
+// TestResolveTarget_NamedRefusalNotDoubled: resolveTarget's wrap must not
+// repeat the polecat the refusal already names.
+func TestResolveTarget_NamedRefusalNotDoubled(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prevResolve := resolveTargetAgentFn
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() {
+		resolveTargetAgentFn = prevResolve
+		spawnPolecatForSling = prevSpawn
+	})
+	resolveTargetAgentFn = func(string) (string, string, string, error) {
+		return "", "", "", errors.New("no session")
+	}
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		return nil, namedPolecatRefusal(rigName, opts.Name, "gt-new", "",
+			fmt.Errorf("%w: not-idle", polecat.ErrPolecatNeedsRecovery))
+	}
+
+	_, err := resolveTarget("gastown/polecats/garnet", ResolveTargetOptions{NoBoot: true, TownRoot: townRoot})
+	if err == nil {
+		t.Fatal("expected the refusal")
+	}
+	if strings.Count(strings.SplitN(err.Error(), "\n", 2)[0], "garnet") != 1 {
+		t.Fatalf("first line names the polecat more than once: %q", strings.SplitN(err.Error(), "\n", 2)[0])
+	}
+}
+
+// brokenIdleReclaimerFake records whether the pre-allocation reclaim sweep ran.
+type brokenIdleReclaimerFake struct {
+	listCalls int
+	reclaimed []string
+	polecats  []*polecat.Polecat
+}
+
+func (f *brokenIdleReclaimerFake) List() ([]*polecat.Polecat, error) {
+	f.listCalls++
+	return f.polecats, nil
+}
+
+func (f *brokenIdleReclaimerFake) ReclaimBrokenIdlePolecat(name string) error {
+	f.reclaimed = append(f.reclaimed, name)
+	return nil
+}
+
+// TestReclaimBrokenIdleUnlessNamed: a named sling must not sweep other
+// polecats; a rig sling still does.
+func TestReclaimBrokenIdleUnlessNamed(t *testing.T) {
+	broken := &polecat.Polecat{Name: "agate", State: polecat.StateIdle, ClonePath: filepath.Join(t.TempDir(), "gone")}
+
+	named := &brokenIdleReclaimerFake{polecats: []*polecat.Polecat{broken}}
+	reclaimBrokenIdleUnlessNamed(named, SlingSpawnOptions{Name: "garnet"})
+	if named.listCalls != 0 || len(named.reclaimed) != 0 {
+		t.Fatalf("named sling swept the pool: list=%d reclaimed=%v", named.listCalls, named.reclaimed)
+	}
+
+	rigSling := &brokenIdleReclaimerFake{polecats: []*polecat.Polecat{broken}}
+	reclaimBrokenIdleUnlessNamed(rigSling, SlingSpawnOptions{})
+	if rigSling.listCalls != 1 || len(rigSling.reclaimed) != 1 || rigSling.reclaimed[0] != "agate" {
+		t.Fatalf("rig sling did not sweep: list=%d reclaimed=%v", rigSling.listCalls, rigSling.reclaimed)
 	}
 }

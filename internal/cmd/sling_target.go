@@ -283,7 +283,10 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 					return nil, err
 				}
 			}
-			polecatName := missingPolecatTargetName(target)
+			polecatName, nameErr := missingPolecatTargetName(target)
+			if nameErr != nil {
+				return nil, nameErr
+			}
 			fmt.Printf("Target polecat %s/%s has no active session; using that polecat (reuse, or create with --create)...\n", rigName, polecatName)
 			spawnOpts := SlingSpawnOptions{
 				Name:          polecatName,
@@ -299,7 +302,8 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			}
 			spawnInfo, spawnErr := spawnPolecatForSling(rigName, spawnOpts)
 			if spawnErr != nil {
-				return nil, fmt.Errorf("spawning named polecat %s/%s: %w", rigName, polecatName, spawnErr)
+				// The named refusal already names the polecat.
+				return nil, fmt.Errorf("spawning polecat: %w", spawnErr)
 			}
 			result.Agent = spawnInfo.AgentID()
 			result.NewPolecatInfo = spawnInfo
@@ -336,13 +340,24 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 // missingPolecatTargetName returns the polecat a target that
 // missingPolecatTargetRig accepted names: <rig>/polecats/<name> or the
 // <rig>/<name> shorthand. The spawn must use exactly this polecat
-// (gt-2w4f9).
-func missingPolecatTargetName(target string) string {
+// (gt-2w4f9). A malformed name is refused here: an empty one (a trailing
+// "polecats/") would otherwise fall through to the pool — the very
+// substitution a named target exists to prevent. Character rules for a new
+// name are ValidatePoolName's, applied by AddNamedWithOptions under --create;
+// an existing polecat is reused under whatever name its directory has.
+func missingPolecatTargetName(target string) (string, error) {
 	parts := strings.Split(target, "/")
+	name := parts[len(parts)-1]
 	if isPolecatTarget(target) {
-		return parts[2]
+		if len(parts) != 3 {
+			return "", fmt.Errorf("invalid polecat target %q: want <rig>/polecats/<name>", target)
+		}
+		name = parts[2]
 	}
-	return parts[len(parts)-1]
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("invalid polecat name %q in target %q; not substituting another polecat", name, target)
+	}
+	return name, nil
 }
 
 func missingPolecatTargetRig(target string, allowShorthand bool, townRoot string) (string, bool) {

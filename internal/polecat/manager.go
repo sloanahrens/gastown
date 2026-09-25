@@ -746,6 +746,68 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 	return name, p, nil
 }
 
+// afterNamedPolecatReserved is a test seam: it runs once AddNamedWithOptions
+// has reserved the name and released the pool lock, before the worktree is
+// built — the window a concurrent allocation would otherwise race into.
+var afterNamedPolecatReserved = func(name string) {}
+
+// AddNamedWithOptions creates a polecat by an operator-chosen name (gt sling
+// <bead> <rig>/<name> --create, gt-2w4f9). It reserves the name the way
+// AllocateAndAdd does — directory created under the pool lock — so a
+// concurrent AllocateAndAdd cannot be handed the same name mid-build and tear
+// the new polecat down on its own error path. The name must pass
+// ValidatePoolName; an existing polecat of that name is ErrPolecatExists.
+func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, error) {
+	if err := ValidatePoolName(name); err != nil {
+		return nil, fmt.Errorf("invalid polecat name: %w", err)
+	}
+
+	poolLock, err := m.lockPool()
+	if err != nil {
+		return nil, err
+	}
+	if m.exists(name) {
+		_ = poolLock.Unlock()
+		return nil, ErrPolecatExists
+	}
+	polecatLock, err := m.lockPolecat(name)
+	if err != nil {
+		_ = poolLock.Unlock()
+		return nil, err
+	}
+	// Re-check under the polecat lock: a holder that created it in between.
+	if m.exists(name) {
+		_ = polecatLock.Unlock()
+		_ = poolLock.Unlock()
+		return nil, ErrPolecatExists
+	}
+	polecatDir := m.polecatDir(name)
+	if err := os.MkdirAll(polecatDir, 0755); err != nil {
+		_ = polecatLock.Unlock()
+		_ = poolLock.Unlock()
+		return nil, fmt.Errorf("creating polecat dir: %w", err)
+	}
+	m.namePool.MarkInUse(name)
+	_ = m.namePool.Save() // the directory is the reservation; the pool file is a cache
+
+	// Same fresh-incarnation hygiene as AllocateAndAdd (gt-pqf9x, gt-5mkr).
+	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
+	if m.tmux != nil {
+		if alive, _ := m.tmux.HasSession(sessionName); alive {
+			_ = m.tmux.KillSessionWithProcesses(sessionName)
+		}
+	}
+	RemoveSessionHeartbeat(m.townRoot, sessionName)
+
+	// The directory now reserves the name: reconcilePoolInternal sees it.
+	_ = poolLock.Unlock()
+	afterNamedPolecatReserved(name)
+
+	p, err := m.addWithOptionsLocked(name, opts, polecatDir)
+	_ = polecatLock.Unlock()
+	return p, err
+}
+
 // addWithOptionsLocked performs the expensive parts of polecat creation
 // (worktree, beads, settings) after the directory has been created.
 // Caller MUST hold the polecat lock and have already created polecatDir.
