@@ -600,6 +600,14 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	}
 	requireUngatedGuardCommand(t, "witness", witness, "tap guard patrol-loop")
 	requireUngatedGuardCommand(t, "witness", witness, "tap guard pr-workflow")
+	// dangerous-command carries the witness-never-pushes rule
+	// (matchesWitnessGitPush, gt-v89d). It comes from DefaultBase, not a
+	// witness-specific override, so a future edit to the witness override
+	// that replaced rather than unioned its Bash entry — or dropped
+	// dangerous-command from DefaultBase — would silently disable that rule
+	// while every test above kept passing (gt-8ki9: an om review found the
+	// guard missing with no test catching it).
+	requireUngatedGuardCommand(t, "witness", witness, "tap guard dangerous-command")
 	if len(witness.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected witness to inherit SessionStart from DefaultBase")
 	}
@@ -613,6 +621,7 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	}
 	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard patrol-loop")
 	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard pr-workflow")
+	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard dangerous-command")
 	if len(deacon.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected deacon to inherit SessionStart from DefaultBase")
 	}
@@ -624,6 +633,7 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	}
 	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard patrol-loop")
 	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard pr-workflow")
+	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard dangerous-command")
 	if len(refinery.SessionStart) != len(defaultBase.SessionStart) {
 		t.Error("expected refinery to inherit SessionStart from DefaultBase")
 	}
