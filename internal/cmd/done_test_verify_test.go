@@ -120,8 +120,7 @@ func stubGoBuildWholeModule(t *testing.T, err error) {
 
 // deletePkgb commits the removal of every file in the test repo's pkgb — a
 // whole-package deletion, the diff shape gt-ytjh opened. It lives here (not in
-// verify_integration_test.go) because both the unit and the integration test
-// files need it, and the integration file only compiles with -tags integration.
+// verify_integration_test.go) because both test files need it.
 func deletePkgb(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.RemoveAll(filepath.Join(dir, "pkgb")); err != nil {
@@ -428,10 +427,8 @@ func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
 // the failing gate's name and exit code and drops it, and the refinery's gate
 // buffers each attempt separately. The sibling shapes in
 // done_test_verify_lint_test.go cannot catch the offset going wrong (each
-// prints the marker on every attempt, or runs a single attempt), and they are
-// behind the integration tag, which `make test` does not pass. This test needs
-// no real suite run — the lint refuses first — so it runs in the gate the merge
-// queue runs.
+// prints the marker on every attempt, or runs a single attempt). This test
+// needs no real suite run — the lint refuses first.
 //
 // Serial because stubLintLockRetryDelay swaps lintlock's retry schedule and
 // restores it (gt-k317).
