@@ -3,6 +3,7 @@ package polecat
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -134,5 +135,46 @@ func TestReuseIdlePolecat_RefusesParkedPolecat(t *testing.T) {
 	}
 	if branchAfter != branchBefore {
 		t.Fatalf("parked polecat re-branched %q -> %q", branchBefore, branchAfter)
+	}
+}
+
+// TestReuseIdlePolecat_ParkedRefusalIsDistinguishable: callers tell a park
+// apart from other recovery refusals (the named sling hints `gt agent resume`
+// for it), while ErrPolecatNeedsRecovery still matches so the unnamed sling
+// keeps allocating a new polecat.
+func TestReuseIdlePolecat_ParkedRefusalIsDistinguishable(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+	addCleanIdlePolecat(t, mgr, "alpha")
+	parkPolecat(t, mgr, "alpha")
+
+	_, err := mgr.ReuseIdlePolecat("alpha", AddOptions{HookBead: "gt-next"})
+	if !errors.Is(err, ErrPolecatParked) {
+		t.Fatalf("err = %v; want ErrPolecatParked", err)
+	}
+	if !errors.Is(err, ErrPolecatNeedsRecovery) {
+		t.Fatalf("err = %v; want it to still match ErrPolecatNeedsRecovery", err)
+	}
+}
+
+// TestParkedReuseBlocker_UnreadableMarkerSurfacesTheError: a corrupt marker
+// still blocks reuse (fail closed), but the refusal says the marker could not
+// be read instead of passing for an ordinary park.
+func TestParkedReuseBlocker_UnreadableMarkerSurfacesTheError(t *testing.T) {
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+	addCleanIdlePolecat(t, mgr, "alpha")
+	path := agentpause.FilePath(mgr.townRoot, mgr.rig.Name, constants.RolePolecat, "alpha")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := mgr.ReuseDecisionForPolecat("alpha", StateIdle)
+	if d.Reusable {
+		t.Fatal("polecat with a corrupt pause marker reported reusable; PauseGate must fail closed")
+	}
+	if !strings.Contains(d.Reason, "pause marker unreadable") || !strings.Contains(d.Reason, path) {
+		t.Fatalf("reason = %q; want it to say the marker is unreadable and name %s", d.Reason, path)
 	}
 }

@@ -6,6 +6,12 @@ import "errors"
 // or advertised as reusable until its preserved work is recovered or submitted.
 var ErrPolecatNeedsRecovery = errors.New("polecat needs recovery before reuse")
 
+// ErrPolecatParked marks a reuse refused because the polecat carries an
+// agentpause marker (gt-0r29l). ReuseIdlePolecat wraps it together with
+// ErrPolecatNeedsRecovery, so callers that only care "allocate elsewhere"
+// keep working while a named sling can tell the operator to resume the park.
+var ErrPolecatParked = errors.New("polecat is parked")
+
 // SlotReuseInput is the shared input for deciding whether a polecat slot can be
 // advertised as open and destructively reused for new work. It carries raw
 // facts, not a pre-resolved IgnoreCleanupStatus — see DecideSlotReuse.

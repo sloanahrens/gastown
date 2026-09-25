@@ -1805,7 +1805,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// A parked polecat is refused before anything below touches it — the
 	// idle-session kill included (gt-0r29l).
 	if reason, parked := m.parkedReuseBlocker(name); parked {
-		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, reason)
+		return nil, fmt.Errorf("%w: %w: %s", ErrPolecatNeedsRecovery, ErrPolecatParked, reason)
 	}
 	current, err := m.loadFromBeads(name, nil)
 	if err != nil {
@@ -2398,11 +2398,16 @@ func (m *Manager) FindIdlePolecat() (*Polecat, error) {
 // slot is never handed new work: its marker mutes every crash scanner, so a
 // reused session would run unwatched (gt-0r29l). Reuse never clears the
 // marker — undoing an operator's park is for gt session start / gt agent
-// resume. PauseGate fails closed, so an unreadable marker also blocks reuse.
+// resume. PauseGate fails closed, so an unreadable marker also blocks reuse,
+// and the reason then carries the read error so a corrupt marker file is not
+// mistaken for an operator's park.
 func (m *Manager) parkedReuseBlocker(name string) (string, bool) {
-	paused, st, _ := agentpause.PauseGate(m.townRoot, m.rig.Name, constants.RolePolecat, name)
+	paused, st, err := agentpause.PauseGate(m.townRoot, m.rig.Name, constants.RolePolecat, name)
 	if !paused {
 		return "", false
+	}
+	if err != nil {
+		return "parked (pause marker unreadable: " + err.Error() + ")", true
 	}
 	return "parked (" + agentpause.Reason(st) + ")", true
 }
