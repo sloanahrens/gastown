@@ -283,8 +283,10 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 					return nil, err
 				}
 			}
-			fmt.Printf("Target polecat has no active session, spawning fresh polecat in rig '%s'...\n", rigName)
+			polecatName := missingPolecatTargetName(target)
+			fmt.Printf("Target polecat %s/%s has no active session; using that polecat (reuse, or create with --create)...\n", rigName, polecatName)
 			spawnOpts := SlingSpawnOptions{
+				Name:          polecatName,
 				TownRoot:      opts.TownRoot,
 				Force:         opts.Force,
 				Account:       opts.Account,
@@ -297,7 +299,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			}
 			spawnInfo, spawnErr := spawnPolecatForSling(rigName, spawnOpts)
 			if spawnErr != nil {
-				return nil, fmt.Errorf("spawning polecat to replace dead polecat: %w", spawnErr)
+				return nil, fmt.Errorf("spawning named polecat %s/%s: %w", rigName, polecatName, spawnErr)
 			}
 			result.Agent = spawnInfo.AgentID()
 			result.NewPolecatInfo = spawnInfo
@@ -329,6 +331,18 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		result.IsSelfSling = true
 	}
 	return result, nil
+}
+
+// missingPolecatTargetName returns the polecat a target that
+// missingPolecatTargetRig accepted names: <rig>/polecats/<name> or the
+// <rig>/<name> shorthand. The spawn must use exactly this polecat
+// (gt-2w4f9).
+func missingPolecatTargetName(target string) string {
+	parts := strings.Split(target, "/")
+	if isPolecatTarget(target) {
+		return parts[2]
+	}
+	return parts[len(parts)-1]
 }
 
 func missingPolecatTargetRig(target string, allowShorthand bool, townRoot string) (string, bool) {
