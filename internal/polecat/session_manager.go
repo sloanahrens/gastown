@@ -388,24 +388,15 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		}
 	}
 
-	// Resolve runtime config for the agent that will actually run in this session.
-	// When an explicit --agent override is provided (e.g., "codex"), use it to resolve
-	// the correct agent config. Without this, ResolveRoleAgentConfig returns the default
-	// role agent (usually Claude), causing WaitForRuntimeReady to poll for the wrong
-	// prompt prefix and all fallback/nudge logic to use incorrect agent capabilities.
-	// This was the root cause of gt-1j3m: Codex polecats sat idle because the startup
-	// sequence used Claude's ReadyPromptPrefix ("❯ ") to detect readiness in a Codex
-	// session, timing out instead of using Codex's delay-based readiness.
+	// Resolve through the role-aware resolver so --settings and
+	// --append-system-prompt-file are both attached (gt-lpb0).
+	// An explicit --agent override still resolves that agent's own config
+	// rather than the default role agent, so WaitForRuntimeReady polls with
+	// the right readiness strategy for the agent that actually starts (gt-1j3m).
 	townRoot := filepath.Dir(m.rig.Path)
-	var runtimeConfig *config.RuntimeConfig
-	if opts.Agent != "" {
-		rc, _, err := config.ResolveAgentConfigWithOverride(townRoot, m.rig.Path, opts.Agent)
-		if err != nil {
-			return fmt.Errorf("resolving agent config for %s: %w", opts.Agent, err)
-		}
-		runtimeConfig = rc
-	} else {
-		runtimeConfig = config.ResolveRoleAgentConfig("polecat", townRoot, m.rig.Path)
+	runtimeConfig, err := config.ResolveRoleAgentConfigWithOverride("polecat", townRoot, m.rig.Path, opts.Agent, polecat)
+	if err != nil {
+		return fmt.Errorf("resolving agent config for %s: %w", opts.Agent, err)
 	}
 
 	// Prepare the workspace (settings, folder trust) before the session starts.
