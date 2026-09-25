@@ -34,26 +34,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A search pattern is no longer misread as a scan root** (gt-yts7) —
   `matchesUnboundedScan` resolved every non-flag argument against cwd, so
-  `grep -rn polecats ./settings` run from a rig root — which holds a
-  `polecats/` directory — was blocked as a scan of that directory instead of
-  a search inside `./settings`. The guard now locates each scan tool's pattern
-  slot (the value of `grep`/`rg`'s `-e`/`-f`, else the first positional
-  argument, with `rg --files` taking no pattern) and stops reading a *bare
-  relative name* there as a directory. Every spelling that names a path by its
-  form — absolute, `~`/`$HOME`, a glob, or a relative path with a separator or
-  a `.`/`..` segment — is still judged exactly as before, as is every other
-  argument, so the block survives wherever something else names the path the
-  walk starts from: `rg -e TODO <town>` is still blocked, `rg -e TODO
-  polecats` from a rig root is still blocked, and a bare word anywhere but the
-  pattern slot is still a path. A scan with no path argument keeps its old
-  reading (it walks cwd; gt-3e6wa), and nothing the guard blocked for a
-  spelling — `/`, `~`, `$HOME`, a glob, a town path — is spared anywhere,
-  the pattern slot included. A value-taking option's argument is judged as a
-  scan root like any other, so a grammar that is wrong about an option
-  re-blocks rather than spares: the pattern slot lands on that option's value
-  and the pattern it displaced is judged as a path. The one argument a wrong
-  grammar could put in the pattern slot and spare is the value of an option
-  that takes a path the scan walks, so those are all listed (fd's
+  `grep -rn polecats ./settings` run from a rig root, which holds a
+  `polecats/` directory, was blocked as a scan of that directory. The guard
+  now locates each scan tool's pattern slot — the value of `grep`/`rg`'s
+  `-e`/`-f`, else the first positional argument, with `rg --files` taking
+  none — and stops reading a bare relative name there as a directory. Every
+  spelling that names a path by its form (absolute, `~`/`$HOME`, a glob, a
+  token with a separator or a `.`/`..` segment) is still judged exactly as
+  before, at the pattern slot too, as is every other argument: `rg -e TODO
+  <town>` is still blocked, `rg -e TODO polecats` from a rig root is still
+  blocked, and a bare word anywhere but the pattern slot is still a path. A
+  scan with no path argument keeps its old reading (it walks cwd; gt-3e6wa).
+  A value-taking option's argument is judged as a scan root like any other,
+  so a grammar that is wrong about an option re-blocks rather than spares;
+  the values that would be a path the scan walks are all listed (fd's
   `--search-path`, `-C`, `--base-directory`).
 
 - **Boot is no longer killed and respawned on every daemon heartbeat**

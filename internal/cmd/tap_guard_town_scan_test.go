@@ -375,7 +375,7 @@ func TestMatchesUnboundedScanPatternNotRoot(t *testing.T) {
 		// tell that from a path it was about to walk.
 		{"an option's argument that collides with a directory is still a path", "fd --exclude polecats ./settings", true},
 		{"a glob filter's argument that collides", "rg -g polecats ./settings", true},
-		{"a path option's bare-name value", "fd --search-path polecats ./settings", true},
+		{"a path option's bare-name value is a path", "fd --search-path polecats ./settings", true},
 
 		// Blocked — a flag that supplies the pattern makes every positional
 		// argument a path, wherever the flag sits (the gt-yts7 rejection:
