@@ -2629,6 +2629,16 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		}
 	}
 
+	// Step 2.9: Give the hooked work bead back (gt-vm5g4). Without this the
+	// bead stays hooked to a polecat that no longer exists: `gt session restart`
+	// fails with "polecat not found" and the work waits for a witness patrol to
+	// notice. Compare-and-release, so a bead already re-slung elsewhere is left
+	// alone. It runs after the preserve gate (a refused nuke keeps its work) and
+	// before removal, which resets the agent bead itself.
+	if getErr == nil && polecatInfo != nil {
+		nukeReleaseHookedWork(newPolecatWorkReleaserFn(beads.FindTownRoot(r.Path), ""), rigName, polecatInfo)
+	}
+
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)
 	if err := mgr.RemoveWithOptions(polecatName, opts.Force, true, false); err != nil {
 		if errors.Is(err, polecat.ErrPolecatNotFound) {
@@ -2687,6 +2697,21 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	_ = events.LogFeed(events.TypeKill, nukeActorIdentity(), events.KillPayload(rigName, polecatName, reason))
 
 	return nil
+}
+
+// nukeReleaseHookedWork releases the nuked polecat's hooked work bead through
+// the shared compare-and-release helper. The slot is not reset here: the
+// sandbox removal that follows resets the agent bead.
+func nukeReleaseHookedWork(rel polecatWorkReleaser, rigName string, p *polecat.Polecat) workReleaseOutcome {
+	if p == nil || p.Issue == "" {
+		return workReleaseOutcome{}
+	}
+	polecatRig := p.Rig
+	if polecatRig == "" {
+		polecatRig = rigName
+	}
+	agentID := fmt.Sprintf("%s/polecats/%s", polecatRig, p.Name)
+	return releasePolecatWork(rel, agentID, p.Issue, false)
 }
 
 // nukeActorIdentity returns a best-effort identity string for the agent or
