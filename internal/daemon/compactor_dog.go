@@ -180,6 +180,14 @@ func (d *Daemon) triggerCompactorDog() {
 			d.compactorDogRunning = false
 			d.compactorDogMu.Unlock()
 		}()
+		// The cycle's SQL phase shares the read side of doltMaintMu; a gc in
+		// flight skips the cycle without recording it, so the next 15-minute
+		// check runs it.
+		release, ok := d.tryDoltTask("compactor_dog")
+		if !ok {
+			return
+		}
+		defer release()
 		compactorDogCycleFn(d)
 		d.recordCompactorDogRun()
 	}()

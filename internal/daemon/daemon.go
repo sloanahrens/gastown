@@ -199,6 +199,17 @@ type Daemon struct {
 	// failed (0 = none pending). The loop goroutine folds it into
 	// lastMaintenanceRun; a deferred cycle never sets it.
 	maintenanceGCFinishedAt atomic.Int64
+	// maintenanceGCCallStartedAt is the UnixNano start of the dolt_gc call in
+	// flight (0 = none); the Dolt health check defers restarts while it is
+	// set and under timeout (doltRestartHeldForGC).
+	maintenanceGCCallStartedAt atomic.Int64
+	// maintenanceGCOverdueEscalated latches the one overdue-gc escalation per
+	// call.
+	maintenanceGCOverdueEscalated atomic.Bool
+	// doltMaintMu serializes a gc call (write side, TryLock) against the
+	// daemon's own Dolt tasks (read side, TryRLock via tryDoltTask). Nobody
+	// blocks on it; see maintenance_gc_guard.go.
+	doltMaintMu sync.RWMutex
 
 	// compactorDogMu guards the three fields below, and serializes compactor
 	// cycles. Due-ness is evaluated on the loop's tick and on the startup
@@ -585,6 +596,11 @@ func New(config *Config) (*Daemon, error) {
 	d.rigStatusAlert = d.escalateAlert
 	d.rigStatusClear = d.clearAlerts
 	d.checkpointRevertAlert = d.escalateAlert
+
+	// A health-driven Dolt restart waits for an in-flight scheduled gc.
+	if doltServer != nil {
+		doltServer.SetRestartSuppressor(d.doltRestartHeldForGC)
+	}
 
 	return d, nil
 }

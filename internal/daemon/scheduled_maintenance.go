@@ -234,6 +234,16 @@ func isInMaintenanceWindow(now time.Time, window string) bool {
 	return !now.Before(windowStart) && now.Before(windowEnd)
 }
 
+// maintenanceWindowEnd returns when the window containing now closes (the
+// window is one hour from its HH:MM start). Only meaningful in-window.
+func maintenanceWindowEnd(now time.Time, window string) time.Time {
+	hour, minute, err := parseWindowTime(window)
+	if err != nil {
+		return now
+	}
+	return time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()).Add(time.Hour)
+}
+
 // shouldRunMaintenance checks if maintenance should run based on the interval
 // and the last run time. Returns true if enough time has passed since the last run.
 func shouldRunMaintenance(now time.Time, lastRun time.Time, interval string) bool {
@@ -278,6 +288,12 @@ func (d *Daemon) runScheduledMaintenance() {
 
 	now := time.Now()
 
+	// gc mode: count a window that closed with gc still deferred (and escalate
+	// a streak) before anything else, including outside the window.
+	if maintenanceMode(d.patrolConfig) == MaintenanceModeGC && !d.maintenanceGCRunning.Load() {
+		d.closeDeferredGCWindow(now, maintenanceInterval(d.patrolConfig))
+	}
+
 	// Check if we're in the maintenance window.
 	if !isInMaintenanceWindow(now, window) {
 		return // Not in window — silent skip (this fires every 5 minutes)
@@ -304,13 +320,21 @@ func (d *Daemon) runScheduledMaintenance() {
 		if d.maintenanceGCRunning.Load() {
 			return
 		}
-		databases := d.compactorDatabases()
-		if len(databases) == 0 {
-			d.logger.Printf("scheduled_maintenance: no databases found")
+		if external, why := maintenanceGCExternalFn(d); external {
+			// The size trigger reads the server's data dir from this host's
+			// disk; against a remote server it would read the wrong one.
+			d.logger.Printf("scheduled_maintenance: mode=%s skipped: %s — gc mode needs a local server", MaintenanceModeGC, why)
+			d.lastMaintenanceRun = now
 			return
 		}
-		d.logger.Printf("scheduled_maintenance: in window %s, mode=%s", window, MaintenanceModeGC)
-		d.startMaintenanceGC(databases)
+		dataDir := d.maintenanceDataDir()
+		databases, err := maintenanceGCDatabasesFn(dataDir)
+		if err != nil || len(databases) == 0 {
+			d.logger.Printf("scheduled_maintenance: mode=%s: no databases discovered in %s (err=%v)", MaintenanceModeGC, dataDir, err)
+			return
+		}
+		d.logger.Printf("scheduled_maintenance: in window %s, mode=%s, %d database(s) discovered", window, MaintenanceModeGC, len(databases))
+		d.startMaintenanceGC(databases, maintenanceWindowEnd(now, window))
 		if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
 			d.lastMaintenanceRun = time.Unix(0, finished)
 		}

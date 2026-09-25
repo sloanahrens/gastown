@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -236,6 +237,9 @@ type gcFakes struct {
 	quietUntil  int // quiet for this many calls, then busy; -1 = always quiet
 	escalations []string
 	flattens    int
+	pauses      int
+	resumes     int
+	pauseFails  bool
 }
 
 func withGCFakes(t *testing.T) *gcFakes {
@@ -244,6 +248,25 @@ func withGCFakes(t *testing.T) *gcFakes {
 
 	prevSize, prevGC, prevQuiet := maintenanceDBSizeFn, maintenanceGCExecFn, maintenanceQuietFn
 	prevEsc, prevExec, prevDispatch := maintenanceEscalateFn, maintenanceExecFn, maintenanceGCDispatchFn
+	prevDBs, prevExternal, prevPause := maintenanceGCDatabasesFn, maintenanceGCExternalFn, maintenanceConvoyPauseFn
+
+	// Discovery returns the databases the fake sizes know about.
+	maintenanceGCDatabasesFn = func(string) ([]string, error) {
+		var dbs []string
+		for db := range f.sizes {
+			dbs = append(dbs, db)
+		}
+		sort.Strings(dbs)
+		return dbs, nil
+	}
+	maintenanceGCExternalFn = func(*Daemon) (bool, string) { return false, "" }
+	maintenanceConvoyPauseFn = func(*Daemon) (func(), bool) {
+		f.pauses++
+		if f.pauseFails {
+			return nil, false
+		}
+		return func() { f.resumes++ }, true
+	}
 
 	maintenanceDBSizeFn = func(_ string, db string) (int64, error) {
 		s, ok := f.sizes[db]
@@ -282,6 +305,7 @@ func withGCFakes(t *testing.T) *gcFakes {
 	t.Cleanup(func() {
 		maintenanceDBSizeFn, maintenanceGCExecFn, maintenanceQuietFn = prevSize, prevGC, prevQuiet
 		maintenanceEscalateFn, maintenanceExecFn, maintenanceGCDispatchFn = prevEsc, prevExec, prevDispatch
+		maintenanceGCDatabasesFn, maintenanceGCExternalFn, maintenanceConvoyPauseFn = prevDBs, prevExternal, prevPause
 	})
 	return f
 }
@@ -305,8 +329,8 @@ func TestMaintenanceGCCycleCollectsEligibleSmallestFirst(t *testing.T) {
 
 	out := d.maintenanceGCCycle([]string{"gt", "hq", "om", "beads"}, "/unused", testGCPolicy)
 
-	if out != gcOutcomeCompleted {
-		t.Fatalf("outcome = %v, want completed", out)
+	if out.outcome != gcOutcomeCompleted {
+		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq,gt" {
 		t.Errorf("gc calls = %s, want hq,gt (eligible only, smallest first)", got)
@@ -355,8 +379,8 @@ func TestMaintenanceGCCycleRespectsBaseline(t *testing.T) {
 
 	out := d.maintenanceGCCycle([]string{"gt", "hq"}, "/unused", testGCPolicy)
 
-	if out != gcOutcomeCompleted {
-		t.Fatalf("outcome = %v, want completed", out)
+	if out.outcome != gcOutcomeCompleted {
+		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %s, want hq only (gt has not doubled since its last gc)", got)
@@ -368,8 +392,8 @@ func TestMaintenanceGCCycleNothingEligibleSkipsQuietProbe(t *testing.T) {
 	f := withGCFakes(t)
 	f.sizes = map[string]int64{"om": 42 * mib}
 
-	if out := d.maintenanceGCCycle([]string{"om"}, "/unused", testGCPolicy); out != gcOutcomeCompleted {
-		t.Fatalf("outcome = %v, want completed", out)
+	if out := d.maintenanceGCCycle([]string{"om"}, "/unused", testGCPolicy); out.outcome != gcOutcomeCompleted {
+		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
 	if len(f.gcCalls) != 0 || f.quietCalls != 0 {
 		t.Errorf("nothing eligible, yet gc=%v quietCalls=%d", f.gcCalls, f.quietCalls)
@@ -384,8 +408,8 @@ func TestMaintenanceGCCycleDefersWhenNotQuiet(t *testing.T) {
 
 	out := d.maintenanceGCCycle([]string{"hq", "gt", "om"}, "/unused", testGCPolicy)
 
-	if out != gcOutcomeDeferred {
-		t.Fatalf("outcome = %v, want deferred", out)
+	if out.outcome != gcOutcomeDeferred {
+		t.Fatalf("outcome = %v, want deferred", out.outcome)
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %s, want hq only — the run must stop when the town gets busy", got)
@@ -406,8 +430,8 @@ func TestMaintenanceGCCycleStopsAndEscalatesOnceOnError(t *testing.T) {
 
 	out := d.maintenanceGCCycle([]string{"hq", "gt", "om"}, "/unused", testGCPolicy)
 
-	if out != gcOutcomeFailed {
-		t.Fatalf("outcome = %v, want failed", out)
+	if out.outcome != gcOutcomeFailed {
+		t.Fatalf("outcome = %v, want failed", out.outcome)
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq,gt" {
 		t.Errorf("gc calls = %s, want hq,gt — a failure must stop the run", got)
@@ -436,8 +460,8 @@ func TestMaintenanceGCCycleSizeErrorSkipsDatabase(t *testing.T) {
 	f.sizes = map[string]int64{"hq": 300 * mib} // "ghost" has no directory
 
 	out := d.maintenanceGCCycle([]string{"ghost", "hq"}, "/unused", testGCPolicy)
-	if out != gcOutcomeCompleted {
-		t.Fatalf("outcome = %v, want completed", out)
+	if out.outcome != gcOutcomeCompleted {
+		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %s, want hq", got)

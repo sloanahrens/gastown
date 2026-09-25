@@ -102,6 +102,11 @@ func (d *Daemon) pushDoltRemotes() {
 	if !d.isPatrolActive("dolt_remotes") {
 		return
 	}
+	release, ok := d.tryDoltTask("dolt_remotes")
+	if !ok {
+		return
+	}
+	defer release()
 
 	// Need dolt server to be configured for data dir
 	if d.doltServer == nil || !d.doltServer.IsEnabled() {

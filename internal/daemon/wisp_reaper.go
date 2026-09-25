@@ -164,6 +164,11 @@ func (d *Daemon) reapWisps() {
 	if !d.isPatrolActive("wisp_reaper") {
 		return
 	}
+	release, ok := d.tryDoltTask("wisp_reaper")
+	if !ok {
+		return
+	}
+	defer release()
 
 	config := d.patrolConfig.Patrols.WispReaper
 	maxAge := wispReaperMaxAge(d.patrolConfig)

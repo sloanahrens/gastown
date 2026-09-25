@@ -50,6 +50,11 @@ func (d *Daemon) syncDoltBackups() {
 	if !d.isPatrolActive("dolt_backup") {
 		return
 	}
+	release, ok := d.tryDoltTask("dolt_backup")
+	if !ok {
+		return
+	}
+	defer release()
 
 	// Pour molecule for observability (nil-safe — all methods are no-ops on nil).
 	mol := d.pourDogMolecule(constants.MolDogBackup, nil)
