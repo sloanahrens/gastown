@@ -360,9 +360,12 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 
 		// A hold recorded on the bead takes it off this path too: the
 		// continuation feed would sling it with the rig default agent, which is
-		// what a routing label or a keep-off decision forbids (gt-tq6l).
-		if reason := DispatchHoldReason(ctx, store, issue.ID, resolver); reason != "" {
-			logger("%s: convoy %s: %s not dispatched: %s", caller, convoyID, issue.ID, reason)
+		// what a routing label or a keep-off decision forbids (gt-tq6l). A
+		// merge rejection on record holds it as well: a rejected bead is
+		// reopened to exactly the open, unassigned state this loop feeds, and
+		// its redispatch is the deacon's (gt-ghyfx).
+		if hold := FeedHold(ctx, store, issue.ID, resolver); hold.Reason != "" {
+			logger("%s: convoy %s: %s not dispatched: %s", caller, convoyID, issue.ID, hold.Reason)
 			continue
 		}
 

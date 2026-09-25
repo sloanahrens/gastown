@@ -61,11 +61,61 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			// The orphaned-molecule recovery case for the hook status too.
+			name: "hooked unassigned issue treated ready for recovery",
+			in:   trackedIssueInfo{Status: "hooked"},
+			want: true,
+		},
+		{
+			name: "blocked in_progress issue not ready",
+			in:   trackedIssueInfo{Status: "in_progress", Blocked: true},
+			want: false,
+		},
+		// Readiness is an allowlist (gt-t08jn): every status the tracker says
+		// is not ready work stays off the feeders, assigned or not.
+		{
+			name: "blocked-status unassigned issue not ready",
+			in:   trackedIssueInfo{Status: "blocked"},
+			want: false,
+		},
+		{
+			name: "deferred unassigned issue not ready",
+			in:   trackedIssueInfo{Status: "deferred"},
+			want: false,
+		},
+		{
+			name: "pinned unassigned issue not ready",
+			in:   trackedIssueInfo{Status: "pinned"},
+			want: false,
+		},
+		{
+			name: "tombstone issue not ready",
+			in:   trackedIssueInfo{Status: "tombstone"},
+			want: false,
+		},
+		{
+			name: "custom status unassigned issue not ready",
+			in:   trackedIssueInfo{Status: "review"},
+			want: false,
+		},
+		{
+			// Not ready before any session lookup: a frozen status is not
+			// made ready by its holder being gone.
+			name: "deferred assigned issue not ready",
+			in:   trackedIssueInfo{Status: "deferred", Assignee: "gastown/polecats/gone"},
+			want: false,
+		},
+		{
+			name: "scheduled open issue not ready",
+			in:   trackedIssueInfo{ID: "gt-sched", Status: "open"},
+			want: false,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isReadyIssue(tc.in, nil)
+			got := isReadyIssue(tc.in, map[string]bool{"gt-sched": true})
 			if got != tc.want {
 				t.Fatalf("isReadyIssue() = %v, want %v", got, tc.want)
 			}

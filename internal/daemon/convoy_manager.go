@@ -18,9 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -343,7 +341,7 @@ func (m *ConvoyManager) SetAlertHooks(escalate func(key, source, message string)
 // retryMissingStores calls the opener when the store set is not known-complete
 // and its backoff has elapsed, folding whatever opens into the live map. Stores
 // already held are kept and the duplicate handle closed: a retry must not take
-// a handle away from a reader — convoyStatusOf, hasRejectionMarker — that is
+// a handle away from a reader — convoyStatusOf, feedHold — that is
 // mid-call holding it, and re-opening healthy stores every retry would churn
 // connections while Dolt is flaky.
 func (m *ConvoyManager) retryMissingStores(now time.Time) {
@@ -958,7 +956,16 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
-		if verdict := m.hasRejectionMarker(rig, issueID); verdict.IsFail() {
+		// One read of the bead's record answers both hold checks in this loop
+		// (gt-ghyfx): the rejection gate here and the hold check below.
+		hold, haveStore := m.feedHold(rig, issueID)
+		switch {
+		case !haveStore:
+			// No open store for the rig is a town-level gap the store alert
+			// already reports; the scan proceeds as for a clean record, but
+			// says so rather than folding it in silently (gt-udrrw, gt-jj29p).
+			m.logger("Convoy %s: could not confirm rejection-marker state for %s, proceeding as clear: no open store for rig %s", c.ID, issueID, rig)
+		case hold.MergeRejection:
 			// This bead was previously rejected and reopened for recovery
 			// (RECOVERED_BEAD). Redispatch of rejected work belongs solely
 			// to the deacon, which applies cooldown/escalation gating and
@@ -966,12 +973,15 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// to it rather than race it with a fresh sling (gt-qw4u).
 			m.logger("Convoy %s: %s carries a rejection marker, deferring to deacon, skipping", c.ID, issueID)
 			continue
-		} else if verdict.IsUnknown() {
-			// Unreadable is treated the same as a confirmed-clean record here
-			// (see hasRejectionMarker doc), but logged rather than folded in
-			// silently, so the gap is visible instead of indistinguishable
-			// from "checked and fine" (gt-udrrw).
-			m.logger("Convoy %s: could not confirm rejection-marker state for %s, proceeding as clear: %v", c.ID, issueID, verdict.Err())
+		case hold.Unreadable:
+			// A record the store holds but cannot hand back could carry a
+			// rejection, so the bead is held here (fail-closed). The gate
+			// used to proceed as clear and leave the skip to the hold check
+			// below, which failed closed on the same read; the bead was
+			// never fed, but the dead-holder and surviving-branch checks ran
+			// on a record nobody could read (gt-ghyfx).
+			m.logger("Convoy %s: %s not dispatched: %s — cannot rule out a merge rejection (fail-closed)", c.ID, issueID, hold.Reason)
+			continue
 		}
 
 		if assignee := m.issueAssignee(rig, issueID); assignee != "" {
@@ -1001,11 +1011,13 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
-		// A hold is checked after the dead-holder/worktree checks above, which
-		// keep their escalation for a dead holder's unpreserved work: that
-		// warning is worth more than the earlier, quieter skip (gt-tq6l).
-		if reason := m.dispatchHoldReason(rig, issueID); reason != "" {
-			m.logger("Convoy %s: %s not dispatched: %s", c.ID, issueID, reason)
+		// A hold other than a rejection is acted on after the dead-holder/
+		// worktree checks above, which keep their escalation for a dead
+		// holder's unpreserved work: that warning is worth more than the
+		// earlier, quieter skip (gt-tq6l). The record was read once, at the
+		// rejection gate.
+		if hold.Reason != "" {
+			m.logger("Convoy %s: %s not dispatched: %s", c.ID, issueID, hold.Reason)
 			continue
 		}
 
@@ -1182,65 +1194,32 @@ func (m *ConvoyManager) resetOriginBranches() {
 	m.originBranchesMu.Unlock()
 }
 
-// dispatchHoldReason reports why the stranded scan must not re-dispatch
-// issueID, or "" when it may (gt-tq6l). The rule lives in convoy, which the
-// event-driven continuation feed shares; this only picks the rig's store.
+// feedHold reads the hold rule for issueID from its rig's store (gt-tq6l,
+// gt-ghyfx). The rule, merge-rejection marker included, lives in convoy, which
+// the event-driven continuation feed shares; this only picks the rig's store.
+// ok is false when the rig has no open store.
 //
 // A rig with no open store reports no hold, the fail-open posture the sibling
-// issueAssignee and hasRejectionMarker checks keep for the same gap: a store
-// that never opened is a town-level condition, already escalated by the store
-// alert, and blocking dispatch on it would stall every convoy feeding that rig.
-func (m *ConvoyManager) dispatchHoldReason(rig, issueID string) string {
+// issueAssignee check keeps for the same gap: a store that never opened is a
+// town-level condition, already escalated by the store alert, and blocking
+// dispatch on it would stall every convoy feeding that rig. A store that is
+// open but cannot read the record is different: that is an unreadable hold,
+// and the bead is not fed.
+func (m *ConvoyManager) feedHold(rig, issueID string) (hold convoy.Hold, ok bool) {
 	m.storesMu.Lock()
 	store := m.stores[rig]
 	m.storesMu.Unlock()
 	if store == nil {
-		return ""
+		return convoy.Hold{}, false
 	}
-	return convoy.DispatchHoldReason(m.ctx, store, issueID, nil)
-}
-
-// hasRejectionMarker reports whether issueID's notes carry the refinery's
-// merge-rejection marker — Fail when it does (previously rejected and
-// reopened for the deacon's RECOVERED_BEAD recovery flow), Pass when the
-// notes were read and it does not, Unknown when the rig's store isn't
-// available or the record could not be read (gt-udrrw, gt-jj29p). Looks up
-// the issue via the already-open per-rig store (populated at daemon startup
-// alongside "hq"; see openBeadsStores).
-//
-// Unknown is deliberately treated the same as Pass at the call site: a rig
-// whose store never opened (e.g. in tests that only wire "hq", or a rig
-// whose store failed to open) is a town-level condition, already escalated
-// by the store alert, and blocking the stranded scan on it would stall every
-// convoy feeding that rig — the deacon's own gating still applies on any
-// subsequent recovery attempt. The call site now logs the Unknown instead of
-// folding it silently into the same code path as a confirmed-clean record.
-func (m *ConvoyManager) hasRejectionMarker(rig, issueID string) guard.Result {
-	m.storesMu.Lock()
-	store := m.stores[rig]
-	m.storesMu.Unlock()
-	if store == nil {
-		return guard.Unknown(fmt.Errorf("no open store for rig %s", rig))
-	}
-
-	issue, err := store.GetIssue(m.ctx, issueID)
-	if err != nil {
-		return guard.Unknown(fmt.Errorf("reading issue %s: %w", issueID, err))
-	}
-	if issue == nil {
-		return guard.Unknown(fmt.Errorf("issue %s: store returned no record and no error", issueID))
-	}
-	if strings.Contains(issue.Notes, refinery.MergeRejectionNoteMarker) {
-		return guard.Fail("notes carry the refinery merge-rejection marker")
-	}
-	return guard.Pass()
+	return convoy.FeedHold(m.ctx, store, issueID, nil), true
 }
 
 // issueAssignee returns issueID's assignee via the already-open per-rig
 // store, or "" if the store is unavailable, the issue can't be read, or it
 // has no assignee. An empty return is read by callers as "no known previous
-// holder" — the same fail-open posture as hasRejectionMarker, for the same
-// reason: a rig whose store never opened must not block dispatch of issues
+// holder" — the same fail-open posture as feedHold's missing store, for the
+// same reason: a rig whose store never opened must not block dispatch of issues
 // unrelated to that gap.
 func (m *ConvoyManager) issueAssignee(rig, issueID string) string {
 	m.storesMu.Lock()
