@@ -1147,7 +1147,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	hooked = true
 	slingSteps.step("hook")
-	clearOrphanEpisodeLabelsFn(townRoot, beadID)
+	clearOrphanEpisodeLabelsFn(townRoot, beadID, hookWorkDir)
 
 	// The bead is dispatched now, so later dispatches in this process should
 	// see it in the pool even though their snapshot predates this hook.

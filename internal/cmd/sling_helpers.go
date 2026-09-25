@@ -1511,12 +1511,13 @@ var orphanEpisodeLabels = []string{"gt:preserved-orphan", "gt:survival-unknown",
 // orphaning of the same bead must mail and escalate afresh (gt-vm5g4).
 // Best-effort: every bd call is bounded by the beads subprocess timeout, a
 // failure only warns, and a bead carrying none of the labels costs one read
-// and no write.
-func clearOrphanEpisodeLabels(townRoot, beadID string) {
+// and no write. workDir is the hook write's work dir, so an unrouted bead is
+// read from the same database the hook just wrote.
+func clearOrphanEpisodeLabels(townRoot, beadID, workDir string) {
 	if beadID == "" {
 		return
 	}
-	b := beads.New(beads.ResolveHookDir(townRoot, beadID, ""))
+	b := beads.New(beads.ResolveHookDir(townRoot, beadID, workDir))
 	issue, err := b.Show(beadID)
 	if err != nil {
 		fmt.Printf("  %s Could not read %s to clear orphan labels: %v\n", style.Dim.Render("Warning:"), beadID, err)

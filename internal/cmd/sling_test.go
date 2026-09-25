@@ -1972,7 +1972,7 @@ func TestExecuteSlingRawReviewOnlySuccessKeepsMetadata(t *testing.T) {
 	prevClear := clearOrphanEpisodeLabelsFn
 	t.Cleanup(func() { clearOrphanEpisodeLabelsFn = prevClear })
 	var cleared []string
-	clearOrphanEpisodeLabelsFn = func(_ string, beadID string) { cleared = append(cleared, beadID) }
+	clearOrphanEpisodeLabelsFn = func(_, beadID, _ string) { cleared = append(cleared, beadID) }
 
 	result, err := executeSling(SlingParams{
 		BeadID:      "gt-rawrollback",

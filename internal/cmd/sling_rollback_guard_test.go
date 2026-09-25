@@ -278,7 +278,7 @@ func setupRollbackGuardTown(t *testing.T) string {
 		burnSlingWispFn, createAutoConvoyFn, resolveTargetAgentFn = prevBurnWisp, prevConvoy, prevResolveAgent
 		clearOrphanEpisodeLabelsFn = prevClearLabels
 	})
-	clearOrphanEpisodeLabelsFn = func(string, string) {}
+	clearOrphanEpisodeLabelsFn = func(string, string, string) {}
 	burnSlingWispFn = func(string, string) error { return nil }
 	createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) {
 		return "", errors.New("unexpected convoy create")
@@ -571,7 +571,7 @@ func TestRunSlingClearsOrphanEpisodeLabelsOnHook(t *testing.T) {
 			setupRollbackGuardTown(t)
 			_ = recordRollbacks(t)
 			var got []string
-			clearOrphanEpisodeLabelsFn = func(_ string, beadID string) { got = append(got, beadID) }
+			clearOrphanEpisodeLabelsFn = func(_, beadID, _ string) { got = append(got, beadID) }
 			tc.inject()
 			_ = runSling(nil, []string{bead, "gastown"})
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {

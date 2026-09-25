@@ -479,7 +479,7 @@ exit 0
 			_ = writeBDStub(t, binDir, script, "")
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-			_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "gt-lbl1") })
+			_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "gt-lbl1", "") })
 
 			data, _ := os.ReadFile(logPath)
 			var updates []string
@@ -498,6 +498,42 @@ exit 0
 				t.Fatalf("updates = %v, want one starting %q\nlog:\n%s", updates, tc.wantUpdate, data)
 			}
 		})
+	}
+}
+
+// An unrouted bead is cleared in the hook write's work dir, not the town
+// root: the labels live in the database the hook just wrote.
+func TestClearOrphanEpisodeLabelsUsesHookWorkDir(t *testing.T) {
+	townRoot := t.TempDir()
+	workDir := t.TempDir()
+	binDir := filepath.Join(townRoot, "bin")
+	for _, d := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(workDir, ".beads"), binDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(townRoot, "bd-cwd.log")
+	script := `#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+  show)
+    pwd -P >> "` + logPath + `"
+    echo '[{"id":"zz-lbl2","title":"t","status":"hooked","labels":["gt:preserved-orphan"]}]'
+    exit 0 ;;
+  update) exit 0 ;;
+  esac
+done
+exit 0
+`
+	_ = writeBDStub(t, binDir, script, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "zz-lbl2", workDir) })
+
+	data, _ := os.ReadFile(logPath)
+	want, _ := filepath.EvalSymlinks(workDir)
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("bd show ran in %q, want hook work dir %q", got, want)
 	}
 }
 
