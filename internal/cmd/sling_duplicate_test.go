@@ -608,6 +608,76 @@ exit 0
 	t.Setenv("BD_DUPE_CLOSED_FILE", closedPath)
 }
 
+// TestConvoyAndEpicDispatchRunDuplicateCheck is the gt-skk7 wiring test. Both
+// manual schedulers set SkipDuplicateCheck on what is actually the bead's FIRST
+// dispatch — the operator's 'gt sling <convoy|epic>', with no earlier checked
+// sling — so the check never ran on those paths at all. A convoy or epic is in
+// fact the shape the check exists for: a batch of beads dispatched together are
+// the same-defect pair that no title dedupe sees (gt-mcq).
+func TestConvoyAndEpicDispatchRunDuplicateCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	townRoot := t.TempDir()
+	writeDuplicateBDStub(t, townRoot)
+	t.Setenv("PATH", filepath.Join(townRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	job := convoyDispatchJob{
+		candidate: convoyCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"},
+		agent:     "deepseek-flash",
+	}
+	// --no-boot keeps the run off the rig's agents, as the daemon passes it.
+	convoyOpts := convoyScheduleOpts{Formula: "mol-polecat-work", NoBoot: true}
+	epicOpts := epicScheduleOpts{Formula: "mol-polecat-work", NoBoot: true}
+
+	paths := []struct {
+		name   string
+		params func() SlingParams
+	}{
+		{
+			name:   "gt sling <convoy> -> runConvoySlingByID",
+			params: func() SlingParams { return convoySlingParams(job, convoyOpts, townRoot) },
+		},
+		{
+			name: "gt sling <epic> -> runEpicSlingByID",
+			params: func() SlingParams {
+				child := epicDispatchCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"}
+				return epicSlingParams(child, "mol-polecat-work", epicOpts, townRoot)
+			},
+		},
+	}
+
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			resetDuplicatePoolCache()
+			t.Cleanup(resetDuplicatePoolCache)
+
+			result, err := executeSling(path.params())
+			if err == nil {
+				t.Fatal("expected a refusal: gt-3vr names the test gt-rl0 already owns")
+			}
+			if result == nil || result.ErrMsg != errSlingDuplicateContent.Error() {
+				t.Errorf("expected ErrMsg=%q, got %+v", errSlingDuplicateContent.Error(), result)
+			}
+			for _, want := range []string{"TestHermeticHarnessEnforced", "gt-rl0", "--force"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal should mention %q: %v", want, err)
+				}
+			}
+
+			// --force is the escape hatch these schedulers already document, so
+			// it must reach the check through their own params. Past the check
+			// the dispatch fails for want of a real rig; only the refusal
+			// matters here.
+			forced := path.params()
+			forced.Force = true
+			if _, err := executeSling(forced); err != nil && strings.Contains(err.Error(), "TestHermeticHarnessEnforced") {
+				t.Fatalf("--force must bypass the duplicate check: %v", err)
+			}
+		})
+	}
+}
+
 // writeDuplicateBDStub stands up a fake town whose bd answers `show` for gt-3vr
 // and `list` for gt-rl0, the pair from gt-mcq.
 func writeDuplicateBDStub(t *testing.T, townRoot string) {

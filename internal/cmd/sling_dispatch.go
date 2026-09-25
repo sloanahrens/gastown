@@ -48,9 +48,10 @@ type SlingParams struct {
 	BeadsDir         string
 
 	// SkipDuplicateCheck disables the pre-dispatch content duplicate check
-	// (gt-mcq). Set by the bulk feeders — scheduler, convoy, and epic dispatch —
-	// which re-dispatch work the mayor already chose to sling: the check earns
-	// its cost when a bead is first picked up, not on every queue replay.
+	// (gt-mcq) for a caller re-dispatching beads its own queue already accepted.
+	// The capacity scheduler's dispatchSingleBead is the only such caller:
+	// convoy and epic dispatch are a bead's first dispatch, and run the check
+	// (gt-skk7).
 	SkipDuplicateCheck bool
 }
 
