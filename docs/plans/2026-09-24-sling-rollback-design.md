@@ -69,13 +69,26 @@ Two teardown paths leave the bead and the polecat out of step.
    is the intersection of the `+` lines of `git cherry <base> <branch>` for
    each base. An epic's polecat branches start from, and merge into, the
    epic's integration branch.
+   - Controller ruling: a patch on **any** `origin/integration/*` branch
+     counts as preserved, not only the patch on the bead's own epic branch.
+     This is accepted without narrowing. The worst case is duplicated work
+     (a bead released while its patch sits on another epic's branch), never
+     lost work.
+   - Cost: the first check in a rig lists the integration branches with one
+     `ls-remote`, then fetches each one it lacks, or holds at a stale tip,
+     one sequential bounded fetch per branch. Later checks through the same
+     `WorkSurvival` reuse the refreshed bases.
    - Patch identity is correct under rebase merges and single-commit
      squashes, where an ancestry check reports merged work as unmerged. A
      multi-commit squash matches no single commit's patch, so it reads as
      surviving. That is the safe direction: the hook is kept.
    - A branch equal to its base, fully merged or empty does not survive.
-   - Every fetch is bounded by `git.RemoteQueryTimeout`. A timeout, a failed
-     listing or an uncomparable branch makes the answer unknown.
+   - Every remote call (`ls-remote` and fetch) is bounded by
+     `git.RemoteQueryTimeout`. On timeout the whole process group is killed.
+     Over http(s), git forks `git-remote-http`, which holds the output
+     pipes, so killing only git would leave the call blocked. `WaitDelay`
+     is the backstop. A timeout, a failed listing or an uncomparable branch
+     makes the answer unknown.
    - The predicate is `polecat.WorkSurvival` / `SurvivingWorkForIssue`.
    - Every path that releases a hooked bead asks it first:
      - `gt polecat nuke`;
@@ -85,11 +98,18 @@ Two teardown paths leave the bead and the polecat out of step.
      - the witness formula's orphan step, through
        `gt polecat surviving-work <bead>` (exit 0 = branch printed, 3 = none,
        anything else = unknown);
-     - sling's re-sling guard.
+     - sling's re-sling guard, in `runSling` and in `executeSling`'s
+       dead-holder auto-force (batch sling, convoy and epic feeders,
+       scheduler dispatch). `--force` and `--branch` skip it.
    - Surviving work keeps the hook, and so does an unknown answer. Sling
      refuses on an unknown answer ("resume with `--branch` or override with
      `--force`"). Only "no rig repo" or "routes to no rig" mean there is
      nothing to protect.
+   - For automated dispatchers, that refusal is a deferral, not a failure.
+     The scheduler leaves the context queued and records no dispatch
+     failure. The convoy and epic feeders count it apart from failures. The
+     daemon's convoy feeder logs "deferring", matched on the text
+     "refusing to re-sling".
    - A failed sling whose bead's work survives hands the bead back to its
      pre-sling holder instead of releasing it.
    - Every release is a guarded `--if-assignee` write. That covers removal,
@@ -100,7 +120,10 @@ Two teardown paths leave the bead and the polecat out of step.
      `gt polecat surviving-work <bead>` when the answer is unknown.
    - For each preserved orphan, the witness mails the mayor once and labels
      the bead `gt:preserved-orphan`. An unknown answer two cycles running is
-     escalated.
+     escalated once, and the bead is labelled `gt:survival-escalated`. A
+     definite answer clears `gt:survival-unknown` and
+     `gt:survival-escalated`. A successful reset also clears
+     `gt:preserved-orphan`, so a later episode starts over.
 
 ## Invariants the tests pin
 
@@ -133,7 +156,16 @@ Two teardown paths leave the bead and the polecat out of step.
   - an epic branch with work not yet in integration survives;
   - a stale local origin ref is re-fetched;
   - an unreachable origin is unknown.
-- A bounded fetch against a remote that never answers returns a timeout.
+- A bounded fetch or `ls-remote` against an http remote that accepts and
+  never answers returns a timeout near its bound, and the helper's
+  connection is closed. The predicate answers unknown.
+- `executeSling` with a dead holder refuses surviving and unknown work
+  (`errReslingRefused`), proceeds when there is nothing to protect, and
+  skips the guard under `--force` or `--branch`. The scheduler, the feeders
+  and the daemon convoy feeder treat the refusal as a deferral.
+- The witness formula's orphan step, run against `bd`/`gt` stubs across
+  cycles, escalates once per unknown episode, mails the mayor once per
+  preserved-orphan episode, and clears its labels as described above.
 - Polecat removal keeps a bead whose work survives and releases one whose
   branch is merged, using the guarded write.
 - The witness keeps surviving and unknown work hooked, and makes a guarded
