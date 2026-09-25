@@ -81,6 +81,54 @@ A third mode, `gc`, in `internal/daemon/maintenance_gc.go`.
    values with the defaults and logs a warning. `gt config set` refuses
    them and now accepts `maintenance.mode gc` and both `maintenance.gc_*` keys.
 
+## Fix round 1 (review, 2026-09-25)
+
+The review approved the mode, trigger, baseline and config. It asked for
+four fixes before prod, all of them now built:
+
+1. **Health restart during gc.** `DoltServerManager.EnsureRunning` stops and
+   restarts a server that fails its health, write or identity probe. A new
+   `restartSuppressed` hook, wired to `doltRestartHeldForGC`, defers that
+   restart while a gc call is in flight and within its timeout plus a
+   2-minute grace. Past the grace it escalates once and lets the restart
+   proceed, because a gc stuck past its own context timeout means the server
+   is stuck. A dead server is still started.
+2. **The daemon's own Dolt work.** `d.doltMaintMu` is an RWMutex that no
+   caller ever blocks on.
+   - The gc takes the write side with `TryLock` after each database's quiet
+     check and holds it for that one call. If the lock is taken, the gc
+     defers with the reason "daemon Dolt task in flight".
+   - `syncDoltBackups`, `pushDoltRemotes`, `reapWisps`, `syncJsonlGitBackup`
+     and the compactor cycle take the read side with `TryRLock`. They skip
+     their tick while a gc holds the lock and log "skipped: gc in flight".
+     Using a read side keeps these tasks from excluding each other.
+   - The ConvoyManager gets a `pollGate`. Event-poll ticks and stranded
+     scans take its read side with `TryRLock` and skip while it is paused.
+     `Pause(timeout)` and `Resume()` wrap each database's gc; if a pause
+     times out, the gc defers with "convoy poll busy".
+3. **Database set.** Databases are discovered from the data dir: every
+   directory that has a `.dolt` subdirectory. This replaces the
+   compactor_dog and wisp_reaper lists, which fall back to `["hq"]` alone.
+   There is no config key; discovery is the only source.
+4. **Skipped-window escalation.** A window that closes with gc still
+   deferred and at least one eligible database increments
+   `consecutive_deferred_windows` in `maintenance_state.json`. The file also
+   keeps the pending deferral, the last deferral reason and a count per
+   reason.
+   - The first escalation fires at 3 windows for a daily interval, or 2 for
+     weekly, monthly or an interval of 6 days or more.
+   - After that it escalates at most once every further 3 windows.
+   - A completed or failed run resets the count.
+
+Minor fixes:
+- The DSN uses `doltServerHost()`, and the database name is validated
+  before the DSN is built.
+- gc mode is skipped, with a log line, when the server is external or on a
+  host that is not loopback.
+- The docs now state that `gc_min_bytes` must be a plain JSON integer.
+- The docs now state that a failed re-measure records no baseline, so the
+  next interval gc's that database again.
+
 ## compactor_dog.threshold
 
 The compactor dog only escalates; it never compacts. With gc mode handling
@@ -105,9 +153,6 @@ sets it to 20000.
 
 - A `gt maintain --gc-only` operator command. The patrol covers the recurring
   case, and the one-off case used a script (`run-gc.sh` in the evidence dir).
-- Pausing the daemon's Convoy events poller during a gc. The quiet guard
-  covers agents and gates. The Convoy poller is a short read that the guard
-  does not see. The 2026-09-24 prod gc ran with it live and had no panic.
 - Rebuilding `.dolt-backup` stores and running `git gc` in `.dolt-archive`
   (separate operator steps, claude-05o item d).
 - Flatten stays off. Revisit it only if history queries degrade, and take a

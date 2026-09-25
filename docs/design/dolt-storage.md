@@ -352,7 +352,16 @@ Dolt data dir and runs `CALL dolt_gc('--full')` on a database when both hold:
 - size >= `gc_growth_ratio` (default 2.0) x the size recorded right after its
   last patrol gc, or no such record exists yet.
 
-The post-gc sizes live in `daemon/maintenance_state.json` (atomic write).
+The databases are every directory with a `.dolt` subdirectory under the
+Dolt data dir (discovered each run), not the `compactor_dog` /
+`wisp_reaper` database lists, whose fallback is `hq` alone. gc mode is
+skipped (logged) when the server is externally managed or not on a loopback
+host: the size trigger reads the data dir from this host's disk.
+
+The post-gc sizes live in `daemon/maintenance_state.json` (atomic write). If
+the size cannot be re-measured after a gc, no baseline is recorded, so the
+next interval treats the database as never gc'd and gc's it again if it is
+still over `gc_min_bytes`.
 Eligible databases run smallest first, one at a time, each bounded by 10
 minutes. Before each database the patrol re-checks a quiet-window guard: the
 daemon's upgrade-idle predicate, no `main_branch_test` (even one waiting for a
@@ -362,6 +371,27 @@ stops; the next 5-minute tick in the window retries, and databases already
 gc'd have fresh baselines so they drop out. A gc error stops the run, logs,
 and escalates once; the patrol does not retry until the next interval. gc mode
 never flattens, never force-pushes and never restarts Dolt.
+
+Around each database's gc the patrol also:
+
+- takes the write side of the daemon's Dolt-task lock (non-blocking). The
+  daemon's own Dolt tasks (dolt_backup, dolt_remotes, wisp_reaper,
+  jsonl_git_backup, the compactor_dog cycle) take the read side and skip
+  their tick with `<task>: skipped: gc in flight`; a task in flight makes the
+  gc defer with `daemon Dolt task in flight`. Nothing blocks the select loop.
+- pauses the Convoy manager's event poll and stranded scan (waiting up to 60s
+  for an in-flight tick; otherwise it defers with `convoy poll busy`).
+- holds off a health-driven Dolt restart while the gc call is in flight and
+  under its 10-minute timeout (plus 2 minutes' grace). Past that it escalates
+  once and lets the restart proceed. A dead server is still started.
+
+A window that closes with gc still deferred on at least one eligible
+database counts toward a streak kept in `maintenance_state.json`
+(`consecutive_deferred_windows`, `last_deferral_reason`). The patrol
+escalates once at 3 consecutive windows for a daily interval (2 for weekly,
+monthly, or an interval of six days or more), with the waiting databases,
+their sizes and the top deferral reasons, then at most every further 3
+windows. A completed or failed run resets the streak.
 
 `--full` matters: Dolt's gc is generational, and auto-gc and plain
 `dolt_gc()` only collect the new generation. Chunks promoted to the old
@@ -377,7 +407,10 @@ Settings (`patrols.scheduled_maintenance` in `mayor/daemon.json`):
 ```
 
 Or with `gt config set maintenance.mode gc`, `maintenance.gc_min_bytes`,
-`maintenance.gc_growth_ratio`. An invalid `gc_min_bytes` (<= 0) or
+`maintenance.gc_growth_ratio`. `gc_min_bytes` must be a plain JSON integer
+(`268435456`, not `2.5e8` or `"256MiB"`): a float or string there fails the
+parse of the whole daemon.json, and the daemon then runs with no patrol
+config at all. An invalid `gc_min_bytes` (<= 0) or
 `gc_growth_ratio` (< 1, NaN, Inf) in the file is replaced by its default with
 a logged warning; `gt config set` refuses them.
 
