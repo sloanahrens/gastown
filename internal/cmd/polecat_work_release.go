@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
@@ -12,10 +14,15 @@ import (
 type polecatWorkReleaser interface {
 	// HookState reads the work bead's current status and assignee.
 	HookState(beadID string) (status, assignee string, err error)
-	// ReleaseBead returns the work bead to open with no assignee.
-	ReleaseBead(beadID string) error
+	// ReleaseBead returns the work bead to open with no assignee, atomically
+	// guarded on the bead still being assigned to expectedAssignee. It reports
+	// released=false with a nil error when the guard no longer held (another
+	// actor re-assigned the bead between the read and the write).
+	ReleaseBead(beadID, expectedAssignee string) (released bool, err error)
 	// ResetSlot clears the polecat agent bead's hook_bead and marks it idle.
 	ResetSlot(agentID string) error
+	// Annotate appends a comment to the bead.
+	Annotate(beadID, text string) error
 }
 
 // releasableHookStatuses are the statuses in which a bead is held by its
@@ -36,9 +43,12 @@ type workReleaseOutcome struct {
 // releasePolecatWork is the one "give the work back" step shared by
 // `gt polecat nuke` and sling rollback (gt-vm5g4, gt-7evi4).
 //
-//  1. Compare-and-release: re-read beadID and return it to open ONLY while it is
-//     still hooked/in_progress to agentID. A bead that has since been re-slung
-//     to someone else, closed, or released is left untouched.
+//  1. Compare-and-release: the bead is returned to open only while it is still
+//     hooked/in_progress to agentID. The status is read first; the write is
+//     guarded atomically by bd (--if-assignee), so a bead re-slung to someone
+//     else between the read and the write is left untouched. The guarded write
+//     is also the sanctioned claim transfer: bd refuses a plain assignee write
+//     on an in_progress bead that someone else holds.
 //  2. When resetSlot is set, clear the polecat's hook_bead and mark its slot
 //     idle. Callers that are about to remove the sandbox pass false: removal
 //     resets the agent bead itself.
@@ -48,24 +58,7 @@ type workReleaseOutcome struct {
 func releasePolecatWork(r polecatWorkReleaser, agentID, beadID string, resetSlot bool) workReleaseOutcome {
 	var out workReleaseOutcome
 	if beadID != "" {
-		status, assignee, err := r.HookState(beadID)
-		switch {
-		case err != nil:
-			out.SkipNote = fmt.Sprintf("could not read %s: %v", beadID, err)
-			fmt.Printf("  %s Left hooked work %s alone: %s\n", style.Dim.Render("Warning:"), beadID, out.SkipNote)
-		case assignee != agentID:
-			out.SkipNote = fmt.Sprintf("assigned to %q, not %s", assignee, agentID)
-		case !releasableHookStatuses[status]:
-			out.SkipNote = fmt.Sprintf("status %s is not held", status)
-		default:
-			if err := r.ReleaseBead(beadID); err != nil {
-				out.SkipNote = fmt.Sprintf("release failed: %v", err)
-				fmt.Printf("  %s Could not release hooked work %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-			} else {
-				out.Released = true
-				fmt.Printf("  %s Released hooked work %s from %s\n", style.Dim.Render("○"), beadID, agentID)
-			}
-		}
+		out = releaseHeldBead(r, agentID, beadID)
 	}
 	if resetSlot {
 		if err := r.ResetSlot(agentID); err != nil {
@@ -76,6 +69,47 @@ func releasePolecatWork(r polecatWorkReleaser, agentID, beadID string, resetSlot
 	}
 	return out
 }
+
+// heldBy reports whether beadID is currently held (hooked/in_progress) by
+// agentID, with the reason when it is not.
+func heldBy(r polecatWorkReleaser, agentID, beadID string) (bool, string) {
+	status, assignee, err := r.HookState(beadID)
+	switch {
+	case err != nil:
+		note := fmt.Sprintf("could not read %s: %v", beadID, err)
+		fmt.Printf("  %s Left hooked work %s alone: %s\n", style.Dim.Render("Warning:"), beadID, note)
+		return false, note
+	case assignee != agentID:
+		return false, fmt.Sprintf("assigned to %q, not %s", assignee, agentID)
+	case !releasableHookStatuses[status]:
+		return false, fmt.Sprintf("status %s is not held", status)
+	}
+	return true, ""
+}
+
+func releaseHeldBead(r polecatWorkReleaser, agentID, beadID string) workReleaseOutcome {
+	var out workReleaseOutcome
+	if held, note := heldBy(r, agentID, beadID); !held {
+		out.SkipNote = note
+		return out
+	}
+	released, err := r.ReleaseBead(beadID, agentID)
+	switch {
+	case err != nil:
+		out.SkipNote = fmt.Sprintf("release failed: %v", err)
+		fmt.Printf("  %s Could not release hooked work %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+	case !released:
+		out.SkipNote = fmt.Sprintf("no longer assigned to %s at write time", agentID)
+	default:
+		out.Released = true
+		fmt.Printf("  %s Released hooked work %s from %s\n", style.Dim.Render("○"), beadID, agentID)
+	}
+	return out
+}
+
+// bdGuardNotHeldExit is bd's exit code when an --if-assignee/--if-status
+// precondition no longer holds: nothing was written.
+const bdGuardNotHeldExit = 13
 
 // bdPolecatWorkReleaser is the production polecatWorkReleaser.
 type bdPolecatWorkReleaser struct {
@@ -91,11 +125,19 @@ func (r bdPolecatWorkReleaser) HookState(beadID string) (string, string, error) 
 	return info.Status, info.Assignee, nil
 }
 
-func (r bdPolecatWorkReleaser) ReleaseBead(beadID string) error {
-	return BdCmd("update", beadID, "--status=open", "--assignee=").
+func (r bdPolecatWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (bool, error) {
+	err := BdCmd("update", beadID, "--status=open", "--assignee=", "--if-assignee="+expectedAssignee).
 		Dir(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).
 		WithAutoCommit().
 		Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == bdGuardNotHeldExit {
+		return false, nil
+	}
+	return false, err
 }
 
 func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {
@@ -103,6 +145,10 @@ func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {
 	// (gt-skwt): hook_bead cleared, agent_state idle. Warn-only inside.
 	clearReassignedPolecatState(r.townRoot, agentID)
 	return nil
+}
+
+func (r bdPolecatWorkReleaser) Annotate(beadID, text string) error {
+	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).AddComment(beadID, text)
 }
 
 // newPolecatWorkReleaserFn is a seam for tests.
