@@ -283,30 +283,202 @@ func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
 	}
 }
 
-// TestAutoCloseRejectsStaleAgeBelowFloor covers the second brake from gt-2qzr:
-// the incident run's 7d threshold was short enough to catch eight-day-old agent
-// beads, so anything below a week is refused outright.
-func TestAutoCloseRejectsStaleAgeBelowFloor(t *testing.T) {
-	// db is nil on purpose: the floor is checked before any query runs, so a
-	// non-refusing implementation would panic here rather than pass.
+// TestAutoCloseSoftRefusalBelowFloor covers the second brake from gt-2qzr and
+// its gt-ecpj softening: the incident run's 7d threshold was short enough to
+// catch eight-day-old agent beads, so a below-floor stale-age refuses — but as
+// a soft error, not a stop. The refusal arrives with the set the threshold would
+// take in the result, and the command exits 0.
+func TestAutoCloseSoftRefusalBelowFloor(t *testing.T) {
+	state := newStaleIssueState("hq-a", "hq-b")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
 	for _, age := range []time.Duration{time.Hour, 24 * time.Hour, 6 * 24 * time.Hour} {
-		_, err := AutoClose(nil, "hq", AutoCloseOptions{StaleAge: age})
+		// Both candidates have been stale for 60d, so they are in the set at
+		// this threshold and at the floor alike: this preview is what the live
+		// run carries either way.
+		preview, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: age, DryRun: true})
+		if err != nil {
+			t.Fatalf("dry run at %s: %v", age, err)
+		}
+		result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: age, PreviewHash: preview.PreviewHash})
 		if !errors.Is(err, ErrStaleAgeTooLow) {
 			t.Errorf("AutoClose(StaleAge=%s) error = %v, want ErrStaleAgeTooLow", age, err)
+		}
+		if result == nil {
+			t.Fatalf("AutoClose(StaleAge=%s) returned no result; a soft refusal must report the set that threshold would take", age)
+		}
+		if !result.Floored {
+			t.Errorf("AutoClose(StaleAge=%s) did not flag Floored, so nothing names the mis-set threshold", age)
+		}
+		if result.FlooredAt != age {
+			t.Errorf("AutoClose(StaleAge=%s).FlooredAt = %s, want the asked-for threshold", age, result.FlooredAt)
+		}
+		if result.Closed != 0 {
+			t.Errorf("refused sweep reported Closed = %d, want 0: the floor never closes", result.Closed)
+		}
+		if len(result.ClosedEntries) != 2 {
+			t.Errorf("soft refusal carried %d candidate entries, want 2: the operator has to see what the threshold would take",
+				len(result.ClosedEntries))
+		}
+	}
+
+	for id, status := range state.staleIssueStatuses() {
+		if status != "open" {
+			t.Errorf("%s status = %q after a soft refusal, want open", id, status)
 		}
 	}
 
 	// The floor itself is allowed — it is the explicit lower bound — and Force
-	// lifts it. Both get past validation and reach the query, so any error they
-	// return is the fake driver's, never the floor's.
-	db := openFakeReaperDB(t, &fakeReaperState{wisps: map[string]*fakeWisp{}, ops: map[int][]string{}})
+	// lifts it. Neither carries a floor refusal.
+	_, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run at the floor: %v", err)
+	}
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("forced dry run: %v", err)
+	}
+	if errors.Is(err, ErrStaleAgeTooLow) || result.Floored {
+		t.Errorf("forced run carries a floor refusal: Floored = %v, want false", result.Floored)
+	}
+}
+
+// TestAutoCloseBelowFloorReportsTheThresholdsSet pins which set the refusal
+// reports. The floor is the safe value, so the sweep could report the floor's
+// set instead — and for a threshold below the floor that is always the smaller
+// of the two, since a shorter age reaches further back. Reporting it would show
+// the operator a number smaller than the sweep they are contemplating and hide
+// the blast radius that makes the refusal worth reading (gt-ecpj).
+func TestAutoCloseBelowFloorReportsTheThresholdsSet(t *testing.T) {
+	// hq-aged has been stale for 60d and is in the set at any threshold;
+	// hq-recent has been stale for an hour, so only the below-floor threshold
+	// reaches it.
+	state := newStaleIssueState("hq-aged")
+	state.addStaleIssueAged("hq-recent", time.Hour)
+	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	if _, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge}); errors.Is(err, ErrStaleAgeTooLow) {
-		t.Errorf("AutoClose(StaleAge=MinStaleIssueAge) should not be refused by the floor")
+	atFloor, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run at the floor: %v", err)
 	}
-	if _, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true}); errors.Is(err, ErrStaleAgeTooLow) {
-		t.Errorf("AutoClose(StaleAge=1h, Force) should not be refused by the floor")
+	if atFloor.Closed != 1 {
+		t.Fatalf("dry run at the floor counted %d candidates, want 1 — the test needs the floor set to be the smaller one", atFloor.Closed)
+	}
+
+	refused, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour})
+	if !errors.Is(err, ErrStaleAgeTooLow) {
+		t.Fatalf("AutoClose(StaleAge=1h) error = %v, want ErrStaleAgeTooLow", err)
+	}
+	if refused == nil {
+		t.Fatal("refusal returned no result, so the set it refused over was never reported")
+	}
+	if got := len(refused.ClosedEntries); got != 2 {
+		t.Errorf("refusal carried %d candidates, want 2: the report is the asked-for threshold's set, not the floor's %d",
+			got, atFloor.Closed)
+	}
+	if refused.Closed != 0 {
+		t.Errorf("refusal reported Closed = %d, want 0", refused.Closed)
+	}
+	if !strings.Contains(err.Error(), "2 candidate") {
+		t.Errorf("refusal error = %q, want it to name the 2 candidates at the threshold asked for", err)
+	}
+	for id, status := range state.staleIssueStatuses() {
+		if status != "open" {
+			t.Errorf("%s status = %q after a refusal, want open: a refusal closes nothing", id, status)
+		}
+	}
+}
+
+// TestAutoCloseBelowFloorOfZeroIsRefused pins the flag that carries the refusal.
+// A --stale-age of zero is the most extreme below-floor request there is — it
+// reaches every open issue — and a FlooredAt > 0 test would read it as "not
+// floored", letting the sweep fall through to the write path and close at the
+// floor.
+func TestAutoCloseBelowFloorOfZeroIsRefused(t *testing.T) {
+	state := newStaleIssueState("hq-a")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: 0})
+	if !errors.Is(err, ErrStaleAgeTooLow) {
+		t.Fatalf("AutoClose(StaleAge=0) error = %v, want ErrStaleAgeTooLow", err)
+	}
+	if result == nil || !result.Floored {
+		t.Fatal("a below-floor zero did not flag Floored, so no caller can see the refusal")
+	}
+	if result.Closed != 0 {
+		t.Errorf("refused sweep reported Closed = %d, want 0", result.Closed)
+	}
+	for id, status := range state.staleIssueStatuses() {
+		if status != "open" {
+			t.Errorf("%s status = %q after a below-floor zero, want open: the refusal must not reach the write path",
+				id, status)
+		}
+	}
+}
+
+// TestScanStaleCountIsAtTheThresholdAskedFor pins the same choice on the scan
+// side. The dog reads this count before it decides what to do, so below the
+// floor it has to be the number auto-close's refusal reports for the same flag;
+// a count at the floor would be a different, smaller set, and the two numbers
+// could not be compared (gt-ecpj).
+func TestScanStaleCountIsAtTheThresholdAskedFor(t *testing.T) {
+	state := newStaleIssueState("hq-aged")
+	state.addStaleIssueAged("hq-recent", time.Hour)
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const ( // Scan's parameters the stale-age question does not bear on.
+		maxAge   = 24 * time.Hour
+		purgeAge = 7 * 24 * time.Hour
+		mailAge  = 7 * 24 * time.Hour
+	)
+
+	belowFloor, err := Scan(db, "hq", maxAge, purgeAge, mailAge, time.Hour)
+	if err != nil {
+		t.Fatalf("Scan below the floor: %v", err)
+	}
+	if !belowFloor.Floored {
+		t.Error("Scan below the floor did not flag Floored, so nothing names the mis-set threshold")
+	}
+	if belowFloor.FlooredAt != time.Hour {
+		t.Errorf("Scan.FlooredAt = %s, want the threshold asked for (1h)", belowFloor.FlooredAt)
+	}
+	if belowFloor.StaleCandidates != 2 {
+		t.Errorf("Scan counted %d stale candidates below the floor, want 2: the count is at the threshold asked for, not the floor's 1",
+			belowFloor.StaleCandidates)
+	}
+
+	atFloor, err := Scan(db, "hq", maxAge, purgeAge, mailAge, MinStaleIssueAge)
+	if err != nil {
+		t.Fatalf("Scan at the floor: %v", err)
+	}
+	if atFloor.Floored {
+		t.Error("Scan at the floor flagged Floored, want it clear: the floor is the allowed lower bound")
+	}
+	if atFloor.StaleCandidates != 1 {
+		t.Errorf("Scan at the floor counted %d stale candidates, want 1", atFloor.StaleCandidates)
+	}
+}
+
+// TestAutoCloseForceLiftsTheFloor is the lift side of the same brake: --force
+// lets a below-floor threshold sweep at the value asked for, with no refusal.
+func TestAutoCloseForceLiftsTheFloor(t *testing.T) {
+	state := newStaleIssueState("hq-a")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("forced below-floor dry run: %v", err)
+	}
+	if result.Floored {
+		t.Errorf("forced run reported Floored = true, want false")
+	}
+	if result.FlooredAt != 0 {
+		t.Errorf("forced run reported FlooredAt = %s, want none", result.FlooredAt)
 	}
 }
 
@@ -1106,6 +1278,13 @@ func (s *fakeReaperState) staleIssueStatuses() map[string]string {
 // addStaleIssue adds an open issue to the fake's issues table, well past any
 // stale-age floor — as if it had aged in since the preview ran.
 func (s *fakeReaperState) addStaleIssue(id string) {
+	s.addStaleIssueAged(id, 60*24*time.Hour)
+}
+
+// addStaleIssueAged adds an open issue untouched for the given age, so a test
+// can place a candidate between a below-floor threshold and the floor itself and
+// see which of the two selects it.
+func (s *fakeReaperState) addStaleIssueAged(id string, age time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.staleIssues == nil {
@@ -1114,7 +1293,7 @@ func (s *fakeReaperState) addStaleIssue(id string) {
 	s.staleIssues[id] = &fakeStaleIssue{
 		id:        id,
 		title:     "abandoned " + id,
-		updatedAt: time.Now().UTC().Add(-60 * 24 * time.Hour),
+		updatedAt: time.Now().UTC().Add(-age),
 		status:    "open",
 	}
 }
@@ -1435,6 +1614,11 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		return fakeIDRows(c.state.purgeCandidatesLocked(namedTime(args), namedExcludedIDs(args))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w WHERE w.status = 'closed'"):
 		return fakeCountRows(len(c.state.purgeCandidatesLocked(namedTime(args), namedExcludedIDs(args)))), nil
+	case strings.Contains(normalized, "SELECT COUNT(*) FROM issues i WHERE"):
+		// Scan's stale count. It shares the sweep's eligibility, so the fake
+		// answers it from the same rows the sweep's SELECT does — which is what
+		// lets a test compare the two numbers at the same threshold.
+		return fakeCountRows(len(c.state.staleIssueCandidatesLocked(namedTime(args)))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM issues"):
 		return fakeCountRows(0), nil
 	case strings.Contains(normalized, "issues WHERE status = 'closed'"):

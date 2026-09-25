@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"io"
 	"log"
@@ -8,10 +11,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/reaper"
 )
 
 func TestWispReaperInterval(t *testing.T) {
@@ -308,5 +314,203 @@ func TestTriggerWispReaper_SkipsWhenNotDue(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "not due") {
 		t.Errorf("expected a not-due log line, got: %q", buf.String())
+	}
+}
+
+// reaperSweepFake answers the one query the inline auto-close sweep issues —
+// the stale-issue SELECT — with a fixed candidate set, so the daemon's handling
+// of the sweep's outcomes can be driven without a live Dolt server. Any other
+// statement is an error: the sweep may only reach the write path when it is
+// meant to, and a fake that quietly accepted an UPDATE would hide a soft refusal
+// leaking into a close.
+type reaperSweepFake struct {
+	mu      sync.Mutex
+	writes  []string
+	rows    [][]driver.Value
+	nextID  uint64
+	nextRow int
+}
+
+func (s *reaperSweepFake) rowsFor(cutoff time.Time) [][]driver.Value {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var stale [][]driver.Value
+	for _, row := range s.rows {
+		updatedAt, ok := row[2].(time.Time)
+		if !ok || !updatedAt.Before(cutoff) {
+			continue
+		}
+		stale = append(stale, row)
+	}
+	return stale
+}
+
+func (s *reaperSweepFake) recordWrite(query string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writes = append(s.writes, query)
+}
+
+func (s *reaperSweepFake) recordedWrites() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.writes...)
+}
+
+// openReaperSweepFake registers a driver over the fake and returns a handle to
+// it, in the shape the daemon's autoCloseDB takes.
+func openReaperSweepFake(t *testing.T, staleIssues [][]driver.Value) (*sql.DB, *reaperSweepFake) {
+	t.Helper()
+	fake := &reaperSweepFake{rows: staleIssues}
+	driverName := fmt.Sprintf("fake_wisp_reaper_%d", atomic.AddUint64(&reaperSweepFakeDriverID, 1))
+	sql.Register(driverName, &reaperSweepDriver{state: fake})
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatalf("open fake db: %v", err)
+	}
+	return db, fake
+}
+
+var reaperSweepFakeDriverID uint64
+
+type reaperSweepDriver struct{ state *reaperSweepFake }
+
+func (d *reaperSweepDriver) Open(string) (driver.Conn, error) {
+	return &reaperSweepConn{state: d.state}, nil
+}
+
+type reaperSweepConn struct{ state *reaperSweepFake }
+
+func (c *reaperSweepConn) Prepare(string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("prepare not implemented")
+}
+
+func (c *reaperSweepConn) Close() error { return nil }
+
+func (c *reaperSweepConn) Begin() (driver.Tx, error) { return reaperSweepTx{}, nil }
+
+func (c *reaperSweepConn) CheckNamedValue(*driver.NamedValue) error { return nil }
+
+func (c *reaperSweepConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if !strings.Contains(query, "SELECT i.id, i.title, i.updated_at FROM issues i WHERE") {
+		return nil, fmt.Errorf("unexpected query on the auto-close sweep: %s", query)
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("stale-issue SELECT carried no cutoff argument")
+	}
+	cutoff, ok := args[0].Value.(time.Time)
+	if !ok {
+		return nil, fmt.Errorf("stale-issue SELECT cutoff = %#v, want a time", args[0].Value)
+	}
+	return &reaperSweepRows{rows: c.state.rowsFor(cutoff)}, nil
+}
+
+func (c *reaperSweepConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	c.state.recordWrite(query)
+	return nil, fmt.Errorf("the below-floor sweep must not write, but issued: %s", query)
+}
+
+type reaperSweepTx struct{}
+
+func (reaperSweepTx) Commit() error   { return nil }
+func (reaperSweepTx) Rollback() error { return nil }
+
+type reaperSweepRows struct {
+	rows [][]driver.Value
+	next int
+}
+
+func (r *reaperSweepRows) Columns() []string { return []string{"id", "title", "updated_at"} }
+func (r *reaperSweepRows) Close() error      { return nil }
+
+func (r *reaperSweepRows) Next(dest []driver.Value) error {
+	if r.next >= len(r.rows) {
+		return io.EOF
+	}
+	copy(dest, r.rows[r.next])
+	r.next++
+	return nil
+}
+
+// TestAutoCloseDBSoftRefusalDoesNotFailTheStep covers the daemon half of
+// gt-ecpj. The inline fallback is what a failed Dog dispatch lands on, so a
+// below-floor stale-age treated as an error here fails the auto-close step and
+// stops the reaper — the stop the soft refusal exists to remove. The sweep must
+// instead log the notice, report nothing closed, and leave the issues alone.
+func TestAutoCloseDBSoftRefusalDoesNotFailTheStep(t *testing.T) {
+	// Two open issues, long past the floor: the below-floor threshold reaches
+	// both, so the notice has a real set to name.
+	db, fake := openReaperSweepFake(t, [][]driver.Value{
+		{"hq-a", "abandoned hq-a", time.Now().UTC().Add(-60 * 24 * time.Hour)},
+		{"hq-b", "abandoned hq-b", time.Now().UTC().Add(-60 * 24 * time.Hour)},
+	})
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf strings.Builder
+	d := &Daemon{logger: log.New(&buf, "", 0)}
+
+	closed, err := d.autoCloseDB(db, "hq", time.Hour, false)
+	if err != nil {
+		t.Fatalf("autoCloseDB below the floor returned error %v, want the refusal to be soft", err)
+	}
+	if closed != 0 {
+		t.Errorf("autoCloseDB below the floor closed %d issues, want 0", closed)
+	}
+	if writes := fake.recordedWrites(); len(writes) != 0 {
+		t.Errorf("below-floor sweep issued %d write(s), want none: %v", len(writes), writes)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, reaper.FloorNotice(time.Hour, 2)) {
+		t.Errorf("cycle log = %q, want the below-floor notice naming the 2 candidates that threshold would take", logged)
+	}
+}
+
+// TestAutoCloseDBCarriesTheRefusalIntoTheLog pins that the daemon reports the
+// way the command does: the notice is the refusal, so it has to reach the log a
+// patrol reader sees, with the threshold that was asked for and the size of the
+// set it would take.
+func TestAutoCloseDBCarriesTheRefusalIntoTheLog(t *testing.T) {
+	db, _ := openReaperSweepFake(t, [][]driver.Value{
+		{"hq-a", "abandoned hq-a", time.Now().UTC().Add(-60 * 24 * time.Hour)},
+	})
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf strings.Builder
+	d := &Daemon{logger: log.New(&buf, "", 0)}
+
+	if _, err := d.autoCloseDB(db, "hq", 24*time.Hour, false); err != nil {
+		t.Fatalf("autoCloseDB below the floor: %v", err)
+	}
+	logged := buf.String()
+	for _, want := range []string{"wisp_reaper: hq:", "24h0m0s", reaper.MinStaleIssueAge.String(), "1 candidate(s)"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("cycle log = %q, want it to carry %q", logged, want)
+		}
+	}
+}
+
+// TestAutoCloseDBDryRunCycleCountsARefusalAsNothing covers the dry-run cycle:
+// the sweep returns the set the mis-set threshold would take, and the cycle
+// summary must not fold that count in as closed — a live run refuses the same
+// threshold, so the number would be a close count for a write that cannot
+// happen (gt-ecpj).
+func TestAutoCloseDBDryRunCycleCountsARefusalAsNothing(t *testing.T) {
+	db, _ := openReaperSweepFake(t, [][]driver.Value{
+		{"hq-a", "abandoned hq-a", time.Now().UTC().Add(-60 * 24 * time.Hour)},
+	})
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf strings.Builder
+	d := &Daemon{logger: log.New(&buf, "", 0)}
+
+	closed, err := d.autoCloseDB(db, "hq", time.Hour, true)
+	if err != nil {
+		t.Fatalf("dry-run autoCloseDB below the floor: %v", err)
+	}
+	if closed != 0 {
+		t.Errorf("dry-run cycle counted %d auto-closed, want 0: the threshold is refused", closed)
+	}
+	if !strings.Contains(buf.String(), reaper.FloorNotice(time.Hour, 1)) {
+		t.Errorf("cycle log = %q, want the below-floor notice", buf.String())
 	}
 }
