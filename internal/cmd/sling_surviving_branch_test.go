@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -427,5 +428,102 @@ func TestCapacityDispatchDeferralRecognizesReslingRefusal(t *testing.T) {
 	}
 	if _, ok := capacityDispatchDeferral(errors.New("sling failed: spawn failed")); ok {
 		t.Fatal("an ordinary failure must not be a deferral")
+	}
+}
+
+// clearOrphanEpisodeLabels removes only the episode labels the bead carries,
+// writes nothing when it carries none, and never fails the caller.
+func TestClearOrphanEpisodeLabels(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX bd stub")
+	}
+	cases := []struct {
+		name       string
+		labels     string
+		showFails  bool
+		wantUpdate string // "" = no update call
+	}{
+		{name: "all three present", labels: `"gt:preserved-orphan","keep-me","gt:survival-unknown","gt:survival-escalated"`,
+			wantUpdate: "update gt-lbl1 --remove-label=gt:preserved-orphan --remove-label=gt:survival-unknown --remove-label=gt:survival-escalated"},
+		{name: "one present", labels: `"gt:survival-unknown"`, wantUpdate: "update gt-lbl1 --remove-label=gt:survival-unknown"},
+		{name: "none present", labels: `"keep-me"`},
+		{name: "read fails", showFails: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			binDir := filepath.Join(townRoot, "bin")
+			for _, d := range []string{filepath.Join(townRoot, ".beads"), binDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			logPath := filepath.Join(townRoot, "bd.log")
+			fail := ""
+			if tc.showFails {
+				fail = "1"
+			}
+			script := `#!/bin/sh
+echo "$*" >> "` + logPath + `"
+for a in "$@"; do
+  case "$a" in
+  show)
+    [ -n "` + fail + `" ] && { echo "boom" >&2; exit 1; }
+    echo '[{"id":"gt-lbl1","title":"t","status":"hooked","labels":[` + tc.labels + `]}]'
+    exit 0 ;;
+  update) exit 0 ;;
+  esac
+done
+exit 0
+`
+			_ = writeBDStub(t, binDir, script, "")
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "gt-lbl1") })
+
+			data, _ := os.ReadFile(logPath)
+			var updates []string
+			for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				if i := strings.Index(l, "update "); i >= 0 {
+					updates = append(updates, l[i:])
+				}
+			}
+			if tc.wantUpdate == "" {
+				if len(updates) != 0 {
+					t.Fatalf("want no update, got %v", updates)
+				}
+				return
+			}
+			if len(updates) != 1 || !strings.HasPrefix(updates[0], tc.wantUpdate) {
+				t.Fatalf("updates = %v, want one starting %q\nlog:\n%s", updates, tc.wantUpdate, data)
+			}
+		})
+	}
+}
+
+// The refusal text leads with the shared marker the daemon's convoy feeder
+// matches on stderr (dispatch.ReslingRefusalMarker).
+func TestReslingRefusalStartsWithSharedMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+		err    error
+	}{
+		{name: "work survives", branch: "polecat/pearl/gt-ibt8+mu72g5cz"},
+		{name: "survival unknown", err: errors.New("timed out")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withSurvivingWork(t, tc.branch, tc.err)
+			err := reslingSurvivingWorkGuard(t.TempDir(), "gt-ibt8", "gastown/polecats/pearl")
+			if err == nil {
+				t.Fatal("want a refusal")
+			}
+			if !strings.HasPrefix(err.Error(), dispatch.ReslingRefusalMarker+" ") {
+				t.Fatalf("refusal %q does not start with %q", err.Error(), dispatch.ReslingRefusalMarker)
+			}
+			if !errors.Is(err, errReslingRefused) {
+				t.Fatal("refusal must match errReslingRefused")
+			}
+		})
 	}
 }

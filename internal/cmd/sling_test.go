@@ -1968,6 +1968,11 @@ func TestExecuteSlingRawReviewOnlySuccessKeepsMetadata(t *testing.T) {
 		assertHasRawReviewMetadata(t, readMutableBDDescription(t, descPath))
 		return nil
 	}
+	// The hook ends any witness orphan episode on the base bead (gt-vm5g4).
+	prevClear := clearOrphanEpisodeLabelsFn
+	t.Cleanup(func() { clearOrphanEpisodeLabelsFn = prevClear })
+	var cleared []string
+	clearOrphanEpisodeLabelsFn = func(_ string, beadID string) { cleared = append(cleared, beadID) }
 
 	result, err := executeSling(SlingParams{
 		BeadID:      "gt-rawrollback",
@@ -1987,6 +1992,9 @@ func TestExecuteSlingRawReviewOnlySuccessKeepsMetadata(t *testing.T) {
 		t.Fatalf("executeSling result not successful: %+v", result)
 	}
 	assertHasRawReviewMetadata(t, readMutableBDDescription(t, descPath))
+	if len(cleared) != 1 || cleared[0] != "gt-rawrollback" {
+		t.Fatalf("orphan label clears = %v, want [gt-rawrollback]", cleared)
+	}
 }
 
 func TestSlingFormulaRollsBackSpawnedPolecatOnWispFailure(t *testing.T) {

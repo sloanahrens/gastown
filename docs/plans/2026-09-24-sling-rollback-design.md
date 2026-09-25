@@ -108,8 +108,9 @@ Two teardown paths leave the bead and the polecat out of step.
    - For automated dispatchers, that refusal is a deferral, not a failure.
      The scheduler leaves the context queued and records no dispatch
      failure. The convoy and epic feeders count it apart from failures. The
-     daemon's convoy feeder logs "deferring", matched on the text
-     "refusing to re-sling".
+     daemon's convoy feeder logs "deferring". It matches the text
+     `dispatch.ReslingRefusalMarker` ("refusing to re-sling"), which both
+     `internal/cmd` and `internal/daemon` import.
    - A failed sling whose bead's work survives hands the bead back to its
      pre-sling holder instead of releasing it.
    - Every release is a guarded `--if-assignee` write. That covers removal,
@@ -123,7 +124,9 @@ Two teardown paths leave the bead and the polecat out of step.
      escalated once, and the bead is labelled `gt:survival-escalated`. A
      definite answer clears `gt:survival-unknown` and
      `gt:survival-escalated`. A successful reset also clears
-     `gt:preserved-orphan`, so a later episode starts over.
+     `gt:preserved-orphan`, so a later episode starts over. A sling that
+     hooks the bead clears all three labels (best-effort), which covers an
+     episode an operator ended with `--branch` or `--force`.
 
 ## Invariants the tests pin
 

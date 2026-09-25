@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
@@ -1437,11 +1438,11 @@ func reslingSurvivingWorkGuard(townRoot, beadID, holder string) error {
 	branch, err := survivingWorkForBeadFn(townRoot, beadID)
 	switch {
 	case err != nil && !noRepoToProtect(err):
-		return &reslingRefusal{msg: fmt.Sprintf("refusing to re-sling %s: previous holder %s has no active session, and sling cannot verify surviving work (%v); resume with --branch or override with --force",
-			beadID, holder, err)}
+		return &reslingRefusal{msg: fmt.Sprintf("%s %s: previous holder %s has no active session, and sling cannot verify surviving work (%v); resume with --branch or override with --force",
+			dispatch.ReslingRefusalMarker, beadID, holder, err)}
 	case branch != "":
-		return &reslingRefusal{msg: fmt.Sprintf("refusing to re-sling %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
-			beadID, holder, branch, beadID, branch, beadID)}
+		return &reslingRefusal{msg: fmt.Sprintf("%s %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
+			dispatch.ReslingRefusalMarker, beadID, holder, branch, beadID, branch, beadID)}
 	}
 	return nil
 }
@@ -1451,11 +1452,11 @@ func reslingSurvivingWorkGuard(townRoot, beadID, holder string) error {
 // treat it as a deferral, not a failure: the bead waits for an operator to
 // resume (--branch) or discard (--force) the work, or for survival to become
 // verifiable again, and must not burn a dispatch attempt meanwhile.
-var errReslingRefused = errors.New("refusing to re-sling")
+var errReslingRefused = errors.New(dispatch.ReslingRefusalMarker)
 
-// reslingRefusal is the guard's refusal. Its text starts with "refusing to
-// re-sling", which the daemon's convoy feeder (a gt sling subprocess) also
-// recognizes.
+// reslingRefusal is the guard's refusal. Its text starts with
+// dispatch.ReslingRefusalMarker, which the daemon's convoy feeder (running gt
+// sling as a subprocess) matches on stderr.
 type reslingRefusal struct{ msg string }
 
 func (e *reslingRefusal) Error() string { return e.msg }
@@ -1497,6 +1498,49 @@ func (t *feederDispatchTally) result(kind, id string) error {
 	}
 	return nil
 }
+
+// orphanEpisodeLabels are the witness's cross-cycle memory for an orphaned
+// bead (mol-witness-patrol survey-workers step 5): the mayor was told its work
+// survives, the last survival answer was unknown, and that unknown run was
+// escalated. Each suppresses a repeat notice while present.
+var orphanEpisodeLabels = []string{"gt:preserved-orphan", "gt:survival-unknown", "gt:survival-escalated"}
+
+// clearOrphanEpisodeLabels removes the orphan-episode labels from a bead that
+// sling just hooked to a new holder. A successful sling ends the episode —
+// including one an operator ended with --branch or --force — so a later
+// orphaning of the same bead must mail and escalate afresh (gt-vm5g4).
+// Best-effort: every bd call is bounded by the beads subprocess timeout, a
+// failure only warns, and a bead carrying none of the labels costs one read
+// and no write.
+func clearOrphanEpisodeLabels(townRoot, beadID string) {
+	if beadID == "" {
+		return
+	}
+	b := beads.New(beads.ResolveHookDir(townRoot, beadID, ""))
+	issue, err := b.Show(beadID)
+	if err != nil {
+		fmt.Printf("  %s Could not read %s to clear orphan labels: %v\n", style.Dim.Render("Warning:"), beadID, err)
+		return
+	}
+	var present []string
+	for _, want := range orphanEpisodeLabels {
+		for _, have := range issue.Labels {
+			if have == want {
+				present = append(present, want)
+				break
+			}
+		}
+	}
+	if len(present) == 0 {
+		return
+	}
+	if err := b.Update(beadID, beads.UpdateOptions{RemoveLabels: present}); err != nil {
+		fmt.Printf("  %s Could not clear orphan labels %v on %s: %v\n", style.Dim.Render("Warning:"), present, beadID, err)
+	}
+}
+
+// clearOrphanEpisodeLabelsFn is a seam for tests.
+var clearOrphanEpisodeLabelsFn = clearOrphanEpisodeLabels
 
 // survivingBranchesForBead lists every polecat branch on the rig's origin
 // remote that encodes beadID, newest first. Unlike survivingBranchForBead it

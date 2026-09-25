@@ -481,6 +481,8 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 
 	fmt.Printf("  %s Work attached to %s\n", style.Bold.Render("✓"), spawnInfo.PolecatName)
+	// Labels live on the base bead even when a formula wisp was hooked.
+	clearOrphanEpisodeLabelsFn(townRoot, params.BeadID)
 
 	// The bead is dispatched now, so later dispatches in this process should
 	// see it in the pool even though their snapshot predates this hook.

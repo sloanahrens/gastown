@@ -273,9 +273,12 @@ func setupRollbackGuardTown(t *testing.T) string {
 	})
 
 	prevBurnWisp, prevConvoy, prevResolveAgent := burnSlingWispFn, createAutoConvoyFn, resolveTargetAgentFn
+	prevClearLabels := clearOrphanEpisodeLabelsFn
 	t.Cleanup(func() {
 		burnSlingWispFn, createAutoConvoyFn, resolveTargetAgentFn = prevBurnWisp, prevConvoy, prevResolveAgent
+		clearOrphanEpisodeLabelsFn = prevClearLabels
 	})
+	clearOrphanEpisodeLabelsFn = func(string, string) {}
 	burnSlingWispFn = func(string, string) error { return nil }
 	createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) {
 		return "", errors.New("unexpected convoy create")
@@ -538,6 +541,41 @@ func TestRunSlingFormulaRollsBackOnEveryPostSpawnExit(t *testing.T) {
 			}
 			if strings.Join(burned, ",") != strings.Join(tc.wantBurned, ",") {
 				t.Fatalf("burned wisps = %v, want %v", burned, tc.wantBurned)
+			}
+		})
+	}
+}
+
+// A sling that hooks the bead ends any witness orphan episode, so it clears
+// the episode labels once, after the hook lands (gt-vm5g4). A sling that fails
+// before the hook leaves them.
+func TestRunSlingClearsOrphanEpisodeLabelsOnHook(t *testing.T) {
+	const bead = "gt-abc123"
+	for _, tc := range []struct {
+		name   string
+		inject func()
+		want   []string
+	}{
+		{name: "success", inject: func() {}, want: []string{bead}},
+		{name: "session fails after the hook", inject: func() {
+			startSpawnedPolecatSessionFn = func(*SpawnedPolecatInfo) (string, error) { return "", errInjected }
+		}, want: []string{bead}},
+		{name: "hook fails", inject: func() {
+			hookBeadWithRetryFn = func(string, string, string) error { return errInjected }
+		}},
+		{name: "fails before the hook", inject: func() {
+			tryAcquireSlingAssigneeLockFn = func(string, string) (func(), error) { return nil, errInjected }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupRollbackGuardTown(t)
+			_ = recordRollbacks(t)
+			var got []string
+			clearOrphanEpisodeLabelsFn = func(_ string, beadID string) { got = append(got, beadID) }
+			tc.inject()
+			_ = runSling(nil, []string{bead, "gastown"})
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("label clears = %v, want %v", got, tc.want)
 			}
 		})
 	}
