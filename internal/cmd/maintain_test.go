@@ -386,3 +386,166 @@ func TestMaintainPreflightRefusalIsNotSilent(t *testing.T) {
 		t.Fatal("a verified, undiverged remote was refused — the guard would never clear")
 	}
 }
+
+// TestMaintainClassifyForPlan drives the plan's counting rules without a live
+// Dolt server: a refused database must never be counted as flattening (the
+// count that feeds "Will flatten: N" and the exit-code decision), and an
+// unknown commit count must be counted at most once, only for a database that
+// will actually flatten (gt-aku6).
+func TestMaintainClassifyForPlan(t *testing.T) {
+	t.Parallel()
+
+	const threshold = 100
+
+	t.Run("below threshold neither flattens nor is refused", func(t *testing.T) {
+		db := maintainDBInfo{name: "om", commitCount: 5, countKnown: true}
+		row := maintainClassifyForPlan(db, threshold, false)
+		if row.willFlatten || row.refused {
+			t.Errorf("row = %+v, want neither willFlatten nor refused for a database under threshold", row)
+		}
+	})
+
+	t.Run("over threshold with a clean pre-flight flattens", func(t *testing.T) {
+		db := maintainDBInfo{name: "om", commitCount: 500, countKnown: true,
+			preflight: maintainPreflight{Remote: "origin"}}
+		row := maintainClassifyForPlan(db, threshold, false)
+		if !row.willFlatten {
+			t.Error("willFlatten = false, want true for an over-threshold, undiverged database")
+		}
+		if row.refused {
+			t.Error("refused = true for a database whose pre-flight cleared it")
+		}
+		if row.countUnknown {
+			t.Error("countUnknown = true for a database with a known count")
+		}
+	})
+
+	t.Run("diverged database is refused, not counted as flattening", func(t *testing.T) {
+		db := maintainDBInfo{name: "om", commitCount: 500, countKnown: true,
+			preflight: maintainPreflight{Remote: "origin", Diverged: true}}
+		row := maintainClassifyForPlan(db, threshold, false)
+		if row.willFlatten {
+			t.Error("willFlatten = true for a diverged database — it must be excluded from the flatten count")
+		}
+		if !row.refused {
+			t.Fatal("refused = false for a diverged database")
+		}
+		if row.refusalReason == "" {
+			t.Error("refusalReason is empty for a refused database")
+		}
+	})
+
+	t.Run("--force-diverged clears the refusal and counts as flattening", func(t *testing.T) {
+		db := maintainDBInfo{name: "om", commitCount: 500, countKnown: true,
+			preflight: maintainPreflight{Remote: "origin", Diverged: true}}
+		row := maintainClassifyForPlan(db, threshold, true)
+		if row.refused {
+			t.Error("refused = true with --force-diverged, want the refusal skipped")
+		}
+		if !row.willFlatten {
+			t.Error("willFlatten = false with --force-diverged on a database over threshold")
+		}
+	})
+
+	t.Run("refused database with an unknown count is not double-counted", func(t *testing.T) {
+		// The specific gap: a database that is both over threshold with an
+		// unknown commit count AND refused by the pre-flight must contribute
+		// to refusedCount alone. Reading countUnknown here would let it also
+		// increment unknownCount in the caller, even though it was never
+		// flattened.
+		db := maintainDBInfo{name: "om", countErr: errors.New("connect: connection refused"),
+			preflight: maintainPreflight{Remote: "origin", Diverged: true}}
+		row := maintainClassifyForPlan(db, threshold, false)
+		if !row.refused {
+			t.Fatal("refused = false for a diverged database with an unknown count")
+		}
+		if row.willFlatten {
+			t.Error("willFlatten = true for a refused database")
+		}
+		if row.countUnknown {
+			t.Error("countUnknown = true for a refused database — it was never flattened, so it must not feed the unknown-flatten-count tally")
+		}
+	})
+
+	t.Run("unknown count flattens and is counted exactly once", func(t *testing.T) {
+		db := maintainDBInfo{name: "om", countErr: errors.New("connect: connection refused")}
+		row := maintainClassifyForPlan(db, threshold, false)
+		if row.refused {
+			t.Error("refused = true for a database with no configured remote")
+		}
+		if !row.willFlatten {
+			t.Fatal("willFlatten = false for an unknown-count database, want it flattened rather than silently skipped (gt-racu)")
+		}
+		if !row.countUnknown {
+			t.Error("countUnknown = false for a database whose count measurement failed")
+		}
+	})
+
+	t.Run("backup state is classified independently of flatten/refusal", func(t *testing.T) {
+		backedUp := maintainClassifyForPlan(
+			maintainDBInfo{name: "be", commitCount: 1, countKnown: true, hasBackup: true, backupKnown: true},
+			threshold, false)
+		if !backedUp.hasBackup || backedUp.backupUnknown {
+			t.Errorf("backedUp row = %+v, want hasBackup only", backedUp)
+		}
+
+		unbacked := maintainClassifyForPlan(
+			maintainDBInfo{name: "be", commitCount: 1, countKnown: true, backupKnown: true},
+			threshold, false)
+		if unbacked.hasBackup || unbacked.backupUnknown {
+			t.Errorf("unbacked row = %+v, want neither hasBackup nor backupUnknown", unbacked)
+		}
+
+		unknownBackup := maintainClassifyForPlan(
+			maintainDBInfo{name: "be", commitCount: 1, countKnown: true, backupErr: errors.New("boom")},
+			threshold, false)
+		if !unknownBackup.backupUnknown || unknownBackup.hasBackup {
+			t.Errorf("unknownBackup row = %+v, want backupUnknown only", unknownBackup)
+		}
+	})
+}
+
+// TestMaintainPlanTally exercises the aggregate counts the same way
+// runMaintain's plan-display loop derives them from maintainClassifyForPlan,
+// pinning the two properties gt-aku6 found missing coverage for: a refused
+// database (including one with an unknown count) is excluded from
+// flattenCount and unknownCount, and refusedCount tracks it instead.
+func TestMaintainPlanTally(t *testing.T) {
+	t.Parallel()
+
+	const threshold = 100
+	dbInfos := []maintainDBInfo{
+		{name: "clean", commitCount: 500, countKnown: true,
+			preflight: maintainPreflight{Remote: "origin"}},
+		{name: "diverged", commitCount: 500, countKnown: true,
+			preflight: maintainPreflight{Remote: "origin", Diverged: true}},
+		{name: "diverged-unknown-count", countErr: errors.New("connect: connection refused"),
+			preflight: maintainPreflight{Remote: "origin", Diverged: true}},
+		{name: "unknown-count-clean", countErr: errors.New("connect: connection refused")},
+		{name: "quiet", commitCount: 1, countKnown: true},
+	}
+
+	var flattenCount, refusedCount, unknownCount int
+	for _, db := range dbInfos {
+		row := maintainClassifyForPlan(db, threshold, false)
+		switch {
+		case row.refused:
+			refusedCount++
+		case row.willFlatten:
+			flattenCount++
+			if row.countUnknown {
+				unknownCount++
+			}
+		}
+	}
+
+	if flattenCount != 2 {
+		t.Errorf("flattenCount = %d, want 2 (clean, unknown-count-clean)", flattenCount)
+	}
+	if refusedCount != 2 {
+		t.Errorf("refusedCount = %d, want 2 (diverged, diverged-unknown-count)", refusedCount)
+	}
+	if unknownCount != 1 {
+		t.Errorf("unknownCount = %d, want 1 — only unknown-count-clean flattens with an unknown count; diverged-unknown-count was refused, not flattened", unknownCount)
+	}
+}

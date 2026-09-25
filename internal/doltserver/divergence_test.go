@@ -127,6 +127,38 @@ func TestFetchAndVerify(t *testing.T) {
 			t.Fatalf("flatten left the remote holding commits local no longer has, but the pre-flight cleared it (head=%s)", after.RemoteHead)
 		}
 	})
+
+	// The fail-open this guard must not have: a database can have more than
+	// one remote, and a check that only looked at the alphabetically-first
+	// one would clear the whole database on that remote's say-so alone,
+	// leaving a second, genuinely diverged remote unexamined.
+	t.Run("divergence on a remote that does not sort first is still caught", func(t *testing.T) {
+		consumer, consumerName := createDivergenceTestDB(t, admin)
+		seedHistory(t, consumer, consumerName)
+
+		// "aardvark" sorts before "zzremote". Push the consumer's own current
+		// history there, so this remote is provably not diverged.
+		execSQL(t, consumer, "CALL DOLT_REMOTE('add','aardvark',?)", remoteURL(consumerName+"-aardvark"))
+		execSQL(t, consumer, "CALL DOLT_PUSH('aardvark','main')")
+
+		// "zzremote" points at a producer database with unrelated history the
+		// consumer does not have.
+		producer, producerName := createDivergenceTestDB(t, admin)
+		seedHistory(t, producer, producerName)
+		addRemoteAndPush(t, producer, producerName)
+		execSQL(t, consumer, "CALL DOLT_REMOTE('add','zzremote',?)", remoteURL(producerName))
+
+		got, err := fetchAndVerify(t, consumer, consumerName)
+		if err != nil {
+			t.Fatalf("FetchAndVerify with two remotes: %v", err)
+		}
+		if !got.Diverged {
+			t.Fatalf("consumer has a second, diverged remote (zzremote) but the guard cleared it — only the first remote (aardvark) was examined")
+		}
+		if got.Remote != "zzremote" {
+			t.Errorf("Remote = %q, want zzremote (the remote the divergence was found on)", got.Remote)
+		}
+	})
 }
 
 // TestFetchAndVerifyRejectsInvalidDatabaseName pins the identifier check: the

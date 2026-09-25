@@ -103,9 +103,13 @@ type maintainDBInfo struct {
 	// meaningless — not a "no" — and must not be read as one (gt-ij15).
 	backupKnown bool
 	backupErr   error
-	// preflight is the remote-divergence check for this database. It is only
-	// populated for databases the plan means to flatten; a database that is
-	// below threshold is never fetched.
+	// preflight is the remote-divergence check for this database, as of the
+	// plan phase. It is only populated for databases the plan means to
+	// flatten; a database that is below threshold is never fetched. It backs
+	// the plan display only — the flatten phase re-runs the check
+	// immediately before flattening rather than trusting this snapshot
+	// (gt-aku6), since backup and reap can take minutes and nothing else
+	// re-verifies on the daemon's unattended --force path.
 	preflight maintainPreflight
 }
 
@@ -175,6 +179,54 @@ func maintainCheckDivergence(config *doltserver.Config, dbName string) maintainP
 // database identically. An unknown count therefore flattens rather than skips.
 func (db maintainDBInfo) needsFlatten(threshold int) bool {
 	return !db.countKnown || db.commitCount >= threshold
+}
+
+// maintainPlanRow is one database's classification in the maintenance plan:
+// whether it flattens, is refused, and its backup state. It mirrors the
+// decisions runMaintain's plan-display loop renders, split into a pure
+// function of maintainDBInfo so the counting rules — a refused database is
+// never counted as flattening, and an unknown commit count is counted at most
+// once, only for a database that will actually flatten — have a test that
+// does not require a live Dolt server (gt-aku6).
+type maintainPlanRow struct {
+	// willFlatten is true when the database is at or over threshold and the
+	// pre-flight did not refuse it.
+	willFlatten bool
+	// refused is true when the database needed to flatten but the pre-flight
+	// (or --force-diverged's absence of one) refused it. refusalReason is the
+	// human-readable reason in that case.
+	refused       bool
+	refusalReason string
+	// countUnknown is true only when willFlatten is also true and the commit
+	// count measurement failed — never set for a refused database, since a
+	// refused database was not flattened regardless of what its count was.
+	countUnknown bool
+	// hasBackup and backupUnknown mirror maintainDBInfo's own backup fields;
+	// exactly one may be true, matching the mutually exclusive plan tags.
+	hasBackup     bool
+	backupUnknown bool
+}
+
+// maintainClassifyForPlan applies the plan's flatten/refusal/backup decisions
+// to one database, exactly as runMaintain's plan-display loop does.
+func maintainClassifyForPlan(db maintainDBInfo, threshold int, forceDiverged bool) maintainPlanRow {
+	var row maintainPlanRow
+	if db.needsFlatten(threshold) {
+		if reason := db.preflight.refusal(forceDiverged); reason != "" {
+			row.refused = true
+			row.refusalReason = reason
+		} else {
+			row.willFlatten = true
+			row.countUnknown = !db.countKnown
+		}
+	}
+	switch {
+	case !db.backupKnown:
+		row.backupUnknown = true
+	case db.hasBackup:
+		row.hasBackup = true
+	}
+	return row
 }
 
 // countText renders the commit count for the plan line, keeping an unknown
@@ -298,35 +350,33 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	unknownBackupCount := 0
 	fmt.Printf("\n%s Maintenance plan:\n", style.Bold.Render("●"))
 	for _, db := range dbInfos {
+		row := maintainClassifyForPlan(db, maintainThreshold, maintainForceDiverged)
 		tags := ""
-		if db.needsFlatten(maintainThreshold) {
+		switch {
+		case row.refused:
+			tags += fmt.Sprintf(" %s", style.Warning.Render("→ REFUSED: "+row.refusalReason))
+			refusedCount++
+		case row.willFlatten:
 			reason := ""
-			if !db.countKnown {
-				reason = " (count unknown)"
-			}
-			if refusal := db.preflight.refusal(maintainForceDiverged); refusal != "" {
-				tags += fmt.Sprintf(" %s", style.Warning.Render("→ REFUSED: "+refusal))
-				refusedCount++
-			} else {
+			if row.countUnknown {
 				// unknownCount feeds the "flattened, not skipped" line below,
 				// so it counts only databases that will actually flatten — an
 				// unknown count on a refused database was not flattened, and
 				// saying so was the whole point of gt-racu.
-				if !db.countKnown {
-					unknownCount++
-				}
-				tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"+reason))
-				flattenCount++
+				reason = " (count unknown)"
+				unknownCount++
 			}
+			tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"+reason))
+			flattenCount++
 		}
 		switch {
-		case !db.backupKnown:
+		case row.backupUnknown:
 			// Neither a backed-up database nor an unbacked one: the probe did
 			// not answer, and the line says so rather than leaving the gap that
 			// reads as "no backup configured" (gt-ij15).
 			tags += fmt.Sprintf(" %s", style.Warning.Render("→ "+db.backupText()))
 			unknownBackupCount++
-		case db.hasBackup:
+		case row.hasBackup:
 			tags += fmt.Sprintf(" %s", style.Dim.Render("[backup]"))
 			backupCount++
 		}
@@ -416,11 +466,17 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 			if !db.needsFlatten(maintainThreshold) {
 				continue
 			}
-			// The same predicate the plan rendered, applied at the statement
-			// that actually destroys history. The verdict is the plan phase's
-			// — the operator confirmed that plan, and a second fetch here
-			// could refuse a flatten the plan promised.
-			if reason := db.preflight.refusal(maintainForceDiverged); reason != "" {
+			// Re-run the divergence check immediately before flattening rather
+			// than trusting the plan phase's verdict: backup and reap ran in
+			// between, and on the daemon's --force path nothing re-verifies —
+			// there is no operator confirming a plan close enough in time for
+			// it to still be trustworthy. A remote that gained commits during
+			// that window must still refuse (gt-aku6).
+			preflight := db.preflight
+			if !maintainForceDiverged {
+				preflight = maintainCheckDivergence(config, db.name)
+			}
+			if reason := preflight.refusal(maintainForceDiverged); reason != "" {
 				fmt.Printf("  %s %s: refused — %s\n", style.Warning.Render("!"), db.name, reason)
 				refused = append(refused, db.name)
 				continue

@@ -322,8 +322,9 @@ Compaction itself is unchanged SQL — see below.
 **Flattening a diverged database is refused.** A flatten rewrites the commit
 graph, so if the database's remote holds commits the local history does not,
 squashing locally makes the two disagree and the next force-push deletes the
-remote-only commits. `gt maintain` therefore fetches each candidate database's
-remote and refuses to flatten any whose remote has moved on:
+remote-only commits. `gt maintain` therefore fetches every configured remote of
+each candidate database — not just the first — and refuses to flatten any
+whose remote has moved on the database's active branch:
 
 ```
   gt: refused — diverged from origin; pass --force-diverged
@@ -336,6 +337,12 @@ verify" and "verified safe" are different facts. `--force-diverged` skips the
 check, and a refusal exits non-zero with the rest of the maintenance run
 (backup, reap, gc) still complete.
 
+The check runs twice: once while building the plan, and again immediately
+before each flatten. Backup and reap run in between and can take minutes, and
+on the daemon's unattended `--force` path there is no operator re-reading the
+plan to catch a remote that moved during that window — so the second check,
+not the first, is what actually licenses the flatten.
+
 Note the consequence for an unpushed flatten: the remote keeps pointing at
 pre-flatten history, so the next run reports the database as diverged until
 someone pushes. That is the intended reading — the remote really does hold
@@ -344,10 +351,11 @@ commits local no longer has.
 `scheduled_maintenance` acts on `maintenance.mode`. `monitor` (the default)
 escalates with the commit counts and rewrites nothing; `flatten` runs
 `gt maintain --force`, which is still subject to the pre-flight above. Set it
-with `gt config set maintenance.mode flatten`. The daemon recognizes only
-`flatten` and `gc` (below), trimmed and case-insensitive; any other value,
-including a typo, is treated as `monitor`, so a misspelling cannot arm the
-destructive path.
+with `gt config set maintenance.mode flatten`. The daemon recognizes only the
+exact lowercase strings `flatten` and `gc` (below), trimmed of surrounding
+whitespace; any other value, including a typo or a case variation like
+`FLATTEN`, is treated as `monitor`, so a misspelling — or a hand-edited
+`daemon.json` — cannot arm the destructive path.
 
 `gc` is the history-preserving mode (claude-05o; design in
 `docs/plans/2026-09-25-dolt-gc-maintenance-design.md`). It ignores commit
