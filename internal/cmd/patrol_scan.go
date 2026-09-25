@@ -23,6 +23,7 @@ var (
 	patrolScanVerbose           bool
 	patrolScanActivityThreshold time.Duration
 	patrolScanStallWindow       time.Duration
+	patrolScanDryRun            bool
 )
 
 var patrolScanCmd = &cobra.Command{
@@ -38,7 +39,8 @@ Detections:
     stuck done-intent, closed beads with live sessions
   - Stalls: Agents stuck at startup prompts
   - Refinery stall: A live refinery holding unsubmitted composer input while
-    producing no output (gt-hkhu). Queued input is submitted on detection.
+    producing no output (gt-hkhu). Queued input is submitted on detection,
+    unless --dry-run is set.
   - Completions: Agent bead metadata indicating gt done was called
   - Activity: Real work recency per live session, from the agent's transcript
     and pane content — NOT from the pane's rendered spinner/elapsed label
@@ -68,7 +70,8 @@ Examples:
   gt patrol scan                    # Scan current rig
   gt patrol scan --rig gastown      # Scan specific rig
   gt patrol scan --json             # Machine-readable output
-  gt patrol scan --notify           # Send mail on zombie detection`,
+  gt patrol scan --notify           # Send mail on zombie detection
+  gt patrol scan --dry-run          # Detect a stalled refinery without submitting its queued input`,
 	RunE: runPatrolScan,
 }
 
@@ -81,6 +84,8 @@ func init() {
 		"Age of last real activity that marks a polecat as a stall candidate (report-only)")
 	patrolScanCmd.Flags().DurationVar(&patrolScanStallWindow, "stall-window", constants.HungSessionThreshold,
 		"Minimum time between the persisted sample 1 and a later scan for a stall verdict (gt-xb27)")
+	patrolScanCmd.Flags().BoolVar(&patrolScanDryRun, "dry-run", false,
+		"Report a stalled refinery composer without submitting its queued input (om major on gt-wisp-q9os)")
 
 	patrolCmd.AddCommand(patrolScanCmd)
 }
@@ -266,7 +271,7 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	// composed-but-unsubmitted instruction reads as running to every other
 	// check while MRs age behind it (gt-hkhu).
 	refineryResult := runPatrolScanPhase(diagnostics, "refinery stall detection", func() *witness.DetectRefineryStallResult {
-		return witness.DetectStalledRefinery(workDir, rigName)
+		return witness.DetectStalledRefinery(workDir, rigName, patrolScanDryRun)
 	})
 	completionResult := runPatrolScanPhase(diagnostics, "completion discovery", func() *witness.DiscoverCompletionsResult {
 		return witness.DiscoverCompletions(bd, workDir, rigName, router)
