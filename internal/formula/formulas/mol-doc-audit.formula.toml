@@ -214,8 +214,9 @@ R1-R13 in front of you. They are the checklist.
 **3. For every file in the slice, apply every rule.**
 - A `.md` or `.toml` file: read the whole file. For each rule, ask whether any
   line fails it. Edit in place. Deleting is the usual fix (R3, R4, R5, R13);
-  a pointer replaces a duplicate (R2); a split or a move behind a pointer fixes
-  sprawl (R6).
+  a pointer replaces a duplicate (R2). For sprawl (R6), split or move only
+  between files the slice names: a split into a new file, or a move into a file
+  outside the slice, is a proposal for step 5 and never an edit.
 - A `.go` file: comments only. Every doc comment on an exported identifier
   states the contract in one sentence (R10); every inline comment says why
   (R9); history collapses to one bead citation (R11). Never touch code.
@@ -237,13 +238,13 @@ files: <one per line, with the rule ids applied or 'clean'>
 findings per rule: R1=<n> R2=<n> ... R13=<n>
 words agent-facing: before=<WORDS_BEFORE> after=<docs-lint.sh --words now>
 proposals:
-- <deletion | out-of-slice rot | rule to sharpen>: <path or rule> — <evidence>
+- <deletion | out-of-slice rot | R6 split | rule to sharpen>: <path or rule> — <evidence>
 EOF
 )"
 ```
 
-**Done when:** every file in /tmp/doc-audit-slice.txt has a commit or is listed
-as clean in the comment, and the comment is posted.
+**Done when:** every file in /tmp/doc-audit-slice.txt has a commit, a `clean`
+line, or a proposal line naming it, and the comment is posted.
 """
 
 [[steps]]
@@ -278,9 +279,7 @@ git log origin/{{base_branch}}..HEAD --oneline
 
 This MUST show at least 1 commit. If it shows NOTHING:
 - You have NOT completed your implementation. Do NOT close this step.
-- Go back to the implement step and do the work.
-- If the task genuinely requires no code changes (already fixed upstream, etc.),
-  run `gt done --status DEFERRED` and skip remaining steps.
+- Go back to the audit step and do the work.
 - Do NOT proceed to review or build with zero commits.
 
 **5. VERIFY clean working tree:**
@@ -289,17 +288,16 @@ git status
 ```
 Must show "nothing to commit, working tree clean".
 
-**Report-only tasks (audits, reviews, research — no code changes):**
-If your task produced no code changes, verify your findings are persisted to the bead:
+**A clean slice — no code changes:** if every file in the slice passed every
+rule, no commit is expected. Verify the run comment is on the bead; it is the
+audit's output, and a run with no edits still posts it:
 ```bash
-bd show {{issue}}    # Check notes/design fields have your findings
+bd comments {{issue}}    # the `doc-audit run` comment from the audit step
 ```
-If the bead is `review_only: true`, also verify a fresh assignee-authored
-`PR-SHERIFF-EVIDENCE` comment exists for the current `HEAD`.
-If findings/evidence are persisted, proceed to review. Report-only tasks with
-findings persisted can skip commit verification.
+Then run `gt done --status DEFERRED` (submit step) and skip self-review,
+build-check, and pre-verify: no diff means nothing to review, build, or gate.
 
-**Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) report-only task with findings persisted to bead."""
+**Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) a clean slice whose run comment is posted."""
 
 [[steps]]
 id = "self-review"
@@ -314,8 +312,10 @@ sort /tmp/doc-audit-slice.txt > /tmp/doc-audit-slice-sorted.txt
 comm -23 /tmp/doc-audit-changed.txt /tmp/doc-audit-slice-sorted.txt
 ```
 The last command must print nothing. Any path it prints is outside the slice:
-revert it (`git checkout origin/{{base_branch}} -- <path>` then commit) and add
-a line to the bead comment: `reverted out-of-slice edit: <path>`.
+revert it, commit the revert, and add a line to the bead comment
+(`reverted out-of-slice edit: <path>`). A path that exists on {{base_branch}}
+goes back with `git checkout origin/{{base_branch}} -- <path>`; a file you added
+is absent from {{base_branch}}, so undo it with `git rm -f <path>`.
 
 **2. Go files: comments only.**
 ```bash
@@ -360,7 +360,7 @@ If typecheck_command is set:
 Empty commands mean "not configured" — skip silently.
 
 **2. If build fails:**
-- Fix it. Return to implement step if needed.
+- Fix it. Return to the audit step if needed.
 - Do NOT submit broken code to the merge queue.
 
 **3. Targeted tests (OPTIONAL — run if fast and relevant):**
