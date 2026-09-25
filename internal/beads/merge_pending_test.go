@@ -32,6 +32,37 @@ func openMRIndex(mrs ...*Issue) map[string]*Issue {
 	return index
 }
 
+// TestBlockingDependenciesDropBareListShapeRelations pins the defect that made
+// the starting-context merge warning never fire for a real dispatched bead
+// (gt-u6p4). `bd list --json`'s "dependencies" entries are bare relation
+// records (issue_id/depends_on_id/type — no "id" or "status" key), a
+// different shape from `bd show --json`'s full per-dependency issue records.
+// IssueDep.UnmarshalJSON only ever reads an "id" key, so a list-shaped
+// dependency unmarshals with an empty ID; ExtractIssueID then drops it, and
+// the bead reads as dependency-free even though it has a blocker. This is why
+// prime.go's beadWithFullDependencies re-fetches via `bd show` before
+// resolving merge status instead of trusting the `bd list`-sourced hookedBead
+// directly.
+func TestBlockingDependenciesDropBareListShapeRelations(t *testing.T) {
+	issue := unmarshalIssueForTest(t, `{
+		"id":"gt-target",
+		"status":"open",
+		"issue_type":"task",
+		"dependencies":[
+			{"issue_id":"gt-target","depends_on_id":"gt-blocker","type":"blocks","created_at":"2026-09-23T07:06:48Z","created_by":"someone","metadata":"{}"}
+		]
+	}`)
+
+	deps := BlockingDependencies(issue)
+	if len(deps) != 1 || deps[0].ID != "" {
+		t.Fatalf("BlockingDependencies() = %#v, want 1 entry with empty ID (list-shaped relation has no \"id\" key)", deps)
+	}
+
+	if got := CandidateMergeAwareBlockerIDs(issue); got != nil {
+		t.Fatalf("CandidateMergeAwareBlockerIDs() = %#v, want nil — an empty-ID dependency cannot be resolved to a blocker", got)
+	}
+}
+
 // TestDependentStaysBlockedWhileBlockerMRIsOpen is acceptance criterion 1:
 // a dependent is not dispatchable while its blocker's merge request is still in
 // the queue, and becomes dispatchable the moment that MR merges.

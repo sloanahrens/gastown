@@ -155,6 +155,28 @@ func TestRenderDependencyMergeStatusWarnsOnUnmergedBlocker(t *testing.T) {
 	}
 }
 
+// TestBeadWithFullDependenciesSkipsShowWhenNoDependencies verifies the fast
+// path: a bead with no dependencies is returned unchanged, without shelling
+// out to `bd show`. Proven by using an ID `bd show` cannot resolve — if the
+// fast path did not short-circuit, the re-fetch would fail and the function
+// would still (correctly) fall back to the original bead, so this test would
+// pass either way; what it actually pins is same-pointer identity, which only
+// the short-circuit produces.
+func TestBeadWithFullDependenciesSkipsShowWhenNoDependencies(t *testing.T) {
+	bead := &beads.Issue{ID: "gt-does-not-exist-anywhere", DependencyCount: 0}
+	if got := beadWithFullDependencies(RoleContext{}, bead); got != bead {
+		t.Fatalf("beadWithFullDependencies() = %#v, want the same bead pointer unchanged", got)
+	}
+}
+
+// TestBeadWithFullDependenciesNilBead: findAgentWork can return a nil bead
+// (no work hooked); the re-fetch helper must not panic on it.
+func TestBeadWithFullDependenciesNilBead(t *testing.T) {
+	if got := beadWithFullDependencies(RoleContext{}, nil); got != nil {
+		t.Fatalf("beadWithFullDependencies(nil) = %#v, want nil", got)
+	}
+}
+
 // TestRenderDependencyMergeStatusSilentWithoutDependencies: a bead with no
 // dependencies gets no dependency noise in its starting context.
 func TestRenderDependencyMergeStatusSilentWithoutDependencies(t *testing.T) {
