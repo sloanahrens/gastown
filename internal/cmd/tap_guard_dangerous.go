@@ -49,6 +49,9 @@ This guard blocks operations that could cause irreversible damage:
     where a dog's 'grep -R ... /Users/sloan/gt' ran unblocked and walked
     every rig and every worktree on the host. A path inside a single repo or
     worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed.
+    A search pattern is not a root: 'grep -rn polecats ./src' scans ./src,
+    not a polecats/ directory at cwd (gt-yts7). fd is the exception — its
+    pattern is optional, so 'fd /' and 'fd $HOME' are roots.
   - go clean -cache/-testcache/-modcache/-fuzzcache (wipes the Go build
     cache SHARED by every agent on the host — see gt-nqcy follow-up).
   - a loop or watcher around 'gt done' or 'gt slot': a for/while/until block
@@ -764,6 +767,105 @@ var alwaysRecursiveScanTools = map[string]bool{
 	"find": true, "bfs": true, "fd": true, "du": true, "rg": true, "ag": true,
 }
 
+// patternFirstScanTools names the scan tools that take a search pattern as a
+// positional argument, so one is never mistaken for a scan root (gt-yts7).
+// It is only the membership test: scanPatternIndex decides, per invocation,
+// whether a pattern is there to skip.
+//
+// find, bfs, du and ls are absent because they have no pattern argument —
+// every non-flag argument there is a path.
+var patternFirstScanTools = map[string]bool{
+	"grep": true, "rg": true, "ag": true, "fd": true,
+}
+
+// scanPatternIndex returns the index in args of the argument tool reads as
+// its search pattern, or -1 when this invocation has no pattern — in which
+// case every positional argument is a scan-root candidate.
+//
+// Only positional arguments count, and a bare "--" ends flag parsing, so the
+// token after it is positional even when it starts with a dash: `grep -rn --
+// --recursive /` searches for the literal "--recursive" in "/". Reading that
+// token as a flag would move the pattern slot onto "/" and skip the root.
+//
+// grep, rg and ag take the pattern as their first positional argument
+// (written with -e it is still the first one, since -e's value is), and with
+// no path argument they search stdin or the working directory rather than
+// walking anything. Three invocations put a path in that slot instead:
+//
+//   - fd's pattern is optional. fd reads a lone positional argument naming an
+//     existing path as its search root — `fd /`, `fd $HOME`, `fd /Users` are
+//     the everyday ways to walk a whole tree.
+//   - fd's --search-path and -C/--base-directory take the paths to walk as a
+//     flag value, so the pattern argument comes after them (see fdPathFlags).
+//   - rg --files lists paths and takes no pattern.
+func scanPatternIndex(tool string, args []string, vars map[string]string) int {
+	if !patternFirstScanTools[tool] {
+		return -1
+	}
+	if tool == "rg" && hasExactArg(args, "--files") {
+		return -1
+	}
+
+	first, positionals := -1, 0
+	flagsDone, valueNext := false, false
+	for i, a := range args {
+		resolved := resolveShellVar(a, vars)
+		if valueNext {
+			// The value of a path-taking flag (see fdPathFlags): a path, and
+			// so a root candidate, but never the positional pattern.
+			valueNext = false
+			continue
+		}
+		if !flagsDone {
+			if a == "--" {
+				flagsDone = true
+				continue
+			}
+			if isFlagToken(resolved) {
+				valueNext = tool == "fd" && fdPathFlags[resolved]
+				continue
+			}
+		}
+		positionals++
+		if first < 0 {
+			first = i
+		}
+	}
+	if first < 0 {
+		return -1
+	}
+	if tool == "fd" && positionals == 1 && namesExistingPath(resolveShellVar(args[first], vars)) {
+		return -1
+	}
+	return first
+}
+
+// fdPathFlags are the fd options that take the paths to walk as a flag value,
+// so the argument after one of them is a search root rather than something to
+// weigh as the pattern: `fd --search-path / foo` and `fd -C / foo` walk "/".
+// Judging those values as patterns would let a whole-filesystem walk through.
+var fdPathFlags = map[string]bool{
+	"--search-path": true, "-C": true, "--base-directory": true,
+}
+
+// isFlagToken reports whether an argument is an option — "-rn", "--recursive".
+// A lone "-" is not one: tools read it as stdin.
+func isFlagToken(arg string) bool {
+	return len(arg) > 1 && arg[0] == '-'
+}
+
+// namesExistingPath reports whether token names something on disk. It is fd's
+// own test for a lone positional argument: an existing path there is fd's
+// search root rather than its pattern. Existence is one stat(2), never a walk.
+func namesExistingPath(token string) bool {
+	p, ok := expandHomePath(token)
+	if !ok || p == "" || strings.Contains(p, "$") {
+		return false
+	}
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 // commandArgs returns the arguments of the command starting at i — its
 // tokens up to the next shell command separator, the same delimiting the
 // other per-command matchers use (see shellCommandSeparators, gt-wisp-52y4).
@@ -820,13 +922,24 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 			continue
 		}
 
-		for _, arg := range rest {
+		pattern := scanPatternIndex(base, rest, vars)
+		for j, arg := range rest {
 			resolved := resolveShellVar(arg, vars)
 			if isUnboundedScanRoot(resolved) {
 				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)
 				alternative = "Alternative: brew --prefix, pkg-config, 'go env GOROOT'/'go env GOMODCACHE', " +
 					"or a search rooted inside the repo/rig instead of the whole filesystem."
 				return reason, alternative
+			}
+			if j == pattern {
+				// The pattern a scan tool was given is not the path it scans,
+				// whatever the pattern spells — `grep -rn polecats ./docs`
+				// from a rig root only *looks* like a scan of that rig's
+				// polecats/ because cwd holds one (gt-yts7). scanPatternIndex
+				// gives this slot to the pattern rather than to the value of a
+				// path-taking flag (fdPathFlags, rg --files), and the denylist
+				// above still judges every argument's spelling.
+				continue
 			}
 			root := scanRootPath(resolved)
 			// The expanded home directory names the same root as ~ / $HOME.

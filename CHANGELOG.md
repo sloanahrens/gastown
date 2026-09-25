@@ -179,6 +179,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure is logged with its category, so a timeout no longer reads like a
   missing bead, and a rig whose status cannot be verified is escalated instead
   of only warned about.
+- **A grep/rg/ag/fd search pattern is no longer read as a scan root**
+  (gt-yts7) — the unbounded-scan rule ran every non-flag argument through
+  `scanRootPath`, which reads a relative token as a path whenever the directory
+  it names exists. A pattern that collided with a real directory name at cwd —
+  `grep -rn polecats ./docs` run from a rig root, which does hold a `polecats/`
+  — was blocked as a scan of that directory. The pattern slot is now identified
+  per tool and that one argument exempted from the root checks: fd's pattern is
+  optional, so a lone `fd /` or `fd $HOME` is still its search root, and fd's
+  `--search-path`/`-C` supply paths as a flag value rather than a pattern;
+  `rg --files` takes paths and no pattern; and a pattern escaped with `--`
+  (`grep -rn -- --recursive /`) counts as positional, so the root behind it is
+  still checked. The host-root denylist judges every argument's spelling, so
+  no `/`, `~` or `$HOME` spelling became reachable that was not before.
 
 ### Changed
 
