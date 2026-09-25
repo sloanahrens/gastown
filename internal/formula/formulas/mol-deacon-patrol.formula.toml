@@ -220,9 +220,14 @@ Subject format: `RECOVERED_BEAD <bead-id>`
 gt mail read <id>
 # Extract bead ID from subject
 gt deacon redispatch <bead-id>
+rc=$?
 # Exit 2 (cooldown or deferred): leave the message in the inbox; the next
 # patrol retries it. Any other exit: archive it.
-gt mail archive <message-id>
+if [ "$rc" -eq 2 ]; then
+  echo "redispatch <bead-id>: cooldown/deferred, leaving <message-id> for the next patrol"
+else
+  gt mail archive <message-id>
+fi
 ```
 
 The `redispatch` command handles:

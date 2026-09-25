@@ -58,6 +58,36 @@ func TestDeaconPatrolRedispatchExit2IsRetried(t *testing.T) {
 	if strings.Contains(d, "archive the message regardless") {
 		t.Error("inbox-check still archives every redispatch exit, dropping deferred beads")
 	}
+
+	// The bash sample is what the agent copies, so the archive in it must be
+	// guarded by the exit code: an unconditional archive under a comment
+	// saying "keep it" drops every deferred bead.
+	start := strings.Index(d, "gt deacon redispatch <bead-id>")
+	if start < 0 {
+		t.Fatal("RECOVERED_BEAD sample does not run gt deacon redispatch <bead-id>")
+	}
+	end := strings.Index(d[start:], "```")
+	if end < 0 {
+		t.Fatal("RECOVERED_BEAD sample block is not closed")
+	}
+	sample := d[start : start+end]
+	capture := strings.Index(sample, "rc=$?")
+	guard := strings.Index(sample, `if [ "$rc" -eq 2 ]; then`)
+	elseAt := strings.Index(sample, "else")
+	archive := strings.Index(sample, "gt mail archive <message-id>")
+	fiAt := strings.LastIndex(sample, "fi")
+	switch {
+	case capture < 0:
+		t.Errorf("sample does not capture the redispatch exit code (rc=$?):\n%s", sample)
+	case guard < capture:
+		t.Errorf("sample does not test $rc for 2 after capturing it:\n%s", sample)
+	case archive < 0:
+		t.Errorf("sample never archives:\n%s", sample)
+	case !(guard < elseAt && elseAt < archive && archive < fiAt):
+		t.Errorf("gt mail archive is not inside the else branch of the exit-2 check:\n%s", sample)
+	case strings.Count(sample, "gt mail archive") != 1:
+		t.Errorf("sample archives more than once, so one path is unguarded:\n%s", sample)
+	}
 }
 
 // TestConvoyFeedDispatchHonorsHold pins gt-ifijm on the feed dog: it slings
