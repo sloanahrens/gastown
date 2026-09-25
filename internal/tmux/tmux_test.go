@@ -2452,9 +2452,16 @@ func TestHasBusyIndicator(t *testing.T) {
 		{"claude spinner busy - no k suffix", "· Processing… (2s · ↓ 129 tokens)", true},
 		{"claude subagent busy", "◯ Explore  Grepping runEscalate and BdCli definitions   48s · ↓ 38.0k tokens", true},
 		{"claude tool-running hint busy", "  (ctrl+b ctrl+b (twice) to run in background)", true},
+		{"claude spinner busy - indented", "   ✽ Leavening… (3m 17s · ↓ 14.1k tokens)", true},
 		{"claude idle done line", "✻ Cooked for 4m 23s · done 10:29 PM", false},
 		{"idle line", "› Review ready notification", false},
 		{"idle footer with context pct, no arrow", "  Sonnet 5 | Context: 21%", false},
+		// gt-dq6pi: a relayed nudge quoting another pane's live spinner carries
+		// the same token-count substring but is prose, not the status line
+		// itself — the mayor read this as BUSY on every idle poll because
+		// hasBusyIndicator matched the substring anywhere in the line.
+		{"transcript quoting another pane's spinner", `live turn "Sautéing… 8m16s · ↓14.6k tokens"`, false},
+		{"prose mentioning tokens without leading glyph", "the deacon nudge showed ↓14.6k tokens in the transcript", false},
 		{"blank", "", false},
 	}
 
@@ -2765,6 +2772,109 @@ func TestIsBusy_LivePane(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// TestIsBusy_LivePane_IgnoresQuotedSpinnerInTranscript reproduces gt-dq6pi: the
+// mayor read BUSY forever because a relayed nudge earlier in its transcript
+// quoted another pane's live spinner text ("Sautéing… 8m16s · ↓14.6k tokens").
+// That text carries the same token-count substring busyTokenSpinnerPattern
+// looks for, but it is prose describing another pane, not this pane's live
+// status line — IsBusy must not treat it as one.
+func TestIsBusy_LivePane_IgnoresQuotedSpinnerInTranscript(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-is-busy-quoted-" + t.Name()
+
+	_ = tm.KillSession(session)
+	if err := tm.NewSession(session, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(session) }()
+
+	quote := `printf 'live turn "Sautéing… 8m16s · ↓14.6k tokens"\n'`
+	if err := tm.SendKeys(session, quote); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	// Give the shell a moment to render, then confirm the quote alone never
+	// reads as busy (poll rather than sleep-once so a slow shell isn't a flake).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if !tm.IsBusy(session) {
+			return
+		}
+		if time.Now().After(deadline) {
+			out, _ := tm.CapturePane(session, busyCaptureLines)
+			t.Fatalf("IsBusy on a pane whose only token-count text is quoted transcript = true, want false; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestCapturePaneVisibleTail_ExcludesHistory guards the capture-window defect
+// behind gt-dq6pi: CapturePane/CapturePaneLines(session, N) pass N to tmux's
+// "-S -N" (start-line) flag, which starts N lines into HISTORY and, absent an
+// explicit -E, still ends at the bottom of the visible pane — so on a pane
+// taller than N it returns the whole visible screen PLUS N history lines, not
+// the last N lines. Busy detection asking for "the last 20 lines" this way
+// actually scans the full screen plus 20 rows of old transcript, so content
+// that scrolled out of view (e.g. a relayed nudge quoting another pane's
+// spinner) never ages out. capturePaneVisibleTail must return only the
+// visible screen's own tail, regardless of how deep the history goes.
+func TestCapturePaneVisibleTail_ExcludesHistory(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-visible-tail-" + t.Name()
+
+	_ = tm.KillSession(session)
+	if err := tm.NewSession(session, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(session) }()
+
+	// A pane a bit taller than busyCaptureLines (20), matching the real
+	// Claude Code panes (40-63 rows) the bug was reproduced against.
+	if _, err := tm.run("resize-window", "-t", session, "-x", "80", "-y", "24"); err != nil {
+		t.Fatalf("resize-window: %v", err)
+	}
+
+	if err := tm.SendKeys(session, "echo HISTORY_MARKER_TOKEN"); err != nil {
+		t.Fatalf("SendKeys marker: %v", err)
+	}
+	for i := 1; i <= 15; i++ {
+		if err := tm.SendKeys(session, fmt.Sprintf("echo fill-%d", i)); err != nil {
+			t.Fatalf("SendKeys fill %d: %v", i, err)
+		}
+	}
+
+	// Sanity check: confirm this environment actually reproduces the "-S -N"
+	// over-capture before asserting the fix, so a future tmux behavior change
+	// fails loudly here instead of silently passing the negative assertion.
+	broken, err := tm.CapturePaneLines(session, busyCaptureLines)
+	if err != nil {
+		t.Fatalf("CapturePaneLines: %v", err)
+	}
+	if !linesContain(broken, "HISTORY_MARKER_TOKEN") {
+		t.Skip("environment did not reproduce the tmux -S window behavior this test guards against")
+	}
+
+	tail, err := tm.capturePaneVisibleTail(session)
+	if err != nil {
+		t.Fatalf("capturePaneVisibleTail: %v", err)
+	}
+	if len(tail) > busyCaptureLines {
+		t.Errorf("capturePaneVisibleTail returned %d lines, want at most %d", len(tail), busyCaptureLines)
+	}
+	if linesContain(tail, "HISTORY_MARKER_TOKEN") {
+		t.Errorf("capturePaneVisibleTail leaked scrollback history into the tail: %v", tail)
+	}
+}
+
+func linesContain(lines []string, substr string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestIsBusy_CaptureErrorFailsSafeBusy mirrors
