@@ -242,6 +242,138 @@ func TestPushedCheckpointRequiresMatchingCommit(t *testing.T) {
 	})
 }
 
+// countingLandedProbe answers classifyResumedPush's target question and counts
+// how often it was asked. A checkpoint that matches nothing must never reach it:
+// where the work sits says nothing about a branch this run's checkpoint does not
+// describe.
+type countingLandedProbe struct {
+	landed bool
+	calls  int
+}
+
+func (p *countingLandedProbe) CommitLandedOnTarget(remote, target, commit string) bool {
+	p.calls++
+	return p.landed
+}
+
+// TestClassifyResumedPushAsksTheTargetOnlyForThisCommit is the gt-mik3
+// regression test at the decision level. A checkpoint naming this branch and
+// commit is an earlier run's verified push, and the merge that lands work
+// deletes its branch from origin — so the re-run must ask the target whether the
+// work is already on it, instead of pushing the branch back and reading the
+// missing ref as an unlanded push.
+func TestClassifyResumedPushAsksTheTargetOnlyForThisCommit(t *testing.T) {
+	t.Parallel()
+	const (
+		branch = "polecat/granite/gt-mik3"
+		shaA   = "8eb0cf6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		shaB   = "c890451bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+
+	tests := []struct {
+		name       string
+		checkpoint string
+		sha        string
+		landed     bool
+		want       resumedWork
+		wantProbed bool
+	}{
+		{
+			name:       "this commit, on the target",
+			checkpoint: pushedCheckpointValue(branch, shaA), sha: shaA, landed: true,
+			want: resumedWorkLanded, wantProbed: true,
+		},
+		{
+			name:       "this commit, not on the target",
+			checkpoint: pushedCheckpointValue(branch, shaA), sha: shaA, landed: false,
+			want: resumedWorkPushed, wantProbed: true,
+		},
+		{
+			name:       "another commit on the same branch",
+			checkpoint: pushedCheckpointValue(branch, shaA), sha: shaB, landed: true,
+			want: resumedWorkStale, wantProbed: false,
+		},
+		{
+			name:       "another branch",
+			checkpoint: pushedCheckpointValue("polecat/amber/gt-uoqg", shaA), sha: shaA, landed: true,
+			want: resumedWorkStale, wantProbed: false,
+		},
+		{
+			name:       "legacy branch-only checkpoint",
+			checkpoint: branch, sha: shaA, landed: true,
+			want: resumedWorkStale, wantProbed: false,
+		},
+		{
+			name:       "no checkpoint",
+			checkpoint: "", sha: shaA, landed: true,
+			want: resumedWorkStale, wantProbed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			probe := &countingLandedProbe{landed: tt.landed}
+			if got := classifyResumedPush(probe, "origin", "main", tt.checkpoint, branch, tt.sha); got != tt.want {
+				t.Errorf("classifyResumedPush(%q, %q, %q) = %v, want %v",
+					tt.checkpoint, branch, tt.sha, got, tt.want)
+			}
+			if probed := probe.calls > 0; probed != tt.wantProbed {
+				t.Errorf("target probed = %v (%d calls), want %v", probed, probe.calls, tt.wantProbed)
+			}
+		})
+	}
+}
+
+// TestClassifyResumedPushSeesAMergedAndDeletedBranch pins the gt-mik3 shape
+// against real refs: the merge lands the commit on main and the post-merge
+// cleanup deletes the branch from origin, which is why a re-run cannot take the
+// branch's absence for an unlanded push. The unmerged control is the same
+// missing-ref shape and must still be classified as pushed — the branch being
+// gone is never on its own evidence that the work landed.
+func TestClassifyResumedPushSeesAMergedAndDeletedBranch(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	const branch = "polecat/granite/gt-mik3"
+	g, head := seedRepoWithCommit(t, tmp, remote, branch)
+	repo := filepath.Join(tmp, "work")
+	if err := g.Push("origin", branch+":"+branch, false); err != nil {
+		t.Fatalf("push branch: %v", err)
+	}
+
+	// The merge: main fast-forwards to the submitted commit, then the branch is
+	// deleted and the worktree's refs are refreshed the way a fetch would.
+	testRunGit(t, repo, "push", "origin", branch+":main")
+	testRunGit(t, repo, "push", "origin", "--delete", branch)
+	testRunGit(t, repo, "fetch", "--prune", "origin")
+
+	if got := classifyResumedPush(g, "origin", "main", pushedCheckpointValue(branch, head), branch, head); got != resumedWorkLanded {
+		t.Errorf("classifyResumedPush(merged, branch deleted) = %v, want resumedWorkLanded", got)
+	}
+
+	const unmerged = "polecat/granite/gt-mik3-unmerged"
+	writeRepoFile(t, repo, "other.txt", "unmerged\n")
+	testRunGit(t, repo, "checkout", "-b", unmerged)
+	testRunGit(t, repo, "add", ".")
+	testRunGit(t, repo, "commit", "-m", "unmerged work")
+	if err := g.Push("origin", unmerged+":"+unmerged, false); err != nil {
+		t.Fatalf("push unmerged branch: %v", err)
+	}
+	unmergedHead, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("resolve HEAD: %v", err)
+	}
+	unmergedHead = strings.TrimSpace(unmergedHead)
+	testRunGit(t, repo, "push", "origin", "--delete", unmerged)
+	testRunGit(t, repo, "fetch", "--prune", "origin")
+
+	if got := classifyResumedPush(g, "origin", "main", pushedCheckpointValue(unmerged, unmergedHead), unmerged, unmergedHead); got != resumedWorkPushed {
+		t.Errorf("classifyResumedPush(branch deleted, work never landed) = %v, want resumedWorkPushed", got)
+	}
+}
+
 // noSleep is the sleep injection for tests that must not wait out the retry
 // delay. Returning immediately keeps them fast without changing which code path
 // runs; the budget itself is pinned by
