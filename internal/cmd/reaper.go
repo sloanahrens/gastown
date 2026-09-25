@@ -28,6 +28,7 @@ var (
 	reaperJSON      bool
 	reaperMaxCloses int
 	reaperForce     bool
+	reaperPreview   string
 )
 
 // parseReaperAge parses an age flag, accepting the day suffix the mol-dog-reaper
@@ -134,10 +135,11 @@ formula. They execute SQL operations but leave eligibility decisions to the
 Dog agent or daemon orchestrator.
 
 When run by a Dog:
-  gt reaper scan --db=gastown          # Discover candidates
-  gt reaper reap --db=gastown          # Close stale wisps
-  gt reaper purge --db=gastown         # Delete old closed wisps + mail
-  gt reaper auto-close --db=gastown    # Close stale issues`,
+  gt reaper scan --db=gastown                          # Discover candidates
+  gt reaper reap --db=gastown                          # Close stale wisps
+  gt reaper purge --db=gastown                         # Delete old closed wisps + mail
+  gt reaper auto-close --db=gastown --dry-run          # Preview stale issues (prints a preview hash)
+  gt reaper auto-close --db=gastown --preview=<hash>   # Close exactly that previewed set`,
 	RunE: requireSubcommand,
 }
 
@@ -454,13 +456,18 @@ polecat bead carries gt:agent), plugin receipts, and issues with active
 dependencies. Scan and auto-close share one eligibility clause, so 'gt reaper
 scan' is a faithful preview of this command.
 
-Three guards apply, each answering the 2026-09-16 mis-close that swept 102
-durable beads (gt-2qzr):
+Four guards apply, the first three answering the 2026-09-16 mis-close that swept
+102 durable beads (gt-2qzr):
   - --stale-age below 7d is refused unless --force.
   - more than --max-closes candidates in one database refuses the whole run
     (nothing is closed) unless --force.
   - auto-close disarmed in daemon.json (patrols.wisp_reaper.auto_close=false)
     is refused unless --force.
+  - a live run with no --preview hash is refused (nothing is closed) unless
+    --force: the sweep only closes a set a dry run already showed. The dry run
+    prints the hash; hand it back verbatim. This is what keeps the counting
+    ahead of the writing regardless of how the two commands were ordered
+    (gt-39bu — the 2026-09-20 reaper ran live before its dry run).
 
 When --db is provided, auto-closes in a single database. When omitted,
 auto-discovers all databases on the Dolt server and auto-closes in each one.
@@ -505,17 +512,22 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 			}
 
 			result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
-				StaleAge:  staleAge,
-				DryRun:    reaperDryRun,
-				MaxCloses: reaperMaxCloses,
-				Force:     reaperForce,
+				StaleAge:    staleAge,
+				DryRun:      reaperDryRun,
+				MaxCloses:   reaperMaxCloses,
+				PreviewHash: reaperPreview,
+				Force:       reaperForce,
 			})
 			db.Close()
 			if err != nil {
-				if errors.Is(err, reaper.ErrTooManyCloses) {
-					// Nothing was closed. Keep the detail so the operator can
-					// see what the sweep wanted to take. Candidates go to
-					// stderr under --json so the stream stays parseable.
+				// Every refusal leaves the database untouched, so it is a stop
+				// to read rather than a partial sweep to retry. Keep the detail
+				// so the operator sees what the sweep wanted to take and what it
+				// was missing. Candidates go to stderr under --json so the
+				// stream stays parseable.
+				if errors.Is(err, reaper.ErrTooManyCloses) ||
+					errors.Is(err, reaper.ErrPreviewRequired) ||
+					errors.Is(err, reaper.ErrPreviewMismatch) {
 					fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
 					if result != nil {
 						printAutoCloseCandidates(result, reaperJSON)
@@ -539,8 +551,15 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 					prefix = "[DRY RUN] would "
 				}
 				printAutoCloseCandidates(r, false)
-				fmt.Printf("%s: %sauto-closed %d stale issues\n",
+				line := fmt.Sprintf("%s: %sauto-closed %d stale issues",
 					r.Database, prefix, r.Closed)
+				if r.DryRun {
+					// A dry run's job is to hand the live run its authorization,
+					// so print the flag to paste verbatim — the pair reads as one
+					// instruction instead of two commands a caller might reorder.
+					line += fmt.Sprintf(" — live run: --preview=%s", r.PreviewHash)
+				}
+				fmt.Println(line)
 				totalClosed += r.Closed
 			}
 			if len(results) > 1 {
@@ -647,15 +666,31 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 				totalMailPurged += purgeResult.MailPurged
 			}
 
-			// Auto-close
+			// Auto-close composes its own preview: this path has no caller to
+			// order the two phases, and a live sweep closes only what a preview
+			// showed (gt-39bu).
 			if autoCloseDisarmed && !reaperForce {
 				fmt.Printf("%s: auto-close skipped (disarmed by %s)\n", dbName, autoCloseConfigPath)
 			} else {
-				closeResult, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+				preview, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
 					StaleAge:  staleAge,
-					DryRun:    reaperDryRun,
+					DryRun:    true,
 					MaxCloses: reaperMaxCloses,
 					Force:     reaperForce,
+				})
+				if err != nil {
+					fmt.Printf("%s: auto-close preview error: %v\n", dbName, err)
+					db.Close()
+					continue
+				}
+				fmt.Printf("%s: auto-close preview: %d candidate(s)\n", dbName, preview.Closed)
+
+				closeResult, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+					StaleAge:    staleAge,
+					DryRun:      reaperDryRun,
+					MaxCloses:   reaperMaxCloses,
+					PreviewHash: preview.PreviewHash,
+					Force:       reaperForce,
 				})
 				if err != nil {
 					// A refusal is a stop, not a partial sweep: report it and
@@ -732,8 +767,13 @@ func init() {
 		cmd.Flags().IntVar(&reaperMaxCloses, "max-closes", reaper.DefaultAutoCloseMaxPerRun,
 			"Refuse the run if a database has more than this many auto-close candidates")
 		cmd.Flags().BoolVar(&reaperForce, "force", false,
-			"Override the stale-age floor, the per-run cap, and the daemon.json auto-close disarm")
+			"Override the stale-age floor, the per-run cap, the preview hash requirement, and the daemon.json auto-close disarm")
 	}
+
+	// --preview is auto-close's own: `gt reaper run` previews in-process before
+	// it writes, so it has no separate preview to be handed (gt-39bu).
+	reaperAutoCloseCmd.Flags().StringVar(&reaperPreview, "preview", "",
+		"Preview hash from a preceding --dry-run; a live run without it is refused")
 
 	reaperCmd.AddCommand(reaperDatabasesCmd)
 	reaperCmd.AddCommand(reaperScanCmd)

@@ -8,11 +8,14 @@ package reaper
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -146,8 +149,13 @@ type AutoCloseResult struct {
 	ClosedEntries []ClosedEntry `json:"closed_entries,omitempty"`
 	DryRun        bool          `json:"dry_run,omitempty"`
 	// MaxCloses is the per-run cap that applied to this operation.
-	MaxCloses int       `json:"max_closes,omitempty"`
-	Anomalies []Anomaly `json:"anomalies,omitempty"`
+	MaxCloses int `json:"max_closes,omitempty"`
+	// PreviewHash fingerprints the candidate set this operation selected. A dry
+	// run returns it so the caller can hand it back to the live run
+	// (AutoCloseOptions.PreviewHash) — the preview authorizes the write, and
+	// this is the token that carries the authorization (gt-39bu).
+	PreviewHash string    `json:"preview_hash,omitempty"`
+	Anomalies   []Anomaly `json:"anomalies,omitempty"`
 }
 
 // AutoCloseOptions parameterizes an AutoClose sweep.
@@ -161,8 +169,14 @@ type AutoCloseOptions struct {
 	// DefaultAutoCloseMaxPerRun. Exceeding it refuses the whole run unless
 	// Force is set.
 	MaxCloses int
-	// Force lifts both the StaleAge floor and the MaxCloses cap. Reserved for
-	// a human operator who has looked at the candidate list.
+	// PreviewHash authorizes a live run: it is the AutoCloseResult.PreviewHash a
+	// preceding dry run returned for this exact candidate set. A live run
+	// without it, or with a hash for a different set, refuses and closes
+	// nothing (gt-39bu). Force lifts it.
+	PreviewHash string
+	// Force lifts the StaleAge floor, the MaxCloses cap, and the PreviewHash
+	// requirement. Reserved for a human operator who has looked at the
+	// candidate list.
 	Force bool
 }
 
@@ -211,7 +225,33 @@ var (
 	// ErrTooManyCloses is returned when a sweep would exceed its per-run cap
 	// without Force. No issues are closed when this is returned.
 	ErrTooManyCloses = errors.New("auto-close candidate count exceeds cap")
+	// ErrPreviewRequired is returned when a live sweep arrives with no preview
+	// hash, so the set it would close was never counted. No issues are closed
+	// when this is returned.
+	ErrPreviewRequired = errors.New("auto-close live run without a preview")
+	// ErrPreviewMismatch is returned when the preview hash names a different
+	// candidate set than the live run's: the sweep would close something the
+	// dry run never showed. No issues are closed when this is returned.
+	ErrPreviewMismatch = errors.New("auto-close preview does not match the candidate set")
 )
+
+// PreviewHash fingerprints the candidate set a sweep is about to close: the
+// database, the stale-age that selected it, and the issue ids, sorted so query
+// order cannot change the hash.
+//
+// A hash the dry run produces and the live run demands is what makes "count
+// first, then close" structural instead of an instruction order the caller can
+// invert (gt-39bu).
+func PreviewHash(dbName string, staleAge time.Duration, ids []string) string {
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+
+	h := sha256.New()
+	// NUL separators keep the fields apart, so no two different (db, age, ids)
+	// triples can hash alike — "a"+"b" never encodes the same as "ab"+"".
+	fmt.Fprintf(h, "db=%s\x00stale_age=%s\x00ids=%s", dbName, staleAge, strings.Join(sorted, "\x00"))
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
 
 // ValidateDBName returns an error if the database name is unsafe.
 func ValidateDBName(dbName string) error {
@@ -991,10 +1031,11 @@ func staleIssueEligibilityClause(dbQualifier string) string {
 // AutoClose closes issues that have been open with no updates past
 // opts.StaleAge. Eligibility is defined by staleIssueEligibilityClause.
 //
-// Two brakes guard against a mis-parameterized sweep (gt-2qzr, where a
+// Three brakes guard against a mis-parameterized sweep (gt-2qzr, where a
 // hardcoded 7d threshold closed 102 beads, including every agent bead in the
-// town): opts.StaleAge must be at least MinStaleIssueAge, and one run may not
-// close more than opts.MaxCloses issues. Both are lifted by opts.Force.
+// town): opts.StaleAge must be at least MinStaleIssueAge, one run may not close
+// more than opts.MaxCloses issues, and a live run must carry the preview hash
+// of the set a dry run produced. All three are lifted by opts.Force.
 func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResult, error) {
 	if opts.StaleAge < MinStaleIssueAge && !opts.Force {
 		return nil, fmt.Errorf("%w: %s (minimum %s, pass --force to override)",
@@ -1052,13 +1093,30 @@ func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResu
 		})
 	}
 
+	result.PreviewHash = PreviewHash(dbName, opts.StaleAge, ids)
+
 	if opts.DryRun {
 		result.Closed = len(ids)
 		return result, nil
 	}
 
 	if len(ids) == 0 {
+		// Nothing to close, so there is no write for a preview to authorize.
 		return result, nil
+	}
+
+	// Counting has to precede closing however the caller ordered its commands:
+	// a set the caller cannot show a preview for is not authorized, and neither
+	// is one that moved since the preview (gt-39bu).
+	if !opts.Force && opts.PreviewHash != result.PreviewHash {
+		if opts.PreviewHash == "" {
+			return result, fmt.Errorf(
+				"%w: dry-run first, then pass its preview hash (--preview=%s) to close exactly this set",
+				ErrPreviewRequired, result.PreviewHash)
+		}
+		return result, fmt.Errorf(
+			"%w: preview %s, current set %s (%d candidates); re-run the dry run",
+			ErrPreviewMismatch, opts.PreviewHash, result.PreviewHash, len(ids))
 	}
 
 	// Refuse-and-report rather than close-then-apologize: a sweep this large

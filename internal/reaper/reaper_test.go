@@ -325,6 +325,197 @@ func TestAutoCloseMaxPerRunDefaults(t *testing.T) {
 	}
 }
 
+// TestAutoCloseLiveRefusesWithoutPreview is the regression guard for gt-39bu.
+// The 2026-09-20 reaper ran its live sweep before the dry run meant to gate it,
+// and nothing in the code could tell: the two commands were unrelated, so "dry
+// run first" lived in formula prose and in the agent's willingness to follow it.
+// A live sweep that was shown no preview now refuses and closes nothing,
+// whatever order the caller used.
+func TestAutoCloseLiveRefusesWithoutPreview(t *testing.T) {
+	state := newStaleIssueState("hq-a", "hq-b")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge})
+	if !errors.Is(err, ErrPreviewRequired) {
+		t.Fatalf("live AutoClose with no preview: error = %v, want ErrPreviewRequired", err)
+	}
+	if result == nil {
+		t.Fatal("a refusal must still report the candidates it refused")
+	}
+	if result.Closed != 0 {
+		t.Errorf("refused sweep reported Closed = %d, want 0", result.Closed)
+	}
+	if len(result.ClosedEntries) != 2 {
+		t.Errorf("refusal carried %d candidate entries, want 2: the operator has to see what tripped it",
+			len(result.ClosedEntries))
+	}
+	for id, status := range state.staleIssueStatuses() {
+		if status != "open" {
+			t.Errorf("%s status = %q after a refused sweep, want open", id, status)
+		}
+	}
+}
+
+// TestAutoCloseLiveClosesThePreviewedSet is the other half of the binding: the
+// dry run's hash is what authorizes the write, so the ordinary pair — dry run,
+// then live carrying that hash — closes exactly the set the dry run showed.
+func TestAutoCloseLiveClosesThePreviewedSet(t *testing.T) {
+	state := newStaleIssueState("hq-a", "hq-b")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	preview, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if preview.Closed != 2 {
+		t.Fatalf("dry run counted %d candidates, want 2", preview.Closed)
+	}
+	if preview.PreviewHash == "" {
+		t.Fatal("dry run returned no preview hash, so the live run has nothing to authorize with")
+	}
+
+	result, err := AutoClose(db, "hq", AutoCloseOptions{
+		StaleAge:    MinStaleIssueAge,
+		PreviewHash: preview.PreviewHash,
+	})
+	if err != nil {
+		t.Fatalf("live AutoClose carrying the preview hash: %v", err)
+	}
+	if result.Closed != 2 {
+		t.Errorf("live sweep closed %d, want the 2 the preview showed", result.Closed)
+	}
+	if result.PreviewHash != preview.PreviewHash {
+		t.Errorf("live run reported preview hash %q, want the dry run's %q",
+			result.PreviewHash, preview.PreviewHash)
+	}
+	for id, status := range state.staleIssueStatuses() {
+		if status != "closed" {
+			t.Errorf("%s status = %q after a previewed sweep, want closed", id, status)
+		}
+	}
+}
+
+// TestAutoClosePreviewHashBindsTheExactSet: a hash naming a different set is not
+// authorization. The sweep may only close what the dry run showed, so a
+// candidate that appeared after the preview refuses the whole run rather than
+// riding along with the previewed ones.
+func TestAutoClosePreviewHashBindsTheExactSet(t *testing.T) {
+	state := newStaleIssueState("hq-a", "hq-b")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	preview, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+
+	// hq-c crosses the stale-age threshold between the preview and the live run.
+	state.addStaleIssue("hq-c")
+
+	result, err := AutoClose(db, "hq", AutoCloseOptions{
+		StaleAge:    MinStaleIssueAge,
+		PreviewHash: preview.PreviewHash,
+	})
+	if !errors.Is(err, ErrPreviewMismatch) {
+		t.Fatalf("error = %v, want ErrPreviewMismatch", err)
+	}
+	if result == nil || result.Closed != 0 {
+		t.Errorf("a mismatched preview closed %v, want nothing", result)
+	}
+	for id, status := range state.staleIssueStatuses() {
+		if status != "open" {
+			t.Errorf("%s status = %q, want open: the sweep must not close a set the preview did not name", id, status)
+		}
+	}
+}
+
+// TestAutoCloseEmptyCandidateSetNeedsNoPreview: with nothing to close there is no
+// write for a preview to authorize, so the guard stays out of the way — the same
+// shape as the formula's "0 candidates, skip the live run".
+func TestAutoCloseEmptyCandidateSetNeedsNoPreview(t *testing.T) {
+	state := newStaleIssueState()
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge})
+	if err != nil {
+		t.Fatalf("empty sweep error = %v, want nil", err)
+	}
+	if result.Closed != 0 {
+		t.Errorf("empty sweep closed %d, want 0", result.Closed)
+	}
+}
+
+// TestAutoCloseForceLiftsThePreviewRequirement: --force is the documented lift
+// for every auto-close brake, this one included. It stays reserved for an
+// operator who has already read the candidate list.
+func TestAutoCloseForceLiftsThePreviewRequirement(t *testing.T) {
+	state := newStaleIssueState("hq-a")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, Force: true})
+	if err != nil {
+		t.Fatalf("forced live sweep: %v", err)
+	}
+	if result.Closed != 1 {
+		t.Errorf("forced sweep closed %d, want 1", result.Closed)
+	}
+	if got := state.staleIssueStatuses()["hq-a"]; got != "closed" {
+		t.Errorf("hq-a status = %q, want closed", got)
+	}
+}
+
+// TestPreviewHashFingerprintsTheSet: the hash must be stable across callers (list
+// order cannot matter) and distinct for every way the set can differ — a hash
+// that collided would let a live run close something the preview never named.
+func TestPreviewHashFingerprintsTheSet(t *testing.T) {
+	age := MinStaleIssueAge
+	base := PreviewHash("hq", age, []string{"hq-a", "hq-b"})
+	if base == "" {
+		t.Fatal("PreviewHash returned an empty hash")
+	}
+	if got := PreviewHash("hq", age, []string{"hq-b", "hq-a"}); got != base {
+		t.Errorf("hash depends on candidate order: %s vs %s", got, base)
+	}
+	for _, other := range []struct {
+		what string
+		hash string
+	}{
+		{"another database", PreviewHash("gastown", age, []string{"hq-a", "hq-b"})},
+		{"another stale age", PreviewHash("hq", 2*age, []string{"hq-a", "hq-b"})},
+		{"an extra candidate", PreviewHash("hq", age, []string{"hq-a", "hq-b", "hq-c"})},
+		{"one id instead of two", PreviewHash("hq", age, []string{"hq-a,hq-b"})},
+	} {
+		if other.hash == base {
+			t.Errorf("%s hashes the same as the previewed set — the binding would not hold", other.what)
+		}
+	}
+}
+
+// TestDogReaperFormulaBindsTheLiveAutoCloseToItsPreview guards the instruction
+// half of gt-39bu: the formula has to hand the dry run's preview hash to the
+// live run, because the live run refuses without it.
+func TestDogReaperFormulaBindsTheLiveAutoCloseToItsPreview(t *testing.T) {
+	data, err := os.ReadFile("../formula/formulas/mol-dog-reaper.formula.toml")
+	if err != nil {
+		t.Fatalf("read mol-dog-reaper formula: %v", err)
+	}
+
+	step := sourceBetween(t, string(data), `id = "auto-close"`, `id = "convoy-check"`)
+	if !strings.Contains(step, "--dry-run") {
+		t.Error("auto-close step no longer shows the dry run")
+	}
+	if !strings.Contains(step, "--preview=<hash printed by step 1>") {
+		t.Error("auto-close step's live command must carry the dry run's preview hash")
+	}
+	if !strings.Contains(strings.ToLower(step), "refuses") {
+		t.Error("auto-close step must say a live run with no matching preview is refused")
+	}
+}
+
 // TestReapQueryNoDatabaseNameInjection verifies that the Reap function's batch
 // SELECT query does not inject the database name into the SQL string. Previously,
 // dbName was passed as a Sprintf arg but the format string didn't use it, causing
@@ -865,13 +1056,78 @@ type fakeIssueBead struct {
 	description string
 }
 
+// fakeStaleIssue is an issues-table row the auto-close sweep can select: an open
+// non-infrastructure issue untouched since updatedAt. The eligibility clause
+// itself is not modelled — the fake supplies exactly the rows the sweep's SELECT
+// should see, so the ordering guard can be driven without a real Dolt.
+type fakeStaleIssue struct {
+	id        string
+	title     string
+	updatedAt time.Time
+	status    string
+}
+
 type fakeReaperState struct {
 	mu          sync.Mutex
 	wisps       map[string]*fakeWisp
 	issueAgents []fakeIssueBead
+	staleIssues map[string]*fakeStaleIssue
 	deps        []fakeDep
 	nextConn    int
 	ops         map[int][]string
+}
+
+// staleIssueCandidatesLocked mirrors the sweep's SELECT: still-open issues whose
+// last update predates the cutoff, in id order.
+func (s *fakeReaperState) staleIssueCandidatesLocked(cutoff time.Time) []*fakeStaleIssue {
+	candidates := make([]*fakeStaleIssue, 0, len(s.staleIssues))
+	for _, issue := range s.staleIssues {
+		if issue.status != "open" || !issue.updatedAt.Before(cutoff) {
+			continue
+		}
+		candidates = append(candidates, issue)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].id < candidates[j].id })
+	return candidates
+}
+
+// staleIssueStatuses reports every fake issues-table row's status, so a test can
+// assert that a refused sweep wrote nothing.
+func (s *fakeReaperState) staleIssueStatuses() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	statuses := make(map[string]string, len(s.staleIssues))
+	for id, issue := range s.staleIssues {
+		statuses[id] = issue.status
+	}
+	return statuses
+}
+
+// addStaleIssue adds an open issue to the fake's issues table, well past any
+// stale-age floor — as if it had aged in since the preview ran.
+func (s *fakeReaperState) addStaleIssue(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.staleIssues == nil {
+		s.staleIssues = map[string]*fakeStaleIssue{}
+	}
+	s.staleIssues[id] = &fakeStaleIssue{
+		id:        id,
+		title:     "abandoned " + id,
+		updatedAt: time.Now().UTC().Add(-60 * 24 * time.Hour),
+		status:    "open",
+	}
+}
+
+// newStaleIssueState builds a fake holding the given ids as open, long-stale
+// issues. AutoClose's write path needs SELECT and UPDATE answers, so the fake
+// stands in for the issues table rather than for the wisp one.
+func newStaleIssueState(ids ...string) *fakeReaperState {
+	state := &fakeReaperState{wisps: map[string]*fakeWisp{}, ops: map[int][]string{}}
+	for _, id := range ids {
+		state.addStaleIssue(id)
+	}
+	return state
 }
 
 func (s *fakeReaperState) status(id string) string {
@@ -1159,6 +1415,8 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		return fakeDescriptionRows(c.state.agentDescriptionsLocked(strings.Contains(normalized, "gt:agent"))), nil
 	case strings.Contains(normalized, "SELECT description FROM issues WHERE"):
 		return fakeDescriptionRows(c.state.issueAgentDescriptionsLocked(strings.Contains(normalized, "gt:agent"))), nil
+	case strings.Contains(normalized, "SELECT i.id, i.title, i.updated_at FROM issues i WHERE"):
+		return fakeStaleIssueRows(c.state.staleIssueCandidatesLocked(namedTime(args))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "created_at <"):
 		if err := validateStaleWispQuery(normalized); err != nil {
 			return nil, err
@@ -1223,6 +1481,18 @@ func (c *fakeReaperConn) ExecContext(_ context.Context, query string, args []dri
 			}
 		}
 		return fakeReaperResult(affected), nil
+	case strings.Contains(normalized, ".issues SET status = 'closed'"):
+		// The auto-close sweep's UPDATE. Its bind args are the issue ids the
+		// sweep decided to close.
+		affected := int64(0)
+		for _, arg := range args {
+			id, _ := arg.Value.(string)
+			if issue := c.state.staleIssues[id]; issue != nil && issue.status == "open" {
+				issue.status = "closed"
+				affected++
+			}
+		}
+		return fakeReaperResult(affected), nil
 	case strings.HasPrefix(normalized, "DELETE FROM `wisps` WHERE id IN"):
 		affected := int64(0)
 		for _, arg := range args {
@@ -1274,6 +1544,14 @@ func fakeDescriptionRows(descriptions []string) *fakeReaperRows {
 		rows[i] = []driver.Value{d}
 	}
 	return &fakeReaperRows{cols: []string{"description"}, rows: rows}
+}
+
+func fakeStaleIssueRows(issues []*fakeStaleIssue) *fakeReaperRows {
+	rows := make([][]driver.Value, len(issues))
+	for i, issue := range issues {
+		rows[i] = []driver.Value{issue.id, issue.title, issue.updatedAt}
+	}
+	return &fakeReaperRows{cols: []string{"id", "title", "updated_at"}, rows: rows}
 }
 
 func fakeWispTypeCountRows(counts map[string]int) *fakeReaperRows {

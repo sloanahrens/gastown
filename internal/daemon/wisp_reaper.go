@@ -431,9 +431,27 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 				db.Close()
 				continue
 			}
-			result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+			// Preview before writing: AutoClose refuses a live run with no
+			// preview hash (gt-39bu), and this path has no formula prose to
+			// order the two passes for it.
+			preview, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
 				StaleAge: staleIssueAge,
-				DryRun:   dryRun,
+				DryRun:   true,
+			})
+			if err != nil {
+				d.logger.Printf("wisp_reaper: %s: auto-close preview error: %v", dbName, err)
+				autoCloseErrors++
+				db.Close()
+				continue
+			}
+			if preview.Closed > 0 {
+				d.logger.Printf("wisp_reaper: %s: auto-close preview: %d candidate(s)", dbName, preview.Closed)
+			}
+
+			result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+				StaleAge:    staleIssueAge,
+				DryRun:      dryRun,
+				PreviewHash: preview.PreviewHash,
 			})
 			db.Close()
 			if err != nil {
