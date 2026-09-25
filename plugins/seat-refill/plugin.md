@@ -123,10 +123,14 @@ to sling while it exists and log why (`internal/dispatch`):
 - the deacon's RECOVERED_BEAD redispatch and its convoy feed dogs
 - the gated-molecule step in the deacon patrol
 - the daemon's convoy feeders
-- the daemon's `gt scheduler run` heartbeat step
+- `gt scheduler run`, whether the daemon heartbeat, the witness on SLOT_OPEN, or a person runs it
 - the `scheduled_slings` patrol
 
-`GT_SEAT_REFILL_HOLD` relocates the file for all of them. A rig's
+`GT_SEAT_REFILL_HOLD` relocates the file for all of them. Each process reads
+it from its own environment (the daemon, the deacon and its dogs, the witness,
+seat-refill, a shell running `gt scheduler run`), so set it the same way
+everywhere or not at all: a process without it still watches
+`<town-root>/seat-refill.hold`. A rig's
 `ESTOP.<rig>` holds only that rig's dispatch. An explicit `gt sling` typed by
 the operator or the mayor still works.
 

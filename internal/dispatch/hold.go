@@ -22,7 +22,9 @@ const HoldFileName = "seat-refill.hold"
 
 // HoldFileEnv relocates the hold file, with the same ${VAR:-default}
 // semantics as run.sh: set and non-empty, it names the hold file; unset or
-// empty, the hold is <town>/seat-refill.hold.
+// empty, the hold is <town>/seat-refill.hold. It is read from each process's
+// own environment (daemon, deacon, witness, seat-refill, a manual gt), so it
+// must be set consistently across them or not at all.
 const HoldFileEnv = "GT_SEAT_REFILL_HOLD"
 
 // HoldFilePath returns the operator hold file for a town.
