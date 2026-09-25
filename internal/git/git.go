@@ -204,8 +204,26 @@ const remoteQueryTimeout = 30 * time.Second
 // push into an unbounded hang.
 const notesFetchTimeout = 30 * time.Second
 
+// timedCommandWaitDelay bounds how long a timed-out git command may keep
+// Run() waiting on its output pipes after the context is done. The process
+// group kill (SIGTERM, then SIGKILL after util.ProcessGroupKillGrace) reaches
+// every helper; this is the backstop should one still hold a pipe.
+var timedCommandWaitDelay = util.ProcessGroupKillGrace + 3*time.Second
+
+// boundRemoteCommand makes a context-bound git command killable as a whole.
+// A remote command is not one process: over http(s) git forks
+// git-remote-http, which inherits the stdout/stderr pipes. The default
+// context cancel kills only git, so the helper — still waiting on a stalled
+// server — keeps the pipe open and cmd.Run() never returns. Canceling the
+// process group kills the helper too, and WaitDelay caps the pipe wait.
+func boundRemoteCommand(cmd *exec.Cmd) {
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = timedCommandWaitDelay
+}
+
 // runWithTimeout executes a git command with a deadline. If the command does
-// not finish within the timeout, the process is killed and an error is returned.
+// not finish within the timeout, its whole process group (git and any remote
+// helper) is killed and an error is returned.
 func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _ error) { //nolint:unparam // string return kept for consistency with Run()
 	if err := g.guardUnsafeTownRootMutation(args); err != nil {
 		return "", err
@@ -219,7 +237,7 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", args...)
-	util.SetDetachedProcessGroup(cmd)
+	boundRemoteCommand(cmd)
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
 	}
@@ -230,7 +248,7 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 
 	err := cmd.Run()
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
 		}
 		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
@@ -257,17 +275,19 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 
 	var cmd *exec.Cmd
 	var cancel context.CancelFunc
+	ctx := context.Background()
 	if timeout > 0 {
-		var ctx context.Context
-		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		cmd = exec.CommandContext(ctx, "git", args...)
 	} else {
 		cmd = exec.Command("git", args...)
 	}
 	if cancel != nil {
 		defer cancel()
+		boundRemoteCommand(cmd)
+	} else {
+		util.SetDetachedProcessGroup(cmd)
 	}
-	util.SetDetachedProcessGroup(cmd)
 
 	if g.workDir != "" {
 		cmd.Dir = g.workDir
@@ -282,7 +302,7 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	if err != nil {
 		if timeout > 0 {
 			// Check if the context's deadline was exceeded
-			if errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
 			}
 		}
@@ -2359,7 +2379,13 @@ type RemoteRef struct {
 // The prefix filters refs (e.g., "refs/heads/polecat/" for all polecat branches).
 // Returns full ref names like "refs/heads/polecat/furiosa-abc123".
 func (g *Git) ListRemoteRefsWithHashes(remote, prefix string) ([]RemoteRef, error) {
-	out, err := g.runWithTimeout(remoteQueryTimeout, "ls-remote", "--refs", remote, prefix+"*")
+	return g.ListRemoteRefsWithHashesTimeout(remote, prefix, remoteQueryTimeout)
+}
+
+// ListRemoteRefsWithHashesTimeout is ListRemoteRefsWithHashes with an explicit
+// bound; the command (and any remote helper) is killed when it expires.
+func (g *Git) ListRemoteRefsWithHashesTimeout(remote, prefix string, timeout time.Duration) ([]RemoteRef, error) {
+	out, err := g.runWithTimeout(timeout, "ls-remote", "--refs", remote, prefix+"*")
 	if err != nil {
 		return nil, err
 	}

@@ -14,8 +14,9 @@ import (
 // clone, so there is no git state to judge surviving work from.
 var ErrNoRigRepo = errors.New("rig has no git repo (neither .repo.git nor mayor/rig)")
 
-// workSurvivalFetchTimeout bounds every fetch the predicate makes; a timeout
-// makes the answer unknown. A variable so tests can shorten it.
+// workSurvivalFetchTimeout bounds every remote call the predicate makes
+// (ls-remote and fetch); a timeout makes the answer unknown. A variable so
+// tests can shorten it.
 var workSurvivalFetchTimeout = git.RemoteQueryTimeout
 
 // WorkSurvival is the one "does this bead's polecat work survive?" predicate
@@ -188,7 +189,7 @@ func (w *WorkSurvival) listOrigin() {
 		return
 	}
 	w.originListed = true
-	refs, err := w.g.ListRemoteRefsWithHashes("origin", "refs/heads/polecat/")
+	refs, err := w.g.ListRemoteRefsWithHashesTimeout("origin", "refs/heads/polecat/", workSurvivalFetchTimeout)
 	if err != nil {
 		w.originErr = err
 		return
@@ -217,7 +218,7 @@ func (w *WorkSurvival) baseRefs() ([]string, error) {
 	}
 	w.bases = []string{"origin/" + w.defaultBranch}
 
-	integration, err := w.g.ListRemoteRefsWithHashes("origin", "refs/heads/integration/")
+	integration, err := w.g.ListRemoteRefsWithHashesTimeout("origin", "refs/heads/integration/", workSurvivalFetchTimeout)
 	if err != nil {
 		w.basesErr = fmt.Errorf("listing origin integration branches: %w", err)
 		return nil, w.basesErr
