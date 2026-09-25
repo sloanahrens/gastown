@@ -29,7 +29,8 @@ This guard blocks operations that could cause irreversible damage:
   - gem install           (system-level Ruby installs)
   - rm -rf /             (only blocks root target; rm -rf ./build/ is allowed)
   - git push --force/-f  (--force-with-lease is allowed)
-  - git push to main/master from a polecat session (GT_POLECAT_PATH set):
+  - git push to main/master from a polecat session (GT_ROLE naming a polecat
+    role, or GT_POLECAT_PATH set when GT_ROLE is unset):
     HEAD:main, <sha>:main, :main, refs/heads/main, main, --all, --mirror.
     Polecat work lands through gt done -> MR -> Refinery (gt-ibt8). A release
     or a manual plugin run pushes main legitimately; both belong to a
@@ -1135,12 +1136,17 @@ const (
 var polecatMainPushBranches = map[string]bool{"main": true, "master": true}
 
 // inPolecatSession reports whether this guard run is inside a polecat's
-// session. The session manager exports GT_POLECAT_PATH at spawn
-// (internal/polecat/session_manager.go), and nothing else in the town sets
-// it, so its presence is a positive polecat signal: crew, refinery, mayor,
-// witness, and the daemon all run without it and keep their unguarded
-// push-to-main paths.
+// session. GT_ROLE decides first, exactly as it does for the guard family's
+// other polecat check (isPolecatSession, tap_guard.go) and for `gt sling`,
+// `gt hook` and `gt handoff`: one rule answers "is this a polecat", so a
+// session the town names a polecat gets the rule whatever markers its
+// environment happens to carry (gt-c38o). GT_POLECAT_PATH — exported to the
+// session at polecat spawn (internal/polecat/session_manager.go) — is the
+// fallback for a run with no role in its environment at all.
 func inPolecatSession() bool {
+	if role := strings.TrimSpace(os.Getenv("GT_ROLE")); role != "" {
+		return isPolecatRole(role)
+	}
 	return os.Getenv("GT_POLECAT_PATH") != ""
 }
 
