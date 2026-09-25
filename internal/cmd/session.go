@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -184,6 +185,11 @@ var sessionHealthCmd = &cobra.Command{
 
 This wraps tmux.CheckSessionHealth, which reads GT_PROCESS_NAMES/GT_AGENT from
 the session environment before falling back to built-in agent process names.
+
+Unlike its sibling subcommands, this one takes a TMUX SESSION NAME, not a
+rig/name address: "gt-witness", not "gastown/witness" (for that, see
+"gt session status gastown/witness"). A rig/name address is rejected with a
+non-zero exit rather than reported as session-dead (gt-3uyr).
 
 The command exits successfully for all valid health states; inspect the status
 field when using --json. Operational failures, argument errors, or invalid flags
@@ -759,6 +765,9 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 
 func runSessionHealth(cmd *cobra.Command, args []string) error {
 	sessionName := args[0]
+	if err := sessionHealthArgError(sessionName); err != nil {
+		return err
+	}
 	status := tmux.NewTmux().CheckSessionHealth(sessionName, sessionHealthMaxInactivity)
 	report := newSessionHealthReport(sessionName, status, sessionHealthMaxInactivity)
 
@@ -774,6 +783,59 @@ func runSessionHealth(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s: %s\n", sessionName, style.Dim.Render(report.Status))
 	}
 	return nil
+}
+
+// sessionHealthArgError rejects arguments that cannot name a tmux session.
+//
+// `gt session health` is the odd one out among the session subcommands: its
+// siblings take a rig/name address (parseAddress, "gastown/witness") while it
+// takes a tmux session name ("gt-witness"). Feeding it the sibling form used to
+// fall through to tmux's has-session miss and return exit 0 with
+// status=session-dead, healthy=false — a payload indistinguishable from a
+// genuine dead-session verdict, so a caller could not tell "this session is
+// dead" from "you gave me the wrong kind of name" (gt-3uyr). That is a
+// plausible cause of the false MASS DEATH critical hq-wisp-6g109.
+//
+// The rejection is deliberately narrow — only arguments that can never name a
+// session. A well-formed session name that happens not to exist still reports
+// session-dead with exit 0, because "is this session running?" is a question
+// callers ask on purpose: plugins/stuck-agent-dog/run.sh turns health's
+// session-dead verdict into a polecat restart, and a non-zero exit there reads
+// as "health unavailable" and skips the restart instead.
+func sessionHealthArgError(arg string) error {
+	if strings.TrimSpace(arg) == "" {
+		return fmt.Errorf("missing session name (usage: gt session health <tmux-session>)")
+	}
+	if !strings.Contains(arg, "/") {
+		return nil
+	}
+
+	lines := []string{fmt.Sprintf(
+		"invalid session name %q: gt session health takes a tmux session name, not a rig/name address",
+		arg)}
+	if resolved := tmuxSessionForAddress(arg); resolved != "" {
+		lines = append(lines, fmt.Sprintf("Did you mean: gt session health %s", resolved))
+	}
+	lines = append(lines, fmt.Sprintf("For session details by rig/name, use: gt session status %s", arg))
+	return errors.New(strings.Join(lines, "\n"))
+}
+
+// tmuxSessionForAddress maps a rig/name address ("gastown/witness") to the tmux
+// session name it runs as ("gt-witness"), for use in an error hint.
+//
+// Returns "" unless the address's rig is registered with the prefix registry:
+// PrefixFor falls back to the default prefix for unknown rigs, so an
+// unregistered rig would yield a plausible but wrong session name.
+func tmuxSessionForAddress(addr string) string {
+	parts := strings.Split(addr, "/")
+	if len(parts) < 2 || parts[0] == "" {
+		return ""
+	}
+	if _, known := session.DefaultRegistry().AllRigs()[parts[0]]; !known {
+		return ""
+	}
+	resolved, _ := assigneeToSessionName(addr)
+	return resolved
 }
 
 // formatDuration formats a duration for human display.
