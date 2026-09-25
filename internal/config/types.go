@@ -1380,6 +1380,53 @@ func BuiltinRoleThemes() map[string]string {
 	}
 }
 
+// Defaults for WitnessSessionConfig (claude-8w7, approved boundary).
+const (
+	DefaultWitnessCycleMinCycles = 3
+	DefaultWitnessCycleMaxCycles = 8
+)
+
+// WitnessSessionConfig controls the lifetime of a rig's witness session. It
+// lives in the rig root config.json under "witness", next to merge_queue.
+// These are separate from the town-level operational.witness thresholds,
+// which tune detection rather than session lifetime.
+type WitnessSessionConfig struct {
+	// CycleSessionAtIdleCap makes `gt patrol report`, run by the rig's
+	// witness in its own pane, respawn the witness session in place at a
+	// quiet boundary: the cycle's await-signal timed out at its backoff cap
+	// and the session has completed at least CycleSessionMinCycles cycles, or
+	// it has completed CycleSessionMaxCycles cycles whatever the wait did.
+	// Off by default; opt in per rig.
+	CycleSessionAtIdleCap bool `json:"cycle_session_at_idle_cap,omitempty"`
+
+	// CycleSessionMinCycles is the minimum cycles before a respawn at the
+	// idle cap. Zero or unset means DefaultWitnessCycleMinCycles.
+	CycleSessionMinCycles int `json:"cycle_session_min_cycles,omitempty"`
+
+	// CycleSessionMaxCycles is the backstop. Zero or unset means
+	// DefaultWitnessCycleMaxCycles; negative disables the backstop.
+	CycleSessionMaxCycles int `json:"cycle_session_max_cycles,omitempty"`
+}
+
+// MinCycles returns the effective idle-cap minimum.
+func (c *WitnessSessionConfig) MinCycles() int {
+	if c == nil || c.CycleSessionMinCycles <= 0 {
+		return DefaultWitnessCycleMinCycles
+	}
+	return c.CycleSessionMinCycles
+}
+
+// MaxCycles returns the effective backstop; 0 means no backstop.
+func (c *WitnessSessionConfig) MaxCycles() int {
+	switch {
+	case c == nil || c.CycleSessionMaxCycles == 0:
+		return DefaultWitnessCycleMaxCycles
+	case c.CycleSessionMaxCycles < 0:
+		return 0
+	}
+	return c.CycleSessionMaxCycles
+}
+
 // MergeQueueConfig represents merge queue settings for a rig.
 type MergeQueueConfig struct {
 	// Enabled controls whether the merge queue is active.

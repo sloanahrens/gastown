@@ -36,3 +36,24 @@ func TestWitnessPatrolReadsPersistedStallVerdict(t *testing.T) {
 		t.Error("witness formula must keep the escalate-not-restart stall policy")
 	}
 }
+
+// TestWitnessPatrolWarnsOfReportRespawn pins the claude-8w7 step 3 contract:
+// gt patrol report may respawn the witness after a quiet report, so the
+// formula must say so and tell the agent it need not act on it.
+func TestWitnessPatrolWarnsOfReportRespawn(t *testing.T) {
+	content, err := formulasFS.ReadFile("formulas/mol-witness-patrol.formula.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	for _, want := range []string{
+		"witness.cycle_session_at_idle_cap",
+		"A respawn may follow a quiet report",
+		"session kept: <cause>",
+		"You do not need to do anything",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("witness formula must mention %q", want)
+		}
+	}
+}

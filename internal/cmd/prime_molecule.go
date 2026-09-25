@@ -11,8 +11,10 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/patrolstate"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
 // MoleculeCurrentOutput represents the JSON output of bd mol current.
@@ -395,6 +397,14 @@ func outputWitnessPatrolContext(ctx RoleContext, status primePatrolStatus) {
 	cfg.HeaderTitle = "Witness Patrol Status"
 	cfg.WorkLoopSteps = patrolWorkLoopSteps(cfg.RoleName)
 	outputPatrolContext(cfg, status)
+	// After a quiet-boundary respawn (claude-8w7), carry the predecessor's
+	// effort forward so the first patrol is not a needless full one.
+	if ctx.TownRoot != "" && ctx.Rig != "" && primeHandoffReason == unitCycleHandoffReason {
+		wait, _ := patrolstate.ReadWaitOutcome(witness.WitnessStateDir(ctx.TownRoot, ctx.Rig))
+		if line := witnessRespawnEffortLine(primeHandoffReason, wait); line != "" {
+			fmt.Println(line)
+		}
+	}
 	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig, cfg.ExtraVars)
 }
 

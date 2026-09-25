@@ -340,6 +340,12 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 		result.EffortLevel = "abbreviated"
 	}
 
+	// Record how this wait ended for a patrol role that cycles its session at
+	// a quiet boundary (claude-8w7): gt patrol report reads it, so the agent
+	// never has to remember it. at_cap uses the FULL window, not a resumed
+	// remainder.
+	recordAwaitSignalOutcome(townRoot, result, fullTimeout, awaitSignalBackoffCap())
+
 	// Drain nudges queued for this session (gt-saz7a). Included in the JSON
 	// result so a --json caller doesn't lose them; printed as a
 	// system-reminder block below for the normal (human-readable) path.
@@ -458,6 +464,20 @@ func backoffTimeout(idleCycles int) (time.Duration, error) {
 
 	// Simple timeout mode
 	return time.ParseDuration(awaitSignalTimeout)
+}
+
+// awaitSignalBackoffCap returns the --backoff-max cap in backoff mode, or 0
+// when the wait has no cap (simple --timeout mode or no --backoff-max).
+// calculateEffectiveTimeout has already rejected an unparseable value.
+func awaitSignalBackoffCap() time.Duration {
+	if awaitSignalBackoffBase == "" || awaitSignalBackoffMax == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(awaitSignalBackoffMax)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // waitForActivitySignal tails the events file for new activity relevant to rig.

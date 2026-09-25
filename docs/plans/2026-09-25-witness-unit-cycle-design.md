@@ -1,4 +1,5 @@
-> Status: draft for Sloan (2026-09-25), claude-8w7.
+> Status: step 3 implemented (2026-09-25), claude-8w7. Boundary approved by
+> Sloan: idle-cap timeout after 3 cycles, backstop at 8, flag off by default.
 
 # Witness: respawn on a unit boundary instead of one long compacting session — design
 
@@ -8,8 +9,9 @@ refinery version of this change already landed:
 (design: `2026-09-23-install-gt-after-merge-design.md`, section "Refinery: a
 fresh session per unit of work").
 
-This pass covers plan step 1 (implemented, see "Step 1") and the design for
-steps 2–5. The respawn itself is not implemented yet.
+Steps 1 and 3 are implemented: step 1 persists the stall sample, and step 3
+respawns the witness at the approved boundary (see "Step 3: as implemented").
+Step 5, the measurement, is still to do.
 
 ## Problem
 
@@ -290,6 +292,69 @@ behaviour and its tests; it calls the shared helper for its steps 2–3.
 These are separate from the town-level `operational.witness` thresholds
 (`WitnessThresholds`), which tune detection rather than session lifetime. Start
 with gastown only, as the refinery did.
+
+### Step 3: as implemented
+
+The shipped code differs from the plan above in these details:
+
+- **Config lives in the rig root `config.json`**, next to
+  `merge_queue.cycle_session_after_merge`, not in `settings/config.json`:
+  `rig.RigConfig.Witness` (`config.WitnessSessionConfig`), read by
+  `rig.ResolveWitnessSessionConfig`. To enable it for gastown:
+
+  ```json
+  "witness": { "cycle_session_at_idle_cap": true }
+  ```
+
+  `cycle_session_min_cycles` (default 3) and `cycle_session_max_cycles`
+  (default 8; negative disables the backstop) are optional.
+- **Files.** Both live in `<witness dir>/.runtime/`, the directory the
+  session runs in and where the SessionStart hook persists `session_id`:
+  - `await-signal-last.json`: `gt mol await-signal` writes it on every return
+    when `GT_ROLE` is `<rig>/witness` and the flag is on (flag off: nothing
+    is written). It records the reason, the FULL backoff window (a resumed
+    wait still counts as at the cap), the cap, `at_cap`, the idle count, the
+    effort level, the session ID and the time.
+  - `session-cycles.json`: the counter, `{session_id, cycles, last_wait_at}`.
+    A different `session_id` restarts the count, so a respawn, a daemon
+    restart or a crash all start a fresh session at zero. The respawn also
+    writes zero itself, which covers a session with no recorded ID.
+  - Both are Go-owned, versioned and written atomically by
+    `internal/patrolstate` (cycle.go). An unreadable file warns and reads as
+    "nothing recorded", which can delay a respawn but never causes one.
+- **Staleness is a watermark, not the wisp age.** The report attributes a wait
+  outcome to its cycle only when the outcome is newer than `last_wait_at` (the
+  last one a report consumed) and came from the same session. A report after a
+  skipped await-signal, or a predecessor's unconsumed wait, therefore counts
+  as "no wait recorded".
+- **Order in `gt patrol report`** (`reportAndMaybeCycleWitness`,
+  `internal/cmd/witness_cycle.go`): decide every gate (caller, counter,
+  boundary, cooldown); run the report, with `drainNudges=false` only when
+  the session is about to respawn; save the counter; record the cycle
+  (cooldown stamp, handoff marker `unit-cycle`, town log); respawn last. On
+  a skip it prints `○ session kept: <cause>`. With the flag off, the report
+  is exactly today's and prints nothing extra. A failed report is returned
+  and nothing is counted. A counter that cannot be saved keeps the session.
+  A failed respawn escalates `witness-respawn-failed:<rig>` MEDIUM.
+- **Shared helper** (`internal/cmd/session_cycle.go`): `ownPaneCallerMismatch`,
+  `handoffCooldownCause`, `recordOwnSessionCycle` and `respawnOwnSessionFresh`
+  were extracted from `unit_cycle.go`. The refinery calls them unchanged in
+  behaviour. The deacon (claude-9jq tier 4) needs only a directory and flag in
+  `patrolCycleDir` and a caller like `reportAndMaybeCycleWitness`.
+- **First cycle's effort.** After a `unit-cycle` handoff, `gt prime` for the
+  witness reads `await-signal-last.json` and, when the predecessor's last wait
+  implied `abbreviated`, prints one `EFFORT: reduced ...` line (about 100
+  characters), so the first patrol is not a full one. No bd call is added to
+  prime.
+- **Formula.** `mol-witness-patrol` v21 tells the agent that a respawn may
+  follow a quiet report and that it need not act on it.
+
+What the fresh session needs and where it comes from: stall sample 1
+(`stall_samples.json`, step 1); `idle:N` and `backoff-until` (agent bead
+labels, so the backoff stays at the cap); the patrol wisp (`gt patrol report`
+already poured the next one); mail and queued nudges (the respawning report
+does not drain them); lessons (`gt remember`); and role context (`gt prime`).
+Ad-hoc watches the agent invented are still lost, as agreed above.
 
 ## Step 4: `gt prime` for the witness fits the hook limit
 
