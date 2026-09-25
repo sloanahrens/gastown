@@ -193,13 +193,19 @@ func NewPruner(townRoot string, config *Config) *Pruner {
 // Each file is rewritten atomically (temp file + rename) under its writer
 // lock, and only when something expired; see pruneFile.
 func (p *Pruner) Prune() (*PruneResult, error) {
+	return p.PruneContext(context.Background())
+}
+
+// PruneContext is Prune with a context that bounds the wait for each file's
+// writer lock; canceling it abandons a prune still waiting for a lock.
+func (p *Pruner) PruneContext(ctx context.Context) (*PruneResult, error) {
 	start := time.Now()
 	result := &PruneResult{
 		PrunedByType: make(map[string]int),
 	}
 
 	// Prune events file
-	eventsResult, err := p.pruneFile(filepath.Join(p.townRoot, events.EventsFile))
+	eventsResult, err := p.pruneFile(ctx, filepath.Join(p.townRoot, events.EventsFile))
 	if err != nil {
 		return nil, fmt.Errorf("pruning events: %w", err)
 	}
@@ -213,7 +219,7 @@ func (p *Pruner) Prune() (*PruneResult, error) {
 	}
 
 	// Prune feed file
-	feedResult, err := p.pruneFile(filepath.Join(p.townRoot, ".feed.jsonl"))
+	feedResult, err := p.pruneFile(ctx, filepath.Join(p.townRoot, ".feed.jsonl"))
 	if err != nil {
 		return nil, fmt.Errorf("pruning feed: %w", err)
 	}
@@ -249,7 +255,7 @@ var pruneLockTimeout = 30 * time.Second
 // the path a new inode, and every tail of the old one must notice and reopen
 // (events.Tail does); a rotation that removes nothing is pure risk
 // (claude-9jq: no-op rotations at each daemon start blinded await-signal).
-func (p *Pruner) pruneFile(filePath string) (*PruneResult, error) {
+func (p *Pruner) pruneFile(ctx context.Context, filePath string) (*PruneResult, error) {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return &PruneResult{PrunedByType: make(map[string]int)}, nil
 	} else if err != nil {
@@ -257,7 +263,7 @@ func (p *Pruner) pruneFile(filePath string) (*PruneResult, error) {
 	}
 
 	fl := flock.New(filePath + ".lock")
-	ctx, cancel := context.WithTimeout(context.Background(), pruneLockTimeout)
+	ctx, cancel := context.WithTimeout(ctx, pruneLockTimeout)
 	defer cancel()
 	locked, err := fl.TryLockContext(ctx, 50*time.Millisecond)
 	if err != nil || !locked {
