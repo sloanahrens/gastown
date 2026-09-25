@@ -92,3 +92,7 @@ This is the rule behind the others. When a line survives every rule above, ask t
 ## Applying the rules
 
 An audit run records, per file, which rule ids produced edits. A finding it cannot act on (a deletion proposal, rot outside its slice, a rule that needs sharpening) goes in the run bead comment, not in the file.
+
+## Static hypotheses, not observed facts
+
+The om editorial reviewer is a read-only tool: it reads the working tree and the diff, and it cannot execute code or run tests (gt-jq95). It has never observed a change run, so a runtime-failure claim in any agent-authored text — a comment, a test report, a finding — must be phrased as a static hypothesis: "this will fail when run because `<defect>` on line `<n>`", never as "this fails" or "the tests fail". Operators discount findings that assert runtime behaviour the reviewer could not have observed.
