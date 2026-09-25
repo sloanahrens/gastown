@@ -89,10 +89,13 @@ func assertFeedLacks(t *testing.T, feedPath string, actors ...string) {
 // claude-9jq the curator kept reading the old inode and stopped curating the
 // feed until the next daemon restart.
 func TestCurator_FollowsRenameRotation(t *testing.T) {
-	eventsPath, feedPath := startCurator(t, feedLine(t, "expired"), feedLine(t, "kept"))
+	// Build each line once: feedLine stamps time.Now() to the second, and a
+	// rebuilt copy straddling a second boundary would not match the anchor.
+	kept := feedLine(t, "kept")
+	eventsPath, feedPath := startCurator(t, feedLine(t, "expired"), kept)
 
 	tmp := eventsPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(feedLine(t, "kept")+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(kept+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(tmp, eventsPath); err != nil {
@@ -120,7 +123,8 @@ func TestCurator_FollowsTruncateInPlace(t *testing.T) {
 // A writer that opened the file before the rename can land a line in the old
 // inode; the curator drains it before switching, then follows the new file.
 func TestCurator_LateWriteToOldFileAfterRename(t *testing.T) {
-	eventsPath, feedPath := startCurator(t, feedLine(t, "history"))
+	history := feedLine(t, "history") // built once; see TestCurator_FollowsRenameRotation
+	eventsPath, feedPath := startCurator(t, history)
 
 	oldWriter, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -129,7 +133,7 @@ func TestCurator_LateWriteToOldFileAfterRename(t *testing.T) {
 	defer oldWriter.Close()
 
 	tmp := eventsPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(feedLine(t, "history")+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(history+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(tmp, eventsPath); err != nil {
