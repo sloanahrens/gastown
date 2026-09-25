@@ -313,9 +313,8 @@ func runGitOut(t *testing.T, dir string, args ...string) string {
 // TestLintFailureDetail pins what a failed lint attempt is allowed to tell the
 // polecat. Only a lint that ran to completion may ask for findings to be fixed;
 // lock contention, a lint that stopped at golangci-lint's own timeout, and a
-// budget that ran out while the lint was still going (gt-taoz:
-// run.allow-serial-runners makes a contended golangci-lint block on the lock
-// rather than exit with the marker) all linted nothing (gt-xsty).
+// budget that ran out while the lint was still going all linted nothing
+// (gt-xsty, gt-taoz).
 //
 // The verdicts come from the final attempt rather than from a retry count, so a
 // lint that contended once and then reported a real finding is sent back as a

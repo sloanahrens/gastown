@@ -24,11 +24,11 @@ import (
 // that does not exist is the misattribution this file exists to prevent
 // (gt-xsty).
 //
-// budgetExpired is the case gt-taoz opened: with run.allow-serial-runners a
-// contended lint blocks rather than exiting with the lock marker, so the wait is
-// spent inside a single attempt — one that the outer budget can and does kill,
-// at which point the run returns a signal error carrying no marker and the
-// default detail would claim findings.
+// budgetExpired is the case gt-taoz opened: a lint killed at the outer budget
+// returns a signal error carrying no marker, so the default detail would claim
+// findings for output that never existed. A lint still going at the deadline is
+// one that took the lock and outran its reserve, or a lint command that waits
+// on the lock internally and says nothing while it does (gt-kqwu).
 func lintFailureDetail(outcome lintlock.Outcome, budgetExpired bool, budget time.Duration) string {
 	switch {
 	case outcome.Contended:
