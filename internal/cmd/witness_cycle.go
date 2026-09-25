@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/patrolstate"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -30,7 +31,8 @@ import (
 //
 // Everything the successor needs is already outside the session: stall
 // sample 1 in stall_samples.json (step 1), idle:N on the agent bead, the
-// patrol wisp, mail and queued nudges. The cycle counter and the wait outcome
+// patrol wisp, mail and queued nudges (await-signal leaves the queue to the
+// report while cycling is on; see awaitSignalDrainNudges). The cycle counter and the wait outcome
 // are Go-owned files under the witness directory (internal/patrolstate).
 
 // witnessCycleParams is one `gt patrol report` by a witness.
@@ -158,6 +160,19 @@ func patrolCycleDir(townRoot, gtRole string) string {
 	return witness.WitnessStateDir(townRoot, rigName)
 }
 
+// awaitSignalDrainNudges drains the session's queued nudges for await-signal,
+// except for a role whose session cycling is enabled (patrolCycleDir != ""):
+// there the next command, gt patrol report, may respawn the session, and
+// nudges printed into the dying context would be lost. The report is then the
+// single decision point: it drains when it keeps the session and leaves the
+// queue for the successor when it respawns. Flag off: drained as before.
+func awaitSignalDrainNudges(townRoot, gtRole string, drain func(string) []nudge.QueuedNudge) []nudge.QueuedNudge {
+	if patrolCycleDir(townRoot, gtRole) != "" {
+		return nil
+	}
+	return drain(townRoot)
+}
+
 // runtimeSessionID is the runtime session ID the SessionStart hook persisted
 // in dir (gt prime --hook), or "" when none is recorded.
 func runtimeSessionID(dir string) string {
@@ -227,11 +242,46 @@ func defaultWitnessCycleDeps(roleInfo RoleInfo, p witnessCycleParams, summary, s
 // witness that was just respawned by a session cycle, so its first patrol
 // matches the effort the predecessor's last wait implied instead of always
 // running a full patrol (claude-8w7 design, "The fresh session's first
-// cycle"). Returns "" when prime has nothing to add.
-func witnessRespawnEffortLine(handoffReason string, wait *patrolstate.WaitOutcome) string {
+// cycle"). Returns "" when prime has nothing to add, which means a full
+// patrol.
+//
+// The hint is used only when wait is the outcome the respawning report
+// consumed: its At equals the counter's watermark (LastWaitAt) and, when both
+// know it, it came from the session the counter belonged to. Anything else (a
+// newer wait nobody reported, an old record, another session's) defaults to
+// a full patrol.
+func witnessRespawnEffortLine(handoffReason string, wait *patrolstate.WaitOutcome, state patrolstate.CycleState) string {
 	if handoffReason != unitCycleHandoffReason || wait == nil || wait.EffortLevel != "abbreviated" {
+		return ""
+	}
+	if wait.At.IsZero() || !wait.At.Equal(state.LastWaitAt) {
+		return ""
+	}
+	if wait.SessionID != "" && state.SessionID != "" && wait.SessionID != state.SessionID {
 		return ""
 	}
 	return fmt.Sprintf("EFFORT: reduced (respawned at a quiet boundary; last wait: %s, idle %d). Run your first patrol ABBREVIATED.",
 		wait.Reason, wait.IdleCycles)
+}
+
+// witnessPrimeEffortText reads the witness's cycle files and returns the
+// respawn EFFORT line as a prime section ("" for other roles or when there
+// is no hint to give).
+func witnessPrimeEffortText(ctx RoleContext, handoffReason string) string {
+	if ctx.Role != RoleWitness || ctx.TownRoot == "" || ctx.Rig == "" || handoffReason != unitCycleHandoffReason {
+		return ""
+	}
+	dir := witness.WitnessStateDir(ctx.TownRoot, ctx.Rig)
+	wait, err := patrolstate.ReadWaitOutcome(dir)
+	if err != nil {
+		return ""
+	}
+	state, err := patrolstate.LoadCycleState(dir)
+	if err != nil {
+		return ""
+	}
+	if line := witnessRespawnEffortLine(handoffReason, wait, state); line != "" {
+		return "\n" + line + "\n"
+	}
+	return ""
 }

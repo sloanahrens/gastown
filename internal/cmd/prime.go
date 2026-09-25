@@ -327,7 +327,11 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 			explain(true, "Session metadata: always included for seance discovery")
 			return captureOutput(func() { outputSessionMetadata(ctx) })
 		},
-		patrol:     func() string { return patrolSetupText + primePatrolSection(patrolStatus) },
+		patrol: func() string {
+			// The respawn EFFORT hint rides the kept, early patrol section so
+			// hook-output truncation cannot drop it (claude-8w7).
+			return patrolSetupText + primePatrolSection(patrolStatus) + witnessPrimeEffortText(ctx, primeHandoffReason)
+		},
 		hookedWork: func() string { return hookedWorkText },
 		molecule:   func() string { return captureOutput(func() { outputMoleculeContext(ctx, patrolStatus) }) },
 		directives: func() string { return captureOutput(func() { outputRoleDirectives(ctx, os.Stdout, primeExplain) }) },

@@ -155,7 +155,10 @@ You do not need to do anything either way: do not hand off, write notes or
 wait for it. Everything the next session needs is already outside your
 context (stall samples, `idle:N`, the patrol wisp, mail, queued nudges), and
 the fresh session starts from `gt prime`. The report is always the LAST
-command of a cycle, so nothing is lost when the pane is replaced.
+command of a cycle, so nothing is lost when the pane is replaced. With this
+setting on, await-signal does not print queued nudges: the report prints them
+when it keeps the session, and leaves them queued for the next session when it
+respawns. Handle any nudges the report prints before the next cycle.
 
 **If context HIGH** (approaching limit):
 1. Write handoff mail with notable observations:

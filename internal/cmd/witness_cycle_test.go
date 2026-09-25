@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/patrolstate"
 )
 
@@ -386,26 +387,164 @@ func TestPatrolCycleDir(t *testing.T) {
 }
 
 func TestWitnessRespawnEffortLine(t *testing.T) {
-	abbrev := &patrolstate.WaitOutcome{Reason: "timeout", IdleCycles: 6, EffortLevel: "abbreviated"}
-	full := &patrolstate.WaitOutcome{Reason: "signal", EffortLevel: "full"}
-	if line := witnessRespawnEffortLine("unit-cycle", abbrev); !strings.HasPrefix(line, "EFFORT: reduced") || !strings.Contains(line, "ABBREVIATED") {
+	at := wcNow
+	abbrev := &patrolstate.WaitOutcome{Reason: "timeout", IdleCycles: 6, EffortLevel: "abbreviated", SessionID: "old", At: at}
+	consumed := patrolstate.CycleState{SessionID: "old", Cycles: 0, LastWaitAt: at}
+	if line := witnessRespawnEffortLine("unit-cycle", abbrev, consumed); !strings.HasPrefix(line, "EFFORT: reduced") || !strings.Contains(line, "ABBREVIATED") {
 		t.Fatalf("line = %q", line)
 	}
+	if len(witnessRespawnEffortLine("unit-cycle", abbrev, consumed)) > 120 {
+		t.Error("EFFORT line must stay small (prime hook budget)")
+	}
+	full := *abbrev
+	full.Reason, full.EffortLevel = "signal", "full"
+	newer := *abbrev
+	newer.At = at.Add(time.Minute) // a wait nobody reported
+	older := *abbrev
+	older.At = at.Add(-time.Hour) // a stale record under a newer watermark
+	other := *abbrev
+	other.SessionID = "someone-else"
+	zero := *abbrev
+	zero.At = time.Time{}
 	for name, tc := range map[string]struct {
 		reason string
 		wait   *patrolstate.WaitOutcome
+		state  patrolstate.CycleState
 	}{
-		"full effort":     {"unit-cycle", full},
-		"no wait":         {"unit-cycle", nil},
-		"not a respawn":   {"", abbrev},
-		"compaction path": {"compaction", abbrev},
+		"full effort":           {"unit-cycle", &full, consumed},
+		"no wait":               {"unit-cycle", nil, consumed},
+		"not a respawn":         {"", abbrev, consumed},
+		"compaction path":       {"compaction", abbrev, consumed},
+		"unconsumed newer wait": {"unit-cycle", &newer, consumed},
+		"stale record":          {"unit-cycle", &older, consumed},
+		"another session":       {"unit-cycle", &other, consumed},
+		"zero time":             {"unit-cycle", &zero, patrolstate.CycleState{}},
+		"no counter":            {"unit-cycle", abbrev, patrolstate.CycleState{}},
 	} {
-		if line := witnessRespawnEffortLine(tc.reason, tc.wait); line != "" {
-			t.Errorf("%s: line = %q, want none", name, line)
+		if line := witnessRespawnEffortLine(tc.reason, tc.wait, tc.state); line != "" {
+			t.Errorf("%s: line = %q, want none (full patrol)", name, line)
 		}
 	}
-	if len(witnessRespawnEffortLine("unit-cycle", abbrev)) > 120 {
-		t.Error("EFFORT line must stay small (prime hook budget)")
+}
+
+func TestWitnessPrimeEffortTextReadsTheRespawnFiles(t *testing.T) {
+	town := t.TempDir()
+	dir := filepath.Join(town, "gastown", "witness")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := RoleContext{Role: RoleWitness, Rig: "gastown", TownRoot: town}
+	if got := witnessPrimeEffortText(ctx, "unit-cycle"); got != "" {
+		t.Fatalf("no files = %q, want none", got)
+	}
+	w := patrolstate.WaitOutcome{Reason: "timeout", AtCap: true, IdleCycles: 7, EffortLevel: "abbreviated", SessionID: "s1", At: wcNow}
+	if err := patrolstate.WriteWaitOutcome(dir, w); err != nil {
+		t.Fatal(err)
+	}
+	if err := patrolstate.SaveCycleState(dir, patrolstate.CycleState{SessionID: "s1", LastWaitAt: wcNow}); err != nil {
+		t.Fatal(err)
+	}
+	if got := witnessPrimeEffortText(ctx, "unit-cycle"); !strings.Contains(got, "EFFORT: reduced") {
+		t.Fatalf("respawn prime = %q, want the EFFORT line", got)
+	}
+	if got := witnessPrimeEffortText(ctx, ""); got != "" {
+		t.Fatalf("non-respawn prime = %q, want none", got)
+	}
+	ctx.Role = RoleRefinery
+	if got := witnessPrimeEffortText(ctx, "unit-cycle"); got != "" {
+		t.Fatalf("refinery prime = %q, want none", got)
+	}
+}
+
+// TestWitnessCycle_NudgesSurviveARespawn is fix round 1: with cycling on,
+// await-signal must not drain the queue (its output goes into a context the
+// next report may kill); the report drains only when it keeps the session.
+func TestWitnessCycle_NudgesSurviveARespawn(t *testing.T) {
+	const sess = "gt-witness"
+	town := t.TempDir()
+	rigDir := filepath.Join(town, "gastown")
+	if err := os.MkdirAll(filepath.Join(rigDir, "witness"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setFlag := func(on bool) {
+		cfg := `{"type":"rig","version":1,"name":"gastown"}`
+		if on {
+			cfg = `{"type":"rig","version":1,"name":"gastown","witness":{"cycle_session_at_idle_cap":true}}`
+		}
+		if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	enqueue := func() {
+		if err := nudge.Enqueue(town, sess, nudge.QueuedNudge{Sender: "mayor", Message: "check opal"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending := func() int {
+		n, err := nudge.Pending(town, sess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	drain := func(tr string) []nudge.QueuedNudge {
+		got, err := nudge.Drain(tr, sess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	// Flag off: await-signal drains exactly as today.
+	setFlag(false)
+	enqueue()
+	if got := awaitSignalDrainNudges(town, "gastown/witness", drain); len(got) != 1 || pending() != 0 {
+		t.Fatalf("flag off: drained %d, pending %d; want today's drain", len(got), pending())
+	}
+
+	// Flag on: await-signal leaves the queue for the report.
+	setFlag(true)
+	enqueue()
+	if got := awaitSignalDrainNudges(town, "gastown/witness", drain); got != nil || pending() != 1 {
+		t.Fatalf("flag on: await-signal drained %d, pending %d; want the queue untouched", len(got), pending())
+	}
+	// Other roles are unaffected by the witness flag.
+	if got := awaitSignalDrainNudges(town, "gastown/refinery", func(string) []nudge.QueuedNudge {
+		return []nudge.QueuedNudge{{}}
+	}); len(got) != 1 {
+		t.Fatal("a non-cycling role stopped draining")
+	}
+
+	report := func(f *fakeWitnessCycle) witnessCycleDeps {
+		d := f.deps(&bytes.Buffer{})
+		d.Report = func(drainNudges bool) error {
+			f.seq = append(f.seq, "report")
+			if drainNudges {
+				drain(town)
+			}
+			return nil
+		}
+		return d
+	}
+
+	// Report that respawns: the nudge is still queued for the successor.
+	f := witnessFake().priorCycles(2)
+	f.wait = waitAt("timeout", true)
+	if rep, err := reportAndMaybeCycleWitness(witnessParams(), report(f)); err != nil || !rep.Respawned {
+		t.Fatalf("expected a respawn: %+v %v", rep, err)
+	}
+	if pending() != 1 {
+		t.Fatalf("respawning report left %d queued, want 1 for the successor", pending())
+	}
+
+	// Report that keeps the session: it drains.
+	f = witnessFake().priorCycles(0)
+	f.wait = waitAt("signal", false)
+	if rep, err := reportAndMaybeCycleWitness(witnessParams(), report(f)); err != nil || rep.Respawned {
+		t.Fatalf("expected the session kept: %+v %v", rep, err)
+	}
+	if pending() != 0 {
+		t.Fatalf("keeping report left %d queued, want 0", pending())
 	}
 }
 

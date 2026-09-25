@@ -247,7 +247,11 @@ similar one, hq-wisp-twfom). The fresh session's first cycle is a discovery
 pass (mail drain, `gt patrol scan`), which covers anything the window missed,
 and events addressed to the witness wait in its mail and nudge queue.
 `drainNudges=false` on the report keeps queued nudges for the successor, as
-the refinery does.
+the refinery does. That alone is not enough: `gt mol await-signal` also drains
+the queue on every return, one command before the report. With cycling on,
+await-signal therefore leaves the queue alone, and the report is the single
+decision point (it drains when it keeps the session, and leaves the queue for
+the successor when it respawns).
 
 ## Step 3: reuse the refinery mechanism
 
@@ -330,7 +334,9 @@ The shipped code differs from the plan above in these details:
 - **Order in `gt patrol report`** (`reportAndMaybeCycleWitness`,
   `internal/cmd/witness_cycle.go`): decide every gate (caller, counter,
   boundary, cooldown); run the report, with `drainNudges=false` only when
-  the session is about to respawn; save the counter; record the cycle
+  the session is about to respawn (await-signal, one command earlier, does
+  not drain nudges while cycling is on, so none reach the dying context);
+  save the counter; record the cycle
   (cooldown stamp, handoff marker `unit-cycle`, town log); respawn last. On
   a skip it prints `○ session kept: <cause>`. With the flag off, the report
   is exactly today's and prints nothing extra. A failed report is returned
@@ -352,8 +358,8 @@ The shipped code differs from the plan above in these details:
 What the fresh session needs and where it comes from: stall sample 1
 (`stall_samples.json`, step 1); `idle:N` and `backoff-until` (agent bead
 labels, so the backoff stays at the cap); the patrol wisp (`gt patrol report`
-already poured the next one); mail and queued nudges (the respawning report
-does not drain them); lessons (`gt remember`); and role context (`gt prime`).
+already poured the next one); mail and queued nudges (neither await-signal nor
+the respawning report drains them); lessons (`gt remember`); and role context (`gt prime`).
 Ad-hoc watches the agent invented are still lost, as agreed above.
 
 ## Step 4: `gt prime` for the witness fits the hook limit
