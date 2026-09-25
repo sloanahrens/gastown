@@ -188,6 +188,7 @@ log "=== Commit Counts ==="
 declare -a CANDIDATES=()
 declare -a SKIPPED=()
 REPORT=""
+CHECK_STARTED_AT=$(date +%s)
 
 while IFS= read -r DB; do
   [[ -z "$DB" ]] && continue
@@ -226,12 +227,59 @@ fi
 if $CHECK_ONLY; then
   log ""
   log "=== CHECK-ONLY — databases exceeding threshold: ==="
-  for entry in "${CANDIDATES[@]}"; do
-    log "  ${entry%%:*} (${entry##*:} commits) — recommends compaction"
-  done
+  ESCALATED=0
+  ESCALATE_FAILOVER=0
+  ESC_ELAPSED=""
+  if [[ ${#CANDIDATES[@]} -gt 0 ]]; then
+    ESC_ELAPSED=$(( $(date +%s) - CHECK_STARTED_AT ))
+    ESC_TOTAL=0
+    for entry in "${CANDIDATES[@]}"; do
+      log "  ${entry%%:*} (${entry##*:} commits) — recommends compaction"
+      ESC_TOTAL=$((ESC_TOTAL + ${entry##*:}))
+    done
+    # The monitor found a candidate, so it reports the signal. Monitor-only
+    # means the script warns and exits 0: the operator decides whether
+    # --compact runs, and the daemon's compactor_dog patrol already escalates
+    # its own 2000-commits line, so a per-DB warning is the <2000 band with
+    # no double alert at the top of it (gt-hrt9). On gt failure, one HIGH
+    # failover covers the whole run; the loop keeps counting.
+    for entry in "${CANDIDATES[@]}"; do
+      ESC_NAME="${entry%%:*}"
+      ESC_COUNT="${entry##*:}"
+      if gt escalate "compactor-dog: $ESC_NAME at $ESC_COUNT commits (threshold $COMMIT_THRESHOLD)" \
+        -s MEDIUM \
+        --reason "Monitor-only check: $ESC_NAME has $ESC_COUNT commits; $ESC_TOTAL total across ${#CANDIDATES[@]} candidate(s), check took ${ESC_ELAPSED}s. Compaction is operator-only: run plugins/compactor-dog/run.sh --compact. See plugins/compactor-dog/plugin.md for the escalation policy." \
+        2>/dev/null; then
+        ESCALATED=$((ESCALATED + 1))
+      else
+        ESCALATE_FAILOVER=$((ESCALATE_FAILOVER + 1))
+      fi
+    done
+    if [[ $ESCALATE_FAILOVER -gt 0 ]]; then
+      gt escalate "compactor-dog: failed to raise $ESCALATE_FAILOVER of ${#CANDIDATES[@]} per-DB escalations" \
+        -s HIGH \
+        --reason "gt escalate failed during the check-only run. Per-DB escalations were not raised; the signal in the run record may be stale." \
+        2>/dev/null || true
+    fi
+  fi
   SUMMARY="compactor-dog: ${#CANDIDATES[@]} DBs exceed threshold ($COMMIT_THRESHOLD commits)"
-  gt plugin record-run --plugin compactor-dog --result check-only \
-    --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  if [[ $ESCALATED -gt 0 ]]; then
+    log "Escalated $ESCALATED of ${#CANDIDATES[@]} candidate(s) to the Mayor"
+    SUMMARY="$SUMMARY — escalated"
+    # A signal that reached the Mayor is a warning, not a quiet check-only:
+    # history and cooldown accounting must distinguish "raised" from "saw
+    # nothing". When gt failed for every candidate, the record keeps the
+    # check-only result and the HIGH failover escalation is the only signal.
+    gt plugin record-run --plugin compactor-dog --result warning \
+      --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  elif [[ $ESCALATE_FAILOVER -gt 0 ]]; then
+    log "WARNING: gt escalate failed for all ${#CANDIDATES[@]} candidate(s)"
+    gt plugin record-run --plugin compactor-dog --result check-only \
+      --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  else
+    gt plugin record-run --plugin compactor-dog --result check-only \
+      --title "$SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
+  fi
   exit 0
 fi
 

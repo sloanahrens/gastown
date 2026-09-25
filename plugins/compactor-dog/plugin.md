@@ -36,12 +36,16 @@ to decide if maintenance is needed.** Consider:
 ## How this runs
 
 The daemon runs `run.sh` directly in its default monitor-only mode
-(`[execution] type = "script"`, claude-l5w). It records per-DB commit counts
-and a `check-only` receipt when any DB exceeds the threshold. Escalation is
-owned by the daemon's `compactor_dog` patrol (`internal/daemon/compactor_dog.go`,
+(`[execution] type = "script"`, claude-l5w). The script records per-DB commit
+counts; when a DB exceeds the threshold it raises one MEDIUM `gt escalate`
+per candidate and records a `warning` receipt (a run with no candidates
+records `check-only`). The 30-minute cooldown gate deduplicates: a steady
+over-threshold DB re-warns once per 30 minutes, not per daemon heartbeat.
+The daemon's `compactor_dog` patrol (`internal/daemon/compactor_dog.go`,
 threshold 2000, chosen to stay clear of the escalation-commit loop described
-there), so this plugin raises nothing itself. A dog reads the judgment steps
-below only when `run.sh` exits nonzero (Dolt unreachable, no databases).
+there) owns the hard line, so the plugin's per-DB warnings are the <2000 band
+without a double alert at its top. A dog reads the judgment steps below only
+when `run.sh` exits nonzero (Dolt unreachable, no databases).
 
 **First, check the maintenance mode.** The judgment table in Step 6 depends
 on it:
@@ -327,20 +331,18 @@ SUMMARY="Compactor check: $TOTAL_COMMITS total commits across $(echo "$PROD_DBS"
 echo "=== $SUMMARY ==="
 ```
 
-On success (no escalation needed):
-```bash
-gt plugin record-run --plugin compactor-dog --result success \
-  --title "compactor-dog: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
-```
+Receipt outcomes, with who records them:
 
-On escalation:
-```bash
-gt plugin record-run --plugin compactor-dog --result warning \
-  --title "compactor-dog: ESCALATED - $SUMMARY" \
-  --description "Escalated to Mayor for compaction. $SUMMARY" >/dev/null 2>&1 || true
-```
+- `run.sh` check-only, no candidates: records `check-only` itself.
+- `run.sh` check-only, one or more candidates: raises the per-DB
+  `gt escalate` calls itself (see "How this runs") and records `warning`.
+- `run.sh --compact`: records `success` or `warning` (the compaction-error
+  escalation) itself.
+- `run.sh` exits nonzero: the daemon records `failure` and dispatches a dog
+  with the output attached. The dog investigates, records `failure`, and
+  escalates if the failure looks permanent.
 
-On failure:
+Dog escalation (only after a failed run):
 ```bash
 gt plugin record-run --plugin compactor-dog --result failure \
   --title "compactor-dog: FAILED" \

@@ -4,6 +4,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FAILURES=0
+# Per-run log dirs, space-separated and cleaned by the EXIT trap. A variable
+# set inside a $(...) command substitution never reaches the parent shell
+# (macOS bash 3.2), so the runner appends each dir to this list in the parent
+# where it is visible — RUN_LOG alone is not reliable for cleanup.
+RUN_LOG_DIRS=""
+RUN_LOG_DIR=""
+run_test_cleanup() { rm -rf ${RUN_LOG_DIRS:-}; }
+trap run_test_cleanup EXIT
 
 # Source just the helper functions from run.sh by extracting them.
 # We can't source the whole script (it runs immediately), so redefine here.
@@ -46,10 +54,20 @@ if ! grep -q '^CHECK_ONLY=true' "$SCRIPT_DIR/run.sh"; then
   echo "FAIL: run.sh no longer defaults CHECK_ONLY=true — destructive compaction is the default"
   FAILURES=$((FAILURES + 1))
 fi
-FALSE_SETTERS=$(grep -c 'CHECK_ONLY=false' "$SCRIPT_DIR/run.sh" || true)
-COMPACT_FLAG=$(grep -c -- '--compact).*CHECK_ONLY=false' "$SCRIPT_DIR/run.sh" || true)
-if [[ "$FALSE_SETTERS" != "$COMPACT_FLAG" ]]; then
-  echo "FAIL: run.sh clears CHECK_ONLY on $FALSE_SETTERS line(s) but only $COMPACT_FLAG is the --compact flag"
+# --compact is parsed inside the argument loop; the flag's line shape can
+# move, so locate it and bound the false-setter count to the loop that
+# contains it.
+COMPACT_FLAG_LINE=$(grep -n -- '--compact' "$SCRIPT_DIR/run.sh" | head -1 | sed -n 's/^[0-9]*://p')
+ARG_LOOP_START=$(grep -n '^while \[\[ \$# -gt 0 \]\]' "$SCRIPT_DIR/run.sh" | head -1 | sed -n 's/^[0-9]*://p')
+grep -n '' "$SCRIPT_DIR/run.sh" | awk -v start="${ARG_LOOP_START:-0}" '$1 ~ /^[0-9]+:done$/ && $1+0 > start {print $1; exit}' > /tmp/compactor-dog-loopend.$$ 2>/dev/null
+ARG_LOOP_END=$(cat /tmp/compactor-dog-loopend.$$ 2>/dev/null)
+rm -f /tmp/compactor-dog-loopend.$$
+ARG_LOOP_END=${ARG_LOOP_END:-999999}
+FALSE_SETTERS=$(awk -v s="$COMPACT_FLAG_LINE" -v e="$ARG_LOOP_END" '
+  $1+0 >= s && $1+0 <= e && /CHECK_ONLY=false/ {n++}
+  END {print n+0}' "$SCRIPT_DIR/run.sh")
+if [[ "$FALSE_SETTERS" != "1" ]]; then
+  echo "FAIL: CHECK_ONLY is cleared on $FALSE_SETTERS line(s) of the argument loop — only the --compact flag may do that"
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -124,7 +142,9 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "SKIP: jq not installed (the query pipes through jq)"
 elif $QUERY_OK; then
   FAKE_DIR=$(mktemp -d)
-  trap 'rm -rf "${FAKE_DIR:-}"' EXIT
+  # Replaces the top-level cleanup trap: this block owns FAKE_DIR, so the EXIT
+  # trap now covers it alongside the per-run log dirs.
+  trap 'rm -rf ${RUN_LOG_DIRS:-} "${FAKE_DIR:-}"' EXIT
 
   # Run the extracted query under whichever fake bd is installed in FAKE_DIR.
   # The subshell keeps PATH changes from leaking into later tests.
@@ -177,6 +197,174 @@ FAKE_BD_EMPTY
     echo "      The harness is not exercising the query in plugin.md."
     FAILURES=$((FAILURES + 1))
   fi
+fi
+
+# --- Check-only escalation loop (gt-hrt9) ---
+#
+# Monitor-only is a steady state: the daemon records a receipt and exits 0,
+# so the old doc contract (a dog reads plugin.md and escalates on any
+# over-threshold signal) could never fire — the plugin raised nothing. The
+# escalation loop now lives in run.sh's check-only branch: one gt escalate
+# per candidate DB, a warning receipt when any candidate was escalated, and
+# exit 0 either way. Drive the real script with faked dolt and gt commands
+# and assert the branch's behavior.
+echo ""
+echo "=== check-only escalation tests ==="
+
+# Returns a fresh per-run log dir on stdout. The value only reaches the
+# caller through the $(...) subshell, so any variable set inside this
+# subshell is gone the moment it returns — the caller is responsible for
+# recording the dir (see run_with_fakes / RUN_LOG_DIRS).
+run_log_dir() {
+  printf '%s' "$(mktemp -d /tmp/compactor-dog-run.XXXXXX)"
+}
+
+write_fakes() {
+  local dir="$1" esc_rc="${2:-0}"
+  cat > "$dir/dolt" <<'FAKE_DOLT'
+#!/usr/bin/env bash
+# Stand-in for the `dolt sql` CLI as run.sh calls it:
+# `dolt --host H --port P --no-tls -u U -p "" [--use-db DB] sql -q QUERY --result-format csv`
+# (run.sh puts global flags BEFORE the sql subcommand). It serves two
+# databases: hq over the threshold (600), beads below it (10).
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -q) q="${2:-}"; shift ;;
+    --use-db) db="${2:-}"; shift ;;
+    sql) sub="sql" ;;
+    *) : ;;
+  esac
+  shift
+done
+if [[ "${sub:-}" == "sql" ]]; then
+  if [[ "$q" == "SHOW DATABASES" ]]; then
+    printf 'Database\nhq\nbeads\n'
+  elif [[ "$q" == *"dolt_log"* ]]; then
+    if [[ "$db" == "hq" ]]; then
+      printf 'cnt\n600\n'
+    else
+      printf 'cnt\n10\n'
+    fi
+  fi
+fi
+exit 0
+FAKE_DOLT
+  cat > "$dir/gt" <<FAKE_GT
+#!/usr/bin/env bash
+LOG="\${RUN_LOG:-/dev/null}"
+case "\${1:-}" in
+escalate)
+  printf 'ESCALATE %s\n' "\$*" >> "\$LOG"
+  exit "$esc_rc"
+  ;;
+plugin)
+  printf 'RECORD-RUN %s\n' "\$*" >> "\$LOG"
+  exit 0
+  ;;
+*)
+  exit 0
+  ;;
+esac
+FAKE_GT
+  chmod +x "$dir/dolt" "$dir/gt"
+}
+
+# Drive the real run.sh with the faked gt/dolt on PATH. $1 = fake bin dir,
+# remaining args go to run.sh. The runner creates a fresh log dir (the fake
+# gt appends ops there), records it in RUN_LOG_DIR (global, set in the
+# parent) and RUN_LOG_DIRS (for the EXIT trap), then runs run.sh in a
+# subshell. Do NOT call this from $(...) — the function must run in the
+# parent shell for RUN_LOG_DIRS to reach the EXIT trap.
+run_with_fakes() {
+  local dir="$1" rc d
+  shift
+  d=$(run_log_dir)
+  RUN_LOG_DIR="$d"
+  RUN_LOG_DIRS="$RUN_LOG_DIRS $d"
+  (
+    export PATH="$dir:$PATH"
+    export RUN_LOG="$d/ops"
+    bash "$SCRIPT_DIR/run.sh" "$@"
+  ) >/dev/null 2>&1
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "HARNESS: run.sh exited $rc (see ops in $d)" >&2
+  fi
+  return 0
+}
+
+FAKE_DIR=$(mktemp -d)
+FAKE_DIR_RC1=$(mktemp -d)
+trap 'rm -rf ${RUN_LOG_DIRS:-} "$FAKE_DIR" "$FAKE_DIR_RC1"' EXIT
+write_fakes "$FAKE_DIR" 0
+write_fakes "$FAKE_DIR_RC1" 1
+
+# (a) One over-threshold DB: the check-only branch escalates exactly one
+# DB, records a warning receipt, and exits 0 (the run stays a success —
+# escalation is the happy path, not a failure). The runner always returns 0
+# so a run.sh failure cannot kill the harness mid-test; check exit 0 here.
+run_with_fakes "$FAKE_DIR"
+LOG="$RUN_LOG_DIR"
+if [[ $? -ne 0 ]]; then
+  echo "FAIL: check-only with a candidate did not exit 0 (runner reports the code on stderr)"
+  FAILURES=$((FAILURES + 1))
+fi
+ESC_COUNT=$( (grep -c '^ESCALATE ' "$LOG/ops" 2>/dev/null) || true )
+ESC_COUNT=${ESC_COUNT:-0}
+ESC_COUNT="${ESC_COUNT//$'\n'/}"
+REC_COUNT=$( (grep -c '^RECORD-RUN ' "$LOG/ops" 2>/dev/null) || true )
+REC_COUNT=${REC_COUNT:-0}
+REC_COUNT="${REC_COUNT//$'\n'/}"
+if [[ "$ESC_COUNT" != "1" ]]; then
+  echo "FAIL: expected 1 escalation (one per candidate DB), got $ESC_COUNT"
+  FAILURES=$((FAILURES + 1))
+fi
+if [[ "$ESC_COUNT" -gt 0 ]] && ! grep -q 'ESCALATE .*hq' "$LOG/ops"; then
+  echo "FAIL: escalation does not name the over-threshold DB (hq)"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q -- '--result warning' "$LOG/ops"; then
+  echo "FAIL: escalated check-only run must record a warning receipt"
+  FAILURES=$((FAILURES + 1))
+fi
+if [[ "$REC_COUNT" -lt 1 ]]; then
+  echo "FAIL: check-only run recorded no receipt"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# (b) gt escalate fails (Dolt down): the script must NOT exit nonzero —
+# a nonzero exit would dispatch a dog to investigate a failure whose
+# signal was already in the run record. One HIGH failover escalation
+# covers the run; the receipt is still written.
+run_with_fakes "$FAKE_DIR_RC1"
+LOG="$RUN_LOG_DIR"
+if [[ $? -ne 0 ]]; then
+  echo "FAIL: check-only with failed escalations did not exit 0 (runner reports the code on stderr)"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q -- '-s HIGH' "$LOG/ops"; then
+  echo "FAIL: failed per-DB escalations must trigger the HIGH failover escalation"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# (c) --compact must not go through the check-only escalation branch:
+# the destructive path escalates only on integrity/compaction errors,
+# never per candidate.
+# The fake dolt serves the same counts in every mode, so --compact goes
+# through the full flatten cycle: exit is nonzero, but the branch
+# distinguisher is that the per-candidate escalation message never appears
+# (that wording belongs to the check-only branch only).
+run_with_fakes "$FAKE_DIR" --compact
+LOG="$RUN_LOG_DIR"
+# grep -c prints "0" on no match but exits 1, which under set -e would kill
+# the harness mid-test: run it in a guarded subshell so the assignment always
+# succeeds, then trim the count to a single bare number.
+CANDIDATE_ESC=$( (grep -c 'ESCALATE .*commits (threshold' "$LOG/ops" 2>/dev/null) || true )
+CANDIDATE_ESC=${CANDIDATE_ESC:-0}
+CANDIDATE_ESC="${CANDIDATE_ESC//$'\n'/}"
+if [[ "$CANDIDATE_ESC" != "0" ]]; then
+  echo "FAIL: --compact path raised '$CANDIDATE_ESC' per-candidate escalation(s); that branch is check-only's"
+  FAILURES=$((FAILURES + 1))
 fi
 
 echo ""

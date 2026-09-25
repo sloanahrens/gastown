@@ -101,7 +101,7 @@ var pluginRunCmd = &cobra.Command{
 This command does no work: it prints the plugin's instructions and records a
 "printed" receipt, distinct from success, that does not satisfy the plugin's
 own cooldown gate. Execute the instructions yourself, then record the real
-result with ` + "`gt plugin record-run`" + ` (--result success or failure).
+result with ` + "`gt plugin record-run`" + ` (--result success, failure, skipped, or warning).
 A receipt is never written as success on the command's say-so alone (gt-o1z7).
 
 Gate behavior:
@@ -554,7 +554,7 @@ func runPluginRun(cmd *cobra.Command, args []string) error {
 		PluginName: p.Name,
 		RigName:    p.RigName,
 		Result:     plugin.ResultPrinted,
-		Body:       "Manual run via gt plugin run: instructions printed, not executed. Record the real result with `gt plugin record-run --plugin " + p.Name + " --result <success|failure>` once the work is done.",
+		Body:       "Manual run via gt plugin run: instructions printed, not executed. Record the real result with `gt plugin record-run --plugin " + p.Name + " --result <success|failure|skipped|warning>` once the work is done.",
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to record run: %v\n", err)

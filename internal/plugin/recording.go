@@ -18,6 +18,12 @@ const (
 	ResultSuccess RunResult = "success"
 	ResultFailure RunResult = "failure"
 	ResultSkipped RunResult = "skipped"
+	// ResultWarning marks a run that finished and acted on its finding: the
+	// check succeeded and its signal was escalated to the operator (the
+	// compactor-dog's check-only escalation, gt-hrt9). Distinct from
+	// ResultFailure — a warning escalates, it does not dispatch a dog — and
+	// from ResultSuccess, which a quiet check records.
+	ResultWarning RunResult = "warning"
 	// ResultPrinted marks a `gt plugin run` receipt for a plugin whose
 	// instructions were printed but not executed: distinct from
 	// ResultSuccess so history, dashboards and cooldown accounting never
