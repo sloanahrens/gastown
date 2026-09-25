@@ -262,6 +262,57 @@ func TestMatchesUnboundedScanTownTree(t *testing.T) {
 	}
 }
 
+// TestMatchesUnboundedScanPatternNotRoot pins gt-yts7: a grep/rg/ag/fd search
+// pattern is never a scan-root candidate, even when it happens to spell the
+// name of a real directory relative to cwd. Before the fix, matchesUnboundedScan
+// walked every non-flag argument through scanRootPath — including the
+// pattern, which comes before the root(s) in these tools' argv — so a
+// pattern colliding with an aggregate directory (e.g. searching for the word
+// "polecats" while sitting at the rig root, which really does hold a
+// polecats/ directory) misclassified the pattern as a town-tree scan root
+// and blocked an otherwise bounded, harmless command.
+func TestMatchesUnboundedScanPatternNotRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+	other := t.TempDir()
+
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		// The pattern collides with a real aggregate directory at cwd, but
+		// the actual (bounded) root argument is unrelated — must not block.
+		{"grep pattern collides with rig aggregate dir", rig, `grep -rn polecats ` + other, false},
+		{"rg pattern collides with rig aggregate dir", rig, `rg polecats ` + other, false},
+		{"ag pattern collides with rig aggregate dir", rig, `ag polecats ` + other, false},
+		{"fd pattern collides with rig aggregate dir", rig, `fd polecats ` + other, false},
+		// The pattern collides with the rig name at the town root.
+		{"grep pattern collides with rig name at town root", town, `grep -rn ` + fakeRigName + ` ` + other, false},
+
+		// The real root argument, appearing *after* the pattern, must still
+		// be caught — the fix must not blind the guard to genuine hazards.
+		{"grep root after a harmless pattern is still blocked", rig, `grep -rn TODO polecats`, true},
+		{"rg root after a harmless pattern is still blocked", rig, `rg TODO polecats`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(tt.cwd)
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked=%v (reason=%q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q, town) blocked but returned no alternative text", tt.command)
+			}
+		})
+	}
+}
+
 // TestNestedTownScanPayloadIsBlocked covers the shapes only the recursive
 // evaluator can see: a town-root scan hidden inside bash -c, eval, or a
 // command substitution. matchesUnboundedScan judges one token list and never

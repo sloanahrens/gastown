@@ -764,6 +764,19 @@ var alwaysRecursiveScanTools = map[string]bool{
 	"find": true, "bfs": true, "fd": true, "du": true, "rg": true, "ag": true,
 }
 
+// patternFirstScanTools take a search pattern as their first positional
+// argument, ahead of any path — grep PATTERN [FILE...], and rg/ag/fd the
+// same. That pattern is not a scan root even when it happens to spell the
+// name of a real directory relative to cwd (gt-yts7): `grep -rn gastown
+// ./bounded` must not block on the pattern "gastown" merely because a rig
+// of that name exists at the town root, the same way scanRootPath already
+// excuses a pattern that names a real *file* (its ".env" example). Tools
+// without an implicit pattern argument — find, bfs, du, ls — are not
+// listed; every non-flag argument there is a path.
+var patternFirstScanTools = map[string]bool{
+	"grep": true, "rg": true, "ag": true, "fd": true,
+}
+
 // commandArgs returns the arguments of the command starting at i — its
 // tokens up to the next shell command separator, the same delimiting the
 // other per-command matchers use (see shellCommandSeparators, gt-wisp-52y4).
@@ -820,8 +833,16 @@ func matchesUnboundedScan(tokens []string, townRoot string) (reason, alternative
 			continue
 		}
 
+		skipPattern := patternFirstScanTools[base]
 		for _, arg := range rest {
 			resolved := resolveShellVar(arg, vars)
+			if skipPattern && !strings.HasPrefix(resolved, "-") {
+				// The first non-flag argument is the search pattern, not a
+				// path — never a scan-root candidate (see
+				// patternFirstScanTools).
+				skipPattern = false
+				continue
+			}
 			if isUnboundedScanRoot(resolved) {
 				reason = fmt.Sprintf("Unbounded scan (%s rooted at %s)", base, arg)
 				alternative = "Alternative: brew --prefix, pkg-config, 'go env GOROOT'/'go env GOMODCACHE', " +
