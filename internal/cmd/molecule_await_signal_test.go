@@ -83,9 +83,35 @@ func TestCalculateEffectiveTimeout(t *testing.T) {
 		{
 			name:        "backoff base exceeds max",
 			timeout:     "60s",
+			backoffBase: "8m",
+			backoffMax:  "5m",
+			want:        5 * time.Minute,
+		},
+		{
+			// The deacon formula's 15m cap outlived the 10m agent tool-call
+			// limit, so every capped wait was backgrounded (claude-9jq).
+			name:        "backoff max above the single-wait bound is clamped",
+			timeout:     "60s",
+			backoffBase: "60s",
+			backoffMult: 2,
+			backoffMax:  "15m",
+			idleCycles:  7,
+			want:        9 * time.Minute,
+		},
+		{
+			name:        "uncapped backoff is clamped to the single-wait bound",
+			timeout:     "60s",
+			backoffBase: "30s",
+			backoffMult: 2,
+			idleCycles:  20,
+			want:        9 * time.Minute,
+		},
+		{
+			name:        "backoff base above the single-wait bound is clamped",
+			timeout:     "60s",
 			backoffBase: "15m",
 			backoffMax:  "10m",
-			want:        10 * time.Minute,
+			want:        9 * time.Minute,
 		},
 		{
 			name:    "invalid timeout",
@@ -821,5 +847,177 @@ func TestWaitForEventsFile_WakesAfterTruncateInPlace(t *testing.T) {
 	}
 	if result.Reason != "signal" || result.Signal != fresh {
 		t.Fatalf("got reason=%q signal=%q, want signal %q", result.Reason, result.Signal, fresh)
+	}
+}
+
+// awaitSignalFakeTown builds a minimal town whose bd is a fake that reports
+// the given agent labels and logs every call's arguments. It chdirs into the
+// town and resets the await-signal flag globals afterwards.
+func awaitSignalFakeTown(t *testing.T, labels string) (townRoot, bdLog string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell fake bd")
+	}
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	townRoot = filepath.Join(tmp, "gt")
+	townBeads := filepath.Join(townRoot, ".beads")
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), townBeads} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`)
+	if err := os.WriteFile(filepath.Join(townBeads, "metadata.json"), metadata, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bdLog = filepath.Join(tmp, "bd.log")
+	bdScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+case "$1" in
+  show) printf '[{"labels":` + labels + `}]\n' ;;
+  update) ;;
+  *) printf 'unexpected bd command: %s\n' "$1" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_LOG", bdLog)
+	t.Setenv("BEADS_DIR", "")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout, oldBase, oldMult, oldMax := awaitSignalTimeout, awaitSignalBackoffBase, awaitSignalBackoffMult, awaitSignalBackoffMax
+	oldQuiet, oldBead, oldRig, oldJSON := awaitSignalQuiet, awaitSignalAgentBead, awaitSignalRig, moleculeJSON
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+		awaitSignalTimeout, awaitSignalBackoffBase, awaitSignalBackoffMult, awaitSignalBackoffMax = oldTimeout, oldBase, oldMult, oldMax
+		awaitSignalQuiet, awaitSignalAgentBead, awaitSignalRig, moleculeJSON = oldQuiet, oldBead, oldRig, oldJSON
+	})
+	awaitSignalQuiet = true
+	awaitSignalAgentBead = "hq-deacon"
+	awaitSignalRig = awaitSignalRigAny
+	moleculeJSON = false
+	return townRoot, bdLog
+}
+
+// idleLabelChanges returns the idle:N values bd updates wrote that differ from
+// initial. The fake's show always returns the initial labels, so other
+// read-modify-write updates (heartbeat, backoff-until) re-send the initial
+// idle label unchanged; only a differing value is an idle write.
+func idleLabelChanges(t *testing.T, bdLog, initial string) []string {
+	t.Helper()
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	var idle []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "update ") {
+			continue
+		}
+		for _, arg := range strings.Fields(line) {
+			if strings.HasPrefix(arg, "--set-labels=idle:") && arg != "--set-labels="+initial {
+				idle = append(idle, strings.TrimPrefix(arg, "--set-labels="))
+			}
+		}
+	}
+	return idle
+}
+
+// A real event must reset the idle counter inside await-signal. The formula
+// used to leave the reset to the agent, which skipped it 20 of 20 times, so
+// every deacon wait sat at the backoff cap (claude-9jq).
+func TestRunMoleculeAwaitSignal_SignalResetsIdle(t *testing.T) {
+	townRoot, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
+	awaitSignalBackoffBase = "30s"
+	awaitSignalBackoffMult = 2
+	awaitSignalBackoffMax = "5m"
+
+	eventsPath := filepath.Join(townRoot, ".events.jsonl")
+	go func() {
+		time.Sleep(time.Second) // after the pre-wait bd calls and the tail's open
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"ts":"now","type":"mail","actor":"mayor"}` + "\n")
+	}()
+
+	start := time.Now()
+	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitSignal: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Fatalf("wait ran %v; the event should have woken it", elapsed)
+	}
+	if got := idleLabelChanges(t, bdLog, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
+		t.Fatalf("idle label updates = %q, want exactly [idle:0]", got)
+	}
+}
+
+// Timeouts keep backing off: idle goes up by one, never back to zero.
+func TestRunMoleculeAwaitSignal_TimeoutIncrementsIdle(t *testing.T) {
+	_, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
+	awaitSignalBackoffBase = "1ms"
+	awaitSignalBackoffMult = 1
+	awaitSignalBackoffMax = ""
+
+	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitSignal: %v", err)
+	}
+	if got := idleLabelChanges(t, bdLog, "idle:5"); len(got) != 1 || got[0] != "idle:6" {
+		t.Fatalf("idle label updates = %q, want exactly [idle:6]", got)
+	}
+}
+
+// A signal at idle 0 has nothing to reset, so no extra bd write is spent.
+func TestRunMoleculeAwaitSignal_SignalAtIdleZeroSkipsWrite(t *testing.T) {
+	townRoot, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:0"]`)
+	awaitSignalBackoffBase = "30s"
+	awaitSignalBackoffMult = 2
+	awaitSignalBackoffMax = "5m"
+
+	eventsPath := filepath.Join(townRoot, ".events.jsonl")
+	go func() {
+		time.Sleep(time.Second)
+		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(`{"ts":"now","type":"mail","actor":"mayor"}` + "\n")
+	}()
+
+	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+		t.Fatalf("runMoleculeAwaitSignal: %v", err)
+	}
+	// Every update re-sends idle:0 unchanged, so count updates instead. The
+	// fake never reports a backoff-until label, so clearing it is a no-op.
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "update "); n != 2 {
+		t.Fatalf("bd updates = %d, want 2 (backoff-until set, heartbeat); an idle reset at idle 0 is a wasted write\n%s", n, data)
 	}
 }

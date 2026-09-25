@@ -66,8 +66,11 @@ When backoff parameters are provided, the effective timeout is calculated as:
   min(base * multiplier^idle_cycles, max)
 
 The idle_cycles value is read from the agent bead's "idle" label, enabling
-exponential backoff that persists across invocations. When a signal is
-received, the caller should reset idle:0 on the agent bead.
+exponential backoff that persists across invocations. A timeout increments
+idle:N; a signal resets it to idle:0 (the caller does not need to).
+
+A single backoff wait never exceeds 9m, whatever --backoff-max says, so it fits
+inside a 10-minute agent tool call.
 
 EXIT CODES:
   0 - Signal received or timeout (check output for which)
@@ -91,7 +94,7 @@ EXAMPLES:
   gt mol await-signal --rig town --agent-bead hq-deacon --backoff-base 30s
 
   # On timeout, the agent bead's idle:N label is auto-incremented
-  # On signal, caller should reset: gt agents state gt-gastown-witness --set idle=0
+  # On signal, it is reset to idle:0 automatically
 
   # Quiet mode (no output, for scripting)
   gt mol await-signal --timeout 30s --quiet`,
@@ -132,7 +135,7 @@ func init() {
 	moleculeAwaitSignalCmd.Flags().IntVar(&awaitSignalBackoffMult, "backoff-mult", 2,
 		"Multiplier for exponential backoff (default: 2)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalBackoffMax, "backoff-max", "",
-		"Maximum interval cap for backoff (e.g., 10m)")
+		"Maximum interval cap for backoff (e.g., 5m; never above 9m)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalAgentBead, "agent-bead", "",
 		"Agent bead ID for tracking idle cycles (reads/writes idle:N label)")
 	moleculeAwaitSignalCmd.Flags().StringVar(&awaitSignalRig, "rig", "",
@@ -152,7 +155,7 @@ func init() {
 	moleculeAwaitSignalShortcutCmd.Flags().IntVar(&awaitSignalBackoffMult, "backoff-mult", 2,
 		"Multiplier for exponential backoff (default: 2)")
 	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalBackoffMax, "backoff-max", "",
-		"Maximum interval cap for backoff (e.g., 10m)")
+		"Maximum interval cap for backoff (e.g., 5m; never above 9m)")
 	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalAgentBead, "agent-bead", "",
 		"Agent bead ID for tracking idle cycles (reads/writes idle:N label)")
 	moleculeAwaitSignalShortcutCmd.Flags().StringVar(&awaitSignalRig, "rig", "",
@@ -304,8 +307,21 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 					style.Dim.Render("⚠"), err)
 			}
 		}
-		// Report current idle cycles (caller should reset)
+		// Woken by real activity: reset the idle counter here so the next
+		// wait starts at the base interval. This used to be left to the
+		// agent, which skipped it (0 of 20 in one deacon session), so every
+		// wait sat at the backoff cap (claude-9jq).
 		result.IdleCycles = idleCycles
+		if idleCycles > 0 {
+			if err := setAgentIdleCycles(awaitSignalAgentBead, beadsDir, 0); err != nil {
+				if !awaitSignalQuiet {
+					fmt.Printf("%s Failed to reset agent bead idle count: %v\n",
+						style.Dim.Render("⚠"), err)
+				}
+			} else {
+				result.IdleCycles = 0
+			}
+		}
 		// Clear the backoff window — woken by real activity
 		_ = clearAgentBackoffUntil(awaitSignalAgentBead, beadsDir)
 	}
@@ -374,13 +390,34 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// awaitSignalMaxWait caps a single backoff-mode wait, whatever --backoff-max
+// says. Patrol agents run await-signal as one Bash tool call, and Claude Code
+// caps a tool call at 10 minutes: a longer wait is moved to the background and
+// the agent falls back to sleep-polling it. The deacon formula's 15m cap did
+// exactly that on every idle cycle (claude-9jq). Nine minutes leaves a minute
+// for the bd reads and writes around the wait.
+const awaitSignalMaxWait = 9 * time.Minute
+
 // calculateEffectiveTimeout determines the timeout based on flags.
 // If backoff parameters are provided, uses exponential backoff formula:
 //
-//	min(base * multiplier^idleCycles, max)
+//	min(base * multiplier^idleCycles, max, awaitSignalMaxWait)
 //
-// Otherwise uses the simple --timeout value.
+// Otherwise uses the simple --timeout value, which is not clamped: an explicit
+// timeout is the caller's choice.
 func calculateEffectiveTimeout(idleCycles int) (time.Duration, error) {
+	timeout, err := backoffTimeout(idleCycles)
+	if err != nil || awaitSignalBackoffBase == "" {
+		return timeout, err
+	}
+	if timeout > awaitSignalMaxWait {
+		return awaitSignalMaxWait, nil
+	}
+	return timeout, nil
+}
+
+// backoffTimeout is calculateEffectiveTimeout before the single-wait clamp.
+func backoffTimeout(idleCycles int) (time.Duration, error) {
 	// If backoff base is set, use backoff mode
 	if awaitSignalBackoffBase != "" {
 		base, err := time.ParseDuration(awaitSignalBackoffBase)

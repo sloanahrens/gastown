@@ -1399,7 +1399,7 @@ gt deacon heartbeat "pre-await checkpoint"
 ```
 
 Then ack any probe that arrived while this cycle was working. The wait below can
-run 15 minutes, and without this the next cycle's `ack-probes` step is the only
+run 9 minutes, and without this the next cycle's `ack-probes` step is the only
 other opportunity — the deacon-self-probe doctor check reads that ack back:
 
 ```bash
@@ -1410,7 +1410,7 @@ Use await-signal with exponential backoff to wait for activity:
 
 ```bash
 gt mol step await-signal --rig town --agent-bead hq-deacon \
-  --backoff-base 60s --backoff-mult 2 --backoff-max 15m
+  --backoff-base 60s --backoff-mult 2 --backoff-max 9m
 ```
 
 `--rig town` keeps the subscription town-wide on purpose: the deacon coordinates
@@ -1423,15 +1423,16 @@ This command:
    - First timeout: 60s
    - Second timeout: 120s
    - Third timeout: 240s
-   - ...capped at 15 minutes max
-4. Tracks `idle:N` label on hq-deacon bead for backoff state
+   - ...capped at 9 minutes max (await-signal never waits longer than 9m in
+     one call, so the wait fits inside a 10-minute tool call)
+4. Tracks `idle:N` label on hq-deacon bead for backoff state: a timeout
+   increments it, a signal resets it to 0
 5. Outputs `EFFORT: reduced` or `EFFORT: full` directive for next cycle
 
 **On signal received** (activity detected):
-Reset the idle counter and start next patrol cycle:
-```bash
-gt agents state hq-deacon --set idle=0
-```
+await-signal has already reset the idle counter to 0. Start the next patrol
+cycle. Only if its output shows `Failed to reset agent bead idle count`, reset
+it by hand: `gt agents state hq-deacon --set idle=0`
 
 **On timeout** (no activity):
 The idle counter was auto-incremented. Continue to next patrol cycle
