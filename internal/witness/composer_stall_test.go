@@ -102,7 +102,7 @@ func TestDetectStalledRefinerySubmitsPendingInput(t *testing.T) {
 		"display-message:#{pane_current_command}": "claude",
 	})
 
-	result := DetectStalledRefinery(t.TempDir(), "gastown")
+	result := DetectStalledRefinery(t.TempDir(), "gastown", false)
 
 	logged, err := os.ReadFile(logPath)
 	if err != nil {
@@ -134,6 +134,43 @@ func TestDetectStalledRefinerySubmitsPendingInput(t *testing.T) {
 	}
 }
 
+// dryRun must report the same confirmed stall without touching the live
+// session — the gate the om major on gt-wisp-q9os asked for.
+func TestDetectStalledRefineryDryRunSkipsSubmit(t *testing.T) {
+	logPath := fakeTmuxShim(t, map[string]string{
+		"has-session":                             "",
+		"show-environment":                        "@missing",
+		"capture-pane":                            stalledRefineryPane,
+		"display-message:#{window_activity}":      "1700000000", // 2023-11-14: silent since
+		"display-message:#{pane_current_command}": "claude",
+	})
+
+	result := DetectStalledRefinery(t.TempDir(), "gastown", true)
+
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+
+	if result.Checked != 1 {
+		t.Fatalf("Checked = %d, want 1", result.Checked)
+	}
+	if len(result.Stalls) != 1 {
+		t.Fatalf("Stalls = %d, want 1 (errors: %v)\ntmux calls:\n%s", len(result.Stalls), result.Errors, logged)
+	}
+	stall := result.Stalls[0]
+	if stall.Action != ComposerStallActionDetectedDryRun {
+		t.Errorf("Action = %q, want %q", stall.Action, ComposerStallActionDetectedDryRun)
+	}
+	if stall.Error != nil {
+		t.Errorf("Error = %v, want nil on a dry-run detection", stall.Error)
+	}
+
+	if strings.Contains(string(logged), "send-keys") {
+		t.Errorf("keystrokes sent to the refinery on a dry run; log:\n%s", logged)
+	}
+}
+
 // A refinery that is actively working must be left completely alone: this is
 // the false positive the witness hit live on 2026-09-18 16:13.
 func TestDetectStalledRefineryLeavesWorkingRefineryAlone(t *testing.T) {
@@ -145,7 +182,7 @@ func TestDetectStalledRefineryLeavesWorkingRefineryAlone(t *testing.T) {
 		"display-message:#{pane_current_command}": "claude",
 	})
 
-	result := DetectStalledRefinery(t.TempDir(), "gastown")
+	result := DetectStalledRefinery(t.TempDir(), "gastown", false)
 
 	if len(result.Stalls) != 0 {
 		t.Errorf("working refinery reported as stalled: %+v", result.Stalls)
@@ -167,7 +204,7 @@ func TestDetectStalledRefinerySkipsMissingSession(t *testing.T) {
 		"capture-pane":     stalledRefineryPane,
 	})
 
-	result := DetectStalledRefinery(t.TempDir(), "gastown")
+	result := DetectStalledRefinery(t.TempDir(), "gastown", false)
 
 	if result.Checked != 0 {
 		t.Errorf("Checked = %d, want 0 for a missing session", result.Checked)
@@ -197,7 +234,7 @@ func TestDetectStalledRefinerySkipsDeadAgent(t *testing.T) {
 		"list-panes":                              "zsh\t1",
 	})
 
-	result := DetectStalledRefinery(t.TempDir(), "gastown")
+	result := DetectStalledRefinery(t.TempDir(), "gastown", false)
 
 	if len(result.Stalls) != 0 {
 		t.Errorf("stall reported for a session with no live agent: %+v", result.Stalls)

@@ -50,6 +50,10 @@ const (
 	// ComposerStallActionStillPending means the input did not leave the
 	// composer after the submit attempt.
 	ComposerStallActionStillPending = "still-pending"
+	// ComposerStallActionDetectedDryRun means a stall was confirmed but the
+	// caller asked for detection only — no keystrokes were sent to the live
+	// session.
+	ComposerStallActionDetectedDryRun = "detected-dry-run"
 )
 
 // composerStallRecheckDelay is the settle time before re-probing the composer
@@ -115,7 +119,12 @@ type DetectRefineryStallResult struct {
 // did not free the composer and the session needs a restart, which is the
 // operator's interim fix and stays a human/patrol decision rather than
 // something this scan does silently.
-func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
+//
+// dryRun reports a confirmed stall without sending anything to the live
+// session — the submit is the only side effect a patrol scan has on a running
+// agent's pane, and a caller that wants detection without that mutation
+// (om major on gt-wisp-q9os) sets this instead of acting on the result.
+func DetectStalledRefinery(workDir, rigName string, dryRun bool) *DetectRefineryStallResult {
 	result := &DetectRefineryStallResult{}
 
 	townRoot, err := workspace.Find(workDir)
@@ -162,6 +171,12 @@ func DetectStalledRefinery(workDir, rigName string) *DetectRefineryStallResult {
 		Inactivity:     stall.Inactivity,
 		PendingFor:     stall.PendingFor,
 		PendingSamples: stall.PendingSamples,
+	}
+
+	if dryRun {
+		item.Action = ComposerStallActionDetectedDryRun
+		result.Stalls = append(result.Stalls, item)
+		return result
 	}
 
 	if err := t.SubmitPendingInput(sessionName, stall.Queued); err != nil {
