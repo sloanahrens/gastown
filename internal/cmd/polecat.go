@@ -2648,7 +2648,9 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		if preservedRef != "" && !alreadyOnRemote {
 			pushedRef = preservedRef
 		}
-		nukeReleaseHookedWork(nukeRel, nukeTownRoot, rigName, polecatInfo, pushedRef)
+		if out := nukeReleaseHookedWork(nukeRel, nukeTownRoot, rigName, polecatInfo, pushedRef); !out.Released && out.SkipNote != "" {
+			fmt.Printf("  %s hooked work %s not released: %s\n", style.Dim.Render("○"), polecatInfo.Issue, out.SkipNote)
+		}
 		hookHandled = true
 	}
 
