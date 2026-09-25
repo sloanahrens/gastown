@@ -173,6 +173,26 @@ func TestImmediateConsumptionWarningReportsUnknownWhenPaneUnreadable(t *testing.
 	}
 }
 
+// The gt-8hi4w case: wait-idle's direct-delivery path shares the same probe as
+// immediate mode, and the warning must say "wait-idle", not "immediate", so an
+// operator reading it knows which delivery path produced a false idle-read.
+func TestConsumptionWarningLabelsWaitIdleMode(t *testing.T) {
+	withShortImmediateProbe(t)
+	fakeTmuxPane(t, cmdWedgedPane, -1)
+	tm := tmux.NewTmuxWithSocket("gt-test-nudge-consumption")
+
+	warning := consumptionWarning(tm, "gt-mayor", NudgeModeWaitIdle)
+	if warning == "" {
+		t.Fatal("wedged target produced no warning for wait-idle mode")
+	}
+	if !strings.HasPrefix(warning, "wait-idle: ") {
+		t.Errorf("warning %q does not start with the wait-idle label", warning)
+	}
+	if strings.Contains(warning, "immediate:") {
+		t.Errorf("wait-idle warning mislabeled as immediate: %q", warning)
+	}
+}
+
 // A pane that is readable at baseline but gone before the final judgment is the
 // same fail-open in a rarer shape (session vanishing mid-probe, gt-7xnv).
 func TestImmediateConsumptionWarningReportsUnknownWhenPaneLostMidProbe(t *testing.T) {

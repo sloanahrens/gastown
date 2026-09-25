@@ -228,7 +228,7 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 			return err
 		}
 		// Delivery succeeded; now check the target actually acted on it.
-		if warning := immediateConsumptionWarning(t, sessionName); warning != "" {
+		if warning := consumptionWarning(t, sessionName, NudgeModeImmediate); warning != "" {
 			fmt.Fprint(os.Stderr, warning)
 		}
 		return nil
@@ -240,12 +240,13 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 // can shorten it.
 var immediateTurnProbeWindow = 3 * time.Second
 
-// immediateConsumptionWarning watches a target for a reaction to a nudge that
-// immediate mode has just delivered, and returns a warning line when the target
-// took the input without acting on it — or when consumption could not be
-// established (an unreadable pane, or a frozen pane with nothing to date it by,
-// both read UNKNOWN and name a re-probe instead of claiming a wedge, gt-7xnv).
-// It returns "" only on a positive, unambiguous verdict.
+// consumptionWarning watches a target for a reaction to a nudge that mode has
+// just delivered directly (immediate, or wait-idle's own direct delivery once
+// the target went idle), and returns a warning line when the target took the
+// input without acting on it — or when consumption could not be established
+// (an unreadable pane, or a frozen pane with nothing to date it by, both read
+// UNKNOWN and name a re-probe instead of claiming a wedge, gt-7xnv). It
+// returns "" only on a positive, unambiguous verdict.
 //
 // This exists because "the pty took the keystrokes" and "the agent acted on
 // them" are different claims, and only the first was ever being verified
@@ -254,12 +255,18 @@ var immediateTurnProbeWindow = 3 * time.Second
 // minutes while the daemon logged "Refinery for beads already running,
 // skipping spawn" on every heartbeat. Every delivery had reported success.
 //
+// wait-idle's direct-delivery path had the same gap (gt-8hi4w): a target that
+// WaitForIdle read as idle — a stale prompt, a frozen pane — could take the
+// keystrokes without starting a turn, and 'gt nudge' printed '✓ Nudged ...
+// (wait-idle)' regardless. mode is only used to label the warning; the probe
+// itself does not care how the text was delivered.
+//
 // It reports rather than fails. Delivery genuinely succeeded — the text left
 // the composer — and the target may still act on it later, so a non-zero exit
 // here would make every caller (patrols, slings, operators) treat a delivered
 // nudge as an undelivered one. The warning is the signal; the recovery stays
 // the operator's or the patrol's, per tmux.SubmitPendingInput's contract.
-func immediateConsumptionWarning(t *tmux.Tmux, sessionName string) string {
+func consumptionWarning(t *tmux.Tmux, sessionName, mode string) string {
 	verdict, err := t.WaitForInputConsumed(sessionName, immediateTurnProbeWindow)
 	if err != nil {
 		// Fail closed (gt-7xnv): an unobservable pane says nothing about the
@@ -267,30 +274,35 @@ func immediateConsumptionWarning(t *tmux.Tmux, sessionName string) string {
 		// claim a wedge either, so the word here is UNKNOWN, not "started no
 		// turn". Re-probe before acting on it.
 		return fmt.Sprintf(
-			"immediate: %s took the nudge but consumption is UNKNOWN — the probe could not read the pane (%v). "+
+			"%s: %s took the nudge but consumption is UNKNOWN — the probe could not read the pane (%v). "+
 				"Re-check with 'gt session health %s' before acting.\n",
-			sessionName, err, sessionName)
+			mode, sessionName, err, sessionName)
 	}
 	if verdict == tmux.InputConsumptionUndated {
 		// The pane was frozen and holding input but has no content above the
 		// input box to date it by (gt-7xnv): the nudge may be the input, or
 		// any older text. Not a strand claim — re-probe on a longer window.
 		return fmt.Sprintf(
-			"immediate: %s still holds input and the pane was frozen for %s, but it has nothing above "+
+			"%s: %s still holds input and the pane was frozen for %s, but it has nothing above "+
 				"the input box to date it by — consumption is UNKNOWN (UNDATED), not a strand. "+
 				"Re-check with 'gt session health %s' before acting.\n",
-			sessionName, immediateTurnProbeWindow, sessionName)
+			mode, sessionName, immediateTurnProbeWindow, sessionName)
 	}
 	if verdict != tmux.InputConsumptionNotConsumed {
 		return ""
 	}
 	return fmt.Sprintf(
-		"immediate: %s accepted the nudge but started no turn within %s — its input is "+
+		"%s: %s accepted the nudge but started no turn within %s — its input is "+
 			"still stranded in the composer/queue, which is how a wedged session presents "+
 			"(gt-eigw). Inspect it with 'gt session health %s'; if it stays stuck, restart "+
 			"that session ('gt refinery restart <rig>' for a refinery, 'gt witness restart "+
 			"<rig>' for a witness).\n",
-		sessionName, immediateTurnProbeWindow, sessionName)
+		mode, sessionName, immediateTurnProbeWindow, sessionName)
+}
+
+// immediateConsumptionWarning is consumptionWarning labeled for immediate mode.
+func immediateConsumptionWarning(t *tmux.Tmux, sessionName string) string {
+	return consumptionWarning(t, sessionName, NudgeModeImmediate)
 }
 
 // deliverWaitIdle waits for the target to become idle (prompt visible), then
@@ -349,6 +361,16 @@ func deliverWaitIdle(t *tmux.Tmux, townRoot, sessionName, message, sender string
 		}})
 		deliverErr := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot})
 		if !errors.Is(deliverErr, tmux.ErrSubmitNotVerified) {
+			if deliverErr == nil {
+				// Delivery reported success because the target read as idle
+				// and took the keystrokes — but "took the keystrokes" and
+				// "acted on them" are different claims (gt-8hi4w, the same
+				// gap immediate mode closed for gt-eigw). Warn rather than
+				// let a false idle-read report a silent success.
+				if warning := consumptionWarning(t, sessionName, NudgeModeWaitIdle); warning != "" {
+					fmt.Fprint(os.Stderr, warning)
+				}
+			}
 			return deliverErr
 		}
 		fmt.Fprintf(os.Stderr, "wait-idle: %v; queueing for %s\n", deliverErr, sessionName)
@@ -452,6 +474,11 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 			if err := t.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot}); err != nil {
 				fmt.Fprintf(os.Stderr, "idle-watcher: delivery for %s failed: %v\n", sessionName, err)
 				requeueDrainedNudges(townRoot, sessionName, "idle-watcher", drained)
+			} else if warning := consumptionWarning(t, sessionName, NudgeModeWaitIdle); warning != "" {
+				// Same false-idle gap as the direct-delivery path above: the
+				// watcher's own WaitForIdle read the target as idle, but that
+				// does not mean the target acted on what it was just handed.
+				fmt.Fprint(os.Stderr, "idle-watcher: "+warning)
 			}
 			return
 		}
