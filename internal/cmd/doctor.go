@@ -268,6 +268,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewCustomTypesCheck())
 	d.Register(doctor.NewCustomStatusesCheck())
 	d.Register(doctor.NewFormulaCheck())
+	d.Register(doctor.NewFormulaTierCheck())
 	d.Register(doctor.NewOverlayHealthCheck())
 	d.Register(doctor.NewUnusedDirectiveCheck())
 	d.Register(doctor.NewPrefixConflictCheck())

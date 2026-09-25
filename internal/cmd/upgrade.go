@@ -134,6 +134,7 @@ func upgradeDoctor(townRoot string) upgradeResult {
 	d.Register(doctor.NewCustomTypesCheck())
 	d.Register(doctor.NewCustomStatusesCheck())
 	d.Register(doctor.NewFormulaCheck())
+	d.Register(doctor.NewFormulaTierCheck())
 	d.Register(doctor.NewPrefixConflictCheck())
 	d.Register(doctor.NewPrefixMismatchCheck())
 	d.Register(doctor.NewDatabasePrefixCheck())
