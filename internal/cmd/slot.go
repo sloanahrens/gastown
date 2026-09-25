@@ -131,7 +131,7 @@ you mean and that no live test process owns it, then run
 }
 
 func init() {
-	slotRunCmd.Flags().StringVar(&slotRunRole, "role", "", "Identifier for the holder, shown in 'gt status' (e.g. rig/role or MR id). It also scopes nesting: a wrapper nested inside another holder stays reentrant only if it passes that holder's role")
+	slotRunCmd.Flags().StringVar(&slotRunRole, "role", "", "Identifier for the holder, shown in 'gt status' (e.g. rig/role or MR id). It also scopes nesting: a wrapper nested inside another holder stays reentrant only if it names that holder's role. Omit it to inherit the ancestor's role automatically when nested; naming a different role always contends")
 	slotRunCmd.Flags().DurationVar(&slotRunTimeout, "timeout", 60*time.Minute, "Max time to wait for the slot to free up (0 = wait forever)")
 	slotRunCmd.Flags().IntVar(&slotRunNice, "nice", -1, "CPU niceness for the command (default: 10 for non-gate roles, 0 for refinery/batch/main-branch-test; 0 disables)")
 
@@ -148,16 +148,36 @@ func init() {
 	rootCmd.AddCommand(slotCmd)
 }
 
+// resolveSlotRunRole is the --role default 'gt slot run' actually applies.
+// Split out from runSlotRun so it's testable without the full
+// workspace/exec harness that function needs (following resolveSlotCommand's
+// precedent below).
+//
+// An explicit flagRole always wins, unchanged. An omitted one usually means
+// a nested wrap that has no way to know its ancestor's exact role string
+// (gt-cet2, gt-tuiy): default to riding that ancestor's hold via
+// slot.InheritedRole instead of a per-invocation placeholder that is
+// guaranteed to mismatch it and contend for the full --timeout — the
+// deadlock class gt-tuiy exists to prevent. A top-level invocation with no
+// ancestor hold at all still falls back to the old unique-pid role, so two
+// unrelated unnamed invocations never collide with each other.
+func resolveSlotRunRole(flagRole, townRoot string) string {
+	if flagRole != "" {
+		return flagRole
+	}
+	if inherited, ok := slot.InheritedRole(townRoot); ok {
+		return inherited
+	}
+	return fmt.Sprintf("pid-%d", os.Getpid())
+}
+
 func runSlotRun(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	role := slotRunRole
-	if role == "" {
-		role = fmt.Sprintf("pid-%d", os.Getpid())
-	}
+	role := resolveSlotRunRole(slotRunRole, townRoot)
 
 	// Resolve and validate the command before taking the slot: the gate is the
 	// merge path's critical section, and a command that cannot run must not hold
