@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -1386,10 +1387,6 @@ func isHookedAgentDead(assignee string) bool {
 	return !alive
 }
 
-// survivingBranchForBeadFn is a seam for tests. Production uses
-// survivingBranchForBead.
-var survivingBranchForBeadFn = survivingBranchForBead
-
 // rigRootForBead resolves the rig directory owning beadID through the prefix
 // routes, or "" when the bead's prefix routes nowhere.
 func rigRootForBead(townRoot, beadID string) string {
@@ -1404,16 +1401,20 @@ func rigRootForBead(townRoot, beadID string) string {
 	return filepath.Join(townRoot, rigName)
 }
 
+// errBeadRoutesToNoRig means a bead's prefix maps to no rig, so there is no
+// rig repo that could hold its polecat branches.
+var errBeadRoutesToNoRig = errors.New("bead routes to no rig")
+
 // survivingWorkForBead is the shared surviving-work predicate
 // (polecat.WorkSurvival) for beadID: the newest polecat branch — local in the
-// rig repo or on origin — carrying a patch that is not on the rig's default
-// branch, or "" when none does. A non-nil error means the answer is unknown
-// (no rig route, unreachable origin, ...); polecat.ErrNoRigRepo means the rig
-// has no git repo, so there is no branch to protect.
+// rig repo or on origin — carrying a patch that is on neither the rig's
+// default branch nor an integration branch, or "" when none does. A non-nil
+// error means the answer is unknown, except for polecat.ErrNoRigRepo and
+// errBeadRoutesToNoRig, which mean there is no repo, so no branch to protect.
 func survivingWorkForBead(townRoot, beadID string) (string, error) {
 	rigRoot := rigRootForBead(townRoot, beadID)
 	if rigRoot == "" {
-		return "", fmt.Errorf("bead %s routes to no rig", beadID)
+		return "", fmt.Errorf("%s: %w", beadID, errBeadRoutesToNoRig)
 	}
 	return polecat.SurvivingWorkForIssue(rigRoot, beadID)
 }
@@ -1421,15 +1422,28 @@ func survivingWorkForBead(townRoot, beadID string) (string, error) {
 // survivingWorkForBeadFn is a seam for tests.
 var survivingWorkForBeadFn = survivingWorkForBead
 
-// survivingBranchForBead is sling's view of survivingWorkForBead: the branch
-// and true when the bead's work survives. It reads an unknown answer as "no
-// surviving work" (false), so an unreachable remote never blocks a re-sling.
-func survivingBranchForBead(townRoot, beadID string) (string, bool) {
+// noRepoToProtect reports whether a survival error only says there is no repo
+// (and therefore no branch) for the bead.
+func noRepoToProtect(err error) bool {
+	return errors.Is(err, polecat.ErrNoRigRepo) || errors.Is(err, errBeadRoutesToNoRig)
+}
+
+// reslingSurvivingWorkGuard is sling's re-sling guard for a bead whose
+// holder is dead (gt-3qfp): it refuses when the work survives on a branch, and
+// also when survival cannot be verified — an outage must not turn into a
+// second polecat started from main over preserved work. It returns nil only
+// when there is verifiably nothing to protect. --force bypasses it (caller).
+func reslingSurvivingWorkGuard(townRoot, beadID, holder string) error {
 	branch, err := survivingWorkForBeadFn(townRoot, beadID)
-	if err != nil || branch == "" {
-		return "", false
+	switch {
+	case err != nil && !noRepoToProtect(err):
+		return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, and sling cannot verify surviving work (%v); resume with --branch or override with --force",
+			beadID, holder, err)
+	case branch != "":
+		return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
+			beadID, holder, branch, beadID, branch, beadID)
 	}
-	return branch, true
+	return nil
 }
 
 // survivingBranchesForBead lists every polecat branch on the rig's origin

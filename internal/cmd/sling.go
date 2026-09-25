@@ -676,9 +676,8 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			// gt-da2x (3). Preserved work must be resumed or explicitly
 			// discarded, never silently re-created.
 			if slingResumeBranch == "" {
-				if branch, ok := survivingBranchForBeadFn(townRoot, beadID); ok {
-					return fmt.Errorf("refusing to re-sling %s: previous holder %s has no active session, but its branch still carries work that is not on main:\n  %s\nRe-slinging would start a second polecat from main on work that is already preserved.\n  Resume the preserved work:  gt sling %s <target> --branch %s\n  Start fresh anyway:         gt sling %s <target> --force",
-						beadID, info.Assignee, branch, beadID, branch, beadID)
+				if err := reslingSurvivingWorkGuard(townRoot, beadID, info.Assignee); err != nil {
+					return err
 				}
 			}
 			fmt.Printf("%s Hooked agent %s has no active session, auto-forcing re-sling...\n",
@@ -791,6 +790,9 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	delayedDogInfo := resolved.DelayedDogInfo
 	newPolecatInfo := resolved.NewPolecatInfo
 	isSelfSling := resolved.IsSelfSling
+	if newPolecatInfo != nil {
+		newPolecatInfo.originalHold = &beadHold{Status: originalStatus, Assignee: originalAssignee}
+	}
 
 	// Rollback guard (gt-7evi4). resolveTarget may have spawned or reused a
 	// polecat; from here every exit that does not reach the commit point below

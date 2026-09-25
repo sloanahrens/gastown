@@ -52,6 +52,17 @@ type SpawnedPolecatInfo struct {
 	// Internal fields for deferred session start
 	account string
 	agent   string
+
+	// originalHold is the work bead's status and assignee before this sling
+	// touched it; nil when unknown. A rollback that finds the bead's work
+	// surviving hands it back to this holder instead of releasing it.
+	originalHold *beadHold
+}
+
+// beadHold is a work bead's status and assignee.
+type beadHold struct {
+	Status   string
+	Assignee string
 }
 
 // resolveSpawnBaseBranch computes the merge-target base branch reported on

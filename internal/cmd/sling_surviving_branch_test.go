@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // writeGastownRoutes maps the gt- prefix to the gastown rig, which is what
@@ -88,12 +91,12 @@ exit 0
 	return townRoot
 }
 
-// withSurvivingBranchForBead replaces the branch-lookup seam for a test.
-func withSurvivingBranchForBead(t *testing.T, fn func(townRoot, beadID string) (string, bool)) {
+// withSurvivingWork replaces the surviving-work seam for a test.
+func withSurvivingWork(t *testing.T, branch string, err error) {
 	t.Helper()
-	prev := survivingBranchForBeadFn
-	t.Cleanup(func() { survivingBranchForBeadFn = prev })
-	survivingBranchForBeadFn = fn
+	prev := survivingWorkForBeadFn
+	t.Cleanup(func() { survivingWorkForBeadFn = prev })
+	survivingWorkForBeadFn = func(string, string) (string, error) { return branch, err }
 }
 
 // TestSlingDeadAgentRefusesWhenBranchSurvives is the guard half of the gt-3qfp
@@ -107,9 +110,7 @@ func TestSlingDeadAgentRefusesWhenBranchSurvives(t *testing.T) {
 	}
 
 	_ = setupDeadHolderSlingFixture(t)
-	withSurvivingBranchForBead(t, func(townRoot, beadID string) (string, bool) {
-		return "polecat/pearl/gt-ibt8+mu72g5cz", true
-	})
+	withSurvivingWork(t, "polecat/pearl/gt-ibt8+mu72g5cz", nil)
 
 	var err error
 	stdout := captureStdout(t, func() {
@@ -143,9 +144,7 @@ func TestSlingDeadAgentResumesWithBranchFlag(t *testing.T) {
 
 	_ = setupDeadHolderSlingFixture(t)
 	slingResumeBranch = "polecat/pearl/gt-ibt8+mu72g5cz"
-	withSurvivingBranchForBead(t, func(townRoot, beadID string) (string, bool) {
-		return "polecat/pearl/gt-ibt8+mu72g5cz", true
-	})
+	withSurvivingWork(t, "polecat/pearl/gt-ibt8+mu72g5cz", nil)
 
 	var err error
 	stdout := captureStdout(t, func() {
@@ -160,29 +159,66 @@ func TestSlingDeadAgentResumesWithBranchFlag(t *testing.T) {
 	}
 }
 
-// TestSlingDeadAgentForcesWhenBranchUnknown pins the fail-open behaviour: if
-// the surviving-branch lookup cannot answer (no repo, unreachable remote), the
-// long-standing dead-holder auto-force must still work.
-func TestSlingDeadAgentForcesWhenBranchUnknown(t *testing.T) {
+// TestSlingDeadAgentRefusesWhenSurvivalUnknown: when surviving work cannot
+// be verified (unreachable remote, timeout), the guard refuses rather than
+// risk a second polecat from main over preserved work; --branch or --force are
+// the ways forward.
+func TestSlingDeadAgentRefusesWhenSurvivalUnknown(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
 
 	_ = setupDeadHolderSlingFixture(t)
-	withSurvivingBranchForBead(t, func(townRoot, beadID string) (string, bool) {
-		return "", false
-	})
+	withSurvivingWork(t, "", errors.New("origin unreachable"))
 
 	var err error
 	stdout := captureStdout(t, func() {
 		err = runSling(nil, []string{"gt-ibt8", "gastown/polecats/pearl"})
 	})
-
-	if err != nil && strings.Contains(err.Error(), "refusing to re-sling") {
-		t.Fatalf("unknown branch state must not refuse, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "cannot verify surviving work (origin unreachable)") {
+		t.Fatalf("want a cannot-verify refusal, got %v", err)
 	}
-	if !strings.Contains(stdout, "auto-forcing re-sling") {
-		t.Errorf("expected auto-force when no branch is known, stdout: %q", stdout)
+	if !strings.Contains(err.Error(), "resume with --branch or override with --force") {
+		t.Fatalf("refusal must name both ways forward, got %v", err)
+	}
+	if strings.Contains(stdout, "auto-forcing re-sling") {
+		t.Errorf("must not auto-force on an unknown answer, stdout: %q", stdout)
+	}
+}
+
+// TestSlingDeadAgentForcesWhenNothingToProtect: no rig repo, or a bead that
+// routes to no rig, means there is no branch to protect, so the dead-holder
+// auto-force still runs. So does an explicit --force on an unknown answer.
+func TestSlingDeadAgentForcesWhenNothingToProtect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	for _, tc := range []struct {
+		name  string
+		err   error
+		force bool
+	}{
+		{name: "no rig repo", err: polecat.ErrNoRigRepo},
+		{name: "routes to no rig", err: fmt.Errorf("gt-ibt8: %w", errBeadRoutesToNoRig)},
+		{name: "no surviving work"},
+		{name: "explicit --force on an unknown answer", err: errors.New("origin unreachable"), force: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = setupDeadHolderSlingFixture(t)
+			withSurvivingWork(t, "", tc.err)
+			slingForce = tc.force
+
+			var err error
+			stdout := captureStdout(t, func() {
+				err = runSling(nil, []string{"gt-ibt8", "gastown/polecats/pearl"})
+			})
+			if err != nil && strings.Contains(err.Error(), "refusing to re-sling") {
+				t.Fatalf("must not refuse, got: %v", err)
+			}
+			if !tc.force && !strings.Contains(stdout, "auto-forcing re-sling") {
+				t.Errorf("expected the dead-holder auto-force, stdout: %q", stdout)
+			}
+		})
 	}
 }
 
@@ -233,26 +269,26 @@ func TestSurvivingBranchForBead_ResolvesRigRepo(t *testing.T) {
 	runGit(t, townRoot, "init", "--bare", bare)
 	runGit(t, bare, "remote", "add", "origin", originDir)
 
-	branch, ok := survivingBranchForBead(townRoot, "gt-ibt8")
-	if !ok {
-		t.Fatalf("expected a surviving branch for gt-ibt8, got none")
+	branch, err := survivingWorkForBead(townRoot, "gt-ibt8")
+	if err != nil {
+		t.Fatalf("survivingWorkForBead(gt-ibt8): %v", err)
 	}
 	if branch != "polecat/pearl/gt-ibt8+mu72g5cz" {
-		t.Errorf("survivingBranchForBead() = %q, want the pushed branch", branch)
+		t.Errorf("survivingWorkForBead() = %q, want the pushed branch", branch)
 	}
 
 	// A branch equal to main is not surviving work.
-	if branch, ok := survivingBranchForBead(townRoot, "gt-empty"); ok {
-		t.Errorf("a branch equal to main must not count as surviving work, got %q", branch)
+	if branch, err := survivingWorkForBead(townRoot, "gt-empty"); err != nil || branch != "" {
+		t.Errorf("a branch equal to main must not count as surviving work, got %q (%v)", branch, err)
 	}
 
 	// A bead with no branch reports unknown, not a false positive.
-	if branch, ok := survivingBranchForBead(townRoot, "gt-nobranch"); ok {
+	if branch, err := survivingWorkForBead(townRoot, "gt-nobranch"); err != nil || branch != "" {
 		t.Errorf("expected no branch for gt-nobranch, got %q", branch)
 	}
 
 	// A prefix with no route reports unknown rather than guessing a path.
-	if branch, ok := survivingBranchForBead(townRoot, "zz-unrouted"); ok {
+	if branch, err := survivingWorkForBead(townRoot, "zz-unrouted"); !errors.Is(err, errBeadRoutesToNoRig) || branch != "" {
 		t.Errorf("expected no branch for unrouted prefix, got %q", branch)
 	}
 }

@@ -33,11 +33,12 @@ func (f *fakeSandbox) DeleteBranch(branch string) { f.branches = append(f.branch
 func installRollbackFakes(t *testing.T, rel *fakeWorkReleaser) *fakeSandbox {
 	t.Helper()
 	sb := &fakeSandbox{}
-	prevRel, prevSandbox := newPolecatWorkReleaserFn, openSpawnedPolecatSandboxFn
+	prevRel, prevSandbox, prevSurviving := newPolecatWorkReleaserFn, openSpawnedPolecatSandboxFn, survivingWorkForBeadFn
 	newPolecatWorkReleaserFn = func(string, string) polecatWorkReleaser { return rel }
 	openSpawnedPolecatSandboxFn = func(string, string) (spawnedPolecatSandbox, error) { return sb, nil }
+	survivingWorkForBeadFn = func(string, string) (string, error) { return "", nil }
 	t.Cleanup(func() {
-		newPolecatWorkReleaserFn, openSpawnedPolecatSandboxFn = prevRel, prevSandbox
+		newPolecatWorkReleaserFn, openSpawnedPolecatSandboxFn, survivingWorkForBeadFn = prevRel, prevSandbox, prevSurviving
 	})
 	return sb
 }
@@ -98,6 +99,50 @@ func TestCleanupSpawnedPolecatWorkRespectsProvenance(t *testing.T) {
 			}
 			if len(rel.released) != 1 {
 				t.Errorf("the hook this sling set must be released, got %v", rel.released)
+			}
+		})
+	}
+}
+
+// A failed sling whose bead carries surviving work (e.g. a --branch resume)
+// hands the bead back to its pre-sling holder instead of releasing it to a
+// fresh re-dispatch from main; an unknown answer does the same.
+func TestCleanupSpawnedPolecatWorkRestoresOriginalHoldWhenWorkSurvives(t *testing.T) {
+	const toast = "gastown/polecats/Toast"
+	const pearl = "gastown/polecats/pearl"
+	for _, tc := range []struct {
+		name        string
+		branch      string
+		err         error
+		orig        *beadHold
+		wantHolder  string
+		wantStatus  string
+		wantRelease bool
+	}{
+		{name: "work survives: back to the original holder", branch: "polecat/pearl/gt-abc+mu5wzd6q",
+			orig: &beadHold{Status: "hooked", Assignee: pearl}, wantHolder: pearl, wantStatus: "hooked"},
+		{name: "survival unknown: back to the original holder", err: errors.New("origin unreachable"),
+			orig: &beadHold{Status: "in_progress", Assignee: pearl}, wantHolder: pearl, wantStatus: "in_progress"},
+		{name: "no surviving work: released", orig: &beadHold{Status: "hooked", Assignee: pearl},
+			wantStatus: "open", wantRelease: true},
+		{name: "original unknown: released", branch: "polecat/pearl/gt-abc+mu5wzd6q",
+			wantStatus: "open", wantRelease: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chdirTempTown(t)
+			rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-abc": {"hooked", toast}}}
+			installRollbackFakes(t, rel)
+			survivingWorkForBeadFn = func(string, string) (string, error) { return tc.branch, tc.err }
+
+			info := &SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true, originalHold: tc.orig}
+			cleanupSpawnedPolecatWork(info, "gastown", "gt-abc", "", "")
+
+			got := rel.beads["gt-abc"]
+			if got[0] != tc.wantStatus || got[1] != tc.wantHolder {
+				t.Fatalf("bead = %v, want status %q holder %q", got, tc.wantStatus, tc.wantHolder)
+			}
+			if (len(rel.released) == 1) != tc.wantRelease {
+				t.Fatalf("released = %v, want release %v", rel.released, tc.wantRelease)
 			}
 		})
 	}

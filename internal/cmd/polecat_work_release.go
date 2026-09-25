@@ -17,6 +17,9 @@ type polecatWorkReleaser interface {
 	// released=false with a nil error when the guard no longer held (another
 	// actor re-assigned the bead between the read and the write).
 	ReleaseBead(beadID, expectedAssignee string) (released bool, err error)
+	// RestoreBead sets the bead's status and assignee, guarded like ReleaseBead
+	// on the bead still being assigned to expectedAssignee.
+	RestoreBead(beadID, expectedAssignee, status, assignee string) (restored bool, err error)
 	// ResetSlot clears the polecat agent bead's hook_bead and marks it idle.
 	ResetSlot(agentID string) error
 	// Annotate appends a comment to the bead.
@@ -124,6 +127,10 @@ func (r bdPolecatWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (boo
 	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).ReleaseIfAssignee(beadID, expectedAssignee)
 }
 
+func (r bdPolecatWorkReleaser) RestoreBead(beadID, expectedAssignee, status, assignee string) (bool, error) {
+	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).TransferIfAssignee(beadID, expectedAssignee, status, assignee)
+}
+
 func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {
 	// Same reset a --force reassignment applies to the outgoing polecat
 	// (gt-skwt): hook_bead cleared, agent_state idle. Warn-only inside.
@@ -138,4 +145,45 @@ func (r bdPolecatWorkReleaser) Annotate(beadID, text string) error {
 // newPolecatWorkReleaserFn is a seam for tests.
 var newPolecatWorkReleaserFn = func(townRoot, hookWorkDir string) polecatWorkReleaser {
 	return bdPolecatWorkReleaser{townRoot: townRoot, hookWorkDir: hookWorkDir}
+}
+
+// restoreOriginalHoldIfWorkSurvives is the sling-rollback side of the
+// work-survival rule: when the bead this polecat holds carries work that
+// survives on a branch (for example a failed --branch resume sling), or when
+// survival cannot be verified, the bead goes back to its pre-sling holder
+// (guarded on this polecat still holding it) instead of being released to a
+// fresh re-dispatch from main. Reports whether the bead was handled here.
+func restoreOriginalHoldIfWorkSurvives(r polecatWorkReleaser, townRoot, agentID, beadID string, orig *beadHold) bool {
+	if beadID == "" || orig == nil {
+		return false
+	}
+	if held, _ := heldBy(r, agentID, beadID); !held {
+		return false
+	}
+	branch, err := survivingWorkForBeadFn(townRoot, beadID)
+	reason := ""
+	switch {
+	case err != nil && !noRepoToProtect(err):
+		reason = fmt.Sprintf("could not verify surviving work (%v)", err)
+	case branch != "":
+		reason = "work survives on " + branch
+	default:
+		return false
+	}
+	status := orig.Status
+	if status == "" {
+		status = "open"
+	}
+	restored, rerr := r.RestoreBead(beadID, agentID, status, orig.Assignee)
+	switch {
+	case rerr != nil:
+		fmt.Printf("  %s Could not restore %s to its original holder: %v\n", style.Dim.Render("Warning:"), beadID, rerr)
+	case restored:
+		holder := orig.Assignee
+		if holder == "" {
+			holder = "(unassigned)"
+		}
+		fmt.Printf("  %s Restored %s to %s/%s: %s\n", style.Dim.Render("○"), beadID, status, holder, reason)
+	}
+	return true
 }

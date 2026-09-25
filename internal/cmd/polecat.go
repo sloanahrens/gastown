@@ -2724,20 +2724,27 @@ var nukeSurvivingWorkFn = polecat.SurvivingWorkForIssue
 // (before the sandbox is removed) to the final report (after).
 type nukeHookedWork struct {
 	rel      polecatWorkReleaser
+	survives func(beadID string) (string, error)
 	agentID  string
 	beadID   string
-	kept     bool   // the hook was deliberately kept
-	branch   string // where the work survives ("" when survival was unknown)
-	keepNote string
+}
+
+// workSurvivalVerdict classifies a survival answer: the branch the work
+// survives on, or unknown (an error other than "the rig has no git repo").
+func workSurvivalVerdict(branch string, err error) (survivesOn string, unknown bool) {
+	if err != nil && !errors.Is(err, polecat.ErrNoRigRepo) {
+		return "", true
+	}
+	return branch, false
 }
 
 // startNukeHookedWork decides what happens to the nuked polecat's hooked work
-// bead. The bead is the polecat record's issue or, for a polecat reaped before
-// its nuke, the agent bead's hook_bead (readHook). Only a bead still held by
-// this polecat is touched. Surviving work — or an unknown answer, except for a
-// rig with no git repo — keeps the hook; otherwise the bead is released through
-// the shared compare-and-release helper. Returns nil when there is nothing to
-// report later.
+// bead before the sandbox is removed. The bead is the polecat record's issue
+// or, for a polecat reaped before its nuke, the agent bead's hook_bead
+// (readHook). Only a bead still held by this polecat is touched. Surviving work
+// — or an unknown answer — keeps the hook for now; otherwise the bead is
+// released through the shared compare-and-release helper. Returns nil when
+// there is nothing left to settle after removal.
 func startNukeHookedWork(rel polecatWorkReleaser, survives func(beadID string) (string, error),
 	rigName, polecatName string, p *polecat.Polecat, readHook func() string) *nukeHookedWork {
 	beadID := ""
@@ -2750,48 +2757,57 @@ func startNukeHookedWork(rel polecatWorkReleaser, survives func(beadID string) (
 	if beadID == "" {
 		return nil
 	}
-	h := &nukeHookedWork{rel: rel, agentID: fmt.Sprintf("%s/polecats/%s", rigName, polecatName), beadID: beadID}
+	h := &nukeHookedWork{rel: rel, survives: survives, agentID: fmt.Sprintf("%s/polecats/%s", rigName, polecatName), beadID: beadID}
 	if held, _ := heldBy(rel, h.agentID, beadID); !held {
 		return nil
 	}
-	branch, err := survives(beadID)
-	switch {
-	case err != nil && !errors.Is(err, polecat.ErrNoRigRepo):
-		h.kept, h.keepNote = true, fmt.Sprintf("could not check for surviving work: %v", err)
-	case branch != "":
-		h.kept, h.branch = true, branch
-		h.keepNote = fmt.Sprintf("work survives on %s", branch)
-	default:
-		if out := releasePolecatWork(rel, h.agentID, beadID, false); !out.Released && out.SkipNote != "" {
-			fmt.Printf("  %s hooked work %s not released: %s\n", style.Dim.Render("○"), beadID, out.SkipNote)
-		}
-		return nil
+	if branch, unknown := workSurvivalVerdict(survives(beadID)); branch != "" || unknown {
+		return h
 	}
-	return h
+	h.release()
+	return nil
 }
 
-// finish reports a kept hook once removal is over, and writes the resume
-// comment only when the bead is in fact still hooked to this polecat.
+func (h *nukeHookedWork) release() {
+	if out := releasePolecatWork(h.rel, h.agentID, h.beadID, false); !out.Released && out.SkipNote != "" {
+		fmt.Printf("  %s hooked work %s not released: %s\n", style.Dim.Render("○"), h.beadID, out.SkipNote)
+	}
+}
+
+// finish settles a kept hook once removal (and the local branch delete) is
+// over. Survival is asked again, because removal can change the answer: work
+// that no longer survives is released (guarded), and a hook that stays gets a
+// comment built from the final answer — the resume command for a branch, or
+// the command to re-check an unknown answer.
 func (h *nukeHookedWork) finish() {
-	if h == nil || !h.kept {
+	if h == nil {
 		return
 	}
 	if held, _ := heldBy(h.rel, h.agentID, h.beadID); !held {
 		return
 	}
+	branch, unknown := workSurvivalVerdict(h.survives(h.beadID))
 	rigName := strings.SplitN(h.agentID, "/", 2)[0]
-	fmt.Printf("  %s Kept %s hooked: %s\n", style.Dim.Render("○"), h.beadID, h.keepNote)
-	if h.branch == "" {
+	var note, text string
+	switch {
+	case branch != "":
+		note = "work survives on " + branch
+		text = fmt.Sprintf("gt polecat nuke: %s was nuked with its work preserved on branch %s. "+
+			"The bead stays hooked so a re-sling does not start a fresh polecat from main over that work.\n"+
+			"Resume it:          gt sling %s %s --branch %s\n"+
+			"Discard and redo:   gt sling %s %s --force",
+			h.agentID, branch, h.beadID, rigName, branch, h.beadID, rigName)
+	case unknown:
+		note = "could not verify surviving work"
+		text = fmt.Sprintf("gt polecat nuke: %s was nuked; hook kept: could not verify surviving work; "+
+			"run gt polecat surviving-work %s", h.agentID, h.beadID)
+	default:
+		h.release()
 		return
 	}
-	text := fmt.Sprintf("gt polecat nuke: %s was nuked with its work preserved on branch %s. "+
-		"The bead stays hooked so a re-sling does not start a fresh polecat from main over that work.\n"+
-		"Resume it:          gt sling %s %s --branch %s\n"+
-		"Discard and redo:   gt sling %s %s --force",
-		h.agentID, h.branch, h.beadID, rigName, h.branch, h.beadID, rigName)
+	fmt.Printf("  %s Kept %s hooked: %s\n", style.Dim.Render("○"), h.beadID, note)
 	if err := h.rel.Annotate(h.beadID, text); err != nil {
-		fmt.Printf("  %s Could not annotate %s with preserved branch %s: %v\n",
-			style.Dim.Render("Warning:"), h.beadID, h.branch, err)
+		fmt.Printf("  %s Could not annotate %s: %v\n", style.Dim.Render("Warning:"), h.beadID, err)
 	}
 }
 

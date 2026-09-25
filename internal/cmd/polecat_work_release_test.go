@@ -23,6 +23,7 @@ type fakeWorkReleaser struct {
 	readErr   error
 	raceTo    string
 	released  []string
+	restored  []string
 	resets    []string
 	annotated map[string]string
 }
@@ -52,6 +53,15 @@ func (f *fakeWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (bool, e
 	}
 	f.released = append(f.released, beadID)
 	f.beads[beadID] = [2]string{"open", ""}
+	return true, nil
+}
+
+func (f *fakeWorkReleaser) RestoreBead(beadID, expected, status, assignee string) (bool, error) {
+	if f.beads[beadID][1] != expected {
+		return false, nil
+	}
+	f.restored = append(f.restored, beadID)
+	f.beads[beadID] = [2]string{status, assignee}
 	return true, nil
 }
 
@@ -170,10 +180,24 @@ func survivesWith(branch string, err error) func(string) (string, error) {
 	return func(string) (string, error) { return branch, err }
 }
 
+// survivesSeq answers the survival question with successive verdicts, one per
+// call (start, removal, finish); the last one repeats.
+func survivesSeq(verdicts ...[2]any) func(string) (string, error) {
+	i := 0
+	return func(string) (string, error) {
+		v := verdicts[min(i, len(verdicts)-1)]
+		i++
+		branch, _ := v[0].(string)
+		err, _ := v[1].(error)
+		return branch, err
+	}
+}
+
 func TestNukeHookedWorkEndToEnd(t *testing.T) {
 	const me = "gastown/polecats/basalt"
 	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
 	working := &polecat.Polecat{Name: "basalt", Rig: "gastown", Issue: "gt-elvf4"}
+	unreachable := errors.New("origin unreachable")
 
 	for _, tc := range []struct {
 		name         string
@@ -181,24 +205,33 @@ func TestNukeHookedWorkEndToEnd(t *testing.T) {
 		p            *polecat.Polecat
 		readHook     func() string
 		survives     func(string) (string, error)
-		wantHeld     bool // still hooked to the nuked polecat at the end
-		wantComment  bool
-		wantAttempts int // release writes attempted
+		wantHeld     bool   // still hooked to the nuked polecat at the end
+		wantComment  string // substring of the one comment ("" = no comment)
+		wantAttempts int    // release writes attempted
 	}{
 		{name: "hooked, surviving work: still hooked after removal", status: "hooked", who: me, p: working,
-			survives: survivesWith(branch, nil), wantHeld: true, wantComment: true},
+			survives: survivesWith(branch, nil), wantHeld: true, wantComment: "gt sling gt-elvf4 gastown --branch " + branch},
 		{name: "in_progress, surviving work: kept, one comment, no release attempts", status: "in_progress", who: me, p: working,
-			survives: survivesWith(branch, nil), wantHeld: true, wantComment: true},
+			survives: survivesWith(branch, nil), wantHeld: true, wantComment: "--branch " + branch},
 		{name: "hooked, merged branch: released", status: "hooked", who: me, p: working,
 			survives: survivesWith("", nil), wantAttempts: 1},
-		{name: "survival unknown: kept, no comment", status: "in_progress", who: me, p: working,
-			survives: survivesWith("", errors.New("origin unreachable")), wantHeld: true},
+		{name: "survival unknown: kept, unknown comment", status: "in_progress", who: me, p: working,
+			survives: survivesWith("", unreachable), wantHeld: true,
+			wantComment: "hook kept: could not verify surviving work; run gt polecat surviving-work gt-elvf4"},
 		{name: "rig with no git repo: released", status: "hooked", who: me, p: working,
 			survives: survivesWith("", polecat.ErrNoRigRepo), wantAttempts: 1},
+		{name: "survived before removal, gone after the branch delete: released at finish", status: "hooked", who: me, p: working,
+			survives: survivesSeq([2]any{branch}, [2]any{branch}, [2]any{""}), wantAttempts: 1},
+		{name: "survived before removal, unknown after: kept, unknown comment", status: "hooked", who: me, p: working,
+			survives: survivesSeq([2]any{branch}, [2]any{branch}, [2]any{"", unreachable}), wantHeld: true,
+			wantComment: "could not verify surviving work"},
+		{name: "unknown before removal, survives after: comment names the final branch", status: "hooked", who: me, p: working,
+			survives: survivesSeq([2]any{"", unreachable}, [2]any{"", unreachable}, [2]any{branch}), wantHeld: true,
+			wantComment: "--branch " + branch},
 		{name: "reaped before the nuke: hook read off the agent bead, released", status: "hooked", who: me,
 			readHook: func() string { return "gt-elvf4" }, survives: survivesWith("", nil), wantAttempts: 1},
 		{name: "reaped before the nuke with surviving work: kept", status: "hooked", who: me,
-			readHook: func() string { return "gt-elvf4" }, survives: survivesWith(branch, nil), wantHeld: true, wantComment: true},
+			readHook: func() string { return "gt-elvf4" }, survives: survivesWith(branch, nil), wantHeld: true, wantComment: "--branch " + branch},
 		{name: "already re-slung elsewhere: untouched", status: "hooked", who: "gastown/polecats/granite", p: working,
 			survives: survivesWith(branch, nil)},
 	} {
@@ -214,11 +247,8 @@ func TestNukeHookedWorkEndToEnd(t *testing.T) {
 				t.Fatalf("another agent's bead changed: %v", cur)
 			}
 			note, commented := rel.annotated["gt-elvf4"]
-			if commented != tc.wantComment {
-				t.Fatalf("commented = %v (%q), want %v", commented, note, tc.wantComment)
-			}
-			if commented && !strings.Contains(note, "gt sling gt-elvf4 gastown --branch "+branch) {
-				t.Fatalf("comment lacks the resume hint:\n%s", note)
+			if commented != (tc.wantComment != "") || !strings.Contains(note, tc.wantComment) {
+				t.Fatalf("comment = %q (present %v), want %q", note, commented, tc.wantComment)
 			}
 			if rel.attempts != tc.wantAttempts {
 				t.Fatalf("release attempts = %d, want %d", rel.attempts, tc.wantAttempts)
@@ -244,8 +274,7 @@ func (c *countingReleaser) ReleaseBead(beadID, expected string) (bool, error) {
 // report after.
 func runNukeHookFlowCounting(rel *countingReleaser, p *polecat.Polecat, readHook func() string, survives func(string) (string, error)) {
 	h := startNukeHookedWork(rel, survives, "gastown", "basalt", p, readHook)
-	branch, err := survives("gt-elvf4")
-	if err == nil && branch == "" || errors.Is(err, polecat.ErrNoRigRepo) {
+	if branch, unknown := workSurvivalVerdict(survives("gt-elvf4")); branch == "" && !unknown {
 		// Removal's own guarded release: a no-op when the start already released.
 		if held, _ := heldBy(rel, "gastown/polecats/basalt", "gt-elvf4"); held {
 			_, _ = rel.ReleaseBead("gt-elvf4", "gastown/polecats/basalt")

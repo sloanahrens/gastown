@@ -297,8 +297,13 @@ func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, rigName, beadID, h
 
 	// Give the work back first: the sandbox removal below resets a fresh
 	// polecat's agent bead, and a kept sandbox needs its slot reset here.
-	releasePolecatWork(newPolecatWorkReleaserFn(townRoot, hookWorkDir),
-		spawnInfo.AgentID(), beadID, !spawnInfo.FreshSpawn)
+	// Work that survives on a branch goes back to its pre-sling holder rather
+	// than being released (the shared work-survival rule).
+	rel := newPolecatWorkReleaserFn(townRoot, hookWorkDir)
+	if restoreOriginalHoldIfWorkSurvives(rel, townRoot, spawnInfo.AgentID(), beadID, spawnInfo.originalHold) {
+		beadID = ""
+	}
+	releasePolecatWork(rel, spawnInfo.AgentID(), beadID, !spawnInfo.FreshSpawn)
 
 	if spawnInfo.FreshSpawn {
 		if sandbox, err := openSpawnedPolecatSandboxFn(townRoot, rigName); err != nil {

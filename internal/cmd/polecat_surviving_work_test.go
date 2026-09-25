@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,8 +22,9 @@ func TestReportSurvivingWorkExitContract(t *testing.T) {
 		wantOut  string
 	}{
 		{name: "work survives", branch: "polecat/basalt/gt-elvf4+mu5wzd6q", wantOut: "polecat/basalt/gt-elvf4+mu5wzd6q\n"},
-		{name: "no surviving work", wantCode: 1},
-		{name: "rig has no git repo", err: polecat.ErrNoRigRepo, wantCode: 1},
+		{name: "no surviving work", wantCode: 3},
+		{name: "rig has no git repo", err: polecat.ErrNoRigRepo, wantCode: 3},
+		{name: "bead routes to no rig", err: fmt.Errorf("gt-elvf4: %w", errBeadRoutesToNoRig), wantCode: 3},
 		{name: "cannot tell", err: errors.New("origin unreachable"), wantCode: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

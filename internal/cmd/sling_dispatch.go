@@ -320,6 +320,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 	result.SpawnInfo = spawnInfo
 	result.PolecatName = spawnInfo.PolecatName
+	spawnInfo.originalHold = &beadHold{Status: info.Status, Assignee: info.Assignee}
 
 	targetAgent := spawnInfo.AgentID()
 	hookWorkDir := spawnInfo.ClonePath
