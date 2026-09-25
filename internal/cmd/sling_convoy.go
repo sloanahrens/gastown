@@ -365,12 +365,13 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 // createAutoConvoy creates an auto-convoy for a single issue and tracks it.
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
 // mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
-// agent is optional (variadic so existing callers are unaffected): the runtime
-// agent requested with --agent at sling time. It is persisted on the convoy so
-// that a convoy feeder re-dispatching this bead after a failed sling re-uses
-// the same agent instead of the rig default (gt-yg24).
+// agent is the runtime agent requested with --agent at sling time (empty if
+// none). formula is the formula requested with --formula at sling time (empty
+// if none). Both are persisted on the convoy so that a convoy feeder
+// re-dispatching this bead after a failed sling re-uses the same agent and
+// formula instead of the rig default (gt-yg24, gt-4lor).
 // Returns the created convoy ID.
-func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch string, agent ...string) (_ string, retErr error) {
+func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseBranch, agent, formula string) (_ string, retErr error) {
 	defer func() { telemetry.RecordConvoyCreate(context.Background(), beadID, retErr) }()
 	// Guard against flag-like titles propagating into convoy names (gt-e0kx5)
 	if beads.IsFlagLikeTitle(beadTitle) {
@@ -394,7 +395,8 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	description := beads.SetConvoyFields(&beads.Issue{Description: prose}, &beads.ConvoyFields{
 		Merge:      mergeStrategy,
 		BaseBranch: baseBranch,
-		Agent:      optionalAgent(agent),
+		Agent:      strings.TrimSpace(agent),
+		Formula:    strings.TrimSpace(formula),
 	})
 
 	createArgs := []string{

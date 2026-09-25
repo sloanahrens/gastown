@@ -95,7 +95,7 @@ func TestFreshInstallRigPolecatHookIntegration(t *testing.T) {
 	}
 
 	withWorkingDir(t, hqPath, func() {
-		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main")
+		convoyID, err := createAutoConvoy(issue.ID, issue.Title, false, "mr", "main", "", "")
 		if err != nil {
 			t.Fatalf("create auto convoy: %v", err)
 		}

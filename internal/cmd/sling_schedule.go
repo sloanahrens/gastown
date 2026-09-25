@@ -201,8 +201,9 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	if !opts.NoConvoy {
 		existingConvoy := isTrackedByConvoy(beadID)
 		if existingConvoy == "" {
-			// Persist the requested agent so a convoy re-feed keeps it (gt-yg24).
-			convoyID, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent)
+			// Persist the requested agent and formula so a convoy re-feed
+			// keeps them (gt-yg24, gt-4lor).
+			convoyID, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent, opts.Formula)
 			if err != nil {
 				fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {

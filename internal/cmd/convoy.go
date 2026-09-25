@@ -1532,6 +1532,11 @@ type strandedConvoyInfo struct {
 	// (--agent). Feeders must re-dispatch with it instead of the rig default,
 	// so a failed sling cannot silently re-route the bead (gt-yg24).
 	Agent string `json:"agent,omitempty"`
+	// Formula is the formula requested when the convoy's beads were slung
+	// (--formula). Feeders must re-dispatch with it instead of the rig
+	// default formula, so a sling whose formula bond fails and rolls back
+	// cannot be silently re-fed under the wrong formula (gt-4lor).
+	Formula string `json:"formula,omitempty"`
 	// Owned reports whether the convoy carries the gt:owned label. Owned
 	// convoys have a designated owner responsible for their own dispatch
 	// cadence; the system-managed stranded scan (daemon's feedFirstReady)
@@ -1638,11 +1643,12 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 
 	// Check each convoy for stranded state
 	for _, convoy := range convoys {
-		// Extract base_branch and agent from convoy description fields
-		var baseBranch, convoyAgent string
+		// Extract base_branch, agent, and formula from convoy description fields
+		var baseBranch, convoyAgent, convoyFormula string
 		if cf := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description}); cf != nil {
 			baseBranch = cf.BaseBranch
 			convoyAgent = cf.Agent
+			convoyFormula = cf.Formula
 		}
 		owned := hasLabel(convoy.Labels, "gt:owned")
 
@@ -1665,6 +1671,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
 				Agent:        convoyAgent,
+				Formula:      convoyFormula,
 				Owned:        owned,
 			})
 			continue
@@ -1705,6 +1712,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
 				Agent:        convoyAgent,
+				Formula:      convoyFormula,
 				Owned:        owned,
 			})
 		} else {
@@ -1719,6 +1727,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
 				Agent:        convoyAgent,
+				Formula:      convoyFormula,
 				Owned:        owned,
 			})
 		}

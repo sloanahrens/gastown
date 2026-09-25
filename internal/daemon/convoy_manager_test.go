@@ -1736,6 +1736,89 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 	}
 }
 
+// TestFeedFirstReady_PassesConvoyFormula is the regression test for gt-4lor: a
+// convoy that recorded the sling-time --formula must re-feed with that
+// formula. Without it, a sling whose formula bond failed and rolled back left
+// the convoy open, and the daemon's re-feed ran the bead under gt sling's
+// default formula instead of the one the original sling asked for.
+func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	var mu sync.Mutex
+	logger := func(format string, args ...interface{}) {
+		mu.Lock()
+		defer mu.Unlock()
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-formula1",
+		Title:       "Formula passthrough",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+		Formula:     "mol-doc-audit",
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	logContent := string(data)
+
+	if !strings.Contains(logContent, "--formula=mol-doc-audit") {
+		t.Errorf("expected re-feed to pass the convoy's formula, got: %q", logContent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, s := range *logged {
+		if strings.Contains(s, `formula "mol-doc-audit" recorded on convoy`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected feed log to name the recorded formula, got: %v", *logged)
+	}
+}
+
+// TestFeedFirstReady_NoFormula_OmitsFlag guards the other half of gt-4lor:
+// when no formula was recorded, the feed passes no --formula and leaves
+// resolution to gt sling's own default, rather than inventing one.
+func TestFeedFirstReady_NoFormula_OmitsFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	townRoot, gtPath, slingLogPath, _ := feedTestRig(t)
+	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, gtPath, 10*time.Minute, nil, nil, nil)
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-noformula",
+		Title:       "No recorded formula",
+		ReadyCount:  1,
+		ReadyIssues: []string{"gt-issue1"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if strings.Contains(string(data), "--formula=") {
+		t.Errorf("expected no --formula when none was recorded, got: %q", string(data))
+	}
+}
+
 func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 	t.Parallel()
 	takeStoreSlot(t)

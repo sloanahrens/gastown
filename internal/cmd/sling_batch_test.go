@@ -942,7 +942,7 @@ exit 0
 	}
 	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
 
-	convoyID, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "")
+	convoyID, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "", "", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
@@ -996,7 +996,7 @@ exit 0
 	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error { return nil }
 	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
 
-	if _, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "deepseek-flash"); err != nil {
+	if _, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "deepseek-flash", ""); err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
 
@@ -1017,7 +1017,7 @@ exit 0
 	if err := os.Remove(logPath); err != nil {
 		t.Fatalf("reset bd log: %v", err)
 	}
-	if _, err := createAutoConvoy("gt-bbb", "Another task", false, "", ""); err != nil {
+	if _, err := createAutoConvoy("gt-bbb", "Another task", false, "", "", "", ""); err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
 	logBytes, err = os.ReadFile(logPath)
@@ -1029,11 +1029,64 @@ exit 0
 	}
 }
 
+// TestCreateAutoConvoy_RecordsRequestedFormula is the regression test for
+// gt-4lor: the --formula a sling was dispatched with is persisted on the
+// convoy, so a convoy feeder re-dispatching the bead after a failed sling
+// re-uses it instead of quietly falling back to the rig default formula.
+func TestCreateAutoConvoy_RecordsRequestedFormula(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	bdScript := `#!/bin/sh
+echo "CMD:$*" >> "LOGPATH"
+exit 0
+`
+	townRoot, logPath := setupTownWithBdStub(t, "")
+	bdScript = strings.ReplaceAll(bdScript, "LOGPATH", logPath)
+	if err := os.WriteFile(filepath.Join(townRoot, "bin", "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("rewrite bd stub: %v", err)
+	}
+
+	oldAddTracking := addTrackingRelationFn
+	addTrackingRelationFn = func(townRoot, convoyID, issueID string) error { return nil }
+	t.Cleanup(func() { addTrackingRelationFn = oldAddTracking })
+
+	if _, err := createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "", "mol-doc-audit"); err != nil {
+		t.Fatalf("createAutoConvoy() error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	logContent := string(logBytes)
+	if !strings.Contains(logContent, "formula: mol-doc-audit") {
+		t.Errorf("convoy description should record the requested formula:\n%s", logContent)
+	}
+
+	// No formula requested: nothing recorded, so feeders fall back to
+	// gt sling's own resolution rather than pinning a stray value.
+	if err := os.Remove(logPath); err != nil {
+		t.Fatalf("reset bd log: %v", err)
+	}
+	if _, err := createAutoConvoy("gt-bbb", "Another task", false, "", "", "", ""); err != nil {
+		t.Fatalf("createAutoConvoy() error: %v", err)
+	}
+	logBytes, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	if strings.Contains(string(logBytes), "formula:") {
+		t.Errorf("convoy description should omit formula when none requested:\n%s", string(logBytes))
+	}
+}
+
 // TestCreateAutoConvoy_FlagLikeTitleReturnsError verifies that a title starting
 // with "--" is rejected.
 func TestCreateAutoConvoy_FlagLikeTitleReturnsError(t *testing.T) {
 	t.Parallel()
-	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "")
+	_, err := createAutoConvoy("gt-aaa", "--verbose", false, "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for flag-like title, got nil")
 	}
@@ -1060,7 +1113,7 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	_, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "")
+	_, err := createAutoConvoy("gt-aaa", "My task", true, "direct", "", "", "")
 	if err != nil {
 		t.Fatalf("createAutoConvoy() error: %v", err)
 	}
@@ -1108,7 +1161,7 @@ exit 0
 		t.Fatalf("rewrite bd stub: %v", err)
 	}
 
-	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "")
+	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
 	}

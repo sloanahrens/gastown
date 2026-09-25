@@ -280,7 +280,7 @@ func setupRollbackGuardTown(t *testing.T) string {
 	})
 	clearOrphanEpisodeLabelsFn = func(string, string, string) {}
 	burnSlingWispFn = func(string, string) error { return nil }
-	createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) {
+	createAutoConvoyFn = func(string, string, bool, string, string, string, string) (string, error) {
 		return "", errors.New("unexpected convoy create")
 	}
 
@@ -362,12 +362,12 @@ func TestRunSlingRollsBackOnEveryPostSpawnExit(t *testing.T) {
 			slingHookRawBead, slingNoMerge = true, true
 			storeRawSlingMetadataFn = func(string, string, beadFieldUpdates) error { return errInjected }
 			slingNoConvoy = false
-			createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) { return "hq-cv-auto", nil }
+			createAutoConvoyFn = func(string, string, bool, string, string, string, string) (string, error) { return "hq-cv-auto", nil }
 		}},
 		{name: "hook fails with an auto-convoy keeps the convoy", wantErrSub: "injected failure", wantErr: true, wantRollback: true, wantBeadID: bead, inject: func() {
 			slingHookRawBead = true
 			slingNoConvoy = false
-			createAutoConvoyFn = func(string, string, bool, string, string, ...string) (string, error) { return "hq-cv-auto", nil }
+			createAutoConvoyFn = func(string, string, bool, string, string, string, string) (string, error) { return "hq-cv-auto", nil }
 			hookBeadWithRetryFn = func(string, string, string) error { return errInjected }
 		}},
 		{name: "hook fails", wantErrSub: "injected failure", wantErr: true, wantRollback: true, wantBeadID: bead, inject: func() {
