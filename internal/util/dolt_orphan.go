@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // doltOrphanMinAge is the minimum age (in seconds) a dolt sql-server process
@@ -149,8 +151,17 @@ func classifyDoltOrphan(e doltProcEntry) (DoltOrphanServer, bool) {
 	}
 
 	cfg := doltSQLServerConfigPath(e.Args)
+	// PPID <= 1 (reparented to launchd/init) is only orphan evidence when
+	// there's no config path contradicting it: a daemonized production
+	// server is *also* reparented to PPID 1 once its launching shell exits,
+	// but it runs from a real, persistent --config, not a test scratch dir
+	// or no --config at all. Without this, PPID<=1 alone would tag any
+	// daemonized server "orphan" — the shape Fix() SIGTERMs (gt-l7za1).
 	reason := "unexpected"
-	if e.PPID <= 1 || isBeadsTestConfigPath(cfg) {
+	switch {
+	case isBeadsTestConfigPath(cfg):
+		reason = "orphan"
+	case cfg == "" && e.PPID <= 1:
 		reason = "orphan"
 	}
 
@@ -163,15 +174,36 @@ func classifyDoltOrphan(e doltProcEntry) (DoltOrphanServer, bool) {
 	}, true
 }
 
+// townServerPIDs returns the set of PIDs considered "the town's own dolt
+// sql-server": townRoot's daemon/dolt.pid, plus — when the hermetic test
+// harness has recorded one (workspace.ForbiddenTownRoot) — the live town
+// root's daemon/dolt.pid too. A hermetic/sandbox townRoot has no
+// daemon/dolt.pid of its own (townDoltServerPID returns 0), so without this
+// second source the real production server, which the process table scan
+// still sees since it isn't sandboxed, has nothing to match against and is
+// misclassified as an orphan (gt-l7za1).
+func townServerPIDs(townRoot string) map[int]bool {
+	pids := make(map[int]bool, 2)
+	if pid := townDoltServerPID(townRoot); pid != 0 {
+		pids[pid] = true
+	}
+	if forbidden := workspace.ForbiddenTownRoot(); forbidden != "" && forbidden != townRoot {
+		if pid := townDoltServerPID(forbidden); pid != 0 {
+			pids[pid] = true
+		}
+	}
+	return pids
+}
+
 // FindOrphanDoltServers scans the process table for `dolt sql-server`
-// processes other than the town's own server (daemon/dolt.pid) whose shape
-// matches an orphaned embedded-dolt test server: reparented to init/launchd
-// (PPID <= 1) or running from a beads-bd-tests-* scratch config (either the
-// per-test or shared-server layout). Any other non-town dolt sql-server is
-// also returned, tagged Reason "unexpected", so it is surfaced without being
-// auto-signaled — it may be a developer's own manual server.
+// processes other than the town's own server(s) (see townServerPIDs) whose
+// shape matches an orphaned embedded-dolt test server: reparented to
+// init/launchd (PPID <= 1) or running from a beads-bd-tests-* scratch config
+// (either the per-test or shared-server layout). Any other non-town dolt
+// sql-server is also returned, tagged Reason "unexpected", so it is surfaced
+// without being auto-signaled — it may be a developer's own manual server.
 func FindOrphanDoltServers(townRoot string) ([]DoltOrphanServer, error) {
-	expected := townDoltServerPID(townRoot)
+	expected := townServerPIDs(townRoot)
 
 	entries, err := doltPSSnapshot()
 	if err != nil {
@@ -183,7 +215,7 @@ func FindOrphanDoltServers(townRoot string) ([]DoltOrphanServer, error) {
 		if !isDoltSQLServerArgs(e.Args) {
 			continue
 		}
-		if expected != 0 && e.PID == expected {
+		if expected[e.PID] {
 			continue // the town's own server
 		}
 		if o, ok := classifyDoltOrphan(e); ok {
