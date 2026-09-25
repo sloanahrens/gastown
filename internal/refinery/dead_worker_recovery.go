@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -14,11 +15,10 @@ import (
 )
 
 // MergeRejectionNoteMarker is the canonical vocabulary written into source-bead
-// notes when a branch-caused merge rejection is recorded. The polecat work
-// formula (mol-polecat-work) greps bead notes for this exact marker during its
-// resume path, so a redispatched polecat can find the rejection details and
-// reuse the surviving branch. Keep the marker and the formula in sync (gt-tc0).
-const MergeRejectionNoteMarker = "MERGE REJECTION"
+// notes when a branch-caused merge rejection is recorded; see
+// dispatch.MergeRejectionNoteMarker, where it is defined so the convoy feeders
+// can read it without importing refinery (gt-ghyfx).
+const MergeRejectionNoteMarker = dispatch.MergeRejectionNoteMarker
 
 // Rejection failure classes: what a rejection was actually about, the
 // vocabulary `gt mq reject --failure-type` accepts. These are strings rather

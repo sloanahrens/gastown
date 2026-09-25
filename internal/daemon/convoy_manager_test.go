@@ -15,6 +15,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/convoy"
 )
 
 // setupTestStore opens a real beads database for integration tests.
@@ -1895,38 +1896,133 @@ exit 0
 	assertLogged(t, logged, "gt-issue1", "could not confirm rejection-marker state")
 }
 
-// TestHasRejectionMarker_Unknown pins the guard.Result verdict directly: a
-// store read failure is Unknown (not Pass folded into false), a present
-// marker is Fail, and a clean record is Pass.
-func TestHasRejectionMarker_Unknown(t *testing.T) {
+// TestFeedHold_Verdicts pins the stranded scan's read of a bead's record: a
+// rig with no open store reports no store (the fail-open gap the store alert
+// owns), a read failure is an unreadable hold, a present marker is a merge
+// rejection, and a clean record holds nothing (gt-udrrw, gt-ghyfx).
+func TestFeedHold_Verdicts(t *testing.T) {
 	t.Parallel()
 
-	readErr := fmt.Errorf("dolt: connection refused")
 	store := &holdTestStorage{
 		issues: map[string]*beadsdk.Issue{
 			"gt-clean":    {Notes: "nothing to see here"},
 			"gt-rejected": {Notes: "MERGE REJECTION (attempt 1): see review"},
 		},
 	}
-	errStore := &holdTestStorage{readErr: readErr}
+	errStore := &holdTestStorage{readErr: fmt.Errorf("dolt: connection refused")}
 
 	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute,
 		map[string]beadsdk.Storage{"gt": store, "broken": errStore}, nil, nil)
 
-	if v := m.hasRejectionMarker("missing-rig", "gt-clean"); !v.IsUnknown() {
-		t.Errorf("no store for rig: want Unknown, got %v", v)
+	if _, ok := m.feedHold("missing-rig", "gt-clean"); ok {
+		t.Errorf("no store for rig: want ok=false")
 	}
-	if v := m.hasRejectionMarker("broken", "gt-clean"); !v.IsUnknown() {
-		t.Errorf("store read error: want Unknown, got %v", v)
-	} else if v.Err() == nil {
-		t.Errorf("store read error: want a non-nil Err(), got nil")
+	if hold, ok := m.feedHold("broken", "gt-clean"); !ok || !hold.Unreadable || hold.Reason == "" {
+		t.Errorf("store read error: want an unreadable hold with a reason, got %+v ok=%v", hold, ok)
 	}
-	if v := m.hasRejectionMarker("gt", "gt-clean"); !v.IsPass() {
-		t.Errorf("clean record: want Pass, got %v", v)
+	if hold, ok := m.feedHold("gt", "gt-clean"); !ok || hold != (convoy.Hold{}) {
+		t.Errorf("clean record: want no hold, got %+v ok=%v", hold, ok)
 	}
-	if v := m.hasRejectionMarker("gt", "gt-rejected"); !v.IsFail() {
-		t.Errorf("rejected record: want Fail, got %v", v)
+	if hold, ok := m.feedHold("gt", "gt-rejected"); !ok || !hold.MergeRejection {
+		t.Errorf("rejected record: want a merge-rejection hold, got %+v ok=%v", hold, ok)
 	}
+}
+
+// TestFeedFirstReady_RejectionMarker_HermeticStore is the stranded-scan half
+// of gt-ghyfx without a real store: the rejected bead defers to the deacon with
+// the same log it always had, and the fresh sibling feeds.
+func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store := &holdTestStorage{issues: map[string]*beadsdk.Issue{
+		"gt-rejected1": {Status: beadsdk.StatusOpen, Notes: "MERGE REJECTION (attempt 1): needs work - see review"},
+		"gt-fresh2":    {Status: beadsdk.StatusOpen},
+	}}
+	townRoot, gtPath, slingLogPath := holdTestTown(t)
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+
+	m.feedFirstReady(strandedConvoyInfo{
+		ID:          "hq-cv1",
+		ReadyCount:  2,
+		ReadyIssues: []string{"gt-rejected1", "gt-fresh2"},
+	})
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("expected the fresh bead to be slung: %v; log: %v", err, logged)
+	}
+	if strings.Contains(string(data), "gt-rejected1") {
+		t.Errorf("rejected bead was slung: %q", data)
+	}
+	if !strings.Contains(string(data), "gt-fresh2") {
+		t.Errorf("expected gt-fresh2 to be slung, got %q", data)
+	}
+	assertLogged(t, logged, "gt-rejected1", "rejection marker, deferring to deacon")
+}
+
+// TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate pins the one
+// behaviour gt-ghyfx changes in the stranded scan. The rejection gate used to
+// read an unreadable record as "proceeding as clear" and leave the skip to the
+// later hold check; it now holds the bead at the gate, because a rejection
+// cannot be ruled out. The bead was never fed either way; what changes is that
+// the gate says so, and the dead-holder and surviving-branch checks do not run
+// on a record nobody could read.
+func TestFeedFirstReady_UnreadableRecord_FailsClosedAtRejectionGate(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	store := &holdTestStorage{readErr: fmt.Errorf("dolt unreachable")}
+	townRoot, gtPath, slingLogPath := holdTestTown(t)
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+
+	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-u", ReadyCount: 1, ReadyIssues: []string{"gt-unreadable"}})
+
+	if data, err := os.ReadFile(slingLogPath); err == nil {
+		t.Errorf("unreadable record was fed: %q", data)
+	}
+	assertLogged(t, logged, "gt-unreadable", "cannot rule out a merge rejection (fail-closed)")
+	for _, l := range logged {
+		if strings.Contains(l, "proceeding as clear") || strings.Contains(l, "surviving branch") {
+			t.Errorf("unreadable record went past the rejection gate: %q", l)
+		}
+	}
+}
+
+// holdTestTown builds a town whose gt- prefix routes to rig "gt" and a gt stub
+// that records each sling, for the hermetic feedFirstReady tests.
+func holdTestTown(t *testing.T) (townRoot, gtPath, slingLogPath string) {
+	t.Helper()
+	binDir := t.TempDir()
+	townRoot = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+	slingLogPath = filepath.Join(binDir, "sling.log")
+	gtScript := "#!/bin/sh\nif [ \"$1\" = \"sling\" ]; then\n  echo \"$@\" >> \"" + slingLogPath + "\"\nfi\nexit 0\n"
+	gtPath = filepath.Join(binDir, "gt")
+	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
+		t.Fatalf("write mock gt: %v", err)
+	}
+	return townRoot, gtPath, slingLogPath
 }
 
 func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {

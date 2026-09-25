@@ -232,6 +232,13 @@ marker that held it.
 | `needs-sonnet`, `needs-mayor-review` | label |
 | `MAYOR DESIGN DECISION`, `do not redispatch` | notes, design, or a comment |
 | `HOLD RELEASED` | a comment, to lift an earlier comment hold |
+| `MERGE REJECTION` | notes, written by the refinery when it rejects a branch |
+
+A merge rejection holds the bead for the convoy feeders only. The refinery
+reopens a rejected bead as open and unassigned, which is exactly what the
+feeders look for, but redispatching it is the deacon's job: the deacon applies
+the cooldown and escalation gates and resumes the surviving branch. The deacon's
+own redispatch reads every other marker in this table but not this one.
 
 A decision holds only where it is asserted: at the start of a line, past any
 `#`, `>`, `-`, or `*` in front of it. Prose that mentions the wording — a review
