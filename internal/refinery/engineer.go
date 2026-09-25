@@ -356,6 +356,11 @@ type Engineer struct {
 	// tests. Nil in production, where the real mail send runs; a test that
 	// leaves it nil would reach a live witness.
 	notifyMergedFn func(mr *MRInfo, mergeCommit string)
+
+	// mrRejectionPollInterval overrides defaultMRRejectionPollInterval for
+	// tests, so a rejection lands within one gate run without a real test
+	// sleeping out the production interval.
+	mrRejectionPollInterval time.Duration
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -781,11 +786,22 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	shouldSkipGates := len(skipGates) > 0 && skipGates[0]
 	if shouldSkipGates {
 		_, _ = fmt.Fprintln(e.output, "[Engineer] Skipping gates (pre-verified by polecat)")
-	} else if verification, ran := e.runVerification(ctx); ran {
-		if !verification.Success {
-			return verification
+	} else {
+		gateCtx, cancelGateWatch := e.watchMRRejection(ctx, mr.ID)
+		verification, ran := e.runVerification(gateCtx)
+		midRun := rejectedMidRun(ctx, gateCtx)
+		cancelGateWatch()
+		if ran {
+			if !verification.Success {
+				if midRun {
+					if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
+						return eligibility
+					}
+				}
+				return verification
+			}
+			_, _ = fmt.Fprintln(e.output, "[Engineer] Verification passed")
 		}
-		_, _ = fmt.Fprintln(e.output, "[Engineer] Verification passed")
 	}
 
 	// PR merge path: when merge_strategy=pr, use the VCS provider's merge API
@@ -875,10 +891,18 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	// These validate the actual combined code before it goes anywhere.
 	// On failure, reset the merge to undo the local merge commit.
 	if !shouldSkipGates {
-		postResult := e.runGatesForPhase(ctx, GatePhasePostSquash)
+		postCtx, cancelPostWatch := e.watchMRRejection(ctx, mr.ID)
+		postResult := e.runGatesForPhase(postCtx, GatePhasePostSquash)
+		midRun := rejectedMidRun(ctx, postCtx)
+		cancelPostWatch()
 		if !postResult.Success {
 			if resetErr := e.restoreTargetToOrigin(target); resetErr != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after post-squash gate failure: %v\n", target, resetErr)
+			}
+			if midRun {
+				if eligibility := e.recheckMRStillMergeable(mr, target, true); !eligibility.Success {
+					return eligibility
+				}
 			}
 			return postResult
 		}
@@ -1146,6 +1170,79 @@ func mergeIneligibleResult(format string, args ...interface{}) ProcessResult {
 		NoMerge: true,
 		Error:   fmt.Sprintf(format, args...),
 	}
+}
+
+// defaultMRRejectionPollInterval is how often watchMRRejection re-checks an
+// in-flight gate's MR bead against beads while the gate runs.
+const defaultMRRejectionPollInterval = 3 * time.Second
+
+// watchMRRejection returns a context derived from parent that is canceled the
+// moment any of ids stops being an open beads issue. runGate's
+// exec.CommandContext already kills a gate's whole process group when its
+// context is canceled (util.SetProcessGroup) — this just gives that hook
+// something to react to before the gate finishes on its own.
+//
+// Without it, `gt mq reject` on an MR whose gate is already running only
+// closes the MR bead; the gate keeps running for however long it takes, the
+// caller doesn't recheck MR status until the gate finishes, and a gate slow
+// enough (make test can run for minutes) merges and pushes a branch the
+// operator already rejected before the recheck ever runs (gt-xp2b4, gt-55fvl:
+// gt-wisp-dz1 rejected at 16:27:10Z, refinery gate for it merged+pushed at
+// 16:36:40Z anyway).
+//
+// The returned cancel must be called once the watched section ends, whether
+// or not it was this watcher that ended it — the caller checks watchCtx.Err()
+// immediately after, so calling cancel first would erase the very signal it
+// is checking for.
+func (e *Engineer) watchMRRejection(parent context.Context, ids ...string) (context.Context, context.CancelFunc) {
+	watchCtx, cancel := context.WithCancel(parent)
+	live := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			live = append(live, id)
+		}
+	}
+	if len(live) == 0 || e.beads == nil {
+		return watchCtx, cancel
+	}
+
+	interval := e.mrRejectionPollInterval
+	if interval <= 0 {
+		interval = defaultMRRejectionPollInterval
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case <-ticker.C:
+				for _, id := range live {
+					issue, err := e.beads.Show(id)
+					if err != nil || issue == nil {
+						// A lookup hiccup or a since-deleted bead is not
+						// itself a rejection signal — don't kill a gate on it.
+						continue
+					}
+					if beads.IssueStatus(strings.TrimSpace(issue.Status)) != beads.StatusOpen {
+						cancel()
+						return
+					}
+				}
+			}
+		}
+	}()
+	return watchCtx, cancel
+}
+
+// rejectedMidRun reports whether watchCtx was canceled by watchMRRejection
+// rather than by parent itself — the distinction that tells the caller a gate
+// failure means "the MR was rejected while this ran" versus an ordinary
+// cancellation the caller already knows about (e.g. a shutdown).
+func rejectedMidRun(parent, watchCtx context.Context) bool {
+	return watchCtx.Err() != nil && parent.Err() == nil
 }
 
 // recheckMRStillMergeable re-verifies mr is still eligible to merge into

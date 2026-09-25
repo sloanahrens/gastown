@@ -439,9 +439,15 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		return e.verifyAndPush(ctx, stacked, target, result)
 	}
 
-	// Step 2: Run gates on the stack tip
+	// Step 2: Run gates on the stack tip. Watched so a member rejected
+	// mid-gate (gt mq reject) kills the gate immediately instead of running
+	// to completion on a stack that's about to lose a member anyway
+	// (gt-xp2b4) — recheckMRStillMergeable in fastForwardBatch below is the
+	// last-resort catch, this just stops wasting the gate's time on it.
 	_, _ = fmt.Fprintf(e.output, "[Batch] Running gates on stack tip (%d MRs)...\n", len(stacked))
-	gateResult := e.runBatchGates(ctx)
+	gateCtx, cancelGateWatch := e.watchMRRejection(ctx, mrIDs(stacked)...)
+	gateResult := e.runBatchGates(gateCtx)
+	cancelGateWatch()
 
 	// Step 3: Happy path — all green
 	if gateResult.Success {
@@ -679,7 +685,9 @@ func (e *Engineer) verifyAndPush(ctx context.Context, stacked []*MRInfo, target 
 		result = &BatchResult{}
 	}
 
-	gateResult := e.runBatchGates(ctx)
+	gateCtx, cancelGateWatch := e.watchMRRejection(ctx, mrIDs(stacked)...)
+	gateResult := e.runBatchGates(gateCtx)
+	cancelGateWatch()
 	if !gateResult.Success {
 		if gateResult.TestsFailed {
 			result.Culprits = stacked
