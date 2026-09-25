@@ -15,6 +15,7 @@ package krc
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/events"
 )
 
@@ -188,7 +190,8 @@ func NewPruner(townRoot string, config *Config) *Pruner {
 }
 
 // Prune removes expired events from the events and feed files.
-// It operates atomically by writing to temp files then renaming.
+// Each file is rewritten atomically (temp file + rename) under its writer
+// lock, and only when something expired; see pruneFile.
 func (p *Pruner) Prune() (*PruneResult, error) {
 	start := time.Now()
 	result := &PruneResult{
@@ -227,13 +230,53 @@ func (p *Pruner) Prune() (*PruneResult, error) {
 	return result, nil
 }
 
+// pruneLockTimeout bounds how long a prune waits for a file's writer lock.
+// Writers hold it for one append, so this only trips when a writer is wedged;
+// the prune then fails and the next scheduled run retries.
+var pruneLockTimeout = 30 * time.Second
+
 // pruneFile prunes a single JSONL file.
-func (p *Pruner) pruneFile(filePath string) (result *PruneResult, err error) {
-	result = &PruneResult{
+//
+// Append-safety guarantee: the pruner holds <file>.lock, the same flock that
+// events.writeTo (for .events.jsonl) and the feed curator (for .feed.jsonl)
+// take around each append, for the whole scan-and-rename. An append through
+// either writer therefore lands entirely before the scan (and is kept or
+// pruned on its TTL) or entirely after the rename (in the new file, because
+// the writers open the path after taking the lock). A writer that bypasses
+// the lock can still lose a line appended between the scan and the rename.
+//
+// The file is only replaced when at least one line is pruned. A rename gives
+// the path a new inode, and every tail of the old one must notice and reopen
+// (events.Tail does); a rotation that removes nothing is pure risk
+// (claude-9jq: no-op rotations at each daemon start blinded await-signal).
+func (p *Pruner) pruneFile(filePath string) (*PruneResult, error) {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return &PruneResult{PrunedByType: make(map[string]int)}, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	fl := flock.New(filePath + ".lock")
+	ctx, cancel := context.WithTimeout(context.Background(), pruneLockTimeout)
+	defer cancel()
+	locked, err := fl.TryLockContext(ctx, 50*time.Millisecond)
+	if err != nil || !locked {
+		if err == nil {
+			err = ctx.Err()
+		}
+		return nil, fmt.Errorf("locking %s for prune: %w", filePath, err)
+	}
+	defer fl.Unlock() //nolint:errcheck // best-effort unlock
+
+	return p.pruneLocked(filePath)
+}
+
+// pruneLocked does the work of pruneFile. The caller holds the file's lock.
+func (p *Pruner) pruneLocked(filePath string) (*PruneResult, error) {
+	result := &PruneResult{
 		PrunedByType: make(map[string]int),
 	}
 
-	// Get file size before
 	info, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
 		return result, nil
@@ -243,41 +286,34 @@ func (p *Pruner) pruneFile(filePath string) (result *PruneResult, err error) {
 	}
 	result.BytesBefore = info.Size()
 
-	// Open source file
-	srcFile, err := os.Open(filePath)
+	retained, err := p.scanRetained(filePath, result)
 	if err != nil {
 		return nil, err
 	}
-	srcClosed := false
-	defer func() {
-		if srcClosed {
-			return
-		}
-		if closeErr := srcFile.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}()
+	result.EventsRetained = len(retained)
 
-	// Create temp file for output
-	tmpPath := filePath + ".tmp"
-	tmpFile, err := os.Create(tmpPath)
+	if result.EventsPruned == 0 {
+		// Nothing expired: leave the file (and its inode) alone.
+		result.BytesAfter = result.BytesBefore
+		return result, nil
+	}
+
+	bytesAfter, err := replaceWithLines(filePath, info.Mode().Perm(), retained)
 	if err != nil {
 		return nil, err
 	}
-	tmpClosed := false
-	defer func() {
-		if err == nil {
-			return
-		}
-		if !tmpClosed {
-			if closeErr := tmpFile.Close(); closeErr != nil && err == nil {
-				err = closeErr
-			}
-		}
-		if removeErr := os.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
-			err = removeErr
-		}
-	}()
+	result.BytesAfter = bytesAfter
+	return result, nil
+}
+
+// scanRetained reads filePath and returns the lines to keep, counting the
+// processed and pruned events into result.
+func (p *Pruner) scanRetained(filePath string, result *PruneResult) ([]string, error) {
+	srcFile, err := os.Open(filePath) //nolint:gosec // G304: path is the town's own events/feed file
+	if err != nil {
+		return nil, err
+	}
+	defer srcFile.Close() //nolint:errcheck // read-only handle
 
 	now := time.Now()
 	scanner := bufio.NewScanner(srcFile)
@@ -285,7 +321,6 @@ func (p *Pruner) pruneFile(filePath string) (result *PruneResult, err error) {
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	var retained []string
-
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -321,51 +356,47 @@ func (p *Pruner) pruneFile(filePath string) (result *PruneResult, err error) {
 			retained = append(retained, line)
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scanning file: %w", err)
 	}
+	return retained, nil
+}
 
-	// Ensure we keep minimum retain count (most recent events)
-	if len(retained) > p.config.MinRetainCount {
-		result.EventsRetained = len(retained)
-	} else {
-		// If we're below minimum, recalculate - keep the minimum from original
-		result.EventsRetained = len(retained)
+// replaceWithLines atomically replaces filePath with lines (tmp + rename) and
+// returns the new size.
+func replaceWithLines(filePath string, perm os.FileMode, lines []string) (size int64, err error) {
+	tmpPath := filePath + ".tmp"
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm) //nolint:gosec // G304: sibling of the town's own events/feed file
+	if err != nil {
+		return 0, err
 	}
+	defer func() {
+		if err != nil {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	// Write retained events
-	for _, line := range retained {
-		if _, err := tmpFile.WriteString(line + "\n"); err != nil {
-			return nil, err
+	w := bufio.NewWriter(tmpFile)
+	for _, line := range lines {
+		if _, err = w.WriteString(line + "\n"); err != nil {
+			return 0, err
 		}
 	}
-
-	// Get final size
+	if err = w.Flush(); err != nil {
+		return 0, err
+	}
 	tmpInfo, err := tmpFile.Stat()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	result.BytesAfter = tmpInfo.Size()
-
-	// Close files before rename
-	if err := tmpFile.Close(); err != nil {
-		tmpClosed = true
-		return nil, err
+	if err = tmpFile.Close(); err != nil {
+		return 0, err
 	}
-	tmpClosed = true
-	if err := srcFile.Close(); err != nil {
-		srcClosed = true
-		return nil, err
+	if err = os.Rename(tmpPath, filePath); err != nil {
+		return 0, fmt.Errorf("replacing file: %w", err)
 	}
-	srcClosed = true
-
-	// Atomic replace
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		return nil, fmt.Errorf("replacing file: %w", err)
-	}
-
-	return result, nil
+	return tmpInfo.Size(), nil
 }
 
 // Stats contains statistics about the current ephemeral data.
