@@ -64,26 +64,43 @@ Two teardown paths leave the bead and the polecat out of step.
 
 4. **One work-survival predicate.** Work survives for bead B when two things
    hold. A generated `polecat/*` branch for B exists, either in the rig repo
-   or on origin. And `git cherry origin/<default> <branch>` shows at least one
-   `+` line, meaning a patch that is not on main. Patch identity stays correct
-   under rebase and squash merges, where an ancestry check reports merged work
-   as unmerged. A branch equal to main, fully merged or empty does not survive.
+   or on origin. And at least one of its commits has a patch that is on
+   neither `origin/<default>` nor any `origin/integration/*` branch. The test
+   is the intersection of the `+` lines of `git cherry <base> <branch>` for
+   each base. An epic's polecat branches start from, and merge into, the
+   epic's integration branch.
+   - Patch identity is correct under rebase merges and single-commit
+     squashes, where an ancestry check reports merged work as unmerged. A
+     multi-commit squash matches no single commit's patch, so it reads as
+     surviving. That is the safe direction: the hook is kept.
+   - A branch equal to its base, fully merged or empty does not survive.
+   - Every fetch is bounded by `git.RemoteQueryTimeout`. A timeout, a failed
+     listing or an uncomparable branch makes the answer unknown.
    - The predicate is `polecat.WorkSurvival` / `SurvivingWorkForIssue`.
    - Every path that releases a hooked bead asks it first:
      - `gt polecat nuke`;
      - polecat removal (`unassignWorkBeads`);
+     - sling rollback;
      - the witness `resetAbandonedBead` and `DetectOrphanedBeads`;
      - the witness formula's orphan step, through
-       `gt polecat surviving-work <bead>` (exit 0 = branch printed, 1 = none,
-       2 = unknown);
+       `gt polecat surviving-work <bead>` (exit 0 = branch printed, 3 = none,
+       anything else = unknown);
      - sling's re-sling guard.
-   - Surviving work keeps the hook. An unknown answer keeps it too, except in
-     sling, which proceeds so a network outage cannot block dispatch. A rig
-     with no git repo has no branch to protect.
-   - Every release, including removal's and the witness's, is the guarded
-     `--if-assignee` write.
-   - Nuke writes the "resume with `--branch`" comment only after removal, and
-     only if the bead is still hooked to the nuked polecat.
+   - Surviving work keeps the hook, and so does an unknown answer. Sling
+     refuses on an unknown answer ("resume with `--branch` or override with
+     `--force`"). Only "no rig repo" or "routes to no rig" mean there is
+     nothing to protect.
+   - A failed sling whose bead's work survives hands the bead back to its
+     pre-sling holder instead of releasing it.
+   - Every release is a guarded `--if-assignee` write. That covers removal,
+     the witness and the restore to the original holder.
+   - Nuke asks again after removal and the local branch delete. It releases
+     the bead if the work no longer survives. Otherwise it comments with the
+     final answer: the `--branch` resume command, or
+     `gt polecat surviving-work <bead>` when the answer is unknown.
+   - For each preserved orphan, the witness mails the mayor once and labels
+     the bead `gt:preserved-orphan`. An unknown answer two cycles running is
+     escalated.
 
 ## Invariants the tests pin
 
@@ -112,13 +129,24 @@ Two teardown paths leave the bead and the polecat out of step.
   - a merged branch does not;
   - a rebase-merged branch does not;
   - a local-only branch with unpushed work survives;
+  - an idle epic branch merged into its integration branch does not;
+  - an epic branch with work not yet in integration survives;
+  - a stale local origin ref is re-fetched;
   - an unreachable origin is unknown.
+- A bounded fetch against a remote that never answers returns a timeout.
 - Polecat removal keeps a bead whose work survives and releases one whose
   branch is merged, using the guarded write.
 - The witness keeps surviving and unknown work hooked, and makes a guarded
   reset otherwise.
 - The nuke flow runs decide, remove, report in order. Kept work gets exactly
-  one comment and no release attempts. Merged work is released. A polecat
-  reaped before its nuke is handled through its `hook_bead`.
+  one comment and no release attempts. That comment is built from the answer
+  after removal: work that stopped surviving is released instead, and an
+  unknown answer gets the re-check command. Merged work is released. A
+  polecat reaped before its nuke is handled through its `hook_bead`.
+- Sling refuses a re-sling on an unknown answer. It proceeds when there is no
+  repo to protect or with an explicit `--force`.
+- A sling rollback whose bead's work survives, or whose survival is unknown,
+  restores the pre-sling holder. Otherwise it releases the bead.
+- `gt polecat surviving-work` exits 0, 3 or 2.
 - A failure before the sling writes to the bead neither burns the bead's
   molecules nor releases its hook.
