@@ -3308,11 +3308,11 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 
 	// Best-effort lookup of the MR this session just submitted (set on the
 	// agent bead's active_mr field earlier in the same gt done invocation —
-	// see UpdateAgentActiveMR). Used below to mark the hooked bead's close
-	// reason so a pre-merge eligibility check can tell this ordinary
-	// transient self-close apart from a source issue closed for real
-	// abandonment (gt-di2t). Empty when this exit had no MR (no-merge,
-	// escalated, etc.) — those go through a different close path already.
+	// see UpdateAgentActiveMR). Used below to leave the hooked bead open and
+	// record which MR is outstanding (gt-pqqz) rather than closing it here;
+	// the refinery closes it for real at merge success. Empty when this exit
+	// had no MR (no-merge, escalated, etc.) — those go through a different
+	// close path already.
 	var pendingMRID string
 	if agentIssue, err := agentBd.Show(agentBeadID); err == nil && agentIssue != nil {
 		if fields := beads.ParseAgentFields(agentIssue.Description); fields != nil {
@@ -3413,30 +3413,26 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
 				notifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
 			} else if pendingMRID != "" {
-				// Transient polecats exit right after gt done, so this issue
-				// is routinely closed seconds after its MR is created — well
-				// before the MR reaches the merge queue. Record the exact MR
-				// in the close reason so the refinery's pre-merge eligibility
-				// check (recheckMRSourceStillMergeable) can tell this
-				// ordinary self-close apart from a source issue a human
-				// closed for real abandonment (gt-di2t).
+				// gt-pqqz: the source bead stays open through the merge queue
+				// instead of closing here at MR-submission time. "Closed" now
+				// means "merged" everywhere a human or a dependency check
+				// reads it — the refinery's closeMergedWorkBead
+				// (work_bead_close.go) is what actually closes this bead, at
+				// real merge success, referencing the merge commit. A comment
+				// records the outstanding MR for anyone reading the bead
+				// while it's in flight.
 				//
-				// The attempt the closure carries counts the merge-rejection
-				// records this closure supersedes on the issue (the refinery
-				// appends one "MERGE REJECTION (attempt N)" note per rejected
-				// attempt of a reused branch) plus this submission: the
-				// witness's stranded-branch scan adjudicates a superseded
-				// branch by comparing the newest rejection a closure attests
-				// against the closure's own attempt (gt-0cp3). The substring
-				// counted is exactly the one mol-refinery-patrol's reject step
-				// derives its own attempt number from, so the note that step
-				// writes for this submission names the attempt this closure
-				// does; a bare marker followed by anything else is not a
-				// rejection record to either reader.
+				// If the MR is rejected instead, recoverRejectedMRDeadWorker
+				// (dead_worker_recovery.go) reopens the bead for redispatch
+				// once this (transient) polecat's session is confirmed gone —
+				// it already treats a still-open, still-assigned source bead
+				// as one of its cases, gated on tmux session liveness rather
+				// than on close-reason vocabulary.
 				attempt := 1 + strings.Count(hookedBead.Notes, refinery.MergeRejectionNoteMarker+" (attempt")
-				if err := hookBd.CloseWithReason(beads.PendingMergeCloseReason(pendingMRID, attempt), hookedBeadID); err != nil {
+				note := fmt.Sprintf("Submitted to merge queue: %s (attempt %d)", pendingMRID, attempt)
+				if err := hookBd.AddComment(hookedBeadID, note); err != nil {
 					// Non-fatal: warn but continue
-					fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)
+					fmt.Fprintf(os.Stderr, "Warning: couldn't record pending-MR note on %s: %v\n", hookedBeadID, err)
 				}
 			} else if err := hookBd.Close(hookedBeadID); err != nil {
 				// Non-fatal: warn but continue
