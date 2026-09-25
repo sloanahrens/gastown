@@ -113,6 +113,10 @@ type RigConfig struct {
 	// end up with commands that are never read back (gt-me9t).
 	MergeQueue *config.MergeQueueConfig `json:"merge_queue,omitempty"`
 
+	// Witness controls the witness session's lifetime (claude-8w7):
+	// witness.cycle_session_at_idle_cap and its cycle bounds.
+	Witness *config.WitnessSessionConfig `json:"witness,omitempty"`
+
 	// Persistent polecat pool configuration.
 	// PolecatPoolSize is the number of persistent polecats to create with pool init.
 	// PolecatNames optionally specifies fixed names (overrides theme-based naming).
@@ -1153,6 +1157,20 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 		mq.Editorial = &defaulted
 	}
 	return mq
+}
+
+// ResolveWitnessSessionConfig returns the witness block of the rig root
+// config.json, or nil when the rig has none or the file cannot be read (the
+// feature is then off).
+func ResolveWitnessSessionConfig(townRoot, rigName string) *config.WitnessSessionConfig {
+	if townRoot == "" || rigName == "" {
+		return nil
+	}
+	rigCfg, err := LoadRigConfig(filepath.Join(townRoot, rigName))
+	if err != nil || rigCfg == nil {
+		return nil
+	}
+	return rigCfg.Witness
 }
 
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates

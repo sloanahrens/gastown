@@ -41,3 +41,5 @@ internal/tmux/tmux.go:processMatchesNamesChecked
 internal/witness/handlers.go:_verifyCommitOnMain
 # deliberate os.IsNotExist narrowing: a missing state file means nothing to reset (gt-wdv9)
 internal/patrolstate/patrolstate.go:ResetCounter
+# deliberate os.ErrNotExist narrowing: found=false tells "never written" apart from a read error (claude-8w7)
+internal/patrolstate/cycle.go:readVersioned

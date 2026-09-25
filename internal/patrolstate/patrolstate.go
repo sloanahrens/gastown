@@ -8,6 +8,9 @@
 // their own state-file *paths* and call in here for the shared read/zero/
 // write mechanics, which keeps this package a leaf with no risk of an import
 // cycle between them.
+//
+// cycle.go adds the Go-owned per-session cycle counter and await-signal
+// outcome that role-scoped session cycling reads (claude-8w7).
 package patrolstate
 
 import (

@@ -12,13 +12,10 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/protocol"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 type unitMode int
@@ -201,30 +198,13 @@ func unitCycleSkipCause(p unitCycleParams, d unitCycleDeps) string {
 	if p.Mode == unitBatch && p.BatchErrored {
 		return "batch had errors; the session stays to recover the failed members"
 	}
-	if age, ok := d.HandoffAge(); ok && age < constants.MinHandoffCooldown {
-		return fmt.Sprintf("last handoff %v ago (< %v); the next unit cycles",
-			age.Round(time.Second), constants.MinHandoffCooldown)
-	}
-	return ""
+	return handoffCooldownCause(d.HandoffAge, "the next unit cycles")
 }
 
 // unitCycleCallerMismatch returns why the caller is not this rig's refinery
 // running in its own pane, or "" when it is.
 func unitCycleCallerMismatch(p unitCycleParams, d unitCycleDeps) string {
-	if role := d.Getenv("GT_ROLE"); role != p.Rig+"/refinery" {
-		return fmt.Sprintf("caller is not %s/refinery (GT_ROLE=%q)", p.Rig, role)
-	}
-	if d.Getenv("TMUX_PANE") == "" {
-		return "not inside tmux"
-	}
-	sess, err := d.PaneSession()
-	if err != nil {
-		return fmt.Sprintf("pane session unknown: %v", err)
-	}
-	if sess != p.RefinerySession {
-		return fmt.Sprintf("pane is in %s, not %s", sess, p.RefinerySession)
-	}
-	return ""
+	return ownPaneCallerMismatch(p.Rig+"/refinery", p.RefinerySession, d.Getenv, d.PaneSession)
 }
 
 // archiveMergeReady archives the MERGE_READY mail for mr, matched by its
@@ -321,29 +301,11 @@ func defaultUnitCycleDeps(townRoot, beadsPath, workDir, refinerySession string, 
 			// drainNudges=false: queued nudges stay queued for the fresh session.
 			return runPatrolReportFor(out, roleInfo, summary, "", false)
 		},
-		Respawn: func() error {
-			pane := os.Getenv("TMUX_PANE")
-			restartCmd, err := buildRestartCommandWithOpts(refinerySession, buildRestartCommandOpts{ContinueSession: false})
-			if err != nil {
-				return err
-			}
-			t := tmux.NewTmuxWithSocket(tmux.SocketFromEnv())
-			updateSessionEnvForHandoff(t, refinerySession)
-			return respawnOwnPane(t, refinerySession, pane, restartCmd)
-		},
+		Respawn: func() error { return respawnOwnSessionFresh(refinerySession) },
 		Escalate: func(fp, sev, msg string) {
 			runBoundedEscalate("refinery-unit-cycle", "refinery:unit-cycle", fp, sev, msg)
 		},
-		RecordCycle: func() {
-			recordHandoffTimeIn(workDir)
-			writeHandoffMarker(workDir, refinerySession, "unit-cycle")
-			agent := sessionToGTRole(refinerySession)
-			if agent == "" {
-				agent = refinerySession
-			}
-			_ = LogHandoff(townRoot, agent, "unit-cycle")
-			_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload("unit-cycle", true))
-		},
+		RecordCycle: func() { recordOwnSessionCycle(townRoot, workDir, refinerySession) },
 		PaneSession: func() (string, error) { return tmuxSessionForPane(os.Getenv("TMUX_PANE")) },
 		HandoffAge:  func() (time.Duration, bool) { return lastHandoffAge(workDir) },
 		Getenv:      os.Getenv,

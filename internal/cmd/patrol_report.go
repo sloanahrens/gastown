@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
 )
@@ -51,6 +52,17 @@ func runPatrolReport(cmd *cobra.Command, args []string) error {
 	roleInfo, err := GetRole()
 	if err != nil {
 		return fmt.Errorf("detecting role: %w", err)
+	}
+
+	// A witness may respawn its own session after the report, at a quiet
+	// boundary, when its rig opts in (claude-8w7). Flag off: today's report.
+	if roleInfo.Role == RoleWitness && roleInfo.Rig != "" {
+		if cfg := rig.ResolveWitnessSessionConfig(roleInfo.TownRoot, roleInfo.Rig); cfg != nil && cfg.CycleSessionAtIdleCap {
+			p := witnessCycleParamsFor(roleInfo.TownRoot, roleInfo.Rig, true, cfg.MinCycles(), cfg.MaxCycles())
+			_, err := reportAndMaybeCycleWitness(p,
+				defaultWitnessCycleDeps(roleInfo, p, patrolReportSummary, patrolReportSteps, os.Stdout))
+			return err
+		}
 	}
 
 	return runPatrolReportFor(os.Stdout, roleInfo, patrolReportSummary, patrolReportSteps, true)
