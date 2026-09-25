@@ -138,7 +138,9 @@ type maintenanceGCState struct {
 	ConsecutiveDeferredWindows int `json:"consecutive_deferred_windows"`
 	// LastDeferralReason is the most recent quiet-guard (or lock) reason.
 	LastDeferralReason string `json:"last_deferral_reason,omitempty"`
-	// DeferralReasons counts each deferral reason over the current streak.
+	// DeferralReasons counts deferred attempts per reason over the current
+	// streak. It counts attempts, not windows: a busy window can defer on
+	// every 5-minute tick, so one window can add up to ~12 to a reason.
 	DeferralReasons map[string]int `json:"deferral_reasons,omitempty"`
 }
 

@@ -269,7 +269,7 @@ func deferredWindowsMessage(st maintenanceGCState, closed gcDeferral) string {
 	if len(reasons) > 3 {
 		reasons = reasons[:3]
 	}
-	b.WriteString("Top deferral reasons:\n")
+	b.WriteString("Top deferral reasons (deferred attempts, up to one per 5-minute tick):\n")
 	for _, r := range reasons {
 		fmt.Fprintf(&b, "  %dx %s\n", r.n, r.reason)
 	}
