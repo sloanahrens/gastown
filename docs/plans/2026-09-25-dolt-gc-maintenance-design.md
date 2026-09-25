@@ -105,7 +105,10 @@ four fixes before prod, all of them now built:
    - The ConvoyManager gets a `pollGate`. Event-poll ticks and stranded
      scans take its read side with `TryRLock` and skip while it is paused.
      `Pause(timeout)` and `Resume()` wrap each database's gc; if a pause
-     times out, the gc defers with "convoy poll busy".
+     times out, the gc defers with "convoy poll busy". While `Pause` waits,
+     a `pausing` flag stops new ticks from starting, so back-to-back ticks
+     cannot starve it; it still polls `TryLock` because a blocking `Lock`
+     cannot be abandoned on timeout.
 3. **Database set.** Databases are discovered from the data dir: every
    directory that has a `.dolt` subdirectory. This replaces the
    compactor_dog and wisp_reaper lists, which fall back to `["hq"]` alone.
@@ -176,4 +179,10 @@ or Docker. Coverage:
   running cycle is skipped;
 - the quiet guard's individual probes;
 - the gc flag blocking an upgrade but not the guard itself;
-- detection of working polecats from heartbeats.
+- detection of working polecats from heartbeats, and a rig whose polecats
+  cannot be listed counting as busy.
+
+`internal/daemon/maintenance_gc_dolt_test.go` runs `doltGCFull`'s real
+`CALL dolt_gc('--full')` against the package's Docker-gated Dolt container
+and checks that commits and rows survive. It skips without Docker
+(`GT_TEST_DOCKER=0`).
