@@ -140,6 +140,49 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		assertSurvivor(t, f.rigRoot, "")
 	})
 
+	t.Run("idle polecat on an epic branch merged into integration does not survive", func(t *testing.T) {
+		t.Parallel()
+		f := newSurvivalFixture(t)
+		runGit(t, f.seed, "checkout", "-q", "-b", "integration/epic-x", "main")
+		f.commit(t, "epic.txt", "epic\n", "epic groundwork")
+		runGit(t, f.seed, "checkout", "-q", "-b", older, "integration/epic-x")
+		f.commit(t, "work.txt", "work\n", "work on the epic")
+		runGit(t, f.seed, "checkout", "-q", "integration/epic-x")
+		runGit(t, f.seed, "merge", "-q", "--no-ff", "-m", "merge into epic", older)
+		runGit(t, f.seed, "checkout", "-q", "main")
+		f.push(t, older, "integration/epic-x")
+		// The work (and the epic's own groundwork) is on the integration
+		// branch, not on main: judged against main alone it would survive.
+		assertSurvivor(t, f.rigRoot, "")
+	})
+
+	t.Run("epic branch with work not yet in integration survives", func(t *testing.T) {
+		t.Parallel()
+		f := newSurvivalFixture(t)
+		runGit(t, f.seed, "checkout", "-q", "-b", "integration/epic-x", "main")
+		f.commit(t, "epic.txt", "epic\n", "epic groundwork")
+		runGit(t, f.seed, "checkout", "-q", "-b", older, "integration/epic-x")
+		f.commit(t, "work.txt", "work\n", "work on the epic")
+		runGit(t, f.seed, "checkout", "-q", "main")
+		f.push(t, older, "integration/epic-x")
+		assertSurvivor(t, f.rigRoot, older)
+	})
+
+	t.Run("stale local origin ref is re-fetched", func(t *testing.T) {
+		t.Parallel()
+		f := newSurvivalFixture(t)
+		// The rig repo last saw the branch at main's tip (no work) ...
+		runGit(t, f.seed, "branch", older, "main")
+		f.push(t, older)
+		runGit(t, f.bare, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+		// ... then work landed on origin.
+		runGit(t, f.seed, "checkout", "-q", older)
+		f.commit(t, "work.txt", "work\n", "late work")
+		runGit(t, f.seed, "checkout", "-q", "main")
+		f.push(t, older)
+		assertSurvivor(t, f.rigRoot, older)
+	})
+
 	t.Run("unreachable origin with no local candidate is unknown", func(t *testing.T) {
 		t.Parallel()
 		f := newSurvivalFixture(t)

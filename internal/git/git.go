@@ -1029,6 +1029,18 @@ func (g *Git) FetchPrune(remote string) error {
 	return err
 }
 
+// RemoteQueryTimeout is the bound on read-only remote queries (ls-remote and
+// small, targeted fetches), exported for callers that pick their own bound.
+const RemoteQueryTimeout = remoteQueryTimeout
+
+// FetchRefspecWithTimeout fetches one refspec from remote, killing git after
+// timeout. A timeout is an error: callers that judge state from the fetched
+// ref must treat it as "unknown", never as "absent".
+func (g *Git) FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error {
+	_, err := g.runWithTimeout(timeout, "fetch", remote, refspec)
+	return err
+}
+
 // FetchBranch fetches a specific branch from the remote.
 func (g *Git) FetchBranch(remote, branch string) error {
 	_, err := g.run("fetch", remote, branch)
