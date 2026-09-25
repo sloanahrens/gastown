@@ -168,4 +168,16 @@ func TestVerifyAndPush_KillsInFlightStackGateWhenMemberRejected(t *testing.T) {
 	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
 		t.Fatalf("origin/main changed: before %s after %s", before, after)
 	}
+	// A mid-gate rejection must report as the same clean per-member verdict
+	// a rejection landing between steps already gets, not blame the whole
+	// stack as bisection "culprits" for a test failure that never ran.
+	if len(result.Culprits) != 0 {
+		t.Fatalf("expected no culprits (this was a rejection, not a test failure), got %v", mrIDs(result.Culprits))
+	}
+	if got := store.issues["gt-mr-b"].Status; got != beadsdk.StatusClosed {
+		t.Fatalf("rejected MR gt-mr-b status = %s, want closed (left as the rejection set it)", got)
+	}
+	if got := store.issues["gt-mr-a"].Status; got != beadsdk.StatusOpen {
+		t.Fatalf("unaffected MR gt-mr-a status = %s, want still open (never blamed)", got)
+	}
 }

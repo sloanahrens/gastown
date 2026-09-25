@@ -788,6 +788,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 		_, _ = fmt.Fprintln(e.output, "[Engineer] Skipping gates (pre-verified by polecat)")
 	} else {
 		gateCtx, cancelGateWatch := e.watchMRRejection(ctx, mr.ID)
+		defer cancelGateWatch() // panic-safety backstop; cancel is idempotent
 		verification, ran := e.runVerification(gateCtx)
 		midRun := rejectedMidRun(ctx, gateCtx)
 		cancelGateWatch()
@@ -892,6 +893,7 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	// On failure, reset the merge to undo the local merge commit.
 	if !shouldSkipGates {
 		postCtx, cancelPostWatch := e.watchMRRejection(ctx, mr.ID)
+		defer cancelPostWatch() // panic-safety backstop; cancel is idempotent
 		postResult := e.runGatesForPhase(postCtx, GatePhasePostSquash)
 		midRun := rejectedMidRun(ctx, postCtx)
 		cancelPostWatch()

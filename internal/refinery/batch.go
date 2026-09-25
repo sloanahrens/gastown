@@ -443,9 +443,13 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	// mid-gate (gt mq reject) kills the gate immediately instead of running
 	// to completion on a stack that's about to lose a member anyway
 	// (gt-xp2b4) — recheckMRStillMergeable in fastForwardBatch below is the
-	// last-resort catch, this just stops wasting the gate's time on it.
+	// last-resort catch, this just stops wasting the gate's time on it. The
+	// flaky-retry rerun and bisection's own gate runs below are NOT watched
+	// (gt-1g75b): a mid-run rejection here still falls through to
+	// retry/bisect like an ordinary test failure instead of a clean verdict.
 	_, _ = fmt.Fprintf(e.output, "[Batch] Running gates on stack tip (%d MRs)...\n", len(stacked))
 	gateCtx, cancelGateWatch := e.watchMRRejection(ctx, mrIDs(stacked)...)
+	defer cancelGateWatch() // panic-safety backstop; cancel is idempotent
 	gateResult := e.runBatchGates(gateCtx)
 	cancelGateWatch()
 
@@ -686,16 +690,40 @@ func (e *Engineer) verifyAndPush(ctx context.Context, stacked []*MRInfo, target 
 	}
 
 	gateCtx, cancelGateWatch := e.watchMRRejection(ctx, mrIDs(stacked)...)
+	defer cancelGateWatch() // panic-safety backstop; cancel is idempotent
 	gateResult := e.runBatchGates(gateCtx)
+	midRun := rejectedMidRun(ctx, gateCtx)
 	cancelGateWatch()
 	if !gateResult.Success {
+		if restoreErr := e.restoreTargetToOrigin(target); restoreErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to restore %s to origin after gate failure: %v\n", target, restoreErr)
+		}
+		// A rejection landing mid-gate reports as the same clean per-member
+		// verdict recheckMRStillMergeable already gives a rejection landing
+		// between steps, instead of blaming every stacked member as a
+		// bisection "culprit" for a test failure that never actually ran
+		// (gt-xp2b4).
+		if midRun {
+			for _, mr := range stacked {
+				eligibility := e.recheckMRStillMergeable(mr, target, true)
+				if eligibility.Success {
+					continue
+				}
+				if eligibility.NoMerge {
+					_, _ = fmt.Fprintf(e.output, "[Batch] MR %s was rejected while its gate was running: %s\n", mr.ID, eligibility.Error)
+					e.HandleMRInfoFailure(mr, eligibility)
+					continue
+				}
+				if result.Error == nil {
+					result.Error = fmt.Errorf("pre-push eligibility recheck failed for %s: %s", mr.ID, eligibility.Error)
+				}
+			}
+			return result
+		}
 		if gateResult.TestsFailed {
 			result.Culprits = stacked
 		} else {
 			result.Error = fmt.Errorf("gates failed: %s", gateResult.Error)
-		}
-		if restoreErr := e.restoreTargetToOrigin(target); restoreErr != nil {
-			_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to restore %s to origin after gate failure: %v\n", target, restoreErr)
 		}
 		return result
 	}
