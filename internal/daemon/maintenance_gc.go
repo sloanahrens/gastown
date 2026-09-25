@@ -305,7 +305,8 @@ var maintenanceSlotHoldersFn = func(townRoot string) ([]string, error) {
 }
 
 // maintenanceWorkingPolecatsFn lists polecats with a fresh "working" heartbeat.
-var maintenanceWorkingPolecatsFn = func(d *Daemon) []string { return d.workingPolecats() }
+// An error means some rig's polecats could not be listed.
+var maintenanceWorkingPolecatsFn = func(d *Daemon) ([]string, error) { return d.workingPolecats() }
 
 // maintenanceGCDispatchFn runs a gc cycle off the daemon's select loop: a
 // cycle can hold a --full gc for up to maintenanceGCTimeout per database, and
@@ -339,7 +340,11 @@ func (d *Daemon) maintenanceQuiet() (bool, string) {
 	if len(holders) > 0 {
 		return false, "slot held by " + strings.Join(holders, ", ")
 	}
-	if working := maintenanceWorkingPolecatsFn(d); len(working) > 0 {
+	working, err := maintenanceWorkingPolecatsFn(d)
+	if err != nil {
+		return false, fmt.Sprintf("cannot list polecats: %v", err)
+	}
+	if len(working) > 0 {
 		return false, "polecats working: " + strings.Join(working, ", ")
 	}
 	return true, ""
@@ -348,13 +353,20 @@ func (d *Daemon) maintenanceQuiet() (bool, string) {
 // workingPolecats lists "<rig>/<polecat>" for every polecat worktree whose
 // session heartbeat says working and is fresher than
 // maintenancePolecatFreshness. File reads only — no tmux, no bd.
-func (d *Daemon) workingPolecats() []string {
+//
+// A rig with no polecats directory has no polecats. Any other listing error
+// is returned: the caller cannot tell whether a polecat is working in that
+// rig, so it must count the town as busy.
+func (d *Daemon) workingPolecats() ([]string, error) {
 	var out []string
 	now := time.Now()
 	for _, rigName := range d.getKnownRigs() {
 		polecats, err := listPolecatWorktrees(filepath.Join(d.config.TownRoot, rigName, "polecats"))
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("rig %s: %w", rigName, err)
 		}
 		for _, name := range polecats {
 			hb := polecat.ReadSessionHeartbeat(d.config.TownRoot,
@@ -369,7 +381,7 @@ func (d *Daemon) workingPolecats() []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // --- the gc call -------------------------------------------------------------------

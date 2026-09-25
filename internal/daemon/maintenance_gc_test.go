@@ -571,7 +571,7 @@ func TestMaintenanceQuiet(t *testing.T) {
 		name     string
 		set      func(d *Daemon)
 		slots    func(string) ([]string, error)
-		polecats func(*Daemon) []string
+		polecats func(*Daemon) ([]string, error)
 		want     bool
 		reason   string
 	}{
@@ -586,7 +586,9 @@ func TestMaintenanceQuiet(t *testing.T) {
 		{"slot probe fails", func(*Daemon) {},
 			func(string) ([]string, error) { return nil, errors.New("flock: permission denied") }, nil, false, "slot"},
 		{"polecat working", func(*Daemon) {}, nil,
-			func(*Daemon) []string { return []string{"gastown/opal"} }, false, "gastown/opal"},
+			func(*Daemon) ([]string, error) { return []string{"gastown/opal"}, nil }, false, "gastown/opal"},
+		{"polecat probe fails", func(*Daemon) {}, nil,
+			func(*Daemon) ([]string, error) { return nil, errors.New("rig gastown: permission denied") }, false, "cannot list polecats"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -594,7 +596,7 @@ func TestMaintenanceQuiet(t *testing.T) {
 			if tc.slots != nil {
 				maintenanceSlotHoldersFn = tc.slots
 			}
-			maintenanceWorkingPolecatsFn = func(*Daemon) []string { return nil }
+			maintenanceWorkingPolecatsFn = func(*Daemon) ([]string, error) { return nil, nil }
 			if tc.polecats != nil {
 				maintenanceWorkingPolecatsFn = tc.polecats
 			}
@@ -617,7 +619,7 @@ func TestMaintenanceGCRunningBlocksUpgradeButNotItsOwnQuietProbe(t *testing.T) {
 	prevSlots, prevPolecats := maintenanceSlotHoldersFn, maintenanceWorkingPolecatsFn
 	t.Cleanup(func() { maintenanceSlotHoldersFn, maintenanceWorkingPolecatsFn = prevSlots, prevPolecats })
 	maintenanceSlotHoldersFn = func(string) ([]string, error) { return nil, nil }
-	maintenanceWorkingPolecatsFn = func(*Daemon) []string { return nil }
+	maintenanceWorkingPolecatsFn = func(*Daemon) ([]string, error) { return nil, nil }
 
 	d := idleTestDaemon(t)
 	d.maintenanceGCRunning.Store(true)
@@ -629,17 +631,61 @@ func TestMaintenanceGCRunningBlocksUpgradeButNotItsOwnQuietProbe(t *testing.T) {
 	}
 }
 
-func TestWorkingPolecatsFromHeartbeats(t *testing.T) {
-	town := t.TempDir()
-	rig := "testrig"
+// writeTestRigsJSON registers rigs in <town>/mayor/rigs.json.
+func writeTestRigsJSON(t *testing.T, town string, rigNames ...string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rigs := map[string]any{"rigs": map[string]any{rig: map[string]any{}}}
-	data, _ := json.Marshal(rigs)
+	entries := map[string]any{}
+	for _, r := range rigNames {
+		entries[r] = map[string]any{}
+	}
+	data, _ := json.Marshal(map[string]any{"rigs": entries})
 	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// A rig whose polecats directory cannot be listed (here: it is a file, so
+// ReadDir fails with ENOTDIR rather than not-exist) must make the town read
+// busy: the guard cannot tell whether a polecat is working there. A rig with
+// no polecats directory at all is simply a rig without polecats.
+func TestMaintenanceQuietFailsClosedWhenPolecatListingFails(t *testing.T) {
+	prevSlots := maintenanceSlotHoldersFn
+	t.Cleanup(func() { maintenanceSlotHoldersFn = prevSlots })
+	maintenanceSlotHoldersFn = func(string) ([]string, error) { return nil, nil }
+
+	d := idleTestDaemon(t)
+	town := d.config.TownRoot
+	writeTestRigsJSON(t, town, "broken", "nopolecats")
+	if err := os.MkdirAll(filepath.Join(town, "broken"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "broken", "polecats"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	quiet, reason := d.maintenanceQuiet()
+	if quiet {
+		t.Fatal("maintenanceQuiet() = true although a rig's polecats could not be listed; want fail closed")
+	}
+	if !strings.Contains(reason, "broken") {
+		t.Errorf("reason %q does not name the rig that could not be listed", reason)
+	}
+
+	// The not-exist case alone stays quiet.
+	d2 := idleTestDaemon(t)
+	writeTestRigsJSON(t, d2.config.TownRoot, "nopolecats")
+	if quiet, reason := d2.maintenanceQuiet(); !quiet {
+		t.Errorf("maintenanceQuiet() = false (%s) for a rig with no polecats directory", reason)
+	}
+}
+
+func TestWorkingPolecatsFromHeartbeats(t *testing.T) {
+	town := t.TempDir()
+	rig := "testrig"
+	writeTestRigsJSON(t, town, rig)
 	for _, p := range []string{"fresh", "stale", "idle", "nobeat"} {
 		if err := os.MkdirAll(filepath.Join(town, rig, "polecats", p), 0o755); err != nil {
 			t.Fatal(err)
@@ -655,7 +701,10 @@ func TestWorkingPolecatsFromHeartbeats(t *testing.T) {
 	}
 
 	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
-	got := d.workingPolecats()
+	got, err := d.workingPolecats()
+	if err != nil {
+		t.Fatalf("workingPolecats() error: %v", err)
+	}
 	if strings.Join(got, ",") != rig+"/fresh" {
 		t.Errorf("workingPolecats() = %v, want [%s/fresh]", got, rig)
 	}
