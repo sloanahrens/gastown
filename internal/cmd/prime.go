@@ -1184,7 +1184,28 @@ func outputHookedBeadDetails(ctx RoleContext, hookedBead *beads.Issue) {
 // difference between "my prerequisite is on main" and "my prerequisite is
 // sitting in the queue behind me".
 func outputDependencyMergeStatus(ctx RoleContext, hookedBead *beads.Issue) {
-	renderDependencyMergeStatus(beads.ResolveDependencyMergeStatuses(filepath.Join(ctx.TownRoot, ".beads"), hookedBead))
+	issue := beadWithFullDependencies(ctx, hookedBead)
+	renderDependencyMergeStatus(beads.ResolveDependencyMergeStatuses(filepath.Join(ctx.TownRoot, ".beads"), issue))
+}
+
+// beadWithFullDependencies re-fetches hookedBead via `bd show` when it looks
+// like it was sourced from `bd list`, whose "dependencies" entries are bare
+// relation records (depends_on_id/type, no id or status field). Unmarshaled
+// through IssueDep, those records come out with an empty ID — ExtractIssueID
+// then drops them — so a bead found via findAgentWork (which lists rather
+// than shows) always reads as dependency-free and the merge warning above
+// never fires for a real dispatched bead. `bd show` returns each dependency
+// as a full issue record instead, which is what the merge-status check
+// needs. A failed re-fetch falls back to the bead as given rather than
+// losing it. (gt-u6p4)
+func beadWithFullDependencies(ctx RoleContext, hookedBead *beads.Issue) *beads.Issue {
+	if hookedBead == nil || hookedBead.DependencyCount == 0 {
+		return hookedBead
+	}
+	if full, err := beads.New(rigBeadsRoot(ctx)).Show(hookedBead.ID); err == nil && full != nil {
+		return full
+	}
+	return hookedBead
 }
 
 // renderDependencyMergeStatus prints already-resolved dependency merge states.
