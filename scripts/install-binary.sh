@@ -22,6 +22,18 @@
 # into the same temp file and one would rename the other's half-written copy
 # into place — the same defect, just moved.
 #
+# gt-vya0s: the installed binary is also left OS-immutable (BSD `chflags
+# uchg` / Linux `chattr +i`) between installs. gt-tnts5 added a Claude Code
+# PreToolUse hook that blocks a polecat's Edit/Write/Bash from targeting this
+# directory, but a local-coder (ollama) polecat runs with zero Claude Code
+# hooks (gt-be0z) — that guard is a no-op for the exact seat that caused the
+# incident. An immutable flag is enforced by the kernel, not a hook, so it
+# protects the file no matter which agent or tool is doing the writing.
+# Best-effort only: `chattr +i` silently no-ops without CAP_LINUX_IMMUTABLE
+# (e.g. non-root on Linux), so this hardens the common case (this repo is
+# developed and installed on macOS) without failing installs where the
+# platform can't grant it.
+#
 # Usage: install-binary.sh <built-binary> <install-dir> [name]
 
 set -euo pipefail
@@ -37,6 +49,26 @@ if [ ! -f "$src" ]; then
 fi
 
 mkdir -p "$dest_dir"
+dest="$dest_dir/$name"
+
+# clear_immutable/set_immutable straddle the atomic replace below: the flag
+# must come off before mv (an immutable destination refuses rename(2) the
+# same way it refuses unlink/write) and go back on once the new binary is in
+# place, so the file is writable for no longer than this script's own install.
+clear_immutable() {
+  local target="$1"
+  [ -e "$target" ] || return 0
+  chflags nouchg "$target" 2>/dev/null || true
+  chattr -i "$target" 2>/dev/null || true
+}
+
+set_immutable() {
+  local target="$1"
+  chflags uchg "$target" 2>/dev/null && return 0
+  chattr +i "$target" 2>/dev/null || true
+}
+
+clear_immutable "$dest"
 
 tmp="$(mktemp "$dest_dir/.$name.tmp.XXXXXX")"
 # Leftovers are only possible if the copy or rename below failed; never leave a
@@ -51,4 +83,6 @@ cp "$src" "$tmp"
 chmod --reference="$src" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
 
 # Atomic: replaces the directory entry, so readers never observe a partial file.
-mv -f "$tmp" "$dest_dir/$name"
+mv -f "$tmp" "$dest"
+
+set_immutable "$dest"
