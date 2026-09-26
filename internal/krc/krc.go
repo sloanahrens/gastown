@@ -52,12 +52,12 @@ type Config struct {
 // DefaultConfig returns the default KRC configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		DefaultTTL:    7 * 24 * time.Hour, // 7 days
-		PruneInterval: 1 * time.Hour,
+		DefaultTTL:     7 * 24 * time.Hour, // 7 days
+		PruneInterval:  1 * time.Hour,
 		MinRetainCount: 100,
 		TTLs: map[string]time.Duration{
 			// Patrol events decay fastest - low forensic value after hours
-			"patrol_*":       24 * time.Hour,  // 1 day
+			"patrol_*":        24 * time.Hour, // 1 day
 			"polecat_checked": 24 * time.Hour, // 1 day
 			"polecat_nudged":  24 * time.Hour, // 1 day
 
@@ -66,22 +66,22 @@ func DefaultConfig() *Config {
 			"session_end":   3 * 24 * time.Hour, // 3 days
 
 			// Operational events - moderate TTL
-			"nudge":    3 * 24 * time.Hour,  // 3 days
-			"handoff":  7 * 24 * time.Hour,  // 7 days
+			"nudge":   3 * 24 * time.Hour, // 3 days
+			"handoff": 7 * 24 * time.Hour, // 7 days
 
 			// Higher-value events - longer TTL
-			"mail":          30 * 24 * time.Hour, // 30 days
-			"sling":         14 * 24 * time.Hour, // 14 days
-			"done":          14 * 24 * time.Hour, // 14 days
-			"hook":          14 * 24 * time.Hour, // 14 days
-			"unhook":        14 * 24 * time.Hour, // 14 days
+			"mail":   30 * 24 * time.Hour, // 30 days
+			"sling":  14 * 24 * time.Hour, // 14 days
+			"done":   14 * 24 * time.Hour, // 14 days
+			"hook":   14 * 24 * time.Hour, // 14 days
+			"unhook": 14 * 24 * time.Hour, // 14 days
 
 			// Death events - keep for forensics
 			"session_death": 30 * 24 * time.Hour, // 30 days
 			"mass_death":    90 * 24 * time.Hour, // 90 days
 
 			// Merge events - important for audit
-			"merge_*":       30 * 24 * time.Hour, // 30 days
+			"merge_*": 30 * 24 * time.Hour, // 30 days
 		},
 	}
 }
@@ -370,6 +370,12 @@ func (p *Pruner) scanRetained(filePath string, result *PruneResult) ([]string, e
 
 // replaceWithLines atomically replaces filePath with lines (tmp + rename) and
 // returns the new size.
+//
+// A hard crash (SIGKILL mid-prune) leaves <filePath>.tmp behind. The hermetic
+// tripwire reports such residue as a leak (gt-lqri) instead of silently
+// tolerating the .tmp suffix; the next prune removes it as its first step, so
+// it is self-healing and its one reporting pass is the intended signal that a
+// crash happened.
 func replaceWithLines(filePath string, perm os.FileMode, lines []string) (size int64, err error) {
 	tmpPath := filePath + ".tmp"
 	// Remove a .tmp left by a crashed prune and create a fresh one: opening
