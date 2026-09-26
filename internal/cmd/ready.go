@@ -81,20 +81,27 @@ type ReadySummary struct {
 	P4Count  int            `json:"p4_count"`
 }
 
-// fillReadySourceCapped splits a ReadyDispatchable error into a displayable
-// note: a capped ready page (ErrReadyTruncated with data) is not a failed
-// source — the page is shown, flagged as capped, and TrueCount tells the user
-// how much is out of view (gt-m7pq). A query with no data at all still
-// renders as an error.
-func fillReadySourceCapped(src *ReadySource, err error) {
-	var capped *beads.ErrReadyTruncated
-	if errors.As(err, &capped) {
+// classifyReadyErr splits a ReadyDispatchable error into what actually
+// happened: a capped ready page (ErrReadyTruncated) is data, not a failure —
+// ReadyDispatchable's own contract returns the page alongside the sentinel,
+// so the caller must still run its filter pipeline over the returned issues.
+// classifyReadyErr flags src.Capped (and src.TrueCount, when the probe proved
+// one) and reports capped=true so the caller takes the "page is usable"
+// branch instead of the "no data, real failure" branch (gt-m7pq).
+//
+// Any other error means there is no page to show at all, so src.Error is set
+// and the caller must not run the filter pipeline over nil/stale issues.
+func classifyReadyErr(src *ReadySource, err error) (capped bool) {
+	var trunc *beads.ErrReadyTruncated
+	if errors.As(err, &trunc) {
 		src.Capped = true
-		if capped.TrueCount > 0 {
-			src.TrueCount = capped.TrueCount
+		if trunc.TrueCount > 0 {
+			src.TrueCount = trunc.TrueCount
 		}
+		return true
 	}
 	src.Error = err.Error()
+	return false
 }
 
 func runReady(cmd *cobra.Command, args []string) error {
@@ -151,9 +158,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			mu.Lock()
 			defer mu.Unlock()
 			src := ReadySource{Name: "town"}
-			if err != nil {
-				fillReadySourceCapped(&src, err)
-			} else {
+			if err == nil || classifyReadyErr(&src, err) {
 				// Filter out formula scaffolds (gt-579)
 				formulaNames := getFormulaNames(townBeadsPath)
 				filtered := filterFormulaScaffolds(issues, formulaNames)
@@ -186,9 +191,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			mu.Lock()
 			defer mu.Unlock()
 			src := ReadySource{Name: r.Name}
-			if err != nil {
-				fillReadySourceCapped(&src, err)
-			} else {
+			if err == nil || classifyReadyErr(&src, err) {
 				// Filter out formula scaffolds (gt-579)
 				formulaNames := getFormulaNames(r.BeadsPath())
 				filtered := filterFormulaScaffolds(issues, formulaNames)

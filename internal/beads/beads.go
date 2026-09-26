@@ -2275,6 +2275,17 @@ type readyEnvelope struct {
 	} `json:"pagination"`
 }
 
+// bdReadyDefaultLimit is bd's own page size for `ready --json` when the
+// caller passes no -n/--limit, verified against bd 1.2.2: a request with no
+// -n returns exactly 100 rows and pagination.truncated=true against a larger
+// board. readyCliArgs and readyBaseArgs never pass -n, so this constant is
+// the actual cap bounding every parseReadyOutput call. The envelope itself
+// carries no limit field — only returned/total/truncated — so Cap must come
+// from this known default rather than Pagination.Returned, which happens to
+// equal it only because bd stops exactly at the limit when truncated; that
+// coincidence is not an invariant this package enforces (gt-m7pq).
+const bdReadyDefaultLimit = 100
+
 // parseReadyOutput unmarshals bd ready --json stdout into issues, returning
 // ErrReadyTruncated when the envelope says the page was capped. bd <1.2.2
 // (or any build that ignores BD_JSON_ENVELOPE) answers with a bare array
@@ -2303,7 +2314,7 @@ func parseReadyOutput(out []byte) ([]*Issue, error) {
 	}
 	return issues, &ErrReadyTruncated{
 		Found:     env.Pagination.Returned,
-		Cap:       env.Pagination.Returned,
+		Cap:       bdReadyDefaultLimit,
 		TrueCount: env.Pagination.Total,
 	}
 }

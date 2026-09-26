@@ -192,6 +192,13 @@ exit 0
 	if capped.Found != 1 || capped.TrueCount != 373 {
 		t.Errorf("capped = {Found: %d, TrueCount: %d}, want {1, 373}", capped.Found, capped.TrueCount)
 	}
+	// Cap must be the query's actual limit (bd's documented default of 100
+	// for a `ready --json` call with no -n), not the envelope's "returned"
+	// row count — the stub's returned:1 would leak through as Cap=1 if
+	// parseReadyOutput conflated the two (gt-m7pq).
+	if capped.Cap != bdReadyDefaultLimit {
+		t.Errorf("capped.Cap = %d, want %d (bd's default ready page limit)", capped.Cap, bdReadyDefaultLimit)
+	}
 }
 
 // TestReady_ReadyDispatchableCappedEnvelopeReturnsSentinel pins the same
@@ -234,6 +241,9 @@ exit 0
 	}
 	if capped.Found != 1 || capped.TrueCount != 373 {
 		t.Errorf("capped = {Found: %d, TrueCount: %d}, want {1, 373}", capped.Found, capped.TrueCount)
+	}
+	if capped.Cap != bdReadyDefaultLimit {
+		t.Errorf("capped.Cap = %d, want %d (bd's default ready page limit)", capped.Cap, bdReadyDefaultLimit)
 	}
 }
 
@@ -359,5 +369,83 @@ esac
 	}
 	if len(issues) != 1 || issues[0].ID != "gt-real" {
 		t.Fatalf("ReadyDispatchable fallback = %v, want [gt-real]", issues)
+	}
+}
+
+// TestBDJSONEnvelopeScopedToReadyCalls is the gt-m7pq regression test for the
+// om-editorial rejection's finding that BD_JSON_ENVELOPE=1 was set process-wide
+// (buildRunEnv/buildRoutingEnv, backing every bd subcommand) instead of only
+// the ready endpoint that actually emits the pagination envelope. Ready's CLI
+// path must set it; an unrelated bd invocation through the same run() plumbing
+// must not.
+func TestBDJSONEnvelopeScopedToReadyCalls(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+
+	ResetBdAllowStaleCacheForTest()
+	t.Cleanup(ResetBdAllowStaleCacheForTest)
+
+	stubDir := t.TempDir()
+	logPath := filepath.Join(stubDir, "bd.log")
+	stubScript := `#!/bin/sh
+case "$1" in
+  --allow-stale) exit 0 ;;
+esac
+printf '%s|BD_JSON_ENVELOPE=%s\n' "$*" "$BD_JSON_ENVELOPE" >> "$MOCK_BD_LOG"
+case "$*" in
+  *ready*)
+    printf '{"schema_version":1,"data":[],"pagination":{"returned":0,"total":0,"truncated":false}}\n'
+    ;;
+  *)
+    printf '[]\n'
+    ;;
+esac
+exit 0
+`
+	stubPath := filepath.Join(stubDir, "bd")
+	if err := os.WriteFile(stubPath, []byte(stubScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MOCK_BD_LOG", logPath)
+
+	b := NewIsolated(t.TempDir())
+	if _, err := b.Ready(); err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	// list --json is an ordinary bd --json call that shares buildRunEnv with
+	// Ready but does not parse the pagination envelope; it must never see
+	// BD_JSON_ENVELOPE=1.
+	if _, err := b.run("list", "--json"); err != nil {
+		t.Fatalf("run(list): %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log: %v", err)
+	}
+	var readyLine, listLine string
+	for _, line := range strings.Split(strings.TrimSpace(string(logBytes)), "\n") {
+		switch {
+		case strings.Contains(line, "ready"):
+			readyLine = line
+		case strings.Contains(line, "list"):
+			listLine = line
+		}
+	}
+
+	if readyLine == "" {
+		t.Fatal("no logged invocation contained 'ready'")
+	}
+	if !strings.HasSuffix(readyLine, "BD_JSON_ENVELOPE=1") {
+		t.Errorf("ready call: got %q, want BD_JSON_ENVELOPE=1", readyLine)
+	}
+
+	if listLine == "" {
+		t.Fatal("no logged invocation contained 'list'")
+	}
+	if !strings.HasSuffix(listLine, "BD_JSON_ENVELOPE=") {
+		t.Errorf("list call: got %q, want BD_JSON_ENVELOPE unset", listLine)
 	}
 }

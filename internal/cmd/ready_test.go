@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -232,5 +233,112 @@ func TestFilterReadyIssuesByRoute(t *testing.T) {
 	filtered = filterReadyIssuesByRoute(townRoot, "bd_symphony", issues)
 	if got, want := issueIDs(filtered), []string{"bds-123"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("rig filtered IDs = %v, want %v", got, want)
+	}
+}
+
+// TestClassifyReadyErr_CappedIsNotAFailure is the gt-m7pq regression test for
+// the om-editorial rejection's critical finding: a capped ready page
+// (ErrReadyTruncated) must report capped=true so runReady's goroutines take
+// the "run the filter pipeline over the returned page" branch instead of the
+// "no data, hard failure" branch. It must also leave src.Error empty so the
+// same source isn't double-counted as a failedSources entry in runReady's
+// warning/exit-code logic.
+func TestClassifyReadyErr_CappedIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	src := ReadySource{Name: "town"}
+	err := &beads.ErrReadyTruncated{Found: 100, Cap: 100, TrueCount: 373}
+
+	capped := classifyReadyErr(&src, err)
+
+	if !capped {
+		t.Fatal("classifyReadyErr returned false for ErrReadyTruncated, want true")
+	}
+	if !src.Capped {
+		t.Error("src.Capped = false, want true")
+	}
+	if src.TrueCount != 373 {
+		t.Errorf("src.TrueCount = %d, want 373", src.TrueCount)
+	}
+	if src.Error != "" {
+		t.Errorf("src.Error = %q, want empty — a capped page is not a failed source", src.Error)
+	}
+}
+
+// TestClassifyReadyErr_CappedWithoutTrueCount pins the sub-case where the
+// store path's unbounded re-query itself failed (ErrReadyTruncated.StoreError
+// set, TrueCount left at zero): the page is still capped data, not a hard
+// failure, even though the probe couldn't confirm how much more exists.
+func TestClassifyReadyErr_CappedWithoutTrueCount(t *testing.T) {
+	t.Parallel()
+	src := ReadySource{Name: "town"}
+	err := &beads.ErrReadyTruncated{Found: 100, Cap: 100, StoreError: errors.New("probe timed out")}
+
+	capped := classifyReadyErr(&src, err)
+
+	if !capped {
+		t.Fatal("classifyReadyErr returned false for ErrReadyTruncated, want true")
+	}
+	if !src.Capped {
+		t.Error("src.Capped = false, want true")
+	}
+	if src.TrueCount != 0 {
+		t.Errorf("src.TrueCount = %d, want 0 (probe failed, no confirmed count)", src.TrueCount)
+	}
+	if src.Error != "" {
+		t.Errorf("src.Error = %q, want empty — a capped page is not a failed source", src.Error)
+	}
+}
+
+// TestClassifyReadyErr_HardFailureSetsError pins the other side: an error
+// that is not ErrReadyTruncated means there is no usable page at all, so
+// classifyReadyErr must report capped=false and set src.Error so runReady's
+// failedSources check catches it.
+func TestClassifyReadyErr_HardFailureSetsError(t *testing.T) {
+	t.Parallel()
+	src := ReadySource{Name: "town"}
+	err := errors.New("bd: connection refused")
+
+	capped := classifyReadyErr(&src, err)
+
+	if capped {
+		t.Fatal("classifyReadyErr returned true for a plain error, want false")
+	}
+	if src.Capped {
+		t.Error("src.Capped = true, want false")
+	}
+	if src.Error != "bd: connection refused" {
+		t.Errorf("src.Error = %q, want %q", src.Error, "bd: connection refused")
+	}
+}
+
+// TestRunReadyBranch_CappedSourceKeepsIssues exercises the exact branch
+// shape runReady's town and rig goroutines use
+// ("if err == nil || classifyReadyErr(&src, err) { ...run filter
+// pipeline... }") so a regression back to the rejected attempt's
+// "if err != nil { setError } else { filter }" shape — which discarded the
+// capped page entirely — fails this test.
+func TestRunReadyBranch_CappedSourceKeepsIssues(t *testing.T) {
+	t.Parallel()
+	issues := []*beads.Issue{{ID: "gt-real", Title: "capped page row", Priority: 2}}
+	err := &beads.ErrReadyTruncated{Found: 1, Cap: 100, TrueCount: 373}
+
+	src := ReadySource{Name: "town"}
+	if err == nil || classifyReadyErr(&src, err) {
+		src.Issues = issues
+	}
+
+	if len(src.Issues) != 1 || src.Issues[0].ID != "gt-real" {
+		t.Fatalf("capped source dropped its page: got %d issues, want [gt-real]", len(src.Issues))
+	}
+	if !src.Capped || src.TrueCount != 373 {
+		t.Errorf("src = {Capped: %v, TrueCount: %d}, want {true, 373}", src.Capped, src.TrueCount)
+	}
+
+	var failedSources []string
+	if src.Error != "" {
+		failedSources = append(failedSources, src.Name)
+	}
+	if len(failedSources) != 0 {
+		t.Errorf("failedSources = %v, want empty — a capped-but-successful source is not a failure", failedSources)
 	}
 }
