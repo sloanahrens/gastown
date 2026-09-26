@@ -448,11 +448,12 @@ func recoverRejectedMRDeadWorker(bd rejectedSourceBeads, sessionAlive func(polec
 	}
 
 	// Reopen with no assignee so the deacon's Redispatch (which requires
-	// status=open) can re-sling it.
-	openStatus := string(beads.StatusOpen)
-	emptyAssignee := ""
-	if err := bd.Update(req.SourceIssue, beads.UpdateOptions{Status: &openStatus, Assignee: &emptyAssignee}); err != nil {
+	// status=open) can re-sling it. bd's reassign fence is answerable with
+	// --force only where it can have fired: a non-terminal bead carrying an
+	// assignee, which is the dead holder's claim and nothing else.
+	if err := reopenSourceForRedispatch(bd, req.SourceIssue, !status.IsTerminal() && assignee != "", logf); err != nil {
 		logf("[Engineer] Warning: failed to reopen source bead %s for redispatch: %v\n", req.SourceIssue, err)
+		escalateStrandedSource(sendMail, req, polecatName, err, logf)
 		return false
 	}
 	logf("[Engineer] Worker %s no longer holds %s — reopened for redispatch (%s)\n", polecatName, req.SourceIssue, MergeRejectionNoteMarker)
@@ -509,6 +510,78 @@ can check it out and make a targeted fix instead of starting over.`,
 	}
 	logf("[Engineer] Sent RECOVERED_BEAD %s to deacon for redispatch\n", req.SourceIssue)
 	return true
+}
+
+// reopenSourceForRedispatch clears the source bead's assignee and returns it
+// to open, so the deacon's Redispatch — which only re-slings a bead whose
+// status is open — has something to act on.
+//
+// forcePastClaim retries the reopen with bd's --force, for the one refusal
+// recovery can answer: bd fences a plain reassign that strips another actor's
+// in_progress claim, and here that claim belongs to a polecat whose dead
+// session the caller already established. bd cannot see the session, so the
+// retry is how the established fact reaches it. A refusal anywhere else is a
+// real failure, and --force would only paper over it. Abandoning the reopen
+// instead strands the bead under a worker that will never act on it while the
+// RECOVERED_BEAD mail below — the only signal that re-slings it — goes unsent
+// (gt-mabxx).
+func reopenSourceForRedispatch(bd rejectedSourceBeads, id string, forcePastClaim bool, logf func(string, ...interface{})) error {
+	openStatus := string(beads.StatusOpen)
+	emptyAssignee := ""
+	opts := beads.UpdateOptions{Status: &openStatus, Assignee: &emptyAssignee}
+
+	err := bd.Update(id, opts)
+	if err == nil || !forcePastClaim {
+		return err
+	}
+
+	opts.Force = true
+	if forceErr := bd.Update(id, opts); forceErr != nil {
+		return fmt.Errorf("plain update: %w; retry with --force: %v", err, forceErr)
+	}
+	logf("[Engineer] Source bead %s: reopen refused (%v); cleared the dead holder's claim with --force\n", id, err)
+	return nil
+}
+
+// escalateStrandedSource mails the mayor about a source bead recovery could
+// not reopen, so a rejection is not recorded as handled while the bead stays
+// held by a worker that cannot act on it.
+//
+// Nothing else covers that state: the RECOVERED_BEAD mail requires an open
+// bead, the deacon re-dispatches only from that mail, and the witness's
+// ready-queue sweep only sees beads that are already open. A mail rather than
+// the nudge routine refinery signals use, because the record is what a later
+// reader needs. Best-effort: the caller has already logged the reopen failure,
+// so a mail that will not send is a warning rather than a new failure
+// (gt-mabxx).
+func escalateStrandedSource(sendMail func(*mail.Message) error, req deadWorkerRecoveryRequest, polecatName string, reopenErr error, logf func(string, ...interface{})) {
+	if sendMail == nil {
+		return
+	}
+	msg := &mail.Message{
+		From:     req.RigName + "/refinery",
+		To:       "mayor/",
+		Subject:  fmt.Sprintf("STRANDED_BEAD %s", req.SourceIssue),
+		Priority: mail.PriorityHigh,
+		Body: fmt.Sprintf(`Merge rejection with no live worker, and the source bead could not be reopened.
+
+Bead: %s
+Polecat: %s/polecats/%s
+MR: %s
+Branch: %s
+Attempt: %d
+Reopen: %v
+
+No RECOVERED_BEAD was sent: the deacon re-dispatches only an open bead, and
+this one is still held by the worker that cannot act on it. Nothing patrols
+for a bead in that state, so it needs a hand — bd reclaim for a stale lease,
+or bd update %s --status=open --assignee= --force. The branch survives on
+origin.`, req.SourceIssue, req.RigName, polecatName, req.MRID, req.Branch,
+			req.AttemptNumber, reopenErr, req.SourceIssue),
+	}
+	if err := sendMail(msg); err != nil {
+		logf("[Engineer] Warning: failed to send STRANDED_BEAD for %s: %v\n", req.SourceIssue, err)
+	}
 }
 
 // newDeadWorkerRecoverer builds the standard (tmux + mail) wiring for

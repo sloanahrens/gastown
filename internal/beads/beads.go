@@ -670,6 +670,16 @@ type UpdateOptions struct {
 	AddLabels    []string // Labels to add
 	RemoveLabels []string // Labels to remove
 	SetLabels    []string // Labels to set (replaces all existing)
+
+	// Force passes bd's --force, overriding the two fences a plain update
+	// enforces: Assignee overwriting another actor's live in_progress claim,
+	// and Status moving a bead to closed past open children or a live
+	// blocker. A caller reaches for it only on a claim it has established is
+	// abandoned — a crashed agent or an expired lease — because bd cannot see
+	// the holder's session and a plain update is refused on the claim's
+	// existence alone (gt-mabxx). The in-process store path ignores it: that
+	// path has no CLI fences to override.
+	Force bool
 }
 
 // Beads wraps bd CLI operations for a working directory.
@@ -2870,6 +2880,10 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 
 	args := []string{"update", id}
 	var stdinData []byte
+
+	if opts.Force {
+		args = append(args, "--force")
+	}
 
 	if opts.Title != nil {
 		args = append(args, "--title="+*opts.Title)
