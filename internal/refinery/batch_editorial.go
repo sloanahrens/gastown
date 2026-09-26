@@ -176,7 +176,19 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 			// this diff, so the MR must stop being merge-eligible (gt-bsmp).
 			e.rejectReviewedCandidate(mr, target, r)
 		} else {
-			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial review exit=%d, dropped from batch (left queued)\n", mr.ID, r.Exit)
+			// An infra-class result: no verdict exists, so nothing about the
+			// diff is known. Surface r.Stderr here too (not just on the
+			// approve path above) — it is otherwise discarded, leaving no way
+			// to see why the candidate was dropped (gt-crvw0).
+			detail := r.Stderr
+			if detail == "" {
+				detail = "no error detail captured"
+			}
+			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial review exit=%d, dropped from batch (left queued): %s\n", mr.ID, r.Exit, detail)
+			// A transient failure clears on its own next cycle; a
+			// deterministic one retries forever with nobody told unless this
+			// tracks the repeat and escalates (gt-crvw0).
+			e.recordEditorialDrop(mr, r.Class, r.Stderr)
 		}
 	}
 	return approved, reviewed, notes

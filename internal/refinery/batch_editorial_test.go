@@ -96,6 +96,52 @@ func (s *batchReviewStore) GetDependenciesWithMetadata(_ context.Context, id str
 	return nil, nil
 }
 
+// AddLabel/RemoveLabel back the editorial-drop marks (gt-crvw0): beads.Update
+// applies label changes through these store calls, not through UpdateIssue,
+// so a test that wants to read back what recordEditorialDrop wrote needs them
+// implemented rather than falling through to the embedded nil Storage.
+func (s *batchReviewStore) AddLabel(_ context.Context, issueID, label, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	issue, ok := s.issues[issueID]
+	if !ok {
+		return fmt.Errorf("issue %s not found", issueID)
+	}
+	for _, existing := range issue.Labels {
+		if existing == label {
+			return nil
+		}
+	}
+	issue.Labels = append(issue.Labels, label)
+	return nil
+}
+
+func (s *batchReviewStore) RemoveLabel(_ context.Context, issueID, label, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	issue, ok := s.issues[issueID]
+	if !ok {
+		return fmt.Errorf("issue %s not found", issueID)
+	}
+	kept := issue.Labels[:0]
+	for _, existing := range issue.Labels {
+		if existing != label {
+			kept = append(kept, existing)
+		}
+	}
+	issue.Labels = kept
+	return nil
+}
+
+func (s *batchReviewStore) labelsOf(issueID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if issue, ok := s.issues[issueID]; ok {
+		return append([]string(nil), issue.Labels...)
+	}
+	return nil
+}
+
 func (s *batchReviewStore) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
