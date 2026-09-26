@@ -10,8 +10,12 @@ import (
 )
 
 // listBeadsAcrossTables lists matching durable issues and ephemeral wisps.
-// Hooked molecule roots can live in either table, so active-work readers must
-// explicitly merge both sources instead of relying on issue-only bd list output.
+// Hooked molecule roots can live in either table, so readers must merge both
+// sources instead of relying on issue-only bd list output.
+//
+// This costs two subprocesses. For a fleet-wide lookup use
+// beads.ListAssignedIssueStatuses, which unions both tables in one query
+// (gt-t8tu); this is left for the per-parent child scan.
 func listBeadsAcrossTables(b *beads.Beads, opts beads.ListOptions) ([]*beads.Issue, error) {
 	limit := opts.Limit
 
@@ -39,36 +43,39 @@ func listBeadsAcrossTables(b *beads.Beads, opts beads.ListOptions) ([]*beads.Iss
 }
 
 func listAssignedActiveWork(b *beads.Beads, assignee string) ([]*beads.Issue, error) {
-	for _, status := range activeWorkStatuses() {
-		beadsForStatus, err := listBeadsAcrossTables(b, beads.ListOptions{
-			Status:   status,
-			Assignee: assignee,
-			Priority: -1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(beadsForStatus) > 0 {
-			return beadsForStatus, nil
-		}
+	assignments, err := listAssignedActiveWorkAcrossStatuses(b, assignee)
+	if err != nil {
+		return nil, err
 	}
-	return nil, nil
+	return preferHooked(assignments), nil
 }
 
+// listAssignedActiveWorkAcrossStatuses returns every active assignment for
+// assignee, newest first, from one query over both statuses and both tables.
 func listAssignedActiveWorkAcrossStatuses(b *beads.Beads, assignee string) ([]*beads.Issue, error) {
-	var assigned []*beads.Issue
-	for _, status := range activeWorkStatuses() {
-		beadsForStatus, err := listBeadsAcrossTables(b, beads.ListOptions{
-			Status:   status,
-			Assignee: assignee,
-			Priority: -1,
-		})
-		if err != nil {
-			return nil, err
-		}
-		assigned = append(assigned, beadsForStatus...)
+	assignments, err := b.ListAssignedIssueStatuses(assignee, activeWorkStatuses()...)
+	if err != nil {
+		return nil, err
 	}
-	return mergeBeadLists(assigned, nil), nil
+	return mergeBeadLists(assignments, nil), nil
+}
+
+// preferHooked puts a hooked bead ahead of an in_progress one. Callers read
+// element 0 as "the" hook, and the merged query returns both statuses
+// interleaved, so the split happens here.
+func preferHooked(assignments []*beads.Issue) []*beads.Issue {
+	var hooked, inProgress []*beads.Issue
+	for _, issue := range assignments {
+		if issue.Status == beads.StatusHooked {
+			hooked = append(hooked, issue)
+		} else {
+			inProgress = append(inProgress, issue)
+		}
+	}
+	if len(hooked) > 0 {
+		return mergeBeadLists(hooked, nil)
+	}
+	return mergeBeadLists(inProgress, nil)
 }
 
 func listChildrenAcrossTables(b *beads.Beads, parentID string) ([]*beads.Issue, error) {
@@ -98,8 +105,8 @@ func resolveHookLookupWorkDir(workDir, target, townRoot string) string {
 	return filepath.Join(townRoot, rigName)
 }
 
-func activeWorkStatuses() []string {
-	return []string{beads.StatusHooked, string(beads.StatusInProgress)}
+func activeWorkStatuses() []beads.IssueStatus {
+	return []beads.IssueStatus{beads.IssueStatusHooked, beads.StatusInProgress}
 }
 
 func safeAgentTargetPath(target string) bool {

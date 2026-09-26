@@ -1560,13 +1560,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	return issues, nil
 }
 
-// ListIssueStatuses returns durable issues matching any of the supplied
-// statuses with one bd query. Summary paths use this to avoid multiplying bd
-// subprocesses by status and polecat count.
-func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
-	if len(statuses) == 0 {
-		return nil, nil
-	}
+// uniqueStatuses drops empty and repeated statuses, preserving first-seen
+// order so callers can express precedence through the argument order.
+func uniqueStatuses(statuses []IssueStatus) []IssueStatus {
 	unique := make([]IssueStatus, 0, len(statuses))
 	seen := make(map[IssueStatus]bool, len(statuses))
 	for _, status := range statuses {
@@ -1576,6 +1572,14 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 		seen[status] = true
 		unique = append(unique, status)
 	}
+	return unique
+}
+
+// ListIssueStatuses returns durable issues matching any of the supplied
+// statuses with one bd query. Summary paths use this to avoid multiplying bd
+// subprocesses by status and polecat count.
+func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
+	unique := uniqueStatuses(statuses)
 	if len(unique) == 0 {
 		return nil, nil
 	}
@@ -1597,6 +1601,66 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 		statusClauses = append(statusClauses, "status="+quoteBDQueryValue(string(status)))
 	}
 	expr := "ephemeral=false AND (" + strings.Join(statusClauses, " OR ") + ")"
+	out, err := b.run("query", "--json", expr, "--all", "--limit=0")
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if !isJSONBytes(out) {
+		return nil, fmt.Errorf("bd query returned non-JSON output")
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd query output: %w", err)
+	}
+	return issues, nil
+}
+
+// ListAssignedIssueStatuses returns the issues assigned to assignee whose
+// status is any of statuses, from both the durable issues table and the
+// ephemeral wisps table, in one bd query (gt-t8tu).
+//
+// The single query is the contract, not an implementation detail: the callers
+// are hook lookups, which run once per agent per probe, so a query per status
+// per table is multiplied by the fleet size.
+//
+// "ephemeral" is deliberately absent from the expression. A nil
+// beadsdk.IssueFilter.Ephemeral means "either table"; pinning it either way
+// drops half the union.
+func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStatus) ([]*Issue, error) {
+	if assignee == "" {
+		return nil, nil
+	}
+	unique := uniqueStatuses(statuses)
+	if len(unique) == 0 {
+		return nil, nil
+	}
+
+	if b.store != nil {
+		var all []*Issue
+		for _, status := range unique {
+			issues, err := b.storeListAnyTable(ListOptions{
+				Status:   string(status),
+				Assignee: assignee,
+				Priority: -1,
+			})
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, issues...)
+		}
+		return all, nil
+	}
+
+	statusClauses := make([]string, 0, len(unique))
+	for _, status := range unique {
+		statusClauses = append(statusClauses, "status="+quoteBDQueryValue(string(status)))
+	}
+	expr := "assignee=" + quoteBDQueryValue(assignee) +
+		" AND (" + strings.Join(statusClauses, " OR ") + ")"
 	out, err := b.run("query", "--json", expr, "--all", "--limit=0")
 	if err != nil {
 		return nil, err
