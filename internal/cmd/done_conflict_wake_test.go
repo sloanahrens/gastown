@@ -322,9 +322,16 @@ func TestWakeRefineryForReadyConflict_SkipsUnrelatedCompletion(t *testing.T) {
 // path calls is exactly as silent as no function, and every other test in this
 // file would still pass, so the call site itself is asserted here.
 //
+// The call must land after updateAgentStateAfterSubmission, not merely
+// somewhere in notifyWitness: that call is what actually closes the hooked
+// conflict task (via updateAgentStateOnDone), and checking readiness before
+// the close always found the task still open — gt done could never wake the
+// refinery for its own conflict-resolution completion (gt-ue2h).
+//
 // A source-level check is used because the alternative — driving runDone — needs
 // a git remote, a beads database, and a tmux session. This deliberately asserts
-// only that notifyWitness reaches the wake, not how it is spelled around it.
+// only that notifyWitness reaches the wake after the close, not how it is
+// spelled around it.
 func TestDoneWiresConflictWakeIntoNotifyWitness(t *testing.T) {
 	t.Parallel()
 
@@ -336,20 +343,32 @@ func TestDoneWiresConflictWakeIntoNotifyWitness(t *testing.T) {
 
 	// Scope the search to the notifyWitness block: gt done has several early
 	// gotos to it, and a call placed anywhere else would not run for the
-	// completions this fixes.
+	// completions this fixes. The block runs to the next top-level func decl
+	// (the end of runDone) rather than cutting at "Notifying Witness..." —
+	// the wake call must land after the state-update close, which happens
+	// later in the same block.
 	label := strings.Index(doneSrc, "notifyWitness:")
 	if label < 0 {
 		t.Fatal("done.go has no notifyWitness block — the refinery wake site moved")
 	}
 	block := doneSrc[label:]
-	if end := strings.Index(block, "Notifying Witness..."); end >= 0 {
+	if end := strings.Index(block, "\nfunc "); end >= 0 {
 		block = block[:end]
 	}
 
-	if !strings.Contains(block, "wakeRefineryForReadyConflict(") {
-		t.Errorf("gt done's notifyWitness block does not call wakeRefineryForReadyConflict:\n%s\n"+
+	closeIdx := strings.Index(block, "updateAgentStateAfterSubmission(")
+	if closeIdx < 0 {
+		t.Fatal("done.go's notifyWitness block no longer calls updateAgentStateAfterSubmission — the hooked-conflict-task close site moved")
+	}
+	wakeIdx := strings.Index(block, "wakeRefineryForReadyConflict(")
+	if wakeIdx < 0 {
+		t.Fatalf("gt done's notifyWitness block does not call wakeRefineryForReadyConflict:\n%s\n"+
 			"A conflict-resolution completion creates no MR of its own, so it can only reach the "+
 			"refinery through this call (gt-rv8h).", block)
+	}
+	if wakeIdx < closeIdx {
+		t.Errorf("wakeRefineryForReadyConflict is called before updateAgentStateAfterSubmission — "+
+			"the readiness check would see the hooked conflict task as still open (gt-ue2h):\n%s", block)
 	}
 }
 

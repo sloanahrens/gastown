@@ -2639,6 +2639,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 
 notifyWitness:
 	// Nudge refinery — MR bead is already on main (transaction-based shared main).
+	var wakeConflictCandidates []string
+	var wakeConflictBD *beads.Beads
 	if shouldNudgeRefinery(exitType, mrID) {
 		nudgeRefinery(rigName, "MERGE_READY received - check inbox for pending work")
 	} else if !pushFailed {
@@ -2651,21 +2653,25 @@ notifyWitness:
 		// would then not be on origin, and waking the refinery would only invite
 		// it to merge a stale head. The MR is left blocked and the existing
 		// push-failure recovery path owns it.
-		wakeBD := sourceBD
-		if wakeBD == nil {
-			wakeBD = beads.New(cwd)
+		wakeConflictBD = sourceBD
+		if wakeConflictBD == nil {
+			wakeConflictBD = beads.New(cwd)
 		}
 		// issueID is branch-derived unless --issue was passed, and a conflict
 		// polecat may still be on the resolved branch (whose name carries the
 		// source issue, not the task). The agent bead's hook_bead is the other
 		// candidate for "the conflict task this completion just finished".
-		wakeCandidates := []string{issueID}
+		// Captured here, before updateAgentStateAfterSubmission below clears
+		// the agent bead's hook_bead field, but the actual readiness check is
+		// deferred until after that call closes the hooked conflict task
+		// (gt-ue2h): checking readiness here always found the task still open,
+		// since gt done itself hadn't closed it yet.
+		wakeConflictCandidates = []string{issueID}
 		if agentBeadID != "" {
 			if _, fields, err := beads.New(cwd).ForAgentBead().GetAgentBead(agentBeadID); err == nil && fields != nil {
-				wakeCandidates = append(wakeCandidates, fields.HookBead)
+				wakeConflictCandidates = append(wakeConflictCandidates, fields.HookBead)
 			}
 		}
-		wakeRefineryForReadyConflict(wakeBD.Show, rigName, wakeCandidates...)
 	}
 
 	// Write completion metadata to agent bead for audit trail.
@@ -2722,6 +2728,14 @@ notifyWitness:
 	// keep the hook intact so Witness can recover the still-open work.
 	if err := updateAgentStateAfterSubmission(cwd, townRoot, exitType, issueID, pushFailed, mrFailed); err != nil {
 		return err
+	}
+
+	// Check the conflict-resolution wake now that the hooked conflict task
+	// bead above has actually been closed (updateAgentStateOnDone, reached via
+	// updateAgentStateAfterSubmission). wakeConflictCandidates is nil whenever
+	// shouldNudgeRefinery already fired or the push failed (gt-ue2h).
+	if wakeConflictCandidates != nil {
+		wakeRefineryForReadyConflict(wakeConflictBD.Show, rigName, wakeConflictCandidates...)
 	}
 
 	// Nudge witness only after hook/cleanup state is updated. Otherwise witness can
