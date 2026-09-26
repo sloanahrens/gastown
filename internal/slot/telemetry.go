@@ -136,6 +136,16 @@ func (w *waitWatch) info(timeout time.Duration, timedOut bool) waitInfo {
 	}
 }
 
+// blockedInfo is info for a pass that is blocked right now: it carries the
+// reason the pass itself cannot grant rather than the dominant one reason()
+// would report. credit() runs after the sleep, so during a pass the reason has
+// no time against it yet and reason() is still empty (gt-78b8).
+func (w *waitWatch) blockedInfo(timeout time.Duration, reason WaitReason) waitInfo {
+	info := w.info(timeout, false)
+	info.Reason = reason
+	return info
+}
+
 // describe renders the reason and its evidence for a human reader, e.g.
 // "token held by gastown/refinery pid 62965". The wait line wraps this in its
 // own parentheses, so the holder's pid is not parenthesized here.

@@ -212,6 +212,13 @@ func TestAcquire_WaitReasonUnwrappedContainers(t *testing.T) {
 	})
 	defer restore()
 
+	// The wait reports itself through probeWriter while it is still waiting
+	// (gt-78b8), not only in the record of how it ended.
+	prevProbe := probeWriter
+	var probeOut strings.Builder
+	probeWriter = &probeOut
+	defer func() { probeWriter = prevProbe }()
+
 	h, err := Acquire(townRoot, "gastown/refinery", 30*time.Second)
 	if err != nil {
 		t.Fatalf("Acquire while an unwrapped suite cleared on the second check: %v", err)
@@ -219,6 +226,9 @@ func TestAcquire_WaitReasonUnwrappedContainers(t *testing.T) {
 	defer func() { _ = h.Release() }()
 	if h.WaitedFor < DefaultPollInterval {
 		t.Errorf("wait = %s, want at least one poll interval spent behind the unwrapped suite", h.WaitedFor)
+	}
+	if !strings.Contains(probeOut.String(), "unwrapped container suite") {
+		t.Errorf("probe output = %q, want the unwrapped suite named while the caller waited", probeOut.String())
 	}
 
 	history, err := History(townRoot)
@@ -264,6 +274,11 @@ func TestAcquire_WaitReasonDaemonUnreachable(t *testing.T) {
 
 	if !strings.Contains(probeOut.String(), "inconclusive") {
 		t.Errorf("probe output = %q, want the wait's cause reported while it waited", probeOut.String())
+	}
+	// The inconclusive probe is this reason's one reporter: the wait line
+	// would say the same thing a second time (gt-78b8).
+	if strings.Contains(probeOut.String(), "waiting for container-gate slot") {
+		t.Errorf("probe output = %q, want the inconclusive probe reported once", probeOut.String())
 	}
 
 	history, err := History(townRoot)
