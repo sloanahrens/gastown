@@ -321,6 +321,56 @@ func TestRenderRole_Refinery_DefaultBranch(t *testing.T) {
 	}
 }
 
+// TestRenderRole_Refinery_ClaimCheckTwoOutcomes locks in the two-outcome
+// judgment gt-i76q flagged as an untested relaxation: a title-vs-diff
+// mismatch must resolve to exactly one of "title disproved" (with the title
+// rewritten and an externally-checkable completion criterion) or "genuinely
+// incomplete" (reject). It exists so a future template edit cannot silently
+// drop the reject branch or the completion criterion — the two failure modes
+// that would turn this from a judgment call into a rubber stamp — without
+// failing a test.
+func TestRenderRole_Refinery_ClaimCheckTwoOutcomes(t *testing.T) {
+	tmpl, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	data := RoleData{
+		Role:          "refinery",
+		RigName:       "myrig",
+		TownRoot:      "/test/town",
+		TownName:      "town",
+		WorkDir:       "/test/town/myrig/refinery/rig",
+		DefaultBranch: "main",
+		MayorSession:  "gt-town-mayor",
+		DeaconSession: "gt-town-deacon",
+	}
+
+	output, err := tmpl.RenderRole("refinery", data)
+	if err != nil {
+		t.Fatalf("RenderRole() error = %v", err)
+	}
+
+	if !strings.Contains(output, "A title-vs-diff mismatch is a claim check, not an incompleteness test.") {
+		t.Error("output missing the claim-check framing that gates a title/diff mismatch")
+	}
+	if !strings.Contains(output, "The title is disproved or outdated") {
+		t.Error("output missing the 'title disproved' outcome")
+	}
+	if !strings.Contains(output, `bd update <bead> --title "DISPROVEN:`) {
+		t.Error("output missing the title-rewrite command for the disproved outcome")
+	}
+	if !strings.Contains(output, "Completion criterion: `bd show <bead>` no longer asserts") {
+		t.Error("output missing the externally-checkable completion criterion for a title rewrite")
+	}
+	if !strings.Contains(output, "The work is genuinely incomplete") || !strings.Contains(output, "reject as before") {
+		t.Error("output missing the 'genuinely incomplete' reject outcome - without it a mismatch can only ever be waved through")
+	}
+	if !strings.Contains(output, "Gating on shape alone nearly rejected a completed P0 (gt-ido).") {
+		t.Error("output missing the gt-ido rationale for why shape-only gating was relaxed")
+	}
+}
+
 func TestRenderMessage_Spawn(t *testing.T) {
 	tmpl, err := New()
 	if err != nil {
