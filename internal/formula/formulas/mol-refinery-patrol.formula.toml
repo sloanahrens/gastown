@@ -1859,7 +1859,9 @@ After await-event returns, check the EFFORT directive in the output:
 - patrol-cleanup: SKIP
 
 Abbreviated patrol should complete in ~10% of the tokens of a full patrol.
-Mark skipped steps as SKIP in the patrol report.
+If you pass `--steps`, every entry needs a `:STATUS` suffix — executed steps
+get OK, skipped steps get SKIP. A bare step id is rejected, not silently
+counted (gt-gvo8m).
 
 After await-event returns (either by event, timeout, or context-yield):
 1. **Re-assess session health** (check RSS, context, age again — conditions change)

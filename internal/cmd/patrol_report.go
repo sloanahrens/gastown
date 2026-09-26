@@ -143,8 +143,14 @@ func runPatrolReportFor(out io.Writer, roleInfo RoleInfo, summary, steps string,
 		b = beads.New(cfg.BeadsDir)
 	}
 
-	// Build step audit checklist
-	stepAudit := buildStepAudit(cfg.PatrolMolName, steps)
+	// Build step audit checklist. The audit is the anti-shortcut record, so a
+	// malformed entry (a bare step id with no ":STATUS") fails the command
+	// before anything is closed — a silent default to SKIP would make a full
+	// patrol read as "0/N" in the ledger (gt-gvo8m).
+	stepAudit, err := buildStepAudit(out, cfg.PatrolMolName, steps)
+	if err != nil {
+		return fmt.Errorf("invalid --steps: %w", err)
+	}
 
 	// Update the description with the patrol summary and step audit
 	desc := fmt.Sprintf("Patrol report: %s\n\n%s", summary, stepAudit)
@@ -228,39 +234,70 @@ func stampDeaconHeartbeatOnReport(townRoot, summary string) {
 //
 //	Steps: heartbeat OK | inbox-check OK | orphan-cleanup SKIP | ... (14/25)
 //
-// If stepsFlag is empty, returns a line indicating the audit was not reported.
-func buildStepAudit(formulaName string, stepsFlag string) string {
+// If stepsFlag is empty, it returns a line indicating the audit was not
+// reported. A malformed entry — a bare step id with no ":STATUS" — is an
+// error (gt-gvo8m): the audit is the anti-shortcut record of the ledger, so a
+// silent default to SKIP would make a fully executed patrol read as "0/N".
+func buildStepAudit(out io.Writer, formulaName string, stepsFlag string) (string, error) {
 	// Load the formula to get the canonical step list
 	content, err := formula.GetEmbeddedFormulaContent(formulaName)
 	if err != nil {
 		if stepsFlag == "" {
-			return "Steps: NOT REPORTED (formula not found)"
+			return "Steps: NOT REPORTED (formula not found)", nil
+		}
+		// Validate the entries even though the formula is unresolvable: the
+		// unvalidated path prints them raw, so it must not accept entries
+		// that are malformed (a bare step id has no status, gt-gvo8m).
+		if _, err := parseStepResults(stepsFlag); err != nil {
+			return "", err
 		}
 		// Can't validate without the formula, but still show what was reported
-		return fmt.Sprintf("Steps: %s (unvalidated — formula not found)", stepsFlag)
+		return fmt.Sprintf("Steps: %s (unvalidated — formula not found)", stepsFlag), nil
 	}
 
 	f, err := formula.Parse(content)
 	if err != nil {
 		if stepsFlag == "" {
-			return "Steps: NOT REPORTED (formula parse error)"
+			return "Steps: NOT REPORTED (formula parse error)", nil
 		}
-		return fmt.Sprintf("Steps: %s (unvalidated — formula parse error)", stepsFlag)
+		// Same: validate before printing the raw entries (gt-gvo8m).
+		if _, err := parseStepResults(stepsFlag); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Steps: %s (unvalidated — formula parse error)", stepsFlag), nil
 	}
 
 	allStepIDs := f.GetAllIDs()
 	if len(allStepIDs) == 0 {
-		return ""
+		return "", nil
 	}
 
 	if stepsFlag == "" {
-		return fmt.Sprintf("Steps: NOT REPORTED (?/%d)", len(allStepIDs))
+		return fmt.Sprintf("Steps: NOT REPORTED (?/%d)", len(allStepIDs)), nil
 	}
 
-	// Parse the reported step results
-	reported := parseStepResults(stepsFlag)
+	reported, err := parseStepResults(stepsFlag)
+	if err != nil {
+		return "", err
+	}
 
-	// Build the audit line: map each formula step to its reported status
+	// Warn about entries that name no canonical step; they never reach the
+	// audit line, which could otherwise hide a typo in the statuses.
+	canonical := make(map[string]bool, len(allStepIDs))
+	for _, id := range allStepIDs {
+		canonical[id] = true
+	}
+	for id := range reported {
+		if !canonical[id] {
+			fmt.Fprintf(out, "warning: step %q not in %s — ignored\n", id, formulaName)
+		}
+	}
+
+	// Build the audit line: map each formula step to its reported status. A
+	// step missing from the report was skipped — SKIP is the one default the
+	// audit keeps, because an agent that actually ran a step and omitted it
+	// is claiming less than it did. The failure mode to prevent is the
+	// inverse: entries that parsed without a status (bare ids on the CLI).
 	var parts []string
 	okCount := 0
 	for _, stepID := range allStepIDs {
@@ -274,13 +311,19 @@ func buildStepAudit(formulaName string, stepsFlag string) string {
 		parts = append(parts, stepID+" "+status)
 	}
 
-	return fmt.Sprintf("Steps: %s (%d/%d)", strings.Join(parts, " | "), okCount, len(allStepIDs))
+	return fmt.Sprintf("Steps: %s (%d/%d)", strings.Join(parts, " | "), okCount, len(allStepIDs)), nil
 }
 
-// parseStepResults parses a comma-separated string of step:STATUS pairs.
-// Returns a map of step ID to uppercase status.
+// parseStepResults parses a comma-separated string of step:STATUS pairs and
+// returns a map of step ID to uppercase status.
 // Example input: "heartbeat:OK,inbox-check:OK,orphan-cleanup:SKIP"
-func parseStepResults(stepsFlag string) map[string]string {
+//
+// A bare id (no ":STATUS") is always a parse error: the audit is the
+// anti-shortcut record of the ledger, so silently defaulting a status-less
+// entry to SKIP is what turned a full 28/28 deacon patrol into a ledger
+// entry reading 0/28 (gt-gvo8m). Every caller is the CLI path; the refinery
+// unit cycle reports no steps at all.
+func parseStepResults(stepsFlag string) (map[string]string, error) {
 	results := make(map[string]string)
 	for _, entry := range strings.Split(stepsFlag, ",") {
 		entry = strings.TrimSpace(entry)
@@ -288,9 +331,10 @@ func parseStepResults(stepsFlag string) map[string]string {
 			continue
 		}
 		parts := strings.SplitN(entry, ":", 2)
-		if len(parts) == 2 {
-			results[strings.TrimSpace(parts[0])] = strings.ToUpper(strings.TrimSpace(parts[1]))
+		if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+			return nil, fmt.Errorf("entry %q has no status — use %q (expected step:STATUS pairs like heartbeat:OK,inbox-check:OK)", entry, entry+":OK")
 		}
+		results[strings.TrimSpace(parts[0])] = strings.ToUpper(strings.TrimSpace(parts[1]))
 	}
-	return results
+	return results, nil
 }
