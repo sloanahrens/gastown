@@ -198,6 +198,10 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 //
 // An infra-class result (Exit 2) never reaches this: no Note means no verdict,
 // so that candidate stays queued and untouched for the next cycle.
+//
+// A close that fails leaves the candidate queued, which is the very state this
+// function exists to produce against — see failRejectionClose for why that is
+// escalated rather than warned, and why no recovery runs in that case.
 func (e *Engineer) rejectReviewedCandidate(mr *MRInfo, target string, r editorial.ReviewResult) {
 	// No Note means no verdict — an infra-class result, which is not this
 	// function's to act on.
@@ -213,11 +217,16 @@ func (e *Engineer) rejectReviewedCandidate(mr *MRInfo, target string, r editoria
 	attempt := mr.RetryCount + 1
 	reason := fmt.Sprintf("EDITORIAL REJECTION (attempt %d): om gate %s, score %.2f, %d finding(s)",
 		attempt, r.Note.Verdict, r.Note.Score, r.Note.FindingsCount)
-	closeResult, closeErr := e.closeMRWithReasonResult(mr, "rejected: "+reason)
+	closeReason := "rejected: " + reason
+	closeResult, closeErr := e.closeMRWithReasonResult(mr, closeReason)
 	if closeErr != nil {
-		_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to close rejected MR %s: %v\n", mr.ID, closeErr)
+		// The close is what makes this rejection take effect, so a failed one
+		// leaves the rejected diff merge-eligible with nobody told. Report the
+		// MR as dropped from this batch — it is — but not as rejected.
+		e.failRejectionClose("[Batch]", mr, closeReason, closeErr)
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial %s — rejected, dropped from batch\n", mr.ID, r.Note.Verdict)
 	}
-	_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: editorial %s — rejected, dropped from batch\n", mr.ID, r.Note.Verdict)
 
 	// Only the close that actually closed the MR owes it recovery; an MR some
 	// other path already dequeued was recovered there.

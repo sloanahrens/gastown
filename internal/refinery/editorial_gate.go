@@ -230,10 +230,38 @@ func (e *Engineer) rejectEditorialVerdict(mr *MRInfo, cerr *editorial.Preconditi
 	}
 	reason := fmt.Sprintf("EDITORIAL REJECTION: om gate %s for %s — push refused, no approve note for this range",
 		cerr.Reason, cerr.MR)
-	if closeErr := e.closeIneligibleMR(mr, reason); closeErr != nil {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close rejected MR %s: %v\n", mr.ID, closeErr)
+	closeReason := "rejected: " + reason
+	if closeErr := e.closeMRWithReason(mr, closeReason); closeErr != nil {
+		e.failRejectionClose("[Engineer]", mr, closeReason, closeErr)
+		return
 	}
 	_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: push refused for %s — closed (rejected)\n", mr.ID, cerr.Reason)
+}
+
+// failRejectionClose reports a rejection whose close did not take effect, from
+// either automatic editorial-rejection path (rejectReviewedCandidate,
+// rejectEditorialVerdict).
+//
+// The close is what takes the MR out of the merge queue (gt-bsmp). When it
+// fails the MR is still ready, so the rejection is not in force: the diff
+// stays merge-eligible and a re-roll that comes back approve can land it
+// (gt-bveg). Refusal is no longer available — the close has already run and
+// failed — so the remaining lever is the one copyEditorialNotes took for a
+// landing left without its proof (gt-qvxf): record the failure so it
+// aggregates, and escalate loudly. A rejection that did not take must not be
+// a warning line that scrolls past.
+//
+// The next cycle re-reviews the same unchanged head and re-attempts this
+// close, so a transient store failure clears itself; the escalation is what
+// covers the case where it does not, where every later cycle reports the same
+// refusal against a diff om has already rejected.
+func (e *Engineer) failRejectionClose(logPrefix string, mr *MRInfo, closeReason string, closeErr error) {
+	detail := fmt.Sprintf("close MR %s as %q: %v", mr.ID, closeReason, closeErr)
+	_, _ = fmt.Fprintf(e.output, "%s EDITORIAL_REJECT_CLOSE_FAILED: %s — MR still ready, rejected diff still merge-eligible\n", logPrefix, detail)
+	e.recordEditorialRecordFailed(mr, detail)
+	e.escalateToWitness(fmt.Sprintf(
+		"EDITORIAL_REJECT_CLOSE_FAILED: MR %s — %s. The rejection is not in force: the MR is still ready, so a re-roll can still land the diff om rejected. The next cycle retries this close on the same head; if it keeps failing the MR must be dequeued by hand.",
+		mr.ID, detail))
 }
 
 // mrByExactID returns the MR in mrs matching id, or nil when this push does
@@ -279,11 +307,13 @@ func (e *Engineer) recordEditorialFailure(mr *MRInfo, cerr *editorial.Preconditi
 }
 
 // recordEditorialRecordFailed records a failure_class:record_failed receipt
-// for mr — used when a verdict exists but the proof could not be attached
-// to (or published on) the commit that actually landed. Mirrors
-// recordEditorialFailure's precondition receipt but for the class the
-// design doc reserves for this case: "a verdict without proof is the
-// defect class this design removes."
+// for mr — used when a verdict exists but the write that carries it through
+// did not land: the proof could not be attached to (or published on) the
+// commit that actually landed (copyEditorialNotes), or the rejection's close
+// left the MR in the queue (failRejectionClose). Both are the same defect —
+// a verdict with no durable effect — which is the class the design doc
+// reserves: "a verdict without proof is the defect class this design
+// removes." Mirrors recordEditorialFailure's precondition receipt.
 func (e *Engineer) recordEditorialRecordFailed(mr *MRInfo, reason string) {
 	townRoot := filepath.Dir(e.rig.Path)
 	rec := plugin.NewRecorder(townRoot)

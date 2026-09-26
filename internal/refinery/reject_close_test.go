@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -263,5 +264,102 @@ func TestRejectEditorialVerdict_ClosesOnlyOnAVerdict(t *testing.T) {
 				t.Errorf("close_reason = %q, want a 'rejected: ' reason", store.closeReasons["gt-wisp-mr1"])
 			}
 		})
+	}
+}
+
+// TestReviewBatchCandidates_CloseFailure_Escalates is the gt-woxj half of the
+// gt-bsmp guarantee. The close is what takes a rejected MR out of the queue, so
+// a close that fails leaves the rejected diff merge-eligible — and a re-roll
+// that comes back approve can still land it (gt-bveg). That must not be a
+// warning line: it is recorded as a record_failed receipt and escalated to the
+// witness, and the candidate is reported as dropped from the batch but never as
+// rejected, since calling it rejected would claim an effect that did not happen.
+func TestReviewBatchCandidates_CloseFailure_Escalates(t *testing.T) {
+	e, store, candidates := batchRejectFixture(t)
+	e.editorialExec = reviewGateStub(t, map[string]string{"gt-wisp-bbb": "request_changes"})
+	out := &bytes.Buffer{}
+	e.output = out
+
+	store.closeErr["gt-wisp-bbb"] = errors.New("dolt unavailable")
+
+	var escalations []string
+	e.escalateFn = func(msg string) { escalations = append(escalations, msg) }
+
+	recovered := false
+	e.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool {
+		recovered = true
+		return true
+	}
+
+	approved, _, _ := e.reviewBatchCandidates(context.Background(), candidates, "main")
+
+	if len(approved) != 1 || approved[0].ID != "gt-wisp-aaa" {
+		t.Fatalf("expected only gt-wisp-aaa approved, got %v (output:\n%s)", mrIDs(approved), e.output)
+	}
+	if _, closed := store.closeReasons["gt-wisp-bbb"]; closed {
+		t.Fatal("the fixture's close failure did not take: gt-wisp-bbb reported closed")
+	}
+	// Recovery travels with the close that closed the MR (gt-bsmp). With the
+	// close still open the next cycle re-reviews the same head and re-attempts
+	// it, so recovering here would race that retry with a second redispatch.
+	if recovered {
+		t.Error("no dead-worker recovery may run for a close that did not close the MR")
+	}
+
+	if len(escalations) != 1 {
+		t.Fatalf("expected exactly 1 escalation for the failed rejection close, got %d: %v", len(escalations), escalations)
+	}
+	if !strings.Contains(escalations[0], "EDITORIAL_REJECT_CLOSE_FAILED") {
+		t.Errorf("escalation %q must carry the EDITORIAL_REJECT_CLOSE_FAILED marker", escalations[0])
+	}
+	if !strings.Contains(escalations[0], "gt-wisp-bbb") {
+		t.Errorf("escalation %q must name the MR that stayed queued", escalations[0])
+	}
+	if !strings.Contains(out.String(), "EDITORIAL_REJECT_CLOSE_FAILED") {
+		t.Errorf("the failed close must be reported on output, not swallowed (output:\n%s)", out)
+	}
+	if strings.Contains(out.String(), "rejected, dropped from batch") {
+		t.Errorf("an MR whose close failed must not be reported as rejected (output:\n%s)", out)
+	}
+}
+
+// TestRejectEditorialVerdict_CloseFailure_Escalates is the same guarantee on the
+// single-MR path: verdict_not_approve rejects through the same closeTerminalMR,
+// so a close that fails is escalated there too rather than warned.
+func TestRejectEditorialVerdict_CloseFailure_Escalates(t *testing.T) {
+	fakeBDForBatch(t)
+	workDir := t.TempDir()
+	r := &rig.Rig{Name: "test-rig", Path: workDir}
+	e := NewEngineer(r)
+	out := &bytes.Buffer{}
+	e.output = out
+	e.workDir = workDir
+
+	store := newPrepushStore(prepushMRIssue("gt-wisp-mr1", "polecat/nux/gt-src1+abc", "main", "gt-src1"))
+	store.closeErr = errors.New("dolt unavailable")
+	e.beads = beads.NewWithStore(workDir, store)
+
+	var escalations []string
+	e.escalateFn = func(msg string) { escalations = append(escalations, msg) }
+
+	mr := &MRInfo{ID: "gt-wisp-mr1", Branch: "polecat/nux/gt-src1+abc", Target: "main", SourceIssue: "gt-src1"}
+	e.rejectEditorialVerdict(mr, &editorial.PreconditionError{
+		Class: editorial.Precondition, MR: mr.ID, Reason: editorial.ReasonVerdictNotApprove,
+	})
+
+	if _, closed := store.closeReasons["gt-wisp-mr1"]; closed {
+		t.Fatal("the fixture's close failure did not take: gt-wisp-mr1 reported closed")
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("expected exactly 1 escalation for the failed rejection close, got %d: %v", len(escalations), escalations)
+	}
+	if !strings.Contains(escalations[0], "EDITORIAL_REJECT_CLOSE_FAILED") {
+		t.Errorf("escalation %q must carry the EDITORIAL_REJECT_CLOSE_FAILED marker", escalations[0])
+	}
+	if !strings.Contains(escalations[0], "gt-wisp-mr1") {
+		t.Errorf("escalation %q must name the MR that stayed queued", escalations[0])
+	}
+	if strings.Contains(out.String(), "closed (rejected)") {
+		t.Errorf("an MR whose close failed must not be reported as closed (output:\n%s)", out)
 	}
 }

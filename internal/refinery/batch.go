@@ -388,7 +388,9 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	// merge_queue.editorial.review_parallelism concurrent invocations.
 	// No-op (returns batch unchanged) when the rig hasn't set
 	// merge_queue.editorial.required. Members that don't come back approve
-	// are dropped here and left queued, untouched.
+	// are dropped here; a request_changes verdict is also rejected outright
+	// (MR closed, source bead recovered — rejectReviewedCandidate), while an
+	// infra-class result is left queued and untouched for the next cycle.
 	approved, reviewed, notes := e.reviewBatchCandidates(ctx, batch, target)
 	result.Reviewed = reviewed
 	if len(approved) == 0 {

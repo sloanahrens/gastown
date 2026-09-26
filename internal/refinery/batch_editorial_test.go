@@ -28,12 +28,16 @@ type batchReviewStore struct {
 	mu           sync.Mutex
 	issues       map[string]*beadsdk.Issue
 	closeReasons map[string]string
+	// closeErr, when set, makes CloseIssue fail for that MR id — the store-side
+	// half of "the rejection's close did not take effect" (gt-woxj).
+	closeErr map[string]error
 }
 
 func newBatchReviewStore(issues ...*beadsdk.Issue) *batchReviewStore {
 	s := &batchReviewStore{
 		issues:       make(map[string]*beadsdk.Issue, len(issues)),
 		closeReasons: make(map[string]string),
+		closeErr:     make(map[string]error),
 	}
 	for _, issue := range issues {
 		s.issues[issue.ID] = issue
@@ -43,10 +47,14 @@ func newBatchReviewStore(issues ...*beadsdk.Issue) *batchReviewStore {
 
 // CloseIssue backs the reject close (closeTerminalMR -> CloseWithReason) so a
 // batch-review test can observe that a request_changes candidate's MR was
-// closed as rejected, and with what reason (gt-bsmp).
+// closed as rejected, and with what reason (gt-bsmp), or make that close fail
+// (gt-woxj).
 func (s *batchReviewStore) CloseIssue(_ context.Context, id, reason, _, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.closeErr[id]; err != nil {
+		return err
+	}
 	issue, ok := s.issues[id]
 	if !ok {
 		return fmt.Errorf("issue %s not found", id)
