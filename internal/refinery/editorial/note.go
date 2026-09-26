@@ -46,11 +46,23 @@ func ValidVerdict(v string) bool {
 type Note struct {
 	OMVersion    string `json:"om_version"`
 	RubricSHA256 string `json:"rubric_sha256"`
-	Rig          string `json:"rig"`
-	MR           string `json:"mr"`
-	Worker       string `json:"worker"`
-	BaseSHA      string `json:"base_sha"`
-	HeadSHA      string `json:"head_sha"`
+	// ResolvedBackend is om's own report of which review backend it
+	// resolved and invoked for this review (verdictJSON.Backend) — e.g. the
+	// backend argv or a model identifier — copied through verbatim when om
+	// reports it. The backend is deliberately never pinned by the rig
+	// manifest (see Manifest's doc comment): it is operator configuration
+	// by design, precisely so changing it never requires a manifest
+	// re-stamp. This field is instead how a swap becomes visible after the
+	// fact, without pinning anything. Omitted when om's verdict carries no
+	// such field — every om version before this one, and any note written
+	// before this field existed — so those notes round-trip unchanged
+	// (gt-iqr6).
+	ResolvedBackend string `json:"resolved_backend,omitempty"`
+	Rig             string `json:"rig"`
+	MR              string `json:"mr"`
+	Worker          string `json:"worker"`
+	BaseSHA         string `json:"base_sha"`
+	HeadSHA         string `json:"head_sha"`
 	// ReviewedTargetTip is origin/<target>'s own tip, resolved at review
 	// time — distinct from BaseSHA, which pins to the branch's own cut
 	// point (the merge-base) and does not move as target advances past it.

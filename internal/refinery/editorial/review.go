@@ -165,6 +165,13 @@ type verdictJSON struct {
 	Verdict  string    `json:"verdict"`
 	Findings []Finding `json:"findings"`
 
+	// Backend, when om reports it, is copied through onto Note.ResolvedBackend
+	// unchanged — see that field's doc comment for why this is a record, not
+	// a pin (gt-iqr6). Absent from every om version that predates this, in
+	// which case it unmarshals to the zero value and the note simply carries
+	// none.
+	Backend string `json:"backend,omitempty"`
+
 	PriorFindings *struct {
 		Resolved   []string `json:"resolved"`
 		Unresolved []string `json:"unresolved"`
@@ -568,6 +575,7 @@ func Run(ctx context.Context, req ReviewRequest, deps Deps) ReviewResult {
 	note := Note{
 		OMVersion:         manifest.OMBinary.Version,
 		RubricSHA256:      manifest.Rubric.SHA256,
+		ResolvedBackend:   v.Backend,
 		Rig:               req.Rig,
 		MR:                req.MRID,
 		Worker:            req.Worker,

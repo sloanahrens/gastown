@@ -24,6 +24,13 @@ const manifestFileName = ".gastown-harness-manifest.json"
 // Manifest is the deploy manifest's om-relevant subset: the om binary's
 // location, content hash, and version, and the rubric file's location and
 // content hash. Both are asserted by AssertVersion before every review.
+//
+// The review backend command is deliberately absent from this struct: om
+// treats the backend as operator configuration, never repo configuration
+// (a rig's .om.json setting it is ignored, with a warning) — specifically so
+// changing it never requires a manifest re-stamp. Pinning it here would
+// fight that design. See Note.ResolvedBackend for how a backend swap is
+// instead made visible after the fact (gt-iqr6).
 type Manifest struct {
 	OMBinary struct {
 		Path    string `json:"path"`

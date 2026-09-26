@@ -295,6 +295,79 @@ func TestRun_ApproveWritesNoteAndReceiptAndReviewedHead(t *testing.T) {
 	}
 }
 
+// TestRun_ApproveRecordsResolvedBackendOnNote is the gt-iqr6 visibility
+// fix: when om's verdict reports which backend it resolved and invoked, that
+// identity is copied through onto the note, so a backend swap is auditable
+// from refs/notes/om after the fact even though the backend itself is never
+// pinned by the rig manifest (see Manifest's doc comment for why).
+func TestRun_ApproveRecordsResolvedBackendOnNote(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	const wantBackend = "claude-deepseek-pro -p"
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve", Backend: wantBackend})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if result.Note == nil {
+		t.Fatal("expected a note")
+	}
+	if result.Note.ResolvedBackend != wantBackend {
+		t.Errorf("Note.ResolvedBackend = %q, want %q", result.Note.ResolvedBackend, wantBackend)
+	}
+
+	gotNote, err := ReadNote(deps.Git, fixture.head)
+	if err != nil {
+		t.Fatalf("ReadNote: %v", err)
+	}
+	if gotNote.ResolvedBackend != wantBackend {
+		t.Errorf("git note resolved_backend = %q, want %q", gotNote.ResolvedBackend, wantBackend)
+	}
+}
+
+// TestRun_ApproveWithNoBackendReportedLeavesNoteFieldEmpty is the
+// compatibility case: an om version that predates the verdict's Backend
+// field leaves it unset, and the note's ResolvedBackend must stay empty
+// (and so omitted from the JSON) exactly as it did before this field
+// existed.
+func TestRun_ApproveWithNoBackendReportedLeavesNoteFieldEmpty(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.8, Verdict: "approve"})
+			return "", 0, nil
+		},
+	}
+
+	result := Run(context.Background(), fixture.request(), deps)
+
+	if result.Exit != 0 {
+		t.Fatalf("Exit = %d, want 0 (stderr=%q class=%q)", result.Exit, result.Stderr, result.Class)
+	}
+	if result.Note == nil {
+		t.Fatal("expected a note")
+	}
+	if result.Note.ResolvedBackend != "" {
+		t.Errorf("Note.ResolvedBackend = %q, want empty when om reports no backend", result.Note.ResolvedBackend)
+	}
+}
+
 func TestRun_RequestChangesNoReviewedHeadChange(t *testing.T) {
 	fakeBDForReview(t)
 	fixture := newReviewFixture(t)
