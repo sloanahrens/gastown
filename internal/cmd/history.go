@@ -40,6 +40,8 @@ gt history names the floor and gives the verdict:
   - where the bead's commit-snapshot history starts (the dolt_log floor, the
     oldest commit after the repository root that a flatten leaves behind),
   - whether that is after the bead was created, i.e. truncated,
+  - whether the bead's row is in a table Dolt ignores (a wisp), in which case no
+    commit snapshots it, so neither verdict applies and the floor is silent,
   - how many rows survive in the events table, which a flatten preserves, and
     whether they reach back past the floor,
   - the command that reads them.
@@ -62,6 +64,12 @@ type historyReport struct {
 	Database string `json:"database"`
 
 	BeadCreated string `json:"bead_created_at,omitempty"`
+	BeadTable   string `json:"bead_table,omitempty"`
+
+	// Versioned is false when the bead's row lives in a dolt_ignored table. No
+	// commit then carries a snapshot of it, so Truncated stays false for the
+	// opposite reason to a complete history: there was never a snapshot to lose.
+	Versioned bool `json:"versioned"`
 
 	FloorAt      string `json:"dolt_log_floor_at,omitempty"`
 	FloorCommit  string `json:"dolt_log_floor_commit,omitempty"`
@@ -85,9 +93,11 @@ type historyReport struct {
 	RecoveryCommand string `json:"recovery_command"`
 }
 
-// historySnapshot is a bead's stored creation time (issues table).
+// historySnapshot is a bead's stored creation time and the table it was read
+// from: issues for ordinary beads, wisps for the ephemeral ones.
 type historySnapshot struct {
 	Created time.Time
+	Table   string
 	Found   bool
 }
 
@@ -110,13 +120,14 @@ type historyFloor struct {
 }
 
 // historyQuerier is the read surface the verdict needs. Narrowing it to these
-// four facts (rather than passing *sql.DB) keeps the report testable without a
+// five facts (rather than passing *sql.DB) keeps the report testable without a
 // Dolt server and keeps the SQL that follows the schema in one place.
 type historyQuerier interface {
 	floor(ctx context.Context, dbName string) (historyFloor, error)
 	commitCount(ctx context.Context, dbName string) (int64, error)
 	beadCreated(ctx context.Context, dbName, beadID string) (historySnapshot, error)
 	eventSpan(ctx context.Context, dbName, beadID string) (historyEventSpan, error)
+	tableVersioned(ctx context.Context, dbName, table string) (bool, error)
 }
 
 // doltQuerier reads history facts from a live Dolt server.
@@ -209,10 +220,12 @@ func (q doltQuerier) commitCount(ctx context.Context, dbName string) (int64, err
 	return count, nil
 }
 
-// beadCreated reads the bead's creation time. Ordinary beads live in issues and
-// wisps in wisps, so both are consulted: a wisp is a molecule step or a patrol
-// bead, exactly the kind of row whose history gets asked about, and reading only
-// issues would report it as missing from the database.
+// beadCreated reads the bead's creation time and the table it came from.
+// Ordinary beads live in issues and wisps in wisps, so both are consulted: a
+// wisp is a molecule step or a patrol bead, exactly the kind of row whose
+// history gets asked about, and reading only issues would report it as missing
+// from the database. The table is reported back because the two are versioned
+// differently, and the verdict turns on that.
 func (q doltQuerier) beadCreated(ctx context.Context, dbName, beadID string) (historySnapshot, error) {
 	var readErr error
 	for _, table := range []string{"issues", "wisps"} {
@@ -234,12 +247,26 @@ func (q doltQuerier) beadCreated(ctx context.Context, dbName, beadID string) (hi
 		if !created.Valid {
 			continue
 		}
-		return historySnapshot{Created: created.Time, Found: true}, nil
+		return historySnapshot{Created: created.Time, Table: table, Found: true}, nil
 	}
 	if readErr != nil {
 		return historySnapshot{}, readErr
 	}
 	return historySnapshot{}, nil
+}
+
+// tableVersioned reports whether Dolt versions the table a bead's row lives in.
+// A table matched by dolt_ignore is in no commit at all, so dolt_log holds no
+// snapshot of its rows — kept or discarded — and the floor about to be compared
+// against cannot say anything about them (gt-ivlh).
+func (q doltQuerier) tableVersioned(ctx context.Context, dbName, table string) (bool, error) {
+	query := fmt.Sprintf(
+		"SELECT COUNT(*) FROM `%s`.dolt_ignore WHERE ignored = 1 AND ? LIKE pattern", dbName)
+	var matches int
+	if err := q.db.QueryRowContext(ctx, query, table).Scan(&matches); err != nil {
+		return false, fmt.Errorf("reading dolt_ignore for %s: %w", table, err)
+	}
+	return matches == 0, nil
 }
 
 // eventSpan counts a bead's rows in the events table. Wisps are recorded in
@@ -403,6 +430,15 @@ func buildHistoryReport(ctx context.Context, q historyQuerier, dbName, beadID st
 		return nil, fmt.Errorf("%s is not in database %s — nothing to report", beadID, dbName)
 	}
 	report.BeadCreated = formatHistoryTime(snapshot.Created)
+	report.BeadTable = snapshot.Table
+
+	// A premise of the verdict, so an unreadable dolt_ignore fails the command
+	// rather than falling back to the issues answer for a row that may not be in
+	// issues.
+	report.Versioned, err = q.tableVersioned(ctx, dbName, snapshot.Table)
+	if err != nil {
+		return nil, err
+	}
 
 	count, err := q.commitCount(ctx, dbName)
 	if err != nil {
@@ -438,7 +474,12 @@ func buildHistoryReport(ctx context.Context, q historyQuerier, dbName, beadID st
 
 	// The snapshots are truncated exactly when the oldest retained commit that
 	// can carry a snapshot is newer than the bead itself: everything the bead
-	// did before the floor has no snapshot left.
+	// did before the floor has no snapshot left. Neither claim reaches a
+	// dolt_ignored table, whose rows no commit holds: a wisp has no snapshot of
+	// its life to begin with, so a floor date says nothing about it either way.
+	if !report.Versioned {
+		return report, nil
+	}
 	if floor.Found && floor.At.After(snapshot.Created.Add(snapshotSlack)) {
 		report.Truncated = true
 		report.MissingFrom = formatHistoryTime(floor.At)
@@ -499,6 +540,16 @@ func renderHistoryReport(out io.Writer, r *historyReport) error {
 	}
 
 	fmt.Fprintln(out)
+	if !r.Versioned {
+		fmt.Fprintf(out, "  %s this bead's row lives in the %s table, which Dolt is\n",
+			style.Warning.Render("⚠ NOT VERSIONED —"), r.BeadTable)
+		fmt.Fprintf(out, "    configured to ignore, so no commit carries a snapshot of it. The floor\n")
+		fmt.Fprintf(out, "    above has none to truncate, and %s has no\n",
+			style.Dim.Render("bd history "+r.BeadID))
+		fmt.Fprintf(out, "    snapshots of this bead to report — its events are the whole record:\n\n")
+		fmt.Fprintf(out, "    %s\n", style.Info.Render(r.RecoveryCommand))
+		return nil
+	}
 	if !r.Truncated {
 		fmt.Fprintf(out, "  %s the commit snapshots begin at or before this bead was\n",
 			style.Success.Render("✓ COMPLETE —"))
