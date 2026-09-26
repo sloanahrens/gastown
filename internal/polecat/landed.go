@@ -56,12 +56,38 @@ func ProbeWorkLandedOnRef(clonePath, branch, remote string) LandedEvidence {
 	// origin/HEAD; an unresolvable ref then fails the preservation checks
 	// below, which is the fail-closed answer rather than a wrong one.
 	integration := remote + "/" + g.RemoteDefaultBranch()
-	for _, head := range []string{remote + "/" + branch, "refs/heads/" + branch} {
-		if refPreservedBy(g, head, integration) {
-			return LandedEvidence{Verified: true, Ref: integration}
-		}
+	if refPreservedBy(g, remote+"/"+branch, integration) {
+		return LandedEvidence{Verified: true, Ref: integration}
+	}
+	// The local branch stands in only for a submitted branch already deleted
+	// from origin after landing. A local ref that never diverged from base --
+	// left empty by a polecat that made no commits, or a stale/unrelated
+	// pointer sitting somewhere in integration's own history -- is its own
+	// merge-base with integration, so IsAncestor (and the merge-tree no-op
+	// check behind it) reports "preserved" whether the ref carries real work
+	// or none at all. hasDivergedFrom rules that degenerate case out before
+	// the local branch is trusted as landed-work evidence.
+	localHead := "refs/heads/" + branch
+	if hasDivergedFrom(g, localHead, integration) && refPreservedBy(g, localHead, integration) {
+		return LandedEvidence{Verified: true, Ref: integration}
 	}
 	return LandedEvidence{}
+}
+
+// hasDivergedFrom reports whether head carries any commit of its own beyond
+// its merge-base with ref -- i.e. it is not simply a pointer sitting inside
+// ref's own history with nothing unique to it. An unresolvable head or ref is
+// "no divergence", the fail-closed default this package uses throughout.
+func hasDivergedFrom(g *git.Git, head, ref string) bool {
+	headSHA, err := g.Rev(head)
+	if err != nil {
+		return false
+	}
+	base, err := g.MergeBase(head, ref)
+	if err != nil {
+		return false
+	}
+	return headSHA != base
 }
 
 // refPreservedBy reports whether head's work is contained in ref: ancestry

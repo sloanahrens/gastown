@@ -146,6 +146,36 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		}
 	})
 
+	t.Run("empty local branch is not landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		// The branch is created but never committed to, and never pushed --
+		// exactly a polecat that made no commits. The local ref sits right on
+		// main, which makes it a trivial ancestor of integration; that must
+		// not read as landed work.
+		runLandedGit(t, repo.work, "checkout", "-b", branch)
+
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a branch with no commits of its own", got)
+		}
+	})
+
+	t.Run("stale local branch behind main is not landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		// A local ref left over from an earlier point in main's own history,
+		// never advanced and never pushed under this name. It is an ancestor
+		// of the current integration branch by construction, but that is
+		// main's own history, not this branch's work.
+		runLandedGit(t, repo.work, "branch", branch)
+		writeLandedFile(t, filepath.Join(repo.work, "unrelated.txt"), "unrelated main work\n")
+		runLandedGit(t, repo.work, "add", ".")
+		runLandedGit(t, repo.work, "commit", "-m", "unrelated main commit")
+		runLandedGit(t, repo.work, "push", "origin", "main")
+
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a stale branch with no commits of its own", got)
+		}
+	})
+
 	t.Run("dirty worktree does not change the answer", func(t *testing.T) {
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
