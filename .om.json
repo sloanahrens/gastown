@@ -42,6 +42,11 @@
       "name": "docs-and-comments",
       "weight": 2,
       "guidance": "A change that alters behaviour updates every doc and comment that describes it. New or edited docs and comments follow the rules R1-R13 in the repository context (docs/writing-for-agents.md); cite the rule id in a finding. A stale or contradicted line in an agent-facing file (AGENTS.md, internal/templates/polecat-CLAUDE.md, a directive, a formula description, a plugin.md, docs/HOOKS.md) is major; elsewhere minor. This criterion moves the score; it does not block alone."
+    },
+    {
+      "name": "instruction-proliferation",
+      "weight": 2,
+      "guidance": "A change that adds a second statement of an instruction, convention, or rule already stated in the agent-facing surfaces docs-and-comments names is a finding, even when the two copies agree today: the offence is the copy, not the disagreement, and the divergence it permits is charged to whichever later MR happens to touch one of them. R2 in docs/writing-for-agents.md is the rule this violates; cite the rule id, the existing copy, and whether the new copy points at it as its source of truth. An added copy is minor; a copy that also contradicts its original is major. This criterion moves the score; it does not block alone."
     }
   ]
 }
