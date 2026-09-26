@@ -265,7 +265,7 @@ type mqPostMergeGit interface {
 	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
 	CleanBaseRef(remote, defaultBranch, target string) string
 	FetchPrune(remote string) error
-	HasOpenPullRequest(ref git.PullRequestRef) bool
+	PullRequestProtection(ref git.PullRequestRef) (git.PRProtection, error)
 	Rev(ref string) (string, error)
 	MergeBase(a, b string) (string, error)
 	DiffNameOnly(base, head string) ([]string, error)
@@ -293,6 +293,14 @@ type mqPostMergeBranchCleanup struct {
 	AlreadyGone   bool
 	RemoteDeleted bool
 	LocalDeleted  bool
+
+	// PRUnknown reports that the open-PR guard's lookup itself failed or was
+	// ambiguous rather than finding an open PR (gt-ghpk): the branch is still
+	// left in place, but the operator needs to hear that the PR state
+	// couldn't be determined, not that a PR exists. PRLookupErr is the
+	// lookup failure.
+	PRUnknown   bool
+	PRLookupErr error
 
 	// LeftForOwner reports a branch the refinery may not push to (anything
 	// but polecat/* and integration/*), so its remote delete was never
@@ -1042,6 +1050,8 @@ func printMQPostMergeResult(w io.Writer, result *refinery.PostMergeResult, branc
 		fmt.Fprintf(w, "  %s Branch delete disabled by config\n", style.Dim.Render("○"))
 	} else if branchCleanup.OpenPR {
 		fmt.Fprintf(w, "  %s Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), mr.Branch)
+	} else if branchCleanup.PRUnknown {
+		fmt.Fprintf(w, "  %s PR state unknown for %s, branch left in place (gas-fk4): %v\n", style.Dim.Render("○"), mr.Branch, branchCleanup.PRLookupErr)
 	} else if branchCleanup.AlreadyGone {
 		fmt.Fprintf(w, "  %s Remote branch already absent: %s\n", style.Dim.Render("○"), mr.Branch)
 	} else if branchCleanup.LeftForOwner {
@@ -1069,6 +1079,8 @@ func printMQPostMergeOrphan(w io.Writer, cleanup mqPostMergeBranchCleanup) {
 		fmt.Fprintf(w, "  %s Remote branch already absent\n", style.Dim.Render("○"))
 	case cleanup.OpenPR:
 		fmt.Fprintf(w, "  %s Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), cleanup.Branch)
+	case cleanup.PRUnknown:
+		fmt.Fprintf(w, "  %s PR state unknown for %s, branch left in place (gas-fk4): %v\n", style.Dim.Render("○"), cleanup.Branch, cleanup.PRLookupErr)
 	case cleanup.RemoteDeleted:
 		fmt.Fprintf(w, "  %s Deleted remote branch: %s (preserved on %s)\n", style.Success.Render("✓"), cleanup.Branch, cleanup.Target)
 	}
@@ -1606,9 +1618,17 @@ func cleanupMQPostMergeBranch(rigPath string, rigGit mqPostMergeGit, mr *refiner
 
 	// Deleting a branch with an open PR causes GitHub to auto-close the PR as
 	// "closed" (not "merged"), destroying the PR audit trail. (gas-fk4)
-	if rigGit.HasOpenPullRequest(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: cleanup.Branch, HeadSHA: expectedHead}) {
+	// A failed or ambiguous lookup fails closed the same way an open PR does
+	// (Unknown), but it is reported as an unresolved lookup, not a claimed
+	// open PR the operator would go hunt for and never find (gt-ghpk).
+	prState, prErr := rigGit.PullRequestProtection(git.PullRequestRef{URL: mr.PRURL, Number: mr.PRNumber, Branch: cleanup.Branch, HeadSHA: expectedHead})
+	switch prState {
+	case git.PRProtectionOpen:
 		cleanup.OpenPR = true
-	} else {
+	case git.PRProtectionUnknown:
+		cleanup.PRUnknown = true
+		cleanup.PRLookupErr = prErr
+	default:
 		remoteTip, err := rigGit.PushRemoteBranchTip("origin", cleanup.Branch)
 		if err != nil {
 			return cleanup, fmt.Errorf("remote branch delete %s: read remote branch tip: %w", cleanup.Branch, err)
