@@ -1433,6 +1433,25 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	var sourceBD *beads.Beads
 	if exitType == ExitCompleted {
 		if branch == defaultBranch || branch == "master" {
+			// A conflict-resolution pass ends on the base branch by design: it
+			// submits no branch of its own, because its work is a rewritten head
+			// already pushed to the branch of an existing MR
+			// (mol-polecat-conflict-resolve, cleanup-and-exit). Rejecting it here
+			// returns before notifyWitness, so the wake for the MR the pass just
+			// released never fires (gt-rv8h, gt-tne1). DEFERRED is not this exit:
+			// it files a finished pass as "stuck".
+			if task := conflictResolutionCompletionTask(cwd, agentBeadID, issueID); task != nil {
+				if !beads.IssueStatus(task.Status).IsTerminal() {
+					// Completing now would walk away from a task the refinery is
+					// still blocked on. Say so, rather than reporting a merge-queue
+					// rejection the polecat cannot act on.
+					return fmt.Errorf("cannot complete %s: conflict-resolution task %s is still open, and its MR stays blocked until it closes\nClose it first: bd close %s --reason=\"resolved conflicts\"",
+						defaultBranch, task.ID, task.ID)
+				}
+				fmt.Printf("%s Conflict-resolution completion on %s — no branch of its own to submit\n", style.Bold.Render("→"), defaultBranch)
+				fmt.Printf("  %s is closed; the refinery wake below names the MR it released.\n", task.ID)
+				goto notifyWitness
+			}
 			return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
 		}
 
@@ -2655,17 +2674,7 @@ notifyWitness:
 		if wakeBD == nil {
 			wakeBD = beads.New(cwd)
 		}
-		// issueID is branch-derived unless --issue was passed, and a conflict
-		// polecat may still be on the resolved branch (whose name carries the
-		// source issue, not the task). The agent bead's hook_bead is the other
-		// candidate for "the conflict task this completion just finished".
-		wakeCandidates := []string{issueID}
-		if agentBeadID != "" {
-			if _, fields, err := beads.New(cwd).ForAgentBead().GetAgentBead(agentBeadID); err == nil && fields != nil {
-				wakeCandidates = append(wakeCandidates, fields.HookBead)
-			}
-		}
-		wakeRefineryForReadyConflict(wakeBD.Show, rigName, wakeCandidates...)
+		wakeRefineryForReadyConflict(wakeBD.Show, rigName, conflictResolutionCandidates(cwd, agentBeadID, issueID)...)
 	}
 
 	// Write completion metadata to agent bead for audit trail.

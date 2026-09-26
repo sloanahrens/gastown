@@ -328,10 +328,10 @@ Should show either:
 
 [[steps]]
 id = "cleanup-and-exit"
-title = "Clean up and close task"
+title = "Clean up and signal completion"
 needs = ["release-slot"]
 description = """
-Clean up workspace and close the conflict resolution task.
+Clean up the workspace and signal completion.
 
 **1. Clean up local branch:**
 ```bash
@@ -347,7 +347,12 @@ git status                  # Clean
 git stash list              # Empty
 ```
 
-**3. Close this task:**
+**3. Confirm this task is closed:**
+```bash
+bd show {{task}}            # Status: closed — the close-beads step did this
+```
+
+If it is still open, its MR is still blocked. Close it before continuing:
 ```bash
 bd close {{task}} --reason="Conflicts resolved on {{branch}}"
 ```
@@ -356,6 +361,17 @@ bd close {{task}} --reason="Conflicts resolved on {{branch}}"
 ```bash
 gt done
 ```
+
+Plain `gt done`, with no status flag. This pass submits no branch of its own —
+its work is the rewritten head you already pushed to {{branch}} — so ending on
+{{base_branch}} is expected: gt done recognizes the closed conflict task on your
+hook, skips the merge queue, and runs the completion handshake. That handshake
+is the only thing that wakes the Refinery for the MR the closed task released
+(gt-rv8h, gt-tne1).
+
+Do not substitute `gt done --status DEFERRED`. It files a finished
+conflict-resolution pass as "stuck" on your agent bead, and since {{task}} was
+closed in the close-beads step it preserves nothing.
 
 You're now recyclable. The Witness knows you've completed conflict resolution.
 
