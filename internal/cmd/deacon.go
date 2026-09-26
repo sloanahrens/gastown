@@ -1309,6 +1309,10 @@ func runDeaconStaleHooks(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scanning stale hooks: %w", err)
 	}
 
+	// Surface store errors regardless of what the scan found: a store error
+	// means this is a partial sweep, and that must never read as a clean one.
+	printStoreErrors(result)
+
 	// Print summary
 	if result.TotalHooked == 0 {
 		fmt.Printf("%s No hooked beads found\n", style.Dim.Render("○"))
@@ -1388,14 +1392,22 @@ func runDeaconStaleHooks(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// printHookStoresSearched names every bead store the scan queried, and every
-// store it could not. Without it, "no hooked beads" reads as "nothing is wedged
-// anywhere" even when the scan never looked at the store where the bead lives.
+// printHookStoresSearched names every bead store the scan queried. Without it,
+// "no hooked beads" reads as "nothing is wedged anywhere" even when the scan
+// never looked at the store where the bead lives.
 func printHookStoresSearched(result *deacon.StaleHookScanResult) {
 	if len(result.StoresSearched) > 0 {
 		fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("Searched %d store(s): %s",
 			len(result.StoresSearched), strings.Join(result.StoresSearched, ", "))))
 	}
+}
+
+// printStoreErrors surfaces every store the scan could not query. Called
+// unconditionally after every scan (not just the "no beads found" paths): a
+// store error means the result is a partial sweep, and an operator seeing
+// "no stale beads" must not read that as a clean sweep of every store when
+// one of them was never successfully queried.
+func printStoreErrors(result *deacon.StaleHookScanResult) {
 	for _, name := range slices.Sorted(maps.Keys(result.StoreErrors)) {
 		style.PrintWarning("store %s could not be queried: %s", name, result.StoreErrors[name])
 	}
