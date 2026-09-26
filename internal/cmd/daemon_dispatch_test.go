@@ -253,3 +253,170 @@ func TestRigMergeQueueDepthReadsRigRootMergeQueue(t *testing.T) {
 		t.Errorf("ready = %d, want 5", ready)
 	}
 }
+
+// testServerMetadata names a database the way a tracked .beads/metadata.json
+// does in gastown's server mode.
+const testServerMetadata = `{"dolt_mode":"server","dolt_database":"beads_testrig"}`
+
+func mkdirTestDir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+}
+
+// TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork reproduces gt-ka00.
+//
+// The guard read beads.ResolveBeadsDir against "", which that function never
+// returns, so it never fired: an uninitialized rig reached the store open,
+// failed it, and dispatchRigPictures turned that into an error for the whole
+// dispatch picture, every rig included.
+//
+// The fixture is what an uninitialized rig actually looks like on disk. The
+// repo checkout supplies .beads/ (.beads/config.yaml and friends are tracked),
+// so the directory exists; what is missing is the database under it.
+func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	mkdirTestDir(t, beadsDir)
+	writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
+
+	issues, err := readyIssuesUnlimited(rigPath)
+	if err != nil {
+		t.Fatalf("uninitialized rig is no ready work, not a read failure: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Errorf("issues = %d, want 0 from a rig with no database", len(issues))
+	}
+}
+
+// A redirect whose target was never created is the same empty rig by another
+// route: ResolveBeadsDir follows it out of the rig and lands somewhere with no
+// database. It must be absorbed for the same reason, not fail the check.
+func TestReadyIssuesUnlimited_DanglingRedirectHasNoReadyWork(t *testing.T) {
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	mkdirTestDir(t, beadsDir)
+	writeTestFile(t, filepath.Join(beadsDir, "redirect"), "mayor/rig/.beads\n")
+
+	issues, err := readyIssuesUnlimited(rigPath)
+	if err != nil {
+		t.Fatalf("a redirect to a missing database is no ready work, not a read failure: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Errorf("issues = %d, want 0 from a dangling redirect", len(issues))
+	}
+}
+
+// TestHasBeadsDatabase pins the guard's contract: a rig has a database when one
+// is reachable under the resolved beads directory, not when a tracked
+// metadata.json merely names one.
+func TestHasBeadsDatabase(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, townRoot, rigPath string)
+		want  bool
+	}{
+		{
+			name:  "empty .beads directory",
+			setup: func(*testing.T, string, string) {},
+			want:  false,
+		},
+		{
+			name: "tracked config.yaml without a database",
+			setup: func(t *testing.T, _, rigPath string) {
+				writeTestFile(t, filepath.Join(rigPath, ".beads", "config.yaml"), "status.custom: []\n")
+			},
+			want: false,
+		},
+		{
+			name: "embedded dolt directory",
+			setup: func(t *testing.T, _, rigPath string) {
+				mkdirTestDir(t, filepath.Join(rigPath, ".beads", "dolt"))
+			},
+			want: true,
+		},
+		{
+			// bd's embedded data root. A .beads directory carrying it needs no
+			// metadata.json, so testing metadata.json alone would read the rig
+			// as empty and report no ready work.
+			name: "embeddeddolt directory",
+			setup: func(t *testing.T, _, rigPath string) {
+				mkdirTestDir(t, filepath.Join(rigPath, ".beads", "embeddeddolt", "beads", ".dolt"))
+			},
+			want: true,
+		},
+		{
+			// A same-named regular file is not a database, and accepting it
+			// would put the rig back on the store-open path.
+			name: "dolt as a regular file",
+			setup: func(t *testing.T, _, rigPath string) {
+				writeTestFile(t, filepath.Join(rigPath, ".beads", "dolt"), "")
+			},
+			want: false,
+		},
+		{
+			name: "unparseable metadata.json",
+			setup: func(t *testing.T, _, rigPath string) {
+				writeTestFile(t, filepath.Join(rigPath, ".beads", "metadata.json"), "{not json")
+			},
+			want: true,
+		},
+		{
+			name: "metadata.json with no server database reference",
+			setup: func(t *testing.T, _, rigPath string) {
+				writeTestFile(t, filepath.Join(rigPath, ".beads", "metadata.json"), `{"dolt_mode":"embedded"}`)
+			},
+			want: true,
+		},
+		{
+			name: "server mode naming a database the server has",
+			setup: func(t *testing.T, townRoot, rigPath string) {
+				mkdirTestDir(t, filepath.Join(townRoot, ".dolt-data", "beads_testrig"))
+				writeTestFile(t, filepath.Join(rigPath, ".beads", "metadata.json"), testServerMetadata)
+			},
+			want: true,
+		},
+		{
+			// The documented stale-metadata.json case: the file is tracked from
+			// a workspace whose Dolt server had the database, this one does not.
+			// It is an uninitialized rig, not a read failure.
+			name: "server mode naming a database the server lacks",
+			setup: func(t *testing.T, _, rigPath string) {
+				writeTestFile(t, filepath.Join(rigPath, ".beads", "metadata.json"), testServerMetadata)
+			},
+			want: false,
+		},
+		{
+			name: "server mode with no town to look in",
+			setup: func(t *testing.T, townRoot, rigPath string) {
+				if err := os.RemoveAll(filepath.Join(townRoot, "mayor")); err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, filepath.Join(rigPath, ".beads", "metadata.json"), testServerMetadata)
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			townRoot := t.TempDir()
+			mkdirTestDir(t, filepath.Join(townRoot, "mayor"))
+			writeTestFile(t, filepath.Join(townRoot, "mayor", "town.json"), "{}\n")
+			rigPath := filepath.Join(townRoot, "testrig")
+			mkdirTestDir(t, filepath.Join(rigPath, ".beads"))
+			tt.setup(t, townRoot, rigPath)
+
+			if got := hasBeadsDatabase(filepath.Join(rigPath, ".beads")); got != tt.want {
+				t.Errorf("hasBeadsDatabase() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("missing directory", func(t *testing.T) {
+		if hasBeadsDatabase(filepath.Join(t.TempDir(), ".beads")) {
+			t.Error("hasBeadsDatabase() = true for a directory that does not exist")
+		}
+	})
+}
