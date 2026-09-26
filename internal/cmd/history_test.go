@@ -21,6 +21,10 @@ type stubHistoryQuerier struct {
 	createdFact historySnapshot
 	spanFact    historyEventSpan
 	spanErr     error
+	// ignoredTable stands in for a dolt_ignore entry: set it to the table the
+	// createdFact came from to make the stub report that table unversioned.
+	ignoredTable string
+	versionedErr error
 }
 
 func (s stubHistoryQuerier) floor(context.Context, string) (historyFloor, error) {
@@ -43,6 +47,13 @@ func (s stubHistoryQuerier) eventSpan(context.Context, string, string) (historyE
 	return s.spanFact, nil
 }
 
+func (s stubHistoryQuerier) tableVersioned(_ context.Context, _, table string) (bool, error) {
+	if s.versionedErr != nil {
+		return false, s.versionedErr
+	}
+	return table != s.ignoredTable, nil
+}
+
 func mustTime(t *testing.T, value string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.RFC3339, value)
@@ -57,7 +68,11 @@ func mustTime(t *testing.T, value string) time.Time {
 func gtDe6bStub(t *testing.T) stubHistoryQuerier {
 	t.Helper()
 	return stubHistoryQuerier{
-		createdFact: historySnapshot{Created: mustTime(t, "2026-09-09T19:46:58Z"), Found: true},
+		createdFact: historySnapshot{
+			Created: mustTime(t, "2026-09-09T19:46:58Z"),
+			Table:   "issues",
+			Found:   true,
+		},
 		floorFact: historyFloor{
 			At:      mustTime(t, "2026-09-19T08:03:13Z"),
 			Commit:  "abcdef1234567890",
@@ -131,6 +146,101 @@ func TestHistoryReportCompleteInsideWindow(t *testing.T) {
 	// caller comparing two beads' verdicts needs both floors.
 	if report.FloorAt == "" {
 		t.Error("want FloorAt reported even when this bead is inside the window")
+	}
+}
+
+// wispStub is a wisp bead as the database reports one: the row came from wisps,
+// which dolt_ignore keeps out of every commit, and its trail is in wisp_events.
+func wispStub(t *testing.T) stubHistoryQuerier {
+	t.Helper()
+	stub := gtDe6bStub(t)
+	stub.createdFact.Table = "wisps"
+	stub.ignoredTable = "wisps"
+	return stub
+}
+
+// A wisp has no snapshot in any commit, so no floor can make its history
+// complete: bd history reports nothing for it. Reading the floor as the snapshot
+// start turns "nothing was ever recorded" into "everything was kept", which is
+// the wrong verdict this pins (gt-ivlh).
+func TestHistoryReportWispIsNotComplete(t *testing.T) {
+	t.Parallel()
+	stub := wispStub(t)
+	// Created after the floor: the case the pre-fix verdict called COMPLETE.
+	stub.createdFact.Created = mustTime(t, "2026-09-20T00:00:00Z")
+
+	report, err := buildHistoryReport(context.Background(), stub, "gt", "gt-wisp-qnu1")
+	if err != nil {
+		t.Fatalf("buildHistoryReport: %v", err)
+	}
+	if report.Versioned {
+		t.Error("want Versioned false for a row in the dolt_ignored wisps table")
+	}
+	if report.Truncated {
+		t.Error("a wisp is not truncated: no commit ever held a snapshot of it")
+	}
+	if report.MissingFrom != "" || report.MissingSpan != "" {
+		t.Errorf("an unversioned bead must not report a missing span: %q / %q",
+			report.MissingFrom, report.MissingSpan)
+	}
+	if report.BeadTable != "wisps" {
+		t.Errorf("BeadTable = %q, want wisps", report.BeadTable)
+	}
+	// The floor stays a reported fact: it is a property of the database, and a
+	// caller comparing beads needs it whichever table they live in.
+	if report.FloorAt == "" {
+		t.Error("want FloorAt reported for a wisp too")
+	}
+
+	var out bytes.Buffer
+	if err := renderHistoryReport(&out, report); err != nil {
+		t.Fatalf("renderHistoryReport: %v", err)
+	}
+	rendered := out.String()
+	if strings.Contains(rendered, "COMPLETE") {
+		t.Errorf("wisp report claims COMPLETE:\n%s", rendered)
+	}
+	for _, want := range []string{"NOT VERSIONED", "wisps", "bd history gt-wisp-qnu1 --events"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("wisp report does not mention %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// The other direction: a wisp older than the floor loses nothing to the flatten
+// either — the span the floor cut was never inside a commit — so reporting it as
+// truncated invents a loss and points at a recovery that recovers nothing.
+func TestHistoryReportWispOlderThanFloorIsNotTruncated(t *testing.T) {
+	t.Parallel()
+	// gtDe6bStub's bead predates its floor by 9d12h.
+	report, err := buildHistoryReport(context.Background(), wispStub(t), "gt", "gt-wisp-old")
+	if err != nil {
+		t.Fatalf("buildHistoryReport: %v", err)
+	}
+	if report.Truncated {
+		t.Errorf("want not Truncated: the floor cannot truncate rows no commit holds (invented loss %s)",
+			report.MissingSpan)
+	}
+
+	var out bytes.Buffer
+	if err := renderHistoryReport(&out, report); err != nil {
+		t.Fatalf("renderHistoryReport: %v", err)
+	}
+	if rendered := out.String(); strings.Contains(rendered, "TRUNCATED") {
+		t.Errorf("wisp report claims TRUNCATED:\n%s", rendered)
+	}
+}
+
+// Table versioning is a premise of the verdict, so an unreadable dolt_ignore
+// fails the command rather than falling through to the issues answer for a row
+// that may not be in issues.
+func TestHistoryReportUnreadableDoltIgnoreFails(t *testing.T) {
+	t.Parallel()
+	stub := gtDe6bStub(t)
+	stub.versionedErr = errStubVersioning
+
+	if _, err := buildHistoryReport(context.Background(), stub, "gt", "gt-de6b"); err == nil {
+		t.Fatal("want an error when dolt_ignore cannot be read")
 	}
 }
 
@@ -489,3 +599,6 @@ func TestHistoryCommandRegistered(t *testing.T) {
 
 // errStubEvents stands in for a failed events query.
 var errStubEvents = errors.New("events table unavailable")
+
+// errStubVersioning stands in for a failed dolt_ignore read.
+var errStubVersioning = errors.New("dolt_ignore unavailable")
