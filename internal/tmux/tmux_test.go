@@ -2774,6 +2774,153 @@ func TestIsBusy_LivePane(t *testing.T) {
 	}
 }
 
+// newBusyTestSession creates a session whose harness identity is pinned, so
+// what IsBusy does with a marker (busyMarkerStalenessApplies) cannot depend on
+// the environment the test binary happened to run in. GT_ROOT is a throwaway
+// directory for the same reason: harness resolution falls back to the process
+// environment's town root, which in a real Gas Town checkout is the live one.
+func newBusyTestSession(t *testing.T, tm *Tmux, session, agent string) {
+	t.Helper()
+
+	_ = tm.KillSession(session)
+	if err := tm.NewSession(session, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(session) })
+
+	if err := tm.SetEnvironment(session, "GT_ROOT", t.TempDir()); err != nil {
+		t.Fatalf("SetEnvironment GT_ROOT: %v", err)
+	}
+	if err := tm.SetEnvironment(session, "GT_AGENT", agent); err != nil {
+		t.Fatalf("SetEnvironment GT_AGENT: %v", err)
+	}
+}
+
+// waitForBusyMarker blocks until IsBusy reads the session as busy, so a test
+// that renders a marker measures the age of a marker the pane is actually
+// showing rather than racing the shell that drew it.
+func waitForBusyMarker(t *testing.T, tm *Tmux, session string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !tm.IsBusy(session) {
+		if time.Now().After(deadline) {
+			out, _ := tm.CapturePane(session, busyCaptureLines)
+			t.Fatalf("IsBusy did not detect busy marker within timeout; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestIsBusy_LivePane_StaleIndicatorExpires covers both sides of gt-z4gs's
+// staleness threshold on a Claude Code pane: a marker left over from a turn
+// that already ended stops reading as busy once the pane has been silent past
+// isBusyStaleAfter, and still reads as busy before that.
+func TestIsBusy_LivePane_StaleIndicatorExpires(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-is-busy-stale-" + t.Name()
+
+	// tmux's #{window_activity} is a whole-second Unix timestamp, so the
+	// threshold needs enough headroom above 1s that rounding can't make a
+	// genuinely fresh marker read as stale.
+	origStaleAfter := isBusyStaleAfter
+	isBusyStaleAfter = 4 * time.Second
+	defer func() { isBusyStaleAfter = origStaleAfter }()
+
+	newBusyTestSession(t, tm, session, "claude")
+
+	if err := tm.SendKeys(session, "printf 'filler\\n✵ Leavening… (3m 17s · ↓ 14.1k tokens)\\n'"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	waitForBusyMarker(t, tm, session)
+
+	// Nothing writes to the pane again, so window activity freezes at the
+	// printf above while the marker stays on screen — the shape a finished
+	// turn leaves behind when its status line never gets painted over.
+	//
+	// A quarter of the window in, the other three quarters are slack for a
+	// slow host: the marker is still young enough to trust either way.
+	time.Sleep(isBusyStaleAfter / 4)
+	if !tm.IsBusy(session) {
+		out, _ := tm.CapturePane(session, busyCaptureLines)
+		t.Fatalf("IsBusy on a pane silent for a quarter of isBusyStaleAfter (%s) = false, want true (marker still young); pane:\n%s", isBusyStaleAfter, out)
+	}
+
+	time.Sleep(isBusyStaleAfter)
+	if tm.IsBusy(session) {
+		out, _ := tm.CapturePane(session, busyCaptureLines)
+		t.Fatalf("IsBusy on a pane silent past isBusyStaleAfter (%s) = true, want false (stale indicator); pane:\n%s", isBusyStaleAfter, out)
+	}
+}
+
+// TestIsBusy_LivePane_RefreshedMarkerStaysBusy is the other half of
+// TestIsBusy_LivePane_StaleIndicatorExpires: a pane that keeps repainting
+// under its marker — what a genuinely working agent does — stays busy for as
+// long as it repaints, however long isBusyStaleAfter is. What the discount
+// measures is the pane going quiet, not the elapsed age of the marker.
+func TestIsBusy_LivePane_RefreshedMarkerStaysBusy(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-is-busy-refresh-" + t.Name()
+
+	origStaleAfter := isBusyStaleAfter
+	isBusyStaleAfter = 2 * time.Second
+	defer func() { isBusyStaleAfter = origStaleAfter }()
+
+	newBusyTestSession(t, tm, session, "claude")
+
+	// The shell repaints the spinner in place with an advancing elapsed
+	// counter, the way Claude Code's status line does, so the pane is never
+	// silent while the marker is up.
+	if err := tm.SendKeys(session, `i=0; while :; do i=$((i+1)); printf '\r✵ Leavening… (3m %02ds · ↓ 14.1k tokens)' "$i"; sleep 0.2; done`); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	waitForBusyMarker(t, tm, session)
+
+	// Watch past two whole thresholds. An implementation that discounts a
+	// marker by age rather than by the pane having gone quiet fails here.
+	start := time.Now()
+	for deadline := start.Add(2 * isBusyStaleAfter); time.Now().Before(deadline); {
+		if !tm.IsBusy(session) {
+			out, _ := tm.CapturePane(session, busyCaptureLines)
+			t.Fatalf("IsBusy on a pane repainting under its marker = false after %s, want true; pane:\n%s", time.Since(start).Round(time.Second), out)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// TestIsBusy_LivePane_NonClaudeStaleMarkerStaysBusy is the gt-cyyg guard on
+// the staleness discount: only a Claude Code marker is discounted for age
+// (busyMarkerStalenessApplies), because only Claude Code's working panes were
+// measured repainting. A harness that may sit silent under its marker while it
+// works — 'esc to interrupt' is Codex and Gemini's marker (see
+// busyIndicators) — keeps reading busy however long the pane is quiet, or
+// --mode=immediate would type into a running tool call.
+func TestIsBusy_LivePane_NonClaudeStaleMarkerStaysBusy(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-is-busy-codex-" + t.Name()
+
+	origStaleAfter := isBusyStaleAfter
+	isBusyStaleAfter = 2 * time.Second
+	defer func() { isBusyStaleAfter = origStaleAfter }()
+
+	newBusyTestSession(t, tm, session, "codex")
+
+	// The marker is split across a printf verb so the shell's echo of the
+	// command does not itself carry it: the busy read below must come from the
+	// marker the command printed, not from its own text on screen.
+	if err := tm.SendKeys(session, `printf 'filler\nesc to in%s\n' terrupt`); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	waitForBusyMarker(t, tm, session)
+
+	time.Sleep(isBusyStaleAfter + 1500*time.Millisecond)
+
+	if !tm.IsBusy(session) {
+		out, _ := tm.CapturePane(session, busyCaptureLines)
+		t.Fatalf("IsBusy on a silent pane showing a non-Claude marker = false, want true (only Claude Code markers are discounted for age); pane:\n%s", out)
+	}
+}
+
 // TestIsBusy_LivePane_IgnoresQuotedSpinnerInTranscript reproduces gt-dq6pi: the
 // mayor read BUSY forever because a relayed nudge earlier in its transcript
 // quoted another pane's live spinner text ("Sautéing… 8m16s · ↓14.6k tokens").

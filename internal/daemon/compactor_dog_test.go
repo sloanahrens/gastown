@@ -74,10 +74,11 @@ func TestCompactorDogFiresAcrossRestarts(t *testing.T) {
 	}()
 
 	// The cycle itself needs Dolt; the subject here is the schedule.
-	compactorDogCycleFn = func(*Daemon) {
+	compactorDogCycleFn = func(*Daemon) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		runs = append(runs, compactorDogNow())
+		return true
 	}
 
 	start := time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC)
@@ -130,10 +131,11 @@ func TestCompactorDogRunsWhenLastRunStateUnreadable(t *testing.T) {
 
 	origCycle := compactorDogCycleFn
 	defer func() { compactorDogCycleFn = origCycle }()
-	compactorDogCycleFn = func(*Daemon) {
+	compactorDogCycleFn = func(*Daemon) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		ran = true
+		return true
 	}
 
 	d := compactorDogTestDaemon(townRoot, &buf)
@@ -170,10 +172,11 @@ func TestCompactorDogSkipsWhenNotDue(t *testing.T) {
 		compactorDogCycleFn = origCycle
 		compactorDogNow = origNow
 	}()
-	compactorDogCycleFn = func(*Daemon) {
+	compactorDogCycleFn = func(*Daemon) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		ran = true
+		return true
 	}
 	compactorDogNow = func() time.Time { return now }
 
@@ -195,6 +198,54 @@ func TestCompactorDogSkipsWhenNotDue(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "not due") {
 		t.Errorf("the not-due decision is not logged; log:\n%s", buf.String())
+	}
+}
+
+// TestCompactorDogFailedCycleNotRecorded is the regression test for gt-4uxs: a
+// cycle that finds nothing to inspect (or fails every inspection) must not be
+// recorded as a completed run. Recording it anyway would hide the failure
+// behind the full 24h interval before the next attempt, instead of retrying on
+// the next 15-minute check.
+func TestCompactorDogFailedCycleNotRecorded(t *testing.T) {
+	townRoot := t.TempDir()
+
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	cycles := 0
+
+	origCycle := compactorDogCycleFn
+	defer func() { compactorDogCycleFn = origCycle }()
+	compactorDogCycleFn = func(*Daemon) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		cycles++
+		return false
+	}
+
+	d := compactorDogTestDaemon(townRoot, &buf)
+
+	// Two triggers in a row: with no last-run recorded after the first, the
+	// second must find the patrol due again rather than waiting out the
+	// interval.
+	d.triggerCompactorDog()
+	awaitCompactorDogIdle(t, d)
+	d.triggerCompactorDog()
+	awaitCompactorDogIdle(t, d)
+
+	mu.Lock()
+	gotCycles := cycles
+	mu.Unlock()
+
+	if gotCycles != 2 {
+		t.Fatalf("cycles ran = %d, want 2 (a failed cycle must not suppress the next check)", gotCycles)
+	}
+	if _, found, err := loadPatrolLastRun(townRoot, "compactor_dog"); err != nil {
+		t.Fatalf("load last run: %v", err)
+	} else if found {
+		t.Error("last-run record exists after a failed cycle; a failed cycle must not be recorded as completed")
+	}
+	if !strings.Contains(buf.String(), "cycle failed") {
+		t.Errorf("no log line about the failed cycle; log:\n%s", buf.String())
 	}
 }
 
@@ -251,7 +302,7 @@ func TestCompactorDogBringsDoltUpBeforeItsCycle(t *testing.T) {
 
 	origCycle := compactorDogCycleFn
 	defer func() { compactorDogCycleFn = origCycle }()
-	compactorDogCycleFn = func(*Daemon) { record("cycle") }
+	compactorDogCycleFn = func(*Daemon) bool { record("cycle"); return true }
 
 	d.triggerCompactorDog()
 	awaitCompactorDogIdle(t, d)

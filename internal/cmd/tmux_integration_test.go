@@ -131,6 +131,17 @@ func busyProofCommand() (cmd, proof string) {
 func markPaneBusy(t *testing.T, tm *tmux.Tmux, session string) {
 	t.Helper()
 
+	// The fixture pane is not an agent, so pin GT_AGENT to a name no preset
+	// resolves to. That keeps the harness identity out of the pane's verdict
+	// whatever the surrounding environment carries — a Claude Code identity
+	// inherited from it would let IsBusy discount this marker once the pane
+	// had been silent past isBusyStaleAfter, breaking the contract below
+	// (gt-z4gs) — and leaves the other harness-gated behaviour, the Escape
+	// gate, at its fail-safe default (claude-9a8).
+	if err := tm.SetEnvironment(session, "GT_AGENT", "busy-pane-fixture"); err != nil {
+		t.Fatalf("SetEnvironment GT_AGENT: %v", err)
+	}
+
 	cmd, proof := busyProofCommand()
 	if err := tm.SendKeys(session, cmd); err != nil {
 		t.Fatalf("SendKeys: %v", err)
@@ -469,6 +480,57 @@ func TestDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
 	// a wrap is still caught.
 	if strings.Contains(flattenPane(out), message) {
 		t.Fatalf("busy pane received the nudge text directly — immediate mode should have refused and queued it instead:\n%s", out)
+	}
+}
+
+// TestWatchAndDeliver_TimeoutReportsGivingUp covers the second half of
+// gt-z4gs: the watcher's timeout path must say it gave up on stderr, and the
+// nudge must stay queued rather than vanish, so a caller (including the
+// --mode=immediate busy-refusal fallback this watcher serves) can tell "gave
+// up, still queued" from "delivered".
+func TestWatchAndDeliver_TimeoutReportsGivingUp(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	tm := tmux.NewTmux()
+	ensureServerKeeper(t, tm)
+	sessionName := "gt-test-idle-watcher-gives-up"
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+
+	// Keep the pane busy for the life of the test so WaitForIdle never
+	// succeeds and the watcher runs out its full timeout (same technique as
+	// TestDeliverNudge_ImmediateMode_RefusesBusyTarget).
+	markPaneBusy(t, tm, sessionName)
+
+	townRoot := t.TempDir()
+	if err := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
+		Sender:  "tester",
+		Message: "should stay queued",
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	origTimeout, origInterval := idleWatcherTimeout, idleWatcherPollInterval
+	idleWatcherTimeout = 300 * time.Millisecond
+	idleWatcherPollInterval = 50 * time.Millisecond
+	t.Cleanup(func() {
+		idleWatcherTimeout, idleWatcherPollInterval = origTimeout, origInterval
+	})
+
+	stderr := captureStderr(t, func() {
+		watchAndDeliver(tm, townRoot, sessionName)
+	})
+
+	if !strings.Contains(stderr, "gave up waiting") {
+		t.Fatalf("watchAndDeliver stderr = %q, want a message reporting that it gave up", stderr)
+	}
+	if got := nudge.QueueLen(townRoot, sessionName); got != 1 {
+		t.Errorf("QueueLen after watcher gave up = %d, want 1 (nudge should stay queued, not be lost)", got)
 	}
 }
 

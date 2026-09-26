@@ -146,6 +146,109 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		}
 	})
 
+	t.Run("local branch landed by a non-squash merge then deleted is landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		repo.startLandedBranch(t, branch)
+		runLandedGit(t, repo.work, "checkout", "main")
+		runLandedGit(t, repo.work, "merge", "--no-ff", "-m", "merge polecat work", branch)
+		runLandedGit(t, repo.work, "push", "origin", "main")
+		runLandedGit(t, repo.work, "push", "origin", "--delete", branch)
+
+		// A --no-ff merge leaves the branch tip an ancestor of integration, so
+		// the ancestry arm alone cannot tell it from a ref that was never
+		// committed to. It is distinguishable by how integration reached it:
+		// the merge, not integration's own first-parent line. Losing this case
+		// is the false negative the divergence guard was rejected for.
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); !got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified for a --no-ff merge whose remote branch was deleted", got)
+		}
+	})
+
+	t.Run("local branch landed by a non-squash merge, integration advances, then deleted is landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		repo.startLandedBranch(t, branch)
+		runLandedGit(t, repo.work, "checkout", "main")
+		runLandedGit(t, repo.work, "merge", "--no-ff", "-m", "merge polecat work", branch)
+		runLandedGit(t, repo.work, "push", "origin", "main")
+		runLandedGit(t, repo.work, "push", "origin", "--delete", branch)
+
+		// Integration keeps moving after the merge landed, the ordinary case
+		// since a landed check typically runs well after other work has
+		// continued to land on main. head is now two hops behind integration's
+		// tip on its first-parent line, not one: a check that only inspects
+		// ref^ would find head is not that single immediate parent and wrongly
+		// conclude head sits off the line, reintroducing the false negative
+		// this probe exists to fix.
+		writeLandedFile(t, filepath.Join(repo.work, "later.txt"), "later main work\n")
+		runLandedGit(t, repo.work, "add", ".")
+		runLandedGit(t, repo.work, "commit", "-m", "later main commit")
+		runLandedGit(t, repo.work, "push", "origin", "main")
+
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); !got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified for a --no-ff merge once integration has advanced further", got)
+		}
+	})
+
+	t.Run("local branch fast-forwarded then deleted is not landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		repo.startLandedBranch(t, branch)
+		runLandedGit(t, repo.work, "checkout", "main")
+		runLandedGit(t, repo.work, "merge", "--ff-only", branch)
+		runLandedGit(t, repo.work, "push", "origin", "main")
+		runLandedGit(t, repo.work, "push", "origin", "--delete", branch)
+
+		// A fast-forward leaves the tip equal to integration's tip — byte for
+		// byte the state a branch that was created and never committed to is
+		// in. This asserts the fail-closed answer for that unresolvable case
+		// rather than leaving it to chance; refCarriesOwnWork says why.
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified: a fast-forward landing is indistinguishable from an empty branch", got)
+		}
+	})
+
+	t.Run("remote branch that never carried a commit is not landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		// Pushed, but at integration's own tip with nothing of its own — a
+		// branch created from origin/main and left there. The remote-tracking
+		// ref is therefore a trivial ancestor of integration, and the guard
+		// has to apply to it too, not just to the local fallback.
+		runLandedGit(t, repo.work, "push", "origin", "main:"+branch)
+
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a pushed branch with no commits of its own", got)
+		}
+	})
+
+	t.Run("empty local branch is not landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		// Created and never committed to, so the ref sits exactly on
+		// integration and every preservation arm finds it trivially preserved.
+		// This is the fail-open the probe must not take (gt-7pec): the local
+		// branch stands in for a submitted branch, and this one submitted
+		// nothing.
+		runLandedGit(t, repo.work, "checkout", "-b", branch)
+
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a branch with no commits of its own", got)
+		}
+	})
+
+	t.Run("stale local branch on integration's own history is not landed", func(t *testing.T) {
+		repo := initLandedRepo(t)
+		// A ref left at an earlier commit of main and never advanced: an
+		// ancestor of integration because it is main's own history, which is
+		// not this branch's work.
+		runLandedGit(t, repo.work, "branch", branch)
+		writeLandedFile(t, filepath.Join(repo.work, "unrelated.txt"), "unrelated main work\n")
+		runLandedGit(t, repo.work, "add", ".")
+		runLandedGit(t, repo.work, "commit", "-m", "unrelated main commit")
+		runLandedGit(t, repo.work, "push", "origin", "main")
+
+		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a stale branch with no commits of its own", got)
+		}
+	})
+
 	t.Run("dirty worktree does not change the answer", func(t *testing.T) {
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
