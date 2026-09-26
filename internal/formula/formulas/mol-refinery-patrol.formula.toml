@@ -1294,7 +1294,7 @@ If merge fails (conflict, branch protection), debug and retry.
 
 ⚠️ **STOP HERE - DO NOT PROCEED UNTIL THE PR IS ACTUALLY MERGED ON GITHUB**
 
-**Step 2: Re-key the om verdict, then post-merge cleanup (REQUIRED — single command)**
+**Step 2: Re-key the om verdict, then post-merge cleanup (REQUIRED — two commands, in order)**
 
 On an editorial_required rig the landed commit first gets this MR's om verdict
 re-keyed onto it (gt-fr3r) — the verdict is keyed to the rehearsal head `gt mq
@@ -1350,26 +1350,48 @@ fi
 # origin/<polecat-branch> was already contained in <merge-target> the merge
 # created nothing, and LANDED_SHA is the previous MR's merge commit — which
 # carries its own note. Re-keying onto it would be a patch-id mismatch.
+#
+# In PR mode LANDED_SHA is a commit GitHub created on the remote (Step 1.6's
+# `gh pr view --json mergeCommit`), which this clone has never fetched.
+# Reading its parents without fetching first fails, and a failure hidden
+# behind `2>/dev/null` reads identically to "no commit created here" — a
+# silent no-signal skip on the one merge path this guard exists to cover
+# (the direct path always has LANDED_SHA local already, from its own
+# `git merge`). Fetch first so the read can succeed, and never let a read
+# failure pass as a legitimate skip: the two are told apart below and both
+# are loud.
 if [ "{{editorial_required}}" = "true" ] && [ -n "$LANDED_SHA" ]; then
+  git fetch origin <merge-target> >/dev/null 2>&1
   BRANCH_TIP=$(git rev-parse origin/<polecat-branch> 2>/dev/null)
-  LANDED_PARENTS=$(git log -1 --format=%P "$LANDED_SHA" 2>/dev/null)
+  PARENTS_ERR=""
+  if ! LANDED_PARENTS=$(git log -1 --format=%P "$LANDED_SHA" 2>&1); then
+    PARENTS_ERR="$LANDED_PARENTS"
+    LANDED_PARENTS=""
+  fi
   MERGE_LANDED_HERE=false
   case " $LANDED_PARENTS " in
     *" $BRANCH_TIP "*) MERGE_LANDED_HERE=true ;;
   esac
-  if [ -n "$BRANCH_TIP" ] && [ "$MERGE_LANDED_HERE" = "true" ]; then
-    REKEY_REASON="wisp raw-git merge-push: the verdict is keyed to the rehearsal head and the landed commit is a different merge (gt-fr3r)"
-    if ! gt mq rekey-note <mr-bead-id> --landed "$LANDED_SHA" --target <merge-target> --reason "$REKEY_REASON"; then
-      echo "EDITORIAL_RECORD_FAILED: <mr-bead-id> landed as $LANDED_SHA with no om note on it. Until the note is re-keyed, editorial-coverage counts the landed commit as covered by patch-id (a backfill moves the proof, not the verdict) and reports a Warning; a run that re-walks this commit will keep naming it in the details."
-      gt mail send <rig>/witness -s "HELP: om note missing on landed commit <mr-bead-id>" --stdin <<BODY
+  REKEY_REASON="wisp raw-git merge-push: the verdict is keyed to the rehearsal head and the landed commit is a different merge (gt-fr3r)"
+  REKEY_FAILURE=""
+  if [ -n "$PARENTS_ERR" ]; then
+    REKEY_FAILURE="could not read landed commit $LANDED_SHA's parents even after fetching <merge-target> ($PARENTS_ERR) — refusing to guess whether this merge created a commit here"
+  elif [ -z "$BRANCH_TIP" ] || [ "$MERGE_LANDED_HERE" != "true" ]; then
+    echo "Re-key skipped: landed commit $LANDED_SHA's parents ($LANDED_PARENTS) do not include the branch tip ($BRANCH_TIP) — this merge did not create a new commit for <polecat-branch> (already landed via an earlier MR), so there is nothing here to re-key."
+  elif ! gt mq rekey-note <mr-bead-id> --landed "$LANDED_SHA" --target <merge-target> --reason "$REKEY_REASON"; then
+    REKEY_FAILURE="gt mq rekey-note refused or failed"
+  fi
+  if [ -n "$REKEY_FAILURE" ]; then
+    echo "EDITORIAL_RECORD_FAILED: <mr-bead-id> landed as $LANDED_SHA with no om note on it ($REKEY_FAILURE). Until the note is re-keyed, editorial-coverage counts the landed commit as covered by patch-id (a backfill moves the proof, not the verdict) and reports a Warning; a run that re-walks this commit will keep naming it in the details."
+    bd update <mr-bead-id> --append-notes "EDITORIAL_RECORD_FAILED: $REKEY_FAILURE on landed commit $LANDED_SHA — see witness escalation"
+    gt mail send <rig>/witness -s "HELP: om note missing on landed commit <mr-bead-id>" --stdin <<BODY
 MR: <mr-bead-id>
 Issue: <issue-id>
 Landed: $LANDED_SHA
 Target: <merge-target>
-Problem: gt mq rekey-note refused or failed, so the landed commit carries no om note.
-Retry: gt mq rekey-note <mr-bead-id> --landed $LANDED_SHA --target <merge-target> --reason "$REKEY_REASON"
+Problem: $REKEY_FAILURE, so the landed commit carries no om note.
+Retry: git fetch origin <merge-target> && gt mq rekey-note <mr-bead-id> --landed $LANDED_SHA --target <merge-target> --reason "$REKEY_REASON"
 BODY
-    fi
   fi
 fi
 
