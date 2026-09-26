@@ -88,6 +88,66 @@ func TestFilterAndSortBatchCandidates_SortsByScoreDescending(t *testing.T) {
 	}
 }
 
+// gt-gz8l: a batch bisection leaves its culprit queued as 'ready', and the
+// batch runs before the single-MR path on every cycle, so without this the
+// same MR is stacked again and the gate, the flaky retry, and the bisection
+// re-derive the same answer while the batch's good MRs wait.
+func TestPartitionBatchCandidates_HoldsBackMarkedCulprits(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	head := "abc123"
+	mrs := []*refinery.MRInfo{
+		{ID: "marked-at-head", Priority: 2, CreatedAt: old, CommitSHA: head, Labels: []string{"batch-culprit:" + head}},
+		{ID: "marked-other-head", Priority: 2, CreatedAt: old, CommitSHA: "def456", Labels: []string{"batch-culprit:" + head}},
+		{ID: "unmarked", Priority: 2, CreatedAt: old, CommitSHA: "def456", Labels: []string{"gt:merge-request"}},
+	}
+
+	eligible, marked := partitionBatchCandidates(mrs, time.Hour, now)
+
+	if got := idsOf(eligible); len(got) != 2 || got[0] != "marked-other-head" || got[1] != "unmarked" {
+		t.Errorf("eligible = %v, want [marked-other-head unmarked] — only the MR whose head still carries the mark is held back", got)
+	}
+	if got := idsOf(marked); len(got) != 1 || got[0] != "marked-at-head" {
+		t.Errorf("marked = %v, want [marked-at-head]", got)
+	}
+}
+
+// filterAndSortBatchCandidates is the entry point the callers use, so the
+// exclusion has to hold there too.
+func TestFilterAndSortBatchCandidates_ExcludesMarkedCulprit(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	mrs := []*refinery.MRInfo{
+		{ID: "culprit", Priority: 2, CreatedAt: old, CommitSHA: "abc123", Labels: []string{"batch-culprit:abc123"}},
+		{ID: "clean", Priority: 2, CreatedAt: old, CommitSHA: "def456"},
+	}
+
+	got := filterAndSortBatchCandidates(mrs, time.Hour, now)
+
+	if len(got) != 1 || got[0].ID != "clean" {
+		t.Fatalf("got %v, want only [clean]", idsOf(got))
+	}
+}
+
+// A mark on an MR too young to batch is not why it was excluded, so it must
+// not be reported as held back — the count is what tells an operator why a
+// batch declined to assemble.
+func TestPartitionBatchCandidates_MarkOnTooYoungMRIsNotReported(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	mrs := []*refinery.MRInfo{
+		{ID: "young-culprit", Priority: 2, CreatedAt: now.Add(-time.Minute), CommitSHA: "abc123", Labels: []string{"batch-culprit:abc123"}},
+	}
+
+	eligible, marked := partitionBatchCandidates(mrs, time.Hour, now)
+
+	if len(eligible) != 0 || len(marked) != 0 {
+		t.Errorf("eligible = %v, marked = %v, want both empty", idsOf(eligible), idsOf(marked))
+	}
+}
+
 func idsOf(mrs []*refinery.MRInfo) []string {
 	ids := make([]string, len(mrs))
 	for i, mr := range mrs {

@@ -119,4 +119,53 @@ func TestResolveFastPath(t *testing.T) {
 			t.Errorf("expected staleness log line, got: %s", out)
 		}
 	})
+
+	// gt-gz8l: a batch already isolated this head as a culprit, so a recorded
+	// gate verdict about it outranks the polecat's stamp. A mark naming any
+	// other head is a stale verdict about a different revision and does not.
+	t.Run("pre-verified, but a batch marked this head a culprit", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			mrHead      string
+			markedHeads []string
+			wantSkip    bool
+		}{
+			{name: "mark names the submitted head", mrHead: "abc123", markedHeads: []string{"abc123"}, wantSkip: false},
+			{name: "mark names an older head", mrHead: "def456", markedHeads: []string{"abc123"}, wantSkip: true},
+			{name: "no mark", mrHead: "abc123", wantSkip: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				workDir, g, cleanup := testGitRepo(t)
+				defer cleanup()
+				e := newTestEngineer(t, workDir, g)
+				e.currentGateSetSHAFn = func() string { return "sha-a" }
+
+				targetHead, err := g.Rev("origin/main")
+				if err != nil {
+					t.Fatalf("resolving origin/main: %v", err)
+				}
+
+				mr := makeMR("gt-wisp-1", "polecat/x/gt-1", "main")
+				mr.PreVerified = true
+				mr.PreVerifiedBase = targetHead
+				mr.PreVerifiedGates = "sha-a"
+				mr.CommitSHA = tc.mrHead
+				for _, head := range tc.markedHeads {
+					mr.Labels = append(mr.Labels, batchCulpritLabelPrefix+head)
+				}
+
+				got := e.resolveFastPath(mr)
+				if got != tc.wantSkip {
+					t.Fatalf("resolveFastPath = %v, want %v", got, tc.wantSkip)
+				}
+				if tc.wantSkip {
+					return
+				}
+				out := e.output.(interface{ String() string }).String()
+				if !strings.Contains(out, "batch isolated this MR as a culprit") {
+					t.Errorf("expected the batch-culprit refusal to be logged, got: %s", out)
+				}
+			})
+		}
+	})
 }

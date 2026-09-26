@@ -480,7 +480,7 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	_, _ = fmt.Fprintf(e.output, "[Batch] Bisecting %d MRs to isolate failure...\n", len(stacked))
 	good, culprits := e.bisectBatch(ctx, stacked, target)
 
-	result.Culprits = culprits
+	e.recordCulprits(result, culprits)
 
 	// Step 6: If we found good MRs, merge them
 	if len(good) > 0 {
@@ -563,7 +563,7 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 	} else if processResult.Conflict {
 		result.Conflicts = []*MRInfo{mr}
 	} else if processResult.TestsFailed {
-		result.Culprits = []*MRInfo{mr}
+		e.recordCulprits(result, []*MRInfo{mr})
 	} else if processResult.BranchNotFound {
 		// Branch not found on remote — escalate to mayor via HandleMRInfoFailure (gas-556).
 		e.HandleMRInfoFailure(mr, processResult)
@@ -721,7 +721,7 @@ func (e *Engineer) verifyAndPush(ctx context.Context, stacked []*MRInfo, target 
 			return result
 		}
 		if gateResult.TestsFailed {
-			result.Culprits = stacked
+			e.recordCulprits(result, stacked)
 		} else {
 			result.Error = fmt.Errorf("gates failed: %s", gateResult.Error)
 		}

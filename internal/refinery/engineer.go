@@ -1905,6 +1905,15 @@ func (e *Engineer) resolveFastPath(mr *MRInfo) bool {
 	}
 	_, _ = fmt.Fprintf(e.output, "  Pre-verified: yes (base=%s)\n", shortSHA(mr.PreVerifiedBase))
 
+	// A batch-culprit mark naming this head is a recorded gate verdict about
+	// this exact revision (gt-gz8l). The stamp cannot outrank it, so gates run
+	// even though the polecat claimed a clean run. Belt-and-suspenders today:
+	// only ProcessMRInfo calls this, and nothing calls ProcessMRInfo (gt-03dp9).
+	if MRMarkedBatchCulprit(mr) {
+		_, _ = fmt.Fprintln(e.output, "[Engineer] Pre-verification overruled — a batch isolated this MR as a culprit at this head, running gates normally")
+		return false
+	}
+
 	// (c): the polecat's stamp covers the five *_command gates gt done ran, not
 	// the named merge_queue.gates that doMerge runs. Post-squash gates are the
 	// sharpest case — they validate the merged result, which no polecat-side run
