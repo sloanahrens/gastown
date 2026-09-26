@@ -26,6 +26,39 @@ func (b *Beads) SetStore(store beadsdk.Storage) {
 	b.store = store
 }
 
+// ErrReadyTruncated is the sentinel every ready method returns when its query
+// came back capped: the row count equals the limit, and a one-shot unbounded
+// re-query proved more rows exist. A count that is not the whole board
+// silently mis-sizes every consumer built on it (the 2026-09-21 patrol
+// under-report that gt-59o9 chased down), so a full page has to be a loud
+// answer, not a quiet one (gt-m7pq).
+//
+// Found is the row count returned; Cap is the limit that bound the query
+// (100 — bd's default ready page, or the per-method cap); TrueCount is what
+// the re-query proved exists, and may still sit below the real board if a
+// process-level cap (BD_JSON_ENVELOPE off, BEADS_MAX_ROWS) bound it too —
+// bd ready's own stderr note, when present, carries the authoritative
+// number.
+type ErrReadyTruncated struct {
+	Found      int
+	Cap        int
+	TrueCount  int
+	StoreError error
+}
+
+func (e *ErrReadyTruncated) Error() string {
+	msg := fmt.Sprintf("ready query capped: %d rows returned against a limit of %d, at least %d exist",
+		e.Found, e.Cap, e.TrueCount)
+	if e.StoreError != nil {
+		msg += "; unbounded re-query failed: " + e.StoreError.Error()
+	}
+	return msg
+}
+
+// Unwrap returns the underlying store error when the cap check ran but
+// failed (the page it ran against was still returned).
+func (e *ErrReadyTruncated) Unwrap() error { return e.StoreError }
+
 // Store returns the in-process beadsdk.Storage, or nil if not set.
 func (b *Beads) Store() beadsdk.Storage {
 	return b.store
@@ -535,16 +568,64 @@ func (b *Beads) storeClose(reason, session string, ids ...string) error {
 }
 
 // storeReadyWithFilter implements Ready with a WorkFilter using the in-process store.
+//
+// A query whose Limit (or a process-level knob: MaxRows from BEADS_MAX_ROWS,
+// which bd inherits from gt's own environment) came back full is truncated,
+// and gt cannot know it is truncated from the page alone — the page is a
+// silent board. So it re-asks once with the limit off, the same one-shot
+// probe bd ready's --json branch uses (cmd/bd/ready.go:189), and returns
+// ErrReadyTruncated when the probe proves more rows exist. The bounded page
+// is returned alongside so a caller that wants the cap still has its data.
 func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error) {
 	ctx, cancel := storeCtx()
 	defer cancel()
+
+	cap := 0
+	if filter.Limit > 0 {
+		cap = filter.Limit
+	} else if filter.MaxRows > 0 {
+		cap = filter.MaxRows
+	}
 
 	sdkIssues, err := b.store.GetReadyWork(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("store ready: %w", err)
 	}
 
-	return sdkIssuesToIssues(sdkIssues), nil
+	if cap == 0 || len(sdkIssues) < cap {
+		return sdkIssuesToIssues(sdkIssues), nil
+	}
+
+	// The page is full: a page that is not the whole board is not a board.
+	// Lifting every cap the storage layer honors (MaxRows is process-level —
+	// bd inherits BEADS_MAX_ROWS from gt's environment, so it survives
+	// lifting Limit — while an operator-set cap is exactly what this sentinel
+	// reports) leaves exactly one knob that could still bound the re-query:
+	// the same process-level one, whose source we carry in the error.
+	requery := filter
+	requery.Limit = 0
+	requery.MaxRows = 0
+	full, fullErr := b.store.GetReadyWork(ctx, requery)
+
+	if fullErr != nil {
+		return sdkIssuesToIssues(sdkIssues), &ErrReadyTruncated{
+			Found:      len(sdkIssues),
+			Cap:        cap,
+			Source:     filter.MaxRowsSource,
+			StoreError: fullErr,
+		}
+	}
+	if len(full) <= cap {
+		return sdkIssuesToIssues(sdkIssues), nil
+	}
+
+	return sdkIssuesToIssues(full), &ErrReadyTruncated{
+		Found:      len(full),
+		Cap:        cap,
+		TrueCount:  len(full),
+		Source:     filter.MaxRowsSource,
+		StoreError: fullErr,
+	}
 }
 
 // storeBlocked implements Blocked using the in-process store.
