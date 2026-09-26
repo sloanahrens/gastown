@@ -99,6 +99,12 @@ const (
 	// mol-deacon-patrol.formula.toml) that has no Go call site of its own to
 	// emit events.LogFeed directly. See "gt log prune-worktree".
 	TypeWorktreePrune = "worktree_prune"
+
+	// TypePolecatBranchRepairFailed records a session start whose worktree
+	// repair (moving off the base branch) did not run. It exists for the
+	// witness restart path, which discards the stderr warning that would
+	// otherwise be the only report (gt-ns8t).
+	TypePolecatBranchRepairFailed = "polecat_branch_repair_failed"
 )
 
 // EventsFile is the name of the raw events log.

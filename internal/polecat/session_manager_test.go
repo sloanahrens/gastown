@@ -2,6 +2,7 @@ package polecat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -78,6 +79,35 @@ func setupSessionBranchTestRepo(t *testing.T) (string, *git.Git) {
 	}
 
 	return workDir, repoGit
+}
+
+// runTestGit runs one git command in workDir, failing the test on a non-zero
+// exit.
+func runTestGit(t *testing.T, workDir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = workDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// dropOriginRemote removes the test repo's origin. The helper's origin is the
+// repo itself, so `git fetch origin` republishes every local branch as
+// origin/<branch> — it cannot model a working tree that diverged from a remote
+// it no longer reaches.
+func dropOriginRemote(t *testing.T, workDir string) {
+	t.Helper()
+	runTestGit(t, workDir, "remote", "remove", "origin")
+}
+
+// strandCanonicalBaseRef makes origin/<default> unresolvable in the test repo,
+// standing in for a worktree that never fetched the canonical base.
+func strandCanonicalBaseRef(t *testing.T, workDir string) {
+	t.Helper()
+	dropOriginRemote(t, workDir)
+	runTestGit(t, workDir, "update-ref", "-d", "refs/remotes/origin/main")
 }
 
 func TestSessionName(t *testing.T) {
@@ -400,7 +430,10 @@ func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
 	}
 
 	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
-	branch := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
+	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
+	if err != nil {
+		t.Fatalf("ensureCanonicalSessionBranch: %v", err)
+	}
 	if !strings.Contains(branch, "/gt-9qb+") {
 		t.Fatalf("fresh session branch = %q, want issue-scoped branch", branch)
 	}
@@ -431,9 +464,121 @@ func TestEnsureCanonicalSessionBranch_KeepsCurrentIssueBranch(t *testing.T) {
 	}
 
 	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
-	branch := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
+	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
+	if err != nil {
+		t.Fatalf("ensureCanonicalSessionBranch: %v", err)
+	}
 	if branch != currentBranch {
 		t.Fatalf("ensureCanonicalSessionBranch changed active issue branch: got %q want %q", branch, currentBranch)
+	}
+}
+
+// TestEnsureCanonicalSessionBranch_MissingBaseRefFailsOnBaseBranch covers the
+// incident state of gt-ns8t: the worktree sits on the base branch, the repair
+// is needed, and origin/<default> does not resolve — so the session used to
+// start on the base branch with nothing reported anywhere.
+func TestEnsureCanonicalSessionBranch_MissingBaseRefFailsOnBaseBranch(t *testing.T) {
+	workDir, repoGit := setupSessionBranchTestRepo(t)
+	strandCanonicalBaseRef(t, workDir)
+
+	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
+	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
+	if !errors.Is(err, ErrBaseBranchRepair) {
+		t.Fatalf("err = %v, want ErrBaseBranchRepair", err)
+	}
+	if branch != "main" {
+		t.Fatalf("branch = %q, want the base branch %q", branch, "main")
+	}
+}
+
+// TestEnsureCanonicalSessionBranch_CheckoutRefusedFailsOnBaseBranch covers the
+// other shape of the same incident: the repair resolves its start point but
+// git refuses the branch switch, which happens when local commits on the base
+// branch conflict with the uncommitted working tree a killed polecat left
+// behind (lapis's "WIP: checkpoint (auto)" on local main, gt-ns8t).
+func TestEnsureCanonicalSessionBranch_CheckoutRefusedFailsOnBaseBranch(t *testing.T) {
+	workDir, repoGit := setupSessionBranchTestRepo(t)
+	baseSHA, err := repoGit.Rev("origin/main")
+	if err != nil {
+		t.Fatalf("resolve origin/main: %v", err)
+	}
+
+	// Local main diverges from origin/main, then leaves an uncommitted edit to
+	// the diverging file: `git checkout -b <new> origin/main` must overwrite it.
+	if err := os.WriteFile(filepath.Join(workDir, "local.txt"), []byte("diverged\n"), 0644); err != nil {
+		t.Fatalf("write local.txt: %v", err)
+	}
+	if err := repoGit.Add("local.txt"); err != nil {
+		t.Fatalf("git add local.txt: %v", err)
+	}
+	if err := repoGit.Commit("local main commit"); err != nil {
+		t.Fatalf("git commit local.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "local.txt"), []byte("uncommitted\n"), 0644); err != nil {
+		t.Fatalf("edit local.txt: %v", err)
+	}
+
+	// Pin origin/main to the pre-divergence base and cut the remote, so the
+	// repair still resolves its start point but the switch has to overwrite the
+	// dirty file.
+	dropOriginRemote(t, workDir)
+	runTestGit(t, workDir, "update-ref", "refs/remotes/origin/main", baseSHA)
+
+	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
+	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
+	if !errors.Is(err, ErrBaseBranchRepair) {
+		t.Fatalf("err = %v, want ErrBaseBranchRepair", err)
+	}
+	if branch != "main" {
+		t.Fatalf("branch = %q, want the base branch %q", branch, "main")
+	}
+}
+
+// TestEnsureCanonicalSessionBranch_RecordsRepairFailure asserts the feed event
+// that carries the failure past the witness restart path, where
+// `gt session restart` runs under util.ExecRun and its stderr is discarded on
+// exit 0 (gt-ns8t).
+func TestEnsureCanonicalSessionBranch_RecordsRepairFailure(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("mkdir rig path: %v", err)
+	}
+
+	workDir, repoGit := setupSessionBranchTestRepo(t)
+	strandCanonicalBaseRef(t, workDir)
+
+	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: rigPath})
+	if _, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"}); err == nil {
+		t.Fatal("ensureCanonicalSessionBranch returned no error, want ErrBaseBranchRepair")
+	}
+
+	data, err := os.ReadFile(filepath.Join(townRoot, ".events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events file: %v", err)
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var ev struct {
+			Type    string                 `json:"type"`
+			Payload map[string]interface{} `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("unmarshal event %q: %v", line, err)
+		}
+		if ev.Type != "polecat_branch_repair_failed" {
+			continue
+		}
+		found = true
+		if ev.Payload["polecat"] != "toast" {
+			t.Errorf("payload polecat = %v, want toast", ev.Payload["polecat"])
+		}
+		if ev.Payload["step"] == "" {
+			t.Error("payload step is empty; the event cannot say which repair step failed")
+		}
+	}
+	if !found {
+		t.Fatalf("no polecat_branch_repair_failed event in %s", data)
 	}
 }
 
