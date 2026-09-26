@@ -13,17 +13,26 @@ import (
 // closeTimeMRTracker is the narrow interface closeTimeInvariantSkipReason
 // needs to evaluate invariant exit (b). *beads.Beads satisfies it.
 //
-// Exit (b) checks the specific pendingMRID the caller already knows about
-// (the MR gt done just created for this issue, or resumed from the agent
-// bead's active_mr field) rather than re-listing MRs by issueID/status. This
-// sidesteps two production bugs a status-filtered list-by-issue lookup hit:
-// a refinery-claimed MR transitions open -> in_progress the moment the
-// refinery picks it up (internal/refinery/types.go:183), which a
-// status=="open" filter would treat as gone; and MR beads always live in the
-// rig beads DB, which callers must pass here directly rather than a
-// cross-prefix-routed client (gt-6hmz om-editorial findings 2 and 3).
+// Exit (b) primarily checks the specific pendingMRID the caller already
+// knows about (the MR gt done just created for this issue, or resumed from
+// the agent bead's active_mr field) rather than re-listing MRs by
+// issueID/status. This sidesteps two production bugs a status-filtered
+// list-by-issue lookup hit: a refinery-claimed MR transitions open ->
+// in_progress the moment the refinery picks it up
+// (internal/refinery/types.go:183), which a status=="open" filter would
+// treat as gone; and MR beads always live in the rig beads DB, which callers
+// must pass here directly rather than a cross-prefix-routed client (gt-6hmz
+// om-editorial findings 2 and 3).
+//
+// When pendingMRID is empty — active_mr was never recorded on the agent
+// bead, e.g. because a prior gt done invocation died before writing it back
+// — NonTerminalMRsForIssue is the fallback: it re-lists by issueID with the
+// same non-terminal status test (open OR in_progress), using the same rig DB
+// client this call already has, so it doesn't reintroduce either bug above
+// (gt-h8ld).
 type closeTimeMRTracker interface {
 	Show(id string) (*beads.Issue, error)
+	NonTerminalMRsForIssue(issueID string) ([]*beads.Issue, error)
 }
 
 // closeTimeCommitCounter is the narrow interface closeTimeInvariantSkipReason
@@ -78,6 +87,11 @@ func closeTimeInvariantSkipReason(mrTracker closeTimeMRTracker, counter closeTim
 			if mr, err := mrTracker.Show(id); err == nil && mr != nil && !beads.IssueStatus(mr.Status).IsTerminal() {
 				return ""
 			}
+		} else if mrs, err := mrTracker.NonTerminalMRsForIssue(issueID); err == nil && len(mrs) > 0 {
+			// active_mr was never recorded — fall back to re-listing by
+			// issueID rather than treating "unknown" the same as "none"
+			// (gt-h8ld).
+			return ""
 		}
 	}
 	return fmt.Sprintf(
@@ -105,8 +119,9 @@ func hasOperatorOverridePrefix(reason string) bool {
 // beads always live in the rig DB, and pendingMRID is looked up there
 // (gt-6hmz om-editorial finding 2). pendingMRID is the MR this same gt done
 // invocation just created for issueID (or resumed from the agent bead's
-// active_mr field); passing "" means the caller found no such MR, so exit
-// (b) can never apply.
+// active_mr field); passing "" means active_mr was never recorded, which
+// falls back to a by-issueID lookup rather than skipping exit (b) outright
+// (gt-h8ld).
 //
 // Branch/target resolution failures fail OPEN (return "", allowing the
 // close): this check runs for every role (polecat, crew, mayor, deacon),

@@ -34,6 +34,23 @@ func (f fakeCloseTimeMRTracker) Show(id string) (*beads.Issue, error) {
 	return f.issues[id], nil
 }
 
+func (f fakeCloseTimeMRTracker) NonTerminalMRsForIssue(issueID string) ([]*beads.Issue, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var matches []*beads.Issue
+	for _, issue := range f.issues {
+		if !beads.MatchesMRSourceIssue(issue.Description, issueID) {
+			continue
+		}
+		if beads.IssueStatus(issue.Status).IsTerminal() {
+			continue
+		}
+		matches = append(matches, issue)
+	}
+	return matches, nil
+}
+
 // TestCloseTimeInvariantSkipReason_ZeroCommitsAllowed covers gt-6hmz exit
 // (a): a branch with zero commits the target lacks may always close, even
 // with no MR and no override reason.
@@ -95,6 +112,63 @@ func TestCloseTimeInvariantSkipReason_RefusesWhenPendingMRClosed(t *testing.T) {
 	got := closeTimeInvariantSkipReason(tracker, counter, "gt-6hmz", "gt-wisp-mr1", "polecat/basalt/gt-6hmz+abc", "main", "")
 	if got == "" {
 		t.Fatal("expected refusal when the pending MR is already closed")
+	}
+}
+
+// TestCloseTimeInvariantSkipReason_FallsBackToIssueLookupWhenPendingMRIDEmpty
+// covers gt-h8ld: active_mr was never written back onto the agent bead (the
+// caller passes pendingMRID=""), but an MR bead tracking issueID genuinely
+// exists and is still open. Exit (b) must not blame a missing MR that
+// exists — it should fall back to re-listing by issueID and find it.
+func TestCloseTimeInvariantSkipReason_FallsBackToIssueLookupWhenPendingMRIDEmpty(t *testing.T) {
+	t.Parallel()
+	counter := fakeCloseTimeCommitCounter{count: 3}
+	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
+		"gt-wisp-n65n": {
+			ID:          "gt-wisp-n65n",
+			Status:      "open",
+			Description: "branch: polecat/emerald/gt-h8ld+abc\nsource_issue: gt-h8ld\n",
+		},
+	}}
+
+	got := closeTimeInvariantSkipReason(tracker, counter, "gt-h8ld", "", "polecat/emerald/gt-h8ld+abc", "main", "")
+	if got != "" {
+		t.Errorf("expected close allowed via issueID fallback when active_mr was never recorded, got skip reason %q", got)
+	}
+}
+
+// TestCloseTimeInvariantSkipReason_FallbackFindsInProgressMR mirrors the
+// refinery-claim race (gt-6hmz om-editorial finding 3) for the fallback
+// path: the MR the fallback finds by issueID has already been claimed
+// (in_progress), not just open.
+func TestCloseTimeInvariantSkipReason_FallbackFindsInProgressMR(t *testing.T) {
+	t.Parallel()
+	counter := fakeCloseTimeCommitCounter{count: 3}
+	tracker := fakeCloseTimeMRTracker{issues: map[string]*beads.Issue{
+		"gt-wisp-n65n": {
+			ID:          "gt-wisp-n65n",
+			Status:      "in_progress",
+			Description: "branch: polecat/emerald/gt-h8ld+abc\nsource_issue: gt-h8ld\n",
+		},
+	}}
+
+	got := closeTimeInvariantSkipReason(tracker, counter, "gt-h8ld", "", "polecat/emerald/gt-h8ld+abc", "main", "")
+	if got != "" {
+		t.Errorf("expected close allowed via issueID fallback when the found MR is in_progress, got skip reason %q", got)
+	}
+}
+
+// TestCloseTimeInvariantSkipReason_FallbackFindsNothingStillRefuses ensures
+// the fallback doesn't turn into a fail-open: when pendingMRID is empty and
+// no non-terminal MR tracks issueID either, the refusal must still fire.
+func TestCloseTimeInvariantSkipReason_FallbackFindsNothingStillRefuses(t *testing.T) {
+	t.Parallel()
+	counter := fakeCloseTimeCommitCounter{count: 3}
+	tracker := fakeCloseTimeMRTracker{} // no MRs at all
+
+	got := closeTimeInvariantSkipReason(tracker, counter, "gt-h8ld", "", "polecat/emerald/gt-h8ld+abc", "main", "")
+	if got == "" {
+		t.Fatal("expected refusal when the fallback also finds no tracking MR")
 	}
 }
 

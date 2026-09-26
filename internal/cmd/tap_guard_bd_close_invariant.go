@@ -280,7 +280,8 @@ func rigBeadsWorkspaceExists(rigPath string) bool {
 // predicate re-verifies it with a live Show and requires a non-terminal
 // status, so a stale pointer to a closed MR does not count as tracking. Every
 // failure here (no agent bead, unreadable, no active_mr) yields "", which
-// disables exit (b) and leaves the other exits to decide.
+// sends exit (b) to its by-issueID fallback instead of disabling it
+// (gt-h8ld) — the field being unreadable isn't evidence no MR exists.
 func resolveBdCloseInvariantPendingMR(ctx RoleContext, ctxErr error, rigBd *beads.Beads) string {
 	if ctxErr != nil {
 		// No resolved role means no agent bead to identify, and ctx is the
