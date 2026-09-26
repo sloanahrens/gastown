@@ -989,10 +989,13 @@ func setMaintenanceConfig(townRoot, key, value string) error {
 
 	case "maintenance.mode":
 		// Validated here so a typo is refused at the point of entry. The
-		// daemon (maintenanceMode) recognizes "flatten" and "gc", trimmed and
-		// case-insensitive, and treats anything else as "monitor", which only
-		// reports. An invalid value that reached daemon.json by hand would be
-		// safe but silent, so it is never written.
+		// daemon (maintenanceMode) recognizes only the exact lowercase
+		// strings "flatten" and "gc" (trimmed of surrounding whitespace) and
+		// treats anything else, including a case variation like "FLATTEN",
+		// as "monitor", which only reports. That agreement matters because
+		// daemon.json can also be hand-edited directly, bypassing this
+		// validation — an invalid value that reached it by hand is safe but
+		// silent, and this switch keeps it from being written here too.
 		switch value {
 		case daemon.MaintenanceModeMonitor, daemon.MaintenanceModeFlatten, daemon.MaintenanceModeGC:
 			mc.Mode = value

@@ -324,10 +324,15 @@ func TestMaintenanceMode(t *testing.T) {
 		{"empty mode defaults to monitor", withMode(""), MaintenanceModeMonitor},
 		{"explicit monitor", withMode("monitor"), MaintenanceModeMonitor},
 		{"explicit flatten", withMode("flatten"), MaintenanceModeFlatten},
-		{"flatten is matched case-insensitively", withMode("FLATTEN"), MaintenanceModeFlatten},
 		{"flatten tolerates surrounding space", withMode("  flatten  "), MaintenanceModeFlatten},
-		// The load-bearing cases: only the exact word arms the destructive
-		// path. A typo at 03:00 must escalate, not rewrite every database.
+		// The load-bearing cases: only the exact lowercase word arms the
+		// destructive path. A typo, or a case variation from a hand-edited
+		// daemon.json, must escalate at 03:00, not rewrite every database
+		// (gt-aku6: a prior version matched case-insensitively, which let
+		// "FLATTEN" arm the path even though setMaintenanceConfig's own
+		// validation and this package's doc comments both claimed only the
+		// exact word could).
+		{"flatten is matched case-sensitively", withMode("FLATTEN"), MaintenanceModeMonitor},
 		{"typo stays monitor", withMode("flaten"), MaintenanceModeMonitor},
 		{"unknown mode stays monitor", withMode("compact"), MaintenanceModeMonitor},
 		{"monitor with trailing junk stays monitor", withMode("monitor flatten"), MaintenanceModeMonitor},
