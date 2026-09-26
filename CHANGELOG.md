@@ -32,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rogue-bd scan spares the build output of the repo that builds `bd`**
+  (gt-5zsc) — step 18 of `mol-deacon-patrol` flagged `<worktree-root>/bd` in
+  every beads worktree that had ever run `make build`. The beads repo's
+  `.gitignore` line 3 is `/bd`, the documented output of that very build, so
+  those hits were normal artifacts of the same source that produces the town
+  `bd`, and neutralizing them with `chmod 644` breaks the rig's own build and
+  test loop while stopping no shadow. A hit is now a finding unless the
+  worktree carrying it also carries `cmd/bd` — the source that produces that
+  binary — and `git check-ignore` reports the path ignored. A symlink named
+  `bd`, any `bd` whose directory is on `PATH`, and an unignored copy all stay
+  findings. The check's candidate list is now a `mktemp` file removed on exit,
+  so a patrol no longer leaves a `rogue-bd-candidates.<pid>` file behind in
+  `/tmp` on every run.
+
 - **A search pattern is no longer misread as a scan root** (gt-yts7) —
   `matchesUnboundedScan` resolved every non-flag argument against cwd, so
   `grep -rn polecats ./settings` run from a rig root, which holds a
