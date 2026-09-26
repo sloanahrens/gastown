@@ -835,22 +835,33 @@ func mergeAgentBeadSources(issuesByID, wispsByID map[string]*Issue) map[string]*
 
 // ListAgentBeadsFromWisps queries the wisps table for agent beads.
 // Returns nil, nil if the wisps table doesn't exist yet or has no agent beads.
+//
+// A PreloadLabeledWisps("gt:agent", ...) cache is checked first: it answers
+// from the one bd sql round trip that call already paid for (gt-92zx),
+// instead of this spawning its own "bd mol wisp list" over every wisp in the
+// rig.
 func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
-	out, err := b.run("mol", "wisp", "list", "--json")
-	if err != nil {
-		return nil, nil // Wisps table may not exist yet
-	}
+	var wisps []*Issue
+	if cached, ok := b.wispCache["gt:agent"]; ok {
+		wisps = cached
+	} else {
+		out, err := b.run("mol", "wisp", "list", "--json")
+		if err != nil {
+			return nil, nil // Wisps table may not exist yet
+		}
 
-	// bd mol wisp list --json returns {"wisps": [...], "count": N, ...}
-	var wrapper struct {
-		Wisps []*Issue `json:"wisps"`
-	}
-	if err := json.Unmarshal(out, &wrapper); err != nil {
-		return nil, nil
+		// bd mol wisp list --json returns {"wisps": [...], "count": N, ...}
+		var wrapper struct {
+			Wisps []*Issue `json:"wisps"`
+		}
+		if err := json.Unmarshal(out, &wrapper); err != nil {
+			return nil, nil
+		}
+		wisps = wrapper.Wisps
 	}
 
 	result := make(map[string]*Issue)
-	for _, w := range wrapper.Wisps {
+	for _, w := range wisps {
 		// Check by type/label first (works when fields are present)
 		if IsAgentBead(w) {
 			result[w.ID] = w

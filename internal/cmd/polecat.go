@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -598,6 +600,135 @@ func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 	return mgr, r, nil
 }
 
+// buildRigSeats gathers one rig's polecat rows for `gt polecat list`: a seat
+// per known worktree, plus a decided row for any zombie/foreign orphan tmux
+// session, in the same order the listing used to produce them when this was
+// inline in runPolecatList's per-rig loop. Called once per rig — concurrently
+// across rigs, bounded by polecatSeatPoolSize — so `--all` overlaps every
+// rig's Dolt round trips instead of paying them one rig after another
+// (gt-92zx).
+func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time) []polecatSeat {
+	// The filesystem read and the session filter are the two cheap facts that
+	// decide whether this rig has anything to report. Both are local (a
+	// directory listing, an in-memory lookup), so they come first: the
+	// queries below are the expensive part — several Dolt CLI round trips per
+	// rig — and a rig with no polecat directory and no tmux session has no row
+	// to build out of any of them (gt-8q0s).
+	polecatNames, err := listPolecatDirectoryNames(r.Path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to list polecats in %s: %v\n", r.Name, err)
+		return nil
+	}
+	rigSessions := sessions.namesForRig(r.Name)
+	if len(polecatNames) == 0 && len(rigSessions) == 0 {
+		return nil
+	}
+
+	bd := beads.New(r.Path)
+
+	// One combined bd sql round trip for both label sets this rig's listing
+	// needs (agent beads, merge requests), so the MR query below and
+	// ListAgentBeads() share it instead of each paying their own wisps-table
+	// subprocess (gt-92zx). A failed preload just means both fall back to
+	// their own per-call query — never fatal to the list.
+	if err := bd.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to preload wisp labels in %s: %v\n", r.Name, err)
+	}
+
+	// ONE merge-request query per rig, joined per polecat below — never a
+	// `bd show` per polecat (MRs are ephemeral wisps, and the per-id path is
+	// the blindness this replaces).
+	mrIndex, mrErr := loadPolecatMRIndex(bd, r.Name)
+	if mrErr != nil {
+		// The index is empty and every active_mr reads status=unknown
+		// (fail-closed, as before), but say so — a silently unreadable queue
+		// is how the original hardcoded "unknown" hid real state.
+		fmt.Fprintf(os.Stderr, "warning: failed to list merge requests in %s: %v — MR status reported as unknown\n", r.Name, mrErr)
+	}
+
+	agents, agentErr := bd.ListAgentBeads()
+	agentLookupFailed := agentErr != nil
+	if agentLookupFailed {
+		fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
+		agents = nil
+	}
+	activeWork, activeWorkErr := listActivePolecatWorkByName(bd, r.Name)
+	if activeWorkErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to list active polecat work in %s: %v\n", r.Name, activeWorkErr)
+		activeWork = nil
+	}
+
+	// Track known polecat names from filesystem for zombie detection. This is
+	// exactly the set of worktree directories, so it is built here rather than
+	// accumulated by the seat loop below — which runs later, on the probe
+	// pool.
+	knownNames := make(map[string]bool, len(polecatNames))
+	for _, name := range polecatNames {
+		knownNames[name] = true
+	}
+
+	var seats []polecatSeat
+	for _, name := range polecatNames {
+		agentBeadID := polecatBeadIDForRig(r, r.Name, name)
+		agentBead := agents[agentBeadID]
+		fields := parsePolecatAgentFields(agentBead)
+		// Grace is dated by the agent bead's own last write: a bead that
+		// still says spawning and was touched inside the window is a
+		// dispatch in flight, not a stall.
+		env := polecatListInventoryEnv(r.Path, r.Name, name, mrIndex,
+			polecatActiveMRReader{index: mrIndex, bd: bd},
+			polecatSpawnFacts{
+				UpdatedAt: polecat.AgentBeadUpdatedAt(agentBead),
+				Grace:     spawnWindow,
+				Now:       now,
+			})
+		seats = append(seats, polecatSeat{
+			rigName:       r.Name,
+			name:          name,
+			fields:        fields,
+			activeWork:    activeWork[name],
+			activeWorkErr: activeWorkErr,
+			sessions:      sessions,
+			env:           env,
+		})
+	}
+
+	// Discover zombie (and foreign) tmux sessions: sessions without matching
+	// worktree directories. Genuine zombies occur when a worktree is deleted
+	// but the tmux session persists (incomplete nuke or session naming
+	// mismatch) — those still have an agent bead. A session with no worktree
+	// AND no agent bead was never dispatched as a polecat at all (e.g. a
+	// hermetic test's session escaping onto the wrong socket, gt-yav3);
+	// report it as foreign, not zombie, so it never counts toward capacity or
+	// gets restart/nuke treatment aimed at real polecats.
+	for _, sessionName := range rigSessions {
+		_, polecatName, ok := parsePolecatSessionName(sessionName)
+		if !ok {
+			continue
+		}
+		if knownNames[polecatName] {
+			continue
+		}
+		agentBeadID := polecatBeadIDForRig(r, r.Name, polecatName)
+		presence := beadAbsent
+		switch {
+		case agentLookupFailed:
+			presence = beadLookupFailed
+		default:
+			if _, ok := agents[agentBeadID]; ok {
+				presence = beadPresent
+			}
+		}
+		// Classified here, not on the pool: an orphan session is decided from
+		// session and bead presence alone, so it needs no probe. It still
+		// takes its place in `seats` to keep the output order.
+		orphan := classifyOrphanSession(r.Name, polecatName, sessionName, presence)
+		seats = append(seats, polecatSeat{decided: &orphan})
+	}
+
+	return seats
+}
+
 func runPolecatList(cmd *cobra.Command, args []string) error {
 	var rigs []*rig.Rig
 
@@ -634,119 +765,43 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
 	spawnWindow := polecatSpawnGraceWindow(townRoot)
 	now := time.Now()
-	// Every row of the output, in output order, with the inputs its build
-	// needs. Assembled serially (the per-rig queries below are one per rig, not
-	// one per seat) and resolved concurrently at the end.
+	// Every rig's rows, in rig order, fetched concurrently (bounded, same
+	// pool sizing as the seat probe below): each rig only pays a handful of
+	// Dolt CLI round trips, not CPU-bound work, so overlapping them is what
+	// keeps `--all` from paying every rig's list time serially (gt-92zx) —
+	// the previous per-rig loop is what made a many-rig town time out.
+	rigSeats := make([][]polecatSeat, len(rigs))
+	{
+		workers := polecatSeatPoolSize()
+		if workers > len(rigs) {
+			workers = len(rigs)
+		}
+		if workers <= 1 {
+			for i, r := range rigs {
+				rigSeats[i] = buildRigSeats(r, sessions, spawnWindow, now)
+			}
+		} else {
+			var next atomic.Int64
+			var wg sync.WaitGroup
+			wg.Add(workers)
+			for w := 0; w < workers; w++ {
+				go func() {
+					defer wg.Done()
+					for {
+						i := int(next.Add(1)) - 1
+						if i >= len(rigs) {
+							return
+						}
+						rigSeats[i] = buildRigSeats(rigs[i], sessions, spawnWindow, now)
+					}
+				}()
+			}
+			wg.Wait()
+		}
+	}
 	var seats []polecatSeat
-
-	for _, r := range rigs {
-		// The filesystem read and the session filter are the two cheap facts
-		// that decide whether this rig has anything to report. Both are local
-		// (a directory listing, an in-memory lookup), so they come first: the
-		// queries below are the expensive part — five Dolt CLI round trips per
-		// rig — and a rig with no polecat directory and no tmux session has no
-		// row to build out of any of them (gt-8q0s).
-		polecatNames, err := listPolecatDirectoryNames(r.Path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to list polecats in %s: %v\n", r.Name, err)
-			continue
-		}
-		rigSessions := sessions.namesForRig(r.Name)
-		if len(polecatNames) == 0 && len(rigSessions) == 0 {
-			continue
-		}
-
-		bd := beads.New(r.Path)
-
-		// ONE merge-request query per rig, joined per polecat below — never a
-		// `bd show` per polecat (MRs are ephemeral wisps, and the per-id path
-		// is the blindness this replaces).
-		mrIndex, mrErr := loadPolecatMRIndex(bd, r.Name)
-		if mrErr != nil {
-			// The index is empty and every active_mr reads status=unknown
-			// (fail-closed, as before), but say so — a silently unreadable
-			// queue is how the original hardcoded "unknown" hid real state.
-			fmt.Fprintf(os.Stderr, "warning: failed to list merge requests in %s: %v — MR status reported as unknown\n", r.Name, mrErr)
-		}
-
-		agents, agentErr := bd.ListAgentBeads()
-		agentLookupFailed := agentErr != nil
-		if agentLookupFailed {
-			fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
-			agents = nil
-		}
-		activeWork, activeWorkErr := listActivePolecatWorkByName(bd, r.Name)
-		if activeWorkErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to list active polecat work in %s: %v\n", r.Name, activeWorkErr)
-			activeWork = nil
-		}
-
-		// Track known polecat names from filesystem for zombie detection. This
-		// is exactly the set of worktree directories, so it is built here rather
-		// than accumulated by the seat loop below — which now runs later, on the
-		// probe pool.
-		knownNames := make(map[string]bool, len(polecatNames))
-		for _, name := range polecatNames {
-			knownNames[name] = true
-		}
-
-		for _, name := range polecatNames {
-			agentBeadID := polecatBeadIDForRig(r, r.Name, name)
-			agentBead := agents[agentBeadID]
-			fields := parsePolecatAgentFields(agentBead)
-			// Grace is dated by the agent bead's own last write: a bead that
-			// still says spawning and was touched inside the window is a
-			// dispatch in flight, not a stall.
-			env := polecatListInventoryEnv(r.Path, r.Name, name, mrIndex,
-				polecatActiveMRReader{index: mrIndex, bd: bd},
-				polecatSpawnFacts{
-					UpdatedAt: polecat.AgentBeadUpdatedAt(agentBead),
-					Grace:     spawnWindow,
-					Now:       now,
-				})
-			seats = append(seats, polecatSeat{
-				rigName:       r.Name,
-				name:          name,
-				fields:        fields,
-				activeWork:    activeWork[name],
-				activeWorkErr: activeWorkErr,
-				sessions:      sessions,
-				env:           env,
-			})
-		}
-
-		// Discover zombie (and foreign) tmux sessions: sessions without matching
-		// worktree directories. Genuine zombies occur when a worktree is deleted
-		// but the tmux session persists (incomplete nuke or session naming
-		// mismatch) — those still have an agent bead. A session with no worktree
-		// AND no agent bead was never dispatched as a polecat at all (e.g. a
-		// hermetic test's session escaping onto the wrong socket, gt-yav3);
-		// report it as foreign, not zombie, so it never counts toward capacity
-		// or gets restart/nuke treatment aimed at real polecats.
-		for _, sessionName := range rigSessions {
-			_, polecatName, ok := parsePolecatSessionName(sessionName)
-			if !ok {
-				continue
-			}
-			if knownNames[polecatName] {
-				continue
-			}
-			agentBeadID := polecatBeadIDForRig(r, r.Name, polecatName)
-			presence := beadAbsent
-			switch {
-			case agentLookupFailed:
-				presence = beadLookupFailed
-			default:
-				if _, ok := agents[agentBeadID]; ok {
-					presence = beadPresent
-				}
-			}
-			// Classified here, not on the pool: an orphan session is decided
-			// from session and bead presence alone, so it needs no probe. It
-			// still takes its place in `seats` to keep the output order.
-			orphan := classifyOrphanSession(r.Name, polecatName, sessionName, presence)
-			seats = append(seats, polecatSeat{decided: &orphan})
-		}
+	for _, s := range rigSeats {
+		seats = append(seats, s...)
 	}
 
 	// One probe per seat, fanned out across a bounded pool. Order is preserved,

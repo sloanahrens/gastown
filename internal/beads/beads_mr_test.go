@@ -444,3 +444,137 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+// installLabeledWispsBDStub returns one agent wisp and one merge-request wisp
+// from "bd sql", so a single PreloadLabeledWisps("gt:agent",
+// "gt:merge-request") call can warm both caches at once. It also logs every
+// invocation, so a test can assert PreloadLabeledWisps costs exactly one bd
+// sql round trip and that a subsequent ListAgentBeadsFromWisps /
+// ListMergeRequests reads the cache instead of spawning its own (gt-92zx).
+func installLabeledWispsBDStub(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mock for bd")
+	}
+	ResetBdAllowStaleCacheForTest()
+	t.Cleanup(ResetBdAllowStaleCacheForTest)
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "bd.log")
+	script := `#!/bin/sh
+LOG_FILE='` + logPath + `'
+printf '%s\n' "$*" >> "$LOG_FILE"
+if [ "${1:-}" = "--allow-stale" ]; then
+  if [ "${2:-}" = "version" ]; then
+    echo "Error: unknown flag: --allow-stale" >&2
+    exit 0
+  fi
+  shift
+fi
+case "${1:-}" in
+  list)
+    printf '%s\n' '[]'
+    exit 0
+    ;;
+  sql)
+    printf '%s\n' '[{"id":"gt-om-witness","title":"witness agent","description":"role: witness\n","status":"open","priority":1,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":"gt:agent"},{"id":"gt-wisp-mr","title":"Merge: gt-source","description":"branch: polecat/test/gt-source@abc\ntarget: main\nsource_issue: gt-source\nrig: gastown\n","status":"open","priority":1,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":"gt:merge-request"}]'
+    exit 0
+    ;;
+  show)
+    printf '%s\n' '[{"id":"gt-wisp-mr","title":"Merge: gt-source","description":"branch: polecat/test/gt-source@abc\ntarget: main\nsource_issue: gt-source\nrig: gastown\n","status":"open","priority":1,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","ephemeral":true,"labels":["gt:merge-request"]}]'
+    exit 0
+    ;;
+  "mol")
+    echo 'ListAgentBeadsFromWisps should have used the preloaded cache' >&2
+    exit 7
+    ;;
+  *)
+    printf '%s\n' '[]'
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// TestPreloadLabeledWispsSingleQuery covers the gt-92zx fix: warming both the
+// agent and merge-request wisp caches costs one bd sql round trip, not one
+// per label.
+func TestPreloadLabeledWispsSingleQuery(t *testing.T) {
+	logPath := installLabeledWispsBDStub(t)
+
+	b := New(t.TempDir())
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	logOutput := string(logData)
+	if count := strings.Count(logOutput, "sql --json"); count != 1 {
+		t.Fatalf("sql --json count = %d, want 1\nlog:\n%s", count, logOutput)
+	}
+	for _, want := range []string{"'gt:agent'", "'gt:merge-request'"} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("bd sql query missing %s\nlog:\n%s", want, logOutput)
+		}
+	}
+}
+
+// TestListMergeRequestsUsesPreloadedWispCache covers the gt-92zx fix: once
+// PreloadLabeledWisps has warmed the cache, ListMergeRequests reads it
+// instead of running its own "bd sql" query.
+func TestListMergeRequestsUsesPreloadedWispCache(t *testing.T) {
+	logPath := installLabeledWispsBDStub(t)
+
+	b := New(t.TempDir())
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	}
+
+	issues, err := b.ListMergeRequests(ListOptions{Label: "gt:merge-request", Status: "all", Priority: -1})
+	if err != nil {
+		t.Fatalf("ListMergeRequests() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "gt-wisp-mr" {
+		t.Fatalf("ListMergeRequests() = %#v, want only gt-wisp-mr", issues)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	if count := strings.Count(string(logData), "sql --json"); count != 1 {
+		t.Fatalf("sql --json count = %d, want 1 (the preload's, none from ListMergeRequests)\nlog:\n%s", count, logData)
+	}
+}
+
+// TestListAgentBeadsFromWispsUsesPreloadedCache covers the gt-92zx fix: once
+// PreloadLabeledWisps has warmed the cache, ListAgentBeadsFromWisps reads it
+// instead of running its own "bd mol wisp list" (the stub fails the test if
+// that subcommand is invoked).
+func TestListAgentBeadsFromWispsUsesPreloadedCache(t *testing.T) {
+	installLabeledWispsBDStub(t)
+
+	b := New(t.TempDir())
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	}
+
+	agents, err := b.ListAgentBeadsFromWisps()
+	if err != nil {
+		t.Fatalf("ListAgentBeadsFromWisps() error = %v", err)
+	}
+	if agent, ok := agents["gt-om-witness"]; !ok || agent.ID != "gt-om-witness" {
+		t.Fatalf("ListAgentBeadsFromWisps() = %#v, want gt-om-witness", agents)
+	}
+	if _, ok := agents["gt-wisp-mr"]; ok {
+		t.Fatalf("ListAgentBeadsFromWisps() should not include the merge-request wisp: %#v", agents)
+	}
+}
