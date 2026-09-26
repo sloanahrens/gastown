@@ -9,15 +9,17 @@
 // that is the whole vantage-point mechanism — but they always share files.
 //
 // It runs at gt prime, BEFORE the session is spent, needs no index, and costs
-// one local git command. Output is deliberately terse (a few lines); a prime
-// payload is already long, so the check degrades to silence on any failure
-// rather than growing it.
+// two local git commands — a ref check that origin/main exists, then one day of
+// its history for the bead's paths. Both go through runPrimeExternalCommand, so
+// they share prime's external-tool deadline and process group; a git that hangs
+// is abandoned rather than waited out. Output is deliberately terse (a few
+// lines); a prime payload is already long, so the check degrades to silence on
+// any failure rather than growing it.
 
 package cmd
 
 import (
 	"fmt"
-	"os/exec"
 	"regexp"
 	"strings"
 
@@ -38,9 +40,9 @@ const dupesRecentFiles = 3
 var dupesCommitLineRe = regexp.MustCompile(`^([0-9a-f]{7,40})\t(.*)$`)
 
 type dupesCommit struct {
-	Hash  string
+	Hash    string
 	Subject string
-	Files map[string]bool
+	Files   map[string]bool
 }
 
 func (c dupesCommit) touches(files []string) bool {
@@ -136,36 +138,34 @@ func checkHookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
 	fmt.Println(b.String())
 }
 
-// gitIn runs a git command in workDir, the polecat's worktree.
-func gitIn(workDir string, args ...string) *exec.Cmd {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = workDir
-	return cmd
-}
-
 // dupesRecentLog reads a day of origin/main history naming the given paths.
 // The day cap keeps this O(churn) for any worktree, fresh or stale; the cap
-// is the point, not the exactness. The commands run with Dir=workDir, the
+// is the point, not the exactness. The commands run in workDir as Dir, the
 // polecat's own worktree — no getGitRoot call, which resolves relative to the
-// gt binary's cwd and would read the wrong repo. Any error — workDir outside
-// a repo, no origin/main, git failing — is returned so the caller can degrade
+// gt binary's cwd and would read the wrong repo.
+//
+// Both commands go through runPrimeExternalCommand, which is what keeps this
+// check from outliving its welcome: prime's external-tool deadline bounds each
+// one and its process group makes a canceled git killable, exactly as for the
+// bd and mail injections. Any error — workDir outside a repo, no origin/main,
+// git failing or hitting the deadline — is returned so the caller can degrade
 // to silence.
 func dupesRecentLog(workDir string, files []string) ([]dupesCommit, error) {
-	if _, err := gitIn(workDir, "rev-parse", "--verify", "--quiet", "origin/main").Output(); err != nil {
+	if _, _, err := runPrimeExternalCommand(workDir, "git", "rev-parse", "--verify", "--quiet", "origin/main"); err != nil {
 		return nil, fmt.Errorf("origin/main: %w", err)
 	}
 
-	args := []string{"log", "origin/main", "--since=1 day", "--name-only", "--pretty=format:%h%x09%s"}
-	args = append(args, "--")
+	args := []string{"log", "origin/main", "--since=1 day", "--name-only", "--pretty=format:%h%x09%s", "--"}
 	args = append(args, files...)
-	out, err := gitIn(workDir, args...).Output()
+	stdout, _, err := runPrimeExternalCommand(workDir, "git", args...)
 	if err != nil {
 		return nil, err
 	}
+	out := stdout.String()
 
 	var commits []dupesCommit
 	var cur *dupesCommit
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if m := dupesCommitLineRe.FindStringSubmatch(line); m != nil {
 			if cur != nil {
