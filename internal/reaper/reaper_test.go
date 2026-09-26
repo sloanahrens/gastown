@@ -120,7 +120,7 @@ func TestParentExcludeJoin(t *testing.T) {
 }
 
 func TestMRProtectedJoin(t *testing.T) {
-	joinClause, whereCondition := mrProtectedJoin()
+	joinClause, whereCondition := mrProtectedJoin(time.Hour, time.Now().UTC().Add(-time.Hour))
 
 	if !contains(joinClause, "wisp_labels") {
 		t.Error("mrProtectedJoin should query wisp_labels")
@@ -1007,22 +1007,26 @@ func TestReapExcludesLiveMergeQueueWisps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	// old-cleanup-no-mr and old-stale-orphan are eligible: the other two old
-	// wisps are protected by MR label, cleanup+merge-requested labels, or active_mr.
-	if scan.ReapCandidates != 2 {
-		t.Fatalf("Scan ReapCandidates = %d, want 2", scan.ReapCandidates)
+	// old-mr-wisp is protected by its gt:merge-request label; old-active-mr-target
+	// is spared by live-agent's active_mr. The three other old wisps are
+	// eligible: old-cleanup-open-mr's merge-requested state was last set 48h ago
+	// (createdAt, no label_set event), past the 24h protection TTL (gt-apam);
+	// old-cleanup-no-mr never requested; old-stale-orphan's nuked-agent ref has
+	// lapsed.
+	if scan.ReapCandidates != 3 {
+		t.Fatalf("Scan ReapCandidates = %d, want 3", scan.ReapCandidates)
 	}
 
 	if _, err := Reap(db, "testdb", maxAge, false); err != nil {
 		t.Fatalf("real Reap: %v", err)
 	}
 
-	for _, id := range []string{"old-mr-wisp", "old-cleanup-open-mr", "old-active-mr-target"} {
+	for _, id := range []string{"old-mr-wisp", "old-active-mr-target"} {
 		if got := state.status(id); got != "open" {
 			t.Fatalf("%s status = %q, want open (protected)", id, got)
 		}
 	}
-	for _, id := range []string{"old-cleanup-no-mr", "old-stale-orphan"} {
+	for _, id := range []string{"old-cleanup-open-mr", "old-cleanup-no-mr", "old-stale-orphan"} {
 		if got := state.status(id); got != "closed" {
 			t.Fatalf("%s status = %q, want closed (not protected)", id, got)
 		}
@@ -1194,7 +1198,7 @@ var fakeReaperDriverID uint64
 func openFakeReaperDB(t *testing.T, state *fakeReaperState) *sql.DB {
 	t.Helper()
 	driverName := fmt.Sprintf("fake_reaper_%d", atomic.AddUint64(&fakeReaperDriverID, 1))
-	sql.Register(driverName, &fakeReaperDriver{state: state})
+	sql.Register(driverName, &fakeReaperDriver{state: state, t: t})
 	db, err := sql.Open(driverName, "")
 	if err != nil {
 		t.Fatalf("open fake db: %v", err)
@@ -1210,6 +1214,11 @@ type fakeWisp struct {
 	closedAt    time.Time
 	description string
 	labels      []string
+	// labelSetAt is when the state:merge-requested label was last set —
+	// the wisp_events label_set anchor mrProtectedJoin's TTL reads (gt-apam).
+	// Zero means no such event row exists, so the reaper falls back to
+	// createdAt.
+	labelSetAt time.Time
 }
 
 type fakeDep struct {
@@ -1433,8 +1442,14 @@ func (s *fakeReaperState) isMoleculeStepCandidateLocked(id string) bool {
 // ones the caller binds as NOT IN args. References come from excluded rather than
 // from this model, so a query that stops producing those IDs shows up here as an
 // unspared wisp (gt-l6y9).
-func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMoleculeSteps bool, excluded map[string]bool) []string {
-	mrProtected := s.mrProtectedLocked()
+func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, protectionCutoff time.Time, excludeMoleculeSteps bool, excluded map[string]bool) []string {
+	stepsClosedParent := map[string]bool{}
+	for id := range s.wisps {
+		if s.isMoleculeStepCandidateLocked(id) {
+			stepsClosedParent[id] = true
+		}
+	}
+	mrProtected := s.mrProtectedLocked(protectionCutoff)
 	var ids []string
 	for id, w := range s.wisps {
 		if !isOpenWispStatus(w.status) || w.issueType == "agent" || !w.createdAt.Before(cutoff) {
@@ -1443,7 +1458,12 @@ func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMolecul
 		if s.hasOpenParentLocked(id) {
 			continue
 		}
-		if excludeMoleculeSteps && s.isMoleculeStepCandidateLocked(id) {
+		if excludeMoleculeSteps {
+			if stepsClosedParent[id] {
+				continue
+			}
+		} else if !stepsClosedParent[id] {
+			// Inner join: only closed-molecule steps are eligible here.
 			continue
 		}
 		if mrProtected[id] || excluded[id] {
@@ -1455,9 +1475,11 @@ func (s *fakeReaperState) staleCandidatesLocked(cutoff time.Time, excludeMolecul
 	return ids
 }
 
-// mrProtectedLocked mirrors mrProtectedJoin's semantics: wisps labeled
-// gt:merge-request, or labeled both cleanup and state:merge-requested.
-func (s *fakeReaperState) mrProtectedLocked() map[string]bool {
+// mrProtectedLocked mirrors mrProtectedJoin's semantics (gt-apam): a wisp is
+// protected when labeled gt:merge-request, or labeled both cleanup and
+// state:merge-requested with the state set within maxProtection of now (the
+// wisp_events label_set anchor, else createdAt).
+func (s *fakeReaperState) mrProtectedLocked(protectionCutoff time.Time) map[string]bool {
 	protected := map[string]bool{}
 	for id, w := range s.wisps {
 		hasMR, hasCleanup, hasMergeRequested := false, false, false
@@ -1471,7 +1493,11 @@ func (s *fakeReaperState) mrProtectedLocked() map[string]bool {
 				hasMergeRequested = true
 			}
 		}
-		if hasMR || (hasCleanup && hasMergeRequested) {
+		anchor := w.createdAt
+		if !w.labelSetAt.IsZero() {
+			anchor = w.labelSetAt
+		}
+		if hasMR || (hasCleanup && hasMergeRequested && !anchor.Before(protectionCutoff)) {
 			protected[id] = true
 		}
 	}
@@ -1557,6 +1583,7 @@ func (s *fakeReaperState) openCountLocked() int {
 
 type fakeReaperDriver struct {
 	state *fakeReaperState
+	t     *testing.T
 }
 
 func (d *fakeReaperDriver) Open(string) (driver.Conn, error) {
@@ -1565,11 +1592,12 @@ func (d *fakeReaperDriver) Open(string) (driver.Conn, error) {
 	d.state.nextConn++
 	connID := d.state.nextConn
 	d.state.ops[connID] = nil
-	return &fakeReaperConn{state: d.state, id: connID}, nil
+	return &fakeReaperConn{state: d.state, id: connID, t: d.t}, nil
 }
 
 type fakeReaperConn struct {
 	state *fakeReaperState
+	t     *testing.T
 	id    int
 }
 
@@ -1600,7 +1628,8 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		if err := validateStaleWispQuery(normalized); err != nil {
 			return nil, err
 		}
-		return fakeCountRows(len(c.state.staleCandidatesLocked(namedTime(args), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL"), namedExcludedIDs(args)))), nil
+		candidates := c.state.staleCandidatesLocked(namedTime(args), namedLiteralTTLTime(normalized, c.t), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL"), namedExcludedIDs(args))
+		return fakeCountRows(len(candidates)), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "pm.issue_type = 'molecule'"):
 		if err := validateMoleculeStepQuery(normalized); err != nil {
 			return nil, err
@@ -1637,7 +1666,7 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		if err := validateStaleWispQuery(normalized); err != nil {
 			return nil, err
 		}
-		return fakeIDRows(c.state.staleCandidatesLocked(namedTime(args), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL"), namedExcludedIDs(args))), nil
+		return fakeIDRows(c.state.staleCandidatesLocked(namedTime(args), namedLiteralTTLTime(normalized, c.t), strings.Contains(normalized, "closed_molecule_step.issue_id IS NULL"), namedExcludedIDs(args))), nil
 	case strings.Contains(normalized, "SELECT w.id FROM wisps w") && strings.Contains(normalized, "pm.issue_type = 'molecule'"):
 		if err := validateMoleculeStepQuery(normalized); err != nil {
 			return nil, err
@@ -1773,6 +1802,28 @@ func namedTime(args []driver.NamedValue) time.Time {
 	return time.Time{}
 }
 
+// namedLiteralTTLTime extracts the merge-requested protection TTL cutoff the
+// reap queries render as a SQL literal (gt-apam). Zero means the query carries
+// no literal — protection unbounded — which is not the shape Scan and Reap
+// must produce, so tests fail on it rather than silently protecting forever.
+func namedLiteralTTLTime(normalized string, t *testing.T) time.Time {
+	const marker = "COALESCE(mr_requested.last_requested_at, w.created_at) >= '"
+	idx := strings.Index(normalized, marker)
+	if idx == -1 {
+		t.Fatalf("reap query missing the TTL literal %q: %s", marker, normalized)
+	}
+	end := strings.Index(normalized[idx+len(marker):], "'")
+	if end == -1 {
+		t.Fatalf("unterminated TTL literal in reap query: %s", normalized)
+	}
+	value := normalized[idx+len(marker) : idx+len(marker)+end]
+	cutoff, err := time.Parse("2006-01-02 15:04:05", value)
+	if err != nil {
+		t.Fatalf("parse TTL literal %q: %v", value, err)
+	}
+	return cutoff
+}
+
 // namedExcludedIDs returns the bind args after the age cutoff — the wisp IDs the
 // live-reference exclusion clause carries.
 func namedExcludedIDs(args []driver.NamedValue) map[string]bool {
@@ -1850,4 +1901,119 @@ func assertOpsContainInOrder(t *testing.T, ops []string, want ...string) {
 		}
 	}
 	t.Fatalf("ops missing ordered sequence %v in %v", want[next:], ops)
+}
+
+// TestMRProtectionTTLFreshLabelSetStaysProtected verifies that a cleanup wisp
+// whose state:merge-requested label was set within the TTL remains protected
+// (gt-apam): the witness records a wisp_events label_set anchor when it sets
+// the state, so the reaper reads that timestamp — not createdAt — as the
+// protection anchor.
+func TestMRProtectionTTLFreshLabelSetStaysProtected(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	freshLabelSet := now.Add(-2 * time.Hour) // within the 24h TTL
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"fresh-cleanup": {
+				id: "fresh-cleanup", status: "open", issueType: "task",
+				createdAt: old, labelSetAt: freshLabelSet,
+				labels: []string{"cleanup", "state:merge-requested"},
+			},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	defer db.Close()
+
+	maxAge := 24 * time.Hour
+	scan, err := Scan(db, "testdb", maxAge, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	// The wisp is 48h old (past maxAge) but its label was set 2h ago (within TTL),
+	// so it stays protected: zero reap candidates.
+	if scan.ReapCandidates != 0 {
+		t.Fatalf("Scan ReapCandidates = %d, want 0 (fresh labelSetAt within TTL)", scan.ReapCandidates)
+	}
+}
+
+// TestMRProtectionTTLExpiredLabelSetBecomesReapable verifies that a cleanup
+// wisp whose state:merge-requested label was set before the TTL lapses becomes
+// reapable (gt-apam): the protection window is bounded, so a lost MERGED signal
+// no longer leaves the wisp immortal.
+func TestMRProtectionTTLExpiredLabelSetBecomesReapable(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	expiredLabelSet := now.Add(-30 * time.Hour) // beyond the 24h TTL
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"expired-cleanup": {
+				id: "expired-cleanup", status: "open", issueType: "task",
+				createdAt: old, labelSetAt: expiredLabelSet,
+				labels: []string{"cleanup", "state:merge-requested"},
+			},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	defer db.Close()
+
+	maxAge := 24 * time.Hour
+	scan, err := Scan(db, "testdb", maxAge, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.ReapCandidates != 1 {
+		t.Fatalf("Scan ReapCandidates = %d, want 1 (expired labelSetAt beyond TTL)", scan.ReapCandidates)
+	}
+
+	// And Reap actually closes it.
+	if _, err := Reap(db, "testdb", maxAge, false); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if got := state.status("expired-cleanup"); got != "closed" {
+		t.Fatalf("expired-cleanup status = %q, want closed", got)
+	}
+}
+
+// TestMRProtectionTTLZeroLabelSetFallsBackToCreatedAt verifies that when no
+// wisp_events label_set row exists (labelSetAt is zero), the reaper falls back
+// to createdAt as the protection anchor (gt-apam): this preserves the
+// pre-TTL behavior for wisps created before the witness started recording
+// anchors, while still bounding their protection window.
+func TestMRProtectionTTLZeroLabelSetFallsBackToCreatedAt(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	recent := now.Add(-2 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			// 48h old, no labelSetAt → anchor = createdAt = 48h ago → expired
+			"old-no-anchor": {
+				id: "old-no-anchor", status: "open", issueType: "task",
+				createdAt: old,
+				labels: []string{"cleanup", "state:merge-requested"},
+			},
+			// 2h old, no labelSetAt → anchor = createdAt = 2h ago → fresh
+			"recent-no-anchor": {
+				id: "recent-no-anchor", status: "open", issueType: "task",
+				createdAt: recent,
+				labels: []string{"cleanup", "state:merge-requested"},
+			},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	defer db.Close()
+
+	maxAge := 24 * time.Hour
+	scan, err := Scan(db, "testdb", maxAge, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	// old-no-anchor is 48h old (past maxAge) with anchor=createdAt=48h ago
+	// (beyond the 24h TTL) → unprotected → reapable.
+	// recent-no-anchor is 2h old (NOT past maxAge) → not eligible at all.
+	if scan.ReapCandidates != 1 {
+		t.Fatalf("Scan ReapCandidates = %d, want 1 (only old-no-anchor is past maxAge and expired)", scan.ReapCandidates)
+	}
 }

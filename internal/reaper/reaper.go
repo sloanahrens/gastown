@@ -217,6 +217,14 @@ const (
 	// the normal working set. See hq-57jr8.
 	DefaultAlertThreshold = 3000
 
+	// DefaultMRProtectionTTL caps how long a cleanup wisp stays protected from
+	// age-based reaping by its state:merge-requested label, measured from when
+	// the state was last set (wisp_events label_set row, else created_at).
+	// A merge the refinery handles lands in minutes, so 24h of silence is "MR
+	// genuinely lost". Callers pass 0 to mrProtectedJoin for unbounded
+	// protection (gt-apam).
+	DefaultMRProtectionTTL = 24 * time.Hour
+
 	// MinStaleIssueAge is the shortest stale-age AutoClose will act on without
 	// Force. The 2026-09-16 reaper incident ran at 7d, which was short enough to
 	// sweep eight-day-old agent beads; anything below a week cannot distinguish
@@ -341,6 +349,44 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 
 const openWispStatusWhere = "w.status IN ('open', 'hooked', 'in_progress')"
 
+// cleanupWispProtectedJoin is the half of mrProtectedJoin that protects
+// cleanup wisps tracking an outstanding MR: labels cleanup +
+// state:merge-requested. The protection lapses maxProtection after the state
+// was last set — wisp_events row (event_type='label_set') when one exists,
+// the wisp's created_at otherwise — so a wisp whose MERGED signal never
+// arrived becomes reapable instead of immortal (gt-apam). The caller supplies
+// the cutoff; the clause renders it as a literal so the TTL is one bind per
+// query, not one per protected wisp.
+//
+// Like parentExcludeJoin, the two return values are a LEFT JOIN clause and a
+// WHERE-clause fragment: the caller MUST introduce the WHERE keyword itself
+// before appending whereCondition. Appending it straight onto the last JOIN's
+// ON clause instead is a silent no-op — a LEFT JOIN never drops a left-side
+// row over its own ON predicate — which let every wisp through as
+// "protected" and disabled all age-based reaping (gt-apam rejection).
+func cleanupWispProtectedJoin(maxProtection time.Duration, cutoff time.Time) (joinClause, whereCondition string) {
+	joinClause = `LEFT JOIN (
+		SELECT issue_id FROM wisp_labels WHERE label = 'cleanup'
+	) wisp_cleanup ON wisp_cleanup.issue_id = w.id
+	LEFT JOIN (
+		SELECT issue_id, MAX(created_at) AS last_requested_at
+		FROM wisp_events
+		WHERE event_type = 'label_set' AND old_value = 'state:merge-requested'
+		GROUP BY issue_id
+	) mr_requested ON mr_requested.issue_id = w.id
+	LEFT JOIN (
+		SELECT issue_id FROM wisp_labels WHERE label = 'state:merge-requested'
+	) mr_label ON mr_label.issue_id = w.id`
+
+	whereCondition = "wisp_cleanup.issue_id IS NOT NULL AND mr_label.issue_id IS NOT NULL"
+	if maxProtection > 0 {
+		whereCondition += fmt.Sprintf(
+			" AND COALESCE(mr_requested.last_requested_at, w.created_at) >= '%s'",
+			cutoff.Format("2006-01-02 15:04:05"))
+	}
+	return joinClause, whereCondition
+}
+
 // mrProtectedJoin returns a LEFT JOIN clause and WHERE condition that excludes
 // wisps actively participating in the merge queue from age-based reaping:
 //   - MR wisps (label gt:merge-request): beads status doesn't distinguish
@@ -353,13 +399,20 @@ const openWispStatusWhere = "w.status IN ('open', 'hooked', 'in_progress')"
 // older than max-age, so age alone must never be sufficient to close these
 // classes (gt-4okk: reaper age-sweep closed a live MR wisp during a 5-day
 // Dolt outage, and the witness gc purged it irrecoverably two minutes later).
-func mrProtectedJoin() (joinClause, whereCondition string) {
+//
+// The cleanup-wisp branch lapses maxProtection after the state was last set
+// (gt-apam). The TTL cutoff renders as a SQL literal, not a bind arg, so the
+// caller passes cutoff = now - maxProtection and keeps binding only the age
+// cutoff and the live-reference IDs.
+func mrProtectedJoin(maxProtection time.Duration, cutoff time.Time) (joinClause, whereCondition string) {
+	cleanupJoin, cleanupWhere := cleanupWispProtectedJoin(maxProtection, cutoff)
 	joinClause = `LEFT JOIN (
 		SELECT DISTINCT issue_id FROM wisp_labels WHERE label = 'gt:merge-request'
 		UNION
-		SELECT wl.issue_id FROM wisp_labels wl
-		WHERE wl.label = 'cleanup'
-		AND wl.issue_id IN (SELECT issue_id FROM wisp_labels WHERE label = 'state:merge-requested')
+		SELECT w.id FROM wisps w
+		` + cleanupJoin + `
+		WHERE ` + cleanupWhere + `
+		AND w.status IN ('open', 'hooked', 'in_progress')
 	) mr_protected ON mr_protected.issue_id = w.id`
 	whereCondition = "mr_protected.issue_id IS NULL"
 	return
@@ -545,7 +598,7 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	parentJoin, parentWhere := parentExcludeJoin(dbName)
 	moleculeStepJoin := closedMoleculeStepJoin("closed_molecule_step")
 	moleculeStepExcludeJoin := closedMoleculeStepExcludeJoin("closed_molecule_step")
-	mrJoin, mrWhere := mrProtectedJoin()
+	mrJoin, mrWhere := mrProtectedJoin(DefaultMRProtectionTTL, now.Add(-DefaultMRProtectionTTL))
 
 	moleculeStepQuery := fmt.Sprintf(
 		"SELECT COUNT(*) FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
@@ -568,7 +621,8 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 	reapQuery := fmt.Sprintf(
 		"SELECT COUNT(*) FROM wisps w %s %s %s WHERE %s AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND closed_molecule_step.issue_id IS NULL AND %s%s",
 		parentJoin, moleculeStepExcludeJoin, mrJoin, openWispStatusWhere, parentWhere, mrWhere, referencedClause)
-	reapArgs := append([]interface{}{now.Add(-maxAge)}, referencedArgs...)
+	reapArgs := []interface{}{now.Add(-maxAge)}
+	reapArgs = append(reapArgs, referencedArgs...)
 	if err := db.QueryRowContext(ctx, reapQuery, reapArgs...).Scan(&result.ReapCandidates); err != nil {
 		return nil, fmt.Errorf("count reap candidates: %w", err)
 	}
@@ -649,11 +703,12 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	cutoff := time.Now().UTC().Add(-maxAge)
+	now := time.Now().UTC()
+	cutoff := now.Add(-maxAge)
 	parentJoin, parentWhere := parentExcludeJoin(dbName)
 	moleculeStepJoin := closedMoleculeStepJoin("closed_molecule_step")
 	moleculeStepExcludeJoin := closedMoleculeStepExcludeJoin("closed_molecule_step")
-	mrJoin, mrWhere := mrProtectedJoin()
+	mrJoin, mrWhere := mrProtectedJoin(DefaultMRProtectionTTL, now.Add(-DefaultMRProtectionTTL))
 	referencedIDs, err := liveAgentReferencedWispIDs(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("compute live agent referenced ids: %w", err)
@@ -670,7 +725,8 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 	whereClause := fmt.Sprintf(
 		"%s AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND closed_molecule_step.issue_id IS NULL AND %s%s",
 		openWispStatusWhere, parentWhere, mrWhere, referencedClause)
-	whereArgs := append([]interface{}{cutoff}, referencedArgs...)
+	whereArgs := []interface{}{cutoff}
+	whereArgs = append(whereArgs, referencedArgs...)
 
 	// absentParentJoin and absentParentWhere are used for both dry-run counting
 	// and real execution. Define them once here.

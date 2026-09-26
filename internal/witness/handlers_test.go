@@ -1438,6 +1438,73 @@ func TestUpdateCleanupWispState_UsesCorrectBdUpdateFlags(t *testing.T) {
 	}
 }
 
+// TestRecordCleanupWispLabelSet_RejectsInvalidWispID guards the gt-apam SQL
+// injection finding: wispID is interpolated into raw SQL text (bd.Exec's
+// "sql" subcommand has no parameter-binding path), so a wispID that doesn't
+// match the bead-id shape must be rejected before it ever reaches a query.
+func TestRecordCleanupWispLabelSet_RejectsInvalidWispID(t *testing.T) {
+	t.Parallel()
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			t.Fatalf("bd.Exec should not be called for an invalid wisp id, got args: %v", args)
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	recordCleanupWispLabelSet(bd, t.TempDir(), "gt-wisp-abc'; DROP TABLE wisps; --", "merge-requested")
+
+	if len(mock.calls) != 0 {
+		t.Errorf("recordCleanupWispLabelSet: expected no bd calls for an invalid wisp id, got: %v", mock.calls)
+	}
+}
+
+// TestRecordCleanupWispLabelSet_SkipsInsertOnUnparseableCount guards the
+// gt-apam finding that treating a parse error the same as count==0 risks a
+// double-insert if bd's table-output format ever changes shape.
+func TestRecordCleanupWispLabelSet_SkipsInsertOnUnparseableCount(t *testing.T) {
+	t.Parallel()
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			// args[0] is "sql" for both the count and insert queries here.
+			return "not-a-number", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	recordCleanupWispLabelSet(bd, t.TempDir(), "gt-wisp-abc", "merge-requested")
+
+	for _, call := range mock.calls {
+		if strings.Contains(call, "INSERT INTO wisp_events") {
+			t.Errorf("recordCleanupWispLabelSet: must not insert when the count is unparseable, got call: %s", call)
+		}
+	}
+}
+
+// TestRecordCleanupWispLabelSet_InsertsWhenCountIsZero verifies the normal
+// path still fires the insert once the count query cleanly reports 0 rows.
+func TestRecordCleanupWispLabelSet_InsertsWhenCountIsZero(t *testing.T) {
+	t.Parallel()
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			return "COUNT(*)\n0", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	recordCleanupWispLabelSet(bd, t.TempDir(), "gt-wisp-abc", "merge-requested")
+
+	var inserted bool
+	for _, call := range mock.calls {
+		if strings.Contains(call, "INSERT INTO wisp_events") && strings.Contains(call, "gt-wisp-abc") {
+			inserted = true
+		}
+	}
+	if !inserted {
+		t.Errorf("recordCleanupWispLabelSet: expected an INSERT INTO wisp_events call, got: %v", mock.calls)
+	}
+}
+
 func TestExtractDoneIntent_Valid(t *testing.T) {
 	t.Parallel()
 	ts := time.Now().Add(-45 * time.Second)

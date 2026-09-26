@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1277,7 +1278,71 @@ func UpdateCleanupWispState(bd *BdCli, workDir, wispID, newState string) error {
 	for _, l := range labels {
 		args = append(args, "--set-labels="+l)
 	}
-	return bd.Run(workDir, args...)
+	if err := bd.Run(workDir, args...); err != nil {
+		return err
+	}
+
+	// Timestamp the state transition in wisp_events so the reaper's
+	// merge-requested protection TTL has a durable anchor (gt-apam). A
+	// bd --set-labels update alone leaves wisp_events without the row, and
+	// without the anchor the reaper cannot tell a lost MR from a fresh one.
+	// Best-effort: the label is the source of truth, the event is metadata,
+	// so a failure here only degrades back to created_at anchoring.
+	if newState == "merge-requested" {
+		recordCleanupWispLabelSet(bd, workDir, wispID, newState)
+	}
+	return nil
+}
+
+// wispIDShape matches the bead-id syntax bd generates for wisps (a prefix,
+// which may be empty, plus hyphen-joined alphanumeric segments — e.g.
+// "gt-apam", "hq-wisp-fw1m"). recordCleanupWispLabelSet checks wispID against
+// it before the ID is interpolated into SQL text, since bd.Exec's "sql"
+// subcommand takes a raw query string with no parameter-binding path.
+var wispIDShape = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]*$`)
+
+// recordCleanupWispLabelSet records a state label_set row in wisp_events,
+// inserting only when no such row exists for the wisp yet (gt-apam).
+func recordCleanupWispLabelSet(bd *BdCli, workDir, wispID, newState string) {
+	// wispID reaches here from createCleanupWisp/ensureCleanupWisp bead IDs,
+	// which are bd-generated today but not validated on the way in; guard the
+	// SQL-text interpolation below rather than trust that (gt-apam).
+	if !wispIDShape.MatchString(wispID) {
+		log.Printf("witness: cleanup wisp label_set timestamp skipped for %q: not a valid bead id (TTL anchor falls back to created_at)", wispID)
+		return
+	}
+	// wisp_events carries no label column: event_type='label_set' marks the
+	// transition and old_value names the label that was set.
+	stamp := time.Now().UTC().Format("2006-01-02 15:04:05")
+	countQuery := "SELECT COUNT(*) FROM wisp_events WHERE issue_id = '" + wispID +
+		"' AND event_type = 'label_set' AND old_value = 'state:" + newState + "'"
+	output, err := bd.Exec(workDir, "sql", countQuery)
+	if err != nil {
+		log.Printf("witness: cleanup wisp label_set timestamp query failed for %s: %v (TTL anchor falls back to created_at)", wispID, err)
+		return
+	}
+	// The count renders as a table (header + value row); take the last
+	// whitespace-delimited token and parse it.
+	tokens := strings.Fields(output)
+	if len(tokens) == 0 {
+		return
+	}
+	count, err := strconv.Atoi(tokens[len(tokens)-1])
+	if err != nil {
+		// Unparseable, non-empty render — bd's table format may have changed.
+		// Skip the insert rather than risk a double-insert from misreading it
+		// as zero; the TTL anchor falls back to created_at.
+		log.Printf("witness: cleanup wisp label_set count unparseable for %s: %q (TTL anchor falls back to created_at)", wispID, output)
+		return
+	}
+	if count > 0 {
+		return // already timestamped
+	}
+	insertQuery := "INSERT INTO wisp_events (issue_id, event_type, actor, old_value, created_at) " +
+		"VALUES ('" + wispID + "', 'label_set', 'witness', 'state:" + newState + "', '" + stamp + "')"
+	if _, err := bd.Exec(workDir, "sql", insertQuery); err != nil {
+		log.Printf("witness: cleanup wisp label_set timestamp insert failed for %s: %v", wispID, err)
+	}
 }
 
 // extractPolecatFromJSON extracts the polecat name from bd show --json output.
