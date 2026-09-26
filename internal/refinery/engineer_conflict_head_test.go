@@ -253,6 +253,80 @@ func TestSubmittedBranchHead_NoConflictTaskKeepsStrictGuard(t *testing.T) {
 	}
 }
 
+// TestSubmittedBranchHead_AdoptsViaDependencyWhenFieldBlank is the gt-8cre7
+// regression: conflict_task_id can go blank on the MR bead (e.g. an earlier
+// cycle's head==recorded short-circuit spent it before the resolved push it
+// announced actually landed) while the dependency edge the conflict task was
+// created under still verifies. Adoption must recover from that dependency
+// rather than treating a blank field as "no conflict ever happened".
+func TestSubmittedBranchHead_AdoptsViaDependencyWhenFieldBlank(t *testing.T) {
+	t.Parallel()
+	workDir, _, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	const branch = "polecat/jade/gt-blank-field"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "v1\n")
+	submitted, resolved := resolveConflictOnBranch(t, workDir, branch)
+
+	// conflict_task_id is blank on the MR bead, but retry_count carries the
+	// conflict history and a closed dependency still names this MR.
+	store := newPrepushStore(
+		conflictMRBead("gt-mr-7", branch, "main", "gt-blank-field", submitted, ""),
+		conflictTaskBead("gt-task-7", "gt-mr-7", "gt-blank-field", branch, "main", true),
+	)
+	store.deps = map[string][]*beadsdk.IssueWithDependencyMetadata{
+		"gt-mr-7": {{
+			Issue:          beadsdk.Issue{ID: "gt-task-7", Status: beadsdk.StatusClosed},
+			DependencyType: beadsdk.DepBlocks,
+		}},
+	}
+	e := newPrepushEngineer(t, workDir, store)
+
+	mr := &MRInfo{
+		ID: "gt-mr-7", Branch: branch, Target: "main", SourceIssue: "gt-blank-field",
+		CommitSHA: submitted, RetryCount: 1,
+	}
+	head, err := e.submittedBranchHead(mr)
+	if err != nil {
+		t.Fatalf("submittedBranchHead with blank conflict_task_id: %v", err)
+	}
+	if head != resolved {
+		t.Errorf("submitted head = %s, want resolved head %s", head, resolved)
+	}
+
+	fields := mrFieldsFromStore(t, store, "gt-mr-7")
+	if fields.CommitSHA != resolved {
+		t.Errorf("persisted commit_sha = %s, want %s", fields.CommitSHA, resolved)
+	}
+}
+
+// TestSubmittedBranchHead_BlankFieldNoRetryHistoryKeepsStrictGuard covers the
+// cheap early-out: an MR that never recorded a conflict retry (RetryCount==0)
+// must not pay for a dependency scan and must keep the strict comparison,
+// even if some unrelated closed dependency happens to exist.
+func TestSubmittedBranchHead_BlankFieldNoRetryHistoryKeepsStrictGuard(t *testing.T) {
+	t.Parallel()
+	workDir, _, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	const branch = "polecat/jade/gt-no-history"
+	createFeatureBranch(t, workDir, branch, "feature.txt", "v1\n")
+	submitted, _ := resolveConflictOnBranch(t, workDir, branch)
+
+	store := newPrepushStore(
+		prepushMRIssue("gt-mr-8", branch, "main", "gt-no-history", submitted),
+	)
+	e := newPrepushEngineer(t, workDir, store)
+
+	mr := &MRInfo{
+		ID: "gt-mr-8", Branch: branch, Target: "main", SourceIssue: "gt-no-history",
+		CommitSHA: submitted,
+	}
+	if _, err := e.submittedBranchHead(mr); err == nil {
+		t.Fatal("expected rejection: no conflict retry history must not unlock adoption")
+	}
+}
+
 // TestConflictTaskInstructionsDocumentPushAndClose pins the contract the fix
 // makes true: the task text has to tell the polecat to do both steps, since a
 // push without a close leaves the MR blocked and a close without a push leaves

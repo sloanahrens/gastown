@@ -2192,16 +2192,34 @@ func (e *Engineer) ensureMRInfoCommitSHA(mr *MRInfo) error {
 // any other submission. If the "resolution" did not actually resolve anything,
 // the merge attempt still reports a conflict and a fresh task is created.
 func (e *Engineer) adoptConflictResolvedHead(mr *MRInfo) error {
-	// Only the explicit conflict_task_id field authorizes a head move. The
-	// BlockedBy fallback used by conflictTaskIDForMR is for post-merge cleanup
-	// and would match any unrelated blocker that happens to have closed.
-	taskID := strings.TrimSpace(mr.ConflictTaskID)
-	if taskID == "" || e.beads == nil || e.git == nil {
+	if e.beads == nil || e.git == nil {
 		return nil
 	}
 	branch := strings.TrimSpace(mr.Branch)
 	if branch == "" {
 		return nil
+	}
+
+	// The explicit conflict_task_id field is the normal authority for a head
+	// move. It can end up blank even though a closed conflict task still
+	// authorizes one — e.g. the head==recorded branch below clears it to spend
+	// a task that closed before the resolved push it announces actually
+	// landed (gt-8cre7), permanently stranding the MR once the push does
+	// arrive. The dependency edge createConflictResolutionTaskForMR wired up
+	// survives that regardless, so fall back to it: any closed dependency that
+	// verifies as this MR's conflict task (isConflictTaskForMR) carries the
+	// same authority the field would. Only MRs with conflict history pay for
+	// the lookup; an unrelated closed blocker still fails verification.
+	taskID := strings.TrimSpace(mr.ConflictTaskID)
+	if taskID == "" {
+		if mr.RetryCount <= 0 {
+			return nil
+		}
+		var err error
+		taskID, err = e.closedConflictDependencyID(mr)
+		if err != nil || taskID == "" {
+			return nil
+		}
 	}
 
 	task, err := e.beads.Show(taskID)
@@ -2238,6 +2256,36 @@ func (e *Engineer) adoptConflictResolvedHead(mr *MRInfo) error {
 	_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: adopted conflict-resolved head %s (was %s) from closed task %s\n",
 		mr.ID, shortSHA(head), shortSHA(recorded), taskID)
 	return nil
+}
+
+// closedConflictDependencyID finds a closed dependency on mr that verifies as
+// mr's own conflict-resolution task (isConflictTaskForMR), for use when
+// mr.ConflictTaskID has gone blank (gt-8cre7). The dependency edge
+// RecordConflict/createConflictResolutionTaskForMR wires up when it opens a
+// conflict task is separate beads state from that field and survives it being
+// cleared, so this recovers the same authority the field would have carried.
+func (e *Engineer) closedConflictDependencyID(mr *MRInfo) (string, error) {
+	issue, err := e.beads.Show(mr.ID)
+	if err != nil || issue == nil {
+		return "", err
+	}
+	for _, dep := range issue.Dependencies {
+		if strings.ToLower(strings.TrimSpace(dep.Status)) != "closed" {
+			continue
+		}
+		id := beads.ExtractIssueID(dep.ID)
+		if id == "" {
+			continue
+		}
+		task, showErr := e.beads.Show(id)
+		if showErr != nil || task == nil {
+			continue
+		}
+		if isConflictTaskForMR(task, mr.ID, mr.SourceIssue) {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 // setMRConflictHead writes commit_sha and conflict_task_id back to the MR bead
