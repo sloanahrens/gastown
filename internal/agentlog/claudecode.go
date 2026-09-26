@@ -33,23 +33,17 @@ const (
 
 // ClaudeCodeAdapter watches Claude Code JSONL conversation files.
 //
-// Claude Code writes conversation files at:
-//
-//	~/.claude/projects/<hash>/<session-uuid>.jsonl
-//
-// where <hash> is derived from the working directory by replacing "/" with "-"
-// (e.g. /Users/pa/gt/mayor → -Users-pa-gt-mayor).
-//
-// The adapter finds the most recently modified JSONL file created after the
-// Gas Town session start time (since), tails it, and automatically switches
-// to a newer file when a new Claude session starts in the same project dir.
+// The adapter finds the most recently modified JSONL file created after the Gas
+// Town session start time (since), tails it, and automatically switches to a
+// newer file when a new Claude session starts for the same working directory.
 // This handles Claude instances that are frequently created and destroyed.
 type ClaudeCodeAdapter struct{}
 
 func (a *ClaudeCodeAdapter) AgentType() string { return "claudecode" }
 
 // Watch starts tailing the Claude Code JSONL log for sessionID.
-// workDir is the agent's CWD and is used to locate the project hash directory.
+// workDir is the agent's CWD and is used to locate the project hash directory
+// under each config root that can hold one.
 // since is the Gas Town session start time: only JSONL files modified at or
 // after this time are considered, so unrelated Claude instances (user sessions,
 // other Gas Town rigs) running in the same work dir are excluded.
@@ -58,7 +52,7 @@ func (a *ClaudeCodeAdapter) AgentType() string { return "claudecode" }
 // When Claude exits and a new session starts (new JSONL file), Watch
 // automatically switches to the new file within one poll interval (500ms).
 func (a *ClaudeCodeAdapter) Watch(ctx context.Context, sessionID, workDir string, since time.Time) (<-chan AgentEvent, error) {
-	projectDir, err := claudeProjectDirFor(workDir)
+	projectDirs, err := claudeProjectDirsFor(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving project dir: %w", err)
 	}
@@ -76,7 +70,7 @@ func (a *ClaudeCodeAdapter) Watch(ctx context.Context, sessionID, workDir string
 			if ctx.Err() != nil {
 				return
 			}
-			jsonlPath, err := waitForNewestJSONL(ctx, projectDir, since)
+			jsonlPath, err := waitForNewestJSONL(ctx, projectDirs, since)
 			if err != nil {
 				// ctx was canceled — clean exit.
 				if ctx.Err() != nil {
@@ -91,7 +85,7 @@ func (a *ClaudeCodeAdapter) Watch(ctx context.Context, sessionID, workDir string
 			currentPath = jsonlPath
 
 			// Tail the file; returns when a newer file appears or ctx is done.
-			tailJSONL(ctx, currentPath, projectDir, since, sessionID, a.AgentType(), ch)
+			tailJSONL(ctx, currentPath, projectDirs, since, sessionID, a.AgentType(), ch)
 
 			if ctx.Err() != nil {
 				return
@@ -102,24 +96,38 @@ func (a *ClaudeCodeAdapter) Watch(ctx context.Context, sessionID, workDir string
 	return ch, nil
 }
 
-// claudeProjectDirFor returns the Claude Code project directory for workDir.
+// claudeProjectDirFor returns the primary Claude Code project directory for
+// workDir — the configured config dir's, first of claudeProjectDirsFor.
+//
 // Formula: <config-dir>/projects/<hash>, where <hash> is the absolute path with
 // every non-alphanumeric character replaced by '-'. Claude Code encodes "."
 // and "_" as well as "/" this way — /Users/me/.claude becomes
 // -Users-me--claude, and <town>/gastown/.repo.git becomes
 // -…-gastown--repo-git. On Windows, backslashes are converted to forward
-// slashes and the drive letter (e.g. "C:") is stripped before hashing,
-// matching Claude Code's cross-platform behavior.
-//
-// The config dir comes from config.ClaudeConfigDir(), which honors
-// CLAUDE_CONFIG_DIR. Gas Town sets that variable town-wide (…/gt/.claude-town),
-// so resolving against ~/.claude here landed on a directory holding only
-// pre-migration transcripts: every live agent looked undated, which silently
-// disables transcript-based liveness checks (gt-xb27).
+// slashes and the drive letter (e.g. "C:") is stripped before hashing.
 func claudeProjectDirFor(workDir string) (string, error) {
+	dirs, err := claudeProjectDirsFor(workDir)
+	if err != nil {
+		return "", err
+	}
+	return dirs[0], nil
+}
+
+// claudeProjectDirsFor returns every Claude Code project directory that can
+// hold transcripts for workDir: the configured config dir's first, then the
+// default ~/.claude one.
+//
+// The config dir is a property of the process, not of the worktree. A seat
+// spawned with CLAUDE_CONFIG_DIR (…/gt/.claude-town) logs under that root,
+// while a seat that inherits the default (~/.claude — the claude-sonnet preset
+// needs the credentials only that root holds) logs under the other. Resolving
+// against one root hides the other root's live sessions, which reads as
+// activity_source=none and silently disables transcript-based liveness checks
+// for that whole seat class (gt-jxfe).
+func claudeProjectDirsFor(workDir string) ([]string, error) {
 	abs, err := filepath.Abs(workDir)
 	if err != nil {
-		return "", fmt.Errorf("resolving absolute path: %w", err)
+		return nil, fmt.Errorf("resolving absolute path: %w", err)
 	}
 	// Normalize to forward slashes (no-op on Unix).
 	normalized := filepath.ToSlash(abs)
@@ -128,11 +136,23 @@ func claudeProjectDirFor(workDir string) (string, error) {
 	if len(normalized) >= 2 && normalized[1] == ':' {
 		normalized = normalized[2:]
 	}
+	hash := claudeProjectHash(normalized)
+
 	configDir, err := config.ClaudeConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolving Claude config dir: %w", err)
+		return nil, fmt.Errorf("resolving Claude config dir: %w", err)
 	}
-	return filepath.Join(configDir, claudeProjectsSubdir, claudeProjectHash(normalized)), nil
+	dirs := []string{filepath.Join(configDir, claudeProjectsSubdir, hash)}
+
+	// Second root: the pre-CLAUDE_CONFIG_DIR location. Identical to the first
+	// when the variable is unset, so the duplicate is dropped rather than
+	// scanned twice.
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if legacy := filepath.Join(home, claudeProjectsDir, hash); legacy != dirs[0] {
+			dirs = append(dirs, legacy)
+		}
+	}
+	return dirs, nil
 }
 
 // claudeProjectHash encodes an absolute path the way Claude Code names its
@@ -147,58 +167,47 @@ func claudeProjectHash(normalizedPath string) string {
 	}, normalizedPath)
 }
 
-// ClaudeProjectDirFor returns the Claude Code project directory that holds the
-// transcripts for workDir. Exported for callers that need to inspect an agent's
-// conversation log directly (e.g. witness liveness checks, gt-xb27).
+// ClaudeProjectDirFor returns the primary Claude Code project directory for
+// workDir — the configured config dir's. Exported for callers that need to
+// inspect an agent's conversation log directly (e.g. witness liveness checks,
+// gt-xb27); use LatestTranscript to find a session's transcript across roots.
 func ClaudeProjectDirFor(workDir string) (string, error) {
 	return claudeProjectDirFor(workDir)
 }
 
 // LatestTranscript returns the most recently modified transcript (JSONL) for
-// workDir, or "" when no directory for it holds any. The modification time of
-// this file is the authoritative "last real work" timestamp for a Claude Code
-// session: Claude appends to it on conversation events (tool calls, file
-// writes, assistant messages) and not on terminal redraws, so it distinguishes
-// a long turn from a stall — unlike pane scraping (gt-xb27).
+// workDir across every root that can hold one, or "" when none does.
 //
-// The historical ~/.claude location is searched as a fallback. Callers that
-// judge staleness must still check that the transcript they get postdates the
-// session they are judging, since a fallback hit can be a transcript from an
-// earlier session in the same working directory.
+// Its modification time is the authoritative "last real work" timestamp for a
+// Claude Code session: Claude appends to it on conversation events (tool calls,
+// file writes, assistant messages) and not on terminal redraws, so it
+// distinguishes a long turn from a stall — unlike pane scraping (gt-xb27).
+// Callers that judge staleness must still check that the transcript they get
+// postdates the session they are judging, since a reused worktree keeps its
+// predecessor's transcripts.
 func LatestTranscript(workDir string) (string, error) {
-	projectDir, err := claudeProjectDirFor(workDir)
+	dirs, err := claudeProjectDirsFor(workDir)
 	if err != nil {
 		return "", err
 	}
-	if path, ok := newestJSONLIn(projectDir, time.Time{}); ok {
+	if path, ok := newestJSONLIn(dirs, time.Time{}); ok {
 		return path, nil
 	}
-
-	// Fallback: the pre-CLAUDE_CONFIG_DIR location. Harmless when it holds
-	// nothing, and its hits are filtered by mtime against session start.
-	if home, herr := os.UserHomeDir(); herr == nil {
-		if abs, aerr := filepath.Abs(workDir); aerr == nil {
-			legacyDir := filepath.Join(home, claudeProjectsDir, claudeProjectHash(filepath.ToSlash(abs)))
-			if path, ok := newestJSONLIn(legacyDir, time.Time{}); ok {
-				return path, nil
-			}
-		}
-	}
-
 	return "", nil
 }
 
-// waitForNewestJSONL polls projectDir until a qualifying .jsonl file appears.
+// waitForNewestJSONL polls dirs until a qualifying .jsonl file appears.
 // "Qualifying" means mod time >= since (or any file if since is zero).
 // Returns the path of the most recently modified qualifying file.
-func waitForNewestJSONL(ctx context.Context, projectDir string, since time.Time) (string, error) {
+func waitForNewestJSONL(ctx context.Context, dirs []string, since time.Time) (string, error) {
 	deadline := time.Now().Add(watchFileTimeout)
 	for {
-		if path, ok := newestJSONLIn(projectDir, since); ok {
+		if path, ok := newestJSONLIn(dirs, since); ok {
 			return path, nil
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timeout: no JSONL file appeared in %s within %s", projectDir, watchFileTimeout)
+			return "", fmt.Errorf("timeout: no JSONL file appeared in %s within %s",
+				strings.Join(dirs, ", "), watchFileTimeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -208,31 +217,35 @@ func waitForNewestJSONL(ctx context.Context, projectDir string, since time.Time)
 	}
 }
 
-// newestJSONLIn returns the most recently modified .jsonl file in dir whose
-// modification time is >= since (skip if since is zero).
-func newestJSONLIn(dir string, since time.Time) (string, bool) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", false
-	}
+// newestJSONLIn returns the most recently modified .jsonl file across dirs
+// whose modification time is >= since (skip if since is zero). A directory that
+// cannot be read is skipped: the reason to search several roots is that any one
+// of them may hold the live transcript.
+func newestJSONLIn(dirs []string, since time.Time) (string, bool) {
 	var bestPath string
 	var bestTime time.Time
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		info, err := e.Info()
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		// Skip files older than the Gas Town session start — they belong to
-		// previous Claude sessions or unrelated Claude instances.
-		if !since.IsZero() && info.ModTime().Before(since) {
-			continue
-		}
-		if bestPath == "" || info.ModTime().After(bestTime) {
-			bestPath = filepath.Join(dir, e.Name())
-			bestTime = info.ModTime()
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			// Skip files older than the Gas Town session start — they belong
+			// to previous Claude sessions or unrelated Claude instances.
+			if !since.IsZero() && info.ModTime().Before(since) {
+				continue
+			}
+			if bestPath == "" || info.ModTime().After(bestTime) {
+				bestPath = filepath.Join(dir, e.Name())
+				bestTime = info.ModTime()
+			}
 		}
 	}
 	return bestPath, bestPath != ""
@@ -247,13 +260,13 @@ func nativeSessionIDFromPath(path string) string {
 
 // tailJSONL reads all existing lines in path then polls for new ones, emitting
 // AgentEvents on ch. It returns (without closing ch) when:
-//   - a newer JSONL file appears in projectDir (new Claude session detected), or
+//   - a newer JSONL file appears in dirs (new Claude session detected), or
 //   - ctx is canceled.
 //
 // Callers loop back to waitForNewestJSONL after this returns to pick up the
 // new session file. This handles Claude instances that are created and destroyed
 // frequently: no events are lost because the file is tailed until we switch.
-func tailJSONL(ctx context.Context, path, projectDir string, since time.Time, sessionID, agentType string, ch chan<- AgentEvent) {
+func tailJSONL(ctx context.Context, path string, dirs []string, since time.Time, sessionID, agentType string, ch chan<- AgentEvent) {
 	nativeID := nativeSessionIDFromPath(path)
 
 	f, err := os.Open(path)
@@ -292,7 +305,7 @@ func tailJSONL(ctx context.Context, path, projectDir string, since time.Time, se
 		if err == io.EOF {
 			// At EOF: check every poll whether a newer file has appeared.
 			// This detects new Claude sessions within one poll interval (500ms).
-			if newer, ok := newestJSONLIn(projectDir, since); ok && newer != path {
+			if newer, ok := newestJSONLIn(dirs, since); ok && newer != path {
 				return // newer Claude session detected — caller switches
 			}
 			select {

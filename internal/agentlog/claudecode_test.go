@@ -55,6 +55,8 @@ func TestClaudeProjectHash(t *testing.T) {
 func TestLatestTranscript_ResolvesAgainstConfigDir(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	// Hermetic: the legacy root is searched too, so it must hold nothing here.
+	t.Setenv("HOME", t.TempDir())
 
 	workDir := filepath.Join(t.TempDir(), "polecats", "topaz", "gastown")
 	projectDir := filepath.Join(configDir, claudeProjectsSubdir, claudeProjectHash(filepath.ToSlash(workDir)))
@@ -88,6 +90,7 @@ func TestLatestTranscript_ResolvesAgainstConfigDir(t *testing.T) {
 // rather than acting on it.
 func TestLatestTranscript_NoTranscriptIsEmptyNotAnError(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 
 	got, err := LatestTranscript(filepath.Join(t.TempDir(), "nothing-here"))
 	if err != nil {
@@ -95,6 +98,133 @@ func TestLatestTranscript_NoTranscriptIsEmptyNotAnError(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("LatestTranscript() = %q, want empty", got)
+	}
+}
+
+// TestClaudeProjectDirsFor covers both roots, and their collapse to one when
+// CLAUDE_CONFIG_DIR is unset (where the "configured" dir IS ~/.claude).
+func TestClaudeProjectDirsFor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := "/some/work/dir"
+	hash := "-some-work-dir"
+
+	t.Run("config dir set: configured root first, legacy root second", func(t *testing.T) {
+		configDir := filepath.Join(t.TempDir(), "claude-town")
+		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+		got, err := claudeProjectDirsFor(workDir)
+		if err != nil {
+			t.Fatalf("claudeProjectDirsFor: %v", err)
+		}
+		want := []string{
+			filepath.Join(configDir, claudeProjectsSubdir, hash),
+			filepath.Join(home, claudeProjectsDir, hash),
+		}
+		if len(got) != len(want) {
+			t.Fatalf("claudeProjectDirsFor = %q, want %q", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("dirs[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("config dir unset: one root, not the same path twice", func(t *testing.T) {
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+		got, err := claudeProjectDirsFor(workDir)
+		if err != nil {
+			t.Fatalf("claudeProjectDirsFor: %v", err)
+		}
+		want := []string{filepath.Join(home, claudeProjectsDir, hash)}
+		if len(got) != len(want) || got[0] != want[0] {
+			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestLatestTranscript_SearchesLegacyRoot is the gt-jxfe regression.
+//
+// A seat can log to ~/.claude (the claude-sonnet preset keeps its credentials
+// there) while the town's CLAUDE_CONFIG_DIR root holds only a previous
+// session's transcript. Picking the configured root's newest — which is what a
+// single-root lookup does — hands the caller a transcript that predates the
+// live session, and the session is reported as having no dated activity.
+func TestLatestTranscript_SearchesLegacyRoot(t *testing.T) {
+	configDir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "polecats", "emerald", "gastown")
+	hash := claudeProjectHash(filepath.ToSlash(workDir))
+
+	staleDir := filepath.Join(configDir, claudeProjectsSubdir, hash)
+	liveDir := filepath.Join(home, claudeProjectsDir, hash)
+	for _, dir := range []string{staleDir, liveDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("creating project dir: %v", err)
+		}
+	}
+
+	stale := filepath.Join(staleDir, "9b478215-0000-0000-0000-000000000000.jsonl")
+	live := filepath.Join(liveDir, "a5aef6ba-1111-1111-1111-111111111111.jsonl")
+	writeTranscript(t, stale, time.Now().Add(-time.Hour))
+	writeTranscript(t, live, time.Now())
+
+	got, err := LatestTranscript(workDir)
+	if err != nil {
+		t.Fatalf("LatestTranscript: %v", err)
+	}
+	if got != live {
+		t.Errorf("LatestTranscript() = %q, want the live transcript in the legacy root %q", got, live)
+	}
+}
+
+// TestLatestTranscript_NewestWinsAcrossRoots guards the direction of the
+// multi-root pick: the configured root must not be preferred when the legacy
+// root holds only an older transcript.
+func TestLatestTranscript_NewestWinsAcrossRoots(t *testing.T) {
+	configDir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "polecats", "quartz", "gastown")
+	hash := claudeProjectHash(filepath.ToSlash(workDir))
+
+	configuredDir := filepath.Join(configDir, claudeProjectsSubdir, hash)
+	legacyDir := filepath.Join(home, claudeProjectsDir, hash)
+	for _, dir := range []string{configuredDir, legacyDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("creating project dir: %v", err)
+		}
+	}
+
+	live := filepath.Join(configuredDir, "bbbbbbbb-1111-1111-1111-111111111111.jsonl")
+	stale := filepath.Join(legacyDir, "aaaaaaaa-0000-0000-0000-000000000000.jsonl")
+	writeTranscript(t, stale, time.Now().Add(-time.Hour))
+	writeTranscript(t, live, time.Now())
+
+	got, err := LatestTranscript(workDir)
+	if err != nil {
+		t.Fatalf("LatestTranscript: %v", err)
+	}
+	if got != live {
+		t.Errorf("LatestTranscript() = %q, want the newest transcript across roots %q", got, live)
+	}
+}
+
+// writeTranscript creates a transcript file with an explicit modification time.
+func writeTranscript(t *testing.T, path string, mtime time.Time) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
+		t.Fatalf("writing transcript: %v", err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("aging transcript: %v", err)
 	}
 }
 
