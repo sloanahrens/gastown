@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 func TestMaintainCommand_Registered(t *testing.T) {
@@ -574,5 +577,64 @@ func TestMaintainPlanTally(t *testing.T) {
 	}
 	if unknownCount != 1 {
 		t.Errorf("unknownCount = %d, want 1 — only unknown-count-clean flattens with an unknown count; diverged-unknown-count was refused, not flattened", unknownCount)
+	}
+}
+
+// TestMaintainRecheckDivergenceFiresBeforeFlatten pins the flatten loop's
+// central safety property: the divergence check runs a second time,
+// immediately before flattening, rather than trusting the plan phase's
+// snapshot. Backup and reap can take minutes between the two phases, and the
+// daemon's unattended --force path has no operator to catch a stale verdict
+// (gt-aku6). A regression that silently dropped this second call — falling
+// back to db.preflight — would pass every other test in this file, since
+// they all drive maintainPreflight.refusal() or maintainClassifyForPlan()
+// directly rather than the flatten loop's own decision.
+func TestMaintainRecheckDivergenceFiresBeforeFlatten(t *testing.T) {
+	orig := maintainCheckDivergenceFn
+	t.Cleanup(func() { maintainCheckDivergenceFn = orig })
+
+	var calls int
+	rechecked := maintainPreflight{Remotes: []string{"origin"}, Diverged: true}
+	maintainCheckDivergenceFn = func(ctx context.Context, config *doltserver.Config, dbName string) maintainPreflight {
+		calls++
+		return rechecked
+	}
+
+	// The plan-phase snapshot says clean — the bug this guards against is
+	// trusting this stale verdict instead of re-checking.
+	db := maintainDBInfo{name: "somedb", preflight: maintainPreflight{Remotes: []string{"origin"}}}
+
+	got := maintainRecheckDivergence(&doltserver.Config{}, db, false)
+
+	if calls != 1 {
+		t.Fatalf("maintainCheckDivergenceFn called %d times, want 1 — the flatten phase must re-check immediately before flattening, not reuse the plan-phase snapshot", calls)
+	}
+	if got.refusal(false) == "" {
+		t.Fatal("re-check found divergence but the flatten loop's decision did not refuse — it must be using the stale plan-phase snapshot instead of the fresh re-check result")
+	}
+}
+
+// TestMaintainRecheckDivergenceSkippedByForceDiverged pins the other half of
+// the contract: --force-diverged skips the re-check entirely (as it does the
+// plan-phase check) and flattens on the plan snapshot alone.
+func TestMaintainRecheckDivergenceSkippedByForceDiverged(t *testing.T) {
+	orig := maintainCheckDivergenceFn
+	t.Cleanup(func() { maintainCheckDivergenceFn = orig })
+
+	var calls int
+	maintainCheckDivergenceFn = func(ctx context.Context, config *doltserver.Config, dbName string) maintainPreflight {
+		calls++
+		return maintainPreflight{Diverged: true}
+	}
+
+	db := maintainDBInfo{name: "somedb", preflight: maintainPreflight{Diverged: true}}
+
+	got := maintainRecheckDivergence(&doltserver.Config{}, db, true)
+
+	if calls != 0 {
+		t.Fatalf("maintainCheckDivergenceFn called %d times with --force-diverged, want 0 — it must skip the re-check entirely", calls)
+	}
+	if got.refusal(true) != "" {
+		t.Fatalf("refusal(forceDiverged=true) = %q, want \"\" — --force-diverged must clear the guard", got.refusal(true))
 	}
 }

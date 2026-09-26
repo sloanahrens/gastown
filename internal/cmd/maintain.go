@@ -30,13 +30,25 @@ const (
 	maintainBackupTimeout = 2 * time.Minute
 	// maintainQueryTimeout is the timeout for individual SQL queries during flatten.
 	maintainQueryTimeout = 30 * time.Second
-	// maintainDivergenceTimeout bounds the pre-flight divergence check for one
-	// database. FetchAndVerify spends DivergenceFetchTimeout per remote, so
-	// the deadline must cover every remote: two budgets, one per fetch, for
-	// the two-remote case this guard exists for — a single shared 2m budget
-	// instead starves the second remote (gt-aku6).
-	maintainDivergenceTimeout = 2 * doltserver.DivergenceFetchTimeout
 )
+
+// maintainDivergenceBudget bounds the pre-flight divergence check for one
+// database with remoteCount configured remotes. FetchAndVerify spends
+// DivergenceFetchTimeout per remote, so the deadline must scale with the
+// actual remote count rather than a number hardcoded for a specific case —
+// a single shared budget sized for fewer remotes than the database actually
+// has starves the last one(s) (gt-aku6). maintainQueryTimeout covers the
+// list-remotes/active-branch/ancestor queries that run outside any single
+// fetch's own timeout. A database with zero remotes still gets one budget's
+// worth, so the list-remotes query itself is not run against an
+// already-expired context.
+func maintainDivergenceBudget(remoteCount int) time.Duration {
+	n := remoteCount
+	if n < 1 {
+		n = 1
+	}
+	return time.Duration(n)*doltserver.DivergenceFetchTimeout + maintainQueryTimeout
+}
 
 var (
 	maintainForce         bool
@@ -173,11 +185,12 @@ var maintainCheckDivergenceFn = maintainCheckDivergence
 // maintainCheckDivergence runs the pre-flight for one database: fetch its
 // remotes and report whether any of them has commits this database lacks.
 //
-// The caller's context bounds the whole check: FetchAndVerify gives each
-// remote its own per-fetch timeout derived from it, so the passed-in deadline
-// must cover every remote, not just the first — a database with two remotes
-// needs at least twice the per-fetch budget, or the second remote's fetch is
-// starved by the parent deadline and spuriously refused (gt-aku6).
+// It sizes its own deadline from the database's actual remote count
+// (maintainDivergenceBudget) rather than trusting the caller for one, so a
+// database with more remotes than some hardcoded assumption still gets a
+// full per-fetch budget for each of them — a fixed budget sized for fewer
+// remotes starves the later ones and spuriously refuses the flatten
+// (gt-aku6). ctx still bounds the overall call for cancellation.
 //
 // A database with no remote, or with no push yet, clears the check. Any error
 // is handed back inside the result rather than raised, because callers need to
@@ -189,11 +202,37 @@ func maintainCheckDivergence(ctx context.Context, config *doltserver.Config, dbN
 	}
 	defer db.Close()
 
-	div, err := doltserver.FetchAndVerify(ctx, db, dbName)
+	remotes, err := doltserver.ListRemotes(ctx, db)
+	if err != nil {
+		return maintainPreflight{Err: fmt.Errorf("list remotes: %w", err)}
+	}
+
+	budgetCtx, cancel := context.WithTimeout(ctx, maintainDivergenceBudget(len(remotes)))
+	defer cancel()
+
+	div, err := doltserver.FetchAndVerify(budgetCtx, db, dbName)
 	if err != nil {
 		return maintainPreflight{Remotes: div.Remotes, Err: err}
 	}
 	return maintainPreflight{Remotes: div.Remotes, Diverged: div.Diverged}
+}
+
+// maintainRecheckDivergence re-runs the divergence check immediately before
+// flattening db, rather than trusting the plan phase's snapshot (db.preflight):
+// backup and reap ran in between, and on the daemon's --force path nothing
+// else re-verifies — there is no operator confirming a plan close enough in
+// time for it to still be trustworthy. A remote that gained commits during
+// that window must still refuse (gt-aku6).
+//
+// It calls the maintainCheckDivergenceFn seam rather than maintainCheckDivergence
+// directly so a test can script the re-check's answer and confirm it actually
+// fires a second time, rather than the flatten loop silently falling back to
+// the stale plan-phase verdict.
+func maintainRecheckDivergence(config *doltserver.Config, db maintainDBInfo, forceDiverged bool) maintainPreflight {
+	if forceDiverged {
+		return db.preflight
+	}
+	return maintainCheckDivergenceFn(context.Background(), config, db.name)
 }
 
 // needsFlatten reports whether the flatten phase should process this database.
@@ -362,9 +401,7 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 		// Pre-flight only what the plan would flatten: the check costs a
 		// network fetch, and a database below threshold is never touched.
 		if info.needsFlatten(maintainThreshold) && !maintainForceDiverged {
-			ctx, cancel := context.WithTimeout(context.Background(), maintainDivergenceTimeout)
-			info.preflight = maintainCheckDivergence(ctx, config, dbName)
-			cancel()
+			info.preflight = maintainCheckDivergence(context.Background(), config, dbName)
 		}
 		dbInfos = append(dbInfos, info)
 	}
@@ -493,18 +530,7 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 			if !db.needsFlatten(maintainThreshold) {
 				continue
 			}
-			// Re-run the divergence check immediately before flattening rather
-			// than trusting the plan phase's verdict: backup and reap ran in
-			// between, and on the daemon's --force path nothing re-verifies —
-			// there is no operator confirming a plan close enough in time for
-			// it to still be trustworthy. A remote that gained commits during
-			// that window must still refuse (gt-aku6).
-			preflight := db.preflight
-			if !maintainForceDiverged {
-				ctx, cancel := context.WithTimeout(context.Background(), maintainDivergenceTimeout)
-				preflight = maintainCheckDivergenceFn(ctx, config, db.name)
-				cancel()
-			}
+			preflight := maintainRecheckDivergence(config, db, maintainForceDiverged)
 			if reason := preflight.refusal(maintainForceDiverged); reason != "" {
 				fmt.Printf("  %s %s: refused — %s\n", style.Warning.Render("!"), db.name, reason)
 				refused = append(refused, db.name)

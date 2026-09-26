@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 )
 
@@ -16,19 +15,11 @@ import (
 // remotes spends this budget once per remote: FetchAndVerify gives each remote
 // its own timeout derived from the caller's context, so a slow first remote
 // does not starve the second (gt-aku6).
-const DivergenceFetchTimeout = 2 * time.Minute
-
-// divergenceFetchTimeout is the per-fetch budget actually used: the constant
-// above, overridable in tests via GASTOWN_DIVERGENCE_FETCH_TIMEOUT so the
-// per-remote budget can be exercised without waiting two minutes per remote.
-func divergenceFetchTimeout() time.Duration {
-	if v := os.Getenv("GASTOWN_DIVERGENCE_FETCH_TIMEOUT"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return DivergenceFetchTimeout
-}
+//
+// It is a var, not a const, so a test can shrink it instead of waiting two
+// minutes per remote; callers that need the number of remotes to size their
+// own deadline (internal/cmd's maintainDivergenceBudget) read it too.
+var DivergenceFetchTimeout = 2 * time.Minute
 
 // RemoteDivergence is what FetchAndVerify learned about a database's remotes.
 //
@@ -38,10 +29,11 @@ func divergenceFetchTimeout() time.Duration {
 // daemon need the same answer, so the query lives here rather than beside
 // either caller.
 type RemoteDivergence struct {
-	// Remotes lists every configured Dolt remote the check ran on, in the
-	// order checked. It is empty only when the database has no remote at
-	// all — that means there was nothing to verify, not a verdict that the
-	// database is safe.
+	// Remotes attributes this verdict: every remote cleared, in check order,
+	// when the whole database cleared; just the one remote that diverged or
+	// could not be verified, when it didn't. It is empty only when the
+	// database has no remote at all — that means there was nothing to
+	// verify, not a verdict that the database is safe.
 	Remotes []string
 
 	// RemoteHead is the commit the responsible remote's branch pointed at
@@ -84,7 +76,7 @@ func FetchAndVerify(ctx context.Context, db *sql.DB, dbName string) (RemoteDiver
 
 	// Discover every remote first. dolt_remotes is a local table, so a
 	// database with no remote costs one cheap query and no network round trip.
-	remotes, err := listRemotes(ctx, db)
+	remotes, err := ListRemotes(ctx, db)
 	if err != nil {
 		return RemoteDivergence{}, fmt.Errorf("list remotes: %w", err)
 	}
@@ -104,21 +96,26 @@ func FetchAndVerify(ctx context.Context, db *sql.DB, dbName string) (RemoteDiver
 	var checked []string
 	for _, remoteName := range remotes {
 		div, err := fetchAndVerifyRemote(ctx, db, remoteName, branch)
-		div.Remotes = checked
 		if err != nil {
+			// Attribute the failure to the remote that could not be verified,
+			// not the remotes already cleared before it.
+			div.Remotes = []string{remoteName}
 			return div, err
 		}
-		checked = append(checked, remoteName)
 		if div.Diverged {
+			// Attribute the divergence to the remote it was found on, not the
+			// remotes already cleared before it.
+			div.Remotes = []string{remoteName}
 			return div, nil
 		}
+		checked = append(checked, remoteName)
 	}
 
 	return RemoteDivergence{Remotes: checked}, nil
 }
 
-// listRemotes returns every configured remote's name, in a stable (name) order.
-func listRemotes(ctx context.Context, db *sql.DB) ([]string, error) {
+// ListRemotes returns every configured remote's name, in a stable (name) order.
+func ListRemotes(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "SELECT name FROM dolt_remotes ORDER BY name")
 	if err != nil {
 		return nil, err
@@ -150,7 +147,7 @@ func activeBranch(ctx context.Context, db *sql.DB) (string, error) {
 func fetchAndVerifyRemote(ctx context.Context, db *sql.DB, remoteName, branch string) (RemoteDivergence, error) {
 	// Fetch. Without this the remote-tracking ref below is whatever the last
 	// fetch left behind, and divergence that happened since would be invisible.
-	fetchCtx, cancel := context.WithTimeout(ctx, divergenceFetchTimeout())
+	fetchCtx, cancel := context.WithTimeout(ctx, DivergenceFetchTimeout)
 	defer cancel()
 	if _, err := db.ExecContext(fetchCtx, "CALL DOLT_FETCH(?)", remoteName); err != nil {
 		return RemoteDivergence{}, fmt.Errorf("DOLT_FETCH %s: %w", remoteName, err)

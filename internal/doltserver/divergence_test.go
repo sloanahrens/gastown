@@ -195,7 +195,9 @@ func TestFetchAndVerify(t *testing.T) {
 	// it and complete the second remote's fetch with the rest of the
 	// caller's deadline intact.
 	t.Run("a slow first remote does not starve the second remote's fetch", func(t *testing.T) {
-		t.Setenv("GASTOWN_DIVERGENCE_FETCH_TIMEOUT", "5s")
+		orig := doltserver.DivergenceFetchTimeout
+		doltserver.DivergenceFetchTimeout = 5 * time.Second
+		t.Cleanup(func() { doltserver.DivergenceFetchTimeout = orig })
 
 		conn, name := createDivergenceTestDB(t, admin)
 		seedHistory(t, conn, name)
