@@ -1072,6 +1072,16 @@ exit 0
 	if data, err := os.ReadFile(slingLogPath); err != nil || !strings.Contains(string(data), "gt-issue1") {
 		t.Errorf("an unreadable status must fail open and feed, got %q (err=%v)", string(data), err)
 	}
+	failedOpenLogged := false
+	for _, s := range logged {
+		if strings.Contains(s, "hq-cv2") && strings.Contains(s, "failing open") {
+			failedOpenLogged = true
+			break
+		}
+	}
+	if !failedOpenLogged {
+		t.Errorf("expected the fail-open path to be logged so it is distinguishable from a confirmed-open convoy, got: %v", logged)
+	}
 }
 
 func TestFeedFirstReady_IteratesPastDispatchFailure(t *testing.T) {
