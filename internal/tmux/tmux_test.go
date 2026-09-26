@@ -2774,6 +2774,52 @@ func TestIsBusy_LivePane(t *testing.T) {
 	}
 }
 
+// TestIsBusy_LivePane_StaleIndicatorExpires reproduces gt-z4gs: a busy
+// indicator left over from a turn that already ended must not read as busy
+// forever. IsBusy confirms a busy marker against window activity the way
+// DetectComposerStall does (gt-ncon) — once the pane has gone silent past
+// isBusyStaleAfter, the lingering marker no longer counts.
+func TestIsBusy_LivePane_StaleIndicatorExpires(t *testing.T) {
+	tm := newTestTmux(t)
+	session := "gt-test-is-busy-stale-" + t.Name()
+
+	// tmux's #{window_activity} is a whole-second Unix timestamp, so the
+	// threshold needs enough headroom above 1s that rounding can't make a
+	// genuinely fresh marker read as stale.
+	origStaleAfter := isBusyStaleAfter
+	isBusyStaleAfter = 2 * time.Second
+	defer func() { isBusyStaleAfter = origStaleAfter }()
+
+	_ = tm.KillSession(session)
+	if err := tm.NewSession(session, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(session) }()
+
+	if err := tm.SendKeys(session, "printf 'filler\\n✵ Leavening… (3m 17s · ↓ 14.1k tokens)\\n'"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !tm.IsBusy(session) {
+		if time.Now().After(deadline) {
+			out, _ := tm.CapturePane(session, busyCaptureLines)
+			t.Fatalf("IsBusy did not detect busy marker within timeout; pane:\n%s", out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Nothing writes to the pane again, so window activity freezes at the
+	// printf above while the marker stays on screen — the shape a finished
+	// turn leaves behind when its status line never gets painted over.
+	time.Sleep(isBusyStaleAfter + 1500*time.Millisecond)
+
+	if tm.IsBusy(session) {
+		out, _ := tm.CapturePane(session, busyCaptureLines)
+		t.Fatalf("IsBusy on a pane silent past isBusyStaleAfter (%s) = true, want false (stale indicator); pane:\n%s", isBusyStaleAfter, out)
+	}
+}
+
 // TestIsBusy_LivePane_IgnoresQuotedSpinnerInTranscript reproduces gt-dq6pi: the
 // mayor read BUSY forever because a relayed nudge earlier in its transcript
 // quoted another pane's live spinner text ("Sautéing… 8m16s · ↓14.6k tokens").

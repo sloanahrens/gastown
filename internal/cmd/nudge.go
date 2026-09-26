@@ -483,7 +483,13 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 			return
 		}
 	}
-	// Timeout — nudge stays in queue for next watcher or manual drain.
+	// Timeout — nudge stays in queue for next watcher or manual drain. Say so:
+	// this call is often the emergency break-through --mode=immediate exists
+	// for (gt-cyyg), and it used to exit exactly like the success path above —
+	// silently, with a 0 exit code — leaving the caller unable to tell "watcher
+	// gave up" from "watcher delivered" without inspecting the queue itself
+	// (gt-z4gs).
+	fmt.Fprintf(os.Stderr, "idle-watcher: gave up waiting for %s to go idle after %s; nudge stays queued for the next watcher or a manual drain\n", sessionName, idleWatcherTimeout)
 }
 
 func requeueDrainedNudges(townRoot, sessionName, source string, drained []nudge.QueuedNudge) {

@@ -472,6 +472,59 @@ func TestDeliverNudge_ImmediateMode_RefusesBusyTarget(t *testing.T) {
 	}
 }
 
+// TestWatchAndDeliver_TimeoutReportsGivingUp reproduces the second half of
+// gt-z4gs: watchAndDeliver used to exit its timeout path exactly like its
+// success path — silently, with no indication delivery never happened — so a
+// caller (including the --mode=immediate busy-refusal fallback this watcher
+// serves) could not tell "gave up, still queued" from "delivered" without
+// inspecting the queue itself. It must now say so on stderr, and the nudge
+// must stay queued rather than vanish.
+func TestWatchAndDeliver_TimeoutReportsGivingUp(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	tm := tmux.NewTmux()
+	ensureServerKeeper(t, tm)
+	sessionName := "gt-test-idle-watcher-gives-up"
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+
+	// Keep the pane busy for the life of the test so WaitForIdle never
+	// succeeds and the watcher runs out its full timeout (same technique as
+	// TestDeliverNudge_ImmediateMode_RefusesBusyTarget).
+	markPaneBusy(t, tm, sessionName)
+
+	townRoot := t.TempDir()
+	if err := nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{
+		Sender:  "tester",
+		Message: "should stay queued",
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	origTimeout, origInterval := idleWatcherTimeout, idleWatcherPollInterval
+	idleWatcherTimeout = 300 * time.Millisecond
+	idleWatcherPollInterval = 50 * time.Millisecond
+	t.Cleanup(func() {
+		idleWatcherTimeout, idleWatcherPollInterval = origTimeout, origInterval
+	})
+
+	stderr := captureStderr(t, func() {
+		watchAndDeliver(tm, townRoot, sessionName)
+	})
+
+	if !strings.Contains(stderr, "gave up waiting") {
+		t.Fatalf("watchAndDeliver stderr = %q, want a message reporting that it gave up", stderr)
+	}
+	if got := nudge.QueueLen(townRoot, sessionName); got != 1 {
+		t.Errorf("QueueLen after watcher gave up = %d, want 1 (nudge should stay queued, not be lost)", got)
+	}
+}
+
 // TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal guards the
 // escape-hatch half of gt-cyyg: --force must still deliver immediately even
 // when the target is busy, since --mode=immediate --force is the documented

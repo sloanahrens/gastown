@@ -4119,6 +4119,17 @@ func (t *Tmux) IsIdle(session string) bool {
 	return false
 }
 
+// isBusyStaleAfter is how long a busy indicator may sit in the pane without
+// matching window activity before IsBusy stops trusting it. Claude Code's
+// status line repaints on its own (spinner frame, elapsed-second counter), so
+// a session that is genuinely generating advances #{window_activity} on every
+// observation — DetectComposerStall measured this live at ~0s of age for
+// working sessions, against 19s+ for ones that had actually gone quiet
+// (gt-ncon). Ten seconds of silence under a busy marker is well past that
+// margin: the marker is left over from a turn that already ended, not
+// evidence one is still running (gt-z4gs). Var so tests can shrink it.
+var isBusyStaleAfter = 10 * time.Second
+
 // IsBusy reports whether the target currently shows a busy indicator (active
 // generation, or a running tool call's status line — see hasBusyIndicator) in
 // its recent pane output. Point-in-time snapshot, not a poll.
@@ -4127,20 +4138,39 @@ func (t *Tmux) IsIdle(session string) bool {
 // into a target that is mid-tool-call, the caller refuses and falls back to
 // wait-idle/queue delivery (gt-cyyg).
 //
-// On capture failure, returns true (fail safe): when the pane can't be
-// observed, treat it as busy so callers refuse rather than risk interrupting
-// a session in an unknown state.
+// A busy indicator alone is not proof of a running turn: like the stale busy
+// marker DetectComposerStall guards against (gt-ncon), it can linger in the
+// capture after generation has actually ended, reading as busy forever and
+// forcing every delivery path — including the emergency break-through
+// --mode=immediate exists for — into wait-idle's queue, where it can sit
+// unconsumed (gt-z4gs). A busy verdict is therefore confirmed against window
+// activity the same way: a marker with no matching pane output for
+// isBusyStaleAfter is stale, not busy.
+//
+// On capture failure, or when activity cannot be read, returns true (fail
+// safe): when the pane can't be observed, treat it as busy so callers refuse
+// rather than risk interrupting a session in an unknown state.
 func (t *Tmux) IsBusy(target string) bool {
 	lines, err := t.capturePaneVisibleTail(target)
 	if err != nil {
 		return true
 	}
+	busy := false
 	for _, line := range lines {
 		if hasBusyIndicator(line) {
-			return true
+			busy = true
+			break
 		}
 	}
-	return false
+	if !busy {
+		return false
+	}
+
+	activity, err := t.GetWindowActivity(target)
+	if err != nil {
+		return true
+	}
+	return time.Since(activity) < isBusyStaleAfter
 }
 
 // GetSessionInfo returns detailed information about a session.
