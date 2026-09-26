@@ -7,18 +7,22 @@ import (
 	"time"
 )
 
+// defaultMergeSlotStaleAfter is the fallback per-push lease TTL. It is
+// independent of StaleClaimTimeout: that knob bounds how long a claimed MR
+// can sit untouched (legitimately long — a slow test suite), while this one
+// bounds how long the push slot itself can be held (a git push plus a bounded
+// pre-push recheck, never a test run). Operators tuning StaleClaimTimeout
+// down for faster MR reclaim were also shrinking this TTL, risking reclaim of
+// a lease still mid-push (om major on gt-wisp-np1, gt-vyjc).
+const defaultMergeSlotStaleAfter = 10 * time.Minute
+
 // leaseStaleAfter is the age past which a per-push lease counts as abandoned.
-// It shares StaleClaimTimeout's knob: both answer "how long before this owner
-// is gone?", and a lease reclaimed early only costs a refused push, which
-// retries (gt-pp44).
+// A lease reclaimed early only costs a refused push, which retries (gt-pp44).
 func (e *Engineer) leaseStaleAfter() time.Duration {
 	if e.mergeSlotStaleAfter > 0 {
 		return e.mergeSlotStaleAfter
 	}
-	if e.config != nil && e.config.StaleClaimTimeout > 0 {
-		return e.config.StaleClaimTimeout
-	}
-	return DefaultStaleClaimTimeout
+	return defaultMergeSlotStaleAfter
 }
 
 // pushLeasePrefix is the identity namespace acquireMainPushSlot leases under.

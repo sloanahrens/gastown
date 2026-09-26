@@ -112,6 +112,26 @@ func TestAcquireMainPushSlot_ReclaimsStalePushLease(t *testing.T) {
 	}
 }
 
+func TestLeaseStaleAfter_IgnoresStaleClaimTimeout(t *testing.T) {
+	t.Parallel()
+	// StaleClaimTimeout bounds an untouched MR claim (legitimately long); the
+	// push-lease TTL bounds a git push (always short). A rig that tunes the
+	// former down must not also shrink the latter, or a live push lease gets
+	// reclaimed out from under it (om major on gt-wisp-np1, gt-vyjc).
+	e, slot, _ := newSlotEngineer(t, "testrig")
+	e.config = &MergeQueueConfig{StaleClaimTimeout: time.Minute}
+	live := fmt.Sprintf("testrig/refinery/push/%d-1", time.Now().Add(-5*time.Minute).UnixNano())
+	slot.holder = live
+
+	_, err := e.acquireMainPushSlot(context.Background())
+	if !errors.Is(err, errMergeSlotTimeout) {
+		t.Fatalf("expected contention against a lease inside the push-lease window, got: %v", err)
+	}
+	if len(slot.releases) != 0 {
+		t.Errorf("a live lease was reclaimed using the shorter StaleClaimTimeout: releases = %v", slot.releases)
+	}
+}
+
 func TestAcquireMainPushSlot_KeepsLivePushLease(t *testing.T) {
 	t.Parallel()
 	e, slot, _ := newSlotEngineer(t, "testrig")
