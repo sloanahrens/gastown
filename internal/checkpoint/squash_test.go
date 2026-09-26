@@ -362,6 +362,24 @@ func TestSquashWIPCommits_NoCommits(t *testing.T) {
 	}
 }
 
+// TestHasAutoSaveCommits_BaseRefMissing covers gt-c1mw: callers that treat a
+// zero-value (false, nil-checked-away) return as "no auto-save commits" must
+// see an actual error here, not a silent false. An unresolvable base ref is
+// the simplest way to make merge-base fail.
+func TestHasAutoSaveCommits_BaseRefMissing(t *testing.T) {
+	dir := initTestRepo(t)
+	createBranch(t, dir, "feature")
+	addCommit(t, dir, "a.go", "package a", WIPCommitPrefix)
+
+	has, err := HasAutoSaveCommits(dir, "no-such-base-ref", "feature")
+	if err == nil {
+		t.Fatal("expected an error when the base ref cannot be resolved, got nil")
+	}
+	if has {
+		t.Error("expected false alongside the error")
+	}
+}
+
 func TestHasAutoSaveCommits_None(t *testing.T) {
 	dir := initTestRepo(t)
 	createBranch(t, dir, "feature")
