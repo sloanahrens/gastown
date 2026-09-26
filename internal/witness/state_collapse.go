@@ -195,9 +195,10 @@ const stateCollapseRenotifyAfter = 12 * time.Hour
 // alreadyReportedRecently reports whether the issue already carries a comment
 // identifying this same condition, added within the renotify window.
 //
-// A read failure reports "not reported" — the cost of a duplicate comment is a
-// redundant line, while the cost of a silent skip is a collapse nobody hears
-// about, and only one of those is recoverable.
+// A read failure reports "not reported", and so does a comment whose timestamp
+// cannot be read: the cost of a duplicate comment is a redundant line, while
+// the cost of a silent skip is a collapse nobody hears about, and only one of
+// those is recoverable.
 func alreadyReportedRecently(bd *BdCli, workDir, issueID, marker string, now time.Time) bool {
 	out, err := bd.Exec(workDir, "comments", issueID, "--json")
 	if err != nil {
@@ -213,9 +214,10 @@ func alreadyReportedRecently(bd *BdCli, workDir, issueID, marker string, now tim
 		}
 		createdAt, err := time.Parse(time.RFC3339, c.CreatedAt)
 		if err != nil {
-			// Unparseable timestamp: the record exists and cannot be aged
-			// out, so treat it as current rather than re-reporting forever.
-			return true
+			// A record whose age cannot be recovered never falls outside the
+			// window, so suppressing on it would mute this condition for good
+			// (gt-ivcf). Keep scanning: a parseable sibling still suppresses.
+			continue
 		}
 		if now.Sub(createdAt) < stateCollapseRenotifyAfter {
 			return true
