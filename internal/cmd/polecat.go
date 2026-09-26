@@ -729,6 +729,58 @@ func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Dura
 	return seats
 }
 
+// rigSeatBuilder builds one rig's rows for `gt polecat list`. It is the seam
+// that lets the pool below be driven by a fake in tests, without a filesystem
+// or a Dolt.
+type rigSeatBuilder func(*rig.Rig) []polecatSeat
+
+// buildAllRigSeats fills one slot per rig, in rig order, by running build
+// concurrently across a bounded pool sized like the seat probe.
+//
+// CONCURRENT-USE PRECONDITION: build runs on several goroutines at once, one
+// per rig. The rigs are independent (each owns its own *beads.Beads over its
+// own directory), but buildRigSeats also reads the shared polecatSessionSet,
+// so anything added to it must stay read-only under concurrent use.
+//
+// Results are indexed by rig slot, never appended, so the flattened listing is
+// byte-for-byte what the serial loop produced regardless of which rig's Dolt
+// round trips land first — the same order contract resolvePolecatSeats holds
+// for seats.
+func buildAllRigSeats(rigs []*rig.Rig, build rigSeatBuilder) [][]polecatSeat {
+	rigSeats := make([][]polecatSeat, len(rigs))
+
+	workers := polecatSeatPoolSize()
+	if workers > len(rigs) {
+		workers = len(rigs)
+	}
+	if workers <= 1 {
+		// A single rig, or a one-core host, falls back to the serial path
+		// rather than paying for goroutines that cannot overlap.
+		for i, r := range rigs {
+			rigSeats[i] = build(r)
+		}
+		return rigSeats
+	}
+
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(rigs) {
+					return
+				}
+				rigSeats[i] = build(rigs[i])
+			}
+		}()
+	}
+	wg.Wait()
+	return rigSeats
+}
+
 func runPolecatList(cmd *cobra.Command, args []string) error {
 	var rigs []*rig.Rig
 
@@ -770,35 +822,9 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	// Dolt CLI round trips, not CPU-bound work, so overlapping them is what
 	// keeps `--all` from paying every rig's list time serially (gt-92zx) —
 	// the previous per-rig loop is what made a many-rig town time out.
-	rigSeats := make([][]polecatSeat, len(rigs))
-	{
-		workers := polecatSeatPoolSize()
-		if workers > len(rigs) {
-			workers = len(rigs)
-		}
-		if workers <= 1 {
-			for i, r := range rigs {
-				rigSeats[i] = buildRigSeats(r, sessions, spawnWindow, now)
-			}
-		} else {
-			var next atomic.Int64
-			var wg sync.WaitGroup
-			wg.Add(workers)
-			for w := 0; w < workers; w++ {
-				go func() {
-					defer wg.Done()
-					for {
-						i := int(next.Add(1)) - 1
-						if i >= len(rigs) {
-							return
-						}
-						rigSeats[i] = buildRigSeats(rigs[i], sessions, spawnWindow, now)
-					}
-				}()
-			}
-			wg.Wait()
-		}
-	}
+	rigSeats := buildAllRigSeats(rigs, func(r *rig.Rig) []polecatSeat {
+		return buildRigSeats(r, sessions, spawnWindow, now)
+	})
 	var seats []polecatSeat
 	for _, s := range rigSeats {
 		seats = append(seats, s...)

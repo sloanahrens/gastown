@@ -836,14 +836,19 @@ func mergeAgentBeadSources(issuesByID, wispsByID map[string]*Issue) map[string]*
 // ListAgentBeadsFromWisps queries the wisps table for agent beads.
 // Returns nil, nil if the wisps table doesn't exist yet or has no agent beads.
 //
-// A PreloadLabeledWisps("gt:agent", ...) cache is checked first: it answers
-// from the one bd sql round trip that call already paid for (gt-92zx),
-// instead of this spawning its own "bd mol wisp list" over every wisp in the
-// rig.
+// A PreloadLabeledWisps(...) snapshot is checked first: it answers from the
+// one bd sql round trip that call already paid for (gt-92zx), instead of this
+// spawning its own "bd mol wisp list" over every wisp in the rig.
+//
+// That snapshot is the *unfiltered* wisps read, not the gt:agent-labeled
+// subset, and the distinction is load-bearing: the two fallbacks below exist
+// for wisps whose label/type metadata is missing or unreliable, so narrowing
+// the input to wisps that carry the gt:agent label would make exactly those
+// fallbacks unreachable and silently drop a live polecat from the result.
 func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
 	var wisps []*Issue
-	if cached, ok := b.wispCache["gt:agent"]; ok {
-		wisps = cached
+	if b.wispSnapshot != nil {
+		wisps = b.wispSnapshot
 	} else {
 		out, err := b.run("mol", "wisp", "list", "--json")
 		if err != nil {

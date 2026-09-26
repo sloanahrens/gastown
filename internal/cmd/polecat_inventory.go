@@ -469,14 +469,24 @@ func buildPolecatSeatItem(rigName, name string, fields *beads.AgentFields, activ
 	}
 }
 
-// polecatSeatPoolSize bounds how many seats are probed concurrently. Each seat
-// spawns several git subprocesses against its own worktree, so this is the
-// knob that keeps a large town from forking hundreds of git processes in one
-// burst: at 47 seats an unbounded fan-out is ~300 concurrent processes.
+// polecatSeatPoolSize bounds how many units of `gt polecat list` work run
+// concurrently. It governs two pools, both of which are waiting on
+// subprocesses rather than burning CPU:
 //
-// The multiplier is deliberately modest. A seat's probe is mostly waiting on
-// git subprocesses rather than burning CPU, so more goroutines than cores is
-// right; but the work is a few tens of milliseconds per seat even locally, so
+//   - seats, in resolvePolecatSeats: each seat spawns several git subprocesses
+//     against its own worktree (gt-8q0s)
+//   - rigs, in buildAllRigSeats: each rig pays a handful of Dolt CLI round
+//     trips, so this is also the ceiling on concurrent `bd` processes a
+//     `--all` listing starts (gt-92zx)
+//
+// For the seat pool it is the knob that keeps a large town from forking
+// hundreds of git processes in one burst: at 47 seats an unbounded fan-out is
+// ~300 concurrent processes. Retuning it for one workload moves the other, so
+// check both before changing it.
+//
+// The multiplier is deliberately modest. Both probes are mostly waiting on
+// subprocesses rather than burning CPU, so more goroutines than cores is
+// right; but the work is a few tens of milliseconds per unit even locally, so
 // the pool only needs to overlap waves, not maximize throughput.
 func polecatSeatPoolSize() int {
 	size := runtime.GOMAXPROCS(0) * 2

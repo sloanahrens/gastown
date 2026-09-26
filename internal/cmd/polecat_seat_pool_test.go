@@ -5,7 +5,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // TestProbePolecatWorktreeLocalOnlyRunsNoLsRemote is the regression test for
@@ -210,6 +214,68 @@ func TestResolvePolecatSeatsPassesDecidedRowsThrough(t *testing.T) {
 	items := resolvePolecatSeats([]polecatSeat{seat})
 	if len(items) != 1 || items[0].State != "foreign" || !items[0].Foreign {
 		t.Fatalf("decided row was not passed through: %+v", items)
+	}
+}
+
+// TestBuildAllRigSeatsPreservesOutputOrder: the rig-level pool may fetch rigs
+// in any order, but `gt polecat list --all` output must not depend on which
+// rig's Dolt round trips finish first. Rows are indexed by rig slot, never
+// appended. This is the rig-level analogue of
+// TestResolvePolecatSeatsPreservesOutputOrder, and it exists because the pool
+// is a genuinely new concurrent path in a command whose output order
+// downstream code depends on (gt-92zx).
+func TestBuildAllRigSeatsPreservesOutputOrder(t *testing.T) {
+	// Deliberately not sorted, and the fake builder sleeps longest on the
+	// first rig, so the completion order is the reverse of the input order:
+	// an implementation that appended results as they landed, or that sorted
+	// them, would produce a different list.
+	names := []string{"gastown", "beads", "quartz", "basalt", "topaz", "cobalt", "flint", "marble"}
+	rigs := make([]*rig.Rig, len(names))
+	delay := make(map[string]time.Duration, len(names))
+	for i, name := range names {
+		rigs[i] = &rig.Rig{Name: name}
+		delay[name] = time.Duration(len(names)-i) * 5 * time.Millisecond
+	}
+
+	rigSeats := buildAllRigSeats(rigs, func(r *rig.Rig) []polecatSeat {
+		time.Sleep(delay[r.Name])
+		return []polecatSeat{{rigName: r.Name, name: "seat-" + r.Name}}
+	})
+
+	if len(rigSeats) != len(rigs) {
+		t.Fatalf("buildAllRigSeats returned %d rig slots for %d rigs", len(rigSeats), len(rigs))
+	}
+	for i, seats := range rigSeats {
+		if len(seats) != 1 || seats[0].rigName != names[i] || seats[0].name != "seat-"+names[i] {
+			t.Fatalf("rig slot %d = %+v, want one seat for %s — output order must not depend on completion order",
+				i, seats, names[i])
+		}
+	}
+}
+
+// TestBuildAllRigSeatsRunsEveryRigExactlyOnce: the shared cursor hands out
+// slots one at a time, so the pool must neither skip a rig (a slot left nil
+// silently truncates the listing) nor build one twice.
+func TestBuildAllRigSeatsRunsEveryRigExactlyOnce(t *testing.T) {
+	names := []string{"gastown", "beads", "quartz", "basalt", "topaz", "cobalt", "flint", "marble"}
+	rigs := make([]*rig.Rig, len(names))
+	for i, name := range names {
+		rigs[i] = &rig.Rig{Name: name}
+	}
+
+	var mu sync.Mutex
+	calls := make(map[string]int, len(names))
+	buildAllRigSeats(rigs, func(r *rig.Rig) []polecatSeat {
+		mu.Lock()
+		defer mu.Unlock()
+		calls[r.Name]++
+		return []polecatSeat{{rigName: r.Name, name: "seat-" + r.Name}}
+	})
+
+	for _, name := range names {
+		if calls[name] != 1 {
+			t.Fatalf("build called %d times for rig %s, want exactly 1 (calls: %v)", calls[name], name, calls)
+		}
 	}
 }
 

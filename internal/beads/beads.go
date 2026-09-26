@@ -722,16 +722,26 @@ type Beads struct {
 	// ListMergeRequests scan unchanged.
 	mrCache *mrCacheState
 
-	// wispCache is an opt-in snapshot of the wisps table, warmed by
-	// PreloadLabeledWisps() and keyed by label. ListAgentBeadsFromWisps and
-	// the wisp lookup inside ListMergeRequests each check it first, so a
-	// caller that preloads both labels (gt polecat list, gt-92zx) pays one bd
-	// sql subprocess for both instead of one each. nil, or a label missing
-	// from the map, means "not warmed for this label" — the reader falls back
-	// to its own bd subprocess unchanged. Same caveat as agentBeadCache/
-	// mrCache: never refreshes, so don't warm it on a *Beads held across
-	// writes that could create/close wisps mid-run.
+	// wispCache is an opt-in view of the wisps table, warmed by
+	// PreloadLabeledWisps() and keyed by label. The wisp lookup inside
+	// ListMergeRequests checks it first, so a caller that preloads a label
+	// (gt polecat list, gt-92zx) pays one bd sql subprocess for it instead of
+	// one more. nil, or a label missing from the map, means "not warmed for
+	// this label" — the reader falls back to its own bd subprocess unchanged.
+	// Same caveat as agentBeadCache/mrCache: never refreshes, so don't warm it
+	// on a *Beads held across writes that could create/close wisps mid-run.
 	wispCache map[string][]*Issue
+
+	// wispSnapshot is every wisp the same PreloadLabeledWisps() round trip
+	// read, before bucketing into wispCache by label. It exists because the
+	// two consumers need different things from one query: ListMergeRequests
+	// wants the label-filtered bucket, while ListAgentBeadsFromWisps must
+	// still see wisps whose label metadata is missing, since its legacy
+	// type-field and ID-pattern fallbacks exist precisely for those. A
+	// label-filtered query cannot answer that — the join drops any wisp
+	// without a gt:agent label row — so the agent side reads this. nil means
+	// "not warmed": the reader runs its own "bd mol wisp list" unchanged.
+	wispSnapshot []*Issue
 }
 
 // beadsFields holds every constructor-settable field of Beads. It exists so
@@ -1963,11 +1973,30 @@ func mrWispStatusMatches(status, filter string) bool {
 	return strings.EqualFold(status, filter)
 }
 
+// wispSelectColumns is the SELECT list every wisps-table read in this file
+// shares, so the column order and the row struct below stay in one place. The
+// LEFT JOIN on wisp_labels is what populates labels_csv; callers that need to
+// *filter* on a label add their own INNER JOIN (see listWispsByLabels).
+const wispSelectColumns = "SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, " +
+	"w.created_at, w.updated_at, w.created_by, " +
+	"GROUP_CONCAT(al.label) as labels_csv " +
+	"FROM wisps w " +
+	"LEFT JOIN wisp_labels al ON w.id = al.issue_id "
+
+// wispSelectGroupBy closes the query started by wispSelectColumns. GROUP BY on
+// the wisp's own columns collapses the one-row-per-label join into one row per
+// wisp, with labels_csv carrying the rest.
+const wispSelectGroupBy = " GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, " +
+	"w.created_at, w.updated_at, w.created_by"
+
 // listWispsByLabels queries the wisps table for every wisp carrying any of
-// the given labels, via one bd sql round trip. ListMergeRequests and
-// ListAgentBeadsFromWisps share this query — a caller that preloads both
-// labels through PreloadLabeledWisps pays one bd subprocess instead of two
-// (gt-92zx).
+// the given labels, via one bd sql round trip. ListMergeRequests uses this —
+// an MR *is* the wisp carrying gt:merge-request, so the label filter is the
+// definition, not a narrowing of it.
+//
+// ListAgentBeadsFromWisps must NOT read this: the INNER JOIN makes a wisp
+// without the label row invisible, which is exactly the set its type/ID
+// fallbacks exist to catch. It reads listAllWisps instead (gt-92zx).
 func (b *Beads) listWispsByLabels(labels []string) ([]*Issue, error) {
 	if len(labels) == 0 {
 		return nil, nil
@@ -1977,17 +2006,29 @@ func (b *Beads) listWispsByLabels(labels []string) ([]*Issue, error) {
 		quoted[i] = "'" + strings.ReplaceAll(l, "'", "''") + "'"
 	}
 
-	query := fmt.Sprintf(
-		"SELECT w.id, w.title, w.description, w.status, w.priority, w.assignee, "+
-			"w.created_at, w.updated_at, w.created_by, "+
-			"GROUP_CONCAT(al.label) as labels_csv "+
-			"FROM wisps w "+
-			"JOIN wisp_labels l ON w.id = l.issue_id "+
-			"LEFT JOIN wisp_labels al ON w.id = al.issue_id "+
-			"WHERE l.label IN (%s) "+
-			"GROUP BY w.id, w.title, w.description, w.status, w.priority, w.assignee, w.created_at, w.updated_at, w.created_by",
-		strings.Join(quoted, ", "))
+	query := wispSelectColumns +
+		"JOIN wisp_labels l ON w.id = l.issue_id " +
+		fmt.Sprintf("WHERE l.label IN (%s)", strings.Join(quoted, ", ")) +
+		wispSelectGroupBy
 
+	return b.queryWisps(query)
+}
+
+// listAllWisps reads every wisp in the rig in one bd sql round trip, with no
+// label filter. PreloadLabeledWisps uses this rather than listWispsByLabels
+// so that ListAgentBeadsFromWisps keeps seeing the whole wisps table, which is
+// what its legacy type-field and ID-pattern fallbacks are defined over: a
+// wisp whose JSON or label metadata is incomplete is still an agent bead by
+// type or by `prefix-rig-role` ID, and only an unfiltered read can find it.
+// Bucketing by label then happens in Go, per label, off labels_csv (gt-92zx).
+func (b *Beads) listAllWisps() ([]*Issue, error) {
+	return b.queryWisps(wispSelectColumns + wispSelectGroupBy)
+}
+
+// queryWisps runs one wisps-table SELECT and scans its rows. It is the single
+// place the bd sql invocation, the JSON-vs-empty guard, and the row-to-Issue
+// mapping live, so every wisps reader agrees on what a row means.
+func (b *Beads) queryWisps(query string) ([]*Issue, error) {
 	sqlOut, sqlErr := b.run("sql", "--json", query)
 	if sqlErr != nil {
 		return nil, sqlErr
@@ -2034,7 +2075,7 @@ func (b *Beads) listWispsByLabels(labels []string) ([]*Issue, error) {
 	return result, nil
 }
 
-// PreloadLabeledWisps warms this *Beads' wisp cache with one bd sql query
+// PreloadLabeledWisps warms this *Beads' wisp cache with one bd sql round trip
 // covering every label in labels, split back out per label. A caller that
 // needs more than one label's wisps within a single command run (gt polecat
 // list: gt:agent for the agent-bead join, gt:merge-request for the MR index,
@@ -2043,8 +2084,14 @@ func (b *Beads) listWispsByLabels(labels []string) ([]*Issue, error) {
 // wisp list subprocess. The cache never refreshes — same caveat as
 // PreloadAgentBeads/PreloadMergeRequests: don't hold this instance across
 // writes that could create/close wisps mid-run.
+//
+// The round trip is unfiltered (listAllWisps, not listWispsByLabels) and the
+// per-label split happens in Go, because the two consumers need different
+// subsets of one read: ListMergeRequests wants its label's wisps, while
+// ListAgentBeadsFromWisps needs every wisp to run its type/ID fallbacks
+// against. A label-filtered query could not serve the second.
 func (b *Beads) PreloadLabeledWisps(labels ...string) error {
-	wisps, err := b.listWispsByLabels(labels)
+	wisps, err := b.listAllWisps()
 	if err != nil {
 		return err
 	}
@@ -2060,6 +2107,7 @@ func (b *Beads) PreloadLabeledWisps(labels ...string) error {
 		}
 	}
 	b.wispCache = cache
+	b.wispSnapshot = wisps
 	return nil
 }
 
