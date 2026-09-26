@@ -15,14 +15,19 @@ const NotesRef = "om"
 
 // NoteAttempt is one verdict recorded for a reviewed head, frozen as it was
 // written. Score and Verdict are what a re-review of the same diff can
-// disagree with; ReviewedAt orders the history.
+// disagree with; ReviewedAt orders the history. ResolvedBackend is carried
+// per-attempt, not just at the note's top level: a re-roll's score swing
+// otherwise cannot be told apart from ordinary LLM nondeterminism (gt-bveg)
+// if the backend that produced it changed between attempts and only the
+// latest one is visible (gt-iqr6).
 type NoteAttempt struct {
-	Score         float64   `json:"score"`
-	Verdict       string    `json:"verdict"`
-	Attempt       int       `json:"attempt"`
-	OMVersion     string    `json:"om_version,omitempty"`
-	FindingsCount int       `json:"findings_count"`
-	ReviewedAt    time.Time `json:"reviewed_at"`
+	Score           float64   `json:"score"`
+	Verdict         string    `json:"verdict"`
+	Attempt         int       `json:"attempt"`
+	OMVersion       string    `json:"om_version,omitempty"`
+	ResolvedBackend string    `json:"resolved_backend,omitempty"`
+	FindingsCount   int       `json:"findings_count"`
+	ReviewedAt      time.Time `json:"reviewed_at"`
 }
 
 // The gate's verdict schema is exactly these two, and every reader that
@@ -46,11 +51,23 @@ func ValidVerdict(v string) bool {
 type Note struct {
 	OMVersion    string `json:"om_version"`
 	RubricSHA256 string `json:"rubric_sha256"`
-	Rig          string `json:"rig"`
-	MR           string `json:"mr"`
-	Worker       string `json:"worker"`
-	BaseSHA      string `json:"base_sha"`
-	HeadSHA      string `json:"head_sha"`
+	// ResolvedBackend is om's own report of which review backend it
+	// resolved and invoked for this review (verdictJSON.Backend) — e.g. the
+	// backend argv or a model identifier — copied through verbatim when om
+	// reports it. The backend is deliberately never pinned by the rig
+	// manifest (see Manifest's doc comment): it is operator configuration
+	// by design, precisely so changing it never requires a manifest
+	// re-stamp. This field is instead how a swap becomes visible after the
+	// fact, without pinning anything. Omitted when om's verdict carries no
+	// such field — every om version before this one, and any note written
+	// before this field existed — so those notes round-trip unchanged
+	// (gt-iqr6).
+	ResolvedBackend string `json:"resolved_backend,omitempty"`
+	Rig             string `json:"rig"`
+	MR              string `json:"mr"`
+	Worker          string `json:"worker"`
+	BaseSHA         string `json:"base_sha"`
+	HeadSHA         string `json:"head_sha"`
 	// ReviewedTargetTip is origin/<target>'s own tip, resolved at review
 	// time — distinct from BaseSHA, which pins to the branch's own cut
 	// point (the merge-base) and does not move as target advances past it.
@@ -194,12 +211,13 @@ func omVersionBelowFloor(v, min string) bool {
 // attemptOf renders a note's own top-level verdict as a history entry.
 func attemptOf(n *Note) NoteAttempt {
 	return NoteAttempt{
-		Score:         n.Score,
-		Verdict:       n.Verdict,
-		Attempt:       n.Attempt,
-		OMVersion:     n.OMVersion,
-		FindingsCount: n.FindingsCount,
-		ReviewedAt:    n.ReviewedAt,
+		Score:           n.Score,
+		Verdict:         n.Verdict,
+		Attempt:         n.Attempt,
+		OMVersion:       n.OMVersion,
+		ResolvedBackend: n.ResolvedBackend,
+		FindingsCount:   n.FindingsCount,
+		ReviewedAt:      n.ReviewedAt,
 	}
 }
 
