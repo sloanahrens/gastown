@@ -29,7 +29,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		got, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			t.Fatalf("FetchAndVerify on a remote-less database: %v", err)
+			skipOrFailContainerLost(t, err, "FetchAndVerify on a remote-less database")
 		}
 		if got.Remote != "" {
 			t.Errorf("Remote = %q, want empty for a database with no remote", got.Remote)
@@ -46,7 +46,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		got, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			t.Fatalf("FetchAndVerify after a push: %v", err)
+			skipOrFailContainerLost(t, err, "FetchAndVerify after a push")
 		}
 		if got.Remote != "origin" {
 			t.Errorf("Remote = %q, want origin", got.Remote)
@@ -79,7 +79,7 @@ func TestFetchAndVerify(t *testing.T) {
 		if err := consumer.QueryRow(
 			"SELECT COUNT(*) FROM dolt_remote_branches WHERE name = 'remotes/origin/main'",
 		).Scan(&tracking); err != nil {
-			t.Fatalf("count remote-tracking refs before fetch: %v", err)
+			skipOrFailContainerLost(t, err, "count remote-tracking refs before fetch")
 		}
 		if tracking != 0 {
 			t.Fatalf("consumer already tracks %d remote ref(s) before any fetch — this case can no longer prove the fetch ran", tracking)
@@ -87,7 +87,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		got, err := fetchAndVerify(t, consumer, consumerName)
 		if err != nil {
-			t.Fatalf("FetchAndVerify on a diverged consumer: %v", err)
+			skipOrFailContainerLost(t, err, "FetchAndVerify on a diverged consumer")
 		}
 		if !got.Diverged {
 			t.Fatalf("consumer reported no divergence against a remote whose history it does not share (remote=%q head=%q) — the fetch did not run, or the tracking ref was read from the wrong name",
@@ -111,7 +111,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		before, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			t.Fatalf("FetchAndVerify before flatten: %v", err)
+			skipOrFailContainerLost(t, err, "FetchAndVerify before flatten")
 		}
 		if before.Diverged {
 			t.Fatalf("premise broken: %s is already diverged before the flatten (head=%s)", name, before.RemoteHead)
@@ -121,7 +121,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		after, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			t.Fatalf("FetchAndVerify after flatten: %v", err)
+			skipOrFailContainerLost(t, err, "FetchAndVerify after flatten")
 		}
 		if !after.Diverged {
 			t.Fatalf("flatten left the remote holding commits local no longer has, but the pre-flight cleared it (head=%s)", after.RemoteHead)
@@ -156,11 +156,11 @@ func doltTestAdmin(t *testing.T) *sql.DB {
 	dsn := "root:@tcp(127.0.0.1:" + testutil.DoltContainerPort() + ")/"
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("open admin connection: %v", err)
+		skipOrFailContainerLost(t, err, "open admin connection")
 	}
 	if err := db.Ping(); err != nil {
 		db.Close()
-		t.Fatalf("ping Dolt container: %v", err)
+		skipOrFailContainerLost(t, err, "ping Dolt container")
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
@@ -175,7 +175,7 @@ func createDivergenceTestDB(t *testing.T, admin *sql.DB) (*sql.DB, string) {
 
 	name := fmt.Sprintf("dolt_remotes_check_div_%d", time.Now().UnixNano())
 	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE `%s`", name)); err != nil {
-		t.Fatalf("create database %s: %v", name, err)
+		skipOrFailContainerLost(t, err, "create database "+name)
 	}
 	t.Cleanup(func() {
 		if _, err := admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name)); err != nil {
@@ -187,11 +187,11 @@ func createDivergenceTestDB(t *testing.T, admin *sql.DB) (*sql.DB, string) {
 	dsn := "root:@tcp(127.0.0.1:" + testutil.DoltContainerPort() + ")/" + name + "?parseTime=true"
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("open connection to %s: %v", name, err)
+		skipOrFailContainerLost(t, err, "open connection to "+name)
 	}
 	if err := conn.Ping(); err != nil {
 		conn.Close()
-		t.Fatalf("ping %s: %v", name, err)
+		skipOrFailContainerLost(t, err, "ping "+name)
 	}
 	t.Cleanup(func() { conn.Close() })
 	return conn, name
@@ -230,7 +230,7 @@ func flattenHistory(t *testing.T, conn *sql.DB, dbName string) {
 	if err := conn.QueryRow(fmt.Sprintf(
 		"SELECT commit_hash FROM `%s`.dolt_log ORDER BY date ASC LIMIT 1", dbName,
 	)).Scan(&root); err != nil {
-		t.Fatalf("find root commit of %s: %v", dbName, err)
+		skipOrFailContainerLost(t, err, "find root commit of "+dbName)
 	}
 	execSQL(t, conn, fmt.Sprintf("CALL DOLT_RESET('--soft','%s')", root))
 	commitAll(t, conn, "flatten history")
@@ -259,6 +259,6 @@ func commitAll(t *testing.T, conn *sql.DB, message string) {
 func execSQL(t *testing.T, conn *sql.DB, query string, args ...any) {
 	t.Helper()
 	if _, err := conn.Exec(query, args...); err != nil {
-		t.Fatalf("exec %q: %v", query, err)
+		skipOrFailContainerLost(t, err, fmt.Sprintf("exec %q", query))
 	}
 }
