@@ -781,6 +781,66 @@ func TestRunDefaultTestVerification_MixedDeletionAndModificationBuildsWholeModul
 	}
 }
 
+// TestRunDefaultTestVerification_MixedDeletionAndNestedModuleBuildsBoth pins
+// gt-dlsd: a diff that deletes a whole package AND touches a nested module
+// used to run only the deletion's whole-module build (a switch's first
+// matching case wins, so the nested module's build never ran) while the log
+// still printed the nested module's "built that module in its own directory"
+// line — a false record of a check that never happened. Both shapes can
+// appear in the same diff, so both builds must run.
+func TestRunDefaultTestVerification_MixedDeletionAndNestedModuleBuildsBoth(t *testing.T) {
+	stubNoContainers(t)
+	var builds []string
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(dir string) error { builds = append(builds, dir); return nil }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error { return nil })
+
+	dir, _ := initVerifyTestGoRepo(t)
+	addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+	deletePkgb(t, dir)
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-mixed-deletion-nested")
+	if err != nil {
+		t.Fatalf("runDefaultTestVerification: %v", err)
+	}
+	wantWorktreeBuild := dir
+	wantNestedBuild := filepath.Join(dir, "plugins", "example-sub")
+	if len(builds) != 2 {
+		t.Fatalf("goBuildWholeModule ran %v, want exactly two builds — one for the deletion, one for the nested module", builds)
+	}
+	foundWorktree, foundNested := false, false
+	for _, b := range builds {
+		switch b {
+		case wantWorktreeBuild:
+			foundWorktree = true
+		case wantNestedBuild:
+			foundNested = true
+		}
+	}
+	if !foundWorktree {
+		t.Errorf("builds = %v, missing the deletion's whole-module build of %s", builds, wantWorktreeBuild)
+	}
+	if !foundNested {
+		t.Errorf("builds = %v, missing the nested module's build of %s", builds, wantNestedBuild)
+	}
+
+	logBytes, readErr := os.ReadFile(result.logPath)
+	if readErr != nil {
+		t.Fatalf("reading verify log: %v", readErr)
+	}
+	logText := string(logBytes)
+	for _, want := range []string{"not scoped:", "plugins/example-sub", "built that module in its own directory"} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("verify log is missing %q:\n%s", want, logText)
+		}
+	}
+}
+
 // TestModuleHasMainPackage covers the discriminator that decides whether the
 // whole-module build can use -o: only a module with something to link may pass
 // an output directory, and a listing that fails must not be reported as a main
