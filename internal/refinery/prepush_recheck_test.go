@@ -18,6 +18,9 @@ type prepushStore struct {
 	issues       map[string]*beadsdk.Issue
 	closeReasons map[string]string
 	beforeGet    func(id string)
+	// closeErr, when set, makes every CloseIssue fail — the store-side half of
+	// "the rejection's close did not take effect" (gt-woxj).
+	closeErr error
 }
 
 type prepushPRProvider struct {
@@ -106,6 +109,9 @@ func (s *prepushStore) UpdateIssue(_ context.Context, id string, updates map[str
 }
 
 func (s *prepushStore) CloseIssue(_ context.Context, id, reason, _, _ string) error {
+	if s.closeErr != nil {
+		return s.closeErr
+	}
 	issue, ok := s.issues[id]
 	if !ok {
 		return fmt.Errorf("issue %s not found", id)
