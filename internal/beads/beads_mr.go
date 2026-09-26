@@ -160,3 +160,35 @@ func MatchesMRSourceIssue(description, issueID string) bool {
 	needle := "source_issue: " + issueID + "\n"
 	return strings.Contains(description, needle)
 }
+
+// NonTerminalMRsForIssue returns every merge-request bead whose source_issue
+// matches issueID and whose status is not terminal (closed/tombstone) —
+// unlike FindOpenMRsForIssue, this also catches an MR the refinery has
+// already claimed: status transitions open -> in_progress the moment the
+// refinery picks one up (internal/refinery/types.go:183), and a
+// status=="open" filter would miss it.
+//
+// This is the fallback the gt-6hmz close-time invariant's exit (b) uses when
+// pendingMRID is empty — i.e. active_mr was never recorded on the agent
+// bead — rather than treating "unknown" the same as "no MR exists" (gt-h8ld).
+func (b *Beads) NonTerminalMRsForIssue(issueID string) ([]*Issue, error) {
+	issues, err := b.ListMergeRequests(ListOptions{
+		Status: "all",
+		Label:  "gt:merge-request",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var matches []*Issue
+	for _, issue := range issues {
+		if !MatchesMRSourceIssue(issue.Description, issueID) {
+			continue
+		}
+		if IssueStatus(issue.Status).IsTerminal() {
+			continue
+		}
+		matches = append(matches, issue)
+	}
+	return matches, nil
+}
