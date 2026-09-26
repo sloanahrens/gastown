@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // divergedPushGit is the subset of *git.Git that recoverDivergedPush needs.
@@ -11,7 +13,7 @@ type divergedPushGit interface {
 	Rev(ref string) (string, error)
 	MergeBase(a, b string) (string, error)
 	PatchID(base, head string) (string, error)
-	PatchIDs(base, head string) ([]string, error)
+	FirstParentPatchIDs(base, head string) ([]git.PatchIDCommit, error)
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 }
 
@@ -45,6 +47,18 @@ type divergedPushGit interface {
 // does not, nothing is pushed; diagnosis explains why so callers can report it
 // instead of a bare "possible work loss".
 //
+// The per-commit ids come from FirstParentPatchIDs, not PatchIDs: a merge
+// commit carries real content of its own (whatever a manual conflict
+// resolution folded in is not attached to any individual commit), and
+// PatchIDs' --no-merges walk drops that content from the comparison
+// entirely — origin could hold a merge commit's unique content and this
+// function would call it "no origin work at risk" and lease over it. Walking
+// --first-parent instead keeps merge commits in the id set, each keyed to its
+// diff against its first parent (which is exactly a merge's net content, per
+// FirstParentPatchIDs' doc). For the common case of a linear, rebase-only
+// range the two functions agree commit-for-commit, so this changes nothing
+// there (gt-5wp5).
+//
 // Returns recovered=true only when the leased push actually landed.
 // diagnosis is set whenever the comparison could be made, for inclusion in
 // error/alarm messages either way.
@@ -76,14 +90,16 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 		return false, "", fmt.Errorf("merge-base(%s, local HEAD): %w", target, err)
 	}
 
-	originIDs, err := g.PatchIDs(originBase, originSHA)
+	originPairs, err := g.FirstParentPatchIDs(originBase, originSHA)
 	if err != nil {
 		return false, "", fmt.Errorf("patch-ids of origin range %s..%s: %w", originBase, originSHA, err)
 	}
-	localIDs, err := g.PatchIDs(localBase, localSHA)
+	localPairs, err := g.FirstParentPatchIDs(localBase, localSHA)
 	if err != nil {
 		return false, "", fmt.Errorf("patch-ids of local range %s..%s: %w", localBase, localSHA, err)
 	}
+	originIDs := patchIDsOf(originPairs)
+	localIDs := patchIDsOf(localPairs)
 
 	missing := patchIDsMissingFrom(originIDs, localIDs)
 
@@ -124,6 +140,18 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 		return false, diagnosis, fmt.Errorf("leased force-push failed: %w", leaseErr)
 	}
 	return true, diagnosis, nil
+}
+
+// patchIDsOf extracts the patch-id half of each pair, in the same order
+// FirstParentPatchIDs returned them. The paired commit sha is only needed to
+// name a landing commit elsewhere; the divergence comparison here only ever
+// needs the ids.
+func patchIDsOf(pairs []git.PatchIDCommit) []string {
+	ids := make([]string, len(pairs))
+	for i, p := range pairs {
+		ids[i] = p.PatchID
+	}
+	return ids
 }
 
 // patchIDsMissingFrom returns the patch-ids present in want but not in have,

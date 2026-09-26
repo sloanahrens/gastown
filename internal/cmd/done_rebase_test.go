@@ -434,7 +434,9 @@ type fakeDivergedPushGit struct {
 	patchIDs   map[[2]string]string
 	patchIDErr error
 
-	// patchIDLists backs PatchIDs (one id per commit in the range).
+	// patchIDLists backs FirstParentPatchIDs (one id per commit in the range).
+	// The fake pairs each id with a placeholder sha — recoverDivergedPush never
+	// reads the commit half.
 	patchIDLists map[[2]string][]string
 	patchIDsErr  error
 
@@ -478,11 +480,19 @@ func (f *fakeDivergedPushGit) PatchID(base, head string) (string, error) {
 	return f.patchIDs[[2]string{base, head}], nil
 }
 
-func (f *fakeDivergedPushGit) PatchIDs(base, head string) ([]string, error) {
+func (f *fakeDivergedPushGit) FirstParentPatchIDs(base, head string) ([]gitpkg.PatchIDCommit, error) {
 	if f.patchIDsErr != nil {
 		return nil, f.patchIDsErr
 	}
-	return f.patchIDLists[[2]string{base, head}], nil
+	ids := f.patchIDLists[[2]string{base, head}]
+	if ids == nil {
+		return nil, nil
+	}
+	pairs := make([]gitpkg.PatchIDCommit, len(ids))
+	for i, id := range ids {
+		pairs[i] = gitpkg.PatchIDCommit{PatchID: id, Commit: fmt.Sprintf("commit-%d", i)}
+	}
+	return pairs, nil
 }
 
 func (f *fakeDivergedPushGit) PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error {
@@ -1097,6 +1107,102 @@ func TestRecoverDivergedPush_RealRepoRefusesGenuineDivergence(t *testing.T) {
 	testRunGit(t, work, "fetch", "origin")
 	if got := gitpkgRev(t, work, "origin/feature"); got != otherHead {
 		t.Errorf("origin/feature was modified: got %s, want %s (untouched)", got, otherHead)
+	}
+}
+
+// TestRecoverDivergedPush_RealRepoMergeCommitContentRefuses guards the gap
+// gt-5wp5 found: a merge commit can carry content of its own — whatever was
+// added while resolving it, on top of what either parent already
+// contributed — that no individual commit's diff carries. A default rebase
+// drops merge commits, replaying only their non-merge ancestors, so a branch
+// rebased after landing such a merge loses that content entirely. The
+// per-commit comparison must catch this and refuse, not force-push local's
+// copy (missing the content) over origin's (which still has it).
+func TestRecoverDivergedPush_RealRepoMergeCommitContentRefuses(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	seed := filepath.Join(tmp, "seed")
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	writeRepoFile(t, seed, "README.md", "# initial\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// Two branches off the same point, touching different files so both
+	// replay cleanly after a later rebase — the content this test is about
+	// comes from the merge commit itself, not from a replay conflict.
+	testRunGit(t, seed, "checkout", "-b", "feature")
+	writeRepoFile(t, seed, "a.txt", "feature\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "feature: add a.txt")
+
+	testRunGit(t, seed, "checkout", "main")
+	testRunGit(t, seed, "checkout", "-b", "topic")
+	writeRepoFile(t, seed, "b.txt", "topic\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "topic: add b.txt")
+
+	// Merge topic into feature, then add content in the merge commit itself
+	// — a conflict resolution lands the same way. c.txt exists only on this
+	// commit, attached to neither parent's own diff.
+	testRunGit(t, seed, "checkout", "feature")
+	testRunGit(t, seed, "merge", "--no-ff", "--no-commit", "topic")
+	writeRepoFile(t, seed, "c.txt", "resolved during the merge\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "Merge topic into feature, plus fixup")
+	testRunGit(t, seed, "push", "origin", "feature:feature")
+
+	// main advances while the MR sits in the queue.
+	testRunGit(t, seed, "checkout", "main")
+	writeRepoFile(t, seed, "main-new.txt", "advance\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "advance main")
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// Second dispatch: fresh checkout of the reused branch, rebased onto
+	// origin/main per the formula's branch-reuse step. A default rebase drops
+	// the merge commit and replays its non-merge ancestors individually —
+	// a.txt and b.txt both come back, but c.txt (the merge's own content)
+	// does not.
+	work := filepath.Join(tmp, "work")
+	testRunGit(t, tmp, "clone", remote, work)
+	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.name", "Test")
+	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
+	testRunGit(t, work, "fetch", "origin")
+	testRunGit(t, work, "rebase", "origin/main")
+
+	if _, statErr := os.Stat(filepath.Join(work, "c.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("precondition failed: rebase should have dropped c.txt, stat err: %v", statErr)
+	}
+
+	g := gitpkg.NewGit(work)
+	if err := g.Push("origin", "feature:feature", false); err == nil {
+		t.Fatal("expected plain push to fail non-fast-forward after rebase")
+	}
+
+	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recovered {
+		t.Fatal("must not recover: the rebase dropped the merge commit's own content (c.txt)")
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
+	}
+
+	// origin/feature must still carry the merge's content untouched.
+	verify := filepath.Join(tmp, "verify")
+	testRunGit(t, tmp, "clone", "--branch", "feature", remote, verify)
+	if _, statErr := os.Stat(filepath.Join(verify, "c.txt")); statErr != nil {
+		t.Errorf("c.txt missing on origin/feature after recovery attempt: %v", statErr)
 	}
 }
 
