@@ -738,6 +738,51 @@ func TestChangedGoPackages(t *testing.T) {
 		}
 	})
 
+	// Deleting a package inside a nested module is not a deletion of THIS
+	// module's, and the difference decides which build verifies it: the
+	// whole-module build is the gate's stand-in for a deletion, and this
+	// module's `go build ./...` never reaches a nested one (gt-h8cr). A gate
+	// that reads the deletion as this module's verifies it with a build that
+	// cannot contain anything the branch changed.
+	t.Run("a package deleted inside a nested module belongs to that module", func(t *testing.T) {
+		dir, _ := initVerifyTestGoRepo(t)
+		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+		addNestedModulePackage(t, dir, "plugins/example-sub/inner")
+		base := strings.TrimSpace(runGitOut(t, dir, "rev-parse", "HEAD"))
+		deleteDir(t, dir, "plugins/example-sub/inner")
+
+		g := git.NewGit(dir)
+		got, err := changedGoPackages(g, dir, base)
+		if err != nil {
+			t.Fatalf("changedGoPackages: %v", err)
+		}
+		if !got.changedGoFiles {
+			t.Fatal("changedGoFiles = false, want true (deletion still touches .go paths)")
+		}
+		if len(got.deletedDirs) != 0 {
+			t.Errorf("deletedDirs = %v, want empty — this module never owned that package, so its build cannot verify the deletion", got.deletedDirs)
+		}
+		if len(got.packages) != 0 {
+			t.Errorf("packages = %v, want empty — the nested module's packages are not packages of this module", got.packages)
+		}
+		if len(got.nestedModules) != 1 {
+			t.Fatalf("nestedModules = %v, want exactly one entry", got.nestedModules)
+		}
+		nested := got.nestedModules[0]
+		if nested.dir != "plugins/example-sub/inner" || nested.moduleRoot != "plugins/example-sub" {
+			t.Errorf("nested = %+v, want the deleted directory and the module that owned it", nested)
+		}
+		if !nested.deleted {
+			t.Errorf("nested = %+v, want deleted=true — the directory is gone, and a reader has to be able to tell that from a changed file", nested)
+		}
+		if nested.importPath != "" {
+			t.Errorf("importPath = %q, want empty — there is no package left in the directory to name", nested.importPath)
+		}
+		if len(got.unresolvable) != 0 {
+			t.Errorf("unresolvable = %v, want empty — nothing here is an unbuildable file", got.unresolvable)
+		}
+	})
+
 	// Failing closed inside a nested module: a directory the owning module will
 	// not make a package of either leaves nothing anywhere to build or test, so
 	// the classification must not become a way to skip a broken file.

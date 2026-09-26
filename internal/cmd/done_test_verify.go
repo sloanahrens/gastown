@@ -189,11 +189,15 @@ type unresolvedChangedDir struct {
 // inside the worktree — a directory below the worktree root with its own
 // go.mod. The worktree's own module contains neither the directory nor a
 // package for it, so its `go list` fails on a file that is perfectly good;
-// moduleRoot and importPath name where the file does resolve.
+// moduleRoot and importPath name where the file does resolve. deleted marks
+// the emptied directory, where there is no file left to resolve and
+// importPath is empty — the module that owned the package is still the only
+// build that can verify the deletion (gt-h8cr).
 type nestedChangedDir struct {
 	dir        string
 	moduleRoot string
 	importPath string
+	deleted    bool
 }
 
 // changedGoResolution is the outcome of resolving a branch's changed .go files
@@ -202,15 +206,20 @@ type changedGoResolution struct {
 	// packages are the import paths the branch's changed .go files resolve
 	// to. A directory `go list` cannot resolve contributes nothing.
 	packages []string
-	// deletedDirs are changed .go directories that no longer hold any .go
-	// file: the whole-package deletion shape, where go list failing is the
-	// deletion talking and not an unbuildable change. The module still has to
-	// build, and only a whole-module build can say so.
+	// deletedDirs are changed .go directories this module owned and that no
+	// longer hold any .go file: the whole-package deletion shape, where go
+	// list failing is the deletion talking and not an unbuildable change. The
+	// module still has to build, and only a whole-module build can say so.
+	// A directory a nested module owned is never one of these: this module's
+	// build cannot see it, so the deed would be verified by the wrong module
+	// (gt-h8cr).
 	deletedDirs []string
 	// nestedModules are changed .go directories that belong to a nested
-	// module. They hold .go files this module cannot name, but nothing is
-	// wrong with the files: they are resolved, built and logged as the other
-	// module's, not refused as this one's broken change.
+	// module — both the ones that still hold .go files this module cannot
+	// name (nothing is wrong with the files: they are resolved, built and
+	// logged as the other module's, not refused as this one's broken change)
+	// and the ones the branch emptied (deleted, with no package left to
+	// resolve). The module that owns either is the only build that verifies it.
 	nestedModules []nestedChangedDir
 	// unresolvable are changed .go directories that still hold a .go file but
 	// that `go list` could not resolve — a file that no longer compiles, a
@@ -229,13 +238,15 @@ type changedGoResolution struct {
 // verifiedBase) into what the gate can act on — gt-h9kf: "computes the changed
 // packages (git diff base...HEAD --name-only -> go list)". `go list`, not the
 // diff, is the authority on what is still a package, so a changed directory it
-// will not resolve is classified rather than dropped: deletedDirs when the
-// directory holds no .go file any more, nestedModules when the directory
-// belongs to another module inside the worktree, and unresolvable when a .go
-// file is still there that this module will not make a package of — one that
-// no longer compiles, one its build constraints exclude, a stray .go file
-// outside any package. Only the last is a refusal: nothing here builds or
-// tests a file the module cannot name, so no check can stand in for it.
+// will not resolve is classified rather than dropped: deletedDirs when this
+// module owned the directory and it holds no .go file any more, nestedModules
+// when the directory belongs to another module inside the worktree — emptied
+// or not, because the module that owns it is what verifies it either way
+// (gt-h8cr) — and unresolvable when a .go file is still there that this module
+// will not make a package of: one that no longer compiles, one its build
+// constraints exclude, a stray .go file outside any package. Only the last is
+// a refusal: nothing here builds or tests a file the module cannot name, so no
+// check can stand in for it.
 func changedGoPackages(g *git.Git, worktree, verifiedBase string) (changedGoResolution, error) {
 	var res changedGoResolution
 
@@ -272,7 +283,24 @@ func changedGoPackages(g *git.Git, worktree, verifiedBase string) (changedGoReso
 		// go list is the authority on what is a package, and it said no.
 		// Which of the three reasons it said no for decides what the caller
 		// may do about it.
+		//
+		// The module that owns the directory is asked first, because it
+		// decides what a deletion here even means (gt-h8cr). The whole-module
+		// build is the gate's stand-in for a deletion, and it is only a
+		// stand-in when it is the build of the module that owned the package:
+		// this module's `go build ./...` does not reach a nested module at
+		// all, so reading a nested deletion as this module's would verify the
+		// change by building a tree that cannot contain it.
+		moduleRoot, moduleErr := nestedModuleRoot(worktree, d)
+		if moduleErr != nil {
+			res.unresolvable = append(res.unresolvable, unresolvedChangedDir{dir: d, listErr: moduleErr})
+			continue
+		}
 		if !dirHoldsGoFiles(worktree, d) {
+			if moduleRoot != "" {
+				res.nestedModules = append(res.nestedModules, nestedChangedDir{dir: d, moduleRoot: moduleRoot, deleted: true})
+				continue
+			}
 			res.deletedDirs = append(res.deletedDirs, d)
 			continue
 		}
@@ -280,11 +308,6 @@ func changedGoPackages(g *git.Git, worktree, verifiedBase string) (changedGoReso
 		// reason that is not a broken change: the file is fine, it just
 		// belongs to a module this one does not contain, so resolve it
 		// there instead of reading this module's refusal as the file's.
-		moduleRoot, moduleErr := nestedModuleRoot(worktree, d)
-		if moduleErr != nil {
-			res.unresolvable = append(res.unresolvable, unresolvedChangedDir{dir: d, listErr: moduleErr})
-			continue
-		}
 		if moduleRoot == "" {
 			res.unresolvable = append(res.unresolvable, unresolvedChangedDir{dir: d, listErr: listErr})
 			continue
@@ -984,6 +1007,10 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// for them cannot tell a file that was skipped from one that was never
 	// noticed.
 	for _, n := range changed.nestedModules {
+		if n.deleted {
+			fmt.Fprintf(logFile, "not scoped: %s was deleted, and it belonged to the nested module %s; this module's suite does not build that module, so the gate built it in its own directory instead\n", n.dir, n.moduleRoot)
+			continue
+		}
 		fmt.Fprintf(logFile, "not scoped: %s belongs to the nested module %s (%s); this module's suite does not run it, so the gate built that module in its own directory instead\n", n.dir, n.moduleRoot, n.importPath)
 	}
 	// Whether this gate queues for the town's container-gate slot, and why, is
