@@ -1371,6 +1371,36 @@ func TestDetectStateCollapse_StaleReportIsRepeated(t *testing.T) {
 	}
 }
 
+// TestDetectStateCollapse_UnageableReportStillRepeats is the caller side of
+// that rule: a prior report with an unreadable timestamp still leaves the
+// collapse reportable (gt-ivcf).
+func TestDetectStateCollapse_UnageableReportStillRepeats(t *testing.T) {
+	t.Parallel()
+
+	unageableComment := `[{"text":"STATE-COLLAPSE: this issue is closed but its merge request gt-mr-collapsed is still open (branch=\"polecat/topaz/gt-wdr+abc\" target=\"main\").","created_at":"not a timestamp"}]`
+	bd, mock := mockBd(
+		func(args []string) (string, error) {
+			switch {
+			case len(args) > 1 && args[0] == "show" && args[1] == "gt-wdr":
+				return `[{"status":"closed"}]`, nil
+			case len(args) > 1 && args[0] == "comments" && args[1] == "gt-wdr":
+				return unageableComment, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+	refs := fakeBranchRefSourceWithMRs(nil, nil, []OpenMRRef{
+		{ID: "gt-mr-collapsed", Status: "open", SourceIssue: "gt-wdr", Branch: "polecat/topaz/gt-wdr+abc", Target: "main"},
+	})
+
+	DetectStateCollapse(bd, refs, "/work", "gastown", nil)
+
+	if logStr := strings.Join(mock.calls, "\n"); !strings.Contains(logStr, "comments add gt-wdr") {
+		t.Errorf("a prior report with an unreadable timestamp must not silence the finding; log:\n%s", logStr)
+	}
+}
+
 // TestDetectStateCollapse_CommentReadFailureStillReports pins the failure
 // direction: a read that fails reports rather than stays silent. A duplicate
 // comment costs a redundant line; a suppressed one costs a collapse nobody
@@ -1402,9 +1432,8 @@ func TestDetectStateCollapse_CommentReadFailureStillReports(t *testing.T) {
 }
 
 // TestAlreadyReportedRecently_AgesOutAndMatchesOnMarker covers the helper
-// directly, including the case that makes silent skipping safe: a timestamp the
-// helper cannot parse is treated as current, so an unreadable record cannot
-// make a standing collapse re-report on every single cycle.
+// directly. A timestamp it cannot parse belongs on the same side as a read
+// failure: an unageable record suppresses nothing (gt-ivcf).
 func TestAlreadyReportedRecently_AgesOutAndMatchesOnMarker(t *testing.T) {
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 	const marker = "merge request gt-mr-1 is still"
@@ -1431,9 +1460,17 @@ func TestAlreadyReportedRecently_AgesOutAndMatchesOnMarker(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "unparseable timestamp suppresses",
+			name:     "unparseable timestamp does not suppress",
 			comments: `[{"text":"... ` + marker + ` open ...","created_at":"not a timestamp"}]`,
-			want:     true,
+			want:     false,
+		},
+		{
+			// The loop keeps scanning, so one unageable record cannot mask an
+			// ageable one beside it.
+			name: "unparseable sibling does not mask a recent one",
+			comments: `[{"text":"... ` + marker + ` open ...","created_at":"not a timestamp"},` +
+				`{"text":"... ` + marker + ` open ...","created_at":"2026-09-21T11:00:00Z"}]`,
+			want: true,
 		},
 		{
 			name:     "no comments does not suppress",
