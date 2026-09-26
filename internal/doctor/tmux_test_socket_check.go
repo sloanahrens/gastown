@@ -70,12 +70,16 @@ type TmuxTestSocketCheck struct {
 	leftovers []string
 	// staleFiles holds socket files left by runs whose server already exited.
 	staleFiles []string
+	// unprobed holds sockets whose state Run could not establish, neither a
+	// server it can report nor a file it may remove. They are carried so the
+	// check reports an unknown rather than a pass it did not earn.
+	unprobed []string
 
-	socketDirForTest string                              // override for tmux.SocketDir()
-	probeForTest     func(socket string) testSocketProbe // override for the real tmux client
-	pidAliveForTest  func(pid int) bool                  // override for os.FindProcess
-	servingForTest   func(path string) bool              // override for socketServing
-	socketAgeForTest func(path string) time.Duration     // override for the file's mtime
+	socketDirForTest   string                              // override for tmux.SocketDir()
+	probeForTest       func(socket string) testSocketProbe // override for the real tmux client
+	pidAliveForTest    func(pid int) bool                  // override for os.FindProcess
+	socketStateForTest func(path string) socketState       // override for dialSocketState
+	socketAgeForTest   func(path string) time.Duration     // override for the file's mtime
 }
 
 // NewTmuxTestSocketCheck creates a check for abandoned test tmux servers.
@@ -106,11 +110,12 @@ func (c *TmuxTestSocketCheck) probe(socket string) testSocketProbe {
 	return tmux.NewTmuxWithSocket(socket)
 }
 
-func (c *TmuxTestSocketCheck) serving(path string) bool {
-	if c.servingForTest != nil {
-		return c.servingForTest(path)
+// socketStateOf dials the socket, unless a test has stubbed the dial out.
+func (c *TmuxTestSocketCheck) socketStateOf(path string) socketState {
+	if c.socketStateForTest != nil {
+		return c.socketStateForTest(path)
 	}
-	return socketServing(path)
+	return dialSocketState(path)
 }
 
 // socketAge is how long the socket file has existed. A file that cannot be
@@ -201,9 +206,15 @@ func candidateOwnerPid(socket string) (int, bool) {
 // socket is residue whoever made it, and requiring an owner pid there is what let
 // the litter accumulate, since a pid recycled onto an unrelated live process
 // made the file uncollectable forever (gt-20di).
+//
+// Both halves collect only on evidence that the server is gone, and a failed
+// probe is not that evidence: a file left behind is collected by the next scan,
+// while one removed out from under a live server leaves that server outside the
+// sweep for good (gt-ri37).
 func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 	c.leftovers = nil
 	c.staleFiles = nil
+	c.unprobed = nil
 
 	entries, err := os.ReadDir(c.socketDir())
 	if err != nil {
@@ -222,7 +233,15 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 		path := filepath.Join(c.socketDir(), socket)
-		if !c.serving(path) {
+		switch c.socketStateOf(path) {
+		case socketUnreachable:
+			// The dial could not be made, which says nothing about the server.
+			c.unprobed = append(c.unprobed, socket)
+			continue
+		case socketGone:
+			// Unlinked while the scan ran; there is nothing to collect.
+			continue
+		case socketRefused:
 			if c.socketAge(path) >= staleSocketMinAge {
 				c.staleFiles = append(c.staleFiles, socket)
 			}
@@ -235,9 +254,16 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		probe := c.probe(socket)
 		sessions, err := probe.ListSessions()
-		if err != nil || len(sessions) == 0 {
-			// The dial answered but tmux does not: the server exited between
-			// the two, leaving the file behind (gt-2bj).
+		if err != nil {
+			// The dial answered but tmux could not be asked. Same asymmetry as
+			// the dial above: an unreadable server is not a departed one, and
+			// removing the file here would drop it out of every later scan.
+			c.unprobed = append(c.unprobed, socket)
+			continue
+		}
+		if len(sessions) == 0 {
+			// The dial answered, so did the server, and it holds no sessions:
+			// it exited between the two, leaving the file behind (gt-2bj).
 			c.staleFiles = append(c.staleFiles, socket)
 			continue
 		}
@@ -251,7 +277,18 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	sort.Strings(c.staleFiles)
+	sort.Strings(c.unprobed)
 	if len(c.leftovers) == 0 && len(c.staleFiles) == 0 {
+		if len(c.unprobed) > 0 {
+			// Nothing was found, but not everything was looked at, and a pass
+			// the check did not earn is the report it must not give.
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusSkipped,
+				Message: fmt.Sprintf("unknown: %d socket file(s) could not be probed", len(c.unprobed)),
+				Details: []string{fmt.Sprintf("e.g. %s", strings.Join(firstFew(c.unprobed, 5), ", "))},
+			}
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -260,11 +297,15 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(c.leftovers) == 0 {
+		details := []string{fmt.Sprintf("e.g. %s", strings.Join(firstFew(c.staleFiles, 5), ", "))}
+		if len(c.unprobed) > 0 {
+			details = append(details, unprobedDetail(c.unprobed))
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d socket file(s) left by test runs whose server has exited", len(c.staleFiles)),
-			Details: []string{fmt.Sprintf("e.g. %s", strings.Join(firstFew(c.staleFiles, 5), ", "))},
+			Details: details,
 			FixHint: "Run 'gt doctor --fix' to remove them",
 		}
 	}
@@ -272,6 +313,9 @@ func (c *TmuxTestSocketCheck) Run(ctx *CheckContext) *CheckResult {
 	details := evidence
 	if len(c.staleFiles) > 0 {
 		details = append(details, fmt.Sprintf("plus %d socket file(s) whose server has exited", len(c.staleFiles)))
+	}
+	if len(c.unprobed) > 0 {
+		details = append(details, unprobedDetail(c.unprobed))
 	}
 	sort.Strings(c.leftovers)
 	return &CheckResult{
@@ -293,16 +337,62 @@ func firstFew(names []string, n int) []string {
 	return names[:n]
 }
 
-// socketServing reports whether anything is listening on the socket file. A
-// socket file whose server exited refuses the connection instantly, which is
-// what keeps the directory scan off a `tmux` spawn per stale file.
-func socketServing(path string) bool {
+// unprobedDetail names the sockets the scan could not ask, so a reader of a
+// residue report can tell the count it is missing from (gt-ri37).
+func unprobedDetail(unprobed []string) string {
+	return fmt.Sprintf("plus %d socket file(s) that could not be probed: %s",
+		len(unprobed), strings.Join(firstFew(unprobed, 5), ", "))
+}
+
+// socketState is what a dial of the socket file can conclude. The outcomes are
+// not two: only a refusal is evidence about the server, and reading a dial that
+// cannot be made as absence is how the sweep came to unlink the sockets of live
+// servers (gt-ri37).
+type socketState int
+
+const (
+	// socketServing: a server accepted the connection.
+	socketServing socketState = iota
+	// socketRefused: the file is there and nothing holds it — the one outcome
+	// that makes the file residue.
+	socketRefused
+	// socketGone: the file was unlinked mid-scan, so there is nothing to collect.
+	socketGone
+	// socketUnreachable: the dial failed for a reason that is not the server's
+	// absence, leaving what holds the socket unknown and the file untouchable.
+	socketUnreachable
+)
+
+// dialSocketState reports what holds the socket file. A file whose server
+// exited refuses the connection instantly, which is what keeps the directory
+// scan off a `tmux` spawn per stale file.
+func dialSocketState(path string) socketState {
 	conn, err := net.DialTimeout("unix", path, 250*time.Millisecond)
-	if err != nil {
-		return false
+	if err == nil {
+		_ = conn.Close()
+		return socketServing
 	}
-	_ = conn.Close()
-	return true
+	return classifyDialErr(err)
+}
+
+// classifyDialErr maps a failed dial onto what it says about the server. A
+// refusal and an unlinked path are the only answers about the socket itself;
+// EMFILE and ENFILE from this process's descriptor table, EACCES, EAGAIN, and a
+// dial that timed out are answers about the probe.
+//
+// The timeout is the one worth naming, because it is not hypothetical: a server
+// with a full listen queue accepts nothing until it drains, so a busy run's live
+// server presents as a dial that hangs, and calling that absence would unlink
+// the socket of a test in flight (gt-ri37).
+func classifyDialErr(err error) socketState {
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return socketRefused
+	case errors.Is(err, syscall.ENOENT):
+		return socketGone
+	default:
+		return socketUnreachable
+	}
 }
 
 // sessionEvidence pairs each session with the pane pid and cwd that identify
@@ -330,6 +420,10 @@ func (c *TmuxTestSocketCheck) sessionEvidence(probe testSocketProbe, sessions []
 // Fix kills each abandoned server and unlinks the socket files. A server
 // unlinks its own socket on the way out, so the explicit Remove covers the one
 // that died between Run and Fix, and the files whose server had already exited.
+//
+// Nothing unprobed is touched: those are the sockets Run could not make a
+// finding about, and a fix has no more evidence than the scan it follows
+// (gt-ri37).
 func (c *TmuxTestSocketCheck) Fix(ctx *CheckContext) error {
 	var firstErr error
 	for _, socket := range c.leftovers {
@@ -346,5 +440,6 @@ func (c *TmuxTestSocketCheck) Fix(ctx *CheckContext) error {
 	}
 	c.leftovers = nil
 	c.staleFiles = nil
+	c.unprobed = nil
 	return firstErr
 }
