@@ -2207,6 +2207,94 @@ func TestCheckpointResumeSkipsPush(t *testing.T) {
 	}
 }
 
+// TestMRCheckpointStaleReason guards gt-xgbv: a rerun of gt done may resume
+// from an MR-created checkpoint only while that MR is still this branch's, at
+// this commit, and in the queue. A checkpoint whose MR has since been closed —
+// the shape a refinery rejection leaves behind (gt-bsmp) — must read as stale,
+// so the rerun creates a fresh MR rather than reporting success and queueing
+// nothing.
+//
+// It calls the same helper runDone calls, so the two cannot drift apart.
+func TestMRCheckpointStaleReason(t *testing.T) {
+	t.Parallel()
+	const (
+		branch = "polecat/obsidian/gt-xgbv"
+		shaA   = "8eb0cf6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		shaB   = "c890451bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	mr := func(status, mrBranch, sha string) *beads.Issue {
+		description := fmt.Sprintf("branch: %s\ntarget: main\nsource_issue: gt-xgbv\nrig: gastown", mrBranch)
+		if sha != "" {
+			description += "\ncommit_sha: " + sha
+		}
+		return &beads.Issue{ID: "gt-mr1", Status: status, Description: description}
+	}
+
+	tests := []struct {
+		name string
+		mr   *beads.Issue
+		head string
+		want string
+	}{
+		{
+			name: "open MR for this branch and commit - resume",
+			mr:   mr("open", branch, shaA),
+			head: shaA,
+			want: "",
+		},
+		{
+			name: "rejected MR for this branch and commit - create fresh",
+			mr:   mr("closed", branch, shaA),
+			head: shaA,
+			want: "MR is closed",
+		},
+		{
+			name: "tombstoned MR - create fresh",
+			mr:   mr("tombstone", branch, shaA),
+			head: shaA,
+			want: "MR is tombstone",
+		},
+		{
+			name: "open MR for another branch - create fresh",
+			mr:   mr("open", "polecat/obsidian/gt-other", shaA),
+			head: shaA,
+			want: "was for different branch",
+		},
+		{
+			name: "open MR for an earlier commit on this branch - create fresh",
+			mr:   mr("open", branch, shaA),
+			head: shaB,
+			want: "was for commit " + shaA[:8],
+		},
+		{
+			name: "legacy MR with no commit_sha - branch and status decide",
+			mr:   mr("open", branch, ""),
+			head: shaA,
+			want: "",
+		},
+		{
+			name: "unreadable HEAD - branch and status decide",
+			mr:   mr("open", branch, shaA),
+			head: "",
+			want: "",
+		},
+		{
+			name: "MR bead gone - create fresh",
+			mr:   nil,
+			head: shaA,
+			want: "MR bead not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mrCheckpointStaleReason(tt.mr, branch, tt.head); got != tt.want {
+				t.Errorf("mrCheckpointStaleReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCheckpointNilMapSafe verifies that reading from a nil/empty checkpoint
 // map returns zero values and doesn't panic.
 func TestCheckpointNilMapSafe(t *testing.T) {
