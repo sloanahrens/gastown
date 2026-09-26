@@ -146,6 +146,40 @@ func addNestedModule(t *testing.T, dir, relDir, modulePath string) {
 	runGitIn(t, dir, "commit", "-q", "-m", "add nested module at "+relDir)
 }
 
+// addNestedModulePackage writes a second package inside a nested module —
+// a directory that module owns and this one cannot name — and commits it, so
+// a test can delete it again (gt-h8cr).
+func addNestedModulePackage(t *testing.T, dir, relDir string) {
+	t.Helper()
+	full := filepath.Join(dir, relDir)
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(full, "inner.go"), "package inner\n\nfunc I() int { return 1 }\n")
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "add a package inside the nested module")
+}
+
+// deleteDir commits the removal of every file in relDir — the whole-package
+// deletion shape deletePkgb makes at the repo root, at any depth.
+func deleteDir(t *testing.T, dir, relDir string) {
+	t.Helper()
+	if err := os.RemoveAll(filepath.Join(dir, relDir)); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, dir, "add", ".")
+	runGitIn(t, dir, "commit", "-q", "-m", "delete "+relDir)
+}
+
+// recordBaseAsRemoteMain moves refs/remotes/origin/main to HEAD, which is how a
+// test makes the current commit the branch's base: the gate diffs the branch
+// against origin/<default>, so a deletion only reaches it when the commit that
+// still held the path is what origin/main points at.
+func recordBaseAsRemoteMain(t *testing.T, dir string) {
+	t.Helper()
+	runGitIn(t, dir, "update-ref", "refs/remotes/origin/main", strings.TrimSpace(runGitOut(t, dir, "rev-parse", "HEAD")))
+}
+
 // addMainPackage writes a package main at cmd/ in the test repo and commits it,
 // which is what puts the module into moduleHasMainPackage's true branch and so
 // switches goBuildWholeModule to its -o form.
@@ -743,6 +777,117 @@ func TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses(t *testing.T
 	}
 	if suiteRan {
 		t.Error("the suite ran for a nested module whose build is already broken")
+	}
+}
+
+// TestRunDefaultTestVerification_NestedModuleDeletionBuildsItsOwnModule pins
+// gt-h8cr: a branch that deletes a package inside a nested module used to be
+// "verified" by building the worktree — this module's `go build ./...`, which
+// does not reach a nested module and so cannot see anything the branch
+// changed. The deletion's importers live in the module that owned the package,
+// so that module is the build the gate has to run, exactly as it already does
+// for a nested module whose files changed.
+func TestRunDefaultTestVerification_NestedModuleDeletionBuildsItsOwnModule(t *testing.T) {
+	stubNoContainers(t)
+	var builds []string
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(dir string) error { builds = append(builds, dir); return nil }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+	suiteRan := false
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error {
+			suiteRan = true
+			return nil
+		})
+
+	dir, _ := initVerifyTestGoRepo(t)
+	addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+	addNestedModulePackage(t, dir, "plugins/example-sub/inner")
+	// The deletion has to be in the diff, so the branch's base is the commit
+	// that still had the package.
+	recordBaseAsRemoteMain(t, dir)
+	deleteDir(t, dir, "plugins/example-sub/inner")
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-deletion")
+	if err != nil {
+		t.Fatalf("runDefaultTestVerification: deleting a package inside a nested module must not refuse: %v", err)
+	}
+	if !result.ran || !result.success {
+		t.Fatalf("result = %+v, want ran=true success=true", result)
+	}
+	if len(result.packages) != 1 || result.packages[0] != "." {
+		t.Errorf("packages = %v, want [.] — no package of this module can be scoped to the change", result.packages)
+	}
+	if !suiteRan {
+		t.Error("the suite did not run for a nested-module deletion")
+	}
+	// Building the worktree here would verify the wrong tree: the deleted
+	// package's importers are in the nested module, which this module's
+	// `./...` does not reach.
+	want := filepath.Join(dir, "plugins", "example-sub")
+	if len(builds) != 1 || builds[0] != want {
+		t.Errorf("goBuildWholeModule called with %v, want exactly [%s] — the root-module build cannot see a nested module's packages", builds, want)
+	}
+	// The deletion has to be legible in the artifact too: a reader who sees
+	// the removed files and no line for them cannot tell the gate verified
+	// them somewhere else from it never having noticed them.
+	logBytes, readErr := os.ReadFile(result.logPath)
+	if readErr != nil {
+		t.Fatalf("reading verify log: %v", readErr)
+	}
+	logText := string(logBytes)
+	for _, want := range []string{"not scoped:", "plugins/example-sub/inner", "was deleted", "plugins/example-sub"} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("verify log is missing %q, so the deleted package's verification is invisible:\n%s", want, logText)
+		}
+	}
+}
+
+// TestRunDefaultTestVerification_NestedModuleDeletionBuildFailureRefuses is the
+// failing half: deleting a package inside a nested module can break the module
+// that owned it, and the refusal has to name that module and keep the
+// compiler's output, rather than passing the branch because some *other*
+// module still builds.
+func TestRunDefaultTestVerification_NestedModuleDeletionBuildFailureRefuses(t *testing.T) {
+	stubNoContainers(t)
+	// Deliberately free of the module's path: the assertion that the refusal
+	// names the module has to be about the gate's own wording, not about the
+	// build error it quotes back.
+	compilerSaid := `inner.go:9:9: undefined: Gone`
+	prev := goBuildWholeModule
+	goBuildWholeModule = func(string) error { return errors.New("go build ./...: exit status 1: " + compilerSaid) }
+	t.Cleanup(func() { goBuildWholeModule = prev })
+	suiteRan := false
+	stubVerifyGate(t,
+		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
+		func(context.Context, string, string, []string, *os.File) error {
+			suiteRan = true
+			return nil
+		})
+
+	dir, _ := initVerifyTestGoRepo(t)
+	addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
+	addNestedModulePackage(t, dir, "plugins/example-sub/inner")
+	recordBaseAsRemoteMain(t, dir)
+	deleteDir(t, dir, "plugins/example-sub/inner")
+
+	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+	g := git.NewGit(dir)
+	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-deletion-build")
+	if err == nil {
+		t.Fatalf("runDefaultTestVerification: a nested module the deletion left unbuildable must refuse, got result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "plugins/example-sub") {
+		t.Errorf("the refusal does not name the nested module that owns the deleted package: %v", err)
+	}
+	if !strings.Contains(err.Error(), compilerSaid) {
+		t.Errorf("the refusal does not surface the build failure it tells the polecat to fix: %v", err)
+	}
+	if suiteRan {
+		t.Error("the suite ran for a deletion whose module does not build")
 	}
 }
 
