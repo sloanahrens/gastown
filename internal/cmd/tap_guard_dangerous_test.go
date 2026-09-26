@@ -1370,9 +1370,13 @@ func TestMatchesWitnessGitPush(t *testing.T) {
 }
 
 // TestMatchesRefineryRawNotesPush: a refinery session pushing refs/notes/
-// directly is blocked, whatever the remote or the exact refspec form; the
-// same commands pass for a non-refinery session, and an ordinary branch
-// push from a refinery is untouched (gt-qhhlr).
+// directly is blocked, whatever the remote or the exact refspec form,
+// including the --all/--mirror forms that carry refs/notes/om implicitly;
+// the same commands pass for a non-refinery session, and an ordinary branch
+// push from a refinery is untouched (gt-qhhlr). This does not cover a
+// compound command that runs git push after another program's own tokens
+// (e.g. `echo x && git push ...`) — that gap is pre-existing shared
+// behavior in inCommandPosition, not specific to this guard.
 func TestMatchesRefineryRawNotesPush(t *testing.T) {
 	t.Parallel()
 	blocked := []string{
@@ -1381,6 +1385,8 @@ func TestMatchesRefineryRawNotesPush(t *testing.T) {
 		"git push upstream refs/notes/om --force",
 		"git -C /x push origin refs/notes/om",
 		"timeout 60 git push origin refs/notes/om",
+		"git push origin --all",
+		"git push origin --mirror",
 	}
 	allowed := []string{
 		"git push origin main",

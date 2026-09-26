@@ -1752,13 +1752,10 @@ func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, altern
 }
 
 const refineryRawNotesPushReason = "raw git push of refs/notes/ from a refinery session"
-const refineryRawNotesPushAlternative = "Alternative: refs/notes/om is published by `gt mq review` and " +
-	"`gt mq rekey-note`, which push through a bounded timeout that kills the whole process group " +
-	"(git and any credential helper) if the remote hangs. On 2026-09-26 a refinery ran a manual " +
-	"`git push origin refs/notes/om`; an orphaned `git credential-osxkeychain get` hung indefinitely on " +
-	"an unanswerable keychain prompt, wedging the refinery for ~18 minutes (gt-qhhlr). Let the gate " +
-	"publish the note, or if a manual push is unavoidable bound it yourself: " +
-	"`GIT_TERMINAL_PROMPT=0 timeout 60 git push origin refs/notes/om`."
+const refineryRawNotesPushAlternative = "Alternative: `gt mq review` and `gt mq rekey-note` publish " +
+	"refs/notes/om through a bounded timeout that kills git and any credential helper if the remote " +
+	"hangs; let the gate publish the note, or bound a manual push yourself: " +
+	"`GIT_TERMINAL_PROMPT=0 timeout 60 git push origin refs/notes/om` (gt-qhhlr)."
 
 // matchesRefineryRawNotesPush blocks an unbounded `git push` targeting a
 // refs/notes/ ref from a refinery session. The refinery's own note-publishing
@@ -1771,6 +1768,17 @@ const refineryRawNotesPushAlternative = "Alternative: refs/notes/om is published
 // keychain prompt no headless session can answer, and that child can outlive
 // git itself, holding open whatever pipe is reading the command's output
 // (gt-qhhlr).
+//
+// --all and --mirror push every ref including refs/notes/om without ever
+// spelling it out as an argument, the same implicit-destination gap
+// matchesPolecatMainPush already guards for a main-branch push, so those
+// flags match here too regardless of any refs/notes/ token being present.
+//
+// Known gap: inCommandPosition judges the whole command by tokens[0], so a
+// compound command that runs git push after another program's own tokens
+// (e.g. `echo x && git push origin refs/notes/om`) is not caught here. That
+// is pre-existing shared behavior (matchesWitnessGitPush has the same gap),
+// not something this guard alone can close.
 func matchesRefineryRawNotesPush(tokens []string, refinerySession bool) (reason, alternative string) {
 	if !refinerySession {
 		return "", ""
@@ -1780,7 +1788,7 @@ func matchesRefineryRawNotesPush(tokens []string, refinerySession bool) (reason,
 			continue
 		}
 		for _, arg := range tokens[i+1:] {
-			if strings.Contains(arg, "refs/notes/") {
+			if arg == "--all" || arg == "--mirror" || strings.Contains(arg, "refs/notes/") {
 				return refineryRawNotesPushReason, refineryRawNotesPushAlternative
 			}
 		}
