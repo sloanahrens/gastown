@@ -193,7 +193,9 @@ type eventMsg Event
 
 // convoyUpdateMsg is sent when convoy data is refreshed. elapsed and err
 // (present only when state is non-nil, i.e. a fetch actually ran) drive the
-// poll-interval backoff in Update.
+// poll-interval backoff in Update. A non-nil err means the fetch failed — the
+// state beside it is whatever partial read succeeded — which is distinct from
+// a clean fetch of a town with no convoys.
 type convoyUpdateMsg struct {
 	state   *ConvoyState
 	elapsed time.Duration
@@ -312,10 +314,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case convoyUpdateMsg:
 		if msg.state != nil {
-			// Fresh data arrived - update state and schedule next tick.
+			// Adopt a fetch's result only when it succeeded: a failed fetch
+			// returns an empty state, which would blank the panel (gt-nzt0).
 			m.mu.Lock()
-			m.convoyState = msg.state
-			m.updateViewContentLocked()
+			if msg.err == nil {
+				m.convoyState = msg.state
+				m.updateViewContentLocked()
+			}
 			// Back off when a fetch was slow or errored — a sign Dolt is
 			// contended — and recover once fetches are fast again, mirroring
 			// the daemon's event-poll backoff (see convoy_manager.go).
