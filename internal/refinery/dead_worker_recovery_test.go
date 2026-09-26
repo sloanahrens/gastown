@@ -19,6 +19,11 @@ type fakeRejectedBeads struct {
 	runErr    error
 	updates   []beads.UpdateOptions
 	updateErr error
+
+	// liveClaim models bd's AssigneeNotStolen fence: a plain update that
+	// reassigns an in_progress bead out of another actor's claim is refused,
+	// and only Force gets past it (gt-mabxx).
+	liveClaim bool
 }
 
 func (f *fakeRejectedBeads) Show(id string) (*beads.Issue, error) {
@@ -30,7 +35,14 @@ func (f *fakeRejectedBeads) Show(id string) (*beads.Issue, error) {
 
 func (f *fakeRejectedBeads) Update(id string, opts beads.UpdateOptions) error {
 	f.updates = append(f.updates, opts)
-	return f.updateErr
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	if f.liveClaim && !opts.Force && opts.Assignee != nil && f.issue != nil &&
+		*opts.Assignee != f.issue.Assignee {
+		return fmt.Errorf("cannot reassign %s: held by %q (in_progress)", id, f.issue.Assignee)
+	}
+	return nil
 }
 
 func (f *fakeRejectedBeads) Run(args ...string) ([]byte, error) {
@@ -671,6 +683,118 @@ func TestRecoverRejectedMRDeadWorker_DuplicateNote_NotAppended(t *testing.T) {
 	}
 	if len(bd.runCalls) != 0 {
 		t.Fatalf("expected no duplicate notes write, got %d", len(bd.runCalls))
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_ReopenRefused_RetriesWithForce covers the
+// stale-holder case (gt-mabxx): the bead is still in_progress under a dead
+// worker, so bd refuses the plain reassign. Recovery has to get past that
+// refusal, because the RECOVERED_BEAD mail below it is the only thing that
+// re-slings the bead — bd's Refinery sent neither and left the bead held by a
+// worker that could never act on it.
+func TestRecoverRejectedMRDeadWorker_ReopenRefused_RetriesWithForce(t *testing.T) {
+	t.Parallel()
+	bd := &fakeRejectedBeads{
+		issue: &beads.Issue{
+			ID:       "gt-src1",
+			Status:   "in_progress",
+			Assignee: "testrig/polecats/nux",
+		},
+		liveClaim: true,
+	}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+	var out bytes.Buffer
+
+	if !recoverRejectedMRDeadWorker(bd, deadSession, sendMail, &out, deadWorkerReq()) {
+		t.Fatalf("expected recovery to survive the refused reopen; output:\n%s", out.String())
+	}
+
+	if len(bd.updates) != 2 {
+		t.Fatalf("expected plain reopen then a forced retry, got %d updates", len(bd.updates))
+	}
+	if bd.updates[0].Force {
+		t.Error("the first reopen should be the plain one; forcing it up front hides the fence the retry exists for")
+	}
+	if !bd.updates[1].Force {
+		t.Error("the retry did not pass Force, so a live-claim refusal is not overridden (gt-mabxx)")
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("expected RECOVERED_BEAD, got %d mails", len(sent))
+	}
+	if sent[0].To != "deacon/" {
+		t.Errorf("mail To = %q, want deacon/ — the redispatch signal must still go out", sent[0].To)
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_ReopenCannotLand_Escalates covers the other
+// half of gt-mabxx: when even the forced reopen fails, the bead is held by a
+// worker that cannot act on it and no RECOVERED_BEAD can be sent, so recovery
+// must leave a durable trace instead of returning false quietly.
+func TestRecoverRejectedMRDeadWorker_ReopenCannotLand_Escalates(t *testing.T) {
+	t.Parallel()
+	bd := &fakeRejectedBeads{
+		issue:     &beads.Issue{ID: "gt-src1", Status: "in_progress", Assignee: "testrig/polecats/nux"},
+		updateErr: fmt.Errorf("bd update gt-src1: dolt unreachable"),
+	}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+	var out bytes.Buffer
+
+	if recoverRejectedMRDeadWorker(bd, deadSession, sendMail, &out, deadWorkerReq()) {
+		t.Fatal("expected false when the bead cannot be reopened")
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("expected 1 escalated mail, got %d", len(sent))
+	}
+	if sent[0].To != "mayor/" {
+		t.Errorf("escalation To = %q, want mayor/ — the deacon cannot act on a bead that is not open", sent[0].To)
+	}
+	if !strings.Contains(sent[0].Subject, "gt-src1") {
+		t.Errorf("escalation subject %q does not name the stranded bead", sent[0].Subject)
+	}
+	if strings.HasPrefix(sent[0].Subject, "RECOVERED_BEAD") {
+		t.Error("sent RECOVERED_BEAD for a bead that is still held; the deacon skips anything but an open bead")
+	}
+}
+
+// TestRecoverRejectedMRDeadWorker_ReopenFailureWithoutAClaim_DoesNotForce
+// pins the retry's blast radius: --force answers bd's live-claim fence, so it
+// is spent only where that fence can have fired. A refusal on a bead carrying
+// no claim is a real failure, and forcing past it would hide one.
+func TestRecoverRejectedMRDeadWorker_ReopenFailureWithoutAClaim_DoesNotForce(t *testing.T) {
+	t.Parallel()
+	bd := &fakeRejectedBeads{
+		issue:     &beads.Issue{ID: "gt-src1", Status: "closed"},
+		updateErr: fmt.Errorf("bd update gt-src1: dolt unreachable"),
+	}
+	var sent []*mail.Message
+	sendMail := func(m *mail.Message) error {
+		sent = append(sent, m)
+		return nil
+	}
+	var out bytes.Buffer
+
+	if recoverRejectedMRDeadWorker(bd, deadSession, sendMail, &out, deadWorkerReq()) {
+		t.Fatal("expected false when the bead cannot be reopened")
+	}
+
+	if len(bd.updates) != 1 {
+		t.Fatalf("expected a single unforced reopen attempt, got %d", len(bd.updates))
+	}
+	if bd.updates[0].Force {
+		t.Error("forced a bead that carries no claim; --force is for the dead holder's claim, not for any failure")
+	}
+	if len(sent) != 1 || sent[0].To != "mayor/" {
+		t.Fatalf("expected the stranded-bead escalation, got %d mails", len(sent))
 	}
 }
 
