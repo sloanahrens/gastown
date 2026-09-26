@@ -215,7 +215,16 @@ rollback() {
   cp -p "$BIN_DIR/gt.prev" "$BIN_DIR/.gt.rollback.$$" 2>/dev/null || return 1
   clear_immutable "$BIN_DIR/.gt.rollback.$$"
   clear_immutable "$GT"
-  mv -f "$BIN_DIR/.gt.rollback.$$" "$GT" 2>/dev/null || { rm -f "$BIN_DIR/.gt.rollback.$$"; return 1; }
+  if ! mv -f "$BIN_DIR/.gt.rollback.$$" "$GT" 2>/dev/null; then
+    rm -f "$BIN_DIR/.gt.rollback.$$"
+    # The mv failed for some reason other than the flag (disk full, EIO, a
+    # directory permission change mid-run): $GT is left holding the bad
+    # binary. Re-apply the flag anyway so that binary is at least still
+    # protected from a stray write while a human responds to the CRITICAL
+    # escalation this failure triggers.
+    set_immutable "$GT"
+    return 1
+  fi
   set_immutable "$GT"
 }
 

@@ -108,7 +108,7 @@ run_install() {
   local t="$1" rc=0; shift
   ( export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
       INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
-      PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin"
+      PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
 }
