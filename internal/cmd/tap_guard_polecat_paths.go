@@ -55,6 +55,17 @@ import (
 // script written inside the worktree and then executed can still reach
 // anywhere), and a complete shell parse. It is a seat belt, not a cage — the
 // tool-trial watcher remains the backstop for hazards it misses.
+//
+// gt-tnts5: on 2026-09-26 a local-coder polecat (obsidian) wrote a shell stub
+// over the production bd binary at $HOME/.local/bin/bd via a Bash echo, then
+// repeatedly cp'd a backup over it trying to fix it — a town-wide bd outage
+// (every agent's bd reads/writes broke for ~3 minutes). $HOME/.local/bin is
+// the Makefile's INSTALL_DIR for both gt and bd, shared by every agent on the
+// host via PATH, but it sits OUTSIDE the town tree — so the town-membership
+// check above (isTownPath) never protected it. protectedBinDirs adds it (and
+// only it — the concrete shared install path, not a speculative denylist of
+// every bin-shaped directory) as a target no polecat may ever write to,
+// regardless of town membership.
 const (
 	// maxSubstitutionDepth bounds recursion into $( ) / ` ` payloads.
 	maxSubstitutionDepth = 3
@@ -82,6 +93,10 @@ owner cannot see, which is how gt-hmaf's incident happened.
     redirection, a cd, or a git -C target names a path inside the town that is
     not the polecat's own worktree, its own polecat directory, or its rig's
     .repo.git. Read-only commands (grep/cat/ls) are allowed anywhere.
+  - $HOME/.local/bin (the shared gt/bd install directory, off the town tree)
+    is denied to Edit/Write/Bash alike, unconditionally — a polecat has no
+    legitimate reason to write there, and a partial write breaks the binary
+    for every agent on the host (gt-tnts5).
 
 Paths are expanded (~, $HOME, and any variable this process can see), resolved
 against the session cwd, symlink-resolved through their longest existing
@@ -143,12 +158,13 @@ func runTapGuardPolecatPaths(cmd *cobra.Command, args []string) error {
 // polecatPathScope is the set of paths the guarded polecat may write to,
 // resolved once per hook invocation.
 type polecatPathScope struct {
-	worktree string // canonical own git worktree (the session's cwd)
-	ownDir   string // canonical <town>/<rig>/polecats/<name>
-	repoGit  string // canonical <town>/<rig>/.repo.git
-	townRoot string // canonical town root
-	cwd      string // canonical directory relative targets resolve against
-	scratch  []string
+	worktree     string // canonical own git worktree (the session's cwd)
+	ownDir       string // canonical <town>/<rig>/polecats/<name>
+	repoGit      string // canonical <town>/<rig>/.repo.git
+	townRoot     string // canonical town root
+	cwd          string // canonical directory relative targets resolve against
+	scratch      []string
+	protectedBin []string // shared host binary dirs no polecat may write to (gt-tnts5)
 }
 
 // evaluate reports why the hook payload must be blocked, or "" to allow it.
@@ -187,6 +203,9 @@ func (s polecatPathScope) checkFileTarget(raw, tool string) string {
 	target, ok := canonicalizeToolPath(raw, s.cwd)
 	if !ok {
 		return fmt.Sprintf("%s target %q cannot be resolved (unknown variable or missing parent) — refusing to guess. Write inside your own worktree: %s", tool, raw, s.worktree)
+	}
+	if s.isProtectedBinPath(target) {
+		return fmt.Sprintf("%s target is a shared host binary directory: %s. Polecats must never write there — a stub or partial write breaks gt/bd for every agent on the host (gt-tnts5).", tool, target)
 	}
 	if s.isWorktreePath(target) || s.isScratchPath(target) {
 		return ""
@@ -293,6 +312,9 @@ func (s polecatPathScope) checkBashTarget(raw, context string) string {
 		if !ok {
 			return fmt.Sprintf("%s path %q cannot be resolved (unknown variable or missing parent) — refusing to guess; name an explicit path inside your worktree: %s", context, candidate, s.worktree)
 		}
+		if s.isProtectedBinPath(target) {
+			return fmt.Sprintf("%s target is a shared host binary directory: %s. Polecats must never write there — a stub or partial write breaks gt/bd for every agent on the host (gt-tnts5).", context, target)
+		}
 		if !s.isTownPath(target) {
 			continue
 		}
@@ -383,12 +405,13 @@ func resolvePolecatPathScope(payloadCwd string) (polecatPathScope, bool) {
 	}
 
 	scope := polecatPathScope{
-		worktree: resolveGuardDir(layout.worktree),
-		ownDir:   resolveGuardDir(layout.polecatDir),
-		repoGit:  resolveGuardDir(filepath.Join(layout.rigRoot, bareRepoDir)),
-		townRoot: resolveGuardDir(layout.townRoot),
-		cwd:      cwd,
-		scratch:  scratchRoots(layout.townRoot),
+		worktree:     resolveGuardDir(layout.worktree),
+		ownDir:       resolveGuardDir(layout.polecatDir),
+		repoGit:      resolveGuardDir(filepath.Join(layout.rigRoot, bareRepoDir)),
+		townRoot:     resolveGuardDir(layout.townRoot),
+		cwd:          cwd,
+		scratch:      scratchRoots(layout.townRoot),
+		protectedBin: protectedBinDirs(),
 	}
 	if scope.worktree == "" {
 		scope.worktree = scope.ownDir
@@ -620,6 +643,33 @@ func scratchRoots(townRoot string) []string {
 		}
 	}
 	return roots
+}
+
+// protectedBinDirs lists shared host binary directories a polecat must never
+// write to, independent of town membership (gt-tnts5). $HOME/.local/bin is the
+// Makefile's INSTALL_DIR for both gt and bd — every agent on the host resolves
+// them off PATH there — and it sits outside the town tree, so isTownPath alone
+// never covers it. An unresolvable $HOME yields no roots rather than guessing:
+// callers still have the town-membership rules to fall back on.
+func protectedBinDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	return []string{resolveGuardDir(filepath.Join(home, ".local", "bin"))}
+}
+
+// isProtectedBinPath reports whether target lies inside a shared host binary
+// directory (see protectedBinDirs) — checked ahead of, and regardless of,
+// town membership: the whole point is that these paths are NOT inside the
+// town tree.
+func (s polecatPathScope) isProtectedBinPath(target string) bool {
+	for _, dir := range s.protectedBin {
+		if isWithinPath(target, dir) {
+			return true
+		}
+	}
+	return false
 }
 
 // isWithinPath reports whether target is root itself or lies below it,
