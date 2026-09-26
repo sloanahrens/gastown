@@ -1046,13 +1046,14 @@ func makeTruncated(t *testing.T, err error, want bool) *ErrReadyTruncated {
 	return nil
 }
 
-// TestReadyStoreTruncatedPageReturnsSentinel is the gt-m7pq regression test for
-// the in-process store path: a ready page that comes back exactly full (row
-// count equals the limit) is re-asked once with the limit off, and when the
-// probe proves more rows exist, Ready returns the full set alongside an
-// ErrReadyTruncated sentinel — a page that is not the board cannot be told
-// from a board that happens to fit (the 2026-09-21 patrol under-report).
-func TestReadyStoreTruncatedPageReturnsSentinel(t *testing.T) {
+// TestStoreReadyTruncatedPageReturnsSentinel is the gt-m7pq regression test
+// for the in-process store path: a ready page that comes back exactly full
+// (row count equals the limit) is re-asked once with the limit off, and when
+// the probe proves more rows exist, the page is expanded to the full set and
+// returned alongside an ErrReadyTruncated sentinel — a page that is not the
+// board cannot be told from a board that happens to fit (the 2026-09-21
+// patrol under-report gt-59o9 chased down).
+func TestStoreReadyTruncatedPageReturnsSentinel(t *testing.T) {
 	store := newMockStorage()
 	store.readyResults = []readyResult{
 		{Issues: scriptedSDKIssues(100)},
@@ -1060,7 +1061,7 @@ func TestReadyStoreTruncatedPageReturnsSentinel(t *testing.T) {
 	}
 	b := newTestBeads(store)
 
-	issues, err := b.Ready()
+	issues, err := b.storeReadyWithFilter(beadsdk.WorkFilter{Limit: 100})
 	if err == nil {
 		t.Fatal("expected ErrReadyTruncated")
 	}
@@ -1073,10 +1074,10 @@ func TestReadyStoreTruncatedPageReturnsSentinel(t *testing.T) {
 		t.Errorf("probe filter Limit = %d, want 0 (unbounded re-query)", store.readyFilter.Limit)
 	}
 	if len(issues) != 250 {
-		t.Errorf("Ready returned %d issues, want the full 250 from the probe", len(issues))
+		t.Errorf("returned %d issues, want the full 250 from the probe", len(issues))
 	}
 	if firstIssueID(issues) != "gt-scripted-0" {
-		t.Errorf("Ready first issue = %q, want the probe's first", firstIssueID(issues))
+		t.Errorf("first issue = %q, want the probe's first", firstIssueID(issues))
 	}
 	if capped.Found != 250 {
 		t.Errorf("capped.Found = %d, want 250", capped.Found)
@@ -1086,11 +1087,11 @@ func TestReadyStoreTruncatedPageReturnsSentinel(t *testing.T) {
 	}
 }
 
-// TestReadyStoreFullPageThatIsTheBoardProbesSilently pins the other half of
+// TestStoreReadyFullPageThatIsTheBoardProbesSilently pins the other half of
 // the probe: a full page that the unbounded re-query proves was the whole
-// board (no more rows exist) is NOT a truncation — Ready returns it without a
+// board (no more rows exist) is NOT a truncation — it is returned without a
 // sentinel, so boards that genuinely fit in a page are not marked as capped.
-func TestReadyStoreFullPageThatIsTheBoardProbesSilently(t *testing.T) {
+func TestStoreReadyFullPageThatIsTheBoardProbesSilently(t *testing.T) {
 	store := newMockStorage()
 	store.readyResults = []readyResult{
 		{Issues: scriptedSDKIssues(100)},
@@ -1098,9 +1099,9 @@ func TestReadyStoreFullPageThatIsTheBoardProbesSilently(t *testing.T) {
 	}
 	b := newTestBeads(store)
 
-	issues, err := b.Ready()
+	issues, err := b.storeReadyWithFilter(beadsdk.WorkFilter{Limit: 100})
 	if err != nil {
-		t.Fatalf("Ready: %v", err)
+		t.Fatalf("storeReadyWithFilter: %v", err)
 	}
 	makeTruncated(t, err, false)
 
@@ -1108,24 +1109,24 @@ func TestReadyStoreFullPageThatIsTheBoardProbesSilently(t *testing.T) {
 		t.Fatalf("GetReadyWork called %d times, want 2 (the page + the unbounded probe)", store.readyCalls)
 	}
 	if len(issues) != 100 {
-		t.Errorf("Ready returned %d issues, want 100", len(issues))
+		t.Errorf("returned %d issues, want 100", len(issues))
 	}
 }
 
-// TestReadyStorePageUnderLimitDoesNotProbe pins that the probe fires only on
+// TestStoreReadyPageUnderLimitDoesNotProbe pins that the probe fires only on
 // a full page: a page that came back under the limit is the whole board by
-// construction, so Ready returns it in a single query with no re-ask (the
+// construction, so the page is returned in a single query with no re-ask (the
 // probe is a one-shot cost paid only when a full page is ambiguous).
-func TestReadyStorePageUnderLimitDoesNotProbe(t *testing.T) {
+func TestStoreReadyPageUnderLimitDoesNotProbe(t *testing.T) {
 	store := newMockStorage()
 	store.readyResults = []readyResult{
 		{Issues: scriptedSDKIssues(50)},
 	}
 	b := newTestBeads(store)
 
-	issues, err := b.Ready()
+	issues, err := b.storeReadyWithFilter(beadsdk.WorkFilter{Limit: 100})
 	if err != nil {
-		t.Fatalf("Ready: %v", err)
+		t.Fatalf("storeReadyWithFilter: %v", err)
 	}
 	makeTruncated(t, err, false)
 
@@ -1133,35 +1134,34 @@ func TestReadyStorePageUnderLimitDoesNotProbe(t *testing.T) {
 		t.Fatalf("GetReadyWork called %d times, want 1 (no probe for a page under the limit)", store.readyCalls)
 	}
 	if len(issues) != 50 {
-		t.Errorf("Ready returned %d issues, want 50", len(issues))
+		t.Errorf("returned %d issues, want 50", len(issues))
 	}
 }
 
-// TestReadyStoreProbeFailureKeepsPage pins the degraded path: when the page is
-// full and the unbounded probe itself fails, Ready still returns the bounded
-// page (the data the caller can use) alongside the sentinel — with
+// TestStoreReadyProbeFailureKeepsPage pins the degraded path: when the page
+// is full and the unbounded probe itself fails, the bounded page is still
+// returned (the data the caller can use) alongside the sentinel — with
 // StoreError set so a caller can tell "proven truncated" from "cap suspected,
 // re-query failed" — and the probe's failure does not mask the page.
-func TestReadyStoreProbeFailureKeepsPage(t *testing.T) {
+func TestStoreReadyProbeFailureKeepsPage(t *testing.T) {
 	store := newMockStorage()
-	page := scriptedSDKIssues(100)
 	store.readyResults = []readyResult{
-		{Issues: page},
+		{Issues: scriptedSDKIssues(100)},
 		{Err: errors.New("probe: db gone")},
 	}
 	b := newTestBeads(store)
 
-	issues, err := b.Ready()
+	issues, err := b.storeReadyWithFilter(beadsdk.WorkFilter{Limit: 100})
 	if err == nil {
 		t.Fatal("expected ErrReadyTruncated (probe failed)")
 	}
 	capped := makeTruncated(t, err, true)
 
 	if len(issues) != 100 {
-		t.Errorf("Ready returned %d issues, want the bounded page's 100", len(issues))
+		t.Errorf("returned %d issues, want the bounded page's 100", len(issues))
 	}
 	if firstIssueID(issues) != "gt-scripted-0" {
-		t.Errorf("Ready first issue = %q, want the page's first", firstIssueID(issues))
+		t.Errorf("first issue = %q, want the page's first", firstIssueID(issues))
 	}
 	if capped.StoreError == nil {
 		t.Error("capped.StoreError = nil, want the probe's failure")
