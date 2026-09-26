@@ -24,7 +24,14 @@ func TestRefineryPatrolMergePushRekeysNoteOntoLandedCommit(t *testing.T) {
 	mergePush := requireFormulaStep(t, f, "merge-push")
 	desc := mergePush.Description
 
-	rekeyAt := strings.Index(desc, "gt mq rekey-note")
+	// Anchored on the actual invocation, not the bare command name: "gt mq
+	// rekey-note" alone also appears earlier in this step's prose (explaining
+	// why the editorial-coverage check and the backfill match on the same
+	// patch-id) and in the later HELP-mail retry line, so a bare-name match
+	// would find one of those instead and could pass even if the real
+	// invocation moved after post-merge or vanished entirely.
+	const rekeyInvocation = `gt mq rekey-note <mr-bead-id> --landed "$LANDED_SHA"`
+	rekeyAt := strings.Index(desc, rekeyInvocation)
 	if rekeyAt < 0 {
 		t.Fatal("merge-push never re-keys the om verdict onto the landed commit; the landed merge commit is left without the note gt mq review wrote on the rehearsal head (gt-fr3r)")
 	}
