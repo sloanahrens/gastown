@@ -567,51 +567,45 @@ func (b *Beads) storeClose(reason, session string, ids ...string) error {
 	return nil
 }
 
-// storeReadyWithFilter implements Ready with a WorkFilter using the in-process store.
+// storeReadyWithFilter implements Ready with a WorkFilter using the in-process
+// store.
 //
-// A query whose Limit (or a process-level knob: MaxRows from BEADS_MAX_ROWS,
-// which bd inherits from gt's own environment) came back full is truncated,
-// and gt cannot know it is truncated from the page alone — the page is a
-// silent board. So it re-asks once with the limit off, the same one-shot
-// probe bd ready's --json branch uses (cmd/bd/ready.go:189), and returns
-// ErrReadyTruncated when the probe proves more rows exist. The bounded page
-// is returned alongside so a caller that wants the cap still has its data.
+// A query that came back with exactly Limit rows is a page, not a board: a
+// full page is indistinguishable from a complete result, and a count that is
+// not the whole board silently mis-sizes every consumer built on it (the
+// 2026-09-21 patrol under-report gt-59o9 chased down). So when the page is
+// full it re-asks once with Limit off — the same one-shot probe bd ready's
+// --json branch runs (cmd/bd/ready.go) — and returns ErrReadyTruncated when
+// the probe proves more rows exist. The probe result is returned alongside so
+// a caller that wants the cap still has its data.
+//
+// One caveat the probe cannot rule out: a process-level knob outside the
+// filter (BEADS_MAX_ROWS inherited from gt's own environment) can still bound
+// the re-query, in which case TrueCount is a floor, not a count.
 func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error) {
 	ctx, cancel := storeCtx()
 	defer cancel()
-
-	cap := 0
-	if filter.Limit > 0 {
-		cap = filter.Limit
-	} else if filter.MaxRows > 0 {
-		cap = filter.MaxRows
-	}
 
 	sdkIssues, err := b.store.GetReadyWork(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("store ready: %w", err)
 	}
 
+	cap := filter.Limit
 	if cap == 0 || len(sdkIssues) < cap {
 		return sdkIssuesToIssues(sdkIssues), nil
 	}
 
-	// The page is full: a page that is not the whole board is not a board.
-	// Lifting every cap the storage layer honors (MaxRows is process-level —
-	// bd inherits BEADS_MAX_ROWS from gt's environment, so it survives
-	// lifting Limit — while an operator-set cap is exactly what this sentinel
-	// reports) leaves exactly one knob that could still bound the re-query:
-	// the same process-level one, whose source we carry in the error.
+	// The page is full. Re-ask with Limit off and compare: if the unbounded
+	// query returns no more than the cap, the page was the whole board.
 	requery := filter
 	requery.Limit = 0
-	requery.MaxRows = 0
 	full, fullErr := b.store.GetReadyWork(ctx, requery)
 
 	if fullErr != nil {
 		return sdkIssuesToIssues(sdkIssues), &ErrReadyTruncated{
 			Found:      len(sdkIssues),
 			Cap:        cap,
-			Source:     filter.MaxRowsSource,
 			StoreError: fullErr,
 		}
 	}
@@ -620,11 +614,9 @@ func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error
 	}
 
 	return sdkIssuesToIssues(full), &ErrReadyTruncated{
-		Found:      len(full),
-		Cap:        cap,
-		TrueCount:  len(full),
-		Source:     filter.MaxRowsSource,
-		StoreError: fullErr,
+		Found:     len(full),
+		Cap:       cap,
+		TrueCount: len(full),
 	}
 }
 
