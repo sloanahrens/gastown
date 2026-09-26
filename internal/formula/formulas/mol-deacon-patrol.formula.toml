@@ -1085,12 +1085,15 @@ migrate town databases behind the town's back (gt-li4t).
 
 **Run the check:**
 ```bash
-cand=/tmp/rogue-bd-candidates.$$; fail=0; : >"$cand"
+fail=0; n=0
+cand=$(mktemp "${TMPDIR:-/tmp}/rogue-bd-candidates.XXXXXX") || { cand=/dev/null; fail=1; }
+trap '[ "$cand" = /dev/null ] || rm -f "$cand"' EXIT
 for agg in ~/gt/*/polecats ~/gt/*/crew ~/gt/*/refinery ~/gt/*/witness ~/gt/*/mayor ~/gt/mayor ~/gt/deacon/dogs; do
   [ -d "$agg" ] || continue
   find "$agg" -maxdepth 4 \\( -type f -o -type l \\) -name bd -perm -u+x -print >>"$cand" || fail=1
 done
 while IFS= read -r hit; do
+  n=$((n+1))
   d=$(dirname "$hit")
   if [ -L "$hit" ]; then echo "FINDING symlink $hit"; continue; fi
   case ":$PATH:" in *":$d:"*) echo "FINDING on-PATH $hit"; continue;; esac
@@ -1101,7 +1104,7 @@ while IFS= read -r hit; do
     echo "FINDING $hit"
   fi
 done <"$cand"
-echo "rogue-bd-check fail=$fail candidates=$(wc -l <"$cand" | tr -d ' ') list=$cand"
+echo "rogue-bd-check fail=$fail candidates=$n"
 ```
 
 Name the aggregate directories in one `find` and the town's
@@ -1113,6 +1116,10 @@ so the walk never enters a repo's object store, is allowed and bounded.
 `-type l` catches a symlinked `bd`. `-perm -u+x` skips a copy already
 neutralized with `chmod 644`. `~/gt/mayor` is listed separately: the
 town-level mayor tree does not match `~/gt/*/mayor`.
+
+The candidate list is a `mktemp` file removed on exit, so a patrol leaves
+nothing behind in `/tmp`; when it cannot be created the check still reports
+`fail=1` instead of exiting mute.
 
 **Sorting a candidate into by-design or finding** - the repo that builds
 `bd` carries `cmd/bd`, and `git check-ignore` separates that repo's ignored

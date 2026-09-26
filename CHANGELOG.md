@@ -42,7 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktree carrying it also carries `cmd/bd` — the source that produces that
   binary — and `git check-ignore` reports the path ignored. A symlink named
   `bd`, any `bd` whose directory is on `PATH`, and an unignored copy all stay
-  findings.
+  findings. The check's candidate list is now a `mktemp` file removed on exit,
+  so a patrol no longer leaves a `rogue-bd-candidates.<pid>` file behind in
+  `/tmp` on every run.
 
 - **A search pattern is no longer misread as a scan root** (gt-yts7) —
   `matchesUnboundedScan` resolved every non-flag argument against cwd, so
