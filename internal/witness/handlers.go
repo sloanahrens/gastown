@@ -2138,27 +2138,27 @@ var neverHeartbeatedLiveness = assessNeverHeartbeatedLiveness
 
 func assessNeverHeartbeatedLiveness(t *tmux.Tmux, townRoot, rigName, polecatName, sessionName string, graceDeadline time.Time) neverHeartbeatedEvidence {
 	act := ObserveRealActivity(t, polecatName, sessionName, "")
-	return classifyNeverHeartbeatedLiveness(act, heldGateSlot(townRoot, rigName, polecatName), graceDeadline, time.Now())
+	return classifyNeverHeartbeatedLiveness(act, readHeldGateSlot(townRoot, rigName, polecatName), graceDeadline, time.Now())
 }
 
 // classifyNeverHeartbeatedLiveness decides whether a live heartbeatless session
 // is working. Pure, so each verified false-positive shape is pinnable without
 // tmux, a slot pool, or a transcript on disk (gt-gx2v).
-func classifyNeverHeartbeatedLiveness(act RealActivity, gateSlot string, graceDeadline, now time.Time) neverHeartbeatedEvidence {
-	gateDetail := "gate-slot=none"
-	if gateSlot != "" {
-		gateDetail = gateSlot
-	}
+//
+// An unreadable pool is named in the evidence and left out of Working, the
+// same as an unreadable transcript: a read that failed is not evidence of work,
+// and it must not be able to silence the rule either (gt-4y5x).
+func classifyNeverHeartbeatedLiveness(act RealActivity, gate gateSlotEvidence, graceDeadline, now time.Time) neverHeartbeatedEvidence {
 	ev := neverHeartbeatedEvidence{
 		Detail: strings.Join([]string{
-			gateDetail,
+			gate.Detail,
 			transcriptEvidence(act, now),
 			paneOutputEvidence(act, now),
 		}, ", "),
 	}
 	// The slot is read live, so holding one needs no timestamp test: a holder
 	// that never heartbeated has lost its heartbeat file, not its suite.
-	ev.Working = gateSlot != "" ||
+	ev.Working = gate.Held ||
 		outputSince(act.LastActivity, act.ActivitySource == ActivitySourceTranscript, graceDeadline, now) ||
 		outputSince(act.PaneOutputAt, !act.PaneOutputAt.IsZero(), graceDeadline, now)
 	return ev
@@ -2198,22 +2198,41 @@ func paneOutputEvidence(act RealActivity, now time.Time) string {
 	return fmt.Sprintf("pane-output=%v old", now.Sub(act.PaneOutputAt).Round(time.Second))
 }
 
-// heldGateSlot names the container-gate slot this polecat holds, or "" when it
-// holds none — a holder has its own verification suite running right now. The
-// "<rig>/<polecat>" role format is the one `gt slot run` records, and the one
-// the polecat Stop hook already matches on (internal/cmd/tap_polecat_stop.go);
-// a mismatch here would silently disable this half of the liveness check.
-func heldGateSlot(townRoot, rigName, polecatName string) string {
+// gateSlotEvidence is what the container-gate pool says about this polecat.
+// Detail is the "gate-slot=..." fragment for the flag message and is set in
+// every case, so an unreadable pool never renders as an empty one (gt-4y5x).
+type gateSlotEvidence struct {
+	// Held is true only when the pool names this polecat as a holder.
+	Held   bool
+	Detail string
+}
+
+// gateSlotNone is the evidence for a polecat the pool lists as holding no slot.
+var gateSlotNone = gateSlotEvidence{Detail: "gate-slot=none"}
+
+// readHeldGateSlot reports the container-gate slot this polecat holds — a
+// holder has its own verification suite running right now — or that it holds
+// none. The "<rig>/<polecat>" role format is the one `gt slot run` records, and
+// the one the polecat Stop hook already matches on
+// (internal/cmd/tap_polecat_stop.go); a mismatch here would silently disable
+// this half of the liveness check.
+func readHeldGateSlot(townRoot, rigName, polecatName string) gateSlotEvidence {
 	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
 	rep, err := slot.StatusPoolLocksOnly(townRoot, slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()})
 	if err != nil {
-		return ""
+		// A pool we could not read and a pool with no holder are different
+		// facts. Reporting both as "none" asserts something never observed,
+		// and hides a pool outage inside a wedge verdict (gt-4y5x).
+		return gateSlotEvidence{Detail: fmt.Sprintf("gate-slot=unreadable (%v)", err)}
 	}
 	mine := rep.HeldBy(rigName + "/" + polecatName)
 	if len(mine) == 0 {
-		return ""
+		return gateSlotNone
 	}
-	return fmt.Sprintf("gate-slot held by %s (verification suite running)", mine[0].Owner.Role)
+	return gateSlotEvidence{
+		Held:   true,
+		Detail: fmt.Sprintf("gate-slot held by %s (verification suite running)", mine[0].Owner.Role),
+	}
 }
 
 func detectSubmittedStillRunning(bd *BdCli, workDir, polecatName, sessionName string, t *tmux.Tmux, hb *polecat.SessionHeartbeat, snap *agentBeadSnapshot, staleThreshold time.Duration) (ZombieResult, bool) {
