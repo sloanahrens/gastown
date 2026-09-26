@@ -591,8 +591,8 @@ func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error
 		return nil, fmt.Errorf("store ready: %w", err)
 	}
 
-	cap := filter.Limit
-	if cap == 0 || len(sdkIssues) < cap {
+	queryCap := filter.Limit
+	if queryCap == 0 || len(sdkIssues) < queryCap {
 		return sdkIssuesToIssues(sdkIssues), nil
 	}
 
@@ -605,17 +605,17 @@ func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error
 	if fullErr != nil {
 		return sdkIssuesToIssues(sdkIssues), &ErrReadyTruncated{
 			Found:      len(sdkIssues),
-			Cap:        cap,
+			Cap:        queryCap,
 			StoreError: fullErr,
 		}
 	}
-	if len(full) <= cap {
+	if len(full) <= queryCap {
 		return sdkIssuesToIssues(sdkIssues), nil
 	}
 
 	return sdkIssuesToIssues(full), &ErrReadyTruncated{
 		Found:     len(full),
-		Cap:       cap,
+		Cap:       queryCap,
 		TrueCount: len(full),
 	}
 }

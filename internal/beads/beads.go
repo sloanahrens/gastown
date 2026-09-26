@@ -1247,6 +1247,23 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	return b.runBdWithRetry(stdinData, runEnv, args)
 }
 
+// runReadyCLI executes a bd ready --json invocation with BD_JSON_ENVELOPE=1
+// set, so bd's paginated-ready branch (cmd/bd/output.go
+// outputJSONWithPagination) answers with the schema_version/data/pagination
+// envelope parseReadyOutput expects instead of a bare array. Scoped to
+// Ready/ReadyDispatchable, the only callers that parse that envelope: the
+// other ~14 json.Unmarshal call sites sharing buildRunEnv (List, Show,
+// Blocked, Comments, Create, Update, Close, ...) expect a bare array/object,
+// and bd is only documented to wrap the ready endpoint, so setting the env
+// var on every invocation gambled on an unverified hypothesis about an
+// external binary (gt-m7pq).
+func (b *Beads) runReadyCLI(args ...string) ([]byte, error) {
+	args = InjectFlatForListJSON(args)
+	beadsDir := b.getResolvedBeadsDir()
+	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir, "BD_JSON_ENVELOPE=1")
+	return b.runBdWithRetry(nil, runEnv, args)
+}
+
 // runBdOnce executes exactly one bd subprocess and is where every pinned and
 // routed call ends up. runBdWithRetry owns the attempt loop; keeping a single
 // attempt here means the --flat handling and the telemetry record stay per
@@ -1402,7 +1419,6 @@ func (b *Beads) buildRunEnv() []string {
 			// half-migrated (gt-elvf4; testContainerEnv).
 			env = append(env, testContainerEnv()...)
 		}
-		env = append(env, "BD_JSON_ENVELOPE=1")
 		return SuppressBDSideEffects(env)
 	}
 	// runWithStdin appends BEADS_DIR after probing bd --allow-stale support, so
@@ -1410,7 +1426,6 @@ func (b *Beads) buildRunEnv() []string {
 	// first-match-sensitive BEADS_DIR entries.
 	env := BuildPinnedBDEnv(os.Environ(), b.getResolvedBeadsDir())
 	env = StripEnvKey(env, "BEADS_DIR")
-	env = append(env, "BD_JSON_ENVELOPE=1")
 	return env
 }
 
@@ -1436,11 +1451,9 @@ func (b *Beads) buildRoutingEnv() []string {
 			// half-migrated (gt-elvf4; testContainerEnv).
 			env = append(env, testContainerEnv()...)
 		}
-		env = append(env, "BD_JSON_ENVELOPE=1")
 		return SuppressBDSideEffects(env)
 	}
 	env := BuildRoutingBDEnv(os.Environ(), b.getResolvedBeadsDir())
-	env = append(env, "BD_JSON_ENVELOPE=1")
 	return env
 }
 
@@ -2310,7 +2323,7 @@ func (b *Beads) Ready() ([]*Issue, error) {
 		return b.storeReadyWithFilter(readyWorkFilter())
 	}
 
-	out, err := b.run(readyCliArgs()...)
+	out, err := b.runReadyCLI(readyCliArgs()...)
 	if err != nil {
 		return nil, err
 	}
@@ -2335,10 +2348,10 @@ func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
 		return b.storeReadyWithFilter(readyWorkFilter())
 	}
 
-	out, err := b.run(readyCliArgs()...)
+	out, err := b.runReadyCLI(readyCliArgs()...)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown flag") {
-			out, err = b.run(readyBaseArgs()...)
+			out, err = b.runReadyCLI(readyBaseArgs()...)
 		}
 		if err != nil {
 			return nil, err
