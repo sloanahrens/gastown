@@ -208,6 +208,9 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 	if r, alt := matchesWitnessGitPush(lowerTokens, inWitnessSession()); r != "" {
 		return r, alt
 	}
+	if r, alt := matchesRefineryRawNotesPush(lowerTokens, isRefineryRole()); r != "" {
+		return r, alt
+	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
 		return r, alt
 	}
@@ -1743,6 +1746,43 @@ func matchesWitnessGitPush(tokens []string, witnessSession bool) (reason, altern
 	for i, f := range tokens {
 		if f == "git" && inCommandPosition(tokens, i) && gitSubcommand(tokens[i+1:]) == "push" {
 			return witnessGitPushReason, witnessGitPushAlternative
+		}
+	}
+	return "", ""
+}
+
+const refineryRawNotesPushReason = "raw git push of refs/notes/ from a refinery session"
+const refineryRawNotesPushAlternative = "Alternative: refs/notes/om is published by `gt mq review` and " +
+	"`gt mq rekey-note`, which push through a bounded timeout that kills the whole process group " +
+	"(git and any credential helper) if the remote hangs. On 2026-09-26 a refinery ran a manual " +
+	"`git push origin refs/notes/om`; an orphaned `git credential-osxkeychain get` hung indefinitely on " +
+	"an unanswerable keychain prompt, wedging the refinery for ~18 minutes (gt-qhhlr). Let the gate " +
+	"publish the note, or if a manual push is unavoidable bound it yourself: " +
+	"`GIT_TERMINAL_PROMPT=0 timeout 60 git push origin refs/notes/om`."
+
+// matchesRefineryRawNotesPush blocks an unbounded `git push` targeting a
+// refs/notes/ ref from a refinery session. The refinery's own note-publishing
+// paths (gt mq review, gt mq rekey-note) already push notes through
+// git.PushNotes, which runs the command with a timeout and kills its whole
+// process group — including any credential helper — if the remote hangs
+// (see pushTimeout in internal/git/git.go). A refinery agent typing the same
+// push by hand as a raw shell command gets none of that: git can fork a
+// credential helper (e.g. git-credential-osxkeychain) that blocks on a
+// keychain prompt no headless session can answer, and that child can outlive
+// git itself, holding open whatever pipe is reading the command's output
+// (gt-qhhlr).
+func matchesRefineryRawNotesPush(tokens []string, refinerySession bool) (reason, alternative string) {
+	if !refinerySession {
+		return "", ""
+	}
+	for i, f := range tokens {
+		if f != "git" || !inCommandPosition(tokens, i) || gitSubcommand(tokens[i+1:]) != "push" {
+			continue
+		}
+		for _, arg := range tokens[i+1:] {
+			if strings.Contains(arg, "refs/notes/") {
+				return refineryRawNotesPushReason, refineryRawNotesPushAlternative
+			}
 		}
 	}
 	return "", ""
