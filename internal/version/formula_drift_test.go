@@ -3,6 +3,7 @@ package version
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,16 +87,22 @@ func TestCheckEmbeddedFormulaDrift_DevBuildIsUnchecked(t *testing.T) {
 	gitRun(t, dir, "branch", "-M", "main")
 	setBinaryCommit(t, "")
 
-	// Force the no-build-info path so resolveCommitHash cannot fall back to it.
-	t.Setenv("GIT_DIR", "")
+	// The branch this test is about needs an empty commit. Go stamps
+	// vcs.revision into some test binaries, and no environment variable reaches
+	// that (an earlier version of this test cleared GIT_DIR, which cannot
+	// affect build info); skip where it is present rather than pass through
+	// the throwaway "binary commit not found" path and assert nothing.
+	if got := resolveCommitHash(); got != "" {
+		t.Skipf("test binary carries commit %s; the dev-build path needs none", got)
+	}
 
 	drift := CheckEmbeddedFormulaDrift(dir)
 
 	if drift.Checked {
 		t.Error("Checked = true, want false for a build with no commit")
 	}
-	if drift.Reason == "" {
-		t.Error("Reason is empty, want why the check could not run")
+	if !strings.Contains(drift.Reason, "dev build") {
+		t.Errorf("Reason = %q, want the unstamped-build reason", drift.Reason)
 	}
 }
 

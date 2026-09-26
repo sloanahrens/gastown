@@ -563,4 +563,107 @@ func TestFormulaSyncMessage_NamesHandEditedFormulas(t *testing.T) {
 	if string(content) != "# hand-edited\n" {
 		t.Error("the hand-edited formula was overwritten")
 	}
+
+	// root is a bare temp dir with no gt source checkout under it, so drift must
+	// come back unknown, and it must say so of root. That is what keeps this
+	// test hermetic: resolving the ambient checkout instead is what used to
+	// reach the network (gt-vxjz).
+	if !strings.Contains(msg, "is UNKNOWN") || !strings.Contains(msg, root) {
+		t.Errorf("drift should be unknown for the town root %s, with no ambient checkout consulted:\n%s", root, msg)
+	}
+}
+
+// TestBuildFormulaSyncReport_DryRunForceNamesTheDestination is the gt-vxjz
+// follow-up to gt-dt7r: --dry-run --force read the on-disk backup manifest and
+// so reported the copies some earlier force sync displaced, rather than the
+// ones this run would move aside.
+func TestBuildFormulaSyncReport_DryRunForceNamesTheDestination(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	// A fresh sync installs the embedded set; one copy is then hand-edited.
+	if _, err := formulaSyncMessage(root); err != nil {
+		t.Fatalf("formulaSyncMessage (initial): %v", err)
+	}
+	const edited = "mol-refinery-patrol.formula.toml"
+	path := filepath.Join(root, ".beads", "formulas", edited)
+	if err := os.WriteFile(path, []byte("# hand-edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A manifest left by some earlier force sync. Its paths describe that run.
+	bakDir := filepath.Join(root, ".beads", "formulas", ".bak")
+	if err := os.MkdirAll(bakDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const earlierRun = "/elsewhere/it-went"
+	if err := os.WriteFile(filepath.Join(bakDir, "last-force-sync.txt"),
+		[]byte(edited+"\t"+filepath.Join(earlierRun, edited)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := buildFormulaSyncReport(root, formula.SyncOptions{DryRun: true, Force: true})
+	if err != nil {
+		t.Fatalf("buildFormulaSyncReport: %v", err)
+	}
+	msg := formatFormulaSyncReport(report)
+
+	want := filepath.Join(bakDir, edited)
+	if got := report.BackedUp[edited]; got != want {
+		t.Errorf("BackedUp[%s] = %q, want the destination a real run would write, %q", edited, got, want)
+	}
+	if strings.Contains(msg, earlierRun) {
+		t.Errorf("summary reports the earlier run's backup path:\n%s", msg)
+	}
+	if !strings.Contains(msg, "would be overwritten") {
+		t.Errorf("a dry run must not claim it overwrote anything:\n%s", msg)
+	}
+
+	// A dry run writes nothing: the edit survives and nothing is parked.
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "# hand-edited\n" {
+		t.Error("a dry run overwrote the hand-edited formula")
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Errorf("a dry run created %s", want)
+	}
+}
+
+// TestBuildFormulaSyncReport_ForceReportsWhereCopiesWent covers the real run:
+// the summary points at the copies the overwrite actually displaced.
+func TestBuildFormulaSyncReport_ForceReportsWhereCopiesWent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	if _, err := formulaSyncMessage(root); err != nil {
+		t.Fatalf("formulaSyncMessage (initial): %v", err)
+	}
+	const edited = "mol-refinery-patrol.formula.toml"
+	if err := os.WriteFile(filepath.Join(root, ".beads", "formulas", edited),
+		[]byte("# hand-edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := buildFormulaSyncReport(root, formula.SyncOptions{Force: true})
+	if err != nil {
+		t.Fatalf("buildFormulaSyncReport: %v", err)
+	}
+
+	want := filepath.Join(root, ".beads", "formulas", ".bak", edited)
+	if got := report.BackedUp[edited]; got != want {
+		t.Errorf("BackedUp[%s] = %q, want %q", edited, got, want)
+	}
+	backed, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("reading the backup: %v", err)
+	}
+	if string(backed) != "# hand-edited\n" {
+		t.Error("the backup does not hold the displaced hand edit")
+	}
+	if !strings.Contains(formatFormulaSyncReport(report), "were overwritten") {
+		t.Error("a real --force run should say the copies were overwritten")
+	}
 }

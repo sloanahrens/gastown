@@ -240,8 +240,13 @@ count, err := formula.ProvisionFormulas("/path/to/workspace")
 // Check formula health (outdated, modified, etc.)
 report, err := formula.CheckFormulaHealth("/path/to/workspace")
 
-// Update formulas safely (preserves user modifications)
-updated, skipped, reinstalled, err := formula.UpdateFormulas("/path/to/workspace")
+// Classify every formula without writing anything (dry run)
+dryRun, err := formula.PlanFormulaSync("/path/to/workspace")
+
+// Sync, preserving hand-edited copies; SyncOptions{Force: true} overwrites
+// them instead, backing each displaced copy up first.
+plan, err := formula.UpdateFormulas("/path/to/workspace")
+plan.Installed(); plan.Updated(); plan.SkippedModified(); plan.Superseded()
 ```
 
 ## Testing
