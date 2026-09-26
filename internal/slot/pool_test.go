@@ -3,6 +3,7 @@ package slot
 import (
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,6 +68,38 @@ func TestPool_ThreeSlotsHoldConcurrently(t *testing.T) {
 	h := mustAcquirePool(t, town, "gastown/polecat-4", pool)
 	if h.Index != 1 {
 		t.Fatalf("re-acquire after release got slot %d, want 1", h.Index)
+	}
+}
+
+// TestPool_HeldSlotNamesTheWaitOnce covers gt-78b8: a caller that cannot be
+// granted because another process holds every candidate slot says who holds it
+// at the top of the wait, and says it once for the whole wait rather than on
+// every poll.
+func TestPool_HeldSlotNamesTheWaitOnce(t *testing.T) {
+	stubNoContainers(t)
+	town := t.TempDir()
+	pool := Pool{Slots: 1}
+
+	held := mustAcquirePool(t, town, "gastown/refinery", pool)
+	defer func() { _ = held.Release() }()
+
+	prev := probeWriter
+	var out strings.Builder
+	probeWriter = &out
+	t.Cleanup(func() { probeWriter = prev })
+
+	if _, err := AcquirePool(town, "gastown/amber", shortWait, pool); err == nil {
+		t.Fatal("AcquirePool was granted a slot while the only slot was held")
+	}
+
+	if n := strings.Count(out.String(), "waiting for container-gate slot"); n != 1 {
+		t.Errorf("wait lines = %d, want one line for the whole wait: %q", n, out.String())
+	}
+	if !strings.Contains(out.String(), "token held by gastown/refinery") {
+		t.Errorf("wait line = %q, want the holder named", out.String())
+	}
+	if !strings.Contains(out.String(), "cap ") {
+		t.Errorf("wait line = %q, want the caller's timeout cap", out.String())
 	}
 }
 

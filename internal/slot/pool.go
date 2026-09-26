@@ -262,6 +262,32 @@ func inconclusiveLogger() func(error) {
 	}
 }
 
+// waitLogger returns a func that reports why the first blocked pass of one
+// Acquire call could not grant, then stays quiet.
+//
+// Acquire polls while it waits, so a cause announced on every pass would
+// re-announce itself every DefaultPollInterval. Silence is the worse failure:
+// the timeout the caller finally returns names no cause, and for
+// runMQBatchRun that is up to batchSlotTimeout — an hour with nothing on the
+// pane for the ordinary case of a pool whose slots are all held (gt-78b8). A
+// wedged docker probe already names itself (inconclusiveLogger, gt-a8kx), so
+// this reports the two remaining ways to be held up: every candidate slot
+// held by a live process, and an unwrapped suite.
+func waitLogger(role string, timeout time.Duration) func(waitInfo) {
+	logged := false
+	return func(info waitInfo) {
+		if logged || info.Reason == "" || info.Reason == WaitReasonDaemonUnreachable {
+			return
+		}
+		logged = true
+		cap := ""
+		if timeout > 0 {
+			cap = fmt.Sprintf(" (cap %s)", timeout.Round(time.Second))
+		}
+		fmt.Fprintf(probeWriter, "gt slot: waiting for container-gate slot as %s — %s%s\n", role, info.describe(), cap)
+	}
+}
+
 // acquirePool implements AcquirePool (firstClass false) and AcquirePoolReal
 // (firstClass true).
 func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstClass bool) (*Handle, error) {
@@ -300,6 +326,10 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 	// Likewise once per Acquire call, and for the same reason: the wait can
 	// outlast several polls.
 	logInconclusiveOnce := inconclusiveLogger()
+
+	// Likewise once per Acquire call: the cause of the wait, named as soon as
+	// a pass is blocked (gt-78b8).
+	logWaitOnce := waitLogger(role, timeout)
 
 	// watch attributes the wait this call is about to spend (gt-dc81).
 	watch := newWaitWatch()
@@ -408,6 +438,9 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 				unlock()
 			}
 			break
+		}
+		if passReason != "" {
+			logWaitOnce(watch.blockedInfo(timeout, passReason))
 		}
 		if hasDeadline && time.Now().After(deadline) {
 			// A caller that gave up is recorded like a grant. It is the
