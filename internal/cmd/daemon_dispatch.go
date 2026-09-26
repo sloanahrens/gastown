@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -449,6 +450,13 @@ func countActionableReady(rigPath string) (ready, urgent int, err error) {
 // The size of that board is the whole point of this check, so a cap that
 // silently reports a fraction of the work is not usable here (gt-59o9).
 //
+// When the in-process query comes back capped, Ready returns the full
+// re-query alongside an ErrReadyTruncated sentinel; this caller wants the
+// board, not the cap, so it unwraps the sentinel and keeps the data, and a
+// probe whose own query failed (StoreError set) is the one case the sentinel
+// still reports as an error — a read failure, which the patrol must surface,
+// not absorb.
+//
 // A rig with no beads database returns no issues: it is a rig that has never
 // been initialized, not a read failure.
 func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
@@ -467,7 +475,12 @@ func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
 	defer cleanup()
 
 	b.SetStore(store)
-	return b.Ready()
+	issues, err := b.Ready()
+	var capped *beads.ErrReadyTruncated
+	if errors.As(err, &capped) && capped.StoreError == nil {
+		return issues, nil
+	}
+	return issues, err
 }
 
 // hasBeadsDatabase reports whether a resolved beads directory holds a database

@@ -1402,6 +1402,7 @@ func (b *Beads) buildRunEnv() []string {
 			// half-migrated (gt-elvf4; testContainerEnv).
 			env = append(env, testContainerEnv()...)
 		}
+		env = append(env, "BD_JSON_ENVELOPE=1")
 		return SuppressBDSideEffects(env)
 	}
 	// runWithStdin appends BEADS_DIR after probing bd --allow-stale support, so
@@ -1409,6 +1410,7 @@ func (b *Beads) buildRunEnv() []string {
 	// first-match-sensitive BEADS_DIR entries.
 	env := BuildPinnedBDEnv(os.Environ(), b.getResolvedBeadsDir())
 	env = StripEnvKey(env, "BEADS_DIR")
+	env = append(env, "BD_JSON_ENVELOPE=1")
 	return env
 }
 
@@ -1434,9 +1436,12 @@ func (b *Beads) buildRoutingEnv() []string {
 			// half-migrated (gt-elvf4; testContainerEnv).
 			env = append(env, testContainerEnv()...)
 		}
+		env = append(env, "BD_JSON_ENVELOPE=1")
 		return SuppressBDSideEffects(env)
 	}
-	return BuildRoutingBDEnv(os.Environ(), b.getResolvedBeadsDir())
+	env := BuildRoutingBDEnv(os.Environ(), b.getResolvedBeadsDir())
+	env = append(env, "BD_JSON_ENVELOPE=1")
+	return env
 }
 
 // filterBeadsEnv removes beads-related environment variables from the given
@@ -2241,11 +2246,65 @@ func (b *Beads) GetAssignedIssue(assignee string) (*Issue, error) {
 	return nil, nil
 }
 
+// readyEnvelope is the shape bd --json takes under BD_JSON_ENVELOPE=1
+// (cmd/bd/output.go outputJSONWithPagination). The ready page is always the
+// "data" array; "pagination" carries the truncation verdict bd ready's
+// own one-shot count computed, present only when the page came back capped.
+// bd builds old enough to predate the envelope emit a bare array, which the
+// plain-array branch of parseReadyOutput covers (gt-m7pq).
+type readyEnvelope struct {
+	SchemaVersion int             `json:"schema_version"`
+	Data          json.RawMessage `json:"data"`
+	Pagination    struct {
+		Returned  int  `json:"returned"`
+		Total     int  `json:"total"`
+		Truncated bool `json:"truncated"`
+	} `json:"pagination"`
+}
+
+// parseReadyOutput unmarshals bd ready --json stdout into issues, returning
+// ErrReadyTruncated when the envelope says the page was capped. bd <1.2.2
+// (or any build that ignores BD_JSON_ENVELOPE) answers with a bare array
+// and no pagination block; that degrades to a plain result with no sentinel,
+// the status quo this method exists to improve on but not to break.
+func parseReadyOutput(out []byte) ([]*Issue, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		var issues []*Issue
+		if err := json.Unmarshal(out, &issues); err != nil {
+			return nil, fmt.Errorf("parsing bd ready output: %w", err)
+		}
+		return issues, nil
+	}
+
+	var env readyEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		return nil, fmt.Errorf("parsing bd ready envelope: %w", err)
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(env.Data, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready envelope data: %w", err)
+	}
+	if !env.Pagination.Truncated {
+		return issues, nil
+	}
+	return issues, &ErrReadyTruncated{
+		Found:     env.Pagination.Returned,
+		Cap:       env.Pagination.Returned,
+		TrueCount: env.Pagination.Total,
+	}
+}
+
 // Ready returns issues that are ready to work (not blocked). Bookkeeping
 // families (mail, escalations, identity, merge queue, event records) are
 // excluded server-side by the same WorkFilter / --exclude flags
 // ReadyDispatchable sends, so the ready query answers the same question on
 // every path (gt-0q80).
+//
+// When the ready page came back capped at bd's default limit of 100, Ready
+// returns the page AND an ErrReadyTruncated sentinel so a caller that needs
+// the whole board can tell a full page from a whole board — a board whose
+// size is silently 100 mis-sizes every count built on it (gt-m7pq).
 func (b *Beads) Ready() ([]*Issue, error) {
 	if b.store != nil {
 		return b.storeReadyWithFilter(readyWorkFilter())
@@ -2256,12 +2315,7 @@ func (b *Beads) Ready() ([]*Issue, error) {
 		return nil, err
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready output: %w", err)
-	}
-
-	return issues, nil
+	return parseReadyOutput(out)
 }
 
 // ReadyDispatchable returns ready issues with the town's bookkeeping
@@ -2291,12 +2345,7 @@ func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
 		}
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready --exclude-label/--exclude-type output: %w", err)
-	}
-
-	return issues, nil
+	return parseReadyOutput(out)
 }
 
 // readyWorkFilter is the WorkFilter every in-process store ready query sends:
