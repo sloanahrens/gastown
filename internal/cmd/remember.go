@@ -62,8 +62,11 @@ var rememberCmd = &cobra.Command{
 	Short: "Store a persistent memory",
 	Long: `Store a persistent memory in the beads key-value store.
 
-Memories persist across sessions and are injected during gt prime.
-This replaces filesystem-based MEMORY.md with bead-backed storage.
+Memories persist across sessions, and gt prime renders the memory index only
+for mayor and crew — the roles that carry context from one session into the
+next. Every role stores memories the same way, but no other role sees them
+injected at prime time; read them back with gt memories. This replaces
+filesystem-based MEMORY.md with bead-backed storage.
 
 The key is auto-generated from the content if not specified.
 Use --key to provide an explicit slug for easy retrieval.
