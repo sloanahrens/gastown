@@ -29,6 +29,7 @@ var hardenedPackages = []string{
 var policyConstructors = map[string]bool{
 	"Command":               true,
 	"CommandContext":        true,
+	"CommandContextBounded": true,
 	"CommandContextWithBin": true,
 }
 
