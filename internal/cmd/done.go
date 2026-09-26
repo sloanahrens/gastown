@@ -1433,6 +1433,25 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	var sourceBD *beads.Beads
 	if exitType == ExitCompleted {
 		if branch == defaultBranch || branch == "master" {
+			// A conflict-resolution pass ends on the base branch by design: it
+			// submits no branch of its own, because its work is a rewritten head
+			// already pushed to the branch of an existing MR
+			// (mol-polecat-conflict-resolve, cleanup-and-exit). Rejecting it here
+			// returns before notifyWitness, so the wake for the MR the pass just
+			// released never fires (gt-rv8h, gt-tne1). DEFERRED is not this exit:
+			// it files a finished pass as "stuck".
+			if task := conflictResolutionCompletionTask(cwd, agentBeadID, issueID); task != nil {
+				if !beads.IssueStatus(task.Status).IsTerminal() {
+					// Completing now would walk away from a task the refinery is
+					// still blocked on. Say so, rather than reporting a merge-queue
+					// rejection the polecat cannot act on.
+					return fmt.Errorf("cannot complete %s: conflict-resolution task %s is still open, and its MR stays blocked until it closes\nClose it first: bd close %s --reason=\"resolved conflicts\"",
+						defaultBranch, task.ID, task.ID)
+				}
+				fmt.Printf("%s Conflict-resolution completion on %s — no branch of its own to submit\n", style.Bold.Render("→"), defaultBranch)
+				fmt.Printf("  %s is closed; the refinery wake below names the MR it released.\n", task.ID)
+				goto notifyWitness
+			}
 			return fmt.Errorf("cannot submit %s/master branch to merge queue", defaultBranch)
 		}
 
@@ -2666,12 +2685,7 @@ notifyWitness:
 		// deferred until after that call closes the hooked conflict task
 		// (gt-ue2h): checking readiness here always found the task still open,
 		// since gt done itself hadn't closed it yet.
-		wakeConflictCandidates = []string{issueID}
-		if agentBeadID != "" {
-			if _, fields, err := beads.New(cwd).ForAgentBead().GetAgentBead(agentBeadID); err == nil && fields != nil {
-				wakeConflictCandidates = append(wakeConflictCandidates, fields.HookBead)
-			}
-		}
+		wakeConflictCandidates = conflictResolutionCandidates(cwd, agentBeadID, issueID)
 	}
 
 	// Write completion metadata to agent bead for audit trail.

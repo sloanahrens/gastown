@@ -130,6 +130,21 @@ func TestRunTapGuardPolecatPaths_BlocksLiveHookPayload(t *testing.T) {
 	}
 }
 
+// TestRunTapGuardPolecatPaths_BlocksSharedBinDir is the live-block leg for
+// gt-tnts5: obsidian, a local-coder polecat, overwrote the production bd
+// binary at $HOME/.local/bin/bd with a Bash echo, causing a town-wide bd
+// outage. $HOME/.local/bin sits outside the town tree, so it must be blocked
+// on its own rule rather than the town-membership check that protects
+// everything else — driven through the real stdin payload, not internals.
+func TestRunTapGuardPolecatPaths_BlocksSharedBinDir(t *testing.T) {
+	p := newPolecatTestTown(t)
+	target := filepath.Join(p.root, ".local", "bin", "bd")
+	err := p.run(t, "Bash", commandInput("echo 'echo STUB-RAN' > "+target))
+	if err == nil {
+		t.Fatalf("expected a write to %s (the shared bd install path) to be blocked, got nil error", target)
+	}
+}
+
 // TestPolecatPathGuardFileTargets covers the Edit/Write/MultiEdit/NotebookEdit
 // leg: only the polecat's own worktree, temp directories and the session
 // scratchpad are writable.
@@ -172,6 +187,8 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 		{"town settings dir", "Write", fileInput(filepath.Join(p.town, "settings", "x.json")), true},
 		{"own polecat dir but outside worktree", "Write", fileInput(filepath.Join(p.rigRoot, "polecats", p.name, ".claude", "settings.json")), true},
 		{"another agent's workspace", "Write", fileInput(filepath.Join(p.rigRoot, "crew", "alice", "x.go")), true},
+		{"shared install dir, outside the town tree", "Write", fileInput(filepath.Join(p.root, ".local", "bin", "bd")), true},
+		{"shared install dir via tilde", "Write", fileInput("~/.local/bin/bd"), true},
 		{"tmp", "Write", fileInput("/tmp/polecat-paths-probe/x.go"), false},
 		{"session scratchpad", "Write", fileInput(filepath.Join(p.town, ".claude-town", "projects", "p", "notes.md")), false},
 		{"notebook in sibling worktree", "NotebookEdit", notebookInput(filepath.Join(p.sibling, "nb.ipynb")), true},
@@ -325,6 +342,14 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"cp to a sibling via $GT_POLECAT_PATH sibling", "cp a.go $GT_TOWN_ROOT/" + p.rig + "/polecats/" + p.other + "/" + p.rig + "/x.go", true},
 		{"cp with --target-directory into a sibling", "cp --target-directory=" + p.sibling + " a.go", true},
 		{"dd of= into a sibling", "dd if=/dev/zero of=" + sib, true},
+		// gt-tnts5: the shared gt/bd install dir sits outside the town tree, so
+		// it needs its own always-on rule rather than the town-membership check.
+		{"echo stub over the shared bd binary", "echo 'echo STUB-RAN' > " + filepath.Join(p.root, ".local", "bin", "bd"), true},
+		{"cp over the shared bd binary", "cp backup-bd " + filepath.Join(p.root, ".local", "bin", "bd"), true},
+		{"mkdir the shared install dir", "mkdir -p " + filepath.Join(p.root, ".local", "bin"), true},
+		{"shared install dir via tilde", "cp a.go ~/.local/bin/bd", true},
+		{"shared install dir via $HOME", "cp a.go $HOME/.local/bin/bd", true},
+		{"read from the shared install dir is allowed", "cat " + filepath.Join(p.root, ".local", "bin", "bd"), false},
 		// Interpreters and downloaders are write-capable: the previous
 		// attempt's guard whitelisted them as read-only.
 		{"python3 -c opening a sibling file for write", `python3 -c "open('` + sib + `','w').write('x')"`, true},

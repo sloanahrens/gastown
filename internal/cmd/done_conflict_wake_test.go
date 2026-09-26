@@ -372,6 +372,136 @@ func TestDoneWiresConflictWakeIntoNotifyWitness(t *testing.T) {
 	}
 }
 
+// TestConflictResolutionTaskOnHook covers the predicate gt done's base-branch
+// guard runs on (gt-tne1). Its job is narrower than the wake's: it answers "is
+// one of these candidate beads a conflict-resolution task", and it must do so
+// while the task is still OPEN, because that is the case the guard reports back
+// to the polecat rather than completing.
+func TestConflictResolutionTaskOnHook(t *testing.T) {
+	t.Parallel()
+	const taskID = "gt-l5dy"
+
+	tests := []struct {
+		name   string
+		mutate func(*conflictWakeStore)
+		ids    []string
+		want   string
+	}{
+		{
+			name:   "closed conflict task on the hook",
+			mutate: func(*conflictWakeStore) {},
+			ids:    []string{taskID},
+			want:   taskID,
+		},
+		{
+			name: "open conflict task is still a conflict task",
+			mutate: func(s *conflictWakeStore) {
+				s.beads[taskID].Status = string(beads.StatusOpen)
+			},
+			ids:  []string{taskID},
+			want: taskID,
+		},
+		{
+			name: "second candidate wins when the first is unrelated",
+			mutate: func(s *conflictWakeStore) {
+				s.beads["gt-znj8"] = &beads.Issue{
+					ID:     "gt-znj8",
+					Title:  "main_branch_test runner ignores merge_queue.setup_command",
+					Status: string(beads.StatusClosed),
+				}
+			},
+			ids:  []string{"gt-znj8", taskID},
+			want: taskID,
+		},
+		{
+			name: "ordinary bead is not a conflict task",
+			mutate: func(s *conflictWakeStore) {
+				s.beads["gt-other"] = &beads.Issue{ID: "gt-other", Title: "Unrelated task", Status: string(beads.StatusClosed)}
+			},
+			ids:  []string{"gt-other"},
+			want: "",
+		},
+		{
+			name: "title prefix without the metadata is not a conflict task",
+			mutate: func(s *conflictWakeStore) {
+				s.beads[taskID].Description = "Resolve merge conflicts for branch b\n\n## Metadata\n- Branch: b\n"
+			},
+			ids:  []string{taskID},
+			want: "",
+		},
+		{
+			name:   "blank and unknown ids are skipped",
+			mutate: func(*conflictWakeStore) {},
+			ids:    []string{"   ", ""},
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store := newConflictWakeStore()
+			store.closeConflictTask(taskID)
+			tt.mutate(store)
+
+			task := conflictResolutionTaskOnHook(store.show, tt.ids...)
+			got := ""
+			if task != nil {
+				got = task.ID
+			}
+			if got != tt.want {
+				t.Errorf("conflictResolutionTaskOnHook(%v) = %q, want %q", tt.ids, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConflictResolutionTaskOnHook_NilShower(t *testing.T) {
+	t.Parallel()
+	if task := conflictResolutionTaskOnHook(nil, "gt-l5dy"); task != nil {
+		t.Errorf("conflictResolutionTaskOnHook(nil) = %v, want nil", task)
+	}
+}
+
+// TestDoneAcceptsConflictCompletionOnBaseBranch is the wiring half of gt-tne1,
+// in the same spirit as TestDoneWiresConflictWakeIntoNotifyWitness: the
+// predicate is inert unless the guard that rejected the completion consults it.
+// The guard lives inside runDone, which no unit test drives end to end, so the
+// assertion is on the source region between the base-branch test and the
+// rejection it must no longer reach.
+func TestDoneAcceptsConflictCompletionOnBaseBranch(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("done.go")
+	if err != nil {
+		t.Fatalf("reading done.go: %v", err)
+	}
+	doneSrc := string(src)
+
+	rejection := strings.Index(doneSrc, "cannot submit %s/master branch to merge queue")
+	if rejection < 0 {
+		t.Fatal("done.go no longer rejects base-branch MR submissions — this guard moved")
+	}
+
+	const guard = `if branch == defaultBranch || branch == "master" {`
+	start := strings.LastIndex(doneSrc[:rejection], guard)
+	if start < 0 {
+		t.Fatal("done.go has no base-branch guard before the rejection")
+	}
+	block := doneSrc[start:rejection]
+
+	if !strings.Contains(block, "conflictResolutionCompletionTask(") {
+		t.Errorf("the base-branch guard does not consult conflictResolutionCompletionTask:\n%s\n"+
+			"A conflict-resolution pass ends on the base branch and submits no branch of its own, "+
+			"so this guard rejects the completion the formula is built to produce (gt-tne1).", block)
+	}
+	if !strings.Contains(block, "goto notifyWitness") {
+		t.Errorf("the base-branch guard accepts a conflict completion but does not reach notifyWitness:\n%s\n"+
+			"Without that jump the completion handshake — including the gt-rv8h refinery wake — still "+
+			"never runs.", block)
+	}
+}
+
 func readNudgeLog(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
