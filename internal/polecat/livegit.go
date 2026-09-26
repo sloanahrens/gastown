@@ -33,9 +33,9 @@ type LiveGitState struct {
 	//
 	// Which probe produced it decides where the "pushed branch" tip was read
 	// from: ProbeLiveGitState asks the remote, ProbeLiveGitStateLocal reads the
-	// local remote-tracking ref. The local count is never the lower of the two,
-	// so a caller that swaps probes can only ever see more work reported as
-	// unpreserved, never less.
+	// local remote-tracking ref. Swapping probes can raise this count (a ref
+	// this clone never fetched) or lower it (a ref that outlives its remote
+	// branch) — git.BranchPreservationStatusLocal has both cases.
 	UnpushedCommits int
 	// Source is GitStateSourceLive when the probe answered, or
 	// GitStateSourceUnknown when it failed — never GitStateSourceRecorded,
@@ -70,11 +70,14 @@ func ProbeLiveGitState(worktreePath string) LiveGitState {
 // then has only local subprocesses left to overlap. It keeps every other fact
 // identical.
 //
-// The local unpushed count is the live one's answer or more conservative,
-// never less: a tracking ref this clone never fetched reads as "no evidence of
-// preservation" and reports the work as unpreserved, which flags a seat for
-// recovery rather than clearing it. Enumerating seats is a read-only
-// inventory, so the one-sided error is the right side to fail on.
+// The local unpushed count tracks the live one wherever this clone's view of
+// the branch tip matches the remote's, and both directions of drift are real:
+// a ref this clone never fetched reports the work as unpreserved, which flags
+// a seat for recovery rather than clearing it, while a ref that outlives its
+// remote branch reports it as preserved (gt-dt0k). Enumerating seats is a
+// read-only inventory, which is the fidelity this buys — see
+// git.BranchPreservationStatusLocal for the boundary and for the callers that
+// need the live probe instead.
 func ProbeLiveGitStateLocal(worktreePath string) LiveGitState {
 	return probeLiveGitState(worktreePath, (*git.Git).CheckUncommittedWorkLocal)
 }
