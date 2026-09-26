@@ -2215,10 +2215,11 @@ func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testin
 // control. The liveness cross-check lives in the live-session path, so a polecat
 // whose session and agent process are both gone is still classified and
 // escalated — the gate cannot be "fixed" by silencing the rule. Not parallel:
-// it stubs the restart seam so the restart starts nothing real (gt-5itbt: the
-// real restartSessionExec now panics in a test binary unless faked).
+// it stubs the restart and nuke seams so the restart starts nothing real and
+// the archive path cannot reach a polecat.
 func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T) {
 	stubRestartSessionExec(t)
+	nuked := stubNukePolecat(t, nil)
 
 	townRoot := t.TempDir()
 	bd, _ := mockBd(
@@ -2236,8 +2237,8 @@ func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T
 		UpdatedAt:  time.Now().Format(time.RFC3339),
 	}
 
-	zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "gastown", "deadcat",
-		"gt-gastown-deadcat", tmux.NewTmux(), nil, time.Now(), &config.WitnessThresholds{}, snap, "")
+	zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "zz-test-rig", "zz-test-cat",
+		"gt-zz-test-rig-zz-test-cat", deadSessionTmux(t), nil, time.Now(), &config.WitnessThresholds{}, snap, "")
 	t.Logf("found=%v zombie=%+v", found, zombie)
 	if !found {
 		t.Fatal("a polecat with no session and no process was not flagged")
@@ -2248,6 +2249,21 @@ func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T
 	if !zombie.WasActive {
 		t.Error("WasActive = false, want true for a dead session holding work")
 	}
+	if nuked() {
+		t.Error("the archive path ran a polecat nuke; this control must not be able to reach one")
+	}
+}
+
+// deadSessionTmux returns a tmux client on a test-only socket with no server
+// behind it. The dead-session detector only reads through it, so an isolated
+// socket is sufficient — and required: the default socket IS the town's real
+// tmux server, which the nuke path behind this detector can kill sessions on
+// (gt-4y5x).
+func deadSessionTmux(t *testing.T) *tmux.Tmux {
+	t.Helper()
+	socket := constants.TestSocketName("gt-test-deadsession")
+	t.Cleanup(func() { _ = tmux.NewTmuxWithSocket(socket).KillServer() })
+	return tmux.NewTmuxWithSocket(socket)
 }
 
 // TestDetectZombieDeadSession_DeliberateHoldBlocksRestart is the gt-vql3
@@ -2274,12 +2290,13 @@ func TestDetectZombieDeadSession_DeliberateHoldBlocksRestart(t *testing.T) {
 
 	detectedAt := time.Now()
 	doneIntent := &DoneIntent{ExitType: "COMPLETED", Timestamp: detectedAt.Add(-5 * time.Minute)}
+	deadTM := deadSessionTmux(t)
 
 	detect := func(agentState string) (ZombieResult, bool) {
 		before := len(*restarts)
 		snap := &agentBeadSnapshot{AgentState: agentState, HookBead: "gt-vql3x"}
-		zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "gastown", "quartz",
-			"gt-gastown-quartz", tmux.NewTmux(), doneIntent, detectedAt, &config.WitnessThresholds{}, snap, "")
+		zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "zz-test-rig", "zz-test-cat",
+			"gt-zz-test-rig-zz-test-cat", deadTM, doneIntent, detectedAt, &config.WitnessThresholds{}, snap, "")
 		t.Logf("agent_state=%s found=%v restarts=%d zombie=%+v", agentState, found, len(*restarts)-before, zombie)
 		return zombie, found
 	}
@@ -3813,20 +3830,25 @@ func TestClassifyNeverHeartbeatedLiveness_WorkingIsNotFlagged(t *testing.T) {
 	}
 
 	cases := []struct {
-		name     string
-		act      RealActivity
-		gateSlot string
-		wantIn   string
+		name   string
+		act    RealActivity
+		gate   gateSlotEvidence
+		wantIn string
 	}{
-		{"emerald: mid self-review, transcript 1s old", transcript(time.Second), "", "transcript=1s old"},
-		{"diamond: mid-compaction, pane showing a progress bar", pane(2 * time.Second), "", "pane-output=2s old"},
-		{"garnet: 45m turn, output tokens still rising", transcript(3 * time.Second), "", "transcript=3s old"},
-		{"granite: transcript active 8s ago", transcript(8 * time.Second), "", "transcript=8s old"},
-		{"holding the container-gate slot", pane(40 * time.Minute), "gate-slot held by gastown/granite (verification suite running)", "gastown/granite"},
+		{"emerald: mid self-review, transcript 1s old", transcript(time.Second), gateSlotNone, "transcript=1s old"},
+		{"diamond: mid-compaction, pane showing a progress bar", pane(2 * time.Second), gateSlotNone, "pane-output=2s old"},
+		{"garnet: 45m turn, output tokens still rising", transcript(3 * time.Second), gateSlotNone, "transcript=3s old"},
+		{"granite: transcript active 8s ago", transcript(8 * time.Second), gateSlotNone, "transcript=8s old"},
+		{
+			"holding the container-gate slot",
+			pane(40 * time.Minute),
+			gateSlotEvidence{Held: true, Detail: "gate-slot held by gastown/granite (verification suite running)"},
+			"gastown/granite",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ev := classifyNeverHeartbeatedLiveness(tc.act, tc.gateSlot, graceDeadline, now)
+			ev := classifyNeverHeartbeatedLiveness(tc.act, tc.gate, graceDeadline, now)
 			if !ev.Working {
 				t.Errorf("healthy polecat flagged as never-heartbeated; evidence=%q", ev.Detail)
 			}
@@ -3874,7 +3896,7 @@ func TestClassifyNeverHeartbeatedLiveness_QuietStartupIsFlagged(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ev := classifyNeverHeartbeatedLiveness(tc.act, "", graceDeadline, now)
+			ev := classifyNeverHeartbeatedLiveness(tc.act, gateSlotNone, graceDeadline, now)
 			if ev.Working {
 				t.Errorf("wedged polecat reported as working; evidence=%q", ev.Detail)
 			}
@@ -3882,6 +3904,27 @@ func TestClassifyNeverHeartbeatedLiveness_QuietStartupIsFlagged(t *testing.T) {
 				t.Errorf("evidence %q should record the gate slot check", ev.Detail)
 			}
 		})
+	}
+}
+
+// TestClassifyNeverHeartbeatedLiveness_UnreadablePoolIsNamed is the gt-4y5x
+// major on the classification side: a pool read that failed must be named in
+// the evidence, must not be read as a holder, and must not silence the rule.
+func TestClassifyNeverHeartbeatedLiveness_UnreadablePoolIsNamed(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	graceDeadline := now.Add(-15 * time.Minute) // session started 20m ago, 5m grace
+	unreadable := gateSlotEvidence{Detail: "gate-slot=unreadable (acquiring flock: is a directory)"}
+
+	// Quiet session: the flag still fires, and the evidence names the failed
+	// pool read instead of claiming there was no holder.
+	ev := classifyNeverHeartbeatedLiveness(RealActivity{AgentAlive: true, ObservedAt: now}, unreadable, graceDeadline, now)
+	if ev.Working {
+		t.Errorf("unreadable pool read as work; evidence=%q", ev.Detail)
+	}
+	if !strings.HasPrefix(ev.Detail, "gate-slot=unreadable") {
+		t.Errorf("evidence %q does not name the failed pool read", ev.Detail)
 	}
 }
 
@@ -3929,8 +3972,39 @@ func TestHeldGateSlot_NoneHeld(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	if got := heldGateSlot(townRoot, "gastown", "diamond"); got != "" {
-		t.Errorf("heldGateSlot on an empty town = %q, want no holder", got)
+	got := readHeldGateSlot(townRoot, "gastown", "diamond")
+	if got.Held {
+		t.Errorf("readHeldGateSlot on an empty town = %+v, want no holder", got)
+	}
+	if got.Detail != "gate-slot=none" {
+		t.Errorf("Detail = %q, want the empty pool named as such", got.Detail)
+	}
+}
+
+// TestHeldGateSlot_UnreadableIsNotNone is the gt-4y5x major: a pool read that
+// fails is not "no slot held", and the operator must be able to tell the two
+// apart from the flag message alone.
+func TestHeldGateSlot_UnreadableIsNotNone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the flock probe succeeds unconditionally on Windows")
+	}
+
+	townRoot := t.TempDir()
+	// A directory where the lock file belongs: os.Stat sees a path, and the
+	// read-write open behind it fails, so the pool reports an error.
+	if err := os.MkdirAll(slot.LockDir(townRoot), 0o755); err != nil {
+		t.Fatalf("create lock dir: %v", err)
+	}
+	if err := os.Mkdir(slot.LockPath(townRoot), 0o755); err != nil {
+		t.Fatalf("create lock path as a directory: %v", err)
+	}
+
+	got := readHeldGateSlot(townRoot, "gastown", "diamond")
+	if got.Held {
+		t.Errorf("Held = true on a pool that could not be read: %+v", got)
+	}
+	if !strings.HasPrefix(got.Detail, "gate-slot=unreadable") {
+		t.Errorf("Detail = %q, want the failed read named, not an empty pool", got.Detail)
 	}
 }
 
@@ -3949,12 +4023,12 @@ func TestHeldGateSlot_NamedByRigAndPolecat(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Release() })
 
-	got := heldGateSlot(townRoot, "gastown", "diamond")
-	if !strings.Contains(got, "gastown/diamond") {
-		t.Errorf("heldGateSlot = %q, want the slot held by gastown/diamond", got)
+	got := readHeldGateSlot(townRoot, "gastown", "diamond")
+	if !got.Held || !strings.Contains(got.Detail, "gastown/diamond") {
+		t.Errorf("readHeldGateSlot = %+v, want the slot held by gastown/diamond", got)
 	}
-	if other := heldGateSlot(townRoot, "gastown", "emerald"); other != "" {
-		t.Errorf("heldGateSlot for a non-holder = %q, want no holder", other)
+	if other := readHeldGateSlot(townRoot, "gastown", "emerald"); other.Held {
+		t.Errorf("readHeldGateSlot for a non-holder = %+v, want no holder", other)
 	}
 }
 
