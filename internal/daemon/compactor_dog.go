@@ -81,12 +81,16 @@ const compactorDogTickInterval = 15 * time.Minute
 // multi-restart timeline without sleeping through it.
 var compactorDogNow = time.Now
 
-// compactorDogCycleFn runs one monitoring cycle. Seamed like the package's
-// other *Fn variables: a cycle opens a SQL connection to every production
-// database and pours a dog molecule, so a test of the schedule must not need
-// Dolt. Recording the last-run time stays outside the seam — the record is what
-// the schedule is built on.
-var compactorDogCycleFn = func(d *Daemon) { d.runCompactorDog() }
+// compactorDogCycleFn runs one monitoring cycle and reports whether it
+// completed cleanly. Seamed like the package's other *Fn variables: a cycle
+// opens a SQL connection to every production database and pours a dog
+// molecule, so a test of the schedule must not need Dolt. Recording the
+// last-run time stays outside the seam — the record is what the schedule is
+// built on, and it must only happen for a cycle this return value calls clean
+// (gt-4uxs): a cycle that found no databases or failed every inspection is not
+// a completed run, and recording it as one would hide the failure behind a
+// 24h wait before the next attempt.
+var compactorDogCycleFn = func(d *Daemon) bool { return d.runCompactorDog() }
 
 // compactorDogDecision is one due-ness evaluation.
 type compactorDogDecision struct {
@@ -164,8 +168,11 @@ func (d *Daemon) triggerCompactorDog() {
 			return
 		}
 		defer release()
-		compactorDogCycleFn(d)
-		d.recordCompactorDogRun()
+		if compactorDogCycleFn(d) {
+			d.recordCompactorDogRun()
+		} else {
+			d.logger.Printf("compactor_dog: cycle failed — not recording last-run, next check will retry")
+		}
 	}()
 }
 
@@ -228,9 +235,13 @@ func compactorDogThreshold(config *DaemonPatrolConfig) int {
 // impractical because the patrol needs database/sql connections and a stable
 // per-run step ledger that outlives any single agent session. See
 // mol-dog-compactor.formula.toml for full rationale.
-func (d *Daemon) runCompactorDog() {
+//
+// Returns whether the cycle completed cleanly — false when there was nothing
+// to inspect or every inspection errored, so the caller knows not to record
+// this as a completed run (gt-4uxs).
+func (d *Daemon) runCompactorDog() bool {
 	if !d.isPatrolActive("compactor_dog") {
-		return
+		return true
 	}
 
 	threshold := compactorDogThreshold(d.patrolConfig)
@@ -245,7 +256,7 @@ func (d *Daemon) runCompactorDog() {
 	if len(databases) == 0 {
 		d.logger.Printf("compactor_dog: no databases to check")
 		mol.failStep("inspect", "no databases found")
-		return
+		return false
 	}
 
 	// Step "inspect": count commits per database. The step is closed exactly
@@ -299,6 +310,12 @@ func (d *Daemon) runCompactorDog() {
 	d.logger.Printf("compactor_dog: cycle complete — above_threshold=%d below_threshold=%d errors=%d",
 		len(candidates), belowThreshold, errors)
 	mol.closeStep("report")
+
+	// A cycle that inspected every database without error is the only kind
+	// clean enough to record as a completed run; a partial or total inspection
+	// failure must leave the last-run time alone so the next check retries
+	// instead of waiting out the full interval (gt-4uxs).
+	return errors == 0
 }
 
 // warnDeprecatedCompactorConfig logs a warning when daemon.json still carries
