@@ -38,12 +38,14 @@ func (m *fakeMQPostMergeManager) PostMergeMR(mr *refinery.MergeRequest) (*refine
 }
 
 type fakeMQPostMergeGit struct {
-	verifyErr error
-	openPR    bool
-	deleteErr error
-	remoteTip string
-	localHead string
-	tipErr    error
+	verifyErr   error
+	openPR      bool
+	prUnknown   bool
+	prLookupErr error
+	deleteErr   error
+	remoteTip   string
+	localHead   string
+	tipErr      error
 
 	// Attestation-binding fixtures (verifyLandedCommitMatchesSubmitted).
 	mergeBase       string
@@ -145,8 +147,14 @@ func (g *fakeMQPostMergeGit) FetchPrune(remote string) error {
 	return g.pruneErr
 }
 
-func (g *fakeMQPostMergeGit) HasOpenPullRequest(git.PullRequestRef) bool {
-	return g.openPR
+func (g *fakeMQPostMergeGit) PullRequestProtection(git.PullRequestRef) (git.PRProtection, error) {
+	if g.prUnknown {
+		return git.PRProtectionUnknown, g.prLookupErr
+	}
+	if g.openPR {
+		return git.PRProtectionOpen, nil
+	}
+	return git.PRProtectionNone, nil
 }
 
 func (g *fakeMQPostMergeGit) PushRemoteBranchTip(_, _ string) (string, error) {
@@ -786,6 +794,40 @@ func TestRunVerifiedMQPostMerge_OpenPRSkipsRemoteDeleteAfterProof(t *testing.T) 
 	}
 	if len(rigGit.localDeleted) != 1 || rigGit.localDeleted[0] != mgr.mr.Branch {
 		t.Fatalf("local branch cleanup = %v, want [%s]", rigGit.localDeleted, mgr.mr.Branch)
+	}
+}
+
+// TestRunVerifiedMQPostMerge_PRLookupFailureIsReportedAsUnknownNotOpenPR is the
+// regression for gt-ghpk: a PR lookup that fails (no GitHub remote, gh
+// missing/unauthenticated, an ambiguous head match) must not be reported as
+// "open PR exists" — that sends the operator hunting for a PR that was never
+// found. It still has to fail closed and leave the remote branch alone, same
+// as a genuinely open PR, but the caller needs to be able to tell the two
+// apart.
+func TestRunVerifiedMQPostMerge_PRLookupFailureIsReportedAsUnknownNotOpenPR(t *testing.T) {
+	t.Parallel()
+	mgr := &fakeMQPostMergeManager{mr: testMQPostMergeMR()}
+	lookupErr := errors.New("remote is not a GitHub repo")
+	rigGit := &fakeMQPostMergeGit{prUnknown: true, prLookupErr: lookupErr, localHead: mgr.mr.CommitSHA}
+
+	_, cleanup, err := runVerifiedMQPostMerge(mgr, t.TempDir(), rigGit, mgr.mr.ID, false, "")
+	if err != nil {
+		t.Fatalf("runVerifiedMQPostMerge: %v", err)
+	}
+	if !mgr.postMergeCalled {
+		t.Fatal("PostMerge was not called after successful proof")
+	}
+	if !cleanup.PRUnknown {
+		t.Fatalf("cleanup.PRUnknown = false, cleanup=%+v", cleanup)
+	}
+	if cleanup.OpenPR {
+		t.Fatalf("cleanup.OpenPR = true, want false for a failed lookup: cleanup=%+v", cleanup)
+	}
+	if !errors.Is(cleanup.PRLookupErr, lookupErr) {
+		t.Fatalf("cleanup.PRLookupErr = %v, want %v", cleanup.PRLookupErr, lookupErr)
+	}
+	if len(rigGit.deletedBranches) != 0 {
+		t.Fatalf("remote branch deleted despite unresolved PR lookup: %v", rigGit.deletedBranches)
 	}
 }
 
@@ -1489,15 +1531,17 @@ func writeOrphanCleanupFile(t *testing.T, dir, name, content string) {
 }
 
 // orphanCleanupRealGit is a real *git.Git with the PR guard stubbed out. A
-// temp-dir origin is not a GitHub repo, so the guard's lookup fails and
-// HasOpenPullRequest reports it as protected (gas-fk4), which would hide the
-// deletion this test is about. The guard's own behaviour is covered by the
-// fake-git tests.
+// temp-dir origin is not a GitHub repo, so the guard's lookup fails and would
+// otherwise report Unknown (gt-ghpk) — still protected (gas-fk4) — which
+// would hide the deletion this test is about. The guard's own behaviour is
+// covered by the fake-git tests.
 type orphanCleanupRealGit struct {
 	*git.Git
 }
 
-func (orphanCleanupRealGit) HasOpenPullRequest(git.PullRequestRef) bool { return false }
+func (orphanCleanupRealGit) PullRequestProtection(git.PullRequestRef) (git.PRProtection, error) {
+	return git.PRProtectionNone, nil
+}
 
 // TestRunOrphanMQPostMerge_RealRemoteSquashMergedBranch pins the composition
 // the fake cannot: the ref name the proof fetches (refs/heads/<branch>), the

@@ -100,6 +100,84 @@ exit 1
 	if !g.HasOpenPR("shared") {
 		t.Fatal("HasOpenPR should protect branch deletion on ambiguous lookup")
 	}
+	state, protErr := g.PullRequestProtection(PullRequestRef{Branch: "shared"})
+	if state != PRProtectionUnknown {
+		t.Fatalf("PullRequestProtection state = %v, want PRProtectionUnknown for an ambiguous lookup", state)
+	}
+	if !errors.Is(protErr, ErrPullRequestAmbiguous) {
+		t.Fatalf("PullRequestProtection err = %v, want ErrPullRequestAmbiguous", protErr)
+	}
+}
+
+// TestPullRequestProtectionDistinguishesFailedLookupFromOpenPR is the
+// regression for gt-ghpk: HasOpenPullRequest collapsed "the lookup failed" and
+// "a PR is genuinely open" into the same true, so a caller reporting its
+// verdict to an operator said "open PR exists" even when the branch has no
+// GitHub remote at all. PullRequestProtection must keep the two apart.
+func TestPullRequestProtectionDistinguishesFailedLookupFromOpenPR(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	if _, err := g.AddRemote("origin", filepath.Join(t.TempDir(), "local-origin.git")); err != nil {
+		t.Fatalf("AddRemote origin: %v", err)
+	}
+
+	state, err := g.PullRequestProtection(PullRequestRef{Branch: "some-branch"})
+	if state != PRProtectionUnknown {
+		t.Fatalf("PullRequestProtection state = %v, want PRProtectionUnknown for a non-GitHub remote", state)
+	}
+	if err == nil {
+		t.Fatal("PullRequestProtection err = nil, want a lookup failure describing the non-GitHub remote")
+	}
+	if g.HasOpenPullRequest(PullRequestRef{Branch: "some-branch"}) != true {
+		t.Fatal("HasOpenPullRequest should still fail closed (true) for a failed lookup")
+	}
+}
+
+func TestPullRequestProtectionOpenPRIsOpen(t *testing.T) {
+	installFakeGH(t, `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\n' '[{"number":7,"url":"https://github.com/upstream/repo/pull/7","state":"OPEN","mergedAt":"","headRefName":"feature","headRefOid":"abc","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]'
+  exit 0
+fi
+printf 'unexpected gh args: %s\n' "$*" >&2
+exit 1
+`)
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	addGitHubRemotes(t, g)
+
+	state, err := g.PullRequestProtection(PullRequestRef{Branch: "feature"})
+	if err != nil {
+		t.Fatalf("PullRequestProtection: %v", err)
+	}
+	if state != PRProtectionOpen {
+		t.Fatalf("PullRequestProtection state = %v, want PRProtectionOpen", state)
+	}
+}
+
+func TestPullRequestProtectionNoMatchIsNone(t *testing.T) {
+	installFakeGH(t, `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\n' '[]'
+  exit 0
+fi
+printf 'unexpected gh args: %s\n' "$*" >&2
+exit 1
+`)
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	addGitHubRemotes(t, g)
+
+	state, err := g.PullRequestProtection(PullRequestRef{Branch: "no-pr"})
+	if err != nil {
+		t.Fatalf("PullRequestProtection: %v", err)
+	}
+	if state != PRProtectionNone {
+		t.Fatalf("PullRequestProtection state = %v, want PRProtectionNone", state)
+	}
+	if g.HasOpenPullRequest(PullRequestRef{Branch: "no-pr"}) {
+		t.Fatal("HasOpenPullRequest should be false when the lookup completes and finds no PR")
+	}
 }
 
 func TestLookupPullRequestBranchHeadSHADisambiguates(t *testing.T) {

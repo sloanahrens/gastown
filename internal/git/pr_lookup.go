@@ -93,14 +93,47 @@ func (g *Git) LookupPullRequest(ref PullRequestRef) (*PullRequestInfo, error) {
 	return g.lookupPullRequestByHead(targetRepo, branch, strings.TrimSpace(ref.HeadSHA))
 }
 
-// HasOpenPullRequest checks whether the ref resolves to an open PR. Errors and
-// ambiguity are treated as protected so callers do not delete a branch blindly.
-func (g *Git) HasOpenPullRequest(ref PullRequestRef) bool {
+// PRProtection is the three-way verdict a branch-delete guard needs: Open (a
+// PR is genuinely open — refuse), None (the lookup completed and found no
+// open PR — safe), or Unknown (the lookup itself failed or was ambiguous, so
+// the caller cannot tell either way). Unknown still has to fail closed like
+// Open, but it is not the same claim: reporting it as "open PR exists" tells
+// the operator to go close a PR that was never found, when the actual problem
+// is that the lookup couldn't run at all (no GitHub remote, gh missing or
+// unauthenticated, an ambiguous head match).
+type PRProtection int
+
+const (
+	PRProtectionNone PRProtection = iota
+	PRProtectionOpen
+	PRProtectionUnknown
+)
+
+// PullRequestProtection resolves ref to a three-way protection verdict for
+// safe-delete callers. See PRProtection for what each value means and why the
+// distinction matters.
+func (g *Git) PullRequestProtection(ref PullRequestRef) (PRProtection, error) {
 	pr, err := g.LookupPullRequest(ref)
 	if err != nil {
-		return !errors.Is(err, ErrPullRequestNotFound)
+		if errors.Is(err, ErrPullRequestNotFound) {
+			return PRProtectionNone, nil
+		}
+		return PRProtectionUnknown, err
 	}
-	return pr.Open()
+	if pr.Open() {
+		return PRProtectionOpen, nil
+	}
+	return PRProtectionNone, nil
+}
+
+// HasOpenPullRequest checks whether the ref resolves to an open PR. Errors and
+// ambiguity are treated as protected so callers do not delete a branch
+// blindly. Callers that report the guard's verdict to an operator should use
+// PullRequestProtection instead: it tells a failed lookup apart from a
+// genuinely open PR, which this collapses into the same "true".
+func (g *Git) HasOpenPullRequest(ref PullRequestRef) bool {
+	state, _ := g.PullRequestProtection(ref)
+	return state != PRProtectionNone
 }
 
 func (g *Git) pullRequestTargetRepo(explicit string) (string, error) {
