@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -287,6 +290,66 @@ func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
 	}
 	if len(issues) != 0 {
 		t.Errorf("issues = %d, want 0 from a rig with no database", len(issues))
+	}
+}
+
+// boardStorage is a minimal beadsdk.Storage that serves a fixed ready board,
+// applying the SDK's own limit semantics: a LIMIT is applied only when
+// Limit > 0, so a caller that sends no Limit gets the whole board. The
+// embedded interface covers the methods this test never reaches.
+type boardStorage struct {
+	beadsdk.Storage
+	board []*beadsdk.Issue
+}
+
+func (s *boardStorage) GetReadyWork(_ context.Context, filter beadsdk.WorkFilter) ([]*beadsdk.Issue, error) {
+	result := s.board
+	if filter.Limit > 0 && len(result) > filter.Limit {
+		result = result[:filter.Limit]
+	}
+	return result, nil
+}
+
+// TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit is the gt-59o9
+// regression test at the patrol's own seam. The board this check counts held
+// 373 ready beads on 2026-09-21; a count capped at bd's default of 100 is
+// exactly the under-report that left the mayor asleep with work to dispatch,
+// so the assertion is on the whole 373 rather than on anything smaller.
+//
+// It drives readyIssuesUnlimited itself, through the store opener the daemon
+// uses, so the guarantee is asserted on the function the patrol calls rather
+// than on a helper beneath it.
+func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	mkdirTestDir(t, beadsDir)
+	writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
+	mkdirTestDir(t, filepath.Join(beadsDir, "dolt"))
+
+	board := make([]*beadsdk.Issue, 373)
+	for i := range board {
+		board[i] = &beadsdk.Issue{
+			ID:     fmt.Sprintf("gt-board-%d", i),
+			Title:  fmt.Sprintf("ready bead %d", i),
+			Status: beadsdk.StatusOpen,
+		}
+	}
+
+	prev := openDispatchReadyStore
+	openDispatchReadyStore = func(*beads.Beads, context.Context) (beadsdk.Storage, func(), error) {
+		return &boardStorage{board: board}, func() {}, nil
+	}
+	t.Cleanup(func() { openDispatchReadyStore = prev })
+
+	issues, err := readyIssuesUnlimited(rigPath)
+	if err != nil {
+		t.Fatalf("readyIssuesUnlimited: %v", err)
+	}
+	if len(issues) != 373 {
+		t.Fatalf("readyIssuesUnlimited returned %d issues, want the whole 373-bead board", len(issues))
+	}
+	if issues[0].ID != "gt-board-0" {
+		t.Errorf("first issue = %q, want gt-board-0 (the board read whole, in order)", issues[0].ID)
 	}
 }
 

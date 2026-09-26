@@ -32,6 +32,8 @@ type mockStorage struct {
 	removeDepErr    error
 	getLabelsErr    error
 	readyFilter     *beadsdk.WorkFilter // last WorkFilter handed to GetReadyWork
+	readyCalls      int
+	readyResults    []readyResult
 }
 
 func newMockStorage() *mockStorage {
@@ -278,9 +280,21 @@ func (m *mockStorage) GetLabels(_ context.Context, issueID string) ([]string, er
 	return m.labels[issueID], nil
 }
 
+// readyResult is a scripted per-call GetReadyWork response: the issues a call
+// returns, or the error it returns instead.
+type readyResult struct {
+	Issues []*beadsdk.Issue
+	Err    error
+}
+
 func (m *mockStorage) GetReadyWork(_ context.Context, filter beadsdk.WorkFilter) ([]*beadsdk.Issue, error) {
 	m.readyFilter = &filter
-	// Return all open issues (simplified: no real blocking logic)
+	m.readyCalls++
+	if len(m.readyResults) >= m.readyCalls {
+		res := m.readyResults[m.readyCalls-1]
+		return res.Issues, res.Err
+	}
+	// Default: all open issues, truncated by Limit (no real blocking logic)
 	var result []*beadsdk.Issue
 	for _, issue := range m.issues {
 		if issue.Status != beadsdk.StatusOpen {
@@ -346,6 +360,83 @@ func TestReadyDispatchableStorePathSendsBookkeepingExclusions(t *testing.T) {
 	}
 	if !containsIssueType(store.readyFilter.ExcludeTypes, beadsdk.IssueType("message")) {
 		t.Errorf("ReadyDispatchable's WorkFilter.ExcludeTypes missing \"message\": %v", store.readyFilter.ExcludeTypes)
+	}
+}
+
+// TestReadyWorkFilterCarriesNoLimit pins the invariant that makes the store
+// path unbounded: readyWorkFilter sends no Limit, so GetReadyWork emits no
+// LIMIT clause and returns the whole board. A Limit here would re-introduce
+// bd's 100-row default on the in-process path — the silent under-report
+// gt-59o9 chased down and gt-m7pq exists to prevent — so it fails loudly here
+// rather than quietly shrinking a patrol's board.
+func TestReadyWorkFilterCarriesNoLimit(t *testing.T) {
+	if limit := readyWorkFilter().Limit; limit != 0 {
+		t.Fatalf("readyWorkFilter().Limit = %d, want 0 (unset: the store path must return the whole board)", limit)
+	}
+}
+
+// TestReadyStorePathReturnsBoardPastBdDefaultLimit is the gt-m7pq regression
+// test for the path the daemon patrol actually reads. It drives b.Ready() —
+// not storeReadyWithFilter — so it exercises the production wiring
+// (Ready -> readyWorkFilter -> storeReadyWithFilter) against a board larger
+// than bd's 100-row default.
+//
+// The mock's default GetReadyWork mirrors the SDK's documented limit
+// semantics (a LIMIT is applied only when Limit > 0), which is what makes the
+// assertion meaningful: were readyWorkFilter to start sending a Limit, the
+// mock would truncate to it and this test would see 100 rows where it wants
+// 373.
+func TestReadyStorePathReturnsBoardPastBdDefaultLimit(t *testing.T) {
+	store := newMockStorage()
+	for i := 0; i < 373; i++ {
+		if err := store.CreateIssue(context.Background(), &beadsdk.Issue{Title: fmt.Sprintf("ready %d", i)}, "test"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+	}
+	b := newTestBeads(store)
+
+	issues, err := b.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	makeTruncated(t, err, false)
+
+	if len(issues) != 373 {
+		t.Fatalf("Ready returned %d issues, want the whole 373-bead board", len(issues))
+	}
+	if store.readyFilter == nil {
+		t.Fatal("Ready did not call GetReadyWork")
+	}
+	if store.readyFilter.Limit != 0 {
+		t.Errorf("Ready sent Limit %d, want 0 (unbounded)", store.readyFilter.Limit)
+	}
+	if store.readyCalls != 1 {
+		t.Errorf("GetReadyWork called %d times, want 1 (an unbounded query cannot be capped, so there is nothing to probe)", store.readyCalls)
+	}
+}
+
+// TestReadyDispatchableStorePathReturnsBoardPastBdDefaultLimit pins the same
+// guarantee on ReadyDispatchable, whose board the dispatch patrol counts.
+func TestReadyDispatchableStorePathReturnsBoardPastBdDefaultLimit(t *testing.T) {
+	store := newMockStorage()
+	for i := 0; i < 373; i++ {
+		if err := store.CreateIssue(context.Background(), &beadsdk.Issue{Title: fmt.Sprintf("ready %d", i)}, "test"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+	}
+	b := newTestBeads(store)
+
+	issues, err := b.ReadyDispatchable()
+	if err != nil {
+		t.Fatalf("ReadyDispatchable: %v", err)
+	}
+	makeTruncated(t, err, false)
+
+	if len(issues) != 373 {
+		t.Fatalf("ReadyDispatchable returned %d issues, want the whole 373-bead board", len(issues))
+	}
+	if store.readyCalls != 1 {
+		t.Errorf("GetReadyWork called %d times, want 1 (an unbounded query cannot be capped, so there is nothing to probe)", store.readyCalls)
 	}
 }
 
@@ -995,6 +1086,177 @@ func TestStoreReleaseWithReason(t *testing.T) {
 	}
 	if string(store.issues["test-1"].Status) != "open" {
 		t.Fatalf("expected status 'open', got %q", store.issues["test-1"].Status)
+	}
+}
+
+// scriptedSDKIssues returns n beadsdk issues with distinct IDs and titles.
+func scriptedSDKIssues(n int) []*beadsdk.Issue {
+	issues := make([]*beadsdk.Issue, n)
+	for i := range issues {
+		issues[i] = &beadsdk.Issue{ID: fmt.Sprintf("gt-scripted-%d", i), Title: fmt.Sprintf("issue %d", i)}
+	}
+	return issues
+}
+
+// firstIssueID returns the ID of the first issue, or "" for a nil slice.
+func firstIssueID(issues []*Issue) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	return issues[0].ID
+}
+
+// makeTruncated returns a non-nil ErrReadyTruncated when the sentinel is set,
+// or nil (and a test failure when the sentinel is absent and want is non-nil).
+func makeTruncated(t *testing.T, err error, want bool) *ErrReadyTruncated {
+	t.Helper()
+	var capped *ErrReadyTruncated
+	if errors.As(err, &capped) {
+		if !want {
+			t.Fatalf("unexpected ErrReadyTruncated: %v", err)
+		}
+		return capped
+	}
+	if want {
+		t.Fatalf("expected ErrReadyTruncated, got %v", err)
+	}
+	return nil
+}
+
+// TestStoreReadyTruncatedPageReturnsSentinel is the gt-m7pq regression test
+// for the in-process store path: a ready page that comes back exactly full
+// (row count equals the limit) is re-asked once with the limit off, and when
+// the probe proves more rows exist, the page is expanded to the full set and
+// returned alongside an ErrReadyTruncated sentinel — a page that is not the
+// board cannot be told from a board that happens to fit (the 2026-09-21
+// patrol under-report gt-59o9 chased down).
+//
+// It drives ReadyForMol rather than storeReadyWithFilter so the cap is the one
+// a production caller actually sends (ReadyForMol's Limit: 100). Ready() and
+// ReadyDispatchable() carry no Limit at all — the probe does not run for them
+// by construction — so a synthetic Limit here would test a wiring no caller
+// uses (gt-m7pq).
+func TestStoreReadyTruncatedPageReturnsSentinel(t *testing.T) {
+	store := newMockStorage()
+	store.readyResults = []readyResult{
+		{Issues: scriptedSDKIssues(100)},
+		{Issues: scriptedSDKIssues(250)},
+	}
+	b := newTestBeads(store)
+
+	issues, err := b.ReadyForMol("gt-mol-1")
+	if err == nil {
+		t.Fatal("expected ErrReadyTruncated")
+	}
+	capped := makeTruncated(t, err, true)
+
+	if store.readyCalls != 2 {
+		t.Fatalf("GetReadyWork called %d times, want 2 (the page + the unbounded probe)", store.readyCalls)
+	}
+	if store.readyFilter.Limit != 0 {
+		t.Errorf("probe filter Limit = %d, want 0 (unbounded re-query)", store.readyFilter.Limit)
+	}
+	if len(issues) != 250 {
+		t.Errorf("returned %d issues, want the full 250 from the probe", len(issues))
+	}
+	if firstIssueID(issues) != "gt-scripted-0" {
+		t.Errorf("first issue = %q, want the probe's first", firstIssueID(issues))
+	}
+	if capped.Found != 250 {
+		t.Errorf("capped.Found = %d, want 250", capped.Found)
+	}
+	if capped.Cap != 100 {
+		t.Errorf("capped.Cap = %d, want 100 (the caller's own cap, not the probe's)", capped.Cap)
+	}
+	if capped.TrueCount != 250 {
+		t.Errorf("capped.TrueCount = %d, want 250", capped.TrueCount)
+	}
+}
+
+// TestStoreReadyFullPageThatIsTheBoardProbesSilently pins the other half of
+// the probe: a full page that the unbounded re-query proves was the whole
+// board (no more rows exist) is NOT a truncation — it is returned without a
+// sentinel, so boards that genuinely fit in a page are not marked as capped.
+func TestStoreReadyFullPageThatIsTheBoardProbesSilently(t *testing.T) {
+	store := newMockStorage()
+	store.readyResults = []readyResult{
+		{Issues: scriptedSDKIssues(100)},
+		{Issues: scriptedSDKIssues(100)},
+	}
+	b := newTestBeads(store)
+
+	issues, err := b.ReadyForMol("gt-mol-1")
+	if err != nil {
+		t.Fatalf("ReadyForMol: %v", err)
+	}
+	makeTruncated(t, err, false)
+
+	if store.readyCalls != 2 {
+		t.Fatalf("GetReadyWork called %d times, want 2 (the page + the unbounded probe)", store.readyCalls)
+	}
+	if len(issues) != 100 {
+		t.Errorf("returned %d issues, want 100", len(issues))
+	}
+}
+
+// TestStoreReadyPageUnderLimitDoesNotProbe pins that the probe fires only on
+// a full page: a page that came back under the limit is the whole board by
+// construction, so the page is returned in a single query with no re-ask (the
+// probe is a one-shot cost paid only when a full page is ambiguous).
+func TestStoreReadyPageUnderLimitDoesNotProbe(t *testing.T) {
+	store := newMockStorage()
+	store.readyResults = []readyResult{
+		{Issues: scriptedSDKIssues(50)},
+	}
+	b := newTestBeads(store)
+
+	issues, err := b.ReadyForMol("gt-mol-1")
+	if err != nil {
+		t.Fatalf("ReadyForMol: %v", err)
+	}
+	makeTruncated(t, err, false)
+
+	if store.readyCalls != 1 {
+		t.Fatalf("GetReadyWork called %d times, want 1 (no probe for a page under the limit)", store.readyCalls)
+	}
+	if len(issues) != 50 {
+		t.Errorf("returned %d issues, want 50", len(issues))
+	}
+}
+
+// TestStoreReadyProbeFailureKeepsPage pins the degraded path: when the page
+// is full and the unbounded probe itself fails, the bounded page is still
+// returned (the data the caller can use) alongside the sentinel — with
+// StoreError set so a caller can tell "proven truncated" from "cap suspected,
+// re-query failed" — and the probe's failure does not mask the page.
+func TestStoreReadyProbeFailureKeepsPage(t *testing.T) {
+	store := newMockStorage()
+	store.readyResults = []readyResult{
+		{Issues: scriptedSDKIssues(100)},
+		{Err: errors.New("probe: db gone")},
+	}
+	b := newTestBeads(store)
+
+	issues, err := b.ReadyForMol("gt-mol-1")
+	if err == nil {
+		t.Fatal("expected ErrReadyTruncated (probe failed)")
+	}
+	capped := makeTruncated(t, err, true)
+
+	if len(issues) != 100 {
+		t.Errorf("returned %d issues, want the bounded page's 100", len(issues))
+	}
+	if firstIssueID(issues) != "gt-scripted-0" {
+		t.Errorf("first issue = %q, want the page's first", firstIssueID(issues))
+	}
+	if capped.StoreError == nil {
+		t.Error("capped.StoreError = nil, want the probe's failure")
+	}
+	if !errors.Is(err, capped.StoreError) {
+		t.Errorf("sentinel does not unwrap to the probe error: %v", err)
+	}
+	if capped.TrueCount != 0 {
+		t.Errorf("capped.TrueCount = %d, want 0 (the probe proved nothing)", capped.TrueCount)
 	}
 }
 

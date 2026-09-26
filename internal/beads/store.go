@@ -26,6 +26,39 @@ func (b *Beads) SetStore(store beadsdk.Storage) {
 	b.store = store
 }
 
+// ErrReadyTruncated is the sentinel every ready method returns when its query
+// came back capped: the row count equals the limit, and a one-shot unbounded
+// re-query proved more rows exist. A count that is not the whole board
+// silently mis-sizes every consumer built on it (the 2026-09-21 patrol
+// under-report that gt-59o9 chased down), so a full page has to be a loud
+// answer, not a quiet one (gt-m7pq).
+//
+// Found is the row count returned; Cap is the limit that bound the query
+// (100 — bd's default ready page, or the per-method cap); TrueCount is what
+// the re-query proved exists, and may still sit below the real board if a
+// process-level cap (BD_JSON_ENVELOPE off, BEADS_MAX_ROWS) bound it too —
+// bd ready's own stderr note, when present, carries the authoritative
+// number.
+type ErrReadyTruncated struct {
+	Found      int
+	Cap        int
+	TrueCount  int
+	StoreError error
+}
+
+func (e *ErrReadyTruncated) Error() string {
+	msg := fmt.Sprintf("ready query capped: %d rows returned against a limit of %d, at least %d exist",
+		e.Found, e.Cap, e.TrueCount)
+	if e.StoreError != nil {
+		msg += "; unbounded re-query failed: " + e.StoreError.Error()
+	}
+	return msg
+}
+
+// Unwrap returns the underlying store error when the cap check ran but
+// failed (the page it ran against was still returned).
+func (e *ErrReadyTruncated) Unwrap() error { return e.StoreError }
+
 // Store returns the in-process beadsdk.Storage, or nil if not set.
 func (b *Beads) Store() beadsdk.Storage {
 	return b.store
@@ -534,7 +567,21 @@ func (b *Beads) storeClose(reason, session string, ids ...string) error {
 	return nil
 }
 
-// storeReadyWithFilter implements Ready with a WorkFilter using the in-process store.
+// storeReadyWithFilter implements Ready with a WorkFilter using the in-process
+// store.
+//
+// A query that came back with exactly Limit rows is a page, not a board: a
+// full page is indistinguishable from a complete result, and a count that is
+// not the whole board silently mis-sizes every consumer built on it (the
+// 2026-09-21 patrol under-report gt-59o9 chased down). So when the page is
+// full it re-asks once with Limit off — the same one-shot probe bd ready's
+// --json branch runs (cmd/bd/ready.go) — and returns ErrReadyTruncated when
+// the probe proves more rows exist. The probe result is returned alongside so
+// a caller that wants the cap still has its data.
+//
+// One caveat the probe cannot rule out: a process-level knob outside the
+// filter (BEADS_MAX_ROWS inherited from gt's own environment) can still bound
+// the re-query, in which case TrueCount is a floor, not a count.
 func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error) {
 	ctx, cancel := storeCtx()
 	defer cancel()
@@ -544,7 +591,43 @@ func (b *Beads) storeReadyWithFilter(filter beadsdk.WorkFilter) ([]*Issue, error
 		return nil, fmt.Errorf("store ready: %w", err)
 	}
 
-	return sdkIssuesToIssues(sdkIssues), nil
+	// No Limit means nothing bounded the query, so the page is the board and
+	// there is no cap to probe for: the SDK emits its LIMIT clause only when
+	// Limit > 0 and reads rows until exhaustion otherwise (beads v1.0.5
+	// internal/storage/issueops/ready_work.go). Ready() and ReadyDispatchable()
+	// send no Limit and get the whole board that way; the probe below is for the
+	// callers that do cap (ReadyForMol, ReadyWithType), where a full page is
+	// ambiguous (gt-m7pq).
+	queryCap := filter.Limit
+	if queryCap <= 0 {
+		return sdkIssuesToIssues(sdkIssues), nil
+	}
+	if len(sdkIssues) < queryCap {
+		return sdkIssuesToIssues(sdkIssues), nil
+	}
+
+	// The page is full. Re-ask with Limit off and compare: if the unbounded
+	// query returns no more than the cap, the page was the whole board.
+	requery := filter
+	requery.Limit = 0
+	full, fullErr := b.store.GetReadyWork(ctx, requery)
+
+	if fullErr != nil {
+		return sdkIssuesToIssues(sdkIssues), &ErrReadyTruncated{
+			Found:      len(sdkIssues),
+			Cap:        queryCap,
+			StoreError: fullErr,
+		}
+	}
+	if len(full) <= queryCap {
+		return sdkIssuesToIssues(sdkIssues), nil
+	}
+
+	return sdkIssuesToIssues(full), &ErrReadyTruncated{
+		Found:     len(full),
+		Cap:       queryCap,
+		TrueCount: len(full),
+	}
 }
 
 // storeBlocked implements Blocked using the in-process store.

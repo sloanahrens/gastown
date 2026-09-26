@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -54,6 +56,11 @@ type ReadySource struct {
 	Name   string         `json:"name"`   // "town" or rig name
 	Issues []*beads.Issue `json:"issues"` // Ready issues from this source
 	Error  string         `json:"error,omitempty"`
+	// Capped is set when the source's ready query came back bounded (bd's
+	// default limit of 100): Issues is a page, and TrueCount is what bd's
+	// count probe proved exists beyond it (gt-m7pq).
+	Capped    bool `json:"capped,omitempty"`
+	TrueCount int  `json:"true_count,omitempty"`
 }
 
 // ReadyResult is the aggregated result of gt ready.
@@ -72,6 +79,47 @@ type ReadySummary struct {
 	P2Count  int            `json:"p2_count"`
 	P3Count  int            `json:"p3_count"`
 	P4Count  int            `json:"p4_count"`
+}
+
+// classifyReadyErr splits a ReadyDispatchable error into what actually
+// happened: a capped ready page (ErrReadyTruncated) is data, not a failure —
+// ReadyDispatchable's own contract returns the page alongside the sentinel,
+// so the caller must still run its filter pipeline over the returned issues.
+// classifyReadyErr flags src.Capped (and src.TrueCount, when the probe proved
+// one) and reports capped=true so the caller takes the "page is usable"
+// branch instead of the "no data, real failure" branch (gt-m7pq).
+//
+// Any other error means there is no page to show at all, so src.Error is set
+// and the caller must not run the filter pipeline over nil/stale issues.
+func classifyReadyErr(src *ReadySource, err error) (capped bool) {
+	var trunc *beads.ErrReadyTruncated
+	if errors.As(err, &trunc) {
+		src.Capped = true
+		if trunc.TrueCount > 0 {
+			src.TrueCount = trunc.TrueCount
+		}
+		return true
+	}
+	src.Error = err.Error()
+	return false
+}
+
+// cappedNote renders the "this is a page, not the board" note for a source
+// whose ready query came back capped. Call it only when src.Capped is set.
+//
+// Every capped source gets a note, including one whose true size the probe
+// could not prove (TrueCount unset): a capped source that renders exactly like
+// a complete one is the silent under-report, and "unknown" is not "none"
+// (gt-m7pq).
+func cappedNote(src ReadySource, count int) string {
+	switch {
+	case src.TrueCount > count:
+		return "capped: " + strconv.Itoa(src.TrueCount) + " exist"
+	case count == 0:
+		return "capped: more exist"
+	default:
+		return "capped: more than " + strconv.Itoa(count) + " exist"
+	}
 }
 
 func runReady(cmd *cobra.Command, args []string) error {
@@ -128,9 +176,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			mu.Lock()
 			defer mu.Unlock()
 			src := ReadySource{Name: "town"}
-			if err != nil {
-				src.Error = err.Error()
-			} else {
+			if err == nil || classifyReadyErr(&src, err) {
 				// Filter out formula scaffolds (gt-579)
 				formulaNames := getFormulaNames(townBeadsPath)
 				filtered := filterFormulaScaffolds(issues, formulaNames)
@@ -163,9 +209,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			mu.Lock()
 			defer mu.Unlock()
 			src := ReadySource{Name: r.Name}
-			if err != nil {
-				src.Error = err.Error()
-			} else {
+			if err == nil || classifyReadyErr(&src, err) {
 				// Filter out formula scaffolds (gt-579)
 				formulaNames := getFormulaNames(r.BeadsPath())
 				filtered := filterFormulaScaffolds(issues, formulaNames)
@@ -274,18 +318,30 @@ func printReadyHuman(result ReadyResult) error {
 	fmt.Printf("%s Ready work across town:\n\n", style.Bold.Render("📋"))
 
 	for _, src := range result.Sources {
-		if src.Error != "" {
+		// A capped page is data, not a failure: print the page it is, and
+		// say how much more exists so the number next to the name is not
+		// mistaken for the whole board (gt-m7pq).
+		if src.Error != "" && !src.Capped {
 			fmt.Printf("%s %s\n", style.Dim.Render(src.Name+"/"), style.Warning.Render("(error: "+src.Error+")"))
 			continue
 		}
 
 		count := len(src.Issues)
 		if count == 0 {
-			fmt.Printf("%s %s\n", style.Dim.Render(src.Name+"/"), style.Dim.Render("(none)"))
+			if src.Capped {
+				fmt.Printf("%s %s\n", style.Dim.Render(src.Name+"/"), style.Warning.Render("("+cappedNote(src, 0)+")"))
+			} else {
+				fmt.Printf("%s %s\n", style.Dim.Render(src.Name+"/"), style.Dim.Render("(none)"))
+			}
 			continue
 		}
 
-		fmt.Printf("%s (%d items)\n", style.Bold.Render(src.Name+"/"), count)
+		header := fmt.Sprintf("%s (%d items", style.Bold.Render(src.Name+"/"), count)
+		if src.Capped {
+			header += ", " + cappedNote(src, count)
+		}
+		header += ")"
+		fmt.Println(header)
 		for _, issue := range src.Issues {
 			priorityStr := fmt.Sprintf("P%d", issue.Priority)
 			var priorityStyled string

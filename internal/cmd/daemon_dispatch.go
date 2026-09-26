@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -441,13 +442,23 @@ func countActionableReady(rigPath string) (ready, urgent int, err error) {
 	return ready, urgent, nil
 }
 
+// openDispatchReadyStore opens the in-process store readyIssuesUnlimited reads
+// the board through. It is a var so tests can drive the patrol's board read
+// against a store holding more than a page of ready work without a live Dolt.
+var openDispatchReadyStore = func(b *beads.Beads, ctx context.Context) (beadsdk.Storage, func(), error) {
+	return b.OpenStore(ctx)
+}
+
 // readyIssuesUnlimited returns every ready issue in the rig.
 //
-// It goes through the in-process store rather than beads.Beads.Ready(), which
-// shells out to `bd ready --json` and inherits bd's default limit of 100: a
-// 373-bead board reads as 100 beads, and then as whatever survives filtering.
-// The size of that board is the whole point of this check, so a cap that
-// silently reports a fraction of the work is not usable here (gt-59o9).
+// It goes through the in-process store rather than beads.Beads.Ready()'s
+// subprocess branch, which inherits bd's default limit of 100: the board this
+// check counts was 373 beads the day it was found reading as 100, and the count
+// is the whole point of the check (gt-59o9).
+//
+// That store branch is unbounded, so there is no cap for this caller to unwrap;
+// see storeReadyWithFilter for why. TestReadyWorkFilterCarriesNoLimit pins the
+// invariant — a Limit reintroduced there restores the silent under-report.
 //
 // A rig with no beads database returns no issues: it is a rig that has never
 // been initialized, not a read failure.
@@ -460,7 +471,7 @@ func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dispatchStoreTimeout)
 	defer cancel()
 
-	store, cleanup, err := b.OpenStore(ctx)
+	store, cleanup, err := openDispatchReadyStore(b, ctx)
 	if err != nil {
 		return nil, fmt.Errorf("opening beads store for %s: %w", rigPath, err)
 	}
