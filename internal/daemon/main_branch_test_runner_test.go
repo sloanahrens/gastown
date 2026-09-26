@@ -2286,6 +2286,123 @@ func TestRunMainBranchTests_CountsSkipsAcrossRigs(t *testing.T) {
 	}
 }
 
+// stubMainBranchTestRigVerdicts hands the patrol cycle a fixed verdict per rig
+// by stubbing mainBranchTestRigFn, so a cycle test can mix a pass, a failure and
+// an interruption without standing up a bare repo (or a real mid-run context
+// cancellation) behind any of them. A rig the map does not name fails the test
+// rather than quietly running the real path.
+func stubMainBranchTestRigVerdicts(t *testing.T, verdicts map[string]error) {
+	t.Helper()
+	prev := mainBranchTestRigFn
+	mainBranchTestRigFn = func(_ *Daemon, rigName, _ string, _ time.Duration) error {
+		verdict, ok := verdicts[rigName]
+		if !ok {
+			t.Errorf("the cycle walked rig %q, which this test gave no verdict for", rigName)
+			return nil
+		}
+		return verdict
+	}
+	t.Cleanup(func() { mainBranchTestRigFn = prev })
+}
+
+// TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert is the mixed
+// cycle gt-5cn6 reports: one rig reaches a verdict (a pass) and another is
+// killed mid-run, so the cycle is not green — the interrupted rig's verdict was
+// never reached. Clearing there retires a live failure alert on the passing
+// rig's verdict alone and reports "main branch tests green" for a rig this
+// cycle never concluded anything about.
+//
+// The gt calls are the assertion, not the log: both halves of the alert
+// lifecycle (escalate and escalate clear) go through gt, so "no gt invocation
+// at all" is exactly "the alert was left as it stands" — a log line saying so
+// could not tell a withheld clear apart from a failed one.
+func TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert(t *testing.T) {
+	gtCalls := fakeGtRecordingArgs(t)
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", false)
+	addTestTownRig(t, townRoot, "otherrig", false)
+	stubMainBranchTestRigVerdicts(t, map[string]error{
+		"gastown":  nil,
+		"otherrig": errMainBranchTestInterrupted,
+	})
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	d.runMainBranchTests()
+
+	if calls := readGtCalls(t, gtCalls); calls != "" {
+		t.Errorf("a cycle whose rigs did not all reach a verdict must leave the alert alone, got gt calls:\n%s", calls)
+	}
+	out := logged.String()
+	if !strings.Contains(out, "interrupted, not a verdict about main") {
+		t.Errorf("expected the interrupted rig reported as no verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "leaving the failure alert as it stands") {
+		t.Errorf("expected the withheld clear to say why, rather than dropping it silently:\n%s", out)
+	}
+	// The interrupted rig is not a test of main: counting it would make the
+	// summary read as a cycle that checked both rigs.
+	if !strings.Contains(out, "(1 tested, 0 failed, 0 skipped)") {
+		t.Errorf("expected the interrupted rig excluded from the tested tally:\n%s", out)
+	}
+}
+
+// TestRunMainBranchTests_GreenCycleClearsTheFailureAlert is the other side of
+// the guard the mixed-cycle test pins: a cycle that reached a verdict on every
+// rig it walked, and passed every one of them, must still retire the alert.
+// Without it the fix would be free to over-correct into an alert that can never
+// clear.
+func TestRunMainBranchTests_GreenCycleClearsTheFailureAlert(t *testing.T) {
+	gtCalls := fakeGtRecordingArgs(t)
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", false)
+	addTestTownRig(t, townRoot, "otherrig", false)
+	stubMainBranchTestRigVerdicts(t, map[string]error{"gastown": nil, "otherrig": nil})
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	d.runMainBranchTests()
+
+	calls := readGtCalls(t, gtCalls)
+	if !strings.Contains(calls, "escalate clear") || !strings.Contains(calls, "--fingerprint "+alertKeyMainBranchTest) {
+		t.Errorf("an all-green cycle must retire the failure alert, got gt calls:\n%s", calls)
+	}
+	if out := logged.String(); !strings.Contains(out, "(2 tested, 0 failed, 0 skipped)") {
+		t.Errorf("expected both rigs counted as tested:\n%s", out)
+	}
+}
+
+// TestRunMainBranchTests_FailureAlongsideAnInterruptionStillEscalates pins the
+// branch order the gt-5cn6 fix depends on: withholding the clear on an
+// interruption must not swallow a failure that shares the cycle with it. Put
+// the interruption branch first and this cycle escalates nothing while a rig is
+// demonstrably broken.
+func TestRunMainBranchTests_FailureAlongsideAnInterruptionStillEscalates(t *testing.T) {
+	gtCalls := fakeGtRecordingArgs(t)
+	townRoot := t.TempDir()
+	writeTestTownRig(t, townRoot, "gastown", false)
+	addTestTownRig(t, townRoot, "otherrig", false)
+	stubMainBranchTestRigVerdicts(t, map[string]error{
+		"gastown":  errors.New("main branch test failed on internal/widget"),
+		"otherrig": errMainBranchTestInterrupted,
+	})
+
+	var logged bytes.Buffer
+	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+
+	d.runMainBranchTests()
+
+	calls := readGtCalls(t, gtCalls)
+	if !strings.Contains(calls, "escalate -s HIGH") || !strings.Contains(calls, "--fingerprint "+alertKeyMainBranchTest) {
+		t.Errorf("a failing rig must escalate even when another rig was interrupted, got gt calls:\n%s", calls)
+	}
+	if strings.Contains(calls, "escalate clear") {
+		t.Errorf("a cycle with a failure must not clear the failure alert, got gt calls:\n%s", calls)
+	}
+}
+
 // TestRunMainBranchTests_StarvedRigEscalates is the alarming branch of the
 // starvation bound: a rig whose skips have run unbroken past the configured
 // bound must be escalated by name, so a yielding patrol that has stopped
