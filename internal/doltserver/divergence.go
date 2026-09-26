@@ -94,6 +94,7 @@ func FetchAndVerify(ctx context.Context, db *sql.DB, dbName string) (RemoteDiver
 	}
 
 	var checked []string
+	var lastHead string
 	for _, remoteName := range remotes {
 		div, err := fetchAndVerifyRemote(ctx, db, remoteName, branch)
 		if err != nil {
@@ -109,9 +110,13 @@ func FetchAndVerify(ctx context.Context, db *sql.DB, dbName string) (RemoteDiver
 			return div, nil
 		}
 		checked = append(checked, remoteName)
+		lastHead = div.RemoteHead
 	}
 
-	return RemoteDivergence{Remotes: checked}, nil
+	// Every remote cleared: RemoteHead reports the last one checked's head
+	// rather than being dropped on the floor, so a caller inspecting a clean
+	// single-remote verdict can still see what was actually verified.
+	return RemoteDivergence{Remotes: checked, RemoteHead: lastHead}, nil
 }
 
 // ListRemotes returns every configured remote's name, in a stable (name) order.
