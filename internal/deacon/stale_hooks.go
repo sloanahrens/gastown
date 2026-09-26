@@ -350,20 +350,15 @@ func unhookBeadInStore(store hookStore, beadID string) error {
 	return cmd.Run()
 }
 
-// parseBeadTime parses a bd timestamp. The second return is false when the
-// value is empty or unrecognized; callers treat that as "age unknown" rather
-// than "infinitely old", so a timestamp format change cannot silently unhook
-// live work.
+// parseBeadTime parses a bd timestamp via the shared beads.ParseIssueTime, so
+// this scan agrees with the rest of the town about what a bead's timestamp
+// means. The second return is false when the value is empty or unparseable
+// (the zero time); callers treat that as "age unknown" rather than
+// "infinitely old", so a timestamp format change cannot silently unhook live
+// work.
 func parseBeadTime(value string) (time.Time, bool) {
-	if value == "" {
-		return time.Time{}, false
-	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
-		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed, true
-		}
-	}
-	return time.Time{}, false
+	parsed := beads.ParseIssueTime(value)
+	return parsed, !parsed.IsZero()
 }
 
 // formatBeadAge renders a bead's age for scan output.
