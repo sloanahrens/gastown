@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -375,5 +376,28 @@ func TestOrElse(t *testing.T) {
 	}
 	if got := orElse("", "no one"); got != "no one" {
 		t.Errorf("orElse() = %q, want %q", got, "no one")
+	}
+}
+
+// TestRememberHelpNamesExactlyTheGatedRoles pins the injection claim in
+// `gt remember --help` to the gate that implements it (shouldRenderMemories).
+// The claim once read "injected during gt prime" with no mention of the role
+// gate, so agents outside mayor and crew stored memories no prime of theirs
+// would ever show (gt-n976). The same drift recurs if a role enters or leaves
+// the gate without the help text following, in either direction.
+func TestRememberHelpNamesExactlyTheGatedRoles(t *testing.T) {
+	t.Parallel()
+
+	// A role named in the Examples as a --with target is not a claim about
+	// injection, so the check covers the text ahead of that section.
+	claim, _, _ := strings.Cut(rememberCmd.Long, "Examples:")
+
+	for _, role := range AllRoles() {
+		name := string(role)
+		named := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`).MatchString(claim)
+		if want := shouldRenderMemories(name); named != want {
+			t.Errorf("`gt remember --help` names role %q: %v; shouldRenderMemories(%q) = %v — the claim and the gate must agree",
+				name, named, name, want)
+		}
 	}
 }
