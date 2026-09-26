@@ -1726,6 +1726,35 @@ func TestDoneIntentWorthRestarting(t *testing.T) {
 			want: false,
 		},
 		{
+			// gt-vql3: the hold owns the hook, so the label is not evidence of
+			// resumable work and a restart would break the hold.
+			name: "hook held under awaiting-gate",
+			snap: &agentBeadSnapshot{
+				AgentState: "awaiting-gate",
+				HookBead:   "gt-abc123",
+			},
+			age:  5 * time.Minute,
+			want: false,
+		},
+		{
+			name: "hook held under stuck",
+			snap: &agentBeadSnapshot{
+				AgentState: "stuck",
+				HookBead:   "gt-abc123",
+			},
+			age:  5 * time.Minute,
+			want: false,
+		},
+		{
+			name: "hook held under paused",
+			snap: &agentBeadSnapshot{
+				AgentState: "paused",
+				HookBead:   "gt-abc123",
+			},
+			age:  5 * time.Minute,
+			want: false,
+		},
+		{
 			name: "completion already reached the witness",
 			snap: &agentBeadSnapshot{
 				AgentState: "working",
@@ -2218,6 +2247,56 @@ func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T
 	}
 	if !zombie.WasActive {
 		t.Error("WasActive = false, want true for a dead session holding work")
+	}
+}
+
+// TestDetectZombieDeadSession_DeliberateHoldBlocksRestart is the gt-vql3
+// regression. The two runs differ only in agent_state: both hold a hook and a
+// done-intent inside the max age, so the working run is the control that proves
+// the bead reaches the restart and the held run proves the state is what stops
+// it. Not parallel: it stubs the restart seam.
+func TestDetectZombieDeadSession_DeliberateHoldBlocksRestart(t *testing.T) {
+	restarts := stubRestartSessionExec(t)
+
+	townRoot := t.TempDir()
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			switch {
+			case len(args) > 0 && args[0] == "query":
+				return "[]", nil // no cleanup wisp == no pending MR
+			case len(args) > 0 && args[0] == "show":
+				return `[{"status":"open"}]`, nil
+			}
+			return "{}", nil
+		},
+		func(args []string) error { return nil },
+	)
+
+	detectedAt := time.Now()
+	doneIntent := &DoneIntent{ExitType: "COMPLETED", Timestamp: detectedAt.Add(-5 * time.Minute)}
+
+	detect := func(agentState string) (ZombieResult, bool) {
+		before := len(*restarts)
+		snap := &agentBeadSnapshot{AgentState: agentState, HookBead: "gt-vql3x"}
+		zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "gastown", "quartz",
+			"gt-gastown-quartz", tmux.NewTmux(), doneIntent, detectedAt, &config.WitnessThresholds{}, snap, "")
+		t.Logf("agent_state=%s found=%v restarts=%d zombie=%+v", agentState, found, len(*restarts)-before, zombie)
+		return zombie, found
+	}
+
+	if _, found := detect("working"); !found {
+		t.Fatal("control failed: a working polecat with a fresh done-intent was not restarted")
+	}
+
+	for _, held := range []string{"awaiting-gate", "stuck", "paused"} {
+		before := len(*restarts)
+		zombie, found := detect(held)
+		if found {
+			t.Errorf("agent_state=%s: restarted off the label alone (gt-vql3): %+v", held, zombie)
+		}
+		if len(*restarts) != before {
+			t.Errorf("agent_state=%s: %d restart(s) recorded, want none", held, len(*restarts)-before)
+		}
 	}
 }
 

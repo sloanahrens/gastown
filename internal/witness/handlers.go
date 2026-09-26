@@ -3779,11 +3779,20 @@ func extractDoneIntent(labels []string) *DoneIntent {
 //
 // Restarting needs positive evidence of resumable work: an unreadable agent
 // bead (nil snap) is not evidence, so nothing is restarted on one.
+//
+// Neither is a hook held under a state that marks a deliberate hold. That hook
+// belongs to the hold, so restarting on the label alone breaks the hold and
+// costs a re-sling (gt-vql3). An empty agent_state is no hold, so legacy beads
+// keep the crash-recovery path.
 func doneIntentWorthRestarting(snap *agentBeadSnapshot, age, maxAge time.Duration) bool {
 	if snap == nil {
 		return false
 	}
-	if snap.HookBead == "" || beads.AgentState(snap.AgentState) == AgentStateIdle {
+	state := beads.AgentState(snap.AgentState)
+	if snap.HookBead == "" || state == AgentStateIdle {
+		return false
+	}
+	if state.ProtectsFromCleanup() {
 		return false
 	}
 	if hasDoneCheckpoint(snap, "witness-notified") {
