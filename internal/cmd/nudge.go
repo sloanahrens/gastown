@@ -483,7 +483,9 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 			return
 		}
 	}
-	// Timeout — nudge stays in queue for next watcher or manual drain.
+	// Timeout — the nudge stays queued for the next watcher or a manual drain.
+	// Say so rather than exit like the success path above (gt-z4gs).
+	fmt.Fprintf(os.Stderr, "idle-watcher: gave up waiting for %s to go idle after %s; nudge stays queued for the next watcher or a manual drain\n", sessionName, idleWatcherTimeout)
 }
 
 func requeueDrainedNudges(townRoot, sessionName, source string, drained []nudge.QueuedNudge) {

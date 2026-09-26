@@ -4119,6 +4119,26 @@ func (t *Tmux) IsIdle(session string) bool {
 	return false
 }
 
+// isBusyStaleAfter is how long a Claude Code pane may sit under a busy marker
+// with no window activity before IsBusy stops trusting the marker. That status
+// line repaints about once a second while the agent works (the elapsed counter
+// and token readout both advance), so silence this long means the marker
+// outlived the turn that drew it. Ten seconds is ten repaint periods of slack.
+// Var so tests can shrink it. (gt-z4gs)
+var isBusyStaleAfter = 10 * time.Second
+
+// busyMarkerStalenessApplies reports whether a busy marker in this session may
+// be discounted for age. Only Claude Code qualifies: its working panes were
+// measured advancing #{window_activity} continuously (gt-ncon), which is the
+// only evidence any harness repaints under a marker. Every other harness — and
+// every session whose harness cannot be resolved — keeps the marker
+// authoritative, because a TUI that does not repaint while it works would
+// otherwise read as idle mid-turn and reopen the interrupt gt-cyyg closed.
+func (t *Tmux) busyMarkerStalenessApplies(session string) bool {
+	_, preset, ok := t.SessionAgentPreset(session, "")
+	return ok && preset != nil && preset.Name == config.AgentClaude
+}
+
 // IsBusy reports whether the target currently shows a busy indicator (active
 // generation, or a running tool call's status line — see hasBusyIndicator) in
 // its recent pane output. Point-in-time snapshot, not a poll.
@@ -4127,20 +4147,37 @@ func (t *Tmux) IsIdle(session string) bool {
 // into a target that is mid-tool-call, the caller refuses and falls back to
 // wait-idle/queue delivery (gt-cyyg).
 //
-// On capture failure, returns true (fail safe): when the pane can't be
-// observed, treat it as busy so callers refuse rather than risk interrupting
-// a session in an unknown state.
+// A Claude Code marker is discounted when the pane holding it has been silent
+// for isBusyStaleAfter, so a marker left over from an ended turn cannot veto
+// delivery indefinitely (gt-z4gs). See busyMarkerStalenessApplies for why the
+// discount is confined to that one harness.
+//
+// On capture failure, or when activity cannot be read, returns true (fail
+// safe): when the pane can't be observed, treat it as busy so callers refuse
+// rather than risk interrupting a session in an unknown state.
 func (t *Tmux) IsBusy(target string) bool {
 	lines, err := t.capturePaneVisibleTail(target)
 	if err != nil {
 		return true
 	}
+	busy := false
 	for _, line := range lines {
 		if hasBusyIndicator(line) {
-			return true
+			busy = true
+			break
 		}
 	}
-	return false
+	if !busy || !t.busyMarkerStalenessApplies(target) {
+		return busy
+	}
+
+	// Silence under the marker is what separates a running turn from a marker
+	// left behind by one that ended: a working Claude Code pane keeps writing.
+	activity, err := t.GetWindowActivity(target)
+	if err != nil {
+		return true
+	}
+	return time.Since(activity) < isBusyStaleAfter
 }
 
 // GetSessionInfo returns detailed information about a session.
