@@ -827,6 +827,17 @@ var mainBranchTestGatePoolStatusFn = func(townRoot string) (slot.Report, error) 
 	return slot.StatusPoolLocksOnly(townRoot, pool)
 }
 
+// mainBranchTestRigFn runs one rig's main-branch check for a cycle. A package
+// variable, following this package's *Fn seam convention (measureHostLoadFn,
+// mainBranchTestGatePoolStatusFn), so a cycle test can hand the loop a pass, a
+// failure, or an interruption directly: the alert arithmetic below is decided
+// over the *verdicts*, and reaching each shape through the real path would mean
+// a bare repo, a gate config, and a real mid-run context cancellation for the
+// interrupted one.
+var mainBranchTestRigFn = func(d *Daemon, rigName, rigPath string, timeout time.Duration) error {
+	return d.testRigMainBranch(rigName, rigPath, timeout)
+}
+
 // mainBranchTestEscalateFn reports a rig starved off its baseline test by a
 // persistently busy gate. Seamed for the same reason as maintenanceEscalateFn:
 // the escalation is the only signal that a yielding patrol has stopped testing
@@ -882,7 +893,7 @@ func (d *Daemon) runMainBranchTests() int {
 	allowedRigs := mainBranchTestRigs(d.patrolConfig)
 	timeout := mainBranchTestTimeout(d.patrolConfig)
 
-	var tested, failed, skipped int
+	var tested, failed, skipped, interrupted int
 	var failures []string
 
 	for _, rigName := range rigNames {
@@ -891,7 +902,7 @@ func (d *Daemon) runMainBranchTests() int {
 		}
 
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
-		err := d.testRigMainBranch(rigName, rigPath, timeout)
+		err := mainBranchTestRigFn(d, rigName, rigPath, timeout)
 		if errors.Is(err, errMainBranchTestGateBusy) {
 			// A skip, not a verdict: this rig was not tested, so it must not
 			// count toward the "tested" total the summary and the alert-clearing
@@ -918,6 +929,7 @@ func (d *Daemon) runMainBranchTests() int {
 			// reported as a crash, and as a pass it would clear a live alert on
 			// a run that checked nothing (gt-59yz).
 			d.logger.Printf("main_branch_test: %s: interrupted, not a verdict about main: %s", rigName, oneLine(err.Error()))
+			interrupted++
 			continue
 		}
 		if err != nil {
@@ -943,8 +955,21 @@ func (d *Daemon) runMainBranchTests() int {
 		msg := fmt.Sprintf("main branch test failures:\n%s", strings.Join(failures, "\n"))
 		d.logger.Printf("main_branch_test: escalating %d failure(s)", len(failures))
 		d.escalateAlert(alertKeyMainBranchTest, "main_branch_test", msg)
+	} else if interrupted > 0 {
+		// A mixed cycle — one rig reached a verdict, another was killed
+		// mid-run — is not a green cycle, so it must not report "main branch
+		// tests green" and retire the alert on the passing rig's verdict
+		// alone: the interrupted rig's verdict was never reached, and the
+		// alert may still hold for it (gt-5cn6). The cycle reports the reason
+		// it left the alert standing rather than clearing it silently.
+		//
+		// The order of these branches is the fix: the failure case still
+		// escalates when failures and interruptions share a cycle, so placing
+		// this one ahead of it would trade a false green for a swallowed red.
+		d.logger.Printf("main_branch_test: %d rig(s) were interrupted this cycle (no verdict about main) — "+
+			"leaving the failure alert as it stands", interrupted)
 	} else if tested > 0 {
-		// Every rig that was checked passed, so the condition the alert
+		// Every rig this cycle tested passed, so the condition the alert
 		// describes is gone. Guarded on tested > 0: a cycle that ran nothing
 		// (all rigs filtered out by config) re-checked nothing and must not
 		// clear an alert that may still hold.
