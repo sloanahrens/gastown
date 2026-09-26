@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
@@ -1148,11 +1149,31 @@ const bdInitSubprocessTimeout = 5 * time.Minute
 // included, so tests and unusual workloads can shorten one command's budget.
 const bdTimeoutEnvVar = "GT_BD_TIMEOUT_SEC"
 
+// bdTestTimeoutEnvVar is a test-only, in-binary knob that sets a hard cap
+// (in seconds) on the in-process client's subprocess budget, applied after
+// bdTimeoutEnvVar: tests can bind their own budget without exporting the
+// operator-facing override into the environment.
+const bdTestTimeoutEnvVar = "GT_TEST_BD_TIMEOUT_SEC"
+
 // parseBdTimeoutOverride returns the GT_BD_TIMEOUT_SEC override when it parses
 // as a positive whole number of seconds. An unparseable value is no override
 // at all, so a typo cannot silently shrink a budget.
 func parseBdTimeoutOverride() (time.Duration, bool) {
 	v := os.Getenv(bdTimeoutEnvVar)
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return time.Duration(n) * time.Second, true
+}
+
+// parseBdTestTimeoutOverride reads bdTestTimeoutEnvVar. Same fail-closed
+// contract as parseBdTimeoutOverride: empty or unparseable means no override.
+func parseBdTestTimeoutOverride() (time.Duration, bool) {
+	v := os.Getenv(bdTestTimeoutEnvVar)
 	if v == "" {
 		return 0, false
 	}
@@ -1183,6 +1204,13 @@ func resolveBdSubprocessTimeout() time.Duration {
 func subprocessTimeoutFor(args []string, testContainer bool) time.Duration {
 	if d, ok := parseBdTimeoutOverride(); ok {
 		return d
+	}
+	// Testing(): the GT_TEST knob exists to bind test binaries; checking the
+	// flag avoids teaching it to a production process.
+	if testing.Testing() {
+		if d, ok := parseBdTestTimeoutOverride(); ok {
+			return d
+		}
 	}
 	if len(args) > 0 && args[0] == "init" {
 		return bdInitSubprocessTimeout
