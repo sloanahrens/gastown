@@ -436,7 +436,7 @@ func NewPatrolPluginDriftCheck() *PatrolPluginDriftCheck {
 func (c *PatrolPluginDriftCheck) Run(ctx *CheckContext) *CheckResult {
 	c.targetDir = filepath.Join(ctx.TownRoot, "plugins")
 
-	sourceDir, err := plugin.FindGastownSource(ctx.TownRoot)
+	src, err := plugin.FindGastownSource(ctx.TownRoot)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -446,6 +446,7 @@ func (c *PatrolPluginDriftCheck) Run(ctx *CheckContext) *CheckResult {
 			FixHint: "Verify the gastown rig checkout exists at <town>/gastown/mayor/rig, or run 'gt plugin sync --source <dir>'",
 		}
 	}
+	sourceDir := src.Dir
 	c.sourceDir = sourceDir
 
 	// Skip if source and target are the same directory

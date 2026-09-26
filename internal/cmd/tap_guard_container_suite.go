@@ -507,11 +507,10 @@ func containerSuiteTarget(pkgArgs []string, cwd string) (wholeRepo bool, matched
 
 // isGastownModule reports whether the file at path is a go.mod declaring
 // this module — "module .../gastown" (import-path form) or "module
-// gastown" (local form). Both the guard's module-root walk and the
-// plugin sync (internal/plugin) check the same shape; sync.go keeps its
-// private copy, and this duplicate exists because a guard that imports
-// internal/plugin would link testcontainers (via the chain from
-// internal/plugin) into the gt binary, which it deliberately avoids.
+// gastown" (local form). It lives here rather than in internal/plugin
+// because a guard that imports internal/plugin would link testcontainers
+// (via the chain from internal/plugin) into the gt binary, which it
+// deliberately avoids.
 func isGastownModule(goModPath string) bool {
 	f, err := os.Open(goModPath) //nolint:gosec // G304: path from traversal
 	if err != nil {

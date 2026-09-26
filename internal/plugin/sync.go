@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -227,34 +226,40 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// FindGastownSource locates the gastown source repo's plugins directory.
-// Search order:
-//  1. Walk up from CWD for a gastown go.mod with plugins/
-//  2. <gastown rig checkout>/mayor/rig/plugins/ — the canonical checkout
-//     maintained by the mayor, resolved via mayor/rigs.json (honoring a
-//     LocalRepo override) and falling back to <townRoot>/gastown
-//  3. Legacy layouts, kept for towns predating the mayor/rig convention:
-//     <townRoot>/gastown/crew/den/plugins/, <townRoot>/gastown/plugins/
-func FindGastownSource(townRoot string) (string, error) {
-	if cwd, err := os.Getwd(); err == nil {
-		if src := findSourceFromDir(cwd); src != "" {
-			return src, nil
-		}
-	}
+// GastownSource is a resolved plugin source directory, plus the rule that
+// chose it so a caller can say where a sync's plugins came from.
+type GastownSource struct {
+	Dir string
+	// Rule names the layout that matched, phrased for a sync log.
+	Rule string
+}
 
+// FindGastownSource locates the gastown source repo's plugins directory and
+// reports which rule chose it.
+//
+// Candidates lie only inside the town: <gastown rig>/mayor/rig/plugins — the
+// canonical checkout maintained by the mayor, resolved via mayor/rigs.json so
+// a LocalRepo override is honored — then the legacy
+// <gastown rig>/crew/den/plugins and <gastown rig>/plugins layouts.
+//
+// The working directory is never a candidate. Resolving from it let a stale
+// clone's checkout decide which plugin files the town got: a dog running from
+// a Sep-17 checkout pushed that commit's destructive compactor-dog default
+// over ~/gt/plugins (gt-nc7q). Pass --source to name a directory explicitly.
+func FindGastownSource(townRoot string) (GastownSource, error) {
 	gastownRoot := rigCheckoutRoot(townRoot, "gastown")
-	candidates := []string{
-		filepath.Join(gastownRoot, "mayor", "rig", "plugins"),
-		filepath.Join(gastownRoot, "crew", "den", "plugins"),
-		filepath.Join(gastownRoot, "plugins"),
+	candidates := []GastownSource{
+		{filepath.Join(gastownRoot, "mayor", "rig", "plugins"), "mayor rig checkout"},
+		{filepath.Join(gastownRoot, "crew", "den", "plugins"), "legacy crew/den layout"},
+		{filepath.Join(gastownRoot, "plugins"), "legacy gastown/plugins layout"},
 	}
 	for _, candidate := range candidates {
-		if hasPlugins(candidate) {
+		if hasPlugins(candidate.Dir) {
 			return candidate, nil
 		}
 	}
 
-	return "", fmt.Errorf("could not locate gastown plugin source; use --source to specify")
+	return GastownSource{}, fmt.Errorf("no plugin source under %s; use --source to specify", gastownRoot)
 }
 
 // rigCheckoutRoot resolves the on-disk root of a registered rig's checkout.
@@ -269,44 +274,6 @@ func rigCheckoutRoot(townRoot, rigName string) string {
 		}
 	}
 	return filepath.Join(townRoot, rigName)
-}
-
-func findSourceFromDir(dir string) string {
-	current := dir
-	for {
-		pluginsDir := filepath.Join(current, "plugins")
-		goMod := filepath.Join(current, "go.mod")
-		if hasPlugins(pluginsDir) {
-			if isGastownModule(goMod) {
-				return pluginsDir
-			}
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	return ""
-}
-
-// isGastownModule checks if a go.mod file declares a gastown module path.
-// Matches "module .../gastown" on the module directive line to avoid
-// false-positives from comments or dependency names.
-func isGastownModule(goModPath string) bool {
-	f, err := os.Open(goModPath) //nolint:gosec // G304: path from traversal
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "module ") {
-			return strings.HasSuffix(line, "/gastown") || line == "module gastown"
-		}
-	}
-	return false
 }
 
 func hasPlugins(dir string) bool {

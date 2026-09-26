@@ -331,11 +331,6 @@ func TestRigCheckoutRoot_DefaultsToTownRootRigName(t *testing.T) {
 }
 
 func TestFindGastownSource_LocatesMayorRigPlugins(t *testing.T) {
-	// Isolate from this test process's own repo checkout: without this, the
-	// CWD-walk-up branch in FindGastownSource would find this repo's own
-	// go.mod/plugins/ before ever consulting townRoot.
-	t.Chdir(t.TempDir())
-
 	townRoot := t.TempDir()
 	pluginsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
@@ -347,14 +342,37 @@ func TestFindGastownSource_LocatesMayorRigPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindGastownSource() error = %v", err)
 	}
-	if got != pluginsDir {
-		t.Errorf("FindGastownSource() = %q, want %q", got, pluginsDir)
+	if got.Dir != pluginsDir {
+		t.Errorf("FindGastownSource().Dir = %q, want %q", got.Dir, pluginsDir)
+	}
+	if got.Rule != "mayor rig checkout" {
+		t.Errorf("FindGastownSource().Rule = %q, want %q", got.Rule, "mayor rig checkout")
+	}
+}
+
+// gt-nc7q: a gastown checkout in the working directory must not become the
+// plugin source. A dog resolved its sync source from CWD, so running from its
+// stale clone (deacon/dogs/alpha/gastown at a Sep-17 commit) would have pushed
+// that commit's plugin files over the town runtime copy.
+func TestFindGastownSource_IgnoresWorkingDirectoryCheckout(t *testing.T) {
+	cwdCheckout := t.TempDir()
+	writeGastownCheckout(t, cwdCheckout, "stale-plugin")
+	t.Chdir(cwdCheckout)
+
+	townRoot := t.TempDir()
+	canonical := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	createTestPlugin(t, canonical, "current-plugin", "+++\nname = \"current-plugin\"\n+++\nbody", nil)
+
+	got, err := FindGastownSource(townRoot)
+	if err != nil {
+		t.Fatalf("FindGastownSource() error = %v", err)
+	}
+	if got.Dir != canonical {
+		t.Errorf("FindGastownSource().Dir = %q, want canonical %q (never the CWD checkout)", got.Dir, canonical)
 	}
 }
 
 func TestFindGastownSource_FallsBackToLegacyLayout(t *testing.T) {
-	t.Chdir(t.TempDir())
-
 	townRoot := t.TempDir()
 	// No mayor/rig/plugins — only the legacy crew/den/plugins layout exists.
 	legacyDir := filepath.Join(townRoot, "gastown", "crew", "den", "plugins")
@@ -367,18 +385,27 @@ func TestFindGastownSource_FallsBackToLegacyLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindGastownSource() error = %v", err)
 	}
-	if got != legacyDir {
-		t.Errorf("FindGastownSource() = %q, want legacy path %q", got, legacyDir)
+	if got.Dir != legacyDir {
+		t.Errorf("FindGastownSource().Dir = %q, want legacy path %q", got.Dir, legacyDir)
 	}
 }
 
 func TestFindGastownSource_NoneFoundReturnsError(t *testing.T) {
-	t.Chdir(t.TempDir())
-
 	townRoot := t.TempDir() // Empty: no gastown checkout anywhere.
 	if _, err := FindGastownSource(townRoot); err == nil {
 		t.Error("FindGastownSource() error = nil, want error when no source exists")
 	}
+}
+
+// writeGastownCheckout lays out a directory that FindGastownSource's old
+// CWD-walk-up recognized: a gastown go.mod beside a plugins/ tree.
+func writeGastownCheckout(t *testing.T, dir, pluginName string) {
+	t.Helper()
+	goMod := "module github.com/steveyegge/gastown\n\ngo 1.24\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+	createTestPlugin(t, filepath.Join(dir, "plugins"), pluginName, "+++\nname = \""+pluginName+"\"\n+++\nbody", nil)
 }
 
 // gt-o848l: a runtime edit the repo never held (2026-09-18: the mayor's

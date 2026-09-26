@@ -125,8 +125,11 @@ var pluginSyncCmd = &cobra.Command{
 	Short: "Sync plugins from source repo to runtime directories",
 	Long: `Copy plugins from the gastown source repository to runtime plugin directories.
 
-By default, auto-detects the source by walking up from the current directory
-looking for a gastown repo, or checks known locations within the town.
+By default the source is the town's own gastown checkout:
+<town>/gastown/mayor/rig/plugins, then the legacy crew/den and gastown/plugins
+layouts. The working directory is never consulted — a checkout you happen to
+be standing in is not the town's source of truth (gt-nc7q). Pass --source to
+read a directory of your choosing.
 
 Syncs to town-level plugins (~/gt/plugins/) so all rigs see the latest plugins.
 
@@ -575,11 +578,13 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 
 	// Determine source directory
 	sourceDir := pluginSyncSource
+	sourceRule := "explicit --source"
 	if sourceDir == "" {
-		sourceDir, err = plugin.FindGastownSource(townRoot)
+		src, err := plugin.FindGastownSource(townRoot)
 		if err != nil {
 			return err
 		}
+		sourceDir, sourceRule = src.Dir, src.Rule
 	}
 
 	// Resolve to absolute path
@@ -593,15 +598,21 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 
 	targetDir := filepath.Join(townRoot, "plugins")
 
+	// Name the source and the rule that chose it on every run, including the
+	// up-to-date one: which checkout supplies the plugins is what a sync from
+	// the wrong directory gets silently wrong, and "already up to date" is
+	// exactly where that hides (gt-nc7q).
+	fmt.Printf("%s\n", style.Bold.Render("Plugin sync:"))
+	fmt.Printf("  Source: %s (%s)\n", sourceDir, sourceRule)
+	fmt.Printf("  Target: %s\n\n", targetDir)
+
 	if pluginSyncDryRun {
 		report, err := plugin.DetectDrift(sourceDir, targetDir)
 		if err != nil {
 			return fmt.Errorf("detecting drift: %w", err)
 		}
 
-		fmt.Printf("%s Plugin sync dry run\n", style.Bold.Render("Plugin sync:"))
-		fmt.Printf("  Source: %s\n", sourceDir)
-		fmt.Printf("  Target: %s\n\n", targetDir)
+		fmt.Printf("  %s\n\n", style.Dim.Render("dry run — nothing written"))
 
 		if !report.HasDrift() && len(report.Extra) == 0 {
 			fmt.Printf("  %s All plugins up to date\n", style.Success.Render("✓"))
@@ -626,7 +637,7 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("syncing plugins: %w", err)
 	}
-	printPluginSyncResult(result, sourceDir)
+	printPluginSyncResult(result)
 	return reportProtectedPlugins(result.Protected)
 }
 
@@ -652,14 +663,14 @@ func reportProtectedPlugins(protected map[string][]string) error {
 	return fmt.Errorf("%d plugin(s) hold runtime edits and were not synced", len(protected))
 }
 
-func printPluginSyncResult(result *plugin.SyncResult, sourceDir string) {
+func printPluginSyncResult(result *plugin.SyncResult) {
 	if len(result.Copied) == 0 && len(result.Removed) == 0 && len(result.Protected) == 0 {
 		fmt.Printf("%s Plugins already up to date (%d checked)\n",
 			style.Success.Render("✓"), len(result.Skipped))
 		return
 	}
 
-	fmt.Printf("%s Synced plugins from %s\n", style.Success.Render("●"), style.Dim.Render(sourceDir))
+	fmt.Printf("%s Synced plugins\n", style.Success.Render("●"))
 	for _, name := range result.Copied {
 		fmt.Printf("  %s %s\n", style.Success.Render("↑"), name)
 	}

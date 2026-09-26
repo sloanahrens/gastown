@@ -393,11 +393,6 @@ func writePluginFixture(t *testing.T, dir, name, content string) {
 }
 
 func TestPatrolPluginDriftCheck_SourceNotFound_ReturnsWarningNotOK(t *testing.T) {
-	// Isolate from this test process's own repo checkout — otherwise
-	// FindGastownSource's CWD-walk-up would find this repo's real plugins/
-	// directory before ever consulting ctx.TownRoot.
-	t.Chdir(t.TempDir())
-
 	townRoot := t.TempDir() // No gastown checkout anywhere under here.
 
 	check := NewPatrolPluginDriftCheck()
