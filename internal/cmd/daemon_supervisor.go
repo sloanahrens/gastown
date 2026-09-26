@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -53,6 +55,25 @@ var (
 	supervisorGOOS                                = runtime.GOOS
 )
 
+// supervisorFilePath returns the path of the supervisor file this host would
+// use for a daemon and the kind it belongs to ("launchd" / "systemd"), or
+// ("", "") on a host with no supported supervisor. The file need not exist.
+// Both the detection below and the file reconciliation use it, so the two
+// never disagree about which file they are talking about.
+func supervisorFilePath() (path, kind string) {
+	switch supervisorGOOS {
+	case "darwin":
+		if p, err := supervisorPlistPath(); err == nil {
+			return p, "launchd"
+		}
+	case "linux":
+		if p, err := supervisorUnitPath(); err == nil {
+			return p, "systemd"
+		}
+	}
+	return "", ""
+}
+
 // detectDaemonSupervisor reports the supervisor provisioned FOR townRoot, or
 // nil when the daemon is meant to be run by hand (no plist / unit file
 // installed) or the installed one belongs to another workspace: the file is
@@ -62,18 +83,18 @@ var (
 // be read is an error, never "no supervisor": the whole point of the check
 // is to never hand-spawn beside a provisioned one.
 func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
-	switch supervisorGOOS {
-	case "darwin":
-		p, err := supervisorPlistPath()
-		if err != nil {
-			// No resolvable home means nowhere a plist could have been
-			// provisioned; same reading as templates.SupervisorStatus.
-			return nil, nil
-		}
-		isFor, err := templates.SupervisorFileIsFor(p, townRoot)
-		if err != nil || !isFor {
-			return nil, err
-		}
+	p, kind := supervisorFilePath()
+	if kind == "" {
+		// No resolvable home means nowhere a plist could have been
+		// provisioned; same reading as templates.SupervisorStatus.
+		return nil, nil
+	}
+	isFor, err := templates.SupervisorFileIsFor(p, townRoot)
+	if err != nil || !isFor {
+		return nil, err
+	}
+	switch kind {
+	case "launchd":
 		return &daemonSupervisor{
 			name:      "launchd",
 			start:     []string{"launchctl", "kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Getuid(), templates.LaunchdLabel)},
@@ -81,15 +102,7 @@ func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
 			bootstrap: []string{"launchctl", "bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), p},
 			load:      fmt.Sprintf("launchctl bootstrap gui/%d %s", os.Getuid(), p),
 		}, nil
-	case "linux":
-		p, err := supervisorUnitPath()
-		if err != nil {
-			return nil, nil
-		}
-		isFor, err := templates.SupervisorFileIsFor(p, townRoot)
-		if err != nil || !isFor {
-			return nil, err
-		}
+	case "systemd":
 		return &daemonSupervisor{
 			name:      "systemd",
 			start:     []string{"systemctl", "--user", "restart", templates.SystemdUnit},
@@ -99,6 +112,127 @@ func detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
 		}, nil
 	}
 	return nil, nil
+}
+
+// syncSupervisorFile brings an installed supervisor file up to date with the
+// binary now running, and reports whether it had to rewrite it (gt-x872).
+//
+// A supervisor file is derived state, and one part of it is compiled into the
+// binary that wrote it: launchd's ExitTimeOut, from daemon.ShutdownBudget. Only
+// a provision writes one and a provision only runs on request, so a town
+// provisioned before ShutdownBudget grew keeps the old value for as long as
+// nobody rewrites the file — and launchd SIGKILLs the daemon part-way through
+// its shutdown on every restart in the meantime, which is the failure the key
+// exists to prevent. What is repairable, and what is deliberately left alone,
+// is templates.SupervisorFileRepair's call; this is the installation half.
+//
+// A repair that cannot be made is warned about and then dropped: a job file
+// that is behind is a reason to restart the daemon under a worse ExitTimeOut,
+// never a reason to refuse to start it at all.
+//
+// A rewrite only changes the file. Making the service manager act on it is
+// separate and deliberate: both managers cache a job definition at load time,
+// so a changed file reaches the running job only through the unload and load
+// that startFromFile does, never through an in-place restart.
+func syncSupervisorFile(townRoot string) (rewritten bool) {
+	path, kind := supervisorFilePath()
+	if kind == "" {
+		return false
+	}
+	content, repair, err := templates.SupervisorFileRepair(path, kind, townRoot, daemon.ShutdownBudget)
+	if err == nil && repair {
+		err = installSupervisorFile(path, content)
+	}
+	if err != nil {
+		style.PrintWarning("could not bring the %s job file up to date: %v", kind, err)
+		return false
+	}
+	return repair
+}
+
+// installSupervisorFile writes content over the supervisor file at path,
+// whole and moved into place: a truncate-and-write leaves a half-written plist
+// behind if this process dies mid-write, and the next bootstrap would then
+// fail on it — no daemon, and nothing to say why. Same directory, so the
+// rename is atomic.
+func installSupervisorFile(path, content string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".com.gastown.daemon.*")
+	if err != nil {
+		return fmt.Errorf("writing supervisor file: %w", err)
+	}
+	defer os.Remove(tmp.Name()) // no-op once the rename below succeeded
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing supervisor file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing supervisor file: %w", err)
+	}
+	if err := os.Chmod(tmp.Name(), 0644); err != nil {
+		return fmt.Errorf("writing supervisor file: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("writing supervisor file: %w", err)
+	}
+	return nil
+}
+
+// reconcileSupervisorJob brings the supervisor job for townRoot in line with
+// the binary now running, for callers that found the daemon already up:
+// startDaemon and restartDaemon do the same reconciliation on their own paths,
+// so this is the town-boot version of it. The returned note is "" when there
+// was nothing to do — no supervisor, no file, or a current one.
+//
+// It is a restart, not just a file write: a service manager caches a job
+// definition when it loads it, so a rewritten file does not reach the running
+// job by itself (gt-x872). That is an interruption the caller did not ask for
+// — bounded, and paid once per change of the file's derived values, since the
+// rewrite is what makes the next boot find the file current. The alternative
+// is an ExitTimeOut that never takes effect on any town that is not
+// re-provisioned, which is the whole of the bug.
+func reconcileSupervisorJob(townRoot string, daemonPID int) (note string, err error) {
+	sup, err := detectDaemonSupervisor(townRoot)
+	if err != nil || sup == nil {
+		return "", err
+	}
+	if !syncSupervisorFile(townRoot) {
+		return "", nil
+	}
+
+	if err := sup.startFromFile(); err != nil {
+		return "", fmt.Errorf("reloading the %s job from its rewritten file: %w", sup.name, err)
+	}
+	// The job is back but the daemon it starts needs a moment to take the
+	// lock, and the caller reads that lock for its own status line. Unlike the
+	// restart paths, the PID that must be replaced is the one the caller
+	// already read: a wait that stopped at "the lock is held" would report the
+	// daemon on its way out and call this a success.
+	if _, err := waitForRestart(townRoot, daemonPID); err != nil {
+		return "", fmt.Errorf("daemon did not come back after the %s job was reloaded from its file: %w", sup.name, err)
+	}
+	return fmt.Sprintf("%s job reloaded from an updated file", sup.name), nil
+}
+
+// startFromFile (re)starts the daemon from the job's file on disk, for the
+// case where that file was just rewritten: a service manager reads a job
+// definition when it loads it and caches it from then on, so the only way a
+// rewritten file reaches the job is to unload it and load it again. That is
+// what this does — sup.stop, then sup.bootstrap.
+//
+// It is deliberately not how a restart normally goes. Unloading leaves the
+// daemon unsupervised between the two commands, the window restartDaemon
+// exists to avoid (gt-sq9e), and spending it is worth it only when the job
+// definition actually changed — at most once per binary upgrade.
+func (s *daemonSupervisor) startFromFile() error {
+	// Unload only a job the manager knows: bootout on a job that is not there
+	// fails, and startFromFile is also reached from start, where "not loaded"
+	// (the state `gt daemon stop` leaves) is ordinary.
+	if st := supervisorStateFor(s.name); st.Err == nil && st.Loaded {
+		if err := supervisorRun(s.stop); err != nil {
+			return fmt.Errorf("unloading the %s job to load its rewritten file: %w", s.name, err)
+		}
+	}
+	return supervisorRun(s.bootstrap)
 }
 
 // startDaemon starts the daemon for townRoot: through the provisioned
@@ -122,14 +256,22 @@ func startDaemon(townRoot string) (via string, pid int, err error) {
 		return "", 0, err
 	}
 	if sup != nil {
-		runErr := supervisorRun(sup.start)
-		if runErr != nil {
-			// kickstart / restart reach only a job the service manager knows.
-			// One that gt daemon stop unloaded is bootstrapped instead, so that
-			// a stop-then-start pair leaves a supervised daemon rather than the
-			// hand spawn that recreates the crash loop (gt-3jrm).
-			if st := supervisorStateFor(sup.name); st.Err == nil && !st.Loaded {
-				runErr = supervisorRun(sup.bootstrap)
+		rewritten := syncSupervisorFile(townRoot)
+		var runErr error
+		if rewritten {
+			// The file the job will start from is the one just rewritten, so
+			// the job has to be loaded from it rather than restarted in place.
+			runErr = sup.startFromFile()
+		} else {
+			runErr = supervisorRun(sup.start)
+			if runErr != nil {
+				// kickstart / restart reach only a job the service manager knows.
+				// One that gt daemon stop unloaded is bootstrapped instead, so that
+				// a stop-then-start pair leaves a supervised daemon rather than the
+				// hand spawn that recreates the crash loop (gt-3jrm).
+				if st := supervisorStateFor(sup.name); st.Err == nil && !st.Loaded {
+					runErr = supervisorRun(sup.bootstrap)
+				}
 			}
 		}
 		if runErr != nil {
@@ -218,6 +360,13 @@ func waitForDaemonGone(townRoot string) error {
 // first. When no supervisor is provisioned the daemon is only ever run by
 // hand, so the hand stop/start pair is the whole of it there.
 //
+// The supervisor's file is reconciled first (syncSupervisorFile). A restart is
+// both the act a stale ExitTimeOut endangers — it is what asks the service
+// manager to stop the daemon — and the one gt-driven moment the file can be
+// loaded afresh: when the reconciliation finds the file stale it rewrites it
+// and restarts the job from it, so the new value is in force from this restart
+// onward rather than at some later one.
+//
 // The outgoing PID is read before the restart so the wait can tell the new
 // daemon from the old one: waitForDaemon returns as soon as the lock reads as
 // running, and throughout a restart that is true of the process on its way
@@ -249,7 +398,15 @@ func restartDaemon(townRoot string) (via string, pid int, err error) {
 		}
 		return startDaemon(townRoot)
 	}
-	runErr := supervisorRun(sup.start)
+	var runErr error
+	if syncSupervisorFile(townRoot) {
+		// This is the restart the ExitTimeOut it carries exists for: the job
+		// is reloaded from the file, so the new value is in force before the
+		// next stop this restart causes — and for every one after it.
+		runErr = sup.startFromFile()
+	} else {
+		runErr = supervisorRun(sup.start)
+	}
 	if runErr != nil {
 		// The command may have failed after the job came up; a live daemon
 		// that is not the old one is what the caller asked for either way.

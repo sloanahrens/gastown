@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -644,6 +645,205 @@ func stubRestart(t *testing.T, goos, file string, pids ...int) *supervisorCalls 
 		return pid != 0, pid, nil
 	}
 	return calls
+}
+
+// A plist as this binary renders it for town, but without the ExitTimeOut a
+// binary that passes a shutdown budget adds — the shape a file installed
+// before that key existed has on disk (gt-x872). Written where the supervisor
+// path seams say the plist lives.
+func writeStaleSupervisorFile(t *testing.T, town string) string {
+	t.Helper()
+	body, ok, err := templates.SupervisorFileContent("launchd", town, 0)
+	if err != nil || !ok {
+		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
+	}
+	p := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// The plist on disk is repaired on the way into a start, and because launchd
+// reads a job definition only when it loads one, the job is loaded from the
+// rewritten file rather than kickstarted from the definition it cached
+// (gt-x872): a kickstart would restart the daemon under the ExitTimeOut the
+// file was installed with, which is the value the repair exists to replace.
+func TestStartDaemon_RepairsAStaleExitTimeOutBeforeStarting(t *testing.T) {
+	town := t.TempDir()
+	plist := writeStaleSupervisorFile(t, town)
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+
+	via, pid, err := startDaemon(town)
+	if err != nil {
+		t.Fatalf("startDaemon: %v", err)
+	}
+	if via != "launchd" || pid != 4242 || calls.spawned {
+		t.Fatalf("startDaemon = (%q, %d, spawned=%v), want (launchd, 4242, false)", via, pid, calls.spawned)
+	}
+	if len(calls.argv) != 2 {
+		t.Fatalf("supervisor commands = %v, want an unload then a load", calls.argv)
+	}
+	if got := strings.Join(calls.argv[0], " "); !strings.HasPrefix(got, "launchctl bootout gui/") {
+		t.Errorf("first supervisor command = %q, want a bootout first: a loaded job does not re-read its file", got)
+	}
+	if got := strings.Join(calls.argv[1], " "); got != "launchctl bootstrap gui/"+strconv.Itoa(os.Getuid())+" "+plist {
+		t.Errorf("second supervisor command = %q, want the bootstrap for %s", got, plist)
+	}
+
+	repaired, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(repaired), "<key>ExitTimeOut</key>") {
+		t.Errorf("plist was not repaired before the job was loaded from it:\n%s", repaired)
+	}
+}
+
+// A restart repairs the same way, so the ExitTimeOut a restart depends on is
+// in force for the stop that restart causes and every one after it (gt-x872).
+func TestRestartDaemon_RepairsAStaleExitTimeOutBeforeRestarting(t *testing.T) {
+	town := t.TempDir()
+	plist := writeStaleSupervisorFile(t, town)
+	calls := stubRestart(t, "darwin", plist, 1111, 1111, 4242)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if via != "launchd" || pid != 4242 {
+		t.Fatalf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	}
+	if len(calls.argv) != 2 {
+		t.Fatalf("supervisor commands = %v, want an unload then a load", calls.argv)
+	}
+	if got := strings.Join(calls.argv[0], " "); !strings.HasPrefix(got, "launchctl bootout gui/") {
+		t.Errorf("first supervisor command = %q, want a bootout: the job has to be loaded from the repaired file", got)
+	}
+	repaired, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(repaired), "<key>ExitTimeOut</key>") {
+		t.Errorf("plist was not repaired before the job was loaded from it:\n%s", repaired)
+	}
+}
+
+// A file that is not this binary's rendering of this town is left exactly as
+// it is, and the start proceeds in place: repairing it would be a
+// reconfiguration of somebody else's job, not a repair (gt-x872).
+func TestSyncSupervisorFile_LeavesAFileItDidNotRender(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	before, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+
+	if rewritten := syncSupervisorFile(town); rewritten {
+		t.Error("syncSupervisorFile rewrote a plist this binary did not render")
+	}
+	after, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("plist changed:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// A repair that cannot be made is warned about and dropped: the job file
+// being behind is a reason to restart the daemon under a worse ExitTimeOut,
+// never a reason to leave the town with no daemon at all (gt-x872).
+func TestStartDaemon_StartsWithAFileItCouldNotRepair(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to a read-only directory, so the repair would succeed")
+	}
+	town := t.TempDir()
+	body, ok, err := templates.SupervisorFileContent("launchd", town, 0)
+	if err != nil || !ok {
+		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
+	}
+	dir := t.TempDir()
+	plist := filepath.Join(dir, "com.gastown.daemon.plist")
+	if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Unwritable, so the repair cannot be installed over it.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+
+	via, pid, err := startDaemon(town)
+	if err != nil {
+		t.Fatalf("startDaemon: %v", err)
+	}
+	if via != "launchd" || pid != 4242 {
+		t.Fatalf("startDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	}
+	if got := calls.joined(); !strings.HasPrefix(got, "launchctl kickstart -k gui/") {
+		t.Errorf("supervisor command = %q, want the ordinary kickstart when no repair was made", got)
+	}
+	after, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != body {
+		t.Error("the plist changed although the repair could not be installed")
+	}
+}
+
+// The town boot is the one place a stale job file is found with the daemon
+// already up, so it is the one place the reload happens without a start or a
+// restart asking for it (gt-x872). The note it returns is what stops the
+// daemon's PID changing from looking unexplained.
+func TestReconcileSupervisorJob_ReloadsAStaleJob(t *testing.T) {
+	town := t.TempDir()
+	plist := writeStaleSupervisorFile(t, town)
+	calls := stubRestart(t, "darwin", plist, 1111, 4242)
+
+	note, err := reconcileSupervisorJob(town, 1111)
+	if err != nil {
+		t.Fatalf("reconcileSupervisorJob: %v", err)
+	}
+	if note == "" {
+		t.Error("reconcileSupervisorJob returned no note for a job it reloaded")
+	}
+	if len(calls.argv) != 2 {
+		t.Fatalf("supervisor commands = %v, want an unload then a load", calls.argv)
+	}
+	if got := strings.Join(calls.argv[0], " "); !strings.HasPrefix(got, "launchctl bootout gui/") {
+		t.Errorf("first supervisor command = %q, want a bootout", got)
+	}
+}
+
+// A job file that is already current leaves the running daemon alone: the
+// reload is an interruption, and one that is not needed is one not paid.
+func TestReconcileSupervisorJob_LeavesACurrentJobRunning(t *testing.T) {
+	town := t.TempDir()
+	body, ok, err := templates.SupervisorFileContent("launchd", town, daemon.ShutdownBudget)
+	if err != nil || !ok {
+		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
+	}
+	plist := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
+	if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := stubRestart(t, "darwin", plist, 1111)
+
+	note, err := reconcileSupervisorJob(town, 1111)
+	if err != nil {
+		t.Fatalf("reconcileSupervisorJob: %v", err)
+	}
+	if note != "" {
+		t.Errorf("reconcileSupervisorJob note = %q, want \"\"", note)
+	}
+	if len(calls.argv) != 0 {
+		t.Errorf("supervisor commands = %v, want none", calls.argv)
+	}
 }
 
 // A restart of a supervised daemon goes through the supervisor's kickstart -k

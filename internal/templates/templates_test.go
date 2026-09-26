@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -916,6 +917,163 @@ func TestRenderLaunchdPlist_ExitTimeOut(t *testing.T) {
 	}
 	if strings.Contains(output, "<key>ExitTimeOut</key>") {
 		t.Errorf("plist set ExitTimeOut for a zero ExitTimeOutSeconds, leaving launchd's default in effect requires omitting the key:\n%s", output)
+	}
+}
+
+// writeInstalledPlist writes body where the launchd plist for town would be
+// installed and returns its path. SupervisorFileRepair is pointed at the path
+// directly, the way the caller resolves it, so the test does not need HOME.
+func writeInstalledPlist(t *testing.T, town, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// renderedPlist is what this binary renders for town, the shape an install
+// writes. exitTimeout is the budget it is rendered with.
+func renderedPlist(t *testing.T, town string, exitTimeout time.Duration) string {
+	t.Helper()
+	content, ok, err := SupervisorFileContent("launchd", town, exitTimeout)
+	if err != nil || !ok {
+		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
+	}
+	return content
+}
+
+// TestSupervisorFileRepair_AddsAMissingExitTimeOut is the bug gt-x872 names: a
+// plist installed before ExitTimeOut existed carries no key, and every restart
+// through launchd then SIGKILLs the daemon at the 20s default, part-way
+// through a graceful shutdown that is allowed longer than that. The file is
+// this binary's rendering of this town in every other respect, so the repair
+// is to rewrite it with the key.
+func TestSupervisorFileRepair_AddsAMissingExitTimeOut(t *testing.T) {
+	town := t.TempDir()
+	path := writeInstalledPlist(t, town, renderedPlist(t, town, 0))
+
+	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if !repair {
+		t.Fatal("SupervisorFileRepair() did not repair a plist with no ExitTimeOut")
+	}
+	if !strings.Contains(content, "<key>ExitTimeOut</key>") || !strings.Contains(content, "<integer>55</integer>") {
+		t.Errorf("repair does not carry ExitTimeOut=55:\n%s", content)
+	}
+	if stripped := withExitTimeOutStripped(content); stripped != renderedPlist(t, town, 0) {
+		t.Errorf("repair changed something other than ExitTimeOut:\n%s", content)
+	}
+}
+
+// A plist that has the key but at an older budget is the same repair: the
+// value is compiled into the binary, so it follows the binary, not the file.
+func TestSupervisorFileRepair_UpdatesAChangedExitTimeOut(t *testing.T) {
+	town := t.TempDir()
+	path := writeInstalledPlist(t, town, renderedPlist(t, town, 20*time.Second))
+
+	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if !repair {
+		t.Fatal("SupervisorFileRepair() did not repair an out-of-date ExitTimeOut")
+	}
+	if !strings.Contains(content, "<integer>55</integer>") {
+		t.Errorf("repair does not carry the current ExitTimeOut:\n%s", content)
+	}
+}
+
+// A file this binary would write unchanged needs no repair, and the caller
+// must be able to tell that from a repair it declined to make.
+func TestSupervisorFileRepair_CurrentFileIsNoRepair(t *testing.T) {
+	town := t.TempDir()
+	path := writeInstalledPlist(t, town, renderedPlist(t, town, 55*time.Second))
+
+	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if repair || content != "" {
+		t.Errorf("SupervisorFileRepair() = (%q, %v) for a current file, want (\"\", false)", content, repair)
+	}
+}
+
+// The repair is confined to the one value that belongs to the binary. A file
+// that names a different gt is somebody's deliberate configuration — repointing
+// a launchd job at whichever gt happens to be running is a reconfiguration, and
+// not this function's to make.
+func TestSupervisorFileRepair_LeavesAFileThatDiffersInMore(t *testing.T) {
+	town := t.TempDir()
+	other, err := renderLaunchdPlist(SupervisorData{
+		GTPath:             "/opt/other/bin/gt",
+		TownRoot:           town,
+		ExitTimeOutSeconds: 0,
+	})
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist() error = %v", err)
+	}
+	path := writeInstalledPlist(t, town, other)
+
+	content, repair, err := SupervisorFileRepair(path, "launchd", town, 55*time.Second)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if repair || content != "" {
+		t.Errorf("SupervisorFileRepair() = (%q, %v), want (\"\", false): the file names another gt", content, repair)
+	}
+}
+
+// A plist serving another town is not this town's to rewrite.
+func TestSupervisorFileRepair_AnotherTownsFileIsNotTouched(t *testing.T) {
+	other := t.TempDir()
+	path := writeInstalledPlist(t, other, renderedPlist(t, other, 0))
+
+	content, repair, err := SupervisorFileRepair(path, "launchd", t.TempDir(), 55*time.Second)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if repair || content != "" {
+		t.Errorf("SupervisorFileRepair() = (%q, %v), want (\"\", false): the file serves another town", content, repair)
+	}
+}
+
+// The systemd unit renders nothing from the binary's own constants, so a
+// binary upgrade leaves nothing in it to repair.
+func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
+	town := t.TempDir()
+	unit, ok, err := SupervisorFileContent("systemd", town, 0)
+	if err != nil || !ok {
+		t.Fatalf("SupervisorFileContent(systemd, %q) = (ok=%v, err=%v)", town, ok, err)
+	}
+	path := filepath.Join(t.TempDir(), "gastown-daemon.service")
+	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	content, repair, err := SupervisorFileRepair(path, "systemd", town, 55*time.Second)
+	if err != nil {
+		t.Fatalf("SupervisorFileRepair() error = %v", err)
+	}
+	if repair || content != "" {
+		t.Errorf("SupervisorFileRepair() = (%q, %v) for a systemd unit, want (\"\", false)", content, repair)
+	}
+}
+
+// SupervisorFileContent renders nothing for a kind this build does not write,
+// including the empty kind a host with no supported supervisor reports —
+// rather than erroring on it, since that is an ordinary host.
+func TestSupervisorFileContent_UnknownKind(t *testing.T) {
+	for _, kind := range []string{"", "upstart", "launchd "} {
+		content, ok, err := SupervisorFileContent(kind, t.TempDir(), time.Second)
+		if err != nil {
+			t.Errorf("SupervisorFileContent(%q) error = %v", kind, err)
+		}
+		if ok || content != "" {
+			t.Errorf("SupervisorFileContent(%q) = (%q, %v), want (\"\", false)", kind, content, ok)
+		}
 	}
 }
 

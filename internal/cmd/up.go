@@ -186,6 +186,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Start daemon, deacon, mayor, and rig prefetch in parallel
 	var daemonErr error
 	var daemonPID int
+	// daemonNote is set when the town boot had to reload the supervisor job
+	// the daemon runs under, which restarts it (gt-x872).
+	var daemonNote string
 	var deaconResult, mayorResult agentStartResult
 	var prefetchedRigs map[string]*rig.Rig
 	var rigErrors map[string]error
@@ -221,13 +224,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// 1. Daemon (Go process)
 	go func() {
 		defer startupWg.Done()
-		if err := ensureDaemon(townRoot); err != nil {
+		note, err := ensureDaemon(townRoot)
+		if err != nil {
 			daemonErr = err
-		} else {
-			running, pid, _ := daemon.IsRunning(townRoot)
-			if running {
-				daemonPID = pid
-			}
+			return
+		}
+		daemonNote = note
+		running, pid, _ := daemon.IsRunning(townRoot)
+		if running {
+			daemonPID = pid
 		}
 	}()
 
@@ -288,10 +293,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if daemonErr != nil {
 		services = append(services, ServiceStatus{Name: "Daemon", Type: "daemon", OK: false, Detail: daemonErr.Error()})
 		allOK = false
-	} else if daemonPID > 0 {
-		services = append(services, ServiceStatus{Name: "Daemon", Type: "daemon", OK: true, Detail: fmt.Sprintf("PID %d", daemonPID)})
 	} else {
-		services = append(services, ServiceStatus{Name: "Daemon", Type: "daemon", OK: true, Detail: "running (PID unknown)"})
+		detail := "running (PID unknown)"
+		if daemonPID > 0 {
+			detail = fmt.Sprintf("PID %d", daemonPID)
+		}
+		if daemonNote != "" {
+			detail = fmt.Sprintf("%s (%s)", detail, daemonNote)
+		}
+		services = append(services, ServiceStatus{Name: "Daemon", Type: "daemon", OK: true, Detail: detail})
 	}
 	services = append(services, ServiceStatus{Name: deaconResult.name, Type: constants.RoleDeacon, OK: deaconResult.ok, Detail: deaconResult.detail})
 	if !deaconResult.ok {
@@ -491,7 +501,13 @@ func disableCurrentAgentDND(townRoot string) (bool, error) {
 }
 
 // ensureDaemon starts the daemon if not running.
-func ensureDaemon(townRoot string) error {
+//
+// A daemon that is already up is left running, with one exception: when the
+// supervisor job it runs under is defined by a file that no longer matches the
+// binary on disk, that job is reloaded from the rewritten file (gt-x872). The
+// note returned in that case says so — the daemon restarted, and the caller
+// shows why rather than leaving the PID change unexplained.
+func ensureDaemon(townRoot string) (note string, err error) {
 	// GH#2656: Don't restart the daemon while gt down is running.
 	// GH#2907: If the sentinel's PID is dead, remove stale sentinel.
 	sentinelPath := filepath.Join(townRoot, ShutdownSentinel)
@@ -510,16 +526,16 @@ func ensureDaemon(townRoot string) error {
 		if stale {
 			os.Remove(sentinelPath)
 		} else {
-			return fmt.Errorf("shutdown in progress (sentinel exists: %s)", sentinelPath)
+			return "", fmt.Errorf("shutdown in progress (sentinel exists: %s)", sentinelPath)
 		}
 	}
 
-	running, _, err := daemon.IsRunning(townRoot)
+	running, pid, err := daemon.IsRunning(townRoot)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if running {
-		return nil
+		return reconcileSupervisorJob(townRoot, pid)
 	}
 
 	// Start it — through the provisioned supervisor when there is one
@@ -529,11 +545,11 @@ func ensureDaemon(townRoot string) error {
 		// A concurrent starter (gt mayor, another gt up) may have won the
 		// race between the check above and the start; that is success.
 		if running, _, chk := daemonIsRunning(townRoot); chk == nil && running {
-			return nil
+			return "", nil
 		}
-		return err
+		return "", err
 	}
-	return nil
+	return "", nil
 }
 
 // rigPrefetchResult holds the result of loading a single rig config.
