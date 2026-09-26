@@ -168,6 +168,14 @@ func (d *Daemon) triggerCompactorDog() {
 			return
 		}
 		defer release()
+		// The cycle opens a SQL connection to every production database, and
+		// Run()'s startup catch-up reaches here before the first heartbeat — the
+		// step that otherwise starts Dolt — so the bring-up belongs on this
+		// goroutine, where it cannot stall the tick loop behind a restart and
+		// its backoff (gt-ox6c).
+		if err := d.ensureDoltServerUp(); err != nil {
+			d.logger.Printf("compactor_dog: Dolt server unavailable: %v", err)
+		}
 		if compactorDogCycleFn(d) {
 			d.recordCompactorDogRun()
 		} else {

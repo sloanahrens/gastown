@@ -272,3 +272,46 @@ func TestRecordCompactorDogRunPersists(t *testing.T) {
 		t.Errorf("recorded %v, want %v", lastRun, at)
 	}
 }
+
+// TestCompactorDogBringsDoltUpBeforeItsCycle is the regression test for
+// gt-ox6c, a major finding on the gt-wisp-yi3r review: Run()'s startup catch-up
+// dispatches the first cycle before the first heartbeat, which is the step that
+// starts Dolt, so on a cold start the cycle opened a SQL connection to a server
+// that was not listening and counted nothing. The trigger has to bring the
+// server up before the cycle runs.
+//
+// The Dolt manager is external with a seamed health check, so the bring-up is
+// observable without a server: EnsureRunning probes health instead of spawning
+// one, and the probe records that it ran.
+func TestCompactorDogBringsDoltUpBeforeItsCycle(t *testing.T) {
+	townRoot := t.TempDir()
+	d := compactorDogTestDaemon(townRoot, nil)
+
+	var mu sync.Mutex
+	var order []string
+	record := func(step string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, step)
+	}
+
+	d.doltServer = &DoltServerManager{
+		config:        &DoltServerConfig{Enabled: true, External: true},
+		healthCheckFn: func() error { record("dolt"); return nil },
+	}
+
+	origCycle := compactorDogCycleFn
+	defer func() { compactorDogCycleFn = origCycle }()
+	compactorDogCycleFn = func(*Daemon) bool { record("cycle"); return true }
+
+	d.triggerCompactorDog()
+	awaitCompactorDogIdle(t, d)
+
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+
+	if len(got) != 2 || got[0] != "dolt" || got[1] != "cycle" {
+		t.Fatalf("cycle order = %v, want the Dolt bring-up before the cycle", got)
+	}
+}

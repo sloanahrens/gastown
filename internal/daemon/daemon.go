@@ -922,7 +922,9 @@ func (d *Daemon) Run() (err error) {
 			compactorDogTickInterval, interval)
 		// Catch up at startup rather than waiting for the first tick: due-ness
 		// is a wall-clock question and a restart must not postpone the answer
-		// (gt-ima2).
+		// (gt-ima2). This cycle is a SQL connection to Dolt and this catch-up
+		// dispatches before the first heartbeat has started the server, so the
+		// trigger brings it up itself (gt-ox6c).
 		d.triggerCompactorDog()
 	}
 
@@ -1478,6 +1480,19 @@ func (d *Daemon) ensureDoltServerRunning() {
 			h.Healthy,
 		)
 	}
+}
+
+// ensureDoltServerUp brings the Dolt server up and reports a failure to do so.
+//
+// ensureDoltServerRunning is the heartbeat's step 0 and does more than this: it
+// pours the doctor molecule and reads the OTel gauges from state the heartbeat
+// goroutine owns. A patrol cycle running on its own goroutine takes this bare
+// bring-up instead of reaching into that state (gt-ox6c).
+func (d *Daemon) ensureDoltServerUp() error {
+	if d.doltServer == nil || !d.doltServer.IsEnabled() {
+		return nil
+	}
+	return d.doltServer.EnsureRunning()
 }
 
 // pourDoctorMolecule creates a mol-dog-doctor molecule to track a health anomaly.
