@@ -78,11 +78,31 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 		DeaconSession: session.DeaconSessionName(),
 	}
 
+	if roleName == constants.RoleDeacon {
+		// Best-effort: the prompt falls back to a generic phrasing (see the
+		// deacon template) rather than failing prime if this can't resolve.
+		if count, err := deaconPatrolStepCount(ctx.TownRoot, ctx.Rig); err == nil {
+			data.PatrolStepCount = count
+		}
+	}
+
 	output, err := tmpl.RenderRole(roleName, data)
 	if err != nil {
 		return "", fmt.Errorf("rendering template: %w", err)
 	}
 	return output, nil
+}
+
+// deaconPatrolStepCount returns the number of steps in the resolved
+// mol-deacon-patrol formula (extends and compose expansion applied), so the
+// live Deacon prompt can report a count that can't drift from the formula
+// that actually runs (gt-5adz).
+func deaconPatrolStepCount(townRoot, rigName string) (int, error) {
+	f, err := loadFormulaForVarDefaults("mol-deacon-patrol", townRoot, rigName)
+	if err != nil {
+		return 0, err
+	}
+	return len(f.Steps), nil
 }
 
 func roleRigContext(ctx RoleContext) (defaultBranch string, isForkRig bool, upstreamURL string) {
