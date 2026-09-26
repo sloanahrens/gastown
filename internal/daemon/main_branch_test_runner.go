@@ -455,6 +455,18 @@ func EstimateCPUIdlePercent() float64 {
 	return measureHostLoad().IdlePercent
 }
 
+// EstimateLoad1 gives callers outside this package the raw 1-minute load
+// average, one instant sysctl/proc read. Unlike EstimateCPUIdlePercent, this
+// is not normalized by core count: macOS loadavg counts processes in
+// uninterruptible wait (disk/IO), not just CPU-runnable ones, so on a
+// many-core host with bursty non-CPU load (e.g. a Dolt server) load1/NumCPU
+// reports "busy" long before the CPU actually is. Gates that need to match
+// the operator's own "don't retry above load1 60" rule of thumb read this
+// directly instead (gt-e6xh).
+func EstimateLoad1() float64 {
+	return loadAverage1()
+}
+
 // computeCPUIdlePercent converts a 1-minute load average into an idle
 // percentage: load 0 is 100% idle, load == cores is 0% idle, and more load
 // than cores clamps to 0. A non-positive core count reports 100 — nothing

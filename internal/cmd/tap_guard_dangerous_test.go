@@ -1545,30 +1545,30 @@ func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
 }
 
 // TestEvaluateIdleGate checks the wiring between the pure command matcher
-// and the CPU sample: a gated command is held when the sampled idle
-// percentage is below idleGateThresholdPercent, and allowed through when it
-// is at or above threshold, the sample fails (fail open), or the command
+// and the load sample: a gated command is held when the sampled 1-minute
+// load average is above idleGateLoad1Threshold, and allowed through when it
+// is at or below threshold, the sample fails (fail open), or the command
 // isn't gated at all.
 func TestEvaluateIdleGate(t *testing.T) {
-	origCPUIdlePercent := cpuIdlePercent
-	t.Cleanup(func() { cpuIdlePercent = origCPUIdlePercent })
+	origHostLoad1 := hostLoad1
+	t.Cleanup(func() { hostLoad1 = origHostLoad1 })
 
 	tests := []struct {
-		name       string
-		command    string
-		sampleIdle int
-		sampleOK   bool
-		wantHeld   bool
+		name        string
+		command     string
+		sampleLoad1 float64
+		sampleOK    bool
+		wantHeld    bool
 	}{
-		{"held when idle below threshold", "make test", 10, true, true},
-		{"allowed when idle at threshold", "make test", 25, true, false},
-		{"allowed when idle above threshold", "make test", 90, true, false},
+		{"held when load above threshold", "make test", 74, true, true},
+		{"allowed when load at threshold", "make test", 60, true, false},
+		{"allowed when load below threshold", "make test", 5, true, false},
 		{"allowed when sample fails (fail open)", "make test", 0, false, false},
 		{"allowed when not a gated command", "make lint", 0, true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cpuIdlePercent = func() (int, bool) { return tt.sampleIdle, tt.sampleOK }
+			hostLoad1 = func() (float64, bool) { return tt.sampleLoad1, tt.sampleOK }
 			_, held := evaluateIdleGate(tt.command)
 			if held != tt.wantHeld {
 				t.Errorf("evaluateIdleGate(%q) held=%v, want %v", tt.command, held, tt.wantHeld)

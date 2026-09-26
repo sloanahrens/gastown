@@ -126,8 +126,8 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 		return NewSilentExit(2)
 	}
 
-	if idle, held := evaluateIdleGate(command); held {
-		printIdleGateHold(idle, command)
+	if load1, held := evaluateIdleGate(command); held {
+		printIdleGateHold(load1, command)
 		return NewSilentExit(2)
 	}
 
@@ -136,18 +136,18 @@ func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 
 // evaluateIdleGate reports whether command is a full-suite start
 // (isIdleGatedSuiteStartCommand) that should be held because the sampled
-// CPU idle percentage is below idleGateThresholdPercent. idle is the
-// sampled percentage (0 when the command isn't gated or the sample
-// failed — a failed sample fails open, never holding the command).
-func evaluateIdleGate(command string) (idle int, held bool) {
+// 1-minute load average is above idleGateLoad1Threshold. load1 is the
+// sampled value (0 when the command isn't gated or the sample failed — a
+// failed sample fails open, never holding the command).
+func evaluateIdleGate(command string) (load1 float64, held bool) {
 	if !isIdleGatedSuiteStartCommand(command) {
 		return 0, false
 	}
-	idle, ok := cpuIdlePercent()
+	load1, ok := hostLoad1()
 	if !ok {
 		return 0, false
 	}
-	return idle, idle < idleGateThresholdPercent
+	return load1, load1 > idleGateLoad1Threshold
 }
 
 // maxDangerousNestDepth bounds nestedCommands recursion so a pathological
@@ -1582,14 +1582,18 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 	return "", ""
 }
 
-// idleGateThresholdPercent is the minimum CPU idle percentage required
-// before a full-suite start is allowed to proceed; below it the command is
-// HELD (exit 2, retryable) rather than permanently blocked. Ported from the
-// interim host-hygiene hook — see gt-nqcy follow-up.
-const idleGateThresholdPercent = 25
+// idleGateLoad1Threshold is the 1-minute load average above which a
+// full-suite start is HELD (exit 2, retryable) rather than permitted. This
+// mirrors the mayor standing rule mol-refinery-patrol's gate-load-check step
+// already tells operators to follow by hand ("do NOT start or retry a
+// full-suite gate while 1-min loadavg > 60"); the guard used to derive its
+// own, stricter threshold from load1/NumCPU, which held gates on idle,
+// many-core hosts because macOS loadavg counts uninterruptible-wait
+// processes, not just CPU-runnable ones (gt-e6xh).
+const idleGateLoad1Threshold = 60
 
 // idleGateAlternative is the HOLD banner's suggested next step.
-const idleGateAlternative = "Wait 2 minutes and re-run this exact command; it will pass once idle >= 25%. " +
+const idleGateAlternative = "Wait 2 minutes and re-run this exact command; it will pass once load1 <= 60. " +
 	"Avoid bare 'go test ./...' at full parallelism — use GOFLAGS=-p=8 make test."
 
 // isIdleGatedSuiteStartCommand reports whether command contains an
@@ -1681,28 +1685,30 @@ func wholeRepoArgFollows(tokens []string, idx int) bool {
 	return idx < len(tokens) && isWholeRepoPackageArg(normalizeGoPackageArg(tokens[idx]))
 }
 
-// cpuIdlePercent returns the current CPU idle percentage. Overridden in
-// tests. Production reads internal/daemon's load-average-based estimate
-// (one instant sysctl/proc read, no subprocess sampling loop) rather than
-// shelling out to `top` for several seconds on every suite-start command —
-// the same host-busy signal already powers the main_branch_test patrol's
-// gate (gt-f57o).
-var cpuIdlePercent = actualCPUIdlePercent
+// hostLoad1 returns the current 1-minute load average. Overridden in tests.
+// Production reads internal/daemon's raw load-average sample (one instant
+// sysctl/proc read, no subprocess sampling loop) rather than shelling out to
+// `top` for several seconds on every suite-start command — the same
+// mechanism that already powers the main_branch_test patrol's gate
+// (gt-f57o), read unnormalized so a host whose load comes from non-CPU
+// (uninterruptible-wait) contention isn't misjudged as CPU-saturated
+// (gt-e6xh).
+var hostLoad1 = actualHostLoad1
 
-func actualCPUIdlePercent() (idle int, ok bool) {
-	return int(daemon.EstimateCPUIdlePercent()), true
+func actualHostLoad1() (load1 float64, ok bool) {
+	return daemon.EstimateLoad1(), true
 }
 
 // printIdleGateHold prints the HOLD banner to stderr — distinct from
 // printDangerousBlock's BLOCKED banner since this command is expected to
 // succeed on retry, not to be avoided entirely.
-func printIdleGateHold(idle int, command string) {
+func printIdleGateHold(load1 float64, command string) {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "╔══════════════════════════════════════════════════════════════════╗")
 	fmt.Fprintln(os.Stderr, "║  ⏸  SUITE START HELD (host busy)                                 ║")
 	fmt.Fprintln(os.Stderr, "╠══════════════════════════════════════════════════════════════════╣")
 	fmt.Fprintf(os.Stderr, "║  Command:   %-51s ║\n", truncateStr(command, 51))
-	fmt.Fprintf(os.Stderr, "║  CPU idle:  %-51s ║\n", fmt.Sprintf("%d%% (need >= %d%%)", idle, idleGateThresholdPercent))
+	fmt.Fprintf(os.Stderr, "║  Load avg:  %-51s ║\n", fmt.Sprintf("%.1f (need <= %d)", load1, idleGateLoad1Threshold))
 	fmt.Fprintln(os.Stderr, "║                                                                  ║")
 	fmt.Fprintln(os.Stderr, "║  Another suite is running on this shared host.                  ║")
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
