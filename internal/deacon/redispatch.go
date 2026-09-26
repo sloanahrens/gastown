@@ -30,6 +30,15 @@ const (
 	// DefaultRedispatchCooldown is the minimum time between re-dispatches of
 	// the same bead. Prevents thrashing when a bead keeps killing polecats.
 	DefaultRedispatchCooldown = 5 * time.Minute
+
+	// DefaultMaxDeferrals is the number of consecutive deferrals — a
+	// persistent pool-full refusal, a standing operator hold, or a per-rig
+	// ESTOP — tolerated before the deacon escalates to Mayor instead of
+	// deferring forever. A deferral deliberately never advances AttemptCount
+	// (gt-xdaq: the bead was queued, not failed), so a PERSISTENT deferral
+	// condition would otherwise never reach the --max-attempts escalation
+	// either — the bead just defers every cycle, silently, forever (gt-oo494).
+	DefaultMaxDeferrals = 3
 )
 
 // RedispatchState tracks re-dispatch attempts for recovered beads.
@@ -64,6 +73,19 @@ type BeadRedispatchState struct {
 
 	// EscalatedAt is when the bead was escalated.
 	EscalatedAt time.Time `json:"escalated_at,omitempty"`
+
+	// DeferralCount is the number of consecutive deferrals (pool-full
+	// refusal, operator hold, or rig ESTOP) since the last actual dispatch
+	// attempt. RecordAttempt resets it to 0, so it only measures an
+	// unbroken streak — the condition that matters for DefaultMaxDeferrals
+	// is whether the bead is stuck right now, not how often it has ever
+	// deferred.
+	DeferralCount int `json:"deferral_count,omitempty"`
+
+	// LastDeferralReason is the hold/refusal text from the most recent
+	// deferral, carried into the Mayor escalation mail once DeferralCount
+	// crosses DefaultMaxDeferrals.
+	LastDeferralReason string `json:"last_deferral_reason,omitempty"`
 
 	// LastReceipt is the om editorial ReceiptSummary from the most recent
 	// resubmit attempt, when this bead's re-dispatches are gated by
@@ -270,11 +292,25 @@ func (s *BeadRedispatchState) ShouldEscalate(maxAttempts int) bool {
 	return s.AttemptCount >= maxAttempts
 }
 
-// RecordAttempt records a re-dispatch attempt for the bead.
+// RecordAttempt records a re-dispatch attempt for the bead. It also resets
+// DeferralCount: an actual attempt (successful or failed) breaks whatever
+// consecutive-deferral streak preceded it, so the next deferral starts a
+// fresh count rather than immediately re-triggering the escalation this
+// attempt already got past.
 func (s *BeadRedispatchState) RecordAttempt(rig string) {
 	s.AttemptCount++
 	s.LastAttemptTime = time.Now().UTC()
 	s.LastRig = rig
+	s.DeferralCount = 0
+}
+
+// RecordDeferral records one more consecutive deferral and returns the
+// updated streak length, for the caller to compare against
+// DefaultMaxDeferrals.
+func (s *BeadRedispatchState) RecordDeferral(reason string) int {
+	s.DeferralCount++
+	s.LastDeferralReason = reason
+	return s.DeferralCount
 }
 
 // RecordEscalation records that the bead was escalated to Mayor.
@@ -452,9 +488,7 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	// recorded: the bead did not fail, the town is paused, and it stays open
 	// for whoever dispatches after the hold lifts.
 	if reason := dispatch.OperatorHold(townRoot); reason != "" {
-		result.Action = "deferred"
-		result.Message = "not re-dispatched: " + reason
-		return result
+		return deferBead(townRoot, beadID, state, beadState, "not re-dispatched: "+reason, reason)
 	}
 
 	// Determine target rig
@@ -472,9 +506,7 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	// A per-rig ESTOP on the target rig defers the same way the town hold
 	// does: no attempt, no cooldown (gt-ifijm).
 	if reason := dispatch.RigHold(townRoot, targetRig); reason != "" {
-		result.Action = "deferred"
-		result.Message = "not re-dispatched: " + reason
-		return result
+		return deferBead(townRoot, beadID, state, beadState, "not re-dispatched: "+reason, reason)
 	}
 
 	// Verify bead is still open (not already claimed or closed).
@@ -502,9 +534,7 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 		// the retry budget and the REDISPATCH_FAILED escalation stay reserved
 		// for real failures. The bead is left open and ready (gt-xdaq).
 		if refusal != "" {
-			result.Action = "deferred"
-			result.Message = "not re-dispatched, retry later: " + refusal
-			return result
+			return deferBead(townRoot, beadID, state, beadState, "not re-dispatched, retry later: "+refusal, refusal)
 		}
 		result.Action = "error"
 		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
@@ -537,6 +567,77 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	}
 
 	return result
+}
+
+// deferBead is the outcome for all three deferral sites in redispatchAttempt
+// (operator hold, rig hold, pool-full sling refusal). It records the
+// consecutive-deferral streak and, once that streak reaches
+// DefaultMaxDeferrals, escalates to Mayor instead of deferring again —
+// otherwise a PERSISTENT deferral condition (a saturated pool, a standing
+// hold) would defer this bead every cycle forever, since a deferral never
+// advances AttemptCount and so never reaches the --max-attempts escalation
+// either (gt-oo494).
+//
+// message is the plain-deferral wording the caller already built (it varies
+// per site: "not re-dispatched: <hold>" vs "not re-dispatched, retry later:
+// <refusal>"); reason is the same fact bare, for the escalation mail body.
+func deferBead(townRoot, beadID string, state *RedispatchState, beadState *BeadRedispatchState, message, reason string) *RedispatchResult {
+	result := &RedispatchResult{BeadID: beadID, Attempts: beadState.AttemptCount}
+
+	count := beadState.RecordDeferral(reason)
+	if count < DefaultMaxDeferrals {
+		result.Action = "deferred"
+		result.Message = message
+		if saveErr := SaveRedispatchState(townRoot, state); saveErr != nil {
+			result.Message += fmt.Sprintf(" (warning: state save failed: %v)", saveErr)
+		}
+		return result
+	}
+
+	result.Action = "escalated"
+	result.Message = fmt.Sprintf("%s (escalating after %d consecutive deferrals)", message, count)
+	if err := escalateDeferralToMayor(townRoot, beadID, reason, count, beadState); err != nil {
+		result.Error = fmt.Errorf("escalating to mayor: %w", err)
+		result.Message += fmt.Sprintf(" (warning: escalation mail failed: %v)", err)
+	} else {
+		beadState.RecordEscalation()
+	}
+	if saveErr := SaveRedispatchState(townRoot, state); saveErr != nil {
+		result.Message += fmt.Sprintf(" (warning: state save failed: %v)", saveErr)
+	}
+	return result
+}
+
+// escalateDeferralToMayor sends the REDISPATCH_FAILED mail for a bead stuck
+// behind DefaultMaxDeferrals consecutive deferrals. It deliberately does not
+// reuse escalateToMayor's wording ("keeps failing") — the bead here was never
+// actually slung, so the message names the real blocker: a recurring
+// deferral condition, not a bead defect.
+func escalateDeferralToMayor(townRoot, beadID, reason string, deferralCount int, beadState *BeadRedispatchState) error {
+	subject := fmt.Sprintf("REDISPATCH_FAILED: %s (%d consecutive deferrals)", beadID, deferralCount)
+	body := fmt.Sprintf(`Bead %s has been deferred %d times in a row without ever being re-dispatched.
+
+Bead: %s
+Consecutive deferrals: %d
+Redispatch attempts so far: %d
+Last deferral reason: %s
+
+This is not a bead failure — the bead never got a seat. The recurring
+deferral reason above (a saturated pool or a standing dispatch hold) is the
+actual blocker, and it will keep recurring until that condition clears.
+Please investigate and either:
+1. Free capacity (raise polecat_pool.max_local/max_overflow) or lift the hold
+2. Re-sling the bead manually once the condition clears
+3. Close/deprioritize the bead if it's no longer actionable`,
+		beadID, deferralCount,
+		beadID, deferralCount, beadState.AttemptCount, reason,
+	)
+
+	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
+	cmd.Dir = townRoot
+	cmd.Env = deaconMutationRoutingEnv(townRoot)
+	util.SetDetachedProcessGroup(cmd)
+	return cmd.Run()
 }
 
 // RedispatchEditorial handles a RECOVERED_BEAD message whose rejection came
