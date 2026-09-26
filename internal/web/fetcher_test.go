@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -725,8 +726,12 @@ exit 0
 				t.Fatal("expected first FetchConvoys call to fail")
 			}
 
-			if _, err := f.FetchConvoys(); err != nil {
-				t.Fatalf("expected immediate retry to be backed off silently, got: %v", err)
+			// The immediate retry is backed off — it must not re-invoke bd —
+			// but it still must report the breaker-open error rather than
+			// (nil, nil): a caller cannot tell "still failing" from "town is
+			// empty" from a nil error (gt-jwf7).
+			if _, err := f.FetchConvoys(); !errors.Is(err, errConvoyBreakerOpen) {
+				t.Fatalf("expected immediate retry to report errConvoyBreakerOpen, got: %v", err)
 			}
 
 			countBytes, err := os.ReadFile(bdPath + ".count")
@@ -1117,14 +1122,24 @@ exit 0
 	wg.Wait()
 	close(errCh)
 
-	errCount := 0
+	// Exactly one goroutine wins the in-flight slot and hits the fake bd; the
+	// rest are turned away by the breaker. All 8 must still report a non-nil
+	// error — a backed-off caller reporting nil would read as "no convoys"
+	// rather than "still failing" (gt-jwf7).
+	realErrs, breakerOpenErrs := 0, 0
 	for err := range errCh {
-		if err != nil {
-			errCount++
+		switch {
+		case errors.Is(err, errConvoyBreakerOpen):
+			breakerOpenErrs++
+		case err != nil:
+			realErrs++
 		}
 	}
-	if errCount != 1 {
-		t.Fatalf("FetchConvoys errors = %d, want 1; backed-off callers should return nil", errCount)
+	if realErrs != 1 {
+		t.Fatalf("FetchConvoys real errors = %d, want 1 (the single caller that hit bd)", realErrs)
+	}
+	if breakerOpenErrs != 7 {
+		t.Fatalf("FetchConvoys errConvoyBreakerOpen errors = %d, want 7 (every backed-off caller)", breakerOpenErrs)
 	}
 
 	countBytes, err := os.ReadFile(bdPath + ".count")
