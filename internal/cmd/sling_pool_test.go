@@ -597,6 +597,42 @@ func TestResolvePoolAgentLeavesANonPoolRequestUntouched(t *testing.T) {
 	}
 }
 
+// A tmux-listing failure must not override an explicit non-pool --agent
+// (gt-67fj): the fallback that answers an unknown session count with the
+// overflow agent ran ahead of the "not the pool's seat" check, so a request
+// for claude-sonnet came back deepseek-flash whenever tmux hiccupped. The
+// request has to stand untouched here exactly as it does with a clean count
+// in TestResolvePoolAgentLeavesANonPoolRequestUntouched above.
+func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnListSessionsFailure(t *testing.T) {
+	townRoot, added := fakePoolTownWithPool(t,
+		&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash"},
+		poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
+	newPoolSessionLister = func() sessionLister { return &fakeLister{err: errors.New("no server")} }
+
+	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "claude-sonnet")
+	if err != nil || agent != "" || reason != "" {
+		t.Fatalf("a non-pool request must survive a tmux-listing failure untouched: got %q %q %v", agent, reason, err)
+	}
+	if len(*added) != 0 {
+		t.Errorf("a request the pool does not answer must write no label: %v", *added)
+	}
+}
+
+// The same requirement against the seat-claim read path (gt-67fj): a claims
+// directory that cannot be read must not override a non-pool --agent either.
+func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnSeatClaimReadFailure(t *testing.T) {
+	townRoot := fakeRacingPoolTown(t, 3, "", 0)
+	seatFS := injectUnreadableSeatFS(t)
+
+	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-a", "claude-sonnet")
+	if err != nil || agent != "" || reason != "" {
+		t.Fatalf("a non-pool request must survive a seat-claim read failure untouched: got %q %q %v", agent, reason, err)
+	}
+	if files := seatFS.claimFiles(); len(files) != 0 {
+		t.Errorf("a request the pool does not answer must claim no seat: %v", files)
+	}
+}
+
 // fakePoolTown wires a town whose pool has three local seats, one taken 10m
 // ago (so a seat is free and the stagger gap has passed), plus recording fakes
 // for the bead lookup and the label write. It returns the town root and a

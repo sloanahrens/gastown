@@ -181,6 +181,17 @@ func poolSeatCounts(pool *config.PolecatPool, sessions []poolSession) (local, ov
 // three lines that name no agent — no pool configured, no local_agent, and a
 // requested agent the pool does not own — are empty or say so, because the
 // caller has yet to pick one.
+
+// poolOwnsAgent reports whether requested names a seat the pool controls. An
+// empty request has no seat to leave alone, so it is trivially "owned": the
+// pool is free to pick for it. Both choosePoolAgent's rule 2 and poolRoute's
+// own-error fallbacks (a tmux-listing or seat-claim read failure) test this
+// same question — a seat the pool never owned is not the pool's to override
+// on a hiccup any more than it is the pool's to admit (gt-67fj, gt-gcrk).
+func poolOwnsAgent(pool *config.PolecatPool, requested string) bool {
+	return requested == "" || requested == pool.LocalAgent || requested == pool.OverflowAgent
+}
+
 func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, sessions []poolSession, now time.Time) (agent, reason string, refused bool) {
 	switch {
 	case pool == nil:
@@ -286,7 +297,7 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 	//    nothing about a seat the pool never owned: answering such a request with
 	//    the overflow seat, or refusing it as full, spends where the caller never
 	//    asked (gt-gcrk).
-	if requested != "" && requested != pool.LocalAgent && requested != pool.OverflowAgent {
+	if !poolOwnsAgent(pool, requested) {
 		return "", "", false
 	}
 	// 3. One local attempt per bead (B3). The label is attached by the idle-seat
@@ -919,6 +930,12 @@ func poolRoute(townRoot, beadID, requested string, live bool) (agent, reason str
 	}
 	sessions, err := listPolecatSessions(newPoolSessionLister(), townRoot)
 	if err != nil {
+		// A seat the pool does not own is not the pool's to override on a
+		// tmux hiccup any more than it is the pool's to admit (gt-67fj): the
+		// request stands untouched, same as choosePoolAgent's rule 2.
+		if !poolOwnsAgent(ts.PolecatPool, requested) {
+			return "", "", nil
+		}
 		// Without a session count the pool cannot be trusted: fall back to
 		// the overflow agent (or the role default when none is set) rather
 		// than risk over-filling the GPU. A town whose sessions cannot be
@@ -937,6 +954,11 @@ func poolRoute(townRoot, beadID, requested string, live bool) (agent, reason str
 	sessions, seat, claimErr := beginPoolSeatDecision(townRoot, live, sessions)
 	defer seat.done()
 	if claimErr != nil {
+		// As above: a seat the pool does not own stands untouched rather than
+		// being overridden by a claims-read failure (gt-67fj).
+		if !poolOwnsAgent(ts.PolecatPool, requested) {
+			return "", "", nil
+		}
 		// The seats other slings hold could not be read, so the count this
 		// decision would run on is unknown — not zero. The seat a failure to
 		// read can hide is the local one, and taking it on a count that cannot
