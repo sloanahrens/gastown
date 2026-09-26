@@ -123,6 +123,12 @@ var shellCommandSeparators = map[string]bool{
 	"|":  true,
 }
 
+// maxPRWorkflowNestDepth bounds the shell-fed-heredoc recursion in
+// matchesPRWorkflowCommand, mirroring maxDangerousNestDepth: a heredoc body
+// can itself contain a heredoc fed to a shell, and without a cap that nesting
+// could recurse as deep as the input text allows.
+const maxPRWorkflowNestDepth = 3
+
 // matchesPRWorkflowCommand reports whether command is one of the PR-workflow
 // shapes this guard exists to block. It tokenizes the command (so a quoted
 // argument like a PR body is never mistaken for a shell operator or a
@@ -137,7 +143,19 @@ var shellCommandSeparators = map[string]bool{
 // tokenizing. Now that an unquoted newline ends a command (gt-3j8u), a body
 // line that happens to spell "gh pr create" would otherwise be read as a
 // live invocation and block an ordinary file write.
+//
+// A heredoc body fed to a shell invoker (bash <<EOF ... EOF) is the
+// exception: that shell runs the body as a script rather than reading it as
+// data, the same distinction the dangerous-command guard draws with
+// shellFedHeredocBodies (gt-9g0y). Without checking those bodies too, "bash
+// <<'EOF'\ngh pr create --title foo\nEOF" tokenized to [bash, <<, 'EOF'] and
+// was allowed, while the identical text as a line of a compound command was
+// blocked (gt-q91m).
 func matchesPRWorkflowCommand(command string) bool {
+	return matchesPRWorkflowCommandDepth(command, 0)
+}
+
+func matchesPRWorkflowCommandDepth(command string, depth int) bool {
 	tokens := shellTokenize(stripHeredocBodies(strings.TrimSpace(command)))
 
 	segmentMatches := func(segment []string) bool {
@@ -170,7 +188,19 @@ func matchesPRWorkflowCommand(command string) bool {
 		}
 		segment = append(segment, tok)
 	}
-	return segmentMatches(segment)
+	if segmentMatches(segment) {
+		return true
+	}
+
+	if depth >= maxPRWorkflowNestDepth {
+		return false
+	}
+	for _, body := range shellFedHeredocBodies(command) {
+		if matchesPRWorkflowCommandDepth(body, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {

@@ -53,6 +53,16 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 		{"prose in a heredoc body stays opaque", "cat > note.md <<'EOF'\nnever run gh pr create here\nEOF", false},
 		{"blocked command after a heredoc body", "cat > note.md <<'EOF'\nordinary content\nEOF\ngit switch -c feature/x", true},
 
+		// gt-q91m: a heredoc body fed to a shell invoker is not data, it's a
+		// script the shell will run — the same distinction
+		// shellFedHeredocBodies draws for the dangerous-command guard
+		// (gt-9g0y). "bash <<EOF ... gh pr create ... EOF" must be caught the
+		// same as the equivalent compound command.
+		{"gh pr create inside a bash-fed heredoc", "bash <<'EOF'\ngh pr create --title foo\nEOF", true},
+		{"git checkout -b inside a sh-fed heredoc", "sh <<EOF\ngit checkout -b feature/x\nEOF", true},
+		{"unrelated body in a bash-fed heredoc stays unblocked", "bash <<'EOF'\necho hello\nEOF", false},
+		{"bash-fed heredoc piped through cat still counts", "cat <<'EOF' | bash\ngh pr create --title foo\nEOF", true},
+
 		// Quoted text is never a command word, newline or not.
 		{"quoted mention on its own line", "git commit -m \"use gh pr create\"\nls -la", false},
 	}
