@@ -29,8 +29,11 @@ const beadStatusTimeout = 15 * time.Second
 //
 // The trigger — dead session, branch absent from origin — is the population
 // that has always been right; the discriminator is what was missing (gt-4vbn).
-// Work already on the default branch under any SHA, or a terminal bead behind
-// the branch, is superseded rather than lost. A branch that IS on origin is
+// Work already on the default branch under any SHA is confirmed superseded.
+// A terminal bead behind the branch is a weaker signal: closing an issue (e.g.
+// a "no-changes" reclose after a zombie reset re-dispatches it) proves nothing
+// about whether THIS branch's content survives anywhere, so it only stands
+// down the auto-push, not the report (gt-5wse). A branch that IS on origin is
 // never in scope: origin is already custody.
 type StalledPolecatCheck struct {
 	FixableCheck
@@ -99,7 +102,8 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	var stalled []stalledPolecatInfo
-	var unknown []string // polecats we could not verify one way or the other
+	var unknown []string     // polecats we could not verify one way or the other
+	var needsReview []string // closed bead, but content not confirmed on the default branch — not pushed, but not silently cleared either
 	var checked int
 
 	// Iterate over all rigs (or single rig if specified)
@@ -159,12 +163,29 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 			// The branch exists on no remote. Before warning, separate "nobody
 			// has this work" from "someone already did it" (gt-4vbn). An
 			// inconclusive answer here leaves the branch flagged: the trigger
-			// population is right, so uncertainty must not silence it. The
-			// bead is asked first because it needs no network.
-			if c.branchSupersededByTerminalBead(ctx.TownRoot, branch) {
+			// population is right, so uncertainty must not silence it.
+			//
+			// Content confirmed on the default branch is checked first because
+			// it is the strong, independent signal: it proves the same content
+			// exists in custody regardless of what anyone did to the bead.
+			if c.branchLandedOnDefault(pg, branch) {
 				continue
 			}
-			if c.branchLandedOnDefault(pg, branch) {
+			// A closed/tombstoned bead is only a weak, indirect signal — the
+			// issue tracker resolving says nothing about whether THIS branch's
+			// specific commits made it anywhere. Trusting it as proof silently
+			// discarded genuinely-unique work behind an unrelated closure
+			// (gt-5wse). It still stands down the auto-push below (pushing a
+			// truly-superseded branch back to origin was gt-4vbn's harm), but
+			// it must not make the branch disappear from the report too.
+			if c.branchSupersededByTerminalBead(ctx.TownRoot, branch) {
+				issue := "unknown-issue"
+				if meta, ok := polecat.ParseBranchName(branch); ok && meta.Issue != "" {
+					issue = meta.Issue
+				}
+				needsReview = append(needsReview, fmt.Sprintf(
+					"CLOSED-BUT-UNVERIFIED: %s/%s — branch %s has %d commit(s) on no remote behind closed bead %s; content not confirmed on the default branch, review before deleting",
+					rigName, polecatName, branch, unpushedCount, issue))
 				continue
 			}
 
@@ -186,8 +207,9 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 			details[i] = fmt.Sprintf("STALLED: %s/%s — branch %s has %d commit(s) on no remote",
 				s.rigName, s.name, s.branch, s.unpushedCount)
 		}
-		if len(unknown) > 0 {
+		if len(needsReview) > 0 || len(unknown) > 0 {
 			details = append(details, "")
+			details = append(details, needsReview...)
 			details = append(details, unknown...)
 		}
 
@@ -201,12 +223,13 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if len(unknown) > 0 {
+	if len(needsReview) > 0 || len(unknown) > 0 {
 		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusSkipped,
-			Message: fmt.Sprintf("unknown: could not check %d of %d polecat(s) for stalled work", len(unknown), checked),
-			Details: unknown,
+			Name:   c.Name(),
+			Status: StatusSkipped,
+			Message: fmt.Sprintf("unknown: %d of %d polecat(s) need manual review before their branch is discarded",
+				len(needsReview)+len(unknown), checked),
+			Details: append(needsReview, unknown...),
 		}
 	}
 
@@ -241,13 +264,15 @@ func (c *StalledPolecatCheck) branchLandedOnDefault(pg polecatGit, branch string
 }
 
 // branchSupersededByTerminalBead reports whether the bead encoded in the branch
-// name is closed or tombstoned. A terminal bead means the work item is
-// resolved — by this branch landing elsewhere, by a reimplementation, or by
-// abandonment — so the branch is not at risk even when git cannot match its
-// content to the default branch (gt-4vbn).
+// name is closed or tombstoned. A terminal bead means the work ITEM is
+// resolved somehow, but that is not proof this branch's specific content is
+// preserved anywhere: a "no-changes" reclose after a zombie reset, a duplicate
+// pointing at a branch that never lands, or any other closure unrelated to
+// this content, all read as terminal too (gt-5wse). So this signal is only
+// strong enough to withhold the auto-push — never to clear the report, which
+// stays visible via the needsReview bucket in Run.
 //
 // False on any uncertainty: no issue in the branch name, or a failed lookup.
-// This signal only narrows an already-flagged branch back out of the warning.
 func (c *StalledPolecatCheck) branchSupersededByTerminalBead(townRoot, branch string) bool {
 	if c.beadStatus == nil {
 		return false
