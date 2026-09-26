@@ -178,9 +178,34 @@ if [ -n "$PREV" ] && ! git -C "$RIG_DIR" merge-base --is-ancestor "$PREV" "$EXPE
   refuse not-forward "installed $PREV is not an ancestor of $EXPECTED (would be a downgrade)"
 fi
 
+# gt-vya0s can leave $GT OS-immutable (BSD chflags uchg / Linux chattr +i)
+# between installs. That flag blocks more than a direct write to $GT itself:
+# macOS `cp -p` also copies chflags onto the copy, and an immutable file
+# cannot be renamed even under a new name — so a plain `cp -p "$GT" tmp` below
+# would leave `tmp` stuck uchg too, and the following `mv` of *that* tmp would
+# fail the same way a direct write would. clear_immutable strips the flag
+# from any such copy right after it's made (only the live $GT should ever
+# carry it), and from $GT itself before rollback's own replace; set_immutable
+# re-applies it once $GT holds the restored binary — the same bracket
+# install-binary.sh's atomic replace uses. Both are harmless no-ops when the
+# flag was never set (e.g. before gt-vya0s lands).
+clear_immutable() {
+  local target="$1"
+  [ -e "$target" ] || return 0
+  chflags nouchg "$target" 2>/dev/null || true
+  chattr -i "$target" 2>/dev/null || true
+}
+
+set_immutable() {
+  local target="$1"
+  chflags uchg "$target" 2>/dev/null && return 0
+  chattr +i "$target" 2>/dev/null || true
+}
+
 # --- Keep the previous binary ------------------------------------------------------
 if [ -f "$GT" ]; then
   cp -p "$GT" "$BIN_DIR/.gt.prev.$$"
+  clear_immutable "$BIN_DIR/.gt.prev.$$"
   mv -f "$BIN_DIR/.gt.prev.$$" "$BIN_DIR/gt.prev"
 fi
 
@@ -188,7 +213,10 @@ fi
 rollback() {
   [ -f "$BIN_DIR/gt.prev" ] || return 1
   cp -p "$BIN_DIR/gt.prev" "$BIN_DIR/.gt.rollback.$$" 2>/dev/null || return 1
+  clear_immutable "$BIN_DIR/.gt.rollback.$$"
+  clear_immutable "$GT"
   mv -f "$BIN_DIR/.gt.rollback.$$" "$GT" 2>/dev/null || { rm -f "$BIN_DIR/.gt.rollback.$$"; return 1; }
+  set_immutable "$GT"
 }
 
 # fail_install REASON MESSAGE SEVERITY FINGERPRINT EVENT — exit 1 after putting

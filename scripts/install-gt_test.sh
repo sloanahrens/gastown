@@ -85,7 +85,17 @@ case "$target" in
     c=$(cat "$T_WORLD/new_commit" 2>/dev/null || git rev-parse --short HEAD)
     sed "s/__COMMIT__/$c/" "$T_WORLD/gt.tmpl" > "$inst/.gt.new"
     chmod +x "$inst/.gt.new"
-    mv -f "$inst/.gt.new" "$inst/gt" ;;
+    # simulate_immutable_replace marker: stand in for install-binary.sh's own
+    # gt-vya0s clear-flag/replace/re-set-flag bracket, so a case can leave the
+    # installed binary OS-immutable the way a real gt-vya0s install would.
+    if [ -e "$T_WORLD/simulate_immutable_replace" ]; then
+      chflags nouchg "$inst/gt" 2>/dev/null || true
+      chattr -i "$inst/gt" 2>/dev/null || true
+    fi
+    mv -f "$inst/.gt.new" "$inst/gt"
+    if [ -e "$T_WORLD/simulate_immutable_replace" ]; then
+      chflags uchg "$inst/gt" 2>/dev/null || chattr +i "$inst/gt" 2>/dev/null || true
+    fi ;;
   *) echo "stub make: unhandled target $target" >&2; exit 2 ;;
 esac
 MAKE
@@ -316,6 +326,50 @@ for sub in fetch merge; do
     *) fail "no auto gc: $sub line: '$line'" ;;
   esac
 done
+
+# --- Case 17: gt-aigsx — gt-vya0s can leave the installed binary OS-immutable
+# (chflags uchg / chattr +i) between installs; rollback must still be able to
+# replace it. `chattr +i` silently no-ops without CAP_LINUX_IMMUTABLE (e.g.
+# non-root CI on Linux), so probe for real enforcement first — asserting a
+# rollback success the host couldn't actually have tested would be a false
+# PASS, worse than skipping (mirrors install-binary_test.sh's own probe). ---
+immutable_supported() {
+  local probe ok=1
+  probe="$(mktemp)"
+  if chflags uchg "$probe" 2>/dev/null; then
+    ok=0
+    chflags nouchg "$probe" 2>/dev/null || true
+  elif chattr +i "$probe" 2>/dev/null; then
+    ok=0
+    chattr -i "$probe" 2>/dev/null || true
+  fi
+  rm -f "$probe"
+  return "$ok"
+}
+
+if immutable_supported; then
+  T=$(make_world)
+  touch "$T/simulate_immutable_replace"
+  echo deadbee > "$T/new_commit"
+  chflags uchg "$T/bin/gt" 2>/dev/null || chattr +i "$T/bin/gt" 2>/dev/null || true
+  rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+  [ "$rc" = "1" ] && grep -q "escalate .*cannot verify what came into force.*--fingerprint install-gt:smoke-failed" "$T/gt.log" \
+    && grep -q -- "-s high" "$T/gt.log" \
+    && pass "immutable binary: rollback recovers (HIGH smoke-failed, not CRITICAL rollback-failed)" \
+    || fail "immutable binary: rc=$rc $(cat "$T/gt.log" 2>/dev/null)"
+  [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
+    && pass "immutable binary: c1 restored despite the flag" \
+    || fail "immutable binary: in force $(reported "$T")"
+  rc2=0
+  ( printf 'STUB\n' > "$T/bin/gt" ) 2>/dev/null || rc2=$?
+  [ "$rc2" -ne 0 ] \
+    && pass "immutable binary: rollback re-set the flag on the restored binary" \
+    || fail "immutable binary: flag not re-set after rollback"
+  chflags nouchg "$T/bin/gt" 2>/dev/null || true
+  chattr -i "$T/bin/gt" 2>/dev/null || true
+else
+  echo "  SKIP: OS immutable-flag enforcement unavailable on this host (needs BSD chflags, or chattr with CAP_LINUX_IMMUTABLE) — gt-aigsx rollback check not run"
+fi
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
