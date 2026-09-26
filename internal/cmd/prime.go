@@ -907,6 +907,11 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	}
 	outputHookedBeadDetails(ctx, hookedBead)
 
+	// gt-csng: polecat-side pre-work duplicate check — one local git command
+	// against origin/main, terse output, best-effort (silent on any failure).
+	// It rides this section so hook-budget truncation cannot drop it.
+	checkHookedPathDupes(ctx, hookedBead)
+
 	if hasWorkflow {
 		if err := outputMoleculeWorkflow(ctx, attachment); err != nil {
 			return true, err
