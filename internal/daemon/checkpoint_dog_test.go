@@ -436,6 +436,110 @@ func TestCheckpointWorktreeAllowsLegitimateWorkAgainstMergedTarget(t *testing.T)
 	}
 }
 
+// TestCheckpointRevertTarget_UsesRigConfigDefaultBranch reproduces the gt-dw43
+// mismatch: a rig whose default branch is not "main" was still guarded
+// against origin/main, a ref that never even resolves there. The target must
+// follow the rig's configured default branch, the same source gt done itself
+// reads.
+func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
+	dir := t.TempDir()
+	remote := filepath.Join(dir, "origin.git")
+	workDir := filepath.Join(dir, "polecat")
+
+	mustRunGit(t, "", "init", "--bare", remote)
+	mustRunGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/trunk")
+	mustRunGit(t, "", "clone", remote, workDir)
+	mustRunGit(t, workDir, "config", "user.email", "polecat@example.com")
+	mustRunGit(t, workDir, "config", "user.name", "Polecat")
+	if err := os.WriteFile(filepath.Join(workDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base.txt: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "-A")
+	mustRunGit(t, workDir, "commit", "-m", "base")
+	mustRunGit(t, workDir, "push", "origin", "HEAD:trunk")
+
+	townRoot := filepath.Join(dir, "town")
+	rigPath := filepath.Join(townRoot, "rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"default_branch":"trunk"}`), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	d := &Daemon{
+		logger: log.New(io.Discard, "", 0),
+		config: &Config{TownRoot: townRoot},
+	}
+	if got, want := d.checkpointRevertTarget(workDir, "rig"), "origin/trunk"; got != want {
+		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
+	}
+}
+
+// TestCheckpointRevertTarget_ForkBackedRigUsesUpstream reproduces the other
+// half of gt-dw43: even on a rig whose default branch really is "main",
+// origin/main is the wrong ref in a fork-backed rig, where origin is the
+// fork and upstream carries the shared history. gt done's own base
+// resolution (git.CleanDefaultBranchBaseRef) targets upstream/<default> there
+// instead, and the daemon's guard must agree.
+func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
+	dir := t.TempDir()
+	originRemote := filepath.Join(dir, "origin.git")
+	upstreamRemote := filepath.Join(dir, "upstream.git")
+	workDir := filepath.Join(dir, "polecat")
+
+	// origin and upstream are distinct bare repos at distinct paths — origin
+	// stands in for the fork, upstream for the shared canonical repo. Only a
+	// URL difference between them makes ForkBackedRemote true.
+	mustRunGit(t, "", "init", "--bare", originRemote)
+	mustRunGit(t, "", "init", "--bare", upstreamRemote)
+
+	mustRunGit(t, "", "init", workDir)
+	mustRunGit(t, workDir, "config", "user.email", "polecat@example.com")
+	mustRunGit(t, workDir, "config", "user.name", "Polecat")
+	mustRunGit(t, workDir, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(workDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base.txt: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "-A")
+	mustRunGit(t, workDir, "commit", "-m", "base")
+	mustRunGit(t, workDir, "remote", "add", "origin", originRemote)
+	mustRunGit(t, workDir, "remote", "add", "upstream", upstreamRemote)
+	mustRunGit(t, workDir, "push", "origin", "HEAD:main")
+	mustRunGit(t, workDir, "push", "upstream", "HEAD:main")
+	mustRunGit(t, workDir, "fetch", "upstream")
+
+	townRoot := filepath.Join(dir, "town")
+	rigPath := filepath.Join(townRoot, "rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"default_branch":"main"}`), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	d := &Daemon{
+		logger: log.New(io.Discard, "", 0),
+		config: &Config{TownRoot: townRoot},
+	}
+	if got, want := d.checkpointRevertTarget(workDir, "rig"), "upstream/main"; got != want {
+		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
+	}
+}
+
+// TestCheckpointRevertTarget_NoRigConfigFallsBackToMain covers the case the
+// old hardcoded constant handled correctly: no rig config reachable (nil
+// daemon config, as in the other checkpoint_dog tests in this file) still
+// falls back to origin/main rather than erroring.
+func TestCheckpointRevertTarget_NoRigConfigFallsBackToMain(t *testing.T) {
+	polecat := newCheckpointRevertScenario(t)
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if got, want := d.checkpointRevertTarget(polecat, "rig"), "origin/main"; got != want {
+		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
+	}
+}
+
 // TestCheckpointWorktreeExcludesThrowawayFiles reproduces gt-ozo4: a polecat
 // wrote a throwaway diagnostic test file in its worktree to poke at a live
 // system, and deleted it minutes later. The checkpoint dog's `git add -A`
