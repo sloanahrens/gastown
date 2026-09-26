@@ -10,6 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/feed"
+	"github.com/steveyegge/gastown/internal/krc"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -192,6 +196,127 @@ func TestTripwire_ToleratesPlainAtomicWriteTemp(t *testing.T) {
 	joined := strings.Join(leaks, "\n")
 	if strings.Contains(joined, ".events.jsonl.tmp") {
 		t.Errorf("atomic-write temp flagged as leak: %v", leaks)
+	}
+}
+
+// gt-lqri: the .tmp suffix exemption is fails-open — a test that writes a
+// .tmp to a watched directory and never renames it looks identical to a live
+// atomic write under the suffix test, and the suffix alone forgives both. A
+// .tmp whose base is not a known atomic-write sibling must be reported.
+func TestTripwire_FailsClosedOnUnclaimedTmp(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	writeFile(t, filepath.Join(town, "scratch.tmp"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak (unclaimed .tmp), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.tmp") {
+		t.Errorf("unclaimed .tmp not detected: %v", leaks)
+	}
+}
+
+// beads.WriteRoutes creates .routes-<random>.tmp in .beads via
+// os.CreateTemp (a .tmp-suffix name whose middle is a random number, so it is
+// not derivable from the target routes.jsonl), and the daemon may hard-crash
+// before the rename. The suffix must not carry it: .beads is a watched
+// surface, and a .routes-<random>.tmp left there is exactly the residue the
+// cross-check tolerates only because it names a real atomic-write target.
+func TestTripwire_ToleratesRoutesCreateTempSiblings(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	writeFile(t, filepath.Join(town, ".beads", beads.RoutesTempPrefix+"12345.tmp"), "")
+	writeFile(t, filepath.Join(town, ".beads", beads.RoutesTempPrefix+"99999.tmp"), "")
+	// A real leak in the same directory must still be caught.
+	writeFile(t, filepath.Join(town, ".beads", "scratch.jsonl"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak (real file only), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.jsonl") {
+		t.Errorf("real leak not detected: %v", leaks)
+	}
+	joined := strings.Join(leaks, "\n")
+	if strings.Contains(joined, beads.RoutesTempPrefix) {
+		t.Errorf("CreateTemp %s*.tmp sibling flagged as leak: %v", beads.RoutesTempPrefix, leaks)
+	}
+}
+
+// Same fails-open shape in a watched subdirectory: an abandoned .tmp under
+// .dolt-data must be reported, not forgiven by the suffix.
+func TestTripwire_FailsClosedOnUnclaimedTmpInWatchedSubdir(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	writeFile(t, filepath.Join(town, ".dolt-data", "scratch.tmp"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak (unclaimed .tmp), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.tmp") {
+		t.Errorf("unclaimed .tmp not detected: %v", leaks)
+	}
+}
+
+// A hard crash (SIGKILL) mid-prune leaves <path>.tmp in the watched town
+// surface — the expected state for krc's own writers (events prune, feed
+// prune, and its auto-prune state save), which all go through
+// replaceWithLines/SaveAutoPruneState and share krc.ReplaceTempSuffix. The
+// next prune removes the residue; the tripwire tolerates it in the meantime,
+// and its reporting pass is the intended signal that a crash happened.
+func TestTripwire_ToleratesCrashResidueTmp(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	writeFile(t, filepath.Join(town, events.EventsFile+krc.ReplaceTempSuffix), "")
+	writeFile(t, filepath.Join(town, feed.FeedFile+krc.ReplaceTempSuffix), "")
+	writeFile(t, filepath.Join(town, krc.AutoPruneStateFile+krc.ReplaceTempSuffix), "")
+	// A real leak must still be caught alongside the crash residue.
+	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak (real file only), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.txt") {
+		t.Errorf("real leak not detected: %v", leaks)
+	}
+	joined := strings.Join(leaks, "\n")
+	if strings.Contains(joined, ".tmp") {
+		t.Errorf("crash-residue .tmp flagged as leak: %v", leaks)
+	}
+}
+
+// The feed curator's separate truncate rotation writes a different suffix
+// than krc's own prune (feed.TruncateTempSuffix, ".truncate.tmp", not
+// krc.ReplaceTempSuffix's plain ".tmp") for the same target file,
+// .feed.jsonl. A prior version of this allowlist assumed .feed.jsonl had
+// only one writer's suffix and reported this one's crash residue as a leak;
+// this test pins the real producer filename so that regression cannot
+// recur silently.
+func TestTripwire_ToleratesFeedCuratorTruncateResidue(t *testing.T) {
+	town := makeFakeTown(t)
+	snap := snapshotTown(town)
+
+	writeFile(t, filepath.Join(town, feed.FeedFile+feed.TruncateTempSuffix), "")
+	// A real leak must still be caught alongside the crash residue.
+	writeFile(t, filepath.Join(town, "scratch.txt"), "oops")
+
+	leaks := snap.diff()
+	if len(leaks) != 1 {
+		t.Fatalf("expected 1 leak (real file only), got %d: %v", len(leaks), leaks)
+	}
+	if !strings.Contains(leaks[0], "scratch.txt") {
+		t.Errorf("real leak not detected: %v", leaks)
+	}
+	joined := strings.Join(leaks, "\n")
+	if strings.Contains(joined, feed.TruncateTempSuffix) {
+		t.Errorf("feed curator truncate residue flagged as leak: %v", leaks)
 	}
 }
 

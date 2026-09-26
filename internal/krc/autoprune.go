@@ -52,7 +52,7 @@ func SaveAutoPruneState(townRoot string, state *AutoPruneState) error {
 	}
 
 	path := autoStatePath(townRoot)
-	tmp := path + ".tmp"
+	tmp := path + ReplaceTempSuffix
 	if err := os.WriteFile(tmp, data, 0644); err != nil { //nolint:gosec // G306: state file is non-sensitive
 		return fmt.Errorf("writing auto-prune state: %w", err)
 	}

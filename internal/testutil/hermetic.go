@@ -44,6 +44,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/feed"
+	"github.com/steveyegge/gastown/internal/krc"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -796,6 +799,13 @@ func snapshotTown(root string) *townSnapshot {
 // events not attributable to the town's known actors (concurrent legitimate
 // agents keep writing events while tests run, so growth alone is not a
 // failure).
+//
+// The atomic-temp exemption is fails-open by construction (gt-lqri): a
+// .tmp-suffix match cannot distinguish a temp written to a watched directory
+// from one abandoned there, and the suffix alone forgives both. diff()
+// tolerates a new .tmp entry only when its base matches a known atomic-write
+// sibling (atomicTempLeak) — the transients the exemption was added for — and
+// reports any other .tmp as a leak.
 func (s *townSnapshot) diff() []string {
 	var leaks []string
 
@@ -803,9 +813,21 @@ func (s *townSnapshot) diff() []string {
 	rigs := rigNames(s.root)
 	var added []string
 	for name := range after.entries {
-		if !s.entries[name] && !strings.HasSuffix(name, ".lock") && !isAtomicWriteTemp(name) && !explainedByRig(name, rigs) {
-			added = append(added, name)
+		if s.entries[name] || strings.HasSuffix(name, ".lock") || explainedByRig(name, rigs) {
+			continue
 		}
+		if isAtomicWriteTemp(name) {
+			// .~ names are unforgeable — the temp pattern is
+			// .~<file>.<random> — and stay tolerated as-is (gt-wdr). A
+			// .tmp suffix, by contrast, is a fails-open match: it is
+			// tolerated only when the base is a known atomic-write
+			// sibling, so an abandoned or leaked .tmp is reported (gt-lqri).
+			base := filepath.Base(name)
+			if strings.HasPrefix(base, ".~") || atomicTempLeak(base) {
+				continue
+			}
+		}
+		added = append(added, name)
 	}
 	sort.Strings(added)
 	for _, name := range added {
@@ -843,9 +865,70 @@ func explainedByRig(name string, rigs map[string]bool) bool {
 // removes one of these — indistinguishable from the .lock churn already
 // tolerated below (gt-wdr, the file-entry analog of gt-ro0's event-actor
 // exemption).
+//
+// gt-lqri: the .tmp suffix alone is a fails-open exemption — a test that
+// abandons a .tmp file, or tooling that hard-crashes before renaming, looks
+// identical to a live atomic write, and the suffix match forgives both. The
+// .~ prefix does not have this ambiguity (the OS temp pattern
+// .~<file>.<random> is unforgeable by accident), so diff() keeps it
+// unconditional; .tmp entries pass diff() only when atomicTempLeak()
+// cross-checks them against the live target set, and fails closed otherwise.
 func isAtomicWriteTemp(name string) bool {
 	base := filepath.Base(name)
 	return strings.HasPrefix(base, ".~") || strings.HasSuffix(base, ".tmp")
+}
+
+// atomicWriteTemps maps each live target file on the snapshot's watched
+// surface to the exact suffixes its atomic writers append while building a
+// replacement, before renaming it over the target. .feed.jsonl has two
+// independent writers with different suffixes — krc's periodic prune
+// (replaceWithLines, gt-hotx) and the feed curator's separate truncate
+// rotation — so both must be listed, or the writer that isn't gets its
+// crash residue reported as a leak (exactly the bug this map replaced:
+// hardcoding a single ".tmp" sibling per file missed the curator's
+// ".truncate.tmp"). Suffixes are the producers' own exported constants
+// rather than re-typed literals, so a renamed suffix breaks the build here
+// instead of silently going stale.
+var atomicWriteTemps = map[string][]string{
+	events.EventsFile:      {krc.ReplaceTempSuffix},
+	feed.FeedFile:          {krc.ReplaceTempSuffix, feed.TruncateTempSuffix},
+	krc.AutoPruneStateFile: {krc.ReplaceTempSuffix},
+}
+
+// atomicTempPrefixes are CreateTemp patterns that produce temps on the
+// watched surface: beads.WriteRoutes uses os.CreateTemp(beadsDir,
+// beads.RoutesTempPrefix+"*.tmp") in .beads, and os.CreateTemp splices its
+// random suffix at the "*" in the pattern — so the temp's name
+// (.routes-<random>.tmp) is not derivable from routes.jsonl, which is why
+// the match is a prefix, not a sibling of a target name.
+var atomicTempPrefixes = []string{
+	beads.RoutesTempPrefix,
+}
+
+// atomicTempLeak reports whether a new .tmp-suffix entry is a known atomic-
+// write temp rather than a leaked file. The exemption is fails-open by
+// construction — a suffix match cannot tell a .tmp written to a watched
+// directory from a .tmp abandoned there — so diff() tolerates a .tmp entry
+// only when its base names a known temp (a target file plus one of its
+// producers' exact suffixes, or a known CreateTemp prefix); a .tmp with no
+// live target (a test that wrote a temp and never renamed it) is reported
+// as a leak instead of being silently forgiven.
+func atomicTempLeak(base string) bool {
+	for file, suffixes := range atomicWriteTemps {
+		for _, suffix := range suffixes {
+			if base == file+suffix { // e.g. .feed.jsonl.truncate.tmp
+				return true
+			}
+		}
+	}
+	if strings.HasSuffix(base, ".tmp") {
+		for _, prefix := range atomicTempPrefixes {
+			if strings.HasPrefix(base, prefix) { // e.g. .routes-12345.tmp
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // suspiciousAppendedEvents reads .events.jsonl from offset and flags events
