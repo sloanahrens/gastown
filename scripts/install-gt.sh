@@ -188,7 +188,8 @@ fi
 # carry it), and from $GT itself before rollback's own replace; set_immutable
 # re-applies it once $GT holds the restored binary — the same bracket
 # install-binary.sh's atomic replace uses. Both are harmless no-ops when the
-# flag was never set (e.g. before gt-vya0s lands).
+# flag was never set, or on a platform that can't set it at all (e.g.
+# chattr +i without CAP_LINUX_IMMUTABLE).
 clear_immutable() {
   local target="$1"
   [ -e "$target" ] || return 0
