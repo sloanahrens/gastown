@@ -2729,6 +2729,7 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	agentForProcess := rc.ResolvedAgent
 	if agentOverride != "" {
 		resolvedEnv["GT_AGENT"] = agentOverride
+		resolvedEnv[EnvAgentOverride] = "1"
 		agentForProcess = agentOverride
 	} else if rc.ResolvedAgent != "" {
 		resolvedEnv["GT_AGENT"] = rc.ResolvedAgent
