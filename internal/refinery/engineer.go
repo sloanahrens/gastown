@@ -832,9 +832,16 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	// generic "WIP: checkpoint (auto)" subject, straight onto target's
 	// history. Squash instead so target never gains one, whether or not it
 	// ended up as the branch tip.
+	// gt-c1mw: a warning-and-continue here defaults hasAutoSave to false and
+	// falls through to the --no-ff path below — exactly the path this guard
+	// exists to block a raw checkpoint commit from taking. Fail closed instead,
+	// matching stackMerge's batch-path handling of the same check.
 	hasAutoSave, asErr := checkpoint.HasAutoSaveCommits(e.git.WorkDir(), "origin/"+target, mergeRef)
 	if asErr != nil {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not check for auto-save commits: %v\n", asErr)
+		return ProcessResult{
+			Success: false,
+			Error:   fmt.Sprintf("check %s for auto-save commits: %v", mr.ID, asErr),
+		}
 	}
 
 	if hasAutoSave {
