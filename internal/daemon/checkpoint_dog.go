@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
 	gtgit "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -274,28 +275,48 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	return true
 }
 
+// checkpointRevertTargetDefault is the branch name assumed when the rig's
+// config cannot be read — most rigs in this town default to main.
+const checkpointRevertTargetDefault = "main"
+
 // checkpointRevertTarget is the ref checkpointRevertGuard compares the
-// pending checkpoint tree against. Hardcoded rather than read from rig
-// config: every rig in this town bases its polecat branches on main, the same
-// assumption gt done's own revert guard makes (internal/cmd/done.go).
-const checkpointRevertTarget = "origin/main"
+// pending checkpoint tree against. It is NOT always origin/main: gt done's
+// own revert guard resolves its base with git.CleanDefaultBranchBaseRef,
+// which reads the rig's configured default branch and, in a fork-backed rig
+// (origin is a fork with a distinct upstream remote), targets
+// upstream/<default> instead of origin/<default> — origin/main would be the
+// fork's stale copy there, not the shared history the guard needs to protect
+// (internal/cmd/done.go, doneContaminationBaseRef/CleanBaseRef). This mirrors
+// that same resolution so the two guards agree on what "already merged" means.
+func (d *Daemon) checkpointRevertTarget(workDir, rigName string) string {
+	defaultBranch := checkpointRevertTargetDefault
+	if d.config != nil && d.config.TownRoot != "" {
+		rigPath := filepath.Join(d.config.TownRoot, rigName)
+		if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
+			defaultBranch = rigCfg.DefaultBranch
+		}
+	}
+	return gtgit.NewGit(workDir).CleanDefaultBranchBaseRef("origin", defaultBranch)
+}
 
 // checkpointRevertGuard reports whether the currently staged index would, if
-// committed, revert content already merged to checkpointRevertTarget (gt-2bp8).
+// committed, revert content already merged to the rig's clean base ref
+// (gt-2bp8).
 //
 // It writes the index to a tree object without committing — the WIP commit
 // does not exist yet to inspect — and runs the same content-based revert
 // detection gt done applies to its own final commit (git.DetectRevertedMerges),
 // against that pending tree instead of HEAD's.
 //
-// When checkpointRevertTarget cannot even be resolved locally (no origin
-// remote, or it was never fetched into this worktree) there is no known
-// merged baseline to compare against, so the guard passes rather than blocks
-// every checkpoint in an environment that simply lacks the ref. Once the
-// target does resolve, any further failure to complete the check fails
-// closed: a check that could not run must not read as a check that passed.
+// When the target ref cannot even be resolved locally (no origin remote, or
+// it was never fetched into this worktree) there is no known merged baseline
+// to compare against, so the guard passes rather than blocks every checkpoint
+// in an environment that simply lacks the ref. Once the target does resolve,
+// any further failure to complete the check fails closed: a check that could
+// not run must not read as a check that passed.
 func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (blocked bool, reason string) {
-	if _, err := runGitCmd(workDir, "rev-parse", "--verify", "--quiet", checkpointRevertTarget); err != nil {
+	target := d.checkpointRevertTarget(workDir, rigName)
+	if _, err := runGitCmd(workDir, "rev-parse", "--verify", "--quiet", target); err != nil {
 		return false, ""
 	}
 
@@ -304,9 +325,9 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 		return true, fmt.Sprintf("could not inspect the pending checkpoint tree (git write-tree failed): %v", err)
 	}
 
-	found, err := gtgit.DetectRevertedMerges(gtgit.NewGit(workDir), checkpointRevertTarget, pendingTree)
+	found, err := gtgit.DetectRevertedMerges(gtgit.NewGit(workDir), target, pendingTree)
 	if err != nil {
-		return true, fmt.Sprintf("could not verify the pending checkpoint against %s: %v", checkpointRevertTarget, err)
+		return true, fmt.Sprintf("could not verify the pending checkpoint against %s: %v", target, err)
 	}
 	if len(found) == 0 {
 		return false, ""
@@ -318,7 +339,7 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 	}
 	reason = fmt.Sprintf(
 		"staged content reverts %d commit(s) already merged to %s, across %d path(s): %s",
-		len(found), checkpointRevertTarget, len(paths), strings.Join(paths, ", "))
+		len(found), target, len(paths), strings.Join(paths, ", "))
 
 	if alert := d.checkpointRevertAlert; alert != nil {
 		key := fmt.Sprintf("checkpoint_dog:revert-guard:%s/%s", rigName, polecatName)
