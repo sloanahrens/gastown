@@ -112,6 +112,30 @@ has_in_progress_work() {
   [ "${count:-0}" -gt 0 ]
 }
 
+# True (exit 0) if the rig has a 'gt mq batch run' in flight.
+#
+# A batch stacks several MRs and lands them in one push, claiming none of them
+# — and no polecat bead — until they land. Mid-batch the rig therefore reads
+# as entries, none in_progress, nobody working: the exact signature detector 2
+# escalates on, and the source of 9 false escalations in 5 hours before this
+# check existed (gt-lhaum). The run holds an in-flight marker for its whole
+# duration; 'gt slot status' lists it beside the gate slots, and its name and
+# role are defined in internal/cmd/mq_batch.go (batchMarkerName,
+# batchMarkerRole).
+#
+# A reading that cannot be taken counts as not-in-flight: this detector exists
+# to speak up about a queue nobody is moving, and a marker it cannot read must
+# not silence it.
+batch_in_flight() {
+  local rig="$1" reading=""
+
+  reading=$(gt slot status --json 2>/dev/null) || return 1
+  [ -n "$reading" ] || return 1
+
+  printf '%s' "$reading" | jq -e --arg name "mq-batch-$rig" \
+    'any(.slots[]?; .marker == true and .name == $name)' >/dev/null 2>&1
+}
+
 # Fetch a single bead as a normalized single JSON object (bd show --json
 # returns a one-element array).
 bead_json() {
@@ -210,16 +234,20 @@ while IFS= read -r RIG; do
       QUEUE_AGE=$(( NOW - OLDEST_EPOCH ))
 
       if [ "$QUEUE_AGE" -ge "$QUEUE_STALL_SECONDS" ] && ! has_in_progress_work "$RIG"; then
-        QUEUE_AGE_MIN=$(( QUEUE_AGE / 60 ))
-        log "  STUCK WORK: $RIG merge queue stalled — $MR_COUNT entries, none progressing, no polecat working, oldest ${QUEUE_AGE_MIN}m"
-        ESCALATIONS=$((ESCALATIONS + 1))
+        if batch_in_flight "$RIG"; then
+          log "  $RIG: 'gt mq batch run' in flight — $MR_COUNT entries unclaimed until it lands them"
+        else
+          QUEUE_AGE_MIN=$(( QUEUE_AGE / 60 ))
+          log "  STUCK WORK: $RIG merge queue stalled — $MR_COUNT entries, none progressing, no polecat working, oldest ${QUEUE_AGE_MIN}m"
+          ESCALATIONS=$((ESCALATIONS + 1))
 
-        gt escalate "$RIG merge queue stalled — $MR_COUNT entries, none in_progress, no polecat working (oldest ${QUEUE_AGE_MIN}m)" \
-          -s medium \
-          --source "plugin:stuck-work-dog" \
-          --fingerprint "stuck-work-dog:queue-stall:$RIG" \
-          --reason "The merge queue has entries but none are progressing and no polecat in $RIG has in_progress work. Check for a blocked-mr escalation above (an unassigned blocker is the usual cause) or a stuck refinery." \
-          || escalate_failed "queue-stall:$RIG"
+          gt escalate "$RIG merge queue stalled — $MR_COUNT entries, none in_progress, no polecat working (oldest ${QUEUE_AGE_MIN}m)" \
+            -s medium \
+            --source "plugin:stuck-work-dog" \
+            --fingerprint "stuck-work-dog:queue-stall:$RIG" \
+            --reason "The merge queue has entries but none are progressing and no polecat in $RIG has in_progress work. Check for a blocked-mr escalation above (an unassigned blocker is the usual cause) or a stuck refinery." \
+            || escalate_failed "queue-stall:$RIG"
+        fi
       fi
     fi
   fi
