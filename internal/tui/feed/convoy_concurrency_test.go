@@ -93,6 +93,43 @@ func resetTrackedIDsCache() {
 	trackedIDsCacheMu.Unlock()
 }
 
+func resetIssueStatusCache() {
+	issueStatusCacheMu.Lock()
+	issueStatusCache = make(map[string]string)
+	issueStatusCacheMu.Unlock()
+}
+
+// setupFakeBdShowFailing installs a fake `bd` binary whose `show` subcommand
+// always fails (non-zero exit), simulating the transient bd/Dolt failure
+// that batchIssueStatus must tolerate. Other subcommands succeed with an
+// empty list so trackedIssueIDs (if it ends up called) doesn't error out.
+func setupFakeBdShowFailing(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bd script uses /bin/sh, not available on Windows")
+	}
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+cmd="$1"
+case "$cmd" in
+  show)
+    exit 1
+    ;;
+  *)
+    echo '[]'
+    exit 0
+    ;;
+esac
+`
+	bdPath := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil { //nolint:gosec // test fixture
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func readMaxConcurrent(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path) //nolint:gosec // test fixture, path constructed by test
@@ -208,5 +245,49 @@ func TestEnrichConvoys_BatchesStatusIntoOneBdShowCall(t *testing.T) {
 	}
 	if showCalls != 1 {
 		t.Fatalf("expected exactly 1 `bd show` call for 3 convoys, got %d: %v", showCalls, lines)
+	}
+}
+
+// TestBatchIssueStatus_FallsBackToCacheOnBdShowFailure is the regression
+// test for gt-7g8i. Once enrichConvoys batches every convoy's tracked
+// issues into a single `bd show` call (gt-05vk), a single failure of that
+// call — one bad ID, a transient Dolt hiccup — used to zero out Completed
+// for every convoy in the town at once, not just the one convoy affected.
+// batchIssueStatus must fall back to each issue's last known status
+// instead of returning an empty map on failure.
+func TestBatchIssueStatus_FallsBackToCacheOnBdShowFailure(t *testing.T) {
+	resetTrackedIDsCache()
+	resetIssueStatusCache()
+
+	items := []convoyListItem{
+		{ID: "hq-cv-eee1"},
+		{ID: "hq-cv-eee2"},
+	}
+	depByConvoy := map[string]string{
+		"hq-cv-eee1": `[{"id":"gt-1"}]`,
+		"hq-cv-eee2": `[{"id":"gt-2"}]`,
+	}
+	showJSON := `[{"id":"gt-1","status":"closed"},{"id":"gt-2","status":"open"}]`
+	setupFakeBdForEnrich(t, depByConvoy, showJSON)
+
+	first := enrichConvoys(t.TempDir(), items)
+	if first[0].Completed != 1 || first[1].Completed != 0 {
+		t.Fatalf("initial enrichConvoys() = %+v, want convoy 1 Completed=1 (gt-1 closed), convoy 2 Completed=0 (gt-2 open)", first)
+	}
+
+	// Simulate a Dolt hiccup on the next poll tick: `bd show` now fails.
+	// trackedIssueIDs still serves gt-1/gt-2 from its own warm cache, so
+	// only batchIssueStatus's error path is exercised here.
+	setupFakeBdShowFailing(t)
+
+	second := enrichConvoys(t.TempDir(), items)
+	if second[0].Total != 1 || second[1].Total != 1 {
+		t.Fatalf("Total should still reflect cached tracked IDs after bd show failure: got %+v", second)
+	}
+	if second[0].Completed != 1 {
+		t.Errorf("after a failed bd show, convoy hq-cv-eee1 Completed = %d, want 1 (fallback to last known status, not zeroed)", second[0].Completed)
+	}
+	if second[1].Completed != 0 {
+		t.Errorf("after a failed bd show, convoy hq-cv-eee2 Completed = %d, want 0 (unchanged)", second[1].Completed)
 	}
 }
