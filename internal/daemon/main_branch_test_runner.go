@@ -1202,25 +1202,53 @@ func (d *Daemon) commitTested(ctx context.Context, rigName, worktreePath string)
 	return strings.TrimSpace(string(output))
 }
 
+// mainBranchTestGateFn runs one gate of a rig's main-branch check. A package
+// variable, following this package's *Fn seam convention
+// (mainBranchTestGatePoolStatusFn, mainBranchTestEscalateFn), so a test can hand
+// the loop a verdict per gate: gates are walked in map order, so aiming a real
+// mid-run cancellation at the gate a mixed-cycle test needs is not something a
+// test can set up without racing the iteration.
+var mainBranchTestGateFn = func(d *Daemon, ctx context.Context, rigName, commit, workDir, label, command string) error {
+	return d.runCommandOnWorktree(ctx, rigName, commit, workDir, label, command)
+}
+
 // runGatesOnWorktree runs all configured gates sequentially on the given worktree.
 func (d *Daemon) runGatesOnWorktree(ctx context.Context, rigName, commit, workDir string, gates map[string]string) error {
-	var failures []string
-	interrupted := false
+	var failures, stopped []string
 	for name, cmd := range gates {
-		if err := d.runCommandOnWorktree(ctx, rigName, commit, workDir, name, cmd); err != nil {
-			failures = append(failures, fmt.Sprintf("gate %q: %v", name, err))
+		if err := mainBranchTestGateFn(d, ctx, rigName, commit, workDir, name, cmd); err != nil {
 			// The gates' messages are joined as text, which would drop the
 			// sentinel: a canceled run has to stay recognizable as a stopped
 			// run, not become an ordinary failure on the way out (gt-59yz).
-			interrupted = interrupted || errors.Is(err, errMainBranchTestInterrupted)
+			// Kept in two lists, not one list plus a flag, because the verdict
+			// below is decided from which kind this gate was: a stopped gate
+			// must not be able to revoke a sibling's genuine failure (gt-vyyd).
+			if errors.Is(err, errMainBranchTestInterrupted) {
+				stopped = append(stopped, fmt.Sprintf("gate %q: %v", name, err))
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("gate %q: %v", name, err))
 		}
 	}
+	// A gate that failed on its own clock is a verdict about main, and the run
+	// keeps it when another gate was stopped: the cancellation says nothing
+	// about main, but this red does, and folding the two together is how a real
+	// failure came back to the cycle as "no verdict" and was dropped uncounted
+	// (gt-vyyd). Only a run whose every non-passing gate was stopped reached no
+	// verdict at all, and only that one keeps the sentinel the cycle refuses to
+	// count (gt-59yz).
 	if len(failures) > 0 {
 		joined := strings.Join(failures, "; ")
-		if interrupted {
-			return fmt.Errorf("%w: %s", errMainBranchTestInterrupted, joined)
+		if len(stopped) > 0 {
+			// Reported as stopped rather than folded in as another failure: the
+			// reader has to know the run was cut short before it reached every
+			// gate.
+			joined += fmt.Sprintf("; also stopped, not failed: %s", strings.Join(stopped, "; "))
 		}
-		return fmt.Errorf("%s", joined)
+		return errors.New(joined)
+	}
+	if len(stopped) > 0 {
+		return fmt.Errorf("%w: %s", errMainBranchTestInterrupted, strings.Join(stopped, "; "))
 	}
 	return nil
 }

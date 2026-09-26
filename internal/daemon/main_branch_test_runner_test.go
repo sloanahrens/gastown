@@ -1417,6 +1417,106 @@ func TestRunGatesOnWorktree_InterruptionSurvivesTheJoin(t *testing.T) {
 	}
 }
 
+// stubMainBranchTestGateVerdicts hands each gate of a run a fixed verdict by
+// stubbing mainBranchTestGateFn, so a test can mix a genuine failure with an
+// interruption in one run. The real path reaches that shape only by timing a
+// cancellation against map-order iteration, which no test can aim. A gate the
+// map does not name fails the test rather than quietly running the real command.
+func stubMainBranchTestGateVerdicts(t *testing.T, verdicts map[string]error) {
+	t.Helper()
+	prev := mainBranchTestGateFn
+	mainBranchTestGateFn = func(_ *Daemon, _ context.Context, _, _, _, label, _ string) error {
+		verdict, ok := verdicts[label]
+		if !ok {
+			t.Errorf("the run walked gate %q, which this test gave no verdict for", label)
+			return nil
+		}
+		return verdict
+	}
+	t.Cleanup(func() { mainBranchTestGateFn = prev })
+}
+
+// interruptedGateError is the shape runCommandOnWorktree returns for a gate the
+// daemon's cancellation stopped: the sentinel wrapped around a body that names
+// the cause.
+func interruptedGateError(label string) error {
+	return fmt.Errorf("%w: %s was stopped, not failed: the run's context was canceled while the command was in flight", errMainBranchTestInterrupted, label)
+}
+
+// TestRunGatesOnWorktree_FailureSurvivesAnInterruptedGate is gt-vyyd: a genuine
+// failure and a stopped gate in one run is a FAILING run, not a stopped one.
+// The old flag OR'ed the sentinel across every gate, so one cancellation turned
+// the whole run into "no verdict" — runMainBranchTests' sentinel branch then
+// dropped it before failures, and main's real red never escalated.
+//
+// "Does not satisfy errors.Is(err, errMainBranchTestInterrupted)" is the whole
+// assertion, not a proxy: that predicate is exactly what sends the cycle down
+// the branch that skips failures, counts nothing, and clears no alert.
+func TestRunGatesOnWorktree_FailureSurvivesAnInterruptedGate(t *testing.T) {
+	// Which gate the loop walks first is map order, and the verdicts here are
+	// keyed by gate, so the shape under test is the same in either order — as it
+	// was for the flag this replaces, whose OR made one cancellation suppress a
+	// failure regardless of where it landed in the iteration.
+	// Both verdicts are the gate's own body, without the `gate %q:` prefix the
+	// loop adds — the shape runCommandOnWorktree actually returns.
+	stubMainBranchTestGateVerdicts(t, map[string]error{
+		"lint": errors.New("lint failed: exit status 1"),
+		"test": interruptedGateError("test"),
+	})
+
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: discardLogger,
+	}
+	err := d.runGatesOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), map[string]string{
+		"lint": "make lint",
+		"test": "make test",
+	})
+	if err == nil {
+		t.Fatal("expected an error from a run whose gate failed")
+	}
+	if errors.Is(err, errMainBranchTestInterrupted) {
+		t.Errorf("a real failure must not be reported as an interruption the cycle drops, got: %v", err)
+	}
+	body := err.Error()
+	if !strings.Contains(body, `gate "lint": lint failed: exit status 1`) {
+		t.Errorf("expected the genuine failure kept in full, got:\n%s", body)
+	}
+	// The stopped gate is named as stopped: the reader has to know the run was
+	// cut short before it reached every gate, and presenting it as a second red
+	// would misreport the daemon's own cancellation as a failure of main.
+	if !strings.Contains(body, "also stopped, not failed") {
+		t.Errorf("expected the stopped gate reported as stopped, not as another failure, got:\n%s", body)
+	}
+}
+
+// TestRunGatesOnWorktree_AllStoppedGatesKeepTheSentinel is the other half of the
+// partition, and the guard against over-correcting: when no gate reached a
+// verdict, the run says nothing about main and must still carry the sentinel the
+// cycle refuses to count (gt-59yz). Without this, "the failure always wins" would
+// be free to escalate a red main for a run that only ever got stopped.
+func TestRunGatesOnWorktree_AllStoppedGatesKeepTheSentinel(t *testing.T) {
+	stubMainBranchTestGateVerdicts(t, map[string]error{
+		"lint": interruptedGateError("lint"),
+		"test": interruptedGateError("test"),
+	})
+
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: discardLogger,
+	}
+	err := d.runGatesOnWorktree(context.Background(), "gastown", "deadbeef", t.TempDir(), map[string]string{
+		"lint": "make lint",
+		"test": "make test",
+	})
+	if err == nil {
+		t.Fatal("expected an error from a run whose gates were all stopped")
+	}
+	if !errors.Is(err, errMainBranchTestInterrupted) {
+		t.Errorf("a run with no verdict must keep the sentinel so the cycle does not count it, got: %v", err)
+	}
+}
+
 // TestRunCommandOnWorktree_ExpiredBudgetNeverRan covers the third way a command
 // ends without a verdict: the run's context was already spent when this command
 // started (earlier gates ate a shared budget), so os/exec's Start hands back
