@@ -1135,6 +1135,18 @@ func (r *Router) sendToSingle(msg *Message) error {
 		msg.ID = GenerateID()
 	}
 
+	// Every direct message gets a thread ID, even a one-off system notice
+	// (RECOVERED_BEAD, SPAWN_BLOCKED, ...) that never sets one explicitly.
+	// Without this, notifyRecipient enqueues that message's reply-reminder
+	// with ThreadID="" — but `gt mail reply` mints a *fresh* random thread ID
+	// whenever it finds the original's ThreadID empty, so the two can never
+	// match. ClearReplyReminders then removes nothing, and the reminder
+	// replays after every reply, read, or delete of the "handled" thread
+	// (gt-5mac). Assigning it here instead keeps sender and reply consistent.
+	if msg.ThreadID == "" {
+		msg.ThreadID = generateThreadID()
+	}
+
 	// Validate message before sending
 	if err := msg.Validate(); err != nil {
 		return fmt.Errorf("invalid message: %w", err)

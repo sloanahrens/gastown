@@ -665,6 +665,106 @@ exit 1
 	}
 }
 
+// TestSendToSingle_BackfillsEmptyThreadID verifies that a message built
+// without a ThreadID (as every RECOVERED_BEAD/SPAWN_BLOCKED-style system
+// notice is) gets one assigned at send time. Without this, notifyRecipient
+// enqueues that message's reply-reminder with ThreadID="", but `gt mail
+// reply`/`gt mail send --reply-to` mint a fresh random thread ID whenever
+// they find the original's ThreadID empty — so the two can never match and
+// ClearReplyReminders removes nothing, leaving the reminder to fire long
+// after the thread was read, replied to, or deleted (gt-5mac).
+func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a bash bd stub")
+	}
+
+	tmpDir := t.TempDir()
+	townRoot := filepath.Join(tmpDir, "town")
+	senderDir := filepath.Join(townRoot, "barnaby", "crew", "tom")
+	recipientDir := filepath.Join(townRoot, "barnaby", "crew", "troy")
+	mayorDir := filepath.Join(townRoot, "mayor")
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+
+	for _, dir := range []string{senderDir, recipientDir, mayorDir, townBeadsDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townBeadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("write beads.db: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+		t.Fatalf("write types sentinel: %v", err)
+	}
+
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	argsLog := filepath.Join(tmpDir, "bd-create-args.log")
+	bdStub := filepath.Join(binDir, "bd")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "config" || "${1:-}" == "init" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "list" ]]; then
+  echo "[]"
+  exit 0
+fi
+
+if [[ "${1:-}" == "mol" && "${2:-}" == "wisp" && "${3:-}" == "list" ]]; then
+  echo "[]"
+  exit 0
+fi
+
+if [[ "${1:-}" == "create" ]]; then
+  echo "$@" >> "` + argsLog + `"
+  echo "hq-testmail-1"
+  exit 0
+fi
+
+echo "unsupported bd args: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(bdStub, []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	r := NewRouter(senderDir)
+	// Built as a plain struct literal with no ThreadID set, matching how
+	// system notices like RECOVERED_BEAD are constructed in production.
+	msg := &Message{
+		From:           "barnaby/witness",
+		To:             "barnaby/troy",
+		Subject:        "RECOVERED_BEAD gt-abcd",
+		Body:           "Recovered abandoned bead.",
+		SuppressNotify: true,
+	}
+
+	if err := r.Send(msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if msg.ThreadID == "" {
+		t.Fatal("Send left ThreadID empty; reply-reminders for this message can never be cleared")
+	}
+
+	logged, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read bd create args log: %v", err)
+	}
+	if !strings.Contains(string(logged), "thread:"+msg.ThreadID) {
+		t.Errorf("bd create args = %q, want a thread:%s label", logged, msg.ThreadID)
+	}
+}
+
 func TestNewRouterWithTownRoot(t *testing.T) {
 	r := NewRouterWithTownRoot("/work/rig", "/home/gt")
 	if filepath.ToSlash(r.workDir) != "/work/rig" {
