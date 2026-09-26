@@ -229,29 +229,49 @@ var errComposerUnverifiable = errors.New("composer could not be classified after
 // the patrol to a restart on a pane that was merely mid-repaint — which is very
 // likely what an unclassifiable capture is, three quarters of a second after
 // ctrl+x ctrl+s (gt-afa7).
+//
+// A capture that fails outright (tmux itself erroring, not a classifiable-but-
+// ambiguous pane) gets the same retry treatment as an unclassifiable read
+// rather than an immediate strand verdict: one flaky capture three quarters of
+// a second after the submit is exactly the kind of transient miss the recheck
+// attempts exist to ride out, and giving up on the first one defeats the retry
+// loop entirely (gt-0b4z). Only when every attempt fails to capture does it
+// propagate as a genuine check failure — still distinct from
+// errComposerUnverifiable, since the caller reports that case as "submitted,
+// could not confirm" rather than as an error.
 func confirmComposerCleared(t *tmux.Tmux, sessionName string, frozenFor time.Duration) error {
 	last := tmux.ComposerUnknown.String()
 	unverifiable := false
+	var captureErr error
 	for i := 0; i < composerStallRecheckAttempts; i++ {
 		time.Sleep(composerStallRecheckDelay)
 		after, err := t.DetectComposerStall(sessionName, frozenFor)
 		if err != nil {
 			if errors.Is(err, tmux.ErrComposerUnobservable) {
 				unverifiable = true
+				captureErr = nil
 				last = err.Error()
 				continue
 			}
-			// The pane could not be read at all. That is a failure of the
-			// check, not a verdict about the composer.
-			return err
+			// The pane could not be read at all this round. Retry like any
+			// other inconclusive read — only report it if it persists across
+			// every remaining attempt.
+			captureErr = err
+			unverifiable = false
+			last = err.Error()
+			continue
 		}
+		captureErr = nil
 		if after.State != tmux.ComposerPending {
 			return nil
 		}
 		// Positive evidence that the input is still there outranks an earlier
-		// unclassifiable read.
+		// unclassifiable or uncaptured read.
 		unverifiable = false
 		last = after.State.String()
+	}
+	if captureErr != nil {
+		return captureErr
 	}
 	if unverifiable {
 		return fmt.Errorf("%w (last: %s)", errComposerUnverifiable, last)

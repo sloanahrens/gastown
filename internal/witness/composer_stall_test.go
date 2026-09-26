@@ -340,3 +340,74 @@ func TestConfirmComposerClearedPropagatesACaptureFailure(t *testing.T) {
 		t.Errorf("a capture failure was reported as an unverifiable composer: %v", err)
 	}
 }
+
+// One flaky capture must not end the recheck: the whole point of the retry
+// loop is to ride out a transient miss three quarters of a second after
+// ctrl+x ctrl+s. A single failed capture followed by a clean read of a
+// recovered composer must report the recovery, not a still-pending/restart
+// verdict off the first miss (gt-0b4z).
+func TestConfirmComposerClearedRetriesPastASingleCaptureFailure(t *testing.T) {
+	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
+	composerStallRecheckDelay = 0
+
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux shim is POSIX-only; tmux itself does not run on Windows")
+	}
+
+	binDir := t.TempDir()
+	scriptPath := filepath.Join(binDir, "tmux")
+	countPath := filepath.Join(binDir, "capture-pane.count")
+
+	clearedPane := "⏺ Waiting on the review.\n" +
+		"────────────────────────────────────────────────────────────────────────────────\n" +
+		"❯ \n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+
+	script := `#!/bin/sh
+for a in "$@"; do case "$a" in
+	capture-pane|display-message|has-session|send-keys|show-environment|list-panes) sub=$a; break;;
+esac; done
+case "$sub" in
+	has-session) exit 0;;
+	show-environment) printf '%s\n' 'unknown variable: not set' 1>&2; exit 1;;
+	display-message)
+		fmt=""
+		for a in "$@"; do case "$a" in '#'*) fmt="$a";; esac; done
+		case "$fmt" in
+			'#{window_activity}') printf '%s' '1700000000';;
+			'#{pane_current_command}') printf '%s' 'claude';;
+		esac
+		exit 0
+		;;
+	capture-pane)
+		n=$(cat "` + countPath + `" 2>/dev/null || echo 0)
+		n=$((n + 1))
+		echo "$n" > "` + countPath + `"
+		if [ "$n" -eq 1 ]; then
+			exit 1
+		fi
+		printf '%s' "` + clearedPane + `"
+		exit 0
+		;;
+	*) exit 0;;
+esac
+`
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
+	if err != nil {
+		t.Errorf("err = %v, want nil: a single capture miss followed by a cleared composer must be a pass", err)
+	}
+
+	counted, readErr := os.ReadFile(countPath)
+	if readErr != nil {
+		t.Fatalf("read capture count: %v", readErr)
+	}
+	if strings.TrimSpace(string(counted)) == "1" {
+		t.Error("only one capture attempt was made; the retry loop gave up after the first failure")
+	}
+}
