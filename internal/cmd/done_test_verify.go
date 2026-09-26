@@ -870,8 +870,12 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			}
 			return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are still present but `go list` resolves no package for %s — that is not a package deletion, so no whole-module build can verify it; fix the file so it compiles and resolves (or use --skip-verify with justification if this is genuinely not testable)", strings.Join(details, "; "))
 		}
-		switch {
-		case len(changed.deletedDirs) > 0:
+		// A single diff can carry both shapes at once (a deleted package here,
+		// a nested-module edit there), so these run independently rather than
+		// as a switch's mutually-exclusive cases: a switch that only ran the
+		// first matching case silently skipped the other build while the log
+		// below still claimed every nested module got one.
+		if len(changed.deletedDirs) > 0 {
 			// A whole-package deletion: every changed .go file in these
 			// directories is gone, so go list no longer resolves them to a
 			// package and nothing is left to scope. That is not a broken
@@ -883,14 +887,11 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			// because the packages that import the deleted one are not in
 			// the changed set: `go list` resolves a package whose imports are
 			// broken, so only the build sees them.
-			pkgs = []string{"."}
 			if buildErr := goBuildWholeModule(worktree); buildErr != nil {
 				return testVerifyResult{}, fmt.Errorf("gt done: deleting every .go file in a package since %s left the rest of the module unbuildable — the deletion broke something that imports it; fix the build (or undo the deletion) before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", shortSHA(verifiedBase), buildErr)
 			}
-			if len(changed.packages) > 0 {
-				pkgs = changed.packages
-			}
-		case len(changed.nestedModules) > 0:
+		}
+		if len(changed.nestedModules) > 0 {
 			// The changed files belong to nested modules, so no package of
 			// this module names them and there is nothing here to scope: the
 			// suite runs over the module root, and the header below records
@@ -900,14 +901,17 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			// not a formality: `go list` does not typecheck, so a file that
 			// resolves in its own module can still be one this build is the
 			// only check of.
-			pkgs = []string{"."}
-			if len(changed.packages) > 0 {
-				pkgs = changed.packages
-			}
 			for _, n := range changed.nestedModules {
 				if buildErr := goBuildWholeModule(filepath.Join(worktree, n.moduleRoot)); buildErr != nil {
 					return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are in the nested module %s, and building that module failed — fix it before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", n.moduleRoot, buildErr)
 				}
+			}
+		}
+		switch {
+		case len(changed.deletedDirs) > 0, len(changed.nestedModules) > 0:
+			pkgs = []string{"."}
+			if len(changed.packages) > 0 {
+				pkgs = changed.packages
 			}
 		default:
 			pkgs = changed.packages
