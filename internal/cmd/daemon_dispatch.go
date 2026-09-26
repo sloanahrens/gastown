@@ -423,7 +423,7 @@ func knownRigNames(townRoot string) ([]string, error) {
 // A read failure is returned, not swallowed. Under-reporting ready work is the
 // one error this check cannot absorb: it produces exactly the silence the
 // patrol exists to break, and produces it invisibly. A rig with no beads
-// directory at all is not a failure — it has no ready work to report.
+// database at all is not a failure — it has no ready work to report.
 func countActionableReady(rigPath string) (ready, urgent int, err error) {
 	issues, err := readyIssuesUnlimited(rigPath)
 	if err != nil {
@@ -449,10 +449,10 @@ func countActionableReady(rigPath string) (ready, urgent int, err error) {
 // The size of that board is the whole point of this check, so a cap that
 // silently reports a fraction of the work is not usable here (gt-59o9).
 //
-// A rig with no beads directory returns no issues: it is a rig that has never
+// A rig with no beads database returns no issues: it is a rig that has never
 // been initialized, not a read failure.
 func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
-	if beads.ResolveBeadsDir(rigPath) == "" {
+	if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
 		return nil, nil
 	}
 
@@ -468,6 +468,49 @@ func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
 
 	b.SetStore(store)
 	return b.Ready()
+}
+
+// hasBeadsDatabase reports whether a resolved beads directory holds a database
+// this check could read.
+//
+// It is a filesystem test on purpose. The one error this check cannot absorb is
+// under-reporting ready work, so an unreachable Dolt server must still surface
+// as a read failure; asking whether a database is *configured* keeps the two
+// apart (gt-ka00).
+func hasBeadsDatabase(beadsDir string) bool {
+	// Embedded mode: the data directory sits beside the config, and a .beads
+	// directory carrying one need not carry a metadata.json to name it. bd
+	// writes embeddeddolt/<database>/.dolt; dolt/ is the older layout.
+	for _, embedded := range []string{"dolt", "embeddeddolt"} {
+		if info, err := os.Stat(filepath.Join(beadsDir, embedded)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+
+	// Server mode: metadata.json names the database and the server keeps it in
+	// the town's .dolt-data/. A metadata.json tracked from another workspace
+	// names a database this server may not have, which is the same empty rig
+	// as one that was never initialized.
+	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json")) //nolint:gosec // G304: path is constructed internally
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		DoltMode     string `json:"dolt_mode"`
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return true // Unparseable — assume initialized, matching bdDatabaseExists
+	}
+	if meta.DoltMode != "server" || meta.DoltDatabase == "" {
+		return true // Not a server-mode database reference — assume initialized
+	}
+	townRoot := beads.FindTownRoot(filepath.Dir(beadsDir))
+	if townRoot == "" {
+		return true // No town to look in — assume initialized
+	}
+	_, err = os.Stat(filepath.Join(townRoot, ".dolt-data", meta.DoltDatabase))
+	return !os.IsNotExist(err)
 }
 
 // patrolSuppressedTitlePrefixes are notification envelopes this patrol does not
