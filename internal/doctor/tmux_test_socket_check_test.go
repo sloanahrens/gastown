@@ -2,9 +2,11 @@ package doctor
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -80,7 +82,7 @@ func TestTmuxTestSocketCheck_ReportsLeftover(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
-	check.servingForTest = func(string) bool { return true }
+	check.socketStateForTest = func(string) socketState { return socketServing }
 	check.probeForTest = func(string) testSocketProbe { return probe }
 
 	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
@@ -105,7 +107,7 @@ func TestTmuxTestSocketCheck_StaleFileIsNotAServer(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
-	check.servingForTest = func(string) bool { return false }
+	check.socketStateForTest = func(string) socketState { return socketRefused }
 	check.probeForTest = func(string) testSocketProbe {
 		t.Error("probed a socket with no server")
 		return &fakeTestSocketProbe{}
@@ -129,7 +131,7 @@ func TestTmuxTestSocketCheck_StaleFileIsNotAServer(t *testing.T) {
 func TestTmuxTestSocketCheck_FreshFileIsLeftAlone(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
-	check.servingForTest = func(string) bool { return false }
+	check.socketStateForTest = func(string) socketState { return socketRefused }
 	check.probeForTest = func(string) testSocketProbe {
 		t.Error("probed a socket with no server")
 		return &fakeTestSocketProbe{}
@@ -151,7 +153,7 @@ func TestTmuxTestSocketCheck_StaleFileWithoutOwnerIsCollected(t *testing.T) {
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-sentinel", "gt-test-91506")
 	// The pid in the second name is alive — it just is not this socket's owner.
 	check.pidAliveForTest = func(int) bool { return true }
-	check.servingForTest = func(string) bool { return false }
+	check.socketStateForTest = func(string) socketState { return socketRefused }
 	check.probeForTest = func(string) testSocketProbe {
 		t.Error("probed a socket with no server")
 		return &fakeTestSocketProbe{}
@@ -173,7 +175,7 @@ func TestTmuxTestSocketCheck_ForeignSocketIsUntouched(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-3aa519", "default")
 	check.pidAliveForTest = func(int) bool { return false }
-	check.servingForTest = func(string) bool { return false }
+	check.socketStateForTest = func(string) socketState { return socketRefused }
 	check.probeForTest = func(string) testSocketProbe {
 		t.Error("probed a socket outside the test families")
 		return &fakeTestSocketProbe{}
@@ -194,7 +196,7 @@ func TestTmuxTestSocketCheck_H9zFamilyIsOurs(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-h9z-live-91506")
 	check.pidAliveForTest = func(int) bool { return false }
-	check.servingForTest = func(string) bool { return true }
+	check.socketStateForTest = func(string) socketState { return socketServing }
 	check.probeForTest = func(string) testSocketProbe { return probe }
 
 	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
@@ -218,7 +220,7 @@ func TestTmuxTestSocketCheck_TimestampShapedOwnerIsNotAPid(t *testing.T) {
 		t.Error("read a timestamp as a pid")
 		return false
 	}
-	check.servingForTest = func(string) bool { return true }
+	check.socketStateForTest = func(string) socketState { return socketServing }
 	check.probeForTest = func(string) testSocketProbe {
 		t.Error("probed a socket whose owner cannot be identified")
 		return &fakeTestSocketProbe{sessions: []string{"gt-test-dog-stale"}}
@@ -236,7 +238,7 @@ func TestTmuxTestSocketCheck_LiveOwnerIsNotALeak(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return true }
-	check.servingForTest = func(string) bool { return true }
+	check.socketStateForTest = func(string) socketState { return socketServing }
 	check.probeForTest = func(string) testSocketProbe {
 		t.Error("probed a socket whose owner is alive")
 		return &fakeTestSocketProbe{}
@@ -253,7 +255,7 @@ func TestTmuxTestSocketCheck_ForeignSessionsAreNotOurs(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
-	check.servingForTest = func(string) bool { return true }
+	check.socketStateForTest = func(string) socketState { return socketServing }
 	check.probeForTest = func(string) testSocketProbe {
 		return &fakeTestSocketProbe{sessions: []string{"gt-garnet"}}
 	}
@@ -266,13 +268,17 @@ func TestTmuxTestSocketCheck_ForeignSessionsAreNotOurs(t *testing.T) {
 // TestTmuxTestSocketCheck_ServerVanishedMidScan covers the race the dial cannot
 // close: the socket answered, then its server exited before the sessions were
 // listed. The socket file is then residue, not evidence.
+//
+// The empty session list is what the real client reports for a server that is
+// gone — ListSessions maps ErrNoServer to (nil, nil) rather than to an error
+// (internal/tmux/tmux.go), so that is the shape a vanished server has here.
 func TestTmuxTestSocketCheck_ServerVanishedMidScan(t *testing.T) {
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
-	check.servingForTest = func(string) bool { return true }
+	check.socketStateForTest = func(string) socketState { return socketServing }
 	check.probeForTest = func(string) testSocketProbe {
-		return &fakeTestSocketProbe{listErr: errors.New("no server running")}
+		return &fakeTestSocketProbe{}
 	}
 
 	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
@@ -284,12 +290,166 @@ func TestTmuxTestSocketCheck_ServerVanishedMidScan(t *testing.T) {
 	}
 }
 
+// TestTmuxTestSocketCheck_UnreachableSocketIsNotRemovable is the gt-ri37
+// tripwire: a dial that fails for a reason that is not the server's absence says
+// nothing about what holds the socket. The file stays, and the check reports an
+// unknown rather than the pass it did not earn.
+func TestTmuxTestSocketCheck_UnreachableSocketIsNotRemovable(t *testing.T) {
+	check := NewTmuxTestSocketCheck()
+	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-91506")
+	check.pidAliveForTest = func(int) bool { return false }
+	check.socketStateForTest = func(string) socketState { return socketUnreachable }
+	check.probeForTest = func(string) testSocketProbe {
+		t.Error("probed a socket whose state is unknown")
+		return &fakeTestSocketProbe{}
+	}
+
+	ctx := &CheckContext{TownRoot: t.TempDir()}
+	result := check.Run(ctx)
+	if result.Status != StatusSkipped {
+		t.Fatalf("status = %v, want skipped — an unaskable socket is not a result: %s",
+			result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "could not be probed") {
+		t.Errorf("message = %q, want the unprobed count", result.Message)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(check.socketDirForTest, "gt-test-91506")); err != nil {
+		t.Errorf("Fix removed an unreachable socket: %v", err)
+	}
+}
+
+// TestTmuxTestSocketCheck_UnreadableServerIsNotRemovable closes the second half
+// of the same fail-open: the dial answered but the session listing failed. An
+// error from tmux is not evidence the server exited, so the file is left alone
+// rather than dropped out of every later scan (gt-ri37).
+func TestTmuxTestSocketCheck_UnreadableServerIsNotRemovable(t *testing.T) {
+	check := NewTmuxTestSocketCheck()
+	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
+	check.pidAliveForTest = func(int) bool { return false }
+	check.socketStateForTest = func(string) socketState { return socketServing }
+	check.probeForTest = func(string) testSocketProbe {
+		return &fakeTestSocketProbe{listErr: errors.New("exec: tmux: not found")}
+	}
+
+	ctx := &CheckContext{TownRoot: t.TempDir()}
+	result := check.Run(ctx)
+	if result.Status != StatusSkipped {
+		t.Fatalf("status = %v, want skipped: %s", result.Status, result.Message)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(check.socketDirForTest, "gt-test-91506")); err != nil {
+		t.Errorf("Fix removed the socket of a server it could not read: %v", err)
+	}
+}
+
+// TestTmuxTestSocketCheck_UnprobedIsCountedBesideResidue keeps the unprobed
+// sockets visible when there is residue to report as well: the message counts
+// what was found, and the details name what could not be looked at.
+func TestTmuxTestSocketCheck_UnprobedIsCountedBesideResidue(t *testing.T) {
+	check := NewTmuxTestSocketCheck()
+	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-91506", "gt-test-91507")
+	check.pidAliveForTest = func(int) bool { return false }
+	check.socketStateForTest = func(path string) socketState {
+		if strings.HasSuffix(path, "gt-test-91507") {
+			return socketRefused
+		}
+		return socketUnreachable
+	}
+	check.probeForTest = func(string) testSocketProbe {
+		t.Error("probed a socket whose state is unknown")
+		return &fakeTestSocketProbe{}
+	}
+
+	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "1 socket file(s)") {
+		t.Errorf("message = %q, want only the refused file counted", result.Message)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "could not be probed") {
+		t.Errorf("details = %v, want the unprobed count", result.Details)
+	}
+}
+
+// TestSocketStateReadsARealSocket pins the classification to the socket itself
+// rather than to a stub: a live listener serves, a file whose listener closed
+// refuses, and a path that is already gone is gone.
+func TestSocketStateReadsARealSocket(t *testing.T) {
+	// Not t.TempDir(): a unix socket path is capped at just over a hundred
+	// bytes, and the per-test directory name spends most of that budget.
+	dir, err := os.MkdirTemp("", "gtsock")
+	if err != nil {
+		t.Fatalf("creating socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "gt-test-91506")
+	addr := &net.UnixAddr{Name: path, Net: "unix"}
+	ln, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		t.Fatalf("listening on %s: %v", path, err)
+	}
+	// The default would unlink the file on close, and the refused case needs it
+	// to survive its server.
+	ln.SetUnlinkOnClose(false)
+
+	if got := dialSocketState(path); got != socketServing {
+		t.Errorf("state of a served socket = %v, want serving", got)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("closing listener: %v", err)
+	}
+	if got := dialSocketState(path); got != socketRefused {
+		t.Errorf("state of an unserved socket file = %v, want refused", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("removing socket file: %v", err)
+	}
+	if got := dialSocketState(path); got != socketGone {
+		t.Errorf("state of a removed socket file = %v, want gone", got)
+	}
+}
+
+// TestClassifyDialErr covers the reason a failed dial must not be read as
+// absence: the process's own limits, permissions, and a busy server's timeout
+// all end the dial without saying anything about the server.
+func TestClassifyDialErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want socketState
+	}{
+		{"refused", &net.OpError{Op: "dial",
+			Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}, socketRefused},
+		{"gone", &net.OpError{Op: "dial",
+			Err: &os.SyscallError{Syscall: "connect", Err: syscall.ENOENT}}, socketGone},
+		{"descriptor table full", &net.OpError{Op: "dial",
+			Err: &os.SyscallError{Syscall: "socket", Err: syscall.EMFILE}}, socketUnreachable},
+		{"no permission", &net.OpError{Op: "dial",
+			Err: &os.SyscallError{Syscall: "connect", Err: syscall.EACCES}}, socketUnreachable},
+		{"timed out on a full backlog", &net.OpError{Op: "dial",
+			Err: &os.SyscallError{Syscall: "connect", Err: syscall.ETIMEDOUT}}, socketUnreachable},
+		{"deadline exceeded", os.ErrDeadlineExceeded, socketUnreachable},
+		{"anything else", errors.New("dial unix: unexpected"), socketUnreachable},
+	}
+	for _, tc := range cases {
+		if got := classifyDialErr(tc.err); got != tc.want {
+			t.Errorf("classifyDialErr(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestTmuxTestSocketCheck_FixKillsLeftover(t *testing.T) {
 	probe := &fakeTestSocketProbe{sessions: []string{"gt-test-modeA-2"}}
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
-	check.servingForTest = func(string) bool { return true }
+	check.socketStateForTest = func(string) socketState { return socketServing }
 	check.probeForTest = func(string) testSocketProbe { return probe }
 
 	ctx := &CheckContext{TownRoot: t.TempDir()}
