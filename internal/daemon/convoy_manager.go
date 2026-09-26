@@ -418,7 +418,12 @@ func (m *ConvoyManager) mergeStoreOpenResultLocked(result storeOpenResult, now t
 	// An attempt that returns nothing at all — every open refused, or a
 	// compatibility failure that discarded a whole map — is no evidence of
 	// completeness, so only a non-empty set with nothing missing confirms it.
-	complete := len(m.stores) > 0 && len(result.Missing) == 0
+	// "Nothing missing" must come from an attempt that actually reported
+	// something: an empty result (no stores opened, nothing named missing)
+	// is uninformative, not proof the missing stores were resolved, and must
+	// not rubber-stamp a store set this attempt never touched.
+	attempted := len(result.Stores) > 0 || len(result.Missing) > 0
+	complete := attempted && len(m.stores) > 0 && len(result.Missing) == 0
 	if complete {
 		if rec.confirmed {
 			return storeAlert{}

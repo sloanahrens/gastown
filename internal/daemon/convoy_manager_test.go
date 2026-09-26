@@ -541,6 +541,40 @@ exit 0
 	}
 }
 
+// TestRetryMissingStores_EmptyResultDoesNotConfirmPartialSet pins gt-tolf: an
+// empty attempt (no stores opened, nothing named missing — e.g. the opener's
+// rig walk found no known rigs this pass) is uninformative, not proof the
+// stores this manager still lacks were resolved. Before the fix, a manager
+// already holding some stores from a prior attempt would read that empty
+// result as "nothing missing" and latch confirmed=true — silently freezing
+// convoy lookups on a store set that was still incomplete.
+func TestRetryMissingStores_EmptyResultDoesNotConfirmPartialSet(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	opener := func() storeOpenResult {
+		calls++
+		return storeOpenResult{}
+	}
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
+
+	m.retryMissingStores(time.Now())
+	if m.storeRecovery.confirmed {
+		t.Error("an empty retry result must not confirm a store set that never opened hq")
+	}
+	if _, held := m.stores["hq"]; held {
+		t.Error("hq was never opened by any attempt, so it must not be in the map")
+	}
+
+	// An unconfirmed set must keep retrying past its backoff, not freeze.
+	m.retryMissingStores(time.Now().Add(time.Hour))
+	if calls != 2 {
+		t.Errorf("opener called %d times, want 2 — an empty result must not stop retries", calls)
+	}
+}
+
 func TestRetryMissingStores_CompletesPartialStoreSet(t *testing.T) {
 	t.Parallel()
 
