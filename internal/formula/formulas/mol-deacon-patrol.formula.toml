@@ -1476,7 +1476,9 @@ gt patrol report --summary "<brief summary>" \
   --steps "heartbeat:OK,ack-probes:OK,inbox-check:OK,orphan-process-cleanup:SKIP,..."
 ```
 The --steps flag is REQUIRED. List ALL 28 steps with their actual status.
-Steps you executed get OK, steps you skipped get SKIP.
+Every entry needs a `:STATUS` suffix — bare step ids are rejected, not
+silently counted (gt-gvo8m). Steps you executed get OK, steps you skipped
+get SKIP.
 This closes the current patrol wisp and automatically creates a new one.
 4. Hand off immediately so a fresh Deacon session picks up the newly-created
    patrol wisp from the hook:

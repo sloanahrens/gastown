@@ -135,7 +135,9 @@ After await-signal returns, check the EFFORT directive in the output:
 - context-check: One-sentence self-assessment
 
 Abbreviated patrol should complete in ~10% of the tokens of a full patrol.
-Mark skipped steps as SKIP in the patrol report.
+If you pass `--steps`, every entry needs a `:STATUS` suffix — executed steps
+get OK, skipped steps get SKIP. A bare step id is rejected, not silently
+counted (gt-gvo8m).
 
 After await-signal returns (either by signal or timeout):
 1. Generate a brief summary of this patrol cycle's observations

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -109,11 +110,27 @@ func TestParseStepResults(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
+		wantErr  bool
 		expected map[string]string
 	}{
 		{
 			name:     "empty input",
 			input:    "",
+			expected: map[string]string{},
+		},
+		{
+			// A bare step id has no status. It is a parse error: the audit is
+			// the ledger's anti-shortcut record (gt-gvo8m), so a missing status
+			// must fail loudly instead of defaulting to SKIP.
+			name:     "bare id rejected",
+			input:    "heartbeat",
+			wantErr:  true,
+			expected: map[string]string{},
+		},
+		{
+			name:     "bare id with empty status rejected",
+			input:    "heartbeat:",
+			wantErr:  true,
 			expected: map[string]string{},
 		},
 		{
@@ -159,7 +176,16 @@ func TestParseStepResults(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseStepResults(tt.input)
+			got, err := parseStepResults(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseStepResults(%q) succeeded, want error", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseStepResults(%q) failed: %v", tt.input, err)
+			}
 			if len(got) != len(tt.expected) {
 				t.Errorf("parseStepResults(%q) returned %d entries, want %d", tt.input, len(got), len(tt.expected))
 				return
@@ -226,9 +252,14 @@ func TestBuildStepAudit(t *testing.T) {
 		},
 	}
 
+	var buildStepAuditTestOut = io.Discard
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildStepAudit(tt.formulaName, tt.stepsFlag)
+			got, err := buildStepAudit(buildStepAuditTestOut, tt.formulaName, tt.stepsFlag)
+			if err != nil {
+				t.Fatalf("buildStepAudit() failed: %v", err)
+			}
 			if tt.wantPrefix != "" && !strings.HasPrefix(got, tt.wantPrefix) {
 				t.Errorf("buildStepAudit() = %q, want prefix %q", got, tt.wantPrefix)
 			}
