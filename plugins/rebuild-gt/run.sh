@@ -271,8 +271,13 @@ log "Pre-flight checks..."
 # The plugin runs from $TOWN_ROOT/plugins (a deployed copy, plugin.md), which
 # is not a repo, so no git command may use the plugin's cwd. Every git call in
 # this file therefore carries an explicit -C.
+# No record-run call here (nothing to attribute the run to yet), so the
+# daemon's own record is the only receipt this path produces; the skip
+# marker (scriptSkippedMarker, gt-chqi) is what keeps that receipt honest —
+# without it the daemon's automatic exit-0 record reads "success".
 if [ ! -d "$RIG_ROOT" ]; then
   log "Rig root $RIG_ROOT does not exist. Skipping."
+  echo "[plugin-result skipped]"
   exit 0
 fi
 
@@ -447,6 +452,7 @@ DIRTY=$(git -C "$RIG_ROOT" status --porcelain --untracked-files=no -- . ':(exclu
 if [ -n "$DIRTY" ]; then
   log "Repo is dirty, skipping rebuild."
   if [ -n "$DUE" ]; then note_blocked "repo has uncommitted changes"; fi
+  echo "[plugin-result skipped]"
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: repo has uncommitted changes" >/dev/null 2>&1 || true
@@ -457,6 +463,7 @@ BRANCH=$(git -C "$RIG_ROOT" branch --show-current 2>/dev/null)
 if [ "$BRANCH" != "main" ]; then
   log "Not on main branch (on $BRANCH), skipping rebuild."
   if [ -n "$DUE" ]; then note_blocked "not on main branch (on $BRANCH)"; fi
+  echo "[plugin-result skipped]"
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: not on main branch (on $BRANCH)" >/dev/null 2>&1 || true
@@ -530,6 +537,7 @@ if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 9>&- 2>/dev/null; th
     install_lock_release
     log "Local main diverged from origin/main, skipping rebuild."
     if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
+    echo "[plugin-result skipped]"
     gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
       --title "Plugin: rebuild-gt [skipped]" \
       --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
@@ -545,6 +553,7 @@ if ! git -C "$RIG_ROOT" merge --ff-only origin/main --quiet 9>&- 2>/dev/null; th
     install_lock_release
     log "Local main diverged from origin/main, skipping rebuild."
     if [ -n "$DUE" ]; then note_blocked "local main diverged from origin/main"; fi
+    echo "[plugin-result skipped]"
     gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
       --title "Plugin: rebuild-gt [skipped]" \
       --description "Skipped: local main diverged from origin/main" >/dev/null 2>&1 || true
@@ -587,6 +596,7 @@ fi
 if [ "$SAFE" != "True" ]; then
   log "Not safe to rebuild (not on main or would be a downgrade). Skipping."
   if [ -n "$DUE" ]; then note_blocked "not safe to rebuild"; fi
+  echo "[plugin-result skipped]"
   gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
     --title "Plugin: rebuild-gt [skipped]" \
     --description "Skipped: not safe to rebuild" >/dev/null 2>&1 || true
@@ -834,6 +844,7 @@ $SUBJECTS" >/dev/null 2>&1 || true
   2)
     log "install-gt refused: ${R_REASON:-unknown}"
     if [ -n "$DUE" ]; then note_blocked "install-gt refused: ${R_REASON:-unknown}"; fi
+    echo "[plugin-result skipped]"
     gt plugin record-run --plugin rebuild-gt --result skipped --rig gastown \
       --title "Plugin: rebuild-gt [skipped]" \
       --description "Skipped: install-gt refused (${R_REASON:-unknown})" >/dev/null 2>&1 || true

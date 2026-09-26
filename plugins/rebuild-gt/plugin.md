@@ -38,7 +38,7 @@ cases differ in what they escalate.
 
 | exit | when | recorded | escalates |
 |------|------|----------|-----------|
-| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, install-gt refused (exit 2), no rig root | yes, as success or skipped — except no rig root, which records nothing | on a refusal, only while the binary is due and past `REBUILD_GT_STARVE_MINUTES` (Starvation below) |
+| 0 | did the work (installed, or already fresh) — or refused safely: dirty checkout, wrong branch, diverged local main, not safe to rebuild, install-gt refused (exit 2), no rig root | yes, always: the daemon records every exit-0 run itself (`internal/daemon/plugin_script.go`); every refusal prints the skip marker (`scriptSkippedMarker`) so that record reads skipped, not a bare success. All refusals but no rig root also call `gt plugin record-run` themselves, landing two skipped records per run; no rig root skips that call, leaving only the daemon's own | on a refusal, only while the binary is due and past `REBUILD_GT_STARVE_MINUTES` (Starvation below) |
 | 3 | deferred: nothing accomplished this run (gate busy, MR in flight, under the install threshold, an unreadable staleness check, the install lock or the container-gate slot not free — install-gt exit 3, or the lock busy before this plugin's own sync) — retry next heartbeat | no | the same starvation clock |
 | 1 | failed: install-gt.sh failed (build, install, or smoke check — it rolls back and escalates under `install-gt:*`), or the rig has no `scripts/install-gt.sh` | yes, as failure | install-gt's own fingerprint, or `rebuild-gt:no-installer` |
 
