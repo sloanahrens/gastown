@@ -1174,7 +1174,10 @@ func (m *ConvoyManager) convoyOpen(convoyID string) bool {
 	status, ok := m.convoyStatusOf(convoyID)
 	if !ok {
 		// Fail open: the stranded scan already read this convoy as open, and a
-		// status the town store cannot answer must not stop the feeder.
+		// status the town store cannot answer must not stop the feeder. Logged
+		// so this is distinguishable in daemon.log from a confirmed-open convoy
+		// (gt-rif8).
+		m.logger("Convoy %s: status unreadable, failing open (assuming still open)", convoyID)
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(status)) {
