@@ -22,6 +22,13 @@ type Route struct {
 // RoutesFileName is the name of the routes configuration file.
 const RoutesFileName = "routes.jsonl"
 
+// RoutesTempPrefix is the os.CreateTemp prefix WriteRoutes uses to build its
+// atomic-write temp in beadsDir, before renaming it over RoutesFileName.
+// Exported so the hermetic tripwire (gt-lqri) can recognize this temp's
+// exact shape instead of duplicating ".routes-" as a second, driftable
+// source of truth.
+const RoutesTempPrefix = ".routes-"
+
 // LoadRoutes loads routes from routes.jsonl in the given beads directory.
 // Returns an empty slice if the file doesn't exist.
 func LoadRoutes(beadsDir string) ([]Route, error) {

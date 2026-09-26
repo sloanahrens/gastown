@@ -368,10 +368,22 @@ func (p *Pruner) scanRetained(filePath string, result *PruneResult) ([]string, e
 	return retained, nil
 }
 
+// ReplaceTempSuffix is the suffix replaceWithLines appends to filePath while
+// building its atomic-write temp, before renaming it into place. Exported so
+// the hermetic tripwire (gt-lqri) can recognize this temp's exact shape
+// instead of duplicating ".tmp" as a second, driftable source of truth.
+const ReplaceTempSuffix = ".tmp"
+
 // replaceWithLines atomically replaces filePath with lines (tmp + rename) and
 // returns the new size.
+//
+// A hard crash (SIGKILL mid-prune) leaves <filePath>.tmp behind. The hermetic
+// tripwire reports such residue as a leak (gt-lqri) instead of silently
+// tolerating the .tmp suffix; the next prune removes it as its first step, so
+// it is self-healing and its one reporting pass is the intended signal that a
+// crash happened.
 func replaceWithLines(filePath string, perm os.FileMode, lines []string) (size int64, err error) {
-	tmpPath := filePath + ".tmp"
+	tmpPath := filePath + ReplaceTempSuffix
 	// Remove a .tmp left by a crashed prune and create a fresh one: opening
 	// an existing file with O_TRUNC would keep its old permissions.
 	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {

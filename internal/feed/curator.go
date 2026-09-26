@@ -410,6 +410,13 @@ func (c *Curator) writeFeedEvent(event *events.Event) {
 	}
 }
 
+// TruncateTempSuffix is the suffix truncateFeedFile appends to feedPath
+// while building its atomic-rewrite temp, before renaming it into place.
+// Exported so the hermetic tripwire (gt-lqri) can recognize this temp's
+// exact shape instead of duplicating ".truncate.tmp" as a second, driftable
+// source of truth.
+const TruncateTempSuffix = ".truncate.tmp"
+
 // truncateFeedFile keeps the newest half of the feed file using atomic rename.
 // Must be called under the feed file flock.
 func (c *Curator) truncateFeedFile(feedPath string, currentSize int64) {
@@ -435,7 +442,7 @@ func (c *Curator) truncateFeedFile(feedPath string, currentSize int64) {
 	}
 
 	// Write retained content to a temp file
-	tmpPath := feedPath + ".truncate.tmp"
+	tmpPath := feedPath + TruncateTempSuffix
 	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return
