@@ -79,12 +79,28 @@ func trackedIssueIDs(beadsDir, convoyID string) []string {
 	return ids
 }
 
+// issueStatusCache holds the last known status for every issue ID this
+// package has ever resolved via batchIssueStatus. It has no TTL: it exists
+// purely as a fallback for when a batch `bd show` fails, not as a freshness
+// optimization (batchIssueStatus always attempts a live call first).
+var (
+	issueStatusCacheMu sync.Mutex
+	issueStatusCache   = make(map[string]string)
+)
+
 // batchIssueStatus runs a single `bd show <ids...> --json` covering every
 // distinct tracked issue ID across every convoy in one FetchConvoys pass,
 // replacing what used to be one `bd show` call per convoy. bd dep list
 // returns status from the dependency record in HQ beads, which is never
 // updated when cross-rig issues (e.g., gt-* tracked by hq-* convoys) are
 // closed in their rig — this batched bd show is what keeps status current.
+//
+// Because this one call now covers every convoy in the town, a single
+// failure (a transient Dolt hiccup, or one stale/deleted ID poisoning the
+// whole batch) used to zero out Completed for every convoy at once — the
+// caller has no way to tell "nothing is done" from "status lookup failed".
+// On failure this falls back to each ID's last known status instead, the
+// same pattern trackedIssueIDs already uses for its own cache.
 func batchIssueStatus(ids []string) map[string]string {
 	if len(ids) == 0 {
 		return nil
@@ -100,7 +116,7 @@ func batchIssueStatus(ids []string) map[string]string {
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
-		return nil
+		return fallbackIssueStatus(ids)
 	}
 
 	var issues []struct {
@@ -108,12 +124,31 @@ func batchIssueStatus(ids []string) map[string]string {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
-		return nil
+		return fallbackIssueStatus(ids)
 	}
 
 	result := make(map[string]string, len(issues))
+	issueStatusCacheMu.Lock()
 	for _, issue := range issues {
 		result[issue.ID] = issue.Status
+		issueStatusCache[issue.ID] = issue.Status
+	}
+	issueStatusCacheMu.Unlock()
+	return result
+}
+
+// fallbackIssueStatus returns the last known status for each requested ID,
+// from issueStatusCache. IDs never seen before are simply absent from the
+// result (buildConvoy already treats a missing status as "not closed").
+func fallbackIssueStatus(ids []string) map[string]string {
+	issueStatusCacheMu.Lock()
+	defer issueStatusCacheMu.Unlock()
+
+	result := make(map[string]string, len(ids))
+	for _, id := range ids {
+		if status, ok := issueStatusCache[id]; ok {
+			result[id] = status
+		}
 	}
 	return result
 }
