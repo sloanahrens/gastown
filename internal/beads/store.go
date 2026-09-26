@@ -287,6 +287,29 @@ func (b *Beads) storeList(opts ListOptions) ([]*Issue, error) {
 	return sdkIssuesToIssues(sdkIssues), nil
 }
 
+// storeListAnyTable lists matching issues from both the persistent and the
+// wisp table, the in-process form of ListAssignedIssueStatuses' subprocess
+// query.
+//
+// issueFilterFromListOpts sets SkipWisps for every non-ephemeral ListOptions,
+// so both flags are reset here: ListOptions.Ephemeral is a bool and cannot
+// express the nil that means "either table".
+func (b *Beads) storeListAnyTable(opts ListOptions) ([]*Issue, error) {
+	ctx, cancel := storeCtx()
+	defer cancel()
+
+	filter := issueFilterFromListOpts(opts)
+	filter.SkipWisps = false
+	filter.Ephemeral = nil
+
+	sdkIssues, err := b.store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return nil, fmt.Errorf("store list: %w", err)
+	}
+
+	return sdkIssuesToIssues(sdkIssues), nil
+}
+
 // storeChildren implements Children using the in-process store's
 // GetDependentsWithMetadata, which (like `bd show --children`) unions the
 // persistent and wisp dependency tables — unlike storeList's ParentID

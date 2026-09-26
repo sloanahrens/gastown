@@ -97,6 +97,47 @@ func TestListIssueStatusesUsesSingleQuery(t *testing.T) {
 	}
 }
 
+// The hook lookup is the hot path here: stuck-agent-dog probes every agent, so
+// a per-status, per-table loop is multiplied by the fleet size (gt-t8tu). One
+// query must cover both statuses AND both tables — no ephemeral clause, since
+// an unset Filter.Ephemeral means "either table".
+func TestListAssignedIssueStatusesUsesSingleQueryAcrossBothTables(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress, StatusInProgress)
+	if err != nil {
+		t.Fatalf("ListAssignedIssueStatuses() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	want := `query --json assignee="gastown/polecats/toast" AND (status="hooked" OR status="in_progress") --all --limit=0`
+	if !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+	}
+	if count := strings.Count(logOutput, "query --json"); count != 1 {
+		t.Fatalf("query count = %d, want 1\nlog:\n%s", count, logOutput)
+	}
+	if strings.Contains(logOutput, "ephemeral=") {
+		t.Fatalf("query pins ephemeral, dropping half the union\nlog:\n%s", logOutput)
+	}
+}
+
+func TestListAssignedIssueStatusesWithoutAssigneeSpawnsNothing(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	if _, err := b.ListAssignedIssueStatuses("", IssueStatusHooked); err != nil {
+		t.Fatalf("ListAssignedIssueStatuses() error = %v", err)
+	}
+
+	if logOutput := readMockBDLog(t, logPath); logOutput != "" {
+		t.Fatalf("expected no bd subprocess, got log:\n%s", logOutput)
+	}
+}
+
 func TestListDurableUsesBDListFilters(t *testing.T) {
 	ResetBdAllowStaleCacheForTest()
 	logPath := installMockBDRecorder(t)

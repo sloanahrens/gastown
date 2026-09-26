@@ -92,7 +92,7 @@ func TestResolveHookLookupWorkDirUsesSafeUnknownRigFallback(t *testing.T) {
 func TestActiveWorkStatusesPreferHookedOverInProgress(t *testing.T) {
 	t.Parallel()
 	got := activeWorkStatuses()
-	want := []string{beads.StatusHooked, string(beads.StatusInProgress)}
+	want := []beads.IssueStatus{beads.IssueStatusHooked, beads.StatusInProgress}
 	if len(got) != len(want) {
 		t.Fatalf("activeWorkStatuses length = %d, want %d", len(got), len(want))
 	}
@@ -128,5 +128,40 @@ func TestActiveWorkMergeBeadListsDedupeAndSort(t *testing.T) {
 	}
 	if got[2].Title != "durable" {
 		t.Fatalf("duplicate should keep primary issue, got title %q", got[2].Title)
+	}
+}
+
+// The single-query rewrite merges both statuses into one result set, so the
+// hooked-outranks-in_progress rule the old per-status loop got for free has to
+// live somewhere. Callers read [0] as "the" hook, so it is load-bearing.
+func TestPreferHookedKeepsHookedAheadOfNewerInProgress(t *testing.T) {
+	t.Parallel()
+	assignments := []*beads.Issue{
+		{ID: "gt-inprog-newer", Status: string(beads.StatusInProgress), UpdatedAt: "2026-01-05T00:00:00Z"},
+		{ID: "gt-hooked-older", Status: beads.StatusHooked, UpdatedAt: "2026-01-01T00:00:00Z"},
+	}
+
+	got := preferHooked(assignments)
+	if len(got) != 1 || got[0].ID != "gt-hooked-older" {
+		t.Fatalf("preferHooked() = %v, want only gt-hooked-older", got)
+	}
+}
+
+func TestPreferHookedFallsBackToInProgressNewestFirst(t *testing.T) {
+	t.Parallel()
+	assignments := []*beads.Issue{
+		{ID: "gt-inprog-older", Status: string(beads.StatusInProgress), UpdatedAt: "2026-01-01T00:00:00Z"},
+		{ID: "gt-inprog-newer", Status: string(beads.StatusInProgress), UpdatedAt: "2026-01-05T00:00:00Z"},
+	}
+
+	got := preferHooked(assignments)
+	wantIDs := []string{"gt-inprog-newer", "gt-inprog-older"}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("preferHooked() length = %d, want %d", len(got), len(wantIDs))
+	}
+	for i, want := range wantIDs {
+		if got[i].ID != want {
+			t.Fatalf("preferHooked()[%d].ID = %q, want %q", i, got[i].ID, want)
+		}
 	}
 }
