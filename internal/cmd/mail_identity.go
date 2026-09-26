@@ -60,18 +60,37 @@ func findLocalBeadsDir() (string, error) {
 // detectSender determines the current context's address.
 // Priority:
 //  1. GT_ROLE env var → use the role-based identity (agent session)
-//  2. No GT_ROLE → try cwd-based detection (witness/refinery/polecat/crew directories)
-//  3. No match → return "overseer" (human at terminal)
+//  2. No GT_ROLE, but GT_POLECAT set → synthetic polecat identity (agent
+//     context missing its role marker)
+//  3. Neither → try cwd-based detection (witness/refinery/polecat/crew directories)
+//  4. No match → return "overseer" (human at terminal)
 //
 // All Gas Town agents run in tmux sessions with GT_ROLE set at spawn.
 // However, cwd-based detection is also tried to support running commands
 // from agent directories without GT_ROLE set (e.g., debugging sessions).
+//
+// Step 2 exists because GT_ROLE-absent-but-GT_POLECAT-set is an established
+// agent-context signal elsewhere (isPolecatSession and isGasTownAgentContext
+// in tap_guard.go): the hooks live-fire probe deliberately strips GT_ROLE
+// (and GT_RIG) to avoid inheriting guard exemptions, but keeps GT_POLECAT so
+// guards still see it as an agent. Without this step, that combination fell
+// through to detectSenderFromCwd, which lands on its "overseer" default
+// because the probe's cwd is a disposable sandbox — so `gt mail check
+// --inject`, run by the probed settings' own hooks, read and ACKed the real
+// human operator's mail (gt-wyia).
 func detectSender() string {
 	// Check GT_ROLE first (authoritative for agent sessions)
 	role := os.Getenv("GT_ROLE")
 	if role != "" {
 		// Agent session - build address from role and context
 		return detectSenderFromRole(role)
+	}
+
+	if polecat := os.Getenv("GT_POLECAT"); polecat != "" {
+		if rig := os.Getenv("GT_RIG"); rig != "" {
+			return fmt.Sprintf("%s/%s", rig, polecat)
+		}
+		return polecat
 	}
 
 	// No GT_ROLE - try cwd-based detection, defaults to overseer if not in agent directory
