@@ -295,8 +295,16 @@ handles the re-dispatch:
 3. If under the limit: runs 'gt sling <bead> <rig>' to re-dispatch
 4. If over the limit: escalates to Mayor instead of re-slinging
 
+A deferral (cooldown, operator hold, ESTOP, or a full polecat pool) never
+counts against --max-attempts — the bead was queued, not failed. But a
+deferral that keeps recurring is tracked separately: after 3 consecutive
+deferrals with no successful dispatch in between, the deacon escalates to
+Mayor instead of deferring forever, since the failure condition otherwise
+never surfaces on its own (gt-oo494).
+
 Exit codes:
-  0 - Bead successfully re-dispatched or escalated
+  0 - Bead successfully re-dispatched or escalated (by attempt count or by
+      consecutive deferrals)
   1 - Error occurred
   2 - Try again later: the bead is in cooldown, or deferred by the operator's
       dispatch hold (<town>/seat-refill.hold, ESTOP, ESTOP.<rig>) or a full
@@ -1766,6 +1774,10 @@ func runDeaconRedispatchState(cmd *cobra.Command, args []string) error {
 		}
 		if beadState.Escalated {
 			fmt.Printf("  Escalated: YES (at %s)\n", beadState.EscalatedAt.Format(time.RFC3339))
+		}
+		if beadState.DeferralCount > 0 {
+			fmt.Printf("  Consecutive deferrals: %d/%d (%s)\n",
+				beadState.DeferralCount, deacon.DefaultMaxDeferrals, beadState.LastDeferralReason)
 		}
 
 		cooldown := deacon.DefaultRedispatchCooldown

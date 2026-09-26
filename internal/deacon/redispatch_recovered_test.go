@@ -408,6 +408,82 @@ func TestRedispatch_PoolFullRefusalIsNotAnAttempt(t *testing.T) {
 	}
 }
 
+// TestRedispatch_PersistentPoolFullEscalatesAfterMaxDeferrals is gt-oo494:
+// gt-qhhlr deferred behind a full pool for 3 straight patrol cycles and
+// never escalated, because a deferral never advances AttemptCount and so
+// never reaches the --max-attempts check. The consecutive-deferral counter
+// must catch what the attempt counter structurally cannot.
+func TestRedispatch_PersistentPoolFullEscalatesAfterMaxDeferrals(t *testing.T) {
+	calls := stubDispatchToolsSlinging(t, poolFullStderr, 1)
+	townRoot := t.TempDir()
+
+	var last *RedispatchResult
+	for i := 0; i < DefaultMaxDeferrals; i++ {
+		last = RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-stuck", "gastown", 3, 0)
+		if i < DefaultMaxDeferrals-1 && last.Action != "deferred" {
+			t.Fatalf("cycle %d: Action = %q, want %q (message: %s)", i+1, last.Action, "deferred", last.Message)
+		}
+	}
+
+	if last.Action != "escalated" {
+		t.Fatalf("final cycle: Action = %q, want %q (message: %s, err: %v)", last.Action, "escalated", last.Message, last.Error)
+	}
+	if !strings.Contains(last.Message, "consecutive deferrals") {
+		t.Errorf("Message = %q, want it to name the consecutive deferrals", last.Message)
+	}
+
+	logged := calls()
+	if call := callResembling(logged, "mail send mayor/", "consecutive deferrals"); call == "" {
+		t.Errorf("no consecutive-deferral escalation mail to the mayor; calls: %v", logged)
+	}
+
+	after, err := LoadRedispatchState(townRoot)
+	if err != nil {
+		t.Fatalf("LoadRedispatchState: %v", err)
+	}
+	got := after.Beads["gt-stuck"]
+	if !got.Escalated {
+		t.Error("bead was not marked escalated after max consecutive deferrals")
+	}
+	if got.AttemptCount != 0 {
+		t.Errorf("AttemptCount = %d, want 0 — deferrals must never count as attempts", got.AttemptCount)
+	}
+
+	// Further redispatch calls stop retrying rather than deferring forever.
+	again := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-stuck", "gastown", 3, 0)
+	if again.Action != "already-escalated" {
+		t.Errorf("Action = %q, want %q once escalated", again.Action, "already-escalated")
+	}
+}
+
+// TestRedispatch_DeferralStreakResetsOnRealAttempt checks the counter tracks
+// a consecutive streak, not a lifetime total: once a real attempt succeeds
+// (or fails), a fresh run of deferrals must not inherit the old count.
+func TestRedispatch_DeferralStreakResetsOnRealAttempt(t *testing.T) {
+	townRoot := t.TempDir()
+	state := &RedispatchState{Beads: map[string]*BeadRedispatchState{
+		"gt-mixed": {BeadID: "gt-mixed", DeferralCount: DefaultMaxDeferrals - 1, LastDeferralReason: "stale"},
+	}}
+	if err := SaveRedispatchState(townRoot, state); err != nil {
+		t.Fatalf("SaveRedispatchState: %v", err)
+	}
+
+	// A successful sling breaks the streak.
+	stubDispatchToolsSlinging(t, "", 0)
+	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-mixed", "gastown", 3, 0)
+	if result.Action != "redispatched" {
+		t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "redispatched", result.Message)
+	}
+
+	after, err := LoadRedispatchState(townRoot)
+	if err != nil {
+		t.Fatalf("LoadRedispatchState: %v", err)
+	}
+	if got := after.Beads["gt-mixed"].DeferralCount; got != 0 {
+		t.Errorf("DeferralCount = %d, want 0 after a real dispatch attempt", got)
+	}
+}
+
 // TestRedispatch_GenuineSlingFailureStillCounts keeps the budget honest: a
 // sling that broke for any other reason is still an attempt.
 func TestRedispatch_GenuineSlingFailureStillCounts(t *testing.T) {
