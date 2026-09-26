@@ -287,6 +287,16 @@ func runReady(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// An all-sources failure is a failed command, not an empty town, so it is
+	// settled before either renderer runs: both print an all-clear for a
+	// zero-item result, and the JSON body is byte-identical to a genuinely idle
+	// town, so a caller reading the exit status took the failure for success
+	// (gt-an5b). Only the human path reported it, and only because this check
+	// happened to sit after the render.
+	if len(failedSources) > 0 && len(failedSources) == len(sources) {
+		return fmt.Errorf("all sources failed to load: %s", strings.Join(failedSources, ", "))
+	}
+
 	// Output
 	if readyJSON {
 		enc := json.NewEncoder(os.Stdout)

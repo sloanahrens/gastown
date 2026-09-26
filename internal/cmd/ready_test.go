@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -391,5 +392,44 @@ func TestCappedNote_NeverRendersLikeACompleteBoard(t *testing.T) {
 				t.Errorf("cappedNote(%d rows) = %q, want %q", tt.count, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRunReady_AllSourcesFailedIsACommandFailure is the gt-an5b regression
+// test. runReady returned the JSON encode before its failed-sources check, so a
+// town whose every store failed still exited 0 and printed a zero-item report:
+// byte-identical on the wire to an idle town, and the exit status agreed with
+// the idle case too. /api/ready keys off that status, so it answered 200
+// carrying the panel's "No ready work" for a town it could not read at all.
+//
+// Serial: it drives runReady through the real workspace lookup and the
+// captureOutput os.Stdout swap, and runReady's output mode and rig filter are
+// package variables.
+func TestRunReady_AllSourcesFailedIsACommandFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	// A bd that always fails: every source's ready query dies, which is the
+	// all-sources-failed case. The stub never reaches a real bd or Dolt.
+	setupTownWithBdStub(t, "#!/bin/sh\nexit 1\n")
+
+	oldJSON := readyJSON
+	readyJSON = true
+	t.Cleanup(func() { readyJSON = oldJSON })
+
+	var err error
+	out := captureOutput(func() { err = runReady(nil, nil) })
+
+	if err == nil {
+		t.Fatalf("runReady returned nil for a town whose every source failed; "+
+			"stdout was %q", out)
+	}
+	if !strings.Contains(err.Error(), "all sources failed to load") {
+		t.Errorf("runReady error = %v, want it to name the all-sources failure", err)
+	}
+	if got := strings.TrimSpace(out); got != "" {
+		t.Errorf("runReady wrote %q on stdout; a failed command must not print a "+
+			"zero-item report, which is byte-identical to what an idle town prints", got)
 	}
 }
