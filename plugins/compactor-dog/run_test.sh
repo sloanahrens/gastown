@@ -276,6 +276,10 @@ run_with_fakes() {
   if (
     export PATH="$dir:$PATH"
     export RUN_LOG="$d/ops"
+    # Pin monitor mode: these tests assert monitor/flatten escalation
+    # behavior and must not pick up this machine's real
+    # mayor/daemon.json scheduled_maintenance.mode (gt-124a6).
+    export COMPACTOR_MAINT_MODE="monitor"
     bash "$SCRIPT_DIR/run.sh" "$@"
   ) >/dev/null 2>&1; then
     RUN_RC=0
@@ -438,6 +442,35 @@ run_with_daemon_threshold() {
     export PATH="$dir:$PATH"
     export RUN_LOG="$d/ops"
     export COMPACTOR_DAEMON_THRESHOLD="$threshold"
+    # Pin monitor mode for the same reason as run_with_fakes above — these
+    # tests predate the gc-mode gate and assert monitor/flatten behavior.
+    export COMPACTOR_MAINT_MODE="monitor"
+    bash "$SCRIPT_DIR/run.sh" "$@"
+  ) >/dev/null 2>&1; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+  if [[ $RUN_RC -ne 0 ]]; then
+    echo "HARNESS: run.sh exited $RUN_RC (see ops in $d)" >&2
+  fi
+  return 0
+}
+
+# Same as run_with_daemon_threshold, but also pins scheduled_maintenance.mode
+# (gt-124a6: gc mode changes whether commit count below the daemon threshold
+# is an escalation signal at all).
+run_with_daemon_threshold_and_mode() {
+  local dir="$1" threshold="$2" mode="$3" d
+  shift 3
+  d=$(run_log_dir)
+  RUN_LOG_DIR="$d"
+  RUN_LOG_DIRS="$RUN_LOG_DIRS $d"
+  if (
+    export PATH="$dir:$PATH"
+    export RUN_LOG="$d/ops"
+    export COMPACTOR_DAEMON_THRESHOLD="$threshold"
+    export COMPACTOR_MAINT_MODE="$mode"
     bash "$SCRIPT_DIR/run.sh" "$@"
   ) >/dev/null 2>&1; then
     RUN_RC=0
@@ -499,8 +532,50 @@ if ! grep -q -- '--result check-only' "$LOG/ops" 2>/dev/null; then
   echo "FAIL: a run with every candidate deferred to the daemon must record check-only, not warning or failure"
   FAILURES=$((FAILURES + 1))
 fi
-if ! grep -q 'deferred to its own patrol' "$LOG/ops" 2>/dev/null; then
+if ! grep -q "deferred to the daemon's own patrol" "$LOG/ops" 2>/dev/null; then
   echo "FAIL: the check-only receipt must say candidates were deferred, not silently drop them"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# (f) gc mode: a candidate between the plugin's 500 floor and the daemon
+# threshold must NOT be escalated — commit count isn't a disk signal in gc
+# mode (plugin.md Step 6), so the script defers it exactly like the
+# at/above-threshold band. This is the gt-124a6 regression: monitor mode
+# still escalates hq (600, below a 20000 daemon threshold); gc mode must not.
+FAKE_DIR_GC=$(mktemp -d)
+trap 'rm -rf ${RUN_LOG_DIRS:-} "$FAKE_DIR" "$FAKE_DIR_RC1" "$FAKE_DIR_DEFER" "$FAKE_DIR_ALL_DEFER" "$FAKE_DIR_GC"' EXIT
+write_fake_dolt_counts "$FAKE_DIR_GC" 600 3000
+
+run_with_daemon_threshold_and_mode "$FAKE_DIR_GC" 20000 "gc"
+LOG="$RUN_LOG_DIR"
+if [[ "$RUN_RC" -ne 0 ]]; then
+  echo "FAIL: gc-mode check-only exited $RUN_RC, want 0"
+  FAILURES=$((FAILURES + 1))
+fi
+if grep -q '^ESCALATE ' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: gc mode escalated a candidate (hq, 600) below the daemon threshold (20000) — commit count isn't a disk signal in gc mode"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q -- '--result check-only' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: gc mode with every candidate deferred must record check-only, not warning"
+  FAILURES=$((FAILURES + 1))
+fi
+
+# (g) monitor mode (the default) with the same fixture still escalates the
+# sub-threshold candidate — the gc-mode gate must not suppress the existing
+# monitor/flatten behavior.
+FAKE_DIR_MONITOR=$(mktemp -d)
+trap 'rm -rf ${RUN_LOG_DIRS:-} "$FAKE_DIR" "$FAKE_DIR_RC1" "$FAKE_DIR_DEFER" "$FAKE_DIR_ALL_DEFER" "$FAKE_DIR_GC" "$FAKE_DIR_MONITOR"' EXIT
+write_fake_dolt_counts "$FAKE_DIR_MONITOR" 600 3000
+
+run_with_daemon_threshold_and_mode "$FAKE_DIR_MONITOR" 20000 "monitor"
+LOG="$RUN_LOG_DIR"
+if [[ "$RUN_RC" -ne 0 ]]; then
+  echo "FAIL: monitor-mode check-only exited $RUN_RC, want 0"
+  FAILURES=$((FAILURES + 1))
+fi
+if ! grep -q 'ESCALATE .*hq' "$LOG/ops" 2>/dev/null; then
+  echo "FAIL: monitor mode must still escalate a sub-daemon-threshold candidate (hq, 600) — the gc-mode gate should not apply here"
   FAILURES=$((FAILURES + 1))
 fi
 
