@@ -418,7 +418,9 @@ func ensureMayorInfra(townRoot string) error {
 	daemonRunning, _, _ := daemon.IsRunning(townRoot)
 	if !daemonRunning {
 		style.PrintWarning("daemon is not running, starting...")
-		if err := ensureDaemon(townRoot); err != nil {
+		// The supervisor-file note ensureDaemon can return is about a daemon
+		// that was already up, which this call site has already ruled out.
+		if _, err := ensureDaemon(townRoot); err != nil {
 			style.PrintWarning("daemon start failed: %v", err)
 		} else {
 			fmt.Printf("  %s Daemon started\n", style.Bold.Render("✓"))

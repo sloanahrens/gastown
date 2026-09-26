@@ -293,6 +293,13 @@ inactive and `gt daemon start` restarts it. A stop that cannot establish the
 job's state exits non-zero and names the uncertainty rather than reporting a
 stop it could not confirm.
 
+The job file also records how long the daemon is given to stop before launchd
+SIGKILLs it, and that value comes from the `gt` that wrote the file. `gt daemon
+start`, `gt daemon restart` and `gt up` therefore rewrite a file installed by
+an older `gt` and reload the job from it, so expect the daemon to restart once
+at the first of those commands after an upgrade. Only that value is repaired
+this way; re-provision anything else with `gt daemon enable-supervisor`.
+
 ### Choosing Roles
 
 Gas Town is modular. Enable only what you need:

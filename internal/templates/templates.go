@@ -339,22 +339,9 @@ func MissingCommandsFor(workspacePath, agent string) []string {
 // real value instead of drifting independently. A zero exitTimeout leaves
 // launchd's own default in effect (only meaningful on darwin).
 func ProvisionSupervisor(townRoot string, exitTimeout time.Duration) (string, error) {
-	gtPath, err := os.Executable()
+	data, err := supervisorData(townRoot, exitTimeout)
 	if err != nil {
-		return "", fmt.Errorf("finding gt executable: %w", err)
-	}
-
-	env, err := config.LoadDaemonEnv(townRoot)
-	if err != nil {
-		return "", fmt.Errorf("loading daemon env: %w", err)
-	}
-	delete(env, "GT_TOWN_ROOT")
-
-	data := SupervisorData{
-		GTPath:             gtPath,
-		TownRoot:           townRoot,
-		Env:                env,
-		ExitTimeOutSeconds: int(exitTimeout / time.Second),
+		return "", err
 	}
 
 	switch runtime.GOOS {
@@ -365,6 +352,138 @@ func ProvisionSupervisor(townRoot string, exitTimeout time.Duration) (string, er
 	default:
 		return fmt.Sprintf("Supervisor auto-configuration skipped on %s (not supported yet)", runtime.GOOS), nil
 	}
+}
+
+// supervisorData builds the render inputs for the town at townRoot. Both the
+// provision paths and SupervisorFileContent go through it, so that a file
+// rewritten from the running binary is byte-for-byte the file a fresh
+// provision would write: "what is current" has to mean one thing.
+func supervisorData(townRoot string, exitTimeout time.Duration) (SupervisorData, error) {
+	gtPath, err := os.Executable()
+	if err != nil {
+		return SupervisorData{}, fmt.Errorf("finding gt executable: %w", err)
+	}
+
+	env, err := config.LoadDaemonEnv(townRoot)
+	if err != nil {
+		return SupervisorData{}, fmt.Errorf("loading daemon env: %w", err)
+	}
+	delete(env, "GT_TOWN_ROOT")
+
+	return SupervisorData{
+		GTPath:             gtPath,
+		TownRoot:           townRoot,
+		Env:                env,
+		ExitTimeOutSeconds: int(exitTimeout / time.Second),
+	}, nil
+}
+
+// SupervisorFileContent renders the supervisor file this binary would install
+// for the town at townRoot under the supervisor of the given kind
+// ("launchd"/"systemd"), from the same data ProvisionSupervisor renders with.
+// ok is false for a kind this build does not write — including the empty kind
+// a host with no supported supervisor reports.
+//
+// It answers "what does this binary think the file should say", which
+// SupervisorFileRepair needs to ask, and which a caller can use to see the
+// difference a provision would make without installing anything.
+func SupervisorFileContent(kind, townRoot string, exitTimeout time.Duration) (content string, ok bool, err error) {
+	switch kind {
+	case "launchd", "systemd":
+	default:
+		return "", false, nil
+	}
+
+	data, err := supervisorData(townRoot, exitTimeout)
+	if err != nil {
+		return "", false, err
+	}
+
+	if kind == "launchd" {
+		content, err = renderLaunchdPlist(data)
+	} else {
+		content, err = renderSystemdUnit(data)
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return content, true, nil
+}
+
+// SupervisorFileRepair returns the content that should replace the supervisor
+// file at path, and whether there is a repair to make at all (gt-x872).
+//
+// The file at path describes a job run out of townRoot; the caller has already
+// established that it is this town's. A repair is a rewrite of the ONE value
+// in it that is compiled into the binary that wrote it — launchd's
+// ExitTimeOut, which comes from daemon.ShutdownBudget. It goes stale on a
+// binary upgrade and nowhere else, and it is not cosmetic: a job whose
+// ExitTimeOut is shorter than the daemon's own graceful shutdown gets its
+// daemon SIGKILLed mid-shutdown on every restart, which for the Dolt SQL
+// server step in particular risks its journal. That value has to follow the
+// binary, so a file written by an older one has to be repairable without
+// re-provisioning the whole job.
+//
+// Anything else that differs means the file is not this binary's rendering of
+// this town — a different gt path, a different town, a job someone wrote by
+// hand, an env file that changed since it was written — and none of it is
+// repaired here. Repointing a launchd job at whichever gt happens to be
+// running is a reconfiguration, not a repair; `gt daemon enable-supervisor`
+// is the explicit way to re-provision a file from scratch.
+//
+// On Linux this is always ("", false, nil): the systemd unit renders no value
+// from the binary's own constants, so there is nothing for a binary upgrade to
+// leave behind.
+//
+// It only renders. Installing the content and making the running job read it
+// are the caller's, and separate: a service manager caches a job definition
+// when it loads it, so a rewritten file reaches a loaded job only through an
+// unload and a load.
+func SupervisorFileRepair(path, kind, townRoot string, exitTimeout time.Duration) (content string, repair bool, err error) {
+	if kind != "launchd" {
+		return "", false, nil
+	}
+	isFor, err := SupervisorFileIsFor(path, townRoot)
+	if err != nil || !isFor {
+		return "", false, err
+	}
+
+	installed, err := os.ReadFile(path) //nolint:gosec // fixed per-user path from this package
+	if err != nil {
+		return "", false, fmt.Errorf("reading supervisor file %s: %w", path, err)
+	}
+
+	current, ok, err := SupervisorFileContent(kind, townRoot, exitTimeout)
+	if err != nil || !ok {
+		return "", false, err
+	}
+
+	if string(installed) == current {
+		return "", false, nil
+	}
+	if withExitTimeOutStripped(string(installed)) != withExitTimeOutStripped(current) {
+		return "", false, nil
+	}
+	return current, true, nil
+}
+
+// withExitTimeOutStripped removes the ExitTimeOut key and its integer from a
+// rendered plist, so that two plists differing only in that value compare
+// equal. Matching is line-based against what renderLaunchdPlist produces —
+// the key on its own line, the value on the next — so a file formatted some
+// other way (the key and value on one line) keeps its difference and is not
+// treated as a repairable one.
+func withExitTimeOutStripped(plist string) string {
+	lines := strings.Split(plist, "\n")
+	kept := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "<key>ExitTimeOut</key>" {
+			i++ // the value line goes with the key
+			continue
+		}
+		kept = append(kept, lines[i])
+	}
+	return strings.Join(kept, "\n")
 }
 
 // renderLaunchdPlist renders the launchd plist template for the given data.
