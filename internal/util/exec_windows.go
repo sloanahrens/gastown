@@ -3,6 +3,8 @@
 package util
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
@@ -47,14 +49,22 @@ func newProcessGroup(cmd *exec.Cmd) {
 // group signal, so this is taskkill's tree walk: the same guarantee a negative
 // pid gives on Unix, with no SIGTERM grace to wait out.
 //
-// taskkill reports a process tree that is already gone as a failure, which is
-// the outcome this function exists to produce, so its exit status is not
-// surfaced — a caller cancelling a command has no use for "it was already
-// dead" as an error.
+// taskkill reports a process tree that is already gone as a failure, the same
+// exit status it gives for a tree it failed to reach (e.g. access denied, or
+// taskkill missing from PATH), so a taskkill failure alone doesn't tell us the
+// tree is dead. On failure we fall back to killing the top-level process
+// directly: that either confirms the tree was already gone (os.ErrProcessDone)
+// or gives the caller a real error instead of a silent no-op. The fallback
+// can't reach grandchildren the way taskkill's /T does, but it beats reporting
+// success while the tree is still running.
 func KillProcessGroup(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
 	}
-	_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run() //nolint:errcheck // best-effort teardown; see doc comment
+	if err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run(); err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			return killErr
+		}
+	}
 	return nil
 }
