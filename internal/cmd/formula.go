@@ -367,7 +367,10 @@ func runFormulaSync(cmd *cobra.Command, args []string) error {
 // human-readable summary. Split out from runFormulaSync so the summary logic is
 // testable without a real workspace.
 func formulaSyncMessage(townRoot string) (string, error) {
-	report, err := buildFormulaSyncReport(townRoot)
+	report, err := buildFormulaSyncReport(townRoot, formula.SyncOptions{
+		DryRun: formulaSyncDryRun,
+		Force:  formulaSyncForce,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -414,16 +417,15 @@ type formulaSyncReport struct {
 
 // buildFormulaSyncReport runs the sync (or its dry run) and collects the
 // embedded-content provenance a "synced" line cannot stand without.
-func buildFormulaSyncReport(townRoot string) (*formulaSyncReport, error) {
-	opts := formula.SyncOptions{DryRun: formulaSyncDryRun, Force: formulaSyncForce}
+func buildFormulaSyncReport(townRoot string, opts formula.SyncOptions) (*formulaSyncReport, error) {
 	plan, err := formula.SyncFormulas(townRoot, opts)
 	if err != nil {
 		return nil, err
 	}
 
 	report := &formulaSyncReport{
-		DryRun:        formulaSyncDryRun,
-		Forced:        formulaSyncForce,
+		DryRun:        opts.DryRun,
+		Forced:        opts.Force,
 		Installed:     emptyIfNil(plan.Installed()),
 		Updated:       emptyIfNil(plan.Updated()),
 		Reinstalled:   emptyIfNil(plan.Reinstalled()),
@@ -435,18 +437,23 @@ func buildFormulaSyncReport(townRoot string) (*formulaSyncReport, error) {
 		BuiltAt:       BuildTime,
 	}
 	if len(plan.ForceOverwritten()) > 0 {
-		report.BackedUp = backedUpPaths(townRoot)
+		report.BackedUp = backedUpPaths(townRoot, plan, opts.DryRun)
 	}
 
-	fillFormulaDrift(report)
+	fillFormulaDrift(report, townRoot)
 	return report, nil
 }
 
 // fillFormulaDrift records whether formula fixes merged on the build branch are
 // missing from this binary. A sync cannot deliver those — only a rebuild can —
 // so the report has to say it or "synced" reads as "current" (gt-dt7r).
-func fillFormulaDrift(report *formulaSyncReport) {
-	repoDir, err := version.GetRepoRoot()
+//
+// The checkout is resolved from townRoot rather than the ambient environment:
+// drift is a property of the town being synced, and the alternative resolves
+// (and, to report freshness, fetches) whichever source checkout the process
+// happens to be near (gt-vxjz).
+func fillFormulaDrift(report *formulaSyncReport, townRoot string) {
+	repoDir, err := version.GetRepoRootForTown(townRoot)
 	if err != nil {
 		// No source checkout: drift is unknowable, not absent.
 		report.DriftReason = err.Error()
@@ -471,9 +478,24 @@ func emptyIfNil(names []string) []string {
 	return names
 }
 
-// backedUpPaths maps each displaced formula to where its previous copy now
-// lives, so the summary can point at what a --force overwrite moved aside.
-func backedUpPaths(townRoot string) map[string]string {
+// backedUpPaths maps each formula a --force overwrite displaces to where its
+// previous copy lives, so the summary can point at what was moved aside.
+//
+// A dry run displaces nothing, so it names the destinations a real run would
+// write. Reading the manifest instead would report the copies some earlier
+// force sync displaced — an answer about a different run (gt-vxjz).
+func backedUpPaths(townRoot string, plan *formula.SyncPlan, dryRun bool) map[string]string {
+	displaced := plan.ForceOverwritten()
+	if len(displaced) == 0 {
+		return nil
+	}
+	if dryRun {
+		backedUp := make(map[string]string, len(displaced))
+		for _, name := range displaced {
+			backedUp[name] = formula.ForceBackupPath(townRoot, name)
+		}
+		return backedUp
+	}
 	records, err := formula.ReadForceBackupManifest(townRoot)
 	if err != nil || len(records) == 0 {
 		return nil
@@ -531,8 +553,13 @@ func formatFormulaSyncReport(r *formulaSyncReport) string {
 	}
 
 	if len(r.BackedUp) > 0 {
-		fmt.Fprintf(&b, "\n%s %d hand-edited formulas were overwritten; the previous copies are at:\n",
-			style.WarningPrefix, len(r.BackedUp))
+		if r.DryRun {
+			fmt.Fprintf(&b, "\n%s %d hand-edited formulas would be overwritten; the previous copies would go to:\n",
+				style.WarningPrefix, len(r.BackedUp))
+		} else {
+			fmt.Fprintf(&b, "\n%s %d hand-edited formulas were overwritten; the previous copies are at:\n",
+				style.WarningPrefix, len(r.BackedUp))
+		}
 		for _, name := range slices.Sorted(maps.Keys(r.BackedUp)) {
 			fmt.Fprintf(&b, "      %s  %s\n", name, style.Dim.Render(r.BackedUp[name]))
 		}

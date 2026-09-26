@@ -529,18 +529,29 @@ type BackupRecord struct {
 // backupDirName is where --force parks displaced copies, alongside the live ones.
 const backupDirName = ".bak"
 
+// ForceBackupPath returns where a displacing --force sync parks the town copy of
+// formula. It is a pure function of the beads path and the name, so a dry run
+// can name the destination a real run would write without reading a manifest.
+func ForceBackupPath(beadsPath, formula string) string {
+	return backupPathFor(filepath.Join(beadsPath, ".beads", "formulas"), formula)
+}
+
+// backupPathFor returns where a displaced town copy of filename is parked.
+func backupPathFor(formulasDir, filename string) string {
+	return filepath.Join(formulasDir, backupDirName, filename)
+}
+
 // backupFormulaFile copies a hand-edited town formula aside before --force
 // overwrites it, so an overwrite is recoverable rather than destructive.
 func backupFormulaFile(formulasDir, destPath, filename string) (BackupRecord, error) {
-	dir := filepath.Join(formulasDir, backupDirName)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	backupPath := backupPathFor(formulasDir, filename)
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0755); err != nil {
 		return BackupRecord{}, fmt.Errorf("creating backup directory: %w", err)
 	}
 	content, err := os.ReadFile(destPath) //nolint:gosec // G304: path is inside the town formulas dir
 	if err != nil {
 		return BackupRecord{}, fmt.Errorf("reading %s to back it up: %w", filename, err)
 	}
-	backupPath := filepath.Join(dir, filename)
 	if err := os.WriteFile(backupPath, content, 0644); err != nil {
 		return BackupRecord{}, fmt.Errorf("backing up %s: %w", filename, err)
 	}

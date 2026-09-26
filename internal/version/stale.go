@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -235,10 +236,9 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 // can't hang gt stale / gt doctor.
 const remoteFetchTimeout = 5 * time.Second
 
-// CheckStaleBinaryFresh is CheckStaleBinary, but first refreshes the
-// origin/upstream remote-tracking refs it may compare against instead of
-// trusting however current repoDir's last "git fetch" happened to leave
-// them.
+// CheckStaleBinaryFresh is CheckStaleBinary, but refreshes the
+// origin/upstream remote-tracking refs before trusting one of them to say
+// the binary is current.
 //
 // repoDir is normally $GT_ROOT/gastown/mayor/rig — a shared worktree nobody
 // guarantees to keep fetched — so refs/remotes/origin/main there can lag the
@@ -249,15 +249,22 @@ const remoteFetchTimeout = 5 * time.Second
 // live refresh can't confirm the ref it landed on, this fails closed to
 // Skipped rather than trusting an unverified "fresh".
 //
+// The refresh runs only for a verdict that needs it (liveRefVerdict); a
+// result the cached refs already settle is returned untouched.
+//
 // Callers on the interactive hot path (the per-command startup warning)
-// should keep using CheckStaleBinary directly — this is for the explicit,
-// occasional checks (gt stale, gt doctor) where a network round trip is
-// acceptable.
+// should keep using CheckStaleBinary directly.
 func CheckStaleBinaryFresh(repoDir string) *StaleBinaryInfo {
-	refreshed := refreshRemoteTrackingRefs(repoDir)
 	info := CheckStaleBinary(repoDir)
+	if !liveRefVerdict(info) {
+		return info
+	}
 
-	if !info.IsStale && !info.Skipped && info.Error == nil && isRemoteTrackingRef(info.CompareRef) && !refreshed[info.CompareRef] {
+	refreshed := refreshRemoteTrackingRefs(repoDir)
+	if refreshed[info.CompareRef] {
+		info = CheckStaleBinary(repoDir)
+	}
+	if liveRefVerdict(info) && !refreshed[info.CompareRef] {
 		info.Skipped = true
 		info.SkipReason = fmt.Sprintf(
 			"could not confirm %s is current (remote unreachable or not configured); refusing to report fresh from a possibly-stale cached ref",
@@ -265,6 +272,16 @@ func CheckStaleBinaryFresh(repoDir string) *StaleBinaryInfo {
 	}
 
 	return info
+}
+
+// liveRefVerdict reports whether info is about to say the binary is current on
+// the strength of a remote-tracking ref — the only verdict a live fetch can
+// change. Drift the cached ref already proves needs no fetch, and neither does
+// an error or a skip, which assert nothing. Gating on this keeps a routine
+// caller from fetching, and so rewriting the shared checkout's remote-tracking
+// refs, for an answer it already has (gt-vxjz).
+func liveRefVerdict(info *StaleBinaryInfo) bool {
+	return info.Error == nil && !info.Skipped && !info.IsStale && isRemoteTrackingRef(info.CompareRef)
 }
 
 // isRemoteTrackingRef reports whether compareRef is one of the
@@ -452,6 +469,29 @@ func singleBranchRef(repoDir, pattern string) (buildBranchRef, bool) {
 	return buildBranchRef{ref: refs[0], display: display}, true
 }
 
+// townSourceCandidates lists where a town keeps its gt source checkout:
+// <townRoot>/gastown canonically, or <townRoot>/gastown/mayor/rig when the
+// source lives in the mayor's rig worktree.
+func townSourceCandidates(townRoot string) []string {
+	return []string{
+		filepath.Join(townRoot, "gastown"),
+		filepath.Join(townRoot, "gastown", "mayor", "rig"),
+	}
+}
+
+// GetRepoRootForTown returns the gt source checkout belonging to the town at
+// townRoot, so a caller reporting one town's build drift cannot pick up another
+// checkout's. It reads nothing outside townRoot, unlike GetRepoRoot, which
+// falls back to $HOME and the working directory.
+func GetRepoRootForTown(townRoot string) (string, error) {
+	for _, candidate := range townSourceCandidates(townRoot) {
+		if hasGtSource(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("town %s has no gt source checkout (no gastown/cmd/gt/main.go below it)", townRoot)
+}
+
 // GetRepoRoot returns the git repository root for the gt source code.
 // The canonical source is the gastown repo itself ($GT_ROOT/gastown).
 // Crew rigs also contain cmd/gt/main.go but have different HEADs,
@@ -459,11 +499,7 @@ func singleBranchRef(repoDir, pattern string) (buildBranchRef, bool) {
 func GetRepoRoot() (string, error) {
 	// Check if GT_ROOT environment variable is set (agents always have this)
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		candidates := []string{
-			gtRoot + "/gastown",
-			gtRoot + "/gastown/mayor/rig",
-		}
-		for _, candidate := range candidates {
+		for _, candidate := range townSourceCandidates(gtRoot) {
 			if hasGtSource(candidate) {
 				return candidate, nil
 			}

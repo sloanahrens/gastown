@@ -1,6 +1,7 @@
 package version
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -714,6 +715,157 @@ func TestStaleBinaryInfo_Describe(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.info.Describe(tt.subject); got != tt.want {
 				t.Errorf("Describe(%q) = %q, want %q", tt.subject, got, tt.want)
+			}
+		})
+	}
+}
+
+// errNotBuilt stands in for the "cannot determine binary commit" error.
+var errNotBuilt = errors.New("cannot determine binary commit (dev build?)")
+
+// TestLiveRefVerdict pins the gate that decides whether CheckStaleBinaryFresh
+// goes to the network. Only a "current" verdict resting on a remote-tracking
+// ref can be changed by a fetch; everything else is returned as-is, so a
+// routine caller does not rewrite the shared checkout's refs for nothing
+// (gt-vxjz).
+func TestLiveRefVerdict(t *testing.T) {
+	tests := []struct {
+		name string
+		info *StaleBinaryInfo
+		want bool
+	}{
+		{"current, judged against a remote-tracking ref", &StaleBinaryInfo{CompareRef: "origin/main"}, true},
+		{"current, judged against a local branch", &StaleBinaryInfo{CompareRef: "main"}, false},
+		{"current, judged against a carry branch", &StaleBinaryInfo{CompareRef: "carry/ops"}, false},
+		{"stale from the cached ref", &StaleBinaryInfo{CompareRef: "origin/main", IsStale: true}, false},
+		{"no verdict (skipped)", &StaleBinaryInfo{CompareRef: "origin/main", Skipped: true}, false},
+		{"no verdict (error)", &StaleBinaryInfo{CompareRef: "origin/main", Error: errNotBuilt}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := liveRefVerdict(tt.info); got != tt.want {
+				t.Errorf("liveRefVerdict(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckStaleBinaryFresh_StaleFromCacheSkipsTheFetch: drift the cached ref
+// already proves needs no network. Observable through refs/remotes/origin/main
+// itself, because a fetch would be what moved it to the newer tip (gt-vxjz).
+func TestCheckStaleBinaryFresh_StaleFromCacheSkipsTheFetch(t *testing.T) {
+	remoteDir := newBareRemote(t)
+
+	dir := newGitRepo(t)
+	gitRun(t, dir, "remote", "add", "origin", remoteDir)
+	builtFrom := gitCommit(t, dir, "a.go", "1")
+	gitRun(t, dir, "branch", "-M", "main")
+	gitRun(t, dir, "push", "-q", "origin", "main")
+
+	// A separate checkout lands the tie the cache will hold. Pushing from dir
+	// would update dir's own remote-tracking ref, leaving nothing to prove.
+	other := t.TempDir()
+	gitRun(t, other, "init", "-q")
+	gitRun(t, other, "remote", "add", "origin", remoteDir)
+	gitRun(t, other, "fetch", "-q", "origin", "main")
+	gitRun(t, other, "checkout", "-q", "-b", "main", "origin/main")
+	fetchedTip := gitCommit(t, other, "b.go", "2")
+	gitRun(t, other, "push", "-q", "origin", "main")
+
+	// dir fetches that tie; the binary predates it, so the cached ref alone
+	// proves the drift.
+	gitRun(t, dir, "fetch", "-q", "origin")
+	setBinaryCommit(t, builtFrom)
+
+	// A later tip that only a live fetch would learn about.
+	gitCommit(t, other, "c.go", "3")
+	gitRun(t, other, "push", "-q", "origin", "main")
+
+	info := CheckStaleBinaryFresh(dir)
+
+	if !info.IsStale {
+		t.Fatalf("cached origin/main is %s and the binary is %s; want stale",
+			ShortCommit(fetchedTip), ShortCommit(builtFrom))
+	}
+	if info.Skipped {
+		t.Errorf("Skipped = true (%s), want the verdict the cached ref already supports", info.SkipReason)
+	}
+	if info.RepoCommit != fetchedTip {
+		t.Errorf("RepoCommit = %s, want the cached %s: a stale-from-cache verdict must not fetch",
+			ShortCommit(info.RepoCommit), ShortCommit(fetchedTip))
+	}
+}
+
+// TestCheckStaleBinaryFresh_UnstampedBuildSkipsTheFetch: a build with no commit
+// has no verdict to make fresh, so it must not reach the network. This is the
+// path that made gt formula sync non-hermetic (gt-vxjz).
+func TestCheckStaleBinaryFresh_UnstampedBuildSkipsTheFetch(t *testing.T) {
+	dir := newGitRepo(t)
+	gitRun(t, dir, "remote", "add", "origin", newBareRemote(t))
+	remoteTip := gitCommit(t, dir, "a.go", "1")
+	gitRun(t, dir, "branch", "-M", "main")
+	gitRun(t, dir, "push", "-q", "origin", "main")
+
+	// Park the cached ref somewhere the remote is not, so any fetch would
+	// visibly rewrite it.
+	cachedTip := gitCommit(t, dir, "b.go", "2")
+	gitRun(t, dir, "update-ref", "refs/remotes/origin/main", cachedTip)
+	gitRun(t, dir, "reset", "-q", "--hard", remoteTip)
+	setBinaryCommit(t, "")
+
+	if got := resolveCommitHash(); got != "" {
+		t.Skipf("test binary carries commit %s; the unstamped path needs none", got)
+	}
+
+	info := CheckStaleBinaryFresh(dir)
+	if info.Error == nil {
+		t.Fatalf("want the unstamped-build error, got IsStale=%v Skipped=%v", info.IsStale, info.Skipped)
+	}
+
+	if got := gitRun(t, dir, "rev-parse", "refs/remotes/origin/main"); got != cachedTip {
+		t.Errorf("refs/remotes/origin/main = %s, want the untouched cache %s: an unstamped build must not fetch",
+			ShortCommit(got), ShortCommit(cachedTip))
+	}
+}
+
+// TestGetRepoRootForTown_ReadsOnlyTheTown keeps a caller reporting one town's
+// build drift from resolving — and, to report freshness, fetching — whichever
+// checkout the process happens to sit near (gt-vxjz).
+func TestGetRepoRootForTown_ReadsOnlyTheTown(t *testing.T) {
+	// Both GT_ROOT and the working directory name a real checkout here, so a
+	// fallback would resolve one. The town root must be the only input.
+	t.Setenv("GT_ROOT", string(filepath.Separator))
+
+	empty := t.TempDir()
+	if _, err := GetRepoRootForTown(empty); err == nil {
+		t.Error("resolved a checkout for a town with no gastown/ below it")
+	}
+
+	tests := []struct {
+		name string
+		rel  string
+	}{
+		{"canonical", "gastown"},
+		{"mayor's rig worktree", filepath.Join("gastown", "mayor", "rig")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			town := t.TempDir()
+			source := filepath.Join(town, tt.rel)
+			main := filepath.Join(source, "cmd", "gt", "main.go")
+			if err := os.MkdirAll(filepath.Dir(main), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(main, []byte("package main\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := GetRepoRootForTown(town)
+			if err != nil {
+				t.Fatalf("GetRepoRootForTown: %v", err)
+			}
+			if got != source {
+				t.Errorf("GetRepoRootForTown = %q, want %q", got, source)
 			}
 		})
 	}
