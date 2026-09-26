@@ -643,29 +643,67 @@ func (f *LiveConvoyFetcher) getTrackedIssues(convoyID string) ([]trackedIssueInf
 // target row is not in this database.
 //
 // Returned IDs are unwrapped; the caller validates them. An empty slice means
-// "try the next strategy", never "this convoy tracks nothing".
+// "try the next strategy", never "this convoy tracks nothing" — so a payload
+// this function cannot read is an error, not an empty slice (gt-r12y).
 func (f *LiveConvoyFetcher) rawTrackedDeps(convoyID string) ([]depRef, error) {
 	stdout, err := f.runBdCmd(f.townRoot, "dep", "list", convoyID, convoyID, "--json")
 	if err != nil {
 		return nil, err
 	}
 
-	var edges []struct {
-		DependsOnID string `json:"depends_on_id"`
-		Type        string `json:"type"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &edges); err != nil {
-		return nil, fmt.Errorf("parsing raw deps for %s: %w", convoyID, err)
+	edges, err := parseRawEdgeRecords(stdout.Bytes(), convoyID)
+	if err != nil {
+		return nil, err
 	}
 
 	deps := make([]depRef, 0, len(edges))
 	for _, edge := range edges {
-		if edge.Type != "tracks" {
+		if edge.Type == nil || *edge.Type != rawEdgeTracks || edge.DependsOnID == nil {
 			continue
 		}
-		deps = append(deps, depRef{ID: beads.ExtractIssueID(edge.DependsOnID)})
+		deps = append(deps, depRef{ID: beads.ExtractIssueID(*edge.DependsOnID)})
 	}
 	return deps, nil
+}
+
+// rawEdgeTracks is the dependency type bd gives a convoy's tracked issues.
+const rawEdgeTracks = "tracks"
+
+// rawEdgeRecord is one record of bd's raw-edge form, `bd dep list <convoyID>
+// <convoyID> --json`. The pointers keep a field bd renamed distinguishable from
+// one it omitted, which is what parseRawEdgeRecords reports.
+type rawEdgeRecord struct {
+	DependsOnID *string `json:"depends_on_id"`
+	Type        *string `json:"type"`
+}
+
+// parseRawEdgeRecords decodes bd's raw-edge form and reports a payload whose
+// records stopped carrying depends_on_id or type. Without that check a renamed
+// field decodes as an empty string and the convoy reads as tracking nothing:
+// the caller falls through to the join-based strategies, which drop
+// cross-database edges, restoring the 0/0 render (gt-44z1) with nothing in the
+// log to say why.
+func parseRawEdgeRecords(payload []byte, convoyID string) ([]rawEdgeRecord, error) {
+	var records []rawEdgeRecord
+	if err := json.Unmarshal(payload, &records); err != nil {
+		return nil, fmt.Errorf("parsing raw deps for %s: %w", convoyID, err)
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+
+	var hasTarget, hasType bool
+	for _, rec := range records {
+		hasTarget = hasTarget || rec.DependsOnID != nil
+		hasType = hasType || rec.Type != nil
+	}
+	if !hasTarget {
+		return nil, fmt.Errorf("bd's raw-edge form returned %d record(s) for %s, none carrying depends_on_id: the CLI's record schema changed, so tracked edges can no longer be resolved", len(records), convoyID)
+	}
+	if !hasType {
+		return nil, fmt.Errorf("bd's raw-edge form returned %d record(s) for %s, none carrying type: the CLI's record schema changed, so tracked edges can no longer be resolved", len(records), convoyID)
+	}
+	return records, nil
 }
 
 // depListTrackedDeps is the single-ID `bd dep list --type=tracks` query. It is
