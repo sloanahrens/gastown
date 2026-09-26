@@ -29,6 +29,7 @@ import (
 var (
 	sessionIssue               string
 	sessionForce               bool
+	sessionRequestedBy         string
 	sessionLines               int
 	sessionMessage             string
 	sessionFile                string
@@ -145,7 +146,11 @@ var sessionRestartCmd = &cobra.Command{
 	Long: `Restart a polecat session (stop + start).
 
 Gracefully stops the current session and starts a fresh one.
-Use --force to skip graceful shutdown.`,
+Use --force to skip graceful shutdown.
+
+Use --requested-by when an automated caller performs the restart, so the
+town log's wake line names it instead of reading like an operator's own
+"gt session start" (gt-tcrgb).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSessionRestart,
 }
@@ -222,6 +227,8 @@ func init() {
 
 	// Restart flags
 	sessionRestartCmd.Flags().BoolVarP(&sessionForce, "force", "f", false, "Force immediate shutdown")
+	sessionRestartCmd.Flags().StringVar(&sessionRequestedBy, "requested-by", "",
+		"Caller performing an automated restart (e.g. \"witness\"); recorded in the town log wake line")
 
 	// Status flags
 	sessionStatusCmd.Flags().BoolVar(&sessionStatusJSON, "json", false, "Output as JSON")
@@ -711,7 +718,31 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	if clearParkedSession(townRoot, rigName, polecatName) {
 		fmt.Print(pauseClearedNotice)
 	}
+
+	// Log wake event, same as an explicit start (gt-tcrgb). A restart used to
+	// leave no town-log trace at all, so the session it created could not be
+	// attributed to it: a hooked-but-idle polecat that the witness restarted
+	// looked like a session appearing from nowhere, and the only visible
+	// correlation left was whichever patrol happened to be running.
+	if townRoot != "" {
+		agent := fmt.Sprintf("%s/%s", rigName, polecatName)
+		logger := townlog.NewLogger(townRoot)
+		_ = logger.Log(townlog.EventWake, agent, sessionRestartWakeContext(sessionRequestedBy))
+	}
+
 	return nil
+}
+
+// sessionRestartWakeContext is the parenthetical of the restart path's wake
+// line. `gt session start` logs a bare `resumed (<issue>)`; a restart logging
+// the same shape would be indistinguishable from an operator's own start, so
+// the restart names itself and, when the caller identified itself, who asked
+// for it (gt-tcrgb).
+func sessionRestartWakeContext(requestedBy string) string {
+	if requestedBy = strings.TrimSpace(requestedBy); requestedBy != "" {
+		return "restart requested by " + requestedBy
+	}
+	return "restart"
 }
 
 func runSessionStatus(cmd *cobra.Command, args []string) error {
