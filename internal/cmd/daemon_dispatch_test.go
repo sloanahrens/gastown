@@ -253,3 +253,128 @@ func TestRigMergeQueueDepthReadsRigRootMergeQueue(t *testing.T) {
 		t.Errorf("ready = %d, want 5", ready)
 	}
 }
+
+// TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork reproduces gt-ka00.
+//
+// The guard it replaces compared beads.ResolveBeadsDir against "", which that
+// function never returns, so it never fired: an uninitialized rig reached the
+// store open, failed it, and dispatchRigPictures turned that into an error for
+// the whole dispatch picture, every rig included.
+//
+// The fixture is what an uninitialized rig actually looks like on disk. The
+// repo checkout supplies .beads/ (.beads/config.yaml and friends are tracked),
+// so the directory exists; what is missing is the database under it.
+func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("status.custom: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	issues, err := readyIssuesUnlimited(rigPath)
+	if err != nil {
+		t.Fatalf("uninitialized rig is no ready work, not a read failure: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Errorf("issues = %d, want 0 from a rig with no database", len(issues))
+	}
+}
+
+// A redirect whose target was never created is the same empty rig by another
+// route: ResolveBeadsDir follows it out of the rig, and lands somewhere with
+// no database. It must be absorbed for the same reason, not fail the check.
+func TestReadyIssuesUnlimited_DanglingRedirectHasNoReadyWork(t *testing.T) {
+	rigPath := t.TempDir()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("mayor/rig/.beads\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	issues, err := readyIssuesUnlimited(rigPath)
+	if err != nil {
+		t.Fatalf("a redirect to a missing database is no ready work, not a read failure: %v", err)
+	}
+	if len(issues) != 0 {
+		t.Errorf("issues = %d, want 0 from a dangling redirect", len(issues))
+	}
+}
+
+func TestHasBeadsDatabase(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, beadsDir string)
+		want  bool
+	}{
+		{
+			name:  "empty .beads directory",
+			setup: func(*testing.T, string) {},
+			want:  false,
+		},
+		{
+			name: "tracked config.yaml without a database",
+			setup: func(t *testing.T, beadsDir string) {
+				writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
+			},
+			want: false,
+		},
+		{
+			name: "server-mode metadata.json",
+			setup: func(t *testing.T, beadsDir string) {
+				writeTestFile(t, filepath.Join(beadsDir, "metadata.json"), `{"dolt_mode":"server","dolt_database":"beads_testrig"}`)
+			},
+			want: true,
+		},
+		{
+			name: "embedded dolt directory",
+			setup: func(t *testing.T, beadsDir string) {
+				if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: true,
+		},
+		{
+			name: "embeddeddolt directory",
+			setup: func(t *testing.T, beadsDir string) {
+				if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: true,
+		},
+		{
+			// A same-named regular file is not a database directory, and
+			// treating it as one would put the rig back on the store-open path.
+			name: "dolt as a regular file",
+			setup: func(t *testing.T, beadsDir string) {
+				writeTestFile(t, filepath.Join(beadsDir, "dolt"), "")
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(t, beadsDir)
+			if got := hasBeadsDatabase(beadsDir); got != tt.want {
+				t.Errorf("hasBeadsDatabase() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("missing directory", func(t *testing.T) {
+		if hasBeadsDatabase(filepath.Join(t.TempDir(), ".beads")) {
+			t.Error("hasBeadsDatabase() = true for a directory that does not exist")
+		}
+	})
+}

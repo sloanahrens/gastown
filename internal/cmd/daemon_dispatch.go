@@ -423,7 +423,7 @@ func knownRigNames(townRoot string) ([]string, error) {
 // A read failure is returned, not swallowed. Under-reporting ready work is the
 // one error this check cannot absorb: it produces exactly the silence the
 // patrol exists to break, and produces it invisibly. A rig with no beads
-// directory at all is not a failure — it has no ready work to report.
+// database at all is not a failure — it has no ready work to report.
 func countActionableReady(rigPath string) (ready, urgent int, err error) {
 	issues, err := readyIssuesUnlimited(rigPath)
 	if err != nil {
@@ -449,10 +449,10 @@ func countActionableReady(rigPath string) (ready, urgent int, err error) {
 // The size of that board is the whole point of this check, so a cap that
 // silently reports a fraction of the work is not usable here (gt-59o9).
 //
-// A rig with no beads directory returns no issues: it is a rig that has never
+// A rig with no beads database returns no issues: it is a rig that has never
 // been initialized, not a read failure.
 func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
-	if beads.ResolveBeadsDir(rigPath) == "" {
+	if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
 		return nil, nil
 	}
 
@@ -468,6 +468,37 @@ func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
 
 	b.SetStore(store)
 	return b.Ready()
+}
+
+// hasBeadsDatabase reports whether a resolved beads directory holds a database
+// this check could read.
+//
+// It is a filesystem test on purpose. The one error this check cannot absorb is
+// under-reporting ready work, so an unreachable Dolt server must still surface
+// as a read failure; asking whether a database is *configured* keeps the two
+// apart.
+//
+// Testing ResolveBeadsDir against "" — what this replaced — never fired:
+// ResolveBeadsDir returns at least <workDir>/.beads for any input, so it has no
+// empty result to compare (gt-ka00). Testing the directory's existence instead
+// is no better: rig checkouts track .beads/ (.beads/config.yaml, README.md,
+// project formulas), so an uninitialized rig has the directory and no database
+// under it, and configfile.Load — which reads metadata.json — resolves it to a
+// default server-mode config rather than reporting the rig as empty.
+//
+// The markers are the ones beads.ensureDatabaseInitialized uses to decide a
+// rig still needs `bd init`: metadata.json (server mode, the town's mode) or a
+// dolt/ or embeddeddolt/ directory (embedded mode).
+func hasBeadsDatabase(beadsDir string) bool {
+	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); err == nil {
+		return true
+	}
+	for _, embedded := range []string{"dolt", "embeddeddolt"} {
+		if info, err := os.Stat(filepath.Join(beadsDir, embedded)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // patrolSuppressedTitlePrefixes are notification envelopes this patrol does not
