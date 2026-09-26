@@ -3089,6 +3089,13 @@ func validateEscalationConfig(c *EscalationConfig) error {
 		}
 	}
 
+	// Validate renotify_window if specified
+	if c.RenotifyWindow != "" {
+		if _, err := time.ParseDuration(c.RenotifyWindow); err != nil {
+			return fmt.Errorf("invalid renotify_window: %w", err)
+		}
+	}
+
 	// Initialize nil maps
 	if c.Routes == nil {
 		c.Routes = make(map[string][]string)
@@ -3118,6 +3125,19 @@ func (c *EscalationConfig) GetStaleThreshold() time.Duration {
 	d, err := time.ParseDuration(c.StaleThreshold)
 	if err != nil {
 		return 4 * time.Hour
+	}
+	return d
+}
+
+// GetRenotifyWindow returns the renotify window as a time.Duration.
+// Returns 1 hour if not configured or invalid.
+func (c *EscalationConfig) GetRenotifyWindow() time.Duration {
+	if c.RenotifyWindow == "" {
+		return time.Hour
+	}
+	d, err := time.ParseDuration(c.RenotifyWindow)
+	if err != nil {
+		return time.Hour
 	}
 	return d
 }

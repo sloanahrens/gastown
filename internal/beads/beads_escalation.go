@@ -35,6 +35,11 @@ type EscalationFields struct {
 	// LastSeenAt is when the alert most recently fired, i.e. when
 	// Occurrences was last bumped (empty if never re-fired).
 	LastSeenAt string
+	// LastNotifiedAt is when a notification (mail/email/sms/slack/log) was
+	// last actually sent for this alert. Set at creation, then again each
+	// time a repeat firing re-notifies after the renotify window elapses
+	// (empty only for a bead created before this field existed).
+	LastNotifiedAt string
 }
 
 // FormatEscalationDescription creates a description string from escalation fields.
@@ -115,6 +120,11 @@ func FormatEscalationDescription(title string, fields *EscalationFields) string 
 	} else {
 		lines = append(lines, "last_seen_at: null")
 	}
+	if fields.LastNotifiedAt != "" {
+		lines = append(lines, fmt.Sprintf("last_notified_at: %s", fields.LastNotifiedAt))
+	} else {
+		lines = append(lines, "last_notified_at: null")
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -179,6 +189,8 @@ func ParseEscalationFields(description string) *EscalationFields {
 			}
 		case "last_seen_at":
 			fields.LastSeenAt = value
+		case "last_notified_at":
+			fields.LastNotifiedAt = value
 		}
 	}
 
@@ -313,19 +325,33 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 //
 // Severity, reason and source are refreshed to the latest firing when
 // non-empty: an alert that escalates in severity, or whose latest evidence
-// differs from the first firing's, should say so. Returns the new occurrence
-// count.
-func (b *Beads) BumpEscalation(id, severity, reason, source string) (int, error) {
+// differs from the first firing's, should say so.
+//
+// Before this only the bead was ever touched: a repeat firing never re-sent
+// its routed notifications, so a condition that recurred for days notified a
+// human exactly once, at creation, and then went silent forever no matter how
+// long it persisted (gt-9qg1). BumpEscalation now also decides whether this
+// firing should re-notify: renotifyWindow is the minimum time between two
+// notifications, and the second return value tells the caller to actually
+// re-send mail/email/sms/slack/log this time. The decision and the
+// last_notified_at write happen together with the occurrence bump so the two
+// can never drift apart into "marked notified but nothing was sent" or vice
+// versa.
+//
+// Returns the new occurrence count and whether this firing should re-notify.
+func (b *Beads) BumpEscalation(id, severity, reason, source string, renotifyWindow time.Duration) (occurrences int, renotify bool, err error) {
 	target := b.forIssueID(id)
 	issue, err := target.Show(id)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if !HasLabel(issue, "gt:escalation") {
-		return 0, fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
+		return 0, false, fmt.Errorf("issue %s is not an escalation bead (missing gt:escalation label)", id)
 	}
 
 	fields := ParseEscalationFields(issue.Description)
+	renotify = ShouldRenotify(fields, renotifyWindow)
+
 	// An escalation created before gt-vwry has no occurrences line at all;
 	// its first bump is its second firing, so seed from the fields rather
 	// than assuming the bead's own creation was counted.
@@ -343,12 +369,40 @@ func (b *Beads) BumpEscalation(id, severity, reason, source string) (int, error)
 	if source != "" {
 		fields.Source = source
 	}
+	if renotify {
+		fields.LastNotifiedAt = time.Now().Format(time.RFC3339)
+	}
 
 	description := FormatEscalationDescription(issue.Title, fields)
 	if err := target.Update(id, UpdateOptions{Description: &description}); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return fields.Occurrences, nil
+	return fields.Occurrences, renotify, nil
+}
+
+// ShouldRenotify reports whether a firing of an existing escalation should
+// re-send its routed notifications rather than staying silent. A firing
+// re-notifies once at least window has elapsed since the alert's last
+// notification; a bead with no recorded LastNotifiedAt (created before this
+// field existed) falls back to its original EscalatedAt. A window of zero
+// re-notifies on every firing, and a bead with no timestamp to measure from
+// at all always re-notifies rather than risk staying silent.
+func ShouldRenotify(fields *EscalationFields, window time.Duration) bool {
+	if fields == nil {
+		return true
+	}
+	last := fields.LastNotifiedAt
+	if last == "" {
+		last = fields.EscalatedAt
+	}
+	if last == "" {
+		return true
+	}
+	t, err := time.Parse(time.RFC3339, last)
+	if err != nil {
+		return true
+	}
+	return time.Since(t) >= window
 }
 
 // CloseEscalationsByFingerprint closes every open escalation carrying the given

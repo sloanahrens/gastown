@@ -36,6 +36,12 @@ Each tier can resolve OR forward. The chain is tracked via bead comments.
 
 Config file: `~/gt/settings/escalation.json`
 
+A repeat firing of an already-open escalation (same alert key) always bumps
+its occurrence count, but only re-sends its routed notifications once
+`renotify_window` has elapsed since the alert's last notification — otherwise
+a condition that fires every few minutes would spam every channel on every
+cycle, and a condition that persists for days would never say so twice.
+
 ### Default Configuration
 
 ```json
@@ -59,7 +65,8 @@ Config file: `~/gt/settings/escalation.json`
     "sms_webhook": ""
   },
   "stale_threshold": "4h",
-  "max_reescalations": 2
+  "max_reescalations": 2,
+  "renotify_window": "1h"
 }
 ```
 

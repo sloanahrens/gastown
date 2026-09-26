@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // escalationStub is a shell stub for bd that answers the handful of reads and
@@ -151,12 +152,15 @@ func TestBumpEscalation_RecordsRepeatOnTheExistingBead(t *testing.T) {
 	stub.setShowJSON(t, existing)
 
 	b := New(t.TempDir())
-	count, err := b.BumpEscalation("hq-e1", "high", "second firing", "main_branch_test")
+	count, renotify, err := b.BumpEscalation("hq-e1", "high", "second firing", "main_branch_test", time.Hour)
 	if err != nil {
 		t.Fatalf("BumpEscalation: %v", err)
 	}
 	if count != 2 {
 		t.Errorf("occurrences = %d, want 2", count)
+	}
+	if !renotify {
+		t.Error("a bead with no last_notified_at and an old escalated_at should renotify")
 	}
 
 	calls := stub.calls(t)
@@ -192,7 +196,7 @@ func TestBumpEscalation_SeedsOccurrencesForPreexistingBeads(t *testing.T) {
 	stub.setShowJSON(t, escalationIssueForTest("hq-old", "escalation-fp:abc123", 0))
 
 	b := New(t.TempDir())
-	count, err := b.BumpEscalation("hq-old", "high", "second firing", "main_branch_test")
+	count, _, err := b.BumpEscalation("hq-old", "high", "second firing", "main_branch_test", time.Hour)
 	if err != nil {
 		t.Fatalf("BumpEscalation: %v", err)
 	}
@@ -209,8 +213,129 @@ func TestBumpEscalation_RejectsNonEscalationBeads(t *testing.T) {
 	stub.setShowJSON(t, plain)
 
 	b := New(t.TempDir())
-	if _, err := b.BumpEscalation("gt-work", "high", "reason", "source"); err == nil {
+	if _, _, err := b.BumpEscalation("gt-work", "high", "reason", "source", time.Hour); err == nil {
 		t.Fatal("expected BumpEscalation to refuse a bead that is not an escalation")
+	}
+}
+
+// TestBumpEscalation_SuppressesWithinRenotifyWindow is the gt-9qg1 fix's core
+// property: a repeat firing that arrives before the renotify window has
+// elapsed since the last notification must bump the bead's occurrence count
+// (so the recurrence stays visible) but must NOT ask the caller to re-send
+// notifications, or a fast-firing condition would spam every channel on every
+// cycle.
+func TestBumpEscalation_SuppressesWithinRenotifyWindow(t *testing.T) {
+	stub := newEscalationStub(t)
+	existing := escalationIssueForTest("hq-e1", "escalation-fp:abc123", 1)
+	fields := ParseEscalationFields(existing.Description)
+	fields.LastNotifiedAt = time.Now().Format(time.RFC3339)
+	existing.Description = FormatEscalationDescription(existing.Title, fields)
+	stub.setShowJSON(t, existing)
+
+	b := New(t.TempDir())
+	count, renotify, err := b.BumpEscalation("hq-e1", "high", "second firing", "main_branch_test", time.Hour)
+	if err != nil {
+		t.Fatalf("BumpEscalation: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("occurrences = %d, want 2", count)
+	}
+	if renotify {
+		t.Error("a firing just after the last notification must not renotify")
+	}
+
+	stdins := stub.stdin(t)
+	if len(stdins) == 0 {
+		t.Fatal("expected the new description to be written via stdin")
+	}
+	updated := ParseEscalationFields(stdins[0])
+	if updated.LastNotifiedAt != fields.LastNotifiedAt {
+		t.Errorf("last_notified_at changed from %q to %q on a suppressed firing", fields.LastNotifiedAt, updated.LastNotifiedAt)
+	}
+}
+
+// TestBumpEscalation_RenotifiesAfterWindowElapses is the flip side: once the
+// renotify window has elapsed since the last notification, the next firing
+// must ask the caller to re-send and must record the new last_notified_at, or
+// a persisting condition would go silent forever after its first alert.
+func TestBumpEscalation_RenotifiesAfterWindowElapses(t *testing.T) {
+	stub := newEscalationStub(t)
+	existing := escalationIssueForTest("hq-e1", "escalation-fp:abc123", 1)
+	fields := ParseEscalationFields(existing.Description)
+	fields.LastNotifiedAt = time.Now().Add(-2 * time.Hour).Format(time.RFC3339)
+	existing.Description = FormatEscalationDescription(existing.Title, fields)
+	stub.setShowJSON(t, existing)
+
+	b := New(t.TempDir())
+	_, renotify, err := b.BumpEscalation("hq-e1", "high", "still failing", "main_branch_test", time.Hour)
+	if err != nil {
+		t.Fatalf("BumpEscalation: %v", err)
+	}
+	if !renotify {
+		t.Error("a firing an hour after the last notification must renotify")
+	}
+
+	stdins := stub.stdin(t)
+	if len(stdins) == 0 {
+		t.Fatal("expected the new description to be written via stdin")
+	}
+	updated := ParseEscalationFields(stdins[0])
+	if updated.LastNotifiedAt == fields.LastNotifiedAt || updated.LastNotifiedAt == "" {
+		t.Errorf("expected last_notified_at to be refreshed, got %q (was %q)", updated.LastNotifiedAt, fields.LastNotifiedAt)
+	}
+}
+
+func TestShouldRenotify(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name   string
+		fields *EscalationFields
+		window time.Duration
+		want   bool
+	}{
+		{
+			name:   "nil fields always renotifies",
+			fields: nil,
+			window: time.Hour,
+			want:   true,
+		},
+		{
+			name:   "no timestamps at all always renotifies",
+			fields: &EscalationFields{},
+			window: time.Hour,
+			want:   true,
+		},
+		{
+			name:   "recent last_notified_at suppresses",
+			fields: &EscalationFields{LastNotifiedAt: now.Add(-time.Minute).Format(time.RFC3339)},
+			window: time.Hour,
+			want:   false,
+		},
+		{
+			name:   "old last_notified_at renotifies",
+			fields: &EscalationFields{LastNotifiedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)},
+			window: time.Hour,
+			want:   true,
+		},
+		{
+			name:   "falls back to escalated_at when never notified",
+			fields: &EscalationFields{EscalatedAt: now.Add(-time.Minute).Format(time.RFC3339)},
+			window: time.Hour,
+			want:   false,
+		},
+		{
+			name:   "zero window always renotifies",
+			fields: &EscalationFields{LastNotifiedAt: now.Format(time.RFC3339)},
+			window: 0,
+			want:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShouldRenotify(tt.fields, tt.window); got != tt.want {
+				t.Errorf("ShouldRenotify() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

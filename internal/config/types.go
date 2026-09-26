@@ -2069,6 +2069,15 @@ type EscalationConfig struct {
 	// re-escalated. Default: 2 (low→medium→high, then stops)
 	// Pointer type to distinguish "not configured" (nil) from explicit 0.
 	MaxReescalations *int `json:"max_reescalations,omitempty"`
+
+	// RenotifyWindow is the minimum time between two notifications for the
+	// same recurring escalation. A repeat firing bumps the bead's occurrence
+	// count every time, but only re-sends mail/email/sms/slack/log once this
+	// much time has passed since the last notification — otherwise a
+	// condition that fires every few minutes would spam every channel on
+	// every cycle. Format: Go duration string (e.g., "1h", "30m").
+	// Default: "1h". A value of "0" re-notifies on every firing.
+	RenotifyWindow string `json:"renotify_window,omitempty"`
 }
 
 // EscalationContacts contains contact information for external notification channels.
@@ -2142,6 +2151,7 @@ func NewEscalationConfig() *EscalationConfig {
 		Contacts:         EscalationContacts{},
 		StaleThreshold:   "4h",
 		MaxReescalations: intPtr(2),
+		RenotifyWindow:   "1h",
 	}
 }
 
