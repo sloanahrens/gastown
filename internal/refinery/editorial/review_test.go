@@ -2103,6 +2103,52 @@ func TestRun_RerollReReviewsAndRecordsAttemptHistory(t *testing.T) {
 	}
 }
 
+// TestRun_RerollWithDifferentBackendCarriesBothBackendsInHistory is the
+// finding this attempt fixes: ResolvedBackend must travel with each attempt
+// in Note.Attempts, not just at the note's top level, so a score swing across
+// a re-roll can be told apart from ordinary LLM nondeterminism (gt-bveg) when
+// the review backend changed in between — exactly what ResolvedBackend
+// exists to make visible (gt-iqr6).
+func TestRun_RerollWithDifferentBackendCarriesBothBackendsInHistory(t *testing.T) {
+	fakeBDForReview(t)
+	fixture := newReviewFixture(t)
+	store := newReviewStore(mrIssue("gt-mr-1", fixture.request().Branch, "main", "gt-real", "gastown", "marble"))
+	recorded := recordedNoteFor(t, fixture, 0.55, "request_changes")
+	recorded.ResolvedBackend = "backend-a"
+	recordVerdict(t, fixture, recorded)
+
+	deps := Deps{
+		Git:      git.NewGit(fixture.repoDir),
+		Beads:    beads.NewWithStore(fixture.repoDir, store),
+		Recorder: plugin.NewRecorder(t.TempDir()),
+		Exec: func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
+			writeVerdict(t, verdictPathFromArgs(args), verdictJSON{Score: 0.85, Verdict: "approve", Backend: "backend-b"})
+			return "", 0, nil
+		},
+	}
+	req := fixture.request()
+	req.Reroll = true
+
+	result := Run(context.Background(), req, deps)
+
+	if result.Exit != 0 || result.Reused {
+		t.Fatalf("Exit/Reused = %d/%v, want 0/false (stderr=%q)", result.Exit, result.Reused, result.Stderr)
+	}
+	attempts := result.Note.Attempts
+	if len(attempts) != 2 {
+		t.Fatalf("Attempts = %+v, want the replaced verdict and this one", attempts)
+	}
+	if attempts[0].ResolvedBackend != "backend-a" {
+		t.Errorf("Attempts[0].ResolvedBackend = %q, want %q (the backend that produced the replaced 0.55)", attempts[0].ResolvedBackend, "backend-a")
+	}
+	if attempts[1].ResolvedBackend != "backend-b" {
+		t.Errorf("Attempts[1].ResolvedBackend = %q, want %q (the backend that produced this review's 0.85)", attempts[1].ResolvedBackend, "backend-b")
+	}
+	if result.Note.ResolvedBackend != "backend-b" {
+		t.Errorf("Note.ResolvedBackend = %q, want the latest attempt's %q", result.Note.ResolvedBackend, "backend-b")
+	}
+}
+
 // TestRun_RecordedVerdictAppliesOnlyToTheDiffAndRubricItScored pins the three
 // ways a recorded verdict stops applying. Each must re-review rather than
 // answer from a verdict about something else — and must still carry the

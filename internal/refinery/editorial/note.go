@@ -15,14 +15,19 @@ const NotesRef = "om"
 
 // NoteAttempt is one verdict recorded for a reviewed head, frozen as it was
 // written. Score and Verdict are what a re-review of the same diff can
-// disagree with; ReviewedAt orders the history.
+// disagree with; ReviewedAt orders the history. ResolvedBackend is carried
+// per-attempt, not just at the note's top level: a re-roll's score swing
+// otherwise cannot be told apart from ordinary LLM nondeterminism (gt-bveg)
+// if the backend that produced it changed between attempts and only the
+// latest one is visible (gt-iqr6).
 type NoteAttempt struct {
-	Score         float64   `json:"score"`
-	Verdict       string    `json:"verdict"`
-	Attempt       int       `json:"attempt"`
-	OMVersion     string    `json:"om_version,omitempty"`
-	FindingsCount int       `json:"findings_count"`
-	ReviewedAt    time.Time `json:"reviewed_at"`
+	Score           float64   `json:"score"`
+	Verdict         string    `json:"verdict"`
+	Attempt         int       `json:"attempt"`
+	OMVersion       string    `json:"om_version,omitempty"`
+	ResolvedBackend string    `json:"resolved_backend,omitempty"`
+	FindingsCount   int       `json:"findings_count"`
+	ReviewedAt      time.Time `json:"reviewed_at"`
 }
 
 // The gate's verdict schema is exactly these two, and every reader that
@@ -206,12 +211,13 @@ func omVersionBelowFloor(v, min string) bool {
 // attemptOf renders a note's own top-level verdict as a history entry.
 func attemptOf(n *Note) NoteAttempt {
 	return NoteAttempt{
-		Score:         n.Score,
-		Verdict:       n.Verdict,
-		Attempt:       n.Attempt,
-		OMVersion:     n.OMVersion,
-		FindingsCount: n.FindingsCount,
-		ReviewedAt:    n.ReviewedAt,
+		Score:           n.Score,
+		Verdict:         n.Verdict,
+		Attempt:         n.Attempt,
+		OMVersion:       n.OMVersion,
+		ResolvedBackend: n.ResolvedBackend,
+		FindingsCount:   n.FindingsCount,
+		ReviewedAt:      n.ReviewedAt,
 	}
 }
 
