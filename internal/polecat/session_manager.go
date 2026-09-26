@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
@@ -32,11 +33,35 @@ func debugSession(context string, err error) {
 	}
 }
 
+// reportBranchRepairFailure makes a session-branch repair that did not run
+// visible in two places, because neither one reaches every path that starts a
+// session. The stderr warning reaches an operator running gt session start or
+// gt sling. The feed event reaches an operator watching a witness-driven
+// restart: that path is `gt session restart` under util.ExecRun, which keeps
+// stderr only when the command exits non-zero, so a repair that fails while
+// the session still starts would otherwise leave no trace at all (gt-ns8t).
+func reportBranchRepairFailure(townRoot, rigName, polecat, step string, err error) {
+	style.PrintWarning("polecat %s/%s: session branch repair did not run (%s): %v", rigName, polecat, step, err)
+	_ = events.LogFeedTo(townRoot, events.TypePolecatBranchRepairFailed, events.ActorGt, map[string]interface{}{
+		"rig":     rigName,
+		"polecat": polecat,
+		"step":    step,
+		"error":   err.Error(),
+	})
+}
+
 // Session errors
 var (
 	ErrSessionRunning  = errors.New("session already running")
 	ErrSessionNotFound = errors.New("session not found")
 	ErrIssueInvalid    = errors.New("issue not found or tombstoned")
+
+	// ErrBaseBranchRepair reports the state the fresh-branch repair exists to
+	// prevent: a worktree on the canonical base branch that the repair could
+	// not move off it. Starting a session here is what mis-bases the work a
+	// polecat later submits (gt-032w), so callers fail the start instead of
+	// proceeding on the base branch (gt-ns8t).
+	ErrBaseBranchRepair = errors.New("polecat worktree left on the base branch")
 )
 
 // SessionManager handles polecat session lifecycle.
@@ -242,45 +267,70 @@ func shouldCreateFreshSessionBranch(currentBranch, issue, canonicalBranch string
 	return issue != "" && meta.ok
 }
 
-func (m *SessionManager) ensureCanonicalSessionBranch(g *git.Git, polecat string, opts SessionStartOptions) string {
+// ensureCanonicalSessionBranch puts a starting session on a polecat branch
+// rather than the canonical base branch, and reports why it could not.
+//
+// It returns ErrBaseBranchRepair when the repair was needed and the worktree
+// is still on the base branch. That case is an error rather than a log line
+// because nothing downstream can tell a session that opened on the base
+// branch from a healthy one (gt-ns8t).
+func (m *SessionManager) ensureCanonicalSessionBranch(g *git.Git, polecat string, opts SessionStartOptions) (string, error) {
+	townRoot := filepath.Dir(m.rig.Path)
+
 	currentBranch, err := g.CurrentBranch()
 	if err != nil {
-		return ""
+		// The worktree's branch is unreadable, so whether it sits on the base
+		// branch is unknown. Report and start: refusing here would fail every
+		// session in a worktree whose only problem is this read.
+		reportBranchRepairFailure(townRoot, m.rig.Name, polecat, "read the current branch", err)
+		return "", nil
 	}
 
 	startPoint := m.canonicalSessionStartPoint(g)
 	if startPoint == "" {
-		debugSession("canonical session start point unresolved", fmt.Errorf("no default branch in rig config or remote"))
-		return currentBranch
+		reportBranchRepairFailure(townRoot, m.rig.Name, polecat,
+			"resolve the canonical session start point",
+			errors.New("no default branch in rig config or remote"))
+		return currentBranch, nil
 	}
 	canonicalBranch := strings.TrimPrefix(startPoint, "origin/")
 	if !shouldCreateFreshSessionBranch(currentBranch, opts.Issue, canonicalBranch) {
-		return currentBranch
+		return currentBranch, nil
 	}
 
 	// Refresh origin refs before branching so recovered sessions start from the
 	// canonical remote base instead of any preserved local polecat branch.
 	if err := g.Fetch("origin"); err != nil {
-		debugSession("fetch origin for canonical session branch", err)
+		// The branch is still created, but from whatever origin/<default>
+		// resolved to locally. That mis-bases the session rather than stranding
+		// it on the base branch, so it is reported and the repair continues.
+		reportBranchRepairFailure(townRoot, m.rig.Name, polecat, "refresh origin", err)
 	}
 
 	exists, err := g.RefExists(startPoint)
 	if err != nil {
-		debugSession("check canonical session start point", err)
-		return currentBranch
+		return currentBranch, m.baseBranchRepairError(townRoot, polecat, currentBranch, "check "+startPoint, err)
 	}
 	if !exists {
-		debugSession("missing canonical session start point", fmt.Errorf("%s", startPoint))
-		return currentBranch
+		return currentBranch, m.baseBranchRepairError(townRoot, polecat, currentBranch,
+			"resolve "+startPoint, fmt.Errorf("%s does not exist locally", startPoint))
 	}
 
 	newBranch := m.freshBranchName(polecat, opts.Issue)
 	if err := g.CheckoutNewBranch(newBranch, startPoint); err != nil {
-		debugSession("auto-checkout fresh branch on canonical base", err)
-		return currentBranch
+		return currentBranch, m.baseBranchRepairError(townRoot, polecat, currentBranch, "check out "+newBranch, err)
 	}
 
-	return newBranch
+	return newBranch, nil
+}
+
+// baseBranchRepairError reports a repair that was needed, was attempted, and
+// left the worktree on the base branch. The message names the branch and the
+// failing step so the operator can finish the repair by hand.
+func (m *SessionManager) baseBranchRepairError(townRoot, polecat, currentBranch, step string, err error) error {
+	reportBranchRepairFailure(townRoot, m.rig.Name, polecat, step, err)
+	return fmt.Errorf("%w: %s/%s is on %q and %s failed: %v",
+		ErrBaseBranchRepair, m.rig.Name, polecat, currentBranch, step, err)
 }
 
 // HasPolecat reports whether a polecat directory exists for name — the same
@@ -451,7 +501,12 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// working directory.
 	polecatGitBranch := ""
 	if g := git.NewGit(workDir); g != nil {
-		polecatGitBranch = m.ensureCanonicalSessionBranch(g, polecat, opts)
+		branch, err := m.ensureCanonicalSessionBranch(g, polecat, opts)
+		if err != nil {
+			// Before any tmux session exists, so nothing is left to clean up.
+			return err
+		}
+		polecatGitBranch = branch
 	}
 	// Generate the GASTA run ID — the root identifier for all telemetry emitted
 	// by this polecat session and its subprocesses (bd, mail, …).
