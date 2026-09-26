@@ -336,7 +336,13 @@ func TestStalledPolecatCheck_BranchSupersededByTerminalBead(t *testing.T) {
 	}
 }
 
-func TestStalledPolecatCheck_ClosedBeadSuppressesWarning(t *testing.T) {
+// TestStalledPolecatCheck_ClosedBeadIsReportedNotSuppressed is the gt-5wse
+// regression: a closed bead proves the work ITEM is resolved, not that this
+// branch's specific content is preserved anywhere (a "no-changes" reclose
+// after a zombie reset carries no such proof). The branch must still surface
+// for manual review rather than reading as a clean bill of health, even
+// though Fix must not auto-push it (that stays gt-4vbn's protection).
+func TestStalledPolecatCheck_ClosedBeadIsReportedNotSuppressed(t *testing.T) {
 	check, result := checkFor(t, &fakePolecatGit{
 		branch:        polecat.FormatGeneratedBranchName("furiosa", "gt-closed1", "abc123"),
 		unpushedCount: 1,
@@ -345,11 +351,65 @@ func TestStalledPolecatCheck_ClosedBeadSuppressesWarning(t *testing.T) {
 		return "closed", beadID == "gt-closed1"
 	})
 
-	if result.Status != StatusOK {
-		t.Fatalf("Status = %v, want OK — the bead behind the branch is closed (details: %v)", result.Status, result.Details)
+	if result.Status != StatusSkipped {
+		t.Fatalf("Status = %v, want Skipped — closed bead is not proof this content is preserved, so it must not silently clear (details: %v)", result.Status, result.Details)
 	}
 	if len(check.stalledPolecats) != 0 {
-		t.Fatalf("stalledPolecats = %+v, want none", check.stalledPolecats)
+		t.Fatalf("stalledPolecats = %+v, want none — Fix must not auto-push a branch behind a closed bead", check.stalledPolecats)
+	}
+	found := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "CLOSED-BUT-UNVERIFIED") && strings.Contains(d, "gt-closed1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want an entry naming the closed bead for manual review", result.Details)
+	}
+}
+
+// TestStalledPolecatCheck_ClosedBeadDoesNotMaskConfirmedStall pairs a
+// closed-bead branch with a genuinely stalled one in the same run: the
+// needsReview entry must not downgrade a real, confirmed-at-risk stall away
+// from StatusWarning.
+func TestStalledPolecatCheck_ClosedBeadDoesNotMaskConfirmedStall(t *testing.T) {
+	tmpDir := t.TempDir()
+	makePolecatDir(t, tmpDir, "testrig", "furiosa")
+	makePolecatDir(t, tmpDir, "testrig", "slate")
+
+	check := NewStalledPolecatCheck()
+	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+	check.gitForTest = func(clonePath string) polecatGit {
+		if strings.Contains(clonePath, "furiosa") {
+			return &fakePolecatGit{
+				branch:        polecat.FormatGeneratedBranchName("furiosa", "gt-closed2", "abc123"),
+				unpushedCount: 1,
+				defaultBranch: "main",
+			}
+		}
+		return &fakePolecatGit{branch: "polecat/slate-def456", unpushedCount: 3}
+	}
+	check.beadStatus = func(_, beadID string) (string, bool) {
+		return "closed", beadID == "gt-closed2"
+	}
+
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: "testrig"}
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning — a confirmed stall must not be masked by a closed-bead entry", result.Status)
+	}
+	if !strings.Contains(result.Message, "1 stalled") {
+		t.Errorf("Message = %q, want it to report the 1 confirmed stall", result.Message)
+	}
+	found := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "CLOSED-BUT-UNVERIFIED") && strings.Contains(d, "gt-closed2") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want the closed-bead entry surfaced alongside the confirmed stall", result.Details)
 	}
 }
 
