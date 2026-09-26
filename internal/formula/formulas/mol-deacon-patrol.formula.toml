@@ -1079,14 +1079,29 @@ needs = ["orphan-check"]
 description = """
 **DETECT ONLY** - Scan agent worktrees for rogue `bd` executables.
 
-An agent that builds or symlinks its own `bd` inside an agent worktree
-shadows the town's beads release: that fork can carry a different schema
-and migrate town databases behind the town's back. Any executable file
-named `bd` under an agent directory is a finding (gt-li4t).
+A `bd` in an agent worktree shadows the town's `bd` release when it
+reaches agents at large: that fork can carry a different schema and
+migrate town databases behind the town's back (gt-li4t).
 
 **Run the check:**
 ```bash
-fail=0; for agg in ~/gt/*/polecats ~/gt/*/crew ~/gt/*/refinery ~/gt/*/witness ~/gt/*/mayor ~/gt/mayor ~/gt/deacon/dogs; do [ -d "$agg" ] || continue; find "$agg" -maxdepth 4 \\( -type f -o -type l \\) -name bd -perm -u+x -print || fail=1; done; echo "rogue-bd-check fail=$fail"
+cand=/tmp/rogue-bd-candidates.$$; fail=0; : >"$cand"
+for agg in ~/gt/*/polecats ~/gt/*/crew ~/gt/*/refinery ~/gt/*/witness ~/gt/*/mayor ~/gt/mayor ~/gt/deacon/dogs; do
+  [ -d "$agg" ] || continue
+  find "$agg" -maxdepth 4 \\( -type f -o -type l \\) -name bd -perm -u+x -print >>"$cand" || fail=1
+done
+while IFS= read -r hit; do
+  d=$(dirname "$hit")
+  if [ -L "$hit" ]; then echo "FINDING symlink $hit"; continue; fi
+  case ":$PATH:" in *":$d:"*) echo "FINDING on-PATH $hit"; continue;; esac
+  root=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || root=
+  if [ -n "$root" ] && [ -d "$root/cmd/bd" ] && git -C "$root" check-ignore -q "$hit" 2>/dev/null; then
+    echo "BY-DESIGN build output $hit"
+  else
+    echo "FINDING $hit"
+  fi
+done <"$cand"
+echo "rogue-bd-check fail=$fail candidates=$(wc -l <"$cand" | tr -d ' ') list=$cand"
 ```
 
 Name the aggregate directories in one `find` and the town's
@@ -1099,9 +1114,26 @@ so the walk never enters a repo's object store, is allowed and bounded.
 neutralized with `chmod 644`. `~/gt/mayor` is listed separately: the
 town-level mayor tree does not match `~/gt/*/mayor`.
 
-**Verdict** - read the hits and the trailing `fail=` together:
-- No hits, `fail=0`: log `Rogue bd check: clean`.
-- Any hit: a finding - handle it below.
+**Sorting a candidate into by-design or finding** - the repo that builds
+`bd` carries `cmd/bd`, and `git check-ignore` separates that repo's ignored
+build output from a copy an agent dropped in (gt-5zsc):
+
+- `BY-DESIGN build output`: git-ignored, and the worktree carrying it also
+  carries `cmd/bd`, the source that produces that binary. `~/gt/beads` is
+  that repo - `make build` writes `bd` at the worktree root and
+  `.gitignore` line 3 is `/bd` - so every beads worktree that has ever
+  built carries one. Neutralizing those breaks the rig's own build/test
+  loop, and a build artifact of the `bd` source is not a divergent fork.
+- `FINDING`: everything else - an unignored copy, a `bd` in a worktree
+  whose repo does not build one, any `bd` whose directory is on `PATH`
+  (resolution is the shadow vector, whatever the repo), and every symlink,
+  because a link is never build output (gt-19zn).
+
+**Verdict** - read the lines and the trailing counters together:
+- No `FINDING` line, `fail=0`, and `candidates=N` counting every
+  `BY-DESIGN` line: log `Rogue bd check: clean (N candidates, all build
+  output)`.
+- Any `FINDING` line: handle it below.
 - `fail=1`, a non-zero exit, or a `DANGEROUS COMMAND BLOCKED` banner: the
   check did not complete. Log `Rogue bd check: INCONCLUSIVE` and mail the
   Mayor. Reserve "clean" for a check that ran.
@@ -1129,9 +1161,10 @@ chmod 644 <path>
 gt mail send mayor/ -s "ROGUE_BD <path>" -m "Rogue executable bd: <path> (mtime <mtime>, owner <agent>). Neutralized (<chmod 644 | symlink removed>). Please file a root-cause bead."
 ```
 
-**Exit criteria:** The check ran, and every hit is reported, neutralized
-(matching the file's kind), and mailed to the Mayor - or the run logged
-`clean` with `fail=0`."""
+**Exit criteria:** The check ran, and every `FINDING` line is reported,
+neutralized (matching the file's kind), and mailed to the Mayor - or the
+run logged `clean` with `fail=0` and every candidate accounted for as
+`BY-DESIGN`."""
 
 [[steps]]
 id = "session-gc"
