@@ -1247,6 +1247,23 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	return b.runBdWithRetry(stdinData, runEnv, args)
 }
 
+// runReadyCLI executes a bd ready --json invocation with BD_JSON_ENVELOPE=1
+// set, so bd's paginated-ready branch (cmd/bd/output.go
+// outputJSONWithPagination) answers with the schema_version/data/pagination
+// envelope parseReadyOutput expects instead of a bare array. Scoped to
+// Ready/ReadyDispatchable, the only callers that parse that envelope: the
+// other ~14 json.Unmarshal call sites sharing buildRunEnv (List, Show,
+// Blocked, Comments, Create, Update, Close, ...) expect a bare array/object,
+// and bd is only documented to wrap the ready endpoint, so setting the env
+// var on every invocation gambled on an unverified hypothesis about an
+// external binary (gt-m7pq).
+func (b *Beads) runReadyCLI(args ...string) ([]byte, error) {
+	args = InjectFlatForListJSON(args)
+	beadsDir := b.getResolvedBeadsDir()
+	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir, "BD_JSON_ENVELOPE=1")
+	return b.runBdWithRetry(nil, runEnv, args)
+}
+
 // runBdOnce executes exactly one bd subprocess and is where every pinned and
 // routed call ends up. runBdWithRetry owns the attempt loop; keeping a single
 // attempt here means the --flat handling and the telemetry record stay per
@@ -2241,27 +2258,87 @@ func (b *Beads) GetAssignedIssue(assignee string) (*Issue, error) {
 	return nil, nil
 }
 
+// readyEnvelope is the shape bd --json takes under BD_JSON_ENVELOPE=1
+// (cmd/bd/output.go outputJSONWithPagination). The ready page is always the
+// "data" array; "pagination" carries the truncation verdict bd ready's
+// own one-shot count computed, present only when the page came back capped.
+// bd builds old enough to predate the envelope emit a bare array, which the
+// plain-array branch of parseReadyOutput covers (gt-m7pq).
+type readyEnvelope struct {
+	SchemaVersion int             `json:"schema_version"`
+	Data          json.RawMessage `json:"data"`
+	Pagination    struct {
+		Returned  int  `json:"returned"`
+		Total     int  `json:"total"`
+		Truncated bool `json:"truncated"`
+	} `json:"pagination"`
+}
+
+// bdReadyDefaultLimit is bd's own page size for `ready --json` when the
+// caller passes no -n/--limit, verified against bd 1.2.2: a request with no
+// -n returns exactly 100 rows and pagination.truncated=true against a larger
+// board. readyCliArgs and readyBaseArgs never pass -n, so this constant is
+// the actual cap bounding every parseReadyOutput call. The envelope itself
+// carries no limit field — only returned/total/truncated — so Cap must come
+// from this known default rather than Pagination.Returned, which happens to
+// equal it only because bd stops exactly at the limit when truncated; that
+// coincidence is not an invariant this package enforces (gt-m7pq).
+const bdReadyDefaultLimit = 100
+
+// parseReadyOutput unmarshals bd ready --json stdout into issues, returning
+// ErrReadyTruncated when the envelope says the page was capped. bd <1.2.2
+// (or any build that ignores BD_JSON_ENVELOPE) answers with a bare array
+// and no pagination block; that degrades to a plain result with no sentinel,
+// the status quo this method exists to improve on but not to break.
+func parseReadyOutput(out []byte) ([]*Issue, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		var issues []*Issue
+		if err := json.Unmarshal(out, &issues); err != nil {
+			return nil, fmt.Errorf("parsing bd ready output: %w", err)
+		}
+		return issues, nil
+	}
+
+	var env readyEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		return nil, fmt.Errorf("parsing bd ready envelope: %w", err)
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(env.Data, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready envelope data: %w", err)
+	}
+	if !env.Pagination.Truncated {
+		return issues, nil
+	}
+	return issues, &ErrReadyTruncated{
+		Found:     env.Pagination.Returned,
+		Cap:       bdReadyDefaultLimit,
+		TrueCount: env.Pagination.Total,
+	}
+}
+
 // Ready returns issues that are ready to work (not blocked). Bookkeeping
 // families (mail, escalations, identity, merge queue, event records) are
 // excluded server-side by the same WorkFilter / --exclude flags
 // ReadyDispatchable sends, so the ready query answers the same question on
 // every path (gt-0q80).
+//
+// When the ready page came back capped at bd's default limit of 100, Ready
+// returns the page AND an ErrReadyTruncated sentinel so a caller that needs
+// the whole board can tell a full page from a whole board — a board whose
+// size is silently 100 mis-sizes every count built on it (gt-m7pq).
 func (b *Beads) Ready() ([]*Issue, error) {
 	if b.store != nil {
 		return b.storeReadyWithFilter(readyWorkFilter())
 	}
 
-	out, err := b.run(readyCliArgs()...)
+	out, err := b.runReadyCLI(readyCliArgs()...)
 	if err != nil {
 		return nil, err
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready output: %w", err)
-	}
-
-	return issues, nil
+	return parseReadyOutput(out)
 }
 
 // ReadyDispatchable returns ready issues with the town's bookkeeping
@@ -2281,22 +2358,17 @@ func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
 		return b.storeReadyWithFilter(readyWorkFilter())
 	}
 
-	out, err := b.run(readyCliArgs()...)
+	out, err := b.runReadyCLI(readyCliArgs()...)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown flag") {
-			out, err = b.run(readyBaseArgs()...)
+			out, err = b.runReadyCLI(readyBaseArgs()...)
 		}
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready --exclude-label/--exclude-type output: %w", err)
-	}
-
-	return issues, nil
+	return parseReadyOutput(out)
 }
 
 // readyWorkFilter is the WorkFilter every in-process store ready query sends:

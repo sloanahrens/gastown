@@ -5742,16 +5742,20 @@ func TestBuildRunEnv(t *testing.T) {
 		mustNotContain []string
 	}{
 		{
-			name:           "default preserves all vars",
-			envVars:        map[string]string{"PATH": "/usr/bin"},
-			mustContain:    []string{"PATH="},
-			mustNotContain: nil,
+			name:        "default preserves all vars",
+			envVars:     map[string]string{"PATH": "/usr/bin"},
+			mustContain: []string{"PATH="},
+			// BD_JSON_ENVELOPE must not be set process-wide: it is only
+			// correct for bd's paginated `ready` branch, and buildRunEnv
+			// backs every other bd subcommand (List, Show, Create, ...)
+			// (gt-m7pq).
+			mustNotContain: []string{"BD_JSON_ENVELOPE="},
 		},
 		{
 			name:           "isolated strips all beads vars",
 			isolated:       true,
 			envVars:        map[string]string{"BD_ACTOR": "test-actor", "BEADS_DIR": "/tmp/beads"},
-			mustNotContain: []string{"BD_ACTOR=", "BEADS_DIR="},
+			mustNotContain: []string{"BD_ACTOR=", "BEADS_DIR=", "BD_JSON_ENVELOPE="},
 		},
 	}
 
@@ -5800,13 +5804,13 @@ func TestBuildRoutingEnv(t *testing.T) {
 			name:           "default strips BEADS_DIR only",
 			envVars:        map[string]string{"BEADS_DIR": "/tmp/beads", "PATH": "/usr/bin"},
 			mustContain:    []string{"PATH="},
-			mustNotContain: []string{"BEADS_DIR="},
+			mustNotContain: []string{"BEADS_DIR=", "BD_JSON_ENVELOPE="},
 		},
 		{
 			name:           "isolated strips all beads vars",
 			isolated:       true,
 			envVars:        map[string]string{"BD_ACTOR": "test-actor", "BEADS_DIR": "/tmp/beads"},
-			mustNotContain: []string{"BD_ACTOR=", "BEADS_DIR="},
+			mustNotContain: []string{"BD_ACTOR=", "BEADS_DIR=", "BD_JSON_ENVELOPE="},
 		},
 	}
 
