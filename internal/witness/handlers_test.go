@@ -585,6 +585,149 @@ func TestActiveMRBlockerFromCLIUsesTerminalStatus(t *testing.T) {
 	}
 }
 
+// TestNukePolecatRefusalNamesBlocker is the regression for gt-v24u: the
+// refinery-pending refusal must not print a hardcoded, non-interpolated bead
+// id. The parenthetical is the real blocker — the pending cleanup wisp id when
+// one exists, else the live active_mr value with its status — so the recipient
+// can act on it instead of chasing a dead reference.
+//
+// Both subcases drive the real NukePolecat against a stub town. The injected
+// mock bd only answers witness-level BdCli calls; the agent-bead show inside
+// the gate (getAgentMRContext) is a real beads-library subprocess, so a stub
+// bd on PATH answers it and the gate's active_mr show (witness-level) goes to
+// the mock. The stub gt and tmux stand in for the nuke execs so a
+// non-refused case cannot touch a real polecat.
+//
+// Not parallel: stubNukePolecatExecs mutates package-level vars, and the PATH
+// stub plus GT_TEST_BD_TIMEOUT_SEC are process-wide.
+func TestNukePolecatRefusalNamesBlocker(t *testing.T) {
+	// 5s keeps a stub that is missing a fixture from burning the 60s
+	// production subprocess budget before it errors out.
+	t.Setenv("GT_TEST_BD_TIMEOUT_SEC", "5")
+
+	stubNukePolecatExecs(t)
+	binDir, workDir := writeNukeRefusalTown(t)
+
+	// agentBead is the rig's polecat agent bead. The description carries the
+	// AgentFields the gate reads — the active-mr case points active_mr at the
+	// open MR the PATH stub bd answers, so the refusal can name it.
+	agentBead := func(activeMR string) string {
+		mrLine := "active_mr: null"
+		if activeMR != "" {
+			mrLine = "active_mr: " + activeMR
+		}
+		return `[{"id":"gt-gastown-polecat-nitro","title":"polecat: gastown/nitro","issue_type":"task","status":"open","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: gt-v24u\ncleanup_status: null\n` + mrLine + `\nnotification_level: null\n\nexit_type: COMPLETED\nmr_id: ` + activeMR + `\nbranch: polecat/obsidian/gt-v24u\nlast_source_issue: gt-v24u\ncompletion_time: 2026-09-26T06:54:46.660503Z\n"}]`
+	}
+
+	tests := []struct {
+		name   string
+		activeMR bool
+		execFn func(args []string) (string, error)
+	}{
+		{
+			name: "refusal names the blocking cleanup wisp",
+			// The witness-level mock answers findCleanupWisp's "bd query" with
+			// the pending cleanup wisp; the PATH stub's bd answers the gate's
+			// agent-bead show with an empty active_mr so the wisp is the
+			// blocker that gets named.
+			execFn: func(args []string) (string, error) {
+				if args[0] == "query" {
+					return `[{"id":"hq-wisp-wo3dsl"}]`, nil
+				}
+				return "[]", nil
+			},
+		},
+		{
+			name: "refusal names the live active_mr with its status",
+			activeMR: true,
+			execFn: func(args []string) (string, error) {
+				switch args[0] {
+				case "show":
+					return `[{"id":"gt-mr","title":"mr: gastown/nitro gt-v24u","issue_type":"task","status":"open"}]`, nil
+				default:
+					return "[]", nil
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mrID := ""
+			if tt.activeMR {
+				mrID = "gt-mr"
+			}
+			stub := filepath.Join(binDir, "bd")
+			script := `#!/bin/sh
+# BdSupportsAllowStaleWithEnv probes "bd --allow-stale version" once and, on a
+# zero exit, prepends --allow-stale to every subsequent call — so this stub
+# must accept and discard it before dispatching on the real subcommand.
+if [ "$1" = "--allow-stale" ]; then shift; fi
+# printf, not echo: /bin/sh's echo interprets backslash escapes (e.g. the
+# \n inside the agent bead's description field), which would corrupt the
+# JSON it is meant to pass through literally.
+case "$1" in
+  show)
+    case "$2" in
+      gt-mr) printf '%s\n' '[{"id":"gt-mr","title":"mr: gastown/nitro gt-v24u","issue_type":"task","status":"open"}]' ;;
+      *)     printf '%s\n' '` + agentBead(mrID) + `' ;;
+    esac ;;
+  *) printf '%s\n' '[]' ;;
+esac
+exit 0
+`
+			if err := os.WriteFile(stub, []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			bd, _ := mockBd(tt.execFn, func(args []string) error { return nil })
+			err := NukePolecat(bd, workDir, "gastown", "nitro")
+			if err == nil {
+				t.Fatal("NukePolecat returned nil; want a refinery-pending refusal")
+			}
+			want := "refusing to nuke gastown/nitro: MR pending in refinery ("
+			if got := err.Error(); got != want+"cleanup wisp hq-wisp-wo3dsl)" && got != want+"active_mr=gt-mr status=open)" {
+				t.Fatalf("refusal = %q; want it to name the blocking wisp or the live active_mr", got)
+			}
+		})
+	}
+}
+
+// writeNukeRefusalTown builds a stub Gas Town for TestNukePolecatRefusalNamesBlocker:
+// a temp town root (mayor/town.json makes workspace.Find and FindTownRoot stop
+// there, and no other town marker exists above a TempDir), a rig with the
+// town-level beads database it routes to, and a binDir on PATH whose stub bd
+// answers the agent-bead show the injected mock can't intercept. The stub gt
+// stands in for `gt polecat nuke` so a non-refused path cannot touch a real
+// polecat. The agent-bead show fixture is written by the test itself.
+func writeNukeRefusalTown(t *testing.T) (binDir, workDir string) {
+	t.Helper()
+	root := t.TempDir()
+	binDir = filepath.Join(root, "bin")
+	workDir = filepath.Join(root, "gastown")
+	for _, dir := range []string{
+		filepath.Join(root, "mayor"),
+		filepath.Join(root, ".beads"),
+		filepath.Join(workDir, ".beads"),
+		binDir,
+	} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, content string, mode os.FileMode) {
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(root, "mayor", "town.json"), "{}", 0644)
+	write(filepath.Join(workDir, ".beads", "routes.jsonl"), `{"prefix":"gt","path":"gastown/mayor/rig"}`, 0644)
+	write(filepath.Join(root, ".beads", "routes.jsonl"), `{"prefix":"gt","path":"gastown/mayor/rig"}`, 0644)
+	write(filepath.Join(binDir, "gt"), "#!/bin/sh\nexit 0\n", 0755)
+	write(filepath.Join(binDir, "bd"), "#!/bin/sh\necho \"[]\"\nexit 0\n", 0755)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return binDir, workDir
+}
+
 func TestHandlePolecatDoneFromBead_NilFields(t *testing.T) {
 	t.Parallel()
 	result := HandlePolecatDoneFromBead(DefaultBdCli(), "/tmp", "testrig", "nux", nil, nil)

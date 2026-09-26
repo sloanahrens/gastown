@@ -1493,7 +1493,10 @@ func NukePolecat(bd *BdCli, workDir, rigName, polecatName string) error {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 	if hasPendingMR(bd, workDir, rigName, polecatName, agentBeadID) {
-		return fmt.Errorf("refusing to nuke %s/%s: MR pending in refinery (gt-6a9d)", rigName, polecatName)
+		// Name the real blocker so the refusal is actionable; a bare
+		// "MR pending" reads as a live reference and sends the recipient
+		// chasing a bead id that is not the cause (gt-v24u).
+		return fmt.Errorf("refusing to nuke %s/%s: MR pending in refinery (%s)", rigName, polecatName, pendingMRBlocker(bd, workDir, rigName, polecatName, agentBeadID))
 	}
 
 	// CRITICAL: Kill the tmux session FIRST and unconditionally.
@@ -4051,6 +4054,23 @@ func hasPendingMR(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) 
 	activeMR, sourceHint := getAgentMRContext(workDir, agentBeadID)
 	assessment := polecat.AssessActiveMR(beadCLIShower{bd: bd, workDir: workDir}, polecat.ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: activeMRGitSafe(workDir, rigName, polecatName)})
 	return assessment.Pending
+}
+
+// pendingMRBlocker names the specific thing blocking a nuke for the refusal
+// message: the pending cleanup wisp id when one exists, else the live active_mr
+// value with its status (gt-v24u). Empty only when neither source produced a
+// blocker; the gate (hasPendingMR) still treats an unexplained pending state as
+// a blocker, it just reads as bare "MR pending in refinery" in that case.
+func pendingMRBlocker(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) string {
+	wispID, _ := findCleanupWisp(bd, workDir, rigName, polecatName)
+	if wispID != "" {
+		return "cleanup wisp " + wispID
+	}
+	activeMR, _ := getAgentMRContext(workDir, agentBeadID)
+	if blocker := activeMRBlockerFromCLI(bd, workDir, activeMR); blocker != "" {
+		return blocker
+	}
+	return ""
 }
 
 // hasPendingMRFromSnapshot checks for a pending MR using a pre-fetched ActiveMR
