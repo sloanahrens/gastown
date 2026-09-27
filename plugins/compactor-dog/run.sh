@@ -29,13 +29,25 @@ DOLT_HOST="${GT_DOLT_HOST:-${DOLT_HOST:-127.0.0.1}}"
 DOLT_PORT="${GT_DOLT_PORT:-${DOLT_PORT:-3307}}"
 DOLT_USER="${DOLT_USER:-root}"
 COMMIT_THRESHOLD="${COMMIT_THRESHOLD:-500}"
+# GT_HOME is where this town's Gas Town lives; COMPACTOR_CONFIG_HOME overrides
+# both the daemon.json this script reads and its lockfile, so the test harness
+# can run a fully isolated copy without touching the live dog's lock (gt-a50zu)
+# or the operator's daemon.json (gt-bolgo).
+GT_HOME="${COMPACTOR_CONFIG_HOME:-${GT_HOME:-$HOME}/gt}"
+DAEMON_JSON="$GT_HOME/mayor/daemon.json"
 # Default: auto-discover production databases via SHOW DATABASES.
 # Override with --databases db1,db2,... for an explicit list.
 DEFAULT_DBS="auto"
 DRY_RUN=false
 CHECK_ONLY=true # default: monitor-only (matches plugin.md). Use --compact for the destructive path.
 LOGFILE=""
-LOCKFILE="/tmp/compactor-dog.lock"
+# A live dog and a harness run can coexist on the same machine (gt-a50zu):
+# a machine-global lock in /tmp let the daemon's dog make the plugin's own
+# suite fail with 'Another instance is running'. The lock now lives next to
+# the config the run is reading (COMPACTOR_CONFIG_HOME), so a harness that
+# overrides that root is isolated from the live dog — while a default run
+# still excludes other default runs from each other.
+LOCKFILE="$GT_HOME/compactor-dog.lock"
 
 # --- Argument parsing ---------------------------------------------------------
 
@@ -75,7 +87,6 @@ done
 # that line: a candidate at or above it will get escalated by the daemon on
 # its own cadence regardless, so warning here too is a double alert, not an
 # extra signal (gt-hrt9). COMPACTOR_DAEMON_THRESHOLD overrides for tests.
-DAEMON_JSON="${GT_HOME:-$HOME/gt}/mayor/daemon.json"
 DAEMON_THRESHOLD="${COMPACTOR_DAEMON_THRESHOLD:-}"
 if [[ -z "$DAEMON_THRESHOLD" ]] && command -v jq >/dev/null 2>&1 && [[ -f "$DAEMON_JSON" ]]; then
   DAEMON_THRESHOLD=$(jq -r '.patrols.compactor_dog.threshold // 2000' "$DAEMON_JSON" 2>/dev/null)

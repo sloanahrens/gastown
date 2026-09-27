@@ -10,7 +10,18 @@ FAILURES=0
 # where it is visible — RUN_LOG alone is not reliable for cleanup.
 RUN_LOG_DIRS=""
 RUN_LOG_DIR=""
-run_test_cleanup() { rm -rf ${RUN_LOG_DIRS:-}; }
+# Isolated config root: run.sh derives its daemon.json path AND its lockfile
+# from COMPACTOR_CONFIG_HOME (gt-a50zu: the old machine-global
+# /tmp/compactor-dog.lock let a live dog run make this suite fail with
+# 'Another instance is running'). Pointing it at a per-run temp dir keeps the
+# harness clear of the live plugin, and COMPACTOR_DAEMON_THRESHOLD pins the
+# daemon line below so the pinned COMPACTOR_MAINT_MODE per case below is
+# self-consistent (gt-bolgo).
+COMPACTOR_CONFIG_HOME=$(mktemp -d)
+GT_HOME="$COMPACTOR_CONFIG_HOME"
+export COMPACTOR_CONFIG_HOME GT_HOME COMPACTOR_DAEMON_THRESHOLD
+COMPACTOR_DAEMON_THRESHOLD=20000
+run_test_cleanup() { rm -rf ${RUN_LOG_DIRS:-} "${COMPACTOR_CONFIG_HOME:-}"; }
 trap run_test_cleanup EXIT
 
 # Source just the helper functions from run.sh by extracting them.
@@ -133,8 +144,10 @@ if ! command -v jq >/dev/null 2>&1; then
 elif $QUERY_OK; then
   FAKE_DIR=$(mktemp -d)
   # Replaces the top-level cleanup trap: this block owns FAKE_DIR, so the EXIT
-  # trap now covers it alongside the per-run log dirs.
-  trap 'rm -rf ${RUN_LOG_DIRS:-} "${FAKE_DIR:-}"' EXIT
+  # trap now covers it alongside the per-run log dirs and the isolated config
+  # root (run_test_cleanup keeps the same shape; COMPACTOR_CONFIG_HOME is
+  # exported for the run.sh subprocesses, so the trap cleans it in the parent).
+  trap 'rm -rf ${RUN_LOG_DIRS:-} "${FAKE_DIR:-}" "${COMPACTOR_CONFIG_HOME:-}"' EXIT
 
   # Run the extracted query under whichever fake bd is installed in FAKE_DIR.
   # The subshell keeps PATH changes from leaking into later tests.
@@ -278,7 +291,10 @@ run_with_fakes() {
     export RUN_LOG="$d/ops"
     # Pin monitor mode: these tests assert monitor/flatten escalation
     # behavior and must not pick up this machine's real
-    # mayor/daemon.json scheduled_maintenance.mode (gt-124a6).
+    # mayor/daemon.json scheduled_maintenance.mode (gt-124a6). The daemon
+    # threshold is already pinned for the whole harness (COMPACTOR_CONFIG_HOME
+    # points at an empty root, so no live daemon.json is read at all —
+    # gt-bolgo).
     export COMPACTOR_MAINT_MODE="monitor"
     bash "$SCRIPT_DIR/run.sh" "$@"
   ) >/dev/null 2>&1; then
@@ -294,7 +310,7 @@ run_with_fakes() {
 
 FAKE_DIR=$(mktemp -d)
 FAKE_DIR_RC1=$(mktemp -d)
-trap 'rm -rf ${RUN_LOG_DIRS:-} "$FAKE_DIR" "$FAKE_DIR_RC1"' EXIT
+trap 'rm -rf ${RUN_LOG_DIRS:-} "$FAKE_DIR" "$FAKE_DIR_RC1" "${COMPACTOR_CONFIG_HOME:-}"' EXIT
 write_fakes "$FAKE_DIR" 0
 write_fakes "$FAKE_DIR_RC1" 1
 
@@ -442,8 +458,9 @@ run_with_daemon_threshold() {
     export PATH="$dir:$PATH"
     export RUN_LOG="$d/ops"
     export COMPACTOR_DAEMON_THRESHOLD="$threshold"
-    # Pin monitor mode for the same reason as run_with_fakes above — these
-    # tests predate the gc-mode gate and assert monitor/flatten behavior.
+    # Pin monitor mode for the same reason as run_with_fakes above: these
+    # cases assert the monitor/flatten escalation band the gc-mode gate
+    # (gt-124a6) left in place.
     export COMPACTOR_MAINT_MODE="monitor"
     bash "$SCRIPT_DIR/run.sh" "$@"
   ) >/dev/null 2>&1; then
