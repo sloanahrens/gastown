@@ -126,6 +126,22 @@ case "${1:-}" in
     fi
     exit 1
     ;;
+  slot)
+    if [ "${2:-}" = "status" ]; then
+      if [ -f "$TEST_STATE/slot_status_fail" ]; then
+        printf 'gt: cannot read the container-gate lock directory\n' >&2
+        exit 1
+      fi
+      file="$TEST_STATE/slot_status.json"
+      if [ -f "$file" ]; then
+        cat "$file"
+      else
+        echo '{"slots":[]}'
+      fi
+      exit 0
+    fi
+    exit 1
+    ;;
   escalate)
     shift
     desc="${1:-}"
@@ -242,6 +258,22 @@ set_bead() {
 mark_in_progress() {
   local rig="$1"
   touch "$GT_TOWN_ROOT/$rig/.in_progress"
+}
+
+# The slot-status reading 'gt slot status --json' returns: one in-flight batch
+# marker for each rig named, exactly as internal/cmd/mq_batch.go writes it.
+set_batch_markers() {
+  local rigs=("$@") rig rows=()
+
+  for rig in "${rigs[@]}"; do
+    rows+=("{\"index\":1,\"held\":true,\"marker\":true,\"name\":\"mq-batch-$rig\",\"owner\":{\"role\":\"$rig/refinery-batch\",\"pid\":4242}}")
+  done
+
+  printf '{"held":false,"slots":[%s]}\n' "$(IFS=,; echo "${rows[*]}")" > "$TEST_STATE/slot_status.json"
+}
+
+fail_slot_status() {
+  touch "$TEST_STATE/slot_status_fail"
 }
 
 run_plugin() {
@@ -410,7 +442,53 @@ test_multiple_rigs_checked() {
   assert_file_contains "$TEST_STATE/escalate.log" "stuck-work-dog:blocked-mr:otherrig:gt-blocker-5" "multiple_rigs: escalates for the right rig"
 }
 
-# --- Test 12: no unexpected gt/bd calls in a representative run ------------
+# --- Test 12: a batch in flight means the queue is not stalled -------------
+test_queue_stall_skipped_when_batch_in_flight() {
+  setup_test "batch_in_flight"
+  mkdir -p "$GT_TOWN_ROOT/gastown"
+  set_rigs '[{"name":"gastown","status":"operational"}]'
+  set_mq "gastown" "[
+    {\"id\":\"gt-mr-070\",\"status\":\"open\",\"created_at\":\"$(iso_ago 3600)\"}
+  ]"
+  set_batch_markers "gastown"
+
+  run_plugin
+
+  assert_file_not_contains "$TEST_STATE/escalate.log" "queue-stall" "batch_in_flight: no escalation while the batch has not landed its MRs"
+  assert_file_contains "$TEST_STATE/stdout.log" "gastown: 'gt mq batch run' in flight" "batch_in_flight: says why it stayed quiet"
+}
+
+# --- Test 13: another rig's batch does not silence this rig ----------------
+test_queue_stall_fires_when_only_another_rig_has_a_batch() {
+  setup_test "batch_other_rig"
+  mkdir -p "$GT_TOWN_ROOT/gastown" "$GT_TOWN_ROOT/otherrig"
+  set_rigs '[{"name":"gastown","status":"operational"}]'
+  set_mq "gastown" "[
+    {\"id\":\"gt-mr-080\",\"status\":\"open\",\"created_at\":\"$(iso_ago 3600)\"}
+  ]"
+  set_batch_markers "otherrig"
+
+  run_plugin
+
+  assert_file_contains "$TEST_STATE/escalate.log" "stuck-work-dog:queue-stall:gastown" "batch_other_rig: gastown's stall still escalates"
+}
+
+# --- Test 14: an unreadable slot status must not silence the detector ------
+test_queue_stall_fires_when_slot_status_unreadable() {
+  setup_test "slot_status_unreadable"
+  mkdir -p "$GT_TOWN_ROOT/gastown"
+  set_rigs '[{"name":"gastown","status":"operational"}]'
+  set_mq "gastown" "[
+    {\"id\":\"gt-mr-090\",\"status\":\"open\",\"created_at\":\"$(iso_ago 3600)\"}
+  ]"
+  fail_slot_status
+
+  run_plugin
+
+  assert_file_contains "$TEST_STATE/escalate.log" "stuck-work-dog:queue-stall:gastown" "slot_status_unreadable: escalates rather than assuming a batch holds the queue"
+}
+
+# --- Test 15: no unexpected gt/bd calls in a representative run ------------
 test_no_unexpected_calls() {
   setup_test "no_unexpected_calls"
   mkdir -p "$GT_TOWN_ROOT/gastown"
@@ -460,6 +538,9 @@ test_queue_stall_skipped_when_polecat_working
 test_queue_not_stalled_when_mr_in_progress
 test_closed_mrs_ignored
 test_multiple_rigs_checked
+test_queue_stall_skipped_when_batch_in_flight
+test_queue_stall_fires_when_only_another_rig_has_a_batch
+test_queue_stall_fires_when_slot_status_unreadable
 test_no_unexpected_calls
 test_failed_escalation_exits_nonzero
 

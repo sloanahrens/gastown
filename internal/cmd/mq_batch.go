@@ -389,6 +389,36 @@ func acquireBatchGateSlot(townRoot, rigName string, hasGate bool) (*slot.Handle,
 	return slot.AcquirePool(townRoot, rigName+"/refinery-batch", batchSlotTimeout, containerGatePool(townRoot))
 }
 
+// batchMarkerName keys the rig's in-flight batch marker: one batch per rig, and
+// the marker directory is shared townwide, so two rigs' batches must not
+// collide on one name.
+func batchMarkerName(rigName string) string { return "mq-batch-" + rigName }
+
+// batchMarkerRole names the marker with the role the batch's gate slot is taken
+// under (acquireBatchGateSlot), so a reader that already recognizes the batch
+// gate needs no new vocabulary for the batch itself.
+func batchMarkerRole(rigName string) string { return rigName + "/refinery-batch" }
+
+// acquireBatchMarker holds the rig's in-flight batch marker for the whole run
+// and returns the release func for it, safe to call in every case — including
+// when the acquire failed.
+//
+// A batch claims none of its MRs and no polecat bead until it lands them, so
+// mid-run the rig reads as entries, none in_progress, nobody working: the same
+// picture a wedged refinery leaves, and the one plugins/stuck-work-dog
+// escalates on (gt-lhaum, 9 false escalations in 5 hours). The marker is what
+// separates the two. It gates nothing, so a refusal — another batch of this rig
+// already holds it — is returned for the caller to report and carry on with,
+// never to enforce: refusing the run would trade a false escalation for a
+// stalled queue.
+func acquireBatchMarker(townRoot, rigName string) (func(), error) {
+	h, err := slot.AcquireMarker(townRoot, batchMarkerName(rigName), batchMarkerRole(rigName))
+	if err != nil {
+		return func() {}, err
+	}
+	return func() { _ = h.Release() }, nil
+}
+
 func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 	townRoot, r, err := getRig(rigName)
@@ -468,6 +498,16 @@ func runMQBatchRun(cmd *cobra.Command, args []string) error {
 	if belowBatchMinCount(cmd.OutOrStdout(), len(eligible), minCount) {
 		return nil
 	}
+
+	// Held for everything below — assembly, review, gate, bisection, merge and
+	// the post-merge chores — because all of it is invisible to the queue: the
+	// deferred release covers every return path (gt-lhaum).
+	releaseBatchMarker, markerErr := acquireBatchMarker(townRoot, rigName)
+	if markerErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s no in-flight batch marker for '%s': %v (a stall detector reading the queue may report this batch as a wedged refinery)\n",
+			style.Dim.Render("⚠"), rigName, markerErr)
+	}
+	defer releaseBatchMarker()
 
 	batchCfg := newBatchConfig(max)
 	batch := eng.AssembleBatch(eligible, batchCfg)

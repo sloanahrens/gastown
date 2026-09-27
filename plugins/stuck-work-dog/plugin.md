@@ -109,12 +109,25 @@ If no MR in the rig's active queue is `in_progress`:
 - Find the oldest `created_at` among active entries.
 - If that age exceeds `GT_STUCK_WORK_DOG_QUEUE_STALL_SECONDS` (default
   `1800` — 30 minutes) **and** no bead anywhere in the rig is
-  `in_progress` (`bd list --status=in_progress --json --limit=1`), escalate
-  with fingerprint `stuck-work-dog:queue-stall:<rig>`.
+  `in_progress` (`bd list --status=in_progress --json --limit=1`) **and** no
+  in-flight marker `mq-batch-<rig>` is held, escalate with fingerprint
+  `stuck-work-dog:queue-stall:<rig>`.
 
 The `bd list --status=in_progress` check is a coarse, cheap proxy for "is a
 polecat actually working" — it doesn't require tmux/session access, only
 beads.
+
+The batch check is what keeps the queue's own silence from reading as a
+refinery that died. `gt mq batch run` claims none of its MRs until it lands
+them, so for the whole of a run — assembly, editorial review, gate, bisection,
+merge and the post-merge chores — the rig is entries, none `in_progress`,
+nobody assigned: the exact shape this detector fires on, which cost 9 false
+escalations in 5 hours (gt-lhaum). The run holds an in-flight marker for its
+whole duration; `gt slot status` lists it beside the gate slots, and
+`internal/cmd/mq_batch.go` defines its name and role. A `gt slot status` this
+plugin cannot read counts as *no* batch — the detector exists to speak up
+about a queue nobody is moving, and a command it cannot parse must not
+silence it.
 
 ## Step 5: Escalate
 
