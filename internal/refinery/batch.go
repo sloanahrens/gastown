@@ -161,12 +161,26 @@ func (e *Engineer) BuildRebaseStack(ctx context.Context, batch []*MRInfo, target
 		}
 		mergeRef, shaErr := e.submittedBranchHead(mr)
 		if shaErr != nil {
-			return nil, nil, shaErr
+			// Like an unpushed head below, a stale submission is confined to
+			// this MR: report it, then leave it queued by keeping it out of the
+			// stack instead of aborting the batch. One member whose recorded
+			// head the branch has moved past must not cost the batch the MRs
+			// behind it (gt-qlim8). A refusal from the origin check carries its
+			// own classification; anything else is an ordinary failure.
+			shaResult := ProcessResult{Success: false, Error: shaErr.Error()}
+			var shaRefusal *headRefusal
+			if errors.As(shaErr, &shaRefusal) {
+				shaResult = shaRefusal.result()
+			}
+			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: %v, removing from batch\n", mr.ID, shaErr)
+			e.HandleMRInfoFailure(mr, shaResult)
+			conflicts = append(conflicts, mr)
+			continue
 		}
 		if refusal := e.assertSubmittedHeadReachableOnOrigin(mr, mergeRef); refusal != nil {
-			// Unlike a stale local ref (fatal above), an unpushed head is
-			// confined to this MR: report it, then leave the MR queued by
-			// keeping it out of the stack instead of aborting the batch.
+			// An unpushed head is likewise confined to this MR: report it, then
+			// leave the MR queued by keeping it out of the stack instead of
+			// aborting the batch.
 			_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: %v, removing from batch\n", mr.ID, refusal.Err)
 			e.HandleMRInfoFailure(mr, refusal.result())
 			conflicts = append(conflicts, mr)

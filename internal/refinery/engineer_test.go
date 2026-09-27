@@ -1405,25 +1405,21 @@ func TestDoMergeDirectPreservesSubmittedHeadForPostMergeProof(t *testing.T) {
 
 func TestDoMergeDirectRejectsAdvancedSourceBranch(t *testing.T) {
 	t.Parallel()
-	workDir, g, cleanup := testGitRepo(t)
+	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
 
 	branch := "polecat/test/native-advanced"
 	createFeatureBranch(t, workDir, branch, "native.txt", "submitted\n")
-	commit := run(t, workDir, "git", "rev-parse", branch)
-	run(t, workDir, "git", "checkout", branch)
-	writeFile(t, workDir, "later.txt", "not submitted\n")
-	run(t, workDir, "git", "add", ".")
-	run(t, workDir, "git", "commit", "-m", "feat: later")
-	run(t, workDir, "git", "checkout", "main")
+	commit := run(t, workDir, "git", "rev-parse", "refs/heads/"+branch)
+	advanceBranchLocally(t, workDir, branch)
 
-	e := newTestEngineer(t, workDir, g)
-	result := e.doMerge(context.Background(), &MRInfo{
-		ID:        "mr-native-advanced",
-		Branch:    branch,
-		Target:    "main",
-		CommitSHA: commit,
-	})
+	// A real MR id, not a synthetic mr-* one: the synthetic exemption skips the
+	// origin guard, and this case is about what that guard does when the local
+	// ref moves off the recorded head of a branch origin never received
+	// (gt-qlim8).
+	const mrID = "gt-mr-native-advanced"
+	e := setupAssertEngineer(t, workDir, branch, mrID, commit)
+	result := e.doMerge(context.Background(), assertTestMR(mrID, branch, commit))
 	if result.Success {
 		t.Fatal("doMerge succeeded for advanced source branch")
 	}

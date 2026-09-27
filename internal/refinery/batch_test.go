@@ -67,6 +67,18 @@ func pushBranch(t *testing.T, workDir, branch string) {
 	run(t, workDir, "git", "push", "-u", "origin", branch)
 }
 
+// originBranchTip returns the SHA origin holds for branch, or "" when origin
+// has no such branch. Head resolution reads origin, so a test that has to know
+// whether a submission is published asks here rather than of the local ref.
+func originBranchTip(t *testing.T, workDir, branch string) string {
+	t.Helper()
+	fields := strings.Fields(run(t, workDir, "git", "ls-remote", "origin", "refs/heads/"+branch))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
 // createConflictingBranch creates a branch that modifies the same file as another.
 func createConflictingBranch(t *testing.T, workDir, branchName, filename, content string) {
 	t.Helper()
@@ -445,34 +457,173 @@ func TestBuildRebaseStack_MissingBranch(t *testing.T) {
 	}
 }
 
-func TestBuildRebaseStack_RejectsAdvancedSourceBranch(t *testing.T) {
-	t.Parallel()
+// advanceBranchLocally adds a commit to branch and leaves the worktree back on
+// main, without pushing — the shape a polecat's in-progress rework leaves
+// behind in a shared .repo.git.
+func advanceBranchLocally(t *testing.T, workDir, branch string) string {
+	t.Helper()
+	run(t, workDir, "git", "checkout", branch)
+	writeFile(t, workDir, "later.txt", "not submitted\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: later")
+	head := run(t, workDir, "git", "rev-parse", "refs/heads/"+branch)
+	run(t, workDir, "git", "checkout", "main")
+	return head
+}
+
+// TestBuildRebaseStack_EjectsAdvancedSourceBranch is the gt-qlim8 regression at
+// the stacking level: the shared local ref for a member has moved past the head
+// its MR recorded, and origin never received the branch. The local ref is not
+// the authority on what was submitted, so this is drift — and drift is one
+// member's problem. It is dropped from the stack and left queued, whereas
+// before the fix the whole batch aborted on it.
+func TestBuildRebaseStack_EjectsAdvancedSourceBranch(t *testing.T) {
+	// Not t.Parallel(): the ejection nudges the worker through a fake gt.
+	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
 	branch := "feature-advanced"
 	createFeatureBranch(t, workDir, branch, "a.txt", "submitted\n")
 	commit := run(t, workDir, "git", "rev-parse", branch)
-	run(t, workDir, "git", "checkout", branch)
-	writeFile(t, workDir, "later.txt", "not submitted\n")
-	run(t, workDir, "git", "add", ".")
-	run(t, workDir, "git", "commit", "-m", "feat: later")
-	run(t, workDir, "git", "checkout", "main")
+	advanceBranchLocally(t, workDir, branch)
 
 	e := newTestEngineer(t, workDir, g)
 	batch := []*MRInfo{{
-		ID:        "mr-advanced",
-		Branch:    branch,
-		Target:    "main",
-		CommitSHA: commit,
+		ID:          "gt-mr-advanced",
+		Branch:      branch,
+		Target:      "main",
+		SourceIssue: "gt-src",
+		CommitSHA:   commit,
 	}}
 
-	_, _, err := e.BuildRebaseStack(context.Background(), batch, "main")
-	if err == nil {
-		t.Fatal("BuildRebaseStack succeeded for advanced source branch")
+	stacked, conflicts, err := e.BuildRebaseStack(context.Background(), batch, "main")
+	if err != nil {
+		t.Fatalf("a drifted member must not abort the batch: %v", err)
 	}
-	if !strings.Contains(err.Error(), "changed from submitted head") {
-		t.Fatalf("BuildRebaseStack error = %q, want submitted-head drift", err.Error())
+	if len(stacked) != 0 {
+		t.Errorf("expected the drifted member to stay out of the stack, got %v", stackedIDs(stacked))
+	}
+	if len(conflicts) != 1 || conflicts[0].ID != "gt-mr-advanced" {
+		t.Errorf("expected gt-mr-advanced ejected from the batch, got %v", stackedIDs(conflicts))
+	}
+}
+
+// TestBuildRebaseStack_MergesSubmissionWhenLocalRefDrifted is the other half of
+// gt-qlim8: the local ref for a member has moved off the recorded head, but
+// origin still carries the submission (the worktree kept working and never
+// pushed, a superseding resubmission, a nuked worktree). Origin decides, so the
+// member stacks the recorded submission — the head that was actually submitted,
+// reviewed and gated — instead of being refused, and the unsubmitted work on
+// the local ref stays out of the merge.
+func TestBuildRebaseStack_MergesSubmissionWhenLocalRefDrifted(t *testing.T) {
+	t.Parallel()
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "feature-drifted"
+	createFeatureBranch(t, workDir, branch, "a.txt", "submitted\n")
+	submitted := run(t, workDir, "git", "rev-parse", branch)
+	pushBranch(t, workDir, branch)
+	drifted := advanceBranchLocally(t, workDir, branch)
+	if drifted == submitted {
+		t.Fatal("test setup: the local branch did not move")
+	}
+	// Origin still points at the submission, not at the drifted ref.
+	if tip := originBranchTip(t, workDir, branch); tip != submitted {
+		t.Fatalf("test setup: origin/%s = %s, want the submitted head %s", branch, tip, submitted)
+	}
+
+	e := newTestEngineer(t, workDir, g)
+	batch := []*MRInfo{{
+		ID:          "gt-mr-drifted",
+		Branch:      branch,
+		Target:      "main",
+		SourceIssue: "gt-src",
+		CommitSHA:   submitted,
+	}}
+
+	stacked, conflicts, err := e.BuildRebaseStack(context.Background(), batch, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stacked) != 1 || len(conflicts) != 0 {
+		t.Fatalf("expected the submission stacked, got stacked=%v conflicts=%v", stackedIDs(stacked), stackedIDs(conflicts))
+	}
+
+	// The stack carries the submitted content, not the local ref's later work.
+	content, readErr := os.ReadFile(filepath.Join(workDir, "a.txt"))
+	if readErr != nil {
+		t.Fatalf("read a.txt from the stack: %v", readErr)
+	}
+	if got := strings.ReplaceAll(string(content), "\r\n", "\n"); got != "submitted\n" {
+		t.Errorf("a.txt on the stack = %q, want the submitted content", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "later.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("later.txt is on the stack: unsubmitted local work must not be merged")
+	}
+}
+
+// TestProcessBatch_LandsHealthyMembersPastAStaleOne is the gt-qlim8 acceptance
+// case end to end: one batch member's recorded head is stale — the branch was
+// rewritten on origin after submission, so origin no longer carries it — and
+// the healthy member behind it must still land. Before the fix the stale
+// member aborted the whole batch, so nothing landed.
+func TestProcessBatch_LandsHealthyMembersPastAStaleOne(t *testing.T) {
+	// Not t.Parallel(): the ejected member nudges the worker through a fake gt.
+	fakeBDAndGt(t)
+	workDir, _, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	const stale = "feature-rewritten"
+	createFeatureBranch(t, workDir, stale, "shared.txt", "submitted\n")
+	recorded := run(t, workDir, "git", "rev-parse", "refs/heads/"+stale)
+	pushBranch(t, workDir, stale)
+
+	// Rewrite the branch on origin: a disjoint history, so the recorded head is
+	// neither origin's tip nor reachable from it.
+	run(t, workDir, "git", "checkout", "-B", stale, "main")
+	writeFile(t, workDir, "shared.txt", "rewritten\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: rewritten")
+	run(t, workDir, "git", "push", "--force", "origin", stale)
+	run(t, workDir, "git", "checkout", "main")
+
+	createFeatureBranch(t, workDir, "feature-good", "good.txt", "good\n")
+	goodHead := run(t, workDir, "git", "rev-parse", "refs/heads/feature-good")
+	pushBranch(t, workDir, "feature-good")
+
+	store := newPrepushStore(
+		prepushIssue("gt-src-stale", ""),
+		prepushIssue("gt-src-good", ""),
+		prepushMRIssue("gt-mr-stale", stale, "main", "gt-src-stale", recorded),
+		prepushMRIssue("gt-mr-good", "feature-good", "main", "gt-src-good", goodHead),
+	)
+	e := newPrepushEngineer(t, workDir, store)
+	batch := []*MRInfo{
+		{ID: "gt-mr-stale", Branch: stale, Target: "main", SourceIssue: "gt-src-stale", CommitSHA: recorded},
+		{ID: "gt-mr-good", Branch: "feature-good", Target: "main", SourceIssue: "gt-src-good", CommitSHA: goodHead},
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+	if result.Error != nil {
+		t.Fatalf("a stale member must not fail the batch: %v", result.Error)
+	}
+	if len(result.Merged) != 1 || result.Merged[0].ID != "gt-mr-good" {
+		t.Fatalf("expected only gt-mr-good merged, got %v", stackedIDs(result.Merged))
+	}
+	if len(result.Conflicts) != 1 || result.Conflicts[0].ID != "gt-mr-stale" {
+		t.Fatalf("expected gt-mr-stale dropped from the batch, got %v", stackedIDs(result.Conflicts))
+	}
+
+	// The healthy member reached origin's main.
+	verifyDir := filepath.Join(filepath.Dir(workDir), "verify")
+	run(t, filepath.Dir(workDir), "git", "clone", filepath.Join(filepath.Dir(workDir), "origin.git"), verifyDir)
+	if _, statErr := os.Stat(filepath.Join(verifyDir, "good.txt")); statErr != nil {
+		t.Errorf("good.txt missing from origin's main after the batch: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(verifyDir, "shared.txt")); !os.IsNotExist(statErr) {
+		t.Errorf("the rewritten branch landed on origin's main; only the recorded submission may")
 	}
 }
 

@@ -697,6 +697,15 @@ func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) P
 	}
 	mergeRef, err := e.submittedBranchHead(mr)
 	if err != nil {
+		// Head resolution consults origin when the local ref disagrees with
+		// the recorded head, and returns that refusal typed: route it (and
+		// only it) through the classification callers act on — escalate a
+		// branch origin never received, keep queued for an unreadable origin.
+		var refusal *headRefusal
+		if errors.As(err, &refusal) {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] ✗ Refusing to gate/merge MR %s: %v\n", mr.ID, refusal.Err)
+			return refusal.result()
+		}
 		return ProcessResult{Success: false, Error: err.Error()}
 	}
 	if refusal := e.assertSubmittedHeadReachableOnOrigin(mr, mergeRef); refusal != nil {
@@ -2317,6 +2326,35 @@ func (e *Engineer) setMRConflictHead(mr *MRInfo, commitSHA, taskID string) error
 	return nil
 }
 
+// submittedBranchHead resolves the head an MR submitted — its recorded
+// commit_sha — and confirms that the head origin carries is that submission.
+//
+// Origin is the authority, not the shared local refs/heads/<branch>. That ref
+// is a cache of the polecat's own worktree HEAD, and in a rig where the
+// refinery shares .repo.git with the polecats it moves for reasons that are
+// not submissions: a nuked worktree, a rewrite, a superseding resubmission, an
+// in-progress rework on the same branch. Reading it as the authority made any
+// such move look like a changed submission, and in a batch that refusal was
+// fatal to every MR behind the stale one (gt-qlim8).
+//
+// The local ref therefore decides only when it agrees with the recorded head —
+// the unchanged fast path, and free of network round trips. When it disagrees,
+// origin decides: the submission stands as long as origin carries the recorded
+// head, literally, as an ancestor a later push advanced past, or as a
+// content-preserving rebase. That is the same assertion every merge path runs
+// next (assertSubmittedHeadReachableOnOrigin), so the two cannot disagree about
+// what "origin carries it" means. Only a head origin no longer carries is
+// drift, and that refusal is returned typed (*headRefusal) so callers confine
+// it to the MR it names instead of the batch around it.
+//
+// A branch origin has never heard of keeps the local comparison's own refusal
+// rather than the assertion's: the assertion still runs next and classifies the
+// unpublished case, and reporting it here as work origin never received is more
+// accurate than calling it drift.
+//
+// A missing local ref (a nuked worktree) stays an error. Every merge path
+// checks branch existence before resolving a head, so that case is already
+// routed per-MR.
 func (e *Engineer) submittedBranchHead(mr *MRInfo) (string, error) {
 	if err := e.ensureMRInfoCommitSHA(mr); err != nil {
 		return "", err
@@ -2334,10 +2372,22 @@ func (e *Engineer) submittedBranchHead(mr *MRInfo) (string, error) {
 		return "", fmt.Errorf("resolve source branch %s: %w", branch, err)
 	}
 	localHead = strings.TrimSpace(localHead)
-	if localHead != commit {
-		return "", fmt.Errorf("source branch %s changed from submitted head %s to %s", branch, shortSHA(commit), shortSHA(localHead))
+	if localHead == commit {
+		return commit, nil
 	}
-	return commit, nil
+
+	// The local ref moved off the recorded head. That alone is not a changed
+	// submission — ask origin, which is where a submission lands.
+	if refusal := e.assertSubmittedHeadReachableOnOrigin(mr, commit); refusal == nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: local ref %s is at %s, not the submitted head %s; origin carries the submission, using it\n",
+			mr.ID, branch, shortSHA(localHead), shortSHA(commit))
+		return commit, nil
+	} else if !refusal.BranchMissing {
+		// Origin answered: it either does not carry the submission or could
+		// not be read. Both refusals keep their classification for the caller.
+		return "", refusal
+	}
+	return "", fmt.Errorf("source branch %s changed from submitted head %s to %s", branch, shortSHA(commit), shortSHA(localHead))
 }
 
 // headRefusal is a refusal to stage a merge because origin does not carry the
@@ -2361,10 +2411,16 @@ func (r *headRefusal) result() ProcessResult {
 	}
 }
 
+// Error makes a refusal usable as the error value head resolution returns, so
+// a caller that has to route it (a batch member to eject, a single MR to hand
+// to HandleMRInfoFailure) keeps the flags above instead of a bare string.
+func (r *headRefusal) Error() string { return r.Err.Error() }
+
 // assertSubmittedHeadReachableOnOrigin refuses when origin's tip for mr's
-// branch does not carry its declared head (gt-sda9). It runs wherever a merge
-// path takes a ref from submittedBranchHead, whose local refs/heads check
-// cannot see an unpushed head in a rig sharing .repo.git with the polecats.
+// branch does not carry its declared head (gt-sda9). submittedBranchHead calls
+// it whenever the shared local ref disagrees with the recorded head, and every
+// merge path calls it again before staging a merge, so a submission the
+// polecat never pushed is refused rather than merged.
 //
 // Only the declared head is asserted: adoptConflictResolvedHead has already
 // adopted a head that moved through a closed conflict task, and a
