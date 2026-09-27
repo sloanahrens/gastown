@@ -55,3 +55,26 @@ func TestScanDirFixtures(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckContracts(t *testing.T) {
+	t.Parallel()
+	dirs := []string{
+		filepath.Join("testdata", "contracts", "goodfake"),
+		filepath.Join("testdata", "contracts", "real"),
+		filepath.Join("testdata", "contracts", "badfake"),
+	}
+	vs, err := CheckContracts("testdata/contracts", dirs)
+	if err != nil {
+		t.Fatalf("CheckContracts: %v", err)
+	}
+	if len(vs) != 1 {
+		t.Fatalf("violations = %v, want exactly one", vs)
+	}
+	v := vs[0]
+	if v.Rule != RuleContract {
+		t.Fatalf("rule = %q, want %q", v.Rule, RuleContract)
+	}
+	if v.Pos.Filename != filepath.Join("testdata", "contracts", "badfake") {
+		t.Fatalf("violation filename = %q, want badfake dir", v.Pos.Filename)
+	}
+}
