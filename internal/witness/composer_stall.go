@@ -229,32 +229,53 @@ var errComposerUnverifiable = errors.New("composer could not be classified after
 // the patrol to a restart on a pane that was merely mid-repaint — which is very
 // likely what an unclassifiable capture is, three quarters of a second after
 // ctrl+x ctrl+s (gt-afa7).
+//
+// A capture that fails outright (tmux itself erroring, not a classifiable-but-
+// ambiguous pane) gets the same retry treatment as an unclassifiable read
+// rather than an immediate strand verdict: one flaky capture three quarters of
+// a second after the submit is exactly the kind of transient miss the recheck
+// attempts exist to ride out, and giving up on the first one defeats the retry
+// loop entirely (gt-0b4z). It stays distinct from errComposerUnverifiable,
+// since the caller reports that one as "submitted, could not confirm" rather
+// than as an error.
+//
+// When no attempt passes, the verdict is the strongest class any attempt
+// observed rather than the last one's. The caller acts on the class, not the
+// message: it treats "still holds input" and a capture failure alike as a
+// still-pending/restart, and spends errComposerUnverifiable on the benign
+// reading. Ranking them keeps a trailing ambiguous read from talking it into
+// the benign one after an attempt saw input still in the composer, or after
+// one failed to read the pane at all and made the check itself the story.
 func confirmComposerCleared(t *tmux.Tmux, sessionName string, frozenFor time.Duration) error {
-	last := tmux.ComposerUnknown.String()
-	unverifiable := false
+	var (
+		pendingState string // set by a read that found the input still in place
+		captureErr   error  // set by a read that could not reach the pane
+		unverifiable string // set by a read that reached it but could not classify it
+	)
 	for i := 0; i < composerStallRecheckAttempts; i++ {
 		time.Sleep(composerStallRecheckDelay)
 		after, err := t.DetectComposerStall(sessionName, frozenFor)
 		if err != nil {
 			if errors.Is(err, tmux.ErrComposerUnobservable) {
-				unverifiable = true
-				last = err.Error()
+				unverifiable = err.Error()
 				continue
 			}
-			// The pane could not be read at all. That is a failure of the
-			// check, not a verdict about the composer.
-			return err
+			captureErr = err
+			continue
 		}
 		if after.State != tmux.ComposerPending {
+			// The composer let the input go: the submit worked.
 			return nil
 		}
-		// Positive evidence that the input is still there outranks an earlier
-		// unclassifiable read.
-		unverifiable = false
-		last = after.State.String()
+		// Positive evidence that the input is still there, held against any
+		// later unclassifiable or uncaptured read.
+		pendingState = after.State.String()
 	}
-	if unverifiable {
-		return fmt.Errorf("%w (last: %s)", errComposerUnverifiable, last)
+	if pendingState != "" {
+		return fmt.Errorf("composer still holds input after submit (state: %s)", pendingState)
 	}
-	return fmt.Errorf("composer still holds input after submit (state: %s)", last)
+	if captureErr != nil {
+		return captureErr
+	}
+	return fmt.Errorf("%w (last: %s)", errComposerUnverifiable, unverifiable)
 }
