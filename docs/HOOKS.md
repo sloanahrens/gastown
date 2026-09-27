@@ -67,17 +67,18 @@ built-in lifecycle baseline) are blocked before they run.
 
 The `polecats` override adds the polecat-paths guard (`gt tap guard
 polecat-paths`, gt-hmaf) on the `Bash` and `Edit|Write|MultiEdit|NotebookEdit`
-matchers. Polecats work in exactly one worktree; a polecat that edits a
-sibling's worktree corrupts a branch its owner cannot see. File-writing tools
-are limited to the polecat's own worktree (plus temp dirs and the session
-scratchpad), and Bash commands that write — including interpreters, `curl -o`,
+matchers: a cross-worktree edit corrupts a branch its owner cannot see.
+File-writing tools are limited to the polecat's own worktree (plus temp dirs
+and the session scratchpad), and Bash writes — interpreters, `curl -o`,
 redirections, `cd` and `git -C` targets — are blocked when they name a town
-path that is not the polecat's worktree, its own polecat directory, or its
-rig's `.repo.git`. Read-only commands stay allowed anywhere, and a target the
-guard cannot resolve is blocked rather than allowed.
+path outside it, its polecat directory, or its rig's `.repo.git`. Reads stay
+allowed anywhere; an unresolvable target is blocked.
 
 The `polecats` and `dog` overrides deny permission prompts nobody can answer
 (`gt tap guard permission-request`, gt-8stz); attended roles carry no entry.
+They deny the question tool too (`gt tap guard question-tool`, gt-163k8, matcher
+`AskUserQuestion`): it parks the session while it reads as running — a polecat
+sat 4h26m on one.
 
 The `bd-close-invariant` guard (`gt tap guard bd-close-invariant`, gt-arno) runs
 on the `Bash` matcher for every role, from `DefaultBase()`. It is the town-wide

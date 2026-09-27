@@ -1,0 +1,45 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Sonnet 5 · Claude Max
+ ▝▝   ▝▝   /private/tmp/gt-dialog-probe
+
+
+❯ Call the AskUserQuestion tool exactly once, with question set to the literal text n/a, header n/a, and options labelled 'a' and 'b'. Do
+  not call any other tool. Stop immediately after the tool call.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ n/a
+
+n/a
+
+❯ 1. a
+     a
+  2. b
+     b
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
