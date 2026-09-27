@@ -37,6 +37,10 @@ func stubRestartSessionExec(t *testing.T) *[]string {
 func TestRestartPolecatSessionHonoursPause(t *testing.T) {
 	town := testutil.HermeticTest(t)
 	restarts := stubRestartSessionExec(t)
+	// These tests are about the pause gate. Stub the hold seam too so the
+	// restart path stays subprocess-free and this test cannot be read as a
+	// statement about holds (gt-n38c6, hold_gate_test.go).
+	stubHookHold(t, "", false)
 
 	if err := agentpause.Pause(town, "gastown", "polecat", "flint", "frozen by operator", "human", ""); err != nil {
 		t.Fatalf("Pause: %v", err)
@@ -65,6 +69,7 @@ func TestRestartPolecatSessionHonoursPause(t *testing.T) {
 func TestRestartPolecatSessionRestartsUnpausedAgent(t *testing.T) {
 	town := testutil.HermeticTest(t)
 	restarts := stubRestartSessionExec(t)
+	stubHookHold(t, "", false)
 
 	if err := RestartPolecatSession(town, "gastown", "flint"); err != nil {
 		t.Fatalf("RestartPolecatSession on unpaused polecat: %v", err)
@@ -115,6 +120,7 @@ func TestRestartPolecatSessionFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			town := testutil.HermeticTest(t)
 			restarts := stubRestartSessionExec(t)
+			stubHookHold(t, "", false)
 
 			markerPath := agentpause.FilePath(town, "gastown", "polecat", "flint")
 			if err := os.MkdirAll(filepath.Dir(markerPath), 0o755); err != nil {

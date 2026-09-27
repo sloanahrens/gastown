@@ -145,3 +145,58 @@ func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
 		t.Errorf("expected a log line naming the merge rejection on test-rejected1, got %v", *logMsgs)
 	}
 }
+
+// TestDispatchHoldFields_MatchesTheIssueRule pins the exported field rule
+// against the one readHold applies, so the two cannot drift: the witness
+// reaches the rule through DispatchHoldFields (it reads a hook bead as JSON
+// and holds no beadsdk.Storage), and a divergence would mean a polecat
+// restarted against work a convoy feeder would have held (gt-n38c6).
+func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
+	cases := []struct {
+		name  string
+		issue beadsdk.Issue
+	}{
+		{
+			name:  "clean",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Notes: "ordinary notes"},
+		},
+		{
+			name:  "label",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"needs-mayor-review"}},
+		},
+		{
+			name:  "label, however typed",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-SONNET"}},
+		},
+		{
+			name:  "deferred status",
+			issue: beadsdk.Issue{Status: beadsdk.StatusDeferred},
+		},
+		{
+			name:  "pinned status",
+			issue: beadsdk.Issue{Status: "pinned"},
+		},
+		{
+			name:  "decision in design",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Design: "## MAYOR DESIGN DECISION\npark it"},
+		},
+		{
+			name:  "decision in notes",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Notes: "context\n\n- do not redispatch"},
+		},
+		{
+			name:  "wording only mentioned",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Notes: "a review note quoting 'do not redispatch'"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fromIssue := dispatchHoldInFields(&tc.issue)
+			fromFields := DispatchHoldFields(string(tc.issue.Status), tc.issue.Labels, tc.issue.Design, tc.issue.Notes)
+			if fromIssue != fromFields {
+				t.Errorf("rule drift: dispatchHoldInFields = %q, DispatchHoldFields = %q", fromIssue, fromFields)
+			}
+		})
+	}
+}

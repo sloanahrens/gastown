@@ -127,22 +127,36 @@ func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolv
 
 // dispatchHoldInFields applies the hold rule to the fields GetIssue returns.
 func dispatchHoldInFields(issue *beadsdk.Issue) string {
-	for _, status := range dispatchHoldStatuses {
-		if issue.Status == status {
-			return "status " + string(status)
+	return DispatchHoldFields(string(issue.Status), issue.Labels, issue.Design, issue.Notes)
+}
+
+// DispatchHoldFields reports the hold a bead's own fields assert, or "" when
+// they assert none.
+//
+// It is the field half of readHold, exported so a caller that has a bead's
+// fields but no beadsdk.Storage reaches the same verdict instead of a second
+// copy of the rule — the witness reads a polecat's hooked bead as JSON to
+// decide whether a restart may raise it (gt-n38c6). Comments are not part of
+// this: bd show --json omits them, which makes such a caller narrower than
+// readHold and never wider. status is a plain string so that JSON-reading
+// caller needs no SDK type; dispatchHoldInFields does the one conversion.
+func DispatchHoldFields(status string, labels []string, design, notes string) string {
+	for _, held := range dispatchHoldStatuses {
+		if status == string(held) {
+			return "status " + status
 		}
 	}
-	for _, label := range issue.Labels {
+	for _, label := range labels {
 		for _, held := range dispatchHoldLabels {
 			if strings.EqualFold(label, held) {
 				return "label " + label
 			}
 		}
 	}
-	if decision := holdDecisionIn(issue.Design); decision != "" {
+	if decision := holdDecisionIn(design); decision != "" {
 		return decision + " in design"
 	}
-	if decision := holdDecisionIn(issue.Notes); decision != "" {
+	if decision := holdDecisionIn(notes); decision != "" {
 		return decision + " in notes"
 	}
 	return ""
