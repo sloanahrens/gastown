@@ -39,6 +39,11 @@
       "guidance": "Any check, gate, guard, or measurement whose failure path emits the same value as its success path is a finding, even when the local change is correct."
     },
     {
+      "name": "alarming-branch",
+      "weight": 3,
+      "guidance": "Any check, guard, probe or alarm needs a test that drives its failing branch and asserts the alarm is observable: coverage of the passing path is not evidence, and a check whose failure is indistinguishable from its success is not a check. Scope is code whose purpose is to detect or report a condition — doctor checks, gates, probes, alarms, escalation paths, liveness tests, and the counters feeding them; a change reporting no verdict is out of scope, so this is not a coverage mandate. Can this check's failing branch produce the same value as its succeeding branch? If so it is not shippable; if you cannot tell, the test that answers it is missing. Rejected example: a doctor check returning OK when its probe cannot run, tested only on the healthy verdict — a broken probe reads exactly like a clean town. A confirmed finding blocks on its own; name the missing assertion."
+    },
+    {
       "name": "docs-and-comments",
       "weight": 2,
       "guidance": "A change that alters behaviour updates every doc and comment that describes it. New or edited docs and comments follow the rules R1-R13 in the repository context (docs/writing-for-agents.md); cite the rule id in a finding. A stale or contradicted line in an agent-facing file (AGENTS.md, internal/templates/polecat-CLAUDE.md, a directive, a formula description, a plugin.md, docs/HOOKS.md) is major; elsewhere minor. This criterion moves the score; it does not block alone."
