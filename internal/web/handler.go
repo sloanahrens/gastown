@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"html/template"
 	"io/fs"
 	"log"
@@ -193,6 +194,7 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 
 	var (
 		convoys        []ConvoyRow
+		convoysErr     string
 		mergeQueue     []MergeQueueRow
 		townMergeQueue TownMergeQueue
 		gate           *GateStatus
@@ -227,7 +229,15 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 			var err error
 			convoys, err = h.fetcher.FetchConvoys()
 			if err != nil {
-				log.Printf("dashboard: FetchConvoys failed: %v", err)
+				if errors.Is(err, errConvoyBreakerOpen) {
+					// Sustained outage: the breaker already logged the
+					// triggering failure, so every backed-off render logging
+					// the same line again would just be noise.
+					convoysErr = "convoy list backed off"
+				} else {
+					convoysErr = "convoy list unreadable"
+					log.Printf("dashboard: FetchConvoys failed: %v", err)
+				}
 			}
 		},
 		func() {
@@ -365,6 +375,7 @@ func (h *ConvoyHandler) fetchAndRender(r *http.Request, expandPanel string) []by
 	data := ConvoyData{
 		Convoys:           convoys,
 		UnreadableConvoys: countUnreadableConvoys(convoys),
+		ConvoysErr:        convoysErr,
 		MergeQueue:        mergeQueue,
 		TownMergeQueue:    townMergeQueue,
 		Gate:              gate,

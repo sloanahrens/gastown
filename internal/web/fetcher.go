@@ -380,12 +380,21 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 	return fetcher, nil
 }
 
+// errConvoyBreakerOpen marks a FetchConvoys call that was skipped because the
+// breaker is backed off. It is a distinct sentinel (not a generic list-read
+// error) so the handler can render "unreadable" without re-logging a fresh
+// failure for every backed-off request during the cooldown (gt-jwf7).
+var errConvoyBreakerOpen = errors.New("convoy list breaker open (backed off after repeated failures)")
+
 // FetchConvoys fetches all open convoys with their activity data.
 // Uses a circuit breaker to avoid hammering bd/dolt when listing fails
-// persistently (e.g., "invalid issue type: convoy" schema mismatch).
+// persistently (e.g., "invalid issue type: convoy" schema mismatch). A
+// backed-off call and a failed list read both return a non-nil error rather
+// than (nil, nil): an outage must not read as a genuinely empty town
+// (gt-jwf7).
 func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 	if !f.convoyBreaker.allow() {
-		return nil, nil // Backed off — return empty result silently
+		return nil, errConvoyBreakerOpen
 	}
 
 	// List all open issues and filter locally so legacy type=convoy beads remain visible.

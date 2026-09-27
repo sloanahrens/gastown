@@ -265,8 +265,11 @@ func TestConvoyHandler_MultipleConvoys(t *testing.T) {
 }
 
 // Integration tests for error handling
-// Note: The refactored dashboard handler treats fetch errors as non-fatal,
-// rendering an empty section instead of returning an error.
+// Note: The refactored dashboard handler treats fetch errors as non-fatal —
+// the dashboard still renders — but a failed convoy read must render as
+// unreadable, not as the empty-town state (gt-jwf7): an operator watching a
+// bd/Dolt outage must not see "No active convoys" and read it as an
+// all-clear.
 
 func TestConvoyHandler_FetchConvoysError(t *testing.T) {
 	mock := &MockConvoyFetcher{
@@ -289,9 +292,43 @@ func TestConvoyHandler_FetchConvoysError(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	// Should show the empty state for convoys section
-	if !strings.Contains(body, "No active convoys") {
-		t.Error("Response should show empty state when fetch fails")
+	if strings.Contains(body, "No active convoys") {
+		t.Error("Response must not show the empty-town state when the convoy list read failed")
+	}
+	if !strings.Contains(body, "convoy list unreadable") {
+		t.Error("Response should mark the convoys panel unreadable when the list read failed")
+	}
+}
+
+// TestConvoyHandler_FetchConvoysBreakerOpen covers the other empty-reads-as-
+// nothing path from gt-jwf7: the circuit breaker backed off rather than a
+// fresh list-command failure. The panel must still say unreadable, not
+// render the same empty state as a genuinely quiet town.
+func TestConvoyHandler_FetchConvoysBreakerOpen(t *testing.T) {
+	mock := &MockConvoyFetcher{
+		Error: errConvoyBreakerOpen,
+	}
+
+	handler, err := NewConvoyHandler(mock, 8*time.Second, "test-token")
+	if err != nil {
+		t.Fatalf("NewConvoyHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "No active convoys") {
+		t.Error("Response must not show the empty-town state when the breaker is backed off")
+	}
+	if !strings.Contains(body, "convoy list backed off") {
+		t.Error("Response should mark the convoys panel unreadable when the breaker is backed off")
 	}
 }
 

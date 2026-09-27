@@ -46,25 +46,30 @@ type ConvoyData struct {
 	// are rendered and counted, so the panel names how many rows are unknown
 	// instead of presenting the list as whole (gt-huzu).
 	UnreadableConvoys int
-	MergeQueue        []MergeQueueRow
-	TownMergeQueue    TownMergeQueue
-	Gate              *GateStatus
-	Workers           []WorkerRow
-	Mail              []MailRow
-	Rigs              []RigRow
-	Dogs              []DogRow
-	Escalations       []EscalationRow
-	Health            *HealthRow
-	Queues            []QueueRow
-	Sessions          []SessionRow
-	Hooks             []HookRow
-	Mayor             *MayorStatus
-	Issues            []IssueRow
-	Activity          []ActivityRow
-	LocalPool         *LocalPoolData
-	Summary           *DashboardSummary
-	Expand            string // Panel to show fullscreen (from ?expand=name)
-	CSRFToken         string // Token for CSRF protection on POST requests
+	// ConvoysErr says why Convoys came back empty — the enumeration itself
+	// failed, or the breaker is backed off — so the panel renders unreadable
+	// instead of the empty-town state (gt-jwf7). Empty means the list read
+	// (or lack of one) genuinely found nothing.
+	ConvoysErr     string
+	MergeQueue     []MergeQueueRow
+	TownMergeQueue TownMergeQueue
+	Gate           *GateStatus
+	Workers        []WorkerRow
+	Mail           []MailRow
+	Rigs           []RigRow
+	Dogs           []DogRow
+	Escalations    []EscalationRow
+	Health         *HealthRow
+	Queues         []QueueRow
+	Sessions       []SessionRow
+	Hooks          []HookRow
+	Mayor          *MayorStatus
+	Issues         []IssueRow
+	Activity       []ActivityRow
+	LocalPool      *LocalPoolData
+	Summary        *DashboardSummary
+	Expand         string // Panel to show fullscreen (from ?expand=name)
+	CSRFToken      string // Token for CSRF protection on POST requests
 }
 
 // RigRow represents a registered rig in the dashboard.

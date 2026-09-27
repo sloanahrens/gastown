@@ -93,7 +93,7 @@
                     <span class="stat-label">📋 Work</span>
                 </div>
                 <div class="stat">
-                    <span class="stat-value">{{.Summary.ConvoyCount}}</span>
+                    <span class="stat-value">{{if .ConvoysErr}}?{{else}}{{.Summary.ConvoyCount}}{{end}}</span>
                     <span class="stat-label">🚚 Convoys</span>
                 </div>
                 <div class="stat">
@@ -134,7 +134,7 @@
             <div class="panel" id="convoy-panel">
                 <div class="panel-header">
                     <h2>🚚 Convoys</h2>
-                    <span class="count">{{len .Convoys}}</span>
+                    <span class="count">{{if .ConvoysErr}}?{{else}}{{len .Convoys}}{{end}}</span>
                     <button class="new-convoy-btn" id="new-convoy-btn">+ New Convoy</button>
                     <button class="collapse-btn" aria-label="Toggle panel">▼</button>
                     <button class="expand-btn">Expand</button>
@@ -142,7 +142,11 @@
                 <div class="panel-body">
                     <!-- Convoy List View -->
                     <div id="convoy-list">
-                        {{if .UnreadableConvoys}}
+                        {{if .ConvoysErr}}
+                        <div class="convoy-unreadable-note" title="The convoy list read failed or is backed off after repeated failures; this is not a report of zero convoys">
+                            ⚠ convoys unreadable — {{.ConvoysErr}}
+                        </div>
+                        {{else if .UnreadableConvoys}}
                         <div class="convoy-unreadable-note" title="Their detail reads failed; they are counted, but their progress is unreadable">
                             ⚠ {{.UnreadableConvoys}} of {{len .Convoys}} convoys unreadable — progress unknown
                         </div>
@@ -210,6 +214,10 @@
                                 {{end}}
                             </tbody>
                         </table>
+                        {{else if .ConvoysErr}}
+                        <div class="empty-state">
+                            <p>Convoys unreadable</p>
+                        </div>
                         {{else}}
                         <div class="empty-state">
                             <p>No active convoys</p>
