@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
@@ -1415,6 +1416,18 @@ func RestartPolecatSession(workDir, rigName, polecatName string) error {
 		return nil
 	}
 
+	// Hold gate (gt-n38c6): the second gate behind heldHookSkip, repeated here
+	// for the same reason the pause gate above is — a caller reaching this
+	// function directly must not raise a session against work an operator's
+	// hold parked. It costs a bd read, which is why heldHookSkip is what keeps
+	// it off the patrol's hot path; here it is paid only when a restart was
+	// already going to happen. Fails CLOSED, as readHookHold does.
+	if reason, held := hookHoldReason(DefaultBdCli(), workDir, rigName, polecatName); held {
+		log.Printf("info: skip restart of %s/%s: hooked work is held (%s)",
+			rigName, polecatName, reason)
+		return nil
+	}
+
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
 	if err := restartSessionExec(workDir, address); err != nil {
 		return fmt.Errorf("session restart failed: %w", err)
@@ -1876,6 +1889,13 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 		}
 		doneIntent := extractDoneIntent(labels)
 
+		// Hold gate (gt-n38c6): see heldHookSkip's doc. The snapshot above is
+		// what carries hook_bead, so this sits here rather than beside the
+		// pause gate, which runs before the snapshot is fetched.
+		if heldHookSkip(bd, workDir, rigName, polecatName, snap) {
+			continue
+		}
+
 		if sessionAlive {
 			// gt-s8bq: Idle Polecat Heresy fix. Idle polecats are HEALTHY — they
 			// have no hook_bead, agent_state="idle", and their sandbox is preserved
@@ -1949,6 +1969,36 @@ func pauseGateSkip(townRoot, rigName, polecatName string) bool {
 		log.Printf("info: skip zombie detection for %s/%s: agent is paused (%s)",
 			rigName, polecatName, agentpause.Reason(pst))
 	}
+	return true
+}
+
+// heldHookSkip is the second choke point beside pauseGateSkip, for the other
+// half of the same incident (gt-n38c6): a polecat whose HOOKED WORK is held is
+// parked, and its dead session is not a crash. The hold rule is convoy's
+// (DispatchHoldFields), so this reaches the verdict every dispatcher already
+// applies rather than a second copy of it.
+//
+// DetectZombiePolecats calls it before any classification, so none of the
+// actions that follow run for a held polecat: restart, done-intent label
+// clearing, cleanup wisp, aa-apw archive/nuke, bead reset for re-dispatch. It
+// takes the snapshot the loop already fetched rather than resolving the hook
+// bead again (gt-2gra), and fails CLOSED on a hook bead that cannot be read
+// (see hookBeadHeld).
+//
+// The set is the dispatchers' whole hold set, needs-sonnet included, not only
+// the label the incident wore. That is the asymmetry agentpause states: a
+// polecat left waiting on work the tracker says is specially routed is
+// recoverable, and a session raised against held work is the incident.
+func heldHookSkip(bd *BdCli, workDir, rigName, polecatName string, snap *agentBeadSnapshot) bool {
+	if snap == nil || snap.HookBead == "" {
+		return false
+	}
+	reason, held := hookBeadHeld(bd, workDir, snap.HookBead)
+	if !held {
+		return false
+	}
+	log.Printf("info: skip zombie detection for %s/%s: hooked work %s is held (%s)",
+		rigName, polecatName, snap.HookBead, reason)
 	return true
 }
 
@@ -3242,6 +3292,82 @@ func getBeadStatus(bd *BdCli, workDir, beadID string) (string, bool) {
 		return "", true
 	}
 	return issues[0].Status, true
+}
+
+// holdBeadReason reads the dispatch hold a bead's own fields assert, or "" when
+// they assert none (gt-n38c6).
+//
+// The rule is convoy's (DispatchHoldFields), so the witness reaches the verdict
+// a convoy feeder or the deacon's redispatch would rather than a second copy of
+// it. Only the read is narrower: bd show --json omits comments, so a hold
+// recorded in one is invisible here — a missed hold, never an invented one.
+//
+// A bead that is not there holds nothing: there is no record to assert one.
+// Anything else that stops the read is an error, for the caller to rule on.
+func holdBeadReason(bd *BdCli, workDir, beadID string) (string, error) {
+	if bd == nil || bd.Exec == nil || beadID == "" {
+		return "", nil
+	}
+	output, err := bd.Exec(workDir, "show", beadID, "--json")
+	if err != nil {
+		if isBdNotFoundError(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var issues []struct {
+		Status string   `json:"status"`
+		Labels []string `json:"labels"`
+		Design string   `json:"design"`
+		Notes  string   `json:"notes"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil {
+		return "", fmt.Errorf("reading bead %s: %w", beadID, err)
+	}
+	if len(issues) == 0 {
+		return "", nil // valid response, no results — reaped/deleted
+	}
+	return convoy.DispatchHoldFields(issues[0].Status, issues[0].Labels, issues[0].Design, issues[0].Notes), nil
+}
+
+// hookHoldReason is the seam RestartPolecatSession's hold gate reads through;
+// a package variable so a test can answer "is this polecat's hooked work held"
+// without a bd subprocess. Swap it only from a non-parallel test, and restore
+// it in t.Cleanup.
+var hookHoldReason = readHookHold
+
+// hookBeadHeld reports whether the work a hook bead carries is held, and the
+// marker that held it (gt-n38c6). It fails CLOSED, like agentpause.PauseGate:
+// "we could not read the record" is not "nothing holds this work", and a
+// restart runs a live agent against whatever it finds.
+func hookBeadHeld(bd *BdCli, workDir, hookBead string) (string, bool) {
+	reason, err := holdBeadReason(bd, workDir, hookBead)
+	if err != nil {
+		return fmt.Sprintf("hook bead %s unreadable (%v)", hookBead, err), true
+	}
+	return reason, reason != ""
+}
+
+// readHookHold resolves a polecat's hook bead for itself and reports whether
+// the work it carries is held (gt-n38c6). RestartPolecatSession uses it, being
+// the caller that has only coordinates; the detection loop calls hookBeadHeld
+// with the hook_bead from the snapshot it already holds (gt-2gra).
+//
+// A polecat with no readable agent bead, no hook_bead on one, or no reader at
+// all is not held: there is no hook to be held by, and inventing a hold would
+// park every restart on a path that cannot name why.
+func readHookHold(bd *BdCli, workDir, rigName, polecatName string) (string, bool) {
+	if bd == nil || bd.Exec == nil {
+		return "", false
+	}
+	townRoot := workDirToTownRoot(workDir)
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+	snap := fetchAgentBeadSnapshot(workDir, agentBeadID)
+	if snap == nil || snap.HookBead == "" {
+		return "", false
+	}
+	return hookBeadHeld(bd, workDir, snap.HookBead)
 }
 
 // survivingWorkForBead is the shared surviving-work predicate
