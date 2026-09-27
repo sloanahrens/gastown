@@ -1193,6 +1193,15 @@ func resolveBdSubprocessTimeout() time.Duration {
 	return bdSubprocessTimeout
 }
 
+// ResolveSubprocessTimeout exposes resolveBdSubprocessTimeout to callers
+// outside this package that build their own bd *exec.Cmd (e.g. internal/witness's
+// DefaultBdCli) instead of going through Beads.run, so they can bound that
+// command on the same steady-state budget and honor the same GT_BD_TIMEOUT_SEC
+// override rather than inventing a second, drifting constant.
+func ResolveSubprocessTimeout() time.Duration {
+	return resolveBdSubprocessTimeout()
+}
+
 // subprocessTimeoutFor returns the subprocess budget for one bd command. args
 // is the caller's argv before --allow-stale/--flat injection, so args[0] is
 // the command word; testContainer is whether the call targets testutil's

@@ -36,6 +36,25 @@ func CommandContext(ctx context.Context, dir, fallbackBeadsDir string, mode Subp
 	return cmd
 }
 
+// CommandContextBounded is CommandContext plus a real deadline: cmd.Cancel
+// kills the whole process group (not just the direct bd child) when ctx
+// expires, and cmd.WaitDelay bounds how long Wait can then block on a
+// descendant that escaped the group and kept an output pipe open. Use this
+// instead of CommandContext whenever the caller's ctx timeout must actually
+// hold — CommandContext's ConfigureCommand applies SetDetachedProcessGroup,
+// which has no Cancel hook, so on timeout it kills only bd itself and Wait
+// can still hang on a runaway grandchild (e.g. an interactive credential
+// prompt bd or a helper it spawned is blocked on) — the hang gt-7itep traced
+// to this package's DefaultBdCli having no deadline at all.
+func CommandContextBounded(ctx context.Context, dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: args are constructed internally
+	cmd.Dir = dir
+	cmd.Env = EnvForSubprocessMode(os.Environ(), fallbackBeadsDir, mode)
+	cmd.WaitDelay = SubprocessKillGrace
+	util.SetProcessGroup(cmd)
+	return cmd
+}
+
 // CommandContextWithBin is CommandContext for a caller that resolves and caches
 // bd's path itself.
 func CommandContextWithBin(ctx context.Context, bin, dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *exec.Cmd {

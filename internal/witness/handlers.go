@@ -87,8 +87,23 @@ func DefaultBdCli() *BdCli {
 	}
 }
 
+// bdSubprocessCommand builds a context-bound bd command via
+// beads.CommandContextBounded, whose process-group Cancel hook and WaitDelay
+// make the caller's ctx deadline real. DefaultBdCli's earlier form used
+// beads.Command, a plain exec.Command with no deadline at all: every witness
+// patrol scan that shells out through it (e.g. gt patrol state-collapse)
+// could park in wait4 forever on a wedged bd child (gt-7itep) — a git
+// credential prompt or similar blocking grandchild is exactly the shape
+// confirmed on the hang.
+func bdSubprocessCommand(ctx context.Context, workDir string, args []string) *exec.Cmd {
+	return beads.CommandContextBounded(ctx, workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
+}
+
 func defaultBDExecWithOutput(workDir string, args ...string) (string, error) {
-	cmd := beads.Command(workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
+	timeout := beads.ResolveSubprocessTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := bdSubprocessCommand(ctx, workDir, args)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -97,24 +112,27 @@ func defaultBDExecWithOutput(workDir string, args ...string) (string, error) {
 	if err := cmd.Run(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg != "" {
-			return "", fmt.Errorf("%s", errMsg)
+			return "", beads.SubprocessFailureError(ctx, timeout, fmt.Errorf("%s", errMsg))
 		}
-		return "", err
+		return "", beads.SubprocessFailureError(ctx, timeout, err)
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
 
 func defaultBDRun(workDir string, args ...string) error {
-	cmd := beads.Command(workDir, beads.ResolveBeadsDir(workDir), beads.SubprocessModeForArgs(args), args...)
+	timeout := beads.ResolveSubprocessTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := bdSubprocessCommand(ctx, workDir, args)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg != "" {
-			return fmt.Errorf("%s", errMsg)
+			return beads.SubprocessFailureError(ctx, timeout, fmt.Errorf("%s", errMsg))
 		}
-		return err
+		return beads.SubprocessFailureError(ctx, timeout, err)
 	}
 	return nil
 }

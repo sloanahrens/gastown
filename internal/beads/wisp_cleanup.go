@@ -25,6 +25,13 @@ import (
 // Wait would block on that pipe well past the caller's timeout.
 const bdKillGrace = 2 * time.Second
 
+// SubprocessKillGrace exposes bdKillGrace to callers outside this package
+// that build their own context-bound bd *exec.Cmd with util.SetProcessGroup
+// (e.g. internal/witness's DefaultBdCli) and need the same WaitDelay bound:
+// without it, Wait can still block past the caller's own timeout on a
+// descendant that escaped the process group and kept the output pipe open.
+const SubprocessKillGrace = bdKillGrace
+
 // wispCmd builds a context-bound bd command outside the shared
 // ConfigureCommand policy so the caller can pass the daemon's routing env,
 // while still killing the whole process group on cancellation. That last part
