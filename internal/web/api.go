@@ -1967,6 +1967,11 @@ type ReadyResponse struct {
 		P2Count int `json:"p2_count"`
 		P3Count int `json:"p3_count"`
 	} `json:"summary"`
+	// FailedSources names the sources whose ready query carried an error, so a
+	// partial read is not byte-identical to a town where those rigs are simply
+	// idle (gt-b3zk). Omitted when every source answered, which leaves the
+	// common case's bytes unchanged.
+	FailedSources []string `json:"failed_sources,omitempty"`
 }
 
 // handleCrew returns crew status across all rigs with proper state detection.
@@ -2218,6 +2223,15 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 				Priority int    `json:"priority"`
 				Type     string `json:"issue_type"`
 			} `json:"issues"`
+			// Error is set by gt ready for a source whose own query failed.
+			// Sources are fetched independently and the subprocess still exits
+			// 0 for those that answered (internal/cmd/ready.go), so this field
+			// — not the exit code — is what marks a source as missing.
+			//
+			// A capped page never lands here: classifyReadyErr sets Capped or
+			// Error, never both, so a non-empty Error is unambiguously a
+			// failure and Capped is a separate concern (gt-b3zk).
+			Error string `json:"error"`
 		} `json:"sources"`
 		Summary struct {
 			Total   int `json:"total"`
@@ -2234,8 +2248,14 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to ReadyItem format
+	// Convert to ReadyItem format, collecting the sources that failed as we go.
+	// A failed source contributes no issues, so without this list its absence is
+	// indistinguishable from an idle rig.
+	var failedSources []string
 	for _, src := range readyData.Sources {
+		if src.Error != "" {
+			failedSources = append(failedSources, src.Name)
+		}
 		for _, issue := range src.Issues {
 			item := ReadyItem{
 				ID:       issue.ID,
@@ -2259,6 +2279,22 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp.Summary.Total = len(resp.Items)
+
+	// Every source failed: there is no partial board to show, so answer as the
+	// whole-fetch failure above does rather than as a zero-item success, which
+	// is the one thing this response must never mean. No sources at all is a
+	// town with no rigs, not this case, and stays a genuine empty queue.
+	if len(readyData.Sources) > 0 && len(failedSources) == len(readyData.Sources) {
+		h.sendError(w, "ready work unavailable: all sources failed: "+
+			strings.Join(failedSources, ", "), http.StatusServiceUnavailable)
+		return
+	}
+
+	// A partial failure stays a 200 — the rows that answered are real work —
+	// but it names the missing sources, mirroring the CLI's own split between
+	// "some sources failed" and "all sources failed" (internal/cmd/ready.go).
+	// The panel paints the degraded state from this field (gt-b3zk).
+	resp.FailedSources = failedSources
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)

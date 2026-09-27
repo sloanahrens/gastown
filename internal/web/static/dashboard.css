@@ -735,6 +735,15 @@
             color: var(--bg-dark);
         }
 
+        /* Ready panel: a source that failed while others answered is a partial
+           read, not an empty one. The warning line sits above whatever rows did
+           come back and shares the badge's red treatment, so the missing rig is
+           never silently absent from the board (gt-b3zk). */
+        #ready-loading.ready-partial {
+            color: var(--orange);
+            padding: 8px 0;
+        }
+
         /* Crew attention badge */
         .count.needs-attention {
             background: var(--orange);

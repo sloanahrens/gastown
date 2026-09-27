@@ -18,6 +18,10 @@ FAIL=0
 
 cleanup() {
   if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    # gt-vya0s: the installer leaves the binary OS-immutable; rm -rf cannot
+    # remove it (nor the directories above it) until the flag comes off.
+    chflags -R nouchg "$WORK_DIR" 2>/dev/null || true
+    chattr -R -i "$WORK_DIR" 2>/dev/null || true
     rm -rf "$WORK_DIR"
   fi
 }
@@ -168,6 +172,72 @@ else
 fi
 assert_eq "concurrent installs leave no temp files" "" "$(find "$DEST" -name '.gt.tmp.*' -print)"
 cleanup
+
+# --- gt-vya0s: installed binary is OS-immutable, not just hook-guarded --------
+#
+# gt-tnts5 added a Claude Code PreToolUse hook that blocks a polecat's
+# Edit/Write/Bash from targeting the install dir, but a local-coder (ollama)
+# polecat runs with zero Claude Code hooks (gt-be0z) — the exact seat that
+# caused the incident this guards against. The installer also marks the
+# binary immutable at the OS level (chflags/chattr) so a write is refused by
+# the kernel regardless of which agent or tool attempts it.
+#
+# `chattr +i` silently no-ops without CAP_LINUX_IMMUTABLE (e.g. non-root CI on
+# Linux), so probe for real enforcement first — asserting a rejection that the
+# host can't actually produce would be a false PASS, worse than skipping.
+immutable_supported() {
+  local probe ok=1
+  probe="$(mktemp)"
+  if chflags uchg "$probe" 2>/dev/null; then
+    ok=0
+    chflags nouchg "$probe" 2>/dev/null || true
+  elif chattr +i "$probe" 2>/dev/null; then
+    ok=0
+    chattr -i "$probe" 2>/dev/null || true
+  fi
+  rm -f "$probe"
+  return "$ok"
+}
+
+if immutable_supported; then
+  setup
+  mkdir -p "$DEST"
+  printf 'OLD\n' > "$WORK_DIR/built-gt"
+  chmod 755 "$WORK_DIR/built-gt"
+  bash "$INSTALLER" "$WORK_DIR/built-gt" "$DEST" gt
+
+  rc=0
+  ( printf 'STUB\n' > "$DEST/gt" ) 2>/dev/null || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    echo "  PASS: a direct write to the installed binary is rejected by the OS"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: a direct write to the installed binary is rejected by the OS"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_eq "the direct write left the installed binary unchanged" "OLD" "$(cat "$DEST/gt")"
+
+  rc=0
+  rm -f "$DEST/gt" 2>/dev/null || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    echo "  PASS: rm of the installed binary is rejected by the OS"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: rm of the installed binary is rejected by the OS"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_eq "the rm attempt left the installed binary in place" "OLD" "$(cat "$DEST/gt" 2>/dev/null)"
+
+  printf 'NEW\n' > "$WORK_DIR/built-gt-2"
+  chmod 755 "$WORK_DIR/built-gt-2"
+  rc=0
+  bash "$INSTALLER" "$WORK_DIR/built-gt-2" "$DEST" gt || rc=$?
+  assert_ok "the installer itself can still replace an already-immutable binary" "$rc"
+  assert_eq "the installer's replacement content lands" "NEW" "$(cat "$DEST/gt")"
+  cleanup
+else
+  echo "  SKIP: OS immutable-flag enforcement unavailable on this host (needs BSD chflags, or chattr with CAP_LINUX_IMMUTABLE) — gt-vya0s checks not run"
+fi
 
 # --- Static guard: the non-atomic recipe must not come back -------------------
 if grep -qE 'cp[[:space:]]+\$\(BUILD_DIR\)/\$\(BINARY\)[[:space:]]+\$\(INSTALL_DIR\)' "$REPO_ROOT/Makefile"; then

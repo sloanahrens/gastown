@@ -166,6 +166,65 @@ func TestDashboardScript_ReadyFailureIsNotAnEmptyQueue(t *testing.T) {
 	}
 }
 
+// TestDashboardScript_ReadyPartialFailureIsNotAnEmptyQueue guards the client
+// half of gt-b3zk, the per-source case. The server now answers a partial read
+// with 200 plus a failed_sources list (see api_ready_test.go), but 200 is the
+// same status a whole board arrives with — so if the client ignores that list,
+// a rig that could not be reached renders exactly like a rig with nothing to
+// do, and the panel is back to reporting an incomplete town as a complete one.
+//
+// Same approach as its gt-w7eg sibling: no JS engine here, so this asserts
+// against the render contract of the extracted function bodies.
+func TestDashboardScript_ReadyPartialFailureIsNotAnEmptyQueue(t *testing.T) {
+	js, err := os.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("ReadFile(static/dashboard.js) error = %v", err)
+	}
+	content := string(js)
+
+	partial := dashJSFuncBody(t, content, "renderReadyPartialError")
+	load := dashJSFuncBody(t, content, "loadReady")
+
+	// The success path must read the server's failed_sources list; without this
+	// the 200 is taken at face value.
+	if !strings.Contains(load, "data.failed_sources") {
+		t.Error("loadReady must read failed_sources from the response — a partial read arrives " +
+			"as a 200, so the status code alone cannot flag it (gt-b3zk)")
+	}
+	if !strings.Contains(load, "renderReadyPartialError(failed, total)") {
+		t.Error("loadReady's success path must route a failed_sources list through renderReadyPartialError")
+	}
+
+	// Zero rows plus a failed source must not render as "No ready work": that
+	// sentence is only true when every source answered.
+	if !strings.Contains(load, "empty.style.display = failed.length > 0 ? 'none' : 'block'") {
+		t.Error("loadReady must suppress the 'No ready work' empty state when a source failed; " +
+			"zero visible rows then means 'nothing we could see', not 'nothing to do'")
+	}
+
+	// The badge is the load-bearing part, exactly as in renderReadyError: with
+	// no rows, any number — 0 included — reads as a real count.
+	if !strings.Contains(partial, "count.textContent = total > 0 ? total : '?'") {
+		t.Error("renderReadyPartialError must drop the badge to '?' when no rows came back; " +
+			"a 0 there is what a genuinely idle town shows")
+	}
+	if !strings.Contains(partial, "count.classList.add('count-error')") {
+		t.Error("renderReadyPartialError must mark the badge so a partial count is visually distinct")
+	}
+	if !strings.Contains(partial, "var names = failedSources.join(', ')") {
+		t.Error("renderReadyPartialError must render the failed source names, not a generic message")
+	}
+	if !strings.Contains(partial, "loading.textContent = 'Ready work may be incomplete") {
+		t.Error("renderReadyPartialError must put the degradation in the panel body, " +
+			"where an operator reading the list sees it")
+	}
+	// The class is what carries the warning treatment; a paint that never adds
+	// it looks exactly like the loading placeholder.
+	if !strings.Contains(partial, "loading.classList.add('ready-partial')") {
+		t.Error("renderReadyPartialError must add the ready-partial class the warning style hangs off")
+	}
+}
+
 func TestConvoyTemplate_LastActivityColors(t *testing.T) {
 	tmpl, err := LoadTemplates()
 	if err != nil {

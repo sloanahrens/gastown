@@ -273,10 +273,11 @@ func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
 	t.Cleanup(func() { compactorDogCycleFn = origCycle })
 	var mu sync.Mutex
 	cycles := 0
-	compactorDogCycleFn = func(*Daemon) {
+	compactorDogCycleFn = func(*Daemon) bool {
 		mu.Lock()
 		cycles++
 		mu.Unlock()
+		return true
 	}
 	count := func() int {
 		mu.Lock()

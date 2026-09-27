@@ -66,8 +66,9 @@ func FetchConvoys(townRoot string) (*ConvoyState, error) {
 	// just the convoys, not the whole town's open beads.
 	openConvoys, err := listConvoys(townBeads, "open", "")
 	if err != nil {
-		// Not a fatal error - just return empty state
-		return state, nil
+		// Return the state with the error rather than swallowing it: the
+		// feed's poll backoff keys on that error (gt-nzt0).
+		return state, fmt.Errorf("list open convoys: %w", err)
 	}
 
 	// Fetch recently closed convoys (landed in last 24h). closedAfter is
@@ -91,6 +92,9 @@ func FetchConvoys(townRoot string) (*ConvoyState, error) {
 	enriched := enrichConvoys(townBeads, allItems)
 
 	state.InProgress = enriched[:len(openConvoys)]
+	// A failed closed-convoy listing stays tolerated — the guard below drops
+	// the landed list and keeps in-progress — where reporting it as an error
+	// would freeze the whole panel (gt-nzt0).
 	if closedErr == nil {
 		for _, convoy := range enriched[len(openConvoys):] {
 			if !convoy.ClosedAt.IsZero() && convoy.ClosedAt.After(cutoff) {

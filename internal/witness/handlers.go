@@ -1429,8 +1429,15 @@ func panicIfTestBinary(op string) {
 // instead of silently running for real when a test forgets to swap it.
 var restartSessionExec = func(workDir, address string) error {
 	panicIfTestBinary("RestartPolecatSession: gt session restart " + address)
-	return util.ExecRun(workDir, "gt", "session", "restart", address, "--force")
+	return util.ExecRun(workDir, "gt", "session", "restart", address, "--force",
+		"--requested-by", restartRequestedBy)
 }
+
+// restartRequestedBy identifies this restart path in the town log's wake line
+// (gt-tcrgb). Without it, a restart and an operator's own `gt session start`
+// write the same line, so a session the witness raised from a hooked-but-idle
+// polecat is indistinguishable from one a human raised deliberately.
+const restartRequestedBy = "witness"
 
 // nukePolecatFunc is a package variable so tests can assert the zombie
 // archive path's decision without shelling out to the real `gt polecat

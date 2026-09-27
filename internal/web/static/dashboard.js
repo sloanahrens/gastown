@@ -1730,17 +1730,48 @@
         }
         if (loading) {
             loading.style.display = '';
+            loading.classList.remove('ready-partial');
             loading.textContent = text;
         }
     }
 
-    // clearReadyError undoes renderReadyError as soon as a fetch succeeds, so
-    // the badge goes back to carrying a real count.
+    // clearReadyError undoes renderReadyError (and the partial-failure state
+    // below) as soon as a fetch comes back whole, so the badge goes back to
+    // carrying a real count.
     function clearReadyError() {
         var count = document.getElementById('ready-count');
-        if (!count) return;
-        count.classList.remove('count-error');
-        count.removeAttribute('title');
+        if (count) {
+            count.classList.remove('count-error');
+            count.removeAttribute('title');
+        }
+        var loading = document.getElementById('ready-loading');
+        if (loading) loading.classList.remove('ready-partial');
+    }
+
+    // renderReadyPartialError paints the degraded-but-alive state: at least one
+    // source answered and at least one did not. /api/ready reports this as a
+    // 200 plus a failed_sources list, because the rows that DID come back are
+    // real work an operator can still sling (gt-b3zk).
+    //
+    // The badge cannot keep a clean number when nothing came back: with zero
+    // rows, "0" is also what a genuinely idle town renders. With rows on screen
+    // the number is a true lower bound, so it stays and wears the red badge and
+    // a tooltip naming the missing sources instead.
+    function renderReadyPartialError(failedSources, total) {
+        var count = document.getElementById('ready-count');
+        var loading = document.getElementById('ready-loading');
+        var names = failedSources.join(', ');
+
+        if (count) {
+            count.classList.add('count-error');
+            count.setAttribute('title', 'could not load: ' + names);
+            count.textContent = total > 0 ? total : '?';
+        }
+        if (loading) {
+            loading.classList.add('ready-partial');
+            loading.style.display = '';
+            loading.textContent = 'Ready work may be incomplete — could not load: ' + names;
+        }
     }
 
     function loadReady() {
@@ -1758,7 +1789,11 @@
                 loading.style.display = 'none';
                 clearReadyError();
 
-                if (data.items && data.items.length > 0) {
+                var failed = (data && data.failed_sources) || [];
+                var total = (data.summary && data.summary.total) || 0;
+                var hasItems = !!(data.items && data.items.length > 0);
+
+                if (hasItems) {
                     table.style.display = 'table';
                     empty.style.display = 'none';
                     tbody.innerHTML = '';
@@ -1786,12 +1821,18 @@
                             '<td><button class="sling-btn" data-bead-id="' + escapeHtml(item.id) + '" title="Sling to rig">Sling</button></td>';
                         tbody.appendChild(tr);
                     });
-
-                    if (count) count.textContent = data.summary.total;
                 } else {
                     table.style.display = 'none';
-                    empty.style.display = 'block';
-                    if (count) count.textContent = '0';
+                    // "No ready work" is only the truth when every source
+                    // answered. With a source missing, zero rows mean "nothing
+                    // we could see", not "nothing to do" (gt-b3zk).
+                    empty.style.display = failed.length > 0 ? 'none' : 'block';
+                }
+
+                if (failed.length > 0) {
+                    renderReadyPartialError(failed, total);
+                } else if (count) {
+                    count.textContent = total;
                 }
             })
             .catch(function(err) {

@@ -72,6 +72,10 @@ func simulateCrashedMerge(t *testing.T, workDir, branch string) (landedCommit st
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_NoOtherActivitySince(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
+	// A resume that refuses records a failure receipt (bd) and escalates to
+	// the witness (gt); fake both on PATH so this test cannot reach the real
+	// binaries on the branch it does not intend to take (gt-pwwn).
+	fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-crash"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -132,6 +136,10 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_FullConvergence(t *testing.T)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	installNoPRGH(t)
+	// This path runs HandleMRInfoSuccess, which nudges the mayor through gt,
+	// and a resume that refuses records a failure receipt through bd; fake
+	// both on PATH so the real binaries are never reached (gt-i0ld, gt-pwwn).
+	fakeBDAndGt(t)
 	run(t, workDir, "git", "remote", "add", "upstream", "https://github.com/example/repo.git")
 
 	branch := "polecat/test/resume-crash-converge"
@@ -183,6 +191,10 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_FullConvergence(t *testing.T)
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_LaterMRsAlreadyLanded(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
+	// A resume that refuses records a failure receipt (bd) and escalates to
+	// the witness (gt); fake both on PATH so this test cannot reach the real
+	// binaries on the branch it does not intend to take (gt-pwwn).
+	fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-crash-2"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -438,6 +450,13 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoNote_Refuses
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
+	// The landing this test drives takes the refusal branch whenever the
+	// backfill cannot establish its patch-id proof, and that branch records a
+	// failure receipt (bd) and escalates to the witness (gt) — with the real
+	// binaries on PATH the test would reach into the live town on exactly the
+	// path a hostile environment can push it down (gt-pwwn). Fake both, and
+	// assert below that the completing path used neither.
+	bdLog, gtLog := fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-renamed-note"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -485,6 +504,18 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled
 	if note.RekeyedFrom != head {
 		t.Fatalf("expected the note to be rekeyed from the reviewed sha %s, got %q", head, note.RekeyedFrom)
 	}
+
+	// A resume that backfilled its note and completed must not have recorded a
+	// failure or escalated anywhere. Pinning that here is what makes the
+	// hermeticity more than a property of the path this run happened to take:
+	// the fakes above catch the real binaries, and these catch a regression
+	// that reaches for them (gt-pwwn).
+	if bd := readLog(t, bdLog); strings.Contains(bd, "record_failed") {
+		t.Fatalf("expected no failure receipt for a resume that completed, bd log:\n%s", bd)
+	}
+	if gtCalls := readLog(t, gtLog); strings.Contains(gtCalls, "nudge") {
+		t.Fatalf("expected no escalation for a resume that completed, gt log:\n%s", gtCalls)
+	}
 }
 
 // TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDifferentMR_Backfilled
@@ -513,6 +544,10 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDifferentMR_Backfilled(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
+	// A resume that refuses records a failure receipt (bd) and escalates to
+	// the witness (gt); fake both on PATH so this test cannot reach the real
+	// binaries on the branch it does not intend to take (gt-pwwn).
+	fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-renamed-note-remint"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -583,6 +618,11 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteFromDiffer
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_EditorialNotRequired_NoOp(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
+	// An externally dirty merge worktree escalates to the witness through gt,
+	// and the refusal paths the other resume tests in this file reach record
+	// their receipts through bd; fake both on PATH so this test cannot reach
+	// the real binaries (gt-i0ld, gt-pwwn).
+	fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-crash-noeditorial"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")

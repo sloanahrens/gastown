@@ -5523,6 +5523,55 @@ func TestBuildStartupCommandWithAgentOverride_SetsGTAgent(t *testing.T) {
 	}
 }
 
+// A pin's provenance decides how a handoff treats it: only an explicit
+// --agent override outranks role_agents resolution, and handoff.go tells
+// the two apart by reading GT_AGENT_OVERRIDE off the session (gt-di8p).
+// BuildStartupCommandWithAgentOverride must set that marker on the same
+// path that exports GT_AGENT=<override>, or an override-spawned session
+// looks indistinguishable from a role-resolved one (gt-bmqo).
+func TestBuildStartupCommandWithAgentOverride_SetsOverrideMarker(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	townSettings := NewTownSettings()
+	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	cmd, err := BuildStartupCommandWithAgentOverride(
+		map[string]string{"GT_ROLE": constants.RoleWitness},
+		rigPath,
+		"",
+		"gemini",
+	)
+	if err != nil {
+		t.Fatalf("BuildStartupCommandWithAgentOverride: %v", err)
+	}
+
+	if !strings.Contains(cmd, "GT_AGENT_OVERRIDE=1") {
+		t.Errorf("expected GT_AGENT_OVERRIDE=1 in command so handoff can tell this pin came from an explicit override, got: %q", cmd)
+	}
+
+	// Without an override, the marker must stay unset — a resolved agent
+	// looks indistinguishable from a stale marker otherwise (gt-di8p).
+	cmd, err = BuildStartupCommandWithAgentOverride(
+		map[string]string{"GT_ROLE": constants.RoleWitness},
+		rigPath,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("BuildStartupCommandWithAgentOverride: %v", err)
+	}
+	if strings.Contains(cmd, "GT_AGENT_OVERRIDE") {
+		t.Errorf("expected no GT_AGENT_OVERRIDE when agentOverride is empty, got: %q", cmd)
+	}
+}
+
 func TestBuildStartupCommandWithAgentOverride_SetsGTProcessNames(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

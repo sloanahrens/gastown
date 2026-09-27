@@ -91,14 +91,52 @@ Examples:
   gt mq review gt-mr-abc123 --out-of-order "stacked on gt-mr-xyz"
   gt mq review --landed 3107a0d
   gt mq review --landed 3107a0d --target main --rig gastown`,
-	Args: cobra.RangeArgs(0, 2),
+	Args: mqReviewArgs,
 	RunE: runMQReview,
 	// A verdict signals through its exit code, and RunE returns a non-nil
 	// SilentExitError for request_changes — so without these cobra would print
 	// "Error: exit 1" and the usage block after a verdict, on every invocation
-	// the refinery patrol and the workers drive.
+	// the refinery patrol and the workers drive. The same two settings also
+	// silence cobra for flag and argument errors and leave them on cobra's
+	// exit-1 path, the request_changes code: mqReviewArgs, the flag error func
+	// and runMQReview's own failure branch are what put every non-verdict
+	// failure back on exit 2 (gt-twt2).
 	SilenceUsage:  true,
 	SilenceErrors: true,
+}
+
+// mqReviewUsage is the invocation line every usage error prints, so the three
+// callers cannot drift apart on what a valid invocation looks like.
+const mqReviewUsage = "usage: gt mq review <mr-id> | gt mq review --landed <sha> [mr-id]"
+
+// mqReviewArgs rejects the wrong number of positional args with the exit-2
+// usage shape rather than cobra's exit 1 (gt-twt2).
+func mqReviewArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.RangeArgs(0, 2)(cmd, args); err != nil {
+		return mqReviewUsageError(err)
+	}
+	return nil
+}
+
+// mqReviewUsageError reports a failure cobra raises before RunE — an unknown
+// or unparsable flag, the wrong number of positional args — as the exit-2
+// result this command reserves for everything that is not a verdict.
+//
+// Cobra's own error path cannot carry it: mqReviewCmd silences the error line
+// so a verdict is not followed by "Error: exit 1" (see the command literal),
+// and that path exits 1 — the request_changes code. Left there, `gt mq review
+// --timeout=abc` printed nothing and exited 1, and the refinery patrol read a
+// mistyped invocation as a rejection: the MR closed, the source bead reopened
+// with MERGE REJECTION, the polecat redispatched to fix code the gate never
+// reviewed (gt-twt2). ConfigError is the class the rig's gate script gives its
+// own usage errors.
+func mqReviewUsageError(err error) error {
+	printMQReviewResult(editorial.ReviewResult{
+		Exit:   2,
+		Class:  editorial.ConfigError,
+		Stderr: fmt.Sprintf("%v\n%s", err, mqReviewUsage),
+	})
+	return NewSilentExit(2)
 }
 
 func init() {
@@ -112,6 +150,11 @@ func init() {
 	mqReviewCmd.Flags().StringVar(&mqReviewTarget, "target", "", "Target branch a --landed commit landed on (default: the rig's remote default branch)")
 	mqReviewCmd.Flags().StringVar(&mqReviewOutOfOrder, "out-of-order", "", "Review this MR even though a ready, higher-priority MR outranks it; the value is the reason (e.g. a stack that depends on it)")
 	mqReviewCmd.Flags().StringVar(&mqReviewRigFlag, "rig", "", "Rig to review a --landed commit in (default: the current rig)")
+	// An unknown flag or an unparsable flag value never reaches runMQReview
+	// (gt-twt2).
+	mqReviewCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return mqReviewUsageError(err)
+	})
 	mqCmd.AddCommand(mqReviewCmd)
 }
 
@@ -145,17 +188,18 @@ func runMQReview(cmd *cobra.Command, args []string) error {
 		printMQReviewResult(editorial.ReviewResult{
 			Exit:   2,
 			Class:  editorial.ConfigError,
-			Stderr: "usage: gt mq review <mr-id> | gt mq review --landed <sha> [mr-id]",
+			Stderr: mqReviewUsage,
 		})
 		return NewSilentExit(2)
 	}
 	if err != nil {
 		// This command silences cobra's error line (a verdict's exit code is
 		// the signal, and an error line after one reads as part of the
-		// verdict), so a real failure prints its one message here. Execute maps
-		// a plain error to exit 1, as before.
+		// verdict), so a real failure prints its one message here — and exits
+		// 2 itself rather than returning the bare error, which Execute would
+		// map to 1, the request_changes code (gt-twt2).
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
-		return err
+		return NewSilentExit(2)
 	}
 	printMQReviewResult(result)
 	if result.Exit == 0 {

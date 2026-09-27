@@ -68,10 +68,11 @@ The guard blocks in two scenarios:
   1. Running as a Gas Town agent (crew, polecat, witness, etc.)
   2. Origin remote is steveyegge/gastown (maintainer should push directly)
 
-Two exemptions narrow the first scenario, both keyed on the same leading
-branch-creation shape and each scoped to its role:
+Two exemptions narrow the first scenario, each scoped to its role:
   - the refinery's mandated merge rehearsal, "git checkout -b temp
-    origin/<branch>" (gt-r2xm);
+    origin/<branch>" (gt-r2xm) — allowed wherever the checkout sits in the
+    call when it names a rehearsal branch (temp, temp-resolve: the
+    formula's multi-line step runs as one compound call, gt-mo53);
   - a polecat creating a local session branch inside its own worktree
     (gt-6hg7) — the escape route for a polecat that resumed a branch whose
     push had already gone out, where gt done's recoverDivergedPush refuses
@@ -105,6 +106,18 @@ var prWorkflowCommandPrefixes = [][]string{
 	{"gh", "pr", "create"},
 	{"git", "checkout", "-b"},
 	{"git", "switch", "-c"},
+}
+
+// refRehearsalBranchNames are the literal local branch names the refinery's
+// mandated merge-rehearsal steps create (mol-refinery-patrol's
+// "git checkout -b temp origin/<branch>"; mol-polecat-conflict-resolve's
+// "git checkout -b temp-resolve origin/<branch>"). The refinery exemption
+// (gt-r2xm, gt-mo53) keys on this set: a checkout creating any of these
+// branches is the rehearsal the formula mandates, not the feature-branch
+// creation this guard exists to block.
+var refRehearsalBranchNames = map[string]bool{
+	"temp":        true,
+	"temp-resolve": true,
 }
 
 // shellCommandSeparators are shell operators that start a new command
@@ -254,13 +267,31 @@ const (
 func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
 	command := extractCommand(input)
 
-	// The refinery's mandated merge-rehearsal checkout (mol-refinery-patrol
-	// step 1, mol-polecat-conflict-resolve: "git checkout -b temp
-	// origin/<branch>") legitimately needs to create a branch — the same
-	// shape of command isGasTownAgentContext() otherwise blocks for every
-	// role. Exempt only that shape, and only for the refinery role: "gh pr
-	// create" stays blocked for refineries same as everyone else (gt-r2xm).
-	if isRefineryRole() && isLeadingBranchCreation(command) {
+	// The refinery's mandated merge-rehearsal checkouts (mol-refinery-patrol
+	// step 1: "git checkout -b temp origin/<branch>"; mol-polecat-
+	// conflict-resolve: "git checkout -b temp-resolve origin/<branch>")
+	// legitimately need to create a branch — the same shape
+	// isGasTownAgentContext() otherwise blocks for every role.
+	//
+	// Two command shapes are exempt, and the shape that matched this
+	// command's OWN routing into the guard (the "if" glob it fired under)
+	// decides which applies — the one isLeadingBranchCreation's doc states
+	// for the leading command:
+	//   - isLeadingBranchCreation: the command's FIRST segment is a branch
+	//     creation of any name (the Bash(git checkout -b*) glob). The
+	//     chains gt-cyz8 and its tests pin stay exempt under it, including
+	//     a PR create glued AFTER the checkout on the same line.
+	//   - isRehearsalBranchCreation: the fix for gt-mo53, where the
+	//     formula's multi-line step (fetch / checkout -b temp / merge) runs
+	//     as one compound call and the checkout sits on a LATER segment the
+	//     leading check misses. Scoped to the literal rehearsal branch
+	//     names (temp, temp-resolve), and never firing when the call holds
+	//     a "gh pr create" anywhere (isPRCreateCommand) — the PR path this
+	//     guard exists to block, and the shape its own
+	//     Bash(gh pr create*) routing matches.
+	if isRefineryRole() &&
+		(isLeadingBranchCreation(command) ||
+			(isRehearsalBranchCreation(command) && !isPRCreateCommand(command))) {
 		return prWorkflowAllow
 	}
 
@@ -518,7 +549,47 @@ func isLeadingBranchCreation(command string) bool {
 		(containsToken(lower, "-b") || containsToken(lower, "-c"))
 }
 
-// containsToken reports whether want appears as an exact element of tokens.
+// gt-mo53: the rehearsal step is a multi-line block (fetch / checkout -b
+// temp / merge) and a session runs it as one compound Bash call, so the
+// branch creation sits on a LATER segment — the position
+// isLeadingBranchCreation deliberately does not match. "Branch creation"
+// here means a whole segment that is "git checkout -b <name>" or "git
+// switch -c <name>" (an extra flag between the subcommand and the flag,
+// e.g. "git checkout -q -b temp", still matches), where <name> is one of
+// refRehearsalBranchNames — a creation of any other branch is the feature-
+// branch shape this guard blocks and stays blocked for every role.
+func isRehearsalBranchCreation(command string) bool {
+	for _, seg := range splitShellSegments(shellTokenize(strings.TrimSpace(command))) {
+		if len(seg) < 3 || !strings.EqualFold(seg[0], "git") {
+			continue
+		}
+		lower := make([]string, len(seg))
+		for i, tok := range seg {
+			lower[i] = strings.ToLower(tok)
+		}
+		hasFlag := false
+		for i, tok := range lower {
+			if (tok == "checkout" || tok == "switch") && i+1 < len(lower) {
+				switch lower[i+1] {
+				case "-b", "-c":
+					// The branch name is the token after the flag.
+					if i+2 < len(lower) && refRehearsalBranchNames[lower[i+2]] {
+						hasFlag = true
+					}
+				case "-branch", "-create":
+					// Long forms take the name as a separate argument.
+					if i+2 < len(lower) && refRehearsalBranchNames[lower[i+2]] {
+						hasFlag = true
+					}
+				}
+			}
+		}
+		if hasFlag {
+			return true
+		}
+	}
+	return false
+}
 func containsToken(tokens []string, want string) bool {
 	for _, t := range tokens {
 		if t == want {
