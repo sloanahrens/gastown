@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -178,6 +179,30 @@ func (a *agentAddr) displayAddress(role, name string) string {
 	return a.Address()
 }
 
+// pauseFileGatedRoles lists the roles whose pause state lives in a separate
+// pause file that `gt agent resume` must not clobber: the deacon's
+// `gt deacon pause` writes .runtime/deacon/paused.json and mirrors
+// agent_state=paused onto the bead for display (hq-sa8de Phase A). If that
+// pause file is live, the bead mirror is NOT stale — resume must leave it
+// alone, or the deacon resumes its patrols while still frozen (gt-aj4m).
+// The mayor has no such file (its only pause path is the agentpause marker,
+// which this command owns and clears), so it stays out of the list.
+var pauseFileGatedRoles = map[session.Role]bool{
+	session.RoleDeacon: true,
+}
+
+// pauseFileStillPaused reports whether the target's separate pause file (the
+// deacon's, today) still reads paused. An unreadable file is treated as not
+// paused: deacon's own heartbeat gate already fails open on it, so it is not
+// governing anything to clobber, and the stale-mirror repair proceeds.
+func pauseFileStillPaused(townRoot string, target *agentAddr) bool {
+	if !pauseFileGatedRoles[target.Role] {
+		return false
+	}
+	live, _, err := deacon.IsPaused(townRoot)
+	return live && err == nil
+}
+
 // readAgentState reads the agent bead's current agent_state verbatim, or ""
 // when the bead cannot be read or carries no agent fields.
 func readAgentState(townRoot, beadID string) string {
@@ -298,6 +323,19 @@ func runAgentResume(cmd *cobra.Command, args []string) error {
 		// marker, which is long gone by the time anyone notices — minor
 		// finding on om kgx0). Nothing else clears it, so resume does.
 		if beads.AgentState(readAgentState(townRoot, target.BeadID)) == beads.AgentStatePaused {
+			// Before rewriting the mirror, check for a separate live pause
+			// file the marker does not cover: `gt deacon pause` gates on
+			// .runtime/deacon/paused.json and mirrors agent_state=paused for
+			// display. Rewriting that mirror to idle would make the deacon
+			// resume patrols while its pause file still holds (gt-aj4m). A
+			// live pause file means the mirror is live state, not a stale
+			// race artifact — leave it alone and tell the operator how to
+			// clear it for real.
+			if pauseFileStillPaused(townRoot, target) {
+				fmt.Printf("%s %s bead mirror is agent_state=paused (no agent-pause marker) and its pause file is LIVE — left untouched; clear it with `gt deacon resume`\n",
+					style.Dim.Render("○"), display)
+				return nil
+			}
 			if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(target.BeadID, string(beads.AgentStateIdle)); err != nil {
 				return fmt.Errorf("clearing stale agent_state=paused mirror on bead %s: %w", target.BeadID, err)
 			}
