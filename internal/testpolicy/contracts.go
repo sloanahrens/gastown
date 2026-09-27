@@ -94,7 +94,7 @@ func hasIntegrationTag(f *ast.File) bool {
 		for _, c := range cg.List {
 			if constraint.IsGoBuild(c.Text) {
 				expr, err := constraint.Parse(c.Text)
-				if err == nil && mentionsIntegration(expr) {
+				if err == nil && requiresIntegration(expr) {
 					return true
 				}
 			}
@@ -103,22 +103,54 @@ func hasIntegrationTag(f *ast.File) bool {
 	return false
 }
 
-// mentionsIntegration reports whether expr refers to the "integration" build
-// tag anywhere in it. Evaluating the expression with a witness function
-// (ok("integration") == true, everything else false) is not enough: a
-// platform constraint like "!windows" also evaluates true under that witness
-// even though it has nothing to do with integration tests, so the tag must
-// be found syntactically instead.
-func mentionsIntegration(e constraint.Expr) bool {
-	switch e := e.(type) {
-	case *constraint.TagExpr:
-		return e.Tag == "integration"
-	case *constraint.NotExpr:
-		return mentionsIntegration(e.X)
-	case *constraint.AndExpr:
-		return mentionsIntegration(e.X) || mentionsIntegration(e.Y)
-	case *constraint.OrExpr:
-		return mentionsIntegration(e.X) || mentionsIntegration(e.Y)
+// requiresIntegration reports whether expr can only be satisfied when the
+// "integration" build tag is set: false under every assignment of the other
+// tags with integration false, and true under at least one assignment with
+// integration true. Checking whether "integration" appears in the expression
+// at all is not enough: "!integration" and "linux || integration" both
+// mention it but do not require it (the first forbids it, the second builds
+// fine without it on linux), while a tag that never appears, such as in
+// "!windows", never requires it either.
+func requiresIntegration(e constraint.Expr) bool {
+	tags := map[string]bool{}
+	collectTags(e, tags)
+	delete(tags, "integration")
+	others := make([]string, 0, len(tags))
+	for tag := range tags {
+		others = append(others, tag)
+	}
+	assignment := func(bits int, integration bool) func(tag string) bool {
+		vals := map[string]bool{"integration": integration}
+		for i, tag := range others {
+			vals[tag] = bits&(1<<i) != 0
+		}
+		return func(tag string) bool { return vals[tag] }
+	}
+	for bits := 0; bits < 1<<len(others); bits++ {
+		if e.Eval(assignment(bits, false)) {
+			return false
+		}
+	}
+	for bits := 0; bits < 1<<len(others); bits++ {
+		if e.Eval(assignment(bits, true)) {
+			return true
+		}
 	}
 	return false
+}
+
+// collectTags gathers every tag name that appears anywhere in expr.
+func collectTags(e constraint.Expr, tags map[string]bool) {
+	switch e := e.(type) {
+	case *constraint.TagExpr:
+		tags[e.Tag] = true
+	case *constraint.NotExpr:
+		collectTags(e.X, tags)
+	case *constraint.AndExpr:
+		collectTags(e.X, tags)
+		collectTags(e.Y, tags)
+	case *constraint.OrExpr:
+		collectTags(e.X, tags)
+		collectTags(e.Y, tags)
+	}
 }

@@ -1,6 +1,7 @@
 package testpolicy
 
 import (
+	"go/build/constraint"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -76,5 +77,30 @@ func TestCheckContracts(t *testing.T) {
 	}
 	if v.Pos.Filename != filepath.Join("testdata", "contracts", "badfake") {
 		t.Fatalf("violation filename = %q, want badfake dir", v.Pos.Filename)
+	}
+}
+
+func TestRequiresIntegration(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"integration":             true,
+		"!integration":            false,
+		"linux || integration":    false,
+		"linux && integration":    true,
+		"!windows":                false,
+		"integration && !windows": true,
+	}
+	for src, want := range cases {
+		src, want := src, want
+		t.Run(src, func(t *testing.T) {
+			t.Parallel()
+			expr, err := constraint.Parse("//go:build " + src)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", src, err)
+			}
+			if got := requiresIntegration(expr); got != want {
+				t.Errorf("requiresIntegration(%q) = %v, want %v", src, got, want)
+			}
+		})
 	}
 }

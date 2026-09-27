@@ -28,12 +28,20 @@ func TestPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// originallyListed is a snapshot of unconverted.txt's membership, taken
+	// before the loop below starts deleting from unconverted to find stale
+	// entries. It is consulted after CheckContracts runs, to tell a stale
+	// integration-name finding (a package the rollout hasn't reached yet)
+	// from a real one.
+	originallyListed := make(map[string]bool, len(unconverted))
+	for rel := range unconverted {
+		originallyListed[rel] = true
+	}
 	dirs, err := PackageDirs(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var dirty []string
-	var converted []string
 	for _, dir := range dirs {
 		rel := filepath.ToSlash(strings.TrimPrefix(dir, root+string(filepath.Separator)))
 		vs, err := ScanDir(dir)
@@ -45,9 +53,6 @@ func TestPolicy(t *testing.T) {
 		}
 		listed := unconverted[rel]
 		delete(unconverted, rel)
-		if !listed {
-			converted = append(converted, dir)
-		}
 		switch {
 		case *seed:
 		case listed && len(vs) == 0:
@@ -66,18 +71,25 @@ func TestPolicy(t *testing.T) {
 	for rel := range unconverted {
 		t.Errorf("unconverted.txt lists %s, which is not a Go package directory", rel)
 	}
-	// CheckContracts holds converted packages to the contract and integration-
-	// naming rules. An unconverted package hasn't been through the rollout yet
-	// (docs/testing.md, tmux pilot, then the rest of internal/*), so its
-	// pre-existing integration tests are exempt for the same reason ScanDir's
-	// rules are: the ratchet in unconverted.txt is the single switch that
-	// turns every new-testing-discipline rule on for a package, not just the
-	// syntax rules ScanDir enforces.
-	cvs, err := CheckContracts(root, converted)
+	// CheckContracts runs over every package: a fake-contract finding, or a
+	// call to a contract from another package, can only be judged correctly
+	// with the whole picture. Only its integration-name findings are then
+	// filtered, one at a time, against the ratchet: a package that hasn't
+	// been through the rollout yet (docs/testing.md, tmux pilot, then the
+	// rest of internal/*) is exempt from the naming convention alone, the
+	// same way it's exempt from ScanDir's rules. fake-contract findings are
+	// never filtered.
+	cvs, err := CheckContracts(root, dirs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, v := range cvs {
+		if v.Rule == RuleIntegrationName {
+			pkgDir := filepath.ToSlash(strings.TrimPrefix(filepath.Dir(v.Pos.Filename), root+string(filepath.Separator)))
+			if originallyListed[pkgDir] {
+				continue
+			}
+		}
 		t.Error(v.String())
 	}
 }
