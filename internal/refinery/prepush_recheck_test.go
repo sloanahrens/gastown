@@ -21,6 +21,10 @@ type prepushStore struct {
 	// closeErr, when set, makes every CloseIssue fail — the store-side half of
 	// "the rejection's close did not take effect" (gt-woxj).
 	closeErr error
+	// deps, when set for an issue ID, backs GetDependenciesWithMetadata for it
+	// — tests exercising the dependency-graph fallback (gt-8cre7) populate this
+	// instead of relying on the default empty result.
+	deps map[string][]*beadsdk.IssueWithDependencyMetadata
 }
 
 type prepushPRProvider struct {
@@ -78,7 +82,7 @@ func (s *prepushStore) GetDependenciesWithMetadata(_ context.Context, id string)
 	if _, ok := s.issues[id]; !ok {
 		return nil, fmt.Errorf("issue %s not found", id)
 	}
-	return nil, nil
+	return s.deps[id], nil
 }
 
 // SearchIssues backs List/ListMergeRequests for tests that exercise a full
