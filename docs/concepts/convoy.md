@@ -226,6 +226,12 @@ until something else lands — record the decision on the bead itself. Both
 feeders read the bead's record before slinging, skip a held bead, and log the
 marker that held it.
 
+A hold parks the work wherever an automatic path finds it, not only at dispatch:
+the witness reads the same markers before restarting a polecat whose hooked bead
+carries one, so a session it would otherwise raise against held work stays down
+(gt-n38c6). Comment-recorded holds are the one exception there — the witness
+reads a bead through `bd show --json`, which omits comments.
+
 | Marker, as written | Field the feeder reads it from |
 |--------------------|-------------------------------|
 | `deferred`, `pinned` | status |

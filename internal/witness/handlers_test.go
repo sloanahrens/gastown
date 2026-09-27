@@ -4630,6 +4630,10 @@ func TestNukePolecatPanicsWithoutFakeExecutors(t *testing.T) {
 // running a real `gt session restart` (gt-5itbt, companion to
 // TestNukePolecatPanicsWithoutFakeExecutors).
 func TestRestartPolecatSessionPanicsWithoutFakeExecutor(t *testing.T) {
+	// The hold gate runs ahead of the executor (gt-n38c6); let it answer from
+	// the stub so the panic under test is the executor's, and so reaching the
+	// executor is what this test actually exercises.
+	stubHookHold(t, "", false)
 	defer func() {
 		r := recover()
 		if r == nil {
