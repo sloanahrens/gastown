@@ -407,6 +407,22 @@ func DefaultOverrides() map[string]*HooksConfig {
 						Command: gtCommand("gt tap guard polecat-paths"),
 					}},
 				},
+				{
+					// The interactive question tool is never answerable here,
+					// and the dialog it raises parks the session while tmux
+					// still reports it running — a polecat sat 4h26m on one
+					// (gt-163k8), and the witness sweep that escapes such a
+					// dialog (gt-z83) only fires when a patrol pass sees the
+					// pane. Denying the tool the model calls on its own
+					// initiative is the half the PermissionRequest guard below
+					// cannot reach: that event answers a prompt the harness
+					// raises, and a model-initiated dialog raises none.
+					Matcher: "AskUserQuestion",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard question-tool"),
+					}},
+				},
 			},
 			// An ask raised for a polecat has nobody to answer it, so the
 			// session parks while still reading as running (gt-8stz). The
@@ -507,6 +523,17 @@ func DefaultOverrides() map[string]*HooksConfig {
 					Hooks: []Hook{{
 						Type:    "command",
 						Command: gtCommand("gt tap guard formula-allowlist"),
+					}},
+				},
+				{
+					// A dog also runs with nobody at the pane; see the
+					// polecats override for why the question tool is denied
+					// rather than left to the witness recovery sweep
+					// (gt-163k8).
+					Matcher: "AskUserQuestion",
+					Hooks: []Hook{{
+						Type:    "command",
+						Command: gtCommand("gt tap guard question-tool"),
 					}},
 				},
 			},

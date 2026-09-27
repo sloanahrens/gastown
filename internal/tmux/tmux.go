@@ -1655,28 +1655,82 @@ func containsBlockingQuestionDialog(content string) (string, bool) {
 	return blockingQuestionText(content), true
 }
 
+// optionLineText strips the indentation and the selection pointer ("❯") a
+// rendered option line carries, leaving the marker optionMarkerPattern matches
+// on. It returns "" for a line that is not an option.
+func optionLineText(line string) string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "❯"))
+	if !optionMarkerPattern.MatchString(trimmed) {
+		return ""
+	}
+	return trimmed
+}
+
 // hasOptionList reports whether pane content contains at least two lines
 // that look like rendered selection options.
 func hasOptionList(content string) bool {
 	matches := 0
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "❯"))
-		if optionMarkerPattern.MatchString(trimmed) {
-			matches++
-			if matches >= 2 {
-				return true
-			}
+		if optionLineText(line) == "" {
+			continue
+		}
+		matches++
+		if matches >= 2 {
+			return true
 		}
 	}
 	return false
 }
 
-// blockingQuestionText extracts the best-effort question text above a
-// detected option list, for inclusion in escalations/nudges. Falls back to
-// a generic description if no clear question line is found.
+// questionChromeMarkers are the glyphs a question dialog draws to the left of
+// its own text: the checkbox on the question header ("☐ n/a") and the same
+// selection pointer the option rows carry.
+var questionChromeMarkers = []string{"☐", "☑", "❯"}
+
+// stripQuestionChrome removes a leading dialog marker from a line, leaving the
+// text itself untouched.
+func stripQuestionChrome(line string) string {
+	trimmed := strings.TrimSpace(line)
+	for _, marker := range questionChromeMarkers {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, marker))
+	}
+	return trimmed
+}
+
+// blockingQuestionText extracts the best-effort question text from a detected
+// question dialog, for inclusion in escalations/nudges.
+//
+// The question is the nearest non-empty line ABOVE the rendered option list:
+// that is where AskUserQuestion puts it, and a real capture shows the option
+// rows are the only stable anchor in the pane
+// (testdata/askuserquestion_pane_capture.txt). The previous implementation
+// looked for a line ending in "?" instead, which finds nothing for the
+// degenerate placeholder call that actually parks polecats — its question is
+// the literal string "n/a" (gt-163k8, gt-z83) — so the escalation went out
+// saying only "(question text not captured)" and a human reading it could not
+// tell what was being asked. Reporting an "n/a" placeholder verbatim is still
+// the right answer: it tells the reader the question was never a real one.
 func blockingQuestionText(content string) string {
 	lines := strings.Split(content, "\n")
+
+	firstOption := -1
+	for i, line := range lines {
+		if optionLineText(line) != "" {
+			firstOption = i
+			break
+		}
+	}
+	if firstOption >= 0 {
+		for i := firstOption - 1; i >= 0; i-- {
+			if text := stripQuestionChrome(lines[i]); text != "" {
+				return text
+			}
+		}
+	}
+
+	// No option list to anchor on: fall back to the last question-shaped line,
+	// then to a description that at least says where to look.
 	for i := len(lines) - 1; i >= 0; i-- {
 		trimmed := strings.TrimSpace(lines[i])
 		if trimmed != "" && strings.HasSuffix(trimmed, "?") {

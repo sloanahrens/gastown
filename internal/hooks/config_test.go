@@ -898,6 +898,63 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	}
 }
 
+// TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles pins the
+// gt-163k8 wiring: the interactive question tool is denied for the two roles
+// that run with nobody at the pane, and for nothing else. The guard removes a
+// polecat's only interactive channel, so a wiring regression that let it reach
+// crew, witness or mayor would silently take a person's question dialog away —
+// and one that dropped it from the unattended roles would restore the 4h26m
+// park the bead records.
+func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	const (
+		guardCommand = "tap guard question-tool"
+		matcher      = "AskUserQuestion"
+	)
+	for _, target := range []string{"gastown/polecats", "dog"} {
+		cfg, err := ComputeExpected(target)
+		if err != nil {
+			t.Fatalf("ComputeExpected(%s): %v", target, err)
+		}
+		entry, ok := findPreToolUse(cfg, matcher)
+		if !ok {
+			t.Fatalf("%s missing the %s PreToolUse matcher", target, matcher)
+		}
+		found := false
+		for _, h := range entry.Hooks {
+			if strings.Contains(h.Command, guardCommand) {
+				found = true
+				if h.If != "" {
+					t.Errorf("%s question-tool guard must self-filter (If=\"\"), got If=%q", target, h.If)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s %s entry missing %q, got: %+v", target, matcher, guardCommand, entry.Hooks)
+		}
+	}
+
+	// The attended roles keep their question dialog, on every event.
+	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "boot"} {
+		cfg, err := ComputeExpected(target)
+		if err != nil {
+			t.Fatalf("ComputeExpected(%s): %v", target, err)
+		}
+		for _, eventType := range EventTypes {
+			for _, entry := range cfg.GetEntries(eventType) {
+				for _, h := range entry.Hooks {
+					if strings.Contains(h.Command, guardCommand) {
+						t.Errorf("%s must not receive the question-tool guard (event %s, matcher %q)",
+							target, eventType, entry.Matcher)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestPreToolUseGuardsCoverMonitorTool pins gt-vx2mm: Claude Code's Monitor
 // tool carries the same tool_input.command shape as Bash (both take a
 // "command" string), but every self-filtering PreToolUse guard (pr-workflow,
