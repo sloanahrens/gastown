@@ -67,6 +67,30 @@ func TestAgentResumeDeaconPausedFileNotPaused(t *testing.T) {
 	}
 }
 
+// TestAgentResumeCorruptPauseFileFailsClosed is the gt-aj4m editorial
+// follow-up: a torn or corrupt .runtime/deacon/paused.json makes
+// deacon.IsPaused return an error (deacon.Pause's non-atomic os.WriteFile
+// means a partial file is possible). pauseFileStillPaused must fail closed
+// on that error — treat it as paused and leave the mirror alone — matching
+// the agent-pause marker handling and deacon's heartbeat gate
+// (heartbeat.go:156). A fail-open here would let resume clobber the mirror
+// in exactly the scenario the guard exists to prevent.
+func TestAgentResumeCorruptPauseFileFailsClosed(t *testing.T) {
+	town, argsFile := setupResumeFixture(t, false)
+	// Malformed JSON: IsPaused returns (false, nil, json error) for this.
+	writePauseFile(t, town, `{"paused": true, "reason": `)
+	out, _ := captureStdio(t, func() { _ = runAgentResume(bareResumeCmd(), []string{"deacon"}) })
+
+	// No bd update may have run: a corrupt pause file must not unblock the
+	// stale-mirror rewrite.
+	if hasUpdateCall(t, argsFile) {
+		t.Errorf("bd update recorded despite a corrupt deacon pause file; the mirror would have been clobbered")
+	}
+	if !strings.Contains(out, "LIVE") || !strings.Contains(out, "left untouched") {
+		t.Errorf("expected live-pause-file notice, got: %q", out)
+	}
+}
+
 // bareResumeCmd builds a command object whose RunE is runAgentResume, so
 // the handler can be driven without the full root command tree.
 func bareResumeCmd() *cobra.Command {

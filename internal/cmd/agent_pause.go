@@ -192,15 +192,19 @@ var pauseFileGatedRoles = map[session.Role]bool{
 }
 
 // pauseFileStillPaused reports whether the target's separate pause file (the
-// deacon's, today) still reads paused. An unreadable file is treated as not
-// paused: deacon's own heartbeat gate already fails open on it, so it is not
-// governing anything to clobber, and the stale-mirror repair proceeds.
+// deacon's, today) still reads paused. An unreadable or corrupt file is
+// treated as paused (fail closed, same as the agent-pause marker handling
+// above and deacon's heartbeat gate, TouchIfActive at heartbeat.go:156):
+// deacon.IsPaused surfaces read/parse errors — and deacon.Pause's non-atomic
+// os.WriteFile means a torn paused.json is possible — and letting resume
+// clobber the mirror on a bad read would be the same failure gt-aj4m fixes,
+// triggered by a corrupt read instead of a missing marker.
 func pauseFileStillPaused(townRoot string, target *agentAddr) bool {
 	if !pauseFileGatedRoles[target.Role] {
 		return false
 	}
 	live, _, err := deacon.IsPaused(townRoot)
-	return live && err == nil
+	return live || err != nil
 }
 
 // readAgentState reads the agent bead's current agent_state verbatim, or ""
