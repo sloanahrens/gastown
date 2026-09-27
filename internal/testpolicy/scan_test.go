@@ -9,24 +9,26 @@ import (
 func TestScanDirFixtures(t *testing.T) {
 	t.Parallel()
 	cases := map[string][]string{ // fixture dir -> sorted expected rules
-		"clean":               nil,
-		"sleep":               {RuleNoSleep},
-		"env":                 {RuleNoEnv, RuleNoEnv},               // os.Setenv and t.Setenv
-		"chdir":               {RuleNoChdir, RuleNoChdir},           // os.Chdir and t.Chdir
-		"skip":                {RuleNoSkip, RuleNoSkip, RuleNoSkip}, // Skip, Skipf, SkipNow
-		"exec_other":          {RuleNoSubprocess},
-		"exec_go":             {RuleNoBuild},
-		"exec_git":            nil,
-		"exec_file":           {RuleNoExecFiles},
-		"shebang":             {RuleNoExecFiles},
-		"global_swap":         {RuleNoGlobalSwap},
-		"global_shadow":       nil,
-		"parallel_missing":    {RuleParallel},
-		"allow_ok":            nil,
-		"allow_noreason":      {RuleAllowReason},
-		"prod_setenv":         {RuleProdSetenv},
-		"prod_sleep_clock":    {RuleProdSleep},
-		"integration_skipped": nil,
+		"clean":                 nil,
+		"sleep":                 {RuleNoSleep},
+		"env":                   {RuleNoEnv, RuleNoEnv},               // os.Setenv and t.Setenv
+		"chdir":                 {RuleNoChdir, RuleNoChdir},           // os.Chdir and t.Chdir
+		"skip":                  {RuleNoSkip, RuleNoSkip, RuleNoSkip}, // Skip, Skipf, SkipNow
+		"exec_other":            {RuleNoSubprocess},
+		"exec_go":               {RuleNoBuild},
+		"exec_git":              nil,
+		"exec_file":             {RuleNoExecFiles},
+		"shebang":               {RuleNoExecFiles},
+		"global_swap":           {RuleNoGlobalSwap},
+		"global_shadow":         nil,
+		"parallel_missing":      {RuleParallel},
+		"parallel_subtest_only": {RuleParallel},
+		"nontesting_receiver":   nil,
+		"allow_ok":              nil,
+		"allow_noreason":        {RuleAllowReason},
+		"prod_setenv":           {RuleProdSetenv},
+		"prod_sleep_clock":      {RuleProdSleep},
+		"integration_skipped":   nil,
 	}
 	for dir, want := range cases {
 		dir, want := dir, want

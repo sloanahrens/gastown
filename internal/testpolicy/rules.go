@@ -39,7 +39,6 @@ var bannedTestMethods = map[string]string{
 
 func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []Violation {
 	imp := imports(f)
-	tvars := testingVars(f, imp)
 	var vs []Violation
 	add := func(n ast.Node, rule, msg string) {
 		vs = append(vs, Violation{Pos: fset.Position(n.Pos()), Rule: rule, Msg: msg})
@@ -47,7 +46,7 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
-			checkTestCall(n, imp, tvars, add)
+			checkTestCall(n, imp, add)
 		case *ast.BasicLit:
 			if n.Kind == token.STRING {
 				if s, err := strconv.Unquote(n.Value); err == nil && strings.HasPrefix(s, "#!") {
@@ -89,7 +88,7 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 	return vs
 }
 
-func checkTestCall(c *ast.CallExpr, imp map[string]string, tvars map[string]bool, add func(ast.Node, string, string)) {
+func checkTestCall(c *ast.CallExpr, imp map[string]string, add func(ast.Node, string, string)) {
 	sel, ok := c.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return
@@ -98,7 +97,7 @@ func checkTestCall(c *ast.CallExpr, imp map[string]string, tvars map[string]bool
 	if !ok {
 		return
 	}
-	if tvars[x.Name] {
+	if isTestingReceiver(x, imp) {
 		if rule, bad := bannedTestMethods[sel.Sel.Name]; bad {
 			add(c, rule, x.Name+"."+sel.Sel.Name+" is not allowed in a unit test")
 		}
@@ -169,30 +168,20 @@ func checkProdFile(fset *token.FileSet, f *ast.File, clocked bool) []Violation {
 	return vs
 }
 
-// testingVars returns the names of every parameter in the file whose type is
-// *testing.T, *testing.B, *testing.F or testing.TB.
-func testingVars(f *ast.File, imp map[string]string) map[string]bool {
-	vars := map[string]bool{}
-	ast.Inspect(f, func(n ast.Node) bool {
-		var ft *ast.FuncType
-		switch n := n.(type) {
-		case *ast.FuncDecl:
-			ft = n.Type
-		case *ast.FuncLit:
-			ft = n.Type
-		default:
-			return true
-		}
-		for _, field := range ft.Params.List {
-			if isTestingType(field.Type, imp, "T", "B", "F", "TB") {
-				for _, name := range field.Names {
-					vars[name.Name] = true
-				}
-			}
-		}
-		return true
-	})
-	return vars
+// isTestingReceiver reports whether x resolves, through the parser's object
+// resolution, to a parameter declared as *testing.T, *testing.B, *testing.F
+// or testing.TB. Resolving through x.Obj (rather than matching identifier
+// names file-wide) keeps an unrelated type's same-named parameter, such as
+// a helper(t *cfgBuilder), from being mistaken for a testing handle.
+func isTestingReceiver(x *ast.Ident, imp map[string]string) bool {
+	if x.Obj == nil || x.Obj.Kind != ast.Var {
+		return false
+	}
+	field, ok := x.Obj.Decl.(*ast.Field)
+	if !ok {
+		return false
+	}
+	return isTestingType(field.Type, imp, "T", "B", "F", "TB")
 }
 
 func testingParam(fd *ast.FuncDecl, imp map[string]string, kind string) string {
@@ -223,9 +212,19 @@ func isTestingType(e ast.Expr, imp map[string]string, kinds ...string) bool {
 	return false
 }
 
+// callsMethodOn reports whether body calls recv.method directly, without
+// descending into a nested *ast.FuncLit. A t.Run subtest closure runs later
+// and independently, so a Parallel call inside it does not make the
+// enclosing test itself parallel.
 func callsMethodOn(body *ast.BlockStmt, recv, method string) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
+		if found || n == nil {
+			return false
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
 		if c, ok := n.(*ast.CallExpr); ok {
 			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == method {
 				if x, ok := sel.X.(*ast.Ident); ok && x.Name == recv {
@@ -233,7 +232,7 @@ func callsMethodOn(body *ast.BlockStmt, recv, method string) bool {
 				}
 			}
 		}
-		return !found
+		return true
 	})
 	return found
 }
