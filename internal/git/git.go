@@ -3475,7 +3475,9 @@ func (g *Git) UnpushedCommits() (int, error) {
 // UnpushedCommitsLocal is UnpushedCommits without the network round trip: the
 // exact-branch evidence comes from this clone's remote-tracking refs. It is
 // the counterpart a caller needs when it measures one worktree per seat
-// (gt-8q0s); the answer is UnpushedCommits' or more conservative, never less.
+// (gt-8q0s). It can answer above UnpushedCommits' count or below it, depending
+// on which way this clone's view of the branch has drifted — see
+// BranchPreservationStatusLocal for both cases.
 func (g *Git) UnpushedCommitsLocal() (int, error) {
 	return g.unpushedCommits(g.BranchPreservationStatusLocal)
 }
@@ -3580,22 +3582,29 @@ func (g *Git) BranchTargetStatus(localBranch, remote string, targets []string) (
 	return g.branchPreservationStatus(localBranch, remote, targets, false)
 }
 
-// BranchPreservationStatusLocal is BranchPreservationStatus with the
-// exact-branch evidence read from this clone's remote-tracking refs instead of
-// the remote. Everything after that first lookup — the integration-branch
-// candidates, the ancestry / merge-tree / cherry judging — is the same code,
-// so a local verdict and a live verdict agree about what "preserved" means;
-// they can differ only in whether they saw a branch this clone never fetched.
+// BranchPreservationStatusLocal is BranchPreservationStatus with both custody
+// lookups — the branch's own tip and a branch-less HEAD's — answered from this
+// clone's remote-tracking refs instead of the remote. Everything after those
+// lookups — the integration-branch candidates, the ancestry / merge-tree /
+// cherry judging — is the same code, so a local verdict and a live verdict
+// agree about what "preserved" means and differ only in the branch tip they
+// judged.
 //
-// That difference is one-directional and deliberate. A tracking ref that is
-// missing (never fetched, pruned by a fetch --prune, or the branch deleted
-// after merge) resolves to no evidence, which drops the comparison to the
-// integration branch and reports whatever patches are not in it — i.e. it errs
-// toward "work not preserved", the answer that blocks reuse and asks for
-// recovery. It can never claim preservation it did not see. The cost of that
-// one-sidedness is a stale tracking ref can flag a seat whose work already
-// landed; the benefit is that measuring N seats costs N local ref reads rather
-// than N network round trips.
+// They differ in both directions, whichever way this clone's refs have drifted
+// from the remote (gt-dt0k). A ref this clone never had — never fetched, or
+// already pruned — resolves to no evidence, drops the comparison to the
+// integration branch, and reports work that did land as unpreserved: stricter
+// than the live probe, which is the direction that flags a seat for recovery
+// rather than clearing it. A ref that outlives its remote branch — the branch
+// deleted or rewritten on the remote by something other than a delete push
+// from this clone, with no fetch --prune since — still holds HEAD, and reads
+// as preserved on a branch the remote no longer has: looser than the live
+// probe. Nothing local separates the two cases — this clone's refs, config,
+// and worktree are byte-identical to a clone whose branch is still on the
+// remote — so no network-free probe can tell them apart, and the miss costs a
+// skipped recovery rather than a lost branch, since the commits stay reachable
+// from the ref that was just trusted. That bounded, one-seat error is the
+// price of N local ref reads instead of N network round trips.
 //
 // Use it for bulk enumeration (gt polecat list, the dashboard's inventory
 // poll). Use BranchPreservationStatus where the answer gates a single

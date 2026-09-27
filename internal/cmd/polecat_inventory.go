@@ -361,9 +361,11 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 // probePolecatWorktree measures one polecat worktree, picking the probe's
 // fidelity from the caller's cost budget. The branch is the only place the two
-// probes differ; both classify a failed probe the same way, so a caller cannot
-// get a looser verdict by asking for the cheap one — only a slower or faster
-// answer, and a local one that errs toward reporting unpreserved work.
+// probes differ, and both classify a failed probe the same way. The cheap one
+// is not a faster copy of the live answer — it reads preservation from this
+// clone's tracking refs, so it reports more unpreserved work than the live
+// probe when a ref was never fetched and less when a ref outlives its remote
+// branch (gt-dt0k); see git.BranchPreservationStatusLocal.
 func probePolecatWorktree(worktreePath string, localOnly bool) polecat.LiveGitState {
 	if localOnly {
 		return polecat.ProbeLiveGitStateLocal(worktreePath)
