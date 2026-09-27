@@ -206,6 +206,17 @@ agent_live() {
 # in a rig the pool may serve. Notification envelopes are titles *about* work
 # (STATE_COLLAPSE, an escalation) rather than work, so they stay out —
 # dispatch-check draws the same line for the same reason (gt-59o9).
+#
+# The title rule and the label rule below each stand alone because neither
+# can be trusted to arrive with the other. A merge-slot lock bead is titled
+# "merge-slot" and labelled gt:merge-slot (beads.go getMergeSlotBead), but a
+# re-created one — or a gt:slot variant — may carry the title without the
+# label, and the daemon's client-side render can drop labels, so the query
+# excludes on both (gt-14r9p: a lock bead reached the candidate list and was
+# slung as if it were a task). The same families go in both filters so the
+# two paths cannot drift and split a family across them.
+NONDISPATCHABLE_TITLES='^(STATE_COLLAPSE|\\[HIGH\\]|\\[CRITICAL\\]|\\[MEDIUM\\]|main_branch_test:|HANDOFF|merge-slot)'
+NONDISPATCHABLE_LABELS='gt:slot|gt:merge-slot|gt:escalation|gt:handoff'
 
 operational_rigs() {
   local out rows
@@ -239,13 +250,15 @@ while IFS= read -r RIG; do
     log "SKIP $RIG: gt ready failed"
     continue
   }
-  rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" '
+  rows=$(printf '%s' "$out" | jq -r --arg rig "$RIG" --argjson maxp "$MAX_PRIORITY" \
+      --arg ex_title "$NONDISPATCHABLE_TITLES" --arg ex_label "$NONDISPATCHABLE_LABELS" '
     [ .sources[]? | select(.name == $rig) | .issues[]? ]
     | .[]
     | select((.priority // 99) <= $maxp)
     | select((.issue_type // "") == "task" or (.issue_type // "") == "bug" or (.issue_type // "") == "feature")
     | select((.assignee // "") == "")
-    | select((.title // "") | test("^(STATE_COLLAPSE|\\[HIGH\\]|\\[CRITICAL\\]|\\[MEDIUM\\]|main_branch_test:|HANDOFF|merge-slot)") | not)
+    | select((.title // "") | test($ex_title) | not)
+    | select(((.labels // []) | map(test($ex_label)) | any) | not)
     | [$rig, .id, (.priority | tostring), ((.labels // []) | join(","))] | @tsv
   ' 2>/dev/null) || {
     log "SKIP $RIG: ready output not parseable"

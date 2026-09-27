@@ -312,6 +312,49 @@ run_plugin 4000600
 assert_eq "$(nudges)" "0" \
   "filters: P3, chore, epic, assigned, and envelope beads are not work"
 
+# --- Case 7b: lock and bookkeeping beads are not dispatch candidates (gt-14r9p)
+# The incident: gt-merge-slot (label gt:slot, title "merge-slot") reached the
+# candidate list and was slung as if it were a task. The title filter and the
+# label filter must each stand alone: a lock bead can lose its title
+# ("Exclusive access slot for serialized conflict resolution") and keep its
+# label, and the daemon's render can drop the label and keep the title.
+setup_case
+write_polecats "$LIVE_NONE"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-merge-slot","title":"merge-slot","status":"open","priority":1,"issue_type":"task","labels":["gt:merge-slot"]},
+  {"id":"gt-slot-titleless","title":"Exclusive access slot for serialized conflict resolution in the merge queue","status":"open","priority":1,"issue_type":"task","labels":["gt:slot"]},
+  {"id":"gt-esc","title":"Escalation: stuck pool","status":"open","priority":1,"issue_type":"task","labels":["gt:escalation"]},
+  {"id":"gt-plain","title":"A real task","status":"open","priority":1,"issue_type":"task"}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 4100000
+run_plugin 4100600
+assert_eq "$(nudges)" "1" "lock beads: exactly one nudge, the plain task is still work"
+assert_not_contains "$TEST_STATE/nudge.log" "gt-merge-slot" "lock beads: the merge-slot lock is not named"
+assert_not_contains "$TEST_STATE/nudge.log" "gt-slot-titleless" "lock beads: a gt:slot bead without the title is not named"
+assert_not_contains "$TEST_STATE/nudge.log" "gt-esc" "lock beads: an escalation bead is not named"
+assert_contains "$TEST_STATE/nudge.log" "gt-plain (P1 gastown)" "lock beads: the real task is named"
+
+# --- Case 7c: the two filters each stand alone ------------------------------
+# Title without label: the server-side exclusion dropped the label, the title
+# remains. Label without title: the lock was re-created with a prose title.
+setup_case
+write_polecats "$LIVE_NONE"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-title-only","title":"merge-slot","status":"open","priority":1,"issue_type":"task"},
+  {"id":"gt-label-only","title":"Exclusive access slot for serialized conflict resolution","status":"open","priority":1,"issue_type":"task","labels":["gt:slot"]},
+  {"id":"gt-plain2","title":"Real work","status":"open","priority":1,"issue_type":"task"}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 4200000
+run_plugin 4200600
+assert_eq "$(nudges)" "1" "filter independence: one nudge"
+assert_not_contains "$TEST_STATE/nudge.log" "gt-title-only" "filter independence: title alone still excludes"
+assert_not_contains "$TEST_STATE/nudge.log" "gt-label-only" "filter independence: label alone still excludes"
+assert_contains "$TEST_STATE/nudge.log" "gt-plain2 (P1 gastown)" "filter independence: the real task is named"
+
 # --- Case 8: a parked rig is not a dispatch target -------------------------
 setup_case
 write_polecats "$LIVE_NONE"
