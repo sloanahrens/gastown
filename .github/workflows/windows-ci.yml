@@ -47,3 +47,15 @@ jobs:
       - name: Vet
         shell: msys2 {0}
         run: go vet ./...
+
+      # The Windows half of internal/util's process teardown (KillProcessGroup,
+      # SetProcessGroup) has no other automated check on any platform, and
+      # cross-compiling it proves only that it compiles (gt-7hx0). These tests
+      # spawn taskkill, cmd.exe, powershell.exe and ping.exe by name, so the
+      # step runs under pwsh — a native PATH — rather than the msys2 shell the
+      # build steps use; internal/util pulls in no cgo, so it needs none of
+      # that shell's toolchain. The rest of the package's suite shells out to
+      # sh and is exercised on the Unix runners.
+      - name: Test process teardown
+        shell: pwsh
+        run: go test ./internal/util/ -run 'TestKillProcessGroup|TestSetProcessGroup' -v
