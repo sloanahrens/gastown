@@ -73,20 +73,29 @@ func launchBrowser(cfg browserTestConfig) (*rod.Browser, func()) {
 	return browser, cleanup
 }
 
-// mockFetcher implements ConvoyFetcher for testing
-type mockFetcher struct {
-	convoys []ConvoyRow
-}
+// newBrowserTestServer serves fetcher through the production dashboard mux, so
+// the page loads htmx and idiomorph from /static/vendor as scripts. A bare
+// ConvoyHandler answers those paths with the dashboard page itself (200
+// text/html), which the browser will not execute, leaving window.htmx undefined
+// for a reason the rendered markup cannot show (gt-18ox).
+func newBrowserTestServer(t *testing.T, fetcher ConvoyFetcher) *httptest.Server {
+	t.Helper()
 
-func (m *mockFetcher) FetchConvoys() ([]ConvoyRow, error) {
-	return m.convoys, nil
+	handler, err := NewDashboardMux(fetcher, nil)
+	if err != nil {
+		t.Fatalf("NewDashboardMux() error = %v", err)
+	}
+
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+	return ts
 }
 
 // TestBrowser_ConvoyListLoads tests that the convoy list page loads correctly
 func TestBrowser_ConvoyListLoads(t *testing.T) {
 	// Setup test server with mock data
-	fetcher := &mockFetcher{
-		convoys: []ConvoyRow{
+	fetcher := &MockConvoyFetcher{
+		Convoys: []ConvoyRow{
 			{
 				ID:           "hq-cv-abc",
 				Title:        "Feature X",
@@ -108,13 +117,7 @@ func TestBrowser_ConvoyListLoads(t *testing.T) {
 		},
 	}
 
-	handler, err := NewConvoyHandler(fetcher, 8*time.Second, "test-token")
-	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
-	}
-
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
+	ts := newBrowserTestServer(t, fetcher)
 
 	cfg := getBrowserConfig()
 	browser, cleanup := launchBrowser(cfg)
@@ -154,8 +157,8 @@ func TestBrowser_ConvoyListLoads(t *testing.T) {
 // TestBrowser_LastActivityColors tests that activity colors are displayed correctly
 func TestBrowser_LastActivityColors(t *testing.T) {
 	// Setup test server with convoys at different activity ages
-	fetcher := &mockFetcher{
-		convoys: []ConvoyRow{
+	fetcher := &MockConvoyFetcher{
+		Convoys: []ConvoyRow{
 			{
 				ID:           "hq-cv-green",
 				Title:        "Active Work",
@@ -177,13 +180,7 @@ func TestBrowser_LastActivityColors(t *testing.T) {
 		},
 	}
 
-	handler, err := NewConvoyHandler(fetcher, 8*time.Second, "test-token")
-	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
-	}
-
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
+	ts := newBrowserTestServer(t, fetcher)
 
 	cfg := getBrowserConfig()
 	browser, cleanup := launchBrowser(cfg)
@@ -212,8 +209,8 @@ func TestBrowser_LastActivityColors(t *testing.T) {
 
 // TestBrowser_HtmxAutoRefresh tests that htmx auto-refresh attributes are present
 func TestBrowser_HtmxAutoRefresh(t *testing.T) {
-	fetcher := &mockFetcher{
-		convoys: []ConvoyRow{
+	fetcher := &MockConvoyFetcher{
+		Convoys: []ConvoyRow{
 			{
 				ID:     "hq-cv-test",
 				Title:  "Test Convoy",
@@ -222,13 +219,7 @@ func TestBrowser_HtmxAutoRefresh(t *testing.T) {
 		},
 	}
 
-	handler, err := NewConvoyHandler(fetcher, 8*time.Second, "test-token")
-	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
-	}
-
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
+	ts := newBrowserTestServer(t, fetcher)
 
 	cfg := getBrowserConfig()
 	browser, cleanup := launchBrowser(cfg)
@@ -261,7 +252,11 @@ func TestBrowser_HtmxAutoRefresh(t *testing.T) {
 
 	// Verify htmx binds: the vendored htmx.min.js sets window.htmx (gt-iav5
 	// moved the library from unpkg to /static/vendor so the page runs offline)
-	if bound, evalErr := page.Eval(`typeof window.htmx`); evalErr != nil || bound.Value == "undefined" {
+	bound, evalErr := page.Eval(`() => typeof window.htmx`)
+	if evalErr != nil {
+		t.Fatalf("Evaluating window.htmx failed: %v", evalErr)
+	}
+	if bound.Value.Str() == "undefined" {
 		t.Error("Expected htmx to be bound — the vendored /static/vendor/htmx.min.js never executed")
 	}
 
@@ -270,17 +265,11 @@ func TestBrowser_HtmxAutoRefresh(t *testing.T) {
 
 // TestBrowser_EmptyState tests the empty state when no convoys exist
 func TestBrowser_EmptyState(t *testing.T) {
-	fetcher := &mockFetcher{
-		convoys: []ConvoyRow{}, // Empty convoy list
+	fetcher := &MockConvoyFetcher{
+		Convoys: []ConvoyRow{}, // Empty convoy list
 	}
 
-	handler, err := NewConvoyHandler(fetcher, 8*time.Second, "test-token")
-	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
-	}
-
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
+	ts := newBrowserTestServer(t, fetcher)
 
 	cfg := getBrowserConfig()
 	browser, cleanup := launchBrowser(cfg)
@@ -294,42 +283,40 @@ func TestBrowser_EmptyState(t *testing.T) {
 	// Check for empty state message
 	bodyText := page.MustElement("body").MustText()
 
-	if !strings.Contains(bodyText, "No convoys") {
-		t.Errorf("Expected 'No convoys' empty state message, got: %s", bodyText[:min(len(bodyText), 500)])
+	if !strings.Contains(bodyText, "No active convoys") {
+		t.Errorf("Expected 'No active convoys' empty state message, got: %s", bodyText[:min(len(bodyText), 500)])
 	}
 
-	// Verify help text is shown
-	if !strings.Contains(bodyText, "gt convoy create") {
-		t.Error("Expected help text with 'gt convoy create' command")
+	if rows := page.MustElements("tr.convoy-row"); len(rows) != 0 {
+		t.Errorf("Expected no convoy rows in the empty state, got %d", len(rows))
 	}
 
 	t.Log("PASSED: Empty state displays correctly")
 }
 
-// TestBrowser_StatusIndicators tests open/closed status indicators
+// TestBrowser_StatusIndicators tests the work-status badge a convoy row renders
 func TestBrowser_StatusIndicators(t *testing.T) {
-	fetcher := &mockFetcher{
-		convoys: []ConvoyRow{
+	fetcher := &MockConvoyFetcher{
+		Convoys: []ConvoyRow{
 			{
-				ID:     "hq-cv-open",
-				Title:  "Open Convoy",
-				Status: "open",
+				ID:         "hq-cv-active",
+				Title:      "Active Convoy",
+				WorkStatus: "active",
+				Progress:   "1/3",
+				Completed:  1,
+				Total:      3,
 			},
 			{
-				ID:     "hq-cv-closed",
-				Title:  "Closed Convoy",
-				Status: "closed",
+				ID:         "hq-cv-stuck",
+				Title:      "Stuck Convoy",
+				WorkStatus: "stuck",
+				Progress:   "0/2",
+				Total:      2,
 			},
 		},
 	}
 
-	handler, err := NewConvoyHandler(fetcher, 8*time.Second, "test-token")
-	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
-	}
-
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
+	ts := newBrowserTestServer(t, fetcher)
 
 	cfg := getBrowserConfig()
 	browser, cleanup := launchBrowser(cfg)
@@ -340,14 +327,14 @@ func TestBrowser_StatusIndicators(t *testing.T) {
 
 	page.MustWaitLoad()
 
-	html := page.MustHTML()
-
-	// Check for status classes
-	if !strings.Contains(html, "status-open") {
-		t.Error("Expected status-open class for open convoy")
+	active := page.MustElement(`tr[data-convoy-id="hq-cv-active"]`).MustHTML()
+	if !strings.Contains(active, "badge-green") {
+		t.Error("Expected badge-green on a convoy whose work is progressing")
 	}
-	if !strings.Contains(html, "status-closed") {
-		t.Error("Expected status-closed class for closed convoy")
+
+	stuck := page.MustElement(`tr[data-convoy-id="hq-cv-stuck"]`).MustHTML()
+	if !strings.Contains(stuck, "badge-red") {
+		t.Error("Expected badge-red on a convoy whose work has stalled")
 	}
 
 	t.Log("PASSED: Status indicators display correctly")
@@ -355,8 +342,8 @@ func TestBrowser_StatusIndicators(t *testing.T) {
 
 // TestBrowser_ProgressDisplay tests progress bar rendering
 func TestBrowser_ProgressDisplay(t *testing.T) {
-	fetcher := &mockFetcher{
-		convoys: []ConvoyRow{
+	fetcher := &MockConvoyFetcher{
+		Convoys: []ConvoyRow{
 			{
 				ID:        "hq-cv-progress",
 				Title:     "Progress Convoy",
@@ -368,13 +355,7 @@ func TestBrowser_ProgressDisplay(t *testing.T) {
 		},
 	}
 
-	handler, err := NewConvoyHandler(fetcher, 8*time.Second, "test-token")
-	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
-	}
-
-	ts := httptest.NewServer(handler)
-	defer ts.Close()
+	ts := newBrowserTestServer(t, fetcher)
 
 	cfg := getBrowserConfig()
 	browser, cleanup := launchBrowser(cfg)
