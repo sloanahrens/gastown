@@ -1924,7 +1924,7 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 				continue
 			}
 
-			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap, agentBeadID); found {
+			if zombie, found := detectZombieLiveSession(bd, workDir, townRoot, rigName, polecatName, sessionName, t, doneIntent, witCfg, snap, agentBeadID, time.Now()); found {
 				result.Zombies = append(result.Zombies, zombie)
 			}
 			continue // Either handled or not a zombie
@@ -2015,7 +2015,11 @@ var restartStuckSession = RestartPolecatSession
 //
 // gt-dsgp: Uses restart-first policy. Instead of nuking polecats, restarts their
 // sessions to preserve worktrees and branches.
-func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot, agentBeadID string) (ZombieResult, bool) {
+// now is the patrol's reading of the clock. Every age this check derives
+// (heartbeat staleness, done-intent age, session age) is measured against it,
+// so a test fixes time explicitly instead of sleeping past a tiny grace and
+// racing tmux's one-second session_created resolution.
+func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName, sessionName string, t *tmux.Tmux, doneIntent *DoneIntent, witCfg *config.WitnessThresholds, snap *agentBeadSnapshot, agentBeadID string, now time.Time) (ZombieResult, bool) {
 	// gt-2gra: Agent state and hook bead are read from the pre-fetched snapshot
 	// instead of calling getAgentBeadState multiple times per code path.
 	snapState, snapHook := "", ""
@@ -2028,7 +2032,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// The witness makes exactly ONE inference: is the heartbeat fresh?
 	hb := polecat.ReadSessionHeartbeat(townRoot, sessionName)
 	if hb != nil && hb.IsV2() {
-		stale := time.Since(hb.Timestamp) >= polecat.SessionHeartbeatStaleThreshold
+		stale := now.Sub(hb.Timestamp) >= polecat.SessionHeartbeatStaleThreshold
 		if !stale {
 			switch hb.EffectiveState() {
 			case polecat.HeartbeatExiting:
@@ -2068,7 +2072,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// branch at the pre-rebase tip, which one session later reads as real
 	// divergence and needs an operator force push (gt-bf5x). So the restart also
 	// requires the transcript to show no work since the done-intent was written.
-	if doneIntent != nil && time.Since(doneIntent.Timestamp) > witCfg.DoneIntentStuckTimeoutD() {
+	if doneIntent != nil && now.Sub(doneIntent.Timestamp) > witCfg.DoneIntentStuckTimeoutD() {
 		// TOCTOU guard (gt-0pst): Re-check session liveness before restarting.
 		// The session could have exited normally between our initial check and here.
 		if alive, _ := t.HasSession(sessionName); !alive {
@@ -2086,7 +2090,7 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 			Classification: ZombieStuckInDone,
 			HookBead:       snapHook,
 			WasActive:      true,
-			Action:         fmt.Sprintf("restarted-stuck-session (done-intent age=%v)", time.Since(doneIntent.Timestamp).Round(time.Second)),
+			Action:         fmt.Sprintf("restarted-stuck-session (done-intent age=%v)", now.Sub(doneIntent.Timestamp).Round(time.Second)),
 		}
 		// Clear ALL done-intent labels before restart so the polecat doesn't
 		// immediately re-trigger stuck-in-done on the next patrol cycle (gt-wmpy).
@@ -2168,10 +2172,10 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 	// so a working session is not flagged at all.
 	if (snapHook != "" || beads.AgentState(snapState).IsActive()) && hb == nil {
 		if createdAt, err := t.GetSessionCreatedTime(sessionName); err == nil {
-			age := time.Since(createdAt)
+			age := now.Sub(createdAt)
 			grace := witCfg.HeartbeatStartupGraceD()
 			if age > grace {
-				live := neverHeartbeatedLiveness(t, townRoot, rigName, polecatName, sessionName, createdAt.Add(grace))
+				live := neverHeartbeatedLiveness(t, townRoot, rigName, polecatName, sessionName, createdAt.Add(grace), now)
 				if live.Working {
 					return ZombieResult{}, false
 				}
@@ -2214,9 +2218,9 @@ type neverHeartbeatedEvidence struct {
 // tests pin health without any of the three.
 var neverHeartbeatedLiveness = assessNeverHeartbeatedLiveness
 
-func assessNeverHeartbeatedLiveness(t *tmux.Tmux, townRoot, rigName, polecatName, sessionName string, graceDeadline time.Time) neverHeartbeatedEvidence {
+func assessNeverHeartbeatedLiveness(t *tmux.Tmux, townRoot, rigName, polecatName, sessionName string, graceDeadline, now time.Time) neverHeartbeatedEvidence {
 	act := ObserveRealActivity(t, polecatName, sessionName, "")
-	return classifyNeverHeartbeatedLiveness(act, readHeldGateSlot(townRoot, rigName, polecatName), graceDeadline, time.Now())
+	return classifyNeverHeartbeatedLiveness(act, readHeldGateSlot(townRoot, rigName, polecatName), graceDeadline, now)
 }
 
 // classifyNeverHeartbeatedLiveness decides whether a live heartbeatless session

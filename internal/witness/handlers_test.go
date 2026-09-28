@@ -2252,27 +2252,19 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 		t.Fatal("precondition failed: fake session should report agent alive")
 	}
 
-	// Ensure session age exceeds the (artificially tiny) startup grace period.
-	time.Sleep(20 * time.Millisecond)
-	witCfg := &config.WitnessThresholds{HeartbeatStartupGrace: "1ms"}
-
-	// Pin the gt-gx2v liveness cross-check to "quiet". This test is about
-	// the gate admitting agent_state=spawning with no hook_bead; the real
-	// cross-check reads tmux's window_activity, which pane output advances
-	// and which has one-second resolution. NewSessionWithCommand starts the
-	// login shell first and respawns the pane with the command after, so the
-	// shell's prompt is written asynchronously. When that write landed in the
-	// second after session_created (likelier on a loaded host), it postdated
-	// createdAt+1ms grace and read as fresh work, so the session was judged
-	// working and not flagged (found=false). The cross-check has its own
-	// tests (TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence
-	// and the classifyNeverHeartbeatedLiveness cases). Not parallel: it
-	// swaps a package seam.
-	old := neverHeartbeatedLiveness
-	t.Cleanup(func() { neverHeartbeatedLiveness = old })
-	neverHeartbeatedLiveness = func(*tmux.Tmux, string, string, string, string, time.Time) neverHeartbeatedEvidence {
-		return neverHeartbeatedEvidence{Detail: "gate-slot=none, transcript=none, pane-output=none"}
+	// Time is an explicit input: judge the session an hour after it was
+	// created, well past the default startup grace. The patrol used to read
+	// the wall clock, so this test slept 20ms past a 1ms grace and raced
+	// tmux's one-second session_created resolution and the shell prompt the
+	// pane paints after creation (gt-94gie). With now fixed, the real gx2v
+	// liveness cross-check runs unpinned: the pane's only output predates
+	// createdAt+grace and is an hour old, so it is no evidence of work.
+	createdAt, err := tm.GetSessionCreatedTime(sessionName)
+	if err != nil {
+		t.Fatalf("session created time: %v", err)
 	}
+	now := createdAt.Add(time.Hour)
+	witCfg := &config.WitnessThresholds{} // default HeartbeatStartupGrace
 
 	bd, _ := fakeBd()
 	snap := &agentBeadSnapshot{
@@ -2280,7 +2272,7 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 		HookBead:   "", // partial spawn: never durably attached a hook_bead
 	}
 
-	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap, "")
+	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap, "", now)
 	t.Logf("found=%v zombie=%+v", found, zombie)
 	if !found {
 		t.Fatal("expected zombie detection for live session stuck at agent_state=spawning with no hook_bead and no heartbeat")
@@ -2315,8 +2307,14 @@ func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testin
 		t.Fatalf("set GT_PROCESS_NAMES: %v", err)
 	}
 
-	time.Sleep(20 * time.Millisecond)
-	witCfg := &config.WitnessThresholds{HeartbeatStartupGrace: "1ms"}
+	// Judge the session an hour after creation, past the default grace, so
+	// the liveness seam is always consulted (no sleep past a tiny grace).
+	createdAt, err := tm.GetSessionCreatedTime(sessionName)
+	if err != nil {
+		t.Fatalf("session created time: %v", err)
+	}
+	now := createdAt.Add(time.Hour)
+	witCfg := &config.WitnessThresholds{}
 	bd, _ := fakeBd()
 	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gt-gx2v"}
 
@@ -2324,10 +2322,10 @@ func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testin
 	t.Cleanup(func() { neverHeartbeatedLiveness = old })
 
 	detect := func(ev neverHeartbeatedEvidence) (ZombieResult, bool) {
-		neverHeartbeatedLiveness = func(*tmux.Tmux, string, string, string, string, time.Time) neverHeartbeatedEvidence {
+		neverHeartbeatedLiveness = func(*tmux.Tmux, string, string, string, string, time.Time, time.Time) neverHeartbeatedEvidence {
 			return ev
 		}
-		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "emerald", sessionName, tm, nil, witCfg, snap, "")
+		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "emerald", sessionName, tm, nil, witCfg, snap, "", now)
 	}
 
 	// Working: the cross-check found the transcript a second old, so the patrol
@@ -2509,7 +2507,7 @@ func TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone(t *testing.T)
 
 	detect := func(act RealActivity) (ZombieResult, bool) {
 		observeDoneIntentActivity = func(*tmux.Tmux, string, string, string) RealActivity { return act }
-		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "flint", sessionName, tm, doneIntent, witCfg, snap, "")
+		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "flint", sessionName, tm, doneIntent, witCfg, snap, "", now)
 	}
 
 	// Work in flight: the transcript advanced a minute ago, after the done-intent.
