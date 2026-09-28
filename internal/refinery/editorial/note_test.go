@@ -41,6 +41,7 @@ func initTestRepo(t *testing.T) string {
 }
 
 func TestWriteNoteReadNote_RoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	head, err := g.Rev("HEAD")
@@ -80,6 +81,7 @@ func TestWriteNoteReadNote_RoundTrip(t *testing.T) {
 }
 
 func TestReadNote_NoNoteReturnsErrNoNote(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	head, err := g.Rev("HEAD")
@@ -96,6 +98,7 @@ func TestReadNote_NoNoteReturnsErrNoNote(t *testing.T) {
 // exact field names from the design spec's example, since the note is
 // meant to be read by humans and other tools (git notes --ref om show).
 func TestNoteJSON_MatchesSpecFieldNames(t *testing.T) {
+	t.Parallel()
 	n := Note{
 		OMVersion:     "1.4.0",
 		RubricSHA256:  "abc",
@@ -183,6 +186,7 @@ func writeNoteOn(t *testing.T, g *git.Git, sha string, n Note) {
 // applies to the note on a known head still decide, so answering from a note
 // about something else is not possible.
 func TestFindVerdictForDiff_IgnoresVerdictsThatDoNotApply(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		note Note
@@ -195,6 +199,7 @@ func TestFindVerdictForDiff_IgnoresVerdictsThatDoNotApply(t *testing.T) {
 		{"below the floor by carrying no version at all", recordedNote(diffLookedFor, rubricDeployed, "approve", "", time.Unix(100, 0)), "1.0.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			g := git.NewGit(initTestRepo(t))
 			writeNoteOn(t, g, "1111111111111111111111111111111111111111", tc.note)
 
@@ -214,6 +219,7 @@ func TestFindVerdictForDiff_IgnoresVerdictsThatDoNotApply(t *testing.T) {
 // reviewed here" and "nothing matching was found" are the same answer and not
 // an error: an absent ref is a first review, which must proceed.
 func TestFindVerdictForDiff_AbsentNotesRefIsNoVerdict(t *testing.T) {
+	t.Parallel()
 	g := git.NewGit(initTestRepo(t))
 
 	got, err := FindVerdictForDiff(g, diffLookedFor, rubricDeployed, "")
@@ -232,6 +238,7 @@ func TestFindVerdictForDiff_AbsentNotesRefIsNoVerdict(t *testing.T) {
 // lookup to the MR would hand a caller the roll-until-it-clears bypass one
 // bead id further along.
 func TestFindVerdictForDiff_MostRecentlyReviewedMatchGoverns(t *testing.T) {
+	t.Parallel()
 	g := git.NewGit(initTestRepo(t))
 	first := recordedNote(diffLookedFor, rubricDeployed, "request_changes", "1.4.0", time.Unix(1000, 0).UTC())
 	first.MR, first.Score = "gt-mr-1", 0.56
@@ -258,6 +265,7 @@ func TestFindVerdictForDiff_MostRecentlyReviewedMatchGoverns(t *testing.T) {
 // does not make a diff's verdict unfindable: the ref is shared with every
 // writer that ever touched it.
 func TestFindVerdictForDiff_SkipsUnparseableNotes(t *testing.T) {
+	t.Parallel()
 	g := git.NewGit(initTestRepo(t))
 	if err := g.NotesAdd(NotesRef, "1111111111111111111111111111111111111111", "not json"); err != nil {
 		t.Fatalf("NotesAdd: %v", err)
@@ -279,6 +287,7 @@ func TestFindVerdictForDiff_SkipsUnparseableNotes(t *testing.T) {
 // them in — two notes reviewed in the same instant must still order the same
 // way every run.
 func TestReviewedLaterThan_IsDeterministicOnATimestampTie(t *testing.T) {
+	t.Parallel()
 	at := time.Unix(1000, 0).UTC()
 	lo := Note{HeadSHA: "1111111111111111111111111111111111111111", ReviewedAt: at}
 	hi := Note{HeadSHA: "9999999999999999999999999999999999999999", ReviewedAt: at}
@@ -298,6 +307,7 @@ func TestReviewedLaterThan_IsDeterministicOnATimestampTie(t *testing.T) {
 }
 
 func TestAttemptHistory_CarriesEveryPriorVerdictForward(t *testing.T) {
+	t.Parallel()
 	first := NoteAttempt{Score: 0.74, Verdict: "approve", Attempt: 1, ReviewedAt: time.Unix(1000, 0).UTC()}
 	second := NoteAttempt{Score: 0.50, Verdict: "request_changes", Attempt: 2, ReviewedAt: time.Unix(2000, 0).UTC()}
 	third := NoteAttempt{Score: 0.81, Verdict: "approve", Attempt: 3, ReviewedAt: time.Unix(3000, 0).UTC()}
@@ -321,6 +331,7 @@ func TestAttemptHistory_CarriesEveryPriorVerdictForward(t *testing.T) {
 		{"prior note with history", recorded, []NoteAttempt{first, second, third}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := attemptHistory(tc.prev, third)
 			if len(got) != len(tc.want) {
 				t.Fatalf("attemptHistory = %+v, want %+v", got, tc.want)

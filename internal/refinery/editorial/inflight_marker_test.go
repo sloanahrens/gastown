@@ -329,6 +329,7 @@ func TestRun_ParallelBatchMembersEachHoldTheirOwnMarker(t *testing.T) {
 // TestReviewMarkerName_KeysOnTheWorkReviewed: the lock name has to identify one
 // review, not one rig — the batch's members share a rig.
 func TestReviewMarkerName_KeysOnTheWorkReviewed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		req  ReviewRequest
@@ -357,6 +358,7 @@ func TestReviewMarkerName_KeysOnTheWorkReviewed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := reviewMarkerName(tt.req); got != tt.want {
 				t.Errorf("reviewMarkerName = %q, want %q", got, tt.want)
 			}

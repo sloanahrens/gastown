@@ -39,6 +39,7 @@ func (s *priorFindingsStore) GetDependenciesWithMetadata(_ context.Context, id s
 }
 
 func TestBuildPriorFindings_ParsesIDSevPathLineTitleLines(t *testing.T) {
+	t.Parallel()
 	notes := `Findings from the last rejection:
 - id:abc123456789 sev:major internal/foo.go:42 — leaky abstraction
 - id:def987654321 sev:minor internal/bar.go:7 — missing test
@@ -68,6 +69,7 @@ not a finding line
 }
 
 func TestBuildPriorFindings_CollapsesDuplicateIDs(t *testing.T) {
+	t.Parallel()
 	// gt-3mp1's notes carried two findings written with the reviewed head sha
 	// as the id. Forwarding that to om makes it reject the payload, and the
 	// gate fails closed, so the duplicate must be collapsed here (gt-2ok0).
@@ -95,6 +97,7 @@ func TestBuildPriorFindings_CollapsesDuplicateIDs(t *testing.T) {
 }
 
 func TestBuildPriorFindings_ParsesEmptyTitleAndColonInPath(t *testing.T) {
+	t.Parallel()
 	// formatMergeRejectionNote's " — %s" with an empty title loses its
 	// trailing space to strings.TrimSpace before this line reaches the
 	// regex, so the line ends right at the em dash with nothing after it.
@@ -122,6 +125,7 @@ func TestBuildPriorFindings_ParsesEmptyTitleAndColonInPath(t *testing.T) {
 }
 
 func TestBuildPriorFindings_ParsesBulletPrefixedLines(t *testing.T) {
+	t.Parallel()
 	// Either bullet parses, and a prose "FINDING [major] ..." line is still
 	// not a finding: it holds no om finding id to classify on (gt-3mp1).
 	notes := `MERGE REJECTION (attempt 1): om-editorial - findings on MR bead gt-mr-1
@@ -148,6 +152,7 @@ FINDING [major] internal/hooks/config.go boot override (~line 432): removing If 
 }
 
 func TestBuildPriorFindings_NoSourceIssueReturnsNil(t *testing.T) {
+	t.Parallel()
 	store := &priorFindingsStore{issues: map[string]*beadsdk.Issue{}}
 	bd := beads.NewWithStore(t.TempDir(), store)
 

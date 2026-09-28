@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/testutil"
@@ -196,33 +199,65 @@ func TestPushDatabase_RefusesTestPrefixes(t *testing.T) {
 	}
 }
 
-// TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout locks in the DSN fix:
-// openDoltDB's readTimeout must exceed doltPushTimeout, not sit below it.
-// Before the fix, readTimeout=30s meant any query running longer than 30s —
-// including a large, legitimate DOLT_PUSH within its 60s budget — died with a
-// raw i/o timeout from the MySQL driver's socket read deadline, regardless of
-// how much time was left on the request context. A query held open for 45s
-// (comfortably inside doltPushTimeout, well past the old 30s ceiling) must
-// still succeed.
-func TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout(t *testing.T) {
+// TestOpenDoltDB_ReadTimeoutExceedsPushTimeout locks in the DSN fix:
+// openDoltDB's socket readTimeout (and writeTimeout) must exceed
+// doltPushTimeout, not sit below it. Before the fix, readTimeout=30s meant
+// any query running longer than 30s, including a large, legitimate DOLT_PUSH
+// within its 60s budget, died with a raw i/o timeout from the MySQL driver's
+// socket read deadline, regardless of how much time was left on the request
+// context. The request context must be what bounds a push, so the driver's
+// deadline has to sit past it.
+//
+// This asserts on the exact DSN openDoltDB connects with. Whether the MySQL
+// driver enforces a DSN readTimeout is the driver's contract, not gastown's,
+// so it is not re-tested here.
+func TestOpenDoltDB_ReadTimeoutExceedsPushTimeout(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
+
+	cfg, err := mysql.ParseDSN(d.doltRemotesDSN("information_schema"))
+	if err != nil {
+		t.Fatalf("parse openDoltDB DSN: %v", err)
+	}
+	if cfg.ReadTimeout <= doltPushTimeout {
+		t.Errorf("openDoltDB readTimeout = %v, want > doltPushTimeout (%v)", cfg.ReadTimeout, doltPushTimeout)
+	}
+	if cfg.WriteTimeout <= doltPushTimeout {
+		t.Errorf("openDoltDB writeTimeout = %v, want > doltPushTimeout (%v)", cfg.WriteTimeout, doltPushTimeout)
+	}
+}
+
+// TestDoltRemotesDSN_LongQueryCompletesWithinContextBudget runs a query that
+// holds the connection open, over a dolt_remotes DSN, and requires it to run
+// to completion. The DSN read timeout sits above the context budget, as
+// doltRemotesReadTimeout sits above doltPushTimeout, and both are generous
+// (testDoltSQLTimeout), so a stalled container slows the test rather than
+// failing it. It replaces a 45s SELECT SLEEP with a 1.5s one.
+func TestDoltRemotesDSN_LongQueryCompletesWithinContextBudget(t *testing.T) {
 	d := testDoltRemotesDaemon(t)
 
-	conn, err := d.openDoltDB("information_schema")
+	const sleepFor = 1500 * time.Millisecond
+	dsn := doltRemotesDSNWithTimeout(d.doltServerHost(), d.doltServerPort(), "information_schema", testDoltSQLTimeout+30*time.Second)
+	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("connect to server: %v", err)
+		t.Fatalf("sql.Open(dolt_remotes DSN): %v", err)
 	}
 	defer conn.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), doltPushTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
 	defer cancel()
 
-	const sleepFor = 45 * time.Second
 	start := time.Now()
-	if _, err := conn.ExecContext(ctx, "SELECT SLEEP(?)", sleepFor.Seconds()); err != nil {
-		t.Fatalf("SELECT SLEEP(%v) failed (readTimeout regressed below doltPushTimeout?): %v", sleepFor, err)
+	var slept int64
+	if err := conn.QueryRowContext(ctx, "SELECT SLEEP(?)", sleepFor.Seconds()).Scan(&slept); err != nil {
+		t.Fatalf("SELECT SLEEP(%v) with read timeout past the context budget: %v", sleepFor, err)
 	}
-	if elapsed := time.Since(start); elapsed < sleepFor {
-		t.Fatalf("SELECT SLEEP(%v) returned early after %v", sleepFor, elapsed)
+	elapsed := time.Since(start)
+	if slept != 0 {
+		t.Fatalf("SELECT SLEEP(%v) = %d, want 0 (sleep ran to completion, not interrupted)", sleepFor, slept)
+	}
+	if elapsed < sleepFor {
+		t.Fatalf("SELECT SLEEP(%v) returned after %v, want at least %v", sleepFor, elapsed, sleepFor)
 	}
 }
 

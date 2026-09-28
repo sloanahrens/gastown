@@ -143,6 +143,7 @@ func noteOnOrigin(t *testing.T, f *rekeyFixture, commit string) string {
 // non-fast-forward merge landed and the note stayed on the reviewed branch
 // tip, so the landed merge commit has none.
 func TestRekeyNote_CopiesNoteOntoLandedMergeCommit(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -215,6 +216,7 @@ func TestRekeyNote_CopiesNoteOntoLandedMergeCommit(t *testing.T) {
 // reviews something other than what landed proves nothing about main, so the
 // backfill must refuse and leave the notes ref untouched.
 func TestRekeyNote_PatchIDMismatchRefuses(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -244,6 +246,7 @@ func TestRekeyNote_PatchIDMismatchRefuses(t *testing.T) {
 // from a note keyed to a rehearsal head that is not on any branch, the
 // 097ab8a/245987b shape.
 func TestRekeyNote_SecondParentCopy(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -309,6 +312,7 @@ func TestRekeyNote_SecondParentCopy(t *testing.T) {
 // TestRekeyNote_SecondParentOnNonMergeRefuses: --second-parent asks for a
 // merge's second parent; on a plain commit there is none.
 func TestRekeyNote_SecondParentOnNonMergeRefuses(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	landed := commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
 	f.publish()
@@ -327,6 +331,7 @@ func TestRekeyNote_SecondParentOnNonMergeRefuses(t *testing.T) {
 // error — never as a warning — while leaving the local note in place for a
 // re-run.
 func TestRekeyNote_PushFailureIsLoud(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -367,6 +372,7 @@ func TestRekeyNote_PushFailureIsLoud(t *testing.T) {
 // nothing to copy — the command must not invent one, even when some other
 // MR's note covers the same diff.
 func TestRekeyNote_NoNoteForMRRefuses(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -404,6 +410,7 @@ func TestRekeyNote_NoNoteForMRRefuses(t *testing.T) {
 // which MR it was borrowed from, and re-keys it onto the requesting MR so a
 // later lookup by this MR's own id finds it too.
 func TestRekeyNote_AllowAnyMR_BorrowsNoteFromDifferentMR(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -452,6 +459,7 @@ func TestRekeyNote_AllowAnyMR_BorrowsNoteFromDifferentMR(t *testing.T) {
 // any covering note — that unscoped scan is exactly what gt-bagu's om review
 // 0.55 flagged as accepting proof CheckPrecondition would itself reject.
 func TestRekeyNote_AllowAnyMR_RequiresSourceHead(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	f.git(f.repoDir, "checkout", "-q", "-b", "polecat/slate/gt-aivi")
 	_ = commitFile(t, f.repoDir, "feature.txt", "hello\n", "add feature")
@@ -471,6 +479,7 @@ func TestRekeyNote_AllowAnyMR_RequiresSourceHead(t *testing.T) {
 // note at SourceHead is not proof CheckPrecondition would have accepted, so
 // AllowAnyMR must refuse rather than borrow it.
 func TestRekeyNote_AllowAnyMR_SourceHeadNotApprove_Refuses(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -505,6 +514,7 @@ func TestRekeyNote_AllowAnyMR_SourceHeadNotApprove_Refuses(t *testing.T) {
 // SourceHead whose patch-id does not match the landed diff is not proof of
 // this diff, whatever its verdict.
 func TestRekeyNote_AllowAnyMR_SourceHeadPatchIDMismatch_Refuses(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -531,6 +541,7 @@ func TestRekeyNote_AllowAnyMR_SourceHeadPatchIDMismatch_Refuses(t *testing.T) {
 // play — a note under mr's own id, even one for an unrelated diff, is
 // refused as a patch-id mismatch on mr's own note, not silently bypassed.
 func TestRekeyNote_NoNoteForMRRefuses_EvenWithAllowAnyMR(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -556,6 +567,7 @@ func TestRekeyNote_NoNoteForMRRefuses_EvenWithAllowAnyMR(t *testing.T) {
 // per commit, so stamping here would delete another MR's proof for the same
 // diff. Refuse and leave it alone.
 func TestRekeyNote_RefusesToReplaceAnotherMRsNote(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -587,6 +599,7 @@ func TestRekeyNote_RefusesToReplaceAnotherMRsNote(t *testing.T) {
 // TestRekeyNote_UnlandedCommitRefuses: re-keying proof onto a commit that
 // never reached the target would be an unaudited provenance claim.
 func TestRekeyNote_UnlandedCommitRefuses(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -617,6 +630,7 @@ func TestRekeyNote_UnlandedCommitRefuses(t *testing.T) {
 // audit trail keeps the timestamp of the run that established it) but must
 // still publish, so a first run whose push failed can be repaired.
 func TestRekeyNote_RerunRepublishes(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -659,6 +673,7 @@ func TestRekeyNote_RerunRepublishes(t *testing.T) {
 // TestRekeyNote_RequiresReason keeps the audit trail honest: a backfill has
 // to say why the copy is legitimate.
 func TestRekeyNote_RequiresReason(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	landed, err := f.g.Rev("HEAD")
 	if err != nil {
@@ -674,6 +689,7 @@ func TestRekeyNote_RequiresReason(t *testing.T) {
 // later reader — the coverage check, a human, the om tooling — sees the same
 // schema whether the copy was hand-written or run by this command.
 func TestNote_BackfillFieldsMatchTheHandWrittenSchema(t *testing.T) {
+	t.Parallel()
 	const historical = `{"om_version":"dev","rig":"gastown","mr":"gt-wisp-c304",` +
 		`"base_sha":"ef5f153","head_sha":"097ab8a","patch_id":"dee5be9b","score":0.62,` +
 		`"verdict":"approve","rekeyed_from":"476420c3b4c77284e3df49bd53abeced57c72384",` +
@@ -732,6 +748,7 @@ func TestNote_BackfillFieldsMatchTheHandWrittenSchema(t *testing.T) {
 // to the branch, and the patch-id rekey verifies is the same one the
 // editorial-coverage doctor recomputes after a landing.
 func TestRekeyNote_CoversLandedMergeCommitWhenNoteSitsOnRehearsalHead(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	const branch = "polecat/slate/gt-fr3r"
 	const mr = "gt-wisp-1q55"
@@ -821,6 +838,7 @@ func TestRekeyNote_CoversLandedMergeCommitWhenNoteSitsOnRehearsalHead(t *testing
 // the range that does match, because the remedy is re-landing the branch, not
 // another backfill (gt-nhqoa).
 func TestRekeyNote_FastForwardedMultiCommitLandingNamesTheRange(t *testing.T) {
+	t.Parallel()
 	f := newRekeyFixture(t)
 	base, err := f.g.Rev("HEAD")
 	if err != nil {

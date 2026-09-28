@@ -330,6 +330,7 @@ func TestReceiptOutcomes_DistinguishVerdictFromRejection(t *testing.T) {
 }
 
 func TestFailureClass_Valid(t *testing.T) {
+	t.Parallel()
 	valid := []FailureClass{
 		BinaryMissing, VersionMismatch, ConfigError, BackendTimeout,
 		MalformedVerdict, Tooling, RecordFailed, Precondition,
@@ -348,6 +349,7 @@ func TestFailureClass_Valid(t *testing.T) {
 }
 
 func TestValidVerdict(t *testing.T) {
+	t.Parallel()
 	for _, v := range []string{VerdictApprove, VerdictRequestChanges} {
 		if !ValidVerdict(v) {
 			t.Errorf("ValidVerdict(%q) = false, want true", v)
@@ -361,6 +363,7 @@ func TestValidVerdict(t *testing.T) {
 }
 
 func TestFailureClass_Retryable(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		fc   FailureClass
 		want bool
