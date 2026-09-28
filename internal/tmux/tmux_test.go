@@ -1,136 +1,13 @@
 package tmux
 
 import (
-	"os/exec"
-	"runtime"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
-
-func hasTmux() bool {
-	_, err := exec.LookPath("tmux")
-	return err == nil
-}
-
-// newTestTmux returns a Tmux instance connected to the package-level test
-// socket (set by TestMain in testmain_test.go). All tests in this package
-// share one tmux server, which is torn down after all tests complete.
-//
-// This isolates tests from the user's interactive tmux and from other
-// packages' tests that run in parallel during `go test ./...`.
-func newTestTmux(t *testing.T) *Tmux {
-	t.Helper()
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-	return NewTmux()
-}
-
-// shellPromptWaitTimeout bounds the wait for a new session's first shell
-// prompt. 30s is roughly six times the slowest startup measured on a machine
-// with a heavy interactive rc, so hitting it means the environment is broken
-// rather than merely slow.
-const shellPromptWaitTimeout = 30 * time.Second
-
-// shellPromptPollInterval is how often waitForShellPrompt re-checks the pane.
-const shellPromptPollInterval = 100 * time.Millisecond
-
-// serverReadyTimeout bounds the wait for the package's tmux server to answer a
-// command. The server outlives every test (TestMain's sentinel sees to that), so
-// hitting it means the socket is wedged, not merely busy.
-const serverReadyTimeout = 5 * time.Second
-
-// bindingLookupTimeout bounds the wait for a builtin key binding to read back
-// non-empty. See defaultKeyBinding for why the read is retried at all.
-const bindingLookupTimeout = 2 * time.Second
-
-// requireTestServer blocks until the package's tmux server answers commands.
-//
-// TestMain's sentinel keeps the server alive, but "alive" is not "answering":
-// the server can still be coming up when the first tests run, and a test that
-// killed the last session takes it down for the moment it takes tmux to start
-// it again. A command issued in either window fails with "server exited
-// unexpectedly" rather than doing what it was asked.
-//
-// Skips rather than fails when the server never answers: an absent server is an
-// environment fault, not a product defect — the policy waitForShellPrompt
-// follows.
-func requireTestServer(t *testing.T, tm *Tmux) {
-	t.Helper()
-	deadline := time.Now().Add(serverReadyTimeout)
-	for time.Now().Before(deadline) {
-		if _, err := tm.run("list-sessions", "-F", ""); err == nil {
-			return
-		}
-		time.Sleep(shellPromptPollInterval)
-	}
-	t.Skipf("tmux server on socket %q did not answer list-sessions within %s; the environment cannot supply this test's precondition (gt-rdvq)",
-		tm.socketName, serverReadyTimeout)
-}
-
-// defaultKeyBinding reads a builtin binding (prefix-n is next-window, say) from
-// the package's test server, waiting out the server rather than racing it.
-//
-// lookupKeyBinding reports a failed list-keys as "", and getKeyBinding folds
-// that into the same "" it uses for "no such binding" — so a single query made
-// in the window requireTestServer describes reads as "the binding is gone".
-// That is what TestGetKeyBinding_CapturesDefaultBinding saw under the full suite
-// at -p=8: "" for prefix-n, on a server whose builtin table had the binding all
-// along (gt-rdvq).
-//
-// Bounded, never a fixed sleep: the server answering is the precondition, and an
-// empty result after the bound is returned to the caller to judge, so a binding
-// that is genuinely absent still fails the test.
-func defaultKeyBinding(t *testing.T, tm *Tmux, table, key string) string {
-	t.Helper()
-	requireTestServer(t, tm)
-
-	deadline := time.Now().Add(bindingLookupTimeout)
-	for {
-		if got := tm.getKeyBinding(table, key); got != "" {
-			return got
-		}
-		if time.Now().After(deadline) {
-			return ""
-		}
-		time.Sleep(shellPromptPollInterval)
-	}
-}
-
-// waitForShellPrompt blocks until the session's pane shows a shell prompt,
-// which is the precondition a number of tmux tests silently assume.
-//
-// The prompt is not free to wait for: tmux runs a shell as the pane's initial
-// process, and a login shell that sources something slow (nvm.sh and the node it
-// pulls in, for instance) took 4.4-5.4s to reach its first prompt in every new
-// session (gt-n0jv). Tests that start measuring before the prompt is up are
-// measuring shell startup rather than the code under test:
-// AcceptWorkspaceTrustDialog and AcceptBypassPermissionsWarning both early-exit
-// on a prompt indicator, and sendEnterVerified decides whether Enter was
-// processed by comparing pane content before and after — none of that is
-// meaningful against a still-blank pane.
-//
-// TestMain pins a shell that reads no startup file on the test server, which
-// puts the prompt ~100ms out and makes this a barrier (gt-n0jv); the wait below
-// is what covers the tests that create their own server or another socket.
-//
-// Skips rather than fails when the prompt never appears: an absent shell prompt
-// is an environment fault, not a product defect.
-func waitForShellPrompt(t *testing.T, tm *Tmux, session string) {
-	t.Helper()
-	deadline := time.Now().Add(shellPromptWaitTimeout)
-	for time.Now().Before(deadline) {
-		if content, err := tm.CapturePane(session, 30); err == nil && containsPromptIndicator(content) {
-			return
-		}
-		time.Sleep(shellPromptPollInterval)
-	}
-	t.Skipf("no shell prompt in %s after %s; the environment cannot supply this test's precondition (gt-32pv)",
-		session, shellPromptWaitTimeout)
-}
 
 // TestAdaptiveTextDelay verifies the delay scaling logic for post-text delivery.
 func TestAdaptiveTextDelay(t *testing.T) {
@@ -476,6 +353,7 @@ func TestDefaultReadyPromptPrefix(t *testing.T) {
 }
 
 func TestNewSessionSet(t *testing.T) {
+	t.Parallel()
 	// Test creating SessionSet from names
 	names := []string{"session-a", "session-b", "session-c"}
 	set := NewSessionSet(names)
@@ -515,6 +393,7 @@ func TestNewSessionSet(t *testing.T) {
 }
 
 func TestNewSessionSet_Empty(t *testing.T) {
+	t.Parallel()
 	set := NewSessionSet([]string{})
 
 	if set == nil {
@@ -532,6 +411,7 @@ func TestNewSessionSet_Empty(t *testing.T) {
 }
 
 func TestNewSessionSet_Nil(t *testing.T) {
+	t.Parallel()
 	set := NewSessionSet(nil)
 
 	if set == nil {
@@ -544,6 +424,7 @@ func TestNewSessionSet_Nil(t *testing.T) {
 }
 
 func TestFindBindingLine(t *testing.T) {
+	t.Parallel()
 	// Representative list-keys -T prefix output (tmux 3.7c formatting:
 	// aligned columns, backslash-escaped special keys, -r repeat flags).
 	output := "bind-key    -T prefix Space   next-layout\n" +
@@ -603,13 +484,10 @@ func TestZombieStatusString(t *testing.T) {
 func TestValidateCommandBinary(t *testing.T) {
 	t.Parallel()
 
-	absoluteShell := "/bin/sh"
-	if runtime.GOOS == "windows" {
-		path, err := exec.LookPath("sh")
-		if err != nil {
-			t.Skip("sh not installed")
-		}
-		absoluteShell = path
+	// Any absolute path that exists will do; the test binary always does.
+	absoluteShell, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	tests := []struct {

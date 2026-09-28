@@ -1,3 +1,5 @@
+//go:build integration
+
 package tmux
 
 import (
@@ -129,4 +131,23 @@ func paneCommandIsSupportedShell(tm *Tmux) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+func hasTmux() bool {
+	_, err := exec.LookPath("tmux")
+	return err == nil
+}
+
+// newTestTmux returns a Tmux instance connected to the package-level test
+// socket (set by TestMain above). All tests in this package
+// share one tmux server, which is torn down after all tests complete.
+//
+// This isolates tests from the user's interactive tmux and from other
+// packages' tests that run in parallel during `go test ./...`.
+func newTestTmux(t *testing.T) *Tmux {
+	t.Helper()
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	return NewTmux()
 }
