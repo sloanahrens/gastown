@@ -120,11 +120,12 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 }
 
 // readOnlyStringFuncs are the strings and bytes functions that only inspect
-// their arguments.
+// their arguments and return a bool or an int. Functions that return (part
+// of) an argument, such as TrimPrefix, CutPrefix or Cut, are left out: their
+// result can carry the "#!" literal on into a write.
 var readOnlyStringFuncs = map[string]bool{
 	"HasPrefix": true, "HasSuffix": true, "Contains": true, "Index": true,
 	"LastIndex": true, "Count": true, "Equal": true, "EqualFold": true,
-	"TrimPrefix": true, "CutPrefix": true, "Cut": true,
 }
 
 // markReadOnlyLits records the string literals that c, a call to a
