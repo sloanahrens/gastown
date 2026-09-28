@@ -12,7 +12,6 @@ internal/deacon
 internal/doctor
 internal/dog
 internal/doltserver
-internal/events
 internal/feed
 internal/formula
 internal/git
