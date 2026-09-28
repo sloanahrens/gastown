@@ -48,7 +48,17 @@ func (t *Tmux) clk() clockwork.Clock {
 
 // withSocket returns a Tmux on socket that shares t's seams.
 func (t *Tmux) withSocket(socket string) *Tmux {
-	return &Tmux{socketName: socket, exec: t.exec, clock: t.clock, sock: t.sock, socketDir: t.socketDir}
+	return &Tmux{socketName: socket, exec: t.exec, clock: t.clock, sock: t.sock, socketDir: t.socketDir, getenv: t.getenv}
+}
+
+// env reads the process environment through the getenv seam. Methods read
+// only boundary values through it ($TMUX, GT_ROOT, GT_TOWN_ROOT, the
+// live-socket opt-out); tests give each Tmux its own environment.
+func (t *Tmux) env(key string) string {
+	if t.getenv == nil {
+		return os.Getenv(key)
+	}
+	return t.getenv(key)
 }
 
 // socketOps is the filesystem and dial surface the new-session socket guard

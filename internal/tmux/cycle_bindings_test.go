@@ -56,7 +56,7 @@ func TestSetCycleBindings_RefreshesStalePattern(t *testing.T) {
 	if len(binds) != 2 {
 		t.Fatalf("bind-key calls = %v, want n and p rebound", binds)
 	}
-	pattern := sessionPrefixPattern()
+	pattern := tm.sessionPrefixPattern()
 	for i, key := range []string{"n", "p"} {
 		c := binds[i]
 		if !c.has("-T", "prefix", key, "if-shell") {
@@ -72,7 +72,7 @@ func TestSetCycleBindings_RefreshesStalePattern(t *testing.T) {
 // already has --client and the current pattern is left alone.
 func TestSetCycleBindings_SkipsCurrentBinding(t *testing.T) {
 	t.Parallel()
-	current := strings.ReplaceAll(staleCycleBindings, stalePattern, sessionPrefixPattern())
+	current := strings.ReplaceAll(staleCycleBindings, stalePattern, "^(gt|hq)-")
 	s := newScripted(bySub(map[string]reply{"list-keys": ok(current)}))
 	if err := unitTmux(s, nil).SetCycleBindings("gt-x"); err != nil {
 		t.Fatalf("SetCycleBindings: %v", err)

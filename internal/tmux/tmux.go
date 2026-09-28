@@ -190,11 +190,12 @@ func BuildCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 
 // Tmux wraps tmux operations.
 type Tmux struct {
-	socketName string          // tmux socket name (-L flag), empty = default socket
-	exec       execFunc        // nil = realExec; see exec.go
-	clock      clockwork.Clock // nil = real clock; see exec.go
-	sock       *socketOps      // nil = real socket directory and dial; see exec.go
-	socketDir  string          // "" = SocketDir()
+	socketName string              // tmux socket name (-L flag), empty = default socket
+	exec       execFunc            // nil = realExec; see exec.go
+	clock      clockwork.Clock     // nil = real clock; see exec.go
+	sock       *socketOps          // nil = real socket directory and dial; see exec.go
+	socketDir  string              // "" = SocketDir()
+	getenv     func(string) string // nil = os.Getenv; the process env reads methods make
 }
 
 // noTownSocket is a sentinel socket name used when no town socket is configured.
@@ -220,7 +221,7 @@ func (t *Tmux) refuseLiveSessionCreate() error {
 	if !testing.Testing() {
 		return nil
 	}
-	return liveCreateRefusal(t.socketName, SocketFromEnv(), os.Getenv(AllowLiveTmuxEnv) == "1")
+	return liveCreateRefusal(t.socketName, socketFromTMUX(t.env("TMUX")), t.env(AllowLiveTmuxEnv) == "1")
 }
 
 // liveCreateRefusal is refuseLiveSessionCreate's decision for a test binary:
@@ -2074,7 +2075,7 @@ func (t *Tmux) SessionAgentPreset(session, townRootHint string) (string, *config
 		townRoot = townRootHint
 	}
 	if townRoot == "" {
-		townRoot = os.Getenv("GT_ROOT")
+		townRoot = t.env("GT_ROOT")
 	}
 	rigPath := ""
 	if rig, _ := t.GetEnvironment(session, "GT_RIG"); rig != "" && townRoot != "" {
@@ -4522,7 +4523,7 @@ func (t *Tmux) SetMailClickBinding(session string) error {
 	if t.isGTBinding("root", "MouseDown1StatusRight") {
 		return nil
 	}
-	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", t.sessionPrefixPattern())
 	fallback := t.getKeyBinding("root", "MouseDown1StatusRight")
 	if fallback == "" {
 		// No prior binding — do nothing in non-GT sessions
@@ -4797,6 +4798,11 @@ func sessionPrefixPattern() string {
 	return sessionPrefixPatternFor(townRootFrom(os.Getenv))
 }
 
+// sessionPrefixPattern is the package function over t's environment seam.
+func (t *Tmux) sessionPrefixPattern() string {
+	return sessionPrefixPatternFor(townRootFrom(t.env))
+}
+
 // townRootFrom resolves the town root the bindings read rig prefixes from:
 // GT_ROOT, then GT_TOWN_ROOT.
 func townRootFrom(getenv func(string) string) string {
@@ -4850,7 +4856,7 @@ func (t *Tmux) SetCycleBindings(session string) error {
 	// We must re-bind if an older GT binding exists without --client, or if the
 	// prefix pattern is stale (missing newly added rig prefixes).
 	// See: https://github.com/steveyegge/gastown/issues/2299
-	pattern := sessionPrefixPattern()
+	pattern := t.sessionPrefixPattern()
 	if t.isGTBindingWithClient("prefix", "n") && t.isGTBindingCurrent("prefix", "n", pattern) {
 		return nil
 	}
@@ -4896,7 +4902,7 @@ func (t *Tmux) SetCycleBindings(session string) error {
 // See: https://github.com/steveyegge/gastown/issues/13
 // See: https://github.com/steveyegge/gastown/issues/1548
 func (t *Tmux) SetFeedBinding(session string) error {
-	pattern := sessionPrefixPattern()
+	pattern := t.sessionPrefixPattern()
 	// Skip if already configured with the current rig prefix pattern.
 	// Must re-bind if the pattern is stale (e.g., after gt rig add adds a new prefix).
 	if t.isGTBinding("prefix", "a") && t.isGTBindingCurrent("prefix", "a", pattern) {
@@ -4924,7 +4930,7 @@ func (t *Tmux) SetFeedBinding(session string) error {
 // press is silently ignored.
 // See: https://github.com/steveyegge/gastown/issues/1548
 func (t *Tmux) SetAgentsBinding(session string) error {
-	pattern := sessionPrefixPattern()
+	pattern := t.sessionPrefixPattern()
 	// Skip if already configured with the current rig prefix pattern.
 	// Must re-bind if the pattern is stale (e.g., after gt rig add adds a new prefix).
 	if t.isGTBinding("prefix", "g") && t.isGTBindingCurrent("prefix", "g", pattern) {
@@ -4950,7 +4956,7 @@ func (t *Tmux) SetRigMenuBinding(session string) error {
 	if t.isGTBinding("prefix", "r") {
 		return nil
 	}
-	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", t.sessionPrefixPattern())
 	fallback := t.getKeyBinding("prefix", "r")
 	if fallback == "" {
 		fallback = ":"

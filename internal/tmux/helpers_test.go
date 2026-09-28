@@ -13,8 +13,11 @@ import (
 
 // newTmuxForTest builds a Tmux whose processes and clock are supplied by the
 // test. A nil ex or clk falls back to the real one.
+//
+// Its environment is empty: nothing a method reads through t.env comes from
+// the host running the test.
 func newTmuxForTest(socket string, ex execFunc, clk clockwork.Clock) *Tmux {
-	return &Tmux{socketName: socket, exec: ex, clock: clk}
+	return &Tmux{socketName: socket, exec: ex, clock: clk, getenv: func(string) string { return "" }}
 }
 
 // driveClock advances clk by step every time a goroutine blocks on it, until

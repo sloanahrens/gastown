@@ -237,3 +237,31 @@ func TestCheckSessionHealth_ActivityCheck(t *testing.T) {
 		t.Errorf("activity check disabled: %v, want SessionHealthy", status)
 	}
 }
+
+// TestTmuxEnvironmentIsInjected: the boundary values methods read (the town
+// root for the prefix pattern and the agent preset) come through the Tmux's
+// environment seam, never the host's.
+func TestTmuxEnvironmentIsInjected(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigs := `{"version":1,"rigs":{"alpha":{"git_url":"https://example.com/a.git","beads":{"repo":"local","prefix":"al-"}}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(rigs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tm := unitTmux(newScripted(nil), nil)
+	if got := tm.sessionPrefixPattern(); got != "^(gt|hq)-" {
+		t.Errorf("empty environment: pattern = %q, want ^(gt|hq)-", got)
+	}
+	tm.getenv = func(k string) string {
+		if k == "GT_ROOT" {
+			return town
+		}
+		return ""
+	}
+	if got := tm.sessionPrefixPattern(); got != "^(al|gt|hq)-" {
+		t.Errorf("GT_ROOT=%s: pattern = %q, want ^(al|gt|hq)-", town, got)
+	}
+}
