@@ -17,7 +17,6 @@ internal/formula
 internal/git
 internal/hooks
 internal/krc
-internal/lock
 internal/mail
 internal/mayor
 internal/nudge
