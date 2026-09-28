@@ -1430,7 +1430,14 @@ func acquireNudgeLock(clk clockwork.Clock, session string, timeout time.Duration
 	select {
 	case sem <- struct{}{}:
 		return true
-	case <-clk.After(timeout):
+	default:
+	}
+	timer := clk.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return true
+	case <-timer.Chan():
 		return false
 	}
 }
