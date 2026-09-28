@@ -13,6 +13,12 @@ Before you write or convert a test in this repository, read this page. It covers
 - `make test-integration` runs `go test -tags integration -run '^TestIntegration' ./...`. Tests that need Docker still need a `gt slot run` around the call.
 - `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
 
+The unit tier does no real I/O that carries a wall-clock timeout. That includes sockets and dials: a 200 ms dial in `internal/tmux` timed out under load (a 1-in-600 failure) and blocked other runs for 150 s in socket syscalls. The `no-network` rule enforces this for sockets, and the same rule applies by review to anything else with a deadline. Put such I/O behind a seam and script it; the filesystem through `t.TempDir` is fine.
+
+The integration tier is only for tests that need the real tool. A test that moves there to escape a rule, such as a global swap, belongs in the unit tier behind a seam. Integration tests also follow the zero-flakes rule:
+- They poll for the condition they need with a generous deadline (`eventually` and `integrationWait` in `internal/tmux`), never sleep for a guessed interval.
+- A missing precondition fails the test instead of skipping it.
+
 `go test -tags integration` compiles both tiers together. `TestMain` therefore lives in the integration tier only (see `internal/tmux/testmain_integration_test.go`). A unit test must pass with no tmux, ps or docker on `PATH`.
 
 ## The rules
@@ -26,6 +32,7 @@ Before you write or convert a test in this repository, read this page. It covers
 | `no-chdir` | call `os.Chdir` or `t.Chdir` |
 | `no-skip` | call `t.Skip`, `t.Skipf` or `t.SkipNow` |
 | `no-subprocess` | run `exec.Command` on anything but `git` |
+| `no-network` | dial or listen (`net.Dial*`, `net.Listen*`, or build a `net.Dialer` or `net.ListenConfig`) |
 | `no-build` | run the `go` tool |
 | `no-exec-files` | write a `#!` script or create or chmod a file with an execute bit |
 | `no-global-swap` | assign a package-level variable |
@@ -81,28 +88,32 @@ func newTmuxForTest(socket string, ex execFunc, clk clockwork.Clock) *Tmux {
 }
 ```
 
-A test then asserts what was sent (bucket T below):
+A test then asserts what was sent (bucket T below). `scripted` in `helpers_test.go` records every call, with the `-u -L <socket>` prefix split off:
 
 ```go
 func TestHasSessionSendsHasSession(t *testing.T) {
 	t.Parallel()
-	ex, calls := recorder(nil)
-	tm := newTmuxForTest("gt-test-x", ex, nil)
+	s := newScripted(nil)
+	tm := newTmuxForTest("gt-test-x", s.exec, nil)
 	ok, err := tm.HasSession("alpha")
 	if err != nil || !ok {
 		t.Fatalf("HasSession = %v, %v; want true, nil", ok, err)
 	}
-	want := call{"tmux", []string{"-u", "-L", "gt-test-x", "has-session", "-t", "=alpha"}}
-	if len(*calls) == 0 || !reflect.DeepEqual((*calls)[0], want) {
-		t.Fatalf("calls = %+v, want first %+v", *calls, want)
+	want := tmuxCall{name: "tmux", socket: "gt-test-x", args: []string{"has-session", "-t", "=alpha"}}
+	if calls := s.all(); len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 }
 ```
 
-For bigger tests the package has two helpers in `helpers_test.go` and `fakeserver_test.go`:
+For bigger tests the package has more helpers:
+- `bySub` answers `scripted` from a map keyed by subcommand.
+- `fakeServer` (`fakeserver_test.go`) is a small stateful model of a tmux server and the process table that `ps` and `kill` see.
+- `fakeSockets` (`fakesockets_test.go`) scripts the socket directory behind the `socketOps` seam.
 
-- `scripted` records calls and answers through a function; `bySub` builds that function from a map keyed by subcommand.
-- `fakeServer` is a small stateful model of a tmux server and the process table that `ps` and `kill` see.
+Every canned answer is pinned to the real tool. Any argv-level emulator, and any canned stdout or stderr, must be checked by a differential integration test: it replays the argv the package sends against the real tool and against the emulator, and compares exit status, error family and output. `TestIntegrationFakeServerMatchesTmux` does this for `fakeServer`, and the missing-target and no-server paths are in its table. When a unit test asserts an error, the canned stderr must be the real tool's words. In tmux 3.7c, `send-keys` to a missing session says "can't find pane", not "can't find session", and a test that invented the latter hid a real bug (`WaitForIdle` never saw the session had gone).
+
+Other environment reads go through a seam too. Methods read `$TMUX` and `GT_ROOT` through `t.env`, and `newTmuxForTest` gives each test an empty environment.
 
 ### Interface seams
 
@@ -133,6 +144,8 @@ Every sleep, deadline and time read goes through `clockwork.Clock`:
 - `t.clk().Since(x)`
 - `t.clk().NewTimer(d)` (read it with `.Chan()`)
 - `clockwork.WithTimeout(ctx, clk, d)` for a context deadline
+
+Fake clocks start from a fixed epoch: `newFixedClock()` returns `clockwork.NewFakeClockAt(testEpoch)`. Never seed one from `time.Now()`, and date fixtures (stamps, activity times) from the same epoch.
 
 When a context may be clock-driven, check `ctx.Done()` rather than calling `ctx.Err()`, because a clock-driven context's `Err` blocks until the context is done. A package-level variable that exists only so tests can shrink an interval goes back to being a `const`; the fake clock moves past the real value instead.
 
@@ -221,7 +234,7 @@ func TestIntegrationSessionsContract(t *testing.T) {
 }
 ```
 
-Write the integration runner first. If a contract case fails against the real implementation, the contract is wrong: correct it to what the real system does, then make the fake copy it. Every behavior the fake claims should be pinned by a contract case.
+Write the integration runner first. If a contract case fails against the real implementation, the contract is wrong: correct it to what the real system does, then make the fake copy it. Every behavior the fake claims should be pinned by a contract case. That includes the error and missing-object paths, not only the happy path: `RunSessionsContract` pins no-server, missing-session (kill, pane command, capture, send, environment), unset-variable and create-validation behavior.
 
 ## Converting a package
 
@@ -230,7 +243,7 @@ Write the integration runner first. If a contract case fails against the real im
 - **T (translation):** the test checks what a method sends. Rewrite it as a unit test that asserts the recorded calls.
 - **L (logic):** the test checks parsing, detection, decisions or timeouts over output. Rewrite it with canned output and the fake clock. Pure functions only need `t.Parallel()`.
 - **R (real):** the behavior exists only in the real system, such as tmux's `-S` history window, a hook firing, a process tree, or socket ownership. Move the test to an `_integration_test.go` file and rename it `TestIntegration<OldName>`. If it is about the fake's surface, add a case to the contract instead.
-- **D (delete):** the test re-enacts something a T, L or R test already covers, exercises no production code, or asserts nothing. Record why.
+- **D (delete):** the test re-enacts something a T, L or R test already covers, exercises no production code, or asserts nothing. Record why. Every deleted test is listed by name, with its reason, in the commit that deletes it and in the MR body.
 
 Keep the triage as a TSV (`file`, `test`, `bucket`, `reason`). The MR body is built from it.
 
