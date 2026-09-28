@@ -108,7 +108,9 @@ func (d *Daemon) triggerMayorDispatch() bool {
 		d.logger.Printf("mayor_dispatch: due — %s", dec.note)
 	}
 
+	d.mayorDispatchCycles.Add(1)
 	go func() {
+		defer d.mayorDispatchCycles.Done()
 		defer d.mayorDispatchRunning.Store(false)
 		d.runMayorDispatch()
 		if d.config == nil {

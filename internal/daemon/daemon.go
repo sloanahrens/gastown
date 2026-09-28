@@ -330,6 +330,11 @@ type Daemon struct {
 	// seconds, and running them inline would hold the tick loop (gt-59o9).
 	mayorDispatchRunning atomic.Bool
 
+	// mayorDispatchCycles counts the cycle goroutines triggerMayorDispatch has
+	// started and not yet finished, so a caller can wait for a triggered
+	// cycle to end instead of polling mayorDispatchRunning against a clock.
+	mayorDispatchCycles sync.WaitGroup
+
 	// patrolWatchdogRunning is the single-flight guard for the patrol_watchdog
 	// patrol, on its own goroutine: it checks every known rig's witness and
 	// refinery plus the deacon, each read involving a bd subprocess and a
