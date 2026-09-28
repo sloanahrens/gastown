@@ -174,12 +174,7 @@ func BuildCommand(args ...string) *exec.Cmd {
 
 // BuildCommandContext is like BuildCommand but honors a context for cancellation.
 func BuildCommandContext(ctx context.Context, args ...string) *exec.Cmd {
-	allArgs := []string{"-u"}
-	if sock := GetDefaultSocket(); sock != "" {
-		allArgs = append(allArgs, "-L", sock)
-	}
-	allArgs = append(allArgs, args...)
-	cmd := exec.CommandContext(ctx, "tmux", allArgs...)
+	cmd := exec.CommandContext(ctx, "tmux", socketArgs(GetDefaultSocket(), args)...)
 	hideConsoleWindow(cmd)
 	return cmd
 }
@@ -211,16 +206,22 @@ const AllowLiveTmuxEnv = "BEADS_TEST_ALLOW_LIVE_TMUX"
 // (gt-2bj). Creation rather than NewTmux, so tests that only read keep working
 // without a harness.
 func (t *Tmux) refuseLiveSessionCreate() error {
-	if !testing.Testing() || os.Getenv(AllowLiveTmuxEnv) == "1" {
+	if !testing.Testing() {
 		return nil
 	}
-	live := SocketFromEnv()
-	if live == "" {
+	return liveCreateRefusal(t.socketName, SocketFromEnv(), os.Getenv(AllowLiveTmuxEnv) == "1")
+}
+
+// liveCreateRefusal is refuseLiveSessionCreate's decision for a test binary:
+// socketName is the Tmux's socket, live the socket named by $TMUX, and
+// allowLive the AllowLiveTmuxEnv opt-out.
+func liveCreateRefusal(socketName, live string, allowLive bool) error {
+	if allowLive || live == "" {
 		return nil
 	}
 	// An empty socketName is not the default server: tmux honors $TMUX ahead of
 	// it, so the two both resolve to the server this process runs inside.
-	if t.socketName != "" && t.socketName != live {
+	if socketName != "" && socketName != live {
 		return nil
 	}
 	return fmt.Errorf(
@@ -281,9 +282,15 @@ func (t *Tmux) run(args ...string) (string, error) {
 
 // tmuxArgs prepends the UTF-8 flag and socket selection to a tmux subcommand.
 func (t *Tmux) tmuxArgs(args []string) []string {
+	return socketArgs(t.socketName, args)
+}
+
+// socketArgs is the tmux argv (after the program name) for args on socket:
+// always -u for UTF-8, then -L socket unless socket is empty.
+func socketArgs(socket string, args []string) []string {
 	allArgs := []string{"-u"}
-	if t.socketName != "" {
-		allArgs = append(allArgs, "-L", t.socketName)
+	if socket != "" {
+		allArgs = append(allArgs, "-L", socket)
 	}
 	return append(allArgs, args...)
 }
@@ -5008,7 +5015,12 @@ func (t *Tmux) GetSessionCreatedUnix(session string) (int64, error) {
 // Returns the basename of the socket path (e.g., "default", "gt"), or empty if
 // not in tmux or the env variable is not set.
 func SocketFromEnv() string {
-	tmuxEnv := os.Getenv("TMUX")
+	return socketFromTMUX(os.Getenv("TMUX"))
+}
+
+// socketFromTMUX extracts the socket name from a $TMUX value
+// ("/path/to/socket,pid,session").
+func socketFromTMUX(tmuxEnv string) string {
 	if tmuxEnv == "" {
 		return ""
 	}

@@ -1,3 +1,5 @@
+//go:build integration
+
 package tmux
 
 import (
@@ -22,7 +24,7 @@ func readIfExists(path string) ([]byte, error) {
 	return data, err
 }
 
-// TestNewSessionWithCommandAndEnv_SubprocessInheritsEnv verifies the gt-neycp
+// TestIntegrationNewSessionWithCommandAndEnv_SubprocessInheritsEnv verifies the gt-neycp
 // fix: env vars passed via tmux -e flags reach SUBPROCESSES spawned inside the
 // pane, not just the initial shell. This is the contract bd subprocess of
 // Claude depends on — without it, bd auto-discovers a per-rig embedded Dolt
@@ -31,7 +33,7 @@ func readIfExists(path string) ([]byte, error) {
 // The pane runs a shell that spawns a child shell which writes the value of
 // BEADS_DOLT_PORT (as seen by the child) to a file. We then verify the file
 // contains the expected port. Subprocess inheritance is what matters here.
-func TestNewSessionWithCommandAndEnv_SubprocessInheritsEnv(t *testing.T) {
+func TestIntegrationNewSessionWithCommandAndEnv_SubprocessInheritsEnv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell command; skipping on Windows")
 	}
