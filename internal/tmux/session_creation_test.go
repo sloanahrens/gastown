@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jonboulle/clockwork"
 )
 
 // Tests for the two-step session creation (new-session + respawn-pane) and
@@ -33,7 +31,7 @@ func paneState(dead, status string) func(tmuxCall) reply {
 // checkSessionAfterCreate's waits.
 func createAndDrive(t *testing.T, s *scripted, create func(tm *Tmux) error) error {
 	t.Helper()
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm := unitTmux(s, clk)
 	done := make(chan error, 1)
 	go func() { done <- create(tm) }()
@@ -188,7 +186,7 @@ func TestWaitForCommand_Timeout(t *testing.T) {
 		}
 		return ok("")
 	})
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm := unitTmux(s, clk)
 	done := make(chan error, 1)
 	go func() { done <- tm.WaitForCommand("gt-x", []string{"bash", "zsh", "sh"}, 500*time.Millisecond) }()
@@ -213,7 +211,7 @@ func TestWaitForCommand_AgentReadySentinel(t *testing.T) {
 		}
 		return ok("")
 	})
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	done := make(chan error, 1)
 	go func() { done <- unitTmux(s, clk).WaitForCommand("gt-x", []string{"bash"}, time.Second) }()
 	if err := driveClock(t, clk, 100*time.Millisecond, done); err != nil {
@@ -284,7 +282,7 @@ func TestContainsRewindIndicators(t *testing.T) {
 func TestSendMessageToTarget_Chunking(t *testing.T) {
 	t.Parallel()
 	s := newScripted(nil)
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	msg := strings.Repeat("A", 600)
 	done := make(chan error, 1)
 	go func() { done <- unitTmux(s, clk).sendMessageToTarget("gt-x", msg) }()

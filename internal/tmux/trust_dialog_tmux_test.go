@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -21,7 +20,7 @@ import (
 func acceptTrust(t *testing.T, pane *fakePane) error {
 	t.Helper()
 	s := newScripted(pane.answer)
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	done := make(chan error, 1)
 	go func() { done <- unitTmux(s, clk).AcceptWorkspaceTrustDialog("gt-x") }()
 	return driveClock(t, clk, constants.DialogPollInterval, done)
@@ -152,7 +151,7 @@ func TestAcceptWorkspaceTrustDialog_WaitsForLateDialog(t *testing.T) {
 	t.Parallel()
 	pane := &fakePane{content: "", confirm: showPrompt}
 	s := newScripted(pane.answer)
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	done := make(chan error, 1)
 	go func() { done <- unitTmux(s, clk).AcceptWorkspaceTrustDialog("gt-x") }()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)

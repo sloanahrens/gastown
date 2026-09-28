@@ -5,8 +5,6 @@ import (
 	"reflect"
 	"testing"
 	"time"
-
-	"github.com/jonboulle/clockwork"
 )
 
 func TestListSessionsNoServer(t *testing.T) {
@@ -64,7 +62,7 @@ func TestHasSessionNoServer(t *testing.T) {
 func TestSendKeysAndCapture(t *testing.T) {
 	t.Parallel()
 	s := newScripted(bySub(map[string]reply{"capture-pane": ok("$ echo HELLO_TEST_MARKER\nHELLO_TEST_MARKER")}))
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm := unitTmux(s, clk)
 
 	done := make(chan error, 1)

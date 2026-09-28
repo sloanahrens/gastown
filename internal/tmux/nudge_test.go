@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -91,7 +90,7 @@ func TestSendKeysLiteralWithRetry_RetriesTransientError(t *testing.T) {
 		}
 		return ok("")
 	})
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm := unitTmux(s, clk)
 	if err := driven(t, clk, constants.NudgeRetryInterval, func() error {
 		return tm.sendKeysLiteralWithRetry("gt-x", "hello", 5*time.Second)
@@ -106,7 +105,7 @@ func TestSendKeysLiteralWithRetry_RetriesTransientError(t *testing.T) {
 func TestSendKeysLiteralWithRetry_TransientUntilTimeout(t *testing.T) {
 	t.Parallel()
 	s := newScripted(func(tmuxCall) reply { return fail("not in a mode") })
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm := unitTmux(s, clk)
 	err := driven(t, clk, constants.NudgeRetryInterval, func() error {
 		return tm.sendKeysLiteralWithRetry("gt-x", "hello", 3*time.Second)
@@ -123,7 +122,7 @@ func TestSendKeysLiteralWithRetry_TransientUntilTimeout(t *testing.T) {
 func TestSendKeysLeadingDash_NotParsedAsFlags(t *testing.T) {
 	t.Parallel()
 	s := newScripted(nil)
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm := unitTmux(s, clk)
 	longMsg := strings.Repeat("x", sendKeysChunkSize) + "-r second chunk starts with dash"
 	if err := driven(t, clk, 10*time.Millisecond, func() error {
@@ -164,7 +163,7 @@ func nudgeFixture(t *testing.T) (*fakeServer, *fpane, string) {
 
 func nudge(t *testing.T, f *fakeServer, session, message string) (*scripted, error) {
 	t.Helper()
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm, s := f.tmux(clk)
 	return s, driven(t, clk, 50*time.Millisecond, func() error { return tm.NudgeSession(session, message) })
 }

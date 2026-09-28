@@ -5,8 +5,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/jonboulle/clockwork"
 )
 
 // processTree is a fakeServer whose session gt-x runs a shell (the pane
@@ -253,7 +251,7 @@ func TestCollectReparentedGroupMembers(t *testing.T) {
 // killWith runs kill on a fake clock, driving it through the grace periods.
 func killWith(t *testing.T, f *fakeServer, kill func(tm *Tmux) error) (*scripted, error) {
 	t.Helper()
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm, s := f.tmux(clk)
 	return s, driven(t, clk, processKillGracePeriod, func() error { return kill(tm) })
 }
@@ -446,7 +444,7 @@ func TestCleanupOrphanedSessions(t *testing.T) {
 	live := f.addSession("gt-live", "bash")      // agent running under a shell
 	f.spawn(live.panes[0].pid, "claude")
 
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm, _ := f.tmux(clk)
 	var cleaned int
 	err := driven(t, clk, processKillGracePeriod, func() error {

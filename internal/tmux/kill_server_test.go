@@ -4,8 +4,6 @@ package tmux
 
 import (
 	"testing"
-
-	"github.com/jonboulle/clockwork"
 )
 
 // TestKillServerClearsLitterWithNoServer pins the ErrNoServer path: a kill that
@@ -126,7 +124,7 @@ func TestOwnsSocketFile(t *testing.T) {
 func TestKillServerLeavesTownSocketAlone(t *testing.T) {
 	t.Parallel()
 	s := newScripted(bySub(map[string]reply{"kill-server": fail("no server running")}))
-	tm := newTmuxForTest("", s.exec, clockwork.NewFakeClock())
+	tm := newTmuxForTest("", s.exec, newFixedClock())
 	if tm.ownsSocketFile() {
 		t.Fatal("default-socket wrapper would unlink the town socket file")
 	}

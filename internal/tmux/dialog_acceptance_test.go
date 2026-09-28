@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -22,7 +21,7 @@ const bypassDialog = ` WARNING: Claude Code running in Bypass Permissions mode
 func runDialog(t *testing.T, pane *fakePane, f func(tm *Tmux) error) (*scripted, error) {
 	t.Helper()
 	s := newScripted(pane.answer)
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	done := make(chan error, 1)
 	go func() { done <- f(unitTmux(s, clk)) }()
 	return s, driveClock(t, clk, constants.DialogPollInterval, done)

@@ -1016,7 +1016,7 @@ func captureTmux(t *testing.T, captures []string) (*Tmux, *clockwork.FakeClock, 
 		}
 		return ok(captures[i])
 	})
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	count := func() int {
 		mu.Lock()
 		defer mu.Unlock()

@@ -5,8 +5,6 @@ import (
 	"runtime"
 	"testing"
 	"time"
-
-	"github.com/jonboulle/clockwork"
 )
 
 func TestFindAgentPane_SinglePane(t *testing.T) {
@@ -99,7 +97,7 @@ func TestFindAgentPane_MultiPaneNoAgent(t *testing.T) {
 func TestNudgeLockTimeout(t *testing.T) {
 	t.Parallel()
 	session := "test-nudge-" + t.Name()
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	if !acquireNudgeLock(clk, session, time.Second) {
 		t.Fatal("initial acquireNudgeLock should succeed")
 	}
@@ -128,7 +126,7 @@ func TestNudgeLockConcurrency(t *testing.T) {
 	t.Parallel()
 	session := "test-nudge-" + t.Name()
 	const waiters = 5
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	if !acquireNudgeLock(clk, session, time.Second) {
 		t.Fatal("initial acquire should succeed")
 	}
@@ -169,7 +167,7 @@ func TestNudgeLockDifferentSessions(t *testing.T) {
 	t.Parallel()
 	session1 := "test-nudge-a-" + t.Name()
 	session2 := "test-nudge-b-" + t.Name()
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	if !acquireNudgeLock(clk, session1, time.Second) {
 		t.Fatal("acquire session1 should succeed")
 	}

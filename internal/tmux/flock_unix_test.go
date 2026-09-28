@@ -20,7 +20,7 @@ func TestAcquireFlockLockTimesOutOnFakeClock(t *testing.T) {
 	}
 	defer release()
 
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	done := make(chan error, 1)
 	go func() {
 		_, err := acquireFlockLock(clk, lock, 5*time.Second)

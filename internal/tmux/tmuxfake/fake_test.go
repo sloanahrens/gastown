@@ -13,12 +13,12 @@ import (
 
 func TestFakeSessionsContract(t *testing.T) {
 	t.Parallel()
-	RunSessionsContract(t, func(t *testing.T) Sessions { return New(clockwork.NewFakeClock()) })
+	RunSessionsContract(t, func(t *testing.T) Sessions { return New(fixedClock()) })
 }
 
 func TestFakeWaitForIdleWakesOnSetIdle(t *testing.T) {
 	t.Parallel()
-	s := New(clockwork.NewFakeClock())
+	s := New(fixedClock())
 	if err := s.NewSession("a", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestFakeWaitForIdleWakesOnSetIdle(t *testing.T) {
 
 func TestFakeWaitForCommandTimesOutOnClock(t *testing.T) {
 	t.Parallel()
-	clk := clockwork.NewFakeClock()
+	clk := fixedClock()
 	s := New(clk)
 	if err := s.NewSession("a", ""); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestFakeWaitForCommandTimesOutOnClock(t *testing.T) {
 
 func TestFakeScriptingHelpers(t *testing.T) {
 	t.Parallel()
-	s := New(clockwork.NewFakeClock())
+	s := New(fixedClock())
 	if err := s.NewSessionWithCommandAndEnv("a", "", "claude --x", map[string]string{"K": "v"}); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestFakeScriptingHelpers(t *testing.T) {
 // sentinel left from before the wait does not count.
 func TestFakeWaitForCommandHonoursAgentReady(t *testing.T) {
 	t.Parallel()
-	s := New(clockwork.NewFakeClock())
+	s := New(fixedClock())
 	if err := s.NewSessionWithCommandAndEnv("a", "", "", map[string]string{tmux.EnvAgentReady: "1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestFakeWaitForCommandHonoursAgentReady(t *testing.T) {
 
 func TestFakeWaitForRuntimeReadyReadsLastTenLines(t *testing.T) {
 	t.Parallel()
-	clk := clockwork.NewFakeClock()
+	clk := fixedClock()
 	s := New(clk)
 	if err := s.NewSession("a", ""); err != nil {
 		t.Fatal(err)
@@ -154,4 +154,10 @@ func TestFakeWaitForRuntimeReadyReadsLastTenLines(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatal("WaitForRuntimeReady saw a prompt beyond the last 10 lines")
 	}
+}
+
+// fixedClock is a fake clock at a fixed instant, so no test depends on the
+// wall clock it runs at.
+func fixedClock() *clockwork.FakeClock {
+	return clockwork.NewFakeClockAt(time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC))
 }

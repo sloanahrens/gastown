@@ -201,7 +201,7 @@ func bySub(m map[string]reply) func(tmuxCall) reply {
 // unitTmux returns a Tmux on socket gt-test-unit driven by s and clk.
 func unitTmux(s *scripted, clk clockwork.Clock) *Tmux {
 	if clk == nil {
-		clk = clockwork.NewFakeClock()
+		clk = newFixedClock()
 	}
 	return newTmuxForTest("gt-test-unit", s.exec, clk)
 }

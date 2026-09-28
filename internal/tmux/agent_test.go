@@ -3,8 +3,6 @@ package tmux
 import (
 	"errors"
 	"testing"
-
-	"github.com/jonboulle/clockwork"
 )
 
 // These run the session-freshness and agent-liveness logic against
@@ -30,7 +28,7 @@ func TestEnsureSessionFresh_ZombieSession(t *testing.T) {
 	t.Parallel()
 	f := newFakeServer()
 	old := f.addSession("gt-x", "bash")
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm, s := f.tmux(clk)
 	if tm.IsAgentAlive("gt-x") {
 		t.Fatal("fixture: a bare shell must not read as a live agent")
@@ -64,7 +62,7 @@ func TestEnsureSessionFresh_KeepsLiveAgent(t *testing.T) {
 func TestEnsureSessionFresh_IdempotentOnZombie(t *testing.T) {
 	t.Parallel()
 	f := newFakeServer()
-	clk := clockwork.NewFakeClock()
+	clk := newFixedClock()
 	tm, _ := f.tmux(clk)
 	for i := 0; i < 3; i++ {
 		if err := driven(t, clk, processKillGracePeriod, func() error { return tm.EnsureSessionFresh("gt-x", "") }); err != nil {

@@ -4,8 +4,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/jonboulle/clockwork"
 )
 
 // TestWaitForIdle_VanishedSessionEndsWait: real tmux answers capture-pane on
@@ -15,7 +13,7 @@ import (
 func TestWaitForIdle_VanishedSessionEndsWait(t *testing.T) {
 	t.Parallel()
 	s := newScripted(bySub(map[string]reply{"capture-pane": fail("can't find pane: gt-x")}))
-	tm := unitTmux(s, clockwork.NewFakeClock())
+	tm := unitTmux(s, newFixedClock())
 	err := returnsWithoutClock(t, func() error { return tm.WaitForIdle("gt-x", time.Minute) })
 	if !errors.Is(err, ErrPaneNotFound) {
 		t.Fatalf("WaitForIdle(missing) = %v, want ErrPaneNotFound", err)
