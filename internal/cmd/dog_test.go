@@ -361,6 +361,7 @@ func TestFormulaWispIDs_FiltersToAttachedFormula(t *testing.T) {
 // "signal: killed" at 10.01s having asserted nothing about dog done.
 type fakeDogWispOps struct {
 	queryOut   string
+	closeCount int // what each close reports having closed
 	trees      map[string][]beads.WispStep
 	queryArgs  [][]string
 	treeReads  []string
@@ -385,13 +386,7 @@ func (f *fakeDogWispOps) ops() dogWispOps {
 		close: func(_ context.Context, reason string, tree []beads.WispStep) (int, error) {
 			f.closeCalls = append(f.closeCalls, tree)
 			f.reasons = append(f.reasons, reason)
-			n := 0
-			for _, step := range tree {
-				if step.Status != string(beads.StatusClosed) {
-					n++
-				}
-			}
-			return n, nil
+			return f.closeCount, nil
 		},
 	}
 }
@@ -413,16 +408,18 @@ func TestCloseDogFormulaWisps_ClosesHookedFormulaWisp(t *testing.T) {
 	f := &fakeDogWispOps{
 		queryOut: `[{"id":"hq-task","status":"hooked","description":"unrelated"},` +
 			`{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n"}]`,
-		trees: map[string][]beads.WispStep{"hq-wisp-admuv": tree},
+		trees:      map[string][]beads.WispStep{"hq-wisp-admuv": tree},
+		closeCount: 2,
 	}
 
 	closed, err := closeDogFormulaWispsWith(context.Background(), f.ops(), "alpha")
 	if err != nil {
 		t.Fatalf("closeDogFormulaWispsWith: %v", err)
 	}
-	// The root and the one still-open step; the already-closed step is skipped.
-	if closed != 2 {
-		t.Errorf("closeDogFormulaWispsWith() = %d, want 2", closed)
+	// The count is what the tree close reported; which steps it closes (not
+	// the already-closed one) is CloseWispTree's, tested in internal/beads.
+	if closed != f.closeCount {
+		t.Errorf("closeDogFormulaWispsWith() = %d, want the %d the close reported", closed, f.closeCount)
 	}
 
 	wantQuery := []string{"query", "--json",
