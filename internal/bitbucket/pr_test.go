@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -302,4 +303,21 @@ func TestAPIError(t *testing.T) {
 	var apiErr *APIError
 	assert.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, 404, apiErr.StatusCode)
+}
+
+// TestNewClient_ReadsProcessEnv pins that the exported constructor takes its
+// token from the process's BITBUCKET_TOKEN, exactly as newClient does with os.Getenv.
+func TestNewClient_ReadsProcessEnv(t *testing.T) {
+	t.Parallel()
+	got, gotErr := NewClient()
+	want, wantErr := newClient(os.Getenv)
+	if (gotErr == nil) != (wantErr == nil) {
+		t.Fatalf("NewClient() err = %v, newClient(os.Getenv) err = %v", gotErr, wantErr)
+	}
+	if gotErr != nil {
+		assert.ErrorContains(t, gotErr, "BITBUCKET_TOKEN is required")
+		return
+	}
+	assert.Equal(t, os.Getenv("BITBUCKET_TOKEN"), got.token)
+	assert.Equal(t, want.token, got.token)
 }
