@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
@@ -166,6 +167,11 @@ func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) 
 	return dolt.Run(ctx, DoltDockerImage, doltContainerOpts()...)
 }
 
+// doltEntrypointDoneLog is the last line the dolt-sql-server image's
+// entrypoint prints, after its init SQL; until then a statement that
+// changes the catalog can kill the container.
+const doltEntrypointDoneLog = "Dolt init process done. Ready for connections."
+
 // doltContainerOpts is every option a test Dolt container starts with. The
 // data dir is tmpfs by default: each bd init DOLT_COMMITs 66 migrations, and
 // on the Docker Desktop VM disk every commit's fsync reaches the host SSD
@@ -181,6 +187,15 @@ func doltContainerOpts() []testcontainers.ContainerCustomizer {
 		// req.Env without a nil check, so it needs the map already set.
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
 		dolt.WithDatabase("gt_test"),
+		// The module waits only for dolt's own "Server ready" line. The
+		// image's entrypoint logs that and then keeps running init SQL
+		// (a root-host check, CREATE DATABASE gt_test, SELECT FROM
+		// mysql.user) through `dolt sql` under `set -e`: a statement that
+		// fails there exits the entrypoint with status 1 and the container
+		// dies under the tests, and one overlapping a catalog change (the
+		// pool's CREATE DATABASEs, a test's CREATE or DROP) does fail. Wait
+		// for the entrypoint's own last line as well.
+		testcontainers.WithAdditionalWaitStrategy(wait.ForLog(doltEntrypointDoneLog)),
 	}
 	if labels := slot.TestContainerOwnerLabels(); labels != nil {
 		opts = append(opts, testcontainers.WithLabels(labels))
