@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -944,11 +945,11 @@ func (h *handlers) notifyMayorSlotOpen(workDir, rigName, polecatName, exitType s
 		}
 	} else if result.Dispatched > 0 {
 		if status, ok := schedulerOpenAfterSlot(result); ok {
-			notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType, status)
+			h.notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType, status)
 		}
 		return
 	} else if status, ok := schedulerOpenAfterSlot(result); ok {
-		notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType, status)
+		h.notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType, status)
 		return
 	} else if status := schedulerStatusAfterSlot(result); status.Capacity.Max > 0 && (status.Paused || status.Capacity.Free <= 0) {
 		return
@@ -976,9 +977,7 @@ func (h *handlers) notifyMayorSlotOpen(workDir, rigName, polecatName, exitType s
 	// Fall back to mail so the completion is not silently lost.
 	subject := fmt.Sprintf("SLOT_OPEN: %s/%s completed (exit=%s)", rigName, polecatName, exitType)
 	body := fmt.Sprintf("Polecat %s/%s finished (exit=%s). Slot available for next bead.", rigName, polecatName, exitType)
-	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
-	cmd.Dir = townRoot
-	_ = cmd.Run()
+	_ = h.notify(townRoot).MailSend(context.Background(), "mayor/", subject, body)
 }
 
 func schedulerOpenAfterSlot(result slotOpenSchedulerResult) (slotOpenSchedulerStatus, bool) {
@@ -994,7 +993,7 @@ func schedulerStatusAfterSlot(result slotOpenSchedulerResult) slotOpenSchedulerS
 	return status
 }
 
-func notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType string, status slotOpenSchedulerStatus) {
+func (h *handlers) notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType string, status slotOpenSchedulerStatus) {
 	_, _ = channelevents.EmitToTown(townRoot, "mayor", "", "SCHEDULER_OPEN", []string{
 		"source=witness",
 		"rig=" + rigName,
@@ -1014,9 +1013,7 @@ func notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType string, s
 	}
 
 	subject := fmt.Sprintf("SCHEDULER_OPEN: %s/%s completed (exit=%s)", rigName, polecatName, exitType)
-	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", msg)
-	cmd.Dir = townRoot
-	_ = cmd.Run()
+	_ = h.notify(townRoot).MailSend(context.Background(), "mayor/", subject, msg)
 }
 
 func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
@@ -2719,6 +2716,10 @@ type DetectStalledPolecatsResult struct {
 // bypass permissions) without screen-scraping pane content. This avoids coupling
 // to third-party TUI strings that can change with any Claude Code update.
 func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult {
+	return newHandlers().detectStalledPolecats(workDir, rigName)
+}
+
+func (h *handlers) detectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult {
 	result := &DetectStalledPolecatsResult{}
 
 	// Find town root for path resolution and session naming
@@ -2783,7 +2784,7 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 		// stalls silently forever.
 		if question, blocked, err := t.DetectBlockingQuestionDialog(sessionName); err == nil && blocked {
 			result.Stalled = append(result.Stalled,
-				recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, question, t))
+				h.recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, question, t))
 			continue
 		}
 
@@ -2861,7 +2862,7 @@ func DetectStalledPolecats(workDir, rigName string) *DetectStalledPolecatsResult
 //     (attach or reply) when it matters. Fingerprinted on the session name
 //     so repeated patrol passes on the same stuck session don't spam
 //     duplicate escalation beads.
-func recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, question string, t *tmux.Tmux) StalledResult {
+func (h *handlers) recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, question string, t *tmux.Tmux) StalledResult {
 	stalled := StalledResult{
 		PolecatName: polecatName,
 		StallType:   "dialog-blocked",
@@ -2881,14 +2882,13 @@ func recoverDialogBlockedPolecat(townRoot, rigName, polecatName, sessionName, qu
 			"agent to proceed autonomously. Attach to the session or reply to this "+
 			"escalation if it needs a human answer.",
 		sessionName, question)
-	escCmd := exec.Command("gt", "escalate", description,
-		"-s", "medium",
-		"--reason", reason,
-		"--source", "witness-patrol:dialog-blocked",
-		"--fingerprint", "dialog-blocked:"+sessionName,
-	)
-	escCmd.Dir = townRoot
-	escErr := escCmd.Run()
+	escErr := h.notify(townRoot).Escalate(context.Background(), notify.Escalation{
+		Severity:    "medium",
+		Description: description,
+		Reason:      reason,
+		Source:      "witness-patrol:dialog-blocked",
+		Fingerprint: "dialog-blocked:" + sessionName,
+	})
 
 	switch {
 	case dismissErr != nil:

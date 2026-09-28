@@ -237,7 +237,8 @@ func readMayorEvents(t *testing.T, townRoot string) []testMayorEvent {
 func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	newHandlers().notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
+	h := newTestHandlers()
+	h.notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
 
 	events := readMayorEvents(t, townRoot)
 	if len(events) != 1 {
@@ -249,6 +250,9 @@ func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 	}
 	if event.Payload["reason"] != "exit-deferred" {
 		t.Fatalf("reason = %q, want exit-deferred", event.Payload["reason"])
+	}
+	if calls := recorderOf(t, h).Calls(); len(calls) != 0 {
+		t.Fatalf("sends = %+v, want none", calls)
 	}
 }
 
@@ -279,6 +283,9 @@ func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
 	}
 	if events := readMayorEvents(t, townRoot); len(events) != 0 {
 		t.Fatalf("events = %+v, want none when scheduler dispatches", events)
+	}
+	if calls := recorderOf(t, h).Calls(); len(calls) != 0 {
+		t.Fatalf("sends = %+v, want none", calls)
 	}
 }
 
@@ -312,6 +319,11 @@ func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
 	if events[0].Type != "SCHEDULER_OPEN" {
 		t.Fatalf("event type = %q, want SCHEDULER_OPEN", events[0].Type)
 	}
+	// No mayor session is reachable (no tmux on PATH), so the notice falls
+	// back to mail.
+	if mails := recorderOf(t, h).Mails(); len(mails) != 1 || mails[0].To != "mayor/" || mails[0].Subject != "SCHEDULER_OPEN: gastown/guzzle completed (exit=COMPLETED)" {
+		t.Fatalf("mails = %+v, want one SCHEDULER_OPEN mail to mayor/", mails)
+	}
 }
 
 func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T) {
@@ -333,6 +345,9 @@ func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T
 
 	if events := readMayorEvents(t, townRoot); len(events) != 0 {
 		t.Fatalf("events = %+v, want none after confirmed dispatch", events)
+	}
+	if calls := recorderOf(t, h).Calls(); len(calls) != 0 {
+		t.Fatalf("sends = %+v, want none", calls)
 	}
 }
 
@@ -399,6 +414,9 @@ func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
 	if events[0].Type != "SLOT_OPEN" {
 		t.Fatalf("event type = %q, want SLOT_OPEN", events[0].Type)
 	}
+	if mails := recorderOf(t, h).Mails(); len(mails) != 1 || mails[0].To != "mayor/" || mails[0].Subject != "SLOT_OPEN: gastown/guzzle completed (exit=COMPLETED)" {
+		t.Fatalf("mails = %+v, want one SLOT_OPEN mail to mayor/", mails)
+	}
 }
 
 func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *testing.T) {
@@ -428,6 +446,9 @@ func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *test
 
 	if events := readMayorEvents(t, townRoot); len(events) != 0 {
 		t.Fatalf("events = %+v, want none when scheduler no longer has capacity", events)
+	}
+	if calls := recorderOf(t, h).Calls(); len(calls) != 0 {
+		t.Fatalf("sends = %+v, want none", calls)
 	}
 }
 
@@ -2742,18 +2763,6 @@ func writeFakeTmuxWithBlockingDialog(t *testing.T, dir string) {
 	}
 }
 
-// writeFakeGTRefusing creates a fake `gt` binary that always fails
-// immediately. recoverDialogBlockedPolecat shells out to the real `gt
-// escalate`; this keeps that call from ever reaching an actual `gt` binary
-// (and, via it, a live town) if one happens to be on the test runner's PATH.
-func writeFakeGTRefusing(t *testing.T, dir string) {
-	t.Helper()
-	script := "#!/bin/sh\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(dir, "gt"), []byte(script), 0755); err != nil {
-		t.Fatalf("writing fake gt: %v", err)
-	}
-}
-
 // TestDetectStalledPolecats_HonoursPauseMarker pins the pause gate the mayor
 // required for this scanner (gt-ahik, om kgx0): a frozen (SIGSTOPped)
 // polecat still has a live tmux session and process, so it looks exactly
@@ -2769,7 +2778,6 @@ func TestDetectStalledPolecats_HonoursPauseMarker(t *testing.T) {
 
 	binDir := t.TempDir()
 	writeFakeTmuxWithBlockingDialog(t, binDir)
-	writeFakeGTRefusing(t, binDir)
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 	t.Setenv("GT_TOWN_SOCKET", "")
 
@@ -2786,7 +2794,8 @@ func TestDetectStalledPolecats_HonoursPauseMarker(t *testing.T) {
 		t.Fatalf("Pause: %v", err)
 	}
 
-	result := DetectStalledPolecats(townRoot, rigName)
+	h := newTestHandlers()
+	result := h.detectStalledPolecats(townRoot, rigName)
 
 	if result.Checked != 2 {
 		t.Fatalf("Checked = %d, want 2", result.Checked)
@@ -2799,6 +2808,17 @@ func TestDetectStalledPolecats_HonoursPauseMarker(t *testing.T) {
 	}
 	if result.Stalled[0].StallType != "dialog-blocked" {
 		t.Errorf("Stalled[0].StallType = %q, want %q", result.Stalled[0].StallType, "dialog-blocked")
+	}
+	// Only the control is escalated, under its session's key.
+	escalations := recorderOf(t, h).Escalations()
+	if len(escalations) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one (the control)", escalations)
+	}
+	e := escalations[0].Escalation
+	if e.Severity != "medium" || e.Source != "witness-patrol:dialog-blocked" ||
+		!strings.HasPrefix(e.Fingerprint, "dialog-blocked:") || !strings.HasSuffix(e.Fingerprint, "control") ||
+		e.Description != "Dialog-blocked: gastown/control stuck on an interactive question" {
+		t.Errorf("escalation = %+v", e)
 	}
 }
 
@@ -3376,7 +3396,7 @@ func TestProcessDiscoveredCompletion_PhaseComplete(t *testing.T) {
 		Exit:        "PHASE_COMPLETE",
 	}
 	discovery := &CompletionDiscovery{}
-	newHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
+	newTestHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
 	if discovery.Action != "phase-complete" {
 		t.Errorf("Action = %q, want %q", discovery.Action, "phase-complete")
 	}
@@ -3390,7 +3410,7 @@ func TestProcessDiscoveredCompletion_NoMR(t *testing.T) {
 		MRFailed:    true, // Prevents fallback MR lookup
 	}
 	discovery := &CompletionDiscovery{}
-	newHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
+	newTestHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
 	if !strings.Contains(discovery.Action, "acknowledged-idle") {
 		t.Errorf("Action = %q, want to contain %q", discovery.Action, "acknowledged-idle")
 	}
@@ -3403,7 +3423,7 @@ func TestProcessDiscoveredCompletion_EscalatedNoMR(t *testing.T) {
 		Exit:        "ESCALATED",
 	}
 	discovery := &CompletionDiscovery{}
-	newHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
+	newTestHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
 	if !strings.Contains(discovery.Action, "acknowledged-idle") {
 		t.Errorf("Action = %q, want to contain %q for ESCALATED exit", discovery.Action, "acknowledged-idle")
 	}
@@ -3462,7 +3482,7 @@ func TestProcessDiscoveredCompletion_IdempotentWhenWispAlreadyExists(t *testing.
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newTestHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if createCalled {
 		t.Error("expected no new wisp to be created when an open wisp already matches this (issue, branch)")
@@ -3502,7 +3522,7 @@ func TestProcessDiscoveredCompletion_DoesNotMatchWispForDifferentIssue(t *testin
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newTestHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if !createCalled {
 		t.Error("expected a new wisp to be created — the existing wisp is for a different issue")
@@ -3562,7 +3582,7 @@ func TestProcessDiscoveredCompletion_ClosesDuplicateOnConcurrentRace(t *testing.
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newTestHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if len(closedIDs) != 1 || closedIDs[0] != "gt-wisp-b" {
 		t.Errorf("closed IDs = %v, want [gt-wisp-b] (the later, non-winning wisp)", closedIDs)
@@ -3599,7 +3619,7 @@ func TestProcessDiscoveredCompletion_StrandedPendingWispRetriesStateUpdate(t *te
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newTestHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if len(updateArgs) == 0 || updateArgs[0] != "update" || updateArgs[1] != "gt-wisp-stranded" {
 		t.Errorf("update args = %v, want an update of gt-wisp-stranded", updateArgs)
