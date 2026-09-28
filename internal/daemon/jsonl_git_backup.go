@@ -958,10 +958,11 @@ const maxEscalationTitleLen = 200
 
 // escalationTitle builds a single-line "source: summary" title safe to pass
 // as `bd create --title=...`, collapsing a possibly-multiline message down
-// to its first line.
+// to its first line. A line ends at the first "\r" or "\n", the same
+// characters notify.Escalation.Validate refuses in a description.
 func escalationTitle(source, message string) string {
 	summary := message
-	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
+	if idx := strings.IndexAny(summary, "\r\n"); idx >= 0 {
 		summary = summary[:idx]
 	}
 	summary = strings.TrimSpace(summary)

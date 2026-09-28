@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"io"
 	"log"
 	"os"
@@ -15,8 +17,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"github.com/steveyegge/gastown/internal/notify"
-	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 func TestGitChildEnv_ForwardsExisting(t *testing.T) {
@@ -1238,6 +1238,28 @@ func TestEscalationTitle_MultilineCollapsedToFirstLine(t *testing.T) {
 	want := "main_branch_test: main branch test failures:"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestEscalationTitle_CarriageReturnEndsTheLine: notify.Escalation.Validate
+// refuses a description containing "\r" as well as "\n", so a title cut only
+// at "\n" let a message with a bare carriage return (a progress line from git
+// or go test) through to a refusal, and the escalation was never filed.
+func TestEscalationTitle_CarriageReturnEndsTheLine(t *testing.T) {
+	t.Parallel()
+	for name, message := range map[string]string{
+		"bare CR":      "push failed\rretrying 2/3",
+		"CRLF":         "push failed\r\nretrying 2/3",
+		"CR before LF": "push failed\rretrying\nmore",
+		"LF before CR": "push failed\nretrying\rmore",
+	} {
+		got := escalationTitle("jsonl_git_backup", message)
+		if want := "jsonl_git_backup: push failed"; got != want {
+			t.Errorf("%s: got %q, want %q", name, got, want)
+		}
+		if err := (notify.Escalation{Description: got}).Validate(); err != nil {
+			t.Errorf("%s: title %q is not a valid escalation description: %v", name, got, err)
+		}
 	}
 }
 
