@@ -61,5 +61,4 @@ internal/web
 internal/wisp
 internal/witness
 internal/workspace
-internal/wrappers
 plugins/dolt-snapshots
