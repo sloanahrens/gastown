@@ -21,6 +21,7 @@ func checkSource(t *testing.T, src string) []Finding {
 }
 
 func TestFlagsTrueOnErrorPath(t *testing.T) {
+	t.Parallel()
 	findings := checkSource(t, `package sample
 
 func guard(input string) (bool, error) {
@@ -42,6 +43,7 @@ func parse(s string) (string, error) { return s, nil }
 }
 
 func TestFlagsSwallowedErrorOnErrorPath(t *testing.T) {
+	t.Parallel()
 	// The exact shape gt-udrrw's worked example fixed: bool is false (a
 	// legitimate-looking negative), but the error that caused it is dropped.
 	findings := checkSource(t, `package sample
@@ -65,6 +67,7 @@ func exec(s string) (string, error) { return s, nil }
 }
 
 func TestDoesNotFlagPropagatedError(t *testing.T) {
+	t.Parallel()
 	findings := checkSource(t, `package sample
 
 func guard(input string) (bool, error) {
@@ -83,6 +86,7 @@ func parse(s string) (string, error) { return s, nil }
 }
 
 func TestDoesNotFlagNonGuardShapedFunctions(t *testing.T) {
+	t.Parallel()
 	findings := checkSource(t, `package sample
 
 func compute(input string) (int, error) {
@@ -98,6 +102,7 @@ func compute(input string) (int, error) {
 }
 
 func TestDoesNotFlagOutsideErrorBranch(t *testing.T) {
+	t.Parallel()
 	findings := checkSource(t, `package sample
 
 func guard(input string) (bool, error) {
@@ -113,6 +118,7 @@ func guard(input string) (bool, error) {
 }
 
 func TestFlagsNestedInsideLoop(t *testing.T) {
+	t.Parallel()
 	findings := checkSource(t, `package sample
 
 func guard(inputs []string) (bool, error) {
@@ -135,6 +141,7 @@ func parse(s string) (string, error) { return s, nil }
 }
 
 func TestKeyIsStableAcrossLineShifts(t *testing.T) {
+	t.Parallel()
 	a := Finding{File: "pkg/file.go", Line: 10, Func: "Guard", Slot: "bool"}
 	b := Finding{File: "pkg/file.go", Line: 40, Func: "Guard", Slot: "bool"}
 	if a.Key() != b.Key() {

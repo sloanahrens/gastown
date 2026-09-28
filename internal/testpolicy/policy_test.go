@@ -16,7 +16,7 @@ var seed = flag.Bool("seed", false, "print the unconverted.txt a fresh checkout 
 // ratchet was added (Ruling R11). The list only shrinks: converting a
 // package deletes its line from unconverted.txt AND lowers maxUnconverted
 // here, in the same change. It must never grow.
-const maxUnconverted = 62
+const maxUnconverted = 61
 
 // TestPolicy applies the unit-test rules to every package not listed in
 // unconverted.txt, and fails a listed package that already passes, so the

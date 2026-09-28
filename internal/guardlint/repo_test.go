@@ -17,6 +17,7 @@ import (
 // guard is caught at the same point golangci-lint would catch it, not left
 // for a later `make test` a polecat might skip.
 func TestNoNewFailOpenGuards(t *testing.T) {
+	t.Parallel()
 	root := repoInternalDir(t)
 	findings, err := Check(root)
 	if err != nil {
