@@ -26,19 +26,30 @@ import (
 // a different package.
 type reviewStore struct {
 	beadsdk.Storage
-	issues map[string]*beadsdk.Issue
-	nextID int
+	issues   map[string]*beadsdk.Issue
+	comments map[string][]string
+	nextID   int
 	// failCreate makes CreateIssue fail, standing in for a follow-up bead
 	// filing failure on an otherwise-successful approve.
 	failCreate bool
 }
 
 func newReviewStore(issues ...*beadsdk.Issue) *reviewStore {
-	s := &reviewStore{issues: make(map[string]*beadsdk.Issue, len(issues))}
+	s := &reviewStore{issues: make(map[string]*beadsdk.Issue, len(issues)), comments: map[string][]string{}}
 	for _, issue := range issues {
 		s.issues[issue.ID] = issue
 	}
 	return s
+}
+
+// AddIssueComment comments on an issue the store holds; like the real store,
+// it refuses one that does not exist.
+func (s *reviewStore) AddIssueComment(_ context.Context, issueID, author, text string) (*beadsdk.Comment, error) {
+	if _, ok := s.issues[issueID]; !ok {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+	s.comments[issueID] = append(s.comments[issueID], text)
+	return &beadsdk.Comment{IssueID: issueID, Author: author, Text: text}, nil
 }
 
 func (s *reviewStore) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
@@ -107,8 +118,8 @@ func mrIssue(id, branch, target, sourceIssue, rig, worker string) *beadsdk.Issue
 
 // fakeBDForReview installs a bd stand-in on PATH so plugin.Recorder
 // (RecordReceipt/RecordFailure, which always shell out — see
-// internal/plugin/recording.go) and Beads.AddComment (which has no
-// in-process store path) have something to talk to.
+// internal/plugin/recording.go) has something to talk to. Comments go
+// through the in-process reviewStore.
 func fakeBDForReview(t *testing.T) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -117,7 +128,6 @@ func fakeBDForReview(t *testing.T) {
 		"case \"$1\" in\n" +
 		"  create) printf '{\\\"id\\\":\\\"gt-test-receipt\\\"}\\n' ;;\n" +
 		"  close) exit 0 ;;\n" +
-		"  comments) exit 0 ;;\n" +
 		"  *) exit 2 ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {

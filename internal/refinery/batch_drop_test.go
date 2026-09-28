@@ -129,6 +129,10 @@ func TestRecordEditorialDrop_IncrementsAcrossCycles(t *testing.T) {
 	if got := recorderOf(t, e).Escalations(); len(got) != 1 {
 		t.Fatalf("escalations = %+v, want exactly one, at the threshold", got)
 	}
+	comments := store.commentsOn("gt-mr-a")
+	if len(comments) != 1 || !strings.HasPrefix(comments[0], "editorial_drop_escalated: 3 consecutive drops at abc123") {
+		t.Fatalf("MR comments = %q, want one editorial_drop_escalated record of the escalation", comments)
+	}
 }
 
 // TestRecordEditorialDrop_MultiLineStderrStillEscalates: the stderr a
@@ -288,5 +292,8 @@ func TestReviewBatchCandidates_RehearsalFailure_SurfacesStderrAndEscalates(t *te
 	}
 	if !containsLabel(labels, "editorial-drop-escalated:deadbeef") {
 		t.Fatalf("mr-bad labels = %v, want it marked escalated after 3 consecutive drops (output:\n%s)", labels, output)
+	}
+	if comments := store.commentsOn("mr-bad"); len(comments) != 1 || !strings.HasPrefix(comments[0], "editorial_drop_escalated: 3 consecutive drops at deadbee") {
+		t.Fatalf("mr-bad comments = %q, want one editorial_drop_escalated record", comments)
 	}
 }

@@ -3078,11 +3078,20 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 }
 
 // AddComment appends a comment to an issue, routing by issue ID when needed.
+// With an in-process store the comment goes through the store, as Comments
+// reads it back, rather than through bd.
 func (b *Beads) AddComment(id, comment string) error {
 	if !b.noRoute {
 		if target := b.forIssueID(id); target != b {
 			return target.AddComment(id, comment)
 		}
+	}
+
+	if b.store != nil {
+		ctx, cancel := storeCtx()
+		defer cancel()
+		_, err := b.store.AddIssueComment(ctx, id, b.getActor(), comment)
+		return err
 	}
 
 	_, err := b.run("comments", "add", id, comment)

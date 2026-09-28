@@ -727,19 +727,8 @@ func writeTestManifest(t *testing.T, rigDir string) error {
 // comment on. The follow-up beads are still filed — they are the record — and
 // the run must not fail trying to comment on a bead that does not exist.
 func TestFileFollowups_NoMRIDSkipsTheComment(t *testing.T) {
-	// A bd that cannot comment at all: any attempt to comment fails, so a run
+	// The store holds no MR bead, so any attempt to comment fails: a run
 	// that returns cleanly proves none was attempted.
-	binDir := t.TempDir()
-	script := "#!/usr/bin/env bash\n" +
-		"case \"$1\" in\n" +
-		"  comments) echo 'comments: no such issue' >&2; exit 1 ;;\n" +
-		"  *) exit 0 ;;\n" +
-		"esac\n"
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	b := beads.NewWithStore(t.TempDir(), newReviewStore())
 	majors := []Finding{{Title: "a major finding", Path: "internal/x.go", Line: 12}}
 
