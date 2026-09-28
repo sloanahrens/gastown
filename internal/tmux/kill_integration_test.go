@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"testing"
-	"time"
 )
 
 // TestIntegrationKillSessionWithProcesses_DoesNotKillUnrelatedProcesses runs
@@ -35,8 +34,10 @@ func TestIntegrationKillSessionWithProcesses_DoesNotKillUnrelatedProcesses(t *te
 	sentinelPID := sentinel.Process.Pid
 	defer func() { _ = sentinel.Process.Kill(); _ = sentinel.Wait() }()
 
-	// Give processes time to start
-	time.Sleep(200 * time.Millisecond)
+	eventually(t, "the pane to run sleep", func() bool {
+		cmd, _ := tm.GetPaneCommand(sessionName)
+		return cmd == "sleep"
+	})
 
 	// Kill session with processes
 	if err := tm.KillSessionWithProcesses(sessionName); err != nil {

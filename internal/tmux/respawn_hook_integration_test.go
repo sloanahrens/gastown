@@ -4,11 +4,12 @@ package tmux
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // requireTestSocket returns a per-test socket name and skips the test if
@@ -16,10 +17,8 @@ import (
 // The socket server is cleaned up when the test finishes.
 func requireTestSocket(t *testing.T) string {
 	t.Helper()
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-	socket := fmt.Sprintf("gt-test-hook-%d", os.Getpid())
+	requireTmux(t)
+	socket := constants.TestSocketName("gt-test-hook")
 	// KillServer, not a bare `tmux kill-server`: it unlinks the socket file,
 	// which tmux leaves behind when the server exits (gt-20di).
 	t.Cleanup(func() {
@@ -36,14 +35,16 @@ func testSession(t *testing.T, socket, session, command string) {
 	if err != nil {
 		t.Fatalf("failed to create test session %q on socket %q: %v\n%s", session, socket, err, out)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if exec.Command("tmux", "-L", socket, "has-session", "-t", session).Run() == nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("session %q never appeared on socket %q", session, socket)
+	eventually(t, "session "+session+" to appear", func() bool {
+		return exec.Command("tmux", "-L", socket, "has-session", "-t", session).Run() == nil
+	})
+}
+
+// hookJobRunning reports whether the auto-respawn hook's run-shell job for
+// session on socket is running (it sleeps 3s before checking the pane).
+func hookJobRunning(socket, session string) bool {
+	pattern := "sleep 3 && tmux -L " + socket + " list-panes -t '" + session + "'"
+	return exec.Command("pgrep", "-f", pattern).Run() == nil
 }
 
 func isPaneDead(socket, session string) bool {
@@ -103,33 +104,23 @@ func TestIntegrationAutoRespawnHook_RespawnWorks(t *testing.T) {
 		logT("tmux version: %s", strings.TrimSpace(string(verOut)))
 	}
 
-	// Wait for sleep 2 to exit
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if isPaneDead(socket, session) {
-			logT("pane died (sleep 2 exited)")
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if !isPaneDead(socket, session) {
-		logT("WARNING: pane never died within 5s deadline")
-	}
+	eventually(t, "the pane to die (sleep 2 exits)", func() bool { return isPaneDead(socket, session) })
+	logT("pane died (sleep 2 exited)")
 
-	// Wait for hook to respawn (3s sleep + startup)
+	// The hook sleeps 3s, sees the pane still dead, and respawns it.
 	alive := false
-	deadline = time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(integrationWait)
 	for time.Now().Before(deadline) {
 		if !isPaneDead(socket, session) {
 			logT("pane respawned (alive again)")
 			alive = true
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	if !alive {
 		// Dump diagnostics on failure
-		logT("FAILURE: pane was NOT respawned within 8s of death")
+		logT("FAILURE: pane was NOT respawned within %s of death", integrationWait)
 		logT("pane_dead=%v, pane_pid=%s", isPaneDead(socket, session), getPanePIDSafe(socket, session))
 		if paneInfo, err := exec.Command("tmux", "-L", socket, "list-panes", "-t", session,
 			"-F", "dead=#{pane_dead} pid=#{pane_pid} cmd=#{pane_current_command} start=#{pane_start_command}").CombinedOutput(); err == nil {
@@ -172,18 +163,22 @@ func TestIntegrationAutoRespawnHook_SkipsAlreadyAlive(t *testing.T) {
 		t.Fatalf("SetAutoRespawnHook: %v", err)
 	}
 
-	// Kill process → pane dies → hook starts 3s sleep
-	exec.Command("tmux", "-L", socket, "respawn-pane", "-k", "-t", session, "true").Run()
-	time.Sleep(500 * time.Millisecond)
+	// Kill the process: the pane dies and the hook's job starts its 3s sleep.
+	if out, err := exec.Command("tmux", "-L", socket, "respawn-pane", "-k", "-t", session, "true").CombinedOutput(); err != nil {
+		t.Fatalf("respawn-pane true: %v\n%s", err, out)
+	}
+	eventually(t, "the pane to die", func() bool { return isPaneDead(socket, session) })
+	eventually(t, "the hook job to start", func() bool { return hookJobRunning(socket, session) })
 
-	// Simulate daemon: immediately respawn before hook wakes
-	exec.Command("tmux", "-L", socket, "respawn-pane", "-k", "-t", session, "sleep 300").Run()
-	time.Sleep(300 * time.Millisecond)
-
+	// Simulate the daemon: respawn the pane while the hook is still asleep.
+	if out, err := exec.Command("tmux", "-L", socket, "respawn-pane", "-k", "-t", session, "sleep 300").CombinedOutput(); err != nil {
+		t.Fatalf("respawn-pane sleep: %v\n%s", err, out)
+	}
+	eventually(t, "the respawned pane to be alive", func() bool { return !isPaneDead(socket, session) })
 	pid1 := getPanePID(t, socket, session)
 
-	// Wait for hook to fire
-	time.Sleep(5 * time.Second)
+	// The hook wakes, finds the pane alive, and must leave it alone.
+	eventually(t, "the hook job to finish", func() bool { return !hookJobRunning(socket, session) })
 
 	pid2 := getPanePID(t, socket, session)
 	if pid1 != pid2 {

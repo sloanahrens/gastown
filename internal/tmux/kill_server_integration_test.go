@@ -14,9 +14,7 @@ import (
 // that kills its server at the end of every run added one file forever.
 // KillServer now clears the file too.
 func TestIntegrationKillServerUnlinksSocketFile(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
+	requireTmux(t)
 	socket := constants.TestSocketName("gt-test-killsrv")
 	socketPath := socketPathForTest(t, socket)
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {

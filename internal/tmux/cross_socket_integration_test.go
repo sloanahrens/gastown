@@ -12,9 +12,7 @@ var crossSocket = fmt.Sprintf("gt-test-cross-%d", os.Getpid())
 
 func newCrossTestSocket(t *testing.T) *Tmux {
 	t.Helper()
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
+	requireTmux(t)
 	tm := NewTmuxWithSocket(crossSocket)
 	t.Cleanup(func() {
 		_ = tm.KillServer()

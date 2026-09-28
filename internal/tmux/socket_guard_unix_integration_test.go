@@ -11,9 +11,7 @@ import (
 )
 
 func TestIntegrationNewSessionAllowsStaleUnixSocket(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
+	requireTmux(t)
 	socket := uniqueSocketName(t, "gt-h9z-newsession-stale")
 	createStaleUnixSocket(t, socket)
 	tm := NewTmuxWithSocket(socket)
@@ -25,9 +23,7 @@ func TestIntegrationNewSessionAllowsStaleUnixSocket(t *testing.T) {
 }
 
 func TestIntegrationNewSessionRefusesUnresponsiveSocket(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
+	requireTmux(t)
 	socket := uniqueSocketName(t, "gt-h9z-unresponsive")
 	listener, socketPath := listenOnSocketPath(t, socket)
 	var heldMu sync.Mutex
@@ -80,9 +76,7 @@ func TestIntegrationNewSessionRefusesUnresponsiveSocket(t *testing.T) {
 }
 
 func TestIntegrationNewSessionRefusesClosingListener(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
+	requireTmux(t)
 	socket := uniqueSocketName(t, "gt-h9z-closing")
 	listener, socketPath := listenOnSocketPath(t, socket)
 	done := make(chan struct{})

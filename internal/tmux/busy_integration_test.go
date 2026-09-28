@@ -5,7 +5,6 @@ package tmux
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestIntegrationCapturePaneVisibleTail_ExcludesHistory guards the capture-window defect
@@ -39,17 +38,10 @@ func TestIntegrationCapturePaneVisibleTail_ExcludesHistory(t *testing.T) {
 	if err := tm.SendKeys(session, "echo HISTORY_MARKER_TOKEN; seq -f fill-%g 1 40"); err != nil {
 		t.Fatalf("SendKeys: %v", err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	eventually(t, "the output to render", func() bool {
 		out, _ := tm.CapturePane(session, 5)
-		if strings.Contains(out, "fill-40") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("output never rendered; pane:\n%s", out)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return strings.Contains(out, "fill-40")
+	})
 
 	// Sanity check: confirm this environment actually reproduces the "-S -N"
 	// over-capture before asserting the fix, so a future tmux behavior change
@@ -59,7 +51,7 @@ func TestIntegrationCapturePaneVisibleTail_ExcludesHistory(t *testing.T) {
 		t.Fatalf("CapturePaneLines: %v", err)
 	}
 	if !linesContain(broken, "HISTORY_MARKER_TOKEN") {
-		t.Skip("environment did not reproduce the tmux -S window behavior this test guards against")
+		t.Fatal("tmux did not reproduce the -S window behavior this test guards against; its capture semantics changed")
 	}
 
 	tail, err := tm.capturePaneVisibleTail(session)

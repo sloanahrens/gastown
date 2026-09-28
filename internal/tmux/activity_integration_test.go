@@ -28,23 +28,17 @@ func TestIntegrationGetWindowActivity_AdvancesOnUnattendedOutput(t *testing.T) {
 		t.Fatalf("GetWindowActivity (before): %v", err)
 	}
 
-	// Sleep past tmux's 1-second activity resolution, then produce pane
-	// output on this UNATTACHED session (no client ever attaches in this
-	// test — that is the whole point).
-	time.Sleep(1100 * time.Millisecond)
+	// Wait until the wall clock is past tmux's 1-second activity resolution,
+	// then produce pane output on this UNATTACHED session (no client ever
+	// attaches in this test — that is the whole point).
+	eventually(t, "a new wall-clock second", func() bool { return time.Now().Unix() > before.Unix() })
 	if err := tm.SendKeys(sessionName, "echo hello-from-gt-2sln-test"); err != nil {
 		t.Fatalf("SendKeys: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond)
-
-	after, err := tm.GetWindowActivity(sessionName)
-	if err != nil {
-		t.Fatalf("GetWindowActivity (after): %v", err)
-	}
-
-	if !after.After(before) {
-		t.Errorf("window_activity did not advance on an unattended session: before=%v after=%v", before, after)
-	}
+	eventually(t, "window_activity to advance on an unattended session", func() bool {
+		after, err := tm.GetWindowActivity(sessionName)
+		return err == nil && after.After(before)
+	})
 
 	// Sanity check on the bug this replaces: session_activity should NOT
 	// have advanced, confirming the session genuinely stayed unattached.
@@ -57,6 +51,6 @@ func TestIntegrationGetWindowActivity_AdvancesOnUnattendedOutput(t *testing.T) {
 		t.Fatalf("GetSessionCreatedUnix: %v", err)
 	}
 	if sessActivity.Unix() != createdUnix {
-		t.Skipf("session_activity advanced (session_activity=%v created=%v) — environment attached the session, precondition for this regression guard not met", sessActivity, createdUnix)
+		t.Fatalf("session_activity advanced (session_activity=%v created=%v): something attached a client to the isolated test server", sessActivity, createdUnix)
 	}
 }
