@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -30,8 +29,8 @@ func (t *Tmux) ensureNewSessionSocketSafe() error {
 		return nil
 	}
 
-	socketPath := filepath.Join(SocketDir(), t.socketName)
-	info, err := os.Lstat(socketPath)
+	socketPath := t.socketPath()
+	info, err := t.sockets().lstat(socketPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -50,7 +49,7 @@ func (t *Tmux) ensureNewSessionSocketSafe() error {
 }
 
 func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
-	if stale, err := unixSocketStale(socketPath); err != nil || stale {
+	if stale, err := unixSocketStale(t.sockets(), socketPath); err != nil || stale {
 		if stale {
 			return nil
 		}
@@ -62,7 +61,7 @@ func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
 	if err := t.runListSessionsProbe(ctx); err == nil {
 		return nil
 	} else if errors.Is(err, ErrNoServer) {
-		stale, recheckErr := unixSocketStale(socketPath)
+		stale, recheckErr := unixSocketStale(t.sockets(), socketPath)
 		if recheckErr == nil && stale {
 			return nil
 		}
@@ -93,15 +92,15 @@ const (
 // nothing is behind the file. That also covers a path that cannot be dialed at
 // all — a plain file sitting where a socket belongs, the shape gt-h9z guards
 // against — which is not this function's state to change.
-func unlinkDeadSocketFile(clk clockwork.Clock, socketPath string) {
+func unlinkDeadSocketFile(clk clockwork.Clock, ops socketOps, socketPath string) {
 	deadline := clk.Now().Add(socketUnlinkWait)
 	for {
-		stale, err := unixSocketStale(socketPath)
+		stale, err := unixSocketStale(ops, socketPath)
 		if err != nil {
 			return
 		}
 		if stale {
-			_ = os.Remove(socketPath)
+			_ = ops.remove(socketPath)
 			return
 		}
 		if !clk.Now().Before(deadline) {
@@ -111,16 +110,30 @@ func unlinkDeadSocketFile(clk clockwork.Clock, socketPath string) {
 	}
 }
 
-func unixSocketStale(socketPath string) (bool, error) {
-	conn, err := net.DialTimeout("unix", socketPath, newSessionSocketDialTimeout)
-	if err != nil {
+// unixSocketStale reports whether nothing listens on socketPath: a refused
+// connection, or no file, is the only proof.
+func unixSocketStale(ops socketOps, socketPath string) (bool, error) {
+	if err := ops.dial(socketPath); err != nil {
 		if os.IsNotExist(err) || errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
 			return true, nil
 		}
 		return false, err
 	}
-	_ = conn.Close()
 	return false, nil
+}
+
+func realSocketOps() socketOps {
+	return socketOps{
+		lstat:  os.Lstat,
+		remove: os.Remove,
+		dial: func(path string) error {
+			conn, err := net.DialTimeout("unix", path, newSessionSocketDialTimeout)
+			if err != nil {
+				return err
+			}
+			return conn.Close()
+		},
+	}
 }
 
 func (t *Tmux) runListSessionsProbe(ctx context.Context) error {

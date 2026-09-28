@@ -3,13 +3,9 @@
 package tmux
 
 import (
-	"context"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/jonboulle/clockwork"
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // TestKillServerClearsLitterWithNoServer pins the ErrNoServer path: a kill that
@@ -17,16 +13,15 @@ import (
 // exactly the state a run that died before reaching its cleanup leaves behind.
 func TestKillServerClearsLitterWithNoServer(t *testing.T) {
 	t.Parallel()
-	socket := constants.TestSocketName("gt-test-killsrv-twice")
-	socketPath := createStaleUnixSocket(t, socket)
-
-	s := newScripted(bySub(map[string]reply{"kill-server": fail("no server running on " + socketPath)}))
-	tm := newTmuxForTest(socket, s.exec, clockwork.NewFakeClock())
+	fs := newFakeSockets()
+	fs.set("/fake-sock/gt-test-killsrv", sockStale)
+	s := newScripted(bySub(map[string]reply{"kill-server": fail("no server running on /fake-sock/gt-test-killsrv")}))
+	tm := socketTmux("gt-test-killsrv", fs, s)
 	if err := tm.KillServer(); err != nil {
 		t.Fatalf("KillServer with no server: %v", err)
 	}
-	if _, err := os.Lstat(socketPath); !os.IsNotExist(err) {
-		t.Errorf("socket file survived a kill with no server: %v", err)
+	if fs.state("/fake-sock/gt-test-killsrv") != sockAbsent {
+		t.Error("socket file survived a kill with no server")
 	}
 }
 
@@ -42,24 +37,40 @@ func TestKillServerReportsOtherErrors(t *testing.T) {
 
 // TestUnlinkDeadSocketFileKeepsLiveListener is the guard on the unlink: a file
 // with something still listening is not residue. Removing it would strand a
-// server with no socket path to reach it — and a test may be holding that
-// listener open on purpose (socket_guard_unix_test.go does exactly this).
+// server with no socket path to reach it. It re-checks for socketUnlinkWait
+// (a just-killed server answers a little longer) and then leaves the file.
 func TestUnlinkDeadSocketFileKeepsLiveListener(t *testing.T) {
 	t.Parallel()
-	socket := constants.TestSocketName("gt-h9z-held")
-	listener, socketPath := listenOnSocketPath(t, socket)
-	defer func() { _ = listener.Close() }()
-
-	clk := clockwork.NewFakeClock()
+	fs := newFakeSockets()
+	fs.set("/s/held", sockLive)
+	clk := newFixedClock()
 	done := make(chan struct{}, 1)
 	go func() {
-		unlinkDeadSocketFile(clk, socketPath)
+		unlinkDeadSocketFile(clk, *fs.ops(), "/s/held")
 		done <- struct{}{}
 	}()
 	driveClock(t, clk, socketUnlinkInterval, done)
+	if fs.state("/s/held") != sockLive {
+		t.Error("unlinked a socket with a live listener")
+	}
+}
 
-	if _, err := os.Lstat(socketPath); err != nil {
-		t.Errorf("unlinked a socket with a live listener: %v", err)
+// TestUnlinkDeadSocketFileWaitsOutAClosingServer: a server that stops
+// answering within socketUnlinkWait has its file removed.
+func TestUnlinkDeadSocketFileWaitsOutAClosingServer(t *testing.T) {
+	t.Parallel()
+	fs := newFakeSockets()
+	fs.set("/s/closing", sockStale)
+	fs.queueDial("/s/closing", nil, nil, nil) // still accepting for three checks
+	clk := newFixedClock()
+	done := make(chan struct{}, 1)
+	go func() {
+		unlinkDeadSocketFile(clk, *fs.ops(), "/s/closing")
+		done <- struct{}{}
+	}()
+	driveClock(t, clk, socketUnlinkInterval, done)
+	if fs.state("/s/closing") != sockAbsent {
+		t.Error("socket file of a server that stopped answering survived")
 	}
 }
 
@@ -67,13 +78,11 @@ func TestUnlinkDeadSocketFileKeepsLiveListener(t *testing.T) {
 // the socket file is there, the server is not.
 func TestUnlinkDeadSocketFileRemovesStaleFile(t *testing.T) {
 	t.Parallel()
-	socket := constants.TestSocketName("gt-h9z-gone")
-	socketPath := createStaleUnixSocket(t, socket)
-
-	unlinkDeadSocketFile(clockwork.NewFakeClock(), socketPath)
-
-	if _, err := os.Lstat(socketPath); !os.IsNotExist(err) {
-		t.Errorf("stale socket file survived: %v", err)
+	fs := newFakeSockets()
+	fs.set("/s/gone", sockStale)
+	unlinkDeadSocketFile(newFixedClock(), *fs.ops(), "/s/gone")
+	if fs.state("/s/gone") != sockAbsent {
+		t.Error("stale socket file survived")
 	}
 }
 
@@ -83,17 +92,11 @@ func TestUnlinkDeadSocketFileRemovesStaleFile(t *testing.T) {
 // function's call.
 func TestUnlinkDeadSocketFileLeavesNonSocketFile(t *testing.T) {
 	t.Parallel()
-	socket := constants.TestSocketName("gt-h9z-plainfile")
-	socketPath := socketPathForTest(t, socket)
-	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
-		t.Fatalf("write %s: %v", socketPath, err)
-	}
-	t.Cleanup(func() { _ = os.Remove(socketPath) })
-
-	unlinkDeadSocketFile(clockwork.NewFakeClock(), socketPath)
-
-	if _, err := os.Lstat(socketPath); err != nil {
-		t.Errorf("unlinked a file that was never a socket: %v", err)
+	fs := newFakeSockets()
+	fs.set("/s/plain", sockFile)
+	unlinkDeadSocketFile(newFixedClock(), *fs.ops(), "/s/plain")
+	if fs.state("/s/plain") != sockFile {
+		t.Error("unlinked a file that was never a socket")
 	}
 }
 
@@ -140,22 +143,12 @@ func TestKillServerLeavesTownSocketAlone(t *testing.T) {
 // error, and it returns without waiting on the clock.
 func TestUnlinkDeadSocketFileMissingPathIsQuiet(t *testing.T) {
 	t.Parallel()
-	socket := constants.TestSocketName("gt-h9z-never-bound")
-	socketPath := socketPathForTest(t, socket)
-	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("pre-clean %s: %v", socketPath, err)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		unlinkDeadSocketFile(clockwork.NewFakeClock(), socketPath)
-		close(done)
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		t.Fatal("unlink of a missing path blocked")
+	fs := newFakeSockets()
+	err := returnsWithoutClock(t, func() error {
+		unlinkDeadSocketFile(newFixedClock(), *fs.ops(), "/s/never-bound")
+		return nil
+	})
+	if err != nil || len(fs.removed) != 0 {
+		t.Fatalf("err = %v, removed = %v", err, fs.removed)
 	}
 }

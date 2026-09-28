@@ -271,3 +271,9 @@ func driven(t *testing.T, clk *clockwork.FakeClock, step time.Duration, fn func(
 	go func() { done <- fn() }()
 	return driveClock(t, clk, step, done)
 }
+
+// testEpoch is where every fake clock in the package starts: a fixed instant,
+// so a test never depends on the wall clock it runs at.
+var testEpoch = time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+
+func newFixedClock() *clockwork.FakeClock { return clockwork.NewFakeClockAt(testEpoch) }

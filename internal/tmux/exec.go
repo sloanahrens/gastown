@@ -3,7 +3,9 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -44,7 +46,35 @@ func (t *Tmux) clk() clockwork.Clock {
 	return t.clock
 }
 
-// withSocket returns a Tmux on socket that shares t's runner and clock.
+// withSocket returns a Tmux on socket that shares t's seams.
 func (t *Tmux) withSocket(socket string) *Tmux {
-	return &Tmux{socketName: socket, exec: t.exec, clock: t.clock}
+	return &Tmux{socketName: socket, exec: t.exec, clock: t.clock, sock: t.sock, socketDir: t.socketDir}
+}
+
+// socketOps is the filesystem and dial surface the new-session socket guard
+// and the dead-socket cleanup touch. The real one works on the socket
+// directory; tests script it so the unit tier opens no sockets.
+type socketOps struct {
+	lstat  func(path string) (os.FileInfo, error)
+	remove func(path string) error
+	// dial connects to the Unix socket at path and hangs up; nil means
+	// something accepted the connection.
+	dial func(path string) error
+}
+
+// sockets returns the socket seam, falling back to the real one.
+func (t *Tmux) sockets() socketOps {
+	if t.sock == nil {
+		return realSocketOps()
+	}
+	return *t.sock
+}
+
+// socketPath is the file tmux binds for this Tmux's named socket.
+func (t *Tmux) socketPath() string {
+	dir := t.socketDir
+	if dir == "" {
+		dir = SocketDir()
+	}
+	return filepath.Join(dir, t.socketName)
 }

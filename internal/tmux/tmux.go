@@ -193,6 +193,8 @@ type Tmux struct {
 	socketName string          // tmux socket name (-L flag), empty = default socket
 	exec       execFunc        // nil = realExec; see exec.go
 	clock      clockwork.Clock // nil = real clock; see exec.go
+	sock       *socketOps      // nil = real socket directory and dial; see exec.go
+	socketDir  string          // "" = SocketDir()
 }
 
 // noTownSocket is a sentinel socket name used when no town socket is configured.
@@ -1160,7 +1162,7 @@ func (t *Tmux) removeDeadSocketFile() {
 	if !t.ownsSocketFile() {
 		return
 	}
-	unlinkDeadSocketFile(t.clk(), filepath.Join(SocketDir(), t.socketName))
+	unlinkDeadSocketFile(t.clk(), t.sockets(), t.socketPath())
 }
 
 // ownsSocketFile reports whether the file at this wrapper's socket path belongs
