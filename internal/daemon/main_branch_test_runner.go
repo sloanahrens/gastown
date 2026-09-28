@@ -770,7 +770,9 @@ func (d *Daemon) triggerMainBranchTests() bool {
 		d.logger.Printf("main_branch_test: due — %s", dec.note)
 	}
 
+	d.mainBranchTestCycles.Add(1)
 	go func() {
+		defer d.mainBranchTestCycles.Done()
 		defer d.mainBranchTestRunning.Store(false)
 		tested := d.runMainBranchTests()
 		if d.config == nil {
