@@ -1651,7 +1651,9 @@ func TestFetchTownMergeQueueServesStaleSnapshotWithoutBlocking(t *testing.T) {
 	close(release)
 	<-listed
 
-	deadline := time.Now().Add(5 * time.Second)
+	// The refresh publishes right after the lister returns. Poll until it
+	// has; there is no wall-clock budget, since a refresh that never
+	// publishes is a hang the test binary's -timeout reports.
 	for {
 		if got := f.FetchTownMergeQueue(); len(got.Rows) == 1 {
 			if got.ReadyCount != 1 {
@@ -1659,10 +1661,7 @@ func TestFetchTownMergeQueueServesStaleSnapshotWithoutBlocking(t *testing.T) {
 			}
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("published snapshot never became visible")
-		}
-		time.Sleep(5 * time.Millisecond)
+		runtime.Gosched()
 	}
 
 	// A fresh snapshot is served from memory, so a render costs no bd process.
@@ -1950,17 +1949,17 @@ func TestWorkerPolecatIndexColdStartDoesNotBlock(t *testing.T) {
 // waitForPolecatRefresh blocks until the published snapshot is fresh again.
 func waitForPolecatRefresh(t *testing.T, f *LiveConvoyFetcher) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// No wall-clock budget: a refresh that never publishes is a hang the test
+	// binary's -timeout reports.
+	for {
 		f.polecatMu.Lock()
 		fetchedAt := f.polecatFetchedAt
 		f.polecatMu.Unlock()
 		if !fetchedAt.IsZero() && time.Since(fetchedAt) < polecatIndexTTL {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		runtime.Gosched()
 	}
-	t.Fatal("polecat inventory refresh never published")
 }
 
 // TestRefreshPolecatIndexPublishesAndKeepsOnFailure drives the refresh's two
@@ -2843,4 +2842,58 @@ func TestIsWorkPanelNonDispatchable(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRefreshSkipsWhenSnapshotPublishedMeanwhile pins the single-flight
+// guarantee of the background refreshes. A render reads the snapshot's age,
+// finds it stale, and only then takes the breaker. If a refresh published and
+// released the breaker between those two steps, the render used to start a
+// second, duplicate derivation (bd and gt children for every rig). The
+// refresh must re-check staleness once it holds the breaker. The test takes
+// the breaker exactly as such a render does, with a fresh snapshot already
+// published.
+func TestRefreshSkipsWhenSnapshotPublishedMeanwhile(t *testing.T) {
+	t.Run("merge queue", func(t *testing.T) {
+		lists := 0
+		f := &LiveConvoyFetcher{
+			townRoot: townRootWithRigs(t, "gastown"),
+			listMRs: func(string, beads.ListOptions) ([]*beads.Issue, error) {
+				lists++
+				return nil, nil
+			},
+			countMerges: func(string, time.Duration) (int, error) { return 0, nil },
+		}
+		f.mqFetchedAt = time.Now() // another refresh just published
+		if !f.mqBreaker.allow() {
+			t.Fatal("breaker refused a first attempt")
+		}
+		f.refreshTownMergeQueue()
+		if lists != 0 {
+			t.Fatalf("refresh re-derived a fresh snapshot (%d list calls), want 0", lists)
+		}
+		if !f.mqBreaker.allow() {
+			t.Fatal("skipped refresh left the breaker held; later refreshes would never run")
+		}
+	})
+
+	t.Run("polecat index", func(t *testing.T) {
+		lists := 0
+		f := &LiveConvoyFetcher{
+			listPolecats: func() ([]byte, error) {
+				lists++
+				return []byte(polecatListFixture), nil
+			},
+		}
+		f.polecatFetchedAt = time.Now()
+		if !f.polecatBreaker.allow() {
+			t.Fatal("breaker refused a first attempt")
+		}
+		f.refreshPolecatIndex()
+		if lists != 0 {
+			t.Fatalf("refresh re-listed a fresh polecat index (%d calls), want 0", lists)
+		}
+		if !f.polecatBreaker.allow() {
+			t.Fatal("skipped refresh left the breaker held; later refreshes would never run")
+		}
+	})
 }

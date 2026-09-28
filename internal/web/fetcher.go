@@ -264,6 +264,14 @@ func (cb *fetchCircuitBreaker) recordFailure() {
 	}
 }
 
+// release gives back an attempt reserved by allow without recording an
+// outcome: the holder found nothing to do.
+func (cb *fetchCircuitBreaker) release() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.inFlight = false
+}
+
 // recordSuccess resets the circuit breaker on a successful fetch.
 func (cb *fetchCircuitBreaker) recordSuccess() {
 	cb.mu.Lock()
@@ -1360,19 +1368,32 @@ func (f *LiveConvoyFetcher) markParkedRigs(snapshot TownMergeQueue) TownMergeQue
 // refreshTownMergeQueue republishes the snapshot on success. A failed refresh
 // keeps the previous one: an empty panel is worse than a stale one, and the
 // breaker decides when to try again.
+//
+// The caller took the breaker after reading the snapshot's age, so another
+// refresh may have published in between. The age is checked again here, with
+// the breaker held, and the snapshot is published before the breaker is
+// released, so a render can never start a duplicate derivation.
 func (f *LiveConvoyFetcher) refreshTownMergeQueue() {
+	f.mqMu.Lock()
+	fresh := !f.mqFetchedAt.IsZero() && time.Since(f.mqFetchedAt) < townMergeQueueTTL
+	f.mqMu.Unlock()
+	if fresh {
+		f.mqBreaker.release()
+		return
+	}
+
 	snapshot, err := f.townMergeQueueSnapshot()
 	if err != nil {
 		f.mqBreaker.recordFailure()
 		log.Printf("dashboard: town merge queue refresh failed: %v", err)
 		return
 	}
-	f.mqBreaker.recordSuccess()
 
 	f.mqMu.Lock()
 	f.mqSnapshot = snapshot
 	f.mqFetchedAt = time.Now()
 	f.mqMu.Unlock()
+	f.mqBreaker.recordSuccess()
 }
 
 // townMergeQueueSnapshot derives the merge queue for every rig laid out in
@@ -1731,19 +1752,31 @@ func (f *LiveConvoyFetcher) workerPolecatIndex() polecatIndex {
 // refreshPolecatIndex republishes the snapshot on success. A failed refresh
 // keeps the previous one — a stale agent name beats a blank column — and the
 // breaker decides when to try again.
+//
+// Like refreshTownMergeQueue, it re-checks the age with the breaker held and
+// publishes before releasing the breaker, so a render never starts a
+// duplicate `gt polecat list`.
 func (f *LiveConvoyFetcher) refreshPolecatIndex() {
+	f.polecatMu.Lock()
+	fresh := !f.polecatFetchedAt.IsZero() && time.Since(f.polecatFetchedAt) < polecatIndexTTL
+	f.polecatMu.Unlock()
+	if fresh {
+		f.polecatBreaker.release()
+		return
+	}
+
 	index, err := f.polecatIndexSnapshot()
 	if err != nil {
 		f.polecatBreaker.recordFailure()
 		log.Printf("dashboard: polecat inventory refresh failed: %v", err)
 		return
 	}
-	f.polecatBreaker.recordSuccess()
 
 	f.polecatMu.Lock()
 	f.polecatIndex = mergePolecatIndexes(f.polecatIndex, index)
 	f.polecatFetchedAt = time.Now()
 	f.polecatMu.Unlock()
+	f.polecatBreaker.recordSuccess()
 }
 
 // mergePolecatIndexes carries a rig's previous rows into a fresh snapshot that
