@@ -368,7 +368,7 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 		t.Fatalf("expected 4 reviewed entries, got %d", len(reviewed))
 	}
 	if barrier.abandoned() {
-		t.Fatalf("semaphore is serializing: fewer than 3 reviews were ever in flight together (barrier abandoned at the test deadline)")
+		t.Fatalf("semaphore is serializing: fewer than 3 reviews were ever in flight together (barrier gave up %v after the first arrival)", barrierArrivalBound)
 	}
 	if got := barrier.maxInFlight(); got != 3 {
 		t.Fatalf("expected exactly 3 concurrent review invocations at the barrier, saw %d", got)
@@ -468,31 +468,40 @@ func TestReviewBatchCandidates_RehearsalNeverMovesLiveCloneOffItsOwnBranch(t *te
 // lets everyone through; later callers pass straight through. It also
 // tracks the peak number of callers between arrive and leave.
 //
-// Waiting has no wall-clock budget: each review does real git work before it
-// reaches the exec, so on a loaded host the n arrivals can be seconds apart,
-// and the former 5s timeout failed a correct semaphore. A semaphore that
-// serializes never lets the n-th caller in, so the barrier only gives up at
-// the test binary's own deadline, to fail with a message instead of a panic.
+// The wait is bounded from the first arrival, not from the start of the
+// batch: each review does real git work before it reaches the exec, so the
+// time before the first arrival is unbounded load, and the former 5s timeout
+// that covered it failed a correct semaphore. Once one review is in, the
+// others need only the git work of their own reviews to follow; a semaphore
+// that serializes never lets the n-th caller in, and the barrier gives up
+// barrierArrivalBound after the first arrival.
 type reviewBarrier struct {
-	n        int
-	mu       sync.Mutex
-	arrived  int
-	inFlight int
-	peak     int
-	release  chan struct{}
-	abort    <-chan struct{}
-	gaveUp   bool
+	n         int
+	mu        sync.Mutex
+	arrived   int
+	inFlight  int
+	peak      int
+	release   chan struct{}
+	abort     chan struct{}
+	abortOnce sync.Once
+	timer     *time.Timer
+	gaveUp    bool
 }
 
+// barrierArrivalBound is how long the first reviewer waits for the other
+// n-1. A minute fails only a semaphore that is not going to admit them.
+const barrierArrivalBound = 60 * time.Second
+
 func newReviewBarrier(t *testing.T, n int) *reviewBarrier {
-	ctx := context.Background()
-	if deadline, ok := t.Deadline(); ok {
-		// Leave room to report before the binary's timeout panics.
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-30*time.Second))
-		t.Cleanup(cancel)
-	}
-	return &reviewBarrier{n: n, release: make(chan struct{}), abort: ctx.Done()}
+	b := &reviewBarrier{n: n, release: make(chan struct{}), abort: make(chan struct{})}
+	t.Cleanup(func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.timer != nil {
+			b.timer.Stop()
+		}
+	})
+	return b
 }
 
 func (b *reviewBarrier) arrive() {
@@ -503,7 +512,13 @@ func (b *reviewBarrier) arrive() {
 	if b.inFlight > b.peak {
 		b.peak = b.inFlight
 	}
+	if seq == 1 {
+		b.timer = time.AfterFunc(barrierArrivalBound, func() {
+			b.abortOnce.Do(func() { close(b.abort) })
+		})
+	}
 	if seq == b.n {
+		b.timer.Stop()
 		close(b.release)
 	}
 	b.mu.Unlock()
