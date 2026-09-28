@@ -60,7 +60,6 @@ internal/runtime
 internal/scheduler/capacity
 internal/session
 internal/shell
-internal/slot
 internal/state
 internal/style
 internal/suggest
