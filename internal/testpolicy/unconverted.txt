@@ -30,7 +30,6 @@ internal/lock
 internal/mail
 internal/mayor
 internal/nudge
-internal/patrolstate
 internal/plugin
 internal/polecat
 internal/protocol

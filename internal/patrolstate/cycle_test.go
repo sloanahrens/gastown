@@ -15,6 +15,7 @@ func capTimeout(at time.Time, sid string) *WaitOutcome {
 }
 
 func TestWaitOutcomeRoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if o, err := ReadWaitOutcome(dir); o != nil || err != nil {
 		t.Fatalf("missing file = (%v, %v), want (nil, nil)", o, err)
@@ -35,6 +36,7 @@ func TestWaitOutcomeRoundTrip(t *testing.T) {
 }
 
 func TestReadWaitOutcomeRejectsCorruptAndUnknownVersion(t *testing.T) {
+	t.Parallel()
 	for name, body := range map[string]string{
 		"corrupt":         "{not json",
 		"unknown version": `{"version": 99, "reason": "timeout", "at_cap": true}`,
@@ -50,6 +52,7 @@ func TestReadWaitOutcomeRejectsCorruptAndUnknownVersion(t *testing.T) {
 }
 
 func TestCycleStateRoundTripAndCorrupt(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if s, err := LoadCycleState(dir); err != nil || s != (CycleState{}) {
 		t.Fatalf("missing = (%+v, %v)", s, err)
@@ -72,6 +75,7 @@ func TestCycleStateRoundTripAndCorrupt(t *testing.T) {
 }
 
 func TestAdvanceCycleCountsPerSessionAndResetsOnFreshSession(t *testing.T) {
+	t.Parallel()
 	var s CycleState
 	for i := 1; i <= 3; i++ {
 		step := AdvanceCycle(s, "s1", nil, t0)
@@ -87,6 +91,7 @@ func TestAdvanceCycleCountsPerSessionAndResetsOnFreshSession(t *testing.T) {
 }
 
 func TestAdvanceCycleConsumesEachWaitOnce(t *testing.T) {
+	t.Parallel()
 	w := capTimeout(t0, "s1")
 	first := AdvanceCycle(CycleState{SessionID: "s1", Cycles: 2}, "s1", w, t0)
 	if first.Wait != w || !first.State.LastWaitAt.Equal(t0) {
@@ -103,6 +108,7 @@ func TestAdvanceCycleConsumesEachWaitOnce(t *testing.T) {
 }
 
 func TestAdvanceCycleIgnoresAnotherSessionsWait(t *testing.T) {
+	t.Parallel()
 	// The predecessor's wait, never consumed (it died before reporting).
 	w := capTimeout(t0, "old")
 	step := AdvanceCycle(CycleState{SessionID: "old", Cycles: 5}, "new", w, t0)
@@ -120,6 +126,7 @@ func TestAdvanceCycleIgnoresAnotherSessionsWait(t *testing.T) {
 // respawn when the wait timed out at the idle cap and the session has run at
 // least 3 cycles, or at 8 cycles regardless.
 func TestCycleBoundaryTruthTable(t *testing.T) {
+	t.Parallel()
 	signal := &WaitOutcome{Reason: "signal", At: t0}
 	belowCap := &WaitOutcome{Reason: "timeout", Timeout: 2 * time.Minute, BackoffMax: 5 * time.Minute, At: t0}
 	atCap := capTimeout(t0, "")
@@ -156,6 +163,7 @@ func TestCycleBoundaryTruthTable(t *testing.T) {
 }
 
 func TestCycleBoundaryBackstopDisabled(t *testing.T) {
+	t.Parallel()
 	if got, _ := CycleBoundary(50, nil, 3, 0); got {
 		t.Fatal("backstop fired with maxCycles 0")
 	}
