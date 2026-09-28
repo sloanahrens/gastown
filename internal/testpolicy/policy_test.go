@@ -12,6 +12,12 @@ import (
 
 var seed = flag.Bool("seed", false, "print the unconverted.txt a fresh checkout needs, instead of failing")
 
+// maxUnconverted is the number of entries unconverted.txt held when this
+// ratchet was added (Ruling R11). The list only shrinks: converting a
+// package deletes its line from unconverted.txt AND lowers maxUnconverted
+// here, in the same change. It must never grow.
+const maxUnconverted = 83
+
 // TestPolicy applies the unit-test rules to every package not listed in
 // unconverted.txt, and fails a listed package that already passes, so the
 // list can only shrink.
@@ -37,6 +43,9 @@ func TestPolicy(t *testing.T) {
 	for rel := range unconverted {
 		originallyListed[rel] = true
 	}
+	if !*seed && len(originallyListed) > maxUnconverted {
+		t.Errorf("unconverted.txt has %d entries, want at most %d: the list only shrinks — converting a package deletes its line here AND lowers maxUnconverted in policy_test.go", len(originallyListed), maxUnconverted)
+	}
 	dirs, err := PackageDirs(root)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +53,7 @@ func TestPolicy(t *testing.T) {
 	var dirty []string
 	for _, dir := range dirs {
 		rel := filepath.ToSlash(strings.TrimPrefix(dir, root+string(filepath.Separator)))
-		vs, err := ScanDir(dir)
+		vs, exemptions, err := ScanDirWithExemptions(dir)
 		if err != nil {
 			t.Fatalf("%s: %v", rel, err)
 		}
@@ -60,6 +69,12 @@ func TestPolicy(t *testing.T) {
 		case !listed:
 			for _, v := range vs {
 				t.Error(v.String())
+			}
+			// The test logs every exemption (spec §4), but only for
+			// packages the ratchet already covers: an unconverted
+			// package's allow comments (if any) aren't policy yet.
+			for _, e := range exemptions {
+				t.Logf("exemption %s:%d %s — %s", e.Pos.Filename, e.Pos.Line, e.Rule, e.Reason)
 			}
 		}
 	}

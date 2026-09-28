@@ -30,6 +30,7 @@ func TestScanDirFixtures(t *testing.T) {
 		"prod_setenv":           {RuleProdSetenv},
 		"prod_sleep_clock":      {RuleProdSleep},
 		"integration_skipped":   nil,
+		"setenv_in_subtest":     {RuleNoEnv}, // t.Setenv in a t.Run subtest is still no-env
 	}
 	for dir, want := range cases {
 		dir, want := dir, want
@@ -54,6 +55,27 @@ func TestScanDirFixtures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestScanDirWithExemptions(t *testing.T) {
+	t.Parallel()
+	vs, exemptions, err := ScanDirWithExemptions(filepath.Join("testdata", "allow_ok"))
+	if err != nil {
+		t.Fatalf("ScanDirWithExemptions: %v", err)
+	}
+	if len(vs) != 0 {
+		t.Fatalf("violations = %v, want none (exempted)", vs)
+	}
+	if len(exemptions) != 1 {
+		t.Fatalf("exemptions = %+v, want exactly one", exemptions)
+	}
+	e := exemptions[0]
+	if e.Rule != RuleNoSleep {
+		t.Fatalf("rule = %q, want %q", e.Rule, RuleNoSleep)
+	}
+	if e.Reason != "measures real scheduler latency" {
+		t.Fatalf("reason = %q, want %q", e.Reason, "measures real scheduler latency")
 	}
 }
 

@@ -28,9 +28,17 @@ func (v Violation) String() string { return fmt.Sprintf("%s: [%s] %s", v.Pos, v.
 // Files excluded by build constraints for the current platform with no extra
 // tags are skipped, and that includes every //go:build integration file.
 func ScanDir(dir string) ([]Violation, error) {
+	vs, _, err := ScanDirWithExemptions(dir)
+	return vs, err
+}
+
+// ScanDirWithExemptions is ScanDir, plus every honored
+// "//testpolicy:allow" exemption it applied, so a caller can log them
+// (spec §4: "The test logs every exemption").
+func ScanDirWithExemptions(dir string) ([]Violation, []Exemption, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fset := token.NewFileSet()
 	var prod, tests []*ast.File
@@ -41,14 +49,14 @@ func ScanDir(dir string) ([]Violation, error) {
 		}
 		ok, err := build.Default.MatchFile(dir, name)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
+			return nil, nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
 		}
 		if !ok {
 			continue
 		}
 		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ParseComments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if strings.HasSuffix(name, "_test.go") {
 			tests = append(tests, f)
@@ -65,14 +73,14 @@ func ScanDir(dir string) ([]Violation, error) {
 	for _, f := range prod {
 		vs = append(vs, checkProdFile(fset, f, clocked)...)
 	}
-	vs = applyAllows(fset, append(append([]*ast.File{}, tests...), prod...), vs)
+	vs, exemptions := applyAllows(fset, append(append([]*ast.File{}, tests...), prod...), vs)
 	sort.Slice(vs, func(i, j int) bool {
 		if vs[i].Pos.Filename != vs[j].Pos.Filename {
 			return vs[i].Pos.Filename < vs[j].Pos.Filename
 		}
 		return vs[i].Pos.Line < vs[j].Pos.Line
 	})
-	return vs, nil
+	return vs, exemptions, nil
 }
 
 // packageVars returns the names of package-level variables declared in the

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"time"
@@ -37,6 +38,13 @@ func main() {
 		os.Exit(2)
 	}
 	over, scanErr := testpolicy.WatchBudget(stdout, os.Stdout, *budget, exempt, "github.com/steveyegge/gastown")
+	if scanErr != nil {
+		// WatchBudget stopped reading before the child was done writing (for
+		// example a single line over its 16 MB scan buffer); drain the pipe
+		// so the child's next Write doesn't block on a full pipe buffer and
+		// hang cmd.Wait() forever.
+		_, _ = io.Copy(io.Discard, stdout)
+	}
 	waitErr := cmd.Wait()
 
 	for _, o := range over {
