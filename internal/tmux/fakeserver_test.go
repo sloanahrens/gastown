@@ -55,6 +55,38 @@ type fpane struct {
 	deadStatus string
 	activity   int64 // window_activity
 	keys       []string
+	// composer, when set, makes the pane behave like an agent's input box:
+	// literal send-keys text is typed into it and Enter submits it into the
+	// transcript. capture-pane then renders transcript + prompt + composer.
+	composer   *composer
+	windowSize string // window-size option of the pane's window
+}
+
+type composer struct {
+	transcript []string
+	input      string
+	submitted  []string
+}
+
+func (c *composer) render() string {
+	return strings.Join(append(append([]string(nil), c.transcript...), "❯ "+c.input), "\n")
+}
+
+// withComposer gives pane p an agent input box with the given transcript.
+func (f *fakeServer) withComposer(p *fpane, transcript ...string) {
+	f.with(func() { p.composer = &composer{transcript: transcript} })
+}
+
+func (f *fakeServer) submitted(p *fpane) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), p.composer.submitted...)
+}
+
+func (f *fakeServer) paneKeys(p *fpane) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), p.keys...)
 }
 
 type fproc struct {
@@ -102,7 +134,36 @@ func (f *fakeServer) addPaneLocked(s *fsess, dir, cmd string) *fpane {
 	}
 	f.nextPane++
 	pid := f.spawnLocked("1", cmd)
-	p := &fpane{id: fmt.Sprintf("%%%d", f.nextPane), index: len(s.panes), cmd: cmd, pid: pid, path: dir}
+	p := &fpane{id: fmt.Sprintf("%%%d", f.nextPane), cmd: cmd, pid: pid, path: dir}
+	for _, q := range s.panes {
+		if q.window == 0 {
+			p.index++
+		}
+	}
+	s.panes = append(s.panes, p)
+	return p
+}
+
+// addWindow opens a new window in session name running cmd and returns its
+// pane. tmux makes a new window the active one.
+func (f *fakeServer) addWindow(name, cmd string) *fpane {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.addWindowLocked(f.sessions[name], cmd)
+}
+
+func (f *fakeServer) addWindowLocked(s *fsess, cmd string) *fpane {
+	if cmd == "" {
+		cmd = "bash"
+	}
+	w := 0
+	for _, q := range s.panes {
+		if q.window >= w {
+			w = q.window + 1
+		}
+	}
+	f.nextPane++
+	p := &fpane{id: fmt.Sprintf("%%%d", f.nextPane), window: w, cmd: cmd, pid: f.spawnLocked("1", cmd)}
 	s.panes = append(s.panes, p)
 	return p
 }
@@ -182,12 +243,26 @@ func (f *fakeServer) resolve(target string) (*fsess, *fpane) {
 	if s == nil || len(s.panes) == 0 {
 		return s, nil
 	}
-	if _, pi, ok := strings.Cut(rest, "."); ok {
-		if i, err := strconv.Atoi(pi); err == nil && i < len(s.panes) {
-			return s, s.panes[i]
+	if rest == "" || rest == "^" {
+		return s, s.panes[0]
+	}
+	ws, ps, hasPane := strings.Cut(rest, ".")
+	w, err := strconv.Atoi(ws)
+	if err != nil {
+		return s, nil
+	}
+	pi := 0
+	if hasPane {
+		if pi, err = strconv.Atoi(ps); err != nil {
+			return s, nil
 		}
 	}
-	return s, s.panes[0]
+	for _, p := range s.panes {
+		if p.window == w && p.index == pi {
+			return s, p
+		}
+	}
+	return s, nil
 }
 
 var formatVar = regexp.MustCompile(`#\{([a-z_]+)\}`)
@@ -228,6 +303,8 @@ func (f *fakeServer) expand(format string, s *fsess, p *fpane) string {
 			return "0"
 		case "pane_dead_status":
 			return p.deadStatus
+		case "window_width":
+			return "80"
 		}
 		return ""
 	})
@@ -405,13 +482,51 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		if p == nil {
 			return fail("can't find pane: " + target)
 		}
+		if p.composer != nil {
+			return ok(p.composer.render())
+		}
 		return ok(p.content)
 	case "send-keys":
 		_, p := f.resolve(target)
 		if p == nil {
 			return fail("can't find pane: " + target)
 		}
-		p.keys = append(p.keys, strings.Join(a[3:], " "))
+		rest := a[3:]
+		p.keys = append(p.keys, strings.Join(rest, " "))
+		if c := p.composer; c != nil {
+			if len(rest) >= 2 && rest[0] == "-l" {
+				c.input += rest[len(rest)-1]
+			} else {
+				for _, k := range rest {
+					switch k {
+					case "Enter":
+						if c.input != "" {
+							c.transcript = append(c.transcript, "❯ "+c.input, "⏺ ok")
+							c.submitted = append(c.submitted, c.input)
+							c.input = ""
+						}
+					case "C-u":
+						c.input = ""
+					}
+				}
+			}
+		}
+	case "new-window":
+		s, _ := f.resolve(target)
+		if s == nil {
+			return missing(target)
+		}
+		f.addWindowLocked(s, "")
+	case "set-option":
+		if c.has("-w", "-t") && c.has("window-size") {
+			if _, p := f.resolve(target); p != nil {
+				p.windowSize = c.last()
+			}
+		}
+	case "show-options":
+		if _, p := f.resolve(target); p != nil && c.has("window-size") {
+			return ok("window-size " + p.windowSize)
+		}
 	}
 	return ok("")
 }
