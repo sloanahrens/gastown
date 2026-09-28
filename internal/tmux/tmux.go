@@ -51,6 +51,11 @@ var (
 	ErrSessionRunning     = errors.New("session already running with healthy agent")
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
+	// ErrPaneNotFound matches tmux's "can't find pane" / "can't find window",
+	// which is what a pane-targeted command (capture-pane, send-keys,
+	// respawn-pane, list-panes) reports when its session or pane is gone.
+	// The wrapped error keeps tmux's own text.
+	ErrPaneNotFound = errors.New("pane not found")
 )
 
 // validateSessionName checks that a session name contains only safe characters.
@@ -322,11 +327,26 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 		return ErrSessionNotFound
 	}
 
+	if strings.Contains(stderr, "can't find pane") ||
+		strings.Contains(stderr, "can't find window") {
+		return tmuxTextError{msg: fmt.Sprintf("tmux %s: %s", args[0], stderr), is: ErrPaneNotFound}
+	}
+
 	if stderr != "" {
 		return fmt.Errorf("tmux %s: %s", args[0], stderr)
 	}
 	return fmt.Errorf("tmux %s: %w", args[0], err)
 }
+
+// tmuxTextError reports tmux's own message verbatim while matching a sentinel
+// with errors.Is, so callers that match on the text keep working.
+type tmuxTextError struct {
+	msg string
+	is  error
+}
+
+func (e tmuxTextError) Error() string        { return e.msg }
+func (e tmuxTextError) Is(target error) bool { return target == e.is }
 
 func (t *Tmux) createNewSession(name, workDir string, env map[string]string) error {
 	if err := t.refuseLiveSessionCreate(); err != nil {
@@ -4066,7 +4086,8 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
 			// no point in polling further.
-			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			// capture-pane reports a missing session as "can't find pane".
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) || errors.Is(err, ErrPaneNotFound) {
 				return err
 			}
 			consecutiveIdle = 0
