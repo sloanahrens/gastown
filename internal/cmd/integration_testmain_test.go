@@ -33,6 +33,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	sweepStaleGTBinaries()
 	code := h.Finish(m.Run())
 	removeBuiltGT()
 	os.Exit(code)

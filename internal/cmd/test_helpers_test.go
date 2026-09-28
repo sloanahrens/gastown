@@ -7,9 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // gtBinaryOnce guards the single build of the gt binary that the CLI-level
@@ -32,10 +34,56 @@ var (
 )
 
 // removeBuiltGT deletes the directory buildGT linked into. TestMain calls it
-// after m.Run, so each test process leaves no binary behind.
+// after m.Run, so each test process that exits normally leaves no binary
+// behind; one killed first (timeout panic, SIGTERM, SIGKILL) is cleaned up by
+// the next process's sweepStaleGTBinaries.
 func removeBuiltGT() {
 	if gtBinaryDir != "" {
 		_ = os.RemoveAll(gtBinaryDir)
+	}
+}
+
+// gtBinaryDirPrefix names a test process's build directory; the owning pid
+// follows it, so a sweep can tell a live owner from a dead one.
+const gtBinaryDirPrefix = "gt-test-bin-"
+
+// legacyGTBinaryPrefix is the per-checkout-path binary name buildGTBinary used
+// before 539a156. Checkouts of older revisions still create and exec it, so
+// only a file untouched for legacyGTBinaryMaxAge (far past any test binary's
+// timeout) is taken to be abandoned.
+const (
+	legacyGTBinaryPrefix = "gt-integration-test-"
+	legacyGTBinaryMaxAge = time.Hour
+)
+
+// sweepStaleGTBinaries removes gt build directories whose owning test process
+// is gone, and abandoned legacy per-path binaries (~180MB each). Both
+// TestMains call it on entry. Errors are ignored: this is housekeeping, and a
+// directory that cannot be removed now is retried by the next run.
+func sweepStaleGTBinaries() {
+	tmp := os.TempDir()
+	dirs, _ := filepath.Glob(filepath.Join(tmp, gtBinaryDirPrefix+"*"))
+	for _, dir := range dirs {
+		rest := strings.TrimPrefix(filepath.Base(dir), gtBinaryDirPrefix)
+		pidStr, _, ok := strings.Cut(rest, "-")
+		pid, err := strconv.Atoi(pidStr)
+		if !ok || err != nil || pid <= 0 {
+			// Pre-pid name (gt-test-bin-<random>): no owner to check, and no
+			// current code creates one, so it is abandoned.
+			_ = os.RemoveAll(dir)
+			continue
+		}
+		// processAlive (process_alive_*.go) is the package's own probe; the
+		// directories are this user's, so its owner is never another user's.
+		if pid != os.Getpid() && !processAlive(pid) {
+			_ = os.RemoveAll(dir)
+		}
+	}
+	legacy, _ := filepath.Glob(filepath.Join(tmp, legacyGTBinaryPrefix+"*"))
+	for _, path := range legacy {
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) > legacyGTBinaryMaxAge {
+			_ = os.Remove(path)
+		}
 	}
 }
 
@@ -81,7 +129,8 @@ func buildGTBinary() (string, error) {
 	// saw exit 0 and empty stderr from a gt that predated the guard. go build
 	// renames its output into place, so the swap was silent. The per-path
 	// files were also never deleted (~180MB each).
-	dir, err := os.MkdirTemp("", "gt-test-bin-")
+	sweepStaleGTBinaries()
+	dir, err := os.MkdirTemp("", fmt.Sprintf("%s%d-", gtBinaryDirPrefix, os.Getpid()))
 	if err != nil {
 		return "", fmt.Errorf("creating gt build dir: %w", err)
 	}

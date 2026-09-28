@@ -15,6 +15,7 @@ import (
 // and a tripwire that fails the run if any state leaks into a live town.
 // (The integration build has its own TestMain in integration_testmain_test.go.)
 func TestMain(m *testing.M) {
+	sweepStaleGTBinaries()
 	code := testutil.HermeticMain(m)
 	removeBuiltGT()
 	os.Exit(code)
