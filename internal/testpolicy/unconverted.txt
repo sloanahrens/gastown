@@ -36,7 +36,6 @@ internal/telemetry
 internal/templates
 internal/testutil
 internal/tui/feed
-internal/ui
 internal/util
 internal/version
 internal/wasteland
