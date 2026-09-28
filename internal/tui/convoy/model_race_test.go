@@ -176,7 +176,7 @@ func TestViewConcurrentWithWindowResize(t *testing.T) {
 	m.height = 40
 	m.convoys = []ConvoyItem{
 		{ID: "hq-abc", Title: "Test", Status: "open",
-			Issues: []IssueItem{{ID: "gt-1", Title: "Issue", Status: "open"}},
+			Issues:   []IssueItem{{ID: "gt-1", Title: "Issue", Status: "open"}},
 			Progress: "0/1", Expanded: true},
 	}
 	m.mu.Unlock()
@@ -220,7 +220,7 @@ func TestViewConcurrentWithCursorNavigation(t *testing.T) {
 			},
 			Progress: "0/2", Expanded: true},
 		{ID: "hq-def", Title: "C2", Status: "open",
-			Issues: []IssueItem{{ID: "gt-3", Title: "I3", Status: "open"}},
+			Issues:   []IssueItem{{ID: "gt-3", Title: "I3", Status: "open"}},
 			Progress: "0/1", Expanded: true},
 	}
 	m.mu.Unlock()
