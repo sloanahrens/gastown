@@ -4183,8 +4183,8 @@ func (t *Tmux) IsIdle(session string) bool {
 // line repaints about once a second while the agent works (the elapsed counter
 // and token readout both advance), so silence this long means the marker
 // outlived the turn that drew it. Ten seconds is ten repaint periods of slack.
-// Var so tests can shrink it. (gt-z4gs)
-var isBusyStaleAfter = 10 * time.Second
+// Tests move past it on a fake clock. (gt-z4gs)
+const isBusyStaleAfter = 10 * time.Second
 
 // busyMarkerStalenessApplies reports whether a busy marker in this session may
 // be discounted for age. Only Claude Code qualifies: its working panes were

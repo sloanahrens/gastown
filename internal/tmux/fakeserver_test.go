@@ -478,7 +478,10 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		}
 		return ok(key + "=" + v)
 	case "capture-pane":
-		_, p := f.resolve(target)
+		s, p := f.resolve(target)
+		if s == nil {
+			return missing(target)
+		}
 		if p == nil {
 			return fail("can't find pane: " + target)
 		}
@@ -487,7 +490,10 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		}
 		return ok(p.content)
 	case "send-keys":
-		_, p := f.resolve(target)
+		s, p := f.resolve(target)
+		if s == nil {
+			return missing(target)
+		}
 		if p == nil {
 			return fail("can't find pane: " + target)
 		}
