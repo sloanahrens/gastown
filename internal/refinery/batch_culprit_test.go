@@ -11,6 +11,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -96,6 +97,7 @@ func newCulpritTestEngineer(t *testing.T, store *culpritLabelStore) *Engineer {
 	e.testAllowSyntheticMRs = true
 	e.beads = beads.NewWithStore(workDir, store)
 	e.output = &strings.Builder{}
+	e.notifier = notifyfake.New() // the third drop escalates; never through a live gt
 	return e
 }
 
