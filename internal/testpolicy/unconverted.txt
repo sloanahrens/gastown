@@ -25,7 +25,6 @@ internal/git
 internal/github
 internal/hooks
 internal/krc
-internal/lintlock
 internal/lock
 internal/mail
 internal/mayor

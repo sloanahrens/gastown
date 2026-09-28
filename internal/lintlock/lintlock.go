@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // Marker is what golangci-lint prints when another instance holds the lock. It
@@ -40,7 +42,9 @@ const TimeoutSentinel = "Timeout exceeded: try increasing it by passing --timeou
 // to the next with no gap, so a would-be holder that gives up early gives up
 // while the lock is merely busy (gt-xsty).
 //
-// A var so tests need not sleep.
+// A var because the internal/cmd and internal/refinery tests still shorten it;
+// Retry reads it on every call. This package's own tests inject a schedule and
+// a fake clock through retry instead.
 var RetryDelay = []time.Duration{
 	15 * time.Second, 30 * time.Second, 30 * time.Second, 45 * time.Second,
 	45 * time.Second, 45 * time.Second, 45 * time.Second, 45 * time.Second,
@@ -86,11 +90,16 @@ func MinBudget() time.Duration {
 // A context with no deadline gets no retries: every caller is bounded, and
 // answering "yes" here would turn a contention loop into a hung gate.
 func RoomForRetry(ctx context.Context, wait time.Duration) bool {
+	return roomForRetry(ctx, clockwork.NewRealClock(), wait)
+}
+
+// roomForRetry is RoomForRetry measuring the time left on clk.
+func roomForRetry(ctx context.Context, clk clockwork.Clock, wait time.Duration) bool {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return false
 	}
-	return time.Until(deadline) >= wait+Reserve
+	return clk.Until(deadline) >= wait+Reserve
 }
 
 // Attempt is one run of a lint command: the runner's error, and that attempt's
@@ -137,6 +146,11 @@ type Outcome struct {
 // waiting, the last attempt's error is returned unchanged rather than a
 // truncated attempt's.
 func Retry(ctx context.Context, attempt func() Attempt, onRetry func(attempt, attempts int, wait time.Duration)) Outcome {
+	return retry(ctx, clockwork.NewRealClock(), RetryDelay, attempt, onRetry)
+}
+
+// retry is Retry waiting delays on clk.
+func retry(ctx context.Context, clk clockwork.Clock, delays []time.Duration, attempt func() Attempt, onRetry func(attempt, attempts int, wait time.Duration)) Outcome {
 	for n := 0; ; n++ {
 		got := attempt()
 		outcome := Outcome{
@@ -150,19 +164,19 @@ func Retry(ctx context.Context, attempt func() Attempt, onRetry func(attempt, at
 			outcome.Err = nil
 			return outcome
 		}
-		if n >= len(RetryDelay) || !outcome.Unfinished || !RoomForRetry(ctx, RetryDelay[n]) {
+		if n >= len(delays) || !outcome.Unfinished || !roomForRetry(ctx, clk, delays[n]) {
 			return outcome
 		}
-		wait := RetryDelay[n]
+		wait := delays[n]
 		if onRetry != nil {
-			onRetry(n+1, len(RetryDelay)+1, wait)
+			onRetry(n+1, len(delays)+1, wait)
 		}
-		timer := time.NewTimer(wait)
+		timer := clk.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return outcome
-		case <-timer.C:
+		case <-timer.Chan():
 		}
 	}
 }
