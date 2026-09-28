@@ -105,7 +105,9 @@ func TestNudgeLockTimeout(t *testing.T) {
 	}
 	got := make(chan bool, 1)
 	go func() { got <- acquireNudgeLock(clk, session, 100*time.Millisecond) }()
-	if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := clk.BlockUntilContext(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
 	clk.Advance(100 * time.Millisecond)

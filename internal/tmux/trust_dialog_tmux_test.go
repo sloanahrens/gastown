@@ -1,9 +1,11 @@
 package tmux
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -153,7 +155,9 @@ func TestAcceptWorkspaceTrustDialog_WaitsForLateDialog(t *testing.T) {
 	clk := clockwork.NewFakeClock()
 	done := make(chan error, 1)
 	go func() { done <- unitTmux(s, clk).AcceptWorkspaceTrustDialog("gt-x") }()
-	if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := clk.BlockUntilContext(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
 	pane.set(claudeTrustDialogYesFirst)

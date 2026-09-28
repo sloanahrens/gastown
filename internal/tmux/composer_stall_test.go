@@ -254,11 +254,11 @@ func TestAnalyzeComposerStateNoBusy(t *testing.T) {
 // which is what a session producing output right now reports for
 // #{window_activity}; "@fail" answers exit status 1.
 //
-// The clock starts at the real current time so fixtures dated from time.Now
-// (agedPendingClock) line up with it.
+// The clock starts at testEpoch, the instant fixtures such as
+// agedPendingClock date their stamps from.
 func shimTmux(t *testing.T, responses map[string]string) (*Tmux, *scripted) {
 	t.Helper()
-	clk := clockwork.NewFakeClockAt(time.Now())
+	clk := newFixedClock()
 	s := newScripted(func(c tmuxCall) reply {
 		if c.name != "tmux" {
 			return ok("")
@@ -499,7 +499,7 @@ func agedPendingClock(t *testing.T, session, pane string, age time.Duration) *Pe
 	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
-	now := time.Now()
+	now := testEpoch
 	data, err := json.Marshal(pendingStamp{
 		SessionID: testSessionID,
 		First:     now.Add(-age).Unix(),
@@ -608,8 +608,8 @@ func TestDetectComposerStallClearsTheClockWhenInputIsConsumed(t *testing.T) {
 	// A run left over from before the agent drained its queue.
 	stamp, err := json.Marshal(pendingStamp{
 		SessionID: testSessionID,
-		First:     time.Now().Add(-time.Hour).Unix(),
-		Last:      time.Now().Add(-time.Hour + time.Minute).Unix(),
+		First:     testEpoch.Add(-time.Hour).Unix(),
+		Last:      testEpoch.Add(-time.Hour + time.Minute).Unix(),
 		Samples:   pendingInputMinSamples + 1,
 		Progress:  PaneProgressSignature(pendingTypedPane, DefaultReadyPromptPrefix),
 	})
@@ -718,7 +718,7 @@ func TestDetectComposerStallBurstOfSamplesIsNotARun(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
-	first := time.Now().Add(-time.Hour)
+	first := testEpoch.Add(-time.Hour)
 	stamp, err := json.Marshal(pendingStamp{
 		SessionID: testSessionID,
 		First:     first.Unix(),
