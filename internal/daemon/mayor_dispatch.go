@@ -233,18 +233,5 @@ func (d *Daemon) nudgeMayor(message string) error {
 
 	ctx, cancel := context.WithTimeout(d.ctx, mayorNudgeTimeout)
 	defer cancel()
-
-	cmd := exec.CommandContext(ctx, d.gtPath, "nudge", constants.RoleMayor, message) //nolint:gosec // G204: gtPath resolved at daemon init
-	cmd.Dir = d.config.TownRoot
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return fmt.Errorf("%w: %s", err, msg)
-		}
-		return err
-	}
-	return nil
+	return d.notify().Nudge(ctx, constants.RoleMayor, message)
 }

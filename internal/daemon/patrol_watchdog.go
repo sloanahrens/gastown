@@ -1,11 +1,8 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -347,18 +344,5 @@ func (d *Daemon) nudgeStalePatrol(target patrolWatchdogTarget) {
 func (d *Daemon) nudgeSession(address, message string) error {
 	ctx, cancel := context.WithTimeout(d.ctx, mayorNudgeTimeout)
 	defer cancel()
-
-	cmd := exec.CommandContext(ctx, d.gtPath, "nudge", address, message) //nolint:gosec // G204: gtPath resolved at daemon init
-	cmd.Dir = d.config.TownRoot
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return fmt.Errorf("%w: %s", err, msg)
-		}
-		return err
-	}
-	return nil
+	return d.notify().Nudge(ctx, address, message)
 }

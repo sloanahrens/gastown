@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,11 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 func TestGitChildEnv_ForwardsExisting(t *testing.T) {
@@ -1271,95 +1273,62 @@ func TestMaxEscalationRetries(t *testing.T) {
 // exit 1 immediately, confirming the function retries transient failures
 // instead of giving up after one attempt.
 func TestEscalate_RetriesOnTimeout(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for gt")
-	}
-
-	townRoot := t.TempDir()
-	counterFile := filepath.Join(t.TempDir(), "counter")
-	os.WriteFile(counterFile, []byte("0"), 0644)
-
-	// Fake gt that succeeds on the 3rd call. On calls 1-2 it exits 1
-	// immediately (simulating a transient failure that the retry should
-	// overcome).
-	gtScript := `#!/usr/bin/env bash
-counter=` + counterFile + `
-count=$(cat "$counter")
-count=$((count + 1))
-echo "$count" > "$counter"
-if [ $count -lt 3 ]; then
-	exit 1
-fi
-exit 0
-`
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0o755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	logger := log.New(os.Stderr, "TestEscalate_RetriesOnTimeout: ", log.LstdFlags)
+	flaky := &flakyEscalations{Recorder: notifyfake.New(), failures: 2}
 	d := &Daemon{
-		logger: logger,
-		config: &Config{
-			TownRoot: townRoot,
-		},
+		logger:   log.New(io.Discard, "", 0),
+		config:   &Config{TownRoot: t.TempDir()},
+		notifier: flaky,
 	}
 
-	done := make(chan struct{})
-	go func() {
-		d.escalate("main_branch_test", "test failed")
-		close(done)
-	}()
+	if err := d.escalateAlertErr("k", "main_branch_test", "test failed"); err != nil {
+		t.Fatalf("escalateAlertErr = %v, want success on the third attempt", err)
+	}
+	if flaky.attempts != 3 {
+		t.Errorf("escalation attempts = %d, want 3", flaky.attempts)
+	}
+	if got := flaky.Escalations(); len(got) != 1 {
+		t.Errorf("delivered escalations = %d, want 1", len(got))
+	}
+}
 
-	select {
-	case <-done:
-		// Good — escalate completed after retries.
-	case <-time.After(30 * time.Second):
-		t.Fatal("escalate did not complete within 30 s")
-	}
+// flakyEscalations fails the first failures escalations, then records the
+// rest.
+type flakyEscalations struct {
+	*notifyfake.Recorder
+	failures int
+	attempts int
+}
 
-	// Verify the fake gt was called 3 times (3 attempts).
-	count, err := os.ReadFile(counterFile)
-	if err != nil {
-		t.Fatalf("read counter: %v", err)
+func (f *flakyEscalations) Escalate(ctx context.Context, e notify.Escalation) error {
+	f.attempts++
+	if f.failures > 0 {
+		f.failures--
+		return errors.New("gt escalate: exit status 1 (<no output>)")
 	}
-	if strings.TrimSpace(string(count)) != "3" {
-		t.Errorf("gt called %s times, want 3", strings.TrimSpace(string(count)))
-	}
+	return f.Recorder.Escalate(ctx, e)
 }
 
 // TestEscalate_FallsBackToFeedOnPermanentFailure verifies that when gt
 // escalate always fails, the full message is logged to the feed (not just
 // the title).
 func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for gt")
-	}
-
 	townRoot := t.TempDir()
 	eventsFile := filepath.Join(townRoot, ".events.jsonl")
 	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o755); err != nil {
 		t.Fatalf("mkdir daemon: %v", err)
 	}
 
-	// Fake gt that always fails with stderr output.
-	gtScript := `#!/usr/bin/env bash
-echo "bd: database not found" >&2
-exit 1
-`
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0o755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Every escalation fails, as gt does when bd cannot reach its database.
+	rec := notifyfake.New()
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
 
-	logger := log.New(os.Stderr, "TestEscalate_Fallback: ", log.LstdFlags)
+	logger := log.New(io.Discard, "", 0)
 	d := &Daemon{
 		logger: logger,
 		config: &Config{
 			TownRoot: townRoot,
 		},
+		notifier: rec,
 	}
 
 	testMessage := "main branch test failures:\ngastown: gate \"test\": exit status 1"

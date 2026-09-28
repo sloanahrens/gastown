@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1159,12 +1160,7 @@ stuck_duration: %v
 Action needed: Check if agent is alive and responsive. Consider restarting if stuck.`,
 		agentID, hookBead, stuckDuration.Round(time.Minute))
 
-	cmd := exec.Command(d.gtPath, "mail", "send", witnessAddr, "-s", subject, "-m", body)
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = os.Environ() // Inherit PATH to find gt executable
-	util.SetDetachedProcessGroup(cmd)
-
-	if err := cmd.Run(); err != nil {
+	if err := d.notify().MailSend(context.Background(), witnessAddr, subject, body); err != nil {
 		d.logger.Printf("Warning: failed to notify witness of GUPP violation: %v", err)
 	} else {
 		d.logger.Printf("Notified %s of GUPP violation for %s", witnessAddr, agentID)
@@ -1286,12 +1282,7 @@ hook_bead: %s
 Action needed: Either restart the agent or reassign the work.`,
 		agentID, hookBead)
 
-	cmd := exec.Command(d.gtPath, "mail", "send", witnessAddr, "-s", subject, "-m", body)
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = os.Environ() // Inherit PATH to find gt executable
-	util.SetDetachedProcessGroup(cmd)
-
-	if err := cmd.Run(); err != nil {
+	if err := d.notify().MailSend(context.Background(), witnessAddr, subject, body); err != nil {
 		d.logger.Printf("Warning: failed to notify witness of orphaned work: %v", err)
 	} else {
 		d.logger.Printf("Notified %s of orphaned work for %s", witnessAddr, agentID)
