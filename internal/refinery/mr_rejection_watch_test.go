@@ -2,9 +2,7 @@ package refinery
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,32 +50,28 @@ func TestDoMerge_KillsInFlightGateWhenMRRejected(t *testing.T) {
 		}
 	}
 
-	// A gate that proves whether it was killed: it only creates GATE_DONE
-	// after outliving every reasonable cancellation window. The sleep is
-	// generous (well beyond the 10ms poll interval and the process-group
-	// kill grace) so the test distinguishes "killed" from "ran to
-	// completion" even under heavy parallel test-suite contention, rather
-	// than asserting a tight wall-clock bound.
-	gateDone := filepath.Join(workDir, "GATE_DONE")
+	// A gate that never finishes on its own within the test binary's life, so
+	// doMerge returning at all proves the gate was killed. There is no
+	// elapsed-time bound: the old one (sleep 15, fail if doMerge took >10s)
+	// also timed the git work around the gate and failed a correct kill on a
+	// loaded host (gt-e9wnj). A kill that never comes hangs the test to the
+	// binary's -timeout, which names this test.
 	e.config.Gates = map[string]*GateConfig{
-		"test": {Cmd: fmt.Sprintf("sleep 15 && touch %s", gateDone)},
+		"test": {Cmd: "sleep 3600"},
 	}
 
 	before := run(t, workDir, "git", "rev-parse", "origin/main")
 
 	mr := &MRInfo{ID: "gt-mr", Branch: "feature-reject", Target: "main", SourceIssue: "gt-src", CommitSHA: commit}
-	start := time.Now()
 	result := e.doMerge(context.Background(), mr)
-	elapsed := time.Since(start)
 
 	if result.Success {
 		t.Fatalf("expected merge to be refused, got success: %+v", result)
 	}
-	if elapsed > 10*time.Second {
-		t.Fatalf("doMerge took %v — gate was not killed promptly when the MR was rejected mid-run", elapsed)
-	}
-	if _, err := os.Stat(gateDone); err == nil {
-		t.Fatal("gate ran to completion (GATE_DONE exists) instead of being killed on rejection")
+	// The refusal must be the rejection, reported through the mid-run
+	// recheck, not some other gate failure.
+	if !strings.Contains(result.Error, "status is closed") {
+		t.Fatalf("result.Error = %q, want the mid-gate rejection reported", result.Error)
 	}
 	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
 		t.Fatalf("origin/main changed: before %s after %s", before, after)
@@ -145,25 +139,18 @@ func TestVerifyAndPush_KillsInFlightStackGateWhenMemberRejected(t *testing.T) {
 		}
 	}
 
-	gateDone := filepath.Join(workDir, "GATE_DONE")
+	// As in TestDoMerge_KillsInFlightGateWhenMRRejected: the gate never
+	// finishes on its own, so verifyAndPush returning proves the kill.
 	e.config.Gates = map[string]*GateConfig{
-		"test": {Cmd: fmt.Sprintf("sleep 15 && touch %s", gateDone)},
+		"test": {Cmd: "sleep 3600"},
 	}
 
 	before := run(t, workDir, "git", "rev-parse", "origin/main")
 
-	start := time.Now()
 	result := e.verifyAndPush(context.Background(), stacked, "main", nil)
-	elapsed := time.Since(start)
 
 	if len(result.Merged) != 0 {
 		t.Fatalf("expected no merged MRs, got %v", result.Merged)
-	}
-	if elapsed > 10*time.Second {
-		t.Fatalf("verifyAndPush took %v — stack gate was not killed promptly when a member was rejected mid-run", elapsed)
-	}
-	if _, err := os.Stat(gateDone); err == nil {
-		t.Fatal("stack gate ran to completion (GATE_DONE exists) instead of being killed on rejection")
 	}
 	if after := run(t, workDir, "git", "rev-parse", "origin/main"); after != before {
 		t.Fatalf("origin/main changed: before %s after %s", before, after)
