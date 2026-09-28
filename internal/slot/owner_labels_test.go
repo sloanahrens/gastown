@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-const testHost = "test-host"
-
 // ownerLabels is the label set internal/testutil stamps on a Dolt container,
 // plus the testcontainers session labels it carries anyway.
 func ownerLabels(pid int, host, session string) map[string]string {

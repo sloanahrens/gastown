@@ -13,6 +13,7 @@ func heldSlot(index int, owner *Owner) SlotState {
 // was never closed is named against the pool, and every other entry keeps to
 // what its own fields already say.
 func TestResolveHolds(t *testing.T) {
+	t.Parallel()
 	open := HistoryEntry{TS: "2026-09-22T15:16:25Z", Role: "gastown/refinery-batch", Slot: 0, PID: 4242, WaitedS: 0}
 	heldFor := 5.0
 	released := HistoryEntry{Role: "gastown/amber", Slot: 0, PID: 7, HeldS: &heldFor}
@@ -95,6 +96,7 @@ func TestResolveHolds(t *testing.T) {
 // TestResolveHolds_LeavesAnEmptyHistoryEmpty keeps a town that has never run a
 // container-backed suite from reporting a history of nothing.
 func TestResolveHolds_LeavesAnEmptyHistoryEmpty(t *testing.T) {
+	t.Parallel()
 	if got := ResolveHolds(nil, Report{Total: 1}); len(got) != 0 {
 		t.Errorf("ResolveHolds(nil) = %+v, want nothing", got)
 	}
@@ -106,6 +108,7 @@ func TestResolveHolds_LeavesAnEmptyHistoryEmpty(t *testing.T) {
 // ordinary abandoned hold, never as "reclaimed by" the marker's om-review
 // holder (gt-97cm finding 5).
 func TestResolveHolds_IgnoresMarkerRows(t *testing.T) {
+	t.Parallel()
 	entry := HistoryEntry{Role: "gastown/refinery-batch", Slot: 1, PID: 4242}
 	rep := Report{
 		Total: 1,
