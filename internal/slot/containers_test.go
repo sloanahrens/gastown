@@ -34,6 +34,7 @@ func sessionLabels(sessionID string) map[string]string {
 }
 
 func TestParseGateContainer(t *testing.T) {
+	t.Parallel()
 	created := time.Date(2026, 9, 21, 10, 41, 0, 0, time.UTC)
 
 	t.Run("docker json", func(t *testing.T) {
@@ -69,6 +70,7 @@ func TestParseGateContainer(t *testing.T) {
 }
 
 func TestParseDockerCreatedAt(t *testing.T) {
+	t.Parallel()
 	want := time.Date(2026, 9, 21, 20, 42, 23, 0, time.FixedZone("CDT", -5*3600))
 
 	got := parseDockerCreatedAt("2026-09-21 20:42:23 -0500 CDT")
@@ -84,6 +86,7 @@ func TestParseDockerCreatedAt(t *testing.T) {
 }
 
 func TestParseDockerLabels(t *testing.T) {
+	t.Parallel()
 	got := parseDockerLabels("org.testcontainers.sessionId=sess-1,org.testcontainers=true")
 	if got["org.testcontainers.sessionId"] != "sess-1" || got["org.testcontainers"] != "true" {
 		t.Fatalf("parseDockerLabels = %v, want both pairs", got)
@@ -99,6 +102,7 @@ func TestParseDockerLabels(t *testing.T) {
 // TestClassify is the rule the whole staleness verdict turns on (gt-ul1k):
 // only a container that could still belong to a running suite blocks the gate.
 func TestClassify(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 21, 17, 0, 0, 0, time.UTC)
 	window := 30 * time.Minute
 
@@ -143,8 +147,8 @@ func TestClassify(t *testing.T) {
 			reasonIn: "no reaper running",
 		},
 		{
-			name:   "old reaper is debris — it is what exits last, so it leaked",
-			holder: GateContainer{ID: "r", Image: "testcontainers/ryuk:0.14.0", Name: "reaper", Created: hoursOld, Labels: sessionLabels("sess-1")},
+			name:     "old reaper is debris — it is what exits last, so it leaked",
+			holder:   GateContainer{ID: "r", Image: "testcontainers/ryuk:0.14.0", Name: "reaper", Created: hoursOld, Labels: sessionLabels("sess-1")},
 			want:     VerdictDebris,
 			reasonIn: "session it reaped for is over",
 		},
@@ -178,12 +182,9 @@ func TestClassify(t *testing.T) {
 // TestLogDebris pins the requirement that a grant made on debris leaves the
 // evidence behind: the container, the age verdict, and the labels (gt-ul1k).
 func TestLogDebris(t *testing.T) {
-	orig := debrisWriter
+	t.Parallel()
 	buf := &strings.Builder{}
-	debrisWriter = buf
-	t.Cleanup(func() { debrisWriter = orig })
-
-	logDebris(ContainerVerdict{
+	logDebris(buf, ContainerVerdict{
 		Container: GateContainer{ID: "orphan-id", Image: "dolthub/dolt-sql-server:2.2.0", Name: "wizardly_goldberg",
 			Labels: map[string]string{"org.testcontainers.reuse.enable": ""}},
 		Verdict: VerdictDebris,
@@ -202,12 +203,9 @@ func TestLogDebris(t *testing.T) {
 // polls while a live suite runs, so the same orphan must not be re-announced
 // every DefaultPollInterval.
 func TestDebrisLoggerAnnouncesEachContainerOnce(t *testing.T) {
-	orig := debrisWriter
+	t.Parallel()
 	buf := &strings.Builder{}
-	debrisWriter = buf
-	t.Cleanup(func() { debrisWriter = orig })
-
-	logOnce := debrisLogger()
+	logOnce := debrisLogger(buf)
 	orphan := ContainerVerdict{Container: GateContainer{ID: "orphan-id", Image: "dolt/dolt-sql-server:2.2.0", Name: "orphan"}}
 	other := ContainerVerdict{Container: GateContainer{ID: "second-id", Image: "dolt/dolt-sql-server:2.2.0", Name: "second"}}
 
@@ -221,6 +219,7 @@ func TestDebrisLoggerAnnouncesEachContainerOnce(t *testing.T) {
 }
 
 func TestGateContainerHelpers(t *testing.T) {
+	t.Parallel()
 	reaper := GateContainer{Image: "testcontainers/ryuk:0.14.0", Name: "reaper"}
 	if !reaper.IsReaper() {
 		t.Error("IsReaper() = false for a ryuk image")

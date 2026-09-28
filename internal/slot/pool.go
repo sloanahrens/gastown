@@ -202,7 +202,12 @@ func othersHeld(townRoot string, pool Pool, exclude int) int {
 // its descendants inherit the fast path. AcquirePoolReal is the same
 // acquire for a caller that must be visible to everyone instead.
 func AcquirePool(townRoot, role string, timeout time.Duration, pool Pool) (*Handle, error) {
-	return acquirePool(townRoot, role, timeout, pool, false)
+	return NewGate().AcquirePool(townRoot, role, timeout, pool)
+}
+
+// AcquirePool is the package-level AcquirePool on this gate.
+func (g *Gate) AcquirePool(townRoot, role string, timeout time.Duration, pool Pool) (*Handle, error) {
+	return g.acquirePool(townRoot, role, timeout, pool, false)
 }
 
 // AcquirePoolReal acquires a slot as a first-class holder: it always takes
@@ -229,16 +234,13 @@ func AcquirePool(townRoot, role string, timeout time.Duration, pool Pool) (*Hand
 // so their gate commands and verifies queue behind this hold rather than
 // skipping its lock (gt-off9).
 func AcquirePoolReal(townRoot, role string, timeout time.Duration, pool Pool) (*Handle, error) {
-	return acquirePool(townRoot, role, timeout, pool, true)
+	return NewGate().AcquirePoolReal(townRoot, role, timeout, pool)
 }
 
-// probeWriter is where the gate's `docker ps` diagnostics go — the counterpart
-// to debrisWriter, which carries the verdicts on the containers Acquire walks
-// past. Both an inconclusive probe and an unreachable daemon are reported
-// here, so an operator has one stream to look at when the gate waits for a
-// reason it cannot name. Declared as a var so a test can read the evidence
-// back rather than have it land on its own stderr.
-var probeWriter io.Writer = os.Stderr
+// AcquirePoolReal is the package-level AcquirePoolReal on this gate.
+func (g *Gate) AcquirePoolReal(townRoot, role string, timeout time.Duration, pool Pool) (*Handle, error) {
+	return g.acquirePool(townRoot, role, timeout, pool, true)
+}
 
 // inconclusiveLogger returns a func that reports the first inconclusive
 // `docker ps` probe it is shown, then stays quiet.
@@ -251,14 +253,14 @@ var probeWriter io.Writer = os.Stderr
 // wedged daemon was indistinguishable from a busy town (gt-a8kx). One line
 // carrying the underlying error is the difference between a diagnosable wait
 // and a mystery hang.
-func inconclusiveLogger() func(error) {
+func inconclusiveLogger(w io.Writer) func(error) {
 	logged := false
 	return func(err error) {
 		if logged {
 			return
 		}
 		logged = true
-		fmt.Fprintf(probeWriter, "gt slot: docker ps check inconclusive (%v); cannot confirm no container-backed suite is running, waiting for the gate instead of handing out a slot\n", err)
+		fmt.Fprintf(w, "gt slot: docker ps check inconclusive (%v); cannot confirm no container-backed suite is running, waiting for the gate instead of handing out a slot\n", err)
 	}
 }
 
@@ -273,7 +275,7 @@ func inconclusiveLogger() func(error) {
 // wedged docker probe already names itself (inconclusiveLogger, gt-a8kx), so
 // this reports the two remaining ways to be held up: every candidate slot
 // held by a live process, and an unwrapped suite.
-func waitLogger(role string, timeout time.Duration) func(waitInfo) {
+func waitLogger(w io.Writer, role string, timeout time.Duration) func(waitInfo) {
 	logged := false
 	return func(info waitInfo) {
 		if logged || info.Reason == "" || info.Reason == WaitReasonDaemonUnreachable {
@@ -284,21 +286,21 @@ func waitLogger(role string, timeout time.Duration) func(waitInfo) {
 		if timeout > 0 {
 			cap = fmt.Sprintf(" (cap %s)", timeout.Round(time.Second))
 		}
-		fmt.Fprintf(probeWriter, "gt slot: waiting for container-gate slot as %s — %s%s\n", role, info.describe(), cap)
+		fmt.Fprintf(w, "gt slot: waiting for container-gate slot as %s — %s%s\n", role, info.describe(), cap)
 	}
 }
 
 // acquirePool implements AcquirePool (firstClass false) and AcquirePoolReal
 // (firstClass true).
-func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstClass bool) (*Handle, error) {
+func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstClass bool) (*Handle, error) {
 	pool = pool.normalized()
 
 	// Reentrant fast path (see ReentrantEnvVar): a descendant of a process
 	// holding ANY slot of this town, doing the same role's work, does not
 	// compete with its ancestor. A first-class holder never takes it.
 	if !firstClass {
-		if m, ok := reentrantHolder(); ok && m.grants(townRoot, role) {
-			return &Handle{townRoot: townRoot, unlock: func() {}, reentrant: true}, nil
+		if m, ok := g.reentrantHolder(); ok && m.grants(townRoot, role, g.pid) {
+			return &Handle{gate: g, townRoot: townRoot, unlock: func() {}, reentrant: true}, nil
 		}
 	}
 
@@ -312,56 +314,57 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 	}
 
 	hasDeadline := timeout > 0
-	deadline := time.Now().Add(timeout)
+	deadline := g.clock.Now().Add(timeout)
 
 	// Announced once per container per Acquire call: a town with one orphan
 	// beside a busy suite would otherwise print the same warning on every
 	// poll of the wait.
-	logDebrisOnce := debrisLogger()
+	logDebrisOnce := debrisLogger(g.debrisOut)
 
 	// Likewise one removal attempt per orphan per Acquire call: a removal that
 	// failed is logged once, not retried on every poll.
-	removeOrphanOnce := orphanRemover()
+	removeOrphanOnce := orphanRemover(g.runtime, g.debrisOut)
 
 	// Likewise once per Acquire call, and for the same reason: the wait can
 	// outlast several polls.
-	logInconclusiveOnce := inconclusiveLogger()
+	logInconclusiveOnce := inconclusiveLogger(g.probeOut)
 
 	// Likewise once per Acquire call: the cause of the wait, named as soon as
 	// a pass is blocked (gt-78b8).
-	logWaitOnce := waitLogger(role, timeout)
+	logWaitOnce := waitLogger(g.probeOut, role, timeout)
 
 	// watch attributes the wait this call is about to spend (gt-dc81).
-	watch := newWaitWatch()
+	watch := newWaitWatch(g.clock)
 
 	grant := func(i int, unlock func()) *Handle {
 		info := watch.info(timeout, false)
 		h := &Handle{
+			gate:       g,
 			townRoot:   townRoot,
-			unlock:     unlock,
+			unlock:     pinHold(unlock),
 			Index:      i,
 			role:       role,
-			acquiredAt: time.Now(),
+			acquiredAt: g.clock.Now(),
 			WaitedFor:  info.Waited,
 		}
 		_ = atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(townRoot, i), Owner{
 			Role:       role,
-			PID:        os.Getpid(),
-			AcquiredAt: time.Now(),
+			PID:        g.pid,
+			AcquiredAt: g.clock.Now(),
 			Slot:       i,
 		})
 		// Both acquire paths arm the marker for their own descendants; only
 		// the fast path differs between them (see AcquirePoolReal).
-		_ = os.Setenv(ReentrantEnvVar, reentrantEnvValue(townRoot, i, role, os.Getpid()))
-		if err := recordWaitResult(townRoot, role, i, os.Getpid(), info); err != nil {
-			fmt.Fprintf(probeWriter, "gt slot: recording slot acquisition in history: %v\n", err)
+		g.env.Setenv(ReentrantEnvVar, reentrantEnvValue(townRoot, i, role, g.pid))
+		if err := recordWaitResult(townRoot, role, i, g.pid, g.clock.Now(), info); err != nil {
+			fmt.Fprintf(g.probeOut, "gt slot: recording slot acquisition in history: %v\n", err)
 		}
-		emitWaitEvent(townRoot, role, i, info)
+		emitWaitEvent(g.probeOut, townRoot, role, i, info)
 		return h
 	}
 
 	for {
-		passStart := time.Now()
+		passStart := g.clock.Now()
 		// passReason is why this pass could not grant; "" means nothing
 		// blocked it, which only a grant can end.
 		var passReason WaitReason
@@ -391,7 +394,7 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 			if othersHeld(townRoot, pool, i) > 0 {
 				return grant(i, unlock), nil
 			}
-			containers, containerErr := gateContainers()
+			containers, containerErr := g.gateContainers()
 			switch {
 			case containerErr != nil && !isDaemonUnreachable(containerErr):
 				// Inconclusive probe (wedged daemon, permission-denied
@@ -406,11 +409,11 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 				}
 				unlock()
 			case containerErr != nil:
-				fmt.Fprintf(probeWriter, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
+				fmt.Fprintf(g.probeOut, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
 				return grant(i, unlock), nil
 			default:
 				var blocking []string
-				for _, verdict := range Classify(containers, time.Now(), StaleContainerWindow) {
+				for _, verdict := range g.owner.classify(containers, g.clock.Now(), StaleContainerWindow) {
 					if verdict.Blocks() {
 						blocking = append(blocking, verdict.Container.Display())
 						continue
@@ -442,23 +445,23 @@ func acquirePool(townRoot, role string, timeout time.Duration, pool Pool, firstC
 		if passReason != "" {
 			logWaitOnce(watch.blockedInfo(timeout, passReason))
 		}
-		if hasDeadline && time.Now().After(deadline) {
+		if hasDeadline && g.clock.Now().After(deadline) {
 			// A caller that gave up is recorded like a grant. It is the
 			// strongest evidence of a constricting gate and the case a
 			// grant-only history drops: two `gt slot run` calls timed out at 30s
 			// behind one unwrapped dolt suite on 2026-09-22 and left no trace
 			// anywhere until this did (gt-dc81).
 			info := watch.info(timeout, true)
-			if err := recordWaitResult(townRoot, role, candidates[0], os.Getpid(), info); err != nil {
-				fmt.Fprintf(probeWriter, "gt slot: recording slot timeout in history: %v\n", err)
+			if err := recordWaitResult(townRoot, role, candidates[0], g.pid, g.clock.Now(), info); err != nil {
+				fmt.Fprintf(g.probeOut, "gt slot: recording slot timeout in history: %v\n", err)
 			}
-			emitWaitEvent(townRoot, role, candidates[0], info)
+			emitWaitEvent(g.probeOut, townRoot, role, candidates[0], info)
 			return nil, fmt.Errorf("timed out after %s waiting for container-gate slot", timeout)
 		}
-		time.Sleep(DefaultPollInterval)
+		g.clock.Sleep(g.pollInterval)
 		// Credited after the sleep so a blocked pass carries the poll interval
 		// it spent waiting, not just the microseconds its probes took.
-		watch.credit(passReason, time.Since(passStart))
+		watch.credit(passReason, g.clock.Since(passStart))
 	}
 }
 
@@ -488,6 +491,11 @@ type SlotState struct {
 // nothing but the held/owner picture wants StatusPoolLocksOnly instead
 // (gt-a8kx).
 func StatusPool(townRoot string, pool Pool) (Report, error) {
+	return NewGate().StatusPool(townRoot, pool)
+}
+
+// StatusPool is the package-level StatusPool on this gate.
+func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 	rep, err := StatusPoolLocksOnly(townRoot, pool)
 	if err != nil {
 		return Report{}, err
@@ -498,12 +506,12 @@ func StatusPool(townRoot string, pool Pool) (Report, error) {
 		return rep, nil
 	}
 
-	containers, err := gateContainers()
+	containers, err := g.gateContainers()
 	if err != nil {
 		rep.DockerUnknown = true
 		return rep, nil
 	}
-	for _, verdict := range Classify(containers, time.Now(), StaleContainerWindow) {
+	for _, verdict := range g.owner.classify(containers, g.clock.Now(), StaleContainerWindow) {
 		if verdict.Blocks() {
 			rep.UnwrappedContainers = append(rep.UnwrappedContainers, verdict.Container.Display())
 		} else {

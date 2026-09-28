@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,43 +49,34 @@ func payloadSeconds(t *testing.T, ev events.Event, key string) float64 {
 
 // TestAcquire_MeasuresAndRecordsTheWait is gt-dc81's acceptance criterion 1 and
 // 3 in unit form: a second caller queuing behind a holder reports a wait, the
-// holder reports ~0, and both land in the ring file with the reason the second
+// holder reports 0, and both land in the ring file with the reason the second
 // one waited.
 func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
-	stubNoContainers(t)
+	t.Parallel()
+	tg := newTestGate(t)
 	townRoot := t.TempDir()
 
-	holder, err := Acquire(townRoot, "gastown/refinery", 10*time.Second)
+	holder, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 10*time.Second) })
 	if err != nil {
 		t.Fatalf("holder Acquire: %v", err)
 	}
-	if holder.WaitedFor > time.Second {
-		t.Errorf("uncontended Acquire reported a wait of %s, want ~0", holder.WaitedFor)
+	if holder.WaitedFor != 0 {
+		t.Errorf("uncontended Acquire reported a wait of %s, want 0", holder.WaitedFor)
 	}
 
-	type acquired struct {
-		h   *Handle
-		err error
-	}
-	done := make(chan acquired, 1)
-	go func() {
-		h, err := Acquire(townRoot, "gastown/pearl", 15*time.Second)
-		done <- acquired{h, err}
-	}()
+	done := goAcquire(func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/pearl", 15*time.Second) })
 
-	// Let the waiter take at least one blocked pass, then let it in.
-	time.Sleep(300 * time.Millisecond)
-	if err := holder.Release(); err != nil {
-		t.Fatalf("holder Release: %v", err)
-	}
+	// Let the waiter take one blocked pass, then let it in.
+	waitBlocked(t, tg.clk)
+	release(t, holder)
 
-	got := <-done
+	got := driveClock(t, tg.clk, tg.pollInterval, done)
 	if got.err != nil {
 		t.Fatalf("waiter Acquire: %v", got.err)
 	}
-	defer func() { _ = got.h.Release() }()
-	if got.h.WaitedFor < 200*time.Millisecond {
-		t.Errorf("waiter reported a wait of %s, want at least the 300ms it queued behind the holder", got.h.WaitedFor)
+	defer release(t, got.h)
+	if got.h.WaitedFor != tg.pollInterval {
+		t.Errorf("waiter reported a wait of %s, want the %s poll it queued behind the holder", got.h.WaitedFor, tg.pollInterval)
 	}
 
 	history, err := History(townRoot)
@@ -128,8 +118,8 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 	if got, want := waiterEvent.Payload["reason"], string(WaitReasonTokenHeld); got != want {
 		t.Errorf("slot_wait reason = %v, want %v", got, want)
 	}
-	if seconds := payloadSeconds(t, waiterEvent, "waited_s"); seconds < 0.2 {
-		t.Errorf("slot_wait waited_s = %v, want the ~0.3s wait or more", seconds)
+	if seconds := payloadSeconds(t, waiterEvent, "waited_s"); seconds != tg.pollInterval.Seconds() {
+		t.Errorf("slot_wait waited_s = %v, want the %s wait", seconds, tg.pollInterval)
 	}
 	if seconds := payloadSeconds(t, waiterEvent, "timeout_s"); seconds != 15 {
 		t.Errorf("slot_wait timeout_s = %v, want the caller's 15s", seconds)
@@ -152,14 +142,15 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 // TestRelease_RecordsTheHold covers the slot_hold half: held_s, the exit status
 // gt slot run reports, and the guard against recording one hold twice.
 func TestRelease_RecordsTheHold(t *testing.T) {
-	stubNoContainers(t)
+	t.Parallel()
+	tg := newTestGate(t)
 	townRoot := t.TempDir()
 
-	h, err := Acquire(townRoot, "gastown/refinery", 5*time.Second)
+	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 5*time.Second) })
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond)
+	tg.clk.Advance(150 * time.Millisecond)
 	if err := h.ReleaseWithExit(1); err != nil {
 		t.Fatalf("ReleaseWithExit: %v", err)
 	}
@@ -180,7 +171,7 @@ func TestRelease_RecordsTheHold(t *testing.T) {
 	if got := holds[0].Payload["exit_status"]; got != float64(1) {
 		t.Errorf("slot_hold exit_status = %v, want 1", got)
 	}
-	if seconds := payloadSeconds(t, holds[0], "held_s"); seconds < 0.1 {
+	if seconds := payloadSeconds(t, holds[0], "held_s"); seconds != 0.15 {
 		t.Errorf("slot_hold held_s = %v, want the 150ms hold", seconds)
 	}
 
@@ -191,41 +182,37 @@ func TestRelease_RecordsTheHold(t *testing.T) {
 	if len(history) != 1 {
 		t.Fatalf("History holds %d entries after one acquisition, want 1: %+v", len(history), history)
 	}
-	if history[0].HeldS == nil || *history[0].HeldS < 0.1 {
-		t.Errorf("history held_s = %v, want the ~0.15s hold", history[0].HeldS)
+	if history[0].HeldS == nil || *history[0].HeldS != 0.15 {
+		t.Errorf("history held_s = %v, want the 0.15s hold", history[0].HeldS)
 	}
 }
 
 // TestAcquire_WaitReasonUnwrappedContainers is the overseer's gt-dc81 amendment
 // for the second enum case: a wait behind an unwrapped suite names it.
 func TestAcquire_WaitReasonUnwrappedContainers(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
 	townRoot := t.TempDir()
 
 	line := dockerPSLine("stray-id", "dolt/dolt-sql-server:2.2.0", "stray-suite",
-		time.Now().Add(-2*time.Minute), nil)
-	var calls int32
-	restore := SetContainerListerForTest(func() ([]string, error) {
-		if atomic.AddInt32(&calls, 1) == 1 {
+		tg.clk.Now().Add(-2*time.Minute), nil)
+	tg.rt.listFn = func(call int) ([]string, error) {
+		if call == 1 {
 			return []string{line}, nil
 		}
 		return nil, nil
-	})
-	defer restore()
+	}
 
-	// The wait reports itself through probeWriter while it is still waiting
-	// (gt-78b8), not only in the record of how it ended.
-	prevProbe := probeWriter
-	var probeOut strings.Builder
-	probeWriter = &probeOut
-	defer func() { probeWriter = prevProbe }()
+	// The wait reports itself through the probe stream while it is still
+	// waiting (gt-78b8), not only in the record of how it ended.
+	probeOut := tg.probe
 
-	h, err := Acquire(townRoot, "gastown/refinery", 30*time.Second)
+	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 30*time.Second) })
 	if err != nil {
 		t.Fatalf("Acquire while an unwrapped suite cleared on the second check: %v", err)
 	}
-	defer func() { _ = h.Release() }()
-	if h.WaitedFor < DefaultPollInterval {
-		t.Errorf("wait = %s, want at least one poll interval spent behind the unwrapped suite", h.WaitedFor)
+	if h.WaitedFor != tg.pollInterval {
+		t.Errorf("wait = %s, want the one poll interval spent behind the unwrapped suite", h.WaitedFor)
 	}
 	if !strings.Contains(probeOut.String(), "unwrapped container suite") {
 		t.Errorf("probe output = %q, want the unwrapped suite named while the caller waited", probeOut.String())
@@ -247,30 +234,24 @@ func TestAcquire_WaitReasonUnwrappedContainers(t *testing.T) {
 // TestAcquire_WaitReasonDaemonUnreachable is the third enum case: a docker
 // check that could not answer is recorded as such rather than as a mystery.
 func TestAcquire_WaitReasonDaemonUnreachable(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
 	townRoot := t.TempDir()
 
 	probeErr := errors.New("docker ps did not respond within 5s: context deadline exceeded")
-	var calls int32
-	restore := SetContainerListerForTest(func() ([]string, error) {
-		if atomic.AddInt32(&calls, 1) == 1 {
+	tg.rt.listFn = func(call int) ([]string, error) {
+		if call == 1 {
 			return nil, probeErr
 		}
 		return nil, nil
-	})
-	defer restore()
+	}
 
-	// The inconclusive probe announces itself through probeWriter; a test
-	// binary's stderr is not the place to read that back from.
-	prevProbe := probeWriter
-	var probeOut strings.Builder
-	probeWriter = &probeOut
-	defer func() { probeWriter = prevProbe }()
+	// The inconclusive probe announces itself through the probe stream.
+	probeOut := tg.probe
 
-	h, err := Acquire(townRoot, "gastown/refinery", 30*time.Second)
-	if err != nil {
+	if _, err, _ := tg.run(t, func() (*Handle, error) { return tg.Acquire(townRoot, "gastown/refinery", 30*time.Second) }); err != nil {
 		t.Fatalf("Acquire after a wedged docker probe cleared: %v", err)
 	}
-	defer func() { _ = h.Release() }()
 
 	if !strings.Contains(probeOut.String(), "inconclusive") {
 		t.Errorf("probe output = %q, want the wait's cause reported while it waited", probeOut.String())
@@ -298,12 +279,13 @@ func TestAcquire_WaitReasonDaemonUnreachable(t *testing.T) {
 // process death" half of gt-dc81's acceptance: the record is on disk as soon as
 // the slot is granted, so a holder that dies mid-suite is still accounted for.
 func TestHistory_RingFileIsBounded(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Ten more acquisitions than the ring holds, so eviction is observable.
 	const over = 10
 	for i := 0; i < HistoryLimit+over; i++ {
-		err := recordWaitResult(townRoot, fmt.Sprintf("role-%d", i), 0, os.Getpid(), waitInfo{
+		err := recordWaitResult(townRoot, fmt.Sprintf("role-%d", i), 0, os.Getpid(), testNow, waitInfo{
 			Waited:  time.Duration(i) * time.Second,
 			Timeout: time.Minute,
 		})
@@ -344,10 +326,11 @@ func TestHistory_RingFileIsBounded(t *testing.T) {
 // from closing the wrong record: entry N+1 belongs to the new hold, not the one
 // the previous holder already closed.
 func TestCompleteHold_ClosesTheNewestOpenEntry(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	for _, waited := range []time.Duration{time.Second, 3 * time.Second} {
-		if err := recordWaitResult(townRoot, "gastown/refinery", 0, os.Getpid(), waitInfo{Waited: waited}); err != nil {
+		if err := recordWaitResult(townRoot, "gastown/refinery", 0, os.Getpid(), testNow, waitInfo{Waited: waited}); err != nil {
 			t.Fatalf("recordWaitResult: %v", err)
 		}
 	}
@@ -377,6 +360,7 @@ func TestCompleteHold_ClosesTheNewestOpenEntry(t *testing.T) {
 }
 
 func TestSummarizeWaits(t *testing.T) {
+	t.Parallel()
 	if got := SummarizeWaits(nil); got != (WaitSummary{}) {
 		t.Errorf("SummarizeWaits(nil) = %+v, want the zero summary", got)
 	}
@@ -410,6 +394,7 @@ func TestSummarizeWaits(t *testing.T) {
 // message is what the feed renders, so the facts and the wording describing
 // them have to arrive together.
 func TestWaitMessage(t *testing.T) {
+	t.Parallel()
 	info := waitInfo{
 		Reason:  WaitReasonTokenHeld,
 		Waited:  4*time.Minute + 12*time.Second,

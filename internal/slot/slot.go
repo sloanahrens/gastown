@@ -30,11 +30,8 @@
 package slot
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -45,7 +42,7 @@ import (
 // non-blocking attempt while waiting for a timed acquire.
 const DefaultPollInterval = 2 * time.Second
 
-// dockerPSTimeout bounds the `docker ps` call runningGateContainers makes.
+// dockerPSTimeout bounds the `docker ps` call DockerRuntime().List makes.
 // Status() is on gt-status's hot path (gt-tuiy: polled frequently by
 // witness patrols and `gt slot status`), so a wedged docker daemon must not
 // be able to hang it indefinitely — a bounded, explicit "unknown" beats an
@@ -148,8 +145,8 @@ func parseReentrantMark(val string) (reentrantMark, bool) {
 }
 
 // reentrantHolder returns the marker this process inherited, if any.
-func reentrantHolder() (reentrantMark, bool) {
-	return parseReentrantMark(os.Getenv(ReentrantEnvVar))
+func (g *Gate) reentrantHolder() (reentrantMark, bool) {
+	return parseReentrantMark(g.env.Getenv(ReentrantEnvVar))
 }
 
 // validAncestor reports whether this marker names a genuine ancestor hold
@@ -158,11 +155,11 @@ func reentrantHolder() (reentrantMark, bool) {
 // townRoot-scoped half of grants, split out so InheritedRole can reuse it
 // without also requiring a caller to already know the role to compare
 // against.
-func (m reentrantMark) validAncestor(townRoot string) bool {
+func (m reentrantMark) validAncestor(townRoot string, selfPID int) bool {
 	// A marker naming THIS process is its own (or a sibling goroutine's)
 	// hold, not an ancestor's: it must still contend, or mutual exclusion
 	// would not survive two callers in one process (gt-tuiy).
-	if m.pid == os.Getpid() {
+	if m.pid == selfPID {
 		return false
 	}
 	// A path outside this town's lock directory is somebody else's slot.
@@ -172,8 +169,9 @@ func (m reentrantMark) validAncestor(townRoot string) bool {
 
 // grants reports whether this marker licenses a caller acquiring role in
 // townRoot to take the reentrant fast path instead of locking for real.
-func (m reentrantMark) grants(townRoot, role string) bool {
-	if !m.validAncestor(townRoot) {
+// selfPID is the caller's own process id.
+func (m reentrantMark) grants(townRoot, role string, selfPID int) bool {
+	if !m.validAncestor(townRoot, selfPID) {
 		return false
 	}
 	// Legacy markers predate the role field and keep the old permissive
@@ -194,8 +192,14 @@ func (m reentrantMark) grants(townRoot, role string) bool {
 // marker predates roles (an empty role carries no value to hand back, even
 // though grants() still treats it as reentrant for any role).
 func InheritedRole(townRoot string) (string, bool) {
-	m, ok := reentrantHolder()
-	if !ok || !m.validAncestor(townRoot) || m.role == "" {
+	return NewGate().InheritedRole(townRoot)
+}
+
+// InheritedRole is the package-level InheritedRole, reading the gate's
+// environment.
+func (g *Gate) InheritedRole(townRoot string) (string, bool) {
+	m, ok := g.reentrantHolder()
+	if !ok || !m.validAncestor(townRoot, g.pid) || m.role == "" {
 		return "", false
 	}
 	return m.role, true
@@ -215,49 +219,7 @@ func reentrantEnvValue(townRoot string, index int, role string, pid int) string 
 // kind of detector that missed a live suite before.
 var gateContainerPatterns = []string{"dolt", "testcontainers", "ryuk"}
 
-// runningGateContainers lists the raw `docker ps` lines for every currently
-// running Docker container whose image or name matches gateContainerPatterns.
-// Each line is one of docker's own JSON records (see dockerPSFormat), which
-// gateContainers parses into the age and session the gate classifies on.
-//
-// A non-nil error means the check could not be performed (docker daemon
-// unreachable, wedged, or refused the connection for some other reason) —
-// callers must treat that as "unknown", never as "no containers running",
-// except the specific isDaemonUnreachable case Acquire distinguishes (see
-// its doc comment). Declared as a var so tests can substitute a fake docker
-// CLI response.
-var runningGateContainers = func() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), dockerPSTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "ps", "--format", dockerPSFormat).Output() //nolint:gosec // G204: fixed args, no user input
-	if err != nil {
-		var execErr *exec.Error
-		if errors.As(err, &execErr) {
-			// docker binary itself is missing — this host can never run a
-			// container-backed suite, so there is nothing to detect. This is
-			// distinct from an *exec.ExitError (docker installed but the
-			// daemon is unreachable), which IS treated as unknown below.
-			return nil, nil
-		}
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("docker ps did not respond within %s: %w", dockerPSTimeout, ctx.Err())
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			// Fold the docker CLI's own stderr into the error text so
-			// isDaemonUnreachable can tell "daemon refused the connection"
-			// (safe to infer nothing is running) apart from other exit
-			// failures like a permission-denied socket (not safe to infer
-			// anything) — exec.ExitError.Error() alone is just "exit status
-			// N" and loses that distinction.
-			return nil, fmt.Errorf("docker ps failed: %s", strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return nil, err
-	}
-	return matchGateContainers(string(out)), nil
-}
-
-// isDaemonUnreachable reports whether a runningGateContainers error means
+// isDaemonUnreachable reports whether a ContainerRuntime.List error means
 // the docker daemon itself refused the connection (the CLI's own message
 // for "not running" and "connection refused" — Docker emits the same
 // wording for both), as opposed to a wedged daemon (docker ps timed out,
@@ -271,26 +233,8 @@ func isDaemonUnreachable(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "cannot connect to the docker daemon")
 }
 
-// SetContainerListerForTest overrides the function Acquire/Status use to
-// list running gate containers, for tests in OTHER packages that cannot
-// reach the unexported runningGateContainers var directly the way this
-// package's own tests do (see stubNoContainers in slot_test.go).
-// internal/cmd's batch-slot tests drive Acquire through
-// acquireBatchGateSlot and must never shell out to the real docker CLI: a
-// stray dolt/testcontainers/ryuk container on a shared Gas Town host would
-// otherwise make Acquire poll for the full batchSlotTimeout and hang the
-// whole test binary (gt-tuiy attempt 4, CRITICAL). Returns a restore func
-// the caller must invoke (typically via t.Cleanup) to put the real lister
-// back — the override is process-wide state shared by every test in the
-// binary.
-func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
-	prev := runningGateContainers
-	runningGateContainers = fn
-	return func() { runningGateContainers = prev }
-}
-
 // matchGateContainers filters raw `docker ps` output down to the lines for
-// gate containers. Split out from runningGateContainers so the matching logic
+// gate containers. Split out from the docker call so the matching logic
 // is testable without stubbing the docker CLI call itself.
 func matchGateContainers(psOutput string) []string {
 	var matches []string
@@ -315,11 +259,10 @@ func matchGateContainers(psOutput string) []string {
 	return matches
 }
 
-// gateContainers parses runningGateContainers' lines into the records the gate
-// judges. Kept separate from the lister so the string seam the tests and the
-// other rigs' packages stub stays what it was.
-func gateContainers() ([]GateContainer, error) {
-	lines, err := runningGateContainers()
+// gateContainers lists the gate's containers through its runtime, parsed into
+// the records the gate judges.
+func (g *Gate) gateContainers() ([]GateContainer, error) {
+	lines, err := g.runtime.List()
 	if err != nil {
 		return nil, err
 	}
@@ -366,6 +309,7 @@ type Owner struct {
 // Handle represents a held slot. Call Release exactly once when the
 // container-backed suite has finished.
 type Handle struct {
+	gate      *Gate
 	townRoot  string
 	unlock    func()
 	reentrant bool // true: this Handle rides an ancestor's real hold; Release is a no-op.
@@ -410,7 +354,12 @@ type Handle struct {
 // ReentrantEnvVar). Callers working on one item should therefore pass one
 // stable role, not a per-invocation one.
 func Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
-	return AcquirePool(townRoot, role, timeout, DefaultPool)
+	return NewGate().Acquire(townRoot, role, timeout)
+}
+
+// Acquire is the package-level Acquire on this gate.
+func (g *Gate) Acquire(townRoot, role string, timeout time.Duration) (*Handle, error) {
+	return g.AcquirePool(townRoot, role, timeout, DefaultPool)
 }
 
 // Release releases the slot: the owner file is removed first (best-effort,
@@ -446,19 +395,20 @@ func (h *Handle) release(exitCode *int) error {
 		return nil
 	}
 	h.released = true
+	g := h.gate
 
-	held := time.Since(h.acquiredAt)
+	held := g.clock.Since(h.acquiredAt)
 	_ = os.Remove(SlotOwnerPath(h.townRoot, h.Index))
 	h.unlock()
-	_ = os.Unsetenv(ReentrantEnvVar)
+	g.env.Unsetenv(ReentrantEnvVar)
 
 	// Telemetry is best-effort and runs after the lock is gone: a caller
 	// blocked on this slot must not be made to wait on a stats write, and a
 	// grant is worth more than the record of it.
-	if _, err := completeHold(h.townRoot, h.role, h.Index, os.Getpid(), held); err != nil {
-		fmt.Fprintf(probeWriter, "gt slot: recording slot hold in history: %v\n", err)
+	if _, err := completeHold(h.townRoot, h.role, h.Index, g.pid, held); err != nil {
+		fmt.Fprintf(g.probeOut, "gt slot: recording slot hold in history: %v\n", err)
 	}
-	emitHoldEvent(h.townRoot, h.role, h.Index, held, exitCode)
+	emitHoldEvent(g.probeOut, h.townRoot, h.role, h.Index, held, exitCode)
 	return nil
 }
 
@@ -530,5 +480,10 @@ func (r Report) Busy() bool {
 // A caller that reads only Held/Owner should use StatusPoolLocksOnly and
 // spare itself the `docker ps` shell-out (gt-a8kx).
 func Status(townRoot string) (Report, error) {
-	return StatusPool(townRoot, DefaultPool)
+	return NewGate().Status(townRoot)
+}
+
+// Status is the package-level Status on this gate.
+func (g *Gate) Status(townRoot string) (Report, error) {
+	return g.StatusPool(townRoot, DefaultPool)
 }

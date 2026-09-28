@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -130,19 +129,16 @@ func parseGateContainer(line string) GateContainer {
 // THAT RUN started from one that was already there.
 //
 // A non-nil error means the check could not be performed and must be read as
-// "unknown", never as "no containers running". Goes through the same
-// runningGateContainers var Acquire and Status use, so tests substitute it
-// with SetContainerListerForTest.
+// "unknown", never as "no containers running". Goes through the same runtime
+// Acquire and Status use, so tests substitute it with
+// SetContainerListerForTest.
 func GateContainers() ([]GateContainer, error) {
-	lines, err := runningGateContainers()
-	if err != nil {
-		return nil, err
-	}
-	containers := make([]GateContainer, 0, len(lines))
-	for _, line := range lines {
-		containers = append(containers, parseGateContainer(line))
-	}
-	return containers, nil
+	return NewGate().GateContainers()
+}
+
+// GateContainers is the package-level GateContainers on this gate.
+func (g *Gate) GateContainers() ([]GateContainer, error) {
+	return g.gateContainers()
 }
 
 // parseDockerCreatedAt parses docker's start-time string, returning the zero
@@ -227,24 +223,20 @@ func (v ContainerVerdict) Blocks() bool {
 	return v.Verdict != VerdictDebris
 }
 
-// debrisWriter is where the gate's debris warnings go. Declared as a var so a
-// test can read the evidence back rather than have it land on its own stderr.
-var debrisWriter io.Writer = os.Stderr
-
 // logDebris records one container the gate is walking past, with the age and
 // the labels an operator needs to confirm the verdict before reaping — the
 // gate grants on debris now, so the evidence for that call has to be on the
 // record rather than inferred from a container someone removed by hand
 // (gt-ul1k).
-func logDebris(verdict ContainerVerdict) {
-	fmt.Fprintf(debrisWriter, "gt slot: ignoring %s as stale debris (%s); labels: %s. Remove it with 'gt slot reap'.\n",
+func logDebris(w io.Writer, verdict ContainerVerdict) {
+	fmt.Fprintf(w, "gt slot: ignoring %s as stale debris (%s); labels: %s. Remove it with 'gt slot reap'.\n",
 		verdict.Container.Display(), verdict.Reason, verdict.Container.LabelSummary())
 }
 
 // debrisLogger returns a logDebris that records each distinct container once.
 // Acquire polls while a live suite runs, so a container this gate is walking
 // past would otherwise be re-announced on every poll.
-func debrisLogger() func(ContainerVerdict) {
+func debrisLogger(w io.Writer) func(ContainerVerdict) {
 	seen := map[string]bool{}
 	return func(verdict ContainerVerdict) {
 		key := verdict.Container.ID + "\x00" + verdict.Container.Display()
@@ -252,7 +244,7 @@ func debrisLogger() func(ContainerVerdict) {
 			return
 		}
 		seen[key] = true
-		logDebris(verdict)
+		logDebris(w, verdict)
 	}
 }
 
@@ -272,6 +264,11 @@ func debrisLogger() func(ContainerVerdict) {
 // start time) is live at any age. An owner that only looks alive decides only
 // inside the window. Everything else is judged by age and reaper.
 func Classify(containers []GateContainer, now time.Time, window time.Duration) []ContainerVerdict {
+	return hostOwnerProbe().classify(containers, now, window)
+}
+
+// classify is Classify with the owner labels judged by this probe.
+func (p ownerProbe) classify(containers []GateContainer, now time.Time, window time.Duration) []ContainerVerdict {
 	if window <= 0 {
 		window = StaleContainerWindow
 	}
@@ -294,7 +291,7 @@ func Classify(containers []GateContainer, now time.Time, window time.Duration) [
 
 	out := make([]ContainerVerdict, 0, len(containers))
 	for _, c := range containers {
-		if verdict, ok := ownerVerdict(c, now, window); ok {
+		if verdict, ok := p.ownerVerdict(c, now, window); ok {
 			out = append(out, verdict)
 			continue
 		}

@@ -1,12 +1,8 @@
 package slot
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/lock"
@@ -64,6 +60,11 @@ type ReapReport struct {
 // promise that its own suite cleans up after itself; a polecat reaping another
 // holder's containers mid-run would break that suite.
 func Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
+	return NewGate().Reap(townRoot, opts)
+}
+
+// Reap is the package-level Reap on this gate.
+func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 	report := ReapReport{DryRun: opts.DryRun, OlderThan: opts.OlderThan}
 	if report.OlderThan <= 0 {
 		report.OlderThan = StaleContainerWindow
@@ -71,12 +72,12 @@ func Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 
 	report.OwnerFiles = reapStaleOwnerFiles(townRoot, opts.DryRun)
 
-	containers, err := gateContainers()
+	containers, err := g.gateContainers()
 	if err != nil {
 		return report, fmt.Errorf("listing gate containers: %w", err)
 	}
 
-	for _, verdict := range Classify(containers, time.Now(), report.OlderThan) {
+	for _, verdict := range g.owner.classify(containers, g.clock.Now(), report.OlderThan) {
 		if !verdict.Blocks() {
 			report.Debris = append(report.Debris, verdict)
 		} else {
@@ -91,7 +92,7 @@ func Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 				fmt.Sprintf("%s: no container id in the docker listing, so it cannot be removed", verdict.Container.Display()))
 			continue
 		}
-		if removeErr := removeContainer(verdict.Container.ID); removeErr != nil {
+		if removeErr := g.runtime.Remove(verdict.Container.ID); removeErr != nil {
 			report.Failed = append(report.Failed, fmt.Sprintf("%s: %v", verdict.Container.Display(), removeErr))
 			continue
 		}
@@ -133,29 +134,4 @@ func reapStaleOwnerFiles(townRoot string, dryRun bool) []StaleOwnerFile {
 		stale = append(stale, file)
 	}
 	return stale
-}
-
-// removeContainer force-removes one container. Declared as a var so a test
-// that feeds the gate fake debris can never reach the host's real docker: a
-// stub container id has no business being deleted for real.
-var removeContainer = func(id string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), dockerRmTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", id).CombinedOutput() //nolint:gosec // G204: fixed args, id comes from docker's own listing
-	if err != nil {
-		if msg := strings.TrimSpace(string(out)); msg != "" {
-			return errors.New(msg)
-		}
-		return err
-	}
-	return nil
-}
-
-// SetContainerRemoverForTest overrides removeContainer, for tests in other
-// packages that drive Reap and must not delete a real container. Returns a
-// restore func the caller must invoke (typically via t.Cleanup).
-func SetContainerRemoverForTest(fn func(id string) error) (restore func()) {
-	prev := removeContainer
-	removeContainer = fn
-	return func() { removeContainer = prev }
 }
