@@ -197,3 +197,63 @@ func unitTmux(s *scripted, clk clockwork.Clock) *Tmux {
 	}
 	return newTmuxForTest("gt-test-unit", s.exec, clk)
 }
+
+// fakePane is one scripted tmux pane: capture-pane returns its content,
+// send-keys records the keys, and confirm (when set) runs on Enter to change
+// the content or end the session. Use it through scripted.answer.
+type fakePane struct {
+	mu      sync.Mutex
+	content string
+	keys    []string
+	dead    bool
+	confirm func(p *fakePane) // called under mu when Enter arrives
+}
+
+func (p *fakePane) answer(c tmuxCall) reply {
+	if c.name != "tmux" {
+		return ok("")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch c.sub() {
+	case "has-session":
+		if p.dead {
+			return fail("can't find session: x")
+		}
+		return ok("")
+	case "capture-pane":
+		if p.dead {
+			return fail("can't find pane: x")
+		}
+		return ok(p.content)
+	case "send-keys":
+		if p.dead {
+			return fail("can't find pane: x")
+		}
+		key := c.last()
+		p.keys = append(p.keys, key)
+		if key == "Enter" && p.confirm != nil {
+			p.confirm(p)
+		}
+		return ok("")
+	}
+	return ok("")
+}
+
+func (p *fakePane) sentKeys() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.keys...)
+}
+
+func (p *fakePane) set(content string) {
+	p.mu.Lock()
+	p.content = content
+	p.mu.Unlock()
+}
+
+// showPrompt is a confirm action: the dialog clears to an agent prompt.
+func showPrompt(p *fakePane) { p.content = "\n❯ " }
+
+// exitPane is a confirm action: the agent exits and tmux destroys the session.
+func exitPane(p *fakePane) { p.dead = true }
