@@ -4,13 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1958,65 +1958,91 @@ func TestValidateRecipientFilesystemFallbackWithRouteErrors(t *testing.T) {
 	}
 }
 
-// requireNotifyTestSocket returns a per-test tmux socket and skips if tmux
-// is unavailable. The socket server is killed on test cleanup.
-func requireNotifyTestSocket(t *testing.T) string {
-	t.Helper()
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	// Use test name for unique socket per test to prevent cleanup interference.
-	// Sanitize: tmux socket names cannot contain slashes or dots.
-	safe := strings.NewReplacer("/", "-", ".", "-").Replace(t.Name())
-	socket := fmt.Sprintf("gt-test-%s-%d", safe, os.Getpid())
-	// tmux.KillServer, not a bare `tmux kill-server`: it unlinks the socket
-	// file too, which tmux leaves behind when its server exits (gt-20di). The
-	// pre-kill clears a server left by a run that died before its cleanup.
-	tm := tmux.NewTmuxWithSocket(socket)
-	_ = tm.KillServer()
-	t.Cleanup(func() {
-		_ = tm.KillServer()
-	})
-	return socket
+// fakeNotifyTmux is a scripted notifyTmux: sessions listed in live exist,
+// those also in idle show a ready prompt, and noServer models a tmux server
+// that is not running. It records what notifyRecipient sent, so the tests
+// below decide the delivery path directly instead of waiting on a real pane.
+type fakeNotifyTmux struct {
+	mu       sync.Mutex
+	live     map[string]bool
+	idle     map[string]bool
+	noServer bool
+
+	nudges   map[string][]string
+	banners  []string
+	waitedOn map[string]time.Duration
 }
 
-// createNotifyTestSession creates a tmux session on the given socket and waits
-// for it to be ready.
-func createNotifyTestSession(t *testing.T, socket, sessionName, command string) {
-	t.Helper()
-	args := []string{"-L", socket, "new-session", "-d", "-s", sessionName, command}
-	out, err := exec.Command("tmux", args...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("failed to create test session %q: %v\n%s", sessionName, err, out)
+func newFakeNotifyTmux(live ...string) *fakeNotifyTmux {
+	f := &fakeNotifyTmux{
+		live:     map[string]bool{},
+		idle:     map[string]bool{},
+		nudges:   map[string][]string{},
+		waitedOn: map[string]time.Duration{},
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if exec.Command("tmux", "-L", socket, "has-session", "-t", sessionName).Run() == nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	for _, s := range live {
+		f.live[s] = true
 	}
-	t.Fatalf("session %q never appeared on socket %q", sessionName, socket)
+	return f
+}
+
+func (f *fakeNotifyTmux) HasSession(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noServer {
+		return false, tmux.ErrNoServer
+	}
+	return f.live[name], nil
+}
+
+func (f *fakeNotifyTmux) SendNotificationBanner(session, from, subject string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.banners = append(f.banners, session+": "+from+": "+subject)
+	return nil
+}
+
+func (f *fakeNotifyTmux) WaitForIdle(session string, timeout time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.waitedOn[session] = timeout
+	if !f.live[session] {
+		return tmux.ErrSessionNotFound
+	}
+	if f.idle[session] {
+		return nil
+	}
+	return tmux.ErrIdleTimeout
+}
+
+func (f *fakeNotifyTmux) NudgeSession(session, message string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.live[session] {
+		return tmux.ErrSessionNotFound
+	}
+	f.nudges[session] = append(f.nudges[session], message)
+	return nil
+}
+
+func (f *fakeNotifyTmux) nudgesTo(session string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.nudges[session]...)
 }
 
 // TestNotifyRecipient_IdleAgent verifies that an idle agent (prompt visible)
 // receives a direct nudge instead of a queued one.
 func TestNotifyRecipient_IdleAgent(t *testing.T) {
-	socket := requireNotifyTestSocket(t)
 	sessionName := "gt-crew-idletest"
-
-	// Create a session that displays the Claude Code prompt prefix, simulating idle.
-	// "printf" prints the prompt, then "cat" blocks keeping the session alive.
-	createNotifyTestSession(t, socket, sessionName, `sh -c 'printf "❯ \n" && cat'`)
-
-	// Wait briefly for printf output to appear in the pane.
-	time.Sleep(500 * time.Millisecond)
+	fake := newFakeNotifyTmux(sessionName)
+	fake.idle[sessionName] = true
 
 	townRoot := t.TempDir()
 	r := &Router{
 		workDir:           t.TempDir(),
 		townRoot:          townRoot,
-		tmux:              tmux.NewTmuxWithSocket(socket),
+		tmux:              fake,
 		IdleNotifyTimeout: 3 * time.Second,
 	}
 
@@ -2029,6 +2055,13 @@ func TestNotifyRecipient_IdleAgent(t *testing.T) {
 	err := r.notifyRecipient(msg)
 	if err != nil {
 		t.Fatalf("notifyRecipient returned error: %v", err)
+	}
+
+	if got := fake.waitedOn[sessionName]; got != 3*time.Second {
+		t.Errorf("WaitForIdle timeout = %v, want the router's IdleNotifyTimeout (3s)", got)
+	}
+	if got := fake.nudgesTo(sessionName); len(got) != 1 || !strings.Contains(got[0], "test idle delivery") {
+		t.Errorf("direct nudges to %s = %q, want one notification naming the subject", sessionName, got)
 	}
 
 	// The main notification was delivered directly (no immediate queue).
@@ -2052,18 +2085,14 @@ func TestNotifyRecipient_IdleAgent(t *testing.T) {
 // TestNotifyRecipient_BusyAgent verifies that a busy agent (no prompt visible)
 // gets a queued nudge instead of an immediate one.
 func TestNotifyRecipient_BusyAgent(t *testing.T) {
-	socket := requireNotifyTestSocket(t)
 	sessionName := "gt-crew-busytest"
-
-	// Create a session running sleep — no prompt visible, simulating busy agent.
-	createNotifyTestSession(t, socket, sessionName, "sleep 300")
+	fake := newFakeNotifyTmux(sessionName) // live, never idle
 
 	townRoot := t.TempDir()
 	r := &Router{
-		workDir:           t.TempDir(),
-		townRoot:          townRoot,
-		tmux:              tmux.NewTmuxWithSocket(socket),
-		IdleNotifyTimeout: 1 * time.Second, // short timeout for test speed
+		workDir:  t.TempDir(),
+		townRoot: townRoot,
+		tmux:     fake,
 	}
 
 	msg := &Message{
@@ -2075,6 +2104,13 @@ func TestNotifyRecipient_BusyAgent(t *testing.T) {
 	err := r.notifyRecipient(msg)
 	if err != nil {
 		t.Fatalf("notifyRecipient returned error: %v", err)
+	}
+
+	if got := fake.waitedOn[sessionName]; got != DefaultIdleNotifyTimeout {
+		t.Errorf("WaitForIdle timeout = %v, want DefaultIdleNotifyTimeout (%v) when unset", got, DefaultIdleNotifyTimeout)
+	}
+	if got := fake.nudgesTo(sessionName); len(got) != 0 {
+		t.Errorf("busy agent got direct nudges %q, want none — its mail must be queued", got)
 	}
 
 	// Two nudges should be queued:
@@ -2091,7 +2127,7 @@ func TestNotifyRecipient_BusyAgent(t *testing.T) {
 		t.Fatalf("Drain: %v", err)
 	}
 	if len(nudges) != 1 {
-		t.Errorf("expected 1 immediately-deliverable nudge, got %d", len(nudges))
+		t.Fatalf("expected 1 immediately-deliverable nudge, got %d", len(nudges))
 	}
 	if nudges[0].Priority != nudge.PriorityNormal {
 		t.Errorf("queued mail notification priority = %q, want %q", nudges[0].Priority, nudge.PriorityNormal)
@@ -2105,18 +2141,15 @@ func TestNotifyRecipient_BusyAgent(t *testing.T) {
 }
 
 func TestNotifyRecipient_CanonicalAliasFansOutToBusyCandidates(t *testing.T) {
-	socket := requireNotifyTestSocket(t)
 	crewSession := "gt-crew-aliasfanout"
 	polecatSession := "gt-aliasfanout"
-	createNotifyTestSession(t, socket, crewSession, "sleep 300")
-	createNotifyTestSession(t, socket, polecatSession, "sleep 300")
+	fake := newFakeNotifyTmux(crewSession, polecatSession) // both live and busy
 
 	townRoot := t.TempDir()
 	r := &Router{
-		workDir:           t.TempDir(),
-		townRoot:          townRoot,
-		tmux:              tmux.NewTmuxWithSocket(socket),
-		IdleNotifyTimeout: 10 * time.Millisecond,
+		workDir:  t.TempDir(),
+		townRoot: townRoot,
+		tmux:     fake,
 	}
 
 	msg := &Message{
@@ -2153,11 +2186,14 @@ func TestNotifyRecipient_CanonicalAliasFansOutToBusyCandidates(t *testing.T) {
 }
 
 func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T) {
+	fake := newFakeNotifyTmux()
+	fake.noServer = true
+
 	townRoot := t.TempDir()
 	r := &Router{
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
-		tmux:     tmux.NewTmuxWithSocket("gt-test-missing-socket"),
+		tmux:     fake,
 	}
 
 	msg := &Message{
@@ -2186,11 +2222,14 @@ func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T)
 }
 
 func TestNotifyRecipient_DogQueuesDogSessionNotDeacon(t *testing.T) {
+	fake := newFakeNotifyTmux()
+	fake.noServer = true
+
 	townRoot := t.TempDir()
 	r := &Router{
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
-		tmux:     tmux.NewTmuxWithSocket("gt-test-missing-socket"),
+		tmux:     fake,
 	}
 
 	msg := &Message{
@@ -2225,16 +2264,14 @@ func TestNotifyRecipient_DogQueuesDogSessionNotDeacon(t *testing.T) {
 }
 
 func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) {
-	socket := requireNotifyTestSocket(t)
 	sessionName := "gt-crew-busy-escalation"
-	createNotifyTestSession(t, socket, sessionName, "sleep 300")
+	fake := newFakeNotifyTmux(sessionName) // live, never idle
 
 	townRoot := t.TempDir()
 	r := &Router{
-		workDir:           t.TempDir(),
-		townRoot:          townRoot,
-		tmux:              tmux.NewTmuxWithSocket(socket),
-		IdleNotifyTimeout: 1 * time.Second,
+		workDir:  t.TempDir(),
+		townRoot: townRoot,
+		tmux:     fake,
 	}
 
 	msg := &Message{
