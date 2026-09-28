@@ -49,7 +49,7 @@ func (t *Tmux) ensureNewSessionSocketSafe() error {
 }
 
 func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
-	if stale, err := unixSocketStale(t.sockets(), socketPath); err != nil || stale {
+	if stale, err := t.socketStaleWithin(socketPath, newSessionSocketProbeTimeout); err != nil || stale {
 		if stale {
 			return nil
 		}
@@ -61,7 +61,7 @@ func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
 	if err := t.runListSessionsProbe(ctx); err == nil {
 		return nil
 	} else if errors.Is(err, ErrNoServer) {
-		stale, recheckErr := unixSocketStale(t.sockets(), socketPath)
+		stale, recheckErr := t.socketStaleWithin(socketPath, newSessionSocketProbeTimeout)
 		if recheckErr == nil && stale {
 			return nil
 		}
@@ -96,7 +96,7 @@ func unlinkDeadSocketFile(clk clockwork.Clock, ops socketOps, socketPath string)
 	deadline := clk.Now().Add(socketUnlinkWait)
 	for {
 		stale, err := unixSocketStale(ops, socketPath)
-		if err != nil {
+		if err != nil && !isDialTimeout(err) {
 			return
 		}
 		if stale {
@@ -105,6 +105,28 @@ func unlinkDeadSocketFile(clk clockwork.Clock, ops socketOps, socketPath string)
 		}
 		if !clk.Now().Before(deadline) {
 			return
+		}
+		clk.Sleep(socketUnlinkInterval)
+	}
+}
+
+// isDialTimeout reports whether a dial ran out of time. That says nothing about
+// the socket: under host load a dial to a dead socket can time out before the
+// kernel's refusal is read.
+func isDialTimeout(err error) bool {
+	var te interface{ Timeout() bool }
+	return errors.As(err, &te) && te.Timeout()
+}
+
+// socketStaleWithin is unixSocketStale, re-dialing a timed-out dial every
+// socketUnlinkInterval until budget has passed on the clock.
+func (t *Tmux) socketStaleWithin(socketPath string, budget time.Duration) (bool, error) {
+	clk := t.clk()
+	deadline := clk.Now().Add(budget)
+	for {
+		stale, err := unixSocketStale(t.sockets(), socketPath)
+		if err == nil || !isDialTimeout(err) || !clk.Now().Before(deadline) {
+			return stale, err
 		}
 		clk.Sleep(socketUnlinkInterval)
 	}
