@@ -242,7 +242,18 @@ func (tg *testGate) run(t *testing.T, fn func() (*Handle, error)) (*Handle, erro
 	t.Helper()
 	start := tg.clk.Now()
 	got := driveClock(t, tg.clk, tg.pollInterval, goAcquire(fn))
+	keepHeld(t, got.h)
 	return got.h, got.err, tg.clk.Since(start)
+}
+
+// keepHeld releases h when the test ends. Until then the cleanup keeps h
+// reachable: a Handle the test no longer mentions would otherwise be garbage
+// collected, and the finalizer on its lock file would drop the flock under the
+// test's feet.
+func keepHeld(t *testing.T, h *Handle) {
+	if h != nil {
+		t.Cleanup(func() { _ = h.Release() })
+	}
 }
 
 // mustAcquirePool acquires a slot the test expects to be free.
