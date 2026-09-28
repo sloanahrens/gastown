@@ -81,6 +81,11 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 		"TestParallelWaived":         false, // parallel, waived with a reason
 		"TestParallelInstallsOnce":   false, // parallel, installs once and never restores
 		"TestParallelOnlyReads":      false, // parallel, only reads the seam
+		// The witness race (nudgeRefinery): a parallel test swaps the global
+		// in its own body and restores it with defer rather than t.Cleanup.
+		"TestParallelDeferRestores":    true,
+		"TestParallelDeferArgRestores": true,  // defer func(v int) { Seam = v }(Seam)
+		"TestParallelDeferUnlocksOnly": false, // a defer that restores nothing is no swap
 	}
 	seen := map[string]bool{}
 	for _, line := range got {
@@ -179,6 +184,32 @@ func TestParallelInstallsOnce(t *testing.T) {
 func TestParallelOnlyReads(t *testing.T) {
 	t.Parallel()
 	_ = ReadSeam()
+}
+
+func TestParallelDeferRestores(t *testing.T) {
+	t.Parallel()
+	old := Seam
+	defer func() { Seam = old }()
+	Seam = 5
+}
+
+func TestParallelDeferArgRestores(t *testing.T) {
+	t.Parallel()
+	defer func(v int) { Seam = v }(Seam)
+	Seam = 6
+}
+
+var mu sync.Mutex
+
+func bumpLocked() {
+	mu.Lock()
+	defer mu.Unlock()
+	Seam = Seam + 1
+}
+
+func TestParallelDeferUnlocksOnly(t *testing.T) {
+	t.Parallel()
+	bumpLocked()
 }
 `,
 	}
@@ -520,6 +551,10 @@ type candidateWrite struct {
 //     (session.SetDefaultRegistry, slot.SetContainerListerForTest), or
 //   - it is restored later in this same function (t.Cleanup, the shape that
 //     makes a parallel caller lose the race), or
+//   - a defer in this function writes the same global back (the swap is
+//     scoped to the function rather than the test, but a parallel test that
+//     does it races every parallel reader just the same: gt witness's
+//     nudgeRefinery swap), or
 //   - it is os.Stdout/os.Stderr/os.Stdin, which are process-global whatever
 //     the value and cannot be made safe by construction.
 //
@@ -581,9 +616,27 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 
 	var candidates []candidateWrite
 	withCleanup := false
+	deferRestored := map[string]bool{} // globals a deferred call writes back
 	once := onceRanges(fd, pa.pkgLevel)
 	ast.Inspect(fd, func(n ast.Node) bool {
 		switch node := n.(type) {
+		case *ast.DeferStmt:
+			// `defer func() { X = old }()` restores X when this function
+			// returns: the same swap-and-restore shape as t.Cleanup, scoped to
+			// the function instead of the test. A parallel test that swaps
+			// this way races every parallel reader of X for its whole body.
+			// Only a defer that writes a global back counts; a defer that
+			// unlocks a mutex says nothing about the writes around it.
+			ast.Inspect(node.Call, func(m ast.Node) bool {
+				if as, ok := m.(*ast.AssignStmt); ok && as.Tok != token.DEFINE {
+					for _, lhs := range as.Lhs {
+						if what, _, ok := pa.globalTarget(lhs, locals); ok {
+							deferRestored[what] = true
+						}
+					}
+				}
+				return true
+			})
 		case *ast.AssignStmt:
 			if node.Tok == token.DEFINE || within(node.Pos(), once) {
 				return true
@@ -629,7 +682,7 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 		return nil
 	}
 	for _, c := range candidates {
-		if c.process || c.fromParam {
+		if c.process || c.fromParam || deferRestored[c.what] {
 			return &globalWrite{pos: c.pos, what: c.what}
 		}
 	}

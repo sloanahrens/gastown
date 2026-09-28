@@ -41,7 +41,7 @@ func TestVerifyBranchAlreadyMergedUsesBranchTargetStatus(t *testing.T) {
 	setupWitnessSquashPreservedRepoAt(t, repo, filepath.Join(t.TempDir(), "remote.git"))
 	runWitnessGit(t, repo, "push", "origin", "integration/test:main")
 
-	merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "institute", "")
+	merged, err := newHandlers()._verifyBranchAlreadyMerged(workDir, "gastown", "institute", "")
 	if err != nil {
 		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestVerifyBranchAlreadyMergedUsesBranchTargetStatus(t *testing.T) {
 	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
 	runWitnessGit(t, repo, "add", "feature.txt")
 	runWitnessGit(t, repo, "commit", "-m", "extra local work")
-	merged, err = _verifyBranchAlreadyMerged(workDir, "gastown", "institute", "")
+	merged, err = newHandlers()._verifyBranchAlreadyMerged(workDir, "gastown", "institute", "")
 	if err != nil {
 		t.Fatalf("_verifyBranchAlreadyMerged after extra work: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestVerifyBranchAlreadyMerged_RejectsStaleBranchFromSupersededAssignment(t 
 	runWitnessGit(t, repo, "switch", oldBranch)
 
 	// Unknown hookBead: preserve the old (pre-gt-skwt) behavior.
-	if merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "rust", ""); err != nil || !merged {
+	if merged, err := newHandlers()._verifyBranchAlreadyMerged(workDir, "gastown", "rust", ""); err != nil || !merged {
 		t.Fatalf("merged=%v err=%v, want merged=true when hookBead is unknown", merged, err)
 	}
 
@@ -110,7 +110,7 @@ func TestVerifyBranchAlreadyMerged_RejectsStaleBranchFromSupersededAssignment(t 
 	// force-reassigned to this polecat after be-dxx merged): must NOT report
 	// merged, or handleZombieRestart will archive/nuke the polecat for work
 	// on be-4c2 it never started.
-	merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "rust", "be-4c2")
+	merged, err := newHandlers()._verifyBranchAlreadyMerged(workDir, "gastown", "rust", "be-4c2")
 	if err != nil {
 		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestVerifyBranchAlreadyMerged_RejectsStaleBranchFromSupersededAssignment(t 
 
 	// The branch DOES match the current hookBead: genuine merged-work
 	// detection (aa-apw) must still fire.
-	merged, err = _verifyBranchAlreadyMerged(workDir, "gastown", "rust", "be-dxx")
+	merged, err = newHandlers()._verifyBranchAlreadyMerged(workDir, "gastown", "rust", "be-dxx")
 	if err != nil {
 		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
 	}
@@ -237,7 +237,7 @@ func readMayorEvents(t *testing.T, townRoot string) []testMayorEvent {
 func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
+	newHandlers().notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeDeferred))
 
 	events := readMayorEvents(t, townRoot)
 	if len(events) != 1 {
@@ -253,26 +253,18 @@ func TestNotifyMayorSlotOpen_BlocksNonCompletedExit(t *testing.T) {
 }
 
 func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
+	h := newTestHandlers()
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	prevRecovery := slotOpenRecoveryCheck
-	prevDecision := slotOpenDecisionForNotify
-	prevScheduler := runSchedulerForSlotOpen
-	t.Cleanup(func() {
-		slotOpenRecoveryCheck = prevRecovery
-		slotOpenDecisionForNotify = prevDecision
-		runSchedulerForSlotOpen = prevScheduler
-	})
-
-	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+	h.slotOpenRecoveryCheckFn = func(workDir, rigName, polecatName string) (string, error) {
 		return `{"verdict":"SAFE_TO_NUKE"}`, nil
 	}
-	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+	h.slotOpenDecisionFn = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
 		return polecat.SlotReuseDecision{Reusable: true}
 	}
 	called := false
-	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+	h.runSchedulerForSlotOpenFn = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
 		called = true
 		if gotTownRoot != townRoot {
 			t.Fatalf("townRoot = %q, want %q", gotTownRoot, townRoot)
@@ -280,7 +272,7 @@ func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
 		return slotOpenSchedulerResult{Dispatched: 1}, nil
 	}
 
-	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+	h.notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	if !called {
 		t.Fatal("scheduler trigger was not called")
@@ -291,25 +283,17 @@ func TestNotifyMayorSlotOpen_SchedulerDispatchSuppressesMayor(t *testing.T) {
 }
 
 func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
+	h := newTestHandlers()
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	prevRecovery := slotOpenRecoveryCheck
-	prevDecision := slotOpenDecisionForNotify
-	prevScheduler := runSchedulerForSlotOpen
-	t.Cleanup(func() {
-		slotOpenRecoveryCheck = prevRecovery
-		slotOpenDecisionForNotify = prevDecision
-		runSchedulerForSlotOpen = prevScheduler
-	})
-
-	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+	h.slotOpenRecoveryCheckFn = func(workDir, rigName, polecatName string) (string, error) {
 		return `{"verdict":"SAFE_TO_NUKE"}`, nil
 	}
-	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+	h.slotOpenDecisionFn = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
 		return polecat.SlotReuseDecision{Reusable: true}
 	}
-	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+	h.runSchedulerForSlotOpenFn = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
 		var result slotOpenSchedulerResult
 		result.Ran = true
 		result.Dispatched = 1
@@ -319,7 +303,7 @@ func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
 		return result, nil
 	}
 
-	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+	h.notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	events := readMayorEvents(t, townRoot)
 	if len(events) != 1 {
@@ -331,29 +315,21 @@ func TestNotifyMayorSlotOpen_DispatchThenEmptyEmitsSchedulerOpen(t *testing.T) {
 }
 
 func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T) {
+	h := newTestHandlers()
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	prevRecovery := slotOpenRecoveryCheck
-	prevDecision := slotOpenDecisionForNotify
-	prevScheduler := runSchedulerForSlotOpen
-	t.Cleanup(func() {
-		slotOpenRecoveryCheck = prevRecovery
-		slotOpenDecisionForNotify = prevDecision
-		runSchedulerForSlotOpen = prevScheduler
-	})
-
-	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+	h.slotOpenRecoveryCheckFn = func(workDir, rigName, polecatName string) (string, error) {
 		return `{"verdict":"SAFE_TO_NUKE"}`, nil
 	}
-	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+	h.slotOpenDecisionFn = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
 		return polecat.SlotReuseDecision{Reusable: true}
 	}
-	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+	h.runSchedulerForSlotOpenFn = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
 		return slotOpenSchedulerResult{Dispatched: 1}, errors.New("status read failed")
 	}
 
-	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+	h.notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	if events := readMayorEvents(t, townRoot); len(events) != 0 {
 		t.Fatalf("events = %+v, want none after confirmed dispatch", events)
@@ -361,25 +337,17 @@ func TestNotifyMayorSlotOpen_DispatchWithStatusErrorSuppressesMayor(t *testing.T
 }
 
 func TestNotifyMayorSlotOpen_EmitsSchedulerOpenWhenQueueEmpty(t *testing.T) {
+	h := newTestHandlers()
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	prevRecovery := slotOpenRecoveryCheck
-	prevDecision := slotOpenDecisionForNotify
-	prevScheduler := runSchedulerForSlotOpen
-	t.Cleanup(func() {
-		slotOpenRecoveryCheck = prevRecovery
-		slotOpenDecisionForNotify = prevDecision
-		runSchedulerForSlotOpen = prevScheduler
-	})
-
-	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+	h.slotOpenRecoveryCheckFn = func(workDir, rigName, polecatName string) (string, error) {
 		return `{"verdict":"SAFE_TO_NUKE"}`, nil
 	}
-	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+	h.slotOpenDecisionFn = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
 		return polecat.SlotReuseDecision{Reusable: true}
 	}
-	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+	h.runSchedulerForSlotOpenFn = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
 		var result slotOpenSchedulerResult
 		result.Before.Capacity.Max = 10
 		result.Before.Capacity.Free = 2
@@ -387,7 +355,7 @@ func TestNotifyMayorSlotOpen_EmitsSchedulerOpenWhenQueueEmpty(t *testing.T) {
 		return result, nil
 	}
 
-	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+	h.notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	events := readMayorEvents(t, townRoot)
 	if len(events) != 1 {
@@ -402,25 +370,17 @@ func TestNotifyMayorSlotOpen_EmitsSchedulerOpenWhenQueueEmpty(t *testing.T) {
 }
 
 func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
+	h := newTestHandlers()
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	prevRecovery := slotOpenRecoveryCheck
-	prevDecision := slotOpenDecisionForNotify
-	prevScheduler := runSchedulerForSlotOpen
-	t.Cleanup(func() {
-		slotOpenRecoveryCheck = prevRecovery
-		slotOpenDecisionForNotify = prevDecision
-		runSchedulerForSlotOpen = prevScheduler
-	})
-
-	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+	h.slotOpenRecoveryCheckFn = func(workDir, rigName, polecatName string) (string, error) {
 		return `{"verdict":"SAFE_TO_NUKE"}`, nil
 	}
-	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+	h.slotOpenDecisionFn = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
 		return polecat.SlotReuseDecision{Reusable: true}
 	}
-	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+	h.runSchedulerForSlotOpenFn = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
 		var result slotOpenSchedulerResult
 		result.Before.Capacity.Max = 10
 		result.Before.Capacity.Free = 1
@@ -430,7 +390,7 @@ func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
 		return result, nil
 	}
 
-	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+	h.notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	events := readMayorEvents(t, townRoot)
 	if len(events) != 1 {
@@ -442,25 +402,17 @@ func TestNotifyMayorSlotOpen_QueuedReadyWithoutDispatchFallsBack(t *testing.T) {
 }
 
 func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *testing.T) {
+	h := newTestHandlers()
 	t.Setenv("PATH", t.TempDir())
 	townRoot, workDir := setupSlotOpenTestTown(t)
 
-	prevRecovery := slotOpenRecoveryCheck
-	prevDecision := slotOpenDecisionForNotify
-	prevScheduler := runSchedulerForSlotOpen
-	t.Cleanup(func() {
-		slotOpenRecoveryCheck = prevRecovery
-		slotOpenDecisionForNotify = prevDecision
-		runSchedulerForSlotOpen = prevScheduler
-	})
-
-	slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+	h.slotOpenRecoveryCheckFn = func(workDir, rigName, polecatName string) (string, error) {
 		return `{"verdict":"SAFE_TO_NUKE"}`, nil
 	}
-	slotOpenDecisionForNotify = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
+	h.slotOpenDecisionFn = func(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
 		return polecat.SlotReuseDecision{Reusable: true}
 	}
-	runSchedulerForSlotOpen = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
+	h.runSchedulerForSlotOpenFn = func(gotTownRoot string) (slotOpenSchedulerResult, error) {
 		var result slotOpenSchedulerResult
 		result.Before.Capacity.Max = 10
 		result.Before.Capacity.Free = 1
@@ -472,7 +424,7 @@ func TestNotifyMayorSlotOpen_NoDispatchAfterCapacityFillsSuppressesMayor(t *test
 		return result, nil
 	}
 
-	notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
+	h.notifyMayorSlotOpen(workDir, "gastown", "guzzle", string(ExitTypeCompleted))
 
 	if events := readMayorEvents(t, townRoot); len(events) != 0 {
 		t.Fatalf("events = %+v, want none when scheduler no longer has capacity", events)
@@ -500,9 +452,7 @@ func TestParseSchedulerRunDispatched(t *testing.T) {
 }
 
 func TestShouldNotifyMayorSlotOpenRequiresSafeRecovery(t *testing.T) {
-	prev := slotOpenRecoveryCheck
-	t.Cleanup(func() { slotOpenRecoveryCheck = prev })
-
+	h := newTestHandlers()
 	tests := []struct {
 		name    string
 		output  string
@@ -539,11 +489,11 @@ func TestShouldNotifyMayorSlotOpenRequiresSafeRecovery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, error) {
+			h.slotOpenRecoveryCheckFn = func(workDir, rigName, polecatName string) (string, error) {
 				return tt.output, tt.err
 			}
 
-			gotOK, gotMsg := shouldNotifyMayorSlotOpen("/tmp", "gastown", "nitro")
+			gotOK, gotMsg := h.shouldNotifyMayorSlotOpen("/tmp", "gastown", "nitro")
 			if gotOK != tt.wantOK {
 				t.Fatalf("ok = %v, want %v (msg=%q)", gotOK, tt.wantOK, gotMsg)
 			}
@@ -598,14 +548,14 @@ func TestActiveMRBlockerFromCLIUsesTerminalStatus(t *testing.T) {
 // the mock. The stub gt and tmux stand in for the nuke execs so a
 // non-refused case cannot touch a real polecat.
 //
-// Not parallel: stubNukePolecatExecs mutates package-level vars, and the PATH
-// stub plus GT_TEST_BD_TIMEOUT_SEC are process-wide.
+// Not parallel: the PATH stub and GT_TEST_BD_TIMEOUT_SEC are process-wide.
 func TestNukePolecatRefusalNamesBlocker(t *testing.T) {
+	h := newTestHandlers()
 	// 5s keeps a stub that is missing a fixture from burning the 60s
 	// production subprocess budget before it errors out.
 	t.Setenv("GT_TEST_BD_TIMEOUT_SEC", "5")
 
-	stubNukePolecatExecs(t)
+	stubNukePolecatExecs(t, h)
 	binDir, workDir := writeNukeRefusalTown(t)
 
 	// agentBead is the rig's polecat agent bead. The description carries the
@@ -680,7 +630,7 @@ exit 0
 				t.Fatal(err)
 			}
 			bd, _ := mockBd(tt.execFn, func(args []string) error { return nil })
-			err := NukePolecat(bd, workDir, "gastown", "nitro")
+			err := h.nukePolecatImpl(bd, workDir, "gastown", "nitro")
 			if err == nil {
 				t.Fatal("NukePolecat returned nil; want a refinery-pending refusal")
 			}
@@ -2272,7 +2222,7 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 		HookBead:   "", // partial spawn: never durably attached a hook_bead
 	}
 
-	zombie, found := detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap, "", now)
+	zombie, found := newHandlers().detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "jade", sessionName, tm, nil, witCfg, snap, "", now)
 	t.Logf("found=%v zombie=%+v", found, zombie)
 	if !found {
 		t.Fatal("expected zombie detection for live session stuck at agent_state=spawning with no hook_bead and no heartbeat")
@@ -2285,8 +2235,8 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 // TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence is the
 // gt-gx2v wiring: a live, heartbeatless polecat with work on its hook is flagged
 // only when no signal shows output, and the flag names the evidence it read.
-// Not parallel — it overrides the neverHeartbeatedLiveness seam.
 func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testing.T) {
+	h := newTestHandlers()
 	if runtime.GOOS == "windows" {
 		t.Skip("tmux not supported on Windows")
 	}
@@ -2317,15 +2267,11 @@ func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testin
 	witCfg := &config.WitnessThresholds{}
 	bd, _ := fakeBd()
 	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gt-gx2v"}
-
-	old := neverHeartbeatedLiveness
-	t.Cleanup(func() { neverHeartbeatedLiveness = old })
-
 	detect := func(ev neverHeartbeatedEvidence) (ZombieResult, bool) {
-		neverHeartbeatedLiveness = func(*tmux.Tmux, string, string, string, string, time.Time, time.Time) neverHeartbeatedEvidence {
+		h.neverHeartbeatedLivenessFn = func(*tmux.Tmux, string, string, string, string, time.Time, time.Time) neverHeartbeatedEvidence {
 			return ev
 		}
-		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "emerald", sessionName, tm, nil, witCfg, snap, "", now)
+		return h.detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "emerald", sessionName, tm, nil, witCfg, snap, "", now)
 	}
 
 	// Working: the cross-check found the transcript a second old, so the patrol
@@ -2355,12 +2301,13 @@ func TestDetectZombieLiveSession_NeverHeartbeatedNeedsLivenessEvidence(t *testin
 // TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged is the gt-gx2v
 // control. The liveness cross-check lives in the live-session path, so a polecat
 // whose session and agent process are both gone is still classified and
-// escalated — the gate cannot be "fixed" by silencing the rule. Not parallel:
-// it stubs the restart and nuke seams so the restart starts nothing real and
-// the archive path cannot reach a polecat.
+// escalated — the gate cannot be "fixed" by silencing the rule. It stubs the
+// restart and nuke seams so the restart starts nothing real and the archive
+// path cannot reach a polecat.
 func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T) {
-	stubRestartSessionExec(t)
-	nuked := stubNukePolecat(t, nil)
+	h := newTestHandlers()
+	stubRestartSessionExec(t, h)
+	nuked := stubNukePolecat(t, h, nil)
 
 	townRoot := t.TempDir()
 	bd, _ := mockBd(
@@ -2378,7 +2325,7 @@ func TestDetectZombieDeadSession_GenuinelyDeadPolecatIsStillFlagged(t *testing.T
 		UpdatedAt:  time.Now().Format(time.RFC3339),
 	}
 
-	zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "zz-test-rig", "zz-test-cat",
+	zombie, found := h.detectZombieDeadSession(bd, townRoot, townRoot, "zz-test-rig", "zz-test-cat",
 		"gt-zz-test-rig-zz-test-cat", deadSessionTmux(t), nil, time.Now(), &config.WitnessThresholds{}, snap, "")
 	t.Logf("found=%v zombie=%+v", found, zombie)
 	if !found {
@@ -2411,9 +2358,10 @@ func deadSessionTmux(t *testing.T) *tmux.Tmux {
 // regression. The two runs differ only in agent_state: both hold a hook and a
 // done-intent inside the max age, so the working run is the control that proves
 // the bead reaches the restart and the held run proves the state is what stops
-// it. Not parallel: it stubs the restart seam.
+// it.
 func TestDetectZombieDeadSession_DeliberateHoldBlocksRestart(t *testing.T) {
-	restarts := stubRestartSessionExec(t)
+	h := newTestHandlers()
+	restarts := stubRestartSessionExec(t, h)
 
 	townRoot := t.TempDir()
 	bd, _ := mockBd(
@@ -2436,7 +2384,7 @@ func TestDetectZombieDeadSession_DeliberateHoldBlocksRestart(t *testing.T) {
 	detect := func(agentState string) (ZombieResult, bool) {
 		before := len(*restarts)
 		snap := &agentBeadSnapshot{AgentState: agentState, HookBead: "gt-vql3x"}
-		zombie, found := detectZombieDeadSession(bd, townRoot, townRoot, "zz-test-rig", "zz-test-cat",
+		zombie, found := h.detectZombieDeadSession(bd, townRoot, townRoot, "zz-test-rig", "zz-test-cat",
 			"gt-zz-test-rig-zz-test-cat", deadTM, doneIntent, detectedAt, &config.WitnessThresholds{}, snap, "")
 		t.Logf("agent_state=%s found=%v restarts=%d zombie=%+v", agentState, found, len(*restarts)-before, zombie)
 		return zombie, found
@@ -2465,6 +2413,7 @@ func TestDetectZombieDeadSession_DeliberateHoldBlocksRestart(t *testing.T) {
 // pre-rebase tip and cost an operator force push one session later (gt-bf5x).
 // A live session whose transcript advanced after the done-intent is working.
 func TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone(t *testing.T) {
+	h := newTestHandlers()
 	if runtime.GOOS == "windows" {
 		t.Skip("tmux not supported on Windows")
 	}
@@ -2496,18 +2445,14 @@ func TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone(t *testing.T)
 	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gt-3s52"}
 
 	restarts := 0
-	oldObserve, oldRestart := observeDoneIntentActivity, restartStuckSession
-	restartStuckSession = func(string, string, string) error {
+	h.restartStuckSessionFn = func(string, string, string) error {
 		restarts++
 		return nil
 	}
-	t.Cleanup(func() {
-		observeDoneIntentActivity, restartStuckSession = oldObserve, oldRestart
-	})
 
 	detect := func(act RealActivity) (ZombieResult, bool) {
-		observeDoneIntentActivity = func(*tmux.Tmux, string, string, string) RealActivity { return act }
-		return detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "flint", sessionName, tm, doneIntent, witCfg, snap, "", now)
+		h.observeDoneIntentActivityFn = func(*tmux.Tmux, string, string, string) RealActivity { return act }
+		return h.detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "flint", sessionName, tm, doneIntent, witCfg, snap, "", now)
 	}
 
 	// Work in flight: the transcript advanced a minute ago, after the done-intent.
@@ -2544,7 +2489,7 @@ func TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone(t *testing.T)
 func TestResetAbandonedBead_EmptyHookBead(t *testing.T) {
 	t.Parallel()
 	// resetAbandonedBead should return false for empty hookBead
-	result := resetAbandonedBead(DefaultBdCli(), "/tmp", "testrig", "", "nux", nil)
+	result := newHandlers().resetAbandonedBead(DefaultBdCli(), "/tmp", "testrig", "", "nux", nil)
 	if result {
 		t.Error("resetAbandonedBead should return false for empty hookBead")
 	}
@@ -2554,23 +2499,19 @@ func TestResetAbandonedBead_NoRouter(t *testing.T) {
 	t.Parallel()
 	// resetAbandonedBead with nil router should not panic even if bead exists.
 	// It will return false because bd won't find the bead, but shouldn't crash.
-	result := resetAbandonedBead(DefaultBdCli(), "/tmp/nonexistent", "testrig", "gt-fake123", "nux", nil)
+	result := newHandlers().resetAbandonedBead(DefaultBdCli(), "/tmp/nonexistent", "testrig", "gt-fake123", "nux", nil)
 	if result {
 		t.Error("resetAbandonedBead should return false when bd commands fail")
 	}
 }
 
 func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
-	// Not parallel: overrides package-level verifyCommitOnMain.
+	h := newTestHandlers()
 	// When verifyCommitOnMain returns true, resetAbandonedBead should close the
 	// bead instead of resetting it for re-dispatch. This is the fix for #2036.
-
-	oldVerify := verifyCommitOnMain
-	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) (bool, error) {
 		return true, nil // work is on main
 	}
-	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
-
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
 			if len(args) >= 1 && args[0] == "show" {
@@ -2584,7 +2525,7 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	)
 
 	tmpDir := t.TempDir()
-	result := resetAbandonedBead(bd, tmpDir, "testrig", "gt-work123", "alpha", nil)
+	result := h.resetAbandonedBead(bd, tmpDir, "testrig", "gt-work123", "alpha", nil)
 	if result {
 		t.Error("resetAbandonedBead should return false when work is on main (bead closed, not re-dispatched)")
 	}
@@ -2608,16 +2549,12 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 }
 
 func TestResetAbandonedBead_ResetsWhenWorkNotOnMain(t *testing.T) {
-	// Not parallel: overrides package-level verifyCommitOnMain.
+	h := newTestHandlers()
 	// When verifyCommitOnMain returns false, resetAbandonedBead should reset
 	// the bead for re-dispatch (existing behavior).
-
-	oldVerify := verifyCommitOnMain
-	verifyCommitOnMain = func(workDir, rigName, polecatName string) (bool, error) {
+	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) (bool, error) {
 		return false, nil // work NOT on main
 	}
-	t.Cleanup(func() { verifyCommitOnMain = oldVerify })
-
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
 			if len(args) >= 1 && args[0] == "show" {
@@ -2631,7 +2568,7 @@ func TestResetAbandonedBead_ResetsWhenWorkNotOnMain(t *testing.T) {
 	)
 
 	tmpDir := t.TempDir()
-	result := resetAbandonedBead(bd, tmpDir, "testrig", "gt-work123", "alpha", nil)
+	result := h.resetAbandonedBead(bd, tmpDir, "testrig", "gt-work123", "alpha", nil)
 	if !result {
 		t.Error("resetAbandonedBead should return true when work is NOT on main (bead reset for re-dispatch)")
 	}
@@ -3439,7 +3376,7 @@ func TestProcessDiscoveredCompletion_PhaseComplete(t *testing.T) {
 		Exit:        "PHASE_COMPLETE",
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
+	newHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
 	if discovery.Action != "phase-complete" {
 		t.Errorf("Action = %q, want %q", discovery.Action, "phase-complete")
 	}
@@ -3453,7 +3390,7 @@ func TestProcessDiscoveredCompletion_NoMR(t *testing.T) {
 		MRFailed:    true, // Prevents fallback MR lookup
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
+	newHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
 	if !strings.Contains(discovery.Action, "acknowledged-idle") {
 		t.Errorf("Action = %q, want to contain %q", discovery.Action, "acknowledged-idle")
 	}
@@ -3466,7 +3403,7 @@ func TestProcessDiscoveredCompletion_EscalatedNoMR(t *testing.T) {
 		Exit:        "ESCALATED",
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
+	newHandlers().processDiscoveredCompletion(DefaultBdCli(), "/tmp", "testrig", payload, discovery)
 	if !strings.Contains(discovery.Action, "acknowledged-idle") {
 		t.Errorf("Action = %q, want to contain %q for ESCALATED exit", discovery.Action, "acknowledged-idle")
 	}
@@ -3525,7 +3462,7 @@ func TestProcessDiscoveredCompletion_IdempotentWhenWispAlreadyExists(t *testing.
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if createCalled {
 		t.Error("expected no new wisp to be created when an open wisp already matches this (issue, branch)")
@@ -3565,7 +3502,7 @@ func TestProcessDiscoveredCompletion_DoesNotMatchWispForDifferentIssue(t *testin
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if !createCalled {
 		t.Error("expected a new wisp to be created — the existing wisp is for a different issue")
@@ -3625,7 +3562,7 @@ func TestProcessDiscoveredCompletion_ClosesDuplicateOnConcurrentRace(t *testing.
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if len(closedIDs) != 1 || closedIDs[0] != "gt-wisp-b" {
 		t.Errorf("closed IDs = %v, want [gt-wisp-b] (the later, non-winning wisp)", closedIDs)
@@ -3662,7 +3599,7 @@ func TestProcessDiscoveredCompletion_StrandedPendingWispRetriesStateUpdate(t *te
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	newHandlers().processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if len(updateArgs) == 0 || updateArgs[0] != "update" || updateArgs[1] != "gt-wisp-stranded" {
 		t.Errorf("update args = %v, want an update of gt-wisp-stranded", updateArgs)
@@ -3687,11 +3624,12 @@ func TestProcessDiscoveredCompletion_NudgeFailureDoesNotBlockMetadataClear(t *te
 	// installFakeTmuxNoServer, but nudgeRefinery's HasSession check treats
 	// ErrNoServer as (false, nil) and short-circuits to a nil return before
 	// ever attempting the nudge — so that test could never observe a real
-	// nudge failure, before or after the fix. Override the package-level
-	// nudgeRefinery var directly to produce a genuine failure instead.
-	origNudge := nudgeRefinery
-	defer func() { nudgeRefinery = origNudge }()
-	nudgeRefinery = func(townRoot, rigName string) error {
+	// nudge failure, before or after the fix. Fake this test's own nudge to
+	// produce a genuine failure instead. The fake lives on h, not in a
+	// package variable: swapping a global here raced every parallel test that
+	// nudges the refinery.
+	h := newTestHandlers()
+	h.nudgeRefineryFn = func(townRoot, rigName string) error {
 		return errors.New("refinery session busy")
 	}
 
@@ -3707,7 +3645,7 @@ func TestProcessDiscoveredCompletion_NudgeFailureDoesNotBlockMetadataClear(t *te
 		Branch:      "feature-x",
 	}
 	discovery := &CompletionDiscovery{}
-	processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
+	h.processDiscoveredCompletion(bd, t.TempDir(), "testrig", payload, discovery)
 
 	if discovery.Error != nil {
 		t.Errorf("Error = %v, want nil — a nudge failure must not gate the metadata clear", discovery.Error)
@@ -4288,7 +4226,7 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 
 	result := &HandlerResult{}
 	// notifyRefineryMergeReady takes workDir and calls workspace.Find(workDir) internally
-	notifyRefineryMergeReady(townRoot, "dashboard", result)
+	newHandlers().notifyRefineryMergeReady(townRoot, "dashboard", result)
 
 	// Verify that a MERGE_READY event file was created in the rig-scoped
 	// refinery channel directory (per-rig channels, gt-dsj)
@@ -4339,49 +4277,36 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 }
 
-// stubNukePolecat overrides the package-level nukePolecatFunc so archive-path
-// tests never shell out to the real `gt polecat nuke` (gt-evdg): NukePolecat
-// kills a real tmux session and deletes a real worktree, so a test that
-// reaches the archive path with the real function — on a live rig/polecat
-// name — can destroy an in-use polecat. Returns a func reporting whether the
-// stub was invoked. Restores the original in t.Cleanup.
-func stubNukePolecat(t *testing.T, err error) func() bool {
+// stubNukePolecat fakes h's whole nuke so archive-path tests never shell out
+// to the real `gt polecat nuke` (gt-evdg): a nuke kills a real tmux session
+// and deletes a real worktree, so a test that reaches the archive path with
+// the real one — on a live rig/polecat name — can destroy an in-use polecat.
+// Returns a func reporting whether the stub was invoked.
+func stubNukePolecat(t *testing.T, h *handlers, err error) func() bool {
 	t.Helper()
-	old := nukePolecatFunc
 	called := false
-	nukePolecatFunc = func(bd *BdCli, workDir, rigName, polecatName string) error {
+	h.nukePolecatFn = func(bd *BdCli, workDir, rigName, polecatName string) error {
 		called = true
 		return err
 	}
-	t.Cleanup(func() { nukePolecatFunc = old })
 	return func() bool { return called }
 }
 
-// stubNukePolecatExecs replaces NukePolecat's own tmux-kill and `gt polecat
-// nuke` seams so a test exercising NukePolecat directly (not through the
-// coarser nukePolecatFunc/stubNukePolecat) can see exactly what it was asked
-// to destroy without spawning either: the real implementations panic under a
-// test binary unless faked (gt-5itbt).
-//
-// Must not be combined with t.Parallel: it mutates package variables.
-func stubNukePolecatExecs(t *testing.T) (killed *[]string, nuked *[]string) {
+// stubNukePolecatExecs fakes h's own tmux-kill and `gt polecat nuke` seams so
+// a test exercising the nuke itself (not through the coarser stubNukePolecat)
+// can see exactly what it was asked to destroy without spawning either: the
+// real implementations panic under a test binary unless faked (gt-5itbt).
+func stubNukePolecatExecs(t *testing.T, h *handlers) (killed *[]string, nuked *[]string) {
 	t.Helper()
 	killed = &[]string{}
 	nuked = &[]string{}
-
-	oldKill := nukeKillSessionExec
-	nukeKillSessionExec = func(sessionName string) {
+	h.nukeKillSessionFn = func(sessionName string) {
 		*killed = append(*killed, sessionName)
 	}
-	t.Cleanup(func() { nukeKillSessionExec = oldKill })
-
-	oldNuke := nukePolecatWorktreeExec
-	nukePolecatWorktreeExec = func(workDir, address string) error {
+	h.nukePolecatWorktreeFn = func(workDir, address string) error {
 		*nuked = append(*nuked, address)
 		return nil
 	}
-	t.Cleanup(func() { nukePolecatWorktreeExec = oldNuke })
-
 	return killed, nuked
 }
 
@@ -4390,16 +4315,12 @@ func stubNukePolecatExecs(t *testing.T) (killed *[]string, nuked *[]string) {
 // via squash-merge), the witness must NOT restart the session — restarting
 // would let the polecat re-push its pre-squash HEAD and create a duplicate MR.
 // Instead the polecat is archived.
-//
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
-// nukePolecatFunc vars.
 func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
-	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+	h := newTestHandlers()
+	h.verifyBranchAlreadyMergedFn = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return true, nil
 	}
-	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
-	nuked := stubNukePolecat(t, nil)
+	nuked := stubNukePolecat(t, h, nil)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -4409,7 +4330,7 @@ func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 	// hookBead is reaped ("" with found=true) — the original always-archive-
 	// eligible case that predates gt-evdg.
 	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "ma-poc.4"}
-	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "ma-poc.4", "", true, "has_unpushed", z)
+	h.handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "ma-poc.4", "", true, "has_unpushed", z)
 
 	// Action must reflect the archive decision; must NOT be a "restarted*" action.
 	if !strings.Contains(z.Action, "work-already-merged") {
@@ -4419,24 +4340,20 @@ func TestHandleZombieRestart_SkipsWhenBranchAlreadyMerged(t *testing.T) {
 		t.Errorf("action = %q, polecat must not be restarted when work is already merged", z.Action)
 	}
 	if !nuked() {
-		t.Error("nukePolecatFunc was not called; archive path should invoke it")
+		t.Error("the nuke stub was not called; archive path should invoke it")
 	}
 }
 
 // TestHandleZombieRestart_RestartsWhenBranchNotMerged verifies the pre-aa-apw
 // behavior is preserved when work is NOT merged: handleZombieRestart proceeds
 // to its normal cleanup/restart flow.
-//
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged,
-// nukePolecatFunc and restartSessionExec vars.
 func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
-	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+	h := newTestHandlers()
+	h.verifyBranchAlreadyMergedFn = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return false, nil
 	}
-	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
-	nuked := stubNukePolecat(t, nil)
-	restarts := stubRestartSessionExec(t)
+	nuked := stubNukePolecat(t, h, nil)
+	restarts := stubRestartSessionExec(t, h)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -4444,14 +4361,14 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 	)
 
 	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "ma-poc.4"}
-	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "ma-poc.4", "in_progress", true, "clean", z)
+	h.handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "ma-poc.4", "in_progress", true, "clean", z)
 
 	// Should NOT take the archive path.
 	if strings.Contains(z.Action, "work-already-merged") {
 		t.Errorf("action = %q, should not archive when work is not merged", z.Action)
 	}
 	if nuked() {
-		t.Error("nukePolecatFunc was called; archive path should not fire when work is not merged")
+		t.Error("the nuke stub was called; archive path should not fire when work is not merged")
 	}
 	if len(*restarts) != 1 || (*restarts)[0] != "zz-test-rig/zz-test-cat" {
 		t.Errorf("restarts = %v, want exactly [\"zz-test-rig/zz-test-cat\"]", *restarts)
@@ -4467,25 +4384,21 @@ func TestHandleZombieRestart_RestartsWhenBranchNotMerged(t *testing.T) {
 // the assignment was never even claimed, so a "merged" verdict from git
 // alone must not be trusted to license a nuke.
 //
-// Uses fake rig/polecat names and a stubbed nukePolecatFunc, never the real
+// Uses fake rig/polecat names and a stubbed nukePolecatFn, never the real
 // NukePolecat — per the MAYOR SAFETY WARNING on gt-evdg, a live rig/polecat
 // name here would let a regression in this gate shell out to the real
 // `gt polecat nuke` and kill a real tmux session.
-//
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged,
-// nukePolecatFunc and restartSessionExec vars.
 func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
-	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+	h := newTestHandlers()
+	h.verifyBranchAlreadyMergedFn = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		// Simulates the false positive from a branch that never diverged:
 		// the git layer alone cannot tell "never started" from "already
 		// merged" here, so it reports merged=true just as it would for
 		// real, completed work.
 		return true, nil
 	}
-	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
-	nuked := stubNukePolecat(t, nil)
-	stubRestartSessionExec(t)
+	nuked := stubNukePolecat(t, h, nil)
+	stubRestartSessionExec(t, h)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -4493,13 +4406,13 @@ func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
 	)
 
 	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "gt-3qfp"}
-	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "gt-3qfp", "open", true, "clean", z)
+	h.handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "gt-3qfp", "open", true, "clean", z)
 
 	if strings.Contains(z.Action, "work-already-merged") {
 		t.Errorf("action = %q, must not archive a session-dead polecat whose hookBead status is open (gt-evdg)", z.Action)
 	}
 	if nuked() {
-		t.Error("nukePolecatFunc must not be called when hookBead status is open — real (gt-3qfp) or fake (this test), the assignment was never claimed")
+		t.Error("the nuke stub must not be called when hookBead status is open — real (gt-3qfp) or fake (this test), the assignment was never claimed")
 	}
 }
 
@@ -4509,16 +4422,12 @@ func TestHandleZombieRestart_DoesNotArchiveWhenHookBeadOpen(t *testing.T) {
 // The refinery may not have closed the bead yet — that race must not block
 // the archive, or the polecat gets restarted and re-pushes a duplicate MR
 // for work already on main.
-//
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
-// nukePolecatFunc vars.
 func TestHandleZombieRestart_ArchivesWhenHookBeadInProgressAndMerged(t *testing.T) {
-	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+	h := newTestHandlers()
+	h.verifyBranchAlreadyMergedFn = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return true, nil
 	}
-	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
-	nuked := stubNukePolecat(t, nil)
+	nuked := stubNukePolecat(t, h, nil)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -4526,29 +4435,25 @@ func TestHandleZombieRestart_ArchivesWhenHookBeadInProgressAndMerged(t *testing.
 	)
 
 	z := &ZombieResult{PolecatName: "zz-test-cat", HookBead: "gt-real"}
-	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "gt-real", "in_progress", true, "clean", z)
+	h.handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "gt-real", "in_progress", true, "clean", z)
 
 	if !strings.Contains(z.Action, "work-already-merged") {
 		t.Errorf("action = %q, want archive when a hooked/in_progress bead's branch is really merged", z.Action)
 	}
 	if !nuked() {
-		t.Error("nukePolecatFunc was not called; a real merge must still archive even with a non-closed hookBead status")
+		t.Error("the nuke stub was not called; a real merge must still archive even with a non-closed hookBead status")
 	}
 }
 
 // TestHandleZombieRestart_ArchivesWhenHookBeadEmptyAndMerged pins the
 // original aa-apw case: no hookBead at all (or a reaped one, "" with
 // found=true), branch really merged — must archive.
-//
-// Not parallel: overrides the package-level verifyBranchAlreadyMerged and
-// nukePolecatFunc vars.
 func TestHandleZombieRestart_ArchivesWhenHookBeadEmptyAndMerged(t *testing.T) {
-	oldVerify := verifyBranchAlreadyMerged
-	verifyBranchAlreadyMerged = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
+	h := newTestHandlers()
+	h.verifyBranchAlreadyMergedFn = func(workDir, rigName, polecatName, hookBead string) (bool, error) {
 		return true, nil
 	}
-	t.Cleanup(func() { verifyBranchAlreadyMerged = oldVerify })
-	nuked := stubNukePolecat(t, nil)
+	nuked := stubNukePolecat(t, h, nil)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
@@ -4556,13 +4461,13 @@ func TestHandleZombieRestart_ArchivesWhenHookBeadEmptyAndMerged(t *testing.T) {
 	)
 
 	z := &ZombieResult{PolecatName: "zz-test-cat"}
-	handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "", "", false, "clean", z)
+	h.handleZombieRestart(bd, t.TempDir(), "zz-test-rig", "zz-test-cat", "", "", false, "clean", z)
 
 	if !strings.Contains(z.Action, "work-already-merged") {
 		t.Errorf("action = %q, want archive when there is no hookBead and the branch is really merged", z.Action)
 	}
 	if !nuked() {
-		t.Error("nukePolecatFunc was not called; an empty hookBead with a real merge must still archive")
+		t.Error("the nuke stub was not called; an empty hookBead with a real merge must still archive")
 	}
 }
 
@@ -4570,17 +4475,16 @@ func TestHandleZombieRestart_ArchivesWhenHookBeadEmptyAndMerged(t *testing.T) {
 // TestNukePolecatPanicsWithoutFakeExecutors: with stubNukePolecatExecs
 // injected, NukePolecat runs clean and drives both seams with the expected
 // session name and address, rather than merely avoiding the panic.
-//
-// Not parallel: mutates package-level vars via stubNukePolecatExecs.
 func TestNukePolecatCallsInjectedExecsWhenFaked(t *testing.T) {
-	killed, nuked := stubNukePolecatExecs(t)
+	h := newTestHandlers()
+	killed, nuked := stubNukePolecatExecs(t, h)
 
 	bd, _ := mockBd(
 		func(args []string) (string, error) { return "[]", nil },
 		func(args []string) error { return nil },
 	)
 
-	if err := NukePolecat(bd, t.TempDir(), "zz-test-rig", "zz-test-cat"); err != nil {
+	if err := h.nukePolecatImpl(bd, t.TempDir(), "zz-test-rig", "zz-test-cat"); err != nil {
 		t.Fatalf("NukePolecat: %v", err)
 	}
 	if len(*nuked) != 1 || (*nuked)[0] != "zz-test-rig/zz-test-cat" {
@@ -4628,10 +4532,11 @@ func TestNukePolecatPanicsWithoutFakeExecutors(t *testing.T) {
 // running a real `gt session restart` (gt-5itbt, companion to
 // TestNukePolecatPanicsWithoutFakeExecutors).
 func TestRestartPolecatSessionPanicsWithoutFakeExecutor(t *testing.T) {
+	h := newTestHandlers()
 	// The hold gate runs ahead of the executor (gt-n38c6); let it answer from
 	// the stub so the panic under test is the executor's, and so reaching the
 	// executor is what this test actually exercises.
-	stubHookHold(t, "", false)
+	stubHookHold(t, h, "", false)
 	defer func() {
 		r := recover()
 		if r == nil {
@@ -4643,7 +4548,7 @@ func TestRestartPolecatSessionPanicsWithoutFakeExecutor(t *testing.T) {
 		}
 	}()
 
-	_ = RestartPolecatSession(t.TempDir(), "gastown", "flint")
+	_ = h.restartPolecatSession(t.TempDir(), "gastown", "flint")
 	t.Fatal("RestartPolecatSession returned without panicking — the real restart path ran unguarded")
 }
 
@@ -4652,11 +4557,8 @@ func TestRestartPolecatSessionPanicsWithoutFakeExecutor(t *testing.T) {
 // keeps it too; a rig with no git repo resets as before. The reset itself is
 // guarded on the dead polecat still holding the bead.
 func TestResetAbandonedBead_SurvivingWorkKeepsHook(t *testing.T) {
-	// Not parallel: overrides package-level seams.
-	oldVerify, oldSurviving := verifyCommitOnMain, survivingWorkForBead
-	verifyCommitOnMain = func(string, string, string) (bool, error) { return false, nil }
-	t.Cleanup(func() { verifyCommitOnMain, survivingWorkForBead = oldVerify, oldSurviving })
-
+	h := newTestHandlers()
+	h.verifyCommitOnMainFn = func(string, string, string) (bool, error) { return false, nil }
 	for _, tc := range []struct {
 		name      string
 		branch    string
@@ -4669,7 +4571,7 @@ func TestResetAbandonedBead_SurvivingWorkKeepsHook(t *testing.T) {
 		{name: "rig has no git repo", err: polecat.ErrNoRigRepo, wantReset: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			survivingWorkForBead = func(_, rigName, beadID string) (string, error) {
+			h.survivingWorkForBeadFn = func(_, rigName, beadID string) (string, error) {
 				if rigName != "testrig" || beadID != "gt-work123" {
 					t.Fatalf("predicate asked about %s/%s", rigName, beadID)
 				}
@@ -4684,7 +4586,7 @@ func TestResetAbandonedBead_SurvivingWorkKeepsHook(t *testing.T) {
 				},
 				func([]string) error { return nil },
 			)
-			got := resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil)
+			got := h.resetAbandonedBead(bd, t.TempDir(), "testrig", "gt-work123", "alpha", nil)
 			var resets []string
 			for _, call := range mock.calls {
 				if strings.Contains(call, "update") && strings.Contains(call, "--status=open") {

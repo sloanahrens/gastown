@@ -8,20 +8,16 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// stubHookHold replaces the hold seam RestartPolecatSession reads through, so
-// a test can decide what a polecat's hooked work is held by without a bd
-// subprocess. Returns the reasons it was asked about.
-//
-// Must not be combined with t.Parallel: it mutates a package variable.
-func stubHookHold(t *testing.T, reason string, held bool) *[]string {
+// stubHookHold fakes the hold seam h's restartPolecatSession reads through,
+// so a test can decide what a polecat's hooked work is held by without a bd
+// subprocess. Returns the polecats it was asked about.
+func stubHookHold(t *testing.T, h *handlers, reason string, held bool) *[]string {
 	t.Helper()
 	asked := &[]string{}
-	old := hookHoldReason
-	hookHoldReason = func(_ *BdCli, _, rigName, polecatName string) (string, bool) {
+	h.hookHoldReasonFn = func(_ *BdCli, _, rigName, polecatName string) (string, bool) {
 		*asked = append(*asked, rigName+"/"+polecatName)
 		return reason, held
 	}
-	t.Cleanup(func() { hookHoldReason = old })
 	return asked
 }
 
@@ -192,11 +188,12 @@ func TestHeldHookSkip(t *testing.T) {
 // agent against work an operator had parked — and the unheld one must be, so a
 // gate that short-circuited everything fails here.
 func TestRestartPolecatSessionHonoursHeldHook(t *testing.T) {
+	h := newTestHandlers()
 	town := testutil.HermeticTest(t)
-	restarts := stubRestartSessionExec(t)
+	restarts := stubRestartSessionExec(t, h)
 
-	held := stubHookHold(t, "label needs-mayor-review", true)
-	if err := RestartPolecatSession(town, "gastown", "turquoise"); err != nil {
+	held := stubHookHold(t, h, "label needs-mayor-review", true)
+	if err := h.restartPolecatSession(town, "gastown", "turquoise"); err != nil {
 		t.Fatalf("RestartPolecatSession on a held hook returned error (want silent no-op): %v", err)
 	}
 	if len(*restarts) != 0 {
@@ -206,8 +203,8 @@ func TestRestartPolecatSessionHonoursHeldHook(t *testing.T) {
 		t.Errorf("hold gate asked about %v, want [gastown/turquoise]", *held)
 	}
 
-	free := stubHookHold(t, "", false)
-	if err := RestartPolecatSession(town, "gastown", "flint"); err != nil {
+	free := stubHookHold(t, h, "", false)
+	if err := h.restartPolecatSession(town, "gastown", "flint"); err != nil {
 		t.Fatalf("RestartPolecatSession on unheld work: %v", err)
 	}
 	if len(*restarts) != 1 || (*restarts)[0] != "gastown/flint" {

@@ -470,11 +470,8 @@ func TestStallSampleStore_UnknownVersionIsCorrupt(t *testing.T) {
 // clobber the holder's samples.
 func TestTrackStalls_LockHeldSkipsSave(t *testing.T) {
 	town := t.TempDir()
-	old := stallSamplesLockTimeout
-	stallSamplesLockTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { stallSamplesLockTimeout = old })
-
 	store := NewStallSampleStore(town, "gastown")
+	store.lockTimeout = 50 * time.Millisecond
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o755); err != nil {
 		t.Fatal(err)
 	}
