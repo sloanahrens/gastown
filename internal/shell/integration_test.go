@@ -11,6 +11,7 @@ import (
 )
 
 func TestDetectShell(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		shellEnv string
 		want     string
@@ -24,19 +25,21 @@ func TestDetectShell(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.shellEnv, func(t *testing.T) {
-			orig := os.Getenv("SHELL")
-			defer os.Setenv("SHELL", orig)
-
-			os.Setenv("SHELL", tt.shellEnv)
-			got := DetectShell()
-			if got != tt.want {
-				t.Errorf("DetectShell() = %q, want %q", got, tt.want)
+			t.Parallel()
+			if got := detectShell(tt.shellEnv); got != tt.want {
+				t.Errorf("detectShell(%q) = %q, want %q", tt.shellEnv, got, tt.want)
 			}
 		})
+	}
+
+	// DetectShell reads $SHELL from the process environment.
+	if got, want := DetectShell(), detectShell(os.Getenv("SHELL")); got != want {
+		t.Errorf("DetectShell() = %q, want %q", got, want)
 	}
 }
 
 func TestRCFilePath(t *testing.T) {
+	t.Parallel()
 	home, _ := os.UserHomeDir()
 
 	tests := []struct {
@@ -58,6 +61,7 @@ func TestRCFilePath(t *testing.T) {
 }
 
 func TestAddRemoveFromRCFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rcPath := filepath.Join(tmpDir, ".zshrc")
 
@@ -111,6 +115,7 @@ func TestAddRemoveFromRCFile(t *testing.T) {
 }
 
 func TestUpdateRCFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rcPath := filepath.Join(tmpDir, ".zshrc")
 
