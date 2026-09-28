@@ -4758,11 +4758,22 @@ var safePrefixRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{0,19}$`)
 //
 // Example output: "^(bd|db|fa|gl|gt|hq|la|lc)-"
 func sessionPrefixPattern() string {
-	seen := map[string]bool{"hq": true, "gt": true} // always include HQ + gastown fallback
-	townRoot := os.Getenv("GT_ROOT")
-	if townRoot == "" {
-		townRoot = os.Getenv("GT_TOWN_ROOT")
+	return sessionPrefixPatternFor(townRootFrom(os.Getenv))
+}
+
+// townRootFrom resolves the town root the bindings read rig prefixes from:
+// GT_ROOT, then GT_TOWN_ROOT.
+func townRootFrom(getenv func(string) string) string {
+	if root := getenv("GT_ROOT"); root != "" {
+		return root
 	}
+	return getenv("GT_TOWN_ROOT")
+}
+
+// sessionPrefixPatternFor builds the session-name pattern for townRoot's rigs
+// (gt and hq always; townRoot may be "").
+func sessionPrefixPatternFor(townRoot string) string {
+	seen := map[string]bool{"hq": true, "gt": true} // always include HQ + gastown fallback
 	if townRoot != "" {
 		for _, p := range config.AllRigPrefixes(townRoot) {
 			if safePrefixRe.MatchString(p) {
