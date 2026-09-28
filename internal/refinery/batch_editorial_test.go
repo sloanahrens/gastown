@@ -322,7 +322,7 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 	// is fine: an observed excess is never a false alarm. Watching for
 	// ">=2 at some instant" instead flapped whenever a loaded host ran the
 	// goroutines one after another.
-	barrier := newReviewBarrier(3)
+	barrier := newReviewBarrier(t, 3)
 	e.editorialExec = func(_ context.Context, _ string, args []string, _ string) (string, int, error) {
 		barrier.arrive()
 		defer barrier.leave()
@@ -367,8 +367,8 @@ func TestReviewBatchCandidates_BoundedParallelism_DropsRequestChanges(t *testing
 	if len(reviewed) != 4 {
 		t.Fatalf("expected 4 reviewed entries, got %d", len(reviewed))
 	}
-	if barrier.timedOut() {
-		t.Fatalf("semaphore is serializing: fewer than 3 reviews were ever in flight together (barrier timed out)")
+	if barrier.abandoned() {
+		t.Fatalf("semaphore is serializing: fewer than 3 reviews were ever in flight together (barrier abandoned at the test deadline)")
 	}
 	if got := barrier.maxInFlight(); got != 3 {
 		t.Fatalf("expected exactly 3 concurrent review invocations at the barrier, saw %d", got)
@@ -467,6 +467,12 @@ func TestReviewBatchCandidates_RehearsalNeverMovesLiveCloneOffItsOwnBranch(t *te
 // reviewBarrier holds the first n callers until all n have arrived, then
 // lets everyone through; later callers pass straight through. It also
 // tracks the peak number of callers between arrive and leave.
+//
+// Waiting has no wall-clock budget: each review does real git work before it
+// reaches the exec, so on a loaded host the n arrivals can be seconds apart,
+// and the former 5s timeout failed a correct semaphore. A semaphore that
+// serializes never lets the n-th caller in, so the barrier only gives up at
+// the test binary's own deadline, to fail with a message instead of a panic.
 type reviewBarrier struct {
 	n        int
 	mu       sync.Mutex
@@ -474,11 +480,19 @@ type reviewBarrier struct {
 	inFlight int
 	peak     int
 	release  chan struct{}
-	timeout  bool
+	abort    <-chan struct{}
+	gaveUp   bool
 }
 
-func newReviewBarrier(n int) *reviewBarrier {
-	return &reviewBarrier{n: n, release: make(chan struct{})}
+func newReviewBarrier(t *testing.T, n int) *reviewBarrier {
+	ctx := context.Background()
+	if deadline, ok := t.Deadline(); ok {
+		// Leave room to report before the binary's timeout panics.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-30*time.Second))
+		t.Cleanup(cancel)
+	}
+	return &reviewBarrier{n: n, release: make(chan struct{}), abort: ctx.Done()}
 }
 
 func (b *reviewBarrier) arrive() {
@@ -498,9 +512,9 @@ func (b *reviewBarrier) arrive() {
 	}
 	select {
 	case <-b.release:
-	case <-time.After(5 * time.Second):
+	case <-b.abort:
 		b.mu.Lock()
-		b.timeout = true
+		b.gaveUp = true
 		b.mu.Unlock()
 	}
 }
@@ -511,10 +525,10 @@ func (b *reviewBarrier) leave() {
 	b.mu.Unlock()
 }
 
-func (b *reviewBarrier) timedOut() bool {
+func (b *reviewBarrier) abandoned() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.timeout
+	return b.gaveUp
 }
 
 func (b *reviewBarrier) maxInFlight() int {
