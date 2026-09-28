@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
@@ -39,17 +41,8 @@ var primeStructuredSessionStartOutput bool
 
 // Prime's external injections are best-effort; role context should still
 // return when bd/mail is slow or wedged.
-var primeExternalToolTimeout = 5 * time.Second
-var primeExternalToolWaitDelay = time.Second
-
-// primeExternalToolContext builds the context that bounds a single external
-// prime tool subprocess. It is a var so bound-enforcement tests can drive the
-// deadline from a barrier (the stub announcing it has started) rather than from
-// host wall-clock time — an elapsed<N assertion measures the host, not the
-// code, and reddens the suite on a loaded gate (gt-v2a5).
-var primeExternalToolContext = func(timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), timeout)
-}
+const primeExternalToolTimeout = 5 * time.Second
+const primeExternalToolWaitDelay = time.Second
 
 // primeHookSource stores the SessionStart source ("startup", "resume", "clear", "compact")
 // when running in hook mode. Used to provide lighter output on compaction/resume.
@@ -743,17 +736,69 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 	}
 }
 
+// primeRunFunc runs one of prime's external tools in workDir under ctx and
+// returns its stdout and stderr.
+type primeRunFunc func(ctx context.Context, workDir, name string, args ...string) (stdout, stderr bytes.Buffer, err error)
+
+// primeTools runs prime's best-effort external tools (bd, gt mail, git) and
+// renders what they return. Each field's zero value is the real thing: the
+// tool runs as a subprocess, its primeExternalToolTimeout deadline runs on the
+// wall clock, and output goes to os.Stdout as it is at the time of writing
+// (runPrime captures stdout per section). Tests set all three, so they neither
+// exec anything nor wait on real time.
+type primeTools struct {
+	run   primeRunFunc
+	clock clockwork.Clock
+	out   io.Writer
+}
+
+func (p primeTools) runner() primeRunFunc {
+	if p.run == nil {
+		return execPrimeExternalCommand
+	}
+	return p.run
+}
+
+func (p primeTools) clk() clockwork.Clock {
+	if p.clock == nil {
+		return clockwork.NewRealClock()
+	}
+	return p.clock
+}
+
+func (p primeTools) w() io.Writer {
+	if p.out == nil {
+		return os.Stdout
+	}
+	return p.out
+}
+
+// command runs one external tool bounded by primeExternalToolTimeout.
+func (p primeTools) command(workDir, name string, args ...string) (bytes.Buffer, bytes.Buffer, error) {
+	ctx, cancel := clockwork.WithTimeout(context.Background(), p.clk(), primeExternalToolTimeout)
+	defer cancel()
+	return p.runner()(ctx, workDir, name, args...)
+}
+
 // runPrimeExternalTools runs lightweight memory and mail injection in one go.
 // runPrime renders the two as separate payload sections; this wrapper keeps
 // the combined behavior for callers and tests.
 func runPrimeExternalTools(ctx RoleContext, cwd string) {
-	runPrimeMemoryInject(ctx, cwd)
-	runPrimeMailInject(ctx, cwd)
+	primeTools{}.externalTools(ctx, cwd)
+}
+
+func (p primeTools) externalTools(ctx RoleContext, cwd string) {
+	p.memoryInject(ctx, cwd)
+	p.mailInject(ctx, cwd)
 }
 
 // runPrimeMemoryInject renders the memory index section (skipped in dry-run and
 // for roles that do not render memories).
 func runPrimeMemoryInject(ctx RoleContext, cwd string) {
+	primeTools{}.memoryInject(ctx, cwd)
+}
+
+func (p primeTools) memoryInject(ctx RoleContext, cwd string) {
 	if primeDryRun {
 		explain(true, "memory injection: skipped in dry-run mode")
 		return
@@ -762,11 +807,15 @@ func runPrimeMemoryInject(ctx RoleContext, cwd string) {
 		explain(true, fmt.Sprintf("memory injection: skipped for role %s", ctx.Role))
 		return
 	}
-	runMemoryInject(cwd)
+	p.memoryIndex(cwd)
 }
 
 // runPrimeMailInject renders pending mail (skipped in dry-run and for patrol roles).
 func runPrimeMailInject(ctx RoleContext, cwd string) {
+	primeTools{}.mailInject(ctx, cwd)
+}
+
+func (p primeTools) mailInject(ctx RoleContext, cwd string) {
 	if primeDryRun {
 		explain(true, "gt mail check --inject: skipped in dry-run mode")
 		return
@@ -775,7 +824,7 @@ func runPrimeMailInject(ctx RoleContext, cwd string) {
 		explain(true, fmt.Sprintf("gt mail check --inject: skipped for patrol role %s", ctx.Role))
 		return
 	}
-	runMailCheckInject(cwd)
+	p.mailCheck(cwd)
 }
 
 func shouldSkipStartupMailInject(role string) bool {
@@ -804,11 +853,18 @@ func shouldRenderMemories(role string) bool {
 	}
 }
 
+// runPrimeExternalCommand runs one external tool as a subprocess, bounded by
+// primeExternalToolTimeout on the wall clock.
 func runPrimeExternalCommand(workDir, name string, args ...string) (bytes.Buffer, bytes.Buffer, error) {
-	var stdout, stderr bytes.Buffer
-	ctx, cancel := primeExternalToolContext(primeExternalToolTimeout)
-	defer cancel()
+	return primeTools{}.command(workDir, name, args...)
+}
 
+// execPrimeExternalCommand is the real primeRunFunc. When ctx ends, the tool
+// is killed and Wait gives an escaped descendant holding an output pipe
+// primeExternalToolWaitDelay before returning, so prime abandons the tool
+// rather than waiting it out.
+func execPrimeExternalCommand(ctx context.Context, workDir, name string, args ...string) (bytes.Buffer, bytes.Buffer, error) {
+	var stdout, stderr bytes.Buffer
 	if name == "bd" {
 		args = beads.InjectFlatForListJSON(args)
 	}
@@ -842,16 +898,20 @@ var memoryTypeLabels = map[string]string{
 // paragraphs each, and paging them in on demand via `gt memories <key>` keeps
 // the section from dominating the prime payload.
 func runMemoryInject(workDir string) {
-	kvs, err := bdKvListJSONForPrime(workDir)
+	primeTools{}.memoryIndex(workDir)
+}
+
+func (p primeTools) memoryIndex(workDir string) {
+	kvs, err := p.kvList(workDir)
 	if err != nil {
 		return // Silently skip if kv list fails
 	}
 
-	fmt.Print(renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars))
+	fmt.Fprint(p.w(), renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars))
 }
 
-func bdKvListJSONForPrime(workDir string) (map[string]string, error) {
-	stdout, _, err := runPrimeExternalCommand(workDir, "bd", "kv", "list", "--json")
+func (p primeTools) kvList(workDir string) (map[string]string, error) {
+	stdout, _, err := p.command(workDir, "bd", "kv", "list", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -859,10 +919,10 @@ func bdKvListJSONForPrime(workDir string) (map[string]string, error) {
 	return parseBdKvListJSON(stdout.Bytes())
 }
 
-// runMailCheckInject runs `gt mail check --inject` and outputs the result.
+// mailCheck runs `gt mail check --inject` and outputs the result.
 // This injects any pending mail into the agent's context.
-func runMailCheckInject(workDir string) {
-	stdout, stderr, err := runPrimeExternalCommand(workDir, "gt", "mail", "check", "--inject")
+func (p primeTools) mailCheck(workDir string) {
+	stdout, stderr, err := p.command(workDir, "gt", "mail", "check", "--inject")
 	if err != nil {
 		// Skip if mail check fails, but log stderr for debugging
 		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
@@ -873,8 +933,8 @@ func runMailCheckInject(workDir string) {
 
 	output := strings.TrimSpace(stdout.String())
 	if output != "" {
-		fmt.Println()
-		fmt.Println(output)
+		fmt.Fprintln(p.w())
+		fmt.Fprintln(p.w(), output)
 	}
 }
 
@@ -1682,8 +1742,12 @@ func setTmuxWorkContext(workRig, workBead, workMol string) {
 // so this check silently no-op'd since the day it was written. --include-infra
 // is also required or ephemeral escalation wisps are hidden from bd list.
 func checkPendingEscalations(ctx RoleContext) {
+	primeTools{}.pendingEscalations(ctx)
+}
+
+func (p primeTools) pendingEscalations(ctx RoleContext) {
 	// Query for open escalations using bd list with label filter
-	stdout, _, err := runPrimeExternalCommand(ctx.WorkDir, "bd", "list", "--status=open", "--label=gt:escalation", "--include-infra", "--json")
+	stdout, _, err := p.command(ctx.WorkDir, "bd", "list", "--status=open", "--label=gt:escalation", "--include-infra", "--json")
 	if err != nil {
 		// Silently skip - escalation check is best-effort
 		return
@@ -1742,20 +1806,20 @@ func checkPendingEscalations(ctx RoleContext) {
 	}
 
 	// Display prominently
-	fmt.Println()
-	fmt.Printf("%s\n\n", style.Bold.Render("## 🚨 PENDING ESCALATIONS"))
-	fmt.Printf("There are %d escalation(s) awaiting human attention:\n\n", len(escalations))
+	fmt.Fprintln(p.w())
+	fmt.Fprintf(p.w(), "%s\n\n", style.Bold.Render("## 🚨 PENDING ESCALATIONS"))
+	fmt.Fprintf(p.w(), "There are %d escalation(s) awaiting human attention:\n\n", len(escalations))
 
 	if critical > 0 {
-		fmt.Printf("  🔴 CRITICAL: %d\n", critical)
+		fmt.Fprintf(p.w(), "  🔴 CRITICAL: %d\n", critical)
 	}
 	if high > 0 {
-		fmt.Printf("  🟠 HIGH: %d\n", high)
+		fmt.Fprintf(p.w(), "  🟠 HIGH: %d\n", high)
 	}
 	if medium > 0 {
-		fmt.Printf("  🟡 MEDIUM: %d\n", medium)
+		fmt.Fprintf(p.w(), "  🟡 MEDIUM: %d\n", medium)
 	}
-	fmt.Println()
+	fmt.Fprintln(p.w())
 
 	// Show first few escalations
 	maxShow := 5
@@ -1771,14 +1835,14 @@ func checkPendingEscalations(ctx RoleContext) {
 		case 1:
 			severity = "HIGH"
 		}
-		fmt.Printf("  • [%s] %s (%s)\n", severity, e.Title, e.ID)
+		fmt.Fprintf(p.w(), "  • [%s] %s (%s)\n", severity, e.Title, e.ID)
 	}
 	if len(escalations) > maxShow {
-		fmt.Printf("  ... and %d more\n", len(escalations)-maxShow)
+		fmt.Fprintf(p.w(), "  ... and %d more\n", len(escalations)-maxShow)
 	}
-	fmt.Println()
+	fmt.Fprintln(p.w())
 
-	fmt.Println("**Action required:** Review escalations with `gt escalate list`")
-	fmt.Println("Close resolved ones with `bd close <id> --reason \"resolution\"`")
-	fmt.Println()
+	fmt.Fprintln(p.w(), "**Action required:** Review escalations with `gt escalate list`")
+	fmt.Fprintln(p.w(), "Close resolved ones with `bd close <id> --reason \"resolution\"`")
+	fmt.Fprintln(p.w())
 }

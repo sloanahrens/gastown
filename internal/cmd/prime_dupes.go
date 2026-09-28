@@ -10,7 +10,7 @@
 //
 // It runs at gt prime, BEFORE the session is spent, needs no index, and costs
 // two local git commands — a ref check that origin/main exists, then one day of
-// its history for the bead's paths. Both go through runPrimeExternalCommand, so
+// its history for the bead's paths. Both go through primeTools.command, so
 // they share prime's external-tool deadline and process group; a git that hangs
 // is abandoned rather than waited out. Output is deliberately terse (a few
 // lines); a prime payload is already long, so the check degrades to silence on
@@ -78,6 +78,10 @@ func (c dupesCommit) dupesWarn(tests []string, files []string) bool {
 // subprocess may run). Every failure path returns without printing: the check
 // must never block or bloat a prime.
 func checkHookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
+	primeTools{}.hookedPathDupes(ctx, hookedBead)
+}
+
+func (p primeTools) hookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
 	if primeContinuationMode || primeDryRun {
 		return
 	}
@@ -94,7 +98,7 @@ func checkHookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
 		files = files[:dupesRecentFiles]
 	}
 
-	commits, err := dupesRecentLog(ctx.WorkDir, files)
+	commits, err := p.dupesRecentLog(ctx.WorkDir, files)
 	if err != nil {
 		return
 	}
@@ -135,7 +139,7 @@ func checkHookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
 		fmt.Fprintf(&b, "  %s %s%s\n", c.Hash, c.Subject, stronger)
 	}
 	fmt.Fprintln(&b, "  If the fix above already covers this bead, close it no-changes; otherwise proceed and build on it.")
-	fmt.Println(b.String())
+	fmt.Fprintln(p.w(), b.String())
 }
 
 // dupesRecentLog reads a day of origin/main history naming the given paths.
@@ -144,20 +148,20 @@ func checkHookedPathDupes(ctx RoleContext, hookedBead *beads.Issue) {
 // polecat's own worktree — no getGitRoot call, which resolves relative to the
 // gt binary's cwd and would read the wrong repo.
 //
-// Both commands go through runPrimeExternalCommand, which is what keeps this
+// Both commands go through primeTools.command, which is what keeps this
 // check from outliving its welcome: prime's external-tool deadline bounds each
 // one and its process group makes a canceled git killable, exactly as for the
 // bd and mail injections. Any error — workDir outside a repo, no origin/main,
 // git failing or hitting the deadline — is returned so the caller can degrade
 // to silence.
-func dupesRecentLog(workDir string, files []string) ([]dupesCommit, error) {
-	if _, _, err := runPrimeExternalCommand(workDir, "git", "rev-parse", "--verify", "--quiet", "origin/main"); err != nil {
+func (p primeTools) dupesRecentLog(workDir string, files []string) ([]dupesCommit, error) {
+	if _, _, err := p.command(workDir, "git", "rev-parse", "--verify", "--quiet", "origin/main"); err != nil {
 		return nil, fmt.Errorf("origin/main: %w", err)
 	}
 
 	args := []string{"log", "origin/main", "--since=1 day", "--name-only", "--pretty=format:%h%x09%s", "--"}
 	args = append(args, files...)
-	stdout, _, err := runPrimeExternalCommand(workDir, "git", args...)
+	stdout, _, err := p.command(workDir, "git", args...)
 	if err != nil {
 		return nil, err
 	}
