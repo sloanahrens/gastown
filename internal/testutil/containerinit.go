@@ -55,7 +55,7 @@ func SkipOrFailContainerInit(t *testing.T, b *beads.Beads, err error) {
 // DropTestDatabaseOnCleanup drops the database b's isolated Init created on the
 // shared test Dolt container when t ends. The drop is a catalog change, so it
 // runs under the exclusive side of the catalog gate
-// (beads.DropTestDatabase) rather than racing the bd calls of the tests still
+// (beads.ReleaseTestDatabase, batched) rather than racing the bd calls of the tests still
 // running.
 func DropTestDatabaseOnCleanup(t testing.TB, b *beads.Beads) {
 	t.Helper()
@@ -64,7 +64,7 @@ func DropTestDatabaseOnCleanup(t testing.TB, b *beads.Beads) {
 		t.Fatalf("DropTestDatabaseOnCleanup: no isolated test database to drop (name=%q port=%d); call it after a successful Init", name, port)
 	}
 	t.Cleanup(func() {
-		if err := beads.DropTestDatabase(port, name); err != nil {
+		if err := beads.ReleaseTestDatabase(port, name); err != nil {
 			t.Logf("cleanup: drop test database %s: %v", name, err)
 		}
 	})

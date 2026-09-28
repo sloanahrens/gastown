@@ -70,7 +70,7 @@ func TestCatalogGate_InitsSurviveConcurrentCatalogChurn(t *testing.T) {
 				return
 			}
 			defer func() {
-				if err := beads.DropTestDatabase(port, b.TestDatabaseName()); err != nil {
+				if err := beads.ReleaseTestDatabase(port, b.TestDatabaseName()); err != nil {
 					t.Logf("drop %s: %v", b.TestDatabaseName(), err)
 				}
 			}()

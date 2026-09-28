@@ -45,7 +45,7 @@ func OpenTestStore(t testing.TB, ctx context.Context, dbPath string) beadsdk.Sto
 		t.Fatalf("OpenTestStore: create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
-		if err := beads.DropTestDatabase(port, name); err != nil {
+		if err := beads.ReleaseTestDatabase(port, name); err != nil {
 			t.Logf("cleanup: drop test database %s: %v", name, err)
 		}
 	})

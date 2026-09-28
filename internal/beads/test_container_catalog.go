@@ -182,3 +182,91 @@ func WithSharedTestCatalog(fn func() error) error {
 	defer release()
 	return fn()
 }
+
+// Catalog changes are batched, because each one waits for every bd call in
+// flight — a schema migration included — and holds every new one back until it
+// is done. One CREATE per init would put every init's migration behind the one
+// before it; one exclusive section per batch lets a package's inits migrate
+// side by side again.
+const (
+	// testDatabasePoolBatch is how many empty databases one exclusive section
+	// creates for isolated inits to take.
+	testDatabasePoolBatch = 8
+	// testDatabaseDropBatch is how many released databases wait before one
+	// exclusive section drops them. Whatever is still queued when the test
+	// process exits goes with its container.
+	testDatabaseDropBatch = 16
+)
+
+var testDatabasePool struct {
+	sync.Mutex
+	port  int
+	ready []string // created, empty, not yet handed to an init
+	drops []string // released by their tests, not yet dropped
+}
+
+// takePooledTestDatabase returns an empty database on the shared test
+// container on port, created under the exclusive side of the gate. When the
+// pool is empty it creates a whole batch in one exclusive section.
+func takePooledTestDatabase(port int) (string, error) {
+	testDatabasePool.Lock()
+	defer testDatabasePool.Unlock()
+	if testDatabasePool.port != port {
+		testDatabasePool.port = port
+		testDatabasePool.ready = nil
+		testDatabasePool.drops = nil
+	}
+	if len(testDatabasePool.ready) == 0 {
+		names := make([]string, testDatabasePoolBatch)
+		stmts := make([]string, testDatabasePoolBatch)
+		for i := range names {
+			names[i] = testDatabaseName()
+			stmts[i] = "CREATE DATABASE IF NOT EXISTS `" + names[i] + "`"
+		}
+		if err := execTestCatalogDDL(port, stmts...); err != nil {
+			return "", err
+		}
+		testDatabasePool.ready = names
+	}
+	name := testDatabasePool.ready[0]
+	testDatabasePool.ready = testDatabasePool.ready[1:]
+	return name, nil
+}
+
+// ReleaseTestDatabase queues name, a database a finished test created on the
+// shared test container on port, for dropping. Drops run in batches under the
+// exclusive side of the gate, for the reason takePooledTestDatabase creates in
+// batches.
+func ReleaseTestDatabase(port int, name string) error {
+	testDatabasePool.Lock()
+	defer testDatabasePool.Unlock()
+	testDatabasePool.drops = append(testDatabasePool.drops, name)
+	if len(testDatabasePool.drops) < testDatabaseDropBatch {
+		return nil
+	}
+	stmts := make([]string, 0, len(testDatabasePool.drops)+1)
+	for _, n := range testDatabasePool.drops {
+		stmts = append(stmts, "DROP DATABASE IF EXISTS `"+n+"`")
+	}
+	stmts = append(stmts, "CALL dolt_purge_dropped_databases()")
+	testDatabasePool.drops = nil
+	return execTestCatalogDDL(port, stmts...)
+}
+
+// withInitDatabaseArg returns args with the --database value of a bd init
+// argv replaced by name.
+func withInitDatabaseArg(args []string, name string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, arg := range out {
+		switch {
+		case arg == "--database" && i+1 < len(out):
+			out[i+1] = name
+			return out
+		case strings.HasPrefix(arg, "--database="):
+			out[i] = "--database=" + name
+			return out
+		}
+	}
+	return out
+}

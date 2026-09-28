@@ -120,3 +120,19 @@ func TestInitTestDatabaseArg(t *testing.T) {
 		}
 	}
 }
+
+func TestWithInitDatabaseArg(t *testing.T) {
+	got := withInitDatabaseArg([]string{"init", "--database", "testdb_a", "--server"}, "testdb_b")
+	if got[2] != "testdb_b" {
+		t.Errorf("--database value = %q, want testdb_b", got[2])
+	}
+	got = withInitDatabaseArg([]string{"init", "--database=testdb_a"}, "testdb_b")
+	if got[1] != "--database=testdb_b" {
+		t.Errorf("--database= form = %q, want --database=testdb_b", got[1])
+	}
+	orig := []string{"init", "--database", "testdb_a"}
+	_ = withInitDatabaseArg(orig, "testdb_b")
+	if orig[2] != "testdb_a" {
+		t.Error("withInitDatabaseArg modified its input")
+	}
+}

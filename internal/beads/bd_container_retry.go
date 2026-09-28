@@ -311,14 +311,17 @@ func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string)
 
 // runBdAttempt is one attempt of runBdWithRetry. Against the shared test Dolt
 // container it holds the shared side of the catalog gate for the subprocess,
-// and an init of a minted testdb_ name first creates that database under the
-// exclusive side, so bd init meets an existing database and never changes the
-// catalog while another test's bd is running (test_container_catalog.go).
+// and an init of a minted testdb_ name runs against an empty database taken
+// from the pool the gate creates under its exclusive side, so bd init meets an
+// existing database and never changes the catalog while another test's bd is
+// running (test_container_catalog.go).
 func (b *Beads) runBdAttempt(stdinData []byte, runEnv []string, args []string) ([]byte, error) {
-	if name := initTestDatabaseArg(args); name != "" && b.targetsTestDoltContainer() && isSharedTestContainerPort(b.serverPort) {
-		if err := CreateTestDatabase(b.serverPort, name); err != nil {
+	if initTestDatabaseArg(args) != "" && b.targetsTestDoltContainer() && isSharedTestContainerPort(b.serverPort) {
+		name, err := takePooledTestDatabase(b.serverPort)
+		if err != nil {
 			return nil, fmt.Errorf("bd %s: pre-create test database: %w", strings.Join(args, " "), err)
 		}
+		args = withInitDatabaseArg(args, name)
 		b.testDatabase = name
 	}
 	release := shareTestCatalog()
