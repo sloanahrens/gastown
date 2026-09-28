@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,7 +28,16 @@ var (
 	gtBinaryOnce sync.Once
 	gtBinaryPath string
 	gtBinaryErr  error
+	gtBinaryDir  string // this process's private build dir; see removeBuiltGT
 )
+
+// removeBuiltGT deletes the directory buildGT linked into. TestMain calls it
+// after m.Run, so each test process leaves no binary behind.
+func removeBuiltGT() {
+	if gtBinaryDir != "" {
+		_ = os.RemoveAll(gtBinaryDir)
+	}
+}
 
 // buildGT returns the path to a gt binary built from this checkout, with
 // BuiltProperly=1 set (without it the binary refuses to run).
@@ -64,17 +71,26 @@ func buildGTBinary() (string, error) {
 		projectRoot = parent
 	}
 
-	// The output path is shared across every process running as this user
-	// (os.TempDir() is per-user, not per-worktree), so two concurrent test
-	// runs — a polecat's and the refinery's, say — would otherwise link the
-	// binary to the same file and race on it. Key the name on the project
-	// root: one worktree, one binary.
-	sum := sha256.Sum256([]byte(projectRoot))
-	binaryName := "gt-integration-test-" + hex.EncodeToString(sum[:4])
+	// Link into a directory private to this test process. The output path
+	// used to be $TMPDIR/gt-integration-test-<hash of projectRoot>: one file
+	// per checkout path, shared by every process testing that path. A
+	// checkout path is not one tree — the refinery rig checks out branch
+	// after branch in the same directory — so a process still linking an
+	// older tree could replace the binary under a newer run, which then
+	// exec'd a gt without the code under test: TestBootSendKeysGuard_Integration
+	// saw exit 0 and empty stderr from a gt that predated the guard. go build
+	// renames its output into place, so the swap was silent. The per-path
+	// files were also never deleted (~180MB each).
+	dir, err := os.MkdirTemp("", "gt-test-bin-")
+	if err != nil {
+		return "", fmt.Errorf("creating gt build dir: %w", err)
+	}
+	gtBinaryDir = dir
+	binaryName := "gt"
 	if runtime.GOOS == "windows" {
 		binaryName += ".exe"
 	}
-	tmpBinary := filepath.Join(os.TempDir(), binaryName)
+	tmpBinary := filepath.Join(dir, binaryName)
 
 	// Dolt's go-icu-regex cgo build only reaches this point, so only this
 	// helper needs the include-path diagnosis (gt-mjll). icuEnv is what the
