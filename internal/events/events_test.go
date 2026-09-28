@@ -51,7 +51,8 @@ func TestLogTo_EmptyTownRootIsNoop(t *testing.T) {
 // TestLog_NoopUnderGoTest verifies the cwd-resolving path never writes from a
 // test binary, even when cwd is inside a real Gas Town workspace. This is the
 // guard against fixture events polluting production ~/gt/.events.jsonl (gt-x9o).
-// The resolver is not even consulted.
+// It goes through writeFromCwd, which reads testing.Testing() itself, so the
+// guard is the production one; the resolver must not even be consulted.
 func TestLog_NoopUnderGoTest(t *testing.T) {
 	t.Parallel()
 	townRoot := fixtureTown(t)
@@ -59,15 +60,10 @@ func TestLog_NoopUnderGoTest(t *testing.T) {
 		t.Error("the cwd resolver ran under go test")
 		return townRoot, nil
 	}
-	if err := writeVia(newEvent(TypeSessionDeath, "tester", nil, VisibilityFeed), true, noEnv, findRoot); err != nil {
+	if err := writeFromCwd(newEvent(TypeSessionDeath, "tester", nil, VisibilityFeed), findRoot); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	assertNoEventsFile(t, townRoot)
-
-	// The exported path is wired to the same guard: it returns cleanly here.
-	if err := LogFeed(TypeSessionDeath, "tester", nil); err != nil {
-		t.Fatalf("LogFeed: %v", err)
-	}
 }
 
 // TestLog_NoopUnderHermeticHarness covers gt subprocesses of tests: not test

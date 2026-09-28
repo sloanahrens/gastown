@@ -170,7 +170,14 @@ func newEvent(eventType, actor string, payload map[string]interface{}, visibilit
 // write appends an event to the events file of the town root resolved from
 // the current working directory.
 func write(event Event) error {
-	return writeVia(event, testing.Testing(), os.Getenv, workspace.FindFromCwd)
+	return writeFromCwd(event, workspace.FindFromCwd)
+}
+
+// writeFromCwd is write with the cwd town-root resolver explicit. It keeps
+// the process's own test-binary and hermetic checks, so a test can hand it a
+// fixture town and prove the gt-x9o guard still refuses to write there.
+func writeFromCwd(event Event, findRoot func() (string, error)) error {
+	return writeVia(event, testing.Testing(), os.Getenv, findRoot)
 }
 
 // writeVia is write with its inputs explicit: whether this is a test binary,
