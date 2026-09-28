@@ -382,37 +382,19 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 }
 
 // getConvoyTrackedIssues returns issues tracked by a convoy with fresh status.
-// Uses SDK GetDependenciesWithMetadata filtered by tracks, then GetIssuesByIDs for current status.
-// When a StoreResolver is provided, cross-rig beads are resolved via direct store queries.
-// Otherwise falls back to bd show subprocess via fetchCrossRigBeadStatus.
+// Reads the convoy's raw tracks dependency records, then GetIssuesByIDs for
+// current status of the ones in this store. When a StoreResolver is provided,
+// cross-rig beads are resolved via direct store queries. Otherwise falls back
+// to bd show subprocess via fetchCrossRigBeadStatus.
+//
+// The raw records, not GetDependenciesWithMetadata: that joins each target to
+// an issue row in this store and silently drops every target that has none,
+// which is every cross-rig bead ("external:<prefix>:<id>") a town convoy
+// tracks. With it the cross-rig resolution below could never run, and such a
+// convoy fed nothing.
 func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID, townRoot string, resolver *StoreResolver) []trackedIssue {
-	deps, err := store.GetDependenciesWithMetadata(ctx, convoyID)
-	if err != nil || len(deps) == 0 {
-		return nil
-	}
-
-	// Filter by tracks type and collect IDs
-	var ids []string
-	type depMeta struct {
-		status    string
-		assignee  string
-		priority  int
-		issueType string
-	}
-	metaByID := make(map[string]depMeta)
-	for _, d := range deps {
-		if string(d.DependencyType) == "tracks" {
-			id := extractIssueID(d.ID)
-			ids = append(ids, id)
-			metaByID[id] = depMeta{
-				status:    string(d.Status),
-				assignee:  d.Assignee,
-				priority:  d.Priority,
-				issueType: string(d.IssueType),
-			}
-		}
-	}
-	if len(ids) == 0 {
+	ids, err := trackedIDs(ctx, store, convoyID)
+	if err != nil || len(ids) == 0 {
 		return nil
 	}
 
@@ -463,16 +445,49 @@ func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID
 			t.Assignee = fresh.Assignee
 			t.Priority = fresh.Priority
 			t.IssueType = string(fresh.IssueType)
-		} else if meta, ok := metaByID[id]; ok {
-			t.Status = meta.status
-			t.Assignee = meta.assignee
-			t.Priority = meta.priority
-			t.IssueType = meta.issueType
 		}
 		result = append(result, t)
 	}
 
 	return result
+}
+
+// dependencyRecordReader reads a bead's raw dependency edges, whatever their
+// target. beadsdk.Storage does not carry it; the Dolt store every beadsdk.Open
+// returns does.
+type dependencyRecordReader interface {
+	GetDependencyRecords(ctx context.Context, issueID string) ([]*beadsdk.Dependency, error)
+}
+
+// trackedIDs returns the IDs of the beads convoyID tracks, cross-rig ones
+// included, with any external:<prefix>: wrapper stripped.
+func trackedIDs(ctx context.Context, store beadsdk.Storage, convoyID string) ([]string, error) {
+	var ids []string
+	reader, ok := store.(dependencyRecordReader)
+	if !ok {
+		// A store without raw edge reads offers only the joined view, which
+		// lists local targets alone.
+		deps, err := store.GetDependenciesWithMetadata(ctx, convoyID)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range deps {
+			if string(d.DependencyType) == "tracks" {
+				ids = append(ids, extractIssueID(d.ID))
+			}
+		}
+		return ids, nil
+	}
+	deps, err := reader.GetDependencyRecords(ctx, convoyID)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range deps {
+		if string(d.Type) == "tracks" {
+			ids = append(ids, extractIssueID(d.DependsOnID))
+		}
+	}
+	return ids, nil
 }
 
 // extractIssueID strips the external:prefix:id wrapper from bead IDs.

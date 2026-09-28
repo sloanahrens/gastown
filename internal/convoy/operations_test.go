@@ -1771,7 +1771,7 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 	}
 
 	if found == nil {
-		t.Skipf("oag-19dd9 not found in tracked issues (GetDependenciesWithMetadata may not work in embedded Dolt)")
+		t.Fatalf("cross-rig bead oag-19dd9 is missing from the convoy's tracked issues %+v: a convoy that tracks another rig's bead must list it", tracked)
 	}
 
 	// The critical assertion: the cross-rig bead should show fresh "closed" status,
