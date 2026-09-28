@@ -508,34 +508,51 @@ func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSigna
 	}
 	defer func() { _ = tail.Close() }()
 
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := time.NewTicker(eventsPollInterval)
 	defer ticker.Stop()
+	return waitOnTail(ctx, tail, rig, ticker.C)
+}
 
+// eventsPollInterval is how often waitForEventsFile polls the events file.
+const eventsPollInterval = 200 * time.Millisecond
+
+// waitOnTail polls tail once per value received from ticks until a line
+// relevant to rig arrives or ctx is done.
+func waitOnTail(ctx context.Context, tail *events.Tail, rig string, ticks <-chan time.Time) (*AwaitSignalResult, error) {
 	for {
 		select {
 		case <-ctx.Done():
 			return &AwaitSignalResult{
 				Reason: "timeout",
 			}, nil
-		case <-ticker.C:
-			// Poll drains every complete line appended so far (partial lines
-			// are held until their newline arrives). Reading one line per tick
-			// would let a busy town outrun the reader, delaying a signal for
-			// this rig indefinitely, since cross-rig lines are skipped.
-			lines, err := tail.Poll()
-			for _, line := range lines {
-				if eventRelevantToRig(line, rig) {
-					return &AwaitSignalResult{
-						Reason: "signal",
-						Signal: line,
-					}, nil
-				}
-			}
-			if err != nil {
-				return nil, fmt.Errorf("reading events file: %w", err)
+		case <-ticks:
+			if res, err := pollTailForRig(tail, rig); res != nil || err != nil {
+				return res, err
 			}
 		}
 	}
+}
+
+// pollTailForRig reads every complete line appended to tail since the last
+// poll and returns a "signal" result for the first one relevant to rig, or nil
+// when there is none. Partial lines are held until their newline arrives.
+// Draining everything matters: reading one line per tick would let a busy
+// town outrun the reader, delaying a signal for this rig indefinitely, since
+// cross-rig lines are skipped.
+func pollTailForRig(tail *events.Tail, rig string) (*AwaitSignalResult, error) {
+	lines, err := tail.Poll()
+	for _, line := range lines {
+		if eventRelevantToRig(line, rig) {
+			return &AwaitSignalResult{
+				Reason: "signal",
+				Signal: line,
+			}, nil
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading events file: %w", err)
+	}
+	return nil, nil
 }
 
 // eventRelevantToRig reports whether a raw .events.jsonl line should wake a

@@ -1,15 +1,14 @@
 package cmd
 
 import (
-	"context"
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
@@ -44,9 +43,28 @@ func gitRootFixture(t *testing.T) string {
 	return root
 }
 
+// realGitPrimeTools runs prime's git calls for real but on a fake clock that
+// is never advanced, so primeExternalToolTimeout cannot fire on a slow host:
+// what these tests check is the check's reading of git, not its deadline
+// (TestCheckHookedPathDupes_BoundsSlowGitLog covers that). Output collects in
+// the returned buffer.
+func realGitPrimeTools() (primeTools, *bytes.Buffer) {
+	var out bytes.Buffer
+	return primeTools{clock: clockwork.NewFakeClockAt(primeTestEpoch), out: &out}, &out
+}
+
+// hookedPathDupesOutput runs the check on real git and returns what it printed.
+func hookedPathDupesOutput(ctx RoleContext, bead *beads.Issue) string {
+	p, out := realGitPrimeTools()
+	p.hookedPathDupes(ctx, bead)
+	return out.String()
+}
+
 func TestDupesRecentLog(t *testing.T) {
+	t.Parallel()
 	root := gitRootFixture(t)
-	commits, err := dupesRecentLog(root, []string{"cmd/gt/hermetic_main_test.go"})
+	p, _ := realGitPrimeTools()
+	commits, err := p.dupesRecentLog(root, []string{"cmd/gt/hermetic_main_test.go"})
 	if err != nil {
 		t.Fatalf("dupesRecentLog: %v", err)
 	}
@@ -66,7 +84,7 @@ func TestDupesRecentLog(t *testing.T) {
 	}
 
 	// A path the history never touches returns nothing, no error.
-	if commits, err := dupesRecentLog(root, []string{"internal/cmd/never_touched.go"}); err != nil || len(commits) != 0 {
+	if commits, err := p.dupesRecentLog(root, []string{"internal/cmd/never_touched.go"}); err != nil || len(commits) != 0 {
 		t.Errorf("untouched path: commits=%v err=%v, want empty/nil", commits, err)
 	}
 }
@@ -74,15 +92,13 @@ func TestDupesRecentLog(t *testing.T) {
 func TestCheckHookedPathDupes(t *testing.T) {
 	t.Run("warns when a shared file was recently changed", func(t *testing.T) {
 		root := gitRootFixture(t)
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: root},
-				&beads.Issue{
-					ID:    "gt-3vr",
-					Title: "Fix the slow-mail bound",
-					Description: "cmd/gt/hermetic_main_test.go fails in " +
-						"TestRunPrimeExternalTools_BoundsSlowMailCheck.",
-				})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
+			&beads.Issue{
+				ID:    "gt-3vr",
+				Title: "Fix the slow-mail bound",
+				Description: "cmd/gt/hermetic_main_test.go fails in " +
+					"TestRunPrimeExternalTools_BoundsSlowMailCheck.",
+			})
 		if !strings.Contains(out, "cmd/gt/hermetic_main_test.go") {
 			t.Fatalf("output missing the shared file:\n%s", out)
 		}
@@ -96,24 +112,20 @@ func TestCheckHookedPathDupes(t *testing.T) {
 
 	t.Run("silent when no overlap", func(t *testing.T) {
 		root := gitRootFixture(t)
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: root},
-				&beads.Issue{
-					ID:          "gt-rl0",
-					Title:       "Some unrelated bead",
-					Description: "Touches internal/cmd/never_touched.go only.",
-				})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
+			&beads.Issue{
+				ID:          "gt-rl0",
+				Title:       "Some unrelated bead",
+				Description: "Touches internal/cmd/never_touched.go only.",
+			})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("expected silence, got:\n%s", out)
 		}
 	})
 
 	t.Run("silent when the bead names no paths", func(t *testing.T) {
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RolePolecat},
-				&beads.Issue{ID: "gt-x", Title: "No paths here", Description: "Just prose."})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat},
+			&beads.Issue{ID: "gt-x", Title: "No paths here", Description: "Just prose."})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("expected silence, got:\n%s", out)
 		}
@@ -124,20 +136,16 @@ func TestCheckHookedPathDupes(t *testing.T) {
 		primeContinuationMode = true
 		defer func() { primeContinuationMode = old }()
 
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
-				&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
+			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("continuation mode must skip the check, got:\n%s", out)
 		}
 	})
 
 	t.Run("non-polecat is skipped", func(t *testing.T) {
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RoleWitness, WorkDir: t.TempDir()},
-				&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RoleWitness, WorkDir: t.TempDir()},
+			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("non-polecat must skip the check, got:\n%s", out)
 		}
@@ -151,24 +159,20 @@ func TestCheckHookedPathDupes(t *testing.T) {
 		primeDryRun = true
 		defer func() { primeDryRun = old }()
 
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: root},
-				&beads.Issue{
-					ID:          "gt-x",
-					Title:       "Fix the slow-mail bound",
-					Description: "cmd/gt/hermetic_main_test.go fails in TestRunPrimeExternalTools_BoundsSlowMailCheck.",
-				})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
+			&beads.Issue{
+				ID:          "gt-x",
+				Title:       "Fix the slow-mail bound",
+				Description: "cmd/gt/hermetic_main_test.go fails in TestRunPrimeExternalTools_BoundsSlowMailCheck.",
+			})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("dry-run must skip the check, got:\n%s", out)
 		}
 	})
 
 	t.Run("silent outside a git repo", func(t *testing.T) {
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
-				&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
+			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("a workdir outside a repo must not be reported on, got:\n%s", out)
 		}
@@ -185,10 +189,8 @@ func TestCheckHookedPathDupes(t *testing.T) {
 			t.Fatalf("drop origin/main: %v\n%s", err, out)
 		}
 
-		out := captureStdout(t, func() {
-			checkHookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: root},
-				&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
-		})
+		out := hookedPathDupesOutput(RoleContext{Role: RolePolecat, WorkDir: root},
+			&beads.Issue{ID: "gt-x", Title: "x", Description: "cmd/gt/hermetic_main_test.go."})
 		if strings.TrimSpace(out) != "" {
 			t.Fatalf("no origin/main must fail closed, got:\n%s", out)
 		}
@@ -196,68 +198,20 @@ func TestCheckHookedPathDupes(t *testing.T) {
 }
 
 // TestCheckHookedPathDupes_BoundsSlowGitLog proves the check's git calls run on
-// prime's external-tool deadline rather than waiting a wedged git out.
-//
-// The deadline is driven by a barrier — the stub git announces it has started
-// on the log call, and that announcement cancels the context — not by host
-// wall-clock time, for the reason recorded on
-// TestRunPrimeExternalTools_BoundsSlowMailCheck (gt-v2a5). The stub stands in
-// for git on PATH only after the fixture is built, so the repository the check
-// reads is a real one.
+// prime's external-tool deadline rather than waiting a wedged git out, and
+// that an abandoned call is not reported on. The deadline is asserted on the
+// fake clock (see waitOutWedgedTool) rather than timed.
 func TestCheckHookedPathDupes_BoundsSlowGitLog(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-script subprocess test")
+	t.Parallel()
+	const logCall = "git:log origin/main --since=1 day --name-only --pretty=format:%h%x09%s -- cmd/gt/hermetic_main_test.go"
+	f := &fakePrimeRunner{
+		answers: map[string]string{"git:rev-parse --verify --quiet origin/main": ""},
+		block:   map[string]bool{logCall: true},
 	}
-	markerDir := t.TempDir()
-	startedPath := filepath.Join(markerDir, "git-started")
-	survivedPath := filepath.Join(markerDir, "git-survived")
+	p, clk, out := newFakePrimeTools(f)
 
-	root := gitRootFixture(t)
-
-	binDir := filepath.Join(markerDir, "bin")
-	if err := os.Mkdir(binDir, 0o700); err != nil {
-		t.Fatalf("create bin dir: %v", err)
-	}
-	script := "#!/bin/sh\n" +
-		"case \"$1\" in\n" +
-		"  rev-parse) exit 0 ;;\n" +
-		"  log)\n" +
-		"    : > \"$PRIME_GIT_STARTED\"\n" +
-		"    sleep " + primeTestStallSeconds + "\n" +
-		"    : > \"$PRIME_GIT_SURVIVED\"\n" +
-		"    exit 0\n" +
-		"    ;;\n" +
-		"esac\n" +
-		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o700); err != nil {
-		t.Fatalf("write git stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("PRIME_GIT_STARTED", startedPath)
-	t.Setenv("PRIME_GIT_SURVIVED", survivedPath)
-
-	// Prime's own budget for an external tool, so the only deadline that can
-	// fire here is the barrier-driven one below.
-	oldTimeout := primeExternalToolTimeout
-	primeExternalToolTimeout = primeTestToolTimeout
-	t.Cleanup(func() { primeExternalToolTimeout = oldTimeout })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	withPrimeExternalToolDeadline(t, func(time.Duration) (context.Context, context.CancelFunc) {
-		return context.WithCancel(ctx)
-	})
-
-	barrierReached := make(chan bool, 1)
-	go func() {
-		reached := waitForPath(startedPath, primeTestBarrierWait)
-		cancel() // never leave the check blocked, even if the barrier never came
-		barrierReached <- reached
-	}()
-
-	start := time.Now()
-	out := captureStdout(t, func() {
-		checkHookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: root},
+	call := waitOutWedgedTool(t, f, clk, func() {
+		p.hookedPathDupes(RoleContext{Role: RolePolecat, WorkDir: t.TempDir()},
 			&beads.Issue{
 				ID:    "gt-x",
 				Title: "Fix the slow-mail bound",
@@ -265,25 +219,11 @@ func TestCheckHookedPathDupes_BoundsSlowGitLog(t *testing.T) {
 					"TestRunPrimeExternalTools_BoundsSlowMailCheck.",
 			})
 	})
-	elapsed := time.Since(start)
 
-	if !<-barrierReached {
-		t.Fatalf("git stub never announced it started within %v — nothing can be concluded about the check's bound", primeTestBarrierWait)
+	if call.line != logCall {
+		t.Fatalf("wedged call = %q, want %q", call.line, logCall)
 	}
-	// The stub was mid-stall when the deadline fired, so the check must have
-	// returned without it: a check that waited the tool out would have reaped
-	// the child, and the child writes its survived marker before exiting.
-	if _, err := os.Stat(survivedPath); err == nil {
-		t.Fatalf("git log child ran to completion — the check waited past its deadline instead of abandoning the command")
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("check survived marker: %v", err)
-	}
-	// Safety net rather than a bound: the stub stalls for primeTestSlowToolStall,
-	// so only a check that sat out the whole stall can approach it.
-	if elapsed > primeTestSlowToolStall {
-		t.Fatalf("the check waited out the stalled git log: elapsed = %v", elapsed)
-	}
-	if strings.TrimSpace(out) != "" {
-		t.Fatalf("a git call the check abandoned must not be reported on:\n%s", out)
+	if strings.TrimSpace(out.String()) != "" {
+		t.Fatalf("a git call the check abandoned must not be reported on:\n%s", out.String())
 	}
 }

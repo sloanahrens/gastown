@@ -1,17 +1,17 @@
 package cmd
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // gtBinaryOnce guards the single build of the gt binary that the CLI-level
@@ -30,7 +30,62 @@ var (
 	gtBinaryOnce sync.Once
 	gtBinaryPath string
 	gtBinaryErr  error
+	gtBinaryDir  string // this process's private build dir; see removeBuiltGT
 )
+
+// removeBuiltGT deletes the directory buildGT linked into. TestMain calls it
+// after m.Run, so each test process that exits normally leaves no binary
+// behind; one killed first (timeout panic, SIGTERM, SIGKILL) is cleaned up by
+// the next process's sweepStaleGTBinaries.
+func removeBuiltGT() {
+	if gtBinaryDir != "" {
+		_ = os.RemoveAll(gtBinaryDir)
+	}
+}
+
+// gtBinaryDirPrefix names a test process's build directory; the owning pid
+// follows it, so a sweep can tell a live owner from a dead one.
+const gtBinaryDirPrefix = "gt-test-bin-"
+
+// legacyGTBinaryPrefix is the per-checkout-path binary name buildGTBinary used
+// before 539a156. Checkouts of older revisions still create and exec it, so
+// only a file untouched for legacyGTBinaryMaxAge (far past any test binary's
+// timeout) is taken to be abandoned.
+const (
+	legacyGTBinaryPrefix = "gt-integration-test-"
+	legacyGTBinaryMaxAge = time.Hour
+)
+
+// sweepStaleGTBinaries removes gt build directories whose owning test process
+// is gone, and abandoned legacy per-path binaries (~180MB each). Both
+// TestMains call it on entry. Errors are ignored: this is housekeeping, and a
+// directory that cannot be removed now is retried by the next run.
+func sweepStaleGTBinaries() {
+	tmp := os.TempDir()
+	dirs, _ := filepath.Glob(filepath.Join(tmp, gtBinaryDirPrefix+"*"))
+	for _, dir := range dirs {
+		rest := strings.TrimPrefix(filepath.Base(dir), gtBinaryDirPrefix)
+		pidStr, _, ok := strings.Cut(rest, "-")
+		pid, err := strconv.Atoi(pidStr)
+		if !ok || err != nil || pid <= 0 {
+			// Pre-pid name (gt-test-bin-<random>): no owner to check, and no
+			// current code creates one, so it is abandoned.
+			_ = os.RemoveAll(dir)
+			continue
+		}
+		// processAlive (process_alive_*.go) is the package's own probe; the
+		// directories are this user's, so its owner is never another user's.
+		if pid != os.Getpid() && !processAlive(pid) {
+			_ = os.RemoveAll(dir)
+		}
+	}
+	legacy, _ := filepath.Glob(filepath.Join(tmp, legacyGTBinaryPrefix+"*"))
+	for _, path := range legacy {
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) > legacyGTBinaryMaxAge {
+			_ = os.Remove(path)
+		}
+	}
+}
 
 // buildGT returns the path to a gt binary built from this checkout, with
 // BuiltProperly=1 set (without it the binary refuses to run).
@@ -64,17 +119,27 @@ func buildGTBinary() (string, error) {
 		projectRoot = parent
 	}
 
-	// The output path is shared across every process running as this user
-	// (os.TempDir() is per-user, not per-worktree), so two concurrent test
-	// runs — a polecat's and the refinery's, say — would otherwise link the
-	// binary to the same file and race on it. Key the name on the project
-	// root: one worktree, one binary.
-	sum := sha256.Sum256([]byte(projectRoot))
-	binaryName := "gt-integration-test-" + hex.EncodeToString(sum[:4])
+	// Link into a directory private to this test process. The output path
+	// used to be $TMPDIR/gt-integration-test-<hash of projectRoot>: one file
+	// per checkout path, shared by every process testing that path. A
+	// checkout path is not one tree — the refinery rig checks out branch
+	// after branch in the same directory — so a process still linking an
+	// older tree could replace the binary under a newer run, which then
+	// exec'd a gt without the code under test: TestBootSendKeysGuard_Integration
+	// saw exit 0 and empty stderr from a gt that predated the guard. go build
+	// renames its output into place, so the swap was silent. The per-path
+	// files were also never deleted (~180MB each).
+	sweepStaleGTBinaries()
+	dir, err := os.MkdirTemp("", fmt.Sprintf("%s%d-", gtBinaryDirPrefix, os.Getpid()))
+	if err != nil {
+		return "", fmt.Errorf("creating gt build dir: %w", err)
+	}
+	gtBinaryDir = dir
+	binaryName := "gt"
 	if runtime.GOOS == "windows" {
 		binaryName += ".exe"
 	}
-	tmpBinary := filepath.Join(os.TempDir(), binaryName)
+	tmpBinary := filepath.Join(dir, binaryName)
 
 	// Dolt's go-icu-regex cgo build only reaches this point, so only this
 	// helper needs the include-path diagnosis (gt-mjll). icuEnv is what the

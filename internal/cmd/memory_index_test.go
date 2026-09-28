@@ -511,18 +511,29 @@ func TestRunMemoryInject_ElidesValuesButKeepsThemRetrievable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal kv: %v", err)
 	}
+	// Prime's half runs on a fake runner; `gt memories` still shells out to bd,
+	// so a bd stub on PATH answers that half from the same JSON.
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: string(kvJSON)}}
+	p, _, buf := newFakePrimeTools(f)
+	p.memoryIndex(t.TempDir())
+	out := buf.String()
+
 	jsonPath := filepath.Join(t.TempDir(), "kv.json")
 	if err := os.WriteFile(jsonPath, kvJSON, 0600); err != nil {
 		t.Fatalf("write kv json: %v", err)
 	}
-	workDir := setupPrimeExternalToolTest(t, `
-case "$*" in
-  "kv list --json") cat "$KV_JSON_FILE"; exit 0 ;;
-esac
-`, ``)
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  \"kv list --json\") cat \"$KV_JSON_FILE\"; exit 0 ;;\n" +
+		"esac\n" +
+		"echo \"unexpected args: $*\" >&2\n" +
+		"exit 99\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0700); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("KV_JSON_FILE", jsonPath)
-
-	out := captureStdout(t, func() { runMemoryInject(workDir) })
 
 	if !strings.Contains(out, "# Agent Memories (1)") {
 		t.Errorf("missing memory header:\n%s", out)
