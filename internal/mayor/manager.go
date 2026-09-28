@@ -203,7 +203,7 @@ func (m *Manager) StartACP(ctx context.Context, agentOverride, rigName string) e
 		return fmt.Errorf("resolving agent config: %w", err)
 	}
 
-	if !config.RuntimeConfigSupportsACP(rc) {
+	if !config.AgentRegistryFor(m.townRoot, "").RuntimeConfigSupportsACP(rc) {
 		return fmt.Errorf("agent '%s' does not support ACP. Use an ACP-compatible agent like 'opencode'.", agentName)
 	}
 
@@ -268,7 +268,7 @@ func (m *Manager) StartACP(ctx context.Context, agentOverride, rigName string) e
 		}
 	}()
 
-	acpConfig := config.GetACPConfigFromRuntime(rc)
+	acpConfig := config.AgentRegistryFor(m.townRoot, "").ACPConfigFromRuntime(rc)
 	var agentArgs []string
 	if acpConfig != nil {
 		// ACP mode: build args from ACP config

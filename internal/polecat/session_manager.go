@@ -526,7 +526,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	envVars["GT_TOWN_ROOT"] = townRoot
 	envVars["GT_RUN"] = runID
 	envVars["POLECAT_SLOT"] = fmt.Sprintf("%d", m.polecatSlot(polecat))
-	envVars["GT_PROCESS_NAMES"] = strings.Join(config.ResolveProcessNames(runtimeConfig.ResolvedAgent, runtimeConfig.Command, runtimeConfig.Args...), ",")
+	envVars["GT_PROCESS_NAMES"] = strings.Join(config.AgentRegistryFor(townRoot, m.rig.Path).ResolveProcessNames(runtimeConfig.ResolvedAgent, runtimeConfig.Command, runtimeConfig.Args...), ",")
 	if polecatGitBranch != "" {
 		envVars["GT_BRANCH"] = polecatGitBranch
 	}

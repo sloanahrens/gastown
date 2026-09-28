@@ -191,14 +191,16 @@ func runSeanceList() error {
 	return nil
 }
 
-// resolveSeanceCommand finds the command for an agent that supports --fork-session.
+// resolveSeanceCommand finds the command for an agent that supports --fork-session,
+// using the town's agent registry (townRoot may be empty for built-ins only).
 // Returns the resolved command path, or error if no agent supports fork session.
-func resolveSeanceCommand() (string, error) {
-	for _, name := range config.ListAgentPresets() {
-		preset := config.GetAgentPresetByName(name)
+func resolveSeanceCommand(townRoot string) (string, error) {
+	registry := config.AgentRegistryFor(townRoot, "")
+	for _, name := range registry.Names() {
+		preset := registry.Preset(name)
 		if preset != nil && preset.SupportsForkSession {
 			// Use RuntimeConfigFromPreset to resolve the actual command path
-			rc := config.RuntimeConfigFromPreset(preset.Name)
+			rc := registry.RuntimeConfigFromPreset(preset.Name)
 			return rc.Command, nil
 		}
 	}
@@ -206,17 +208,18 @@ func resolveSeanceCommand() (string, error) {
 }
 
 func runSeanceTalk(sessionID, prompt string) error {
+	// Find workspace root (needed for agent resolution, prefix resolution and
+	// session symlinks)
+	townRoot, _ := workspace.FindFromCwd()
+
 	// Resolve the agent command that supports fork session
-	agentCmd, err := resolveSeanceCommand()
+	agentCmd, err := resolveSeanceCommand(townRoot)
 	if err != nil {
 		return err
 	}
 
 	// Clean up any orphaned symlinks from previous interrupted sessions
 	cleanupOrphanedSessionSymlinks()
-
-	// Find workspace root (needed for both prefix resolution and session symlinks)
-	townRoot, _ := workspace.FindFromCwd()
 
 	// Resolve prefix to full session ID if needed
 	if len(sessionID) < 36 {

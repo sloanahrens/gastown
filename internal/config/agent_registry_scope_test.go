@@ -104,3 +104,86 @@ func TestStartupProcessNamesScopedToRig(t *testing.T) {
 		t.Fatalf("beta command carries rig alpha's agent override: %s", cmdB)
 	}
 }
+
+// A town's settings/agents.json applies to every rig in that town, below the
+// rig's own file (NixOS: claude runs as ".claude-unwrapped").
+func TestStartupProcessNamesUseTownRegistry(t *testing.T) {
+	t.Parallel()
+	townRoot, rigA, rigB := newTwoRigTown(t)
+	townFile := DefaultAgentRegistryPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(townFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(townFile, []byte(`{"version":1,"agents":{"claude":{"process_names":["node","claude",".claude-unwrapped"]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"GT_ROLE": "polecat"}
+
+	cmdB, err := BuildStartupCommand(env, rigB, "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommand(beta): %v", err)
+	}
+	if !strings.Contains(cmdB, "GT_PROCESS_NAMES=node,claude,.claude-unwrapped") {
+		t.Fatalf("beta command lacks the town's process names: %s", cmdB)
+	}
+
+	// Rig alpha's own file wins over the town's for the fields it sets.
+	if got := AgentRegistryFor(townRoot, rigA).ProcessNames("claude"); len(got) != 3 || got[2] != ".claude-alpha" {
+		t.Fatalf("alpha ProcessNames(claude) = %v, want its own override", got)
+	}
+	// Nothing leaks into the built-ins.
+	if got := GetProcessNames("claude"); len(got) != 2 {
+		t.Fatalf("GetProcessNames(claude) = %v, want the built-in [node claude]", got)
+	}
+}
+
+// A rig-level override is merged onto the town-level entry, which is merged
+// onto the built-in, so each file only needs the fields it changes.
+func TestAgentRegistryLayersMergeFieldwise(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "rig")
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(DefaultAgentRegistryPath(townRoot), `{"version":1,"agents":{"claude":{"process_names":["node","claude","town-proc"]}}}`)
+	write(RigAgentRegistryPath(rigPath), `{"version":1,"agents":{"claude":{"command":"env"}}}`)
+
+	reg, err := LoadAgentRegistryFor(townRoot, rigPath)
+	if err != nil {
+		t.Fatalf("LoadAgentRegistryFor: %v", err)
+	}
+	claude := reg.Preset("claude")
+	if claude.Command != "env" {
+		t.Errorf("Command = %q, want the rig's env", claude.Command)
+	}
+	if len(claude.ProcessNames) != 3 || claude.ProcessNames[2] != "town-proc" {
+		t.Errorf("ProcessNames = %v, want the town's", claude.ProcessNames)
+	}
+	if claude.SessionIDEnv != GetAgentPreset(AgentClaude).SessionIDEnv {
+		t.Errorf("SessionIDEnv = %q, want the built-in's", claude.SessionIDEnv)
+	}
+}
+
+// registryWith returns the built-in registry plus the given presets, the
+// registry a town or rig settings/agents.json defining them would produce.
+func registryWith(presets ...AgentPresetInfo) *AgentRegistry {
+	reg := &AgentRegistry{
+		Version: CurrentAgentRegistryVersion,
+		Agents:  make(map[string]*AgentPresetInfo),
+	}
+	for name, preset := range BuiltinAgentRegistry().Agents {
+		reg.Agents[name] = preset
+	}
+	for i := range presets {
+		preset := presets[i]
+		reg.Agents[string(preset.Name)] = &preset
+	}
+	return reg
+}

@@ -139,9 +139,11 @@ func InitRegistry(townRoot string) error {
 		SetDefaultRegistry(r)
 	}
 
-	// Load agent registry so all entry points (CLI, daemon, witness) respect
-	// user-configured overrides like custom process_names.
-	if err := config.LoadAgentRegistry(config.DefaultAgentRegistryPath(townRoot)); err != nil {
+	// Report a malformed settings/agents.json early. Nothing is kept: agents
+	// are resolved against the registry of their own town and rig
+	// (config.LoadAgentRegistryFor), so one rig's overrides cannot leak into
+	// another's in a long-lived process (gt-rg4f1).
+	if _, err := config.LoadAgentRegistryFor(townRoot, ""); err != nil {
 		errs = append(errs, fmt.Errorf("agent registry: %w", err))
 	}
 

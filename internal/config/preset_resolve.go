@@ -9,19 +9,15 @@ import (
 // ResolveAgentPreset maps an agent name — a GT_AGENT value, role_agents entry,
 // or default_agent — to the preset of the harness that actually runs it.
 // Custom agents in rig then town settings/config.json come first (the same
-// order as lookupAgentConfigIfExists), then the registry. ok=false means the
+// order as lookupAgentConfigIfExists), then the registry for that town and
+// rig (LoadAgentRegistryFor). ok=false means the
 // name could not be identified: callers must treat that as an unknown
 // harness, never as Claude. (claude-9a8)
 func ResolveAgentPreset(name, townRoot, rigPath string) (*AgentPresetInfo, bool) {
 	if name == "" {
 		return nil, false
 	}
-	if townRoot != "" {
-		_ = LoadAgentRegistry(DefaultAgentRegistryPath(townRoot))
-	}
-	if rigPath != "" {
-		_ = LoadRigAgentRegistry(RigAgentRegistryPath(rigPath))
-	}
+	reg := AgentRegistryFor(townRoot, rigPath)
 	var town *TownSettings
 	if townRoot != "" {
 		if ts, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot)); err == nil {
@@ -35,21 +31,27 @@ func ResolveAgentPreset(name, townRoot, rigPath string) (*AgentPresetInfo, bool)
 		}
 	}
 	if rc := customAgentFor(name, town, rig); rc != nil {
-		return HarnessPreset(rc)
+		return reg.HarnessPreset(rc)
 	}
-	if preset := GetAgentPresetByName(name); preset != nil {
+	if preset := reg.Preset(name); preset != nil {
 		return preset, true
 	}
 	return nil, false
 }
 
-// HarnessPreset returns the preset of the harness a RuntimeConfig launches,
-// by the same command-wins rule as isClaudeAgent.
+// HarnessPreset returns the built-in preset of the harness a RuntimeConfig
+// launches. See (*AgentRegistry).HarnessPreset.
 func HarnessPreset(rc *RuntimeConfig) (*AgentPresetInfo, bool) {
+	return builtinAgentRegistry.HarnessPreset(rc)
+}
+
+// HarnessPreset returns the preset in r of the harness a RuntimeConfig
+// launches, by the same command-wins rule as isClaudeAgent.
+func (r *AgentRegistry) HarnessPreset(rc *RuntimeConfig) (*AgentPresetInfo, bool) {
 	if rc == nil {
 		return nil, false
 	}
-	table := presetTable()
+	table := r.presetTable()
 	name := harnessPresetName(rc.Command, rc.Args, rc.Provider, table)
 	if name == "" {
 		return nil, false
@@ -74,18 +76,15 @@ func customAgentFor(name string, town *TownSettings, rig *RigSettings) *RuntimeC
 	return nil
 }
 
-// presetTable merges the immutable built-in presets with a snapshot of the
-// registry. Built-ins are copied first so a concurrent registry reset in
-// tests cannot empty the table (gt-5v82).
-func presetTable() map[string]*AgentPresetInfo {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	initRegistryLocked()
-	table := make(map[string]*AgentPresetInfo, len(builtinPresets)+len(globalRegistry.Agents))
+// presetTable merges the built-in presets with the presets in r, so a
+// registry built by hand without the built-ins still recognizes them.
+func (r *AgentRegistry) presetTable() map[string]*AgentPresetInfo {
+	agents := r.agents()
+	table := make(map[string]*AgentPresetInfo, len(builtinPresets)+len(agents))
 	for name, preset := range builtinPresets {
 		table[string(name)] = preset
 	}
-	for name, preset := range globalRegistry.Agents {
+	for name, preset := range agents {
 		table[name] = preset
 	}
 	return table

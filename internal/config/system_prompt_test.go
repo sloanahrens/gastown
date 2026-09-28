@@ -44,7 +44,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 	rig := filepath.Join(town, "myrig")
 
 	rc := &RuntimeConfig{Command: "claude", Args: []string{"--dangerously-skip-permissions"}}
-	got := withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
+	got := withRoleSystemPromptFlag(nil, rc, "polecat", town, rig, "nux")
 	for _, a := range got.Args {
 		if a == "--append-system-prompt-file" {
 			t.Fatalf("flag must not be added while the file does not exist: %v", got.Args)
@@ -62,7 +62,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got = withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
+	got = withRoleSystemPromptFlag(nil, rc, "polecat", town, rig, "nux")
 	found := false
 	for i, a := range got.Args {
 		if a == "--append-system-prompt-file" {
@@ -80,7 +80,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 	}
 
 	// Idempotent: a second call must not add the flag twice.
-	got = withRoleSystemPromptFlag(got, "polecat", town, rig, "nux")
+	got = withRoleSystemPromptFlag(nil, got, "polecat", town, rig, "nux")
 	n := 0
 	for _, a := range got.Args {
 		if a == "--append-system-prompt-file" {
@@ -104,7 +104,7 @@ func TestWithRoleSystemPromptFlag_SkipsNonClaude(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &RuntimeConfig{Command: "codex", Provider: "codex"}
-	got := withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
+	got := withRoleSystemPromptFlag(nil, rc, "polecat", town, rig, "nux")
 	if len(got.Args) != 0 || len(got.Env) != 0 {
 		t.Fatalf("non-Claude agents must be untouched: args=%v env=%v", got.Args, got.Env)
 	}
@@ -305,7 +305,7 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 	if !containsArgPair(rc.Args, "--settings", wantSettings) {
 		t.Errorf("polecat override config lacks --settings %s: %v", wantSettings, rc.Args)
 	}
-	rc = withRoleSettingsFlag(withRoleSystemPromptFlag(rc, "polecat", townRoot, rigPath, "marble"), "polecat", rigPath)
+	rc = withRoleSettingsFlag(nil, withRoleSystemPromptFlag(nil, rc, "polecat", townRoot, rigPath, "marble"), "polecat", rigPath)
 	if n := countArg(rc.Args, "--settings"); n != 1 {
 		t.Errorf("--settings appears %d times after re-application, want 1: %v", n, rc.Args)
 	}
@@ -441,7 +441,7 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 	})
 
 	rc := &RuntimeConfig{Command: "claude", Args: []string{"--dangerously-skip-permissions"}}
-	got := withRoleSystemPromptFlag(rc, "polecat", town, rig, "nux")
+	got := withRoleSystemPromptFlag(nil, rc, "polecat", town, rig, "nux")
 
 	if len(calls) != 1 || calls[0] != "polecat|"+town+"|"+rig+"|nux|"+want {
 		t.Fatalf("renderer calls = %v, want one call for the polecat file %s", calls, want)
@@ -454,7 +454,7 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 	}
 
 	// The file now exists: a second resolution must not render again.
-	got = withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
+	got = withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
 	if len(calls) != 1 {
 		t.Fatalf("renderer must not run when the file exists; calls = %v", calls)
 	}
@@ -469,7 +469,7 @@ func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testin
 
 	t.Run("error", func(t *testing.T) {
 		withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { return os.ErrPermission })
-		got := withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude", Args: []string{"-x"}}, "polecat", town, rig, "nux")
+		got := withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude", Args: []string{"-x"}}, "polecat", town, rig, "nux")
 		if _, ok := hasSystemPromptFlag(got); ok {
 			t.Fatalf("a failing renderer must not add the flag: %v", got.Args)
 		}
@@ -479,7 +479,7 @@ func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testin
 	})
 	t.Run("wrote nothing", func(t *testing.T) {
 		withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { return nil })
-		got := withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
+		got := withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
 		if _, ok := hasSystemPromptFlag(got); ok {
 			t.Fatalf("a renderer that produced no file must not add the flag: %v", got.Args)
 		}
@@ -492,13 +492,13 @@ func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
 	withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { calls++; return nil })
 
 	// A dog without a name has no per-agent file (and no kennel to put it in).
-	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "dog", town, "", "")
+	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "dog", town, "", "")
 	// Boot has no system prompt file at all.
-	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "boot", town, "", "")
+	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "boot", town, "", "")
 	// A polecat without a name has no per-agent file.
-	withRoleSystemPromptFlag(&RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
+	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
 	// Non-Claude runtimes never get the flag, so nothing to render.
-	withRoleSystemPromptFlag(&RuntimeConfig{Command: "ollama", Args: []string{"run"}}, "polecat", town, filepath.Join(town, "myrig"), "nux")
+	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "ollama", Args: []string{"run"}}, "polecat", town, filepath.Join(town, "myrig"), "nux")
 
 	if calls != 0 {
 		t.Fatalf("renderer ran %d times for roles/runtimes that take no system prompt file", calls)

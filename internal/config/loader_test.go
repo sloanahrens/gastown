@@ -1587,8 +1587,7 @@ func TestBuildCrewStartupCommand(t *testing.T) {
 }
 
 func TestResolveAgentConfigWithOverride(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "testrig")
 
@@ -2185,7 +2184,7 @@ func TestValidateAgentConfig(t *testing.T) {
 
 	t.Run("valid built-in agent", func(t *testing.T) {
 		// claude is a built-in preset and binary should exist
-		err := ValidateAgentConfig("claude", nil, nil)
+		err := ValidateAgentConfig(nil, "claude", nil, nil)
 		// Note: This may fail if claude binary is not installed, which is expected
 		if err != nil && !strings.Contains(err.Error(), "not found in PATH") {
 			t.Errorf("unexpected error for claude: %v", err)
@@ -2193,7 +2192,7 @@ func TestValidateAgentConfig(t *testing.T) {
 	})
 
 	t.Run("invalid agent name", func(t *testing.T) {
-		err := ValidateAgentConfig("nonexistent-agent-xyz", nil, nil)
+		err := ValidateAgentConfig(nil, "nonexistent-agent-xyz", nil, nil)
 		if err == nil {
 			t.Error("expected error for nonexistent agent")
 		}
@@ -2210,7 +2209,7 @@ func TestValidateAgentConfig(t *testing.T) {
 				Args:    []string{"--some-flag"},
 			},
 		}
-		err := ValidateAgentConfig("my-custom-agent", townSettings, nil)
+		err := ValidateAgentConfig(nil, "my-custom-agent", townSettings, nil)
 		if err == nil {
 			t.Error("expected error for missing binary")
 		}
@@ -3502,7 +3501,7 @@ func TestLookupAgentConfigWithRigSettings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rc := lookupAgentConfig(tt.name, tt.townSettings, tt.rigSettings)
+			rc := lookupAgentConfig(nil, tt.name, tt.townSettings, tt.rigSettings)
 
 			if rc == nil {
 				t.Errorf("lookupAgentConfig(%s) returned nil", tt.name)
@@ -4139,7 +4138,7 @@ func TestLookupAgentConfigPreservesCustomFields(t *testing.T) {
 		},
 	}
 
-	rc := lookupAgentConfig("opencode-mayor", townSettings, nil)
+	rc := lookupAgentConfig(nil, "opencode-mayor", townSettings, nil)
 
 	if rc == nil {
 		t.Fatal("lookupAgentConfig returned nil for custom agent")
@@ -5635,12 +5634,8 @@ func TestBuildStartupCommand_SetsGTProcessNames(t *testing.T) {
 // This is a regression test for the bug where `gt deacon start --agent codex`
 // would still launch Claude if run from outside the town directory.
 //
-// Must NOT be t.Parallel(): it resets the process-global agent registry and
-// calls os.Chdir, both of which are process-wide state that parallel siblings
-// such as TestGetSessionIDEnvVar read (gt-hvzy.3 / gt-5v82).
+// Must NOT be t.Parallel(): it calls os.Chdir, which is process-wide state.
 func TestBuildStartupCommandWithAgentOverride_UsesOverrideWhenNoTownRoot(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
 
 	// Change to a directory that is definitely NOT in a Gas Town workspace
 	// by using a temp directory with no mayor/town.json
@@ -5983,7 +5978,7 @@ func TestMergeQueueConfig_PartialJSON_NilPointers(t *testing.T) {
 func TestTryResolveFromEphemeralTier(t *testing.T) {
 	t.Run("no env var returns not handled", func(t *testing.T) {
 		t.Setenv("GT_COST_TIER", "")
-		rc, handled := tryResolveFromEphemeralTier("witness")
+		rc, handled := tryResolveFromEphemeralTier(nil, "witness")
 		if handled {
 			t.Error("expected handled=false when GT_COST_TIER not set")
 		}
@@ -5994,7 +5989,7 @@ func TestTryResolveFromEphemeralTier(t *testing.T) {
 
 	t.Run("invalid tier returns not handled", func(t *testing.T) {
 		t.Setenv("GT_COST_TIER", "premium")
-		rc, handled := tryResolveFromEphemeralTier("witness")
+		rc, handled := tryResolveFromEphemeralTier(nil, "witness")
 		if handled {
 			t.Error("expected handled=false for invalid tier")
 		}
@@ -6005,7 +6000,7 @@ func TestTryResolveFromEphemeralTier(t *testing.T) {
 
 	t.Run("budget tier witness gets haiku", func(t *testing.T) {
 		t.Setenv("GT_COST_TIER", "budget")
-		rc, handled := tryResolveFromEphemeralTier("witness")
+		rc, handled := tryResolveFromEphemeralTier(nil, "witness")
 		if !handled {
 			t.Fatal("expected handled=true for witness in budget tier")
 		}
@@ -6029,7 +6024,7 @@ func TestTryResolveFromEphemeralTier(t *testing.T) {
 
 	t.Run("economy tier polecat returns handled with nil rc (use default)", func(t *testing.T) {
 		t.Setenv("GT_COST_TIER", "economy")
-		rc, handled := tryResolveFromEphemeralTier("polecat")
+		rc, handled := tryResolveFromEphemeralTier(nil, "polecat")
 		if !handled {
 			t.Error("expected handled=true for polecat in economy tier (tier manages this role)")
 		}
@@ -6040,7 +6035,7 @@ func TestTryResolveFromEphemeralTier(t *testing.T) {
 
 	t.Run("economy tier mayor gets sonnet", func(t *testing.T) {
 		t.Setenv("GT_COST_TIER", "economy")
-		rc, handled := tryResolveFromEphemeralTier("mayor")
+		rc, handled := tryResolveFromEphemeralTier(nil, "mayor")
 		if !handled {
 			t.Fatal("expected handled=true for mayor in economy tier")
 		}
@@ -6062,7 +6057,7 @@ func TestTryResolveFromEphemeralTier(t *testing.T) {
 	t.Run("standard tier returns handled with nil rc for all roles", func(t *testing.T) {
 		t.Setenv("GT_COST_TIER", "standard")
 		for _, role := range []string{"mayor", "deacon", "witness", "refinery", "polecat", "crew"} {
-			rc, handled := tryResolveFromEphemeralTier(role)
+			rc, handled := tryResolveFromEphemeralTier(nil, role)
 			if !handled {
 				t.Errorf("standard tier should return handled=true for %s", role)
 			}
@@ -6336,7 +6331,7 @@ func TestWithRoleSettingsFlag_IdempotencyGuard(t *testing.T) {
 	}
 
 	before := len(rc.Args)
-	result := withRoleSettingsFlag(rc, "polecat", rigPath)
+	result := withRoleSettingsFlag(nil, rc, "polecat", rigPath)
 
 	if len(result.Args) != before {
 		t.Errorf("idempotency guard failed: expected %d args, got %d — Args = %v", before, len(result.Args), result.Args)
@@ -6580,7 +6575,7 @@ func TestBuildStartupCommand_GroqCompoundResolvesKeyReference(t *testing.T) {
 func TestValidateAgentConfig_ReportsUnsetEnvReference(t *testing.T) {
 	t.Setenv("GROQ_API_KEY", "")
 
-	err := ValidateAgentConfig(string(AgentGroqCompound), nil, nil)
+	err := ValidateAgentConfig(nil, string(AgentGroqCompound), nil, nil)
 	if err == nil {
 		t.Fatal("expected an error when the referenced variable is unset")
 	}
@@ -6592,7 +6587,7 @@ func TestValidateAgentConfig_ReportsUnsetEnvReference(t *testing.T) {
 func TestValidateAgentConfig_AcceptsSetEnvReference(t *testing.T) {
 	t.Setenv("GROQ_API_KEY", "gsk_test_key_12345")
 
-	if err := ValidateAgentConfig(string(AgentGroqCompound), nil, nil); err != nil {
+	if err := ValidateAgentConfig(nil, string(AgentGroqCompound), nil, nil); err != nil {
 		t.Errorf("groq-compound should validate once GROQ_API_KEY is set, got: %v", err)
 	}
 }

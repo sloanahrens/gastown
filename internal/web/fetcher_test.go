@@ -1161,7 +1161,6 @@ func withMayorFetcherHooks(t *testing.T, sessionEnv func(sessionName, key string
 		fetcherGetSessionEnv = originalGetEnv
 		fetcherRunCmd = originalRunCmd
 	})
-	t.Cleanup(config.ResetRegistryForTesting)
 
 	if sessionEnv != nil {
 		fetcherGetSessionEnv = sessionEnv

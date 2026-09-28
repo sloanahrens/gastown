@@ -103,11 +103,6 @@ func TestConfigAgentList(t *testing.T) {
 			t.Fatalf("chdir: %v", err)
 		}
 
-		// Load agent registry
-		registryPath := config.DefaultAgentRegistryPath(townRoot)
-		if err := config.LoadAgentRegistry(registryPath); err != nil {
-			t.Fatalf("load agent registry: %v", err)
-		}
 
 		// Run the command
 		cmd := &cobra.Command{}
@@ -128,11 +123,6 @@ func TestConfigAgentList(t *testing.T) {
 			t.Fatalf("chdir: %v", err)
 		}
 
-		// Load agent registry
-		registryPath := config.DefaultAgentRegistryPath(townRoot)
-		if err := config.LoadAgentRegistry(registryPath); err != nil {
-			t.Fatalf("load agent registry: %v", err)
-		}
 
 		// Use a command with the --json flag registered
 		cmd := &cobra.Command{}
@@ -156,11 +146,6 @@ func TestConfigAgentGet(t *testing.T) {
 			t.Fatalf("chdir: %v", err)
 		}
 
-		// Load agent registry
-		registryPath := config.DefaultAgentRegistryPath(townRoot)
-		if err := config.LoadAgentRegistry(registryPath); err != nil {
-			t.Fatalf("load agent registry: %v", err)
-		}
 
 		// Run the command
 		cmd := &cobra.Command{}
@@ -198,11 +183,6 @@ func TestConfigAgentGet(t *testing.T) {
 			t.Fatalf("chdir: %v", err)
 		}
 
-		// Load agent registry
-		registryPath := config.DefaultAgentRegistryPath(townRoot)
-		if err := config.LoadAgentRegistry(registryPath); err != nil {
-			t.Fatalf("load agent registry: %v", err)
-		}
 
 		// Run the command
 		cmd := &cobra.Command{}
@@ -223,11 +203,6 @@ func TestConfigAgentGet(t *testing.T) {
 			t.Fatalf("chdir: %v", err)
 		}
 
-		// Load agent registry
-		registryPath := config.DefaultAgentRegistryPath(townRoot)
-		if err := config.LoadAgentRegistry(registryPath); err != nil {
-			t.Fatalf("load agent registry: %v", err)
-		}
 
 		// Run the command with unknown agent
 		cmd := &cobra.Command{}
@@ -706,11 +681,6 @@ func TestConfigDefaultAgentList(t *testing.T) {
 		defer os.Chdir(originalWd)
 		if err := os.Chdir(townRoot); err != nil {
 			t.Fatalf("chdir: %v", err)
-		}
-
-		registryPath := config.DefaultAgentRegistryPath(townRoot)
-		if err := config.LoadAgentRegistry(registryPath); err != nil {
-			t.Fatalf("load agent registry: %v", err)
 		}
 
 		cmd := &cobra.Command{}

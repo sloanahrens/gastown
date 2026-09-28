@@ -132,21 +132,17 @@ func TestCheckHelpFlag_EdgeCases(t *testing.T) {
 	})
 }
 
-func TestPersistentPreRunLoadsAgentRegistry(t *testing.T) {
-	// Regression test: persistentPreRun must load settings/agents.json so that
-	// GetProcessNames (used by IsAgentAlive, daemon heartbeat, cleanup) respects
-	// user-configured process_names overrides.
+func TestPersistentPreRunKeepsAgentRegistryScoped(t *testing.T) {
+	// persistentPreRun used to merge the town's settings/agents.json into a
+	// process-global registry, where a rig's file loaded later leaked into
+	// every other rig's resolution (gt-rg4f1). Agents are now resolved against
+	// config.AgentRegistryFor(town, rig), so the process-wide built-ins must
+	// stay untouched. The NixOS ".claude-unwrapped" liveness case this test
+	// used to cover is pinned where the scoped registry is read:
+	// config TestStartupProcessNamesUseTownRegistry and tmux
+	// TestIsAgentAliveLegacyFallbackUsesTownRegistry.
 	//
-	// Without this, NixOS users whose Claude binary is ".claude-unwrapped" get
-	// their sessions killed every 3 minutes because the builtin preset only
-	// lists ["node", "claude"].
-	//
-	// NOTE: cannot use t.Parallel() — mutates cwd and global agent registry.
-	config.ResetRegistryForTesting()
-	t.Cleanup(config.ResetRegistryForTesting)
-
-	// Build a minimal fake town root with mayor/town.json (PrimaryMarker)
-	// and settings/agents.json containing a process_names override.
+	// NOTE: cannot use t.Parallel() — mutates cwd.
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
@@ -187,22 +183,17 @@ func TestPersistentPreRunLoadsAgentRegistry(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
 
-	// Run persistentPreRun (the function under test).
 	cmd := &cobra.Command{Use: "version"}
 	if err := persistentPreRun(cmd, nil); err != nil {
 		t.Fatalf("persistentPreRun: %v", err)
 	}
 
-	// Verify GetProcessNames returns the override from settings/agents.json.
-	got := config.GetProcessNames("claude")
-	want := []string{"node", "claude", ".claude-unwrapped"}
-	if len(got) != len(want) {
-		t.Fatalf("GetProcessNames(claude) = %v, want %v", got, want)
+	if got := config.GetProcessNames("claude"); len(got) != 2 {
+		t.Fatalf("GetProcessNames(claude) = %v after persistentPreRun, want the built-in [node claude]", got)
 	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("GetProcessNames(claude)[%d] = %q, want %q", i, got[i], want[i])
-		}
+	got := config.AgentRegistryFor(townRoot, "").ProcessNames("claude")
+	if len(got) != 3 || got[2] != ".claude-unwrapped" {
+		t.Fatalf("town registry ProcessNames(claude) = %v, want the settings/agents.json override", got)
 	}
 }
 
@@ -210,9 +201,7 @@ func TestPersistentPreRunMalformedAgentRegistry(t *testing.T) {
 	// Verify that malformed settings/agents.json does not block persistentPreRun
 	// and that the builtin defaults are preserved (graceful fallback).
 	//
-	// NOTE: cannot use t.Parallel() — mutates cwd and global agent registry.
-	config.ResetRegistryForTesting()
-	t.Cleanup(config.ResetRegistryForTesting)
+	// NOTE: cannot use t.Parallel() — mutates cwd.
 
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {

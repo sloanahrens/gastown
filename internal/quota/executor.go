@@ -173,7 +173,8 @@ func (r *Rotator) executeOne(state *config.QuotaState, mu *sync.Mutex, session, 
 
 	// 3. Read CLAUDE_SESSION_ID from tmux session environment for resume support.
 	var sessionID string
-	sessionIDEnv := config.GetSessionIDEnvVar(r.agentName)
+	registry := config.AgentRegistryFor(r.townRoot, "")
+	sessionIDEnv := registry.SessionIDEnvVar(r.agentName)
 	if sessionIDEnv != "" {
 		sessionID, _ = r.tmuxClient.GetEnvironment(session, sessionIDEnv)
 	}
@@ -191,7 +192,7 @@ func (r *Rotator) executeOne(state *config.QuotaState, mu *sync.Mutex, session, 
 		if linkErr != nil {
 			r.log.Warn("could not symlink session for resume in %s: %v (falling back to fresh start)", session, linkErr)
 		} else {
-			resumeCmd := config.BuildResumeCommand(r.agentName, sessionID)
+			resumeCmd := registry.BuildResumeCommand(r.agentName, sessionID)
 			if resumeCmd != "" {
 				respawnCmd = resumeCmd
 				result.ResumedSession = sessionID
