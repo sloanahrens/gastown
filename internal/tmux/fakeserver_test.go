@@ -320,7 +320,16 @@ func flagValue(args []string, flag string) string {
 	return ""
 }
 
-func missing(target string) reply { return fail("can't find session: " + target) }
+// The answers below are tmux 3.7c's, per subcommand family, for a target
+// that does not exist. TestIntegrationFakeServerMatchesTmux replays them
+// against real tmux, so a change here or in tmux shows up there.
+func noSession(target string) reply   { return fail("can't find session: " + target) } // has-session, kill-session
+func noPane(target string) reply      { return fail("can't find pane: " + target) }    // capture-pane, send-keys, respawn-pane, split-window
+func noWindow(target string) reply    { return fail("can't find window: " + target) }  // list-panes, new-window, resize-window
+func noWindowOpt(target string) reply { return fail("no such window: " + target) }     // set-option -t, set-hook, show-options
+func noSuchSession(target string) reply {
+	return fail("no such session: " + target) // set-environment, show-environment
+}
 
 // paneCommandFor is what tmux reports as pane_current_command after running
 // command: exec/env prefixes and assignments are skipped, then the base name.
@@ -355,14 +364,17 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		return ok("")
 	}
 	if f.noServer && c.sub() != "new-session" {
-		return fail("no server running on /tmp/tmux-501/gt-test-unit")
+		// tmux 3.7c with no server and no socket file (KillServer unlinks it);
+		// a leftover socket file reads "no server running on <path>" instead.
+		// wrapError maps both to ErrNoServer.
+		return fail("error connecting to /private/tmp/tmux-501/" + c.socket + " (No such file or directory)")
 	}
 	a := c.args
 	target := flagValue(a, "-t")
 	switch c.sub() {
 	case "has-session":
 		if s, _ := f.resolve(target); s == nil {
-			return missing(target)
+			return noSession(target)
 		}
 	case "new-session":
 		name := flagValue(a, "-s")
@@ -381,7 +393,7 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 	case "kill-session":
 		s, _ := f.resolve(target)
 		if s == nil {
-			return missing(target)
+			return noSession(target)
 		}
 		delete(f.sessions, s.name)
 	case "kill-server":
@@ -414,7 +426,7 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		} else if s, _ := f.resolve(target); s != nil {
 			ss = append(ss, s)
 		} else {
-			return missing(target)
+			return noWindow(target)
 		}
 		var lines []string
 		for _, s := range ss {
@@ -426,13 +438,13 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 	case "display-message":
 		s, p := f.resolve(target)
 		if s == nil || p == nil {
-			return missing(target)
+			return ok("") // tmux 3.7c: exit 0, empty output
 		}
 		return ok(f.expand(c.last(), s, p))
 	case "respawn-pane":
 		s, p := f.resolve(target)
 		if p == nil {
-			return missing(target)
+			return noPane(target)
 		}
 		delete(f.procs, p.pid)
 		p.pid = f.spawnLocked("1", "")
@@ -447,7 +459,7 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 	case "split-window":
 		s, _ := f.resolve(target)
 		if s == nil {
-			return missing(target)
+			return noPane(target)
 		}
 		f.addPaneLocked(s, "", "")
 	case "set-environment":
@@ -459,7 +471,7 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		}
 		s, _ := f.resolve(target)
 		if s == nil {
-			return missing(target)
+			return noSuchSession(target)
 		}
 		if c.has("-u") {
 			delete(s.env, c.last())
@@ -469,7 +481,7 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 	case "show-environment":
 		s, _ := f.resolve(target)
 		if s == nil {
-			return missing(target)
+			return noSuchSession(target)
 		}
 		key := c.last()
 		v, found := s.env[key]
@@ -479,11 +491,8 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		return ok(key + "=" + v)
 	case "capture-pane":
 		s, p := f.resolve(target)
-		if s == nil {
-			return missing(target)
-		}
-		if p == nil {
-			return fail("can't find pane: " + target)
+		if s == nil || p == nil {
+			return noPane(target)
 		}
 		if p.composer != nil {
 			return ok(p.composer.render())
@@ -491,11 +500,8 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 		return ok(p.content)
 	case "send-keys":
 		s, p := f.resolve(target)
-		if s == nil {
-			return missing(target)
-		}
-		if p == nil {
-			return fail("can't find pane: " + target)
+		if s == nil || p == nil {
+			return noPane(target)
 		}
 		rest := a[3:]
 		p.keys = append(p.keys, strings.Join(rest, " "))
@@ -520,18 +526,30 @@ func (f *fakeServer) answer(c tmuxCall) reply {
 	case "new-window":
 		s, _ := f.resolve(target)
 		if s == nil {
-			return missing(target)
+			return noWindow(target)
 		}
 		f.addWindowLocked(s, "")
-	case "set-option":
-		if c.has("-w", "-t") && c.has("window-size") {
-			if _, p := f.resolve(target); p != nil {
+	case "set-option", "set-hook", "show-options":
+		if target == "" {
+			if target = flagValue(a, "-wt"); target == "" {
+				return ok("") // global (-g) option
+			}
+		}
+		_, p := f.resolve(target)
+		if p == nil {
+			return noWindowOpt(target)
+		}
+		if c.has("window-size") {
+			if c.sub() == "show-options" {
+				return ok("window-size " + p.windowSize)
+			}
+			if c.sub() == "set-option" {
 				p.windowSize = c.last()
 			}
 		}
-	case "show-options":
-		if _, p := f.resolve(target); p != nil && c.has("window-size") {
-			return ok("window-size " + p.windowSize)
+	case "resize-window":
+		if _, p := f.resolve(target); p == nil {
+			return noWindow(target)
 		}
 	}
 	return ok("")

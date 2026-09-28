@@ -70,8 +70,9 @@ func TestWaitForIdle_BusyMarkerBeatsPrompt(t *testing.T) {
 		t.Fatalf("busy pane: err = %v, want ErrIdleTimeout", err)
 	}
 	f.with(func() { delete(f.sessions, "gt-x") })
-	if err := tm.WaitForIdle("gt-x", time.Second); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("gone session: err = %v, want ErrSessionNotFound", err)
+	// Real tmux answers capture-pane on a missing session "can't find pane".
+	if err := tm.WaitForIdle("gt-x", time.Second); !errors.Is(err, ErrPaneNotFound) {
+		t.Fatalf("gone session: err = %v, want ErrPaneNotFound", err)
 	}
 }
 

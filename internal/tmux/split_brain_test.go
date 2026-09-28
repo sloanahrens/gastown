@@ -20,7 +20,7 @@ func TestKillSplitBrainSessionUsesInjectedRunner(t *testing.T) {
 // the default socket is killed there.
 func TestKillSplitBrainSessionKillsStaleDefaultSession(t *testing.T) {
 	t.Parallel()
-	s := newScripted(bySub(map[string]reply{"display-message": fail("can't find session: gt-x")}))
+	s := newScripted(bySub(map[string]reply{"display-message": ok("")}))
 	unitTmux(s, nil).killSplitBrainSession("gt-x")
 
 	kills := s.find("kill-session")

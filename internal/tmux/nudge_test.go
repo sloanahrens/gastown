@@ -68,7 +68,7 @@ func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 // the first attempt without waiting out the timeout.
 func TestSendKeysLiteralWithRetry_NonTransientFails(t *testing.T) {
 	t.Parallel()
-	s := newScripted(bySub(map[string]reply{"send-keys": fail("can't find session: gt-x")}))
+	s := newScripted(bySub(map[string]reply{"send-keys": fail("can't find pane: gt-x")}))
 	tm := unitTmux(s, nil)
 	err := returnsWithoutClock(t, func() error { return tm.sendKeysLiteralWithRetry("gt-x", "hello", 5*time.Second) })
 	if err == nil {

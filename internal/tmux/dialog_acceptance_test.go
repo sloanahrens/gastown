@@ -399,8 +399,9 @@ func TestDismissBlockingQuestionDialog_SendsEscape(t *testing.T) {
 // when the session doesn't exist.
 func TestDismissBlockingQuestionDialog_InvalidSession(t *testing.T) {
 	t.Parallel()
-	s := newScripted(bySub(map[string]reply{"send-keys": fail("can't find session: gt-x")}))
-	if err := unitTmux(s, nil).DismissBlockingQuestionDialog("gt-x"); !errors.Is(err, ErrSessionNotFound) {
-		t.Errorf("err = %v, want ErrSessionNotFound", err)
+	// tmux 3.7c: send-keys to a missing session is "can't find pane".
+	s := newScripted(bySub(map[string]reply{"send-keys": fail("can't find pane: gt-x")}))
+	if err := unitTmux(s, nil).DismissBlockingQuestionDialog("gt-x"); !errors.Is(err, ErrPaneNotFound) {
+		t.Errorf("err = %v, want ErrPaneNotFound", err)
 	}
 }
