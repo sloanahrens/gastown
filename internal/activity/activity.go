@@ -35,6 +35,11 @@ type Info struct {
 //   - Red:     >10 minutes (stuck)
 //   - Unknown: zero time value
 func Calculate(lastActivity time.Time) Info {
+	return calculateAt(lastActivity, time.Now())
+}
+
+// calculateAt is Calculate measured from now instead of the wall clock.
+func calculateAt(lastActivity, now time.Time) Info {
 	info := Info{
 		LastActivity: lastActivity,
 	}
@@ -47,7 +52,7 @@ func Calculate(lastActivity time.Time) Info {
 	}
 
 	// Calculate duration since last activity
-	info.Duration = time.Since(lastActivity)
+	info.Duration = now.Sub(lastActivity)
 
 	// Handle future time (clock skew) - treat as just now
 	if info.Duration < 0 {

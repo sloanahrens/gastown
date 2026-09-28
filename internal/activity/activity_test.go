@@ -5,7 +5,22 @@ import (
 	"time"
 )
 
+// testEpoch is the fixed "now" the tests measure activity ages from.
+var testEpoch = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+// TestCalculateUsesWallClock checks the exported wrapper measures from
+// time.Now: a stamp a day old is red whatever the host's load.
+func TestCalculateUsesWallClock(t *testing.T) {
+	t.Parallel()
+	last := time.Now().Add(-24 * time.Hour)
+	info := Calculate(last)
+	if info.ColorClass != ColorRed || !info.LastActivity.Equal(last) || info.Duration < 24*time.Hour {
+		t.Errorf("Calculate(now-24h) = %+v, want red with duration >= 24h", info)
+	}
+}
+
 func TestCalculateActivity_Green(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		age      time.Duration
@@ -22,8 +37,7 @@ func TestCalculateActivity_Green(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lastActivity := time.Now().Add(-tt.age)
-			info := Calculate(lastActivity)
+			info := calculateAt(testEpoch.Add(-tt.age), testEpoch)
 
 			if info.FormattedAge != tt.wantAge {
 				t.Errorf("FormattedAge = %q, want %q", info.FormattedAge, tt.wantAge)
@@ -36,6 +50,7 @@ func TestCalculateActivity_Green(t *testing.T) {
 }
 
 func TestCalculateActivity_Yellow(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		age      time.Duration
@@ -50,8 +65,7 @@ func TestCalculateActivity_Yellow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lastActivity := time.Now().Add(-tt.age)
-			info := Calculate(lastActivity)
+			info := calculateAt(testEpoch.Add(-tt.age), testEpoch)
 
 			if info.FormattedAge != tt.wantAge {
 				t.Errorf("FormattedAge = %q, want %q", info.FormattedAge, tt.wantAge)
@@ -64,6 +78,7 @@ func TestCalculateActivity_Yellow(t *testing.T) {
 }
 
 func TestCalculateActivity_Red(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		age      time.Duration
@@ -80,8 +95,7 @@ func TestCalculateActivity_Red(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lastActivity := time.Now().Add(-tt.age)
-			info := Calculate(lastActivity)
+			info := calculateAt(testEpoch.Add(-tt.age), testEpoch)
 
 			if info.FormattedAge != tt.wantAge {
 				t.Errorf("FormattedAge = %q, want %q", info.FormattedAge, tt.wantAge)
@@ -94,6 +108,7 @@ func TestCalculateActivity_Red(t *testing.T) {
 }
 
 func TestCalculateActivity_ZeroTime(t *testing.T) {
+	t.Parallel()
 	// Zero time should return unknown state
 	info := Calculate(time.Time{})
 
@@ -106,16 +121,17 @@ func TestCalculateActivity_ZeroTime(t *testing.T) {
 }
 
 func TestCalculateActivity_FutureTime(t *testing.T) {
+	t.Parallel()
 	// Future time (clock skew) should be treated as "just now"
-	futureTime := time.Now().Add(5 * time.Second)
-	info := Calculate(futureTime)
+	info := calculateAt(testEpoch.Add(5*time.Second), testEpoch)
 
-	if info.ColorClass != ColorGreen {
-		t.Errorf("ColorClass = %q, want %q for future time", info.ColorClass, ColorGreen)
+	if info.ColorClass != ColorGreen || info.Duration != 0 || info.FormattedAge != "<1m" {
+		t.Errorf("info = %+v, want green, zero duration, <1m for future time", info)
 	}
 }
 
 func TestInfo_IsActive(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		color    string
 		isActive bool
@@ -137,6 +153,7 @@ func TestInfo_IsActive(t *testing.T) {
 }
 
 func TestInfo_IsStale(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		color   string
 		isStale bool
@@ -158,6 +175,7 @@ func TestInfo_IsStale(t *testing.T) {
 }
 
 func TestInfo_IsStuck(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		color   string
 		isStuck bool
