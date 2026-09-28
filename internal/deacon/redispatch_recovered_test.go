@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // The deacon's RECOVERED_BEAD handling is the one dispatcher that overrides a
@@ -16,9 +18,9 @@ import (
 // the deacon owes it is honoring whatever reason comes back.
 
 // stubDispatchTools puts a `bd` and a `gt` on PATH that log every invocation
-// to a file, so a test can see which dispatch the handler chose — a sling, an
-// escalation mail, a needs_human label, or none of the three — without a live
-// town. The returned function reads the log back as one line per invocation.
+// to a file, so a test can see which dispatch the handler chose — a sling, a
+// needs_human label, or neither — without a live town. Escalation mail goes
+// through the notifier each test passes (a notifyfake.Recorder), not gt. The returned function reads the log back as one line per invocation.
 func stubDispatchTools(t *testing.T) func() []string {
 	t.Helper()
 	return stubDispatchToolsSlinging(t, "", 0)
@@ -82,6 +84,28 @@ exit 0
 		}
 		return lines
 	}
+}
+
+// mailResembling returns the subject of the first mail rec sent to "to"
+// whose subject or body contains every fragment, or "".
+func mailResembling(rec *notifyfake.Recorder, to string, fragments ...string) string {
+	for _, m := range rec.Mails() {
+		if m.To != to {
+			continue
+		}
+		text := m.Subject + "\n" + m.Body
+		matched := true
+		for _, fragment := range fragments {
+			if !strings.Contains(text, fragment) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return m.Subject
+		}
+	}
+	return ""
 }
 
 // callResembling returns the first logged invocation containing every
@@ -175,7 +199,7 @@ func TestRedispatchRecoveredBead_HeldBeadIsSkipped(t *testing.T) {
 				Notes: editorialRejectionNotes(0.6, "abc123def456"),
 				Hold:  hold,
 			}
-			result := RedispatchRecoveredBead(rec, townRoot, "gt-held", "gastown", 0, 0)
+			result := RedispatchRecoveredBead(notifyfake.New(), rec, townRoot, "gt-held", "gastown", 0, 0)
 
 			if result.Action != "skipped" {
 				t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "skipped", result.Message)
@@ -222,7 +246,8 @@ func TestRedispatchRecoveredBead_EditorialRejectionRoutesThroughConvergence(t *t
 	}
 
 	rec := RecoveredBeadRecord{Notes: editorialRejectionNotes(0.6, "abc123def456")}
-	result := RedispatchRecoveredBead(rec, townRoot, "gt-editalpha", "gastown", 0, 0)
+	mail := notifyfake.New()
+	result := RedispatchRecoveredBead(mail, rec, townRoot, "gt-editalpha", "gastown", 0, 0)
 
 	if result.Action != "escalated" {
 		t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "escalated", result.Message)
@@ -236,8 +261,8 @@ func TestRedispatchRecoveredBead_EditorialRejectionRoutesThroughConvergence(t *t
 	if call := callInvoking(logged, "gt", "sling "); call != "" {
 		t.Errorf("a non-converging editorial resubmit was re-slung: %s", call)
 	}
-	if call := callResembling(logged, "mail send mayor/", "needs_human"); call == "" {
-		t.Errorf("no needs_human escalation to the mayor; calls: %v", logged)
+	if m := mailResembling(mail, "mayor/", "needs_human"); m == "" {
+		t.Errorf("no needs_human escalation to the mayor; mail: %+v", mail.Mails())
 	}
 	if call := callResembling(logged, "update gt-editalpha", "--add-label needs_human"); call == "" {
 		t.Errorf("the bead was not labeled needs_human; calls: %v", logged)
@@ -268,7 +293,7 @@ func TestRedispatchRecoveredBead_NonEditorialRejectionTakesPlainPath(t *testing.
 	rec := RecoveredBeadRecord{
 		Notes: "MERGE REJECTION (attempt 2): build - go build failed\nBranch: polecat/garnet/gt-thing\nTarget: main\nMR: gt-mr-abc",
 	}
-	result := RedispatchRecoveredBead(rec, townRoot, "gt-buildfail", "gastown", 0, 0)
+	result := RedispatchRecoveredBead(notifyfake.New(), rec, townRoot, "gt-buildfail", "gastown", 0, 0)
 
 	if result.Action != "redispatched" {
 		t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "redispatched", result.Message)
@@ -316,7 +341,7 @@ func TestRedispatchRecoveredBead_OperatorHoldRefusesSling(t *testing.T) {
 				t.Fatalf("SaveRedispatchState: %v", err)
 			}
 
-			result := RedispatchRecoveredBead(RecoveredBeadRecord{Notes: notes}, townRoot, "gt-onhold", "gastown", 0, 0)
+			result := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{Notes: notes}, townRoot, "gt-onhold", "gastown", 0, 0)
 
 			if result.Action != "deferred" {
 				t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "deferred", result.Message)
@@ -346,7 +371,7 @@ func TestRedispatchRecoveredBead_NoOperatorHoldStillSlings(t *testing.T) {
 	calls := stubDispatchTools(t)
 	townRoot := t.TempDir()
 
-	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-free", "gastown", 0, 0)
+	result := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{}, townRoot, "gt-free", "gastown", 0, 0)
 	if result.Action != "redispatched" {
 		t.Fatalf("Action = %q, want redispatched (message: %s)", result.Action, result.Message)
 	}
@@ -377,7 +402,7 @@ func TestRedispatch_PoolFullRefusalIsNotAnAttempt(t *testing.T) {
 		t.Fatalf("SaveRedispatchState: %v", err)
 	}
 
-	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-queued", "gastown", 3, 0)
+	result := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{}, townRoot, "gt-queued", "gastown", 3, 0)
 
 	if result.Action != "deferred" {
 		t.Fatalf("Action = %q, want %q (message: %s, err: %v)", result.Action, "deferred", result.Message, result.Error)
@@ -402,7 +427,7 @@ func TestRedispatch_PoolFullRefusalIsNotAnAttempt(t *testing.T) {
 	}
 
 	// The next RECOVERED_BEAD retries rather than escalating.
-	again := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-queued", "gastown", 3, 0)
+	again := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{}, townRoot, "gt-queued", "gastown", 3, 0)
 	if again.Action == "escalated" {
 		t.Errorf("a bead queued behind a full pool was escalated: %s", again.Message)
 	}
@@ -414,12 +439,13 @@ func TestRedispatch_PoolFullRefusalIsNotAnAttempt(t *testing.T) {
 // never reaches the --max-attempts check. The consecutive-deferral counter
 // must catch what the attempt counter structurally cannot.
 func TestRedispatch_PersistentPoolFullEscalatesAfterMaxDeferrals(t *testing.T) {
-	calls := stubDispatchToolsSlinging(t, poolFullStderr, 1)
+	stubDispatchToolsSlinging(t, poolFullStderr, 1)
 	townRoot := t.TempDir()
 
 	var last *RedispatchResult
+	mail := notifyfake.New()
 	for i := 0; i < DefaultMaxDeferrals; i++ {
-		last = RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-stuck", "gastown", 3, 0)
+		last = RedispatchRecoveredBead(mail, RecoveredBeadRecord{}, townRoot, "gt-stuck", "gastown", 3, 0)
 		if i < DefaultMaxDeferrals-1 && last.Action != "deferred" {
 			t.Fatalf("cycle %d: Action = %q, want %q (message: %s)", i+1, last.Action, "deferred", last.Message)
 		}
@@ -432,9 +458,8 @@ func TestRedispatch_PersistentPoolFullEscalatesAfterMaxDeferrals(t *testing.T) {
 		t.Errorf("Message = %q, want it to name the consecutive deferrals", last.Message)
 	}
 
-	logged := calls()
-	if call := callResembling(logged, "mail send mayor/", "consecutive deferrals"); call == "" {
-		t.Errorf("no consecutive-deferral escalation mail to the mayor; calls: %v", logged)
+	if m := mailResembling(mail, "mayor/", "consecutive deferrals"); m == "" {
+		t.Errorf("no consecutive-deferral escalation mail to the mayor; mail: %+v", mail.Mails())
 	}
 
 	after, err := LoadRedispatchState(townRoot)
@@ -450,7 +475,7 @@ func TestRedispatch_PersistentPoolFullEscalatesAfterMaxDeferrals(t *testing.T) {
 	}
 
 	// Further redispatch calls stop retrying rather than deferring forever.
-	again := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-stuck", "gastown", 3, 0)
+	again := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{}, townRoot, "gt-stuck", "gastown", 3, 0)
 	if again.Action != "already-escalated" {
 		t.Errorf("Action = %q, want %q once escalated", again.Action, "already-escalated")
 	}
@@ -470,7 +495,7 @@ func TestRedispatch_DeferralStreakResetsOnRealAttempt(t *testing.T) {
 
 	// A successful sling breaks the streak.
 	stubDispatchToolsSlinging(t, "", 0)
-	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-mixed", "gastown", 3, 0)
+	result := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{}, townRoot, "gt-mixed", "gastown", 3, 0)
 	if result.Action != "redispatched" {
 		t.Fatalf("Action = %q, want %q (message: %s)", result.Action, "redispatched", result.Message)
 	}
@@ -490,7 +515,7 @@ func TestRedispatch_GenuineSlingFailureStillCounts(t *testing.T) {
 	stubDispatchToolsSlinging(t, "Error: bead gt-broken: worktree add failed\n", 1)
 	townRoot := t.TempDir()
 
-	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-broken", "gastown", 3, 0)
+	result := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{}, townRoot, "gt-broken", "gastown", 3, 0)
 	if result.Action != "error" {
 		t.Fatalf("Action = %q, want error (message: %s)", result.Action, result.Message)
 	}
