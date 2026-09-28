@@ -8,19 +8,20 @@ import (
 )
 
 const (
-	RuleNoSleep      = "no-sleep"
-	RuleNoEnv        = "no-env"
-	RuleNoChdir      = "no-chdir"
-	RuleNoSkip       = "no-skip"
-	RuleNoSubprocess = "no-subprocess"
-	RuleNoNetwork    = "no-network"
-	RuleNoBuild      = "no-build"
-	RuleNoExecFiles  = "no-exec-files"
-	RuleNoGlobalSwap = "no-global-swap"
-	RuleParallel     = "parallel"
-	RuleAllowReason  = "allow-reason"
-	RuleProdSetenv   = "prod-no-setenv"
-	RuleProdSleep    = "prod-no-sleep"
+	RuleNoSleep        = "no-sleep"
+	RuleNoEnv          = "no-env"
+	RuleNoChdir        = "no-chdir"
+	RuleNoSkip         = "no-skip"
+	RuleNoSubprocess   = "no-subprocess"
+	RuleNoNetwork      = "no-network"
+	RuleFakeClockEpoch = "fake-clock-epoch"
+	RuleNoBuild        = "no-build"
+	RuleNoExecFiles    = "no-exec-files"
+	RuleNoGlobalSwap   = "no-global-swap"
+	RuleParallel       = "parallel"
+	RuleAllowReason    = "allow-reason"
+	RuleProdSetenv     = "prod-no-setenv"
+	RuleProdSleep      = "prod-no-sleep"
 )
 
 // bannedTestCalls maps "importpath.Func" to the rule it breaks in a unit test.
@@ -29,6 +30,9 @@ var bannedTestCalls = map[string]string{
 	"time.NewTimer": RuleNoSleep, "time.NewTicker": RuleNoSleep, "time.Tick": RuleNoSleep,
 	"os.Setenv": RuleNoEnv, "os.Unsetenv": RuleNoEnv,
 	"os.Chdir": RuleNoChdir,
+	// NewFakeClock starts at time.Now(), so a test's clock depends on when it
+	// runs; start fakes at a fixed epoch with NewFakeClockAt.
+	"github.com/jonboulle/clockwork.NewFakeClock": RuleFakeClockEpoch,
 	// Real sockets carry a wall-clock timeout and block in syscalls under
 	// load; a unit test scripts the connection through a seam instead.
 	"net.Dial": RuleNoNetwork, "net.DialTimeout": RuleNoNetwork, "net.DialUnix": RuleNoNetwork,
