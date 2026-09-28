@@ -8,14 +8,20 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 const (
-	newSessionSocketDialTimeout  = 200 * time.Millisecond
-	newSessionSocketProbeTimeout = time.Second
+	newSessionSocketDialTimeout = 200 * time.Millisecond
+	// newSessionSocketProbeTimeout bounds the list-sessions probe. It has to
+	// outlast a healthy server on a loaded host, where the tmux client's own
+	// exec is slow: at 1s a concurrent create at load 30 was refused as a
+	// hijacked socket (gt-h9z false positive, 2026-09-27). A listener that
+	// never answers is still refused, just after this long.
+	newSessionSocketProbeTimeout = 5 * time.Second
 )
 
 func (t *Tmux) ensureNewSessionSocketSafe() error {
@@ -23,8 +29,8 @@ func (t *Tmux) ensureNewSessionSocketSafe() error {
 		return nil
 	}
 
-	socketPath := filepath.Join(SocketDir(), t.socketName)
-	info, err := os.Lstat(socketPath)
+	socketPath := t.socketPath()
+	info, err := t.sockets().lstat(socketPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -43,19 +49,19 @@ func (t *Tmux) ensureNewSessionSocketSafe() error {
 }
 
 func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
-	if stale, err := unixSocketStale(socketPath); err != nil || stale {
+	if stale, err := t.socketStaleWithin(socketPath, newSessionSocketProbeTimeout); err != nil || stale {
 		if stale {
 			return nil
 		}
 		return fmt.Errorf("tmux socket %s exists but cannot be safely contacted: %w", socketPath, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), newSessionSocketProbeTimeout)
+	ctx, cancel := clockwork.WithTimeout(context.Background(), t.clk(), newSessionSocketProbeTimeout)
 	defer cancel()
 	if err := t.runListSessionsProbe(ctx); err == nil {
 		return nil
 	} else if errors.Is(err, ErrNoServer) {
-		stale, recheckErr := unixSocketStale(socketPath)
+		stale, recheckErr := t.socketStaleWithin(socketPath, newSessionSocketProbeTimeout)
 		if recheckErr == nil && stale {
 			return nil
 		}
@@ -86,68 +92,98 @@ const (
 // nothing is behind the file. That also covers a path that cannot be dialed at
 // all — a plain file sitting where a socket belongs, the shape gt-h9z guards
 // against — which is not this function's state to change.
-func unlinkDeadSocketFile(socketPath string) {
-	deadline := time.Now().Add(socketUnlinkWait)
+func unlinkDeadSocketFile(clk clockwork.Clock, ops socketOps, socketPath string) {
+	deadline := clk.Now().Add(socketUnlinkWait)
 	for {
-		stale, err := unixSocketStale(socketPath)
-		if err != nil {
+		stale, err := unixSocketStale(ops, socketPath)
+		if err != nil && !isDialTimeout(err) {
 			return
 		}
 		if stale {
-			_ = os.Remove(socketPath)
+			_ = ops.remove(socketPath)
 			return
 		}
-		if !time.Now().Before(deadline) {
+		if !clk.Now().Before(deadline) {
 			return
 		}
-		time.Sleep(socketUnlinkInterval)
+		clk.Sleep(socketUnlinkInterval)
 	}
 }
 
-func unixSocketStale(socketPath string) (bool, error) {
-	conn, err := net.DialTimeout("unix", socketPath, newSessionSocketDialTimeout)
-	if err != nil {
+// isDialTimeout reports whether a dial ran out of time. That says nothing about
+// the socket: under host load a dial to a dead socket can time out before the
+// kernel's refusal is read.
+func isDialTimeout(err error) bool {
+	var te interface{ Timeout() bool }
+	return errors.As(err, &te) && te.Timeout()
+}
+
+// socketStaleWithin is unixSocketStale, re-dialing a timed-out dial every
+// socketUnlinkInterval until budget has passed on the clock.
+func (t *Tmux) socketStaleWithin(socketPath string, budget time.Duration) (bool, error) {
+	clk := t.clk()
+	deadline := clk.Now().Add(budget)
+	for {
+		stale, err := unixSocketStale(t.sockets(), socketPath)
+		if err == nil || !isDialTimeout(err) || !clk.Now().Before(deadline) {
+			return stale, err
+		}
+		clk.Sleep(socketUnlinkInterval)
+	}
+}
+
+// unixSocketStale reports whether nothing listens on socketPath: a refused
+// connection, or no file, is the only proof.
+func unixSocketStale(ops socketOps, socketPath string) (bool, error) {
+	if err := ops.dial(socketPath); err != nil {
 		if os.IsNotExist(err) || errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
 			return true, nil
 		}
 		return false, err
 	}
-	_ = conn.Close()
 	return false, nil
 }
 
+func realSocketOps() socketOps {
+	return socketOps{
+		lstat:  os.Lstat,
+		remove: os.Remove,
+		dial: func(path string) error {
+			conn, err := net.DialTimeout("unix", path, newSessionSocketDialTimeout)
+			if err != nil {
+				return err
+			}
+			return conn.Close()
+		},
+	}
+}
+
+// runListSessionsProbe asks whatever listens on this Tmux's socket to answer
+// `tmux list-sessions` before a create lets tmux bind the path.
+//
+// It is the only tmux call in the package with a deadline, and the reason is
+// the case it exists for: gt-h9z is a path held by something that is not a
+// tmux server, which may accept the connection and never answer. Every other
+// call talks to a server this package started. The deadline
+// (newSessionSocketProbeTimeout) is sized for a healthy server on a loaded
+// host, not for an idle one.
+//
+// Output goes through the runner's pipes. realExec sets WaitDelay whenever
+// the context has a deadline, so a hung client is killed and its pipes
+// released within 100ms of the deadline. That made the temp files the probe
+// used to redirect to unnecessary, and the pipes are what let the probe go
+// through the exec seam like every other call.
 func (t *Tmux) runListSessionsProbe(ctx context.Context) error {
-	stdout, err := os.CreateTemp("", "gt-tmux-probe-stdout-*")
-	if err != nil {
-		return err
-	}
-	stdoutPath := stdout.Name()
-	defer func() { _ = os.Remove(stdoutPath) }()
-	defer func() { _ = stdout.Close() }()
-
-	stderr, err := os.CreateTemp("", "gt-tmux-probe-stderr-*")
-	if err != nil {
-		return err
-	}
-	stderrPath := stderr.Name()
-	defer func() { _ = os.Remove(stderrPath) }()
-	defer func() { _ = stderr.Close() }()
-
 	args := []string{"list-sessions", "-F", ""}
-	cmd := t.commandContext(ctx, args...)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.WaitDelay = 100 * time.Millisecond
-
-	if err := cmd.Run(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("tmux list-sessions timed out after %s: %w", newSessionSocketProbeTimeout, ctxErr)
+	_, stderr, err := t.runner()(ctx, "tmux", t.tmuxArgs(args)...)
+	if err != nil {
+		// Done, not Err: a clock-driven context's Err blocks until it is done.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("tmux list-sessions timed out after %s: %w", newSessionSocketProbeTimeout, ctx.Err())
+		default:
 		}
-		stderrBytes, readErr := os.ReadFile(stderrPath)
-		if readErr != nil {
-			return fmt.Errorf("tmux list-sessions: %w", err)
-		}
-		return t.wrapError(err, string(stderrBytes), args)
+		return t.wrapError(err, string(stderr), args)
 	}
 	return nil
 }

@@ -303,7 +303,7 @@ func (t *Tmux) DetectComposerStallTracked(session string, frozenFor time.Duratio
 		if err != nil {
 			return result, fmt.Errorf("reading activity for %q: %w", session, err)
 		}
-		result.Inactivity = time.Since(activity)
+		result.Inactivity = t.clk().Since(activity)
 		// If the session has been silent for the frozen window, the busy
 		// indicator is stale and the agent is stalled. Re-probe the pane to
 		// see if there's pending input that was hidden by the busy indicator.
@@ -338,7 +338,7 @@ func (t *Tmux) DetectComposerStallTracked(session string, frozenFor time.Duratio
 	// session id, so it can tell a run that has been genuinely unattended from
 	// one where the agent kept working — or the session died and a fresh one
 	// took its name (gt-afa7).
-	wait := clock.Observe(session, t.sessionID(session), PaneProgressSignature(content, promptPrefix), time.Now())
+	wait := clock.Observe(session, t.sessionID(session), PaneProgressSignature(content, promptPrefix), t.clk().Now())
 	result.PendingFor = wait.Waiting
 	result.PendingSamples = wait.Samples
 
@@ -346,7 +346,7 @@ func (t *Tmux) DetectComposerStallTracked(session string, frozenFor time.Duratio
 	if err != nil {
 		return result, fmt.Errorf("reading activity for %q: %w", session, err)
 	}
-	result.Inactivity = time.Since(activity)
+	result.Inactivity = t.clk().Since(activity)
 
 	frozen := frozenFor > 0 && result.Inactivity >= frozenFor
 	waiting := frozenFor > 0 && wait.Continuous && result.PendingFor >= frozenFor
@@ -534,8 +534,8 @@ func (c InputConsumption) String() string {
 }
 
 // inputConsumptionPollInterval is how often the probe re-reads the pane while
-// waiting for a reaction. It is a var so tests can shrink it.
-var inputConsumptionPollInterval = 250 * time.Millisecond
+// waiting for a reaction. Tests move it with a fake clock.
+const inputConsumptionPollInterval = 250 * time.Millisecond
 
 // consumptionVerdict folds a baseline pane capture and a later one into a
 // verdict. Pure, so the classification is testable against captured panes
@@ -624,9 +624,9 @@ func (t *Tmux) WaitForInputConsumed(session string, window time.Duration) (Input
 		return InputConsumptionUnknown, err
 	}
 
-	deadline := time.Now().Add(window)
+	deadline := t.clk().Now().Add(window)
 	for {
-		remaining := time.Until(deadline)
+		remaining := t.clk().Until(deadline)
 		if remaining <= 0 {
 			break
 		}
@@ -634,7 +634,7 @@ func (t *Tmux) WaitForInputConsumed(session string, window time.Duration) (Input
 		if remaining < sleep {
 			sleep = remaining
 		}
-		time.Sleep(sleep)
+		t.clk().Sleep(sleep)
 
 		current, err := t.captureForConsumption(session)
 		if err != nil {

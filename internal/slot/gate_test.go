@@ -24,7 +24,7 @@ func TestNewGate_Defaults(t *testing.T) {
 	}
 
 	rt := &fakeRuntime{}
-	clk := clockwork.NewFakeClock()
+	clk := clockwork.NewFakeClockAt(testNow)
 	g = NewGate(WithRuntime(rt), WithClock(clk), WithPollInterval(250*time.Millisecond))
 	if g.runtime != rt || g.clock != clk || g.pollInterval != 250*time.Millisecond {
 		t.Errorf("options not applied: runtime=%T clock=%T poll=%s", g.runtime, g.clock, g.pollInterval)

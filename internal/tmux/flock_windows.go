@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // windowsFlockMu serializes acquireFlockLock calls on Windows where flock(2) is unavailable.
@@ -17,20 +19,20 @@ var windowsFlockMu sync.Mutex
 // acquireFlockLock provides in-process locking on Windows (flock(2) is unavailable).
 // Since tmux is not supported on Windows, this is only reached in tests; it uses
 // a global mutex rather than per-path locking for simplicity.
-func acquireFlockLock(lockPath string, timeout time.Duration) (func(), error) {
+func acquireFlockLock(clk clockwork.Clock, lockPath string, timeout time.Duration) (func(), error) {
 	dir := filepath.Dir(lockPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("creating lock dir: %w", err)
 	}
 
-	deadline := time.Now().Add(timeout)
+	deadline := clk.Now().Add(timeout)
 	for {
 		if windowsFlockMu.TryLock() {
 			return func() { windowsFlockMu.Unlock() }, nil
 		}
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			return nil, fmt.Errorf("timeout after %s waiting for lock", timeout)
 		}
-		time.Sleep(100 * time.Millisecond)
+		clk.Sleep(100 * time.Millisecond)
 	}
 }

@@ -67,7 +67,6 @@ internal/telemetry
 internal/templates
 internal/templates/commands
 internal/testutil
-internal/tmux
 internal/townlog
 internal/tui/convoy
 internal/tui/feed

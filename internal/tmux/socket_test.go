@@ -1,78 +1,66 @@
 package tmux
 
 import (
+	"reflect"
 	"testing"
 )
 
-func TestSetGetDefaultSocket(t *testing.T) {
-	// Save and restore
-	orig := defaultSocket
-	defer func() { defaultSocket = orig }()
-
-	// Initially empty
-	SetDefaultSocket("")
-	if got := GetDefaultSocket(); got != "" {
-		t.Errorf("expected empty, got %q", got)
-	}
-
-	SetDefaultSocket("mytown")
-	if got := GetDefaultSocket(); got != "mytown" {
-		t.Errorf("expected %q, got %q", "mytown", got)
-	}
-}
-
-func TestNewTmuxInheritsSocket(t *testing.T) {
-	orig := defaultSocket
-	defer func() { defaultSocket = orig }()
-
-	SetDefaultSocket("testtown")
-	tmx := NewTmux()
-	if tmx.socketName != "testtown" {
-		t.Errorf("NewTmux() socketName = %q, want %q", tmx.socketName, "testtown")
-	}
-}
-
 func TestNewTmuxWithSocket(t *testing.T) {
+	t.Parallel()
 	tmx := NewTmuxWithSocket("custom")
 	if tmx.socketName != "custom" {
 		t.Errorf("NewTmuxWithSocket() socketName = %q, want %q", tmx.socketName, "custom")
 	}
 }
 
-func TestBuildCommandNoSocket(t *testing.T) {
-	orig := defaultSocket
-	defer func() { defaultSocket = orig }()
-
-	SetDefaultSocket("")
-	cmd := BuildCommand("list-sessions")
-	args := cmd.Args
-	// Should be: tmux -u list-sessions
-	expected := []string{"tmux", "-u", "list-sessions"}
-	if len(args) != len(expected) {
-		t.Fatalf("args = %v, want %v", args, expected)
-	}
-	for i, a := range args {
-		if a != expected[i] {
-			t.Errorf("args[%d] = %q, want %q", i, a, expected[i])
-		}
+func TestSocketArgsNoSocket(t *testing.T) {
+	t.Parallel()
+	got := socketArgs("", []string{"list-sessions"})
+	want := []string{"-u", "list-sessions"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("socketArgs = %v, want %v", got, want)
 	}
 }
 
-func TestBuildCommandWithSocket(t *testing.T) {
-	orig := defaultSocket
-	defer func() { defaultSocket = orig }()
-
-	SetDefaultSocket("mytown")
-	cmd := BuildCommand("has-session", "-t", "hq-mayor")
-	args := cmd.Args
-	// Should be: tmux -u -L mytown has-session -t hq-mayor
-	expected := []string{"tmux", "-u", "-L", "mytown", "has-session", "-t", "hq-mayor"}
-	if len(args) != len(expected) {
-		t.Fatalf("args = %v, want %v", args, expected)
+func TestSocketArgsWithSocket(t *testing.T) {
+	t.Parallel()
+	got := socketArgs("mytown", []string{"has-session", "-t", "hq-mayor"})
+	want := []string{"-u", "-L", "mytown", "has-session", "-t", "hq-mayor"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("socketArgs = %v, want %v", got, want)
 	}
-	for i, a := range args {
-		if a != expected[i] {
-			t.Errorf("args[%d] = %q, want %q", i, a, expected[i])
+}
+
+// TestBuildCommandUsesSocketArgs pins BuildCommand to the same argv the Tmux
+// methods send, for whatever default socket the process holds.
+func TestBuildCommandUsesSocketArgs(t *testing.T) {
+	t.Parallel()
+	cmd := BuildCommand("has-session", "-t", "hq-mayor")
+	want := append([]string{"tmux"}, socketArgs(GetDefaultSocket(), []string{"has-session", "-t", "hq-mayor"})...)
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("BuildCommand args = %v, want %v", cmd.Args, want)
+	}
+}
+
+// TestResolveNewTmuxSocket pins NewTmux's choice of socket without touching
+// the process-wide default: the initialized default wins, GT_TOWN_SOCKET is
+// the fallback, and a test binary is refused the town socket (gt-yav3).
+func TestResolveNewTmuxSocket(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, def, env string
+		refuse         bool
+		want           string
+		wantErr        bool
+	}{
+		{"default wins", "testtown", "live", true, "testtown", false},
+		{"nothing set", "", "", true, "", false},
+		{"town env fallback", "", "gt-town", false, "gt-town", false},
+		{"test binary refused", "", "gt-town", true, "", true},
+	} {
+		got, err := resolveNewTmuxSocket(tc.def, tc.env, tc.refuse)
+		if got != tc.want || (err != nil) != tc.wantErr {
+			t.Errorf("%s: = %q, %v; want %q, err=%v", tc.name, got, err, tc.want, tc.wantErr)
 		}
 	}
 }

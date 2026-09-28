@@ -1,3 +1,5 @@
+//go:build integration
+
 package tmux
 
 import (
@@ -10,9 +12,7 @@ var crossSocket = fmt.Sprintf("gt-test-cross-%d", os.Getpid())
 
 func newCrossTestSocket(t *testing.T) *Tmux {
 	t.Helper()
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
+	requireTmux(t)
 	tm := NewTmuxWithSocket(crossSocket)
 	t.Cleanup(func() {
 		_ = tm.KillServer()
@@ -20,7 +20,7 @@ func newCrossTestSocket(t *testing.T) *Tmux {
 	return tm
 }
 
-func TestCrossSocketIsolation(t *testing.T) {
+func TestIntegrationCrossSocketIsolation(t *testing.T) {
 	defaultTm := newTestTmux(t)
 	crossTm := newCrossTestSocket(t)
 
@@ -74,7 +74,7 @@ func TestCrossSocketIsolation(t *testing.T) {
 	}
 }
 
-func TestCrossSocketKill(t *testing.T) {
+func TestIntegrationCrossSocketKill(t *testing.T) {
 	defaultTm := newTestTmux(t)
 	crossTm := newCrossTestSocket(t)
 
@@ -103,7 +103,7 @@ func TestCrossSocketKill(t *testing.T) {
 	}
 }
 
-func TestSessionsOnMultipleSockets(t *testing.T) {
+func TestIntegrationSessionsOnMultipleSockets(t *testing.T) {
 	defaultTm := newTestTmux(t)
 	crossTm := newCrossTestSocket(t)
 

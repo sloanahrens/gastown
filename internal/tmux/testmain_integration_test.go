@@ -1,3 +1,5 @@
+//go:build integration
+
 package tmux
 
 import (
@@ -129,4 +131,49 @@ func paneCommandIsSupportedShell(tm *Tmux) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+func hasTmux() bool {
+	_, err := exec.LookPath("tmux")
+	return err == nil
+}
+
+// newTestTmux returns a Tmux instance connected to the package-level test
+// socket (set by TestMain above). All tests in this package
+// share one tmux server, which is torn down after all tests complete.
+//
+// This isolates tests from the user's interactive tmux and from other
+// packages' tests that run in parallel during `go test ./...`.
+func newTestTmux(t *testing.T) *Tmux {
+	t.Helper()
+	requireTmux(t)
+	return NewTmux()
+}
+
+// requireTmux fails the test when tmux is missing: the integration tier
+// exists to run against it, so its absence is a broken environment, not a
+// reason to pass.
+func requireTmux(t *testing.T) {
+	t.Helper()
+	if !hasTmux() {
+		t.Fatal("tmux not installed; the integration tier needs it")
+	}
+}
+
+// integrationWait bounds every condition poll in the integration tier. It is
+// far above anything a working system needs, so hitting it means the
+// condition is false, not that the host is slow.
+const integrationWait = 60 * time.Second
+
+// eventually polls cond every 50ms until it holds, and fails the test with
+// what if it has not held within integrationWait.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(integrationWait)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", integrationWait, what)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // acquireFlockLock acquires a file-based lock using flock(2) for cross-process
 // serialization. Returns an unlock function that must be called to release the lock.
 // Uses non-blocking flock in a polling loop to respect the timeout.
-func acquireFlockLock(lockPath string, timeout time.Duration) (func(), error) {
+func acquireFlockLock(clk clockwork.Clock, lockPath string, timeout time.Duration) (func(), error) {
 	dir := filepath.Dir(lockPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("creating lock dir: %w", err)
@@ -24,7 +26,7 @@ func acquireFlockLock(lockPath string, timeout time.Duration) (func(), error) {
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}
 
-	deadline := time.Now().Add(timeout)
+	deadline := clk.Now().Add(timeout)
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
@@ -33,10 +35,10 @@ func acquireFlockLock(lockPath string, timeout time.Duration) (func(), error) {
 				f.Close()
 			}, nil
 		}
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			f.Close()
 			return nil, fmt.Errorf("timeout after %s waiting for flock", timeout)
 		}
-		time.Sleep(100 * time.Millisecond)
+		clk.Sleep(100 * time.Millisecond)
 	}
 }

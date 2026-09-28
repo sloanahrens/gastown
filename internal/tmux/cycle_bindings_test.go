@@ -5,45 +5,38 @@ import (
 	"testing"
 )
 
+// stalePattern can never be current: sessionPrefixPattern always includes hq.
+// (A stale pattern of ^(gt|hq)- is current on a host without GT_ROOT, which
+// made the fixture depend on the environment.)
+const stalePattern = "^(gt)-"
+
+// staleCycleBindings is `tmux list-keys -T prefix` (trimmed to n and p) after
+// an older gt bound C-b n with a prefix pattern that predates a rig add.
+const staleCycleBindings = `bind-key    -T prefix n       if-shell "echo '#{session_name}' | grep -Eq '^(gt)-'" "run-shell 'gt cycle next --session #{session_name} --client #{client_tty}'" next-window
+bind-key    -T prefix p       if-shell "echo '#{session_name}' | grep -Eq '^(gt)-'" "run-shell 'gt cycle prev --session #{session_name} --client #{client_tty}'" previous-window`
+
 // TestIsGTBindingCurrent_DetectsStalePattern verifies that isGTBindingCurrent
 // returns false when the baked-in pattern doesn't match the current pattern.
 // This is the core of the gt rig add fix: after adding a rig, the prefix
 // pattern changes and existing bindings become stale.
 func TestIsGTBindingCurrent_DetectsStalePattern(t *testing.T) {
-	tm := newTestTmux(t)
+	t.Parallel()
+	s := newScripted(bySub(map[string]reply{"list-keys": ok(staleCycleBindings)}))
+	tm := unitTmux(s, nil)
 
-	session := "gt-test-stale-" + t.Name()
-	_ = tm.KillSession(session)
-	defer func() { _ = tm.KillSession(session) }()
-
-	if err := tm.NewSessionWithCommand(session, "", "sleep 30"); err != nil {
-		t.Fatalf("session creation: %v", err)
-	}
-
-	// Install a binding with an OLD pattern (missing a hypothetical "qu" prefix)
-	oldPattern := "^(gt|hq)-"
-	oldIfShell := "echo '#{session_name}' | grep -Eq '" + oldPattern + "'"
-	if _, err := tm.run("bind-key", "-T", "prefix", "n",
-		"if-shell", oldIfShell,
-		"run-shell 'gt cycle next --session #{session_name} --client #{client_tty}'",
-		"next-window"); err != nil {
-		t.Fatalf("installing old binding: %v", err)
-	}
-
-	// Verify the binding has --client (so isGTBindingWithClient returns true)
 	if !tm.isGTBindingWithClient("prefix", "n") {
 		t.Fatal("expected isGTBindingWithClient to return true for the installed binding")
 	}
-
-	// But the pattern is stale — a new pattern with "qu" should not match
-	newPattern := "^(gt|hq|qu)-"
-	if tm.isGTBindingCurrent("prefix", "n", newPattern) {
+	if tm.isGTBindingCurrent("prefix", "n", "^(gt|hq|qu)-") {
 		t.Error("expected isGTBindingCurrent to return false for stale pattern")
 	}
-
-	// The old pattern should still match
-	if !tm.isGTBindingCurrent("prefix", "n", oldPattern) {
+	if !tm.isGTBindingCurrent("prefix", "n", stalePattern) {
 		t.Error("expected isGTBindingCurrent to return true for matching pattern")
+	}
+	for _, c := range s.find("list-keys") {
+		if !c.has("-T", "prefix") {
+			t.Errorf("list-keys call %v does not select the prefix table", c)
+		}
 	}
 }
 
@@ -51,43 +44,40 @@ func TestIsGTBindingCurrent_DetectsStalePattern(t *testing.T) {
 // re-binds when the existing binding has a stale prefix pattern, even though
 // it already has --client support.
 func TestSetCycleBindings_RefreshesStalePattern(t *testing.T) {
-	tm := newTestTmux(t)
+	t.Parallel()
+	s := newScripted(bySub(map[string]reply{"list-keys": ok(staleCycleBindings)}))
+	tm := unitTmux(s, nil)
 
-	session := "gt-test-refresh-" + t.Name()
-	_ = tm.KillSession(session)
-	defer func() { _ = tm.KillSession(session) }()
-
-	if err := tm.NewSessionWithCommand(session, "", "sleep 30"); err != nil {
-		t.Fatalf("session creation: %v", err)
-	}
-
-	// Install a binding with a STALE pattern (only gt|hq, missing other prefixes)
-	stalePattern := "^(gt|hq)-"
-	staleIfShell := "echo '#{session_name}' | grep -Eq '" + stalePattern + "'"
-	if _, err := tm.run("bind-key", "-T", "prefix", "n",
-		"if-shell", staleIfShell,
-		"run-shell 'gt cycle next --session #{session_name} --client #{client_tty}'",
-		"next-window"); err != nil {
-		t.Fatalf("installing stale binding: %v", err)
-	}
-	if _, err := tm.run("bind-key", "-T", "prefix", "p",
-		"if-shell", staleIfShell,
-		"run-shell 'gt cycle prev --session #{session_name} --client #{client_tty}'",
-		"previous-window"); err != nil {
-		t.Fatalf("installing stale binding for p: %v", err)
-	}
-
-	// Call SetCycleBindings — it should detect the stale pattern and re-bind
-	if err := tm.SetCycleBindings(session); err != nil {
+	if err := tm.SetCycleBindings("gt-x"); err != nil {
 		t.Fatalf("SetCycleBindings: %v", err)
 	}
 
-	// Verify the binding was updated with the current pattern
-	currentPattern := sessionPrefixPattern()
-	// (tmux 3.7 no longer honors "list-keys -T <table> <key>", so use the
-	// same lookup helper production code uses.)
-	output := tm.lookupKeyBinding("prefix", "n")
-	if !strings.Contains(output, currentPattern) {
-		t.Errorf("expected binding to contain current pattern %q, got: %s", currentPattern, output)
+	binds := s.find("bind-key")
+	if len(binds) != 2 {
+		t.Fatalf("bind-key calls = %v, want n and p rebound", binds)
+	}
+	pattern := tm.sessionPrefixPattern()
+	for i, key := range []string{"n", "p"} {
+		c := binds[i]
+		if !c.has("-T", "prefix", key, "if-shell") {
+			t.Errorf("bind-key %d = %v, want prefix %s if-shell", i, c, key)
+		}
+		if !strings.Contains(strings.Join(c.args, " "), pattern) {
+			t.Errorf("bind-key %s = %v, want current pattern %q", key, c, pattern)
+		}
+	}
+}
+
+// TestSetCycleBindings_SkipsCurrentBinding is the other half: a binding that
+// already has --client and the current pattern is left alone.
+func TestSetCycleBindings_SkipsCurrentBinding(t *testing.T) {
+	t.Parallel()
+	current := strings.ReplaceAll(staleCycleBindings, stalePattern, "^(gt|hq)-")
+	s := newScripted(bySub(map[string]reply{"list-keys": ok(current)}))
+	if err := unitTmux(s, nil).SetCycleBindings("gt-x"); err != nil {
+		t.Fatalf("SetCycleBindings: %v", err)
+	}
+	if got := s.find("bind-key"); len(got) != 0 {
+		t.Fatalf("bind-key calls = %v, want none for a current binding", got)
 	}
 }

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // Fixtures below are pane captures. The busy and idle-clean ones were taken
@@ -245,82 +247,38 @@ func TestAnalyzeComposerStateNoBusy(t *testing.T) {
 	}
 }
 
-// fakeTmuxLogging installs a tmux shim on PATH that records its argv and
-// returns canned stdout keyed by the tmux subcommand. Returns the log path.
+// shimTmux returns a Tmux whose tmux calls are answered from responses, keyed
+// by subcommand or by "display-message:<format>" for a display-message with a
+// specific format (a keyed entry wins over the bare subcommand). Unlisted
+// subcommands answer empty. "@now" answers the clock's current Unix time,
+// which is what a session producing output right now reports for
+// #{window_activity}; "@fail" answers exit status 1.
 //
-// Each invocation is logged as one line of its arguments joined by "|", so a
-// caller can recover the exact argument vector — joining with a plain space
-// (as "$*" does) would make a single argument containing a space, such as the
-// broken "C-x C-s" form fixed by gt-rbfj, indistinguishable from two separate
-// arguments "C-x" and "C-s".
-//
-// Response value "@now" expands to the current Unix timestamp, which is what a
-// session producing output right now reports for #{window_activity}.
-func fakeTmuxLogging(t *testing.T, responses map[string]string) string {
+// The clock starts at testEpoch, the instant fixtures such as
+// agedPendingClock date their stamps from.
+func shimTmux(t *testing.T, responses map[string]string) (*Tmux, *scripted) {
 	t.Helper()
-
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux shim is POSIX-only; tmux itself does not run on Windows")
-	}
-
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "tmux.log")
-	scriptPath := filepath.Join(binDir, "tmux")
-
-	var b strings.Builder
-	b.WriteString("#!/bin/sh\n")
-	b.WriteString(`for a in "$@"; do printf '%s|' "$a"; done >> "` + logPath + `"` + "\n")
-	b.WriteString(`printf '\n' >> "` + logPath + `"` + "\n")
-	// The subcommand is the first argument naming a tmux command; -L and its
-	// socket value, other flags, and trailing args are all ignored.
-	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
-	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
-	b.WriteString("\tesac; done\n")
-	// display-message's last argument is its format string; make it part of the
-	// key so one shim can answer #{window_activity} and #{session_id} with
-	// different values. A key with no format still answers every display-message
-	// call, which is what the simpler tests rely on.
-	b.WriteString(`key=$sub` + "\n")
-	b.WriteString(`for a in "$@"; do case "$a" in '#'*) key="$sub:$a";; esac; done` + "\n")
-	writeShimCase(&b, responses, true)
-	writeShimCase(&b, responses, false)
-
-	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
-}
-
-// writeShimCase emits the case arms for one lookup pass. keyed selects the arms
-// whose key carries a format string (`display-message:#{session_id}`); the other
-// pass emits the bare-subcommand arms. Both passes are separate case statements,
-// so a keyed arm wins and an unkeyed response still answers any format.
-func writeShimCase(b *strings.Builder, responses map[string]string, keyed bool) {
-	if keyed {
-		b.WriteString(`case "$key" in` + "\n")
-	} else {
-		b.WriteString(`case "$sub" in` + "\n")
-	}
-	for key, out := range responses {
-		if strings.Contains(key, ":") != keyed {
-			continue
+	clk := newFixedClock()
+	s := newScripted(func(c tmuxCall) reply {
+		if c.name != "tmux" {
+			return ok("")
+		}
+		out, found := responses[c.sub()+":"+c.last()]
+		if !found {
+			out, found = responses[c.sub()]
+		}
+		if !found {
+			return ok("")
 		}
 		switch out {
 		case "@now":
-			b.WriteString("\t'" + key + "') date +%s; exit 0;;\n")
+			return ok(strconv.FormatInt(clk.Now().Unix(), 10))
 		case "@fail":
-			b.WriteString("\t'" + key + "') exit 1;;\n")
-		default:
-			b.WriteString("\t'" + key + "') printf '%s' '" + out + "'; exit 0;;\n")
+			return reply{err: exitError(1)}
 		}
-	}
-	if !keyed {
-		// The bare pass is the last one: anything it does not answer is a
-		// subcommand this test does not care about.
-		b.WriteString("\t*) exit 0;;\n")
-	}
-	b.WriteString("esac\n")
+		return ok(out)
+	})
+	return newTmuxForTest("gt-test-composer-stall", s.exec, clk), s
 }
 
 // SubmitPendingInput must send exactly the keystroke that matches the pending
@@ -332,6 +290,7 @@ func writeShimCase(b *strings.Builder, responses map[string]string, keyed bool) 
 // command line: a substring check cannot tell "C-x C-s" as one argument
 // apart from "C-x" and "C-s" as two.
 func TestSubmitPendingInputKeystrokes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		queued bool
@@ -342,34 +301,17 @@ func TestSubmitPendingInputKeystrokes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logPath := fakeTmuxLogging(t, nil)
-			tm := NewTmuxWithSocket("gt-test-composer-stall")
+			tm, sc := shimTmux(t, nil)
 
 			if err := tm.SubmitPendingInput("gt-refinery:0.0", tt.queued); err != nil {
 				t.Fatalf("SubmitPendingInput: %v", err)
 			}
 
-			logged, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatalf("read tmux log: %v", err)
+			sends := sc.find("send-keys")
+			if len(sends) == 0 {
+				t.Fatalf("no send-keys invocation: %v", sc.all())
 			}
-			lines := strings.Split(strings.TrimRight(string(logged), "\n"), "\n")
-			var args []string
-			for _, line := range lines {
-				fields := strings.Split(strings.TrimSuffix(line, "|"), "|")
-				for i, f := range fields {
-					if f == "send-keys" {
-						args = fields[i:]
-						break
-					}
-				}
-				if args != nil {
-					break
-				}
-			}
-			if args == nil {
-				t.Fatalf("no send-keys invocation logged: %q", logged)
-			}
+			args := sends[0].args
 
 			// The keys are whatever follows "-t <target>".
 			idx := -1
@@ -402,12 +344,12 @@ func TestSubmitPendingInputKeystrokes(t *testing.T) {
 // live at 2026-09-18 16:13. A genuinely busy pane has recent activity because
 // it's actively producing output.
 func TestDetectComposerStallBusyPaneIsNotStalled(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":    liveBusyPane,
 		"display-message": "@now", // A genuinely busy pane has recent activity
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStall("gt-refinery", 5*60*1e9)
 	if err != nil {
@@ -425,12 +367,12 @@ func TestDetectComposerStallBusyPaneIsNotStalled(t *testing.T) {
 // activity and pending input is the gt-ncon signature: the detector must
 // report a stall, not be blinded by the stale indicator.
 func TestDetectComposerStallStaleBusyIndicatorIsStalled(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":    pendingTypedPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
 		"display-message": "0", // Old activity: the busy indicator is stale
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStall("gt-refinery", 5*60*1e9)
 	if err != nil {
@@ -447,14 +389,14 @@ func TestDetectComposerStallStaleBusyIndicatorIsStalled(t *testing.T) {
 // A pending composer on a session that is still producing output is not a
 // stall: that is a nudge mid-turn, which the running turn will consume.
 func TestDetectComposerStallRecentActivityIsNotStalled(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane": pendingTypedPane,
 		// window_activity is a Unix timestamp; "now" means the session
 		// produced output this second.
 		"display-message": "@now",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStall("gt-refinery", 5*60*1e9)
 	if err != nil {
@@ -471,13 +413,13 @@ func TestDetectComposerStallRecentActivityIsNotStalled(t *testing.T) {
 // The gt-hkhu signature: unsubmitted input plus a session that has produced
 // nothing for the whole window. Both signals are required, so this is a stall.
 func TestDetectComposerStallPendingAndFrozenIsStalled(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane": pendingTypedPane,
 		// 2023-11-14 — far older than any threshold, i.e. no pane output since.
 		"display-message": "1700000000",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStall("gt-refinery", 5*60*1e9)
 	if err != nil {
@@ -495,12 +437,12 @@ func TestDetectComposerStallPendingAndFrozenIsStalled(t *testing.T) {
 // An empty composer on a frozen session is just an idle agent: no input is
 // waiting, so nothing is stranded.
 func TestDetectComposerStallEmptyComposerIsNotStalled(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":    liveIdleCleanPane,
 		"display-message": "1700000000",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStall("gt-refinery", 5*60*1e9)
 	if err != nil {
@@ -518,12 +460,12 @@ func TestDetectComposerStallEmptyComposerIsNotStalled(t *testing.T) {
 // gt-hkhu's second instance, and must report Queued so recovery uses
 // ctrl+x ctrl+s rather than Enter.
 func TestDetectComposerStallQueuedFooterIsStalledAndQueued(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":    queuedMessagesPane,
 		"display-message": "1700000000",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStall("gt-refinery", 5*60*1e9)
 	if err != nil {
@@ -557,7 +499,7 @@ func agedPendingClock(t *testing.T, session, pane string, age time.Duration) *Pe
 	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
-	now := time.Now()
+	now := testEpoch
 	data, err := json.Marshal(pendingStamp{
 		SessionID: testSessionID,
 		First:     now.Add(-age).Unix(),
@@ -582,7 +524,8 @@ func agedPendingClock(t *testing.T, session, pane string, age time.Duration) *Pe
 // verdict was "not stalled" for as long as the input sat there. Input that has
 // outlived the threshold is a stall regardless of whether the pane is animating.
 func TestDetectComposerStallPendingInputThatOutlivedTheClockIsStalled(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane": queuedMessagesPane,
 		// The pane produced output this second. This is what defeats the
 		// silence window: the TUI repaints, and every nudge typed into the
@@ -591,7 +534,6 @@ func TestDetectComposerStallPendingInputThatOutlivedTheClockIsStalled(t *testing
 		"display-message:#{session_id}": testSessionID,
 		"has-session":                   "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 	const frozenFor = 5 * time.Minute
 	clock := agedPendingClock(t, "gt-refinery", queuedMessagesPane, 6*time.Minute)
 
@@ -621,12 +563,12 @@ func TestDetectComposerStallPendingInputThatOutlivedTheClockIsStalled(t *testing
 // immediately would submit input that a working agent is about to consume, so
 // the age has to be earned across probes.
 func TestDetectComposerStallFirstPendingObservationOnlyStartsTheClock(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":    pendingTypedPane,
 		"display-message": "@now",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 	dir := t.TempDir()
 	clock := NewPendingInputClock(dir)
 	const frozenFor = 5 * time.Minute
@@ -652,12 +594,12 @@ func TestDetectComposerStallFirstPendingObservationOnlyStartsTheClock(t *testing
 // Once the input is gone the run is over: a later wait must not inherit the old
 // age and report a fresh nudge as a long stall.
 func TestDetectComposerStallClearsTheClockWhenInputIsConsumed(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":    liveIdleCleanPane, // the agent picked the input up
 		"display-message": "@now",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 	dir := t.TempDir()
 	clock := NewPendingInputClock(dir)
 	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
@@ -666,8 +608,8 @@ func TestDetectComposerStallClearsTheClockWhenInputIsConsumed(t *testing.T) {
 	// A run left over from before the agent drained its queue.
 	stamp, err := json.Marshal(pendingStamp{
 		SessionID: testSessionID,
-		First:     time.Now().Add(-time.Hour).Unix(),
-		Last:      time.Now().Add(-time.Hour + time.Minute).Unix(),
+		First:     testEpoch.Add(-time.Hour).Unix(),
+		Last:      testEpoch.Add(-time.Hour + time.Minute).Unix(),
 		Samples:   pendingInputMinSamples + 1,
 		Progress:  PaneProgressSignature(pendingTypedPane, DefaultReadyPromptPrefix),
 	})
@@ -695,13 +637,13 @@ func TestDetectComposerStallClearsTheClockWhenInputIsConsumed(t *testing.T) {
 // separate that from a stale indicator — acting on one would interrupt real
 // work, which is the gt-cyyg failure this detector exists alongside.
 func TestDetectComposerStallClockDoesNotOverrideBusyPane(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":                  liveBusyPane,
 		"display-message":               "@now", // genuinely working: still producing output
 		"display-message:#{session_id}": testSessionID,
 		"has-session":                   "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 	clock := agedPendingClock(t, "gt-refinery", liveBusyPane, 30*time.Minute)
 
 	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, clock)
@@ -722,17 +664,17 @@ func TestDetectComposerStallClockDoesNotOverrideBusyPane(t *testing.T) {
 // unchanged for the whole run, so an agent that did anything in the window
 // restarts the clock instead of tripping it.
 func TestDetectComposerStallClockRestartsWhenThePaneShowsProgress(t *testing.T) {
+	t.Parallel()
 	const footer = "  Press up to edit queued messages · ctrl+x ctrl+s to send now"
 	const before = "⏺ Waiting on the review."
 	after := before + "\n⏺ Reviewed MR gt-abc: 3 files changed."
 
-	fakeTmuxLogging(t, map[string]string{
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":                  idleAwaitPane(after, "❯ ", footer),
 		"display-message":               "@now",
 		"display-message:#{session_id}": testSessionID,
 		"has-session":                   "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	// The run was started over the pane as it stood before the agent worked.
 	clock := agedPendingClock(t, "gt-refinery", idleAwaitPane(before, "❯ ", footer), 30*time.Minute)
@@ -759,13 +701,13 @@ func TestDetectComposerStallClockRestartsWhenThePaneShowsProgress(t *testing.T) 
 // apart after submitting, so a caller really can accumulate samples that fast;
 // only a span across observations makes them evidence (gt-afa7).
 func TestDetectComposerStallBurstOfSamplesIsNotARun(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":                  queuedMessagesPane,
 		"display-message":               "@now",
 		"display-message:#{session_id}": testSessionID,
 		"has-session":                   "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 	const frozenFor = 5 * time.Minute
 
 	// An hour of apparent waiting and enough samples for the minimum — but the
@@ -776,7 +718,7 @@ func TestDetectComposerStallBurstOfSamplesIsNotARun(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, composerPendingSubdir), 0o755); err != nil {
 		t.Fatalf("mkdir state dir: %v", err)
 	}
-	first := time.Now().Add(-time.Hour)
+	first := testEpoch.Add(-time.Hour)
 	stamp, err := json.Marshal(pendingStamp{
 		SessionID: testSessionID,
 		First:     first.Unix(),
@@ -807,13 +749,13 @@ func TestDetectComposerStallBurstOfSamplesIsNotARun(t *testing.T) {
 // most common way a stall trips and, before this, the only branch whose evidence
 // carried no timing at all.
 func TestDetectComposerStallSilenceOnlyEvidenceCarriesItsDuration(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":                  pendingTypedPane,
 		"display-message":               "1700000000", // 2023-11-14: silent since
 		"display-message:#{session_id}": testSessionID,
 		"has-session":                   "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, nil)
 	if err != nil {
@@ -831,14 +773,14 @@ func TestDetectComposerStallSilenceOnlyEvidenceCarriesItsDuration(t *testing.T) 
 // zero-valued, nil-error verdict for an unclassifiable pane is how a stalled
 // session reads as a healthy one to every caller.
 func TestDetectComposerStallUnclassifiablePaneIsAnError(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		// No composer line anywhere in the capture, so nothing can be said
 		// about what the input box holds.
 		"capture-pane":    "⏺ Build finished.\n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
 		"display-message": "@now",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStallTracked("gt-refinery", 5*time.Minute, nil)
 	if !errors.Is(err, ErrComposerUnobservable) {
@@ -856,12 +798,12 @@ func TestDetectComposerStallUnclassifiablePaneIsAnError(t *testing.T) {
 // silence window is the only signal, and a repainting pane is not a stall. This
 // pins that DetectComposerStall did not silently gain a time source.
 func TestDetectComposerStallWithoutClockKeepsTheSilenceOnlyVerdict(t *testing.T) {
-	fakeTmuxLogging(t, map[string]string{
+	t.Parallel()
+	tm, _ := shimTmux(t, map[string]string{
 		"capture-pane":    queuedMessagesPane,
 		"display-message": "@now",
 		"has-session":     "",
 	})
-	tm := NewTmuxWithSocket("gt-test-composer-stall")
 
 	stall, err := tm.DetectComposerStall("gt-refinery", 5*time.Minute)
 	if err != nil {
@@ -1050,84 +992,64 @@ func TestInputConsumptionConsumed(t *testing.T) {
 	}
 }
 
-// fakeTmuxCaptures installs a tmux shim that returns captures[i] for the i-th
-// capture-pane call and repeats the last entry thereafter, so a test can drive
-// the probe through a sequence of pane states. It returns the call-count file
-// so a test can assert how many times the pane was read.
-func fakeTmuxCaptures(t *testing.T, captures []string) (logPath, countPath string) {
+// captureTmux returns a Tmux whose i-th capture-pane call answers
+// captures[i], repeating the last entry thereafter, so a test can drive the
+// probe through a sequence of pane states. The returned counter reports how
+// many times the pane was read.
+func captureTmux(t *testing.T, captures []string) (*Tmux, *clockwork.FakeClock, func() int) {
 	t.Helper()
-
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux shim is POSIX-only; tmux itself does not run on Windows")
-	}
 	if len(captures) == 0 {
-		t.Fatal("fakeTmuxCaptures needs at least one capture")
+		t.Fatal("captureTmux needs at least one capture")
 	}
-
-	binDir := t.TempDir()
-	logPath = filepath.Join(binDir, "tmux.log")
-	countPath = filepath.Join(binDir, "capture.count")
-
-	var b strings.Builder
-	b.WriteString("#!/bin/sh\n")
-	b.WriteString(`printf '%s\n' "$*" >> "` + logPath + `"` + "\n")
-	b.WriteString(`for a in "$@"; do case "$a" in` + "\n")
-	b.WriteString("\tcapture-pane|display-message|has-session|send-keys|show-environment) sub=$a; break;;\n")
-	b.WriteString("\tesac; done\n")
-	b.WriteString(`if [ "$sub" = "capture-pane" ]; then` + "\n")
-	b.WriteString(`  n=$(cat "` + countPath + `" 2>/dev/null || echo 0)` + "\n")
-	b.WriteString(`  echo $((n+1)) > "` + countPath + `"` + "\n")
-	b.WriteString("  case \"$n\" in\n")
-	for i, capture := range captures {
-		if i == len(captures)-1 {
-			break
+	var mu sync.Mutex
+	n := 0
+	s := newScripted(func(c tmuxCall) reply {
+		if c.name != "tmux" || c.sub() != "capture-pane" {
+			return ok("")
 		}
-		b.WriteString("\t" + strconv.Itoa(i) + ") printf '%s' '" + capture + "'; exit 0;;\n")
+		mu.Lock()
+		defer mu.Unlock()
+		i := n
+		n++
+		if i >= len(captures) {
+			i = len(captures) - 1
+		}
+		return ok(captures[i])
+	})
+	clk := newFixedClock()
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
 	}
-	b.WriteString("\t*) printf '%s' '" + captures[len(captures)-1] + "'; exit 0;;\n")
-	b.WriteString("  esac\n")
-	b.WriteString("fi\n")
-	b.WriteString("exit 0\n")
-
-	scriptPath := filepath.Join(binDir, "tmux")
-	if err := os.WriteFile(scriptPath, []byte(b.String()), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath, countPath
+	return newTmuxForTest("gt-test-consumption", s.exec, clk), clk, count
 }
 
-// withFastConsumptionPolling shrinks the probe's poll interval for the duration
-// of a test. It is package state, so callers must not run in parallel with it.
-func withFastConsumptionPolling(t *testing.T) {
+// waitConsumed runs WaitForInputConsumed, driving the fake clock one poll
+// interval at a time.
+func waitConsumed(t *testing.T, tm *Tmux, clk *clockwork.FakeClock, session string, window time.Duration) (InputConsumption, error) {
 	t.Helper()
-	original := inputConsumptionPollInterval
-	inputConsumptionPollInterval = 5 * time.Millisecond
-	t.Cleanup(func() { inputConsumptionPollInterval = original })
-}
-
-func captureCallCount(t *testing.T, countPath string) int {
-	t.Helper()
-	data, err := os.ReadFile(countPath)
-	if err != nil {
-		return 0
+	type result struct {
+		v   InputConsumption
+		err error
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		t.Fatalf("parsing capture count %q: %v", data, err)
-	}
-	return n
+	done := make(chan result, 1)
+	go func() {
+		v, err := tm.WaitForInputConsumed(session, window)
+		done <- result{v, err}
+	}()
+	r := driveClock(t, clk, inputConsumptionPollInterval, done)
+	return r.v, r.err
 }
 
 // The wedged session from gt-eigw: the pane never changes and the input stays
 // queued, so the probe must report NotConsumed rather than a successful
 // delivery.
 func TestWaitForInputConsumedDetectsWedgedSession(t *testing.T) {
-	withFastConsumptionPolling(t)
-	_, countPath := fakeTmuxCaptures(t, []string{queuedMessagesPane})
-	tm := NewTmuxWithSocket("gt-test-consumption")
+	t.Parallel()
+	tm, clk, captureCount := captureTmux(t, []string{queuedMessagesPane})
 
-	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	verdict, err := waitConsumed(t, tm, clk, "gt-refinery", 40*time.Millisecond)
 	if err != nil {
 		t.Fatalf("WaitForInputConsumed: %v", err)
 	}
@@ -1136,7 +1058,7 @@ func TestWaitForInputConsumedDetectsWedgedSession(t *testing.T) {
 	}
 	// One baseline read plus at least one observation: the verdict has to be
 	// reached by watching, not by reading once.
-	if got := captureCallCount(t, countPath); got < 2 {
+	if got := captureCount(); got < 2 {
 		t.Errorf("capture-pane called %d time(s), want the pane to be observed over the window", got)
 	}
 }
@@ -1145,20 +1067,19 @@ func TestWaitForInputConsumedDetectsWedgedSession(t *testing.T) {
 // probe must return as soon as it sees the reaction rather than waiting out the
 // window.
 func TestWaitForInputConsumedReturnsOnTurnStart(t *testing.T) {
-	withFastConsumptionPolling(t)
+	t.Parallel()
 	// Impossible to satisfy honestly in wall-clock terms with a long window:
 	// the probe can only succeed early.
-	_, countPath := fakeTmuxCaptures(t, []string{queuedMessagesPane, liveBusyPane})
-	tm := NewTmuxWithSocket("gt-test-consumption")
+	tm, clk, captureCount := captureTmux(t, []string{queuedMessagesPane, liveBusyPane})
 
-	verdict, err := tm.WaitForInputConsumed("gt-refinery", 10*time.Second)
+	verdict, err := waitConsumed(t, tm, clk, "gt-refinery", 10*time.Second)
 	if err != nil {
 		t.Fatalf("WaitForInputConsumed: %v", err)
 	}
 	if verdict != InputConsumptionStartedTurn {
 		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionStartedTurn)
 	}
-	if got := captureCallCount(t, countPath); got > 3 {
+	if got := captureCount(); got > 3 {
 		t.Errorf("capture-pane called %d times before returning, want an early return", got)
 	}
 }
@@ -1167,25 +1088,24 @@ func TestWaitForInputConsumedReturnsOnTurnStart(t *testing.T) {
 // slow to start is not a wedged one. Here the pane is frozen and pending for
 // the first observations and only repaints later.
 func TestWaitForInputConsumedWaitsBeforeJudging(t *testing.T) {
-	withFastConsumptionPolling(t)
+	t.Parallel()
 	repainted := "⏺ Resuming the patrol.\n\n" + liveIdleCleanPane
-	_, countPath := fakeTmuxCaptures(t, []string{
+	tm, clk, captureCount := captureTmux(t, []string{
 		queuedMessagesPane,
 		queuedMessagesPane,
 		queuedMessagesPane,
 		queuedMessagesPane,
 		repainted,
 	})
-	tm := NewTmuxWithSocket("gt-test-consumption")
 
-	verdict, err := tm.WaitForInputConsumed("gt-refinery", 2*time.Second)
+	verdict, err := waitConsumed(t, tm, clk, "gt-refinery", 2*time.Second)
 	if err != nil {
 		t.Fatalf("WaitForInputConsumed: %v", err)
 	}
 	if verdict != InputConsumptionPaneChanged {
 		t.Fatalf("verdict = %s, want %s", verdict, InputConsumptionPaneChanged)
 	}
-	if got := captureCallCount(t, countPath); got < 5 {
+	if got := captureCount(); got < 5 {
 		t.Errorf("capture-pane called %d times, want the probe to keep watching past a slow start", got)
 	}
 }
@@ -1193,11 +1113,10 @@ func TestWaitForInputConsumedWaitsBeforeJudging(t *testing.T) {
 // An idle target whose composer is clean is inconclusive, never a strand. This
 // is the regression guard for the rejection of attempt 1 (gt-eigw).
 func TestWaitForInputConsumedIdleTargetIsInconclusive(t *testing.T) {
-	withFastConsumptionPolling(t)
-	fakeTmuxCaptures(t, []string{liveIdleCleanPane})
-	tm := NewTmuxWithSocket("gt-test-consumption")
+	t.Parallel()
+	tm, clk, _ := captureTmux(t, []string{liveIdleCleanPane})
 
-	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	verdict, err := waitConsumed(t, tm, clk, "gt-refinery", 40*time.Millisecond)
 	if err != nil {
 		t.Fatalf("WaitForInputConsumed: %v", err)
 	}
@@ -1213,7 +1132,7 @@ func TestWaitForInputConsumedIdleTargetIsInconclusive(t *testing.T) {
 // healthy: nothing sits above the input box to date the session by, so the
 // probe must return Undated and must not claim a strand (gt-7xnv).
 func TestWaitForInputConsumedUndatedPendingPaneIsUndated(t *testing.T) {
-	withFastConsumptionPolling(t)
+	t.Parallel()
 	const undated = "────────────────────────────────────────\n" +
 		"❯ MERGE_RECEIVED - check inbox for pending work\n" +
 		"────────────────────────────────────────\n" +
@@ -1226,10 +1145,9 @@ func TestWaitForInputConsumedUndatedPendingPaneIsUndated(t *testing.T) {
 	if sig := PaneProgressSignature(undated, DefaultReadyPromptPrefix); sig != "" {
 		t.Fatalf("fixture has content above the input box (sig %q), want undated", sig)
 	}
-	fakeTmuxCaptures(t, []string{undated})
-	tm := NewTmuxWithSocket("gt-test-consumption")
+	tm, clk, _ := captureTmux(t, []string{undated})
 
-	verdict, err := tm.WaitForInputConsumed("gt-refinery", 40*time.Millisecond)
+	verdict, err := waitConsumed(t, tm, clk, "gt-refinery", 40*time.Millisecond)
 	if err != nil {
 		t.Fatalf("WaitForInputConsumed: %v", err)
 	}
@@ -1239,8 +1157,9 @@ func TestWaitForInputConsumedUndatedPendingPaneIsUndated(t *testing.T) {
 }
 
 func TestWaitForInputConsumedRejectsEmptySession(t *testing.T) {
-	tm := NewTmuxWithSocket("gt-test-consumption")
-	verdict, err := tm.WaitForInputConsumed("  ", time.Second)
+	t.Parallel()
+	s := newScripted(nil)
+	verdict, err := unitTmux(s, nil).WaitForInputConsumed("  ", time.Second)
 	if err == nil {
 		t.Fatal("expected an error for an empty session name")
 	}

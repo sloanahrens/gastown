@@ -8,18 +8,20 @@ import (
 )
 
 const (
-	RuleNoSleep      = "no-sleep"
-	RuleNoEnv        = "no-env"
-	RuleNoChdir      = "no-chdir"
-	RuleNoSkip       = "no-skip"
-	RuleNoSubprocess = "no-subprocess"
-	RuleNoBuild      = "no-build"
-	RuleNoExecFiles  = "no-exec-files"
-	RuleNoGlobalSwap = "no-global-swap"
-	RuleParallel     = "parallel"
-	RuleAllowReason  = "allow-reason"
-	RuleProdSetenv   = "prod-no-setenv"
-	RuleProdSleep    = "prod-no-sleep"
+	RuleNoSleep        = "no-sleep"
+	RuleNoEnv          = "no-env"
+	RuleNoChdir        = "no-chdir"
+	RuleNoSkip         = "no-skip"
+	RuleNoSubprocess   = "no-subprocess"
+	RuleNoNetwork      = "no-network"
+	RuleFakeClockEpoch = "fake-clock-epoch"
+	RuleNoBuild        = "no-build"
+	RuleNoExecFiles    = "no-exec-files"
+	RuleNoGlobalSwap   = "no-global-swap"
+	RuleParallel       = "parallel"
+	RuleAllowReason    = "allow-reason"
+	RuleProdSetenv     = "prod-no-setenv"
+	RuleProdSleep      = "prod-no-sleep"
 )
 
 // bannedTestCalls maps "importpath.Func" to the rule it breaks in a unit test.
@@ -28,6 +30,19 @@ var bannedTestCalls = map[string]string{
 	"time.NewTimer": RuleNoSleep, "time.NewTicker": RuleNoSleep, "time.Tick": RuleNoSleep,
 	"os.Setenv": RuleNoEnv, "os.Unsetenv": RuleNoEnv,
 	"os.Chdir": RuleNoChdir,
+	// NewFakeClock starts at time.Now(), so a test's clock depends on when it
+	// runs; start fakes at a fixed epoch with NewFakeClockAt.
+	"github.com/jonboulle/clockwork.NewFakeClock": RuleFakeClockEpoch,
+	// Real sockets carry a wall-clock timeout and block in syscalls under
+	// load; a unit test scripts the connection through a seam instead.
+	"net.Dial": RuleNoNetwork, "net.DialTimeout": RuleNoNetwork, "net.DialUnix": RuleNoNetwork,
+	"net.DialTCP": RuleNoNetwork, "net.DialUDP": RuleNoNetwork,
+	"net.Listen": RuleNoNetwork, "net.ListenUnix": RuleNoNetwork, "net.ListenTCP": RuleNoNetwork,
+	"net.ListenUDP": RuleNoNetwork, "net.ListenPacket": RuleNoNetwork, "net.ListenUnixgram": RuleNoNetwork,
+	"net.DialIP": RuleNoNetwork, "net.ListenIP": RuleNoNetwork, "net.ListenMulticastUDP": RuleNoNetwork,
+	"net.FileConn": RuleNoNetwork, "net.FileListener": RuleNoNetwork, "net.FilePacketConn": RuleNoNetwork,
+	"net/http/httptest.NewServer": RuleNoNetwork, "net/http/httptest.NewUnstartedServer": RuleNoNetwork,
+	"net/http/httptest.NewTLSServer": RuleNoNetwork,
 }
 
 // bannedTestMethods maps a method name called on a *testing.T/B/F or
@@ -47,6 +62,16 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 		switch n := n.(type) {
 		case *ast.CallExpr:
 			checkTestCall(n, imp, add)
+		case *ast.CompositeLit:
+			// A net.Dialer or net.ListenConfig is only built to dial or listen,
+			// whether as a literal, a zero-value var, or new(...).
+			if name := netDialerType(n.Type, imp); name != "" {
+				add(n, RuleNoNetwork, "builds a net."+name+"; script the connection through a seam")
+			}
+		case *ast.ValueSpec:
+			if name := netDialerType(n.Type, imp); name != "" && len(n.Values) == 0 {
+				add(n, RuleNoNetwork, "declares a net."+name+"; script the connection through a seam")
+			}
 		case *ast.BasicLit:
 			if n.Kind == token.STRING {
 				if s, err := strconv.Unquote(n.Value); err == nil && strings.HasPrefix(s, "#!") {
@@ -89,6 +114,12 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 }
 
 func checkTestCall(c *ast.CallExpr, imp map[string]string, add func(ast.Node, string, string)) {
+	if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "new" && id.Obj == nil && len(c.Args) == 1 {
+		if name := netDialerType(c.Args[0], imp); name != "" {
+			add(c, RuleNoNetwork, "builds a net."+name+"; script the connection through a seam")
+		}
+		return
+	}
 	sel, ok := c.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return
@@ -253,4 +284,22 @@ func execMode(e ast.Expr) bool {
 	}
 	v, err := strconv.ParseInt(bl.Value, 0, 64)
 	return err == nil && v&0o111 != 0
+}
+
+// netDialerType returns "Dialer" or "ListenConfig" when e names that net
+// type, and "" otherwise. Syntax only: a Dialer reached through an alias or
+// a struct field is not seen.
+func netDialerType(e ast.Expr, imp map[string]string) string {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	x, ok := sel.X.(*ast.Ident)
+	if !ok || x.Obj != nil || imp[x.Name] != "net" {
+		return ""
+	}
+	if sel.Sel.Name == "Dialer" || sel.Sel.Name == "ListenConfig" {
+		return sel.Sel.Name
+	}
+	return ""
 }
