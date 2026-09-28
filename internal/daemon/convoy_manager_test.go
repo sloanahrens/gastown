@@ -2245,7 +2245,9 @@ func TestScan_ContextCancelled_MidIteration(t *testing.T) {
 
 	slingLogPath := filepath.Join(binDir, "sling.log")
 
-	// Mock gt: stranded returns list; sling sleeps 10s (simulates slow dispatch)
+	// Mock gt: stranded returns list; sling records itself, then blocks for
+	// longer than the test waits. Only the scan's cancellation ends it sooner,
+	// so a scan that did not kill its in-flight sling would fail the wait below.
 	gtScript := `#!/bin/sh
 if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
   echo '` + strings.ReplaceAll(string(jsonBytes), "'", "'\\''") + `'
@@ -2253,7 +2255,7 @@ if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
 fi
 if [ "$1" = "sling" ]; then
   echo "$@" >> "` + slingLogPath + `"
-  sleep 10
+  sleep 120
   exit 0
 fi
 exit 0
@@ -2279,19 +2281,29 @@ exit 0
 		close(done)
 	}()
 
-	// Give scan time to start processing, then cancel
-	time.Sleep(200 * time.Millisecond)
+	// Cancel once the first sling is in flight: the scan is then mid-iteration
+	// by construction, with four convoys still to go. Waiting for that event,
+	// rather than sleeping a guessed 200ms and then allowing the whole cancel
+	// path 5s of wall time, is what keeps a loaded host (every exec here is a
+	// fresh script the OS scans) from failing a scan that cancelled correctly
+	// (gt-hvzy.10). The deadlines below only bound a hang.
+	waitForFileContent(t, slingLogPath, time.Minute)
 	m.cancel()
 
-	// scan() must exit cleanly within a bounded time (not hang on all 5 convoys)
 	select {
 	case <-done:
-		// Clean exit -- success
-	case <-time.After(5 * time.Second):
-		t.Fatal("scan() did not exit within 5s after context cancellation")
+	case <-time.After(time.Minute):
+		t.Fatal("scan() did not return after context cancellation: the in-flight sling was not killed")
 	}
 
-	// Verify it did NOT process all 5 convoys (cancellation stopped iteration)
+	slings, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if n := strings.Count(string(slings), "\n"); n != 1 {
+		t.Errorf("sling ran %d times, want 1: cancellation must stop the iteration at the convoy in flight\n%s", n, slings)
+	}
+
 	logMu.Lock()
 	defer logMu.Unlock()
 	feedCount := 0
@@ -2300,8 +2312,24 @@ exit 0
 			feedCount++
 		}
 	}
-	if feedCount >= 5 {
-		t.Errorf("expected cancellation to stop iteration before all 5 convoys, but all were fed")
+	if feedCount != 1 {
+		t.Errorf("fed %d convoys, want 1 (the one in flight at cancellation): %q", feedCount, logged)
+	}
+}
+
+// waitForFileContent polls path until it is non-empty, failing t after
+// deadline. The deadline only bounds a hang; the wait ends at the event.
+func waitForFileContent(t *testing.T, path string, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for {
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("%s still empty after %s", path, deadline)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
