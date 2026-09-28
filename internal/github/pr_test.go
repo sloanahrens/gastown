@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -360,4 +361,21 @@ func TestConvertDraftToReady_GraphQLError(t *testing.T) {
 	c := newTestClient(t, mux)
 	err := c.ConvertDraftToReady(context.Background(), "octo", "repo", 42)
 	assert.ErrorContains(t, err, "Pull request is not a draft")
+}
+
+// TestNewClient_ReadsProcessEnv pins that the exported constructor takes its
+// token from the process's GITHUB_TOKEN, exactly as newClient does with os.Getenv.
+func TestNewClient_ReadsProcessEnv(t *testing.T) {
+	t.Parallel()
+	got, gotErr := NewClient()
+	want, wantErr := newClient(os.Getenv)
+	if (gotErr == nil) != (wantErr == nil) {
+		t.Fatalf("NewClient() err = %v, newClient(os.Getenv) err = %v", gotErr, wantErr)
+	}
+	if gotErr != nil {
+		assert.ErrorContains(t, gotErr, "GITHUB_TOKEN is required")
+		return
+	}
+	assert.Equal(t, os.Getenv("GITHUB_TOKEN"), got.token)
+	assert.Equal(t, want.token, got.token)
 }
