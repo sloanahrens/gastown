@@ -20,7 +20,8 @@ import (
 // stubDispatchTools puts a `bd` and a `gt` on PATH that log every invocation
 // to a file, so a test can see which dispatch the handler chose — a sling, a
 // needs_human label, or neither — without a live town. Escalation mail goes
-// through the notifier each test passes (a notifyfake.Recorder), not gt. The returned function reads the log back as one line per invocation.
+// through the notifier each test passes (a notifyfake.Recorder), not gt. The
+// returned function reads the log back as one line per invocation.
 func stubDispatchTools(t *testing.T) func() []string {
 	t.Helper()
 	return stubDispatchToolsSlinging(t, "", 0)

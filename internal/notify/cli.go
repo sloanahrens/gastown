@@ -116,7 +116,8 @@ func (c *CLI) Escalate(ctx context.Context, e Escalation) error {
 	return c.exec(ctx, e.Reason, args...)
 }
 
-// ClearEscalations runs `gt escalate clear` once for every key.
+// ClearEscalations runs one `gt escalate clear` that names every non-blank key
+// with its own --fingerprint flag.
 func (c *CLI) ClearEscalations(ctx context.Context, reason string, fingerprints ...string) error {
 	if err := ValidateClear(fingerprints); err != nil {
 		return err
