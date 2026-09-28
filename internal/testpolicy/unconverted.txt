@@ -57,7 +57,6 @@ internal/session
 internal/shell
 internal/state
 internal/style
-internal/suggest
 internal/telemetry
 internal/templates
 internal/templates/commands

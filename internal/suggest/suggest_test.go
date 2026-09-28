@@ -6,6 +6,7 @@ import (
 )
 
 func TestFindSimilar(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		target     string
@@ -56,8 +57,7 @@ func TestFindSimilar(t *testing.T) {
 
 			if tt.wantFirst == "" {
 				if len(results) > 0 {
-					// Allow some results for partial matches, just check they're reasonable
-					return
+					t.Errorf("FindSimilar(%q) = %v, want no results", tt.target, results)
 				}
 				return
 			}
@@ -75,6 +75,7 @@ func TestFindSimilar(t *testing.T) {
 }
 
 func TestLevenshteinDistance(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		a, b string
 		want int
@@ -100,6 +101,7 @@ func TestLevenshteinDistance(t *testing.T) {
 }
 
 func TestFormatSuggestion(t *testing.T) {
+	t.Parallel()
 	msg := FormatSuggestion("Polecat", "Tosat", []string{"Toast", "Ghost"}, "Create with: gt polecat add Tosat")
 
 	if !strings.Contains(msg, "Polecat") {
