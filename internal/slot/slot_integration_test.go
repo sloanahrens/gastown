@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,9 +24,6 @@ func realGate() *Gate {
 // answer that licenses deleting a pid's containers — against a real child that
 // has exited and been reaped.
 func TestIntegrationProcessGone_ReapedChild(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("processGone has no certain probe on windows and always answers false by design (owner_process_windows.go)")
-	}
 	cmd := exec.Command("true")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("cannot run true: %v", err)

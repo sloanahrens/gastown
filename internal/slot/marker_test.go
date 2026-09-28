@@ -1,6 +1,7 @@
 package slot
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -317,7 +318,14 @@ func TestMarker_AcquireRidesOutTransientFlockContention(t *testing.T) {
 	unlock()
 	tg.clk.Advance(markerAcquireRetryInterval)
 
-	got := <-done
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var got markerResult
+	select {
+	case got = <-done:
+	case <-ctx.Done():
+		t.Fatal("AcquireMarker never returned after the probe let go")
+	}
 	if got.err != nil {
 		t.Fatalf("AcquireMarker should ride out a transient probe hold: %v", got.err)
 	}

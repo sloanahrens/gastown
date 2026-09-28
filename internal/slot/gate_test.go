@@ -57,3 +57,18 @@ func TestReport_Busy(t *testing.T) {
 		}
 	}
 }
+
+// TestParseVMInfo: the doctor's Docker VM capacity comes from this parse of
+// `docker info --format "{{.NCPU}} {{.MemTotal}}"`.
+func TestParseVMInfo(t *testing.T) {
+	t.Parallel()
+	got, err := parseVMInfo("12 8485076992\n")
+	if err != nil || got != (VMInfo{NCPU: 12, MemBytes: 8485076992}) {
+		t.Fatalf("parseVMInfo = %+v, %v; want 12 vCPU / 8485076992 bytes", got, err)
+	}
+	for _, bad := range []string{"", "12", "12 8485076992 extra", "twelve 8485076992", "12 lots"} {
+		if _, err := parseVMInfo(bad); err == nil {
+			t.Errorf("parseVMInfo(%q) succeeded, want an error", bad)
+		}
+	}
+}

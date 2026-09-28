@@ -96,9 +96,14 @@ func (dockerCLI) Info() (VMInfo, error) {
 	if err != nil {
 		return VMInfo{}, err
 	}
-	fields := strings.Fields(strings.TrimSpace(string(out)))
+	return parseVMInfo(string(out))
+}
+
+// parseVMInfo parses `docker info --format "{{.NCPU}} {{.MemTotal}}"` output.
+func parseVMInfo(out string) (VMInfo, error) {
+	fields := strings.Fields(strings.TrimSpace(out))
 	if len(fields) != 2 {
-		return VMInfo{}, fmt.Errorf("unexpected docker info output: %q", string(out))
+		return VMInfo{}, fmt.Errorf("unexpected docker info output: %q", out)
 	}
 	ncpu, err := strconv.Atoi(fields[0])
 	if err != nil {
@@ -159,6 +164,10 @@ func (r funcRuntime) Info() (VMInfo, error) { return r.base.Info() }
 // func the caller must invoke (typically via t.Cleanup) — the override is
 // process-wide state shared by every test in the binary.
 //
+// Each call replaces the whole default runtime and its restore puts back the
+// runtime it replaced, so overrides nest: restore them in reverse order (LIFO,
+// as t.Cleanup does), or an earlier restore resurrects a later override.
+//
 // Deprecated: inject a runtime with NewGate(WithRuntime(...)) instead. Kept
 // until the packages above convert to the unit-test rules.
 func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
@@ -170,7 +179,8 @@ func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
 // SetContainerRemoverForTest overrides the removal the package-level
 // functions use, for tests in other packages that drive Reap and must not
 // delete a real container. Returns a restore func the caller must invoke
-// (typically via t.Cleanup).
+// (typically via t.Cleanup). Like SetContainerListerForTest, it replaces the
+// whole default runtime, so restores must run in reverse order (LIFO).
 //
 // Deprecated: inject a runtime with NewGate(WithRuntime(...)) instead. Kept
 // until internal/doctor converts to the unit-test rules.
