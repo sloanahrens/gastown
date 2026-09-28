@@ -423,7 +423,7 @@ func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	openIssue, err := b.Create(beads.CreateOptions{
@@ -543,7 +543,7 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	// Create a source issue
@@ -594,7 +594,7 @@ func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -649,7 +649,7 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	// Simulate the real-world orphan scenario from gt-2usm: the polecat
@@ -723,7 +723,7 @@ func TestManager_RejectMRRecording_NoRecoverStillRecords(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -777,7 +777,7 @@ func TestManager_RejectMRRecording_OneBlockWhenRecoveryAlsoWrites(t *testing.T) 
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -839,7 +839,7 @@ func TestManager_RejectMR_SupersededSourceBead_NotReopened(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -885,7 +885,7 @@ func TestManager_RejectMR_NoRecoverSkipsRecovery(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -938,7 +938,7 @@ func TestManager_RejectMR_SourceIssueStatusIsReadBack(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -1002,7 +1002,7 @@ func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -1049,7 +1049,7 @@ func TestManager_PostMerge_ClosesWorkBeadFromAgentFallbackBeforeActiveMRClear(t 
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -1104,7 +1104,7 @@ func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -1153,7 +1153,7 @@ func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
@@ -1196,7 +1196,7 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	// Create and close an MR bead

@@ -14,7 +14,7 @@ import (
 // unavailable (GT_TEST_DOCKER=0 or no Docker).
 func TestDoltGCFullAgainstRealServer(t *testing.T) {
 	d := testDoltRemotesDaemon(t)
-	dbName := createTestDB(t, d)
+	dbName := createTestDB(t)
 
 	conn, err := d.openDoltDB(dbName)
 	if err != nil {

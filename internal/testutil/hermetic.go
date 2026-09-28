@@ -34,6 +34,7 @@ package testutil
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -173,8 +174,9 @@ type HermeticOption func(*hermeticConfig)
 // WithDolt starts a shared ephemeral Dolt container for the package
 // (EnsureDoltContainerForTestMain) and routes GT_DOLT_PORT/BEADS_DOLT_PORT to
 // it. Without this option those variables stay poisoned and Dolt-touching
-// code fails fast. When Docker is unavailable the harness warns and
-// continues; Dolt-dependent tests then skip or fail on the poisoned port.
+// code fails fast. Without the GT_TEST_DOCKER=1 opt-in the harness warns and
+// continues, and Dolt-dependent tests skip; with it, a container that will
+// not start fails StartHermetic.
 func WithDolt() HermeticOption {
 	return func(c *hermeticConfig) { c.dolt = true }
 }
@@ -314,9 +316,16 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	}
 	if h.cfg.dolt {
 		// Replaces the poisoned port vars with the container's mapped port.
-		if err := EnsureDoltContainerForTestMain(); err != nil {
+		if err := ensureDoltContainerForTestMain(); err != nil {
+			if DockerTestsEnabled() {
+				// Opted in: the run wants the container coverage, so a
+				// missing container fails the package rather than letting
+				// its container tests skip.
+				_ = os.RemoveAll(sandbox)
+				return nil, fmt.Errorf("%s=1 opted in to the container-backed tests, but the Dolt container is unavailable: %w", DockerTestsEnv, err)
+			}
 			fmt.Fprintf(os.Stderr,
-				"hermetic harness: Dolt container unavailable (%v); Dolt-dependent tests will skip or fail fast\n", err)
+				"hermetic harness: Dolt container unavailable (%v); Dolt-dependent tests will skip\n", err)
 		}
 	}
 
@@ -356,18 +365,31 @@ func isolateTmuxSocket() string {
 	return socket
 }
 
+// ensureDoltContainerForTestMain is EnsureDoltContainerForTestMain, indirected
+// so a test can force its failure without Docker.
+var ensureDoltContainerForTestMain = EnsureDoltContainerForTestMain
+
 // terminateDoltContainer is TerminateDoltContainer, indirected so a test can
 // force the cleanup-failure branch below without starting a real container.
 var terminateDoltContainer = TerminateDoltContainer
 
 // Finish tears down the sandbox and runs the tripwire against the live town
 // snapshot. It returns the exit code for os.Exit: the m.Run() code, forced to
-// 1 when the tripwire detects that tests leaked state into the live town, or
-// when the shared Dolt container fails to terminate.
+// 1 when the tripwire detects that tests leaked state into the live town, when
+// the shared Dolt container's catalog guard finds a database created or dropped
+// while tests ran (ErrDoltCatalogChanged), or when the container fails to
+// terminate.
 func (h *Hermetic) Finish(code int) int {
 	// No-op when no container was started; also covers containers started
 	// lazily by tests via RequireDoltContainer.
-	if err := terminateDoltContainer(); err != nil {
+	if err := terminateDoltContainer(); errors.Is(err, ErrDoltCatalogChanged) {
+		fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
+		fmt.Fprintf(os.Stderr, "DOLT CATALOG GUARD: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("=", 72))
+		if code == 0 {
+			code = 1
+		}
+	} else if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
 		fmt.Fprintf(os.Stderr, "HERMETIC TRIPWIRE: shared Dolt container failed to terminate: %v\n", err)
 		fmt.Fprintf(os.Stderr, "A container that fails to terminate keeps running and holding\n")

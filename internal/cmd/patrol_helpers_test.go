@@ -990,7 +990,7 @@ func setupPatrolTestDB(t *testing.T) (string, *beads.Beads) {
 	}
 	prefix := "pt" + hex.EncodeToString(buf[:])
 	if err := b.Init(prefix); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	// No cleanup: Init took a database from the container's pre-created

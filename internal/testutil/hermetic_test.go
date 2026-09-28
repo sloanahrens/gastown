@@ -654,6 +654,27 @@ func TestStartHermetic_WithDoltWithoutOptIn(t *testing.T) {
 	}
 }
 
+// TestStartHermetic_WithDoltOptedInFailsWithoutContainer: once GT_TEST_DOCKER=1
+// opts in, a container that will not start fails the package's TestMain
+// instead of letting every container test skip on the empty port — an opt-in
+// run that loses its coverage must not read as green.
+func TestStartHermetic_WithDoltOptedInFailsWithoutContainer(t *testing.T) {
+	withSavedEnv(t)
+	_ = os.Setenv(DockerTestsEnv, "1")
+	orig := ensureDoltContainerForTestMain
+	ensureDoltContainerForTestMain = func() error { return errors.New("simulated: Docker not available") }
+	t.Cleanup(func() { ensureDoltContainerForTestMain = orig })
+
+	h, err := StartHermetic(WithDolt())
+	if err == nil {
+		h.Finish(0)
+		t.Fatal("StartHermetic(WithDolt) with the opt-in set and no container succeeded; want an error")
+	}
+	if !strings.Contains(err.Error(), "simulated: Docker not available") || !strings.Contains(err.Error(), DockerTestsEnv) {
+		t.Errorf("StartHermetic error = %q, want it to carry the cause and name %s", err, DockerTestsEnv)
+	}
+}
+
 // TestFinish_DoltTerminationFailureFailsLoud pins the fix for gt-p98h/gt-n5g6:
 // a Dolt container that fails to terminate must fail the run, not vanish
 // silently and keep holding memory on the shared Docker VM until it's
@@ -686,5 +707,39 @@ func TestFinish_DoltTerminationFailureFailsLoud(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "HERMETIC TRIPWIRE: shared Dolt container failed to terminate") {
 		t.Errorf("Finish stderr = %q, want it to name the termination tripwire", buf.String())
+	}
+}
+
+// A catalog-guard failure at teardown fails the run under its own banner,
+// which names the database, rather than the termination tripwire's.
+func TestFinish_DoltCatalogGuardFailsLoud(t *testing.T) {
+	orig := terminateDoltContainer
+	terminateDoltContainer = func() error {
+		return catalogViolations([]string{"gt_test", "information_schema", "mysql", "beads"}, nil, nil)
+	}
+	t.Cleanup(func() { terminateDoltContainer = orig })
+
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = stderrW
+	h := &Hermetic{}
+	code := h.Finish(0)
+	os.Stderr = origStderr
+	stderrW.Close()
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(stderrR); err != nil {
+		t.Fatalf("reading captured stderr: %v", err)
+	}
+
+	if code != 1 {
+		t.Errorf("Finish(0) with a catalog-guard error = %d, want 1", code)
+	}
+	for _, want := range []string{"DOLT CATALOG GUARD", `database "beads" was created`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("Finish stderr = %q, want it to contain %q", buf.String(), want)
+		}
 	}
 }

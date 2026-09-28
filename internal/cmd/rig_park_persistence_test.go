@@ -42,7 +42,7 @@ func setupRigBeadsDB(t *testing.T, rigPath, prefix string) *beads.Beads {
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init(prefix); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	// No cleanup: Init took a database from the container's pre-created

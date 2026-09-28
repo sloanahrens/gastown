@@ -8,10 +8,10 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// TestUnrelatedInitErrorFailsTheTest pins the fail-closed half of the skip
-// decision (gt-cbtl): only a lost connection to the test Dolt container may
-// skip a container-backed suite. A genuine bd, Dolt or Beads.Init regression
-// has to redden the test instead of silencing it.
+// TestUnrelatedInitErrorFailsTheTest pins the classification FailContainerInit
+// reports (gt-cbtl): only a lost connection to the test Dolt container reads as
+// "container gone"; a genuine bd, Dolt or Beads.Init regression reads as bd's
+// answer. Both fail the test.
 func TestUnrelatedInitErrorFailsTheTest(t *testing.T) {
 	container := beads.NewIsolatedWithPort(t.TempDir(), 55107)
 	production := beads.New(t.TempDir())
