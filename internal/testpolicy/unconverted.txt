@@ -29,7 +29,6 @@ internal/feed
 internal/formula
 internal/git
 internal/github
-internal/guard
 internal/guardlint
 internal/hooks
 internal/krc

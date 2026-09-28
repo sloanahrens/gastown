@@ -6,6 +6,7 @@ import (
 )
 
 func TestZeroValueIsUnknown(t *testing.T) {
+	t.Parallel()
 	var r Result
 	if !r.IsUnknown() {
 		t.Fatalf("zero Result = %v, want Unknown", r)
@@ -20,6 +21,7 @@ func TestZeroValueIsUnknown(t *testing.T) {
 // directly) and Err() (which returned nil) must not panic or silently lose
 // the fact that this is an unset, not a passing, result.
 func TestZeroValueErrAndStringDoNotPanic(t *testing.T) {
+	t.Parallel()
 	var r Result
 
 	if err := r.Err(); err == nil {
@@ -33,6 +35,7 @@ func TestZeroValueErrAndStringDoNotPanic(t *testing.T) {
 }
 
 func TestPass(t *testing.T) {
+	t.Parallel()
 	r := Pass()
 	if !r.IsPass() {
 		t.Fatalf("Pass() = %v, want IsPass", r)
@@ -46,6 +49,7 @@ func TestPass(t *testing.T) {
 }
 
 func TestFail(t *testing.T) {
+	t.Parallel()
 	r := Fail("bead not found")
 	if !r.IsFail() {
 		t.Fatalf("Fail() = %v, want IsFail", r)
@@ -59,6 +63,7 @@ func TestFail(t *testing.T) {
 }
 
 func TestUnknown(t *testing.T) {
+	t.Parallel()
 	underlying := errors.New("connection refused")
 	r := Unknown(underlying)
 	if !r.IsUnknown() {
@@ -77,6 +82,7 @@ func TestUnknown(t *testing.T) {
 // method under test here — the test is that IsPass and IsUnknown never both
 // report true for the same Result, across every constructor.
 func TestUnknownNeverPass(t *testing.T) {
+	t.Parallel()
 	results := []Result{
 		{},
 		Pass(),
@@ -91,6 +97,7 @@ func TestUnknownNeverPass(t *testing.T) {
 }
 
 func TestFailPanicsOnEmptyReason(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("Fail(\"\") did not panic")
@@ -100,6 +107,7 @@ func TestFailPanicsOnEmptyReason(t *testing.T) {
 }
 
 func TestFailErrPanicsOnNil(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("FailErr(nil) did not panic")
@@ -109,6 +117,7 @@ func TestFailErrPanicsOnNil(t *testing.T) {
 }
 
 func TestUnknownPanicsOnNil(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("Unknown(nil) did not panic")
@@ -118,6 +127,7 @@ func TestUnknownPanicsOnNil(t *testing.T) {
 }
 
 func TestSwitchCallsMatchingBranch(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		r    Result
@@ -143,6 +153,7 @@ func TestSwitchCallsMatchingBranch(t *testing.T) {
 }
 
 func TestString(t *testing.T) {
+	t.Parallel()
 	if got := Pass().String(); got != "pass" {
 		t.Fatalf("Pass().String() = %q, want %q", got, "pass")
 	}
