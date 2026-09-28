@@ -47,7 +47,6 @@ internal/rig
 internal/runtime
 internal/scheduler/capacity
 internal/session
-internal/style
 internal/telemetry
 internal/templates
 internal/testutil

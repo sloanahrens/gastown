@@ -2,12 +2,14 @@ package style
 
 import (
 	"bytes"
-	"io"
-	"os"
+	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestStyleVariables(t *testing.T) {
+	t.Parallel()
 	// Test that all style variables render non-empty output
 	tests := []struct {
 		name   string
@@ -24,18 +26,18 @@ func TestStyleVariables(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.render == nil {
-				t.Errorf("Style variable %s should not be nil", tt.name)
+				t.Fatalf("Style variable %s should not be nil", tt.name)
 			}
-			// Test that Render works
-			result := tt.render("test")
-			if result == "" {
-				t.Errorf("Style %s.Render() should not return empty string", tt.name)
+			result := tt.render("test message")
+			if !strings.Contains(stripAnsi(result), "test message") {
+				t.Errorf("Style %s.Render() = %q, want it to contain the text", tt.name, result)
 			}
 		})
 	}
 }
 
 func TestPrefixVariables(t *testing.T) {
+	t.Parallel()
 	// Test that all prefix variables are non-empty
 	tests := []struct {
 		name   string
@@ -57,135 +59,88 @@ func TestPrefixVariables(t *testing.T) {
 }
 
 func TestPrintWarning(t *testing.T) {
-	// Capture stderr (PrintWarning writes to stderr, not stdout)
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	PrintWarning("test warning: %s", "value")
-
-	w.Close()
-	os.Stderr = oldStderr
-
-	// Read captured output
+	t.Parallel()
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	output := buf.String()
-
-	if output == "" {
-		t.Error("PrintWarning() should produce output on stderr")
-	}
-
-	// Check that warning message is present
-	if !bytes.Contains(buf.Bytes(), []byte("test warning: value")) {
-		t.Error("PrintWarning() output should contain the warning message")
+	fprintWarning(&buf, "test warning: %s", "value")
+	out := stripAnsi(buf.String())
+	if !strings.Contains(out, "Warning:") || !strings.HasSuffix(out, " test warning: value\n") {
+		t.Errorf("fprintWarning output = %q, want a Warning: label and the formatted message on one line", out)
 	}
 }
 
 func TestPrintWarning_NoFormatArgs(t *testing.T) {
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	PrintWarning("simple warning")
-
-	w.Close()
-	os.Stderr = oldStderr
-
+	t.Parallel()
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	output := buf.String()
-
-	if output == "" {
-		t.Error("PrintWarning() should produce output on stderr")
-	}
-
-	if !bytes.Contains(buf.Bytes(), []byte("simple warning")) {
-		t.Error("PrintWarning() output should contain the message")
-	}
-}
-
-func TestPrintWarning_DoesNotWriteStdout(t *testing.T) {
-	// Verify PrintWarning does NOT write to stdout (prevents JSON contamination)
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-
-	stdoutR, stdoutW, _ := os.Pipe()
-	stderrR, stderrW, _ := os.Pipe()
-	os.Stdout = stdoutW
-	os.Stderr = stderrW
-
-	PrintWarning("should go to stderr only")
-
-	stdoutW.Close()
-	stderrW.Close()
-	os.Stdout = oldStdout
-	os.Stderr = oldStderr
-
-	var stdoutBuf, stderrBuf bytes.Buffer
-	io.Copy(&stdoutBuf, stdoutR)
-	io.Copy(&stderrBuf, stderrR)
-
-	if stdoutBuf.Len() > 0 {
-		t.Errorf("PrintWarning() must not write to stdout (got %q), it contaminates JSON output", stdoutBuf.String())
-	}
-	if stderrBuf.Len() == 0 {
-		t.Error("PrintWarning() should write to stderr")
-	}
-}
-
-func TestStyles_RenderConsistently(t *testing.T) {
-	// Test that styles consistently render non-empty output
-	testText := "test message"
-
-	styles := map[string]func(...string) string{
-		"Success": Success.Render,
-		"Warning": Warning.Render,
-		"Error":   Error.Render,
-		"Info":    Info.Render,
-		"Dim":     Dim.Render,
-		"Bold":    Bold.Render,
-	}
-
-	for name, renderFunc := range styles {
-		t.Run(name, func(t *testing.T) {
-			result := renderFunc(testText)
-			if result == "" {
-				t.Errorf("Style %s.Render() should not return empty string", name)
-			}
-			// Result should be different from input (has styling codes)
-			// except possibly for some edge cases
-		})
+	fprintWarning(&buf, "simple warning")
+	if !strings.HasSuffix(stripAnsi(buf.String()), " simple warning\n") {
+		t.Errorf("fprintWarning output = %q, want it to end with the message", buf.String())
 	}
 }
 
 func TestMultiplePrintWarning(t *testing.T) {
-	// Test that multiple warnings can be printed to stderr
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	for i := 0; i < 3; i++ {
-		PrintWarning("warning %d", i)
-	}
-
-	w.Close()
-	os.Stderr = oldStderr
-
+	t.Parallel()
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
-	_ = buf.String() // ensure buffer is read
+	for i := 0; i < 3; i++ {
+		fprintWarning(&buf, "warning %d", i)
+	}
+	if n := strings.Count(buf.String(), "\n"); n != 3 {
+		t.Errorf("Expected 3 lines of output, got %d: %q", n, buf.String())
+	}
+}
 
-	// Should have 3 lines
-	lineCount := 0
-	for _, b := range buf.Bytes() {
-		if b == '\n' {
-			lineCount++
+func TestStripAnsi(t *testing.T) {
+	t.Parallel()
+	if got := stripAnsi("\x1b[1;32mok\x1b[0m plain"); got != "ok plain" {
+		t.Errorf("stripAnsi = %q, want %q", got, "ok plain")
+	}
+}
+
+func TestTableRender(t *testing.T) {
+	t.Parallel()
+	tbl := NewTable(
+		Column{Name: "ID", Width: 4},
+		Column{Name: "N", Width: 3, Align: AlignRight},
+		Column{Name: "C", Width: 5, Align: AlignCenter},
+	).SetIndent("> ")
+	tbl.AddRow("a", "1", "x").AddRow("toolong", "22") // short row is padded
+
+	lines := strings.Split(strings.TrimSuffix(stripAnsi(tbl.Render()), "\n"), "\n")
+	want := []string{
+		"> ID     N   C  ",
+		"> " + strings.Repeat("─", 4+1+3+1+5),
+		"> a      1   x  ",
+		"> t...  22      ",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("Render() lines = %q, want %q", lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, lines[i], want[i])
 		}
 	}
+}
 
-	if lineCount != 3 {
-		t.Errorf("Expected 3 lines of output, got %d", lineCount)
+func TestTableRenderNoSeparatorAndColumnStyle(t *testing.T) {
+	t.Parallel()
+	st := lipgloss.NewStyle().SetString("") // Value() == "": style not applied
+	tbl := NewTable(Column{Name: "A", Width: 2, Style: st}).SetHeaderSeparator(false)
+	tbl.AddRow("x")
+	if got := stripAnsi(tbl.Render()); got != "  A \n  x \n" {
+		t.Errorf("Render() = %q, want header and row with no separator", got)
+	}
+
+	styled := NewTable(Column{Name: "A", Width: 6, Style: lipgloss.NewStyle().SetString("pre")})
+	styled.AddRow("x")
+	if got := stripAnsi(styled.Render()); !strings.Contains(got, "pre x") {
+		t.Errorf("Render() with a column style = %q, want the style applied to the cell", got)
+	}
+}
+
+func TestTableRenderNoColumns(t *testing.T) {
+	t.Parallel()
+	if got := NewTable().Render(); got != "" {
+		t.Errorf("Render() with no columns = %q, want empty", got)
 	}
 }
 
