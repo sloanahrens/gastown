@@ -793,15 +793,8 @@ func closePluginMails(dogName string) {
 
 // closeDogFormulaWisps finds and force-closes every formula wisp
 // (molecule-type ephemeral bead with attached_formula metadata) currently
-// hooked to the dog's hook bead. Returns the count of beads closed.
-//
-// Reads go through the read-only routing env and writes through the mutation
-// routing env (beads.EnvForSubprocessMode) rather than beads.New, whose run()
-// resolves env via buildRunEnv/BuildPinnedBDEnv — which never sets
-// BD_DOLT_AUTO_COMMIT=off, so every read here would open a connection
-// attempting a no-op auto-commit (gh#3596). The predicate and the wisp walk
-// themselves are shared with the daemon's dispatch path in internal/beads so
-// the two cleanup routes cannot drift (gt-da2x).
+// hooked to the dog's hook bead. Returns the count of beads closed. It is a
+// no-op outside a Gas Town beads workspace.
 func closeDogFormulaWisps(dogName string) (int, error) {
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
@@ -812,26 +805,72 @@ func closeDogFormulaWisps(dogName string) (int, error) {
 		return 0, nil // not in a beads workspace, skip
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return closeDogFormulaWispsWith(ctx, bdDogWispOps(townRoot, workDir), dogName)
+}
+
+// dogWispOps is the bd surface closeDogFormulaWispsWith needs: the hooked-bead
+// query, the wisp-tree read, and the tree close. Production binds all three to
+// real bd subprocesses (bdDogWispOps); tests pass fakes, so the selection and
+// ordering logic runs without exec'ing anything.
+type dogWispOps struct {
+	// query runs `bd <args>` for the hooked-bead query and returns stdout.
+	query func(ctx context.Context, args []string) ([]byte, error)
+	tree  func(ctx context.Context, wispID string) ([]beads.WispStep, error)
+	close func(ctx context.Context, reason string, tree []beads.WispStep) (int, error)
+}
+
+// bdDogWispOps binds dogWispOps to bd subprocesses run for workDir inside
+// townRoot.
+//
+// Reads go through the read-only routing env and writes through the mutation
+// routing env (beads.EnvForSubprocessMode) rather than beads.New, whose run()
+// resolves env via buildRunEnv/BuildPinnedBDEnv — which never sets
+// BD_DOLT_AUTO_COMMIT=off, so every read here would open a connection
+// attempting a no-op auto-commit (gh#3596).
+func bdDogWispOps(townRoot, workDir string) dogWispOps {
+	readEnv := beads.EnvForSubprocessMode(os.Environ(), workDir, beads.ReadOnlyRouting)
+	mutateEnv := beads.EnvForSubprocessMode(os.Environ(), workDir, beads.MutationRouting)
+	return dogWispOps{
+		query: func(ctx context.Context, args []string) ([]byte, error) {
+			cmd := beads.CommandContext(ctx, townRoot, workDir, beads.SubprocessModeForArgs(args), args...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+					return nil, fmt.Errorf("bd query: %s", errMsg)
+				}
+				return nil, err
+			}
+			return stdout.Bytes(), nil
+		},
+		tree: func(ctx context.Context, wispID string) ([]beads.WispStep, error) {
+			return beads.WispTree(ctx, workDir, readEnv, wispID)
+		},
+		close: func(ctx context.Context, reason string, tree []beads.WispStep) (int, error) {
+			return beads.CloseWispTree(ctx, workDir, mutateEnv, reason, tree)
+		},
+	}
+}
+
+// closeDogFormulaWispsWith is closeDogFormulaWisps' body over an explicit bd
+// surface. The predicate and the wisp walk themselves are shared with the
+// daemon's dispatch path in internal/beads so the two cleanup routes cannot
+// drift (gt-da2x).
+func closeDogFormulaWispsWith(ctx context.Context, ops dogWispOps, dogName string) (int, error) {
 	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
 	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
 		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
 	args := []string{"query", "--json", queryExpr, "--limit=0"}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := beads.CommandContext(ctx, townRoot, workDir, beads.SubprocessModeForArgs(args), args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
-			return 0, fmt.Errorf("bd query: %s", errMsg)
-		}
+	stdout, err := ops.query(ctx, args)
+	if err != nil {
 		return 0, err
 	}
 
-	out := bytes.TrimSpace(stdout.Bytes())
+	out := bytes.TrimSpace(stdout)
 	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
 		return 0, nil
 	}
@@ -841,17 +880,14 @@ func closeDogFormulaWisps(dogName string) (int, error) {
 		return 0, fmt.Errorf("parsing bd query output: %w", err)
 	}
 
-	readEnv := beads.EnvForSubprocessMode(os.Environ(), workDir, beads.ReadOnlyRouting)
-	mutateEnv := beads.EnvForSubprocessMode(os.Environ(), workDir, beads.MutationRouting)
-
 	closed := 0
 	for _, wispID := range beads.FormulaWispIDs(hookedBeads) {
-		tree, err := beads.WispTree(ctx, workDir, readEnv, wispID)
+		tree, err := ops.tree(ctx, wispID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not read wisp %s: %v\n", wispID, err)
 			continue
 		}
-		n, err := beads.CloseWispTree(ctx, workDir, mutateEnv, "dog done", tree)
+		n, err := ops.close(ctx, "dog done", tree)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not close wisp %s: %v\n", wispID, err)
 			continue

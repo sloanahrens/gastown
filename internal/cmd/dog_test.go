@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -351,85 +354,90 @@ func TestFormulaWispIDs_FiltersToAttachedFormula(t *testing.T) {
 	}
 }
 
-// setupDogDoneWispTest points the process at a fixture town and installs a
-// mock bd that records its argv to logPath before running body, so
-// closeDogFormulaWisps' real subprocess path runs without a bd/Dolt backend.
-func setupDogDoneWispTest(t *testing.T, body string) (logPath string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd is a shell script; skipping on Windows")
-	}
+// fakeDogWispOps answers closeDogFormulaWispsWith's bd calls from memory and
+// records them, so the selection logic runs without exec'ing a bd stub. A
+// stub bd is a fresh executable, and on a loaded host its first exec could
+// outlast closeDogFormulaWisps' 10s deadline: the test then failed with
+// "signal: killed" at 10.01s having asserted nothing about dog done.
+type fakeDogWispOps struct {
+	queryOut   string
+	trees      map[string][]beads.WispStep
+	queryArgs  [][]string
+	treeReads  []string
+	closeCalls [][]beads.WispStep
+	reasons    []string
+}
 
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-		t.Fatalf("creating mayor dir: %v", err)
+func (f *fakeDogWispOps) ops() dogWispOps {
+	return dogWispOps{
+		query: func(_ context.Context, args []string) ([]byte, error) {
+			f.queryArgs = append(f.queryArgs, args)
+			return []byte(f.queryOut), nil
+		},
+		tree: func(_ context.Context, wispID string) ([]beads.WispStep, error) {
+			f.treeReads = append(f.treeReads, wispID)
+			tree, ok := f.trees[wispID]
+			if !ok {
+				return nil, fmt.Errorf("unexpected tree read for %s", wispID)
+			}
+			return tree, nil
+		},
+		close: func(_ context.Context, reason string, tree []beads.WispStep) (int, error) {
+			f.closeCalls = append(f.closeCalls, tree)
+			f.reasons = append(f.reasons, reason)
+			n := 0
+			for _, step := range tree {
+				if step.Status != string(beads.StatusClosed) {
+					n++
+				}
+			}
+			return n, nil
+		},
 	}
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatalf("creating .beads dir: %v", err)
-	}
-	t.Setenv("BEADS_DIR", beadsDir)
-	t.Chdir(townRoot)
-
-	binDir := t.TempDir()
-	logPath = filepath.Join(t.TempDir(), "bd.log")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" + body
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("writing fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
 }
 
 // TestCloseDogFormulaWisps_ClosesHookedFormulaWisp is the gt-da2x regression
 // at the `gt dog done` end. The bug was a dog that went idle while its formula
 // wisp stayed hooked, making it invisible to dispatch — so this covers the
-// real body, not the predicate: it must close the wisp root AND its steps
-// (children first), and leave a plain hooked bead alone.
+// body, not just the predicate: the dog's hooked beads are queried, the
+// formula wisp's tree is read and closed with reason "dog done", and a plain
+// hooked bead is left alone. The tree walk and its children-first close order
+// are beads.WispTree/CloseWispTree's, tested in internal/beads.
 func TestCloseDogFormulaWisps_ClosesHookedFormulaWisp(t *testing.T) {
-	// The response goes through a quoted heredoc, not echo: sh's echo
-	// interprets \n, which would turn the JSON escape in the description into
-	// a literal newline and make the payload unparseable.
-	logPath := setupDogDoneWispTest(t, `
-if [ "$1" = "query" ]; then
-  cat <<'EOF'
-[{"id":"hq-task","status":"hooked","description":"unrelated"},{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n"}]
-EOF
-  exit 0
-fi
-if [ "$1" = "show" ]; then
-  case "$2" in
-    hq-wisp-admuv)
-      echo '{"hq-wisp-admuv":[{"id":"hq-wisp-admuv.1","status":"closed"},{"id":"hq-wisp-admuv.2","status":"open"}],"schema_version":1}'
-      exit 0
-      ;;
-  esac
-  echo '{"schema_version":1}'
-  exit 0
-fi
-exit 0
-`)
+	t.Parallel()
+	tree := []beads.WispStep{
+		{ID: "hq-wisp-admuv"},
+		{ID: "hq-wisp-admuv.1", Status: "closed"},
+		{ID: "hq-wisp-admuv.2", Status: "open"},
+	}
+	f := &fakeDogWispOps{
+		queryOut: `[{"id":"hq-task","status":"hooked","description":"unrelated"},` +
+			`{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n"}]`,
+		trees: map[string][]beads.WispStep{"hq-wisp-admuv": tree},
+	}
 
-	closed, err := closeDogFormulaWisps("alpha")
+	closed, err := closeDogFormulaWispsWith(context.Background(), f.ops(), "alpha")
 	if err != nil {
-		t.Fatalf("closeDogFormulaWisps: %v", err)
+		t.Fatalf("closeDogFormulaWispsWith: %v", err)
 	}
 	// The root and the one still-open step; the already-closed step is skipped.
 	if closed != 2 {
-		t.Errorf("closeDogFormulaWisps() = %d, want 2", closed)
+		t.Errorf("closeDogFormulaWispsWith() = %d, want 2", closed)
 	}
 
-	calls := readBdCalls(t, logPath)
-	for _, want := range []string{
-		"show hq-wisp-admuv --children --json",
-		"close hq-wisp-admuv.2 hq-wisp-admuv --force --reason dog done",
-	} {
-		if !containsCall(calls, want) {
-			t.Errorf("fake bd calls %q missing; got %q", want, calls)
-		}
+	wantQuery := []string{"query", "--json",
+		`ephemeral=true AND status="hooked" AND assignee="deacon/dogs/alpha"`, "--limit=0"}
+	if len(f.queryArgs) != 1 || !reflect.DeepEqual(f.queryArgs[0], wantQuery) {
+		t.Errorf("bd query calls = %q, want one %q", f.queryArgs, wantQuery)
 	}
-	if containsCall(calls, "close hq-wisp-admuv.1 hq-wisp-admuv.2 hq-wisp-admuv --force --reason dog done") {
-		t.Errorf("fake bd calls = %q, want the already-closed step left out of the close", calls)
+	if !reflect.DeepEqual(f.treeReads, []string{"hq-wisp-admuv"}) {
+		t.Errorf("tree reads = %q, want only the formula wisp hq-wisp-admuv", f.treeReads)
+	}
+	if len(f.closeCalls) != 1 || !reflect.DeepEqual(f.closeCalls[0], tree) {
+		t.Errorf("close calls = %+v, want the formula wisp's tree %+v", f.closeCalls, tree)
+	}
+	if !reflect.DeepEqual(f.reasons, []string{"dog done"}) {
+		t.Errorf("close reasons = %q, want [\"dog done\"]", f.reasons)
 	}
 }
 
@@ -437,25 +445,20 @@ exit 0
 // not force-close a hooked bead that is not a formula wisp — that hook may be
 // unrelated work the dog is still holding.
 func TestCloseDogFormulaWisps_IgnoresNonFormulaHooks(t *testing.T) {
-	logPath := setupDogDoneWispTest(t, `
-if [ "$1" = "query" ]; then
-  echo '[{"id":"hq-task","status":"hooked","description":"someone elses work"}]'
-  exit 0
-fi
-exit 0
-`)
+	t.Parallel()
+	f := &fakeDogWispOps{
+		queryOut: `[{"id":"hq-task","status":"hooked","description":"someone elses work"}]`,
+	}
 
-	closed, err := closeDogFormulaWisps("alpha")
+	closed, err := closeDogFormulaWispsWith(context.Background(), f.ops(), "alpha")
 	if err != nil {
-		t.Fatalf("closeDogFormulaWisps: %v", err)
+		t.Fatalf("closeDogFormulaWispsWith: %v", err)
 	}
 	if closed != 0 {
-		t.Errorf("closeDogFormulaWisps() = %d, want 0", closed)
+		t.Errorf("closeDogFormulaWispsWith() = %d, want 0", closed)
 	}
-	for _, call := range readBdCalls(t, logPath) {
-		if strings.HasPrefix(call, "close ") {
-			t.Errorf("fake bd calls = %q, want no close: no hooked bead carried attached_formula", call)
-		}
+	if len(f.treeReads) != 0 || len(f.closeCalls) != 0 {
+		t.Errorf("tree reads = %q, closes = %+v; want none: no hooked bead carried attached_formula", f.treeReads, f.closeCalls)
 	}
 }
 
@@ -486,17 +489,7 @@ func TestCloseDogFormulaWisps_NoWorkspaceIsNoOp(t *testing.T) {
 	}
 }
 
-// containsCall reports whether want is one of the recorded bd argv lines.
-func containsCall(calls []string, want string) bool {
-	for _, call := range calls {
-		if call == want {
-			return true
-		}
-	}
-	return false
-}
-
-// readBdCalls returns the argv lines a setupDogDoneWispTest fake bd recorded.
+// readBdCalls returns the argv lines a fake bd recorded to logPath.
 func readBdCalls(t *testing.T, logPath string) []string {
 	t.Helper()
 	data, err := os.ReadFile(logPath)
