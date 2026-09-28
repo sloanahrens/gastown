@@ -509,7 +509,10 @@ func TestHookSlot_StatusTransitions(t *testing.T) {
 		})
 	}
 
-	// Finally close the bead
+	// Finally close the bead, as the agent it is hooked to: bd refuses a close
+	// of a bead assigned to someone else unless it is forced, and the hooked
+	// polecat closing its own work is the transition under test.
+	t.Setenv("BD_ACTOR", agentID)
 	if err := b.Close(issue.ID); err != nil {
 		t.Errorf("close hooked bead: %v", err)
 	}
