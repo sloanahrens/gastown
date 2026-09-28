@@ -13,7 +13,6 @@ internal/beads
 internal/bitbucket
 internal/boot
 internal/checkpoint
-internal/cli
 internal/cmd
 internal/config
 internal/connection
