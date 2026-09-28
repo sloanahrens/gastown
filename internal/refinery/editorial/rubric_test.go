@@ -129,6 +129,7 @@ func criterion(name string, weight float64, guidance string) RubricCriterion {
 }
 
 func TestDiffRubric_ReportsRemovalWeightAndGuidance(t *testing.T) {
+	t.Parallel()
 	base := []RubricCriterion{
 		criterion("correctness", 3, "Logic errors outrank all else."),
 		criterion("fail-open-branch", 2, "A gate whose failure path emits the success value is a finding."),
@@ -194,6 +195,7 @@ func TestDiffRubric_ReportsRemovalWeightAndGuidance(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			deltas := DiffRubric(base, tc.head)
 			if len(deltas) != len(tc.want) {
 				t.Fatalf("DiffRubric returned %d deltas (%+v), want %d", len(deltas), deltas, len(tc.want))
@@ -208,6 +210,7 @@ func TestDiffRubric_ReportsRemovalWeightAndGuidance(t *testing.T) {
 }
 
 func TestDiffRubric_RenamedCriterionIsRemoval(t *testing.T) {
+	t.Parallel()
 	base := []RubricCriterion{criterion("fail-open-branch", 2, "Fail-open gates are a finding.")}
 	head := []RubricCriterion{criterion("docs-and-comments", 2, "Docs follow the writing rules.")}
 
@@ -224,6 +227,7 @@ func TestDiffRubric_RenamedCriterionIsRemoval(t *testing.T) {
 }
 
 func TestParseRubricCriteria_EmptyAndMalformed(t *testing.T) {
+	t.Parallel()
 	for _, data := range []string{"", "   \n", "\n"} {
 		criteria, err := ParseRubricCriteria([]byte(data))
 		if err != nil || criteria != nil {
@@ -247,6 +251,7 @@ func TestParseRubricCriteria_EmptyAndMalformed(t *testing.T) {
 // when repoDir is refinery/rig) resolves to the same repo-relative path as if
 // it had been declared relative.
 func TestRubricRelPath_ResolvesUnderSiblingClone(t *testing.T) {
+	t.Parallel()
 	rigRoot := filepath.FromSlash("/gt/gastown")
 	repoDir := filepath.Join(rigRoot, "refinery", "rig")
 
@@ -267,6 +272,7 @@ func TestRubricRelPath_ResolvesUnderSiblingClone(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			rel, ok, resolved := rubricRelPath(repoDir, tc.rubricPath)
 			if ok != tc.wantOK || resolved != tc.wantResolved {
 				t.Fatalf("rubricRelPath(%q) = rel=%q ok=%v resolved=%v, want ok=%v resolved=%v", tc.rubricPath, rel, ok, resolved, tc.wantOK, tc.wantResolved)
@@ -283,6 +289,7 @@ func TestRubricRelPath_ResolvesUnderSiblingClone(t *testing.T) {
 // be reported as touched — never silently read as "untouched", which would
 // disable every rubric protection built on RubricTouched.
 func TestRubricTouched_FailsClosedOnUnresolvablePath(t *testing.T) {
+	t.Parallel()
 	fixture := newRubricFixture(t, rubricBaseJSON)
 	g := git.NewGit(fixture.repoDir)
 	unresolvable := filepath.FromSlash("/etc/other/.om.json")
@@ -300,6 +307,7 @@ func TestRubricTouched_FailsClosedOnUnresolvablePath(t *testing.T) {
 }
 
 func TestHasRetirementLabel(t *testing.T) {
+	t.Parallel()
 	if HasRetirementLabel(nil) {
 		t.Error("HasRetirementLabel(nil) = true, want false")
 	}
@@ -312,6 +320,7 @@ func TestHasRetirementLabel(t *testing.T) {
 }
 
 func TestDiffRubricAt_UntouchedRubricIsNoFinding(t *testing.T) {
+	t.Parallel()
 	fixture := newRubricFixture(t, rubricBaseJSON)
 	deltas, err := DiffRubricAt(git.NewGit(fixture.repoDir), fixture.repoDir, ".om.json", fixture.base, fixture.head)
 	if err != nil {
@@ -323,6 +332,7 @@ func TestDiffRubricAt_UntouchedRubricIsNoFinding(t *testing.T) {
 }
 
 func TestDiffRubricAt_NoRubricDeclaredIsNoFinding(t *testing.T) {
+	t.Parallel()
 	fixture := newRubricFixture(t, `{"rubric": []}`)
 	deltas, err := DiffRubricAt(git.NewGit(fixture.repoDir), fixture.repoDir, "", fixture.base, fixture.head)
 	if err != nil {
@@ -334,6 +344,7 @@ func TestDiffRubricAt_NoRubricDeclaredIsNoFinding(t *testing.T) {
 }
 
 func TestDiffRubricAt_DeletedRubricRemovesEveryCriterion(t *testing.T) {
+	t.Parallel()
 	fixture := newRubricFixture(t, rubricBaseJSON)
 	if err := os.Remove(filepath.Join(fixture.repoDir, ".om.json")); err != nil {
 		t.Fatalf("remove rubric: %v", err)

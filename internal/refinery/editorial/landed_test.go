@@ -197,6 +197,7 @@ func (f *landedFixture) unpushedTip(t *testing.T) string {
 }
 
 func TestResolveLandedRange_FastForward(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.ffLanded)
 	r, err := ResolveLandedRange(f.g, f.ffLanded, "main")
@@ -220,6 +221,7 @@ func TestResolveLandedRange_FastForward(t *testing.T) {
 }
 
 func TestResolveLandedRange_Merge(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.merge)
 	r, err := ResolveLandedRange(f.g, f.merge, "main")
@@ -257,6 +259,7 @@ func TestResolveLandedRange_Merge(t *testing.T) {
 // merge is clean while patch-id(base..branch) and patch-id(target..merge)
 // differ. Requiring those two ids to be equal refused this landing outright.
 func TestResolveLandedRange_ContextChangedMergeAccepted(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.ctxMerge)
 	branchID, err := f.g.PatchID(f.base, f.branchTip)
@@ -284,6 +287,7 @@ func TestResolveLandedRange_ContextChangedMergeAccepted(t *testing.T) {
 }
 
 func TestResolveLandedRange_EvilMergeRefused(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.evilMerge)
 	_, err := ResolveLandedRange(f.g, f.evilMerge, "main")
@@ -302,6 +306,7 @@ func TestResolveLandedRange_EvilMergeRefused(t *testing.T) {
 }
 
 func TestResolveLandedRange_NotLandedRefused(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.merge)
 	unpushed := f.unpushedTip(t)
@@ -323,6 +328,7 @@ func TestResolveLandedRange_NotLandedRefused(t *testing.T) {
 // and would never read a note stamped there — a retro-review would report
 // closed a coverage gap it had not touched (gt-ljn8).
 func TestResolveLandedRange_BranchInternalCommitRefused(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.merge)
 	if !mustIsAncestor(t, f.g, f.branchTip, f.merge) {
@@ -349,6 +355,7 @@ func mustIsAncestor(t *testing.T, g *git.Git, ancestor, descendant string) bool 
 }
 
 func TestResolveLandedRange_RootRefused(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	// A root commit, made reachable from origin/main so that the root check —
@@ -372,6 +379,7 @@ func TestResolveLandedRange_RootRefused(t *testing.T) {
 // nothing at all — the case a refusal recognizer keyed on message text would
 // have missed, letting a zero-valued range reach the gate.
 func TestResolveLandedRange_UnknownShaRefused(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.merge)
 	if _, err := ResolveLandedRange(f.g, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "main"); err == nil {
@@ -384,6 +392,7 @@ func TestResolveLandedRange_UnknownShaRefused(t *testing.T) {
 // feeding it a range whose deletions differ from the landing's is enough to
 // pin both directions without staging a merge that resolves a conflict.
 func TestTryLandedDeletions_ReportsEachDirection(t *testing.T) {
+	t.Parallel()
 	f := newLandedFixture(t)
 	f.land(t, f.merge)
 	// The branch removes doomed.txt; a landing measured against the target

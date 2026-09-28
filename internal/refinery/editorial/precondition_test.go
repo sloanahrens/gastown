@@ -77,6 +77,7 @@ func requiredCfg() config.EditorialConfig {
 }
 
 func TestCheckPrecondition_ApproveMatchingPatchID_OK(t *testing.T) {
+	t.Parallel()
 	g, base, head := reviewedFixture(t, "", "approve", "1.4.0")
 	mrs := []LandedMR{{MRID: "gt-wisp-x", ReviewedHead: head, Base: base, Head: head}}
 
@@ -90,6 +91,7 @@ func TestCheckPrecondition_ApproveMatchingPatchID_OK(t *testing.T) {
 }
 
 func TestCheckPrecondition_NoNote_Missing(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	base, _ := g.Rev("HEAD")
@@ -106,6 +108,7 @@ func TestCheckPrecondition_NoNote_Missing(t *testing.T) {
 }
 
 func TestCheckPrecondition_EmptyReviewedHead_Missing(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	base, _ := g.Rev("HEAD")
@@ -119,6 +122,7 @@ func TestCheckPrecondition_EmptyReviewedHead_Missing(t *testing.T) {
 }
 
 func TestCheckPrecondition_RangeEdited_PatchIDMismatch(t *testing.T) {
+	t.Parallel()
 	g, base, head := reviewedFixture(t, "", "approve", "1.4.0")
 	dir := g.WorkDir()
 	// Edit the range after review: append a second commit changing the diff.
@@ -132,6 +136,7 @@ func TestCheckPrecondition_RangeEdited_PatchIDMismatch(t *testing.T) {
 }
 
 func TestCheckPrecondition_VersionBelowMin(t *testing.T) {
+	t.Parallel()
 	g, base, head := reviewedFixture(t, "", "approve", "0.9.0")
 	mrs := []LandedMR{{MRID: "gt-wisp-x", ReviewedHead: head, Base: base, Head: head}}
 
@@ -144,6 +149,7 @@ func TestCheckPrecondition_VersionBelowMin(t *testing.T) {
 }
 
 func TestCheckPrecondition_RequestChanges_VerdictNotApprove(t *testing.T) {
+	t.Parallel()
 	g, base, head := reviewedFixture(t, "", "request_changes", "1.4.0")
 	mrs := []LandedMR{{MRID: "gt-wisp-x", ReviewedHead: head, Base: base, Head: head}}
 
@@ -154,6 +160,7 @@ func TestCheckPrecondition_RequestChanges_VerdictNotApprove(t *testing.T) {
 }
 
 func TestCheckPrecondition_NotRequired_Skipped(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	base, _ := g.Rev("HEAD")
@@ -171,6 +178,7 @@ func TestCheckPrecondition_NotRequired_Skipped(t *testing.T) {
 }
 
 func TestCopyNotesToLanded_CopiesWhenHeadsDiffer(t *testing.T) {
+	t.Parallel()
 	g, base, reviewedHead := reviewedFixture(t, "", "approve", "1.4.0")
 	dir := g.WorkDir()
 	landedHead := commitFile(t, dir, "other.txt", "unrelated\n", "unrelated landed commit")
@@ -248,6 +256,7 @@ func driftNote(t *testing.T, g *git.Git, base, head, reviewedTip string) {
 }
 
 func TestCheckPrecondition_TargetDriftMaterial_OverlappingFiles_Refused(t *testing.T) {
+	t.Parallel()
 	g, base, head, newTargetTip := driftFixture(t, "feature.txt")
 	driftNote(t, g, base, head, base)
 
@@ -259,6 +268,7 @@ func TestCheckPrecondition_TargetDriftMaterial_OverlappingFiles_Refused(t *testi
 }
 
 func TestCheckPrecondition_TargetDriftDisjointFiles_OK(t *testing.T) {
+	t.Parallel()
 	g, base, head, newTargetTip := driftFixture(t, "unrelated.txt")
 	driftNote(t, g, base, head, base)
 
@@ -273,6 +283,7 @@ func TestCheckPrecondition_TargetDriftDisjointFiles_OK(t *testing.T) {
 }
 
 func TestCheckPrecondition_TargetNotMoved_DriftCheckSkipped(t *testing.T) {
+	t.Parallel()
 	g, base, head, _ := driftFixture(t, "feature.txt")
 	// Target has not moved since review: reviewedTip and the MR's push-time
 	// TargetTip are both base.
@@ -289,6 +300,7 @@ func TestCheckPrecondition_TargetNotMoved_DriftCheckSkipped(t *testing.T) {
 }
 
 func TestCheckPrecondition_NoteMissingReviewedTargetTip_DriftCheckSkipped(t *testing.T) {
+	t.Parallel()
 	// A note written before ReviewedTargetTip existed (empty) must not
 	// refuse the push even though target has materially moved — the field
 	// is unknown, not zero, and is skipped rather than guessed.
@@ -306,6 +318,7 @@ func TestCheckPrecondition_NoteMissingReviewedTargetTip_DriftCheckSkipped(t *tes
 }
 
 func TestCheckPrecondition_MRTargetTipUnset_DriftCheckSkipped(t *testing.T) {
+	t.Parallel()
 	// A caller that never resolved TargetTip (e.g. an older call site) must
 	// not have every push refused — unknown is skipped, not guessed.
 	g, base, head, _ := driftFixture(t, "feature.txt")
@@ -322,6 +335,7 @@ func TestCheckPrecondition_MRTargetTipUnset_DriftCheckSkipped(t *testing.T) {
 }
 
 func TestTargetDriftedMaterially_UnresolvableRange_Errors(t *testing.T) {
+	t.Parallel()
 	g, base, head, newTargetTip := driftFixture(t, "feature.txt")
 	if _, err := targetDriftedMaterially(g, base, newTargetTip, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", head); err == nil {
 		t.Fatal("targetDriftedMaterially: expected error for unresolvable base, got nil")
@@ -329,6 +343,7 @@ func TestTargetDriftedMaterially_UnresolvableRange_Errors(t *testing.T) {
 }
 
 func TestCopyNotesToLanded_NoOpWhenSameCommit(t *testing.T) {
+	t.Parallel()
 	g, base, head := reviewedFixture(t, "", "approve", "1.4.0")
 	mrs := []LandedMR{{MRID: "gt-wisp-x", ReviewedHead: head, Base: base, Head: head}}
 	notes, cerr := CheckPrecondition(g, requiredCfg(), mrs)

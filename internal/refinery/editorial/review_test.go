@@ -526,6 +526,7 @@ func TestRun_BackendTimeoutRetriesOnceThenFails(t *testing.T) {
 // --timeout, so a substring search for "timeout" reads every rejected
 // invocation as a backend timeout (gt-o6xh).
 func TestClassifyOutcome_GateUsageError(t *testing.T) {
+	t.Parallel()
 	// Byte-for-byte the line om-gate.sh's usage_error() prints, so the search
 	// this guards is the one the deployed script actually feeds it.
 	usageLine := "om-gate: usage: om-gate.sh --base <ref> --head <ref> [--dir <path>] " +
@@ -564,6 +565,7 @@ func TestClassifyOutcome_GateUsageError(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			verdictPath := filepath.Join(t.TempDir(), "verdict.json")
 			_, class, err := classifyOutcome(nil, tc.exit, tc.stderr, verdictPath)
 			if class != tc.want {
@@ -1116,6 +1118,7 @@ func TestRun_ApproveCleanDoesNotLeakGateScriptStderr(t *testing.T) {
 // replaces are gt-evk4 (clone stranded on a doomed rehearsal branch) and
 // gt-kmul (a mid-gate clone restored onto the target name).
 func TestRehearsal_MergeConflictLeavesLiveCloneUntouched(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := git.NewGit(dir)
 	base, err := g.Rev("HEAD")
@@ -2271,6 +2274,7 @@ func TestRun_RecordedVerdictBelowVersionFloorIsNotReused(t *testing.T) {
 }
 
 func TestClassOf(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -2298,6 +2302,7 @@ func TestClassOf(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := classOf(tc.err, VersionMismatch); got != tc.want {
 				t.Errorf("classOf() = %q, want %q", got, tc.want)
 			}
@@ -2306,6 +2311,7 @@ func TestClassOf(t *testing.T) {
 }
 
 func TestReceiptRefusalNotice(t *testing.T) {
+	t.Parallel()
 	// The refusal error comes from the writer itself, so the two halves of the
 	// loud path are proven to fit: a class the writer refuses is exactly what
 	// the notice has to carry out to the caller.
