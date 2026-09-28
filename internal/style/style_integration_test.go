@@ -33,9 +33,11 @@ func TestIntegrationPrintWarningDoesNotWriteStdout(t *testing.T) {
 		t.Fatalf("child test binary failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
 
-	// The child's stdout carries only the testing framework's own verdict.
-	if out := strings.TrimSpace(stdout.String()); out != "PASS" {
-		t.Errorf("child stdout = %q, want only the test framework's PASS: PrintWarning must not write to stdout", out)
+	// The child's stdout also carries the framework's own lines (PASS, and
+	// a coverage line under -cover), so check only that the warning is
+	// absent from it.
+	if out := stdout.String(); strings.Contains(out, "should go to stderr only") || strings.Contains(out, "Warning:") {
+		t.Errorf("child stdout = %q, want no warning: PrintWarning must not write to stdout", out)
 	}
 	if !strings.Contains(stderr.String(), "should go to stderr only") {
 		t.Errorf("child stderr = %q, want the warning", stderr.String())
