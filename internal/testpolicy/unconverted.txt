@@ -2,7 +2,6 @@
 # This list only shrinks: converting a package deletes its line.
 internal/acp
 internal/agent/provider
-internal/agentlog
 internal/agentpause
 internal/atomicfile
 internal/beads

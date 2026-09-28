@@ -3,15 +3,19 @@ package agentlog
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
+// testEpoch dates every transcript fixture in this package.
+var testEpoch = time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
 func TestClaudeProjectDirFor(t *testing.T) {
-	// The config dir is resolved from CLAUDE_CONFIG_DIR when set, so the test
-	// owns it rather than inheriting whatever the environment carries.
+	t.Parallel()
 	configDir := filepath.Join(t.TempDir(), "claude-town")
-	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 
 	// Every non-alphanumeric character becomes '-', so the leading slash does,
 	// and so do the dots and underscores Claude Code encodes that way.
@@ -20,18 +24,36 @@ func TestClaudeProjectDirFor(t *testing.T) {
 	wantSuffix := "-some-work--dir-name"
 	wantDir := filepath.Join(configDir, claudeProjectsSubdir, wantSuffix)
 
-	got, err := claudeProjectDirFor(input)
+	hash, err := claudeProjectHashFor(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != wantDir {
-		t.Errorf("claudeProjectDirFor(%q) = %q, want %q", input, got, wantDir)
+	if got := claudeProjectRoots(hash, configDir, t.TempDir())[0]; got != wantDir {
+		t.Errorf("primary project dir for %q = %q, want %q", input, got, wantDir)
+	}
+}
+
+// TestClaudeProjectHashFor pins that a relative work dir is hashed by its
+// absolute path, as Claude Code names the directory after its cwd.
+func TestClaudeProjectHashFor(t *testing.T) {
+	t.Parallel()
+	abs, err := filepath.Abs("rel/dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := claudeProjectHashFor("rel/dir")
+	if err != nil {
+		t.Fatalf("claudeProjectHashFor: %v", err)
+	}
+	if want := claudeProjectHash(filepath.ToSlash(abs)); got != want {
+		t.Errorf("claudeProjectHashFor(rel/dir) = %q, want %q", got, want)
 	}
 }
 
 // TestClaudeProjectHash pins the encoding against directory names observed on
 // disk, including the dot-bearing one Gas Town itself creates (.repo.git).
 func TestClaudeProjectHash(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want string
@@ -48,15 +70,25 @@ func TestClaudeProjectHash(t *testing.T) {
 	}
 }
 
+// roots returns the project dirs for workDir under configDir and home.
+func roots(t *testing.T, workDir, configDir, home string) []string {
+	t.Helper()
+	hash, err := claudeProjectHashFor(workDir)
+	if err != nil {
+		t.Fatalf("claudeProjectHashFor(%q): %v", workDir, err)
+	}
+	return claudeProjectRoots(hash, configDir, home)
+}
+
 // TestLatestTranscript_ResolvesAgainstConfigDir is the gt-xb27 regression:
 // with CLAUDE_CONFIG_DIR set (as Gas Town sets it town-wide), the transcript
 // must be found there rather than in ~/.claude, or every live agent looks
 // undated.
 func TestLatestTranscript_ResolvesAgainstConfigDir(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 	// Hermetic: the legacy root is searched too, so it must hold nothing here.
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
 
 	workDir := filepath.Join(t.TempDir(), "polecats", "topaz", "gastown")
 	projectDir := filepath.Join(configDir, claudeProjectsSubdir, claudeProjectHash(filepath.ToSlash(workDir)))
@@ -66,21 +98,10 @@ func TestLatestTranscript_ResolvesAgainstConfigDir(t *testing.T) {
 
 	older := filepath.Join(projectDir, "aaaaaaaa-0000-0000-0000-000000000000.jsonl")
 	newer := filepath.Join(projectDir, "bbbbbbbb-1111-1111-1111-111111111111.jsonl")
-	for _, path := range []string{older, newer} {
-		if err := os.WriteFile(path, []byte("{}\n"), 0644); err != nil {
-			t.Fatalf("writing transcript: %v", err)
-		}
-	}
-	past := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(older, past, past); err != nil {
-		t.Fatalf("aging transcript: %v", err)
-	}
+	writeTranscript(t, older, testEpoch.Add(-time.Hour))
+	writeTranscript(t, newer, testEpoch)
 
-	got, err := LatestTranscript(workDir)
-	if err != nil {
-		t.Fatalf("LatestTranscript: %v", err)
-	}
-	if got != newer {
+	if got := latestTranscriptIn(roots(t, workDir, configDir, home)); got != newer {
 		t.Errorf("LatestTranscript() = %q, want the newest transcript %q", got, newer)
 	}
 }
@@ -89,14 +110,9 @@ func TestLatestTranscript_ResolvesAgainstConfigDir(t *testing.T) {
 // distinguishable from a failure: callers report "last activity unknown"
 // rather than acting on it.
 func TestLatestTranscript_NoTranscriptIsEmptyNotAnError(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-
-	got, err := LatestTranscript(filepath.Join(t.TempDir(), "nothing-here"))
-	if err != nil {
-		t.Fatalf("LatestTranscript: %v", err)
-	}
-	if got != "" {
+	t.Parallel()
+	dirs := roots(t, filepath.Join(t.TempDir(), "nothing-here"), t.TempDir(), t.TempDir())
+	if got := latestTranscriptIn(dirs); got != "" {
 		t.Errorf("LatestTranscript() = %q, want empty", got)
 	}
 }
@@ -104,19 +120,15 @@ func TestLatestTranscript_NoTranscriptIsEmptyNotAnError(t *testing.T) {
 // TestClaudeProjectDirsFor covers both roots, and their collapse to one when
 // CLAUDE_CONFIG_DIR is unset (where the "configured" dir IS ~/.claude).
 func TestClaudeProjectDirsFor(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	workDir := "/some/work/dir"
 	hash := "-some-work-dir"
 
 	t.Run("config dir set: configured root first, legacy root second", func(t *testing.T) {
+		t.Parallel()
 		configDir := filepath.Join(t.TempDir(), "claude-town")
-		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 
-		got, err := claudeProjectDirsFor(workDir)
-		if err != nil {
-			t.Fatalf("claudeProjectDirsFor: %v", err)
-		}
+		got := claudeProjectRoots(hash, configDir, home)
 		want := []string{
 			filepath.Join(configDir, claudeProjectsSubdir, hash),
 			filepath.Join(home, claudeProjectsDir, hash),
@@ -132,17 +144,52 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 	})
 
 	t.Run("config dir unset: one root, not the same path twice", func(t *testing.T) {
-		t.Setenv("CLAUDE_CONFIG_DIR", "")
-
-		got, err := claudeProjectDirsFor(workDir)
-		if err != nil {
-			t.Fatalf("claudeProjectDirsFor: %v", err)
-		}
+		t.Parallel()
+		// config.ClaudeConfigDir resolves an unset CLAUDE_CONFIG_DIR to ~/.claude.
+		got := claudeProjectRoots(hash, filepath.Join(home, ".claude"), home)
 		want := []string{filepath.Join(home, claudeProjectsDir, hash)}
 		if len(got) != len(want) || got[0] != want[0] {
 			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("no home dir: configured root only", func(t *testing.T) {
+		t.Parallel()
+		configDir := filepath.Join(t.TempDir(), "claude-town")
+		got := claudeProjectRoots(hash, configDir, "")
+		want := []string{filepath.Join(configDir, claudeProjectsSubdir, hash)}
+		if len(got) != len(want) || got[0] != want[0] {
+			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestClaudeProjectDirsFor_ResolvesProcessRoots pins the exported entry
+// points to the process's own config dir and home.
+func TestClaudeProjectDirsFor_ResolvesProcessRoots(t *testing.T) {
+	t.Parallel()
+	workDir := filepath.Join(t.TempDir(), "polecats", "onyx", "gastown")
+	configDir, err := config.ClaudeConfigDir()
+	if err != nil {
+		t.Fatalf("config.ClaudeConfigDir: %v", err)
+	}
+	home, _ := os.UserHomeDir()
+	want := roots(t, workDir, configDir, home)
+
+	got, err := claudeProjectDirsFor(workDir)
+	if err != nil {
+		t.Fatalf("claudeProjectDirsFor: %v", err)
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
+	}
+	if primary, err := ClaudeProjectDirFor(workDir); err != nil || primary != want[0] {
+		t.Errorf("ClaudeProjectDirFor = %q, %v; want %q, nil", primary, err, want[0])
+	}
+	// workDir is fresh, so neither root holds a transcript for it.
+	if latest, err := LatestTranscript(workDir); err != nil || latest != "" {
+		t.Errorf("LatestTranscript = %q, %v; want \"\", nil", latest, err)
+	}
 }
 
 // TestLatestTranscript_SearchesLegacyRoot is the gt-jxfe regression.
@@ -153,10 +200,9 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 // single-root lookup does — hands the caller a transcript that predates the
 // live session, and the session is reported as having no dated activity.
 func TestLatestTranscript_SearchesLegacyRoot(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	home := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-	t.Setenv("HOME", home)
 
 	workDir := filepath.Join(t.TempDir(), "polecats", "emerald", "gastown")
 	hash := claudeProjectHash(filepath.ToSlash(workDir))
@@ -171,14 +217,10 @@ func TestLatestTranscript_SearchesLegacyRoot(t *testing.T) {
 
 	stale := filepath.Join(staleDir, "9b478215-0000-0000-0000-000000000000.jsonl")
 	live := filepath.Join(liveDir, "a5aef6ba-1111-1111-1111-111111111111.jsonl")
-	writeTranscript(t, stale, time.Now().Add(-time.Hour))
-	writeTranscript(t, live, time.Now())
+	writeTranscript(t, stale, testEpoch.Add(-time.Hour))
+	writeTranscript(t, live, testEpoch)
 
-	got, err := LatestTranscript(workDir)
-	if err != nil {
-		t.Fatalf("LatestTranscript: %v", err)
-	}
-	if got != live {
+	if got := latestTranscriptIn(roots(t, workDir, configDir, home)); got != live {
 		t.Errorf("LatestTranscript() = %q, want the live transcript in the legacy root %q", got, live)
 	}
 }
@@ -187,10 +229,9 @@ func TestLatestTranscript_SearchesLegacyRoot(t *testing.T) {
 // multi-root pick: the configured root must not be preferred when the legacy
 // root holds only an older transcript.
 func TestLatestTranscript_NewestWinsAcrossRoots(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	home := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-	t.Setenv("HOME", home)
 
 	workDir := filepath.Join(t.TempDir(), "polecats", "quartz", "gastown")
 	hash := claudeProjectHash(filepath.ToSlash(workDir))
@@ -205,14 +246,10 @@ func TestLatestTranscript_NewestWinsAcrossRoots(t *testing.T) {
 
 	live := filepath.Join(configuredDir, "bbbbbbbb-1111-1111-1111-111111111111.jsonl")
 	stale := filepath.Join(legacyDir, "aaaaaaaa-0000-0000-0000-000000000000.jsonl")
-	writeTranscript(t, stale, time.Now().Add(-time.Hour))
-	writeTranscript(t, live, time.Now())
+	writeTranscript(t, stale, testEpoch.Add(-time.Hour))
+	writeTranscript(t, live, testEpoch)
 
-	got, err := LatestTranscript(workDir)
-	if err != nil {
-		t.Fatalf("LatestTranscript: %v", err)
-	}
-	if got != live {
+	if got := latestTranscriptIn(roots(t, workDir, configDir, home)); got != live {
 		t.Errorf("LatestTranscript() = %q, want the newest transcript across roots %q", got, live)
 	}
 }
@@ -229,6 +266,7 @@ func writeTranscript(t *testing.T, path string, mtime time.Time) {
 }
 
 func TestParseClaudeCodeLine_Text(t *testing.T) {
+	t.Parallel()
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}]},"timestamp":"2026-02-23T10:00:00Z"}`
 	events := parseClaudeCodeLine(line, "hq-mayor", "claudecode", "test-uuid")
 	if len(events) != 1 {
@@ -253,6 +291,7 @@ func TestParseClaudeCodeLine_Text(t *testing.T) {
 }
 
 func TestParseClaudeCodeLine_ToolUse(t *testing.T) {
+	t.Parallel()
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`
 	events := parseClaudeCodeLine(line, "s1", "claudecode", "test-uuid")
 	if len(events) != 1 {
@@ -272,6 +311,7 @@ func TestParseClaudeCodeLine_ToolUse(t *testing.T) {
 }
 
 func TestParseClaudeCodeLine_SkipsUnknownTypes(t *testing.T) {
+	t.Parallel()
 	line := `{"type":"summary","content":"some summary"}`
 	events := parseClaudeCodeLine(line, "s1", "claudecode", "test-uuid")
 	if len(events) != 0 {
@@ -280,6 +320,7 @@ func TestParseClaudeCodeLine_SkipsUnknownTypes(t *testing.T) {
 }
 
 func TestParseClaudeCodeLine_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	events := parseClaudeCodeLine("not json", "s1", "claudecode", "test-uuid")
 	if len(events) != 0 {
 		t.Errorf("expected 0 events for invalid JSON, got %d", len(events))
@@ -287,6 +328,7 @@ func TestParseClaudeCodeLine_InvalidJSON(t *testing.T) {
 }
 
 func TestNewAdapter(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		agentType string
