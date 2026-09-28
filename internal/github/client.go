@@ -56,9 +56,14 @@ func WithGraphQLBase(url string) Option {
 // NewClient creates a GitHub API client.
 // By default it reads GITHUB_TOKEN from the environment.
 func NewClient(opts ...Option) (*Client, error) {
+	return newClient(os.Getenv, opts...)
+}
+
+// newClient is NewClient reading GITHUB_TOKEN through getenv.
+func newClient(getenv func(string) string, opts ...Option) (*Client, error) {
 	c := &Client{
 		httpClient:  http.DefaultClient,
-		token:       os.Getenv("GITHUB_TOKEN"),
+		token:       getenv("GITHUB_TOKEN"),
 		restBase:    defaultRESTBase,
 		graphqlBase: defaultGraphQLBase,
 	}

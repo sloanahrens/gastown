@@ -11,32 +11,65 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestClient creates a Client pointing at a test HTTP server.
-func newTestClient(t *testing.T, handler http.Handler) (*Client, *httptest.Server) {
+// testBase is the API base the test clients address; requests never leave
+// the process.
+const testBase = "http://github.test"
+
+// handlerTransport serves each request in-process with h, so tests exercise
+// the client's real request building and response handling without a socket.
+type handlerTransport struct{ h http.Handler }
+
+func (tr handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	tr.h.ServeHTTP(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+// newTestClient creates a Client whose requests are answered by handler.
+func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
 	c, err := NewClient(
 		WithToken("test-token"),
-		WithHTTPClient(srv.Client()),
-		WithRESTBase(srv.URL),
-		WithGraphQLBase(srv.URL+"/graphql"),
+		WithHTTPClient(&http.Client{Transport: handlerTransport{handler}}),
+		WithRESTBase(testBase),
+		WithGraphQLBase(testBase+"/graphql"),
 	)
 	require.NoError(t, err)
-	return c, srv
+	return c
+}
+
+// envOf returns a getenv over a fixed environment.
+func envOf(kv map[string]string) func(string) string {
+	return func(k string) string { return kv[k] }
 }
 
 func TestNewClient_RequiresToken(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "")
-	_, err := NewClient()
+	t.Parallel()
+	_, err := newClient(envOf(nil))
 	assert.ErrorContains(t, err, "GITHUB_TOKEN is required")
 }
 
 func TestNewClient_FromEnv(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "env-token")
-	c, err := NewClient()
+	t.Parallel()
+	c, err := newClient(envOf(map[string]string{"GITHUB_TOKEN": "env-token"}))
 	require.NoError(t, err)
 	assert.Equal(t, "env-token", c.token)
+	assert.Equal(t, http.DefaultClient, c.httpClient)
+	assert.Equal(t, defaultRESTBase, c.restBase)
+}
+
+func TestNewClient_WithTokenOverridesEnv(t *testing.T) {
+	t.Parallel()
+	c, err := newClient(envOf(map[string]string{"GITHUB_TOKEN": "env-token"}), WithToken("explicit"))
+	require.NoError(t, err)
+	assert.Equal(t, "explicit", c.token)
+
+	// The exported constructor takes the same options.
+	c, err = NewClient(WithToken("explicit"))
+	require.NoError(t, err)
+	assert.Equal(t, "explicit", c.token)
 }
 
 func TestCreateDraftPR(t *testing.T) {
@@ -58,7 +91,7 @@ func TestCreateDraftPR(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	result, err := c.CreateDraftPR(t.Context(), "octo", "repo", "feat-branch", "main", "Add feature", "Description")
 	require.NoError(t, err)
 	assert.Equal(t, 42, result.Number)
@@ -81,7 +114,7 @@ func TestCreateDraftPR_CrossRepoFork(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	result, err := c.CreateDraftPR(t.Context(), "upstream", "repo", "forkOwner:feat-branch", "main", "Fork PR", "From fork")
 	require.NoError(t, err)
 	assert.Equal(t, 7, result.Number)
@@ -98,7 +131,7 @@ func TestUpdatePRDescription(t *testing.T) {
 		w.Write([]byte(`{}`))
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.UpdatePRDescription(t.Context(), "octo", "repo", 42, "Updated body")
 	require.NoError(t, err)
 }
@@ -133,7 +166,7 @@ func TestConvertDraftToReady(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.ConvertDraftToReady(t.Context(), "octo", "repo", 42)
 	require.NoError(t, err)
 }
@@ -149,7 +182,7 @@ func TestGetPRReviewStatus_Approved(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	state, err := c.GetPRReviewStatus(t.Context(), "octo", "repo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, ReviewApproved, state)
@@ -165,7 +198,7 @@ func TestGetPRReviewStatus_ChangesRequested(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	state, err := c.GetPRReviewStatus(t.Context(), "octo", "repo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, ReviewChangesRequired, state)
@@ -178,7 +211,7 @@ func TestGetPRReviewStatus_NoReviews(t *testing.T) {
 		json.NewEncoder(w).Encode([]map[string]any{})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	state, err := c.GetPRReviewStatus(t.Context(), "octo", "repo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, ReviewPending, state)
@@ -201,7 +234,7 @@ func TestGetPRReviewComments(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	comments, err := c.GetPRReviewComments(t.Context(), "octo", "repo", 42)
 	require.NoError(t, err)
 	require.Len(t, comments, 1)
@@ -223,7 +256,7 @@ func TestReplyToPRComment(t *testing.T) {
 		w.Write([]byte(`{}`))
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.ReplyToPRComment(t.Context(), "octo", "repo", 42, 101, "Thanks, fixed!")
 	require.NoError(t, err)
 }
@@ -238,7 +271,7 @@ func TestMergePR(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"merged": true})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.MergePR(t.Context(), "octo", "repo", 42, "squash")
 	require.NoError(t, err)
 }
@@ -254,7 +287,7 @@ func TestGetRepoMergeMethod_Squash(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	method, err := c.GetRepoMergeMethod(t.Context(), "octo", "repo")
 	require.NoError(t, err)
 	assert.Equal(t, "squash", method)
@@ -271,7 +304,7 @@ func TestGetRepoMergeMethod_RebaseOnly(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	method, err := c.GetRepoMergeMethod(t.Context(), "octo", "repo")
 	require.NoError(t, err)
 	assert.Equal(t, "rebase", method)
@@ -288,7 +321,7 @@ func TestGetRepoMergeMethod_NoneEnabled(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	_, err := c.GetRepoMergeMethod(t.Context(), "octo", "repo")
 	assert.ErrorContains(t, err, "no merge methods enabled")
 }
@@ -301,7 +334,7 @@ func TestAPIError(t *testing.T) {
 		w.Write([]byte(`{"message":"Not Found"}`))
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	_, err := c.GetPRReviewStatus(t.Context(), "octo", "repo", 999)
 	require.Error(t, err)
 
@@ -324,7 +357,7 @@ func TestConvertDraftToReady_GraphQLError(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.ConvertDraftToReady(context.Background(), "octo", "repo", 42)
 	assert.ErrorContains(t, err, "Pull request is not a draft")
 }

@@ -21,7 +21,6 @@ internal/events
 internal/feed
 internal/formula
 internal/git
-internal/github
 internal/hooks
 internal/krc
 internal/lock
