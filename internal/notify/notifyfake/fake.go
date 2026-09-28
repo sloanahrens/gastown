@@ -138,7 +138,7 @@ func (r *Recorder) record(ctx context.Context, c Call) error {
 
 // MailSend records a mail send.
 func (r *Recorder) MailSend(ctx context.Context, to, subject, body string, opts ...notify.MailOption) error {
-	if err := notify.ValidateMail(to); err != nil {
+	if err := notify.ValidateMail(to, subject); err != nil {
 		return err
 	}
 	return r.record(ctx, Call{Kind: KindMail, To: to, Subject: subject, Body: body, Mail: notify.ApplyMailOptions(opts)})
@@ -175,4 +175,72 @@ func (r *Recorder) ClearEscalations(ctx context.Context, reason string, fingerpr
 	return r.record(ctx, Call{Kind: KindClear, Reason: reason, Fingerprints: keys})
 }
 
-var _ notify.Notifier = (*Recorder)(nil)
+// Inbox returns the mail delivered to addr, oldest first: every mail send to
+// addr that succeeded. A send without notify.From has no sender here; the real
+// town fills in the sending process's own address.
+func (r *Recorder) Inbox(addr string) []Mail {
+	var out []Mail
+	for _, c := range r.Mails() {
+		if c.Err == nil && c.To == addr {
+			out = append(out, Mail{From: c.Mail.From, Subject: c.Subject, Body: c.Body})
+		}
+	}
+	return out
+}
+
+// OpenEscalations returns the open escalation filed under an alert key, as
+// gt escalate leaves it after the successful escalations and clears so far:
+// the first firing under a key files it, a repeat counts an occurrence and
+// refreshes severity, reason and source, and a clear closes it.
+func (r *Recorder) OpenEscalations(key string) []OpenEscalation {
+	label := notify.FingerprintLabel(key)
+	if label == "" {
+		return nil
+	}
+	var open *OpenEscalation
+	for _, c := range r.Calls() {
+		if c.Err != nil {
+			continue
+		}
+		switch c.Kind {
+		case KindEscalate:
+			e := c.Escalation
+			if notify.FingerprintLabel(notify.AlertKey(e.Fingerprint, e.Source, e.Description)) != label {
+				continue
+			}
+			// gt escalate's --severity defaults to medium, so every firing
+			// carries one.
+			severity := strings.ToLower(e.Severity)
+			if severity == "" {
+				severity = "medium"
+			}
+			if open == nil {
+				open = &OpenEscalation{Title: e.Description, Severity: severity, Reason: e.Reason, Source: e.Source, Occurrences: 1}
+				continue
+			}
+			open.Occurrences++
+			open.Severity = severity
+			if e.Reason != "" {
+				open.Reason = e.Reason
+			}
+			if e.Source != "" {
+				open.Source = e.Source
+			}
+		case KindClear:
+			for _, fp := range c.Fingerprints {
+				if notify.FingerprintLabel(fp) == label {
+					open = nil
+				}
+			}
+		}
+	}
+	if open == nil {
+		return nil
+	}
+	return []OpenEscalation{*open}
+}
+
+var (
+	_ notify.Notifier = (*Recorder)(nil)
+	_ Observer        = (*Recorder)(nil)
+)

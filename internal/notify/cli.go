@@ -68,7 +68,7 @@ func realRun(ctx context.Context, c command) ([]byte, error) {
 
 // MailSend runs `gt mail send`.
 func (c *CLI) MailSend(ctx context.Context, to, subject, body string, opts ...MailOption) error {
-	if err := ValidateMail(to); err != nil {
+	if err := ValidateMail(to, subject); err != nil {
 		return err
 	}
 	o := ApplyMailOptions(opts)

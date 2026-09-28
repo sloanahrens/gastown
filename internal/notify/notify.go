@@ -108,10 +108,16 @@ func ApplyMailOptions(opts []MailOption) MailOptions {
 	return o
 }
 
-// ValidateMail reports whether a mail send to the given address can be made.
-func ValidateMail(to string) error {
+// ValidateMail reports whether a mail send to the given address with the
+// given subject can be made. The subject becomes the message bead's title,
+// and bd refuses a title that starts with "-", so such a send is refused
+// here rather than failing inside gt.
+func ValidateMail(to, subject string) error {
 	if strings.TrimSpace(to) == "" {
 		return fmt.Errorf("%w: mail needs a recipient", ErrInvalid)
+	}
+	if strings.HasPrefix(subject, "-") {
+		return fmt.Errorf("%w: mail subject %q starts with \"-\", which bd refuses as a title", ErrInvalid, subject)
 	}
 	return nil
 }

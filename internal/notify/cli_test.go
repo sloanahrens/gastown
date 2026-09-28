@@ -200,6 +200,7 @@ func TestCLIRefusesInvalidRequestsWithoutRunning(t *testing.T) {
 	t.Parallel()
 	cases := map[string]func(c *CLI) error{
 		"mail without recipient": func(c *CLI) error { return c.MailSend(t.Context(), " ", "s", "b") },
+		"mail dash subject":      func(c *CLI) error { return c.MailSend(t.Context(), "mayor/", "-s", "b") },
 		"nudge without target":   func(c *CLI) error { return c.Nudge(t.Context(), "", "m") },
 		"nudge without message":  func(c *CLI) error { return c.Nudge(t.Context(), "mayor", "  ") },
 		"escalate without title": func(c *CLI) error { return c.Escalate(t.Context(), Escalation{Severity: "high"}) },
@@ -244,15 +245,17 @@ func TestCLIKeepsDashLeadingValuesPositional(t *testing.T) {
 		want []string
 	}{
 		"mail recipient": {
-			call: func(c *CLI) error { return c.MailSend(t.Context(), "-to", "-subject", "-body") },
-			want: []string{"mail", "send", "-s", "-subject", "-m", "-body", "--", "-to"},
+			call: func(c *CLI) error { return c.MailSend(t.Context(), "-to", "subject", "-body") },
+			want: []string{"mail", "send", "-s", "subject", "-m", "-body", "--", "-to"},
 		},
 		"nudge target and message": {
 			call: func(c *CLI) error { return c.Nudge(t.Context(), "-target", "--force") },
 			want: []string{"nudge", "--", "-target", "--force"},
 		},
 		"escalation description": {
-			call: func(c *CLI) error { return c.Escalate(t.Context(), Escalation{Severity: "low", Description: "--dry-run"}) },
+			call: func(c *CLI) error {
+				return c.Escalate(t.Context(), Escalation{Severity: "low", Description: "--dry-run"})
+			},
 			want: []string{"escalate", "-s", "low", "--stdin", "--", "--dry-run"},
 		},
 	}

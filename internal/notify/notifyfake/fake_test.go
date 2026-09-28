@@ -10,10 +10,10 @@ import (
 
 func TestFakeNotifierContract(t *testing.T) {
 	t.Parallel()
-	RunNotifierContract(t, func(t *testing.T) notify.Notifier {
+	RunNotifierContract(t, func(t *testing.T) Subject {
 		r := New()
 		r.Missing(MissingTarget)
-		return r
+		return Subject{Notifier: r, Observer: r}
 	})
 }
 
