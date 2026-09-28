@@ -1,153 +1,137 @@
 package tmux
 
 import (
+	"errors"
+	"reflect"
+	"strings"
 	"testing"
-	"time"
+
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
+// bypassDialog is the bypass-permissions warning with its exit option focused.
+const bypassDialog = ` WARNING: Claude Code running in Bypass Permissions mode
+
+ ❯ 1. No, exit
+   2. Yes, I accept
+
+ Enter to confirm · Esc to cancel`
+
+// runDialog runs f against pane on a fake clock, driving it through any poll.
+func runDialog(t *testing.T, pane *fakePane, f func(tm *Tmux) error) (*scripted, error) {
+	t.Helper()
+	s := newScripted(pane.answer)
+	clk := clockwork.NewFakeClock()
+	done := make(chan error, 1)
+	go func() { done <- f(unitTmux(s, clk)) }()
+	return s, driveClock(t, clk, constants.DialogPollInterval, done)
+}
+
 // TestAcceptWorkspaceTrustDialog_NoDialog verifies that when no trust dialog
-// is present (agent prompt visible), the function returns quickly without error.
+// is present (agent prompt visible), the function returns on its first
+// capture without waiting on the clock or pressing anything.
 func TestAcceptWorkspaceTrustDialog_NoDialog(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-trust-nodlg-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	// Session starts with a shell prompt containing ">", "$", or "%".
-	// The polling loop should exit early when it sees the prompt.
-	//
-	// Wait for that prompt before starting the clock: the early exit is
-	// triggered BY the prompt indicator, so timing from session creation would
-	// measure how long the login shell took to start, not the function (gt-32pv).
-	waitForShellPrompt(t, tm, sessionName)
-
-	start := time.Now()
-	err := tm.AcceptWorkspaceTrustDialog(sessionName)
-	elapsed := time.Since(start)
-
-	if err != nil {
+	t.Parallel()
+	pane := &fakePane{content: "user@host:~$ "}
+	s := newScripted(pane.answer)
+	if err := unitTmux(s, nil).AcceptWorkspaceTrustDialog("gt-x"); err != nil {
 		t.Fatalf("AcceptWorkspaceTrustDialog: %v", err)
 	}
-
-	// With the prompt already on screen the loop should exit on its first
-	// capture. 2s allows for a slow capture-pane call while still catching a
-	// run that burned the full DialogPollTimeout (8s).
-	if elapsed > 2*time.Second {
-		t.Errorf("took %v, expected early exit once prompt is visible (< 2s)", elapsed)
+	if n := len(s.find("capture-pane")); n != 1 {
+		t.Errorf("capture-pane calls = %d, want 1 (early exit on the prompt)", n)
+	}
+	if got := pane.sentKeys(); len(got) != 0 {
+		t.Errorf("keys = %q, want none", got)
 	}
 }
-
-// Both dialogs whose behavior AcceptWorkspaceTrustDialog drives are covered by
-// trust_dialog_tmux_test.go, which runs the function against a pane that renders
-// the dialog and records the keys it receives. The tests that used to live here
-// echoed dialog text into a shell prompt: they passed whether or not the dialog
-// was read, which is exactly why the blind Enter that exited Claude survived
-// review (gt-nc1t).
 
 // TestAcceptBypassPermissionsWarning_NoDialog verifies that when no bypass
-// permissions dialog is present, the function returns quickly without error.
+// permissions dialog is present, the function returns on its first capture.
 func TestAcceptBypassPermissionsWarning_NoDialog(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-bypass-nodlg-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	// Wait for the prompt before starting the clock: the early exit under test
-	// is triggered BY the prompt indicator, so timing from session creation
-	// would measure login-shell startup instead (gt-32pv).
-	waitForShellPrompt(t, tm, sessionName)
-
-	start := time.Now()
-	err := tm.AcceptBypassPermissionsWarning(sessionName)
-	elapsed := time.Since(start)
-
-	if err != nil {
+	t.Parallel()
+	pane := &fakePane{content: "user@host:~$ "}
+	s := newScripted(pane.answer)
+	if err := unitTmux(s, nil).AcceptBypassPermissionsWarning("gt-x"); err != nil {
 		t.Fatalf("AcceptBypassPermissionsWarning: %v", err)
 	}
-
-	// With the prompt already on screen the loop should exit on its first
-	// capture. 2s allows for a slow capture-pane call while still catching a
-	// run that burned the full DialogPollTimeout (8s).
-	if elapsed > 2*time.Second {
-		t.Errorf("took %v, expected early exit once prompt is visible (< 2s)", elapsed)
+	if n := len(s.find("capture-pane")); n != 1 {
+		t.Errorf("capture-pane calls = %d, want 1", n)
 	}
 }
 
-// TestAcceptBypassPermissionsWarning_DetectsDialog verifies that when bypass
-// permissions dialog text appears in the pane, it is detected and accepted.
+// TestAcceptBypassPermissionsWarning_DetectsDialog verifies that the bypass
+// dialog is answered by moving onto "Yes, I accept" and confirming.
 func TestAcceptBypassPermissionsWarning_DetectsDialog(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-bypass-dlg-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	// Simulate the bypass permissions dialog
-	if err := tm.SendKeys(sessionName, "echo 'Bypass Permissions mode is enabled'"); err != nil {
-		t.Fatalf("SendKeys: %v", err)
-	}
-	time.Sleep(300 * time.Millisecond)
-
-	err := tm.AcceptBypassPermissionsWarning(sessionName)
+	t.Parallel()
+	pane := &fakePane{content: bypassDialog, confirm: showPrompt}
+	_, err := runDialog(t, pane, func(tm *Tmux) error { return tm.AcceptBypassPermissionsWarning("gt-x") })
 	if err != nil {
 		t.Fatalf("AcceptBypassPermissionsWarning: %v", err)
+	}
+	if got := pane.sentKeys(); !reflect.DeepEqual(got, []string{"Down", "Enter"}) {
+		t.Errorf("keys = %q, want Down then Enter", got)
+	}
+}
+
+// TestAcceptBypassPermissionsWarning_UnreadableFallsBackToDownEnter pins the
+// documented fallback: an unreadable bypass dialog still gets Down+Enter.
+func TestAcceptBypassPermissionsWarning_UnreadableFallsBackToDownEnter(t *testing.T) {
+	t.Parallel()
+	pane := &fakePane{content: "Bypass Permissions mode is enabled", confirm: showPrompt}
+	_, err := runDialog(t, pane, func(tm *Tmux) error { return tm.AcceptBypassPermissionsWarning("gt-x") })
+	if err != nil {
+		t.Fatalf("AcceptBypassPermissionsWarning: %v", err)
+	}
+	if got := pane.sentKeys(); !reflect.DeepEqual(got, []string{"Down", "Enter"}) {
+		t.Errorf("keys = %q, want Down then Enter", got)
 	}
 }
 
 // TestAcceptStartupDialogs_NoDialogs verifies the combined function returns
-// quickly when no dialogs are present.
+// on first captures when no dialogs are present.
 func TestAcceptStartupDialogs_NoDialogs(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-startup-nodlg-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	// Wait for the prompt before starting the clock: both dialog checks
-	// early-exit on the prompt indicator, so timing from session creation would
-	// measure login-shell startup instead (gt-32pv).
-	waitForShellPrompt(t, tm, sessionName)
-
-	start := time.Now()
-	err := tm.AcceptStartupDialogs(sessionName)
-	elapsed := time.Since(start)
-
-	if err != nil {
+	t.Parallel()
+	pane := &fakePane{content: "user@host:~$ "}
+	s := newScripted(pane.answer)
+	if err := unitTmux(s, nil).AcceptStartupDialogs("gt-x"); err != nil {
 		t.Fatalf("AcceptStartupDialogs: %v", err)
 	}
-
-	// Both dialog checks should early-exit on their first capture now that the
-	// prompt is visible. 4s allows two slow capture-pane calls while still
-	// catching a run that burned a full DialogPollTimeout (8s) on either check.
-	if elapsed > 4*time.Second {
-		t.Errorf("took %v, expected early exit once prompt is visible (< 4s)", elapsed)
+	if got := pane.sentKeys(); len(got) != 0 {
+		t.Errorf("keys = %q, want none", got)
 	}
 }
 
-// TestAcceptWorkspaceTrustDialog_InvalidSession verifies error handling
-// when the session doesn't exist.
+// TestAcceptWorkspaceTrustDialog_InvalidSession: capture errors are retried
+// for the whole poll window, then the function returns nil and leaves the
+// failure for CheckStartupBlocked to report.
 func TestAcceptWorkspaceTrustDialog_InvalidSession(t *testing.T) {
-	tm := newTestTmux(t)
-
-	// Should not panic or hang — should return nil after timeout
-	err := tm.AcceptWorkspaceTrustDialog("gt-nonexistent-session-xyz")
-	// CapturePane errors are retried until timeout, then returns nil
+	t.Parallel()
+	pane := &fakePane{dead: true}
+	s, err := runDialog(t, pane, func(tm *Tmux) error { return tm.AcceptWorkspaceTrustDialog("gt-x") })
 	if err != nil {
 		t.Fatalf("expected nil error for nonexistent session, got: %v", err)
+	}
+	if n := len(s.find("capture-pane")); n < 2 {
+		t.Errorf("capture-pane calls = %d, want retries across the poll window", n)
+	}
+}
+
+// TestCheckStartupBlocked reports a dialog that outlives the poll window and
+// passes a pane with none.
+func TestCheckStartupBlocked(t *testing.T) {
+	t.Parallel()
+	_, err := runDialog(t, &fakePane{content: bypassDialog}, func(tm *Tmux) error { return tm.CheckStartupBlocked("gt-x") })
+	if err == nil || !strings.Contains(err.Error(), "bypass permissions prompt") {
+		t.Fatalf("CheckStartupBlocked(dialog) = %v, want it named", err)
+	}
+	_, err = runDialog(t, &fakePane{content: "❯ "}, func(tm *Tmux) error { return tm.CheckStartupBlocked("gt-x") })
+	if err != nil {
+		t.Fatalf("CheckStartupBlocked(prompt) = %v, want nil", err)
+	}
+	_, err = runDialog(t, &fakePane{dead: true}, func(tm *Tmux) error { return tm.CheckStartupBlocked("gt-x") })
+	if err == nil {
+		t.Fatal("CheckStartupBlocked(dead pane) = nil, want the capture error")
 	}
 }
 
@@ -286,41 +270,41 @@ Bypass Permissions mode
 	}
 }
 
-// TestDismissStartupDialogsBlind_SendsKeys verifies that the blind dismiss
-// sends keys without error on a valid session (no screen-scraping).
+// TestDismissStartupDialogsBlind_SendsKeys verifies that with no trust dialog
+// on screen the blind dismiss sends only the bypass sequence, Down then Enter.
 func TestDismissStartupDialogsBlind_SendsKeys(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-blind-dismiss-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	// Should complete quickly — no polling, no CapturePane
-	start := time.Now()
-	err := tm.DismissStartupDialogsBlind(sessionName)
-	elapsed := time.Since(start)
-
+	t.Parallel()
+	pane := &fakePane{content: "❯ "}
+	_, err := runDialog(t, pane, func(tm *Tmux) error { return tm.DismissStartupDialogsBlind("gt-x") })
 	if err != nil {
 		t.Fatalf("DismissStartupDialogsBlind: %v", err)
 	}
+	if got := pane.sentKeys(); !reflect.DeepEqual(got, []string{"Down", "Enter"}) {
+		t.Errorf("keys = %q, want Down then Enter", got)
+	}
+}
 
-	// Should take ~700ms (500ms + 200ms sleeps) — not the 8s+ dialog poll timeout
-	if elapsed > 3*time.Second {
-		t.Errorf("took %v, expected ~700ms (no polling)", elapsed)
+// TestDismissStartupDialogsBlind_AnswersTrustDialogFirst: a visible trust
+// dialog is read and answered before the blind bypass keys (gt-nc1t).
+func TestDismissStartupDialogsBlind_AnswersTrustDialogFirst(t *testing.T) {
+	t.Parallel()
+	pane := &fakePane{content: claudeTrustDialogCancelFirst, confirm: showPrompt}
+	_, err := runDialog(t, pane, func(tm *Tmux) error { return tm.DismissStartupDialogsBlind("gt-x") })
+	if err != nil {
+		t.Fatalf("DismissStartupDialogsBlind: %v", err)
+	}
+	want := []string{"Down", "Enter", "Down", "Enter"}
+	if got := pane.sentKeys(); !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %q, want %q", got, want)
 	}
 }
 
 // TestDismissStartupDialogsBlind_InvalidSession verifies error handling
 // when the session doesn't exist.
 func TestDismissStartupDialogsBlind_InvalidSession(t *testing.T) {
-	tm := newTestTmux(t)
-
-	err := tm.DismissStartupDialogsBlind("gt-nonexistent-session-blind-xyz")
-	// Should return an error since the session doesn't exist
-	if err == nil {
+	t.Parallel()
+	s := newScripted((&fakePane{dead: true}).answer)
+	if err := unitTmux(s, nil).DismissStartupDialogsBlind("gt-x"); err == nil {
 		t.Error("expected error for nonexistent session, got nil")
 	}
 }
@@ -400,27 +384,23 @@ Enter to select · Esc to cancel`,
 // blocking question dialog sends a single Escape keystroke without polling
 // or screen-scraping (gt-z83).
 func TestDismissBlockingQuestionDialog_SendsEscape(t *testing.T) {
-	tm := newTestTmux(t)
-	sessionName := "gt-test-question-dismiss-" + t.Name()
-
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer func() { _ = tm.KillSession(sessionName) }()
-
-	if err := tm.DismissBlockingQuestionDialog(sessionName); err != nil {
+	t.Parallel()
+	s := newScripted(nil)
+	if err := unitTmux(s, nil).DismissBlockingQuestionDialog("gt-x"); err != nil {
 		t.Fatalf("DismissBlockingQuestionDialog: %v", err)
+	}
+	got := s.all()
+	if len(got) != 1 || !got[0].has("send-keys", "-t", "gt-x", "Escape") {
+		t.Fatalf("calls = %v, want one send-keys Escape", got)
 	}
 }
 
 // TestDismissBlockingQuestionDialog_InvalidSession verifies error handling
 // when the session doesn't exist.
 func TestDismissBlockingQuestionDialog_InvalidSession(t *testing.T) {
-	tm := newTestTmux(t)
-
-	err := tm.DismissBlockingQuestionDialog("gt-nonexistent-session-question-xyz")
-	if err == nil {
-		t.Error("expected error for nonexistent session, got nil")
+	t.Parallel()
+	s := newScripted(bySub(map[string]reply{"send-keys": fail("can't find session: gt-x")}))
+	if err := unitTmux(s, nil).DismissBlockingQuestionDialog("gt-x"); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("err = %v, want ErrSessionNotFound", err)
 	}
 }
