@@ -5,10 +5,15 @@ import (
 	"testing"
 )
 
+// stalePattern can never be current: sessionPrefixPattern always includes hq.
+// (A stale pattern of ^(gt|hq)- is current on a host without GT_ROOT, which
+// made the fixture depend on the environment.)
+const stalePattern = "^(gt)-"
+
 // staleCycleBindings is `tmux list-keys -T prefix` (trimmed to n and p) after
 // an older gt bound C-b n with a prefix pattern that predates a rig add.
-const staleCycleBindings = `bind-key    -T prefix n       if-shell "echo '#{session_name}' | grep -Eq '^(gt|hq)-'" "run-shell 'gt cycle next --session #{session_name} --client #{client_tty}'" next-window
-bind-key    -T prefix p       if-shell "echo '#{session_name}' | grep -Eq '^(gt|hq)-'" "run-shell 'gt cycle prev --session #{session_name} --client #{client_tty}'" previous-window`
+const staleCycleBindings = `bind-key    -T prefix n       if-shell "echo '#{session_name}' | grep -Eq '^(gt)-'" "run-shell 'gt cycle next --session #{session_name} --client #{client_tty}'" next-window
+bind-key    -T prefix p       if-shell "echo '#{session_name}' | grep -Eq '^(gt)-'" "run-shell 'gt cycle prev --session #{session_name} --client #{client_tty}'" previous-window`
 
 // TestIsGTBindingCurrent_DetectsStalePattern verifies that isGTBindingCurrent
 // returns false when the baked-in pattern doesn't match the current pattern.
@@ -25,7 +30,7 @@ func TestIsGTBindingCurrent_DetectsStalePattern(t *testing.T) {
 	if tm.isGTBindingCurrent("prefix", "n", "^(gt|hq|qu)-") {
 		t.Error("expected isGTBindingCurrent to return false for stale pattern")
 	}
-	if !tm.isGTBindingCurrent("prefix", "n", "^(gt|hq)-") {
+	if !tm.isGTBindingCurrent("prefix", "n", stalePattern) {
 		t.Error("expected isGTBindingCurrent to return true for matching pattern")
 	}
 	for _, c := range s.find("list-keys") {
@@ -67,7 +72,7 @@ func TestSetCycleBindings_RefreshesStalePattern(t *testing.T) {
 // already has --client and the current pattern is left alone.
 func TestSetCycleBindings_SkipsCurrentBinding(t *testing.T) {
 	t.Parallel()
-	current := strings.ReplaceAll(staleCycleBindings, "^(gt|hq)-", sessionPrefixPattern())
+	current := strings.ReplaceAll(staleCycleBindings, stalePattern, sessionPrefixPattern())
 	s := newScripted(bySub(map[string]reply{"list-keys": ok(current)}))
 	if err := unitTmux(s, nil).SetCycleBindings("gt-x"); err != nil {
 		t.Fatalf("SetCycleBindings: %v", err)
