@@ -184,6 +184,7 @@ func (d *Daemon) pushDoltRemotes() {
 // unsafe-concurrent-writer hazard that keeps bd's own auto-push disabled by
 // default; routing through the server that already owns the data dir avoids it.
 func (d *Daemon) openDoltDB(dbName string) (*sql.DB, error) {
+	// Must build its DSN via doltRemotesDSN: TestOpenDoltDB_ReadTimeoutExceedsPushTimeout checks that function, not this one.
 	return sql.Open("mysql", d.doltRemotesDSN(dbName))
 }
 
