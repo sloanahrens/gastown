@@ -45,7 +45,6 @@ internal/session
 internal/telemetry
 internal/templates
 internal/testutil
-internal/tui/convoy
 internal/tui/feed
 internal/ui
 internal/util
