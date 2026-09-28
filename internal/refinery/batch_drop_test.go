@@ -126,6 +126,40 @@ func TestRecordEditorialDrop_IncrementsAcrossCycles(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("editorial-drop-escalated:abc123 appears %d times in %v, want exactly 1", count, labels)
 	}
+	if got := recorderOf(t, e).Escalations(); len(got) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one, at the threshold", got)
+	}
+}
+
+// TestRecordEditorialDrop_MultiLineStderrStillEscalates: the stderr a
+// dropped review leaves is the gate script's raw output, usually several
+// lines. It used to be folded into the escalation's description, which gt
+// escalate hands to bd create --title; a title with a newline is refused
+// (the gt-qna failure), so the one alarm gt-crvw0 added for a stuck MR never
+// landed. The headline must be one line, with the output in the reason.
+func TestRecordEditorialDrop_MultiLineStderrStillEscalates(t *testing.T) {
+	t.Parallel()
+	store := newCulpritLabelStore(map[string][]string{"gt-mr-a": {"gt:merge-request"}})
+	e := newCulpritTestEngineer(t, store)
+	stderr := "om review: backend unavailable\nretrying once\nom review: backend unavailable"
+
+	mr := &MRInfo{ID: "gt-mr-a", SourceIssue: "gt-work-a", CommitSHA: "abc123", Labels: []string{"gt:merge-request"}}
+	for i := 0; i < editorialDropEscalationThreshold; i++ {
+		e.recordEditorialDrop(mr, editorial.Tooling, stderr)
+		mr.Labels = store.labelsOf("gt-mr-a")
+	}
+
+	got := recorderOf(t, e).Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one; output:\n%s", got, e.output)
+	}
+	esc := got[0].Escalation
+	if strings.ContainsAny(esc.Description, "\r\n") || !strings.Contains(esc.Description, "gt-mr-a") {
+		t.Errorf("description = %q, want one line naming the MR", esc.Description)
+	}
+	if esc.Severity != "high" || !strings.Contains(esc.Reason, "editorial-drop-stuck") || !strings.Contains(esc.Reason, stderr) {
+		t.Errorf("escalation = %+v, want high severity with the class and the full output in the reason", esc)
+	}
 }
 
 // TestRecordEditorialDrop_HeadMoveResetsCount covers a rework: once the

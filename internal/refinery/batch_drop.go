@@ -124,12 +124,16 @@ func (e *Engineer) escalateEditorialDrop(mr *MRInfo, class editorial.FailureClas
 	}
 
 	_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: dropped %d times at %s with no rework path — escalating\n", mr.ID, count, shortSHA(head))
-	msg := fmt.Sprintf("MR %s dropped from %d consecutive editorial batches at %s (%s): %s",
-		mr.ID, count, shortSHA(head), class, stderr)
+	// The headline is one line: it becomes the escalation bead's title, and
+	// bd refuses a title with a newline (gt-qna). The drop's stderr is the
+	// gate script's raw, usually multi-line, output, so it goes in the
+	// reason, after the class word the reason used to carry alone.
+	headline := fmt.Sprintf("MR %s dropped from %d consecutive editorial batches at %s (%s)",
+		mr.ID, count, shortSHA(head), class)
 	if err := e.notify(e.workDir).Escalate(context.Background(), notify.Escalation{
 		Severity:    "high",
-		Description: msg,
-		Reason:      "editorial-drop-stuck",
+		Description: headline,
+		Reason:      "editorial-drop-stuck: " + stderr,
 	}); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Batch] Warning: editorial-drop escalation failed: %v\n", err)
 	}
