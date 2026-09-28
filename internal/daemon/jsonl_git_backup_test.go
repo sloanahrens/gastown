@@ -2,12 +2,11 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/steveyegge/gastown/internal/notify"
-	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"io"
 	"log"
 	"os"
@@ -17,6 +16,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 func TestGitChildEnv_ForwardsExisting(t *testing.T) {
@@ -1408,6 +1411,63 @@ func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("did not find escalation_dropped event in events file")
+	}
+}
+
+// TestEscalate_TimedOutAttemptsAreLoggedAsTimeouts: notify.CLI reports a
+// killed gt escalate as an error wrapping context.DeadlineExceeded, with gt's
+// output after it. escalateAlertErr must recognise the wrapped deadline, log
+// each attempt as a timeout (gt-tlwv), and record the final drop in the feed
+// as "context deadline exceeded" rather than as an ordinary failure.
+func TestEscalate_TimedOutAttemptsAreLoggedAsTimeouts(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rec := notifyfake.New()
+	rec.Fail(notifyfake.KindEscalate, fmt.Errorf("gt escalate: %w (signal: killed)", context.DeadlineExceeded))
+	var logs bytes.Buffer
+	d := &Daemon{
+		logger:   log.New(&logs, "", 0),
+		config:   &Config{TownRoot: townRoot},
+		notifier: rec,
+	}
+
+	err := d.escalateAlertErr("k", "main_branch_test", "test failed")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("escalateAlertErr = %v, want the wrapped deadline", err)
+	}
+	for attempt := 1; attempt <= maxEscalationRetries; attempt++ {
+		want := fmt.Sprintf("escalate(main_branch_test): attempt %d/%d timed out after %s", attempt, maxEscalationRetries, defaultEscalationTimeout)
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "failed:") {
+		t.Errorf("a timed-out attempt was logged as an ordinary failure:\n%s", logs.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(townRoot, ".events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	var dropped []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("event line %q: %v", line, err)
+		}
+		if record["type"] == events.TypeEscalationDropped {
+			payload, _ := record["payload"].(map[string]any)
+			dropped = append(dropped, payload)
+		}
+	}
+	if len(dropped) != 1 {
+		t.Fatalf("escalation_dropped events = %d, want 1 (the final drop):\n%s", len(dropped), data)
+	}
+	if got := dropped[0]["error"]; got != "context deadline exceeded" {
+		t.Errorf("dropped error = %q, want %q", got, "context deadline exceeded")
+	}
+	if got := dropped[0]["message"]; got != "test failed" {
+		t.Errorf("dropped message = %q, want %q", got, "test failed")
 	}
 }
 
