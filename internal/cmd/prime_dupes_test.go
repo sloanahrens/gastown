@@ -50,7 +50,7 @@ func gitRootFixture(t *testing.T) string {
 // the returned buffer.
 func realGitPrimeTools() (primeTools, *bytes.Buffer) {
 	var out bytes.Buffer
-	return primeTools{clock: clockwork.NewFakeClock(), out: &out}, &out
+	return primeTools{clock: clockwork.NewFakeClockAt(primeTestEpoch), out: &out}, &out
 }
 
 // hookedPathDupesOutput runs the check on real git and returns what it printed.

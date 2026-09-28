@@ -907,7 +907,7 @@ func (p primeTools) memoryIndex(workDir string) {
 		return // Silently skip if kv list fails
 	}
 
-	fmt.Fprint(p.w(), renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars))
+	_, _ = fmt.Fprint(p.w(), renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars))
 }
 
 func (p primeTools) kvList(workDir string) (map[string]string, error) {

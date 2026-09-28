@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jonboulle/clockwork"
 )
@@ -89,10 +90,14 @@ func (f *fakePrimeRunner) callLines() []string {
 // newFakePrimeTools returns primeTools wired to f, a fake clock, and a buffer
 // that collects everything prime prints.
 func newFakePrimeTools(f *fakePrimeRunner) (primeTools, *clockwork.FakeClock, *bytes.Buffer) {
-	clk := clockwork.NewFakeClock()
+	clk := clockwork.NewFakeClockAt(primeTestEpoch)
 	var out bytes.Buffer
 	return primeTools{run: f.run, clock: clk, out: &out}, clk, &out
 }
+
+// primeTestEpoch is where every fake clock in the prime tests starts, so a
+// test never depends on the wall-clock time it runs at.
+var primeTestEpoch = time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
 
 const (
 	primeKVListCall     = "bd:kv list --json"
@@ -391,6 +396,3 @@ func TestCheckPendingEscalations_SkipsMailDeliveryBeads(t *testing.T) {
 		t.Fatalf("mail-delivery bead should not appear in output: %q", out.String())
 	}
 }
-
-// Compile-time check that the fake matches the production runner's shape.
-var _ primeRunFunc = (&fakePrimeRunner{}).run
