@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"os"
 	"os/exec"
@@ -46,22 +45,8 @@ func setupRigBeadsDB(t *testing.T, rigPath, prefix string) *beads.Beads {
 		testutil.SkipOrFailContainerInit(t, b, err)
 	}
 
-	// Keep the test container clean.
-	dbName := "beads_" + prefix
-	t.Cleanup(func() {
-		dsn := "root:@tcp(127.0.0.1:" + testutil.DoltContainerPort() + ")/"
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			t.Logf("cleanup: sql.Open failed for %s: %v", dbName, err)
-			return
-		}
-		defer db.Close()
-
-		if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
-			t.Logf("cleanup: drop %s failed: %v", dbName, err)
-		}
-		_, _ = db.Exec("CALL dolt_purge_dropped_databases()")
-	})
+	// Keep the test container clean, through the catalog gate.
+	testutil.DropTestDatabaseOnCleanup(t, b)
 
 	return b
 }

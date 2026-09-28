@@ -2,11 +2,9 @@ package cmd
 
 import (
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -995,23 +993,10 @@ func setupPatrolTestDB(t *testing.T) (string, *beads.Beads) {
 		testutil.SkipOrFailContainerInit(t, b, err)
 	}
 
-	// Clean up the test database after the test to avoid leaking
-	// beads_pt* databases on the shared Dolt server.
-	dbName := "beads_" + prefix
-	t.Cleanup(func() {
-		dsn := fmt.Sprintf("root:@tcp(127.0.0.1:%s)/", testutil.DoltContainerPort())
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			t.Logf("cleanup: failed to connect to dolt server to drop %s: %v", dbName, err)
-			return
-		}
-		defer db.Close()
-		if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
-			t.Logf("cleanup: failed to drop %s: %v", dbName, err)
-		}
-		// Purge dropped databases to prevent accumulation on disk
-		db.Exec("CALL dolt_purge_dropped_databases()") //nolint:errcheck
-	})
+	// Drop the test database when the test ends. The drop is a catalog
+	// change, so it goes through the catalog gate instead of racing the bd
+	// calls of the tests still running on the shared container.
+	testutil.DropTestDatabaseOnCleanup(t, b)
 
 	return tmpDir, b
 }
