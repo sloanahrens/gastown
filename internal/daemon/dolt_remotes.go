@@ -198,7 +198,7 @@ func (d *Daemon) doltRemotesDSN(dbName string) string {
 // doltRemotesDSNWithTimeout builds a dolt_remotes MySQL DSN with ioTimeout as
 // the driver's socket read and write timeout. Production always goes through
 // doltRemotesDSN; tests pass short timeouts to exercise the driver's timeout
-// behaviour without long waits.
+// behavior without long waits.
 func doltRemotesDSNWithTimeout(host string, port int, dbName string, ioTimeout time.Duration) string {
 	return fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
 		host, port, dbName, ioTimeout, ioTimeout)
