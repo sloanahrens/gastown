@@ -72,6 +72,14 @@ func (c tmuxCall) sub() string {
 	return c.args[0]
 }
 
+// last returns the final argument (for display-message, the format).
+func (c tmuxCall) last() string {
+	if len(c.args) == 0 {
+		return ""
+	}
+	return c.args[len(c.args)-1]
+}
+
 func (c tmuxCall) String() string { return c.name + " " + strings.Join(c.args, " ") }
 
 // has reports whether args contains every one of want, in order, contiguously.
