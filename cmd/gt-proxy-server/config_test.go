@@ -12,6 +12,7 @@ import (
 )
 
 func TestLoadConfig(t *testing.T) {
+	t.Parallel()
 	t.Run("parses all fields correctly", func(t *testing.T) {
 		cfg := ProxyConfig{
 			ListenAddr:      "0.0.0.0:9876",
@@ -46,6 +47,7 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestLoadConfigMissing(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "nonexistent.json")
 	cfg, err := loadConfig(path)
 	require.NoError(t, err, "missing config file should not return error")
@@ -53,6 +55,7 @@ func TestLoadConfigMissing(t *testing.T) {
 }
 
 func TestLoadConfigInvalidJSON(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(path, []byte("{not valid json"), 0644))
 
@@ -61,6 +64,7 @@ func TestLoadConfigInvalidJSON(t *testing.T) {
 }
 
 func TestLoadConfigInvalidIP(t *testing.T) {
+	t.Parallel()
 	// Invalid IPs in extra_san_ips are validated in main(), not loadConfig().
 	// loadConfig only deserialises the JSON — the IP strings are returned as-is.
 	// This test verifies that loadConfig itself does not error on invalid IP strings.
@@ -74,6 +78,7 @@ func TestLoadConfigInvalidIP(t *testing.T) {
 }
 
 func TestParseAllowedSubcmds(t *testing.T) {
+	t.Parallel()
 	t.Run("empty string returns nil", func(t *testing.T) {
 		assert.Nil(t, parseAllowedSubcmds(""))
 	})
@@ -129,6 +134,7 @@ func TestParseAllowedSubcmds(t *testing.T) {
 }
 
 func TestBuildAllowedSubcmds(t *testing.T) {
+	t.Parallel()
 	t.Run("nil map returns empty string", func(t *testing.T) {
 		assert.Equal(t, "", buildAllowedSubcmds(nil))
 	})
@@ -154,6 +160,7 @@ func TestBuildAllowedSubcmds(t *testing.T) {
 }
 
 func TestParseAllowedSubcmdsRoundTrip(t *testing.T) {
+	t.Parallel()
 	t.Run("empty string survives round-trip", func(t *testing.T) {
 		// parse("") → nil → build(nil) → "" → parse("") → nil
 		parsed := parseAllowedSubcmds("")

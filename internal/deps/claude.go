@@ -47,6 +47,11 @@ func CheckClaudeCode() (ClaudeCodeStatus, string) {
 	cmd := exec.CommandContext(ctx, path, "--version")
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
+	return claudeCodeStatusFromOutput(output, err)
+}
+
+// claudeCodeStatusFromOutput classifies the result of running "claude --version".
+func claudeCodeStatusFromOutput(output []byte, err error) (ClaudeCodeStatus, string) {
 	if err != nil {
 		return ClaudeCodeExecFailed, ""
 	}

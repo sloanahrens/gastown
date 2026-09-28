@@ -1,8 +1,12 @@
 package deps
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseDoltVersion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -27,21 +31,35 @@ func TestParseDoltVersion(t *testing.T) {
 	}
 }
 
-func TestCheckDolt(t *testing.T) {
-	status, version, _ := CheckDolt()
-
-	if status == DoltNotFound {
-		t.Skip("dolt not installed, skipping integration test")
+func TestDoltStatusFromOutput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		output      string
+		err         error
+		wantStatus  DoltStatus
+		wantVersion string
+		wantDetail  string
+	}{
+		{"exec error with output", "permission denied\n", errors.New("exit status 1"), DoltExecFailed, "", "at /x/dolt: permission denied"},
+		{"exec error without output", "", errors.New("exit status 2"), DoltExecFailed, "", "at /x/dolt: exit status 2"},
+		{"unparseable", "  garbage\n", nil, DoltUnknown, "", "garbage"},
+		{"too old", "dolt version " + belowVersion(MinDoltVersion), nil, DoltTooOld, belowVersion(MinDoltVersion), ""},
+		{"at minimum", "dolt version " + MinDoltVersion + "\n", nil, DoltOK, MinDoltVersion, ""},
 	}
-
-	if status == DoltOK && version == "" {
-		t.Error("CheckDolt returned DoltOK but empty version")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			status, version, detail := doltStatusFromOutput("/x/dolt", []byte(tt.output), tt.err)
+			if status != tt.wantStatus || version != tt.wantVersion || detail != tt.wantDetail {
+				t.Errorf("doltStatusFromOutput(%q, %v) = %d, %q, %q; want %d, %q, %q", tt.output, tt.err, status, version, detail, tt.wantStatus, tt.wantVersion, tt.wantDetail)
+			}
+		})
 	}
-
-	t.Logf("CheckDolt: status=%d, version=%s", status, version)
 }
 
 func TestMinDoltVersionBoundary(t *testing.T) {
+	t.Parallel()
 	if CompareVersions("2.0.6", MinDoltVersion) >= 0 {
 		t.Fatalf("2.0.6 should be below MinDoltVersion %s", MinDoltVersion)
 	}

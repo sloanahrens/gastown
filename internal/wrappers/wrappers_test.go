@@ -81,21 +81,13 @@ func TestEmbeddedScripts_HaveGtPrime(t *testing.T) {
 }
 
 func TestInstall_CreatesAllWrappers(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("wrapper install not supported on Windows")
+	t.Parallel()
+	binDir := filepath.Join(t.TempDir(), "bin")
+
+	if err := installTo(binDir); err != nil {
+		t.Fatalf("installTo() error = %v", err)
 	}
 
-	// Override HOME to use a temp directory
-	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	t.Cleanup(func() { os.Setenv("HOME", origHome) })
-
-	if err := Install(); err != nil {
-		t.Fatalf("Install() error = %v", err)
-	}
-
-	binDir := filepath.Join(tmpHome, "bin")
 	for _, name := range expectedWrappers {
 		path := filepath.Join(binDir, name)
 		info, err := os.Stat(path)
@@ -103,97 +95,89 @@ func TestInstall_CreatesAllWrappers(t *testing.T) {
 			t.Errorf("Wrapper %s not created: %v", name, err)
 			continue
 		}
-		// Check executable permissions
-		if info.Mode()&0111 == 0 {
+		// Check executable permissions (Windows has no execute bit).
+		if runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
 			t.Errorf("Wrapper %s is not executable: mode=%v", name, info.Mode())
 		}
 	}
 }
 
+func TestInstall_FailsWhenBinDirIsAFile(t *testing.T) {
+	t.Parallel()
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(binDir, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installTo(binDir); err == nil {
+		t.Error("installTo() into a regular file = nil error, want a mkdir error")
+	}
+}
+
 func TestRemove_CleansUp(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("wrapper removal not supported on Windows")
+	t.Parallel()
+	binDir := filepath.Join(t.TempDir(), "bin")
+
+	if err := installTo(binDir); err != nil {
+		t.Fatalf("installTo() error = %v", err)
 	}
-
-	// Override HOME to use a temp directory
-	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	t.Cleanup(func() { os.Setenv("HOME", origHome) })
-
-	// Install first
-	if err := Install(); err != nil {
-		t.Fatalf("Install() error = %v", err)
-	}
-
-	// Verify files exist
-	binDir := filepath.Join(tmpHome, "bin")
 	for _, name := range expectedWrappers {
 		if _, err := os.Stat(filepath.Join(binDir, name)); err != nil {
-			t.Fatalf("Precondition: wrapper %s should exist after Install", name)
+			t.Fatalf("Precondition: wrapper %s should exist after install", name)
 		}
 	}
 
-	// Remove
-	if err := Remove(); err != nil {
-		t.Fatalf("Remove() error = %v", err)
+	if err := removeFrom(binDir); err != nil {
+		t.Fatalf("removeFrom() error = %v", err)
 	}
 
-	// Verify files are gone
 	for _, name := range expectedWrappers {
 		if _, err := os.Stat(filepath.Join(binDir, name)); err == nil {
-			t.Errorf("Wrapper %s still exists after Remove()", name)
+			t.Errorf("Wrapper %s still exists after removeFrom()", name)
 		}
 	}
 }
 
 func TestRemove_NoErrorWhenMissing(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("wrapper removal not supported on Windows")
-	}
-
-	// Override HOME to use a temp directory (no wrappers installed)
-	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	t.Cleanup(func() { os.Setenv("HOME", origHome) })
-
-	// Remove should not error when files don't exist
-	if err := Remove(); err != nil {
-		t.Errorf("Remove() should not error when wrappers don't exist: %v", err)
+	t.Parallel()
+	// No wrappers installed: removal must not error.
+	if err := removeFrom(filepath.Join(t.TempDir(), "bin")); err != nil {
+		t.Errorf("removeFrom() should not error when wrappers don't exist: %v", err)
 	}
 }
 
 func TestInstall_Idempotent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("wrapper install not supported on Windows")
+	t.Parallel()
+	binDir := filepath.Join(t.TempDir(), "bin")
+
+	if err := installTo(binDir); err != nil {
+		t.Fatalf("First installTo() error = %v", err)
+	}
+	if err := installTo(binDir); err != nil {
+		t.Fatalf("Second installTo() error = %v", err)
 	}
 
-	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	t.Cleanup(func() { os.Setenv("HOME", origHome) })
-
-	// Install twice
-	if err := Install(); err != nil {
-		t.Fatalf("First Install() error = %v", err)
-	}
-	if err := Install(); err != nil {
-		t.Fatalf("Second Install() error = %v", err)
-	}
-
-	// All wrappers should still exist with correct content
-	binDir := filepath.Join(tmpHome, "bin")
 	for _, name := range expectedWrappers {
 		content, err := os.ReadFile(filepath.Join(binDir, name))
 		if err != nil {
 			t.Errorf("Wrapper %s missing after double install: %v", name, err)
 			continue
 		}
-		// Should match embedded content
 		embedded, _ := scriptsFS.ReadFile("scripts/" + name)
 		if string(content) != string(embedded) {
 			t.Errorf("Wrapper %s content doesn't match embedded script after double install", name)
 		}
+	}
+}
+
+// TestBinDirIsHomeBin checks the exported entry points target ~/bin,
+// reading HOME without changing it.
+func TestBinDirIsHomeBin(t *testing.T) {
+	t.Parallel()
+	want := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		want = filepath.Join(home, "bin")
+	}
+	if got := BinDir(); got != want {
+		t.Errorf("BinDir() = %q, want %q", got, want)
 	}
 }

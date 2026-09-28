@@ -54,7 +54,11 @@ func Remove() error {
 }
 
 func DetectShell() string {
-	shell := os.Getenv("SHELL")
+	return detectShell(os.Getenv("SHELL"))
+}
+
+// detectShell maps a $SHELL value to "zsh" or "bash", defaulting to zsh.
+func detectShell(shell string) string {
 	if strings.HasSuffix(shell, "zsh") {
 		return "zsh"
 	}

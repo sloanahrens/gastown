@@ -1,8 +1,12 @@
 package deps
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseClaudeCodeVersion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -25,16 +29,29 @@ func TestParseClaudeCodeVersion(t *testing.T) {
 	}
 }
 
-func TestCheckClaudeCode(t *testing.T) {
-	status, version := CheckClaudeCode()
-
-	if status == ClaudeCodeNotFound {
-		t.Skip("claude not installed, skipping integration test")
+func TestClaudeCodeStatusFromOutput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		output      string
+		err         error
+		wantStatus  ClaudeCodeStatus
+		wantVersion string
+	}{
+		{"exec error", "2.1.101 (Claude Code)", errors.New("exit status 1"), ClaudeCodeExecFailed, ""},
+		{"unparseable", "garbage", nil, ClaudeCodeUnknown, ""},
+		{"too old", belowVersion(MinClaudeCodeVersion) + " (Claude Code)", nil, ClaudeCodeTooOld, belowVersion(MinClaudeCodeVersion)},
+		{"at minimum, below recommended", MinClaudeCodeVersion + " (Claude Code)\n", nil, ClaudeCodeOldButOK, MinClaudeCodeVersion},
+		{"at recommended", RecommendedClaudeCodeVersion, nil, ClaudeCodeOK, RecommendedClaudeCodeVersion},
+		{"newer", "2.1.101 (Claude Code)", nil, ClaudeCodeOK, "2.1.101"},
 	}
-
-	if status == ClaudeCodeOK && version == "" {
-		t.Error("CheckClaudeCode returned ClaudeCodeOK but empty version")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			status, version := claudeCodeStatusFromOutput([]byte(tt.output), tt.err)
+			if status != tt.wantStatus || version != tt.wantVersion {
+				t.Errorf("claudeCodeStatusFromOutput(%q, %v) = %d, %q; want %d, %q", tt.output, tt.err, status, version, tt.wantStatus, tt.wantVersion)
+			}
+		})
 	}
-
-	t.Logf("CheckClaudeCode: status=%d, version=%s", status, version)
 }

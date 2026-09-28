@@ -1,27 +1,20 @@
+//go:build integration
+
 package main
 
 import (
 	"os"
 	"os/exec"
-	"runtime"
 	"testing"
 )
 
-// TestCrossPlatformBuild verifies that the codebase compiles for all supported
+// TestIntegrationCrossPlatformBuild verifies that the codebase compiles for all supported
 // platforms. This catches cases where platform-specific code (using build tags
 // like //go:build !windows) is called from platform-agnostic code without
 // providing stubs for all platforms.
-func TestCrossPlatformBuild(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping cross-platform build test in short mode")
-	}
-
-	// Skip if not running on a platform that can cross-compile
-	// (need Go toolchain, not just running tests)
-	if os.Getenv("CI") == "" && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("skipping cross-platform build test on unsupported platform")
-	}
-
+//
+// It runs the go tool, so it lives in the integration tier.
+func TestIntegrationCrossPlatformBuild(t *testing.T) {
 	platforms := []struct {
 		goos   string
 		goarch string

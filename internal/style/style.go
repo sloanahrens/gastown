@@ -4,6 +4,7 @@ package style
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/charmbracelet/lipgloss"
@@ -55,6 +56,11 @@ var (
 // The format and args work like fmt.Printf.
 // Writes to stderr so warnings never contaminate structured (JSON) output on stdout.
 func PrintWarning(format string, args ...interface{}) {
+	fprintWarning(os.Stderr, format, args...)
+}
+
+// fprintWarning is PrintWarning writing to w.
+func fprintWarning(w io.Writer, format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(os.Stderr, "%s %s\n", Warning.Render(ui.IconWarn+" Warning:"), msg)
+	fmt.Fprintf(w, "%s %s\n", Warning.Render(ui.IconWarn+" Warning:"), msg)
 }

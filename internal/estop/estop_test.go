@@ -7,6 +7,7 @@ import (
 )
 
 func TestActivateAndRead(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if IsActive(townRoot) {
@@ -34,6 +35,7 @@ func TestActivateAndRead(t *testing.T) {
 }
 
 func TestDeactivate(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if err := Activate(townRoot, TriggerManual, ""); err != nil {
@@ -50,6 +52,7 @@ func TestDeactivate(t *testing.T) {
 }
 
 func TestDeactivateOnlyAutoSkipsManual(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if err := Activate(townRoot, TriggerManual, "human triggered"); err != nil {
@@ -67,6 +70,7 @@ func TestDeactivateOnlyAutoSkipsManual(t *testing.T) {
 }
 
 func TestDeactivateOnlyAutoRemovesAuto(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if err := Activate(townRoot, TriggerAuto, "dolt-unreachable"); err != nil {
@@ -83,6 +87,7 @@ func TestDeactivateOnlyAutoRemovesAuto(t *testing.T) {
 }
 
 func TestFilePath(t *testing.T) {
+	t.Parallel()
 	got := FilePath("/tmp/mytown")
 	want := filepath.Join("/tmp/mytown", FileName)
 	if got != want {
@@ -91,6 +96,7 @@ func TestFilePath(t *testing.T) {
 }
 
 func TestReadNonExistent(t *testing.T) {
+	t.Parallel()
 	info := Read(t.TempDir())
 	if info != nil {
 		t.Error("Read should return nil for non-existent file")
@@ -98,6 +104,7 @@ func TestReadNonExistent(t *testing.T) {
 }
 
 func TestPerRigActivateAndRead(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if IsRigActive(townRoot, "gastown") {
@@ -129,6 +136,7 @@ func TestPerRigActivateAndRead(t *testing.T) {
 }
 
 func TestIsAnyActive(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if IsAnyActive(townRoot, "gastown") {
@@ -160,6 +168,7 @@ func TestIsAnyActive(t *testing.T) {
 }
 
 func TestPerRigDeactivate(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := ActivateRig(townRoot, "gastown", TriggerManual, ""); err != nil {
 		t.Fatal(err)
@@ -173,6 +182,7 @@ func TestPerRigDeactivate(t *testing.T) {
 }
 
 func TestParseBareFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// Simulate a bare touch (no content)
 	if err := os.WriteFile(FilePath(townRoot), []byte(""), 0644); err != nil {
@@ -189,6 +199,7 @@ func TestParseBareFile(t *testing.T) {
 }
 
 func TestDeactivateNonExistent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// Should not error on non-existent file
 	if err := Deactivate(townRoot, false); err != nil {

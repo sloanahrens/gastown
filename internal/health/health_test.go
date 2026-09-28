@@ -13,6 +13,7 @@ import (
 // data dir, live parent) — the worst direction for a false positive,
 // because it trains agents to discount the alarm that would matter.
 func TestClassifyListeners(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		listeners     []doltserver.DoltListener

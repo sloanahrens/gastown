@@ -58,9 +58,15 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 	add := func(n ast.Node, rule, msg string) {
 		vs = append(vs, Violation{Pos: fset.Position(n.Pos()), Rule: rule, Msg: msg})
 	}
+	// readOnly holds "#!" literals passed straight to a strings/bytes
+	// comparison (HasPrefix, Contains, ...): reading a shebang is not
+	// writing a script. ast.Inspect visits a call before its arguments, so
+	// the set is filled before the literal is reached.
+	readOnly := map[*ast.BasicLit]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.CallExpr:
+			markReadOnlyLits(n, imp, readOnly)
 			checkTestCall(n, imp, add)
 		case *ast.CompositeLit:
 			// A net.Dialer or net.ListenConfig is only built to dial or listen,
@@ -74,7 +80,7 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 			}
 		case *ast.BasicLit:
 			if n.Kind == token.STRING {
-				if s, err := strconv.Unquote(n.Value); err == nil && strings.HasPrefix(s, "#!") {
+				if s, err := strconv.Unquote(n.Value); err == nil && strings.HasPrefix(s, "#!") && !readOnly[n] {
 					add(n, RuleNoExecFiles, "writes a script; use a fake instead of an executable")
 				}
 			}
@@ -111,6 +117,38 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 		}
 	}
 	return vs
+}
+
+// readOnlyStringFuncs are the strings and bytes functions that only inspect
+// their arguments and return a bool or an int. Functions that return (part
+// of) an argument, such as TrimPrefix, CutPrefix or Cut, are left out: their
+// result can carry the "#!" literal on into a write.
+var readOnlyStringFuncs = map[string]bool{
+	"HasPrefix": true, "HasSuffix": true, "Contains": true, "Index": true,
+	"LastIndex": true, "Count": true, "Equal": true, "EqualFold": true,
+}
+
+// markReadOnlyLits records the string literals that c, a call to a
+// read-only strings/bytes function, takes directly or as []byte(literal).
+func markReadOnlyLits(c *ast.CallExpr, imp map[string]string, readOnly map[*ast.BasicLit]bool) {
+	sel, ok := c.Fun.(*ast.SelectorExpr)
+	if !ok || !readOnlyStringFuncs[sel.Sel.Name] {
+		return
+	}
+	x, ok := sel.X.(*ast.Ident)
+	if !ok || x.Obj != nil || (imp[x.Name] != "strings" && imp[x.Name] != "bytes") {
+		return
+	}
+	for _, arg := range c.Args {
+		if conv, ok := arg.(*ast.CallExpr); ok && len(conv.Args) == 1 {
+			if at, ok := conv.Fun.(*ast.ArrayType); ok && at.Len == nil {
+				arg = conv.Args[0]
+			}
+		}
+		if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			readOnly[lit] = true
+		}
+	}
 }
 
 func checkTestCall(c *ast.CallExpr, imp map[string]string, add func(ast.Node, string, string)) {

@@ -3,6 +3,7 @@ package hookutil
 import "testing"
 
 func TestIsAutonomousRole(t *testing.T) {
+	t.Parallel()
 	autonomous := []string{"polecat", "witness", "refinery", "deacon", "boot", "dog"}
 	for _, role := range autonomous {
 		if !IsAutonomousRole(role) {

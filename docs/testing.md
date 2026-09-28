@@ -263,6 +263,10 @@ Keep the triage as a TSV (`file`, `test`, `bucket`, `reason`). The MR body is bu
 
 A test that only `t.Log`s a mismatch, or that discards the error it is supposedly checking, asserts nothing. Its replacement must assert.
 
+Keep the wiring guard when you add a seam. When an exported function becomes a thin wrapper that passes real values (`os.Getenv`, `time.Now`, `os.Stderr`, the town socket, `testing.Testing()`) into an unexported twin, tests of the twin no longer check that the wrapper passes the right thing. If the old test guarded that wiring, one test must still go through the exported function. Keep it in the unit tier if it can run without the real tool, or move it to the integration tier if it can't. Prove it: change the wrapper to pass the wrong value, and the test must fail. Two conversions lost guards this way: the events file under `go test` (gt-x9o), which could have written to the live town, and the town socket in `lock.CleanStaleLocks`.
+
+An integration test must be able to fail. If the code under test starts by checking the same precondition the test checks, the test asserts nothing. A missing tool fails the test; it does not pass it.
+
 ### 2. Convert one file or group per commit
 
 After each commit, run:

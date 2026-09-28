@@ -7,6 +7,7 @@ import (
 )
 
 func TestStateManager_StateFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	manager := NewStateManager[TestState](tmpDir, "test-state.json", func() *TestState {
 		return &TestState{Value: "default"}
@@ -19,6 +20,7 @@ func TestStateManager_StateFile(t *testing.T) {
 }
 
 func TestStateManager_Load_NoFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	manager := NewStateManager[TestState](tmpDir, "nonexistent.json", func() *TestState {
 		return &TestState{Value: "default"}
@@ -34,6 +36,7 @@ func TestStateManager_Load_NoFile(t *testing.T) {
 }
 
 func TestStateManager_Load_Save_Load(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	manager := NewStateManager[TestState](tmpDir, "test-state.json", func() *TestState {
 		return &TestState{Value: "default"}
@@ -59,6 +62,7 @@ func TestStateManager_Load_Save_Load(t *testing.T) {
 }
 
 func TestStateManager_Load_CreatesDirectory(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	manager := NewStateManager[TestState](tmpDir, "test-state.json", func() *TestState {
 		return &TestState{Value: "default"}
@@ -78,6 +82,7 @@ func TestStateManager_Load_CreatesDirectory(t *testing.T) {
 }
 
 func TestStateManager_Load_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	manager := NewStateManager[TestState](tmpDir, "test-state.json", func() *TestState {
 		return &TestState{Value: "default"}
@@ -99,6 +104,7 @@ func TestStateManager_Load_InvalidJSON(t *testing.T) {
 }
 
 func TestStateManager_GenericType(t *testing.T) {
+	t.Parallel()
 	// Test that StateManager works with different types
 
 	type ComplexState struct {

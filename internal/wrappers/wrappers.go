@@ -18,7 +18,11 @@ func Install() error {
 	if err != nil {
 		return fmt.Errorf("determining bin directory: %w", err)
 	}
+	return installTo(binDir)
+}
 
+// installTo writes every wrapper script into binDir.
+func installTo(binDir string) error {
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		return fmt.Errorf("creating bin directory: %w", err)
 	}
@@ -44,7 +48,11 @@ func Remove() error {
 	if err != nil {
 		return err
 	}
+	return removeFrom(binDir)
+}
 
+// removeFrom deletes every wrapper script from binDir; missing ones are fine.
+func removeFrom(binDir string) error {
 	wrappers := []string{"gt-codex", "gt-gemini", "gt-opencode"}
 	for _, name := range wrappers {
 		destPath := filepath.Join(binDir, name)

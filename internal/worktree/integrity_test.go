@@ -8,6 +8,7 @@ import (
 )
 
 func TestValidateAcceptsGitDirectory(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	gitdir := filepath.Join(root, ".git")
 	if err := os.Mkdir(gitdir, 0755); err != nil {
@@ -23,6 +24,7 @@ func TestValidateAcceptsGitDirectory(t *testing.T) {
 }
 
 func TestValidateRejectsPartialGitDirectory(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0755); err != nil {
 		t.Fatal(err)
@@ -35,6 +37,7 @@ func TestValidateRejectsPartialGitDirectory(t *testing.T) {
 }
 
 func TestValidateAcceptsLinkedWorktreeGitfile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	gitdir := filepath.Join(root, "repo.git", "worktrees", "alpha")
 	writeLinkedWorktree(t, root, gitdir, true)
@@ -45,6 +48,7 @@ func TestValidateAcceptsLinkedWorktreeGitfile(t *testing.T) {
 }
 
 func TestValidateRejectsMissingRequiredMetadata(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	err := Validate(root, IntegrityOptions{Require: true})
@@ -54,6 +58,7 @@ func TestValidateRejectsMissingRequiredMetadata(t *testing.T) {
 }
 
 func TestValidateAllowsMissingOptionalMetadata(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	if err := Validate(root, IntegrityOptions{}); err != nil {
@@ -62,6 +67,7 @@ func TestValidateAllowsMissingOptionalMetadata(t *testing.T) {
 }
 
 func TestValidateRejectsMalformedGitfile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("not a gitdir\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -74,6 +80,7 @@ func TestValidateRejectsMalformedGitfile(t *testing.T) {
 }
 
 func TestValidateRejectsMissingGitdirTarget(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	missing := filepath.Join(root, "repo.git", "worktrees", "alpha")
 	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+missing+"\n"), 0644); err != nil {
@@ -87,6 +94,7 @@ func TestValidateRejectsMissingGitdirTarget(t *testing.T) {
 }
 
 func TestValidateRejectsPartialGitdirMetadata(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	gitdir := filepath.Join(root, "repo.git", "worktrees", "alpha")
 	writeLinkedWorktree(t, root, gitdir, false)
@@ -98,6 +106,7 @@ func TestValidateRejectsPartialGitdirMetadata(t *testing.T) {
 }
 
 func TestValidateHonorsTownRootBoundary(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	outside := t.TempDir()
 	if err := os.Mkdir(filepath.Join(outside, ".git"), 0755); err != nil {
