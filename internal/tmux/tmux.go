@@ -247,33 +247,42 @@ func liveCreateRefusal(socketName, live string, allowLive bool) error {
 // Falls back to GT_TOWN_SOCKET env var (set by cross-socket tmux bindings).
 // Empty socket means use the default tmux server.
 func NewTmux() *Tmux {
-	sock := GetDefaultSocket()
-	if sock == "" {
-		// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
-		// so that "gt agents menu" / "gt feed" invoked from a personal terminal still
-		// target the correct town server even when InitRegistry was not called.
-		//
-		// That fallback is meant for an interactive CLI process, not a `go
-		// test` binary — but a test process started from inside a live
-		// polecat/agent shell can inherit GT_TOWN_SOCKET from its ambient
-		// environment and silently attach to the town's production tmux
-		// server, creating real (if oddly-named) sessions there (gt-yav3).
-		// Refuse it in test binaries unless explicitly overridden; hermetic
-		// test harnesses (internal/testutil) call SetDefaultSocket to an
-		// isolated gt-test-* socket before this ever runs, so this only
-		// fires for a test that bypasses that harness entirely.
-		if env := os.Getenv("GT_TOWN_SOCKET"); env != "" {
-			if testing.Testing() && os.Getenv(AllowLiveTmuxEnv) != "1" {
-				panic(fmt.Sprintf(
-					"tmux.NewTmux: refusing to use GT_TOWN_SOCKET=%q (a live town socket) "+
-						"from a test binary; route the test through the hermetic harness "+
-						"(internal/testutil) or an explicit tmux.NewTmuxWithSocket(\"gt-test-...\"), "+
-						"or set %s=1 to override", env, AllowLiveTmuxEnv))
-			}
-			sock = env
-		}
+	sock, err := resolveNewTmuxSocket(GetDefaultSocket(), os.Getenv("GT_TOWN_SOCKET"),
+		testing.Testing() && os.Getenv(AllowLiveTmuxEnv) != "1")
+	if err != nil {
+		panic(err.Error())
 	}
 	return &Tmux{socketName: sock}
+}
+
+// resolveNewTmuxSocket is NewTmux's choice of socket: the initialized default
+// socket, else GT_TOWN_SOCKET (townEnv). refuseTownEnv is set for a test
+// binary that has not opted out with AllowLiveTmuxEnv.
+//
+// GT_TOWN_SOCKET is embedded in tmux bindings created by EnsureBindingsOnSocket
+// so that "gt agents menu" / "gt feed" invoked from a personal terminal still
+// target the correct town server even when InitRegistry was not called.
+//
+// That fallback is meant for an interactive CLI process, not a `go test`
+// binary — but a test process started from inside a live polecat/agent shell
+// can inherit GT_TOWN_SOCKET from its ambient environment and silently attach
+// to the town's production tmux server, creating real (if oddly-named)
+// sessions there (gt-yav3). Refuse it in test binaries unless explicitly
+// overridden; hermetic test harnesses (internal/testutil) call
+// SetDefaultSocket to an isolated gt-test-* socket before this ever runs, so
+// this only fires for a test that bypasses that harness entirely.
+func resolveNewTmuxSocket(defaultSocket, townEnv string, refuseTownEnv bool) (string, error) {
+	if defaultSocket != "" || townEnv == "" {
+		return defaultSocket, nil
+	}
+	if refuseTownEnv {
+		return "", fmt.Errorf(
+			"tmux.NewTmux: refusing to use GT_TOWN_SOCKET=%q (a live town socket) "+
+				"from a test binary; route the test through the hermetic harness "+
+				"(internal/testutil) or an explicit tmux.NewTmuxWithSocket(\"gt-test-...\"), "+
+				"or set %s=1 to override", townEnv, AllowLiveTmuxEnv)
+	}
+	return townEnv, nil
 }
 
 // NewTmuxWithSocket creates a Tmux wrapper that targets a named socket.
