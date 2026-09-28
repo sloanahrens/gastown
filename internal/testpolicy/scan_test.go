@@ -32,7 +32,8 @@ func TestScanDirFixtures(t *testing.T) {
 		"integration_skipped":   nil,
 		"setenv_in_subtest":     {RuleNoEnv}, // t.Setenv in a t.Run subtest is still no-env
 		"fake_clock_epoch":      {RuleFakeClockEpoch},
-		"network":               {RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork}, // Dial, DialTimeout, Listen, ListenUnix, net.Dialer
+		"network_more":          {RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork}, // 3 httptest servers, DialIP, ListenIP, ListenMulticastUDP, FileConn, var Dialer, var ListenConfig, new(net.Dialer)
+		"network":               {RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork},                                                                            // Dial, DialTimeout, Listen, ListenUnix, net.Dialer
 	}
 	for dir, want := range cases {
 		dir, want := dir, want
