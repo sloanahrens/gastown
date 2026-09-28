@@ -3,7 +3,6 @@
 cmd/gt-proxy-server
 internal/acp
 internal/activity
-internal/agent
 internal/agent/provider
 internal/agentlog
 internal/agentpause
