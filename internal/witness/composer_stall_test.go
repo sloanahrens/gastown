@@ -165,10 +165,10 @@ func writeShimArm(b *strings.Builder, label, out string) {
 // the gt-hkhu failure. The scan must submit the input and say so.
 func TestDetectStalledRefinerySubmitsPendingInput(t *testing.T) {
 	// The shim keeps serving the same stalled pane, so the post-submit recheck
-	// can never observe a recovery; zero the settle delay so the test does not
+	// can never observe a recovery; skip the settle delay so the test does not
 	// pay three of them.
-	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
-	composerStallRecheckDelay = 0
+	h := newTestHandlers()
+	h.sleepFn = func(time.Duration) {}
 
 	logPath := fakeTmuxShim(t, map[string]string{
 		"has-session":                             "",
@@ -178,7 +178,7 @@ func TestDetectStalledRefinerySubmitsPendingInput(t *testing.T) {
 		"display-message:#{pane_current_command}": "claude",
 	})
 
-	result := DetectStalledRefinery(t.TempDir(), "gastown", false)
+	result := h.detectStalledRefinery(t.TempDir(), "gastown", false)
 
 	logged, err := os.ReadFile(logPath)
 	if err != nil {
@@ -341,8 +341,8 @@ func TestComposerStallActionFor(t *testing.T) {
 // into its new turn — reading that as "still holding input" would send the
 // patrol after a restart for a session that had just recovered (gt-afa7).
 func TestConfirmComposerClearedDistinguishesUnverifiableFromStranded(t *testing.T) {
-	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
-	composerStallRecheckDelay = 0
+	h := newTestHandlers()
+	h.sleepFn = func(time.Duration) {}
 
 	tests := []struct {
 		name         string
@@ -378,7 +378,7 @@ func TestConfirmComposerClearedDistinguishesUnverifiableFromStranded(t *testing.
 				"display-message:#{pane_current_command}": "claude",
 			})
 
-			err := confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
+			err := h.confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
 
 			if got := errors.Is(err, errComposerUnverifiable); got != tt.wantUnverifi {
 				t.Errorf("unverifiable = %v, want %v (err: %v)", got, tt.wantUnverifi, err)
@@ -395,8 +395,8 @@ func TestConfirmComposerClearedDistinguishesUnverifiableFromStranded(t *testing.
 // caller treats that as "submitted, could not confirm" and reports it beside
 // the submit rather than as an error.
 func TestConfirmComposerClearedPropagatesACaptureFailure(t *testing.T) {
-	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
-	composerStallRecheckDelay = 0
+	h := newTestHandlers()
+	h.sleepFn = func(time.Duration) {}
 
 	fakeTmuxShim(t, map[string]string{
 		"has-session":                             "",
@@ -405,7 +405,7 @@ func TestConfirmComposerClearedPropagatesACaptureFailure(t *testing.T) {
 		"display-message:#{pane_current_command}": "claude",
 	})
 
-	err := confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
+	err := h.confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
 	if err == nil {
 		t.Fatal("a pane that could not be captured at all was reported as cleared")
 	}
@@ -445,8 +445,8 @@ func verdictOf(err error) string {
 // recovered composer must report the recovery, not a still-pending/restart
 // verdict off the first miss (gt-0b4z).
 func TestConfirmComposerClearedRetriesPastASingleCaptureFailure(t *testing.T) {
-	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
-	composerStallRecheckDelay = 0
+	h := newTestHandlers()
+	h.sleepFn = func(time.Duration) {}
 
 	logPath := fakeTmuxShimSeq(t, map[string]string{
 		"has-session":                             "",
@@ -456,7 +456,7 @@ func TestConfirmComposerClearedRetriesPastASingleCaptureFailure(t *testing.T) {
 		"capture-pane": {"@fail", clearedComposerPane},
 	})
 
-	err := confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
+	err := h.confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
 	if err != nil {
 		t.Errorf("err = %v, want nil: a single capture miss followed by a cleared composer must be a pass", err)
 	}
@@ -477,8 +477,8 @@ func TestConfirmComposerClearedRetriesPastASingleCaptureFailure(t *testing.T) {
 // one would report a wedged composer as a benign "submitted, could not
 // confirm" (gt-0b4z).
 func TestConfirmComposerClearedRanksMixedFailureModes(t *testing.T) {
-	defer func(d time.Duration) { composerStallRecheckDelay = d }(composerStallRecheckDelay)
-	composerStallRecheckDelay = 0
+	h := newTestHandlers()
+	h.sleepFn = func(time.Duration) {}
 
 	tests := []struct {
 		name     string
@@ -538,7 +538,7 @@ func TestConfirmComposerClearedRanksMixedFailureModes(t *testing.T) {
 				"display-message:#{pane_current_command}": "claude",
 			}, map[string][]string{"capture-pane": tt.attempts})
 
-			err := confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
+			err := h.confirmComposerCleared(tmux.NewTmux(), "gt-refinery", 5*time.Minute)
 			if got := verdictOf(err); got != tt.want {
 				t.Errorf("verdict = %s, want %s (err: %v)", got, tt.want, err)
 			}

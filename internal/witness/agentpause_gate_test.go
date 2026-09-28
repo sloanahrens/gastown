@@ -9,24 +9,20 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// stubRestartSessionExec replaces the session-restart seam so a test can see
-// exactly what RestartPolecatSession decided, and returns the addresses it was
+// stubRestartSessionExec fakes h's session-restart executor so a test can see
+// exactly what restartPolecatSession decided, and returns the addresses it was
 // asked to restart.
 //
 // The seam exists so these tests never spawn a subprocess: a real
 // `gt session restart <addr> --force` from a non-hermetic test process can
 // resolve to the live town and restart a real session (gt-wisp-6ajo).
-//
-// Must not be combined with t.Parallel: it mutates a package variable.
-func stubRestartSessionExec(t *testing.T) *[]string {
+func stubRestartSessionExec(t *testing.T, h *handlers) *[]string {
 	t.Helper()
 	restarts := &[]string{}
-	old := restartSessionExec
-	restartSessionExec = func(_, address string) error {
+	h.restartSessionExecFn = func(_, address string) error {
 		*restarts = append(*restarts, address)
 		return nil
 	}
-	t.Cleanup(func() { restartSessionExec = old })
 	return restarts
 }
 
@@ -35,18 +31,19 @@ func stubRestartSessionExec(t *testing.T) *[]string {
 // a no-op, not a spawn — this is the choke point that closed the
 // done-intent-dead / zombie / staleness respawn instances.
 func TestRestartPolecatSessionHonoursPause(t *testing.T) {
+	h := newTestHandlers()
 	town := testutil.HermeticTest(t)
-	restarts := stubRestartSessionExec(t)
+	restarts := stubRestartSessionExec(t, h)
 	// These tests are about the pause gate. Stub the hold seam too so the
 	// restart path stays subprocess-free and this test cannot be read as a
 	// statement about holds (gt-n38c6, hold_gate_test.go).
-	stubHookHold(t, "", false)
+	stubHookHold(t, h, "", false)
 
 	if err := agentpause.Pause(town, "gastown", "polecat", "flint", "frozen by operator", "human", ""); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
 
-	if err := RestartPolecatSession(town, "gastown", "flint"); err != nil {
+	if err := h.restartPolecatSession(town, "gastown", "flint"); err != nil {
 		t.Fatalf("RestartPolecatSession on paused polecat returned error (want silent no-op): %v", err)
 	}
 
@@ -67,11 +64,12 @@ func TestRestartPolecatSessionHonoursPause(t *testing.T) {
 // asserts the restart itself, so a gate that short-circuited everything —
 // which would satisfy the pause test on its own — fails here.
 func TestRestartPolecatSessionRestartsUnpausedAgent(t *testing.T) {
+	h := newTestHandlers()
 	town := testutil.HermeticTest(t)
-	restarts := stubRestartSessionExec(t)
-	stubHookHold(t, "", false)
+	restarts := stubRestartSessionExec(t, h)
+	stubHookHold(t, h, "", false)
 
-	if err := RestartPolecatSession(town, "gastown", "flint"); err != nil {
+	if err := h.restartPolecatSession(town, "gastown", "flint"); err != nil {
 		t.Fatalf("RestartPolecatSession on unpaused polecat: %v", err)
 	}
 
@@ -90,6 +88,7 @@ func TestRestartPolecatSessionRestartsUnpausedAgent(t *testing.T) {
 // restarting the agent an operator parked is the harm this gate exists to
 // prevent.
 func TestRestartPolecatSessionFailsClosed(t *testing.T) {
+	h := newTestHandlers()
 	cases := []struct {
 		name   string
 		damage func(t *testing.T, markerPath string)
@@ -119,8 +118,8 @@ func TestRestartPolecatSessionFailsClosed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			town := testutil.HermeticTest(t)
-			restarts := stubRestartSessionExec(t)
-			stubHookHold(t, "", false)
+			restarts := stubRestartSessionExec(t, h)
+			stubHookHold(t, h, "", false)
 
 			markerPath := agentpause.FilePath(town, "gastown", "polecat", "flint")
 			if err := os.MkdirAll(filepath.Dir(markerPath), 0o755); err != nil {
@@ -128,7 +127,7 @@ func TestRestartPolecatSessionFailsClosed(t *testing.T) {
 			}
 			tc.damage(t, markerPath)
 
-			if err := RestartPolecatSession(town, "gastown", "flint"); err != nil {
+			if err := h.restartPolecatSession(town, "gastown", "flint"); err != nil {
 				t.Fatalf("RestartPolecatSession returned error (want silent skip): %v", err)
 			}
 			if len(*restarts) != 0 {

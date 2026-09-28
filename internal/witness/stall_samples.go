@@ -45,9 +45,9 @@ const stallSamplesVersion = 1
 // every scan and silently disable stall detection.
 const stallSampleMaxScanGap = 15 * time.Minute
 
-// stallSamplesLockTimeout bounds the wait for the samples lock. Var so tests
-// can shorten it.
-var stallSamplesLockTimeout = 10 * time.Second
+// stallSamplesLockTimeout bounds the wait for the samples lock. A store's
+// lockTimeout overrides it (tests shorten it per store).
+const stallSamplesLockTimeout = 10 * time.Second
 
 // StallSample is one persisted observation: sample 1 of the stall rule for a
 // polecat.
@@ -80,6 +80,9 @@ type stallSamplesFile struct {
 // StallSampleStore reads and writes a rig witness's stall samples.
 type StallSampleStore struct {
 	path string
+	// lockTimeout bounds the wait for the samples lock; zero means
+	// stallSamplesLockTimeout.
+	lockTimeout time.Duration
 }
 
 // NewStallSampleStore returns the store for rig's witness under townRoot.
@@ -193,11 +196,15 @@ func (s *StallSampleStore) lock() (*flock.Flock, error) {
 		return nil, fmt.Errorf("stall samples lock: %w", err)
 	}
 	fl := flock.New(s.path + ".lock")
-	ctx, cancel := context.WithTimeout(context.Background(), stallSamplesLockTimeout)
+	timeout := s.lockTimeout
+	if timeout <= 0 {
+		timeout = stallSamplesLockTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	ok, err := fl.TryLockContext(ctx, 50*time.Millisecond)
 	if err != nil || !ok {
-		return nil, fmt.Errorf("stall samples lock %s not taken in %s (samples not saved): %v", fl.Path(), stallSamplesLockTimeout, err)
+		return nil, fmt.Errorf("stall samples lock %s not taken in %s (samples not saved): %v", fl.Path(), timeout, err)
 	}
 	return fl, nil
 }

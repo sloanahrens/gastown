@@ -57,8 +57,8 @@ const (
 )
 
 // composerStallRecheckDelay is the settle time before re-probing the composer
-// after a submit. Var so tests can zero it.
-var composerStallRecheckDelay = 750 * time.Millisecond
+// after a submit. Tests skip it through handlers.sleepFn.
+const composerStallRecheckDelay = 750 * time.Millisecond
 
 // composerStallRecheckAttempts is how many times to re-probe for the composer
 // clearing. Claude Code needs a moment to repaint after ctrl+x ctrl+s, and a
@@ -125,6 +125,10 @@ type DetectRefineryStallResult struct {
 // agent's pane, and a caller that wants detection without that mutation
 // (om major on gt-wisp-q9os) sets this instead of acting on the result.
 func DetectStalledRefinery(workDir, rigName string, dryRun bool) *DetectRefineryStallResult {
+	return newHandlers().detectStalledRefinery(workDir, rigName, dryRun)
+}
+
+func (h *handlers) detectStalledRefinery(workDir, rigName string, dryRun bool) *DetectRefineryStallResult {
 	result := &DetectRefineryStallResult{}
 
 	townRoot, err := workspace.Find(workDir)
@@ -189,7 +193,7 @@ func DetectStalledRefinery(workDir, rigName string, dryRun bool) *DetectRefinery
 	clock.Reset(sessionName)
 
 	item.Action = composerStallActionFor(stall.Queued)
-	if err := confirmComposerCleared(t, sessionName, frozenFor); err != nil {
+	if err := h.confirmComposerCleared(t, sessionName, frozenFor); err != nil {
 		if errors.Is(err, errComposerUnverifiable) {
 			// The flush could not be verified, but nothing says it failed.
 			// Report that beside the submit, without claiming the composer is
@@ -246,14 +250,14 @@ var errComposerUnverifiable = errors.New("composer could not be classified after
 // reading. Ranking them keeps a trailing ambiguous read from talking it into
 // the benign one after an attempt saw input still in the composer, or after
 // one failed to read the pane at all and made the check itself the story.
-func confirmComposerCleared(t *tmux.Tmux, sessionName string, frozenFor time.Duration) error {
+func (h *handlers) confirmComposerCleared(t *tmux.Tmux, sessionName string, frozenFor time.Duration) error {
 	var (
 		pendingState string // set by a read that found the input still in place
 		captureErr   error  // set by a read that could not reach the pane
 		unverifiable string // set by a read that reached it but could not classify it
 	)
 	for i := 0; i < composerStallRecheckAttempts; i++ {
-		time.Sleep(composerStallRecheckDelay)
+		h.sleep(composerStallRecheckDelay)
 		after, err := t.DetectComposerStall(sessionName, frozenFor)
 		if err != nil {
 			if errors.Is(err, tmux.ErrComposerUnobservable) {
