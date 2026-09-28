@@ -1,13 +1,12 @@
 package refinery
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // buildLandedMRs computes push-time editorial.LandedMR descriptors for mrs
@@ -324,18 +323,10 @@ func (e *Engineer) recordEditorialRecordFailed(mr *MRInfo, reason string) {
 
 // escalateToWitness nudges the rig's witness — routine process signals use
 // nudge (no permanent record), not mail, per the town's Dolt-health
-// communication guidance. escalateFn replaces the nudge in tests, which must
-// not reach a live witness.
+// communication guidance.
 func (e *Engineer) escalateToWitness(msg string) {
-	if e.escalateFn != nil {
-		e.escalateFn(msg)
-		return
-	}
 	target := fmt.Sprintf("%s/witness", e.rig.Name)
-	cmd := exec.Command("gt", "nudge", target, msg)
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Dir = e.workDir
-	if err := cmd.Run(); err != nil {
+	if err := e.notify(e.workDir).Nudge(context.Background(), target, msg); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge witness about editorial precondition failure: %v\n", err)
 	}
 }

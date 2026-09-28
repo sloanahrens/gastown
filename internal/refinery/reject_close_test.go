@@ -12,6 +12,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -282,9 +283,6 @@ func TestReviewBatchCandidates_CloseFailure_Escalates(t *testing.T) {
 
 	store.closeErr["gt-wisp-bbb"] = errors.New("dolt unavailable")
 
-	var escalations []string
-	e.escalateFn = func(msg string) { escalations = append(escalations, msg) }
-
 	recovered := false
 	e.recoverDeadWorker = func(deadWorkerRecoveryRequest) bool {
 		recovered = true
@@ -306,6 +304,7 @@ func TestReviewBatchCandidates_CloseFailure_Escalates(t *testing.T) {
 		t.Error("no dead-worker recovery may run for a close that did not close the MR")
 	}
 
+	escalations := witnessNudges(t, e)
 	if len(escalations) != 1 {
 		t.Fatalf("expected exactly 1 escalation for the failed rejection close, got %d: %v", len(escalations), escalations)
 	}
@@ -334,13 +333,11 @@ func TestRejectEditorialVerdict_CloseFailure_Escalates(t *testing.T) {
 	out := &bytes.Buffer{}
 	e.output = out
 	e.workDir = workDir
+	e.notifier = notifyfake.New()
 
 	store := newPrepushStore(prepushMRIssue("gt-wisp-mr1", "polecat/nux/gt-src1+abc", "main", "gt-src1"))
 	store.closeErr = errors.New("dolt unavailable")
 	e.beads = beads.NewWithStore(workDir, store)
-
-	var escalations []string
-	e.escalateFn = func(msg string) { escalations = append(escalations, msg) }
 
 	mr := &MRInfo{ID: "gt-wisp-mr1", Branch: "polecat/nux/gt-src1+abc", Target: "main", SourceIssue: "gt-src1"}
 	e.rejectEditorialVerdict(mr, &editorial.PreconditionError{
@@ -350,6 +347,7 @@ func TestRejectEditorialVerdict_CloseFailure_Escalates(t *testing.T) {
 	if _, closed := store.closeReasons["gt-wisp-mr1"]; closed {
 		t.Fatal("the fixture's close failure did not take: gt-wisp-mr1 reported closed")
 	}
+	escalations := witnessNudges(t, e)
 	if len(escalations) != 1 {
 		t.Fatalf("expected exactly 1 escalation for the failed rejection close, got %d: %v", len(escalations), escalations)
 	}

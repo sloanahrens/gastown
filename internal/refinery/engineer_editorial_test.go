@@ -19,9 +19,12 @@ import (
 )
 
 // fakeBDAndGt installs bd and gt stand-ins on PATH that log their
-// invocations, so editorial-precondition tests can assert a failure
-// receipt was recorded and the witness was nudged without touching real
-// beads/gt state. Mirrors internal/refinery/editorial's own fakeBD helper.
+// invocations, so editorial-precondition tests can assert a failure receipt
+// was recorded without touching real beads state. Nudges, mail and
+// escalations go through the engineer's notifier (a recorder from
+// newTestEngineer; read it with sentLog), not gt; the gt stand-in guards the
+// gt calls that remain, such as swarm land. Mirrors
+// internal/refinery/editorial's own fakeBD helper.
 func fakeBDAndGt(t *testing.T) (bdLog, gtLog string) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -70,7 +73,7 @@ func readLog(t *testing.T, path string) string {
 func TestDoMerge_EditorialRequired_NoNote_RefusesPush(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/editorial-missing"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -107,9 +110,9 @@ func TestDoMerge_EditorialRequired_NoNote_RefusesPush(t *testing.T) {
 		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
 	}
 
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
-		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+		t.Fatalf("witness was not nudged, sent:\n%s", gtCalls)
 	}
 }
 
@@ -188,7 +191,7 @@ func TestDoMerge_EditorialRequired_ApproveMatchingNote_PushesAndPublishesNote(t 
 func TestDoMerge_EditorialRequired_TargetMovedMaterially_RefusesPush(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	// feature.txt exists on main before the branch is cut, with room for the
 	// MR and main's own later advance to edit different lines — a clean
@@ -269,9 +272,9 @@ func TestDoMerge_EditorialRequired_TargetMovedMaterially_RefusesPush(t *testing.
 	if bd := readLog(t, bdLog); !strings.Contains(bd, "failure_class:precondition") {
 		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
 	}
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
-		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+		t.Fatalf("witness was not nudged, sent:\n%s", gtCalls)
 	}
 }
 
@@ -442,7 +445,7 @@ func TestDoMerge_EditorialRequired_ReviewedHeadDiffersFromLandedCommit_NoteCopie
 func TestCopyEditorialNotes_CopyFails_RecordsRecordFailedAndEscalates(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/editorial-race"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -510,9 +513,9 @@ func TestCopyEditorialNotes_CopyFails_RecordsRecordFailedAndEscalates(t *testing
 		t.Fatalf("failure receipt missing mr:mr-editorial-race, bd log:\n%s", bd)
 	}
 
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
-		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+		t.Fatalf("witness was not nudged, sent:\n%s", gtCalls)
 	}
 
 	if _, err := editorial.ReadNote(g, landedCommit); err == nil {
@@ -551,7 +554,7 @@ func approveNoteFor(t *testing.T, g *gitpkg.Git, mrID, worker, base, head, patch
 func TestDoMergePR_EditorialRequired_NoNote_RefusesMerge(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/editorial-pr-missing"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -591,9 +594,9 @@ func TestDoMergePR_EditorialRequired_NoNote_RefusesMerge(t *testing.T) {
 	if bd := readLog(t, bdLog); !strings.Contains(bd, "failure_class:precondition") {
 		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
 	}
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
-		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+		t.Fatalf("witness was not nudged, sent:\n%s", gtCalls)
 	}
 }
 
@@ -676,7 +679,7 @@ func TestDoMergePR_EditorialRequired_ApproveNote_MergesAndCopiesNote(t *testing.
 func TestProcessBatch_SingleMR_EditorialRefusal_LeftInQueueQuietly(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/editorial-single"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -699,12 +702,12 @@ func TestProcessBatch_SingleMR_EditorialRefusal_LeftInQueueQuietly(t *testing.T)
 
 	// The witness still learns about the refusal (the design's escalation),
 	// but the worker and the mayor are not told anything they could act on.
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "test-rig/witness") {
-		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+		t.Fatalf("witness was not nudged, sent:\n%s", gtCalls)
 	}
 	if strings.Contains(gtCalls, "MERGE_FAILED") || strings.Contains(gtCalls, "mayor/") {
-		t.Fatalf("editorial refusal nudged the worker/mayor as a build failure, gt log:\n%s", gtCalls)
+		t.Fatalf("editorial refusal nudged the worker/mayor as a build failure, sent:\n%s", gtCalls)
 	}
 	if bd := readLog(t, bdLog); !strings.Contains(bd, "failure_class:precondition") {
 		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
@@ -866,7 +869,7 @@ func TestBatchPush_EditorialRequired_AllNotesApprove_LandsAndCopiesEachNote(t *t
 func TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "hello b\n")
@@ -900,9 +903,9 @@ func TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *tes
 	if !strings.Contains(bd, "failure_class:precondition") {
 		t.Fatalf("failure receipt missing failure_class:precondition, bd log:\n%s", bd)
 	}
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
-		t.Fatalf("witness was not nudged, gt log:\n%s", gtCalls)
+		t.Fatalf("witness was not nudged, sent:\n%s", gtCalls)
 	}
 }
 
@@ -910,7 +913,7 @@ func TestBatchPush_EditorialRequired_OneMissingNote_RefusesWholeBatchPush(t *tes
 // path's half of the CLI post-merge protection: a rubric-touching merge
 // escalates to the operator and never restamps the manifest (gt-7bvf).
 func TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator(t *testing.T) {
-	_, gtLog := fakeBDAndGt(t)
+	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -966,12 +969,12 @@ func TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator(t *testing.T) {
 		t.Fatalf("HandleMRInfoSuccess failed:\n%s", e.output.(interface{ String() string }).String())
 	}
 
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "escalate") {
-		t.Fatalf("gt escalate was not invoked, gt log:\n%s", gtCalls)
+		t.Fatalf("gt escalate was not invoked, sent:\n%s", gtCalls)
 	}
 	if !strings.Contains(gtCalls, "rubric changed on main") {
-		t.Fatalf("escalation message missing rubric-change context, gt log:\n%s", gtCalls)
+		t.Fatalf("escalation message missing rubric-change context, sent:\n%s", gtCalls)
 	}
 
 	reloaded, err := editorial.LoadManifest(workDir)
@@ -989,7 +992,7 @@ func TestHandleMRInfoSuccess_RubricChangeEscalatesToOperator(t *testing.T) {
 // alone is what silently disabled every rubric protection before this
 // attempt (gt-7bvf).
 func TestHandleMRInfoSuccess_UnresolvableRubricPathStillEscalates(t *testing.T) {
-	_, gtLog := fakeBDAndGt(t)
+	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
@@ -1028,7 +1031,7 @@ func TestHandleMRInfoSuccess_UnresolvableRubricPathStillEscalates(t *testing.T) 
 		t.Fatalf("HandleMRInfoSuccess failed:\n%s", e.output.(interface{ String() string }).String())
 	}
 
-	if gtCalls := readLog(t, gtLog); !strings.Contains(gtCalls, "escalate") {
-		t.Fatalf("gt escalate was not invoked for an unresolvable rubric path, gt log:\n%s", gtCalls)
+	if gtCalls := sentLog(t, e); !strings.Contains(gtCalls, "escalate") {
+		t.Fatalf("gt escalate was not invoked for an unresolvable rubric path, sent:\n%s", gtCalls)
 	}
 }

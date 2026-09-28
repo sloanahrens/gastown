@@ -1,14 +1,14 @@
 package refinery
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Editorial-drop marks (gt-crvw0). An infra-class review result (Exit 2 — a
@@ -126,10 +126,11 @@ func (e *Engineer) escalateEditorialDrop(mr *MRInfo, class editorial.FailureClas
 	_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: dropped %d times at %s with no rework path — escalating\n", mr.ID, count, shortSHA(head))
 	msg := fmt.Sprintf("MR %s dropped from %d consecutive editorial batches at %s (%s): %s",
 		mr.ID, count, shortSHA(head), class, stderr)
-	escalateCmd := exec.Command("gt", "escalate", "--severity", "high", "--reason", "editorial-drop-stuck", msg)
-	util.SetDetachedProcessGroup(escalateCmd)
-	escalateCmd.Dir = e.workDir
-	if err := escalateCmd.Run(); err != nil {
+	if err := e.notify(e.workDir).Escalate(context.Background(), notify.Escalation{
+		Severity:    "high",
+		Description: msg,
+		Reason:      "editorial-drop-stuck",
+	}); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Batch] Warning: editorial-drop escalation failed: %v\n", err)
 	}
 

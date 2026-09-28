@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
@@ -71,6 +71,9 @@ type Manager struct {
 	output            io.Writer    // Output destination for user-facing messages
 	router            *mail.Router // Mail router for RECOVERED_BEAD notices on manual reject (gt-2usm)
 	recoverDeadWorker func(deadWorkerRecoveryRequest) bool
+
+	// notifier sends the manager's nudges; nil means gt run from workDir.
+	notifier notify.Notifier
 
 	// startReason/startCaller are stamped into the spawned session's env so the
 	// session_start event this start produces says why, and at whose request,
@@ -1288,10 +1291,7 @@ func (m *Manager) notifyWorkerRejected(mr *MergeRequest, reason string) {
 	target := fmt.Sprintf("%s/%s", m.rig.Name, polecatName)
 	nudgeMsg := fmt.Sprintf("MR rejected: branch=%s issue=%s reason=%s — review feedback and resubmit with 'gt done'",
 		mr.Branch, mr.IssueID, reason)
-	nudgeCmd := exec.Command("gt", "nudge", target, nudgeMsg)
-	util.SetDetachedProcessGroup(nudgeCmd)
-	nudgeCmd.Dir = m.workDir
-	if err := nudgeCmd.Run(); err != nil {
+	if err := m.notify().Nudge(context.Background(), target, nudgeMsg); err != nil {
 		log.Printf("warning: nudging worker about rejection for %s: %v", mr.IssueID, err)
 	}
 }

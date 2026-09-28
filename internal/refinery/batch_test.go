@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -121,6 +122,7 @@ func newTestEngineer(t *testing.T, workDir string, g *gitpkg.Git) *Engineer {
 		return &beads.MergeSlotStatus{Available: true, Holder: holder}, nil
 	}
 	e.mergeSlotRelease = func(holder string) error { return nil }
+	e.notifier = notifyfake.New() // never a live gt; read it with recorderOf
 	return e
 }
 
@@ -478,7 +480,7 @@ func advanceBranchLocally(t *testing.T, workDir, branch string) string {
 // member's problem. It is dropped from the stack and left queued, whereas
 // before the fix the whole batch aborted on it.
 func TestBuildRebaseStack_EjectsAdvancedSourceBranch(t *testing.T) {
-	// Not t.Parallel(): the ejection nudges the worker through a fake gt.
+	// Not t.Parallel(): fakeBDAndGt uses t.Setenv.
 	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
@@ -570,7 +572,7 @@ func TestBuildRebaseStack_MergesSubmissionWhenLocalRefDrifted(t *testing.T) {
 // the healthy member behind it must still land. Before the fix the stale
 // member aborted the whole batch, so nothing landed.
 func TestProcessBatch_LandsHealthyMembersPastAStaleOne(t *testing.T) {
-	// Not t.Parallel(): the ejected member nudges the worker through a fake gt.
+	// Not t.Parallel(): fakeBDAndGt uses t.Setenv.
 	fakeBDAndGt(t)
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()

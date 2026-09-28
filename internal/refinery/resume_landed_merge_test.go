@@ -263,7 +263,7 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_LaterMRsAlreadyLanded(t *test
 func TestResumeLandedMerge_ContentPreservedRebase_BackfillsNoteByPatchID(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-crash-rebase"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -327,8 +327,8 @@ func TestResumeLandedMerge_ContentPreservedRebase_BackfillsNoteByPatchID(t *test
 	if bd := readLog(t, bdLog); strings.Contains(bd, "record_failed") {
 		t.Fatalf("expected no record_failed escalation for content that genuinely landed and was reviewed, bd log:\n%s", bd)
 	}
-	if gtCalls := readLog(t, gtLog); strings.Contains(gtCalls, "nudge") {
-		t.Fatalf("expected no escalation for a reviewed landing that resumed cleanly, gt log:\n%s", gtCalls)
+	if gtCalls := sentLog(t, e); strings.Contains(gtCalls, "nudge") {
+		t.Fatalf("expected no escalation for a reviewed landing that resumed cleanly, sent:\n%s", gtCalls)
 	}
 }
 
@@ -372,7 +372,7 @@ func atCommit(t *testing.T, workDir, branch, commit string) {
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoNote_Refuses(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-renamed-nonote"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -432,12 +432,12 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoNote_Refuses
 	if !strings.Contains(bd, "failure_class:precondition") {
 		t.Fatalf("expected a precondition failure receipt for the unproven landing, bd log:\n%s", bd)
 	}
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "test-rig/witness") || !strings.Contains(gtCalls, "EDITORIAL_RESUME_UNPROVEN") {
-		t.Fatalf("expected the witness to be nudged about the unproven landing, gt log:\n%s", gtCalls)
+		t.Fatalf("expected the witness to be nudged about the unproven landing, sent:\n%s", gtCalls)
 	}
 	if !strings.Contains(gtCalls, "rekey-note mr-resume-renamed-nonote --landed "+landed) {
-		t.Fatalf("expected the escalation to name the remedy and the landed sha, gt log:\n%s", gtCalls)
+		t.Fatalf("expected the escalation to name the remedy and the landed sha, sent:\n%s", gtCalls)
 	}
 }
 
@@ -456,7 +456,7 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled
 	// binaries on PATH the test would reach into the live town on exactly the
 	// path a hostile environment can push it down (gt-pwwn). Fake both, and
 	// assert below that the completing path used neither.
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-renamed-note"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -513,8 +513,8 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_RenamedLanding_NoteBackfilled
 	if bd := readLog(t, bdLog); strings.Contains(bd, "record_failed") {
 		t.Fatalf("expected no failure receipt for a resume that completed, bd log:\n%s", bd)
 	}
-	if gtCalls := readLog(t, gtLog); strings.Contains(gtCalls, "nudge") {
-		t.Fatalf("expected no escalation for a resume that completed, gt log:\n%s", gtCalls)
+	if gtCalls := sentLog(t, e); strings.Contains(gtCalls, "nudge") {
+		t.Fatalf("expected no escalation for a resume that completed, sent:\n%s", gtCalls)
 	}
 }
 
@@ -662,7 +662,7 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_EditorialNotRequired_NoOp(t *
 func TestDoMerge_ResumeAfterInterruptedBookkeeping_NoteUnrecoverable_EscalatesButCompletes(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
-	bdLog, gtLog := fakeBDAndGt(t)
+	bdLog, _ := fakeBDAndGt(t)
 
 	branch := "polecat/test/resume-crash-nonote"
 	createFeatureBranch(t, workDir, branch, "feature.txt", "hello\n")
@@ -696,9 +696,9 @@ func TestDoMerge_ResumeAfterInterruptedBookkeeping_NoteUnrecoverable_EscalatesBu
 	if !strings.Contains(bd, "record_failed") {
 		t.Fatalf("expected a record_failed failure receipt, bd log:\n%s", bd)
 	}
-	gtCalls := readLog(t, gtLog)
+	gtCalls := sentLog(t, e)
 	if !strings.Contains(gtCalls, "nudge") || !strings.Contains(gtCalls, "test-rig/witness") {
-		t.Fatalf("expected the witness to be nudged about the unrecoverable note, gt log:\n%s", gtCalls)
+		t.Fatalf("expected the witness to be nudged about the unrecoverable note, sent:\n%s", gtCalls)
 	}
 }
 
