@@ -52,7 +52,6 @@ internal/session
 internal/style
 internal/telemetry
 internal/templates
-internal/templates/commands
 internal/testutil
 internal/townlog
 internal/tui/convoy
