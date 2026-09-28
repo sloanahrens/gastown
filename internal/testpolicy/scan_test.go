@@ -25,6 +25,7 @@ func TestScanDirFixtures(t *testing.T) {
 		"shebang_written":       {RuleNoExecFiles, RuleNoExecFiles},                  // a "#!" literal outside a comparison, even beside one
 		"global_swap":           {RuleNoGlobalSwap},
 		"global_shadow":         nil,
+		"global_blank":          nil,
 		"parallel_missing":      {RuleParallel},
 		"parallel_subtest_only": {RuleParallel},
 		"nontesting_receiver":   nil,
