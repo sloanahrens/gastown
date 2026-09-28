@@ -866,7 +866,7 @@ func (t *Tmux) killSplitBrainSession(name string) {
 	if t.socketName == "" || t.socketName == "default" || t.socketName == noTownSocket {
 		return // Already on default or no town context — nothing to clean up
 	}
-	other := NewTmuxWithSocket("default")
+	other := t.withSocket("default")
 	if running, _ := other.HasSession(name); running {
 		_ = other.KillSessionWithProcesses(name)
 	}

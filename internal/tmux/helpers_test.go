@@ -60,8 +60,9 @@ func fail(stderr string) reply { return reply{stderr: stderr, err: exitError(1)}
 // tmuxCall is one recorded invocation, with the "-u -L <socket>" prefix of a
 // tmux call stripped so tests read the subcommand first.
 type tmuxCall struct {
-	name string   // program: "tmux", "ps", "kill", ...
-	args []string // for tmux: subcommand and its arguments
+	name   string   // program: "tmux", "ps", "kill", ...
+	socket string   // for tmux: the -L socket, "" when none
+	args   []string // for tmux: subcommand and its arguments
 }
 
 func (c tmuxCall) sub() string {
@@ -115,6 +116,7 @@ func (s *scripted) exec(_ context.Context, name string, args ...string) ([]byte,
 			a = a[1:]
 		}
 		if len(a) > 1 && a[0] == "-L" {
+			c.socket = a[1]
 			a = a[2:]
 		}
 		c.args = a

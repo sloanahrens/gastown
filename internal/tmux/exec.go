@@ -43,3 +43,8 @@ func (t *Tmux) clk() clockwork.Clock {
 	}
 	return t.clock
 }
+
+// withSocket returns a Tmux on socket that shares t's runner and clock.
+func (t *Tmux) withSocket(socket string) *Tmux {
+	return &Tmux{socketName: socket, exec: t.exec, clock: t.clock}
+}
