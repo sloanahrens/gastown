@@ -21,7 +21,6 @@ internal/dispatch
 internal/doctor
 internal/dog
 internal/doltserver
-internal/estop
 internal/events
 internal/feed
 internal/formula
