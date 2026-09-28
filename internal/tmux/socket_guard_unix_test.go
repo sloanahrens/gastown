@@ -8,10 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -81,16 +80,22 @@ func assertSameSocketPath(t *testing.T, socketPath string, before os.FileInfo) {
 	}
 }
 
+// guardTmux is a Tmux on socket whose tmux calls are scripted by s.
+func guardTmux(socket string, s *scripted) *Tmux {
+	return newTmuxForTest(socket, s.exec, clockwork.NewFakeClock())
+}
+
 func TestEnsureNewSessionSocketSafe(t *testing.T) {
+	t.Parallel()
 	t.Run("default_socket", func(t *testing.T) {
-		if err := (&Tmux{}).ensureNewSessionSocketSafe(); err != nil {
+		if err := guardTmux("", newScripted(nil)).ensureNewSessionSocketSafe(); err != nil {
 			t.Fatalf("ensureNewSessionSocketSafe(default) = %v", err)
 		}
 	})
 
 	t.Run("absent_socket", func(t *testing.T) {
 		socket := uniqueSocketName(t, "gt-h9z-absent")
-		if err := NewTmuxWithSocket(socket).ensureNewSessionSocketSafe(); err != nil {
+		if err := guardTmux(socket, newScripted(nil)).ensureNewSessionSocketSafe(); err != nil {
 			t.Fatalf("ensureNewSessionSocketSafe(absent) = %v", err)
 		}
 	})
@@ -98,8 +103,12 @@ func TestEnsureNewSessionSocketSafe(t *testing.T) {
 	t.Run("stale_unix_socket", func(t *testing.T) {
 		socket := uniqueSocketName(t, "gt-h9z-stale")
 		createStaleUnixSocket(t, socket)
-		if err := NewTmuxWithSocket(socket).ensureNewSessionSocketSafe(); err != nil {
+		s := newScripted(nil)
+		if err := guardTmux(socket, s).ensureNewSessionSocketSafe(); err != nil {
 			t.Fatalf("ensureNewSessionSocketSafe(stale) = %v", err)
+		}
+		if got := s.all(); len(got) != 0 {
+			t.Errorf("probed a stale socket: %v", got)
 		}
 	})
 
@@ -111,7 +120,7 @@ func TestEnsureNewSessionSocketSafe(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Remove(socketPath) })
 
-		err := NewTmuxWithSocket(socket).ensureNewSessionSocketSafe()
+		err := guardTmux(socket, newScripted(nil)).ensureNewSessionSocketSafe()
 		if err == nil {
 			t.Fatal("ensureNewSessionSocketSafe(regular file) = nil, want error")
 		}
@@ -128,7 +137,7 @@ func TestEnsureNewSessionSocketSafe(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Remove(socketPath) })
 
-		if err := NewTmuxWithSocket(socket).ensureNewSessionSocketSafe(); err == nil {
+		if err := guardTmux(socket, newScripted(nil)).ensureNewSessionSocketSafe(); err == nil {
 			t.Fatal("ensureNewSessionSocketSafe(directory) = nil, want error")
 		}
 	})
@@ -142,11 +151,11 @@ func TestEnsureNewSessionSocketSafe(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Remove(target) })
 		if err := os.Symlink(target, socketPath); err != nil {
-			t.Skipf("Symlink not supported: %v", err)
+			t.Fatalf("Symlink: %v", err)
 		}
 		t.Cleanup(func() { _ = os.Remove(socketPath) })
 
-		err := NewTmuxWithSocket(socket).ensureNewSessionSocketSafe()
+		err := guardTmux(socket, newScripted(nil)).ensureNewSessionSocketSafe()
 		if err == nil {
 			t.Fatal("ensureNewSessionSocketSafe(symlink) = nil, want error")
 		}
@@ -156,130 +165,64 @@ func TestEnsureNewSessionSocketSafe(t *testing.T) {
 	})
 
 	t.Run("live_tmux_server", func(t *testing.T) {
-		if !hasTmux() {
-			t.Skip("tmux not installed")
-		}
 		socket := uniqueSocketName(t, "gt-h9z-live")
-		tm := NewTmuxWithSocket(socket)
-		t.Cleanup(func() { _ = tm.KillServer() })
-		if _, err := tm.run("new-session", "-d", "-s", "gt-h9z-live"); err != nil {
-			t.Fatalf("new-session setup: %v", err)
-		}
-		if err := tm.ensureNewSessionSocketSafe(); err != nil {
+		listener, _ := listenOnSocketPath(t, socket)
+		go acceptAndClose(listener)
+		s := newScripted(nil) // list-sessions answers: a tmux server
+		if err := guardTmux(socket, s).ensureNewSessionSocketSafe(); err != nil {
 			t.Fatalf("ensureNewSessionSocketSafe(live tmux) = %v", err)
 		}
-	})
-}
-
-func TestNewSessionAllowsStaleUnixSocket(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-	socket := uniqueSocketName(t, "gt-h9z-newsession-stale")
-	createStaleUnixSocket(t, socket)
-	tm := NewTmuxWithSocket(socket)
-	t.Cleanup(func() { _ = tm.KillServer() })
-
-	if err := tm.NewSession("gt-h9z-stale-ok", ""); err != nil {
-		t.Fatalf("NewSession against stale Unix socket = %v, want success", err)
-	}
-}
-
-func TestNewSessionRefusesUnresponsiveSocket(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-	socket := uniqueSocketName(t, "gt-h9z-unresponsive")
-	listener, socketPath := listenOnSocketPath(t, socket)
-	var heldMu sync.Mutex
-	var held []*net.UnixConn
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			conn, err := listener.AcceptUnix()
-			if err != nil {
-				return
-			}
-			heldMu.Lock()
-			held = append(held, conn)
-			heldMu.Unlock()
-		}
-	}()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		<-done
-		heldMu.Lock()
-		defer heldMu.Unlock()
-		for _, conn := range held {
-			_ = conn.Close()
+		if probes := s.find("list-sessions"); len(probes) != 1 || probes[0].socket != socket {
+			t.Fatalf("list-sessions probes = %v, want one on %s", probes, socket)
 		}
 	})
 
-	before, err := os.Lstat(socketPath)
-	if err != nil {
-		t.Fatalf("Lstat(%s): %v", socketPath, err)
-	}
-	errCh := make(chan error, 1)
-	start := time.Now()
-	go func() {
-		errCh <- NewTmuxWithSocket(socket).NewSession("gt-h9z-unresponsive", "")
-	}()
-	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatal("NewSession against unresponsive listener = nil, want error")
+	t.Run("live_listener_not_tmux", func(t *testing.T) {
+		socket := uniqueSocketName(t, "gt-h9z-notmux")
+		listener, socketPath := listenOnSocketPath(t, socket)
+		go acceptAndClose(listener)
+		// The file answers a dial but tmux finds no server behind it: refuse,
+		// because tmux would unlink and rebind a path something else owns.
+		s := newScripted(bySub(map[string]reply{"list-sessions": fail("no server running on " + socketPath)}))
+		err := guardTmux(socket, s).ensureNewSessionSocketSafe()
+		if err == nil || !strings.Contains(err.Error(), "gt-h9z") {
+			t.Fatalf("ensureNewSessionSocketSafe(non-tmux listener) = %v, want refusal", err)
 		}
-		if elapsed := time.Since(start); elapsed > 3*time.Second {
-			t.Fatalf("NewSession took %s, want bounded refusal", elapsed)
-		}
-	case <-time.After(4 * time.Second):
-		_ = listener.Close()
-		t.Fatal("NewSession against unresponsive listener hung")
-	}
-	assertSameSocketPath(t, socketPath, before)
-}
-
-func TestNewSessionRefusesClosingListener(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not installed")
-	}
-	socket := uniqueSocketName(t, "gt-h9z-closing")
-	listener, socketPath := listenOnSocketPath(t, socket)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			conn, err := listener.AcceptUnix()
-			if err != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		<-done
 	})
 
-	before, err := os.Lstat(socketPath)
-	if err != nil {
-		t.Fatalf("Lstat(%s): %v", socketPath, err)
+	t.Run("live_listener_probe_error", func(t *testing.T) {
+		socket := uniqueSocketName(t, "gt-h9z-probeerr")
+		listener, _ := listenOnSocketPath(t, socket)
+		go acceptAndClose(listener)
+		s := newScripted(bySub(map[string]reply{"list-sessions": fail("protocol version mismatch")}))
+		if err := guardTmux(socket, s).ensureNewSessionSocketSafe(); err == nil {
+			t.Fatal("ensureNewSessionSocketSafe(probe error) = nil, want refusal")
+		}
+	})
+}
+
+// acceptAndClose accepts connections on l until it closes, closing each at
+// once: enough for a dial to succeed.
+func acceptAndClose(l *net.UnixListener) {
+	for {
+		c, err := l.AcceptUnix()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
 	}
-	if err := NewTmuxWithSocket(socket).NewSession("gt-h9z-closing", ""); err == nil {
-		t.Fatal("NewSession against closing listener = nil, want error")
-	}
-	assertSameSocketPath(t, socketPath, before)
 }
 
 func TestNewSessionVariantsUseSocketGuard(t *testing.T) {
+	t.Parallel()
 	socket := uniqueSocketName(t, "gt-h9z-variants")
 	socketPath := socketPathForTest(t, socket)
 	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
 		t.Fatalf("WriteFile(%s): %v", socketPath, err)
 	}
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
-	tm := NewTmuxWithSocket(socket)
+	s := newScripted(nil)
+	tm := guardTmux(socket, s)
 
 	tests := []struct {
 		name string
@@ -299,6 +242,9 @@ func TestNewSessionVariantsUseSocketGuard(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), socketPath) {
 				t.Fatalf("error %q does not mention %s", err, socketPath)
+			}
+			if got := s.find("new-session"); len(got) != 0 {
+				t.Fatalf("new-session sent past the guard: %v", got)
 			}
 		})
 	}
