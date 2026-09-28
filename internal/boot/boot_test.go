@@ -9,6 +9,7 @@ import (
 )
 
 func TestAcquireLock(t *testing.T) {
+	t.Parallel()
 	// Create temp directory for test
 	tmpDir := t.TempDir()
 
@@ -56,6 +57,7 @@ func TestAcquireLock(t *testing.T) {
 }
 
 func TestAcquireLockConcurrent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	b1 := &Boot{
@@ -93,6 +95,7 @@ func TestAcquireLockConcurrent(t *testing.T) {
 }
 
 func TestReleaseLockIdempotent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	b := &Boot{

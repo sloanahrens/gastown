@@ -10,7 +10,6 @@ internal/agentpause
 internal/atomicfile
 internal/beads
 internal/bitbucket
-internal/boot
 internal/checkpoint
 internal/cmd
 internal/config
