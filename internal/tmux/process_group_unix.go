@@ -3,7 +3,7 @@
 package tmux
 
 import (
-	"os/exec"
+	"context"
 	"strings"
 	"syscall"
 	"time"
@@ -17,8 +17,8 @@ func killProcessGroup(pgid int) {
 
 // getParentPID returns the parent process ID (PPID) for a given PID.
 // Returns empty string if the process doesn't exist or PPID can't be determined.
-func getParentPID(pid string) string {
-	out, err := exec.Command("ps", "-o", "ppid=", "-p", pid).Output()
+func getParentPID(ex execFunc, pid string) string {
+	out, _, err := ex(context.Background(), "ps", "-o", "ppid=", "-p", pid)
 	if err != nil {
 		return ""
 	}
@@ -27,8 +27,8 @@ func getParentPID(pid string) string {
 
 // getProcessGroupID returns the process group ID (PGID) for a given PID.
 // Returns empty string if the process doesn't exist or PGID can't be determined.
-func getProcessGroupID(pid string) string {
-	out, err := exec.Command("ps", "-o", "pgid=", "-p", pid).Output()
+func getProcessGroupID(ex execFunc, pid string) string {
+	out, _, err := ex(context.Background(), "ps", "-o", "pgid=", "-p", pid)
 	if err != nil {
 		return ""
 	}
@@ -37,11 +37,11 @@ func getProcessGroupID(pid string) string {
 
 // getProcessGroupMembers returns all PIDs in a process group.
 // This finds processes that share the same PGID, including those that reparented to init.
-func getProcessGroupMembers(pgid string) []string {
+func getProcessGroupMembers(ex execFunc, pgid string) []string {
 	// Use ps to find all processes with this PGID
 	// On macOS: ps -axo pid,pgid
 	// On Linux: ps -eo pid,pgid
-	out, err := exec.Command("ps", "-axo", "pid,pgid").Output()
+	out, _, err := ex(context.Background(), "ps", "-axo", "pid,pgid")
 	if err != nil {
 		return nil
 	}

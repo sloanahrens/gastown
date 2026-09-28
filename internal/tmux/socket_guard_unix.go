@@ -117,37 +117,13 @@ func unixSocketStale(socketPath string) (bool, error) {
 }
 
 func (t *Tmux) runListSessionsProbe(ctx context.Context) error {
-	stdout, err := os.CreateTemp("", "gt-tmux-probe-stdout-*")
-	if err != nil {
-		return err
-	}
-	stdoutPath := stdout.Name()
-	defer func() { _ = os.Remove(stdoutPath) }()
-	defer func() { _ = stdout.Close() }()
-
-	stderr, err := os.CreateTemp("", "gt-tmux-probe-stderr-*")
-	if err != nil {
-		return err
-	}
-	stderrPath := stderr.Name()
-	defer func() { _ = os.Remove(stderrPath) }()
-	defer func() { _ = stderr.Close() }()
-
 	args := []string{"list-sessions", "-F", ""}
-	cmd := t.commandContext(ctx, args...)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.WaitDelay = 100 * time.Millisecond
-
-	if err := cmd.Run(); err != nil {
+	_, stderr, err := t.runner()(ctx, "tmux", t.tmuxArgs(args)...)
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("tmux list-sessions timed out after %s: %w", newSessionSocketProbeTimeout, ctxErr)
 		}
-		stderrBytes, readErr := os.ReadFile(stderrPath)
-		if readErr != nil {
-			return fmt.Errorf("tmux list-sessions: %w", err)
-		}
-		return t.wrapError(err, string(stderrBytes), args)
+		return t.wrapError(err, string(stderr), args)
 	}
 	return nil
 }

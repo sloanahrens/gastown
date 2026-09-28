@@ -3,9 +3,9 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -20,13 +20,13 @@ func killProcessGroup(pgid int) {
 
 // getParentPID returns the parent process ID (PPID) for a given PID.
 // On Windows, this is not used for PGID verification, so we return empty string.
-func getParentPID(pid string) string {
+func getParentPID(_ execFunc, pid string) string {
 	return ""
 }
 
 // getProcessGroupID returns the process group ID (PGID) for a given PID.
 // Windows doesn't expose POSIX process groups, so we treat the PID as the PGID.
-func getProcessGroupID(pid string) string {
+func getProcessGroupID(ex execFunc, pid string) string {
 	pid = strings.TrimSpace(pid)
 	if pid == "" {
 		return ""
@@ -37,7 +37,7 @@ func getProcessGroupID(pid string) string {
 		return ""
 	}
 
-	exists, err := processExists(pidInt)
+	exists, err := processExists(ex, pidInt)
 	if err != nil || !exists {
 		return ""
 	}
@@ -47,7 +47,7 @@ func getProcessGroupID(pid string) string {
 
 // getProcessGroupMembers returns all PIDs in a process group.
 // On Windows, we model the group as just the PID itself.
-func getProcessGroupMembers(pgid string) []string {
+func getProcessGroupMembers(ex execFunc, pgid string) []string {
 	pgid = strings.TrimSpace(pgid)
 	if pgid == "" {
 		return nil
@@ -58,7 +58,7 @@ func getProcessGroupMembers(pgid string) []string {
 		return nil
 	}
 
-	exists, err := processExists(pgidInt)
+	exists, err := processExists(ex, pgidInt)
 	if err != nil || !exists {
 		return nil
 	}
@@ -66,9 +66,9 @@ func getProcessGroupMembers(pgid string) []string {
 	return []string{pgid}
 }
 
-func processExists(pid int) (bool, error) {
+func processExists(ex execFunc, pid int) (bool, error) {
 	filter := fmt.Sprintf("PID eq %d", pid)
-	out, err := exec.Command("tasklist", "/FI", filter, "/FO", "CSV", "/NH").Output()
+	out, _, err := ex(context.Background(), "tasklist", "/FI", filter, "/FO", "CSV", "/NH")
 	if err != nil {
 		return false, err
 	}

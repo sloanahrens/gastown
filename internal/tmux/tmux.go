@@ -2,7 +2,6 @@
 package tmux
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -186,7 +186,9 @@ func BuildCommandContext(ctx context.Context, args ...string) *exec.Cmd {
 
 // Tmux wraps tmux operations.
 type Tmux struct {
-	socketName string // tmux socket name (-L flag), empty = default socket
+	socketName string          // tmux socket name (-L flag), empty = default socket
+	exec       execFunc        // nil = realExec; see exec.go
+	clock      clockwork.Clock // nil = real clock; see exec.go
 }
 
 // noTownSocket is a sentinel socket name used when no town socket is configured.
@@ -277,32 +279,21 @@ func (t *Tmux) run(args ...string) (string, error) {
 	return t.runContext(context.Background(), args...)
 }
 
-func (t *Tmux) commandContext(ctx context.Context, args ...string) *exec.Cmd {
+// tmuxArgs prepends the UTF-8 flag and socket selection to a tmux subcommand.
+func (t *Tmux) tmuxArgs(args []string) []string {
 	allArgs := []string{"-u"}
 	if t.socketName != "" {
 		allArgs = append(allArgs, "-L", t.socketName)
 	}
-	allArgs = append(allArgs, args...)
-	cmd := exec.CommandContext(ctx, "tmux", allArgs...)
-	hideConsoleWindow(cmd)
-	return cmd
+	return append(allArgs, args...)
 }
 
 func (t *Tmux) runContext(ctx context.Context, args ...string) (string, error) {
-	cmd := t.commandContext(ctx, args...)
-	if _, ok := ctx.Deadline(); ok {
-		cmd.WaitDelay = 100 * time.Millisecond
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	stdout, stderr, err := t.runner()(ctx, "tmux", t.tmuxArgs(args)...)
 	if err != nil {
-		return "", t.wrapError(err, stderr.String(), args)
+		return "", t.wrapError(err, string(stderr), args)
 	}
-
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimSpace(string(stdout)), nil
 }
 
 // wrapError wraps tmux errors with context.
@@ -711,7 +702,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 	if pid != "" {
 		// Walk the process tree for all descendants (catches processes that
 		// called setsid() and created their own process groups)
-		descendants := getAllDescendants(pid)
+		descendants := getAllDescendants(t.runner(), pid)
 
 		// Build known PID set for group membership verification
 		knownPIDs := make(map[string]bool, len(descendants)+1)
@@ -725,15 +716,15 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 		// hit unrelated processes sharing the same PGID — we enumerate group
 		// members and only include those reparented to init (PPID == 1), which
 		// indicates they were likely children in our tree that outlived their parent.
-		pgid := getProcessGroupID(pid)
+		pgid := getProcessGroupID(t.runner(), pid)
 		if pgid != "" && pgid != "0" && pgid != "1" {
-			reparented := collectReparentedGroupMembers(pgid, knownPIDs)
+			reparented := collectReparentedGroupMembers(t.runner(), pgid, knownPIDs)
 			descendants = append(descendants, reparented...)
 		}
 
 		// Send SIGTERM to all descendants (deepest first to avoid orphaning)
 		for _, dpid := range descendants {
-			_ = exec.Command("kill", "-TERM", dpid).Run()
+			_, _, _ = t.runner()(context.Background(), "kill", "-TERM", dpid)
 		}
 
 		// Wait for graceful shutdown (2s gives processes time to clean up)
@@ -741,13 +732,13 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 
 		// Send SIGKILL to any remaining descendants
 		for _, dpid := range descendants {
-			_ = exec.Command("kill", "-KILL", dpid).Run()
+			_, _, _ = t.runner()(context.Background(), "kill", "-KILL", dpid)
 		}
 
 		// Kill the pane process itself (may have called setsid() and detached)
-		_ = exec.Command("kill", "-TERM", pid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
 		time.Sleep(processKillGracePeriod)
-		_ = exec.Command("kill", "-KILL", pid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 	}
 
 	// Kill the tmux session
@@ -788,13 +779,13 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 
 	if pid != "" {
 		// Get the process group ID
-		pgid := getProcessGroupID(pid)
+		pgid := getProcessGroupID(t.runner(), pid)
 
 		// Collect all PIDs to kill (from multiple sources)
 		toKill := make(map[string]bool)
 
 		// 1. Get all descendant PIDs recursively (catches processes that called setsid())
-		descendants := getAllDescendants(pid)
+		descendants := getAllDescendants(t.runner(), pid)
 
 		// Build known PID set for group membership verification
 		knownPIDs := make(map[string]bool, len(descendants)+1)
@@ -811,7 +802,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		// processes sharing the same PGID — we only add those that were reparented
 		// to init (PPID == 1), indicating they were likely children in our tree.
 		if pgid != "" && pgid != "0" && pgid != "1" {
-			for _, member := range collectReparentedGroupMembers(pgid, knownPIDs) {
+			for _, member := range collectReparentedGroupMembers(t.runner(), pgid, knownPIDs) {
 				if !exclude[member] {
 					toKill[member] = true
 				}
@@ -826,7 +817,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 
 		// Send SIGTERM to all non-excluded processes
 		for _, dpid := range killList {
-			_ = exec.Command("kill", "-TERM", dpid).Run()
+			_, _, _ = t.runner()(context.Background(), "kill", "-TERM", dpid)
 		}
 
 		// Wait for graceful shutdown (2s gives processes time to clean up)
@@ -834,15 +825,15 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 
 		// Send SIGKILL to any remaining non-excluded processes
 		for _, dpid := range killList {
-			_ = exec.Command("kill", "-KILL", dpid).Run()
+			_, _, _ = t.runner()(context.Background(), "kill", "-KILL", dpid)
 		}
 
 		// Kill the pane process itself (may have called setsid() and detached)
 		// Only if not excluded
 		if !exclude[pid] {
-			_ = exec.Command("kill", "-TERM", pid).Run()
+			_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
 			time.Sleep(processKillGracePeriod)
-			_ = exec.Command("kill", "-KILL", pid).Run()
+			_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 		}
 	}
 
@@ -882,15 +873,15 @@ func (t *Tmux) killSplitBrainSession(name string) {
 // This is safer than killing the entire process group blindly with
 // syscall.Kill(-pgid, ...), which could hit unrelated processes if the PGID
 // is shared or has been reused after the group leader exited.
-func collectReparentedGroupMembers(pgid string, knownPIDs map[string]bool) []string {
-	members := getProcessGroupMembers(pgid)
+func collectReparentedGroupMembers(ex execFunc, pgid string, knownPIDs map[string]bool) []string {
+	members := getProcessGroupMembers(ex, pgid)
 	var reparented []string
 	for _, member := range members {
 		if knownPIDs[member] {
 			continue // Already in descendant list, will be handled there
 		}
 		// Check if reparented to init — probably was our child
-		ppid := getParentPID(member)
+		ppid := getParentPID(ex, member)
 		if ppid == "1" {
 			reparented = append(reparented, member)
 		}
@@ -907,8 +898,8 @@ type processSnapshot struct {
 
 // getAllDescendants finds all descendant PIDs of a process from one process snapshot.
 // Returns PIDs in deepest-first order so killing them doesn't orphan grandchildren.
-func getAllDescendants(pid string) []string {
-	out, err := exec.Command("ps", "-axo", "pid=,ppid=,comm=").Output()
+func getAllDescendants(ex execFunc, pid string) []string {
+	out, _, err := ex(context.Background(), "ps", "-axo", "pid=,ppid=,comm=")
 	if err != nil {
 		return nil
 	}
@@ -1006,7 +997,7 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 
 	// Walk the process tree for all descendants (catches processes that
 	// called setsid() and created their own process groups)
-	descendants := getAllDescendants(pid)
+	descendants := getAllDescendants(t.runner(), pid)
 
 	// Build known PID set for group membership verification
 	knownPIDs := make(map[string]bool, len(descendants)+1)
@@ -1019,15 +1010,15 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 	// the entire group blindly with syscall.Kill(-pgid, ...) — which could
 	// hit unrelated processes sharing the same PGID — we enumerate group
 	// members and only include those reparented to init (PPID == 1).
-	pgid := getProcessGroupID(pid)
+	pgid := getProcessGroupID(t.runner(), pid)
 	if pgid != "" && pgid != "0" && pgid != "1" {
-		reparented := collectReparentedGroupMembers(pgid, knownPIDs)
+		reparented := collectReparentedGroupMembers(t.runner(), pgid, knownPIDs)
 		descendants = append(descendants, reparented...)
 	}
 
 	// Send SIGTERM to all descendants (deepest first to avoid orphaning)
 	for _, dpid := range descendants {
-		_ = exec.Command("kill", "-TERM", dpid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", dpid)
 	}
 
 	// Wait for graceful shutdown (2s gives processes time to clean up)
@@ -1035,14 +1026,14 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 
 	// Send SIGKILL to any remaining descendants
 	for _, dpid := range descendants {
-		_ = exec.Command("kill", "-KILL", dpid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-KILL", dpid)
 	}
 
 	// Kill the pane process itself (may have called setsid() and detached,
 	// or may have no children like Claude Code)
-	_ = exec.Command("kill", "-TERM", pid).Run()
+	_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
 	time.Sleep(processKillGracePeriod)
-	_ = exec.Command("kill", "-KILL", pid).Run()
+	_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 
 	return nil
 }
@@ -1073,7 +1064,7 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 	}
 
 	// Get all descendant PIDs recursively (returns deepest-first order)
-	descendants := getAllDescendants(pid)
+	descendants := getAllDescendants(t.runner(), pid)
 
 	// Filter out excluded PIDs
 	var filtered []string
@@ -1085,7 +1076,7 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 
 	// Send SIGTERM to all non-excluded descendants (deepest first to avoid orphaning)
 	for _, dpid := range filtered {
-		_ = exec.Command("kill", "-TERM", dpid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", dpid)
 	}
 
 	// Wait for graceful shutdown
@@ -1093,14 +1084,14 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 
 	// Send SIGKILL to any remaining non-excluded descendants
 	for _, dpid := range filtered {
-		_ = exec.Command("kill", "-KILL", dpid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-KILL", dpid)
 	}
 
 	// Kill the pane process itself only if not excluded
 	if !exclude[pid] {
-		_ = exec.Command("kill", "-TERM", pid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
 		time.Sleep(100 * time.Millisecond)
-		_ = exec.Command("kill", "-KILL", pid).Run()
+		_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 	}
 
 	return nil
@@ -1171,9 +1162,8 @@ func (t *Tmux) SetExitEmpty(on bool) error {
 
 // IsAvailable checks if tmux is installed and can be invoked.
 func (t *Tmux) IsAvailable() bool {
-	cmd := exec.Command("tmux", "-V")
-	hideConsoleWindow(cmd)
-	return cmd.Run() == nil
+	_, _, err := t.runner()(context.Background(), "tmux", "-V")
+	return err == nil
 }
 
 // HasSession checks if a session exists (exact match).
@@ -2899,18 +2889,17 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // processMatchesNames checks if a process's binary name matches any of the given names.
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
-func processMatchesNames(pid string, names []string) bool {
-	matches, _ := processMatchesNamesChecked(pid, names)
+func processMatchesNames(ex execFunc, pid string, names []string) bool {
+	matches, _ := processMatchesNamesChecked(ex, pid, names)
 	return matches
 }
 
-func processMatchesNamesChecked(pid string, names []string) (bool, error) {
+func processMatchesNamesChecked(ex execFunc, pid string, names []string) (bool, error) {
 	if len(names) == 0 {
 		return false, nil
 	}
 	// Use ps to get the command name (COMM column gives the executable name)
-	cmd := exec.Command("ps", "-p", pid, "-o", "comm=")
-	out, err := cmd.Output()
+	out, _, err := ex(context.Background(), "ps", "-p", pid, "-o", "comm=")
 	if err != nil {
 		if isNoMatchExit(err) {
 			return false, nil
@@ -2933,12 +2922,12 @@ func processMatchesNamesChecked(pid string, names []string) (bool, error) {
 // hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
 // matching any of the given names. Recursively traverses the process tree up to maxDepth.
 // Used when the pane command is a shell (bash, zsh, pwsh) that launched an agent.
-func hasDescendantWithNames(pid string, names []string, depth int) bool {
-	found, _ := hasDescendantWithNamesChecked(pid, names, depth)
+func hasDescendantWithNames(ex execFunc, pid string, names []string, depth int) bool {
+	found, _ := hasDescendantWithNamesChecked(ex, pid, names, depth)
 	return found
 }
 
-func hasDescendantWithNamesChecked(pid string, names []string, depth int) (bool, error) {
+func hasDescendantWithNamesChecked(ex execFunc, pid string, names []string, depth int) (bool, error) {
 	const maxDepth = 10 // Prevent infinite loops in case of circular references
 	if len(names) == 0 || depth > maxDepth {
 		return false, nil
@@ -2946,16 +2935,16 @@ func hasDescendantWithNamesChecked(pid string, names []string, depth int) (bool,
 	if runtime.GOOS == "windows" {
 		return hasDescendantWithNamesWindows(pid, names, depth), nil
 	}
-	return hasDescendantWithNamesPosixChecked(pid, names, depth)
+	return hasDescendantWithNamesPosixChecked(ex, pid, names, depth)
 }
 
 // hasDescendantWithNamesPosix walks one ps snapshot on Unix systems.
-func hasDescendantWithNamesPosix(pid string, names []string, depth int) bool {
-	found, _ := hasDescendantWithNamesPosixChecked(pid, names, depth)
+func hasDescendantWithNamesPosix(ex execFunc, pid string, names []string, depth int) bool {
+	found, _ := hasDescendantWithNamesPosixChecked(ex, pid, names, depth)
 	return found
 }
 
-func hasDescendantWithNamesPosixChecked(pid string, names []string, depth int) (bool, error) {
+func hasDescendantWithNamesPosixChecked(ex execFunc, pid string, names []string, depth int) (bool, error) {
 	const maxDepth = 10
 	if len(names) == 0 || depth > maxDepth {
 		return false, nil
@@ -2965,7 +2954,7 @@ func hasDescendantWithNamesPosixChecked(pid string, names []string, depth int) (
 		return false, fmt.Errorf("invalid process ID %q", pid)
 	}
 
-	out, err := exec.Command("ps", "-axo", "pid=,ppid=,comm=").Output()
+	out, _, err := ex(context.Background(), "ps", "-axo", "pid=,ppid=,comm=")
 	if err != nil {
 		return false, err
 	}
@@ -3023,7 +3012,9 @@ func hasDescendantWithNamesFromSnapshot(root string, names []string, depth int, 
 }
 
 func isNoMatchExit(err error) bool {
-	var exitErr *exec.ExitError
+	// Any error carrying an exit code qualifies (*exec.ExitError in production),
+	// so an injected execFunc can report a no-match exit too.
+	var exitErr interface{ ExitCode() int }
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
@@ -3242,7 +3233,7 @@ func (t *Tmux) ResolveCurrentSession() (string, error) {
 		if name, ok := paneSessions[pid]; ok {
 			return name, nil
 		}
-		ppid, err := parentPID(pid)
+		ppid, err := parentPID(t.runner(), pid)
 		if err != nil || ppid == pid {
 			break
 		}
@@ -3253,8 +3244,8 @@ func (t *Tmux) ResolveCurrentSession() (string, error) {
 }
 
 // parentPID returns the parent PID of the given process.
-func parentPID(pid int) (int, error) {
-	data, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+func parentPID(ex execFunc, pid int) (int, error) {
+	data, _, err := ex(context.Background(), "ps", "-o", "ppid=", "-p", strconv.Itoa(pid))
 	if err != nil {
 		return 0, err
 	}
@@ -3677,16 +3668,16 @@ func (t *Tmux) matchesPaneRuntimeChecked(session, cmd, pid string, processNames 
 	// If pane command is a shell, check descendants
 	for _, shell := range constants.SupportedShells {
 		if cmd == shell {
-			return hasDescendantWithNamesChecked(pid, names, 0)
+			return hasDescendantWithNamesChecked(t.runner(), pid, names, 0)
 		}
 	}
 	// Unrecognized command: check if process itself matches (version-as-argv[0])
-	running, err := processMatchesNamesChecked(pid, names)
+	running, err := processMatchesNamesChecked(t.runner(), pid, names)
 	if err == nil && running {
 		return true, nil
 	}
 	// Finally check descendants as fallback
-	descendantRunning, descendantErr := hasDescendantWithNamesChecked(pid, names, 0)
+	descendantRunning, descendantErr := hasDescendantWithNamesChecked(t.runner(), pid, names, 0)
 	if descendantErr != nil {
 		return false, descendantErr
 	}

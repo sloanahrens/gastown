@@ -772,7 +772,7 @@ func TestHasDescendantWithNames(t *testing.T) {
 	// Test the hasDescendantWithNames helper function directly
 
 	// Test with a definitely nonexistent PID
-	got := hasDescendantWithNames("999999999", []string{"node", "claude"}, 0)
+	got := hasDescendantWithNames(realExec, "999999999", []string{"node", "claude"}, 0)
 	if got {
 		t.Error("hasDescendantWithNames should return false for nonexistent PID")
 	}
@@ -781,19 +781,19 @@ func TestHasDescendantWithNames(t *testing.T) {
 	selfPID := fmt.Sprintf("%d", os.Getpid())
 
 	// Test with empty names slice - should always return false
-	got = hasDescendantWithNames(selfPID, []string{}, 0)
+	got = hasDescendantWithNames(realExec, selfPID, []string{}, 0)
 	if got {
 		t.Error("hasDescendantWithNames should return false for empty names slice")
 	}
 
 	// Test with nil names slice - should always return false
-	got = hasDescendantWithNames(selfPID, nil, 0)
+	got = hasDescendantWithNames(realExec, selfPID, nil, 0)
 	if got {
 		t.Error("hasDescendantWithNames should return false for nil names slice")
 	}
 
 	// Test with current process - should have children but not specific agent processes
-	got = hasDescendantWithNames(selfPID, []string{"node", "claude"}, 0)
+	got = hasDescendantWithNames(realExec, selfPID, []string{"node", "claude"}, 0)
 	if got {
 		t.Logf("hasDescendantWithNames(%q, [node,claude]) = true - process has matching child?", selfPID)
 	}
@@ -804,14 +804,14 @@ func TestGetAllDescendants(t *testing.T) {
 	// Test the getAllDescendants helper function
 
 	// Test with nonexistent PID - should return empty slice
-	got := getAllDescendants("999999999")
+	got := getAllDescendants(realExec, "999999999")
 	if len(got) != 0 {
 		t.Errorf("getAllDescendants(nonexistent) = %v, want empty slice", got)
 	}
 
 	// Use current PID instead of PID 1 to avoid walking the entire process tree
 	selfPID := fmt.Sprintf("%d", os.Getpid())
-	descendants := getAllDescendants(selfPID)
+	descendants := getAllDescendants(realExec, selfPID)
 	t.Logf("getAllDescendants(%q) found %d descendants", selfPID, len(descendants))
 
 	// Verify returned PIDs are all numeric strings
@@ -927,7 +927,7 @@ func TestHasDescendantWithNamesPosixCheckedReportsSnapshotError(t *testing.T) {
 	}
 
 	t.Setenv("PATH", "")
-	found, err := hasDescendantWithNamesPosixChecked("1", []string{"node"}, 0)
+	found, err := hasDescendantWithNamesPosixChecked(realExec, "1", []string{"node"}, 0)
 	if err == nil {
 		t.Fatal("hasDescendantWithNamesPosixChecked with missing ps error = nil, want error")
 	}
@@ -1076,7 +1076,7 @@ func TestGetProcessGroupID(t *testing.T) {
 
 	// Test with current process
 	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
+	pgid := getProcessGroupID(realExec, pid)
 
 	if pgid == "" {
 		t.Error("expected non-empty PGID for current process")
@@ -1088,7 +1088,7 @@ func TestGetProcessGroupID(t *testing.T) {
 	}
 
 	// Test with nonexistent PID
-	pgid = getProcessGroupID("999999999")
+	pgid = getProcessGroupID(realExec, "999999999")
 	if pgid != "" {
 		t.Errorf("expected empty PGID for nonexistent process, got %q", pgid)
 	}
@@ -1097,12 +1097,12 @@ func TestGetProcessGroupID(t *testing.T) {
 func TestGetProcessGroupMembers(t *testing.T) {
 	// Get current process's PGID
 	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
+	pgid := getProcessGroupID(realExec, pid)
 	if pgid == "" {
 		t.Skip("could not get PGID for current process")
 	}
 
-	members := getProcessGroupMembers(pgid)
+	members := getProcessGroupMembers(realExec, pgid)
 
 	// Current process should be in the list
 	found := false
@@ -1325,7 +1325,7 @@ func TestCollectReparentedGroupMembers(t *testing.T) {
 
 	// Test with current process's PGID
 	pid := fmt.Sprintf("%d", os.Getpid())
-	pgid := getProcessGroupID(pid)
+	pgid := getProcessGroupID(realExec, pid)
 	if pgid == "" {
 		t.Skip("could not get PGID for current process")
 	}
@@ -1334,13 +1334,13 @@ func TestCollectReparentedGroupMembers(t *testing.T) {
 	knownPIDs := map[string]bool{pid: true}
 
 	// collectReparentedGroupMembers should NOT include our PID (it's in known set)
-	reparented := collectReparentedGroupMembers(pgid, knownPIDs)
+	reparented := collectReparentedGroupMembers(realExec, pgid, knownPIDs)
 	for _, rpid := range reparented {
 		if rpid == pid {
 			t.Errorf("collectReparentedGroupMembers returned known PID %s", pid)
 		}
 		// Each reparented PID should have PPID == 1
-		ppid := getParentPID(rpid)
+		ppid := getParentPID(realExec, rpid)
 		if ppid != "1" {
 			t.Errorf("collectReparentedGroupMembers returned PID %s with PPID %s (expected 1)", rpid, ppid)
 		}
@@ -1355,7 +1355,7 @@ func TestGetParentPID(t *testing.T) {
 
 	// Test with current process - should have a valid PPID
 	pid := fmt.Sprintf("%d", os.Getpid())
-	ppid := getParentPID(pid)
+	ppid := getParentPID(realExec, pid)
 	if ppid == "" {
 		t.Error("expected non-empty PPID for current process")
 	}
@@ -1366,7 +1366,7 @@ func TestGetParentPID(t *testing.T) {
 	}
 
 	// Test with nonexistent PID
-	ppid = getParentPID("999999999")
+	ppid = getParentPID(realExec, "999999999")
 	if ppid != "" {
 		t.Errorf("expected empty PPID for nonexistent process, got %q", ppid)
 	}
