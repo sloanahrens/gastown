@@ -2736,7 +2736,7 @@ func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
 
 	// Town-level store (hq)
 	hqBeadsDir := filepath.Join(d.config.TownRoot, ".beads")
-	if store, err := beadsdk.OpenFromConfig(d.ctx, hqBeadsDir); err == nil {
+	if store, err := beads.OpenStoreFromConfig(d.ctx, hqBeadsDir); err == nil {
 		stores["hq"] = store
 	} else {
 		d.logger.Printf("Convoy: hq beads store unavailable: %s", util.FirstLine(err.Error()))
@@ -2749,7 +2749,7 @@ func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
 		if beadsDir == "" {
 			continue
 		}
-		store, err := beadsdk.OpenFromConfig(d.ctx, beadsDir)
+		store, err := beads.OpenStoreFromConfig(d.ctx, beadsDir)
 		if err != nil {
 			d.logger.Printf("Convoy: %s beads store unavailable: %s", rigName, util.FirstLine(err.Error()))
 			missing = append(missing, rigName)
