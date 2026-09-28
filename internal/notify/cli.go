@@ -72,13 +72,14 @@ func (c *CLI) MailSend(ctx context.Context, to, subject, body string, opts ...Ma
 		return err
 	}
 	o := ApplyMailOptions(opts)
-	args := []string{"mail", "send", to, "-s", subject, "-m", body}
+	args := []string{"mail", "send", "-s", subject, "-m", body}
 	if o.From != "" {
 		args = append(args, "--from", o.From)
 	}
 	if o.NoNotify {
 		args = append(args, "--no-notify")
 	}
+	args = append(args, "--", to)
 	return c.exec(ctx, "", args...)
 }
 
@@ -87,10 +88,16 @@ func (c *CLI) Nudge(ctx context.Context, target, message string) error {
 	if err := ValidateNudge(target, message); err != nil {
 		return err
 	}
-	return c.exec(ctx, "", "nudge", target, message)
+	return c.exec(ctx, "", "nudge", "--", target, message)
 }
 
 // Escalate runs `gt escalate`, passing the reason on stdin.
+//
+// Every method puts its flags first and its positional values after a "--",
+// so a recipient, target, message or description that begins with "-"
+// reaches gt as that value rather than being parsed as a flag. Flag values
+// (subject, body, source, fingerprint) cannot be misread: pflag takes the
+// argument after a string flag as its value whatever it starts with.
 func (c *CLI) Escalate(ctx context.Context, e Escalation) error {
 	if err := e.Validate(); err != nil {
 		return err
@@ -105,7 +112,7 @@ func (c *CLI) Escalate(ctx context.Context, e Escalation) error {
 	if e.Fingerprint != "" {
 		args = append(args, "--fingerprint", e.Fingerprint)
 	}
-	args = append(args, "--stdin", e.Description)
+	args = append(args, "--stdin", "--", e.Description)
 	return c.exec(ctx, e.Reason, args...)
 }
 

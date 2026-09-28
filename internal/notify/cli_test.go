@@ -48,7 +48,7 @@ func TestCLIMailSendArgv(t *testing.T) {
 	got := r.only(t)
 	want := command{
 		Name: "/opt/gt",
-		Args: []string{"mail", "send", "gastown/witness", "-s", "GUPP_VIOLATION: x", "-m", "line one\nline two"},
+		Args: []string{"mail", "send", "-s", "GUPP_VIOLATION: x", "-m", "line one\nline two", "--", "gastown/witness"},
 		Dir:  "/town",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -62,7 +62,7 @@ func TestCLIMailSendOptions(t *testing.T) {
 	if err := newTestCLI(r).MailSend(t.Context(), "overseer", "Convoy landed", "done", From("convoy/hq-cv1"), NoNotify()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mail", "send", "overseer", "-s", "Convoy landed", "-m", "done", "--from", "convoy/hq-cv1", "--no-notify"}
+	want := []string{"mail", "send", "-s", "Convoy landed", "-m", "done", "--from", "convoy/hq-cv1", "--no-notify", "--", "overseer"}
 	if got := r.only(t).Args; !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %q\nwant   %q", got, want)
 	}
@@ -74,7 +74,7 @@ func TestCLINudgeArgv(t *testing.T) {
 	if err := newTestCLI(r).Nudge(t.Context(), "mayor/", "MERGED: mr-1"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"nudge", "mayor/", "MERGED: mr-1"}
+	want := []string{"nudge", "--", "mayor/", "MERGED: mr-1"}
 	if got := r.only(t).Args; !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %q, want %q", got, want)
 	}
@@ -97,7 +97,7 @@ func TestCLIEscalateArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.only(t)
-	wantArgs := []string{"escalate", "-s", "HIGH", "--source", "jsonl_git_backup", "--fingerprint", "jsonl-spike", "--stdin", "jsonl_git_backup: spike detected"}
+	wantArgs := []string{"escalate", "-s", "HIGH", "--source", "jsonl_git_backup", "--fingerprint", "jsonl-spike", "--stdin", "--", "jsonl_git_backup: spike detected"}
 	if !reflect.DeepEqual(got.Args, wantArgs) {
 		t.Fatalf("args = %q\nwant   %q", got.Args, wantArgs)
 	}
@@ -112,7 +112,7 @@ func TestCLIEscalateOmitsUnsetFlags(t *testing.T) {
 	if err := newTestCLI(r).Escalate(t.Context(), Escalation{Description: "stuck"}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"escalate", "--stdin", "stuck"}
+	want := []string{"escalate", "--stdin", "--", "stuck"}
 	if got := r.only(t).Args; !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %q, want %q", got, want)
 	}
@@ -231,5 +231,41 @@ func TestCLIRefusesDoneContextWithoutRunning(t *testing.T) {
 	}
 	if len(r.calls) != 0 {
 		t.Fatalf("ran %+v on a done context", r.calls)
+	}
+}
+
+// TestCLIKeepsDashLeadingValuesPositional: a recipient, target, message or
+// description that begins with "-" must reach gt as a positional argument,
+// not be parsed as a flag, so every positional follows a "--" separator.
+func TestCLIKeepsDashLeadingValuesPositional(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		call func(c *CLI) error
+		want []string
+	}{
+		"mail recipient": {
+			call: func(c *CLI) error { return c.MailSend(t.Context(), "-to", "-subject", "-body") },
+			want: []string{"mail", "send", "-s", "-subject", "-m", "-body", "--", "-to"},
+		},
+		"nudge target and message": {
+			call: func(c *CLI) error { return c.Nudge(t.Context(), "-target", "--force") },
+			want: []string{"nudge", "--", "-target", "--force"},
+		},
+		"escalation description": {
+			call: func(c *CLI) error { return c.Escalate(t.Context(), Escalation{Severity: "low", Description: "--dry-run"}) },
+			want: []string{"escalate", "-s", "low", "--stdin", "--", "--dry-run"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := &recordedRun{}
+			if err := tc.call(newTestCLI(r)); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.only(t).Args; !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("args = %q\nwant   %q", got, tc.want)
+			}
+		})
 	}
 }

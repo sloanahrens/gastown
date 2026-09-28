@@ -147,7 +147,9 @@ func TestDeaconRedispatch_EditorialRejectionRoutesThroughConvergence(t *testing.
 			t.Errorf("a non-converging editorial resubmit was re-slung: %s", call)
 		}
 	}
-	if !hasCallContaining(logged, "mail send mayor/", "needs_human") {
+	// notify.CLI puts the recipient after a "--" (flags first), so the mail
+	// reads "mail send -s ... -m ... -- mayor/".
+	if !hasCallContaining(logged, "mail send ", "-- mayor/", "needs_human") {
 		t.Errorf("no needs_human escalation to the mayor; calls: %v", logged)
 	}
 	if !hasCallContaining(logged, "update gt-wiring", "--add-label needs_human") {
