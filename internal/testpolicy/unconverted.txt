@@ -43,6 +43,5 @@ internal/util
 internal/version
 internal/wasteland
 internal/web
-internal/wisp
 internal/witness
 plugins/dolt-snapshots

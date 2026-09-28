@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
 func TestEnsureDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Test creating directory in existing root
@@ -42,10 +42,7 @@ func TestEnsureDir(t *testing.T) {
 }
 
 func TestEnsureDir_Permissions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory permission bits are not reliable on Windows")
-	}
-
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	dir, err := EnsureDir(tmpDir)
@@ -66,6 +63,7 @@ func TestEnsureDir_Permissions(t *testing.T) {
 }
 
 func TestWispPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		root     string
@@ -103,6 +101,7 @@ func TestWispPath(t *testing.T) {
 }
 
 func TestWispPath_WithWispDir(t *testing.T) {
+	t.Parallel()
 	// Verify WispPath uses WispDir constant
 	root := "/test/root"
 	filename := "test.json"
@@ -116,6 +115,7 @@ func TestWispPath_WithWispDir(t *testing.T) {
 }
 
 func TestWriteJSON_Helper(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "test.json")
 
@@ -166,6 +166,7 @@ func TestWriteJSON_Helper(t *testing.T) {
 }
 
 func TestWriteJSON_Overwrite(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testPath := filepath.Join(tmpDir, "test.json")
 
