@@ -41,13 +41,24 @@ const DefaultIdleNotifyTimeout = 3 * time.Second
 type Router struct {
 	workDir  string // fallback directory to run bd commands in
 	townRoot string // town root directory (e.g., ~/gt)
-	tmux     *tmux.Tmux
+	tmux     notifyTmux
 
 	// IdleNotifyTimeout controls how long to wait for a session to become
 	// idle before falling back to a queued nudge. Zero uses the default.
 	IdleNotifyTimeout time.Duration
 
 	notifyWg sync.WaitGroup // tracks in-flight async notifications
+}
+
+// notifyTmux is the tmux surface notifyRecipient drives. *tmux.Tmux
+// satisfies it. Tests supply a scripted fake, so which delivery path a
+// notification takes is decided by the test rather than by how quickly a
+// real pane paints its prompt on a loaded host.
+type notifyTmux interface {
+	HasSession(name string) (bool, error)
+	SendNotificationBanner(session, from, subject string) error
+	WaitForIdle(session string, timeout time.Duration) error
+	NudgeSession(session, message string) error
 }
 
 // NewRouter creates a new mail router.
