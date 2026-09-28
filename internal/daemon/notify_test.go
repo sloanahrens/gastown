@@ -29,6 +29,31 @@ func TestDaemonNotifierDefaultsToGtAsDaemon(t *testing.T) {
 	}
 }
 
+func TestDoltServerManagerNotifierKeepsAnInjectedOne(t *testing.T) {
+	t.Parallel()
+	rec := notifyfake.New()
+	m := &DoltServerManager{townRoot: "/town", notifier: rec}
+	if got := m.notify(); got != rec {
+		t.Fatalf("notify() = %T, want the injected recorder", got)
+	}
+}
+
+// TestDoltServerManagerNotifierDefaultsToGtFromTheTownRoot pins the
+// invocation the Dolt crash, crash-loop, unhealthy and read-only alert mails
+// always used: gt from PATH, run from the town root, with the daemon's own
+// environment.
+func TestDoltServerManagerNotifierDefaultsToGtFromTheTownRoot(t *testing.T) {
+	t.Parallel()
+	m := &DoltServerManager{townRoot: "/town"}
+	cli, ok := m.notify().(*notify.CLI)
+	if !ok {
+		t.Fatalf("notify() = %T, want *notify.CLI", m.notify())
+	}
+	if cli.Dir != "/town" || cli.Bin != "" || cli.Env != nil {
+		t.Fatalf("CLI = %+v, want gt from PATH run from /town with the inherited env", cli)
+	}
+}
+
 func TestNotifyWitnessMailsGoToTheRigWitness(t *testing.T) {
 	t.Parallel()
 	d, rec := daemonWithRecorder(t)
