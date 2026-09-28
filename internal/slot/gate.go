@@ -111,15 +111,74 @@ func (dockerCLI) Info() (VMInfo, error) {
 	return VMInfo{NCPU: ncpu, MemBytes: memBytes}, nil
 }
 
-// legacyRuntime is the runtime the package-level functions (Acquire, Status,
-// Reap, GateContainers, ...) use. It reads the runningGateContainers and
-// removeContainer variables at every call, so the Set*ForTest shims keep
-// working for tests of packages that have not moved to injecting a Gate.
+// defaultRuntime is the runtime the package-level functions (Acquire, Status,
+// Reap, GateContainers, ...) use. It is replaced only by the deprecated
+// Set*ForTest shims below, for the tests of packages that have not yet moved
+// to injecting a Gate.
+var defaultRuntime = DockerRuntime()
+
+// legacyRuntime reads defaultRuntime at every call, so a shim that swaps it
+// while a package-level call is in flight is seen exactly as the old
+// package-variable stubs were.
 type legacyRuntime struct{}
 
-func (legacyRuntime) List() ([]string, error) { return runningGateContainers() }
-func (legacyRuntime) Remove(id string) error  { return removeContainer(id) }
-func (legacyRuntime) Info() (VMInfo, error)   { return dockerCLI{}.Info() }
+func (legacyRuntime) List() ([]string, error) { return defaultRuntime.List() }
+func (legacyRuntime) Remove(id string) error  { return defaultRuntime.Remove(id) }
+func (legacyRuntime) Info() (VMInfo, error)   { return defaultRuntime.Info() }
+
+// funcRuntime overrides some of a base runtime's methods.
+type funcRuntime struct {
+	base   ContainerRuntime
+	list   func() ([]string, error)
+	remove func(id string) error
+}
+
+func (r funcRuntime) List() ([]string, error) {
+	if r.list != nil {
+		return r.list()
+	}
+	return r.base.List()
+}
+
+func (r funcRuntime) Remove(id string) error {
+	if r.remove != nil {
+		return r.remove(id)
+	}
+	return r.base.Remove(id)
+}
+
+func (r funcRuntime) Info() (VMInfo, error) { return r.base.Info() }
+
+// SetContainerListerForTest overrides the listing the package-level functions
+// use, for tests in OTHER packages that drive Acquire through their own code
+// (internal/cmd's batch-slot tests via acquireBatchGateSlot, the daemon's
+// main-branch runner, the witness) and must never shell out to the real
+// docker CLI: a stray dolt/testcontainers/ryuk container on a shared Gas Town
+// host would otherwise make Acquire poll for the full batchSlotTimeout and
+// hang the whole test binary (gt-tuiy attempt 4, CRITICAL). Returns a restore
+// func the caller must invoke (typically via t.Cleanup) — the override is
+// process-wide state shared by every test in the binary.
+//
+// Deprecated: inject a runtime with NewGate(WithRuntime(...)) instead. Kept
+// until the packages above convert to the unit-test rules.
+func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
+	prev := defaultRuntime
+	defaultRuntime = funcRuntime{base: prev, list: fn}
+	return func() { defaultRuntime = prev }
+}
+
+// SetContainerRemoverForTest overrides the removal the package-level
+// functions use, for tests in other packages that drive Reap and must not
+// delete a real container. Returns a restore func the caller must invoke
+// (typically via t.Cleanup).
+//
+// Deprecated: inject a runtime with NewGate(WithRuntime(...)) instead. Kept
+// until internal/doctor converts to the unit-test rules.
+func SetContainerRemoverForTest(fn func(id string) error) (restore func()) {
+	prev := defaultRuntime
+	defaultRuntime = funcRuntime{base: prev, remove: fn}
+	return func() { defaultRuntime = prev }
+}
 
 // procEnv is the process environment the reentrant marker (ReentrantEnvVar)
 // travels through: a holder arms it for the processes it spawns, and a
@@ -168,22 +227,6 @@ type ownerProbe struct {
 func hostOwnerProbe() ownerProbe {
 	return ownerProbe{hostname: os.Hostname, gone: processGone, startToken: processStartToken}
 }
-
-// legacyOwnerProbe reads the ownerProcessGone, localHostname and
-// ownerStartToken variables at every call, so SetOwnerProcessProbeForTest
-// keeps working for the package-level functions.
-func legacyOwnerProbe() ownerProbe {
-	return ownerProbe{
-		hostname:   func() (string, error) { return localHostname() },
-		gone:       func(pid int) bool { return ownerProcessGone(pid) },
-		startToken: func(pid int) (string, bool) { return ownerStartToken(pid) },
-	}
-}
-
-// varWriter writes to whatever *w names at the time of the write.
-type varWriter struct{ w *io.Writer }
-
-func (v varWriter) Write(p []byte) (int, error) { return (*v.w).Write(p) }
 
 // Gate is the container-gate slot with its collaborators injected: the Docker
 // runtime it checks, the clock its waits run on, and the poll interval between
@@ -235,9 +278,9 @@ func NewGate(opts ...Option) *Gate {
 		pollInterval: DefaultPollInterval,
 		env:          osEnv{},
 		pid:          os.Getpid(),
-		owner:        legacyOwnerProbe(),
-		probeOut:     varWriter{&probeWriter},
-		debrisOut:    varWriter{&debrisWriter},
+		owner:        hostOwnerProbe(),
+		probeOut:     os.Stderr,
+		debrisOut:    os.Stderr,
 	}
 	for _, opt := range opts {
 		opt(g)

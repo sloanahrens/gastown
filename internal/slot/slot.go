@@ -42,7 +42,7 @@ import (
 // non-blocking attempt while waiting for a timed acquire.
 const DefaultPollInterval = 2 * time.Second
 
-// dockerPSTimeout bounds the `docker ps` call runningGateContainers makes.
+// dockerPSTimeout bounds the `docker ps` call DockerRuntime().List makes.
 // Status() is on gt-status's hot path (gt-tuiy: polled frequently by
 // witness patrols and `gt slot status`), so a wedged docker daemon must not
 // be able to hang it indefinitely — a bounded, explicit "unknown" beats an
@@ -219,13 +219,7 @@ func reentrantEnvValue(townRoot string, index int, role string, pid int) string 
 // kind of detector that missed a live suite before.
 var gateContainerPatterns = []string{"dolt", "testcontainers", "ryuk"}
 
-// runningGateContainers lists the raw `docker ps` lines for every currently
-// running Docker container whose image or name matches gateContainerPatterns
-// (see ContainerRuntime.List). Declared as a var so tests in other packages can
-// substitute a fake docker CLI response through SetContainerListerForTest.
-var runningGateContainers = func() ([]string, error) { return dockerCLI{}.List() }
-
-// isDaemonUnreachable reports whether a runningGateContainers error means
+// isDaemonUnreachable reports whether a ContainerRuntime.List error means
 // the docker daemon itself refused the connection (the CLI's own message
 // for "not running" and "connection refused" — Docker emits the same
 // wording for both), as opposed to a wedged daemon (docker ps timed out,
@@ -239,26 +233,8 @@ func isDaemonUnreachable(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "cannot connect to the docker daemon")
 }
 
-// SetContainerListerForTest overrides the function Acquire/Status use to
-// list running gate containers, for tests in OTHER packages that cannot
-// reach the unexported runningGateContainers var directly the way this
-// package's own tests do (see stubNoContainers in slot_test.go).
-// internal/cmd's batch-slot tests drive Acquire through
-// acquireBatchGateSlot and must never shell out to the real docker CLI: a
-// stray dolt/testcontainers/ryuk container on a shared Gas Town host would
-// otherwise make Acquire poll for the full batchSlotTimeout and hang the
-// whole test binary (gt-tuiy attempt 4, CRITICAL). Returns a restore func
-// the caller must invoke (typically via t.Cleanup) to put the real lister
-// back — the override is process-wide state shared by every test in the
-// binary.
-func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
-	prev := runningGateContainers
-	runningGateContainers = fn
-	return func() { runningGateContainers = prev }
-}
-
 // matchGateContainers filters raw `docker ps` output down to the lines for
-// gate containers. Split out from runningGateContainers so the matching logic
+// gate containers. Split out from the docker call so the matching logic
 // is testable without stubbing the docker CLI call itself.
 func matchGateContainers(psOutput string) []string {
 	var matches []string

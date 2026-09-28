@@ -242,14 +242,6 @@ func (g *Gate) AcquirePoolReal(townRoot, role string, timeout time.Duration, poo
 	return g.acquirePool(townRoot, role, timeout, pool, true)
 }
 
-// probeWriter is where the package-level functions' `docker ps` diagnostics go — the counterpart
-// to debrisWriter, which carries the verdicts on the containers Acquire walks
-// past. Both an inconclusive probe and an unreachable daemon are reported
-// here, so an operator has one stream to look at when the gate waits for a
-// reason it cannot name. Declared as a var so a test can read the evidence
-// back rather than have it land on its own stderr.
-var probeWriter io.Writer = os.Stderr
-
 // inconclusiveLogger returns a func that reports the first inconclusive
 // `docker ps` probe it is shown, then stays quiet.
 //

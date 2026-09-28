@@ -73,37 +73,6 @@ func (c GateContainer) OwnerProcess() (pid int, host string, ok bool) {
 	return pid, host, true
 }
 
-// localHostname is os.Hostname behind a var so a test can pin the host the
-// owner labels are compared against.
-var localHostname = os.Hostname
-
-// ownerProcessGone reports whether no process with this pid exists on this
-// host. It must answer true only when that is certain: a true answer licenses
-// deleting the pid's containers. A process owned by another user (EPERM), any
-// other probe error, and a platform with no such probe all answer false —
-// the container is then judged by the older evidence instead. A reused pid
-// also answers false here; ownerStartToken is what tells a reused pid apart.
-// Declared as a var so tests never probe the real process table.
-var ownerProcessGone = processGone
-
-// ownerStartToken reads a live pid's start time (processStartToken); ok is
-// false when it cannot be read. A var so tests can stage a reused pid.
-var ownerStartToken = processStartToken
-
-// SetOwnerProcessProbeForTest overrides ownerProcessGone and localHostname for
-// tests in other packages that drive Acquire, Status or Reap over fake
-// labeled containers. Returns a restore func the caller must invoke.
-//
-// The start-time probe is set to "unreadable", so owner verdicts use the
-// weaker, age-bounded reading unless a test stages start times itself.
-func SetOwnerProcessProbeForTest(gone func(pid int) bool, hostname string) (restore func()) {
-	prevGone, prevHost, prevStart := ownerProcessGone, localHostname, ownerStartToken
-	ownerProcessGone = gone
-	localHostname = func() (string, error) { return hostname, nil }
-	ownerStartToken = func(int) (string, bool) { return "", false }
-	return func() { ownerProcessGone, localHostname, ownerStartToken = prevGone, prevHost, prevStart }
-}
-
 // ownerVerdict judges a container by its owner labels. ok is false when the
 // labels cannot decide — absent, malformed, naming another host, or an owner
 // that only looks alive on a container past the staleness window — and the

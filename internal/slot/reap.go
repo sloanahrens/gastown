@@ -135,18 +135,3 @@ func reapStaleOwnerFiles(townRoot string, dryRun bool) []StaleOwnerFile {
 	}
 	return stale
 }
-
-// removeContainer force-removes one container (see ContainerRuntime.Remove).
-// Declared as a var so a test in another package that feeds the gate fake
-// debris can never reach the host's real docker: a stub container id has no
-// business being deleted for real.
-var removeContainer = func(id string) error { return dockerCLI{}.Remove(id) }
-
-// SetContainerRemoverForTest overrides removeContainer, for tests in other
-// packages that drive Reap and must not delete a real container. Returns a
-// restore func the caller must invoke (typically via t.Cleanup).
-func SetContainerRemoverForTest(fn func(id string) error) (restore func()) {
-	prev := removeContainer
-	removeContainer = fn
-	return func() { removeContainer = prev }
-}

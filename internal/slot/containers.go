@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -224,11 +223,6 @@ func (v ContainerVerdict) Blocks() bool {
 	return v.Verdict != VerdictDebris
 }
 
-// debrisWriter is where the package-level functions' debris warnings go.
-// Declared as a var so a test can read the evidence back rather than have it
-// land on its own stderr.
-var debrisWriter io.Writer = os.Stderr
-
 // logDebris records one container the gate is walking past, with the age and
 // the labels an operator needs to confirm the verdict before reaping — the
 // gate grants on debris now, so the evidence for that call has to be on the
@@ -270,7 +264,7 @@ func debrisLogger(w io.Writer) func(ContainerVerdict) {
 // start time) is live at any age. An owner that only looks alive decides only
 // inside the window. Everything else is judged by age and reaper.
 func Classify(containers []GateContainer, now time.Time, window time.Duration) []ContainerVerdict {
-	return legacyOwnerProbe().classify(containers, now, window)
+	return hostOwnerProbe().classify(containers, now, window)
 }
 
 // classify is Classify with the owner labels judged by this probe.
