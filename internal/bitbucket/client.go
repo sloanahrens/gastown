@@ -48,9 +48,14 @@ func WithRESTBase(url string) Option {
 // NewClient creates a Bitbucket Cloud API client.
 // By default it reads BITBUCKET_TOKEN from the environment.
 func NewClient(opts ...Option) (*Client, error) {
+	return newClient(os.Getenv, opts...)
+}
+
+// newClient is NewClient reading BITBUCKET_TOKEN through getenv.
+func newClient(getenv func(string) string, opts ...Option) (*Client, error) {
 	c := &Client{
 		httpClient: http.DefaultClient,
-		token:      os.Getenv("BITBUCKET_TOKEN"),
+		token:      getenv("BITBUCKET_TOKEN"),
 		restBase:   defaultRESTBase,
 	}
 	for _, o := range opts {

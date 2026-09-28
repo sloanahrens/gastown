@@ -10,31 +10,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestClient creates a Client pointing at a test HTTP server.
-func newTestClient(t *testing.T, handler http.Handler) (*Client, *httptest.Server) {
+// testBase is the API base the test clients address; requests never leave
+// the process.
+const testBase = "http://bitbucket.test"
+
+// handlerTransport serves each request in-process with h, so tests exercise
+// the client's real request building and response handling without a socket.
+type handlerTransport struct{ h http.Handler }
+
+func (tr handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	tr.h.ServeHTTP(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+// newTestClient creates a Client whose requests are answered by handler.
+func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
 	c, err := NewClient(
 		WithToken("test-token"),
-		WithHTTPClient(srv.Client()),
-		WithRESTBase(srv.URL),
+		WithHTTPClient(&http.Client{Transport: handlerTransport{handler}}),
+		WithRESTBase(testBase),
 	)
 	require.NoError(t, err)
-	return c, srv
+	return c
+}
+
+// envOf returns a getenv over a fixed environment.
+func envOf(kv map[string]string) func(string) string {
+	return func(k string) string { return kv[k] }
 }
 
 func TestNewClient_RequiresToken(t *testing.T) {
-	t.Setenv("BITBUCKET_TOKEN", "")
-	_, err := NewClient()
+	t.Parallel()
+	_, err := newClient(envOf(nil))
 	assert.ErrorContains(t, err, "BITBUCKET_TOKEN is required")
 }
 
 func TestNewClient_FromEnv(t *testing.T) {
-	t.Setenv("BITBUCKET_TOKEN", "env-token")
-	c, err := NewClient()
+	t.Parallel()
+	c, err := newClient(envOf(map[string]string{"BITBUCKET_TOKEN": "env-token"}))
 	require.NoError(t, err)
 	assert.Equal(t, "env-token", c.token)
+	assert.Equal(t, http.DefaultClient, c.httpClient)
+	assert.Equal(t, defaultRESTBase, c.restBase)
+}
+
+func TestNewClient_WithTokenOverridesEnv(t *testing.T) {
+	t.Parallel()
+	c, err := newClient(envOf(map[string]string{"BITBUCKET_TOKEN": "env-token"}), WithToken("explicit"))
+	require.NoError(t, err)
+	assert.Equal(t, "explicit", c.token)
+
+	// The exported constructor takes the same options.
+	c, err = NewClient(WithToken("explicit"))
+	require.NoError(t, err)
+	assert.Equal(t, "explicit", c.token)
 }
 
 func TestCreateDraftPR(t *testing.T) {
@@ -67,7 +100,7 @@ func TestCreateDraftPR(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	result, err := c.CreateDraftPR(t.Context(), "myws", "myrepo", "feat-branch", "main", "Add feature", "Description")
 	require.NoError(t, err)
 	assert.Equal(t, 42, result.ID)
@@ -85,7 +118,7 @@ func TestUpdatePRDescription(t *testing.T) {
 		w.Write([]byte(`{}`))
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.UpdatePRDescription(t.Context(), "myws", "myrepo", 42, "Updated body")
 	require.NoError(t, err)
 }
@@ -102,7 +135,7 @@ func TestGetPRApprovalStatus_Approved(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	state, err := c.GetPRApprovalStatus(t.Context(), "myws", "myrepo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, ReviewApproved, state)
@@ -120,7 +153,7 @@ func TestGetPRApprovalStatus_ChangesRequested(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	state, err := c.GetPRApprovalStatus(t.Context(), "myws", "myrepo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, ReviewChangesRequired, state)
@@ -135,7 +168,7 @@ func TestGetPRApprovalStatus_NoParticipants(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	state, err := c.GetPRApprovalStatus(t.Context(), "myws", "myrepo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, ReviewPending, state)
@@ -153,7 +186,7 @@ func TestGetPRApprovalStatus_NonReviewerIgnored(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	state, err := c.GetPRApprovalStatus(t.Context(), "myws", "myrepo", 42)
 	require.NoError(t, err)
 	assert.Equal(t, ReviewPending, state)
@@ -177,7 +210,7 @@ func TestGetPRComments(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	comments, err := c.GetPRComments(t.Context(), "myws", "myrepo", 42)
 	require.NoError(t, err)
 	require.Len(t, comments, 1)
@@ -202,7 +235,7 @@ func TestReplyToPRComment(t *testing.T) {
 		w.Write([]byte(`{}`))
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.ReplyToPRComment(t.Context(), "myws", "myrepo", 42, 101, "Thanks, fixed!")
 	require.NoError(t, err)
 }
@@ -218,7 +251,7 @@ func TestMergePR(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"state": "MERGED"})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	err := c.MergePR(t.Context(), "myws", "myrepo", 42, "squash")
 	require.NoError(t, err)
 }
@@ -234,7 +267,7 @@ func TestGetRepoMergeStrategies(t *testing.T) {
 		})
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	strategy, err := c.GetRepoMergeStrategies(t.Context(), "myws", "myrepo")
 	require.NoError(t, err)
 	assert.Equal(t, "fast_forward", strategy)
@@ -248,7 +281,7 @@ func TestGetRepoMergeStrategies_DefaultsToSquash(t *testing.T) {
 		w.Write([]byte(`{"error":{"message":"Not Found"}}`))
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	strategy, err := c.GetRepoMergeStrategies(t.Context(), "myws", "myrepo")
 	require.NoError(t, err)
 	assert.Equal(t, "squash", strategy)
@@ -262,7 +295,7 @@ func TestAPIError(t *testing.T) {
 		w.Write([]byte(`{"error":{"message":"Not Found"}}`))
 	})
 
-	c, _ := newTestClient(t, mux)
+	c := newTestClient(t, mux)
 	_, err := c.GetPRApprovalStatus(t.Context(), "myws", "myrepo", 999)
 	require.Error(t, err)
 

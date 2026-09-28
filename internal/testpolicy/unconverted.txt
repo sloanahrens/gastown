@@ -5,7 +5,6 @@ internal/agent/provider
 internal/agentpause
 internal/atomicfile
 internal/beads
-internal/bitbucket
 internal/checkpoint
 internal/cmd
 internal/config
