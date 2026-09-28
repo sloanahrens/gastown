@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"hash/fnv"
+	"os"
+	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 
 	beadsdk "github.com/steveyegge/beads"
@@ -22,32 +25,35 @@ func beadsTestModeDatabase(dbPath string) string {
 	return fmt.Sprintf("testdb_%x", h.Sum64())
 }
 
-// OpenTestStore opens an in-process beads store at dbPath on the shared test
-// Dolt container (BEADS_TEST_MODE=1, BEADS_DOLT_PORT set by the package's
-// TestMain) and fails t on any error — a store that cannot open is lost
-// coverage, never a skip.
+// OpenTestStore opens a fresh in-process beads store on the shared test Dolt
+// container (BEADS_TEST_MODE=1, BEADS_DOLT_PORT set by the package's TestMain)
+// and fails t on any error — a store that cannot open is lost coverage, never a
+// skip.
 //
 // beadsdk.Open would CREATE its database itself, in the middle of whatever
 // other tests are migrating on the same server, and a catalog change fails
 // their information_schema reads (beads test_container_catalog.go). So the
-// database is created first under the exclusive side of the catalog gate, and
-// the open — a no-op CREATE IF NOT EXISTS plus the schema migration — runs
-// under the shared side. The database is dropped, through the gate, when t
+// store's path comes from a pool whose databases were created ahead of time,
+// several per exclusive section of the catalog gate, and the open — a no-op
+// CREATE IF NOT EXISTS plus the schema migration — runs under the shared side.
+// The database is released for a batched drop, and the path removed, when t
 // ends.
-func OpenTestStore(t testing.TB, ctx context.Context, dbPath string) beadsdk.Storage {
+func OpenTestStore(t testing.TB, ctx context.Context) beadsdk.Storage {
 	t.Helper()
 	port, err := strconv.Atoi(DoltContainerPort())
 	if err != nil || port == 0 {
 		t.Fatalf("OpenTestStore: no shared test Dolt container (port %q)", DoltContainerPort())
 	}
-	name := beadsTestModeDatabase(dbPath)
-	if err := beads.CreateTestDatabase(port, name); err != nil {
-		t.Fatalf("OpenTestStore: create %s: %v", name, err)
+	dbPath, err := takeTestStorePath(port)
+	if err != nil {
+		t.Fatalf("OpenTestStore: %v", err)
 	}
+	name := beadsTestModeDatabase(dbPath)
 	t.Cleanup(func() {
 		if err := beads.ReleaseTestDatabase(port, name); err != nil {
 			t.Logf("cleanup: drop test database %s: %v", name, err)
 		}
+		_ = os.RemoveAll(filepath.Dir(filepath.Dir(dbPath)))
 	})
 	var store beadsdk.Storage
 	if err := beads.WithSharedTestCatalog(func() error {
@@ -64,6 +70,45 @@ func OpenTestStore(t testing.TB, ctx context.Context, dbPath string) beadsdk.Sto
 		t.Fatalf("OpenTestStore: beadsdk.Open did not migrate the database the gate created: %v", err)
 	}
 	return store
+}
+
+// testStorePathBatch is how many store paths, and their databases, one
+// exclusive section of the catalog gate creates.
+const testStorePathBatch = 8
+
+var testStorePaths struct {
+	sync.Mutex
+	ready []string
+}
+
+// takeTestStorePath returns a store path (<tmp>/.beads/dolt, created) whose
+// BEADS_TEST_MODE database already exists on the container on port.
+func takeTestStorePath(port int) (string, error) {
+	testStorePaths.Lock()
+	defer testStorePaths.Unlock()
+	if len(testStorePaths.ready) == 0 {
+		paths := make([]string, 0, testStorePathBatch)
+		stmts := make([]string, 0, testStorePathBatch)
+		for range testStorePathBatch {
+			root, err := os.MkdirTemp("", "gt-teststore-")
+			if err != nil {
+				return "", fmt.Errorf("store dir: %w", err)
+			}
+			p := filepath.Join(root, ".beads", "dolt")
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				return "", fmt.Errorf("store dir: %w", err)
+			}
+			paths = append(paths, p)
+			stmts = append(stmts, "CREATE DATABASE IF NOT EXISTS `"+beadsTestModeDatabase(p)+"`")
+		}
+		if err := beads.ExecTestCatalogDDL(port, stmts...); err != nil {
+			return "", fmt.Errorf("create store databases: %w", err)
+		}
+		testStorePaths.ready = paths
+	}
+	p := testStorePaths.ready[0]
+	testStorePaths.ready = testStorePaths.ready[1:]
+	return p, nil
 }
 
 // requireTablesIn fails unless database name on the test container has tables.

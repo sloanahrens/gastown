@@ -27,14 +27,8 @@ import (
 // t.Parallel in every caller (gt-fx3c).
 func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 	t.Helper()
-	dir := t.TempDir()
-	beadsDir := filepath.Join(dir, ".beads")
-	doltPath := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltPath, 0755); err != nil {
-		t.Fatalf("cannot create test dir: %v", err)
-	}
 	ctx := context.Background()
-	store := testutil.OpenTestStore(t, ctx, doltPath)
+	store := testutil.OpenTestStore(t, ctx)
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
