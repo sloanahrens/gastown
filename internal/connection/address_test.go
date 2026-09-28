@@ -5,6 +5,7 @@ import (
 )
 
 func TestParseAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -80,6 +81,7 @@ func TestParseAddress(t *testing.T) {
 }
 
 func TestAddressString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		addr *Address
 		want string
@@ -113,6 +115,7 @@ func TestAddressString(t *testing.T) {
 }
 
 func TestAddressIsLocal(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		addr *Address
 		want bool
@@ -133,6 +136,7 @@ func TestAddressIsLocal(t *testing.T) {
 }
 
 func TestAddressIsBroadcast(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		addr *Address
 		want bool
@@ -152,6 +156,7 @@ func TestAddressIsBroadcast(t *testing.T) {
 }
 
 func TestAddressEqual(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		a, b *Address
 		want bool
@@ -192,6 +197,7 @@ func TestAddressEqual(t *testing.T) {
 }
 
 func TestParseAddress_EdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -400,6 +406,7 @@ func TestParseAddress_EdgeCases(t *testing.T) {
 }
 
 func TestMustParseAddress_Panics(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("MustParseAddress with empty string should panic")
@@ -409,6 +416,7 @@ func TestMustParseAddress_Panics(t *testing.T) {
 }
 
 func TestMustParseAddress_Valid(t *testing.T) {
+	t.Parallel()
 	// Should not panic
 	addr := MustParseAddress("rig/polecat")
 	if addr.Rig != "rig" || addr.Polecat != "polecat" {
@@ -417,6 +425,7 @@ func TestMustParseAddress_Valid(t *testing.T) {
 }
 
 func TestAddressRigPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		addr *Address
 		want string
