@@ -8,6 +8,7 @@ import (
 )
 
 func TestRoleEmoji(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		role   string
 		expect string
@@ -32,6 +33,7 @@ func TestRoleEmoji(t *testing.T) {
 }
 
 func TestBeadsCustomTypesList(t *testing.T) {
+	t.Parallel()
 	types := BeadsCustomTypesList()
 	expected := []string{"agent", "role", "rig", "convoy", "slot", "queue", "event", "message", "molecule", "gate", "merge-request"}
 
@@ -46,6 +48,7 @@ func TestBeadsCustomTypesList(t *testing.T) {
 }
 
 func TestBeadsInfraTypesList(t *testing.T) {
+	t.Parallel()
 	types := BeadsInfraTypesList()
 	expected := []string{"agent", "role", "message"}
 
@@ -63,6 +66,7 @@ func TestBeadsInfraTypesList(t *testing.T) {
 }
 
 func TestNonDispatchableBeadWispTypes(t *testing.T) {
+	t.Parallel()
 	got := NonDispatchableBeadWispTypes()
 	// Every entry must be one of the durable types, "wisp" excluded (the wisp
 	// scan walks the wisps table, where every row is a wisp), and order kept.
@@ -87,6 +91,7 @@ func TestNonDispatchableBeadWispTypes(t *testing.T) {
 }
 
 func TestNonDispatchableBeadTypesLabels(t *testing.T) {
+	t.Parallel()
 	// The representative mail case: a mail bead is typed "task" and distinguished
 	// only by its "gt:message" label, so both halves must carry the message
 	// family.
@@ -108,6 +113,7 @@ func containsString(list []string, want string) bool {
 }
 
 func TestMayorRigsPath(t *testing.T) {
+	t.Parallel()
 	got := MayorRigsPath("/town")
 	expect := "/town/mayor/rigs.json"
 	if got != expect {
@@ -116,6 +122,7 @@ func TestMayorRigsPath(t *testing.T) {
 }
 
 func TestMayorTownPath(t *testing.T) {
+	t.Parallel()
 	got := MayorTownPath("/town")
 	expect := "/town/mayor/town.json"
 	if got != expect {
@@ -124,6 +131,7 @@ func TestMayorTownPath(t *testing.T) {
 }
 
 func TestRigMayorPath(t *testing.T) {
+	t.Parallel()
 	got := RigMayorPath("/rig")
 	expect := "/rig/mayor/rig"
 	if got != expect {
@@ -132,6 +140,7 @@ func TestRigMayorPath(t *testing.T) {
 }
 
 func TestRigBeadsPath(t *testing.T) {
+	t.Parallel()
 	got := RigBeadsPath("/rig")
 	expect := "/rig/mayor/rig/.beads"
 	if got != expect {
@@ -140,6 +149,7 @@ func TestRigBeadsPath(t *testing.T) {
 }
 
 func TestRigPolecatsPath(t *testing.T) {
+	t.Parallel()
 	got := RigPolecatsPath("/rig")
 	expect := "/rig/polecats"
 	if got != expect {
@@ -148,6 +158,7 @@ func TestRigPolecatsPath(t *testing.T) {
 }
 
 func TestRigCrewPath(t *testing.T) {
+	t.Parallel()
 	got := RigCrewPath("/rig")
 	expect := "/rig/crew"
 	if got != expect {
@@ -156,6 +167,7 @@ func TestRigCrewPath(t *testing.T) {
 }
 
 func TestMayorConfigPath(t *testing.T) {
+	t.Parallel()
 	got := MayorConfigPath("/town")
 	expect := "/town/mayor/config.json"
 	if got != expect {
@@ -164,6 +176,7 @@ func TestMayorConfigPath(t *testing.T) {
 }
 
 func TestTownRuntimePath(t *testing.T) {
+	t.Parallel()
 	got := TownRuntimePath("/town")
 	expect := "/town/.runtime"
 	if got != expect {
@@ -172,6 +185,7 @@ func TestTownRuntimePath(t *testing.T) {
 }
 
 func TestRigRuntimePath(t *testing.T) {
+	t.Parallel()
 	got := RigRuntimePath("/rig")
 	expect := "/rig/.runtime"
 	if got != expect {
@@ -180,6 +194,7 @@ func TestRigRuntimePath(t *testing.T) {
 }
 
 func TestRigSettingsPath(t *testing.T) {
+	t.Parallel()
 	got := RigSettingsPath("/rig")
 	expect := "/rig/settings"
 	if got != expect {
@@ -188,6 +203,7 @@ func TestRigSettingsPath(t *testing.T) {
 }
 
 func TestMayorAccountsPath(t *testing.T) {
+	t.Parallel()
 	got := MayorAccountsPath("/town")
 	expect := "/town/mayor/accounts.json"
 	if got != expect {
@@ -196,6 +212,7 @@ func TestMayorAccountsPath(t *testing.T) {
 }
 
 func TestMayorQuotaPath(t *testing.T) {
+	t.Parallel()
 	got := MayorQuotaPath("/town")
 	expect := "/town/mayor/quota.json"
 	if got != expect {
@@ -206,6 +223,7 @@ func TestMayorQuotaPath(t *testing.T) {
 // TestTestSocketName pins the shape the doctor's tmux-test-socket check reads:
 // the owning pid is the trailing field, and the name is unique per call.
 func TestTestSocketName(t *testing.T) {
+	t.Parallel()
 	name := TestSocketName("gt-test-tmux")
 	if !strings.HasPrefix(name, "gt-test-tmux-") {
 		t.Fatalf("TestSocketName() = %q, want the gt-test-tmux- prefix", name)

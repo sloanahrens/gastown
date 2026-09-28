@@ -11,7 +11,6 @@ internal/checkpoint
 internal/cmd
 internal/config
 internal/connection
-internal/constants
 internal/convoy
 internal/crew
 internal/daemon
