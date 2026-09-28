@@ -295,8 +295,8 @@ func TestGetPaneCommand_MultiPane(t *testing.T) {
 	if _, err := tm.GetPanePID("gt-x"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tm.GetPaneWorkDir("gt-x"); err == nil {
-		t.Fatal("GetPaneWorkDir with empty path = nil error, want the empty-result error")
+	if wd, err := tm.GetPaneWorkDir("gt-x"); err != nil || wd != "/fake-cwd" {
+		t.Fatalf("GetPaneWorkDir = %q, %v; want the pane's directory", wd, err)
 	}
 	targets := map[string]string{}
 	for _, c := range s.find("display-message") {

@@ -134,6 +134,9 @@ func (f *fakeServer) addPaneLocked(s *fsess, dir, cmd string) *fpane {
 	}
 	f.nextPane++
 	pid := f.spawnLocked("1", cmd)
+	if dir == "" {
+		dir = "/fake-cwd" // tmux always reports a working directory
+	}
 	p := &fpane{id: fmt.Sprintf("%%%d", f.nextPane), cmd: cmd, pid: pid, path: dir}
 	for _, q := range s.panes {
 		if q.window == 0 {
@@ -163,7 +166,7 @@ func (f *fakeServer) addWindowLocked(s *fsess, cmd string) *fpane {
 		}
 	}
 	f.nextPane++
-	p := &fpane{id: fmt.Sprintf("%%%d", f.nextPane), window: w, cmd: cmd, pid: f.spawnLocked("1", cmd)}
+	p := &fpane{id: fmt.Sprintf("%%%d", f.nextPane), window: w, cmd: cmd, pid: f.spawnLocked("1", cmd), path: "/fake-cwd"}
 	s.panes = append(s.panes, p)
 	return p
 }

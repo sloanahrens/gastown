@@ -41,15 +41,25 @@ func TestIntegrationFakeServerMatchesTmux(t *testing.T) {
 	socket := constants.TestSocketName("gt-test-diff")
 	real := NewTmuxWithSocket(socket)
 	t.Cleanup(func() { _ = real.KillServer() })
-	if err := real.NewSessionWithCommand(alive, "", "sleep 300"); err != nil {
+	// The pane prints two lines and then becomes sleep, so capture-pane has
+	// known content and pane_current_command is stable.
+	if err := real.NewSessionWithCommand(alive, "", `sh -c 'printf "line-a\nline-b\n"; exec sleep 300'`); err != nil {
 		t.Fatalf("real fixture: %v", err)
 	}
+	eventually(t, "the fixture pane to print and exec sleep", func() bool {
+		out, _ := real.CapturePane(alive, 30)
+		cmd, _ := real.GetPaneCommand(alive)
+		return strings.Contains(out, "line-b") && cmd == "sleep"
+	})
 	if err := real.SetEnvironment(alive, "GT_X", "1"); err != nil {
 		t.Fatalf("real fixture env: %v", err)
 	}
 	fake := newFakeServer()
 	fake.addSession(alive, "sleep")
-	fake.with(func() { fake.sessions[alive].env["GT_X"] = "1" })
+	fake.with(func() {
+		fake.sessions[alive].env["GT_X"] = "1"
+		fake.sessions[alive].panes[0].content = "line-a\nline-b"
+	})
 
 	cases := []diffCase{
 		{args: []string{"has-session", "-t", "=" + alive}},
@@ -82,6 +92,19 @@ func TestIntegrationFakeServerMatchesTmux(t *testing.T) {
 		{args: []string{"show-environment", "-t", alive, "GT_MISSING"}},
 		{args: []string{"show-environment", "-t", alive, "GT_X"}},
 		{args: []string{"set-environment", "-t", "gt-diff-nope", "GT_X", "1"}},
+		// Live-pane content and every #{...} format fakeServer answers.
+		{args: []string{"capture-pane", "-p", "-t", alive}},
+		{args: []string{"capture-pane", "-p", "-t", alive, "-S", "-30"}},
+		{args: []string{"display-message", "-t", alive, "-p", "#{session_windows}|#{session_attached}|#{pane_index}|#{window_index}|#{pane_dead}|#{pane_dead_status}|#{window_width}"}},
+		{args: []string{"display-message", "-t", alive, "-p", "#{session_id}"}, emptyOnly: true},
+		{args: []string{"display-message", "-t", alive, "-p", "#{pane_id}"}, emptyOnly: true},
+		{args: []string{"display-message", "-t", alive, "-p", "#{pane_current_path}"}, emptyOnly: true},
+		{args: []string{"display-message", "-t", alive, "-p", "#{window_activity}"}, emptyOnly: true},
+		{args: []string{"display-message", "-t", alive, "-p", "#{session_activity}"}, emptyOnly: true},
+		{args: []string{"list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}"}},
+		{args: []string{"list-panes", "-s", "-t", alive, "-F", "#{pane_id}\t#{pane_current_command}\t#{pane_pid}"}, emptyOnly: true},
+		// A live respawn, then the pane command it leaves.
+		{args: []string{"respawn-pane", "-k", "-t", alive, "sleep 301"}},
 	}
 	compare := func(t *testing.T, c diffCase) {
 		t.Helper()
@@ -98,6 +121,27 @@ func TestIntegrationFakeServerMatchesTmux(t *testing.T) {
 	}
 	for _, c := range cases {
 		compare(t, c)
+	}
+	eventually(t, "the respawned pane to run sleep", func() bool {
+		cmd, _ := real.GetPaneCommand(alive)
+		return cmd == "sleep"
+	})
+	compare(t, diffCase{args: []string{"display-message", "-t", alive + ":^", "-p", "#{pane_current_command}"}})
+
+	// The canned `list-keys -T prefix` tables the binding unit tests use are
+	// real lines of tmux's builtin table, modulo column padding.
+	realKeys, _, err := realExec(context.Background(), "tmux", real.tmuxArgs([]string{"list-keys", "-T", "prefix"})...)
+	if err != nil {
+		t.Fatalf("list-keys: %v", err)
+	}
+	have := map[string]bool{}
+	for _, l := range strings.Split(string(realKeys), "\n") {
+		have[strings.Join(strings.Fields(l), " ")] = true
+	}
+	for _, l := range strings.Split(defaultPrefixKeys, "\n") {
+		if !have[strings.Join(strings.Fields(l), " ")] {
+			t.Errorf("canned list-keys line %q is not in real tmux's prefix table", l)
+		}
 	}
 
 	// With no server at all.
