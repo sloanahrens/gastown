@@ -3,6 +3,7 @@ package dispatch
 import "testing"
 
 func TestSlingRefusalReason(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		stderr string
@@ -46,6 +47,7 @@ func TestSlingRefusalReason(t *testing.T) {
 }
 
 func TestReslingRefusalReason(t *testing.T) {
+	t.Parallel()
 	// The marker is a cross-process contract: gt sling writes it, the daemon's
 	// convoy feeder matches it.
 	if ReslingRefusalMarker != "refusing to re-sling" {

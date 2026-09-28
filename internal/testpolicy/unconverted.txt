@@ -15,7 +15,6 @@ internal/convoy
 internal/crew
 internal/daemon
 internal/deacon
-internal/dispatch
 internal/doctor
 internal/dog
 internal/doltserver
