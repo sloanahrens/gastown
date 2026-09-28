@@ -10,17 +10,22 @@ import (
 // RenderMarkdown renders markdown text with glamour styling.
 // Returns raw markdown on failure for graceful degradation.
 func RenderMarkdown(markdown string) string {
+	return processEnv.renderMarkdown(markdown, getTerminalWidth)
+}
+
+// renderMarkdown is RenderMarkdown wrapping at the width that width reports.
+func (e uiEnv) renderMarkdown(markdown string, width func() int) string {
 	// agent mode outputs plain text for machine parsing
-	if IsAgentMode() {
+	if e.isAgentMode() {
 		return markdown
 	}
 
 	// no styling when colors are disabled
-	if !ShouldUseColor() {
+	if !e.shouldUseColor() {
 		return markdown
 	}
 
-	wrapWidth := getTerminalWidth()
+	wrapWidth := width()
 
 	renderer, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),

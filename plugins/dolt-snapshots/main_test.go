@@ -8,6 +8,7 @@ import (
 )
 
 func TestSanitizeName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		title string
 		id    string
@@ -42,6 +43,7 @@ func TestSanitizeName(t *testing.T) {
 }
 
 func TestSanitizeName_Idempotent(t *testing.T) {
+	t.Parallel()
 	// Running sanitizeName on an already-sanitized name should produce a valid result
 	first := sanitizeName("Pi Rust Bug Fixes", "hq-cv-xrwki")
 	second := sanitizeName(first, "hq-cv-xrwki")
@@ -52,6 +54,7 @@ func TestSanitizeName_Idempotent(t *testing.T) {
 }
 
 func TestSanitizeDBName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  string
@@ -77,6 +80,7 @@ func TestSanitizeDBName(t *testing.T) {
 }
 
 func TestIsSystemDB(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want bool
@@ -110,6 +114,7 @@ func TestIsSystemDB(t *testing.T) {
 }
 
 func TestLoadRoutes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	routesFile := filepath.Join(dir, "routes.jsonl")
 
@@ -153,6 +158,7 @@ func TestLoadRoutes(t *testing.T) {
 }
 
 func TestLoadRoutes_MissingFile(t *testing.T) {
+	t.Parallel()
 	routes := loadRoutes("/nonexistent/routes.jsonl")
 	if len(routes) != 0 {
 		t.Errorf("Expected empty map for missing file, got %d entries", len(routes))
@@ -160,6 +166,7 @@ func TestLoadRoutes_MissingFile(t *testing.T) {
 }
 
 func TestLoadRoutes_MalformedJSON(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	routesFile := filepath.Join(dir, "routes.jsonl")
 
@@ -184,6 +191,7 @@ not json at all
 }
 
 func TestLoadRoutes_EmptyLines(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	routesFile := filepath.Join(dir, "routes.jsonl")
 
@@ -204,6 +212,7 @@ func TestLoadRoutes_EmptyLines(t *testing.T) {
 }
 
 func TestLoadRoutes_DuplicatePrefix(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	routesFile := filepath.Join(dir, "routes.jsonl")
 
@@ -222,6 +231,7 @@ func TestLoadRoutes_DuplicatePrefix(t *testing.T) {
 }
 
 func TestResolveDependencyDB(t *testing.T) {
+	t.Parallel()
 	routes := map[string]string{
 		"pe": "petals",
 		"lf": "lora_forge",
@@ -269,6 +279,7 @@ func TestResolveDependencyDB(t *testing.T) {
 }
 
 func TestResolveDependencyDB_EmptyRoutes(t *testing.T) {
+	t.Parallel()
 	routes := map[string]string{}
 
 	// External deps still work without routes
@@ -283,6 +294,7 @@ func TestResolveDependencyDB_EmptyRoutes(t *testing.T) {
 }
 
 func TestConvoyDependencyTargetsQueryUsesTypedTargets(t *testing.T) {
+	t.Parallel()
 	query := convoyDependencyTargetsQuery()
 	if strings.Contains(query, "d.depends_on_id") {
 		t.Fatalf("query should not select legacy physical depends_on_id column:\n%s", query)
@@ -299,95 +311,84 @@ func TestConvoyDependencyTargetsQueryUsesTypedTargets(t *testing.T) {
 	}
 }
 
+// envOf returns a getenv over a fixed environment.
+func envOf(kv map[string]string) func(string) string {
+	return func(k string) string { return kv[k] }
+}
+
 func TestResolveHost(t *testing.T) {
-	os.Unsetenv("GT_DOLT_HOST")
-	os.Unsetenv("DOLT_HOST")
+	t.Parallel()
+	both := envOf(map[string]string{"GT_DOLT_HOST": "10.0.0.2", "DOLT_HOST": "10.0.0.1"})
 
 	// Flag takes precedence
-	if got := resolveHost("192.168.1.1"); got != "192.168.1.1" {
+	if got := resolveHost("192.168.1.1", both); got != "192.168.1.1" {
 		t.Errorf("resolveHost with flag = %q, want 192.168.1.1", got)
 	}
 
 	// GT_DOLT_HOST takes precedence over DOLT_HOST
-	os.Setenv("GT_DOLT_HOST", "10.0.0.2")
-	os.Setenv("DOLT_HOST", "10.0.0.1")
-	defer os.Unsetenv("GT_DOLT_HOST")
-	defer os.Unsetenv("DOLT_HOST")
-	if got := resolveHost(""); got != "10.0.0.2" {
+	if got := resolveHost("", both); got != "10.0.0.2" {
 		t.Errorf("resolveHost with GT_DOLT_HOST = %q, want 10.0.0.2", got)
 	}
 
 	// DOLT_HOST fallback
-	os.Unsetenv("GT_DOLT_HOST")
-	if got := resolveHost(""); got != "10.0.0.1" {
+	if got := resolveHost("", envOf(map[string]string{"DOLT_HOST": "10.0.0.1"})); got != "10.0.0.1" {
 		t.Errorf("resolveHost with DOLT_HOST = %q, want 10.0.0.1", got)
 	}
 
 	// Default
-	os.Unsetenv("DOLT_HOST")
-	if got := resolveHost(""); got != "127.0.0.1" {
+	if got := resolveHost("", envOf(nil)); got != "127.0.0.1" {
 		t.Errorf("resolveHost default = %q, want 127.0.0.1", got)
 	}
 }
 
 func TestResolvePort(t *testing.T) {
-	os.Unsetenv("GT_DOLT_PORT")
-	os.Unsetenv("DOLT_PORT")
+	t.Parallel()
+	both := envOf(map[string]string{"GT_DOLT_PORT": "3309", "DOLT_PORT": "3310"})
 
 	// Flag takes precedence
-	if got := resolvePort("3308"); got != "3308" {
+	if got := resolvePort("3308", both); got != "3308" {
 		t.Errorf("resolvePort with flag = %q, want 3308", got)
 	}
 
 	// GT_DOLT_PORT takes precedence over DOLT_PORT
-	os.Setenv("GT_DOLT_PORT", "3309")
-	os.Setenv("DOLT_PORT", "3310")
-	defer os.Unsetenv("GT_DOLT_PORT")
-	defer os.Unsetenv("DOLT_PORT")
-	if got := resolvePort(""); got != "3309" {
+	if got := resolvePort("", both); got != "3309" {
 		t.Errorf("resolvePort with GT_DOLT_PORT = %q, want 3309", got)
 	}
 
 	// DOLT_PORT fallback
-	os.Unsetenv("GT_DOLT_PORT")
-	if got := resolvePort(""); got != "3310" {
+	if got := resolvePort("", envOf(map[string]string{"DOLT_PORT": "3310"})); got != "3310" {
 		t.Errorf("resolvePort with DOLT_PORT = %q, want 3310", got)
 	}
 
 	// Default
-	os.Unsetenv("DOLT_PORT")
-	if got := resolvePort(""); got != "3307" {
+	if got := resolvePort("", envOf(nil)); got != "3307" {
 		t.Errorf("resolvePort default = %q, want 3307", got)
 	}
 }
 
 func TestResolveRoutesFile(t *testing.T) {
-	os.Unsetenv("ROUTES_FILE")
+	t.Parallel()
+	home := func() (string, error) { return "/home/op", nil }
+	env := envOf(map[string]string{"ROUTES_FILE": "/env/routes.jsonl"})
 
 	// Flag takes precedence
-	if got := resolveRoutesFile("/custom/routes.jsonl"); got != "/custom/routes.jsonl" {
+	if got := resolveRoutesFile("/custom/routes.jsonl", env, home); got != "/custom/routes.jsonl" {
 		t.Errorf("resolveRoutesFile with flag = %q", got)
 	}
 
 	// Env var
-	os.Setenv("ROUTES_FILE", "/env/routes.jsonl")
-	defer os.Unsetenv("ROUTES_FILE")
-	if got := resolveRoutesFile(""); got != "/env/routes.jsonl" {
+	if got := resolveRoutesFile("", env, home); got != "/env/routes.jsonl" {
 		t.Errorf("resolveRoutesFile with ROUTES_FILE = %q, want /env/routes.jsonl", got)
 	}
 
-	// Default includes ~/gt/.beads/routes.jsonl
-	os.Unsetenv("ROUTES_FILE")
-	got := resolveRoutesFile("")
-	if !filepath.IsAbs(got) {
-		t.Errorf("resolveRoutesFile default should be absolute, got %q", got)
-	}
-	if filepath.Base(got) != "routes.jsonl" {
-		t.Errorf("resolveRoutesFile default should end with routes.jsonl, got %q", got)
+	// Default is ~/gt/.beads/routes.jsonl
+	if got, want := resolveRoutesFile("", envOf(nil), home), filepath.Join("/home/op", "gt", ".beads", "routes.jsonl"); got != want {
+		t.Errorf("resolveRoutesFile default = %q, want %q", got, want)
 	}
 }
 
 func TestConvoyRow_SnapshotLogic(t *testing.T) {
+	t.Parallel()
 	// Test the snapshot decision logic that snapshotConvoys uses
 	tests := []struct {
 		name       string

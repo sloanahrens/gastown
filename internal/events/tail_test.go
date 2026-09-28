@@ -64,6 +64,7 @@ func poll(t *testing.T, tail *Tail) []string {
 }
 
 func TestTail_StartsAtEndAndReadsAppends(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "old1", "old2")
 	tail := openTestTail(t, path)
@@ -78,6 +79,7 @@ func TestTail_StartsAtEndAndReadsAppends(t *testing.T) {
 }
 
 func TestTail_CreatesMissingFile(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	tail := openTestTail(t, path)
 	appendLines(t, path, "first")
@@ -87,6 +89,7 @@ func TestTail_CreatesMissingFile(t *testing.T) {
 }
 
 func TestTail_HoldsPartialLineUntilNewline(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "old")
 	tail := openTestTail(t, path)
@@ -110,6 +113,7 @@ func TestTail_HoldsPartialLineUntilNewline(t *testing.T) {
 // while a wait held the old one. Lines written to the new file must be seen,
 // and the retained history the pruner copied across must not be replayed.
 func TestTail_FollowsRenameRotation(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "expired", "kept1", "kept2")
 	tail := openTestTail(t, path)
@@ -134,6 +138,7 @@ func TestTail_FollowsRenameRotation(t *testing.T) {
 // Rotation before the tail consumed anything: the anchor is the last line that
 // existed when the tail opened.
 func TestTail_FollowsRenameRotationWithNoNewLinesConsumed(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "expired", "kept")
 	tail := openTestTail(t, path)
@@ -151,6 +156,7 @@ func TestTail_FollowsRenameRotationWithNoNewLinesConsumed(t *testing.T) {
 // A writer that opened the old file before the rename can still land a line in
 // the old inode. The tail drains the old file before switching.
 func TestTail_DrainsOldFileBeforeSwitching(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "a")
 	tail := openTestTail(t, path)
@@ -175,6 +181,7 @@ func TestTail_DrainsOldFileBeforeSwitching(t *testing.T) {
 }
 
 func TestTail_FollowsTruncateInPlace(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "old1", "old2", "old3")
 	tail := openTestTail(t, path)
@@ -195,6 +202,7 @@ func TestTail_FollowsTruncateInPlace(t *testing.T) {
 // Truncated in place and rewritten with retained history (same inode, smaller
 // than the read offset): resume after the anchor, like a rename.
 func TestTail_TruncateInPlaceWithRetainedHistory(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "expired-long-line-xxxxxxxxxxxxxxxx", "kept")
 	tail := openTestTail(t, path)
@@ -215,6 +223,7 @@ func TestTail_TruncateInPlaceWithRetainedHistory(t *testing.T) {
 // replaced with unrelated content) the tail reads the new file from the start:
 // a spurious wake is recoverable, a missed event is not.
 func TestTail_RotationWithoutAnchorReadsFromStart(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "gone")
 	tail := openTestTail(t, path)
@@ -230,6 +239,7 @@ func TestTail_RotationWithoutAnchorReadsFromStart(t *testing.T) {
 // A missing path (between an unlink and a recreate) keeps the old file; the
 // tail switches once the path exists again.
 func TestTail_PathTemporarilyMissing(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "a")
 	tail := openTestTail(t, path)
@@ -251,6 +261,7 @@ func TestTail_PathTemporarilyMissing(t *testing.T) {
 // resumes after the longest run of recent lines it matches, not after the
 // last copy of the newest one.
 func TestTail_DuplicateOfAnchorAppendedAfterRotation(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "expired", "w", "x")
 	tail := openTestTail(t, path)
@@ -270,6 +281,7 @@ func TestTail_DuplicateOfAnchorAppendedAfterRotation(t *testing.T) {
 // Identical consecutive lines at the end of the old file are all retained
 // history: none of them may replay.
 func TestTail_RepeatedAnchorRunDoesNotReplay(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ".events.jsonl")
 	writeLines(t, path, "expired")
 	tail := openTestTail(t, path)

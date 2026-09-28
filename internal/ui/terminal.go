@@ -20,6 +20,27 @@ const (
 	ThemeModeLight ThemeMode = "light"
 )
 
+// uiEnv is what the output decisions read from their process: environment
+// variables and whether stdout is a terminal. The exported functions use
+// processEnv; tests build their own.
+type uiEnv struct {
+	lookup    func(string) (string, bool)
+	stdoutTTY func() bool
+}
+
+// processEnv reads the running process's environment and stdout.
+var processEnv = uiEnv{lookup: os.LookupEnv, stdoutTTY: IsTerminal}
+
+func (e uiEnv) getenv(key string) string {
+	v, _ := e.lookup(key)
+	return v
+}
+
+func (e uiEnv) isSet(key string) bool {
+	_, ok := e.lookup(key)
+	return ok
+}
+
 // themeMode is the cached theme mode, set during init.
 var themeMode ThemeMode
 
@@ -29,7 +50,7 @@ var hasDarkBackground bool
 // InitTheme initializes the theme mode. Call this early in main.
 // configTheme is the value from TownSettings.CLITheme (may be empty).
 func InitTheme(configTheme string) {
-	themeMode = resolveThemeMode(configTheme)
+	themeMode = processEnv.resolveThemeMode(configTheme)
 	hasDarkBackground = detectDarkBackground(themeMode)
 }
 
@@ -49,9 +70,9 @@ func HasDarkBackground() bool {
 }
 
 // resolveThemeMode determines the theme mode from env and config.
-func resolveThemeMode(configTheme string) ThemeMode {
+func (e uiEnv) resolveThemeMode(configTheme string) ThemeMode {
 	// Priority 1: GT_THEME environment variable
-	if envTheme := os.Getenv("GT_THEME"); envTheme != "" {
+	if envTheme := e.getenv("GT_THEME"); envTheme != "" {
 		switch strings.ToLower(envTheme) {
 		case "dark":
 			return ThemeModeDark
@@ -100,35 +121,43 @@ func IsTerminal() bool {
 // ShouldUseColor determines if ANSI color codes should be used.
 // Respects NO_COLOR (https://no-color.org/), CLICOLOR, and CLICOLOR_FORCE conventions.
 func ShouldUseColor() bool {
+	return processEnv.shouldUseColor()
+}
+
+func (e uiEnv) shouldUseColor() bool {
 	// NO_COLOR takes precedence - any value disables color
-	if _, exists := os.LookupEnv("NO_COLOR"); exists {
+	if e.isSet("NO_COLOR") {
 		return false
 	}
 
 	// CLICOLOR=0 disables color
-	if os.Getenv("CLICOLOR") == "0" {
+	if e.getenv("CLICOLOR") == "0" {
 		return false
 	}
 
 	// CLICOLOR_FORCE enables color even in non-TTY
-	if _, exists := os.LookupEnv("CLICOLOR_FORCE"); exists {
+	if e.isSet("CLICOLOR_FORCE") {
 		return true
 	}
 
 	// default: use color only if stdout is a TTY
-	return IsTerminal()
+	return e.stdoutTTY()
 }
 
 // ShouldUseEmoji determines if emoji decorations should be used.
 // Disabled in non-TTY mode to keep output machine-readable.
 func ShouldUseEmoji() bool {
+	return processEnv.shouldUseEmoji()
+}
+
+func (e uiEnv) shouldUseEmoji() bool {
 	// GT_NO_EMOJI disables emoji output
-	if _, exists := os.LookupEnv("GT_NO_EMOJI"); exists {
+	if e.isSet("GT_NO_EMOJI") {
 		return false
 	}
 
 	// default: use emoji only if stdout is a TTY
-	return IsTerminal()
+	return e.stdoutTTY()
 }
 
 // IsAgentMode returns true if the CLI is running in agent-optimized mode.
@@ -138,11 +167,15 @@ func ShouldUseEmoji() bool {
 //
 // Agent mode provides ultra-compact output optimized for LLM context windows.
 func IsAgentMode() bool {
-	if os.Getenv("GT_AGENT_MODE") == "1" {
+	return processEnv.isAgentMode()
+}
+
+func (e uiEnv) isAgentMode() bool {
+	if e.getenv("GT_AGENT_MODE") == "1" {
 		return true
 	}
 	// auto-detect Claude Code environment
-	if os.Getenv("CLAUDE_CODE") != "" {
+	if e.getenv("CLAUDE_CODE") != "" {
 		return true
 	}
 	return false

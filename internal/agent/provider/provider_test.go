@@ -7,6 +7,7 @@ import (
 )
 
 func TestNewTextContent(t *testing.T) {
+	t.Parallel()
 	content := NewTextContent("hello world")
 	if content.Type != ContentTypeText {
 		t.Errorf("expected type %s, got %s", ContentTypeText, content.Type)
@@ -17,6 +18,7 @@ func TestNewTextContent(t *testing.T) {
 }
 
 func TestNewUserMessage(t *testing.T) {
+	t.Parallel()
 	msg := NewUserMessage("test message")
 	if msg.Role != RoleUser {
 		t.Errorf("expected role %s, got %s", RoleUser, msg.Role)
@@ -30,6 +32,7 @@ func TestNewUserMessage(t *testing.T) {
 }
 
 func TestNewAssistantMessage(t *testing.T) {
+	t.Parallel()
 	msg := NewAssistantMessage("response")
 	if msg.Role != RoleAssistant {
 		t.Errorf("expected role %s, got %s", RoleAssistant, msg.Role)
@@ -43,6 +46,7 @@ func TestNewAssistantMessage(t *testing.T) {
 }
 
 func TestNewToolUseContent(t *testing.T) {
+	t.Parallel()
 	input := map[string]any{"path": "/tmp/test"}
 	content, err := NewToolUseContent("tool-123", "read_file", input)
 	if err != nil {
@@ -64,6 +68,7 @@ func TestNewToolUseContent(t *testing.T) {
 }
 
 func TestNewToolResultContent(t *testing.T) {
+	t.Parallel()
 	content := NewToolResultContent("tool-123", "file contents", false)
 	if content.Type != ContentTypeToolResult {
 		t.Errorf("expected type %s, got %s", ContentTypeToolResult, content.Type)
@@ -80,6 +85,7 @@ func TestNewToolResultContent(t *testing.T) {
 }
 
 func TestNewToolResultContent_Error(t *testing.T) {
+	t.Parallel()
 	content := NewToolResultContent("tool-456", "file not found", true)
 	if !content.IsError {
 		t.Error("expected IsError to be true")
@@ -87,6 +93,7 @@ func TestNewToolResultContent_Error(t *testing.T) {
 }
 
 func TestJSONRPCRequest_Marshal(t *testing.T) {
+	t.Parallel()
 	req := NewInitializeRequest(1, "test-client", "1.0.0")
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -105,6 +112,7 @@ func TestJSONRPCRequest_Marshal(t *testing.T) {
 }
 
 func TestJSONRPCResponse_Marshal(t *testing.T) {
+	t.Parallel()
 	resp := NewInitializeResponse(1, "test-server", "1.0.0", "Welcome")
 	data, err := json.Marshal(resp)
 	if err != nil {
@@ -127,6 +135,7 @@ func TestJSONRPCResponse_Marshal(t *testing.T) {
 }
 
 func TestParseRequest(t *testing.T) {
+	t.Parallel()
 	data := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":"2024-11-05"}}`)
 	req, err := ParseRequest(data)
 	if err != nil {
@@ -141,6 +150,7 @@ func TestParseRequest(t *testing.T) {
 }
 
 func TestParseRequest_InvalidVersion(t *testing.T) {
+	t.Parallel()
 	data := []byte(`{"jsonrpc":"1.0","id":1,"method":"test"}`)
 	_, err := ParseRequest(data)
 	if err == nil {
@@ -149,6 +159,7 @@ func TestParseRequest_InvalidVersion(t *testing.T) {
 }
 
 func TestNewErrorResponse(t *testing.T) {
+	t.Parallel()
 	resp := NewErrorResponse(1, MethodNotFound, "method not found", nil)
 	if resp.Error == nil {
 		t.Fatal("expected error to be set")
@@ -162,6 +173,7 @@ func TestNewErrorResponse(t *testing.T) {
 }
 
 func TestLocalProvider_Initialize(t *testing.T) {
+	t.Parallel()
 	provider := NewLocalProvider(ACPProviderConfig{
 		Name:         "test-provider",
 		Version:      "1.0.0",
@@ -184,6 +196,7 @@ func TestLocalProvider_Initialize(t *testing.T) {
 }
 
 func TestLocalProvider_ListTools(t *testing.T) {
+	t.Parallel()
 	tools := []Tool{
 		{Name: "read_file", Description: "Read a file"},
 		{Name: "write_file", Description: "Write a file"},
@@ -206,6 +219,7 @@ func TestLocalProvider_ListTools(t *testing.T) {
 }
 
 func TestLocalProvider_CallTool_NoCallback(t *testing.T) {
+	t.Parallel()
 	provider := NewLocalProvider(ACPProviderConfig{
 		Name: "test-provider",
 	})
@@ -220,6 +234,7 @@ func TestLocalProvider_CallTool_NoCallback(t *testing.T) {
 }
 
 func TestLocalProvider_CallTool_WithCallback(t *testing.T) {
+	t.Parallel()
 	provider := NewLocalProvider(ACPProviderConfig{
 		Name: "test-provider",
 	})
@@ -245,6 +260,7 @@ func TestLocalProvider_CallTool_WithCallback(t *testing.T) {
 }
 
 func TestLocalProvider_OnSessionStart(t *testing.T) {
+	t.Parallel()
 	called := false
 	var receivedInfo ServerInfo
 	provider := NewLocalProvider(ACPProviderConfig{
@@ -270,6 +286,7 @@ func TestLocalProvider_OnSessionStart(t *testing.T) {
 }
 
 func TestLocalProvider_GetStatus(t *testing.T) {
+	t.Parallel()
 	provider := NewLocalProvider(ACPProviderConfig{
 		Name:    "test-provider",
 		Version: "1.0.0",
@@ -287,6 +304,7 @@ func TestLocalProvider_GetStatus(t *testing.T) {
 }
 
 func TestLocalProvider_AddRemoveTool(t *testing.T) {
+	t.Parallel()
 	provider := NewLocalProvider(ACPProviderConfig{
 		Name: "test-provider",
 	})
@@ -304,6 +322,7 @@ func TestLocalProvider_AddRemoveTool(t *testing.T) {
 }
 
 func TestTranslateGastownMessage(t *testing.T) {
+	t.Parallel()
 	msg := TranslateGastownMessage("sender", "recipient", "Test Subject", "Test Body")
 	if msg.Role != RoleUser {
 		t.Errorf("expected role %s, got %s", RoleUser, msg.Role)
@@ -315,6 +334,7 @@ func TestTranslateGastownMessage(t *testing.T) {
 }
 
 func TestExtractToolCalls(t *testing.T) {
+	t.Parallel()
 	input, _ := json.Marshal(map[string]any{"path": "/test"})
 	msg := Message{
 		Role: RoleAssistant,
@@ -337,6 +357,7 @@ func TestExtractToolCalls(t *testing.T) {
 }
 
 func TestExtractToolResults(t *testing.T) {
+	t.Parallel()
 	msg := Message{
 		Role: RoleUser,
 		Content: []ContentBlock{
@@ -358,6 +379,7 @@ func TestExtractToolResults(t *testing.T) {
 }
 
 func TestMessagesToFromJSON(t *testing.T) {
+	t.Parallel()
 	msgs := []Message{
 		NewUserMessage("Hello"),
 		NewAssistantMessage("Hi there"),
@@ -382,6 +404,7 @@ func TestMessagesToFromJSON(t *testing.T) {
 }
 
 func TestMessagesRoundTripPreservesAssistantReasoningContentWithToolCalls(t *testing.T) {
+	t.Parallel()
 	input := []byte(`[{"role":"assistant","content":null,"reasoning_content":"kept reasoning","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}]`)
 	parsed, err := MessagesFromJSON(input)
 	if err != nil {
@@ -409,6 +432,7 @@ func TestMessagesRoundTripPreservesAssistantReasoningContentWithToolCalls(t *tes
 }
 
 func TestMessagesRoundTripPreservesThinkingBlocks(t *testing.T) {
+	t.Parallel()
 	input := []byte(`[{"role":"assistant","content":[{"type":"thinking","thinking":"private chain","signature":"sig_123"},{"type":"tool_use","id":"tool_1","name":"read","input":{"path":"README.md"}}]}]`)
 	parsed, err := MessagesFromJSON(input)
 	if err != nil {
@@ -441,6 +465,7 @@ func TestMessagesRoundTripPreservesThinkingBlocks(t *testing.T) {
 }
 
 func TestInputSchema_MarshalJSON(t *testing.T) {
+	t.Parallel()
 	schema := &InputSchema{
 		Type: "object",
 		Properties: map[string]any{
@@ -471,6 +496,7 @@ func TestInputSchema_MarshalJSON(t *testing.T) {
 }
 
 func TestIsNotification(t *testing.T) {
+	t.Parallel()
 	notification := NewInitializedNotification()
 	if !IsNotification(&notification) {
 		t.Error("expected initialized to be a notification")

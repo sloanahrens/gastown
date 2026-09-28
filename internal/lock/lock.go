@@ -262,13 +262,21 @@ func FindAllLocks(root string) (map[string]*LockInfo, error) {
 // doesn't exist. This prevents killing active workers whose spawning process
 // has exited (which is normal - Claude runs as a child in tmux).
 func CleanStaleLocks(root string) (int, error) {
+	return cleanStaleLocks(root, func() []string {
+		return activeTmuxSessions(realOutput, tmux.GetDefaultSocket())
+	})
+}
+
+// cleanStaleLocks is CleanStaleLocks asking sessions for the active tmux
+// sessions, once the lock scan has succeeded.
+func cleanStaleLocks(root string, sessions func() []string) (int, error) {
 	locks, err := FindAllLocks(root)
 	if err != nil {
 		return 0, err
 	}
 
 	// Get active tmux sessions to verify locks
-	activeSessions := getActiveTmuxSessions()
+	activeSessions := sessions()
 	sessionSet := make(map[string]bool)
 	for _, s := range activeSessions {
 		sessionSet[s] = true
@@ -293,10 +301,11 @@ func CleanStaleLocks(root string) (int, error) {
 	return cleaned, nil
 }
 
-// getActiveTmuxSessions returns a list of active tmux session identifiers.
+// activeTmuxSessions returns a list of active tmux session identifiers on the
+// tmux server at socket ("" for tmux's default), listing them through run.
 // Returns both session names (gt-foo-bar) and session IDs in various formats
 // (%N, $N) to handle different lock file formats.
-func getActiveTmuxSessions() []string {
+func activeTmuxSessions(run outputFunc, socket string) []string {
 	// Get both session name and ID to handle different lock formats
 	// Format: "session_name:session_id" e.g., "gt-beads-crew-dave:$55"
 	// Use the town's tmux socket so we query the correct server.
@@ -304,12 +313,11 @@ func getActiveTmuxSessions() []string {
 	// all sessions on the per-town socket (e.g., "gt-a1b2c3") and causes
 	// CleanStaleLocks to incorrectly remove locks for active sessions.
 	args := []string{}
-	if sock := tmux.GetDefaultSocket(); sock != "" {
-		args = append(args, "-L", sock)
+	if socket != "" {
+		args = append(args, "-L", socket)
 	}
 	args = append(args, "list-sessions", "-F", "#{session_name}:#{session_id}")
-	cmd := execCommand("tmux", args...)
-	output, err := cmd.Output()
+	output, err := run("tmux", args...)
 	if err != nil {
 		return nil // tmux not running or not installed
 	}
@@ -351,22 +359,12 @@ func splitOnColon(s string) []string {
 	return []string{s[:idx], s[idx+1:]}
 }
 
-// execCommand is a wrapper for exec.Command to allow testing
-var execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-	return realExecCommand(name, args...)
-}
+// outputFunc runs a program and returns its stdout.
+type outputFunc func(name string, args ...string) ([]byte, error)
 
-func realExecCommand(name string, args ...string) interface{ Output() ([]byte, error) } {
-	return &execCmdWrapper{name: name, args: args}
-}
-
-type execCmdWrapper struct {
-	name string
-	args []string
-}
-
-func (c *execCmdWrapper) Output() ([]byte, error) {
-	cmd := exec.Command(c.name, c.args...) //nolint:gosec // G204: command args are controlled internally
+// realOutput runs name in its own process group and returns its stdout.
+func realOutput(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...) //nolint:gosec // G204: command args are controlled internally
 	setProcessGroup(cmd)
 	return cmd.Output()
 }

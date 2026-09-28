@@ -10,7 +10,8 @@ import (
 // TestConvoysWriteConcurrentWithView verifies that updating m.convoys
 // concurrently with View() does not trigger data races.
 func TestConvoysWriteConcurrentWithView(t *testing.T) {
-	m := New("/tmp/fake-beads")
+	t.Parallel()
+	m := New(t.TempDir())
 	m.mu.Lock()
 	m.width = 80
 	m.height = 40
@@ -48,7 +49,8 @@ func TestConvoysWriteConcurrentWithView(t *testing.T) {
 // TestToggleExpandConcurrentWithView verifies that toggling convoy expansion
 // while View() renders does not race.
 func TestToggleExpandConcurrentWithView(t *testing.T) {
-	m := New("/tmp/fake-beads")
+	t.Parallel()
+	m := New(t.TempDir())
 	m.mu.Lock()
 	m.width = 80
 	m.height = 40
@@ -91,7 +93,8 @@ func TestToggleExpandConcurrentWithView(t *testing.T) {
 
 // TestCursorToConvoyIndexLocked verifies correct cursor-to-convoy mapping.
 func TestCursorToConvoyIndexLocked(t *testing.T) {
-	m := New("/tmp/fake-beads")
+	t.Parallel()
+	m := New(t.TempDir())
 	m.convoys = []ConvoyItem{
 		{ID: "hq-abc", Title: "C1", Status: "open",
 			Issues: []IssueItem{
@@ -133,7 +136,8 @@ func TestCursorToConvoyIndexLocked(t *testing.T) {
 
 // TestMaxCursorLocked verifies correct max cursor calculation.
 func TestMaxCursorLocked(t *testing.T) {
-	m := New("/tmp/fake-beads")
+	t.Parallel()
+	m := New(t.TempDir())
 
 	// Empty
 	m.mu.RLock()
@@ -165,13 +169,14 @@ func TestMaxCursorLocked(t *testing.T) {
 // TestViewConcurrentWithWindowResize verifies that View and WindowSizeMsg
 // updates can run concurrently without data races on width/height/help.
 func TestViewConcurrentWithWindowResize(t *testing.T) {
-	m := New("/tmp/fake-beads")
+	t.Parallel()
+	m := New(t.TempDir())
 	m.mu.Lock()
 	m.width = 80
 	m.height = 40
 	m.convoys = []ConvoyItem{
 		{ID: "hq-abc", Title: "Test", Status: "open",
-			Issues: []IssueItem{{ID: "gt-1", Title: "Issue", Status: "open"}},
+			Issues:   []IssueItem{{ID: "gt-1", Title: "Issue", Status: "open"}},
 			Progress: "0/1", Expanded: true},
 	}
 	m.mu.Unlock()
@@ -202,7 +207,8 @@ func TestViewConcurrentWithWindowResize(t *testing.T) {
 // TestViewConcurrentWithCursorNavigation verifies that View and cursor
 // key handlers can run concurrently without data races.
 func TestViewConcurrentWithCursorNavigation(t *testing.T) {
-	m := New("/tmp/fake-beads")
+	t.Parallel()
+	m := New(t.TempDir())
 	m.mu.Lock()
 	m.width = 80
 	m.height = 40
@@ -214,7 +220,7 @@ func TestViewConcurrentWithCursorNavigation(t *testing.T) {
 			},
 			Progress: "0/2", Expanded: true},
 		{ID: "hq-def", Title: "C2", Status: "open",
-			Issues: []IssueItem{{ID: "gt-3", Title: "I3", Status: "open"}},
+			Issues:   []IssueItem{{ID: "gt-3", Title: "I3", Status: "open"}},
 			Progress: "0/1", Expanded: true},
 	}
 	m.mu.Unlock()
@@ -247,7 +253,8 @@ func TestViewConcurrentWithCursorNavigation(t *testing.T) {
 // TestViewConcurrentWithFetchConvoys verifies that View and fetchConvoysMsg
 // via Update can run concurrently without data races.
 func TestViewConcurrentWithFetchConvoys(t *testing.T) {
-	m := New("/tmp/fake-beads")
+	t.Parallel()
+	m := New(t.TempDir())
 	m.mu.Lock()
 	m.width = 80
 	m.height = 40

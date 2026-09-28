@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,7 @@ import (
 // TestLogFeedTo_WritesToExplicitTownRoot verifies that the *To variants write
 // to the provided town root rather than resolving one from cwd (gt-x9o).
 func TestLogFeedTo_WritesToExplicitTownRoot(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if err := LogFeedTo(townRoot, TypeSessionDeath, "myr/mycat",
@@ -40,6 +42,7 @@ func TestLogFeedTo_WritesToExplicitTownRoot(t *testing.T) {
 // TestLogTo_EmptyTownRootIsNoop verifies LogTo silently ignores an empty root
 // instead of writing to the filesystem root or erroring.
 func TestLogTo_EmptyTownRootIsNoop(t *testing.T) {
+	t.Parallel()
 	if err := LogTo("", TypeSling, "tester", nil, VisibilityAudit); err != nil {
 		t.Fatalf("LogTo with empty root: %v", err)
 	}
@@ -48,7 +51,77 @@ func TestLogTo_EmptyTownRootIsNoop(t *testing.T) {
 // TestLog_NoopUnderGoTest verifies the cwd-resolving path never writes from a
 // test binary, even when cwd is inside a real Gas Town workspace. This is the
 // guard against fixture events polluting production ~/gt/.events.jsonl (gt-x9o).
+// It goes through writeFromCwd, which reads testing.Testing() itself, so the
+// guard is the production one; the resolver must not even be consulted.
 func TestLog_NoopUnderGoTest(t *testing.T) {
+	t.Parallel()
+	townRoot := fixtureTown(t)
+	findRoot := func() (string, error) {
+		t.Error("the cwd resolver ran under go test")
+		return townRoot, nil
+	}
+	if err := writeFromCwd(newEvent(TypeSessionDeath, "tester", nil, VisibilityFeed), findRoot); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	assertNoEventsFile(t, townRoot)
+}
+
+// TestLog_NoopUnderHermeticHarness covers gt subprocesses of tests: not test
+// binaries themselves, but marked by GT_TEST_HERMETIC (gt-lwi).
+func TestLog_NoopUnderHermeticHarness(t *testing.T) {
+	t.Parallel()
+	townRoot := fixtureTown(t)
+	env := func(k string) string {
+		if k == "GT_TEST_HERMETIC" {
+			return "1"
+		}
+		return ""
+	}
+	if err := writeVia(newEvent(TypeSling, "tester", nil, VisibilityFeed), false, env, func() (string, error) { return townRoot, nil }); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	assertNoEventsFile(t, townRoot)
+}
+
+// TestLog_WritesToCwdTown pins the production path: outside a test, the event
+// is appended to the town the cwd resolves to.
+func TestLog_WritesToCwdTown(t *testing.T) {
+	t.Parallel()
+	townRoot := fixtureTown(t)
+	if err := writeVia(newEvent(TypeSling, "tester", SlingPayload("gt-1", "gastown"), VisibilityFeed), false, noEnv, func() (string, error) { return townRoot, nil }); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(townRoot, EventsFile))
+	if err != nil {
+		t.Fatalf("reading events file: %v", err)
+	}
+	var event Event
+	if err := json.Unmarshal(data, &event); err != nil {
+		t.Fatalf("unmarshaling event: %v", err)
+	}
+	if event.Type != TypeSling || event.Actor != "tester" || event.Source != "gt" {
+		t.Errorf("event = %+v, want a gt sling by tester", event)
+	}
+}
+
+// TestLog_NoTownIsNoop: outside any workspace, or when resolution fails, the
+// event is dropped silently.
+func TestLog_NoTownIsNoop(t *testing.T) {
+	t.Parallel()
+	ev := newEvent(TypeSling, "tester", nil, VisibilityFeed)
+	if err := writeVia(ev, false, noEnv, func() (string, error) { return "", nil }); err != nil {
+		t.Errorf("no workspace: %v", err)
+	}
+	if err := writeVia(ev, false, noEnv, func() (string, error) { return "", errors.New("getwd failed") }); err != nil {
+		t.Errorf("resolver error: %v", err)
+	}
+}
+
+func noEnv(string) string { return "" }
+
+// fixtureTown creates a minimal town in a temp dir.
+func fixtureTown(t *testing.T) string {
+	t.Helper()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("creating mayor dir: %v", err)
@@ -56,18 +129,18 @@ func TestLog_NoopUnderGoTest(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0644); err != nil {
 		t.Fatalf("writing town.json: %v", err)
 	}
-	t.Chdir(townRoot)
+	return townRoot
+}
 
-	if err := LogFeed(TypeSessionDeath, "tester", nil); err != nil {
-		t.Fatalf("LogFeed: %v", err)
-	}
-
+func assertNoEventsFile(t *testing.T, townRoot string) {
+	t.Helper()
 	if _, err := os.Stat(filepath.Join(townRoot, EventsFile)); !os.IsNotExist(err) {
-		t.Errorf("expected no events file under go test, stat err = %v", err)
+		t.Errorf("expected no events file, stat err = %v", err)
 	}
 }
 
 func TestSlingPayload(t *testing.T) {
+	t.Parallel()
 	p := SlingPayload("gt-123", "gastown")
 	if p["bead"] != "gt-123" {
 		t.Errorf("bead = %v, want gt-123", p["bead"])
@@ -78,6 +151,7 @@ func TestSlingPayload(t *testing.T) {
 }
 
 func TestHookPayload(t *testing.T) {
+	t.Parallel()
 	p := HookPayload("gt-456")
 	if p["bead"] != "gt-456" {
 		t.Errorf("bead = %v, want gt-456", p["bead"])
@@ -88,6 +162,7 @@ func TestHookPayload(t *testing.T) {
 }
 
 func TestUnhookPayload(t *testing.T) {
+	t.Parallel()
 	p := UnhookPayload("gt-789")
 	if p["bead"] != "gt-789" {
 		t.Errorf("bead = %v, want gt-789", p["bead"])
@@ -95,6 +170,7 @@ func TestUnhookPayload(t *testing.T) {
 }
 
 func TestHandoffPayload_WithSubject(t *testing.T) {
+	t.Parallel()
 	p := HandoffPayload("working on auth", true)
 	if p["to_session"] != true {
 		t.Errorf("to_session = %v, want true", p["to_session"])
@@ -105,6 +181,7 @@ func TestHandoffPayload_WithSubject(t *testing.T) {
 }
 
 func TestHandoffPayload_NoSubject(t *testing.T) {
+	t.Parallel()
 	p := HandoffPayload("", false)
 	if _, ok := p["subject"]; ok {
 		t.Error("expected no subject key when empty")
@@ -115,6 +192,7 @@ func TestHandoffPayload_NoSubject(t *testing.T) {
 }
 
 func TestDonePayload(t *testing.T) {
+	t.Parallel()
 	p := DonePayload("gt-100", "polecat/alpha")
 	if p["bead"] != "gt-100" {
 		t.Errorf("bead = %v, want gt-100", p["bead"])
@@ -125,6 +203,7 @@ func TestDonePayload(t *testing.T) {
 }
 
 func TestMailPayload(t *testing.T) {
+	t.Parallel()
 	p := MailPayload("mayor/", "status update")
 	if p["to"] != "mayor/" {
 		t.Errorf("to = %v, want mayor/", p["to"])
@@ -135,6 +214,7 @@ func TestMailPayload(t *testing.T) {
 }
 
 func TestSpawnPayload(t *testing.T) {
+	t.Parallel()
 	p := SpawnPayload("gastown", "alpha")
 	if p["rig"] != "gastown" {
 		t.Errorf("rig = %v, want gastown", p["rig"])
@@ -145,6 +225,7 @@ func TestSpawnPayload(t *testing.T) {
 }
 
 func TestBootPayload(t *testing.T) {
+	t.Parallel()
 	agents := []string{"witness", "refinery"}
 	p := BootPayload("gastown", agents)
 	if p["rig"] != "gastown" {
@@ -160,6 +241,7 @@ func TestBootPayload(t *testing.T) {
 }
 
 func TestMergePayload_WithReason(t *testing.T) {
+	t.Parallel()
 	p := MergePayload("mr-1", "alpha", "polecat/alpha", "conflict")
 	if p["mr"] != "mr-1" {
 		t.Errorf("mr = %v, want mr-1", p["mr"])
@@ -170,6 +252,7 @@ func TestMergePayload_WithReason(t *testing.T) {
 }
 
 func TestMergePayload_NoReason(t *testing.T) {
+	t.Parallel()
 	p := MergePayload("mr-2", "beta", "polecat/beta", "")
 	if _, ok := p["reason"]; ok {
 		t.Error("expected no reason key when empty")
@@ -177,6 +260,7 @@ func TestMergePayload_NoReason(t *testing.T) {
 }
 
 func TestPatrolPayload_WithMessage(t *testing.T) {
+	t.Parallel()
 	p := PatrolPayload("gastown", 3, "all healthy")
 	if p["rig"] != "gastown" {
 		t.Errorf("rig = %v, want gastown", p["rig"])
@@ -190,6 +274,7 @@ func TestPatrolPayload_WithMessage(t *testing.T) {
 }
 
 func TestPatrolPayload_NoMessage(t *testing.T) {
+	t.Parallel()
 	p := PatrolPayload("gastown", 0, "")
 	if _, ok := p["message"]; ok {
 		t.Error("expected no message key when empty")
@@ -197,6 +282,7 @@ func TestPatrolPayload_NoMessage(t *testing.T) {
 }
 
 func TestPolecatCheckPayload_WithIssue(t *testing.T) {
+	t.Parallel()
 	p := PolecatCheckPayload("gastown", "alpha", "working", "gt-123")
 	if p["issue"] != "gt-123" {
 		t.Errorf("issue = %v, want gt-123", p["issue"])
@@ -204,6 +290,7 @@ func TestPolecatCheckPayload_WithIssue(t *testing.T) {
 }
 
 func TestPolecatCheckPayload_NoIssue(t *testing.T) {
+	t.Parallel()
 	p := PolecatCheckPayload("gastown", "alpha", "working", "")
 	if _, ok := p["issue"]; ok {
 		t.Error("expected no issue key when empty")
@@ -211,6 +298,7 @@ func TestPolecatCheckPayload_NoIssue(t *testing.T) {
 }
 
 func TestNudgePayload(t *testing.T) {
+	t.Parallel()
 	p := NudgePayload("gastown", "alpha", "stuck")
 	if p["rig"] != "gastown" {
 		t.Errorf("rig = %v, want gastown", p["rig"])
@@ -224,6 +312,7 @@ func TestNudgePayload(t *testing.T) {
 }
 
 func TestEscalationPayload(t *testing.T) {
+	t.Parallel()
 	p := EscalationPayload("gastown", "alpha", "mayor", "unresponsive")
 	if p["to"] != "mayor" {
 		t.Errorf("to = %v, want mayor", p["to"])
@@ -234,6 +323,7 @@ func TestEscalationPayload(t *testing.T) {
 }
 
 func TestKillPayload(t *testing.T) {
+	t.Parallel()
 	p := KillPayload("gastown", "alpha", "zombie")
 	if p["rig"] != "gastown" {
 		t.Errorf("rig = %v, want gastown", p["rig"])
@@ -247,6 +337,7 @@ func TestKillPayload(t *testing.T) {
 }
 
 func TestWorktreePrunePayload(t *testing.T) {
+	t.Parallel()
 	p := WorktreePrunePayload("dog", "rex", "/gt/deacon/dogs/rex/gastown")
 	if p["kind"] != "dog" {
 		t.Errorf("kind = %v, want dog", p["kind"])
@@ -260,6 +351,7 @@ func TestWorktreePrunePayload(t *testing.T) {
 }
 
 func TestHaltPayload(t *testing.T) {
+	t.Parallel()
 	services := []string{"witness", "refinery", "deacon"}
 	p := HaltPayload(services)
 	gotServices, ok := p["services"].([]string)
@@ -272,6 +364,7 @@ func TestHaltPayload(t *testing.T) {
 }
 
 func TestSessionDeathPayload(t *testing.T) {
+	t.Parallel()
 	p := SessionDeathPayload("gt-gastown-alpha", "gastown/polecats/alpha", "zombie cleanup", "daemon")
 	if p["session"] != "gt-gastown-alpha" {
 		t.Errorf("session = %v, want gt-gastown-alpha", p["session"])
@@ -288,6 +381,7 @@ func TestSessionDeathPayload(t *testing.T) {
 }
 
 func TestMassDeathPayload_WithCause(t *testing.T) {
+	t.Parallel()
 	sessions := []string{"s1", "s2"}
 	p := MassDeathPayload(2, "5s", sessions, "rate limit")
 	if p["count"] != 2 {
@@ -302,6 +396,7 @@ func TestMassDeathPayload_WithCause(t *testing.T) {
 }
 
 func TestMassDeathPayload_NoCause(t *testing.T) {
+	t.Parallel()
 	p := MassDeathPayload(1, "3s", []string{"s1"}, "")
 	if _, ok := p["possible_cause"]; ok {
 		t.Error("expected no possible_cause key when empty")
@@ -309,6 +404,7 @@ func TestMassDeathPayload_NoCause(t *testing.T) {
 }
 
 func TestSessionPayload_Full(t *testing.T) {
+	t.Parallel()
 	p := SessionPayload(SessionStartInfo{
 		SessionID: "uuid-123",
 		Role:      "gastown/crew/tester",
@@ -338,6 +434,7 @@ func TestSessionPayload_Full(t *testing.T) {
 }
 
 func TestSessionPayload_Minimal(t *testing.T) {
+	t.Parallel()
 	p := SessionPayload(SessionStartInfo{SessionID: "uuid-456", Role: "deacon"})
 	if _, ok := p["topic"]; ok {
 		t.Error("expected no topic key when empty")
@@ -353,6 +450,7 @@ func TestSessionPayload_Minimal(t *testing.T) {
 // omitting them on the unresolved path would hide exactly the starts that
 // could not be explained.
 func TestSessionPayload_ReasonAndCallerAlwaysPresent(t *testing.T) {
+	t.Parallel()
 	p := SessionPayload(SessionStartInfo{SessionID: "uuid-789", Role: "gastown/refinery"})
 	for _, key := range []string{"reason", "caller"} {
 		v, ok := p[key]

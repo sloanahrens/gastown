@@ -6,15 +6,51 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
-// stubDelay shortens the waits so a test can drive the retry loop without
-// sleeping the real tens of seconds.
-func stubDelay(t *testing.T, delays ...time.Duration) {
+// testEpoch is the fixed start of every fake clock in this package's tests.
+var testEpoch = time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
+// deadlineCtx is a context that never ends but reports a deadline, so the
+// budget checks can be measured against a fake clock while the only thing
+// waiting on that clock is Retry's own timer.
+type deadlineCtx struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c deadlineCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+
+// budget returns a fake clock at testEpoch and a context whose deadline is d
+// past it.
+func budget(d time.Duration) (*clockwork.FakeClock, context.Context) {
+	return clockwork.NewFakeClockAt(testEpoch), deadlineCtx{context.Background(), testEpoch.Add(d)}
+}
+
+// runRetry runs retry with delays on clk, advancing clk through each wait,
+// and returns its outcome. It fails the test if retry neither returns nor
+// waits within 10 s.
+func runRetry(t *testing.T, ctx context.Context, clk *clockwork.FakeClock, delays []time.Duration, attempt func() Attempt) Outcome {
 	t.Helper()
-	prev := RetryDelay
-	RetryDelay = delays
-	t.Cleanup(func() { RetryDelay = prev })
+	done := make(chan Outcome, 1)
+	go func() { done <- retry(ctx, clk, delays, attempt, nil) }()
+	wait, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		blocked := make(chan error, 1)
+		go func() { blocked <- clk.BlockUntilContext(wait, 1) }()
+		select {
+		case o := <-done:
+			return o
+		case err := <-blocked:
+			if err != nil {
+				t.Fatalf("retry neither returned nor waited on the clock: %v", err)
+			}
+			clk.Advance(time.Minute)
+		}
+	}
 }
 
 func TestContendedAndUnfinished(t *testing.T) {
@@ -50,19 +86,17 @@ func TestContendedAndUnfinished(t *testing.T) {
 // real errors must be forwarded as findings — reporting it as "nothing was
 // linted" sends the agent to re-run a lint that will fail identically.
 func TestRetry_RealFailureAfterContentionIsReported(t *testing.T) {
-	stubDelay(t, time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), MinBudget())
-	defer cancel()
+	t.Parallel()
+	clk, ctx := budget(MinBudget())
 
 	attempts := 0
-	outcome := Retry(ctx, func() Attempt {
+	outcome := runRetry(t, ctx, clk, RetryDelay, func() Attempt {
 		attempts++
 		if attempts == 1 {
 			return Attempt{Err: errors.New("exit 2"), Output: "Error: " + Marker}
 		}
 		return Attempt{Err: errors.New("exit 1"), Output: "pkga/a.go:1:1: something is wrong (fakecheck)"}
-	}, nil)
+	})
 
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2 (one wait, then the retry)", attempts)
@@ -82,11 +116,8 @@ func TestRetry_RealFailureAfterContentionIsReported(t *testing.T) {
 // both shapes a lint that never reported findings takes: the marker a contended
 // golangci-lint prints, and the timeout of one that took the lock and outran
 // run.timeout (gt-taoz, gt-ijqw).
-//
-// Serial because stubDelay swaps the package-level RetryDelay and restores it
-// (gt-k317). Install-once is not available here: each test shortens the delay
-// to a different value.
 func TestRetry_ContentionIsWaitedOut(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		output string
@@ -96,19 +127,17 @@ func TestRetry_ContentionIsWaitedOut(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stubDelay(t, time.Millisecond)
-
-			ctx, cancel := context.WithTimeout(context.Background(), MinBudget())
-			defer cancel()
+			t.Parallel()
+			clk, ctx := budget(MinBudget())
 
 			attempts := 0
-			outcome := Retry(ctx, func() Attempt {
+			outcome := runRetry(t, ctx, clk, RetryDelay, func() Attempt {
 				attempts++
 				if attempts == 1 {
 					return Attempt{Err: errors.New("exit 2"), Output: tc.output}
 				}
 				return Attempt{}
-			}, nil)
+			})
 
 			if attempts != 2 {
 				t.Errorf("attempts = %d, want 2 (a lint that never ran is retried)", attempts)
@@ -127,7 +156,8 @@ func TestRetry_ContentionIsWaitedOut(t *testing.T) {
 // budget: it never starts a retry the budget cannot also fit a lint into, and
 // it refuses a context with no deadline outright.
 func TestRetry_BudgetBoundsRetry(t *testing.T) {
-	stubDelay(t, time.Millisecond)
+	t.Parallel()
+	delays := []time.Duration{time.Millisecond}
 
 	alwaysContended := func(attempts *int) func() Attempt {
 		return func() Attempt {
@@ -137,13 +167,13 @@ func TestRetry_BudgetBoundsRetry(t *testing.T) {
 	}
 
 	t.Run("a budget with no room left for the lint itself: no retry", func(t *testing.T) {
+		t.Parallel()
 		// The deadline is exactly the reserve, so even a 1ms wait would leave
 		// less than a lint's worth of budget.
-		ctx, cancel := context.WithTimeout(context.Background(), Reserve)
-		defer cancel()
+		clk, ctx := budget(Reserve)
 
 		attempts := 0
-		outcome := Retry(ctx, alwaysContended(&attempts), nil)
+		outcome := runRetry(t, ctx, clk, delays, alwaysContended(&attempts))
 		if attempts != 1 {
 			t.Errorf("attempts = %d, want 1 (no retry may eat the lint's own budget)", attempts)
 		}
@@ -156,8 +186,9 @@ func TestRetry_BudgetBoundsRetry(t *testing.T) {
 	})
 
 	t.Run("a context with no deadline: no retry", func(t *testing.T) {
+		t.Parallel()
 		attempts := 0
-		outcome := Retry(context.Background(), alwaysContended(&attempts), nil)
+		outcome := runRetry(t, context.Background(), clockwork.NewFakeClockAt(testEpoch), delays, alwaysContended(&attempts))
 		if attempts != 1 {
 			t.Errorf("attempts = %d, want 1 (an unbounded context must not drive an unbounded retry loop)", attempts)
 		}
@@ -168,15 +199,14 @@ func TestRetry_BudgetBoundsRetry(t *testing.T) {
 }
 
 func TestRetry_StopsWhenTheScheduleRunsOut(t *testing.T) {
-	stubDelay(t, time.Millisecond, time.Millisecond)
+	t.Parallel()
+	clk, ctx := budget(MinBudget())
 
 	attempts := 0
-	ctx, cancel := context.WithTimeout(context.Background(), MinBudget())
-	defer cancel()
-	outcome := Retry(ctx, func() Attempt {
+	outcome := runRetry(t, ctx, clk, []time.Duration{time.Millisecond, time.Millisecond}, func() Attempt {
 		attempts++
 		return Attempt{Err: errors.New("exit 2"), Output: "Error: " + Marker}
-	}, nil)
+	})
 
 	if attempts != 3 {
 		t.Errorf("attempts = %d, want 3 (one plus one per scheduled wait)", attempts)
@@ -191,17 +221,114 @@ func TestRetry_StopsWhenTheScheduleRunsOut(t *testing.T) {
 
 func TestRoomForRetry(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), MinBudget())
-	defer cancel()
-
-	if !RoomForRetry(ctx, time.Second) {
+	clk, ctx := budget(MinBudget())
+	if !roomForRetry(ctx, clk, time.Second) {
 		t.Error("RoomForRetry = false on a fresh MinBudget context, want true")
 	}
 
-	tight, tightCancel := context.WithTimeout(context.Background(), Reserve+time.Millisecond)
-	defer tightCancel()
-	if RoomForRetry(tight, time.Second) {
+	clk, tight := budget(Reserve + time.Millisecond)
+	if roomForRetry(tight, clk, time.Second) {
 		t.Error("RoomForRetry = true when the wait would eat the lint's reserve, want false")
+	}
+
+	clk, exact := budget(Reserve + time.Second)
+	if !roomForRetry(exact, clk, time.Second) {
+		t.Error("RoomForRetry = false when the wait plus the reserve exactly fit, want true")
+	}
+	clk.Advance(time.Nanosecond)
+	if roomForRetry(exact, clk, time.Second) {
+		t.Error("RoomForRetry = true once the clock moved past the fit, want false")
+	}
+
+	if roomForRetry(context.Background(), clk, 0) {
+		t.Error("RoomForRetry = true for a context with no deadline, want false")
+	}
+}
+
+// TestRetry_WaitsTheScheduleOnTheClock pins that each retry waits exactly its
+// scheduled delay: an attempt never starts before the clock has moved by it.
+func TestRetry_WaitsTheScheduleOnTheClock(t *testing.T) {
+	t.Parallel()
+	clk, ctx := budget(MinBudget())
+	delays := []time.Duration{15 * time.Second, 30 * time.Second}
+	var at []time.Time
+	var waits []int
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- retry(ctx, clk, delays, func() Attempt {
+			at = append(at, clk.Now())
+			return Attempt{Err: errors.New("exit 2"), Output: "Error: " + Marker}
+		}, func(attempt, attempts int, wait time.Duration) {
+			if attempts != 3 {
+				t.Errorf("onRetry attempts = %d, want 3", attempts)
+			}
+			waits = append(waits, attempt)
+		})
+	}()
+	for _, d := range delays {
+		if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+			t.Fatal(err)
+		}
+		clk.Advance(d)
+	}
+	o := <-done
+	want := []time.Time{testEpoch, testEpoch.Add(15 * time.Second), testEpoch.Add(45 * time.Second)}
+	if len(at) != len(want) {
+		t.Fatalf("attempts at %v, want %v", at, want)
+	}
+	for i := range want {
+		if !at[i].Equal(want[i]) {
+			t.Errorf("attempt %d at %v, want %v", i+1, at[i], want[i])
+		}
+	}
+	if len(waits) != 2 || waits[0] != 1 || waits[1] != 2 {
+		t.Errorf("onRetry attempts = %v, want [1 2]", waits)
+	}
+	if o.Waits != 2 {
+		t.Errorf("Waits = %d, want 2", o.Waits)
+	}
+}
+
+// TestRetry_ContextEndsDuringWait pins that a context ending mid-wait returns
+// the last attempt's outcome rather than starting another attempt.
+func TestRetry_ContextEndsDuringWait(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(testEpoch)
+	parent, cancel := context.WithCancel(context.Background())
+	ctx := deadlineCtx{parent, testEpoch.Add(MinBudget())}
+	attempts := 0
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- retry(ctx, clk, RetryDelay, func() Attempt {
+			attempts++
+			return Attempt{Err: errors.New("exit 2"), Output: "Error: " + Marker}
+		}, nil)
+	}()
+	if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	o := <-done
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1: the context ended during the first wait", attempts)
+	}
+	if o.Err == nil || !o.Contended {
+		t.Errorf("outcome = %+v, want the first attempt's contended failure", o)
+	}
+}
+
+// TestRetry_ExportedUsesRetryDelayAndRealClock pins the exported wrapper on a
+// path that never waits: a first attempt that succeeds.
+func TestRetry_ExportedUsesRetryDelayAndRealClock(t *testing.T) {
+	t.Parallel()
+	o := Retry(context.Background(), func() Attempt { return Attempt{} }, nil)
+	if o.Err != nil || o.Waits != 0 {
+		t.Errorf("Retry = %+v, want a clean first attempt", o)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), MinBudget())
+	defer cancel()
+	if !RoomForRetry(ctx, time.Second) {
+		t.Error("RoomForRetry = false on a fresh MinBudget context, want true")
 	}
 }
 

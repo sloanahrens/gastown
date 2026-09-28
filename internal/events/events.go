@@ -170,6 +170,19 @@ func newEvent(eventType, actor string, payload map[string]interface{}, visibilit
 // write appends an event to the events file of the town root resolved from
 // the current working directory.
 func write(event Event) error {
+	return writeFromCwd(event, workspace.FindFromCwd)
+}
+
+// writeFromCwd is write with the cwd town-root resolver explicit. It keeps
+// the process's own test-binary and hermetic checks, so a test can hand it a
+// fixture town and prove the gt-x9o guard still refuses to write there.
+func writeFromCwd(event Event, findRoot func() (string, error)) error {
+	return writeVia(event, testing.Testing(), os.Getenv, findRoot)
+}
+
+// writeVia is write with its inputs explicit: whether this is a test binary,
+// the environment, and the cwd town-root resolver.
+func writeVia(event Event, underTest bool, getenv func(string) string, findRoot func() (string, error)) error {
 	// Test binaries often run with cwd inside a real checkout under the
 	// production town root; resolving from cwd would append fixture events
 	// to the operator's live ~/gt/.events.jsonl (gt-x9o). Tests that want
@@ -179,11 +192,11 @@ func write(event Event) error {
 	// test binaries themselves, so testing.Testing() is false, but their cwd
 	// may still resolve to the operator's live town (gt-lwi). The hermetic
 	// test harness (internal/testutil) sets this variable.
-	if testing.Testing() || os.Getenv("GT_TEST_HERMETIC") == "1" {
+	if underTest || getenv("GT_TEST_HERMETIC") == "1" {
 		return nil
 	}
 
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := findRoot()
 	if err != nil || townRoot == "" {
 		// Silently ignore - we're not in a Gas Town workspace
 		return nil

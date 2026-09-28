@@ -9,6 +9,7 @@ import (
 )
 
 func TestFormatLogLine(t *testing.T) {
+	t.Parallel()
 	ts := time.Date(2025, 12, 26, 15, 30, 45, 0, time.UTC)
 
 	tests := []struct {
@@ -81,6 +82,7 @@ func TestFormatLogLine(t *testing.T) {
 }
 
 func TestParseLogLine(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		line    string
@@ -134,17 +136,13 @@ func TestParseLogLine(t *testing.T) {
 }
 
 func TestLoggerLogEvent(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "townlog-test")
-	if err != nil {
-		t.Fatalf("creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	t.Parallel()
+	tmpDir := t.TempDir()
 
 	logger := NewLogger(tmpDir)
 
 	// Log an event
-	err = logger.Log(EventSpawn, "gastown/crew/max", "gt-xyz")
+	err := logger.Log(EventSpawn, "gastown/crew/max", "gt-xyz")
 	if err != nil {
 		t.Fatalf("Log() error: %v", err)
 	}
@@ -165,7 +163,8 @@ func TestLoggerLogEvent(t *testing.T) {
 }
 
 func TestFilterEvents(t *testing.T) {
-	now := time.Now()
+	t.Parallel()
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	events := []Event{
 		{Timestamp: now.Add(-2 * time.Hour), Type: EventSpawn, Agent: "gastown/crew/max", Context: "gt-1"},
 		{Timestamp: now.Add(-1 * time.Hour), Type: EventNudge, Agent: "gastown/crew/max", Context: "hi"},
@@ -216,6 +215,7 @@ func TestFilterEvents(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input  string
 		maxLen int
@@ -237,6 +237,7 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestEventHandoffNoPersist_Format(t *testing.T) {
+	t.Parallel()
 	e := Event{
 		Type:    EventHandoffNoPersist,
 		Agent:   "gastown/crew/max",
@@ -252,6 +253,7 @@ func TestEventHandoffNoPersist_Format(t *testing.T) {
 }
 
 func TestEventHandoffNoPersist_NoContext(t *testing.T) {
+	t.Parallel()
 	e := Event{
 		Type:  EventHandoffNoPersist,
 		Agent: "mayor",
@@ -263,6 +265,7 @@ func TestEventHandoffNoPersist_NoContext(t *testing.T) {
 }
 
 func TestEventHandoffNoPersist_ParseRoundTrip(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "town.log")
 	logger := &Logger{logPath: logPath}

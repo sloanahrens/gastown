@@ -2,15 +2,19 @@ package lock
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+// testEpoch dates every lock fixture; staleness is decided by PID, not age.
+var testEpoch = time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+
 func TestNew(t *testing.T) {
+	t.Parallel()
 	workerDir := "/tmp/test-worker"
 	l := New(workerDir)
 
@@ -25,9 +29,10 @@ func TestNew(t *testing.T) {
 }
 
 func TestLockInfo_IsStale(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name     string
-		pid      int
+		name      string
+		pid       int
 		wantStale bool
 	}{
 		{"current process", os.Getpid(), false},
@@ -47,6 +52,7 @@ func TestLockInfo_IsStale(t *testing.T) {
 }
 
 func TestLock_AcquireAndRelease(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	if err := os.MkdirAll(workerDir, 0755); err != nil {
@@ -87,6 +93,7 @@ func TestLock_AcquireAndRelease(t *testing.T) {
 }
 
 func TestLock_AcquireAlreadyHeld(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	if err := os.MkdirAll(workerDir, 0755); err != nil {
@@ -118,6 +125,7 @@ func TestLock_AcquireAlreadyHeld(t *testing.T) {
 }
 
 func TestLock_AcquireStaleLock(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	runtimeDir := filepath.Join(workerDir, ".runtime")
@@ -128,7 +136,7 @@ func TestLock_AcquireStaleLock(t *testing.T) {
 	// Create a stale lock file with non-existent PID
 	staleLock := LockInfo{
 		PID:        999999999, // Non-existent PID
-		AcquiredAt: time.Now().Add(-time.Hour),
+		AcquiredAt: testEpoch.Add(-time.Hour),
 		SessionID:  "dead-session",
 	}
 	data, _ := json.Marshal(staleLock)
@@ -160,6 +168,7 @@ func TestLock_AcquireStaleLock(t *testing.T) {
 }
 
 func TestLock_Read(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	runtimeDir := filepath.Join(workerDir, ".runtime")
@@ -188,7 +197,7 @@ func TestLock_Read(t *testing.T) {
 	// Test reading valid lock
 	validLock := LockInfo{
 		PID:        12345,
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "test",
 		Hostname:   "testhost",
 	}
@@ -209,6 +218,7 @@ func TestLock_Read(t *testing.T) {
 }
 
 func TestLock_Check(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	runtimeDir := filepath.Join(workerDir, ".runtime")
@@ -241,7 +251,7 @@ func TestLock_Check(t *testing.T) {
 	// Test that a non-existent PID lock gets cleaned up and returns nil
 	staleLock := LockInfo{
 		PID:        999999999, // Non-existent PID
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "other-session",
 	}
 	data, _ := json.Marshal(staleLock)
@@ -263,6 +273,7 @@ func TestLock_Check(t *testing.T) {
 }
 
 func TestLock_Status(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	runtimeDir := filepath.Join(workerDir, ".runtime")
@@ -291,7 +302,7 @@ func TestLock_Status(t *testing.T) {
 	// Stale lock
 	staleLock := LockInfo{
 		PID:        999999999,
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "dead",
 	}
 	data, _ := json.Marshal(staleLock)
@@ -309,6 +320,7 @@ func TestLock_Status(t *testing.T) {
 }
 
 func TestLock_ForceRelease(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	if err := os.MkdirAll(workerDir, 0755); err != nil {
@@ -331,6 +343,7 @@ func TestLock_ForceRelease(t *testing.T) {
 }
 
 func TestProcessExists(t *testing.T) {
+	t.Parallel()
 	// Current process exists
 	if !processExists(os.Getpid()) {
 		t.Error("processExists(current PID) = false, want true")
@@ -352,6 +365,7 @@ func TestProcessExists(t *testing.T) {
 }
 
 func TestFindAllLocks(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create multiple worker directories with locks
@@ -363,7 +377,7 @@ func TestFindAllLocks(t *testing.T) {
 		}
 		info := LockInfo{
 			PID:        i + 100,
-			AcquiredAt: time.Now(),
+			AcquiredAt: testEpoch,
 			SessionID:  "session-" + w,
 		}
 		data, _ := json.Marshal(info)
@@ -391,15 +405,7 @@ func TestFindAllLocks(t *testing.T) {
 }
 
 func TestCleanStaleLocks(t *testing.T) {
-	// Save and restore execCommand
-	origExecCommand := execCommand
-	defer func() { execCommand = origExecCommand }()
-
-	// Mock tmux to return no active sessions
-	execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-		return &mockCmd{output: []byte("")}
-	}
-
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a stale lock
@@ -409,7 +415,7 @@ func TestCleanStaleLocks(t *testing.T) {
 	}
 	staleLock := LockInfo{
 		PID:        999999999,
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "dead-session",
 	}
 	data, _ := json.Marshal(staleLock)
@@ -424,7 +430,7 @@ func TestCleanStaleLocks(t *testing.T) {
 	}
 	liveLock := LockInfo{
 		PID:        os.Getpid(),
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "live-session",
 	}
 	data, _ = json.Marshal(liveLock)
@@ -432,7 +438,8 @@ func TestCleanStaleLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleaned, err := CleanStaleLocks(tmpDir)
+	// No active tmux sessions.
+	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return nil })
 	if err != nil {
 		t.Fatalf("CleanStaleLocks() error = %v", err)
 	}
@@ -454,77 +461,92 @@ func TestCleanStaleLocks(t *testing.T) {
 	}
 }
 
-type mockCmd struct {
-	output []byte
-	err    error
+// TestCleanStaleLocksKeepsLockWithLiveSession: a dead PID alone is not
+// stale when the lock's tmux session is still listed (the spawning process
+// exits normally while the agent runs on in tmux).
+func TestCleanStaleLocksKeepsLockWithLiveSession(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "worker", ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(LockInfo{PID: 999999999, AcquiredAt: testEpoch, SessionID: "$7"})
+	if err := os.WriteFile(filepath.Join(runtimeDir, "agent.lock"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return []string{"gt-x", "$7"} })
+	if err != nil || cleaned != 0 {
+		t.Fatalf("cleanStaleLocks = %d, %v; want 0, nil", cleaned, err)
+	}
+	if _, err := os.Stat(filepath.Join(runtimeDir, "agent.lock")); err != nil {
+		t.Errorf("lock with a live session was removed: %v", err)
+	}
 }
 
-func (m *mockCmd) Output() ([]byte, error) {
-	return m.output, m.err
+// fakeTmux answers list-sessions with out/err and records each call.
+type fakeTmux struct {
+	out   string
+	err   error
+	calls [][]string
+}
+
+func (f *fakeTmux) run(name string, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, append([]string{name}, args...))
+	return []byte(f.out), f.err
 }
 
 func TestGetActiveTmuxSessions(t *testing.T) {
-	// Save and restore execCommand
-	origExecCommand := execCommand
-	defer func() { execCommand = origExecCommand }()
+	t.Parallel()
+	f := &fakeTmux{out: "session1:$1\nsession2:$2\n"}
+	sessions := activeTmuxSessions(f.run, "")
 
-	// Mock tmux output
-	execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-		return &mockCmd{output: []byte("session1:$1\nsession2:$2\n")}
+	// Should contain session names and IDs, in both $N and %N forms.
+	want := []string{"session1", "$1", "%1", "session2", "$2", "%2"}
+	if !reflect.DeepEqual(sessions, want) {
+		t.Errorf("sessions = %v, want %v", sessions, want)
 	}
-
-	sessions := getActiveTmuxSessions()
-
-	// Should contain session names and IDs
-	expected := map[string]bool{
-		"session1": true,
-		"session2": true,
-		"$1":       true,
-		"$2":       true,
-		"%1":       true,
-		"%2":       true,
-	}
-
-	for _, s := range sessions {
-		if !expected[s] {
-			t.Errorf("Unexpected session: %s", s)
-		}
+	wantCall := []string{"tmux", "list-sessions", "-F", "#{session_name}:#{session_id}"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0], wantCall) {
+		t.Errorf("calls = %v, want [%v]", f.calls, wantCall)
 	}
 }
 
 func TestGetActiveTmuxSessionsUsesSocket(t *testing.T) {
-	// Save and restore execCommand and tmux socket
-	origExecCommand := execCommand
-	defer func() { execCommand = origExecCommand }()
+	t.Parallel()
+	f := &fakeTmux{}
+	activeTmuxSessions(f.run, "test-town")
 
-	origSocket := tmux.GetDefaultSocket()
-	defer tmux.SetDefaultSocket(origSocket)
-
-	// Set a custom socket name
-	tmux.SetDefaultSocket("test-town")
-
-	var capturedArgs []string
-	execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-		capturedArgs = args
-		return &mockCmd{output: []byte("")}
+	want := []string{"tmux", "-L", "test-town", "list-sessions", "-F", "#{session_name}:#{session_id}"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0], want) {
+		t.Errorf("getActiveTmuxSessions() calls = %v, want -L test-town: %v", f.calls, want)
 	}
+}
 
-	getActiveTmuxSessions()
-
-	// Verify -L flag was included with the correct socket
-	foundSocket := false
-	for i, arg := range capturedArgs {
-		if arg == "-L" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "test-town" {
-			foundSocket = true
-			break
-		}
+// TestGetActiveTmuxSessionsNoServer: tmux failing (no server, not installed)
+// means no sessions, not an error.
+func TestGetActiveTmuxSessionsNoServer(t *testing.T) {
+	t.Parallel()
+	f := &fakeTmux{err: errors.New("exit status 1")}
+	if sessions := activeTmuxSessions(f.run, "gt-x"); sessions != nil {
+		t.Errorf("sessions = %v, want nil", sessions)
 	}
-	if !foundSocket {
-		t.Errorf("getActiveTmuxSessions() args = %v, want -L test-town", capturedArgs)
+}
+
+// TestGetActiveTmuxSessionsNameOnly: a line with no session id still yields
+// its name, and blank lines are skipped.
+func TestGetActiveTmuxSessionsNameOnly(t *testing.T) {
+	t.Parallel()
+	f := &fakeTmux{out: "solo\n\nother:%3\r\n"}
+	want := []string{"solo", "other", "%3"}
+	if got := activeTmuxSessions(f.run, ""); !reflect.DeepEqual(got, want) {
+		t.Errorf("sessions = %v, want %v", got, want)
 	}
 }
 
 func TestSplitOnColon(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected []string
@@ -551,6 +573,7 @@ func TestSplitOnColon(t *testing.T) {
 }
 
 func TestSplitLines(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected []string
@@ -578,6 +601,7 @@ func TestSplitLines(t *testing.T) {
 }
 
 func TestDetectCollisions(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a stale lock
@@ -587,7 +611,7 @@ func TestDetectCollisions(t *testing.T) {
 	}
 	staleLock := LockInfo{
 		PID:        999999999,
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "dead-session",
 	}
 	data, _ := json.Marshal(staleLock)
@@ -602,7 +626,7 @@ func TestDetectCollisions(t *testing.T) {
 	}
 	orphanLock := LockInfo{
 		PID:        os.Getpid(), // Live PID
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "orphan-session", // Not in active list
 	}
 	data, _ = json.Marshal(orphanLock)
@@ -651,6 +675,7 @@ func containsHelper(s, substr string) bool {
 }
 
 func TestLock_ReleaseNonExistent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	if err := os.MkdirAll(workerDir, 0755); err != nil {
@@ -666,6 +691,7 @@ func TestLock_ReleaseNonExistent(t *testing.T) {
 }
 
 func TestLock_CheckCleansUpStaleLock(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workerDir := filepath.Join(tmpDir, "worker")
 	runtimeDir := filepath.Join(workerDir, ".runtime")
@@ -676,7 +702,7 @@ func TestLock_CheckCleansUpStaleLock(t *testing.T) {
 	// Create a stale lock
 	staleLock := LockInfo{
 		PID:        999999999,
-		AcquiredAt: time.Now(),
+		AcquiredAt: testEpoch,
 		SessionID:  "dead",
 	}
 	data, _ := json.Marshal(staleLock)

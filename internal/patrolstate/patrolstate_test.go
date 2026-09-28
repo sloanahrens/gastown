@@ -20,6 +20,7 @@ func writeState(t *testing.T, dir, name, contents string) string {
 }
 
 func TestResetCounterZeroesAndPreservesEverythingElse(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := writeState(t, dir, "state.json", `{
   "patrol_count": 610,
@@ -60,6 +61,7 @@ func TestResetCounterZeroesAndPreservesEverythingElse(t *testing.T) {
 }
 
 func TestResetCounterNoRewriteWhenAlreadyZero(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := writeState(t, dir, "state.json", "{\n  \"patrol_count\": 0,\n  \"notes\": \"x\"\n}\n")
 
@@ -93,6 +95,7 @@ func TestResetCounterNoRewriteWhenAlreadyZero(t *testing.T) {
 }
 
 func TestResetCounterMissingFileIsNoOp(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
@@ -109,6 +112,7 @@ func TestResetCounterMissingFileIsNoOp(t *testing.T) {
 }
 
 func TestResetCounterAbsentFieldIsNoOp(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := writeState(t, dir, "state.json", `{"notes": "no counter here"}`)
 
@@ -133,6 +137,7 @@ func TestResetCounterAbsentFieldIsNoOp(t *testing.T) {
 }
 
 func TestResetCounterUnparseableLeavesFileUntouched(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const corrupt = `{"patrol_count": 610, "notes": "truncated`
 	path := writeState(t, dir, "state.json", corrupt)
@@ -155,6 +160,7 @@ func TestResetCounterUnparseableLeavesFileUntouched(t *testing.T) {
 }
 
 func TestResetCounterNonNumericCounterErrors(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const contents = `{"patrol_count": "many"}`
 	path := writeState(t, dir, "state.json", contents)
@@ -172,6 +178,7 @@ func TestResetCounterNonNumericCounterErrors(t *testing.T) {
 }
 
 func TestResetCounterPreservesFileMode(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := writeState(t, dir, "state.json", `{"patrol_count": 42}`)
 	if err := os.Chmod(path, 0600); err != nil {
@@ -193,6 +200,7 @@ func TestResetCounterPreservesFileMode(t *testing.T) {
 
 // Leaves no temp files behind, on either path.
 func TestResetCounterLeavesNoTempFiles(t *testing.T) {
+	t.Parallel()
 	for _, contents := range []string{`{"patrol_count": 7}`, `{"patrol_count": 0}`} {
 		dir := t.TempDir()
 		writeState(t, dir, "state.json", contents)

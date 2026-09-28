@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
 
 func TestWriteJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.json")
 
@@ -39,6 +40,7 @@ func TestWriteJSON(t *testing.T) {
 }
 
 func TestWriteFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
 
@@ -64,6 +66,7 @@ func TestWriteFile(t *testing.T) {
 }
 
 func TestWriteOverwrite(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.json")
 
@@ -85,6 +88,7 @@ func TestWriteOverwrite(t *testing.T) {
 }
 
 func TestWriteFilePermissions(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")
 
@@ -104,6 +108,7 @@ func TestWriteFilePermissions(t *testing.T) {
 }
 
 func TestWriteFileEmpty(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "empty.txt")
 
@@ -121,6 +126,7 @@ func TestWriteFileEmpty(t *testing.T) {
 }
 
 func TestWriteJSONTypes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	tests := []struct {
@@ -156,6 +162,7 @@ func TestWriteJSONTypes(t *testing.T) {
 }
 
 func TestWriteJSONUnmarshallable(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "unmarshallable.json")
 
@@ -175,34 +182,50 @@ func TestWriteJSONUnmarshallable(t *testing.T) {
 	}
 }
 
-func TestWriteFileReadOnlyDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("chmod-based read-only directories are not reliable on Windows")
-	}
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses directory permission bits; chmod read-only is not enforceable")
-	}
-
+// TestWriteFileMissingDir: when the temp file cannot be created (here the
+// target directory does not exist), WriteFile fails and creates nothing.
+func TestWriteFileMissingDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	roDir := filepath.Join(tmpDir, "readonly")
+	testFile := filepath.Join(tmpDir, "missing", "test.txt")
 
-	if err := os.Mkdir(roDir, 0555); err != nil {
-		t.Fatalf("Failed to create readonly dir: %v", err)
+	if err := WriteFile(testFile, []byte("test"), 0644); err == nil {
+		t.Fatal("Expected an error for a missing directory")
 	}
-	defer os.Chmod(roDir, 0755)
-
-	testFile := filepath.Join(roDir, "test.txt")
-	err := WriteFile(testFile, []byte("test"), 0644)
-	if err == nil {
-		t.Fatal("Expected permission error")
-	}
-
 	if _, statErr := os.Stat(testFile); !os.IsNotExist(statErr) {
-		t.Fatal("File should not exist after permission error")
+		t.Fatal("File should not exist after the failed write")
+	}
+}
+
+// TestWriteFileRenameFailureCleansUp: when the final rename fails (the target
+// is a non-empty directory), the temp file is removed and the target is left
+// as it was.
+func TestWriteFileRenameFailureCleansUp(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target")
+	if err := os.MkdirAll(filepath.Join(target, "occupant"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteFile(target, []byte("data"), 0644); err == nil {
+		t.Fatal("Expected an error renaming over a non-empty directory")
+	}
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "target" || !entries[0].IsDir() {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("dir after failed rename = %v, want only the untouched target directory", names)
 	}
 }
 
 func TestWriteFileConcurrent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "concurrent.txt")
 
@@ -228,11 +251,7 @@ func TestWriteFileConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile error: %v", err)
 	}
-	if runtime.GOOS == "windows" {
-		if len(content) == 0 {
-			t.Error("Expected non-empty content on Windows")
-		}
-	} else if len(content) != 1 {
+	if len(content) != 1 {
 		t.Errorf("Expected single character, got %q", content)
 	}
 
@@ -247,33 +266,27 @@ func TestWriteFileConcurrent(t *testing.T) {
 	}
 }
 
+// TestWritePreservesOnFailure: a write that fails leaves the previous
+// contents in place. The target's name is the longest a directory entry can
+// be (NAME_MAX, 255 bytes), so its temp name (name + ".tmp.<random>") is too
+// long to create and the write fails before touching the target.
 func TestWritePreservesOnFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("chmod-based read-only directories are not reliable on Windows")
-	}
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses directory permission bits; chmod read-only is not enforceable")
-	}
-
+	t.Parallel()
 	tmpDir := t.TempDir()
-	testFile := filepath.Join(tmpDir, "preserve.txt")
+	testFile := filepath.Join(tmpDir, strings.Repeat("p", 255))
 
 	initialContent := []byte("original content")
-	if err := WriteFile(testFile, initialContent, 0644); err != nil {
-		t.Fatalf("Initial write error: %v", err)
+	if err := WriteFile(testFile, initialContent, 0644); err == nil {
+		t.Fatal("Expected the temp name to be too long; the fixture no longer forces a failure")
+	}
+	// Seed the original directly: WriteFile itself cannot create this name.
+	if err := os.WriteFile(testFile, initialContent, 0644); err != nil {
+		t.Fatalf("seed original: %v", err)
 	}
 
-	if err := os.Chmod(tmpDir, 0555); err != nil {
-		t.Fatalf("Failed to make dir read-only: %v", err)
+	if err := WriteFile(testFile, []byte("new content"), 0644); err == nil {
+		t.Fatal("Expected an error when the temp file cannot be created")
 	}
-	defer os.Chmod(tmpDir, 0755)
-
-	err := WriteFile(testFile, []byte("new content"), 0644)
-	if err == nil {
-		t.Fatal("Expected error when directory is read-only")
-	}
-
-	os.Chmod(tmpDir, 0755)
 
 	content, err := os.ReadFile(testFile)
 	if err != nil {
@@ -282,9 +295,17 @@ func TestWritePreservesOnFailure(t *testing.T) {
 	if string(content) != string(initialContent) {
 		t.Errorf("Original content not preserved: got %q", content)
 	}
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("dir holds %d entries after the failed write, want only the original", len(entries))
+	}
 }
 
 func TestWriteJSONStruct(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "struct.json")
 
@@ -323,6 +344,7 @@ func TestWriteJSONStruct(t *testing.T) {
 }
 
 func TestWriteFileLargeData(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "large.bin")
 
@@ -352,9 +374,7 @@ func TestWriteFileLargeData(t *testing.T) {
 }
 
 func TestWriteJSONWithPerm(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX file permissions not meaningful on Windows")
-	}
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "perm.json")
 
@@ -384,6 +404,7 @@ func TestWriteJSONWithPerm(t *testing.T) {
 }
 
 func TestEnsureDirAndWriteJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// Target sits two directory levels below tmpDir — neither exists yet.
 	testFile := filepath.Join(tmpDir, "a", "b", "cfg.json")
@@ -402,9 +423,7 @@ func TestEnsureDirAndWriteJSON(t *testing.T) {
 }
 
 func TestEnsureDirAndWriteJSONWithPerm(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX file permissions not meaningful on Windows")
-	}
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "x", "y", "cfg.json")
 
@@ -422,6 +441,7 @@ func TestEnsureDirAndWriteJSONWithPerm(t *testing.T) {
 }
 
 func TestWriteJSONWithPermUnmarshallable(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "unmarshallable.json")
 
@@ -435,9 +455,7 @@ func TestWriteJSONWithPermUnmarshallable(t *testing.T) {
 }
 
 func TestEnsureDirAndWriteJSONMkdirFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("blocking-file trick for MkdirAll isn't reliable on Windows")
-	}
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// A regular file where a directory is expected in the target's ancestry:
 	// MkdirAll fails because "blocker" exists as a file.
@@ -453,9 +471,7 @@ func TestEnsureDirAndWriteJSONMkdirFailure(t *testing.T) {
 }
 
 func TestEnsureDirAndWriteJSONWithPermMkdirFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("blocking-file trick for MkdirAll isn't reliable on Windows")
-	}
+	t.Parallel()
 	tmpDir := t.TempDir()
 	blocker := filepath.Join(tmpDir, "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0644); err != nil {
@@ -469,6 +485,7 @@ func TestEnsureDirAndWriteJSONWithPermMkdirFailure(t *testing.T) {
 }
 
 func TestWriteFileConcurrentIntegrity(t *testing.T) {
+	t.Parallel()
 	// Concurrent writers to the same path must each produce self-consistent
 	// content (no cross-writer byte mixing).
 	tmpDir := t.TempDir()

@@ -7,6 +7,7 @@ import (
 )
 
 func TestConfig_BasicOperations(t *testing.T) {
+	t.Parallel()
 	// Create temp directory for test
 	tmpDir := t.TempDir()
 	rigName := "testrig"
@@ -40,6 +41,7 @@ func TestConfig_BasicOperations(t *testing.T) {
 }
 
 func TestConfig_Block(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := NewConfig(tmpDir, "testrig")
 
@@ -78,6 +80,7 @@ func TestConfig_Block(t *testing.T) {
 }
 
 func TestConfig_Unset(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := NewConfig(tmpDir, "testrig")
 
@@ -108,6 +111,7 @@ func TestConfig_Unset(t *testing.T) {
 }
 
 func TestConfig_TypedGetters(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := NewConfig(tmpDir, "testrig")
 
@@ -129,6 +133,7 @@ func TestConfig_TypedGetters(t *testing.T) {
 }
 
 func TestConfig_AllAndKeys(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := NewConfig(tmpDir, "testrig")
 
@@ -160,6 +165,7 @@ func TestConfig_AllAndKeys(t *testing.T) {
 }
 
 func TestConfig_Clear(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := NewConfig(tmpDir, "testrig")
 
@@ -182,6 +188,7 @@ func TestConfig_Clear(t *testing.T) {
 }
 
 func TestConfig_Persistence(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -205,6 +212,7 @@ func TestConfig_Persistence(t *testing.T) {
 }
 
 func TestConfig_MultipleRigs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	cfg1 := NewConfig(tmpDir, "rig1")

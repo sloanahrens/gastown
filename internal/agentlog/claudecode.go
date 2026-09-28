@@ -125,9 +125,27 @@ func claudeProjectDirFor(workDir string) (string, error) {
 // activity_source=none and silently disables transcript-based liveness checks
 // for that whole seat class (gt-jxfe).
 func claudeProjectDirsFor(workDir string) ([]string, error) {
+	hash, err := claudeProjectHashFor(workDir)
+	if err != nil {
+		return nil, err
+	}
+	configDir, err := config.ClaudeConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolving Claude config dir: %w", err)
+	}
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		home = ""
+	}
+	return claudeProjectRoots(hash, configDir, home), nil
+}
+
+// claudeProjectHashFor returns the project-directory name Claude Code uses
+// for workDir, from its absolute path.
+func claudeProjectHashFor(workDir string) (string, error) {
 	abs, err := filepath.Abs(workDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolving absolute path: %w", err)
+		return "", fmt.Errorf("resolving absolute path: %w", err)
 	}
 	// Normalize to forward slashes (no-op on Unix).
 	normalized := filepath.ToSlash(abs)
@@ -136,23 +154,24 @@ func claudeProjectDirsFor(workDir string) ([]string, error) {
 	if len(normalized) >= 2 && normalized[1] == ':' {
 		normalized = normalized[2:]
 	}
-	hash := claudeProjectHash(normalized)
+	return claudeProjectHash(normalized), nil
+}
 
-	configDir, err := config.ClaudeConfigDir()
-	if err != nil {
-		return nil, fmt.Errorf("resolving Claude config dir: %w", err)
-	}
+// claudeProjectRoots returns the project directories for hash under the
+// resolved Claude config dir and, when home is known (non-empty), under the
+// pre-CLAUDE_CONFIG_DIR ~/.claude.
+func claudeProjectRoots(hash, configDir, home string) []string {
 	dirs := []string{filepath.Join(configDir, claudeProjectsSubdir, hash)}
 
 	// Second root: the pre-CLAUDE_CONFIG_DIR location. Identical to the first
 	// when the variable is unset, so the duplicate is dropped rather than
 	// scanned twice.
-	if home, herr := os.UserHomeDir(); herr == nil {
+	if home != "" {
 		if legacy := filepath.Join(home, claudeProjectsDir, hash); legacy != dirs[0] {
 			dirs = append(dirs, legacy)
 		}
 	}
-	return dirs, nil
+	return dirs
 }
 
 // claudeProjectHash encodes an absolute path the way Claude Code names its
@@ -190,10 +209,13 @@ func LatestTranscript(workDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if path, ok := newestJSONLIn(dirs, time.Time{}); ok {
-		return path, nil
-	}
-	return "", nil
+	return latestTranscriptIn(dirs), nil
+}
+
+// latestTranscriptIn is LatestTranscript over already-resolved project dirs.
+func latestTranscriptIn(dirs []string) string {
+	path, _ := newestJSONLIn(dirs, time.Time{})
+	return path
 }
 
 // waitForNewestJSONL polls dirs until a qualifying .jsonl file appears.

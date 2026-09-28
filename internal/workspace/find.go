@@ -28,16 +28,35 @@ const EnvForbiddenTownRoot = "GT_TEST_FORBIDDEN_TOWN_ROOT"
 // hermetic test harness forbids.
 var ErrForbiddenTownRoot = errors.New("resolved the live town root the hermetic test harness forbids")
 
+// procEnv is what workspace resolution reads from its process: environment
+// variables and the working directory. The exported functions use the real
+// process (processEnv); tests build their own.
+type procEnv struct {
+	getenv func(string) string
+	getwd  func() (string, error)
+}
+
+// processEnv reads the running process's environment and working directory.
+var processEnv = procEnv{getenv: os.Getenv, getwd: os.Getwd}
+
 // ForbiddenTownRoot returns the live town root the hermetic test harness
 // forbids, or "" when no harness is active.
 func ForbiddenTownRoot() string {
-	return os.Getenv(EnvForbiddenTownRoot)
+	return processEnv.forbiddenTownRoot()
+}
+
+func (e procEnv) forbiddenTownRoot() string {
+	return e.getenv(EnvForbiddenTownRoot)
 }
 
 // IsForbiddenRoot reports whether dir is the harness-forbidden town root or a
 // directory inside it.
 func IsForbiddenRoot(dir string) bool {
-	forbidden := ForbiddenTownRoot()
+	return processEnv.isForbiddenRoot(dir)
+}
+
+func (e procEnv) isForbiddenRoot(dir string) bool {
+	forbidden := e.forbiddenTownRoot()
 	if forbidden == "" || dir == "" {
 		return false
 	}
@@ -51,7 +70,11 @@ func IsForbiddenRoot(dir string) bool {
 // call site and path when dir is (inside) the harness-forbidden live town root,
 // and nil otherwise.
 func GuardForbiddenRoot(what, dir string) error {
-	if !IsForbiddenRoot(dir) {
+	return processEnv.guardForbiddenRoot(what, dir)
+}
+
+func (e procEnv) guardForbiddenRoot(what, dir string) error {
+	if !e.isForbiddenRoot(dir) {
 		return nil
 	}
 	return fmt.Errorf("%s refused %q: %w (use the sandbox town testutil.Hermetic.TownRoot instead)", what, dir, ErrForbiddenTownRoot)
@@ -69,7 +92,11 @@ func GuardForbiddenRoot(what, dir string) error {
 // so the harness's forbidden-root env reached the workspace resolver and
 // nothing else).
 func RefuseForbiddenRoot(what, dir string) error {
-	err := GuardForbiddenRoot(what, dir)
+	return processEnv.refuseForbiddenRoot(what, dir)
+}
+
+func (e procEnv) refuseForbiddenRoot(what, dir string) error {
+	err := e.guardForbiddenRoot(what, dir)
 	if err == nil {
 		return nil
 	}
@@ -97,6 +124,10 @@ const (
 // workspace structures (e.g., rig directories with their own mayor/town.json).
 // Does not resolve symlinks to stay consistent with os.Getwd().
 func Find(startDir string) (string, error) {
+	return processEnv.find(startDir)
+}
+
+func (e procEnv) find(startDir string) (string, error) {
 	absDir, err := filepath.Abs(startDir)
 	if err != nil {
 		return "", fmt.Errorf("resolving path: %w", err)
@@ -120,7 +151,7 @@ func Find(startDir string) (string, error) {
 
 		parent := filepath.Dir(current)
 		if parent == current {
-			if IsForbiddenRoot(primaryMatch) || IsForbiddenRoot(secondaryMatch) {
+			if e.isForbiddenRoot(primaryMatch) || e.isForbiddenRoot(secondaryMatch) {
 				// Hermetic test harness: the resolved root is (or is inside)
 				// the operator's live town — pretend no workspace was found
 				// rather than let test code mutate production state.
@@ -137,7 +168,11 @@ func Find(startDir string) (string, error) {
 
 // FindOrError is like Find but returns a user-friendly error if not found.
 func FindOrError(startDir string) (string, error) {
-	root, err := Find(startDir)
+	return processEnv.findOrError(startDir)
+}
+
+func (e procEnv) findOrError(startDir string) (string, error) {
+	root, err := e.find(startDir)
 	if err != nil {
 		return "", err
 	}
@@ -149,20 +184,28 @@ func FindOrError(startDir string) (string, error) {
 
 // FindFromCwd locates the town root from the current working directory.
 func FindFromCwd() (string, error) {
-	cwd, err := os.Getwd()
+	return processEnv.findFromCwd()
+}
+
+func (e procEnv) findFromCwd() (string, error) {
+	cwd, err := e.getwd()
 	if err != nil {
 		return "", fmt.Errorf("getting current directory: %w", err)
 	}
-	return Find(cwd)
+	return e.find(cwd)
 }
 
 // FindFromCwdOrError is like FindFromCwd but returns an error if not found.
 // It searches for a workspace starting from the CWD. If none is found, it
 // falls back to the GT_TOWN_ROOT or GT_ROOT environment variables.
 func FindFromCwdOrError() (string, error) {
-	cwd, err := os.Getwd()
+	return processEnv.findFromCwdOrError()
+}
+
+func (e procEnv) findFromCwdOrError() (string, error) {
+	cwd, err := e.getwd()
 	if err == nil {
-		root, err := Find(cwd)
+		root, err := e.find(cwd)
 		if err == nil && root != "" {
 			return root, nil
 		}
@@ -170,9 +213,9 @@ func FindFromCwdOrError() (string, error) {
 
 	// Fallback: try GT_TOWN_ROOT or GT_ROOT env vars (set by shell integration or session manager)
 	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		if townRoot := os.Getenv(envName); townRoot != "" {
+		if townRoot := e.getenv(envName); townRoot != "" {
 			// Verify it's actually a workspace
-			if ok, _ := IsWorkspace(townRoot); ok {
+			if ok, _ := e.isWorkspace(townRoot); ok {
 				return townRoot, nil
 			}
 		}
@@ -189,10 +232,14 @@ func FindFromCwdOrError() (string, error) {
 // This is useful for commands like `gt done` that need to continue even if the
 // working directory is deleted (e.g., polecat worktree nuked by Witness).
 func FindFromCwdWithFallback() (townRoot string, cwd string, err error) {
-	cwd, err = os.Getwd()
+	return processEnv.findFromCwdWithFallback()
+}
+
+func (e procEnv) findFromCwdWithFallback() (townRoot string, cwd string, err error) {
+	cwd, err = e.getwd()
 	if err != nil {
 		// Fallback: try GT_TOWN_ROOT env var
-		if townRoot = os.Getenv("GT_TOWN_ROOT"); townRoot != "" {
+		if townRoot = e.getenv("GT_TOWN_ROOT"); townRoot != "" {
 			// Verify it's actually a workspace
 			if _, statErr := os.Stat(filepath.Join(townRoot, PrimaryMarker)); statErr == nil {
 				return townRoot, "", nil // cwd is gone but townRoot is valid
@@ -201,7 +248,7 @@ func FindFromCwdWithFallback() (townRoot string, cwd string, err error) {
 		return "", "", fmt.Errorf("getting current directory: %w", err)
 	}
 
-	townRoot, err = FindOrError(cwd)
+	townRoot, err = e.findOrError(cwd)
 	if err != nil {
 		return "", "", err
 	}
@@ -212,13 +259,17 @@ func FindFromCwdWithFallback() (townRoot string, cwd string, err error) {
 // A directory is a workspace if it has a primary marker (mayor/town.json)
 // or a secondary marker (mayor/ directory).
 func IsWorkspace(dir string) (bool, error) {
+	return processEnv.isWorkspace(dir)
+}
+
+func (e procEnv) isWorkspace(dir string) (bool, error) {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return false, fmt.Errorf("resolving path: %w", err)
 	}
 
 	// Hermetic test harness: never acknowledge the operator's live town.
-	if IsForbiddenRoot(absDir) {
+	if e.isForbiddenRoot(absDir) {
 		return false, nil
 	}
 

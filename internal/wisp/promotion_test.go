@@ -6,6 +6,7 @@ import (
 )
 
 func TestHasComments(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		commentCount int
@@ -26,6 +27,7 @@ func TestHasComments(t *testing.T) {
 }
 
 func TestIsReferenced(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		nonWispRefCount int
@@ -46,6 +48,7 @@ func TestIsReferenced(t *testing.T) {
 }
 
 func TestHasKeepLabel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		labels []string
@@ -68,6 +71,7 @@ func TestHasKeepLabel(t *testing.T) {
 }
 
 func TestIsPastTTL(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		age  time.Duration
@@ -90,6 +94,7 @@ func TestIsPastTTL(t *testing.T) {
 }
 
 func TestShouldPromote(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		candidate *WispCandidate

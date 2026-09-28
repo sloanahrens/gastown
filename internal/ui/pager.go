@@ -17,14 +17,14 @@ type PagerOptions struct {
 
 // shouldUsePager determines if output should be piped to a pager.
 // Returns false if explicitly disabled, env var set, or stdout is not a TTY.
-func shouldUsePager(opts PagerOptions) bool {
+func (e uiEnv) shouldUsePager(opts PagerOptions) bool {
 	if opts.NoPager {
 		return false
 	}
-	if os.Getenv("GT_NO_PAGER") != "" {
+	if e.getenv("GT_NO_PAGER") != "" {
 		return false
 	}
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
+	if !e.stdoutTTY() {
 		return false
 	}
 	return true
@@ -32,11 +32,11 @@ func shouldUsePager(opts PagerOptions) bool {
 
 // getPagerCommand returns the pager command to use.
 // Checks GT_PAGER, then PAGER, defaults to "less".
-func getPagerCommand() string {
-	if pager := os.Getenv("GT_PAGER"); pager != "" {
+func (e uiEnv) pagerCommand() string {
+	if pager := e.getenv("GT_PAGER"); pager != "" {
 		return pager
 	}
-	if pager := os.Getenv("PAGER"); pager != "" {
+	if pager := e.getenv("PAGER"); pager != "" {
 		return pager
 	}
 	return "less"
@@ -68,7 +68,7 @@ func contentHeight(content string) int {
 // ToPager pipes content to a pager if appropriate.
 // Prints directly if pager is disabled, stdout is not a TTY, or content fits in terminal.
 func ToPager(content string, opts PagerOptions) error {
-	if !shouldUsePager(opts) {
+	if !processEnv.shouldUsePager(opts) {
 		fmt.Print(content)
 		return nil
 	}
@@ -82,7 +82,7 @@ func ToPager(content string, opts PagerOptions) error {
 		return nil
 	}
 
-	pagerCmd := getPagerCommand()
+	pagerCmd := processEnv.pagerCommand()
 	parts := strings.Fields(pagerCmd)
 	if len(parts) == 0 {
 		fmt.Print(content)

@@ -29,7 +29,12 @@ const HoldFileEnv = "GT_SEAT_REFILL_HOLD"
 
 // HoldFilePath returns the operator hold file for a town.
 func HoldFilePath(townRoot string) string {
-	if p := os.Getenv(HoldFileEnv); p != "" {
+	return holdFilePath(townRoot, os.Getenv)
+}
+
+// holdFilePath is HoldFilePath reading HoldFileEnv through getenv.
+func holdFilePath(townRoot string, getenv func(string) string) string {
+	if p := getenv(HoldFileEnv); p != "" {
 		return p
 	}
 	return filepath.Join(townRoot, HoldFileName)
@@ -46,10 +51,15 @@ func HoldFilePath(townRoot string) string {
 // fails closed: the hold cannot be ruled out, and dispatching through a hold
 // is the outcome it exists to prevent (gt-ifijm).
 func OperatorHold(townRoot string) string {
+	return operatorHold(townRoot, os.Getenv)
+}
+
+// operatorHold is OperatorHold reading HoldFileEnv through getenv.
+func operatorHold(townRoot string, getenv func(string) string) string {
 	if townRoot == "" {
 		return ""
 	}
-	path := HoldFilePath(townRoot)
+	path := holdFilePath(townRoot, getenv)
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Sprintf("operator dispatch hold present (%s); remove it to resume", path)
 	} else if !os.IsNotExist(err) {
@@ -65,7 +75,12 @@ func OperatorHold(townRoot string) string {
 // dispatcher that knows which rig it is about to sling into. seat-refill
 // honors the same per-rig file (run.sh). An empty rig answers for the town.
 func RigHold(townRoot, rig string) string {
-	if reason := OperatorHold(townRoot); reason != "" {
+	return rigHold(townRoot, rig, os.Getenv)
+}
+
+// rigHold is RigHold reading HoldFileEnv through getenv.
+func rigHold(townRoot, rig string, getenv func(string) string) string {
+	if reason := operatorHold(townRoot, getenv); reason != "" {
 		return reason
 	}
 	if townRoot != "" && rig != "" && estop.IsRigActive(townRoot, rig) {

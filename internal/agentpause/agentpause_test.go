@@ -12,6 +12,7 @@ import (
 )
 
 func TestPauseIsPausedRoundTrip(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	role, name := "polecat", "flint"
 
@@ -19,9 +20,11 @@ func TestPauseIsPausedRoundTrip(t *testing.T) {
 		t.Fatalf("pre-pause: got (%v, %v, %v), want (false, nil, nil)", got, st, err)
 	}
 
+	before := time.Now().UTC().Truncate(time.Second)
 	if err := Pause(town, "gastown", role, name, "misbehaving", "mayor", "working"); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
+	after := time.Now().UTC()
 
 	got, st, err := IsPaused(town, "gastown", role, name)
 	if err != nil {
@@ -39,8 +42,8 @@ func TestPauseIsPausedRoundTrip(t *testing.T) {
 	if st.PriorAgentState != "working" {
 		t.Errorf("priorAgentState = %q, want %q", st.PriorAgentState, "working")
 	}
-	if time.Since(st.PausedAt) > time.Minute {
-		t.Errorf("pausedAt = %v, want recent", st.PausedAt)
+	if st.PausedAt.Before(before) || st.PausedAt.After(after) {
+		t.Errorf("pausedAt = %v, want the time of the Pause call (%v..%v)", st.PausedAt, before, after)
 	}
 	if st.Address != "gastown/flint" {
 		t.Errorf("address = %q, want %q", st.Address, "gastown/flint")
@@ -48,6 +51,7 @@ func TestPauseIsPausedRoundTrip(t *testing.T) {
 }
 
 func TestResumeClearsMarker(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 
 	if err := Pause(town, "gastown", "polecat", "jade", "test", "human", ""); err != nil {
@@ -66,6 +70,7 @@ func TestResumeClearsMarker(t *testing.T) {
 }
 
 func TestFilePathSingleton(t *testing.T) {
+	t.Parallel()
 	if got := FilePath("/t", "gastown", "witness", ""); got != filepath.Join("/t", ".runtime", "agents", "gastown", "witness.json") {
 		t.Errorf("FilePath singleton = %q", got)
 	}
@@ -78,6 +83,7 @@ func TestFilePathSingleton(t *testing.T) {
 // marker file is the ONLY source of truth. PauseGate has no bead to consult,
 // no reader argument, nothing to disagree with.
 func TestPauseGateIsFileLayerOnly(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 
 	// No marker → not paused.
@@ -102,6 +108,7 @@ func TestPauseGateIsFileLayerOnly(t *testing.T) {
 // exists but cannot be parsed is an intentional-freeze signal as far as the
 // gate is concerned, error or not.
 func TestPauseGateFailsClosedOnBrokenMarker(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := FilePath(town, "gastown", "polecat", "flint")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -129,6 +136,7 @@ func TestPauseGateFailsClosedOnBrokenMarker(t *testing.T) {
 // from the marker path, so pause output and the status banner agree
 // (gt-wisp-6ajo).
 func TestAddressForMatchesMarkerPath(t *testing.T) {
+	t.Parallel()
 	town := "/town"
 	cases := []struct {
 		rig, role, name, want string
@@ -161,6 +169,7 @@ func TestAddressForMatchesMarkerPath(t *testing.T) {
 // which reads as paused and strands the agent with a bogus reason
 // (gt-wisp-6ajo).
 func TestPauseWriteIsAtomic(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := FilePath(town, "gastown", "polecat", "flint")
 	if err := Pause(town, "gastown", "polecat", "flint", "first", "human", ""); err != nil {
@@ -220,6 +229,7 @@ func TestPauseWriteIsAtomic(t *testing.T) {
 
 // TestPauseLeavesNoTempFiles guards the temp-file half of the atomic write.
 func TestPauseLeavesNoTempFiles(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := Pause(town, "gastown", "polecat", "flint", "x", "human", ""); err != nil {
 		t.Fatalf("Pause: %v", err)
@@ -242,6 +252,7 @@ func TestPauseLeavesNoTempFiles(t *testing.T) {
 // "already paused". IsPaused fails closed, so the CLI relies on the error to
 // tell the two apart.
 func TestPauseRepairsBrokenMarker(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := FilePath(town, "gastown", "polecat", "flint")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -269,6 +280,7 @@ func TestPauseRepairsBrokenMarker(t *testing.T) {
 // parked agent shows up as untouched in gt status while the gate refuses to
 // restart it.
 func TestBrokenMarkerSurfacesEverywhere(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := FilePath(town, "gastown", "polecat", "flint")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -299,6 +311,7 @@ func TestBrokenMarkerSurfacesEverywhere(t *testing.T) {
 // paused=false is an explicit "not paused", not a broken read. Fail-closed
 // applies to unreadable state, not to readable state we dislike.
 func TestUnpausedMarkerValueIsHonored(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := FilePath(town, "gastown", "polecat", "flint")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -321,6 +334,7 @@ func TestUnpausedMarkerValueIsHonored(t *testing.T) {
 // name a paused agent in the PAUSED banner (gt-ahik). A banner that says
 // "PAUSED" without naming which agent is not actionable.
 func TestAddressFromMarkerPath(t *testing.T) {
+	t.Parallel()
 	town := "/town"
 	cases := []struct {
 		name string
@@ -346,6 +360,7 @@ func TestAddressFromMarkerPath(t *testing.T) {
 }
 
 func TestReason(t *testing.T) {
+	t.Parallel()
 	if got := Reason(nil); got != "(no reason given)" {
 		t.Errorf("Reason(nil) = %q", got)
 	}
@@ -361,6 +376,7 @@ func TestReason(t *testing.T) {
 }
 
 func TestListPaused(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 
 	if got := ListPaused(town); len(got) != 0 {
