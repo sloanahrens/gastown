@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -68,7 +69,7 @@ func TestUnlinkDeadSocketFileKeepsLiveListener(t *testing.T) {
 	listener, socketPath := listenOnSocketPath(t, socket)
 	defer func() { _ = listener.Close() }()
 
-	unlinkDeadSocketFile(socketPath)
+	unlinkDeadSocketFile(clockwork.NewRealClock(), socketPath)
 
 	if _, err := os.Lstat(socketPath); err != nil {
 		t.Errorf("unlinked a socket with a live listener: %v", err)
@@ -81,7 +82,7 @@ func TestUnlinkDeadSocketFileRemovesStaleFile(t *testing.T) {
 	socket := constants.TestSocketName("gt-h9z-gone")
 	socketPath := createStaleUnixSocket(t, socket)
 
-	unlinkDeadSocketFile(socketPath)
+	unlinkDeadSocketFile(clockwork.NewRealClock(), socketPath)
 
 	if _, err := os.Lstat(socketPath); !os.IsNotExist(err) {
 		t.Errorf("stale socket file survived: %v", err)
@@ -100,7 +101,7 @@ func TestUnlinkDeadSocketFileLeavesNonSocketFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
 
-	unlinkDeadSocketFile(socketPath)
+	unlinkDeadSocketFile(clockwork.NewRealClock(), socketPath)
 
 	if _, err := os.Lstat(socketPath); err != nil {
 		t.Errorf("unlinked a file that was never a socket: %v", err)
@@ -163,7 +164,7 @@ func TestUnlinkDeadSocketFileMissingPathIsQuiet(t *testing.T) {
 	}
 
 	start := time.Now()
-	unlinkDeadSocketFile(socketPath)
+	unlinkDeadSocketFile(clockwork.NewRealClock(), socketPath)
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("unlink of a missing path took %s", elapsed)
 	}

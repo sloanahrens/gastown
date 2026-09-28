@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -1656,13 +1657,13 @@ func TestNudgeLockTimeout(t *testing.T) {
 	session := "test-nudge-timeout-session"
 
 	// Acquire the lock
-	if !acquireNudgeLock(session, time.Second) {
+	if !acquireNudgeLock(clockwork.NewRealClock(), session, time.Second) {
 		t.Fatal("initial acquireNudgeLock should succeed")
 	}
 
 	// Try to acquire again — should timeout
 	start := time.Now()
-	got := acquireNudgeLock(session, 100*time.Millisecond)
+	got := acquireNudgeLock(clockwork.NewRealClock(), session, 100*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if got {
@@ -1677,7 +1678,7 @@ func TestNudgeLockTimeout(t *testing.T) {
 	releaseNudgeLock(session)
 
 	// Now acquire should succeed again
-	if !acquireNudgeLock(session, time.Second) {
+	if !acquireNudgeLock(clockwork.NewRealClock(), session, time.Second) {
 		t.Error("acquireNudgeLock should succeed after release")
 	}
 	releaseNudgeLock(session)
@@ -1694,14 +1695,14 @@ func TestNudgeLockConcurrency(t *testing.T) {
 	acquired := make(chan bool, goroutines)
 
 	// First goroutine holds the lock
-	if !acquireNudgeLock(session, time.Second) {
+	if !acquireNudgeLock(clockwork.NewRealClock(), session, time.Second) {
 		t.Fatal("initial acquire should succeed")
 	}
 
 	// Launch goroutines that try to acquire the lock
 	for i := 0; i < goroutines; i++ {
 		go func() {
-			got := acquireNudgeLock(session, 200*time.Millisecond)
+			got := acquireNudgeLock(clockwork.NewRealClock(), session, 200*time.Millisecond)
 			acquired <- got
 		}()
 	}
@@ -1737,13 +1738,13 @@ func TestNudgeLockDifferentSessions(t *testing.T) {
 	sessionNudgeLocks.Delete(session2)
 
 	// Acquire lock for session1
-	if !acquireNudgeLock(session1, time.Second) {
+	if !acquireNudgeLock(clockwork.NewRealClock(), session1, time.Second) {
 		t.Fatal("acquire session1 should succeed")
 	}
 	defer releaseNudgeLock(session1)
 
 	// Acquiring lock for session2 should succeed (independent)
-	if !acquireNudgeLock(session2, time.Second) {
+	if !acquireNudgeLock(clockwork.NewRealClock(), session2, time.Second) {
 		t.Error("acquire session2 should succeed even when session1 is locked")
 	} else {
 		releaseNudgeLock(session2)

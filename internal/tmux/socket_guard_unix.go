@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 const (
@@ -86,8 +88,8 @@ const (
 // nothing is behind the file. That also covers a path that cannot be dialed at
 // all — a plain file sitting where a socket belongs, the shape gt-h9z guards
 // against — which is not this function's state to change.
-func unlinkDeadSocketFile(socketPath string) {
-	deadline := time.Now().Add(socketUnlinkWait)
+func unlinkDeadSocketFile(clk clockwork.Clock, socketPath string) {
+	deadline := clk.Now().Add(socketUnlinkWait)
 	for {
 		stale, err := unixSocketStale(socketPath)
 		if err != nil {
@@ -97,10 +99,10 @@ func unlinkDeadSocketFile(socketPath string) {
 			_ = os.Remove(socketPath)
 			return
 		}
-		if !time.Now().Before(deadline) {
+		if !clk.Now().Before(deadline) {
 			return
 		}
-		time.Sleep(socketUnlinkInterval)
+		clk.Sleep(socketUnlinkInterval)
 	}
 }
 

@@ -519,7 +519,7 @@ func (t *Tmux) checkSessionAfterCreate(name, command string) error {
 	}
 
 	// First check at 50ms: catches fast failures on lightly-loaded runners.
-	time.Sleep(50 * time.Millisecond)
+	t.clk().Sleep(50 * time.Millisecond)
 	if dead, err := checkPaneDead(); dead {
 		return err
 	}
@@ -528,7 +528,7 @@ func (t *Tmux) checkSessionAfterCreate(name, command string) error {
 	// process startup takes longer than 50ms. This is the fix for CI getting
 	// false negatives on TestNewSessionWithCommand_ExecEnvBadBinary. Normal
 	// long-lived sessions (Claude, shell) will still be alive here and return nil.
-	time.Sleep(200 * time.Millisecond)
+	t.clk().Sleep(200 * time.Millisecond)
 	if dead, err := checkPaneDead(); dead {
 		return err
 	}
@@ -728,7 +728,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 		}
 
 		// Wait for graceful shutdown (2s gives processes time to clean up)
-		time.Sleep(processKillGracePeriod)
+		t.clk().Sleep(processKillGracePeriod)
 
 		// Send SIGKILL to any remaining descendants
 		for _, dpid := range descendants {
@@ -737,7 +737,7 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 
 		// Kill the pane process itself (may have called setsid() and detached)
 		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
-		time.Sleep(processKillGracePeriod)
+		t.clk().Sleep(processKillGracePeriod)
 		_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 	}
 
@@ -821,7 +821,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		}
 
 		// Wait for graceful shutdown (2s gives processes time to clean up)
-		time.Sleep(processKillGracePeriod)
+		t.clk().Sleep(processKillGracePeriod)
 
 		// Send SIGKILL to any remaining non-excluded processes
 		for _, dpid := range killList {
@@ -832,7 +832,7 @@ func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []stri
 		// Only if not excluded
 		if !exclude[pid] {
 			_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
-			time.Sleep(processKillGracePeriod)
+			t.clk().Sleep(processKillGracePeriod)
 			_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 		}
 	}
@@ -1022,7 +1022,7 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 	}
 
 	// Wait for graceful shutdown (2s gives processes time to clean up)
-	time.Sleep(processKillGracePeriod)
+	t.clk().Sleep(processKillGracePeriod)
 
 	// Send SIGKILL to any remaining descendants
 	for _, dpid := range descendants {
@@ -1032,7 +1032,7 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 	// Kill the pane process itself (may have called setsid() and detached,
 	// or may have no children like Claude Code)
 	_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
-	time.Sleep(processKillGracePeriod)
+	t.clk().Sleep(processKillGracePeriod)
 	_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 
 	return nil
@@ -1080,7 +1080,7 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 	}
 
 	// Wait for graceful shutdown
-	time.Sleep(100 * time.Millisecond)
+	t.clk().Sleep(100 * time.Millisecond)
 
 	// Send SIGKILL to any remaining non-excluded descendants
 	for _, dpid := range filtered {
@@ -1090,7 +1090,7 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 	// Kill the pane process itself only if not excluded
 	if !exclude[pid] {
 		_, _, _ = t.runner()(context.Background(), "kill", "-TERM", pid)
-		time.Sleep(100 * time.Millisecond)
+		t.clk().Sleep(100 * time.Millisecond)
 		_, _, _ = t.runner()(context.Background(), "kill", "-KILL", pid)
 	}
 
@@ -1129,7 +1129,7 @@ func (t *Tmux) removeDeadSocketFile() {
 	if !t.ownsSocketFile() {
 		return
 	}
-	unlinkDeadSocketFile(filepath.Join(SocketDir(), t.socketName))
+	unlinkDeadSocketFile(t.clk(), filepath.Join(SocketDir(), t.socketName))
 }
 
 // ownsSocketFile reports whether the file at this wrapper's socket path belongs
@@ -1355,7 +1355,7 @@ func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) (retErr e
 	}
 	// Wait for paste to be processed
 	if debounceMs > 0 {
-		time.Sleep(time.Duration(debounceMs) * time.Millisecond)
+		t.clk().Sleep(time.Duration(debounceMs) * time.Millisecond)
 	}
 	// Send Enter separately - more reliable than appending to send-keys
 	_, retErr = t.run("send-keys", "-t", session, "Enter")
@@ -1381,7 +1381,7 @@ func (t *Tmux) SendKeysReplace(session, keys string, clearDelayMs int) error {
 
 	// Small delay to let the clear take effect
 	if clearDelayMs > 0 {
-		time.Sleep(time.Duration(clearDelayMs) * time.Millisecond)
+		t.clk().Sleep(time.Duration(clearDelayMs) * time.Millisecond)
 	}
 
 	// Now send the actual message
@@ -1391,7 +1391,7 @@ func (t *Tmux) SendKeysReplace(session, keys string, clearDelayMs int) error {
 // SendKeysDelayed sends keystrokes after a delay (in milliseconds).
 // Useful for waiting for a process to be ready before sending input.
 func (t *Tmux) SendKeysDelayed(session, keys string, delayMs int) error {
-	time.Sleep(time.Duration(delayMs) * time.Millisecond)
+	t.clk().Sleep(time.Duration(delayMs) * time.Millisecond)
 	return t.SendKeys(session, keys)
 }
 
@@ -1402,7 +1402,7 @@ func (t *Tmux) SendKeysDelayed(session, keys string, delayMs int) error {
 // debounceMs: time to wait between text paste and Enter key (for paste completion)
 func (t *Tmux) SendKeysDelayedDebounced(session, keys string, preDelayMs, debounceMs int) error {
 	if preDelayMs > 0 {
-		time.Sleep(time.Duration(preDelayMs) * time.Millisecond)
+		t.clk().Sleep(time.Duration(preDelayMs) * time.Millisecond)
 	}
 	return t.SendKeysDebounced(session, keys, debounceMs)
 }
@@ -1418,12 +1418,12 @@ func getSessionNudgeSem(session string) chan struct{} {
 
 // acquireNudgeLock attempts to acquire the per-session nudge lock with a timeout.
 // Returns true if the lock was acquired, false if the timeout expired.
-func acquireNudgeLock(session string, timeout time.Duration) bool {
+func acquireNudgeLock(clk clockwork.Clock, session string, timeout time.Duration) bool {
 	sem := getSessionNudgeSem(session)
 	select {
 	case sem <- struct{}{}:
 		return true
-	case <-time.After(timeout):
+	case <-clk.After(timeout):
 		return false
 	}
 }
@@ -1482,7 +1482,7 @@ func (t *Tmux) WakePane(target string) {
 		return
 	}
 	_, _ = t.run("resize-window", "-t", target, "-x", fmt.Sprintf("%d", w+1))
-	time.Sleep(50 * time.Millisecond)
+	t.clk().Sleep(50 * time.Millisecond)
 	_, _ = t.run("resize-window", "-t", target, "-x", width)
 
 	// Reset window-size to "latest" after the resize dance. tmux automatically
@@ -1589,7 +1589,7 @@ func containsRewindIndicators(content string) bool {
 // then waits briefly for the UI to return to normal.
 func (t *Tmux) dismissRewindMode(target string) {
 	_, _ = t.run("send-keys", "-t", target, "Escape")
-	time.Sleep(300 * time.Millisecond)
+	t.clk().Sleep(300 * time.Millisecond)
 }
 
 // optionMarkerPattern matches a rendered selection-list option: a leading
@@ -1784,7 +1784,7 @@ func (t *Tmux) sendEnterVerified(target string) error {
 
 	backoff := initialBackoff
 	for retry := 0; retry < maxRetries; retry++ {
-		time.Sleep(backoff)
+		t.clk().Sleep(backoff)
 
 		postSnapshot, err := t.CapturePane(target, verifyLines)
 		if err != nil {
@@ -1807,7 +1807,7 @@ func (t *Tmux) sendEnterVerified(target string) error {
 	}
 
 	// Final verification after last retry.
-	time.Sleep(500 * time.Millisecond)
+	t.clk().Sleep(500 * time.Millisecond)
 	postSnapshot, err := t.CapturePane(target, verifyLines)
 	if err != nil || postSnapshot != preSnapshot {
 		return nil // Can't verify or content changed — consider success.
@@ -1865,7 +1865,7 @@ func (t *Tmux) sendMessageToTarget(target, text string) error {
 		}
 		// Small delay between chunks to let the terminal process
 		if end < len(text) {
-			time.Sleep(10 * time.Millisecond)
+			t.clk().Sleep(10 * time.Millisecond)
 		}
 	}
 	return nil
@@ -1885,11 +1885,11 @@ func (t *Tmux) sendMessageToTarget(target, text string) error {
 // This function ONLY addresses the startup race where the agent TUI hasn't
 // initialized yet, causing tmux send-keys to fail with "not in a mode".
 func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+	deadline := t.clk().Now().Add(timeout)
 	interval := constants.NudgeRetryInterval
 	var lastErr error
 
-	for time.Now().Before(deadline) {
+	for t.clk().Now().Before(deadline) {
 		// "--" stops tmux from parsing leading-dash message text as flags (gt-cs0).
 		_, err := t.run("send-keys", "-t", target, "-l", "--", text)
 		if err == nil {
@@ -1900,7 +1900,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 		}
 		lastErr = err
 		// Clamp sleep to remaining time so we don't overshoot the deadline.
-		remaining := time.Until(deadline)
+		remaining := t.clk().Until(deadline)
 		if remaining <= 0 {
 			break
 		}
@@ -1908,7 +1908,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 		if sleep > remaining {
 			sleep = remaining
 		}
-		time.Sleep(sleep)
+		t.clk().Sleep(sleep)
 		// Grow interval by 1.5x, capped at 2s to stay responsive.
 		// 500ms → 750ms → 1125ms → 1687ms → 2s (capped)
 		interval = interval * 3 / 2
@@ -2067,7 +2067,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// or empty input. (GH#gt-ukl8)
 	if opts.TownRoot != "" {
 		lockPath := nudgeFlockPath(opts.TownRoot, session)
-		unlock, err := acquireFlockLock(lockPath, nudgeLockTimeout)
+		unlock, err := acquireFlockLock(t.clk(), lockPath, nudgeLockTimeout)
 		if err != nil {
 			return fmt.Errorf("cross-process nudge lock for session %q: %w", session, err)
 		}
@@ -2075,7 +2075,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	}
 
 	// In-process lock: serialize nudges within a single process (goroutine fast path).
-	if !acquireNudgeLock(session, nudgeLockTimeout) {
+	if !acquireNudgeLock(t.clk(), session, nudgeLockTimeout) {
 		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
 	}
 	defer releaseNudgeLock(session)
@@ -2099,7 +2099,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	//    preventing delivery to the underlying process.
 	if inMode, _ := t.run("display-message", "-p", "-t", target, "#{pane_in_mode}"); strings.TrimSpace(inMode) == "1" {
 		_, _ = t.run("send-keys", "-t", target, "-X", "cancel")
-		time.Sleep(50 * time.Millisecond)
+		t.clk().Sleep(50 * time.Millisecond)
 	}
 
 	// 2. Sanitize control characters that corrupt delivery
@@ -2117,7 +2117,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 
 	// 4. Adaptive post-text delay: scales with message length to give tmux
 	// enough time to process all chunks under load. (GH#gt-0b5)
-	time.Sleep(adaptiveTextDelay(len(sanitized)))
+	t.clk().Sleep(adaptiveTextDelay(len(sanitized)))
 
 	if sendEscape {
 		// 5. Send Escape to exit vim INSERT mode if enabled (harmless in normal mode)
@@ -2128,7 +2128,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 		// so ESC is processed alone, not as a meta prefix for the subsequent Enter.
 		// Without this, ESC+Enter within 500ms becomes M-Enter (meta-return) which
 		// does NOT submit the line.
-		time.Sleep(600 * time.Millisecond)
+		t.clk().Sleep(600 * time.Millisecond)
 
 		// 6.5. Post-Escape: check if our Escape triggered Rewind mode.
 		// This happens when a previous Escape was still in the input buffer,
@@ -2140,7 +2140,7 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 			t.dismissRewindMode(target)
 			// Re-send message text — Rewind consumed the original input.
 			_ = t.sendMessageToTarget(target, sanitized)
-			time.Sleep(adaptiveTextDelay(len(sanitized)))
+			t.clk().Sleep(adaptiveTextDelay(len(sanitized)))
 		}
 	}
 
@@ -2179,7 +2179,7 @@ func (t *Tmux) sessionForPane(pane string) string {
 func (t *Tmux) NudgePane(pane, message string) error {
 	// Serialize nudges to this pane to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
-	if !acquireNudgeLock(pane, nudgeLockTimeout) {
+	if !acquireNudgeLock(t.clk(), pane, nudgeLockTimeout) {
 		return fmt.Errorf("nudge lock timeout for pane %q: previous nudge may be hung", pane)
 	}
 	defer releaseNudgeLock(pane)
@@ -2193,7 +2193,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	//    preventing delivery to the underlying process.
 	if inMode, _ := t.run("display-message", "-p", "-t", pane, "#{pane_in_mode}"); strings.TrimSpace(inMode) == "1" {
 		_, _ = t.run("send-keys", "-t", pane, "-X", "cancel")
-		time.Sleep(50 * time.Millisecond)
+		t.clk().Sleep(50 * time.Millisecond)
 	}
 
 	// 2. Sanitize control characters that corrupt delivery
@@ -2209,7 +2209,7 @@ func (t *Tmux) NudgePane(pane, message string) error {
 	}
 
 	// 4. Adaptive post-text delay: scales with message length. (GH#gt-0b5)
-	time.Sleep(adaptiveTextDelay(len(sanitized)))
+	t.clk().Sleep(adaptiveTextDelay(len(sanitized)))
 
 	if sendEscape {
 		// 5. Send Escape to exit vim INSERT mode if enabled (harmless in normal mode)
@@ -2217,13 +2217,13 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		_, _ = t.run("send-keys", "-t", pane, "Escape")
 
 		// 6. Wait 600ms — must exceed bash readline's keyseq-timeout (500ms default)
-		time.Sleep(600 * time.Millisecond)
+		t.clk().Sleep(600 * time.Millisecond)
 
 		// 6.5. Post-Escape: check if our Escape triggered Rewind mode. (GH#gt-8el)
 		if t.isInRewindMode(pane) {
 			t.dismissRewindMode(pane)
 			_ = t.sendMessageToTarget(pane, sanitized)
-			time.Sleep(adaptiveTextDelay(len(sanitized)))
+			t.clk().Sleep(adaptiveTextDelay(len(sanitized)))
 		}
 	}
 
@@ -2260,7 +2260,7 @@ func (t *Tmux) AcceptStartupDialogs(session string) error {
 // still visible after dialog acceptance. These modals block automated sessions
 // from receiving or acting on the bootstrap prompt.
 func (t *Tmux) CheckStartupBlocked(session string) error {
-	deadline := time.Now().Add(constants.DialogPollTimeout)
+	deadline := t.clk().Now().Add(constants.DialogPollTimeout)
 	var blocker string
 	for {
 		content, err := t.CapturePane(session, 80)
@@ -2272,10 +2272,10 @@ func (t *Tmux) CheckStartupBlocked(session string) error {
 			return nil
 		}
 		blocker = current
-		if time.Now().After(deadline) {
+		if t.clk().Now().After(deadline) {
 			return fmt.Errorf("interactive startup dialog still visible in %s: %s", session, blocker)
 		}
-		time.Sleep(constants.DialogPollInterval)
+		t.clk().Sleep(constants.DialogPollInterval)
 	}
 }
 
@@ -2293,11 +2293,11 @@ func (t *Tmux) CheckStartupBlocked(session string) error {
 // the agent hasn't rendered the dialog yet when we first check. Exits early if the
 // agent prompt appears (indicating no dialog will be shown).
 func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
-	deadline := time.Now().Add(constants.DialogPollTimeout)
-	for time.Now().Before(deadline) {
+	deadline := t.clk().Now().Add(constants.DialogPollTimeout)
+	for t.clk().Now().Before(deadline) {
 		content, err := t.CapturePane(session, 30)
 		if err != nil {
-			time.Sleep(constants.DialogPollInterval)
+			t.clk().Sleep(constants.DialogPollInterval)
 			continue
 		}
 
@@ -2315,7 +2315,7 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 			return nil
 		}
 
-		time.Sleep(constants.DialogPollInterval)
+		t.clk().Sleep(constants.DialogPollInterval)
 	}
 
 	// Timeout — no dialog detected, safe to proceed
@@ -2353,7 +2353,7 @@ func (t *Tmux) selectTrustDialogOption(session, content string) error {
 		if _, err := t.run("send-keys", "-t", session, key); err != nil {
 			return err
 		}
-		time.Sleep(trustKeyInterval)
+		t.clk().Sleep(trustKeyInterval)
 	}
 	if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
 		return err
@@ -2372,7 +2372,7 @@ func (t *Tmux) selectTrustDialogOption(session, content string) error {
 // different blocking dialog appearing next (the bypass warning, say) counts as
 // progress rather than a stuck dialog.
 func (t *Tmux) verifyDialogDismissed(session, blocker string) error {
-	deadline := time.Now().Add(constants.DialogPollTimeout)
+	deadline := t.clk().Now().Add(constants.DialogPollTimeout)
 	for {
 		alive, err := t.HasSession(session)
 		if err == nil && !alive {
@@ -2388,11 +2388,11 @@ func (t *Tmux) verifyDialogDismissed(session, blocker string) error {
 			}
 		}
 
-		if time.Now().After(deadline) {
+		if t.clk().Now().After(deadline) {
 			return fmt.Errorf("%s still visible in %s %s after answering it",
 				blocker, session, constants.DialogPollTimeout)
 		}
-		time.Sleep(constants.DialogPollInterval)
+		t.clk().Sleep(constants.DialogPollInterval)
 	}
 }
 
@@ -2510,11 +2510,11 @@ func lastPromptIndicatorLine(content string) int {
 // Call this after starting Claude and waiting for it to initialize (WaitForCommand),
 // but before sending any prompts.
 func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
-	deadline := time.Now().Add(constants.DialogPollTimeout)
-	for time.Now().Before(deadline) {
+	deadline := t.clk().Now().Add(constants.DialogPollTimeout)
+	for t.clk().Now().Before(deadline) {
 		content, err := t.CapturePane(session, 30)
 		if err != nil {
-			time.Sleep(constants.DialogPollInterval)
+			t.clk().Sleep(constants.DialogPollInterval)
 			continue
 		}
 
@@ -2533,7 +2533,7 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 				if _, err := t.run("send-keys", "-t", session, key); err != nil {
 					return err
 				}
-				time.Sleep(trustKeyInterval)
+				t.clk().Sleep(trustKeyInterval)
 			}
 			if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
 				return err
@@ -2546,7 +2546,7 @@ func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 			return nil
 		}
 
-		time.Sleep(constants.DialogPollInterval)
+		t.clk().Sleep(constants.DialogPollInterval)
 	}
 
 	// Timeout — no dialog detected, safe to proceed
@@ -2584,14 +2584,14 @@ func (t *Tmux) DismissStartupDialogsBlind(session string) error {
 		if err := t.selectTrustDialogOption(session, content); err != nil {
 			return err
 		}
-		time.Sleep(trustKeyInterval)
+		t.clk().Sleep(trustKeyInterval)
 	}
 
 	// Step 2: Send Down+Enter to dismiss bypass permissions dialog (if present)
 	if _, err := t.run("send-keys", "-t", session, "Down"); err != nil {
 		return fmt.Errorf("sending Down for bypass dialog: %w", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	t.clk().Sleep(200 * time.Millisecond)
 	if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
 		return fmt.Errorf("sending Enter for bypass dialog: %w", err)
 	}
@@ -2876,7 +2876,7 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 	if maxInactivity > 0 {
 		lastActivity, err := t.GetWindowActivity(session)
 		if err == nil && !lastActivity.IsZero() {
-			if time.Since(lastActivity) > maxInactivity {
+			if t.clk().Since(lastActivity) > maxInactivity {
 				return AgentHung
 			}
 		}
@@ -3748,11 +3748,11 @@ func (t *Tmux) WaitForCommand(session string, excludeCommands []string, timeout 
 	// the NEW agent, not a leftover from a previous run.
 	_, _ = t.run("set-environment", "-u", "-t", session, EnvAgentReady)
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	deadline := t.clk().Now().Add(timeout)
+	for t.clk().Now().Before(deadline) {
 		cmd, err := t.GetPaneCommand(session)
 		if err != nil {
-			time.Sleep(constants.PollInterval)
+			t.clk().Sleep(constants.PollInterval)
 			continue
 		}
 		// Check if current command is NOT in the exclude list
@@ -3772,7 +3772,7 @@ func (t *Tmux) WaitForCommand(session string, excludeCommands []string, timeout 
 		if ready, err := t.GetEnvironment(session, EnvAgentReady); err == nil && ready == "1" {
 			return nil
 		}
-		time.Sleep(constants.PollInterval)
+		t.clk().Sleep(constants.PollInterval)
 	}
 	return fmt.Errorf("timeout waiting for command (still running excluded command)")
 }
@@ -3781,11 +3781,11 @@ func (t *Tmux) WaitForCommand(session string, excludeCommands []string, timeout 
 // Useful for waiting until a process has exited and returned to shell.
 func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 	shells := constants.SupportedShells
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	deadline := t.clk().Now().Add(timeout)
+	for t.clk().Now().Before(deadline) {
 		cmd, err := t.GetPaneCommand(session)
 		if err != nil {
-			time.Sleep(constants.PollInterval)
+			t.clk().Sleep(constants.PollInterval)
 			continue
 		}
 		for _, shell := range shells {
@@ -3793,7 +3793,7 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 				return nil
 			}
 		}
-		time.Sleep(constants.PollInterval)
+		t.clk().Sleep(constants.PollInterval)
 	}
 	return fmt.Errorf("timeout waiting for shell")
 }
@@ -4001,16 +4001,16 @@ func (t *Tmux) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, tim
 		if delay > timeout {
 			delay = timeout
 		}
-		time.Sleep(delay)
+		t.clk().Sleep(delay)
 		return nil
 	}
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	deadline := t.clk().Now().Add(timeout)
+	for t.clk().Now().Before(deadline) {
 		// Capture last few lines of the pane
 		lines, err := t.CapturePaneLines(session, 10)
 		if err != nil {
-			time.Sleep(200 * time.Millisecond)
+			t.clk().Sleep(200 * time.Millisecond)
 			continue
 		}
 		// Look for runtime prompt indicator at start of line
@@ -4019,7 +4019,7 @@ func (t *Tmux) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, tim
 				return nil
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
+		t.clk().Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for runtime prompt")
 }
@@ -4045,8 +4045,8 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 	consecutiveIdle := 0
 	const requiredConsecutive = 2
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	deadline := t.clk().Now().Add(timeout)
+	for t.clk().Now().Before(deadline) {
 		lines, err := t.capturePaneVisibleTail(session)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
@@ -4056,7 +4056,7 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 				return err
 			}
 			consecutiveIdle = 0
-			time.Sleep(200 * time.Millisecond)
+			t.clk().Sleep(200 * time.Millisecond)
 			continue
 		}
 
@@ -4073,7 +4073,7 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 		}
 		if statusBarBusy {
 			consecutiveIdle = 0
-			time.Sleep(200 * time.Millisecond)
+			t.clk().Sleep(200 * time.Millisecond)
 			continue
 		}
 
@@ -4100,7 +4100,7 @@ func (t *Tmux) WaitForIdle(session string, timeout time.Duration) error {
 		} else {
 			consecutiveIdle = 0
 		}
-		time.Sleep(200 * time.Millisecond)
+		t.clk().Sleep(200 * time.Millisecond)
 	}
 	return ErrIdleTimeout
 }
@@ -4222,7 +4222,7 @@ func (t *Tmux) IsBusy(target string) bool {
 	if err != nil {
 		return true
 	}
-	return time.Since(activity) < isBusyStaleAfter
+	return t.clk().Since(activity) < isBusyStaleAfter
 }
 
 // GetSessionInfo returns detailed information about a session.

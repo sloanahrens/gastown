@@ -263,7 +263,7 @@ func (t *Tmux) pollSubmission(target, needle, promptPrefix string, attempts int)
 	stranded := false
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
-			time.Sleep(submitProbeInterval)
+			t.clk().Sleep(submitProbeInterval)
 		}
 		probe := t.probeSubmission(target, needle, promptPrefix)
 		switch probe {
@@ -307,7 +307,7 @@ func (t *Tmux) recoverStrandedComposer(target, message, needle, promptPrefix str
 	if _, err := t.run("send-keys", "-t", target, "C-j"); err != nil {
 		return fmt.Errorf("%w (C-j reset failed: %v)", ErrSubmitNotVerified, err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	t.clk().Sleep(500 * time.Millisecond)
 
 	switch probe := t.probeSubmission(target, needle, promptPrefix); probe {
 	case probeTurnStarted:
@@ -316,7 +316,7 @@ func (t *Tmux) recoverStrandedComposer(target, message, needle, promptPrefix str
 		if err := t.sendMessageToTarget(target, message); err != nil {
 			return fmt.Errorf("%w (retype failed: %v)", ErrSubmitNotVerified, err)
 		}
-		time.Sleep(adaptiveTextDelay(len(message)))
+		t.clk().Sleep(adaptiveTextDelay(len(message)))
 		_ = t.sendEnterVerified(target)
 	case probeStranded, probeComposerDirty, probeUnknown:
 		return fmt.Errorf("%w (composer state after C-j: %s)", ErrSubmitNotVerified, probe)

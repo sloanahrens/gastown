@@ -7,11 +7,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
-func killProcessGroup(pgid int) {
+func killProcessGroup(clk clockwork.Clock, pgid int) {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	time.Sleep(100 * time.Millisecond)
+	clk.Sleep(100 * time.Millisecond)
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }
 

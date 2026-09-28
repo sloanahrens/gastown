@@ -8,9 +8,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/jonboulle/clockwork"
 )
 
-func killProcessGroup(pgid int) {
+func killProcessGroup(_ clockwork.Clock, pgid int) {
 	proc, err := os.FindProcess(pgid)
 	if err != nil {
 		return
