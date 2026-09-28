@@ -136,3 +136,18 @@ func TestWithInitDatabaseArg(t *testing.T) {
 		t.Error("withInitDatabaseArg modified its input")
 	}
 }
+
+func TestNextPoolBatchDoublesToACap(t *testing.T) {
+	got := []int{}
+	prev := 0
+	for range 6 {
+		prev = nextPoolBatch(prev)
+		got = append(got, prev)
+	}
+	want := []int{8, 16, 32, 64, 64, 64}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("batch sizes = %v, want %v", got, want)
+		}
+	}
+}

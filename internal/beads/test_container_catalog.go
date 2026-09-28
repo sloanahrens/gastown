@@ -187,38 +187,56 @@ func WithSharedTestCatalog(fn func() error) error {
 // flight — a schema migration included — and holds every new one back until it
 // is done. One CREATE per init would put every init's migration behind the one
 // before it; one exclusive section per batch lets a package's inits migrate
-// side by side again.
+// side by side again. Batches double as the pool is drained, so a package that
+// runs many inits (-count=5) stalls a handful of times, not once per eight.
 const (
-	// testDatabasePoolBatch is how many empty databases one exclusive section
-	// creates for isolated inits to take.
-	testDatabasePoolBatch = 8
+	// testDatabasePoolFirstBatch is how many empty databases the first
+	// exclusive section creates for isolated inits to take; each later
+	// refill doubles, up to testDatabasePoolMaxBatch.
+	testDatabasePoolFirstBatch = 8
+	testDatabasePoolMaxBatch   = 64
 	// testDatabaseDropBatch is how many released databases wait before one
-	// exclusive section drops them. Whatever is still queued when the test
+	// exclusive section drops them. A test database is about 2 MB on the
+	// container's tmpfs, so drops exist to bound a runaway run, not to
+	// reclaim space mid-suite; whatever is still queued when the test
 	// process exits goes with its container.
-	testDatabaseDropBatch = 16
+	testDatabaseDropBatch = 128
 )
 
 var testDatabasePool struct {
 	sync.Mutex
 	port  int
+	batch int      // size of the next refill
 	ready []string // created, empty, not yet handed to an init
 	drops []string // released by their tests, not yet dropped
+}
+
+// nextPoolBatch returns the size of the next refill of a pool whose previous
+// refill was prev (0 for none), doubling up to testDatabasePoolMaxBatch.
+func nextPoolBatch(prev int) int {
+	if prev <= 0 {
+		return testDatabasePoolFirstBatch
+	}
+	return min(prev*2, testDatabasePoolMaxBatch)
 }
 
 // takePooledTestDatabase returns an empty database on the shared test
 // container on port, created under the exclusive side of the gate. When the
 // pool is empty it creates a whole batch in one exclusive section.
+// nextPoolBatch sizes the batch.
 func takePooledTestDatabase(port int) (string, error) {
 	testDatabasePool.Lock()
 	defer testDatabasePool.Unlock()
 	if testDatabasePool.port != port {
 		testDatabasePool.port = port
+		testDatabasePool.batch = 0
 		testDatabasePool.ready = nil
 		testDatabasePool.drops = nil
 	}
 	if len(testDatabasePool.ready) == 0 {
-		names := make([]string, testDatabasePoolBatch)
-		stmts := make([]string, testDatabasePoolBatch)
+		n := nextPoolBatch(testDatabasePool.batch)
+		names := make([]string, n)
+		stmts := make([]string, n)
 		for i := range names {
 			names[i] = testDatabaseName()
 			stmts[i] = "CREATE DATABASE IF NOT EXISTS `" + names[i] + "`"
@@ -226,6 +244,7 @@ func takePooledTestDatabase(port int) (string, error) {
 		if err := execTestCatalogDDL(port, stmts...); err != nil {
 			return "", err
 		}
+		testDatabasePool.batch = n
 		testDatabasePool.ready = names
 	}
 	name := testDatabasePool.ready[0]
@@ -269,4 +288,10 @@ func withInitDatabaseArg(args []string, name string) []string {
 		}
 	}
 	return out
+}
+
+// NextTestPoolBatch is nextPoolBatch for pools of test databases kept outside
+// this package (testutil's in-process store pool).
+func NextTestPoolBatch(prev int) int {
+	return nextPoolBatch(prev)
 }

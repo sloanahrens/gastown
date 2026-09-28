@@ -72,12 +72,11 @@ func OpenTestStore(t testing.TB, ctx context.Context) beadsdk.Storage {
 	return store
 }
 
-// testStorePathBatch is how many store paths, and their databases, one
-// exclusive section of the catalog gate creates.
-const testStorePathBatch = 8
-
+// testStorePaths is the pool of store paths whose databases already exist.
+// Refills are sized by beads.NextTestPoolBatch, like the isolated-init pool.
 var testStorePaths struct {
 	sync.Mutex
+	batch int
 	ready []string
 }
 
@@ -87,9 +86,10 @@ func takeTestStorePath(port int) (string, error) {
 	testStorePaths.Lock()
 	defer testStorePaths.Unlock()
 	if len(testStorePaths.ready) == 0 {
-		paths := make([]string, 0, testStorePathBatch)
-		stmts := make([]string, 0, testStorePathBatch)
-		for range testStorePathBatch {
+		n := beads.NextTestPoolBatch(testStorePaths.batch)
+		paths := make([]string, 0, n)
+		stmts := make([]string, 0, n)
+		for range n {
 			root, err := os.MkdirTemp("", "gt-teststore-")
 			if err != nil {
 				return "", fmt.Errorf("store dir: %w", err)
@@ -104,6 +104,7 @@ func takeTestStorePath(port int) (string, error) {
 		if err := beads.ExecTestCatalogDDL(port, stmts...); err != nil {
 			return "", fmt.Errorf("create store databases: %w", err)
 		}
+		testStorePaths.batch = n
 		testStorePaths.ready = paths
 	}
 	p := testStorePaths.ready[0]
