@@ -568,12 +568,6 @@ func newBuiltinAgentRegistry() *AgentRegistry {
 	return reg
 }
 
-// BuiltinAgentRegistry returns the registry of built-in presets only. Callers
-// must not modify it.
-func BuiltinAgentRegistry() *AgentRegistry {
-	return builtinAgentRegistry
-}
-
 // LoadAgentRegistryFor returns the agent registry in effect for a rig: the
 // built-in presets, overlaid by <townRoot>/settings/agents.json, overlaid by
 // <rigPath>/settings/agents.json. An entry in a file is merged onto the entry
@@ -926,7 +920,9 @@ func (r *AgentRegistry) lookupProcessNamesByBinary(realBin string) []string {
 			return preset.ProcessNames
 		}
 	}
-	for _, preset := range builtinPresets {
+	builtins := builtinAgentRegistry.Agents
+	for _, name := range sortedPresetNames(builtins) {
+		preset := builtins[name]
 		if len(preset.ProcessNames) == 0 {
 			continue
 		}
@@ -1089,36 +1085,6 @@ func (r *AgentRegistry) ResolveProcessNames(agentName, command string, args ...s
 
 	// No command provided, agent not in registry — Claude defaults
 	return []string{"node", "claude"}
-}
-
-// MergeWithPreset applies built-in preset defaults to a RuntimeConfig.
-// User-specified values take precedence over preset defaults.
-// Returns a new RuntimeConfig without modifying the original.
-func (rc *RuntimeConfig) MergeWithPreset(preset AgentPreset) *RuntimeConfig {
-	if rc == nil {
-		return RuntimeConfigFromPreset(preset)
-	}
-
-	info := GetAgentPreset(preset)
-	if info == nil {
-		return rc
-	}
-
-	result := &RuntimeConfig{
-		Command:       rc.Command,
-		Args:          append([]string(nil), rc.Args...),
-		InitialPrompt: rc.InitialPrompt,
-	}
-
-	// Apply preset defaults only if not overridden
-	if result.Command == "" {
-		result.Command = info.Command
-	}
-	if len(result.Args) == 0 {
-		result.Args = append([]string(nil), info.Args...)
-	}
-
-	return result
 }
 
 // IsKnownPreset checks if a string is a built-in agent preset name.

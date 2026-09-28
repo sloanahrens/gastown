@@ -1609,6 +1609,17 @@ func IsResolvedAgentClaude(rc *RuntimeConfig) bool {
 	return isClaudeAgent(rc)
 }
 
+// IsResolvedAgentClaudeIn is IsResolvedAgentClaude with presets taken from
+// the agent registry of townRoot and rigPath, so a preset whose command a
+// town or rig settings/agents.json overrides is classified as that town or
+// rig runs it (gt-rg4f1).
+func IsResolvedAgentClaudeIn(townRoot, rigPath string, rc *RuntimeConfig) bool {
+	if rc == nil {
+		return true // Default to Claude when config is unavailable
+	}
+	return isClaudeAgentIn(AgentRegistryFor(townRoot, rigPath), rc)
+}
+
 // isClaudeAgent returns true if the RuntimeConfig launches Claude Code.
 // The command is authoritative (basename, gt- prefix and wrappers such as
 // `env -u X claude` unwrapped — see harnessPresetName); provider is the
@@ -2046,9 +2057,10 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 
 	if rc.Hooks != nil {
 		result.Hooks = &RuntimeHooksConfig{
-			Provider:     rc.Hooks.Provider,
-			Dir:          rc.Hooks.Dir,
-			SettingsFile: rc.Hooks.SettingsFile,
+			Provider:       rc.Hooks.Provider,
+			Dir:            rc.Hooks.Dir,
+			SettingsFile:   rc.Hooks.SettingsFile,
+			UseSettingsDir: rc.Hooks.UseSettingsDir,
 		}
 	}
 
@@ -2109,6 +2121,11 @@ func fillRuntimeDefaultsIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig
 			Dir:          preset.HooksDir,
 			SettingsFile: preset.HooksSettingsFile,
 		}
+	}
+
+	// Record the hooks provider's settings-dir support from the same registry.
+	if result.Hooks != nil && result.Hooks.UseSettingsDir == nil {
+		result.Hooks.UseSettingsDir = hooksUseSettingsDir(reg, result.Hooks.Provider)
 	}
 
 	// Auto-fill Session defaults from preset.

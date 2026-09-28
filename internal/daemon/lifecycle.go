@@ -508,7 +508,7 @@ func (d *Daemon) getStartCommand(roleConfig *beads.RoleConfig, parsed *ParsedIde
 			rigPath = filepath.Join(d.config.TownRoot, parsed.RigName)
 		}
 		rc := config.ResolveRoleAgentConfig(parsed.RoleType, d.config.TownRoot, rigPath)
-		if !config.IsResolvedAgentClaude(rc) {
+		if !config.IsResolvedAgentClaudeIn(d.config.TownRoot, rigPath, rc) {
 			// Non-Claude agent: skip TOML start_command entirely (GH#2417).
 			// Built-in role TOMLs hardcode "exec claude ..." which is wrong
 			// for non-Claude agents. Fall through to BuildStartupCommandFromConfig

@@ -171,6 +171,63 @@ func TestAgentRegistryLayersMergeFieldwise(t *testing.T) {
 	}
 }
 
+// A rig whose settings/agents.json declares its own harness for a binary is
+// classified by that registry, not the built-ins: a config launching
+// local-llm with provider claude is Claude by the built-ins (provider
+// fallback) but local-llm's own harness in the rig that defines it.
+func TestIsResolvedAgentClaudeInUsesRigRegistry(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigA := filepath.Join(townRoot, "alpha")
+	rigB := filepath.Join(townRoot, "beta")
+	path := RigAgentRegistryPath(rigA)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"agents":{"local-llm":{"command":"local-llm"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rc := &RuntimeConfig{Command: "/opt/bin/local-llm", Provider: "claude"}
+
+	if !IsResolvedAgentClaude(rc) {
+		t.Fatal("built-ins: want Claude via the provider fallback")
+	}
+	if IsResolvedAgentClaudeIn(townRoot, rigA, rc) {
+		t.Error("rig alpha: want not Claude; its agents.json makes local-llm its own harness")
+	}
+	if !IsResolvedAgentClaudeIn(townRoot, rigB, rc) {
+		t.Error("rig beta: want Claude; alpha's agents.json must not apply")
+	}
+	if !IsResolvedAgentClaudeIn(townRoot, rigA, nil) {
+		t.Error("nil config: want Claude (the default)")
+	}
+}
+
+// The hooks provider's settings-dir support travels on the resolved config
+// from the rig's own registry.
+func TestResolvedHooksUseSettingsDirFollowsRigRegistry(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigA := filepath.Join(townRoot, "alpha")
+	rigB := filepath.Join(townRoot, "beta")
+	path := RigAgentRegistryPath(rigA)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"agents":{"claude":{"hooks_use_settings_dir":false}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := ResolveRoleAgentConfig(constants.RolePolecat, townRoot, rigA)
+	if a.Hooks == nil || a.Hooks.UseSettingsDir == nil || *a.Hooks.UseSettingsDir {
+		t.Fatalf("rig alpha Hooks.UseSettingsDir = %v, want false from its agents.json", a.Hooks)
+	}
+	b := ResolveRoleAgentConfig(constants.RolePolecat, townRoot, rigB)
+	if b.Hooks == nil || b.Hooks.UseSettingsDir == nil || !*b.Hooks.UseSettingsDir {
+		t.Fatalf("rig beta Hooks.UseSettingsDir = %v, want the built-in true", b.Hooks)
+	}
+}
+
 // registryWith returns the built-in registry plus the given presets, the
 // registry a town or rig settings/agents.json defining them would produce.
 func registryWith(presets ...AgentPresetInfo) *AgentRegistry {
@@ -178,7 +235,7 @@ func registryWith(presets ...AgentPresetInfo) *AgentRegistry {
 		Version: CurrentAgentRegistryVersion,
 		Agents:  make(map[string]*AgentPresetInfo),
 	}
-	for name, preset := range BuiltinAgentRegistry().Agents {
+	for name, preset := range builtinAgentRegistry.Agents {
 		reg.Agents[name] = preset
 	}
 	for i := range presets {

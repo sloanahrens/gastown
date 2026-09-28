@@ -588,41 +588,6 @@ func TestAgentPresetApprovalFlags(t *testing.T) {
 	}
 }
 
-func TestMergeWithPreset(t *testing.T) {
-	t.Parallel()
-	// Test that user config overrides preset defaults
-	userConfig := &RuntimeConfig{
-		Command: "/custom/claude",
-		Args:    []string{"--custom-arg"},
-	}
-
-	merged := userConfig.MergeWithPreset(AgentClaude)
-
-	if merged.Command != "/custom/claude" {
-		t.Errorf("merged command should be user value, got %s", merged.Command)
-	}
-
-	if len(merged.Args) != 1 || merged.Args[0] != "--custom-arg" {
-		t.Errorf("merged args should be user value, got %v", merged.Args)
-	}
-
-	// Test nil config gets preset defaults
-	var nilConfig *RuntimeConfig
-	merged = nilConfig.MergeWithPreset(AgentClaude)
-
-	if !isClaudeCmd(merged.Command) {
-		t.Errorf("nil config merge should get preset command (claude or path), got %s", merged.Command)
-	}
-
-	// Test empty config gets preset defaults
-	emptyConfig := &RuntimeConfig{}
-	merged = emptyConfig.MergeWithPreset(AgentGemini)
-
-	if merged.Command != "gemini" {
-		t.Errorf("empty config merge should get preset command, got %s", merged.Command)
-	}
-}
-
 func TestBuildResumeCommand(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

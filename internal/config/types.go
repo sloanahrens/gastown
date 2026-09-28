@@ -883,6 +883,12 @@ type RuntimeHooksConfig struct {
 	// commands (gt prime) via nudge since hooks won't run automatically.
 	// Defaults to false (backwards compatible with claude/opencode which have real hooks).
 	Informational bool `json:"informational,omitempty"`
+
+	// UseSettingsDir is the hooks provider preset's HooksUseSettingsDir, taken
+	// from the agent registry the config was resolved against (town and rig
+	// settings/agents.json included). Nil means not resolved: readers fall
+	// back to the built-in preset. Not read from or written to settings.
+	UseSettingsDir *bool `json:"-"`
 }
 
 // RuntimeTmuxConfig controls tmux heuristics for detecting runtime readiness.
@@ -1090,6 +1096,10 @@ func normalizeRuntimeConfigIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeCon
 		rc.Hooks.SettingsFile = defaultHooksFile(reg, rc.Provider)
 	}
 
+	if rc.Hooks.UseSettingsDir == nil {
+		rc.Hooks.UseSettingsDir = hooksUseSettingsDir(reg, rc.Hooks.Provider)
+	}
+
 	// Set informational flag for providers whose "hooks" are instructions files,
 	// not executable lifecycle hooks. This tells startup fallback logic to send
 	// gt prime via nudge since hooks won't run automatically.
@@ -1237,6 +1247,17 @@ func defaultHooksFile(reg *AgentRegistry, provider string) string {
 		return preset.HooksSettingsFile
 	}
 	return ""
+}
+
+// hooksUseSettingsDir returns the HooksUseSettingsDir of the hooks provider's
+// preset in reg, or nil when the provider has no preset.
+func hooksUseSettingsDir(reg *AgentRegistry, hooksProvider string) *bool {
+	preset := reg.Preset(hooksProvider)
+	if preset == nil {
+		return nil
+	}
+	v := preset.HooksUseSettingsDir
+	return &v
 }
 
 // defaultHooksInformational returns true for providers whose hooks are instructions

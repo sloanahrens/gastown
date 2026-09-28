@@ -37,9 +37,12 @@ func EnsureSettingsForRole(settingsDir, workDir, role string, rc *config.Runtime
 	}
 
 	// 1. Provider-specific settings via generic installer.
-	// Reads template metadata from the preset and installs the appropriate template.
+	// Settings-dir support comes from the registry rc was resolved against
+	// (gt-rg4f1); a hand-built rc falls back to the built-in preset.
 	useSettingsDir := false
-	if preset := config.GetAgentPresetByName(provider); preset != nil {
+	if rc.Hooks.UseSettingsDir != nil {
+		useSettingsDir = *rc.Hooks.UseSettingsDir
+	} else if preset := config.GetAgentPresetByName(provider); preset != nil {
 		useSettingsDir = preset.HooksUseSettingsDir
 	}
 	if err := hooks.InstallForRole(provider, settingsDir, workDir, role, rc.Hooks.Dir, rc.Hooks.SettingsFile, rc.Command, useSettingsDir); err != nil {
