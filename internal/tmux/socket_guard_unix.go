@@ -158,6 +158,21 @@ func realSocketOps() socketOps {
 	}
 }
 
+// runListSessionsProbe asks whatever listens on this Tmux's socket to answer
+// `tmux list-sessions` before a create lets tmux bind the path.
+//
+// It is the only tmux call in the package with a deadline, and the reason is
+// the case it exists for: gt-h9z is a path held by something that is not a
+// tmux server, which may accept the connection and never answer. Every other
+// call talks to a server this package started. The deadline
+// (newSessionSocketProbeTimeout) is sized for a healthy server on a loaded
+// host, not for an idle one.
+//
+// Output goes through the runner's pipes. realExec sets WaitDelay whenever
+// the context has a deadline, so a hung client is killed and its pipes
+// released within 100ms of the deadline. That made the temp files the probe
+// used to redirect to unnecessary, and the pipes are what let the probe go
+// through the exec seam like every other call.
 func (t *Tmux) runListSessionsProbe(ctx context.Context) error {
 	args := []string{"list-sessions", "-F", ""}
 	_, stderr, err := t.runner()(ctx, "tmux", t.tmuxArgs(args)...)
