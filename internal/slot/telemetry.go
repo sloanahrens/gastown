@@ -3,6 +3,7 @@ package slot
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/events"
 )
@@ -46,6 +48,7 @@ const (
 // poll's blocked time is credited to the reason seen on that poll and the
 // dominant reason wins. One instance per Acquire; not safe for concurrent use.
 type waitWatch struct {
+	clock clockwork.Clock
 	// start is the first lock attempt, i.e. where WaitedFor is measured from.
 	start time.Time
 	// reasonTime is blocked time per reason; order records first sighting so a
@@ -62,8 +65,8 @@ type waitWatch struct {
 	dockerErr  string
 }
 
-func newWaitWatch() *waitWatch {
-	return &waitWatch{start: time.Now(), reasonTime: map[WaitReason]time.Duration{}}
+func newWaitWatch(clock clockwork.Clock) *waitWatch {
+	return &waitWatch{clock: clock, start: clock.Now(), reasonTime: map[WaitReason]time.Duration{}}
 }
 
 // credit attributes one blocked poll of duration d to reason.
@@ -78,7 +81,7 @@ func (w *waitWatch) credit(reason WaitReason, d time.Duration) {
 }
 
 // waited is the wall time from the first lock attempt to now.
-func (w *waitWatch) waited() time.Duration { return time.Since(w.start) }
+func (w *waitWatch) waited() time.Duration { return w.clock.Since(w.start) }
 
 // reason is the reason that accounts for the largest share of the wait, or ""
 // when nothing ever blocked this Acquire.
@@ -299,7 +302,8 @@ func writeHistory(townRoot string, entries []HistoryEntry) error {
 // recordWaitResult appends one wait outcome to the ring file. A grant is
 // recorded at acquire time, not at release, so a holder killed mid-suite still
 // leaves evidence of how long it waited (its hold is simply left open).
-func recordWaitResult(townRoot, role string, slot int, pid int, info waitInfo) error {
+// ts is the moment the outcome is stamped with.
+func recordWaitResult(townRoot, role string, slot int, pid int, ts time.Time, info waitInfo) error {
 	unlock, err := lockHistory(townRoot)
 	if err != nil {
 		return err
@@ -311,7 +315,7 @@ func recordWaitResult(townRoot, role string, slot int, pid int, info waitInfo) e
 		return err
 	}
 	entries = append(entries, HistoryEntry{
-		TS:          time.Now().UTC().Format(time.RFC3339),
+		TS:          ts.UTC().Format(time.RFC3339),
 		Role:        role,
 		Slot:        slot,
 		PID:         pid,
@@ -422,7 +426,8 @@ func nearestRank(sorted []time.Duration, p float64) time.Duration {
 // gave up at its timeout. Telemetry never fails a grant: a caller holding a
 // slot it cannot report on is still the correct outcome, and a town whose event
 // log is unwritable has worse problems.
-func emitWaitEvent(townRoot, role string, slot int, info waitInfo) {
+// A failure to write the event is reported to w.
+func emitWaitEvent(w io.Writer, townRoot, role string, slot int, info waitInfo) {
 	payload := map[string]interface{}{
 		"role":      role,
 		"slot":      slot,
@@ -449,14 +454,15 @@ func emitWaitEvent(townRoot, role string, slot int, info waitInfo) {
 		payload["docker_error"] = info.DockerErr
 	}
 	if err := events.LogTo(townRoot, events.TypeSlotWait, events.ActorGt, payload, events.VisibilityBoth); err != nil {
-		fmt.Fprintf(probeWriter, "gt slot: recording slot_wait event: %v\n", err)
+		fmt.Fprintf(w, "gt slot: recording slot_wait event: %v\n", err)
 	}
 }
 
 // emitHoldEvent emits the slot_hold event for a release. exitCode is nil when
 // the holder has no command status to report (an in-process holder, or one
 // whose child never started).
-func emitHoldEvent(townRoot, role string, slot int, held time.Duration, exitCode *int) {
+// A failure to write the event is reported to w.
+func emitHoldEvent(w io.Writer, townRoot, role string, slot int, held time.Duration, exitCode *int) {
 	payload := map[string]interface{}{
 		"role":    role,
 		"slot":    slot,
@@ -470,7 +476,7 @@ func emitHoldEvent(townRoot, role string, slot int, held time.Duration, exitCode
 		payload["exit_status"] = *exitCode
 	}
 	if err := events.LogTo(townRoot, events.TypeSlotHold, events.ActorGt, payload, events.VisibilityBoth); err != nil {
-		fmt.Fprintf(probeWriter, "gt slot: recording slot_hold event: %v\n", err)
+		fmt.Fprintf(w, "gt slot: recording slot_hold event: %v\n", err)
 	}
 }
 

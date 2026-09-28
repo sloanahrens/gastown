@@ -303,7 +303,7 @@ func TestHistory_RingFileIsBounded(t *testing.T) {
 	// Ten more acquisitions than the ring holds, so eviction is observable.
 	const over = 10
 	for i := 0; i < HistoryLimit+over; i++ {
-		err := recordWaitResult(townRoot, fmt.Sprintf("role-%d", i), 0, os.Getpid(), waitInfo{
+		err := recordWaitResult(townRoot, fmt.Sprintf("role-%d", i), 0, os.Getpid(), time.Now(), waitInfo{
 			Waited:  time.Duration(i) * time.Second,
 			Timeout: time.Minute,
 		})
@@ -347,7 +347,7 @@ func TestCompleteHold_ClosesTheNewestOpenEntry(t *testing.T) {
 	townRoot := t.TempDir()
 
 	for _, waited := range []time.Duration{time.Second, 3 * time.Second} {
-		if err := recordWaitResult(townRoot, "gastown/refinery", 0, os.Getpid(), waitInfo{Waited: waited}); err != nil {
+		if err := recordWaitResult(townRoot, "gastown/refinery", 0, os.Getpid(), time.Now(), waitInfo{Waited: waited}); err != nil {
 			t.Fatalf("recordWaitResult: %v", err)
 		}
 	}

@@ -768,7 +768,7 @@ func TestReentrantMarkGrants(t *testing.T) {
 			if !ok {
 				t.Fatalf("parseReentrantMark(%q) failed", tt.value)
 			}
-			if got := m.grants(townRoot, tt.role); got != tt.want {
+			if got := m.grants(townRoot, tt.role, os.Getpid()); got != tt.want {
 				t.Errorf("grants(%q, role=%q) = %v, want %v", tt.value, tt.role, got, tt.want)
 			}
 		})

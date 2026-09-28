@@ -2,9 +2,8 @@ package doctor
 
 import (
 	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
+
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // ContainerCapacityCheck surfaces the CPU/memory bound of the Docker VM that
@@ -29,25 +28,15 @@ func NewContainerCapacityCheck() *ContainerCapacityCheck {
 	}
 }
 
-// dockerInfoCPUMem lets tests substitute a fake docker CLI response.
+// dockerInfoCPUMem lets tests substitute a fake docker CLI response. It reads
+// the VM's bound through the container gate's runtime, the one place that
+// talks to the docker CLI.
 var dockerInfoCPUMem = func() (ncpu int, memBytes int64, err error) {
-	out, err := exec.Command("docker", "info", "--format", "{{.NCPU}} {{.MemTotal}}").Output() //nolint:gosec // G204: fixed args, no user input
+	info, err := slot.DockerRuntime().Info()
 	if err != nil {
 		return 0, 0, err
 	}
-	fields := strings.Fields(strings.TrimSpace(string(out)))
-	if len(fields) != 2 {
-		return 0, 0, fmt.Errorf("unexpected docker info output: %q", string(out))
-	}
-	ncpu, err = strconv.Atoi(fields[0])
-	if err != nil {
-		return 0, 0, fmt.Errorf("parsing NCPU: %w", err)
-	}
-	memBytes, err = strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("parsing MemTotal: %w", err)
-	}
-	return ncpu, memBytes, nil
+	return info.NCPU, info.MemBytes, nil
 }
 
 // minContainerVMMemBytes is the smallest Docker VM that runs two full -p=8

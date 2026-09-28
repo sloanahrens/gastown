@@ -183,7 +183,7 @@ func TestLogDebris(t *testing.T) {
 	debrisWriter = buf
 	t.Cleanup(func() { debrisWriter = orig })
 
-	logDebris(ContainerVerdict{
+	logDebris(debrisWriter, ContainerVerdict{
 		Container: GateContainer{ID: "orphan-id", Image: "dolthub/dolt-sql-server:2.2.0", Name: "wizardly_goldberg",
 			Labels: map[string]string{"org.testcontainers.reuse.enable": ""}},
 		Verdict: VerdictDebris,
@@ -207,7 +207,7 @@ func TestDebrisLoggerAnnouncesEachContainerOnce(t *testing.T) {
 	debrisWriter = buf
 	t.Cleanup(func() { debrisWriter = orig })
 
-	logOnce := debrisLogger()
+	logOnce := debrisLogger(debrisWriter)
 	orphan := ContainerVerdict{Container: GateContainer{ID: "orphan-id", Image: "dolt/dolt-sql-server:2.2.0", Name: "orphan"}}
 	other := ContainerVerdict{Container: GateContainer{ID: "second-id", Image: "dolt/dolt-sql-server:2.2.0", Name: "second"}}
 

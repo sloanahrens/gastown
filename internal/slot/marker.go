@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/lock"
 )
@@ -125,14 +126,14 @@ const markerAcquireRetryInterval = 2 * time.Millisecond
 
 // acquireMarkerFlock is lock.FlockTryAcquire retried across
 // markerAcquireRetryWindow instead of failing on the first contended attempt.
-func acquireMarkerFlock(path string) (unlock func(), ok bool, err error) {
-	deadline := time.Now().Add(markerAcquireRetryWindow)
+func acquireMarkerFlock(clock clockwork.Clock, path string) (unlock func(), ok bool, err error) {
+	deadline := clock.Now().Add(markerAcquireRetryWindow)
 	for {
 		unlock, ok, err = lock.FlockTryAcquire(path)
-		if err != nil || ok || time.Now().After(deadline) {
+		if err != nil || ok || clock.Now().After(deadline) {
 			return unlock, ok, err
 		}
-		time.Sleep(markerAcquireRetryInterval)
+		clock.Sleep(markerAcquireRetryInterval)
 	}
 }
 
@@ -141,10 +142,15 @@ func acquireMarkerFlock(path string) (unlock func(), ok bool, err error) {
 // is the point, since a second review of the same work must not start and
 // bill the backend twice (gt-97cm).
 func AcquireMarker(townRoot, name, role string) (*MarkerHandle, error) {
+	return NewGate().AcquireMarker(townRoot, name, role)
+}
+
+// AcquireMarker is the package-level AcquireMarker on this gate.
+func (g *Gate) AcquireMarker(townRoot, name, role string) (*MarkerHandle, error) {
 	if err := os.MkdirAll(LockDir(townRoot), 0755); err != nil {
 		return nil, fmt.Errorf("creating lock directory: %w", err)
 	}
-	unlock, ok, err := acquireMarkerFlock(MarkerLockPath(townRoot, name))
+	unlock, ok, err := acquireMarkerFlock(g.clock, MarkerLockPath(townRoot, name))
 	if err != nil {
 		return nil, fmt.Errorf("acquiring marker %q: %w", name, err)
 	}
@@ -154,13 +160,13 @@ func AcquireMarker(townRoot, name, role string) (*MarkerHandle, error) {
 	h := &MarkerHandle{townRoot: townRoot, name: name, unlock: unlock}
 	if err := atomicfile.EnsureDirAndWriteJSON(MarkerOwnerPath(townRoot, name), Owner{
 		Role:       role,
-		PID:        os.Getpid(),
-		AcquiredAt: time.Now(),
+		PID:        g.pid,
+		AcquiredAt: g.clock.Now(),
 		Name:       name,
 	}); err != nil {
 		// The flock is the lock; this file only decorates a report, so failing
 		// to write it must not fail an acquire the holder has already won.
-		fmt.Fprintf(probeWriter, "gt slot: writing owner metadata for marker %q: %v\n", name, err)
+		fmt.Fprintf(g.probeOut, "gt slot: writing owner metadata for marker %q: %v\n", name, err)
 	}
 	return h, nil
 }

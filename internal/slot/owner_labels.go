@@ -2,6 +2,7 @@ package slot
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"time"
@@ -55,7 +56,7 @@ func TestContainerOwnerLabels() map[string]string {
 	}
 	// Without a start time the owner can still be judged, only less strongly:
 	// see ownerVerdict.
-	if start, ok := ownerStartToken(os.Getpid()); ok {
+	if start, ok := processStartToken(os.Getpid()); ok {
 		labels[OwnerStartLabel] = start
 	}
 	return labels
@@ -117,23 +118,23 @@ func SetOwnerProcessProbeForTest(gone func(pid int) bool, hostname string) (rest
 // while the container is younger than window: past that, the age/ryuk rules
 // decide as they did before owner labels existed, and a reused pid can never
 // hold the gate for longer than it could before (gt-ehlga review).
-func ownerVerdict(c GateContainer, now time.Time, window time.Duration) (verdict ContainerVerdict, ok bool) {
+func (p ownerProbe) ownerVerdict(c GateContainer, now time.Time, window time.Duration) (verdict ContainerVerdict, ok bool) {
 	pid, host, labeled := c.OwnerProcess()
 	if !labeled {
 		return ContainerVerdict{}, false
 	}
-	local, err := localHostname()
+	local, err := p.hostname()
 	if err != nil || local != host {
 		return ContainerVerdict{}, false
 	}
 	gone := func(reason string) (ContainerVerdict, bool) {
 		return ContainerVerdict{Container: c, Verdict: VerdictDebris, Reason: reason, OwnerGone: true}, true
 	}
-	if ownerProcessGone(pid) {
+	if p.gone(pid) {
 		return gone("its owning test process (pid " + strconv.Itoa(pid) + " on " + host + ") is gone")
 	}
 	recorded := c.Labels[OwnerStartLabel]
-	current, readable := ownerStartToken(pid)
+	current, readable := p.startToken(pid)
 	if recorded != "" && readable {
 		if current != recorded {
 			return gone(fmt.Sprintf("its owning test process (pid %d on %s, started %s) is gone; pid %d now names a process started %s",
@@ -157,25 +158,25 @@ func ownerVerdict(c GateContainer, now time.Time, window time.Duration) (verdict
 }
 
 // orphanRemover returns a func that force-removes one owner-gone container,
-// once per container, logging what it removed and why to debrisWriter. Acquire
+// once per container, logging what it removed and why to w. Acquire
 // calls it for the verdicts Classify marked OwnerGone: the owner process is
 // certainly gone, so nothing live can be using the container, and leaving it
 // up would keep an ownerless container on the shared Docker VM (gt-ehlga).
 // Anything else — an unlabeled or age-only debris container — is never
 // removed here.
-func orphanRemover() func(ContainerVerdict) {
+func orphanRemover(rt ContainerRuntime, w io.Writer) func(ContainerVerdict) {
 	tried := map[string]bool{}
 	return func(verdict ContainerVerdict) {
 		if !verdict.OwnerGone || verdict.Container.ID == "" || tried[verdict.Container.ID] {
 			return
 		}
 		tried[verdict.Container.ID] = true
-		if err := removeContainer(verdict.Container.ID); err != nil {
-			fmt.Fprintf(debrisWriter, "gt slot: could not remove orphaned %s (%s): %v. 'gt slot reap' will retry.\n",
+		if err := rt.Remove(verdict.Container.ID); err != nil {
+			fmt.Fprintf(w, "gt slot: could not remove orphaned %s (%s): %v. 'gt slot reap' will retry.\n",
 				verdict.Container.Display(), verdict.Reason, err)
 			return
 		}
-		fmt.Fprintf(debrisWriter, "gt slot: removed orphaned %s (id %s): %s; labels: %s\n",
+		fmt.Fprintf(w, "gt slot: removed orphaned %s (id %s): %s; labels: %s\n",
 			verdict.Container.Display(), verdict.Container.ID, verdict.Reason, verdict.Container.LabelSummary())
 	}
 }
