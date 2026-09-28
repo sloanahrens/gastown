@@ -2234,8 +2234,14 @@ func formatMailAge(d time.Duration) string {
 // it is converted to local time so it renders consistently with timestamps built
 // via time.Unix(), which are already local.
 func formatTimestamp(t time.Time) string {
-	t = t.Local()
-	now := time.Now()
+	return formatTimestampIn(t, time.Local)
+}
+
+// formatTimestampIn is formatTimestamp for an explicit zone, so tests pick
+// the zone without assigning the process-global time.Local.
+func formatTimestampIn(t time.Time, loc *time.Location) string {
+	t = t.In(loc)
+	now := time.Now().In(loc)
 	if t.Year() != now.Year() {
 		return t.Format("Jan 2 2006, 3:04 PM")
 	}

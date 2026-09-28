@@ -361,9 +361,9 @@ func TestFormatTimestamp_ConvertsToLocalZone(t *testing.T) {
 	if err != nil {
 		t.Skipf("tzdata not available: %v", err)
 	}
-	orig := time.Local
-	time.Local = loc
-	defer func() { time.Local = orig }()
+	// The zone is an explicit argument. Assigning the process-global
+	// time.Local raced with every live timer (time.sendTime reads it) and
+	// failed under -race.
 
 	// Fixed UTC input (as produced by time.Parse(time.RFC3339, ...) on a
 	// "...Z" value) from a past year so the formatter takes the
@@ -372,9 +372,9 @@ func TestFormatTimestamp_ConvertsToLocalZone(t *testing.T) {
 	// 02:59 UTC on Jan 2 is 20:59 CST on Jan 1 in America/Chicago (UTC-6, no DST in January).
 	want := "Jan 1 2024, 8:59 PM"
 
-	got := formatTimestamp(utcInput)
+	got := formatTimestampIn(utcInput, loc)
 	if got != want {
-		t.Errorf("formatTimestamp(%v) = %q, want %q (must convert to local before formatting)", utcInput, got, want)
+		t.Errorf("formatTimestampIn(%v, %v) = %q, want %q (must convert to the zone before formatting)", utcInput, loc, got, want)
 	}
 }
 
