@@ -38,7 +38,6 @@ internal/lintlock
 internal/lock
 internal/mail
 internal/mayor
-internal/mq
 internal/nudge
 internal/patrolstate
 internal/plugin

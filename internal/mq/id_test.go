@@ -7,6 +7,7 @@ import (
 )
 
 func TestGenerateMRIDWithTime(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		prefix    string
@@ -72,6 +73,7 @@ func TestGenerateMRIDWithTime(t *testing.T) {
 }
 
 func TestGenerateMRIDWithTime_Deterministic(t *testing.T) {
+	t.Parallel()
 	// Same inputs should produce same output
 	prefix := "gt"
 	branch := "polecat/Nux/gt-xyz"
@@ -86,6 +88,7 @@ func TestGenerateMRIDWithTime_Deterministic(t *testing.T) {
 }
 
 func TestGenerateMRIDWithTime_DifferentTimestamps(t *testing.T) {
+	t.Parallel()
 	// Different timestamps should produce different IDs
 	prefix := "gt"
 	branch := "polecat/Nux/gt-xyz"
@@ -101,6 +104,7 @@ func TestGenerateMRIDWithTime_DifferentTimestamps(t *testing.T) {
 }
 
 func TestGenerateMRIDWithTime_DifferentBranches(t *testing.T) {
+	t.Parallel()
 	// Different branches should produce different IDs
 	prefix := "gt"
 	ts := time.Date(2025, 12, 17, 10, 0, 0, 0, time.UTC)
@@ -114,6 +118,7 @@ func TestGenerateMRIDWithTime_DifferentBranches(t *testing.T) {
 }
 
 func TestGenerateMRID(t *testing.T) {
+	t.Parallel()
 	// GenerateMRID uses current time, so we just verify format
 	id := GenerateMRID("gt", "polecat/Nux/gt-xyz")
 
@@ -128,6 +133,7 @@ func TestGenerateMRID(t *testing.T) {
 }
 
 func TestGenerateMRID_Uniqueness(t *testing.T) {
+	t.Parallel()
 	// Generate multiple IDs and verify they're unique
 	ids := make(map[string]bool)
 	prefix := "gt"
