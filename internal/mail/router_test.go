@@ -1960,7 +1960,9 @@ func TestValidateRecipientFilesystemFallbackWithRouteErrors(t *testing.T) {
 
 // fakeNotifyTmux is a scripted notifyTmux: sessions listed in live exist,
 // those also in idle show a ready prompt, and noServer models a tmux server
-// that is not running. It records what notifyRecipient sent, so the tests
+// that is not running. It mirrors (*tmux.Tmux): HasSession folds a missing
+// server into (false, nil), while WaitForIdle and NudgeSession surface
+// tmux.ErrNoServer. It records what notifyRecipient sent, so the tests
 // below decide the delivery path directly instead of waiting on a real pane.
 type fakeNotifyTmux struct {
 	mu       sync.Mutex
@@ -1971,6 +1973,7 @@ type fakeNotifyTmux struct {
 	nudges   map[string][]string
 	banners  []string
 	waitedOn map[string]time.Duration
+	queried  []string // HasSession calls, in order
 }
 
 func newFakeNotifyTmux(live ...string) *fakeNotifyTmux {
@@ -1989,8 +1992,9 @@ func newFakeNotifyTmux(live ...string) *fakeNotifyTmux {
 func (f *fakeNotifyTmux) HasSession(name string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.queried = append(f.queried, name)
 	if f.noServer {
-		return false, tmux.ErrNoServer
+		return false, nil // real HasSession maps ErrNoServer to "no session"
 	}
 	return f.live[name], nil
 }
@@ -2006,6 +2010,9 @@ func (f *fakeNotifyTmux) WaitForIdle(session string, timeout time.Duration) erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.waitedOn[session] = timeout
+	if f.noServer {
+		return tmux.ErrNoServer
+	}
 	if !f.live[session] {
 		return tmux.ErrSessionNotFound
 	}
@@ -2018,6 +2025,9 @@ func (f *fakeNotifyTmux) WaitForIdle(session string, timeout time.Duration) erro
 func (f *fakeNotifyTmux) NudgeSession(session, message string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.noServer {
+		return tmux.ErrNoServer
+	}
 	if !f.live[session] {
 		return tmux.ErrSessionNotFound
 	}
@@ -2207,6 +2217,16 @@ func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T)
 		t.Fatalf("notifyRecipient returned error: %v", err)
 	}
 
+	// Every candidate is looked up and found absent (the real HasSession
+	// reports a missing server as "no session"), so none is waited on or
+	// nudged directly and all fall through to the queue.
+	if got, want := strings.Join(fake.queried, ","), "gt-crew-headless,gt-headless"; got != want {
+		t.Fatalf("HasSession queried %q, want every candidate %q", got, want)
+	}
+	if len(fake.waitedOn) != 0 || len(fake.nudges) != 0 {
+		t.Fatalf("headless candidates were waited on %v / nudged %v, want neither", fake.waitedOn, fake.nudges)
+	}
+
 	for _, sessionID := range []string{"gt-crew-headless", "gt-headless"} {
 		nudges, err := nudge.Drain(townRoot, sessionID)
 		if err != nil {
@@ -2241,6 +2261,13 @@ func TestNotifyRecipient_DogQueuesDogSessionNotDeacon(t *testing.T) {
 
 	if err := r.notifyRecipient(msg); err != nil {
 		t.Fatalf("notifyRecipient returned error: %v", err)
+	}
+
+	if got := strings.Join(fake.queried, ","); got != "hq-dog-fido" {
+		t.Fatalf("HasSession queried %q, want only the dog session hq-dog-fido", got)
+	}
+	if len(fake.waitedOn) != 0 || len(fake.nudges) != 0 {
+		t.Fatalf("absent dog session was waited on %v / nudged %v, want neither", fake.waitedOn, fake.nudges)
 	}
 
 	dogNudges, err := nudge.Drain(townRoot, "hq-dog-fido")
