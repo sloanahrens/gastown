@@ -8,95 +8,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
-
-// TestEscalationAlertKey covers the identity every alert is filed under. The
-// derived key is what makes a repeat firing record onto the existing open
-// escalation rather than mint a second one (gt-vwry), so the derivation rules
-// matter as much as the storage.
-func TestEscalationAlertKey(t *testing.T) {
-	tests := []struct {
-		name        string
-		fingerprint string
-		source      string
-		description string
-		want        string
-	}{
-		{
-			name:        "explicit fingerprint wins over everything",
-			fingerprint: "main_branch_test:failures",
-			source:      "main_branch_test",
-			description: "main branch test failures:",
-			want:        "main_branch_test:failures",
-		},
-		{
-			name:        "explicit fingerprint survives an unrelated description",
-			fingerprint: "deacon:await-signal:hq-deacon",
-			description: "timeout in cycle 41",
-			want:        "deacon:await-signal:hq-deacon",
-		},
-		{
-			name:        "source prefixes the description",
-			source:      "jsonl_git_backup",
-			description: "spike detected",
-			want:        "jsonl_git_backup: spike detected",
-		},
-		{
-			name:        "description alone when no source",
-			description: "main branch test failures:",
-			want:        "main branch test failures:",
-		},
-		{
-			name:        "internal whitespace collapses so reflowed alerts match",
-			description: "main   branch\ttest   failures:",
-			want:        "main branch test failures:",
-		},
-		{
-			name:        "source-only whitespace is not a prefix",
-			source:      "   ",
-			description: "spike detected",
-			want:        "spike detected",
-		},
-		{
-			name: "nothing to key on",
-			want: "",
-		},
-	}
-
-	origFP := escalateFingerprint
-	defer func() { escalateFingerprint = origFP }()
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			escalateFingerprint = tt.fingerprint
-			if got := escalationAlertKey(tt.source, tt.description); got != tt.want {
-				t.Errorf("escalationAlertKey(%q, %q) = %q, want %q", tt.source, tt.description, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestEscalationAlertKeyIsStableAcrossFirings pins the property the dedupe
-// depends on: the same condition described the same way yields the same key,
-// and therefore the same fingerprint label, on every firing.
-func TestEscalationAlertKeyIsStableAcrossFirings(t *testing.T) {
-	origFP := escalateFingerprint
-	defer func() { escalateFingerprint = origFP }()
-	escalateFingerprint = ""
-
-	first := escalationFingerprintLabel(escalationAlertKey("main_branch_test", "main branch test failures:"))
-	second := escalationFingerprintLabel(escalationAlertKey("main_branch_test", "main branch test failures:"))
-	if first != second {
-		t.Errorf("fingerprint changed between firings: %q then %q", first, second)
-	}
-	if first == "" {
-		t.Fatal("fingerprint is empty; repeated alerts would not dedupe")
-	}
-	if other := escalationFingerprintLabel(escalationAlertKey("jsonl_git_backup", "spike detected")); other == first {
-		t.Error("distinct alerts collided onto one fingerprint")
-	}
-}
 
 // escalateStub is a shell stub for bd recording every invocation, so a test can
 // assert which bead operations `gt escalate` actually issued. Show and list
@@ -208,7 +122,7 @@ func TestRunEscalate_FirstFiringCreatesOneKeyedBead(t *testing.T) {
 	if !strings.Contains(calls, "create") {
 		t.Fatalf("expected the first firing to create the escalation, got calls:\n%s", calls)
 	}
-	wantLabel := "--labels=" + escalationFingerprintLabel("main branch test failures:")
+	wantLabel := "--labels=" + notify.FingerprintLabel("main branch test failures:")
 	if !strings.Contains(calls, wantLabel) {
 		t.Errorf("expected the alert key label %q on the created bead, got calls:\n%s", wantLabel, calls)
 	}
@@ -226,7 +140,7 @@ func TestRunEscalate_RepeatFiringBumpsInsteadOfCreating(t *testing.T) {
 	escalateFingerprint = ""
 
 	key := "main branch test failures:"
-	label := escalationFingerprintLabel(key)
+	label := notify.FingerprintLabel(key)
 
 	existing := &beads.Issue{
 		ID:       "hq-e1",
@@ -294,7 +208,7 @@ func TestRunEscalateClear_ClosesTheKeyAndNothingElse(t *testing.T) {
 	silenceEscalationRouting(t)
 
 	key := "main_branch_test:failures"
-	label := escalationFingerprintLabel(key)
+	label := notify.FingerprintLabel(key)
 	mine := "hq-mine"
 	other := "hq-other"
 
@@ -357,7 +271,7 @@ func TestRunEscalateClear_DerivesKeyFromSourceAndDescription(t *testing.T) {
 	silenceEscalationRouting(t)
 
 	key := "main_branch_test: main branch test failures:"
-	label := escalationFingerprintLabel(key)
+	label := notify.FingerprintLabel(key)
 	issueJSON := `{"id":"hq-e1","title":"alert","status":"open","priority":1,"type":"task",` +
 		`"labels":["gt:escalation","` + label + `"],` +
 		`"description":"alert\n\nseverity: high\nreason: r\nescalated_by: daemon\nescalated_at: 2026-09-21T00:00:00Z\nfingerprint: ` + label + `\n"}`
