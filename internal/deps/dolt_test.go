@@ -44,7 +44,7 @@ func TestDoltStatusFromOutput(t *testing.T) {
 		{"exec error with output", "permission denied\n", errors.New("exit status 1"), DoltExecFailed, "", "at /x/dolt: permission denied"},
 		{"exec error without output", "", errors.New("exit status 2"), DoltExecFailed, "", "at /x/dolt: exit status 2"},
 		{"unparseable", "  garbage\n", nil, DoltUnknown, "", "garbage"},
-		{"too old", "dolt version 2.0.6", nil, DoltTooOld, "2.0.6", ""},
+		{"too old", "dolt version " + belowVersion(MinDoltVersion), nil, DoltTooOld, belowVersion(MinDoltVersion), ""},
 		{"at minimum", "dolt version " + MinDoltVersion + "\n", nil, DoltOK, MinDoltVersion, ""},
 	}
 	for _, tt := range tests {

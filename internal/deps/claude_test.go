@@ -40,7 +40,7 @@ func TestClaudeCodeStatusFromOutput(t *testing.T) {
 	}{
 		{"exec error", "2.1.101 (Claude Code)", errors.New("exit status 1"), ClaudeCodeExecFailed, ""},
 		{"unparseable", "garbage", nil, ClaudeCodeUnknown, ""},
-		{"too old", "2.0.19 (Claude Code)", nil, ClaudeCodeTooOld, "2.0.19"},
+		{"too old", belowVersion(MinClaudeCodeVersion) + " (Claude Code)", nil, ClaudeCodeTooOld, belowVersion(MinClaudeCodeVersion)},
 		{"at minimum, below recommended", MinClaudeCodeVersion + " (Claude Code)\n", nil, ClaudeCodeOldButOK, MinClaudeCodeVersion},
 		{"at recommended", RecommendedClaudeCodeVersion, nil, ClaudeCodeOK, RecommendedClaudeCodeVersion},
 		{"newer", "2.1.101 (Claude Code)", nil, ClaudeCodeOK, "2.1.101"},

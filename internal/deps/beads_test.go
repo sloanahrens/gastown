@@ -62,7 +62,7 @@ func TestBeadsStatusFromOutput(t *testing.T) {
 	}{
 		{"exec error", "bd version 0.60.0", errors.New("exit status 1"), BeadsUnknown, ""},
 		{"unparseable", "garbage", nil, BeadsUnknown, ""},
-		{"too old", "bd version 0.56.9", nil, BeadsTooOld, "0.56.9"},
+		{"too old", "bd version " + belowVersion(MinBeadsVersion), nil, BeadsTooOld, belowVersion(MinBeadsVersion)},
 		{"at minimum", "bd version " + MinBeadsVersion + " (dev: main@abc)", nil, BeadsOK, MinBeadsVersion},
 		{"newer", "bd version 1.2.3", nil, BeadsOK, "1.2.3"},
 	}
