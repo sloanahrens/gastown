@@ -1,4 +1,4 @@
-// Package tmuxfake is an in-memory tmux server for unit tests. Its behaviour
+// Package tmuxfake is an in-memory tmux server for unit tests. Its behavior
 // is pinned to real tmux by RunSessionsContract, which runs against the fake in
 // the unit tier and against a real tmux server in the integration tier.
 package tmuxfake
@@ -24,7 +24,7 @@ type Sessions interface {
 	GetPaneCommand(session string) (string, error)
 }
 
-// RunSessionsContract checks the behaviour every Sessions implementation must share.
+// RunSessionsContract checks the behavior every Sessions implementation must share.
 func RunSessionsContract(t *testing.T, newImpl func(t *testing.T) Sessions) {
 	t.Run("new/has/list/kill", func(t *testing.T) {
 		s := newImpl(t)
