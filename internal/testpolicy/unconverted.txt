@@ -48,5 +48,4 @@ internal/wasteland
 internal/web
 internal/wisp
 internal/witness
-internal/workspace
 plugins/dolt-snapshots
