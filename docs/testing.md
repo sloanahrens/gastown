@@ -32,7 +32,8 @@ The integration tier is only for tests that need the real tool. A test that move
 | `no-chdir` | call `os.Chdir` or `t.Chdir` |
 | `no-skip` | call `t.Skip`, `t.Skipf` or `t.SkipNow` |
 | `no-subprocess` | run `exec.Command` on anything but `git` |
-| `no-network` | dial or listen (`net.Dial*`, `net.Listen*`, or build a `net.Dialer` or `net.ListenConfig`) |
+| `no-network` | dial or listen: `net.Dial*`, `net.Listen*`, `net.File*Conn`/`FileListener`, `httptest.New*Server`, or a `net.Dialer`/`net.ListenConfig` (literal, `var` or `new`). The check is syntax-only, so a Dialer reached through a type alias or a struct field is not caught. |
+| `fake-clock-epoch` | call `clockwork.NewFakeClock()`, which starts at `time.Now()`; use `NewFakeClockAt` with a fixed epoch |
 | `no-build` | run the `go` tool |
 | `no-exec-files` | write a `#!` script or create or chmod a file with an execute bit |
 | `no-global-swap` | assign a package-level variable |
@@ -111,7 +112,20 @@ For bigger tests the package has more helpers:
 - `fakeServer` (`fakeserver_test.go`) is a small stateful model of a tmux server and the process table that `ps` and `kill` see.
 - `fakeSockets` (`fakesockets_test.go`) scripts the socket directory behind the `socketOps` seam.
 
-Every canned answer is pinned to the real tool. Any argv-level emulator, and any canned stdout or stderr, must be checked by a differential integration test: it replays the argv the package sends against the real tool and against the emulator, and compares exit status, error family and output. `TestIntegrationFakeServerMatchesTmux` does this for `fakeServer`, and the missing-target and no-server paths are in its table. When a unit test asserts an error, the canned stderr must be the real tool's words. In tmux 3.7c, `send-keys` to a missing session says "can't find pane", not "can't find session", and a test that invented the latter hid a real bug (`WaitForIdle` never saw the session had gone).
+Every argv-level emulator, and every canned stdout or stderr, is checked against the real tool by a differential integration test. The test replays the argv the package sends against the real tool and against the emulator, and compares exit status, error family and output. Values that differ by nature (pids, ids, paths, timestamps) are compared only as empty or non-empty. When a unit test asserts an error, the canned stderr must be the real tool's words. In tmux 3.7c, `send-keys` to a missing session says "can't find pane", not "can't find session", and a test that invented the latter hid a real bug: `WaitForIdle` never saw that the session had gone.
+
+In `internal/tmux`, `TestIntegrationFakeServerMatchesTmux` pins these:
+- every subcommand fakeServer answers, for a live target, a missing target and no server
+- live pane content from `capture-pane`, with and without `-S`
+- every `#{...}` format fakeServer expands
+- `list-panes -s` and `-a`
+- a live `respawn-pane`
+- the canned `list-keys` table the binding tests use
+
+What it does not pin, and why that is acceptable:
+- fakeServer's agent-composer rendering and its `ps` process table: they model an agent TUI and the kernel, which no tmux replay can check.
+- The dialog, spinner and transcript fixtures: they are verbatim captures from real sessions, each saying where it came from.
+Keep new canned answers inside the pinned set, or extend the test.
 
 Other environment reads go through a seam too. Methods read `$TMUX` and `GT_ROOT` through `t.env`, and `newTmuxForTest` gives each test an empty environment.
 
@@ -145,7 +159,7 @@ Every sleep, deadline and time read goes through `clockwork.Clock`:
 - `t.clk().NewTimer(d)` (read it with `.Chan()`)
 - `clockwork.WithTimeout(ctx, clk, d)` for a context deadline
 
-Fake clocks start from a fixed epoch: `newFixedClock()` returns `clockwork.NewFakeClockAt(testEpoch)`. Never seed one from `time.Now()`, and date fixtures (stamps, activity times) from the same epoch.
+Fake clocks start from a fixed epoch: `newFixedClock()` returns `clockwork.NewFakeClockAt(testEpoch)`. Never seed one from `time.Now()`, and date fixtures (stamps, activity times) from the same epoch. `clockwork.NewFakeClock()` is `NewFakeClockAt(time.Now())`, so the `fake-clock-epoch` rule bans it in unit tests.
 
 When a context may be clock-driven, check `ctx.Done()` rather than calling `ctx.Err()`, because a clock-driven context's `Err` blocks until the context is done. A package-level variable that exists only so tests can shrink an interval goes back to being a `const`; the fake clock moves past the real value instead.
 
@@ -270,10 +284,12 @@ A conversion often exposes a real bug: a seam that leaks, a timeout too tight fo
 
 If the bug is in another package, do not fix it there. Report it with `file:line` and the evidence.
 
-Two bugs were found this way in `internal/tmux`:
+Four bugs were found this way in `internal/tmux`:
 
 - The gt-h9z socket probe allowed 1 s, which refused healthy servers under load. It now allows 5 s, and a test runs the slow server on the fake clock.
 - `killSplitBrainSession` bypassed the injected runner.
+- `WaitForIdle` never noticed a vanished session on real tmux, because tmux says "can't find pane". It polled out its whole timeout. It now stops at once (`ErrPaneNotFound`).
+- A socket dial that timed out under load was read as "can't tell". The dead-socket cleanup then left the file, and the new-session guard refused the create. A timed-out dial is now retried on the clock.
 
 ### 4. Zero flakes
 
