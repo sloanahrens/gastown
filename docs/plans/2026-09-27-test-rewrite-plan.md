@@ -1,3 +1,5 @@
+> Status: approved plan, 2026-09-27. Tracked in claude-a3e.2. Execution ledger: `.superpowers/sdd/2026-09-27-test-rewrite-plan/progress.md` in the crew clone.
+
 # Test Suite Rewrite — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

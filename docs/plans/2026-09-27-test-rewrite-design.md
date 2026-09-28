@@ -1,9 +1,9 @@
-# Test Suite Rewrite — Design
-
 > Status: approved design, 2026-09-27. Tracked in claude-a3e.2 (phase 2 of the refinery redesign, claude-a3e).
 > Plan: `2026-09-27-test-rewrite-plan.md`. Evidence: `~/.claude/docs/research/test-rewrite/` (`profile.md`, `seams.md`).
 > Supersedes the capacity-tuning approach of `2026-09-24-test-suite-concurrency-design.md`, which made the existing
 > suite fit the host. This design changes the tests so they no longer depend on the host.
+
+# Test Suite Rewrite — Design
 
 ## Why
 
