@@ -257,3 +257,12 @@ func showPrompt(p *fakePane) { p.content = "\n❯ " }
 
 // exitPane is a confirm action: the agent exits and tmux destroys the session.
 func exitPane(p *fakePane) { p.dead = true }
+
+// driven runs fn in a goroutine and advances clk by step whenever it blocks
+// on the clock, returning fn's error.
+func driven(t *testing.T, clk *clockwork.FakeClock, step time.Duration, fn func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	return driveClock(t, clk, step, done)
+}
