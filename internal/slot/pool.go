@@ -341,7 +341,7 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 		h := &Handle{
 			gate:       g,
 			townRoot:   townRoot,
-			unlock:     unlock,
+			unlock:     pinHold(unlock),
 			Index:      i,
 			role:       role,
 			acquiredAt: g.clock.Now(),

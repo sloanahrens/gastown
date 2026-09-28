@@ -74,7 +74,7 @@ func TestAcquire_MeasuresAndRecordsTheWait(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("waiter Acquire: %v", got.err)
 	}
-	keepHeld(t, got.h)
+	defer release(t, got.h)
 	if got.h.WaitedFor != tg.pollInterval {
 		t.Errorf("waiter reported a wait of %s, want the %s poll it queued behind the holder", got.h.WaitedFor, tg.pollInterval)
 	}

@@ -157,7 +157,7 @@ func (g *Gate) AcquireMarker(townRoot, name, role string) (*MarkerHandle, error)
 	if !ok {
 		return nil, &MarkerHeldError{Name: name, Owner: readOwnerFile(MarkerOwnerPath(townRoot, name))}
 	}
-	h := &MarkerHandle{townRoot: townRoot, name: name, unlock: unlock}
+	h := &MarkerHandle{townRoot: townRoot, name: name, unlock: pinHold(unlock)}
 	if err := atomicfile.EnsureDirAndWriteJSON(MarkerOwnerPath(townRoot, name), Owner{
 		Role:       role,
 		PID:        g.pid,
