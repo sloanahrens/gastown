@@ -226,19 +226,23 @@ func TestFindOrphanedClaudeProcesses(t *testing.T) {
 	}
 }
 
+// TestGetProcessCwd checks getProcessCwd against a directory the test chooses,
+// not the ambient checkout. The kernel (lsof, /proc/<pid>/cwd) reports the
+// physical path, while os.Getwd returns $PWD's logical spelling when it names
+// the same directory. Comparing the two raw failed whenever the checkout was
+// reached through a symlink (/tmp -> /private/tmp on macOS). t.TempDir sits
+// under such a symlink on macOS (/var -> /private/var), so this exercises it
+// on every run instead of depending on where the tree was checked out.
 func TestGetProcessCwd(t *testing.T) {
-	// Our own process should have a valid cwd
+	dir := t.TempDir()
+	t.Chdir(dir)
+
 	cwd := getProcessCwd(os.Getpid())
 	if cwd == "" {
 		t.Fatal("getProcessCwd(self) returned empty string")
 	}
-	// Verify it matches os.Getwd
-	expected, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("os.Getwd() error: %v", err)
-	}
-	if cwd != expected {
-		t.Errorf("getProcessCwd(self) = %q, want %q", cwd, expected)
+	if got, want := realPath(t, cwd), realPath(t, dir); got != want {
+		t.Errorf("getProcessCwd(self) = %q (resolved %q), want the directory %q (resolved %q)", cwd, got, dir, want)
 	}
 }
 
