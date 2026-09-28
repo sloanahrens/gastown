@@ -569,3 +569,27 @@ func TestRunBdCmd_SlotWaitScalesWithCmdTimeout(t *testing.T) {
 		}
 	})
 }
+
+// TestAcquireCmdSlot_FreeSlotWinsOverExpiredWait pins acquireCmdSlot's
+// tie-break: when a slot is free, the call gets it even if its wait budget has
+// already run out. A bare select over the slot send and ctx.Done() picks at
+// random when both are ready, so a caller descheduled past its budget failed
+// with "waiting for subprocess slot" on an idle pool about half the time.
+func TestAcquireCmdSlot_FreeSlotWinsOverExpiredWait(t *testing.T) {
+	sem := make(chan struct{}, 1)
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for i := 0; i < 64; i++ {
+		if err := acquireCmdSlot(expired, sem); err != nil {
+			t.Fatalf("attempt %d: acquireCmdSlot on a free pool with an expired wait = %v, want the free slot", i, err)
+		}
+		releaseCmdSlot(sem)
+	}
+
+	// A full pool still honours the expired wait.
+	sem <- struct{}{}
+	if err := acquireCmdSlot(expired, sem); err == nil {
+		t.Fatal("acquireCmdSlot on a full pool with an expired wait = nil, want the wait error")
+	}
+}

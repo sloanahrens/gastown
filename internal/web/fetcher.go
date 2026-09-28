@@ -69,9 +69,17 @@ const userCommandConcurrency = 4
 // acquireCmdSlot blocks until a slot in sem is free or ctx is done,
 // whichever comes first. A nil sem means no bound is configured (e.g. a
 // fetcher built directly in a test) and the call proceeds unthrottled.
+// A free slot always wins: select picks at random among ready cases, so
+// without the first, non-blocking attempt a caller whose wait budget ran
+// out before it reached the select could be refused a slot on an idle pool.
 func acquireCmdSlot(ctx context.Context, sem chan struct{}) error {
 	if sem == nil {
 		return nil
+	}
+	select {
+	case sem <- struct{}{}:
+		return nil
+	default:
 	}
 	select {
 	case sem <- struct{}{}:
