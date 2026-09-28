@@ -5,6 +5,7 @@ package tmuxfake
 
 import (
 	"errors"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -22,6 +23,8 @@ type Sessions interface {
 	SetEnvironment(session, key, value string) error
 	GetEnvironment(session, key string) (string, error)
 	GetPaneCommand(session string) (string, error)
+	CapturePane(session string, lines int) (string, error)
+	SendKeys(session, keys string) error
 }
 
 // RunSessionsContract checks the behavior every Sessions implementation must share.
@@ -94,6 +97,79 @@ func RunSessionsContract(t *testing.T, newImpl func(t *testing.T) Sessions) {
 		}
 		if c, err := s.GetPaneCommand("gt-c-cmd"); err != nil || c != "sleep" {
 			t.Fatalf("GetPaneCommand = %q, %v; want sleep", c, err)
+		}
+	})
+	t.Run("no server", func(t *testing.T) {
+		s := newImpl(t)
+		if names, err := s.ListSessions(); err != nil || len(names) != 0 {
+			t.Fatalf("ListSessions with no server = %v, %v; want empty, nil", names, err)
+		}
+		if ok, err := s.HasSession("gt-c-none"); err != nil || ok {
+			t.Fatalf("HasSession with no server = %v, %v; want false, nil", ok, err)
+		}
+		if err := s.KillSession("gt-c-none"); err != nil {
+			t.Fatalf("KillSession with no server = %v, want nil", err)
+		}
+	})
+	t.Run("missing session", func(t *testing.T) {
+		s := newImpl(t)
+		if err := s.NewSession("gt-c-other", t.TempDir()); err != nil { // a server with other sessions
+			t.Fatal(err)
+		}
+		const missing = "gt-c-missing"
+		if err := s.KillSession(missing); err != nil {
+			t.Errorf("KillSession(missing) = %v, want nil (idempotent)", err)
+		}
+		if err := s.KillSessionWithProcesses(missing); err != nil {
+			t.Errorf("KillSessionWithProcesses(missing) = %v, want nil", err)
+		}
+		if c, err := s.GetPaneCommand(missing); err == nil {
+			t.Errorf("GetPaneCommand(missing) = %q, nil; want an error", c)
+		}
+		if _, err := s.CapturePane(missing, 10); !errors.Is(err, tmux.ErrPaneNotFound) {
+			t.Errorf("CapturePane(missing) = %v, want ErrPaneNotFound", err)
+		}
+		if err := s.SendKeys(missing, "x"); !errors.Is(err, tmux.ErrPaneNotFound) {
+			t.Errorf("SendKeys(missing) = %v, want ErrPaneNotFound", err)
+		}
+		if _, err := s.GetEnvironment(missing, "GT_ROLE"); err == nil {
+			t.Error("GetEnvironment(missing) = nil error")
+		}
+		if err := s.SetEnvironment(missing, "GT_ROLE", "x"); err == nil {
+			t.Error("SetEnvironment(missing) = nil error")
+		}
+	})
+	t.Run("unset variable", func(t *testing.T) {
+		s := newImpl(t)
+		if err := s.NewSession("gt-c-unset", t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := s.GetEnvironment("gt-c-unset", "GT_NEVER_SET"); err == nil {
+			t.Errorf("GetEnvironment(unset) = %q, nil; want an error", v)
+		}
+	})
+	t.Run("create validation", func(t *testing.T) {
+		s := newImpl(t)
+		if err := s.NewSession("bad.name", t.TempDir()); !errors.Is(err, tmux.ErrInvalidSessionName) {
+			t.Errorf("NewSession(bad.name) = %v, want ErrInvalidSessionName", err)
+		}
+		if err := s.NewSessionWithCommandAndEnv("gt-c-baddir", filepath.Join(t.TempDir(), "absent"), "sleep 300", nil); err == nil {
+			t.Error("NewSessionWithCommandAndEnv with a missing work dir = nil error")
+		}
+		if ok, _ := s.HasSession("gt-c-baddir"); ok {
+			t.Error("a rejected create left a session behind")
+		}
+	})
+	t.Run("pane io", func(t *testing.T) {
+		s := newImpl(t)
+		if err := s.NewSessionWithCommandAndEnv("gt-c-io", t.TempDir(), "sleep 300", nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CapturePane("gt-c-io", 10); err != nil {
+			t.Errorf("CapturePane(live) = %v", err)
+		}
+		if err := s.SendKeys("gt-c-io", "x"); err != nil {
+			t.Errorf("SendKeys(live) = %v", err)
 		}
 	})
 }

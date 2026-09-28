@@ -2,6 +2,7 @@ package tmuxfake
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -63,6 +64,16 @@ func (s *Server) NewSession(name, workDir string) error {
 }
 
 func (s *Server) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
+	if err := tmux.ValidateSessionName(name); err != nil {
+		return err
+	}
+	if workDir != "" {
+		if info, err := os.Stat(workDir); err != nil {
+			return fmt.Errorf("invalid work directory %q: %w", workDir, err)
+		} else if !info.IsDir() {
+			return fmt.Errorf("work directory %q is not a directory", workDir)
+		}
+	}
 	var err error
 	s.mutate(func() {
 		if _, ok := s.sessions[name]; ok {
@@ -105,23 +116,19 @@ func (s *Server) ListSessions() ([]string, error) {
 	return names, nil
 }
 
+// KillSession is idempotent, like *tmux.Tmux: a missing session or no
+// server is not an error.
 func (s *Server) KillSession(name string) error {
-	var err error
-	s.mutate(func() {
-		if _, ok := s.sessions[name]; !ok {
-			err = tmux.ErrSessionNotFound
-			return
-		}
-		delete(s.sessions, name)
-	})
-	return err
+	s.mutate(func() { delete(s.sessions, name) })
+	return nil
 }
 
-func (s *Server) KillSessionWithProcesses(name string) error {
-	if err := s.KillSession(name); err != nil && err != tmux.ErrSessionNotFound {
-		return err
-	}
-	return nil
+func (s *Server) KillSessionWithProcesses(name string) error { return s.KillSession(name) }
+
+// paneNotFound is what *tmux.Tmux returns for a pane-targeted command on a
+// missing session: tmux says "can't find pane".
+func paneNotFound(cmd, target string) error {
+	return fmt.Errorf("tmux %s: can't find pane: %s: %w", cmd, target, tmux.ErrPaneNotFound)
 }
 
 func (s *Server) SetEnvironment(session, key, value string) error {
@@ -167,7 +174,7 @@ func (s *Server) tail(session string, n int) ([]string, error) {
 	defer s.mu.Unlock()
 	ss, ok := s.sessions[sessionName(session)]
 	if !ok {
-		return nil, tmux.ErrSessionNotFound
+		return nil, paneNotFound("capture-pane", session)
 	}
 	lines := ss.screen
 	if n > 0 && len(lines) > n {
@@ -193,7 +200,7 @@ func (s *Server) send(session, keys string) error {
 	s.mutate(func() {
 		ss, ok := s.sessions[sessionName(session)]
 		if !ok {
-			err = tmux.ErrSessionNotFound
+			err = paneNotFound("send-keys", session)
 			return
 		}
 		ss.sent = append(ss.sent, keys)
@@ -213,7 +220,7 @@ func (s *Server) RespawnPane(pane, command string) error {
 	s.mutate(func() {
 		ss, ok := s.sessions[sessionName(pane)]
 		if !ok {
-			err = tmux.ErrSessionNotFound
+			err = paneNotFound("respawn-pane", pane)
 			return
 		}
 		ss.command = command
@@ -262,6 +269,12 @@ func (s *Server) IsAgentRunning(session string, expectedPaneCommands ...string) 
 }
 
 func (s *Server) WaitForCommand(session string, excludeCommands []string, timeout time.Duration) error {
+	// Like *tmux.Tmux, clear a stale ready sentinel from an earlier run first.
+	s.mutate(func() {
+		if ss := s.sessions[sessionName(session)]; ss != nil {
+			delete(ss.env, tmux.EnvAgentReady)
+		}
+	})
 	return s.waitFor(timeout, func() bool {
 		ss := s.sessions[sessionName(session)]
 		if ss == nil {
@@ -269,7 +282,9 @@ func (s *Server) WaitForCommand(session string, excludeCommands []string, timeou
 		}
 		for _, ex := range excludeCommands {
 			if ss.paneCmd == ex {
-				return false
+				// Like *tmux.Tmux: a wrapped agent whose pane still reads
+				// as a shell counts once its hook sets GT_AGENT_READY=1.
+				return ss.env[tmux.EnvAgentReady] == "1"
 			}
 		}
 		return true
@@ -301,7 +316,11 @@ func (s *Server) WaitForRuntimeReady(session string, rc *config.RuntimeConfig, t
 		if ss == nil {
 			return false
 		}
-		for _, l := range ss.screen {
+		lines := ss.screen
+		if len(lines) > 10 { // *tmux.Tmux reads the last 10 lines
+			lines = lines[len(lines)-10:]
+		}
+		for _, l := range lines {
 			l = norm(strings.TrimSpace(l))
 			if strings.HasPrefix(l, prefix) || (strings.TrimSpace(prefix) != "" && l == strings.TrimSpace(prefix)) {
 				return true

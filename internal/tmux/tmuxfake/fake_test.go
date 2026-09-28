@@ -2,11 +2,13 @@ package tmuxfake
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func TestFakeSessionsContract(t *testing.T) {
@@ -93,5 +95,63 @@ func TestFakeScriptingHelpers(t *testing.T) {
 	s.Exit("a")
 	if ok, _ := s.HasSession("a"); ok {
 		t.Fatal("session survived Exit")
+	}
+}
+
+// TestFakeWaitForCommandHonoursAgentReady mirrors *tmux.Tmux: a wrapped agent
+// whose pane is still a shell counts once GT_AGENT_READY=1 is set, and a
+// sentinel left from before the wait does not count.
+func TestFakeWaitForCommandHonoursAgentReady(t *testing.T) {
+	t.Parallel()
+	s := New(clockwork.NewFakeClock())
+	if err := s.NewSessionWithCommandAndEnv("a", "", "", map[string]string{tmux.EnvAgentReady: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.WaitForCommand("a", []string{"zsh"}, time.Minute) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for s.Env("a")[tmux.EnvAgentReady] != "" { // the stale sentinel is cleared first
+		if ctx.Err() != nil {
+			t.Fatal("stale GT_AGENT_READY was not cleared")
+		}
+		runtime.Gosched()
+	}
+	if err := s.SetEnvironment("a", tmux.EnvAgentReady, "1"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForCommand = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("WaitForCommand ignored GT_AGENT_READY")
+	}
+}
+
+func TestFakeWaitForRuntimeReadyReadsLastTenLines(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClock()
+	s := New(clk)
+	if err := s.NewSession("a", ""); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{"❯ "}
+	for i := 0; i < 10; i++ {
+		lines = append(lines, "output")
+	}
+	s.SetScreen("a", lines...) // prompt is 11 lines up: out of reach
+	rc := &config.RuntimeConfig{Tmux: &config.RuntimeTmuxConfig{ReadyPromptPrefix: "❯ "}}
+	done := make(chan error, 1)
+	go func() { done <- s.WaitForRuntimeReady("a", rc, time.Second) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := clk.BlockUntilContext(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(time.Second)
+	if err := <-done; err == nil {
+		t.Fatal("WaitForRuntimeReady saw a prompt beyond the last 10 lines")
 	}
 }

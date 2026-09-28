@@ -61,6 +61,10 @@ var (
 // validateSessionName checks that a session name contains only safe characters.
 // Returns ErrInvalidSessionName if the name contains dots, colons, or other
 // characters that cause tmux to silently fail or produce cryptic errors.
+// ValidateSessionName reports whether name is a session name the create
+// methods accept (ErrInvalidSessionName otherwise). tmuxfake applies it too.
+func ValidateSessionName(name string) error { return validateSessionName(name) }
+
 func validateSessionName(name string) error {
 	if name == "" || !validSessionNameRe.MatchString(name) {
 		return fmt.Errorf("%w %q: must match %s", ErrInvalidSessionName, name, validSessionNameRe.String())
