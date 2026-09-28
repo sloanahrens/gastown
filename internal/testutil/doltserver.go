@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -349,6 +350,16 @@ func startSharedDoltContainer() {
 		return
 	}
 
+	portNum, err := strconv.Atoi(p)
+	if err == nil {
+		err = createDoltPool(portNum)
+	}
+	if err != nil {
+		doltCtrErr = containerStartError(ctx, ctr, err)
+		_ = testcontainers.TerminateContainer(ctr)
+		return
+	}
+
 	doltCtr = ctr
 	doltCtrPort = p
 	os.Setenv("GT_DOLT_PORT", doltCtrPort)    //nolint:tenv // intentional process-wide env
@@ -468,5 +479,6 @@ func TerminateDoltContainer() error {
 	}
 	err := testcontainers.TerminateContainer(doltCtr)
 	doltCtr = nil
+	releaseDoltPool()
 	return err
 }

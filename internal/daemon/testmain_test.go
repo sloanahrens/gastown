@@ -15,15 +15,17 @@ import (
 // GT_*/BD_* env scrubbed, HOME and town root redirected to a sandbox, and a
 // tripwire that fails the run if state leaks into a live town.
 //
-// WithDolt starts an ephemeral Dolt container for this package's tests.
-// BEADS_TEST_MODE=1 below makes the beads SDK create testdb_<hash> databases.
-// By routing those to an isolated container (via BEADS_DOLT_PORT), the
-// databases are destroyed when the container is terminated at cleanup —
-// preventing orphan accumulation in the shared production Dolt data dir.
+// WithDolt starts an ephemeral Dolt container for this package's tests and
+// creates, before any test runs, the pool of databases the store tests open
+// (testutil/doltpool.go): nothing creates or drops a database while tests run.
+// BEADS_TEST_MODE=1 below makes the beads SDK name its database testdb_<hash>
+// of the store path, which is how a pooled path finds its database. Every
+// database goes with the container at cleanup.
 //
-// When Docker is unavailable, Dolt-needing tests self-skip via setupTestStore
-// → beadsdk.Open failure. Non-Dolt tests (e.g. boot_spawn_frequency_test.go)
-// still run. (fixes gt-kw4449)
+// Container tests are opt-in (GT_TEST_DOCKER=1, as make test sets). Without
+// it, or without Docker, setupTestStore skips via testutil.OpenTestStore;
+// once opted in, a store that cannot open fails the test. Non-Dolt tests
+// (e.g. boot_spawn_frequency_test.go) still run. (fixes gt-kw4449)
 func TestMain(m *testing.M) {
 	// Signal-target helper (pid_identity_test.go): this binary re-executed
 	// under a chosen argv0/argv so a test owns a process that looks like

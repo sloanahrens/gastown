@@ -2,38 +2,28 @@ package convoy
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // setupTestStore opens a real beads database in a temp dir for integration tests.
-// Skips the test if the store cannot be opened (e.g. no CGO, no Dolt).
+// Fails the test if the store cannot be opened: a skip would hide lost coverage.
 // Caller must run the returned cleanup when done.
 func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 	t.Helper()
 
 	t.Setenv("BEADS_TEST_MODE", "1")
 
-	dir := t.TempDir()
-	beadsDir := filepath.Join(dir, ".beads")
-	doltPath := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltPath, 0755); err != nil {
-		t.Skipf("cannot create test dir: %v", err)
-	}
-
 	ctx := context.Background()
-	store, err := beadsdk.Open(ctx, doltPath)
-	if err != nil {
-		t.Skipf("beads store unavailable (CGO/Dolt required): %v", err)
-	}
+	// Fails, never skips, on an open error: a skipped store test is lost
+	// coverage with no red signal.
+	store := testutil.OpenTestStore(t, ctx)
 
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		_ = store.Close()
-		t.Skipf("SetConfig issue_prefix: %v", err)
+		t.Fatalf("SetConfig issue_prefix: %v", err)
 	}
 
 	cleanup := func() {

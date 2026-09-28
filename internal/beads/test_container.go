@@ -154,6 +154,23 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 	}
 	defer release()
 
+	// An init that names no database makes bd CREATE one while other tests
+	// are running on the container; give it a pre-created one instead when
+	// the container's pool serves its port (testDatabaseSource).
+	if !hasDatabaseArg(args) {
+		if port := serverPortArg(args); port > 0 {
+			if src := testDatabaseSource.Load(); src != nil {
+				name, err := (*src)(port)
+				if err != nil {
+					return nil, fmt.Errorf("RunTestContainerInit: %w", err)
+				}
+				if name != "" {
+					args = append(append([]string{}, args...), "--database", name)
+				}
+			}
+		}
+	}
+
 	if env == nil {
 		env = os.Environ()
 	}
@@ -167,4 +184,14 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 		return out.Bytes(), SubprocessFailureError(runCtx, timeout, err)
 	}
 	return out.Bytes(), nil
+}
+
+// hasDatabaseArg reports whether args carry bd's --database flag.
+func hasDatabaseArg(args []string) bool {
+	for _, a := range args {
+		if a == "--database" || strings.HasPrefix(a, "--database=") {
+			return true
+		}
+	}
+	return false
 }

@@ -16,29 +16,23 @@ import (
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// setupTestStore opens a real beads database for integration tests.
-// Skips if unavailable. Caller must run cleanup when done.
+// setupTestStore opens a real beads database for integration tests. It skips
+// only when container tests are not opted in (GT_TEST_DOCKER unset) or Docker
+// is absent; once opted in, any error fails the test — a skipped store test is
+// coverage lost without a red signal. The store is also closed when the test
+// ends; calling cleanup earlier is fine.
 //
 // BEADS_TEST_MODE is set once in TestMain, not here: t.Setenv would forbid
 // t.Parallel in every caller (gt-fx3c).
 func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 	t.Helper()
-	dir := t.TempDir()
-	beadsDir := filepath.Join(dir, ".beads")
-	doltPath := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltPath, 0755); err != nil {
-		t.Skipf("cannot create test dir: %v", err)
-	}
 	ctx := context.Background()
-	store, err := beadsdk.Open(ctx, doltPath)
-	if err != nil {
-		t.Skipf("beads store unavailable: %v", err)
-	}
+	store := testutil.OpenTestStore(t, ctx)
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		_ = store.Close()
-		t.Skipf("SetConfig: %v", err)
+		t.Fatalf("SetConfig: %v", err)
 	}
 	return store, func() { _ = store.Close() }
 }

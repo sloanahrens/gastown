@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -392,13 +393,20 @@ func (r *bdInitRetryReset) next(args []string) []string {
 	return remintTestDatabase(args)
 }
 
-// remintTestDatabase returns args with Init's minted testdb_ name replaced by a
-// fresh one, and args of any other shape unchanged: only bdInitOnTestDatabase
-// reaches the rewrite, and the check is repeated here so the predicate and the
-// rewrite cannot disagree about which argv they mean. Both flag spellings are
-// rewritten, for the same reason.
+// remintTestDatabase returns args with Init's testdb_ name replaced by a fresh
+// one — from the pre-created pool when one serves the init's --server-port
+// (testDatabaseFor) — and args of any other shape unchanged: only
+// bdInitOnTestDatabase reaches the rewrite, and the check is repeated here so
+// the predicate and the rewrite cannot disagree about which argv they mean.
+// Both flag spellings are rewritten, for the same reason. The database the
+// failed attempt used is abandoned; it goes with the test container.
 func remintTestDatabase(args []string) []string {
 	if !bdInitOnTestDatabase(args) {
+		return args
+	}
+	name, err := testDatabaseFor(serverPortArg(args))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "beads: no fresh test database for the retried bd init, retrying on the same one: %v\n", err)
 		return args
 	}
 	out := make([]string, len(args))
@@ -406,14 +414,35 @@ func remintTestDatabase(args []string) []string {
 	for i, arg := range args {
 		switch {
 		case arg == "--database" && i+1 < len(args):
-			out[i+1] = testDatabaseName()
+			out[i+1] = name
 			return out
 		case strings.HasPrefix(arg, "--database="):
-			out[i] = "--database=" + testDatabaseName()
+			out[i] = "--database=" + name
 			return out
 		}
 	}
 	return out
+}
+
+// serverPortArg returns the --server-port value in args, or 0.
+func serverPortArg(args []string) int {
+	for i, arg := range args {
+		v := ""
+		switch {
+		case arg == "--server-port" && i+1 < len(args):
+			v = args[i+1]
+		case strings.HasPrefix(arg, "--server-port="):
+			v = arg[len("--server-port="):]
+		default:
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
 
 // retryNotice renders the one-line warning for a failed attempt that another

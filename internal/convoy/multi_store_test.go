@@ -9,6 +9,7 @@ import (
 
 	beadsdk "github.com/steveyegge/beads"
 	beadsRouting "github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // setupTestStoreWithPrefix opens a test store and sets a specific prefix.
@@ -16,22 +17,13 @@ func setupTestStoreWithPrefix(t *testing.T, prefix string) (beadsdk.Storage, fun
 	t.Helper()
 	t.Setenv("BEADS_TEST_MODE", "1")
 
-	dir := t.TempDir()
-	beadsDir := filepath.Join(dir, ".beads")
-	doltPath := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltPath, 0755); err != nil {
-		t.Skipf("cannot create test dir: %v", err)
-	}
-
 	ctx := context.Background()
-	store, err := beadsdk.Open(ctx, doltPath)
-	if err != nil {
-		t.Skipf("beads store unavailable (CGO/Dolt required): %v", err)
-	}
+	// Fails, never skips, on an open error: a skipped store test is lost
+	// coverage with no red signal.
+	store := testutil.OpenTestStore(t, ctx)
 
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		_ = store.Close()
-		t.Skipf("SetConfig issue_prefix: %v", err)
+		t.Fatalf("SetConfig issue_prefix: %v", err)
 	}
 
 	cleanup := func() { _ = store.Close() }
