@@ -19,14 +19,16 @@ const testMarkerName = "om-review-gt-mr-1"
 // holder it refused against, and it has to be scoped to the one name — the
 // batch's other members hold their own markers at the same time.
 func TestMarker_RefusesASecondLiveHolder(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 
-	first, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
+	first, err := tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("AcquireMarker: %v", err)
 	}
 
-	_, err = AcquireMarker(town, testMarkerName, "gastown/om-review")
+	_, err = tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	var held *MarkerHeldError
 	if !errors.As(err, &held) {
 		t.Fatalf("second AcquireMarker on a held name: err = %v, want *MarkerHeldError", err)
@@ -41,7 +43,7 @@ func TestMarker_RefusesASecondLiveHolder(t *testing.T) {
 		t.Errorf("refusal message should name the holder's role: %q", held.Error())
 	}
 
-	other, err := AcquireMarker(town, "om-review-gt-mr-2", "gastown/om-review")
+	other, err := tg.acquireMarker(t, town, "om-review-gt-mr-2", "gastown/om-review")
 	if err != nil {
 		t.Fatalf("a second review's own marker must not be refused: %v", err)
 	}
@@ -50,7 +52,7 @@ func TestMarker_RefusesASecondLiveHolder(t *testing.T) {
 	if err := first.Release(); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	reacquired, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
+	reacquired, err := tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("re-acquire after release: %v", err)
 	}
@@ -63,9 +65,11 @@ func TestMarker_RefusesASecondLiveHolder(t *testing.T) {
 // reader displays, so releasing has to take it with the lock, and a second
 // Release (defer plus an explicit call on a failure path) must not error.
 func TestMarker_ReleaseRemovesTheOwnerFileAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 
-	h, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
+	h, err := tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("AcquireMarker: %v", err)
 	}
@@ -92,7 +96,8 @@ func TestMarker_ReleaseRemovesTheOwnerFileAndIsIdempotent(t *testing.T) {
 // nothing may read it as a live review — the next review of the same diff has
 // to be able to take the marker.
 func TestMarker_DeadHoldersFileIsNotAHolder(t *testing.T) {
-	stubNoContainers(t)
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 	pool := Pool{Slots: 1}
 
@@ -107,7 +112,7 @@ func TestMarker_DeadHoldersFileIsNotAHolder(t *testing.T) {
 		t.Fatalf("write dead holder's owner file: %v", err)
 	}
 
-	rep, err := StatusPool(town, pool)
+	rep, err := tg.StatusPool(town, pool)
 	if err != nil {
 		t.Fatalf("StatusPool: %v", err)
 	}
@@ -120,13 +125,13 @@ func TestMarker_DeadHoldersFileIsNotAHolder(t *testing.T) {
 
 	// Recovery: the next review of this diff takes the marker, and the file it
 	// leaves describes that review rather than the dead one.
-	h, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
+	h, err := tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("AcquireMarker should recover a dead holder's marker: %v", err)
 	}
 	defer func() { _ = h.Release() }()
 
-	rep, err = StatusPool(town, pool)
+	rep, err = tg.StatusPool(town, pool)
 	if err != nil {
 		t.Fatalf("StatusPool: %v", err)
 	}
@@ -144,17 +149,18 @@ func TestMarker_DeadHoldersFileIsNotAHolder(t *testing.T) {
 // leaving the pool's own count, saturation and busy verdict untouched, and
 // leaving the slot itself free for a real suite.
 func TestMarker_StatusReportsItOutsideThePoolCount(t *testing.T) {
-	stubNoContainers(t)
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 	pool := Pool{Slots: 1}
 
-	h, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
+	h, err := tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("AcquireMarker: %v", err)
 	}
 	defer func() { _ = h.Release() }()
 
-	rep, err := StatusPool(town, pool)
+	rep, err := tg.StatusPool(town, pool)
 	if err != nil {
 		t.Fatalf("StatusPool: %v", err)
 	}
@@ -188,10 +194,7 @@ func TestMarker_StatusReportsItOutsideThePoolCount(t *testing.T) {
 
 	// Outside the pool count means outside its admission too: the free slot is
 	// still there for a container-backed suite to take.
-	h2, err := AcquirePool(town, "gastown/polecat-7", shortWait, pool)
-	if err != nil {
-		t.Fatalf("AcquirePool beside a held marker: %v", err)
-	}
+	h2 := tg.mustAcquirePool(t, town, "gastown/polecat-7", pool)
 	if h2.Index != 0 {
 		t.Fatalf("suite took slot %d, want the free slot 0", h2.Index)
 	}
@@ -204,23 +207,21 @@ func TestMarker_StatusReportsItOutsideThePoolCount(t *testing.T) {
 // running, not that the Docker VM is in use. The report must still look for an
 // unwrapped suite, or a review in flight would hide one.
 func TestMarker_DoesNotStandInForTheContainerCheck(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 	pool := Pool{Slots: 1}
 
-	orig := runningGateContainers
-	defer func() { runningGateContainers = orig }()
-	runningGateContainers = func() ([]string, error) {
-		return []string{dockerPSLine("live-id", "dolt/dolt-sql-server:2.2.0", "running-suite",
-			time.Now().Add(-2*time.Minute), nil)}, nil
-	}
+	tg.rt.setLines(dockerPSLine("live-id", "dolt/dolt-sql-server:2.2.0", "running-suite",
+		tg.clk.Now().Add(-2*time.Minute), nil))
 
-	h, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
+	h, err := tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("AcquireMarker: %v", err)
 	}
 	defer func() { _ = h.Release() }()
 
-	rep, err := StatusPool(town, pool)
+	rep, err := tg.StatusPool(town, pool)
 	if err != nil {
 		t.Fatalf("StatusPool: %v", err)
 	}
@@ -236,11 +237,12 @@ func TestMarker_DoesNotStandInForTheContainerCheck(t *testing.T) {
 // directory's filenames, so a name carrying a path separator must not address a
 // file outside it — and the report shows the name the caller spelled.
 func TestMarker_KeepsItsNameInsideTheLockDirectory(t *testing.T) {
-	stubNoContainers(t)
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 	name := "../../escape/om review"
 
-	h, err := AcquireMarker(town, name, "gastown/om-review")
+	h, err := tg.acquireMarker(t, town, name, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("AcquireMarker: %v", err)
 	}
@@ -252,7 +254,7 @@ func TestMarker_KeepsItsNameInsideTheLockDirectory(t *testing.T) {
 		}
 	}
 
-	rep, err := StatusPool(town, Pool{Slots: 1})
+	rep, err := tg.StatusPool(town, Pool{Slots: 1})
 	if err != nil {
 		t.Fatalf("StatusPool: %v", err)
 	}
@@ -266,17 +268,15 @@ func TestMarker_KeepsItsNameInsideTheLockDirectory(t *testing.T) {
 // directory, so the marker sweep has to leave the pool's own slot and owner
 // files alone (and the reports of them).
 func TestMarker_PoolSlotFilesAreNotMarkers(t *testing.T) {
-	stubNoContainers(t)
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 	pool := Pool{Slots: 2}
 
-	h, err := AcquirePool(town, "gastown/refinery", shortWait, pool)
-	if err != nil {
-		t.Fatalf("AcquirePool: %v", err)
-	}
-	defer func() { _ = h.Release() }()
+	h := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	defer release(t, h)
 
-	rep, err := StatusPool(town, pool)
+	rep, err := tg.StatusPool(town, pool)
 	if err != nil {
 		t.Fatalf("StatusPool: %v", err)
 	}
@@ -294,6 +294,8 @@ func TestMarker_PoolSlotFilesAreNotMarkers(t *testing.T) {
 // in that window must not be refused as though another review held it
 // (gt-97cm finding 1).
 func TestMarker_AcquireRidesOutTransientFlockContention(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
 	if err := os.MkdirAll(LockDir(town), 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -303,24 +305,33 @@ func TestMarker_AcquireRidesOutTransientFlockContention(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("simulated status probe could not take the flock: ok=%v err=%v", ok, err)
 	}
+	done := make(chan markerResult, 1)
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		unlock()
+		h, err := tg.AcquireMarker(town, testMarkerName, "gastown/om-review")
+		done <- markerResult{h, err}
 	}()
 
-	h, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
-	if err != nil {
-		t.Fatalf("AcquireMarker should ride out a transient probe hold: %v", err)
+	// The acquire found the flock taken and is waiting to retry; the probe
+	// lets go well inside the retry window.
+	waitBlocked(t, tg.clk)
+	unlock()
+	tg.clk.Advance(markerAcquireRetryInterval)
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("AcquireMarker should ride out a transient probe hold: %v", got.err)
 	}
-	defer func() { _ = h.Release() }()
+	defer func() { _ = got.h.Release() }()
 }
 
 // TestMarker_ReleaseRemovesTheLockFile: Release must remove the lock file
 // itself, not only the owner file, or one file per ever-reviewed MR piles up
 // forever and every status read re-tests it (gt-97cm finding 3).
 func TestMarker_ReleaseRemovesTheLockFile(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
 	town := t.TempDir()
-	h, err := AcquireMarker(town, testMarkerName, "gastown/om-review")
+	h, err := tg.acquireMarker(t, town, testMarkerName, "gastown/om-review")
 	if err != nil {
 		t.Fatalf("AcquireMarker: %v", err)
 	}
@@ -342,6 +353,7 @@ func TestMarker_ReleaseRemovesTheLockFile(t *testing.T) {
 // (gt-97cm finding 3) — this is the recovery path for a marker released by a
 // killed process, which never runs MarkerHandle.Release at all.
 func TestMarker_LiveMarkersSweepsAFreeOrphanedLockFile(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.MkdirAll(LockDir(town), 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -365,6 +377,7 @@ func TestMarker_LiveMarkersSweepsAFreeOrphanedLockFile(t *testing.T) {
 // feeding a name it read off the directory back into MarkerLockPath would
 // then address a different file than the live holder's (gt-97cm finding 6).
 func TestMarkerSlug_LongNameRoundTripsThroughMarkerLockPath(t *testing.T) {
+	t.Parallel()
 	name := strings.Repeat("a", 99) + "." + strings.Repeat("b", 20)
 	slug := markerSlug(name)
 	if len(slug) > 100 {
@@ -387,4 +400,23 @@ func markerRows(rep Report) []SlotState {
 		}
 	}
 	return out
+}
+
+// markerResult is one AcquireMarker outcome.
+type markerResult struct {
+	h   *MarkerHandle
+	err error
+}
+
+// acquireMarker runs AcquireMarker to completion on the fake clock, stepping it
+// through the contention retries.
+func (tg *testGate) acquireMarker(t *testing.T, town, name, role string) (*MarkerHandle, error) {
+	t.Helper()
+	done := make(chan markerResult, 1)
+	go func() {
+		h, err := tg.AcquireMarker(town, name, role)
+		done <- markerResult{h, err}
+	}()
+	got := driveClock(t, tg.clk, markerAcquireRetryInterval, done)
+	return got.h, got.err
 }
