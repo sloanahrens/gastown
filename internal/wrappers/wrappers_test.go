@@ -35,7 +35,6 @@ func TestEmbeddedScripts_HaveShebang(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to read %s: %v", name, err)
 			}
-			//testpolicy:allow no-exec-files — asserts the embedded scripts start with a shebang; the test writes no file
 			if !strings.HasPrefix(string(content), "#!/") {
 				t.Errorf("Script %s missing shebang line", name)
 			}
