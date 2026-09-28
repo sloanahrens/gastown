@@ -45,8 +45,9 @@ func setupRigBeadsDB(t *testing.T, rigPath, prefix string) *beads.Beads {
 		testutil.SkipOrFailContainerInit(t, b, err)
 	}
 
-	// Keep the test container clean, through the catalog gate.
-	testutil.DropTestDatabaseOnCleanup(t, b)
+	// No cleanup: Init took a database from the container's pre-created
+	// pool, and a DROP while other tests run would break their migrations
+	// (testutil/doltpool.go). The database goes with the container.
 
 	return b
 }

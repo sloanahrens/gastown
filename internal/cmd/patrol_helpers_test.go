@@ -993,10 +993,9 @@ func setupPatrolTestDB(t *testing.T) (string, *beads.Beads) {
 		testutil.SkipOrFailContainerInit(t, b, err)
 	}
 
-	// Drop the test database when the test ends. The drop is a catalog
-	// change, so it goes through the catalog gate instead of racing the bd
-	// calls of the tests still running on the shared container.
-	testutil.DropTestDatabaseOnCleanup(t, b)
+	// No cleanup: Init took a database from the container's pre-created
+	// pool, and a DROP while other tests run would break their migrations
+	// (testutil/doltpool.go). The database goes with the container.
 
 	return tmpDir, b
 }

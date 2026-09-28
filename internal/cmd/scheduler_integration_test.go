@@ -97,31 +97,16 @@ func schedulerDoltPort() string {
 	return ""
 }
 
+// cleanupSchedulerBeadsDatabases used to DROP each test's databases (and
+// purge) on the shared test server. It no longer does: the inits run through
+// beads.RunTestContainerInit take databases the container created before any
+// test ran, and a DROP while other tests migrate breaks them
+// (internal/testutil/doltpool.go). The databases go with the container. It
+// also defaulted to port 3307 — the production server — when no test port was
+// set.
 func cleanupSchedulerBeadsDatabases(t *testing.T, prefixes ...string) {
 	t.Helper()
-	t.Cleanup(func() {
-		port := schedulerDoltPort()
-		if port == "" {
-			port = "3307"
-		}
-		dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			t.Logf("cleanup: could not connect to drop test databases: %v", err)
-			return
-		}
-		defer db.Close()
-		for _, prefix := range prefixes {
-			for _, dbName := range []string{prefix, "beads_" + prefix} {
-				if _, err := db.Exec("DROP DATABASE IF EXISTS `" + dbName + "`"); err != nil {
-					t.Logf("cleanup: failed to drop %s: %v", dbName, err)
-				}
-			}
-		}
-		if _, err := db.Exec("CALL dolt_purge_dropped_databases()"); err != nil {
-			t.Logf("cleanup: failed to purge dropped databases: %v", err)
-		}
-	})
+	_ = prefixes
 }
 
 func setTestBeadStatus(t *testing.T, dir, beadID, status string) {

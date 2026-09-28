@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -693,10 +694,6 @@ type Beads struct {
 	isolated   bool   // If true, suppress inherited beads env vars (for test isolation)
 	serverPort int    // If set, pass --server-port to bd init and GT_DOLT_PORT to env
 
-	// testDatabase is the testdb_ database the last isolated Init created on
-	// the test Dolt container (TestDatabaseName).
-	testDatabase string
-
 	// store is an optional in-process beadsdk.Storage. When set, methods
 	// bypass the bd subprocess and use the store directly. Follows the
 	// pattern in internal/daemon/convoy_manager.go. Callers are responsible
@@ -1090,7 +1087,11 @@ func (b *Beads) Init(prefix string) error {
 	}
 	args = append(args, "--quiet")
 	if b.serverPort > 0 {
-		args = append(args, "--database", testDatabaseName(), "--server", "--server-port", fmt.Sprintf("%d", b.serverPort))
+		name, err := testDatabaseFor(b.serverPort)
+		if err != nil {
+			return err
+		}
+		args = append(args, "--database", name, "--server", "--server-port", fmt.Sprintf("%d", b.serverPort))
 	}
 	if b.targetsTestDoltContainer() {
 		// One slot for the whole init, retries included: b.run reaches
@@ -1127,6 +1128,46 @@ func testDatabaseName() string {
 		return fmt.Sprintf("%s%x", testDatabasePrefix, time.Now().UnixNano())
 	}
 	return testDatabasePrefix + hex.EncodeToString(buf[:])
+}
+
+// testDatabaseSource, when set, hands isolated test inits a database that
+// already exists on the shared test Dolt container (testutil's pool, created
+// before any test runs). A CREATE DATABASE issued while other tests are
+// running fails their information_schema reads and savepoints on the same
+// server ("could not resolve initial root for database X/"), which is what
+// broke concurrent bd inits there; taking pre-created databases leaves the
+// catalog unchanged for the whole test run. It returns "" for a port that is
+// not the pool's container.
+var testDatabaseSource atomic.Pointer[func(port int) (string, error)]
+
+// SetTestDatabaseSource installs the source isolated test inits take their
+// database from (see testDatabaseSource). Only a test binary may set it; nil
+// removes it.
+func SetTestDatabaseSource(fn func(port int) (string, error)) {
+	if !testing.Testing() {
+		return
+	}
+	if fn == nil {
+		testDatabaseSource.Store(nil)
+		return
+	}
+	testDatabaseSource.Store(&fn)
+}
+
+// testDatabaseFor returns the database an isolated init against port uses:
+// one from testDatabaseSource when it serves that port, else a freshly minted
+// testdb_ name bd init will create.
+func testDatabaseFor(port int) (string, error) {
+	if src := testDatabaseSource.Load(); src != nil {
+		name, err := (*src)(port)
+		if err != nil {
+			return "", fmt.Errorf("test database for port %d: %w", port, err)
+		}
+		if name != "" {
+			return name, nil
+		}
+	}
+	return testDatabaseName(), nil
 }
 
 // bdSubprocessTimeout caps how long a single bd subprocess may run before

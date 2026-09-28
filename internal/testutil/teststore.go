@@ -4,131 +4,60 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"hash/fnv"
-	"os"
-	"path/filepath"
 	"strconv"
-	"sync"
 	"testing"
 
 	beadsdk "github.com/steveyegge/beads"
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// beadsTestModeDatabase is the database name beadsdk.Open picks for dbPath
-// under BEADS_TEST_MODE=1: "testdb_" plus the FNV-64a hash of the path
-// (beads internal/storage/dolt applyConfigDefaults). OpenTestStore pins the
-// agreement by checking, after the open, that the store's tables landed in it.
-func beadsTestModeDatabase(dbPath string) string {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(dbPath))
-	return fmt.Sprintf("testdb_%x", h.Sum64())
-}
-
 // OpenTestStore opens a fresh in-process beads store on the shared test Dolt
-// container (BEADS_TEST_MODE=1, BEADS_DOLT_PORT set by the package's TestMain)
-// and fails t on any error — a store that cannot open is lost coverage, never a
-// skip.
+// container (BEADS_TEST_MODE=1 and BEADS_DOLT_PORT set by the package's
+// TestMain). Container tests are opt-in: without GT_TEST_DOCKER=1, or without
+// Docker, it skips as RequireDoltContainer does. Once opted in, any error fails
+// t — a store that cannot open is lost coverage, never a skip.
 //
-// beadsdk.Open would CREATE its database itself, in the middle of whatever
-// other tests are migrating on the same server, and a catalog change fails
-// their information_schema reads (beads test_container_catalog.go). So the
-// store's path comes from a pool whose databases were created ahead of time,
-// several per exclusive section of the catalog gate, and the open — a no-op
-// CREATE IF NOT EXISTS plus the schema migration — runs under the shared side.
-// The database is released for a batched drop, and the path removed, when t
-// ends.
-func OpenTestStore(t testing.TB, ctx context.Context) beadsdk.Storage {
+// beadsdk.Open would CREATE its own database, in the middle of whatever other
+// tests are migrating on the same server; the store path comes from the
+// container's pre-created pool instead (doltpool.go), so the open only
+// migrates a database that already exists.
+func OpenTestStore(t *testing.T, ctx context.Context) beadsdk.Storage {
 	t.Helper()
-	port, err := strconv.Atoi(DoltContainerPort())
-	if err != nil || port == 0 {
-		t.Fatalf("OpenTestStore: no shared test Dolt container (port %q)", DoltContainerPort())
-	}
-	dbPath, err := takeTestStorePath(port)
+	RequireDoltContainer(t)
+	dbPath, err := takeDoltPoolPath()
 	if err != nil {
 		t.Fatalf("OpenTestStore: %v", err)
 	}
 	name := beadsTestModeDatabase(dbPath)
-	t.Cleanup(func() {
-		if err := beads.ReleaseTestDatabase(port, name); err != nil {
-			t.Logf("cleanup: drop test database %s: %v", name, err)
-		}
-		_ = os.RemoveAll(filepath.Dir(filepath.Dir(dbPath)))
-	})
-	var store beadsdk.Storage
-	if err := beads.WithSharedTestCatalog(func() error {
-		var openErr error
-		store, openErr = beadsdk.Open(ctx, dbPath)
-		return openErr
-	}); err != nil {
+	store, err := beadsdk.Open(ctx, dbPath)
+	if err != nil {
 		t.Fatalf("OpenTestStore: open beads store at %s (database %s): %v", dbPath, name, err)
 	}
-	// Registered after the drop, so it runs first: the store closes before
-	// its database goes.
 	t.Cleanup(func() { _ = store.Close() })
-	if err := requireTablesIn(port, name); err != nil {
-		t.Fatalf("OpenTestStore: beadsdk.Open did not migrate the database the gate created: %v", err)
+	if err := requireTablesIn(name); err != nil {
+		t.Fatalf("OpenTestStore: beadsdk.Open did not migrate the pooled database: %v", err)
 	}
 	return store
 }
 
-// testStorePaths is the pool of store paths whose databases already exist.
-// Refills are sized by beads.NextTestPoolBatch, like the isolated-init pool.
-var testStorePaths struct {
-	sync.Mutex
-	batch int
-	ready []string
-}
-
-// takeTestStorePath returns a store path (<tmp>/.beads/dolt, created) whose
-// BEADS_TEST_MODE database already exists on the container on port.
-func takeTestStorePath(port int) (string, error) {
-	testStorePaths.Lock()
-	defer testStorePaths.Unlock()
-	if len(testStorePaths.ready) == 0 {
-		n := beads.NextTestPoolBatch(testStorePaths.batch)
-		paths := make([]string, 0, n)
-		stmts := make([]string, 0, n)
-		for range n {
-			root, err := os.MkdirTemp("", "gt-teststore-")
-			if err != nil {
-				return "", fmt.Errorf("store dir: %w", err)
-			}
-			p := filepath.Join(root, ".beads", "dolt")
-			if err := os.MkdirAll(p, 0o755); err != nil {
-				return "", fmt.Errorf("store dir: %w", err)
-			}
-			paths = append(paths, p)
-			stmts = append(stmts, "CREATE DATABASE IF NOT EXISTS `"+beadsTestModeDatabase(p)+"`")
-		}
-		if err := beads.ExecTestCatalogDDL(port, stmts...); err != nil {
-			return "", fmt.Errorf("create store databases: %w", err)
-		}
-		testStorePaths.batch = n
-		testStorePaths.ready = paths
+// requireTablesIn fails unless database name on the shared container has
+// tables. If beadsdk ever derives its test database name differently, the
+// store opens — and CREATEs, mid-run — a database of its own, and this says so.
+func requireTablesIn(name string) error {
+	port, err := strconv.Atoi(DoltContainerPort())
+	if err != nil {
+		return err
 	}
-	p := testStorePaths.ready[0]
-	testStorePaths.ready = testStorePaths.ready[1:]
-	return p, nil
-}
-
-// requireTablesIn fails unless database name on the test container has tables.
-// If beadsdk ever derives its test database name differently, the store opens
-// a database of its own — created outside the gate — and this says so.
-func requireTablesIn(port int, name string) error {
-	return beads.WithSharedTestCatalog(func() error {
-		db, err := sql.Open("mysql", beads.TestDatabaseDSN(port))
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		var n int
-		if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?", name).Scan(&n); err != nil {
-			return fmt.Errorf("count tables in %s: %w", name, err)
-		}
-		if n == 0 {
-			return fmt.Errorf("database %s has no tables", name)
-		}
-		return nil
-	})
+	db, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?timeout=30s", port))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?", name).Scan(&n); err != nil {
+		return fmt.Errorf("count tables in %s: %w", name, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("database %s has no tables", name)
+	}
+	return nil
 }

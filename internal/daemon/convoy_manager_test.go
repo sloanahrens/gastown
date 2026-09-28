@@ -19,9 +19,11 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// setupTestStore opens a real beads database for integration tests. Any error
-// fails the test: a skipped store test is coverage lost without a red signal.
-// The store is also closed when the test ends; calling cleanup earlier is fine.
+// setupTestStore opens a real beads database for integration tests. It skips
+// only when container tests are not opted in (GT_TEST_DOCKER unset) or Docker
+// is absent; once opted in, any error fails the test — a skipped store test is
+// coverage lost without a red signal. The store is also closed when the test
+// ends; calling cleanup earlier is fine.
 //
 // BEADS_TEST_MODE is set once in TestMain, not here: t.Setenv would forbid
 // t.Parallel in every caller (gt-fx3c).

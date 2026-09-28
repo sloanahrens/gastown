@@ -154,23 +154,44 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 	}
 	defer release()
 
+	// An init that names no database makes bd CREATE one while other tests
+	// are running on the container; give it a pre-created one instead when
+	// the container's pool serves its port (testDatabaseSource).
+	if !hasDatabaseArg(args) {
+		if port := serverPortArg(args); port > 0 {
+			if src := testDatabaseSource.Load(); src != nil {
+				name, err := (*src)(port)
+				if err != nil {
+					return nil, fmt.Errorf("RunTestContainerInit: %w", err)
+				}
+				if name != "" {
+					args = append(append([]string{}, args...), "--database", name)
+				}
+			}
+		}
+	}
+
 	if env == nil {
 		env = os.Environ()
 	}
 	env = append(StripEnvKey(env, allowRemoteMigrateEnv), testContainerEnv()...)
 
 	timeout := subprocessTimeoutFor(args, true)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var out bytes.Buffer
-	// These inits name no database, so bd creates one the gate cannot create
-	// ahead of it: the whole init is a catalog change and runs exclusively
-	// (test_container_catalog.go).
-	runErr := ChangeTestCatalog(func() error {
-		runCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		if err := newBDCmd(runCtx, dir, env, nil, args, &out, &out).Run(); err != nil {
-			return SubprocessFailureError(runCtx, timeout, err)
+	if err := newBDCmd(runCtx, dir, env, nil, args, &out, &out).Run(); err != nil {
+		return out.Bytes(), SubprocessFailureError(runCtx, timeout, err)
+	}
+	return out.Bytes(), nil
+}
+
+// hasDatabaseArg reports whether args carry bd's --database flag.
+func hasDatabaseArg(args []string) bool {
+	for _, a := range args {
+		if a == "--database" || strings.HasPrefix(a, "--database=") {
+			return true
 		}
-		return nil
-	})
-	return out.Bytes(), runErr
+	}
+	return false
 }
