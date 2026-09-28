@@ -16,8 +16,13 @@ import (
 )
 
 const (
-	newSessionSocketDialTimeout  = 200 * time.Millisecond
-	newSessionSocketProbeTimeout = time.Second
+	newSessionSocketDialTimeout = 200 * time.Millisecond
+	// newSessionSocketProbeTimeout bounds the list-sessions probe. It has to
+	// outlast a healthy server on a loaded host, where the tmux client's own
+	// exec is slow: at 1s a concurrent create at load 30 was refused as a
+	// hijacked socket (gt-h9z false positive, 2026-09-27). A listener that
+	// never answers is still refused, just after this long.
+	newSessionSocketProbeTimeout = 5 * time.Second
 )
 
 func (t *Tmux) ensureNewSessionSocketSafe() error {
@@ -52,7 +57,7 @@ func (t *Tmux) ensureLiveSocketSafe(socketPath string) error {
 		return fmt.Errorf("tmux socket %s exists but cannot be safely contacted: %w", socketPath, err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), newSessionSocketProbeTimeout)
+	ctx, cancel := clockwork.WithTimeout(context.Background(), t.clk(), newSessionSocketProbeTimeout)
 	defer cancel()
 	if err := t.runListSessionsProbe(ctx); err == nil {
 		return nil
@@ -122,8 +127,11 @@ func (t *Tmux) runListSessionsProbe(ctx context.Context) error {
 	args := []string{"list-sessions", "-F", ""}
 	_, stderr, err := t.runner()(ctx, "tmux", t.tmuxArgs(args)...)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("tmux list-sessions timed out after %s: %w", newSessionSocketProbeTimeout, ctxErr)
+		// Done, not Err: a clock-driven context's Err blocks until it is done.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("tmux list-sessions timed out after %s: %w", newSessionSocketProbeTimeout, ctx.Err())
+		default:
 		}
 		return t.wrapError(err, string(stderr), args)
 	}

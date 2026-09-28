@@ -69,10 +69,10 @@ func TestIntegrationNewSessionRefusesUnresponsiveSocket(t *testing.T) {
 		if err == nil {
 			t.Fatal("NewSession against unresponsive listener = nil, want error")
 		}
-		if elapsed := time.Since(start); elapsed > 3*time.Second {
+		if elapsed := time.Since(start); elapsed > newSessionSocketProbeTimeout+2*time.Second {
 			t.Fatalf("NewSession took %s, want bounded refusal", elapsed)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(newSessionSocketProbeTimeout + 3*time.Second):
 		_ = listener.Close()
 		t.Fatal("NewSession against unresponsive listener hung")
 	}

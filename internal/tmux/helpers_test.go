@@ -19,6 +19,11 @@ func newTmuxForTest(socket string, ex execFunc, clk clockwork.Clock) *Tmux {
 
 // driveClock advances clk by step every time a goroutine blocks on it, until
 // done delivers a value. It fails the test if nothing blocks within 10 s.
+//
+// It advances whenever anything is waiting on the clock, so it suits code
+// with one sleeper at a time. With two (a context deadline plus a sleep, say)
+// it can move time past the second while the goroutine the first woke has not
+// run yet; wait for both with BlockUntilContext and advance by hand instead.
 func driveClock[T any](t *testing.T, clk *clockwork.FakeClock, step time.Duration, done <-chan T) T {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
