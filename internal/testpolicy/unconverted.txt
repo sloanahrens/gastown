@@ -37,7 +37,6 @@ internal/guard
 internal/guardlint
 internal/health
 internal/hooks
-internal/hookutil
 internal/keepalive
 internal/krc
 internal/lintlock
