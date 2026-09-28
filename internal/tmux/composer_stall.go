@@ -534,8 +534,8 @@ func (c InputConsumption) String() string {
 }
 
 // inputConsumptionPollInterval is how often the probe re-reads the pane while
-// waiting for a reaction. It is a var so tests can shrink it.
-var inputConsumptionPollInterval = 250 * time.Millisecond
+// waiting for a reaction. Tests move it with a fake clock.
+const inputConsumptionPollInterval = 250 * time.Millisecond
 
 // consumptionVerdict folds a baseline pane capture and a later one into a
 // verdict. Pure, so the classification is testable against captured panes
