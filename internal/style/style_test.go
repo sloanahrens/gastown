@@ -121,6 +121,11 @@ func TestTableRender(t *testing.T) {
 	}
 }
 
+// TestTableRenderNoSeparatorAndColumnStyle pins current behaviour, quirk
+// included: Render applies Column.Style only when col.Style.Value() != "",
+// which holds only for a style built with SetString. A style carrying
+// colours alone is never applied. No caller sets Column.Style today; if the
+// check is changed to apply any non-zero style, update this test with it.
 func TestTableRenderNoSeparatorAndColumnStyle(t *testing.T) {
 	t.Parallel()
 	st := lipgloss.NewStyle().SetString("") // Value() == "": style not applied
