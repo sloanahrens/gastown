@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -89,6 +91,55 @@ func acquireCmdSlot(ctx context.Context, sem chan struct{}) error {
 	}
 }
 
+// acquireCmdSlotWithin waits up to budget, measured on clock, for a slot in
+// sem. Both the pool wait and the exec deadline run on an injected clock so
+// tests move time explicitly instead of racing the host scheduler.
+func acquireCmdSlotWithin(parent context.Context, clock clockwork.Clock, sem chan struct{}, budget time.Duration) error {
+	waitCtx, cancel := clockwork.WithTimeout(parent, clockOrReal(clock), budget)
+	defer cancel()
+	return acquireCmdSlot(waitCtx, sem)
+}
+
+// realClock is the wall clock used wherever no clock was injected.
+var realClock = clockwork.NewRealClock()
+
+// clockOrReal returns c, or the wall clock when c is nil (struct literals in
+// tests and production constructors that leave the field unset).
+func clockOrReal(c clockwork.Clock) clockwork.Clock {
+	if c == nil {
+		return realClock
+	}
+	return c
+}
+
+// procRunner runs a prepared child process to completion. ctx is the context
+// cmd was built with (exec.CommandContext): the production runner ignores it,
+// because cmd already watches it, while a test fake blocks on it to model a
+// child that runs until its deadline. The dashboard's pool and deadline tests
+// drive children through this seam instead of forking real ones, so what they
+// assert no longer depends on how fast a loaded host forks.
+type procRunner func(ctx context.Context, cmd *exec.Cmd) error
+
+// runProc runs cmd through r, or directly when r is nil.
+func runProc(r procRunner, ctx context.Context, cmd *exec.Cmd) error {
+	if r == nil {
+		return cmd.Run()
+	}
+	return r(ctx, cmd)
+}
+
+// deadlineExceeded reports whether ctx has ended by passing its deadline.
+// It never blocks: a clockwork fake-clock context's Err waits for Done, so
+// Err is only consulted once Done is closed.
+func deadlineExceeded(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return errors.Is(ctx.Err(), context.DeadlineExceeded)
+	default:
+		return false
+	}
+}
+
 // releaseCmdSlot releases a slot acquired via acquireCmdSlot. Safe to call
 // with a nil sem (no-op, mirrors acquireCmdSlot's nil handling).
 func releaseCmdSlot(sem chan struct{}) {
@@ -134,19 +185,13 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	args = beads.InjectFlatForListJSON(args)
 
 	// The slot wait has its own budget, so cmdTimeout bounds only execution.
-	waitCtx, cancelWait := context.WithTimeout(context.Background(), f.waitBudget(f.cmdTimeout))
-	if err := acquireCmdSlot(waitCtx, f.cmdSem); err != nil {
-		cancelWait()
+	if err := acquireCmdSlotWithin(context.Background(), f.clock, f.cmdSem, f.waitBudget(f.cmdTimeout)); err != nil {
 		return nil, fmt.Errorf("bd: waiting for subprocess slot: %w", err)
 	}
-	cancelWait()
 	defer releaseCmdSlot(f.cmdSem)
 
 	timeout := f.cmdTimeout
-	if f.bdTimeoutFor != nil {
-		timeout = f.bdTimeoutFor(args)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := clockwork.WithTimeout(context.Background(), clockOrReal(f.clock), timeout)
 	defer cancel()
 
 	bin := f.bdBin
@@ -157,9 +202,9 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
-	err := cmd.Run()
+	err := runProc(f.runProc, ctx, cmd)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if deadlineExceeded(ctx) {
 			return nil, fmt.Errorf("bd timed out after %v", timeout)
 		}
 		// If we got some output, return it anyway (bd may exit non-zero with warnings)
@@ -324,12 +369,14 @@ type LiveConvoyFetcher struct {
 	// exec timeout"; tests set it short so a full-pool case resolves fast.
 	slotWaitBudget time.Duration
 
-	// bdTimeoutFor overrides cmdTimeout's execution deadline per bd call.
-	// Nil (the default) means every call gets cmdTimeout. Test seam: a test
-	// that proves one call's timeout path can give that call a short
-	// deadline while its fast neighbors keep a generous one, instead of one
-	// shared budget tight enough that a loaded host kills the fast calls too.
-	bdTimeoutFor func(args []string) time.Duration
+	// clock measures the subprocess-slot waits and exec deadlines of
+	// runBdCmd, runGtCmd and the merge-queue snapshot. Nil means the wall
+	// clock; tests inject a clockwork fake and move time explicitly.
+	clock clockwork.Clock
+
+	// runProc runs the bd/gt children runBdCmd and runGtCmd build. Nil means
+	// cmd.Run; tests inject a fake child (see procRunner).
+	runProc procRunner
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.
@@ -1357,9 +1404,7 @@ func (f *LiveConvoyFetcher) townMergeQueueSnapshot() (TownMergeQueue, error) {
 		// list ultimately shells out to bd via internal/beads, a different
 		// runner than runBdCmd's, so it acquires its own slot against the
 		// bd-read pool (gt-d5xr).
-		slotCtx, cancel := context.WithTimeout(context.Background(), f.waitBudget(f.cmdTimeout))
-		slotErr := acquireCmdSlot(slotCtx, f.cmdSem)
-		cancel()
+		slotErr := acquireCmdSlotWithin(context.Background(), f.clock, f.cmdSem, f.waitBudget(f.cmdTimeout))
 		if slotErr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: waiting for subprocess slot: %w", rigName, slotErr)
@@ -1631,15 +1676,12 @@ func (f *LiveConvoyFetcher) listTownPolecats() ([]byte, error) {
 // gt's, and it is the fetcher's long-running child, so it draws its slot
 // from userCmdSem (gt-d5xr).
 func (f *LiveConvoyFetcher) runGtCmd(timeout time.Duration, args ...string) (*bytes.Buffer, error) {
-	waitCtx, cancelWait := context.WithTimeout(context.Background(), f.waitBudget(timeout))
-	if err := acquireCmdSlot(waitCtx, f.userCmdSem); err != nil {
-		cancelWait()
+	if err := acquireCmdSlotWithin(context.Background(), f.clock, f.userCmdSem, f.waitBudget(timeout)); err != nil {
 		return nil, fmt.Errorf("gt %s: waiting for subprocess slot: %w", strings.Join(args, " "), err)
 	}
-	cancelWait()
 	defer releaseCmdSlot(f.userCmdSem)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := clockwork.WithTimeout(context.Background(), clockOrReal(f.clock), timeout)
 	defer cancel()
 
 	bin := f.gtBin
@@ -1651,9 +1693,9 @@ func (f *LiveConvoyFetcher) runGtCmd(timeout time.Duration, args ...string) (*by
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
-	err := cmd.Run()
+	err := runProc(f.runProc, ctx, cmd)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if deadlineExceeded(ctx) {
 			return nil, fmt.Errorf("gt %s timed out after %v", strings.Join(args, " "), timeout)
 		}
 		// gt may exit non-zero after writing usable JSON.

@@ -2,9 +2,12 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -13,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -546,41 +551,18 @@ func TestRunCmd_SuccessAndTimeout(t *testing.T) {
 }
 
 func TestRunBdCmd_ReturnsStdoutOnNonZeroAndTimeout(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based command test")
-	}
-
-	binDir := t.TempDir()
-	bdPath := filepath.Join(binDir, "bd")
-	// Use "exec sleep" so the sleep process replaces the shell — no orphan
-	// child processes that hold stdout open after the parent is killed.
-	script := `#!/bin/sh
-case "$1" in
-  warn)
-    echo "partial output"
-    exit 1
-    ;;
-  sleep)
-    exec sleep 10
-    ;;
-  *)
-    echo "ok"
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	// Use bdBin with full path instead of t.Setenv("PATH", ...) to avoid
-	// process-wide PATH mutation that can race under concurrent test suites.
-	// Use generous 30s timeout — this fetcher tests exit-code behavior, not
-	// timeouts. The 2s value was flaky under CI load (process startup alone
-	// can take >1s under heavy contention).
-	f := &LiveConvoyFetcher{cmdTimeout: 30 * time.Second, bdBin: bdPath}
-
+	// The children are fakes and the deadline runs on a fake clock, so the
+	// exit-code and timeout paths are decided by the test, not by how fast a
+	// loaded host starts a shell (a 2s wall-clock budget was flaky here).
 	t.Run("non-zero exit with stdout returns output", func(t *testing.T) {
+		f := &LiveConvoyFetcher{
+			cmdTimeout: time.Minute,
+			clock:      clockwork.NewFakeClock(),
+			runProc: func(_ context.Context, cmd *exec.Cmd) error {
+				_, _ = io.WriteString(cmd.Stdout, "partial output\n")
+				return errors.New("exit status 1")
+			},
+		}
 		stdout, err := f.runBdCmd(t.TempDir(), "warn")
 		if err != nil {
 			t.Fatalf("runBdCmd warn returned error: %v", err)
@@ -590,17 +572,40 @@ esac
 		}
 	})
 
-	t.Run("timeout returns explicit error", func(t *testing.T) {
-		// Use 200ms timeout (not 20ms) to avoid flakiness from process startup
-		// overhead under system load. The script sleeps for 10s so the timeout
-		// always fires first with wide margin.
-		tf := &LiveConvoyFetcher{cmdTimeout: 200 * time.Millisecond, bdBin: bdPath}
-		_, err := tf.runBdCmd(t.TempDir(), "sleep")
-		if err == nil {
-			t.Fatal("expected timeout error")
+	t.Run("non-zero exit without stdout returns the error", func(t *testing.T) {
+		f := &LiveConvoyFetcher{
+			cmdTimeout: time.Minute,
+			clock:      clockwork.NewFakeClock(),
+			runProc:    func(context.Context, *exec.Cmd) error { return errors.New("exit status 1") },
 		}
-		if !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("expected timeout error, got: %v", err)
+		if _, err := f.runBdCmd(t.TempDir(), "fail"); err == nil || err.Error() != "exit status 1" {
+			t.Fatalf("runBdCmd fail = %v, want the child's exit error", err)
+		}
+	})
+
+	t.Run("timeout returns explicit error", func(t *testing.T) {
+		clock := clockwork.NewFakeClock()
+		started := make(chan struct{})
+		tf := &LiveConvoyFetcher{
+			cmdTimeout: 200 * time.Millisecond,
+			clock:      clock,
+			runProc: func(ctx context.Context, cmd *exec.Cmd) error {
+				_, _ = io.WriteString(cmd.Stdout, "half a line")
+				close(started)
+				<-ctx.Done()
+				return errors.New("signal: killed")
+			},
+		}
+		res := make(chan error, 1)
+		go func() {
+			_, err := tf.runBdCmd(t.TempDir(), "sleep")
+			res <- err
+		}()
+		<-started
+		clock.Advance(tf.cmdTimeout)
+		err := <-res
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("expected timeout error even with partial stdout, got: %v", err)
 		}
 	})
 }
@@ -993,62 +998,58 @@ esac
 // from a complete one — the panel showed a convoy count short by exactly the
 // convoys bd was slowest on, with nothing to say it was short.
 func TestFetchConvoys_TimedOutDetailReadKeepsConvoyCounted(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-based command test")
-	}
-
-	bdPath := filepath.Join(t.TempDir(), "bd")
-	// hq-cv-slow spins on its dep reads until the fetcher's deadline kills it.
-	// The spin forks nothing (kill is a shell builtin), so no child outlives
-	// the kill holding a copy of the stdout pipe open — the call returns at
-	// the deadline rather than waiting out a stray sleep. It spins only while
-	// its parent lives: if the test binary itself is killed mid-test (a suite
-	// timeout, an orphan sweep), an unconditional spin is reparented to
-	// launchd/init and burns a core forever — one ran for 10h at ~80% CPU on
-	// the gate host (2026-09-23).
-	script := `#!/bin/sh
-case "$1" in
-  list)
-    echo '[{"id":"hq-cv-ok","title":"Readable","status":"open","issue_type":"convoy","labels":[]},{"id":"hq-cv-slow","title":"Unreadable","status":"open","issue_type":"convoy","labels":[]}]'
-    ;;
-  dep)
-    case "$*" in
-      *hq-cv-slow*) while kill -0 "$PPID" 2>/dev/null; do :; done ;;
-    esac
-    echo '[{"depends_on_id":"gt-abc","type":"tracks"}]'
-    ;;
-  show)
-    case "$2" in
-      hq-cv-ok) echo '[{"id":"hq-cv-ok","dependencies":null}]' ;;
-      *) echo '[{"id":"gt-abc","title":"Work","status":"open","assignee":"","updated_at":""}]' ;;
-    esac
-    ;;
-esac
-`
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	// Only hq-cv-slow's dep read gets the short deadline it exists to blow.
-	// The list/show/dep calls around it keep a generous budget: one shared
-	// 300ms cmdTimeout killed the trivially fast list call on a loaded gate
-	// host ("listing convoys: bd timed out after 300ms"), failing the test
-	// before it reached the timeout path it is about. The slow call spins
-	// until killed, so its deadline is always the thing that ends it, however
-	// loaded the host is.
+	// hq-cv-slow's dep reads (the raw-edge query and its bd dep list
+	// fallback) each run until their deadline ends them; every other bd call
+	// answers at once. A deadline passes only when the test advances the
+	// clock, after that slow read has started, so host load cannot time out
+	// the fast calls around it (the old 300ms wall-clock budget killed the
+	// list call on a loaded gate host: "listing convoys: bd timed out after
+	// 300ms").
+	const slowReads = 2
+	clock := clockwork.NewFakeClock()
+	slowStarted := make(chan struct{}, slowReads)
 	f := &LiveConvoyFetcher{
 		townRoot:   t.TempDir(),
-		cmdTimeout: 30 * time.Second,
-		bdBin:      bdPath,
-		bdTimeoutFor: func(args []string) time.Duration {
-			if len(args) > 0 && args[0] == "dep" && strings.Contains(strings.Join(args, " "), "hq-cv-slow") {
-				return 300 * time.Millisecond
+		cmdTimeout: 300 * time.Millisecond,
+		clock:      clock,
+		runProc: func(ctx context.Context, cmd *exec.Cmd) error {
+			args := cmd.Args[1:]
+			var out string
+			switch {
+			case len(args) > 0 && args[0] == "list":
+				out = `[{"id":"hq-cv-ok","title":"Readable","status":"open","issue_type":"convoy","labels":[]},{"id":"hq-cv-slow","title":"Unreadable","status":"open","issue_type":"convoy","labels":[]}]`
+			case len(args) > 0 && args[0] == "dep" && strings.Contains(strings.Join(args, " "), "hq-cv-slow"):
+				slowStarted <- struct{}{}
+				<-ctx.Done() // killed at the deadline
+				return errors.New("signal: killed")
+			case len(args) > 0 && args[0] == "dep":
+				out = `[{"depends_on_id":"gt-abc","type":"tracks"}]`
+			case len(args) > 1 && args[0] == "show" && args[1] == "hq-cv-ok":
+				out = `[{"id":"hq-cv-ok","dependencies":null}]`
+			case len(args) > 0 && args[0] == "show":
+				out = `[{"id":"gt-abc","title":"Work","status":"open","assignee":"","updated_at":""}]`
 			}
-			return 30 * time.Second
+			_, err := io.WriteString(cmd.Stdout, out)
+			return err
 		},
 	}
 
-	rows, err := f.FetchConvoys()
+	type result struct {
+		rows []ConvoyRow
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rows, err := f.FetchConvoys()
+		done <- result{rows, err}
+	}()
+	for i := 0; i < slowReads; i++ {
+		<-slowStarted
+		clock.Advance(f.cmdTimeout)
+	}
+	res := <-done
+
+	rows, err := res.rows, res.err
 	if err != nil {
 		t.Fatalf("FetchConvoys returned error: %v", err)
 	}

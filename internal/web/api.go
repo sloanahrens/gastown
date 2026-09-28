@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
@@ -78,6 +80,13 @@ type APIHandler struct {
 	// acquire this handler makes. Zero (the default) means "use the call's own
 	// exec timeout"; tests set it short so a full-pool case resolves fast.
 	slotWaitBudget time.Duration
+	// clock measures the subprocess-slot waits and exec deadlines of the
+	// handler's gt/bd/gh children. Nil means the wall clock; tests inject a
+	// clockwork fake and move time explicitly.
+	clock clockwork.Clock
+	// runProc runs those children. Nil means cmd.Run; tests inject a fake
+	// child (see procRunner).
+	runProc procRunner
 	// csrfToken is validated on POST requests to prevent cross-site request forgery.
 	csrfToken string
 
@@ -345,13 +354,6 @@ func (h *APIHandler) handleCommands(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// acquireUserCmdSlot acquires a userCmdSem slot, or fails on ctx deadline.
-// A nil pool (struct-literal test handlers) means unbounded, mirroring
-// acquireCmdSlot.
-func (h *APIHandler) acquireUserCmdSlot(ctx context.Context) error {
-	return acquireCmdSlot(ctx, h.userCmdSem)
-}
-
 // waitBudget bounds how long a call queues for a subprocess slot, kept
 // separate from execTimeout so a queued call still gets the full timeout
 // once it starts running. Defaults to execTimeout: a fixed budget shorter
@@ -372,9 +374,7 @@ func (h *APIHandler) waitBudget(execTimeout time.Duration) time.Duration {
 // function held a short-read slot for a long command's whole lifetime,
 // undoing the pool split (gt-d5xr).
 func (h *APIHandler) runUserGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
-	err := h.acquireUserCmdSlot(waitCtx)
-	cancelWait()
+	err := acquireCmdSlotWithin(ctx, h.clock, h.userCmdSem, h.waitBudget(timeout))
 	if err != nil {
 		return "", fmt.Errorf("command slot unavailable: %w", err)
 	}
@@ -385,9 +385,7 @@ func (h *APIHandler) runUserGtCommand(ctx context.Context, timeout time.Duration
 
 // runGtCommand executes a short internal gt command under cmdSem.
 func (h *APIHandler) runGtCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
-	err := acquireCmdSlot(waitCtx, h.cmdSem)
-	cancelWait()
+	err := acquireCmdSlotWithin(ctx, h.clock, h.cmdSem, h.waitBudget(timeout))
 	if err != nil {
 		return "", fmt.Errorf("command slot unavailable: %w", err)
 	}
@@ -401,7 +399,7 @@ func (h *APIHandler) runGtCommand(ctx context.Context, timeout time.Duration, ar
 // userCmdSem via runUserGtCommand — call this directly so a command never
 // draws a slot from both pools at once (gt-d5xr).
 func (h *APIHandler) runGtCommandExec(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := clockwork.WithTimeout(ctx, clockOrReal(h.clock), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, h.gtPath, args...)
@@ -415,7 +413,7 @@ func (h *APIHandler) runGtCommandExec(ctx context.Context, timeout time.Duration
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := runProc(h.runProc, ctx, cmd)
 
 	// Combine stdout and stderr for output
 	output := stdout.String()
@@ -426,7 +424,7 @@ func (h *APIHandler) runGtCommandExec(ctx context.Context, timeout time.Duration
 		output += stderr.String()
 	}
 
-	if ctx.Err() == context.DeadlineExceeded {
+	if deadlineExceeded(ctx) {
 		return output, fmt.Errorf("command timed out after %v", timeout)
 	}
 
@@ -1539,15 +1537,13 @@ func (h *APIHandler) handleIssueUpdate(w http.ResponseWriter, r *http.Request) {
 
 // runBdCommand executes a bd command with the given args.
 func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
-	err := acquireCmdSlot(waitCtx, h.cmdSem)
-	cancelWait()
+	err := acquireCmdSlotWithin(ctx, h.clock, h.cmdSem, h.waitBudget(timeout))
 	if err != nil {
 		return "", fmt.Errorf("command slot unavailable: %w", err)
 	}
 	defer releaseCmdSlot(h.cmdSem)
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := clockwork.WithTimeout(ctx, clockOrReal(h.clock), timeout)
 	defer cancel()
 
 	cmd := beads.CommandContextWithEnv(ctx, h.workDir, nil, args...)
@@ -1557,7 +1553,7 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
+	err = runProc(h.runProc, ctx, cmd)
 
 	output := stdout.String()
 	if stderr.Len() > 0 {
@@ -1567,7 +1563,7 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 		output += stderr.String()
 	}
 
-	if ctx.Err() == context.DeadlineExceeded {
+	if deadlineExceeded(ctx) {
 		return output, fmt.Errorf("command timed out after %v", timeout)
 	}
 
@@ -1816,15 +1812,12 @@ func (h *APIHandler) handlePRShow(w http.ResponseWriter, r *http.Request) {
 // network-bound, not Dolt-bound, so it rides the long-command pool with the
 // user-driven gt runs (gt-d5xr).
 func (h *APIHandler) runGhCommand(ctx context.Context, timeout time.Duration, args []string) (string, error) {
-	waitCtx, cancelWait := context.WithTimeout(ctx, h.waitBudget(timeout))
-	if err := h.acquireUserCmdSlot(waitCtx); err != nil {
-		cancelWait()
+	if err := acquireCmdSlotWithin(ctx, h.clock, h.userCmdSem, h.waitBudget(timeout)); err != nil {
 		return "", fmt.Errorf("command slot unavailable: %w", err)
 	}
-	cancelWait()
 	defer releaseCmdSlot(h.userCmdSem)
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := clockwork.WithTimeout(ctx, clockOrReal(h.clock), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "gh", args...)
@@ -1837,7 +1830,7 @@ func (h *APIHandler) runGhCommand(ctx context.Context, timeout time.Duration, ar
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := runProc(h.runProc, ctx, cmd)
 
 	output := stdout.String()
 	if stderr.Len() > 0 {
@@ -1847,7 +1840,7 @@ func (h *APIHandler) runGhCommand(ctx context.Context, timeout time.Duration, ar
 		output += stderr.String()
 	}
 
-	if ctx.Err() == context.DeadlineExceeded {
+	if deadlineExceeded(ctx) {
 		return output, fmt.Errorf("command timed out after %v", timeout)
 	}
 
