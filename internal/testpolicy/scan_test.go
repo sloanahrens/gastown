@@ -30,7 +30,8 @@ func TestScanDirFixtures(t *testing.T) {
 		"prod_setenv":           {RuleProdSetenv},
 		"prod_sleep_clock":      {RuleProdSleep},
 		"integration_skipped":   nil,
-		"setenv_in_subtest":     {RuleNoEnv}, // t.Setenv in a t.Run subtest is still no-env
+		"setenv_in_subtest":     {RuleNoEnv},                                                                 // t.Setenv in a t.Run subtest is still no-env
+		"network":               {RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork, RuleNoNetwork}, // Dial, DialTimeout, Listen, ListenUnix, net.Dialer
 	}
 	for dir, want := range cases {
 		dir, want := dir, want

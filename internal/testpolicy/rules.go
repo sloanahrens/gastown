@@ -13,6 +13,7 @@ const (
 	RuleNoChdir      = "no-chdir"
 	RuleNoSkip       = "no-skip"
 	RuleNoSubprocess = "no-subprocess"
+	RuleNoNetwork    = "no-network"
 	RuleNoBuild      = "no-build"
 	RuleNoExecFiles  = "no-exec-files"
 	RuleNoGlobalSwap = "no-global-swap"
@@ -28,6 +29,12 @@ var bannedTestCalls = map[string]string{
 	"time.NewTimer": RuleNoSleep, "time.NewTicker": RuleNoSleep, "time.Tick": RuleNoSleep,
 	"os.Setenv": RuleNoEnv, "os.Unsetenv": RuleNoEnv,
 	"os.Chdir": RuleNoChdir,
+	// Real sockets carry a wall-clock timeout and block in syscalls under
+	// load; a unit test scripts the connection through a seam instead.
+	"net.Dial": RuleNoNetwork, "net.DialTimeout": RuleNoNetwork, "net.DialUnix": RuleNoNetwork,
+	"net.DialTCP": RuleNoNetwork, "net.DialUDP": RuleNoNetwork,
+	"net.Listen": RuleNoNetwork, "net.ListenUnix": RuleNoNetwork, "net.ListenTCP": RuleNoNetwork,
+	"net.ListenUDP": RuleNoNetwork, "net.ListenPacket": RuleNoNetwork, "net.ListenUnixgram": RuleNoNetwork,
 }
 
 // bannedTestMethods maps a method name called on a *testing.T/B/F or
@@ -47,6 +54,14 @@ func checkTestFile(fset *token.FileSet, f *ast.File, pkgVars map[string]bool) []
 		switch n := n.(type) {
 		case *ast.CallExpr:
 			checkTestCall(n, imp, add)
+		case *ast.CompositeLit:
+			// A net.Dialer or net.ListenConfig is only built to dial or listen.
+			if sel, ok := n.Type.(*ast.SelectorExpr); ok {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Obj == nil && imp[x.Name] == "net" &&
+					(sel.Sel.Name == "Dialer" || sel.Sel.Name == "ListenConfig") {
+					add(n, RuleNoNetwork, "builds a net."+sel.Sel.Name+"; script the connection through a seam")
+				}
+			}
 		case *ast.BasicLit:
 			if n.Kind == token.STRING {
 				if s, err := strconv.Unquote(n.Value); err == nil && strings.HasPrefix(s, "#!") {
