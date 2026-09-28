@@ -56,9 +56,9 @@ func main() {
 	flag.Parse()
 
 	// Resolve defaults
-	h := resolveHost(*host)
-	p := resolvePort(*port)
-	rf := resolveRoutesFile(*routesFile)
+	h := resolveHost(*host, os.Getenv)
+	p := resolvePort(*port, os.Getenv)
+	rf := resolveRoutesFile(*routesFile, os.Getenv, os.UserHomeDir)
 
 	if *watch {
 		if err := watchEvents(h, p, rf, *cleanup); err != nil {
@@ -108,40 +108,40 @@ func main() {
 	}
 }
 
-func resolveHost(flag string) string {
+func resolveHost(flag string, getenv func(string) string) string {
 	if flag != "" {
 		return flag
 	}
-	if h := os.Getenv("GT_DOLT_HOST"); h != "" {
+	if h := getenv("GT_DOLT_HOST"); h != "" {
 		return h
 	}
-	if h := os.Getenv("DOLT_HOST"); h != "" {
+	if h := getenv("DOLT_HOST"); h != "" {
 		return h
 	}
 	return "127.0.0.1"
 }
 
-func resolvePort(flag string) string {
+func resolvePort(flag string, getenv func(string) string) string {
 	if flag != "" {
 		return flag
 	}
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+	if p := getenv("GT_DOLT_PORT"); p != "" {
 		return p
 	}
-	if p := os.Getenv("DOLT_PORT"); p != "" {
+	if p := getenv("DOLT_PORT"); p != "" {
 		return p
 	}
 	return "3307"
 }
 
-func resolveRoutesFile(flag string) string {
+func resolveRoutesFile(flag string, getenv func(string) string, userHome func() (string, error)) string {
 	if flag != "" {
 		return flag
 	}
-	if rf := os.Getenv("ROUTES_FILE"); rf != "" {
+	if rf := getenv("ROUTES_FILE"); rf != "" {
 		return rf
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := userHome()
 	return filepath.Join(home, "gt", ".beads", "routes.jsonl")
 }
 

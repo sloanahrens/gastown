@@ -41,4 +41,3 @@ internal/version
 internal/wasteland
 internal/web
 internal/witness
-plugins/dolt-snapshots
