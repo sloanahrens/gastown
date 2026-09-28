@@ -33,7 +33,6 @@ internal/github
 internal/guard
 internal/guardlint
 internal/hooks
-internal/keepalive
 internal/krc
 internal/lintlock
 internal/lock

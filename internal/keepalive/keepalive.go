@@ -74,6 +74,11 @@ func TouchWithArgs(command string, args []string) {
 // TouchInWorkspace updates the keepalive file in a specific workspace.
 // It silently ignores errors (best-effort signaling).
 func TouchInWorkspace(workspaceRoot, command string) {
+	touchAt(workspaceRoot, command, time.Now())
+}
+
+// touchAt is TouchInWorkspace with the timestamp supplied by the caller.
+func touchAt(workspaceRoot, command string, now time.Time) {
 	runtimeDir := filepath.Join(workspaceRoot, ".runtime")
 
 	// Ensure .runtime directory exists
@@ -83,7 +88,7 @@ func TouchInWorkspace(workspaceRoot, command string) {
 
 	state := State{
 		LastCommand: command,
-		Timestamp:   time.Now().UTC(),
+		Timestamp:   now.UTC(),
 	}
 
 	data, err := json.Marshal(state)
@@ -130,8 +135,13 @@ func Read(workspaceRoot string) *State {
 //   - It's semantically "infinitely old" for activity detection purposes
 //   - It avoids magic values like MaxInt64 that could cause overflow issues
 func (s *State) Age() time.Duration {
+	return s.ageAt(time.Now())
+}
+
+// ageAt is Age measured from now instead of the wall clock.
+func (s *State) ageAt(now time.Time) time.Duration {
 	if s == nil {
 		return 24 * time.Hour * 365 // Sentinel: treat missing keepalive as maximally stale
 	}
-	return time.Since(s.Timestamp)
+	return now.Sub(s.Timestamp)
 }

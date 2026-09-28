@@ -7,30 +7,41 @@ import (
 	"time"
 )
 
+// testEpoch is the fixed instant the tests date their keepalives from.
+var testEpoch = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
 func TestTouchInWorkspace(t *testing.T) {
-	// Create temp directory
+	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Touch the keepalive
-	TouchInWorkspace(tmpDir, "gt status")
+	touchAt(tmpDir, "gt status", testEpoch.In(time.FixedZone("CDT", -5*3600)))
 
-	// Read back
 	state := Read(tmpDir)
 	if state == nil {
 		t.Fatal("expected state to be non-nil")
 	}
-
 	if state.LastCommand != "gt status" {
 		t.Errorf("expected last_command 'gt status', got %q", state.LastCommand)
 	}
+	if !state.Timestamp.Equal(testEpoch) || state.Timestamp.Location() != time.UTC {
+		t.Errorf("timestamp = %v, want %v in UTC", state.Timestamp, testEpoch)
+	}
+}
 
-	// Check timestamp is recent
-	if time.Since(state.Timestamp) > time.Minute {
-		t.Errorf("timestamp too old: %v", state.Timestamp)
+// TestTouchInWorkspaceStampsWallClock checks the exported wrapper writes a
+// non-zero UTC timestamp.
+func TestTouchInWorkspaceStampsWallClock(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	TouchInWorkspace(tmpDir, "gt status")
+	state := Read(tmpDir)
+	if state == nil || state.Timestamp.IsZero() || state.Timestamp.Location() != time.UTC {
+		t.Fatalf("Read() = %+v, want a non-zero UTC timestamp", state)
 	}
 }
 
 func TestReadNonExistent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	state := Read(tmpDir)
 	if state != nil {
@@ -38,25 +49,44 @@ func TestReadNonExistent(t *testing.T) {
 	}
 }
 
+func TestReadCorrupt(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".runtime"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".runtime", "keepalive.json"), []byte("{"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if state := Read(tmpDir); state != nil {
+		t.Errorf("Read() of corrupt file = %+v, want nil", state)
+	}
+}
+
 func TestStateAge(t *testing.T) {
-	// Test nil state returns very large age
+	t.Parallel()
+	// Test nil state returns the sentinel age
 	var nilState *State
-	if nilState.Age() < 24*time.Hour {
-		t.Error("nil state should have very large age")
+	if got := nilState.ageAt(testEpoch); got != 365*24*time.Hour {
+		t.Errorf("nil state age = %v, want 365 days", got)
+	}
+	if nilState.Age() != 365*24*time.Hour {
+		t.Error("nil state Age() should be the 365-day sentinel")
 	}
 
-	// Test fresh state returns accurate age
-	freshState := &State{Timestamp: time.Now().Add(-30 * time.Second)}
-	age := freshState.Age()
-	if age < 29*time.Second || age > 31*time.Second {
-		t.Errorf("expected ~30s age, got %v", age)
+	freshState := &State{Timestamp: testEpoch.Add(-30 * time.Second)}
+	if age := freshState.ageAt(testEpoch); age != 30*time.Second {
+		t.Errorf("expected 30s age, got %v", age)
 	}
 
-	// Test older state returns accurate age
-	olderState := &State{Timestamp: time.Now().Add(-5 * time.Minute)}
-	age = olderState.Age()
-	if age < 4*time.Minute+55*time.Second || age > 5*time.Minute+5*time.Second {
-		t.Errorf("expected ~5m age, got %v", age)
+	olderState := &State{Timestamp: testEpoch.Add(-5 * time.Minute)}
+	if age := olderState.ageAt(testEpoch); age != 5*time.Minute {
+		t.Errorf("expected 5m age, got %v", age)
+	}
+
+	// Age measures from the wall clock: a stamp in the past has positive age.
+	if age := freshState.Age(); age <= 0 {
+		t.Errorf("Age() of a past stamp = %v, want > 0", age)
 	}
 
 	// NOTE: IsFresh(), IsStale(), IsVeryStale() were removed as part of ZFC cleanup.
@@ -64,11 +94,12 @@ func TestStateAge(t *testing.T) {
 }
 
 func TestDirectoryCreation(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	workDir := filepath.Join(tmpDir, "some", "nested", "workspace")
 
 	// Touch should create .runtime directory
-	TouchInWorkspace(workDir, "gt test")
+	touchAt(workDir, "gt test", testEpoch)
 
 	// Verify directory was created
 	runtimeDir := filepath.Join(workDir, ".runtime")
