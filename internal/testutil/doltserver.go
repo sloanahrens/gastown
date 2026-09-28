@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
@@ -362,6 +364,12 @@ func startSharedDoltContainer() {
 	// (e.g. refinery's Manager, which inherits os.Environ() directly) need it
 	// too, not just testutil.RequireDoltContainer's direct callers.
 	os.Setenv("BEADS_TEST_SERVER", "1") //nolint:tenv // intentional process-wide env
+	// Every bd call this process makes from here on shares the server with
+	// every other, so catalog changes (CREATE/DROP DATABASE) must not overlap
+	// them (beads test_container_catalog.go).
+	if port, err := strconv.Atoi(doltCtrPort); err == nil {
+		beads.MarkTestContainerActive(port)
+	}
 }
 
 // StartIsolatedDoltContainer starts a per-test Dolt container and returns the

@@ -693,6 +693,10 @@ type Beads struct {
 	isolated   bool   // If true, suppress inherited beads env vars (for test isolation)
 	serverPort int    // If set, pass --server-port to bd init and GT_DOLT_PORT to env
 
+	// testDatabase is the testdb_ database the last isolated Init created on
+	// the test Dolt container (TestDatabaseName).
+	testDatabase string
+
 	// store is an optional in-process beadsdk.Storage. When set, methods
 	// bypass the bd subprocess and use the store directly. Follows the
 	// pattern in internal/daemon/convoy_manager.go. Callers are responsible

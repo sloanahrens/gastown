@@ -160,11 +160,17 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 	env = append(StripEnvKey(env, allowRemoteMigrateEnv), testContainerEnv()...)
 
 	timeout := subprocessTimeoutFor(args, true)
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	var out bytes.Buffer
-	if err := newBDCmd(runCtx, dir, env, nil, args, &out, &out).Run(); err != nil {
-		return out.Bytes(), SubprocessFailureError(runCtx, timeout, err)
-	}
-	return out.Bytes(), nil
+	// These inits name no database, so bd creates one the gate cannot create
+	// ahead of it: the whole init is a catalog change and runs exclusively
+	// (test_container_catalog.go).
+	runErr := ChangeTestCatalog(func() error {
+		runCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		if err := newBDCmd(runCtx, dir, env, nil, args, &out, &out).Run(); err != nil {
+			return SubprocessFailureError(runCtx, timeout, err)
+		}
+		return nil
+	})
+	return out.Bytes(), runErr
 }
