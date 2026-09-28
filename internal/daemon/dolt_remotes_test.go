@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/testutil"
@@ -196,32 +199,78 @@ func TestPushDatabase_RefusesTestPrefixes(t *testing.T) {
 	}
 }
 
-// TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout locks in the DSN fix:
-// openDoltDB's readTimeout must exceed doltPushTimeout, not sit below it.
-// Before the fix, readTimeout=30s meant any query running longer than 30s —
-// including a large, legitimate DOLT_PUSH within its 60s budget — died with a
-// raw i/o timeout from the MySQL driver's socket read deadline, regardless of
-// how much time was left on the request context. A query held open for 45s
-// (comfortably inside doltPushTimeout, well past the old 30s ceiling) must
-// still succeed.
-func TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout(t *testing.T) {
-	d := testDoltRemotesDaemon(t)
+// TestOpenDoltDB_ReadTimeoutExceedsPushTimeout locks in the DSN fix:
+// openDoltDB's socket readTimeout (and writeTimeout) must exceed
+// doltPushTimeout, not sit below it. Before the fix, readTimeout=30s meant
+// any query running longer than 30s, including a large, legitimate DOLT_PUSH
+// within its 60s budget, died with a raw i/o timeout from the MySQL driver's
+// socket read deadline, regardless of how much time was left on the request
+// context. The request context must be what bounds a push, so the driver's
+// deadline has to sit past it.
+//
+// This asserts on the exact DSN openDoltDB connects with.
+// TestDoltRemotesDSN_ReadTimeoutGovernsLongQueries proves, against the real
+// server, that the driver actually enforces that DSN value, so together they
+// cover what the old 45s SELECT SLEEP test covered.
+func TestOpenDoltDB_ReadTimeoutExceedsPushTimeout(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
 
-	conn, err := d.openDoltDB("information_schema")
+	cfg, err := mysql.ParseDSN(d.doltRemotesDSN("information_schema"))
 	if err != nil {
-		t.Fatalf("connect to server: %v", err)
+		t.Fatalf("parse openDoltDB DSN: %v", err)
 	}
-	defer conn.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), doltPushTimeout)
-	defer cancel()
-
-	const sleepFor = 45 * time.Second
-	start := time.Now()
-	if _, err := conn.ExecContext(ctx, "SELECT SLEEP(?)", sleepFor.Seconds()); err != nil {
-		t.Fatalf("SELECT SLEEP(%v) failed (readTimeout regressed below doltPushTimeout?): %v", sleepFor, err)
+	if cfg.ReadTimeout <= doltPushTimeout {
+		t.Errorf("openDoltDB readTimeout = %v, want > doltPushTimeout (%v)", cfg.ReadTimeout, doltPushTimeout)
 	}
-	if elapsed := time.Since(start); elapsed < sleepFor {
+	if cfg.WriteTimeout <= doltPushTimeout {
+		t.Errorf("openDoltDB writeTimeout = %v, want > doltPushTimeout (%v)", cfg.WriteTimeout, doltPushTimeout)
+	}
+}
+
+// TestDoltRemotesDSN_ReadTimeoutGovernsLongQueries is the behavioural half of
+// TestOpenDoltDB_ReadTimeoutExceedsPushTimeout, scaled down from a 45s query
+// to about two seconds. Against the live server, a query that
+// outlasts the DSN's readTimeout dies with a driver i/o timeout even though
+// its context has time left (the bug), and the same query succeeds when
+// readTimeout sits past the context budget (the fix).
+func TestDoltRemotesDSN_ReadTimeoutGovernsLongQueries(t *testing.T) {
+	d := testDoltRemotesDaemon(t)
+	host, port := d.doltServerHost(), d.doltServerPort()
+
+	const (
+		ctxBudget = 5 * time.Second
+		sleepFor  = 1500 * time.Millisecond
+	)
+	run := func(ioTimeout time.Duration) (time.Duration, error) {
+		conn, err := sql.Open("mysql", doltRemotesDSNWithTimeout(host, port, "information_schema", ioTimeout))
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		defer conn.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), ctxBudget)
+		defer cancel()
+		// Establish the connection first so the timed query measures only
+		// the read deadline, not connection setup.
+		if err := conn.PingContext(ctx); err != nil {
+			t.Fatalf("ping: %v", err)
+		}
+		start := time.Now()
+		_, err = conn.ExecContext(ctx, "SELECT SLEEP(?)", sleepFor.Seconds())
+		return time.Since(start), err
+	}
+
+	// Bug shape: readTimeout below the query's duration, context budget ample.
+	if _, err := run(500 * time.Millisecond); err == nil {
+		t.Fatalf("SELECT SLEEP(%v) with readTimeout=500ms succeeded; want the driver's read deadline to abort it (DSN readTimeout not enforced?)", sleepFor)
+	}
+
+	// Fix shape: readTimeout past the context budget, as doltRemotesReadTimeout is past doltPushTimeout.
+	elapsed, err := run(ctxBudget + 3*time.Second)
+	if err != nil {
+		t.Fatalf("SELECT SLEEP(%v) with readTimeout past the context budget failed: %v", sleepFor, err)
+	}
+	if elapsed < sleepFor {
 		t.Fatalf("SELECT SLEEP(%v) returned early after %v", sleepFor, elapsed)
 	}
 }

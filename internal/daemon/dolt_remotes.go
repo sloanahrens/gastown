@@ -184,9 +184,23 @@ func (d *Daemon) pushDoltRemotes() {
 // unsafe-concurrent-writer hazard that keeps bd's own auto-push disabled by
 // default; routing through the server that already owns the data dir avoids it.
 func (d *Daemon) openDoltDB(dbName string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
-		d.doltServerHost(), d.doltServerPort(), dbName, doltRemotesReadTimeout, doltRemotesReadTimeout)
-	return sql.Open("mysql", dsn)
+	return sql.Open("mysql", d.doltRemotesDSN(dbName))
+}
+
+// doltRemotesDSN is the exact DSN openDoltDB connects with. Its socket
+// read/write timeout is doltRemotesReadTimeout, which must exceed
+// doltPushTimeout (see the constant's comment).
+func (d *Daemon) doltRemotesDSN(dbName string) string {
+	return doltRemotesDSNWithTimeout(d.doltServerHost(), d.doltServerPort(), dbName, doltRemotesReadTimeout)
+}
+
+// doltRemotesDSNWithTimeout builds a dolt_remotes MySQL DSN with ioTimeout as
+// the driver's socket read and write timeout. Production always goes through
+// doltRemotesDSN; tests pass short timeouts to exercise the driver's timeout
+// behaviour without long waits.
+func doltRemotesDSNWithTimeout(host string, port int, dbName string, ioTimeout time.Duration) string {
+	return fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
+		host, port, dbName, ioTimeout, ioTimeout)
 }
 
 // pushDatabase commits pending changes and pushes a single database to its remote.
