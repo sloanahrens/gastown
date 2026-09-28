@@ -42,7 +42,11 @@ func TestMakefileHandsTheContainerOptInToTheSuite(t *testing.T) {
 		}
 		suiteLines := 0
 		for _, line := range lines {
-			if !strings.Contains(line, "go test") {
+			// The test target's recipe runs `go test` through the budget
+			// wrapper (internal/testpolicy/cmd/budget), which execs `go
+			// test -json` inheriting the process environment unchanged --
+			// so GT_TEST_DOCKER still reaches the suite one level deeper.
+			if !strings.Contains(line, "go test") && !strings.Contains(line, "testpolicy/cmd/budget") {
 				continue
 			}
 			suiteLines++

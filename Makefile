@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -235,7 +235,7 @@ test: test-makefile
 	# container suite. A hardcoded =1 here is invisible to every caller that
 	# tries to turn containers off (a recipe assignment beats the child env),
 	# so the gate stayed welded to the town-wide slot.
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m ./...
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./...
 
 # test-changed runs the same hermetic suite as `test` over a caller-supplied
 # package list, for `gt done`'s pre-verify gate (merge_queue.test_verify_command
@@ -250,6 +250,19 @@ test: test-makefile
 PKGS ?= ./...
 test-changed: test-makefile
 	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m $(PKGS)
+
+# test-integration runs only the //go:build integration tier (real tmux, bd,
+# Dolt, gt binary; tests named TestIntegration*). main_branch_test runs it
+# after merge. Docker-backed suites still need `gt slot run` around the call.
+test-integration:
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -tags integration -run '^TestIntegration' -timeout 20m ./...
+
+# test-timing measures the unit tier in a tmux server started by launchd, which
+# macOS does not exempt from its first-run scan of new executables. It is the
+# acceptance measurement for docs/plans/2026-09-27-test-rewrite-design.md.
+# PKGS narrows the run, e.g. make test-timing PKGS=./internal/tmux/...
+test-timing:
+	bash scripts/test-timing.sh $(PKGS)
 
 test-makefile:
 	bash scripts/check-install-path_test.sh
