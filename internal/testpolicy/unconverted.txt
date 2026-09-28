@@ -55,7 +55,6 @@ internal/runtime
 internal/scheduler/capacity
 internal/session
 internal/shell
-internal/state
 internal/style
 internal/telemetry
 internal/templates

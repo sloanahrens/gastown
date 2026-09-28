@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/google/uuid"
+	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // State represents the global Gas Town state.
@@ -24,55 +24,76 @@ type State struct {
 	LastDoctorRun    time.Time `json:"last_doctor_run,omitempty"`
 }
 
+// environ is the slice of the process environment this package reads.
+// Production uses osEnviron; tests build one over a map and a fixed home.
+type environ struct {
+	getenv  func(string) string
+	homeDir func() (string, error)
+}
+
+func osEnviron() environ {
+	return environ{getenv: os.Getenv, homeDir: os.UserHomeDir}
+}
+
 // StateDir returns the XDG-compliant state directory.
 // Uses ~/.local/state/gastown/ (per XDG Base Directory Specification).
-func StateDir() string {
+func StateDir() string { return osEnviron().stateDir() }
+
+func (e environ) stateDir() string {
 	// Check XDG_STATE_HOME first
-	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+	if xdg := e.getenv("XDG_STATE_HOME"); xdg != "" {
 		return filepath.Join(xdg, "gastown")
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := e.homeDir()
 	return filepath.Join(home, ".local", "state", "gastown")
 }
 
 // ConfigDir returns the XDG-compliant config directory.
 // Uses ~/.config/gastown/
-func ConfigDir() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+func ConfigDir() string { return osEnviron().configDir() }
+
+func (e environ) configDir() string {
+	if xdg := e.getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "gastown")
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := e.homeDir()
 	return filepath.Join(home, ".config", "gastown")
 }
 
 // CacheDir returns the XDG-compliant cache directory.
 // Uses ~/.cache/gastown/
-func CacheDir() string {
-	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
+func CacheDir() string { return osEnviron().cacheDir() }
+
+func (e environ) cacheDir() string {
+	if xdg := e.getenv("XDG_CACHE_HOME"); xdg != "" {
 		return filepath.Join(xdg, "gastown")
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := e.homeDir()
 	return filepath.Join(home, ".cache", "gastown")
 }
 
 // StatePath returns the path to state.json.
-func StatePath() string {
-	return filepath.Join(StateDir(), "state.json")
+func StatePath() string { return osEnviron().statePath() }
+
+func (e environ) statePath() string {
+	return filepath.Join(e.stateDir(), "state.json")
 }
 
 // IsEnabled checks if Gas Town is globally enabled.
 // Priority: env override > state file > default (false)
-func IsEnabled() bool {
+func IsEnabled() bool { return osEnviron().isEnabled() }
+
+func (e environ) isEnabled() bool {
 	// Environment overrides take priority
-	if os.Getenv("GASTOWN_DISABLED") == "1" {
+	if e.getenv("GASTOWN_DISABLED") == "1" {
 		return false
 	}
-	if os.Getenv("GASTOWN_ENABLED") == "1" {
+	if e.getenv("GASTOWN_ENABLED") == "1" {
 		return true
 	}
 
 	// Check state file
-	state, err := Load()
+	state, err := e.load()
 	if err != nil {
 		return false // Default to disabled if state unreadable
 	}
@@ -80,8 +101,10 @@ func IsEnabled() bool {
 }
 
 // Load reads the state from disk.
-func Load() (*State, error) {
-	data, err := os.ReadFile(StatePath())
+func Load() (*State, error) { return osEnviron().load() }
+
+func (e environ) load() (*State, error) {
+	data, err := os.ReadFile(e.statePath())
 	if os.IsNotExist(err) {
 		return nil, err
 	}
@@ -97,20 +120,24 @@ func Load() (*State, error) {
 }
 
 // Save writes the state to disk atomically with 0600 permissions.
-func Save(s *State) error {
-	dir := StateDir()
+func Save(s *State) error { return osEnviron().save(s) }
+
+func (e environ) save(s *State) error {
+	dir := e.stateDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
 	s.UpdatedAt = time.Now()
 
-	return atomicfile.WriteJSONWithPerm(StatePath(), s, 0600)
+	return atomicfile.WriteJSONWithPerm(e.statePath(), s, 0600)
 }
 
 // Enable enables Gas Town globally.
-func Enable(version string) error {
-	s, err := Load()
+func Enable(version string) error { return osEnviron().enable(version) }
+
+func (e environ) enable(version string) error {
+	s, err := e.load()
 	if err != nil {
 		// Create new state
 		s = &State{
@@ -121,12 +148,14 @@ func Enable(version string) error {
 
 	s.Enabled = true
 	s.Version = version
-	return Save(s)
+	return e.save(s)
 }
 
 // Disable disables Gas Town globally.
-func Disable() error {
-	s, err := Load()
+func Disable() error { return osEnviron().disable() }
+
+func (e environ) disable() error {
+	s, err := e.load()
 	if err != nil {
 		// Nothing to disable, create disabled state
 		s = &State{
@@ -134,11 +163,11 @@ func Disable() error {
 			MachineID:   generateMachineID(),
 			Enabled:     false,
 		}
-		return Save(s)
+		return e.save(s)
 	}
 
 	s.Enabled = false
-	return Save(s)
+	return e.save(s)
 }
 
 // generateMachineID creates a unique machine identifier.
@@ -147,8 +176,10 @@ func generateMachineID() string {
 }
 
 // GetMachineID returns the machine ID, creating one if needed.
-func GetMachineID() string {
-	s, err := Load()
+func GetMachineID() string { return osEnviron().getMachineID() }
+
+func (e environ) getMachineID() string {
+	s, err := e.load()
 	if err != nil || s.MachineID == "" {
 		return generateMachineID()
 	}
@@ -156,8 +187,10 @@ func GetMachineID() string {
 }
 
 // SetShellIntegration records which shell integration is installed.
-func SetShellIntegration(shell string) error {
-	s, err := Load()
+func SetShellIntegration(shell string) error { return osEnviron().setShellIntegration(shell) }
+
+func (e environ) setShellIntegration(shell string) error {
+	s, err := e.load()
 	if err != nil {
 		s = &State{
 			InstalledAt: time.Now(),
@@ -165,15 +198,17 @@ func SetShellIntegration(shell string) error {
 		}
 	}
 	s.ShellIntegration = shell
-	return Save(s)
+	return e.save(s)
 }
 
 // RecordDoctorRun records when doctor was last run.
-func RecordDoctorRun() error {
-	s, err := Load()
+func RecordDoctorRun() error { return osEnviron().recordDoctorRun() }
+
+func (e environ) recordDoctorRun() error {
+	s, err := e.load()
 	if err != nil {
 		return err
 	}
 	s.LastDoctorRun = time.Now()
-	return Save(s)
+	return e.save(s)
 }
