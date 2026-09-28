@@ -43,6 +43,11 @@ func CheckDolt() (DoltStatus, string, string) {
 	cmd := exec.CommandContext(ctx, path, "version")
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
+	return doltStatusFromOutput(path, output, err)
+}
+
+// doltStatusFromOutput classifies the result of running "<path> version".
+func doltStatusFromOutput(path string, output []byte, err error) (DoltStatus, string, string) {
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
 		if detail == "" {

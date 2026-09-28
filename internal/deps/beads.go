@@ -54,6 +54,11 @@ func CheckBeads() (BeadsStatus, string) {
 	cmd := beads.CommandContextWithEnv(ctx, "", baseEnv, "version")
 	util.SetDetachedProcessGroup(cmd)
 	output, err := cmd.Output()
+	return beadsStatusFromOutput(output, err)
+}
+
+// beadsStatusFromOutput classifies the result of running "bd version".
+func beadsStatusFromOutput(output []byte, err error) (BeadsStatus, string) {
 	if err != nil {
 		return BeadsUnknown, ""
 	}

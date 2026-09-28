@@ -18,7 +18,6 @@ internal/convoy
 internal/crew
 internal/daemon
 internal/deacon
-internal/deps
 internal/dispatch
 internal/doctor
 internal/dog

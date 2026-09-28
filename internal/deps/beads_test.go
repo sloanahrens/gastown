@@ -1,12 +1,14 @@
 package deps
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestParseBeadsVersion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -28,6 +30,7 @@ func TestParseBeadsVersion(t *testing.T) {
 }
 
 func TestCompareVersions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		a, b     string
 		expected int
@@ -48,22 +51,50 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
-func TestCheckBeads(t *testing.T) {
-	// This test depends on whether bd is installed in the test environment
-	status, version := CheckBeads()
-
-	// We expect bd to be installed in dev environment
-	if status == BeadsNotFound {
-		t.Skip("bd not installed, skipping integration test")
+func TestBeadsStatusFromOutput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		output      string
+		err         error
+		wantStatus  BeadsStatus
+		wantVersion string
+	}{
+		{"exec error", "bd version 0.60.0", errors.New("exit status 1"), BeadsUnknown, ""},
+		{"unparseable", "garbage", nil, BeadsUnknown, ""},
+		{"too old", "bd version 0.56.9", nil, BeadsTooOld, "0.56.9"},
+		{"at minimum", "bd version " + MinBeadsVersion + " (dev: main@abc)", nil, BeadsOK, MinBeadsVersion},
+		{"newer", "bd version 1.2.3", nil, BeadsOK, "1.2.3"},
 	}
-
-	if status == BeadsOK && version == "" {
-		t.Error("CheckBeads returned BeadsOK but empty version")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			status, version := beadsStatusFromOutput([]byte(tt.output), tt.err)
+			if status != tt.wantStatus || version != tt.wantVersion {
+				t.Errorf("beadsStatusFromOutput(%q, %v) = %d, %q; want %d, %q", tt.output, tt.err, status, version, tt.wantStatus, tt.wantVersion)
+			}
+		})
 	}
-
-	t.Logf("CheckBeads: status=%d, version=%s", status, version)
 }
 
-func TestMain(m *testing.M) {
-	testutil.HermeticMain(m)
+func TestAppendGOBIN(t *testing.T) {
+	t.Parallel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// No home directory (e.g. under env -i): the env is returned as-is.
+		if got := appendGOBIN([]string{"PATH=/bin"}); len(got) != 1 || got[0] != "PATH=/bin" {
+			t.Errorf("appendGOBIN without a home = %v, want it unchanged", got)
+		}
+		return
+	}
+	want := "GOBIN=" + filepath.Join(home, ".local", "bin")
+
+	got := appendGOBIN([]string{"PATH=/bin"})
+	if len(got) != 2 || got[0] != "PATH=/bin" || got[1] != want {
+		t.Errorf("appendGOBIN without GOBIN = %v, want [PATH=/bin %s]", got, want)
+	}
+	got = appendGOBIN([]string{"GOBIN=/elsewhere", "PATH=/bin"})
+	if len(got) != 2 || got[0] != want || got[1] != "PATH=/bin" {
+		t.Errorf("appendGOBIN with GOBIN = %v, want [%s PATH=/bin]", got, want)
+	}
 }
