@@ -6,6 +6,7 @@ import "testing"
 // stalled (gt-xb27) alongside the pane content that must survive filtering —
 // tool-call lines are the primary evidence of real work.
 func TestIsVolatilePaneLine(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		line     string
@@ -48,6 +49,7 @@ func TestIsVolatilePaneLine(t *testing.T) {
 // guard: a pane that does nothing but tick its spinner must hash identically
 // across captures, so no detector can mistake the tick for output.
 func TestPaneContentSignature_IgnoresSpinnerChrome(t *testing.T) {
+	t.Parallel()
 	first := "⏺ Read(internal/reaper/reaper.go)\n" +
 		"3a253ea Merge polecat/marble into main\n" +
 		"✻ Imagining… (8h 54m 38s)\n" +
@@ -66,6 +68,7 @@ func TestPaneContentSignature_IgnoresSpinnerChrome(t *testing.T) {
 // TestPaneContentSignature_TracksRealOutput is the converse: genuine work
 // changing the screen must change the signature.
 func TestPaneContentSignature_TracksRealOutput(t *testing.T) {
+	t.Parallel()
 	before := "⏺ Read(internal/reaper/reaper.go)\nPASS"
 	after := "⏺ Read(internal/reaper/reaper.go)\n⏺ Edit(internal/reaper/reaper.go)\nPASS"
 
@@ -76,6 +79,7 @@ func TestPaneContentSignature_TracksRealOutput(t *testing.T) {
 
 // TestPaneContentSignature_StableForIdenticalContent pins the no-change case.
 func TestPaneContentSignature_StableForIdenticalContent(t *testing.T) {
+	t.Parallel()
 	content := "⏺ Bash(make test)\nok  internal/witness"
 	if paneContentSignature(content) != paneContentSignature(content) {
 		t.Error("signature is not deterministic")
