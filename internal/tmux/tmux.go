@@ -2070,19 +2070,34 @@ func (t *Tmux) SessionAgentPreset(session, townRootHint string) (string, *config
 	if agent == "" {
 		return "", nil, false
 	}
-	townRoot, _ := t.GetEnvironment(session, "GT_ROOT")
+	townRoot, rigPath := t.sessionScope(session, townRootHint)
+	preset, ok := config.ResolveAgentPreset(agent, townRoot, rigPath)
+	return agent, preset, ok
+}
+
+// SessionAgentRegistry returns the agent registry of the town and rig the
+// session belongs to (see sessionScope), so presets overridden in that town's
+// or rig's settings/agents.json apply and no other rig's do (gt-rg4f1).
+func (t *Tmux) SessionAgentRegistry(session, townRootHint string) *config.AgentRegistry {
+	townRoot, rigPath := t.sessionScope(session, townRootHint)
+	return config.AgentRegistryFor(townRoot, rigPath)
+}
+
+// sessionScope returns the town root and rig path of a session from its
+// GT_ROOT and GT_RIG. The town root falls back to townRootHint, then the
+// process GT_ROOT; rigPath is empty for town-level sessions.
+func (t *Tmux) sessionScope(session, townRootHint string) (townRoot, rigPath string) {
+	townRoot, _ = t.GetEnvironment(session, "GT_ROOT")
 	if townRoot == "" {
 		townRoot = townRootHint
 	}
 	if townRoot == "" {
 		townRoot = t.env("GT_ROOT")
 	}
-	rigPath := ""
 	if rig, _ := t.GetEnvironment(session, "GT_RIG"); rig != "" && townRoot != "" {
 		rigPath = filepath.Join(townRoot, rig)
 	}
-	preset, ok := config.ResolveAgentPreset(agent, townRoot, rigPath)
-	return agent, preset, ok
+	return townRoot, rigPath
 }
 
 // escapeAllowed reports whether agent identity permits the vim-mode Escape
@@ -3774,12 +3789,13 @@ func (t *Tmux) resolveSessionProcessNamesChecked(session string) ([]string, erro
 	} else if ok && names != "" {
 		return strings.Split(names, ","), nil
 	}
-	// Fallback: resolve from agent name (built-in presets only)
+	// Fallback: resolve from agent name against the session's own town and
+	// rig agent registry (settings/agents.json overrides included).
 	agentName, _, err := t.getEnvironmentOptional(session, "GT_AGENT")
 	if err != nil {
 		return nil, err
 	}
-	return config.GetProcessNames(agentName), nil // Returns Claude defaults if empty
+	return t.SessionAgentRegistry(session, "").ProcessNames(agentName), nil // Returns Claude defaults if empty
 }
 
 // WaitForCommand polls until the pane is NOT running one of the excluded commands.

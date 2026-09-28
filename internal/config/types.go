@@ -883,6 +883,12 @@ type RuntimeHooksConfig struct {
 	// commands (gt prime) via nudge since hooks won't run automatically.
 	// Defaults to false (backwards compatible with claude/opencode which have real hooks).
 	Informational bool `json:"informational,omitempty"`
+
+	// UseSettingsDir is the hooks provider preset's HooksUseSettingsDir, taken
+	// from the agent registry the config was resolved against (town and rig
+	// settings/agents.json included). Nil means not resolved: readers fall
+	// back to the built-in preset. Not read from or written to settings.
+	UseSettingsDir *bool `json:"-"`
 }
 
 // RuntimeTmuxConfig controls tmux heuristics for detecting runtime readiness.
@@ -905,7 +911,13 @@ type RuntimeInstructionsConfig struct {
 
 // DefaultRuntimeConfig returns a RuntimeConfig with sensible defaults.
 func DefaultRuntimeConfig() *RuntimeConfig {
-	return normalizeRuntimeConfig(&RuntimeConfig{Provider: "claude"})
+	return defaultRuntimeConfigIn(nil)
+}
+
+// defaultRuntimeConfigIn is DefaultRuntimeConfig with preset defaults taken
+// from reg (nil means the built-in presets).
+func defaultRuntimeConfigIn(reg *AgentRegistry) *RuntimeConfig {
+	return normalizeRuntimeConfigIn(reg, &RuntimeConfig{Provider: "claude"})
 }
 
 // BuildCommand returns the full command line string.
@@ -1005,7 +1017,14 @@ func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
 	return args
 }
 
+// normalizeRuntimeConfig fills unset fields from the built-in presets.
 func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
+	return normalizeRuntimeConfigIn(nil, rc)
+}
+
+// normalizeRuntimeConfigIn fills unset fields from the presets in reg (nil
+// means the built-in presets).
+func normalizeRuntimeConfigIn(reg *AgentRegistry, rc *RuntimeConfig) *RuntimeConfig {
 	if rc == nil {
 		rc = &RuntimeConfig{}
 	}
@@ -1037,16 +1056,16 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	}
 
 	if rc.Command == "" {
-		rc.Command = defaultRuntimeCommand(rc.Provider)
+		rc.Command = defaultRuntimeCommand(reg, rc.Provider)
 	}
 
 	if rc.Args == nil {
-		rc.Args = defaultRuntimeArgs(rc.Provider)
+		rc.Args = defaultRuntimeArgs(reg, rc.Provider)
 	}
 	rc.Args = ensureCodexAutomationArgs(rc.Command, rc.Args)
 
 	if rc.PromptMode == "" {
-		rc.PromptMode = defaultPromptMode(rc.Provider)
+		rc.PromptMode = defaultPromptMode(reg, rc.Provider)
 	}
 
 	if rc.Session == nil {
@@ -1054,11 +1073,11 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	}
 
 	if rc.Session.SessionIDEnv == "" {
-		rc.Session.SessionIDEnv = defaultSessionIDEnv(rc.Provider)
+		rc.Session.SessionIDEnv = defaultSessionIDEnv(reg, rc.Provider)
 	}
 
 	if rc.Session.ConfigDirEnv == "" {
-		rc.Session.ConfigDirEnv = defaultConfigDirEnv(rc.Provider)
+		rc.Session.ConfigDirEnv = defaultConfigDirEnv(reg, rc.Provider)
 	}
 
 	if rc.Hooks == nil {
@@ -1066,22 +1085,26 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	}
 
 	if rc.Hooks.Provider == "" {
-		rc.Hooks.Provider = defaultHooksProvider(rc.Provider)
+		rc.Hooks.Provider = defaultHooksProvider(reg, rc.Provider)
 	}
 
 	if rc.Hooks.Dir == "" {
-		rc.Hooks.Dir = defaultHooksDir(rc.Provider)
+		rc.Hooks.Dir = defaultHooksDir(reg, rc.Provider)
 	}
 
 	if rc.Hooks.SettingsFile == "" {
-		rc.Hooks.SettingsFile = defaultHooksFile(rc.Provider)
+		rc.Hooks.SettingsFile = defaultHooksFile(reg, rc.Provider)
+	}
+
+	if rc.Hooks.UseSettingsDir == nil {
+		rc.Hooks.UseSettingsDir = hooksUseSettingsDir(reg, rc.Hooks.Provider)
 	}
 
 	// Set informational flag for providers whose "hooks" are instructions files,
 	// not executable lifecycle hooks. This tells startup fallback logic to send
 	// gt prime via nudge since hooks won't run automatically.
 	if !rc.Hooks.Informational {
-		rc.Hooks.Informational = defaultHooksInformational(rc.Provider)
+		rc.Hooks.Informational = defaultHooksInformational(reg, rc.Provider)
 	}
 
 	if rc.Tmux == nil {
@@ -1089,15 +1112,15 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	}
 
 	if rc.Tmux.ProcessNames == nil {
-		rc.Tmux.ProcessNames = defaultProcessNames(rc.Provider, rc.Command)
+		rc.Tmux.ProcessNames = defaultProcessNames(reg, rc.Provider, rc.Command)
 	}
 
 	if rc.Tmux.ReadyPromptPrefix == "" {
-		rc.Tmux.ReadyPromptPrefix = defaultReadyPromptPrefix(rc.Provider)
+		rc.Tmux.ReadyPromptPrefix = defaultReadyPromptPrefix(reg, rc.Provider)
 	}
 
 	if rc.Tmux.ReadyDelayMs == 0 {
-		rc.Tmux.ReadyDelayMs = defaultReadyDelayMs(rc.Provider)
+		rc.Tmux.ReadyDelayMs = defaultReadyDelayMs(reg, rc.Provider)
 	}
 
 	if rc.Instructions == nil {
@@ -1105,7 +1128,7 @@ func normalizeRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	}
 
 	if rc.Instructions.File == "" {
-		rc.Instructions.File = defaultInstructionsFile(rc.Provider)
+		rc.Instructions.File = defaultInstructionsFile(reg, rc.Provider)
 	}
 
 	return rc
@@ -1137,11 +1160,11 @@ func hasCodexUpdateCheckConfig(args []string) bool {
 	return false
 }
 
-func defaultRuntimeCommand(provider string) string {
+func defaultRuntimeCommand(reg *AgentRegistry, provider string) string {
 	if provider == "generic" {
 		return ""
 	}
-	if preset := GetAgentPresetByName(provider); preset != nil {
+	if preset := reg.Preset(provider); preset != nil {
 		cmd := preset.Command
 		// Resolve claude path for Claude preset (handles alias installations)
 		if preset.Name == AgentClaude && cmd == "claude" {
@@ -1177,67 +1200,78 @@ func resolveClaudePath() string {
 	return "claude"
 }
 
-func defaultRuntimeArgs(provider string) []string {
-	if preset := GetAgentPresetByName(provider); preset != nil && preset.Args != nil {
+func defaultRuntimeArgs(reg *AgentRegistry, provider string) []string {
+	if preset := reg.Preset(provider); preset != nil && preset.Args != nil {
 		return append([]string(nil), preset.Args...) // copy to avoid mutation
 	}
 	return nil
 }
 
-func defaultPromptMode(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil && preset.PromptMode != "" {
+func defaultPromptMode(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil && preset.PromptMode != "" {
 		return preset.PromptMode
 	}
 	return "arg"
 }
 
-func defaultSessionIDEnv(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil {
+func defaultSessionIDEnv(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil {
 		return preset.SessionIDEnv
 	}
 	return ""
 }
 
-func defaultConfigDirEnv(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil {
+func defaultConfigDirEnv(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil {
 		return preset.ConfigDirEnv
 	}
 	return ""
 }
 
-func defaultHooksProvider(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil && preset.HooksProvider != "" {
+func defaultHooksProvider(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil && preset.HooksProvider != "" {
 		return preset.HooksProvider
 	}
 	return "none"
 }
 
-func defaultHooksDir(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil {
+func defaultHooksDir(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil {
 		return preset.HooksDir
 	}
 	return ""
 }
 
-func defaultHooksFile(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil {
+func defaultHooksFile(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil {
 		return preset.HooksSettingsFile
 	}
 	return ""
 }
 
+// hooksUseSettingsDir returns the HooksUseSettingsDir of the hooks provider's
+// preset in reg, or nil when the provider has no preset.
+func hooksUseSettingsDir(reg *AgentRegistry, hooksProvider string) *bool {
+	preset := reg.Preset(hooksProvider)
+	if preset == nil {
+		return nil
+	}
+	v := preset.HooksUseSettingsDir
+	return &v
+}
+
 // defaultHooksInformational returns true for providers whose hooks are instructions
 // files only (not executable lifecycle hooks). For these providers, Gas Town sends
 // startup fallback commands (gt prime) via nudge since hooks won't auto-run.
-func defaultHooksInformational(provider string) bool {
-	if preset := GetAgentPresetByName(provider); preset != nil {
+func defaultHooksInformational(reg *AgentRegistry, provider string) bool {
+	if preset := reg.Preset(provider); preset != nil {
 		return preset.HooksInformational
 	}
 	return false
 }
 
-func defaultProcessNames(provider, command string) []string {
-	if preset := GetAgentPresetByName(provider); preset != nil && len(preset.ProcessNames) > 0 {
+func defaultProcessNames(reg *AgentRegistry, provider, command string) []string {
+	if preset := reg.Preset(provider); preset != nil && len(preset.ProcessNames) > 0 {
 		return append([]string(nil), preset.ProcessNames...) // copy to avoid mutation
 	}
 	if command != "" {
@@ -1246,22 +1280,22 @@ func defaultProcessNames(provider, command string) []string {
 	return nil
 }
 
-func defaultReadyPromptPrefix(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil {
+func defaultReadyPromptPrefix(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil {
 		return preset.ReadyPromptPrefix
 	}
 	return ""
 }
 
-func defaultReadyDelayMs(provider string) int {
-	if preset := GetAgentPresetByName(provider); preset != nil {
+func defaultReadyDelayMs(reg *AgentRegistry, provider string) int {
+	if preset := reg.Preset(provider); preset != nil {
 		return preset.ReadyDelayMs
 	}
 	return 0
 }
 
-func defaultInstructionsFile(provider string) string {
-	if preset := GetAgentPresetByName(provider); preset != nil && preset.InstructionsFile != "" {
+func defaultInstructionsFile(reg *AgentRegistry, provider string) string {
+	if preset := reg.Preset(provider); preset != nil && preset.InstructionsFile != "" {
 		return preset.InstructionsFile
 	}
 	return "AGENTS.md"

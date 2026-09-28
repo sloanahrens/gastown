@@ -47,21 +47,15 @@ func TestIsKnownSession_UsesDefaultRegistryAndHQPrefix(t *testing.T) {
 	}
 }
 
-func TestInitRegistryLoadsAgentRegistry(t *testing.T) {
-	// Regression test: InitRegistry must load settings/agents.json so that
-	// config.GetProcessNames respects user-configured process_names overrides.
+func TestInitRegistryDoesNotLoadAgentRegistryGlobally(t *testing.T) {
+	// InitRegistry used to merge the town's settings/agents.json into a
+	// process-global agent registry; rig files merged later leaked into every
+	// other rig (gt-rg4f1). It now only reports a malformed file: agents are
+	// resolved against config.AgentRegistryFor(town, rig).
 	//
-	// Without this, any entry point that calls InitRegistry without also
-	// calling config.LoadAgentRegistry (daemon, witness) uses the builtin
-	// defaults. On NixOS the Claude binary is ".claude-unwrapped", which
-	// isn't in the builtin list, so heartbeat thinks the agent is dead and
-	// kills the session.
-	//
-	// NOTE: cannot use t.Parallel() — mutates global registries.
+	// NOTE: cannot use t.Parallel() — mutates the global prefix registry.
 	old := DefaultRegistry()
 	defer SetDefaultRegistry(old)
-	config.ResetRegistryForTesting()
-	t.Cleanup(config.ResetRegistryForTesting)
 
 	townRoot := t.TempDir()
 
@@ -89,21 +83,31 @@ func TestInitRegistryLoadsAgentRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// InitRegistry should load both session prefixes AND agent registry.
 	if err := InitRegistry(townRoot); err != nil {
 		t.Fatalf("InitRegistry: %v", err)
 	}
 
-	// Verify GetProcessNames returns the override from settings/agents.json.
-	got := config.GetProcessNames("claude")
-	want := []string{"node", "claude", ".claude-unwrapped"}
-	if len(got) != len(want) {
-		t.Fatalf("GetProcessNames(claude) = %v, want %v", got, want)
+	if got := config.GetProcessNames("claude"); len(got) != 2 {
+		t.Fatalf("GetProcessNames(claude) = %v after InitRegistry, want the built-in [node claude]", got)
 	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("GetProcessNames(claude)[%d] = %q, want %q", i, got[i], want[i])
-		}
+}
+
+func TestInitRegistryReportsMalformedAgentRegistry(t *testing.T) {
+	// NOTE: cannot use t.Parallel() — mutates the global prefix registry.
+	old := DefaultRegistry()
+	defer SetDefaultRegistry(old)
+
+	townRoot := t.TempDir()
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "agents.json"), []byte("{malformed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InitRegistry(townRoot); err == nil {
+		t.Fatal("InitRegistry with malformed agents.json: want an error, got nil")
 	}
 }
 
@@ -111,8 +115,6 @@ func TestInitRegistryNoAgentsJSON(t *testing.T) {
 	// InitRegistry must not fail when settings/agents.json is absent.
 	old := DefaultRegistry()
 	defer SetDefaultRegistry(old)
-	config.ResetRegistryForTesting()
-	t.Cleanup(config.ResetRegistryForTesting)
 
 	townRoot := t.TempDir()
 

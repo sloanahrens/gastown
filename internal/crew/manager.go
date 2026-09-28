@@ -92,7 +92,7 @@ func harnessAgentName(override, workerName, townRoot, rigPath string) string {
 		return override
 	}
 	if rc := config.ResolveWorkerAgentConfig(workerName, townRoot, rigPath); rc != nil {
-		if preset, ok := config.HarnessPreset(rc); ok {
+		if preset, ok := config.AgentRegistryFor(townRoot, rigPath).HarnessPreset(rc); ok {
 			return string(preset.Name)
 		}
 	}
@@ -103,8 +103,8 @@ func harnessAgentName(override, workerName, townRoot, rigPath string) string {
 // flag(s) to append to the command string. agentName is the resolved agent
 // preset name (e.g. "claude", "gemini"). sessionID is "last" for auto-resume
 // or a specific session ID.
-func buildResumeArgs(agentName, sessionID string) (string, error) {
-	preset := config.GetAgentPresetByName(agentName)
+func buildResumeArgs(registry *config.AgentRegistry, agentName, sessionID string) (string, error) {
+	preset := registry.Preset(agentName)
 	if preset == nil || preset.ResumeFlag == "" {
 		return "", fmt.Errorf("agent %q does not support session resume", agentName)
 	}
@@ -787,7 +787,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 		// Determine agent preset for resume flag.
 		// Try worker-level agent config first, fall back to "claude".
 		agentName := harnessAgentName(opts.AgentOverride, name, townRoot, m.rig.Path)
-		resumeArgs, err := buildResumeArgs(agentName, opts.ResumeSessionID)
+		resumeArgs, err := buildResumeArgs(config.AgentRegistryFor(townRoot, m.rig.Path), agentName, opts.ResumeSessionID)
 		if err != nil {
 			return err
 		}
@@ -892,7 +892,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// for any agent, so we always check for non-interactive sessions.
 	if !opts.Interactive {
 		agentName := harnessAgentName(opts.AgentOverride, name, townRoot, m.rig.Path)
-		preset := config.GetAgentPresetByName(agentName)
+		preset := config.AgentRegistryFor(townRoot, m.rig.Path).Preset(agentName)
 		if preset != nil && preset.EmitsPermissionWarning {
 			if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
 				// Non-fatal — agent might still start

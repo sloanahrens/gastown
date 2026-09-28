@@ -168,10 +168,14 @@ func TestIsKnownPreset(t *testing.T) {
 	}
 }
 
-func TestLoadAgentRegistry(t *testing.T) {
+func TestLoadAgentRegistryForTown(t *testing.T) {
+	t.Parallel()
 	// Create temp directory for test config
 	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "agents.json")
+	configPath := DefaultAgentRegistryPath(tmpDir)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 
 	// Write custom agent config
 	customRegistry := AgentRegistry{
@@ -194,19 +198,14 @@ func TestLoadAgentRegistry(t *testing.T) {
 		t.Fatalf("failed to write test config: %v", err)
 	}
 
-	// Reset global registry for test isolation. t.Cleanup (not a trailing
-	// ResetRegistryForTesting call) so a t.Fatal mid-test still restores the
-	// builtin registry before any parallel sibling runs (gt-hvzy.3).
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
-
 	// Load should succeed
-	if err := LoadAgentRegistry(configPath); err != nil {
-		t.Fatalf("LoadAgentRegistry failed: %v", err)
+	reg, err := LoadAgentRegistryFor(tmpDir, "")
+	if err != nil {
+		t.Fatalf("LoadAgentRegistryFor failed: %v", err)
 	}
 
 	// Check custom agent is available
-	myAgent := GetAgentPresetByName("my-agent")
+	myAgent := reg.Preset("my-agent")
 	if myAgent == nil {
 		t.Fatal("custom agent 'my-agent' not found after loading registry")
 	}
@@ -216,9 +215,14 @@ func TestLoadAgentRegistry(t *testing.T) {
 	}
 
 	// Check built-ins still accessible
-	claude := GetAgentPresetByName("claude")
+	claude := reg.Preset("claude")
 	if claude == nil {
 		t.Fatal("built-in 'claude' not found after loading registry")
+	}
+
+	// Loading a registry changes nothing process-wide (gt-rg4f1).
+	if GetAgentPresetByName("my-agent") != nil {
+		t.Fatal("custom agent leaked into the built-in registry")
 	}
 }
 
@@ -227,8 +231,7 @@ func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
 	// GetProcessNames so that liveness checks (IsAgentAlive, daemon heartbeat,
 	// cleanup) respect user-configured process names.
 	// Real-world case: NixOS wraps claude as ".claude-unwrapped".
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 
 	// Before loading any registry, GetProcessNames returns the builtin default.
 	builtinNames := GetProcessNames("claude")
@@ -238,7 +241,10 @@ func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
 
 	// Write a settings/agents.json that adds ".claude-unwrapped" to process_names.
 	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "agents.json")
+	configPath := DefaultAgentRegistryPath(tmpDir)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 
 	customRegistry := AgentRegistry{
 		Version: CurrentAgentRegistryVersion,
@@ -260,15 +266,16 @@ func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	// After loading the registry, GetProcessNames must return the override.
-	if err := LoadAgentRegistry(configPath); err != nil {
-		t.Fatalf("LoadAgentRegistry: %v", err)
+	// The town's registry must return the override.
+	reg, err := LoadAgentRegistryFor(tmpDir, "")
+	if err != nil {
+		t.Fatalf("LoadAgentRegistryFor: %v", err)
 	}
 
-	got := GetProcessNames("claude")
+	got := reg.ProcessNames("claude")
 	want := []string{"node", "claude", ".claude-unwrapped"}
 	if len(got) != len(want) {
-		t.Fatalf("GetProcessNames(claude) after LoadAgentRegistry = %v, want %v", got, want)
+		t.Fatalf("ProcessNames(claude) = %v, want %v", got, want)
 	}
 	for i := range got {
 		if got[i] != want[i] {
@@ -277,15 +284,8 @@ func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
 	}
 }
 
-// TestResolveProcessNames must NOT be t.Parallel(): its subtests call
-// RegisterAgentForTesting and ResetRegistryForTesting against the
-// process-global agent registry. Go defers every parallel test until the
-// sequential pass has finished, so keeping this test sequential guarantees
-// its mutations can never overlap a parallel reader such as
-// TestGetSessionIDEnvVar (gt-hvzy.3).
 func TestResolveProcessNames(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -407,17 +407,14 @@ func TestResolveProcessNames(t *testing.T) {
 	// Custom agents loaded from agents.json may store full paths in Command.
 	// ResolveProcessNames must normalize both sides to match correctly.
 	t.Run("registry preset with absolute-path command matches", func(t *testing.T) {
-		RegisterAgentForTesting("custom-tool", AgentPresetInfo{
+		reg := registryWith(AgentPresetInfo{
 			Name:         "custom-tool",
 			Command:      "/opt/bin/custom-tool",
 			ProcessNames: []string{"custom-tool", "node"},
 		})
-		t.Cleanup(func() {
-			ResetRegistryForTesting()
-		})
 
 		// Query with basename — should match via filepath.Base normalization
-		got := ResolveProcessNames("custom-tool", "custom-tool")
+		got := reg.ResolveProcessNames("custom-tool", "custom-tool")
 		want := []string{"custom-tool", "node"}
 		if len(got) != len(want) {
 			t.Fatalf("ResolveProcessNames with abs-path registry = %v, want %v", got, want)
@@ -430,17 +427,14 @@ func TestResolveProcessNames(t *testing.T) {
 	})
 
 	t.Run("registry preset with absolute-path command matches via command lookup", func(t *testing.T) {
-		RegisterAgentForTesting("abs-tool", AgentPresetInfo{
+		reg := registryWith(AgentPresetInfo{
 			Name:         "abs-tool",
 			Command:      "/usr/local/bin/special-binary",
 			ProcessNames: []string{"special-binary", "helper"},
 		})
-		t.Cleanup(func() {
-			ResetRegistryForTesting()
-		})
 
 		// Query with different agent name but matching command basename
-		got := ResolveProcessNames("unknown-agent", "special-binary")
+		got := reg.ResolveProcessNames("unknown-agent", "special-binary")
 		want := []string{"special-binary", "helper"}
 		if len(got) != len(want) {
 			t.Fatalf("ResolveProcessNames command-based lookup with abs-path = %v, want %v", got, want)
@@ -525,10 +519,9 @@ func TestResolveProcessNames(t *testing.T) {
 	}
 	for _, tc := range wrapperCases {
 		t.Run(tc.name, func(t *testing.T) {
-			RegisterAgentForTesting(string(tc.agent.Name), tc.agent)
-			t.Cleanup(ResetRegistryForTesting)
+			reg := registryWith(tc.agent)
 
-			got := ResolveProcessNames(string(tc.agent.Name), tc.command, tc.agent.Args...)
+			got := reg.ResolveProcessNames(string(tc.agent.Name), tc.command, tc.agent.Args...)
 			if len(got) != len(tc.want) {
 				t.Fatalf("ResolveProcessNames(%q, %q) = %v, want %v", tc.agent.Name, tc.command, got, tc.want)
 			}
@@ -545,9 +538,7 @@ func TestResolveProcessNames(t *testing.T) {
 	// preset; Args live only on the caller's RuntimeConfig. Caller args must
 	// take precedence so wrapper-unwrap finds the real binary.
 	t.Run("caller args used when registry holds canonical preset", func(t *testing.T) {
-		ResetRegistryForTesting()
-		t.Cleanup(ResetRegistryForTesting)
-		// No RegisterAgentForTesting — registry has canonical built-in claude
+		// Built-in registry only — it has canonical built-in claude
 		// (Command="claude", ProcessNames=[node, claude], Args=[--dangerously-...]).
 		got := ResolveProcessNames("claude", "env",
 			"-u", "ANTHROPIC_API_KEY", "claude", "--dangerously-skip-permissions", "--effort", "high")
@@ -594,41 +585,6 @@ func TestAgentPresetApprovalFlags(t *testing.T) {
 				t.Errorf("preset %s args %v missing expected %s", tt.preset, info.Args, tt.wantArg)
 			}
 		})
-	}
-}
-
-func TestMergeWithPreset(t *testing.T) {
-	t.Parallel()
-	// Test that user config overrides preset defaults
-	userConfig := &RuntimeConfig{
-		Command: "/custom/claude",
-		Args:    []string{"--custom-arg"},
-	}
-
-	merged := userConfig.MergeWithPreset(AgentClaude)
-
-	if merged.Command != "/custom/claude" {
-		t.Errorf("merged command should be user value, got %s", merged.Command)
-	}
-
-	if len(merged.Args) != 1 || merged.Args[0] != "--custom-arg" {
-		t.Errorf("merged args should be user value, got %v", merged.Args)
-	}
-
-	// Test nil config gets preset defaults
-	var nilConfig *RuntimeConfig
-	merged = nilConfig.MergeWithPreset(AgentClaude)
-
-	if !isClaudeCmd(merged.Command) {
-		t.Errorf("nil config merge should get preset command (claude or path), got %s", merged.Command)
-	}
-
-	// Test empty config gets preset defaults
-	emptyConfig := &RuntimeConfig{}
-	merged = emptyConfig.MergeWithPreset(AgentGemini)
-
-	if merged.Command != "gemini" {
-		t.Errorf("empty config merge should get preset command, got %s", merged.Command)
 	}
 }
 
@@ -1027,11 +983,9 @@ func TestDefaultRigAgentRegistryPath(t *testing.T) {
 	}
 }
 
-// TestLoadRigAgentRegistry verifies that rig-level agent registry is loaded correctly.
-func TestLoadRigAgentRegistry(t *testing.T) {
-	// Reset registry for test isolation
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+// TestLoadAgentRegistryForRig verifies that a rig-level agent registry is loaded correctly.
+func TestLoadAgentRegistryForRig(t *testing.T) {
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	registryPath := filepath.Join(tmpDir, "settings", "agents.json")
@@ -1063,11 +1017,12 @@ func TestLoadRigAgentRegistry(t *testing.T) {
 
 	// Test 1: Load should succeed and merge agents
 	t.Run("load and merge", func(t *testing.T) {
-		if err := LoadRigAgentRegistry(registryPath); err != nil {
-			t.Fatalf("LoadRigAgentRegistry(%s) failed: %v", registryPath, err)
+		reg, err := LoadAgentRegistryFor("", tmpDir)
+		if err != nil {
+			t.Fatalf("LoadAgentRegistryFor(rig %s) failed: %v", tmpDir, err)
 		}
 
-		info := GetAgentPresetByName("opencode")
+		info := reg.Preset("opencode")
 		if info == nil {
 			t.Fatal("expected opencode agent to be available after loading rig registry")
 		}
@@ -1094,25 +1049,27 @@ func TestLoadRigAgentRegistry(t *testing.T) {
 
 	// Test 2: File not found should return nil (no error)
 	t.Run("file not found", func(t *testing.T) {
-		nonExistentPath := filepath.Join(tmpDir, "other-rig", "settings", "agents.json")
-		if err := LoadRigAgentRegistry(nonExistentPath); err != nil {
-			t.Errorf("LoadRigAgentRegistry(%s) should not error for non-existent file: %v", nonExistentPath, err)
+		otherRig := filepath.Join(tmpDir, "other-rig")
+		reg, err := LoadAgentRegistryFor("", otherRig)
+		if err != nil {
+			t.Errorf("LoadAgentRegistryFor(rig %s) should not error for non-existent file: %v", otherRig, err)
 		}
 
-		// Verify that previously loaded agent (from test 1) is still available
-		info := GetAgentPresetByName("opencode")
+		// A rig without its own file gets the built-in opencode preset, not
+		// the one loaded for another rig above (gt-rg4f1).
+		info := reg.Preset("opencode")
 		if info == nil {
-			t.Errorf("expected opencode agent to still be available after loading non-existent path")
-			return
+			t.Fatal("expected built-in opencode preset")
 		}
-		if info.Command != "opencode" {
-			t.Errorf("expected opencode agent command to be 'opencode', got %s", info.Command)
+		if len(info.Args) == 1 && info.Args[0] == "--session" {
+			t.Errorf("opencode override from another rig leaked: args %v", info.Args)
 		}
 	})
 
 	// Test 3: Invalid JSON should error
 	t.Run("invalid JSON", func(t *testing.T) {
-		invalidRegistryPath := filepath.Join(tmpDir, "bad-rig", "settings", "agents.json")
+		badRig := filepath.Join(tmpDir, "bad-rig")
+		invalidRegistryPath := filepath.Join(badRig, "settings", "agents.json")
 		badConfigDir := filepath.Join(tmpDir, "bad-rig", "settings")
 		if err := os.MkdirAll(badConfigDir, 0755); err != nil {
 			t.Fatalf("failed to create bad-rig settings dir: %v", err)
@@ -1123,8 +1080,12 @@ func TestLoadRigAgentRegistry(t *testing.T) {
 			t.Fatalf("failed to write invalid registry file: %v", err)
 		}
 
-		if err := LoadRigAgentRegistry(invalidRegistryPath); err == nil {
-			t.Errorf("LoadRigAgentRegistry(%s) should error for invalid JSON: got nil", invalidRegistryPath)
+		reg, err := LoadAgentRegistryFor("", badRig)
+		if err == nil {
+			t.Errorf("LoadAgentRegistryFor(rig %s) should error for invalid JSON: got nil", badRig)
+		}
+		if reg == nil || reg.Preset("claude") == nil {
+			t.Errorf("registry with a bad rig file should still hold the built-ins")
 		}
 	})
 }
@@ -1196,13 +1157,13 @@ func TestOpenCodeProviderDefaults(t *testing.T) {
 	t.Parallel()
 
 	// Test defaultReadyDelayMs for opencode
-	delay := defaultReadyDelayMs("opencode")
+	delay := defaultReadyDelayMs(nil, "opencode")
 	if delay != 8000 {
 		t.Errorf("defaultReadyDelayMs(opencode) = %d, want 8000", delay)
 	}
 
 	// Test defaultProcessNames for opencode (from preset: opencode, node, bun)
-	names := defaultProcessNames("opencode", "opencode")
+	names := defaultProcessNames(nil, "opencode", "opencode")
 	if len(names) != 3 {
 		t.Errorf("defaultProcessNames(opencode) length = %d, want 3", len(names))
 	}
@@ -1211,7 +1172,7 @@ func TestOpenCodeProviderDefaults(t *testing.T) {
 	}
 
 	// Test defaultInstructionsFile for opencode
-	instFile := defaultInstructionsFile("opencode")
+	instFile := defaultInstructionsFile(nil, "opencode")
 	if instFile != "AGENTS.md" {
 		t.Errorf("defaultInstructionsFile(opencode) = %q, want AGENTS.md", instFile)
 	}
@@ -1359,69 +1320,69 @@ func TestPiAgentPreset(t *testing.T) {
 func TestCopilotProviderDefaults(t *testing.T) {
 	t.Parallel()
 
-	cmd := defaultRuntimeCommand("copilot")
+	cmd := defaultRuntimeCommand(nil, "copilot")
 	if cmd != "copilot" {
 		t.Errorf("defaultRuntimeCommand(copilot) = %q, want copilot", cmd)
 	}
 
-	args := defaultRuntimeArgs("copilot")
+	args := defaultRuntimeArgs(nil, "copilot")
 	if len(args) != 1 || args[0] != "--yolo" {
 		t.Errorf("defaultRuntimeArgs(copilot) = %v, want [--yolo]", args)
 	}
 
-	mode := defaultPromptMode("copilot")
+	mode := defaultPromptMode(nil, "copilot")
 	if mode != "arg" {
 		t.Errorf("defaultPromptMode(copilot) = %q, want arg", mode)
 	}
 
-	env := defaultSessionIDEnv("copilot")
+	env := defaultSessionIDEnv(nil, "copilot")
 	if env != "" {
 		t.Errorf("defaultSessionIDEnv(copilot) = %q, want empty", env)
 	}
 
-	configEnv := defaultConfigDirEnv("copilot")
+	configEnv := defaultConfigDirEnv(nil, "copilot")
 	if configEnv != "COPILOT_HOME" {
 		t.Errorf("defaultConfigDirEnv(copilot) = %q, want COPILOT_HOME", configEnv)
 	}
 
-	provider := defaultHooksProvider("copilot")
+	provider := defaultHooksProvider(nil, "copilot")
 	if provider != "copilot" {
 		t.Errorf("defaultHooksProvider(copilot) = %q, want copilot", provider)
 	}
 
-	if defaultHooksInformational("copilot") {
+	if defaultHooksInformational(nil, "copilot") {
 		t.Error("defaultHooksInformational(copilot) should be false (executable hooks)")
 	}
-	if defaultHooksInformational("claude") {
+	if defaultHooksInformational(nil, "claude") {
 		t.Error("defaultHooksInformational(claude) should be false")
 	}
 
-	dir := defaultHooksDir("copilot")
+	dir := defaultHooksDir(nil, "copilot")
 	if dir != ".github/hooks" {
 		t.Errorf("defaultHooksDir(copilot) = %q, want .github/hooks", dir)
 	}
 
-	file := defaultHooksFile("copilot")
+	file := defaultHooksFile(nil, "copilot")
 	if file != "gastown.json" {
 		t.Errorf("defaultHooksFile(copilot) = %q, want gastown.json", file)
 	}
 
-	names := defaultProcessNames("copilot", "copilot")
+	names := defaultProcessNames(nil, "copilot", "copilot")
 	if len(names) != 1 || names[0] != "copilot" {
 		t.Errorf("defaultProcessNames(copilot) = %v, want [copilot]", names)
 	}
 
-	prefix := defaultReadyPromptPrefix("copilot")
+	prefix := defaultReadyPromptPrefix(nil, "copilot")
 	if prefix != "" {
 		t.Errorf("defaultReadyPromptPrefix(copilot) = %q, want empty (GA has no ❯ prompt)", prefix)
 	}
 
-	delay := defaultReadyDelayMs("copilot")
+	delay := defaultReadyDelayMs(nil, "copilot")
 	if delay != 5000 {
 		t.Errorf("defaultReadyDelayMs(copilot) = %d, want 5000", delay)
 	}
 
-	instFile := defaultInstructionsFile("copilot")
+	instFile := defaultInstructionsFile(nil, "copilot")
 	if instFile != "AGENTS.md" {
 		t.Errorf("defaultInstructionsFile(copilot) = %q, want AGENTS.md", instFile)
 	}
@@ -1541,11 +1502,8 @@ func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
 	}
 }
 
-// TestResolveACPConfig must NOT be t.Parallel(): it resets the
-// process-global agent registry. See TestResolveProcessNames (gt-hvzy.3).
 func TestResolveACPConfig(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 
 	tests := []struct {
 		name      string
@@ -1605,20 +1563,19 @@ func TestResolveACPConfig(t *testing.T) {
 }
 
 func TestSupportsACPWithCustomAgent(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 
-	// Register a custom agent that uses 'opencode' command but doesn't have ACP config
-	RegisterAgentForTesting("custom-model", AgentPresetInfo{
+	// A custom agent that uses 'opencode' command but doesn't have ACP config
+	reg := registryWith(AgentPresetInfo{
 		Name:    "custom-model",
 		Command: "opencode",
 	})
 
-	if !SupportsACP("custom-model") {
+	if !reg.SupportsACP("custom-model") {
 		t.Error("SupportsACP(custom-model) = false, want true (uses opencode command)")
 	}
 
-	acpCfg := GetACPConfig("custom-model")
+	acpCfg := reg.ACPConfig("custom-model")
 	if acpCfg == nil {
 		t.Fatal("GetACPConfig(custom-model) = nil, want config")
 	}
@@ -1627,11 +1584,8 @@ func TestSupportsACPWithCustomAgent(t *testing.T) {
 	}
 }
 
-// TestGetACPCommand must NOT be t.Parallel(): it resets the process-global
-// agent registry. See TestResolveProcessNames (gt-hvzy.3).
 func TestGetACPCommand(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 
 	tests := []struct {
 		agentName string
@@ -1660,11 +1614,13 @@ func TestGetACPCommand(t *testing.T) {
 }
 
 func TestACPConfig(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 
 	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "agents.json")
+	configPath := DefaultAgentRegistryPath(tmpDir)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 
 	customRegistry := AgentRegistry{
 		Version: CurrentAgentRegistryVersion,
@@ -1693,27 +1649,28 @@ func TestACPConfig(t *testing.T) {
 		t.Fatalf("failed to write test config: %v", err)
 	}
 
-	if err := LoadAgentRegistry(configPath); err != nil {
-		t.Fatalf("LoadAgentRegistry failed: %v", err)
+	reg, err := LoadAgentRegistryFor(tmpDir, "")
+	if err != nil {
+		t.Fatalf("LoadAgentRegistryFor failed: %v", err)
 	}
 
-	if !SupportsACP("custom-agent") {
-		t.Error("SupportsACP(custom-agent) = false, want true (has ACP)")
+	if !reg.SupportsACP("custom-agent") {
+		t.Error("reg.SupportsACP(custom-agent) = false, want true (has ACP)")
 	}
 
-	if GetACPCommand("custom-agent") != "acp" {
-		t.Errorf("GetACPCommand(custom-agent) = %q, want acp", GetACPCommand("custom-agent"))
+	if reg.ACPCommand("custom-agent") != "acp" {
+		t.Errorf("reg.ACPCommand(custom-agent) = %q, want acp", reg.ACPCommand("custom-agent"))
 	}
 
-	if SupportsACP("legacy-agent") {
-		t.Error("SupportsACP(legacy-agent) = true, want false (no ACP)")
+	if reg.SupportsACP("legacy-agent") {
+		t.Error("reg.SupportsACP(legacy-agent) = true, want false (no ACP)")
 	}
 
-	if GetACPCommand("legacy-agent") != "" {
-		t.Errorf("GetACPCommand(legacy-agent) = %q, want empty", GetACPCommand("legacy-agent"))
+	if reg.ACPCommand("legacy-agent") != "" {
+		t.Errorf("reg.ACPCommand(legacy-agent) = %q, want empty", reg.ACPCommand("legacy-agent"))
 	}
 
-	agentInfo := GetAgentPresetByName("custom-agent")
+	agentInfo := reg.Preset("custom-agent")
 	if agentInfo == nil {
 		t.Fatal("custom-agent not found after loading registry")
 	}
@@ -1727,8 +1684,7 @@ func TestACPConfig(t *testing.T) {
 // - Subcommand mode: Agent has ACP as a subcommand
 // - Flag mode: Agent uses flags to enable ACP
 func TestACPModes(t *testing.T) {
-	ResetRegistryForTesting()
-	t.Cleanup(ResetRegistryForTesting)
+	t.Parallel()
 
 	tests := []struct {
 		name     string

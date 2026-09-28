@@ -77,8 +77,8 @@ var SystemPromptRenderer func(role, townRoot, rigPath, agentName, path string) e
 // installed or rendering fails, the config is returned unchanged and gt prime
 // prints the static role text itself, so it degrades to the old behavior
 // rather than a dead session.
-func withRoleSystemPromptFlag(rc *RuntimeConfig, role, townRoot, rigPath, agentName string) *RuntimeConfig {
-	if rc == nil || !isClaudeAgent(rc) {
+func withRoleSystemPromptFlag(reg *AgentRegistry, rc *RuntimeConfig, role, townRoot, rigPath, agentName string) *RuntimeConfig {
+	if rc == nil || !isClaudeAgentIn(reg, rc) {
 		return rc
 	}
 	path := SystemPromptFilePath(role, townRoot, rigPath, agentName)
@@ -136,8 +136,9 @@ func ResolveRoleAgentConfigWithOverride(role, townRoot, rigPath, agentOverride, 
 			return nil, err
 		}
 	}
-	rc = withRoleSettingsFlag(rc, role, rigPath)
-	return withRoleSystemPromptFlag(rc, role, townRoot, rigPath, agentName), nil
+	reg := AgentRegistryFor(townRoot, rigPath)
+	rc = withRoleSettingsFlag(reg, rc, role, rigPath)
+	return withRoleSystemPromptFlag(reg, rc, role, townRoot, rigPath, agentName), nil
 }
 
 // systemPromptFileReady reports whether a rendered system prompt exists at path.

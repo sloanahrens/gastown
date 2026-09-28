@@ -251,14 +251,14 @@ func runConfigAgentList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading town settings: %w", err)
 	}
 
-	// Load agent registry
-	registryPath := config.DefaultAgentRegistryPath(townRoot)
-	if err := config.LoadAgentRegistry(registryPath); err != nil {
+	// Load the town's agent registry (built-ins plus settings/agents.json)
+	registry, err := config.LoadAgentRegistryFor(townRoot, "")
+	if err != nil {
 		return fmt.Errorf("loading agent registry: %w", err)
 	}
 
 	// Collect all agents
-	builtInAgents := config.ListAgentPresets()
+	builtInAgents := registry.Names()
 	customAgents := make(map[string]*config.RuntimeConfig)
 	if townSettings.Agents != nil {
 		for name, runtime := range townSettings.Agents {
@@ -269,7 +269,7 @@ func runConfigAgentList(cmd *cobra.Command, args []string) error {
 	// Build list items
 	var items []AgentListItem
 	for _, name := range builtInAgents {
-		preset := config.GetAgentPresetByName(name)
+		preset := registry.Preset(name)
 		if preset != nil {
 			items = append(items, AgentListItem{
 				Name:     name,
@@ -342,9 +342,9 @@ func runConfigAgentGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading town settings: %w", err)
 	}
 
-	// Load agent registry
-	registryPath := config.DefaultAgentRegistryPath(townRoot)
-	if err := config.LoadAgentRegistry(registryPath); err != nil {
+	// Load the town's agent registry (built-ins plus settings/agents.json)
+	registry, err := config.LoadAgentRegistryFor(townRoot, "")
+	if err != nil {
 		return fmt.Errorf("loading agent registry: %w", err)
 	}
 
@@ -357,7 +357,7 @@ func runConfigAgentGet(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check built-in agents
-	preset := config.GetAgentPresetByName(name)
+	preset := registry.Preset(name)
 	if preset != nil {
 		runtime := &config.RuntimeConfig{
 			Command: preset.Command,
@@ -411,6 +411,8 @@ func runConfigAgentSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading town settings: %w", err)
 	}
 
+	registry := config.AgentRegistryFor(townRoot, "")
+
 	// Parse command line into command and args
 	parts := strings.Fields(commandLine)
 	if len(parts) == 0 {
@@ -430,7 +432,7 @@ func runConfigAgentSet(cmd *cobra.Command, args []string) error {
 		if idx := strings.LastIndexByte(cmdBase, '/'); idx >= 0 {
 			cmdBase = cmdBase[idx+1:]
 		}
-		if config.IsKnownPreset(cmdBase) {
+		if registry.IsKnown(cmdBase) {
 			provider = cmdBase
 		}
 	}
@@ -450,7 +452,7 @@ func runConfigAgentSet(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Agent '%s' set to: %s\n", style.Bold.Render(name), commandLine)
 
 	// Check if this overrides a built-in
-	builtInAgents := config.ListAgentPresets()
+	builtInAgents := registry.Names()
 	for _, builtin := range builtInAgents {
 		if name == builtin {
 			fmt.Printf("\n%s\n", style.Dim.Render("(overriding built-in '"+builtin+"' preset)"))
@@ -470,7 +472,7 @@ func runConfigAgentRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if trying to remove built-in
-	builtInAgents := config.ListAgentPresets()
+	builtInAgents := config.AgentRegistryFor(townRoot, "").Names()
 	for _, builtin := range builtInAgents {
 		if name == builtin {
 			return fmt.Errorf("cannot remove built-in agent '%s' (use 'gt config agent set' to override it)", name)
@@ -514,9 +516,9 @@ func runConfigDefaultAgent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading town settings: %w", err)
 	}
 
-	// Load agent registry
-	registryPath := config.DefaultAgentRegistryPath(townRoot)
-	if err := config.LoadAgentRegistry(registryPath); err != nil {
+	// Load the town's agent registry (built-ins plus settings/agents.json)
+	registry, err := config.LoadAgentRegistryFor(townRoot, "")
+	if err != nil {
 		return fmt.Errorf("loading agent registry: %w", err)
 	}
 
@@ -535,7 +537,7 @@ func runConfigDefaultAgent(cmd *cobra.Command, args []string) error {
 
 	// Verify agent exists
 	isValid := false
-	builtInAgents := config.ListAgentPresets()
+	builtInAgents := registry.Names()
 	for _, builtin := range builtInAgents {
 		if name == builtin {
 			isValid = true

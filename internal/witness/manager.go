@@ -345,7 +345,7 @@ func buildWitnessStartCommand(rigPath, rigName, townRoot, sessionName, agentOver
 	}
 	if roleConfig != nil && roleConfig.StartCommand != "" {
 		rc := config.ResolveRoleAgentConfig("witness", townRoot, rigPath)
-		if !config.IsResolvedAgentClaude(rc) {
+		if !config.IsResolvedAgentClaudeIn(townRoot, rigPath, rc) {
 			// Non-Claude agent: skip TOML start_command entirely.
 			// Built-in role TOMLs hardcode "exec claude ..." which is wrong
 			// for non-Claude agents. Fall through to BuildStartupCommandFromConfig

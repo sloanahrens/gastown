@@ -1008,7 +1008,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		if staleAgentPin && roleRuntimeConfig != nil {
 			command, args = roleRuntimeConfig.Command, roleRuntimeConfig.Args
 		}
-		resolved := config.ResolveProcessNames(resolvedAgent, command, args...)
+		resolved := config.AgentRegistryFor(townRoot, rigPath).ResolveProcessNames(resolvedAgent, command, args...)
 		envMap["GT_PROCESS_NAMES"] = strings.Join(resolved, ",")
 	}
 
@@ -1140,7 +1140,7 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName string) {
 			}
 		}
 		if roleRuntimeConfig != nil {
-			resolved := config.ResolveProcessNames(currentAgent, roleRuntimeConfig.Command, roleRuntimeConfig.Args...)
+			resolved := config.AgentRegistryFor(townRoot, rigPath).ResolveProcessNames(currentAgent, roleRuntimeConfig.Command, roleRuntimeConfig.Args...)
 			processNames = strings.Join(resolved, ",")
 		}
 	}
@@ -1149,7 +1149,7 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName string) {
 		if pn := os.Getenv("GT_PROCESS_NAMES"); pn != "" {
 			processNames = pn
 		} else {
-			resolved := config.ResolveProcessNames(currentAgent, "")
+			resolved := config.AgentRegistryFor(townRoot, rigPath).ResolveProcessNames(currentAgent, "")
 			processNames = strings.Join(resolved, ",")
 		}
 	}

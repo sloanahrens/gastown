@@ -11,9 +11,10 @@ import (
 )
 
 // allowedPresetLookups names the only call sites outside internal/config that
-// may call GetAgentPresetByName: each passes a built-in/registry or
-// already-resolved harness name, never a custom agent name. Key: file (relative
-// to internal/) + "#" + enclosing function. Anything else must use
+// may look a preset up by name — GetAgentPresetByName, or Preset on an
+// AgentRegistry from LoadAgentRegistryFor: each passes a built-in/registry or
+// already-resolved harness name, never a custom agent name. Key: file
+// (relative to internal/) + "#" + enclosing function. Anything else must use
 // ResolveAgentPreset (claude-9a8).
 var allowedPresetLookups = map[string]bool{
 	"cmd/seance.go#resolveSeanceCommand": true,
@@ -23,9 +24,23 @@ var allowedPresetLookups = map[string]bool{
 	"runtime/runtime.go#EnsureSettingsForRole": true,
 	"crew/manager.go#buildResumeArgs":          true,
 	"crew/manager.go#Start":                    true,
+	// ensureAgentReady wants the readiness settings of a registry preset; an
+	// agent defined only in settings/config.json deliberately falls back to a
+	// fixed delay.
+	"cmd/sling_helpers.go#ensureAgentReady": true,
+	// Looks up the built-in claude preset by its constant.
+	"cmd/sling_helpers.go#shouldAcceptPermissionWarning": true,
 	// provision.go receives harness names only: runtime passes the hooks
 	// provider and rig/manager resolves default_agent first (claude-9a8).
 	"templates/commands/provision.go#getAgentConfigDir": true,
+}
+
+// presetLookupFuncs are the selector names TestNoAgentNamePresetLookups
+// treats as a lookup by agent name.
+var presetLookupFuncs = map[string]bool{
+	"GetAgentPresetByName": true,
+	"GetAgentPreset":       true,
+	"Preset":               true,
 }
 
 func TestNoAgentNamePresetLookups(t *testing.T) {
@@ -63,7 +78,7 @@ func TestNoAgentNamePresetLookups(t *testing.T) {
 					return true
 				}
 				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "GetAgentPresetByName" {
+				if !ok || !presetLookupFuncs[sel.Sel.Name] {
 					return true
 				}
 				key := filepath.ToSlash(rel) + "#" + fn.Name.Name
@@ -85,6 +100,6 @@ func TestNoAgentNamePresetLookups(t *testing.T) {
 		}
 	}
 	for _, b := range bad {
-		t.Errorf("GetAgentPresetByName called with a possibly custom agent name at %s; use ResolveAgentPreset (claude-9a8), or add to allowedPresetLookups if the name is always a harness name", b)
+		t.Errorf("preset looked up by name with a possibly custom agent name at %s; use ResolveAgentPreset (claude-9a8), or add to allowedPresetLookups if the name is always a harness name", b)
 	}
 }

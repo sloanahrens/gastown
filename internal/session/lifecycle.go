@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -426,7 +427,15 @@ func MergeRuntimeLivenessEnv(envVars map[string]string, runtimeConfig *config.Ru
 				argsForLookup = nil
 			}
 		}
-		processNames := config.ResolveProcessNames(agentForLookup, commandForLookup, argsForLookup...)
+		// Resolve against the agent registry of the session's own town and
+		// rig, never another rig's settings/agents.json (gt-rg4f1).
+		townRoot := envVars["GT_ROOT"]
+		rigPath := ""
+		if rig := envVars["GT_RIG"]; rig != "" && townRoot != "" {
+			rigPath = filepath.Join(townRoot, rig)
+		}
+		registry := config.AgentRegistryFor(townRoot, rigPath)
+		processNames := registry.ResolveProcessNames(agentForLookup, commandForLookup, argsForLookup...)
 		if len(processNames) > 0 {
 			envVars["GT_PROCESS_NAMES"] = strings.Join(processNames, ",")
 		}

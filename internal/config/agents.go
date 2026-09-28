@@ -3,11 +3,11 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"sync"
 )
 
 type rawAgentRegistry struct {
@@ -551,73 +551,119 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 	},
 }
 
-// Registry state with proper synchronization.
-var (
-	// registryMu protects all registry state.
-	registryMu sync.RWMutex
-	// globalRegistry is the merged registry of built-in and user-defined agents.
-	globalRegistry *AgentRegistry
-	// loadedPaths tracks which config files have been loaded to avoid redundant reads.
-	loadedPaths = make(map[string]bool)
-	// registryInitialized tracks if builtins have been copied.
-	registryInitialized bool
-)
+// builtinAgentRegistry holds the built-in presets. It is never mutated: every
+// registry that includes user files is a fresh copy built by
+// LoadAgentRegistryFor, so one rig's settings/agents.json cannot leak into
+// another rig's resolution (gt-rg4f1).
+var builtinAgentRegistry = newBuiltinAgentRegistry()
 
-// initRegistry initializes the global registry with built-in presets.
-// Caller must hold registryMu write lock.
-func initRegistryLocked() {
-	if registryInitialized {
-		return
-	}
-	globalRegistry = &AgentRegistry{
+func newBuiltinAgentRegistry() *AgentRegistry {
+	reg := &AgentRegistry{
 		Version: CurrentAgentRegistryVersion,
-		Agents:  make(map[string]*AgentPresetInfo),
+		Agents:  make(map[string]*AgentPresetInfo, len(builtinPresets)),
 	}
-	// Copy built-in presets
 	for name, preset := range builtinPresets {
-		globalRegistry.Agents[string(name)] = preset
+		reg.Agents[string(name)] = preset
 	}
-	registryInitialized = true
+	return reg
 }
 
-// loadAgentRegistryFromPath loads agent definitions from a JSON file and merges with built-ins.
-// Caller must hold registryMu write lock.
-func loadAgentRegistryFromPathLocked(path string) error {
-	initRegistryLocked()
-
-	if loadedPaths[path] {
-		return nil
+// LoadAgentRegistryFor returns the agent registry in effect for a rig: the
+// built-in presets, overlaid by <townRoot>/settings/agents.json, overlaid by
+// <rigPath>/settings/agents.json. An entry in a file is merged onto the entry
+// of the same name below it, so an override only needs the fields it changes.
+// An empty townRoot or rigPath skips that layer, as does a missing file.
+//
+// The files are read on every call and the result is a new registry owned by
+// the caller: nothing is cached between scopes. A file that cannot be read or
+// parsed is skipped as a whole and reported in the returned error; the
+// registry is still usable.
+func LoadAgentRegistryFor(townRoot, rigPath string) (*AgentRegistry, error) {
+	reg := &AgentRegistry{
+		Version: CurrentAgentRegistryVersion,
+		Agents:  make(map[string]*AgentPresetInfo, len(builtinAgentRegistry.Agents)),
 	}
+	for name, preset := range builtinAgentRegistry.Agents {
+		reg.Agents[name] = preset
+	}
+	var errs []error
+	if townRoot != "" {
+		if err := reg.overlayFile(DefaultAgentRegistryPath(townRoot)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if rigPath != "" {
+		if err := reg.overlayFile(RigAgentRegistryPath(rigPath)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return reg, errors.Join(errs...)
+}
 
+// AgentRegistryFor is LoadAgentRegistryFor for callers that resolve agents
+// best-effort: a layer that fails to load is skipped silently.
+func AgentRegistryFor(townRoot, rigPath string) *AgentRegistry {
+	reg, _ := LoadAgentRegistryFor(townRoot, rigPath)
+	return reg
+}
+
+// overlayFile merges the agents defined in a JSON registry file onto r. The
+// file applies entirely or not at all.
+func (r *AgentRegistry) overlayFile(path string) error {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is from config
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Don't cache non-existent paths — the file may be created later
-			// and we need to pick it up on the next load call.
 			return nil
 		}
-		return err
+		return fmt.Errorf("%s: %w", path, err)
 	}
 
 	var userRegistry rawAgentRegistry
 	if err := json.Unmarshal(data, &userRegistry); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", path, err)
 	}
 
+	merged := make(map[string]*AgentPresetInfo, len(userRegistry.Agents))
 	for name, rawPreset := range userRegistry.Agents {
-		merged := cloneAgentPresetInfo(globalRegistry.Agents[name])
-		if merged == nil {
-			merged = &AgentPresetInfo{}
+		info := cloneAgentPresetInfo(r.Agents[name])
+		if info == nil {
+			info = &AgentPresetInfo{}
 		}
-		if err := json.Unmarshal(rawPreset, merged); err != nil {
-			return err
+		if err := json.Unmarshal(rawPreset, info); err != nil {
+			return fmt.Errorf("%s: agent %q: %w", path, name, err)
 		}
-		merged.Name = AgentPreset(name)
-		globalRegistry.Agents[name] = merged
+		info.Name = AgentPreset(name)
+		merged[name] = info
 	}
-
-	loadedPaths[path] = true
+	for name, info := range merged {
+		r.Agents[name] = info
+	}
 	return nil
+}
+
+// agents returns the preset map, treating a nil registry as the built-ins.
+func (r *AgentRegistry) agents() map[string]*AgentPresetInfo {
+	if r == nil || r.Agents == nil {
+		return builtinAgentRegistry.Agents
+	}
+	return r.Agents
+}
+
+// Preset returns the preset registered under name, or nil. A nil registry
+// answers from the built-in presets.
+func (r *AgentRegistry) Preset(name string) *AgentPresetInfo {
+	return r.agents()[name]
+}
+
+// Names returns every registered preset name, sorted.
+func (r *AgentRegistry) Names() []string {
+	return sortedPresetNames(r.agents())
+}
+
+// IsKnown reports whether name is a registered preset.
+func (r *AgentRegistry) IsKnown(name string) bool {
+	_, ok := r.agents()[name]
+	return ok
 }
 
 func cloneAgentPresetInfo(src *AgentPresetInfo) *AgentPresetInfo {
@@ -651,15 +697,6 @@ func cloneAgentPresetInfo(src *AgentPresetInfo) *AgentPresetInfo {
 	return &clone
 }
 
-// LoadAgentRegistry loads agent definitions from a JSON file and merges with built-ins.
-// User-defined agents override built-in presets with the same name.
-// This function caches loaded paths to avoid redundant file reads.
-func LoadAgentRegistry(path string) error {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	return loadAgentRegistryFromPathLocked(path)
-}
-
 // DefaultAgentRegistryPath returns the default path for agent registry.
 // Located alongside other town settings.
 func DefaultAgentRegistryPath(townRoot string) string {
@@ -678,50 +715,28 @@ func RigAgentRegistryPath(rigPath string) string {
 	return DefaultRigAgentRegistryPath(rigPath)
 }
 
-// LoadRigAgentRegistry loads agent definitions from a rig-level JSON file and merges with built-ins.
-// This function works similarly to LoadAgentRegistry but for rig-level configurations.
-func LoadRigAgentRegistry(path string) error {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	return loadAgentRegistryFromPathLocked(path)
-}
-
-// GetAgentPreset returns the preset info for a given agent name.
-// Returns nil if the preset is not found.
+// GetAgentPreset returns the built-in preset info for a given agent name.
+// Returns nil if the preset is not found. Use LoadAgentRegistryFor to see
+// town and rig settings/agents.json overrides.
 func GetAgentPreset(name AgentPreset) *AgentPresetInfo {
-	registryMu.Lock()
-	initRegistryLocked()
-	defer registryMu.Unlock()
-	return globalRegistry.Agents[string(name)]
+	return builtinAgentRegistry.Preset(string(name))
 }
 
-// GetAgentPresetByName returns the preset info by string name.
+// GetAgentPresetByName returns the built-in preset info by string name.
 // Returns nil if not found, allowing caller to fall back to defaults.
 func GetAgentPresetByName(name string) *AgentPresetInfo {
-	registryMu.Lock()
-	initRegistryLocked()
-	defer registryMu.Unlock()
-	return globalRegistry.Agents[name]
+	return builtinAgentRegistry.Preset(name)
 }
 
-// ListAgentPresets returns all known agent preset names.
+// ListAgentPresets returns all built-in agent preset names.
 func ListAgentPresets() []string {
-	registryMu.Lock()
-	initRegistryLocked()
-	defer registryMu.Unlock()
-	names := make([]string, 0, len(globalRegistry.Agents))
-	for name := range globalRegistry.Agents {
-		names = append(names, name)
-	}
-	return names
+	return builtinAgentRegistry.Names()
 }
 
 // BuiltInAgentPresetSummary returns a sorted, comma-separated list of built-in preset names
 // for CLI help text (gt config agent list, default-agent, --provider, etc.).
 func BuiltInAgentPresetSummary() string {
-	names := ListAgentPresets()
-	sort.Strings(names)
-	return strings.Join(names, ", ")
+	return strings.Join(ListAgentPresets(), ", ")
 }
 
 // DefaultAgentPreset returns the default agent preset (Claude).
@@ -729,18 +744,23 @@ func DefaultAgentPreset() AgentPreset {
 	return AgentClaude
 }
 
-// RuntimeConfigFromPreset creates a RuntimeConfig from an agent preset.
+// RuntimeConfigFromPreset creates a RuntimeConfig from a built-in agent preset.
 // This provides the basic Command/Args/Env; additional fields from AgentPresetInfo
 // can be accessed separately for extended functionality.
 func RuntimeConfigFromPreset(preset AgentPreset) *RuntimeConfig {
-	info := GetAgentPreset(preset)
-	return runtimeConfigFromAgentInfo(preset, info)
+	return builtinAgentRegistry.RuntimeConfigFromPreset(preset)
 }
 
-func runtimeConfigFromAgentInfo(preset AgentPreset, info *AgentPresetInfo) *RuntimeConfig {
+// RuntimeConfigFromPreset creates a RuntimeConfig from the preset registered
+// in r under the given name, falling back to Claude defaults.
+func (r *AgentRegistry) RuntimeConfigFromPreset(preset AgentPreset) *RuntimeConfig {
+	return runtimeConfigFromAgentInfo(r, preset, r.Preset(string(preset)))
+}
+
+func runtimeConfigFromAgentInfo(reg *AgentRegistry, preset AgentPreset, info *AgentPresetInfo) *RuntimeConfig {
 	if info == nil {
 		// Fall back to Claude defaults
-		return DefaultRuntimeConfig()
+		return defaultRuntimeConfigIn(reg)
 	}
 
 	// Copy Env map to avoid mutation
@@ -763,18 +783,24 @@ func runtimeConfigFromAgentInfo(preset AgentPreset, info *AgentPresetInfo) *Runt
 		rc.Command = resolveClaudePath()
 	}
 
-	return normalizeRuntimeConfig(rc)
+	return normalizeRuntimeConfigIn(reg, rc)
+}
+
+// BuildResumeCommand builds a command to resume a built-in agent's session.
+// See (*AgentRegistry).BuildResumeCommand.
+func BuildResumeCommand(agentName, sessionID string) string {
+	return builtinAgentRegistry.BuildResumeCommand(agentName, sessionID)
 }
 
 // BuildResumeCommand builds a command to resume an agent session.
 // Returns the full command string including any YOLO/autonomous flags.
 // If sessionID is empty or the agent doesn't support resume, returns empty string.
-func BuildResumeCommand(agentName, sessionID string) string {
+func (r *AgentRegistry) BuildResumeCommand(agentName, sessionID string) string {
 	if sessionID == "" {
 		return ""
 	}
 
-	info := GetAgentPresetByName(agentName)
+	info := r.Preset(agentName)
 	if info == nil || info.ResumeFlag == "" {
 		return ""
 	}
@@ -796,35 +822,45 @@ func BuildResumeCommand(agentName, sessionID string) string {
 	}
 }
 
-// SupportsSessionResume checks if an agent supports session resumption.
+// SupportsSessionResume checks if a built-in agent supports session resumption.
 func SupportsSessionResume(agentName string) bool {
-	info := GetAgentPresetByName(agentName)
+	return builtinAgentRegistry.SupportsSessionResume(agentName)
+}
+
+// SupportsSessionResume checks if an agent supports session resumption.
+func (r *AgentRegistry) SupportsSessionResume(agentName string) bool {
+	info := r.Preset(agentName)
 	return info != nil && info.ResumeFlag != ""
 }
 
-// GetSessionIDEnvVar returns the environment variable name for storing session IDs
-// for a given agent. Returns empty string if the agent doesn't use env vars for this.
+// GetSessionIDEnvVar returns the environment variable name a built-in agent
+// stores its session ID in. See (*AgentRegistry).SessionIDEnvVar.
 func GetSessionIDEnvVar(agentName string) string {
-	// Read the field while still holding registryMu instead of via
-	// GetAgentPresetByName, whose returned pointer outlives its lock scope.
-	// Callers of this function treat the result as an invariant property of
-	// the agent (gt-hvzy.3), so the answer must not depend on where a
-	// concurrent reset/fixture-load happened to land.
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	initRegistryLocked()
-	info := globalRegistry.Agents[agentName]
+	return builtinAgentRegistry.SessionIDEnvVar(agentName)
+}
+
+// SessionIDEnvVar returns the environment variable name for storing session IDs
+// for a given agent. Returns empty string if the agent doesn't use env vars for this.
+func (r *AgentRegistry) SessionIDEnvVar(agentName string) string {
+	info := r.Preset(agentName)
 	if info == nil {
 		return ""
 	}
 	return info.SessionIDEnv
 }
 
-// GetProcessNames returns the process names used to detect if an agent is running.
-// Used by tmux.IsAgentRunning to check pane_current_command.
-// Returns ["node"] for Claude (default) if agent is not found or has no ProcessNames.
+// GetProcessNames returns a built-in agent's process names.
+// See (*AgentRegistry).ProcessNames.
 func GetProcessNames(agentName string) []string {
-	info := GetAgentPresetByName(agentName)
+	return builtinAgentRegistry.ProcessNames(agentName)
+}
+
+// ProcessNames returns the process names used to detect if an agent is running.
+// Used by tmux.IsAgentRunning to check pane_current_command.
+// Returns ["node", "claude"] (Claude, the default) if the agent is not found or
+// has no ProcessNames.
+func (r *AgentRegistry) ProcessNames(agentName string) []string {
+	info := r.Preset(agentName)
 	if info == nil || len(info.ProcessNames) == 0 {
 		// Default to Claude's process names for backwards compatibility
 		return []string{"node", "claude"}
@@ -871,11 +907,12 @@ func wrapperFlagsTakeValue(wrapper string) map[string]bool {
 }
 
 // lookupProcessNamesByBinary returns the ProcessNames of the preset whose
-// Command (or its basename) matches realBin. Searches the runtime registry
-// first, then the canonical builtinPresets so shadowed builtins still resolve.
-// Caller must hold registryMu.
-func lookupProcessNamesByBinary(realBin string) []string {
-	for _, preset := range globalRegistry.Agents {
+// Command (or its basename) matches realBin. Searches the registry first,
+// then the canonical builtinPresets so shadowed builtins still resolve.
+func (r *AgentRegistry) lookupProcessNamesByBinary(realBin string) []string {
+	agents := r.agents()
+	for _, name := range sortedPresetNames(agents) {
+		preset := agents[name]
 		if len(preset.ProcessNames) == 0 {
 			continue
 		}
@@ -883,7 +920,9 @@ func lookupProcessNamesByBinary(realBin string) []string {
 			return preset.ProcessNames
 		}
 	}
-	for _, preset := range builtinPresets {
+	builtins := builtinAgentRegistry.Agents
+	for _, name := range sortedPresetNames(builtins) {
+		preset := builtins[name]
 		if len(preset.ProcessNames) == 0 {
 			continue
 		}
@@ -931,6 +970,12 @@ func extractWrappedBinary(wrapper string, args []string) string {
 	return ""
 }
 
+// ResolveProcessNames resolves process names against the built-in presets.
+// See (*AgentRegistry).ResolveProcessNames.
+func ResolveProcessNames(agentName, command string, args ...string) []string {
+	return builtinAgentRegistry.ResolveProcessNames(agentName, command, args...)
+}
+
 // ResolveProcessNames determines the correct process names for liveness detection
 // given an agent name and the actual command binary. This handles custom agents
 // that shadow built-in preset names (e.g., a custom "codex" agent that runs
@@ -953,10 +998,8 @@ func extractWrappedBinary(wrapper string, args []string) string {
 //     the command basename unioned with the preset's ProcessNames (custom
 //     wrapper script around a known agent, e.g. a script that execs claude).
 //  5. Fallback: [command] (fully custom binary).
-func ResolveProcessNames(agentName, command string, args ...string) []string {
-	registryMu.Lock()
-	initRegistryLocked()
-	defer registryMu.Unlock()
+func (r *AgentRegistry) ResolveProcessNames(agentName, command string, args ...string) []string {
+	agents := r.agents()
 
 	// Normalize command to basename for comparison. Commands may be
 	// path-resolved (e.g., "/home/user/.claude/local/claude" from
@@ -971,7 +1014,7 @@ func ResolveProcessNames(agentName, command string, args ...string) []string {
 	// Check if agentName matches a built-in/registered preset with matching command.
 	// Compare against both the raw command and basename to handle registry entries
 	// that store absolute-path commands (e.g., "/opt/bin/my-tool").
-	info, infoOK := globalRegistry.Agents[agentName]
+	info, infoOK := agents[agentName]
 	if infoOK {
 		if len(info.ProcessNames) > 0 &&
 			(info.Command == command ||
@@ -997,7 +1040,7 @@ func ResolveProcessNames(agentName, command string, args ...string) []string {
 			if realBin == "" {
 				continue
 			}
-			if names := lookupProcessNamesByBinary(realBin); len(names) > 0 {
+			if names := r.lookupProcessNamesByBinary(realBin); len(names) > 0 {
 				return names
 			}
 			return []string{realBin}
@@ -1008,8 +1051,8 @@ func ResolveProcessNames(agentName, command string, args ...string) []string {
 	if cmdBase != "" {
 		// Canonical-first, sorted: builtin groq-compound also runs "claude",
 		// and map order must not decide which preset a binary belongs to.
-		for _, name := range canonicalFirst(sortedPresetNames(globalRegistry.Agents), cmdBase, unwrappedCmdBase) {
-			info := globalRegistry.Agents[name]
+		for _, name := range canonicalFirst(sortedPresetNames(agents), cmdBase, unwrappedCmdBase) {
+			info := agents[name]
 			if len(info.ProcessNames) == 0 {
 				continue
 			}
@@ -1044,43 +1087,9 @@ func ResolveProcessNames(agentName, command string, args ...string) []string {
 	return []string{"node", "claude"}
 }
 
-// MergeWithPreset applies preset defaults to a RuntimeConfig.
-// User-specified values take precedence over preset defaults.
-// Returns a new RuntimeConfig without modifying the original.
-func (rc *RuntimeConfig) MergeWithPreset(preset AgentPreset) *RuntimeConfig {
-	if rc == nil {
-		return RuntimeConfigFromPreset(preset)
-	}
-
-	info := GetAgentPreset(preset)
-	if info == nil {
-		return rc
-	}
-
-	result := &RuntimeConfig{
-		Command:       rc.Command,
-		Args:          append([]string(nil), rc.Args...),
-		InitialPrompt: rc.InitialPrompt,
-	}
-
-	// Apply preset defaults only if not overridden
-	if result.Command == "" {
-		result.Command = info.Command
-	}
-	if len(result.Args) == 0 {
-		result.Args = append([]string(nil), info.Args...)
-	}
-
-	return result
-}
-
-// IsKnownPreset checks if a string is a known agent preset name.
+// IsKnownPreset checks if a string is a built-in agent preset name.
 func IsKnownPreset(name string) bool {
-	registryMu.Lock()
-	initRegistryLocked()
-	defer registryMu.Unlock()
-	_, ok := globalRegistry.Agents[name]
-	return ok
+	return builtinAgentRegistry.IsKnown(name)
 }
 
 // SaveAgentRegistry writes the agent registry to a file.
@@ -1119,51 +1128,28 @@ func NewExampleAgentRegistry() *AgentRegistry {
 	}
 }
 
-// ResetRegistryForTesting clears all registry state.
-// This is intended for use in tests only to ensure test isolation.
-//
-// The registry is left holding a freshly initialized copy of the built-in
-// presets rather than nil. Readers that call initRegistryLocked() (every
-// public accessor does) would rebuild from builtinPresets anyway, so the
-// observable state is unchanged — but the nil window is gone. A concurrent
-// reader can no longer observe a registry "without claude" if a reset lands
-// between its lock acquisition and its read. That window was the exact shape
-// of the TestGetSessionIDEnvVar flake (gt-hvzy.3 / gt-5v82).
-func ResetRegistryForTesting() {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	loadedPaths = make(map[string]bool)
-	registryInitialized = false
-	globalRegistry = nil
-	initRegistryLocked()
-}
-
-// RegisterAgentForTesting adds a custom agent preset to the registry.
-// The registry is initialized first if needed. Intended for test use only.
-func RegisterAgentForTesting(name string, info AgentPresetInfo) {
-	registryMu.Lock()
-	initRegistryLocked()
-	defer registryMu.Unlock()
-	globalRegistry.Agents[name] = &info
+// ResolveACPConfig resolves ACP configuration against the built-in presets.
+// See (*AgentRegistry).ResolveACPConfig.
+func ResolveACPConfig(agentName, command string) *ACPConfig {
+	return builtinAgentRegistry.ResolveACPConfig(agentName, command)
 }
 
 // ResolveACPConfig determines the correct ACP configuration for an agent
 // given its name and the actual command binary. This handles custom agents
 // that use an ACP-compatible launcher like "opencode".
-func ResolveACPConfig(agentName, command string) *ACPConfig {
-	registryMu.Lock()
-	initRegistryLocked()
-	defer registryMu.Unlock()
+func (r *AgentRegistry) ResolveACPConfig(agentName, command string) *ACPConfig {
+	agents := r.agents()
 
 	// 1. Check if agentName matches a registered preset with ACP config.
-	if info, ok := globalRegistry.Agents[agentName]; ok && info.ACP != nil && info.ACP.Command != "" {
+	if info, ok := agents[agentName]; ok && info.ACP != nil && info.ACP.Command != "" {
 		return info.ACP
 	}
 
 	// 2. Otherwise, find a registered preset whose Command matches and has ACP.
 	if command != "" {
 		cmdBase := filepath.Base(command)
-		for _, info := range globalRegistry.Agents {
+		for _, name := range sortedPresetNames(agents) {
+			info := agents[name]
 			if (info.Command == command || filepath.Base(info.Command) == cmdBase) && info.ACP != nil && info.ACP.Command != "" {
 				return info.ACP
 			}
@@ -1173,10 +1159,15 @@ func ResolveACPConfig(agentName, command string) *ACPConfig {
 	return nil
 }
 
+// SupportsACP checks if a built-in agent supports ACP (Agent Communication Protocol).
+func SupportsACP(agentName string) bool {
+	return builtinAgentRegistry.SupportsACP(agentName)
+}
+
 // SupportsACP checks if an agent supports ACP (Agent Communication Protocol).
 // Returns true if the agent has ACP configured.
-func SupportsACP(agentName string) bool {
-	info := GetAgentPresetByName(agentName)
+func (r *AgentRegistry) SupportsACP(agentName string) bool {
+	info := r.Preset(agentName)
 	if info == nil {
 		return false
 	}
@@ -1184,30 +1175,40 @@ func SupportsACP(agentName string) bool {
 		return true
 	}
 	// Fallback: check if the command itself supports ACP
-	return ResolveACPConfig(agentName, info.Command) != nil
+	return r.ResolveACPConfig(agentName, info.Command) != nil
 }
 
-// GetACPConfig returns the ACP configuration for an agent.
-// Returns nil if the agent doesn't support ACP.
+// GetACPConfig returns the ACP configuration for a built-in agent.
 func GetACPConfig(agentName string) *ACPConfig {
-	info := GetAgentPresetByName(agentName)
+	return builtinAgentRegistry.ACPConfig(agentName)
+}
+
+// ACPConfig returns the ACP configuration for an agent.
+// Returns nil if the agent doesn't support ACP.
+func (r *AgentRegistry) ACPConfig(agentName string) *ACPConfig {
+	info := r.Preset(agentName)
 	if info == nil {
 		return nil
 	}
-	return ResolveACPConfig(agentName, info.Command)
+	return r.ResolveACPConfig(agentName, info.Command)
 }
 
-// GetACPCommand returns the ACP subcommand for an agent.
-// Returns empty string if the agent doesn't support ACP.
+// GetACPCommand returns the ACP subcommand for a built-in agent.
 func GetACPCommand(agentName string) string {
-	config := GetACPConfig(agentName)
+	return builtinAgentRegistry.ACPCommand(agentName)
+}
+
+// ACPCommand returns the ACP subcommand for an agent.
+// Returns empty string if the agent doesn't support ACP.
+func (r *AgentRegistry) ACPCommand(agentName string) string {
+	config := r.ACPConfig(agentName)
 	if config == nil {
 		return ""
 	}
 	return config.Command
 }
 
-// GetACPArgs returns the ACP arguments for an agent.
+// GetACPArgs returns the ACP arguments for a built-in agent.
 // Returns nil if the agent doesn't support ACP.
 func GetACPArgs(agentName string) []string {
 	config := GetACPConfig(agentName)
@@ -1230,6 +1231,12 @@ func GetACPArgs(agentName string) []string {
 //  3. Flag pattern: { "command": "gemini", "acp": { "args": ["--acp"] } }
 //     Results in: gemini --acp
 func RuntimeConfigSupportsACP(rc *RuntimeConfig) bool {
+	return builtinAgentRegistry.RuntimeConfigSupportsACP(rc)
+}
+
+// RuntimeConfigSupportsACP is RuntimeConfigSupportsACP with the preset
+// fallback resolved against r.
+func (r *AgentRegistry) RuntimeConfigSupportsACP(rc *RuntimeConfig) bool {
 	if rc == nil {
 		return false
 	}
@@ -1250,7 +1257,7 @@ func RuntimeConfigSupportsACP(rc *RuntimeConfig) bool {
 	}
 	// Fallback: check if the command matches a preset with ACP support
 	if rc.Command != "" {
-		return ResolveACPConfig("", rc.Command) != nil
+		return r.ResolveACPConfig("", rc.Command) != nil
 	}
 	return false
 }
@@ -1268,6 +1275,12 @@ func RuntimeConfigSupportsACP(rc *RuntimeConfig) bool {
 //  3. Flag pattern: { "command": "gemini", "acp": { "args": ["--experimental-acp"] } }
 //     Results in: gemini --experimental-acp
 func GetACPConfigFromRuntime(rc *RuntimeConfig) *ACPConfig {
+	return builtinAgentRegistry.ACPConfigFromRuntime(rc)
+}
+
+// ACPConfigFromRuntime is GetACPConfigFromRuntime with the preset fallback
+// resolved against r.
+func (r *AgentRegistry) ACPConfigFromRuntime(rc *RuntimeConfig) *ACPConfig {
 	if rc == nil {
 		return nil
 	}
@@ -1288,7 +1301,7 @@ func GetACPConfigFromRuntime(rc *RuntimeConfig) *ACPConfig {
 	}
 	// Fallback: check if the command matches a preset with ACP support
 	if rc.Command != "" {
-		return ResolveACPConfig("", rc.Command)
+		return r.ResolveACPConfig("", rc.Command)
 	}
 	return nil
 }
