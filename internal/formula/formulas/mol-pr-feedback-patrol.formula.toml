@@ -281,12 +281,9 @@ description = """
 Context-check and either sleep for the next cycle or exit if context is filling.
 
 **1. Check remaining context capacity:**
-```bash
-# A rough proxy: check if we're getting close to context limits
-# by checking if the session has been running for a long time.
-# Gas Town agents typically cycle every 30-60 minutes.
-gt mol step context-check 2>/dev/null || true
-```
+No command reports context usage: judge it yourself. A rough proxy is how
+long the session has been running; Gas Town agents typically cycle every
+30-60 minutes.
 
 **2. Clean up temp files from this cycle:**
 ```bash
