@@ -140,7 +140,7 @@ func TestYield_KnobOffRestoresOldBehaviour(t *testing.T) {
 	}
 }
 
-// TestYield_GateInSharedSlotOnlyDoesNotApplyWithoutReserved: a pool with no
+// TestYield_NoReservedSlotsMeansNoYield: a pool with no
 // reserved slots has nothing to yield to (the single-slot default).
 func TestYield_NoReservedSlotsMeansNoYield(t *testing.T) {
 	t.Parallel()
