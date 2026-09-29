@@ -124,9 +124,27 @@ func setupCanonicalBranchManagerTest(t *testing.T) (*Manager, string) {
 // also returns the manager's fake bd, for tests that change its answers.
 func setupCanonicalBranchManagerTestBd(t *testing.T) (*Manager, string, *fakeBd) {
 	t.Helper()
-	bd := newAgentBd(true)
+	town := cachedGitFixture(t, "canonical-branch-manager", func(town string) {
+		buildCanonicalRig(t, filepath.Join(town, "rig"))
+	})
+	return canonicalManager(t, town)
+}
 
-	root := t.TempDir()
+// canonicalManager is a manager, with the fake agent bd, for the canonical
+// rig at town/rig, and that rig's mayor/rig clone.
+func canonicalManager(t *testing.T, town string) (*Manager, string, *fakeBd) {
+	t.Helper()
+	bd := newAgentBd(true)
+	root := filepath.Join(town, "rig")
+	r := &rig.Rig{Name: "rig", Path: root}
+	return newTestManager(r, git.NewGit(root), nil, bd), filepath.Join(root, "mayor", "rig"), bd
+}
+
+// buildCanonicalRig lays out the canonical rig at root: a mayor/rig clone
+// with one commit and an origin/main tracking ref, and a .beads redirect to
+// mayor/rig/.beads.
+func buildCanonicalRig(t *testing.T, root string) {
+	t.Helper()
 	mayorRig := filepath.Join(root, "mayor", "rig")
 	if err := os.MkdirAll(mayorRig, 0755); err != nil {
 		t.Fatalf("mkdir mayor/rig: %v", err)
@@ -172,9 +190,51 @@ func setupCanonicalBranchManagerTestBd(t *testing.T) (*Manager, string, *fakeBd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git update-ref: %v\n%s", err, out)
 	}
+}
 
-	r := &rig.Rig{Name: "rig", Path: root}
-	return newTestManager(r, git.NewGit(root), nil, bd), mayorRig, bd
+// setupCanonicalWithPolecats is setupCanonicalBranchManagerTestBd with the
+// named polecats already added through AddWithOptions (and, with clean, their
+// worktrees then cleaned of untracked files with git clean).
+// The rig is built once per test binary for each name list and copied, so
+// each test pays for the copy, not for the adds.
+func setupCanonicalWithPolecats(t *testing.T, clean bool, names ...string) (*Manager, string, *fakeBd, map[string]*Polecat) {
+	t.Helper()
+	key := fmt.Sprintf("canonical-with-polecats clean=%v %s", clean, strings.Join(names, ","))
+	town := cachedGitFixture(t, key, func(town string) {
+		buildCanonicalRig(t, filepath.Join(town, "rig"))
+		mgr, _, _ := canonicalManager(t, town)
+		added := map[string]*Polecat{}
+		for _, name := range names {
+			p, err := mgr.AddWithOptions(name, AddOptions{})
+			if err != nil {
+				t.Fatalf("AddWithOptions(%s): %v", name, err)
+			}
+			if clean {
+				_ = git.NewGit(p.ClonePath).CleanForce()
+			}
+			added[name] = p
+		}
+		data, err := json.Marshal(added)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The template's own path, replaced below by the copy's.
+		data = append([]byte(town+"\n"), data...)
+		if err := os.WriteFile(filepath.Join(town, "polecats.json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	data, err := os.ReadFile(filepath.Join(town, "polecats.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmplRoot, body, _ := strings.Cut(string(data), "\n")
+	added := map[string]*Polecat{}
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(body, tmplRoot, town)), &added); err != nil {
+		t.Fatal(err)
+	}
+	mgr, mayorRig, bd := canonicalManager(t, town)
+	return mgr, mayorRig, bd, added
 }
 
 func createStalePolecatCommit(t *testing.T, repoPath, startPoint, branchName string) string {
@@ -1501,13 +1561,8 @@ func TestAddWithOptions_SetupCommandFailureRollsBack(t *testing.T) {
 
 func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-
-	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
-	_ = git.NewGit(polecat.ClonePath).CleanForce()
+	mgr, _, _, added := setupCanonicalWithPolecats(t, true, "toast")
+	polecat := added["toast"]
 	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("reuse-setup-marker"))
 
 	reused, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
@@ -1536,13 +1591,7 @@ func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 // cap the moment agent_state=done accumulates and nothing is ever idle.
 func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
 	t.Parallel()
-	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
-
-	p, err := mgr.AddWithOptions("toast", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
-	_ = git.NewGit(p.ClonePath).CleanForce()
+	mgr, _, bd, _ := setupCanonicalWithPolecats(t, true, "toast")
 
 	// From here on 'show' reports agent_state=done instead of idle, with
 	// the same clean facts (no hook, no active MR) otherwise.
@@ -1570,16 +1619,10 @@ func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
 
 func TestReuseIdlePolecat_SetupCommandFailureCleansWorktree(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-
-	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
-	_ = git.NewGit(polecat.ClonePath).CleanForce()
+	mgr, _, _, _ := setupCanonicalWithPolecats(t, true, "toast")
 	writeWispSetupCommand(t, mgr, setupCommandWriteMarkerAndFail("dirty-setup-marker"))
 
-	_, err = mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
+	_, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
 	if err == nil {
 		t.Fatal("ReuseIdlePolecat should fail when setup_command fails")
 	}
@@ -1647,13 +1690,7 @@ func setupCommandWriteMarkerAndFail(marker string) string {
 // same facts unverified, so it keeps failing closed regardless of git state.
 func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit(t *testing.T) {
 	t.Parallel()
-	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
-
-	p, err := mgr.AddWithOptions("toast", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
-	_ = git.NewGit(p.ClonePath).CleanForce()
+	mgr, _, bd, _ := setupCanonicalWithPolecats(t, true, "toast")
 
 	// Swap to a mock bd that omits cleanup_status entirely while everything
 	// else (agent_state, hook_bead) still reads as idle/unhooked, and the
@@ -1683,13 +1720,7 @@ func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLive
 // workstateInputForPolecat must keep blocking.
 func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *testing.T) {
 	t.Parallel()
-	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
-
-	p, err := mgr.AddWithOptions("toast", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
-	_ = git.NewGit(p.ClonePath).CleanForce()
+	mgr, _, bd, _ := setupCanonicalWithPolecats(t, true, "toast")
 
 	// newEmptyBd's `show` returns an empty result, so GetAgentBead
 	// resolves to (nil, nil, nil) — exactly the not-found shape workstateInputForPolecat
@@ -1716,12 +1747,8 @@ func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *t
 // B, even though both worktrees see the identical raw `git stash list` output.
 func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-
-	seatA, err := mgr.AddWithOptions("seata", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions(seata): %v", err)
-	}
+	mgr, _, _, added := setupCanonicalWithPolecats(t, false, "seata")
+	seatA := added["seata"]
 	if _, err := mgr.AddWithOptions("seatb", AddOptions{}); err != nil {
 		t.Fatalf("AddWithOptions(seatb): %v", err)
 	}
@@ -2338,17 +2365,13 @@ func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
 
 func TestReclaimBrokenIdlePolecatFailsClosedWithoutSessionEvidence(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-
-	p, err := mgr.AddWithOptions("toast", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
+	mgr, _, _, added := setupCanonicalWithPolecats(t, false, "toast")
+	p := added["toast"]
 	if err := os.Remove(filepath.Join(p.ClonePath, ".git")); err != nil {
 		t.Fatalf("break worktree .git: %v", err)
 	}
 
-	err = mgr.ReclaimBrokenIdlePolecat("toast")
+	err := mgr.ReclaimBrokenIdlePolecat("toast")
 	if err == nil || !strings.Contains(err.Error(), "session_state=unverified") {
 		t.Fatalf("ReclaimBrokenIdlePolecat error = %v, want session evidence blocker", err)
 	}
@@ -2979,7 +3002,7 @@ func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &rig.Rig{Name: "testrig", Path: rigPath}
+	r := &rig.Rig{Name: "testrig", Path: rigPath, BDRunner: newNoDatabaseBd().run}
 	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)
@@ -3018,7 +3041,7 @@ func TestResolveSetupCommandPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &rig.Rig{Name: "testrig", Path: rigPath}
+	r := &rig.Rig{Name: "testrig", Path: rigPath, BDRunner: newNoDatabaseBd().run}
 	mgr := &Manager{rig: r, townRoot: tmpDir}
 
 	got := mgr.resolveSetupCommand(worktreePath)

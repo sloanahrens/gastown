@@ -28,18 +28,26 @@ func runLandedGit(t *testing.T, dir string, args ...string) {
 
 func initLandedRepo(t *testing.T) landedRepo {
 	t.Helper()
-	origin := t.TempDir()
-	runLandedGit(t, origin, "init", "--bare", "-b", "main")
-
-	work := t.TempDir()
-	runLandedGit(t, work, "clone", origin, ".")
-	runLandedGit(t, work, "config", "user.email", "test@test.com")
-	runLandedGit(t, work, "config", "user.name", "Test User")
-	writeLandedFile(t, filepath.Join(work, "README.md"), "# Test\n")
-	runLandedGit(t, work, "add", ".")
-	runLandedGit(t, work, "commit", "-m", "initial")
-	runLandedGit(t, work, "push", "origin", "main")
-	return landedRepo{work: work, origin: origin}
+	// Built once per test binary and copied: a bare origin with one commit
+	// on main, and a clone of it.
+	root := cachedGitFixture(t, "landed-repo", func(root string) {
+		origin := filepath.Join(root, "origin")
+		work := filepath.Join(root, "work")
+		for _, dir := range []string{origin, work} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", dir, err)
+			}
+		}
+		runLandedGit(t, origin, "init", "--bare", "-b", "main")
+		runLandedGit(t, work, "clone", origin, ".")
+		runLandedGit(t, work, "config", "user.email", "test@test.com")
+		runLandedGit(t, work, "config", "user.name", "Test User")
+		writeLandedFile(t, filepath.Join(work, "README.md"), "# Test\n")
+		runLandedGit(t, work, "add", ".")
+		runLandedGit(t, work, "commit", "-m", "initial")
+		runLandedGit(t, work, "push", "origin", "main")
+	})
+	return landedRepo{work: filepath.Join(root, "work"), origin: filepath.Join(root, "origin")}
 }
 
 func writeLandedFile(t *testing.T, path, content string) {
@@ -67,6 +75,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	const branch = "polecat/opal/gt-eoi9+mu8i3jnq"
 
 	t.Run("merged branch is landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -83,6 +92,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("squash-merged branch is landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -99,6 +109,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("branch with an unmerged commit is not landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 
@@ -108,6 +119,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("probe answers about the submitted tip, not the local branch", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -132,6 +144,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("branch deleted from origin after landing is landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -148,6 +161,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("local branch landed by a non-squash merge then deleted is landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -166,6 +180,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("local branch landed by a non-squash merge, integration advances, then deleted is landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -191,6 +206,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("local branch fast-forwarded then deleted is not landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -208,6 +224,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("remote branch that never carried a commit is not landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		// Pushed, but at integration's own tip with nothing of its own — a
 		// branch created from origin/main and left there. The remote-tracking
@@ -221,6 +238,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("empty local branch is not landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		// Created and never committed to, so the ref sits exactly on
 		// integration and every preservation arm finds it trivially preserved.
@@ -235,6 +253,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("stale local branch on integration's own history is not landed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		// A ref left at an earlier commit of main and never advanced: an
 		// ancestor of integration because it is main's own history, which is
@@ -251,6 +270,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("dirty worktree does not change the answer", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 		runLandedGit(t, repo.work, "checkout", "main")
@@ -267,6 +287,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("unknown state fails closed", func(t *testing.T) {
+		t.Parallel()
 		repo := initLandedRepo(t)
 
 		cases := []struct {
@@ -282,6 +303,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				if got := ProbeWorkLandedOnRef(tc.path, tc.branch, "origin"); got.Verified {
 					t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified", got)
 				}
@@ -290,6 +312,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 	})
 
 	t.Run("no origin remote fails closed", func(t *testing.T) {
+		t.Parallel()
 		dir := initLiveGitRepo(t) // local-only repo: no origin, no origin/main
 		if got := ProbeWorkLandedOnRef(dir, "main", "origin"); got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified without an origin", got)

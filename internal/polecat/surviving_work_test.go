@@ -3,7 +3,6 @@ package polecat
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,10 +19,30 @@ type survivalFixture struct {
 
 func newSurvivalFixture(t *testing.T) *survivalFixture {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	tmp := t.TempDir()
+	// Built once per test binary and copied: origin.git with one commit on
+	// main, the seed clone that pushed it, and the rig's empty .repo.git
+	// with origin configured.
+	tmp := cachedGitFixture(t, "survival-fixture", func(tmp string) {
+		f := &survivalFixture{
+			tmp:     tmp,
+			origin:  filepath.Join(tmp, "origin.git"),
+			seed:    filepath.Join(tmp, "seed"),
+			rigRoot: filepath.Join(tmp, "gastown"),
+		}
+		f.bare = filepath.Join(f.rigRoot, ".repo.git")
+		runGit(t, tmp, "init", "--bare", "--initial-branch=main", f.origin)
+		runGit(t, tmp, "init", "--initial-branch=main", f.seed)
+		runGit(t, f.seed, "config", "user.email", "test@example.com")
+		runGit(t, f.seed, "config", "user.name", "test")
+		f.commit(t, "base.txt", "base\n", "base")
+		runGit(t, f.seed, "remote", "add", "origin", f.origin)
+		runGit(t, f.seed, "push", "origin", "main")
+		if err := os.MkdirAll(f.rigRoot, 0755); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, tmp, "init", "--bare", f.bare)
+		runGit(t, f.bare, "remote", "add", "origin", f.origin)
+	})
 	f := &survivalFixture{
 		tmp:     tmp,
 		origin:  filepath.Join(tmp, "origin.git"),
@@ -31,18 +50,6 @@ func newSurvivalFixture(t *testing.T) *survivalFixture {
 		rigRoot: filepath.Join(tmp, "gastown"),
 	}
 	f.bare = filepath.Join(f.rigRoot, ".repo.git")
-	runGit(t, tmp, "init", "--bare", "--initial-branch=main", f.origin)
-	runGit(t, tmp, "init", "--initial-branch=main", f.seed)
-	runGit(t, f.seed, "config", "user.email", "test@example.com")
-	runGit(t, f.seed, "config", "user.name", "test")
-	f.commit(t, "base.txt", "base\n", "base")
-	runGit(t, f.seed, "remote", "add", "origin", f.origin)
-	runGit(t, f.seed, "push", "origin", "main")
-	if err := os.MkdirAll(f.rigRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, tmp, "init", "--bare", f.bare)
-	runGit(t, f.bare, "remote", "add", "origin", f.origin)
 	return f
 }
 

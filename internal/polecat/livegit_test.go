@@ -8,31 +8,28 @@ import (
 	"testing"
 )
 
-func initLiveGitRepo(t *testing.T) string {
+// buildLiveGitRepo lays out a repo on main with one commit in dir.
+func buildLiveGitRepo(t *testing.T, dir string) {
 	t.Helper()
-	dir := t.TempDir()
 	for _, args := range [][]string{
 		{"init", "-b", "main"},
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test User"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
+		runLiveGit(t, dir, args...)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "initial"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
-	return dir
+	runLiveGit(t, dir, "add", ".")
+	runLiveGit(t, dir, "commit", "-m", "initial")
+}
+
+// initLiveGitRepo returns a copy of a repo on main with one commit, built
+// once per test binary.
+func initLiveGitRepo(t *testing.T) string {
+	t.Helper()
+	return cachedGitFixture(t, "live-git-repo", func(dir string) { buildLiveGitRepo(t, dir) })
 }
 
 // initLiveGitRepoWithRemote is initLiveGitRepo plus a bare origin carrying the
@@ -40,20 +37,18 @@ func initLiveGitRepo(t *testing.T) string {
 // and the local main) both exist.
 func initLiveGitRepoWithRemote(t *testing.T) string {
 	t.Helper()
-	dir := initLiveGitRepo(t)
-	remote := filepath.Join(t.TempDir(), "remote.git")
-	for _, args := range [][]string{
-		{"init", "--bare", remote},
-		{"remote", "add", "origin", remote},
-		{"push", "-u", "origin", "main"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
+	root := cachedGitFixture(t, "live-git-repo-with-remote", func(root string) {
+		dir := filepath.Join(root, "work")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
 		}
-	}
-	return dir
+		buildLiveGitRepo(t, dir)
+		remote := filepath.Join(root, "remote.git")
+		runLiveGit(t, dir, "init", "--bare", remote)
+		runLiveGit(t, dir, "remote", "add", "origin", remote)
+		runLiveGit(t, dir, "push", "-u", "origin", "main")
+	})
+	return filepath.Join(root, "work")
 }
 
 // runLiveGit drives git in a probe test worktree, failing the test on error.
@@ -72,6 +67,7 @@ func runLiveGit(t *testing.T, dir string, args ...string) {
 func TestProbeLiveGitState(t *testing.T) {
 	t.Parallel()
 	t.Run("clean worktree is measured live and clean", func(t *testing.T) {
+		t.Parallel()
 		got := ProbeLiveGitState(initLiveGitRepo(t))
 		if got.Source != GitStateSourceLive {
 			t.Fatalf("Source = %q, want %q (reason %q)", got.Source, GitStateSourceLive, got.FailedReason)
@@ -85,6 +81,7 @@ func TestProbeLiveGitState(t *testing.T) {
 	})
 
 	t.Run("stashed worktree reports the stash count", func(t *testing.T) {
+		t.Parallel()
 		dir := initLiveGitRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Changed\n"), 0644); err != nil {
 			t.Fatalf("write file: %v", err)
@@ -106,6 +103,7 @@ func TestProbeLiveGitState(t *testing.T) {
 	})
 
 	t.Run("missing worktree fails closed to unknown", func(t *testing.T) {
+		t.Parallel()
 		got := ProbeLiveGitState(filepath.Join(t.TempDir(), "gone"))
 		if got.Source != GitStateSourceUnknown {
 			t.Fatalf("Source = %q, want %q", got.Source, GitStateSourceUnknown)
@@ -119,6 +117,7 @@ func TestProbeLiveGitState(t *testing.T) {
 	})
 
 	t.Run("a directory inside a repo is not measured as its own worktree", func(t *testing.T) {
+		t.Parallel()
 		// A leftover polecat directory (an incomplete nuke, an obsolete layout)
 		// sits INSIDE the rig's repository. Git resolves upward, so probing it
 		// naively reports the rig root's branch and dirt as the polecat's — a
@@ -159,6 +158,7 @@ func TestProbeLiveGitState(t *testing.T) {
 	// index skew, which would advertise the seat as reusable with the revert
 	// still in its index.
 	t.Run("staged revert of a fix this checkout carries reads dirty", func(t *testing.T) {
+		t.Parallel()
 		dir := initLiveGitRepoWithRemote(t)
 		runLiveGit(t, dir, "checkout", "-b", "polecat/jasper/om-x")
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test fixed\n"), 0644); err != nil {
@@ -247,6 +247,7 @@ func TestDecideWorkstateRedrivesGitFromLiveProbe(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := DecideWorkstate(tt.in)
 			if got.Verdict != tt.wantVerdict || got.Reason != tt.wantReason {
 				t.Fatalf("DecideWorkstate() = %s/%s, want %s/%s", got.Verdict, got.Reason, tt.wantVerdict, tt.wantReason)
@@ -303,6 +304,7 @@ func TestRecordedCleanupBlocks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := RecordedCleanupBlocks(tt.status, tt.source); got != tt.want {
 				t.Fatalf("RecordedCleanupBlocks(%q, %q) = %v, want %v", tt.status, tt.source, got, tt.want)
 			}

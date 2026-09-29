@@ -17,12 +17,8 @@ import (
 // the branch the worktree was holding must still name its own commit after reuse.
 func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
-
-	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
+	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	alpha := added["alpha"]
 
 	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
 
@@ -75,12 +71,8 @@ func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 // holding must not follow it there.
 func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
-
-	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
+	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	alpha := added["alpha"]
 
 	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
 
@@ -113,12 +105,8 @@ func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
 // worktree, reuse must refuse loudly and leave both worktrees untouched.
 func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
-
-	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions(alpha): %v", err)
-	}
+	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	alpha := added["alpha"]
 	beta, err := mgr.AddWithOptions("beta", AddOptions{})
 	if err != nil {
 		t.Fatalf("AddWithOptions(beta): %v", err)
@@ -169,12 +157,8 @@ func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 // with `worktree add --force`, which git permits and so needs the same check.
 func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
-
-	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions(alpha): %v", err)
-	}
+	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	alpha := added["alpha"]
 
 	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
 	heldBranch := "polecat/alpha/gt-x+aaa"
@@ -182,7 +166,7 @@ func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
 	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, mainSHA)
 	runGit(t, alpha.ClonePath, "checkout", heldBranch)
 
-	_, err = mgr.AddWithOptions("beta", AddOptions{HookBead: "gt-next", ResumeBranch: heldBranch})
+	_, err := mgr.AddWithOptions("beta", AddOptions{HookBead: "gt-next", ResumeBranch: heldBranch})
 	if err == nil {
 		t.Fatal("AddWithOptions attached a second worktree to a held branch; want refusal")
 	}

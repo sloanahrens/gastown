@@ -12,18 +12,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 )
 
-// addCleanIdlePolecat creates a polecat whose worktree is clean, so the reuse
-// gate would hand it out if nothing else stood in the way.
-func addCleanIdlePolecat(t *testing.T, mgr *Manager, name string) *Polecat {
-	t.Helper()
-	p, err := mgr.AddWithOptions(name, AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions(%s): %v", name, err)
-	}
-	_ = git.NewGit(p.ClonePath).CleanForce()
-	return p
-}
-
 func parkPolecat(t *testing.T, mgr *Manager, name string) {
 	t.Helper()
 	if err := agentpause.Pause(mgr.townRoot, mgr.rig.Name, constants.RolePolecat, name,
@@ -46,9 +34,7 @@ func assertStillParked(t *testing.T, mgr *Manager, name string) {
 // slot sorts first, so without the gate it is the one picked.
 func TestFindIdlePolecat_SkipsParkedPolecat(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	addCleanIdlePolecat(t, mgr, "alpha")
-	addCleanIdlePolecat(t, mgr, "bravo")
+	mgr, _, _, _ := setupCanonicalWithPolecats(t, true, "alpha", "bravo")
 	parkPolecat(t, mgr, "alpha")
 
 	found, err := mgr.FindIdlePolecat()
@@ -69,9 +55,7 @@ func TestFindIdlePolecat_SkipsParkedPolecat(t *testing.T) {
 // polecat exactly as it does with an empty pool.
 func TestFindIdlePolecat_AllParkedYieldsNone(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	addCleanIdlePolecat(t, mgr, "alpha")
-	addCleanIdlePolecat(t, mgr, "bravo")
+	mgr, _, _, _ := setupCanonicalWithPolecats(t, true, "alpha", "bravo")
 	parkPolecat(t, mgr, "alpha")
 	parkPolecat(t, mgr, "bravo")
 
@@ -91,8 +75,7 @@ func TestFindIdlePolecat_AllParkedYieldsNone(t *testing.T) {
 // the refusal must say why.
 func TestReuseDecisionForPolecat_ParkedNamesTheReason(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	addCleanIdlePolecat(t, mgr, "alpha")
+	mgr, _, _, _ := setupCanonicalWithPolecats(t, true, "alpha")
 
 	if d := mgr.ReuseDecisionForPolecat("alpha", StateIdle); !d.Reusable {
 		t.Fatalf("precondition: clean idle alpha not reusable: %s", d.Reason)
@@ -114,8 +97,8 @@ func TestReuseDecisionForPolecat_ParkedNamesTheReason(t *testing.T) {
 // its old branch.
 func TestReuseIdlePolecat_RefusesParkedPolecat(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	p := addCleanIdlePolecat(t, mgr, "alpha")
+	mgr, _, _, added := setupCanonicalWithPolecats(t, true, "alpha")
+	p := added["alpha"]
 	branchBefore, err := git.NewGit(p.ClonePath).CurrentBranch()
 	if err != nil {
 		t.Fatalf("CurrentBranch: %v", err)
@@ -148,8 +131,7 @@ func TestReuseIdlePolecat_RefusesParkedPolecat(t *testing.T) {
 // keeps allocating a new polecat.
 func TestReuseIdlePolecat_ParkedRefusalIsDistinguishable(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	addCleanIdlePolecat(t, mgr, "alpha")
+	mgr, _, _, _ := setupCanonicalWithPolecats(t, true, "alpha")
 	parkPolecat(t, mgr, "alpha")
 
 	_, err := mgr.ReuseIdlePolecat("alpha", AddOptions{HookBead: "gt-next"})
@@ -166,8 +148,7 @@ func TestReuseIdlePolecat_ParkedRefusalIsDistinguishable(t *testing.T) {
 // be read instead of passing for an ordinary park.
 func TestParkedReuseBlocker_UnreadableMarkerSurfacesTheError(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	addCleanIdlePolecat(t, mgr, "alpha")
+	mgr, _, _, _ := setupCanonicalWithPolecats(t, true, "alpha")
 	path := agentpause.FilePath(mgr.townRoot, mgr.rig.Name, constants.RolePolecat, "alpha")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)

@@ -3,7 +3,9 @@ package polecat
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -186,12 +188,30 @@ func newEmptyBd() *fakeBd {
 
 // newTestManager is NewManager with a fake bd, and a fake tmux when tm is
 // non-nil. Nothing it builds reads PATH or reaches a tmux server.
+//
+// With a fake bd, the rig's own config reads (the rig identity bead) go to it
+// too, and when the rig's beads directory exists the types sentinel is
+// written there: beads.EnsureCustomTypes runs bd itself, outside any runner,
+// unless the sentinel says the custom types are already configured.
 func newTestManager(r *rig.Rig, g *git.Git, tm sessionProbe, bd *fakeBd) *Manager {
 	var run beads.BDRunner
 	if bd != nil {
 		run = bd.run
+		if r.BDRunner == nil {
+			r.BDRunner = run
+		}
+		markTypesConfigured(beads.ResolveBeadsDir(r.Path))
 	}
 	return newManager(r, g, tm, run)
+}
+
+// markTypesConfigured writes the custom-types sentinel into an existing
+// beads directory.
+func markTypesConfigured(beadsDir string) {
+	if info, err := os.Stat(beadsDir); err != nil || !info.IsDir() {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0o644)
 }
 
 // fakeProbe is a tmux for the Manager: tmuxfake's sessions, plus the agent
