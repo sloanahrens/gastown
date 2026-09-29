@@ -170,13 +170,19 @@ func GetRole() (RoleInfo, error) {
 
 // GetRoleWithContext returns role info given explicit cwd and town root.
 func GetRoleWithContext(cwd, townRoot string) (RoleInfo, error) {
+	return getRoleWithContextEnv(cwd, townRoot, os.Getenv)
+}
+
+// getRoleWithContextEnv is GetRoleWithContext reading the environment
+// through getenv.
+func getRoleWithContextEnv(cwd, townRoot string, getenv func(string) string) (RoleInfo, error) {
 	info := RoleInfo{
 		TownRoot: townRoot,
 		WorkDir:  cwd,
 	}
 
 	// Check environment variable first
-	envRole := os.Getenv(EnvGTRole)
+	envRole := getenv(EnvGTRole)
 	info.EnvRole = envRole
 
 	// Always detect from cwd for comparison/fallback
@@ -195,14 +201,14 @@ func GetRoleWithContext(cwd, townRoot string) (RoleInfo, error) {
 		// For simple role strings like "crew" or "polecat", also check
 		// GT_RIG and GT_CREW/GT_POLECAT env vars for the full identity
 		if info.Rig == "" {
-			if envRig := os.Getenv("GT_RIG"); envRig != "" {
+			if envRig := getenv("GT_RIG"); envRig != "" {
 				info.Rig = envRig
 			}
 		}
 		if info.Polecat == "" {
-			if envCrew := os.Getenv("GT_CREW"); envCrew != "" {
+			if envCrew := getenv("GT_CREW"); envCrew != "" {
 				info.Polecat = envCrew
-			} else if envPolecat := os.Getenv("GT_POLECAT"); envPolecat != "" {
+			} else if envPolecat := getenv("GT_POLECAT"); envPolecat != "" {
 				info.Polecat = envPolecat
 			}
 		}

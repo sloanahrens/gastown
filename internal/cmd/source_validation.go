@@ -16,9 +16,15 @@ type submitSourceIssue struct {
 }
 
 func routedIssueBeads(cwd, issueID string) (*beads.Beads, string, string) {
+	return routedIssueBeadsRun(cwd, issueID, nil)
+}
+
+// routedIssueBeadsRun is routedIssueBeads whose bd calls go to run; nil is
+// the real bd.
+func routedIssueBeadsRun(cwd, issueID string, run beads.BDRunner) (*beads.Beads, string, string) {
 	currentBeadsDir := beads.ResolveBeadsDir(cwd)
 	routedBeadsDir := beads.ResolveBeadsDirForID(currentBeadsDir, issueID)
-	return beads.NewWithBeadsDir(cwd, routedBeadsDir), currentBeadsDir, routedBeadsDir
+	return beads.NewWithBeadsDirAndRunner(cwd, routedBeadsDir, run), currentBeadsDir, routedBeadsDir
 }
 
 func sourceRouteContext(currentBeadsDir, routedBeadsDir string) string {
