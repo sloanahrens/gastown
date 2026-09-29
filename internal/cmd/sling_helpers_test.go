@@ -88,9 +88,12 @@ func TestNudgeRefinerySessionName(t *testing.T) {
 func TestWakeRigAgentsDoesNotNudgeRefinery(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "nudge.log")
 	t.Setenv("GT_TEST_NUDGE_LOG", logPath)
+	// An empty PATH: with the inherited one, the "gt rig boot" below ran the
+	// installed gt against whatever town the package dir sits in.
+	t.Setenv("PATH", t.TempDir())
 
 	// wakeRigAgents calls exec.Command("gt", "rig", "boot", ...) and tmux.NudgeSession.
-	// The boot command and witness nudge will fail silently (no real rig/tmux).
+	// The boot command and witness nudge fail silently (no gt or tmux on PATH).
 	// We only care that nudgeRefinery is NOT called (no log entries).
 	wakeRigAgents("testrig")
 

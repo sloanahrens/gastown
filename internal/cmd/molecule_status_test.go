@@ -49,6 +49,11 @@ func TestOutputMoleculeStatus_StandaloneFormulaShowsVars(t *testing.T) {
 }
 
 func TestOutputMoleculeStatus_FormulaWispShowsWorkflowContext(t *testing.T) {
+	// outputMoleculeStatus ends with the git divergence and trail hints for
+	// the current directory. Run from an empty temp dir: from the package
+	// dir they fetched origin of the real checkout on every run.
+	t.Chdir(t.TempDir())
+
 	status := MoleculeStatusInfo{
 		HasWork:         true,
 		PinnedBead:      &beads.Issue{ID: "tool-wisp-demo", Title: "demo-hello"},
