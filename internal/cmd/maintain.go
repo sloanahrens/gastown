@@ -61,7 +61,13 @@ destroys the history the backup existed to keep.
 Use --force for non-interactive mode (daemon/cron), or run interactively
 to review the plan before proceeding.
 
-This command flattens history. For history-preserving reclamation, the
+This command flattens history. It does not check a Dolt remote: remote sync
+was removed (ADR 0002). On a town that still has a Dolt remote registered
+('gt doctor --check dolt-remote-leftovers' warns), remove it first with the
+"Removing Dolt remotes" procedure in docs/design/dolt-storage.md, so no later
+push can carry the rewritten history over the remote's.
+
+For history-preserving reclamation, the
 daemon's scheduled_maintenance patrol has a gc mode (gt config set
 maintenance.mode gc): it runs CALL dolt_gc('--full') per database on a size
 trigger, only while the town is quiet, and never flattens or pushes.

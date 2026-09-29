@@ -318,7 +318,10 @@ Compaction itself is unchanged SQL — see below.
 **Flattening does not check a remote.** Before ADR 0002, `gt maintain` fetched
 each database's Dolt remote and refused to flatten one whose remote had moved
 on, because the force-push after a flatten would have deleted the remote-only
-commits. There is no remote and no push now, so the pre-flight is gone.
+commits. There is no remote and no push now, so the pre-flight is gone. On a
+town that still has a remote registered, run "Removing Dolt remotes" below
+before any flatten: nothing in gastown pushes any more, but a manual
+`bd dolt push` would still carry the rewritten history over the remote's.
 `--force-diverged` still parses, hidden and deprecated, and does nothing.
 
 `scheduled_maintenance` acts on `maintenance.mode`. `monitor` (the default)
@@ -656,16 +659,21 @@ Dolt server stays up throughout.
    gt doctor --check dolt-remote-leftovers
    ```
 
-2. For each database the check names with a remote (`gt`, `be` on the
-   original town), look, remove, verify. `DOLT_REMOTE('remove', ...)` changes
-   repository state, not a table, so it makes no Dolt commit.
+2. Remove every registered remote. The loop finds them itself, so it needs
+   no database list. `DOLT_REMOTE('remove', ...)` changes repository state,
+   not a table, so it makes no Dolt commit. The server listens on the
+   town's Dolt port (3307 unless `GT_DOLT_PORT` says otherwise).
 
    ```bash
-   DB=gt   # then be
-   dq() { dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls "$@"; }
-   dq --use-db "$DB" sql -q "SELECT name, url FROM dolt_remotes"
-   dq --use-db "$DB" sql -q "CALL DOLT_REMOTE('remove', 'origin')"
-   dq --use-db "$DB" sql -q "SELECT COUNT(*) AS remotes FROM dolt_remotes"   # expect 0
+   dq() { dolt --host 127.0.0.1 --port "${GT_DOLT_PORT:-3307}" --user root --password "" --no-tls "$@"; }
+   dq sql -r csv -q "SHOW DATABASES" | tail -n +2 | grep -v -E '^(information_schema|mysql)$' |
+     while read -r DB; do
+       dq --use-db "$DB" sql -r csv -q "SELECT name, url FROM dolt_remotes" </dev/null | tail -n +2 |
+         while IFS=, read -r NAME URL; do
+           echo "$DB: removing $NAME ($URL)"
+           dq --use-db "$DB" sql -q "CALL DOLT_REMOTE('remove', '$NAME')" </dev/null
+         done
+     done
    ```
 
 3. Remove each database's `git-remote-cache`. The cache is only read or
@@ -676,7 +684,7 @@ Dolt server stays up throughout.
    ```bash
    TRASH=~/gt/.dolt-remote-cache-trash-$(date +%Y%m%d)
    mkdir -p "$TRASH"
-   for DB in gt be; do
+   for DB in $(ls -d ~/gt/.dolt-data/*/.dolt/git-remote-cache 2>/dev/null | awk -F/ '{print $(NF-2)}'); do
      du -sh ~/gt/.dolt-data/$DB/.dolt/git-remote-cache
      mv ~/gt/.dolt-data/$DB/.dolt/git-remote-cache "$TRASH/$DB"
      test ! -e ~/gt/.dolt-data/$DB/.dolt/git-remote-cache && echo "$DB: cache gone"
@@ -702,7 +710,7 @@ Dolt server stays up throughout.
    every database `SELECT COUNT(*) FROM dolt_remotes` is 0:
 
    ```bash
-   dq() { dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls "$@"; }
+   dq() { dolt --host 127.0.0.1 --port "${GT_DOLT_PORT:-3307}" --user root --password "" --no-tls "$@"; }
    dq sql -r csv -q "SHOW DATABASES" | tail -n +2 | grep -v -E '^(information_schema|mysql)$' |
      while read -r DB; do
        printf '%s ' "$DB"; dq --use-db "$DB" sql -r csv -q "SELECT COUNT(*) FROM dolt_remotes" </dev/null | tail -1

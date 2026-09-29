@@ -58,8 +58,8 @@ const testDoltSQLTimeout = 2 * time.Minute
 // any test ran, and is never dropped: a CREATE or DROP DATABASE while other
 // tests run breaks their store opens and migrations, and the pool's teardown
 // guard fails the package on one (internal/testutil/doltpool.go). Its name
-// carries the "dolt_remotes_check_" prefix, which the orphan cleanups treat as
-// test cruft.
+// carries the test pool's prefix (testutil.doltSQLPoolPrefix), which the
+// orphan cleanups treat as test cruft.
 func createTestDB(t *testing.T) string {
 	t.Helper()
 	return testutil.TakePooledSQLDatabase(t)
