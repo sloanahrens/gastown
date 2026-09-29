@@ -427,7 +427,7 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 // as phantom open escalations on the dashboard or in `bd ready`. Returns the
 // number closed.
 func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string) (int, error) {
-	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--include-infra", "--json")
+	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--include-infra", "--limit=0", "--json")
 	if err != nil {
 		return 0, fmt.Errorf("listing delivery beads: %w", err)
 	}

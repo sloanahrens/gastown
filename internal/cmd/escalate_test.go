@@ -333,7 +333,9 @@ esac
 	}
 	callLog := string(logData)
 
-	for _, want := range []string{"list", "--label=gt:message", "--label=thread:hq-kl7", "--status=open", "--include-infra", "--json"} {
+	// --limit=0: bd list returns 50 rows by default, and an escalation
+	// broadcast to more recipients than that left the rest open.
+	for _, want := range []string{"list", "--label=gt:message", "--label=thread:hq-kl7", "--status=open", "--include-infra", "--json", "--limit=0"} {
 		if !strings.Contains(callLog, want) {
 			t.Errorf("expected list query to contain %q, got log:\n%s", want, callLog)
 		}
