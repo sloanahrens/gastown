@@ -157,3 +157,16 @@ func TestInstallSessionGateRoutesSessionStartsThroughTheHandshake(t *testing.T) 
 		t.Fatalf("bdgate.Require() = %v, want the handshake refusal", err)
 	}
 }
+
+// TestDefaultBDHandshakeRefusesOutsideATown: with no town root the handshake
+// has no town database to read, so it refuses rather than reading whatever
+// database the working directory resolves to.
+func TestDefaultBDHandshakeRefusesOutsideATown(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
+	_, err := defaultBDHandshakeCheck(context.Background())
+	if !errors.Is(err, deps.ErrBDHandshake) || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+		t.Fatalf("defaultBDHandshakeCheck outside a town = %v", err)
+	}
+}
