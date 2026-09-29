@@ -126,6 +126,15 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Town-running commands refuse to start against a bd whose schema level
+	// or JSON contract gt does not know (gt-7iwy0.1). Read-only commands
+	// skip this and keep working on whatever bd is installed.
+	if requiresBDHandshake(cmd) {
+		if err := requireBDHandshake(); err != nil {
+			return err
+		}
+	}
+
 	// Log command usage telemetry (fire-and-forget, excludes tap/signal)
 	logCommandUsage(cmd, args)
 
