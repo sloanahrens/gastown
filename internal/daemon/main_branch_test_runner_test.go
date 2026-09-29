@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -1290,10 +1292,10 @@ func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 		t.Errorf("expected no failure wording on a deadline kill, got: %q", firstLine)
 	}
 	for _, want := range []string{
-		"of the run's budget",                       // not presented as a plain failure
-		"still running when its deadline fired",     // that it was alive, not crashed
-		"killed by: signal: ",                       // the raw cause, preserved
-		"this is the runner's timeout, not a crash", // and classified
+		"of the run's budget",                          // not presented as a plain failure
+		"still running when its deadline fired",        // that it was alive, not crashed
+		"killed by: signal: ",                          // the raw cause, preserved
+		"this is the runner's timeout, not a crash",    // and classified
 		"run budget: patrols.main_branch_test.timeout", // so the fix (raise it) is visible
 		"last package reported: ok  \t" + "github.com/steveyegge/gastown/internal/tmux",
 		"the killed run's transcript is green", // the all-green tail, labeled
@@ -2073,8 +2075,9 @@ func writeTestTownRig(t *testing.T, townRoot, rigName string, withGateConfig boo
 // owns, a logger it can read back, and main_branch_test enabled.
 func newMainBranchTestDaemon(townRoot string, logged *bytes.Buffer, cfg *MainBranchTestConfig) *Daemon {
 	return &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(logged, "", 0),
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(logged, "", 0),
+		notifier: notifyfake.New(), // never a live gt
 		patrolConfig: &DaemonPatrolConfig{
 			Patrols: &PatrolsConfig{MainBranchTest: cfg},
 		},
@@ -2348,8 +2351,8 @@ func TestRunMainBranchTests_AllSkippedCycleCountsSkips(t *testing.T) {
 		t.Errorf("a skipped rig is not a failure:\n%s", out)
 	}
 	// tested == 0 means the cycle must not clear the failure alert: nothing was
-	// verified. clearAlerts shells out to gt and only logs when it fails, so a
-	// clearAlerts line here is exactly the over-clear this guards.
+	// verified. clearAlerts logs every clear it sends, so a clearAlerts line
+	// here is exactly the over-clear this guards.
 	if strings.Contains(out, "clearAlerts(") {
 		t.Errorf("an all-skipped cycle must not clear the failure alert:\n%s", out)
 	}
@@ -2417,7 +2420,7 @@ func stubMainBranchTestRigVerdicts(t *testing.T, verdicts map[string]error) {
 // at all" is exactly "the alert was left as it stands" — a log line saying so
 // could not tell a withheld clear apart from a failed one.
 func TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert(t *testing.T) {
-	gtCalls := fakeGtRecordingArgs(t)
+	rec := notifyfake.New()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", false)
 	addTestTownRig(t, townRoot, "otherrig", false)
@@ -2428,11 +2431,12 @@ func TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert(t *testing.
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	d.notifier = rec
 
 	d.runMainBranchTests()
 
-	if calls := readGtCalls(t, gtCalls); calls != "" {
-		t.Errorf("a cycle whose rigs did not all reach a verdict must leave the alert alone, got gt calls:\n%s", calls)
+	if calls := rec.Calls(); len(calls) != 0 {
+		t.Errorf("a cycle whose rigs did not all reach a verdict must leave the alert alone, got sends:\n%+v", calls)
 	}
 	out := logged.String()
 	if !strings.Contains(out, "interrupted, not a verdict about main") {
@@ -2454,7 +2458,7 @@ func TestRunMainBranchTests_MixedPassAndInterruptedDoesNotClearAlert(t *testing.
 // Without it the fix would be free to over-correct into an alert that can never
 // clear.
 func TestRunMainBranchTests_GreenCycleClearsTheFailureAlert(t *testing.T) {
-	gtCalls := fakeGtRecordingArgs(t)
+	rec := notifyfake.New()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", false)
 	addTestTownRig(t, townRoot, "otherrig", false)
@@ -2462,12 +2466,12 @@ func TestRunMainBranchTests_GreenCycleClearsTheFailureAlert(t *testing.T) {
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	d.notifier = rec
 
 	d.runMainBranchTests()
 
-	calls := readGtCalls(t, gtCalls)
-	if !strings.Contains(calls, "escalate clear") || !strings.Contains(calls, "--fingerprint "+alertKeyMainBranchTest) {
-		t.Errorf("an all-green cycle must retire the failure alert, got gt calls:\n%s", calls)
+	if clears := rec.Clears(); len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, alertKeyMainBranchTest) {
+		t.Errorf("an all-green cycle must retire the failure alert, got sends:\n%+v", rec.Calls())
 	}
 	if out := logged.String(); !strings.Contains(out, "(2 tested, 0 failed, 0 skipped)") {
 		t.Errorf("expected both rigs counted as tested:\n%s", out)
@@ -2480,7 +2484,7 @@ func TestRunMainBranchTests_GreenCycleClearsTheFailureAlert(t *testing.T) {
 // the interruption branch first and this cycle escalates nothing while a rig is
 // demonstrably broken.
 func TestRunMainBranchTests_FailureAlongsideAnInterruptionStillEscalates(t *testing.T) {
-	gtCalls := fakeGtRecordingArgs(t)
+	rec := notifyfake.New()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", false)
 	addTestTownRig(t, townRoot, "otherrig", false)
@@ -2491,15 +2495,16 @@ func TestRunMainBranchTests_FailureAlongsideAnInterruptionStillEscalates(t *test
 
 	var logged bytes.Buffer
 	d := newMainBranchTestDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true})
+	d.notifier = rec
 
 	d.runMainBranchTests()
 
-	calls := readGtCalls(t, gtCalls)
-	if !strings.Contains(calls, "escalate -s HIGH") || !strings.Contains(calls, "--fingerprint "+alertKeyMainBranchTest) {
-		t.Errorf("a failing rig must escalate even when another rig was interrupted, got gt calls:\n%s", calls)
+	escalations := rec.Escalations()
+	if len(escalations) != 1 || escalations[0].Escalation.Severity != "HIGH" || escalations[0].Escalation.Fingerprint != alertKeyMainBranchTest {
+		t.Errorf("a failing rig must escalate even when another rig was interrupted, got sends:\n%+v", rec.Calls())
 	}
-	if strings.Contains(calls, "escalate clear") {
-		t.Errorf("a cycle with a failure must not clear the failure alert, got gt calls:\n%s", calls)
+	if len(rec.Clears()) != 0 {
+		t.Errorf("a cycle with a failure must not clear the failure alert, got sends:\n%+v", rec.Calls())
 	}
 }
 

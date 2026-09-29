@@ -31,6 +31,7 @@ type batchReviewStore struct {
 	// closeErr, when set, makes CloseIssue fail for that MR id — the store-side
 	// half of "the rejection's close did not take effect" (gt-woxj).
 	closeErr map[string]error
+	comments map[string][]string
 }
 
 func newBatchReviewStore(issues ...*beadsdk.Issue) *batchReviewStore {
@@ -38,11 +39,30 @@ func newBatchReviewStore(issues ...*beadsdk.Issue) *batchReviewStore {
 		issues:       make(map[string]*beadsdk.Issue, len(issues)),
 		closeReasons: make(map[string]string),
 		closeErr:     make(map[string]error),
+		comments:     make(map[string][]string),
 	}
 	for _, issue := range issues {
 		s.issues[issue.ID] = issue
 	}
 	return s
+}
+
+// AddIssueComment records a comment on an issue the store holds, and refuses
+// one it does not, as the real store does.
+func (s *batchReviewStore) AddIssueComment(_ context.Context, issueID, author, text string) (*beadsdk.Comment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.issues[issueID]; !ok {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+	s.comments[issueID] = append(s.comments[issueID], text)
+	return &beadsdk.Comment{IssueID: issueID, Author: author, Text: text}, nil
+}
+
+func (s *batchReviewStore) commentsOn(issueID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.comments[issueID]...)
 }
 
 // CloseIssue backs the reject close (closeTerminalMR -> CloseWithReason) so a

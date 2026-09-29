@@ -21,6 +21,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -957,10 +958,11 @@ const maxEscalationTitleLen = 200
 
 // escalationTitle builds a single-line "source: summary" title safe to pass
 // as `bd create --title=...`, collapsing a possibly-multiline message down
-// to its first line.
+// to its first line. A line ends at the first "\r" or "\n", the same
+// characters notify.Escalation.Validate refuses in a description.
 func escalationTitle(source, message string) string {
 	summary := message
-	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
+	if idx := strings.IndexAny(summary, "\r\n"); idx >= 0 {
 		summary = summary[:idx]
 	}
 	summary = strings.TrimSpace(summary)
@@ -1026,19 +1028,17 @@ func (d *Daemon) escalateAlertErr(key, source, message string) error {
 	var lastErr error
 	for attempt := 0; attempt < maxEscalationRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
-		cmd := exec.CommandContext(ctx, "gt", "escalate", "-s", "HIGH", "--fingerprint", key, "--stdin", title)
-		cmd.Stdin = strings.NewReader(message)
-		cmd.Dir = d.config.TownRoot
-		cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
-		util.SetDetachedProcessGroup(cmd)
-
-		output, err := cmd.CombinedOutput()
+		err := d.notify().Escalate(ctx, notify.Escalation{
+			Severity:    "HIGH",
+			Description: title,
+			Reason:      message,
+			Fingerprint: key,
+		})
 		lastErr = err
 
-		// Check for context deadline exceeded before cmd.Wait() may mask the
-		// cause; cmd.Process is nil once the process exits, so we must check
-		// the context first (gt-tlwv).
-		if ctxErr := ctx.Err(); ctxErr == context.DeadlineExceeded {
+		// A timed-out attempt is retried like any other failure, but logged
+		// as a timeout (gt-tlwv).
+		if errors.Is(err, context.DeadlineExceeded) {
 			d.logger.Printf("escalate(%s): attempt %d/%d timed out after %s — %s",
 				source, attempt+1, maxEscalationRetries, defaultEscalationTimeout, message)
 			cancel()
@@ -1067,17 +1067,9 @@ func (d *Daemon) escalateAlertErr(key, source, message string) error {
 			return nil // success
 		}
 
-		// When a process is killed by signal (SIGKILL from CommandContext),
-		// CombinedOutput() returns nil output, so the old "%v (%s)" format
-		// printed "signal: killed ()" with empty parens.  Capture stderr
-		// separately so signal-killed processes still show diagnostics.
-		stderr := strings.TrimSpace(string(output))
-		if stderr == "" {
-			// CombinedOutput captures both stdout+stderr together; if it's
-			// empty the process likely died before flushing anything.
-			stderr = "<no output>"
-		}
-		errMsg := fmt.Sprintf("%s (%s)", err.Error(), stderr)
+		// The error carries gt's output, or "<no output>" when a killed
+		// process flushed nothing.
+		errMsg := err.Error()
 
 		d.logger.Printf("escalate(%s): attempt %d/%d failed: %s — dropped message: %s",
 			source, attempt+1, maxEscalationRetries, errMsg, message)
@@ -1126,20 +1118,10 @@ func (d *Daemon) clearAlerts(reason string, keys ...string) {
 		return
 	}
 
-	args := []string{"escalate", "clear", "--reason", reason}
-	for _, key := range keys {
-		args = append(args, "--fingerprint", key)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gt", args...)
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon")
-	util.SetDetachedProcessGroup(cmd)
-
-	if out, err := cmd.CombinedOutput(); err != nil {
-		d.logger.Printf("clearAlerts(%s): %v — %s", strings.Join(keys, ","), err, strings.TrimSpace(string(out)))
+	if err := d.notify().ClearEscalations(ctx, reason, keys...); err != nil {
+		d.logger.Printf("clearAlerts(%s): %v", strings.Join(keys, ","), err)
 		return
 	}
 	d.logger.Printf("clearAlerts(%s): %s", strings.Join(keys, ","), reason)

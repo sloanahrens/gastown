@@ -11,6 +11,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -19,16 +20,17 @@ import (
 // recordBatchCulprits put on an MR bead and drive ProcessBatch end to end.
 type culpritLabelStore struct {
 	beadsdk.Storage
-	mu     sync.Mutex
-	labels map[string][]string
-	issues map[string]*beadsdk.Issue
+	mu       sync.Mutex
+	labels   map[string][]string
+	issues   map[string]*beadsdk.Issue
+	comments map[string][]string
 }
 
 func newCulpritLabelStore(labels map[string][]string) *culpritLabelStore {
 	if labels == nil {
 		labels = map[string][]string{}
 	}
-	return &culpritLabelStore{labels: labels, issues: map[string]*beadsdk.Issue{}}
+	return &culpritLabelStore{labels: labels, issues: map[string]*beadsdk.Issue{}, comments: map[string][]string{}}
 }
 
 func (s *culpritLabelStore) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
@@ -81,6 +83,19 @@ func (s *culpritLabelStore) GetLabels(_ context.Context, issueID string) ([]stri
 	return append([]string(nil), s.labels[issueID]...), nil
 }
 
+func (s *culpritLabelStore) AddIssueComment(_ context.Context, issueID, author, text string) (*beadsdk.Comment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.comments[issueID] = append(s.comments[issueID], text)
+	return &beadsdk.Comment{IssueID: issueID, Author: author, Text: text}, nil
+}
+
+func (s *culpritLabelStore) commentsOn(issueID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.comments[issueID]...)
+}
+
 func (s *culpritLabelStore) labelsOf(issueID string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -96,6 +111,7 @@ func newCulpritTestEngineer(t *testing.T, store *culpritLabelStore) *Engineer {
 	e.testAllowSyntheticMRs = true
 	e.beads = beads.NewWithStore(workDir, store)
 	e.output = &strings.Builder{}
+	e.notifier = notifyfake.New() // the third drop escalates; never through a live gt
 	return e
 }
 

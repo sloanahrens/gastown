@@ -34,6 +34,9 @@ type mockStorage struct {
 	readyFilter     *beadsdk.WorkFilter // last WorkFilter handed to GetReadyWork
 	readyCalls      int
 	readyResults    []readyResult
+	comments        map[string][]string // issueID -> comment texts
+	commentAuthors  []string
+	commentErr      error
 }
 
 func newMockStorage() *mockStorage {
@@ -105,6 +108,18 @@ func (m *mockStorage) GetDependenciesWithMetadata(_ context.Context, issueID str
 		})
 	}
 	return result, nil
+}
+
+func (m *mockStorage) AddIssueComment(_ context.Context, issueID, author, text string) (*beadsdk.Comment, error) {
+	if m.commentErr != nil {
+		return nil, m.commentErr
+	}
+	if m.comments == nil {
+		m.comments = map[string][]string{}
+	}
+	m.comments[issueID] = append(m.comments[issueID], text)
+	m.commentAuthors = append(m.commentAuthors, author)
+	return &beadsdk.Comment{IssueID: issueID, Author: author, Text: text}, nil
 }
 
 func (m *mockStorage) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
@@ -775,6 +790,33 @@ func TestStoreUpdate(t *testing.T) {
 	}
 	if store.issues["test-1"].Title != "updated" {
 		t.Fatalf("expected 'updated', got %q", store.issues["test-1"].Title)
+	}
+}
+
+// TestStoreAddComment: a Beads with an in-process store adds a comment through
+// it, as it reads comments through it, instead of running bd. A test that
+// injects a store (beads.NewWithStore) otherwise still reached a real bd.
+func TestStoreAddComment(t *testing.T) {
+	t.Parallel()
+	store := newMockStorage()
+	b := newTestBeads(store)
+
+	if err := b.AddComment("test-1", "editorial_drop_escalated: 3 drops"); err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	if got := store.comments["test-1"]; len(got) != 1 || got[0] != "editorial_drop_escalated: 3 drops" {
+		t.Fatalf("store comments = %q, want the one comment", got)
+	}
+}
+
+func TestStoreAddCommentError(t *testing.T) {
+	t.Parallel()
+	store := newMockStorage()
+	store.commentErr = errors.New("comment failed")
+	b := newTestBeads(store)
+
+	if err := b.AddComment("test-1", "x"); !errors.Is(err, store.commentErr) {
+		t.Fatalf("AddComment err = %v, want the store's error", err)
 	}
 }
 

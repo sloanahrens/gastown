@@ -246,8 +246,6 @@ func TestDoMerge_RefusalEscalatesToTheWitnessOnce(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	e := newTestEngineer(t, workDir, g)
-	escalations := []string{}
-	e.escalateFn = func(msg string) { escalations = append(escalations, msg) }
 
 	createFeatureBranch(t, workDir, "polecat/test/gt-nnwy", "feature.txt", "feature\n")
 	dirtyStagedFile(t, workDir, "slot_run_nice_test.go")
@@ -261,6 +259,7 @@ func TestDoMerge_RefusalEscalatesToTheWitnessOnce(t *testing.T) {
 		e.HandleMRInfoFailure(mr, result)
 	}
 
+	escalations := witnessNudges(t, e)
 	if len(escalations) != 1 {
 		t.Fatalf("expected exactly one escalation for a blockage that repeats every cycle, got %d: %v", len(escalations), escalations)
 	}
@@ -294,7 +293,6 @@ func TestProcessBatch_RefusesExternallyDirtyWorktree(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 	e := newTestEngineer(t, workDir, g)
-	e.escalateFn = func(string) {} // the refusal escalates; tests must not reach a live witness
 	createFeatureBranch(t, workDir, "polecat/test/gt-a", "a.txt", "a\n")
 	createFeatureBranch(t, workDir, "polecat/test/gt-b", "b.txt", "b\n")
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -839,8 +840,7 @@ func TestNewDeadWorkerRecoverer_UsesInjectedBeadsClient(t *testing.T) {
 func TestHandleMRInfoFailure_DeadWorkerRecoveryWired(t *testing.T) {
 	// Not t.Parallel(): fakeBDAndGt uses t.Setenv, which panics with a
 	// parallel ancestor. HandleMRInfoFailure nudges the polecat and mayor
-	// for a non-conflict failure (gt-i0ld) — fake gt on PATH so the test
-	// never shells out to the real binary.
+	// for a non-conflict failure (gt-i0ld); a recorder takes those nudges.
 	fakeBDAndGt(t)
 	// A non-conflict branch failure must consult the dead-worker recovery
 	// seam; conflict failures must not (they get a conflict-resolution task).
@@ -850,6 +850,7 @@ func TestHandleMRInfoFailure_DeadWorkerRecoveryWired(t *testing.T) {
 	var buf bytes.Buffer
 	e.output = &buf
 	e.workDir = workDir
+	e.notifier = notifyfake.New()
 
 	var gotReq *deadWorkerRecoveryRequest
 	e.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {

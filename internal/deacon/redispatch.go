@@ -3,6 +3,7 @@ package deacon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -358,11 +360,11 @@ type RecoveredBeadRecord struct {
 // Parameters are Redispatch's; maxAttempts is also the editorial cap when the
 // bead routes editorially, which RedispatchEditorial resolves to
 // DefaultEditorialMaxAttempts when it is 0.
-func RedispatchRecoveredBead(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration) *RedispatchResult {
+func RedispatchRecoveredBead(n notify.Notifier, rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration) *RedispatchResult {
 	if cur, ok := ParseEditorialReceiptFromNotes(rec.Notes); ok {
-		return RedispatchEditorial(rec, townRoot, beadID, sourceRig, maxAttempts, cooldown, cur)
+		return RedispatchEditorial(n, rec, townRoot, beadID, sourceRig, maxAttempts, cooldown, cur)
 	}
-	return Redispatch(rec, townRoot, beadID, sourceRig, maxAttempts, cooldown)
+	return Redispatch(n, rec, townRoot, beadID, sourceRig, maxAttempts, cooldown)
 }
 
 // heldBeadResult returns the result for a bead its own record keeps off the
@@ -396,10 +398,11 @@ func heldBeadResult(rec RecoveredBeadRecord, beadID string) *RedispatchResult {
 //   - sourceRig: the rig from which the bead was recovered (empty = auto-detect from prefix)
 //   - maxAttempts: max re-dispatches before escalating (0 = use default)
 //   - cooldown: min time between re-dispatches (0 = use default)
-func Redispatch(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration) *RedispatchResult {
+func Redispatch(n notify.Notifier, rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration) *RedispatchResult {
 	if held := heldBeadResult(rec, beadID); held != nil {
 		return held
 	}
+	n = mayorNotifier(n, townRoot)
 
 	result := &RedispatchResult{BeadID: beadID}
 
@@ -442,7 +445,7 @@ func Redispatch(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, max
 		result.Attempts = beadState.AttemptCount
 
 		// Escalate to Mayor
-		err := escalateToMayor(townRoot, beadID, beadState)
+		err := escalateToMayor(n, beadID, beadState)
 		if err != nil {
 			result.Error = fmt.Errorf("escalating to mayor: %w", err)
 			result.Message = fmt.Sprintf("failed to escalate after %d attempts: %v", beadState.AttemptCount, err)
@@ -460,7 +463,7 @@ func Redispatch(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, max
 		return result
 	}
 
-	return redispatchAttempt(townRoot, beadID, sourceRig, maxAttempts, state, beadState, nil)
+	return redispatchAttempt(n, townRoot, beadID, sourceRig, maxAttempts, state, beadState, nil)
 }
 
 // redispatchAttempt is the re-dispatch tail shared by Redispatch and
@@ -477,7 +480,7 @@ func Redispatch(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, max
 // to itself (cur.Score <= prev.Score, since they're equal) and reads it as
 // non-converging, forcing an immediate false escalation on a transient sling
 // failure (gt-j6ez).
-func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, state *RedispatchState, beadState *BeadRedispatchState, onDispatched func()) *RedispatchResult {
+func redispatchAttempt(n notify.Notifier, townRoot, beadID, sourceRig string, maxAttempts int, state *RedispatchState, beadState *BeadRedispatchState, onDispatched func()) *RedispatchResult {
 	result := &RedispatchResult{BeadID: beadID, Attempts: beadState.AttemptCount}
 
 	// The operator's town-wide hold outranks the re-sling: this path passes
@@ -488,7 +491,7 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	// recorded: the bead did not fail, the town is paused, and it stays open
 	// for whoever dispatches after the hold lifts.
 	if reason := dispatch.OperatorHold(townRoot); reason != "" {
-		return deferBead(townRoot, beadID, state, beadState, "not re-dispatched: "+reason, reason)
+		return deferBead(n, townRoot, beadID, state, beadState, "not re-dispatched: "+reason, reason)
 	}
 
 	// Determine target rig
@@ -506,7 +509,7 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 	// A per-rig ESTOP on the target rig defers the same way the town hold
 	// does: no attempt, no cooldown (gt-ifijm).
 	if reason := dispatch.RigHold(townRoot, targetRig); reason != "" {
-		return deferBead(townRoot, beadID, state, beadState, "not re-dispatched: "+reason, reason)
+		return deferBead(n, townRoot, beadID, state, beadState, "not re-dispatched: "+reason, reason)
 	}
 
 	// Verify bead is still open (not already claimed or closed).
@@ -534,7 +537,7 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 		// the retry budget and the REDISPATCH_FAILED escalation stay reserved
 		// for real failures. The bead is left open and ready (gt-xdaq).
 		if refusal != "" {
-			return deferBead(townRoot, beadID, state, beadState, "not re-dispatched, retry later: "+refusal, refusal)
+			return deferBead(n, townRoot, beadID, state, beadState, "not re-dispatched, retry later: "+refusal, refusal)
 		}
 		result.Action = "error"
 		result.Error = fmt.Errorf("slinging bead to %s: %w", targetRig, err)
@@ -581,7 +584,7 @@ func redispatchAttempt(townRoot, beadID, sourceRig string, maxAttempts int, stat
 // message is the plain-deferral wording the caller already built (it varies
 // per site: "not re-dispatched: <hold>" vs "not re-dispatched, retry later:
 // <refusal>"); reason is the same fact bare, for the escalation mail body.
-func deferBead(townRoot, beadID string, state *RedispatchState, beadState *BeadRedispatchState, message, reason string) *RedispatchResult {
+func deferBead(n notify.Notifier, townRoot, beadID string, state *RedispatchState, beadState *BeadRedispatchState, message, reason string) *RedispatchResult {
 	result := &RedispatchResult{BeadID: beadID, Attempts: beadState.AttemptCount}
 
 	count := beadState.RecordDeferral(reason)
@@ -596,7 +599,7 @@ func deferBead(townRoot, beadID string, state *RedispatchState, beadState *BeadR
 
 	result.Action = "escalated"
 	result.Message = fmt.Sprintf("%s (escalating after %d consecutive deferrals)", message, count)
-	if err := escalateDeferralToMayor(townRoot, beadID, reason, count, beadState); err != nil {
+	if err := escalateDeferralToMayor(n, beadID, reason, count, beadState); err != nil {
 		result.Error = fmt.Errorf("escalating to mayor: %w", err)
 		result.Message += fmt.Sprintf(" (warning: escalation mail failed: %v)", err)
 	} else {
@@ -613,7 +616,7 @@ func deferBead(townRoot, beadID string, state *RedispatchState, beadState *BeadR
 // reuse escalateToMayor's wording ("keeps failing") — the bead here was never
 // actually slung, so the message names the real blocker: a recurring
 // deferral condition, not a bead defect.
-func escalateDeferralToMayor(townRoot, beadID, reason string, deferralCount int, beadState *BeadRedispatchState) error {
+func escalateDeferralToMayor(n notify.Notifier, beadID, reason string, deferralCount int, beadState *BeadRedispatchState) error {
 	subject := fmt.Sprintf("REDISPATCH_FAILED: %s (%d consecutive deferrals)", beadID, deferralCount)
 	body := fmt.Sprintf(`Bead %s has been deferred %d times in a row without ever being re-dispatched.
 
@@ -633,11 +636,7 @@ Please investigate and either:
 		beadID, deferralCount, beadState.AttemptCount, reason,
 	)
 
-	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
-	cmd.Dir = townRoot
-	cmd.Env = deaconMutationRoutingEnv(townRoot)
-	util.SetDetachedProcessGroup(cmd)
-	return cmd.Run()
+	return n.MailSend(context.Background(), "mayor/", subject, body)
 }
 
 // RedispatchEditorial handles a RECOVERED_BEAD message whose rejection came
@@ -655,10 +654,11 @@ Please investigate and either:
 //     (0 = DefaultEditorialMaxAttempts).
 //   - cur: the receipt summary (score, unresolved finding ids) from the
 //     rejection that triggered this call.
-func RedispatchEditorial(rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration, cur ReceiptSummary) *RedispatchResult {
+func RedispatchEditorial(n notify.Notifier, rec RecoveredBeadRecord, townRoot, beadID, sourceRig string, maxAttempts int, cooldown time.Duration, cur ReceiptSummary) *RedispatchResult {
 	if held := heldBeadResult(rec, beadID); held != nil {
 		return held
 	}
+	n = mayorNotifier(n, townRoot)
 
 	findingHistory := rec.Notes
 	result := &RedispatchResult{BeadID: beadID}
@@ -699,7 +699,7 @@ func RedispatchEditorial(rec RecoveredBeadRecord, townRoot, beadID, sourceRig st
 		if err := labelNeedsHuman(townRoot, beadID); err != nil {
 			result.Message += fmt.Sprintf(" (warning: failed to label %s: %v)", NeedsHumanLabel, err)
 		}
-		if err := escalateEditorialToMayor(townRoot, beadID, reason, findingHistory, beadState); err != nil {
+		if err := escalateEditorialToMayor(n, beadID, reason, findingHistory, beadState); err != nil {
 			result.Error = fmt.Errorf("escalating to mayor: %w", err)
 			result.Message += fmt.Sprintf(" (warning: escalation mail failed: %v)", err)
 		} else {
@@ -719,7 +719,7 @@ func RedispatchEditorial(rec RecoveredBeadRecord, townRoot, beadID, sourceRig st
 	// rejection's receipt against itself (see redispatchAttempt's doc
 	// comment).
 	receipt := cur
-	return redispatchAttempt(townRoot, beadID, sourceRig, maxAttempts, state, beadState, func() {
+	return redispatchAttempt(n, townRoot, beadID, sourceRig, maxAttempts, state, beadState, func() {
 		beadState.LastReceipt = &receipt
 	})
 }
@@ -735,7 +735,7 @@ func labelNeedsHuman(townRoot, beadID string) error {
 // escalateEditorialToMayor sends the needs_human escalation mail, including
 // the full finding history so a human doesn't have to reconstruct it from
 // bead notes.
-func escalateEditorialToMayor(townRoot, beadID, reason, findingHistory string, beadState *BeadRedispatchState) error {
+func escalateEditorialToMayor(n notify.Notifier, beadID, reason, findingHistory string, beadState *BeadRedispatchState) error {
 	subject := fmt.Sprintf("REDISPATCH_FAILED: %s (needs_human)", beadID)
 	body := fmt.Sprintf(`Bead %s stopped resubmitting under om editorial review: %s
 
@@ -756,11 +756,7 @@ This bead has been labeled %s. Please investigate and either:
 		NeedsHumanLabel,
 	)
 
-	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
-	cmd.Dir = townRoot
-	cmd.Env = deaconMutationRoutingEnv(townRoot)
-	util.SetDetachedProcessGroup(cmd)
-	return cmd.Run()
+	return n.MailSend(context.Background(), "mayor/", subject, body)
 }
 
 // PruneRedispatchState removes entries for beads that are no longer open.
@@ -961,7 +957,7 @@ func slingBead(townRoot, beadID, rig, agent string) (refusal string, err error) 
 }
 
 // escalateToMayor sends an escalation mail to the Mayor about a repeatedly-failing bead.
-func escalateToMayor(townRoot, beadID string, beadState *BeadRedispatchState) error {
+func escalateToMayor(n notify.Notifier, beadID string, beadState *BeadRedispatchState) error {
 	subject := fmt.Sprintf("REDISPATCH_FAILED: %s (%d attempts)", beadID, beadState.AttemptCount)
 	body := fmt.Sprintf(`Bead %s has been recovered and re-dispatched %d times but keeps failing.
 
@@ -983,11 +979,7 @@ Please investigate and either:
 		beadState.LastAttemptTime.Format(time.RFC3339),
 	)
 
-	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", body)
-	cmd.Dir = townRoot
-	cmd.Env = deaconMutationRoutingEnv(townRoot)
-	util.SetDetachedProcessGroup(cmd)
-	return cmd.Run()
+	return n.MailSend(context.Background(), "mayor/", subject, body)
 }
 
 // ParseRecoveredBeadSubject extracts the bead ID from a RECOVERED_BEAD mail subject.

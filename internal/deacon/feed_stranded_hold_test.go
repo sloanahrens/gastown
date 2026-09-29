@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // stubStrandedGT puts a `gt` on PATH that reports one stranded convoy with a
@@ -87,7 +89,7 @@ func TestRedispatchRecoveredBead_RigEstopDefers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := RedispatchRecoveredBead(RecoveredBeadRecord{}, townRoot, "gt-righeld", "gastown", 0, 0)
+	result := RedispatchRecoveredBead(notifyfake.New(), RecoveredBeadRecord{}, townRoot, "gt-righeld", "gastown", 0, 0)
 
 	if result.Action != "deferred" || !strings.Contains(result.Message, "ESTOP.gastown") {
 		t.Fatalf("Action = %q, Message = %q; want deferred naming ESTOP.gastown", result.Action, result.Message)

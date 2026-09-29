@@ -1281,8 +1281,8 @@ func TestHandleMRInfoSuccess_ProofFailurePreservesRemoteBranch(t *testing.T) {
 }
 
 func TestHandleMRInfoSuccess_VerifiedHeadLeaseDeletesRemoteBranch(t *testing.T) {
-	// A successful merge nudges mayor (gt-i0ld) — fake gt on PATH so the
-	// test never shells out to the real binary.
+	// A successful merge nudges mayor (gt-i0ld); newTestEngineer's recorder
+	// takes the nudge, and the bd/gt stand-ins keep the rest off real binaries.
 	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
@@ -1368,8 +1368,9 @@ func TestHandleMRInfoSuccess_NotifiesWitnessMerged(t *testing.T) {
 }
 
 func TestDoMergeDirectPreservesSubmittedHeadForPostMergeProof(t *testing.T) {
-	// HandleMRInfoSuccess below nudges mayor (gt-i0ld) — fake gt on PATH so
-	// the test never shells out to the real binary.
+	// HandleMRInfoSuccess below nudges mayor (gt-i0ld); newTestEngineer's
+	// recorder takes the nudge, and the bd/gt stand-ins keep the rest off
+	// real binaries.
 	fakeBDAndGt(t)
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()

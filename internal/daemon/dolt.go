@@ -17,6 +17,7 @@ import (
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/notify"
 )
 
 const doltCmdTimeout = 15 * time.Second
@@ -157,6 +158,9 @@ type DoltServerManager struct {
 	// could turn a slow gc into a damaged store. A dead server is still
 	// started: there is nothing in flight to protect. Protected by mu.
 	restartSuppressed func() bool
+
+	// notifier sends the manager's alert mail; nil means gt (see notify()).
+	notifier notify.Notifier
 
 	// Test hooks (nil = use real implementations; set only in tests)
 	healthCheckFn     func() error
@@ -719,23 +723,19 @@ Action needed: Investigate and fix the root cause, then restart the daemon or th
 
 	townRoot := m.townRoot
 	logger := m.logger
+	n := m.notify()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), doltAlertMailTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "gt", "mail", "send", "mayor/", "-s", subject, "-m", body) //nolint:gosec // G204: args are constructed internally
-		setSysProcAttr(cmd)
-		cmd.Dir = townRoot
-		cmd.Env = os.Environ()
-
-		if err := cmd.Run(); err != nil {
+		if err := n.MailSend(ctx, "mayor/", subject, body); err != nil {
 			logger("Warning: failed to send escalation mail to mayor: %v", err)
 		} else {
 			logger("Sent escalation mail to mayor about Dolt server crash-loop")
 		}
 
 		// Also notify all witnesses so they can react to degraded Dolt state
-		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
+		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 
@@ -762,10 +762,11 @@ Check the log file for crash details. If crashes recur, the daemon will escalate
 
 	townRoot := m.townRoot
 	logger := m.logger
+	n := m.notify()
 
 	go func() {
-		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
+		sendDoltAlertMail(n, "mayor/", subject, body, logger)
+		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 
@@ -792,30 +793,29 @@ This may indicate high load, connection exhaustion, or internal server errors.`,
 
 	townRoot := m.townRoot
 	logger := m.logger
+	n := m.notify()
 
 	go func() {
-		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
+		sendDoltAlertMail(n, "mayor/", subject, body, logger)
+		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 
-// sendDoltAlertMail sends a Dolt alert mail to a specific recipient.
-func sendDoltAlertMail(townRoot, recipient, subject, body string, logger func(format string, v ...interface{})) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "gt", "mail", "send", recipient, "-s", subject, "-m", body) //nolint:gosec // G204: args are constructed internally
-	setSysProcAttr(cmd)
-	cmd.Dir = townRoot
-	cmd.Env = os.Environ()
+// doltAlertMailTimeout bounds one Dolt alert mail send.
+const doltAlertMailTimeout = 30 * time.Second
 
-	if err := cmd.Run(); err != nil {
+// sendDoltAlertMail sends a Dolt alert mail to a specific recipient.
+func sendDoltAlertMail(n notify.Notifier, recipient, subject, body string, logger func(format string, v ...interface{})) {
+	ctx, cancel := context.WithTimeout(context.Background(), doltAlertMailTimeout)
+	defer cancel()
+	if err := n.MailSend(ctx, recipient, subject, body); err != nil {
 		logger("Warning: failed to send Dolt alert to %s: %v", recipient, err)
 	}
 }
 
 // sendDoltAlertToWitnesses sends a Dolt alert to all rig witnesses.
 // Discovers rigs from mayor/rigs.json and sends to each <rig>/witness.
-func sendDoltAlertToWitnesses(townRoot, subject, body string, logger func(format string, v ...interface{})) {
+func sendDoltAlertToWitnesses(n notify.Notifier, townRoot, subject, body string, logger func(format string, v ...interface{})) {
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	data, err := os.ReadFile(rigsPath)
 	if err != nil {
@@ -831,7 +831,7 @@ func sendDoltAlertToWitnesses(townRoot, subject, body string, logger func(format
 
 	for rigName := range parsed.Rigs {
 		recipient := rigName + "/witness"
-		sendDoltAlertMail(townRoot, recipient, subject, body, logger)
+		sendDoltAlertMail(n, recipient, subject, body, logger)
 	}
 }
 
@@ -1551,10 +1551,11 @@ concurrent polecat count or staggering write-heavy operations.`,
 
 	townRoot := m.townRoot
 	logger := m.logger
+	n := m.notify()
 
 	go func() {
-		sendDoltAlertMail(townRoot, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(townRoot, subject, body, logger)
+		sendDoltAlertMail(n, "mayor/", subject, body, logger)
+		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 

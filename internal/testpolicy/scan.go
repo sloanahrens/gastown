@@ -84,7 +84,7 @@ func ScanDirWithExemptions(dir string) ([]Violation, []Exemption, error) {
 }
 
 // packageVars returns the names of package-level variables declared in the
-// production files of a package.
+// production files of a package. The blank identifier is never one.
 func packageVars(files []*ast.File) map[string]bool {
 	vars := map[string]bool{}
 	for _, f := range files {
@@ -95,6 +95,11 @@ func packageVars(files []*ast.File) map[string]bool {
 			}
 			for _, s := range gd.Specs {
 				for _, n := range s.(*ast.ValueSpec).Names {
+					// `var _ Iface = (*T)(nil)` declares nothing a test
+					// could swap, and `_ = f()` assigns no package state.
+					if n.Name == "_" {
+						continue
+					}
 					vars[n.Name] = true
 				}
 			}

@@ -3,6 +3,7 @@ package witness
 import (
 	"time"
 
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -58,6 +59,17 @@ type handlers struct {
 	survivingWorkForBeadFn func(workDir, rigName, beadID string) (string, error)
 	// sleepFn waits out a settle delay (the composer recheck).
 	sleepFn func(time.Duration)
+	// notifier sends the handlers' mail and escalations; nil means gt run
+	// from the town root.
+	notifier notify.Notifier
+}
+
+// notify returns the handlers' Notifier, or gt run from townRoot.
+func (h *handlers) notify(townRoot string) notify.Notifier {
+	if h.notifier != nil {
+		return h.notifier
+	}
+	return &notify.CLI{Dir: townRoot}
 }
 
 // newHandlers returns the production handlers: every collaborator real.

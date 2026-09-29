@@ -38,6 +38,7 @@ import (
 	"github.com/steveyegge/gastown/internal/feed"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mayor"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -96,6 +97,10 @@ type Daemon struct {
 	// PATCH-006: Resolved binary paths to avoid PATH issues in subprocesses.
 	gtPath string
 	bdPath string
+
+	// notifier sends mail, nudges and escalations; nil means gt run as the
+	// daemon (see notify()).
+	notifier notify.Notifier
 
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
@@ -600,6 +605,7 @@ func New(config *Config) (*Daemon, error) {
 		doltServer:      doltServer,
 		gtPath:          gtPath,
 		bdPath:          bdPath,
+		notifier:        newDaemonNotifier(gtPath, config.TownRoot),
 		restartTracker:  restartTracker,
 		otelProvider:    otelProvider,
 		metrics:         dm,
@@ -3642,11 +3648,7 @@ hook_bead: %s
 Restart deferred to stuck-agent-dog plugin for context-aware recovery.`,
 		polecatName, hookBead)
 
-	cmd := exec.Command(d.gtPath, "mail", "send", witnessAddr, "-s", subject, "-m", body) //nolint:gosec // G204: args are constructed internally
-	setSysProcAttr(cmd)
-	cmd.Dir = d.config.TownRoot
-	cmd.Env = append(os.Environ(), "BD_ACTOR=daemon") // Identify as daemon, not overseer
-	if err := cmd.Run(); err != nil {
+	if err := d.notify().MailSend(context.Background(), witnessAddr, subject, body); err != nil {
 		d.logger.Printf("Warning: failed to notify witness of crashed polecat: %v", err)
 	}
 }

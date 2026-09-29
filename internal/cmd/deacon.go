@@ -1692,7 +1692,7 @@ func deaconRedispatch(townRoot, beadID string) *deacon.RedispatchResult {
 		record.Notes = deacon.GetBeadNotesForRedispatch(townRoot, beadID)
 	}
 
-	return deacon.RedispatchRecoveredBead(record, townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown)
+	return deacon.RedispatchRecoveredBead(nil, record, townRoot, beadID, redispatchRig, redispatchMaxAttempts, redispatchCooldown)
 }
 
 // runDeaconRedispatch handles re-dispatching a recovered bead.

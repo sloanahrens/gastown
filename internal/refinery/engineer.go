@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/lintlock"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/util"
@@ -347,10 +348,9 @@ type Engineer struct {
 	// under test (gt-twil). Overridable in tests.
 	findOrphanDoltServersFn func() ([]util.DoltOrphanServer, error)
 
-	// escalateFn replaces the witness nudge (escalateToWitness) in tests. Nil
-	// in production, where the nudge is the real one; a test that leaves it
-	// nil would reach a live witness.
-	escalateFn func(string)
+	// notifier sends the engineer's nudges, mail and escalations. Nil means
+	// gt (see notify); a test that leaves it nil would reach a live town.
+	notifier notify.Notifier
 
 	// notifyMergedFn replaces the witness MERGED mail (notifyWitnessMerged) in
 	// tests. Nil in production, where the real mail send runs; a test that
@@ -2051,10 +2051,7 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
 	// dependent work. Without this, mayor only discovers completion by polling.
 	// Uses nudge (not mail) to avoid permanent Dolt commits for routine signals (GH#2434).
 	nudgeMsg := fmt.Sprintf("MERGED: %s issue=%s branch=%s", mr.ID, mr.SourceIssue, mr.Branch)
-	nudgeCmd := exec.Command("gt", "nudge", "mayor/", nudgeMsg)
-	util.SetDetachedProcessGroup(nudgeCmd)
-	nudgeCmd.Dir = e.workDir
-	if err := nudgeCmd.Run(); err != nil {
+	if err := e.notify(e.workDir).Nudge(context.Background(), "mayor/", nudgeMsg); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge mayor about merge: %v\n", err)
 	}
 
@@ -2134,10 +2131,11 @@ func (e *Engineer) checkAndEscalateRubricChange(mr *MRInfo, result ProcessResult
 	}
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Rubric changed by %s; escalated to the operator (the manifest is not re-stamped automatically)\n", mr.ID)
 	msg := fmt.Sprintf("rubric changed on %s: re-stamp the harness manifest from main content (rig=%s rubric=%s sha256=%s MR=%s)", mr.Target, e.rig.Name, rel, sha, mr.ID)
-	escalateCmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "rubric-changed", msg)
-	util.SetDetachedProcessGroup(escalateCmd)
-	escalateCmd.Dir = e.workDir
-	if err := escalateCmd.Run(); err != nil {
+	if err := e.notify(e.workDir).Escalate(context.Background(), notify.Escalation{
+		Severity:    "medium",
+		Description: msg,
+		Reason:      "rubric-changed",
+	}); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: rubric-change escalation failed: %v\n", err)
 	}
 	if mr.ID != "" {
@@ -2609,9 +2607,7 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: branch %s not found on remote — escalating to mayor (possible work loss)\n", mr.ID, mr.Branch)
 		mayorMsg := fmt.Sprintf("BRANCH_MISSING: MR %s branch=%s issue=%s worker=%s — branch not on origin, work may be lost; re-dispatch if needed",
 			mr.ID, mr.Branch, mr.SourceIssue, mr.Worker)
-		mayorCmd := exec.Command("gt", "nudge", "mayor/", mayorMsg)
-		mayorCmd.Dir = e.workDir
-		if err := mayorCmd.Run(); err != nil {
+		if err := e.notify(e.workDir).Nudge(context.Background(), "mayor/", mayorMsg); err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge mayor about missing branch: %v\n", err)
 		}
 		return
@@ -2631,10 +2627,7 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	nudgeTarget := fmt.Sprintf("%s/%s", e.rig.Name, polecatName)
 	nudgeMsg := fmt.Sprintf("MERGE_FAILED: branch=%s issue=%s type=%s error=%s — fix and resubmit with 'gt done'",
 		mr.Branch, mr.SourceIssue, failureType, result.Error)
-	nudgeCmd := exec.Command("gt", "nudge", nudgeTarget, nudgeMsg)
-	util.SetDetachedProcessGroup(nudgeCmd)
-	nudgeCmd.Dir = e.workDir
-	if err := nudgeCmd.Run(); err != nil {
+	if err := e.notify(e.workDir).Nudge(context.Background(), nudgeTarget, nudgeMsg); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge %s about merge failure: %v\n", polecatName, err)
 	} else {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Nudged %s about merge failure (%s)\n", polecatName, failureType)
@@ -2643,10 +2636,7 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	// Nudge mayor about merge failure so dispatcher can unblock or reassign
 	// dependent work immediately. Mirrors the success nudge in HandleMRInfoSuccess.
 	mayorMsg := fmt.Sprintf("MERGE_FAILED: %s issue=%s branch=%s type=%s", mr.ID, mr.SourceIssue, mr.Branch, failureType)
-	mayorCmd := exec.Command("gt", "nudge", "mayor/", mayorMsg)
-	util.SetDetachedProcessGroup(mayorCmd)
-	mayorCmd.Dir = e.workDir
-	if err := mayorCmd.Run(); err != nil {
+	if err := e.notify(e.workDir).Nudge(context.Background(), "mayor/", mayorMsg); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge mayor about merge failure: %v\n", err)
 	}
 
@@ -3707,10 +3697,7 @@ func (e *Engineer) notifyDeaconConvoyFeeding(mr *MRInfo) {
 	// The deacon discovers convoy state from beads on next patrol cycle;
 	// this nudge just accelerates discovery.
 	nudgeMsg := fmt.Sprintf("CONVOY_NEEDS_FEEDING: convoy=%s issue=%s", mr.ConvoyID, mr.SourceIssue)
-	nudgeCmd := exec.Command("gt", "nudge", "deacon", nudgeMsg)
-	util.SetDetachedProcessGroup(nudgeCmd)
-	nudgeCmd.Dir = e.workDir
-	if err := nudgeCmd.Run(); err != nil {
+	if err := e.notify(e.workDir).Nudge(context.Background(), "deacon", nudgeMsg); err != nil {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to nudge deacon about convoy feeding for %s: %v\n", mr.ConvoyID, err)
 	} else {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Nudged deacon: CONVOY_NEEDS_FEEDING %s\n", mr.ConvoyID)
@@ -3869,14 +3856,12 @@ func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description
 		return
 	}
 	for _, addr := range fields.NotificationAddresses() {
-		mailCmd := exec.Command("gt", "mail", "send", addr,
-			"-s", fmt.Sprintf("🚚 Convoy landed: %s", title),
-			"-m", fmt.Sprintf("Convoy %s has completed.\n\nAll tracked issues are now closed.\n\nClosed by: %s/refinery", convoyID, e.rig.Name),
-			"--from", "convoy/"+convoyID,
-			"--no-notify")
-		util.SetDetachedProcessGroup(mailCmd)
-		mailCmd.Dir = townRoot
-		if err := mailCmd.Run(); err != nil {
+		err := e.notify(townRoot).MailSend(context.Background(), addr,
+			fmt.Sprintf("🚚 Convoy landed: %s", title),
+			fmt.Sprintf("Convoy %s has completed.\n\nAll tracked issues are now closed.\n\nClosed by: %s/refinery", convoyID, e.rig.Name),
+			notify.From("convoy/"+convoyID),
+			notify.NoNotify())
+		if err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not notify %s: %v\n", addr, err)
 		}
 	}
