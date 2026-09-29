@@ -2,9 +2,6 @@ package daemon
 
 import (
 	"log"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -46,9 +43,7 @@ func seedDeaconCycle(d *Daemon, cycle int64, changedAgo time.Duration, stalledTi
 // from "heartbeat is stale" so the two conditions stay tellable apart in
 // daemon.log.
 func TestCheckDeaconHeartbeat_CycleStall(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows — fake tmux requires bash")
-	}
+	t.Parallel()
 
 	activeWork := map[string]beadsdk.Storage{
 		"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
@@ -93,6 +88,7 @@ func TestCheckDeaconHeartbeat_CycleStall(t *testing.T) {
 			wantLogs: []string{
 				"Deacon cycle stalled (21m0s at cycle 42)",
 				"STUCK DEACON: cycle stalled for 21m0s at cycle 42",
+				"Stuck-agent-dog: Deacon restarted successfully",
 			},
 			wantNoLogs: []string{"nudging session", "heartbeat is stale"},
 		},
@@ -140,26 +136,17 @@ func TestCheckDeaconHeartbeat_CycleStall(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			townRoot := t.TempDir()
-			fakeBinDir := t.TempDir()
-			tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-			if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-				t.Fatalf("create tmux log: %v", err)
-			}
-
-			writeFakeTmuxWithSession(t, fakeBinDir)
-			t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("TMUX_LOG", tmuxLog)
-
 			writeDeaconHeartbeatWithCycle(t, townRoot, tc.heartbeatAge, tc.cycle)
 
-			d := newTestDaemonWithStores(t, townRoot, tc.stores)
+			d, _, clk := newDeaconHeartbeatDaemon(t, townRoot, tc.stores)
 			seedDeaconCycle(d, tc.seedCycle, tc.seedChangedAgo, tc.seedStalledTicks)
 
 			logBuf := &strings.Builder{}
 			d.logger = log.New(logBuf, "", 0)
 
-			d.checkDeaconHeartbeat()
+			runOnClock(t, clk, time.Second, d.checkDeaconHeartbeat)
 
 			logOutput := logBuf.String()
 			for _, want := range tc.wantLogs {
@@ -180,25 +167,14 @@ func TestCheckDeaconHeartbeat_CycleStall(t *testing.T) {
 // first tick that sees a stalled cycle only records it. Acting on one sample
 // would restart a Deacon over a single missed heartbeat tick.
 func TestCheckDeaconHeartbeat_CycleStallNeedsTwoTicks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows — fake tmux requires bash")
-	}
+	t.Parallel()
 
 	townRoot := t.TempDir()
-	fakeBinDir := t.TempDir()
-	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-		t.Fatalf("create tmux log: %v", err)
-	}
-
-	writeFakeTmuxWithSession(t, fakeBinDir)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_LOG", tmuxLog)
 
 	// Timestamp keeps being refreshed; the cycle does not move.
 	writeDeaconHeartbeatWithCycle(t, townRoot, 30*time.Second, 42)
 
-	d := newTestDaemonWithStores(t, townRoot, map[string]beadsdk.Storage{
+	d, tm, _ := newDeaconHeartbeatDaemon(t, townRoot, map[string]beadsdk.Storage{
 		"hq": &searchStorage{results: map[string][]*beadsdk.Issue{
 			"in_progress": {{ID: "sc-abc"}},
 		}},
@@ -215,15 +191,15 @@ func TestCheckDeaconHeartbeat_CycleStallNeedsTwoTicks(t *testing.T) {
 	if !strings.Contains(first, "on its first sample, waiting for confirmation") {
 		t.Errorf("first tick should only record the stall\nlog:\n%s", first)
 	}
-	if strings.Contains(first, "nudging session") {
+	if strings.Contains(first, "nudging session") || deaconHealthChecks(tm) != 0 {
 		t.Errorf("first tick must not nudge\nlog:\n%s", first)
 	}
 
 	logBuf.Reset()
 	d.checkDeaconHeartbeat()
 	second := logBuf.String()
-	if !strings.Contains(second, "nudging session") {
-		t.Errorf("second consecutive tick should nudge\nlog:\n%s", second)
+	if !strings.Contains(second, "nudging session") || deaconHealthChecks(tm) != 1 {
+		t.Errorf("second consecutive tick should nudge the Deacon once\nlog:\n%s", second)
 	}
 	if strings.Contains(second, "waiting for confirmation") {
 		t.Errorf("second tick should not still be waiting\nlog:\n%s", second)
@@ -235,22 +211,11 @@ func TestCheckDeaconHeartbeat_CycleStallNeedsTwoTicks(t *testing.T) {
 // nothing to have a baseline against, so the next heartbeat seen must start
 // the clock over rather than inherit the pre-gap timestamp.
 func TestCheckDeaconHeartbeat_CycleBaselineReset(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows — fake tmux requires bash")
-	}
+	t.Parallel()
 
 	townRoot := t.TempDir()
-	fakeBinDir := t.TempDir()
-	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-		t.Fatalf("create tmux log: %v", err)
-	}
 
-	writeFakeTmuxWithSession(t, fakeBinDir)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_LOG", tmuxLog)
-
-	d := newTestDaemonWithStores(t, townRoot, nil)
+	d, _, _ := newDeaconHeartbeatDaemon(t, townRoot, nil)
 	logBuf := &strings.Builder{}
 	d.logger = log.New(logBuf, "", 0)
 

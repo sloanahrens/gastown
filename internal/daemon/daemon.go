@@ -59,7 +59,7 @@ import (
 type Daemon struct {
 	config        *Config
 	patrolConfig  *DaemonPatrolConfig
-	tmux          *tmux.Tmux
+	tmux          sessionTmux
 	logger        *log.Logger
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -105,6 +105,11 @@ type Daemon struct {
 
 	// clock times the daemon's own waits (see clk()); nil is the real clock.
 	clock clockwork.Clock
+
+	// startDeaconFn replaces deacon.Manager's Start in tests, which drive the
+	// restart paths against a fake tmux that deacon.Manager cannot see. Nil
+	// uses the manager.
+	startDeaconFn func() error
 
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
@@ -2056,9 +2061,7 @@ func (d *Daemon) ensureDeaconRunning() {
 		}
 	}
 
-	mgr := deacon.NewManager(d.config.TownRoot)
-
-	if err := mgr.Start(""); err != nil {
+	if err := d.startDeacon(); err != nil {
 		if err == deacon.ErrAlreadyRunning {
 			// Deacon is running - record success to reset backoff
 			if d.restartTracker != nil {
@@ -2084,6 +2087,15 @@ func (d *Daemon) ensureDeaconRunning() {
 	d.metrics.recordRestart(d.ctx, "deacon")
 	telemetry.RecordDaemonRestart(d.ctx, "deacon")
 	d.logger.Println("Deacon started successfully")
+}
+
+// startDeacon starts the Deacon session through deacon.Manager, or through
+// startDeaconFn when a test set one.
+func (d *Daemon) startDeacon() error {
+	if d.startDeaconFn != nil {
+		return d.startDeaconFn()
+	}
+	return deacon.NewManager(d.config.TownRoot).Start("")
 }
 
 // deaconGracePeriod returns the config-driven deacon grace period.
@@ -2328,7 +2340,7 @@ func (d *Daemon) restartStuckDeacon(sessionName, reason string) {
 	}
 
 	// Brief pause for tmux cleanup
-	time.Sleep(2 * time.Second)
+	d.clk().Sleep(2 * time.Second)
 
 	// Respawn via ensureDeaconRunning (which uses deacon.Manager)
 	d.ensureDeaconRunning()
