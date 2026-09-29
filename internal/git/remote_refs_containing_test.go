@@ -22,6 +22,7 @@ func runGitIn(t *testing.T, dir string, args ...string) string {
 }
 
 func TestRemoteRefsContainingReportsReachability(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	branch, err := g.CurrentBranch()
@@ -80,6 +81,7 @@ func TestRemoteRefsContainingReportsReachability(t *testing.T) {
 }
 
 func TestRemoteRefsContainingIgnoresSymbolicHead(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	branch, err := g.CurrentBranch()
@@ -106,6 +108,7 @@ func TestRemoteRefsContainingIgnoresSymbolicHead(t *testing.T) {
 }
 
 func TestRemoteRefsContainingRejectsEmptySHA(t *testing.T) {
+	t.Parallel()
 	g := NewGit(initTestRepo(t))
 	if _, err := g.RemoteRefsContaining("  "); err == nil {
 		t.Fatal("RemoteRefsContaining(\"  \") must fail rather than report nothing reachable")

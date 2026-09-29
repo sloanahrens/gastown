@@ -5,6 +5,7 @@ import (
 )
 
 func TestGit_UpstreamRemote(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	g := NewGit(tmp)
 	runGit(t, tmp, "init", "--initial-branch", "main")

@@ -4556,6 +4556,14 @@ type SubmoduleChange struct {
 // to share git objects from a local clone instead of fetching from remote.
 // This makes submodule init near-instant for large submodules (e.g. 655MB gitlabhq).
 func InitSubmodules(repoPath string, referencePath ...string) error {
+	return initSubmodules(repoPath, nil, referencePath...)
+}
+
+// initSubmodules is InitSubmodules with extra environment for the git
+// process. Tests pass GIT_CONFIG_* here to allow the file:// transport that
+// a local submodule remote needs, which git refuses by default for
+// submodule clones.
+func initSubmodules(repoPath string, extraEnv []string, referencePath ...string) error {
 	if !hasTrackedGitmodules(repoPath) {
 		return nil
 	}
@@ -4575,6 +4583,9 @@ func InitSubmodules(repoPath string, referencePath ...string) error {
 
 	cmd := exec.Command("git", args...)
 	util.SetDetachedProcessGroup(cmd)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
