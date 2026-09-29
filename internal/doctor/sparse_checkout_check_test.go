@@ -97,7 +97,14 @@ func TestSparseCheckoutCheck_NoGitRepos(t *testing.T) {
 }
 
 // initGitRepo creates a minimal git repo with an initial commit.
+// initGitRepo makes path a repo holding one commit of README.md. The repo is
+// built once per test binary and copied.
 func initGitRepo(t *testing.T, path string) {
+	t.Helper()
+	cachedGitTree(t, "sparse initGitRepo", path, func(dir string) { buildInitGitRepo(t, dir) })
+}
+
+func buildInitGitRepo(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)

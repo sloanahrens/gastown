@@ -147,45 +147,42 @@ func TestForeignRemoteCheck_FixRemovesForeignRemotes(t *testing.T) {
 
 // --- helpers (prefixed to avoid conflicts with branch_check_test.go) ---
 
+// initForeignRemoteTestRepo returns a town repo on main whose origin is a bare
+// repo it has pushed to. The pair is built once per test binary and copied.
 func initForeignRemoteTestRepo(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "foreign-remote-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	runGit(t, dir, "init", "-b", "main")
-
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Town"), 0644); err != nil {
-		t.Fatalf("failed to write file: %v", err)
-	}
-	runGit(t, dir, "add", "README.md")
-	runGit(t, dir, "commit", "-m", "initial")
-
-	bareDir, err := os.MkdirTemp("", "foreign-remote-bare-*")
-	if err != nil {
-		t.Fatalf("failed to create bare dir: %v", err)
-	}
-	runGit(t, bareDir, "init", "--bare")
-	runGit(t, dir, "remote", "add", "origin", bareDir)
-	runGit(t, dir, "push", "origin", "main")
-
-	t.Cleanup(func() { os.RemoveAll(bareDir) })
-
-	return dir
+	root := t.TempDir()
+	cachedGitTree(t, "foreign remote town", root, func(dir string) {
+		town := filepath.Join(dir, "town")
+		bare := filepath.Join(dir, "bare.git")
+		if err := os.MkdirAll(town, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, town, "init", "-b", "main")
+		if err := os.WriteFile(filepath.Join(town, "README.md"), []byte("# Town"), 0644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
+		runGit(t, town, "add", "README.md")
+		runGit(t, town, "commit", "-m", "initial")
+		runGit(t, dir, "init", "--bare", bare)
+		runGit(t, town, "remote", "add", "origin", bare)
+		runGit(t, town, "push", "origin", "main")
+	})
+	return filepath.Join(root, "town")
 }
 
+// initSeparateTestRepo returns a repo that shares no history with the town
+// repo. It is built once per test binary and copied.
 func initSeparateTestRepo(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "foreign-remote-separate-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	runGit(t, dir, "init", "-b", "main")
-
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Separate"), 0644); err != nil {
-		t.Fatalf("failed to write file: %v", err)
-	}
-	runGit(t, dir, "add", "README.md")
-	runGit(t, dir, "commit", "-m", "separate initial")
+	dir := t.TempDir()
+	cachedGitTree(t, "foreign remote separate", dir, func(dir string) {
+		runGit(t, dir, "init", "-b", "main")
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Separate"), 0644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
+		runGit(t, dir, "add", "README.md")
+		runGit(t, dir, "commit", "-m", "separate initial")
+	})
 	return dir
 }

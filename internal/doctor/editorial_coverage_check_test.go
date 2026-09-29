@@ -35,8 +35,22 @@ func runGitIn(t *testing.T, dir string, args ...string) string {
 
 // newCoverageFixture sets up <tmpDir>/<rigName>/mayor/rig as a clone of a
 // bare origin, with editorial review required, and a single root commit on
-// main pushed to origin.
+// main pushed to origin. The tree is built once per rig name and copied.
 func newCoverageFixture(t *testing.T, tmpDir, rigName string) *coverageFixture {
+	t.Helper()
+	cachedGitTree(t, "coverage fixture "+rigName, tmpDir, func(dir string) {
+		buildCoverageFixture(t, dir, rigName)
+	})
+	mayorRig := filepath.Join(tmpDir, rigName, "mayor", "rig")
+	return &coverageFixture{
+		rigPath:    filepath.Join(tmpDir, rigName),
+		originPath: filepath.Join(tmpDir, rigName+"-origin.git"),
+		mayorRig:   mayorRig,
+		g:          git.NewGit(mayorRig),
+	}
+}
+
+func buildCoverageFixture(t *testing.T, tmpDir, rigName string) {
 	t.Helper()
 	rigPath := filepath.Join(tmpDir, rigName)
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -66,13 +80,6 @@ func newCoverageFixture(t *testing.T, tmpDir, rigName string) *coverageFixture {
 	runGitIn(t, mayorRig, "add", ".")
 	runGitIn(t, mayorRig, "commit", "-m", "root commit")
 	runGitIn(t, mayorRig, "push", "-u", "origin", "main")
-
-	return &coverageFixture{
-		rigPath:    rigPath,
-		originPath: origin,
-		mayorRig:   mayorRig,
-		g:          git.NewGit(mayorRig),
-	}
 }
 
 // commit writes name=content, commits, and pushes to origin main. Returns
