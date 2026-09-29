@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	beadsdk "github.com/steveyegge/beads"
 )
@@ -45,7 +47,10 @@ func TestDoltPoolResetsAReturnedDatabaseOnARealServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// No idle connection: a session left open on a returned database fails
+	// its release (see the leaked-session case below).
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
 	ctx := context.Background()
 
 	var migratedHead string
@@ -131,12 +136,15 @@ func TestDoltPoolResetsAReturnedDatabaseOnARealServer(t *testing.T) {
 	}
 	defer sdb.Close()
 	sdb.SetMaxOpenConns(1)
+	sdb.SetMaxIdleConns(0)
 	for _, q := range []string{
 		"CREATE TABLE t (id INT PRIMARY KEY)",
 		"INSERT INTO t VALUES (1)",
 		"CALL DOLT_COMMIT('-Am', 'test commit')",
 		"CALL DOLT_REMOTE('add', 'origin', 'file:///nonexistent/dolt-remote')",
 		"CALL DOLT_BRANCH('side')",
+		"INSERT INTO t VALUES (2)",
+		"CALL DOLT_STASH('push', 'leftover')",
 	} {
 		mustExec(t, sdb, q)
 	}
@@ -146,6 +154,74 @@ func TestDoltPoolResetsAReturnedDatabaseOnARealServer(t *testing.T) {
 	requireOnly(t, sdb, "SELECT CONCAT(name, '@', hash) FROM dolt_branches", "main@"+sqlEntry.initCommit)
 	requireOnly(t, sdb, "SHOW TABLES")
 	requireOnly(t, sdb, "SELECT name FROM dolt_remotes")
+	requireOnly(t, sdb, "SELECT name FROM dolt_stashes")
+
+	// A reset point holding an AUTO_INCREMENT table: a hard reset brings the
+	// rows back but not the counter, which Dolt then stops reporting, so the
+	// release must refuse the database rather than lend it with ids that
+	// differ from a fresh one's.
+	t.Run("moved AUTO_INCREMENT counter", func(t *testing.T) {
+		ai, err := p.acquire(leaseSQL, "TestCounter", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, sdb, "CREATE TABLE ai (id INT AUTO_INCREMENT PRIMARY KEY, v INT)")
+		mustExec(t, sdb, "CALL DOLT_COMMIT('-Am', 'reset point with a counter')")
+		if err := p.recordHead(ai); err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, sdb, "INSERT INTO ai (v) VALUES (1), (2), (3)")
+		err = p.release(ai)
+		if err == nil || !strings.Contains(err.Error(), "AUTO_INCREMENT") || !strings.Contains(err.Error(), "TestCounter") {
+			t.Fatalf("release = %v, want a refusal naming the AUTO_INCREMENT column and the lessee", err)
+		}
+		// Put the one SQL database back for the next case.
+		p.mu.Lock()
+		ai.broken, ai.leased, ai.head = nil, false, ai.initCommit
+		p.mu.Unlock()
+		if err := p.release(mustAcquire(t, p, leaseSQL, "cleanup")); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// A lessee that leaves a session open with a transaction in flight: if the
+	// release reset under it, the transaction could commit into the database
+	// the next lessee gets. The release must end that session and refuse the
+	// database, naming the lessee.
+	t.Run("session left open across the release", func(t *testing.T) {
+		p.sessionWait = time.Second
+		leaky, err := p.acquire(leaseSQL, "TestLeaky", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, sdb, "CREATE TABLE late (id INT PRIMARY KEY)")
+		mustExec(t, sdb, "CALL DOLT_COMMIT('-Am', 'late table')")
+		ldb, err := sql.Open("mysql", "root:@tcp(127.0.0.1:"+port+")/"+leaky.name+"?timeout=30s")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ldb.Close()
+		tx, err := ldb.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec("INSERT INTO late VALUES (1)"); err != nil {
+			t.Fatal(err)
+		}
+		err = p.release(leaky)
+		if err == nil || !strings.Contains(err.Error(), "TestLeaky") || !strings.Contains(err.Error(), "open") {
+			t.Fatalf("release with a session still open = %v, want a refusal naming the lessee", err)
+		}
+		commitErr := tx.Commit()
+		if leaky.broken == nil {
+			t.Error("the database was put back in the pool after its lessee left a session open")
+		}
+		if commitErr == nil {
+			var n int
+			_ = sdb.QueryRow("SELECT COUNT(*) FROM late").Scan(&n)
+			t.Fatalf("the leaked transaction committed after the release (rows in late: %d); the session must be ended first", n)
+		}
+	})
 
 	if err := verifyDoltCatalogAt(portNum, p.names); err != nil {
 		t.Fatalf("leasing and resetting changed the catalog: %v", err)
@@ -180,4 +256,13 @@ func requireOnly(t *testing.T, db *sql.DB, q string, want ...string) {
 	if !slices.Equal(got, want) {
 		t.Errorf("%s = %q, want %q", q, got, want)
 	}
+}
+
+func mustAcquire(t *testing.T, p *doltDBPool, kind doltLeaseKind, owner string) *doltPoolEntry {
+	t.Helper()
+	e, err := p.acquire(kind, owner, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
 }

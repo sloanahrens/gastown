@@ -85,6 +85,11 @@ const doltPoolDDLTimeout = 2 * time.Minute
 // is the catalog change it exists to prevent.
 const doltPoolLeaseWait = 2 * time.Minute
 
+// doltPoolSessionWait is how long a release waits for its lessee's sessions
+// on the database to end. A store's close and a bd subprocess's exit end
+// theirs at once; the wait covers the server noticing a closed connection.
+const doltPoolSessionWait = 10 * time.Second
+
 // doltPoolReclaimPoll is how often a waiting lease looks again for a bd init
 // lease whose owner directory is gone (see doltPoolEntry.ownerDir).
 const doltPoolReclaimPoll = 100 * time.Millisecond
@@ -146,8 +151,11 @@ type doltDBPool struct {
 	names  map[string]bool
 	freed  chan struct{} // closed, and replaced, whenever a lease ends
 	wait   time.Duration
-	reset  func(e *doltPoolEntry, commit string) error
-	db     *sql.DB
+	// sessionWait is how long a release waits for the lessee's sessions on
+	// the database to end before it ends them itself.
+	sessionWait time.Duration
+	reset       func(e *doltPoolEntry, commit string) error
+	db          *sql.DB
 
 	leases, reuses, inUse, peak int
 	reclaimErrs                 []error // failed resets of reclaimed bd init leases
@@ -186,6 +194,8 @@ func newDoltDBPool(port, stores, sqlDBs int) (*doltDBPool, error) {
 		names: make(map[string]bool, stores+sqlDBs),
 		freed: make(chan struct{}),
 		wait:  doltPoolLeaseWait,
+
+		sessionWait: doltPoolSessionWait,
 	}
 	for i := range stores {
 		dir := filepath.Join(base, fmt.Sprintf("s%04d", i))
@@ -213,7 +223,9 @@ func (p *doltDBPool) create() error {
 		return fmt.Errorf("dolt test pool: %w", err)
 	}
 	p.db = db
-	p.reset = func(e *doltPoolEntry, commit string) error { return resetDoltDatabase(db, e.name, commit) }
+	p.reset = func(e *doltPoolEntry, commit string) error {
+		return resetDoltDatabase(db, e.name, commit, p.sessionWait)
+	}
 	entries := p.all()
 	for i, e := range entries {
 		ctx, cancel := context.WithTimeout(context.Background(), doltPoolDDLTimeout)
@@ -251,17 +263,21 @@ func createDoltPool(port int) error {
 	sharedDoltPool.Lock()
 	sharedDoltPool.p = p
 	sharedDoltPool.Unlock()
-	beads.SetTestDatabaseSource(func(port int, ownerDir string) (string, error) {
-		if port != p.port {
-			return "", nil
-		}
-		e, err := p.acquire(leaseInit, "bd init in "+ownerDir, ownerDir)
-		if err != nil {
-			return "", err
-		}
-		return e.name, nil
-	})
+	beads.SetTestDatabaseSource(p.initSource)
 	return nil
+}
+
+// initSource is the pool's beads.SetTestDatabaseSource: it leases a bd init
+// in ownerDir on port a database, until ownerDir is gone.
+func (p *doltDBPool) initSource(port int, ownerDir string) (string, error) {
+	if port != p.port {
+		return "", nil
+	}
+	e, err := p.acquire(leaseInit, "bd init in "+ownerDir, ownerDir)
+	if err != nil {
+		return "", err
+	}
+	return e.name, nil
 }
 
 // close forgets the pool's connection and store directories.
@@ -396,6 +412,17 @@ func (p *doltDBPool) prepare(kind doltLeaseKind, e *doltPoolEntry) error {
 // markMigrated records e's current head as the commit its later lessees get:
 // the store open that just migrated it committed the schema.
 func (p *doltDBPool) markMigrated(e *doltPoolEntry) error {
+	if err := p.recordHead(e); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	e.migrated = true
+	p.mu.Unlock()
+	return nil
+}
+
+// recordHead makes e's current head the commit a release returns it to.
+func (p *doltDBPool) recordHead(e *doltPoolEntry) error {
 	ctx, cancel := context.WithTimeout(context.Background(), doltPoolDDLTimeout)
 	defer cancel()
 	head, err := doltHead(ctx, p.db, e.name)
@@ -403,7 +430,7 @@ func (p *doltDBPool) markMigrated(e *doltPoolEntry) error {
 		return err
 	}
 	p.mu.Lock()
-	e.head, e.migrated = head, true
+	e.head = head
 	p.mu.Unlock()
 	return nil
 }
@@ -480,7 +507,11 @@ func (p *doltDBPool) leaseForTest(t testing.TB, kind doltLeaseKind) *doltPoolEnt
 // than through a beads store. The lease ends with t: the database is reset to
 // its initial commit (resetDoltDatabase) and goes back to the pool. The test
 // must not drop it: a DROP while other tests run is the catalog change the
-// pool prevents. Its name starts with doltSQLPoolPrefix.
+// pool prevents. It must close every connection it opened on it before it
+// ends, or the release kills them and fails t. Tables it creates are dropped
+// at release, so their AUTO_INCREMENT counters go with them; a reset cannot
+// restore the counter of a table it committed as a reset point
+// (checkDoltDatabaseAt). Its name starts with doltSQLPoolPrefix.
 func TakePooledSQLDatabase(t testing.TB) string {
 	t.Helper()
 	p := currentDoltPool()
