@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
+	"github.com/steveyegge/gastown/internal/testdb"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -1177,7 +1178,7 @@ func (b *Beads) Init(prefix string) error {
 // gt dolt cleanup), and the container retry reads it back off argv to scope the
 // schema-era class to databases whose name cannot pre-exist (bdInitOnTestDatabase,
 // gt-w4sxk).
-const testDatabasePrefix = "testdb_"
+const testDatabasePrefix = testdb.MintPrefix
 
 // testDatabaseName generates a unique database name for isolated test Init()
 // calls.

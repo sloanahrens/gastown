@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/testdb"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -48,7 +49,7 @@ const (
 	// recognizable, while a lock a live git process just created is not.
 	gitIndexLockGracePeriod = 2 * time.Minute
 
-	defaultSpikeThreshold         = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
+	defaultSpikeThreshold = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
 
 	// defaultEscalationTimeout is the per-attempt timeout for the gt escalate
 	// child process.  Kept at 60 s so that, even under slot-starvation or
@@ -79,15 +80,35 @@ var errGitCmdTimeout = errors.New("command timed out")
 // testPollutionPatterns matches issue IDs or titles that indicate test data leaked
 // into production exports. These records are filtered out before writing JSONL.
 var testPollutionPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)^Test Issue`),                      // title: "Test Issue ..."
-	regexp.MustCompile(`(?i)^test[_\s]`),                       // title: "test_something" or "test something"
-	regexp.MustCompile(`^bd-[0-9]{1,2}$`),                      // id: bd-1, bd-99 (suspiciously short IDs)
-	regexp.MustCompile(`^bd-[a-z]{3,5}[0-9]{1,2}$`),            // id: bd-abc12 (test-style IDs)
-	regexp.MustCompile(`^(testdb_|beads_t|beads_pt|doctest_)`), // id prefixes from test databases
-	regexp.MustCompile(`(?i)^--help`),                          // title: "--help" CLI artifacts
-	regexp.MustCompile(`(?i)^Usage:\s`),                        // title: "Usage: ..." CLI help output
-	regexp.MustCompile(`^offlinebrew-`),                        // id: offlinebrew-* test prefixes
-	regexp.MustCompile(`-wisp-`),                               // id: wisp-pattern IDs leaked into issues table
+	regexp.MustCompile(`(?i)^Test Issue`),           // title: "Test Issue ..."
+	regexp.MustCompile(`(?i)^test[_\s]`),            // title: "test_something" or "test something"
+	regexp.MustCompile(`^bd-[0-9]{1,2}$`),           // id: bd-1, bd-99 (suspiciously short IDs)
+	regexp.MustCompile(`^bd-[a-z]{3,5}[0-9]{1,2}$`), // id: bd-abc12 (test-style IDs)
+	testDatabaseIDPattern(),                         // id prefixes from test databases
+	regexp.MustCompile(`(?i)^--help`),               // title: "--help" CLI artifacts
+	regexp.MustCompile(`(?i)^Usage:\s`),             // title: "Usage: ..." CLI help output
+	regexp.MustCompile(`^offlinebrew-`),             // id: offlinebrew-* test prefixes
+	regexp.MustCompile(`-wisp-`),                    // id: wisp-pattern IDs leaked into issues table
+}
+
+// testDatabaseIDPattern matches an issue ID that starts with a test-database
+// prefix (internal/testdb, the one list).
+func testDatabaseIDPattern() *regexp.Regexp {
+	quoted := testdb.Prefixes()
+	for i, p := range quoted {
+		quoted[i] = regexp.QuoteMeta(p)
+	}
+	return regexp.MustCompile(`^(` + strings.Join(quoted, "|") + `)`)
+}
+
+// testDatabaseIDNotLike is the scrub clause's AND id NOT LIKE term for each
+// test-database prefix, with LIKE's _ wildcard escaped.
+func testDatabaseIDNotLike() string {
+	var b strings.Builder
+	for _, p := range testdb.Prefixes() {
+		b.WriteString(` AND id NOT LIKE '` + strings.ReplaceAll(p, "_", `\_`) + `%'`)
+	}
+	return b.String()
 }
 
 // validDBName matches safe database names (alphanumeric, underscore, hyphen).
@@ -96,16 +117,14 @@ var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // scrubQuery is the WHERE clause for filtering ephemeral data.
 // Kept separate from Sprintf to avoid %% confusion.
 // The query selects only durable work product (bugs, features, tasks, epics, chores).
-const scrubWhereClause = ` WHERE (ephemeral IS NULL OR ephemeral != 1)` +
+var scrubWhereClause = ` WHERE (ephemeral IS NULL OR ephemeral != 1)` +
 	` AND status != 'tombstone'` +
 	` AND issue_type NOT IN ('message', 'event', 'agent', 'convoy', 'molecule', 'role', 'merge-request', 'rig')` +
 	` AND id NOT LIKE '%-wisp-%'` +
 	` AND id NOT LIKE '%-cv-%'` +
 	` AND id NOT LIKE '%-wf-%'` +
 	` AND id NOT LIKE 'test%'` +
-	` AND id NOT LIKE 'beads\_t%'` +
-	` AND id NOT LIKE 'beads\_pt%'` +
-	` AND id NOT LIKE 'doctest\_%'` +
+	testDatabaseIDNotLike() +
 	` AND id NOT LIKE 'offlinebrew-%'` +
 	` AND title NOT LIKE '--%'` +
 	` AND title NOT LIKE 'Usage: %'` +
@@ -746,9 +765,7 @@ func discoverJsonlBackupDatabases(dataDir string) []string {
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		if strings.HasPrefix(name, "testdb_") || strings.HasPrefix(name, "beads_t") ||
-			strings.HasPrefix(name, "beads_pt") || strings.HasPrefix(name, "doctest_") ||
-			strings.HasPrefix(name, "dolt_remotes_check_") {
+		if testdb.IsTestDatabaseName(name) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dataDir, name, ".dolt")); err != nil {
@@ -1519,8 +1536,8 @@ const (
 // blocks the commit it was derived from — gt-tj-he), this window is re-derived
 // from commit history on every run and tracks committed levels.
 type spikeBaseline struct {
-	Window   int                 `json:"window"`
-	Computed string              `json:"computed"`
+	Window   int                      `json:"window"`
+	Computed string                   `json:"computed"`
 	Counts   map[string][]spikeCommit `json:"counts"`
 }
 

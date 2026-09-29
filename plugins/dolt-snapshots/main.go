@@ -168,13 +168,19 @@ func listDatabases(db *sql.DB) ([]string, error) {
 	return databases, rows.Err()
 }
 
+// testDatabasePrefixes mirrors gastown's internal/testdb list; this plugin is
+// its own module and cannot import it. internal/testdb's
+// TestPluginCopyMatches fails when the two differ.
+var testDatabasePrefixes = []string{"testdb_", "beads_t", "beads_pt", "beads_vr", "doctest_", "doctortest_", "benchdb_", "dolt_remotes_check_"}
+
 func isSystemDB(name string) bool {
 	switch name {
 	case "information_schema", "mysql", "dolt_cluster":
 		return true
 	}
-	for _, prefix := range []string{"testdb_", "beads_t", "beads_pt", "doctest_", "dolt_remotes_check_"} {
-		if strings.HasPrefix(name, prefix) {
+	lower := strings.ToLower(name)
+	for _, prefix := range testDatabasePrefixes {
+		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
 	}

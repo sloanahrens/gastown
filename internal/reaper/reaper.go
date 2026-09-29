@@ -20,6 +20,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/gastown/internal/testdb"
 )
 
 // validDBName matches safe database names (alphanumeric, underscore, hyphen).
@@ -31,9 +33,6 @@ var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // beads) and rig-specific names. Those databases no longer exist in most
 // installations and their presence in the fallback caused phantom DB errors.
 var DefaultDatabases = []string{"hq"}
-
-// testPollutionPrefixes are database name prefixes created by tests.
-var testPollutionPrefixes = []string{"testdb_", "beads_t", "beads_pt", "doctest_", "dolt_remotes_check_"}
 
 // isNothingToCommit returns true if the error is a Dolt "nothing to commit" error.
 func isNothingToCommit(err error) bool {
@@ -81,15 +80,7 @@ func DiscoverDatabases(host string, port int) []string {
 		if name == "information_schema" || name == "mysql" {
 			continue
 		}
-		lower := strings.ToLower(name)
-		skip := false
-		for _, prefix := range testPollutionPrefixes {
-			if strings.HasPrefix(lower, prefix) {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		if testdb.IsTestDatabaseName(name) {
 			continue
 		}
 		databases = append(databases, name)

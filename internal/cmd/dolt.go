@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/testdb"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -1150,7 +1151,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  The server is likely overloaded. SQL cleanup would take hours.\n\n")
 		fmt.Printf("  Instead, stop the server and clean the filesystem:\n\n")
 		fmt.Printf("    gt dolt stop\n")
-		fmt.Printf("    cd %s/.dolt-data && rm -rf testdb_* beads_t* beads_pt* beads_vr* doctest_* doctortest_* dolt_remotes_check_*\n", townRoot)
+		fmt.Printf("    cd %s/.dolt-data && rm -rf %s\n", townRoot, testDatabaseGlobs())
 		fmt.Printf("    gt dolt start\n\n")
 		fmt.Printf("  This is safe — orphan databases have no production data.\n")
 		return fmt.Errorf("too many orphans (%d) for SQL cleanup — see instructions above", len(orphans))
@@ -1786,7 +1787,7 @@ func runDoltMigrateWisps(cmd *cobra.Command, args []string) error {
 
 	for _, db := range databases {
 		// Skip non-rig databases
-		if db == "wl_commons" || strings.HasPrefix(db, "testdb_") {
+		if db == "wl_commons" || testdb.IsTestDatabaseName(db) {
 			continue
 		}
 		// Find the rig directory for this database.
@@ -1836,4 +1837,14 @@ func printMigrateWispsResult(result *doltserver.MigrateWispsResult) {
 	if result.AgentsCopied == 0 && len(result.AuxTablesCreated) == 0 && !result.WispsTableCreated {
 		fmt.Printf("  %s Already migrated (no changes needed)\n", style.Bold.Render("✓"))
 	}
+}
+
+// testDatabaseGlobs is a shell glob per test-database prefix, for the manual
+// cleanup hint.
+func testDatabaseGlobs() string {
+	globs := testdb.Prefixes()
+	for i, p := range globs {
+		globs[i] = p + "*"
+	}
+	return strings.Join(globs, " ")
 }

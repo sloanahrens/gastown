@@ -17,6 +17,7 @@ import (
 	_ "github.com/go-sql-driver/mysql" // driver for creating the pool
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/testdb"
 )
 
 // The shared test Dolt container's database pool.
@@ -75,7 +76,7 @@ const doltPoolSQLDatabases = 8
 // testPollutionPrefixes, jsonl_git_backup's discovery, gt dolt cleanup) already
 // treat as test cruft, so a daemon test that lists the server's databases skips
 // these as it skips the store databases.
-const doltSQLPoolPrefix = "dolt_remotes_check_pool_"
+const doltSQLPoolPrefix = testdb.RemotesCheckPrefix + "pool_"
 
 // doltPoolDDLTimeout bounds each CREATE DATABASE of the pool, and each reset.
 const doltPoolDDLTimeout = 2 * time.Minute
@@ -178,7 +179,7 @@ func currentDoltPool() *doltDBPool {
 func beadsTestModeDatabase(dbPath string) string {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(dbPath))
-	return fmt.Sprintf("testdb_%x", h.Sum64())
+	return fmt.Sprintf("%s%x", testdb.MintPrefix, h.Sum64())
 }
 
 // newDoltDBPool lays out a pool of stores store databases and sqlDBs plain SQL
