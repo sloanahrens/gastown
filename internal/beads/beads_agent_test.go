@@ -678,7 +678,7 @@ case "$cmd" in
       printf '%%s\n' '[{"id":"gt-gastown-polecat-rust","title":"old","issue_type":"task","labels":["gt:agent"],"status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: idle\nhook_bead: old"}]'
       exit 0
     fi
-    echo 'not found' >&2
+    echo 'Error: issue not found' >&2
     exit 1
     ;;
   list)

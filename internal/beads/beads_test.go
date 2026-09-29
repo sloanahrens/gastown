@@ -2062,11 +2062,11 @@ func TestWrapError(t *testing.T) {
 		wantNil bool
 	}{
 		{"Issue not found: gt-xyz", ErrNotFound, false},
-		{"gt-xyz not found", ErrNotFound, false},
+		{"Issue gt-xyz not found", ErrNotFound, false},
 	}
 
 	for _, tt := range tests {
-		err := b.wrapError(nil, tt.stderr, []string{"test"})
+		err := b.wrapError(nil, nil, tt.stderr, []string{"test"})
 		if tt.wantNil {
 			if err != nil {
 				t.Errorf("wrapError(%q) = %v, want nil", tt.stderr, err)

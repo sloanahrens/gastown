@@ -1460,14 +1460,14 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 	}
 
 	if err != nil {
-		return nil, b.wrapError(SubprocessFailureError(ctx, timeout, err), stderr.String(), args)
+		return nil, b.wrapError(SubprocessFailureError(ctx, timeout, err), stdout.Bytes(), stderr.String(), args)
 	}
 
 	// Handle bd exit code 0 bug: when issue not found,
 	// bd may exit 0 but write error to stderr with empty stdout.
 	// Detect this case and treat as error to avoid JSON parse failures.
 	if stdout.Len() == 0 && stderr.Len() > 0 && bdEmptyOutputIsError(stderr.String()) {
-		return nil, b.wrapError(fmt.Errorf("command produced no output"), stderr.String(), args)
+		return nil, b.wrapError(fmt.Errorf("command produced no output"), nil, stderr.String(), args)
 	}
 
 	return stripStdoutWarnings(stdout.Bytes()), nil
@@ -1502,16 +1502,18 @@ func (b *Beads) Run(args ...string) ([]byte, error) {
 
 // wrapError wraps bd errors with context.
 // ZFC: Avoid parsing stderr to make decisions. Transport errors to agents instead.
-// Exception: ErrNotInstalled (exec.ErrNotFound) and ErrNotFound (issue lookup) are
-// acceptable as they enable basic error handling without decision-making.
-func (b *Beads) wrapError(err error, stderr string, args []string) error {
+// Exceptions: ErrNotInstalled (exec.ErrNotFound), ErrGuardNotHeld (bd's
+// guard exit) and ErrNotFound, which only bd's own answer can produce
+// (BDReportedNotFound). Every other failure is ErrUnavailable: the answer is
+// unknown, never "the bead is gone" (G3-01).
+func (b *Beads) wrapError(err error, stdout []byte, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
 
 	// An --if-assignee/--if-status precondition that no longer held: bd
 	// wrote nothing. Checked first, so a guard message never reads as a
 	// "not found" or a generic failure.
-	var exitErr interface{ ExitCode() int }
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == bdGuardNotHeldExit {
+	exitCode := exitCodeOf(err)
+	if exitCode == bdGuardNotHeldExit {
 		return fmt.Errorf("bd %s: %s: %w", strings.Join(args, " "), stderr, ErrGuardNotHeld)
 	}
 
@@ -1520,10 +1522,7 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 		return ErrNotInstalled
 	}
 
-	// ErrNotFound is widely used for issue lookups - acceptable exception
-	// Match various "not found" error patterns from bd
-	if strings.Contains(stderr, "not found") || strings.Contains(stderr, "Issue not found") ||
-		strings.Contains(stderr, "no issue found") {
+	if BDReportedNotFound(exitCode, stdout, []byte(stderr)) {
 		return ErrNotFound
 	}
 
@@ -1532,11 +1531,11 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 		// beside them. Every other message stays byte-identical, keeping log
 		// and caller expectations stable (gt-824d).
 		if errors.Is(err, context.DeadlineExceeded) {
-			return fmt.Errorf("bd %s: %s: %w", strings.Join(args, " "), stderr, err)
+			return &unavailableError{msg: fmt.Sprintf("bd %s: %s: %v", strings.Join(args, " "), stderr, err), cause: err}
 		}
-		return fmt.Errorf("bd %s: %s", strings.Join(args, " "), stderr)
+		return &unavailableError{msg: fmt.Sprintf("bd %s: %s", strings.Join(args, " "), stderr), cause: err}
 	}
-	return fmt.Errorf("bd %s: %w", strings.Join(args, " "), err)
+	return &unavailableError{msg: fmt.Sprintf("bd %s: %v", strings.Join(args, " "), err), cause: err}
 }
 
 // isSubprocessCrash returns true if the error indicates the subprocess crashed

@@ -166,15 +166,14 @@ func (e *CLIError) Output() string {
 	return strings.TrimSpace(string(e.Stdout) + string(e.Stderr))
 }
 
-// Unwrap exposes the process error, and ErrNotFound when bd said the issue
-// was not found, as wrapError does for the policy path.
+// Unwrap exposes the process error, plus ErrNotFound when bd said the id
+// does not exist (BDReportedNotFound) or ErrUnavailable for every other
+// failure, as wrapError does for the policy path.
 func (e *CLIError) Unwrap() []error {
-	errs := []error{e.Err}
-	stderr := string(e.Stderr)
-	if strings.Contains(stderr, "not found") || strings.Contains(stderr, "no issue found") {
-		errs = append(errs, ErrNotFound)
+	if BDReportedNotFound(exitCodeOf(e.Err), e.Stdout, e.Stderr) {
+		return []error{e.Err, ErrNotFound}
 	}
-	return errs
+	return []error{e.Err, ErrUnavailable}
 }
 
 // runPlain runs one bd call for a plain wrapper.
