@@ -11,8 +11,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -398,10 +396,6 @@ const (
 	// Configurable via operational.daemon.doctor_mol_cooldown.
 	doctorMolCooldown = 5 * time.Minute
 )
-
-const beadsModulePath = "github.com/steveyegge/beads"
-
-var semverPattern = regexp.MustCompile(`v?(\d+\.\d+\.\d+)`)
 
 func daemonPathCandidates(home, exePath string) []string {
 	candidates := make([]string, 0, 5)
@@ -1583,44 +1577,32 @@ func readBeadsBackend(beadsDir string) string {
 	return metadata.Backend
 }
 
-type beadsMetadataReader interface {
-	GetMetadata(ctx context.Context, key string) (string, error)
-}
-
 type beadsDBAccessor interface {
 	DB() *sql.DB
 }
 
-// embeddedBeadsVersion returns the semver of the beads module linked into this binary.
-// Empty string means build info did not include a parseable module version.
-func embeddedBeadsVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return ""
+// bdSchemaLevel returns the schema level the bd on PATH migrates a database
+// to (bd version --json db_schema_version). Zero with a nil error means bd
+// did not report one: a build from before the machine surface. Tests
+// replace it.
+var bdSchemaLevel = func(ctx context.Context, townRoot string) (int, error) {
+	stdout, stderr, err := deps.NewBDProcessRunner(townRoot)(ctx, nil, "version", "--json")
+	if err != nil {
+		return 0, fmt.Errorf("bd version --json: %w (%s)", err, strings.TrimSpace(string(stderr)))
 	}
-	for _, dep := range info.Deps {
-		if dep.Path != beadsModulePath {
-			continue
-		}
-		if dep.Replace != nil {
-			if version := normalizeSemver(dep.Replace.Version); version != "" {
-				return version
-			}
-		}
-		return normalizeSemver(dep.Version)
+	info, err := deps.ParseBDVersionJSON(stdout)
+	if err != nil {
+		return 0, err
 	}
-	return ""
+	return info.DBSchemaVersion, nil
 }
 
-func normalizeSemver(version string) string {
-	matches := semverPattern.FindStringSubmatch(version)
-	if len(matches) != 2 {
-		return ""
-	}
-	return matches[1]
-}
-
-func checkBeadsStoreCompatibility(ctx context.Context, stores map[string]beadsdk.Storage, binaryBeadsVersion string) error {
+// checkBeadsStoreCompatibility refuses stores whose database schema level
+// is not the level bd migrates to (bdSchema), or whose event tables cannot
+// be polled. It compares schema integers read from schema_migrations, the
+// table bd advances; the metadata.bd_version semver it used to read is a key
+// the fork never writes, so that guard could not fire (B5-02).
+func checkBeadsStoreCompatibility(ctx context.Context, stores map[string]beadsdk.Storage, bdSchema int) error {
 	if len(stores) == 0 {
 		return nil
 	}
@@ -1633,7 +1615,7 @@ func checkBeadsStoreCompatibility(ctx context.Context, stores map[string]beadsdk
 
 	var problems []string
 	for _, name := range names {
-		problem := checkSingleBeadsStoreCompatibility(ctx, name, stores[name], binaryBeadsVersion)
+		problem := checkSingleBeadsStoreCompatibility(ctx, name, stores[name], bdSchema)
 		if problem != "" {
 			problems = append(problems, problem)
 		}
@@ -1642,16 +1624,13 @@ func checkBeadsStoreCompatibility(ctx context.Context, stores map[string]beadsdk
 		return nil
 	}
 
-	remediation := "Upgrade or rebuild `gt` against a newer beads release, or switch to a workspace created by a matching release, then retry `gt daemon start`."
-	if binaryBeadsVersion == "" {
-		remediation = "Rebuild `gt` or use a release whose embedded beads version matches this workspace, then retry `gt daemon start`."
-	}
+	remediation := "Install the beads fork's bd at the database's schema level (make safe-install in the beads repository), check `gt doctor`, then retry `gt daemon start`."
 
 	return fmt.Errorf("daemon startup blocked: incompatible beads workspace / gt binary combination\n\n  %s\n\n%s",
 		strings.Join(problems, "\n  "), remediation)
 }
 
-func checkSingleBeadsStoreCompatibility(ctx context.Context, name string, store beadsdk.Storage, binaryBeadsVersion string) string {
+func checkSingleBeadsStoreCompatibility(ctx context.Context, name string, store beadsdk.Storage, bdSchema int) string {
 	if store == nil {
 		return ""
 	}
@@ -1659,10 +1638,9 @@ func checkSingleBeadsStoreCompatibility(ctx context.Context, name string, store 
 	label := displayBeadsStoreName(name)
 	var reasons []string
 
-	if workspaceVersion, err := readStoreBDVersion(ctx, store); err != nil {
-		reasons = append(reasons, fmt.Sprintf("cannot read bd_version metadata: %v", err))
-	} else if workspaceVersion != "" && binaryBeadsVersion != "" && deps.CompareVersions(workspaceVersion, binaryBeadsVersion) > 0 {
-		reasons = append(reasons, fmt.Sprintf("workspace bd_version %s is newer than embedded beads %s", workspaceVersion, binaryBeadsVersion))
+	level, err := readStoreSchemaLevel(ctx, store)
+	if problem := schemaLevelProblem(level, err, bdSchema); problem != "" {
+		reasons = append(reasons, problem)
 	}
 
 	if err := probeStoreEventSchema(ctx, store); err != nil {
@@ -1675,25 +1653,36 @@ func checkSingleBeadsStoreCompatibility(ctx context.Context, name string, store 
 	return fmt.Sprintf("%s: %s", label, strings.Join(reasons, "; "))
 }
 
-func readStoreBDVersion(ctx context.Context, store beadsdk.Storage) (string, error) {
-	if metadataStore, ok := store.(beadsMetadataReader); ok {
-		return metadataStore.GetMetadata(ctx, "bd_version")
+// schemaLevelProblem is the verdict on one store: "" when the database is at
+// exactly bd's level, otherwise the reason naming both integers. A failed
+// read or an unknown bd level is a problem, never a pass.
+func schemaLevelProblem(level int, readErr error, bdSchema int) string {
+	switch {
+	case readErr != nil:
+		return fmt.Sprintf("cannot read schema_migrations: %v", readErr)
+	case bdSchema <= 0:
+		return fmt.Sprintf("bd schema level unknown (database schema %d); bd version --json reports no db_schema_version", level)
+	case level != bdSchema:
+		return fmt.Sprintf("database schema %d does not match bd schema %d", level, bdSchema)
 	}
+	return ""
+}
 
+// readStoreSchemaLevel reads the highest applied migration from the store's
+// schema_migrations table.
+func readStoreSchemaLevel(ctx context.Context, store beadsdk.Storage) (int, error) {
 	dbAccessor, ok := store.(beadsDBAccessor)
 	if !ok || dbAccessor.DB() == nil {
-		return "", nil
+		return 0, fmt.Errorf("store does not expose its database")
 	}
-
-	var version string
-	err := dbAccessor.DB().QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = 'bd_version'").Scan(&version)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+	var level sql.NullInt64
+	if err := dbAccessor.DB().QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&level); err != nil {
+		return 0, err
 	}
-	if err != nil {
-		return "", err
+	if !level.Valid {
+		return 0, fmt.Errorf("schema_migrations is empty")
 	}
-	return version, nil
+	return int(level.Int64), nil
 }
 
 func probeStoreEventSchema(ctx context.Context, store beadsdk.Storage) error {
@@ -2780,7 +2769,12 @@ func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
 		return storeOpenResult{Missing: missing}, nil
 	}
 
-	if err := checkBeadsStoreCompatibility(d.ctx, stores, embeddedBeadsVersion()); err != nil {
+	bdSchema, err := bdSchemaLevel(d.ctx, d.config.TownRoot)
+	if err != nil {
+		closeBeadsStores(d.logger, stores)
+		return storeOpenResult{Missing: missing}, fmt.Errorf("daemon startup blocked: cannot read bd's schema level: %w", err)
+	}
+	if err := checkBeadsStoreCompatibility(d.ctx, stores, bdSchema); err != nil {
 		closeBeadsStores(d.logger, stores)
 		return storeOpenResult{Missing: missing}, err
 	}
