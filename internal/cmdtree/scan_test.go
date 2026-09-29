@@ -148,6 +148,8 @@ func f(ctx context.Context, id string, args []string) {
 	_ = BdCmd("dep", "add", id)
 	_ = beads.CommandContext(ctx, "d", "b", beads.MutationPinned, "sync")
 	_ = beads.Command("d", "b", beads.ReadOnlyPinned, args...)
+	_ = beads.CommandWithPath(bin, "d", env, "show", id)
+	_ = beads.CommandContextWithBin(ctx, bin, "d", "b", beads.ReadOnlyPinned, "ready")
 }
 `
 	refs, err := ScanGo("x.go", []byte(src))
@@ -159,6 +161,8 @@ func f(ctx context.Context, id string, args []string) {
 		"10:bd mol wisp",
 		"13:bd dep add",
 		"14:bd sync",
+		"16:bd show",
+		"17:bd ready",
 	)
 }
 

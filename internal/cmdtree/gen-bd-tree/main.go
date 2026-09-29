@@ -11,9 +11,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cmdtree/bdsnapshot"
 )
 
@@ -38,9 +38,7 @@ func run(bd, source string) error {
 	}
 	defer os.RemoveAll(dir)
 	runBd := func(args ...string) ([]byte, error) {
-		cmd := exec.Command(bd, args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "BD_DISABLE_METRICS=1")
+		cmd := beads.CommandWithPath(bd, dir, append(os.Environ(), "BD_DISABLE_METRICS=1"), args...)
 		cmd.Stderr = os.Stderr
 		return cmd.Output()
 	}

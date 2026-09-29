@@ -266,6 +266,12 @@ func goCallArgs(call *ast.CallExpr) (string, []ast.Expr) {
 			return "bd", after(4)
 		case "beads.CommandWithEnv":
 			return "bd", after(2)
+		case "beads.CommandContextWithEnv", "beads.CommandWithPath":
+			return "bd", after(3)
+		case "beads.CommandContextWithPath":
+			return "bd", after(4)
+		case "beads.CommandContextWithBin":
+			return "bd", after(5)
 		}
 	}
 	return "", nil
