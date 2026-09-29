@@ -336,7 +336,7 @@ git rebase --continue
 git rebase --abort
 # Reopen source issue, close MR, notify witness (NOT the polecat — it's dead)
 bd update <source-issue> --status=open
-gt mq close <mr-id> --reason="Unresolvable conflicts"
+gt mq reject {{ .RigName }} <mr-id> --reason="Unresolvable conflicts"
 gt mail send {{ .RigName }}/witness -s "MERGE_FAILED" \
   -m "Branch polecat/<worker> has unresolvable conflicts with target. Source issue reopened for re-slinging."
 ```
