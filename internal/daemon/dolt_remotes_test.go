@@ -71,6 +71,7 @@ func createTestDB(t *testing.T) string {
 }
 
 func TestDatabaseHasRemote_NoneConfigured(t *testing.T) {
+	t.Parallel()
 	d := testDoltRemotesDaemon(t)
 	dbName := createTestDB(t)
 
@@ -86,6 +87,7 @@ func TestDatabaseHasRemote_NoneConfigured(t *testing.T) {
 }
 
 func TestDatabaseHasRemote_Configured(t *testing.T) {
+	t.Parallel()
 	d := testDoltRemotesDaemon(t)
 	dbName := createTestDB(t)
 
@@ -116,6 +118,7 @@ func TestDatabaseHasRemote_Configured(t *testing.T) {
 }
 
 func TestHasStagedChanges(t *testing.T) {
+	t.Parallel()
 	d := testDoltRemotesDaemon(t)
 	dbName := createTestDB(t)
 
@@ -206,6 +209,7 @@ func TestOpenDoltDB_ReadTimeoutExceedsPushTimeout(t *testing.T) {
 // (testDoltSQLTimeout), so a stalled container slows the test rather than
 // failing it. It replaces a 45s SELECT SLEEP with a 1.5s one.
 func TestDoltRemotesDSN_LongQueryCompletesWithinContextBudget(t *testing.T) {
+	t.Parallel()
 	d := testDoltRemotesDaemon(t)
 
 	const sleepFor = 1500 * time.Millisecond
@@ -243,6 +247,7 @@ func TestDoltRemotesDSN_LongQueryCompletesWithinContextBudget(t *testing.T) {
 // correctly over the live connection rather than against a stale/independent
 // checkout of the data directory.
 func TestPushDatabase_UsesLiveServerConnection(t *testing.T) {
+	t.Parallel()
 	d := testDoltRemotesDaemon(t)
 	dbName := createTestDB(t)
 
