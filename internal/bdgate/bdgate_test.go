@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+//testpolicy:allow parallel — sets the package-wide gate that the next test also sets
 func TestRequireIsANoOpUntilSet(t *testing.T) {
 	Set(nil)
 	if err := Require(); err != nil {
@@ -15,6 +16,7 @@ func TestRequireIsANoOpUntilSet(t *testing.T) {
 	}
 }
 
+//testpolicy:allow parallel — sets the package-wide gate that the previous test also sets
 func TestRequireReturnsTheGateVerdict(t *testing.T) {
 	refusal := errors.New("bd handshake failed")
 	Set(func() error { return refusal })
@@ -28,6 +30,7 @@ func TestRequireReturnsTheGateVerdict(t *testing.T) {
 // starts an agent session asks the gate first, so a command path the CLI
 // gate list does not name still cannot start a session on an unknown bd.
 func TestEverySessionStartCallsTheGate(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("..", "..")
 	for file, fn := range map[string]string{
 		"internal/session/lifecycle.go":       "func StartSession(",
