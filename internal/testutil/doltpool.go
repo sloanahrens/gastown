@@ -686,7 +686,9 @@ func releaseDoltPool() error {
 	var stuck []string
 	for _, e := range p.stores {
 		if e.leased && e.ownerDir != "" {
-			stuck = append(stuck, e.owner)
+			if _, err := os.Stat(e.ownerDir); err == nil {
+				stuck = append(stuck, e.owner)
+			}
 		}
 	}
 	fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: %d leases (%d of a returned database), at most %d at once, of %d store and %d SQL databases\n",
