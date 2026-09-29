@@ -123,3 +123,58 @@ func TestDoltRemoteLeftovers_UnparseableRepoStateWarns(t *testing.T) {
 		t.Fatalf("status = %v, want Warning for an unparseable repo_state.json", res.Status)
 	}
 }
+
+// A town with no routes.jsonl has no rigs to scan: that is a clean answer,
+// not a failure, so it must not warn.
+func TestDoltRemoteLeftovers_MissingRoutesIsOK(t *testing.T) {
+	t.Parallel()
+	town, _, _ := leftoversTown(t)
+	if err := os.Remove(filepath.Join(town, ".beads", "routes.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	res := runLeftovers(t, town)
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v, want OK with no routes.jsonl; details %v", res.Status, res.Details)
+	}
+}
+
+// A routes.jsonl that cannot be read is not evidence that no rig sets
+// sync.remote: the check must say it could not tell.
+func TestDoltRemoteLeftovers_UnreadableRoutesWarns(t *testing.T) {
+	t.Parallel()
+	town, _, _ := leftoversTown(t)
+	routes := filepath.Join(town, ".beads", "routes.jsonl")
+	if err := os.Remove(routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(routes, 0o755); err != nil { // reading a directory fails
+		t.Fatal(err)
+	}
+	res := runLeftovers(t, town)
+	if res.Status != StatusWarning {
+		t.Fatalf("status = %v, want Warning for an unreadable routes.jsonl", res.Status)
+	}
+	if joined := strings.Join(res.Details, "\n"); !strings.Contains(joined, "routes.jsonl") {
+		t.Errorf("details %q should name routes.jsonl", joined)
+	}
+}
+
+// A Dolt data dir that exists but cannot be listed is not an empty one.
+func TestDoltRemoteLeftovers_UnlistableDataDirWarns(t *testing.T) {
+	t.Parallel()
+	town, _, _ := leftoversTown(t)
+	dataDir := filepath.Join(town, ".dolt-data")
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := runLeftovers(t, town)
+	if res.Status != StatusWarning {
+		t.Fatalf("status = %v, want Warning for an unlistable data dir", res.Status)
+	}
+	if joined := strings.Join(res.Details, "\n"); !strings.Contains(joined, "cannot list Dolt data dir") {
+		t.Errorf("details %q should say the data dir could not be listed", joined)
+	}
+}
