@@ -12,7 +12,7 @@ This formula orchestrates a release cycle for Gas Town:
 ## Usage
 
 ```bash
-gt mol wisp create gastown-release --var version=0.3.0
+bd mol wisp gastown-release --var version=0.3.0
 ```
 
 Or assign to a crew member:
