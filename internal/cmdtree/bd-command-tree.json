@@ -1,0 +1,2192 @@
+{
+  "source": "sloanahrens/beads da4983e",
+  "version": "1.2.2",
+  "commit": "da4983e24cc92b34df991046e966bd0d39708700",
+  "contract_version": 1,
+  "persistent_flags": [
+    "actor",
+    "cpu-profile",
+    "database",
+    "db",
+    "directory",
+    "dolt-auto-commit",
+    "format",
+    "global",
+    "ignore-schema-skew",
+    "json",
+    "machine",
+    "mem-profile",
+    "no-color",
+    "quiet",
+    "readonly",
+    "sandbox",
+    "verbose"
+  ],
+  "commands": [
+    {
+      "path": "admin"
+    },
+    {
+      "path": "admin cleanup",
+      "flags": [
+        "cascade",
+        "dry-run",
+        "ephemeral",
+        "force",
+        "older-than"
+      ]
+    },
+    {
+      "path": "admin compact",
+      "flags": [
+        "actor",
+        "all",
+        "analyze",
+        "apply",
+        "auto",
+        "batch-size",
+        "dolt",
+        "dry-run",
+        "force",
+        "id",
+        "json",
+        "limit",
+        "stats",
+        "summary",
+        "tier",
+        "workers"
+      ]
+    },
+    {
+      "path": "admin reset",
+      "flags": [
+        "force"
+      ]
+    },
+    {
+      "path": "ado"
+    },
+    {
+      "path": "ado projects"
+    },
+    {
+      "path": "ado pull",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "ado push",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "ado status"
+    },
+    {
+      "path": "ado sync",
+      "flags": [
+        "area-path",
+        "bootstrap-match",
+        "dry-run",
+        "issues",
+        "iteration-path",
+        "no-create",
+        "parent",
+        "prefer-ado",
+        "prefer-local",
+        "prefer-newer",
+        "project",
+        "pull-only",
+        "push-only",
+        "reconcile",
+        "states",
+        "types"
+      ]
+    },
+    {
+      "path": "assign",
+      "flags": [
+        "force"
+      ]
+    },
+    {
+      "path": "audit"
+    },
+    {
+      "path": "audit label",
+      "flags": [
+        "label",
+        "reason"
+      ]
+    },
+    {
+      "path": "audit record",
+      "flags": [
+        "error",
+        "exit-code",
+        "issue-id",
+        "kind",
+        "model",
+        "prompt",
+        "response",
+        "stdin",
+        "tool-name"
+      ]
+    },
+    {
+      "path": "backup"
+    },
+    {
+      "path": "backup init",
+      "aliases": [
+        "add"
+      ]
+    },
+    {
+      "path": "backup remove",
+      "aliases": [
+        "rm"
+      ]
+    },
+    {
+      "path": "backup restore",
+      "flags": [
+        "force"
+      ]
+    },
+    {
+      "path": "backup status"
+    },
+    {
+      "path": "backup sync"
+    },
+    {
+      "path": "batch",
+      "flags": [
+        "dry-run",
+        "file",
+        "message"
+      ]
+    },
+    {
+      "path": "blocked",
+      "flags": [
+        "exclude-label",
+        "label",
+        "label-any",
+        "parent"
+      ]
+    },
+    {
+      "path": "bootstrap",
+      "flags": [
+        "dry-run",
+        "non-interactive",
+        "yes"
+      ]
+    },
+    {
+      "path": "branch"
+    },
+    {
+      "path": "capabilities",
+      "flags": [
+        "help"
+      ]
+    },
+    {
+      "path": "children",
+      "flags": [
+        "pretty"
+      ]
+    },
+    {
+      "path": "close",
+      "aliases": [
+        "done"
+      ],
+      "flags": [
+        "claim-next",
+        "comment",
+        "continue",
+        "force",
+        "message",
+        "no-auto",
+        "reason",
+        "reason-file",
+        "resolution",
+        "session",
+        "suggest-next"
+      ]
+    },
+    {
+      "path": "codex-hook",
+      "hidden": true
+    },
+    {
+      "path": "comment",
+      "flags": [
+        "file",
+        "stdin"
+      ]
+    },
+    {
+      "path": "comments",
+      "flags": [
+        "local-time"
+      ]
+    },
+    {
+      "path": "comments add",
+      "flags": [
+        "author",
+        "file"
+      ]
+    },
+    {
+      "path": "comments list"
+    },
+    {
+      "path": "compact",
+      "flags": [
+        "days",
+        "dry-run",
+        "force"
+      ]
+    },
+    {
+      "path": "completion"
+    },
+    {
+      "path": "completion bash",
+      "flags": [
+        "no-descriptions"
+      ]
+    },
+    {
+      "path": "completion fish",
+      "flags": [
+        "no-descriptions"
+      ]
+    },
+    {
+      "path": "completion powershell",
+      "flags": [
+        "no-descriptions"
+      ]
+    },
+    {
+      "path": "completion zsh",
+      "flags": [
+        "no-descriptions"
+      ]
+    },
+    {
+      "path": "config"
+    },
+    {
+      "path": "config apply",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "config drift"
+    },
+    {
+      "path": "config get"
+    },
+    {
+      "path": "config list"
+    },
+    {
+      "path": "config set",
+      "flags": [
+        "force-git-tracked"
+      ]
+    },
+    {
+      "path": "config set-many",
+      "flags": [
+        "force-git-tracked"
+      ]
+    },
+    {
+      "path": "config show",
+      "flags": [
+        "source"
+      ]
+    },
+    {
+      "path": "config unset"
+    },
+    {
+      "path": "config validate"
+    },
+    {
+      "path": "conflicts"
+    },
+    {
+      "path": "conflicts list"
+    },
+    {
+      "path": "conflicts resolve",
+      "flags": [
+        "all",
+        "conclude",
+        "no-commit",
+        "ours",
+        "strategy",
+        "table",
+        "theirs"
+      ]
+    },
+    {
+      "path": "conflicts show",
+      "flags": [
+        "all-fields",
+        "table"
+      ]
+    },
+    {
+      "path": "context"
+    },
+    {
+      "path": "cook",
+      "flags": [
+        "dry-run",
+        "force",
+        "mode",
+        "persist",
+        "prefix",
+        "search-path",
+        "var"
+      ]
+    },
+    {
+      "path": "count",
+      "flags": [
+        "assignee",
+        "by-assignee",
+        "by-label",
+        "by-priority",
+        "by-status",
+        "by-type",
+        "closed-after",
+        "closed-before",
+        "created-after",
+        "created-before",
+        "desc-contains",
+        "empty-description",
+        "id",
+        "include-infra",
+        "label",
+        "label-any",
+        "metadata-field",
+        "no-assignee",
+        "no-labels",
+        "notes-contains",
+        "priority",
+        "priority-max",
+        "priority-min",
+        "status",
+        "title",
+        "title-contains",
+        "type",
+        "updated-after",
+        "updated-before"
+      ]
+    },
+    {
+      "path": "create",
+      "aliases": [
+        "new"
+      ],
+      "flags": [
+        "acceptance",
+        "allow-empty-description",
+        "append-notes",
+        "assignee",
+        "body",
+        "body-file",
+        "context",
+        "defer",
+        "deps",
+        "description",
+        "description-file",
+        "design",
+        "design-file",
+        "dry-run",
+        "due",
+        "ephemeral",
+        "estimate",
+        "event-actor",
+        "event-category",
+        "event-payload",
+        "event-target",
+        "external-ref",
+        "file",
+        "force",
+        "graph",
+        "id",
+        "label",
+        "labels",
+        "message",
+        "metadata",
+        "mol-type",
+        "no-history",
+        "no-inherit-labels",
+        "notes",
+        "parent",
+        "priority",
+        "repo",
+        "silent",
+        "skills",
+        "spec-id",
+        "status",
+        "stdin",
+        "storage-class",
+        "title",
+        "type",
+        "validate",
+        "waits-for",
+        "waits-for-gate",
+        "wisp-type"
+      ]
+    },
+    {
+      "path": "create-form",
+      "flags": [
+        "parent"
+      ]
+    },
+    {
+      "path": "cursor-hook",
+      "hidden": true
+    },
+    {
+      "path": "db-proxy-child",
+      "hidden": true,
+      "flags": [
+        "backend",
+        "config",
+        "database",
+        "dolt-bin",
+        "external-host",
+        "external-keep-alive",
+        "external-port",
+        "external-socket-path",
+        "idle-timeout",
+        "logpath",
+        "port",
+        "root",
+        "stop-epoch"
+      ]
+    },
+    {
+      "path": "defer",
+      "flags": [
+        "reason",
+        "until"
+      ]
+    },
+    {
+      "path": "delete",
+      "flags": [
+        "cascade",
+        "dry-run",
+        "force",
+        "from-file"
+      ]
+    },
+    {
+      "path": "dep",
+      "flags": [
+        "blocks",
+        "no-cycle-check"
+      ]
+    },
+    {
+      "path": "dep add",
+      "flags": [
+        "blocked-by",
+        "depends-on",
+        "file",
+        "no-cycle-check",
+        "type"
+      ]
+    },
+    {
+      "path": "dep cycles"
+    },
+    {
+      "path": "dep list",
+      "flags": [
+        "direction",
+        "type"
+      ]
+    },
+    {
+      "path": "dep relate"
+    },
+    {
+      "path": "dep remove",
+      "aliases": [
+        "rm"
+      ]
+    },
+    {
+      "path": "dep tree",
+      "flags": [
+        "direction",
+        "format",
+        "max-depth",
+        "max-rows",
+        "reverse",
+        "show-all-paths",
+        "status"
+      ]
+    },
+    {
+      "path": "dep unrelate"
+    },
+    {
+      "path": "diff"
+    },
+    {
+      "path": "doctor",
+      "flags": [
+        "agent",
+        "check",
+        "check-health",
+        "clean",
+        "deep",
+        "dry-run",
+        "fix",
+        "fix-child-parent",
+        "interactive",
+        "migration",
+        "orchestrator",
+        "orchestrator-duplicates-threshold",
+        "output",
+        "perf",
+        "server",
+        "verbose",
+        "yes"
+      ]
+    },
+    {
+      "path": "dolt"
+    },
+    {
+      "path": "dolt clean-databases",
+      "flags": [
+        "dry-run",
+        "purge-dropped"
+      ]
+    },
+    {
+      "path": "dolt commit",
+      "flags": [
+        "message"
+      ]
+    },
+    {
+      "path": "dolt killall"
+    },
+    {
+      "path": "dolt pull",
+      "flags": [
+        "remote",
+        "strategy"
+      ]
+    },
+    {
+      "path": "dolt push",
+      "flags": [
+        "force",
+        "no-adopt",
+        "remote",
+        "yes"
+      ]
+    },
+    {
+      "path": "dolt remote"
+    },
+    {
+      "path": "dolt remote add",
+      "flags": [
+        "allow-git-origin"
+      ]
+    },
+    {
+      "path": "dolt remote list"
+    },
+    {
+      "path": "dolt remote remove"
+    },
+    {
+      "path": "dolt remote reset-data",
+      "flags": [
+        "yes"
+      ]
+    },
+    {
+      "path": "dolt set",
+      "flags": [
+        "update-config"
+      ]
+    },
+    {
+      "path": "dolt show"
+    },
+    {
+      "path": "dolt start"
+    },
+    {
+      "path": "dolt status"
+    },
+    {
+      "path": "dolt stop",
+      "flags": [
+        "force"
+      ]
+    },
+    {
+      "path": "dolt test"
+    },
+    {
+      "path": "duplicate",
+      "flags": [
+        "of"
+      ]
+    },
+    {
+      "path": "duplicates",
+      "flags": [
+        "auto-merge",
+        "dry-run"
+      ]
+    },
+    {
+      "path": "edit",
+      "flags": [
+        "acceptance",
+        "description",
+        "design",
+        "notes",
+        "title"
+      ]
+    },
+    {
+      "path": "epic"
+    },
+    {
+      "path": "epic close-eligible",
+      "flags": [
+        "dry-run",
+        "reason"
+      ]
+    },
+    {
+      "path": "epic status",
+      "flags": [
+        "eligible-only"
+      ]
+    },
+    {
+      "path": "events"
+    },
+    {
+      "path": "events export",
+      "flags": [
+        "limit"
+      ]
+    },
+    {
+      "path": "events prune",
+      "flags": [
+        "before"
+      ]
+    },
+    {
+      "path": "events tail",
+      "flags": [
+        "follow",
+        "limit",
+        "since"
+      ]
+    },
+    {
+      "path": "export",
+      "flags": [
+        "all",
+        "exclude-owner",
+        "include-infra",
+        "include-memories",
+        "no-memories",
+        "output",
+        "scrub",
+        "verbose"
+      ]
+    },
+    {
+      "path": "federation"
+    },
+    {
+      "path": "federation add-peer",
+      "flags": [
+        "password",
+        "sovereignty",
+        "user"
+      ]
+    },
+    {
+      "path": "federation list-peers"
+    },
+    {
+      "path": "federation remove-peer"
+    },
+    {
+      "path": "federation status",
+      "flags": [
+        "peer"
+      ]
+    },
+    {
+      "path": "federation sync",
+      "flags": [
+        "peer",
+        "strategy"
+      ]
+    },
+    {
+      "path": "find-duplicates",
+      "aliases": [
+        "find-dups"
+      ],
+      "flags": [
+        "limit",
+        "max-rows",
+        "method",
+        "model",
+        "status",
+        "threshold"
+      ]
+    },
+    {
+      "path": "flatten",
+      "flags": [
+        "dry-run",
+        "force"
+      ]
+    },
+    {
+      "path": "forget"
+    },
+    {
+      "path": "formula"
+    },
+    {
+      "path": "formula convert",
+      "flags": [
+        "all",
+        "delete",
+        "stdout"
+      ]
+    },
+    {
+      "path": "formula list",
+      "flags": [
+        "type"
+      ]
+    },
+    {
+      "path": "formula schema",
+      "aliases": [
+        "primitives"
+      ]
+    },
+    {
+      "path": "formula show"
+    },
+    {
+      "path": "gate"
+    },
+    {
+      "path": "gate add-waiter"
+    },
+    {
+      "path": "gate check",
+      "flags": [
+        "dry-run",
+        "escalate",
+        "limit",
+        "type"
+      ]
+    },
+    {
+      "path": "gate create",
+      "flags": [
+        "await-id",
+        "blocks",
+        "reason",
+        "timeout",
+        "title",
+        "type"
+      ]
+    },
+    {
+      "path": "gate discover",
+      "flags": [
+        "branch",
+        "dry-run",
+        "limit",
+        "max-age"
+      ]
+    },
+    {
+      "path": "gate list",
+      "flags": [
+        "all",
+        "limit"
+      ]
+    },
+    {
+      "path": "gate resolve",
+      "flags": [
+        "reason"
+      ]
+    },
+    {
+      "path": "gate show"
+    },
+    {
+      "path": "gc",
+      "flags": [
+        "dry-run",
+        "force",
+        "older-than",
+        "skip-decay",
+        "skip-dolt"
+      ]
+    },
+    {
+      "path": "github"
+    },
+    {
+      "path": "github pull",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "github push",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "github repos"
+    },
+    {
+      "path": "github status"
+    },
+    {
+      "path": "github sync",
+      "flags": [
+        "dry-run",
+        "issues",
+        "parent",
+        "prefer-github",
+        "prefer-local",
+        "prefer-newer",
+        "pull-only",
+        "push-only"
+      ]
+    },
+    {
+      "path": "gitlab"
+    },
+    {
+      "path": "gitlab projects"
+    },
+    {
+      "path": "gitlab pull",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "gitlab push",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "gitlab status"
+    },
+    {
+      "path": "gitlab sync",
+      "flags": [
+        "assignee",
+        "dry-run",
+        "exclude-type",
+        "issues",
+        "label",
+        "milestone",
+        "no-ephemeral",
+        "parent",
+        "prefer-gitlab",
+        "prefer-local",
+        "prefer-newer",
+        "project",
+        "pull-only",
+        "push-only",
+        "type"
+      ]
+    },
+    {
+      "path": "graph",
+      "flags": [
+        "all",
+        "box",
+        "compact",
+        "dot",
+        "html",
+        "max-rows",
+        "open"
+      ]
+    },
+    {
+      "path": "graph check"
+    },
+    {
+      "path": "heartbeat",
+      "aliases": [
+        "hb"
+      ]
+    },
+    {
+      "path": "history",
+      "flags": [
+        "events",
+        "limit"
+      ]
+    },
+    {
+      "path": "hooks"
+    },
+    {
+      "path": "hooks install",
+      "flags": [
+        "beads",
+        "chain",
+        "force",
+        "shared"
+      ]
+    },
+    {
+      "path": "hooks list"
+    },
+    {
+      "path": "hooks run"
+    },
+    {
+      "path": "hooks uninstall"
+    },
+    {
+      "path": "human"
+    },
+    {
+      "path": "human dismiss",
+      "flags": [
+        "reason"
+      ]
+    },
+    {
+      "path": "human list",
+      "flags": [
+        "status"
+      ]
+    },
+    {
+      "path": "human respond",
+      "flags": [
+        "file",
+        "response",
+        "stdin"
+      ]
+    },
+    {
+      "path": "human stats"
+    },
+    {
+      "path": "import",
+      "flags": [
+        "allow-stale",
+        "dedup",
+        "dry-run",
+        "input"
+      ]
+    },
+    {
+      "path": "info",
+      "flags": [
+        "schema",
+        "thanks",
+        "whats-new"
+      ]
+    },
+    {
+      "path": "init",
+      "flags": [
+        "agents-file",
+        "agents-profile",
+        "agents-template",
+        "backend",
+        "contributor",
+        "debug",
+        "destroy-token",
+        "discard-remote",
+        "external",
+        "force",
+        "from-jsonl",
+        "init-if-missing",
+        "mysql-database",
+        "mysql-url",
+        "non-interactive",
+        "pg-schema",
+        "pg-url",
+        "prefix",
+        "proxied-server",
+        "proxied-server-config-path",
+        "proxied-server-external-host",
+        "proxied-server-external-keep-alive",
+        "proxied-server-external-port",
+        "proxied-server-external-socket-path",
+        "proxied-server-external-tls",
+        "proxied-server-external-tls-ca-cert-path",
+        "proxied-server-external-tls-cert-path",
+        "proxied-server-external-tls-key-path",
+        "proxied-server-external-tls-server-name",
+        "proxied-server-external-tls-skip-verify",
+        "proxied-server-external-user",
+        "proxied-server-idle-timeout",
+        "proxied-server-log-path",
+        "proxied-server-port",
+        "proxied-server-root-path",
+        "quiet",
+        "reinit-local",
+        "remote",
+        "role",
+        "server",
+        "server-host",
+        "server-port",
+        "server-socket",
+        "server-tls",
+        "server-user",
+        "setup-exclude",
+        "shared-server",
+        "skip-agents",
+        "skip-hooks",
+        "sqlite-path",
+        "stealth",
+        "team",
+        "team-server"
+      ]
+    },
+    {
+      "path": "init-safety"
+    },
+    {
+      "path": "jira"
+    },
+    {
+      "path": "jira pull",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "jira push",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "jira status"
+    },
+    {
+      "path": "jira sync",
+      "flags": [
+        "create-only",
+        "dry-run",
+        "issues",
+        "parent",
+        "prefer-jira",
+        "prefer-local",
+        "project",
+        "pull",
+        "push",
+        "state"
+      ]
+    },
+    {
+      "path": "kv"
+    },
+    {
+      "path": "kv clear"
+    },
+    {
+      "path": "kv get"
+    },
+    {
+      "path": "kv list"
+    },
+    {
+      "path": "kv set"
+    },
+    {
+      "path": "label"
+    },
+    {
+      "path": "label add"
+    },
+    {
+      "path": "label list"
+    },
+    {
+      "path": "label list-all"
+    },
+    {
+      "path": "label propagate"
+    },
+    {
+      "path": "label remove"
+    },
+    {
+      "path": "linear"
+    },
+    {
+      "path": "linear pull",
+      "flags": [
+        "dry-run",
+        "relations"
+      ]
+    },
+    {
+      "path": "linear push",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "linear status"
+    },
+    {
+      "path": "linear sync",
+      "flags": [
+        "create-only",
+        "dry-run",
+        "exclude-type",
+        "include-ephemeral",
+        "issues",
+        "milestones",
+        "no-wait",
+        "parent",
+        "prefer-linear",
+        "prefer-local",
+        "pull",
+        "pull-if-stale",
+        "push",
+        "relations",
+        "state",
+        "team",
+        "threshold",
+        "type",
+        "update-refs"
+      ]
+    },
+    {
+      "path": "linear teams"
+    },
+    {
+      "path": "link",
+      "flags": [
+        "type"
+      ]
+    },
+    {
+      "path": "lint",
+      "flags": [
+        "status",
+        "type"
+      ]
+    },
+    {
+      "path": "list",
+      "flags": [
+        "all",
+        "assignee",
+        "brief",
+        "closed-after",
+        "closed-before",
+        "created-after",
+        "created-before",
+        "defer-after",
+        "defer-before",
+        "deferred",
+        "deps",
+        "desc-contains",
+        "due-after",
+        "due-before",
+        "empty-description",
+        "exclude-label",
+        "exclude-type",
+        "external-contains",
+        "external-ref",
+        "filter-parent",
+        "flat",
+        "format",
+        "has-metadata-key",
+        "id",
+        "include-ephemeral",
+        "include-gates",
+        "include-infra",
+        "include-templates",
+        "label",
+        "label-any",
+        "label-pattern",
+        "label-regex",
+        "limit",
+        "long",
+        "max-rows",
+        "metadata-field",
+        "mol-type",
+        "no-assignee",
+        "no-labels",
+        "no-pager",
+        "no-parent",
+        "no-pinned",
+        "notes-contains",
+        "offset",
+        "overdue",
+        "parent",
+        "pinned",
+        "pretty",
+        "priority",
+        "priority-max",
+        "priority-min",
+        "ready",
+        "reverse",
+        "skip-labels",
+        "sort",
+        "spec",
+        "state",
+        "status",
+        "title",
+        "title-contains",
+        "tree",
+        "type",
+        "updated-after",
+        "updated-before",
+        "watch",
+        "wisp-type"
+      ]
+    },
+    {
+      "path": "mail"
+    },
+    {
+      "path": "memories"
+    },
+    {
+      "path": "merge-slot"
+    },
+    {
+      "path": "merge-slot acquire",
+      "flags": [
+        "holder",
+        "wait"
+      ]
+    },
+    {
+      "path": "merge-slot check"
+    },
+    {
+      "path": "merge-slot create"
+    },
+    {
+      "path": "merge-slot release",
+      "flags": [
+        "holder"
+      ]
+    },
+    {
+      "path": "metrics"
+    },
+    {
+      "path": "metrics example"
+    },
+    {
+      "path": "metrics off"
+    },
+    {
+      "path": "metrics on"
+    },
+    {
+      "path": "migrate",
+      "flags": [
+        "dry-run",
+        "force",
+        "inspect",
+        "json",
+        "update-repo-id",
+        "yes"
+      ]
+    },
+    {
+      "path": "migrate from-proxied-server-to-server",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "migrate from-proxied-server-to-shared-server",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "migrate from-server-to-proxied-server",
+      "flags": [
+        "dry-run",
+        "idle-timeout"
+      ]
+    },
+    {
+      "path": "migrate from-shared-server-to-proxied-server",
+      "flags": [
+        "dry-run",
+        "idle-timeout"
+      ]
+    },
+    {
+      "path": "migrate hooks",
+      "flags": [
+        "apply",
+        "dry-run",
+        "json",
+        "yes"
+      ]
+    },
+    {
+      "path": "migrate issues",
+      "flags": [
+        "dry-run",
+        "from",
+        "id",
+        "ids-file",
+        "include",
+        "label",
+        "priority",
+        "status",
+        "strict",
+        "to",
+        "type",
+        "within-from-only",
+        "yes"
+      ]
+    },
+    {
+      "path": "migrate legacy-sqlite",
+      "flags": [
+        "output",
+        "source-db"
+      ]
+    },
+    {
+      "path": "migrate schema",
+      "flags": [
+        "force",
+        "json"
+      ]
+    },
+    {
+      "path": "migrate sync",
+      "flags": [
+        "dry-run",
+        "json"
+      ]
+    },
+    {
+      "path": "migrate-issues",
+      "hidden": true,
+      "flags": [
+        "dry-run",
+        "from",
+        "id",
+        "ids-file",
+        "include",
+        "label",
+        "priority",
+        "status",
+        "strict",
+        "to",
+        "type",
+        "within-from-only",
+        "yes"
+      ]
+    },
+    {
+      "path": "migrate-personal",
+      "flags": [
+        "yes"
+      ]
+    },
+    {
+      "path": "mol",
+      "aliases": [
+        "protomolecule"
+      ]
+    },
+    {
+      "path": "mol bond",
+      "aliases": [
+        "fart"
+      ],
+      "flags": [
+        "as",
+        "dry-run",
+        "ephemeral",
+        "pour",
+        "ref",
+        "type",
+        "var"
+      ]
+    },
+    {
+      "path": "mol burn",
+      "flags": [
+        "dry-run",
+        "force",
+        "yes"
+      ]
+    },
+    {
+      "path": "mol current",
+      "flags": [
+        "for",
+        "limit",
+        "range"
+      ]
+    },
+    {
+      "path": "mol distill",
+      "flags": [
+        "dry-run",
+        "output",
+        "var"
+      ]
+    },
+    {
+      "path": "mol last-activity"
+    },
+    {
+      "path": "mol pour",
+      "flags": [
+        "assignee",
+        "attach",
+        "attach-type",
+        "dry-run",
+        "var"
+      ]
+    },
+    {
+      "path": "mol progress"
+    },
+    {
+      "path": "mol ready",
+      "flags": [
+        "gated"
+      ]
+    },
+    {
+      "path": "mol seed",
+      "flags": [
+        "var"
+      ]
+    },
+    {
+      "path": "mol show",
+      "flags": [
+        "parallel"
+      ]
+    },
+    {
+      "path": "mol squash",
+      "flags": [
+        "dry-run",
+        "keep-children",
+        "summary"
+      ]
+    },
+    {
+      "path": "mol stale",
+      "flags": [
+        "all",
+        "blocking",
+        "unassigned"
+      ]
+    },
+    {
+      "path": "mol wisp",
+      "flags": [
+        "dry-run",
+        "root-only",
+        "var"
+      ]
+    },
+    {
+      "path": "mol wisp create",
+      "flags": [
+        "dry-run",
+        "root-only",
+        "var"
+      ]
+    },
+    {
+      "path": "mol wisp gc",
+      "flags": [
+        "age",
+        "all",
+        "closed",
+        "dry-run",
+        "exclude-type",
+        "force"
+      ]
+    },
+    {
+      "path": "mol wisp list",
+      "flags": [
+        "all",
+        "type"
+      ]
+    },
+    {
+      "path": "note",
+      "flags": [
+        "file",
+        "stdin"
+      ]
+    },
+    {
+      "path": "notion"
+    },
+    {
+      "path": "notion connect",
+      "flags": [
+        "url"
+      ]
+    },
+    {
+      "path": "notion init",
+      "flags": [
+        "parent",
+        "title"
+      ]
+    },
+    {
+      "path": "notion pull",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "notion push",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
+      "path": "notion status"
+    },
+    {
+      "path": "notion sync",
+      "flags": [
+        "create-only",
+        "dry-run",
+        "issues",
+        "parent",
+        "prefer-local",
+        "prefer-notion",
+        "pull",
+        "push",
+        "state"
+      ]
+    },
+    {
+      "path": "onboard"
+    },
+    {
+      "path": "orphans",
+      "flags": [
+        "details",
+        "fix",
+        "label",
+        "label-any"
+      ]
+    },
+    {
+      "path": "ping"
+    },
+    {
+      "path": "preflight",
+      "flags": [
+        "check",
+        "fix",
+        "json",
+        "skip-lint"
+      ]
+    },
+    {
+      "path": "prime",
+      "flags": [
+        "export",
+        "full",
+        "hook-json",
+        "max-memories",
+        "max-memory-chars",
+        "mcp",
+        "memories-only",
+        "no-memories",
+        "stealth"
+      ]
+    },
+    {
+      "path": "priority"
+    },
+    {
+      "path": "promote",
+      "flags": [
+        "reason"
+      ]
+    },
+    {
+      "path": "provenance"
+    },
+    {
+      "path": "provenance by-ref"
+    },
+    {
+      "path": "provenance log",
+      "flags": [
+        "kind"
+      ]
+    },
+    {
+      "path": "provenance record",
+      "flags": [
+        "actor",
+        "at",
+        "issue",
+        "kind",
+        "payload",
+        "ref",
+        "ref-kind",
+        "source"
+      ]
+    },
+    {
+      "path": "prune",
+      "flags": [
+        "dry-run",
+        "force",
+        "ignore-references",
+        "older-than",
+        "pattern"
+      ]
+    },
+    {
+      "path": "purge",
+      "flags": [
+        "dry-run",
+        "force",
+        "older-than",
+        "pattern"
+      ]
+    },
+    {
+      "path": "q",
+      "flags": [
+        "labels",
+        "parent",
+        "priority",
+        "type"
+      ]
+    },
+    {
+      "path": "query",
+      "flags": [
+        "all",
+        "limit",
+        "long",
+        "offset",
+        "parse-only",
+        "reverse",
+        "sort"
+      ]
+    },
+    {
+      "path": "quickstart"
+    },
+    {
+      "path": "ready",
+      "flags": [
+        "after",
+        "assignee",
+        "brief",
+        "claim",
+        "exclude-label",
+        "exclude-type",
+        "explain",
+        "flat",
+        "gated",
+        "has-metadata-key",
+        "include-deferred",
+        "include-ephemeral",
+        "label",
+        "label-any",
+        "label-pattern",
+        "label-regex",
+        "limit",
+        "max-rows",
+        "metadata-field",
+        "mol",
+        "mol-type",
+        "offset",
+        "parent",
+        "plain",
+        "pretty",
+        "priority",
+        "sort",
+        "type",
+        "unassigned"
+      ]
+    },
+    {
+      "path": "recall"
+    },
+    {
+      "path": "reclaim",
+      "flags": [
+        "any-replica",
+        "assignee",
+        "exclude-label",
+        "id",
+        "label",
+        "label-any",
+        "older-than"
+      ]
+    },
+    {
+      "path": "recompute-blocked"
+    },
+    {
+      "path": "remember",
+      "flags": [
+        "key"
+      ]
+    },
+    {
+      "path": "rename"
+    },
+    {
+      "path": "rename-prefix",
+      "flags": [
+        "dry-run",
+        "repair"
+      ]
+    },
+    {
+      "path": "reopen",
+      "flags": [
+        "reason"
+      ]
+    },
+    {
+      "path": "repo"
+    },
+    {
+      "path": "repo add",
+      "flags": [
+        "json"
+      ]
+    },
+    {
+      "path": "repo list",
+      "flags": [
+        "json"
+      ]
+    },
+    {
+      "path": "repo remove",
+      "flags": [
+        "json"
+      ]
+    },
+    {
+      "path": "repo sync",
+      "flags": [
+        "json",
+        "verbose"
+      ]
+    },
+    {
+      "path": "restore",
+      "flags": [
+        "apply",
+        "json"
+      ]
+    },
+    {
+      "path": "rules"
+    },
+    {
+      "path": "rules audit",
+      "flags": [
+        "path",
+        "threshold"
+      ]
+    },
+    {
+      "path": "rules compact",
+      "flags": [
+        "auto",
+        "dry-run",
+        "group",
+        "path"
+      ]
+    },
+    {
+      "path": "schema"
+    },
+    {
+      "path": "search",
+      "flags": [
+        "assignee",
+        "closed-after",
+        "closed-before",
+        "created-after",
+        "created-before",
+        "desc-contains",
+        "empty-description",
+        "external-contains",
+        "has-metadata-key",
+        "label",
+        "label-any",
+        "limit",
+        "long",
+        "metadata-field",
+        "no-assignee",
+        "no-labels",
+        "notes-contains",
+        "priority-max",
+        "priority-min",
+        "query",
+        "reverse",
+        "sort",
+        "status",
+        "type",
+        "updated-after",
+        "updated-before"
+      ]
+    },
+    {
+      "path": "send-metrics",
+      "hidden": true
+    },
+    {
+      "path": "serve",
+      "flags": [
+        "addr",
+        "allow-non-loopback",
+        "allowed-host",
+        "auth-token-file",
+        "insecure-no-auth"
+      ]
+    },
+    {
+      "path": "set-state",
+      "flags": [
+        "reason"
+      ]
+    },
+    {
+      "path": "setup",
+      "flags": [
+        "add",
+        "check",
+        "global",
+        "list",
+        "output",
+        "print",
+        "project",
+        "remove",
+        "stealth"
+      ]
+    },
+    {
+      "path": "ship",
+      "flags": [
+        "dry-run",
+        "force"
+      ]
+    },
+    {
+      "path": "show",
+      "aliases": [
+        "view"
+      ],
+      "flags": [
+        "as-of",
+        "brief-deps",
+        "children",
+        "current",
+        "id",
+        "include-comments",
+        "include-dependents",
+        "local-time",
+        "long",
+        "refs",
+        "short",
+        "thread",
+        "watch"
+      ]
+    },
+    {
+      "path": "sql",
+      "flags": [
+        "csv"
+      ]
+    },
+    {
+      "path": "stale",
+      "flags": [
+        "days",
+        "exclude-label",
+        "label",
+        "label-any",
+        "limit",
+        "status"
+      ]
+    },
+    {
+      "path": "state"
+    },
+    {
+      "path": "state list"
+    },
+    {
+      "path": "status",
+      "aliases": [
+        "stats"
+      ],
+      "flags": [
+        "all",
+        "assigned",
+        "no-activity",
+        "no-blocked"
+      ]
+    },
+    {
+      "path": "statuses"
+    },
+    {
+      "path": "supersede",
+      "flags": [
+        "with"
+      ]
+    },
+    {
+      "path": "swarm"
+    },
+    {
+      "path": "swarm create",
+      "flags": [
+        "coordinator",
+        "force"
+      ]
+    },
+    {
+      "path": "swarm list"
+    },
+    {
+      "path": "swarm status"
+    },
+    {
+      "path": "swarm validate",
+      "flags": [
+        "verbose"
+      ]
+    },
+    {
+      "path": "sync",
+      "flags": [
+        "attempts",
+        "no-adopt",
+        "remote",
+        "yes"
+      ]
+    },
+    {
+      "path": "tag"
+    },
+    {
+      "path": "todo"
+    },
+    {
+      "path": "todo add",
+      "flags": [
+        "description",
+        "priority"
+      ]
+    },
+    {
+      "path": "todo done",
+      "flags": [
+        "reason"
+      ]
+    },
+    {
+      "path": "todo list",
+      "flags": [
+        "all"
+      ]
+    },
+    {
+      "path": "types",
+      "flags": [
+        "sections"
+      ]
+    },
+    {
+      "path": "unclaim",
+      "flags": [
+        "force",
+        "if-assignee",
+        "reason"
+      ]
+    },
+    {
+      "path": "undefer"
+    },
+    {
+      "path": "update",
+      "flags": [
+        "acceptance",
+        "acceptance-criteria",
+        "add-label",
+        "allow-empty-description",
+        "append-notes",
+        "assignee",
+        "await-id",
+        "body",
+        "body-file",
+        "claim",
+        "defer",
+        "description",
+        "description-file",
+        "design",
+        "design-file",
+        "due",
+        "ephemeral",
+        "estimate",
+        "external-ref",
+        "force",
+        "history",
+        "if-assignee",
+        "if-status",
+        "message",
+        "metadata",
+        "no-history",
+        "notes",
+        "parent",
+        "persistent",
+        "priority",
+        "remove-label",
+        "session",
+        "set-labels",
+        "set-metadata",
+        "spec-id",
+        "status",
+        "stdin",
+        "title",
+        "type",
+        "unset-metadata"
+      ]
+    },
+    {
+      "path": "upgrade"
+    },
+    {
+      "path": "upgrade ack"
+    },
+    {
+      "path": "upgrade review"
+    },
+    {
+      "path": "upgrade status"
+    },
+    {
+      "path": "vc"
+    },
+    {
+      "path": "vc commit",
+      "flags": [
+        "message",
+        "stdin"
+      ]
+    },
+    {
+      "path": "vc merge",
+      "flags": [
+        "strategy"
+      ]
+    },
+    {
+      "path": "vc status"
+    },
+    {
+      "path": "version"
+    },
+    {
+      "path": "where"
+    },
+    {
+      "path": "worktree"
+    },
+    {
+      "path": "worktree create",
+      "flags": [
+        "branch"
+      ]
+    },
+    {
+      "path": "worktree info"
+    },
+    {
+      "path": "worktree list"
+    },
+    {
+      "path": "worktree remove",
+      "flags": [
+        "force",
+        "merged-into"
+      ]
+    }
+  ]
+}

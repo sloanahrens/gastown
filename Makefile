@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -68,6 +68,12 @@ lint: docs-lint
 # Also the tier lists the weekly doc audit slices from.
 docs-lint:
 	bash scripts/docs-lint.sh
+
+# Regenerate the bd command surface the command-tree lint (internal/cmdtree,
+# gt-fcxe9.5) checks bd invocations against. BEADS_SRC is a beads fork
+# checkout; BEADS_REF defaults to origin/main. Builds bd in a temp dir only.
+bd-command-tree:
+	scripts/refresh-bd-command-tree.sh
 
 desktop-build:
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_DESKTOP) ./cmd/gt-desktop
