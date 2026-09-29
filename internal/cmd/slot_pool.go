@@ -11,7 +11,7 @@ import (
 // gt-yihz.
 func containerGatePool(townRoot string) slot.Pool {
 	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	return slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()}
+	return slot.PoolFromConfig(cg)
 }
 
 // readGateSlotHolder reads the container-gate pool's current holder for the

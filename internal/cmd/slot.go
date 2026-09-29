@@ -322,6 +322,7 @@ func printPoolStatusText(cmd *cobra.Command, rep slot.Report) {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "  slot %d%s: %s\n", st.Index, tag, label)
 		}
+		printGateYield(cmd, rep)
 		if rep.HeldCount > 0 {
 			return
 		}
@@ -356,6 +357,20 @@ func printPoolStatusText(cmd *cobra.Command, rep slot.Report) {
 		return
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "Container-gate slot: free")
+}
+
+// printGateYield says why a new non-gate suite would wait right now: a gate
+// holds a gate-reserved slot and the pool yields to it (gt-22hdp.29). Gates
+// still start, so this is not "busy".
+func printGateYield(cmd *cobra.Command, rep slot.Report) {
+	if !rep.YieldingToGate {
+		return
+	}
+	who := "a gate (owner metadata unavailable)"
+	if g := rep.GateHolder; g != nil {
+		who = fmt.Sprintf("%s (pid %d, slot %d)", g.Role, g.PID, g.Slot)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  new non-gate suites: waiting: gate running — %s; they start when it releases\n", who)
 }
 
 // slotHistoryShown is how many recent acquisitions the plain status lists.
@@ -437,6 +452,11 @@ func slotHistoryReason(e slot.HistoryEntry) string {
 			return "daemon_unreachable: " + e.DockerError
 		}
 		return string(slot.WaitReasonDaemonUnreachable)
+	case slot.WaitReasonGateRunning:
+		if e.HolderRole != "" {
+			return fmt.Sprintf("gate_running: %s (pid %d)", e.HolderRole, e.HolderPID)
+		}
+		return string(slot.WaitReasonGateRunning)
 	default:
 		return ""
 	}
@@ -455,6 +475,8 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report, history []slot.His
 		HeldCount           int                 `json:"held_count"`
 		Total               int                 `json:"total"`
 		Reserved            int                 `json:"reserved_for_gate"`
+		YieldingToGate      bool                `json:"yielding_to_gate"`
+		GateHolder          *slot.Owner         `json:"gate_holder,omitempty"`
 		History             []slot.ResolvedHold `json:"history,omitempty"`
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
@@ -471,6 +493,8 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report, history []slot.His
 		HeldCount:           rep.HeldCount,
 		Total:               rep.Total,
 		Reserved:            rep.Reserved,
+		YieldingToGate:      rep.YieldingToGate,
+		GateHolder:          rep.GateHolder,
 		History:             slot.ResolveHolds(history, rep),
 	})
 }
