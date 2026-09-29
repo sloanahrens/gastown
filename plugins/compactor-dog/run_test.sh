@@ -10,6 +10,13 @@ FAILURES=0
 # where it is visible — RUN_LOG alone is not reliable for cleanup.
 RUN_LOG_DIRS=""
 RUN_LOG_DIR=""
+# run.sh refuses to start while its lock exists, and the default lock is one
+# path for the whole host. Each test run takes a lock of its own, so two
+# concurrent runs (two gates, or a gate beside the live dog) do not refuse
+# each other. The dir is cleaned with the run log dirs.
+COMPACTOR_LOCK_DIR=$(mktemp -d)
+RUN_LOG_DIRS="$COMPACTOR_LOCK_DIR"
+export COMPACTOR_LOCKFILE="$COMPACTOR_LOCK_DIR/compactor-dog.lock"
 run_test_cleanup() { rm -rf ${RUN_LOG_DIRS:-}; }
 trap run_test_cleanup EXIT
 

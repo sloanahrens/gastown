@@ -35,7 +35,9 @@ DEFAULT_DBS="auto"
 DRY_RUN=false
 CHECK_ONLY=true # default: monitor-only (matches plugin.md). Use --compact for the destructive path.
 LOGFILE=""
-LOCKFILE="/tmp/compactor-dog.lock"
+# COMPACTOR_LOCKFILE lets a test run take its own lock: the shared default
+# refused concurrent test runs (and a live dog run) with "Another instance".
+LOCKFILE="${COMPACTOR_LOCKFILE:-/tmp/compactor-dog.lock}"
 
 # --- Argument parsing ---------------------------------------------------------
 
