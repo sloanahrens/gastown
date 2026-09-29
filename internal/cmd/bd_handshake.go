@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"context"
-	"os"
+	"fmt"
 	"os/exec"
 	"sync"
 	"time"
@@ -40,6 +40,36 @@ var bdHandshakeGatedCommands = map[string]bool{
 	"gt rig boot":         true,
 	"gt session start":    true,
 	"gt session restart":  true,
+	"gt scheduler run":    true,
+	"gt formula run":      true,
+	"gt synthesis start":  true,
+}
+
+// bdHandshakeTownVerbs are the command names that start or dispatch things.
+// Every command with one of these names must be gated or listed in
+// bdHandshakeNotTownRunning with the reason, so a new start/run command
+// cannot silently skip the gate (TestBDHandshakeClassifiesEveryTownVerb).
+var bdHandshakeTownVerbs = map[string]bool{
+	"up": true, "start": true, "restart": true, "run": true, "spawn": true,
+	"sling": true, "boot": true, "resume": true,
+}
+
+// bdHandshakeNotTownRunning are start/run-named commands that start no agent
+// session, daemon or polecat, with the reason each is exempt.
+var bdHandshakeNotTownRunning = map[string]string{
+	"gt boot":             "command group; its spawn verb is gated",
+	"gt resume":           "reads the inbox for handoff messages",
+	"gt agent resume":     "clears a pause flag; starts no session",
+	"gt deacon resume":    "clears a pause flag; starts no session",
+	"gt mountain resume":  "re-enables wave dispatch, which goes through gt sling (gated)",
+	"gt quota resume":     "nudges existing sessions",
+	"gt scheduler resume": "clears a pause flag; dispatch goes through gt sling (gated)",
+	"gt plugin run":       "runs one plugin gate; starts no agent session",
+	"gt reaper run":       "closes stale beads through bd; starts nothing",
+	"gt mq batch run":     "assembles a merge batch; starts no session",
+	"gt slot run":         "wraps a test suite in the container slot",
+	"gt dolt start":       "starts the Dolt server, which recovery needs when bd is broken",
+	"gt dolt restart":     "restarts the Dolt server, which recovery needs when bd is broken",
 }
 
 // bdHandshakeTimeout bounds the handshake's two bd calls.
@@ -55,9 +85,11 @@ var (
 )
 
 func defaultBDHandshakeCheck(ctx context.Context) (*deps.BDHandshake, error) {
+	// Read the town's own database level, never whatever beads database the
+	// current directory happens to resolve to.
 	dir := detectTownRootFromCwd()
 	if dir == "" {
-		dir, _ = os.Getwd()
+		return nil, fmt.Errorf("%w: not in a Gas Town workspace, so the town database's schema level cannot be read", deps.ErrBDHandshake)
 	}
 	path, _ := exec.LookPath("bd")
 	return deps.CheckBDHandshake(ctx, path, deps.NewBDProcessRunner(dir))

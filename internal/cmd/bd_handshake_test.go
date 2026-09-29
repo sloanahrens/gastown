@@ -100,3 +100,28 @@ func TestPersistentPreRunSkipsHandshakeForReadOnlyCommands(t *testing.T) {
 		t.Fatalf("read-only command ran the handshake %d times", *calls)
 	}
 }
+
+// TestBDHandshakeClassifiesEveryTownVerb: every start/run-style command is
+// either gated or exempt with a stated reason, so a new town-running command
+// fails this test until someone decides.
+func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
+	for path, reason := range bdHandshakeNotTownRunning {
+		findCommand(t, path)
+		if reason == "" || bdHandshakeGatedCommands[path] {
+			t.Errorf("%q: exempt entries need a reason and must not also be gated", path)
+		}
+	}
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if bdHandshakeTownVerbs[c.Name()] {
+			path := c.CommandPath()
+			if !bdHandshakeGatedCommands[path] && bdHandshakeNotTownRunning[path] == "" {
+				t.Errorf("%q starts or dispatches something: gate it (bdHandshakeGatedCommands) or exempt it with a reason (bdHandshakeNotTownRunning)", path)
+			}
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(rootCmd)
+}
