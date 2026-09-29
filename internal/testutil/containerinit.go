@@ -39,14 +39,16 @@ func classifyContainerInit(b *beads.Beads, err error) containerInitOutcome {
 	return containerInitFailed
 }
 
-// SkipOrFailContainerInit skips t when b's init failed because the shared test
-// Dolt container is gone, and fails t for every other error — a blanket skip on
-// any error leaves the suite green everywhere while hiding exactly the
-// regressions it exists to catch (gt-cbtl).
-func SkipOrFailContainerInit(t *testing.T, b *beads.Beads, err error) {
+// FailContainerInit fails t on a container-backed bd init error, saying
+// whether the shared test Dolt container was gone or bd answered. Both fail:
+// the caller opted in to the container tests (GT_TEST_DOCKER=1), so a container
+// that went away is lost coverage, not an absence of evidence to skip on — and
+// a blanket skip leaves the suite green while hiding exactly the regressions it
+// exists to catch (gt-cbtl).
+func FailContainerInit(t *testing.T, b *beads.Beads, err error) {
 	t.Helper()
 	if classifyContainerInit(b, err) == containerInitGone {
-		t.Skipf("test Dolt container gone, skipping: %v", err)
+		t.Fatalf("bd init failed: the test Dolt container is gone: %v", err)
 	}
 	t.Fatalf("bd init failed: %v", err)
 }

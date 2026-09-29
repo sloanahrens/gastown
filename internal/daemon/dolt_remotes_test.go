@@ -19,13 +19,17 @@ import (
 
 // testDoltRemotesDaemon returns a *Daemon that resolves the running Dolt
 // server through the package's shared ephemeral container (started by
-// TestMain via testutil.WithDolt) rather than the live town on :3307. Skips
-// if no container is available (e.g. Docker missing).
+// TestMain via testutil.WithDolt) rather than the live town on :3307. Without
+// the GT_TEST_DOCKER=1 opt-in there is no container and the test skips; once
+// opted in, a missing container fails it.
 func testDoltRemotesDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	containerPort := testutil.DoltContainerPort()
 	if containerPort == "" {
-		t.Skip("no shared Dolt container available")
+		if testutil.DockerTestsEnabled() {
+			t.Fatal("no shared Dolt container, though " + testutil.DockerTestsEnv + "=1 opted in")
+		}
+		t.Skip("no shared Dolt container: container-backed tests are opt-in (" + testutil.DockerTestsEnv + "=1)")
 	}
 
 	d := &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
@@ -45,63 +49,30 @@ func testDoltRemotesDaemon(t *testing.T) *Daemon {
 }
 
 // testDoltSQLTimeout bounds the SQL these tests issue themselves against the
-// package's container (createTestDB's CREATE and DROP DATABASE, and each
-// test's setup and verification statements). Dolt DDL and commits are
-// fsync-bound and serialized on the server, and the container shares the
-// Docker VM's disk with every other package's container during a -p=8 gate:
-// a 15s bound failed 'create database: context deadline exceeded' at host
-// load ~59 (gt-81fp6). It guards only a disposable local container, so it
-// costs time only when that container is truly wedged.
+// package's container (each test's setup and verification statements). Dolt
+// DDL and commits are fsync-bound and serialized on the server, and the
+// container shares the Docker VM's disk with every other package's container
+// during a -p=8 gate: a 15s bound failed at host load ~59 (gt-81fp6). It guards
+// only a disposable local container, so it costs time only when that container
+// is truly wedged.
 const testDoltSQLTimeout = 2 * time.Minute
 
-// createTestDB creates a fresh Dolt database on the shared server and
-// returns its name, guaranteed not to collide with the "test"/"beads_t"/
-// "beads_pt"/"doctest_" prefixes pushDatabase refuses to touch — several
-// tests below push this database over a real (file://) remote and must not
-// trip that refusal. "dolt_remotes_check_" is registered alongside those
-// prefixes at the orphan-cleanup call sites that match on database-name
-// prefix (jsonl_git_backup's discoverJsonlBackupDatabases, the reaper's
-// testPollutionPrefixes, and gt dolt cleanup's filesystem fallback) so a
-// leaked database here is still recognized as test cruft even though it
-// isn't itself referenced by any rig's metadata.json.
-func createTestDB(t *testing.T, d *Daemon) string {
+// createTestDB hands the test an empty database on the shared container and
+// returns its name. The database was created with the container's pool before
+// any test ran, and is never dropped: a CREATE or DROP DATABASE while other
+// tests run breaks their store opens and migrations, and the pool's teardown
+// guard fails the package on one (internal/testutil/doltpool.go). Its name
+// carries the "dolt_remotes_check_" prefix, which pushDatabase does not refuse
+// — several tests below push it over a real (file://) remote — and which the
+// orphan cleanups treat as test cruft.
+func createTestDB(t *testing.T) string {
 	t.Helper()
-
-	admin, err := d.openDoltDB("information_schema")
-	if err != nil {
-		t.Fatalf("connect to server: %v", err)
-	}
-
-	dbName := fmt.Sprintf("dolt_remotes_check_%d", time.Now().UnixNano())
-
-	// admin must stay open until this Cleanup runs at the end of the test —
-	// not closed here via a plain defer, which would fire as soon as
-	// createTestDB returns and leave the DROP below running on a closed
-	// *sql.DB, silently skipped and leaking dolt_remotes-prefixed databases
-	// on whatever server the test reached. Registered before the CREATE: a
-	// CREATE whose client context expires can still complete server-side,
-	// and DROP ... IF EXISTS cleans that up too.
-	t.Cleanup(func() {
-		defer admin.Close()
-		dropCtx, dropCancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
-		defer dropCancel()
-		if _, err := admin.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)); err != nil {
-			t.Logf("drop database %s: %v", dbName, err)
-		}
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), testDoltSQLTimeout)
-	defer cancel()
-	if _, err := admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", dbName)); err != nil {
-		t.Fatalf("create database: %v", err)
-	}
-
-	return dbName
+	return testutil.TakePooledSQLDatabase(t)
 }
 
 func TestDatabaseHasRemote_NoneConfigured(t *testing.T) {
 	d := testDoltRemotesDaemon(t)
-	dbName := createTestDB(t, d)
+	dbName := createTestDB(t)
 
 	if d.databaseHasRemote(dbName, "origin") {
 		t.Fatalf("databaseHasRemote(%q) = true, want false (no remote configured)", dbName)
@@ -116,7 +87,7 @@ func TestDatabaseHasRemote_NoneConfigured(t *testing.T) {
 
 func TestDatabaseHasRemote_Configured(t *testing.T) {
 	d := testDoltRemotesDaemon(t)
-	dbName := createTestDB(t, d)
+	dbName := createTestDB(t)
 
 	conn, err := d.openDoltDB(dbName)
 	if err != nil {
@@ -146,7 +117,7 @@ func TestDatabaseHasRemote_Configured(t *testing.T) {
 
 func TestHasStagedChanges(t *testing.T) {
 	d := testDoltRemotesDaemon(t)
-	dbName := createTestDB(t, d)
+	dbName := createTestDB(t)
 
 	conn, err := d.openDoltDB(dbName)
 	if err != nil {
@@ -272,7 +243,7 @@ func TestDoltRemotesDSN_LongQueryCompletesWithinContextBudget(t *testing.T) {
 // checkout of the data directory.
 func TestPushDatabase_UsesLiveServerConnection(t *testing.T) {
 	d := testDoltRemotesDaemon(t)
-	dbName := createTestDB(t, d)
+	dbName := createTestDB(t)
 
 	conn, err := d.openDoltDB(dbName)
 	if err != nil {

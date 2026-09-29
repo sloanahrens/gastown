@@ -5,7 +5,7 @@
 // dry-run, circuit breaker) against a Dolt-server-backed beads DB. No Claude
 // credentials, no agent sessions.
 //
-// Requires a Dolt server (managed by requireDoltServer/cleanupDoltServer).
+// Requires a Dolt server (managed by requireDoltServer).
 //
 // Run with:
 //
@@ -163,8 +163,7 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 		t.Fatalf("bd not installed: %v", err)
 	}
 
-	requireDoltServer(t)
-	cleanStaleBeadsDatabases(t)
+	requireIsolatedDoltServer(t)
 	gtBinary = buildGT(t)
 
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
@@ -795,8 +794,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 		t.Fatalf("bd not installed: %v", err)
 	}
 
-	requireDoltServer(t)
-	cleanStaleBeadsDatabases(t)
+	requireIsolatedDoltServer(t)
 	gtBinary = buildGT(t)
 
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())

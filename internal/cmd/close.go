@@ -263,7 +263,7 @@ func checkConvoyCompletion(beadIDs []string) {
 	hqBeadsDir := filepath.Join(townRoot, ".beads")
 	ctx := context.Background()
 
-	store, err := beadsdk.Open(ctx, hqBeadsDir)
+	store, err := beads.OpenStoreFromConfig(ctx, hqBeadsDir)
 	if err != nil {
 		return
 	}
@@ -287,7 +287,7 @@ func checkConvoyCompletion(beadIDs []string) {
 		if beadsDir == "" {
 			return nil, fmt.Errorf("no beads directory for rig %s", name)
 		}
-		return beadsdk.OpenFromConfig(ctx, beadsDir)
+		return beads.OpenStoreFromConfig(ctx, beadsDir)
 	})
 	defer func() { _ = resolver.Close() }()
 

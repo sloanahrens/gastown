@@ -307,7 +307,7 @@ func setupEngineerTerminalCloseTest(t *testing.T, activeMR string) (*Engineer, *
 	rigPath := t.TempDir()
 	b := beads.NewIsolatedWithPort(rigPath, port)
 	if err := b.Init("gt"); err != nil {
-		testutil.SkipOrFailContainerInit(t, b, err)
+		testutil.FailContainerInit(t, b, err)
 	}
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})

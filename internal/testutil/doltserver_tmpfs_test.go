@@ -97,15 +97,12 @@ func TestDoltContainer_DataDirIsTmpfs(t *testing.T) {
 		t.Skip(dockerTestsSkipMsg)
 	}
 	if !isDockerAvailable() {
-		t.Skip("Docker not available, skipping test")
+		t.Fatal(dockerMissingMsg)
 	}
 	t.Setenv(DoltTmpfsEnv, "")
 	ctx := context.Background()
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
-		if isDockerUnavailableErr(err) {
-			t.Skipf("Dolt container unavailable: %v", err)
-		}
 		t.Fatalf("starting Dolt container: %v", err)
 	}
 	t.Cleanup(func() {

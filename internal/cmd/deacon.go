@@ -1646,7 +1646,7 @@ var redispatchHoldLookupFn = openRedispatchHoldLookup
 func openRedispatchHoldLookup(townRoot string) (func(beadID string) string, func()) {
 	ctx := context.Background()
 
-	townStore, err := beadsdk.Open(ctx, filepath.Join(townRoot, ".beads"))
+	townStore, err := beads.OpenStoreFromConfig(ctx, filepath.Join(townRoot, ".beads"))
 	if err != nil {
 		reason := "record unreadable (" + util.FirstLine(err.Error()) + ")"
 		return func(string) string { return reason }, func() {}
@@ -1660,7 +1660,7 @@ func openRedispatchHoldLookup(townRoot string) (func(beadID string) string, func
 		if beadsDir == "" {
 			return nil, fmt.Errorf("no beads directory for rig %s", name)
 		}
-		return beadsdk.OpenFromConfig(ctx, beadsDir)
+		return beads.OpenStoreFromConfig(ctx, beadsDir)
 	})
 
 	lookup := func(beadID string) string {

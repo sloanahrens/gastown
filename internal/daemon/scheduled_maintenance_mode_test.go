@@ -110,7 +110,7 @@ func maintenanceTestDaemon(t *testing.T) (*Daemon, string) {
 	// port resolves to the package's container rather than to the live town on
 	// :3307; it refuses to run if the port resolves anywhere else.
 	d := testDoltRemotesDaemon(t)
-	dbName := createTestDB(t, d)
+	dbName := createTestDB(t)
 
 	conn, err := d.compactorOpenDB(dbName)
 	if err != nil {

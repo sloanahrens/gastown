@@ -96,7 +96,7 @@ func (b *Beads) OpenStore(ctx context.Context) (beadsdk.Storage, func(), error) 
 		return nil, nil, fmt.Errorf("no beads directory found")
 	}
 
-	store, err := beadsdk.OpenFromConfig(ctx, beadsDir)
+	store, err := OpenStoreFromConfig(ctx, beadsDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening beads store: %w", err)
 	}

@@ -132,6 +132,10 @@ func DockerTestsEnabled() bool {
 
 const dockerTestsSkipMsg = "container-backed tests are opt-in: set " + DockerTestsEnv + "=1 (make test does) and run under gt slot run"
 
+// dockerMissingMsg fails an opted-in container test on a host without Docker:
+// the opt-in says the run wants the coverage, so losing it is a failure.
+const dockerMissingMsg = "Docker is not available, though " + DockerTestsEnv + "=1 opted in to the container-backed tests"
+
 func isDockerAvailable() bool {
 	dockerOnce.Do(func() {
 		dockerAvail = exec.Command("docker", "info").Run() == nil
@@ -145,16 +149,6 @@ func isDockerAvailable() bool {
 func isReaperRemovingErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unexpected container status") &&
 		strings.Contains(err.Error(), "removing")
-}
-
-func isDockerUnavailableErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "rootless docker not found") ||
-		strings.Contains(msg, "cannot connect to the docker daemon") ||
-		strings.Contains(msg, "no docker host")
 }
 
 func runDoltContainer(ctx context.Context) (ctr *dolt.DoltContainer, err error) {
@@ -399,16 +393,13 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 		t.Skip(dockerTestsSkipMsg)
 	}
 	if !isDockerAvailable() {
-		t.Skip("Docker not available, skipping test")
+		t.Fatal(dockerMissingMsg)
 	}
 
 	ctx := context.Background()
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
-		if isDockerUnavailableErr(err) {
-			t.Skipf("Dolt container unavailable: %v", err)
-		}
-		t.Fatalf("starting Dolt container: %v", err)
+		t.Fatalf("starting Dolt container (%s=1 opted in, so a missing container fails): %v", DockerTestsEnv, err)
 	}
 	t.Cleanup(func() {
 		if err := testcontainers.TerminateContainer(ctr); err != nil {
@@ -434,11 +425,11 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
 // Sets both GT_DOLT_PORT and BEADS_DOLT_PORT process-wide.
 //
-// The only caller is StartHermetic (WithDolt), which logs the error and
-// continues with the port variables left poisoned; every package that opts
-// in then skips its container tests on the empty port (daemon, convoy) or
-// via RequireDoltContainer (cmd). TestStartHermetic_WithDoltWithoutOptIn
-// pins that contract.
+// The only caller is StartHermetic (WithDolt). Without the opt-in it logs the
+// error and continues with the port variables left poisoned, and the
+// package's container tests skip (TestStartHermetic_WithDoltWithoutOptIn);
+// with the opt-in the error fails the package
+// (TestStartHermetic_WithDoltOptedInFailsWithoutContainer).
 func EnsureDoltContainerForTestMain() error {
 	if !DockerTestsEnabled() {
 		return fmt.Errorf("%s", dockerTestsSkipMsg)
@@ -451,23 +442,21 @@ func EnsureDoltContainerForTestMain() error {
 	return doltCtrErr
 }
 
-// RequireDoltContainer ensures a shared Dolt container is running. Skips the
-// test if Docker is not available.
+// RequireDoltContainer ensures a shared Dolt container is running. It skips
+// the test unless GT_TEST_DOCKER=1 opts in; once opted in, a missing Docker or
+// a container that will not start fails it.
 func RequireDoltContainer(t *testing.T) {
 	t.Helper()
 	if !DockerTestsEnabled() {
 		t.Skip(dockerTestsSkipMsg)
 	}
 	if !isDockerAvailable() {
-		t.Skip("Docker not available, skipping test")
+		t.Fatal(dockerMissingMsg)
 	}
 
 	doltCtrOnce.Do(startSharedDoltContainer)
 	if doltCtrErr != nil {
-		if isDockerUnavailableErr(doltCtrErr) {
-			t.Skipf("Dolt container unavailable: %v", doltCtrErr)
-		}
-		t.Fatalf("Dolt container setup failed: %v", doltCtrErr)
+		t.Fatalf("Dolt container setup failed (%s=1 opted in, so a missing container fails): %v", DockerTestsEnv, doltCtrErr)
 	}
 }
 
@@ -488,12 +477,16 @@ func DoltContainerPort() string {
 // gt-n5g6 - a fleet of hours-old leaked containers is exactly how the VM's
 // 7.6GiB got exhausted town-wide, undetected because this used to discard
 // the error).
+//
+// Before the container goes, the pool's catalog guard runs (releaseDoltPool):
+// a database created or dropped while tests ran fails the package, with an
+// error that wraps ErrDoltCatalogChanged and names each database.
 func TerminateDoltContainer() error {
 	if doltCtr == nil {
 		return nil
 	}
+	catalogErr := releaseDoltPool()
 	err := testcontainers.TerminateContainer(doltCtr)
 	doltCtr = nil
-	releaseDoltPool()
-	return err
+	return errors.Join(catalogErr, err)
 }
