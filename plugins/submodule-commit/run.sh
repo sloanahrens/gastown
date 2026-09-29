@@ -35,6 +35,10 @@ while IFS= read -r REPO_PATH; do
   RESOLVED+=("$REPO_PATH")
   [ ! -f "$REPO_PATH/.gitmodules" ] && continue
   RIG_NAME=$(basename "$REPO_PATH")
+  # gt rig settings show prints the rig's settings/config.json as a JSON
+  # object. config.RigSettings has no plugins field yet, so this reads false
+  # for every rig until gt-fcxe9.13 gives the opt-in a home; an unknown rig
+  # prints nothing, which also reads as off.
   PLUGIN_ENABLED=$(gt rig settings show "$RIG_NAME" 2>/dev/null \
     | jq -r '.plugins["submodule-commit"].enabled // false' 2>/dev/null || echo "false")
   if [ "$PLUGIN_ENABLED" = "true" ]; then
