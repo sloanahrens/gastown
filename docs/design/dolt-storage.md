@@ -270,12 +270,8 @@ follows the escalation, and it lives in exactly one place — the plugin's
 `--compact` flag, whose escalation policy is `plugins/compactor-dog/plugin.md`.
 All lifecycle tickers are populated by `EnsureLifecycleDefaults()`
 (lifecycle_defaults.go), which auto-writes missing patrol blocks to daemon.json
-on `gt init` or `gt up` and never overwrites existing ones. dolt_remotes is the
-one exception to "enabled by default": its block is written with
-`enabled: false`, the opt-in default `IsPatrolEnabled` also enforces, so a town
-whose databases have no remote configured sees no behavior change — towns that
-want the scheduled push (see "Dolt Remotes Patrol" below) flip `enabled` to
-true.
+on `gt init` or `gt up` and never overwrites existing ones. There is no Dolt
+remote push patrol any more (see "No Dolt Remote Sync" below).
 
 ### Two Data Streams
 
@@ -319,29 +315,11 @@ escalation threshold is deliberately set well above the plugin's so that a
 busy cycle's escalations cannot re-trigger the patrol on their own output.
 Compaction itself is unchanged SQL — see below.
 
-**Flattening a diverged database is refused.** A flatten rewrites the commit
-graph, so if the database's remote holds commits the local history does not,
-squashing locally makes the two disagree and the next force-push deletes the
-remote-only commits. `gt maintain` therefore fetches every configured remote of
-each candidate database — not just the first — and refuses to flatten any
-whose remote has moved on the database's active branch:
-
-```
-  gt: refused — diverged from origin; pass --force-diverged
-  Refused to flatten: 1 (gt)
-```
-
-A pre-flight that could not run at all — an unreachable remote, a failed
-query — refuses too. Only a completed check licenses the flatten; "could not
-verify" and "verified safe" are different facts. `--force-diverged` skips the
-check, and a refusal exits non-zero with the rest of the maintenance run
-(backup, reap, gc) still complete.
-
-The check runs twice: once while building the plan, and again immediately
-before each flatten. Backup and reap run in between and can take minutes, and
-on the daemon's unattended `--force` path there is no operator re-reading the
-plan to catch a remote that moved during that window — so the second check,
-not the first, is what actually licenses the flatten.
+**Flattening does not check a remote.** Before ADR 0002, `gt maintain` fetched
+each database's Dolt remote and refused to flatten one whose remote had moved
+on, because the force-push after a flatten would have deleted the remote-only
+commits. There is no remote and no push now, so the pre-flight is gone.
+`--force-diverged` still parses, hidden and deprecated, and does nothing.
 
 Note the consequence for an unpushed flatten: the remote keeps pointing at
 pre-flatten history, so the next run reports the database as diverged until
@@ -389,7 +367,7 @@ never flattens, never force-pushes and never restarts Dolt.
 Around each database's gc the patrol also:
 
 - takes the write side of the daemon's Dolt-task lock (non-blocking). The
-  daemon's own Dolt tasks (dolt_backup, dolt_remotes, wisp_reaper,
+  daemon's own Dolt tasks (dolt_backup, wisp_reaper,
   jsonl_git_backup, the compactor_dog cycle) take the read side and skip
   their tick with `<task>: skipped: gc in flight`; a task in flight makes the
   gc defer with `daemon Dolt task in flight`. Nothing blocks the select loop.
@@ -646,96 +624,101 @@ use cases like standalone Beads. This would give solo `bd` users a
 zero-config experience (no server to manage) while retaining Dolt's
 versioning capabilities.
 
-## Remote Push (Git Protocol)
+## No Dolt Remote Sync
 
-Gas Town pushes Dolt databases to GitHub remotes via `gt dolt sync`. These
-use git SSH protocol (`git+ssh://git@github.com/...`), not DoltHub's native
-protocol.
+Gas Town does not push, pull or fetch Dolt remotes (ADR 0002,
+`docs/adr/0002-no-dolt-remote-sync.md`). The daemon's `dolt_remotes` patrol,
+`gt dolt sync`, `gt dolt pull`, the DoltHub remote that `gt rig add` created,
+`gt maintain`'s remote-divergence pre-flight, and the fetch and push steps in
+the compactor-dog and dolt-archive plugins are all gone. Nothing syncs
+`refs/dolt/data` any more.
 
-### Git Remote Cache
+The backup is local: `dolt_backup` syncs each production database to a
+filesystem backup, a nightly filesystem copy of `~/gt/.dolt-data` (planned
+under epic gt-8z769) becomes the disaster-recovery copy, and the JSONL export
+committed to each repo is the human-readable current state.
 
-Dolt maintains a cache at `~/gt/.dolt-data/<db>/.dolt/git-remote-cache/` that
-stores git objects built from Dolt's internal format. Per the Dolt team
-(Dustin Brown, 2026-02-26):
+Why: a git-protocol remote kept a full second copy of history on disk
+(`.dolt/git-remote-cache`, 456 MB of the gt database's 775 MB on 2026-09-29),
+pushed on a timer, and turned every history rewrite into a force-push. The
+2026-09-19 divergence of gt from its remote was that mechanism. The operator
+has restored from a filesystem copy, never from the remote.
 
-- **The cache is necessary** — Dolt uses it to build git objects for push/pull
-- **Accumulates garbage** (orphaned refs) and is not cleaned up automatically
-- **Safe to delete** between pushes, but causes a full rebuild on next push
-  (beads: ~20 min rebuild, gastown: even longer)
-- **Orphaned refs** can be pruned without deleting the whole cache — better balance
-- **Grows over time** as the database grows — inherent to git-protocol remotes
+`gt doctor`'s `dolt-remote-leftovers` check warns while any of the old state is
+still on disk. It reads files only (`.dolt/repo_state.json`,
+`.dolt/git-remote-cache`, each routed `.beads/config.yaml`) and never connects
+to Dolt.
 
-**Guidance**: Do NOT routinely delete the cache. Prefer pruning orphaned refs.
-Full deletion should only be done when disk pressure is critical and a long
-rebuild is acceptable.
+### Removing Dolt remotes
 
-### Sync Procedure
+An operator procedure, run once per town, with the operator's approval. It
+writes to the live server, so the check above never runs it for you. The
+Dolt server stays up throughout.
 
-`gt dolt sync` is the operator-invoked, full-coverage push: it pushes every
-database with a configured remote, with optional `--gc` purge. It has two
-modes: when the Dolt server is running it pushes each database via
-`CALL DOLT_PUSH` over SQL (no downtime); when the server is down it falls back
-to `dolt push` per database directory, which requires the server stopped.
+1. List what is left:
 
-### Dolt Remotes Patrol
+   ```bash
+   gt doctor --check dolt-remote-leftovers
+   ```
 
-The daemon's `dolt_remotes` patrol (internal/daemon/dolt_remotes.go) keeps
-remotes current on a schedule without any operator action. Every interval it
-discovers the databases under the data dir that have a remote configured
-(`dolt_remotes` view), stages and commits pending changes, and runs
-`CALL DOLT_PUSH` over a live connection to the running Dolt SQL server — never
-a competing `dolt` CLI process against the on-disk data dir (gt-74gz).
+2. For each database the check names with a remote (`gt`, `be` on the
+   original town), look, remove, verify. `DOLT_REMOTE('remove', ...)` changes
+   repository state, not a table, so it makes no Dolt commit.
 
-It is opt-in: absent from, or `enabled: false` in, daemon.json, it does
-nothing — that default is locked in by `TestIsPatrolEnabled_DoltRemotes`.
-`gt init` / `gt up` fill in the block with `enabled: false`, so existing towns
-see no behavior change until they opt in:
+   ```bash
+   DB=gt   # then be
+   dq() { dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls "$@"; }
+   dq --use-db "$DB" sql -q "SELECT name, url FROM dolt_remotes"
+   dq --use-db "$DB" sql -q "CALL DOLT_REMOTE('remove', 'origin')"
+   dq --use-db "$DB" sql -q "SELECT COUNT(*) AS remotes FROM dolt_remotes"   # expect 0
+   ```
 
-```json
-"patrols": {
-  "dolt_remotes": {
-    "enabled": true,
-    "interval": "15m"
-  }
-}
-```
+3. Remove each database's `git-remote-cache`. The cache is only read or
+   written by a push or fetch, and there is no remote left to push to. Move
+   it out of the data directory first rather than deleting it in place, so a
+   mistake is a `mv` back:
 
-Omitted fields use code defaults (15m interval, branch `main`, remote
-auto-detected per database). Optional fields: `databases` (explicit list;
-empty = auto-discover), `remote` (push every listed database to this named
-remote instead of auto-detecting), `branch`. Databases whose names start with
-a test prefix (`test`, `beads_t`, `beads_pt`, `doctest_`) are refused — that
-is the guard against pushing orphan test databases to GitHub.
+   ```bash
+   TRASH=~/gt/.dolt-remote-cache-trash-$(date +%Y%m%d)
+   mkdir -p "$TRASH"
+   for DB in gt be; do
+     du -sh ~/gt/.dolt-data/$DB/.dolt/git-remote-cache
+     mv ~/gt/.dolt-data/$DB/.dolt/git-remote-cache "$TRASH/$DB"
+     test ! -e ~/gt/.dolt-data/$DB/.dolt/git-remote-cache && echo "$DB: cache gone"
+     du -sh ~/gt/.dolt-data/$DB/.dolt
+   done
+   gt dolt status          # server healthy, latency normal
+   bd list --limit 1       # from ~/gt/gastown: gt reads work
+   ```
 
-`gt dolt sync` remains the full-coverage escape hatch (all databases, optional
-`--gc`); the patrol is the scheduled one. Both run under the daemon's
-Dolt-task lock, so they skip their tick when the maintenance gc is in flight.
+   Delete `$TRASH` after a clean day.
 
-### Force Push
+4. Delete `sync.remote` from every `.beads/config.yaml` the check names.
+   The file is tracked in the rig's repository, so the change lands as a
+   commit on that repo; the mayor clone picks it up on its next
+   fast-forward. `bd` reads `sync.remote` when it decides where to push, so
+   leaving it invites a later `bd` to add the remote back.
 
-After data recovery (e.g., Clown Show #13), local and remote histories
-diverge. Use `gt dolt sync --force` for the first push to overwrite the
-remote with local state. Subsequent pushes should work without `--force`.
+   ```bash
+   grep -n '^sync.remote' ~/gt/*/mayor/rig/.beads/config.yaml ~/gt/.beads/config.yaml   # expect nothing
+   ```
 
-### Known Limitations
+5. Confirm: `gt doctor --check dolt-remote-leftovers` reports OK, and for
+   every database `SELECT COUNT(*) FROM dolt_remotes` is 0:
 
-- **Slow**: Git-protocol remotes are orders of magnitude slower than DoltHub
-  native remotes. A 71MB database takes ~90s; larger ones take 20+ minutes.
-- **Cache growth**: No automatic garbage collection. Orphan pruning TBD.
+   ```bash
+   dq() { dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls "$@"; }
+   dq sql -r csv -q "SHOW DATABASES" | tail -n +2 | grep -v -E '^(information_schema|mysql)$' |
+     while read -r DB; do
+       printf '%s ' "$DB"; dq --use-db "$DB" sql -r csv -q "SELECT COUNT(*) FROM dolt_remotes" </dev/null | tail -1
+     done   # expect every count to be 0
+   ```
 
-The old "server must be stopped during push" constraint applies only to
-`gt dolt sync`'s CLI fallback (server-down path). SQL-mode pushes — `sync`
-while the server runs and the `dolt_remotes` patrol — go through the running
-server and never take it down (gt-74gz).
+### DoltHub (Wasteland)
 
-### DoltHub Remotes (Planned)
-
-DoltHub's native protocol (`https://doltremoteapi.dolthub.com/...`) avoids
-the git-remote-cache entirely and is much faster. DoltHub-based federation
-is planned as part of the Wasteland commons — this would replace
-git-protocol remotes for the design and ledger planes. Migration would
-require DoltHub accounts and reconfiguring remotes with
-`dolt remote set-url`. Not currently in active development.
+The wasteland commands (`gt wl`) still fork and push the `wl-commons`
+database on DoltHub. That is the commons product, not beads sync, and it is
+unaffected by the above: it never touches the town's beads databases.
 
 ## File Layout
 

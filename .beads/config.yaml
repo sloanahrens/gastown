@@ -50,5 +50,3 @@ dolt.idle-timeout: "0"
 # reach the GitHub issue tracker. Disabling auto-export prevents silent
 # regressions when the bd binary is upgraded. (gt-b48)
 export.auto: "false"
-
-sync.remote: "git+https://github.com/sloanahrens/gastown.git"
