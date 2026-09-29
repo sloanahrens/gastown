@@ -242,9 +242,15 @@ test:
 	# The shell-script tests (test-makefile, ~130s one after another) run
 	# beside the Go suite instead of before it; their output is held and
 	# printed after it, and either failing fails the target (gt-22hdp.60).
+	# Both halves run in the background so the trap fires at once on INT or
+	# TERM (bash defers traps until a foreground child exits): it stops both,
+	# with their children, and removes the log. The shell suites use only stub
+	# tmux/dolt/gt in mktemp dirs, so they share no state with the Go suite.
 	@log=$$(mktemp -t gt-test-makefile); \
 	$(MAKE) --no-print-directory test-makefile >"$$log" 2>&1 & mk=$$!; \
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./...; go_rc=$$?; \
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./... & gt=$$!; \
+	trap 'pkill -TERM -P $$mk 2>/dev/null; pkill -TERM -P $$gt 2>/dev/null; kill $$mk $$gt 2>/dev/null; rm -f "$$log"; exit 130' INT TERM; \
+	wait $$gt; go_rc=$$?; \
 	wait $$mk; mk_rc=$$?; \
 	echo "=== test-makefile (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \
 	if [ $$mk_rc -ne 0 ]; then echo "test-makefile failed (exit $$mk_rc)" >&2; fi; \
