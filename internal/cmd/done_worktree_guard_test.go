@@ -11,6 +11,7 @@ import (
 )
 
 func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name     string
 		layout   string
@@ -54,7 +55,8 @@ func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			townRoot, repoRoot := setupDoneGuardWorktree(t, tt.layout, "shiny")
+			t.Parallel()
+			townRoot, repoRoot := newDoneGuardWorktree(t, tt.layout, "shiny")
 			cwd := repoRoot
 			if tt.subdir != "" {
 				cwd = filepath.Join(repoRoot, tt.subdir)
@@ -62,11 +64,11 @@ func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
 					t.Fatalf("mkdir subdir: %v", err)
 				}
 			}
-			setDoneGuardEnv(t, "gastown", "shiny", tt.gtRole)
+			env := doneGuardEnv(townRoot, "gastown", "shiny", tt.gtRole)
 
-			got, err := resolveDonePolecatWorktreeAt(cwd)
+			got, err := resolveDonePolecatWorktreeIn(cwd, envMap(env))
 			if err != nil {
-				t.Fatalf("resolveDonePolecatWorktreeAt: %v", err)
+				t.Fatalf("resolveDonePolecatWorktreeIn: %v", err)
 			}
 			if got.townRoot != townRoot {
 				t.Fatalf("townRoot = %q, want %q", got.townRoot, townRoot)
@@ -81,7 +83,23 @@ func TestResolveDonePolecatWorktreeAcceptsOwnWorktree(t *testing.T) {
 	}
 }
 
+// TestResolveDonePolecatWorktreeAtReadsTheProcessEnv: gt done calls
+// resolveDonePolecatWorktreeAt, which must read the session from the process
+// environment (the cases above hand resolveDonePolecatWorktreeIn a map).
+func TestResolveDonePolecatWorktreeAtReadsTheProcessEnv(t *testing.T) {
+	townRoot, repoRoot := setupDoneGuardWorktree(t, "nested", "shiny")
+	setDoneGuardEnv(t, "gastown", "shiny", "gastown/polecats/shiny")
+	if _, err := resolveDonePolecatWorktreeAt(repoRoot); err != nil {
+		t.Fatalf("resolveDonePolecatWorktreeAt with the session env set: %v", err)
+	}
+	t.Setenv("BD_ACTOR", "gastown/polecats/other")
+	if _, err := resolveDonePolecatWorktreeAt(repoRoot); err == nil {
+		t.Fatalf("resolveDonePolecatWorktreeAt accepted a BD_ACTOR for another polecat in %s", townRoot)
+	}
+}
+
 func TestResolveDonePolecatWorktreeRejectsUnsafePaths(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name   string
 		cwd    func(townRoot, ownRepo string) string
@@ -132,7 +150,8 @@ func TestResolveDonePolecatWorktreeRejectsUnsafePaths(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			townRoot, ownRepo := setupDoneGuardWorktree(t, "nested", "shiny")
+			t.Parallel()
+			townRoot, ownRepo := newDoneGuardWorktree(t, "nested", "shiny")
 			cwd := tt.cwd(townRoot, ownRepo)
 			if tt.gitDir {
 				initDoneGuardGitRepo(t, cwd)
@@ -141,17 +160,18 @@ func TestResolveDonePolecatWorktreeRejectsUnsafePaths(t *testing.T) {
 					t.Fatalf("mkdir cwd: %v", err)
 				}
 			}
-			setDoneGuardEnv(t, "gastown", "shiny", "gastown/polecats/shiny")
-			t.Setenv("GT_POLECAT_PATH", ownRepo)
+			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
+			env["GT_POLECAT_PATH"] = ownRepo
 
-			if _, err := resolveDonePolecatWorktreeAt(cwd); err == nil {
-				t.Fatalf("resolveDonePolecatWorktreeAt(%q) succeeded, want rejection", cwd)
+			if _, err := resolveDonePolecatWorktreeIn(cwd, envMap(env)); err == nil {
+				t.Fatalf("resolveDonePolecatWorktreeIn(%q) succeeded, want rejection", cwd)
 			}
 		})
 	}
 }
 
 func TestResolveDonePolecatWorktreeRejectsIdentityMismatch(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name    string
 		actor   string
@@ -176,34 +196,36 @@ func TestResolveDonePolecatWorktreeRejectsIdentityMismatch(t *testing.T) {
 		{name: "role traversal rig", actor: "gastown/polecats/shiny", gtRole: "../polecats/shiny", gtRig: "gastown", polecat: "shiny"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, repoRoot := setupDoneGuardWorktree(t, "nested", "shiny")
-			t.Setenv("BD_ACTOR", tt.actor)
-			t.Setenv("GT_ROLE", tt.gtRole)
-			t.Setenv("GT_RIG", tt.gtRig)
-			t.Setenv("GT_POLECAT", tt.polecat)
+			t.Parallel()
+			townRoot, repoRoot := newDoneGuardWorktree(t, "nested", "shiny")
+			env := map[string]string{"GT_TOWN_ROOT": townRoot, "GT_ROOT": townRoot,
+				"BD_ACTOR": tt.actor, "GT_ROLE": tt.gtRole, "GT_RIG": tt.gtRig, "GT_POLECAT": tt.polecat}
 
-			if _, err := resolveDonePolecatWorktreeAt(repoRoot); err == nil {
-				t.Fatal("resolveDonePolecatWorktreeAt succeeded, want identity rejection")
+			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env)); err == nil {
+				t.Fatal("resolveDonePolecatWorktreeIn succeeded, want identity rejection")
 			}
 		})
 	}
 }
 
 func TestResolveDonePolecatWorktreeRejectsTownRootMismatch(t *testing.T) {
+	t.Parallel()
 	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
 		t.Run(envName, func(t *testing.T) {
-			_, repoRoot := setupDoneGuardWorktree(t, "nested", "shiny")
-			setDoneGuardEnv(t, "gastown", "shiny", "gastown/polecats/shiny")
-			t.Setenv(envName, filepath.Join(t.TempDir(), "other-town"))
+			t.Parallel()
+			townRoot, repoRoot := newDoneGuardWorktree(t, "nested", "shiny")
+			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
+			env[envName] = filepath.Join(t.TempDir(), "other-town")
 
-			if _, err := resolveDonePolecatWorktreeAt(repoRoot); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
-				t.Fatalf("resolveDonePolecatWorktreeAt error = %v, want town root mismatch", err)
+			if _, err := resolveDonePolecatWorktreeIn(repoRoot, envMap(env)); err == nil || !strings.Contains(err.Error(), "town root mismatch") {
+				t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want town root mismatch", err)
 			}
 		})
 	}
 }
 
 func TestResolveDonePolecatWorktreeRejectsGitWorkTreeSpoof(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		envName string
 		value   func(repoRoot string) string
@@ -212,12 +234,13 @@ func TestResolveDonePolecatWorktreeRejectsGitWorkTreeSpoof(t *testing.T) {
 		{envName: "GIT_WORK_TREE", value: func(repoRoot string) string { return repoRoot }},
 	} {
 		t.Run(tt.envName, func(t *testing.T) {
-			townRoot, repoRoot := setupDoneGuardWorktree(t, "nested", "shiny")
-			setDoneGuardEnv(t, "gastown", "shiny", "gastown/polecats/shiny")
-			t.Setenv(tt.envName, tt.value(repoRoot))
+			t.Parallel()
+			townRoot, repoRoot := newDoneGuardWorktree(t, "nested", "shiny")
+			env := doneGuardEnv(townRoot, "gastown", "shiny", "gastown/polecats/shiny")
+			env[tt.envName] = tt.value(repoRoot)
 
-			if _, err := resolveDonePolecatWorktreeAt(townRoot); err == nil || !strings.Contains(err.Error(), "unset "+tt.envName) {
-				t.Fatalf("resolveDonePolecatWorktreeAt error = %v, want git env override rejection", err)
+			if _, err := resolveDonePolecatWorktreeIn(townRoot, envMap(env)); err == nil || !strings.Contains(err.Error(), "unset "+tt.envName) {
+				t.Fatalf("resolveDonePolecatWorktreeIn error = %v, want git env override rejection", err)
 			}
 		})
 	}
@@ -344,9 +367,17 @@ func TestPersistentPreRunDoneRejectsBeforeRegistryFallback(t *testing.T) {
 
 func setupDoneGuardWorktree(t *testing.T, layout, polecatName string) (string, string) {
 	t.Helper()
-	townRoot := t.TempDir()
+	townRoot, repoRoot := newDoneGuardWorktree(t, layout, polecatName)
 	t.Setenv("GT_TOWN_ROOT", townRoot)
 	t.Setenv("GT_ROOT", townRoot)
+	return townRoot, repoRoot
+}
+
+// newDoneGuardWorktree is setupDoneGuardWorktree without the process
+// environment: the session's variables go in doneGuardEnv.
+func newDoneGuardWorktree(t *testing.T, layout, polecatName string) (string, string) {
+	t.Helper()
+	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
 	}
@@ -371,6 +402,20 @@ func initDoneGuardGitRepo(t *testing.T, dir string) {
 	cmd := exec.Command("git", "init", dir)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init %s: %v\n%s", dir, err, output)
+	}
+}
+
+// doneGuardEnv is the environment of polecat rig/polecatName's session in
+// townRoot, as setupDoneGuardWorktree and setDoneGuardEnv set it.
+func doneGuardEnv(townRoot, rig, polecatName, gtRole string) map[string]string {
+	return map[string]string{
+		"GT_TOWN_ROOT": townRoot,
+		"GT_ROOT":      townRoot,
+		"BD_ACTOR":     rig + "/polecats/" + polecatName,
+		"GT_ROLE":      gtRole,
+		"GT_RIG":       rig,
+		"GT_POLECAT":   polecatName,
+		"GT_SESSION":   "gt-" + polecatName,
 	}
 }
 
