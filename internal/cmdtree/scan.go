@@ -185,7 +185,7 @@ var tomlUnescaper = strings.NewReplacer(`\\`, `\`, `\n`, "\n", `\"`, `"`, `\t`, 
 // ScanTOMLMarkdown scans a formula: TOML whose string values are markdown.
 // Single-line strings carry their newlines as \n escapes, so each physical
 // line is un-escaped and its logical lines all report the physical line.
-// Keys and tables are recognised only outside multiline strings, where a
+// Keys and tables are recognized only outside multiline strings, where a
 // shell line such as fail=0 would otherwise read as one.
 func ScanTOMLMarkdown(file, text string) []Ref {
 	var md markdown
@@ -400,30 +400,33 @@ func scannerFor(rel string) scanFunc {
 }
 
 // ScanRepo walks root and returns every invocation in the lint's inputs, in
-// walk (lexical) order. Ref.File is relative to root.
+// walk (lexical) order. Ref.File is relative to root. Walking and reading go
+// through an os.Root, so nothing outside root is read.
 func ScanRepo(root string) ([]Ref, error) {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	fsys := r.FS()
+
 	var refs []Ref
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(fsys, ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			switch d.Name() {
 			case ".git", "testdata", "node_modules", "vendor":
-				return filepath.SkipDir
+				return fs.SkipDir
 			}
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
 		scan := scannerFor(rel)
 		if scan == nil {
 			return nil
 		}
-		src, err := os.ReadFile(path)
+		src, err := fs.ReadFile(fsys, rel)
 		if err != nil {
 			return err
 		}

@@ -23,7 +23,7 @@ type Node struct {
 	Children map[string]*Node
 	// TakesArgs reports whether the command accepts positional arguments.
 	// When false, a plain word after it can only be a subcommand, so an
-	// unrecognised one is a violation.
+	// unrecognized one is a violation.
 	TakesArgs bool
 }
 
