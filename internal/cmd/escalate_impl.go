@@ -448,11 +448,14 @@ func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string
 }
 
 // closeDeliveryBeads closes an escalation's delivery beads ids and returns
-// how many closed. When bd refuses some, the error names them and the count
-// is only the ones that closed.
+// how many closed, forcing past the recipients' assignee fence. The count is
+// only the beads that closed.
 func closeDeliveryBeads(bd beads.Client, ids []string, escalationID, closedBy string) (int, error) {
 	reason := fmt.Sprintf("escalation %s closed by %s", escalationID, closedBy)
-	err := bd.CloseWithReason(reason, ids...)
+	// Forced: each delivery bead is assigned to its recipient, and bd
+	// refuses an unforced close of another actor's issue. These beads are
+	// gastown's delivery bookkeeping, not work.
+	err := bd.ForceCloseWithReason(reason, ids...)
 	closed := len(beads.ClosedIDs(ids, err))
 	if err != nil {
 		return closed, fmt.Errorf("closing %d delivery bead(s): %w", len(ids), err)
