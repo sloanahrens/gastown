@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -714,29 +715,27 @@ func TestHandoffPolecatEnvCheck(t *testing.T) {
 }
 
 func TestWarnHandoffGitStatus(t *testing.T) {
-	origCwd, _ := os.Getwd()
-	t.Cleanup(func() { os.Chdir(origCwd) })
+	t.Parallel()
+	warn := func(dir string) string {
+		var buf bytes.Buffer
+		warnHandoffGitStatusIn(&buf, dir)
+		return buf.String()
+	}
 
 	t.Run("no warning on clean repo", func(t *testing.T) {
+		t.Parallel()
 		dir := makeTestGitRepo(t)
-		os.Chdir(dir)
-		t.Cleanup(func() { os.Chdir(origCwd) })
-		output := captureStderr(t, func() {
-			warnHandoffGitStatus()
-		})
+		output := warn(dir)
 		if output != "" {
 			t.Errorf("expected no output for clean repo, got: %q", output)
 		}
 	})
 
 	t.Run("warns on untracked file", func(t *testing.T) {
+		t.Parallel()
 		dir := makeTestGitRepo(t)
 		os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("x"), 0644)
-		os.Chdir(dir)
-		t.Cleanup(func() { os.Chdir(origCwd) })
-		output := captureStderr(t, func() {
-			warnHandoffGitStatus()
-		})
+		output := warn(dir)
 		if !strings.Contains(output, "uncommitted work") {
 			t.Errorf("expected warning about uncommitted work, got: %q", output)
 		}
@@ -746,6 +745,7 @@ func TestWarnHandoffGitStatus(t *testing.T) {
 	})
 
 	t.Run("warns on modified tracked file", func(t *testing.T) {
+		t.Parallel()
 		dir := makeTestGitRepo(t)
 		// Create and commit a file
 		fpath := filepath.Join(dir, "tracked.txt")
@@ -754,11 +754,7 @@ func TestWarnHandoffGitStatus(t *testing.T) {
 		exec.Command("git", "-C", dir, "commit", "-m", "add file").Run()
 		// Now modify it
 		os.WriteFile(fpath, []byte("modified"), 0644)
-		os.Chdir(dir)
-		t.Cleanup(func() { os.Chdir(origCwd) })
-		output := captureStderr(t, func() {
-			warnHandoffGitStatus()
-		})
+		output := warn(dir)
 		if !strings.Contains(output, "uncommitted work") {
 			t.Errorf("expected warning about uncommitted work, got: %q", output)
 		}
@@ -768,44 +764,35 @@ func TestWarnHandoffGitStatus(t *testing.T) {
 	})
 
 	t.Run("no warning for .beads-only changes", func(t *testing.T) {
+		t.Parallel()
 		dir := makeTestGitRepo(t)
 		// Only .beads/ untracked files — should be clean (excluded)
 		os.MkdirAll(filepath.Join(dir, ".beads"), 0755)
 		os.WriteFile(filepath.Join(dir, ".beads", "somefile.db"), []byte("db"), 0644)
-		os.Chdir(dir)
-		t.Cleanup(func() { os.Chdir(origCwd) })
-		output := captureStderr(t, func() {
-			warnHandoffGitStatus()
-		})
+		output := warn(dir)
 		if output != "" {
 			t.Errorf("expected no output for .beads-only changes, got: %q", output)
 		}
 	})
 
 	t.Run("no warning outside git repo", func(t *testing.T) {
-		os.Chdir(os.TempDir())
-		output := captureStderr(t, func() {
-			warnHandoffGitStatus()
-		})
+		t.Parallel()
+		output := warn(t.TempDir())
 		if output != "" {
 			t.Errorf("expected no output outside git repo, got: %q", output)
 		}
 	})
 
 	t.Run("no-git-check flag suppresses warning", func(t *testing.T) {
+		t.Parallel()
 		dir := makeTestGitRepo(t)
 		os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("x"), 0644)
-		os.Chdir(dir)
-		t.Cleanup(func() { os.Chdir(origCwd) })
-		// Simulate --no-git-check by setting the flag
-		origFlag := handoffNoGitCheck
-		handoffNoGitCheck = true
-		defer func() { handoffNoGitCheck = origFlag }()
-		output := captureStderr(t, func() {
-			if !handoffNoGitCheck {
-				warnHandoffGitStatus()
-			}
-		})
+		// Simulate --no-git-check: runHandoff warns only when it is unset.
+		noGitCheck := true
+		output := ""
+		if !noGitCheck {
+			output = warn(dir)
+		}
 		if output != "" {
 			t.Errorf("expected no output with --no-git-check, got: %q", output)
 		}
@@ -869,7 +856,9 @@ func TestHandoffProcessNames(t *testing.T) {
 // TestCollectGitState verifies that collectGitState returns deterministic
 // workspace state from a git repo without shelling out to gt/bd. (GH#1996)
 func TestCollectGitState(t *testing.T) {
+	t.Parallel()
 	t.Run("returns_state_from_git_repo", func(t *testing.T) {
+		t.Parallel()
 		// Create a temp git repo
 		tmpDir := t.TempDir()
 		cmds := [][]string{
@@ -905,10 +894,7 @@ func TestCollectGitState(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 
-		// Run collectGitState from the temp repo
-		t.Chdir(tmpDir)
-
-		state := collectGitState()
+		state := collectGitStateIn(tmpDir)
 
 		if state == "" {
 			t.Fatal("collectGitState() returned empty string for a git repo with changes")
@@ -925,10 +911,8 @@ func TestCollectGitState(t *testing.T) {
 	})
 
 	t.Run("returns_empty_outside_git_repo", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
-
-		state := collectGitState()
+		t.Parallel()
+		state := collectGitStateIn(t.TempDir())
 		if state != "" {
 			t.Errorf("expected empty string outside git repo, got: %s", state)
 		}
