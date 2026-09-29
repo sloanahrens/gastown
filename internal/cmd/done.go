@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
@@ -284,6 +285,17 @@ const preVerificationGateTimeout = 10 * time.Minute
 type preVerifyBudget struct {
 	gateTimeout     time.Duration
 	lintRetryDelays []time.Duration // nil means lintlock.RetryDelay
+	// clock is the clock gateTimeout runs on; nil means the real clock. A
+	// test sets a fake one to prove what is and is not charged to a gate's
+	// budget without depending on how fast a real process starts (gt-22hdp.49).
+	clock clockwork.Clock
+}
+
+func (b preVerifyBudget) clk() clockwork.Clock {
+	if b.clock == nil {
+		return clockwork.NewRealClock()
+	}
+	return b.clock
 }
 
 // defaultPreVerifyBudget is the budget gt done's pre-verification runs under.
@@ -319,7 +331,14 @@ func runPreVerificationGate(ctx context.Context, worktree, script string, logFil
 	// gone (gt-ypkc).
 	util.SetProcessGroup(cmd)
 	err := cmd.Run()
-	return preVerificationGateOutcome{err: err, timedOut: ctx.Err() == context.DeadlineExceeded}
+	// Check Done before Err: a fake-clock context's Err blocks until it is done.
+	timedOut := false
+	select {
+	case <-ctx.Done():
+		timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+	default:
+	}
+	return preVerificationGateOutcome{err: err, timedOut: timedOut}
 }
 
 // runPreVerificationGateHeld runs one pre-verification gate under its own
@@ -336,7 +355,7 @@ func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile 
 		}
 		defer release()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), budget.gateTimeout)
+	ctx, cancel := clockwork.WithTimeout(context.Background(), budget.clk(), budget.gateTimeout)
 	defer cancel()
 	var got preVerificationGateOutcome
 	runGate := func() lintlock.Attempt {

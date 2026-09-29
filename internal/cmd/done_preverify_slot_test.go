@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -24,10 +26,8 @@ type fakeSlotRecorder struct {
 	held     bool
 	releases int
 
-	// wait is how long acquire blocks before granting; err, when set, is
-	// returned instead of a grant.
-	wait time.Duration
-	err  error
+	// err, when set, is returned instead of a grant.
+	err error
 }
 
 func (f *fakeSlotRecorder) isHeld() bool {
@@ -43,14 +43,11 @@ func fakePreVerifySlot(t *testing.T) *fakeSlotRecorder {
 		townRoot: t.TempDir(),
 		role:     "testrig/testcat",
 		acquire: func(townRoot, role string, timeout time.Duration, _ *os.File) (func(), time.Duration, error) {
-			if f.wait > 0 {
-				time.Sleep(f.wait)
-			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.acquires = append(f.acquires, fmt.Sprintf("%s|%s|%s", townRoot, role, timeout))
 			if f.err != nil {
-				return nil, f.wait, f.err
+				return nil, 0, f.err
 			}
 			f.held = true
 			return func() {
@@ -58,7 +55,7 @@ func fakePreVerifySlot(t *testing.T) *fakeSlotRecorder {
 				defer f.mu.Unlock()
 				f.held = false
 				f.releases++
-			}, f.wait, nil
+			}, 0, nil
 		},
 	}
 	return f
@@ -252,22 +249,42 @@ func TestRunPreVerificationGates_SlotUnavailableDoesNotRunSuite(t *testing.T) {
 	}
 }
 
-// The slot wait is not charged to the gate's own run budget.
+// The slot wait is not charged to the gate's own run budget (gt-22hdp.49).
+// The budget runs on a fake clock, and the slot's wait is a jump of that
+// clock well past the budget. While the slot is being waited on, no budget
+// timer may be armed on the clock; a budget started before the wait would
+// also expire in that jump and the gate would report a timeout. A budget
+// started after the wait never sees the fake clock move, however long the
+// real test command takes to spawn on a loaded host.
 func TestRunPreVerificationGates_SlotWaitNotChargedToGateBudget(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC))
 	budget := defaultPreVerifyBudget()
-	budget.gateTimeout = 300 * time.Millisecond
+	budget.clock = clk
 	fake := fakePreVerifySlot(t)
-	fake.wait = 500 * time.Millisecond
+	inner := fake.slot.acquire
+	fake.slot.acquire = func(townRoot, role string, timeout time.Duration, logFile *os.File) (func(), time.Duration, error) {
+		// With an already-done context, BlockUntilContext returns nil only
+		// when a timer is already waiting on the clock: no race to lose.
+		noWait, stop := context.WithCancel(context.Background())
+		stop()
+		if clk.BlockUntilContext(noWait, 1) == nil {
+			t.Error("a gate budget timer was armed while the slot was waited on: the wait is charged to the budget")
+		}
+		clk.Advance(2 * budget.gateTimeout)
+		release, _, err := inner(townRoot, role, timeout, logFile)
+		return release, 2 * budget.gateTimeout, err
+	}
 
 	result, err := runPreVerificationGatesWithBudget(dir, &config.MergeQueueConfig{TestCommand: "true"}, fake.slot, budget)
 	if err != nil {
 		t.Fatalf("runPreVerificationGates: %v", err)
 	}
 	if !result.success {
-		t.Fatalf("success = false (%+v): the slot wait ate the gate's budget", result)
+		log, _ := os.ReadFile(result.logPath)
+		t.Fatalf("success = false (%+v): the slot wait ate the gate's budget\n%s", result, log)
 	}
 }
 
