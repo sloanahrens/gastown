@@ -29,6 +29,9 @@ type fixtureTemplate struct {
 	dir  string // the template's root, under the sandbox home
 	meta any    // what the build returned beside the tree, paths relative to dir
 	err  error
+	// pathRecords lists the files and symlinks under dir, relative to it,
+	// that hold dir's absolute path: what a clone of the tree has to rewrite.
+	pathRecords []string
 }
 
 var fixtureTemplates sync.Map // key -> *fixtureTemplate
@@ -67,16 +70,119 @@ func cachedGitFixture[M any](t *testing.T, key string, build func(dir string) (M
 			tmpl.err = fmt.Errorf("git fixture %q: %w", key, err)
 			return
 		}
-		tmpl.dir, tmpl.meta, tmpl.err = dir, m, nil
+		records, err := fixturePathRecords(dir)
+		if err != nil {
+			tmpl.err = fmt.Errorf("git fixture %q: %w", key, err)
+			return
+		}
+		tmpl.dir, tmpl.meta, tmpl.pathRecords, tmpl.err = dir, m, records, nil
 	})
 	if tmpl.err != nil {
 		t.Fatal(tmpl.err)
 	}
-	dst := t.TempDir()
-	if err := copyFixtureTree(tmpl.dir, dst); err != nil {
+	dst, err := cloneFixtureTree(tmpl, t.TempDir())
+	if err != nil {
 		t.Fatalf("copying git fixture %q: %v", key, err)
 	}
 	return dst, rewriteFixtureMeta(tmpl.meta, tmpl.dir, dst).(M)
+}
+
+// cloneFixtureTree gives the caller its own copy of tmpl's tree inside
+// parent and returns the copy's root. Where the filesystem can clone a whole
+// tree in one call (APFS clonefile), it does that and rewrites only the
+// template's recorded path files; the template's files and directories then
+// cost this package one syscall instead of an open, read and write each. The
+// file-by-file copy, into parent itself, is the fallback everywhere else.
+func cloneFixtureTree(tmpl *fixtureTemplate, parent string) (string, error) {
+	dst := filepath.Join(parent, "fixture")
+	cloned, err := cloneTree(tmpl.dir, dst)
+	if err != nil {
+		return "", err
+	}
+	if !cloned {
+		if err := copyFixtureTree(tmpl.dir, parent); err != nil {
+			return "", err
+		}
+		return parent, nil
+	}
+	oldRoot, newRoot := []byte(tmpl.dir), []byte(dst)
+	for _, rel := range tmpl.pathRecords {
+		path := filepath.Join(dst, rel)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return "", err
+			}
+			if err := os.Remove(path); err != nil {
+				return "", err
+			}
+			if err := os.Symlink(string(bytes.ReplaceAll([]byte(link), oldRoot, newRoot)), path); err != nil {
+				return "", err
+			}
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		// Write through a fresh file: the clone shares its blocks with the
+		// template until written, and a rename keeps the template's copy
+		// untouched even if the write fails part way.
+		tmp := path + ".fixture-rewrite"
+		if err := os.WriteFile(tmp, bytes.ReplaceAll(data, oldRoot, newRoot), info.Mode().Perm()); err != nil {
+			return "", err
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return "", err
+		}
+	}
+	return dst, nil
+}
+
+// fixturePathRecords lists, relative to root, the symlinks and the git
+// metadata files (fixtureFileRecordsPath) under root that contain root's
+// absolute path.
+func fixturePathRecords(root string) ([]string, error) {
+	var records []string
+	needle := []byte(root)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(link, root) {
+				records = append(records, rel)
+			}
+			return nil
+		}
+		if !fixtureFileRecordsPath(path) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(data, needle) {
+			records = append(records, rel)
+		}
+		return nil
+	})
+	return records, err
 }
 
 // copyFixtureTree copies src into dst (which exists), keeping file modes and
