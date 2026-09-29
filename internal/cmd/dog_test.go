@@ -612,6 +612,7 @@ func TestDogClear_NotFound(t *testing.T) {
 // =============================================================================
 
 func TestSplitPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want []string

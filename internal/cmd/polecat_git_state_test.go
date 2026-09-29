@@ -238,7 +238,14 @@ func TestGetGitStateDoesNotRelaxIndexSkewForNukeSafety(t *testing.T) {
 
 func setupGitStateRemoteRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	return cachedGitFixtureStrings(t, "setupGitStateRemoteRepo", func(dir string) []string {
+		return []string{buildSetupGitStateRemoteRepo(t, dir)}
+	})[0]
+}
+
+// buildSetupGitStateRemoteRepo makes setupGitStateRemoteRepo's repos under dir.
+func buildSetupGitStateRemoteRepo(t *testing.T, dir string) string {
+	t.Helper()
 	remote := filepath.Join(dir, "remote.git")
 	repo := filepath.Join(dir, "repo")
 	runGitCmd(t, "", "init", "--bare", remote)

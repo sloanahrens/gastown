@@ -13,6 +13,7 @@ import (
 // silently writing a marker nothing reads. Only the polecat zombie/stall
 // paths and the stuck-agent dog's polecat loop consult the marker.
 func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
+	t.Parallel()
 	if err := checkPauseGated(session.RolePolecat); err != nil {
 		t.Errorf("checkPauseGated(polecat) = %v, want nil", err)
 	}
@@ -40,6 +41,7 @@ func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
 // separate pause command that predates this one — the refusal should point
 // there rather than leaving the operator to guess.
 func TestCheckPauseGatedDeaconHintsAtExistingCommand(t *testing.T) {
+	t.Parallel()
 	err := checkPauseGated(session.RoleDeacon)
 	if err == nil {
 		t.Fatal("checkPauseGated(deacon) = nil, want a refusal")
@@ -69,6 +71,7 @@ var agentPauseAddresses = []string{
 // reads to show that agent's pause. They parse independently, so a divergence
 // means the operator freezes an agent and the status line never says so.
 func TestPauseTargetCoordinatesMatchStatus(t *testing.T) {
+	t.Parallel()
 	for _, address := range agentPauseAddresses {
 		t.Run(address, func(t *testing.T) {
 			target, err := parseAgentAddr(address)
@@ -95,6 +98,7 @@ func TestPauseTargetCoordinatesMatchStatus(t *testing.T) {
 // still parse back to the same agent so the "resume with" line is
 // copy-pasteable.
 func TestPauseDisplayAddressIsCanonical(t *testing.T) {
+	t.Parallel()
 	const townRoot = "/town"
 	for _, address := range agentPauseAddresses {
 		t.Run(address, func(t *testing.T) {

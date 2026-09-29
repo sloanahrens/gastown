@@ -118,6 +118,7 @@ func TestContainerSuiteTarget(t *testing.T) {
 // the set a "go test ." from that directory reaches is the set "go test
 // ./<that dir>" reaches.
 func TestCwdContainerPackages(t *testing.T) {
+	t.Parallel()
 	root := fakeModule(t, "gastown/refinery/rig")
 	tests := []struct {
 		name   string
@@ -181,6 +182,7 @@ func fakeModule(t *testing.T, worktreeRel string) string {
 // have carried. Every layout is exercised, because a resolution anchored to
 // the checkout's directory name answers correctly in exactly one of them.
 func TestCwdPackagePath(t *testing.T) {
+	t.Parallel()
 	for _, layout := range worktreeLayouts {
 		t.Run(layout, func(t *testing.T) {
 			root := fakeModule(t, layout)
@@ -215,6 +217,7 @@ func TestCwdPackagePath(t *testing.T) {
 // plugins/dolt-snapshots submodule in this repo) ends the walk for the same
 // reason.
 func TestCwdPackagePath_OutsideModule(t *testing.T) {
+	t.Parallel()
 	t.Run("no go.mod anywhere", func(t *testing.T) {
 		if pkg, ok := cwdPackagePath(t.TempDir()); ok {
 			t.Errorf("cwdPackagePath(%s) = (%q, true), want ok false outside any module", t.TempDir(), pkg)
@@ -281,6 +284,7 @@ func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
 // test ./<that dir>" names, so cd-ing into the package is not a way around
 // the rule.
 func TestCwdHeavyPackages(t *testing.T) {
+	t.Parallel()
 	root := fakeModule(t, "gastown/refinery/rig")
 	tests := []struct {
 		name   string
@@ -353,6 +357,7 @@ func TestEvaluatePolecatTestScope_CwdStyle(t *testing.T) {
 // matches the name "gastown" only answers in a worktree that happens to carry
 // it.
 func TestCwdPackagePath_ActualCheckout(t *testing.T) {
+	t.Parallel()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)

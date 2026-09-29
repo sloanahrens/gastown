@@ -12,6 +12,7 @@ import (
 // With real work under the checkpoints, the fold is an amend: it keeps that
 // commit's message as the tip's.
 func TestAutoSaveTipFixCommand_FoldsUnderRealWork(t *testing.T) {
+	t.Parallel()
 	got := autoSaveTipFixCommand(checkpoint.AutoSaveTip{Subject: checkpoint.WIPCommitPrefix, AutoSave: true, Trailing: 2, Ahead: 3})
 	want := "git reset --soft HEAD~2 && git commit --amend --no-edit"
 	if got != want {
@@ -23,6 +24,7 @@ func TestAutoSaveTipFixCommand_FoldsUnderRealWork(t *testing.T) {
 // so the polecat must supply a message — amending the base commit would
 // rewrite work the branch does not own.
 func TestAutoSaveTipFixCommand_WholeBranchGenerated(t *testing.T) {
+	t.Parallel()
 	got := autoSaveTipFixCommand(checkpoint.AutoSaveTip{Subject: checkpoint.WIPCommitPrefix, AutoSave: true, Trailing: 2, Ahead: 2})
 	if strings.Contains(got, "--amend") {
 		t.Errorf("expected no amend when every commit is machine-generated, got %q", got)
@@ -35,6 +37,7 @@ func TestAutoSaveTipFixCommand_WholeBranchGenerated(t *testing.T) {
 // The gt-iki6 truth table: a machine-generated tip is only submittable when
 // the squash step can rewrite it, which it cannot once origin has the branch.
 func TestAutoSaveTipGate(t *testing.T) {
+	t.Parallel()
 	generated := checkpoint.AutoSaveTip{Subject: checkpoint.WIPCommitPrefix, AutoSave: true, Trailing: 1, Ahead: 2}
 	real := checkpoint.AutoSaveTip{Subject: "fix: finish the feature", Trailing: 0, Ahead: 2}
 
@@ -67,6 +70,7 @@ func TestAutoSaveTipGate(t *testing.T) {
 // commit is refused, the exact command in the refusal clears it, and the branch
 // is then submittable as a single real commit.
 func TestAutoSaveTipGate_RefusalCommandClearsTheTip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "work")
 	testRunGit(t, dir, "init", "--initial-branch", "main", repo)
@@ -119,6 +123,7 @@ func TestAutoSaveTipGate_RefusalCommandClearsTheTip(t *testing.T) {
 // Amending a merge commit would bury the branch's own message under the
 // merge's subject, so the merge case gets the explicit-message form instead.
 func TestAutoSaveTipFixCommand_MergeBeneathTheRun(t *testing.T) {
+	t.Parallel()
 	got := autoSaveTipFixCommand(checkpoint.AutoSaveTip{
 		Subject: checkpoint.WIPCommitPrefix, AutoSave: true, Trailing: 1, Ahead: 2, BeneathIsMerge: true,
 	})
@@ -133,6 +138,7 @@ func TestAutoSaveTipFixCommand_MergeBeneathTheRun(t *testing.T) {
 // A squash that died after its soft reset leaves the branch with no commits;
 // the refusal has to say so rather than describe a tip that no longer exists.
 func TestAutoSaveSquashResetError_NamesTheResetState(t *testing.T) {
+	t.Parallel()
 	err := autoSaveSquashResetError("polecat/emerald/gt-iki6+mucl8bqw", "origin/main", errors.New("index.lock: File exists"))
 	if err == nil {
 		t.Fatal("expected a refusal")
@@ -152,6 +158,7 @@ func TestAutoSaveSquashResetError_NamesTheResetState(t *testing.T) {
 }
 
 func TestAutoSaveTipUninspectableError_NamesTheBranchAndTheReason(t *testing.T) {
+	t.Parallel()
 	err := autoSaveTipUninspectableError("polecat/emerald/gt-iki6+mucl8bqw", "prior push checkpoint exists", errors.New("exit status 128"))
 	if err == nil {
 		t.Fatal("expected a refusal")
@@ -171,6 +178,7 @@ func TestAutoSaveTipUninspectableError_NamesTheBranchAndTheReason(t *testing.T) 
 }
 
 func TestAutoSaveTipRefusalError_NamesTheTipAndTheFix(t *testing.T) {
+	t.Parallel()
 	tip := checkpoint.AutoSaveTip{Subject: checkpoint.WIPCommitPrefix, AutoSave: true, Trailing: 1, Ahead: 2}
 	err := autoSaveTipRefusalError(tip, "polecat/diamond/gt-zd7b+mucl8bqw", "origin already has this branch (origin/x already exists on origin from an earlier dispatch), so squashing it here would need a force-push.")
 	if err == nil {

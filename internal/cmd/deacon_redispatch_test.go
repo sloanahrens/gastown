@@ -182,6 +182,7 @@ func hasCallContaining(calls []string, fragments ...string) bool {
 // all and a store that answers with no such bead reach the same hold by
 // different reasons.
 func TestOpenRedispatchHoldLookup_FailsClosedOnUnreadableBead(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
@@ -204,6 +205,7 @@ func TestOpenRedispatchHoldLookup_FailsClosedOnUnreadableBead(t *testing.T) {
 // database, and every bead read from it came back "no record", so a held bead
 // and an unheld one got the same answer (gt-22hdp.21).
 func TestOpenRedispatchHoldLookup_ReadsTheTownDatabase(t *testing.T) {
+	t.Parallel()
 	requireBd(t)
 	townRoot, b := setupPatrolTestDB(t)
 

@@ -3237,7 +3237,7 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Println("Pruning remote polecat branches...")
 
-		remoteResult, remoteErr := pruneRemotePolecatBranches(managerStateLookup(mgr), repoGit, polecatPruneDryRun)
+		remoteResult, remoteErr := pruneRemotePolecatBranches(os.Stdout, managerStateLookup(mgr), remotePolecatBranchHasOpenPR, repoGit, polecatPruneDryRun)
 		if remoteErr != nil {
 			return remoteErr
 		}
@@ -3335,8 +3335,8 @@ func remotePolecatBranchEligibleForPrune(lookup polecatStateLookup, branch strin
 // pruning at all — the same outcome gt mq post-merge's branch delete reached
 // when the guard was introduced there (gas-fk4).
 //
-// It is a package-level var, like the prune flags above it, because this
-// package's prune tests drive real local file remotes: the lookup resolves the
+// It is a package-level var, like the prune flags above it, because
+// runPolecatPrune's tests drive real local file remotes: the lookup resolves the
 // repo through the GitHub CLI, so against a local remote it reports *every*
 // branch as PR-protected and would mask every other pruning rule under test.
 var remotePolecatBranchHasOpenPR = func(repoGit *git.Git, branch, headSHA string) bool {
@@ -3352,7 +3352,10 @@ type remotePolecatPruneResult struct {
 	OpenPR int // left in place because an open pull request still points at them
 }
 
-func pruneRemotePolecatBranches(lookup polecatStateLookup, repoGit *git.Git, dryRun bool) (remotePolecatPruneResult, error) {
+// pruneRemotePolecatBranches deletes (or on a dry run lists) the remote
+// polecat branches that are safe to prune, reporting each to out. hasOpenPR
+// is the open-PR guard; runPolecatPrune passes remotePolecatBranchHasOpenPR.
+func pruneRemotePolecatBranches(out io.Writer, lookup polecatStateLookup, hasOpenPR func(repoGit *git.Git, branch, headSHA string) bool, repoGit *git.Git, dryRun bool) (remotePolecatPruneResult, error) {
 	var result remotePolecatPruneResult
 	defaultBranch := repoGit.RemoteDefaultBranch()
 	target := repoGit.CleanDefaultBranchBaseRef("origin", defaultBranch)
@@ -3386,22 +3389,22 @@ func pruneRemotePolecatBranches(lookup polecatStateLookup, repoGit *git.Git, dry
 		// audit trail (gas-fk4). The guard sits after every other gate, as it
 		// does in gt mq post-merge's cleanupMQPostMergeBranch, so only branches
 		// this pass would otherwise delete are reported as PR-protected.
-		if remotePolecatBranchHasOpenPR(repoGit, branch, ref.Hash) {
-			fmt.Printf("  %s Skipping remote branch %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), branch)
+		if hasOpenPR(repoGit, branch, ref.Hash) {
+			fmt.Fprintf(out, "  %s Skipping remote branch %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), branch)
 			result.OpenPR++
 			continue
 		}
 
 		if dryRun {
-			fmt.Printf("  Would delete remote: %s\n", style.Dim.Render(branch))
+			fmt.Fprintf(out, "  Would delete remote: %s\n", style.Dim.Render(branch))
 			result.Pruned++
 			continue
 		}
 		if delErr := repoGit.DeleteRemoteBranchIfAt("origin", branch, ref.Hash); delErr != nil {
-			fmt.Printf("  %s remote %s: %v\n", style.Warning.Render("⚠"), branch, delErr)
+			fmt.Fprintf(out, "  %s remote %s: %v\n", style.Warning.Render("⚠"), branch, delErr)
 			continue
 		}
-		fmt.Printf("  %s deleted remote %s\n", style.Success.Render("✓"), branch)
+		fmt.Fprintf(out, "  %s deleted remote %s\n", style.Success.Render("✓"), branch)
 		result.Pruned++
 	}
 

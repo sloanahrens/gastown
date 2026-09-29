@@ -78,6 +78,7 @@ func writeGoMod(t *testing.T, dir string, withTestcontainers bool) {
 }
 
 func TestResolvePreVerifyTestSlot(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		gomod string // "", "plain", "tc"
@@ -118,6 +119,7 @@ func TestResolvePreVerifyTestSlot(t *testing.T) {
 // --pre-verified test gate runs the rig's container-backed suite, so it must
 // hold a container-gate slot for exactly the test gate's run.
 func TestRunPreVerificationGates_ContainerSuiteHoldsSlot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	fake := fakePreVerifySlot(t)
@@ -178,6 +180,7 @@ func TestRunPreVerificationGates_ContainerSuiteHoldsSlot(t *testing.T) {
 
 // A failing test run still releases its slot.
 func TestRunPreVerificationGates_FailingSuiteReleasesSlot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	fake := fakePreVerifySlot(t)
@@ -197,6 +200,7 @@ func TestRunPreVerificationGates_FailingSuiteReleasesSlot(t *testing.T) {
 // Behaviour is unchanged for a rig whose suite cannot start containers: no
 // slot is taken at all.
 func TestRunPreVerificationGates_NoContainerSuiteTakesNoSlot(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		cmd  string
@@ -229,6 +233,7 @@ func TestRunPreVerificationGates_NoContainerSuiteTakesNoSlot(t *testing.T) {
 // an error (no stamp), never a test failure, and the test command is not run
 // unwrapped.
 func TestRunPreVerificationGates_SlotUnavailableDoesNotRunSuite(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	marker := filepath.Join(dir, "ran")
@@ -249,13 +254,15 @@ func TestRunPreVerificationGates_SlotUnavailableDoesNotRunSuite(t *testing.T) {
 
 // The slot wait is not charged to the gate's own run budget.
 func TestRunPreVerificationGates_SlotWaitNotChargedToGateBudget(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
-	stubPreVerificationGateTimeout(t, 300*time.Millisecond)
+	budget := defaultPreVerifyBudget()
+	budget.gateTimeout = 300 * time.Millisecond
 	fake := fakePreVerifySlot(t)
 	fake.wait = 500 * time.Millisecond
 
-	result, err := runPreVerificationGates(dir, &config.MergeQueueConfig{TestCommand: "true"}, fake.slot)
+	result, err := runPreVerificationGatesWithBudget(dir, &config.MergeQueueConfig{TestCommand: "true"}, fake.slot, budget)
 	if err != nil {
 		t.Fatalf("runPreVerificationGates: %v", err)
 	}
@@ -266,6 +273,7 @@ func TestRunPreVerificationGates_SlotWaitNotChargedToGateBudget(t *testing.T) {
 
 // Without a town root the gate refuses rather than guessing at a lock dir.
 func TestRunPreVerificationGates_NoTownRootRefuses(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	_, err := runPreVerificationGates(dir, &config.MergeQueueConfig{TestCommand: "true"}, preVerifySlot{role: "r/p"})

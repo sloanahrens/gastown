@@ -149,6 +149,16 @@ func Retry(ctx context.Context, attempt func() Attempt, onRetry func(attempt, at
 	return retry(ctx, clockwork.NewRealClock(), RetryDelay, attempt, onRetry)
 }
 
+// RetryWithDelays is Retry with the caller's wait schedule in place of
+// RetryDelay; nil means RetryDelay. A caller that injects its schedule lets
+// its tests shorten the waits without writing this package's variable.
+func RetryWithDelays(ctx context.Context, delays []time.Duration, attempt func() Attempt, onRetry func(attempt, attempts int, wait time.Duration)) Outcome {
+	if delays == nil {
+		delays = RetryDelay
+	}
+	return retry(ctx, clockwork.NewRealClock(), delays, attempt, onRetry)
+}
+
 // retry is Retry waiting delays on clk.
 func retry(ctx context.Context, clk clockwork.Clock, delays []time.Duration, attempt func() Attempt, onRetry func(attempt, attempts int, wait time.Duration)) Outcome {
 	for n := 0; ; n++ {

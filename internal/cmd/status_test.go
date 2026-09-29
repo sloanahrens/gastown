@@ -724,6 +724,7 @@ func TestAgentMarkerTriple(t *testing.T) {
 // pause an agent the way `gt agent pause` does, then confirm the address gt
 // status uses resolves to the same marker and carries the reason.
 func TestApplyPauseMarkerNamesAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if err := agentpause.Pause(townRoot, "gastown", "polecat", "flint", "filesystem scan", "mayor", ""); err != nil {

@@ -32,6 +32,7 @@ func heldMarker(t *testing.T, townRoot, name string) *slot.SlotState {
 // readable from the same townwide lock directory the gate slot lives in, and
 // Release — the deferred call on every return path of runMQBatchRun — clears it.
 func TestAcquireBatchMarker_HeldForTheWholeRun(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	release, err := acquireBatchMarker(townRoot, "gastown")
@@ -64,6 +65,7 @@ func TestAcquireBatchMarker_HeldForTheWholeRun(t *testing.T) {
 // marker untouched. Making the refusal an error the caller returns would turn
 // a detector's hint into an admission gate (see acquireBatchMarker).
 func TestAcquireBatchMarker_SecondBatchIsRefusedNotEnforced(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	firstRelease, err := acquireBatchMarker(townRoot, "gastown")
@@ -90,6 +92,7 @@ func TestAcquireBatchMarker_SecondBatchIsRefusedNotEnforced(t *testing.T) {
 // batch at once on a town whose marker directory is shared, and neither may
 // read as the other's batch.
 func TestAcquireBatchMarker_RigsDoNotCollide(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	gastownRelease, err := acquireBatchMarker(townRoot, "gastown")

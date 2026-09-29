@@ -49,6 +49,7 @@ func slotStatusTextOf(t *testing.T, rep slot.Report) string {
 // acceptance for the status half: the review is named, with the age its callers
 // ask about, and it is not printed as a pool slot the pool does not count.
 func TestPrintSlotStatusText_ListsTheMarkerOutsideThePoolListing(t *testing.T) {
+	t.Parallel()
 	rep := slot.Report{
 		Slots:    []slot.SlotState{{Index: 0}, {Index: 1}, markerRow(2)},
 		Total:    2,
@@ -78,6 +79,7 @@ func TestPrintSlotStatusText_ListsTheMarkerOutsideThePoolListing(t *testing.T) {
 // contract the other readers consume: an in-flight review is a slots[] entry a
 // machine can tell from a pool slot, while total stays the pool's own count.
 func TestPrintSlotStatusJSON_ReportsAMarkerOutsideThePoolCount(t *testing.T) {
+	t.Parallel()
 	out := slotStatusJSONOf(t, markerReport(), nil)
 
 	var decoded struct {

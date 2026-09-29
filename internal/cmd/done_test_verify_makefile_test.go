@@ -34,6 +34,7 @@ var makefileOptInAssignment = regexp.MustCompile(`GT_TEST_DOCKER=(\S+)`)
 // none inherited it must hand 1. Both halves are read out of the recipe line
 // the Makefile actually has, run through sh.
 func TestMakefileHandsTheContainerOptInToTheSuite(t *testing.T) {
+	t.Parallel()
 	recipes := makefileRecipes(t, readRepoMakefile(t))
 	for _, target := range []string{"test", "test-changed"} {
 		lines := recipes[target]

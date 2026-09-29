@@ -112,6 +112,7 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 }
 
 func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
+	t.Parallel()
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	cases := []struct {
 		role, agent, wantWorkDir string
@@ -173,6 +174,7 @@ func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 // --append-system-prompt-file, because this package's init installed the
 // renderer. Before the fix the flag appeared only from the second spawn on.
 func TestResolveRoleAgentConfig_FirstPolecatSpawnCarriesSystemPromptFlag(t *testing.T) {
+	t.Parallel()
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	path := config.SystemPromptFilePath("polecat", town, rigPath, "nux")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

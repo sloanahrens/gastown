@@ -28,6 +28,7 @@ import (
 // runs. Parallel isolated inits must therefore land in pool databases and leave
 // the server's catalog exactly as they found it.
 func TestDoltPool_IsolatedInitsCreateNoDatabases(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd CLI not installed")
 	}

@@ -29,6 +29,7 @@ func TestCrewSessionName(t *testing.T) {
 }
 
 func TestParseCrewSessionName(t *testing.T) {
+	t.Parallel()
 	// parseCrewSessionName depends on session.ParseSessionName which uses
 	// a PrefixRegistry to map prefixes to rigs. Without the registry populated,
 	// parsing will fail. We test the roundtrip with the understanding that in

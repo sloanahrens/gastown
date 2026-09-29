@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,14 @@ import (
 // cleans the branch up from there.
 func newThrowawayScenario(t *testing.T, throwawayPath string) string {
 	t.Helper()
-	dir := t.TempDir()
+	return cachedGitFixtureStrings(t, fmt.Sprint("newThrowawayScenario", throwawayPath), func(dir string) []string {
+		return []string{buildNewThrowawayScenario(t, dir, throwawayPath)}
+	})[0]
+}
+
+// buildNewThrowawayScenario makes newThrowawayScenario's repos under dir.
+func buildNewThrowawayScenario(t *testing.T, dir string, throwawayPath string) string {
+	t.Helper()
 	remote := filepath.Join(dir, "origin.git")
 	seed := filepath.Join(dir, "seed")
 	polecat := filepath.Join(dir, "polecat")
@@ -64,6 +72,7 @@ func newThrowawayScenario(t *testing.T, throwawayPath string) string {
 }
 
 func TestReportThrowawayPaths_RefusesBranchAddingScratchFile(t *testing.T) {
+	t.Parallel()
 	polecat := newThrowawayScenario(t, "internal/util/zz_livecheck_test.go")
 
 	err := reportThrowawayPaths(git.NewGit(polecat), "origin/main")
@@ -87,6 +96,7 @@ func TestReportThrowawayPaths_RefusesBranchAddingScratchFile(t *testing.T) {
 // as it left it, so the fix it runs by hand is applied to the history it was
 // shown.
 func TestReportThrowawayPaths_LeavesTheBranchUntouched(t *testing.T) {
+	t.Parallel()
 	polecat := newThrowawayScenario(t, "internal/util/zz_livecheck_test.go")
 	g := git.NewGit(polecat)
 	before, err := g.Rev("HEAD")
@@ -111,6 +121,7 @@ func TestReportThrowawayPaths_LeavesTheBranchUntouched(t *testing.T) {
 // to being runnable: an unquoted path with a space in it would split into two
 // arguments, so the polecat would follow the refusal and still be stuck.
 func TestReportThrowawayPaths_QuotesPathInRemediation(t *testing.T) {
+	t.Parallel()
 	polecat := newThrowawayScenario(t, "scratch/notes copy.md")
 
 	err := reportThrowawayPaths(git.NewGit(polecat), "origin/main")
@@ -125,6 +136,7 @@ func TestReportThrowawayPaths_QuotesPathInRemediation(t *testing.T) {
 // TestReportThrowawayPaths_AllowsRealWork is the false-positive control: an
 // ordinary branch, including one carrying a WIP checkpoint commit, must pass.
 func TestReportThrowawayPaths_AllowsRealWork(t *testing.T) {
+	t.Parallel()
 	polecat := newThrowawayScenario(t, "internal/util/zz_livecheck_test.go")
 	runGitCmd(t, polecat, "rm", "--cached", "--", "internal/util/zz_livecheck_test.go")
 	runGitCmd(t, polecat, "commit", "-m", "remove throwaway files")
@@ -137,6 +149,7 @@ func TestReportThrowawayPaths_AllowsRealWork(t *testing.T) {
 // TestReportThrowawayPaths_UnresolvableBaseFailsClosed pins the fail-closed
 // contract: a check that could not run must not read as a check that passed.
 func TestReportThrowawayPaths_UnresolvableBaseFailsClosed(t *testing.T) {
+	t.Parallel()
 	polecat := newThrowawayScenario(t, "internal/util/zz_livecheck_test.go")
 
 	err := reportThrowawayPaths(git.NewGit(polecat), "origin/does-not-exist")

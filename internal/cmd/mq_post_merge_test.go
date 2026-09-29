@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1481,7 +1482,17 @@ func TestResolveMQPostMerge_ReportsBothFailures(t *testing.T) {
 // remote rather than a fake. (gt-qjp2)
 func initOrphanCleanupRepo(t *testing.T, squashMerge bool) (clone, branch string) {
 	t.Helper()
-	tmp := t.TempDir()
+	root, f := cachedGitFixture(t, fmt.Sprintf("orphan-cleanup squash=%v", squashMerge), func(dir string) ([2]string, error) {
+		clone, branch := buildOrphanCleanupRepo(t, dir, squashMerge)
+		rel, err := filepath.Rel(dir, clone)
+		return [2]string{rel, branch}, err
+	})
+	return filepath.Join(root, f[0]), f[1]
+}
+
+// buildOrphanCleanupRepo makes initOrphanCleanupRepo's repos under tmp.
+func buildOrphanCleanupRepo(t *testing.T, tmp string, squashMerge bool) (clone, branch string) {
+	t.Helper()
 	originPath := filepath.Join(tmp, "origin.git")
 	runOrphanCleanupGit(t, tmp, "init", "--bare", "-b", "main", originPath)
 

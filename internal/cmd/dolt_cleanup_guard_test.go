@@ -102,6 +102,7 @@ func testAuditor(beadID string, beadErr error) (*cleanupAuditor, *[]string, *[]s
 }
 
 func TestCleanupAuditorIntent(t *testing.T) {
+	t.Parallel()
 	t.Run("writes intent to bead before any removal", func(t *testing.T) {
 		a, comments, events := testAuditor("hq-abc", nil)
 		if err := a.recordIntent([]string{"testdb_1", "testdb_2"}); err != nil {
@@ -147,6 +148,7 @@ func TestCleanupAuditorIntent(t *testing.T) {
 }
 
 func TestCleanupAuditorCompletion(t *testing.T) {
+	t.Parallel()
 	t.Run("records completion with counts and names", func(t *testing.T) {
 		a, comments, _ := testAuditor("hq-abc", nil)
 		if err := a.recordCompletion(2, 3, []string{"testdb_1", "testdb_2"}); err != nil {

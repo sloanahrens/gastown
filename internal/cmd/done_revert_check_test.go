@@ -36,7 +36,16 @@ type scenarioPaths struct {
 // work branch. Files at the base commit: shared.txt ("base") and keep.txt.
 func newRevertScenario(t *testing.T) scenarioPaths {
 	t.Helper()
-	dir := t.TempDir()
+	p := cachedGitFixtureStrings(t, "newRevertScenario", func(dir string) []string {
+		sp := buildNewRevertScenario(t, dir)
+		return []string{sp.seed, sp.polecat}
+	})
+	return scenarioPaths{seed: p[0], polecat: p[1]}
+}
+
+// buildNewRevertScenario makes newRevertScenario's repos under dir.
+func buildNewRevertScenario(t *testing.T, dir string) scenarioPaths {
+	t.Helper()
 	remote := filepath.Join(dir, "origin.git")
 	seed := filepath.Join(dir, "seed")
 	polecat := filepath.Join(dir, "polecat")
@@ -183,6 +192,7 @@ func TestDetectRevertedMerges_LegitimateBranches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			s := newRevertScenario(t)
 			commitPolecat(t, s.polecat, tt.edits, "feat: real work (gt-test)")
 			advanceMain(t, s.seed)
@@ -195,6 +205,7 @@ func TestDetectRevertedMerges_LegitimateBranches(t *testing.T) {
 	// Rebased before working: the branch's base is the advanced tip, so the
 	// merge base is current and the polecat's commits were replayed onto it.
 	t.Run("rebased onto main before working", func(t *testing.T) {
+		t.Parallel()
 		s := newRevertScenario(t)
 		advanceMain(t, s.seed)
 		runGitCmd(t, s.polecat, "fetch", "origin")

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/lintlock"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // initVerifyTestGoRepo builds a tiny Go module with two packages (pkga,
@@ -22,7 +24,15 @@ import (
 // that base to exercise changedGoPackages / runDefaultTestVerification.
 func initVerifyTestGoRepo(t *testing.T) (dir, base string) {
 	t.Helper()
-	dir = t.TempDir()
+	return cachedGitFixture(t, "verify-test-go-repo", func(dir string) (string, error) {
+		return buildVerifyTestGoRepo(t, dir), nil
+	})
+}
+
+// buildVerifyTestGoRepo makes initVerifyTestGoRepo's repo in dir and returns
+// its base commit.
+func buildVerifyTestGoRepo(t *testing.T, dir string) (base string) {
+	t.Helper()
 	runGit := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -57,11 +67,10 @@ func initVerifyTestGoRepo(t *testing.T) (dir, base string) {
 	runGit("commit", "-q", "-m", "base")
 	base = runGit("rev-parse", "HEAD")
 	runGit("update-ref", "refs/remotes/origin/main", base)
-	return dir, base
+	return base
 }
 
-// stubVerifyGate replaces the gate's slot-acquire and suite-runner hooks for
-// the duration of a test, so the gate can be driven without the real
+// stubVerifyGate replaces vg's slot-acquire and suite-runner hooks, so the gate can be driven without the real
 // container-gate slot (which would contend with every other suite on a shared
 // Gas Town host) and without running `go test` over a real package tree.
 //
@@ -72,50 +81,38 @@ func initVerifyTestGoRepo(t *testing.T) (dir, base string) {
 // the watch overrides the listing itself, after this call.
 func stubVerifyGate(
 	t *testing.T,
+	vg *testVerifyGate,
 	acquire func(townRoot, role string, timeout time.Duration) (func(), error),
 	run func(ctx context.Context, worktree, script string, env []string, logFile *os.File) error,
 ) {
 	t.Helper()
 	stubNoContainers(t)
 	if acquire != nil {
-		prev := acquireVerifySlot
-		acquireVerifySlot = acquire
-		t.Cleanup(func() { acquireVerifySlot = prev })
+		vg.acquireSlot = acquire
 	}
 	if run != nil {
-		prev := runVerifySuite
-		runVerifySuite = run
-		t.Cleanup(func() { runVerifySuite = prev })
+		vg.runSuite = run
 	}
 }
 
-// stubLintLockRetryDelay shortens the waits between lint-lock retries so a
+// stubVerifyLintRetryDelay shortens the waits between lint-lock retries so a
 // test can drive the retry path (gt-xsty) without sleeping the real tens of
 // seconds.
-func stubLintLockRetryDelay(t *testing.T, delays ...time.Duration) {
-	t.Helper()
-	prev := lintlock.RetryDelay
-	lintlock.RetryDelay = delays
-	t.Cleanup(func() { lintlock.RetryDelay = prev })
+func stubVerifyLintRetryDelay(vg *testVerifyGate, delays ...time.Duration) {
+	vg.lintRetryDelays = delays
 }
 
 // stubVerifyProgress shortens the gate's progress interval so a test can
 // observe progress lines without waiting out the real one.
-func stubVerifyProgress(t *testing.T, interval time.Duration) {
-	t.Helper()
-	prev := testVerifyProgressInterval
-	testVerifyProgressInterval = interval
-	t.Cleanup(func() { testVerifyProgressInterval = prev })
+func stubVerifyProgress(vg *testVerifyGate, interval time.Duration) {
+	vg.progressInterval = interval
 }
 
 // stubGoBuildWholeModule replaces the whole-module build check that
 // runDefaultTestVerification runs when a Go change resolves to no buildable
 // package (a whole-package deletion) (gt-ytjh).
-func stubGoBuildWholeModule(t *testing.T, err error) {
-	t.Helper()
-	prev := goBuildWholeModule
-	goBuildWholeModule = func(string) error { return err }
-	t.Cleanup(func() { goBuildWholeModule = prev })
+func stubGoBuildWholeModule(vg *testVerifyGate, err error) {
+	vg.buildModule = func(string) error { return err }
 }
 
 // deletePkgb commits the removal of every file in the test repo's pkgb — a
@@ -195,14 +192,12 @@ func addMainPackage(t *testing.T, dir string) {
 
 // stubLintVerifyTimeout shrinks the lint gate's budget so a test can drive a
 // real expiry (gt-taoz) rather than sleeping out the 10m default.
-func stubLintVerifyTimeout(t *testing.T, budget time.Duration) {
-	t.Helper()
-	prev := lintVerifyTimeout
-	lintVerifyTimeout = budget
-	t.Cleanup(func() { lintVerifyTimeout = prev })
+func stubLintVerifyTimeout(vg *testVerifyGate, budget time.Duration) {
+	vg.lintTimeout = budget
 }
 
 func TestResolveTestVerifyBudgets(t *testing.T) {
+	t.Parallel()
 
 	t.Run("defaults: slot cap from the slot CLI default, run budget at the floor", func(t *testing.T) {
 		t.Parallel()
@@ -274,6 +269,7 @@ func containsEnv(env []string, want string) bool {
 // run's environment ends up carrying must always agree — including when the
 // session's own value says the opposite.
 func TestResolveContainerSwitchStatesTheSlotDecision(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		isGoRig  bool
@@ -292,7 +288,8 @@ func TestResolveContainerSwitchStatesTheSlotDecision(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(dockerTestsEnv, tc.ambient)
+			t.Parallel()
+			ambient := []string{"HOME=/nonexistent", dockerTestsEnv + "=" + tc.ambient}
 			got := resolveContainerSwitch(tc.isGoRig, tc.commands...)
 			if got.value != tc.want || got.slot != tc.slot {
 				t.Errorf("resolveContainerSwitch = %+v, want value %q slot %t", got, tc.want, tc.slot)
@@ -301,7 +298,7 @@ func TestResolveContainerSwitchStatesTheSlotDecision(t *testing.T) {
 			// rig prefix deliberately disagrees with it: the environment is
 			// the value the child reads, so the leak a pass-through would
 			// leave here is the hole gt-0hbm closed.
-			env := verifyGateEnv([]string{"GOFLAGS=-p=8", dockerTestsEnv + "=0"}, got.value)
+			env := verifyGateEnv(ambient, []string{"GOFLAGS=-p=8", dockerTestsEnv + "=0"}, got.value)
 			var seen []string
 			for _, kv := range env {
 				if strings.HasPrefix(kv, dockerTestsEnv+"=") {
@@ -415,9 +412,11 @@ func TestLintFailureDetail(t *testing.T) {
 // nothing in the log is attributable, because a lint blocked on a lock prints
 // nothing at all.
 func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
-	stubLintVerifyTimeout(t, 250*time.Millisecond)
+	stubLintVerifyTimeout(vg, 250*time.Millisecond)
 
 	dir, _ := initVerifyTestGoRepo(t)
 	changePkga(t, dir)
@@ -431,7 +430,7 @@ func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
 		TestVerifyCommand: "echo ran > '" + testMarker + "'",
 	}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-budget-role")
+	result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-budget-role")
 	if err == nil {
 		t.Fatalf("expected a refusal when the lint outlives its budget, got result=%+v", result)
 	}
@@ -462,13 +461,12 @@ func TestRunDefaultTestVerification_LintBudgetExpiry(t *testing.T) {
 // done_test_verify_lint_test.go cannot catch the offset going wrong (each
 // prints the marker on every attempt, or runs a single attempt). This test
 // needs no real suite run — the lint refuses first.
-//
-// Serial because stubLintLockRetryDelay swaps lintlock's retry schedule and
-// restores it (gt-k317).
 func TestRunDefaultTestVerification_LintFindingAfterContention(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
-	stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+	stubVerifyLintRetryDelay(vg, time.Millisecond, time.Millisecond)
 
 	dir, _ := initVerifyTestGoRepo(t)
 	changePkga(t, dir)
@@ -490,7 +488,7 @@ func TestRunDefaultTestVerification_LintFindingAfterContention(t *testing.T) {
 		TestVerifyCommand: "echo ran > '" + testMarker + "'",
 	}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-finding-after-contention-role")
+	result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-finding-after-contention-role")
 	if err == nil {
 		t.Fatalf("expected a lint refusal, got result=%+v", result)
 	}
@@ -529,14 +527,12 @@ func TestRunDefaultTestVerification_LintFindingAfterContention(t *testing.T) {
 // whole-package deletion leaves on the MR bead (gt-ytjh): when the changed .go
 // files resolve to no buildable package and the whole-module build passes, the
 // gate proceeds and records packages=["."].
-//
-// Serial because stubGoBuildWholeModule swaps a package variable and restores
-// it (gt-k317). Install-once is not available: the sibling tests need a
-// different stub, one that fails the build rather than passing it.
 func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
-	stubGoBuildWholeModule(t, nil)
-	stubVerifyGate(t,
+	stubGoBuildWholeModule(vg, nil)
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error { return nil })
 
@@ -545,7 +541,7 @@ func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-delete-marker")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-delete-marker")
 	if err != nil {
 		t.Fatalf("runDefaultTestVerification: %v", err)
 	}
@@ -562,11 +558,13 @@ func TestRunDefaultTestVerification_DeletionRecordsWholeModule(t *testing.T) {
 // longer build must refuse, and the refusal has to show the build failure it is
 // asking the polecat to fix rather than only telling it to fix the build.
 func TestRunDefaultTestVerification_BrokenDeletionRefusalQuotesTheBuild(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	compilerSaid := "no required module provides package example.test/pkgb"
-	stubGoBuildWholeModule(t, errors.New("go build ./...: exit status 1: "+compilerSaid))
+	stubGoBuildWholeModule(vg, errors.New("go build ./...: exit status 1: "+compilerSaid))
 	suiteRan := false
-	stubVerifyGate(t,
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error {
 			suiteRan = true
@@ -578,7 +576,7 @@ func TestRunDefaultTestVerification_BrokenDeletionRefusalQuotesTheBuild(t *testi
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-delete-refusal")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-delete-refusal")
 	if err == nil {
 		t.Fatalf("runDefaultTestVerification: a deletion that breaks the build must refuse, got result=%+v", result)
 	}
@@ -602,6 +600,7 @@ func TestRunDefaultTestVerification_BrokenDeletionRefusalQuotesTheBuild(t *testi
 // reached either would report success: that is what makes the refusal the
 // assertion, rather than merely an error message.
 func TestRunDefaultTestVerification_UnresolvableGoChangeRefuses(t *testing.T) {
+	t.Parallel()
 	// addExcludedPkg adds a directory whose only .go file is excluded by its
 	// build constraints — the shape whose whole-module build succeeds.
 	addExcludedPkg := func(t *testing.T, dir string) {
@@ -621,22 +620,22 @@ func TestRunDefaultTestVerification_UnresolvableGoChangeRefuses(t *testing.T) {
 	// succeed, so the count is what separates a refusal from a pass.
 	runGate := func(t *testing.T, dir string) (testVerifyResult, error, int) {
 		t.Helper()
+		vg := newTestVerifyGate()
 		stubNoContainers(t)
 		builds := 0
-		prev := goBuildWholeModule
-		goBuildWholeModule = func(string) error { builds++; return nil }
-		t.Cleanup(func() { goBuildWholeModule = prev })
-		stubVerifyGate(t,
+		vg.buildModule = func(string) error { builds++; return nil }
+		stubVerifyGate(t, vg,
 			func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 			func(context.Context, string, string, []string, *os.File) error { return nil })
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unresolvable-role")
+		result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unresolvable-role")
 		return result, err, builds
 	}
 
 	t.Run("all-build-excluded .go file: refuses instead of falling through to a build that would pass", func(t *testing.T) {
+		t.Parallel()
 		dir, _ := initVerifyTestGoRepo(t)
 		addExcludedPkg(t, dir)
 
@@ -656,6 +655,7 @@ func TestRunDefaultTestVerification_UnresolvableGoChangeRefuses(t *testing.T) {
 	})
 
 	t.Run("resolved package alongside an unresolvable one: still refuses", func(t *testing.T) {
+		t.Parallel()
 		dir, _ := initVerifyTestGoRepo(t)
 		// pkga resolves, so the gate has a package list to scope a suite to —
 		// the mixed case in which an unresolvable file escaped with no check.
@@ -687,13 +687,13 @@ func TestRunDefaultTestVerification_UnresolvableGoChangeRefuses(t *testing.T) {
 // cannot verify it with this module's suite, so it builds that module where it
 // lives.
 func TestRunDefaultTestVerification_NestedModuleChangeIsBuiltInItsOwnModule(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	var builds []string
-	prev := goBuildWholeModule
-	goBuildWholeModule = func(dir string) error { builds = append(builds, dir); return nil }
-	t.Cleanup(func() { goBuildWholeModule = prev })
+	vg.buildModule = func(dir string) error { builds = append(builds, dir); return nil }
 	suiteRan := false
-	stubVerifyGate(t,
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error {
 			suiteRan = true
@@ -705,7 +705,7 @@ func TestRunDefaultTestVerification_NestedModuleChangeIsBuiltInItsOwnModule(t *t
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module")
 	if err != nil {
 		t.Fatalf("runDefaultTestVerification: a change inside a nested module must not refuse: %v", err)
 	}
@@ -747,13 +747,13 @@ func TestRunDefaultTestVerification_NestedModuleChangeIsBuiltInItsOwnModule(t *t
 // a dependency. The failure has to name the module and keep the compiler's
 // output.
 func TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	compilerSaid := `plugins/example-sub/nested.go:5:9: cannot use "x" (untyped string constant) as int value in return statement`
-	prev := goBuildWholeModule
-	goBuildWholeModule = func(string) error { return errors.New("go build ./...: exit status 1: " + compilerSaid) }
-	t.Cleanup(func() { goBuildWholeModule = prev })
+	vg.buildModule = func(string) error { return errors.New("go build ./...: exit status 1: " + compilerSaid) }
 	suiteRan := false
-	stubVerifyGate(t,
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error {
 			suiteRan = true
@@ -765,7 +765,7 @@ func TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses(t *testing.T
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-build")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-build")
 	if err == nil {
 		t.Fatalf("runDefaultTestVerification: a nested module that does not build must refuse, got result=%+v", result)
 	}
@@ -788,13 +788,13 @@ func TestRunDefaultTestVerification_NestedModuleBuildFailureRefuses(t *testing.T
 // so that module is the build the gate has to run, exactly as it already does
 // for a nested module whose files changed.
 func TestRunDefaultTestVerification_NestedModuleDeletionBuildsItsOwnModule(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	var builds []string
-	prev := goBuildWholeModule
-	goBuildWholeModule = func(dir string) error { builds = append(builds, dir); return nil }
-	t.Cleanup(func() { goBuildWholeModule = prev })
+	vg.buildModule = func(dir string) error { builds = append(builds, dir); return nil }
 	suiteRan := false
-	stubVerifyGate(t,
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error {
 			suiteRan = true
@@ -811,7 +811,7 @@ func TestRunDefaultTestVerification_NestedModuleDeletionBuildsItsOwnModule(t *te
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-deletion")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-deletion")
 	if err != nil {
 		t.Fatalf("runDefaultTestVerification: deleting a package inside a nested module must not refuse: %v", err)
 	}
@@ -852,16 +852,16 @@ func TestRunDefaultTestVerification_NestedModuleDeletionBuildsItsOwnModule(t *te
 // compiler's output, rather than passing the branch because some *other*
 // module still builds.
 func TestRunDefaultTestVerification_NestedModuleDeletionBuildFailureRefuses(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	// Deliberately free of the module's path: the assertion that the refusal
 	// names the module has to be about the gate's own wording, not about the
 	// build error it quotes back.
 	compilerSaid := `inner.go:9:9: undefined: Gone`
-	prev := goBuildWholeModule
-	goBuildWholeModule = func(string) error { return errors.New("go build ./...: exit status 1: " + compilerSaid) }
-	t.Cleanup(func() { goBuildWholeModule = prev })
+	vg.buildModule = func(string) error { return errors.New("go build ./...: exit status 1: " + compilerSaid) }
 	suiteRan := false
-	stubVerifyGate(t,
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error {
 			suiteRan = true
@@ -876,7 +876,7 @@ func TestRunDefaultTestVerification_NestedModuleDeletionBuildFailureRefuses(t *t
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-deletion-build")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-nested-module-deletion-build")
 	if err == nil {
 		t.Fatalf("runDefaultTestVerification: a nested module the deletion left unbuildable must refuse, got result=%+v", result)
 	}
@@ -897,12 +897,12 @@ func TestRunDefaultTestVerification_NestedModuleDeletionBuildFailureRefuses(t *t
 // changed set — `go list` resolves a package whose imports are broken — so the
 // resolved modified package is not a substitute for the build.
 func TestRunDefaultTestVerification_MixedDeletionAndModificationBuildsWholeModule(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	builds := 0
-	prev := goBuildWholeModule
-	goBuildWholeModule = func(string) error { builds++; return nil }
-	t.Cleanup(func() { goBuildWholeModule = prev })
-	stubVerifyGate(t,
+	vg.buildModule = func(string) error { builds++; return nil }
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error { return nil })
 
@@ -914,7 +914,7 @@ func TestRunDefaultTestVerification_MixedDeletionAndModificationBuildsWholeModul
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-mixed-diff")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-mixed-diff")
 	if err != nil {
 		t.Fatalf("runDefaultTestVerification: %v", err)
 	}
@@ -934,12 +934,12 @@ func TestRunDefaultTestVerification_MixedDeletionAndModificationBuildsWholeModul
 // line — a false record of a check that never happened. Both shapes can
 // appear in the same diff, so both builds must run.
 func TestRunDefaultTestVerification_MixedDeletionAndNestedModuleBuildsBoth(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	stubNoContainers(t)
 	var builds []string
-	prev := goBuildWholeModule
-	goBuildWholeModule = func(dir string) error { builds = append(builds, dir); return nil }
-	t.Cleanup(func() { goBuildWholeModule = prev })
-	stubVerifyGate(t,
+	vg.buildModule = func(dir string) error { builds = append(builds, dir); return nil }
+	stubVerifyGate(t, vg,
 		func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 		func(context.Context, string, string, []string, *os.File) error { return nil })
 
@@ -949,7 +949,7 @@ func TestRunDefaultTestVerification_MixedDeletionAndNestedModuleBuildsBoth(t *te
 
 	mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/unit-mixed-deletion-nested")
+	result, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/unit-mixed-deletion-nested")
 	if err != nil {
 		t.Fatalf("runDefaultTestVerification: %v", err)
 	}
@@ -991,7 +991,9 @@ func TestRunDefaultTestVerification_MixedDeletionAndNestedModuleBuildsBoth(t *te
 // an output directory, and a listing that fails must not be reported as a main
 // package (the build that follows says why in the compiler's own words).
 func TestModuleHasMainPackage(t *testing.T) {
+	t.Parallel()
 	t.Run("a module with a main package reports true", func(t *testing.T) {
+		t.Parallel()
 		dir, _ := initVerifyTestGoRepo(t)
 		addMainPackage(t, dir)
 		if !moduleHasMainPackage(dir) {
@@ -1000,6 +1002,7 @@ func TestModuleHasMainPackage(t *testing.T) {
 	})
 
 	t.Run("a library-only module reports false", func(t *testing.T) {
+		t.Parallel()
 		dir, _ := initVerifyTestGoRepo(t)
 		if moduleHasMainPackage(dir) {
 			t.Error("moduleHasMainPackage = true, want false for a module of libraries (go build -o would refuse it)")
@@ -1007,6 +1010,7 @@ func TestModuleHasMainPackage(t *testing.T) {
 	})
 
 	t.Run("a directory that is not a Go module reports false", func(t *testing.T) {
+		t.Parallel()
 		if moduleHasMainPackage(t.TempDir()) {
 			t.Error("moduleHasMainPackage = true, want false when `go list` fails")
 		}
@@ -1022,6 +1026,7 @@ func TestModuleHasMainPackage(t *testing.T) {
 // of what happened — the same class of defect as a check whose failure path
 // emits its success value.
 func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
+	t.Parallel()
 	readScope := func(t *testing.T, worktree string) string {
 		t.Helper()
 		data, err := os.ReadFile(testVerifyLogPath(worktree))
@@ -1053,14 +1058,16 @@ func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
 	}
 
 	t.Run("full suite is labelled full", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
 		stubNoContainers(t)
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 			func(context.Context, string, string, []string, *os.File) error { return nil })
 		dir, _ := initVerifyTestGoRepo(t)
 		touchBothPackages(t, dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		if _, err := runDefaultTestVerification(git.NewGit(dir), dir, "main", "main", mq, t.TempDir(), "test/scope-full"); err != nil {
+		if _, err := vg.run(git.NewGit(dir), dir, "main", "main", mq, t.TempDir(), "test/scope-full"); err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
 		if got := readScope(t, dir); got != "full" {
@@ -1069,8 +1076,10 @@ func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
 	})
 
 	t.Run("a scoped test_verify_command is labelled changed", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
 		stubNoContainers(t)
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(string, string, time.Duration) (func(), error) { return func() {}, nil },
 			func(context.Context, string, string, []string, *os.File) error { return nil })
 		dir, _ := initVerifyTestGoRepo(t)
@@ -1079,7 +1088,7 @@ func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
 			TestCommand:       "go test ./...",
 			TestVerifyCommand: "go test {packages}",
 		}
-		if _, err := runDefaultTestVerification(git.NewGit(dir), dir, "main", "main", mq, t.TempDir(), "test/scope-changed"); err != nil {
+		if _, err := vg.run(git.NewGit(dir), dir, "main", "main", mq, t.TempDir(), "test/scope-changed"); err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
 		if got := readScope(t, dir); got != "changed" {
@@ -1100,6 +1109,8 @@ func TestRunDefaultTestVerification_ScopeLabelMatchesWhatRan(t *testing.T) {
 // wait ends when that cap expires rather than re-arming, and both the progress
 // line and the giving-up message reach the polecat.
 func TestRunDefaultTestVerification_SlotWaitIsBounded(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	const slotCap = 80 * time.Millisecond
 	dir, _ := initVerifyTestGoRepo(t)
 	for _, rel := range []string{"pkga/a.go", "pkgb/b.go"} {
@@ -1117,14 +1128,14 @@ func TestRunDefaultTestVerification_SlotWaitIsBounded(t *testing.T) {
 
 	// One progress tick must land inside the cap, or the pane looks hung for
 	// the whole wait — the failure gt-pnkd's victims could not diagnose.
-	stubVerifyProgress(t, slotCap/4)
+	stubVerifyProgress(vg, slotCap/4)
 
 	var (
 		gotTimeout    time.Duration
 		acquires      int
 		acquireWindow time.Duration
 	)
-	stubVerifyGate(t,
+	stubVerifyGate(t, vg,
 		func(_ string, _ string, timeout time.Duration) (func(), error) {
 			acquires++
 			gotTimeout = timeout
@@ -1142,7 +1153,7 @@ func TestRunDefaultTestVerification_SlotWaitIsBounded(t *testing.T) {
 		TestVerifySlotTimeout: slotCap.String(),
 	}
 	g := git.NewGit(dir)
-	_, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/bounded-wait-role")
+	_, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/bounded-wait-role")
 
 	if err == nil {
 		t.Fatal("expected a slot-contention error once the cap expired")
@@ -1182,6 +1193,8 @@ func TestRunDefaultTestVerification_SlotWaitIsBounded(t *testing.T) {
 // waiting line, so a polecat's quiet pane is diagnosable without a restart
 // (gt-pnkd's frozen 144-byte log).
 func TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	const slotCap = 60 * time.Millisecond
 	dir, _ := initVerifyTestGoRepo(t)
 	for _, rel := range []string{"pkga/a.go", "pkgb/b.go"} {
@@ -1197,8 +1210,8 @@ func TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp(t *test
 	runGitIn(t, dir, "add", ".")
 	runGitIn(t, dir, "commit", "-q", "-m", "touch both packages")
 
-	stubVerifyProgress(t, slotCap/6)
-	stubVerifyGate(t,
+	stubVerifyProgress(vg, slotCap/6)
+	stubVerifyGate(t, vg,
 		func(_ string, _ string, timeout time.Duration) (func(), error) {
 			time.Sleep(timeout)
 			return nil, errors.New("timed out after " + timeout.String() + " waiting for container-gate slot")
@@ -1210,7 +1223,7 @@ func TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp(t *test
 		TestVerifySlotTimeout: slotCap.String(),
 	}
 	g := git.NewGit(dir)
-	_, err := runDefaultTestVerification(g, dir, "main", "main", mq, t.TempDir(), "test/bounded-log-role")
+	_, err := vg.run(g, dir, "main", "main", mq, t.TempDir(), "test/bounded-log-role")
 	if err == nil {
 		t.Fatal("expected a slot-contention error once the cap expired")
 	}
@@ -1225,5 +1238,44 @@ func TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp(t *test
 	}
 	if !strings.Contains(logText, "slot cap:") {
 		t.Errorf("verify log does not record the cap it was waiting under:\n%s", logText)
+	}
+}
+
+// newTestVerifyGate is the default gate for a test to adjust: production's
+// collaborators, which the stub helpers above replace one at a time.
+func newTestVerifyGate() *testVerifyGate {
+	return defaultTestVerifyGate()
+}
+
+// TestDefaultTestVerifyGateWiring guards the defaults gt done's gate runs
+// with: every test drives its own testVerifyGate, so nothing else notices a
+// default that silently stops taking the slot (a no-op acquireSlot would run
+// container suites outside it) or stops watching for stray containers (an
+// interval of 0 disables gt-0ss4's watch).
+func TestDefaultTestVerifyGateWiring(t *testing.T) {
+	t.Parallel()
+	vg := defaultTestVerifyGate()
+	funcIs := func(name string, got, want any) {
+		t.Helper()
+		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(want).Pointer() {
+			t.Errorf("default gate's %s is not the production function", name)
+		}
+	}
+	funcIs("acquireSlot", vg.acquireSlot, acquireVerifySlot)
+	funcIs("runSuite", vg.runSuite, runVerifySuite)
+	funcIs("buildModule", vg.buildModule, goBuildWholeModule)
+	funcIs("watch.containers", vg.watch.containers, slot.GateContainers)
+	funcIs("watch.slotHeld", vg.watch.slotHeld, gateSlotHeld)
+	if vg.watch.interval != containerWatchInterval {
+		t.Errorf("watch.interval = %s, want %s", vg.watch.interval, containerWatchInterval)
+	}
+	if vg.lintTimeout != defaultLintVerifyTimeout {
+		t.Errorf("lintTimeout = %s, want %s", vg.lintTimeout, defaultLintVerifyTimeout)
+	}
+	if vg.progressInterval != testVerifyProgressInterval {
+		t.Errorf("progressInterval = %s, want %s", vg.progressInterval, testVerifyProgressInterval)
+	}
+	if vg.lintRetryDelays != nil || vg.env != nil {
+		t.Errorf("lintRetryDelays = %v, env set = %t; want nil (lintlock.RetryDelay, os.Environ)", vg.lintRetryDelays, vg.env != nil)
 	}
 }

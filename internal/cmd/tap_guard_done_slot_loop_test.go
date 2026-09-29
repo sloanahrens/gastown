@@ -106,6 +106,7 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 // polecat sandbox, but a scripted retry is never the sanctioned path for
 // anyone).
 func TestDoneSlotLoopReachesGuard(t *testing.T) {
+	t.Parallel()
 	const incident = `for i in $(seq 1 300); do if gt slot status | grep -q free; then gt done; fi; done`
 	reason, alt := evaluateDangerousCommand(incident, 0, "")
 	if reason != doneSlotLoopReason {

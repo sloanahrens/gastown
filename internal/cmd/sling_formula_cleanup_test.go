@@ -31,6 +31,7 @@ func runSlingFormulaSourceForTest(t *testing.T) string {
 }
 
 func TestRunSlingFormulaCleansDelayedDogFailure(t *testing.T) {
+	t.Parallel()
 	body := runSlingFormulaSourceForTest(t)
 
 	for _, want := range []string{
@@ -93,6 +94,7 @@ func TestCleanupDelayedDogFormulaFailureClearsWorkAfterWispCleanupError(t *testi
 }
 
 func TestRunSlingFormulaSerializesWholeDogPool(t *testing.T) {
+	t.Parallel()
 	body := runSlingFormulaSourceForTest(t)
 	if !strings.Contains(body, `tryAcquireSlingAssigneeLock(townRoot, "deacon/dogs")`) {
 		t.Fatal("dog-pool formula dispatch must use one pool-wide lock, not a per-formula lock")
@@ -103,6 +105,7 @@ func TestRunSlingFormulaSerializesWholeDogPool(t *testing.T) {
 }
 
 func TestRunSlingFormulaExistingHookedDogStartsDelayedSession(t *testing.T) {
+	t.Parallel()
 	body := runSlingFormulaSourceForTest(t)
 
 	existingIdx := strings.Index(body, "shouldReuseExistingFormula(existing, delayedDogInfo, slingForce)")
@@ -134,6 +137,7 @@ func TestRunSlingFormulaExistingHookedDogStartsDelayedSession(t *testing.T) {
 }
 
 func TestRunSlingFormulaNonOwnedDogReuseCannotCreateFreshWisp(t *testing.T) {
+	t.Parallel()
 	body := runSlingFormulaSourceForTest(t)
 	reuseIdx := strings.Index(body, "shouldReuseExistingFormula(existing, delayedDogInfo, slingForce)")
 	guardIdx := strings.Index(body, "delayedDogInfo != nil && !delayedDogInfo.ownsWork")
@@ -147,6 +151,7 @@ func TestRunSlingFormulaNonOwnedDogReuseCannotCreateFreshWisp(t *testing.T) {
 }
 
 func TestRunSlingFormulaDogNudgeBeforeEmptyPaneReturn(t *testing.T) {
+	t.Parallel()
 	body := runSlingFormulaSourceForTest(t)
 
 	dogNudgeIdx := strings.LastIndex(body, "nudgeFormulaDog(delayedDogInfo, prompt)")

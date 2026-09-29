@@ -56,10 +56,6 @@ const defaultTestVerifyRunFloor = 30 * time.Minute
 // why a budget that runs out is attributed rather than reported as findings.
 const defaultLintVerifyTimeout = 10 * time.Minute
 
-// lintVerifyTimeout is the budget the lint gate spends, a var so a test can
-// drive a real expiry instead of waiting out the default.
-var lintVerifyTimeout = defaultLintVerifyTimeout
-
 // testVerifyPackagesPlaceholder is the token merge_queue.test_verify_command
 // may embed to receive the resolved changed-package list, e.g.
 // "make test-changed PKGS='{packages}'".
@@ -68,16 +64,61 @@ const testVerifyPackagesPlaceholder = "{packages}"
 // testVerifyProgressInterval is how often a *waiting* (slot) or *running*
 // (suite) gate emits a progress line. gt-pnkd's victims could only show a
 // frozen 144-byte verify log and 0.0% CPU across 13 minutes of silence — the
-// single most expensive part of diagnosing this bug. A var so tests can
-// shorten it.
-var testVerifyProgressInterval = 2 * time.Minute
+// single most expensive part of diagnosing this bug.
+const testVerifyProgressInterval = 2 * time.Minute
+
+// testVerifyGate is the default test-verify gate's collaborators: the slot,
+// the shell, the build, the budgets and the container watch. Production runs
+// defaultTestVerifyGate(); a test builds its own, so tests drive the gate in
+// parallel without swapping package state (gt-22hdp.13).
+type testVerifyGate struct {
+	// acquireSlot acquires the container-gate slot and returns its release.
+	// It returns just the release closure because slot.Handle's fields are
+	// unexported, so a fake could not construct one (gt-pnkd asked for a
+	// fake slot + fake runner).
+	acquireSlot func(townRoot, role string, timeout time.Duration) (func(), error)
+	// runSuite runs one shell command (the lint, then the suite) with the
+	// given environment, streaming combined output to logFile.
+	runSuite func(ctx context.Context, worktree, script string, env []string, logFile *os.File) error
+	// buildModule builds the module rooted at dir (goBuildWholeModule).
+	buildModule func(dir string) error
+	// lintTimeout is the lint gate's budget, retries and waits included.
+	lintTimeout time.Duration
+	// lintRetryDelays is the wait before each re-run of a contended lint;
+	// nil means lintlock.RetryDelay.
+	lintRetryDelays []time.Duration
+	// progressInterval is how often a waiting or running gate logs progress.
+	progressInterval time.Duration
+	// watch is the slot-free run's container watch.
+	watch containerWatchDeps
+	// env is the environment the lint and the suite inherit before the
+	// rig's prefix and the container switch; nil means os.Environ().
+	env []string
+}
+
+// environ is the environment the gate's children start from.
+func (vg *testVerifyGate) environ() []string {
+	if vg.env == nil {
+		return os.Environ()
+	}
+	return vg.env
+}
+
+// defaultTestVerifyGate is the gate gt done runs.
+func defaultTestVerifyGate() *testVerifyGate {
+	return &testVerifyGate{
+		acquireSlot:      acquireVerifySlot,
+		runSuite:         runVerifySuite,
+		buildModule:      goBuildWholeModule,
+		lintTimeout:      defaultLintVerifyTimeout,
+		progressInterval: testVerifyProgressInterval,
+		watch:            defaultContainerWatchDeps(),
+	}
+}
 
 // acquireVerifySlot acquires the container-gate slot, returning a release
-// func. A var so tests can drive the gate without the real slot (gt-pnkd
-// asked for a fake slot + fake runner): slot.Handle's fields are unexported,
-// so this deliberately returns just the release closure rather than a
-// *slot.Handle a fake could not construct.
-var acquireVerifySlot = func(townRoot, role string, timeout time.Duration) (func(), error) {
+// func.
+func acquireVerifySlot(townRoot, role string, timeout time.Duration) (func(), error) {
 	h, err := slot.AcquirePool(townRoot, role, timeout, containerGatePool(townRoot))
 	if err != nil {
 		return nil, err
@@ -102,11 +143,11 @@ func isContainerSuitePackage(importPath string) bool {
 }
 
 // runVerifySuite runs one shell command for the gate with the given
-// environment, streaming combined output to logFile. A var so tests can
-// substitute a fake runner: the real one shells out to the rig's full
+// environment, streaming combined output to logFile. Tests substitute a fake
+// (testVerifyGate.runSuite): the real one shells out to the rig's full
 // hermetic test_command (or its test_verify_command override), which no
 // unit test may do.
-var runVerifySuite = func(ctx context.Context, worktree, script string, env []string, logFile *os.File) error {
+func runVerifySuite(ctx context.Context, worktree, script string, env []string, logFile *os.File) error {
 	// Trust boundary: script is the rig's configured test_command or the
 	// operator's merge_queue.test_verify_command — same boundary as
 	// runPreVerificationGates.
@@ -412,16 +453,16 @@ func goListDir(worktree, dir string) (string, error) {
 // goBuildWholeModule builds the module rooted at dir, which is the check that
 // distinguishes a whole-package deletion that still compiles (legitimate, and
 // verifiable — the deletion is either consistent or the build breaks, and the
-// build is the authority) from one whose importers are now broken (gt-ytjh). A
-// var so tests can stub it: the real one shells out to `go build`, which no
-// unit test may do.
+// build is the authority) from one whose importers are now broken (gt-ytjh).
+// Tests stub it (testVerifyGate.buildModule): the real one shells out to `go
+// build`, which no unit test may do.
 //
 // dir is the module to build: the worktree for a change to this module, and a
 // nested module's own directory for a change to that one. Building anything
 // else verifies the wrong tree — gt done takes a worktree argument, and the
 // process's own directory is the host checkout, not the branch under test —
 // and this module's `go build ./...` does not reach a nested module at all.
-var goBuildWholeModule = func(dir string) error {
+func goBuildWholeModule(dir string) error {
 	buildArgs := []string{"build", "./..."}
 	// `go build ./...` discards the objects of a package list, and writes an
 	// executable only when that list resolves to exactly one main package —
@@ -642,7 +683,7 @@ func resolveContainerSwitch(isGoRig bool, commands ...string) containerSwitch {
 }
 
 // verifyGateEnv builds the child environment for the gate's lint and suite
-// runs: this process's environment, then the rig's test_command env prefix
+// runs: base (this process's environment), then the rig's test_command env prefix
 // (gt-fa3s), then the gate's resolved container switch (gt-0hbm).
 //
 // Every inherited and rig-supplied value of the switch's name is dropped before
@@ -650,12 +691,12 @@ func resolveContainerSwitch(isGoRig bool, commands ...string) containerSwitch {
 // duplicate entry is read differently by different readers (Go's os.Getenv
 // takes the last, a libc getenv the first), and this value decides whether a
 // container starts outside the container-gate slot.
-func verifyGateEnv(envPrefix []string, switchValue string) []string {
-	env := make([]string, 0, len(os.Environ())+len(envPrefix)+1)
+func verifyGateEnv(base, envPrefix []string, switchValue string) []string {
+	env := make([]string, 0, len(base)+len(envPrefix)+1)
 	keep := func(kv string) bool {
 		return switchValue == "" || !strings.HasPrefix(kv, dockerTestsEnv+"=")
 	}
-	for _, kv := range os.Environ() {
+	for _, kv := range base {
 		if keep(kv) {
 			env = append(env, kv)
 		}
@@ -774,13 +815,19 @@ func currentSlotHolder(townRoot string) string {
 	return fmt.Sprintf("%s (pid %d%s)", o.Role, o.PID, held)
 }
 
-// acquireVerifySlotWithProgress acquires the container-gate slot, emitting a
-// progress line every testVerifyProgressInterval while it waits, and reports
-// how long the wait took. Release is non-nil only when err is nil.
+// acquireVerifySlotWithProgress acquires the container-gate slot the way the
+// default gate does (acquireSlotWithProgress).
 func acquireVerifySlotWithProgress(townRoot, role string, timeout time.Duration, logFile *os.File) (release func(), waited time.Duration, err error) {
-	waited, err = runWithProgress(testVerifyProgressInterval, func() error {
+	return defaultTestVerifyGate().acquireSlotWithProgress(townRoot, role, timeout, logFile)
+}
+
+// acquireSlotWithProgress acquires the container-gate slot, emitting a
+// progress line every progressInterval while it waits, and reports how long
+// the wait took. Release is non-nil only when err is nil.
+func (vg *testVerifyGate) acquireSlotWithProgress(townRoot, role string, timeout time.Duration, logFile *os.File) (release func(), waited time.Duration, err error) {
+	waited, err = runWithProgress(vg.progressInterval, func() error {
 		var acquireErr error
-		release, acquireErr = acquireVerifySlot(townRoot, role, timeout)
+		release, acquireErr = vg.acquireSlot(townRoot, role, timeout)
 		return acquireErr
 	}, func(elapsed time.Duration) {
 		msg := fmt.Sprintf("still waiting for the container-gate slot (%s elapsed, cap %s)",
@@ -838,6 +885,11 @@ func testVerifyLogPath(worktree string) string {
 // contention — explicitly not a test failure, and explicitly counted
 // separately from the run budget.
 func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig, townRoot, role string) (testVerifyResult, error) {
+	return defaultTestVerifyGate().run(g, worktree, defaultBranch, target, mq, townRoot, role)
+}
+
+// run is runDefaultTestVerification on this gate's collaborators.
+func (vg *testVerifyGate) run(g *git.Git, worktree, defaultBranch, target string, mq *config.MergeQueueConfig, townRoot, role string) (testVerifyResult, error) {
 	if mq == nil || mq.TestCommand == "" {
 		return testVerifyResult{skipReason: "rig has no configured test_command — nothing to verify"}, nil
 	}
@@ -910,7 +962,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			// because the packages that import the deleted one are not in
 			// the changed set: `go list` resolves a package whose imports are
 			// broken, so only the build sees them.
-			if buildErr := goBuildWholeModule(worktree); buildErr != nil {
+			if buildErr := vg.buildModule(worktree); buildErr != nil {
 				return testVerifyResult{}, fmt.Errorf("gt done: deleting every .go file in a package since %s left the rest of the module unbuildable — the deletion broke something that imports it; fix the build (or undo the deletion) before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", shortSHA(verifiedBase), buildErr)
 			}
 		}
@@ -925,7 +977,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			// resolves in its own module can still be one this build is the
 			// only check of.
 			for _, n := range changed.nestedModules {
-				if buildErr := goBuildWholeModule(filepath.Join(worktree, n.moduleRoot)); buildErr != nil {
+				if buildErr := vg.buildModule(filepath.Join(worktree, n.moduleRoot)); buildErr != nil {
 					return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are in the nested module %s, and building that module failed — fix it before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", n.moduleRoot, buildErr)
 				}
 			}
@@ -995,7 +1047,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	fmt.Fprintf(logFile, "=== gt done default test-verify (scope=%s) ===\n", scope)
 	fmt.Fprintf(logFile, "command: %s\n", testCmd)
 	if lint := strings.TrimSpace(mq.LintCommand); lint != "" {
-		fmt.Fprintf(logFile, "lint: %s (budget %s, no container slot)\n", lint, humanDuration(lintVerifyTimeout))
+		fmt.Fprintf(logFile, "lint: %s (budget %s, no container slot)\n", lint, humanDuration(vg.lintTimeout))
 	}
 	fmt.Fprintf(logFile, "run budget: %s (%s)\n", humanDuration(budgets.runTimeout), budgets.runSource)
 	fmt.Fprintf(logFile, "slot cap: %s (%s)\n", humanDuration(budgets.slotTimeout), budgets.slotSource)
@@ -1026,7 +1078,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	reportVerifyProgress(logFile, fmt.Sprintf("gate starting (command: %s; run budget %s; slot cap %s)",
 		testCmd, humanDuration(budgets.runTimeout), humanDuration(budgets.slotTimeout)))
 
-	env := verifyGateEnv(envPrefix, cswitch.value)
+	env := verifyGateEnv(vg.environ(), envPrefix, cswitch.value)
 
 	// Lint first: cheap, slot-free, and a lint failure should not cost a
 	// suite run. The rig's lint_command is the same one the batch gate runs.
@@ -1045,11 +1097,11 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 		// One context spans every attempt: the lint budget bounds the lint,
 		// retries and waits included, rather than being renewed per try
 		// (gt-xsty).
-		lintCtx, lintCancel := context.WithTimeout(context.Background(), lintVerifyTimeout)
+		lintCtx, lintCancel := context.WithTimeout(context.Background(), vg.lintTimeout)
 		lintStart := time.Now()
-		outcome := lintlock.Retry(lintCtx, func() lintlock.Attempt {
+		outcome := lintlock.RetryWithDelays(lintCtx, vg.lintRetryDelays, func() lintlock.Attempt {
 			from := fileSize(logFile)
-			err := runVerifySuite(lintCtx, worktree, lint, env, logFile)
+			err := vg.runSuite(lintCtx, worktree, lint, env, logFile)
 			return lintlock.Attempt{Err: err, Output: readLogFrom(logPath, from)}
 		}, func(attempt, attempts int, wait time.Duration) {
 			reportVerifyProgress(logFile, fmt.Sprintf("lint lock held by another golangci-lint (attempt %d/%d); retrying in %s", attempt, attempts, wait.Round(time.Second)))
@@ -1069,7 +1121,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 			}
 			fmt.Fprintf(logFile, "=== lint failed (exit %d) ===\n", exitCode)
 			tail := readLogTail(logPath, 4000)
-			detail := lintFailureDetail(outcome, budgetExpired, lintVerifyTimeout)
+			detail := lintFailureDetail(outcome, budgetExpired, vg.lintTimeout)
 			return testVerifyResult{}, fmt.Errorf("gt done: default lint-verify failed (exit %d) running %q — %s (no tests were run; full log: %s):\n%s", exitCode, lint, detail, logPath, tail)
 		}
 		result.lintRan = true
@@ -1078,7 +1130,7 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 
 	var slotWait time.Duration
 	if needsSlot {
-		release, waited, acquireErr := acquireVerifySlotWithProgress(townRoot, role, budgets.slotTimeout, logFile)
+		release, waited, acquireErr := vg.acquireSlotWithProgress(townRoot, role, budgets.slotTimeout, logFile)
 		if acquireErr != nil {
 			// One invocation, then a bead comment and an escalation to the
 			// mayor: the escalation is the sanctioned move at the cap, not a
@@ -1110,12 +1162,12 @@ func runDefaultTestVerification(g *git.Git, worktree, defaultBranch, target stri
 	// held is one this run started outside the slot (gt-0ss4).
 	var watch *containerWatch
 	if !needsSlot {
-		watch = startGateContainerWatch(runCtx, cancelRun, townRoot, logFile)
+		watch = vg.watch.start(runCtx, cancelRun, townRoot, logFile)
 	}
 
 	runStart := time.Now()
-	_, runErr := runWithProgress(testVerifyProgressInterval, func() error {
-		return runVerifySuite(runCtx, worktree, testCmd, env, logFile)
+	_, runErr := runWithProgress(vg.progressInterval, func() error {
+		return vg.runSuite(runCtx, worktree, testCmd, env, logFile)
 	}, func(elapsed time.Duration) {
 		logBytes := int64(-1)
 		if fi, statErr := logFile.Stat(); statErr == nil {

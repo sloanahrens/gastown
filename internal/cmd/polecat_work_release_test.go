@@ -81,6 +81,7 @@ func (f *fakeWorkReleaser) Annotate(beadID, text string) error {
 // --- releasePolecatWork: the shared compare-and-release helper --------------
 
 func TestReleasePolecatWorkComparesAssigneeBeforeRelease(t *testing.T) {
+	t.Parallel()
 	const me = "gastown/polecats/basalt"
 	cases := []struct {
 		name         string
@@ -123,6 +124,7 @@ func TestReleasePolecatWorkComparesAssigneeBeforeRelease(t *testing.T) {
 }
 
 func TestReleasePolecatWorkResetsSlotOnlyWhenAsked(t *testing.T) {
+	t.Parallel()
 	rel := &fakeWorkReleaser{beads: map[string][2]string{}}
 	out := releasePolecatWork(rel, "gastown/polecats/basalt", "", true)
 	if !out.SlotReset || len(rel.resets) != 1 || rel.resets[0] != "gastown/polecats/basalt" {
@@ -194,6 +196,7 @@ func survivesSeq(verdicts ...[2]any) func(string) (string, error) {
 }
 
 func TestNukeHookedWorkEndToEnd(t *testing.T) {
+	t.Parallel()
 	const me = "gastown/polecats/basalt"
 	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
 	working := &polecat.Polecat{Name: "basalt", Rig: "gastown", Issue: "gt-elvf4"}

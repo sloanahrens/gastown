@@ -18,6 +18,7 @@ import (
 // test_command (gt-btw1) and refuse when it fails, succeed when it passes,
 // and skip cleanly when there is nothing to verify.
 func TestRunDefaultTestVerification(t *testing.T) {
+	t.Parallel()
 	// runDefaultTestVerification's slot.Acquire call checks `docker ps`
 	// regardless of townRoot (gt-jqif): even though every subtest below
 	// passes its own fresh t.TempDir() as townRoot — so the flock itself
@@ -30,12 +31,14 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	// to defaultTestVerifySlotTimeout (60m), blowing this package's own test
 	// timeout. See stubNoContainers in mq_batch_slot_test.go.
 	stubNoContainers(t)
-	townRoot := t.TempDir()
 
 	t.Run("no test_command configured: skips, does not run anything", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", &config.MergeQueueConfig{}, townRoot, "test/skip-role")
+		result, err := vg.run(g, dir, "main", "main", &config.MergeQueueConfig{}, townRoot, "test/skip-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -48,6 +51,9 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	})
 
 	t.Run("no changed go files: skips cleanly, does not block", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, base := initVerifyTestGoRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("docs\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -58,7 +64,7 @@ func TestRunDefaultTestVerification(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/docs-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/docs-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -68,6 +74,9 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	})
 
 	t.Run("passing changed-package test: succeeds, scoped to the changed package", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "pkga", "a.go"), []byte("package pkga\n\nfunc Add(a, b int) int { return a + b }\nfunc Triple(a int) int { return a * 3 }\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -77,7 +86,7 @@ func TestRunDefaultTestVerification(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/pass-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/pass-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -95,7 +104,14 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		}
 	})
 
+	// This subtest and the broken-importers one go through
+	// runDefaultTestVerification itself, not a test gate: they are the
+	// wiring guard that gt done's entry point runs the real shell (a gate
+	// whose suite runner did nothing would pass this failing test) and the
+	// real whole-module build.
 	t.Run("failing changed-package test: refuses with the failure in the error", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		// Introduce a broken new test in pkga — this is exactly the bug
 		// gt-h9kf describes: a polecat's own new test that was never run.
@@ -117,12 +133,15 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	})
 
 	t.Run("whole-package deletion that still compiles: verified by go build, not a false refusal", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		deletePkgb(t, dir)
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/delete-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/delete-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: a clean whole-package deletion must not refuse (gt-ytjh): %v", err)
 		}
@@ -143,6 +162,8 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	// build happens in the worktree under test: the host module builds, and a
 	// build of it could not produce this refusal.
 	t.Run("whole-package deletion with broken importers: refuses with the compiler output", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "root.go"), []byte("package main\n\nimport _ \"example.test/pkgb\"\n\nfunc main() {}\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -175,12 +196,15 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	// compile it refuses — `go list` resolves a package without typechecking
 	// it, so only the build can see that.
 	t.Run("nested-module change: builds that module and proceeds", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/nested-module-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/nested-module-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: a change inside a nested module must not refuse: %v", err)
 		}
@@ -203,6 +227,9 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	})
 
 	t.Run("nested-module change that does not compile: refuses with the compiler output", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
 		// A type error, which `go list` inside the nested module still resolves
@@ -215,7 +242,7 @@ func TestRunDefaultTestVerification(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/nested-module-broken-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/nested-module-broken-role")
 		if err == nil {
 			t.Fatalf("runDefaultTestVerification: a nested module that does not build must refuse, got result=%+v", result)
 		}
@@ -234,12 +261,15 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	// output \"cmd\" already exists and is a directory"). Running the real
 	// build here, this subtest fails on the plain form.
 	t.Run("deletion in a single-binary module: the build links to a temp dir and the deletion verifies", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := initSingleBinaryGoRepo(t)
 		deletePkgb(t, dir)
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/single-binary-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/single-binary-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -257,6 +287,9 @@ func TestRunDefaultTestVerification(t *testing.T) {
 	})
 
 	t.Run("non-Go rig (no go.mod): runs the full test_command instead of scoping", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := t.TempDir()
 		runGitIn(t, dir, "init", "-q", "-b", "main")
 		runGitIn(t, dir, "config", "user.email", "test@example.com")
@@ -277,7 +310,7 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		// (including the parens in "(no go.mod)") — quote it so the shell
 		// doesn't choke on its own metacharacters.
 		mq := &config.MergeQueueConfig{TestCommand: "echo ran >> '" + marker + "'"}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/non-go-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/non-go-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -324,7 +357,7 @@ func initSingleBinaryGoRepo(t *testing.T) string {
 // with the rig's test_command, and the fact that slot waiting is reported and
 // counted separately from the run itself.
 func TestRunDefaultTestVerificationBudgets(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
 
 	type runCall struct {
 		script   string
@@ -351,11 +384,14 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	}
 
 	t.Run("the gate runs the rig's full hermetic test_command, slot-free, when the rig does not ask for containers", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
 
 		var calls []runCall
 		acquired := false
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(_ string, _ string, _ time.Duration) (func(), error) {
 				acquired = true
 				return func() {}, nil
@@ -368,7 +404,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 
 		mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=6 make test"}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/budget-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/budget-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -438,11 +474,14 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("a rig whose command asks for containers runs it inside a slot, unchanged", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
 
 		var calls []runCall
 		var gotTimeout time.Duration
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(_ string, _ string, timeout time.Duration) (func(), error) {
 				gotTimeout = timeout
 				return func() {}, nil
@@ -456,7 +495,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		// command; the gate must honour it, and hold a slot while it runs.
 		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./..."}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/containers-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/containers-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -487,9 +526,12 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("test_verify_command replaces the full test_command and fills {packages}", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
 		var script string
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(_ string, _ string, _ time.Duration) (func(), error) { return func() {}, nil },
 			func(_ context.Context, _ string, s string, _ []string, _ *os.File) error {
 				script = s
@@ -501,7 +543,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 			TestVerifyCommand: "make test-changed PKGS='{packages}'",
 		}
 		g := git.NewGit(dir)
-		if _, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/override-role"); err != nil {
+		if _, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/override-role"); err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
 		if strings.Contains(script, "{packages}") {
@@ -513,9 +555,12 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("slot contention is reported as contention, not as a test failure", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
 		runnerCalled := false
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(_ string, _ string, _ time.Duration) (func(), error) {
 				return nil, errors.New("timed out after 5m0s waiting for container-gate slot")
 			},
@@ -526,7 +571,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 
 		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./...", TestVerifySlotTimeout: "5m"}
 		g := git.NewGit(dir)
-		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/contention-role")
+		_, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/contention-role")
 		if err == nil {
 			t.Fatal("expected an error when the slot cannot be acquired")
 		}
@@ -542,8 +587,11 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("a timing-out suite reports the budget and that slot wait is excluded", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(_ string, _ string, _ time.Duration) (func(), error) { return func() {}, nil },
 			func(ctx context.Context, _ string, _ string, _ []string, _ *os.File) error {
 				<-ctx.Done()
@@ -552,7 +600,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 
 		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./...", TestVerifyRunTimeout: "1ms"}
 		g := git.NewGit(dir)
-		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/run-timeout-role")
+		_, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/run-timeout-role")
 		if err == nil {
 			t.Fatal("expected a timeout error")
 		}
@@ -565,9 +613,12 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("a slot-free timing-out suite says no slot was taken", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
 		acquired := false
-		stubVerifyGate(t,
+		stubVerifyGate(t, vg,
 			func(_ string, _ string, _ time.Duration) (func(), error) {
 				acquired = true
 				return func() {}, nil
@@ -579,7 +630,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", TestVerifyRunTimeout: "1ms"}
 		g := git.NewGit(dir)
-		_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/run-timeout-noslot-role")
+		_, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/run-timeout-noslot-role")
 		if err == nil {
 			t.Fatal("expected a timeout error")
 		}
@@ -595,9 +646,12 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 	})
 
 	t.Run("waiting and running both emit progress lines into the verify log", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
-		stubVerifyProgress(t, 5*time.Millisecond)
-		stubVerifyGate(t,
+		stubVerifyProgress(vg, 5*time.Millisecond)
+		stubVerifyGate(t, vg,
 			func(_ string, _ string, _ time.Duration) (func(), error) {
 				// Long enough for at least one progress tick to fire.
 				time.Sleep(30 * time.Millisecond)
@@ -610,7 +664,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 
 		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./..."}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/progress-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/progress-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -632,7 +686,9 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 }
 
 func TestChangedGoPackages(t *testing.T) {
+	t.Parallel()
 	t.Run("no go files changed reports changedGoFiles=false", func(t *testing.T) {
+		t.Parallel()
 		dir, base := initVerifyTestGoRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("docs\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -654,6 +710,7 @@ func TestChangedGoPackages(t *testing.T) {
 	})
 
 	t.Run("resolves only the changed package, not the whole repo", func(t *testing.T) {
+		t.Parallel()
 		dir, base := initVerifyTestGoRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "pkga", "a.go"), []byte("package pkga\n\nfunc Add(a, b int) int { return a + b + 0 }\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -678,6 +735,7 @@ func TestChangedGoPackages(t *testing.T) {
 	})
 
 	t.Run("deleted-only directory is dropped, not an error", func(t *testing.T) {
+		t.Parallel()
 		dir, base := initVerifyTestGoRepo(t)
 		if err := os.Remove(filepath.Join(dir, "pkgb", "b.go")); err != nil {
 			t.Fatal(err)
@@ -712,6 +770,7 @@ func TestChangedGoPackages(t *testing.T) {
 	// apart. Refusing every root-unresolvable directory locked out every change
 	// to a nested module (plugins/dolt-snapshots in this repo).
 	t.Run("a nested module's directory resolves within its own module", func(t *testing.T) {
+		t.Parallel()
 		dir, base := initVerifyTestGoRepo(t)
 		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
 
@@ -745,6 +804,7 @@ func TestChangedGoPackages(t *testing.T) {
 	// that reads the deletion as this module's verifies it with a build that
 	// cannot contain anything the branch changed.
 	t.Run("a package deleted inside a nested module belongs to that module", func(t *testing.T) {
+		t.Parallel()
 		dir, _ := initVerifyTestGoRepo(t)
 		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
 		addNestedModulePackage(t, dir, "plugins/example-sub/inner")
@@ -787,6 +847,7 @@ func TestChangedGoPackages(t *testing.T) {
 	// not make a package of either leaves nothing anywhere to build or test, so
 	// the classification must not become a way to skip a broken file.
 	t.Run("a directory that resolves to nothing in its own nested module stays unresolvable", func(t *testing.T) {
+		t.Parallel()
 		dir, base := initVerifyTestGoRepo(t)
 		// The nested module's only .go file is one its build constraints
 		// exclude, so the module that owns it resolves no package for the
@@ -823,6 +884,7 @@ func TestChangedGoPackages(t *testing.T) {
 	// treating the empty package list as a deletion would wave the change
 	// through unverified.
 	t.Run("a .go file excluded by build constraints is unresolvable, not deleted", func(t *testing.T) {
+		t.Parallel()
 		dir, base := initVerifyTestGoRepo(t)
 		if err := os.MkdirAll(filepath.Join(dir, "pkgexcluded"), 0o755); err != nil {
 			t.Fatal(err)
@@ -866,10 +928,13 @@ func TestChangedGoPackages(t *testing.T) {
 // and the refinery's batch gate. There is no deferral to the refinery either
 // way (gt-btw1): the command is the rig's full one, run whole.
 func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
+	t.Parallel()
 	stubNoContainers(t)
-	townRoot := t.TempDir()
 
 	t.Run("container-backed package changed, rig does not ask for containers: slot-free", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		changePkga(t, dir)
@@ -878,7 +943,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 
 		acquired := false
 		var env []string
-		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+		stubVerifyGate(t, vg, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
 		}, func(_ context.Context, _ string, _ string, e []string, _ *os.File) error {
@@ -888,7 +953,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/slot-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/slot-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -913,6 +978,9 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 	})
 
 	t.Run("only container-backed packages changed: still slot-free, and the whole suite still runs", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -920,7 +988,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 
 		acquired := false
 		var scripts []string
-		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+		stubVerifyGate(t, vg, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
 		}, func(_ context.Context, _ string, script string, _ []string, _ *os.File) error {
@@ -930,7 +998,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/slot-all-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/slot-all-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -946,6 +1014,9 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 	})
 
 	t.Run("an inherited container opt-in is written off, and the slot with it", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		changePkga(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -954,11 +1025,11 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 		// The integration harness itself sets this (the package's TestMain
 		// needs Docker), so this is also the case that would otherwise make the
 		// gate behave two different ways inside one test binary.
-		t.Setenv(dockerTestsEnv, "1")
+		vg.env = append(os.Environ(), dockerTestsEnv+"=1")
 
 		acquired := false
 		var env []string
-		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+		stubVerifyGate(t, vg, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
 		}, func(_ context.Context, _ string, _ string, e []string, _ *os.File) error {
@@ -968,7 +1039,7 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/inherited-optin-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/inherited-optin-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -996,6 +1067,9 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 	})
 
 	t.Run("a non-Go rig's command is opaque: it keeps the slot", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir := t.TempDir()
 		runGitIn(t, dir, "init", "-q", "-b", "main")
 		runGitIn(t, dir, "config", "user.email", "test@example.com")
@@ -1013,14 +1087,14 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 		runGitIn(t, dir, "commit", "-q", "-m", "touch readme")
 
 		acquired := false
-		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+		stubVerifyGate(t, vg, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
 		}, func(_ context.Context, _ string, _ string, _ []string, _ *os.File) error { return nil })
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "make test"}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/non-go-slot-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/non-go-slot-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}

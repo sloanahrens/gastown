@@ -305,6 +305,7 @@ func TestInstallDashboardLog_SetupModeCreatesNoDirectory(t *testing.T) {
 // exceeds the size cap, that .old holds the entries written before the
 // rotation, and that the fresh file holds exactly the entry that triggered it.
 func TestRotatingLog_Rotates(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dashboard.log")
 	rl := &rotatingLog{path: path, max: 64}
@@ -338,6 +339,7 @@ func TestRotatingLog_Rotates(t *testing.T) {
 // cannot succeed stops rotation without dropping entries or retrying the
 // close/reopen dance on every later write.
 func TestRotatingLog_RenameFailureKeepsAppending(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dashboard.log")
 	// A non-empty directory at <name>.old makes os.Rename fail, standing in

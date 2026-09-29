@@ -16,6 +16,7 @@ const polecatStopTestBranch = "polecat/test/gt-ksnv@abc123"
 func TestPolecatStopPendingWork(t *testing.T) {
 	t.Parallel()
 	t.Run("clean feature branch has no pending work", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 
 		pending, reason, err := polecatStopPendingWork(repo, polecatStopTestBranch)
@@ -28,6 +29,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("non-runtime dirty work is pending", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "internal/cmd/work.go", "package cmd\n")
 
@@ -44,6 +46,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("runtime-only dirty work is ignored", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, ".opencode/state.json", "{}\n")
 
@@ -57,6 +60,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("branch stash is pending", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "stash-work.txt", "saved work\n")
 		runPolecatStopTestGit(t, repo, "stash", "push", "-u", "-m", "branch stash")
@@ -74,6 +78,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("pushed source branch still pending until target contains it", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "submitted.go", "package main\n")
 		runPolecatStopTestGit(t, repo, "add", "submitted.go")
@@ -93,6 +98,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("target-contained commit has no pending work", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "merged.go", "package main\n")
 		runPolecatStopTestGit(t, repo, "add", "merged.go")
@@ -112,6 +118,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("invalid repo fails closed", func(t *testing.T) {
+		t.Parallel()
 		pending, reason, err := polecatStopPendingWork(t.TempDir(), polecatStopTestBranch)
 		if err == nil {
 			t.Fatal("polecatStopPendingWork error = nil, want error")
@@ -188,6 +195,19 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	})
 }
 
+// amendPolecatStopCommitDate re-dates repo's HEAD commit, author and
+// committer, to when.
+func amendPolecatStopCommitDate(t *testing.T, repo string, when time.Time) {
+	t.Helper()
+	date := when.Format(time.RFC3339)
+	cmd := exec.Command("git", "commit", "--amend", "--no-edit", "--date", date)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+date)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit --amend: %v\n%s", err, out)
+	}
+}
+
 // TestPolecatStopCommittedWithinGrace guards the second turn-boundary signal
 // for gt-couv: a commit that just landed means the polecat is very likely
 // still mid-formula (about to build/lint/test), while an old commit carries
@@ -196,6 +216,10 @@ func TestPolecatStopCommittedWithinGrace(t *testing.T) {
 	t.Parallel()
 	t.Run("fresh commit is within grace", func(t *testing.T) {
 		repo := initPolecatStopTestRepo(t)
+		// The repo is a copy of a template built once per test binary, so
+		// its commit is as old as the template. Re-date it to now: this case
+		// is about a commit that just landed.
+		amendPolecatStopCommitDate(t, repo, time.Now())
 
 		recent, err := polecatStopCommittedWithinGrace(repo)
 		if err != nil {
@@ -208,13 +232,7 @@ func TestPolecatStopCommittedWithinGrace(t *testing.T) {
 
 	t.Run("old commit is outside grace", func(t *testing.T) {
 		repo := initPolecatStopTestRepo(t)
-		oldDate := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-		cmd := exec.Command("git", "commit", "--amend", "--no-edit", "--date", oldDate)
-		cmd.Dir = repo
-		cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+oldDate)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git commit --amend: %v\n%s", err, out)
-		}
+		amendPolecatStopCommitDate(t, repo, time.Now().Add(-10*time.Minute))
 
 		recent, err := polecatStopCommittedWithinGrace(repo)
 		if err != nil {
@@ -489,7 +507,17 @@ func TestParseStopCheckProcessTable(t *testing.T) {
 
 func initPolecatStopTestRepo(t *testing.T) string {
 	t.Helper()
-	tmp := t.TempDir()
+	root, _ := cachedGitFixture(t, "polecat-stop", func(dir string) (struct{}, error) {
+		buildPolecatStopTestRepo(t, dir)
+		return struct{}{}, nil
+	})
+	return filepath.Join(root, "repo")
+}
+
+// buildPolecatStopTestRepo makes initPolecatStopTestRepo's repo at tmp/repo,
+// with its origin at tmp/origin.git.
+func buildPolecatStopTestRepo(t *testing.T, tmp string) {
+	t.Helper()
 	repo := filepath.Join(tmp, "repo")
 	origin := filepath.Join(tmp, "origin.git")
 
@@ -509,7 +537,6 @@ func initPolecatStopTestRepo(t *testing.T) string {
 	runPolecatStopTestGit(t, repo, "push", "-u", "origin", "main")
 	runPolecatStopTestGit(t, repo, "checkout", "-b", polecatStopTestBranch)
 
-	return repo
 }
 
 func writePolecatStopTestFile(t *testing.T, repo, rel, contents string) {

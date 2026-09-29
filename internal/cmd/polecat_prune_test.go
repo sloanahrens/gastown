@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -45,14 +47,21 @@ func notFoundLookup(string) (polecat.State, error) {
 // branch as protected and mask the rules under test.
 func stubRemotePolecatBranchOpenPR(t *testing.T, openPRs ...string) *[]git.PullRequestRef {
 	t.Helper()
-	var calls []git.PullRequestRef
+	lookup, calls := fakeOpenPRLookup(openPRs...)
 	old := remotePolecatBranchHasOpenPR
-	remotePolecatBranchHasOpenPR = func(_ *git.Git, branch, headSHA string) bool {
+	remotePolecatBranchHasOpenPR = lookup
+	t.Cleanup(func() { remotePolecatBranchHasOpenPR = old })
+	return calls
+}
+
+// fakeOpenPRLookup is the open-PR guard stubRemotePolecatBranchOpenPR
+// installs, for a test that hands it to pruneRemotePolecatBranches directly.
+func fakeOpenPRLookup(openPRs ...string) (func(*git.Git, string, string) bool, *[]git.PullRequestRef) {
+	var calls []git.PullRequestRef
+	return func(_ *git.Git, branch, headSHA string) bool {
 		calls = append(calls, git.PullRequestRef{Branch: branch, HeadSHA: headSHA})
 		return slices.Contains(openPRs, branch)
-	}
-	t.Cleanup(func() { remotePolecatBranchHasOpenPR = old })
-	return &calls
+	}, &calls
 }
 
 // workingLookup simulates a polecat that is actively working — live, in the
@@ -62,7 +71,8 @@ func workingLookup(string) (polecat.State, error) {
 }
 
 func TestPruneRemotePolecatBranchesDryRunIncludesPatchEquivalentBranch(t *testing.T) {
-	stubRemotePolecatBranchOpenPR(t)
+	t.Parallel()
+	hasOpenPR, _ := fakeOpenPRLookup()
 	localDir, mainBranch := initPolecatPruneTestRepo(t)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prunepatch", "", oldEnoughSuffix())
@@ -71,15 +81,17 @@ func TestPruneRemotePolecatBranchesDryRunIncludesPatchEquivalentBranch(t *testin
 		t.Fatalf("FetchPrune: %v", err)
 	}
 
-	out := captureStdout(t, func() {
-		result, err := pruneRemotePolecatBranches(notFoundLookup, repoGit, true)
+	var outBuf bytes.Buffer
+	func() {
+		result, err := pruneRemotePolecatBranches(&outBuf, notFoundLookup, hasOpenPR, repoGit, true)
 		if err != nil {
 			t.Fatalf("pruneRemotePolecatBranches: %v", err)
 		}
 		if result.Pruned != 1 {
 			t.Fatalf("Pruned = %d, want 1", result.Pruned)
 		}
-	})
+	}()
+	out := outBuf.String()
 	assertRemotePruneDryRunKeptBranch(t, repoGit, out, branch)
 }
 
@@ -109,7 +121,8 @@ func TestRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *testing.T) 
 }
 
 func TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork(t *testing.T) {
-	stubRemotePolecatBranchOpenPR(t)
+	t.Parallel()
+	hasOpenPR, _ := fakeOpenPRLookup()
 	localDir, mainBranch := initPolecatPruneOriginForkRepo(t)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("forkonly", "", oldEnoughSuffix())
@@ -141,15 +154,17 @@ func TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork(t *testing.T) {
 		t.Fatalf("CleanDefaultBranchBaseRef = %q, want upstream/%s", got, mainBranch)
 	}
 
-	out := captureStdout(t, func() {
-		result, err := pruneRemotePolecatBranches(notFoundLookup, repoGit, true)
+	var outBuf bytes.Buffer
+	func() {
+		result, err := pruneRemotePolecatBranches(&outBuf, notFoundLookup, hasOpenPR, repoGit, true)
 		if err != nil {
 			t.Fatalf("pruneRemotePolecatBranches: %v", err)
 		}
 		if result.Pruned != 0 {
 			t.Fatalf("Pruned = %d, want 0 because branch is not preserved on upstream/%s", result.Pruned, mainBranch)
 		}
-	})
+	}()
+	out := outBuf.String()
 	if strings.Contains(out, branch) {
 		t.Fatalf("dry-run output %q should not include fork-only branch %s", out, branch)
 	}
@@ -163,7 +178,8 @@ func TestPruneRemotePolecatBranchesUsesUpstreamBaseForOriginFork(t *testing.T) {
 }
 
 func TestPruneRemotePolecatBranchesNeverPrunesFreshNoCommitBranch(t *testing.T) {
-	stubRemotePolecatBranchOpenPR(t)
+	t.Parallel()
+	hasOpenPR, _ := fakeOpenPRLookup()
 	localDir, mainBranch := initPolecatPruneTestRepo(t)
 	repoGit := git.NewGit(localDir)
 	// A branch generated moments ago, with zero commits ahead of main, is
@@ -179,7 +195,7 @@ func TestPruneRemotePolecatBranchesNeverPrunesFreshNoCommitBranch(t *testing.T) 
 	// Even a lookup reporting no live identity at all must not save this
 	// branch — the age gate is a hard backstop, not merely a tie-breaker
 	// consulted after liveness clears.
-	result, err := pruneRemotePolecatBranches(notFoundLookup, repoGit, false)
+	result, err := pruneRemotePolecatBranches(io.Discard, notFoundLookup, hasOpenPR, repoGit, false)
 	if err != nil {
 		t.Fatalf("pruneRemotePolecatBranches: %v", err)
 	}
@@ -190,7 +206,8 @@ func TestPruneRemotePolecatBranchesNeverPrunesFreshNoCommitBranch(t *testing.T) 
 }
 
 func TestPruneRemotePolecatBranchesNeverPrunesLiveWorkingPolecatEvenIfOld(t *testing.T) {
-	stubRemotePolecatBranchOpenPR(t)
+	t.Parallel()
+	hasOpenPR, _ := fakeOpenPRLookup()
 	localDir, mainBranch := initPolecatPruneTestRepo(t)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("livecat", "gt-live", oldEnoughSuffix())
@@ -202,7 +219,7 @@ func TestPruneRemotePolecatBranchesNeverPrunesLiveWorkingPolecatEvenIfOld(t *tes
 	// Old enough to clear the age gate on its own, but the polecat that owns
 	// it is still actively working — the liveness check must block deletion
 	// independently of age.
-	result, err := pruneRemotePolecatBranches(workingLookup, repoGit, false)
+	result, err := pruneRemotePolecatBranches(io.Discard, workingLookup, hasOpenPR, repoGit, false)
 	if err != nil {
 		t.Fatalf("pruneRemotePolecatBranches: %v", err)
 	}
@@ -213,7 +230,8 @@ func TestPruneRemotePolecatBranchesNeverPrunesLiveWorkingPolecatEvenIfOld(t *tes
 }
 
 func TestPruneRemotePolecatBranchesPrunesTrulyStaleMergedBranch(t *testing.T) {
-	stubRemotePolecatBranchOpenPR(t)
+	t.Parallel()
+	hasOpenPR, _ := fakeOpenPRLookup()
 	localDir, mainBranch := initPolecatPruneTestRepo(t)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("stalecat", "gt-stale", oldEnoughSuffix())
@@ -222,7 +240,7 @@ func TestPruneRemotePolecatBranchesPrunesTrulyStaleMergedBranch(t *testing.T) {
 		t.Fatalf("FetchPrune: %v", err)
 	}
 
-	result, err := pruneRemotePolecatBranches(notFoundLookup, repoGit, false)
+	result, err := pruneRemotePolecatBranches(io.Discard, notFoundLookup, hasOpenPR, repoGit, false)
 	if err != nil {
 		t.Fatalf("pruneRemotePolecatBranches: %v", err)
 	}
@@ -245,6 +263,7 @@ func TestPruneRemotePolecatBranchesPrunesTrulyStaleMergedBranch(t *testing.T) {
 // points at it, because deleting the branch makes GitHub auto-close the PR as
 // "closed" instead of "merged" and destroys the audit trail.
 func TestPruneRemotePolecatBranchesLeavesBranchWithOpenPR(t *testing.T) {
+	t.Parallel()
 	localDir, mainBranch := initPolecatPruneTestRepo(t)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prcat", "gt-pr", oldEnoughSuffix())
@@ -257,9 +276,10 @@ func TestPruneRemotePolecatBranchesLeavesBranchWithOpenPR(t *testing.T) {
 		t.Fatalf("Rev origin/%s: %v", branch, err)
 	}
 
-	calls := stubRemotePolecatBranchOpenPR(t, branch)
-	out := captureStdout(t, func() {
-		result, err := pruneRemotePolecatBranches(notFoundLookup, repoGit, false)
+	hasOpenPR, calls := fakeOpenPRLookup(branch)
+	var outBuf bytes.Buffer
+	func() {
+		result, err := pruneRemotePolecatBranches(&outBuf, notFoundLookup, hasOpenPR, repoGit, false)
 		if err != nil {
 			t.Fatalf("pruneRemotePolecatBranches: %v", err)
 		}
@@ -269,7 +289,8 @@ func TestPruneRemotePolecatBranchesLeavesBranchWithOpenPR(t *testing.T) {
 		if result.OpenPR != 1 {
 			t.Fatalf("OpenPR = %d, want 1", result.OpenPR)
 		}
-	})
+	}()
+	out := outBuf.String()
 	if !strings.Contains(out, "open PR exists (gas-fk4)") || !strings.Contains(out, branch) {
 		t.Fatalf("output %q should report %s as skipped for an open PR", out, branch)
 	}
@@ -285,15 +306,17 @@ func TestPruneRemotePolecatBranchesLeavesBranchWithOpenPR(t *testing.T) {
 
 	// A dry run answers what a real run would do, so it must report the same
 	// skip rather than promising a delete the guarded run would refuse.
-	dryOut := captureStdout(t, func() {
-		result, err := pruneRemotePolecatBranches(notFoundLookup, repoGit, true)
+	var dryOutBuf bytes.Buffer
+	func() {
+		result, err := pruneRemotePolecatBranches(&dryOutBuf, notFoundLookup, hasOpenPR, repoGit, true)
 		if err != nil {
 			t.Fatalf("pruneRemotePolecatBranches dry run: %v", err)
 		}
 		if result.Pruned != 0 || result.OpenPR != 1 {
 			t.Fatalf("dry run = %+v, want Pruned 0 and OpenPR 1", result)
 		}
-	})
+	}()
+	dryOut := dryOutBuf.String()
 	if strings.Contains(dryOut, "Would delete remote") {
 		t.Fatalf("dry-run output %q must not promise the PR-protected branch a delete", dryOut)
 	}

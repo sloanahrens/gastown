@@ -40,6 +40,7 @@ func writePrimeDeaconState(t *testing.T, townRoot, contents string) string {
 // its fast path for that combination when the static role text has not been
 // delivered. This predicate must not reset on that combination either way.
 func TestPrimeResetsDeaconPatrolState_FreshSessionOnly(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name          string
 		role          Role

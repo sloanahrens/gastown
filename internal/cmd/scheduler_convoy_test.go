@@ -21,6 +21,7 @@ import (
 // job; the deferred path hands it to scheduleBead through
 // convoyScheduleOptionsFor, which the row exercises in full.
 func TestConvoyDispatchPathsCarryRecordedAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	const want = "deepseek-flash"
 
@@ -72,6 +73,7 @@ func TestConvoyDispatchPathsCarryRecordedAgent(t *testing.T) {
 // must reach every candidate, while the no-agent fallback description names the
 // rig each candidate is actually going to.
 func TestConvoyDispatchPlanPerCandidateAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	candidates := []convoyCandidate{

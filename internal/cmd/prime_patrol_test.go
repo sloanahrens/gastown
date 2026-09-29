@@ -316,6 +316,7 @@ func TestEnsurePrimePatrol_NonPatrolRolesAreUntouched(t *testing.T) {
 }
 
 func TestPrimePatrolSection_NamesThePatrolAndItsChecklist(t *testing.T) {
+	t.Parallel()
 	live := primePatrolSection(primePatrolStatus{
 		Role: RoleWitness, Formula: constants.MolWitnessPatrol, PatrolID: "gt-wisp-abc",
 	})
@@ -345,6 +346,7 @@ func TestPrimePatrolSection_NamesThePatrolAndItsChecklist(t *testing.T) {
 // Path 1 of the bug: the molecule section is the one the hook budget drops, so
 // the patrol line has to survive on its own (gt-e1ie).
 func TestAssemblePrimePayload_PatrolLineSurvivesDroppedMoleculeSection(t *testing.T) {
+	t.Parallel()
 	status := primePatrolStatus{Role: RoleWitness, Formula: constants.MolWitnessPatrol, PatrolID: "gt-wisp-abc"}
 	parts := primeParts{
 		session:    func() string { return "GAS TOWN role:witness pid:1 session:s\n" },
@@ -431,6 +433,7 @@ func TestRunPrimeCompactResume_NonPatrolRoleTouchesNoPatrolState(t *testing.T) {
 // Every patrol role reads its wisp through one builder, or prime seeds a wisp
 // the emitters and `gt hook` cannot see (gt-e1ie).
 func TestPatrolConfigForRole_AddressesEachRoleTheWayHookQueriesIt(t *testing.T) {
+	t.Parallel()
 	want := map[Role]struct {
 		mol      string
 		assignee string
@@ -462,6 +465,7 @@ func TestPatrolConfigForRole_AddressesEachRoleTheWayHookQueriesIt(t *testing.T) 
 // Three emitters and the patrol commands share these strings; a role named
 // wrongly in the handoff command sends observations to the wrong session.
 func TestPatrolWorkLoopSteps_CarryTheRoleHandoffSubject(t *testing.T) {
+	t.Parallel()
 	for role, subject := range map[string]string{"witness": "Witness patrol", "refinery": "Refinery patrol", "deacon": "Deacon patrol"} {
 		steps := patrolWorkLoopSteps(role)
 		if len(steps) != 2 {
@@ -591,6 +595,7 @@ func TestOutputMoleculeContext_UnresolvedStatusRendersNothing(t *testing.T) {
 // so wisps spawned by those commands got no rig/prefix vars even though the
 // witness/refinery patrol formulas expect them.
 func TestPatrolConfigForRole_ExtraVarsFlowToEveryCaller(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, "testrig"), 0o755); err != nil {
 		t.Fatalf("setup rig dir: %v", err)
