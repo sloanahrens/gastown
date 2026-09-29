@@ -432,7 +432,7 @@ Bash call with
 keeps it running across your turns, and notifies you when it exits:
 
 ```bash
-GATE_DIR="${TMPDIR:-/tmp}/gt-refinery-$(id -u)"; mkdir -p -m 700 "$GATE_DIR"
+GATE_DIR="${TMPDIR:-/tmp}/gt-refinery-$(id -u)"; mkdir -p -m 700 "$GATE_DIR" && [ ! -L "$GATE_DIR" ] && [ -O "$GATE_DIR" ] && chmod 700 "$GATE_DIR" || { echo "REFUSED: $GATE_DIR is a symlink or not owned by $(id -un); remove it and retry" >&2; exit 1; }
 gt mq batch run <rig> --json > "$GATE_DIR/<rig>-batch.json" 2> "$GATE_DIR/<rig>-batch.err"
 echo "BATCH_EXIT=$?" >> "$GATE_DIR/<rig>-batch.err"
 ```
@@ -441,6 +441,9 @@ Fixed paths, so nothing has to be remembered across calls. They sit under
 your own uid's mode-0700 directory, never bare in `/tmp`: the result file
 decides what gets cleaned up as landed, so a predictable name in a
 world-writable directory is one another local user can pre-create or symlink.
+`mkdir -p` accepts a directory that already exists, so the setup line also
+refuses a symlink or a directory you do not own (gt-22hdp.51). On `REFUSED`,
+stop and escalate to the mayor: someone else created that path.
 Each fenced block is its own shell, so the later calls spell the directory
 out as `"${TMPDIR:-/tmp}/gt-refinery-$(id -u)"` rather than expecting
 `$GATE_DIR` to survive. Wait for the
@@ -772,7 +775,7 @@ to a file so a red run stays inspectable. No pipeline: the exit code must
 come straight from the gate, and PIPESTATUS does not exist in zsh:
 
 ```bash
-GATE_DIR="${TMPDIR:-/tmp}/gt-refinery-$(id -u)"; mkdir -p -m 700 "$GATE_DIR"
+GATE_DIR="${TMPDIR:-/tmp}/gt-refinery-$(id -u)"; mkdir -p -m 700 "$GATE_DIR" && [ ! -L "$GATE_DIR" ] && [ -O "$GATE_DIR" ] && chmod 700 "$GATE_DIR" || { echo "REFUSED: $GATE_DIR is a symlink or not owned by $(id -un); remove it and retry" >&2; exit 1; }
 gt slot run --role {{rig}}/refinery -- {{test_command}} > "$GATE_DIR/<mr-bead-id>-gate.log" 2>&1; echo "GATE_EXIT=$?"; tail -40 "$GATE_DIR/<mr-bead-id>-gate.log"
 ```
 
@@ -827,7 +830,7 @@ is N=1). Reuse this same N below in the FIX_NEEDED mail and the reject
 reason.
 
 ```bash
-REVIEW_DIR="${TMPDIR:-/tmp}/gt-mq-review-$(id -u)"; mkdir -p -m 700 "$REVIEW_DIR"
+REVIEW_DIR="${TMPDIR:-/tmp}/gt-mq-review-$(id -u)"; mkdir -p -m 700 "$REVIEW_DIR" && [ ! -L "$REVIEW_DIR" ] && [ -O "$REVIEW_DIR" ] && chmod 700 "$REVIEW_DIR" || { echo "REFUSED: $REVIEW_DIR is a symlink or not owned by $(id -un); remove it and retry" >&2; exit 1; }
 gt mq review <mr-bead-id> --rehearsed temp --attempt <N> --json > "$REVIEW_DIR/<mr-bead-id>.json"
 REVIEW_EXIT=$?
 cat "$REVIEW_DIR/<mr-bead-id>.json"
