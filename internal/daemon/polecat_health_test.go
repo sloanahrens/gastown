@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +13,9 @@ import (
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // writeFakeTestTmux creates a shell script in dir named "tmux" that simulates
@@ -83,23 +82,19 @@ func writeFakeBDWithHookBead(t *testing.T, dir, agentState, hookBeadID, hookBead
 // heartbeat fires during the window between bead creation (hook_bead set atomically
 // by gt sling) and the actual tmux session launch, causing a second Claude process.
 func TestCheckPolecatHealth_SkipsSpawning(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	// Use a recent timestamp so the spawning guard's time-bound is satisfied
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeTestBD(t, binDir, "spawning", "spawning", "gt-xyz", recentTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -118,23 +113,19 @@ func TestCheckPolecatHealth_SkipsSpawning(t *testing.T) {
 // This ensures the spawning guard in issue #1752 does not accidentally suppress
 // legitimate crash detection for polecats that were running normally.
 func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeTestBD(t, binDir, "working", "working", "gt-xyz", recentTime)
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -164,23 +155,19 @@ func TestCheckPolecatHealth_DetectsCrashedPolecat(t *testing.T) {
 // TestCheckPolecatHealth_DetectsCrashedPolecat is the control: same fakes,
 // no marker, crash reported.
 func TestCheckPolecatHealth_SkipsParkedPolecat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeTestBD(t, binDir, "working", "working", "gt-xyz", recentTime)
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	if err := agentpause.Pause(townRoot, "myr", constants.RolePolecat, "mycat", "deliberate stop (gt session stop)", "overseer", ""); err != nil {
@@ -205,23 +192,19 @@ func TestCheckPolecatHealth_SkipsParkedPolecat(t *testing.T) {
 // has a time-bound: polecats stuck in agent_state=spawning for more than 5 minutes
 // are treated as crashed (gt sling may have failed during spawn).
 func TestCheckPolecatHealth_SpawningGuardExpires(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	// Use a timestamp >5 minutes ago to expire the spawning guard
 	oldTime := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
 	bdPath := writeFakeTestBD(t, binDir, "spawning", "spawning", "gt-xyz", oldTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -240,24 +223,20 @@ func TestCheckPolecatHealth_SpawningGuardExpires(t *testing.T) {
 // longer has a supported structured agent_state writer, so the description is
 // Gastown's active contract and the DB column is legacy fallback only.
 func TestCheckPolecatHealth_DescriptionStateOverridesLegacyDBColumn(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	// Description says "spawning" (current Gastown contract) while the legacy
 	// structured column still says "working".
 	bdPath := writeFakeTestBD(t, binDir, "spawning", "working", "gt-xyz", recentTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -277,22 +256,18 @@ func TestCheckPolecatHealth_DescriptionStateOverridesLegacyDBColumn(t *testing.T
 // when a polecat completes work normally, the hook_bead gets closed but the
 // stale reference remains on the agent bead, causing repeated false alerts.
 func TestCheckPolecatHealth_SkipsClosedHookBead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeBDWithHookBead(t, binDir, "working", "fe-xyz", "closed", recentTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -311,32 +286,20 @@ func TestCheckPolecatHealth_SkipsClosedHookBead(t *testing.T) {
 // `gt mail send` with a CRASHED_POLECAT subject. Restart is deferred to the
 // stuck-agent-dog plugin for context-aware recovery.
 func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeTestBD(t, binDir, "working", "working", "gt-xyz", recentTime)
 
-	// Create a fake gt script that logs invocations to a file
-	gtLog := filepath.Join(t.TempDir(), "gt-invocations.log")
-	fakeGt := filepath.Join(binDir, "gt")
-	gtScript := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s\n", gtLog)
-	if err := os.WriteFile(fakeGt, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("writing fake gt: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
+	notes := notifyfake.New()
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
-		gtPath: fakeGt,
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notes,
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -346,20 +309,16 @@ func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
 		t.Fatalf("expected CRASH DETECTED, got: %q", got)
 	}
 
-	// Verify gt mail send was called with CRASHED_POLECAT subject
-	logData, err := os.ReadFile(gtLog)
-	if err != nil {
-		t.Fatalf("reading gt invocation log: %v", err)
+	// The witness is told by mail with a CRASHED_POLECAT subject.
+	mails := notes.Mails()
+	if len(mails) != 1 {
+		t.Fatalf("expected one mail to the witness, got: %+v", notes.Calls())
 	}
-	invocations := string(logData)
-	if !strings.Contains(invocations, "mail send") {
-		t.Errorf("expected gt mail send invocation, got: %q", invocations)
+	if mails[0].To != "myr/witness" {
+		t.Errorf("mail to %q, want the witness address myr/witness", mails[0].To)
 	}
-	if !strings.Contains(invocations, "CRASHED_POLECAT") {
-		t.Errorf("expected CRASHED_POLECAT in mail subject, got: %q", invocations)
-	}
-	if !strings.Contains(invocations, "myr/witness") {
-		t.Errorf("expected witness address myr/witness, got: %q", invocations)
+	if !strings.Contains(mails[0].Subject, "CRASHED_POLECAT") {
+		t.Errorf("expected CRASHED_POLECAT in mail subject, got: %q", mails[0].Subject)
 	}
 }
 
@@ -370,22 +329,18 @@ func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
 // being closed, the daemon heartbeat fires on the dead session + open hook_bead
 // combination, causing repeated false CRASHED_POLECAT alerts to the witness.
 func TestCheckPolecatHealth_SkipsDonePolecat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeBDWithHookBead(t, binDir, "done", "gt-xyz", "open", recentTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -409,22 +364,18 @@ func TestCheckPolecatHealth_SkipsDonePolecat(t *testing.T) {
 // but leaves the work bead open, causing repeated false RECOVERY_NEEDED alerts
 // on every heartbeat cycle.
 func TestCheckPolecatHealth_SkipsNukedPolecat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
+	t.Parallel()
 	binDir := t.TempDir()
-	writeFakeTestTmux(t, binDir)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeBDWithHookBead(t, binDir, "nuked", "gt-xyz", "open", recentTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -439,6 +390,15 @@ func TestCheckPolecatHealth_SkipsNukedPolecat(t *testing.T) {
 	if strings.Contains(got, "CRASH DETECTED") {
 		t.Errorf("nuked polecat must not trigger CRASH DETECTED, got: %q", got)
 	}
+}
+
+// polecatSessionTmux returns a fake tmux holding the polecat session
+// "myr-mycat", its pane running paneCommand ("bash" for an idle shell),
+// created at created.
+func polecatSessionTmux(paneCommand string, created time.Time) *fakeTmux {
+	tm := newFakeTmux(newFixedClock())
+	tm.addSession("myr-mycat", paneCommand, created)
+	return tm
 }
 
 // writeFakeTmuxWithAgent creates a shell script that simulates a live tmux session
@@ -493,9 +453,6 @@ func writeFakeBDLookupFail(t *testing.T, dir string, hasWork bool) string {
 // confirms the polecat has an open work bead assigned. This is the regression test
 // for the working-bead-lookup-failed kill bug (GH#3342 followup).
 func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
 	old := session.DefaultRegistry()
 	reg := session.NewPrefixRegistry()
 	reg.Register("myr", "myr")
@@ -503,18 +460,16 @@ func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
 	defer session.SetDefaultRegistry(old)
 
 	binDir := t.TempDir()
-	writeFakeTmuxIdleSession(t, binDir)
 	bdPath := writeFakeBDLookupFail(t, binDir, true /* hasWork */)
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmuxWithSocket(""),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")
@@ -537,9 +492,6 @@ func TestReapIdlePolecat_SkipsWhenBeadLookupFailsButHasWork(t *testing.T) {
 // DOES kill a polecat when the agent bead lookup fails, no work is assigned, and the
 // agent process is not running. Ensures the hasAssignedOpenWork guard doesn't over-protect.
 func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
 	old := session.DefaultRegistry()
 	reg := session.NewPrefixRegistry()
 	reg.Register("myr", "myr")
@@ -547,18 +499,16 @@ func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
 	defer session.SetDefaultRegistry(old)
 
 	binDir := t.TempDir()
-	writeFakeTmuxIdleSession(t, binDir)
 	bdPath := writeFakeBDLookupFail(t, binDir, false /* no work */)
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmuxWithSocket(""),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")
@@ -578,6 +528,9 @@ func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
 	if !strings.Contains(logBuf.String(), "working-bead-lookup-failed") {
 		t.Errorf("expected working-bead-lookup-failed reason, got: %q", logBuf.String())
 	}
+	if alive, _ := d.tmux.HasSession("myr-mycat"); alive {
+		t.Error("the reaped polecat's session is still alive")
+	}
 }
 
 // TestReapIdlePolecat_SkipsActiveAgent verifies that reapIdlePolecat does NOT kill
@@ -586,9 +539,6 @@ func TestReapIdlePolecat_ReapsWhenBeadLookupFailsAndNoWork(t *testing.T) {
 // the hook while the agent is actively working, causing the daemon to incorrectly
 // reap the session.
 func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
 	// Register "myr" prefix so session name resolves to "myr-mycat"
 	old := session.DefaultRegistry()
 	reg := session.NewPrefixRegistry()
@@ -597,21 +547,18 @@ func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 	defer session.SetDefaultRegistry(old)
 
 	binDir := t.TempDir()
-	// Fake tmux: session alive, agent (codex) running in pane
-	writeFakeTmuxWithAgent(t, binDir, "codex")
 	// Fake bd: agent bead exists but hook_bead is empty (cleared by failed sling)
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeTestBD(t, binDir, "working", "working", "", recentTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     polecatSessionTmux("codex", time.Now().Add(-time.Hour)),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	// Write a stale heartbeat (working state, 20 minutes old) so the reaper considers it
@@ -637,9 +584,6 @@ func TestReapIdlePolecat_SkipsActiveAgent(t *testing.T) {
 // a polecat whose hook_bead is missing AND whose agent process is NOT running
 // (idle shell). This ensures the GH#3342 fix doesn't prevent legitimate reaping.
 func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux and bd")
-	}
 	// Register "myr" prefix so session name resolves to "myr-mycat"
 	old := session.DefaultRegistry()
 	reg := session.NewPrefixRegistry()
@@ -648,21 +592,18 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 	defer session.SetDefaultRegistry(old)
 
 	binDir := t.TempDir()
-	// Fake tmux: session alive, but only a shell running (no agent)
-	writeFakeTmuxIdleSession(t, binDir)
 	// Fake bd: agent bead exists but hook_bead is empty
 	recentTime := time.Now().UTC().Format(time.RFC3339)
 	bdPath := writeFakeTestBD(t, binDir, "working", "working", "", recentTime)
 
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmuxWithSocket(""),
-		bdPath: bdPath,
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
 	}
 
 	// Write a stale heartbeat (working state, 20 minutes old) so the reaper considers it
@@ -685,6 +626,9 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 	if !strings.Contains(got, "working-no-hook") {
 		t.Errorf("expected working-no-hook reason, got: %q", got)
 	}
+	if alive, _ := d.tmux.HasSession("myr-mycat"); alive {
+		t.Error("the reaped polecat's session is still alive")
+	}
 }
 
 // TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat verifies that
@@ -694,38 +638,19 @@ func TestReapIdlePolecat_ReapsIdleNoHook(t *testing.T) {
 // (state=exiting, hours old) until the new incarnation writes its own — the
 // reaper must not treat that inherited staleness as the new session's idle time.
 func TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux")
-	}
 	old := session.DefaultRegistry()
 	reg := session.NewPrefixRegistry()
 	reg.Register("myr", "myr")
 	session.SetDefaultRegistry(reg)
 	defer session.SetDefaultRegistry(old)
 
-	binDir := t.TempDir()
-	// Fake tmux: session alive, and reports session_created as 3 minutes ago —
-	// simulating a freshly re-allocated incarnation of a reused polecat name.
-	recentUnix := time.Now().Add(-3 * time.Minute).Unix()
-	script := fmt.Sprintf("#!/bin/sh\n"+
-		"case \"$*\" in\n"+
-		"  *has-session*) exit 0;;\n"+
-		"  *list-sessions*) echo '%d';;\n"+
-		"  *kill-session*) exit 0;;\n"+
-		"  *) exit 1;;\n"+
-		"esac\n", recentUnix)
-	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0755); err != nil {
-		t.Fatalf("writing fake tmux: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmuxWithSocket(""),
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     polecatSessionTmux("bash", time.Now().Add(-3*time.Minute)),
+		notifier: notifyfake.New(),
 	}
 
 	// Heartbeat left behind by a PREVIOUS incarnation of this name: state=exiting,
@@ -764,26 +689,19 @@ func TestReapIdlePolecat_SkipsFreshSessionWithStaleInheritedHeartbeat(t *testing
 // renewing, the session really is abandoned and the reaper must still reclaim
 // the API slot.
 func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for tmux")
-	}
 	old := session.DefaultRegistry()
 	reg := session.NewPrefixRegistry()
 	reg.Register("myr", "myr")
 	session.SetDefaultRegistry(reg)
 	defer session.SetDefaultRegistry(old)
 
-	binDir := t.TempDir()
-	writeFakeTmuxIdleSession(t, binDir)
-
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
-
 	townRoot := t.TempDir()
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmuxWithSocket(""),
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
+		notifier: notifyfake.New(),
 	}
 
 	sessionName := session.PolecatSessionName(session.PrefixFor("myr"), "mycat")
