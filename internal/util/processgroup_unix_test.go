@@ -3,12 +3,11 @@
 package util
 
 import (
+	"bufio"
 	"context"
 	"errors"
-	"fmt"
-	"os"
+	"io"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,12 +23,7 @@ import (
 func TestKillProcessGroup_TakesTheGrandchild(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "grandchild.pid")
-	pgrep := fmt.Sprintf("sleep 60 & echo $! > %q; wait", pidFile)
-
-	cmd, done := startInGroup(t, pgrep)
-	grandchild := waitForPID(t, pidFile)
+	cmd, done, grandchild := startInGroup(t, "sleep 60 & echo $!; wait")
 
 	if err := KillProcessGroup(cmd); err != nil {
 		t.Fatalf("KillProcessGroup: %v", err)
@@ -51,14 +45,9 @@ func TestKillProcessGroup_EscalatesPastSIGTERM(t *testing.T) {
 	// siblings would race it.
 	stubProcessGroupKillGrace(t, 300*time.Millisecond)
 
-	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "grandchild.pid")
 	// The shell ignores SIGTERM, and its children inherit that disposition, so
 	// nothing in the group is reachable by a polite signal.
-	stubborn := fmt.Sprintf(`trap "" TERM; sleep 60 & echo $! > %q; wait`, pidFile)
-
-	cmd, done := startInGroup(t, stubborn)
-	grandchild := waitForPID(t, pidFile)
+	cmd, done, grandchild := startInGroup(t, `trap "" TERM; sleep 60 & echo $!; wait`)
 
 	start := time.Now()
 	if err := KillProcessGroup(cmd); err != nil {
@@ -77,54 +66,68 @@ func TestKillProcessGroup_EscalatesPastSIGTERM(t *testing.T) {
 }
 
 // TestSetProcessGroup_CancelTakesTheGrandchild guards the wiring every gate in
-// the town depends on: a context deadline on a command configured with
-// SetProcessGroup must reach the grandchild, not just the shell.
+// the town depends on: the end of a command's context (a deadline, in the
+// gates) on a command configured with SetProcessGroup must reach the
+// grandchild, not just the shell.
+//
+// The test ends the context itself, once the grandchild's pid is on disk. It
+// used to give the context a 300 ms deadline, which a loaded host could spend
+// before the shell even wrote the pid, failing with "no pid was written"
+// (a 1 ms deadline reproduces that every time). cmd.Cancel runs the same way
+// whichever ended the context.
 func TestSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
 	// Not parallel: this test writes ProcessGroupKillGrace, and parallel
 	// siblings would race it.
 	stubProcessGroupKillGrace(t, 300*time.Millisecond)
 
-	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "grandchild.pid")
-	pgrep := fmt.Sprintf("sleep 60 & echo $! > %q; wait", pidFile)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", pgrep)
+	cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 60 & echo $!; wait")
 	SetProcessGroup(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(func() { _ = KillProcessGroup(cmd) })
-	grandchild := waitForPID(t, pidFile)
+	grandchild := readPID(t, stdout)
 
+	cancel()
 	if err := cmd.Wait(); err == nil {
-		t.Error("cmd.Wait() = nil, want the error of a command killed at its deadline")
+		t.Error("cmd.Wait() = nil, want the error of a command killed when its context ended")
 	}
 
 	waitForGone(t, grandchild)
 }
 
 // startInGroup starts sh with script under SetProcessGroup and returns the
-// running command plus a channel carrying its Wait error. The context is
+// running command, a channel carrying its Wait error, and the pid the script
+// printed on its first line of stdout (the grandchild's). The context is
 // background — SetProcessGroup requires a CommandContext command, and these
 // tests drive the kill themselves.
-func startInGroup(t *testing.T, script string) (*exec.Cmd, <-chan error) {
+func startInGroup(t *testing.T, script string) (*exec.Cmd, <-chan error, int) {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "sh", "-c", script)
 	SetProcessGroup(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sh -c %q: %v", script, err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
 	t.Cleanup(func() {
 		// A failed assertion leaves the group alive; take it down so the test
 		// binary does not hand a stray `sleep 60` to the rest of the suite.
 		_ = KillProcessGroup(cmd)
 	})
-	return cmd, done
+	pid := readPID(t, stdout)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	return cmd, done, pid
 }
 
 // stubProcessGroupKillGrace shrinks the SIGTERM grace so a test can drive the
@@ -171,17 +174,19 @@ func waitForGroupGone(t *testing.T, pgid int) {
 	}
 }
 
-func waitForPID(t *testing.T, pidFile string) int {
+// readPID reads the pid a script printed as its first line of stdout. The
+// read blocks until the script has written it, or fails at EOF if the script
+// died first; it never races a deadline. (It used to poll a pid file for 5 s,
+// which a loaded host could spend before sh started.)
+func readPID(t *testing.T, stdout io.Reader) int {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(pidFile); err == nil {
-			if pid, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil {
-				return pid
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading the grandchild's pid: %q, %v", line, err)
 	}
-	t.Fatalf("no pid was written to %s", pidFile)
-	return 0
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("grandchild pid %q: %v", line, err)
+	}
+	return pid
 }

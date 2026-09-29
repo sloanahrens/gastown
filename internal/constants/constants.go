@@ -5,6 +5,7 @@ package constants
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -422,13 +423,36 @@ var SupportedShells = []string{"bash", "zsh", "sh", "fish", "tcsh", "ksh", "pwsh
 // while it is alive. A socket not ending in its owner's pid is one nothing can
 // safely collect (gt-20di).
 //
-// The nanosecond field is what keeps two sockets in one test binary apart.
+// The nanosecond field is what keeps two sockets in one test binary apart. It
+// is the wall clock bumped past the last value handed out, because the clock
+// alone does not do it: macOS reports time in whole microseconds, so two calls
+// inside one microsecond read the same UnixNano (112 of 20000 runs of
+// TestTestSocketName returned the same name twice).
 //
 // It lives in this leaf package because every caller can reach it:
 // internal/tmux and internal/testutil both need it, and internal/config sits
 // below internal/tmux and so cannot import it from there.
 func TestSocketName(prefix string) string {
-	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), os.Getpid())
+	return fmt.Sprintf("%s-%d-%d", prefix, nextSocketStamp(), os.Getpid())
+}
+
+// lastSocketStamp is the last nanosecond field TestSocketName handed out.
+var lastSocketStamp atomic.Int64
+
+// nextSocketStamp returns the current UnixNano, or one past the last stamp
+// returned when the clock has not moved past it, so every call in a process
+// gets a distinct, increasing value.
+func nextSocketStamp() int64 {
+	for {
+		last := lastSocketStamp.Load()
+		next := time.Now().UnixNano()
+		if next <= last {
+			next = last + 1
+		}
+		if lastSocketStamp.CompareAndSwap(last, next) {
+			return next
+		}
+	}
 }
 
 // Path helpers construct common paths.
