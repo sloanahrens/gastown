@@ -3251,7 +3251,9 @@ func (b *Beads) Release(id string) error {
 }
 
 // ReleaseWithReason moves an in_progress issue back to open status with a reason.
-// The reason is added as a note to the issue for tracking purposes.
+// The reason is added as a note to the issue for tracking purposes. It
+// overrides the holder's claim (bd --force): releasing is for a worker that
+// is gone.
 func (b *Beads) ReleaseWithReason(id, reason string) error {
 	if b.store != nil {
 		updates := map[string]interface{}{
@@ -3266,7 +3268,9 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 		return b.store.UpdateIssue(ctx, id, updates, b.getActor())
 	}
 
-	args := []string{"update", id, "--status=open", "--assignee="}
+	// --force: the claim being cleared belongs to a worker that died, and bd
+	// refuses to reassign another actor's in_progress claim without it.
+	args := []string{"update", id, "--status=open", "--assignee=", "--force"}
 
 	// Add reason as a note if provided
 	if reason != "" {

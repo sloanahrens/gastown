@@ -198,3 +198,28 @@ func TestPlainErrorKeepsOutput(t *testing.T) {
 		t.Error("exit status lost")
 	}
 }
+
+// TestReleaseOverridesTheDeadHoldersClaim pins that Release passes --force.
+// Release exists to recover a step whose worker died, so the claim it clears
+// is by definition another actor's, and bd 1.2 refuses to reassign another
+// actor's in_progress claim without --force ("cannot reassign X: held by
+// ..."): without it `gt release` failed on exactly the issues it is for.
+// TestIntegrationClientContract/release pins the same against real bd.
+func TestReleaseOverridesTheDeadHoldersClaim(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(nil)
+	b := newRecordedBeads(t.TempDir(), r)
+	if err := b.ReleaseWithReason("gt-1", "worker died"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Release("gt-2"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"update gt-1 --status=open --assignee= --force --notes=Released: worker died",
+		"update gt-2 --status=open --assignee= --force",
+	}
+	if got := r.argvs(); !reflect.DeepEqual(got, want) {
+		t.Errorf("calls = %q\nwant    %q", got, want)
+	}
+}
