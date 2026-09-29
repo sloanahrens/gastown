@@ -11,37 +11,12 @@ import (
 	"time"
 )
 
+// initTestRepo returns a repo (the returned dir itself) with a test identity
+// and one commit adding README.md on main, copied from testRepoFixture.
 func initTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-
-	// Initialize repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-
-	// Configure user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
-	// Create initial commit
-	testFile := filepath.Join(dir, "README.md")
-	if err := os.WriteFile(testFile, []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	cmd = exec.Command("git", "add", ".")
-	cmd.Dir = dir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "initial")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
+	testRepoFixture.copyInto(t, dir)
 	return dir
 }
 
@@ -1286,66 +1261,12 @@ func stringContains(s, substr string) bool {
 }
 
 // initTestRepoWithRemote sets up a local repo with a bare remote and initial push.
-// Returns (localDir, remoteDir, mainBranch).
+// Returns (localDir, remoteDir, mainBranch). It is a copy of remoteFixture.
 func initTestRepoWithRemote(t *testing.T) (string, string, string) {
 	t.Helper()
 	tmp := t.TempDir()
-
-	// Create bare remote
-	remoteDir := filepath.Join(tmp, "remote.git")
-	if err := exec.Command("git", "init", "--bare", remoteDir).Run(); err != nil {
-		t.Fatalf("git init --bare: %v", err)
-	}
-
-	// Create local repo
-	localDir := filepath.Join(tmp, "local")
-	if err := os.MkdirAll(localDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command("git", args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	// Initial commit
-	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", "."},
-		{"git", "commit", "-m", "initial"},
-		{"git", "remote", "add", "origin", remoteDir},
-	} {
-		cmd := exec.Command("git", args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	// Get main branch name and push
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = localDir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("branch --show-current: %v", err)
-	}
-	mainBranch := strings.TrimSpace(string(out))
-
-	cmd = exec.Command("git", "push", "-u", "origin", mainBranch)
-	cmd.Dir = localDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("push: %v", err)
-	}
-
-	return localDir, remoteDir, mainBranch
+	remoteFixture.copyInto(t, tmp)
+	return filepath.Join(tmp, "local"), filepath.Join(tmp, "remote.git"), fixtureMainBranch
 }
 
 func TestPruneStaleBranches_MergedBranch(t *testing.T) {
@@ -2763,6 +2684,7 @@ func TestParsePorcelainStatusEntryPreservesRenameCopySourceAndConflict(t *testin
 func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.T) {
 	t.Parallel()
 	t.Run("rename to real path blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		runGitTestCmd(t, dir, "mv", "README.md", "renamed.md")
 
@@ -2783,6 +2705,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("rename from real path to runtime path blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
 			t.Fatalf("mkdir opencode plugins: %v", err)
@@ -2805,6 +2728,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("rename from runtime path to runtime path is ignored by runtime filter", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
 			t.Fatalf("mkdir opencode plugins: %v", err)
@@ -2832,6 +2756,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("unmerged runtime conflict blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		runGitTestCmd(t, dir, "branch", "-M", "main")
 		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
@@ -2867,6 +2792,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("unmerged conflict blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		runGitTestCmd(t, dir, "branch", "-M", "main")
 		if err := os.WriteFile(filepath.Join(dir, "conflict.txt"), []byte("base\n"), 0644); err != nil {
@@ -2909,6 +2835,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	t.Parallel()
 	t.Run("staged-only content already on origin is skew and does not block reuse", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -2942,6 +2869,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("staged content not yet on origin or main still blocks", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -2970,6 +2898,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	// revert here, not evidence of a moved ref — HEAD is ahead of every
 	// comparison ref — so it must block rather than read as reuse-clean.
 	t.Run("staged revert of a fix this branch carries, absent from main, still blocks", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, mainBranch := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3001,6 +2930,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("unstaged edit always blocks regardless of skew classification", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3032,6 +2962,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	// directions: skew when the content really matches, blocking when it
 	// doesn't.
 	t.Run("pathspec-special filename with content on origin is still classified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3057,6 +2988,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("pathspec-special filename absent from origin is NOT misclassified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3088,6 +3020,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	// the real filename at all — see TestStatusUnquotesCQuotedPaths — so this
 	// is the end-to-end path the om review flagged as untested.
 	t.Run("C-quoted filename (embedded quote) with content on origin is classified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3113,6 +3046,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("C-quoted filename (embedded quote) absent from origin MUST block", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3138,6 +3072,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("non-ASCII filename with content on origin is classified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3163,6 +3098,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("non-ASCII filename absent from origin MUST block", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3316,77 +3252,12 @@ func TestCheckBranchContamination(t *testing.T) {
 // initTestRepoWithSplitRemote creates a test setup that mirrors the polecat workflow:
 // two bare repos (upstream and fork), a local clone whose origin has fetch URL → upstream
 // and push URL → fork. Returns (localDir, upstreamBareDir, forkBareDir, mainBranch).
+// It is a copy of splitRemoteFixture.
 func initTestRepoWithSplitRemote(t *testing.T) (string, string, string, string) {
 	t.Helper()
 	tmp := t.TempDir()
-
-	upstream := filepath.Join(tmp, "upstream.git")
-	fork := filepath.Join(tmp, "fork.git")
-	localDir := filepath.Join(tmp, "local")
-
-	for _, bare := range []string{upstream, fork} {
-		if err := exec.Command("git", "init", "--bare", bare).Run(); err != nil {
-			t.Fatalf("git init --bare %s: %v", bare, err)
-		}
-	}
-
-	if err := os.MkdirAll(localDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command("git", args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", "."},
-		{"git", "commit", "-m", "initial"},
-		{"git", "remote", "add", "origin", upstream},
-	} {
-		cmd := exec.Command("git", args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = localDir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("branch --show-current: %v", err)
-	}
-	mainBranch := strings.TrimSpace(string(out))
-
-	// Push initial commit to both upstream and fork
-	cmd = exec.Command("git", "push", "origin", mainBranch)
-	cmd.Dir = localDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("push to upstream: %v", err)
-	}
-	cmd = exec.Command("git", "push", fork, mainBranch)
-	cmd.Dir = localDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("push to fork: %v", err)
-	}
-
-	// Split the remote: fetch stays at upstream, push goes to fork
-	g := NewGit(localDir)
-	if err := g.ConfigurePushURL("origin", fork); err != nil {
-		t.Fatalf("ConfigurePushURL: %v", err)
-	}
-
-	return localDir, upstream, fork, mainBranch
+	splitRemoteFixture.copyInto(t, tmp)
+	return filepath.Join(tmp, "local"), filepath.Join(tmp, "upstream.git"), filepath.Join(tmp, "fork.git"), fixtureMainBranch
 }
 
 func TestForkBackedDefaultPushGuard_SplitPushURL(t *testing.T) {
