@@ -384,19 +384,21 @@ RUN_SCRIPT_TIMEOUT_SECONDS=30
 RUN_SCRIPT_ATTEMPTS=3
 
 run_script_once() {
-  local pid="" waited=0
+  local pid="" ticks=0
 
   bash "$SCRIPT" > "$TEST_STATE/output.log" 2>&1 &
   pid=$!
+  # Poll every 50ms: run.sh usually exits in well under a second, and a
+  # 1s poll rounded every one of this suite's ~40 runs up to a full second.
   while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$RUN_SCRIPT_TIMEOUT_SECONDS" ]; then
+    if [ "$ticks" -ge $((RUN_SCRIPT_TIMEOUT_SECONDS * 20)) ]; then
       printf 'NOTICE: run.sh stalled >%ss; killing pid %s\n' "$RUN_SCRIPT_TIMEOUT_SECONDS" "$pid" >&2
       kill -9 "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       return 124
     fi
-    sleep 1
-    waited=$((waited + 1))
+    sleep 0.05
+    ticks=$((ticks + 1))
   done
   wait "$pid"
 }
