@@ -969,6 +969,31 @@ func detectRubricChangeAfterMerge(rigDir string, rigGit *git.Git, mr *refinery.M
 // being read as "untouched"), so escalation runs whenever touched is true,
 // not only on a clean detection (gt-7bvf).
 func handlePostMergeRubricChange(rigPath, rigName string, rigGit *git.Git, mr *refinery.MergeRequest, submittedHead string) {
+	handlePostMergeRubricChangeWith(rubricChangeAlerts{}, rigPath, rigName, rigGit, mr, submittedHead)
+}
+
+// rubricChangeAlerts is how handlePostMergeRubricChange reaches the operator
+// and the MR bead. The zero value is the real thing: the gt on PATH and the
+// bd on PATH. Tests hand in recorders, so they need no PATH stubs and can
+// run in parallel.
+type rubricChangeAlerts struct {
+	gt func(args ...string) error
+	bd beads.BDRunner
+}
+
+func (a rubricChangeAlerts) gtRunner() func(args ...string) error {
+	if a.gt == nil {
+		return runGTCommand
+	}
+	return a.gt
+}
+
+// runGTCommand runs the gt on PATH with args.
+func runGTCommand(args ...string) error {
+	return exec.Command("gt", args...).Run() //nolint:gosec // G204: args are constructed internally
+}
+
+func handlePostMergeRubricChangeWith(alerts rubricChangeAlerts, rigPath, rigName string, rigGit *git.Git, mr *refinery.MergeRequest, submittedHead string) {
 	touched, rel, sha, checkErr := detectRubricChangeAfterMerge(rigPath, rigGit, mr, submittedHead)
 	if checkErr != nil {
 		style.PrintWarning("rubric change check: %v", checkErr)
@@ -977,8 +1002,8 @@ func handlePostMergeRubricChange(rigPath, rigName string, rigGit *git.Git, mr *r
 		return
 	}
 	fmt.Printf("  %s Rubric changed by this merge; escalated to the operator (the manifest is not re-stamped automatically)\n", style.Warning.Render("⚠"))
-	escalateRubricChange(rigName, mr.TargetBranch, rel, sha, mr.ID)
-	if commentErr := beads.New(rigPath).AddComment(mr.ID, fmt.Sprintf("rubric_changed_escalated: %s sha256=%s", rel, sha)); commentErr != nil {
+	escalateRubricChange(alerts.gtRunner(), rigName, mr.TargetBranch, rel, sha, mr.ID)
+	if commentErr := beads.NewWithBeadsDirAndRunner(rigPath, "", alerts.bd).AddComment(mr.ID, fmt.Sprintf("rubric_changed_escalated: %s sha256=%s", rel, sha)); commentErr != nil {
 		style.PrintWarning("could not record rubric_changed_escalated comment on %s: %v", mr.ID, commentErr)
 	}
 }
@@ -986,10 +1011,9 @@ func handlePostMergeRubricChange(rigPath, rigName string, rigGit *git.Git, mr *r
 // escalateRubricChange notifies the operator that a merge changed the rig's
 // deployed rubric, without touching the harness manifest. Best-effort: a
 // failed escalation is logged, not fatal — the merge already landed.
-func escalateRubricChange(rigName, target, rubricPath, sha, mrID string) {
+func escalateRubricChange(gt func(args ...string) error, rigName, target, rubricPath, sha, mrID string) {
 	msg := fmt.Sprintf("rubric changed on %s: re-stamp the harness manifest from main content (rig=%s rubric=%s sha256=%s MR=%s)", target, rigName, rubricPath, sha, mrID)
-	cmd := exec.Command("gt", "escalate", "--severity", "medium", "--reason", "rubric-changed", msg)
-	if err := cmd.Run(); err != nil {
+	if err := gt("escalate", "--severity", "medium", "--reason", "rubric-changed", msg); err != nil {
 		style.PrintWarning("rubric-change escalation failed: %v", err)
 	}
 }
