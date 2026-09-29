@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/util"
@@ -26,10 +28,9 @@ const (
 	defaultStrandedScanInterval = 30 * time.Second
 	eventPollInterval           = 5 * time.Second
 	eventPollMaxBackoff         = 60 * time.Second
-	// Beads lifecycle events use CURRENT_TIMESTAMP in Dolt, which is second
-	// precision. Poll with a 1s overlap so transitions that happen in the same
-	// second as the previous high-water mark are still visible next cycle.
-	eventPollLookback = 1 * time.Second
+	// eventPageSize is how many journal records one bd events tail call
+	// returns; a poll reads pages until bd reports nothing follows.
+	eventPageSize = 500
 
 	// convoyGracePeriod is how long after creation a convoy is immune from
 	// auto-close. This prevents a race where the daemon's stranded scan
@@ -233,9 +234,11 @@ type ConvoyManager struct {
 	// starts and the in-flight one can drain; see Pause.
 	pausing atomic.Bool
 
-	// lastEventIDs tracks per-store high-water marks for event polling.
-	// Key matches stores map keys ("hq", "gastown", etc.).
-	lastEventIDs sync.Map // map[string]time.Time
+	// eventCursors holds each store's journal cursor: the highest seq read,
+	// passed back to bd events tail as --since. Key matches the stores map
+	// keys ("hq", "gastown", etc.). The seq is gapless and per replica, so
+	// the cursor needs no overlap window and replays nothing.
+	eventCursors sync.Map // map[string]int64
 
 	// seeded is true once the first poll cycle has run (warm-up).
 	// The first cycle advances high-water marks without processing events,
@@ -244,16 +247,28 @@ type ConvoyManager struct {
 
 	// processedCloses tracks issue IDs whose current closed state has already
 	// been processed. This prevents duplicate convoy checks when the same close
-	// event is seen from multiple stores or across poll cycles where high-water
-	// marks don't perfectly deduplicate (e.g., event replication). The entry is
-	// cleared when the issue is reopened so a later close is processed again.
-	// See GH #1798.
+	// is seen from multiple stores, and when a closed issue is updated again
+	// (the journal records every update with the issue's state after it). The
+	// entry is cleared when the issue is reopened so a later close is
+	// processed again. See GH #1798.
 	processedCloses sync.Map // map[string]bool
+}
 
-	// processedLifecycleEvents tracks close/reopen event IDs that have already
-	// been handled. This allows the 1s overlap window above without replaying
-	// the same lifecycle events on every poll.
-	processedLifecycleEvents sync.Map // map[string]bool
+// eventJournal reads one store's events journal (bd events tail).
+type eventJournal interface {
+	EventsTail(since int64, limit int) (*beads.EventsPage, error)
+}
+
+// newEventJournal returns the journal reader for the named store: bd pinned
+// to the town's .beads for "hq", or to the rig's canonical beads directory.
+// store is the handle the manager holds for the same name; the bd reader
+// does not use it. Tests replace this.
+var newEventJournal = func(townRoot, name string, _ beadsdk.Storage) (eventJournal, error) {
+	dir := doltserver.FindRigBeadsDir(townRoot, name)
+	if dir == "" {
+		return nil, fmt.Errorf("no beads directory for store %q", name)
+	}
+	return beads.NewWithBeadsDir(townRoot, dir), nil
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -564,7 +579,8 @@ func (m *ConvoyManager) logMissingRequiredStore(polled string) {
 		requiredStoreName, polled, detail)
 }
 
-// runEventPoll polls GetAllEventsSince every 5s and processes close events.
+// runEventPoll reads each store's events journal every 5s and processes
+// close events.
 // If stores aren't available at startup (e.g., Dolt not ready), retries
 // lazily via the openStores callback until stores become available.
 func (m *ConvoyManager) runEventPoll() {
@@ -709,71 +725,75 @@ func (m *ConvoyManager) pollStoresSnapshot(stores map[string]beadsdk.Storage) bo
 	return hadError
 }
 
-// pollStore fetches new events from a single store and processes close events.
-// Convoy lookups always use the hq store since convoys are hq-* prefixed.
-// The stores snapshot is passed to avoid accessing m.stores without the lock.
-// The seen set deduplicates issueIDs across stores within a poll cycle.
-// Returns an error if the poll failed (used by caller for backoff decisions).
+// pollStore reads a single store's events journal from its cursor and
+// processes close events. Convoy lookups always use the hq store since
+// convoys are hq-* prefixed. The stores snapshot is passed to avoid
+// accessing m.stores without the lock. The seen set deduplicates issueIDs
+// across stores within a poll cycle. Returns an error if the read failed
+// (used by caller for backoff decisions).
+//
+// The journal is read through bd (bd events tail, gt-7iwy0.2) page by page,
+// and the cursor advances after each page, so a failure mid-read resumes
+// where it stopped. A cursor bd has pruned past resumes at the oldest
+// retained record: the gap is logged and recovery mode set, so the stranded
+// scan catches any convoy whose last close fell in it.
 func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map[string]beadsdk.Storage, seen map[string]bool) error {
-	// Load per-store high-water mark.
-	// Default to Unix epoch (not zero time) because Go's zero time.Time
-	// (0001-01-01) causes Dolt's SQL driver to produce +Inf when converting
-	// to a float parameter, triggering "Error 1366: +Inf is not a valid
-	// value for double". Unix epoch is safe for all SQL backends.
-	highWater := time.Unix(0, 0).UTC()
-	if v, ok := m.lastEventIDs.Load(name); ok {
-		highWater = v.(time.Time)
-	}
-	querySince := highWater
-	if !highWater.Equal(time.Unix(0, 0).UTC()) {
-		querySince = highWater.Add(-eventPollLookback)
-		if querySince.Before(time.Unix(0, 0).UTC()) {
-			querySince = time.Unix(0, 0).UTC()
-		}
-	}
-
-	events, err := store.GetAllEventsSince(m.ctx, querySince)
+	journal, err := newEventJournal(m.townRoot, name, store)
 	if err != nil {
-		if isInfNaNError(err) {
-			// A corrupted row in the events table has +Inf/-Inf/NaN stored in a
-			// double column (e.g. created_at serialized from Go's zero time.Time).
-			// Advance the high-water mark to now so future polls skip past the
-			// bad row entirely. Events before now are missed, but the stranded
-			// convoy scanner will catch any completions that were lost.
-			now := time.Now().UTC()
-			m.lastEventIDs.Store(name, now)
-			m.logger("Convoy: event poll (%s): +Inf/NaN row detected, advancing HWM to %s to skip corrupt data", name, now.Format(time.RFC3339))
-			return nil
-		}
 		m.logger("Convoy: event poll error (%s): %v", name, err)
-		// Signal recovery mode so the stranded scan shortens its interval and
-		// retries quickly once Dolt comes back.
 		m.recoveryMode.Store(true)
 		return err
 	}
-
-	// Advance high-water mark from all events
-	for _, e := range events {
-		if e.CreatedAt.After(highWater) {
-			highWater = e.CreatedAt
-		}
+	var since int64
+	if v, ok := m.eventCursors.Load(name); ok {
+		since = v.(int64)
 	}
-	m.lastEventIDs.Store(name, highWater)
 
-	// First poll cycle is warm-up only: advance marks, skip processing.
-	// This prevents replaying the entire event history on daemon restart.
-	if !m.seeded.Load() {
-		for _, e := range events {
-			if e.ID == "" {
+	// The first poll cycle is warm-up only: it advances cursors without
+	// processing, so a daemon restart does not replay the journal.
+	warmup := !m.seeded.Load()
+	for {
+		page, err := journal.EventsTail(since, eventPageSize)
+		if err != nil {
+			var trunc *beads.EventsTruncatedError
+			if errors.As(err, &trunc) && trunc.Floor-1 > since {
+				m.logger("Convoy: event poll (%s): journal pruned past %d (oldest retained %d, head %d); resuming at %d, the stranded scan covers the gap",
+					name, since, trunc.Floor, trunc.Head, trunc.Floor-1)
+				m.recoveryMode.Store(true)
+				since = trunc.Floor - 1
+				m.eventCursors.Store(name, since)
 				continue
 			}
-			if isCloseEvent(e) || isReopenEvent(e) {
-				m.processedLifecycleEvents.Store(e.ID, true)
+			m.logger("Convoy: event poll error (%s): %v", name, err)
+			// Signal recovery mode so the stranded scan shortens its interval
+			// and retries quickly once Dolt comes back.
+			m.recoveryMode.Store(true)
+			return err
+		}
+		if !warmup {
+			if !m.processJournalPage(name, page.Records, stores, seen) {
+				// No hq store: nothing in this store is checkable. The cursor
+				// stays put so the records are read again once hq is back.
+				return nil
 			}
 		}
-		return nil
+		if page.NextSince > since {
+			since = page.NextSince
+		}
+		m.eventCursors.Store(name, since)
+		if !page.More {
+			return nil
+		}
 	}
+}
 
+// processJournalPage runs the convoy checks for the closes in records. It
+// reports false, having done nothing, when the hq store convoy lookups read
+// through is missing.
+func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRecord, stores map[string]beadsdk.Storage, seen map[string]bool) bool {
+	if len(records) == 0 {
+		return true
+	}
 	// Convoy lookups read through the hq store (convoys are hq-* prefixed).
 	// Missing it, every close event in this store is uncheckable: skip, but say
 	// so at a rate an operator can read, and leave getting it back to the retry
@@ -781,22 +801,16 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 	hqStore := stores[requiredStoreName]
 	if hqStore == nil {
 		m.logMissingRequiredStore(name)
-		return nil
+		return false
 	}
 
-	for _, e := range events {
-		issueID := e.IssueID
+	for _, r := range records {
+		issueID := r.IssueID
 		if issueID == "" {
 			continue
 		}
 
-		if isCloseEvent(e) || isReopenEvent(e) {
-			if _, alreadyHandled := m.processedLifecycleEvents.LoadOrStore(e.ID, true); alreadyHandled {
-				continue
-			}
-		}
-
-		if isReopenEvent(e) {
+		if isReopenRecord(r) {
 			// Reopening starts a new close epoch for this issue. Clear both the
 			// per-cycle and cross-cycle dedup so a later close is processed again.
 			delete(seen, issueID)
@@ -804,23 +818,23 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 			continue
 		}
 
-		if !isCloseEvent(e) {
+		if !isCloseRecord(r) {
 			continue
 		}
 
 		// Deduplicate: skip if already processed this issueID in this poll cycle
-		// (same close may appear in multiple stores or as multiple event types).
-		// Reopen events clear this marker so close→reopen→close can be processed
-		// twice even when all three events land in the same poll cycle.
+		// (same close may appear in multiple stores). A reopen clears this
+		// marker so close→reopen→close can be processed twice even when all
+		// three land in the same poll cycle.
 		if seen[issueID] {
 			continue
 		}
 		seen[issueID] = true
 
-		// Cross-cycle dedup: skip if this issue's close was already processed
-		// in a previous poll cycle. The same close event can appear from
-		// multiple stores (replication) or across poll cycles when high-water
-		// marks don't perfectly filter. See GH #1798.
+		// Cross-cycle dedup: skip if this issue's close was already processed.
+		// The journal records every later update to a closed issue with status
+		// closed, and the same close can appear from more than one store.
+		// See GH #1798.
 		if _, alreadyProcessed := m.processedCloses.LoadOrStore(issueID, true); alreadyProcessed {
 			continue
 		}
@@ -830,53 +844,21 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.isRigParked, resolver)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
 	}
-	return nil
+	return true
 }
 
-// isInfNaNError reports whether err is a Dolt/SQL error about an invalid float
-// value (+Inf, -Inf, NaN) in a double column. These errors arise when a
-// corrupted row (e.g. created_at written from Go's zero time.Time via an old
-// driver path) is encountered during a query. The caller should advance the
-// high-water mark to skip past the offending row rather than entering
-// permanent backoff.
-func isInfNaNError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	// Dolt wraps values in single quotes: "'+Inf' is not a valid value for 'double'"
-	// Match both quoted and unquoted forms.
-	return strings.Contains(msg, "+Inf is not a valid value") ||
-		strings.Contains(msg, "'+Inf' is not a valid value") ||
-		strings.Contains(msg, "-Inf is not a valid value") ||
-		strings.Contains(msg, "'-Inf' is not a valid value") ||
-		strings.Contains(msg, "NaN is not a valid value") ||
-		strings.Contains(msg, "'NaN' is not a valid value")
+// isCloseRecord reports whether a journal record leaves its issue closed: a
+// close, or an update whose resulting status is closed (bd update --status
+// closed, and any later update to an issue that stays closed).
+func isCloseRecord(r beads.EventRecord) bool {
+	return (r.Op == "close" || r.Op == "update") && r.Status == string(beadsdk.StatusClosed)
 }
 
-func isCloseEvent(e *beadsdk.Event) bool {
-	if e == nil {
-		return false
-	}
-	if e.EventType == beadsdk.EventClosed {
-		return true
-	}
-	return e.EventType == beadsdk.EventStatusChanged &&
-		e.NewValue != nil &&
-		*e.NewValue == "closed"
-}
-
-func isReopenEvent(e *beadsdk.Event) bool {
-	if e == nil {
-		return false
-	}
-	if e.EventType == beadsdk.EventReopened {
-		return true
-	}
-	return e.EventType == beadsdk.EventStatusChanged &&
-		e.OldValue != nil &&
-		*e.OldValue == "closed" &&
-		(e.NewValue == nil || *e.NewValue != "closed")
+// isReopenRecord reports whether a journal record leaves its issue in a
+// status other than closed. On an issue this manager saw closed, that is a
+// reopen; on any other it clears nothing.
+func isReopenRecord(r beads.EventRecord) bool {
+	return r.Op == "update" && r.Status != "" && r.Status != string(beadsdk.StatusClosed)
 }
 
 // runStrandedScan is the periodic stranded convoy scan loop.
