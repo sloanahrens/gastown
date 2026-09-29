@@ -35,19 +35,28 @@ func runBDProcess(ctx context.Context, c bdCall) ([]byte, []byte, error) {
 	var stdout, stderr bytes.Buffer
 	var cmd *exec.Cmd
 	if c.plain {
-		cmd = exec.CommandContext(ctx, "bd", c.args...) //nolint:gosec // G204: args are constructed internally
-		cmd.Dir = c.dir
-		cmd.Env = c.env
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if c.stdin != nil {
-			cmd.Stdin = bytes.NewReader(c.stdin)
-		}
+		cmd = newPlainBDCmd(ctx, c, &stdout, &stderr)
 	} else {
 		cmd = newBDCmd(ctx, c.dir, c.env, c.stdin, c.args, &stdout, &stderr)
 	}
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// newPlainBDCmd builds a plain call's bd subprocess the way CommandWithEnv
+// builds one: bd from PATH in c.dir with exactly c.env (nil inherits the
+// process environment, with PWD set to the directory), in the caller's
+// process group, nothing added.
+func newPlainBDCmd(ctx context.Context, c bdCall, stdout, stderr *bytes.Buffer) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "bd", c.args...) //nolint:gosec // G204: args are constructed internally
+	cmd.Dir = c.dir
+	cmd.Env = c.env
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if c.stdin != nil {
+		cmd.Stdin = bytes.NewReader(c.stdin)
+	}
+	return cmd
 }
 
 // runner returns the bd seam, falling back to the real bd for a Beads built

@@ -223,3 +223,38 @@ func TestReleaseOverridesTheDeadHoldersClaim(t *testing.T) {
 		t.Errorf("calls = %q\nwant    %q", got, want)
 	}
 }
+
+// TestNewPlainBDCmdWiring pins the plain call's process wiring, which every
+// NewPlain wrapper (doctor's bd calls, and the CommandWithEnv sites moving
+// onto it) depends on: bd, the call's argv, its directory, its environment
+// exactly (nil stays nil, so the child inherits), and its stdin.
+func TestNewPlainBDCmdWiring(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	env := []string{"BEADS_DIR=/rig/.beads", "ONLY=this"}
+	cmd := newPlainBDCmd(context.Background(), bdCall{dir: "/rig", env: env, args: []string{"config", "get", "k"}, stdin: []byte("in"), plain: true}, &stdout, &stderr)
+	if filepath.Base(cmd.Args[0]) != "bd" || !reflect.DeepEqual(cmd.Args[1:], []string{"config", "get", "k"}) {
+		t.Errorf("args = %q, want bd config get k", cmd.Args)
+	}
+	if cmd.Dir != "/rig" {
+		t.Errorf("Dir = %q, want /rig", cmd.Dir)
+	}
+	if !reflect.DeepEqual(cmd.Env, env) {
+		t.Errorf("Env = %q, want exactly %q", cmd.Env, env)
+	}
+	if cmd.Stdin == nil || cmd.Stdout != &stdout || cmd.Stderr != &stderr {
+		t.Error("stdio not wired")
+	}
+	if cmd.SysProcAttr != nil {
+		t.Error("plain calls stay in the caller's process group, as CommandWithEnv's did")
+	}
+
+	inherit := newPlainBDCmd(context.Background(), bdCall{dir: "/rig", args: []string{"stats"}, plain: true}, &stdout, &stderr)
+	if inherit.Env != nil {
+		t.Errorf("nil env became %q; it must stay nil so bd inherits", inherit.Env)
+	}
+	if inherit.Stdin != nil {
+		t.Error("no stdin was given, but one is wired")
+	}
+}
+
