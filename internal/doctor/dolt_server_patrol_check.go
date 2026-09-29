@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"os"
 	"path/filepath"
 	"time"
@@ -102,13 +103,17 @@ func (c *DoltServerPatrolCheck) Run(ctx *CheckContext) *CheckResult {
 // connections on its configured port.
 func (c *DoltServerPatrolCheck) isDoltReachable(townRoot string) bool {
 	cfg := doltserver.DefaultConfig(townRoot)
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	conn, err := net.DialTimeout("tcp", doltServerAddr(cfg.Host, cfg.Port), 2*time.Second)
 	if err != nil {
 		return false
 	}
 	_ = conn.Close()
 	return true
+}
+
+// doltServerAddr is the host:port the Dolt server listens on.
+func doltServerAddr(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // doltServerPatrolEnabled reports whether the dolt_server patrol is enabled in
