@@ -3345,14 +3345,44 @@ func clearDoneCheckpoints(bd *beads.Beads, agentBeadID string) {
 // If the polecat's worktree is deleted before gt done finishes, we use env vars as fallback.
 // All errors are warnings, not failures - gt done must complete even if bead ops fail.
 func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
+	return updateAgentStateOnDoneIn(doneStateEnv{}, cwd, townRoot, exitType, issueID)
+}
+
+// doneStateEnv is what updateAgentStateOnDone reads beyond its arguments:
+// the environment, bd, and the HEAD that review evidence is checked against.
+// The zero value is the real process: os.Getenv, bd on PATH, and git in the
+// process's working directory. A test passes an env map and an in-process
+// bd, so it needs no PATH stub, t.Setenv or chdir and can run in parallel.
+type doneStateEnv struct {
+	getenv     func(string) string
+	bd         beads.BDRunner
+	reviewHead func() (string, error)
+}
+
+func (e doneStateEnv) lookup() func(string) string {
+	if e.getenv == nil {
+		return os.Getenv
+	}
+	return e.getenv
+}
+
+func (e doneStateEnv) head() func() (string, error) {
+	if e.reviewHead == nil {
+		return currentReviewEvidenceHead
+	}
+	return e.reviewHead
+}
+
+func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID string) error {
+	getenv := e.lookup()
 	// Get role context - try multiple sources for resilience
-	roleInfo, err := GetRoleWithContext(cwd, townRoot)
+	roleInfo, err := getRoleWithContextEnv(cwd, townRoot, getenv)
 	if err != nil {
 		// Fallback: try to construct role info from environment variables
 		// This handles the case where cwd is deleted but env vars are set
-		envRole := os.Getenv("GT_ROLE")
-		envRig := os.Getenv("GT_RIG")
-		envPolecat := os.Getenv("GT_POLECAT")
+		envRole := getenv("GT_ROLE")
+		envRig := getenv("GT_RIG")
+		envPolecat := getenv("GT_POLECAT")
 
 		if envRole == "" || envRig == "" {
 			// Can't determine role, skip agent state update
@@ -3397,7 +3427,7 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 	default:
 		beadsPath = filepath.Join(townRoot, ctx.Rig)
 	}
-	bd := beads.New(beadsPath)
+	bd := beads.NewWithBeadsDirAndRunner(beadsPath, "", e.bd)
 	// agentBd resolves agent beads dual-scope: their canonical (rig-local)
 	// database first, with a town fallback for legacy beads created before
 	// the rig-local migration. See beads.ForAgentBead docstring (gt-8we).
@@ -3443,7 +3473,7 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 		// DEFERRED exits preserve the bead: work is paused, not done. The bead
 		// stays open/in_progress so it can be resumed on the next session.
 		// Exception: workflow step beads (*-wfs-*) are always closed — see above.
-		hookBd, _, _ := routedIssueBeads(beadsPath, hookedBeadID)
+		hookBd, _, _ := routedIssueBeadsRun(beadsPath, hookedBeadID, e.bd)
 		if hookBd == nil {
 			hookBd = bd
 		}
@@ -3456,7 +3486,8 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 				goto doneStateUpdate
 			}
 
-			if skipReason, fatal := doneSourceCloseSkipReason(hookBd, hookedBeadID, hookedBead); skipReason != "" {
+			currentHead, _ := e.head()()
+			if skipReason, fatal := doneSourceCloseSkipReasonForHead(hookBd, hookedBeadID, hookedBead, currentHead); skipReason != "" {
 				style.PrintWarning("%s", skipReason)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
 				notifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
