@@ -27,7 +27,12 @@ func stubLiveFirePairRunner(t *testing.T, blocked, allowed doctor.LiveFireVerdic
 			Allowed:      doctor.LiveFireShapeResult{Verdict: allowed, Detail: "stubbed allowed shape"},
 		}
 	}
-	t.Cleanup(func() { liveFirePairRunner = orig })
+	origLookPath := claudeLookPath
+	claudeLookPath = func(string) (string, error) { return "/stub/bin/claude", nil }
+	t.Cleanup(func() {
+		liveFirePairRunner = orig
+		claudeLookPath = origLookPath
+	})
 }
 
 func TestSyncTargetCreatesNew(t *testing.T) {

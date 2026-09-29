@@ -345,13 +345,19 @@ func recordRoleReport(roles map[string]hooks.SyncReportRole, target hooks.Target
 // rely on its absence to stay hermetic; they override this var instead).
 var liveFirePairRunner = doctor.RunLiveFirePair
 
+// claudeLookPath finds the claude binary the canary fires. Overridable with
+// liveFirePairRunner: a test that stubs the runner must not also depend on a
+// real claude being on PATH, or it passes only on hosts that have one (it
+// failed on every CI runner, gt-22hdp.39).
+var claudeLookPath = exec.LookPath
+
 // liveFireCanary runs the blocked+allowed live-fire pair against the
 // canary's already-synced settings file. Returns a non-nil error only when
 // the probe could not even be attempted (claude missing) — that is a soft
 // warning to the caller, not grounds to abort the sync, since machines
 // without the claude binary installed must still be able to sync hooks.
 func liveFireCanary(target hooks.Target) (*doctor.LiveFirePairResult, error) {
-	claudePath, err := exec.LookPath("claude")
+	claudePath, err := claudeLookPath("claude")
 	if err != nil {
 		return nil, fmt.Errorf("claude not found in PATH")
 	}
