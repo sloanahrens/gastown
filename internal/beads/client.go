@@ -1,0 +1,61 @@
+package beads
+
+// Client is the issue-store surface that code outside this package uses
+// most: reading, listing, creating, updating and closing issues, their
+// comments and dependencies, the ready queue, and claim release. *Beads
+// implements it against bd; internal/beads/beadsfake implements it in memory
+// for unit tests, and beadsfake.RunClientContract pins the two to the same
+// behavior.
+//
+// The interface is deliberately small. A method joins it only when consumers
+// in several packages call it and the fake can model it faithfully; the rest
+// of *Beads (agent, merge-request, channel and other domain helpers built on
+// these primitives) stays on the concrete type. Consumers that need less
+// should declare their own narrower interface.
+type Client interface {
+	// Show returns one issue, or an error wrapping ErrNotFound.
+	Show(id string) (*Issue, error)
+	// ShowMultiple returns the issues that exist among ids, keyed by ID.
+	ShowMultiple(ids []string) (map[string]*Issue, error)
+	// List returns the issues matching opts.
+	List(opts ListOptions) ([]*Issue, error)
+	// ListByAssignee returns every issue, open or closed, assigned to assignee.
+	ListByAssignee(assignee string) ([]*Issue, error)
+	// GetAssignedIssue returns assignee's issue, preferring open over
+	// in_progress over hooked; nil when there is none.
+	GetAssignedIssue(assignee string) (*Issue, error)
+	// ListIssueStatuses returns the durable issues in any of statuses.
+	ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error)
+	// ListAssignedIssueStatuses returns assignee's issues and wisps in any
+	// of statuses.
+	ListAssignedIssueStatuses(assignee string, statuses ...IssueStatus) ([]*Issue, error)
+	// Ready returns open, unblocked, dispatchable issues.
+	Ready() ([]*Issue, error)
+	// Children returns the direct children of parentID.
+	Children(parentID string) ([]*Issue, error)
+	// Comments returns the comments on an issue, oldest first.
+	Comments(id string) ([]Comment, error)
+
+	// Create creates an issue and returns it.
+	Create(opts CreateOptions) (*Issue, error)
+	// Update changes the fields opts sets.
+	Update(id string, opts UpdateOptions) error
+	// Close closes issues.
+	Close(ids ...string) error
+	// CloseWithReason closes issues and records reason.
+	CloseWithReason(reason string, ids ...string) error
+	// ForceCloseWithReason is CloseWithReason past bd's close fences.
+	ForceCloseWithReason(reason string, ids ...string) error
+	// Release returns a claimed issue to open and clears its assignee.
+	Release(id string) error
+	// ReleaseWithReason is Release, recording reason in the notes.
+	ReleaseWithReason(id, reason string) error
+	// AddComment appends a comment.
+	AddComment(id, comment string) error
+	// AddDependency makes issue depend on (be blocked by) dependsOn.
+	AddDependency(issue, dependsOn string) error
+	// RemoveDependency removes that dependency.
+	RemoveDependency(issue, dependsOn string) error
+}
+
+var _ Client = (*Beads)(nil)
