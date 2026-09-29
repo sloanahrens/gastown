@@ -46,3 +46,5 @@ internal/witness/handlers.go:_verifyCommitOnMain
 internal/patrolstate/patrolstate.go:ResetCounter
 # deliberate os.ErrNotExist narrowing: found=false tells "never written" apart from a read error (claude-8w7)
 internal/patrolstate/cycle.go:readVersioned
+# deliberate os.ErrNotExist narrowing: a missing config.yaml has no sync.remote; every other read error is returned (gt-8z769.1)
+internal/doctor/dolt_remote_leftovers_check.go:readSyncRemote
