@@ -274,9 +274,22 @@ type preVerificationResult struct {
 // set) carry no such per-gate config, so this is a single generous fixed
 // bound instead.
 //
-// A var rather than a const so a test can drive the timeout branch without
+// A test drives the timeout branch through preVerifyBudget rather than
 // sleeping out ten minutes (gt-ypkc).
-var preVerificationGateTimeout = 10 * time.Minute
+const preVerificationGateTimeout = 10 * time.Minute
+
+// preVerifyBudget is how long each pre-verification gate may run and how a
+// contended lint waits between attempts. gt done runs defaultPreVerifyBudget;
+// a test passes a shorter one to runPreVerificationGatesWithBudget.
+type preVerifyBudget struct {
+	gateTimeout     time.Duration
+	lintRetryDelays []time.Duration // nil means lintlock.RetryDelay
+}
+
+// defaultPreVerifyBudget is the budget gt done's pre-verification runs under.
+func defaultPreVerifyBudget() preVerifyBudget {
+	return preVerifyBudget{gateTimeout: preVerificationGateTimeout}
+}
 
 // preVerificationGateOutcome is one pre-verification gate command's result:
 // the run error (nil on success) and whether it was the gate's timeout that
@@ -315,7 +328,7 @@ func runPreVerificationGate(ctx context.Context, worktree, script string, logFil
 // before the budget starts, so its wait is never charged to the gate, and it
 // is released by defer however the gate ends. A non-nil error means the slot
 // could not be taken and the gate did not run.
-func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile *os.File, mq *config.MergeQueueConfig, gateSlot preVerifySlot) (preVerificationGateOutcome, error) {
+func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile *os.File, mq *config.MergeQueueConfig, gateSlot preVerifySlot, budget preVerifyBudget) (preVerificationGateOutcome, error) {
 	if name == "test" {
 		release, err := gateSlot.hold(worktree, script, mq, logFile)
 		if err != nil {
@@ -323,7 +336,7 @@ func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile 
 		}
 		defer release()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), preVerificationGateTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), budget.gateTimeout)
 	defer cancel()
 	var got preVerificationGateOutcome
 	runGate := func() lintlock.Attempt {
@@ -336,7 +349,7 @@ func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile 
 		// (golangci-lint's), so a concurrent lint is waited out rather
 		// than costing the submission its pre-verified stamp. This gate's
 		// own 10m bound is the retry budget.
-		_ = lintlock.Retry(ctx, runGate, func(attempt, attempts int, wait time.Duration) {
+		_ = lintlock.RetryWithDelays(ctx, budget.lintRetryDelays, runGate, func(attempt, attempts int, wait time.Duration) {
 			fmt.Fprintf(logFile, "=== gate lint: another golangci-lint holds the lock (attempt %d/%d); retrying in %s ===\n", attempt, attempts, wait.Round(time.Second))
 		})
 	} else {
@@ -358,6 +371,11 @@ func runPreVerificationGateHeld(name, script, worktree, logPath string, logFile 
 // suite and it must hold a slot like every other suite that does. The slot
 // wait is not counted against the gate's preVerificationGateTimeout budget.
 func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig, gateSlot preVerifySlot) (preVerificationResult, error) {
+	return runPreVerificationGatesWithBudget(worktree, mq, gateSlot, defaultPreVerifyBudget())
+}
+
+// runPreVerificationGatesWithBudget is runPreVerificationGates under budget.
+func runPreVerificationGatesWithBudget(worktree string, mq *config.MergeQueueConfig, gateSlot preVerifySlot, budget preVerifyBudget) (preVerificationResult, error) {
 	type namedGate struct {
 		name string
 		cmd  string
@@ -394,7 +412,7 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig, gateS
 
 	for _, ng := range gates {
 		fmt.Fprintf(logFile, "=== gate %s: %s ===\n", ng.name, ng.cmd)
-		got, slotErr := runPreVerificationGateHeld(ng.name, ng.cmd, worktree, logPath, logFile, mq, gateSlot)
+		got, slotErr := runPreVerificationGateHeld(ng.name, ng.cmd, worktree, logPath, logFile, mq, gateSlot, budget)
 		if slotErr != nil {
 			return preVerificationResult{}, slotErr
 		}
@@ -403,7 +421,7 @@ func runPreVerificationGates(worktree string, mq *config.MergeQueueConfig, gateS
 			// done indefinitely at a point where the branch is already
 			// pushed but no MR bead exists yet — degrade to "no stamp"
 			// instead (om-gate T8).
-			fmt.Fprintf(logFile, "=== gate %s timed out after %s ===\n", ng.name, preVerificationGateTimeout)
+			fmt.Fprintf(logFile, "=== gate %s timed out after %s ===\n", ng.name, budget.gateTimeout)
 			return preVerificationResult{success: false, failedGate: ng.name, exitCode: -1, logPath: logPath}, nil
 		}
 		if got.err != nil {

@@ -254,13 +254,15 @@ func TestRunPreVerificationGates_SlotUnavailableDoesNotRunSuite(t *testing.T) {
 
 // The slot wait is not charged to the gate's own run budget.
 func TestRunPreVerificationGates_SlotWaitNotChargedToGateBudget(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
-	stubPreVerificationGateTimeout(t, 300*time.Millisecond)
+	budget := defaultPreVerifyBudget()
+	budget.gateTimeout = 300 * time.Millisecond
 	fake := fakePreVerifySlot(t)
 	fake.wait = 500 * time.Millisecond
 
-	result, err := runPreVerificationGates(dir, &config.MergeQueueConfig{TestCommand: "true"}, fake.slot)
+	result, err := runPreVerificationGatesWithBudget(dir, &config.MergeQueueConfig{TestCommand: "true"}, fake.slot, budget)
 	if err != nil {
 		t.Fatalf("runPreVerificationGates: %v", err)
 	}

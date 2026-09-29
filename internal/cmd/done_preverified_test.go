@@ -19,6 +19,7 @@ import (
 // stamp-worthy log hash; a green run over multiple gates must run all of
 // them, in order, and produce a stable log hash.
 func TestRunPreVerificationGates(t *testing.T) {
+	t.Parallel()
 	t.Run("failing gate reports its name and exit code, no success", func(t *testing.T) {
 		dir := t.TempDir()
 		mq := &config.MergeQueueConfig{TestCommand: "false"}
@@ -112,7 +113,8 @@ func TestRunPreVerificationGates(t *testing.T) {
 	// collision instead of to anything about the branch.
 	t.Run("lint lock held once: retried, then the stamp is earned", func(t *testing.T) {
 		dir := t.TempDir()
-		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+		budget := defaultPreVerifyBudget()
+		budget.lintRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 
 		counter := filepath.Join(dir, "lint-attempts")
 		lint := fmt.Sprintf(`n=$(grep -c . %q 2>/dev/null || echo 0); echo x >> %q; `+
@@ -120,7 +122,7 @@ func TestRunPreVerificationGates(t *testing.T) {
 			counter, counter)
 		mq := &config.MergeQueueConfig{LintCommand: lint, TestCommand: "true"}
 
-		result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
+		result, err := runPreVerificationGatesWithBudget(dir, mq, fakePreVerifySlot(t).slot, budget)
 		if err != nil {
 			t.Fatalf("runPreVerificationGates: %v", err)
 		}
@@ -180,16 +182,6 @@ func TestRunPreVerificationGates(t *testing.T) {
 	})
 }
 
-// stubPreVerificationGateTimeout shrinks the per-gate pre-verification budget
-// so a test can drive a real expiry (gt-ypkc) rather than sleeping out the 10m
-// default.
-func stubPreVerificationGateTimeout(t *testing.T, budget time.Duration) {
-	t.Helper()
-	prev := preVerificationGateTimeout
-	preVerificationGateTimeout = budget
-	t.Cleanup(func() { preVerificationGateTimeout = prev })
-}
-
 // TestRunPreVerificationGates_TimeoutKillsTheWholeGroup guards gt-ypkc: a gate
 // killed at its timeout must take its children with it. The gate command here
 // backgrounds a grandchild and waits on it — the shape of a real rig gate
@@ -197,16 +189,20 @@ func stubPreVerificationGateTimeout(t *testing.T, budget time.Duration) {
 // group without a Cancel hook does, leaves the grandchild writing to the
 // worktree after gt done has moved on.
 func TestRunPreVerificationGates_TimeoutKillsTheWholeGroup(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	orphan := filepath.Join(dir, "orphan-ran")
-	stubPreVerificationGateTimeout(t, 300*time.Millisecond)
+	// A per-gate budget short enough to drive a real expiry (gt-ypkc) rather
+	// than sleeping out the 10m default.
+	budget := defaultPreVerifyBudget()
+	budget.gateTimeout = 300 * time.Millisecond
 
 	mq := &config.MergeQueueConfig{
 		TestCommand: fmt.Sprintf("(sleep 2; touch %q) & wait", orphan),
 	}
 
 	start := time.Now()
-	result, err := runPreVerificationGates(dir, mq, fakePreVerifySlot(t).slot)
+	result, err := runPreVerificationGatesWithBudget(dir, mq, fakePreVerifySlot(t).slot, budget)
 	if err != nil {
 		t.Fatalf("runPreVerificationGates: %v", err)
 	}
