@@ -1,3 +1,5 @@
+> Status: implemented on crew/sloan/w2-cobra (gt-fcxe9.6, gt-fcxe9.9). Historical once merged; not maintained.
+
 # W2 cobra strictness + test-DB isolation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
