@@ -150,7 +150,20 @@ func TestMaintainForceDivergedIsDeprecatedNoOp(t *testing.T) {
 - [ ] `internal/config/types.go`: drop `dolt_remotes` from the DisabledPatrols comment.
 - [ ] commit `docs: record the removal of Dolt remote sync`.
 
-### Gates (after Task 7)
+### Task 8: D9 un-park checklist code item (gt-22hdp.51)
+
+The D9 restart checklist appended to gt-8z769.1 lists one code item: the
+refinery patrol's scratch directories (`gt-refinery-<uid>`,
+`gt-mq-review-<uid>`) must refuse a symlink or a directory another user owns,
+since `mkdir -p -m 700` neither checks nor fixes an existing one. It lands as
+its own commit on this branch because the checklist puts it before the town
+restarts.
+
+- [ ] Failing tests in `internal/formula/refinery_scratch_dir_owner_test.go`: every `mkdir -p -m 700` line carries `[ ! -L`, `[ -O` and `REFUSED`; each line run in bash creates a fresh dir 0700, tightens an own 0755 dir to 0700, and refuses a symlink.
+- [ ] Guard the three setup lines in `mol-refinery-patrol.formula.toml`.
+- [ ] commit `fix(formula): refinery scratch dirs refuse a symlink or foreign owner`.
+
+### Gates (after Task 8)
 
 `make lint`, `go build ./...`, `go test` for `./internal/daemon ./internal/cmd ./internal/doltserver ./internal/doctor ./internal/rig ./internal/templates ./internal/config`, then full `make test` with wall time. Then `om review -base origin/main` until approve.
 

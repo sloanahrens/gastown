@@ -157,9 +157,11 @@ else
 fi
 ```
 
-## Step 3: Verify remote has data
+## Step 3: Verify the git backup has data
 
-Verify that the backup data has successfully reached the remote and is accessible.
+Verify that the JSONL snapshots reached the git backup repo's remote and are
+readable. This covers JSONL only: no Dolt data leaves this machine through
+this plugin (ADR 0002).
 
 ```bash
 echo "=== Verification ==="

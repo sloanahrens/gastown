@@ -11,8 +11,6 @@ import (
 	beadspkg "github.com/steveyegge/gastown/internal/beads"
 )
 
-// TestFindRemote_NoRemote verifies FindRemote returns empty when no remote is configured.
-
 func TestPurgeClosedEphemeralsUsesHardenedBDEnv(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping subprocess test in short mode")

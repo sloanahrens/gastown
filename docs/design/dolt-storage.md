@@ -321,14 +321,9 @@ on, because the force-push after a flatten would have deleted the remote-only
 commits. There is no remote and no push now, so the pre-flight is gone.
 `--force-diverged` still parses, hidden and deprecated, and does nothing.
 
-Note the consequence for an unpushed flatten: the remote keeps pointing at
-pre-flatten history, so the next run reports the database as diverged until
-someone pushes. That is the intended reading — the remote really does hold
-commits local no longer has.
-
 `scheduled_maintenance` acts on `maintenance.mode`. `monitor` (the default)
 escalates with the commit counts and rewrites nothing; `flatten` runs
-`gt maintain --force`, which is still subject to the pre-flight above. Set it
+`gt maintain --force`, which flattens every database over threshold. Set it
 with `gt config set maintenance.mode flatten`. The daemon recognizes only the
 exact lowercase strings `flatten` and `gc` (below), trimmed of surrounding
 whitespace; any other value, including a typo or a case variation like
