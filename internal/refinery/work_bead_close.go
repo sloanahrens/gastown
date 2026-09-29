@@ -135,6 +135,13 @@ func cleanWorkBeadID(id string) string {
 	return id
 }
 
+// MergedWorkBeadCloseBlockReason says why a merged work bead must not be
+// closed on merge: "no_merge", "review_only" or "merge_strategy:local", or
+// "" when it may be closed.
+func MergedWorkBeadCloseBlockReason(issue *beads.Issue) string {
+	return refineryMergedWorkBeadCloseBlockReason(issue)
+}
+
 func refineryMergedWorkBeadCloseBlockReason(issue *beads.Issue) string {
 	if fields := beads.ParseAttachmentFields(issue); fields != nil {
 		switch {

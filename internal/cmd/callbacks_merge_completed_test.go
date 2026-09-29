@@ -37,3 +37,32 @@ func TestHandleMergeCompletedClosesSourceIssue(t *testing.T) {
 		t.Errorf("action = %q, want it to report closing gt-src", action)
 	}
 }
+
+// TestHandleMergeCompletedRespectsCloseBlocks: merge_completed must not
+// close a source issue the refinery itself would not close on merge
+// (no_merge, review_only, merge_strategy local).
+func TestHandleMergeCompletedRespectsCloseBlocks(t *testing.T) {
+	t.Parallel()
+	for field, reason := range map[string]string{
+		"no_merge: true":        "no_merge",
+		"review_only: true":     "review_only",
+		"merge_strategy: local": "merge_strategy:local",
+	} {
+		bd := beadsfake.New()
+		bd.Seed(beads.Issue{ID: "gt-src", Title: "the work", Description: field})
+		msg := &mail.Message{
+			Subject: "Merge Request Completed: polecat/nux/gt-src",
+			Body:    "MR: gt-mr1\nSource: gt-src\nCommit: abc123\n",
+		}
+		action, err := handleMergeCompletedWith(bd, t.TempDir(), msg, false)
+		if err != nil {
+			t.Fatalf("%s: %v", field, err)
+		}
+		if got, _ := bd.Show("gt-src"); got.Status != "open" {
+			t.Errorf("%s: source issue status %q, want it left open", field, got.Status)
+		}
+		if !strings.Contains(action, reason) {
+			t.Errorf("%s: action %q, want it to name %q", field, action, reason)
+		}
+	}
+}
