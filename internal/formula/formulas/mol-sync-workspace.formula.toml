@@ -2,7 +2,7 @@ description = """
 Workspace synchronization molecule for batch prep.
 
 This molecule prepares an agent's workspace for a new batch of work. It syncs git
-and beads state, cleans up cruft, verifies the baseline is healthy, and reports
+state, cleans up cruft, verifies the baseline is healthy, and reports
 readiness. Designed to be broadcast to all agents when preparing for coordinated
 work.
 
@@ -69,17 +69,11 @@ git stash list
 git branch --show-current
 ```
 
-**2. Check beads state:**
-```bash
-bd sync --status
-```
-
-**3. Document starting state:**
+**2. Document starting state:**
 - Branch name
 - Uncommitted changes (staged/unstaged)
 - Untracked files (list them)
 - Stash entries
-- Beads sync status
 
 This information guides decisions in subsequent steps.
 
@@ -276,42 +270,9 @@ risk merging incorrectly. A resubmitted branch is better than a broken main.
 **Exit criteria:** Local branch matches or is cleanly ahead of origin/main."""
 
 [[steps]]
-id = "sync-beads"
-title = "Sync beads state"
-needs = ["sync-git"]
-description = """
-Sync the beads database with remote.
-
-```bash
-bd sync
-```
-
-**If conflicts:**
-Beads uses JSONL append-only format, so true conflicts are rare.
-If they occur:
-```bash
-bd sync --status  # Diagnose
-```
-
-Likely causes:
-- Two agents edited same bead simultaneously
-- Corrupted beads-sync branch
-
-Resolution:
-```bash
-# Try pulling fresh
-git fetch origin beads-sync
-bd sync
-```
-
-If still failing, escalate to mayor.
-
-**Exit criteria:** Beads synced successfully."""
-
-[[steps]]
 id = "run-doctor"
 title = "Run beads health check"
-needs = ["sync-beads"]
+needs = ["sync-git"]
 description = """
 Check for beads system issues.
 
@@ -443,7 +404,6 @@ Git:
   - Conflicts resolved: <y/n, details if yes>
 
 Beads:
-  - Sync status: OK
   - Doctor findings: <count> (fixed: <n>, filed: <n>, deferred: <n>)
 
 Quality checks: PASS
