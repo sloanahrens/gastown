@@ -30,20 +30,24 @@ RIG_JSON=$(gt rig list --json 2>/dev/null) || {
 # 2026-09-18 no-op (gt-xxwx). Detect it explicitly.
 declare -a ENABLED_RIGS=()
 declare -a RESOLVED=()
+declare -a UNREADABLE=()
 while IFS= read -r REPO_PATH; do
   [ -z "$REPO_PATH" ] && continue
   RESOLVED+=("$REPO_PATH")
   [ ! -f "$REPO_PATH/.gitmodules" ] && continue
   RIG_NAME=$(basename "$REPO_PATH")
   # gt rig settings show prints the rig's settings/config.json as a JSON
-  # object. config.RigSettings has no plugins field yet, so this reads false
-  # for every rig until gt-fcxe9.13 gives the opt-in a home; an unknown rig
-  # prints nothing, which also reads as off.
+  # object. config.RigSettings has no plugins field yet (gt-fcxe9.13), so a
+  # rig with submodules usually has no readable opt-in at all. Say so loudly
+  # rather than reading it as a deliberate "off".
   PLUGIN_ENABLED=$(gt rig settings show "$RIG_NAME" 2>/dev/null \
-    | jq -r '.plugins["submodule-commit"].enabled // false' 2>/dev/null || echo "false")
+    | jq -r 'if type == "object" and has("plugins") then (.plugins["submodule-commit"].enabled // false) else "unreadable" end' 2>/dev/null || true)
   if [ "$PLUGIN_ENABLED" = "true" ]; then
     ENABLED_RIGS+=("$REPO_PATH")
     log "Opt-in rig: $REPO_PATH"
+  elif [ "$PLUGIN_ENABLED" != "false" ]; then
+    UNREADABLE+=("$RIG_NAME")
+    log "WARN: $REPO_PATH has submodules but no readable submodule-commit opt-in (rig settings for '$RIG_NAME' carry no plugins key; gt-fcxe9.13); treating it as off"
   fi
 done < <(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | .repo_path' 2>/dev/null)
 
@@ -58,8 +62,12 @@ fi
 if [ ${#ENABLED_RIGS[@]} -eq 0 ]; then
   log "SKIP: no opt-in rigs with submodules"
   echo "[plugin-result skipped]"
+  DESC="gt rig list --json returned ${#RESOLVED[@]} rig(s) with repo paths; none opt in to submodule-commit"
+  if [ ${#UNREADABLE[@]} -gt 0 ]; then
+    DESC="$DESC; ${#UNREADABLE[@]} rig(s) with submodules have no readable opt-in: ${UNREADABLE[*]} (gt-fcxe9.13)"
+  fi
   gt plugin record-run --plugin submodule-commit --result skipped \
-    --title "submodule-commit: no opt-in rigs" --description "gt rig list --json returned ${#RESOLVED[@]} rig(s) with repo paths; none opt in to submodule-commit" >/dev/null 2>&1 || true
+    --title "submodule-commit: no opt-in rigs" --description "$DESC" >/dev/null 2>&1 || true
   exit 0
 fi
 
