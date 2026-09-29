@@ -29,6 +29,10 @@ type bdCmd struct {
 	gtRoot     string
 	beadsDir   string
 	routing    bool
+	// timeout overrides resolveBdCmdTimeout when positive. Tests set it so a
+	// timeout path takes milliseconds instead of GT_BD_TIMEOUT_SEC's whole
+	// seconds.
+	timeout time.Duration
 }
 
 // BdCmd creates a new bd command builder with the given arguments.
@@ -182,6 +186,14 @@ func resolveBdCmdTimeout() time.Duration {
 	return constants.BdCommandTimeout
 }
 
+// deadline is the time budget for one run of this command.
+func (b *bdCmd) deadline() time.Duration {
+	if b.timeout > 0 {
+		return b.timeout
+	}
+	return resolveBdCmdTimeout()
+}
+
 func (b *bdCmd) buildContextCommand(ctx context.Context) *exec.Cmd {
 	args := b.resolvedArgs()
 	cmd := beads.CommandContextWithEnv(ctx, b.dir, b.buildEnv(), args...)
@@ -252,7 +264,7 @@ func (b *bdCmd) resolvedArgs() []string {
 // Run builds and runs the command, returning any error.
 // This is a convenience method equivalent to Build().Run().
 func (b *bdCmd) Run() error {
-	deadline := resolveBdCmdTimeout()
+	deadline := b.deadline()
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	return b.wrapCommandError(ctx, b.buildContextCommand(ctx).Run(), deadline)
@@ -263,7 +275,7 @@ func (b *bdCmd) Run() error {
 // Note: Output() captures stdout but Stderr must still be configured
 // separately if you want to capture stderr instead of it going to os.Stderr.
 func (b *bdCmd) Output() ([]byte, error) {
-	deadline := resolveBdCmdTimeout()
+	deadline := b.deadline()
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	out, err := b.buildContextCommand(ctx).Output()
@@ -274,7 +286,7 @@ func (b *bdCmd) Output() ([]byte, error) {
 // This overrides the configured Stderr writer to capture both streams.
 // Useful for including command output in error messages.
 func (b *bdCmd) CombinedOutput() ([]byte, error) {
-	deadline := resolveBdCmdTimeout()
+	deadline := b.deadline()
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	args := b.resolvedArgs()

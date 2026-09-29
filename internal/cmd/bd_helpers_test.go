@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestBdCmd_Build(t *testing.T) {
@@ -209,10 +211,11 @@ sleep 5
 timeout /t 5 /nobreak >NUL
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GT_BD_TIMEOUT_SEC", "1")
 
+	b := BdCmd("list")
+	b.timeout = 50 * time.Millisecond
 	start := time.Now()
-	err := BdCmd("list").Run()
+	err := b.Run()
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected timeout error")
@@ -225,6 +228,27 @@ timeout /t 5 /nobreak >NUL
 	}
 	if elapsed > 4*time.Second {
 		t.Fatalf("timeout took %v, want under 4s", elapsed)
+	}
+}
+
+// TestResolveBdCmdTimeout pins the GT_BD_TIMEOUT_SEC override that
+// TestBdCmd_RunTimesOut shortcuts through bdCmd.timeout, and that a command
+// with no override of its own uses it.
+func TestResolveBdCmdTimeout(t *testing.T) {
+	t.Setenv("GT_BD_TIMEOUT_SEC", "")
+	if got := resolveBdCmdTimeout(); got != constants.BdCommandTimeout {
+		t.Errorf("unset: timeout = %v, want %v", got, constants.BdCommandTimeout)
+	}
+	t.Setenv("GT_BD_TIMEOUT_SEC", "not-a-number")
+	if got := resolveBdCmdTimeout(); got != constants.BdCommandTimeout {
+		t.Errorf("unparseable: timeout = %v, want %v", got, constants.BdCommandTimeout)
+	}
+	t.Setenv("GT_BD_TIMEOUT_SEC", "7")
+	if got := resolveBdCmdTimeout(); got != 7*time.Second {
+		t.Errorf("GT_BD_TIMEOUT_SEC=7: timeout = %v, want 7s", got)
+	}
+	if got := BdCmd("list").deadline(); got != 7*time.Second {
+		t.Errorf("a command with no override of its own: deadline = %v, want the env's 7s", got)
 	}
 }
 
