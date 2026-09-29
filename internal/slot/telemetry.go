@@ -44,11 +44,6 @@ const (
 	// caller does not start a suite beside it while the pool yields to the
 	// gate (Pool.YieldToGate, gt-22hdp.29). Holder names the gate.
 	WaitReasonGateRunning WaitReason = "gate_running"
-
-	// WaitReasonGatePending: no gate holds a slot yet, but a refinery has a
-	// ready MR and registered intent to gate it (GateIntent), so a non-gate
-	// caller does not start a suite the gate would then have to wait out.
-	WaitReasonGatePending WaitReason = "gate_pending"
 )
 
 // waitWatch accumulates what kept one Acquire call from granting, so the
@@ -76,9 +71,6 @@ type waitWatch struct {
 	// gateHolder is the first running gate observed while yielding to it,
 	// the evidence for WaitReasonGateRunning.
 	gateHolder *Owner
-	// gateIntent is the first pending gate observed, the evidence for
-	// WaitReasonGatePending.
-	gateIntent *GateIntent
 }
 
 func newWaitWatch(clock clockwork.Clock) *waitWatch {
@@ -124,12 +116,6 @@ func (w *waitWatch) noteGateHolder(owner *Owner) {
 	}
 }
 
-func (w *waitWatch) noteGateIntent(intent *GateIntent) {
-	if w.gateIntent == nil {
-		w.gateIntent = intent
-	}
-}
-
 func (w *waitWatch) noteContainers(names []string) {
 	if len(w.containers) == 0 {
 		w.containers = names
@@ -152,8 +138,6 @@ type waitInfo struct {
 	Holder     *Owner
 	Containers []string
 	DockerErr  string
-	// Intent is the pending gate, for WaitReasonGatePending.
-	Intent *GateIntent
 }
 
 // info snapshots the watch against the timeout the caller asked for.
@@ -174,16 +158,8 @@ func (w *waitWatch) info(timeout time.Duration, timedOut bool) waitInfo {
 func (w *waitWatch) attribute(info *waitInfo, reason WaitReason) {
 	info.Reason = reason
 	info.Holder = w.holder
-	info.Intent = nil
-	switch reason {
-	case WaitReasonGateRunning:
+	if reason == WaitReasonGateRunning {
 		info.Holder = w.gateHolder
-	case WaitReasonGatePending:
-		info.Holder = nil
-		info.Intent = w.gateIntent
-		if w.gateIntent != nil {
-			info.Holder = &Owner{Role: w.gateIntent.Role, AcquiredAt: w.gateIntent.RegisteredAt, Slot: -1}
-		}
 	}
 }
 
@@ -222,11 +198,6 @@ func (i waitInfo) describe() string {
 			return fmt.Sprintf("gate running: %s pid %d holds gate-reserved slot %d; non-gate suites yield to it", i.Holder.Role, i.Holder.PID, i.Holder.Slot)
 		}
 		return "gate running: a gate-reserved slot is held; non-gate suites yield to it"
-	case WaitReasonGatePending:
-		if i.Intent != nil {
-			return fmt.Sprintf("gate pending: %s is about to gate %s; non-gate suites yield to it", i.Intent.Role, i.Intent.Ref)
-		}
-		return "gate pending: a refinery is about to run a gate; non-gate suites yield to it"
 	default:
 		return ""
 	}
@@ -277,8 +248,7 @@ type HistoryEntry struct {
 	TimedOut bool       `json:"timed_out,omitempty"`
 	Reason   WaitReason `json:"reason,omitempty"`
 	// HolderRole/HolderPID are the token holder waited behind, for
-	// WaitReasonTokenHeld, or the gate yielded to, for WaitReasonGateRunning
-	// and WaitReasonGatePending (a pending gate has no pid);
+	// WaitReasonTokenHeld, or the gate yielded to, for WaitReasonGateRunning;
 	// Containers the unwrapped suite, for
 	// WaitReasonUnwrappedContainers; DockerError the failed probe, for
 	// WaitReasonDaemonUnreachable. The overseer's gt-dc81 amendment requires the

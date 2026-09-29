@@ -65,49 +65,6 @@ func TestYield_BatchGateIsYieldedTo(t *testing.T) {
 	}
 }
 
-// TestIntent_ExpiryIgnoresAFarExpiresAt (M5): an intent is expired at
-// RegisteredAt + GateIntentTTL even when its file claims a later ExpiresAt.
-func TestIntent_ExpiryIgnoresAFarExpiresAt(t *testing.T) {
-	t.Parallel()
-	tg := newTestGate(t)
-	town := t.TempDir()
-	writeIntent(t, town, GateIntent{Role: "gastown/refinery", Ref: "x", RegisteredAt: tg.clk.Now(), ExpiresAt: tg.clk.Now().Add(10 * time.Hour)})
-
-	if _, ok := tg.pendingGate(town); !ok {
-		t.Fatal("fresh intent not pending")
-	}
-	tg.clk.Advance(GateIntentTTL)
-	if in, ok := tg.pendingGate(town); ok {
-		t.Fatalf("intent past RegisteredAt+TTL still pending: %+v", in)
-	}
-}
-
-// TestIntent_FutureRegisteredAtIsExpired (M5): an intent stamped in the
-// future (a skewed or hand-written file) never holds anyone up.
-func TestIntent_FutureRegisteredAtIsExpired(t *testing.T) {
-	t.Parallel()
-	tg := newTestGate(t)
-	town := t.TempDir()
-	future := tg.clk.Now().Add(time.Hour)
-	writeIntent(t, town, GateIntent{Role: "gastown/refinery", Ref: "x", RegisteredAt: future, ExpiresAt: future.Add(time.Minute)})
-	if in, ok := tg.pendingGate(town); ok {
-		t.Fatalf("intent registered in the future is pending: %+v", in)
-	}
-}
-
-// TestIntent_EarlierExpiresAtWins (M5): an ExpiresAt before RegisteredAt+TTL
-// still ends the intent.
-func TestIntent_EarlierExpiresAtWins(t *testing.T) {
-	t.Parallel()
-	tg := newTestGate(t)
-	town := t.TempDir()
-	writeIntent(t, town, GateIntent{Role: "gastown/refinery", Ref: "x", RegisteredAt: tg.clk.Now(), ExpiresAt: tg.clk.Now().Add(time.Minute)})
-	tg.clk.Advance(time.Minute)
-	if in, ok := tg.pendingGate(town); ok {
-		t.Fatalf("intent past its own ExpiresAt still pending: %+v", in)
-	}
-}
-
 // TestYield_DefaultCapIsTheConfigDefault (M6): the 30m default is defined once.
 func TestYield_DefaultCapIsTheConfigDefault(t *testing.T) {
 	t.Parallel()
@@ -140,12 +97,5 @@ func TestYield_RunningGateReadsOwnerNotFlock(t *testing.T) {
 	tg.gone[tg.pid] = true
 	if owner, ok := tg.runningGate(town, pool); ok {
 		t.Fatalf("runningGate reported a gate whose pid is gone: %+v", owner)
-	}
-}
-
-func writeIntent(t *testing.T, town string, in GateIntent) {
-	t.Helper()
-	if err := atomicfile.EnsureDirAndWriteJSON(gateIntentPath(town, "gastown"), in); err != nil {
-		t.Fatal(err)
 	}
 }

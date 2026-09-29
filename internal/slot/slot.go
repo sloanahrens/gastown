@@ -456,17 +456,12 @@ type Report struct {
 	Reserved  int
 
 	// YieldingToGate is true when the pool yields to the gate
-	// (Pool.YieldToGate) and a live gate holds a gate-reserved slot, or a
-	// gate is pending (GatePending): a new
+	// (Pool.YieldToGate) and a live gate holds a gate-reserved slot: a new
 	// non-gate suite waits ("waiting: gate running") until it releases.
 	// GateHolder is that gate's owner, nil when its metadata is unreadable.
 	// Neither makes the report Busy: gates may still start.
 	YieldingToGate bool
 	GateHolder     *Owner
-	// GatePending is the registered gate intent new non-gate suites wait on
-	// ("waiting: gate pending") when no gate holds a reserved slot yet; see
-	// GateIntent.
-	GatePending *GateIntent
 }
 
 // Busy reports whether a new suite could NOT be admitted right now: every

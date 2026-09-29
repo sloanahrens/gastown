@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func runMQList(cmd *cobra.Command, args []string) error {
@@ -32,10 +31,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	// Create beads wrapper for the rig - use BeadsPath() to get the git-synced location
 	b := beads.New(r.BeadsPath())
 
-	// The town is only needed for the gate intent; a lookup failure just
-	// skips it.
-	townRoot, _ := workspace.FindFromCwdOrError()
-	return listMergeQueue(mqListEnv{rig: r, lister: b, beads: b, townRoot: townRoot, callerRole: os.Getenv("GT_ROLE")}, rigName, mqListFlags{
+	return listMergeQueue(mqListEnv{rig: r, lister: b, beads: b}, rigName, mqListFlags{
 		ready: mqListReady, status: mqListStatus, worker: mqListWorker,
 		epic: mqListEpic, json: mqListJSON, verify: mqListVerify,
 	})
@@ -47,14 +43,11 @@ type mrLister interface {
 }
 
 // mqListEnv is what listMergeQueue runs against: the rig, its merge queue,
-// the beads handle integration-branch lookups use (only with --epic), and the
-// town and caller role the gate intent is synced for.
+// and the beads handle integration-branch lookups use (only with --epic).
 type mqListEnv struct {
-	rig        *rig.Rig
-	lister     mrLister
-	beads      *beads.Beads
-	townRoot   string
-	callerRole string
+	rig    *rig.Rig
+	lister mrLister
+	beads  *beads.Beads
 }
 
 // mqListFlags are gt mq list's flags, captured once per call.
@@ -122,18 +115,6 @@ func listMergeQueue(env mqListEnv, rigName string, f mqListFlags) error {
 			return fmt.Errorf("querying merge queue: %w", err)
 		}
 		duplicates = refinery.DuplicateBranchMRs(issues, rigName)
-	}
-
-	// After the last merge the refinery's loop goes through queue-scan's
-	// gt mq list, never gt mq next again, so this is where a drained queue
-	// clears the pending-gate intent (gt-22hdp.29) instead of leaving crew
-	// yielding to it until it expires.
-	// It is also the call the refinery actually makes to find its MR: the live
-	// agent picked gt-wisp-gig with gt mq list and gt mq show and never ran
-	// gt mq next (gt-22hdp.37), so a merge gate listing a ready MR registers
-	// the intent here too. Anyone else only ever clears.
-	if mqListCoversQueue(f.status, f.worker, f.epic) && env.townRoot != "" {
-		syncGateIntent(env.townRoot, rigName, env.callerRole, firstReadyMR(issues, rigName))
 	}
 
 	// mark every MR that shares a branch with another open MR so the
@@ -577,11 +558,4 @@ func verifyAlreadyLanded(verify bool, client mrLandedVerifier, fields *beads.MRF
 		return false
 	}
 	return client.CommitLandedOnTarget("origin", fields.Target, fields.CommitSHA)
-}
-
-// mqListCoversQueue reports whether a gt mq list with these filters lists the
-// rig's whole open queue, so that finding no ready MR in it means the queue
-// has none. --ready lists a subset of open MRs, which is still every ready one.
-func mqListCoversQueue(status, worker, epic string) bool {
-	return (status == "" || strings.EqualFold(status, "open")) && worker == "" && epic == ""
 }

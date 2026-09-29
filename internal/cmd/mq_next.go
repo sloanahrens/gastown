@@ -2,16 +2,12 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // MQ next command flags
@@ -89,7 +85,6 @@ func runMQNext(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(ready) == 0 {
-		syncGateIntentFromEnv(rigName, "")
 		if mqNextQuiet {
 			return nil // Silent exit
 		}
@@ -123,7 +118,6 @@ func runMQNext(cmd *cobra.Command, args []string) error {
 	// Get the top MR
 	next := ready[0]
 	fields := beads.ParseMRFields(next)
-	syncGateIntentFromEnv(rigName, next.ID)
 
 	// Output based on format flags
 	if mqNextQuiet {
@@ -166,57 +160,4 @@ func runMQNext(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-// syncGateIntentFromEnv is syncGateIntent for this process: the town from the
-// cwd, the caller's role from GT_ROLE. Best-effort: gt mq next's answer must
-// not depend on the lock directory being writable.
-func syncGateIntentFromEnv(rigName, nextID string) {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return
-	}
-	syncGateIntent(townRoot, rigName, os.Getenv("GT_ROLE"), nextID)
-}
-
-// syncGateIntent keeps the container-gate pool's pending-gate intent in step
-// with the merge queue (gt-22hdp.29). The refinery runs gt mq next to pick each
-// MR and then waits for host load to drop before it takes a slot; registering
-// intent here makes new crew and agent suites yield during that wait, so load
-// drains instead of starving the gate. callerRole is the caller's GT_ROLE: only
-// a gate role registers, while an empty queue clears whoever looks.
-func syncGateIntent(townRoot, rigName, callerRole, nextID string) {
-	var err error
-	switch {
-	case nextID == "":
-		err = slot.ClearGateIntent(townRoot, rigName)
-	case slot.IsMergeGateRole(callerRole):
-		err = slot.RegisterGateIntent(townRoot, rigName, nextID)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gt mq next: %v\n", err)
-	}
-}
-
-// firstReadyMR returns the ID of the first ready MR for rigName in issues, or
-// "" when there is none, by the same readiness gt mq next selects on. MR wisps
-// are shared across rigs, so an MR whose rig field names another rig does not
-// count. The ID only labels the intent; which MR is gated first is gt mq
-// next's and the refinery's business.
-func firstReadyMR(issues []*beads.Issue, rigName string) string {
-	for _, issue := range issues {
-		if !isMergeRequestReadyForSelection(issue) {
-			continue
-		}
-		if f := beads.ParseMRFields(issue); f != nil && f.Rig != "" && !strings.EqualFold(f.Rig, rigName) {
-			continue
-		}
-		return issue.ID
-	}
-	return ""
-}
-
-// queueHasReadyMR reports whether issues holds a ready MR for rigName.
-func queueHasReadyMR(issues []*beads.Issue, rigName string) bool {
-	return firstReadyMR(issues, rigName) != ""
 }

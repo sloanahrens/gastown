@@ -402,13 +402,10 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 			if owner, running := g.runningGate(townRoot, pool); running {
 				watch.noteGateHolder(owner)
 				passReason = WaitReasonGateRunning
-			} else if intent, pending := g.pendingGate(townRoot); pending {
-				watch.noteGateIntent(intent)
-				passReason = WaitReasonGatePending
 			}
 		}
 		for _, i := range candidates {
-			if passReason == WaitReasonGateRunning || passReason == WaitReasonGatePending {
+			if passReason == WaitReasonGateRunning {
 				// Yielding: this pass takes no slot at all.
 				break
 			}
@@ -506,7 +503,7 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 		// it spent waiting, not just the microseconds its probes took.
 		passTime := g.clock.Since(passStart)
 		watch.credit(passReason, passTime)
-		if passReason == WaitReasonGateRunning || passReason == WaitReasonGatePending {
+		if passReason == WaitReasonGateRunning {
 			yielded += passTime
 			if yielded >= pool.MaxGateYield && !yieldCapLogged {
 				yieldCapLogged = true
@@ -708,12 +705,6 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 				rep.YieldingToGate = true
 				rep.GateHolder = st.Owner
 				break
-			}
-		}
-		if !rep.YieldingToGate && pool.ReservedForGate > 0 {
-			if intent, pending := g.pendingGate(townRoot); pending {
-				rep.YieldingToGate = true
-				rep.GatePending = intent
 			}
 		}
 	}

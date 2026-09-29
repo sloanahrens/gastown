@@ -1,6 +1,8 @@
 package slot
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -359,5 +361,47 @@ func TestYield_StaleGateMarkerStillYields(t *testing.T) {
 	defer release(t, h)
 	if elapsed != pool.MaxGateYield {
 		t.Fatalf("stale-marker acquire waited %s, want it to yield to the running gate for the cap %s", elapsed, pool.MaxGateYield)
+	}
+}
+
+// TestYield_LeftoverIntentFileIsIgnored (gt-22hdp.34): the gate-intent
+// mechanism is gone. An intent measured live held crew for the refinery's
+// whole ~10.5 min MR cycle (only the ~8 min gate needs protection) and chained
+// across back-to-back MRs. Crew yield only to a RUNNING gate now, so a
+// gate-intent file an older gt left in the lock directory must neither delay a
+// crew start nor show up in status.
+func TestYield_LeftoverIntentFileIsIgnored(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	pool := yieldPool()
+
+	now := tg.clk.Now().UTC().Format(time.RFC3339Nano)
+	later := tg.clk.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	leftover := `{"role":"gastown/refinery","ref":"gt-wisp-rpf","registered_at":"` + now + `","expires_at":"` + later + `"}`
+	if err := os.MkdirAll(LockDir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(LockDir(town), "gate-intent-gastown.json"), []byte(leftover), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	release(t, h)
+	if elapsed != 0 {
+		t.Fatalf("crew waited %s on a leftover gate-intent file", elapsed)
+	}
+	if out := tg.probe.String(); strings.Contains(out, "gate pending") {
+		t.Errorf("wait output mentions a pending gate: %q", out)
+	}
+	rep, err := tg.StatusPoolLocksOnly(town, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.YieldingToGate || rep.Total != 4 {
+		t.Fatalf("status with a leftover intent file: yielding=%v total=%d, want not yielding and 4 slots", rep.YieldingToGate, rep.Total)
 	}
 }
