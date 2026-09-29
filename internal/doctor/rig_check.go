@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2049,10 +2051,18 @@ func (c *BareRepoExistsCheck) bareRepoRemovalBlockers(rigPath, rigName, bareRepo
 }
 
 // readRefsFromFiles reads loose refs under refs/ and packed-refs without git.
-// Loose refs win over packed ones, as in git.
+// Loose refs win over packed ones, as in git. Reads go through an os.Root
+// scoped to the repo, so a symlink inside a corrupt shell cannot point the
+// walk outside it.
 func readRefsFromFiles(repoPath string) (map[string]string, error) {
+	root, err := os.OpenRoot(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
 	refs := map[string]string{}
-	if data, err := os.ReadFile(filepath.Join(repoPath, "packed-refs")); err == nil {
+	if data, err := root.ReadFile("packed-refs"); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "^") {
@@ -2062,26 +2072,25 @@ func readRefsFromFiles(repoPath string) (map[string]string, error) {
 				refs[name] = sha
 			}
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	refsDir := filepath.Join(repoPath, "refs")
-	walkErr := filepath.Walk(refsDir, func(path string, info os.FileInfo, err error) error {
+
+	walkErr := fs.WalkDir(root.FS(), "refs", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			if os.IsNotExist(err) && path == refsDir {
-				return filepath.SkipDir
+			if path == "refs" && errors.Is(err, fs.ErrNotExist) {
+				return fs.SkipDir
 			}
 			return err
 		}
-		if info.IsDir() {
+		if entry.IsDir() {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := root.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(repoPath, path)
-		refs[filepath.ToSlash(rel)] = strings.TrimSpace(string(data))
+		refs[path] = strings.TrimSpace(string(data))
 		return nil
 	})
 	if walkErr != nil {
