@@ -19,7 +19,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -72,9 +71,15 @@ func run() int {
 	}
 	defer os.RemoveAll(cpuDir)
 
+	// go test splits -exec into words, honoring single and double quotes but
+	// no escapes; single quotes keep a path with spaces in one word, and a
+	// path with a single quote in it cannot be passed at all.
+	if strings.Contains(self, "'") {
+		return fail(fmt.Errorf("cannot pass %q to go test -exec: it contains a single quote", self))
+	}
 	// -exec turns off go test's result cache: a cached package runs no
 	// binary, so there would be nothing to measure.
-	args := append([]string{"test", "-json", "-exec", strconv.Quote(self) + " " + execTestArg}, flag.Args()...)
+	args := append([]string{"test", "-json", "-exec", "'" + self + "' " + execTestArg}, flag.Args()...)
 	cmd := exec.Command("go", args...)
 	cmd.Env = append(os.Environ(), testpolicy.CPUDirEnv+"="+cpuDir)
 	cmd.Stderr = os.Stderr
@@ -93,7 +98,7 @@ func run() int {
 		}
 		return c, ok
 	}
-	over, trackedRuns, scanErr := testpolicy.WatchBudgetTracked(stdout, os.Stdout, *budget, exempt, tracked, "github.com/steveyegge/gastown", cpu)
+	res, scanErr := testpolicy.WatchBudgetTracked(stdout, os.Stdout, *budget, exempt, tracked, "github.com/steveyegge/gastown", cpu)
 	if scanErr != nil {
 		// WatchBudget stopped reading before the child was done writing (for
 		// example a single line over its 16 MB scan buffer); drain the pipe
@@ -103,13 +108,19 @@ func run() int {
 	}
 	waitErr := cmd.Wait()
 
-	if len(trackedRuns) > 0 {
+	if len(res.SlowWall) > 0 {
+		fmt.Fprintf(os.Stderr, "over %s of wall time (reported only; the budget is on user CPU):\n", *budget)
+		for _, r := range res.SlowWall {
+			fmt.Fprintf(os.Stderr, "  %s used %s\n", r.Package, usage(r.CPU, false, r.Elapsed))
+		}
+	}
+	if len(res.Tracked) > 0 {
 		fmt.Fprintf(os.Stderr, "over budget (tracked, limit %s user CPU):\n", *budget)
-		for _, r := range trackedRuns {
+		for _, r := range res.Tracked {
 			fmt.Fprintf(os.Stderr, "  %s used %s (%s)\n", r.Package, usage(r.CPU, r.Unmeasured, r.Elapsed), r.Bead)
 		}
 	}
-	for _, o := range over {
+	for _, o := range res.Over {
 		if o.Unmeasured {
 			fmt.Fprintf(os.Stderr, "BUDGET: %s passed but its CPU time was not recorded (wall %s); the budget cannot judge it\n", o.Package, o.Elapsed.Round(time.Millisecond))
 			continue
@@ -126,7 +137,7 @@ func run() int {
 		return exitErr.ExitCode()
 	case waitErr != nil || scanErr != nil || readErr != nil:
 		return fail(errors.Join(waitErr, scanErr, readErr))
-	case len(over) > 0:
+	case len(res.Over) > 0:
 		return 1
 	}
 	return 0
@@ -169,15 +180,18 @@ func execTest(argv []string) int {
 		return 2
 	}
 	cpuDir := os.Getenv(testpolicy.CPUDirEnv)
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = withoutEnv(os.Environ(), testpolicy.CPUDirEnv)
 	// go test signals this process, not the binary: SIGQUIT when -timeout
 	// runs out (for the goroutine dump), SIGINT/SIGTERM when interrupted.
 	// Pass each one on; this process exits when the binary does.
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
-	if err := cmd.Start(); err != nil {
+	cmd, err := startTestBinary(func() *exec.Cmd {
+		c := exec.Command(argv[0], argv[1:]...)
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		c.Env = withoutEnv(os.Environ(), testpolicy.CPUDirEnv)
+		return c
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "budget "+execTestArg+":", err)
 		return 2
 	}
@@ -197,7 +211,7 @@ func execTest(argv []string) int {
 		fmt.Fprintln(os.Stderr, "budget "+execTestArg+": CPU time not recorded:", err)
 	}
 	if ws, ok := st.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return 128 + int(ws.Signal())
+		return dieLike(ws.Signal())
 	}
 	return st.ExitCode()
 }
@@ -210,4 +224,24 @@ func withoutEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// startTestBinary starts the command newCmd builds, retrying while exec fails
+// with ETXTBSY: go test has just written the test binary, and a descriptor
+// for it that another process inherited across fork (before that process's
+// own exec closed it) keeps it "busy" for a moment. go test retries the same
+// error when it runs a test binary itself (go.dev/issue/22315). Each attempt waits twice as
+// long as the last, about 5 s in all; newCmd is called per attempt because an
+// exec.Cmd cannot be started twice.
+func startTestBinary(newCmd func() *exec.Cmd) (*exec.Cmd, error) {
+	wait := 10 * time.Millisecond
+	for attempt := 0; ; attempt++ {
+		cmd := newCmd()
+		err := cmd.Start()
+		if err == nil || !errors.Is(err, syscall.ETXTBSY) || attempt == 9 {
+			return cmd, err
+		}
+		time.Sleep(wait)
+		wait *= 2
+	}
 }

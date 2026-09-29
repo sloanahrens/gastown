@@ -2,6 +2,7 @@ package testpolicy
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +79,8 @@ func TestCheckOverBudget(t *testing.T) {
 }
 
 // A package in overbudget.txt is exempt from the budget but reported with its
-// bead, CPU and wall time on every run, over the budget or not.
+// bead, CPU and wall time on every run, over the budget or not. Like any
+// converted package, one that passes without a CPU measurement fails.
 func TestWatchBudgetTracked(t *testing.T) {
 	t.Parallel()
 	const stream = `{"Action":"pass","Package":"m/internal/git","Elapsed":41.5}
@@ -93,18 +95,46 @@ func TestWatchBudgetTracked(t *testing.T) {
 		"internal/c":    {User: time.Second},
 	})
 	var out bytes.Buffer
-	over, runs, err := WatchBudgetTracked(strings.NewReader(stream), &out, 10*time.Second, nil, tracked, "m", cpu)
+	res, err := WatchBudgetTracked(strings.NewReader(stream), &out, 10*time.Second, nil, tracked, "m", cpu)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(over) != 1 || over[0].Package != "internal/slow" {
-		t.Fatalf("overruns = %+v, want internal/slow only", over)
+	if len(res.Over) != 2 || res.Over[0].Package != "internal/fast" || !res.Over[0].Unmeasured || res.Over[1].Package != "internal/slow" || res.Over[1].Unmeasured {
+		t.Fatalf("overruns = %+v, want internal/fast unmeasured, then internal/slow over", res.Over)
 	}
 	want := []TrackedRun{
 		{Package: "internal/git", Bead: "gt-22hdp.35", Elapsed: 41500 * time.Millisecond, CPU: CPUTime{User: 15 * time.Second, Sys: 300 * time.Second}},
-		{Package: "internal/fast", Bead: "gt-x", Elapsed: 2 * time.Second, Unmeasured: true},
 	}
-	if len(runs) != len(want) || runs[0] != want[0] || runs[1] != want[1] {
-		t.Fatalf("tracked = %+v, want %+v", runs, want)
+	if len(res.Tracked) != len(want) || res.Tracked[0] != want[0] {
+		t.Fatalf("tracked = %+v, want %+v", res.Tracked, want)
+	}
+}
+
+// TestWatchBudgetSlowWall checks that every judged package whose wall time is
+// over the budget is reported, whatever its CPU: wall is report-only, but work
+// done outside the test binary's waited-for process tree (a daemon it
+// started, a server it waits on) shows up nowhere else.
+func TestWatchBudgetSlowWall(t *testing.T) {
+	t.Parallel()
+	const stream = `{"Action":"pass","Package":"m/internal/waits","Elapsed":13.2}
+{"Action":"pass","Package":"m/internal/quick","Elapsed":1.0}
+{"Action":"pass","Package":"m/internal/over","Elapsed":12.0}
+{"Action":"pass","Package":"m/internal/exempt","Elapsed":30.0}
+`
+	cpu := cpuOf(map[string]CPUTime{
+		"internal/waits": {User: 2 * time.Second},
+		"internal/quick": {User: time.Second},
+		"internal/over":  {User: 11 * time.Second},
+	})
+	res, err := WatchBudgetTracked(strings.NewReader(stream), io.Discard, 10*time.Second, map[string]bool{"internal/exempt": true}, nil, "m", cpu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Over) != 1 || res.Over[0].Package != "internal/over" {
+		t.Fatalf("overruns = %+v, want internal/over only", res.Over)
+	}
+	want := SlowRun{Package: "internal/waits", Elapsed: 13200 * time.Millisecond, CPU: CPUTime{User: 2 * time.Second}}
+	if len(res.SlowWall) != 1 || res.SlowWall[0] != want {
+		t.Fatalf("slow wall = %+v, want [%+v] (an overrun already prints its wall; exempt packages are not judged)", res.SlowWall, want)
 	}
 }

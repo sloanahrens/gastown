@@ -16,7 +16,8 @@ import (
 
 // runBudget runs the budget runner from the repo root over one fixture
 // package under testdata/budget, with empty unconverted and overbudget lists
-// so the fixture is judged, and returns its exit code and stderr.
+// so the fixture is judged, and returns its exit code and its stdout and
+// stderr combined.
 func runBudget(t *testing.T, budget, fixture string) (int, string) {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -32,6 +33,7 @@ func runBudget(t *testing.T, budget, fixture string) (int, string) {
 		"--", "-count=1", "./internal/testpolicy/testdata/budget/"+fixture)
 	cmd.Dir = root
 	var stderr bytes.Buffer
+	cmd.Stdout = &stderr
 	cmd.Stderr = &stderr
 	err = cmd.Run()
 	var exitErr *exec.ExitError
@@ -80,5 +82,19 @@ func TestIntegrationBudgetIgnoresWallTime(t *testing.T) {
 	}
 	if strings.Contains(stderr, "BUDGET:") {
 		t.Fatalf("stderr reports a budget failure:\n%s", stderr)
+	}
+}
+
+// TestIntegrationBudgetReportsSignal checks that a test binary killed by a
+// signal is reported the way plain go test reports it ("signal: killed"),
+// although the binary runs under the runner's exec wrapper.
+func TestIntegrationBudgetReportsSignal(t *testing.T) {
+	t.Parallel()
+	code, out := runBudget(t, "10s", "sigkill")
+	if code == 0 {
+		t.Fatalf("exit code = 0, want a failure; output:\n%s", out)
+	}
+	if !strings.Contains(out, "signal: killed") {
+		t.Fatalf("output has no \"signal: killed\" line:\n%s", out)
 	}
 }

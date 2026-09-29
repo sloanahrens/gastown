@@ -58,18 +58,39 @@ type pkgOutput struct {
 // user CPU it uses alone, and internal/slot's system time went from 1.6 s to
 // 11.1 s while its user time stayed at 0.1-0.2 s.
 func WatchBudget(r io.Reader, w io.Writer, budget time.Duration, exempt map[string]bool, module string, cpu CPUSource) ([]Overrun, error) {
-	over, _, err := WatchBudgetTracked(r, w, budget, exempt, nil, module, cpu)
-	return over, err
+	res, err := WatchBudgetTracked(r, w, budget, exempt, nil, module, cpu)
+	return res.Over, err
+}
+
+// SlowRun is a judged package whose wall time was over the budget although
+// its user CPU was not. It is reported, never failed: wall time depends on
+// the host, but work outside the test binary's waited-for process tree (a
+// daemon it started, a server it waited on) shows up nowhere else.
+type SlowRun struct {
+	Package string
+	Elapsed time.Duration
+	CPU     CPUTime
+}
+
+// BudgetResult is what one budget run found.
+type BudgetResult struct {
+	// Over are the packages that fail the budget.
+	Over []Overrun
+	// Tracked are the overbudget.txt packages' measurements, reported on
+	// every run.
+	Tracked []TrackedRun
+	// SlowWall are the judged packages over the budget in wall time only.
+	SlowWall []SlowRun
 }
 
 // WatchBudgetTracked is WatchBudget that also exempts the packages in tracked
 // (overbudget.txt: package to bead id) and returns the time each of them
-// took, so the caller can report them on every run.
-func WatchBudgetTracked(r io.Reader, w io.Writer, budget time.Duration, exempt map[string]bool, tracked map[string]string, module string, cpu CPUSource) ([]Overrun, []TrackedRun, error) {
-	var runs []TrackedRun
+// took, so the caller can report them on every run. A tracked package that
+// passes without a CPU measurement still fails, like any converted package.
+func WatchBudgetTracked(r io.Reader, w io.Writer, budget time.Duration, exempt map[string]bool, tracked map[string]string, module string, cpu CPUSource) (BudgetResult, error) {
+	var res BudgetResult
 	tests := map[string][]TestTime{}
 	bufs := map[string]*pkgOutput{}
-	var over []Overrun
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for sc.Scan() {
@@ -133,21 +154,23 @@ func WatchBudgetTracked(r io.Reader, w io.Writer, budget time.Duration, exempt m
 			continue
 		}
 		c, measured := cpu(pkg)
-		if bead, ok := tracked[pkg]; ok {
-			runs = append(runs, TrackedRun{Package: pkg, Bead: bead, Elapsed: d, CPU: c, Unmeasured: !measured})
-			continue
-		}
 		// A failed package may never have run a binary (a build failure);
 		// it already fails the run, so a missing measurement adds nothing.
 		unmeasured := !measured && ev.Action == "pass"
-		if unmeasured || c.User > budget {
+		bead, isTracked := tracked[pkg]
+		switch {
+		case isTracked && !unmeasured:
+			res.Tracked = append(res.Tracked, TrackedRun{Package: pkg, Bead: bead, Elapsed: d, CPU: c, Unmeasured: !measured})
+		case unmeasured || c.User > budget:
 			ts := tests[pkg]
 			sort.Slice(ts, func(i, j int) bool { return ts[i].Elapsed > ts[j].Elapsed })
 			if len(ts) > 3 {
 				ts = ts[:3]
 			}
-			over = append(over, Overrun{Package: pkg, Elapsed: d, CPU: c, Unmeasured: unmeasured, Slowest: ts})
+			res.Over = append(res.Over, Overrun{Package: pkg, Elapsed: d, CPU: c, Unmeasured: unmeasured, Slowest: ts})
+		case d > budget:
+			res.SlowWall = append(res.SlowWall, SlowRun{Package: pkg, Elapsed: d, CPU: c})
 		}
 	}
-	return over, runs, sc.Err()
+	return res, sc.Err()
 }
