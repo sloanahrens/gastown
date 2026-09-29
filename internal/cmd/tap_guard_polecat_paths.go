@@ -345,11 +345,22 @@ func (s polecatPathScope) isRepoGitPath(target string) bool {
 	return isWithinPath(target, s.repoGit)
 }
 
+// isScratchPath reports whether target is in scratch space. A scratch root
+// that contains the town (a town under /tmp, or a session whose $TMPDIR is the
+// town's parent) is scratch only outside the town: honoring it inside would
+// exempt every town path from the rules this guard exists for. On Linux
+// t.TempDir() is under /tmp, which is how every polecat-paths test passed on
+// macOS and failed on the CI runner (gt-22hdp.39). A root inside the town
+// (the town's .claude-town/projects) is unaffected.
 func (s polecatPathScope) isScratchPath(target string) bool {
 	for _, root := range s.scratch {
-		if isWithinPath(target, root) {
-			return true
+		if !isWithinPath(target, root) {
+			continue
 		}
+		if s.townRoot != "" && isWithinPath(s.townRoot, root) && s.isTownPath(target) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -623,8 +634,15 @@ func claudeConfigScratchRoots(configDir, home string) []string {
 // macOS per-user temp hierarchy writable, which is far more than a polecat
 // needs, and it is what made an earlier version of this guard's tests
 // meaningless — a temp-dir test town looked like scratch space.
+// hostTempScratchDirs are the well-known host temp dirs scratchRoots adds
+// beside $TMPDIR. A variable so the guard's test town can be judged apart
+// from wherever the host's /tmp is: on Linux t.TempDir() is itself under
+// /tmp, so the test town's $HOME and its surroundings were scratch space
+// there and not on macOS.
+var hostTempScratchDirs = []string{"/tmp", "/var/tmp"}
+
 func scratchRoots(townRoot string) []string {
-	candidates := []string{os.TempDir(), "/tmp", "/var/tmp"}
+	candidates := append([]string{os.TempDir()}, hostTempScratchDirs...)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
