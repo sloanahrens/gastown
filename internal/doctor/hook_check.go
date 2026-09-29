@@ -193,6 +193,9 @@ func (c *HookAttachmentValidCheck) Fix(ctx *CheckContext) error {
 type HookSingletonCheck struct {
 	FixableCheck
 	duplicates []duplicateHandoff
+	// closer returns the client Fix closes a beads directory's duplicates
+	// through; nil means bd on that directory.
+	closer func(beadsDir string) beads.Client
 }
 
 type duplicateHandoff struct {
@@ -309,7 +312,12 @@ func (c *HookSingletonCheck) Fix(ctx *CheckContext) error {
 	var errors []string
 
 	for _, dup := range c.duplicates {
-		b := beads.New(filepath.Dir(dup.beadsDir))
+		var b beads.Client
+		if c.closer != nil {
+			b = c.closer(dup.beadsDir)
+		} else {
+			b = beads.New(filepath.Dir(dup.beadsDir))
+		}
 
 		// Close all but the first bead (keep the oldest/first one)
 		toClose := dup.beadIDs[1:]

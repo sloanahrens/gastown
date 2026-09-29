@@ -3850,6 +3850,40 @@ func closeMoleculeWithDescendants(bd *BdCli, workDir, moleculeID string) (int, e
 	return closed, descErr
 }
 
+// verifyClosedViaCLI re-reads ids after a batch close bd reported as done,
+// and returns a *beads.PartialCloseError naming any still open.
+func verifyClosedViaCLI(bd *BdCli, workDir string, ids []string) error {
+	out, err := bd.Exec(workDir, append([]string{"show", "--json"}, ids...)...)
+	if err != nil {
+		return fmt.Errorf("re-reading %d closed issue(s): %w", len(ids), err)
+	}
+	var issues []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(out), &issues); err != nil {
+		return fmt.Errorf("parsing re-read of %d closed issue(s): %w", len(ids), err)
+	}
+	closed := make(map[string]bool, len(issues))
+	for _, is := range issues {
+		if is.Status == string(beads.StatusClosed) {
+			closed[is.ID] = true
+		}
+	}
+	pe := &beads.PartialCloseError{}
+	for _, id := range ids {
+		if closed[id] {
+			pe.Closed = append(pe.Closed, id)
+		} else {
+			pe.NotClosed = append(pe.NotClosed, id)
+		}
+	}
+	if len(pe.NotClosed) == 0 {
+		return nil
+	}
+	return pe
+}
+
 // closeDescendantsViaCLI recursively closes descendant issues of a parent
 // using bd CLI commands. Returns count of issues closed and any error.
 func closeDescendantsViaCLI(bd *BdCli, workDir, parentID string) (int, error) {
@@ -3897,10 +3931,15 @@ func closeDescendantsViaCLI(bd *BdCli, workDir, parentID string) (int, error) {
 		reason := "Orphaned mol-polecat-work step — owning polecat no longer exists"
 		args := append([]string{"close"}, idsToClose...)
 		args = append(args, "-r", reason)
-		if err := bd.Run(workDir, args...); err != nil {
+		err := bd.Run(workDir, args...)
+		if err == nil && len(idsToClose) > 1 {
+			// bd 1.2 skips a refused issue in a multi-issue close and
+			// still exits 0: re-read the batch for the ones left open.
+			err = verifyClosedViaCLI(bd, workDir, idsToClose)
+		}
+		totalClosed += len(beads.ClosedIDs(idsToClose, err))
+		if err != nil {
 			errs = append(errs, fmt.Errorf("closing children of %s: %w", parentID, err))
-		} else {
-			totalClosed += len(idsToClose)
 		}
 	}
 

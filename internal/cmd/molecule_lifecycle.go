@@ -375,7 +375,7 @@ func forceCloseDescendants(b *beads.Beads, parentID string) (int, error) {
 	return closeDescendantsImpl(b, parentID, true)
 }
 
-func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, error) {
+func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, error) {
 	// Uses Children (bd show --children), not List(ListOptions{Parent:
 	// parentID}) (bd list --parent): the latter only checks the persistent
 	// dependencies table and silently misses ephemeral wisp children,
@@ -417,10 +417,13 @@ func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, err
 		} else {
 			closeErr = b.Close(idsToClose...)
 		}
+		// A batch close can close some children and have bd refuse others
+		// (a *beads.PartialCloseError): count only the ones that closed, and
+		// report the rest so no caller takes a stranded step for a closed
+		// one (gt-7lx3).
+		totalClosed += len(beads.ClosedIDs(idsToClose, closeErr))
 		if closeErr != nil {
 			errs = append(errs, fmt.Errorf("closing children of %s: %w", parentID, closeErr))
-		} else {
-			totalClosed += len(idsToClose)
 		}
 	}
 

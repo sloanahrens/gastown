@@ -444,11 +444,20 @@ func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string
 	for _, issue := range issues {
 		ids = append(ids, issue.ID)
 	}
+	return closeDeliveryBeads(bd, ids, escalationID, closedBy)
+}
+
+// closeDeliveryBeads closes an escalation's delivery beads ids and returns
+// how many closed. When bd refuses some, the error names them and the count
+// is only the ones that closed.
+func closeDeliveryBeads(bd beads.Client, ids []string, escalationID, closedBy string) (int, error) {
 	reason := fmt.Sprintf("escalation %s closed by %s", escalationID, closedBy)
-	if err := bd.CloseWithReason(reason, ids...); err != nil {
-		return 0, fmt.Errorf("closing %d delivery bead(s): %w", len(ids), err)
+	err := bd.CloseWithReason(reason, ids...)
+	closed := len(beads.ClosedIDs(ids, err))
+	if err != nil {
+		return closed, fmt.Errorf("closing %d delivery bead(s): %w", len(ids), err)
 	}
-	return len(ids), nil
+	return closed, nil
 }
 
 func runEscalateStale(cmd *cobra.Command, args []string) error {
