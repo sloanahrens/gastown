@@ -226,8 +226,9 @@ func (g *Git) lookupPullRequestByQualifiedHead(targetRepo, headOwner, branch, he
 
 // ghFunc runs the gh CLI in dir and returns its stdout and stderr. Every gh
 // invocation goes through one, so tests can record and answer them without
-// starting a process. An error carrying an exit code satisfies
-// interface{ ExitCode() int }, as *exec.ExitError does.
+// starting a process. Production only checks whether err is nil; a fake that
+// wants to look like *exec.ExitError can also give its error an ExitCode()
+// method.
 type ghFunc func(dir string, args ...string) (stdout, stderr []byte, err error)
 
 // realGH runs the gh binary on PATH with dir as its working directory.

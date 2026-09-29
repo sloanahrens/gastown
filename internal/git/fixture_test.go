@@ -86,6 +86,10 @@ func copyFixtureTree(src, dst string) error {
 			if err != nil {
 				return err
 			}
+			// Only config files carry the fixture's absolute path today. A
+			// fixture that clones (FETCH_HEAD, reflog), adds a worktree
+			// (.git/worktrees/*/gitdir, the worktree's .git file) or fetches
+			// must extend this rewrite to those files too.
 			if d.Name() == "config" {
 				data = bytes.ReplaceAll(data, []byte(src), []byte(dst))
 			}

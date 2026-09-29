@@ -1729,8 +1729,15 @@ func TestInitSubmodules_WithSubmodules(t *testing.T) {
 		t.Fatal("expected empty submodule dir before init")
 	}
 
-	// InitSubmodules should populate it. The file:// transport a local
-	// submodule remote needs is refused for submodule clones by default.
+	// The exported wrapper adds no git config, so git's default refusal of
+	// the file:// transport for submodule clones must stand. This guards
+	// that InitSubmodules passes no extra environment to initSubmodules.
+	err := InitSubmodules(cloneDest)
+	if err == nil || !strings.Contains(err.Error(), "transport 'file' not allowed") {
+		t.Fatalf("InitSubmodules with the default protocol policy = %v, want a refused file transport", err)
+	}
+
+	// initSubmodules with file:// allowed should populate it.
 	allowFile := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.file.allow", "GIT_CONFIG_VALUE_0=always"}
 	if err := initSubmodules(cloneDest, allowFile); err != nil {
 		t.Fatalf("InitSubmodules: %v", err)
