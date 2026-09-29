@@ -95,7 +95,7 @@ func (g *Gate) pendingGate(townRoot string) (*GateIntent, bool) {
 			continue
 		}
 		var in GateIntent
-		if json.Unmarshal(data, &in) != nil || !now.Before(in.ExpiresAt) {
+		if json.Unmarshal(data, &in) != nil || in.expired(now) {
 			continue
 		}
 		live = append(live, &in)
@@ -105,4 +105,19 @@ func (g *Gate) pendingGate(townRoot string) (*GateIntent, bool) {
 	}
 	sort.Slice(live, func(i, j int) bool { return live[i].RegisteredAt.Before(live[j].RegisteredAt) })
 	return live[0], true
+}
+
+// expired reports whether the intent no longer holds anyone up at now. The
+// file's own ExpiresAt is trusted only up to RegisteredAt + GateIntentTTL, and
+// an intent stamped in the future (clock skew, a hand-edited file) is treated
+// as expired rather than as one that could last indefinitely.
+func (in GateIntent) expired(now time.Time) bool {
+	if in.RegisteredAt.After(now) {
+		return true
+	}
+	end := in.RegisteredAt.Add(GateIntentTTL)
+	if in.ExpiresAt.Before(end) {
+		end = in.ExpiresAt
+	}
+	return !now.Before(end)
 }
