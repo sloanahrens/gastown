@@ -9,6 +9,7 @@ import (
 )
 
 func TestBeadsRedirectTargetCheck_ValidTarget(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
@@ -41,6 +42,7 @@ func TestBeadsRedirectTargetCheck_ValidTarget(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_TargetDoesNotExist(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	crewDir := filepath.Join(rigDir, "crew", "worker1")
@@ -72,6 +74,7 @@ func TestBeadsRedirectTargetCheck_TargetDoesNotExist(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_TargetNoBeadsSetup(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
@@ -116,6 +119,7 @@ func TestBeadsRedirectTargetCheck_TargetNoBeadsSetup(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_PolecatBrokenTarget(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	polecatDir := filepath.Join(rigDir, "polecats", "polecat1")
@@ -147,6 +151,7 @@ func TestBeadsRedirectTargetCheck_PolecatBrokenTarget(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	refineryDir := filepath.Join(rigDir, "refinery", "rig")
@@ -175,6 +180,7 @@ func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_NoRedirectFile(t *testing.T) {
+	t.Parallel()
 	// Worktrees without redirect files should not be flagged (handled by other check)
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -197,6 +203,7 @@ func TestBeadsRedirectTargetCheck_NoRedirectFile(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_FixRecomputesRedirect(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
@@ -251,6 +258,7 @@ func TestBeadsRedirectTargetCheck_FixRecomputesRedirect(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_FixWithMayorBeads(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	mayorBeadsDir := filepath.Join(rigDir, "mayor", "rig", ".beads")
@@ -299,6 +307,7 @@ func TestBeadsRedirectTargetCheck_FixWithMayorBeads(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_FixUnfixable(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	crewDir := filepath.Join(rigDir, "crew", "worker1")
@@ -334,6 +343,7 @@ func TestBeadsRedirectTargetCheck_FixUnfixable(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_MayorRedirectChain(t *testing.T) {
+	t.Parallel()
 	// Test tracked beads architecture: rig/.beads has redirect to mayor/rig/.beads
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -379,6 +389,7 @@ func TestBeadsRedirectTargetCheck_MayorRedirectChain(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_MultipleWorktrees(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 
@@ -421,6 +432,7 @@ func TestBeadsRedirectTargetCheck_MultipleWorktrees(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_ValidConfigYaml(t *testing.T) {
+	t.Parallel()
 	// Target with config.yaml should be considered valid
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -457,6 +469,7 @@ func TestBeadsRedirectTargetCheck_ValidConfigYaml(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_AbsolutePathRedirect(t *testing.T) {
+	t.Parallel()
 	// Redirect files containing absolute paths should resolve correctly
 	// without path-doubling (filepath.Join(wt, absPath) bug).
 	townRoot := t.TempDir()
@@ -492,6 +505,7 @@ func TestBeadsRedirectTargetCheck_AbsolutePathRedirect(t *testing.T) {
 }
 
 func TestExtractRigName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		townRoot     string
@@ -554,6 +568,7 @@ func TestExtractRigName(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_FixWithMissingConfigYaml(t *testing.T) {
+	t.Parallel()
 	// Target directory exists with metadata.json but no config.yaml/dolt/redirect.
 	// Fix should create config.yaml from metadata defaults.
 	townRoot := t.TempDir()
@@ -616,6 +631,7 @@ func TestBeadsRedirectTargetCheck_FixWithMissingConfigYaml(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_FixMetadataRepairFails(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not enforce POSIX directory write bits for this chmod-based failure path")
 	}
@@ -668,6 +684,7 @@ func TestBeadsRedirectTargetCheck_FixMetadataRepairFails(t *testing.T) {
 }
 
 func TestBeadsRedirectTargetCheck_FixWithAbsoluteRigRedirect(t *testing.T) {
+	t.Parallel()
 	// When rig/.beads/redirect contains an absolute path, the doctor fix
 	// (recomputeRedirect) should pass it through as-is, not prepend upPath.
 	townRoot := t.TempDir()

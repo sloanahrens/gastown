@@ -7,6 +7,7 @@ import (
 )
 
 func TestRoleConfigCheck_Run(t *testing.T) {
+	t.Parallel()
 	t.Run("no overrides returns OK with defaults message", func(t *testing.T) {
 		tmpDir := t.TempDir()
 

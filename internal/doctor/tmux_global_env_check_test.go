@@ -35,6 +35,7 @@ func (m *mockGlobalEnvAccessor) SetGlobalEnvironment(key, value string) error {
 }
 
 func TestTmuxGlobalEnvCheck_Metadata(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxGlobalEnvCheck()
 
 	if check.Name() != "tmux-global-env" {
@@ -49,6 +50,7 @@ func TestTmuxGlobalEnvCheck_Metadata(t *testing.T) {
 }
 
 func TestTmuxGlobalEnvCheck_Missing(t *testing.T) {
+	t.Parallel()
 	// GT_TOWN_ROOT not set — should warn, fix should set it, re-run should pass.
 	mock := &mockGlobalEnvAccessor{env: map[string]string{}}
 	check := NewTmuxGlobalEnvCheckWithAccessor(mock)
@@ -72,6 +74,7 @@ func TestTmuxGlobalEnvCheck_Missing(t *testing.T) {
 }
 
 func TestTmuxGlobalEnvCheck_WrongValue(t *testing.T) {
+	t.Parallel()
 	// GT_TOWN_ROOT set to wrong path — should warn, fix should correct it.
 	mock := &mockGlobalEnvAccessor{env: map[string]string{
 		"GT_TOWN_ROOT": "/old/path",
@@ -95,6 +98,7 @@ func TestTmuxGlobalEnvCheck_WrongValue(t *testing.T) {
 }
 
 func TestTmuxGlobalEnvCheck_Correct(t *testing.T) {
+	t.Parallel()
 	// GT_TOWN_ROOT already correct — should pass.
 	mock := &mockGlobalEnvAccessor{env: map[string]string{
 		"GT_TOWN_ROOT": "/home/user/gt",
@@ -109,6 +113,7 @@ func TestTmuxGlobalEnvCheck_Correct(t *testing.T) {
 }
 
 func TestTmuxGlobalEnvCheck_NoTmuxServer(t *testing.T) {
+	t.Parallel()
 	// No tmux server — we could not read GT_TOWN_ROOT, so this is unknown,
 	// not a verified pass.
 	mock := &mockGlobalEnvAccessor{err: tmux.ErrNoServer}

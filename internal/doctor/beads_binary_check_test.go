@@ -13,6 +13,7 @@ import (
 )
 
 func TestBeadsBinaryCheck_Metadata(t *testing.T) {
+	t.Parallel()
 	check := NewBeadsBinaryCheck()
 
 	if check.Name() != "beads-binary" {
@@ -30,6 +31,7 @@ func TestBeadsBinaryCheck_Metadata(t *testing.T) {
 }
 
 func TestBeadsBinaryCheck_BdInstalled(t *testing.T) {
+	t.Parallel()
 	// Skip if bd is not actually installed in the test environment
 	if _, err := exec.LookPath("bd"); err != nil {
 		t.Skip("bd not installed, skipping installed-path test")

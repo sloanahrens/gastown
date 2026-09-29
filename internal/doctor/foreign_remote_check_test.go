@@ -8,6 +8,7 @@ import (
 )
 
 func TestNewForeignRemoteCheck(t *testing.T) {
+	t.Parallel()
 	check := NewForeignRemoteCheck()
 
 	if check.Name() != "foreign-remotes" {
@@ -24,6 +25,7 @@ func TestNewForeignRemoteCheck(t *testing.T) {
 }
 
 func TestForeignRemoteCheck_NoGitRepo(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "foreign-remote-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -40,6 +42,7 @@ func TestForeignRemoteCheck_NoGitRepo(t *testing.T) {
 }
 
 func TestForeignRemoteCheck_OnlyOrigin(t *testing.T) {
+	t.Parallel()
 	tmpDir := initForeignRemoteTestRepo(t)
 	defer os.RemoveAll(tmpDir)
 
@@ -53,6 +56,7 @@ func TestForeignRemoteCheck_OnlyOrigin(t *testing.T) {
 }
 
 func TestForeignRemoteCheck_DetectsForeignRemote(t *testing.T) {
+	t.Parallel()
 	townDir := initForeignRemoteTestRepo(t)
 	defer os.RemoveAll(townDir)
 
@@ -80,6 +84,7 @@ func TestForeignRemoteCheck_DetectsForeignRemote(t *testing.T) {
 }
 
 func TestForeignRemoteCheck_IgnoresRelatedRemote(t *testing.T) {
+	t.Parallel()
 	// Create town repo with origin, then clone origin to create a related repo
 	townDir := initForeignRemoteTestRepo(t)
 	defer os.RemoveAll(townDir)
@@ -112,6 +117,7 @@ func TestForeignRemoteCheck_IgnoresRelatedRemote(t *testing.T) {
 }
 
 func TestForeignRemoteCheck_FixRemovesForeignRemotes(t *testing.T) {
+	t.Parallel()
 	townDir := initForeignRemoteTestRepo(t)
 	defer os.RemoveAll(townDir)
 

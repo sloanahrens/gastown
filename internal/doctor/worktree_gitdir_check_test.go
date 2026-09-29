@@ -8,6 +8,7 @@ import (
 )
 
 func TestNewWorktreeGitdirCheck(t *testing.T) {
+	t.Parallel()
 	check := NewWorktreeGitdirCheck()
 
 	if check.Name() != "worktree-gitdir-valid" {
@@ -20,6 +21,7 @@ func TestNewWorktreeGitdirCheck(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_NoRigs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	check := NewWorktreeGitdirCheck()
@@ -33,6 +35,7 @@ func TestWorktreeGitdirCheck_NoRigs(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_ValidWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -68,6 +71,7 @@ func TestWorktreeGitdirCheck_ValidWorktree(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_BrokenGitdir_MissingBareRepo(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -107,6 +111,7 @@ func TestWorktreeGitdirCheck_BrokenGitdir_MissingBareRepo(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_BrokenGitdir_MissingWorktreeEntry(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -148,6 +153,7 @@ func TestWorktreeGitdirCheck_BrokenGitdir_MissingWorktreeEntry(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_CloneNotWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -172,6 +178,7 @@ func TestWorktreeGitdirCheck_CloneNotWorktree(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_MalformedGitFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -206,6 +213,7 @@ func TestWorktreeGitdirCheck_MalformedGitFile(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_PolecatWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -237,6 +245,7 @@ func TestWorktreeGitdirCheck_PolecatWorktree(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_RigFilter(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create two rigs, one with broken worktree
@@ -278,6 +287,7 @@ func TestWorktreeGitdirCheck_RigFilter(t *testing.T) {
 // ── New tests for hq-c6u: relocation and deacon dogs ──────────────────── //
 
 func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
+	t.Parallel()
 	// Simulate rsync from /old/prefix/gt to tmpDir (new town root).
 	// The .git file contains an absolute path with the old prefix,
 	// but .repo.git exists at the new location.
@@ -331,6 +341,7 @@ func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_DeaconDogs(t *testing.T) {
+	t.Parallel()
 	// Simulate deacon/dogs/<dogname>/<rigname>/.git pointing to stale paths.
 	tmpDir := t.TempDir()
 	rigName := "myrig"
@@ -379,6 +390,7 @@ func TestWorktreeGitdirCheck_DeaconDogs(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_DeaconDogs_MultipleDogs(t *testing.T) {
+	t.Parallel()
 	// Multiple dogs with broken worktrees for the same rig.
 	tmpDir := t.TempDir()
 	rigName := "testrig"
@@ -419,6 +431,7 @@ func TestWorktreeGitdirCheck_DeaconDogs_MultipleDogs(t *testing.T) {
 }
 
 func TestWorktreeGitdirCheck_NoDeaconDogs(t *testing.T) {
+	t.Parallel()
 	// Town with no deacon/dogs should still pass.
 	tmpDir := t.TempDir()
 

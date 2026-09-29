@@ -10,6 +10,7 @@ import (
 )
 
 func TestNewClaudeSettingsCheck(t *testing.T) {
+	t.Parallel()
 	check := NewClaudeSettingsCheck()
 
 	if check.Name() != "claude-settings" {
@@ -22,6 +23,7 @@ func TestNewClaudeSettingsCheck(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_NoSettingsFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	check := NewClaudeSettingsCheck()
@@ -201,6 +203,7 @@ func createStaleSettings(t *testing.T, path string, missingElements ...string) {
 }
 
 func TestClaudeSettingsCheck_ValidMayorSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create valid mayor settings at correct location (mayor/.claude/settings.json)
@@ -219,6 +222,7 @@ func TestClaudeSettingsCheck_ValidMayorSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_ValidDeaconSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create valid deacon settings (must be settings.json, not settings.local.json)
@@ -236,6 +240,7 @@ func TestClaudeSettingsCheck_ValidDeaconSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_ValidWitnessSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -255,6 +260,7 @@ func TestClaudeSettingsCheck_ValidWitnessSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_ValidRefinerySettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -274,6 +280,7 @@ func TestClaudeSettingsCheck_ValidRefinerySettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_ValidCrewSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -293,6 +300,7 @@ func TestClaudeSettingsCheck_ValidCrewSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_ValidPolecatSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -320,6 +328,7 @@ func TestClaudeSettingsCheck_ValidPolecatSettings(t *testing.T) {
 // stale, --fix deleted them, the daemon recreated the same file, and the
 // check never converged. The fix recognizes role-specific Stop patterns.
 func TestClaudeSettingsCheck_PolecatStopHookRecognized(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -353,6 +362,7 @@ func TestClaudeSettingsCheck_PolecatStopHookRecognized(t *testing.T) {
 // test will fail and remind whoever's editing it to keep the doctor check
 // in sync.
 func TestExpectedStopPattern(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		role string
 		want string
@@ -375,6 +385,7 @@ func TestExpectedStopPattern(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingEnabledPlugins(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create mayor settings.json missing enabledPlugins (content validation)
@@ -395,6 +406,7 @@ func TestClaudeSettingsCheck_MissingEnabledPlugins(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingHooks(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create mayor settings.json missing hooks entirely (content validation)
@@ -412,6 +424,7 @@ func TestClaudeSettingsCheck_MissingHooks(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingSessionStartPrime(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create mayor settings.json missing gt prime in SessionStart (content validation)
@@ -439,6 +452,7 @@ func TestClaudeSettingsCheck_MissingSessionStartPrime(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingStopHook(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create mayor settings.json missing Stop hook (content validation)
@@ -466,6 +480,7 @@ func TestClaudeSettingsCheck_MissingStopHook(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_WrongLocationWitness(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -495,6 +510,7 @@ func TestClaudeSettingsCheck_WrongLocationWitness(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_WrongLocationRefinery(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -524,6 +540,7 @@ func TestClaudeSettingsCheck_WrongLocationRefinery(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MultipleStaleFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -556,6 +573,7 @@ func TestClaudeSettingsCheck_MultipleStaleFiles(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create invalid JSON file (settings.json for content validation)
@@ -588,6 +606,7 @@ func TestClaudeSettingsCheck_InvalidJSON(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_FixDeletesStaleFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create stale settings.local.json at mayor (old filename, now stale)
@@ -622,6 +641,7 @@ func TestClaudeSettingsCheck_FixDeletesStaleFile(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_SkipsNonRigDirectories(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create directories that should be skipped as rigs
@@ -650,6 +670,7 @@ func TestClaudeSettingsCheck_SkipsNonRigDirectories(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MixedValidAndStale(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -683,6 +704,7 @@ func TestClaudeSettingsCheck_MixedValidAndStale(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_WrongLocationCrew(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -712,6 +734,7 @@ func TestClaudeSettingsCheck_WrongLocationCrew(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_WrongLocationPolecat(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -780,6 +803,7 @@ func gitAddAndCommit(t *testing.T, repoDir, filePath string) {
 }
 
 func TestClaudeSettingsCheck_GitStatusUntracked(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -816,6 +840,7 @@ func TestClaudeSettingsCheck_GitStatusUntracked(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_GitStatusTrackedClean(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -847,6 +872,7 @@ func TestClaudeSettingsCheck_GitStatusTrackedClean(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_GitStatusTrackedModified(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -882,6 +908,7 @@ func TestClaudeSettingsCheck_GitStatusTrackedModified(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_FixPreservesModifiedFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -918,6 +945,7 @@ func TestClaudeSettingsCheck_FixPreservesModifiedFiles(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_FixDeletesUntrackedFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -953,6 +981,7 @@ func TestClaudeSettingsCheck_FixDeletesUntrackedFiles(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_FixPreservesTrackedCleanFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -986,6 +1015,7 @@ func TestClaudeSettingsCheck_FixPreservesTrackedCleanFiles(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_RigRootSettingsFlagged(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1021,6 +1051,7 @@ func TestClaudeSettingsCheck_RigRootSettingsFlagged(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_RigRootSettingsFixDeletes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1058,6 +1089,7 @@ func TestClaudeSettingsCheck_RigRootSettingsFixDeletes(t *testing.T) {
 // See install.go createTownRootAgentMDs() for details.
 
 func TestClaudeSettingsCheck_GitIgnoredFilesNotFlagged(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Initialize git repo at town root
@@ -1089,6 +1121,7 @@ func TestClaudeSettingsCheck_GitIgnoredFilesNotFlagged(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_TownRootSettingsWarnsInsteadOfKilling(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create mayor directory (needed for fix to recreate settings there)
@@ -1159,6 +1192,7 @@ func TestClaudeSettingsCheck_TownRootSettingsWarnsInsteadOfKilling(t *testing.T)
 // report it as a missing file that needs agent restart to create.
 
 func TestClaudeSettingsCheck_MissingWitnessSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1214,6 +1248,7 @@ func TestClaudeSettingsCheck_MissingWitnessSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingRefinerySettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1250,6 +1285,7 @@ func TestClaudeSettingsCheck_MissingRefinerySettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingCrewSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1281,6 +1317,7 @@ func TestClaudeSettingsCheck_MissingCrewSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingPolecatSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1312,6 +1349,7 @@ func TestClaudeSettingsCheck_MissingPolecatSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1355,6 +1393,7 @@ func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MixedMissingAndStale(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1408,6 +1447,7 @@ func TestClaudeSettingsCheck_MixedMissingAndStale(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_MissingFileOnlyMessage(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1438,6 +1478,7 @@ func TestClaudeSettingsCheck_MissingFileOnlyMessage(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_NoMissingFileWhenDirNotExists(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1460,6 +1501,7 @@ func TestClaudeSettingsCheck_NoMissingFileWhenDirNotExists(t *testing.T) {
 }
 
 func TestClaudeSettingsCheck_FixDoesNotDeleteMissingFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 

@@ -219,6 +219,7 @@ func TestStaleTaskDispatchCheck_FixConvergesWithOverride(t *testing.T) {
 }
 
 func TestContainsTaskDispatch(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		config   hooks.HooksConfig
@@ -268,6 +269,7 @@ func TestContainsTaskDispatch(t *testing.T) {
 }
 
 func TestStripTaskDispatch(t *testing.T) {
+	t.Parallel()
 	cfg := &hooks.HooksConfig{
 		PreToolUse: []hooks.HookEntry{
 			{Matcher: "Task", Hooks: []hooks.Hook{{Type: "command", Command: "gt tap guard task-dispatch"}}},

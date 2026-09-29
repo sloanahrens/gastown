@@ -158,6 +158,7 @@ func (f *coverageFixture) ctx(tmpDir, rigName string) *CheckContext {
 }
 
 func TestEditorialCoverageCheck_NotRequired(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(tmpDir, rigName)
@@ -174,6 +175,7 @@ func TestEditorialCoverageCheck_NotRequired(t *testing.T) {
 }
 
 func TestEditorialCoverageCheck_NoBaseline(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -206,6 +208,7 @@ func TestEditorialCoverageCheck_NoBaseline(t *testing.T) {
 }
 
 func TestEditorialCoverageCheck_FullyCovered(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -244,6 +247,7 @@ func TestEditorialCoverageCheck_FullyCovered(t *testing.T) {
 }
 
 func TestEditorialCoverageCheck_MissingNote(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -277,6 +281,7 @@ func TestEditorialCoverageCheck_MissingNote(t *testing.T) {
 }
 
 func TestEditorialCoverageCheck_NotesRefAbsent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -305,6 +310,7 @@ func TestEditorialCoverageCheck_NotesRefAbsent(t *testing.T) {
 // bare origin — mayorRig never sees the note locally until the check fetches
 // refs/notes/om from origin itself.
 func TestEditorialCoverageCheck_NoteReachableOnlyViaOriginFetch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -380,6 +386,7 @@ func (f *coverageFixture) rehearsalHead(t *testing.T, base, name, content string
 // diff. The check must report that distinctly, keep counting it as covered,
 // and print the backfill that moves the proof onto the landed commit.
 func TestEditorialCoverageCheck_CoveredByPatchID(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -438,6 +445,7 @@ func TestEditorialCoverageCheck_CoveredByPatchID(t *testing.T) {
 // parent (the polecat head) carries one proving the same diff, so the remedy
 // must stamp both.
 func TestEditorialCoverageCheck_CoveredByPatchID_MergeSuggestsSecondParent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -484,6 +492,7 @@ func TestEditorialCoverageCheck_CoveredByPatchID_MergeSuggestsSecondParent(t *te
 // two shapes apart: a patch-id match is reported beside the genuinely
 // uncovered commit, and does not downgrade it out of an error.
 func TestEditorialCoverageCheck_CoveredByPatchIDKeepsUncoveredAnError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -516,6 +525,7 @@ func TestEditorialCoverageCheck_CoveredByPatchIDKeepsUncoveredAnError(t *testing
 // only an approve verdict is proof: a request_changes note on the same diff
 // must not be reported as covering the landed commit.
 func TestEditorialCoverageCheck_NonApproveNoteIsNotCoverage(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)
@@ -544,6 +554,7 @@ func TestEditorialCoverageCheck_NonApproveNoteIsNotCoverage(t *testing.T) {
 // the notes ref, so an id that could escape the command's quoting must leave
 // the commit uncovered rather than be echoed into it.
 func TestEditorialCoverageCheck_UnquotableMRBacksNoRemedy(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	f := newCoverageFixture(t, tmpDir, rigName)

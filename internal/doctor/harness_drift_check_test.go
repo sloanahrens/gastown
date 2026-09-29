@@ -28,6 +28,7 @@ func sha256Hex(content string) string {
 }
 
 func TestHarnessDriftCheck_NoManifest(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(tmpDir, rigName)
@@ -47,6 +48,7 @@ func TestHarnessDriftCheck_NoManifest(t *testing.T) {
 }
 
 func TestHarnessDriftCheck_Matches(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(tmpDir, rigName)
@@ -70,6 +72,7 @@ func TestHarnessDriftCheck_Matches(t *testing.T) {
 }
 
 func TestHarnessDriftCheck_HandEditDetected(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(tmpDir, rigName)
@@ -105,6 +108,7 @@ func TestHarnessDriftCheck_HandEditDetected(t *testing.T) {
 }
 
 func TestHarnessDriftCheck_MissingManagedFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(tmpDir, rigName)

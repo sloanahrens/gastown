@@ -9,6 +9,7 @@ import (
 )
 
 func TestRigRoutesJSONLCheck_Run(t *testing.T) {
+	t.Parallel()
 	t.Run("no rigs returns OK", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		// Create minimal town structure
@@ -94,6 +95,7 @@ func TestRigRoutesJSONLCheck_Run(t *testing.T) {
 }
 
 func TestRigRoutesJSONLCheck_Fix(t *testing.T) {
+	t.Parallel()
 	t.Run("deletes routes.jsonl unconditionally", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		rigBeads := filepath.Join(tmpDir, "myrig", ".beads")
@@ -151,6 +153,7 @@ func TestRigRoutesJSONLCheck_Fix(t *testing.T) {
 }
 
 func TestRigRoutesJSONLCheck_FindRigDirectories(t *testing.T) {
+	t.Parallel()
 	t.Run("finds rigs from multiple sources", func(t *testing.T) {
 		tmpDir := t.TempDir()
 

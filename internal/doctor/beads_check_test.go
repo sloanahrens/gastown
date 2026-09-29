@@ -9,6 +9,7 @@ import (
 )
 
 func TestNewPrefixMismatchCheck(t *testing.T) {
+	t.Parallel()
 	check := NewPrefixMismatchCheck()
 
 	if check.Name() != "prefix-mismatch" {
@@ -21,6 +22,7 @@ func TestNewPrefixMismatchCheck(t *testing.T) {
 }
 
 func TestPrefixMismatchCheck_NoRoutes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -38,6 +40,7 @@ func TestPrefixMismatchCheck_NoRoutes(t *testing.T) {
 }
 
 func TestPrefixMismatchCheck_NoRigsJson(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -67,6 +70,7 @@ func TestPrefixMismatchCheck_NoRigsJson(t *testing.T) {
 }
 
 func TestPrefixMismatchCheck_Matching(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -112,6 +116,7 @@ func TestPrefixMismatchCheck_Matching(t *testing.T) {
 }
 
 func TestPrefixMismatchCheck_Mismatch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -174,6 +179,7 @@ func TestPrefixMismatchCheck_Mismatch(t *testing.T) {
 }
 
 func TestPrefixMismatchCheck_Fix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -256,6 +262,7 @@ func TestPrefixMismatchCheck_Fix(t *testing.T) {
 }
 
 func TestNewDatabasePrefixCheck(t *testing.T) {
+	t.Parallel()
 	check := NewDatabasePrefixCheck()
 
 	if check.Name() != "database-prefix" {
@@ -268,6 +275,7 @@ func TestNewDatabasePrefixCheck(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_NoRoutes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -285,6 +293,7 @@ func TestDatabasePrefixCheck_NoRoutes(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_RoutesLoadError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -315,6 +324,7 @@ func TestDatabasePrefixCheck_RoutesLoadError(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_EmptyRoutes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -338,6 +348,7 @@ func TestDatabasePrefixCheck_EmptyRoutes(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_NoBeadsDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -382,6 +393,7 @@ func (m *mockDBPrefixGetter) GetDBPrefix(rigPath string) (string, error) {
 }
 
 func TestDatabasePrefixCheck_SkipsRigRedirectingToTownDB(t *testing.T) {
+	t.Parallel()
 	// Layout:
 	//   <town>/.beads/           <- town root beads (prefix "hq")
 	//   <town>/site_manager/.beads/redirect -> "../.beads"  (shares town DB)
@@ -440,6 +452,7 @@ func TestDatabasePrefixCheck_SkipsRigRedirectingToTownDB(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_DetectsMismatchForOwnDB(t *testing.T) {
+	t.Parallel()
 	// A rig with its own .beads (no redirect) that has a wrong prefix
 	// should still be detected as a mismatch.
 
@@ -569,6 +582,7 @@ func TestDatabasePrefixCheck_FixUsesMetadataDatabase(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_MultipleRedirectsSameDB(t *testing.T) {
+	t.Parallel()
 	// Multiple rigs all redirect to the town DB. None should be flagged.
 
 	tmpDir := t.TempDir()
@@ -621,6 +635,7 @@ func TestDatabasePrefixCheck_MultipleRedirectsSameDB(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_MixedOwnAndRedirect(t *testing.T) {
+	t.Parallel()
 	// Mix of rigs: some redirect to town DB (should be skipped), one has
 	// its own DB with a wrong prefix (should be flagged).
 

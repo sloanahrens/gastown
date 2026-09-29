@@ -14,6 +14,7 @@ import (
 // mail send/read happens. This test only checks the thin translation from
 // daemon.DeaconSelfProbeVerdict to doctor.CheckStatus.
 func TestDeaconSelfProbeCheck_MapsVerdictToStatus(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		verdict string
 		want    CheckStatus

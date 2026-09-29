@@ -7,6 +7,7 @@ import (
 )
 
 func TestNewTownGitCheck(t *testing.T) {
+	t.Parallel()
 	check := NewTownGitCheck()
 
 	if check.Name() != "town-git" {
@@ -23,6 +24,7 @@ func TestNewTownGitCheck(t *testing.T) {
 }
 
 func TestTownGitCheck_NoGitDir(t *testing.T) {
+	t.Parallel()
 	// Create temp directory without .git
 	tmpDir, err := os.MkdirTemp("", "town-git-test-*")
 	if err != nil {
@@ -44,6 +46,7 @@ func TestTownGitCheck_NoGitDir(t *testing.T) {
 }
 
 func TestTownGitCheck_WithGitDir(t *testing.T) {
+	t.Parallel()
 	// Create temp directory with .git
 	tmpDir, err := os.MkdirTemp("", "town-git-test-*")
 	if err != nil {
@@ -66,6 +69,7 @@ func TestTownGitCheck_WithGitDir(t *testing.T) {
 }
 
 func TestTownGitCheck_GitIsFile(t *testing.T) {
+	t.Parallel()
 	// Create temp directory with .git as a file (worktree case)
 	tmpDir, err := os.MkdirTemp("", "town-git-test-*")
 	if err != nil {

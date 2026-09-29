@@ -20,6 +20,7 @@ func writeDirectiveFile(t *testing.T, path, content string) {
 }
 
 func TestUnusedDirectiveCheck_Metadata(t *testing.T) {
+	t.Parallel()
 	check := NewUnusedDirectiveCheck()
 
 	if check.Name() != "unused-directives" {
@@ -34,6 +35,7 @@ func TestUnusedDirectiveCheck_Metadata(t *testing.T) {
 }
 
 func TestUnusedDirectiveCheck_NoUnusedFiles(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
 	writeDirectiveFile(t, filepath.Join(townRoot, "directives", "mayor.md"), "mayor policy")
@@ -47,6 +49,7 @@ func TestUnusedDirectiveCheck_NoUnusedFiles(t *testing.T) {
 }
 
 func TestUnusedDirectiveCheck_WarnsOnMisnamedFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "directives", "refinery.md"), "rig policy")
@@ -77,6 +80,7 @@ func TestUnusedDirectiveCheck_WarnsOnMisnamedFile(t *testing.T) {
 }
 
 func TestUnusedDirectiveCheck_SharedNameIsNotUnused(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
 	writeDirectiveFile(t,
@@ -91,6 +95,7 @@ func TestUnusedDirectiveCheck_SharedNameIsNotUnused(t *testing.T) {
 }
 
 func TestUnusedDirectiveCheck_SkipsWhenDirectivesUnreadable(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// A regular file where the directory belongs makes the scan fail for a
 	// reason other than "nothing there".
@@ -113,6 +118,7 @@ func TestUnusedDirectiveCheck_SkipsWhenDirectivesUnreadable(t *testing.T) {
 // whose fix deletes operator prose town-wide is unrecoverable data loss; the
 // operator renames, the check only reports.
 func TestUnusedDirectiveCheck_FixLeavesFilesOnDisk(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
 	unusedPath := filepath.Join(townRoot, "myrig", "directives", "testing.md")

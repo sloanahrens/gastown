@@ -6,6 +6,7 @@ import (
 )
 
 func TestNewDoltOrphanServersCheck(t *testing.T) {
+	t.Parallel()
 	check := NewDoltOrphanServersCheck()
 
 	if check.Name() != "dolt-orphan-servers" {
@@ -20,6 +21,7 @@ func TestNewDoltOrphanServersCheck(t *testing.T) {
 }
 
 func TestDoltOrphanServersCheck_Run(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("dolt orphan server detection is not supported on Windows")
 	}
@@ -45,6 +47,7 @@ func TestDoltOrphanServersCheck_Run(t *testing.T) {
 }
 
 func TestDoltOrphanServersCheck_FixIsSafeWithNoFindings(t *testing.T) {
+	t.Parallel()
 	check := NewDoltOrphanServersCheck()
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 

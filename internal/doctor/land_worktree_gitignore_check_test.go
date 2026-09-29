@@ -8,6 +8,7 @@ import (
 )
 
 func TestLandWorktreeGitignoreCheck_Present(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := createRigWithGitignore(t, townRoot, "myrig", ".land-worktree/\n")
 
@@ -21,6 +22,7 @@ func TestLandWorktreeGitignoreCheck_Present(t *testing.T) {
 }
 
 func TestLandWorktreeGitignoreCheck_Missing(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	createRigWithGitignore(t, townRoot, "myrig", "plugins/\n.repo.git/\n")
 
@@ -36,6 +38,7 @@ func TestLandWorktreeGitignoreCheck_Missing(t *testing.T) {
 }
 
 func TestLandWorktreeGitignoreCheck_NoGitignore(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// Create rig without any .gitignore
 	rigPath := filepath.Join(townRoot, "myrig")
@@ -52,6 +55,7 @@ func TestLandWorktreeGitignoreCheck_NoGitignore(t *testing.T) {
 }
 
 func TestLandWorktreeGitignoreCheck_MultiRig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	createRigWithGitignore(t, townRoot, "goodrig", "plugins/\n.land-worktree/\n")
 	createRigWithGitignore(t, townRoot, "badrig", "plugins/\n")
@@ -68,6 +72,7 @@ func TestLandWorktreeGitignoreCheck_MultiRig(t *testing.T) {
 }
 
 func TestLandWorktreeGitignoreCheck_Fix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	createRigWithGitignore(t, townRoot, "myrig", "plugins/\n")
 
@@ -106,6 +111,7 @@ func TestLandWorktreeGitignoreCheck_Fix(t *testing.T) {
 }
 
 func TestLandWorktreeGitignoreCheck_FixCreatesFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "myrig")
 	if err := os.MkdirAll(filepath.Join(rigPath, "crew"), 0o755); err != nil {
@@ -130,6 +136,7 @@ func TestLandWorktreeGitignoreCheck_FixCreatesFile(t *testing.T) {
 }
 
 func TestLandWorktreeGitignoreCheck_NoRigs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	check := NewLandWorktreeGitignoreCheck()
@@ -141,6 +148,7 @@ func TestLandWorktreeGitignoreCheck_NoRigs(t *testing.T) {
 }
 
 func TestLandWorktreeGitignoreCheck_CanFix(t *testing.T) {
+	t.Parallel()
 	check := NewLandWorktreeGitignoreCheck()
 	if !check.CanFix() {
 		t.Error("expected CanFix() to return true")

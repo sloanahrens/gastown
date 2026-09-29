@@ -8,6 +8,7 @@ import (
 )
 
 func TestDeprecatedMergeQueueKeysCheck_Clean(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
 			"enabled":    true,
@@ -25,6 +26,7 @@ func TestDeprecatedMergeQueueKeysCheck_Clean(t *testing.T) {
 }
 
 func TestDeprecatedMergeQueueKeysCheck_DetectsTargetBranch(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
 			"enabled":       true,
@@ -42,6 +44,7 @@ func TestDeprecatedMergeQueueKeysCheck_DetectsTargetBranch(t *testing.T) {
 }
 
 func TestDeprecatedMergeQueueKeysCheck_DetectsIntegrationBranches(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
 			"enabled":               true,
@@ -59,6 +62,7 @@ func TestDeprecatedMergeQueueKeysCheck_DetectsIntegrationBranches(t *testing.T) 
 }
 
 func TestDeprecatedMergeQueueKeysCheck_DetectsBothKeys(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"merge_queue": map[string]interface{}{
 			"enabled":              true,
@@ -81,6 +85,7 @@ func TestDeprecatedMergeQueueKeysCheck_DetectsBothKeys(t *testing.T) {
 }
 
 func TestDeprecatedMergeQueueKeysCheck_NoMergeQueue(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"type":    "rig-settings",
 		"version": 1,
@@ -96,6 +101,7 @@ func TestDeprecatedMergeQueueKeysCheck_NoMergeQueue(t *testing.T) {
 }
 
 func TestDeprecatedMergeQueueKeysCheck_NoSettingsFile(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownMinimal(t)
 
 	check := NewDeprecatedMergeQueueKeysCheck()
@@ -108,6 +114,7 @@ func TestDeprecatedMergeQueueKeysCheck_NoSettingsFile(t *testing.T) {
 }
 
 func TestDeprecatedMergeQueueKeysCheck_Fix(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownWithSettings(t, map[string]interface{}{
 		"type":    "rig-settings",
 		"version": 1,
@@ -178,6 +185,7 @@ func TestDeprecatedMergeQueueKeysCheck_Fix(t *testing.T) {
 }
 
 func TestDeprecatedMergeQueueKeysCheck_MultiRig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Rig 1: clean config (no deprecated keys)

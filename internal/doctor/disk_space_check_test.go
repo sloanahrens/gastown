@@ -6,6 +6,7 @@ import (
 )
 
 func TestDiskSpaceCheck_Run(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -28,6 +29,7 @@ func TestDiskSpaceCheck_Run(t *testing.T) {
 }
 
 func TestDiskSpaceCheck_InvalidPath(t *testing.T) {
+	t.Parallel()
 	ctx := &CheckContext{TownRoot: "/nonexistent/path/that/should/not/exist"}
 
 	check := NewDiskSpaceCheck()
@@ -43,6 +45,7 @@ func TestDiskSpaceCheck_InvalidPath(t *testing.T) {
 }
 
 func TestDiskSpaceCheck_Properties(t *testing.T) {
+	t.Parallel()
 	check := NewDiskSpaceCheck()
 
 	if check.Name() != "disk-space" {

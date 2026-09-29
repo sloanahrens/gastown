@@ -41,6 +41,7 @@ func writeRigsJSON(t *testing.T, townRoot, rigName string) {
 }
 
 func TestPatrolMoleculesExistCheck_NoRigs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -63,6 +64,7 @@ func TestPatrolMoleculesExistCheck_NoRigs(t *testing.T) {
 }
 
 func TestPatrolMoleculesExistCheck_RigPathMissing_FallbackToTownRoot(t *testing.T) {
+	t.Parallel()
 	// Regression test for: when gt doctor runs from a mayor's canonical clone,
 	// TownRoot/rigName doesn't exist but patrol formulas are accessible from TownRoot.
 	// The check should fall back to TownRoot instead of reporting false missing formulas.
@@ -91,6 +93,7 @@ func TestPatrolMoleculesExistCheck_RigPathMissing_FallbackToTownRoot(t *testing.
 }
 
 func TestPatrolMoleculesExistCheck_RigPathExists_FormulasPresent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create the rig directory and provision formulas there.
@@ -117,6 +120,7 @@ func TestPatrolMoleculesExistCheck_RigPathExists_FormulasPresent(t *testing.T) {
 }
 
 func TestPatrolMoleculesExistCheck_RigPathExists_TownLevelFormulas(t *testing.T) {
+	t.Parallel()
 	// When the rig directory exists but has no .beads/formulas/, the check should
 	// find patrol formulas at the town level (.beads/formulas/) instead of
 	// reporting them as missing.
@@ -148,6 +152,7 @@ func TestPatrolMoleculesExistCheck_RigPathExists_TownLevelFormulas(t *testing.T)
 }
 
 func TestNewPatrolHooksWiredCheck(t *testing.T) {
+	t.Parallel()
 	check := NewPatrolHooksWiredCheck()
 	if check == nil {
 		t.Fatal("NewPatrolHooksWiredCheck() returned nil")
@@ -161,6 +166,7 @@ func TestNewPatrolHooksWiredCheck(t *testing.T) {
 }
 
 func TestPatrolHooksWiredCheck_NoDaemonConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -181,6 +187,7 @@ func TestPatrolHooksWiredCheck_NoDaemonConfig(t *testing.T) {
 }
 
 func TestPatrolHooksWiredCheck_ValidConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	cfg := config.NewDaemonPatrolConfig()
@@ -200,6 +207,7 @@ func TestPatrolHooksWiredCheck_ValidConfig(t *testing.T) {
 }
 
 func TestPatrolHooksWiredCheck_EmptyPatrols(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	cfg := &config.DaemonPatrolConfig{
@@ -223,6 +231,7 @@ func TestPatrolHooksWiredCheck_EmptyPatrols(t *testing.T) {
 }
 
 func TestPatrolHooksWiredCheck_HeartbeatEnabled(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	cfg := &config.DaemonPatrolConfig{
@@ -250,6 +259,7 @@ func TestPatrolHooksWiredCheck_HeartbeatEnabled(t *testing.T) {
 }
 
 func TestPatrolHooksWiredCheck_Fix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -288,6 +298,7 @@ func TestPatrolHooksWiredCheck_Fix(t *testing.T) {
 }
 
 func TestPatrolHooksWiredCheck_FixPreservesExisting(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	existing := &config.DaemonPatrolConfig{
@@ -391,6 +402,7 @@ func writePluginFixture(t *testing.T, dir, name, content string) {
 }
 
 func TestPatrolPluginDriftCheck_SourceNotFound_ReturnsWarningNotOK(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir() // No gastown checkout anywhere under here.
 
 	check := NewPatrolPluginDriftCheck()

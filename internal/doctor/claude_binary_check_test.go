@@ -13,6 +13,7 @@ import (
 )
 
 func TestClaudeBinaryCheck_Metadata(t *testing.T) {
+	t.Parallel()
 	check := NewClaudeBinaryCheck()
 
 	if check.Name() != "claude-binary" {
@@ -30,6 +31,7 @@ func TestClaudeBinaryCheck_Metadata(t *testing.T) {
 }
 
 func TestClaudeBinaryCheck_ClaudeInstalled(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skip("claude not installed, skipping installed-path test")
 	}

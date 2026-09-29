@@ -8,6 +8,7 @@ import (
 )
 
 func TestRigsRegistryValidCheck_NoRigsJson(t *testing.T) {
+	t.Parallel()
 	// No mayor/rigs.json at all — we could not validate anything, so this
 	// must not report a clean StatusOK.
 	tmpDir := t.TempDir()
@@ -25,6 +26,7 @@ func TestRigsRegistryValidCheck_NoRigsJson(t *testing.T) {
 }
 
 func TestRigsRegistryValidCheck_AllRigsExist(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -48,6 +50,7 @@ func TestRigsRegistryValidCheck_AllRigsExist(t *testing.T) {
 }
 
 func TestRigsRegistryValidCheck_MissingRig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {

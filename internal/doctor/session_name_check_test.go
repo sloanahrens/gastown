@@ -19,6 +19,7 @@ func testRegistryForNameCheck() *session.PrefixRegistry {
 }
 
 func TestNewMalformedSessionNameCheck(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 
 	if check.Name() != "session-name-format" {
@@ -39,6 +40,7 @@ func TestNewMalformedSessionNameCheck(t *testing.T) {
 }
 
 func TestMalformedSessionNameCheck_Run_NoSessions(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{}}
 	check.registryForTest = testRegistryForNameCheck()
@@ -55,6 +57,7 @@ func TestMalformedSessionNameCheck_Run_NoSessions(t *testing.T) {
 // in canonical format produce a clean result. This test uses a populated
 // registry so sessions actually parse — it does not pass vacuously.
 func TestMalformedSessionNameCheck_Run_AllCorrect(t *testing.T) {
+	t.Parallel()
 	reg := testRegistryForNameCheck()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = reg
@@ -76,6 +79,7 @@ func TestMalformedSessionNameCheck_Run_AllCorrect(t *testing.T) {
 }
 
 func TestMalformedSessionNameCheck_Run_NonGasTownSessions(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
@@ -96,6 +100,7 @@ func TestMalformedSessionNameCheck_Run_NonGasTownSessions(t *testing.T) {
 // non-Gastown sessions whose names happen to contain a rig name are NOT
 // falsely flagged. The ownership guard requires a known Gastown prefix.
 func TestMalformedSessionNameCheck_Run_NonGasTownWithRigSubstring(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
@@ -118,6 +123,7 @@ func TestMalformedSessionNameCheck_Run_NonGasTownWithRigSubstring(t *testing.T) 
 // E.g., "gt-fix-gastown-witness" is a polecat named "fix-gastown-witness",
 // not a legacy gastown witness session.
 func TestMalformedSessionNameCheck_Run_PolecatWithRigSubstring(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
@@ -138,6 +144,7 @@ func TestMalformedSessionNameCheck_Run_PolecatWithRigSubstring(t *testing.T) {
 // It verifies that a genuine legacy name (gt-niflheim-witness) is detected
 // and the canonical name (nif-witness) is reported.
 func TestMalformedSessionNameCheck_Run_DetectsMismatch(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
@@ -177,6 +184,7 @@ func TestMalformedSessionNameCheck_Run_DetectsMismatch(t *testing.T) {
 // TestMalformedSessionNameCheck_Run_LegacyWAWitness verifies the stated use
 // case: gt-whatsapp_automation-witness → wa-witness.
 func TestMalformedSessionNameCheck_Run_LegacyWAWitness(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
@@ -202,6 +210,7 @@ func TestMalformedSessionNameCheck_Run_LegacyWAWitness(t *testing.T) {
 // sessions are detected and flagged with a "manual rename required" note,
 // since Fix() cannot safely rename attached crew sessions.
 func TestMalformedSessionNameCheck_Run_CrewSession(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = testRegistryForNameCheck()
 	check.sessionListerForTest = &mockSessionLister{sessions: []string{
@@ -229,6 +238,7 @@ func TestMalformedSessionNameCheck_Run_CrewSession(t *testing.T) {
 // TestMalformedSessionNameCheck_Fix_Rename verifies the happy path: Fix()
 // renames a legacy session to its canonical name.
 func TestMalformedSessionNameCheck_Fix_Rename(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.registryForTest = testRegistryForNameCheck()
 
@@ -260,6 +270,7 @@ func TestMalformedSessionNameCheck_Fix_Rename(t *testing.T) {
 // TestMalformedSessionNameCheck_Fix_SkipsCrew verifies that crew sessions are
 // NOT renamed by Fix() (they need manual intervention).
 func TestMalformedSessionNameCheck_Fix_SkipsCrew(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.malformed = []sessionRename{
 		{oldName: "gt-niflheim-crew-wolf", newName: "nif-crew-wolf", isCrew: true},
@@ -281,6 +292,7 @@ func TestMalformedSessionNameCheck_Fix_SkipsCrew(t *testing.T) {
 // TestMalformedSessionNameCheck_Fix_SkipsCollision verifies that if the target
 // name is already in use, Fix() skips the rename to avoid clobbering.
 func TestMalformedSessionNameCheck_Fix_SkipsCollision(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.malformed = []sessionRename{
 		{oldName: "gt-niflheim-witness", newName: "nif-witness", isCrew: false},
@@ -307,6 +319,7 @@ func TestMalformedSessionNameCheck_Fix_SkipsCollision(t *testing.T) {
 // TestMalformedSessionNameCheck_Fix_TOCTOUGuard verifies that Fix() skips a
 // rename when the source session no longer exists (killed between Run and Fix).
 func TestMalformedSessionNameCheck_Fix_TOCTOUGuard(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.malformed = []sessionRename{
 		{oldName: "gt-niflheim-witness", newName: "nif-witness", isCrew: false},
@@ -332,6 +345,7 @@ func TestMalformedSessionNameCheck_Fix_TOCTOUGuard(t *testing.T) {
 // TestMalformedSessionNameCheck_Fix_HasSessionError verifies that Fix()
 // surfaces HasSession errors instead of silently ignoring them.
 func TestMalformedSessionNameCheck_Fix_HasSessionError(t *testing.T) {
+	t.Parallel()
 	check := NewMalformedSessionNameCheck()
 	check.malformed = []sessionRename{
 		{oldName: "gt-niflheim-witness", newName: "nif-witness", isCrew: false},

@@ -21,6 +21,7 @@ func runTownRootBranchGit(t *testing.T, dir string, args ...string) {
 }
 
 func TestTownRootBranchCheck_NotAGitRepo(t *testing.T) {
+	t.Parallel()
 	// A non-git directory means "git branch --show-current" fails — this
 	// is a could-not-ask condition, not a verified "on main" state.
 	tmpDir := t.TempDir()
@@ -41,6 +42,7 @@ func TestTownRootBranchCheck_NotAGitRepo(t *testing.T) {
 }
 
 func TestTownRootBranchCheck_OnMain(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	runTownRootBranchGit(t, tmpDir, "init", "-q", "-b", "main")
 	runTownRootBranchGit(t, tmpDir, "commit", "-q", "--allow-empty", "-m", "seed")
@@ -55,6 +57,7 @@ func TestTownRootBranchCheck_OnMain(t *testing.T) {
 }
 
 func TestTownRootBranchCheck_WrongBranch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	runTownRootBranchGit(t, tmpDir, "init", "-q", "-b", "main")
 	runTownRootBranchGit(t, tmpDir, "commit", "-q", "--allow-empty", "-m", "seed")

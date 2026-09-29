@@ -35,6 +35,7 @@ func (m *mockSessionLister) ListSessions() ([]string, error) {
 }
 
 func TestNewOrphanSessionCheck(t *testing.T) {
+	t.Parallel()
 	check := NewOrphanSessionCheck()
 
 	if check.Name() != "orphan-sessions" {
@@ -47,6 +48,7 @@ func TestNewOrphanSessionCheck(t *testing.T) {
 }
 
 func TestNewOrphanProcessCheck(t *testing.T) {
+	t.Parallel()
 	check := NewOrphanProcessCheck()
 
 	if check.Name() != "orphan-processes" {
@@ -60,6 +62,7 @@ func TestNewOrphanProcessCheck(t *testing.T) {
 }
 
 func TestOrphanProcessCheck_Run(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("orphan process detection is not supported on Windows")
 	}
@@ -90,6 +93,7 @@ func TestOrphanProcessCheck_Run(t *testing.T) {
 }
 
 func TestOrphanProcessCheck_MessageContent(t *testing.T) {
+	t.Parallel()
 	// Verify the check description is correct
 	check := NewOrphanProcessCheck()
 
@@ -263,6 +267,7 @@ func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
 
 // TestOrphanSessionCheck_GetValidRigs verifies rig detection from filesystem.
 func TestOrphanSessionCheck_GetValidRigs(t *testing.T) {
+	t.Parallel()
 	check := NewOrphanSessionCheck()
 	townRoot := t.TempDir()
 
@@ -376,6 +381,7 @@ func TestIsCrewSession_ComprehensivePatterns(t *testing.T) {
 
 // TestOrphanSessionCheck_HQSessions tests that hq-* sessions are properly recognized as valid.
 func TestOrphanSessionCheck_HQSessions(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
@@ -452,6 +458,7 @@ func TestOrphanSessionCheck_Run_Deterministic(t *testing.T) {
 }
 
 func TestArgvHasFlag(t *testing.T) {
+	t.Parallel()
 	if !argvHasFlag("/x/cursor-agent -f --resume z", "-f") {
 		t.Error("expected -f in argv")
 	}
@@ -461,6 +468,7 @@ func TestArgvHasFlag(t *testing.T) {
 }
 
 func TestGasTownRuntimeYOLO(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		cmd  string

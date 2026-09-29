@@ -10,6 +10,7 @@ import (
 // properties: it is not auto-fixable (only investigation helps), and it
 // belongs to the Hooks category.
 func TestHooksLiveFireCheck_Metadata(t *testing.T) {
+	t.Parallel()
 	check := NewHooksLiveFireCheck()
 	if check.CanFix() {
 		t.Error("hooks-live-fire should not claim to be auto-fixable")
@@ -30,6 +31,7 @@ func TestHooksLiveFireCheck_Metadata(t *testing.T) {
 // must fail toward "could not determine", never toward "pass", when it
 // can't actually exercise the real dispatch path.
 func TestHooksLiveFireCheck_NoPolecatSettings(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// No polecats/ directory anywhere under tmpDir, so findPolecatSettings
 	// finds nothing to test against — this must short-circuit before ever
@@ -50,6 +52,7 @@ func TestHooksLiveFireCheck_NoPolecatSettings(t *testing.T) {
 // (not a zero-value path treated as valid) when no polecat settings.json
 // exists in the workspace.
 func TestFindPolecatSettings_None(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	_, _, err := findPolecatSettings(tmpDir)
 	if err == nil {
@@ -63,6 +66,7 @@ func TestFindPolecatSettings_None(t *testing.T) {
 // confirmed block banner) must be inconclusive rather than a false pass;
 // only a no-branch run WITH a confirmed block banner earns a pass.
 func TestEvaluateBlockedShape(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		branchCreated  bool
@@ -123,6 +127,7 @@ func TestEvaluateBlockedShape(t *testing.T) {
 // command that's supposed to be blocked. This shape must fail when the
 // marker file never appears but the guard's own block banner did.
 func TestEvaluateAllowedShape(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		markerCreated  bool
@@ -180,6 +185,7 @@ func TestEvaluateAllowedShape(t *testing.T) {
 // inconclusive) stays StatusSkipped rather than either a false pass or an
 // unearned failure.
 func TestEvaluatePairResult(t *testing.T) {
+	t.Parallel()
 	check := NewHooksLiveFireCheck()
 
 	tests := []struct {
@@ -259,6 +265,7 @@ func envLookup(env []string, key string) (string, int) {
 // 'git checkout -b' succeeded and the check reported a false failure
 // (gt-xy4b).
 func TestLiveFireProbeEnv(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		environ []string

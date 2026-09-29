@@ -51,6 +51,7 @@ func (m *mockCheck) Fix(ctx *CheckContext) error {
 }
 
 func TestCheckStatus_String(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status CheckStatus
 		want   string
@@ -70,6 +71,7 @@ func TestCheckStatus_String(t *testing.T) {
 }
 
 func TestCheckContext_RigPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		ctx      CheckContext
@@ -98,6 +100,7 @@ func TestCheckContext_RigPath(t *testing.T) {
 }
 
 func TestNewReport(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 
 	if r.Timestamp.IsZero() {
@@ -112,6 +115,7 @@ func TestNewReport(t *testing.T) {
 }
 
 func TestReport_Add(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 
 	// Add an OK result
@@ -140,6 +144,7 @@ func TestReport_Add(t *testing.T) {
 }
 
 func TestReport_HasErrors(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 	if r.HasErrors() {
 		t.Error("Empty report should not have errors")
@@ -162,6 +167,7 @@ func TestReport_HasErrors(t *testing.T) {
 }
 
 func TestReport_HasWarnings(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 	if r.HasWarnings() {
 		t.Error("Empty report should not have warnings")
@@ -179,6 +185,7 @@ func TestReport_HasWarnings(t *testing.T) {
 }
 
 func TestReport_HasSkipped(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 	if r.HasSkipped() {
 		t.Error("Empty report should not have skipped checks")
@@ -196,6 +203,7 @@ func TestReport_HasSkipped(t *testing.T) {
 }
 
 func TestReport_IsHealthy(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		results []CheckStatus
@@ -223,6 +231,7 @@ func TestReport_IsHealthy(t *testing.T) {
 }
 
 func TestReport_Print(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 	r.Add(&CheckResult{
 		Name:    "TestCheck",
@@ -257,6 +266,7 @@ func TestReport_Print(t *testing.T) {
 }
 
 func TestReport_Print_SkippedSection(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 	r.Add(&CheckResult{
 		Name:    "OKCheck",
@@ -287,6 +297,7 @@ func TestReport_Print_SkippedSection(t *testing.T) {
 }
 
 func TestNewDoctor(t *testing.T) {
+	t.Parallel()
 	d := NewDoctor()
 	if d == nil {
 		t.Fatal("NewDoctor() returned nil")
@@ -297,6 +308,7 @@ func TestNewDoctor(t *testing.T) {
 }
 
 func TestDoctor_Register(t *testing.T) {
+	t.Parallel()
 	d := NewDoctor()
 
 	check1 := newMockCheck("check1", StatusOK)
@@ -314,6 +326,7 @@ func TestDoctor_Register(t *testing.T) {
 }
 
 func TestDoctor_RegisterAll(t *testing.T) {
+	t.Parallel()
 	d := NewDoctor()
 
 	check1 := newMockCheck("check1", StatusOK)
@@ -327,6 +340,7 @@ func TestDoctor_RegisterAll(t *testing.T) {
 }
 
 func TestDoctor_Run(t *testing.T) {
+	t.Parallel()
 	d := NewDoctor()
 	d.Register(newMockCheck("ok", StatusOK))
 	d.Register(newMockCheck("warn", StatusWarning))
@@ -354,6 +368,7 @@ func TestDoctor_Run(t *testing.T) {
 // check, not an empty string (which misaligned the line and left placeholder
 // remnants on screen).
 func TestDoctor_RunStreaming_SkippedIcon(t *testing.T) {
+	t.Parallel()
 	d := NewDoctor()
 	d.Register(newMockCheck("skipped", StatusSkipped))
 
@@ -373,6 +388,7 @@ func TestDoctor_RunStreaming_SkippedIcon(t *testing.T) {
 }
 
 func TestDoctor_Fix(t *testing.T) {
+	t.Parallel()
 	d := NewDoctor()
 
 	okCheck := newMockCheck("ok", StatusOK)
@@ -415,6 +431,7 @@ func TestDoctor_Fix(t *testing.T) {
 // that could not determine a result has nothing to fix, so Fix() must never
 // be invoked on it even when the check is otherwise fixable.
 func TestDoctor_Fix_SkipsSkippedChecks(t *testing.T) {
+	t.Parallel()
 	d := NewDoctor()
 
 	skippedCheck := newMockCheck("skipped", StatusSkipped)
@@ -436,6 +453,7 @@ func TestDoctor_Fix_SkipsSkippedChecks(t *testing.T) {
 }
 
 func TestBaseCheck(t *testing.T) {
+	t.Parallel()
 	b := &BaseCheck{
 		CheckName:        "test",
 		CheckDescription: "Test description",
@@ -469,6 +487,7 @@ func (p *panicCheck) Fix(ctx *CheckContext) error {
 }
 
 func TestSafeFixCheck_RecoversPanic(t *testing.T) {
+	t.Parallel()
 	check := &panicCheck{
 		FixableCheck: FixableCheck{
 			BaseCheck: BaseCheck{
@@ -491,6 +510,7 @@ func TestSafeFixCheck_RecoversPanic(t *testing.T) {
 }
 
 func TestSafeFixCheck_NormalError(t *testing.T) {
+	t.Parallel()
 	check := newMockCheck("failing-fix", StatusError)
 	check.fixable = true
 	check.fixError = fmt.Errorf("some fix error")
@@ -505,6 +525,7 @@ func TestSafeFixCheck_NormalError(t *testing.T) {
 }
 
 func TestSafeFixCheck_Success(t *testing.T) {
+	t.Parallel()
 	check := newMockCheck("good-fix", StatusError)
 	check.fixable = true
 
@@ -515,6 +536,7 @@ func TestSafeFixCheck_Success(t *testing.T) {
 }
 
 func TestFixableCheck(t *testing.T) {
+	t.Parallel()
 	f := &FixableCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        "fixable",
@@ -532,6 +554,7 @@ func TestFixableCheck(t *testing.T) {
 // under --verbose make gt doctor --fix look like a silent no-op and hide the
 // real error (gt-8po).
 func TestPrintSummaryOnly_FixFailedDetailsAlwaysVisible(t *testing.T) {
+	t.Parallel()
 	r := NewReport()
 	r.Add(&CheckResult{
 		Name:    "broken-check",

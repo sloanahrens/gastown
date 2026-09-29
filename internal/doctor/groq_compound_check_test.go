@@ -9,6 +9,7 @@ import (
 )
 
 func TestNewGroqCompoundCheck(t *testing.T) {
+	t.Parallel()
 	c := NewGroqCompoundCheck()
 	if c.Name() != "groq-compound-json" {
 		t.Errorf("Name() = %q, want %q", c.Name(), "groq-compound-json")
@@ -25,6 +26,7 @@ func TestNewGroqCompoundCheck(t *testing.T) {
 }
 
 func TestGroqCompoundConfigured_EmptyTownRoot(t *testing.T) {
+	t.Parallel()
 	c := NewGroqCompoundCheck()
 	if c.groqCompoundConfigured("") {
 		t.Error("groqCompoundConfigured(\"\") = true, want false")
@@ -32,6 +34,7 @@ func TestGroqCompoundConfigured_EmptyTownRoot(t *testing.T) {
 }
 
 func TestGroqCompoundConfigured_NoSettingsFile(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	c := NewGroqCompoundCheck()
 	if c.groqCompoundConfigured(tmp) {
@@ -40,6 +43,7 @@ func TestGroqCompoundConfigured_NoSettingsFile(t *testing.T) {
 }
 
 func TestGroqCompoundConfigured_DefaultAgent(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
 	settings.DefaultAgent = string(config.AgentGroqCompound)
@@ -52,6 +56,7 @@ func TestGroqCompoundConfigured_DefaultAgent(t *testing.T) {
 }
 
 func TestGroqCompoundConfigured_RoleAgent(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
 	settings.RoleAgents["refinery"] = string(config.AgentGroqCompound)
@@ -64,6 +69,7 @@ func TestGroqCompoundConfigured_RoleAgent(t *testing.T) {
 }
 
 func TestGroqCompoundConfigured_NoMatch(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
 	settings.RoleAgents["refinery"] = "claude"
@@ -76,6 +82,7 @@ func TestGroqCompoundConfigured_NoMatch(t *testing.T) {
 }
 
 func TestGroqCompoundCheck_Run_SkipWhenNotConfigured(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	c := NewGroqCompoundCheck()
 	res := c.Run(&CheckContext{TownRoot: tmp})

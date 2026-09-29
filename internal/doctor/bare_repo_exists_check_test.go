@@ -12,6 +12,7 @@ import (
 )
 
 func TestBareRepoExistsCheck_Name(t *testing.T) {
+	t.Parallel()
 	check := NewBareRepoExistsCheck()
 	if check.Name() != "bare-repo-exists" {
 		t.Errorf("expected name 'bare-repo-exists', got %q", check.Name())
@@ -22,6 +23,7 @@ func TestBareRepoExistsCheck_Name(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_NoRig(t *testing.T) {
+	t.Parallel()
 	check := NewBareRepoExistsCheck()
 	ctx := &CheckContext{TownRoot: t.TempDir(), RigName: ""}
 
@@ -32,6 +34,7 @@ func TestBareRepoExistsCheck_NoRig(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_BareRepoExists(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -50,6 +53,7 @@ func TestBareRepoExistsCheck_BareRepoExists(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_NoBareRepoNoWorktrees(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -70,6 +74,7 @@ func TestBareRepoExistsCheck_NoBareRepoNoWorktrees(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_MissingBareRepo(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -101,6 +106,7 @@ func TestBareRepoExistsCheck_MissingBareRepo(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_MultipleWorktreesMissing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -140,6 +146,7 @@ func TestBareRepoExistsCheck_MultipleWorktreesMissing(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_RelativeGitdir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -166,6 +173,7 @@ func TestBareRepoExistsCheck_RelativeGitdir(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_NonRepoGitWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -238,6 +246,7 @@ func writeConfigJSON(t *testing.T, rigDir, gitURL, pushURL string) {
 }
 
 func TestBareRepoExistsCheck_PushURLMismatch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -268,6 +277,7 @@ func TestBareRepoExistsCheck_PushURLMismatch(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_LegacyConfigIgnoresPushURL(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -296,6 +306,7 @@ func TestBareRepoExistsCheck_LegacyConfigIgnoresPushURL(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_PushURLMatchesConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -323,6 +334,7 @@ func TestBareRepoExistsCheck_PushURLMatchesConfig(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_FixPushURLMismatch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -372,6 +384,7 @@ func corruptBareRepo(t *testing.T, bareRepo string) {
 }
 
 func TestBareRepoExistsCheck_CorruptBareRepoDetected(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -397,6 +410,7 @@ func TestBareRepoExistsCheck_CorruptBareRepoDetected(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_FixCorruptBareRepoReclones(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -454,6 +468,7 @@ func TestBareRepoExistsCheck_FixCorruptBareRepoReclones(t *testing.T) {
 }
 
 func TestBareRepoRefspecCheck_CorruptBareRepoErrors(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -471,6 +486,7 @@ func TestBareRepoRefspecCheck_CorruptBareRepoErrors(t *testing.T) {
 }
 
 func TestBareRepoRefspecCheck_FixRefusesCorrupt(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -491,6 +507,7 @@ func TestBareRepoRefspecCheck_FixRefusesCorrupt(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_FixCorruptPreservesWorktreeHead(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -543,6 +560,7 @@ func TestBareRepoExistsCheck_FixCorruptPreservesWorktreeHead(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_FixSkipsRepairedBetweenRunAndFix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -585,6 +603,7 @@ func TestBareRepoExistsCheck_FixSkipsRepairedBetweenRunAndFix(t *testing.T) {
 }
 
 func TestBareRepoHealth_RejectsNonBareRepo(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	work := filepath.Join(tmpDir, "work")
 	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
@@ -597,6 +616,7 @@ func TestBareRepoHealth_RejectsNonBareRepo(t *testing.T) {
 }
 
 func TestBareRepoRefspecCheck_HealthyRepoStillFixes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -622,6 +642,7 @@ func TestBareRepoRefspecCheck_HealthyRepoStillFixes(t *testing.T) {
 }
 
 func TestBareRepoExistsCheck_FixPreservesLegacyPushURL(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)

@@ -8,6 +8,7 @@ import (
 )
 
 func TestStaleBeadsRedirectCheck_NoStaleFiles(t *testing.T) {
+	t.Parallel()
 	// Create temp town with clean .beads redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -40,6 +41,7 @@ func TestStaleBeadsRedirectCheck_NoStaleFiles(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_WithStaleFiles(t *testing.T) {
+	t.Parallel()
 	// Create temp town with stale .beads files
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -83,6 +85,7 @@ func TestStaleBeadsRedirectCheck_WithStaleFiles(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_FixRemovesStaleFiles(t *testing.T) {
+	t.Parallel()
 	// Create temp town with stale .beads files
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -158,6 +161,7 @@ func TestStaleBeadsRedirectCheck_FixRemovesStaleFiles(t *testing.T) {
 }
 
 func TestCleanStaleBeadsFiles_RemovesMetadataDriftFromRedirect(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	canonicalBeads := filepath.Join(townRoot, "myrig", "mayor", "rig", ".beads")
 	redirectBeads := filepath.Join(townRoot, "myrig", ".beads")
@@ -186,6 +190,7 @@ func TestCleanStaleBeadsFiles_RemovesMetadataDriftFromRedirect(t *testing.T) {
 }
 
 func TestCleanStaleBeadsFiles_PreservesMatchingRedirectMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	canonicalBeads := filepath.Join(townRoot, "myrig", "mayor", "rig", ".beads")
 	redirectBeads := filepath.Join(townRoot, "myrig", ".beads")
@@ -215,6 +220,7 @@ func TestCleanStaleBeadsFiles_PreservesMatchingRedirectMetadata(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_NoRedirect(t *testing.T) {
+	t.Parallel()
 	// Create temp town with .beads but no redirect (canonical location)
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -247,6 +253,7 @@ func TestStaleBeadsRedirectCheck_NoRedirect(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_CrewWorkspaces(t *testing.T) {
+	t.Parallel()
 	// Create temp town with crew workspace stale files
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -284,6 +291,7 @@ func TestStaleBeadsRedirectCheck_CrewWorkspaces(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_MissingRedirect(t *testing.T) {
+	t.Parallel()
 	// Create temp town with crew workspace missing redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -328,6 +336,7 @@ func TestStaleBeadsRedirectCheck_MissingRedirect(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_FixCreatesMissingRedirect(t *testing.T) {
+	t.Parallel()
 	// Create temp town with crew workspace missing redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -388,6 +397,7 @@ func TestStaleBeadsRedirectCheck_FixCreatesMissingRedirect(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_TrackedBeadsArchitecture(t *testing.T) {
+	t.Parallel()
 	// Create temp town with tracked beads architecture (mayor/rig/.beads is canonical)
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -443,6 +453,7 @@ func TestStaleBeadsRedirectCheck_TrackedBeadsArchitecture(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_IncorrectRedirect(t *testing.T) {
+	t.Parallel()
 	// Create temp town with incorrect redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -494,6 +505,7 @@ func TestStaleBeadsRedirectCheck_IncorrectRedirect(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_ValidRedirectNotFlagged(t *testing.T) {
+	t.Parallel()
 	// Create temp town with correct redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -531,6 +543,7 @@ func TestStaleBeadsRedirectCheck_ValidRedirectNotFlagged(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_PolecatWorkspace(t *testing.T) {
+	t.Parallel()
 	// Create temp town with polecat workspace missing redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -566,6 +579,7 @@ func TestStaleBeadsRedirectCheck_PolecatWorkspace(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_NestedPolecatWorkspace(t *testing.T) {
+	t.Parallel()
 	// Polecats with nested structure: polecats/<name>/<rig_name>/
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -599,6 +613,7 @@ func TestStaleBeadsRedirectCheck_NestedPolecatWorkspace(t *testing.T) {
 }
 
 func TestStaleBeadsRedirectCheck_RefineryWorkspace(t *testing.T) {
+	t.Parallel()
 	// Create temp town with refinery workspace missing redirect
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")

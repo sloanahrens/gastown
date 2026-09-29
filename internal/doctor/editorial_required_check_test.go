@@ -25,6 +25,7 @@ func setupRigWithRubric(t *testing.T, tmpDir, rigName string, editorialConfig st
 }
 
 func TestEditorialRequiredCheck_RubricPresentRequiredFalse(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	setupRigWithRubric(t, tmpDir, rigName, `{"merge_queue":{"editorial":{"required":false}}}`)
@@ -38,6 +39,7 @@ func TestEditorialRequiredCheck_RubricPresentRequiredFalse(t *testing.T) {
 }
 
 func TestEditorialRequiredCheck_RubricPresentNoConfigAtAll(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	setupRigWithRubric(t, tmpDir, rigName, "")
@@ -51,6 +53,7 @@ func TestEditorialRequiredCheck_RubricPresentNoConfigAtAll(t *testing.T) {
 }
 
 func TestEditorialRequiredCheck_RubricPresentRequiredTrue(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	setupRigWithRubric(t, tmpDir, rigName, `{"merge_queue":{"editorial":{"required":true}}}`)
@@ -64,6 +67,7 @@ func TestEditorialRequiredCheck_RubricPresentRequiredTrue(t *testing.T) {
 }
 
 func TestEditorialRequiredCheck_NoRubric(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(tmpDir, rigName)

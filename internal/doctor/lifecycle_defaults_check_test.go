@@ -10,6 +10,7 @@ import (
 )
 
 func TestLifecycleDefaultsCheck_NoConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -25,6 +26,7 @@ func TestLifecycleDefaultsCheck_NoConfig(t *testing.T) {
 }
 
 func TestLifecycleDefaultsCheck_FullyConfigured(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	os.MkdirAll(mayorDir, 0755)
@@ -43,6 +45,7 @@ func TestLifecycleDefaultsCheck_FullyConfigured(t *testing.T) {
 }
 
 func TestLifecycleDefaultsCheck_MissingPatrols(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	os.MkdirAll(mayorDir, 0755)
@@ -72,6 +75,7 @@ func TestLifecycleDefaultsCheck_MissingPatrols(t *testing.T) {
 }
 
 func TestLifecycleDefaultsCheck_Fix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	os.MkdirAll(mayorDir, 0755)
@@ -115,6 +119,7 @@ func TestLifecycleDefaultsCheck_Fix(t *testing.T) {
 }
 
 func TestLifecycleDefaultsCheck_CanFix(t *testing.T) {
+	t.Parallel()
 	check := NewLifecycleDefaultsCheck()
 	if !check.CanFix() {
 		t.Error("expected CanFix() to return true")
@@ -122,6 +127,7 @@ func TestLifecycleDefaultsCheck_CanFix(t *testing.T) {
 }
 
 func TestLifecycleDefaultsCheck_NilPatrolsSection(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	os.MkdirAll(mayorDir, 0755)

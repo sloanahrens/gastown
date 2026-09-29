@@ -9,6 +9,7 @@ import (
 
 // TestStaleDoltPortCheck_ConsistentPorts verifies the check passes when all ports are consistent.
 func TestStaleDoltPortCheck_ConsistentPorts(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create .dolt-data/config.yaml with port 3307
@@ -57,6 +58,7 @@ listener:
 
 // TestStaleDoltPortCheck_InconsistentMetadata verifies the check detects wrong port in metadata.json.
 func TestStaleDoltPortCheck_InconsistentMetadata(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create .dolt-data/config.yaml with port 3307
@@ -107,6 +109,7 @@ listener:
 
 // TestStaleDoltPortCheck_FixUpdatesMetadata verifies that Fix() updates metadata.json with correct port.
 func TestStaleDoltPortCheck_FixUpdatesMetadata(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create .dolt-data/config.yaml with port 3307

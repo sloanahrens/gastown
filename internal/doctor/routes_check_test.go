@@ -9,6 +9,7 @@ import (
 )
 
 func TestRoutesCheck_MissingTownRoute(t *testing.T) {
+	t.Parallel()
 	t.Run("detects missing town root route", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
@@ -78,6 +79,7 @@ func TestRoutesCheck_MissingTownRoute(t *testing.T) {
 }
 
 func TestRoutesCheck_FixRestoresTownRoute(t *testing.T) {
+	t.Parallel()
 	t.Run("fix adds missing town root route", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
@@ -227,6 +229,7 @@ func TestRoutesCheck_FixRestoresTownRoute(t *testing.T) {
 }
 
 func TestRoutesCheck_DirectLayoutRig(t *testing.T) {
+	t.Parallel()
 	t.Run("Run matches direct-layout rig correctly", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
@@ -343,6 +346,7 @@ func TestRoutesCheck_DirectLayoutRig(t *testing.T) {
 }
 
 func TestDetermineRigBeadsPath_Containment(t *testing.T) {
+	t.Parallel()
 	t.Run("redirect escaping town root falls back to default", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
@@ -607,6 +611,7 @@ func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {
 
 
 func TestRoutesCheck_CorruptedRoutesJsonl(t *testing.T) {
+	t.Parallel()
 	t.Run("corrupted routes.jsonl results in empty routes", func(t *testing.T) {
 		tmpDir := t.TempDir()
 

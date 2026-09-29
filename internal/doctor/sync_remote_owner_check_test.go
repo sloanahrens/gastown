@@ -49,6 +49,7 @@ func writeRoutesAndConfig(t *testing.T, townRoot, rigName, syncRemote string) st
 }
 
 func TestSyncRemoteOwnerCheck_MatchingOwner(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := writeRoutesAndConfig(t, townRoot, "myrig", "git+https://github.com/sloanahrens/gastown.git")
 	initGitRepoWithOrigin(t, rigPath, "https://github.com/sloanahrens/gastown.git")
@@ -62,6 +63,7 @@ func TestSyncRemoteOwnerCheck_MatchingOwner(t *testing.T) {
 }
 
 func TestSyncRemoteOwnerCheck_MismatchedOwner(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := writeRoutesAndConfig(t, townRoot, "myrig", "git+https://github.com/steveyegge/gastown.git")
 	initGitRepoWithOrigin(t, rigPath, "https://github.com/sloanahrens/gastown.git")
@@ -78,6 +80,7 @@ func TestSyncRemoteOwnerCheck_MismatchedOwner(t *testing.T) {
 }
 
 func TestSyncRemoteOwnerCheck_NoSyncRemoteConfigured(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := writeRoutesAndConfig(t, townRoot, "myrig", "")
 	initGitRepoWithOrigin(t, rigPath, "https://github.com/sloanahrens/gastown.git")
@@ -91,6 +94,7 @@ func TestSyncRemoteOwnerCheck_NoSyncRemoteConfigured(t *testing.T) {
 }
 
 func TestSyncRemoteOwnerCheck_NoRoutes(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatal(err)
@@ -105,6 +109,7 @@ func TestSyncRemoteOwnerCheck_NoRoutes(t *testing.T) {
 }
 
 func TestGithubOwnerFromURL(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		url     string

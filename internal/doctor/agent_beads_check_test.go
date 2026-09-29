@@ -11,6 +11,7 @@ import (
 
 // TestAgentBeadsExistCheck_NoRoutes verifies the check handles missing routes.
 func TestAgentBeadsExistCheck_NoRoutes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// No .beads dir at all
@@ -29,6 +30,7 @@ func TestAgentBeadsExistCheck_NoRoutes(t *testing.T) {
 
 // TestAgentBeadsExistCheck_NoRigs verifies the check handles empty routes.
 func TestAgentBeadsExistCheck_NoRigs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create .beads dir with empty routes.jsonl
@@ -52,6 +54,7 @@ func TestAgentBeadsExistCheck_NoRigs(t *testing.T) {
 
 // TestAgentBeadsExistCheck_ExpectedIDs verifies the check looks for correct agent bead IDs.
 func TestAgentBeadsExistCheck_ExpectedIDs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Set up routes pointing to a rig with known prefix
@@ -107,6 +110,7 @@ func TestAgentBeadsExistCheck_ExpectedIDs(t *testing.T) {
 // TestAgentBeadsExistCheck_RespectsRigScope verifies that --rig excludes
 // unrelated rig routes from agent-bead expectations.
 func TestAgentBeadsExistCheck_RespectsRigScope(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -614,6 +618,7 @@ func resolvePath(t *testing.T, path string) string {
 // git worktrees (directories where .git is a file) and only returns canonical
 // crew workers (where .git is a directory). This is the fix for GH#2767.
 func TestListCrewWorkers_FiltersWorktrees(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "myrig"
 	crewDir := filepath.Join(tmpDir, rigName, "crew")
@@ -691,6 +696,7 @@ func TestAddWispLabelSQL_WritesWispLabels(t *testing.T) {
 // TestListPolecats_FiltersWorktrees verifies that listPolecats skips
 // git worktrees, same as listCrewWorkers. See GH#2767.
 func TestListPolecats_FiltersWorktrees(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "myrig"
 	polecatDir := filepath.Join(tmpDir, rigName, "polecats")

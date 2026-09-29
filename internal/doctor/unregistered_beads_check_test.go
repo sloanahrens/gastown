@@ -7,6 +7,7 @@ import (
 )
 
 func TestNewUnregisteredBeadsDirsCheck(t *testing.T) {
+	t.Parallel()
 	check := NewUnregisteredBeadsDirsCheck()
 
 	if check.Name() != "unregistered-beads-dirs" {
@@ -23,6 +24,7 @@ func TestNewUnregisteredBeadsDirsCheck(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_Clean(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a registered rig with metadata
@@ -46,6 +48,7 @@ func TestUnregisteredBeadsDirs_Clean(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_OrphanDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// No rigs registered
@@ -68,6 +71,7 @@ func TestUnregisteredBeadsDirs_OrphanDir(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_IgnoresRegisteredRigs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	setupRigsJSON(t, tmpDir, []string{"rig_a", "rig_b"})
@@ -84,6 +88,7 @@ func TestUnregisteredBeadsDirs_IgnoresRegisteredRigs(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_IgnoresSystemDirs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	setupRigsJSON(t, tmpDir, nil)
@@ -103,6 +108,7 @@ func TestUnregisteredBeadsDirs_IgnoresSystemDirs(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_DeaconMismatch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	setupRigsJSON(t, tmpDir, nil)
@@ -127,6 +133,7 @@ func TestUnregisteredBeadsDirs_DeaconMismatch(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_DeaconMatchesOK(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	setupRigsJSON(t, tmpDir, nil)
@@ -145,6 +152,7 @@ func TestUnregisteredBeadsDirs_DeaconMatchesOK(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_MultipleOrphans(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	setupRigsJSON(t, tmpDir, nil)
@@ -167,6 +175,7 @@ func TestUnregisteredBeadsDirs_MultipleOrphans(t *testing.T) {
 }
 
 func TestUnregisteredBeadsDirs_DirWithoutMetadata(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	setupRigsJSON(t, tmpDir, nil)

@@ -78,6 +78,7 @@ func newExposureTown(t *testing.T) (string, map[string]string, map[string]probeR
 }
 
 func TestBeadsExposureCheck_NoRigs(t *testing.T) {
+	t.Parallel()
 	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK with no rigs, got %v (%s)", result.Status, result.Message)
@@ -225,6 +226,7 @@ func TestBeadsExposureCheck_FixSkipsUnresolved(t *testing.T) {
 // fail-closed change: a repo whose git status fails must come back
 // probeUnresolved, never probeProtected.
 func TestBeadsExposureProbe_FailingGit(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	tempGitRepo(t, dir)
 	// Corrupt the refs index so `git status` errors out.
@@ -246,6 +248,7 @@ func TestBeadsExposureProbe_FailingGit(t *testing.T) {
 // not. A marker file makes the untracked directory non-empty so git status
 // reports it.
 func TestBeadsExposureProbe_RealGit(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	tempGitRepo(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
@@ -268,6 +271,7 @@ func TestBeadsExposureProbe_RealGit(t *testing.T) {
 // TestFindBeadsClones_IncludesWitness verifies enumeration covers the witness
 // clone in both layouts (witness/rig legacy clone and the witness dir).
 func TestFindBeadsClones_IncludesWitness(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	for _, sub := range []string{"mayor/rig", "refinery/rig", "witness/rig", "witness", "polecats/pc1/testrig"} {
 		if err := os.MkdirAll(filepath.Join(rigPath, sub), 0o755); err != nil {

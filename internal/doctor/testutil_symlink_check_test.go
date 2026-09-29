@@ -9,6 +9,7 @@ import (
 )
 
 func TestNewTestutilSymlinkCheck(t *testing.T) {
+	t.Parallel()
 	check := NewTestutilSymlinkCheck()
 
 	if check.Name() != "testutil-symlink" {
@@ -21,6 +22,7 @@ func TestNewTestutilSymlinkCheck(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_NoRig(t *testing.T) {
+	t.Parallel()
 	check := NewTestutilSymlinkCheck()
 	ctx := &CheckContext{TownRoot: t.TempDir(), RigName: ""}
 
@@ -32,6 +34,7 @@ func TestTestutilSymlinkCheck_NoRig(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_NoCanonical(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -53,6 +56,7 @@ func TestTestutilSymlinkCheck_NoCanonical(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_NoCrew(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -76,6 +80,7 @@ func TestTestutilSymlinkCheck_NoCrew(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_CrewRealDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -117,6 +122,7 @@ func TestTestutilSymlinkCheck_CrewRealDir(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_ValidSymlink(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires elevated privileges on Windows")
 	}
@@ -157,6 +163,7 @@ func TestTestutilSymlinkCheck_ValidSymlink(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_BrokenSymlink(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires elevated privileges on Windows")
 	}
@@ -189,6 +196,7 @@ func TestTestutilSymlinkCheck_BrokenSymlink(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_WrongTarget(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires elevated privileges on Windows")
 	}
@@ -227,6 +235,7 @@ func TestTestutilSymlinkCheck_WrongTarget(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_RefineryRealDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -256,6 +265,7 @@ func TestTestutilSymlinkCheck_RefineryRealDir(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_Fix(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires elevated privileges on Windows")
 	}
@@ -348,6 +358,7 @@ func TestTestutilSymlinkCheck_Fix(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_MultipleCrewMembers(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires elevated privileges on Windows")
 	}
@@ -396,6 +407,7 @@ func TestTestutilSymlinkCheck_MultipleCrewMembers(t *testing.T) {
 }
 
 func TestTestutilSymlinkCheck_NoInternalDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 

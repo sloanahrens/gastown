@@ -45,6 +45,7 @@ func wantBeadsDirEnv(t *testing.T, bd *fakeBD, beadsDir string) {
 }
 
 func TestSessionHookCheck_UsesSessionStartScript(t *testing.T) {
+	t.Parallel()
 	check := NewSessionHookCheck()
 
 	tests := []struct {
@@ -132,6 +133,7 @@ func TestSessionHookCheck_UsesSessionStartScript(t *testing.T) {
 }
 
 func TestSessionHookCheck_Run(t *testing.T) {
+	t.Parallel()
 	t.Run("mayor bare gt prime warns", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		// Settings must be at mayor/.claude/settings.json
@@ -271,6 +273,7 @@ func TestSessionHookCheck_Run(t *testing.T) {
 }
 
 func TestSessionHookCheck_Fix(t *testing.T) {
+	t.Parallel()
 	t.Run("fixes bare gt prime to gt prime --hook", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		// Create mayor/.claude/ directory (SessionHookCheck looks for settings.json in agent dirs)
@@ -400,6 +403,7 @@ func TestSessionHookCheck_Fix(t *testing.T) {
 }
 
 func TestParseConfigOutput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -458,6 +462,7 @@ func TestParseConfigOutput(t *testing.T) {
 }
 
 func TestCustomTypesCheck_ParsesOutputWithNotePrefix(t *testing.T) {
+	t.Parallel()
 	// This test verifies that CustomTypesCheck correctly parses bd output
 	// that contains "Note:" informational messages before the actual config value.
 	// Without proper filtering, the check would see "Note: ..." as the config value
@@ -492,6 +497,7 @@ func TestCustomTypesCheck_ParsesOutputWithNotePrefix(t *testing.T) {
 }
 
 func TestCustomStatusesCheck_ParsesOutputWithNotePrefix(t *testing.T) {
+	t.Parallel()
 	// Verify that CustomStatusesCheck correctly handles bd output with "Note:" prefix
 	output := "Note: No git repository initialized - running without background sync\n" + constants.BeadsCustomStatuses + "\n"
 	parsed := parseConfigOutput([]byte(output))

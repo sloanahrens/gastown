@@ -233,6 +233,7 @@ func TestSocketSplitBrainCheck_MixedWithNonGastown(t *testing.T) {
 // --- Fix() tests ---
 
 func TestSocketSplitBrainCheck_Fix_NoStale(t *testing.T) {
+	t.Parallel()
 	check := NewSocketSplitBrainCheck()
 	mock := &mockSocketLister{}
 	check.defaultListerForTest = mock
@@ -247,6 +248,7 @@ func TestSocketSplitBrainCheck_Fix_NoStale(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_Fix_KillsStale(t *testing.T) {
+	t.Parallel()
 	check := NewSocketSplitBrainCheck()
 	check.staleSessions = []string{"ga-refinery", "ga-witness"}
 

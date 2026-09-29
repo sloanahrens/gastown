@@ -192,6 +192,7 @@ func TestMacOSSDKCheck_ReportsAtMostMaxStubs(t *testing.T) {
 }
 
 func TestStubTopLevelTargets(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		stub string
@@ -237,6 +238,7 @@ func TestStubTopLevelTargets(t *testing.T) {
 }
 
 func TestMalformedTargets(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		target string
 		want   bool

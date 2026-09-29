@@ -744,6 +744,7 @@ func seedRigBead(bd *fakeBD, townRoot, rig, prefix string) {
 }
 
 func TestStaleRuntimeFilesCheck_StalePIDFiles(t *testing.T) {
+	t.Parallel()
 	// Create temp town root
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -785,6 +786,7 @@ func TestStaleRuntimeFilesCheck_StalePIDFiles(t *testing.T) {
 }
 
 func TestStaleRuntimeFilesCheck_StaleWispConfig(t *testing.T) {
+	t.Parallel()
 	// Create temp town root
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -821,6 +823,7 @@ func TestStaleRuntimeFilesCheck_StaleWispConfig(t *testing.T) {
 }
 
 func TestStaleRuntimeFilesCheck_Fix(t *testing.T) {
+	t.Parallel()
 	// Create temp town root
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")

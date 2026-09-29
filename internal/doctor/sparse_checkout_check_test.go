@@ -9,6 +9,7 @@ import (
 )
 
 func TestNewSparseCheckoutCheck(t *testing.T) {
+	t.Parallel()
 	check := NewSparseCheckoutCheck()
 
 	if check.Name() != "sparse-checkout" {
@@ -21,6 +22,7 @@ func TestNewSparseCheckoutCheck(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_NoRigSpecified(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	check := NewSparseCheckoutCheck()
@@ -35,6 +37,7 @@ func TestSparseCheckoutCheck_NoRigSpecified(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_TownWideMode(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create two rigs with config.json so discoverRigPaths finds them
@@ -74,6 +77,7 @@ func TestSparseCheckoutCheck_TownWideMode(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_NoGitRepos(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -157,6 +161,7 @@ func configureLegacySparseCheckout(t *testing.T, repoPath string) {
 }
 
 func TestSparseCheckoutCheck_NoSparseCheckout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -177,6 +182,7 @@ func TestSparseCheckoutCheck_NoSparseCheckout(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_LegacySparseCheckoutDetected(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -203,6 +209,7 @@ func TestSparseCheckoutCheck_LegacySparseCheckoutDetected(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_MultipleReposWithLegacySparseCheckout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -238,6 +245,7 @@ func TestSparseCheckoutCheck_MultipleReposWithLegacySparseCheckout(t *testing.T)
 }
 
 func TestSparseCheckoutCheck_MixedRepos(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -268,6 +276,7 @@ func TestSparseCheckoutCheck_MixedRepos(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_PolecatNestedWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -294,6 +303,7 @@ func TestSparseCheckoutCheck_PolecatNestedWorktree(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_PolecatLegacyFlatLayout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -317,6 +327,7 @@ func TestSparseCheckoutCheck_PolecatLegacyFlatLayout(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_Fix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -367,6 +378,7 @@ func TestSparseCheckoutCheck_Fix(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_FixNoOp(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -397,6 +409,7 @@ func TestSparseCheckoutCheck_FixNoOp(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_NonGitDirSkipped(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -421,6 +434,7 @@ func TestSparseCheckoutCheck_NonGitDirSkipped(t *testing.T) {
 }
 
 func TestSparseCheckoutCheck_FixRestoresFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)

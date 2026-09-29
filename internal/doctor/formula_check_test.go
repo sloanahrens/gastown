@@ -14,6 +14,7 @@ import (
 )
 
 func TestNewFormulaCheck(t *testing.T) {
+	t.Parallel()
 	check := NewFormulaCheck()
 	if check.Name() != "formulas" {
 		t.Errorf("Name() = %q, want %q", check.Name(), "formulas")
@@ -24,6 +25,7 @@ func TestNewFormulaCheck(t *testing.T) {
 }
 
 func TestFormulaCheck_Run_AllOK(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision formulas fresh
@@ -43,6 +45,7 @@ func TestFormulaCheck_Run_AllOK(t *testing.T) {
 }
 
 func TestFormulaCheck_Run_Missing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision formulas
@@ -72,6 +75,7 @@ func TestFormulaCheck_Run_Missing(t *testing.T) {
 }
 
 func TestFormulaCheck_Fix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision formulas
@@ -112,6 +116,7 @@ func TestFormulaCheck_Fix(t *testing.T) {
 // so a town silently running stale formula content still had a clean bill of
 // health. It must be a warning, and --fix must not be the remedy.
 func TestFormulaCheck_Run_HandEditedIsAWarning(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	if _, err := formula.ProvisionFormulas(tmpDir); err != nil {
@@ -227,6 +232,7 @@ func detailFor(result *CheckResult, name string) string {
 // bytes diverge is announced by no version bump, so the warning has to carry
 // both sizes for a reader to see the drift at all.
 func TestFormulaCheck_Run_SameVersionDivergenceNamesBothSizes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	if _, err := formula.ProvisionFormulas(tmpDir); err != nil {
 		t.Fatalf("ProvisionFormulas() error: %v", err)
@@ -258,6 +264,7 @@ func TestFormulaCheck_Run_SameVersionDivergenceNamesBothSizes(t *testing.T) {
 // disclosure on the "outdated" reading: bytes this town recorded as installed,
 // shadowed by embedded content at the same version.
 func TestFormulaCheck_Run_OutdatedAtSameVersionNamesBothSizes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	if _, err := formula.ProvisionFormulas(tmpDir); err != nil {
 		t.Fatalf("ProvisionFormulas() error: %v", err)
@@ -283,6 +290,7 @@ func TestFormulaCheck_Run_OutdatedAtSameVersionNamesBothSizes(t *testing.T) {
 // copy whose version is ahead of the embedded one is a local advance, and the
 // version already says so.
 func TestFormulaCheck_Run_BumpedVersionOverrideOmitsSizes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	if _, err := formula.ProvisionFormulas(tmpDir); err != nil {
 		t.Fatalf("ProvisionFormulas() error: %v", err)
@@ -316,6 +324,7 @@ func TestFormulaCheck_Run_BumpedVersionOverrideOmitsSizes(t *testing.T) {
 // TestExactBytes pins the detail-line rendering: a size a reader can compare
 // at a glance.
 func TestExactBytes(t *testing.T) {
+	t.Parallel()
 	cases := map[int]string{
 		0:       "0 B",
 		999:     "999 B",

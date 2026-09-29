@@ -162,6 +162,7 @@ func TestGetServerAddr(t *testing.T) {
 }
 
 func TestGetServerAddr_NotServerMode(t *testing.T) {
+	t.Parallel()
 	check := NewDoltServerReachableCheck()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -183,6 +184,7 @@ func TestGetServerAddr_NotServerMode(t *testing.T) {
 }
 
 func TestGetServerAddr_NoMetadata(t *testing.T) {
+	t.Parallel()
 	check := NewDoltServerReachableCheck()
 	_, ok := check.getServerAddr(filepath.Join(t.TempDir(), "nonexistent"), t.TempDir())
 	if ok {
@@ -479,6 +481,7 @@ func TestDoltOrphanedDatabaseCheck_NoDoltData(t *testing.T) {
 }
 
 func TestDoltOrphanedDatabaseCheck_CanFix(t *testing.T) {
+	t.Parallel()
 	check := NewDoltOrphanedDatabaseCheck()
 	if !check.CanFix() {
 		t.Error("expected CanFix to return true")
@@ -486,6 +489,7 @@ func TestDoltOrphanedDatabaseCheck_CanFix(t *testing.T) {
 }
 
 func TestDoltOrphanedDatabaseCheck_Name(t *testing.T) {
+	t.Parallel()
 	check := NewDoltOrphanedDatabaseCheck()
 	if check.Name() != "dolt-orphaned-databases" {
 		t.Errorf("expected name 'dolt-orphaned-databases', got %q", check.Name())

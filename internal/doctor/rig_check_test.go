@@ -116,6 +116,7 @@ func TestBeadsRedirectCheck_FixInitFallsBackToConfigYAML(t *testing.T) {
 }
 
 func TestNewBeadsRedirectCheck(t *testing.T) {
+	t.Parallel()
 	check := NewBeadsRedirectCheck()
 
 	if check.Name() != "beads-redirect" {
@@ -128,6 +129,7 @@ func TestNewBeadsRedirectCheck(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_NoRigSpecified(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	check := NewBeadsRedirectCheck()
@@ -144,6 +146,7 @@ func TestBeadsRedirectCheck_NoRigSpecified(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_NoBeadsAtAll(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -162,6 +165,7 @@ func TestBeadsRedirectCheck_NoBeadsAtAll(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_LocalBeadsOnly(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -186,6 +190,7 @@ func TestBeadsRedirectCheck_LocalBeadsOnly(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_TrackedBeadsMissingRedirect(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -210,6 +215,7 @@ func TestBeadsRedirectCheck_TrackedBeadsMissingRedirect(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_TrackedBeadsCorrectRedirect(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -244,6 +250,7 @@ func TestBeadsRedirectCheck_TrackedBeadsCorrectRedirect(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_TrackedBeadsWrongRedirect(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -278,6 +285,7 @@ func TestBeadsRedirectCheck_TrackedBeadsWrongRedirect(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_FixWrongRedirect(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -329,6 +337,7 @@ func TestBeadsRedirectCheck_FixWrongRedirect(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_Fix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -373,6 +382,7 @@ func TestBeadsRedirectCheck_Fix(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_FixNoOp_LocalBeads(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -464,6 +474,7 @@ func TestBeadsRedirectCheck_FixInitBeads(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_ConflictingLocalBeads(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -505,6 +516,7 @@ func TestBeadsRedirectCheck_ConflictingLocalBeads(t *testing.T) {
 }
 
 func TestDefaultBranchExistsCheck_NoRig(t *testing.T) {
+	t.Parallel()
 	check := NewDefaultBranchExistsCheck()
 	ctx := &CheckContext{TownRoot: t.TempDir(), RigName: ""}
 
@@ -515,6 +527,7 @@ func TestDefaultBranchExistsCheck_NoRig(t *testing.T) {
 }
 
 func TestDefaultBranchExistsCheck_NoConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -532,6 +545,7 @@ func TestDefaultBranchExistsCheck_NoConfig(t *testing.T) {
 }
 
 func TestDefaultBranchExistsCheck_EmptyDefaultBranch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -553,6 +567,7 @@ func TestDefaultBranchExistsCheck_EmptyDefaultBranch(t *testing.T) {
 }
 
 func TestDefaultBranchExistsCheck_NoBareRepo(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -573,6 +588,7 @@ func TestDefaultBranchExistsCheck_NoBareRepo(t *testing.T) {
 }
 
 func TestDefaultBranchExistsCheck_NotFixable(t *testing.T) {
+	t.Parallel()
 	check := NewDefaultBranchExistsCheck()
 	if check.CanFix() {
 		t.Error("DefaultBranchExistsCheck should not be fixable")
@@ -580,6 +596,7 @@ func TestDefaultBranchExistsCheck_NotFixable(t *testing.T) {
 }
 
 func TestBeadsRedirectCheck_FixConflictingLocalBeads(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)

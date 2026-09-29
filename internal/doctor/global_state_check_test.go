@@ -7,6 +7,7 @@ import (
 )
 
 func TestHasShellIntegration_DirectMarker(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("# --- Gas Town Integration (managed by gt) ---\nsource hook.sh\n# --- End Gas Town ---\n"), 0644)
@@ -17,6 +18,7 @@ func TestHasShellIntegration_DirectMarker(t *testing.T) {
 }
 
 func TestHasShellIntegration_NoMarker(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	rc := filepath.Join(dir, ".zshrc")
 	os.WriteFile(rc, []byte("# nothing here\n"), 0644)
@@ -27,12 +29,14 @@ func TestHasShellIntegration_NoMarker(t *testing.T) {
 }
 
 func TestHasShellIntegration_MissingFile(t *testing.T) {
+	t.Parallel()
 	if hasShellIntegration("/nonexistent/.zshrc") {
 		t.Error("expected false for missing file")
 	}
 }
 
 func TestHasShellIntegration_MarkerInSourcedFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Sourced file has the marker
@@ -48,6 +52,7 @@ func TestHasShellIntegration_MarkerInSourcedFile(t *testing.T) {
 }
 
 func TestHasShellIntegration_HookScriptReferenceInSourcedFile(t *testing.T) {
+	t.Parallel()
 	// Simulates the user's actual setup: .zshrc -> profile.zsh -> shell-hook.sh
 	dir := t.TempDir()
 
@@ -65,6 +70,7 @@ func TestHasShellIntegration_HookScriptReferenceInSourcedFile(t *testing.T) {
 }
 
 func TestHasShellIntegration_VariableExpansion(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	sub := filepath.Join(dir, "zsh", "common.zsh")
@@ -83,6 +89,7 @@ source "$DOTFILES_DIR/zsh/common.zsh"
 }
 
 func TestHasShellIntegration_GlobFallback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Create multiple profile files, one with the marker
@@ -104,6 +111,7 @@ source "$DOTFILES_DIR/zsh/$PROFILE.zsh"
 }
 
 func TestHasShellIntegration_TildeExpansion(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	home, _ := os.UserHomeDir()
 
@@ -124,6 +132,7 @@ func TestHasShellIntegration_TildeExpansion(t *testing.T) {
 }
 
 func TestHasShellIntegration_DepthLimit(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Create a chain deeper than the depth limit (5)
@@ -173,6 +182,7 @@ func TestHasShellIntegration_DepthLimit(t *testing.T) {
 }
 
 func TestHasShellIntegration_CircularSourcePrevention(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	a := filepath.Join(dir, "a.zsh")
@@ -188,6 +198,7 @@ func TestHasShellIntegration_CircularSourcePrevention(t *testing.T) {
 }
 
 func TestHasShellIntegration_ConditionalOrSource(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	sub := filepath.Join(dir, "p10k.zsh")
@@ -202,6 +213,7 @@ func TestHasShellIntegration_ConditionalOrSource(t *testing.T) {
 }
 
 func TestExtractShellVars(t *testing.T) {
+	t.Parallel()
 	content := `export FOO="bar"
 BAZ="$HOME/stuff"
 COMPLEX=$(echo hi)
@@ -247,6 +259,7 @@ FOO2="digitvar"
 }
 
 func TestResolveSourcePaths(t *testing.T) {
+	t.Parallel()
 	vars := map[string]string{
 		"HOME": "/home/test",
 		"DIR":  "/home/test/dotfiles",
@@ -284,6 +297,7 @@ func TestResolveSourcePaths(t *testing.T) {
 }
 
 func TestReplaceUnresolvedVars(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in, want string
 	}{

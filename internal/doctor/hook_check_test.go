@@ -7,6 +7,7 @@ import (
 )
 
 func TestNewHookAttachmentValidCheck(t *testing.T) {
+	t.Parallel()
 	check := NewHookAttachmentValidCheck()
 
 	if check.Name() != "hook-attachment-valid" {
@@ -23,6 +24,7 @@ func TestNewHookAttachmentValidCheck(t *testing.T) {
 }
 
 func TestHookAttachmentValidCheck_NoBeadsDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	check := NewHookAttachmentValidCheck()
@@ -37,6 +39,7 @@ func TestHookAttachmentValidCheck_NoBeadsDir(t *testing.T) {
 }
 
 func TestHookAttachmentValidCheck_EmptyBeadsDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -56,6 +59,7 @@ func TestHookAttachmentValidCheck_EmptyBeadsDir(t *testing.T) {
 }
 
 func TestHookAttachmentValidCheck_FormatInvalid(t *testing.T) {
+	t.Parallel()
 	check := NewHookAttachmentValidCheck()
 
 	tests := []struct {
@@ -89,6 +93,7 @@ func TestHookAttachmentValidCheck_FormatInvalid(t *testing.T) {
 }
 
 func TestHookAttachmentValidCheck_FindRigBeadsDirs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create town-level .beads (should be excluded)
@@ -125,6 +130,7 @@ func TestHookAttachmentValidCheck_FindRigBeadsDirs(t *testing.T) {
 // Tests for HookSingletonCheck
 
 func TestNewHookSingletonCheck(t *testing.T) {
+	t.Parallel()
 	check := NewHookSingletonCheck()
 
 	if check.Name() != "hook-singleton" {
@@ -141,6 +147,7 @@ func TestNewHookSingletonCheck(t *testing.T) {
 }
 
 func TestHookSingletonCheck_NoBeadsDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	check := NewHookSingletonCheck()
@@ -155,6 +162,7 @@ func TestHookSingletonCheck_NoBeadsDir(t *testing.T) {
 }
 
 func TestHookSingletonCheck_EmptyBeadsDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -173,6 +181,7 @@ func TestHookSingletonCheck_EmptyBeadsDir(t *testing.T) {
 }
 
 func TestHookSingletonCheck_FormatDuplicate(t *testing.T) {
+	t.Parallel()
 	check := NewHookSingletonCheck()
 
 	tests := []struct {
@@ -206,6 +215,7 @@ func TestHookSingletonCheck_FormatDuplicate(t *testing.T) {
 // Tests for OrphanedAttachmentsCheck
 
 func TestNewOrphanedAttachmentsCheck(t *testing.T) {
+	t.Parallel()
 	check := NewOrphanedAttachmentsCheck()
 
 	if check.Name() != "orphaned-attachments" {
@@ -223,6 +233,7 @@ func TestNewOrphanedAttachmentsCheck(t *testing.T) {
 }
 
 func TestOrphanedAttachmentsCheck_NoBeadsDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	check := NewOrphanedAttachmentsCheck()
@@ -237,6 +248,7 @@ func TestOrphanedAttachmentsCheck_NoBeadsDir(t *testing.T) {
 }
 
 func TestOrphanedAttachmentsCheck_FormatOrphan(t *testing.T) {
+	t.Parallel()
 	check := NewOrphanedAttachmentsCheck()
 
 	tests := []struct {
@@ -268,6 +280,7 @@ func TestOrphanedAttachmentsCheck_FormatOrphan(t *testing.T) {
 }
 
 func TestOrphanedAttachmentsCheck_AgentExists(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create some agent directories

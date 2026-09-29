@@ -31,6 +31,7 @@ func (f *fakeZombieLister) KillSessionWithProcesses(name string) error {
 }
 
 func TestNewZombieSessionCheck(t *testing.T) {
+	t.Parallel()
 	check := NewZombieSessionCheck()
 
 	if check.Name() != "zombie-sessions" {
@@ -51,6 +52,7 @@ func TestNewZombieSessionCheck(t *testing.T) {
 }
 
 func TestZombieSessionCheck_Run_NoSessions(t *testing.T) {
+	t.Parallel()
 	lister := &fakeZombieLister{sessions: []string{}}
 	check := NewZombieSessionCheckWithLister(lister)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
@@ -63,6 +65,7 @@ func TestZombieSessionCheck_Run_NoSessions(t *testing.T) {
 }
 
 func TestZombieSessionCheck_ListSessionsErrorIsSkipped(t *testing.T) {
+	t.Parallel()
 	lister := &fakeZombieLister{listErr: errors.New("no server running")}
 	check := NewZombieSessionCheckWithLister(lister)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
@@ -81,6 +84,7 @@ func TestZombieSessionCheck_ListSessionsErrorIsSkipped(t *testing.T) {
 }
 
 func TestZombieSessionCheck_SkipsCrewSessions(t *testing.T) {
+	t.Parallel()
 	// Verify that crew sessions are not marked as zombies
 	check := NewZombieSessionCheck()
 
@@ -97,6 +101,7 @@ func TestZombieSessionCheck_SkipsCrewSessions(t *testing.T) {
 }
 
 func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
+	t.Parallel()
 	// Verify that Fix() never kills crew sessions
 	check := NewZombieSessionCheck()
 

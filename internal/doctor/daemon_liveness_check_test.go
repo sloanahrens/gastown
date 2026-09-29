@@ -52,6 +52,7 @@ func writeRecoveryHeartbeatInterval(t *testing.T, townRoot string, interval stri
 }
 
 func TestDaemonLivenessCheck_FreshAdvancing_OK(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeRecoveryHeartbeatInterval(t, townRoot, "3m") // staleThreshold = 6m
 	writeLivenessBaseline(t, townRoot, 5, time.Now().Add(-10*time.Minute))
@@ -65,6 +66,7 @@ func TestDaemonLivenessCheck_FreshAdvancing_OK(t *testing.T) {
 }
 
 func TestDaemonLivenessCheck_FreshStatic_Error(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeRecoveryHeartbeatInterval(t, townRoot, "3m") // staleThreshold = 6m
 	writeLivenessBaseline(t, townRoot, 5, time.Now().Add(-10*time.Minute))
@@ -91,6 +93,7 @@ func TestDaemonLivenessCheck_FreshStatic_Error(t *testing.T) {
 }
 
 func TestDaemonLivenessCheck_FreshStatic_BaselineTooYoung_OK(t *testing.T) {
+	t.Parallel()
 	// The baseline exists but hasn't had a fair chance to advance yet
 	// (< staleThreshold old) — must not be flagged as stuck.
 	townRoot := t.TempDir()
@@ -106,6 +109,7 @@ func TestDaemonLivenessCheck_FreshStatic_BaselineTooYoung_OK(t *testing.T) {
 }
 
 func TestDaemonLivenessCheck_FrozenCount_BaselineNotResetWhileYoung(t *testing.T) {
+	t.Parallel()
 	// Regression: the baseline used to be rewritten to "now" on every run
 	// regardless of verdict, so a doctor cadence shorter than staleThreshold
 	// kept baselineAge under the threshold forever and "count not advancing"
@@ -135,6 +139,7 @@ func TestDaemonLivenessCheck_FrozenCount_BaselineNotResetWhileYoung(t *testing.T
 }
 
 func TestDaemonLivenessCheck_Stale_Error(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeRecoveryHeartbeatInterval(t, townRoot, "3m") // staleThreshold = 6m
 	writeLivenessBaseline(t, townRoot, 5, time.Now().Add(-20*time.Minute))
@@ -151,6 +156,7 @@ func TestDaemonLivenessCheck_Stale_Error(t *testing.T) {
 }
 
 func TestDaemonLivenessCheck_NotRunning_WarningNotError(t *testing.T) {
+	t.Parallel()
 	// A cleanly stopped daemon leaves LastHeartbeat/HeartbeatCount intact
 	// (daemon.go's stop path only flips Running to false), so a stale
 	// heartbeat here proves nothing. Must warn, not error — matching
@@ -183,6 +189,7 @@ func TestDaemonLivenessCheck_NotRunning_WarningNotError(t *testing.T) {
 }
 
 func TestDaemonLivenessCheck_Unreadable_Skipped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	stateFile := daemon.StateFile(townRoot)
 	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
@@ -200,6 +207,7 @@ func TestDaemonLivenessCheck_Unreadable_Skipped(t *testing.T) {
 }
 
 func TestDaemonLivenessCheck_MissingState_Skipped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	result := NewDaemonLivenessCheck().Run(&CheckContext{TownRoot: townRoot})
@@ -210,6 +218,7 @@ func TestDaemonLivenessCheck_MissingState_Skipped(t *testing.T) {
 }
 
 func TestDaemonLivenessCheck_NoBaseline_SkippedAndRecordsOne(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeLivenessState(t, townRoot, time.Now().Add(-1*time.Minute), 3)
 

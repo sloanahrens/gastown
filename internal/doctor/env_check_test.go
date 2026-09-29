@@ -73,6 +73,7 @@ func setupEnvTestRegistry(t *testing.T) {
 }
 
 func TestEnvVarsCheck_NoSessions(t *testing.T) {
+	t.Parallel()
 	reader := &mockEnvReader{
 		sessions: []string{},
 	}
@@ -88,6 +89,7 @@ func TestEnvVarsCheck_NoSessions(t *testing.T) {
 }
 
 func TestEnvVarsCheck_ListSessionsError(t *testing.T) {
+	t.Parallel()
 	reader := &mockEnvReader{
 		listErr: errors.New("tmux not running"),
 	}
@@ -108,6 +110,7 @@ func TestEnvVarsCheck_ListSessionsError(t *testing.T) {
 }
 
 func TestEnvVarsCheck_NonGasTownSessions(t *testing.T) {
+	t.Parallel()
 	reader := &mockEnvReader{
 		sessions: []string{"other-session", "my-dev"},
 	}
@@ -123,6 +126,7 @@ func TestEnvVarsCheck_NonGasTownSessions(t *testing.T) {
 }
 
 func TestEnvVarsCheck_MayorCorrect(t *testing.T) {
+	t.Parallel()
 	expected := expectedEnv("mayor", "", "")
 	reader := &mockEnvReader{
 		sessions: []string{"hq-mayor"},
@@ -139,6 +143,7 @@ func TestEnvVarsCheck_MayorCorrect(t *testing.T) {
 }
 
 func TestEnvVarsCheck_MayorMissing(t *testing.T) {
+	t.Parallel()
 	reader := &mockEnvReader{
 		sessions: []string{"hq-mayor"},
 		sessionEnvs: map[string]map[string]string{
@@ -307,6 +312,7 @@ func TestEnvVarsCheck_MixedCorrectAndMismatch(t *testing.T) {
 }
 
 func TestEnvVarsCheck_DeaconCorrect(t *testing.T) {
+	t.Parallel()
 	expected := expectedEnv("deacon", "", "")
 	reader := &mockEnvReader{
 		sessions: []string{"hq-deacon"},
@@ -323,6 +329,7 @@ func TestEnvVarsCheck_DeaconCorrect(t *testing.T) {
 }
 
 func TestEnvVarsCheck_DeaconMissing(t *testing.T) {
+	t.Parallel()
 	reader := &mockEnvReader{
 		sessions: []string{"hq-deacon"},
 		sessionEnvs: map[string]map[string]string{
@@ -372,6 +379,7 @@ func TestEnvVarsCheck_HyphenatedRig(t *testing.T) {
 }
 
 func TestEnvVarsCheck_BootCorrect(t *testing.T) {
+	t.Parallel()
 	// Boot watchdog session (hq-boot) uses "boot" role in AgentEnv,
 	// even though ParseSessionName returns Role=deacon, Name="boot".
 	expected := expectedEnv("boot", "", "boot")
@@ -545,6 +553,7 @@ func (m *mockEnvAccessor) SetEnvironment(sess, key, val string) error {
 }
 
 func TestEnvVarsCheck_CanFix(t *testing.T) {
+	t.Parallel()
 	check := NewEnvVarsCheck()
 	if !check.CanFix() {
 		t.Error("CanFix() should return true after implementing Fix()")
@@ -552,6 +561,7 @@ func TestEnvVarsCheck_CanFix(t *testing.T) {
 }
 
 func TestEnvVarsCheck_FixNoSessions(t *testing.T) {
+	t.Parallel()
 	mock := &mockEnvAccessor{
 		mockEnvReader: mockEnvReader{
 			listErr: errors.New("no tmux server"),
@@ -569,6 +579,7 @@ func TestEnvVarsCheck_FixNoSessions(t *testing.T) {
 }
 
 func TestEnvVarsCheck_FixAppliesMissingVars(t *testing.T) {
+	t.Parallel()
 	mock := &mockEnvAccessor{
 		mockEnvReader: mockEnvReader{
 			sessions: []string{"hq-mayor"},
@@ -600,6 +611,7 @@ func TestEnvVarsCheck_FixAppliesMissingVars(t *testing.T) {
 }
 
 func TestEnvVarsCheck_FixSkipsCorrectVars(t *testing.T) {
+	t.Parallel()
 	expected := expectedEnv("mayor", "", "")
 	mock := &mockEnvAccessor{
 		mockEnvReader: mockEnvReader{

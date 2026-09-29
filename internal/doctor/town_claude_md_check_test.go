@@ -10,6 +10,7 @@ import (
 )
 
 func TestTownCLAUDEmdCheck_Missing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -25,6 +26,7 @@ func TestTownCLAUDEmdCheck_Missing(t *testing.T) {
 }
 
 func TestTownCLAUDEmdCheck_Complete(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -44,6 +46,7 @@ func TestTownCLAUDEmdCheck_Complete(t *testing.T) {
 }
 
 func TestTownCLAUDEmdCheck_MissingSections(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -71,6 +74,7 @@ Run ` + "`gt prime`" + ` for full context after compaction, clear, or new sessio
 }
 
 func TestTownCLAUDEmdCheck_PartialSections(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -103,6 +107,7 @@ Dolt is the data plane for beads.
 }
 
 func TestTownCLAUDEmdCheck_Fix_MissingFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -133,6 +138,7 @@ func TestTownCLAUDEmdCheck_Fix_MissingFile(t *testing.T) {
 }
 
 func TestTownCLAUDEmdCheck_Fix_AppendSections(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -186,6 +192,7 @@ This is user-added content that should be preserved.
 }
 
 func TestTownCLAUDEmdCheck_Fix_Idempotent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -217,6 +224,7 @@ func TestTownCLAUDEmdCheck_Fix_Idempotent(t *testing.T) {
 }
 
 func TestParseH2Sections(t *testing.T) {
+	t.Parallel()
 	content := `# Header
 
 Preamble text.
@@ -271,6 +279,7 @@ Content three.
 }
 
 func TestIsIdentityAnchor_MinimalAnchor(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "CLAUDE.md")
 
@@ -288,6 +297,7 @@ Run ` + "`gt prime`" + ` for full context.
 }
 
 func TestIsIdentityAnchor_ExpandedCLAUDEmd(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "CLAUDE.md")
 
@@ -302,6 +312,7 @@ func TestIsIdentityAnchor_ExpandedCLAUDEmd(t *testing.T) {
 }
 
 func TestIsIdentityAnchor_NonGasTownFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "CLAUDE.md")
 

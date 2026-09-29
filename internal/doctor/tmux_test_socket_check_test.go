@@ -65,6 +65,7 @@ func newAgedSocketDir(t *testing.T, age time.Duration, names ...string) string {
 }
 
 func TestTmuxTestSocketCheck_NoSockets(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t)
 	check.pidAliveForTest = func(int) bool { return true }
@@ -78,6 +79,7 @@ func TestTmuxTestSocketCheck_NoSockets(t *testing.T) {
 // TestTmuxTestSocketCheck_ReportsLeftover is the gt-2bj tripwire: a socket whose
 // owning test process is gone still holding gt-test-* sessions.
 func TestTmuxTestSocketCheck_ReportsLeftover(t *testing.T) {
+	t.Parallel()
 	probe := &fakeTestSocketProbe{sessions: []string{"gt-test-modeA-2", "gt-test-sentinel"}}
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
@@ -104,6 +106,7 @@ func TestTmuxTestSocketCheck_ReportsLeftover(t *testing.T) {
 // killed run leaves: the socket file survives its server. It is not evidence of
 // a phantom, and it is counted only because cleaning it keeps the scan cheap.
 func TestTmuxTestSocketCheck_StaleFileIsNotAServer(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
@@ -129,6 +132,7 @@ func TestTmuxTestSocketCheck_StaleFileIsNotAServer(t *testing.T) {
 // exists for a moment before its server is listening, so a sweep that trusted
 // "nothing answers" alone could unlink a socket out from under a new server.
 func TestTmuxTestSocketCheck_FreshFileIsLeftAlone(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.socketStateForTest = func(string) socketState { return socketRefused }
@@ -149,6 +153,7 @@ func TestTmuxTestSocketCheck_FreshFileIsLeftAlone(t *testing.T) {
 // unrelated live process. Neither socket has a server, so neither is anyone's to
 // keep.
 func TestTmuxTestSocketCheck_StaleFileWithoutOwnerIsCollected(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-sentinel", "gt-test-91506")
 	// The pid in the second name is alive — it just is not this socket's owner.
@@ -172,6 +177,7 @@ func TestTmuxTestSocketCheck_StaleFileWithoutOwnerIsCollected(t *testing.T) {
 // check's directory is the same one every real server binds in, so a name
 // outside the test families must never be collected, served or not.
 func TestTmuxTestSocketCheck_ForeignSocketIsUntouched(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-3aa519", "default")
 	check.pidAliveForTest = func(int) bool { return false }
@@ -192,6 +198,7 @@ func TestTmuxTestSocketCheck_ForeignSocketIsUntouched(t *testing.T) {
 // the guard rather than after the test, so both halves of the check have to
 // recognize the family.
 func TestTmuxTestSocketCheck_H9zFamilyIsOurs(t *testing.T) {
+	t.Parallel()
 	probe := &fakeTestSocketProbe{sessions: []string{"gt-h9z-live"}}
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-h9z-live-91506")
@@ -214,6 +221,7 @@ func TestTmuxTestSocketCheck_H9zFamilyIsOurs(t *testing.T) {
 // owner, so its live server is left running rather than killed under a test
 // that may still be using it.
 func TestTmuxTestSocketCheck_TimestampShapedOwnerIsNotAPid(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-dog-stale-1758012345678901234")
 	check.pidAliveForTest = func(int) bool {
@@ -235,6 +243,7 @@ func TestTmuxTestSocketCheck_TimestampShapedOwnerIsNotAPid(t *testing.T) {
 // TestTmuxTestSocketCheck_LiveOwnerIsNotALeak keeps a running suite safe: the
 // socket of a test process that is still alive belongs to work in flight.
 func TestTmuxTestSocketCheck_LiveOwnerIsNotALeak(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return true }
@@ -252,6 +261,7 @@ func TestTmuxTestSocketCheck_LiveOwnerIsNotALeak(t *testing.T) {
 // TestTmuxTestSocketCheck_ForeignSessionsAreNotOurs stops the Fix from killing a
 // server that is serving something other than test sessions.
 func TestTmuxTestSocketCheck_ForeignSessionsAreNotOurs(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
@@ -273,6 +283,7 @@ func TestTmuxTestSocketCheck_ForeignSessionsAreNotOurs(t *testing.T) {
 // gone — ListSessions maps ErrNoServer to (nil, nil) rather than to an error
 // (internal/tmux/tmux.go), so that is the shape a vanished server has here.
 func TestTmuxTestSocketCheck_ServerVanishedMidScan(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
@@ -295,6 +306,7 @@ func TestTmuxTestSocketCheck_ServerVanishedMidScan(t *testing.T) {
 // nothing about what holds the socket. The file stays, and the check reports an
 // unknown rather than the pass it did not earn.
 func TestTmuxTestSocketCheck_UnreachableSocketIsNotRemovable(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
@@ -326,6 +338,7 @@ func TestTmuxTestSocketCheck_UnreachableSocketIsNotRemovable(t *testing.T) {
 // error from tmux is not evidence the server exited, so the file is left alone
 // rather than dropped out of every later scan (gt-ri37).
 func TestTmuxTestSocketCheck_UnreadableServerIsNotRemovable(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
 	check.pidAliveForTest = func(int) bool { return false }
@@ -351,6 +364,7 @@ func TestTmuxTestSocketCheck_UnreadableServerIsNotRemovable(t *testing.T) {
 // sockets visible when there is residue to report as well: the message counts
 // what was found, and the details name what could not be looked at.
 func TestTmuxTestSocketCheck_UnprobedIsCountedBesideResidue(t *testing.T) {
+	t.Parallel()
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newAgedSocketDir(t, time.Hour, "gt-test-91506", "gt-test-91507")
 	check.pidAliveForTest = func(int) bool { return false }
@@ -435,6 +449,7 @@ func bindUnlistenedSocket(t *testing.T, path string) {
 // absence: the process's own limits, permissions, and a busy server's timeout
 // all end the dial without saying anything about the server.
 func TestClassifyDialErr(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -461,6 +476,7 @@ func TestClassifyDialErr(t *testing.T) {
 }
 
 func TestTmuxTestSocketCheck_FixKillsLeftover(t *testing.T) {
+	t.Parallel()
 	probe := &fakeTestSocketProbe{sessions: []string{"gt-test-modeA-2"}}
 	check := NewTmuxTestSocketCheck()
 	check.socketDirForTest = newTestSocketDir(t, "gt-test-91506")
@@ -484,6 +500,7 @@ func TestTmuxTestSocketCheck_FixKillsLeftover(t *testing.T) {
 }
 
 func TestCandidateOwnerPid(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		socket string
 		want   int

@@ -46,6 +46,7 @@ func setupRigNameTestDir(t *testing.T, rigName string, rigConfig *rigConfigLocal
 }
 
 func TestRigNameMismatchCheck_AllMatch(t *testing.T) {
+	t.Parallel()
 	rigCfg := &rigConfigLocal{
 		Type:    "rig",
 		Version: 1,
@@ -73,6 +74,7 @@ func TestRigNameMismatchCheck_AllMatch(t *testing.T) {
 }
 
 func TestRigNameMismatchCheck_NameMismatch(t *testing.T) {
+	t.Parallel()
 	rigCfg := &rigConfigLocal{
 		Type:    "rig",
 		Version: 1,
@@ -103,6 +105,7 @@ func TestRigNameMismatchCheck_NameMismatch(t *testing.T) {
 }
 
 func TestRigNameMismatchCheck_PrefixMismatch(t *testing.T) {
+	t.Parallel()
 	rigCfg := &rigConfigLocal{
 		Type:    "rig",
 		Version: 1,
@@ -133,6 +136,7 @@ func TestRigNameMismatchCheck_PrefixMismatch(t *testing.T) {
 }
 
 func TestRigNameMismatchCheck_BothMismatch(t *testing.T) {
+	t.Parallel()
 	rigCfg := &rigConfigLocal{
 		Type:    "rig",
 		Version: 1,
@@ -163,6 +167,7 @@ func TestRigNameMismatchCheck_BothMismatch(t *testing.T) {
 }
 
 func TestRigNameMismatchCheck_NoConfigJson(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create rig directory but no config.json
@@ -181,6 +186,7 @@ func TestRigNameMismatchCheck_NoConfigJson(t *testing.T) {
 }
 
 func TestRigNameMismatchCheck_Fix(t *testing.T) {
+	t.Parallel()
 	rigCfg := &rigConfigLocal{
 		Type:      "rig",
 		Version:   1,
@@ -239,6 +245,7 @@ func TestRigNameMismatchCheck_Fix(t *testing.T) {
 }
 
 func TestRigNameMismatchCheck_NoRig(t *testing.T) {
+	t.Parallel()
 	check := NewRigNameMismatchCheck()
 	ctx := &CheckContext{TownRoot: t.TempDir(), RigName: ""}
 	result := check.Run(ctx)
@@ -249,6 +256,7 @@ func TestRigNameMismatchCheck_NoRig(t *testing.T) {
 }
 
 func TestRigNameMismatchCheck_NoRigsJson(t *testing.T) {
+	t.Parallel()
 	// Config name matches directory, but no rigs.json — should only check name
 	rigCfg := &rigConfigLocal{
 		Type:    "rig",

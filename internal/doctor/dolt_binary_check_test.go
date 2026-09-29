@@ -13,6 +13,7 @@ import (
 )
 
 func TestDoltBinaryCheck_Metadata(t *testing.T) {
+	t.Parallel()
 	check := NewDoltBinaryCheck()
 
 	if check.Name() != "dolt-binary" {
@@ -46,6 +47,7 @@ func writeFakeDolt(t *testing.T, dir string, script string, batScript string) {
 }
 
 func TestDoltBinaryCheck_DoltInstalled(t *testing.T) {
+	t.Parallel()
 	// Skip if dolt is not actually installed in the test environment
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("dolt not installed, skipping installed-path test")

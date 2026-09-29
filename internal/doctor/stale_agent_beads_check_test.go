@@ -8,6 +8,7 @@ import (
 )
 
 func TestNewStaleAgentBeadsCheck(t *testing.T) {
+	t.Parallel()
 	check := NewStaleAgentBeadsCheck()
 
 	if check.Name() != "stale-agent-beads" {
@@ -28,6 +29,7 @@ func TestNewStaleAgentBeadsCheck(t *testing.T) {
 }
 
 func TestStaleAgentBeadsCheck_NoRoutes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// No .beads dir at all — LoadRoutes returns empty, so check returns OK (no rigs)
@@ -43,6 +45,7 @@ func TestStaleAgentBeadsCheck_NoRoutes(t *testing.T) {
 }
 
 func TestStaleAgentBeadsCheck_NoRigs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create .beads dir with empty routes.jsonl
@@ -65,6 +68,7 @@ func TestStaleAgentBeadsCheck_NoRigs(t *testing.T) {
 }
 
 func TestStaleAgentBeadsCheck_CrewOnDisk(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Set up routes pointing to a rig
@@ -103,6 +107,7 @@ func TestStaleAgentBeadsCheck_CrewOnDisk(t *testing.T) {
 // === Tests for Phase 2: Deregistered rig orphan detection ===
 
 func TestStaleAgentBeadsCheck_Phase2_NoTownBeadsDir(t *testing.T) {
+	t.Parallel()
 	// Phase 2 scans town beads for orphan agent beads. When the .beads
 	// dir exists (for routes) but has no Dolt connection, the check should
 	// handle ListAgentBeads failure gracefully and not crash.
@@ -139,6 +144,7 @@ func TestStaleAgentBeadsCheck_Phase2_NoTownBeadsDir(t *testing.T) {
 }
 
 func TestStaleAgentBeadsCheck_KnownPrefixTracking(t *testing.T) {
+	t.Parallel()
 	// Verify that both town-level routes (path ".") and rig routes are
 	// tracked in the knownPrefixes map. Phase 2 uses this to identify
 	// orphan beads from deregistered rigs.
@@ -177,6 +183,7 @@ func TestStaleAgentBeadsCheck_KnownPrefixTracking(t *testing.T) {
 // === Tests for parseCrewOrPolecatFromID helper ===
 
 func TestParseCrewOrPolecatFromID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		id         string
@@ -264,6 +271,7 @@ func TestParseCrewOrPolecatFromID(t *testing.T) {
 // === Tests for dedup helper ===
 
 func TestDedup(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input []string
@@ -314,6 +322,7 @@ func TestDedup(t *testing.T) {
 // === Test for Fix() fallback to town beads ===
 
 func TestStaleAgentBeadsCheck_FixFallbackToTownBeads(t *testing.T) {
+	t.Parallel()
 	// When Fix() encounters an orphan bead with unknown prefix, it should
 	// attempt to close via town beads client instead of silently skipping.
 	// Without Dolt, this verifies the code path doesn't crash.

@@ -9,6 +9,7 @@ import (
 )
 
 func TestParseWorktreeConflict(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		output   string
@@ -80,6 +81,7 @@ func initBareWithCommit(t *testing.T, bareRepo string) {
 // a branch that's only referenced by a bare repo's HEAD). This test verifies
 // the checkout succeeds regardless.
 func TestCheckoutWithWorktreeRetry_BareRepoConflict(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a bare repo (simulating .repo.git)
@@ -112,6 +114,7 @@ func TestCheckoutWithWorktreeRetry_BareRepoConflict(t *testing.T) {
 // TestCheckoutWithWorktreeRetry_NonBareRepoConflict verifies that conflicts
 // with non-bare repos produce a clear error instead of silently failing.
 func TestCheckoutWithWorktreeRetry_NonBareRepoConflict(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a regular (non-bare) repo with main branch
@@ -137,6 +140,7 @@ func TestCheckoutWithWorktreeRetry_NonBareRepoConflict(t *testing.T) {
 // TestCheckoutWithWorktreeRetry_NormalCheckout verifies normal checkout
 // (no worktree conflict) still works.
 func TestCheckoutWithWorktreeRetry_NormalCheckout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a regular repo with two branches
@@ -159,6 +163,7 @@ func TestCheckoutWithWorktreeRetry_NormalCheckout(t *testing.T) {
 
 // TestCheckoutWithWorktreeRetry_BranchNotFound verifies clear error for missing branch.
 func TestCheckoutWithWorktreeRetry_BranchNotFound(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	repo := filepath.Join(tmpDir, "repo")

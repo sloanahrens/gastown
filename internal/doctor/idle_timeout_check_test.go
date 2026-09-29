@@ -8,6 +8,7 @@ import (
 )
 
 func TestIdleTimeoutCheck_Run(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create town beads with routes.jsonl
@@ -66,6 +67,7 @@ issue-prefix: bd
 }
 
 func TestIdleTimeoutCheck_Run_AllCorrect(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create town beads with routes.jsonl
@@ -105,6 +107,7 @@ dolt.idle-timeout: "0"
 }
 
 func TestIdleTimeoutCheck_Fix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create town beads with routes.jsonl

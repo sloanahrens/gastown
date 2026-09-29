@@ -9,6 +9,7 @@ import (
 )
 
 func TestPrimingCheck_PolecatNewStructure(t *testing.T) {
+	t.Parallel()
 	// This test verifies that priming check correctly handles the new polecat path structure.
 	// Bug: priming_check.go looks at polecats/<name>/ but the actual worktree is at
 	// polecats/<name>/<rigname>/ which is where the .beads/redirect file lives.
@@ -75,6 +76,7 @@ func TestPrimingCheck_PolecatNewStructure(t *testing.T) {
 }
 
 func TestPrimingCheck_PolecatDirLevel_NoPrimeMD(t *testing.T) {
+	t.Parallel()
 	// This test verifies that NO PRIME.md should exist at the polecatDir level
 	// (polecats/<name>/.beads/PRIME.md). PRIME.md should only exist at:
 	// 1. Rig level: <rig>/.beads/PRIME.md
@@ -121,6 +123,7 @@ func TestPrimingCheck_PolecatDirLevel_NoPrimeMD(t *testing.T) {
 }
 
 func TestPrimingCheck_FixRemovesBadPolecatBeads(t *testing.T) {
+	t.Parallel()
 	// This test verifies that doctor --fix removes spurious .beads directories
 	// that were incorrectly created at the polecatDir level (polecats/<name>/.beads).
 	//
@@ -206,6 +209,7 @@ func TestPrimingCheck_FixRemovesBadPolecatBeads(t *testing.T) {
 // inside mayor/rig/ (the customer's source repo) is NOT flagged.
 // With sparse checkout removed, this is the customer's legitimate file.
 func TestPrimingCheck_AllowsClaudeMdInMayorRig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -251,6 +255,7 @@ func TestPrimingCheck_AllowsClaudeMdInMayorRig(t *testing.T) {
 // TestPrimingCheck_AllowsClaudeMdInRefineryRig verifies that CLAUDE.md
 // inside refinery/rig/ (the customer's source repo worktree) is NOT flagged.
 func TestPrimingCheck_AllowsClaudeMdInRefineryRig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -296,6 +301,7 @@ func TestPrimingCheck_AllowsClaudeMdInRefineryRig(t *testing.T) {
 // TestPrimingCheck_AllowsClaudeMdInCrewWorktree verifies that CLAUDE.md
 // inside crew/<name>/ (the customer's worktree) is NOT flagged.
 func TestPrimingCheck_AllowsClaudeMdInCrewWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	crewName := "alice"
@@ -346,6 +352,7 @@ func TestPrimingCheck_AllowsClaudeMdInCrewWorktree(t *testing.T) {
 // TestPrimingCheck_AllowsClaudeMdInPolecatWorktree verifies that CLAUDE.md
 // inside polecats/<name>/<rigname>/ (the customer's worktree) is NOT flagged.
 func TestPrimingCheck_AllowsClaudeMdInPolecatWorktree(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	polecatName := "testpc"
@@ -397,6 +404,7 @@ func TestPrimingCheck_AllowsClaudeMdInPolecatWorktree(t *testing.T) {
 // does NOT delete CLAUDE.md files from inside source repo worktrees.
 // With sparse checkout removed, these are the customer's legitimate files.
 func TestPrimingCheck_FixPreservesCustomerClaudeMd(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -443,6 +451,7 @@ func TestPrimingCheck_FixPreservesCustomerClaudeMd(t *testing.T) {
 // at agent level (e.g., refinery/CLAUDE.md) ARE flagged as stale files.
 // These are no longer created — only ~/gt/CLAUDE.md (town root) exists.
 func TestPrimingCheck_FlagsStaleAgentLevelFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -505,6 +514,7 @@ func TestPrimingCheck_FlagsStaleAgentLevelFiles(t *testing.T) {
 // A correctly configured rig has NO per-directory CLAUDE.md/AGENTS.md files.
 // Only ~/gt/CLAUDE.md (town root identity anchor) exists on disk.
 func TestPrimingCheck_NoIssuesWhenCorrectlyConfigured(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -567,6 +577,7 @@ func TestPrimingCheck_NoIssuesWhenCorrectlyConfigured(t *testing.T) {
 // TestPrimingCheck_DetectsLargeClaudeMd verifies that CLAUDE.md files
 // exceeding 30 lines are flagged.
 func TestPrimingCheck_DetectsLargeClaudeMd(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create town-level mayor directory with large CLAUDE.md (>30 lines)
@@ -605,6 +616,7 @@ func TestPrimingCheck_DetectsLargeClaudeMd(t *testing.T) {
 // TestPrimingCheck_DetectsStaleIntermediateFiles verifies that stale CLAUDE.md/AGENTS.md
 // at intermediate directories (refinery/, witness/, crew/, polecats/, mayor/) are detected.
 func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -670,6 +682,7 @@ func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 // TestPrimingCheck_FixRemovesStaleIntermediateFiles verifies that doctor --fix
 // removes stale CLAUDE.md/AGENTS.md from intermediate directories.
 func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -742,6 +755,7 @@ func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
 // TestPrimingCheck_DetectsNoPrimeHook verifies that settings.json files
 // missing 'gt prime' in SessionStart are detected.
 func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -824,6 +838,7 @@ func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
 // TestPrimingCheck_FixNoPrimeHook verifies that doctor --fix recreates
 // settings.json from template when gt prime hook is missing.
 func TestPrimingCheck_FixNoPrimeHook(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 

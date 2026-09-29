@@ -15,6 +15,7 @@ import (
 // misplaced ephemerals in the "hq" database, the rigName is "hq" — Fix() must
 // map this to TownRoot (same as Run does). Regression test for GH#2127.
 func TestFixWorkDir_HQ(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	got := resolveMisclassifiedWispWorkDir(townRoot, misclassifiedWisp{rigName: "hq"})
@@ -28,6 +29,7 @@ func TestFixWorkDir_HQ(t *testing.T) {
 }
 
 func TestFixWorkDir_RoutedRig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -52,6 +54,7 @@ func TestFixWorkDir_RoutedRig(t *testing.T) {
 // to guess whether beads should be wisps. Only beads with ephemeral=1 that are
 // in the issues table should be flagged. This is the ZFC compliance test.
 func TestNoHeuristicClassification(t *testing.T) {
+	t.Parallel()
 	check := NewCheckMisclassifiedWisps()
 
 	// Inject items that the OLD heuristic would have flagged but the new
@@ -94,6 +97,7 @@ func TestRunIgnoresJSONLWhenDoltUnavailable(t *testing.T) {
 // rig directories that may have custom paths (e.g., "sallaWork/mayor/rig").
 // Regression test for: DB probe failures when database name != directory name.
 func TestGetRigPathForPrefix_RoutesResolution(t *testing.T) {
+	t.Parallel()
 	// Create a temporary town structure with routes.jsonl
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -152,6 +156,7 @@ func TestGetRigPathForPrefix_RoutesResolution(t *testing.T) {
 // TestRigPathResolution_NoRoutesFile verifies that when routes.jsonl doesn't exist,
 // GetRigPathForPrefix returns empty string, triggering the fallback behavior.
 func TestRigPathResolution_NoRoutesFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// Don't create .beads/routes.jsonl
 
@@ -164,6 +169,7 @@ func TestRigPathResolution_NoRoutesFile(t *testing.T) {
 // TestRigDirResolution_Logic verifies the resolution logic that would be used
 // in the misclassified-wisps check when mapping database names to directories.
 func TestRigDirResolution_Logic(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -221,6 +227,7 @@ func TestRigDirResolution_Logic(t *testing.T) {
 }
 
 func TestMisclassifiedWispDependencyMigrationIsTypedAndFailClosed(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("misclassified_wisp_check.go")
 	if err != nil {
 		t.Fatalf("read misclassified_wisp_check.go: %v", err)

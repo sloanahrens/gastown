@@ -101,6 +101,7 @@ func checkFor(t *testing.T, f *fakePolecatGit, beadStatus func(townRoot, beadID 
 func openBeads(string, string) (string, bool) { return "open", true }
 
 func TestStalledPolecatCheck_Properties(t *testing.T) {
+	t.Parallel()
 	check := NewStalledPolecatCheck()
 
 	if check.Name() != "stalled-polecats" {
@@ -121,6 +122,7 @@ func TestStalledPolecatCheck_Properties(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_EmptyTownRoot(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
@@ -133,6 +135,7 @@ func TestStalledPolecatCheck_EmptyTownRoot(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_NoPolecats(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: "testrig"}
 
@@ -145,6 +148,7 @@ func TestStalledPolecatCheck_NoPolecats(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_FixNoStalled(t *testing.T) {
+	t.Parallel()
 	check := NewStalledPolecatCheck()
 	// Fix with no stalled polecats should be a no-op
 	if err := check.Fix(&CheckContext{TownRoot: t.TempDir()}); err != nil {
@@ -153,6 +157,7 @@ func TestStalledPolecatCheck_FixNoStalled(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_SessionLivenessErrorIsSkipped(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	makePolecatDir(t, tmpDir, "testrig", "furiosa")
 
@@ -174,6 +179,7 @@ func TestStalledPolecatCheck_SessionLivenessErrorIsSkipped(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_PushStatusErrorIsSkipped(t *testing.T) {
+	t.Parallel()
 	_, result := checkFor(t, &fakePolecatGit{
 		branch:       "polecat/furiosa/gt-abc+abc123",
 		pushCheckErr: errors.New("git: unable to contact origin"),
@@ -188,6 +194,7 @@ func TestStalledPolecatCheck_PushStatusErrorIsSkipped(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_UnknownDoesNotMaskConfirmedStall(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	makePolecatDir(t, tmpDir, "testrig", "furiosa")
 	makePolecatDir(t, tmpDir, "testrig", "slate")
@@ -216,6 +223,7 @@ func TestStalledPolecatCheck_UnknownDoesNotMaskConfirmedStall(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_ResolveClonePath_NoDir(t *testing.T) {
+	t.Parallel()
 	check := NewStalledPolecatCheck()
 	path := check.resolveClonePath(t.TempDir(), "testrig", "furiosa")
 	if path != "" {
@@ -231,6 +239,7 @@ func TestStalledPolecatCheck_ResolveClonePath_NoDir(t *testing.T) {
 // resting state of the whole merge queue — because pushed-but-unmerged work is
 // not on main yet. Origin is custody: a branch there survives the worktree.
 func TestStalledPolecatCheck_BranchOnOriginIsNotAtRisk(t *testing.T) {
+	t.Parallel()
 	_, result := checkFor(t, &fakePolecatGit{
 		branch:          "polecat/furiosa/gt-abc+abc123",
 		pushed:          true,
@@ -248,6 +257,7 @@ func TestStalledPolecatCheck_BranchOnOriginIsNotAtRisk(t *testing.T) {
 // the check exists for: dead session, commits on no remote, content on no
 // default branch.
 func TestStalledPolecatCheck_BranchAbsentFromOriginIsAtRisk(t *testing.T) {
+	t.Parallel()
 	check, result := checkFor(t, &fakePolecatGit{
 		branch:          "polecat/furiosa/gt-abc+abc123",
 		pushed:          false,
@@ -268,6 +278,7 @@ func TestStalledPolecatCheck_BranchAbsentFromOriginIsAtRisk(t *testing.T) {
 // half of the trigger: absent from origin, but the content is on the default
 // branch, so nothing is lost by leaving it alone.
 func TestStalledPolecatCheck_ContentOnDefaultBranchIsSuperseded(t *testing.T) {
+	t.Parallel()
 	f := &fakePolecatGit{
 		branch:          "polecat/furiosa/gt-abc+abc123",
 		pushed:          false,
@@ -296,6 +307,7 @@ func TestStalledPolecatCheck_ContentOnDefaultBranchIsSuperseded(t *testing.T) {
 // answer, the branch stays flagged. Silence here would trade a loud false
 // positive for a quiet false negative.
 func TestStalledPolecatCheck_ContentCheckErrorStillWarns(t *testing.T) {
+	t.Parallel()
 	_, result := checkFor(t, &fakePolecatGit{
 		branch:          "polecat/furiosa/gt-abc+abc123",
 		unpushedCount:   1,
@@ -309,6 +321,7 @@ func TestStalledPolecatCheck_ContentCheckErrorStillWarns(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_BranchSupersededByTerminalBead(t *testing.T) {
+	t.Parallel()
 	check := NewStalledPolecatCheck()
 	branch := polecat.FormatGeneratedBranchName("furiosa", "gt-999", "abc123")
 
@@ -343,6 +356,7 @@ func TestStalledPolecatCheck_BranchSupersededByTerminalBead(t *testing.T) {
 // for manual review rather than reading as a clean bill of health, even
 // though Fix must not auto-push it (that stays gt-4vbn's protection).
 func TestStalledPolecatCheck_ClosedBeadIsReportedNotSuppressed(t *testing.T) {
+	t.Parallel()
 	check, result := checkFor(t, &fakePolecatGit{
 		branch:        polecat.FormatGeneratedBranchName("furiosa", "gt-closed1", "abc123"),
 		unpushedCount: 1,
@@ -373,6 +387,7 @@ func TestStalledPolecatCheck_ClosedBeadIsReportedNotSuppressed(t *testing.T) {
 // needsReview entry must not downgrade a real, confirmed-at-risk stall away
 // from StatusWarning.
 func TestStalledPolecatCheck_ClosedBeadDoesNotMaskConfirmedStall(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	makePolecatDir(t, tmpDir, "testrig", "furiosa")
 	makePolecatDir(t, tmpDir, "testrig", "slate")
@@ -420,6 +435,7 @@ func TestStalledPolecatCheck_ClosedBeadDoesNotMaskConfirmedStall(t *testing.T) {
 // Run and is reachable with every polecat session dead, so a branch superseded
 // in the gap must not be pushed back to origin off a stale verdict.
 func TestStalledPolecatCheck_Fix_RefusesToResurrectLandedContent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	makePolecatDir(t, townRoot, "testrig", "furiosa")
 
@@ -458,6 +474,7 @@ func TestStalledPolecatCheck_Fix_RefusesToResurrectLandedContent(t *testing.T) {
 // for the two refusal tests: re-verification must not become a refusal to ever
 // push. Without it, deleting the push entirely would pass every other Fix test.
 func TestStalledPolecatCheck_Fix_PushesStillAtRiskBranch(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	makePolecatDir(t, townRoot, "testrig", "furiosa")
 
@@ -486,6 +503,7 @@ func TestStalledPolecatCheck_Fix_PushesStillAtRiskBranch(t *testing.T) {
 }
 
 func TestStalledPolecatCheck_Fix_RefusesToResurrectClosedBead(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	makePolecatDir(t, townRoot, "testrig", "furiosa")
 
@@ -607,6 +625,7 @@ func (f *stalledFixture) run(t *testing.T, beadStatus func(string, string) (stri
 // refreshed a default branch its clone would never fetch again. Without that
 // refresh the warning is permanent, which is the whole complaint.
 func TestStalledPolecatCheck_RealGit_FlagsThenClearsOnSupersession(t *testing.T) {
+	t.Parallel()
 	f := newStalledFixture(t, "testrig", "test-agate", "gt-4vbn1")
 
 	check, result := f.run(t, openBeads)
@@ -641,6 +660,7 @@ func TestStalledPolecatCheck_RealGit_FlagsThenClearsOnSupersession(t *testing.T)
 // commit on no remote, content on no default branch. The content check must not
 // clear it.
 func TestStalledPolecatCheck_RealGit_KeepsWarningWhenWorkIsGenuinelyAbsent(t *testing.T) {
+	t.Parallel()
 	f := newStalledFixture(t, "testrig", "test-obsidian", "gt-orphan1")
 
 	check, result := f.run(t, openBeads)
@@ -666,6 +686,7 @@ func TestStalledPolecatCheck_RealGit_KeepsWarningWhenWorkIsGenuinelyAbsent(t *te
 // is flagged while genuinely unpreserved, then the fix lands on main in the gap
 // between Run and Fix. Fix must re-verify rather than push on Run's snapshot.
 func TestStalledPolecatCheck_RealGit_FixDoesNotResurrectSupersededBranch(t *testing.T) {
+	t.Parallel()
 	f := newStalledFixture(t, "testrig", "test-agate2", "gt-race1")
 
 	check, result := f.run(t, openBeads)
@@ -689,6 +710,7 @@ func TestStalledPolecatCheck_RealGit_FixDoesNotResurrectSupersededBranch(t *test
 // subprocess: without these, a town root with no beads database would spawn bd
 // once per candidate inside a scan that has to finish.
 func TestLookupBeadStatus_GuardsNoOpPaths(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		townRoot string

@@ -8,6 +8,7 @@ import (
 )
 
 func TestTownBeadsConfigCheck_NoTownBeadsDir(t *testing.T) {
+	t.Parallel()
 	check := NewTownBeadsConfigCheck()
 
 	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
@@ -17,6 +18,7 @@ func TestTownBeadsConfigCheck_NoTownBeadsDir(t *testing.T) {
 }
 
 func TestTownBeadsConfigCheck_DetectsMissingConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
@@ -30,6 +32,7 @@ func TestTownBeadsConfigCheck_DetectsMissingConfig(t *testing.T) {
 }
 
 func TestTownBeadsConfigCheck_FixCreatesConfigFromMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -70,6 +73,7 @@ func TestTownBeadsConfigCheck_FixCreatesConfigFromMetadata(t *testing.T) {
 }
 
 func TestTownBeadsConfigCheck_FixDoesNotOverwriteExistingConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -103,6 +107,7 @@ func TestTownBeadsConfigCheck_FixDoesNotOverwriteExistingConfig(t *testing.T) {
 }
 
 func TestTownBeadsConfigCheck_FixAddsMissingExportAuto(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -138,6 +143,7 @@ func TestTownBeadsConfigCheck_FixAddsMissingExportAuto(t *testing.T) {
 }
 
 func TestTownBeadsConfigCheck_FixDisablesEnabledExportAuto(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {

@@ -12,6 +12,7 @@ import (
 // not unit-tested because it depends on version.GetRepoRoot() (env/git driven);
 // the testable logic lives in staleResult.
 func TestStaleResult(t *testing.T) {
+	t.Parallel()
 	const name = "stale-binary"
 
 	tests := []struct {

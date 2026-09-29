@@ -9,6 +9,7 @@ import (
 )
 
 func TestStaleSQLServerInfoCheck_NoFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	check := NewStaleSQLServerInfoCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
@@ -20,6 +21,7 @@ func TestStaleSQLServerInfoCheck_NoFiles(t *testing.T) {
 }
 
 func TestStaleSQLServerInfoCheck_DetectsStaleFile(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix process signals")
 	}
@@ -51,6 +53,7 @@ func TestStaleSQLServerInfoCheck_DetectsStaleFile(t *testing.T) {
 }
 
 func TestStaleSQLServerInfoCheck_FixIsNoOp(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix process signals")
 	}
@@ -95,6 +98,7 @@ func TestStaleSQLServerInfoCheck_FixIsNoOp(t *testing.T) {
 }
 
 func TestStaleSQLServerInfoCheck_SkipsLiveProcess(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix process signals")
 	}
@@ -123,6 +127,7 @@ func TestStaleSQLServerInfoCheck_SkipsLiveProcess(t *testing.T) {
 }
 
 func TestStaleSQLServerInfoCheck_EmptyFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	doltDir := filepath.Join(tmpDir, "myrig", ".beads", "dolt", ".dolt")

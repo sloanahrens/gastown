@@ -13,6 +13,7 @@ const testRigsJSON = `{
 }`
 
 func TestRigsJSONCheck_BothPresent_OK(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -34,6 +35,7 @@ func TestRigsJSONCheck_BothPresent_OK(t *testing.T) {
 }
 
 func TestRigsJSONCheck_CanonicalOnly_Warning(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -52,6 +54,7 @@ func TestRigsJSONCheck_CanonicalOnly_Warning(t *testing.T) {
 }
 
 func TestRigsJSONCheck_FallbackOnly_Warning(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(townRoot, "rigs.json"), []byte(testRigsJSON), 0644); err != nil {
 		t.Fatal(err)
@@ -66,6 +69,7 @@ func TestRigsJSONCheck_FallbackOnly_Warning(t *testing.T) {
 }
 
 func TestRigsJSONCheck_BothMissing_Error(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	check := NewRigsJSONCheck()
@@ -77,6 +81,7 @@ func TestRigsJSONCheck_BothMissing_Error(t *testing.T) {
 }
 
 func TestRigsJSONCheck_Fix_RestoresCanonicalFromFallback(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// Only fallback exists.
 	if err := os.WriteFile(filepath.Join(townRoot, "rigs.json"), []byte(testRigsJSON), 0644); err != nil {

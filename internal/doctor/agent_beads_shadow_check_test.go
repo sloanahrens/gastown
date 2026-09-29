@@ -38,6 +38,7 @@ func TestAgentBeadsShadowCheck_ReportsTownDuplicates(t *testing.T) {
 }
 
 func TestAgentBeadsShadowCheck_CleanWhenNoRoutes(t *testing.T) {
+	t.Parallel()
 	result := NewAgentBeadsShadowCheck().Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusOK {
 		t.Fatalf("status = %v, want OK (no routes => nothing to shadow)", result.Status)
@@ -45,6 +46,7 @@ func TestAgentBeadsShadowCheck_CleanWhenNoRoutes(t *testing.T) {
 }
 
 func TestShadowedAgentFields(t *testing.T) {
+	t.Parallel()
 	rig := &beads.Issue{Description: "x\n\nrole_type: polecat\nagent_state: done\nactive_mr: gt-wisp-0yhh\n"}
 	town := &beads.Issue{Description: "x\n\nrole_type: polecat\nagent_state: done\nactive_mr: null\n"}
 	got := shadowedAgentFields(rig, town)

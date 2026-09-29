@@ -11,6 +11,7 @@ import (
 )
 
 func TestNewOverlayHealthCheck(t *testing.T) {
+	t.Parallel()
 	check := NewOverlayHealthCheck()
 	assert.Equal(t, "overlay-health", check.Name())
 	assert.True(t, check.CanFix())
@@ -18,6 +19,7 @@ func TestNewOverlayHealthCheck(t *testing.T) {
 }
 
 func TestOverlayHealthCheck_NoOverlays(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -29,6 +31,7 @@ func TestOverlayHealthCheck_NoOverlays(t *testing.T) {
 }
 
 func TestOverlayHealthCheck_HealthyOverlay(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -51,6 +54,7 @@ func TestOverlayHealthCheck_HealthyOverlay(t *testing.T) {
 }
 
 func TestOverlayHealthCheck_StaleStepID(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -75,6 +79,7 @@ description = "This won't match anything"
 }
 
 func TestOverlayHealthCheck_MalformedTOML(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -91,6 +96,7 @@ func TestOverlayHealthCheck_MalformedTOML(t *testing.T) {
 }
 
 func TestOverlayHealthCheck_RigLevel(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -112,6 +118,7 @@ mode = "skip"
 }
 
 func TestOverlayHealthCheck_UnknownFormula(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -134,6 +141,7 @@ description = "Override for non-existent formula"
 }
 
 func TestOverlayHealthCheck_Fix_RemovesStaleEntries(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -170,6 +178,7 @@ func TestOverlayHealthCheck_Fix_RemovesStaleEntries(t *testing.T) {
 }
 
 func TestOverlayHealthCheck_Fix_RemovesEmptyFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
@@ -204,6 +213,7 @@ description = "Also stale"
 }
 
 func TestOverlayHealthCheck_Fix_SkipsMalformed(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	setupRigsJSON(t, tmpDir, []string{"testrig"})
 
