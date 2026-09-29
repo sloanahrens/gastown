@@ -13,6 +13,7 @@ import (
 )
 
 func TestShouldEscalateCrashLoop(t *testing.T) {
+	t.Parallel()
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{})
 
 	// Not in crash loop: never escalate.
@@ -41,6 +42,7 @@ func TestShouldEscalateCrashLoop(t *testing.T) {
 }
 
 func TestShouldEscalateCrashLoop_ResetOnClear(t *testing.T) {
+	t.Parallel()
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{})
 	rt.state.Agents["deacon"] = &AgentRestartInfo{
 		CrashLoopSince: time.Now().Add(-5 * time.Minute),
@@ -62,6 +64,7 @@ func TestShouldEscalateCrashLoop_ResetOnClear(t *testing.T) {
 // Regression test for gt-e7h: crash-loop skip for a core agent must escalate
 // to the mayor instead of silently logging.
 func TestEscalateCrashLoopSkip_CoreAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "daemon"), 0o755); err != nil {
 		t.Fatalf("mkdir daemon: %v", err)
@@ -103,6 +106,7 @@ func TestEscalateCrashLoopSkip_CoreAgent(t *testing.T) {
 
 // Silent skip is acceptable for polecats/dogs (gt-e7h).
 func TestEscalateCrashLoopSkip_NonCoreAgentSilent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rec := notifyfake.New()
 

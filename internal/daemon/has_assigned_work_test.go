@@ -9,6 +9,7 @@ import (
 )
 
 func TestHasAssignedOpenWork_UsesPinnedBeadsDirInsteadOfRigOrRepoFlag(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mocks")
 	}

@@ -18,6 +18,7 @@ func idleTestDaemon(t *testing.T) *Daemon {
 }
 
 func TestIsIdleForUpgrade(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		set  func(t *testing.T, d *Daemon)
@@ -62,6 +63,7 @@ func TestIsIdleForUpgrade(t *testing.T) {
 }
 
 func TestScriptRunnerRunningCountNilSafe(t *testing.T) {
+	t.Parallel()
 	var r *scriptRunner
 	if got := r.runningCount(); got != 0 {
 		t.Fatalf("nil runner runningCount() = %d, want 0", got)
@@ -94,6 +96,7 @@ func holdInstallLock(t *testing.T, path string) {
 }
 
 func TestInstallLockPathMatchesInstallGt(t *testing.T) {
+	t.Parallel()
 	// scripts/install-gt.sh: ${INSTALL_GT_DAEMON_DIR:-$TOWN_ROOT/daemon}/install-gt.lock
 	if got, want := installLockPath("/town"), filepath.Join("/town", "daemon", "install-gt.lock"); got != want {
 		t.Fatalf("installLockPath = %q, want %q", got, want)
@@ -101,6 +104,7 @@ func TestInstallLockPathMatchesInstallGt(t *testing.T) {
 }
 
 func TestInstallLockHeldProbe(t *testing.T) {
+	t.Parallel()
 	t.Run("missing file is not held and is not created", func(t *testing.T) {
 		d := idleTestDaemon(t)
 		if d.installLockHeld() {

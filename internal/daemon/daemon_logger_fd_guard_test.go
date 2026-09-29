@@ -26,6 +26,7 @@ import (
 // log.New(os.Stderr, ...)`) and then attached reaches it only if the test
 // happens to name the local `logger`.
 func TestNoTestLoggerWritesToTheProcessFD(t *testing.T) {
+	t.Parallel()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -67,6 +68,7 @@ func TestNoTestLoggerWritesToTheProcessFD(t *testing.T) {
 // TestFDBackedLoggerFieldScanner pins the scanner on a planted violation: a
 // walk that quietly stopped matching this shape would pass as a clean tree.
 func TestFDBackedLoggerFieldScanner(t *testing.T) {
+	t.Parallel()
 	const src = `package daemon
 
 func f() {
@@ -96,6 +98,7 @@ func f() {
 
 // TestFDBackedLoggerDetector pins the expression matcher the scanner uses.
 func TestFDBackedLoggerDetector(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		src  string
 		want bool

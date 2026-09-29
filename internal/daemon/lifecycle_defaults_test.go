@@ -9,6 +9,7 @@ import (
 )
 
 func TestDefaultLifecycleConfig(t *testing.T) {
+	t.Parallel()
 	config := DefaultLifecycleConfig()
 
 	if config.Type != "daemon-patrol-config" {
@@ -95,12 +96,14 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 }
 
 func TestEnsureLifecycleDefaults_NilConfig(t *testing.T) {
+	t.Parallel()
 	if EnsureLifecycleDefaults(nil) {
 		t.Error("expected false for nil config")
 	}
 }
 
 func TestEnsureLifecycleDefaults_EmptyConfig(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1}
 	changed := EnsureLifecycleDefaults(config)
 
@@ -128,6 +131,7 @@ func TestEnsureLifecycleDefaults_EmptyConfig(t *testing.T) {
 }
 
 func TestEnsureLifecycleDefaults_PreservesExisting(t *testing.T) {
+	t.Parallel()
 	// Config with user-customized wisp_reaper
 	config := &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
@@ -165,6 +169,7 @@ func TestEnsureLifecycleDefaults_PreservesExisting(t *testing.T) {
 }
 
 func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
+	t.Parallel()
 	// Config with all patrols already set (even if disabled)
 	threshold := 2000
 	config := &DaemonPatrolConfig{
@@ -200,6 +205,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 }
 
 func TestEnsureLifecycleConfigFile_NewFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -232,6 +238,7 @@ func TestEnsureLifecycleConfigFile_NewFile(t *testing.T) {
 }
 
 func TestEnsureLifecycleConfigFile_ExistingPartial(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -289,6 +296,7 @@ func TestEnsureLifecycleConfigFile_ExistingPartial(t *testing.T) {
 }
 
 func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
+	t.Parallel()
 	// Simulates the actual production daemon.json: has core patrols (deacon,
 	// refinery, witness) and explicitly disabled dolt_backup, but is missing
 	// all data maintenance tickers (wisp_reaper, compactor_dog, doctor_dog,
@@ -366,6 +374,7 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 }
 
 func TestEnsureLifecycleConfigFile_AlreadyComplete(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {

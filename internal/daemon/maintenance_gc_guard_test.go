@@ -48,6 +48,7 @@ func suppressionTestManager(t *testing.T, health, write, identity error) (*DoltS
 }
 
 func TestEnsureRunningDefersRestartWhileGCInFlight(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("probe timed out")
 	cases := []struct {
 		name                    string
@@ -83,6 +84,7 @@ func TestEnsureRunningDefersRestartWhileGCInFlight(t *testing.T) {
 }
 
 func TestEnsureRunningStartsDeadServerEvenWhileSuppressed(t *testing.T) {
+	t.Parallel()
 	m, _, starts := suppressionTestManager(t, nil, nil, nil)
 	m.runningFn = func() (int, bool) { return 0, starts.Load() > 0 }
 	m.SetRestartSuppressor(func() bool { return true })
@@ -155,6 +157,7 @@ func TestDoltRestartHeldForGC(t *testing.T) {
 }
 
 func TestDoctorDogSkipsWhileGCHoldsLock(t *testing.T) {
+	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		DoctorDog: &DoctorDogConfig{Enabled: true},
@@ -247,6 +250,7 @@ func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 }
 
 func TestWrappedDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
+	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		WispReaper:     &WispReaperConfig{Enabled: true},
@@ -316,6 +320,7 @@ func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
 // while a gc holds the write side. macOS only: the backup patrol returns
 // before the guard on every other OS.
 func TestDoltBackupSkipsWhileGCHoldsLock(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "darwin" {
 		t.Skip("dolt_backup runs only on darwin")
 	}
@@ -370,6 +375,7 @@ func TestGCPausesConvoyAroundEachDatabase(t *testing.T) {
 }
 
 func TestConvoyManagerPauseResume(t *testing.T) {
+	t.Parallel()
 	var logged []string
 	m := &ConvoyManager{logger: func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
@@ -405,6 +411,7 @@ func TestConvoyManagerPauseResume(t *testing.T) {
 // the moment it releases it) must not starve Pause: while Pause waits, no new
 // tick may start, so the one in flight drains and Pause wins.
 func TestConvoyManagerPauseNotStarvedByBackToBackTicks(t *testing.T) {
+	t.Parallel()
 	m := &ConvoyManager{logger: func(string, ...interface{}) {}}
 
 	stop := make(chan struct{})
@@ -450,6 +457,7 @@ func TestConvoyManagerPauseNotStarvedByBackToBackTicks(t *testing.T) {
 // --- discovery and external servers ------------------------------------------------
 
 func TestDiscoverMaintenanceDatabases(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, p := range []string{"hq/.dolt", "gt/.dolt", "notadb", ".hidden/.dolt"} {
 		if err := os.MkdirAll(filepath.Join(dir, p), 0o755); err != nil {
@@ -501,6 +509,7 @@ func TestScheduledMaintenanceGCSkipsExternalServer(t *testing.T) {
 }
 
 func TestMaintenanceGCExternal(t *testing.T) {
+	t.Parallel()
 	mk := func(cfg *DoltServerConfig) *Daemon {
 		return &Daemon{
 			config:     &Config{TownRoot: t.TempDir()},
@@ -525,6 +534,7 @@ func TestMaintenanceGCExternal(t *testing.T) {
 }
 
 func TestDoltGCFullRefusesInvalidNameBeforeConnecting(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
 	for _, db := range []string{"", "../hq", "hq?allowAllFiles=true", ".dolt", "a b", "hq/x"} {
 		if err := d.doltGCFull(context.Background(), db); err == nil || !strings.Contains(err.Error(), "invalid database name") {
@@ -536,6 +546,7 @@ func TestDoltGCFullRefusesInvalidNameBeforeConnecting(t *testing.T) {
 // --- skipped-window streak ------------------------------------------------------
 
 func TestDeferredWindowThresholds(t *testing.T) {
+	t.Parallel()
 	cases := map[string]int{"daily": 3, "": 3, "48h": 3, "weekly": 2, "monthly": 2, "168h": 2}
 	for interval, want := range cases {
 		if got := maintenanceDeferredWindowsBeforeEscalation(interval); got != want {

@@ -8,6 +8,7 @@ import (
 )
 
 func TestWriteAndReadPIDFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "test.pid")
 
@@ -32,6 +33,7 @@ func TestWriteAndReadPIDFile(t *testing.T) {
 }
 
 func TestReadPIDFile_Legacy(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "test.pid")
 
@@ -53,6 +55,7 @@ func TestReadPIDFile_Legacy(t *testing.T) {
 }
 
 func TestReadPIDFile_NotFound(t *testing.T) {
+	t.Parallel()
 	_, _, err := readPIDFile("/nonexistent/path/test.pid")
 	if err == nil {
 		t.Fatal("expected error for nonexistent file")
@@ -60,6 +63,7 @@ func TestReadPIDFile_NotFound(t *testing.T) {
 }
 
 func TestReadPIDFile_Invalid(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "test.pid")
 
@@ -74,6 +78,7 @@ func TestReadPIDFile_Invalid(t *testing.T) {
 }
 
 func TestVerifyPIDOwnership_CurrentProcess(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "test.pid")
 
@@ -96,6 +101,7 @@ func TestVerifyPIDOwnership_CurrentProcess(t *testing.T) {
 }
 
 func TestVerifyPIDOwnership_DeadProcess(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "test.pid")
 
@@ -119,6 +125,7 @@ func TestVerifyPIDOwnership_DeadProcess(t *testing.T) {
 }
 
 func TestVerifyPIDOwnership_NoFile(t *testing.T) {
+	t.Parallel()
 	pid, alive, err := verifyPIDOwnership("/nonexistent/test.pid")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -129,6 +136,7 @@ func TestVerifyPIDOwnership_NoFile(t *testing.T) {
 }
 
 func TestGenerateNonce_Unique(t *testing.T) {
+	t.Parallel()
 	n1, err := generateNonce()
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +154,7 @@ func TestGenerateNonce_Unique(t *testing.T) {
 }
 
 func TestWritePIDFile_Format(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "test.pid")
 

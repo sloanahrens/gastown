@@ -7,6 +7,7 @@ import (
 )
 
 func TestNotificationManager_BasicFlow(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 
@@ -48,6 +49,7 @@ func TestNotificationManager_BasicFlow(t *testing.T) {
 }
 
 func TestNotificationManager_SendIfReady(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 
@@ -80,6 +82,7 @@ func TestNotificationManager_SendIfReady(t *testing.T) {
 }
 
 func TestNotificationManager_StaleSlot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 1*time.Millisecond) // Very short maxAge
 
@@ -99,6 +102,7 @@ func TestNotificationManager_StaleSlot(t *testing.T) {
 }
 
 func TestNotificationManager_ClearSlot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 
@@ -120,6 +124,7 @@ func TestNotificationManager_ClearSlot(t *testing.T) {
 }
 
 func TestNotificationManager_ClearSlot_Nonexistent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 
@@ -130,6 +135,7 @@ func TestNotificationManager_ClearSlot_Nonexistent(t *testing.T) {
 }
 
 func TestNotificationManager_MarkSessionActive(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 
@@ -167,6 +173,7 @@ func TestNotificationManager_MarkSessionActive(t *testing.T) {
 }
 
 func TestNotificationManager_ConcurrentSendIfReady(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 
@@ -202,6 +209,7 @@ func TestNotificationManager_ConcurrentSendIfReady(t *testing.T) {
 }
 
 func TestNotificationManager_ConcurrentMarkConsumed(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 
@@ -234,6 +242,7 @@ func TestNotificationManager_ConcurrentMarkConsumed(t *testing.T) {
 }
 
 func TestNotificationManager_ConcurrentMixedOps(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	mgr := NewNotificationManager(dir, 5*time.Minute)
 

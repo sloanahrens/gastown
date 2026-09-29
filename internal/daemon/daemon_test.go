@@ -20,6 +20,7 @@ import (
 )
 
 func TestDefaultConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := "/tmp/test-town"
 	config := DefaultConfig(townRoot)
 
@@ -38,6 +39,7 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestDaemonPathCandidatesIncludesLaunchdToolDirs(t *testing.T) {
+	t.Parallel()
 	home := filepath.Join("Users", "alice")
 	exePath := filepath.Join("opt", "homebrew", "bin", "gt")
 
@@ -87,6 +89,7 @@ func TestCleanupLegacySocketSessionsRunsOnce(t *testing.T) {
 }
 
 func TestSyncWorkspaceRefusesTownRootWorkDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	cmd := exec.Command("git", "init")
 	cmd.Dir = townRoot
@@ -362,6 +365,7 @@ func assertDaemonTownFilesPreserved(t *testing.T, root string, before map[string
 }
 
 func TestStateFile(t *testing.T) {
+	t.Parallel()
 	townRoot := "/tmp/test-town"
 	expected := filepath.Join(townRoot, "daemon", "state.json")
 	result := StateFile(townRoot)
@@ -372,6 +376,7 @@ func TestStateFile(t *testing.T) {
 }
 
 func TestLoadState_NonExistent(t *testing.T) {
+	t.Parallel()
 	// Create temp dir that doesn't have a state file
 	tmpDir, err := os.MkdirTemp("", "daemon-test-*")
 	if err != nil {
@@ -395,6 +400,7 @@ func TestLoadState_NonExistent(t *testing.T) {
 }
 
 func TestLoadState_ExistingFile(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "daemon-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +448,7 @@ func TestLoadState_ExistingFile(t *testing.T) {
 }
 
 func TestLoadState_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "daemon-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -464,6 +471,7 @@ func TestLoadState_InvalidJSON(t *testing.T) {
 }
 
 func TestSaveState(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "daemon-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -503,6 +511,7 @@ func TestSaveState(t *testing.T) {
 }
 
 func TestSaveLoadState_Roundtrip(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "daemon-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -542,6 +551,7 @@ func TestSaveLoadState_Roundtrip(t *testing.T) {
 }
 
 func TestListPolecatWorktrees_SkipsHiddenDirs(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	polecatsDir := filepath.Join(tmpDir, "some-rig", "polecats")
 
@@ -572,6 +582,7 @@ func TestListPolecatWorktrees_SkipsHiddenDirs(t *testing.T) {
 // as part of ZFC cleanup. Witness poking is now Deacon's responsibility.
 
 func TestLifecycleAction_Constants(t *testing.T) {
+	t.Parallel()
 	// Verify constants have expected string values
 	if ActionCycle != "cycle" {
 		t.Errorf("expected ActionCycle='cycle', got %q", ActionCycle)
@@ -585,6 +596,7 @@ func TestLifecycleAction_Constants(t *testing.T) {
 }
 
 func TestLifecycleRequest_Serialization(t *testing.T) {
+	t.Parallel()
 	request := &LifecycleRequest{
 		From:      "mayor",
 		Action:    ActionCycle,
@@ -610,6 +622,7 @@ func TestLifecycleRequest_Serialization(t *testing.T) {
 }
 
 func TestIsShutdownInProgress_NoLockFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	d := &Daemon{
@@ -623,6 +636,7 @@ func TestIsShutdownInProgress_NoLockFile(t *testing.T) {
 }
 
 func TestIsShutdownInProgress_StaleLockFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	lockDir := filepath.Join(tmpDir, "daemon")
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
@@ -652,6 +666,7 @@ func TestIsShutdownInProgress_StaleLockFile(t *testing.T) {
 }
 
 func TestIsShutdownInProgress_ActiveLock(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	lockDir := filepath.Join(tmpDir, "daemon")
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
@@ -688,6 +703,7 @@ func TestIsShutdownInProgress_ActiveLock(t *testing.T) {
 // TestDaemon_StartsManagerAndScanner verifies that the convoy manager (event-driven + stranded scan)
 // starts and stops correctly when used as the daemon does.
 func TestDaemon_StartsManagerAndScanner(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -707,6 +723,7 @@ func TestDaemon_StartsManagerAndScanner(t *testing.T) {
 // TestDaemon_StopsManagerAndScanner verifies that stopping the convoy manager
 // completes without blocking (e.g. context cancellation works).
 func TestDaemon_StopsManagerAndScanner(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -823,6 +840,7 @@ func TestIsRunningFromPID_LiveProcess(t *testing.T) {
 }
 
 func TestHasPendingEvents_EmptyDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	eventDir := filepath.Join(tmpDir, "events", "refinery", "testrig")
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
@@ -837,6 +855,7 @@ func TestHasPendingEvents_EmptyDir(t *testing.T) {
 }
 
 func TestHasPendingEvents_MissingDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	d := &Daemon{config: &Config{TownRoot: tmpDir}}
@@ -847,6 +866,7 @@ func TestHasPendingEvents_MissingDir(t *testing.T) {
 }
 
 func TestHasPendingEvents_WithEventFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	eventDir := filepath.Join(tmpDir, "events", "refinery", "testrig")
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
@@ -867,6 +887,7 @@ func TestHasPendingEvents_WithEventFiles(t *testing.T) {
 }
 
 func TestHasPendingEvents_ScopedToRig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// Events pending for one rig must not open the spawn gate for another (gt-dsj).
 	eventDir := filepath.Join(tmpDir, "events", "refinery", "otherrig")
@@ -889,6 +910,7 @@ func TestHasPendingEvents_ScopedToRig(t *testing.T) {
 }
 
 func TestHasPendingEvents_IgnoresNonEventFiles(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	eventDir := filepath.Join(tmpDir, "events", "refinery", "testrig")
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
@@ -913,6 +935,7 @@ func TestHasPendingEvents_IgnoresNonEventFiles(t *testing.T) {
 // starting witnesses for potentially docked rigs. (Regression test for
 // bug where witnesses started for docked rigs during Dolt outage)
 func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create a minimal rig structure without a beads database
@@ -971,6 +994,7 @@ func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
 // TestIsRigOperational_DockedRig verifies that docked rigs are correctly
 // identified as not operational.
 func TestIsRigOperational_DockedRig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create rig with docked label on rig bead
@@ -1017,6 +1041,7 @@ func TestIsRigOperational_DockedRig(t *testing.T) {
 // docked - is logged at most once per rig per process, and that the message
 // no longer asserts data loss that did not happen (gt-k07).
 func TestIsRigOperational_MissingWispConfigLoggedOnce(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	rigName := "neverparkedrig"
@@ -1064,6 +1089,7 @@ func TestIsRigOperational_MissingWispConfigLoggedOnce(t *testing.T) {
 // auto-restart enabled - which is what `gt rig config set <rig> auto_restart 0`
 // did for a key whose value was stored as a number.
 func TestAutoRestartDisabled(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		rawJSON  string // value as written into .beads-wisp/config/<rig>.json

@@ -3455,6 +3455,7 @@ func (s *infNaNStorage) GetAllEventsSince(_ context.Context, _ time.Time) ([]*be
 // (corrupt Dolt row), pollStore advances the high-water mark to now and
 // returns nil (no error, no recovery mode).
 func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
+	t.Parallel()
 	for _, errMsg := range []string{
 		"Error 1366 (HY000): error: +Inf is not a valid value for double",
 		"Error 1366 (HY000): error: -Inf is not a valid value for double",

@@ -13,6 +13,7 @@ import (
 // regression test for #3463 — without the cache the ~10 per-tick callers each
 // read and parse the file independently.
 func TestGetKnownRigs_CachedBetweenInvalidations(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
@@ -74,6 +75,7 @@ func TestGetKnownRigs_CachedBetweenInvalidations(t *testing.T) {
 // hundreds of times, which is all the detector needs to not report, and a
 // round where the two never overlap is a round that proves nothing.
 func TestGetKnownRigs_ConcurrentInvalidation(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeRigsJSON(t, townRoot, []string{"alpha"})
 	d := &Daemon{config: &Config{TownRoot: townRoot}}

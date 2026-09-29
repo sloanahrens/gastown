@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -169,3 +170,8 @@ func (f *fakeTmux) ConfigureGasTownSession(session string, _ *tmux.Theme, _, _, 
 	f.record("ConfigureGasTownSession", session)
 	return nil
 }
+
+// errNoSessionDate is what a fakeTmux set with createdErr answers for a
+// session tmux cannot date: *tmux.Tmux fails to parse an empty
+// #{session_created}.
+var errNoSessionDate = errors.New(`parsing session created time "": EOF`)

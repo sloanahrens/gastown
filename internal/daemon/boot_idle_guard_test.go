@@ -5,16 +5,11 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/deacon"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // searchStorage is a minimal Storage stub for hasActiveWork tests.
@@ -53,7 +48,7 @@ func newTestDaemonWithStores(t *testing.T, townRoot string, stores map[string]be
 	return &Daemon{
 		config:      &Config{TownRoot: townRoot},
 		logger:      log.New(io.Discard, "", 0),
-		tmux:        tmux.NewTmux(),
+		tmux:        newFakeTmux(newFixedClock()),
 		beadsStores: stores,
 		ctx:         context.Background(),
 	}
@@ -61,6 +56,7 @@ func newTestDaemonWithStores(t *testing.T, townRoot string, stores map[string]be
 
 // TestHasActiveWork covers the hasActiveWork helper in isolation.
 func TestHasActiveWork(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		stores map[string]beadsdk.Storage
@@ -139,9 +135,7 @@ func TestHasActiveWork(t *testing.T) {
 // TestEnsureBootRunning_IdleGuard verifies that Boot is not spawned when
 // Deacon is healthy and no work is active (idle guard).
 func TestEnsureBootRunning_IdleGuard(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows — fake tmux requires bash")
-	}
+	t.Parallel()
 
 	tests := []struct {
 		name         string
@@ -201,37 +195,19 @@ func TestEnsureBootRunning_IdleGuard(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			townRoot := t.TempDir()
-			fakeBinDir := t.TempDir()
-			tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-			if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-				t.Fatalf("create tmux log: %v", err)
-			}
-
-			writeFakeTmux(t, fakeBinDir) // reuse helper from boot_spawn_frequency_test.go
-			t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("TMUX_LOG", tmuxLog)
-			t.Setenv("GT_DEGRADED", "false")
+			t.Parallel()
+			townRoot, d, spawner := bootTestTown(t)
 			useAgentBootMode(t, townRoot)
 
 			if tc.heartbeatAge > 0 {
 				writeDeaconHeartbeat(t, townRoot, tc.heartbeatAge)
 			}
 
-			d := newTestDaemonWithStores(t, townRoot, tc.stores)
+			d.beadsStores = tc.stores
+			d.ctx = context.Background()
 			d.ensureBootRunning()
 
-			data, err := os.ReadFile(tmuxLog)
-			if err != nil {
-				t.Fatalf("read tmux log: %v", err)
-			}
-
-			spawns := 0
-			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-				if strings.HasPrefix(line, "new-session ") {
-					spawns++
-				}
-			}
+			spawns := spawner.count()
 			if spawns != tc.wantSpawns {
 				t.Errorf("%s\ngot %d spawn(s), want %d", tc.desc, spawns, tc.wantSpawns)
 			}

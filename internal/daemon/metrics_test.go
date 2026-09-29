@@ -6,6 +6,7 @@ import (
 )
 
 func TestNewDaemonMetrics(t *testing.T) {
+	t.Parallel()
 	dm, err := newDaemonMetrics()
 	if err != nil {
 		t.Fatalf("newDaemonMetrics() error: %v", err)
@@ -16,6 +17,7 @@ func TestNewDaemonMetrics(t *testing.T) {
 }
 
 func TestDaemonMetrics_NilReceiver(t *testing.T) {
+	t.Parallel()
 	var dm *daemonMetrics
 	ctx := context.Background()
 
@@ -26,6 +28,7 @@ func TestDaemonMetrics_NilReceiver(t *testing.T) {
 }
 
 func TestDaemonMetrics_RecordHeartbeat(t *testing.T) {
+	t.Parallel()
 	dm, err := newDaemonMetrics()
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +40,7 @@ func TestDaemonMetrics_RecordHeartbeat(t *testing.T) {
 }
 
 func TestDaemonMetrics_RecordRestart(t *testing.T) {
+	t.Parallel()
 	dm, err := newDaemonMetrics()
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +53,7 @@ func TestDaemonMetrics_RecordRestart(t *testing.T) {
 }
 
 func TestDaemonMetrics_UpdateDoltHealth_Healthy(t *testing.T) {
+	t.Parallel()
 	dm, err := newDaemonMetrics()
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +82,7 @@ func TestDaemonMetrics_UpdateDoltHealth_Healthy(t *testing.T) {
 }
 
 func TestDaemonMetrics_UpdateDoltHealth_Unhealthy(t *testing.T) {
+	t.Parallel()
 	dm, err := newDaemonMetrics()
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +99,7 @@ func TestDaemonMetrics_UpdateDoltHealth_Unhealthy(t *testing.T) {
 }
 
 func TestDaemonMetrics_UpdateDoltHealth_Idempotent(t *testing.T) {
+	t.Parallel()
 	dm, err := newDaemonMetrics()
 	if err != nil {
 		t.Fatal(err)

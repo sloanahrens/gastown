@@ -17,6 +17,7 @@ import (
 // gt-ima2/gt-gxpwc). With a recent last-run record on disk, triggerDoltBackup
 // must decline to start a cycle rather than firing on every tick or restart.
 func TestTriggerDoltBackup_SkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := savePatrolLastRun(townRoot, "dolt_backup", time.Now()); err != nil {
 		t.Fatalf("seed last run: %v", err)
@@ -60,6 +61,7 @@ func TestTriggerDoltBackup_SkipsWhenNotDue(t *testing.T) {
 // here is that the last-run defer registered before that early-out still
 // fires.
 func TestTriggerDoltBackup_OverdueRunsAndPersists(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "darwin" {
 		t.Skip("dolt_backup runs only on darwin")
 	}

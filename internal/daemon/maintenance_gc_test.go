@@ -29,6 +29,7 @@ const mib = int64(1024 * 1024)
 // --- mode and config -------------------------------------------------------
 
 func TestMaintenanceModeGC(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		mode string
 		want string
@@ -55,6 +56,7 @@ func TestMaintenanceModeGC(t *testing.T) {
 }
 
 func TestMaintenanceGCConfigDefaultsAndValidation(t *testing.T) {
+	t.Parallel()
 	i64 := func(n int64) *int64 { return &n }
 	f64 := func(f float64) *float64 { return &f }
 	cfg := func(minBytes *int64, ratio *float64) *DaemonPatrolConfig {
@@ -95,6 +97,7 @@ func TestMaintenanceGCConfigDefaultsAndValidation(t *testing.T) {
 }
 
 func TestShouldGCDatabase(t *testing.T) {
+	t.Parallel()
 	p := maintenanceGCPolicy{minBytes: 256 * mib, growthRatio: 2.0}
 	cases := []struct {
 		name     string
@@ -129,6 +132,7 @@ func TestShouldGCDatabase(t *testing.T) {
 // --- state file --------------------------------------------------------------
 
 func TestMaintenanceGCStateRoundTrip(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 
 	st, err := loadMaintenanceGCState(town)
@@ -174,6 +178,7 @@ func TestMaintenanceGCStateRoundTrip(t *testing.T) {
 }
 
 func TestMaintenanceGCStateCorruptIsAnErrorAndRepairable(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := maintenanceGCStatePath(town)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -198,6 +203,7 @@ func TestMaintenanceGCStateCorruptIsAnErrorAndRepairable(t *testing.T) {
 // --- size probe --------------------------------------------------------------
 
 func TestMaintenanceDBSize(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	db := filepath.Join(dataDir, "hq", ".dolt", "noms")
 	if err := os.MkdirAll(filepath.Join(db, "oldgen"), 0o755); err != nil {
@@ -685,6 +691,7 @@ func TestMaintenanceQuietFailsClosedWhenPolecatListingFails(t *testing.T) {
 }
 
 func TestWorkingPolecatsFromHeartbeats(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	rig := "testrig"
 	writeTestRigsJSON(t, town, rig)

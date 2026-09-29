@@ -6,6 +6,7 @@ import (
 )
 
 func TestIsClaudeUsageLimit(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		input  string
@@ -89,6 +90,7 @@ func TestIsClaudeUsageLimit(t *testing.T) {
 }
 
 func TestRestartTracker_RecordPause_DoesNotEscalate(t *testing.T) {
+	t.Parallel()
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{
 		InitialBackoff:    30 * time.Second,
 		MaxBackoff:        10 * time.Minute,
@@ -131,6 +133,7 @@ func TestRestartTracker_RecordPause_DoesNotEscalate(t *testing.T) {
 }
 
 func TestRestartTracker_RecordRestart_StillEscalates(t *testing.T) {
+	t.Parallel()
 	// Regression guard: confirm true-crash path is unaffected.
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{
 		InitialBackoff:    30 * time.Second,

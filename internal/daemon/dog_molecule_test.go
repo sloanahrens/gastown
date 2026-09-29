@@ -26,6 +26,7 @@ import (
 )
 
 func TestParseWispID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		input  string
@@ -69,6 +70,7 @@ func TestParseWispID(t *testing.T) {
 }
 
 func TestStripANSI(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -92,6 +94,7 @@ func TestStripANSI(t *testing.T) {
 }
 
 func TestParseChildrenJSON(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -284,6 +287,7 @@ func (f *fakeDogBd) close(args []string) (string, error) {
 // c2 but leaves c1 permanently stranded (3 failed attempts, never retried).
 // The fix must revisit c1 after c2 closes.
 func TestCloseRemainingSteps_DrainsDependencyChainAcrossPasses(t *testing.T) {
+	t.Parallel()
 	fake := &fakeDogBd{
 		rootID: "hq-wisp-root",
 		statuses: map[string]string{
@@ -319,6 +323,7 @@ func TestCloseRemainingSteps_DrainsDependencyChainAcrossPasses(t *testing.T) {
 // can never resolve. The fix must force-close the tail instead of leaving it
 // HOOKED/open forever.
 func TestCloseRemainingSteps_ForceClosesUnresolvableTail(t *testing.T) {
+	t.Parallel()
 	fake := &fakeDogBd{
 		rootID: "hq-wisp-root2",
 		statuses: map[string]string{
@@ -351,6 +356,7 @@ func TestCloseRemainingSteps_ForceClosesUnresolvableTail(t *testing.T) {
 }
 
 func TestDogMolGracefulDegradation(t *testing.T) {
+	t.Parallel()
 	// A dogMol with empty rootID should be a no-op for all operations.
 	dm := &dogMol{
 		rootID:  "",
@@ -931,6 +937,7 @@ func pouredChildren(steps []formulaStep) (children []childInfo, want map[string]
 // "export", which made closeStep a silent no-op and left those steps to the
 // abandoned-tail sweep.
 func TestDiscoverStepsMapsStepsByFormulaTitle(t *testing.T) {
+	t.Parallel()
 	// want is the set of slugs the daemon's call sites close for that formula —
 	// including the four the keyword matcher failed to map.
 	tests := []struct {
@@ -981,6 +988,7 @@ func TestDiscoverStepsMapsStepsByFormulaTitle(t *testing.T) {
 // vanishing. The cause has to be in the log, or the next reader sees only
 // "unknown step" and no reason.
 func TestDiscoverStepsWithoutFormulaLeavesStepsToTheSweep(t *testing.T) {
+	t.Parallel()
 	var logged bytes.Buffer
 	fake := &fakeFormulaBd{
 		children: []childInfo{{ID: "hq-wisp-00", Title: "Inspect databases for commit count"}},
@@ -1014,6 +1022,7 @@ func TestDiscoverStepsWithoutFormulaLeavesStepsToTheSweep(t *testing.T) {
 // not a step of the formula cannot be mapped, and must say so rather than being
 // skipped in silence — that silence is what hid the gt-i9la bug for months.
 func TestDiscoverStepsLogsUnmatchedChild(t *testing.T) {
+	t.Parallel()
 	var logged bytes.Buffer
 	steps := loadDogFormulaSteps(t, "mol-dog-compactor")
 	fake := &fakeFormulaBd{
@@ -1048,6 +1057,7 @@ func TestDiscoverStepsLogsUnmatchedChild(t *testing.T) {
 // TestStepTitleKeyFoldsCaseAndWhitespace pins the normalization the title match
 // depends on.
 func TestStepTitleKeyFoldsCaseAndWhitespace(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ a, b string }{
 		{"Report findings and return to kennel", "report findings and return to kennel"},
 		{"Sync  backups  to offsite storage", "Sync backups to offsite storage"},
@@ -1061,6 +1071,7 @@ func TestStepTitleKeyFoldsCaseAndWhitespace(t *testing.T) {
 }
 
 func TestParseFormulaStepsJSON(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -1117,6 +1128,7 @@ func TestParseFormulaStepsJSON(t *testing.T) {
 // indistinguishable from their children, so the first wins and the shadowed one
 // is named in the log rather than silently unreachable.
 func TestStepSlugsByTitleKeepsFirstOfDuplicateTitles(t *testing.T) {
+	t.Parallel()
 	var logged bytes.Buffer
 	fake := &fakeFormulaBd{steps: map[string][]formulaStep{
 		"mol-dog-dup": {
@@ -1151,6 +1163,7 @@ func TestStepSlugsByTitleKeepsFirstOfDuplicateTitles(t *testing.T) {
 // only thing that can be wrong about them is the name — and reading them back
 // from the source is what checks it.
 func TestDaemonDogCallSitesUseRealStepIDs(t *testing.T) {
+	t.Parallel()
 	// Every dog the daemon pours, by the constant the call site names. A new dog
 	// fails this test until its formula is added here, which is the point.
 	formulas := map[string]string{

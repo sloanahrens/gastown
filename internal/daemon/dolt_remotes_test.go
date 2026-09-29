@@ -156,6 +156,7 @@ func TestHasStagedChanges(t *testing.T) {
 // against pushing pollution to a real remote: any database name matching a
 // known test prefix is refused before any SQL runs.
 func TestPushDatabase_RefusesTestPrefixes(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{config: &Config{}, logger: log.New(io.Discard, "", 0)}
 
 	for _, name := range []string{"test_foo", "beads_t1234", "beads_pt5678", "doctest_abc"} {
@@ -304,6 +305,7 @@ func TestPushDatabase_UsesLiveServerConnection(t *testing.T) {
 // without waiting for fn) and the ordinary one (fn finishes first: onTimeout
 // must not fire).
 func TestRunBounded_FiresOnTimeoutAndDoesNotWaitForTheAbandonedCall(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	fnDone := make(chan struct{})
 	var timedOut bool
@@ -337,6 +339,7 @@ func TestRunBounded_FiresOnTimeoutAndDoesNotWaitForTheAbandonedCall(t *testing.T
 }
 
 func TestRunBounded_NoTimeoutWhenFnFinishesFirst(t *testing.T) {
+	t.Parallel()
 	var timedOut bool
 	runBounded(time.Second, func() {}, func() { timedOut = true })
 	if timedOut {

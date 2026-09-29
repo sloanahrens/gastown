@@ -389,6 +389,7 @@ func TestHeartbeatSkipsWorkWhenRestartRequested(t *testing.T) {
 // The real ancestry seam against a throwaway repo: a proven yes, a proven no,
 // and "unknown" for a missing commit or repo (never a false "covered").
 func TestIsAncestorFnRealGit(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}

@@ -11,6 +11,7 @@ import (
 )
 
 func TestCheckpointDogInterval_Default(t *testing.T) {
+	t.Parallel()
 	interval := checkpointDogInterval(nil)
 	if interval != defaultCheckpointDogInterval {
 		t.Errorf("expected default interval %v, got %v", defaultCheckpointDogInterval, interval)
@@ -18,6 +19,7 @@ func TestCheckpointDogInterval_Default(t *testing.T) {
 }
 
 func TestCheckpointDogInterval_NilPatrols(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{}
 	interval := checkpointDogInterval(config)
 	if interval != defaultCheckpointDogInterval {
@@ -26,6 +28,7 @@ func TestCheckpointDogInterval_NilPatrols(t *testing.T) {
 }
 
 func TestCheckpointDogInterval_NilCheckpointDog(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{},
 	}
@@ -36,6 +39,7 @@ func TestCheckpointDogInterval_NilCheckpointDog(t *testing.T) {
 }
 
 func TestCheckpointDogInterval_Configured(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
 			CheckpointDog: &CheckpointDogConfig{
@@ -51,6 +55,7 @@ func TestCheckpointDogInterval_Configured(t *testing.T) {
 }
 
 func TestCheckpointDogInterval_InvalidFallsBack(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
 			CheckpointDog: &CheckpointDogConfig{
@@ -66,6 +71,7 @@ func TestCheckpointDogInterval_InvalidFallsBack(t *testing.T) {
 }
 
 func TestCheckpointDogInterval_ZeroFallsBack(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
 			CheckpointDog: &CheckpointDogConfig{
@@ -81,6 +87,7 @@ func TestCheckpointDogInterval_ZeroFallsBack(t *testing.T) {
 }
 
 func TestCheckpointDogEnabled(t *testing.T) {
+	t.Parallel()
 	// Nil config → disabled (opt-in patrol)
 	if IsPatrolEnabled(nil, "checkpoint_dog") {
 		t.Error("expected checkpoint_dog disabled for nil config")
@@ -106,6 +113,7 @@ func TestCheckpointDogEnabled(t *testing.T) {
 }
 
 func TestResolveCheckpointWorkDir_NestedLayout(t *testing.T) {
+	t.Parallel()
 	// New polecat layout: polecats/<name>/<rigName>/.git is the worktree.
 	tmp := t.TempDir()
 	rig := "myrig"
@@ -122,6 +130,7 @@ func TestResolveCheckpointWorkDir_NestedLayout(t *testing.T) {
 }
 
 func TestResolveCheckpointWorkDir_LegacyFlatLayout(t *testing.T) {
+	t.Parallel()
 	// Legacy layout: polecats/<name>/.git directly. polecat.Manager still
 	// recognizes this; checkpoint_dog must too rather than silently skip.
 	tmp := t.TempDir()
@@ -139,6 +148,7 @@ func TestResolveCheckpointWorkDir_LegacyFlatLayout(t *testing.T) {
 }
 
 func TestResolveCheckpointWorkDir_NoGitNeitherLevel(t *testing.T) {
+	t.Parallel()
 	// Critical regression case: polecat container exists but has no .git
 	// at either level. Function MUST return "" so the caller skips, NOT
 	// fall back to a parent dir (which would have the workspace's .git
@@ -163,6 +173,7 @@ func TestResolveCheckpointWorkDir_NoGitNeitherLevel(t *testing.T) {
 }
 
 func TestResolveCheckpointWorkDir_PrefersNestedOverFlat(t *testing.T) {
+	t.Parallel()
 	// If both levels have .git (transitional state during a migration),
 	// prefer the nested (newer) layout.
 	tmp := t.TempDir()
@@ -183,6 +194,7 @@ func TestResolveCheckpointWorkDir_PrefersNestedOverFlat(t *testing.T) {
 }
 
 func TestIsGitWorktree(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	if isGitWorktree(tmp) {
 		t.Error("empty dir should not be a worktree")
@@ -209,6 +221,7 @@ func TestIsGitWorktree(t *testing.T) {
 }
 
 func TestCheckpointWorktreeExcludesNestedRuntimeArtifacts(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	mustRunGit(t, workDir, "init")
 	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
@@ -253,6 +266,7 @@ func TestCheckpointWorktreeExcludesNestedRuntimeArtifacts(t *testing.T) {
 }
 
 func TestCheckpointWorktreeSkipsRuntimeOnlyNestedArtifacts(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	mustRunGit(t, workDir, "init")
 	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
@@ -371,6 +385,7 @@ func newCheckpointRevertScenario(t *testing.T) string {
 // checkpoint_dog must separate. The auto-checkpoint must refuse to commit
 // rather than bake the stale content into the branch as a "real" change.
 func TestCheckpointWorktreeRefusesRevertOfMergedWork(t *testing.T) {
+	t.Parallel()
 	polecat := newCheckpointRevertScenario(t)
 
 	// The bug: working-tree pollution reintroduces the PRE-merge content for a
@@ -414,6 +429,7 @@ func TestCheckpointWorktreeRefusesRevertOfMergedWork(t *testing.T) {
 // not block an ordinary checkpoint just because origin/main happens to be
 // resolvable and ahead of the worktree's starting point.
 func TestCheckpointWorktreeAllowsLegitimateWorkAgainstMergedTarget(t *testing.T) {
+	t.Parallel()
 	polecat := newCheckpointRevertScenario(t)
 
 	if err := os.WriteFile(filepath.Join(polecat, "wip.txt"), []byte("real work in progress\n"), 0o644); err != nil {
@@ -442,6 +458,7 @@ func TestCheckpointWorktreeAllowsLegitimateWorkAgainstMergedTarget(t *testing.T)
 // follow the rig's configured default branch, the same source gt done itself
 // reads.
 func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	remote := filepath.Join(dir, "origin.git")
 	workDir := filepath.Join(dir, "polecat")
@@ -483,6 +500,7 @@ func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
 // resolution (git.CleanDefaultBranchBaseRef) targets upstream/<default> there
 // instead, and the daemon's guard must agree.
 func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	originRemote := filepath.Join(dir, "origin.git")
 	upstreamRemote := filepath.Join(dir, "upstream.git")
@@ -532,6 +550,7 @@ func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
 // daemon config, as in the other checkpoint_dog tests in this file) still
 // falls back to origin/main rather than erroring.
 func TestCheckpointRevertTarget_NoRigConfigFallsBackToMain(t *testing.T) {
+	t.Parallel()
 	polecat := newCheckpointRevertScenario(t)
 
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
@@ -548,6 +567,7 @@ func TestCheckpointRevertTarget_NoRigConfigFallsBackToMain(t *testing.T) {
 // the scratch file would have landed on main. The checkpoint must snapshot the
 // real work and leave the throwaway file untracked where the polecat left it.
 func TestCheckpointWorktreeExcludesThrowawayFiles(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	mustRunGit(t, workDir, "init")
 	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
@@ -594,6 +614,7 @@ func TestCheckpointWorktreeExcludesThrowawayFiles(t *testing.T) {
 // above: when a throwaway file is the only thing dirty, the checkpoint has
 // nothing to protect and must not create a commit for it.
 func TestCheckpointWorktreeSkipsThrowawayOnlyChanges(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	mustRunGit(t, workDir, "init")
 	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
@@ -631,6 +652,7 @@ func TestCheckpointWorktreeSkipsThrowawayOnlyChanges(t *testing.T) {
 // checkpointed, because a modification to a tracked file is real work whatever
 // the file is called.
 func TestCheckpointWorktreeCheckpointsTrackedFileMatchingTheRule(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	mustRunGit(t, workDir, "init")
 	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
@@ -660,6 +682,7 @@ func TestCheckpointWorktreeCheckpointsTrackedFileMatchingTheRule(t *testing.T) {
 // on disk, the trigger must decline to start a cycle rather than firing on
 // every tick (or every restart) regardless of the persisted schedule.
 func TestTriggerCheckpointDog_SkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := savePatrolLastRun(townRoot, "checkpoint_dog", time.Now()); err != nil {
 		t.Fatalf("seed last run: %v", err)

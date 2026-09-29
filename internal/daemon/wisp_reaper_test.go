@@ -21,6 +21,7 @@ import (
 )
 
 func TestWispReaperInterval(t *testing.T) {
+	t.Parallel()
 	// Default (now 1h after Dog-driven refactor)
 	if got := wispReaperInterval(nil); got != defaultWispReaperInterval {
 		t.Errorf("expected default %v, got %v", defaultWispReaperInterval, got)
@@ -47,6 +48,7 @@ func TestWispReaperInterval(t *testing.T) {
 }
 
 func TestWispReaperMaxAge(t *testing.T) {
+	t.Parallel()
 	if got := wispReaperMaxAge(nil); got != defaultWispMaxAge {
 		t.Errorf("expected default %v, got %v", defaultWispMaxAge, got)
 	}
@@ -65,6 +67,7 @@ func TestWispReaperMaxAge(t *testing.T) {
 }
 
 func TestWispDeleteAge(t *testing.T) {
+	t.Parallel()
 	if got := wispDeleteAge(nil); got != defaultWispDeleteAge {
 		t.Errorf("expected default %v, got %v", defaultWispDeleteAge, got)
 	}
@@ -83,6 +86,7 @@ func TestWispDeleteAge(t *testing.T) {
 }
 
 func TestDefaultReaperIntervalIsOneHour(t *testing.T) {
+	t.Parallel()
 	// Verify the default changed from 30m to 1h per issue gt-caf7.
 	if defaultWispReaperInterval != 1*time.Hour {
 		t.Errorf("expected default interval 1h, got %v", defaultWispReaperInterval)
@@ -94,6 +98,7 @@ func TestDefaultReaperIntervalIsOneHour(t *testing.T) {
 // mol-dog-reaper formula's 720h default; agent beads are idle by design and
 // were 8d old, so the shorter threshold swept every agent bead in the town.
 func TestDefaultStaleIssueAgeMatchesFormula(t *testing.T) {
+	t.Parallel()
 	if defaultStaleIssueAge != 30*24*time.Hour {
 		t.Fatalf("defaultStaleIssueAge = %v, want 720h to match the mol-dog-reaper formula default",
 			defaultStaleIssueAge)
@@ -104,6 +109,7 @@ func TestDefaultStaleIssueAgeMatchesFormula(t *testing.T) {
 }
 
 func TestWispReaperStaleIssueAge(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
 			WispReaper: &WispReaperConfig{StaleIssueAgeStr: "45d"},
@@ -122,6 +128,7 @@ func TestWispReaperStaleIssueAge(t *testing.T) {
 }
 
 func TestParseAgeDuration(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in      string
 		want    time.Duration
@@ -149,6 +156,7 @@ func TestParseAgeDuration(t *testing.T) {
 }
 
 func TestWispReaperAutoCloseKnob(t *testing.T) {
+	t.Parallel()
 	yes, no := true, false
 
 	// Unset is not disarmed: the knob exists to disarm, so absence must not
@@ -195,6 +203,7 @@ func TestWispReaperAutoCloseKnob(t *testing.T) {
 // gt-2qzr: the log recorded only "exit status 1", which said nothing about why
 // the sweep had moved to the inline fallback, so the cause went unnoticed.
 func TestDispatchReaperDogReportsFailureCause(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock")
 	}
@@ -221,6 +230,7 @@ func TestDispatchReaperDogReportsFailureCause(t *testing.T) {
 }
 
 func TestDispatchReaperDogUsesDogPoolSling(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock")
 	}
@@ -292,6 +302,7 @@ func TestDoltServerHostUsesConfiguredTownHost(t *testing.T) {
 // disk, the trigger must decline to start a cycle rather than firing on
 // every tick (or every restart) regardless of the persisted schedule.
 func TestTriggerWispReaper_SkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := savePatrolLastRun(townRoot, "wisp_reaper", time.Now()); err != nil {
 		t.Fatalf("seed last run: %v", err)
@@ -438,6 +449,7 @@ func (r *reaperSweepRows) Next(dest []driver.Value) error {
 // stops the reaper — the stop the soft refusal exists to remove. The sweep must
 // instead log the notice, report nothing closed, and leave the issues alone.
 func TestAutoCloseDBSoftRefusalDoesNotFailTheStep(t *testing.T) {
+	t.Parallel()
 	// Two open issues, long past the floor: the below-floor threshold reaches
 	// both, so the notice has a real set to name.
 	db, fake := openReaperSweepFake(t, [][]driver.Value{
@@ -470,6 +482,7 @@ func TestAutoCloseDBSoftRefusalDoesNotFailTheStep(t *testing.T) {
 // patrol reader sees, with the threshold that was asked for and the size of the
 // set it would take.
 func TestAutoCloseDBCarriesTheRefusalIntoTheLog(t *testing.T) {
+	t.Parallel()
 	db, _ := openReaperSweepFake(t, [][]driver.Value{
 		{"hq-a", "abandoned hq-a", time.Now().UTC().Add(-60 * 24 * time.Hour)},
 	})
@@ -495,6 +508,7 @@ func TestAutoCloseDBCarriesTheRefusalIntoTheLog(t *testing.T) {
 // threshold, so the number would be a close count for a write that cannot
 // happen (gt-ecpj).
 func TestAutoCloseDBDryRunCycleCountsARefusalAsNothing(t *testing.T) {
+	t.Parallel()
 	db, _ := openReaperSweepFake(t, [][]driver.Value{
 		{"hq-a", "abandoned hq-a", time.Now().UTC().Add(-60 * 24 * time.Hour)},
 	})

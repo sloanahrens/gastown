@@ -9,14 +9,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // The daemon-level decision: boot_mode unset or "mechanical" runs triage
 // in-process; "agent" spawns the Boot session. Read through the same
 // operational config loader ensureBootRunning uses.
 func TestBootUsesMechanicalTriage(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, config string
 		want         bool
@@ -47,6 +46,7 @@ func TestBootUsesMechanicalTriage(t *testing.T) {
 // A second call while a triage is in flight is a no-op, and the cooldown
 // stamp is taken at start so a failing triage cannot rerun every heartbeat.
 func TestRunMechanicalBootTriage_InFlightGuardAndCooldownStamp(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), ctx: context.Background()}
 	d.bootTriageInFlight.Store(true)
 	d.runMechanicalBootTriage()
@@ -88,22 +88,21 @@ func awaitTriageArgv(t *testing.T, argvLog string) {
 // `gt boot triage` instead of opening a tmux session, and stamps the cooldown.
 // The stub records its argv so we know what would have run.
 func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
-	townRoot, tmuxLog := bootTestTown(t)
+	townRoot, d, spawner := bootTestTown(t)
 	argvLog := mechanicalTriageStub(t)
 	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0), tmux: tmux.NewTmux(), ctx: context.Background()}
+	d.ctx = context.Background()
 	d.ensureBootRunning()
 
 	awaitTriageArgv(t, argvLog)
 	if d.bootLastSpawned.IsZero() {
 		t.Error("cooldown stamp not set by mechanical triage")
 	}
-	data, _ := os.ReadFile(tmuxLog)
-	if strings.Contains(string(data), "new-session") {
-		t.Errorf("mechanical mode must not open a Boot tmux session; tmux log: %s", data)
+	if n := spawner.count(); n != 0 {
+		t.Errorf("mechanical mode must not open a Boot tmux session; spawns = %d", n)
 	}
 }
 
@@ -112,13 +111,13 @@ func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
 // cadence, and a Deacon that dies then waits twice as long to be noticed
 // (gt-w28o).
 func TestEnsureBootRunning_MechanicalIgnoresSpawnCooldown(t *testing.T) {
-	townRoot, _ := bootTestTown(t)
+	townRoot, d, _ := bootTestTown(t)
 	argvLog := mechanicalTriageStub(t)
 	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0), tmux: tmux.NewTmux(), ctx: context.Background()}
+	d.ctx = context.Background()
 	d.bootLastSpawned = time.Now() // a Boot spawn inside the cooldown window
 
 	d.ensureBootRunning()

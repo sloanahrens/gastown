@@ -39,6 +39,7 @@ import (
 var discardLogger = log.New(io.Discard, "", 0)
 
 func TestMainBranchTestInterval(t *testing.T) {
+	t.Parallel()
 	// Nil config returns default
 	if got := mainBranchTestInterval(nil); got != defaultMainBranchTestInterval {
 		t.Errorf("expected default %v, got %v", defaultMainBranchTestInterval, got)
@@ -65,6 +66,7 @@ func TestMainBranchTestInterval(t *testing.T) {
 }
 
 func TestMainBranchTestTimeout(t *testing.T) {
+	t.Parallel()
 	// Nil config returns default
 	if got := mainBranchTestTimeout(nil); got != defaultMainBranchTestTimeout {
 		t.Errorf("expected default %v, got %v", defaultMainBranchTestTimeout, got)
@@ -85,6 +87,7 @@ func TestMainBranchTestTimeout(t *testing.T) {
 }
 
 func TestMainBranchTestRigs(t *testing.T) {
+	t.Parallel()
 	// Nil config returns nil
 	if got := mainBranchTestRigs(nil); got != nil {
 		t.Errorf("expected nil, got %v", got)
@@ -106,6 +109,7 @@ func TestMainBranchTestRigs(t *testing.T) {
 }
 
 func TestIsPatrolEnabledMainBranchTest(t *testing.T) {
+	t.Parallel()
 	// Nil config — disabled (opt-in)
 	if IsPatrolEnabled(nil, "main_branch_test") {
 		t.Error("expected main_branch_test disabled with nil config")
@@ -131,6 +135,7 @@ func TestIsPatrolEnabledMainBranchTest(t *testing.T) {
 }
 
 func TestLoadRigGateConfig(t *testing.T) {
+	t.Parallel()
 	t.Run("no config file", func(t *testing.T) {
 		cfg := loadRigGateConfig("/nonexistent/path")
 		if cfg != nil {
@@ -320,6 +325,7 @@ ok  	github.com/steveyegge/gastown/internal/eee	0.010s
 `
 
 func TestExtractDiagnosticLines(t *testing.T) {
+	t.Parallel()
 	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage, nil)
 
 	found := false
@@ -337,6 +343,7 @@ func TestExtractDiagnosticLines(t *testing.T) {
 }
 
 func TestExtractDiagnosticLines_CapsAtMax(t *testing.T) {
+	t.Parallel()
 	var sb strings.Builder
 	for i := 0; i < maxDiagnosticLines+10; i++ {
 		sb.WriteString("--- FAIL: TestSomething\n")
@@ -348,6 +355,7 @@ func TestExtractDiagnosticLines_CapsAtMax(t *testing.T) {
 }
 
 func TestWriteMainBranchTestLog(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	logPath, err := writeMainBranchTestLog(townRoot, "gastown", "37ab61b2c4d1e5f6", goTestFixtureOneFailingPackage)
 	if err != nil {
@@ -371,6 +379,7 @@ func TestWriteMainBranchTestLog(t *testing.T) {
 // surviving record, and a log named only by rig and timestamp cannot be tied
 // to the verdict it belongs to.
 func TestWriteMainBranchTestLog_NamesTheTestedHead(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	logPath, err := writeMainBranchTestLog(townRoot, "gastown", "37ab61b2c4d1e5f6a7b8", goTestFixtureOneFailingPackage)
 	if err != nil {
@@ -398,6 +407,7 @@ func TestWriteMainBranchTestLog_NamesTheTestedHead(t *testing.T) {
 // used to resolve to the same path, and the second os.WriteFile silently
 // clobbered the first run's evidence.
 func TestWriteMainBranchTestLog_SameRigCommitAndSecondNeverCollide(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	path1, err := writeMainBranchTestLog(townRoot, "gastown", "deadbeef", "first run\n")
@@ -438,6 +448,7 @@ func TestWriteMainBranchTestLog_SameRigCommitAndSecondNeverCollide(t *testing.T)
 // in either the in-memory body or the on-disk log shows up here if one
 // exists.
 func TestRunCommandOnWorktree_ConcurrentRunsSeeOnlyTheirOwnOutput(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := &Daemon{
 		config: &Config{TownRoot: townRoot},
@@ -507,6 +518,7 @@ func TestRunCommandOnWorktree_ConcurrentRunsSeeOnlyTheirOwnOutput(t *testing.T) 
 // assertion line says a test failed but not what broke, and the assertion
 // line matches no failure pattern of its own.
 func TestExtractDiagnosticLines_KeepsAssertionAfterFail(t *testing.T) {
+	t.Parallel()
 	diagnostic := extractDiagnosticLines(goTestFixtureOneFailingPackage, nil)
 	joined := strings.Join(diagnostic, "\n")
 
@@ -523,6 +535,7 @@ func TestExtractDiagnosticLines_KeepsAssertionAfterFail(t *testing.T) {
 // both indented deeper than the parent's block, so a filter that anchored on
 // column zero, or that consumed only one line per marker, would lose them.
 func TestExtractDiagnosticLines_KeepsNestedSubtestBlock(t *testing.T) {
+	t.Parallel()
 	const fixture = `--- FAIL: TestParent (0.00s)
     --- FAIL: TestParent/sub (0.00s)
         parent_test.go:88: got 1, want 2
@@ -545,6 +558,7 @@ FAIL	github.com/steveyegge/gastown/internal/parent	0.050s
 // enforced even when every entry carries an assertion block, which can consume
 // two lines per marker.
 func TestExtractDiagnosticLines_CapHoldsWithAssertionBlocks(t *testing.T) {
+	t.Parallel()
 	var sb strings.Builder
 	for i := 0; i < maxDiagnosticLines; i++ {
 		sb.WriteString("--- FAIL: TestSomething\n    something_test.go:1: boom\n")
@@ -556,6 +570,7 @@ func TestExtractDiagnosticLines_CapHoldsWithAssertionBlocks(t *testing.T) {
 }
 
 func TestComputeCPUIdlePercent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		load1  float64
@@ -583,6 +598,7 @@ func TestComputeCPUIdlePercent(t *testing.T) {
 // since a floor above 100 could never be met and would skip every cycle
 // forever — the "silently starve the patrol" failure the gate must not have.
 func TestHostBusyReason(t *testing.T) {
+	t.Parallel()
 	busy := hostLoad{IdlePercent: 4.0, Load1: 7.68, NumCPU: 8}
 	idle := hostLoad{IdlePercent: 87.5, Load1: 1.0, NumCPU: 8}
 
@@ -624,6 +640,7 @@ func TestHostBusyReason(t *testing.T) {
 // TestHostLoadString pins the shape of the host line the escalation body
 // carries, since the mayor reads it to tell a regression from contention.
 func TestHostLoadString(t *testing.T) {
+	t.Parallel()
 	got := (hostLoad{IdlePercent: 4.3, Load1: 7.65, NumCPU: 8}).String()
 	want := "CPU idle 4.3% (load1 7.65 on 8 cores)"
 	if got != want {
@@ -634,6 +651,7 @@ func TestHostLoadString(t *testing.T) {
 // TestMinCPUIdlePercentConfigWiring proves the gate is actually configurable
 // from patrols.main_branch_test — a knob that parses nowhere is not a knob.
 func TestMinCPUIdlePercentConfigWiring(t *testing.T) {
+	t.Parallel()
 	if got := mainBranchTestMinCPUIdlePercent(nil); got != 0 {
 		t.Errorf("expected the gate disabled with nil config, got %v", got)
 	}
@@ -789,6 +807,7 @@ func TestRunMainBranchTests_OutOfRangeFloorIsNotSilent(t *testing.T) {
 // the rig, the commit tested, and the on-disk log path — not a blind tail
 // of trailing "ok" lines and not just the bare exit status.
 func TestRunCommandOnWorktree_FailureBodyNamesFailingPackage(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	workDir := t.TempDir()
 	d := &Daemon{
@@ -868,6 +887,7 @@ func writeTree(t *testing.T, dir string, files map[string]string) {
 // extractor reads. Before the command was flattened onto one line, the
 // extractor found four fabricated lines here.
 func TestRunCommandOnWorktree_LogCannotFabricateFailures(t *testing.T) {
+	t.Parallel()
 	var logged bytes.Buffer
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
@@ -887,6 +907,7 @@ func TestRunCommandOnWorktree_LogCannotFabricateFailures(t *testing.T) {
 // escalation names only the latter. The full output still reaches the on-disk
 // log — the scope filters the report, not the record.
 func TestRunCommandOnWorktree_ReportsThePackageThatExists(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	writeTree(t, workDir, map[string]string{
 		"go.mod":                  "module github.com/steveyegge/gastown\n",
@@ -937,6 +958,7 @@ func TestRunCommandOnWorktree_ReportsThePackageThatExists(t *testing.T) {
 // marker (that is how a nested subtest's assertion gets in), but it can never
 // stand as a failure on its own.
 func TestExtractDiagnosticLines_IgnoresIndentedMarkers(t *testing.T) {
+	t.Parallel()
 	const fixtureInAMessage = `--- FAIL: TestRunCommandOnWorktree_FailureBodyNamesFailingPackage (0.01s)
     main_branch_test_runner_test.go:344: expected body to name the failing package, got:
         --- FAIL: TestWidgetRenders (0.00s)
@@ -972,6 +994,7 @@ FAIL	github.com/steveyegge/gastown/internal/daemon	901.045s
 // module does not contain takes its summary with it and the failure the
 // worktree really has is what remains.
 func TestExtractDiagnosticLines_ScopesAttributionToTheWorktree(t *testing.T) {
+	t.Parallel()
 	scope := modulePackages{"github.com/steveyegge/gastown/internal/daemon": {}}
 	joined := strings.Join(extractDiagnosticLines(goTestFixtureNestedTranscript, scope), "\n")
 
@@ -997,6 +1020,7 @@ func TestExtractDiagnosticLines_ScopesAttributionToTheWorktree(t *testing.T) {
 // of internal/daemon's failing dolt tests sat in exactly that position, so a
 // marker is filtered only when the marker itself names a package.
 func TestExtractDiagnosticLines_KeepsMarkersFromInterleavedOutput(t *testing.T) {
+	t.Parallel()
 	const interleaved = "ok  \tgithub.com/steveyegge/gastown/internal/crew\t(cached)\n" +
 		"--- FAIL: TestOpenDoltDB_SurvivesQueryLongerThanOldReadTimeout (60.18s)\n" +
 		"    dolt_remotes_test.go:210: SELECT SLEEP(45s) failed: context deadline exceeded\n" +
@@ -1032,6 +1056,7 @@ func TestExtractDiagnosticLines_KeepsMarkersFromInterleavedOutput(t *testing.T) 
 // package at all, and a worktree that could not be listed (nil scope). Dropping
 // either trades a false attribution for no evidence.
 func TestExtractDiagnosticLines_KeepsEvidenceItCannotAttribute(t *testing.T) {
+	t.Parallel()
 	scope := modulePackages{"example.com/other/pkg": {}}
 
 	t.Run("no package line follows a marker", func(t *testing.T) {
@@ -1061,6 +1086,7 @@ func TestExtractDiagnosticLines_KeepsEvidenceItCannotAttribute(t *testing.T) {
 // scoping turns on — a nested module's packages being addressed by the nested
 // module rather than the one containing it.
 func TestLoadModulePackages(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
 		"go.mod":                        "module example.com/m\n",
@@ -1104,6 +1130,7 @@ func TestLoadModulePackages(t *testing.T) {
 // TestModulePathIn covers the go.mod spellings the module declaration may take,
 // including the trailing comment go allows and the quoting a path may need.
 func TestModulePathIn(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ name, goMod, want string }{
 		{"plain", "module example.com/m\n", "example.com/m"},
 		{"trailing comment", "module example.com/m // primary module\n", "example.com/m"},
@@ -1128,6 +1155,7 @@ func TestModulePathIn(t *testing.T) {
 // TestOneLine pins the sanitizer: a log entry is one line, and nothing echoed
 // into it may add another.
 func TestOneLine(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -1167,6 +1195,7 @@ func TestOneLine(t *testing.T) {
 // the heads the refinery verified green instead of being indistinguishable
 // "gastown: running test" entries.
 func TestRunCommandOnWorktree_LogLineNamesTheTestedHead(t *testing.T) {
+	t.Parallel()
 	var logged bytes.Buffer
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
@@ -1344,6 +1373,7 @@ func parseBudgetSeconds(t *testing.T, body string) time.Duration {
 // separates the two, and treating every killed command as a timeout would
 // hide the crashes this runner exists to report.
 func TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
@@ -1370,6 +1400,7 @@ func TestRunCommandOnWorktree_RealFailureIsNotCalledATimeout(t *testing.T) {
 // same false red the timeout fix removes, so it is surfaced as an interruption
 // the cycle does not count as either a pass or a failure (gt-59yz).
 func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
@@ -1399,6 +1430,7 @@ func TestRunCommandOnWorktree_CancelledIsNotAVerdict(t *testing.T) {
 // turn a stopped run back into an ordinary failure — the cycle would then
 // escalate a red main because the daemon restarted (gt-59yz).
 func TestRunGatesOnWorktree_InterruptionSurvivesTheJoin(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
@@ -1526,6 +1558,7 @@ func TestRunGatesOnWorktree_AllStoppedGatesKeepTheSentinel(t *testing.T) {
 // when its deadline fired" would describe a command that never executed, and
 // the empty output would draw the all-green reassurance on top of it.
 func TestRunCommandOnWorktree_ExpiredBudgetNeverRan(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
@@ -1560,6 +1593,7 @@ func TestRunCommandOnWorktree_ExpiredBudgetNeverRan(t *testing.T) {
 // empty diagnostic must not license the sentence that says the transcript is
 // green. It was not green — the matches were filtered, not absent.
 func TestAnalyzeRunFailure_GreenReassuranceNeedsNoMatchesAtAll(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	writeTree(t, workDir, map[string]string{
 		"go.mod":                  "module github.com/steveyegge/gastown\n",
@@ -1586,6 +1620,7 @@ func TestAnalyzeRunFailure_GreenReassuranceNeedsNoMatchesAtAll(t *testing.T) {
 // with no failure to extract, where the transcript stops is the only evidence
 // the run was working rather than dead (gt-59yz).
 func TestLastPackageReported(t *testing.T) {
+	t.Parallel()
 	gastown := modulePackages{
 		"github.com/steveyegge/gastown/internal/daemon": {},
 		"github.com/steveyegge/gastown/internal/tmux":   {},
@@ -1623,6 +1658,7 @@ func TestLastPackageReported(t *testing.T) {
 // inferred from a green run (see the adversarial-test-criterion memory:
 // absence of a failure doesn't prove the right thing ran first).
 func TestRunRigGates_SetupRunsBeforeTest(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	workDir := t.TempDir()
 	d := &Daemon{
@@ -1650,6 +1686,7 @@ func TestRunRigGates_SetupRunsBeforeTest(t *testing.T) {
 // as a setup failure, not a misleading test failure, and the test command
 // must never run.
 func TestRunRigGates_SetupFailureReportedAsSetupNotTest(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	workDir := t.TempDir()
 	d := &Daemon{
@@ -1679,6 +1716,7 @@ func TestRunRigGates_SetupFailureReportedAsSetupNotTest(t *testing.T) {
 // gt-znj8's "missing setup_command unchanged" requirement: a rig that never
 // configures setup_command must behave exactly as before this change.
 func TestRunRigGates_MissingSetupCommandUnchanged(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	workDir := t.TempDir()
 	d := &Daemon{
@@ -1699,6 +1737,7 @@ func shellQuote(s string) string {
 }
 
 func TestContains(t *testing.T) {
+	t.Parallel()
 	if !sliceContains([]string{"a", "b", "c"}, "b") {
 		t.Error("expected true for 'b' in [a b c]")
 	}
@@ -1836,6 +1875,7 @@ func TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI(t *testing.T) {
 // gt-uvxy: an overlapping tick must be skipped rather than stacking a second
 // concurrent main_branch_test cycle on top of one that's still running.
 func TestTriggerMainBranchTests_SingleFlight(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{
 		logger: discardLogger,
 		// patrolConfig is nil, so main_branch_test is inactive and
@@ -1893,6 +1933,7 @@ func waitForMainBranchTestCycle(t *testing.T, d *Daemon) {
 // and fast, while still exercising the same tested>0 accounting path a real
 // pass takes.
 func TestTriggerMainBranchTests_OverdueRunsAndPersists(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeTestTownRig(t, townRoot, "gastown", false)
 
@@ -1960,6 +2001,7 @@ func TestTriggerMainBranchTests_AllSkippedDoesNotPersist(t *testing.T) {
 }
 
 func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
+	t.Parallel()
 	config := DefaultLifecycleConfig()
 	if config.Patrols.MainBranchTest == nil {
 		t.Fatal("expected MainBranchTest in default lifecycle config")
@@ -1976,6 +2018,7 @@ func TestDefaultLifecycleConfigIncludesMainBranchTest(t *testing.T) {
 }
 
 func TestEnsureLifecycleDefaultsFillsMainBranchTest(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
@@ -2092,6 +2135,7 @@ func newMainBranchTestDaemon(townRoot string, logged *bytes.Buffer, cfg *MainBra
 // one, and treating this runner's own role as a busy gate would make every cycle
 // skip itself.
 func TestIsRefineryGateRole(t *testing.T) {
+	t.Parallel()
 	busy := []string{
 		"gastown/refinery",
 		"gastown/refinery-batch",
@@ -2123,6 +2167,7 @@ func TestIsRefineryGateRole(t *testing.T) {
 // hold by anyone else (a polecat, this runner's own role, a slot with no
 // readable owner) runs.
 func TestRefineryGateHolder(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		rep  slot.Report
@@ -2155,6 +2200,7 @@ func TestRefineryGateHolder(t *testing.T) {
 // min_cpu_idle_percent, so the default is its own documented decision and needs
 // its own test.
 func TestMainBranchTestSkipWhenGateBusyDefault(t *testing.T) {
+	t.Parallel()
 	if !mainBranchTestSkipWhenGateBusy(nil) {
 		t.Error("nil config must default to skipping for a busy gate")
 	}
@@ -2178,6 +2224,7 @@ func TestMainBranchTestSkipWhenGateBusyDefault(t *testing.T) {
 // which disables the bound rather than silently substituting the default, so a
 // typo reads as "no bound" instead of as agreement.
 func TestMainBranchTestGateBusyStarveAfter(t *testing.T) {
+	t.Parallel()
 	if got := mainBranchTestGateBusyStarveAfter(nil); got != defaultGateBusyStarveAfter {
 		t.Errorf("nil config: got %v, want the default %v", got, defaultGateBusyStarveAfter)
 	}
@@ -2206,6 +2253,7 @@ func TestMainBranchTestGateBusyStarveAfter(t *testing.T) {
 // again. Without the restart, one busy hour would leave the rig permanently
 // "starved" and the alert would fire on a single later skip.
 func TestNoteGateBusySkip_MeasuresTheUnbrokenRun(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{}
 	start := time.Date(2026, 9, 23, 6, 0, 0, 0, time.UTC)
 

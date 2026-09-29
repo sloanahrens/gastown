@@ -11,6 +11,7 @@ import (
 )
 
 func TestDoctorDogInterval(t *testing.T) {
+	t.Parallel()
 	// Default interval
 	if got := doctorDogInterval(nil); got != defaultDoctorDogInterval {
 		t.Errorf("expected default interval %v, got %v", defaultDoctorDogInterval, got)
@@ -37,6 +38,7 @@ func TestDoctorDogInterval(t *testing.T) {
 }
 
 func TestDoctorDogDatabases(t *testing.T) {
+	t.Parallel()
 	// Default databases
 	dbs := doctorDogDatabases(nil)
 	if len(dbs) != 3 {
@@ -59,6 +61,7 @@ func TestDoctorDogDatabases(t *testing.T) {
 }
 
 func TestIsPatrolEnabled_DoctorDog(t *testing.T) {
+	t.Parallel()
 	// Nil config: disabled (opt-in patrol)
 	if IsPatrolEnabled(nil, "doctor_dog") {
 		t.Error("expected doctor_dog to be disabled with nil config")
@@ -86,6 +89,7 @@ func TestIsPatrolEnabled_DoctorDog(t *testing.T) {
 }
 
 func TestDoctorDogDefaultThresholds(t *testing.T) {
+	t.Parallel()
 	// Verify default thresholds are sane
 	if defaultDoctorDogLatencyAlertMs <= 0 {
 		t.Error("latency alert threshold must be positive")
@@ -110,6 +114,7 @@ func TestDoctorDogDefaultThresholds(t *testing.T) {
 }
 
 func TestDoctorDogThresholds(t *testing.T) {
+	t.Parallel()
 	// Nil config returns defaults
 	lat, orphan, backup := doctorDogThresholds(nil)
 	if lat != defaultDoctorDogLatencyAlertMs {
@@ -162,6 +167,7 @@ func TestDoctorDogThresholds(t *testing.T) {
 }
 
 func TestDoctorDogConfigBackwardsCompat(t *testing.T) {
+	t.Parallel()
 	// Verify that configs with the old max_db_count field can still be parsed
 	// (JSON decoder ignores unknown fields by default).
 	jsonData := `{"enabled": true, "interval": "3m", "max_db_count": 10}`
@@ -180,6 +186,7 @@ func TestDoctorDogConfigBackwardsCompat(t *testing.T) {
 }
 
 func TestDoctorDogConfigThresholdFields(t *testing.T) {
+	t.Parallel()
 	// Verify new threshold fields parse from JSON correctly
 	jsonData := `{"enabled": true, "latency_alert_ms": 3000, "orphan_alert_count": 15, "backup_stale_seconds": 1800}`
 
@@ -218,6 +225,7 @@ func defaultDoctorLimits() doctorLimits {
 // The all-clear case is the one the precheck exists for: no finding means no
 // molecule and no agent session (claude-l5w).
 func TestDoctorDogFindings_AllClear(t *testing.T) {
+	t.Parallel()
 	r := doctorDogFindings(healthyDoctorProbes(), defaultDoctorLimits())
 	if len(r.findings) != 0 {
 		t.Fatalf("healthy probes produced findings: %v", r.findings)
@@ -228,6 +236,7 @@ func TestDoctorDogFindings_AllClear(t *testing.T) {
 }
 
 func TestDoctorDogFindings_EachCheckTrips(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		mut  func(*doctorProbes)
@@ -275,6 +284,7 @@ func TestDoctorDogFindings_EachCheckTrips(t *testing.T) {
 // (on the live town: forkrig, pt0, testrig — untouched for weeks). Judging
 // those stale would pour a molecule on every run forever.
 func TestDoctorDogFindings_BackupOnlyForServedDatabases(t *testing.T) {
+	t.Parallel()
 	p := healthyDoctorProbes()
 	var asked []string
 	p.backupAge = func(db string) (time.Duration, bool) {
@@ -297,6 +307,7 @@ func TestDoctorDogFindings_BackupOnlyForServedDatabases(t *testing.T) {
 // An unreachable server makes every server-side check meaningless; report the
 // outage alone rather than a pile of consequential failures.
 func TestDoctorDogFindings_UnreachableSkipsServerChecks(t *testing.T) {
+	t.Parallel()
 	p := healthyDoctorProbes()
 	p.latency = func() (time.Duration, error) { return 0, errors.New("dial tcp: connection refused") }
 	p.conns = func() (int, int, error) { t.Error("conns probed on an unreachable server"); return 0, 0, nil }
@@ -309,6 +320,7 @@ func TestDoctorDogFindings_UnreachableSkipsServerChecks(t *testing.T) {
 
 // A server-side probe that errors must not serialize as all clear (om review).
 func TestDoctorDogFindings_ProbeErrorIsAFinding(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("i/o timeout")
 	cases := map[string]func(*doctorProbes){
 		"conns":     func(p *doctorProbes) { p.conns = func() (int, int, error) { return 0, 0, boom } },
@@ -331,6 +343,7 @@ func TestDoctorDogFindings_ProbeErrorIsAFinding(t *testing.T) {
 // nothing an agent can fix from a dog session; it is logged, not poured. A
 // removal that failed on a container classified as debris is.
 func TestDoctorDogFindings_ReapListingErrorIsANoteNotAFinding(t *testing.T) {
+	t.Parallel()
 	p := healthyDoctorProbes()
 	p.reap = func() (slot.ReapReport, error) {
 		return slot.ReapReport{}, errors.New("listing gate containers: exec: \"docker\": executable file not found")

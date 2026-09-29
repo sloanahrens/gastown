@@ -9,6 +9,7 @@ import (
 // its stderr away on success. slingTimingLines keeps only the per-step timing
 // lines so the feeder can log them without echoing every warning sling prints.
 func TestSlingTimingLinesKeepsOnlyStepLines(t *testing.T) {
+	t.Parallel()
 	stderr := "⚠ gt binary is 2 commits behind origin/main\n" +
 		"[sling] step admission took 1.2s (total 1.2s)\n" +
 		"some other diagnostic\n" +
@@ -24,6 +25,7 @@ func TestSlingTimingLinesKeepsOnlyStepLines(t *testing.T) {
 }
 
 func TestSlingTimingLinesEmptyWhenAbsent(t *testing.T) {
+	t.Parallel()
 	if got := slingTimingLines("nothing timed here\n"); len(got) != 0 {
 		t.Fatalf("got %q, want none", got)
 	}
@@ -34,6 +36,7 @@ func TestSlingTimingLinesEmptyWhenAbsent(t *testing.T) {
 // error would be lost, so the summary must skip timing lines (om review of
 // gt-llg8, major).
 func TestSlingErrorLineSkipsTimingLines(t *testing.T) {
+	t.Parallel()
 	stderr := "[sling] step admission took 1.2s (total 1.2s)\n" +
 		"[sling] step allocate took 3s (total 4.2s)\n" +
 		"Error: worktree verification failed for opal: no such directory\n" +
@@ -44,6 +47,7 @@ func TestSlingErrorLineSkipsTimingLines(t *testing.T) {
 }
 
 func TestSlingErrorLineFallsBackToFirstLine(t *testing.T) {
+	t.Parallel()
 	if got := slingErrorLine("[sling] step admission took 1s (total 1s)\n"); got != "[sling] step admission took 1s (total 1s)" {
 		t.Fatalf("got %q", got)
 	}

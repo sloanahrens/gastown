@@ -139,6 +139,7 @@ func testSetupWorkingDogState(t *testing.T, townRoot, name, work string, lastAct
 }
 
 func TestDetectStaleWorkingDogs_ClearsStaleWorkers(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -164,6 +165,7 @@ func TestDetectStaleWorkingDogs_ClearsStaleWorkers(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_KillsSessionBeforeClearing(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -197,6 +199,7 @@ func TestDetectStaleWorkingDogs_KillsSessionBeforeClearing(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_SkipsRecentWorkers(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -222,6 +225,7 @@ func TestDetectStaleWorkingDogs_SkipsRecentWorkers(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_SkipsIdleDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -244,6 +248,7 @@ func TestDetectStaleWorkingDogs_SkipsIdleDogs(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_EmptyKennel(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -256,12 +261,14 @@ func TestDetectStaleWorkingDogs_EmptyKennel(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_Constants(t *testing.T) {
+	t.Parallel()
 	if staleWorkingTimeout != 2*time.Hour {
 		t.Errorf("staleWorkingTimeout = %v, want 2h", staleWorkingTimeout)
 	}
 }
 
 func TestReapIdleDogs_SkipsWorkingDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -280,6 +287,7 @@ func TestReapIdleDogs_SkipsWorkingDogs(t *testing.T) {
 }
 
 func TestReapIdleDogs_SkipsRecentlyActiveDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -306,6 +314,7 @@ func TestReapIdleDogs_SkipsRecentlyActiveDogs(t *testing.T) {
 }
 
 func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows: requires tmux")
 	}
@@ -347,6 +356,7 @@ func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
 }
 
 func TestReapIdleDogs_DoesNotRemoveWhenPoolAtMaxSize(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -373,6 +383,7 @@ func TestReapIdleDogs_DoesNotRemoveWhenPoolAtMaxSize(t *testing.T) {
 }
 
 func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows: requires tmux")
 	}
@@ -402,6 +413,7 @@ func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
 }
 
 func TestReapIdleDogs_MixedStates(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows: requires tmux")
 	}
@@ -448,6 +460,7 @@ func TestReapIdleDogs_MixedStates(t *testing.T) {
 }
 
 func TestReapIdleDogs_EmptyKennel(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -460,6 +473,7 @@ func TestReapIdleDogs_EmptyKennel(t *testing.T) {
 }
 
 func TestReapIdleDogs_Constants(t *testing.T) {
+	t.Parallel()
 	if dogIdleSessionTimeout != 1*time.Hour {
 		t.Errorf("dogIdleSessionTimeout = %v, want 1h", dogIdleSessionTimeout)
 	}
@@ -472,6 +486,7 @@ func TestReapIdleDogs_Constants(t *testing.T) {
 }
 
 func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -759,6 +774,7 @@ func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
 }
 
 func TestCleanupStuckDogs_ClearsDeadSessionWorker(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -783,6 +799,7 @@ func TestCleanupStuckDogs_ClearsDeadSessionWorker(t *testing.T) {
 }
 
 func TestCleanupStuckDogs_ClearsAgentDeadWorker(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -817,6 +834,7 @@ func TestCleanupStuckDogs_ClearsAgentDeadWorker(t *testing.T) {
 }
 
 func TestCleanupStuckDogs_SkipsIdleDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -994,6 +1012,7 @@ func TestCloseStaleWisp_RealBodySurfacesCloseFailure(t *testing.T) {
 // plain RFC3339 made every comparison fail, which silently disabled the whole
 // recovery path (fail-safe, but inert).
 func TestIsWispStale(t *testing.T) {
+	t.Parallel()
 	idleSince := time.Date(2026, 9, 18, 11, 0, 0, 0, time.UTC)
 
 	tests := []struct {

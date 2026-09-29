@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -38,6 +38,7 @@ func scriptPlugin(t *testing.T, name, script string) *plugin.Plugin {
 }
 
 func TestRunsAsScript(t *testing.T) {
+	t.Parallel()
 	p := scriptPlugin(t, "s", "exit 0\n")
 	if !runsAsScript(p) {
 		t.Error("script plugin with run.sh must run as script")
@@ -61,6 +62,7 @@ func TestRunsAsScript(t *testing.T) {
 }
 
 func TestScriptTimeout(t *testing.T) {
+	t.Parallel()
 	p := scriptPlugin(t, "s", "exit 0\n")
 	if got := scriptTimeout(p); got != 5*time.Second {
 		t.Errorf("timeout = %s, want 5s", got)
@@ -76,6 +78,7 @@ func TestScriptTimeout(t *testing.T) {
 }
 
 func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
+	t.Parallel()
 	p := scriptPlugin(t, "ok", "echo hello; echo root=$GT_TOWN_ROOT name=$GT_PLUGIN_NAME runner=$GT_PLUGIN_RUNNER role=$GT_ROLE >&2; pwd\n")
 	res := runPluginScript(context.Background(), p, "/town", 5*time.Second)
 	if !res.ok() {
@@ -114,6 +117,7 @@ func TestRunPluginScript_ExportsTownTmuxSocket(t *testing.T) {
 }
 
 func TestRunPluginScript_FailureExitCode(t *testing.T) {
+	t.Parallel()
 	p := scriptPlugin(t, "bad", "echo boom >&2; exit 3\n")
 	res := runPluginScript(context.Background(), p, "/town", 5*time.Second)
 	if res.ok() || res.exitCode != 3 || res.timedOut {
@@ -127,6 +131,7 @@ func TestRunPluginScript_FailureExitCode(t *testing.T) {
 // A timeout must kill the whole process tree, not just bash: the child the
 // script backgrounds has to be gone too (gt-6t43 is the orphan shape).
 func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
+	t.Parallel()
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	p := scriptPlugin(t, "slow", "sleep 60 &\necho $! > "+pidFile+"\nwait\n")
 	start := time.Now()
@@ -157,6 +162,7 @@ func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 }
 
 func TestTail(t *testing.T) {
+	t.Parallel()
 	s := strings.Repeat("line\n", 100)
 	got := tail(s, 30)
 	if !strings.HasPrefix(got, "[... ") || !strings.HasSuffix(got, "line\n") || len(got) > 80 {
@@ -171,6 +177,7 @@ func TestTail(t *testing.T) {
 // failure records failure AND dispatches; a record error never suppresses
 // the dispatch.
 func TestCompleteScriptRun(t *testing.T) {
+	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
 	var recs []plugin.PluginRunRecord
 	dispatched := 0
@@ -203,6 +210,7 @@ func TestCompleteScriptRun(t *testing.T) {
 // as success). Skipped is not a failure: no dog is dispatched, but a record
 // IS written — that is what satisfies the cooldown gate.
 func TestCompleteScriptRun_SkippedRecordsSkippedNoDog(t *testing.T) {
+	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
 	var recs []plugin.PluginRunRecord
 	dispatched := 0
@@ -235,6 +243,7 @@ func TestCompleteScriptRun_SkippedRecordsSkippedNoDog(t *testing.T) {
 // (gt-oqbw) — and a deferral is not a failure, so there is nothing for a dog
 // to do either.
 func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
+	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p", Execution: &plugin.Execution{AllowDeferredExit: true}}
 	recs := 0
 	dispatched := 0
@@ -276,6 +285,7 @@ func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
 // from silently swallowing a real failure in an unrelated plugin that
 // happens to exit 3 (gt-oqbw).
 func TestCompleteScriptRun_DeferralRequiresOptIn(t *testing.T) {
+	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
 	var recs []plugin.PluginRunRecord
 	dispatched := 0
@@ -296,50 +306,110 @@ func TestCompleteScriptRun_DeferralRequiresOptIn(t *testing.T) {
 	}
 }
 
-// Fakes for the dispatch seam.
-type fakeMgr struct{ assigned, cleared []string }
+// Fakes for the dispatch seam. Each guards its record with a mutex: the
+// daemon calls them from the script's goroutine while the test reads them.
+type fakeMgr struct {
+	mu                sync.Mutex
+	assigned, cleared []string
+}
 
-func (m *fakeMgr) AssignWork(name, _ string) error { m.assigned = append(m.assigned, name); return nil }
-func (m *fakeMgr) ClearWork(name string) error     { m.cleared = append(m.cleared, name); return nil }
+func (m *fakeMgr) AssignWork(name, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.assigned = append(m.assigned, name)
+	return nil
+}
 
-type fakeSM struct{ started []string }
+func (m *fakeMgr) ClearWork(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleared = append(m.cleared, name)
+	return nil
+}
+
+func (m *fakeMgr) assignedNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.assigned...)
+}
+
+type fakeSM struct {
+	mu      sync.Mutex
+	started []string
+}
 
 func (s *fakeSM) Start(name string, _ dog.SessionStartOptions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.started = append(s.started, name)
 	return nil
 }
 
-type fakeRouter struct{ sent []*mail.Message }
+func (s *fakeSM) startedNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.started...)
+}
 
-func (r *fakeRouter) Send(m *mail.Message) error { r.sent = append(r.sent, m); return nil }
+type fakeRouter struct {
+	mu   sync.Mutex
+	sent []*mail.Message
+}
 
-type fakeRecorder struct{ recs []plugin.PluginRunRecord }
+func (r *fakeRouter) Send(m *mail.Message) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent = append(r.sent, m)
+	return nil
+}
+
+func (r *fakeRouter) sentMessages() []*mail.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]*mail.Message(nil), r.sent...)
+}
+
+type fakeRecorder struct {
+	mu   sync.Mutex
+	recs []plugin.PluginRunRecord
+}
 
 func (r *fakeRecorder) RecordRun(rec plugin.PluginRunRecord) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.recs = append(r.recs, rec)
 	return "hq-run", nil
+}
+
+func (r *fakeRecorder) records() []plugin.PluginRunRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]plugin.PluginRunRecord(nil), r.recs...)
 }
 
 // End to end through the daemon: a failing script plugin is recorded as a
 // failure and handed to a dog whose mail carries the exit status and output
 // under the "Direct run failed" heading; a succeeding one touches no dog.
 func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
+	t.Parallel()
 	mgr, sm, router, rec := &fakeMgr{}, &fakeSM{}, &fakeRouter{}, &fakeRecorder{}
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), ctx: context.Background()}
+	logs := &lockedBuffer{}
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(logs, "", 0), ctx: context.Background()}
 	d.findDogFn = func() *dog.Dog { return &dog.Dog{Name: "alpha"} }
 
 	bad := scriptPlugin(t, "failing", "echo the disk is full >&2; exit 7\n")
 	d.startScriptPlugin(bad, mgr, sm, router, rec)
-	waitFor(t, func() bool { return len(rec.recs) == 1 && len(sm.started) == 1 })
-	if rec.recs[0].Result != plugin.ResultFailure {
-		t.Errorf("record = %+v", rec.recs[0])
+	waitFor(t, func() bool { return len(rec.records()) == 1 && len(sm.startedNames()) == 1 })
+	if recs := rec.records(); recs[0].Result != plugin.ResultFailure {
+		t.Errorf("record = %+v", recs[0])
 	}
-	if len(router.sent) != 1 || !strings.Contains(router.sent[0].Body, "Direct run failed") ||
-		!strings.Contains(router.sent[0].Body, "exit 7") || !strings.Contains(router.sent[0].Body, "the disk is full") {
-		t.Errorf("failure mail: %+v", router.sent)
+	sent := router.sentMessages()
+	if len(sent) != 1 || !strings.Contains(sent[0].Body, "Direct run failed") ||
+		!strings.Contains(sent[0].Body, "exit 7") || !strings.Contains(sent[0].Body, "the disk is full") {
+		t.Errorf("failure mail: %+v", sent)
 	}
-	if mgr.assigned[0] != "alpha" || sm.started[0] != "alpha" {
-		t.Errorf("dog wiring: assigned=%v started=%v", mgr.assigned, sm.started)
+	if assigned, started := mgr.assignedNames(), sm.startedNames(); assigned[0] != "alpha" || started[0] != "alpha" {
+		t.Errorf("dog wiring: assigned=%v started=%v", assigned, started)
 	}
 	if _, err := os.Stat(scriptLogPath(d.config.TownRoot, "failing")); err != nil {
 		t.Errorf("run log not written: %v", err)
@@ -347,19 +417,26 @@ func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
 
 	good := scriptPlugin(t, "passing", "exit 0\n")
 	d.startScriptPlugin(good, mgr, sm, router, rec)
-	waitFor(t, func() bool { return len(rec.recs) == 2 })
-	if rec.recs[1].Result != plugin.ResultSuccess || len(sm.started) != 1 || len(router.sent) != 1 {
-		t.Errorf("success must not touch a dog: recs=%+v started=%v sent=%d", rec.recs, sm.started, len(router.sent))
+	waitFor(t, func() bool { return len(rec.records()) == 2 })
+	if recs := rec.records(); recs[1].Result != plugin.ResultSuccess || len(sm.startedNames()) != 1 || len(router.sentMessages()) != 1 {
+		t.Errorf("success must not touch a dog: recs=%+v started=%v sent=%d", recs, sm.startedNames(), len(router.sentMessages()))
 	}
 
-	// A second start while the first still runs is a no-op.
-	slow := scriptPlugin(t, "slow", "sleep 2\n")
+	// A second start while the first still runs is a no-op. The script holds
+	// until the test opens its gate, so the second start certainly overlaps.
+	gate := filepath.Join(t.TempDir(), "gate")
+	slow := scriptPlugin(t, "slow", "while [ ! -e "+shellQuote(gate)+" ]; do sleep 0.01; done\n")
 	d.startScriptPlugin(slow, mgr, sm, router, rec)
 	d.startScriptPlugin(slow, mgr, sm, router, rec)
-	waitFor(t, func() bool { return len(rec.recs) == 3 })
-	time.Sleep(200 * time.Millisecond)
-	if len(rec.recs) != 3 {
-		t.Errorf("in-flight guard failed: %d records for two overlapping starts", len(rec.recs))
+	if !strings.Contains(logs.String(), "script plugin slow still running, skipping") {
+		t.Errorf("the overlapping start was not refused:\n%s", logs.String())
+	}
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return d.scripts.runningCount() == 0 })
+	if n := len(rec.records()); n != 3 {
+		t.Errorf("in-flight guard failed: %d records for two overlapping starts, want 3", n)
 	}
 }
 

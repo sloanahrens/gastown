@@ -51,6 +51,7 @@ func testDaemonWithTown(t *testing.T, townName string) (*Daemon, func()) {
 }
 
 func TestParseLifecycleRequest_Cycle(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	tests := []struct {
@@ -83,6 +84,7 @@ func TestParseLifecycleRequest_Cycle(t *testing.T) {
 }
 
 func TestParseLifecycleRequest_RestartAndShutdown(t *testing.T) {
+	t.Parallel()
 	// Verify that restart and shutdown are correctly parsed using structured body.
 	d := testDaemon()
 
@@ -115,6 +117,7 @@ func TestParseLifecycleRequest_RestartAndShutdown(t *testing.T) {
 }
 
 func TestParseLifecycleRequest_NotLifecycle(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	tests := []string{
@@ -138,6 +141,7 @@ func TestParseLifecycleRequest_NotLifecycle(t *testing.T) {
 }
 
 func TestParseLifecycleRequest_UsesFromField(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	// Now that we use structured body, the From field comes directly from the message
@@ -170,6 +174,7 @@ func TestParseLifecycleRequest_UsesFromField(t *testing.T) {
 }
 
 func TestParseLifecycleRequest_AlwaysUsesFromField(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	// With structured body parsing, From always comes from message From field
@@ -188,6 +193,7 @@ func TestParseLifecycleRequest_AlwaysUsesFromField(t *testing.T) {
 }
 
 func TestIdentityToSession_Mayor(t *testing.T) {
+	t.Parallel()
 	d, cleanup := testDaemonWithTown(t, "ai")
 	defer cleanup()
 
@@ -199,6 +205,7 @@ func TestIdentityToSession_Mayor(t *testing.T) {
 }
 
 func TestIdentityToSession_Witness(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	// Default prefix registry: all unknown rigs map to DefaultPrefix ("gt")
@@ -248,6 +255,7 @@ func TestIdentityToSession_WitnessWithPrefix(t *testing.T) {
 }
 
 func TestIdentityToSession_Unknown(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	tests := []string{
@@ -267,6 +275,7 @@ func TestIdentityToSession_Unknown(t *testing.T) {
 }
 
 func TestBeadsMessage_Serialization(t *testing.T) {
+	t.Parallel()
 	msg := BeadsMessage{
 		ID:       "msg-123",
 		Subject:  "Test Message",
@@ -290,6 +299,7 @@ func TestBeadsMessage_Serialization(t *testing.T) {
 }
 
 func TestSyncFailureTracking(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	workDir := "/tmp/test-workdir"
@@ -330,6 +340,7 @@ func TestSyncFailureTracking(t *testing.T) {
 }
 
 func TestSyncFailureEscalationThreshold(t *testing.T) {
+	t.Parallel()
 	// Verify the threshold constant is sensible
 	if syncFailureEscalationThreshold < 2 {
 		t.Errorf("syncFailureEscalationThreshold = %d, should be >= 2 to avoid premature escalation", syncFailureEscalationThreshold)
@@ -340,6 +351,7 @@ func TestSyncFailureEscalationThreshold(t *testing.T) {
 }
 
 func TestIsWorkingTreeDirty(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	// Create a git repo in a temp dir
@@ -397,6 +409,7 @@ func TestIsWorkingTreeDirty(t *testing.T) {
 }
 
 func TestSyncWorkspace_DirtyTreeAutoStash(t *testing.T) {
+	t.Parallel()
 	d := testDaemon()
 
 	// Create a git repo with a remote to simulate real workspace
@@ -474,6 +487,7 @@ func TestSyncWorkspace_DirtyTreeAutoStash(t *testing.T) {
 // the daemon's getStartCommand must NOT use the hardcoded "exec claude" start_command
 // from the built-in role TOMLs.
 func TestGetStartCommand_NonClaudeAgentBypassesToml(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create settings dir and town config.json with gemini as default_agent.
@@ -529,6 +543,7 @@ func TestGetStartCommand_NonClaudeAgentBypassesToml(t *testing.T) {
 // resolved agent, getStartCommand falls through to BuildStartupCommandFromConfig
 // (not the literal TOML string) for proper model flag and beacon injection.
 func TestGetStartCommand_ClaudeAgentFallsThrough(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Default town settings — claude is the default agent.

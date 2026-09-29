@@ -23,6 +23,7 @@ const (
 )
 
 func TestAdvanceBackoff(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			RestartDelay:    5 * time.Second,
@@ -75,6 +76,7 @@ func TestAdvanceBackoff(t *testing.T) {
 }
 
 func TestBuildDoltSQLCmd_LocalUsesTCPClientMode(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			Port:    3307,
@@ -106,6 +108,7 @@ func TestBuildDoltSQLCmd_LocalUsesTCPClientMode(t *testing.T) {
 }
 
 func TestBuildDoltSQLCmd_RemoteNoPasswordSuppressesPrompt(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			Host:    "10.0.0.5",
@@ -199,6 +202,7 @@ func TestBuildDoltSQLCmd_RemoteNoPasswordPreservesInheritedCredentials(t *testin
 }
 
 func TestGetBackoffDelay_InitialValue(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			RestartDelay: 5 * time.Second,
@@ -214,6 +218,7 @@ func TestGetBackoffDelay_InitialValue(t *testing.T) {
 }
 
 func TestPruneRestartTimes(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
@@ -236,6 +241,7 @@ func TestPruneRestartTimes(t *testing.T) {
 }
 
 func TestMaybeResetBackoff(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			HealthyResetInterval: 5 * time.Minute,
@@ -268,6 +274,7 @@ func TestMaybeResetBackoff(t *testing.T) {
 }
 
 func TestMaybeResetBackoff_NoResetIfNotLongEnough(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			HealthyResetInterval: 5 * time.Minute,
@@ -286,6 +293,7 @@ func TestMaybeResetBackoff_NoResetIfNotLongEnough(t *testing.T) {
 }
 
 func TestMaybeResetBackoff_AccumulatesAcrossHeartbeats(t *testing.T) {
+	t.Parallel()
 	// Regression test: with the bug, lastHealthyTime was updated on every call,
 	// so the delta never exceeded the heartbeat interval. With the fix,
 	// lastHealthyTime is only updated on initial detection and after a successful
@@ -333,6 +341,7 @@ func TestMaybeResetBackoff_AccumulatesAcrossHeartbeats(t *testing.T) {
 }
 
 func TestDefaultConfig_BackoffFields(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultDoltServerConfig("/tmp/test")
 
 	if cfg.MaxRestartDelay != 5*time.Minute {
@@ -353,6 +362,7 @@ func TestDefaultConfig_BackoffFields(t *testing.T) {
 }
 
 func TestHealthCheckInterval_Default(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			Enabled: true,
@@ -368,6 +378,7 @@ func TestHealthCheckInterval_Default(t *testing.T) {
 }
 
 func TestHealthCheckInterval_Configured(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
 			Enabled:             true,
@@ -383,6 +394,7 @@ func TestHealthCheckInterval_Configured(t *testing.T) {
 }
 
 func TestHealthCheckInterval_NilConfig(t *testing.T) {
+	t.Parallel()
 	m := &DoltServerManager{
 		config: nil,
 		logger: func(format string, v ...interface{}) {},
@@ -395,6 +407,7 @@ func TestHealthCheckInterval_NilConfig(t *testing.T) {
 }
 
 func TestRestartingFlag_PreventsConcurrentRestarts(t *testing.T) {
+	t.Parallel()
 	// Verify the restarting flag prevents concurrent calls to EnsureRunning
 	// from both entering restartWithBackoff.
 	var callCount atomic.Int32
@@ -437,6 +450,7 @@ func TestRestartingFlag_PreventsConcurrentRestarts(t *testing.T) {
 }
 
 func TestStartLocked_SkipsIfAlreadyRunning(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("isProcessAlive uses Signal(nil) on Windows which doesn't reliably detect live processes")
 	}
@@ -495,6 +509,7 @@ func TestStartLocked_SkipsIfAlreadyRunning(t *testing.T) {
 }
 
 func TestRestartWithBackoff_SkipsIfStartedDuringSleep(t *testing.T) {
+	t.Parallel()
 	// Verify that restartWithBackoff() re-checks isRunning() after the backoff
 	// sleep to detect if another goroutine started the server during the window.
 	//
@@ -573,6 +588,7 @@ func TestRestartWithBackoff_SkipsIfStartedDuringSleep(t *testing.T) {
 }
 
 func TestWriteAndClearUnhealthySignal(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	daemonDir := filepath.Join(tmpDir, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -629,6 +645,7 @@ func TestWriteAndClearUnhealthySignal(t *testing.T) {
 }
 
 func TestUnhealthySignalFile_Path(t *testing.T) {
+	t.Parallel()
 	// Port 3307 (production) uses canonical DOLT_UNHEALTHY path
 	prodConfig := DefaultDoltServerConfig("/tmp/test-town")
 	prodConfig.Port = 3307
@@ -659,6 +676,7 @@ func TestUnhealthySignalFile_Path(t *testing.T) {
 }
 
 func TestIsDoltUnhealthy_NoDir(t *testing.T) {
+	t.Parallel()
 	// Non-existent directory should return false
 	if IsDoltUnhealthy("/nonexistent/path") {
 		t.Error("expected false for non-existent directory")
@@ -706,6 +724,7 @@ func newTestManager(t *testing.T) *DoltServerManager {
 // goroutines call EnsureRunning concurrently and the server is not running,
 // only one goroutine enters restartWithBackoff and starts the server.
 func TestConcurrentEnsureRunning_OnlyOneRestart(t *testing.T) {
+	t.Parallel()
 	var startCount atomic.Int32
 
 	m := newTestManager(t)
@@ -742,6 +761,7 @@ func TestConcurrentEnsureRunning_OnlyOneRestart(t *testing.T) {
 // the backoff sleep in restartWithBackoff, the mutex is released, allowing
 // concurrent callers to check the restarting flag and return immediately.
 func TestConcurrentEnsureRunning_BackoffSleepReleasesLock(t *testing.T) {
+	t.Parallel()
 	sleepStarted := make(chan struct{})
 	sleepDone := make(chan struct{})
 
@@ -792,6 +812,7 @@ func TestConcurrentEnsureRunning_BackoffSleepReleasesLock(t *testing.T) {
 // TestEnsureRunning_UnhealthyTriggersRestart verifies the full flow:
 // server running but unhealthy -> stop -> restart with backoff.
 func TestEnsureRunning_UnhealthyTriggersRestart(t *testing.T) {
+	t.Parallel()
 	var stopCount, startCount atomic.Int32
 	var running atomic.Bool
 	running.Store(true) // Server starts as running
@@ -831,6 +852,7 @@ func TestEnsureRunning_UnhealthyTriggersRestart(t *testing.T) {
 // TestEnsureRunning_HealthyResetsBackoff verifies that a healthy server
 // resets backoff state after HealthyResetInterval elapses.
 func TestEnsureRunning_HealthyResetsBackoff(t *testing.T) {
+	t.Parallel()
 	var clockOffset atomic.Int64
 	baseTime := time.Now()
 
@@ -873,6 +895,7 @@ func TestEnsureRunning_HealthyResetsBackoff(t *testing.T) {
 // exceeded, sendEscalationMail is called exactly once with the correct count,
 // and subsequent calls do not double-escalate.
 func TestEscalation_RestartCapExceeded(t *testing.T) {
+	t.Parallel()
 	var escalateCount atomic.Int32
 	var escalateArg atomic.Int32
 
@@ -917,6 +940,7 @@ func TestEscalation_RestartCapExceeded(t *testing.T) {
 // TestEnsureRunning_BackoffDelayIncreases verifies that each restart
 // through the full EnsureRunning flow increases the backoff delay exponentially.
 func TestEnsureRunning_BackoffDelayIncreases(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var delays []time.Duration
 
@@ -956,6 +980,7 @@ func TestEnsureRunning_BackoffDelayIncreases(t *testing.T) {
 // completes, the restarting flag is properly cleared so subsequent calls
 // can initiate new restarts.
 func TestEnsureRunning_MultipleRestartCycles(t *testing.T) {
+	t.Parallel()
 	var startCount atomic.Int32
 
 	m := newTestManager(t)
@@ -990,6 +1015,7 @@ func TestEnsureRunning_MultipleRestartCycles(t *testing.T) {
 // TestEnsureRunning_HeartbeatCycle simulates a daemon heartbeat loop:
 // server not running -> start -> healthy -> unhealthy -> stop+restart.
 func TestEnsureRunning_HeartbeatCycle(t *testing.T) {
+	t.Parallel()
 	var (
 		healthy atomic.Bool
 		running atomic.Bool
@@ -1049,6 +1075,7 @@ func TestEnsureRunning_HeartbeatCycle(t *testing.T) {
 // TestEnsureRunning_StartFailurePropagates verifies that an error from
 // startLocked propagates through restartWithBackoff to EnsureRunning.
 func TestEnsureRunning_StartFailurePropagates(t *testing.T) {
+	t.Parallel()
 	m := newTestManager(t)
 	m.startFn = func() error { return fmt.Errorf("dolt not found in PATH") }
 	m.sleepFn = func(d time.Duration) {}
@@ -1067,6 +1094,7 @@ func TestEnsureRunning_StartFailurePropagates(t *testing.T) {
 // ============================================================================
 
 func TestIsReadOnlyError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		msg  string
 		want bool
@@ -1092,6 +1120,7 @@ func TestIsReadOnlyError(t *testing.T) {
 // TestCheckWriteHealth_ReadOnlyDetected verifies that when the write probe
 // returns a read-only error, checkWriteHealthLocked returns an error.
 func TestCheckWriteHealth_ReadOnlyDetected(t *testing.T) {
+	t.Parallel()
 	m := newTestManager(t)
 	m.writeProbeCheckFn = func() error {
 		return fmt.Errorf("dolt server is in read-only mode: cannot update manifest: database is read only")
@@ -1112,6 +1141,7 @@ func TestCheckWriteHealth_ReadOnlyDetected(t *testing.T) {
 // TestCheckWriteHealth_WritableServer verifies that when the write probe
 // succeeds, checkWriteHealthLocked returns nil.
 func TestCheckWriteHealth_WritableServer(t *testing.T) {
+	t.Parallel()
 	m := newTestManager(t)
 	m.writeProbeCheckFn = func() error {
 		return nil
@@ -1129,6 +1159,7 @@ func TestCheckWriteHealth_WritableServer(t *testing.T) {
 // TestCheckWriteHealth_NonReadOnlyError verifies that non-read-only write
 // failures do not cause the health check to fail (logged as warnings instead).
 func TestCheckWriteHealth_NonReadOnlyError(t *testing.T) {
+	t.Parallel()
 	m := newTestManager(t)
 	m.writeProbeCheckFn = func() error {
 		return nil // Non-read-only errors are logged, not returned
@@ -1146,6 +1177,7 @@ func TestCheckWriteHealth_NonReadOnlyError(t *testing.T) {
 // TestCheckWriteHealth_NoDatabases verifies that the write probe is skipped
 // when no databases are available.
 func TestCheckWriteHealth_NoDatabases(t *testing.T) {
+	t.Parallel()
 	m := newTestManager(t)
 	m.writeProbeCheckFn = nil // Use real implementation
 	m.listDatabasesFn = func() ([]string, error) {
@@ -1164,6 +1196,7 @@ func TestCheckWriteHealth_NoDatabases(t *testing.T) {
 // TestEnsureRunning_ReadOnlyTriggersRestart verifies the full flow:
 // server running, healthy (SELECT 1 passes), but read-only -> stop -> restart.
 func TestEnsureRunning_ReadOnlyTriggersRestart(t *testing.T) {
+	t.Parallel()
 	var stopCount, startCount atomic.Int32
 	var readOnlyAlerted atomic.Bool
 	var running atomic.Bool
@@ -1213,6 +1246,7 @@ func TestEnsureRunning_ReadOnlyTriggersRestart(t *testing.T) {
 // TestEnsureRunning_ReadOnlyWritesUnhealthySignal verifies that read-only
 // detection writes the DOLT_UNHEALTHY signal file with "read_only" reason.
 func TestEnsureRunning_ReadOnlyWritesUnhealthySignal(t *testing.T) {
+	t.Parallel()
 	var running atomic.Bool
 	running.Store(true)
 
@@ -1250,6 +1284,7 @@ func TestEnsureRunning_ReadOnlyWritesUnhealthySignal(t *testing.T) {
 }
 
 func TestEnsureRunning_SuppressesDuplicateUnhealthyAlerts(t *testing.T) {
+	t.Parallel()
 	var running atomic.Bool
 	var alertCount atomic.Int32
 	running.Store(true)
@@ -1285,6 +1320,7 @@ func TestEnsureRunning_SuppressesDuplicateUnhealthyAlerts(t *testing.T) {
 // TestEnsureRunning_HealthyAfterReadOnlyRecovery verifies that after a
 // read-only restart, subsequent healthy checks clear the unhealthy signal.
 func TestEnsureRunning_HealthyAfterReadOnlyRecovery(t *testing.T) {
+	t.Parallel()
 	var running atomic.Bool
 	var readOnly atomic.Bool
 	running.Store(true)

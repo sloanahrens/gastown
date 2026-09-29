@@ -11,6 +11,7 @@ import (
 )
 
 func TestScheduledSlingEntry_Validate(t *testing.T) {
+	t.Parallel()
 	good := ScheduledSlingEntry{Name: "doc-audit", Rig: "gastown", Formula: "mol-doc-audit", IntervalStr: "168h"}
 	if err := good.validate(); err != nil {
 		t.Fatalf("valid entry rejected: %v", err)
@@ -41,6 +42,7 @@ func TestScheduledSlingEntry_Validate(t *testing.T) {
 }
 
 func TestDecideScheduledSling(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	week := 168 * time.Hour
 	cases := []struct {
@@ -67,6 +69,7 @@ func TestDecideScheduledSling(t *testing.T) {
 }
 
 func TestParseScheduledBeads(t *testing.T) {
+	t.Parallel()
 	data := []byte(`[{"id":"gt-abc","status":"closed","created_at":"2026-09-12T10:00:00Z","labels":["scheduled:doc-audit"]},
 	                 {"id":"gt-def","status":"open","created_at":"2026-09-19T10:00:00-05:00"}]`)
 	got, err := parseScheduledBeads(data)
@@ -89,6 +92,7 @@ func TestParseScheduledBeads(t *testing.T) {
 }
 
 func TestParseCreatedBeadID(t *testing.T) {
+	t.Parallel()
 	for _, in := range []string{`{"id":"gt-new1","title":"x"}`, `[{"id":"gt-new1","title":"x"}]`} {
 		id, err := parseCreatedBeadID([]byte(in))
 		if err != nil || id != "gt-new1" {
@@ -101,6 +105,7 @@ func TestParseCreatedBeadID(t *testing.T) {
 }
 
 func TestIsPatrolEnabled_ScheduledSlingsIsOptIn(t *testing.T) {
+	t.Parallel()
 	if IsPatrolEnabled(nil, "scheduled_slings") {
 		t.Error("nil config must not enable scheduled_slings")
 	}
@@ -114,6 +119,7 @@ func TestIsPatrolEnabled_ScheduledSlingsIsOptIn(t *testing.T) {
 }
 
 func TestParseScheduledBeads_FractionalSecondTimestamp(t *testing.T) {
+	t.Parallel()
 	// bd/Dolt can emit RFC3339Nano, which encoding/json's strict RFC3339
 	// time.Time unmarshaller rejects — one such row used to fail the whole list
 	// and feed the spurious-escalation path.
@@ -129,6 +135,7 @@ func TestParseScheduledBeads_FractionalSecondTimestamp(t *testing.T) {
 }
 
 func TestDecideScheduledSling_IgnoresRunsThatFailedToSling(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	week := 168 * time.Hour
 	failed := scheduledBead{ID: "gt-bad", Status: "closed", CloseReason: scheduledSlingFailureReason, CreatedAt: now.Add(-time.Minute)}
@@ -216,6 +223,7 @@ func newScheduledTestDaemon(t *testing.T, entries []ScheduledSlingEntry, runner 
 var docAuditEntry = ScheduledSlingEntry{Name: "doc-audit", Rig: "gastown", Formula: "mol-doc-audit", Agent: "deepseek-pro", IntervalStr: "168h"}
 
 func TestRunScheduledSlingEntry_DispatchesWhenDue(t *testing.T) {
+	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
@@ -234,6 +242,7 @@ func TestRunScheduledSlingEntry_DispatchesWhenDue(t *testing.T) {
 }
 
 func TestRunScheduledSlingEntry_SkipsWhileOpen(t *testing.T) {
+	t.Parallel()
 	f := &fakeScheduledRunner{beads: []scheduledBead{{ID: "gt-old", Status: "open", CreatedAt: time.Now().Add(-10 * 24 * time.Hour)}}}
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	if err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now()); err != nil {
@@ -249,6 +258,7 @@ func TestRunScheduledSlingEntry_SkipsWhileOpen(t *testing.T) {
 // and reset the counter — making the third-failure escalation unreachable for
 // exactly the failure it exists to surface.
 func TestRunScheduledSlings_EscalatesOnThirdConsecutiveFailure(t *testing.T) {
+	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New("boom"), now: time.Now()}
 	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	for i := 1; i <= 3; i++ {
@@ -275,6 +285,7 @@ func TestRunScheduledSlings_EscalatesOnThirdConsecutiveFailure(t *testing.T) {
 }
 
 func TestRunScheduledSlingEntry_ClosesBeadWhenSlingFails(t *testing.T) {
+	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New("boom"), now: time.Now()}
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	if err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now()); err == nil {
@@ -292,6 +303,7 @@ func TestRunScheduledSlingEntry_ClosesBeadWhenSlingFails(t *testing.T) {
 }
 
 func TestRunScheduledSlings_InvalidEntryIsSkippedNotFatal(t *testing.T) {
+	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-ok", now: time.Now()}
 	bad := ScheduledSlingEntry{Name: "bad", Rig: "gastown", Formula: "f", IntervalStr: "weekly"}
 	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{bad, docAuditEntry}, f)
@@ -305,6 +317,7 @@ func TestRunScheduledSlings_InvalidEntryIsSkippedNotFatal(t *testing.T) {
 }
 
 func TestTriggerScheduledSlings_SingleFlight(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{logger: discardLogger} // patrol inactive: run returns at once
 	if !d.triggerScheduledSlings() {
 		t.Fatal("first trigger should start")
@@ -323,6 +336,7 @@ func TestTriggerScheduledSlings_SingleFlight(t *testing.T) {
 }
 
 func TestExecScheduledRunner_SlingArgv(t *testing.T) {
+	t.Parallel()
 	r := &execScheduledSlingRunner{townRoot: "/town", bdPath: "bd", gtPath: "gt"}
 	e := docAuditEntry
 	e.Vars = map[string]string{"slice_docs": "8"}
@@ -340,6 +354,7 @@ func TestExecScheduledRunner_SlingArgv(t *testing.T) {
 // and the interval guard meaningless — the two integration bugs that unit tests
 // over hand-crafted JSON could not see.
 func TestExecScheduledSlingRunner_ListBeadsArgvContract(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {

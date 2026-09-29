@@ -12,6 +12,7 @@ import (
 // Regression test for gt-arz:
 // getPatrolRigs should filter parked/docked rigs at list-building time.
 func TestGetPatrolRigs_FiltersNonOperationalRigs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Seed known rigs.
