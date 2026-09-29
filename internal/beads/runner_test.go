@@ -282,7 +282,7 @@ func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
 	}
 }
 
-// TestReleaseFallsBackWithoutForce: read-only gt commands still run against bd
+// TestReleaseFallsBackWithoutForce: gt commands outside the handshake gate still run on bd
 // builds older than the claim fence, which may not know `update --force`.
 // On such a bd, Release retries without it, as --flat already falls back,
 // instead of failing every release.

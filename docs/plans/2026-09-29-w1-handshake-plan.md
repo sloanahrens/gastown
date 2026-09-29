@@ -39,7 +39,7 @@ the bd machine surface in beads `engdocs/design/d1-machine-surface.md` at da4983
 - `internal/daemon/daemon.go`: store guard reads `schema_migrations`, compares integers with bd's level.
 - `internal/beads/bd_failure.go` (new): one classifier for bd failures.
 - `internal/beads/beads.go`, `runner.go`, `beads_rig.go`, `beads_agent.go`, `daemon/scheduled_slings.go`: route through the classifier; non-JSON is an error.
-- `internal/witness/handlers.go`, `state_collapse.go`: typed exec error, shared classifier, `--limit 0`.
+- `internal/witness/handlers.go`: typed exec error, shared classifier (`state_collapse.go` calls it unchanged), `--limit 0`.
 - `internal/cmd/done.go`, `errors.go`, `root.go`: coded exit per unlanded outcome; `--skip-tests`.
 
 ---
@@ -73,7 +73,7 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
 
 ### Task 2: delete the installer and go-install hints (gt-7iwy0.1 / gt-fcxe9.8)
 
-**Files:** `internal/deps/beads.go`, `beads_test.go`, `check_integration_test.go`, `internal/cmd/beads_version.go`, `internal/cmd/install.go`, `internal/cmd/rig.go`, `internal/rig/manager.go`.
+**Files:** `internal/deps/beads.go`, `beads_test.go`, `check_integration_test.go`, `internal/cmd/beads_version.go`, `internal/cmd/install.go`, `internal/cmd/rig.go` (`internal/rig/manager.go` keeps calling `CheckBeads` unchanged).
 
 - [x] Failing test: `EnsureBeads` returns an error for `BeadsUnknown` and the
   not-found error text contains `make safe-install` and never `go install`;

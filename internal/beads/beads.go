@@ -3386,7 +3386,8 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 	_, err := b.run(args...)
 	if err != nil && strings.Contains(err.Error(), "unknown flag: --force") {
 		// A bd older than the claim fence has no --force on update, and no
-		// fence for it to override either (gt gates on schema and contract, not on this flag).
+		// fence for it to override either. Read-only gt commands still run on such a
+		// bd; only town-running commands require the handshake (gt-7iwy0.1).
 		_, err = b.run(removeArg(args, "--force")...)
 	}
 	return err
