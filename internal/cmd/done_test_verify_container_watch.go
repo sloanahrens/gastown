@@ -21,14 +21,30 @@ import (
 // matching container up for seconds. One `docker ps` per poll — bounded by
 // slot's own dockerPSTimeout when the daemon is wedged — against a suite that
 // runs for minutes. A var so tests can drive the watch without waiting out the
-// real interval; 0 disables it (see startGateContainerWatch).
-var containerWatchInterval = 5 * time.Second
+// real interval; 0 disables it (see containerWatchDeps.start).
+const containerWatchInterval = 5 * time.Second
 
-// listGateContainers is the watch's view of the containers running right now.
-// A var over slot.GateContainers so no unit test shells out to the real docker
-// CLI: a stray dolt/testcontainers/ryuk container on a shared Gas Town host
-// would otherwise decide the outcome of a gate test (gt-tuiy).
-var listGateContainers = slot.GateContainers
+// containerWatchDeps is what a container watch polls, and how often. Tests
+// build their own, so no unit test shells out to the real docker CLI: a
+// stray dolt/testcontainers/ryuk container on a shared Gas Town host would
+// otherwise decide the outcome of a gate test (gt-tuiy).
+type containerWatchDeps struct {
+	// interval is the poll interval; 0 disables the watch.
+	interval time.Duration
+	// containers is the watch's view of the containers running right now.
+	containers func() ([]slot.GateContainer, error)
+	// slotHeld reports whether any container-gate slot is held right now.
+	slotHeld func(townRoot string) (bool, error)
+}
+
+// defaultContainerWatchDeps is the watch gt done runs.
+func defaultContainerWatchDeps() containerWatchDeps {
+	return containerWatchDeps{
+		interval:   containerWatchInterval,
+		containers: slot.GateContainers,
+		slotHeld:   gateSlotHeld,
+	}
+}
 
 // gateSlotHeld reports whether any container-gate slot is held right now.
 // Locks only, deliberately: StatusPool would add a second `docker ps` to every
@@ -41,7 +57,7 @@ var listGateContainers = slot.GateContainers
 // honest answer is the one that stays quiet. The error is reported, not
 // swallowed, so the log says the watch went blind rather than claiming the
 // suite was clean.
-var gateSlotHeld = func(townRoot string) (bool, error) {
+func gateSlotHeld(townRoot string) (bool, error) {
 	rep, err := slot.StatusPoolLocksOnly(townRoot, containerGatePool(townRoot))
 	if err != nil {
 		return true, err
@@ -115,7 +131,7 @@ type containerWatch struct {
 	started time.Time
 }
 
-// startGateContainerWatch begins watching a slot-free gate run. runCtx bounds
+// start begins watching a slot-free gate run. runCtx bounds
 // the watch's life (the watch stops with the run it is watching); cancelRun
 // kills the run when the watch has a container to blame. Returns nil when the
 // watch cannot be established, having written why to the log — a watch that
@@ -123,14 +139,14 @@ type containerWatch struct {
 // else's and must not fail the run on a container that was already there. The
 // town's own detector for that state is `gt slot status`, which reports any
 // container running without a token as an unwrapped suite.
-func startGateContainerWatch(runCtx context.Context, cancelRun context.CancelFunc, townRoot string, logFile *os.File) *containerWatch {
-	if containerWatchInterval <= 0 {
+func (d containerWatchDeps) start(runCtx context.Context, cancelRun context.CancelFunc, townRoot string, logFile *os.File) *containerWatch {
+	if d.interval <= 0 {
 		return nil
 	}
 	w := &containerWatch{
-		interval:   containerWatchInterval,
-		containers: listGateContainers,
-		slotHeld:   gateSlotHeld,
+		interval:   d.interval,
+		containers: d.containers,
+		slotHeld:   d.slotHeld,
 		townRoot:   townRoot,
 		logFile:    logFile,
 		cancelRun:  cancelRun,

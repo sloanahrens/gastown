@@ -17,17 +17,20 @@ import (
 // the submission without spending a suite run, and it still runs when the
 // changed packages include container-backed ones (gt-btw1: no deferral).
 func TestRunDefaultTestVerification_Lint(t *testing.T) {
+	t.Parallel()
 	stubNoContainers(t)
-	townRoot := t.TempDir()
 
 	t.Run("lint passes, then tests run; recorded on the result", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		changePkga(t, dir)
 		runGitIn(t, dir, "add", ".")
 		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
 
 		acquired := false
-		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+		stubVerifyGate(t, vg, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
 		}, nil)
@@ -35,7 +38,7 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		marker := filepath.Join(dir, "lint-ran")
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: "echo ok > '" + marker + "'"}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -58,6 +61,9 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 	})
 
 	t.Run("lint fails: refuse with the findings, tests never run", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		changePkga(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -67,7 +73,7 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		lint := "echo 'pkga/a.go:1:1: something is wrong (fakelint)'; exit 3"
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: lint, TestVerifyCommand: "echo ran > '" + testMarker + "'"}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-fail-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-fail-role")
 		if err == nil {
 			t.Fatalf("expected a lint refusal, got result=%+v", result)
 		}
@@ -82,6 +88,9 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 	})
 
 	t.Run("container-backed package changed: lint still runs, then the full suite runs slot-free", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		addContainerBackedPackage(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -91,7 +100,7 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		// subtest is about what the gate does around them (the slot stub alone
 		// keeps a slot from being taken).
 		acquired := false
-		stubVerifyGate(t, func(townRoot, role string, timeout time.Duration) (func(), error) {
+		stubVerifyGate(t, vg, func(townRoot, role string, timeout time.Duration) (func(), error) {
 			acquired = true
 			return func() {}, nil
 		}, nil)
@@ -99,7 +108,7 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		marker := filepath.Join(dir, "lint-ran")
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: "echo ok > '" + marker + "'"}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-container-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-container-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -124,6 +133,9 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 	})
 
 	t.Run("no lint_command configured: gate unchanged", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		changePkga(t, dir)
 		runGitIn(t, dir, "add", ".")
@@ -131,7 +143,7 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/no-lint-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/no-lint-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -150,8 +162,8 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 // and retry (attributing the wait) instead of reporting the collision as a
 // lint finding, and must still report a real finding as a finding.
 func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
+	t.Parallel()
 	stubNoContainers(t)
-	townRoot := t.TempDir()
 
 	// collidingLint appends one line per attempt and prints golangci-lint's
 	// contention message on the first attempt only, so the second attempt
@@ -185,14 +197,17 @@ func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
 	}
 
 	t.Run("lock held once: waited out, retried, then lint passes and tests run", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		commitPkga(t, dir)
-		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+		stubVerifyLintRetryDelay(vg, time.Millisecond, time.Millisecond)
 
 		lint, counter := collidingLint(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: lint}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-lock-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-lock-role")
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification after a released lock: %v", err)
 		}
@@ -214,9 +229,12 @@ func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
 	})
 
 	t.Run("lock never released: bounded retries, reported as contention not a finding", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		commitPkga(t, dir)
-		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+		stubVerifyLintRetryDelay(vg, time.Millisecond, time.Millisecond)
 
 		testMarker := filepath.Join(dir, "tests-ran")
 		counter := filepath.Join(dir, "lint-attempts")
@@ -227,7 +245,7 @@ func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
 			TestVerifyCommand: "echo ran > '" + testMarker + "'",
 		}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-lock-stuck-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-lock-stuck-role")
 		if err == nil {
 			t.Fatalf("expected a refusal while the lock stays held, got result=%+v", result)
 		}
@@ -253,15 +271,18 @@ func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
 	})
 
 	t.Run("a real finding is not mistaken for lock contention: no retry", func(t *testing.T) {
+		t.Parallel()
+		vg := newTestVerifyGate()
+		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
 		commitPkga(t, dir)
-		stubLintLockRetryDelay(t, time.Millisecond, time.Millisecond)
+		stubVerifyLintRetryDelay(vg, time.Millisecond, time.Millisecond)
 
 		counter := filepath.Join(dir, "lint-attempts")
 		lint := fmt.Sprintf(`echo x >> %q; echo 'pkga/a.go:1:1: something is wrong (fakelint)'; exit 3`, counter)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: lint}
 		g := git.NewGit(dir)
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/lint-real-finding-role")
+		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-real-finding-role")
 		if err == nil {
 			t.Fatalf("expected a lint refusal, got result=%+v", result)
 		}

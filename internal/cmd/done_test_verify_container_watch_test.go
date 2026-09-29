@@ -32,30 +32,21 @@ func gateContainersFor(displays ...string) []slot.GateContainer {
 
 // stubContainerWatchInterval shortens the watch's poll interval so a test can
 // drive it in milliseconds. 0 disables the watch entirely.
-func stubContainerWatchInterval(t *testing.T, interval time.Duration) {
-	t.Helper()
-	prev := containerWatchInterval
-	containerWatchInterval = interval
-	t.Cleanup(func() { containerWatchInterval = prev })
+func stubContainerWatchInterval(vg *testVerifyGate, interval time.Duration) {
+	vg.watch.interval = interval
 }
 
 // stubGateContainerListing replaces the watch's docker listing. The stub goes
 // through the package var rather than slot.SetContainerListerForTest so a test
 // does not have to race stubNoContainers' process-wide, once-per-binary
 // install (mq_batch_slot_test.go).
-func stubGateContainerListing(t *testing.T, fn func() ([]slot.GateContainer, error)) {
-	t.Helper()
-	prev := listGateContainers
-	listGateContainers = fn
-	t.Cleanup(func() { listGateContainers = prev })
+func stubGateContainerListing(vg *testVerifyGate, fn func() ([]slot.GateContainer, error)) {
+	vg.watch.containers = fn
 }
 
 // stubGateSlotHeld replaces the watch's read of the container-gate slot.
-func stubGateSlotHeld(t *testing.T, held bool) {
-	t.Helper()
-	prev := gateSlotHeld
-	gateSlotHeld = func(string) (bool, error) { return held, nil }
-	t.Cleanup(func() { gateSlotHeld = prev })
+func stubGateSlotHeld(vg *testVerifyGate, held bool) {
+	vg.watch.slotHeld = func(string) (bool, error) { return held, nil }
 }
 
 // watchLog is a standalone verify log a test can read back. The gate's own log
@@ -104,6 +95,7 @@ func neverHeld(string) (bool, error) { return false, nil }
 // GT_TEST_DOCKER=1, the gate ran slot-free, and the suite started a container
 // anyway. The container is this run's, so the watch kills the run.
 func TestContainerWatchBlamesAContainerTheSlotFreeRunStarted(t *testing.T) {
+	t.Parallel()
 	const stray = "dolt/dolt-sql-server:2.2.0 reaper_abc123"
 	containers := []slot.GateContainer{}
 	w, cancels := pollWatch(t,
@@ -143,6 +135,7 @@ func TestContainerWatchBlamesAContainerTheSlotFreeRunStarted(t *testing.T) {
 // job: a container that predates the run is not this run's, which is what
 // keeps pre-existing debris (gt-ul1k) from failing an innocent gate.
 func TestContainerWatchIgnoresAContainerThatWasAlreadyRunning(t *testing.T) {
+	t.Parallel()
 	const stale = "dolt/dolt-sql-server:2.2.0 reaper_old"
 	containers := gateContainersFor(stale)
 	w, cancels := pollWatch(t,
@@ -166,6 +159,7 @@ func TestContainerWatchIgnoresAContainerThatWasAlreadyRunning(t *testing.T) {
 // token and starts containers while this slot-free run is in flight. Those
 // containers are its holder's, not this run's.
 func TestContainerWatchIgnoresAContainerALiveHolderOwns(t *testing.T) {
+	t.Parallel()
 	const theirs = "dolt/dolt-sql-server:2.2.0 reaper_refinery"
 	containers := gateContainersFor(theirs)
 	log := watchLog(t)
@@ -194,6 +188,7 @@ func TestContainerWatchIgnoresAContainerALiveHolderOwns(t *testing.T) {
 // a watch that could not check must not read as one that checked and found
 // nothing.
 func TestContainerWatchGoesQuietWhenTheSlotStateIsUnreadable(t *testing.T) {
+	t.Parallel()
 	containers := gateContainersFor("dolt/dolt-sql-server:2.2.0 reaper_abc")
 	log := watchLog(t)
 	lockErr := errors.New("permission denied")
@@ -223,6 +218,7 @@ func TestContainerWatchGoesQuietWhenTheSlotStateIsUnreadable(t *testing.T) {
 // TestContainerWatchCannotSeeAtAll: a listing that fails is not an empty
 // listing. The watch reports it and does not fail the run on it.
 func TestContainerWatchCannotSeeAtAll(t *testing.T) {
+	t.Parallel()
 	log := watchLog(t)
 	w, cancels := pollWatch(t,
 		func() ([]slot.GateContainer, error) { return nil, errors.New("docker ps did not respond within 5s") },
@@ -248,13 +244,15 @@ func TestContainerWatchCannotSeeAtAll(t *testing.T) {
 // It refuses to guess, says so in the log, and returns no watch — the town's
 // `gt slot status` is the detector for that state.
 func TestStartGateContainerWatchWithoutABaselineDoesNotWatch(t *testing.T) {
-	stubContainerWatchInterval(t, time.Millisecond)
-	stubGateContainerListing(t, func() ([]slot.GateContainer, error) {
+	t.Parallel()
+	vg := newTestVerifyGate()
+	stubContainerWatchInterval(vg, time.Millisecond)
+	stubGateContainerListing(vg, func() ([]slot.GateContainer, error) {
 		return nil, errors.New("docker ps failed: permission denied while trying to connect to the Docker daemon socket")
 	})
 	log := watchLog(t)
 
-	got := startGateContainerWatch(context.Background(), func() {}, t.TempDir(), log)
+	got := vg.watch.start(context.Background(), func() {}, t.TempDir(), log)
 	if got != nil {
 		t.Fatalf("startGateContainerWatch = %+v, want nil when the baseline cannot be taken", got)
 	}
@@ -267,8 +265,10 @@ func TestStartGateContainerWatchWithoutABaselineDoesNotWatch(t *testing.T) {
 // a zero interval is how the gate's own tests keep the watch from shelling out
 // to docker.
 func TestStartGateContainerWatchDisabledByInterval(t *testing.T) {
-	stubContainerWatchInterval(t, 0)
-	if got := startGateContainerWatch(context.Background(), func() {}, t.TempDir(), watchLog(t)); got != nil {
+	t.Parallel()
+	vg := newTestVerifyGate()
+	stubContainerWatchInterval(vg, 0)
+	if got := vg.watch.start(context.Background(), func() {}, t.TempDir(), watchLog(t)); got != nil {
 		t.Fatalf("startGateContainerWatch = %+v, want nil when the interval is 0", got)
 	}
 }
@@ -278,6 +278,8 @@ func TestStartGateContainerWatchDisabledByInterval(t *testing.T) {
 // starts a container anyway, and the gate fails naming the container and the
 // fix — rather than reporting a test failure or a slot problem.
 func TestSlotFreeGateRunFailsWhenTheSuiteStartsAContainer(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	townRoot := t.TempDir()
 	dir, _ := initVerifyTestGoRepo(t)
 	changePkga(t, dir)
@@ -287,7 +289,7 @@ func TestSlotFreeGateRunFailsWhenTheSuiteStartsAContainer(t *testing.T) {
 	const stray = "dolt/dolt-sql-server:2.2.0 reaper_abc123"
 	runStarted := make(chan struct{})
 	slotTaken := false
-	stubVerifyGate(t,
+	stubVerifyGate(t, vg,
 		func(townRoot, role string, timeout time.Duration) (func(), error) {
 			slotTaken = true
 			return func() {}, nil
@@ -297,11 +299,11 @@ func TestSlotFreeGateRunFailsWhenTheSuiteStartsAContainer(t *testing.T) {
 			<-ctx.Done()
 			return ctx.Err()
 		})
-	stubContainerWatchInterval(t, 5*time.Millisecond)
-	stubGateSlotHeld(t, false)
+	stubContainerWatchInterval(vg, 5*time.Millisecond)
+	stubGateSlotHeld(vg, false)
 	// Empty until the suite is under way, then a container: the baseline is
 	// the empty listing, so the container is this run's.
-	stubGateContainerListing(t, func() ([]slot.GateContainer, error) {
+	stubGateContainerListing(vg, func() ([]slot.GateContainer, error) {
 		select {
 		case <-runStarted:
 			return gateContainersFor(stray), nil
@@ -312,7 +314,7 @@ func TestSlotFreeGateRunFailsWhenTheSuiteStartsAContainer(t *testing.T) {
 
 	mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=8 make test"}
 	g := git.NewGit(dir)
-	_, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/watch-role")
+	_, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/watch-role")
 	if err == nil {
 		t.Fatal("the gate passed a slot-free run whose suite started a container (gt-0ss4)")
 	}
@@ -338,22 +340,24 @@ func TestSlotFreeGateRunFailsWhenTheSuiteStartsAContainer(t *testing.T) {
 // artifact, which is what makes the decision to skip the slot a checked fact
 // rather than an assumption (gt-0ss4).
 func TestSlotFreeGateRunRecordsTheContainerWatchEvidence(t *testing.T) {
+	t.Parallel()
+	vg := newTestVerifyGate()
 	townRoot := t.TempDir()
 	dir, _ := initVerifyTestGoRepo(t)
 	changePkga(t, dir)
 	runGitIn(t, dir, "add", ".")
 	runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
 
-	stubVerifyGate(t, nil, func(_ context.Context, _ string, _ string, _ []string, _ *os.File) error {
+	stubVerifyGate(t, vg, nil, func(_ context.Context, _ string, _ string, _ []string, _ *os.File) error {
 		return nil
 	})
-	stubContainerWatchInterval(t, 5*time.Millisecond)
-	stubGateSlotHeld(t, false)
-	stubGateContainerListing(t, func() ([]slot.GateContainer, error) { return nil, nil })
+	stubContainerWatchInterval(vg, 5*time.Millisecond)
+	stubGateSlotHeld(vg, false)
+	stubGateContainerListing(vg, func() ([]slot.GateContainer, error) { return nil, nil })
 
 	mq := &config.MergeQueueConfig{TestCommand: "GOFLAGS=-p=8 make test"}
 	g := git.NewGit(dir)
-	result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/watch-clean-role")
+	result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/watch-clean-role")
 	if err != nil {
 		t.Fatalf("runDefaultTestVerification: %v", err)
 	}
