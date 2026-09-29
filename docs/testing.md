@@ -13,6 +13,18 @@ Before you write or convert a test in this repository, read this page. It covers
 - `make test-integration` runs `go test -tags integration -run '^TestIntegration' ./...`. Tests that need Docker still need a `gt slot run` around the call.
 - `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
 
+### The time budget
+
+The budget runner fails a converted package whose tests use more than 10 s of **user CPU**. It counts the test binary and every process the binary waited for, such as `git`, `bd` or a re-exec'd helper. The runner runs each test binary through itself (`go test -exec`), waits for the binary, and reads the CPU time that `wait4` reports.
+
+The budget ignores wall time and system time because both depend on the host. Measured on the gate host on 2026-09-29 (gt-ty2fy):
+- `internal/testpolicy` used 1.8-2.1 s of user CPU in every run. Alone it took 4.5-5.2 s of wall. In a full `go test ./...` it took 13.2 s, and a gate at load 30 failed on it with every test passing.
+- `internal/git` used 13.7-15.5 s of user CPU in every run. Its system time ranged from 34 s to 303 s. Parallel fork and exec contend inside the kernel, and macOS charges that contention as system time to the process that waits. For the same reason, `internal/slot`'s system time went from 1.6 s to 11.1 s while its user time stayed at 0.1-0.2 s.
+
+Wall time is still printed for every over-budget and tracked package. `-timeout 20m` remains the hang detector. The static rules catch slowness that uses no CPU: `no-sleep` for sleeps and timers, and `no-network` for dials with deadlines.
+
+`-exec` turns off go test's result cache for `make test`, because a cached package runs no binary and there would be nothing to measure. A converted package that passes without a CPU measurement fails the run with a "CPU time was not recorded" line. The runner never treats it as under budget.
+
 The unit tier does no real I/O that carries a wall-clock timeout. That includes sockets and dials: a 200 ms dial in `internal/tmux` timed out under load (a 1-in-600 failure) and blocked other runs for 150 s in socket syscalls. The `no-network` rule enforces this for sockets, and the same rule applies by review to anything else with a deadline. Put such I/O behind a seam and script it; the filesystem through `t.TempDir` is fine.
 
 The integration tier is only for tests that need the real tool. A test that moves there to escape a rule, such as a global swap, belongs in the unit tier behind a seam. Integration tests also follow the zero-flakes rule:
@@ -335,7 +347,7 @@ make test-timing PKGS=./internal/<pkg>/...                   # unit tier, taxed 
 go test -tags integration -run '^TestIntegration' -count=1 ./internal/<pkg>/...   # target 60 s or less
 ```
 
-A package that meets every rule leaves `unconverted.txt` even if it still runs longer than the converted-package budget (10 s in `make test`'s budget runner). In that case, list it in `internal/testpolicy/overbudget.txt` as `<package> <bead-id>`, where the bead tracks getting it under budget, and raise `maxOverBudget` to match. The budget runner does not fail a package on that list. Instead it prints the package's time and bead under "over budget (tracked)" on every run. TestPolicy rejects these entries:
+A package that meets every rule leaves `unconverted.txt` even if it still uses more than the converted-package budget (10 s of user CPU in `make test`'s budget runner; see [The time budget](#the-time-budget)). In that case, list it in `internal/testpolicy/overbudget.txt` as `<package> <bead-id>`, where the bead tracks getting it under budget, and raise `maxOverBudget` to match. The budget runner does not fail a package on that list. Instead it prints the package's user CPU, system and wall time, and its bead, under "over budget (tracked)" on every run. TestPolicy rejects these entries:
 - one with a missing or malformed bead id;
 - one for a package that breaks a rule;
 - one for a package also in `unconverted.txt`;

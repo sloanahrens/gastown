@@ -78,7 +78,7 @@ func TestCheckOverBudget(t *testing.T) {
 }
 
 // A package in overbudget.txt is exempt from the budget but reported with its
-// bead and time on every run, over the budget or not.
+// bead, CPU and wall time on every run, over the budget or not.
 func TestWatchBudgetTracked(t *testing.T) {
 	t.Parallel()
 	const stream = `{"Action":"pass","Package":"m/internal/git","Elapsed":41.5}
@@ -87,8 +87,13 @@ func TestWatchBudgetTracked(t *testing.T) {
 {"Action":"pass","Package":"m/internal/c","Elapsed":1.0}
 `
 	tracked := map[string]string{"internal/git": "gt-22hdp.35", "internal/fast": "gt-x"}
+	cpu := cpuOf(map[string]CPUTime{
+		"internal/git":  {User: 15 * time.Second, Sys: 300 * time.Second},
+		"internal/slow": {User: 12 * time.Second},
+		"internal/c":    {User: time.Second},
+	})
 	var out bytes.Buffer
-	over, runs, err := WatchBudgetTracked(strings.NewReader(stream), &out, 10*time.Second, nil, tracked, "m")
+	over, runs, err := WatchBudgetTracked(strings.NewReader(stream), &out, 10*time.Second, nil, tracked, "m", cpu)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,8 +101,8 @@ func TestWatchBudgetTracked(t *testing.T) {
 		t.Fatalf("overruns = %+v, want internal/slow only", over)
 	}
 	want := []TrackedRun{
-		{Package: "internal/git", Bead: "gt-22hdp.35", Elapsed: 41500 * time.Millisecond},
-		{Package: "internal/fast", Bead: "gt-x", Elapsed: 2 * time.Second},
+		{Package: "internal/git", Bead: "gt-22hdp.35", Elapsed: 41500 * time.Millisecond, CPU: CPUTime{User: 15 * time.Second, Sys: 300 * time.Second}},
+		{Package: "internal/fast", Bead: "gt-x", Elapsed: 2 * time.Second, Unmeasured: true},
 	}
 	if len(runs) != len(want) || runs[0] != want[0] || runs[1] != want[1] {
 		t.Fatalf("tracked = %+v, want %+v", runs, want)

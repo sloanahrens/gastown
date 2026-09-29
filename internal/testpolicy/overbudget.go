@@ -24,10 +24,13 @@ type OverBudgetEntry struct {
 	Line          int
 }
 
-// TrackedRun is the time an over-budget package took in one budget run.
+// TrackedRun is what an over-budget package used in one budget run: its CPU
+// time (Unmeasured when there was no measurement) and its wall time.
 type TrackedRun struct {
 	Package, Bead string
 	Elapsed       time.Duration
+	CPU           CPUTime
+	Unmeasured    bool
 }
 
 var beadIDPattern = regexp.MustCompile(`^[a-z]+-[a-z0-9]+(\.[0-9]+)*$`)
