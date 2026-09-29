@@ -138,7 +138,28 @@ func payloadCwd(input []byte) string {
 }
 
 func runTapGuardBdCloseInvariant(cmd *cobra.Command, args []string) error {
-	input, err := io.ReadAll(os.Stdin)
+	return tapGuardBdCloseInvariant(os.Stdin, realGuardProcess())
+}
+
+// realGuardProcess is the running process's environment and working
+// directory.
+func realGuardProcess() guardProcess {
+	return guardProcess{getenv: os.Getenv, getwd: os.Getwd}
+}
+
+// guardProcess is the process state the bd-close guard reads: the
+// environment and the working directory. runTapGuardBdCloseInvariant passes
+// the real ones; tests pass their own, so they need no t.Setenv and can run
+// in parallel.
+type guardProcess struct {
+	getenv func(string) string
+	getwd  func() (string, error)
+}
+
+// tapGuardBdCloseInvariant is the guard: it reads the hook payload from
+// stdin and the session from proc.
+func tapGuardBdCloseInvariant(stdin io.Reader, proc guardProcess) error {
+	input, err := io.ReadAll(stdin)
 	if err != nil {
 		// Unreadable stdin is "we don't know what command this is", and this
 		// guard's only behavior is command-dependent — there is no
@@ -157,7 +178,7 @@ func runTapGuardBdCloseInvariant(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	scope, ok := resolveBdCloseInvariantScope(payloadCwd(input))
+	scope, ok := resolveBdCloseInvariantScope(payloadCwd(input), proc)
 	if !ok {
 		return nil
 	}
@@ -204,13 +225,13 @@ type bdCloseInvariantScope struct {
 // The rig beads client is built from the rig path (not the worktree), matching
 // gt done: MR beads always live in the rig DB, and cwd may be a checkout the
 // rig path cannot be derived from once the worktree is gone.
-func resolveBdCloseInvariantScope(payloadCwd string) (bdCloseInvariantScope, bool) {
-	if !isGasTownAgentContext() {
+func resolveBdCloseInvariantScope(payloadCwd string, proc guardProcess) (bdCloseInvariantScope, bool) {
+	if !isGasTownAgentContextIn(proc.getenv, proc.getwd) {
 		return bdCloseInvariantScope{}, false
 	}
 	cwd := payloadCwd
 	if cwd == "" || !filepath.IsAbs(cwd) {
-		wd, err := os.Getwd()
+		wd, err := proc.getwd()
 		if err != nil {
 			return bdCloseInvariantScope{}, false
 		}
@@ -229,8 +250,8 @@ func resolveBdCloseInvariantScope(payloadCwd string) (bdCloseInvariantScope, boo
 
 	// Rig identity comes from the role context, with GT_RIG as a backstop for
 	// a session whose cwd-derived detection fails but whose env is intact.
-	rigName := os.Getenv("GT_RIG")
-	ctx, ctxErr := GetRoleWithContext(cwd, townRoot)
+	rigName := proc.getenv("GT_RIG")
+	ctx, ctxErr := getRoleWithContextEnv(cwd, townRoot, proc.getenv)
 	if ctxErr == nil {
 		if ctx.Rig != "" {
 			rigName = ctx.Rig

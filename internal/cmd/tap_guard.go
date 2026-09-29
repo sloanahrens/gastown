@@ -390,6 +390,12 @@ func printPRWorkflowMaintainerOriginBlock() {
 
 // isGasTownAgentContext returns true if we're running as a Gas Town managed agent.
 func isGasTownAgentContext() bool {
+	return isGasTownAgentContextIn(os.Getenv, os.Getwd)
+}
+
+// isGasTownAgentContextIn is isGasTownAgentContext reading the environment
+// through getenv and the working directory through getwd.
+func isGasTownAgentContextIn(getenv func(string) string, getwd func() (string, error)) bool {
 	// Check environment variables set by Gas Town session management
 	envVars := []string{
 		"GT_POLECAT",
@@ -401,13 +407,13 @@ func isGasTownAgentContext() bool {
 		"GT_DOG_NAME",
 	}
 	for _, env := range envVars {
-		if os.Getenv(env) != "" {
+		if getenv(env) != "" {
 			return true
 		}
 	}
 
 	// Also check if we're in a crew or polecat worktree by path
-	cwd, err := os.Getwd()
+	cwd, err := getwd()
 	if err != nil {
 		return false
 	}
