@@ -15,6 +15,7 @@ import (
 )
 
 func TestExtractIssueID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -42,6 +43,7 @@ func TestExtractIssueID(t *testing.T) {
 }
 
 func TestIsSlingableType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		issueType string
 		want      bool
@@ -71,6 +73,7 @@ func TestIsSlingableType(t *testing.T) {
 }
 
 func TestIsIssueBlocked_NoStore(t *testing.T) {
+	t.Parallel()
 	// isIssueBlocked with nil store should fail-open (return false, not panic).
 	// This covers the "store unavailable" failure mode (F-17).
 	result := isIssueBlocked(context.Background(), nil, "test-any-id", nil)
@@ -80,6 +83,7 @@ func TestIsIssueBlocked_NoStore(t *testing.T) {
 }
 
 func TestReadyIssueFilterLogic_SkipsNonSlingableTypes(t *testing.T) {
+	t.Parallel()
 	// Validates that feedNextReadyIssue's type filter skips non-slingable types.
 	// We test the predicate inline (same pattern as existing filter tests).
 	tracked := []trackedIssue{
@@ -105,6 +109,7 @@ func TestReadyIssueFilterLogic_SkipsNonSlingableTypes(t *testing.T) {
 }
 
 func TestReadyIssueFilterLogic_SkipsNonOpenIssues(t *testing.T) {
+	t.Parallel()
 	// Validates the filtering predicate used by feedNextReadyIssue: only
 	// open issues with no assignee should be considered "ready". We test
 	// the predicate inline because feedNextReadyIssue also calls rigForIssue
@@ -126,6 +131,7 @@ func TestReadyIssueFilterLogic_SkipsNonOpenIssues(t *testing.T) {
 }
 
 func TestReadyIssueFilterLogic_FindsReadyIssue(t *testing.T) {
+	t.Parallel()
 	// Validates that the "first open+unassigned" selection picks the correct
 	// issue. See comment on TestReadyIssueFilterLogic_SkipsNonOpenIssues for
 	// why this tests the predicate inline rather than calling feedNextReadyIssue.
@@ -151,6 +157,7 @@ func TestReadyIssueFilterLogic_FindsReadyIssue(t *testing.T) {
 }
 
 func TestCheckConvoysForIssue_NilStore(t *testing.T) {
+	t.Parallel()
 	// Nil store returns nil immediately (no convoy checks).
 	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil)
 	if result != nil {
@@ -159,6 +166,7 @@ func TestCheckConvoysForIssue_NilStore(t *testing.T) {
 }
 
 func TestCheckConvoysForIssue_NilLogger(t *testing.T) {
+	t.Parallel()
 	// Nil logger should not panic — gets replaced with no-op internally.
 	// With nil store, returns nil.
 	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil)
@@ -172,6 +180,7 @@ func TestCheckConvoysForIssue_NilLogger(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBlockingDepTypes_ContainsExpectedTypes(t *testing.T) {
+	t.Parallel()
 	expected := []string{"blocks", "conditional-blocks", "waits-for", "merge-blocks"}
 	for _, depType := range expected {
 		if !blockingDepTypes[depType] {
@@ -181,12 +190,14 @@ func TestBlockingDepTypes_ContainsExpectedTypes(t *testing.T) {
 }
 
 func TestBlockingDepTypes_ExcludesParentChild(t *testing.T) {
+	t.Parallel()
 	if blockingDepTypes["parent-child"] {
 		t.Error("blockingDepTypes should NOT contain parent-child")
 	}
 }
 
 func TestBlockingDepTypes_ExactSize(t *testing.T) {
+	t.Parallel()
 	// Ensure the map has exactly the 4 expected entries and no extras.
 	if len(blockingDepTypes) != 4 {
 		t.Errorf("blockingDepTypes has %d entries, want 4; contents: %v", len(blockingDepTypes), blockingDepTypes)
@@ -199,6 +210,7 @@ func TestBlockingDepTypes_ExactSize(t *testing.T) {
 
 func TestIsIssueBlocked_NoDeps(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -224,6 +236,7 @@ func TestIsIssueBlocked_NoDeps(t *testing.T) {
 
 func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -284,6 +297,7 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 
 func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -335,6 +349,7 @@ func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
 
 func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -385,6 +400,7 @@ func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
 
 func TestIsIssueBlocked_FailOpenOnNonexistentIssue(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -401,6 +417,7 @@ func TestIsIssueBlocked_FailOpenOnNonexistentIssue(t *testing.T) {
 
 func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -453,6 +470,7 @@ func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing
 
 func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -505,6 +523,7 @@ func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
 
 func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -566,6 +585,7 @@ func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRigForIssue_ValidPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create .beads/routes.jsonl with a mapping
@@ -591,6 +611,7 @@ func TestRigForIssue_ValidPrefix(t *testing.T) {
 }
 
 func TestRigForIssue_EmptyPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// No prefix extractable from "nohyphen"
@@ -601,6 +622,7 @@ func TestRigForIssue_EmptyPrefix(t *testing.T) {
 }
 
 func TestRigForIssue_EmptyIssueID(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	rig := rigForIssue(townRoot, "")
@@ -610,6 +632,7 @@ func TestRigForIssue_EmptyIssueID(t *testing.T) {
 }
 
 func TestRigForIssue_UnknownPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create routes.jsonl with only gt- mapping
@@ -630,6 +653,7 @@ func TestRigForIssue_UnknownPrefix(t *testing.T) {
 }
 
 func TestRigForIssue_NoRoutesFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// No .beads directory at all — should return ""
@@ -640,6 +664,7 @@ func TestRigForIssue_NoRoutesFile(t *testing.T) {
 }
 
 func TestRigForIssue_TownLevelPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Town-level beads have path="." which should return "" (no specific rig)
@@ -714,6 +739,7 @@ func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
 	}
 
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -805,6 +831,7 @@ func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
 	}
 
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -884,6 +911,7 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 	}
 
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -988,6 +1016,7 @@ func TestFeedNextReadyIssue_NoReadyIssues_LogsMessage(t *testing.T) {
 	}
 
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1065,6 +1094,7 @@ func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
 	}
 
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1138,6 +1168,7 @@ func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDispatchIssue_Success(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
@@ -1165,6 +1196,7 @@ func TestDispatchIssue_Success(t *testing.T) {
 // slung with --agent must be re-dispatched with the same agent, or the feed
 // silently re-routes it to the rig default.
 func TestDispatchIssue_PassesAgent(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
@@ -1192,6 +1224,7 @@ func TestDispatchIssue_PassesAgent(t *testing.T) {
 // passed through verbatim, and the no-agent fallback stays with gt sling while
 // naming the rig default it expects (gt-yg24).
 func TestFeedDispatchAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	t.Run("recorded agent wins", func(t *testing.T) {
@@ -1232,6 +1265,7 @@ func TestFeedDispatchAgent(t *testing.T) {
 // sling-time agent record. Every re-dispatch path reads the field through it, so
 // the field spellings and the empty cases are pinned here once (gt-mxyk).
 func TestAgentFromConvoyDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -1280,6 +1314,7 @@ func TestAgentFromConvoyDescription(t *testing.T) {
 // makes: a recorded agent is passed through, and an unrecorded one is left to
 // gt sling while naming the rig default it expects (gt-mxyk, gt-yg24).
 func TestRedispatchAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	tests := []struct {
@@ -1326,6 +1361,7 @@ func TestRedispatchAgent(t *testing.T) {
 }
 
 func TestDispatchIssue_Failure(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
@@ -1345,6 +1381,7 @@ func TestDispatchIssue_Failure(t *testing.T) {
 
 func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1436,6 +1473,7 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 
 func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1525,6 +1563,7 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 	}
 
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1818,6 +1857,7 @@ func TestFetchCrossRigBeadStatus_UnknownPrefix(t *testing.T) {
 }
 
 func TestFetchCrossRigBeadStatus_EmptyInput(t *testing.T) {
+	t.Parallel()
 	result := fetchCrossRigBeadStatus("/nonexistent", nil)
 	if len(result) != 0 {
 		t.Errorf("expected 0 results for empty input, got %d", len(result))
@@ -1825,6 +1865,7 @@ func TestFetchCrossRigBeadStatus_EmptyInput(t *testing.T) {
 }
 
 func TestFireCrossRigDepNotifications_NilStores(t *testing.T) {
+	t.Parallel()
 	// Should not panic with nil stores.
 	FireCrossRigDepNotifications(context.Background(), "bd-xxx", "/tmp", nil, nil)
 }
@@ -1832,6 +1873,7 @@ func TestFireCrossRigDepNotifications_NilStores(t *testing.T) {
 func TestFireCrossRigDepNotifications_EmptyClosedID(t *testing.T) {
 	// Should not panic with empty closed issue ID.
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 	FireCrossRigDepNotifications(context.Background(), "", "/tmp", map[string]beadsdk.Storage{"test": store}, nil)
 }
@@ -1839,6 +1881,7 @@ func TestFireCrossRigDepNotifications_EmptyClosedID(t *testing.T) {
 func TestFireCrossRigDepNotifications_EmptyPrefix(t *testing.T) {
 	// Issue ID without a recognizable prefix should not panic.
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 	FireCrossRigDepNotifications(context.Background(), "noprefixid", "/tmp", map[string]beadsdk.Storage{"test": store}, nil)
 }
@@ -1951,6 +1994,7 @@ func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
 	defer convoyCleanup()
 	// The rig store: the bead's home, and the only place its hold is written.
 	rigStore, rigCleanup := setupTestStore(t)
+	t.Parallel()
 	defer rigCleanup()
 
 	ctx := context.Background()
@@ -2067,6 +2111,7 @@ func TestDispatchHoldReason_ResolverRedirectsToRigStore(t *testing.T) {
 	townStore, townCleanup := setupTestStore(t)
 	defer townCleanup()
 	rigStore, rigCleanup := setupTestStore(t)
+	t.Parallel()
 	defer rigCleanup()
 
 	ctx := context.Background()
@@ -2139,6 +2184,7 @@ func TestFeedNextReadyIssue_UnreadableRecordFailsClosed(t *testing.T) {
 	}
 
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()

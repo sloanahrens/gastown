@@ -13,6 +13,7 @@ import (
 // a close event must not sling the convoy's next issue. The hold is answered
 // before the store is read, so a nil store proves nothing else ran.
 func TestFeedNextReadyIssue_OperatorHold_DispatchesNothing(t *testing.T) {
+	t.Parallel()
 	townRoot := setupTownRoot(t)
 	if err := os.WriteFile(filepath.Join(townRoot, "seat-refill.hold"), nil, 0644); err != nil {
 		t.Fatalf("write hold: %v", err)

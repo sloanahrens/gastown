@@ -37,6 +37,7 @@ const rejectedNotes = "MERGE REJECTION (attempt 1): tests fail - see review\nBra
 // TestFeedHold_MergeRejection pins gt-ghyfx: a bead the refinery rejected and
 // reopened is the deacon's to redispatch, so the convoy feeders' hold names it.
 func TestFeedHold_MergeRejection(t *testing.T) {
+	t.Parallel()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-r": {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
 	}}
@@ -53,6 +54,7 @@ func TestFeedHold_MergeRejection(t *testing.T) {
 // gt-ghyfx: the deacon's RECOVERED_BEAD redispatch gates on DispatchHoldReason
 // and exists to redispatch rejected beads, so the marker must not hold there.
 func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
+	t.Parallel()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-r": {ID: "gt-r", Status: beadsdk.StatusOpen, Notes: rejectedNotes},
 	}}
@@ -62,6 +64,7 @@ func TestDispatchHoldReason_MergeRejectionIsNotAHold(t *testing.T) {
 }
 
 func TestFeedHold_Verdicts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
 		"gt-clean":    {ID: "gt-clean", Status: beadsdk.StatusOpen, Notes: "ordinary notes"},
@@ -97,6 +100,7 @@ func TestFeedHold_Verdicts(t *testing.T) {
 // the refinery rejected, while a fresh sibling still feeds.
 func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -152,6 +156,7 @@ func TestFeedNextReadyIssue_SkipsRejectedFeedsSibling(t *testing.T) {
 // and holds no beadsdk.Storage), and a divergence would mean a polecat
 // restarted against work a convoy feeder would have held (gt-n38c6).
 func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		issue beadsdk.Issue
