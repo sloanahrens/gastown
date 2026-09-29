@@ -139,15 +139,32 @@ jobs:
       - name: Install ICU4C development headers
         run: sudo apt-get install -y libicu-dev
 
+      # The version comes from the Makefile's GOLANGCI_LINT_VERSION, the one
+      # `make lint` (the refinery gate) installs. A second pin here drifted to
+      # v2.11.4 while the gate ran v2.13.2, and the two disagreed about main.
+      - name: Read golangci-lint version from the Makefile
+        id: lint-version
+        run: |
+          version="$(sed -n 's/^GOLANGCI_LINT_VERSION ?= *//p' Makefile)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9
         with:
-          version: v2.11.4
+          version: ${{ steps.lint-version.outputs.version }}
           args: --timeout=5m
 
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
+    env:
+      # Container-backed tests are opt-in (internal/testutil DockerTestsEnv).
+      # Without it the integration TestMain cannot start its Dolt container and
+      # fails the package before running a test, which is how this job was red
+      # on every push (gt-22hdp.39). The runner has Docker; the image is
+      # pre-pulled below.
+      GT_TEST_DOCKER: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -157,8 +174,9 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      - name: Install ICU4C development headers
-        run: sudo apt-get install -y libicu-dev
+      # tmux: the integration tier drives a real tmux server.
+      - name: Install ICU4C development headers and tmux
+        run: sudo apt-get install -y libicu-dev tmux
 
       - name: Configure Git
         run: |
@@ -187,6 +205,14 @@ jobs:
         run: |
           status=0
 
+          # The integration tier as the Makefile defines it (every package's
+          # TestIntegration* tests), the same command the daemon's
+          # main_branch_test patrol runs.
+          make test-integration \
+            INTEGRATION_GO_TEST="gotestsum --format testname --junitfile junit-integration-tier.xml --" || status=1
+
+          # internal/cmd's integration-tagged tests that predate the
+          # TestIntegration naming rule, which the tier's -run filter skips.
           gotestsum --format testname --junitfile junit-integration.xml -- \
             -tags=integration -timeout=15m -v ./internal/cmd/... || status=1
 
@@ -219,6 +245,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           status=0
+          python3 .github/scripts/junit-report.py junit-integration-tier.xml "Integration Tier Failures" || status=1
           python3 .github/scripts/junit-report.py junit-integration.xml "Integration Test Failures" || status=1
           python3 .github/scripts/junit-report.py junit-scheduler-1.xml "Scheduler Integration Failures 1" || status=1
           python3 .github/scripts/junit-report.py junit-scheduler-2.xml "Scheduler Integration Failures 2" || status=1

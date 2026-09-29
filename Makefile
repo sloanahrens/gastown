@@ -252,10 +252,15 @@ test-changed: test-makefile
 	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m $(PKGS)
 
 # test-integration runs only the //go:build integration tier (real tmux, bd,
-# Dolt, gt binary; tests named TestIntegration*). main_branch_test runs it
-# after merge. Docker-backed suites still need `gt slot run` around the call.
+# Dolt, gt binary; tests named TestIntegration*). The daemon's
+# main_branch_test patrol runs it on the gastown rig once a day, and the CI
+# integration job runs it on every push. Docker-backed suites still need
+# `gt slot run` around the call. INTEGRATION_GO_TEST swaps the runner so CI can
+# collect JUnit output from this one definition of the tier, e.g.
+#   make test-integration INTEGRATION_GO_TEST="gotestsum --junitfile j.xml --"
+INTEGRATION_GO_TEST ?= go test
 test-integration:
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -tags integration -run '^TestIntegration' -timeout 20m ./...
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' -timeout 20m ./...
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
 # macOS does not exempt from its first-run scan of new executables. It is the
