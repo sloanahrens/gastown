@@ -1793,6 +1793,12 @@ func cleanupMoleculeOnHandoff() {
 // Crew and mayor roles are exempt — they hand off on human request,
 // not on patrol loops, so the cooldown just gets in the way.
 func enforceHandoffCooldown() {
+	enforceHandoffCooldownWith(time.Sleep)
+}
+
+// enforceHandoffCooldownWith is enforceHandoffCooldown with the wait passed
+// in, so tests can see how long it would sleep without sleeping.
+func enforceHandoffCooldownWith(sleep func(time.Duration)) {
 	if role := os.Getenv("GT_ROLE"); role != "" {
 		parsed, _, _ := parseRoleString(role)
 		switch parsed {
@@ -1815,7 +1821,7 @@ func enforceHandoffCooldown() {
 	fmt.Printf("%s Handoff cooldown: waiting %v (last handoff %v ago, min %v)\n",
 		style.Dim.Render("⏳"), remaining.Round(time.Second),
 		age.Round(time.Second), constants.MinHandoffCooldown)
-	time.Sleep(remaining)
+	sleep(remaining)
 }
 
 // recordHandoffTime writes the current timestamp to the handoff cooldown file.

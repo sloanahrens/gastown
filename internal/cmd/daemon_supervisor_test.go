@@ -48,7 +48,7 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 	})
 	// waitForDaemon polls in real time; shrinking the interval keeps the same
 	// attempt count at a wall-clock cost of ms instead of seconds.
-	daemonPollInterval = time.Millisecond
+	daemonPollInterval = time.Nanosecond
 
 	calls := &supervisorCalls{}
 	supervisorGOOS = goos
@@ -622,8 +622,8 @@ func stubRestart(t *testing.T, goos, file string, pids ...int) *supervisorCalls 
 	// waitForDaemon/waitForRestart poll in real time; a test that exhausts
 	// the full attempt budget (e.g. the new daemon never takes the lock)
 	// would otherwise block for waitForRestart's real 60 s. Shrinking the
-	// interval keeps the same number of polls at a wall-clock cost of ms.
-	daemonPollInterval = time.Millisecond
+	// interval keeps the same number of polls at a wall-clock cost of µs.
+	daemonPollInterval = time.Nanosecond
 
 	calls := &supervisorCalls{}
 	supervisorGOOS = goos

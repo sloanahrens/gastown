@@ -963,12 +963,11 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
 
-		start := time.Now()
-		enforceHandoffCooldown()
-		elapsed := time.Since(start)
+		var elapsed time.Duration
+		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
 
 		// Should return almost immediately (no file to check)
-		if elapsed > 1*time.Second {
+		if elapsed != 0 {
 			t.Errorf("expected no cooldown, but waited %v", elapsed)
 		}
 	})
@@ -987,11 +986,10 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		oldTime := time.Now().Add(-10 * time.Minute)
 		os.Chtimes(tsPath, oldTime, oldTime)
 
-		start := time.Now()
-		enforceHandoffCooldown()
-		elapsed := time.Since(start)
+		var elapsed time.Duration
+		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
 
-		if elapsed > 1*time.Second {
+		if elapsed != 0 {
 			t.Errorf("expected no cooldown for old handoff, but waited %v", elapsed)
 		}
 	})
@@ -1011,15 +1009,14 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		recentTime := time.Now().Add(-(constants.MinHandoffCooldown - 1*time.Second))
 		os.Chtimes(tsPath, recentTime, recentTime)
 
-		start := time.Now()
-		enforceHandoffCooldown()
-		elapsed := time.Since(start)
+		var elapsed time.Duration
+		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
 
-		// Should have waited approximately 1 second (the remaining cooldown)
+		// Should wait approximately 1 second (the remaining cooldown)
 		if elapsed < 500*time.Millisecond {
 			t.Errorf("expected cooldown sleep of ~1s, but only waited %v", elapsed)
 		}
-		if elapsed > 3*time.Second {
+		if elapsed > 1500*time.Millisecond {
 			t.Errorf("expected cooldown sleep of ~1s, but waited %v", elapsed)
 		}
 	})
@@ -1035,11 +1032,10 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
 		os.WriteFile(tsPath, []byte("now"), 0644)
 
-		start := time.Now()
-		enforceHandoffCooldown()
-		elapsed := time.Since(start)
+		var elapsed time.Duration
+		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
 
-		if elapsed > 1*time.Second {
+		if elapsed != 0 {
 			t.Errorf("crew should be exempt from cooldown, but waited %v", elapsed)
 		}
 	})
@@ -1055,12 +1051,38 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
 		os.WriteFile(tsPath, []byte("now"), 0644)
 
+		var elapsed time.Duration
+		enforceHandoffCooldownWith(func(d time.Duration) { elapsed += d })
+
+		if elapsed != 0 {
+			t.Errorf("mayor should be exempt from cooldown, but waited %v", elapsed)
+		}
+	})
+
+	// Wiring guard: the exported path really sleeps. The last handoff is
+	// placed 50ms short of the cooldown so the real wait stays short.
+	t.Run("enforceHandoffCooldown sleeps the remaining cooldown", func(t *testing.T) {
+		t.Setenv("GT_ROLE", "gastown/witness")
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+
+		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
+		if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
+		if err := os.WriteFile(tsPath, []byte("now"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		recentTime := time.Now().Add(-(constants.MinHandoffCooldown - 50*time.Millisecond))
+		if err := os.Chtimes(tsPath, recentTime, recentTime); err != nil {
+			t.Fatal(err)
+		}
+
 		start := time.Now()
 		enforceHandoffCooldown()
-		elapsed := time.Since(start)
-
-		if elapsed > 1*time.Second {
-			t.Errorf("mayor should be exempt from cooldown, but waited %v", elapsed)
+		if elapsed := time.Since(start); elapsed < 20*time.Millisecond {
+			t.Errorf("enforceHandoffCooldown returned after %v; it did not sleep the remaining cooldown", elapsed)
 		}
 	})
 }

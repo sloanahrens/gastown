@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,16 +58,23 @@ func stubNoContainers(t *testing.T) {
 // explains a timeout instead of a fast success.
 func TestAcquireBatchGateSlot_NeverInvokesRealDockerCLI(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
+	var consulted atomic.Int32
 	restore := slot.SetContainerListerForTest(func() ([]string, error) {
+		consulted.Add(1)
 		return []string{"dolt/dolt-sql-server:2.2.0 someone-elses-suite"}, nil
 	})
 	defer restore()
 
+	// The first acquire pass consults the lister before it checks the
+	// deadline, so a 1ns budget still exercises the probe once and then times
+	// out instead of sleeping a poll interval.
 	townRoot := t.TempDir()
-	timeout := slot.DefaultPollInterval + 500*time.Millisecond
-	_, err := slot.Acquire(townRoot, "gastown/refinery-batch", timeout)
+	_, err := slot.Acquire(townRoot, "gastown/refinery-batch", time.Nanosecond)
 	if err == nil {
 		t.Fatalf("Acquire succeeded even though the stubbed lister reported a running container — the real (docker-absent) lister must have been consulted instead of the stub")
+	}
+	if consulted.Load() == 0 {
+		t.Fatalf("Acquire failed (%v) without consulting the stubbed lister", err)
 	}
 }
 
