@@ -470,6 +470,12 @@ func resolveDonePolecatWorktree() (donePolecatWorktree, error) {
 }
 
 func resolveDonePolecatWorktreeAt(cwd string) (donePolecatWorktree, error) {
+	return resolveDonePolecatWorktreeIn(cwd, os.Getenv)
+}
+
+// resolveDonePolecatWorktreeIn is resolveDonePolecatWorktreeAt reading the
+// session's identity and town root through getenv.
+func resolveDonePolecatWorktreeIn(cwd string, getenv func(string) string) (donePolecatWorktree, error) {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return donePolecatWorktree{}, fmt.Errorf("gt done must be run from the assigned polecat worktree: current directory unavailable")
@@ -488,22 +494,22 @@ func resolveDonePolecatWorktreeAt(cwd string) (donePolecatWorktree, error) {
 	if err != nil {
 		return donePolecatWorktree{}, fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	if err := doneValidateSessionTownRoot(townRoot); err != nil {
+	if err := doneValidateSessionTownRoot(townRoot, getenv); err != nil {
 		return donePolecatWorktree{}, err
 	}
 
-	actorRig, actorName, err := donePolecatActorIdentity(os.Getenv("BD_ACTOR"))
+	actorRig, actorName, err := donePolecatActorIdentity(getenv("BD_ACTOR"))
 	if err != nil {
 		return donePolecatWorktree{}, err
 	}
-	roleRig, roleName, err := donePolecatEnvIdentity(os.Getenv("GT_ROLE"), os.Getenv("GT_RIG"), os.Getenv("GT_POLECAT"))
+	roleRig, roleName, err := donePolecatEnvIdentity(getenv("GT_ROLE"), getenv("GT_RIG"), getenv("GT_POLECAT"))
 	if err != nil {
 		return donePolecatWorktree{}, err
 	}
 	if actorRig != roleRig || actorName != roleName {
 		return donePolecatWorktree{}, fmt.Errorf("gt done identity mismatch: BD_ACTOR=%s/polecats/%s but GT_ROLE/GT_RIG/GT_POLECAT resolve to %s/polecats/%s", actorRig, actorName, roleRig, roleName)
 	}
-	if err := doneRejectGitEnvOverrides(); err != nil {
+	if err := doneRejectGitEnvOverrides(getenv); err != nil {
 		return donePolecatWorktree{}, err
 	}
 
@@ -645,10 +651,10 @@ func doneValidateIdentitySegment(name, value string) error {
 	return nil
 }
 
-func doneValidateSessionTownRoot(townRoot string) error {
+func doneValidateSessionTownRoot(townRoot string, getenv func(string) string) error {
 	current := doneCanonicalPath(townRoot)
 	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
-		envRoot := strings.TrimSpace(os.Getenv(envName))
+		envRoot := strings.TrimSpace(getenv(envName))
 		if envRoot == "" {
 			continue
 		}
@@ -667,7 +673,7 @@ func donePathWithin(root, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
 }
 
-func doneRejectGitEnvOverrides() error {
+func doneRejectGitEnvOverrides(getenv func(string) string) error {
 	for _, envName := range []string{
 		"GIT_DIR",
 		"GIT_WORK_TREE",
@@ -677,7 +683,7 @@ func doneRejectGitEnvOverrides() error {
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
 		"GIT_NAMESPACE",
 	} {
-		if strings.TrimSpace(os.Getenv(envName)) != "" {
+		if strings.TrimSpace(getenv(envName)) != "" {
 			return fmt.Errorf("gt done requires an unambiguous git worktree; unset %s", envName)
 		}
 	}
