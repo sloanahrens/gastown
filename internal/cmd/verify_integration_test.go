@@ -140,8 +140,10 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		deletePkgb(t, dir)
 
 		g := git.NewGit(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		suite, suiteRan := suiteMarker(dir)
+		mq := &config.MergeQueueConfig{TestCommand: suite}
 		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/delete-role")
+		assertSuiteRan(t, suiteRan)
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: a clean whole-package deletion must not refuse (gt-ytjh): %v", err)
 		}
@@ -203,8 +205,10 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
 
 		g := git.NewGit(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		suite, suiteRan := suiteMarker(dir)
+		mq := &config.MergeQueueConfig{TestCommand: suite}
 		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/nested-module-role")
+		assertSuiteRan(t, suiteRan)
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: a change inside a nested module must not refuse: %v", err)
 		}
@@ -268,8 +272,10 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		deletePkgb(t, dir)
 
 		g := git.NewGit(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		suite, suiteRan := suiteMarker(dir)
+		mq := &config.MergeQueueConfig{TestCommand: suite}
 		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/single-binary-role")
+		assertSuiteRan(t, suiteRan)
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}

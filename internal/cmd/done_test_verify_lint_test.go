@@ -12,6 +12,25 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 )
 
+// suiteMarker returns a test_command that only records that it ran, and the
+// file it records to. The subtests that use it are about what the gate does
+// around the suite (lint, retries, the slot, the whole-module build); a real
+// `go test` compiles and links a test binary per call, the most expensive
+// thing this package's unit tier did. TestRunDefaultTestVerification's
+// passing and failing cases still run the real one.
+func suiteMarker(dir string) (command, marker string) {
+	marker = filepath.Join(dir, "suite-ran")
+	return "echo ran > '" + marker + "'", marker
+}
+
+// assertSuiteRan fails t unless the suiteMarker command wrote its marker.
+func assertSuiteRan(t *testing.T, marker string) {
+	t.Helper()
+	if got, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(got)) != "ran" {
+		t.Errorf("the suite did not run: got=%q err=%v", got, err)
+	}
+}
+
 // TestRunDefaultTestVerification_Lint covers the rig lint_command inside gt
 // done's default gate: it runs slot-free before the tests, a failure refuses
 // the submission without spending a suite run, and it still runs when the
@@ -36,9 +55,11 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		}, nil)
 
 		marker := filepath.Join(dir, "lint-ran")
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: "echo ok > '" + marker + "'"}
+		suite, suiteRan := suiteMarker(dir)
+		mq := &config.MergeQueueConfig{TestCommand: suite, LintCommand: "echo ok > '" + marker + "'"}
 		g := git.NewGit(dir)
 		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-role")
+		assertSuiteRan(t, suiteRan)
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -106,9 +127,11 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		}, nil)
 
 		marker := filepath.Join(dir, "lint-ran")
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: "echo ok > '" + marker + "'"}
+		suite, suiteRan := suiteMarker(dir)
+		mq := &config.MergeQueueConfig{TestCommand: suite, LintCommand: "echo ok > '" + marker + "'"}
 		g := git.NewGit(dir)
 		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-container-role")
+		assertSuiteRan(t, suiteRan)
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -141,9 +164,11 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		runGitIn(t, dir, "add", ".")
 		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
 
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
+		suite, suiteRan := suiteMarker(dir)
+		mq := &config.MergeQueueConfig{TestCommand: suite}
 		g := git.NewGit(dir)
 		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/no-lint-role")
+		assertSuiteRan(t, suiteRan)
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
@@ -205,9 +230,11 @@ func TestRunDefaultTestVerification_LintLockContention(t *testing.T) {
 		stubVerifyLintRetryDelay(vg, time.Millisecond, time.Millisecond)
 
 		lint, counter := collidingLint(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./...", LintCommand: lint}
+		suite, suiteRan := suiteMarker(dir)
+		mq := &config.MergeQueueConfig{TestCommand: suite, LintCommand: lint}
 		g := git.NewGit(dir)
 		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/lint-lock-role")
+		assertSuiteRan(t, suiteRan)
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification after a released lock: %v", err)
 		}
