@@ -1743,6 +1743,8 @@ const (
 	// ZombieAgentDeadInSession: tmux session alive but agent process died.
 	ZombieAgentDeadInSession ZombieClassification = "agent-dead-in-session"
 	// ZombieBeadClosedStillRunning: agent alive but hooked bead already closed.
+	// No longer produced (G1-03: it was read from the unmaintained hook_bead
+	// slot); kept so receipts and the mountain view still name old results.
 	ZombieBeadClosedStillRunning ZombieClassification = "bead-closed-still-running"
 	// ZombieDoneIntentDead: session died while executing gt done.
 	ZombieDoneIntentDead ZombieClassification = "done-intent-dead"
@@ -2125,29 +2127,14 @@ func (h *handlers) detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName
 		return zombie, true
 	}
 
-	// Agent alive but hooked bead closed — occupying slot without work (gt-h1l6i).
-	// gt-dsgp: Restart instead of nuke — the fresh session will pick up its hook
-	// and run gt done properly, or go idle waiting for new work.
-	if hookSt, hookOk := getBeadStatus(bd, workDir, snapHook); snapHook != "" && hookOk && hookSt == "closed" {
-		zombie := ZombieResult{
-			PolecatName:    polecatName,
-			AgentState:     snapState,
-			Classification: ZombieBeadClosedStillRunning,
-			HookBead:       snapHook,
-			WasActive:      true,
-			Action:         "restarted-bead-closed-polecat",
-		}
-		// TOCTOU guard (gt-0pst): Re-check session liveness before restarting.
-		// The session could have exited normally between our initial check and here.
-		if alive, _ := t.HasSession(sessionName); !alive {
-			return ZombieResult{}, false
-		}
-		if err := h.restartPolecatSession(workDir, rigName, polecatName); err != nil {
-			zombie.Error = err
-			zombie.Action = fmt.Sprintf("restart-bead-closed-failed: %v", err)
-		}
-		return zombie, true
-	}
+	// A live agent is never restarted on the agent bead's hook_bead slot
+	// (G1-03). The gt-h1l6i "hooked bead closed while still running" branch
+	// that stood here restarted working polecats: the slot is not written any
+	// more (updateAgentHookBead is a no-op, hq-l6mm5), so after work is
+	// re-slung to a live polecat it still names the previous, closed bead. An
+	// idle live polecat is the daemon's idle reaper's call, which reads the
+	// work bead's status and assignee (hasAssignedOpenWork); per ADR 0003 the
+	// witness does not hold that restart authority.
 
 	// GH#3055: gt done can successfully submit work and leave cleanup_status=clean,
 	// but fail before exiting the polecat session. If successful MR evidence exists

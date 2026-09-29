@@ -2122,69 +2122,67 @@ func TestGetBeadStatus_EmptyBeadID(t *testing.T) {
 	}
 }
 
-func TestDetectZombie_BeadClosedStillRunning(t *testing.T) {
-	t.Parallel()
-	// Verify the logic: live session + agent alive + hooked bead closed → zombie
-	// This is the gt-h1l6i fix: DetectZombiePolecats now checks if the
-	// polecat's hooked bead has been closed while the session is still running.
-	sessionAlive := true
-	agentAlive := true
-	var doneIntent *DoneIntent // No done-intent
-	hookBead := "gt-some-issue"
-	beadStatus := "closed"
-
-	// Live session + agent alive + no done-intent + bead closed → should detect
-	shouldDetect := sessionAlive && agentAlive && doneIntent == nil &&
-		hookBead != "" && beadStatus == "closed"
-	if !shouldDetect {
-		t.Error("expected zombie detection for live session with closed bead")
+// TestDetectZombieLiveSession_StaleClosedHookDoesNotRestart is G1-03: the
+// agent bead's hook_bead slot is no longer written (updateAgentHookBead is a
+// no-op, hq-l6mm5), so after work is re-slung to a live polecat it still names
+// the previous, closed bead. A live polecat in a long tool run (no gt command,
+// so no fresh heartbeat) used to be restarted mid-work on that stale pointer.
+// The witness must not restart a live agent on the hook_bead slot at all.
+func TestDetectZombieLiveSession_StaleClosedHookDoesNotRestart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
 	}
 
-	// Bead open → NOT a zombie
-	beadStatus = "open"
-	shouldSkip := sessionAlive && agentAlive && doneIntent == nil &&
-		hookBead != "" && beadStatus == "closed"
-	if shouldSkip {
-		t.Error("should not detect zombie when bead is still open")
-	}
+	townRoot := t.TempDir()
+	socket := constants.TestSocketName("gt-test-g103")
+	tm := tmux.NewTmuxWithSocket(socket)
+	t.Cleanup(func() { _ = tm.KillServer() })
 
-	// No hook bead → NOT a zombie
-	hookBead = ""
-	beadStatus = "closed"
-	shouldSkipNoHook := sessionAlive && agentAlive && doneIntent == nil &&
-		hookBead != "" && beadStatus == "closed"
-	if shouldSkipNoHook {
-		t.Error("should not detect zombie when no hook bead exists")
+	sessionName := "gt-test-onyx"
+	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+		t.Fatalf("create tmux session: %v", err)
 	}
-}
-
-func TestDetectZombie_BeadClosedVsDoneIntent(t *testing.T) {
-	t.Parallel()
-	// Verify done-intent takes priority over closed-bead check.
-	// If done-intent exists (recent), the polecat is still working through
-	// gt done and we should NOT trigger the closed-bead path.
-	sessionAlive := true
-	agentAlive := true
-	doneIntent := &DoneIntent{
-		ExitType:  "COMPLETED",
-		Timestamp: time.Now().Add(-10 * time.Second), // Recent
+	if err := tm.SetEnvironment(sessionName, "GT_PROCESS_NAMES", "sleep"); err != nil {
+		t.Fatalf("set GT_PROCESS_NAMES: %v", err)
 	}
-	hookBead := "gt-some-issue"
-	beadStatus := "closed"
-
-	// Done-intent exists + bead closed → done-intent check runs first,
-	// closed-bead check should NOT run (it's in the else branch)
-	doneIntentHandled := sessionAlive && doneIntent != nil && time.Since(doneIntent.Timestamp) > config.DefaultWitnessDoneIntentStuckTimeout
-	closedBeadCheck := sessionAlive && agentAlive && doneIntent == nil &&
-		hookBead != "" && beadStatus == "closed"
-
-	// Neither should trigger: done-intent is recent (not stuck), and
-	// closed-bead check requires doneIntent == nil
-	if doneIntentHandled {
-		t.Error("recent done-intent should not trigger stuck-session handler")
+	if alive, err := tm.IsAgentAliveChecked(sessionName); err != nil || !alive {
+		t.Fatalf("precondition: fake session should report agent alive (alive=%v err=%v)", alive, err)
 	}
-	if closedBeadCheck {
-		t.Error("closed-bead check should not run when done-intent exists")
+	createdAt, err := tm.GetSessionCreatedTime(sessionName)
+	if err != nil {
+		t.Fatalf("session created time: %v", err)
+	}
+	// Inside the startup grace, so the never-heartbeated rule stays out of it.
+	now := createdAt.Add(time.Second)
+
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) > 0 && args[0] == "show" {
+				return `[{"id":"gt-previous","status":"closed"}]`, nil
+			}
+			return "[]", nil
+		},
+		func(args []string) error { return nil },
+	)
+	snap := &agentBeadSnapshot{AgentState: "working", HookBead: "gt-previous"}
+
+	h := newTestHandlers()
+	var restarts []string
+	h.restartSessionExecFn = func(_, address string) error {
+		restarts = append(restarts, address)
+		return nil
+	}
+	h.hookHoldReasonFn = func(*BdCli, string, string, string) (string, bool) { return "", false }
+
+	zombie, found := h.detectZombieLiveSession(bd, townRoot, townRoot, "gastown", "onyx", sessionName, tm, nil, &config.WitnessThresholds{}, snap, "", now)
+	if len(restarts) != 0 {
+		t.Fatalf("restarted a live polecat on a stale closed hook_bead: %v (zombie=%+v)", restarts, zombie)
+	}
+	if found && zombie.Classification == ZombieBeadClosedStillRunning {
+		t.Fatalf("classified a live polecat as %s from the unmaintained hook_bead slot", zombie.Classification)
 	}
 }
 
