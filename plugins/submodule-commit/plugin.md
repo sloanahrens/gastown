@@ -32,9 +32,11 @@ repo's submodule pointer. Polecats only operate on parent repo worktrees and
 have no commit mandate for submodule repos — this plugin fills that gap.
 
 **Opt-in only.** Rigs must enable this plugin in their `plugin.md` frontmatter.
-The opt-in is read from `gt rig settings show <rig>`, whose settings have no
-`plugins` key yet (gt-fcxe9.13); a rig with submodules and no readable opt-in
-is logged as a WARN and named in the skip receipt, not read as a silent off.
+**Disabled until gt-fcxe9.13.** The opt-in is read from `gt rig settings show
+<rig>`, whose settings have no `plugins` key yet, so no rig can opt in today.
+A rig with submodules and no readable opt-in is logged as a WARN, named in the
+skip receipt, and escalated once under the fingerprint
+`submodule-commit:opt-in-unreadable`.
 Current enabled rigs: `lilypad_chat` (3 Bitbucket submodules).
 
 ## Step 1: Find opt-in rigs with submodules
