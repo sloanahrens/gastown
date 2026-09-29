@@ -183,9 +183,15 @@ const maxReportedStubs = 5
 // selected through the file the daemon reads, or a reinstall when none is.
 const sdkFixHint = "Point SDKROOT at a well-formed SDK in settings/daemon.env (see Reference, Daemon Environment), or reinstall Command Line Tools"
 
+// sdkCheckGOOS is the OS the check believes it runs on. A variable so the
+// tests of the macOS path run on every OS: they stub the SDK, but read the
+// real runtime.GOOS, so on the Linux CI runner every one of them hit the
+// not-applicable branch and failed (gt-22hdp.39).
+var sdkCheckGOOS = runtime.GOOS
+
 // Run reports whether the SDK a cgo build links against is well-formed.
 func (c *MacOSSDKCheck) Run(_ *CheckContext) *CheckResult {
-	if runtime.GOOS != "darwin" {
+	if sdkCheckGOOS != "darwin" {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,

@@ -39,12 +39,39 @@ func writeSDK(t *testing.T, dir string, stubs map[string]string) {
 	}
 }
 
-// stubResolveSDK points the check at an SDK path and source for the test's duration.
+// stubResolveSDK points the check at an SDK path and source for the test's
+// duration, on a host the check treats as macOS whatever the test runs on.
 func stubResolveSDK(t *testing.T, path, source string, err error) {
 	t.Helper()
+	stubSDKCheckGOOS(t, "darwin")
 	orig := resolveSDK
 	t.Cleanup(func() { resolveSDK = orig })
 	resolveSDK = func() (string, string, error) { return path, source, err }
+}
+
+func stubSDKCheckGOOS(t *testing.T, goos string) {
+	t.Helper()
+	orig := sdkCheckGOOS
+	t.Cleanup(func() { sdkCheckGOOS = orig })
+	sdkCheckGOOS = goos
+}
+
+// TestMacOSSDKCheck_NotApplicableOffMacOS pins the other branch: off macOS the
+// check reports OK without resolving an SDK at all.
+func TestMacOSSDKCheck_NotApplicableOffMacOS(t *testing.T) {
+	stubSDKCheckGOOS(t, "linux")
+	orig := resolveSDK
+	t.Cleanup(func() { resolveSDK = orig })
+	resolveSDK = func() (string, string, error) {
+		t.Error("resolveSDK called off macOS")
+		return "", "", errors.New("unreachable")
+	}
+
+	result := NewMacOSSDKCheck().Run(&CheckContext{})
+
+	if result.Status != StatusOK || !strings.Contains(result.Message, "not applicable") {
+		t.Fatalf("result = %v %q, want OK and not applicable", result.Status, result.Message)
+	}
 }
 
 func TestMacOSSDKCheck_MalformedStubFails(t *testing.T) {
