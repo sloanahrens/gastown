@@ -430,7 +430,13 @@ var closeStaleWispFn = closeStaleWisp
 // reintroduce the gh#3596 connection churn that dogHasHookedFormulaWithID is
 // carefully arranged to avoid.
 func wispTree(townRoot, wispID string) ([]beads.WispStep, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
+	return wispTreeWithin(townRoot, wispID, dogHookedFormulaCheckTimeout)
+}
+
+// wispTreeWithin is wispTree with its time budget as a parameter, so a test
+// can bound a hung bd without waiting out the production budget.
+func wispTreeWithin(townRoot, wispID string, budget time.Duration) ([]beads.WispStep, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	return beads.WispTree(ctx, townRoot, bdReadOnlyRoutingEnv(townRoot), wispID)
 }

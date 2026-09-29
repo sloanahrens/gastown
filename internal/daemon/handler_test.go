@@ -1157,12 +1157,17 @@ func TestWispTreeTimeoutIsBounded(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	// The bound is what is under test, not the production 5s value: a hung bd
+	// must be killed at the budget, whatever the budget is.
+	const budget = 200 * time.Millisecond
 	start := time.Now()
-	_, err := wispTree(t.TempDir(), "wisp-x")
+	_, err := wispTreeWithin(t.TempDir(), "wisp-x", budget)
 	if err == nil {
-		t.Fatal("wispTree() error = nil, want a timeout error from a hung bd")
+		t.Fatal("wispTreeWithin() error = nil, want a timeout error from a hung bd")
 	}
-	if elapsed := time.Since(start); elapsed > 3*dogHookedFormulaCheckTimeout {
-		t.Errorf("wispTree() took %v, want it bounded near dogHookedFormulaCheckTimeout (%v)", elapsed, dogHookedFormulaCheckTimeout)
+	// Generous against load: the hung bd sleeps 60s, so anything short of that
+	// proves the budget, not the child, ended the call.
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("wispTreeWithin() took %v, want it bounded near its %v budget", elapsed, budget)
 	}
 }

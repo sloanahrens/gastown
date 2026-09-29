@@ -1821,7 +1821,12 @@ func TestAcquireMainBranchTestSlot_NeverInvokesRealDockerCLI(t *testing.T) {
 	defer restore()
 
 	townRoot := t.TempDir()
-	timeout := slot.DefaultPollInterval + 500*time.Millisecond
+	// One pass is enough: the acquire probes the lister before it checks its
+	// deadline, so a nanosecond budget fails on the stub's container at once
+	// instead of polling it for DefaultPollInterval. Were the real (docker-
+	// absent) lister consulted instead, the slot would be granted on the flock
+	// alone and the acquire would succeed.
+	timeout := time.Nanosecond
 	if _, err := slot.Acquire(townRoot, "gastown/main-branch-test", timeout); err == nil {
 		t.Fatalf("Acquire succeeded even though the stubbed lister reported a running container — the real (docker-absent) lister must have been consulted instead of the stub")
 	}
