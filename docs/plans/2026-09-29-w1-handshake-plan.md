@@ -1,3 +1,5 @@
+> Status: implemented on branch crew/sloan/w1-handshake (2026-09-29), awaiting landing. Tracked in gt-7iwy0.1, gt-fcxe9.2, gt-fcxe9.3.
+
 # W1: bd startup handshake, typed bd failures, gt done exit status
 
 > For agentic workers: execute with superpowers:executing-plans and
@@ -59,26 +61,26 @@ func ParseBDVersionJSON(out []byte) (BDVersionInfo, error) // accepts flat paylo
 func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
 ```
 
-- [ ] Failing tests (table, fake runner): installed-style 537accb payload (no
+- [x] Failing tests (table, fake runner): installed-style 537accb payload (no
   contract, no schema) refused naming "no contract_version"; upstream-style
   payload refused; unknown contract 2 refused; schema 66 vs DB 65 refused;
   DB read failing with exit 26 refused as "database schema is ahead"; version
   command failing refused; bd missing refused; happy path returns 66/66.
   Every refusal message contains the found build, schema, contract, the DB
   level when read, what is required, and `make safe-install`.
-- [ ] Implement; the DB read runs only after the version passes.
-- [ ] `go test ./internal/deps/` green; commit `feat(deps): bd startup handshake against version --json and the DB migration level`.
+- [x] Implement; the DB read runs only after the version passes.
+- [x] `go test ./internal/deps/` green; commit `feat(deps): bd startup handshake against version --json and the DB migration level`.
 
 ### Task 2: delete the installer and go-install hints (gt-7iwy0.1 / gt-fcxe9.8)
 
 **Files:** `internal/deps/beads.go`, `beads_test.go`, `check_integration_test.go`, `internal/cmd/beads_version.go`, `internal/cmd/install.go`, `internal/cmd/rig.go`, `internal/rig/manager.go`.
 
-- [ ] Failing test: `EnsureBeads` returns an error for `BeadsUnknown` and the
+- [x] Failing test: `EnsureBeads` returns an error for `BeadsUnknown` and the
   not-found error text contains `make safe-install` and never `go install`;
   a source test greps `internal/` non-test Go files for `go install` + `beads/cmd/bd` and fails on any hit.
-- [ ] Delete `installBeads`, `appendGOBIN`, `BeadsInstallPath`,
+- [x] Delete `installBeads`, `appendGOBIN`, `BeadsInstallPath`,
   `MinBeadsVersion`, `BeadsTooOld`; `EnsureBeads()` takes no argument and never installs; parse the `schema<=N` suffix in `parseBeadsVersion` output alongside the semver.
-- [ ] Green; commit `fix(deps): never install bd; unknown bd version is an error`.
+- [x] Green; commit `fix(deps): never install bd; unknown bd version is an error`.
 
 ### Task 3: gate town-running paths and doctor (gt-7iwy0.1)
 
@@ -86,25 +88,25 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
 
 **Produces:** `requireBDHandshake() error` (sync.Once cached), `bdHandshakeGatedCommands` (command paths), `var bdHandshakeCheck = func(ctx) (*deps.BDHandshake, error)` seam.
 
-- [ ] Failing tests: every gated path exists in the cobra tree (`gt up`,
+- [x] Failing tests: every gated path exists in the cobra tree (`gt up`,
   `gt start`, `gt daemon start|run|restart`, `gt sling`, the start/restart
   verbs of crew, witness, refinery, deacon, mayor); `gt status` and `gt show`
   are not gated; a gated command with a failing seam returns the refusal
   error from PersistentPreRunE; doctor reports StatusError with found vs need
   and a `make safe-install` hint, StatusOK with build/schema/contract.
-- [ ] Implement; the root per-command warning keeps using the cheap version
+- [x] Implement; the root per-command warning keeps using the cheap version
   check only (no DB read) so read-only commands stay fast and unblocked.
-- [ ] Green; commit `feat(cmd): refuse to run the town unless bd passes the handshake`.
+- [x] Green; commit `feat(cmd): refuse to run the town unless bd passes the handshake`.
 
 ### Task 4: daemon store guard compares schema integers (gt-fcxe9.8 / B5-02)
 
 **Files:** `internal/daemon/daemon.go`, `daemon_compatibility_test.go`.
 
-- [ ] Failing test: seed `schema_migrations` (not `metadata`) at a version
+- [x] Failing test: seed `schema_migrations` (not `metadata`) at a version
   above the expected level; guard refuses naming both integers; equal passes;
   missing table is an error, never a pass.
-- [ ] Replace `readStoreBDVersion` with `readStoreSchemaLevel` (`SELECT MAX(version) FROM schema_migrations`); the expected level comes from the handshake's `DBSchema`; delete the semver compare and `embeddedBeadsVersion` if unused.
-- [ ] Green; commit `fix(daemon): skew guard reads schema_migrations and compares levels`.
+- [x] Replace `readStoreBDVersion` with `readStoreSchemaLevel` (`SELECT MAX(version) FROM schema_migrations`); the expected level comes from the handshake's `DBSchema`; delete the semver compare and `embeddedBeadsVersion` if unused.
+- [x] Green; commit `fix(daemon): skew guard reads schema_migrations and compares levels`.
 
 ### Task 5: one bd failure classifier (gt-fcxe9.2)
 
@@ -112,27 +114,27 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
 
 **Produces:** `var ErrUnavailable`; `func BDReportedNotFound(exitCode int, stdout, stderr []byte) bool`; `type BDExitError struct{Args []string; ExitCode int; Stdout, Stderr []byte; Err error}`; `func ClassifyBDError(err error) error`-style helpers used by witness.
 
-- [ ] Failing tests: `database not found: gastown`, `table not found: wisps`,
+- [x] Failing tests: `database not found: gastown`, `table not found: wisps`,
   `exec: "bd": executable file not found in $PATH`, `column not found`,
   `remote not found`, `no such host` are NOT ErrNotFound and ARE
   ErrUnavailable; exit 20, envelope `error.kind=not_found`, legacy stdout
   `{"error":"no issues found matching the provided IDs"}`, and bd's own
   `Issue gt-x not found` line are ErrNotFound; guard exit 13 unchanged.
-- [ ] Implement; wrapError and CLIError use it; error text unchanged.
-- [ ] Green (beads package + importers); commit `fix(beads): classify bd failures by exit code and bd's own not-found forms`.
+- [x] Implement; wrapError and CLIError use it; error text unchanged.
+- [x] Green (beads package + importers); commit `fix(beads): classify bd failures by exit code and bd's own not-found forms`.
 
 ### Task 6: non-JSON output is an error; witness uses the classifier (gt-fcxe9.2)
 
 **Files:** `beads.go` (listIssues, queryWisps, query helpers), `beads_rig.go`, `beads_agent.go`, `daemon/scheduled_slings.go`, `witness/handlers.go`, `witness/state_collapse.go` + tests.
 
-- [ ] Failing tests: fake runner answering `No issues found.` or empty stdout
+- [x] Failing tests: fake runner answering `No issues found.` or empty stdout
   to List/queryWisps/ListRigBeads/GetAgentBeadInStoreOnly/listBeads returns
   an error naming the first line; witness `isBdNotFoundError` false for
   "database not found" and "executable file not found"; `findMRBeadForBranch`
   passes `--limit 0`; `ListRigBeads` passes `--limit=0`.
-- [ ] `requireJSON(out, what)` helper; `defaultBDExecWithOutput` returns
+- [x] `requireJSON(out, what)` helper; `defaultBDExecWithOutput` returns
   `*beads.BDExitError` with exit code and stdout; `isBdNotFoundError` delegates.
-- [ ] Green; commit `fix(beads,witness): unparseable bd output is an error, never zero results`.
+- [x] Green; commit `fix(beads,witness): unparseable bd output is an error, never zero results`.
 
 ### Task 7: gt done exit status (gt-fcxe9.3)
 
@@ -142,22 +144,22 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
 `doneExitPushFailed=10`, `doneExitPushUnverified=11`, `doneExitMRFailed=12`,
 `doneExitCloseFailed=13`; `type doneLanding` accumulator replacing `doneErrors`.
 
-- [ ] Failing tests: accumulator precedence (push > unverified > MR > close)
+- [x] Failing tests: accumulator precedence (push > unverified > MR > close)
   and message listing every failure; Execute maps CodedExitError to its
   code; runDone with a fake bd whose `create` fails returns code 12; the
   `--skip-verify` alias sets skip-tests and no longer skips push verification.
-- [ ] Record every unlanded outcome (direct push, direct verify, branch push,
+- [x] Record every unlanded outcome (direct push, direct verify, branch push,
   branch verify, checkpoint/existing/new MR failures, source close failure)
   and return the coded error after notifications and retirement.
-- [ ] `--skip-tests` flag; `--skip-verify` hidden deprecated alias; MR field
+- [x] `--skip-tests` flag; `--skip-verify` hidden deprecated alias; MR field
   `skip_tests: true`; delete `noteVerifiedPushSkipped`; guidance text says `--skip-tests`.
-- [ ] Green; commit `fix(done): exit non-zero for every unlanded outcome; split --skip-verify`.
+- [x] Green; commit `fix(done): exit non-zero for every unlanded outcome; split --skip-verify`.
 
 ### Task 8: gates, review, push
 
-- [ ] `make lint`, `go build ./...`, touched + importing packages, full `make test` (timed), all by exit code.
-- [ ] `om review -base origin/main` until approve.
-- [ ] Attribution grep empty; `git push origin crew/sloan/w1-handshake`.
+- [x] `make lint`, `go build ./...`, touched + importing packages, full `make test` (timed), all by exit code.
+- [x] `om review -base origin/main` until approve.
+- [x] Attribution grep empty; `git push origin crew/sloan/w1-handshake`.
 
 ## Decisions recorded
 
@@ -168,3 +170,14 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
 - NotFound comes from bd's exit 20 or JSON error first. Until gastown runs bd
   in machine mode (gt-7iwy0 siblings), bd's own anchored not-found sentences
   are also accepted; bare "not found" and every Dolt/exec phrase are not.
+
+## Execution notes
+
+- The doctor check moved onto the handshake in Task 2, not Task 3: deleting
+  `BeadsInstallPath` and `MinBeadsVersion` would not build otherwise.
+- bd's batch form "no issue found: <id>" is also a not-found sentence (the
+  rig-status test relies on it).
+- Test fakes that answered a `--json` list or query with nothing, or a bare
+  "not found", now answer as bd does (`[]`, "Issue <id> not found").
+- The `bd version` text `schema<=N` suffix is not parsed: the handshake reads
+  the same level from `bd version --json` (`db_schema_version`).
