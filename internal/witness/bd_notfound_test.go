@@ -3,6 +3,7 @@ package witness
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -54,5 +55,34 @@ func TestFindMRBeadForBranchIsNotTruncated(t *testing.T) {
 	findMRBeadForBranch(bd, t.TempDir(), "polecat/nux-abc")
 	if len(calls.calls) != 1 || !strings.Contains(calls.calls[0], "--limit 0") {
 		t.Fatalf("bd calls = %q, want one query with --limit 0", calls.calls)
+	}
+}
+
+// TestEveryWitnessQueryIsUnlimited: bd query stops at 50 rows unless told
+// otherwise and says nothing to a program, so every query the witness runs
+// passes --limit 0 (B1-04).
+func TestEveryWitnessQueryIsUnlimited(t *testing.T) {
+	t.Parallel()
+	for _, file := range []string{"handlers.go", "patrol_liveness.go"} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(data)
+		for i := strings.Index(src, `bd.Exec(workDir, "query"`); i >= 0; {
+			end := strings.Index(src[i:], "\n\t)")
+			if nl := strings.Index(src[i:], ")\n"); end < 0 || (nl >= 0 && nl < end) {
+				end = nl
+			}
+			call := src[i : i+end]
+			if !strings.Contains(call, `"--limit", "0"`) && !strings.Contains(call, `"--limit=0"`) {
+				t.Errorf("%s: bd query without --limit 0:\n%s", file, call)
+			}
+			next := strings.Index(src[i+1:], `bd.Exec(workDir, "query"`)
+			if next < 0 {
+				break
+			}
+			i += 1 + next
+		}
 	}
 }

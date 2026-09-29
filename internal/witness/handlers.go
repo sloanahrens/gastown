@@ -659,7 +659,7 @@ func findCleanupWisp(bd *BdCli, workDir, rigName, polecatName string) (string, e
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
 		fmt.Sprintf("ephemeral=true AND label=polecat:%s AND label=state:merge-requested AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
-		"--json",
+		"--json", "--limit", "0",
 	)
 	if err != nil {
 		return "", err
@@ -4119,7 +4119,7 @@ func findAnyCleanupWisp(bd *BdCli, workDir, rigName, polecatName string) string 
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
 		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
-		"--json",
+		"--json", "--limit", "0",
 	)
 	if err != nil {
 		return ""
@@ -4147,7 +4147,7 @@ func findAllCleanupWisps(bd *BdCli, workDir, rigName, polecatName string) []stri
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
 		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
-		"--json",
+		"--json", "--limit", "0",
 	)
 	if err != nil {
 		return nil
@@ -4182,7 +4182,7 @@ func findCleanupWispsForCompletion(bd *BdCli, workDir, rigName, polecatName, iss
 	// query" instead, same fix as findMRBeadForBranch (GH#2446).
 	output, err := bd.Exec(workDir, "query",
 		fmt.Sprintf("ephemeral=true AND label=cleanup AND label=polecat:%s AND status=open AND assignee=%s", polecatName, CleanupWispAssignee(rigName)),
-		"--json",
+		"--json", "--limit", "0",
 	)
 	if err != nil || output == "" || output == "[]" || output == "null" {
 		return nil
