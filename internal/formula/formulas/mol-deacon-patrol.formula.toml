@@ -1410,11 +1410,9 @@ needs = ["patrol-cleanup"]
 description = """
 Check own context limit.
 
-The Deacon runs in a Claude session with finite context. Check if approaching the limit:
-
-```bash
-gt context --usage
-```
+The Deacon runs in a Claude session with finite context. No command reports
+context usage: judge it yourself from how much this session has read and
+written since its last handoff.
 
 If context is high (>80%), prepare for handoff:
 - Summarize current state
