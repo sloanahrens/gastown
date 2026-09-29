@@ -1,3 +1,5 @@
+> Status: executed 2026-09-29 on branch crew/sloan/w1-dolt-remotes. Tracked in gt-8z769.1 (epic gt-8z769).
+
 # W1: Remove Dolt remote sync (gt-8z769.1) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
