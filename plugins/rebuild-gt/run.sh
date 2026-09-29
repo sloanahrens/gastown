@@ -36,7 +36,7 @@ set -euo pipefail
 
 DEFERRED=3
 
-TOWN_ROOT="${GT_TOWN_ROOT:-$(gt town root 2>/dev/null)}"
+TOWN_ROOT="${GT_TOWN_ROOT:?GT_TOWN_ROOT is unset; the daemon sets it for every plugin run}"
 RIG_ROOT="${TOWN_ROOT}/gastown/mayor/rig"
 
 log() { echo "[rebuild-gt] $*"; }
