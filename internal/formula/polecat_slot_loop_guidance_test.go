@@ -8,7 +8,7 @@ import (
 // polecatFormulaSlotLoopVerbatim is the instruction gt-7dxw requires the
 // polecat workflow to carry: `gt done` waits for the container-gate slot on
 // its own, a polecat never polls the slot or scripts a retry around it, and a
-// gate failure goes to the mayor as a one-shot --skip-verify ruling rather
+// gate failure goes to the mayor as a one-shot --skip-tests ruling rather
 // than into an improvised loop.
 //
 // It is asserted character-for-character because a polecat misreads the wait
@@ -52,7 +52,7 @@ func TestPolecatFormulasCarryTheSlotLoopRule(t *testing.T) {
 				wants = append(wants,
 					polecatFormulaSlotLoopVerbatim,
 					"gt escalate -s medium",
-					"--skip-verify",
+					"--skip-tests",
 					"Do not run container suites yourself. Run the non-container packages, then",
 				)
 			}

@@ -169,7 +169,7 @@ func TestDoneBodyCarriesTheSlotLoopRule(t *testing.T) {
 	for _, want := range []string{
 		"Never poll the slot, and never script a retry around `gt done`",
 		"`gt escalate -s medium`",
-		"--skip-verify",
+		"--skip-tests",
 		"read the container-gate rule in `docs/reference.md`",
 	} {
 		if !strings.Contains(text, want) {

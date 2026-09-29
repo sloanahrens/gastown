@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -171,7 +172,7 @@ func TestRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) {
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	doneSkipVerify = true
+	doneSkipTests = true
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
 	if err := runDone(nil, nil); err != nil {
 		t.Fatalf("runDone: %v", err)
@@ -210,7 +211,7 @@ func TestRunDoneReworkBranchRecordsActualWorkerNotBranchName(t *testing.T) {
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	doneSkipVerify = true
+	doneSkipTests = true
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
 	if err := runDone(nil, nil); err != nil {
 		t.Fatalf("runDone: %v", err)
@@ -412,6 +413,10 @@ if [ "$1" = "sql" ]; then
   exit 0
 fi
 if [ "$1" = "create" ]; then
+  if [ -n "$GT_TEST_BD_CREATE_FAILS" ]; then
+    echo "Error: database not found: gastown" >&2
+    exit 1
+  fi
   echo '{"id":"gt-mr","title":"Merge: bd-source","status":"open","priority":1,"issue_type":"task","labels":["gt:merge-request"]}'
   exit 0
 fi
@@ -478,7 +483,7 @@ func resetDoneFlagsForTest(t *testing.T) {
 	t.Helper()
 	oldIssue, oldStatus, oldCleanupStatus, oldTarget := doneIssue, doneStatus, doneCleanupStatus, doneTarget
 	oldPriority := donePriority
-	oldResume, oldPreVerified, oldSkipVerify := doneResume, donePreVerified, doneSkipVerify
+	oldResume, oldPreVerified, oldSkipTests := doneResume, donePreVerified, doneSkipTests
 	oldUpdateAgentStateOnDoneFn := updateAgentStateOnDoneFn
 	doneIssue = ""
 	donePriority = -1
@@ -487,11 +492,49 @@ func resetDoneFlagsForTest(t *testing.T) {
 	doneResume = false
 	donePreVerified = false
 	doneTarget = ""
-	doneSkipVerify = false
+	doneSkipTests = false
 	t.Cleanup(func() {
 		doneIssue, doneStatus, doneCleanupStatus, doneTarget = oldIssue, oldStatus, oldCleanupStatus, oldTarget
 		donePriority = oldPriority
-		doneResume, donePreVerified, doneSkipVerify = oldResume, oldPreVerified, oldSkipVerify
+		doneResume, donePreVerified, doneSkipTests = oldResume, oldPreVerified, oldSkipTests
 		updateAgentStateOnDoneFn = oldUpdateAgentStateOnDoneFn
 	})
+}
+
+// TestRunDoneExitsNonZeroWhenMRCreateFails: the branch is pushed but bd
+// could not create the MR bead. gt done used to print a warning, notify the
+// witness and exit 0, so no caller could tell dropped work from landed work
+// (G5-01).
+func TestRunDoneExitsNonZeroWhenMRCreateFails(t *testing.T) {
+	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
+	setupRoutedSubmitCommandTown(t, workDir)
+	setupRoutedSubmitGitRepo(t, workDir, false)
+	installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
+	resetDoneFlagsForTest(t)
+	townRoot := routedSourceTestTownRoot(workDir)
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+	t.Setenv("GT_ROOT", townRoot)
+	t.Setenv("GT_ROLE", "gastown/polecats/refuge")
+	t.Setenv("GT_RIG", "gastown")
+	t.Setenv("GT_POLECAT", "refuge")
+	t.Setenv("BD_ACTOR", "gastown/polecats/refuge")
+	t.Setenv("GT_TEST_BD_CREATE_FAILS", "1")
+	t.Chdir(workDir)
+
+	doneIssue = "bd-source"
+	doneCleanupStatus = "unpushed"
+	doneSkipTests = true
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	err := runDone(nil, nil)
+	if err == nil {
+		t.Fatal("runDone returned nil after MR bead creation failed")
+	}
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != doneExitMRFailed {
+		t.Fatalf("runDone error = %T %v, want *ExitCodeError with code %d", err, err, doneExitMRFailed)
+	}
+	if !strings.Contains(err.Error(), "MR bead creation failed") {
+		t.Errorf("error %q does not say what failed", err)
+	}
 }

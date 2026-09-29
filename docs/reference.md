@@ -194,7 +194,7 @@ lines is the ordinary case, not a hang. It gives up with a slot-acquire timeout
 once the cap (`merge_queue.test_verify_slot_timeout`, 60m by default) expires.
 On a slot-cap or run-budget failure the sanctioned move is a bead comment with
 the error and the verify-log path, then `gt escalate -s medium` asking the mayor
-for a one-shot `--skip-verify` ruling — not a second invocation.
+for a one-shot `--skip-tests` ruling — not a second invocation.
 
 Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
 polling loop holds the gate every other agent is queued behind, one pass at a

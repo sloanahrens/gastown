@@ -43,7 +43,7 @@ const (
 		"`gt done` or `gt slot`: a polling loop holds the gate other agents are queued behind, one " +
 		"pass at a time (gt-7dxw). If `gt done` fails on the test-verify slot cap or the run budget, " +
 		"add a bead comment with the error and the verify log path, then `gt escalate -s medium` " +
-		"asking the mayor for a one-shot `--skip-verify` ruling, and wait (gt-pnkd)."
+		"asking the mayor for a one-shot `--skip-tests` ruling, and wait (gt-pnkd)."
 )
 
 // doneSlotLoopKeywords are the block-shaped shell loop openers. The deacon

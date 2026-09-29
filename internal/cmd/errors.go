@@ -34,3 +34,27 @@ func IsSilentExit(err error) (int, bool) {
 	}
 	return 0, false
 }
+
+// ExitCodeError is a command failure that exits with Code. Unlike
+// SilentExitError it carries a message, which cobra prints like any error.
+type ExitCodeError struct {
+	Code int
+	Err  error
+}
+
+func (e *ExitCodeError) Error() string { return e.Err.Error() }
+
+func (e *ExitCodeError) Unwrap() error { return e.Err }
+
+// exitCodeForError is the process exit status for a command's error:
+// SilentExitError and ExitCodeError carry their own, anything else is 1.
+func exitCodeForError(err error) int {
+	if code, ok := IsSilentExit(err); ok {
+		return code
+	}
+	var coded *ExitCodeError
+	if errors.As(err, &coded) {
+		return coded.Code
+	}
+	return 1
+}

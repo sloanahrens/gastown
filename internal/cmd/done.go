@@ -55,13 +55,19 @@ Exit statuses:
   ESCALATED      - Hit blocker, needs human intervention
   DEFERRED       - Work paused, issue still open
 
+Process exit codes (work that did not land; notifications already ran):
+  10  push failed: origin does not have the commit
+  11  push unverified: origin is not at the commit gt done would declare
+  12  MR bead not created or not trusted
+  13  source bead could not be closed
+
 Examples:
   gt done                              # Submit branch, notify COMPLETED, exit session
   gt done --pre-verified               # Submit with pre-verification fast-path
   gt done --target feat/my-branch      # Explicit MR target branch
   gt done --pre-verified --target feat/contract-review  # Pre-verified with explicit target
   gt done --issue gt-abc               # Explicit issue ID
-  gt done --skip-verify                # Audit-only escape hatch for non-code closes
+  gt done --skip-tests                 # Skip the test gate (one-shot mayor ruling only)
   gt done --status ESCALATED           # Signal blocker, skip MR
   gt done --status DEFERRED            # Pause work, skip MR`,
 	RunE:         runDone,
@@ -76,7 +82,7 @@ var (
 	doneResume        bool
 	donePreVerified   bool
 	doneTarget        string
-	doneSkipVerify    bool
+	doneSkipTests     bool
 	doneAllowReverts  bool
 
 	doneAllowThrowawayPaths bool
@@ -1166,7 +1172,11 @@ func init() {
 	doneCmd.Flags().BoolVar(&doneResume, "resume", false, "Resume from last checkpoint (auto-detected, for Witness recovery)")
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Mark MR as pre-verified (polecat ran gates after rebasing onto target)")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit MR target branch (overrides formula_vars and auto-detection)")
-	doneCmd.Flags().BoolVar(&doneSkipVerify, "skip-verify", false, "Skip verified-push checks for audit/test-only completion (recorded on bead)")
+	doneCmd.Flags().BoolVar(&doneSkipTests, "skip-tests", false, "Skip the default test gate: a one-shot mayor ruling for untestable or slot-starved work (recorded on the MR). Push verification is never skipped")
+	// --skip-verify skipped both the test gate and push verification (G2-02).
+	// It now only skips tests; kept so existing rulings and scripts still parse.
+	doneCmd.Flags().BoolVar(&doneSkipTests, "skip-verify", false, "Deprecated alias for --skip-tests")
+	_ = doneCmd.Flags().MarkDeprecated("skip-verify", "use --skip-tests; push verification is no longer skippable")
 	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 
@@ -1460,11 +1470,10 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	var mrID string
 	var pushFailed bool
 	var mrFailed bool
-	var doneErrors []string
-	// pushVerifyErr records a failed "origin is at the commit this MR would
-	// declare" assertion (gt-2wqt). It is returned as gt done's exit status so
-	// the caller cannot mistake a dropped submission for a successful one.
-	var pushVerifyErr error
+	// landing records every outcome that did not land. It becomes gt done's
+	// exit status after the notifications below have run, so a caller cannot
+	// mistake a dropped submission for a landed one (gt-2wqt, G5-01).
+	var landing doneLanding
 	var convoyInfo *ConvoyInfo // Populated if issue is tracked by a convoy
 	var sourceIssueForNoMerge *beads.Issue
 	var sourceBD *beads.Beads
@@ -1609,12 +1618,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				if !skipClose {
 					closeReason := "Completed with no code changes (already fixed or already merged)"
 					noMRCommitSHA, _ := g.Rev("HEAD")
-					if doneSkipVerify {
-						noteVerifiedPushSkipped(bd, cwd, issueID, defaultBranch, noMRCommitSHA, "--skip-verify on no-MR close")
-						if noMRCommitSHA != "" {
-							closeReason = fmt.Sprintf("%s\nskip_verify: true\ntarget_branch: %s\ncommit_sha: %s", closeReason, defaultBranch, noMRCommitSHA)
-						}
-					} else if !isNoMergeTask {
+					if !isNoMergeTask {
 						if g.ForkBackedRemote("origin") {
 							return fmt.Errorf("cannot close no-MR code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", branch, baseRef)
 						}
@@ -1642,7 +1646,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						}
 					}
 					if closeErr != nil {
-						style.PrintWarning("could not close issue %s after 3 attempts: %v (issue may be left HOOKED)", issueID, closeErr)
+						errMsg := fmt.Sprintf("could not close issue %s after 3 attempts: %v", issueID, closeErr)
+						landing.fail(doneExitCloseFailed, errMsg, closeErr)
+						style.PrintWarning("%s (issue may be left HOOKED)", errMsg)
 					}
 				}
 			}
@@ -1874,17 +1880,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitPushFailed, errMsg, directPushErr)
 				style.PrintWarning("%s", errMsg)
 				goto notifyWitness
 			}
 			directCommitSHA, _ := g.Rev("HEAD")
-			if doneSkipVerify {
-				noteVerifiedPushSkipped(directBd, cwd, issueID, defaultBranch, directCommitSHA, "--skip-verify on direct merge")
-			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+			if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitPushUnverified, errMsg, verifyErr)
 				noteVerifiedPushFailure(directBd, cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
 				style.PrintWarning("%s\nDirect merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
 				goto notifyWitness
@@ -1915,7 +1919,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						}
 					}
 					if closeErr != nil {
-						style.PrintWarning("could not close issue %s after 3 attempts: %v", issueID, closeErr)
+						errMsg := fmt.Sprintf("could not close issue %s after 3 attempts: %v", issueID, closeErr)
+						landing.fail(doneExitCloseFailed, errMsg, closeErr)
+						style.PrintWarning("%s", errMsg)
 					}
 				}
 			}
@@ -1976,17 +1982,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if directPushErr != nil {
 				pushFailed = true
 				errMsg := fmt.Sprintf("direct push to %s failed: %v", defaultBranch, directPushErr)
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitPushFailed, errMsg, directPushErr)
 				style.PrintWarning("%s", errMsg)
 				goto notifyWitness
 			}
 			directCommitSHA, _ := g.Rev("HEAD")
-			if doneSkipVerify {
-				noteVerifiedPushSkipped(directBd, cwd, issueID, defaultBranch, directCommitSHA, "--skip-verify on late direct merge")
-			} else if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
+			if verifyErr := g.VerifyPushedCommitReachableFromPushTarget("origin", defaultBranch, directCommitSHA); verifyErr != nil {
 				pushFailed = true
 				errMsg := verifyErr.Error()
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitPushUnverified, errMsg, verifyErr)
 				noteVerifiedPushFailure(directBd, cwd, issueID, defaultBranch, directCommitSHA, verifyErr)
 				style.PrintWarning("%s\nLate direct merge pushed but remote verification failed. Source bead will remain in progress.", errMsg)
 				goto notifyWitness
@@ -2015,7 +2019,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					}
 				}
 				if closeErr != nil {
-					style.PrintWarning("could not close issue %s after 3 attempts: %v", issueID, closeErr)
+					errMsg := fmt.Sprintf("could not close issue %s after 3 attempts: %v", issueID, closeErr)
+					landing.fail(doneExitCloseFailed, errMsg, closeErr)
+					style.PrintWarning("%s", errMsg)
 				}
 			}
 
@@ -2140,10 +2146,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if pushedCommitSHA == "" {
 				pushedCommitSHA, _ = g.Rev("HEAD")
 			}
-			if doneSkipVerify {
-				noteVerifiedPushSkipped(sourceBD, cwd, issueID, branch, pushedCommitSHA, "--skip-verify on branch push")
-				fmt.Printf("%s Branch pushed to origin (verification skipped: --skip-verify)\n", style.Bold.Render("✓"))
-			} else if recovered, verifyErr := landBranchPushBeforeMR(
+			if recovered, verifyErr := landBranchPushBeforeMR(
 				func() error { return pushBranchToOrigin(g, townRoot, rigName, refspec) },
 				func() error { return verifyPushLandedBeforeMR(g, townRoot, rigName, branch, pushedCommitSHA) },
 				time.Sleep,
@@ -2151,9 +2154,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// gt-0opm: only reached once origin was re-asserted and the push
 				// re-sent, so a first failing attempt never strands the work.
 				pushFailed = true
-				pushVerifyErr = verifyErr
 				errMsg := unlandedPushMessage(branch, pushErr, pushFailureDetail, verifyErr)
-				doneErrors = append(doneErrors, errMsg)
+				if pushErr != nil {
+					landing.fail(doneExitPushFailed, errMsg, verifyErr)
+				} else {
+					landing.fail(doneExitPushUnverified, errMsg, verifyErr)
+				}
 				noteVerifiedPushFailure(sourceBD, cwd, issueID, branch, pushedCommitSHA, verifyErr)
 				if pushErr != nil {
 					style.PrintWarning("%s\nCommits exist locally but failed to push. Witness will be notified.", errMsg)
@@ -2417,7 +2423,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 					if err := validateMergeRequestSource(cpMR, issueID, sourceIssueForNoMerge); err != nil {
 						mrFailed = true
 						errMsg := fmt.Sprintf("checkpoint MR validation failed: %v", err)
-						doneErrors = append(doneErrors, errMsg)
+						landing.fail(doneExitMRFailed, errMsg, err)
 						style.PrintWarning("%s\nBranch is pushed but MR bead not trusted. Witness will be notified.", errMsg)
 						goto notifyWitness
 					}
@@ -2445,7 +2451,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if err := validateMergeRequestSource(existingMR, issueID, sourceIssueForNoMerge); err != nil {
 				mrFailed = true
 				errMsg := fmt.Sprintf("existing MR validation failed: %v", err)
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitMRFailed, errMsg, err)
 				style.PrintWarning("%s\nBranch is pushed but existing MR bead not trusted. Witness will be notified.", errMsg)
 				goto notifyWitness
 			}
@@ -2460,8 +2466,8 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if commitSHA != "" {
 				description += fmt.Sprintf("\ncommit_sha: %s", commitSHA)
 			}
-			if doneSkipVerify {
-				description += "\nskip_verify: true"
+			if doneSkipTests {
+				description += "\nskip_tests: true"
 			}
 			if worker != "" {
 				description += fmt.Sprintf("\nworker: %s", worker)
@@ -2522,9 +2528,9 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			// redispatch). Runs unconditionally unless the polecat already ran
 			// the full gate set via --pre-verified (fullGatesVerified, which
 			// already covers this and more) or explicitly opted out with
-			// --skip-verify. A failure here returns an error and no MR bead is
+			// --skip-tests. A failure here returns an error and no MR bead is
 			// created — that refusal is the fix.
-			if !doneSkipVerify && !fullGatesVerified {
+			if !doneSkipTests && !fullGatesVerified {
 				verifyMQ := rig.ResolveMergeQueueConfig(townRoot, rigName)
 				verifyRole := fmt.Sprintf("%s/%s", rigName, polecatName)
 				// gt-azmw: this gate can hold the container slot for 60m
@@ -2584,7 +2590,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// Set mrFailed so the witness knows not to send MERGE_READY.
 				mrFailed = true
 				errMsg := fmt.Sprintf("MR bead creation failed: %v", err)
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitMRFailed, errMsg, err)
 				style.PrintWarning("%s\nBranch is pushed but MR bead not created. Witness will be notified.", errMsg)
 				goto notifyWitness
 			}
@@ -2595,7 +2601,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if mrID == "" {
 				mrFailed = true
 				errMsg := "MR bead creation returned empty ID"
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitMRFailed, errMsg, nil)
 				style.PrintWarning("%s\nBranch is pushed but MR bead has no ID. Witness will be notified.", errMsg)
 				goto notifyWitness
 			}
@@ -2607,7 +2613,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if verifiedMR, verifyErr := bd.Show(mrID); verifyErr != nil || verifiedMR == nil {
 				mrFailed = true
 				errMsg := fmt.Sprintf("MR bead created but verification read-back failed (id=%s): %v", mrID, verifyErr)
-				doneErrors = append(doneErrors, errMsg)
+				landing.fail(doneExitMRFailed, errMsg, verifyErr)
 				style.PrintWarning("%s\nBranch is pushed but MR bead not confirmed. Preserving worktree.", errMsg)
 				goto notifyWitness
 			}
@@ -2837,15 +2843,11 @@ notifyWitness:
 		retirePolecatSessionAfterFinalExit(exitType, mergeStrategy, pushFailed, mrFailed, fromHandoff, rigName, polecatName, os.Getpid())
 	}
 
-	// Fail closed on a push that could not be verified against origin (gt-2wqt):
-	// without a non-zero status the caller cannot tell a dropped submission from
-	// a landed one. Everything above — witness notification, completion
+	// Fail closed on every outcome that did not land (gt-2wqt, G5-01):
+	// without a non-zero status the caller cannot tell a dropped submission
+	// from a landed one. Everything above — witness notification, completion
 	// metadata, session preservation — has already run.
-	if pushVerifyErr != nil {
-		return pushVerifyErr
-	}
-
-	return nil
+	return landing.err()
 }
 
 // pushSubmoduleChanges detects submodules modified between baseRef
@@ -2932,18 +2934,6 @@ func noteVerifiedPushFailure(sourceBD *beads.Beads, cwd, issueID, branch, commit
 	inProgress := "in_progress"
 	_ = bd.Update(issueID, beads.UpdateOptions{Status: &inProgress})
 	msg := fmt.Sprintf("verified_push_failed: commit %s not verified on origin/%s: %v", commit, branch, verifyErr)
-	_ = bd.AddComment(issueID, msg)
-}
-
-func noteVerifiedPushSkipped(sourceBD *beads.Beads, cwd, issueID, branch, commit, reason string) {
-	if issueID == "" || cwd == "" {
-		return
-	}
-	msg := fmt.Sprintf("verified_push_skipped: commit %s branch origin/%s reason=%s", commit, branch, reason)
-	bd := sourceBD
-	if bd == nil {
-		bd, _, _ = routedIssueBeads(cwd, issueID)
-	}
 	_ = bd.AddComment(issueID, msg)
 }
 

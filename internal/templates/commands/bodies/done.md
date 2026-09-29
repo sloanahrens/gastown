@@ -48,7 +48,7 @@ loop holds the container-gate slot every other agent is queued behind, one pass
 at a time, and the dangerous-command guard refuses the loop shape. If it fails
 on the test-verify slot cap or the run budget: do NOT retry; add a bead comment
 with the error and the verify-log path, then `gt escalate -s medium` asking the
-mayor for a one-shot `--skip-verify` ruling, and wait. `--pre-verified` is not
+mayor for a one-shot `--skip-tests` ruling, and wait. `--pre-verified` is not
 that path: it is refinery/mayor only and re-runs the whole gate set under the
 same slot cap.
 

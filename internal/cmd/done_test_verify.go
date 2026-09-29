@@ -27,7 +27,7 @@ import (
 // (run). Both were smaller than reality on a loaded host — internal/cmd alone
 // measures 505-602s, and up to three suites queue behind each other for the
 // one container-gate slot — so the gate refused for infrastructure reasons on
-// branches whose tests were never run at all. Four one-shot --skip-verify
+// branches whose tests were never run at all. Four one-shot --skip-tests
 // exceptions in 24h were the result, i.e. the exceptions became the process.
 // The fix is not "raise the numbers": it is that the budgets are surfaceable
 // in the verify log and overridable per rig in settings
@@ -858,7 +858,7 @@ func testVerifyLogPath(worktree string) string {
 //
 // Unless the caller has already secured a full --pre-verified gate run (see
 // resolvePreVerification in done.go) or the polecat explicitly opted out
-// with --skip-verify, gt done itself runs the rig's hermetic test_command
+// with --skip-tests, gt done itself runs the rig's hermetic test_command
 // before an MR bead can be created (gt-btw1): the gate used to run a bare
 // `go test` over the changed packages, which bypassed the rig's hermetic
 // test environment (BEADS_TEST_MODE, test-env.sh, Makefile CGO flags) and
@@ -943,7 +943,7 @@ func (vg *testVerifyGate) run(g *git.Git, worktree, defaultBranch, target string
 			for _, u := range changed.unresolvable {
 				details = append(details, fmt.Sprintf("%s: %v", u.dir, u.listErr))
 			}
-			return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are still present but `go list` resolves no package for %s — that is not a package deletion, so no whole-module build can verify it; fix the file so it compiles and resolves (or use --skip-verify with justification if this is genuinely not testable)", strings.Join(details, "; "))
+			return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are still present but `go list` resolves no package for %s — that is not a package deletion, so no whole-module build can verify it; fix the file so it compiles and resolves (or use --skip-tests with justification if this is genuinely not testable)", strings.Join(details, "; "))
 		}
 		// A single diff can carry both shapes at once (a deleted package here,
 		// a nested-module edit there), so these run independently rather than
@@ -963,7 +963,7 @@ func (vg *testVerifyGate) run(g *git.Git, worktree, defaultBranch, target string
 			// the changed set: `go list` resolves a package whose imports are
 			// broken, so only the build sees them.
 			if buildErr := vg.buildModule(worktree); buildErr != nil {
-				return testVerifyResult{}, fmt.Errorf("gt done: deleting every .go file in a package since %s left the rest of the module unbuildable — the deletion broke something that imports it; fix the build (or undo the deletion) before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", shortSHA(verifiedBase), buildErr)
+				return testVerifyResult{}, fmt.Errorf("gt done: deleting every .go file in a package since %s left the rest of the module unbuildable — the deletion broke something that imports it; fix the build (or undo the deletion) before submitting, or use --skip-tests with justification if this is genuinely not testable: %w", shortSHA(verifiedBase), buildErr)
 			}
 		}
 		if len(changed.nestedModules) > 0 {
@@ -978,7 +978,7 @@ func (vg *testVerifyGate) run(g *git.Git, worktree, defaultBranch, target string
 			// only check of.
 			for _, n := range changed.nestedModules {
 				if buildErr := vg.buildModule(filepath.Join(worktree, n.moduleRoot)); buildErr != nil {
-					return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are in the nested module %s, and building that module failed — fix it before submitting, or use --skip-verify with justification if this is genuinely not testable: %w", n.moduleRoot, buildErr)
+					return testVerifyResult{}, fmt.Errorf("gt done: the branch's changed .go file(s) are in the nested module %s, and building that module failed — fix it before submitting, or use --skip-tests with justification if this is genuinely not testable: %w", n.moduleRoot, buildErr)
 				}
 			}
 		}
@@ -1137,7 +1137,7 @@ func (vg *testVerifyGate) run(g *git.Git, worktree, defaultBranch, target string
 			// retry, so the message must not be the thing that suggests one
 			// (gt-7dxw).
 			return testVerifyResult{}, fmt.Errorf(
-				"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Do not retry or loop on it: add a bead comment with this error and the verify log at %s, then run `gt escalate -s medium` asking the mayor for a one-shot --skip-verify ruling, and wait. Raising merge_queue.test_verify_slot_timeout is the rig-level alternative; --skip-verify with justification is the last resort (gt-7dxw)",
+				"gt done: could not acquire the container-gate slot for the default test-verify gate after %s (cap %s): %w — this is slot contention, NOT a test failure, and nothing in your diff was tested. Do not retry or loop on it: add a bead comment with this error and the verify log at %s, then run `gt escalate -s medium` asking the mayor for a one-shot --skip-tests ruling, and wait. Raising merge_queue.test_verify_slot_timeout is the rig-level alternative; --skip-tests with justification is the last resort (gt-7dxw)",
 				waited.Round(time.Second), humanDuration(budgets.slotTimeout), acquireErr, logPath)
 		}
 		defer release()

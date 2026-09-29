@@ -1509,7 +1509,7 @@ func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
 	for _, want := range []string{
 		"Never poll the slot, and never script a retry around `gt done`",
 		"`gt escalate -s medium`",
-		"--skip-verify",
+		"--skip-tests",
 		"Do not run container suites yourself. Run the non-container packages, then",
 		// The explanation lives once, in the home the prime points at (R2).
 		"read the container-gate rule in `docs/reference.md`",

@@ -408,12 +408,9 @@ func Execute() int {
 	}
 
 	if err := rootCmd.Execute(); err != nil {
-		// Check for silent exit (scripting commands that signal status via exit code)
-		if code, ok := IsSilentExit(err); ok {
-			return code
-		}
-		// Other errors already printed by cobra
-		return 1
+		// Silent and coded exits carry their own status; other errors were
+		// already printed by cobra and exit 1.
+		return exitCodeForError(err)
 	}
 	return 0
 }
