@@ -611,7 +611,7 @@ the same slot cap.
 
 **Do not run container suites yourself. Run the non-container packages, then
 gt done** — its own gate runs the container suites for you. Before you run
-`gt slot`, read the container-gate rule in `docs/reference.md`.
+`gt slot run`, read the container-gate rule in `docs/reference.md`.
 
 **Run gt done:**
 ```bash

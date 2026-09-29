@@ -52,7 +52,7 @@ mayor for a one-shot `--skip-tests` ruling, and wait. `--pre-verified` is not
 that path: it is refinery/mayor only and re-runs the whole gate set under the
 same slot cap.
 
-Before you run `gt slot`, read the container-gate rule in `docs/reference.md`.
+Before you run `gt slot run`, read the container-gate rule in `docs/reference.md`.
 
 This command pushes your branch, submits an MR to the merge queue, and exits the
 polecat session after durable handoff. The Refinery/Witness handle merge and cleanup.
