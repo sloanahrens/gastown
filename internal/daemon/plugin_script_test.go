@@ -134,9 +134,27 @@ func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 	t.Parallel()
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	p := scriptPlugin(t, "slow", "sleep 60 &\necho $! > "+pidFile+"\nwait\n")
+	// The deadline fires once the script has recorded its backgrounded child,
+	// not after a fixed 500ms: under load bash had not reached the echo by
+	// then, and the test failed on a missing pid file instead of testing the
+	// kill.
+	deadline := newGatedDeadline()
+	go func() {
+		for {
+			if _, err := os.Stat(pidFile); err == nil {
+				deadline.expire()
+				return
+			}
+			select {
+			case <-deadline.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
 	start := time.Now()
-	res := runPluginScript(context.Background(), p, "/town", 500*time.Millisecond)
-	if time.Since(start) > 10*time.Second {
+	res := runPluginScript(deadline, p, "/town", time.Hour)
+	if time.Since(start) > 30*time.Second {
 		t.Fatalf("timeout did not bound the run: %s", time.Since(start))
 	}
 	if !res.timedOut || res.ok() {
@@ -150,8 +168,8 @@ func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 		t.Fatalf("child pid not recorded: %v", err)
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	gone := time.Now().Add(3 * time.Second)
+	for time.Now().Before(gone) {
 		if err := syscall.Kill(pid, 0); err != nil {
 			return // gone
 		}
@@ -159,6 +177,33 @@ func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	t.Fatalf("backgrounded child %d survived the timeout: process group was not killed", pid)
+}
+
+// gatedDeadline is a context whose deadline passes when the test says so:
+// Done closes and Err reports context.DeadlineExceeded, which is what a
+// context derived from it (runPluginScript's own timeout) reports too.
+type gatedDeadline struct {
+	context.Context
+	once     sync.Once
+	done     chan struct{}
+	deadline time.Time // what Deadline reports; zero reports none
+}
+
+func (g *gatedDeadline) Deadline() (time.Time, bool) { return g.deadline, !g.deadline.IsZero() }
+
+func newGatedDeadline() *gatedDeadline {
+	return &gatedDeadline{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (g *gatedDeadline) expire()               { g.once.Do(func() { close(g.done) }) }
+func (g *gatedDeadline) Done() <-chan struct{} { return g.done }
+func (g *gatedDeadline) Err() error {
+	select {
+	case <-g.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
 }
 
 func TestTail(t *testing.T) {

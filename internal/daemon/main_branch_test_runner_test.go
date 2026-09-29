@@ -1271,8 +1271,8 @@ const killedSuiteTranscript = "ok  \tgithub.com/steveyegge/gastown/internal/daem
 // so only the deadline can end it. The exec replaces the shell with the sleep:
 // the context's kill then reaches the process holding the output pipes, and the
 // run returns at the deadline instead of waiting the sleep out.
-func timedOutCommand() string {
-	return "printf '%s' " + shellQuote(killedSuiteTranscript) + "; exec sleep 30"
+func timedOutCommand(printed string) string {
+	return "printf '%s' " + shellQuote(killedSuiteTranscript) + "; touch " + shellQuote(printed) + "; exec sleep 30"
 }
 
 // TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout is the gt-59yz
@@ -1302,9 +1302,27 @@ func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 	}
 	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8} }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", workDir, "test", timedOutCommand())
+	// The deadline passes once the suite has printed its transcript, not
+	// after a fixed 2s of wall clock: a loaded host can take longer than that
+	// to start sh at all, and the kill would then find no transcript to
+	// report. The context still carries a 2s deadline for the budget line.
+	printed := filepath.Join(t.TempDir(), "printed")
+	ctx := newGatedDeadline()
+	ctx.deadline = time.Now().Add(2 * time.Second)
+	go func() {
+		for {
+			if _, err := os.Stat(printed); err == nil {
+				ctx.expire()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+	err := d.runCommandOnWorktree(ctx, "gastown", "deadbeef", workDir, "test", timedOutCommand(printed))
 	if err == nil {
 		t.Fatal("expected error from a command killed at its deadline")
 	}
