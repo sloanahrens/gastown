@@ -16,6 +16,7 @@ const polecatStopTestBranch = "polecat/test/gt-ksnv@abc123"
 func TestPolecatStopPendingWork(t *testing.T) {
 	t.Parallel()
 	t.Run("clean feature branch has no pending work", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 
 		pending, reason, err := polecatStopPendingWork(repo, polecatStopTestBranch)
@@ -28,6 +29,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("non-runtime dirty work is pending", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "internal/cmd/work.go", "package cmd\n")
 
@@ -44,6 +46,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("runtime-only dirty work is ignored", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, ".opencode/state.json", "{}\n")
 
@@ -57,6 +60,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("branch stash is pending", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "stash-work.txt", "saved work\n")
 		runPolecatStopTestGit(t, repo, "stash", "push", "-u", "-m", "branch stash")
@@ -74,6 +78,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("pushed source branch still pending until target contains it", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "submitted.go", "package main\n")
 		runPolecatStopTestGit(t, repo, "add", "submitted.go")
@@ -93,6 +98,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("target-contained commit has no pending work", func(t *testing.T) {
+		t.Parallel()
 		repo := initPolecatStopTestRepo(t)
 		writePolecatStopTestFile(t, repo, "merged.go", "package main\n")
 		runPolecatStopTestGit(t, repo, "add", "merged.go")
@@ -112,6 +118,7 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	})
 
 	t.Run("invalid repo fails closed", func(t *testing.T) {
+		t.Parallel()
 		pending, reason, err := polecatStopPendingWork(t.TempDir(), polecatStopTestBranch)
 		if err == nil {
 			t.Fatal("polecatStopPendingWork error = nil, want error")
