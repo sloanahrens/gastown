@@ -273,7 +273,7 @@ with:
 // — go env CXX (process env, then the go env file, then a "c++" default),
 // quote-split the way cmd/go splits CC/CXX ("ccache clang++" is one field) —
 // and confirms it is on PATH. Factored out so the probe and its tests
-// (cgoCompilerPresent, systemIcu4cResolvable in cgo_probe_test.go) agree on
+// (cgoCompilerPresent, systemIcu4cResolvable in cgo_probe_integration_test.go) agree on
 // which compiler is being exercised.
 func probeCompiler() ([]string, error) {
 	cxx := ""
