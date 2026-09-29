@@ -2077,6 +2077,12 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 // .repo.git, so a branch held elsewhere is that polecat's live HEAD and not a
 // free name to switch to. An unreadable worktree list refuses too: "cannot tell"
 // must not read as "free" (gt-0kk2).
+//
+// A registration whose directory is gone is not a holder, and is pruned before
+// this returns: git itself still counts it. `worktree add` of such a branch
+// fails on every git version checked (2.42, 2.50), and `checkout` fails on
+// 2.50 though not on 2.42, so calling the branch free while leaving the
+// registration made the caller's next step fail (gt-22hdp.39).
 func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
 	if branch == "" {
 		return nil
@@ -2086,6 +2092,7 @@ func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
 		return fmt.Errorf("%w: cannot tell whether %s is checked out elsewhere: %v",
 			ErrBranchHeld, branch, err)
 	}
+	var deleted string
 	for _, wt := range worktrees {
 		if wt.Branch != branch {
 			continue
@@ -2093,12 +2100,19 @@ func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
 		if _, err := os.Stat(wt.Path); err != nil {
 			// A deleted worktree keeps its registration, branch line and all. No
 			// directory means no HEAD there to conflict with (gt-0kk2).
+			deleted = wt.Path
 			continue
 		}
 		if slices.ContainsFunc(exempt, func(p string) bool { return sameWorktreePath(wt.Path, p) }) {
 			continue
 		}
 		return fmt.Errorf("%w: %s is already checked out at %s", ErrBranchHeld, branch, wt.Path)
+	}
+	if deleted != "" {
+		if err := g.WorktreePrune(); err != nil {
+			return fmt.Errorf("%w: %s is registered to deleted worktree %s, and pruning that registration failed: %v",
+				ErrBranchHeld, branch, deleted, err)
+		}
 	}
 	return nil
 }
