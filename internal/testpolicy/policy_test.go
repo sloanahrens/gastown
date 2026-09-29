@@ -16,7 +16,14 @@ var seed = flag.Bool("seed", false, "print the unconverted.txt a fresh checkout 
 // ratchet was added (Ruling R11). The list only shrinks: converting a
 // package deletes its line from unconverted.txt AND lowers maxUnconverted
 // here, in the same change. It must never grow.
-const maxUnconverted = 41
+const maxUnconverted = 40
+
+// maxOverBudget is the number of entries overbudget.txt holds (Ruling R25):
+// packages that meet every rule but still exceed the converted-package time
+// budget, each with the bead tracking the overrun. Like maxUnconverted it
+// only shrinks: getting a package under budget deletes its line AND lowers
+// this, in the same change.
+const maxOverBudget = 1
 
 // TestPolicy applies the unit-test rules to every package not listed in
 // unconverted.txt, and fails a listed package that already passes, so the
@@ -51,12 +58,14 @@ func TestPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	var dirty []string
+	violations := map[string]int{}
 	for _, dir := range dirs {
 		rel := filepath.ToSlash(strings.TrimPrefix(dir, root+string(filepath.Separator)))
 		vs, exemptions, err := ScanDirWithExemptions(dir)
 		if err != nil {
 			t.Fatalf("%s: %v", rel, err)
 		}
+		violations[rel] = len(vs)
 		if len(vs) > 0 {
 			dirty = append(dirty, rel)
 		}
@@ -65,7 +74,7 @@ func TestPolicy(t *testing.T) {
 		switch {
 		case *seed:
 		case listed && len(vs) == 0:
-			t.Errorf("%s is in unconverted.txt but passes every rule: delete its line", rel)
+			t.Errorf("%s is in unconverted.txt but passes every rule: delete its line (if it still exceeds the time budget, list it in overbudget.txt with the bead tracking that)", rel)
 		case !listed:
 			for _, v := range vs {
 				t.Error(v.String())
@@ -85,6 +94,13 @@ func TestPolicy(t *testing.T) {
 	}
 	for rel := range unconverted {
 		t.Errorf("unconverted.txt lists %s, which is not a Go package directory", rel)
+	}
+	overBudget, err := ReadOverBudget("overbudget.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range CheckOverBudget(overBudget, originallyListed, violations, maxOverBudget) {
+		t.Error(msg)
 	}
 	// CheckContracts runs over every package: a fake-contract finding, or a
 	// call to a contract from another package, can only be judged correctly

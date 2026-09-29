@@ -1,3 +1,5 @@
+//go:build integration
+
 package git
 
 import (
@@ -19,7 +21,7 @@ import (
 func stallingHTTPRemote(t *testing.T) (string, func() []net.Conn) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+		t.Fatalf("git not available: %v", err)
 	}
 	// Keep a proxy from the environment out of the path to the listener.
 	for _, k := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"} {
@@ -29,7 +31,7 @@ func stallingHTTPRemote(t *testing.T) (string, func() []net.Conn) {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Skipf("no loopback listener: %v", err)
+		t.Fatalf("no loopback listener: %v", err)
 	}
 	var (
 		mu   sync.Mutex
@@ -102,8 +104,9 @@ func assertBoundedAndHelperGone(t *testing.T, err error, elapsed, bound time.Dur
 }
 
 // A fetch from an http remote that stalls must return near its bound: the
-// whole process group (git and git-remote-http) is killed.
-func TestFetchRefspecWithTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
+// whole process group (git and git-remote-http) is killed. It lives in the
+// integration tier because it needs a real socket and a real timeout.
+func TestIntegrationFetchRefspecWithTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
 	url, conns := stallingHTTPRemote(t)
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
@@ -117,7 +120,7 @@ func TestFetchRefspecWithTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
 }
 
 // ls-remote against the same stalling http remote is bounded the same way.
-func TestListRemoteRefsWithHashesTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
+func TestIntegrationListRemoteRefsWithHashesTimeoutBoundsAStallingHTTPRemote(t *testing.T) {
 	url, conns := stallingHTTPRemote(t)
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {

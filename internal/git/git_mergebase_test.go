@@ -6,6 +6,7 @@ import (
 )
 
 func TestMergeBase_FindsCommonAncestor(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	base, err := g.Rev("HEAD")

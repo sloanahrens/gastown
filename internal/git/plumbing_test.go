@@ -15,6 +15,7 @@ import (
 // every commit in the scan, which is the exact failure an unseen-file guard
 // cannot afford.
 func TestCommitFileChanges_ReportsEveryFileOfEveryCommit(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -71,6 +72,7 @@ func TestCommitFileChanges_ReportsEveryFileOfEveryCommit(t *testing.T) {
 // spelling: callers compare these values against blobs read from trees, and
 // git's all-zero null object is not a blob any tree reports.
 func TestCommitFileChanges_CreationAndDeletionUseEmptyNotNullBlob(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -153,6 +155,7 @@ func TestCommitFileChanges_ShallowBoundaryContributesNothing(t *testing.T) {
 // TestBlobDiffLines exercises the containment primitive the revert check is
 // built on: which lines one side adds and removes relative to the other.
 func TestBlobDiffLines(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -204,6 +207,7 @@ func TestBlobDiffLines(t *testing.T) {
 // TestTreeFileBlobs checks the path -> blob view both sides of every comparison
 // are read from.
 func TestTreeFileBlobs(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -232,6 +236,7 @@ func write(t *testing.T, path, content string) {
 }
 
 func TestTreesIdentical(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -268,6 +273,7 @@ func TestTreesIdentical(t *testing.T) {
 // hash line follows the subject directly. A parser that assumes the blank line
 // is present loses every commit after an empty one.
 func TestCommitLineStatsInRange(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 

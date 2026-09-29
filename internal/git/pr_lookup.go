@@ -224,10 +224,36 @@ func (g *Git) lookupPullRequestByQualifiedHead(targetRepo, headOwner, branch, he
 	return selectPullRequest(prs, targetRepo, branch, headSHA, "qualified-head")
 }
 
-func (g *Git) runGH(args ...string) ([]byte, error) {
+// ghFunc runs the gh CLI in dir and returns its stdout and stderr. Every gh
+// invocation goes through one, so tests can record and answer them without
+// starting a process. Production only checks whether err is nil; a fake that
+// wants to look like *exec.ExitError can also give its error an ExitCode()
+// method.
+type ghFunc func(dir string, args ...string) (stdout, stderr []byte, err error)
+
+// realGH runs the gh binary on PATH with dir as its working directory.
+func realGH(dir string, args ...string) (stdout, stderr []byte, err error) {
 	cmd := exec.Command("gh", args...)
-	cmd.Dir = g.workDir
-	out, err := cmd.CombinedOutput()
+	cmd.Dir = dir
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	return outBuf.Bytes(), errBuf.Bytes(), err
+}
+
+func (g *Git) ghRunner() ghFunc {
+	if g.gh == nil {
+		return realGH
+	}
+	return g.gh
+}
+
+// runGH runs gh in the working directory and returns stdout followed by
+// stderr, which is what a parse or an error message sees.
+func (g *Git) runGH(args ...string) ([]byte, error) {
+	stdout, stderr, err := g.ghRunner()(g.workDir, args...)
+	out := append(stdout, stderr...)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
 	}

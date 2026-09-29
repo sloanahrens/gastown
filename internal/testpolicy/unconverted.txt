@@ -14,7 +14,6 @@ internal/dog
 internal/doltserver
 internal/feed
 internal/formula
-internal/git
 internal/hooks
 internal/krc
 internal/mail

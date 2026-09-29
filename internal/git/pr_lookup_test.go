@@ -2,26 +2,23 @@ package git
 
 import (
 	"errors"
-	"os"
+	"fmt"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
 func TestLookupPullRequestRecordedURLSurvivesDeletedHead(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-case "$*" in
-  *baseRepository*) printf 'unsupported field requested: %s\n' "$*" >&2; exit 2 ;;
-esac
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "https://github.com/upstream/repo/pull/42" ]; then
-  printf '%s\n' '{"number":42,"url":"https://github.com/upstream/repo/pull/42","state":"MERGED","mergedAt":"2026-07-13T12:00:00Z","headRefName":"fix/deleted-head","headRefOid":"abc123","headRepository":null,"headRepositoryOwner":{"login":"fork-owner"},"baseRepository":{"nameWithOwner":"upstream/repo"}}'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{reject: "baseRepository", rules: []ghRule{
+		{prefix: []string{"pr", "view", "https://github.com/upstream/repo/pull/42"}, stdout: `{"number":42,"url":"https://github.com/upstream/repo/pull/42","state":"MERGED","mergedAt":"2026-07-13T12:00:00Z","headRefName":"fix/deleted-head","headRefOid":"abc123","headRepository":null,"headRepositoryOwner":{"login":"fork-owner"},"baseRepository":{"nameWithOwner":"upstream/repo"}}`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	pr, err := g.LookupPullRequest(PullRequestRef{URL: "https://github.com/upstream/repo/pull/42", Branch: "fix/deleted-head"})
@@ -37,16 +34,13 @@ exit 1
 }
 
 func TestLookupPullRequestRecordedURLRejectsHeadDrift(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "https://github.com/upstream/repo/pull/42" ]; then
-  printf '%s\n' '{"number":42,"url":"https://github.com/upstream/repo/pull/42","state":"OPEN","mergedAt":"","headRefName":"fix/drift","headRefOid":"new-head","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"pr", "view", "https://github.com/upstream/repo/pull/42"}, stdout: `{"number":42,"url":"https://github.com/upstream/repo/pull/42","state":"OPEN","mergedAt":"","headRefName":"fix/drift","headRefOid":"new-head","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	_, err := g.LookupPullRequest(PullRequestRef{URL: "https://github.com/upstream/repo/pull/42", Branch: "fix/drift", HeadSHA: "submitted"})
@@ -56,16 +50,13 @@ exit 1
 }
 
 func TestLookupPullRequestQualifiedForkHead(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "GET" ] && [ "$4" = "repos/upstream/repo/pulls" ]; then
-  printf '%s\n' '[{"number":4474,"html_url":"https://github.com/upstream/repo/pull/4474","state":"open","merged_at":null,"head":{"ref":"fix/fork-head","sha":"sha4474","repo":{"full_name":"blairsilverberg/repo","owner":{"login":"blairsilverberg"}},"user":{"login":"blairsilverberg"}},"base":{"repo":{"full_name":"upstream/repo"}}}]'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"api", "-X", "GET", "repos/upstream/repo/pulls"}, stdout: `[{"number":4474,"html_url":"https://github.com/upstream/repo/pull/4474","state":"open","merged_at":null,"head":{"ref":"fix/fork-head","sha":"sha4474","repo":{"full_name":"blairsilverberg/repo","owner":{"login":"blairsilverberg"}},"user":{"login":"blairsilverberg"}},"base":{"repo":{"full_name":"upstream/repo"}}}]`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	pr, err := g.LookupPullRequest(PullRequestRef{Branch: "fix/fork-head", HeadOwner: "blairsilverberg"})
@@ -81,16 +72,13 @@ exit 1
 }
 
 func TestLookupPullRequestBranchAmbiguityFailsClosed(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[{"number":1,"url":"https://github.com/upstream/repo/pull/1","state":"OPEN","mergedAt":"","headRefName":"shared","headRefOid":"a1","headRepository":{"nameWithOwner":"one/repo"},"headRepositoryOwner":{"login":"one"},"baseRepository":{"nameWithOwner":"upstream/repo"}},{"number":2,"url":"https://github.com/upstream/repo/pull/2","state":"OPEN","mergedAt":"","headRefName":"shared","headRefOid":"b2","headRepository":{"nameWithOwner":"two/repo"},"headRepositoryOwner":{"login":"two"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"pr", "list"}, stdout: `[{"number":1,"url":"https://github.com/upstream/repo/pull/1","state":"OPEN","mergedAt":"","headRefName":"shared","headRefOid":"a1","headRepository":{"nameWithOwner":"one/repo"},"headRepositoryOwner":{"login":"one"},"baseRepository":{"nameWithOwner":"upstream/repo"}},{"number":2,"url":"https://github.com/upstream/repo/pull/2","state":"OPEN","mergedAt":"","headRefName":"shared","headRefOid":"b2","headRepository":{"nameWithOwner":"two/repo"},"headRepositoryOwner":{"login":"two"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	_, err := g.LookupPullRequest(PullRequestRef{Branch: "shared"})
@@ -115,6 +103,7 @@ exit 1
 // verdict to an operator said "open PR exists" even when the branch has no
 // GitHub remote at all. PullRequestProtection must keep the two apart.
 func TestPullRequestProtectionDistinguishesFailedLookupFromOpenPR(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	if _, err := g.AddRemote("origin", filepath.Join(t.TempDir(), "local-origin.git")); err != nil {
@@ -134,16 +123,13 @@ func TestPullRequestProtectionDistinguishesFailedLookupFromOpenPR(t *testing.T) 
 }
 
 func TestPullRequestProtectionOpenPRIsOpen(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[{"number":7,"url":"https://github.com/upstream/repo/pull/7","state":"OPEN","mergedAt":"","headRefName":"feature","headRefOid":"abc","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"pr", "list"}, stdout: `[{"number":7,"url":"https://github.com/upstream/repo/pull/7","state":"OPEN","mergedAt":"","headRefName":"feature","headRefOid":"abc","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	state, err := g.PullRequestProtection(PullRequestRef{Branch: "feature"})
@@ -156,16 +142,13 @@ exit 1
 }
 
 func TestPullRequestProtectionNoMatchIsNone(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[]'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"pr", "list"}, stdout: `[]`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	state, err := g.PullRequestProtection(PullRequestRef{Branch: "no-pr"})
@@ -181,16 +164,13 @@ exit 1
 }
 
 func TestLookupPullRequestBranchHeadSHADisambiguates(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '[{"number":1,"url":"https://github.com/upstream/repo/pull/1","state":"CLOSED","mergedAt":"","headRefName":"shared","headRefOid":"old","headRepository":{"nameWithOwner":"one/repo"},"headRepositoryOwner":{"login":"one"},"baseRepository":{"nameWithOwner":"upstream/repo"}},{"number":2,"url":"https://github.com/upstream/repo/pull/2","state":"CLOSED","mergedAt":"2026-07-13T12:00:00Z","headRefName":"shared","headRefOid":"wanted","headRepository":{"nameWithOwner":"two/repo"},"headRepositoryOwner":{"login":"two"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"pr", "list"}, stdout: `[{"number":1,"url":"https://github.com/upstream/repo/pull/1","state":"CLOSED","mergedAt":"","headRefName":"shared","headRefOid":"old","headRepository":{"nameWithOwner":"one/repo"},"headRepositoryOwner":{"login":"one"},"baseRepository":{"nameWithOwner":"upstream/repo"}},{"number":2,"url":"https://github.com/upstream/repo/pull/2","state":"CLOSED","mergedAt":"2026-07-13T12:00:00Z","headRefName":"shared","headRefOid":"wanted","headRepository":{"nameWithOwner":"two/repo"},"headRepositoryOwner":{"login":"two"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	pr, err := g.LookupPullRequest(PullRequestRef{Branch: "shared", HeadSHA: "wanted"})
@@ -203,16 +183,13 @@ exit 1
 }
 
 func TestFindPRNumberRequiresOpenPR(t *testing.T) {
-	installFakeGH(t, `#!/bin/sh
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "99" ]; then
-  printf '%s\n' '{"number":99,"url":"https://github.com/upstream/repo/pull/99","state":"CLOSED","mergedAt":"","headRefName":"closed","headRefOid":"abc","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}'
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"pr", "view", "99"}, stdout: `{"number":99,"url":"https://github.com/upstream/repo/pull/99","state":"CLOSED","mergedAt":"","headRefName":"closed","headRefOid":"abc","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}`},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	addGitHubRemotes(t, g)
 
 	number, err := g.FindPRNumberForRef(PullRequestRef{Number: 99})
@@ -225,22 +202,14 @@ exit 1
 }
 
 func TestPullRequestApprovalAndMergeUseResolvedURLAndRepo(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "gh.log")
-	t.Setenv("GH_LOG", logPath)
-	installFakeGH(t, `#!/bin/sh
-printf '%s\n' "$*" >> "$GH_LOG"
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  printf '%s\n' '{"reviewDecision":"APPROVED"}'
-  exit 0
-fi
-if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
-  exit 0
-fi
-printf 'unexpected gh args: %s\n' "$*" >&2
-exit 1
-`)
+	t.Parallel()
+	gh := &fakeGH{rules: []ghRule{
+		{prefix: []string{"pr", "view"}, stdout: `{"reviewDecision":"APPROVED"}`},
+		{prefix: []string{"pr", "merge"}},
+	}}
 	dir := initTestRepo(t)
 	g := NewGit(dir)
+	g.gh = gh.run
 	pr := &PullRequestInfo{Number: 42, URL: "https://github.com/upstream/repo/pull/42", BaseRepo: "upstream/repo", HeadSHA: "abc123"}
 
 	approved, err := g.IsPullRequestApproved(pr)
@@ -254,31 +223,69 @@ exit 1
 		t.Fatalf("GhPrMergePullRequest: %v", err)
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read gh log: %v", err)
+	want := []ghCall{
+		{dir: dir, args: "pr view https://github.com/upstream/repo/pull/42 --json reviewDecision --repo upstream/repo"},
+		{dir: dir, args: "pr merge https://github.com/upstream/repo/pull/42 --squash --match-head-commit abc123 --repo upstream/repo"},
 	}
-	log := string(logBytes)
-	for _, want := range []string{
-		"pr view https://github.com/upstream/repo/pull/42 --json reviewDecision --repo upstream/repo",
-		"pr merge https://github.com/upstream/repo/pull/42 --squash --match-head-commit abc123 --repo upstream/repo",
-	} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("gh log missing %q\nlog:\n%s", want, log)
-		}
+	if got := gh.all(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gh calls = %v, want %v", got, want)
 	}
 }
 
-func installFakeGH(t *testing.T, script string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "gh")
-	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake gh: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return dir
+// ghRule answers a gh invocation whose argv starts with prefix.
+type ghRule struct {
+	prefix []string
+	stdout string
 }
+
+// ghCall is one recorded gh invocation: its working directory and its argv
+// joined by spaces.
+type ghCall struct {
+	dir  string
+	args string
+}
+
+// fakeGH stands in for the gh CLI behind Git's gh seam. It answers the first
+// rule whose prefix matches, fails any argv containing reject the way gh
+// refuses an unknown --json field, and fails everything else.
+type fakeGH struct {
+	rules  []ghRule
+	reject string
+
+	mu    sync.Mutex
+	calls []ghCall
+}
+
+func (f *fakeGH) run(dir string, args ...string) (stdout, stderr []byte, err error) {
+	joined := strings.Join(args, " ")
+	f.mu.Lock()
+	f.calls = append(f.calls, ghCall{dir: dir, args: joined})
+	f.mu.Unlock()
+	if f.reject != "" && strings.Contains(joined, f.reject) {
+		return nil, []byte("unsupported field requested: " + joined + "\n"), ghExit(2)
+	}
+	for _, r := range f.rules {
+		if len(args) >= len(r.prefix) && slices.Equal(args[:len(r.prefix)], r.prefix) {
+			if r.stdout == "" {
+				return nil, nil, nil
+			}
+			return []byte(r.stdout + "\n"), nil, nil
+		}
+	}
+	return nil, []byte("unexpected gh args: " + joined + "\n"), ghExit(1)
+}
+
+func (f *fakeGH) all() []ghCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ghCall(nil), f.calls...)
+}
+
+// ghExit is a non-zero gh exit, matched like *exec.ExitError.
+type ghExit int
+
+func (e ghExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e ghExit) ExitCode() int { return int(e) }
 
 func addGitHubRemotes(t *testing.T, g *Git) {
 	t.Helper()

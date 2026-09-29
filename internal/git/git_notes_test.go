@@ -32,6 +32,7 @@ func commitFile(t *testing.T, dir, path, content, message string) string {
 }
 
 func TestPatchID_StableAcrossNoOpRebase(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	base, err := g.Rev("HEAD")
@@ -88,6 +89,7 @@ func TestPatchID_StableAcrossNoOpRebase(t *testing.T) {
 }
 
 func TestPatchID_DiffersAfterContentEdit(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	base, err := g.Rev("HEAD")
@@ -112,6 +114,7 @@ func TestPatchID_DiffersAfterContentEdit(t *testing.T) {
 }
 
 func TestNotesAddShow_RoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	head, err := g.Rev("HEAD")
@@ -133,6 +136,7 @@ func TestNotesAddShow_RoundTrip(t *testing.T) {
 }
 
 func TestNotesShow_NoNoteReturnsErrNoNote(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	head, err := g.Rev("HEAD")
@@ -160,6 +164,7 @@ func currentBranchName(t *testing.T, dir string) string {
 }
 
 func TestNotesList_ReturnsNotesOnUnreachableCommits(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	root, err := g.Rev("HEAD")
@@ -203,6 +208,7 @@ func TestNotesList_ReturnsNotesOnUnreachableCommits(t *testing.T) {
 }
 
 func TestNotesList_AbsentRefIsEmpty(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -216,6 +222,7 @@ func TestNotesList_AbsentRefIsEmpty(t *testing.T) {
 }
 
 func TestParents_OfRootAndMerge(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	root, err := g.Rev("HEAD")
@@ -251,6 +258,7 @@ func TestParents_OfRootAndMerge(t *testing.T) {
 }
 
 func TestNotesCopy(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	from, err := g.Rev("HEAD")
@@ -283,6 +291,7 @@ func TestNotesCopy(t *testing.T) {
 // PatchID: one id per commit, each unchanged by a rebase, so a caller can tell
 // which individual changes two branches share.
 func TestPatchIDs_PerCommitAndStableAcrossRebase(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	base, err := g.Rev("HEAD")
@@ -325,6 +334,7 @@ func TestPatchIDs_PerCommitAndStableAcrossRebase(t *testing.T) {
 // commit is added on top, so "origin's changes are all present locally" is
 // answerable by set containment.
 func TestPatchIDs_SupersetAfterAddingCommit(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	base, err := g.Rev("HEAD")
@@ -377,6 +387,7 @@ func TestPatchIDs_SupersetAfterAddingCommit(t *testing.T) {
 // about, so it must read as an empty list rather than the error PatchID raises
 // when there is no diff to hash.
 func TestPatchIDs_EmptyRange(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	head, err := g.Rev("HEAD")
@@ -398,6 +409,7 @@ func TestPatchIDs_EmptyRange(t *testing.T) {
 // first-parent chain, and the landed-review refusal turns on exactly that
 // difference (gt-ljn8).
 func TestFirstParentContains(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	mainBranch, err := g.CurrentBranch()
@@ -456,6 +468,7 @@ func TestFirstParentContains(t *testing.T) {
 // keyed to. Without that, the commit that landed an MR whose sha a rebase
 // rewrote could not be found at all.
 func TestFirstParentPatchIDs_MergeCommitCarriesBranchPatchID(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	mainBranch, err := g.CurrentBranch()
@@ -530,6 +543,7 @@ func TestFirstParentPatchIDs_MergeCommitCarriesBranchPatchID(t *testing.T) {
 // commits of its own" is a state callers reason about, so it reads as an
 // empty list rather than the error PatchID raises with no diff to hash.
 func TestFirstParentPatchIDs_EmptyRange(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	head, err := g.Rev("HEAD")

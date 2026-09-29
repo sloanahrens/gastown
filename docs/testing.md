@@ -335,6 +335,16 @@ make test-timing PKGS=./internal/<pkg>/...                   # unit tier, taxed 
 go test -tags integration -run '^TestIntegration' -count=1 ./internal/<pkg>/...   # target 60 s or less
 ```
 
+A package that meets every rule leaves `unconverted.txt` even if it still runs longer than the converted-package budget (10 s in `make test`'s budget runner). In that case, list it in `internal/testpolicy/overbudget.txt` as `<package> <bead-id>`, where the bead tracks getting it under budget, and raise `maxOverBudget` to match. The budget runner does not fail a package on that list. Instead it prints the package's time and bead under "over budget (tracked)" on every run. TestPolicy rejects these entries:
+- one with a missing or malformed bead id;
+- one for a package that breaks a rule;
+- one for a package also in `unconverted.txt`;
+- one that is not a Go package in this repo;
+- a duplicate;
+- more entries than `maxOverBudget` allows.
+
+`overbudget.txt` only shrinks, like `unconverted.txt`: when the package fits the budget, delete its line and lower `maxOverBudget`.
+
 Coverage may drop by no more than 2 points; justify any larger drop in the MR. `internal/tmux` went from 65.6% (the old suite, with real tmux) to 71.1% for the unit tier alone.
 
 ## One bead, one MR

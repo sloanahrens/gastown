@@ -11,37 +11,12 @@ import (
 	"time"
 )
 
+// initTestRepo returns a repo (the returned dir itself) with a test identity
+// and one commit adding README.md on main, copied from testRepoFixture.
 func initTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-
-	// Initialize repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-
-	// Configure user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = dir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
-	// Create initial commit
-	testFile := filepath.Join(dir, "README.md")
-	if err := os.WriteFile(testFile, []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	cmd = exec.Command("git", "add", ".")
-	cmd.Dir = dir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "initial")
-	cmd.Dir = dir
-	_ = cmd.Run()
-
+	testRepoFixture.copyInto(t, dir)
 	return dir
 }
 
@@ -53,46 +28,52 @@ type townRootSafetySnapshot struct {
 
 func initTownRootSafetyRepo(t *testing.T) string {
 	t.Helper()
-
-	root := initTestRepo(t)
-	g := NewGit(root)
-	cmd := exec.Command("git", "branch", "polecat/safety")
-	cmd.Dir = root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("create safety branch: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("committed\n"), 0644); err != nil {
-		t.Fatalf("write tracked file: %v", err)
-	}
-	if err := g.Add("tracked.txt"); err != nil {
-		t.Fatalf("git add tracked: %v", err)
-	}
-	if err := g.Commit("add tracked file"); err != nil {
-		t.Fatalf("git commit tracked: %v", err)
-	}
-
-	writeTownSafetyFile(t, root, "mayor/town.json", `{"name":"test-town"}\n`)
-	writeTownSafetyFile(t, root, "mayor/rigs.json", `{"rigs":[]}\n`)
-	writeTownSafetyFile(t, root, ".dolt-data/gastown/.dolt/noms/manifest", "manifest sentinel\n")
-	writeTownSafetyFile(t, root, ".runtime/sentinel", "runtime sentinel\n")
-	writeTownSafetyFile(t, root, ".beads/metadata.json", `{"prefix":"hq"}\n`)
-	writeTownSafetyFile(t, root, "daemon/daemon.pid", "12345\n")
-	writeTownSafetyFile(t, root, "user-work.txt", "untracked user work\n")
-	writeTownSafetyFile(t, root, "tracked.txt", "dirty tracked work\n")
-
+	root := t.TempDir()
+	townRootSafetyFixture.copyInto(t, root)
 	return root
 }
 
-func writeTownSafetyFile(t *testing.T, root, rel, contents string) {
-	t.Helper()
-	path := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
-		t.Fatalf("write %s: %v", rel, err)
-	}
+// townRootSafetyContents are the files initTownRootSafetyRepo leaves in the
+// town root, relative to it, with their contents.
+var townRootSafetyContents = [][2]string{
+	{"mayor/town.json", `{"name":"test-town"}\n`},
+	{"mayor/rigs.json", `{"rigs":[]}\n`},
+	{".dolt-data/gastown/.dolt/noms/manifest", "manifest sentinel\n"},
+	{".runtime/sentinel", "runtime sentinel\n"},
+	{".beads/metadata.json", `{"prefix":"hq"}\n`},
+	{"daemon/daemon.pid", "12345\n"},
+	{"user-work.txt", "untracked user work\n"},
+	{"tracked.txt", "dirty tracked work\n"},
 }
+
+// townRootSafetyFixture is a town root that is also a git repo: the initial
+// commit, a branch polecat/safety at it, a second commit adding tracked.txt,
+// and then the town's marker and runtime files written on top, including
+// an uncommitted edit to tracked.txt.
+var townRootSafetyFixture = &gitFixture{name: "townroot", build: func(root string) error {
+	if err := buildCommittedRepo(root); err != nil {
+		return err
+	}
+	if _, err := fixtureGit(root, "branch", "polecat/safety"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("committed\n"), 0o644); err != nil {
+		return err
+	}
+	if err := fixtureSteps(root, []string{"add", "tracked.txt"}, []string{"commit", "-m", "add tracked file"}); err != nil {
+		return err
+	}
+	for _, f := range townRootSafetyContents {
+		path := filepath.Join(root, filepath.FromSlash(f[0]))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(f[1]), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}}
 
 func snapshotTownRootSafety(t *testing.T, root string) townRootSafetySnapshot {
 	t.Helper()
@@ -158,6 +139,7 @@ func requireTownRootSafetyError(t *testing.T, err error) {
 }
 
 func TestTownRootMutatingGitCommandsAreBlocked(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		run  func(*Git) error
@@ -182,6 +164,7 @@ func TestTownRootMutatingGitCommandsAreBlocked(t *testing.T) {
 }
 
 func TestTownRootReadOnlyStashListIsAllowed(t *testing.T) {
+	t.Parallel()
 	root := initTownRootSafetyRepo(t)
 	count, err := NewGit(root).StashCount()
 	if err != nil {
@@ -193,6 +176,7 @@ func TestTownRootReadOnlyStashListIsAllowed(t *testing.T) {
 }
 
 func TestNestedWorkDirResolvingToTownRootGitIsBlocked(t *testing.T) {
+	t.Parallel()
 	root := initTownRootSafetyRepo(t)
 	rigDir := filepath.Join(root, "gastown")
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
@@ -225,6 +209,7 @@ func TestNestedWorkDirResolvingToTownRootGitIsBlocked(t *testing.T) {
 }
 
 func TestWorktreeAddCannotTargetTownRootRuntimePaths(t *testing.T) {
+	t.Parallel()
 	root := initTownRootSafetyRepo(t)
 	before := snapshotTownRootSafety(t, root)
 
@@ -252,7 +237,7 @@ func TestWorktreeAddCannotTargetTownRootRuntimePaths(t *testing.T) {
 
 	link := filepath.Join(t.TempDir(), "townlink")
 	if err := os.Symlink(root, link); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
+		t.Fatalf("symlink: %v", err)
 	}
 	err := NewGitWithDir(bareDir, "").WorktreeAddFromRef(filepath.Join(link, ".runtime", "linked-worktree"), "polecat/town-root-symlink", "HEAD")
 	requireTownRootSafetyError(t, err)
@@ -260,6 +245,7 @@ func TestWorktreeAddCannotTargetTownRootRuntimePaths(t *testing.T) {
 }
 
 func TestCloneCannotTargetTownRootRuntimePaths(t *testing.T) {
+	t.Parallel()
 	root := initTownRootSafetyRepo(t)
 	before := snapshotTownRootSafety(t, root)
 	src := initTestRepo(t)
@@ -270,26 +256,29 @@ func TestCloneCannotTargetTownRootRuntimePaths(t *testing.T) {
 
 	link := filepath.Join(t.TempDir(), "townlink")
 	if err := os.Symlink(root, link); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
+		t.Fatalf("symlink: %v", err)
 	}
 	err = NewGit(t.TempDir()).Clone(src, filepath.Join(link, ".dolt-data", "clone"))
 	requireTownRootSafetyError(t, err)
 	assertTownRootSafetyPreserved(t, root, before)
 
-	oldWd, err := os.Getwd()
+	// A relative destination resolves against the process's working
+	// directory, so name the town root's runtime dir relative to it.
+	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("get cwd: %v", err)
 	}
-	if err := os.Chdir(root); err != nil {
-		t.Fatalf("chdir town root: %v", err)
+	rel, err := filepath.Rel(wd, filepath.Join(root, ".runtime", "relative-clone"))
+	if err != nil || filepath.IsAbs(rel) {
+		t.Fatalf("relative path to town root: %q, %v", rel, err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	err = NewGit(t.TempDir()).Clone(src, filepath.Join(".runtime", "relative-clone"))
+	err = NewGit(t.TempDir()).Clone(src, rel)
 	requireTownRootSafetyError(t, err)
 	assertTownRootSafetyPreserved(t, root, before)
 }
 
 func TestIsRepo(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	g := NewGit(dir)
 
@@ -309,6 +298,7 @@ func TestIsRepo(t *testing.T) {
 }
 
 func TestCloneWithReferenceCreatesAlternates(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src")
 	dst := filepath.Join(tmp, "dst")
@@ -316,8 +306,6 @@ func TestCloneWithReferenceCreatesAlternates(t *testing.T) {
 	if err := exec.Command("git", "init", src).Run(); err != nil {
 		t.Fatalf("init src: %v", err)
 	}
-	_ = exec.Command("git", "-C", src, "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "-C", src, "config", "user.name", "Test User").Run()
 
 	if err := os.WriteFile(filepath.Join(src, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -337,6 +325,7 @@ func TestCloneWithReferenceCreatesAlternates(t *testing.T) {
 }
 
 func TestCloneWithReferencePreservesSymlinks(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src")
 	dst := filepath.Join(tmp, "dst")
@@ -345,8 +334,6 @@ func TestCloneWithReferencePreservesSymlinks(t *testing.T) {
 	if err := exec.Command("git", "init", src).Run(); err != nil {
 		t.Fatalf("init src: %v", err)
 	}
-	_ = exec.Command("git", "-C", src, "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "-C", src, "config", "user.name", "Test User").Run()
 
 	// Create a directory and a symlink to it
 	targetDir := filepath.Join(src, "target")
@@ -359,7 +346,7 @@ func TestCloneWithReferencePreservesSymlinks(t *testing.T) {
 
 	linkPath := filepath.Join(src, "link")
 	if err := os.Symlink("target", linkPath); err != nil {
-		t.Skipf("symlinks not supported: %v", err)
+		t.Fatalf("symlink: %v", err)
 	}
 
 	_ = exec.Command("git", "-C", src, "add", ".").Run()
@@ -392,6 +379,7 @@ func TestCloneWithReferencePreservesSymlinks(t *testing.T) {
 }
 
 func TestTopLevelResolvesUpward(t *testing.T) {
+	t.Parallel()
 	root := initTestRepo(t)
 	nested := filepath.Join(root, "sub", "deeper")
 	if err := os.MkdirAll(nested, 0755); err != nil {
@@ -427,6 +415,7 @@ func TestTopLevelResolvesUpward(t *testing.T) {
 }
 
 func TestCurrentBranch(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -442,6 +431,7 @@ func TestCurrentBranch(t *testing.T) {
 }
 
 func TestStatus(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -478,13 +468,12 @@ func TestStatus(t *testing.T) {
 // Status still reports the gitlink, because callers preserving a user's work
 // must not miss it.
 func TestStatusIgnoringSubmodulesDropsGitlinkDrift(t *testing.T) {
+	t.Parallel()
 	subRoot := t.TempDir()
 	subBare := filepath.Join(subRoot, "sub.git")
 	subWork := filepath.Join(subRoot, "sub-work")
 	runGit(t, subRoot, "init", "--bare", "--initial-branch=main", subBare)
 	runGit(t, subRoot, "clone", subBare, subWork)
-	runGit(t, subWork, "config", "user.email", "test@test.com")
-	runGit(t, subWork, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(subWork, "README.md"), []byte("v1\n"), 0644); err != nil {
 		t.Fatalf("write submodule file: %v", err)
 	}
@@ -499,8 +488,6 @@ func TestStatusIgnoringSubmodulesDropsGitlinkDrift(t *testing.T) {
 	// Move the submodule's own HEAD: the superproject's gitlink now names the
 	// previous commit.
 	subCheckout := filepath.Join(dir, "libs", "sub")
-	runGit(t, subCheckout, "config", "user.email", "test@test.com")
-	runGit(t, subCheckout, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(subCheckout, "v2.txt"), []byte("v2\n"), 0644); err != nil {
 		t.Fatalf("write submodule file: %v", err)
 	}
@@ -526,6 +513,7 @@ func TestStatusIgnoringSubmodulesDropsGitlinkDrift(t *testing.T) {
 }
 
 func TestGitDirResolvesLinkedWorktreeToItsOwnDirectory(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -554,6 +542,7 @@ func TestGitDirResolvesLinkedWorktreeToItsOwnDirectory(t *testing.T) {
 }
 
 func TestStatusOnMissingWorkDirReportsMissingDirectoryNotGitBinary(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	goneDir := filepath.Join(dir, "gone")
 	// Never create goneDir: this reproduces a polecat whose worktree
@@ -585,6 +574,7 @@ func TestStatusOnMissingWorkDirReportsMissingDirectoryNotGitBinary(t *testing.T)
 // character ("README.md" parsed as "EADME.md"). Status() must use the
 // untrimmed runOutput() instead.
 func TestStatusPreservesLeadingSpaceColumnOnSoleUnstagedModification(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("unstaged edit\n"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -606,6 +596,7 @@ func TestStatusPreservesLeadingSpaceColumnOnSoleUnstagedModification(t *testing.
 // git as a pathspec (classifyIndexSkew, gt-ui2x) looks for a literal file
 // whose name contains quote characters, which matches nothing.
 func TestStatusUnquotesCQuotedPaths(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	name := `weird"quote.txt`
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("content\n"), 0644); err != nil {
@@ -622,6 +613,7 @@ func TestStatusUnquotesCQuotedPaths(t *testing.T) {
 }
 
 func TestAddAndCommit(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -650,6 +642,7 @@ func TestAddAndCommit(t *testing.T) {
 }
 
 func TestHasUncommittedChanges(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -677,6 +670,7 @@ func TestHasUncommittedChanges(t *testing.T) {
 }
 
 func TestCheckout(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -697,6 +691,7 @@ func TestCheckout(t *testing.T) {
 }
 
 func TestCheckoutDetachAllowsBranchCheckedOutInAnotherWorktree(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -747,6 +742,7 @@ func TestCheckoutDetachAllowsBranchCheckedOutInAnotherWorktree(t *testing.T) {
 }
 
 func TestCheckoutNewBranch(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -780,6 +776,7 @@ func TestCheckoutNewBranch(t *testing.T) {
 }
 
 func TestNotARepo(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir() // Empty dir, not a git repo
 	g := NewGit(dir)
 
@@ -798,6 +795,7 @@ func TestNotARepo(t *testing.T) {
 }
 
 func TestRev(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -813,6 +811,7 @@ func TestRev(t *testing.T) {
 }
 
 func TestLogGrep_FindsMatchingCommit(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -849,6 +848,7 @@ func TestLogGrep_FindsMatchingCommit(t *testing.T) {
 }
 
 func TestFetchBranch(t *testing.T) {
+	t.Parallel()
 	// Create a "remote" repo
 	remoteDir := t.TempDir()
 	cmd := exec.Command("git", "init", "--bare")
@@ -883,6 +883,7 @@ func TestFetchBranch(t *testing.T) {
 }
 
 func TestCheckConflicts_NoConflict(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	mainBranch, _ := g.CurrentBranch()
@@ -933,6 +934,7 @@ func TestCheckConflicts_NoConflict(t *testing.T) {
 }
 
 func TestCheckConflicts_WithConflict(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	mainBranch, _ := g.CurrentBranch()
@@ -1009,6 +1011,7 @@ func TestCheckConflicts_WithConflict(t *testing.T) {
 //
 // Related: GitHub issue #286
 func TestCloneBareHasOriginRefs(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 
 	// Create a "remote" repo with a commit on main
@@ -1021,12 +1024,6 @@ func TestCloneBareHasOriginRefs(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
 
 	// Create initial commit
 	readmeFile := filepath.Join(remoteDir, "README.md")
@@ -1086,6 +1083,7 @@ func TestCloneBareHasOriginRefs(t *testing.T) {
 }
 
 func TestCloneBareEmptyRepoSkipsMissingHeadFetch(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remoteDir := filepath.Join(tmp, "remote")
 	if err := os.MkdirAll(remoteDir, 0755); err != nil {
@@ -1114,6 +1112,7 @@ func TestCloneBareEmptyRepoSkipsMissingHeadFetch(t *testing.T) {
 }
 
 func TestIsEmpty_EmptyRepo(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cmd := exec.Command("git", "init")
 	cmd.Dir = dir
@@ -1132,6 +1131,7 @@ func TestIsEmpty_EmptyRepo(t *testing.T) {
 }
 
 func TestIsEmpty_RepoWithCommit(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -1145,6 +1145,7 @@ func TestIsEmpty_RepoWithCommit(t *testing.T) {
 }
 
 func TestRefExists_ValidRef(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -1159,6 +1160,7 @@ func TestRefExists_ValidRef(t *testing.T) {
 }
 
 func TestRefExists_InvalidRef(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -1173,6 +1175,7 @@ func TestRefExists_InvalidRef(t *testing.T) {
 }
 
 func TestRefExists_OriginRef(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 
 	// Create a remote repo
@@ -1185,12 +1188,6 @@ func TestRefExists_OriginRef(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
 	if err := os.WriteFile(filepath.Join(remoteDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1250,69 +1247,16 @@ func stringContains(s, substr string) bool {
 }
 
 // initTestRepoWithRemote sets up a local repo with a bare remote and initial push.
-// Returns (localDir, remoteDir, mainBranch).
+// Returns (localDir, remoteDir, mainBranch). It is a copy of remoteFixture.
 func initTestRepoWithRemote(t *testing.T) (string, string, string) {
 	t.Helper()
 	tmp := t.TempDir()
-
-	// Create bare remote
-	remoteDir := filepath.Join(tmp, "remote.git")
-	if err := exec.Command("git", "init", "--bare", remoteDir).Run(); err != nil {
-		t.Fatalf("git init --bare: %v", err)
-	}
-
-	// Create local repo
-	localDir := filepath.Join(tmp, "local")
-	if err := os.MkdirAll(localDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	// Initial commit
-	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", "."},
-		{"git", "commit", "-m", "initial"},
-		{"git", "remote", "add", "origin", remoteDir},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	// Get main branch name and push
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = localDir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("branch --show-current: %v", err)
-	}
-	mainBranch := strings.TrimSpace(string(out))
-
-	cmd = exec.Command("git", "push", "-u", "origin", mainBranch)
-	cmd.Dir = localDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("push: %v", err)
-	}
-
-	return localDir, remoteDir, mainBranch
+	remoteFixture.copyInto(t, tmp)
+	return filepath.Join(tmp, "local"), filepath.Join(tmp, "remote.git"), fixtureMainBranch
 }
 
 func TestPruneStaleBranches_MergedBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -1402,6 +1346,7 @@ func TestPruneStaleBranches_MergedBranch(t *testing.T) {
 }
 
 func TestPruneStaleBranches_DryRun(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -1455,6 +1400,7 @@ func TestPruneStaleBranches_DryRun(t *testing.T) {
 }
 
 func TestPruneStaleBranches_SkipsCurrentBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, _ := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -1477,6 +1423,7 @@ func TestPruneStaleBranches_SkipsCurrentBranch(t *testing.T) {
 }
 
 func TestPruneStaleBranches_SkipsUnmerged(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -1519,6 +1466,7 @@ func TestPruneStaleBranches_SkipsUnmerged(t *testing.T) {
 }
 
 func TestListPushRemoteRefsWithHashesClassifiesRemoteOnlyMergedBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	branch := "polecat/remote-merged"
@@ -1583,26 +1531,15 @@ func TestListPushRemoteRefsWithHashesClassifiesRemoteOnlyMergedBranch(t *testing
 	}
 }
 
+// TestPushWithEnv checks that PushWithEnv hands its extra environment to the
+// git push process (and so to the pre-push hook git runs, which is what
+// GT_INTEGRATION_LAND=1 is for). GIT_TRACE in that environment makes git
+// write a trace file, which only happens if the variable reached git.
 func TestPushWithEnv(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
-
-	// Set up a pre-push hook that blocks unless GT_INTEGRATION_LAND=1
-	hooksDir := filepath.Join(localDir, ".git", "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
-		t.Fatalf("mkdir hooks: %v", err)
-	}
-	hookScript := `#!/bin/bash
-if [[ "$GT_INTEGRATION_LAND" != "1" ]]; then
-  echo "BLOCKED: GT_INTEGRATION_LAND not set"
-  exit 1
-fi
-exit 0
-`
-	hookPath := filepath.Join(hooksDir, "pre-push")
-	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
-		t.Fatalf("write hook: %v", err)
-	}
+	trace := filepath.Join(t.TempDir(), "push.trace")
 
 	// Make a commit to push
 	if err := os.WriteFile(filepath.Join(localDir, "env-test.txt"), []byte("test"), 0644); err != nil {
@@ -1615,20 +1552,21 @@ exit 0
 		t.Fatalf("Commit: %v", err)
 	}
 
-	// Regular Push should fail (hook blocks without env var)
-	err := g.Push("origin", mainBranch, false)
-	if err == nil {
-		t.Fatal("expected Push to fail without GT_INTEGRATION_LAND")
-	}
-
-	// PushWithEnv with GT_INTEGRATION_LAND=1 should succeed
-	err = g.PushWithEnv("origin", mainBranch, false, []string{"GT_INTEGRATION_LAND=1"})
+	err := g.PushWithEnv("origin", mainBranch, false, []string{"GT_INTEGRATION_LAND=1", "GIT_TRACE=" + trace})
 	if err != nil {
-		t.Fatalf("PushWithEnv with GT_INTEGRATION_LAND=1 should succeed: %v", err)
+		t.Fatalf("PushWithEnv: %v", err)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatalf("git never saw GIT_TRACE from PushWithEnv's environment: %v", err)
+	}
+	if !strings.Contains(string(data), "push") {
+		t.Fatalf("trace does not record the push:\n%s", data)
 	}
 }
 
 func TestFetchPrune(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -1688,8 +1626,6 @@ func initTestRepoWithSubmodule(t *testing.T) (string, string) {
 	// Create a working clone of the submodule to add content
 	subWork := filepath.Join(tmp, "sub-work")
 	runGit(t, tmp, "clone", subRemote, subWork)
-	runGit(t, subWork, "config", "user.email", "test@test.com")
-	runGit(t, subWork, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(subWork, "lib.go"), []byte("package lib\n"), 0644); err != nil {
 		t.Fatalf("write sub file: %v", err)
 	}
@@ -1700,8 +1636,6 @@ func initTestRepoWithSubmodule(t *testing.T) (string, string) {
 	// Create the parent repo
 	parent := filepath.Join(tmp, "parent")
 	runGit(t, tmp, "init", "--initial-branch", "main", parent)
-	runGit(t, parent, "config", "user.email", "test@test.com")
-	runGit(t, parent, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(parent, "README.md"), []byte("# Parent\n"), 0644); err != nil {
 		t.Fatalf("write parent file: %v", err)
 	}
@@ -1728,6 +1662,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 }
 
 func TestInitSubmodules_NoSubmodules(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	// Should be a no-op, not an error
 	if err := InitSubmodules(dir); err != nil {
@@ -1736,6 +1671,7 @@ func TestInitSubmodules_NoSubmodules(t *testing.T) {
 }
 
 func TestInitSubmodules_SkipsUntrackedGitmodules(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	gitmodules := filepath.Join(dir, ".gitmodules")
 	content := []byte("[submodule \"libs/sub\"]\n\tpath = libs/sub\n\turl = https://example.com/sub.git\n")
@@ -1748,6 +1684,7 @@ func TestInitSubmodules_SkipsUntrackedGitmodules(t *testing.T) {
 }
 
 func TestHasTrackedGitmodules(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	if hasTrackedGitmodules(dir) {
 		t.Fatal("expected false when .gitmodules doesn't exist")
@@ -1767,6 +1704,7 @@ func TestHasTrackedGitmodules(t *testing.T) {
 }
 
 func TestInitSubmodules_WithSubmodules(t *testing.T) {
+	t.Parallel()
 	parent, _ := initTestRepoWithSubmodule(t)
 
 	// The submodule should already be initialized from the test setup
@@ -1791,13 +1729,17 @@ func TestInitSubmodules_WithSubmodules(t *testing.T) {
 		t.Fatal("expected empty submodule dir before init")
 	}
 
-	// Allow file:// transport for submodule init in test environment
-	t.Setenv("GIT_CONFIG_COUNT", "1")
-	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+	// The exported wrapper adds no git config, so git's default refusal of
+	// the file:// transport for submodule clones must stand. This guards
+	// that InitSubmodules passes no extra environment to initSubmodules.
+	err := InitSubmodules(cloneDest)
+	if err == nil || !strings.Contains(err.Error(), "transport 'file' not allowed") {
+		t.Fatalf("InitSubmodules with the default protocol policy = %v, want a refused file transport", err)
+	}
 
-	// InitSubmodules should populate it
-	if err := InitSubmodules(cloneDest); err != nil {
+	// initSubmodules with file:// allowed should populate it.
+	allowFile := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.file.allow", "GIT_CONFIG_VALUE_0=always"}
+	if err := initSubmodules(cloneDest, allowFile); err != nil {
 		t.Fatalf("InitSubmodules: %v", err)
 	}
 
@@ -1808,6 +1750,7 @@ func TestInitSubmodules_WithSubmodules(t *testing.T) {
 }
 
 func TestSubmoduleChanges(t *testing.T) {
+	t.Parallel()
 	parent, subRemote := initTestRepoWithSubmodule(t)
 
 	// Create a branch with a submodule change
@@ -1856,6 +1799,7 @@ func TestSubmoduleChanges(t *testing.T) {
 }
 
 func TestSubmoduleChanges_NoSubmodules(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 
 	// Create a branch with a regular file change
@@ -1884,6 +1828,7 @@ func TestSubmoduleChanges_NoSubmodules(t *testing.T) {
 }
 
 func TestPushSubmoduleCommit(t *testing.T) {
+	t.Parallel()
 	parent, subRemote := initTestRepoWithSubmodule(t)
 
 	// Make a new commit in the submodule (but don't push it)
@@ -1926,6 +1871,7 @@ func TestPushSubmoduleCommit(t *testing.T) {
 }
 
 func TestPushSubmoduleCommit_ShortSHA(t *testing.T) {
+	t.Parallel()
 	// Verify that PushSubmoduleCommit doesn't panic when given a short SHA
 	// that triggers an error path. The error message formats sha[:8] which
 	// panics if len(sha) < 8. (gt-dg7)
@@ -1943,6 +1889,7 @@ func TestPushSubmoduleCommit_ShortSHA(t *testing.T) {
 }
 
 func TestSubmoduleChanges_SkipsClaudeWorktrees(t *testing.T) {
+	t.Parallel()
 	// Verify that SubmoduleChanges filters out .claude/ paths.
 	// Claude Code creates worktrees under .claude/worktrees/ which have .git
 	// files that git may report as gitlinks (mode 160000). These are not
@@ -1956,8 +1903,6 @@ func TestSubmoduleChanges_SkipsClaudeWorktrees(t *testing.T) {
 	// Populate the claude submodule remote
 	claudeWork := filepath.Join(tmp, "claude-work")
 	runGit(t, tmp, "clone", claudeRemote, claudeWork)
-	runGit(t, claudeWork, "config", "user.email", "test@test.com")
-	runGit(t, claudeWork, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(claudeWork, "init.go"), []byte("package x\n"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -2012,6 +1957,7 @@ func TestSubmoduleChanges_SkipsClaudeWorktrees(t *testing.T) {
 }
 
 func TestConfigurePushURL(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -2051,6 +1997,7 @@ func TestConfigurePushURL(t *testing.T) {
 }
 
 func TestGetPushURL_NoPushURL(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -2384,6 +2331,7 @@ func TestStashPop(t *testing.T) {
 }
 
 func TestClearPushURL(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
@@ -2426,6 +2374,7 @@ func TestClearPushURL(t *testing.T) {
 }
 
 func TestIsGasTownRuntimePath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want bool
@@ -2477,6 +2426,7 @@ func TestIsGasTownRuntimePath(t *testing.T) {
 }
 
 func TestCleanExcludingRuntime(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		s    UncommittedWorkStatus
@@ -2594,6 +2544,7 @@ func TestCleanExcludingRuntime(t *testing.T) {
 }
 
 func TestRuntimeArtifactPaths(t *testing.T) {
+	t.Parallel()
 	status := UncommittedWorkStatus{
 		HasUncommittedChanges: true,
 		ModifiedFiles: []string{
@@ -2631,6 +2582,7 @@ func TestRuntimeArtifactPaths(t *testing.T) {
 }
 
 func TestRuntimeArtifactPathspecs(t *testing.T) {
+	t.Parallel()
 	got := RuntimeArtifactPathspecs([]string{
 		".beads/redirect",
 		"web/.beads/redirect",
@@ -2664,6 +2616,7 @@ func TestRuntimeArtifactPathspecs(t *testing.T) {
 }
 
 func TestParsePorcelainStatusEntryPreservesRenameCopySourceAndConflict(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		line       string
@@ -2716,7 +2669,9 @@ func TestParsePorcelainStatusEntryPreservesRenameCopySourceAndConflict(t *testin
 }
 
 func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.T) {
+	t.Parallel()
 	t.Run("rename to real path blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		runGitTestCmd(t, dir, "mv", "README.md", "renamed.md")
 
@@ -2737,6 +2692,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("rename from real path to runtime path blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
 			t.Fatalf("mkdir opencode plugins: %v", err)
@@ -2759,6 +2715,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("rename from runtime path to runtime path is ignored by runtime filter", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
 			t.Fatalf("mkdir opencode plugins: %v", err)
@@ -2786,6 +2743,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("unmerged runtime conflict blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		runGitTestCmd(t, dir, "branch", "-M", "main")
 		if err := os.MkdirAll(filepath.Join(dir, ".opencode", "plugins"), 0755); err != nil {
@@ -2821,6 +2779,7 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 	})
 
 	t.Run("unmerged conflict blocks", func(t *testing.T) {
+		t.Parallel()
 		dir := initTestRepo(t)
 		runGitTestCmd(t, dir, "branch", "-M", "main")
 		if err := os.WriteFile(filepath.Join(dir, "conflict.txt"), []byte("base\n"), 0644); err != nil {
@@ -2861,7 +2820,9 @@ func TestCheckUncommittedWorkCapturesPorcelainRenameAndUnmergedPaths(t *testing.
 // skew, not risk — while a real staged edit that ISN'T already known
 // anywhere, and any unstaged edit at all, must still block.
 func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
+	t.Parallel()
 	t.Run("staged-only content already on origin is skew and does not block reuse", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -2895,6 +2856,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("staged content not yet on origin or main still blocks", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -2923,6 +2885,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	// revert here, not evidence of a moved ref — HEAD is ahead of every
 	// comparison ref — so it must block rather than read as reuse-clean.
 	t.Run("staged revert of a fix this branch carries, absent from main, still blocks", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, mainBranch := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -2954,6 +2917,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("unstaged edit always blocks regardless of skew classification", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -2985,6 +2949,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	// directions: skew when the content really matches, blocking when it
 	// doesn't.
 	t.Run("pathspec-special filename with content on origin is still classified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3010,6 +2975,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("pathspec-special filename absent from origin is NOT misclassified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3041,6 +3007,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	// the real filename at all — see TestStatusUnquotesCQuotedPaths — so this
 	// is the end-to-end path the om review flagged as untested.
 	t.Run("C-quoted filename (embedded quote) with content on origin is classified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3066,6 +3033,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("C-quoted filename (embedded quote) absent from origin MUST block", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3091,6 +3059,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("non-ASCII filename with content on origin is classified as skew", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3116,6 +3085,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 	})
 
 	t.Run("non-ASCII filename absent from origin MUST block", func(t *testing.T) {
+		t.Parallel()
 		localDir, _, _ := initTestRepoWithRemote(t)
 		g := NewGit(localDir)
 
@@ -3149,6 +3119,7 @@ func TestCheckUncommittedWorkIndexSkewVsRealDirty(t *testing.T) {
 // the porcelain status already parsed; only calling IndexSkewFiles triggers
 // the classification.
 func TestCheckUncommittedWorkIndexSkewIsLazy(t *testing.T) {
+	t.Parallel()
 	localDir, _, _ := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -3198,6 +3169,7 @@ func runGitTestCmdWantFailure(t *testing.T, dir string, args ...string) {
 }
 
 func TestCheckBranchContamination(t *testing.T) {
+	t.Parallel()
 	// Create a repo with main and a feature branch that diverges.
 	dir := initTestRepo(t) // has initial commit on default branch
 	g := NewGit(dir)
@@ -3267,80 +3239,16 @@ func TestCheckBranchContamination(t *testing.T) {
 // initTestRepoWithSplitRemote creates a test setup that mirrors the polecat workflow:
 // two bare repos (upstream and fork), a local clone whose origin has fetch URL → upstream
 // and push URL → fork. Returns (localDir, upstreamBareDir, forkBareDir, mainBranch).
+// It is a copy of splitRemoteFixture.
 func initTestRepoWithSplitRemote(t *testing.T) (string, string, string, string) {
 	t.Helper()
 	tmp := t.TempDir()
-
-	upstream := filepath.Join(tmp, "upstream.git")
-	fork := filepath.Join(tmp, "fork.git")
-	localDir := filepath.Join(tmp, "local")
-
-	for _, bare := range []string{upstream, fork} {
-		if err := exec.Command("git", "init", "--bare", bare).Run(); err != nil {
-			t.Fatalf("git init --bare %s: %v", bare, err)
-		}
-	}
-
-	if err := os.MkdirAll(localDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	if err := os.WriteFile(filepath.Join(localDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	for _, args := range [][]string{
-		{"git", "add", "."},
-		{"git", "commit", "-m", "initial"},
-		{"git", "remote", "add", "origin", upstream},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = localDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("%s: %v", args, err)
-		}
-	}
-
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = localDir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("branch --show-current: %v", err)
-	}
-	mainBranch := strings.TrimSpace(string(out))
-
-	// Push initial commit to both upstream and fork
-	cmd = exec.Command("git", "push", "origin", mainBranch)
-	cmd.Dir = localDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("push to upstream: %v", err)
-	}
-	cmd = exec.Command("git", "push", fork, mainBranch)
-	cmd.Dir = localDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("push to fork: %v", err)
-	}
-
-	// Split the remote: fetch stays at upstream, push goes to fork
-	g := NewGit(localDir)
-	if err := g.ConfigurePushURL("origin", fork); err != nil {
-		t.Fatalf("ConfigurePushURL: %v", err)
-	}
-
-	return localDir, upstream, fork, mainBranch
+	splitRemoteFixture.copyInto(t, tmp)
+	return filepath.Join(tmp, "local"), filepath.Join(tmp, "upstream.git"), filepath.Join(tmp, "fork.git"), fixtureMainBranch
 }
 
 func TestForkBackedDefaultPushGuard_SplitPushURL(t *testing.T) {
+	t.Parallel()
 	localDir, _, _, mainBranch := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 
@@ -3371,6 +3279,7 @@ func TestForkBackedDefaultPushGuard_SplitPushURL(t *testing.T) {
 }
 
 func TestForkBackedDefaultPushGuard_OriginForkWithUpstream(t *testing.T) {
+	t.Parallel()
 	localDir, upstream, fork, mainBranch := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 	if err := g.ClearPushURL("origin"); err != nil {
@@ -3395,6 +3304,7 @@ func TestForkBackedDefaultPushGuard_OriginForkWithUpstream(t *testing.T) {
 }
 
 func TestForkBackedDefaultPushGuard_AllowsNormalDefaultPush(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -3407,6 +3317,7 @@ func TestForkBackedDefaultPushGuard_AllowsNormalDefaultPush(t *testing.T) {
 }
 
 func TestForkBackedDefaultPushGuard_AllowsFeatureBranchPush(t *testing.T) {
+	t.Parallel()
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 
@@ -3434,6 +3345,7 @@ func TestForkBackedDefaultPushGuard_AllowsFeatureBranchPush(t *testing.T) {
 // with a split fetch/push URL, RemoteBranchExists checks the fetch URL (upstream)
 // while PushRemoteBranchExists checks the push URL (fork/bare repo).
 func TestPushRemoteBranchExists_SplitURL(t *testing.T) {
+	t.Parallel()
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 
@@ -3480,6 +3392,7 @@ func TestPushRemoteBranchExists_SplitURL(t *testing.T) {
 }
 
 func TestListPushRemoteRefsWithHashesUsesPushURLHash(t *testing.T) {
+	t.Parallel()
 	localDir, upstream, _, mainBranch := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 	branch := "polecat/split-classifier"
@@ -3573,6 +3486,7 @@ func TestListPushRemoteRefsWithHashesUsesPushURLHash(t *testing.T) {
 }
 
 func TestPushRemoteRefTargetStatusPreservesRebasedRemoteBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	branch := "polecat/rebased-preserved"
@@ -3638,10 +3552,8 @@ func TestPushRemoteRefTargetStatusPreservesRebasedRemoteBranch(t *testing.T) {
 }
 
 func TestPushRemoteRefTargetStatusPreservesMultiCommitSquashRemoteBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
-	if err := exec.Command("git", "-C", localDir, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
-		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
-	}
 	g := NewGit(localDir)
 	branch := "polecat/squash-remote-preserved"
 
@@ -3704,6 +3616,7 @@ func TestPushRemoteRefTargetStatusPreservesMultiCommitSquashRemoteBranch(t *test
 }
 
 func TestPushRemoteRefTargetStatusKeepsUnmergedSplitPushRemoteBranch(t *testing.T) {
+	t.Parallel()
 	localDir, upstream, _, mainBranch := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 	branch := "polecat/split-unmerged"
@@ -3773,6 +3686,7 @@ func mustPushRemoteRef(t *testing.T, g *Git, branch string) RemoteRef {
 }
 
 func TestDeleteRemoteBranchIfAtRejectsChangedBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -3845,6 +3759,7 @@ func TestDeleteRemoteBranchIfAtRejectsChangedBranch(t *testing.T) {
 // TestPushRemoteBranchExists_NoPushURL verifies that PushRemoteBranchExists
 // falls back to RemoteBranchExists when no custom push URL is configured.
 func TestPushRemoteBranchExists_NoPushURL(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -3868,6 +3783,7 @@ func TestPushRemoteBranchExists_NoPushURL(t *testing.T) {
 }
 
 func TestVerifyPushedCommit(t *testing.T) {
+	t.Parallel()
 	localDir, _, _ := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -3919,6 +3835,7 @@ func TestVerifyPushedCommit(t *testing.T) {
 }
 
 func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
+	t.Parallel()
 	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -3946,16 +3863,6 @@ func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
 	if out, err := exec.Command("git", "clone", remoteDir, cloneDir).CombinedOutput(); err != nil {
 		t.Fatalf("clone advancer: %v\n%s", err, out)
 	}
-	for _, args := range [][]string{
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = cloneDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", args, err, out)
-		}
-	}
 	if err := os.WriteFile(filepath.Join(cloneDir, "shared.txt"), []byte("v2\n"), 0644); err != nil {
 		t.Fatalf("write advancer v2: %v", err)
 	}
@@ -3964,7 +3871,7 @@ func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
 		{"git", "commit", "-m", "shared target v2"},
 		{"git", "push", "origin", mainBranch},
 	} {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := exec.Command("git", args[1:]...)
 		cmd.Dir = cloneDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", args, err, out)
@@ -3998,7 +3905,7 @@ func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
 		{"git", "checkout", "--orphan", "replacement"},
 		{"git", "rm", "-rf", "."},
 	} {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := exec.Command("git", args[1:]...)
 		cmd.Dir = cloneDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", args, err, out)
@@ -4013,7 +3920,7 @@ func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
 		{"git", "branch", "-M", mainBranch},
 		{"git", "push", "--force", "origin", mainBranch},
 	} {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := exec.Command("git", args[1:]...)
 		cmd.Dir = cloneDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", args, err, out)
@@ -4030,6 +3937,7 @@ func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
 // commit_sha even though the change is identical. The proof check must treat
 // that as verified, not as an unverified push.
 func TestVerifyPushedCommitReachableFromPushTargetAllowsContentPreservedRebase(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -4104,6 +4012,7 @@ func TestVerifyPushedCommitReachableFromPushTargetAllowsContentPreservedRebase(t
 }
 
 func TestCommitLandedOnTarget_ExactTipAndAncestor(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -4152,6 +4061,7 @@ func TestCommitLandedOnTarget_ExactTipAndAncestor(t *testing.T) {
 }
 
 func TestCommitLandedOnTarget_ContentPreservedRebase(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -4233,6 +4143,7 @@ func TestCommitLandedOnTarget_ContentPreservedRebase(t *testing.T) {
 // never-merged, still-open MR as already landed would skip closing it as the
 // empty/superseded submission it actually is (gt-j5cc).
 func TestCommitLandedOnTarget_EmptyNetDiff_NotLanded(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -4277,6 +4188,7 @@ func TestCommitLandedOnTarget_EmptyNetDiff_NotLanded(t *testing.T) {
 }
 
 func TestVerifyPushedCommitSplitURL(t *testing.T) {
+	t.Parallel()
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 
@@ -4316,6 +4228,7 @@ func TestVerifyPushedCommitSplitURL(t *testing.T) {
 }
 
 func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
+	t.Parallel()
 	localDir, _, forkDir, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 	branch := "integration/verified-split"
@@ -4348,16 +4261,6 @@ func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
 	if out, err := exec.Command("git", "clone", forkDir, cloneDir).CombinedOutput(); err != nil {
 		t.Fatalf("clone fork advancer: %v\n%s", err, out)
 	}
-	for _, args := range [][]string{
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = cloneDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", args, err, out)
-		}
-	}
 	cmd := exec.Command("git", "checkout", branch)
 	cmd.Dir = cloneDir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -4371,7 +4274,7 @@ func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
 		{"git", "commit", "-m", "split shared v2"},
 		{"git", "push", "origin", branch},
 	} {
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := exec.Command("git", args[1:]...)
 		cmd.Dir = cloneDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", args, err, out)
@@ -4398,6 +4301,7 @@ func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
 // reports a branch as pushed when it exists on the push target (fork), even though
 // it's absent from the fetch URL (upstream). This is the GH#3224 fix.
 func TestBranchPushedToRemote_SplitURL(t *testing.T) {
+	t.Parallel()
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
 
@@ -4437,6 +4341,7 @@ func TestBranchPushedToRemote_SplitURL(t *testing.T) {
 }
 
 func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	branch := "polecat/already-pushed"
@@ -4518,6 +4423,7 @@ func detachAtPushedBranchTip(t *testing.T, localDir, branch string) string {
 // the preservation evidence a named branch already gets from the exact-branch
 // arm, so the count must be 0 here without the seat's branch being named.
 func TestUnpushedCommitsDetachedHeadOnRemoteBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	branch := "polecat/topaz/gt-glfh+mudjlvex"
@@ -4576,6 +4482,7 @@ func TestUnpushedCommitsDetachedHeadOnRemoteBranch(t *testing.T) {
 // still name the work. The local level cannot see it and says so, which is its
 // documented one-sided error; the live level asks.
 func TestUnpushedCommitsDetachedHeadUnfetchedRemoteBranch(t *testing.T) {
+	t.Parallel()
 	localDir, _, _ := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	branch := "polecat/granite/gt-7dxw+mudlcgyf"
@@ -4604,6 +4511,7 @@ func TestUnpushedCommitsDetachedHeadUnfetchedRemoteBranch(t *testing.T) {
 // reporting unpreserved work. Without it, widening the detached-head evidence
 // could clear a seat holding the only copy of a commit.
 func TestUnpushedCommitsDetachedHeadOffRemoteStillBlocks(t *testing.T) {
+	t.Parallel()
 	localDir, _, _ := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	detachAtPushedBranchTip(t, localDir, "polecat/opal/gt-glfh+mudjlvex")
@@ -4651,6 +4559,7 @@ func TestUnpushedCommitsDetachedHeadOffRemoteStillBlocks(t *testing.T) {
 // remote is configured but was never fetched, so there is no exact-branch,
 // upstream, or default-branch ref to compare HEAD against at all.
 func TestUnpushedCommitsLocalFailClosed_NoComparisonRefs(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	remoteDir := filepath.Join(tmp, "remote.git")
 	if err := exec.Command("git", "init", "--bare", remoteDir).Run(); err != nil {
@@ -4662,8 +4571,6 @@ func TestUnpushedCommitsLocalFailClosed_NoComparisonRefs(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	runGit(t, localDir, "init")
-	runGit(t, localDir, "config", "user.email", "test@test.com")
-	runGit(t, localDir, "config", "user.name", "Test User")
 	runGit(t, localDir, "remote", "add", "origin", remoteDir)
 	runGit(t, localDir, "checkout", "-b", "polecat/never-fetched")
 	runGit(t, localDir, "commit", "--allow-empty", "-m", "initial")
@@ -4696,6 +4603,7 @@ func TestUnpushedCommitsLocalFailClosed_NoComparisonRefs(t *testing.T) {
 }
 
 func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
+	t.Parallel()
 	got := comparisonRefCandidates("main", "origin")
 	want := []string{"upstream/main", "origin/main", "main"}
 	if len(got) != len(want) {
@@ -4709,10 +4617,8 @@ func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
 }
 
 func TestBranchTargetStatusPreservesSquashMergedAdvancedTarget(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
-	if err := exec.Command("git", "-C", localDir, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
-		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
-	}
 	g := NewGit(localDir)
 	branch := "polecat/squash-preserved"
 
@@ -4806,6 +4712,7 @@ func revParse(t *testing.T, dir, ref string) string {
 // anything: a scan running in a clone that stopped fetching must be able to
 // pull main forward, or it judges today's work by yesterday's main forever.
 func TestFetchDefaultBranchWithTimeoutRefreshesStaleDefaultBranch(t *testing.T) {
+	t.Parallel()
 	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	if got := g.RemoteDefaultBranch(); got != mainBranch {
@@ -4841,6 +4748,7 @@ func TestFetchDefaultBranchWithTimeoutRefreshesStaleDefaultBranch(t *testing.T) 
 // TestFetchDefaultBranchWithTimeoutErrorsOnUnreachableRemote pins the failure
 // direction: a broken remote ends the fetch, it does not stall the scan.
 func TestFetchDefaultBranchWithTimeoutErrorsOnUnreachableRemote(t *testing.T) {
+	t.Parallel()
 	localDir, _, _ := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 	runGit(t, localDir, "remote", "set-url", "origin", filepath.Join(localDir, "does-not-exist.git"))
@@ -4853,6 +4761,7 @@ func TestFetchDefaultBranchWithTimeoutErrorsOnUnreachableRemote(t *testing.T) {
 // TestBranchPushedToRemote_NoPushURL verifies baseline behavior: when fetch and
 // push URLs are the same, BranchPushedToRemote works normally.
 func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
+	t.Parallel()
 	localDir, _, mainBranch := initTestRepoWithRemote(t)
 	g := NewGit(localDir)
 
@@ -4921,8 +4830,6 @@ func notesTestClone(t *testing.T, originDir string) string {
 	if out, err := exec.Command("git", "-c", "protocol.file.allow=always", "clone", originDir, dir).CombinedOutput(); err != nil {
 		t.Fatalf("git clone %s: %v\n%s", originDir, err, out)
 	}
-	runGit(t, dir, "config", "user.email", "test@test.com")
-	runGit(t, dir, "config", "user.name", "Test User")
 	return dir
 }
 
@@ -4971,6 +4878,7 @@ func notesPublishedOnOrigin(t *testing.T, originDir, ref string) map[string]stri
 // every other clone (and, at the `gt mq review` callsite, exits 2
 // record_failed).
 func TestPushNotes_MergesRemoteNotesOnNonFastForwardRejection(t *testing.T) {
+	t.Parallel()
 	origin, cloneA := notesOriginFixture(t)
 	cloneB := notesTestClone(t, origin)
 	gA, gB := NewGit(cloneA), NewGit(cloneB)
@@ -5013,6 +4921,7 @@ func TestPushNotes_MergesRemoteNotesOnNonFastForwardRejection(t *testing.T) {
 // notes ref left exactly as they were, rather than one silently replacing the
 // other.
 func TestPushNotes_ConflictOnSameCommitFailsClosed(t *testing.T) {
+	t.Parallel()
 	origin, cloneA := notesOriginFixture(t)
 	cloneB := notesTestClone(t, origin)
 	gA, gB := NewGit(cloneA), NewGit(cloneB)
@@ -5057,6 +4966,7 @@ func TestPushNotes_ConflictOnSameCommitFailsClosed(t *testing.T) {
 // conflict-free merge of two revs would have, and an error when the two have
 // no conflict-free merge at all.
 func TestMergedTree(t *testing.T) {
+	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 	gitRun := func(args ...string) {
