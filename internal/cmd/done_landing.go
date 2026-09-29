@@ -5,7 +5,9 @@ import (
 	"strings"
 )
 
-// gt done exit statuses for work that did not land (G5-01). Session
+// gt done exit statuses for work that did not land (G5-01). They are ordered
+// by distance from landing: doneLanding.err reports the lowest code present,
+// so a new outcome must be numbered by where it falls in that order. Session
 // retirement, witness notification and completion metadata all run before
 // gt done returns, so a caller that sees one of these has lost nothing by
 // the non-zero exit; it can tell dropped work from landed work.

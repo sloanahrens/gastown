@@ -58,7 +58,7 @@ type BDRunner func(ctx context.Context, env []string, args ...string) (stdout, s
 type BDHandshake struct { Path string; Found BDVersionInfo; DBSchema int }
 var KnownBDContractVersions = []int{1}
 func ParseBDVersionJSON(out []byte) (BDVersionInfo, error) // accepts flat payload and machine envelope
-func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
+func CheckBDHandshake(ctx context.Context, bdPath string, run BDRunner) (*BDHandshake, error)
 ```
 
 - [x] Failing tests (table, fake runner): installed-style 537accb payload (no
@@ -79,7 +79,7 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
   not-found error text contains `make safe-install` and never `go install`;
   a source test greps `internal/` non-test Go files for `go install` + `beads/cmd/bd` and fails on any hit.
 - [x] Delete `installBeads`, `appendGOBIN`, `BeadsInstallPath`,
-  `MinBeadsVersion`, `BeadsTooOld`; `EnsureBeads()` takes no argument and never installs; parse the `schema<=N` suffix in `parseBeadsVersion` output alongside the semver.
+  `MinBeadsVersion`, `BeadsTooOld`; `EnsureBeads()` takes no argument and never installs. (The `schema<=N` text suffix is not parsed: see Execution notes.)
 - [x] Green; commit `fix(deps): never install bd; unknown bd version is an error`.
 
 ### Task 3: gate town-running paths and doctor (gt-7iwy0.1)
@@ -140,7 +140,7 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
 
 **Files:** `internal/cmd/done.go`, `errors.go`, `root.go` (Execute), `done_landing_test.go` (new), `source_validation_test.go`, formulas/templates/docs mentioning `--skip-verify`.
 
-**Produces:** `type CodedExitError struct{Code int; Err error}`; exit codes
+**Produces:** `type ExitCodeError struct{Code int; Err error}`; exit codes
 `doneExitPushFailed=10`, `doneExitPushUnverified=11`, `doneExitMRFailed=12`,
 `doneExitCloseFailed=13`; `type doneLanding` accumulator replacing `doneErrors`.
 
@@ -181,3 +181,7 @@ func CheckBDHandshake(ctx context.Context, run BDRunner) (*BDHandshake, error)
   "not found", now answer as bd does (`[]`, "Issue <id> not found").
 - The `bd version` text `schema<=N` suffix is not parsed: the handshake reads
   the same level from `bd version --json` (`db_schema_version`).
+- om review added: a session-level gate (`internal/bdgate`) called by every
+  agent session start; the batch close runs in machine mode and builds
+  `*PartialCloseError` from the envelope (exit 21/22) or a re-read; every
+  witness `bd query` passes `--limit 0`.
