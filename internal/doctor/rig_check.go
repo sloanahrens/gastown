@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -1117,14 +1118,30 @@ func hasBeadsData(beadsDir string) bool {
 	return false
 }
 
-// bareRepoHealth returns nil if .repo.git is structurally usable as a bare repo,
-// or an error describing why it is not. Catches the recurring corruption mode
-// where .repo.git is reduced to objects/ + worktrees/ (no HEAD, refs, config),
-// and also rejects a non-bare repo masquerading as .repo.git (which would let
-// refspec repair write into a working tree's git dir).
-func bareRepoHealth(bareRepoPath string) error {
+// bareRepoState classifies a .repo.git for the doctor checks.
+type bareRepoState int
+
+const (
+	// bareRepoHealthy: git confirms a usable bare repository.
+	bareRepoHealthy bareRepoState = iota
+	// bareRepoCorrupt: HEAD is missing, the recurring corruption mode where
+	// .repo.git is reduced to objects/ + worktrees/. Decided by a stat, not
+	// by git, so a git that cannot run never produces this verdict.
+	bareRepoCorrupt
+	// bareRepoUnverified: git could not confirm the repo (rev-parse failed
+	// for any reason, or it reports a non-bare repo). This is UNKNOWN, never
+	// corrupt: a broken git shim, fork exhaustion or a codesign kill fail
+	// rev-parse on a perfectly good repo (G4-02). Nothing acts on it.
+	bareRepoUnverified
+)
+
+// classifyBareRepo reports the state of .repo.git and, when not healthy, why.
+func classifyBareRepo(bareRepoPath string) (bareRepoState, error) {
 	if _, err := os.Stat(filepath.Join(bareRepoPath, "HEAD")); err != nil {
-		return fmt.Errorf("HEAD missing: %w", err)
+		if os.IsNotExist(err) {
+			return bareRepoCorrupt, fmt.Errorf("HEAD missing: %w", err)
+		}
+		return bareRepoUnverified, fmt.Errorf("cannot stat HEAD: %w", err)
 	}
 	cmd := exec.Command("git", "-C", bareRepoPath, "rev-parse", "--git-dir")
 	var stderr bytes.Buffer
@@ -1134,7 +1151,7 @@ func bareRepoHealth(bareRepoPath string) error {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("git rev-parse --git-dir failed: %s", msg)
+		return bareRepoUnverified, fmt.Errorf("git rev-parse --git-dir failed: %s", msg)
 	}
 	stderr.Reset()
 	bareCmd := exec.Command("git", "-C", bareRepoPath, "rev-parse", "--is-bare-repository")
@@ -1145,12 +1162,23 @@ func bareRepoHealth(bareRepoPath string) error {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("git rev-parse --is-bare-repository failed: %s", msg)
+		return bareRepoUnverified, fmt.Errorf("git rev-parse --is-bare-repository failed: %s", msg)
 	}
 	if strings.TrimSpace(string(out)) != "true" {
-		return fmt.Errorf(".repo.git is not a bare repository")
+		return bareRepoUnverified, fmt.Errorf(".repo.git is not a bare repository")
 	}
-	return nil
+	return bareRepoHealthy, nil
+}
+
+// bareRepoHealth returns nil if .repo.git is structurally usable as a bare repo,
+// or an error describing why it is not. Catches the recurring corruption mode
+// where .repo.git is reduced to objects/ + worktrees/ (no HEAD, refs, config),
+// and also rejects a non-bare repo masquerading as .repo.git (which would let
+// refspec repair write into a working tree's git dir). Callers that might
+// remove the repo use classifyBareRepo, which separates corrupt from unknown.
+func bareRepoHealth(bareRepoPath string) error {
+	_, err := classifyBareRepo(bareRepoPath)
+	return err
 }
 
 // BareRepoRefspecCheck verifies that the shared bare repo has the correct refspec configured.
@@ -1475,10 +1503,12 @@ func (c *DefaultBranchAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 // never created), all those worktrees break with "fatal: not a git repository".
 type BareRepoExistsCheck struct {
 	FixableCheck
-	brokenWorktrees []string          // worktree paths with broken .repo.git references
-	pushURLMismatch bool              // config.json push_url differs from .repo.git push URL
-	bareRepoCorrupt bool              // .repo.git exists but is not a usable git directory
-	recoveredHeads  map[string]string // rig-relative worktree path -> HEAD ref captured before re-clone
+	brokenWorktrees []string // worktree paths with broken .repo.git references
+	pushURLMismatch bool     // config.json push_url differs from .repo.git push URL
+	bareRepoCorrupt bool     // .repo.git exists and is missing HEAD (see bareRepoCorrupt state)
+	// bareRepoUnverified: .repo.git exists but git could not confirm it.
+	// Fix refuses to touch the repo or its worktree metadata (G4-02).
+	bareRepoUnverified bool
 }
 
 // NewBareRepoExistsCheck creates a new bare repo exists check.
@@ -1512,7 +1542,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	c.brokenWorktrees = nil
 	c.pushURLMismatch = false
 	c.bareRepoCorrupt = false
-	c.recoveredHeads = nil
+	c.bareRepoUnverified = false
 	worktreeDirs := c.findWorktreeDirs(rigPath, ctx.RigName)
 
 	for _, wtDir := range worktreeDirs {
@@ -1562,7 +1592,24 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	// with "fatal: not a git repository" and is the recurring corruption mode this
 	// check exists to catch. Detect it here as a hard error so --fix triggers re-clone.
 	if _, err := os.Stat(bareRepoPath); err == nil {
-		if healthErr := bareRepoHealth(bareRepoPath); healthErr != nil {
+		state, healthErr := classifyBareRepo(bareRepoPath)
+		if state == bareRepoUnverified {
+			c.bareRepoUnverified = true
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusError,
+				Message: "unknown: could not verify the shared bare repo",
+				Details: []string{
+					fmt.Sprintf("git could not confirm %s is a usable bare repo", bareRepoPath),
+					healthErr.Error(),
+					"This is not treated as corruption: git itself may be failing (toolchain update, load, codesign).",
+					"gt doctor --fix will not touch .repo.git in this state.",
+				},
+				FixHint:  "Check that `git -C " + bareRepoPath + " rev-parse --git-dir` works, then re-run gt doctor",
+				Category: c.Category(),
+			}
+		}
+		if state == bareRepoCorrupt {
 			c.bareRepoCorrupt = true
 			details := []string{
 				fmt.Sprintf("Bare repo at %s is structurally broken", bareRepoPath),
@@ -1755,38 +1802,43 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 	rigPath := ctx.RigPath()
 	bareRepoPath := filepath.Join(rigPath, ".repo.git")
 
-	// If .repo.git is corrupt (exists but unusable), nuke it so the missing-repo
+	// An unverifiable repo is never touched: not removed, not re-registered
+	// into, not reconfigured (G4-02).
+	if c.bareRepoUnverified {
+		return fmt.Errorf("refusing to modify %s: git could not verify it (see gt doctor output); fix git and re-run", bareRepoPath)
+	}
+
+	// If .repo.git is corrupt (HEAD missing), move it aside so the missing-repo
 	// branch below re-clones from config.json. We cannot repair a partial-shell
 	// bare repo in place — git refuses to operate on it.
 	//
-	// Before nuking:
-	//   1. Re-verify health to guard against stale state — Run may have flagged
-	//      corruption minutes ago and the operator could have repaired it manually
-	//      between Run and Fix. Refusing to delete a now-healthy repo prevents
-	//      data loss from a TOCTOU window.
-	//   2. Capture every worktree that references .repo.git AND its HEAD ref.
-	//      Run only flags worktrees whose .repo.git/worktrees/<name> gitdir was
-	//      already missing — but after we delete .repo.git, ALL referencing
-	//      worktrees are broken and must be re-registered. HEAD must be captured
-	//      now because os.RemoveAll will erase .repo.git/worktrees/<name>/HEAD.
+	// It is never deleted. .repo.git is the object store every polecat worktree
+	// in the rig shares, and a corrupt shell still holds their objects (G4-02).
+	// Before moving it:
+	//   1. Re-classify to guard against stale state: the operator may have
+	//      repaired it between Run and Fix, or git may now be the thing failing.
+	//   2. Require it provably unneeded: no worktree references it, no
+	//      worktrees/ metadata, and no local branch ref that is not identical to
+	//      its origin tracking ref. Otherwise refuse and name what is at stake.
+	//   3. Rename to .repo.git.corrupt-<unix-nanos>, keeping every object.
 	if c.bareRepoCorrupt {
 		if _, err := os.Stat(bareRepoPath); err == nil {
-			if healthErr := bareRepoHealth(bareRepoPath); healthErr == nil {
-				// Repaired between Run and Fix — drop the corrupt flag and skip deletion.
+			state, _ := classifyBareRepo(bareRepoPath)
+			switch state {
+			case bareRepoHealthy:
+				// Repaired between Run and Fix — drop the corrupt flag and skip.
 				c.bareRepoCorrupt = false
-			} else {
-				refs := c.collectBareRepoReferences(rigPath, ctx.RigName)
-				c.recoveredHeads = make(map[string]string, len(refs))
+			case bareRepoUnverified:
+				return fmt.Errorf("refusing to modify %s: it is no longer classifiable as corrupt (git could not verify it)", bareRepoPath)
+			case bareRepoCorrupt:
+				if reasons := c.bareRepoRemovalBlockers(rigPath, ctx.RigName, bareRepoPath); len(reasons) > 0 {
+					return fmt.Errorf("refusing to replace corrupt %s: %s; recover or push that work, then re-run", bareRepoPath, strings.Join(reasons, "; "))
+				}
+				quarantine := fmt.Sprintf("%s.corrupt-%d", bareRepoPath, time.Now().UnixNano())
+				if mvErr := os.Rename(bareRepoPath, quarantine); mvErr != nil {
+					return fmt.Errorf("moving corrupt .repo.git aside: %w", mvErr)
+				}
 				c.brokenWorktrees = c.brokenWorktrees[:0]
-				for _, r := range refs {
-					c.brokenWorktrees = append(c.brokenWorktrees, r.relPath)
-					if r.headRef != "" {
-						c.recoveredHeads[r.relPath] = r.headRef
-					}
-				}
-				if rmErr := os.RemoveAll(bareRepoPath); rmErr != nil {
-					return fmt.Errorf("removing corrupt .repo.git: %w", rmErr)
-				}
 			}
 		}
 	}
@@ -1915,13 +1967,10 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 
-		// Detect which branch the worktree was on. Prefer a HEAD captured before
-		// .repo.git was nuked (corrupt-recovery path), fall back to reading from
-		// the live worktree gitdir (legacy missing-bare-repo path), then to main.
+		// Detect which branch the worktree was on: read it from the live
+		// worktree gitdir (missing-bare-repo path), else default to main.
 		headContent := "ref: refs/heads/main\n"
-		if saved, ok := c.recoveredHeads[relPath]; ok && saved != "" {
-			headContent = saved
-		} else if oldHead, err := os.ReadFile(filepath.Join(gitdir, "HEAD")); err == nil {
+		if oldHead, err := os.ReadFile(filepath.Join(gitdir, "HEAD")); err == nil {
 			headContent = string(oldHead)
 		}
 
@@ -1934,26 +1983,16 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// bareRepoWorktreeRef captures everything we need to re-register a worktree
-// after .repo.git is re-cloned. HEAD is captured BEFORE deletion because
-// os.RemoveAll erases .repo.git/worktrees/<name>/HEAD; without this the
-// re-registration would silently default to main.
-type bareRepoWorktreeRef struct {
-	relPath string // rig-relative worktree directory path
-	headRef string // contents of the worktree's HEAD (e.g. "ref: refs/heads/foo\n"), empty if unreadable
-}
+// bareRepoRemovalBlockers lists what makes a corrupt .repo.git unsafe to
+// replace: worktrees whose .git file points into it, entries under its
+// worktrees/ directory, and local branch refs that are not identical to
+// refs/remotes/origin/<same name>. Refs are read from files (loose refs and
+// packed-refs) because git cannot operate on a corrupt shell. Empty means the
+// repo is provably unneeded.
+func (c *BareRepoExistsCheck) bareRepoRemovalBlockers(rigPath, rigName, bareRepoPath string) []string {
+	var reasons []string
 
-// collectBareRepoReferences returns refs for every worktree dir whose .git
-// file points into <rigPath>/.repo.git/worktrees/<name>. Used during corrupt
-// .repo.git recovery: all referencing worktrees must be re-registered after
-// re-clone, regardless of whether the gitdir target was already missing.
-//
-// Path matching is exact (resolved + cleaned + prefix check) so a worktree
-// from another rig that happens to contain ".repo.git" in its path is not
-// mis-collected.
-func (c *BareRepoExistsCheck) collectBareRepoReferences(rigPath, rigName string) []bareRepoWorktreeRef {
-	bareRepoPrefix := filepath.Clean(filepath.Join(rigPath, ".repo.git", "worktrees")) + string(filepath.Separator)
-	var refs []bareRepoWorktreeRef
+	bareRepoPrefix := filepath.Clean(filepath.Join(bareRepoPath, "worktrees")) + string(filepath.Separator)
 	for _, wtDir := range c.findWorktreeDirs(rigPath, rigName) {
 		gitFile := filepath.Join(wtDir, ".git")
 		info, err := os.Stat(gitFile)
@@ -1972,22 +2011,83 @@ func (c *BareRepoExistsCheck) collectBareRepoReferences(rigPath, rigName string)
 		if !filepath.IsAbs(gitdir) {
 			gitdir = filepath.Join(wtDir, gitdir)
 		}
-		gitdir = filepath.Clean(gitdir)
-		if !strings.HasPrefix(gitdir, bareRepoPrefix) {
+		if !strings.HasPrefix(filepath.Clean(gitdir), bareRepoPrefix) {
 			continue
 		}
 		relPath, _ := filepath.Rel(rigPath, wtDir)
 		if relPath == "" {
 			relPath = wtDir
 		}
-		ref := bareRepoWorktreeRef{relPath: relPath}
-		// Capture HEAD now, before the caller removes .repo.git.
-		if headBytes, err := os.ReadFile(filepath.Join(gitdir, "HEAD")); err == nil {
-			ref.headRef = string(headBytes)
-		}
-		refs = append(refs, ref)
+		reasons = append(reasons, "worktree "+relPath+" is registered in it")
 	}
-	return refs
+
+	if entries, err := os.ReadDir(filepath.Join(bareRepoPath, "worktrees")); err == nil && len(entries) > 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		reasons = append(reasons, "worktrees/ metadata present ("+strings.Join(names, ", ")+")")
+	} else if err != nil && !os.IsNotExist(err) {
+		reasons = append(reasons, "cannot read worktrees/: "+err.Error())
+	}
+
+	refs, err := readRefsFromFiles(bareRepoPath)
+	if err != nil {
+		reasons = append(reasons, "cannot read refs: "+err.Error())
+		return reasons
+	}
+	for name, sha := range refs {
+		branch, ok := strings.CutPrefix(name, "refs/heads/")
+		if !ok {
+			continue
+		}
+		if refs["refs/remotes/origin/"+branch] != sha {
+			reasons = append(reasons, "branch "+branch+" is not on origin")
+		}
+	}
+	return reasons
+}
+
+// readRefsFromFiles reads loose refs under refs/ and packed-refs without git.
+// Loose refs win over packed ones, as in git.
+func readRefsFromFiles(repoPath string) (map[string]string, error) {
+	refs := map[string]string{}
+	if data, err := os.ReadFile(filepath.Join(repoPath, "packed-refs")); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "^") {
+				continue
+			}
+			if sha, name, ok := strings.Cut(line, " "); ok {
+				refs[name] = sha
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	refsDir := filepath.Join(repoPath, "refs")
+	walkErr := filepath.Walk(refsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) && path == refsDir {
+				return filepath.SkipDir
+			}
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(repoPath, path)
+		refs[filepath.ToSlash(rel)] = strings.TrimSpace(string(data))
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return refs, nil
 }
 
 // findWorktreeDirs returns paths to directories that may be git worktrees within a rig.

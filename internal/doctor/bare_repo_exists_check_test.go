@@ -439,10 +439,11 @@ func TestBareRepoExistsCheck_FixCorruptBareRepoReclones(t *testing.T) {
 		}
 	}
 
-	// Set up the rig with a corrupt .repo.git pointing at our upstream.
+	// Set up the rig with a corrupt .repo.git pointing at our upstream. No
+	// worktree references it: a referenced corrupt repo is refused, see
+	// TestBareRepoExistsCheck_FixRefusesCorruptRepoWithRegisteredWorktree.
 	bareRepo := initBareRepoWithRemote(t, rigDir, upstream)
 	writeConfigJSON(t, rigDir, upstream, "")
-	setupWorktreeRef(t, rigDir, bareRepo)
 	corruptBareRepo(t, bareRepo)
 
 	check := NewBareRepoExistsCheck()
@@ -506,58 +507,10 @@ func TestBareRepoRefspecCheck_FixRefusesCorrupt(t *testing.T) {
 	}
 }
 
-func TestBareRepoExistsCheck_FixCorruptPreservesWorktreeHead(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-	rigDir := filepath.Join(tmpDir, rigName)
-
-	upstream := filepath.Join(tmpDir, "upstream.git")
-	if out, err := exec.Command("git", "init", "--bare", upstream).CombinedOutput(); err != nil {
-		t.Fatalf("git init upstream: %v\n%s", err, out)
-	}
-	work := filepath.Join(tmpDir, "work")
-	for _, args := range [][]string{
-		{"init", "-b", "main", work},
-		{"-C", work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"},
-		{"-C", work, "remote", "add", "origin", upstream},
-		{"-C", work, "push", "origin", "main"},
-	} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-
-	bareRepo := initBareRepoWithRemote(t, rigDir, upstream)
-	writeConfigJSON(t, rigDir, upstream, "")
-	setupWorktreeRef(t, rigDir, bareRepo)
-	// Pre-populate the worktree's HEAD with a non-default branch ref.
-	customHead := "ref: refs/heads/feature-branch\n"
-	headFile := filepath.Join(bareRepo, "worktrees", "rig", "HEAD")
-	if err := os.WriteFile(headFile, []byte(customHead), 0644); err != nil {
-		t.Fatal(err)
-	}
-	corruptBareRepo(t, bareRepo)
-
-	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
-	if result := check.Run(ctx); result.Status != StatusError {
-		t.Fatalf("expected StatusError, got %v: %s", result.Status, result.Message)
-	}
-	if err := check.Fix(ctx); err != nil {
-		t.Fatalf("Fix failed: %v", err)
-	}
-
-	// After Fix, the re-registered worktree HEAD should match the captured value,
-	// not the default "refs/heads/main".
-	got, err := os.ReadFile(headFile)
-	if err != nil {
-		t.Fatalf("reading re-registered HEAD: %v", err)
-	}
-	if string(got) != customHead {
-		t.Errorf("expected captured HEAD %q after re-clone, got %q", customHead, string(got))
-	}
-}
+// TestBareRepoExistsCheck_FixCorruptPreservesWorktreeHead was removed with
+// G4-02: Fix no longer deletes a corrupt .repo.git that a worktree references
+// (and re-registers the worktree's HEAD into a fresh clone that lacks its
+// commits); it refuses. See bare_repo_quarantine_test.go.
 
 func TestBareRepoExistsCheck_FixSkipsRepairedBetweenRunAndFix(t *testing.T) {
 	t.Parallel()
