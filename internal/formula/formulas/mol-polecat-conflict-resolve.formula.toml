@@ -296,11 +296,6 @@ open; the Refinery closes them only after verified post-merge proof.
 bd close {{task}} --reason="resolved conflicts on {{branch}}"
 ```
 
-**2. Sync beads:**
-```bash
-bd sync
-```
-
 **Exit criteria:** Conflict-resolution task is closed; original MR remains queued."""
 
 [[steps]]
