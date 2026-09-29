@@ -121,3 +121,76 @@ func TestCloseStepsThenRootKeepsRootOpenOnRefusal(t *testing.T) {
 		t.Errorf("root status %q, want closed", got.Status)
 	}
 }
+
+// chainedMolecule builds a molecule of n unassigned steps chained by blocks
+// dependencies, as bd mol bond makes them, with the steps' IDs in an order
+// other than the chain's: step order[i] is the i-th link.
+func chainedMolecule(t *testing.T, order []int) (bd *beadsfake.Fake, mol *beads.Issue, steps []*beads.Issue) {
+	t.Helper()
+	bd = beadsfake.New()
+	mol, _ = bd.Create(beads.CreateOptions{Title: "mol", Priority: -1, Ephemeral: true})
+	for range order {
+		is, _ := bd.Create(beads.CreateOptions{Title: "step", Parent: mol.ID, Priority: -1, Ephemeral: true})
+		steps = append(steps, is)
+	}
+	for i := 1; i < len(order); i++ {
+		if err := bd.AddDependency(steps[order[i]].ID, steps[order[i-1]].ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return bd, mol, steps
+}
+
+// TestCloseStepsThenRootClosesAShuffledChain: bd closes a batch in argument
+// order and refuses a step whose blocker is later in the batch, and Children
+// lists steps in ID order. A chained molecule's steps must still all close,
+// and its root with them; before, one batch closed only the steps whose
+// blockers came first and gt done left every molecule open.
+func TestCloseStepsThenRootClosesAShuffledChain(t *testing.T) {
+	t.Parallel()
+	bd, mol, steps := chainedMolecule(t, []int{4, 2, 0, 3, 1})
+
+	n, err := closeStepsThenRoot(bd, mol.ID, func() error { return bd.ForceCloseWithReason("done", mol.ID) })
+	if err != nil {
+		t.Fatalf("closeStepsThenRoot: %v", err)
+	}
+	if n != len(steps) {
+		t.Errorf("steps closed = %d, want %d", n, len(steps))
+	}
+	for _, is := range steps {
+		if got, _ := bd.Show(is.ID); got.Status != "closed" {
+			t.Errorf("step %s status %q, want closed", is.ID, got.Status)
+		}
+	}
+	if got, _ := bd.Show(mol.ID); got.Status != "closed" {
+		t.Errorf("root status %q, want closed", got.Status)
+	}
+}
+
+// TestCloseDescendantsChainWithRefusedLinkStops: a chain whose middle step
+// bd genuinely refuses (another assignee) closes the links before it, keeps
+// the refused step and everything after it open, and reports them.
+func TestCloseDescendantsChainWithRefusedLinkStops(t *testing.T) {
+	t.Parallel()
+	bd, mol, steps := chainedMolecule(t, []int{2, 0, 1})
+	// Chain: steps[2] <- steps[0] <- steps[1]. Refuse steps[0].
+	other := "gastown/polecats/other"
+	if err := bd.Update(steps[0].ID, beads.UpdateOptions{Assignee: &other}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := closeDescendantsImpl(bd, mol.ID, false)
+	if n != 1 {
+		t.Errorf("closed = %d, want 1 (only %s)", n, steps[2].ID)
+	}
+	var pe *beads.PartialCloseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v, want a *PartialCloseError", err)
+	}
+	if got := strings.Join(pe.NotClosed, ","); !strings.Contains(got, steps[0].ID) || !strings.Contains(got, steps[1].ID) {
+		t.Errorf("NotClosed = %v, want %s and %s", pe.NotClosed, steps[0].ID, steps[1].ID)
+	}
+	rootClosed := false
+	if _, err := closeStepsThenRoot(bd, mol.ID, func() error { rootClosed = true; return nil }); err == nil || rootClosed {
+		t.Errorf("closeStepsThenRoot = %v, root closed %v; want an error and the root left open", err, rootClosed)
+	}
+}

@@ -372,6 +372,37 @@ squashed_at: %s
 	return nil
 }
 
+// closeUntilNoProgress closes ids unforced, retrying the ones bd refused
+// while each pass closes at least one. bd closes a batch in argument order
+// and refuses an issue whose blocker is still open at its turn, even when
+// the blocker is later in the same batch; a molecule's steps are chained by
+// blocks dependencies and Children lists them in ID order, so one pass can
+// close only part of a chain that would close whole. Only the issues still
+// refused when a pass makes no progress are reported, in a
+// *beads.PartialCloseError.
+func closeUntilNoProgress(b beads.Client, ids []string) error {
+	var closed []string
+	pending := ids
+	for {
+		err := b.Close(pending...)
+		if err == nil {
+			return nil
+		}
+		var pe *beads.PartialCloseError
+		if !errors.As(err, &pe) || len(pe.Closed) == 0 {
+			// No progress: bd refused every issue left (a single refused
+			// issue, or a batch refused whole), or the close failed.
+			if len(closed) == 0 {
+				return err
+			}
+			// The previous pass reported pending as refused.
+			return &beads.PartialCloseError{Closed: closed, NotClosed: pending, Err: errors.Join(beads.ErrCloseRefused, err)}
+		}
+		closed = append(closed, pe.Closed...)
+		pending = pe.NotClosed
+	}
+}
+
 // discardDescendants closes parentID's descendants for an explicit discard
 // (gt mol burn and squash). It closes them unforced first, then force-closes
 // whatever bd refused, so no open step is left under the root the caller
@@ -520,7 +551,7 @@ func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, err
 		if force {
 			closeErr = b.ForceCloseWithReason("burned: force-close descendants", idsToClose...)
 		} else {
-			closeErr = b.Close(idsToClose...)
+			closeErr = closeUntilNoProgress(b, idsToClose)
 		}
 		// A batch close can close some children and have bd refuse others
 		// (a *beads.PartialCloseError): count only the ones that closed, and
