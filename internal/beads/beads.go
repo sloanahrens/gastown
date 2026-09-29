@@ -155,18 +155,21 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 		return false
 	}
 
-	return bdAllowStale.supported(bdPath, func() (bool, bool) { return probeAllowStale(bdPath, env) })
+	return bdAllowStale.supported(bdPath, func() (bool, bool) {
+		ctx, cancel := context.WithTimeout(context.Background(), resolveBdAllowStaleProbeTimeout())
+		defer cancel()
+		return probeAllowStale(ctx, bdPath, env)
+	})
 }
 
-// probeAllowStale runs `bd --allow-stale version` under the probe timeout.
+// probeAllowStale runs `bd --allow-stale version` until it exits or ctx ends
+// (in production, the probe timeout). When ctx ends it kills bd's whole
+// process group, not just bd.
 // bd v0.60+ exits 0 even on an unknown flag, printing the error, so the
 // output decides. The answer is definitive only when bd ran and exited
 // within the timeout: a timeout or a failure to start says nothing about
 // the flag, and fails closed (unsupported) for this call only.
-func probeAllowStale(bdPath string, env []string) (supported, definitive bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), resolveBdAllowStaleProbeTimeout())
-	defer cancel()
-
+func probeAllowStale(ctx context.Context, bdPath string, env []string) (supported, definitive bool) {
 	cmd := exec.CommandContext(ctx, bdPath, "--allow-stale", "version") //nolint:gosec // G204: bd is a trusted internal tool
 	util.SetProcessGroup(cmd)
 	if env != nil {
