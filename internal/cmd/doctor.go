@@ -348,6 +348,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 
 	// Lifecycle hygiene checks
 	d.Register(doctor.NewLifecycleHygieneCheck())
+	d.Register(doctor.NewTownConfigParseCheck())
 	d.Register(doctor.NewLifecycleDefaultsCheck())
 
 	// Hook attachment checks

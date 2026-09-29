@@ -35,7 +35,17 @@ func NewLifecycleDefaultsCheck() *LifecycleDefaultsCheck {
 func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 	c.missing = nil
 
-	config := daemon.LoadPatrolConfig(ctx.TownRoot)
+	config, err := daemon.ReadPatrolConfig(ctx.TownRoot)
+	if err != nil {
+		// Never offer --fix here: EnsureLifecycleConfigFile refuses to
+		// rewrite a file that does not parse (gt-fcxe9.10).
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusError,
+			Message: err.Error(),
+			FixHint: "Fix mayor/daemon.json by hand; gt never rewrites a file it cannot parse",
+		}
+	}
 	if config == nil {
 		// No daemon.json at all — EnsureLifecycleConfigFile handles creation.
 		// Report as warning so --fix can create it.
