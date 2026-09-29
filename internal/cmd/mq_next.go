@@ -198,10 +198,12 @@ func syncGateIntent(townRoot, rigName, callerRole, nextID string) {
 	}
 }
 
-// queueHasReadyMR reports whether issues holds a ready MR for rigName, by the
-// same readiness gt mq next selects on. MR wisps are shared across rigs, so
-// an MR whose rig field names another rig does not count.
-func queueHasReadyMR(issues []*beads.Issue, rigName string) bool {
+// firstReadyMR returns the ID of the first ready MR for rigName in issues, or
+// "" when there is none, by the same readiness gt mq next selects on. MR wisps
+// are shared across rigs, so an MR whose rig field names another rig does not
+// count. The ID only labels the intent; which MR is gated first is gt mq
+// next's and the refinery's business.
+func firstReadyMR(issues []*beads.Issue, rigName string) string {
 	for _, issue := range issues {
 		if !isMergeRequestReadyForSelection(issue) {
 			continue
@@ -209,7 +211,12 @@ func queueHasReadyMR(issues []*beads.Issue, rigName string) bool {
 		if f := beads.ParseMRFields(issue); f != nil && f.Rig != "" && !strings.EqualFold(f.Rig, rigName) {
 			continue
 		}
-		return true
+		return issue.ID
 	}
-	return false
+	return ""
+}
+
+// queueHasReadyMR reports whether issues holds a ready MR for rigName.
+func queueHasReadyMR(issues []*beads.Issue, rigName string) bool {
+	return firstReadyMR(issues, rigName) != ""
 }
