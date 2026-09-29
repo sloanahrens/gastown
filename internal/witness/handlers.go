@@ -1743,7 +1743,7 @@ const (
 	// ZombieAgentDeadInSession: tmux session alive but agent process died.
 	ZombieAgentDeadInSession ZombieClassification = "agent-dead-in-session"
 	// ZombieBeadClosedStillRunning: agent alive but hooked bead already closed.
-	// No longer produced (G1-03: it was read from the unmaintained hook_bead
+	// No longer produced (gt-fcxe9.7: it was read from the unmaintained hook_bead
 	// slot); kept so receipts and the mountain view still name old results.
 	ZombieBeadClosedStillRunning ZombieClassification = "bead-closed-still-running"
 	// ZombieDoneIntentDead: session died while executing gt done.
@@ -2099,7 +2099,7 @@ func (h *handlers) detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName
 	// Tmux alive but agent process dead (gt-kj6r6).
 	// gt-dsgp: Restart instead of nuke — preserve worktree and branch.
 	// Only a confirmed dead agent is restarted. A failed liveness query is
-	// UNKNOWN and is logged, never acted on (G4-01).
+	// UNKNOWN and is logged, never acted on (gt-fcxe9.1).
 	agentAlive, aliveErr := t.IsAgentAliveChecked(sessionName)
 	if aliveErr != nil {
 		log.Printf("warning: %s/%s agent liveness unknown (%v); not treated as dead this cycle",
@@ -2128,13 +2128,12 @@ func (h *handlers) detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName
 	}
 
 	// A live agent is never restarted on the agent bead's hook_bead slot
-	// (G1-03). The gt-h1l6i "hooked bead closed while still running" branch
-	// that stood here restarted working polecats: the slot is not written any
-	// more (updateAgentHookBead is a no-op, hq-l6mm5), so after work is
-	// re-slung to a live polecat it still names the previous, closed bead. An
-	// idle live polecat is the daemon's idle reaper's call, which reads the
-	// work bead's status and assignee (hasAssignedOpenWork); per ADR 0003 the
-	// witness does not hold that restart authority.
+	// (gt-fcxe9.7). The slot is not written any more (hq-l6mm5), so after work
+	// is re-slung to a live polecat it still names the previous, closed bead,
+	// and a restart here interrupted working polecats. Accepted cost: a live
+	// polecat that finished its work and never reports an idle heartbeat keeps
+	// its session until an operator or the ADR 0003 supervisor acts; the
+	// daemon's idle reaper leaves live agents alone by design (GH#3342).
 
 	// GH#3055: gt done can successfully submit work and leave cleanup_status=clean,
 	// but fail before exiting the polecat session. If successful MR evidence exists

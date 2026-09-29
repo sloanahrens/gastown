@@ -826,13 +826,8 @@ func (d *Daemon) getAgentBeadState(agentBeadID string) (string, error) {
 
 // agentBeadsDir returns the database an agent bead canonically lives in: the
 // one its prefix routes to, rig-local for rig-prefixed agents and the town for
-// hq- agents. This is the resolver beads.ForAgentBead uses (gt-a6g completed
-// the gt-8we migration; there is no town fallback for rig-prefixed IDs).
-//
-// The daemon used to pin every agent-bead read to the town .beads (hq-3kri,
-// from when agent rows lived there). After gt-prk moved them rig-local, that
-// pin read "not found" or a stale legacy row, and crash detection, GUPP and
-// the orphaned-work scan ran blind (G1-01).
+// hq- agents. This is the resolver beads.ForAgentBead uses; there is no town
+// fallback for rig-prefixed IDs (gt-a6g, gt-fcxe9.7).
 func (d *Daemon) agentBeadsDir(agentBeadID string) string {
 	return beads.ResolveBeadsDirForID(beads.GetTownBeadsPath(d.config.TownRoot), agentBeadID)
 }
@@ -903,25 +898,30 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	return info, nil
 }
 
-// getAgentHookBead re-reads the hook_bead for an agent bead from the database.
-// Used for TOCTOU re-verification before taking destructive action on agents.
-// Returns empty string on error or if no hook_bead is set.
-func (d *Daemon) getAgentHookBead(agentBeadID string) string {
-	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(d.agentBeadsDir(agentBeadID)), "show", agentBeadID, "--json")
+// getAgentHookBead re-reads the hook_bead for an agent bead from its canonical
+// database. Used for TOCTOU re-verification before acting on agents. Returns
+// "" with a nil error when no hook_bead is set; a read failure or a missing
+// row is an error (unknown), never an empty hook.
+func (d *Daemon) getAgentHookBead(agentBeadID string) (string, error) {
+	beadsDir := d.agentBeadsDir(agentBeadID)
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(beadsDir), "show", agentBeadID, "--json")
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("bd show %s (BEADS_DIR=%s): %w", agentBeadID, beadsDir, err)
 	}
 
 	var issues []struct {
 		HookBead string `json:"hook_bead"`
 	}
-	if err := json.Unmarshal(output, &issues); err != nil || len(issues) == 0 {
-		return ""
+	if err := json.Unmarshal(output, &issues); err != nil {
+		return "", fmt.Errorf("parsing bd show %s: %w", agentBeadID, err)
 	}
-	return issues[0].HookBead
+	if len(issues) == 0 {
+		return "", fmt.Errorf("agent bead not found: %s (BEADS_DIR=%s)", agentBeadID, beadsDir)
+	}
+	return issues[0].HookBead, nil
 }
 
 // identityToAgentBeadID maps a daemon identity to an agent bead ID.
@@ -1145,7 +1145,7 @@ func (d *Daemon) checkRigGUPPViolations(rigName string) {
 		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 
 		// Check if tmux session exists and agent is running. A failed
-		// liveness query is unknown: skip this agent this cycle (G4-01).
+		// liveness query is unknown: skip this agent this cycle (gt-fcxe9.1).
 		agentAlive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName)
 		if aliveErr != nil {
 			d.logger.Printf("GUPP check: agent %s liveness unknown (%v); skipped", agent.ID, aliveErr)
@@ -1258,7 +1258,7 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 
 		// Session running = not orphaned (work is being processed). A failed
-		// liveness query is unknown, not dead: skip this cycle (G4-01).
+		// liveness query is unknown, not dead: skip this cycle (gt-fcxe9.1).
 		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil {
 			d.logger.Printf("Orphaned work check: agent %s liveness unknown (%v); skipped", agent.ID, aliveErr)
 			continue
@@ -1269,10 +1269,17 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 		// TOCTOU guard: re-verify agent state before taking action.
 		// Between the bd list above and now, the agent may have been
 		// restarted or its hook_bead cleared. Re-check both conditions.
-		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil || alive {
+		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil {
+			d.logger.Printf("Orphaned work check: agent %s liveness unknown on re-check (%v); skipped", agent.ID, aliveErr)
+			continue
+		} else if alive {
 			continue
 		}
-		currentHookBead := d.getAgentHookBead(agent.ID)
+		currentHookBead, hookErr := d.getAgentHookBead(agent.ID)
+		if hookErr != nil {
+			d.logger.Printf("Orphaned work check: agent %s re-read failed (%v); skipped as unknown", agent.ID, hookErr)
+			continue
+		}
 		if currentHookBead == "" {
 			continue
 		}

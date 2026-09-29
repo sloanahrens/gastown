@@ -97,7 +97,7 @@ func bdLog(t *testing.T, path string) string {
 	return string(data)
 }
 
-// G1-01: the polecat's agent bead lives only in the rig database. The daemon
+// gt-fcxe9.7: the polecat's agent bead lives only in the rig database. The daemon
 // used to pin its read to the town database, get "not found", and return
 // silently, so a crashed polecat with hooked work raised nothing.
 func TestCheckPolecatHealth_ReadsRigLocalAgentBead(t *testing.T) {
@@ -114,7 +114,7 @@ func TestCheckPolecatHealth_ReadsRigLocalAgentBead(t *testing.T) {
 	}
 }
 
-// G1-01: an agent bead that cannot be read is UNKNOWN, logged as such, never
+// gt-fcxe9.7: an agent bead that cannot be read is UNKNOWN, logged as such, never
 // a silent return.
 func TestCheckPolecatHealth_AgentBeadNotFoundIsLoggedUnknown(t *testing.T) {
 	townRoot, _ := routedTown(t)
@@ -151,7 +151,7 @@ func TestCheckPolecatHealth_EmptyHookSlotUsesAssignedWork(t *testing.T) {
 	}
 }
 
-// G1-01: the orphaned-work scan lists agent beads from the rig database, so a
+// gt-fcxe9.7: the orphaned-work scan lists agent beads from the rig database, so a
 // rig-local polecat with hooked work and a dead session is found.
 func TestCheckRigOrphanedWork_ListsRigLocalAgentBeads(t *testing.T) {
 	townRoot, _ := routedTown(t)
@@ -164,5 +164,64 @@ func TestCheckRigOrphanedWork_ListsRigLocalAgentBeads(t *testing.T) {
 	if !strings.Contains(logBuf.String(), "Orphaned work detected") {
 		t.Fatalf("orphaned-work scan missed a rig-local agent bead\nlog: %s\nbd calls:\n%s",
 			logBuf.String(), bdLog(t, logPath))
+	}
+}
+
+// writeScriptBD writes a fake bd from a shell body and returns its path.
+func writeScriptBD(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// With the hook_bead slot empty, crash detection reads the assigned work. If
+// that read fails, the answer is unknown: log UNKNOWN, raise no crash, and
+// never read the failure as "no work".
+func TestCheckPolecatHealth_AssignedWorkReadFailureIsUnknown(t *testing.T) {
+	townRoot, _ := routedTown(t)
+	agentJSON := `[{"id":"gt-myr-polecat-mycat","issue_type":"agent","labels":["gt:agent"],"description":"agent_state: working","hook_bead":"","agent_state":"working","updated_at":"2026-01-01T00:00:00Z"}]`
+	bdPath := writeScriptBD(t, ""+
+		"if [ \"$1\" = show ]; then echo '"+agentJSON+"'; exit 0; fi\n"+
+		"case \"$*\" in *--status=hooked*) echo 'Error: database is locked' >&2; exit 1;; esac\n"+
+		"echo '[]'\n")
+	var logBuf strings.Builder
+	d := newCanonicalDBDaemon(t, townRoot, bdPath, &logBuf)
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if !strings.Contains(got, "UNKNOWN") || !strings.Contains(got, "assigned work") {
+		t.Fatalf("assigned-work read failure not logged as UNKNOWN: %q", got)
+	}
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Fatalf("acted on an unknown assigned-work answer: %q", got)
+	}
+}
+
+// The orphaned-work TOCTOU re-read of hook_bead failing is unknown, logged,
+// and not acted on; it is never read as "hook cleared" silently.
+func TestCheckRigOrphanedWork_ReReadFailureIsLoggedUnknown(t *testing.T) {
+	townRoot, _ := routedTown(t)
+	agentJSON := `[{"id":"gt-myr-polecat-mycat","issue_type":"agent","labels":["gt:agent"],"description":"agent_state: working","hook_bead":"gt-work4","agent_state":"working"}]`
+	bdPath := writeScriptBD(t, ""+
+		"case \"$*\" in *gt:agent*) echo '"+agentJSON+"'; exit 0;; esac\n"+
+		"if [ \"$1\" = show ]; then echo 'Error: connection refused' >&2; exit 1; fi\n"+
+		"echo '[]'\n")
+	var logBuf strings.Builder
+	rec := notifyfake.New()
+	d := newCanonicalDBDaemon(t, townRoot, bdPath, &logBuf)
+	d.notifier = rec
+
+	d.checkRigOrphanedWork("myr")
+
+	got := logBuf.String()
+	if !strings.Contains(got, "re-read failed") {
+		t.Fatalf("hook re-read failure was not logged: %q", got)
+	}
+	if strings.Contains(got, "Orphaned work detected") {
+		t.Fatalf("acted on an unknown re-read: %q", got)
 	}
 }

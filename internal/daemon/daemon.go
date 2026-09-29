@@ -2589,7 +2589,7 @@ func (d *Daemon) ensureMayorRunning() {
 			alive, aliveErr := d.isMayorAgentAlive(mgr)
 			if aliveErr != nil {
 				// Unknown is not a zombie cycle: neither count it toward the
-				// restart debounce nor reset the count (G4-01).
+				// restart debounce nor reset the count (gt-fcxe9.1).
 				d.logger.Printf("Mayor agent liveness unknown (%v); not counted as a zombie cycle", aliveErr)
 			} else if !alive {
 				d.mayorZombieCount++
@@ -3491,7 +3491,7 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	info, err := d.getAgentBeadInfo(agentBeadID)
 	if err != nil {
 		// Not found or unreadable is UNKNOWN, not "not registered": say so,
-		// so a crash detector running blind is visible in the log (G1-01).
+		// so a crash detector running blind is visible in the log (gt-fcxe9.7).
 		d.logger.Printf("UNKNOWN: crash detection for %s/%s skipped: session %s is dead but agent bead %s could not be read: %v",
 			rigName, polecatName, sessionName, agentBeadID, err)
 		return
@@ -3698,14 +3698,13 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 
 // assignedActiveWorkBead returns the ID of a work bead assigned to the polecat
 // with status hooked or in_progress, read from the rig's database the way
-// hasAssignedOpenWork does, or "" when there is none. An error means every
-// query failed, so the answer is unknown.
+// hasAssignedOpenWork does, or "" when there is none. A bead found by any
+// query is returned; otherwise any failed query makes the answer unknown
+// (an error), since the failed status may be the one holding the work.
 func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error) {
 	rigDir := beads.GetRigDirForName(d.config.TownRoot, rigName)
 	var lastErr error
-	failed := 0
-	statuses := []string{"hooked", "in_progress"}
-	for _, status := range statuses {
+	for _, status := range []string{"hooked", "in_progress"} {
 		args := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + assignee, "--status=" + status, "--json"})
 		env := bdReadOnlyRoutingEnv(d.config.TownRoot)
 		if rigDir != "" {
@@ -3714,16 +3713,14 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error
 		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
 		output, err := cmd.Output()
 		if err != nil {
-			lastErr = err
-			failed++
+			lastErr = fmt.Errorf("bd list --status=%s: %w", status, err)
 			continue
 		}
 		var issues []struct {
 			ID string `json:"id"`
 		}
 		if err := json.Unmarshal(output, &issues); err != nil {
-			lastErr = fmt.Errorf("parsing bd list output: %w", err)
-			failed++
+			lastErr = fmt.Errorf("parsing bd list --status=%s output: %w", status, err)
 			continue
 		}
 		for _, issue := range issues {
@@ -3732,10 +3729,7 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error
 			}
 		}
 	}
-	if failed == len(statuses) {
-		return "", lastErr
-	}
-	return "", nil
+	return "", lastErr
 }
 
 // notifyWitnessOfCrashedPolecat notifies the witness when a polecat crash is detected.
@@ -3852,7 +3846,7 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 			// infrastructure degradation when the agent process is alive but not
 			// detectable (e.g. long thinking sessions, slow process inspection).
 			// A failed liveness query is unknown, not dead: it never earns
-			// the shorter 2x threshold (G4-01).
+			// the shorter 2x threshold (gt-fcxe9.1).
 			alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName)
 			confirmedDead := aliveErr == nil && !alive
 			if staleDuration >= timeout*3 || confirmedDead && staleDuration >= timeout*2 {
@@ -3883,7 +3877,7 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		// No hooked work + stale heartbeat — but check if the agent process
 		// is still actively running before reaping. A failed gt sling rollback
 		// can clear the hook while the agent is still working (GH#3342).
-		// A failed liveness query is unknown: leave the session alone (G4-01).
+		// A failed liveness query is unknown: leave the session alone (gt-fcxe9.1).
 		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil {
 			d.logger.Printf("Not reaping %s/%s: agent liveness unknown (%v)", rigName, polecatName, aliveErr)
 			return
