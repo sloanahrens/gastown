@@ -119,11 +119,10 @@ exit 0
 
 func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -169,11 +168,10 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 
 func TestEventPoll_SkipsNonCloseEvents(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -1418,11 +1416,10 @@ exit 0
 
 func TestPollEvents_GetAllEventsSinceError(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	var logged []string
@@ -1859,12 +1856,11 @@ func TestFeedFirstReady_NoFormula_OmitsFlag(t *testing.T) {
 
 func TestFeedFirstReady_RejectionMarker_SkipsAndDefersToDeacon(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -2404,11 +2400,10 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 
 func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup() // safety net; Stop() should close first
 
 	opener := func() storeOpenResult {
@@ -2450,13 +2445,12 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 
 func TestStop_ClosesMultipleStores(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	hqStore, hqCleanup := setupTestStore(t)
+	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
-	rigStore, rigCleanup := setupTestStore(t)
+	rigStore, rigCleanup := newMemStore(t)
 	defer rigCleanup()
 
 	var logged []string
@@ -2498,13 +2492,12 @@ func TestStop_ClosesMultipleStores(t *testing.T) {
 
 func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	hqStore, hqCleanup := setupTestStore(t)
+	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
-	rigStore, rigCleanup := setupTestStore(t)
+	rigStore, rigCleanup := newMemStore(t)
 	defer rigCleanup()
 
 	ctx := context.Background()
@@ -2559,13 +2552,12 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 
 func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	hqStore, hqCleanup := setupTestStore(t)
+	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
-	rigStore, rigCleanup := setupTestStore(t)
+	rigStore, rigCleanup := newMemStore(t)
 	defer rigCleanup()
 
 	ctx := context.Background()
@@ -2632,15 +2624,14 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 
 func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	hqStore, hqCleanup := setupTestStore(t)
+	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
-	activeStore, activeCleanup := setupTestStore(t)
+	activeStore, activeCleanup := newMemStore(t)
 	defer activeCleanup()
-	parkedStore, parkedCleanup := setupTestStore(t)
+	parkedStore, parkedCleanup := newMemStore(t)
 	defer parkedCleanup()
 
 	ctx := context.Background()
@@ -2715,11 +2706,10 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 
 func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -2765,11 +2755,10 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 
 func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -2822,12 +2811,13 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 
 func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
+	clk := newFixedClock()
+	store.now = clk.Now
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -2863,7 +2853,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 		t.Fatalf("expected 1 close detection for %s on first close, got %d: %v", issueID, firstCloseCount, logged)
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	clk.Advance(10 * time.Millisecond)
 	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"status": beadsdk.StatusOpen}, "test"); err != nil {
 		t.Fatalf("ReopenIssue via UpdateIssue: %v", err)
 	}
@@ -2880,7 +2870,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 		}
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	clk.Advance(10 * time.Millisecond)
 	if err := store.CloseIssue(ctx, issue.ID, "done again", "test", ""); err != nil {
 		t.Fatalf("CloseIssue again: %v", err)
 	}
@@ -2901,12 +2891,13 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 
 func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
+	clk := newFixedClock()
+	store.now = clk.Now
 
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -2925,12 +2916,12 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	// Beads events use CURRENT_TIMESTAMP in Dolt, which is second precision.
 	// Space the lifecycle transitions across distinct seconds so the store's
 	// created_at ordering is deterministic within this single poll.
-	time.Sleep(1100 * time.Millisecond)
+	clk.Advance(1100 * time.Millisecond)
 	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"status": beadsdk.StatusOpen}, "test"); err != nil {
 		t.Fatalf("ReopenIssue via UpdateIssue: %v", err)
 	}
 
-	time.Sleep(1100 * time.Millisecond)
+	clk.Advance(1100 * time.Millisecond)
 	if err := store.CloseIssue(ctx, issue.ID, "done again", "test", ""); err != nil {
 		t.Fatalf("CloseIssue again: %v", err)
 	}
@@ -2960,13 +2951,12 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 // multiple stores is only processed once (GH #1798).
 func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	hqStore, hqCleanup := setupTestStore(t)
+	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
-	rigStore, rigCleanup := setupTestStore(t)
+	rigStore, rigCleanup := newMemStore(t)
 	defer rigCleanup()
 
 	ctx := context.Background()
@@ -3014,13 +3004,12 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 
 func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	hqStore, hqCleanup := setupTestStore(t)
+	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
-	rigStore, rigCleanup := setupTestStore(t)
+	rigStore, rigCleanup := newMemStore(t)
 	defer rigCleanup()
 
 	ctx := context.Background()
@@ -3089,11 +3078,10 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 
 func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -3147,13 +3135,12 @@ exit 0
 
 func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 	// Create a rig store with a close event, but no hq store in the map.
 	// The nil hq guard should log a warning and skip convoy lookups.
-	rigStore, rigCleanup := setupTestStore(t)
+	rigStore, rigCleanup := newMemStore(t)
 	defer rigCleanup()
 
 	ctx := context.Background()
@@ -3760,12 +3747,11 @@ func newDeadHolderWorktree(t *testing.T, townRoot, rig, name, branch string) (wo
 // reason TestFeedFirstReady_SkipsIssueWithSurvivingBranch and its siblings
 // run serially.
 func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -3832,12 +3818,11 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T) {
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -3902,12 +3887,11 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testing.T) {
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -3966,12 +3950,11 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *testing.T) {
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -4050,9 +4033,8 @@ func withDeadHolderWorktreeState(t *testing.T, fn func(townRoot, assignee, issue
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *testing.T) {
-	takeStoreSlot(t)
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -4112,9 +4094,8 @@ func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *test
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
-	takeStoreSlot(t)
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -4167,12 +4148,11 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -4223,12 +4203,11 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing.T) {
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -4286,12 +4265,11 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 
 // t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T) {
-	takeStoreSlot(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := newMemStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
