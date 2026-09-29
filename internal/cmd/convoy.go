@@ -29,7 +29,6 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/tui/convoy"
-	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -1655,20 +1654,29 @@ func townRootOf(townBeads string) string {
 // show cannot be used for this: its dependencies join each edge to an issue
 // row in the bead's own database and drop every cross-rig blocker, so the
 // daemon's stranded feed slung beads another rig's open bead blocked
-// (gt-j02xy). A town store that will not open holds every bead.
-func openStrandedBlockCheck(townRoot string) (blockCheck, func()) {
+// (gt-j02xy). A town store that will not open is an error: the scan fails
+// rather than hold every bead in silence.
+func openStrandedBlockCheck(townRoot string) (blockCheck, func(), error) {
 	ctx := context.Background()
-	townStore, err := beads.OpenStoreFromConfig(ctx, filepath.Join(townRoot, ".beads"))
+	return openStrandedBlockCheckWith(townRoot, func(beadsDir string) (beadsdk.Storage, error) {
+		return beads.OpenStoreFromConfig(ctx, beadsDir)
+	})
+}
+
+// openStrandedBlockCheckWith is openStrandedBlockCheck with the store opener
+// supplied: openStore opens the beads store in a .beads directory.
+func openStrandedBlockCheckWith(townRoot string, openStore func(beadsDir string) (beadsdk.Storage, error)) (blockCheck, func(), error) {
+	ctx := context.Background()
+	townStore, err := openStore(filepath.Join(townRoot, ".beads"))
 	if err != nil {
-		reason := "town beads store unavailable (" + util.FirstLine(err.Error()) + ")"
-		return func(string) string { return reason }, func() {}
+		return nil, nil, fmt.Errorf("town beads store unavailable: %w", err)
 	}
 	resolver := convoyops.NewOpeningStoreResolver(townRoot, func(name string) (beadsdk.Storage, error) {
 		beadsDir := doltserver.FindRigBeadsDir(townRoot, name)
 		if beadsDir == "" {
 			return nil, fmt.Errorf("no beads directory for rig %s", name)
 		}
-		return beads.OpenStoreFromConfig(ctx, beadsDir)
+		return openStore(beadsDir)
 	})
 	check := func(issueID string) string {
 		return convoyops.BlockReason(ctx, townStore, issueID, resolver)
@@ -1676,7 +1684,7 @@ func openStrandedBlockCheck(townRoot string) (blockCheck, func()) {
 	return check, func() {
 		_ = resolver.Close()
 		_ = townStore.Close()
-	}
+	}, nil
 }
 
 // blockCheck returns why a bead's dependencies keep it from dispatch, or ""
@@ -1687,7 +1695,7 @@ type blockCheck func(issueID string) string
 // opener supplied. openCheck runs at most once, and only when some convoy has
 // a bead that is otherwise ready, so a scan with nothing to feed opens no
 // store.
-func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (blockCheck, func())) ([]strandedConvoyInfo, error) {
+func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (blockCheck, func(), error)) ([]strandedConvoyInfo, error) {
 	stranded := []strandedConvoyInfo{} // Initialize as empty slice for proper JSON encoding
 	// The blocker check opens on the first otherwise-ready bead.
 	var check blockCheck
@@ -1757,7 +1765,15 @@ func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (
 					continue
 				}
 				if check == nil {
-					check, release = openCheck(townRootOf(townBeads))
+					opened, releaseOpened, openErr := openCheck(townRootOf(townBeads))
+					if openErr != nil {
+						// Holding every candidate in silence would read, to the
+						// daemon, as "N tracked, 0 ready" on every scan: it
+						// drops a successful run's stderr. Failing the scan
+						// makes it log "stranded scan failed" with the cause.
+						return nil, fmt.Errorf("blocker check: %w", openErr)
+					}
+					check, release = opened, releaseOpened
 				}
 				if reason := check(t.ID); reason != "" {
 					// stderr: stdout is the daemon's JSON (#2142).

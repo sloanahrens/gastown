@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -101,19 +102,19 @@ exit 0
 
 // storeBlockCheck opens the stranded scan's blocker check over the given
 // stores, the daemon's wiring: every store is held up front.
-func storeBlockCheck(stores map[string]beadsdk.Storage) func(string) (blockCheck, func()) {
-	return func(townRoot string) (blockCheck, func()) {
+func storeBlockCheck(stores map[string]beadsdk.Storage) func(string) (blockCheck, func(), error) {
+	return func(townRoot string) (blockCheck, func(), error) {
 		resolver := convoyops.NewStoreResolver(townRoot, stores)
 		return func(id string) string {
 			return convoyops.BlockReason(context.Background(), stores["hq"], id, resolver)
-		}, func() {}
+		}, func() {}, nil
 	}
 }
 
 // noBlockers is a blocker check that finds nothing, for scans about something
 // other than dependencies.
-func noBlockers(string) (blockCheck, func()) {
-	return func(string) string { return "" }, func() {}
+func noBlockers(string) (blockCheck, func(), error) {
+	return func(string) string { return "" }, func() {}, nil
 }
 
 // TestFindStrandedConvoys_CrossRigBlockerNotReady is gt-j02xy on the daemon's
@@ -161,14 +162,43 @@ func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
 func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
 	_, townBeads, _ := mockBdForConvoyTest(t, "hq-empty-open", "Empty convoy")
 	opened := 0
-	open := func(string) (blockCheck, func()) {
+	open := func(string) (blockCheck, func(), error) {
 		opened++
-		return func(string) string { return "" }, func() {}
+		return func(string) string { return "" }, func() {}, nil
 	}
 	if _, err := findStrandedConvoysWith(townBeads, open); err != nil {
 		t.Fatalf("findStrandedConvoysWith: %v", err)
 	}
 	if opened != 0 {
 		t.Errorf("blocker check opened %d times for a scan with no candidates, want 0", opened)
+	}
+}
+
+// TestFindStrandedConvoys_TownStoreDownFailsTheScan (review round 2): a town
+// store that will not open must fail the scan, not hold every candidate in
+// silence. The daemon drops a successful run's stderr, so a silent hold read
+// as "N tracked, 0 ready" every scan with no cause; an error makes gt exit
+// non-zero and the daemon log "stranded scan failed".
+func TestFindStrandedConvoys_TownStoreDownFailsTheScan(t *testing.T) {
+	townRoot := strandedXrigTown(t)
+	down := func(townRoot string) (blockCheck, func(), error) {
+		return openStrandedBlockCheckWith(townRoot, func(string) (beadsdk.Storage, error) {
+			return nil, errors.New("dial tcp 127.0.0.1:3307: connection refused")
+		})
+	}
+
+	stranded, err := findStrandedConvoysWith(townRoot, down)
+	if err == nil {
+		t.Fatalf("want an error when the town store will not open, got stranded %+v", stranded)
+	}
+	for _, want := range []string{"blocker check", "town beads store unavailable", "connection refused"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	for _, s := range stranded {
+		if len(s.ReadyIssues) != 0 {
+			t.Errorf("convoy %s lists ready issues %v on a failed scan", s.ID, s.ReadyIssues)
+		}
 	}
 }

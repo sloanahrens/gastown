@@ -348,13 +348,13 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Both beads are blocked by gt-blocker1, as the blocker check reports.
-	blockedByBlocker1 := func(string) (blockCheck, func()) {
+	blockedByBlocker1 := func(string) (blockCheck, func(), error) {
 		return func(id string) string {
 			if strings.HasPrefix(id, "gt-busy") {
 				return "blocks gt-blocker1 (open)"
 			}
 			return ""
-		}, func() {}
+		}, func() {}, nil
 	}
 	stranded, err := findStrandedConvoysWith(townRoot, blockedByBlocker1)
 	if err != nil {
