@@ -304,8 +304,23 @@ func summarizeCommandOutput(out []byte) string {
 	return s
 }
 
+// reaperWriterFor resolves the bd writer a live reaper run writes through;
+// tests replace it so no bd runs.
+var reaperWriterFor = reaper.WriterForDatabase
+
+// reaperWriter returns the bd writer for a live run against dbName, pinned to
+// the beads dir whose metadata names that database, and nil for a dry run:
+// the reaper selects with SQL but writes only through bd (gt-fcxe9.12).
+func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error) {
+	if dryRun {
+		return nil, nil
+	}
+	return reaperWriterFor(d.config.TownRoot, dbName)
+}
+
 // reapWispsInline is the fallback that runs the reaper cycle inline when
-// Dog dispatch is unavailable. Delegates to the reaper package for SQL execution.
+// Dog dispatch is unavailable. Delegates to the reaper package, which selects
+// with SQL and writes through bd.
 func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, staleIssueAge time.Duration, mol *dogMol) {
 	databases := config.Databases
 	host := d.doltServerHost()
@@ -341,7 +356,14 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		result, err := reaper.Reap(db, dbName, maxAge, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun)
+		if err != nil {
+			db.Close()
+			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
+			reapErrors++
+			continue
+		}
+		result, err := reaper.Reap(db, w, dbName, maxAge, dryRun)
 		db.Close()
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: reap error: %v", dbName, err)
@@ -380,7 +402,14 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		result, err := reaper.Purge(db, dbName, deleteAge, defaultMailDeleteAge, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun)
+		if err != nil {
+			db.Close()
+			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
+			purgeErrors++
+			continue
+		}
+		result, err := reaper.Purge(db, w, dbName, deleteAge, defaultMailDeleteAge, dryRun)
 		db.Close()
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: purge error: %v", dbName, err)
@@ -414,7 +443,13 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		result, err := reaper.ClosePluginReceipts(db, dbName, pluginReceiptAge, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun)
+		if err != nil {
+			db.Close()
+			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
+			continue
+		}
+		result, err := reaper.ClosePluginReceipts(db, w, dbName, pluginReceiptAge, dryRun)
 		db.Close()
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: plugin receipt close error: %v", dbName, err)
@@ -441,7 +476,13 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			db.Close()
 			continue
 		}
-		result, err := reaper.ClosePluginDispatches(db, dbName, pluginDispatchAge, dryRun)
+		w, err := d.reaperWriter(dbName, dryRun)
+		if err != nil {
+			db.Close()
+			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
+			continue
+		}
+		result, err := reaper.ClosePluginDispatches(db, w, dbName, pluginDispatchAge, dryRun)
 		db.Close()
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: plugin dispatch close error: %v", dbName, err)
@@ -522,7 +563,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 // would stop a patrol over a config value, which is the stop the soft refusal
 // exists to remove.
 func (d *Daemon) autoCloseDB(db *sql.DB, dbName string, staleIssueAge time.Duration, dryRun bool) (int, error) {
-	preview, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+	preview, err := reaper.AutoClose(db, nil, dbName, reaper.AutoCloseOptions{
 		StaleAge: staleIssueAge,
 		DryRun:   true,
 	})
@@ -530,7 +571,15 @@ func (d *Daemon) autoCloseDB(db *sql.DB, dbName string, staleIssueAge time.Durat
 		return 0, fmt.Errorf("preview: %w", err)
 	}
 
-	result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+	// The writer is resolved only when this run may write: a dry run, or a
+	// preview with nothing to close, needs no bd.
+	var w reaper.Writer
+	if !dryRun && preview.Closed > 0 && !preview.Floored {
+		if w, err = d.reaperWriter(dbName, dryRun); err != nil {
+			return 0, err
+		}
+	}
+	result, err := reaper.AutoClose(db, w, dbName, reaper.AutoCloseOptions{
 		StaleAge:    staleIssueAge,
 		DryRun:      dryRun,
 		PreviewHash: preview.PreviewHash,

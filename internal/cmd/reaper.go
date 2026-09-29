@@ -56,6 +56,21 @@ func reaperAutoCloseDisarmed() (bool, string) {
 		daemon.PatrolConfigFile(townRoot)
 }
 
+// reaperWriter returns the bd writer a live reaper run against dbName writes
+// through, and nil for a dry run. The reaper selects candidates with SQL but
+// every write is a bd verb against the beads dir whose metadata names dbName
+// (gt-fcxe9.12), so a database no beads dir claims is skipped, not written.
+func reaperWriter(dbName string) (reaper.Writer, error) {
+	if reaperDryRun {
+		return nil, nil
+	}
+	townRoot, err := findTownRoot()
+	if err != nil {
+		return nil, fmt.Errorf("live reaper run needs the town root to reach bd: %w", err)
+	}
+	return reaper.WriterForDatabase(townRoot, dbName)
+}
+
 // printAutoCloseCandidates lists the issues a sweep selected. Printed on every
 // refusal as well as a dry run: a refusal is only actionable if it shows what
 // tripped it, and for the below-floor one (gt-ecpj) the set is the whole report
@@ -359,7 +374,13 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				continue
 			}
 
-			result, err := reaper.Reap(db, dbName, maxAge, reaperDryRun)
+			w, err := reaperWriter(dbName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
+				db.Close()
+				continue
+			}
+			result, err := reaper.Reap(db, w, dbName, maxAge, reaperDryRun)
 			db.Close()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: reap error: %v\n", dbName, err)
@@ -459,7 +480,13 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 				continue
 			}
 
-			result, err := reaper.Purge(db, dbName, purgeAge, mailAge, reaperDryRun)
+			w, err := reaperWriter(dbName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
+				db.Close()
+				continue
+			}
+			result, err := reaper.Purge(db, w, dbName, purgeAge, mailAge, reaperDryRun)
 			db.Close()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: purge error: %v\n", dbName, err)
@@ -569,7 +596,13 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				continue
 			}
 
-			result, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+			w, err := reaperWriter(dbName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
+				db.Close()
+				continue
+			}
+			result, err := reaper.AutoClose(db, w, dbName, reaper.AutoCloseOptions{
 				StaleAge:    staleAge,
 				DryRun:      reaperDryRun,
 				MaxCloses:   reaperMaxCloses,
@@ -703,8 +736,15 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 				fmt.Printf("%s: %s %s\n", dbName, style.Warning.Render("ANOMALY:"), a.Message)
 			}
 
+			w, err := reaperWriter(dbName)
+			if err != nil {
+				fmt.Printf("%s: %v\n", dbName, err)
+				db.Close()
+				continue
+			}
+
 			// Reap
-			reapResult, err := reaper.Reap(db, dbName, maxAge, reaperDryRun)
+			reapResult, err := reaper.Reap(db, w, dbName, maxAge, reaperDryRun)
 			if err != nil {
 				fmt.Printf("%s: reap error: %v\n", dbName, err)
 			} else {
@@ -714,7 +754,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			}
 
 			// Purge
-			purgeResult, err := reaper.Purge(db, dbName, purgeAge, mailAge, reaperDryRun)
+			purgeResult, err := reaper.Purge(db, w, dbName, purgeAge, mailAge, reaperDryRun)
 			if err != nil {
 				fmt.Printf("%s: purge error: %v\n", dbName, err)
 			} else {
@@ -728,7 +768,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			if autoCloseDisarmed && !reaperForce {
 				fmt.Printf("%s: auto-close skipped (disarmed by %s)\n", dbName, autoCloseConfigPath)
 			} else {
-				preview, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+				preview, err := reaper.AutoClose(db, nil, dbName, reaper.AutoCloseOptions{
 					StaleAge:  staleAge,
 					DryRun:    true,
 					MaxCloses: reaperMaxCloses,
@@ -750,7 +790,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 					fmt.Printf("%s: auto-close preview: %d candidate(s)\n", dbName, preview.Closed)
 				}
 
-				closeResult, err := reaper.AutoClose(db, dbName, reaper.AutoCloseOptions{
+				closeResult, err := reaper.AutoClose(db, w, dbName, reaper.AutoCloseOptions{
 					StaleAge:    staleAge,
 					DryRun:      reaperDryRun,
 					MaxCloses:   reaperMaxCloses,
