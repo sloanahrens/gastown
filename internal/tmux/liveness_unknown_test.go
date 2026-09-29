@@ -50,3 +50,21 @@ func TestCleanupOrphanedSessions_LivenessErrorKillsNothing(t *testing.T) {
 		t.Fatalf("cleaned=%d, session present=%v; want 0 and true", cleaned, f.has("gt-live"))
 	}
 }
+
+// TestZombieStatus_CountsAsRunning pins the rule every IsRunning wrapper
+// (polecat, witness, refinery, feed) uses: unknown counts as running, so a
+// failed query never leads a caller to start a second agent into the session.
+func TestZombieStatus_CountsAsRunning(t *testing.T) {
+	t.Parallel()
+	for status, want := range map[ZombieStatus]bool{
+		SessionHealthy: true,
+		AgentUnknown:   true,
+		SessionDead:    false,
+		AgentDead:      false,
+		AgentHung:      false,
+	} {
+		if got := status.CountsAsRunning(); got != want {
+			t.Errorf("%v.CountsAsRunning() = %v, want %v", status, got, want)
+		}
+	}
+}

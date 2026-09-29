@@ -744,9 +744,7 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 func (m *SessionManager) IsRunning(polecat string) (bool, error) {
 	sessionID := m.SessionName(polecat)
 	status := m.tmux.CheckSessionHealth(sessionID, 0)
-	// AgentUnknown counts as running: callers start a session when this
-	// is false, and a second start into a live session is the harm (gt-fcxe9.1).
-	return status == tmux.SessionHealthy || status == tmux.AgentUnknown, nil
+	return status.CountsAsRunning(), nil
 }
 
 // Status returns detailed status for a polecat session.

@@ -51,9 +51,7 @@ func NewManager(r *rig.Rig) *Manager {
 func (m *Manager) IsRunning() (bool, error) {
 	t := tmux.NewTmux()
 	status := t.CheckSessionHealth(m.SessionName(), 0)
-	// AgentUnknown counts as running: a false answer leads callers to start
-	// a second witness into a live session (gt-fcxe9.1).
-	return status == tmux.SessionHealthy || status == tmux.AgentUnknown, nil
+	return status.CountsAsRunning(), nil
 }
 
 // IsHealthy checks if the witness is running and has been active recently.

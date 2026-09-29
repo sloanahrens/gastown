@@ -153,6 +153,18 @@ type patrolWatchdogFinding struct {
 	Result guard.Result
 }
 
+// patrolWatchdogSessionAlive is the watchdog's liveness reader. A failed
+// query is unknown, not dead: a dead session passes the watchdog outright, so
+// unknown reads as alive and the patrol is judged by its receipts (gt-fcxe9.1).
+func (d *Daemon) patrolWatchdogSessionAlive(target patrolWatchdogTarget) bool {
+	alive, err := d.tmux.IsAgentAliveChecked(target.Session)
+	if err != nil {
+		d.logger.Printf("patrol_watchdog: %s liveness unknown (%v); judging by receipts", target.Session, err)
+		return true
+	}
+	return alive
+}
+
 // assessPatrolWatchdogTargets evaluates every target against injected
 // liveness/receipt readers. It has no side effects (no escalation, no
 // nudging, no mail) — it is the pure core that unit tests drive directly to
@@ -288,16 +300,7 @@ func (d *Daemon) runPatrolWatchdog() {
 
 	findings := assessPatrolWatchdogTargets(
 		targets,
-		func(target patrolWatchdogTarget) bool {
-			// A failed liveness query is unknown, not dead: keep judging the
-			// patrol by its receipts rather than passing it silently (gt-fcxe9.1).
-			alive, err := d.tmux.IsAgentAliveChecked(target.Session)
-			if err != nil {
-				d.logger.Printf("patrol_watchdog: %s liveness unknown (%v); judging by receipts", target.Session, err)
-				return true
-			}
-			return alive
-		},
+		d.patrolWatchdogSessionAlive,
 		func(target patrolWatchdogTarget) (time.Time, guard.Result) {
 			return witness.LastCompletedPatrol(bd, target.WorkDir, target.Assignee, target.PatrolMol)
 		},

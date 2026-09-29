@@ -797,3 +797,24 @@ func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
 		t.Fatal("session was killed on an unknown liveness answer")
 	}
 }
+
+// gt-fcxe9.1: the patrol watchdog passes a dead session outright, so an
+// unknown liveness answer must read as alive (judge by receipts) and be logged.
+func TestPatrolWatchdogSessionAlive_UnknownReadsAliveAndLogs(t *testing.T) {
+	tm := polecatSessionTmux("bash", time.Now().Add(-time.Hour))
+	tm.setAliveErr("myr-mycat", fmt.Errorf("tmux show-environment: timed out"))
+	var logBuf strings.Builder
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&logBuf, "", 0), tmux: tm}
+
+	if !d.patrolWatchdogSessionAlive(patrolWatchdogTarget{Session: "myr-mycat"}) {
+		t.Fatal("unknown liveness read as dead: the watchdog would pass the patrol without judging it")
+	}
+	if !strings.Contains(logBuf.String(), "liveness unknown") {
+		t.Fatalf("unknown liveness not logged: %q", logBuf.String())
+	}
+	// A confirmed dead agent (bare shell, no error) still reads as dead.
+	tm.setAliveErr("myr-mycat", nil)
+	if d.patrolWatchdogSessionAlive(patrolWatchdogTarget{Session: "myr-mycat"}) {
+		t.Fatal("a bare shell read as a live agent")
+	}
+}

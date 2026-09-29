@@ -2896,6 +2896,14 @@ func (z ZombieStatus) String() string {
 	}
 }
 
+// CountsAsRunning reports whether callers asking "is this agent running?"
+// should answer yes: healthy, or unknown because the liveness query failed.
+// A false answer leads callers to start a second agent into the session, so
+// unknown must not read as not-running (gt-fcxe9.1).
+func (z ZombieStatus) CountsAsRunning() bool {
+	return z == SessionHealthy || z == AgentUnknown
+}
+
 // IsZombie returns true if the status represents a zombie (any non-healthy state
 // where the session exists but the agent is dead or hung).
 func (z ZombieStatus) IsZombie() bool {

@@ -507,11 +507,6 @@ func TestBareRepoRefspecCheck_FixRefusesCorrupt(t *testing.T) {
 	}
 }
 
-// TestBareRepoExistsCheck_FixCorruptPreservesWorktreeHead was removed with
-// gt-fcxe9.1: Fix no longer deletes a corrupt .repo.git that a worktree references
-// (and re-registers the worktree's HEAD into a fresh clone that lacks its
-// commits); it refuses. See bare_repo_quarantine_test.go.
-
 func TestBareRepoExistsCheck_FixSkipsRepairedBetweenRunAndFix(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
