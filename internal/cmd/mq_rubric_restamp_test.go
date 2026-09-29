@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -324,31 +325,13 @@ func TestDetectRubricChangeAfterMerge_CorruptManifestReturnsError(t *testing.T) 
 	}
 }
 
-// fakeExecutable writes a shell script at binDir/name that appends its args
-// to logPath, one call per line, and exits 0.
-func fakeExecutable(t *testing.T, binDir, name, logPath string) {
-	t.Helper()
-	script := "#!/usr/bin/env bash\n" +
-		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
-		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake %s: %v", name, err)
-	}
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
 // TestHandlePostMergeRubricChange_TouchedEscalatesInsteadOfRestamping is the
 // runMQPostMerge wiring this attempt adds a test for: a merge that lowers
 // the rubric threshold escalates to the operator via `gt escalate`, records
 // rubric_changed_escalated on the MR bead via `bd`, and never restamps the
 // harness manifest.
 func TestHandlePostMergeRubricChange_TouchedEscalatesInsteadOfRestamping(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
-	}
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 	baseSum := sha256.Sum256([]byte(restampBaseRubric))
@@ -360,24 +343,18 @@ func TestHandlePostMergeRubricChange_TouchedEscalatesInsteadOfRestamping(t *test
 		t.Fatalf("SaveManifest: %v", err)
 	}
 
-	binDir := t.TempDir()
-	gtLog := filepath.Join(t.TempDir(), "gt-args.log")
-	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
-	fakeExecutable(t, binDir, "gt", gtLog)
-	fakeExecutable(t, binDir, "bd", bdLog)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	alerts, gtLog, bdLog := recordRubricAlerts()
 	mr := &refinery.MergeRequest{ID: "gt-mr-threshold", TargetBranch: "main"}
-	handlePostMergeRubricChange(rigDir, "test-rig", git.NewGit(clone), mr, head)
+	handlePostMergeRubricChangeWith(alerts, rigDir, "test-rig", git.NewGit(clone), mr, head)
 
-	gtCalls := readFile(t, gtLog)
+	gtCalls := gtLog.log()
 	if !strings.Contains(gtCalls, "escalate") {
 		t.Fatalf("gt escalate was not invoked, gt log:\n%s", gtCalls)
 	}
 	if !strings.Contains(gtCalls, "rubric changed on main") {
 		t.Fatalf("escalation message missing rubric-change context, gt log:\n%s", gtCalls)
 	}
-	bdCalls := readFile(t, bdLog)
+	bdCalls := bdLog.log()
 	if !strings.Contains(bdCalls, "rubric_changed_escalated") {
 		t.Fatalf("bd comments add did not record rubric_changed_escalated, bd log:\n%s", bdCalls)
 	}
@@ -398,9 +375,7 @@ func TestHandlePostMergeRubricChange_TouchedEscalatesInsteadOfRestamping(t *test
 // warning alone is what silently disabled every rubric protection before
 // this attempt (gt-7bvf).
 func TestHandlePostMergeRubricChange_UnresolvablePathStillEscalates(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
-	}
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 	baseSum := sha256.Sum256([]byte(restampBaseRubric))
@@ -411,17 +386,11 @@ func TestHandlePostMergeRubricChange_UnresolvablePathStillEscalates(t *testing.T
 		t.Fatalf("SaveManifest: %v", err)
 	}
 
-	binDir := t.TempDir()
-	gtLog := filepath.Join(t.TempDir(), "gt-args.log")
-	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
-	fakeExecutable(t, binDir, "gt", gtLog)
-	fakeExecutable(t, binDir, "bd", bdLog)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	alerts, gtLog, _ := recordRubricAlerts()
 	mr := &refinery.MergeRequest{ID: "gt-mr-unresolvable", TargetBranch: "main"}
-	handlePostMergeRubricChange(rigDir, "test-rig", git.NewGit(clone), mr, head)
+	handlePostMergeRubricChangeWith(alerts, rigDir, "test-rig", git.NewGit(clone), mr, head)
 
-	gtCalls := readFile(t, gtLog)
+	gtCalls := gtLog.log()
 	if !strings.Contains(gtCalls, "escalate") {
 		t.Fatalf("gt escalate was not invoked for an unresolvable rubric path, gt log:\n%s", gtCalls)
 	}
@@ -430,9 +399,7 @@ func TestHandlePostMergeRubricChange_UnresolvablePathStillEscalates(t *testing.T
 // TestHandlePostMergeRubricChange_UntouchedDoesNotEscalate: a merge that
 // never touched the rubric must not invoke `gt escalate` at all.
 func TestHandlePostMergeRubricChange_UntouchedDoesNotEscalate(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
-	}
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, false)
 	rigDir := t.TempDir()
 	baseSum := sha256.Sum256([]byte(restampBaseRubric))
@@ -443,27 +410,43 @@ func TestHandlePostMergeRubricChange_UntouchedDoesNotEscalate(t *testing.T) {
 		t.Fatalf("SaveManifest: %v", err)
 	}
 
-	binDir := t.TempDir()
-	gtLog := filepath.Join(t.TempDir(), "gt-args.log")
-	fakeExecutable(t, binDir, "gt", gtLog)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	alerts, gtLog, _ := recordRubricAlerts()
 	mr := &refinery.MergeRequest{ID: "gt-mr-untouched", TargetBranch: "main"}
-	handlePostMergeRubricChange(rigDir, "test-rig", git.NewGit(clone), mr, head)
+	handlePostMergeRubricChangeWith(alerts, rigDir, "test-rig", git.NewGit(clone), mr, head)
 
-	if gtCalls := readFile(t, gtLog); strings.Contains(gtCalls, "escalate") {
+	if gtCalls := gtLog.log(); strings.Contains(gtCalls, "escalate") {
 		t.Fatalf("gt escalate was invoked for a merge that never touched the rubric, gt log:\n%s", gtCalls)
 	}
 }
 
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ""
-		}
-		t.Fatalf("read %s: %v", path, err)
+// recordRubricAlerts returns alerts whose gt and bd log each call's argv
+// joined by spaces, one line per call, as the fake executables on PATH did.
+func recordRubricAlerts() (alerts rubricChangeAlerts, gtLog, bdLog *inprocBD) {
+	gtLog, bdLog = &inprocBD{}, &inprocBD{}
+	bdLog.answer = func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(strings.Join(append([]string{cmd}, args...), " "))
+		return bdAnswer{}
 	}
-	return string(data)
+	alerts = rubricChangeAlerts{
+		gt: func(args ...string) error {
+			gtLog.logLine(strings.Join(args, " "))
+			return nil
+		},
+		bd: bdLog.run,
+	}
+	return alerts, gtLog, bdLog
+}
+
+// TestRubricChangeAlertsZeroValueRunsRealGT: handlePostMergeRubricChange
+// passes the zero rubricChangeAlerts, which must run the gt on PATH (and,
+// with a nil runner, the bd on PATH).
+func TestRubricChangeAlertsZeroValueRunsRealGT(t *testing.T) {
+	t.Parallel()
+	var a rubricChangeAlerts
+	if got, want := reflect.ValueOf(a.gtRunner()).Pointer(), reflect.ValueOf(runGTCommand).Pointer(); got != want {
+		t.Error("zero rubricChangeAlerts does not run gt through runGTCommand")
+	}
+	if a.bd != nil {
+		t.Error("zero rubricChangeAlerts has a bd runner; it must be nil, the real bd")
+	}
 }
