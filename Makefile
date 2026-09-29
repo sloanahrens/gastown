@@ -303,6 +303,9 @@ test-makefile:
 	bash scripts/install-gt_test.sh
 	bash -n scripts/install-after-merge.sh
 	bash scripts/install-after-merge_test.sh
+	bash -n plugins/dolt-log-rotate/run.sh
+	bash -n plugins/dolt-log-rotate/run_test.sh
+	bash plugins/dolt-log-rotate/run_test.sh
 	bash -n plugins/stuck-agent-dog/run.sh
 	bash -n plugins/stuck-agent-dog/run_test.sh
 	bash plugins/stuck-agent-dog/run_test.sh
