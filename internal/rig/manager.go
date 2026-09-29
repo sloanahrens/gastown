@@ -738,23 +738,6 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		_ = beads.EnsureDoltConfigValue(resolvedBeadsDir, "types.infra", constants.BeadsInfraTypes)
 	}
 
-	// Auto-create DoltHub remote for the rig's beads database.
-	// Requires DOLTHUB_TOKEN and DOLTHUB_ORG environment variables.
-	// Non-fatal: sync will work without a remote; user can add one manually later.
-	if token := doltserver.DoltHubToken(); token != "" {
-		if org := doltserver.DoltHubOrg(); org != "" {
-			dbName := "beads_" + opts.Name
-			dbDir := doltserver.RigDatabaseDir(m.townRoot, dbName)
-			fmt.Printf("  Setting up DoltHub remote for %s/%s...\n", org, doltserver.DoltHubRepoName(dbName))
-			if err := doltserver.SetupDoltHubRemote(dbDir, org, dbName, token); err != nil {
-				fmt.Printf("  Warning: DoltHub remote setup failed: %v\n", err)
-				fmt.Printf("  You can set up the remote manually later with 'gt dolt sync'.\n")
-			} else {
-				fmt.Printf("   ✓ DoltHub remote configured and initial push complete\n")
-			}
-		}
-	}
-
 	// Provision PRIME.md with Gas Town context for all workers in this rig.
 	// This is the fallback if SessionStart hook fails - ensures ALL workers
 	// (crew, polecats, refinery, witness) have GUPP and essential Gas Town context.

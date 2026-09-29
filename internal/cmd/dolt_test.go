@@ -48,3 +48,15 @@ func TestDirSizeHuman_NonexistentDir(t *testing.T) {
 		t.Errorf("nonexistent dir: got %q, want %q", got, "0 B")
 	}
 }
+
+// ADR 0002: gastown no longer pushes or pulls Dolt remotes, so neither verb
+// exists.
+func TestDoltCmd_HasNoRemoteSyncVerbs(t *testing.T) {
+	for _, name := range []string{"sync", "pull"} {
+		for _, c := range doltCmd.Commands() {
+			if c.Name() == name {
+				t.Errorf("gt dolt %s is still registered", name)
+			}
+		}
+	}
+}
