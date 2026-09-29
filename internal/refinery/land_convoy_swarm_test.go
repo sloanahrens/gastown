@@ -31,4 +31,17 @@ func TestLandConvoySwarmReportsBranchNotLanded(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
+
+	// A log line alone strands the branch: the operator must be told.
+	got := recorderOf(t, e).Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one", got)
+	}
+	esc := got[0].Escalation
+	if strings.ContainsAny(esc.Description, "\r\n") || !strings.Contains(esc.Description, "swarm/mol-x") || !strings.Contains(esc.Description, "hq-cv-1") {
+		t.Errorf("description = %q, want one line naming the branch and convoy", esc.Description)
+	}
+	if esc.Fingerprint == "" || !strings.Contains(esc.Fingerprint, "mol-x") {
+		t.Errorf("fingerprint = %q, want one keyed on the molecule so repeats fold", esc.Fingerprint)
+	}
 }

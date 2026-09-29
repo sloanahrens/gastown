@@ -3908,8 +3908,8 @@ func (e *Engineer) claimConvoyCompletionNotification(townRoot, convoyID, fallbac
 
 // landConvoySwarm reports a completed convoy whose molecule still has a
 // swarm/<molecule> integration branch. Nothing lands these branches
-// automatically (gt has no swarm command), so the message tells the operator
-// to merge the branch by hand.
+// automatically (gt has no swarm command), so it logs the branch and
+// escalates, keyed on the molecule, for the operator to merge it by hand.
 func (e *Engineer) landConvoySwarm(convoy convoyInfo) {
 	// ZFC: Use typed accessor instead of parsing description text
 	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description})
@@ -3936,6 +3936,15 @@ func (e *Engineer) landConvoySwarm(convoy convoyInfo) {
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Integration branch %s for convoy %s is NOT landed: "+
 		"automatic swarm landing was removed (no gt swarm command); merge it by hand\n",
 		integrationBranch, convoy.ID)
+	if err := e.notify(e.workDir).Escalate(context.Background(), notify.Escalation{
+		Severity:    "medium",
+		Description: fmt.Sprintf("integration branch %s for closed convoy %s is not landed; merge it by hand", integrationBranch, convoy.ID),
+		Reason:      "swarm-branch-unlanded: nothing lands swarm/<molecule> branches automatically (gt has no swarm command)",
+		Source:      "refinery:swarm-branch-unlanded",
+		Fingerprint: "swarm-branch-unlanded:" + moleculeID,
+	}); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: unlanded-branch escalation failed: %v\n", err)
+	}
 }
 
 // pruneStaleRemoteRefs prunes remote tracking refs that no longer exist on origin.
