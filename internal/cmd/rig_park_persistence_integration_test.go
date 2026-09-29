@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -21,7 +23,7 @@ const parkedLabel = "status:parked"
 func requireBdCLI(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd CLI not installed, skipping test")
+		t.Fatalf("bd CLI not on PATH: %v", err)
 	}
 }
 
@@ -54,8 +56,7 @@ func setupRigBeadsDB(t *testing.T, rigPath, prefix string) *beads.Beads {
 
 // Regression test for gt-6ju:
 // Parked state should survive wisp cleanup when persisted in bead layer.
-func TestIsRigParked_WhenOnlyBeadLabelPresent(t *testing.T) {
-	t.Parallel()
+func TestIntegrationIsRigParked_WhenOnlyBeadLabelPresent(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(townRoot, rigName)

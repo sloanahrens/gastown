@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -14,7 +16,7 @@ import (
 func requireBd(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd CLI not installed, skipping patrol test")
+		t.Fatalf("bd CLI not on PATH: %v", err)
 	}
 }
 

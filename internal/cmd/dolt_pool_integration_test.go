@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -16,7 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// TestDoltPool_IsolatedInitsCreateNoDatabases pins the fix for the
+// TestIntegrationDoltPool_IsolatedInitsCreateNoDatabases pins the fix for the
 // shared-container schema-migration flake (TestFindActivePatrol* and friends).
 //
 // Dolt fails a session's information_schema reads and savepoints ("could not
@@ -27,10 +29,9 @@ import (
 // tables". Now every database a test process uses exists before its first test
 // runs. Parallel isolated inits must therefore land in pool databases and leave
 // the server's catalog exactly as they found it.
-func TestDoltPool_IsolatedInitsCreateNoDatabases(t *testing.T) {
-	t.Parallel()
+func TestIntegrationDoltPool_IsolatedInitsCreateNoDatabases(t *testing.T) {
 	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd CLI not installed")
+		t.Fatalf("bd CLI not on PATH: %v", err)
 	}
 	testutil.RequireDoltContainer(t)
 	port := testutil.DoltContainerPort()
