@@ -274,12 +274,7 @@ Overall assessment:
 <brief summary - healthy, needs attention, significant issues, etc.>"
 ```
 
-**2. Sync beads:**
-```bash
-bd sync
-```
-
-**3. Add close evidence for review-only completion:**
+**2. Add close evidence for review-only completion:**
 ```bash
 HEAD_SHA=$(git rev-parse HEAD)
 bd comments add {{issue}} "PR-SHERIFF-EVIDENCE: code review complete
@@ -305,7 +300,6 @@ Once you run `gt done`, you're gone. The command:
 
 **Run gt done:**
 ```bash
-bd sync
 gt done
 ```
 
