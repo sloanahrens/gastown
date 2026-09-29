@@ -843,7 +843,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 		} else {
 			// Normal start - session exists, check if agent is actually running.
 			// A failed liveness query is UNKNOWN: refuse instead of killing a
-			// session that may be working (G4-01).
+			// session that may be working (gt-fcxe9.1).
 			alive, aliveErr := t.IsAgentAliveChecked(sessionID)
 			if aliveErr != nil {
 				return fmt.Errorf("checking agent liveness in %s (not killing): %w", sessionID, aliveErr)

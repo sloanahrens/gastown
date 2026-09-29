@@ -2122,7 +2122,7 @@ func TestGetBeadStatus_EmptyBeadID(t *testing.T) {
 	}
 }
 
-// TestDetectZombieLiveSession_StaleClosedHookDoesNotRestart is G1-03: the
+// TestDetectZombieLiveSession_StaleClosedHookDoesNotRestart is gt-fcxe9.7: the
 // agent bead's hook_bead slot is no longer written (updateAgentHookBead is a
 // no-op, hq-l6mm5), so after work is re-slung to a live polecat it still names
 // the previous, closed bead. A live polecat in a long tool run (no gt command,

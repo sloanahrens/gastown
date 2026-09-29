@@ -423,7 +423,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	}
 	if running {
 		// A failed liveness query is UNKNOWN, not a zombie: refuse the start
-		// rather than kill a session that may be working (G4-01).
+		// rather than kill a session that may be working (gt-fcxe9.1).
 		alive, aliveErr := m.tmux.IsAgentAliveChecked(sessionID)
 		if aliveErr != nil {
 			return fmt.Errorf("checking agent liveness in %s (not killing): %w", sessionID, aliveErr)
@@ -745,7 +745,7 @@ func (m *SessionManager) IsRunning(polecat string) (bool, error) {
 	sessionID := m.SessionName(polecat)
 	status := m.tmux.CheckSessionHealth(sessionID, 0)
 	// AgentUnknown counts as running: callers start a session when this
-	// is false, and a second start into a live session is the harm (G4-01).
+	// is false, and a second start into a live session is the harm (gt-fcxe9.1).
 	return status == tmux.SessionHealthy || status == tmux.AgentUnknown, nil
 }
 

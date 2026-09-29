@@ -94,7 +94,7 @@ func (c *ZombieSessionCheck) Run(ctx *CheckContext) *CheckResult {
 
 		// Check if Claude is running in this session. A failed query is
 		// UNKNOWN, never dead: under load `tmux show-environment` times out and
-		// the old error-dropping check turned that into a zombie kill (G4-01).
+		// the old error-dropping check turned that into a zombie kill (gt-fcxe9.1).
 		alive, err := t.IsAgentAliveChecked(sess)
 		switch {
 		case err != nil:
@@ -168,7 +168,7 @@ func (c *ZombieSessionCheck) Fix(ctx *CheckContext) error {
 		// Between Run() identifying zombies and Fix() killing them,
 		// a Claude process may have started (e.g., session was restarted).
 		// Only a confirmed "not alive" answer proceeds; a query error is
-		// UNKNOWN and the session is left alone (G4-01).
+		// UNKNOWN and the session is left alone (gt-fcxe9.1).
 		if alive, err := t.IsAgentAliveChecked(sess); err != nil || alive {
 			continue
 		}

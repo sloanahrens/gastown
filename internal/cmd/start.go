@@ -464,7 +464,7 @@ func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot strin
 		// Uses descendant process check instead of pane command check,
 		// since crew members launch via bash -c wrappers (see #1315, #1330).
 		// A failed liveness query is UNKNOWN: type nothing into the pane,
-		// which may hold a running agent (G4-01).
+		// which may hold a running agent (gt-fcxe9.1).
 		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
 		if aliveErr != nil {
 			return fmt.Sprintf("  %s %s/%s agent liveness unknown (%v); session left alone\n", style.Dim.Render("○"), r.Name, crewName, aliveErr), false

@@ -752,7 +752,7 @@ func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
 	}
 }
 
-// G4-01: an unanswerable liveness query is UNKNOWN, not dead. With the agent
+// gt-fcxe9.1: an unanswerable liveness query is UNKNOWN, not dead. With the agent
 // bead unreadable and no assigned work, a confirmed-dead agent is reaped at 2x
 // the idle threshold; an unknown one must wait for the 3x ceiling like a live
 // one. The session's pane runs a shell, so the old error-dropping check read

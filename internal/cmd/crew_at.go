@@ -264,7 +264,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		// since crew members launch via bash -c wrappers that cause
 		// false-negative detection with IsAgentRunning (see #1315, #1330).
 		// A failed liveness query is UNKNOWN: refuse to respawn a pane that
-		// may hold a running agent (G4-01).
+		// may hold a running agent (gt-fcxe9.1).
 		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
 		if aliveErr != nil {
 			return fmt.Errorf("could not verify agent in %s is running (not restarting): %w", sessionID, aliveErr)
@@ -352,7 +352,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	if isInTmuxSession(sessionID) {
 		// Check if agent is already alive - don't restart if so
 		// Uses descendant process check (see #1315, #1330). A failed
-		// liveness query is UNKNOWN: do not start a second agent (G4-01).
+		// liveness query is UNKNOWN: do not start a second agent (gt-fcxe9.1).
 		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
 		if aliveErr != nil {
 			return fmt.Errorf("could not verify agent in %s is running (not starting another): %w", sessionID, aliveErr)

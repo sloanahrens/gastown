@@ -124,7 +124,7 @@ func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 	// The test passes if no panic occurred and crew sessions are protected by the safeguard
 }
 
-// TestZombieSessionCheck_LivenessErrorIsNotAZombie is G4-01: a liveness
+// TestZombieSessionCheck_LivenessErrorIsNotAZombie is gt-fcxe9.1: a liveness
 // query that fails (tmux show-environment timing out under load) is UNKNOWN,
 // not dead. Run must not list the session as a zombie and Fix must not kill it.
 func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {

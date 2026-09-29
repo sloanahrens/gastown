@@ -233,7 +233,7 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 		// Use IsAgentAliveChecked (checks descendant processes) instead of
 		// IsAgentRunning (pane command only), since mayor launches via bash
 		// wrapper. A failed query is UNKNOWN: never kill and respawn a Mayor
-		// that may be working; attach and let the operator see (G4-01).
+		// that may be working; attach and let the operator see (gt-fcxe9.1).
 		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
 		if aliveErr != nil {
 			style.PrintWarning("could not verify the Mayor agent is running (%v); attaching without restart", aliveErr)

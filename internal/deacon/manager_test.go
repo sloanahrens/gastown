@@ -151,7 +151,7 @@ func TestStart_AlreadyRunningRepairsNudgePoller(t *testing.T) {
 	}
 }
 
-// TestStart_LivenessUnknownDoesNotKill is G4-01: a failed liveness query on
+// TestStart_LivenessUnknownDoesNotKill is gt-fcxe9.1: a failed liveness query on
 // an existing deacon session is UNKNOWN. Start must not kill it; it reports
 // the deacon as already running with the reason.
 func TestStart_LivenessUnknownDoesNotKill(t *testing.T) {
@@ -162,8 +162,9 @@ func TestStart_LivenessUnknownDoesNotKill(t *testing.T) {
 	m := newTestManager(t.TempDir(), mock)
 
 	err := m.Start("")
-	if !errors.Is(err, ErrAlreadyRunning) {
-		t.Fatalf("Start() error = %v, want ErrAlreadyRunning", err)
+	// Callers compare with ==, so the sentinel must come back unwrapped.
+	if err != ErrAlreadyRunning { //nolint:errorlint // pins the == contract callers rely on
+		t.Fatalf("Start() error = %v, want ErrAlreadyRunning unwrapped", err)
 	}
 	if len(mock.killCalls) != 0 {
 		t.Fatalf("Start() killed %v on an unknown liveness answer", mock.killCalls)

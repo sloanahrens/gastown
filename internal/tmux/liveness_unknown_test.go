@@ -17,7 +17,7 @@ func failingShowEnv(f *fakeServer) (*Tmux, *scripted) {
 	return unitTmux(s, nil), s
 }
 
-// TestCheckSessionHealth_LivenessErrorIsUnknown is G4-01: a failed liveness
+// TestCheckSessionHealth_LivenessErrorIsUnknown is gt-fcxe9.1: a failed liveness
 // query must read as AgentUnknown, which is not a zombie, never as AgentDead.
 func TestCheckSessionHealth_LivenessErrorIsUnknown(t *testing.T) {
 	t.Parallel()

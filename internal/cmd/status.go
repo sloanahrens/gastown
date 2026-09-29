@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -76,6 +77,10 @@ type TownStatus struct {
 	Rigs     []RigStatus    `json:"rigs"`
 	Summary  StatusSum      `json:"summary"`
 	Slot     *SlotInfo      `json:"container_slot,omitempty"` // Container-suite gate slot (gt-bcsq)
+	// LivenessUnknown lists sessions whose agent-liveness query failed. They
+	// are shown as running (unknown is not dead) and named here so the
+	// failure is visible (gt-fcxe9.1).
+	LivenessUnknown []string `json:"liveness_unknown,omitempty"`
 }
 
 // SlotInfo represents the town-level container-suite gate slot (see
@@ -667,6 +672,7 @@ func gatherStatus() (TownStatus, error) {
 	// zombie sessions (tmux alive, agent dead) from showing as running.
 	// See: gt-bd6i3
 	allSessions := make(map[string]bool)
+	var livenessUnknown []string
 	if sessions, err := t.ListSessions(); err == nil {
 		var sessionMu sync.Mutex
 		var sessionWg sync.WaitGroup
@@ -676,12 +682,13 @@ func gatherStatus() (TownStatus, error) {
 				go func(name string) {
 					defer sessionWg.Done()
 					// A failed liveness query is unknown, not dead: show
-					// the session as present rather than hide it (G4-01).
+					// the session as present rather than hide it (gt-fcxe9.1).
 					alive, aliveErr := t.IsAgentAliveChecked(name)
+					sessionMu.Lock()
 					if aliveErr != nil {
 						alive = true
+						livenessUnknown = append(livenessUnknown, name)
 					}
-					sessionMu.Lock()
 					allSessions[name] = alive
 					sessionMu.Unlock()
 				}(s)
@@ -881,6 +888,9 @@ func gatherStatus() (TownStatus, error) {
 	// actually holding it (gt-bcsq). Best-effort — a lock-read failure
 	// shouldn't break 'gt status'.
 	status.Slot = readGateSlotHolder(townRoot)
+
+	sort.Strings(livenessUnknown)
+	status.LivenessUnknown = livenessUnknown
 
 	// ACP status
 	if mayor.IsACPActive(townRoot) {
@@ -1105,6 +1115,12 @@ func outputStatusText(w io.Writer, status TownStatus) error {
 			style.Bold.Render("Container suite running:"),
 			status.Slot.Role,
 			style.Dim.Render(fmt.Sprintf("(pid %d, age %s)", status.Slot.PID, time.Since(status.Slot.AcquiredAt).Round(time.Second))))
+	}
+
+	if len(status.LivenessUnknown) > 0 {
+		fmt.Fprintf(w, "%s %s\n\n",
+			style.Bold.Render("Agent liveness unknown (query failed, shown as running):"),
+			strings.Join(status.LivenessUnknown, ", "))
 	}
 
 	// Role icons - uses centralized emojis from constants package

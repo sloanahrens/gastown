@@ -2874,7 +2874,7 @@ const (
 	AgentHung
 	// AgentUnknown means the session exists but the agent-liveness query
 	// failed (e.g. `tmux show-environment` timed out under load). It is not a
-	// zombie: callers must report it and never kill or restart on it (G4-01).
+	// zombie: callers must report it and never kill or restart on it (gt-fcxe9.1).
 	AgentUnknown
 )
 
@@ -3770,11 +3770,8 @@ func (t *Tmux) matchesPaneRuntimeChecked(session, cmd, pid string, processNames 
 // agent-agnostic detection: GT_PROCESS_NAMES (or the GT_AGENT registry entry)
 // matched against the pane command and its descendants.
 //
-// A non-nil error means the answer is UNKNOWN, not dead. The error-dropping
-// IsAgentAlive wrapper was deleted (G4-01): gt doctor --fix, gt mayor attach
-// and gt start each killed or typed into live sessions when a tmux query
-// failed under load. Callers that kill, restart, respawn or send keys must act
-// only on (false, nil).
+// A non-nil error means the answer is UNKNOWN, not dead. Callers that kill,
+// restart, respawn or send keys act only on (false, nil) (gt-fcxe9.1).
 func (t *Tmux) IsAgentAliveChecked(session string) (bool, error) {
 	processNames, err := t.resolveSessionProcessNamesChecked(session)
 	if err != nil {

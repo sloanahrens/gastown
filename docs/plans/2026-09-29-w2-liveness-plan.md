@@ -1,4 +1,4 @@
-> Status: active (2026-09). Stopgaps for gt-fcxe9.1 and gt-fcxe9.7 on branch crew/sloan/w2-liveness; superseded by the ADR 0003 supervisor refactor.
+> Status: historical (2026-09). Merged in: gt-fcxe9.1, gt-fcxe9.7. Not maintained.
 
 # Liveness stopgaps (gt-fcxe9.1, gt-fcxe9.7) Implementation Plan
 
@@ -31,7 +31,7 @@
 - Modify: `internal/polecat/session_manager.go`, `internal/crew/manager.go`, `internal/deacon/manager.go` (+ mock), `internal/session/lifecycle.go`
 - Modify: `internal/witness/handlers.go`, `internal/witness/composer_stall.go`, `internal/witness/realactivity.go`, `internal/witness/manager.go`
 - Modify: `internal/daemon/tmux_seam.go`, `internal/daemon/lifecycle.go`, `internal/daemon/daemon.go`, `internal/daemon/patrol_watchdog.go` (+ `tmux_fake_test.go`)
-- Test: `internal/doctor/zombie_check_test.go`, `internal/cmd/start_liveness_test.go` or the nearest existing seam
+- Test: `internal/doctor/zombie_check_test.go`, `internal/cmd/start_crew_restart_test.go`, `internal/tmux/liveness_unknown_test.go`, `internal/daemon/polecat_health_test.go`, `internal/deacon/manager_test.go`
 
 **Interfaces:**
 - Produces: no `IsAgentAlive` anywhere; seams (`zombieSessionLister`, daemon `sessionTmux`, deacon tmux interface) declare `IsAgentAliveChecked(session string) (bool, error)`.
@@ -67,7 +67,7 @@ Per-caller policy on a liveness-query error:
 
 **Interfaces:**
 - `bareRepoHealth(path) error` keeps its signature for `BareRepoRefspecCheck`; new `classifyBareRepo(path) bareRepoState` returns `bareRepoHealthy`, `bareRepoCorrupt` (HEAD missing: the recurring objects/+worktrees/ shell), or `bareRepoUnverified` (any `git rev-parse` failure, or a non-bare repo).
-- Fix quarantines only `bareRepoCorrupt` repos with no referencing worktree, no `worktrees/*` entry and no local branch ref that is not identical to `refs/remotes/origin/<same>`; it renames to `.repo.git.corrupt-<unix>` instead of RemoveAll, then re-clones.
+- Fix quarantines only `bareRepoCorrupt` repos with no referencing worktree, no `worktrees/*` entry and no local branch ref that is not identical to `refs/remotes/origin/<same>`; it renames to `.repo.git.corrupt-<unix-nanos>` instead of RemoveAll, then re-clones.
 
 - [ ] **Step 1: failing tests.** (a) PATH points at a fake `git` that exits 1 for everything; HEAD present; Run must report an unverified error and Fix must leave `.repo.git` in place with its objects. (b) Corrupt shell with a registered worktree: Fix returns an error naming the worktree and leaves `.repo.git` in place. (c) Corrupt shell with a local branch ref not on origin: Fix refuses. (d) Corrupt shell, no references: Fix re-clones and a `.repo.git.corrupt-*` directory exists holding the old objects.
 - [ ] **Step 2: run, expect FAIL.**
@@ -101,7 +101,7 @@ Per-caller policy on a liveness-query error:
 
 - [ ] **Step 1: failing test.** Real tmux socket session running `sleep`, `GT_PROCESS_NAMES=sleep`, snapshot `HookBead` pointing at a bead the fake bd reports closed, `restartSessionExecFn` records calls; expect no restart and no `ZombieBeadClosedStillRunning` result.
 - [ ] **Step 2: run, expect FAIL** (restart recorded).
-- [ ] **Step 3: delete the branch**; the idle reaper in the daemon already covers an idle live polecat using the work bead assignee. Keep the classification constant (receipts and mountain still map it for historical records).
+- [ ] **Step 3: delete the branch.** Accepted cost: a live polecat that finished and never reports an idle heartbeat keeps its session until an operator or the ADR 0003 supervisor acts (the daemon reaper leaves live agents alone, GH#3342). Keep the classification constant (receipts and mountain still map it for historical records).
 - [ ] **Step 4: run** `go test ./internal/witness/`.
 - [ ] **Step 5: commit** `fix(witness): never restart a live polecat on the unmaintained hook_bead slot`.
 

@@ -110,10 +110,13 @@ func (m *Manager) Start(agentOverride string) error {
 	if running {
 		// Session exists - check if agent is actually running (healthy vs zombie).
 		// A failed liveness query is UNKNOWN: treat the deacon as running and
-		// leave it alone rather than kill a session that may be working (G4-01).
+		// leave it alone rather than kill a session that may be working (gt-fcxe9.1).
 		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
 		if aliveErr != nil {
-			return fmt.Errorf("%w (agent liveness unknown: %v)", ErrAlreadyRunning, aliveErr)
+			// Callers compare the sentinel with ==, so report the unknown
+			// here and return it bare.
+			fmt.Fprintf(os.Stderr, "warning: deacon session %s: agent liveness unknown (%v); treating as running\n", sessionID, aliveErr)
+			return ErrAlreadyRunning
 		}
 		if alive {
 			m.startNudgePoller(sessionID)

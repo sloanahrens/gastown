@@ -50,7 +50,7 @@ func quarantined(t *testing.T, rigDir string) []string {
 	return matches
 }
 
-// G4-02: when git itself cannot run (CLT update, fork exhaustion, a codesign
+// gt-fcxe9.1: when git itself cannot run (CLT update, fork exhaustion, a codesign
 // kill), rev-parse fails on a perfectly good repo. That is UNKNOWN, not
 // corrupt: Run reports it and Fix must leave .repo.git and its objects alone.
 func TestBareRepoExistsCheck_GitFailureIsNotCorruption(t *testing.T) {

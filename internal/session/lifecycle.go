@@ -468,7 +468,7 @@ func KillExistingSession(t *tmux.Tmux, sessionID string, checkAlive bool) (bool,
 
 	if checkAlive {
 		// Only a confirmed dead agent is killed. A failed liveness query is
-		// UNKNOWN: refuse rather than kill a session that may be working (G4-01).
+		// UNKNOWN: refuse rather than kill a session that may be working (gt-fcxe9.1).
 		alive, err := t.IsAgentAliveChecked(sessionID)
 		if err != nil {
 			return false, fmt.Errorf("session %s: agent liveness unknown, not killing: %w", sessionID, err)

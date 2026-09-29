@@ -187,7 +187,7 @@ func TestStartOrRestartCrewMember_RestartsWhenEnvResolves(t *testing.T) {
 	}
 }
 
-// G4-01: when the liveness query itself fails, gt start must not type a
+// gt-fcxe9.1: when the liveness query itself fails, gt start must not type a
 // startup command into the pane. The old error-dropping check read the failure
 // as "agent exited" and pasted `exec claude ...` into a running Claude TUI.
 func TestStartOrRestartCrewMember_UnknownLivenessSendsNothing(t *testing.T) {

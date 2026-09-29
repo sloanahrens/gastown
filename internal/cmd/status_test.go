@@ -775,3 +775,24 @@ func TestBeadStatePausedStillShows(t *testing.T) {
 		t.Errorf("renderAgentDetails output = %q, want it to contain [paused]", out)
 	}
 }
+
+// gt-fcxe9.1: a session whose liveness query failed is shown as running (it
+// is not known dead) and named on its own line, so the failure is visible.
+func TestOutputStatusText_LivenessUnknown(t *testing.T) {
+	t.Parallel()
+	st := TownStatus{Name: "gt", Location: "/tmp/gt", LivenessUnknown: []string{"gt-gastown-witness"}}
+	var buf bytes.Buffer
+	if err := outputStatusText(&buf, st); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "Agent liveness unknown") || !strings.Contains(out, "gt-gastown-witness") {
+		t.Fatalf("expected an unknown-liveness line naming the session, got: %q", out)
+	}
+	buf.Reset()
+	if err := outputStatusText(&buf, TownStatus{Name: "gt", Location: "/tmp/gt"}); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	if strings.Contains(buf.String(), "Agent liveness unknown") {
+		t.Fatalf("unknown-liveness line printed with nothing unknown: %q", buf.String())
+	}
+}

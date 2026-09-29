@@ -1133,7 +1133,7 @@ const (
 	// bareRepoUnverified: git could not confirm the repo (rev-parse failed
 	// for any reason, or it reports a non-bare repo). This is UNKNOWN, never
 	// corrupt: a broken git shim, fork exhaustion or a codesign kill fail
-	// rev-parse on a perfectly good repo (G4-02). Nothing acts on it.
+	// rev-parse on a perfectly good repo (gt-fcxe9.1). Nothing acts on it.
 	bareRepoUnverified
 )
 
@@ -1509,7 +1509,7 @@ type BareRepoExistsCheck struct {
 	pushURLMismatch bool     // config.json push_url differs from .repo.git push URL
 	bareRepoCorrupt bool     // .repo.git exists and is missing HEAD (see bareRepoCorrupt state)
 	// bareRepoUnverified: .repo.git exists but git could not confirm it.
-	// Fix refuses to touch the repo or its worktree metadata (G4-02).
+	// Fix refuses to touch the repo or its worktree metadata (gt-fcxe9.1).
 	bareRepoUnverified bool
 }
 
@@ -1805,7 +1805,7 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 	bareRepoPath := filepath.Join(rigPath, ".repo.git")
 
 	// An unverifiable repo is never touched: not removed, not re-registered
-	// into, not reconfigured (G4-02).
+	// into, not reconfigured (gt-fcxe9.1).
 	if c.bareRepoUnverified {
 		return fmt.Errorf("refusing to modify %s: git could not verify it (see gt doctor output); fix git and re-run", bareRepoPath)
 	}
@@ -1815,7 +1815,7 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 	// bare repo in place — git refuses to operate on it.
 	//
 	// It is never deleted. .repo.git is the object store every polecat worktree
-	// in the rig shares, and a corrupt shell still holds their objects (G4-02).
+	// in the rig shares, and a corrupt shell still holds their objects (gt-fcxe9.1).
 	// Before moving it:
 	//   1. Re-classify to guard against stale state: the operator may have
 	//      repaired it between Run and Fix, or git may now be the thing failing.
