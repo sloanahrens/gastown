@@ -38,7 +38,7 @@ func commandWords(rest string) []string {
 		if strings.HasPrefix(tok, "#") {
 			break
 		}
-		trimmed := strings.TrimRight(tok, ";)`\"',.:")
+		trimmed := strings.TrimRight(tok, ";)}]`\"',.:")
 		if !cmdWord.MatchString(trimmed) {
 			break
 		}

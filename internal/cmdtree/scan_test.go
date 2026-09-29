@@ -42,6 +42,8 @@ func TestScanShell(t *testing.T) {
 		`log "Installing gt from $RIG_ROOT"`,     // 11: text inside an open quote
 		`echo 'Run gt prime first'`,              // 12: text inside an open quote
 		`echo "done" && gt done`,                 // 13: quote closed before gt
+		`R="${GT_TOWN_ROOT:-$(gt town root)}"`,   // 14: closing braces stop words
+		`a=[$(bd list)]`,                         // 15
 	}, "\n")
 	assertRefs(t, ScanShell("f.sh", text, 1),
 		"1:gt rig list",
@@ -53,6 +55,8 @@ func TestScanShell(t *testing.T) {
 		"8:gt mail inbox",
 		"10:bd list",
 		"13:gt done",
+		"14:gt town root",
+		"15:bd list",
 	)
 }
 
