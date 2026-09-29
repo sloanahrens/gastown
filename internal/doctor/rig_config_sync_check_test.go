@@ -3,9 +3,13 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 func TestRigConfigSyncCheck_MissingConfig(t *testing.T) {
@@ -165,9 +169,7 @@ func TestRigConfigSyncCheck_AllConfigsPresent(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_FixDisablesRigAutoExport(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -209,13 +211,9 @@ func TestRigConfigSyncCheck_FixDisablesRigAutoExport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/usr/bin/env bash\nif [ \"$1\" = show ]; then echo \"[{\\\"id\\\":\\\"$2\\\"}]\"; fi\nexit 0\n"), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	ctx := &CheckContext{TownRoot: tmpDir}
+	bd := newFakeBD()
+	seedRigBead(bd, tmpDir, "testrig", "tr")
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -242,9 +240,7 @@ func TestRigConfigSyncCheck_FixDisablesRigAutoExport(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_FixCreatesMissingMetadata(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -283,13 +279,9 @@ func TestRigConfigSyncCheck_FixCreatesMissingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	ctx := &CheckContext{TownRoot: tmpDir}
+	bd := newFakeBD()
+	seedRigBead(bd, tmpDir, "testrig", "tr")
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -313,9 +305,7 @@ func TestRigConfigSyncCheck_FixCreatesMissingMetadata(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_FixCreatesMissingRootMetadata(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -354,13 +344,9 @@ func TestRigConfigSyncCheck_FixCreatesMissingRootMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	ctx := &CheckContext{TownRoot: tmpDir}
+	bd := newFakeBD()
+	seedRigBead(bd, tmpDir, "testrig", "tr")
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -450,9 +436,6 @@ func TestRigConfigSyncCheck_DoltListErrorDoesNotMeanMissingDB(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_FixMissingDoltDBUsesCanonicalDatabase(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd arg/env logging is shell-specific")
-	}
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -476,23 +459,12 @@ func TestRigConfigSyncCheck_FixMissingDoltDBUsesCanonicalDatabase(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	cmdLog := filepath.Join(t.TempDir(), "bd-cmds.log")
-	binDir := t.TempDir()
-	script := `#!/usr/bin/env bash
-set -e
-printf 'args=%s env=%s beads=%s db=%s\n' "$*" "${BEADS_DOLT_SERVER_DATABASE:-<unset>}" "${BEADS_DIR:-<unset>}" "${BEADS_DB:-<unset>}" >> "$BD_CMD_LOG"
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_CMD_LOG", cmdLog)
 	t.Setenv("BEADS_DIR", filepath.Join(tmpDir, "wrong", ".beads"))
 	t.Setenv("BEADS_DB", filepath.Join(tmpDir, "wrong.db"))
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong_db")
 
-	ctx := &CheckContext{TownRoot: tmpDir}
+	bd := newFakeBD()
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	check.missingDoltDB = []string{"testrig"}
 
@@ -500,22 +472,26 @@ exit 0
 		t.Fatalf("Fix failed: %v", err)
 	}
 
-	logData, err := os.ReadFile(cmdLog)
-	if err != nil {
-		t.Fatalf("reading command log: %v", err)
+	want := []beads.InitOptions{{
+		Prefix: "tr", Database: "testrig", ServerPort: doltserver.DefaultConfig(tmpDir).Port,
+		Force: true, DestroyToken: "DESTROY-tr",
+	}}
+	if got := bd.db(mayorRigDir).Inits(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("bd init in mayor/rig = %+v, want %+v (the canonical database)", got, want)
 	}
-	cmds := string(logData)
-	if !strings.Contains(cmds, "args=init --prefix tr --database testrig --server --server-port") {
-		t.Fatalf("bd init did not use canonical database; log:\n%s", cmds)
+	opens := bd.opened()
+	if len(opens) != 1 || opens[0].dir != mayorRigDir {
+		t.Fatalf("bd opens = %+v, want one in %s", opens, mayorRigDir)
 	}
-	if !strings.Contains(cmds, "env=testrig") {
-		t.Fatalf("bd init did not receive canonical database env; log:\n%s", cmds)
+	env := opens[0].env
+	if v, n := envLookup(env, "BEADS_DOLT_SERVER_DATABASE"); n != 1 || v != "testrig" {
+		t.Errorf("BEADS_DOLT_SERVER_DATABASE = %q (x%d), want testrig once", v, n)
 	}
-	if !strings.Contains(cmds, "beads="+filepath.Join(mayorRigDir, ".beads")) {
-		t.Fatalf("bd init did not receive mayor/rig BEADS_DIR; log:\n%s", cmds)
+	if v, n := envLookup(env, "BEADS_DIR"); n != 1 || v != filepath.Join(mayorRigDir, ".beads") {
+		t.Errorf("BEADS_DIR = %q (x%d), want mayor/rig's .beads once", v, n)
 	}
-	if strings.Contains(cmds, "wrong_db") || strings.Contains(cmds, "wrong.db") || strings.Contains(cmds, filepath.Join(tmpDir, "wrong", ".beads")) {
-		t.Fatalf("stale BEADS env leaked into bd subprocess; log:\n%s", cmds)
+	if _, n := envLookup(env, "BEADS_DB"); n != 0 {
+		t.Error("stale BEADS_DB leaked into bd init")
 	}
 }
 
@@ -525,9 +501,7 @@ exit 0
 // "DB name mismatch", and --fix must NOT revert its metadata.json back to the
 // non-existent rig-name database.
 func TestRigConfigSyncCheck_PrefixNamedDoltDBNoMismatch(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake dolt stub is shell-specific")
-	}
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -584,15 +558,10 @@ func TestRigConfigSyncCheck_PrefixNamedDoltDBNoMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fake bd so the identity-bead lookup succeeds.
-	binDir := t.TempDir()
-	bdScript := "#!/usr/bin/env bash\nif [ \"$1\" = show ]; then echo \"[{\\\"id\\\":\\\"$2\\\"}]\"; fi\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	ctx := &CheckContext{TownRoot: tmpDir}
+	// The identity bead exists.
+	bd := newFakeBD()
+	seedRigBead(bd, tmpDir, "beads", "bd")
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	check.Run(ctx)
 
@@ -618,9 +587,7 @@ func TestRigConfigSyncCheck_PrefixNamedDoltDBNoMismatch(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_DeaconTownDoltDBNoMismatch(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -666,9 +633,9 @@ func TestRigConfigSyncCheck_DeaconTownDoltDBNoMismatch(t *testing.T) {
 	if err := os.WriteFile(metadataPath, []byte(metadata), 0644); err != nil {
 		t.Fatal(err)
 	}
-	setFakeBDShow(t)
-
-	ctx := &CheckContext{TownRoot: tmpDir}
+	bd := newFakeBD()
+	seedRigBead(bd, tmpDir, "deacon", "dc")
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	result := check.Run(ctx)
 
@@ -695,9 +662,7 @@ func TestRigConfigSyncCheck_DeaconTownDoltDBNoMismatch(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_OrdinaryRigTownDoltDBMismatch(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -743,9 +708,9 @@ func TestRigConfigSyncCheck_OrdinaryRigTownDoltDBMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
 		t.Fatal(err)
 	}
-	setFakeBDShow(t)
-
-	ctx := &CheckContext{TownRoot: tmpDir}
+	bd := newFakeBD()
+	seedRigBead(bd, tmpDir, "testrig", "tr")
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	result := check.Run(ctx)
 
@@ -772,14 +737,10 @@ func writeTestDoltDatabase(t *testing.T, townRoot, dbName string) {
 	}
 }
 
-func setFakeBDShow(t *testing.T) {
-	t.Helper()
-	binDir := t.TempDir()
-	script := "#!/usr/bin/env bash\nif [ \"$1\" = show ]; then echo \"[{\\\"id\\\":\\\"$2\\\"}]\"; fi\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+// seedRigBead gives rig its identity bead (<prefix>-rig-<rig>) in the fake bd
+// the check opens in the rig directory.
+func seedRigBead(bd *fakeBD, townRoot, rig, prefix string) {
+	bd.db(filepath.Join(townRoot, rig)).Seed(beads.Issue{ID: prefix + "-rig-" + rig, Title: rig, Labels: []string{"gt:rig"}})
 }
 
 func TestStaleRuntimeFilesCheck_StalePIDFiles(t *testing.T) {

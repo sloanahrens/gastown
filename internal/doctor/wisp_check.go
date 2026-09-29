@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"time"
-
 )
 
 // WispGCCheck detects and cleans orphaned wisps that are older than a threshold.

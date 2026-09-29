@@ -674,3 +674,21 @@ func (f *Fake) RemoveDependency(issue, dependsOn string) error {
 	r.deps = kept
 	return nil
 }
+
+// Seed stores issues exactly as given, IDs included, replacing any issue
+// with the same ID. It sets up a test's starting state (an issue with a
+// fixed ID, such as a rig identity bead) and is not a bd operation: labels,
+// status and timestamps are taken as they are, and no dependencies are
+// recorded.
+func (f *Fake) Seed(issues ...beads.Issue) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, is := range issues {
+		f.seq++
+		is.Labels = sortedSet(is.Labels)
+		if is.Status == "" {
+			is.Status = string(beads.StatusOpen)
+		}
+		f.issues[is.ID] = &record{seq: f.seq, issue: is}
+	}
+}

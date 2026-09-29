@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,102 +9,39 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
-func installFakeBdForConfigChecks(t *testing.T, townRoot string) {
-	t.Helper()
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir fake bin: %v", err)
-	}
-
-	script := `#!/bin/sh
-set -eu
-
-target="${BEADS_DIR:-$PWD}"
-if [ -d "$target/.beads" ]; then
-  target="$target/.beads"
-fi
-
-case "$1:$2:$3" in
-  config:get:types.custom)
-    if [ -f "$target/types.custom" ]; then
-      cat "$target/types.custom"
-    else
-      exit 1
-    fi
-    ;;
-	  config:set:types.custom)
-	    printf '%s\n' "$4" > "$target/types.custom"
-	    ;;
-	  config:get:types.infra)
-	    if [ -f "$target/types.infra" ]; then
-	      cat "$target/types.infra"
-	    else
-	      exit 1
-	    fi
-	    ;;
-	  config:set:types.infra)
-	    printf '%s\n' "$4" > "$target/types.infra"
-	    ;;
-  config:get:status.custom)
-    if [ -f "$target/status.custom" ]; then
-      cat "$target/status.custom"
-    else
-      exit 1
-    fi
-    ;;
-  config:set:status.custom)
-    printf '%s\n' "$4" > "$target/status.custom"
-    ;;
-  *)
-    echo "unexpected bd invocation: $*" >&2
-    exit 1
-    ;;
-esac
-`
-
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	oldPath := os.Getenv("PATH")
-	if err := os.Setenv("PATH", fmt.Sprintf("%s:%s", binDir, oldPath)); err != nil {
-		t.Fatalf("set PATH: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Setenv("PATH", oldPath)
-	})
-	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BEADS_DOLT_SERVER_DATABASE"} {
-		oldVal, hadVal := os.LookupEnv(key)
-		_ = os.Unsetenv(key)
-		t.Cleanup(func() {
-			if hadVal {
-				_ = os.Setenv(key, oldVal)
-			} else {
-				_ = os.Unsetenv(key)
-			}
-		})
-	}
-}
-
-func writeConfigCheckFile(t *testing.T, beadsDir, name, value string) {
+// writeConfigCheckFile sets a bd config key in the fake database of beadsDir
+// (creating the directory, which the checks stat first).
+func writeConfigCheckFile(t *testing.T, bd *fakeBD, beadsDir, name, value string) {
 	t.Helper()
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("mkdir beads dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(value+"\n"), 0644); err != nil {
-		t.Fatalf("write %s: %v", name, err)
+	if err := bd.db(beadsDir).ConfigSet(name, value); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func readConfigCheckFile(t *testing.T, beadsDir, name string) string {
+func readConfigCheckFile(t *testing.T, bd *fakeBD, beadsDir, name string) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(beadsDir, name))
+	v, err := bd.db(beadsDir).ConfigGet(name)
 	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
+		t.Fatalf("config get %s: %v", name, err)
 	}
-	return strings.TrimSpace(string(data))
+	return v
+}
+
+// wantBeadsDirEnv checks every bd the check opened ran in beadsDir with
+// BEADS_DIR pinned to it.
+func wantBeadsDirEnv(t *testing.T, bd *fakeBD, beadsDir string) {
+	t.Helper()
+	for _, o := range bd.opened() {
+		if o.dir != beadsDir {
+			t.Errorf("bd opened in %s, want %s", o.dir, beadsDir)
+		}
+		if v, n := envLookup(o.env, "BEADS_DIR"); n != 1 || v != beadsDir {
+			t.Errorf("BEADS_DIR = %q (x%d), want %q once", v, n, beadsDir)
+		}
+	}
 }
 
 func TestSessionHookCheck_UsesSessionStartScript(t *testing.T) {
@@ -583,17 +519,19 @@ func TestCustomStatusesCheck_ParsesOutputWithNotePrefix(t *testing.T) {
 }
 
 func TestCustomTypesCheck_UsesRigScopedBeadsDir(t *testing.T) {
+	t.Parallel()
+	bd := newFakeBD()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
 
-	writeConfigCheckFile(t, townBeadsDir, "types.custom", constants.BeadsCustomTypes)
-	writeConfigCheckFile(t, rigBeadsDir, "types.custom", "agent,role")
-	installFakeBdForConfigChecks(t, townRoot)
+	writeConfigCheckFile(t, bd, townBeadsDir, "types.custom", constants.BeadsCustomTypes)
+	writeConfigCheckFile(t, bd, rigBeadsDir, "types.custom", "agent,role")
 
 	check := NewCustomTypesCheck()
-	ctx := &CheckContext{TownRoot: townRoot, RigName: "gastown"}
+	ctx := bd.ctx(townRoot)
+	ctx.RigName = "gastown"
 
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -602,12 +540,13 @@ func TestCustomTypesCheck_UsesRigScopedBeadsDir(t *testing.T) {
 	if check.targetBeadsDir != rigBeadsDir {
 		t.Fatalf("Run cached %q, want %q", check.targetBeadsDir, rigBeadsDir)
 	}
+	wantBeadsDirEnv(t, bd, rigBeadsDir)
 
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
 
-	gotTypes := strings.Split(readConfigCheckFile(t, rigBeadsDir, "types.custom"), ",")
+	gotTypes := strings.Split(readConfigCheckFile(t, bd, rigBeadsDir, "types.custom"), ",")
 	wantTypes := make(map[string]struct{})
 	for _, item := range constants.BeadsCustomTypesList() {
 		wantTypes[item] = struct{}{}
@@ -618,10 +557,10 @@ func TestCustomTypesCheck_UsesRigScopedBeadsDir(t *testing.T) {
 	if len(wantTypes) != 0 {
 		t.Fatalf("rig types.custom missing expected entries after fix: %v (got %q)", wantTypes, strings.Join(gotTypes, ","))
 	}
-	if got := readConfigCheckFile(t, townBeadsDir, "types.custom"); got != constants.BeadsCustomTypes {
+	if got := readConfigCheckFile(t, bd, townBeadsDir, "types.custom"); got != constants.BeadsCustomTypes {
 		t.Fatalf("town types.custom changed unexpectedly: %q", got)
 	}
-	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+	if got := readConfigCheckFile(t, bd, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
 		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
 	}
 
@@ -632,17 +571,19 @@ func TestCustomTypesCheck_UsesRigScopedBeadsDir(t *testing.T) {
 }
 
 func TestCustomTypesCheck_FixPreservesExistingRigTypes(t *testing.T) {
+	t.Parallel()
+	bd := newFakeBD()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
 
-	writeConfigCheckFile(t, townBeadsDir, "types.custom", constants.BeadsCustomTypes)
-	writeConfigCheckFile(t, rigBeadsDir, "types.custom", "agent,role,external")
-	installFakeBdForConfigChecks(t, townRoot)
+	writeConfigCheckFile(t, bd, townBeadsDir, "types.custom", constants.BeadsCustomTypes)
+	writeConfigCheckFile(t, bd, rigBeadsDir, "types.custom", "agent,role,external")
 
 	check := NewCustomTypesCheck()
-	ctx := &CheckContext{TownRoot: townRoot, RigName: "gastown"}
+	ctx := bd.ctx(townRoot)
+	ctx.RigName = "gastown"
 
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -653,7 +594,7 @@ func TestCustomTypesCheck_FixPreservesExistingRigTypes(t *testing.T) {
 		t.Fatalf("Fix failed: %v", err)
 	}
 
-	got := strings.Split(readConfigCheckFile(t, rigBeadsDir, "types.custom"), ",")
+	got := strings.Split(readConfigCheckFile(t, bd, rigBeadsDir, "types.custom"), ",")
 	wantSet := make(map[string]struct{})
 	for _, item := range append(constants.BeadsCustomTypesList(), "external") {
 		wantSet[item] = struct{}{}
@@ -664,22 +605,24 @@ func TestCustomTypesCheck_FixPreservesExistingRigTypes(t *testing.T) {
 	if len(wantSet) != 0 {
 		t.Fatalf("rig types.custom missing expected entries after fix: %v (got %q)", wantSet, strings.Join(got, ","))
 	}
-	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+	if got := readConfigCheckFile(t, bd, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
 		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
 	}
 }
 
 func TestCustomTypesCheck_FixesStaleInfraTypes(t *testing.T) {
+	t.Parallel()
+	bd := newFakeBD()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
 
-	writeConfigCheckFile(t, rigBeadsDir, "types.custom", constants.BeadsCustomTypes)
-	writeConfigCheckFile(t, rigBeadsDir, "types.infra", "agent,role,rig,message")
-	installFakeBdForConfigChecks(t, townRoot)
+	writeConfigCheckFile(t, bd, rigBeadsDir, "types.custom", constants.BeadsCustomTypes)
+	writeConfigCheckFile(t, bd, rigBeadsDir, "types.infra", "agent,role,rig,message")
 
 	check := NewCustomTypesCheck()
-	ctx := &CheckContext{TownRoot: townRoot, RigName: "gastown"}
+	ctx := bd.ctx(townRoot)
+	ctx.RigName = "gastown"
 
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -692,7 +635,7 @@ func TestCustomTypesCheck_FixesStaleInfraTypes(t *testing.T) {
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
-	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+	if got := readConfigCheckFile(t, bd, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
 		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
 	}
 
@@ -703,15 +646,17 @@ func TestCustomTypesCheck_FixesStaleInfraTypes(t *testing.T) {
 }
 
 func TestCustomTypesCheck_FixesMissingInfraTypes(t *testing.T) {
+	t.Parallel()
+	bd := newFakeBD()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
 
-	writeConfigCheckFile(t, rigBeadsDir, "types.custom", constants.BeadsCustomTypes)
-	installFakeBdForConfigChecks(t, townRoot)
+	writeConfigCheckFile(t, bd, rigBeadsDir, "types.custom", constants.BeadsCustomTypes)
 
 	check := NewCustomTypesCheck()
-	ctx := &CheckContext{TownRoot: townRoot, RigName: "gastown"}
+	ctx := bd.ctx(townRoot)
+	ctx.RigName = "gastown"
 
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -721,23 +666,25 @@ func TestCustomTypesCheck_FixesMissingInfraTypes(t *testing.T) {
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
-	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+	if got := readConfigCheckFile(t, bd, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
 		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
 	}
 }
 
 func TestCustomStatusesCheck_UsesRigScopedBeadsDir(t *testing.T) {
+	t.Parallel()
+	bd := newFakeBD()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
 
-	writeConfigCheckFile(t, townBeadsDir, "status.custom", constants.BeadsCustomStatuses)
-	writeConfigCheckFile(t, rigBeadsDir, "status.custom", "queued")
-	installFakeBdForConfigChecks(t, townRoot)
+	writeConfigCheckFile(t, bd, townBeadsDir, "status.custom", constants.BeadsCustomStatuses)
+	writeConfigCheckFile(t, bd, rigBeadsDir, "status.custom", "queued")
 
 	check := NewCustomStatusesCheck()
-	ctx := &CheckContext{TownRoot: townRoot, RigName: "gastown"}
+	ctx := bd.ctx(townRoot)
+	ctx.RigName = "gastown"
 
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -746,15 +693,16 @@ func TestCustomStatusesCheck_UsesRigScopedBeadsDir(t *testing.T) {
 	if check.targetBeadsDir != rigBeadsDir {
 		t.Fatalf("Run cached %q, want %q", check.targetBeadsDir, rigBeadsDir)
 	}
+	wantBeadsDirEnv(t, bd, rigBeadsDir)
 
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
 
-	if got := readConfigCheckFile(t, rigBeadsDir, "status.custom"); got != "queued,"+constants.BeadsCustomStatuses {
+	if got := readConfigCheckFile(t, bd, rigBeadsDir, "status.custom"); got != "queued,"+constants.BeadsCustomStatuses {
 		t.Fatalf("rig status.custom = %q", got)
 	}
-	if got := readConfigCheckFile(t, townBeadsDir, "status.custom"); got != constants.BeadsCustomStatuses {
+	if got := readConfigCheckFile(t, bd, townBeadsDir, "status.custom"); got != constants.BeadsCustomStatuses {
 		t.Fatalf("town status.custom changed unexpectedly: %q", got)
 	}
 
