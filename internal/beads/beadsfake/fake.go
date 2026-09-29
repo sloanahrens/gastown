@@ -595,22 +595,33 @@ func (f *Fake) close(reason string, force bool, ids []string) error {
 			return notFound(id)
 		}
 	}
+	// A refused issue is skipped and the rest close; the batch fails only
+	// when every issue in it is refused, with the first refusal (bd 1.2).
+	var firstRefusal error
+	closed := 0
 	for _, id := range ids {
 		r := f.issues[id]
 		if !force {
 			if err := f.closeRefusal(r); err != nil {
-				return err
+				if firstRefusal == nil {
+					firstRefusal = err
+				}
+				continue
 			}
 		}
 		f.setStatus(r, string(beads.StatusClosed), reason)
 		r.issue.UpdatedAt = f.now()
+		closed++
+	}
+	if closed == 0 && firstRefusal != nil {
+		return firstRefusal
 	}
 	return nil
 }
 
 // Close closes ids with bd's default reason, "Closed". An issue with open
 // children or an open blocker, or assigned to someone other than the actor,
-// is refused.
+// is refused: skipped, with an error only when every issue is refused.
 func (f *Fake) Close(ids ...string) error { return f.close("", false, ids) }
 
 // CloseWithReason closes ids recording reason, with Close's refusals.
@@ -642,6 +653,50 @@ func (f *Fake) ReleaseWithReason(id, reason string) error {
 	}
 	r.issue.UpdatedAt = f.now()
 	return nil
+}
+
+// AppendNotes appends note to the issue's notes, after a newline when
+// there are notes already, as bd update --append-notes does.
+func (f *Fake) AppendNotes(id, note string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.issues[id]
+	if !ok {
+		return notFound(id)
+	}
+	f.tick()
+	if r.issue.Notes != "" {
+		r.issue.Notes += "\n"
+	}
+	r.issue.Notes += note
+	r.issue.UpdatedAt = f.now()
+	return nil
+}
+
+// ReleaseIfAssignee is TransferIfAssignee to open with no assignee.
+func (f *Fake) ReleaseIfAssignee(id, expected string) (bool, error) {
+	return f.TransferIfAssignee(id, expected, string(beads.StatusOpen), "")
+}
+
+// TransferIfAssignee sets status and assignee only while expected is the
+// assignee (an empty expected means unassigned), and reports false with no
+// error, writing nothing, when it is not. The guard stands in for the claim
+// fence: an in_progress claim moves when its holder is the one expected.
+func (f *Fake) TransferIfAssignee(id, expected, status, assignee string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.issues[id]
+	if !ok {
+		return false, notFound(id)
+	}
+	if r.issue.Assignee != expected {
+		return false, nil
+	}
+	f.tick()
+	f.setStatus(r, status, "")
+	r.issue.Assignee = assignee
+	r.issue.UpdatedAt = f.now()
+	return true, nil
 }
 
 // AddComment appends a comment authored by the fake's actor.

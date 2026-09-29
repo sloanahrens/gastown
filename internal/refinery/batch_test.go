@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,35 +21,129 @@ import (
 
 // testGitRepo creates a bare repo + working clone with an initial commit.
 // Returns the working dir, a cleanup func, and a git.Git for the working dir.
+//
+// The repo is a copy of one built once per test binary (gitRepoTemplate):
+// building it takes nine git processes, about 2 s each time on a loaded host,
+// and some 145 tests start from it.
 func testGitRepo(t *testing.T) (workDir string, g *gitpkg.Git, cleanup func()) {
 	t.Helper()
+	tmpl, err := gitRepoTemplate()
+	if err != nil {
+		t.Fatalf("building the template git repo: %v", err)
+	}
 	tmpDir := t.TempDir()
-
-	bareDir := filepath.Join(tmpDir, "origin.git")
+	if err := copyTree(tmpl, tmpDir); err != nil {
+		t.Fatalf("copying the template git repo: %v", err)
+	}
 	workDir = filepath.Join(tmpDir, "work")
-
-	// Create bare repo with main as default branch
-	run(t, tmpDir, "git", "init", "--bare", "--initial-branch=main", bareDir)
-
-	// Clone it
-	run(t, tmpDir, "git", "clone", bareDir, workDir)
-
-	// Configure git user
-	run(t, workDir, "git", "config", "user.email", "test@test.com")
-	run(t, workDir, "git", "config", "user.name", "Test")
-
-	// Ensure we're on main branch
-	run(t, workDir, "git", "checkout", "-b", "main")
-
-	// Initial commit
-	writeFile(t, workDir, "README.md", "# Test\n")
-	run(t, workDir, "git", "add", ".")
-	run(t, workDir, "git", "commit", "-m", "initial commit")
-	run(t, workDir, "git", "push", "-u", "origin", "main")
+	// The clone's origin is the template's bare repo; point it at the copy.
+	cfgPath := filepath.Join(workDir, ".git", "config")
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := strings.ReplaceAll(string(cfg), filepath.Join(tmpl, "origin.git"), filepath.Join(tmpDir, "origin.git"))
+	if fixed == string(cfg) {
+		t.Fatalf("template clone config names no template origin:\n%s", cfg)
+	}
+	if err := os.WriteFile(cfgPath, []byte(fixed), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	g = gitpkg.NewGit(workDir)
 
 	return workDir, g, func() {} // t.TempDir handles cleanup
+}
+
+var (
+	gitRepoTemplateOnce sync.Once
+	gitRepoTemplateDir  string
+	gitRepoTemplateErr  error
+)
+
+// gitRepoTemplate returns the directory holding testGitRepo's starting
+// state, building it on first use: origin.git, a bare repo whose main has one
+// commit (README.md), and work, its clone with main checked out and tracking
+// origin/main. It lives in the hermetic sandbox's home, which TestMain
+// removes.
+func gitRepoTemplate() (string, error) {
+	gitRepoTemplateOnce.Do(func() {
+		gitRepoTemplateDir, gitRepoTemplateErr = buildGitRepoTemplate()
+	})
+	return gitRepoTemplateDir, gitRepoTemplateErr
+}
+
+func buildGitRepoTemplate() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(home, "refinery-git-template-")
+	if err != nil {
+		return "", err
+	}
+	bareDir := filepath.Join(dir, "origin.git")
+	workDir := filepath.Join(dir, "work")
+	steps := []struct {
+		dir  string
+		args []string
+	}{
+		{dir, []string{"init", "--bare", "--initial-branch=main", bareDir}},
+		{dir, []string{"clone", bareDir, workDir}},
+		{workDir, []string{"config", "user.email", "test@test.com"}},
+		{workDir, []string{"config", "user.name", "Test"}},
+		{workDir, []string{"checkout", "-b", "main"}},
+		{workDir, []string{"add", "."}},
+		{workDir, []string{"commit", "-m", "initial commit"}},
+		{workDir, []string{"push", "-u", "origin", "main"}},
+	}
+	for i, step := range steps {
+		if i == 5 {
+			if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+				return "", err
+			}
+		}
+		cmd := exec.Command("git", step.args...)
+		cmd.Dir = step.dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git %v: %v\n%s", step.args, err, out)
+		}
+	}
+	return dir, nil
+}
+
+// copyTree copies the directory tree src into dst, keeping file modes.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm()|0o700)
+		case d.Type()&fs.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		default:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(target, data, info.Mode().Perm())
+		}
+	})
 }
 
 // createFeatureBranch creates a branch with a single file change.

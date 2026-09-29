@@ -58,6 +58,18 @@ type Client interface {
 	AddDependency(issue, dependsOn string) error
 	// RemoveDependency removes that dependency.
 	RemoveDependency(issue, dependsOn string) error
+	// AppendNotes appends note to the issue's notes, on a new line when
+	// there are notes already.
+	AppendNotes(id, note string) error
+
+	// ReleaseIfAssignee returns the issue to open with no assignee, but only
+	// while expected still holds it. released=false with a nil error means
+	// the guard no longer held and nothing was written.
+	ReleaseIfAssignee(id, expected string) (released bool, err error)
+	// TransferIfAssignee sets the issue's status and assignee, but only
+	// while expected still holds it; the guard replaces bd's claim fence.
+	// transferred=false with a nil error means nothing was written.
+	TransferIfAssignee(id, expected, status, assignee string) (transferred bool, err error)
 }
 
 var _ Client = (*Beads)(nil)

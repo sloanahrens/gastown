@@ -39,3 +39,16 @@ func (b *Beads) TransferIfAssignee(id, expected, status, assignee string) (trans
 	}
 	return false, err
 }
+
+// AppendNotes appends note to an issue's notes (bd update --append-notes),
+// which bd joins to existing notes with a newline. It routes by the issue's
+// prefix the way Update does.
+func (b *Beads) AppendNotes(id, note string) error {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.AppendNotes(id, note)
+		}
+	}
+	_, err := b.run("update", id, "--append-notes", note)
+	return err
+}

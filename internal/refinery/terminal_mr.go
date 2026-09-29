@@ -40,7 +40,7 @@ type terminalMRCloseResult struct {
 	AgentActiveMRClearErr error
 }
 
-func closeTerminalMR(b *beads.Beads, mrID string, opts terminalMRCloseOptions) (*terminalMRCloseResult, error) {
+func closeTerminalMR(b beads.Client, mrID string, opts terminalMRCloseOptions) (*terminalMRCloseResult, error) {
 	mrID = strings.TrimSpace(mrID)
 	result := &terminalMRCloseResult{MRID: mrID}
 	if b == nil || mrID == "" {
@@ -108,7 +108,7 @@ func closeTerminalMR(b *beads.Beads, mrID string, opts terminalMRCloseOptions) (
 	}
 
 	if result.AgentBead != "" {
-		cleared, clearErr := b.ForAgentBead().ClearAgentActiveMRIfMatches(result.AgentBead, mrID)
+		cleared, clearErr := beads.ClearAgentActiveMRIfMatches(beads.ForAgentBead(b), result.AgentBead, mrID)
 		result.AgentActiveMRCleared = cleared
 		result.AgentActiveMRClearErr = clearErr
 	}

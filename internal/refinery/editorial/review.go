@@ -116,7 +116,7 @@ type ExecFunc func(ctx context.Context, path string, args []string, dir string) 
 // Deps are Run's collaborators, all substitutable for testing.
 type Deps struct {
 	Git      *git.Git
-	Beads    *beads.Beads
+	Beads    beads.Client
 	Recorder *plugin.Recorder
 	Exec     ExecFunc
 
@@ -964,7 +964,7 @@ func recordedVerdictApplies(prev *Note, patchID, rubricSHA, minVersion string) b
 // asks first rather than re-recording the same head. On a reuse the head is
 // the commit the note was found on, which is what the field is for: the push
 // precondition reads it to find the note without scanning.
-func ensureEditorialReviewedHead(b *beads.Beads, mrID, head string) error {
+func ensureEditorialReviewedHead(b beads.Client, mrID, head string) error {
 	if issue, err := b.Show(mrID); err == nil {
 		if fields := beads.ParseMRFields(issue); fields != nil && fields.EditorialReviewedHead == head {
 			return nil
@@ -976,7 +976,7 @@ func ensureEditorialReviewedHead(b *beads.Beads, mrID, head string) error {
 // setEditorialReviewedHead records the reviewed head on the MR bead so the
 // push precondition (om-gate T6) can find the matching note without
 // re-deriving it.
-func setEditorialReviewedHead(b *beads.Beads, mrID, head string) error {
+func setEditorialReviewedHead(b beads.Client, mrID, head string) error {
 	issue, err := b.Show(mrID)
 	if err != nil {
 		return fmt.Errorf("show %s: %w", mrID, err)
@@ -994,7 +994,7 @@ func setEditorialReviewedHead(b *beads.Beads, mrID, head string) error {
 // verdict (label om-followup) and appends their ids as a comment on the MR
 // bead, so a review that approves-with-caveats still leaves a paper trail —
 // approval never dissolves a finding (DECISION 8).
-func fileFollowups(b *beads.Beads, mrID string, score float64, findings []Finding) ([]string, error) {
+func fileFollowups(b beads.Client, mrID string, score float64, findings []Finding) ([]string, error) {
 	var ids []string
 	var firstErr error
 	for _, f := range findings {

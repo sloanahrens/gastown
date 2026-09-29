@@ -180,15 +180,21 @@ func probeAllowStale(bdPath string, env []string) (supported, definitive bool) {
 }
 
 // allowStaleAnswer reads a probe's outcome: whether bd accepted
-// --allow-stale, and whether that is a definitive answer worth caching.
+// --allow-stale, and whether that is a definitive answer worth caching. Only
+// two outcomes are: bd exited 0 (it ran the command, so it parsed the flag),
+// or bd said "unknown flag", whatever its exit status. Any other failure (a
+// timeout, a failure to start, or a nonzero exit over a lock or an
+// unreachable database) says nothing about the flag, and is unsupported for
+// this call only (gt-22hdp.27).
 func allowStaleAnswer(ctx context.Context, err error, output string) (supported, definitive bool) {
 	out := strings.TrimSpace(output)
-	supported = err == nil && out != "" && !strings.Contains(out, "unknown flag")
+	unknownFlag := strings.Contains(out, "unknown flag")
+	supported = err == nil && out != "" && !unknownFlag
 	if ctx.Err() != nil {
 		return false, false
 	}
 	var exit interface{ ExitCode() int }
-	definitive = err == nil || errors.As(err, &exit)
+	definitive = err == nil || (errors.As(err, &exit) && unknownFlag)
 	return supported && definitive, definitive
 }
 
@@ -2088,12 +2094,6 @@ func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 		return nil, err
 	}
 
-	// Build dedup map from issues
-	seen := make(map[string]bool, len(issueResults))
-	for _, issue := range issueResults {
-		seen[issue.ID] = true
-	}
-
 	// 2. Query the wisps table for merge-request wisps with full data. A
 	// PreloadLabeledWisps cache covering this label (gt-92zx: shared with
 	// ListAgentBeadsFromWisps so both answer from one bd sql round trip
@@ -2115,16 +2115,7 @@ func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 			wisps = nil
 		}
 	}
-	for _, w := range wisps {
-		if seen[w.ID] || !mrWispStatusMatches(w.Status, opts.Status) {
-			continue
-		}
-		seen[w.ID] = true
-		issueResults = append(issueResults, w)
-	}
-
-	issueResults = filterMergeRequestsByRig(issueResults, opts.Rig)
-	return b.hydrateMergeRequestDetails(issueResults)
+	return finishMergeRequests(b, issueResults, wisps, opts)
 }
 
 // mrWispStatusMatches replicates the wisps-table status filter
@@ -2294,7 +2285,7 @@ func filterMergeRequestsByRig(issues []*Issue, rigName string) []*Issue {
 	return filtered
 }
 
-func (b *Beads) hydrateMergeRequestDetails(issues []*Issue) ([]*Issue, error) {
+func hydrateMergeRequestDetails(c Client, issues []*Issue) ([]*Issue, error) {
 	if len(issues) == 0 {
 		return issues, nil
 	}
@@ -2309,7 +2300,7 @@ func (b *Beads) hydrateMergeRequestDetails(issues []*Issue) ([]*Issue, error) {
 		return issues, nil
 	}
 
-	details, err := b.ShowMultiple(ids)
+	details, err := c.ShowMultiple(ids)
 	if err != nil {
 		return nil, fmt.Errorf("hydrating merge-request dependencies: %w", err)
 	}

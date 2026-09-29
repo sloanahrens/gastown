@@ -54,6 +54,12 @@ var contractCases = []contractCase{
 	{"ready filter", contractReadyFilter},
 	{"children", contractChildren},
 	{"release", contractRelease},
+	{"batch close refusal", contractBatchCloseRefusal},
+	{"append notes", contractAppendNotes},
+	{"guarded transfer", contractGuardedTransfer},
+	{"merge requests", contractMergeRequests},
+	{"agent active_mr", contractAgentActiveMR},
+	{"merge slot", contractMergeSlot},
 }
 
 // scope is one case's view of a possibly shared database: the issues it
@@ -648,5 +654,229 @@ func contractRelease(t *testing.T, s *scope) {
 	}
 	if err := s.Release("gt-nosuch"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("Release(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// contractBatchCloseRefusal pins what bd does with a batch close in which
+// some issues are refused: it closes the rest and reports success. Only a
+// batch in which every issue is refused fails. So a caller cannot learn from
+// a nil error that every issue it named closed.
+func contractBatchCloseRefusal(t *testing.T, s *scope) {
+	first := s.mustCreate(t, beads.CreateOptions{Title: "closable", Priority: -1})
+	parent := s.mustCreate(t, beads.CreateOptions{Title: "parent", Priority: -1})
+	s.mustCreate(t, beads.CreateOptions{Title: "open child", Parent: parent.ID, Priority: -1})
+	mustDo(t, "a batch close whose later issue is refused", s.CloseWithReason("batch", first.ID, parent.ID))
+	if got := s.mustShow(t, first.ID); got.Status != "closed" || got.CloseReason != "batch" {
+		t.Errorf("the closable issue: status %q reason %q, want closed \"batch\"", got.Status, got.CloseReason)
+	}
+	if st := s.mustShow(t, parent.ID).Status; st != "open" {
+		t.Errorf("the refused issue's status = %q, want open", st)
+	}
+
+	other := s.mustCreate(t, beads.CreateOptions{Title: "parent 2", Priority: -1})
+	s.mustCreate(t, beads.CreateOptions{Title: "open child 2", Parent: other.ID, Priority: -1})
+	last := s.mustCreate(t, beads.CreateOptions{Title: "closable last", Priority: -1})
+	mustDo(t, "a batch close whose first issue is refused", s.CloseWithReason("batch", other.ID, last.ID))
+	if st := s.mustShow(t, last.ID).Status; st != "closed" {
+		t.Errorf("the issue after the refused one: status %q, want closed", st)
+	}
+
+	refused(t, "a batch close in which every issue is refused", s.CloseWithReason("batch", other.ID, parent.ID))
+	for _, id := range []string{other.ID, parent.ID} {
+		if st := s.mustShow(t, id).Status; st != "open" {
+			t.Errorf("%s status %q after an all-refused batch, want open", id, st)
+		}
+	}
+}
+
+func contractAppendNotes(t *testing.T, s *scope) {
+	is := s.mustCreate(t, beads.CreateOptions{Title: "notes", Priority: -1})
+	mustDo(t, "first append", s.AppendNotes(is.ID, "first line"))
+	if n := s.mustShow(t, is.ID).Notes; n != "first line" {
+		t.Errorf("notes after one append = %q, want the note alone", n)
+	}
+	mustDo(t, "second append", s.AppendNotes(is.ID, "second\nwith two lines"))
+	if n := s.mustShow(t, is.ID).Notes; n != "first line\nsecond\nwith two lines" {
+		t.Errorf("notes after two appends = %q, want them joined by a newline", n)
+	}
+	if err := s.AppendNotes("gt-nosuch", "x"); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("AppendNotes(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+func contractGuardedTransfer(t *testing.T, s *scope) {
+	alice, bob := s.who("alice"), s.who("bob")
+	is := s.mustCreate(t, beads.CreateOptions{Title: "hooked work", Priority: -1})
+	mustDo(t, "claim", s.Update(is.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(alice)}))
+
+	// The guard names the holder, so it moves an in_progress claim that a
+	// plain update may not.
+	ok, err := s.TransferIfAssignee(is.ID, alice, beads.StatusHooked, bob)
+	if err != nil || !ok {
+		t.Fatalf("TransferIfAssignee(alice -> bob) = %v, %v; want true, nil", ok, err)
+	}
+	if got := s.mustShow(t, is.ID); got.Status != beads.StatusHooked || got.Assignee != bob {
+		t.Errorf("after the transfer: status %q assignee %q, want hooked %s", got.Status, got.Assignee, bob)
+	}
+
+	// A guard that no longer holds writes nothing and is not an error.
+	ok, err = s.TransferIfAssignee(is.ID, alice, "open", alice)
+	if err != nil || ok {
+		t.Errorf("TransferIfAssignee with a stale guard = %v, %v; want false, nil", ok, err)
+	}
+	ok, err = s.ReleaseIfAssignee(is.ID, alice)
+	if err != nil || ok {
+		t.Errorf("ReleaseIfAssignee with a stale guard = %v, %v; want false, nil", ok, err)
+	}
+	if got := s.mustShow(t, is.ID); got.Status != beads.StatusHooked || got.Assignee != bob {
+		t.Errorf("stale guards changed the issue to %q/%q", got.Status, got.Assignee)
+	}
+
+	mustDo(t, "bob starts", s.Update(is.ID, beads.UpdateOptions{Status: ptr("in_progress")}))
+	ok, err = s.ReleaseIfAssignee(is.ID, bob)
+	if err != nil || !ok {
+		t.Fatalf("ReleaseIfAssignee(bob) = %v, %v; want true, nil", ok, err)
+	}
+	if got := s.mustShow(t, is.ID); got.Status != "open" || got.Assignee != "" {
+		t.Errorf("after the release: status %q assignee %q, want open and none", got.Status, got.Assignee)
+	}
+
+	// An empty expected guards on "unassigned".
+	ok, err = s.TransferIfAssignee(is.ID, "", beads.StatusHooked, alice)
+	if err != nil || !ok {
+		t.Errorf("TransferIfAssignee(unassigned -> alice) = %v, %v; want true, nil", ok, err)
+	}
+	if _, err := s.ReleaseIfAssignee("gt-nosuch", alice); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("ReleaseIfAssignee(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// contractMergeRequests pins beads.ListMergeRequests: on *beads.Beads it
+// reads the wisps table by SQL, on any other Client through List, and the
+// two must agree.
+func contractMergeRequests(t *testing.T, s *scope) {
+	const mrLabel = "gt:merge-request"
+	desc := func(rig string) string {
+		d := "branch: polecat/nux/" + s.tag + "\ntarget: main\nsource_issue: gt-src"
+		if rig != "" {
+			d += "\nrig: " + rig
+		}
+		return d
+	}
+	durable := s.mustCreate(t, beads.CreateOptions{Title: "durable MR", Labels: []string{mrLabel}, Description: desc(""), Priority: -1})
+	wisp := s.mustCreate(t, beads.CreateOptions{Title: "wisp MR", Labels: []string{mrLabel}, Description: desc("testrig"), Priority: -1, Ephemeral: true})
+	elsewhere := s.mustCreate(t, beads.CreateOptions{Title: "other rig's MR", Labels: []string{mrLabel}, Description: desc("otherrig"), Priority: -1, Ephemeral: true})
+	done := s.mustCreate(t, beads.CreateOptions{Title: "merged MR", Labels: []string{mrLabel}, Description: desc(""), Priority: -1, Ephemeral: true})
+	mustDo(t, "close the merged MR", s.CloseWithReason("merged", done.ID))
+	s.mustCreate(t, beads.CreateOptions{Title: "not an MR", Labels: []string{"gt:task"}, Priority: -1, Ephemeral: true})
+
+	got, err := beads.ListMergeRequests(s.Client, beads.ListOptions{Label: mrLabel, Status: "open", Priority: -1})
+	s.want(t, "ListMergeRequests(open)", got, err, durable.ID, wisp.ID, elsewhere.ID)
+	for _, is := range s.mine(got) {
+		if !strings.Contains(is.Description, "branch: polecat/nux/") || !beads.HasLabel(is, mrLabel) {
+			t.Errorf("%s came back without its description or labels: %+v", is.ID, is)
+		}
+		if is.ID != durable.ID && !is.Ephemeral {
+			t.Errorf("wisp %s came back not ephemeral", is.ID)
+		}
+	}
+	got, err = beads.ListMergeRequests(s.Client, beads.ListOptions{Label: mrLabel, Status: "open", Priority: -1, Rig: "testrig"})
+	s.want(t, "ListMergeRequests(open, rig testrig)", got, err, durable.ID, wisp.ID)
+	got, err = beads.ListMergeRequests(s.Client, beads.ListOptions{Label: mrLabel, Status: "all", Priority: -1})
+	s.want(t, "ListMergeRequests(all)", got, err, durable.ID, wisp.ID, elsewhere.ID, done.ID)
+	got, err = beads.ListMergeRequests(s.Client, beads.ListOptions{Label: mrLabel, Status: "closed", Priority: -1})
+	s.want(t, "ListMergeRequests(closed)", got, err, done.ID)
+}
+
+// contractAgentActiveMR pins the agent-bead helpers over a Client.
+func contractAgentActiveMR(t *testing.T, s *scope) {
+	agent := s.mustCreate(t, beads.CreateOptions{
+		Title: "Polecat nux", Labels: []string{"gt:agent"}, Priority: -1,
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: gt-mr-" + s.tag,
+	})
+	issue, fields, err := beads.GetAgentBead(s.Client, agent.ID)
+	if err != nil || issue == nil || fields == nil {
+		t.Fatalf("GetAgentBead = %v, %v, %v", issue, fields, err)
+	}
+	if fields.ActiveMR != "gt-mr-"+s.tag || fields.RoleType != "polecat" || fields.AgentState != "working" {
+		t.Errorf("agent fields = %+v", fields)
+	}
+	if issue, fields, err := beads.GetAgentBead(s.Client, "gt-nosuch"); issue != nil || fields != nil || err != nil {
+		t.Errorf("GetAgentBead(missing) = %v, %v, %v; want nil, nil, nil", issue, fields, err)
+	}
+	task := s.mustCreate(t, beads.CreateOptions{Title: "not an agent", Labels: []string{"gt:task"}, Priority: -1})
+	if _, _, err := beads.GetAgentBead(s.Client, task.ID); err == nil {
+		t.Error("GetAgentBead(non-agent) succeeded")
+	}
+
+	cleared, err := beads.ClearAgentActiveMRIfMatches(s.Client, agent.ID, "gt-mr-newer")
+	if err != nil || cleared {
+		t.Errorf("clear with another MR = %v, %v; want false, nil", cleared, err)
+	}
+	if _, f, _ := beads.GetAgentBead(s.Client, agent.ID); f == nil || f.ActiveMR != "gt-mr-"+s.tag {
+		t.Errorf("a non-matching clear changed active_mr to %+v", f)
+	}
+	cleared, err = beads.ClearAgentActiveMRIfMatches(s.Client, agent.ID, " gt-mr-"+s.tag+" ")
+	if err != nil || !cleared {
+		t.Fatalf("clear with the active MR = %v, %v; want true, nil", cleared, err)
+	}
+	if _, f, _ := beads.GetAgentBead(s.Client, agent.ID); f == nil || f.ActiveMR != "" || f.RoleType != "polecat" {
+		t.Errorf("after the clear: %+v, want active_mr empty and the rest kept", f)
+	}
+	if cleared, err := beads.ClearAgentActiveMRIfMatches(s.Client, "gt-nosuch", "gt-mr-x"); err != nil || cleared {
+		t.Errorf("clear on a missing agent = %v, %v; want false, nil", cleared, err)
+	}
+	if _, err := beads.ClearAgentActiveMRIfMatches(s.Client, task.ID, "gt-mr-x"); err == nil {
+		t.Error("clear on a non-agent succeeded")
+	}
+	if beads.ForAgentBead(s.Client) == nil {
+		t.Error("ForAgentBead returned nil")
+	}
+}
+
+// contractMergeSlot pins the merge slot helpers over a Client. The slot is
+// one bead per database, so only this case may create it.
+func contractMergeSlot(t *testing.T, s *scope) {
+	alice, bob := s.who("alice"), s.who("bob")
+	st, err := beads.MergeSlotCheck(s.Client)
+	if err != nil || st.Error != "not found" {
+		t.Fatalf("MergeSlotCheck before any slot = %+v, %v; want Error \"not found\"", st, err)
+	}
+	if _, err := beads.MergeSlotAcquire(s.Client, alice, false); err == nil {
+		t.Error("MergeSlotAcquire with no slot succeeded")
+	}
+	if err := beads.MergeSlotRelease(s.Client, alice); err != nil {
+		t.Errorf("MergeSlotRelease with no slot = %v, want nil", err)
+	}
+	id, err := beads.MergeSlotEnsureExists(s.Client)
+	if err != nil || id == "" {
+		t.Fatalf("MergeSlotEnsureExists = %q, %v", id, err)
+	}
+	s.created[id] = true
+	if again, err := beads.MergeSlotEnsureExists(s.Client); err != nil || again != id {
+		t.Errorf("MergeSlotEnsureExists again = %q, %v; want %q", again, err, id)
+	}
+	if st, err := beads.MergeSlotCheck(s.Client); err != nil || !st.Available || st.ID != id {
+		t.Errorf("fresh slot = %+v, %v; want available %s", st, err, id)
+	}
+
+	st, err = beads.MergeSlotAcquire(s.Client, alice, false)
+	if err != nil || st.Holder != alice || st.Available {
+		t.Fatalf("alice acquires = %+v, %v", st, err)
+	}
+	st, err = beads.MergeSlotAcquire(s.Client, bob, true)
+	if err != nil || st.Holder != alice || !reflect.DeepEqual(st.Waiters, []string{bob}) {
+		t.Errorf("bob tries while alice holds = %+v, %v; want holder alice, waiters [bob]", st, err)
+	}
+	if err := beads.MergeSlotRelease(s.Client, bob); !errors.Is(err, beads.ErrMergeSlotNotHolder) {
+		t.Errorf("bob releases alice's slot = %v, want ErrMergeSlotNotHolder", err)
+	}
+	mustDo(t, "alice releases", beads.MergeSlotRelease(s.Client, alice))
+	if st, err := beads.MergeSlotCheck(s.Client); err != nil || st.Holder != bob || len(st.Waiters) != 0 {
+		t.Errorf("after alice releases = %+v, %v; want bob promoted", st, err)
+	}
+	mustDo(t, "bob releases", beads.MergeSlotRelease(s.Client, bob))
+	if st, err := beads.MergeSlotCheck(s.Client); err != nil || !st.Available {
+		t.Errorf("after bob releases = %+v, %v; want available", st, err)
 	}
 }

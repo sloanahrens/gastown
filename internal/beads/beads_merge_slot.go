@@ -58,7 +58,7 @@ func mergeSlotStatusFromIssue(issue *Issue) *MergeSlotStatus {
 
 // getMergeSlotBead finds the merge slot bead (label=gt:merge-slot).
 // Returns ErrNotFound if no slot bead exists.
-func (b *Beads) getMergeSlotBead() (*Issue, error) {
+func getMergeSlotBead(b Client) (*Issue, error) {
 	issues, err := b.List(ListOptions{Label: "gt:merge-slot"})
 	if err != nil {
 		return nil, fmt.Errorf("listing merge slot beads: %w", err)
@@ -73,7 +73,10 @@ func (b *Beads) getMergeSlotBead() (*Issue, error) {
 // MergeSlotCreate creates the merge slot bead for the current rig.
 // The slot is used for serialized conflict resolution in the merge queue.
 // Returns the slot ID if successful.
-func (b *Beads) MergeSlotCreate() (string, error) {
+func (b *Beads) MergeSlotCreate() (string, error) { return MergeSlotCreate(b) }
+
+// MergeSlotCreate creates the merge slot bead through c.
+func MergeSlotCreate(b Client) (string, error) {
 	initial, _ := json.Marshal(mergeSlotData{})
 	issue, err := b.Create(CreateOptions{
 		Title:       "merge-slot",
@@ -88,8 +91,12 @@ func (b *Beads) MergeSlotCreate() (string, error) {
 
 // MergeSlotCheck checks the availability of the merge slot.
 // Returns the current status including holder and waiters if held.
-func (b *Beads) MergeSlotCheck() (*MergeSlotStatus, error) {
-	issue, err := b.getMergeSlotBead()
+func (b *Beads) MergeSlotCheck() (*MergeSlotStatus, error) { return MergeSlotCheck(b) }
+
+// MergeSlotCheck checks the merge slot through c. A missing slot is
+// reported as Error "not found", not as an error.
+func MergeSlotCheck(b Client) (*MergeSlotStatus, error) {
+	issue, err := getMergeSlotBead(b)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return &MergeSlotStatus{Error: "not found"}, nil
@@ -108,8 +115,13 @@ func (b *Beads) MergeSlotAcquire(holder string, addWaiter bool) (*MergeSlotStatu
 	if holder == "" {
 		holder = b.getActor()
 	}
+	return MergeSlotAcquire(b, holder, addWaiter)
+}
 
-	issue, err := b.getMergeSlotBead()
+// MergeSlotAcquire acquires the merge slot through c for holder, with
+// (*Beads).MergeSlotAcquire's rules; holder is used as given.
+func MergeSlotAcquire(b Client, holder string, addWaiter bool) (*MergeSlotStatus, error) {
+	issue, err := getMergeSlotBead(b)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring merge slot: %w", err)
 	}
@@ -168,8 +180,12 @@ func (b *Beads) MergeSlotAcquire(holder string, addWaiter bool) (*MergeSlotStatu
 
 // MergeSlotRelease releases the merge slot after conflict resolution completes.
 // If holder is provided, it verifies the slot is held by that holder before releasing.
-func (b *Beads) MergeSlotRelease(holder string) error {
-	issue, err := b.getMergeSlotBead()
+func (b *Beads) MergeSlotRelease(holder string) error { return MergeSlotRelease(b, holder) }
+
+// MergeSlotRelease releases the merge slot through c, with
+// (*Beads).MergeSlotRelease's rules.
+func MergeSlotRelease(b Client, holder string) error {
+	issue, err := getMergeSlotBead(b)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil // Nothing to release
@@ -207,16 +223,20 @@ func (b *Beads) MergeSlotRelease(holder string) error {
 
 // MergeSlotEnsureExists creates the merge slot if it doesn't exist.
 // This is idempotent - safe to call multiple times.
-func (b *Beads) MergeSlotEnsureExists() (string, error) {
+func (b *Beads) MergeSlotEnsureExists() (string, error) { return MergeSlotEnsureExists(b) }
+
+// MergeSlotEnsureExists creates the merge slot through c if it is missing,
+// and returns its ID.
+func MergeSlotEnsureExists(b Client) (string, error) {
 	// Check if slot exists first
-	status, err := b.MergeSlotCheck()
+	status, err := MergeSlotCheck(b)
 	if err != nil {
 		return "", err
 	}
 
 	if status.Error == "not found" {
 		// Create it
-		return b.MergeSlotCreate()
+		return MergeSlotCreate(b)
 	}
 
 	return status.ID, nil

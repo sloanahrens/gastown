@@ -54,7 +54,14 @@ func TestAllowStaleAnswer(t *testing.T) {
 	}{
 		{"accepted", live, nil, "bd version 1.2.2", true, true},
 		{"unknown flag exit 0", live, nil, "Error: unknown flag: --allow-stale", false, true},
-		{"nonzero exit", live, exitError{1}, "Error: unknown flag: --allow-stale", false, true},
+		{"unknown flag nonzero exit", live, exitError{1}, "Error: unknown flag: --allow-stale", false, true},
+		// A bd that exits nonzero for any other reason (a lock held, a
+		// database it cannot reach, a crash) said nothing about the flag:
+		// caching that as "unsupported" drops --allow-stale from every later
+		// call for the life of the process (gt-22hdp.27).
+		{"nonzero exit, other error", live, exitError{1}, "Error: failed to open database: lock held", false, false},
+		{"nonzero exit, no output", live, exitError{2}, "", false, false},
+		{"exit 0, no output", live, nil, "", false, true},
 		{"timed out", expired, errors.New("signal: killed"), "", false, false},
 		{"did not start", live, errors.New("fork/exec: resource temporarily unavailable"), "", false, false},
 	} {

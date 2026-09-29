@@ -4,7 +4,6 @@ package beads
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +33,11 @@ func (b *Beads) lockAgentBead(id string) (*flock.Flock, error) {
 	}
 	return fl, nil
 }
+
+// unlockAgentBead releases a lock from lockAgentBead. An unlock error is
+// dropped: the lock file's descriptor closes with it, and the write it guarded
+// has already succeeded or failed on its own.
+func unlockAgentBead(fl *flock.Flock) { _ = fl.Unlock() }
 
 // AgentFields holds structured fields for agent beads.
 // These are stored as "key: value" lines in the description.
@@ -588,30 +592,8 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 	if lockErr != nil {
 		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
 	}
-	defer func() { _ = fl.Unlock() }()
-
-	issue, err := b.Show(id)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	if !IsAgentBead(issue) {
-		return false, fmt.Errorf("%s is not an agent bead", id)
-	}
-
-	fields := ParseAgentFields(issue.Description)
-	if strings.TrimSpace(fields.ActiveMR) != expectedMR {
-		return false, nil
-	}
-
-	fields.ActiveMR = ""
-	description := FormatAgentDescription(issue.Title, fields)
-	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
-		return false, err
-	}
-	return true, nil
+	defer unlockAgentBead(fl)
+	return clearAgentActiveMRIfMatches(b, id, expectedMR)
 }
 
 // UpdateAgentNotificationLevel updates the notification_level field in an agent bead.
@@ -745,16 +727,7 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 	if target := b.agentBeadTarget(); target != b {
 		return target.GetAgentBead(id)
 	}
-
-	issue, err := b.Show(id)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil, nil, nil
-		}
-		return nil, nil, err
-	}
-
-	return agentBeadFields(id, issue)
+	return getAgentBead(b, id)
 }
 
 // agentBeadFields validates issue as an agent bead and parses its fields —

@@ -258,6 +258,30 @@ func TestNewPlainBDCmdWiring(t *testing.T) {
 	}
 }
 
+// TestBDProcessChoosesPlainOnlyForPlainCalls pins the branch runBDProcess
+// takes: a plain call (NewPlain, CommandWithEnv's replacement) gets exactly
+// the caller's environment and process group, and every other call gets the
+// routed build with its detached process group and OTEL variables. Swapping
+// or collapsing the branch fails here.
+func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	env := []string{"BEADS_DIR=/rig/.beads"}
+
+	plain := newBDProcess(context.Background(), bdCall{dir: "/rig", env: env, args: []string{"stats"}, plain: true}, &stdout, &stderr)
+	if !reflect.DeepEqual(plain.Env, env) || plain.SysProcAttr != nil {
+		t.Errorf("plain call: Env = %q, SysProcAttr = %+v; want exactly %q in the caller's process group", plain.Env, plain.SysProcAttr, env)
+	}
+
+	routed := newBDProcess(context.Background(), bdCall{dir: "/rig", env: env, args: []string{"stats"}}, &stdout, &stderr)
+	if routed.SysProcAttr == nil {
+		t.Error("routed call: not in a detached process group, so it was built as a plain call")
+	}
+	if routed.Dir != "/rig" || len(routed.Env) < len(env) || !reflect.DeepEqual(routed.Env[:len(env)], env) {
+		t.Errorf("routed call: Dir = %q, Env = %q; want /rig and the call's env first", routed.Dir, routed.Env)
+	}
+}
+
 // TestReleaseFallsBackWithoutForce: deps.MinBeadsVersion still admits bd
 // builds older than the claim fence, which may not know `update --force`.
 // On such a bd, Release retries without it, as --flat already falls back,
