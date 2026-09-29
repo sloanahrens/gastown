@@ -102,9 +102,7 @@ done
 # failed run, not a partial one that files its receipt against another town.
 TOWN_ROOT="${GT_TOWN_ROOT:-}"
 if [ -z "$TOWN_ROOT" ]; then
-  if ! TOWN_ROOT=$(gt town root 2>/dev/null); then
-    fail "could not resolve the town root: GT_TOWN_ROOT is unset and 'gt town root' failed"
-  fi
+  fail "could not resolve the town root: GT_TOWN_ROOT is unset (the daemon sets it for every plugin run)"
 fi
 export GT_TOWN_ROOT="$TOWN_ROOT"
 
