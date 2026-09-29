@@ -22,8 +22,8 @@ import (
 // invocations, so editorial-precondition tests can assert a failure receipt
 // was recorded without touching real beads state. Nudges, mail and
 // escalations go through the engineer's notifier (a recorder from
-// newTestEngineer; read it with sentLog), not gt; the gt stand-in guards the
-// gt calls that remain, such as swarm land. Mirrors
+// newTestEngineer; read it with sentLog), not gt; the gt stand-in guards any
+// gt call that remains. Mirrors
 // internal/refinery/editorial's own fakeBD helper.
 func fakeBDAndGt(t *testing.T) (bdLog, gtLog string) {
 	t.Helper()

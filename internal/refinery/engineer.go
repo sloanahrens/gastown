@@ -3906,9 +3906,13 @@ func (e *Engineer) claimConvoyCompletionNotification(townRoot, convoyID, fallbac
 	return fields, true
 }
 
-// landConvoySwarm checks if a completed convoy has an associated swarm with an
-// integration branch, and triggers landing if so.
-func (e *Engineer) landConvoySwarm(townRoot string, convoy convoyInfo) {
+// landConvoySwarm reports a completed convoy whose molecule still has a
+// swarm/<molecule> integration branch. It used to exec `gt swarm land`, but
+// gt has no swarm command any more, so every attempt failed and was logged as
+// a Warning while the branch sat unlanded (gt-fcxe9.5, deep review G4-03).
+// Nothing lands these branches automatically now; the message says so, so an
+// operator can land the branch by hand.
+func (e *Engineer) landConvoySwarm(_ string, convoy convoyInfo) {
 	// ZFC: Use typed accessor instead of parsing description text
 	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description})
 	var moleculeID string
@@ -3931,23 +3935,9 @@ func (e *Engineer) landConvoySwarm(townRoot string, convoy convoyInfo) {
 		}
 	}
 
-	_, _ = fmt.Fprintf(e.output, "[Engineer] Landing integration branch %s for convoy %s...\n", integrationBranch, convoy.ID)
-
-	// Use gt swarm land to perform the landing
-	landCmd := exec.Command("gt", "swarm", "land", moleculeID)
-	util.SetDetachedProcessGroup(landCmd)
-	landCmd.Dir = townRoot
-	var landOut, landErr bytes.Buffer
-	landCmd.Stdout = &landOut
-	landCmd.Stderr = &landErr
-
-	if err := landCmd.Run(); err != nil {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to land swarm %s: %v (%s)\n",
-			moleculeID, err, strings.TrimSpace(landErr.String()))
-		return
-	}
-
-	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Landed integration branch for convoy %s\n", convoy.ID)
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Integration branch %s for convoy %s is NOT landed: "+
+		"automatic swarm landing was removed (no gt swarm command); merge it by hand\n",
+		integrationBranch, convoy.ID)
 }
 
 // pruneStaleRemoteRefs prunes remote tracking refs that no longer exist on origin.
