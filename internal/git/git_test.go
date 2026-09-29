@@ -28,46 +28,52 @@ type townRootSafetySnapshot struct {
 
 func initTownRootSafetyRepo(t *testing.T) string {
 	t.Helper()
-
-	root := initTestRepo(t)
-	g := NewGit(root)
-	cmd := exec.Command("git", "branch", "polecat/safety")
-	cmd.Dir = root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("create safety branch: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("committed\n"), 0644); err != nil {
-		t.Fatalf("write tracked file: %v", err)
-	}
-	if err := g.Add("tracked.txt"); err != nil {
-		t.Fatalf("git add tracked: %v", err)
-	}
-	if err := g.Commit("add tracked file"); err != nil {
-		t.Fatalf("git commit tracked: %v", err)
-	}
-
-	writeTownSafetyFile(t, root, "mayor/town.json", `{"name":"test-town"}\n`)
-	writeTownSafetyFile(t, root, "mayor/rigs.json", `{"rigs":[]}\n`)
-	writeTownSafetyFile(t, root, ".dolt-data/gastown/.dolt/noms/manifest", "manifest sentinel\n")
-	writeTownSafetyFile(t, root, ".runtime/sentinel", "runtime sentinel\n")
-	writeTownSafetyFile(t, root, ".beads/metadata.json", `{"prefix":"hq"}\n`)
-	writeTownSafetyFile(t, root, "daemon/daemon.pid", "12345\n")
-	writeTownSafetyFile(t, root, "user-work.txt", "untracked user work\n")
-	writeTownSafetyFile(t, root, "tracked.txt", "dirty tracked work\n")
-
+	root := t.TempDir()
+	townRootSafetyFixture.copyInto(t, root)
 	return root
 }
 
-func writeTownSafetyFile(t *testing.T, root, rel, contents string) {
-	t.Helper()
-	path := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
-		t.Fatalf("write %s: %v", rel, err)
-	}
+// townRootSafetyContents are the files initTownRootSafetyRepo leaves in the
+// town root, relative to it, with their contents.
+var townRootSafetyContents = [][2]string{
+	{"mayor/town.json", `{"name":"test-town"}\n`},
+	{"mayor/rigs.json", `{"rigs":[]}\n`},
+	{".dolt-data/gastown/.dolt/noms/manifest", "manifest sentinel\n"},
+	{".runtime/sentinel", "runtime sentinel\n"},
+	{".beads/metadata.json", `{"prefix":"hq"}\n`},
+	{"daemon/daemon.pid", "12345\n"},
+	{"user-work.txt", "untracked user work\n"},
+	{"tracked.txt", "dirty tracked work\n"},
 }
+
+// townRootSafetyFixture is a town root that is also a git repo: the initial
+// commit, a branch polecat/safety at it, a second commit adding tracked.txt,
+// and then the town's marker and runtime files written on top, including
+// an uncommitted edit to tracked.txt.
+var townRootSafetyFixture = &gitFixture{name: "townroot", build: func(root string) error {
+	if err := buildCommittedRepo(root); err != nil {
+		return err
+	}
+	if _, err := fixtureGit(root, "branch", "polecat/safety"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("committed\n"), 0o644); err != nil {
+		return err
+	}
+	if err := fixtureSteps(root, []string{"add", "tracked.txt"}, []string{"commit", "-m", "add tracked file"}); err != nil {
+		return err
+	}
+	for _, f := range townRootSafetyContents {
+		path := filepath.Join(root, filepath.FromSlash(f[0]))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(f[1]), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}}
 
 func snapshotTownRootSafety(t *testing.T, root string) townRootSafetySnapshot {
 	t.Helper()
@@ -300,8 +306,6 @@ func TestCloneWithReferenceCreatesAlternates(t *testing.T) {
 	if err := exec.Command("git", "init", src).Run(); err != nil {
 		t.Fatalf("init src: %v", err)
 	}
-	_ = exec.Command("git", "-C", src, "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "-C", src, "config", "user.name", "Test User").Run()
 
 	if err := os.WriteFile(filepath.Join(src, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write file: %v", err)
@@ -330,8 +334,6 @@ func TestCloneWithReferencePreservesSymlinks(t *testing.T) {
 	if err := exec.Command("git", "init", src).Run(); err != nil {
 		t.Fatalf("init src: %v", err)
 	}
-	_ = exec.Command("git", "-C", src, "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "-C", src, "config", "user.name", "Test User").Run()
 
 	// Create a directory and a symlink to it
 	targetDir := filepath.Join(src, "target")
@@ -472,8 +474,6 @@ func TestStatusIgnoringSubmodulesDropsGitlinkDrift(t *testing.T) {
 	subWork := filepath.Join(subRoot, "sub-work")
 	runGit(t, subRoot, "init", "--bare", "--initial-branch=main", subBare)
 	runGit(t, subRoot, "clone", subBare, subWork)
-	runGit(t, subWork, "config", "user.email", "test@test.com")
-	runGit(t, subWork, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(subWork, "README.md"), []byte("v1\n"), 0644); err != nil {
 		t.Fatalf("write submodule file: %v", err)
 	}
@@ -488,8 +488,6 @@ func TestStatusIgnoringSubmodulesDropsGitlinkDrift(t *testing.T) {
 	// Move the submodule's own HEAD: the superproject's gitlink now names the
 	// previous commit.
 	subCheckout := filepath.Join(dir, "libs", "sub")
-	runGit(t, subCheckout, "config", "user.email", "test@test.com")
-	runGit(t, subCheckout, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(subCheckout, "v2.txt"), []byte("v2\n"), 0644); err != nil {
 		t.Fatalf("write submodule file: %v", err)
 	}
@@ -1026,12 +1024,6 @@ func TestCloneBareHasOriginRefs(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
 
 	// Create initial commit
 	readmeFile := filepath.Join(remoteDir, "README.md")
@@ -1196,12 +1188,6 @@ func TestRefExists_OriginRef(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = remoteDir
-	_ = cmd.Run()
 	if err := os.WriteFile(filepath.Join(remoteDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1640,8 +1626,6 @@ func initTestRepoWithSubmodule(t *testing.T) (string, string) {
 	// Create a working clone of the submodule to add content
 	subWork := filepath.Join(tmp, "sub-work")
 	runGit(t, tmp, "clone", subRemote, subWork)
-	runGit(t, subWork, "config", "user.email", "test@test.com")
-	runGit(t, subWork, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(subWork, "lib.go"), []byte("package lib\n"), 0644); err != nil {
 		t.Fatalf("write sub file: %v", err)
 	}
@@ -1652,8 +1636,6 @@ func initTestRepoWithSubmodule(t *testing.T) (string, string) {
 	// Create the parent repo
 	parent := filepath.Join(tmp, "parent")
 	runGit(t, tmp, "init", "--initial-branch", "main", parent)
-	runGit(t, parent, "config", "user.email", "test@test.com")
-	runGit(t, parent, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(parent, "README.md"), []byte("# Parent\n"), 0644); err != nil {
 		t.Fatalf("write parent file: %v", err)
 	}
@@ -1914,8 +1896,6 @@ func TestSubmoduleChanges_SkipsClaudeWorktrees(t *testing.T) {
 	// Populate the claude submodule remote
 	claudeWork := filepath.Join(tmp, "claude-work")
 	runGit(t, tmp, "clone", claudeRemote, claudeWork)
-	runGit(t, claudeWork, "config", "user.email", "test@test.com")
-	runGit(t, claudeWork, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(claudeWork, "init.go"), []byte("package x\n"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -3876,16 +3856,6 @@ func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
 	if out, err := exec.Command("git", "clone", remoteDir, cloneDir).CombinedOutput(); err != nil {
 		t.Fatalf("clone advancer: %v\n%s", err, out)
 	}
-	for _, args := range [][]string{
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command("git", args[1:]...)
-		cmd.Dir = cloneDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", args, err, out)
-		}
-	}
 	if err := os.WriteFile(filepath.Join(cloneDir, "shared.txt"), []byte("v2\n"), 0644); err != nil {
 		t.Fatalf("write advancer v2: %v", err)
 	}
@@ -4284,16 +4254,6 @@ func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
 	if out, err := exec.Command("git", "clone", forkDir, cloneDir).CombinedOutput(); err != nil {
 		t.Fatalf("clone fork advancer: %v\n%s", err, out)
 	}
-	for _, args := range [][]string{
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command("git", args[1:]...)
-		cmd.Dir = cloneDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", args, err, out)
-		}
-	}
 	cmd := exec.Command("git", "checkout", branch)
 	cmd.Dir = cloneDir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -4604,8 +4564,6 @@ func TestUnpushedCommitsLocalFailClosed_NoComparisonRefs(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	runGit(t, localDir, "init")
-	runGit(t, localDir, "config", "user.email", "test@test.com")
-	runGit(t, localDir, "config", "user.name", "Test User")
 	runGit(t, localDir, "remote", "add", "origin", remoteDir)
 	runGit(t, localDir, "checkout", "-b", "polecat/never-fetched")
 	runGit(t, localDir, "commit", "--allow-empty", "-m", "initial")
@@ -4865,8 +4823,6 @@ func notesTestClone(t *testing.T, originDir string) string {
 	if out, err := exec.Command("git", "-c", "protocol.file.allow=always", "clone", originDir, dir).CombinedOutput(); err != nil {
 		t.Fatalf("git clone %s: %v\n%s", originDir, err, out)
 	}
-	runGit(t, dir, "config", "user.email", "test@test.com")
-	runGit(t, dir, "config", "user.name", "Test User")
 	return dir
 }
 
