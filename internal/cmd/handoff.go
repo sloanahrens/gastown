@@ -1470,7 +1470,13 @@ func warnHandoffGitStatus() {
 	if err != nil {
 		return
 	}
-	g := git.NewGit(cwd)
+	warnHandoffGitStatusIn(os.Stderr, cwd)
+}
+
+// warnHandoffGitStatusIn writes warnHandoffGitStatus's warning for the
+// repository at dir to w.
+func warnHandoffGitStatusIn(w io.Writer, dir string) {
+	g := git.NewGit(dir)
 	if !g.IsRepo() {
 		return
 	}
@@ -1478,17 +1484,17 @@ func warnHandoffGitStatus() {
 	if err != nil || status.CleanExcludingBeads() {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s workspace has uncommitted work: %s\n", ui.IconWarn, status.String())
+	fmt.Fprintf(w, "%s workspace has uncommitted work: %s\n", ui.IconWarn, status.String())
 	if len(status.ModifiedFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "%s   modified: %s\n", ui.IconWarn, strings.Join(status.ModifiedFiles, ", "))
+		fmt.Fprintf(w, "%s   modified: %s\n", ui.IconWarn, strings.Join(status.ModifiedFiles, ", "))
 	}
 	if len(status.UntrackedFiles) > 0 {
-		fmt.Fprintf(os.Stderr, "%s   untracked: %s\n", ui.IconWarn, strings.Join(status.UntrackedFiles, ", "))
+		fmt.Fprintf(w, "%s   untracked: %s\n", ui.IconWarn, strings.Join(status.UntrackedFiles, ", "))
 	}
 	if status.UnpushedCommits > 0 {
-		fmt.Fprintf(os.Stderr, "%s   %d unpushed commit(s) — run 'git push' before handoff\n", ui.IconWarn, status.UnpushedCommits)
+		fmt.Fprintf(w, "%s   %d unpushed commit(s) — run 'git push' before handoff\n", ui.IconWarn, status.UnpushedCommits)
 	}
-	fmt.Fprintln(os.Stderr, "  (use --no-git-check to suppress this warning)")
+	fmt.Fprintln(w, "  (use --no-git-check to suppress this warning)")
 }
 
 // looksLikeBeadID checks if a string looks like a bead ID.
@@ -1644,8 +1650,12 @@ func collectGitState() string {
 	if err != nil {
 		return ""
 	}
+	return collectGitStateIn(cwd)
+}
 
-	g := git.NewGit(cwd)
+// collectGitStateIn is collectGitState for the repository at dir.
+func collectGitStateIn(dir string) string {
+	g := git.NewGit(dir)
 	if !g.IsRepo() {
 		return ""
 	}
