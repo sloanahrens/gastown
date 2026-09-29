@@ -562,12 +562,31 @@ func liveTmuxTestSessions(socket string) []string {
 // writeSandboxGitConfig gives the sandbox HOME a deterministic git identity,
 // since redirecting HOME hides the developer's ~/.gitconfig and git commands
 // in tests would otherwise fail with "Please tell me who you are".
+//
+// It also points init.templateDir at a minimal template: an empty hooks
+// directory and info/exclude, without git's stock template's fourteen
+// *.sample hooks and description. Every repo a test inits or clones would
+// otherwise carry those fifteen inert files, and creating, copying and
+// deleting them is a large share of the filesystem work git-heavy packages
+// do (gt-22hdp.13).
 func writeSandboxGitConfig(home string) error {
+	template := filepath.Join(home, ".git-template")
+	if err := os.MkdirAll(filepath.Join(template, "hooks"), 0o755); err != nil {
+		return fmt.Errorf("creating sandbox git template: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(template, "info"), 0o755); err != nil {
+		return fmt.Errorf("creating sandbox git template: %w", err)
+	}
+	exclude := "# git ls-files --others --exclude-from=.git/info/exclude\n# Lines that start with '#' are comments.\n"
+	if err := os.WriteFile(filepath.Join(template, "info", "exclude"), []byte(exclude), 0o644); err != nil {
+		return fmt.Errorf("writing sandbox git template: %w", err)
+	}
 	cfg := `[user]
 	name = Hermetic Test
 	email = hermetic@test.invalid
 [init]
 	defaultBranch = main
+	templateDir = ` + template + `
 [commit]
 	gpgsign = false
 [tag]
