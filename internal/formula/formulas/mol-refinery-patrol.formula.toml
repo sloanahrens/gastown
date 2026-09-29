@@ -1610,7 +1610,7 @@ The land command uses an isolated `.land-worktree` that is auto-removed via
 defer. But if the binary crashed mid-merge, the dir may persist:
 
 ```bash
-RIG_PATH=$(gt rig path)   # path to current rig root
+RIG_PATH="$GT_ROOT/$GT_RIG"   # path to current rig root (both set in the refinery session)
 if [ -d "$RIG_PATH/.land-worktree" ]; then
   # Best-effort manual cleanup: abort any in-progress merge and remove the worktree
   git -C "$RIG_PATH/.land-worktree" merge --abort 2>/dev/null || true
