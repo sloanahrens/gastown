@@ -140,25 +140,9 @@ Old logs are moved to `$GT_ROOT/logs/archive/` with timestamps.
 """
 
 [[steps]]
-id = "sync-state"
-title = "Sync beads and push"
-needs = ["rotate-logs"]
-description = """
-Ensure all beads state is persisted.
-
-```bash
-bd sync
-```
-
-Note: We do NOT force-commit polecat work here. Their sandboxes
-are preserved with whatever state they had. They'll commit their
-own work when they resume.
-"""
-
-[[steps]]
 id = "handoff-mayor"
 title = "Send Mayor handoff"
-needs = ["sync-state"]
+needs = ["rotate-logs"]
 description = """
 Record shutdown context for the fresh Mayor session.
 
