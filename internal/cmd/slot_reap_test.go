@@ -20,6 +20,7 @@ func slotTestCmd(out *bytes.Buffer) *cobra.Command {
 }
 
 func TestPrintSlotReapReport(t *testing.T) {
+	t.Parallel()
 	orphan := slot.ContainerVerdict{
 		Container: slot.GateContainer{ID: "orphan-id", Image: "dolthub/dolt-sql-server:2.2.0", Name: "wizardly_goldberg"},
 		Verdict:   slot.VerdictDebris,
@@ -68,6 +69,7 @@ func TestPrintSlotReapReport(t *testing.T) {
 }
 
 func TestPrintSlotReapJSON(t *testing.T) {
+	t.Parallel()
 	out := &bytes.Buffer{}
 	err := printSlotReapJSON(slotTestCmd(out), slot.ReapReport{
 		OlderThan: 30 * time.Minute,
@@ -109,6 +111,7 @@ func TestPrintSlotReapJSON(t *testing.T) {
 // the gate walked past is named, so an operator reading "free" can see what
 // the gate decided about.
 func TestPrintSlotDebris(t *testing.T) {
+	t.Parallel()
 	out := &bytes.Buffer{}
 	printSlotDebris(slotTestCmd(out), []string{"dolt/dolt-sql-server:2.2.0 wizardly_goldberg"})
 	got := out.String()

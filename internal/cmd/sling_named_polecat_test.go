@@ -113,6 +113,7 @@ func assertOnlyNamedTouched(t *testing.T, fake *namedSlingFake, name string) {
 // rig/garnet with garnet idle reuses garnet, even though the pool would have
 // offered agate first.
 func TestNamedSling_ReusesExactlyTheNamedIdlePolecat(t *testing.T) {
+	t.Parallel()
 	fake := newNamedSlingFake(t)
 
 	info, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "garnet", HookBead: "gt-0cp3", Create: true})
@@ -133,6 +134,7 @@ func TestNamedSling_ReusesExactlyTheNamedIdlePolecat(t *testing.T) {
 // stop with that reason instead of falling back to another polecat or a
 // fresh allocation.
 func TestNamedSling_RefusesIneligibleNamedPolecat(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name   string
 		reason string
@@ -172,6 +174,7 @@ func TestNamedSling_RefusesIneligibleNamedPolecat(t *testing.T) {
 // refused; with --create the reuse step steps aside (nil, nil) so the caller
 // creates it — by name, see TestAllocatePolecatForSling_*.
 func TestNamedSling_AbsentPolecat(t *testing.T) {
+	t.Parallel()
 	t.Run("without create refuses", func(t *testing.T) {
 		fake := newNamedSlingFake(t)
 		info, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "flint", HookBead: "gt-3s52"})
@@ -204,6 +207,7 @@ func TestNamedSling_AbsentPolecat(t *testing.T) {
 // TestNamedSling_LookupFailureRefuses: a polecat that cannot be read is not
 // "absent" — refusing is the only answer that cannot substitute.
 func TestNamedSling_LookupFailureRefuses(t *testing.T) {
+	t.Parallel()
 	fake := &namedSlingLookupErrFake{namedSlingFake: newNamedSlingFake(t)}
 	info, err := reuseIdlePolecatForSling(fake, tmux.NewTmux(), &rig.Rig{Name: "rig", Path: t.TempDir()},
 		t.TempDir(), "rig", SlingSpawnOptions{Name: "garnet", Create: true}, func() {})
@@ -224,6 +228,7 @@ func (f *namedSlingLookupErrFake) Get(name string) (*polecat.Polecat, error) {
 // TestAllocatePolecatForSling_NamedCreatesByThatName: --create on an absent
 // named polecat creates it under exactly that name, never a pool name.
 func TestAllocatePolecatForSling_NamedCreatesByThatName(t *testing.T) {
+	t.Parallel()
 	fake := newNamedSlingFake(t)
 	fake.allocatedAs = "basalt"
 
@@ -244,6 +249,7 @@ func TestAllocatePolecatForSling_NamedCreatesByThatName(t *testing.T) {
 
 // TestAllocatePolecatForSling_UnnamedUsesPool keeps the rig-target path.
 func TestAllocatePolecatForSling_UnnamedUsesPool(t *testing.T) {
+	t.Parallel()
 	fake := newNamedSlingFake(t)
 	fake.allocatedAs = "basalt"
 
@@ -259,6 +265,7 @@ func TestAllocatePolecatForSling_UnnamedUsesPool(t *testing.T) {
 // TestAllocatePolecatForSling_NamedCreateRaceRefuses: if the name was taken
 // between the lookup and the create, refuse rather than pick another.
 func TestAllocatePolecatForSling_NamedCreateRaceRefuses(t *testing.T) {
+	t.Parallel()
 	fake := &namedSlingAddErrFake{namedSlingFake: newNamedSlingFake(t)}
 	_, err := allocatePolecatForSling(fake, "rig", "flint", polecat.AddOptions{})
 	if !errors.Is(err, polecat.ErrPolecatExists) {
@@ -329,6 +336,7 @@ func TestResolveTarget_DeadNamedPolecatKeepsItsName(t *testing.T) {
 // holding the slung bead resumes that session; any other refusal must not
 // suggest hooking the new bead onto a polecat that holds other work.
 func TestNamedPolecatRefusal_HintPerCause(t *testing.T) {
+	t.Parallel()
 	needsRecovery := func(reason string) error {
 		return fmt.Errorf("%w: %s", polecat.ErrPolecatNeedsRecovery, reason)
 	}
@@ -394,6 +402,7 @@ func TestNamedPolecatRefusal_HintPerCause(t *testing.T) {
 // TestNamedSling_HeldIssueReachesTheHint: the reuse path reads the named
 // polecat's current work and hands it to the refusal.
 func TestNamedSling_HeldIssueReachesTheHint(t *testing.T) {
+	t.Parallel()
 	fake := newNamedSlingFake(t)
 	fake.polecats["garnet"].Issue = "gt-0cp3"
 	fake.reuseErr["garnet"] = fmt.Errorf("%w: unpushed commits", polecat.ErrPolecatNeedsRecovery)
@@ -501,6 +510,7 @@ func (f *brokenIdleReclaimerFake) ReclaimBrokenIdlePolecat(name string) error {
 // TestReclaimBrokenIdleUnlessNamed: a named sling must not sweep other
 // polecats; a rig sling still does.
 func TestReclaimBrokenIdleUnlessNamed(t *testing.T) {
+	t.Parallel()
 	broken := &polecat.Polecat{Name: "agate", State: polecat.StateIdle, ClonePath: filepath.Join(t.TempDir(), "gone")}
 
 	named := &brokenIdleReclaimerFake{polecats: []*polecat.Polecat{broken}}

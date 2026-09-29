@@ -1480,6 +1480,7 @@ func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
 }
 
 func TestLastHandoffAge(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if _, ok := lastHandoffAge(dir); ok {
 		t.Fatal("lastHandoffAge reported a handoff in an empty dir")
@@ -1495,6 +1496,7 @@ func TestLastHandoffAge(t *testing.T) {
 }
 
 func TestWriteHandoffMarker(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeHandoffMarker(dir, "gt-refinery", "unit-cycle")
 	got, err := os.ReadFile(filepath.Join(dir, constants.DirRuntime, constants.FileHandoffMarker))

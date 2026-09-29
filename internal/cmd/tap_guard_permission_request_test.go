@@ -133,6 +133,7 @@ func TestUnattendedPromptSessionPrefersRole(t *testing.T) {
 // TestUnattendedPromptRole pins both directions of the role split: the roles
 // the town leaves alone deny, and everything else keeps its prompt.
 func TestUnattendedPromptRole(t *testing.T) {
+	t.Parallel()
 	unattended := []string{"gastown/polecats/obsidian", "polecat", "dog", "deacon/dogs/alpha"}
 	attended := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", "boot", ""}
 	for _, role := range unattended {
@@ -150,6 +151,7 @@ func TestUnattendedPromptRole(t *testing.T) {
 // TestPermissionRequestHoldsForUnparsablePayload: a payload this guard cannot
 // read is not grounds to deny a call, so the prompt flow stays untouched.
 func TestPermissionRequestHoldsForUnparsablePayload(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{"", "not json", "[1,2,3]"} {
 		var hook permissionRequestInput
 		err := json.Unmarshal([]byte(raw), &hook)
@@ -264,6 +266,7 @@ func TestPermissionRequestEscalationMailerFailure(t *testing.T) {
 // reach the mayor's mail unredacted, and the raw command itself must not
 // appear at all (gt-8stz review, finding 36adb619b71a).
 func TestPermissionRequestEscalationBodyRedactsSecrets(t *testing.T) {
+	t.Parallel()
 	token := "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	command := `curl -H "Authorization: Bearer ` + token + `" https://example.com`
 	hook := payloadInput(t, bashPermissionPayload(command))
@@ -284,6 +287,7 @@ func TestPermissionRequestEscalationBodyRedactsSecrets(t *testing.T) {
 // fix: an empty session id must not collapse every session's dedup key onto
 // one shared marker (gt-8stz review, finding 8de95c69660d).
 func TestPermissionRequestEscalationMarkerSessionFallback(t *testing.T) {
+	t.Parallel()
 	shape := "bash cd-compound-write"
 	a := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/alpha/gastown", ToolName: "Bash"}
 	b := permissionRequestInput{SessionID: "", Cwd: "/Users/sloan/gt/gastown/polecats/beta/gastown", ToolName: "Bash"}
@@ -295,6 +299,7 @@ func TestPermissionRequestEscalationMarkerSessionFallback(t *testing.T) {
 // TestPermissionRequestShapeLabels pins the labels the mail subject and the
 // rate-limit key are built from.
 func TestPermissionRequestShapeLabels(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		command string
 		want    string

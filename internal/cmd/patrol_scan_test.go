@@ -310,6 +310,7 @@ func TestBuildActivityOutput(t *testing.T) {
 // persisted sample 1 and the verdict against it, so a respawned witness reads
 // the stall rule's state instead of remembering it (claude-8w7).
 func TestBuildActivityOutput_CarriesPersistedStallCheck(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 25, 15, 0, 0, 0, time.UTC)
 	observed := []witness.RealActivity{
 		{Polecat: "opal", Session: "gt-opal", AgentAlive: true, ObservedAt: now},

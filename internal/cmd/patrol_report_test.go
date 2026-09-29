@@ -9,6 +9,7 @@ import (
 )
 
 func TestRunPatrolReportForRejectsNonPatrolRole(t *testing.T) {
+	t.Parallel()
 	err := runPatrolReportFor(io.Discard, RoleInfo{Role: RoleCrew, Rig: "gastown", TownRoot: t.TempDir()}, "x", "", true)
 	if err == nil {
 		t.Fatal("runPatrolReportFor accepted a crew role; only deacon, witness and refinery patrol")
@@ -20,6 +21,7 @@ func TestRunPatrolReportForRejectsNonPatrolRole(t *testing.T) {
 // that ran a full 28/28 patrol but passed bare ids must not produce a ledger
 // entry reading "0/28".
 func TestBuildStepAuditBareIDsRejected(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	_, err := buildStepAudit(&out, constants.MolDeaconPatrol, "heartbeat,ack-probes,inbox-check")
 	if err == nil {
@@ -30,6 +32,7 @@ func TestBuildStepAuditBareIDsRejected(t *testing.T) {
 // TestBuildStepAuditBareIDWithEmptyStatusRejected: "step:" parses to an empty
 // status, which is the same missing-status defect as a bare id.
 func TestBuildStepAuditBareIDWithEmptyStatusRejected(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	_, err := buildStepAudit(&out, constants.MolDeaconPatrol, "heartbeat:")
 	if err == nil {
@@ -41,6 +44,7 @@ func TestBuildStepAuditBareIDWithEmptyStatusRejected(t *testing.T) {
 // the pre-gt-gvo8m behavior, including the SKIP default for steps the agent
 // omitted from the report.
 func TestBuildStepAuditValidInputsUnchanged(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	audit, err := buildStepAudit(&out, constants.MolDeaconPatrol, "heartbeat:OK,ack-probes:OK,inbox-check:SKIP")
 	if err != nil {
@@ -66,6 +70,7 @@ func TestBuildStepAuditValidInputsUnchanged(t *testing.T) {
 // the formula is ignored for the audit line but must be warned about, so a
 // typo cannot hide a skipped step.
 func TestBuildStepAuditUnknownStepIDWarns(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	_, err := buildStepAudit(&out, constants.MolDeaconPatrol, "heartbeat:OK,heartbet:OK")
 	if err != nil {
@@ -80,6 +85,7 @@ func TestBuildStepAuditUnknownStepIDWarns(t *testing.T) {
 // audit prints the raw flag unvalidated; a bare id is unparseable, so it is an
 // error in the CLI path, not a silent pass-through.
 func TestBuildStepAuditNoFormulaStillPrintsRaw(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 
 	audit, err := buildStepAudit(&out, "no-such-formula", "heartbeat:OK")
@@ -99,6 +105,7 @@ func TestBuildStepAuditNoFormulaStillPrintsRaw(t *testing.T) {
 // TestBuildStepAuditEmptyFlagUnchanged: no --steps flag keeps the
 // NOT REPORTED line for both the CLI and the unit cycle.
 func TestBuildStepAuditEmptyFlagUnchanged(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	audit, err := buildStepAudit(&out, constants.MolDeaconPatrol, "")
 	if err != nil {

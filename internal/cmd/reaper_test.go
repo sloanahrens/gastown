@@ -29,6 +29,7 @@ func TestReaperDatabaseNamesTrimsConfiguredList(t *testing.T) {
 // so the flag belongs to auto-close alone; a bare `gt reaper auto-close` has to
 // be able to refuse for want of it.
 func TestReaperAutoClosePreviewFlag(t *testing.T) {
+	t.Parallel()
 	flag := reaperAutoCloseCmd.Flags().Lookup("preview")
 	if flag == nil {
 		t.Fatal("gt reaper auto-close has no --preview flag: a live run could not be bound to a dry run")
@@ -111,6 +112,7 @@ func TestDefaultReaperEndpointUsesTownConfig(t *testing.T) {
 // gated on the error instead would drop it and print "auto-closed 0" alone,
 // which reads as a clean run rather than as the threshold to go fix (gt-ecpj).
 func TestWriteAutoCloseReportPrintsTheFloorRefusal(t *testing.T) {
+	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	closed := writeAutoCloseReport(&stdout, &stderr, &reaper.AutoCloseResult{
 		Database:  "hq",
@@ -145,6 +147,7 @@ func TestWriteAutoCloseReportPrintsTheFloorRefusal(t *testing.T) {
 // live run: --preview=H" line would both claim a close and hand over a hash the
 // live run refuses (gt-ecpj).
 func TestWriteAutoCloseReportHintsNoPreviewForARefusal(t *testing.T) {
+	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	closed := writeAutoCloseReport(&stdout, &stderr, &reaper.AutoCloseResult{
 		Database:    "hq",
@@ -174,6 +177,7 @@ func TestWriteAutoCloseReportHintsNoPreviewForARefusal(t *testing.T) {
 // ordinary sweep totals its closes, so the below-floor refusal's zero cannot be
 // mistaken for a reporting path that never counts anything.
 func TestWriteAutoCloseReportCountsWhatAClosedSweepClosed(t *testing.T) {
+	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	closed := writeAutoCloseReport(&stdout, &stderr, &reaper.AutoCloseResult{
 		Database: "hq",

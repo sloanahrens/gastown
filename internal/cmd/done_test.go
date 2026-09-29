@@ -1443,6 +1443,7 @@ func TestResolveDoneAgentIdentityAlwaysNamesThePolecat(t *testing.T) {
 // "unknown" instead — still fail-closed at every gate, but distinguishable
 // from "gt done never ran".
 func TestResolveCleanupStatusForSelfReportIsTotal(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		computed   string
@@ -1476,6 +1477,7 @@ func TestResolveCleanupStatusForSelfReportIsTotal(t *testing.T) {
 // push (when updateAgentStateAfterSubmission bails out before recording
 // anything) and for a status that cannot be observed at all.
 func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
+	t.Parallel()
 	// A directory that is not a git repository: every observation attempt in
 	// observeCleanupStatus fails, which is the "cannot observe" case.
 	notARepo := gitpkg.NewGit(t.TempDir())

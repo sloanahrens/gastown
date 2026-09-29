@@ -119,6 +119,7 @@ func TestResolvePreVerifyTestSlot(t *testing.T) {
 // --pre-verified test gate runs the rig's container-backed suite, so it must
 // hold a container-gate slot for exactly the test gate's run.
 func TestRunPreVerificationGates_ContainerSuiteHoldsSlot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	fake := fakePreVerifySlot(t)
@@ -179,6 +180,7 @@ func TestRunPreVerificationGates_ContainerSuiteHoldsSlot(t *testing.T) {
 
 // A failing test run still releases its slot.
 func TestRunPreVerificationGates_FailingSuiteReleasesSlot(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	fake := fakePreVerifySlot(t)
@@ -231,6 +233,7 @@ func TestRunPreVerificationGates_NoContainerSuiteTakesNoSlot(t *testing.T) {
 // an error (no stamp), never a test failure, and the test command is not run
 // unwrapped.
 func TestRunPreVerificationGates_SlotUnavailableDoesNotRunSuite(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	marker := filepath.Join(dir, "ran")
@@ -268,6 +271,7 @@ func TestRunPreVerificationGates_SlotWaitNotChargedToGateBudget(t *testing.T) {
 
 // Without a town root the gate refuses rather than guessing at a lock dir.
 func TestRunPreVerificationGates_NoTownRootRefuses(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeGoMod(t, dir, true)
 	_, err := runPreVerificationGates(dir, &config.MergeQueueConfig{TestCommand: "true"}, preVerifySlot{role: "r/p"})

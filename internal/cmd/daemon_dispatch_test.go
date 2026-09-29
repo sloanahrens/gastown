@@ -15,6 +15,7 @@ import (
 )
 
 func TestDispatchDecision_NudgesWhenSeatsAreFreeAndWorkExists(t *testing.T) {
+	t.Parallel()
 	// The acceptance case: seats free, and a single actionable ready bead.
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
 	rigs := []dispatchRig{{Rig: "gastown", Ready: 1}}
@@ -33,6 +34,7 @@ func TestDispatchDecision_NudgesWhenSeatsAreFreeAndWorkExists(t *testing.T) {
 }
 
 func TestDispatchDecision_SilentWhenNoSeatIsFree(t *testing.T) {
+	t.Parallel()
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 4, Free: 0}
 	rigs := []dispatchRig{{Rig: "gastown", Ready: 5}}
 
@@ -42,6 +44,7 @@ func TestDispatchDecision_SilentWhenNoSeatIsFree(t *testing.T) {
 }
 
 func TestDispatchDecision_SilentWhenNoWorkIsReady(t *testing.T) {
+	t.Parallel()
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 3, Free: 1}
 	rigs := []dispatchRig{{Rig: "gastown", Ready: 0}, {Rig: "beads", Ready: 0}}
 
@@ -51,6 +54,7 @@ func TestDispatchDecision_SilentWhenNoWorkIsReady(t *testing.T) {
 }
 
 func TestDispatchDecision_SilentWhenNoSeatModelIsConfigured(t *testing.T) {
+	t.Parallel()
 	// A town with neither a pool nor scheduler.max_polecats has no answer to
 	// "is a seat free?", so the patrol has nothing to report.
 	seats := dispatchSeats{Source: "none"}
@@ -62,6 +66,7 @@ func TestDispatchDecision_SilentWhenNoSeatModelIsConfigured(t *testing.T) {
 }
 
 func TestDispatchDecision_BackpressuredRigIsNamedButNotCounted(t *testing.T) {
+	t.Parallel()
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 2, Free: 2}
 	rigs := []dispatchRig{
 		{Rig: "om", Ready: 9, ReadyMRs: 15, MRCeiling: 12, Backpressure: true},
@@ -88,6 +93,7 @@ func TestDispatchDecision_BackpressuredRigIsNamedButNotCounted(t *testing.T) {
 }
 
 func TestDispatchDecision_NamesUrgentSubsetOnlyWhenNonZero(t *testing.T) {
+	t.Parallel()
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
 
 	_, msg := dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 200, Urgent: 0}})
@@ -102,6 +108,7 @@ func TestDispatchDecision_NamesUrgentSubsetOnlyWhenNonZero(t *testing.T) {
 }
 
 func TestDispatchDecision_SkipsParkedRigs(t *testing.T) {
+	t.Parallel()
 	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
 	rigs := []dispatchRig{{Rig: "mango", Ready: 7, Parked: true}}
 
@@ -111,6 +118,7 @@ func TestDispatchDecision_SkipsParkedRigs(t *testing.T) {
 }
 
 func TestIsActionableReadyBead(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		issue *beads.Issue
@@ -168,6 +176,7 @@ func TestIsActionableReadyBead(t *testing.T) {
 }
 
 func TestPoolSeatPicture(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	pool := &config.PolecatPool{
 		LocalAgent:    "deepseek-flash",
@@ -202,6 +211,7 @@ func TestPoolSeatPicture(t *testing.T) {
 }
 
 func TestPoolSeatPicture_UncappedOverflowIsAtLeastOneFreeSeat(t *testing.T) {
+	t.Parallel()
 	// An overflow seat with no cap is unbounded room: the pool never refuses a
 	// spawn, so a full local pool must not read as a town with no seat free.
 	pool := &config.PolecatPool{
@@ -279,6 +289,7 @@ func mkdirTestDir(t *testing.T, path string) {
 // repo checkout supplies .beads/ (.beads/config.yaml and friends are tracked),
 // so the directory exists; what is missing is the database under it.
 func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	beadsDir := filepath.Join(rigPath, ".beads")
 	mkdirTestDir(t, beadsDir)
@@ -357,6 +368,7 @@ func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 // route: ResolveBeadsDir follows it out of the rig and lands somewhere with no
 // database. It must be absorbed for the same reason, not fail the check.
 func TestReadyIssuesUnlimited_DanglingRedirectHasNoReadyWork(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	beadsDir := filepath.Join(rigPath, ".beads")
 	mkdirTestDir(t, beadsDir)

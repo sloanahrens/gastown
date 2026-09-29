@@ -16,6 +16,7 @@ import (
 // the writer must land on exactly that path, or the operator's stop records
 // nothing and the detector restarts the session anyway.
 func TestDeliberateStopMarkerCoordinatesAreTheDetectorGate(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName, polecatName := "gastown", "garnet"
 
@@ -54,6 +55,7 @@ func TestDeliberateStopMarkerCoordinatesAreTheDetectorGate(t *testing.T) {
 // pause is already covered by the gate, and its reason is the operator's.
 // Rewriting it with the stop reason would lose that (gt-fojqs).
 func TestDeliberateStopMarkerKeepsAnExistingPause(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName, polecatName := "gastown", "garnet"
 
@@ -79,6 +81,7 @@ func TestDeliberateStopMarkerKeepsAnExistingPause(t *testing.T) {
 // town root, so a missing one must fail rather than write into the caller's
 // directory, where no scanner looks.
 func TestDeliberateStopMarkerWithoutTownRoot(t *testing.T) {
+	t.Parallel()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -101,6 +104,7 @@ func TestDeliberateStopMarkerWithoutTownRoot(t *testing.T) {
 // clearing is idempotent — a start on a polecat nobody stopped clears nothing
 // and reports nothing (gt-fojqs).
 func TestClearParkedSession(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName, polecatName := "gastown", "garnet"
 

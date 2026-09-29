@@ -130,6 +130,7 @@ func TestApplyConfiguredDoltEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) 
 }
 
 func TestSemaphoreLimitsConcurrency(t *testing.T) {
+	t.Parallel()
 	// Test that a semaphore pattern properly limits concurrency
 	const maxConcurrent = 3
 	const totalTasks = 10
@@ -235,6 +236,7 @@ func TestPrefetchRigs_Empty(t *testing.T) {
 }
 
 func TestWorkerPoolLimitsConcurrency(t *testing.T) {
+	t.Parallel()
 	// Test that a worker pool pattern properly limits concurrency
 	const numWorkers = 3
 	const numTasks = 15

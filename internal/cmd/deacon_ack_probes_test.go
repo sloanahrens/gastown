@@ -67,6 +67,7 @@ func probeMessage(id, nonce, deliveryState string) *mail.Message {
 }
 
 func TestAckDeaconSelfProbes_AcksOnlyPendingProbes(t *testing.T) {
+	t.Parallel()
 	box := &fakeAckableMailbox{
 		messages: []*mail.Message{
 			probeMessage("probe-pending", "nonce-1", mail.DeliveryStatePending),
@@ -95,6 +96,7 @@ func TestAckDeaconSelfProbes_AcksOnlyPendingProbes(t *testing.T) {
 }
 
 func TestAckDeaconSelfProbes_NoPendingProbes_NoOp(t *testing.T) {
+	t.Parallel()
 	box := &fakeAckableMailbox{
 		messages: []*mail.Message{
 			{ID: "normal-1", Subject: "hello", To: "deacon"},
@@ -111,6 +113,7 @@ func TestAckDeaconSelfProbes_NoPendingProbes_NoOp(t *testing.T) {
 }
 
 func TestAckDeaconSelfProbes_PropagatesListError(t *testing.T) {
+	t.Parallel()
 	box := &fakeAckableMailbox{listErr: errors.New("dolt: connection refused")}
 
 	if _, err := ackDeaconSelfProbes(box, "deacon"); err == nil {
@@ -119,6 +122,7 @@ func TestAckDeaconSelfProbes_PropagatesListError(t *testing.T) {
 }
 
 func TestAckDeaconSelfProbes_PropagatesAckError(t *testing.T) {
+	t.Parallel()
 	box := &fakeAckableMailbox{
 		messages: []*mail.Message{probeMessage("probe-1", "nonce-1", mail.DeliveryStatePending)},
 		ackErr:   errors.New("bd: write failed"),
@@ -144,6 +148,7 @@ func TestAckDeaconSelfProbes_PropagatesAckError(t *testing.T) {
 // == acked, DeliveryAckedAt set) — i.e. the doctor check would now pass
 // where before the fix it stayed pending forever and hard-failed.
 func TestAckDeaconSelfProbes_EndToEnd_DoctorCheckWouldPass(t *testing.T) {
+	t.Parallel()
 	nonce := "e2e-nonce-1"
 	probe := probeMessage("probe-e2e", nonce, mail.DeliveryStatePending)
 	box := &fakeAckableMailbox{messages: []*mail.Message{probe}}

@@ -205,6 +205,7 @@ func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 // list --json` emits: a consumer must be able to tell the recorded cleanup hint
 // from the live git measurement, and a failed measurement must say why.
 func TestPolecatListItemJSONCarriesFactSources(t *testing.T) {
+	t.Parallel()
 	item := PolecatListItem{
 		Rig:                 "gastown",
 		Name:                "topaz",
@@ -249,6 +250,7 @@ func TestPolecatListItemJSONCarriesFactSources(t *testing.T) {
 // provenance marks: the recorded cleanup hint is labeled as recorded, and the
 // live git answer says so (with the reason when the probe failed).
 func TestPolecatReuseDetailLineMarksRecordedFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		item PolecatListItem

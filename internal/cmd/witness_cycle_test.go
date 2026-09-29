@@ -105,6 +105,7 @@ func (f *fakeWitnessCycle) priorCycles(n int) *fakeWitnessCycle {
 }
 
 func TestWitnessCycle_BoundaryTruthTable(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		prior   int // completed before this report; this report is cycle prior+1
@@ -163,6 +164,7 @@ func TestWitnessCycle_BoundaryTruthTable(t *testing.T) {
 }
 
 func TestWitnessCycle_ThreeQuietCyclesThenRespawnThenCountRestarts(t *testing.T) {
+	t.Parallel()
 	f := witnessFake()
 	p := witnessParams()
 	for i := 1; i <= 3; i++ {
@@ -192,6 +194,7 @@ func TestWitnessCycle_ThreeQuietCyclesThenRespawnThenCountRestarts(t *testing.T)
 }
 
 func TestWitnessCycle_CounterResetsOnFreshSession(t *testing.T) {
+	t.Parallel()
 	// A predecessor far past the minimum (it died without respawning here):
 	// the fresh session's first cap timeout must not respawn it.
 	f := witnessFake()
@@ -207,6 +210,7 @@ func TestWitnessCycle_CounterResetsOnFreshSession(t *testing.T) {
 }
 
 func TestWitnessCycle_UnknownSessionIDStillResetsAtRespawn(t *testing.T) {
+	t.Parallel()
 	// No SessionStart hook recorded an ID: the respawn itself zeroes the count.
 	f := witnessFake().priorCycles(2)
 	f.sessionID = ""
@@ -220,6 +224,7 @@ func TestWitnessCycle_UnknownSessionIDStillResetsAtRespawn(t *testing.T) {
 }
 
 func TestWitnessCycle_SameWaitIsNotCountedTwice(t *testing.T) {
+	t.Parallel()
 	// The agent skipped await-signal: the report must not reuse the last wait.
 	f := witnessFake().priorCycles(4)
 	f.wait = waitAt("timeout", true)
@@ -231,6 +236,7 @@ func TestWitnessCycle_SameWaitIsNotCountedTwice(t *testing.T) {
 }
 
 func TestWitnessCycle_FlagOffNeverRespawnsOrCounts(t *testing.T) {
+	t.Parallel()
 	for _, prior := range []int{2, 7, 50} {
 		f := witnessFake().priorCycles(prior)
 		f.wait = waitAt("timeout", true)
@@ -251,6 +257,7 @@ func TestWitnessCycle_FlagOffNeverRespawnsOrCounts(t *testing.T) {
 }
 
 func TestWitnessCycle_GuardsKeepTheSession(t *testing.T) {
+	t.Parallel()
 	cases := map[string]func(f *fakeWitnessCycle){
 		"human caller":      func(f *fakeWitnessCycle) { f.env["GT_ROLE"] = "gastown/crew/sloan" },
 		"other rig witness": func(f *fakeWitnessCycle) { f.env["GT_ROLE"] = "hm/witness" },
@@ -279,6 +286,7 @@ func TestWitnessCycle_GuardsKeepTheSession(t *testing.T) {
 }
 
 func TestWitnessCycle_CooldownSkipsWithoutSleeping(t *testing.T) {
+	t.Parallel()
 	f := witnessFake().priorCycles(2)
 	f.wait = waitAt("timeout", true)
 	f.hasHandoff, f.handoffAge = true, 30*time.Second
@@ -308,6 +316,7 @@ func TestWitnessCycle_CooldownSkipsWithoutSleeping(t *testing.T) {
 }
 
 func TestWitnessCycle_ReportFailureNeitherCountsNorRespawns(t *testing.T) {
+	t.Parallel()
 	f := witnessFake().priorCycles(7)
 	f.wait = waitAt("timeout", true)
 	f.reportErr = errors.New("dolt down")
@@ -321,6 +330,7 @@ func TestWitnessCycle_ReportFailureNeitherCountsNorRespawns(t *testing.T) {
 }
 
 func TestWitnessCycle_SaveFailureKeepsTheSession(t *testing.T) {
+	t.Parallel()
 	f := witnessFake().priorCycles(2)
 	f.wait = waitAt("timeout", true)
 	f.saveErr = errors.New("disk full")
@@ -334,6 +344,7 @@ func TestWitnessCycle_SaveFailureKeepsTheSession(t *testing.T) {
 }
 
 func TestWitnessCycle_RespawnFailureEscalates(t *testing.T) {
+	t.Parallel()
 	f := witnessFake().priorCycles(2)
 	f.wait = waitAt("timeout", true)
 	f.respawnErr = errors.New("no pane")
@@ -347,6 +358,7 @@ func TestWitnessCycle_RespawnFailureEscalates(t *testing.T) {
 }
 
 func TestWitnessCycle_UnreadableFilesNeverCauseARespawn(t *testing.T) {
+	t.Parallel()
 	f := witnessFake()
 	f.loadErr = errors.New("corrupt")
 	f.waitErr = errors.New("corrupt")
@@ -361,6 +373,7 @@ func TestWitnessCycle_UnreadableFilesNeverCauseARespawn(t *testing.T) {
 }
 
 func TestPatrolCycleDir(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	rigDir := filepath.Join(town, "gastown")
 	if err := os.MkdirAll(filepath.Join(rigDir, "witness"), 0o755); err != nil {
@@ -387,6 +400,7 @@ func TestPatrolCycleDir(t *testing.T) {
 }
 
 func TestWitnessRespawnEffortLine(t *testing.T) {
+	t.Parallel()
 	at := wcNow
 	abbrev := &patrolstate.WaitOutcome{Reason: "timeout", IdleCycles: 6, EffortLevel: "abbreviated", SessionID: "old", At: at}
 	consumed := patrolstate.CycleState{SessionID: "old", Cycles: 0, LastWaitAt: at}
@@ -428,6 +442,7 @@ func TestWitnessRespawnEffortLine(t *testing.T) {
 }
 
 func TestWitnessPrimeEffortTextReadsTheRespawnFiles(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	dir := filepath.Join(town, "gastown", "witness")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -460,6 +475,7 @@ func TestWitnessPrimeEffortTextReadsTheRespawnFiles(t *testing.T) {
 // await-signal must not drain the queue (its output goes into a context the
 // next report may kill); the report drains only when it keeps the session.
 func TestWitnessCycle_NudgesSurviveARespawn(t *testing.T) {
+	t.Parallel()
 	const sess = "gt-witness"
 	town := t.TempDir()
 	rigDir := filepath.Join(town, "gastown")
@@ -549,6 +565,7 @@ func TestWitnessCycle_NudgesSurviveARespawn(t *testing.T) {
 }
 
 func TestOwnPaneCallerMismatchAndCooldownCause(t *testing.T) {
+	t.Parallel()
 	env := map[string]string{"GT_ROLE": "gastown/witness", "TMUX_PANE": "%1"}
 	getenv := func(k string) string { return env[k] }
 	pane := func() (string, error) { return "gt-witness", nil }

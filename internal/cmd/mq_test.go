@@ -16,6 +16,7 @@ import (
 // deleting branches. Routing through rig.ResolveMergeQueueConfig makes the
 // rig-root value visible with no rig-local settings/config.json present.
 func TestMqDeleteMergedBranchesEnabledReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
 	rigPath := filepath.Join(t.TempDir(), "testrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -39,6 +40,7 @@ func TestMqDeleteMergedBranchesEnabledReadsRigRootMergeQueue(t *testing.T) {
 // TestMqDeleteMergedBranchesEnabledDefaultsTrue guards the nil-safe default:
 // no config at any tier must not disable branch cleanup.
 func TestMqDeleteMergedBranchesEnabledDefaultsTrue(t *testing.T) {
+	t.Parallel()
 	rigPath := filepath.Join(t.TempDir(), "norig")
 	if got := mqDeleteMergedBranchesEnabled(rigPath); got != true {
 		t.Errorf("mqDeleteMergedBranchesEnabled() = %v, want true (no config at any tier defaults enabled)", got)

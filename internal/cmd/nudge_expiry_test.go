@@ -13,6 +13,7 @@ import (
 // a mail notice: the nudge package cannot install its own handler, so a dropped
 // init leaves expiries preserved on disk but never delivered (gt-oexm).
 func TestExpiryObserverInstalled(t *testing.T) {
+	t.Parallel()
 	if nudge.ExpiryObserver == nil {
 		t.Fatal("nudge.ExpiryObserver is nil; expiry notices would never be mailed")
 	}
@@ -21,6 +22,7 @@ func TestExpiryObserverInstalled(t *testing.T) {
 // TestExpiredNudgeMailTargetFallsBackToMayor covers the session that no rig
 // claims: the notice still has a mailbox to reach (gt-oexm).
 func TestExpiredNudgeMailTargetFallsBackToMayor(t *testing.T) {
+	t.Parallel()
 	if got := expiredNudgeMailTarget("not a session name"); got != constants.RoleMayor {
 		t.Errorf("expiredNudgeMailTarget(unparseable session) = %q, want %q", got, constants.RoleMayor)
 	}
@@ -30,6 +32,7 @@ func TestExpiredNudgeMailTargetFallsBackToMayor(t *testing.T) {
 // on its own: the recipient must be able to act on it without the expired file
 // or the logs of the process that found the expiry (gt-oexm).
 func TestFormatExpiredNudgeMailBodyCarriesTheMessage(t *testing.T) {
+	t.Parallel()
 	queued := time.Now().Add(-45 * time.Minute)
 	ev := nudge.ExpiryEvent{
 		TownRoot: t.TempDir(),

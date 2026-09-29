@@ -158,6 +158,7 @@ func initSeatPoolRepo(t *testing.T) string {
 // flipping a boolean — the probe itself is tested, but the listing's use of it
 // is the part the dashboard actually feels.
 func TestPolecatListInventoryEnvProbe(t *testing.T) {
+	t.Parallel()
 	env := polecatListInventoryEnv(
 		"/town/gastown", "gastown", "zircon",
 		polecatMRIndex{}, nil, polecatSpawnFacts{},
@@ -172,6 +173,7 @@ func TestPolecatListInventoryEnvProbe(t *testing.T) {
 // order, but the list output must not depend on which goroutine finished
 // first. Rows are indexed, never appended.
 func TestResolvePolecatSeatsPreservesOutputOrder(t *testing.T) {
+	t.Parallel()
 	// Deliberately not sorted: an implementation that appended results as they
 	// completed, or that sorted them, would produce a different order.
 	names := []string{"zircon", "alpha", "quartz", "basalt", "topaz", "cobalt", "flint", "marble"}
@@ -206,6 +208,7 @@ func TestResolvePolecatSeatsPreservesOutputOrder(t *testing.T) {
 // They carry no probe inputs, so a pool that tried to rebuild them would lose
 // the foreign/zombie distinction.
 func TestResolvePolecatSeatsPassesDecidedRowsThrough(t *testing.T) {
+	t.Parallel()
 	foreign := PolecatListItem{
 		Rig: "gastown", Name: "stray", State: "foreign", Foreign: true, SessionRunning: true,
 	}
@@ -225,6 +228,7 @@ func TestResolvePolecatSeatsPassesDecidedRowsThrough(t *testing.T) {
 // is a genuinely new concurrent path in a command whose output order
 // downstream code depends on (gt-92zx).
 func TestBuildAllRigSeatsPreservesOutputOrder(t *testing.T) {
+	t.Parallel()
 	// Deliberately not sorted, and the fake builder sleeps longest on the
 	// first rig, so the completion order is the reverse of the input order:
 	// an implementation that appended results as they landed, or that sorted
@@ -257,6 +261,7 @@ func TestBuildAllRigSeatsPreservesOutputOrder(t *testing.T) {
 // slots one at a time, so the pool must neither skip a rig (a slot left nil
 // silently truncates the listing) nor build one twice.
 func TestBuildAllRigSeatsRunsEveryRigExactlyOnce(t *testing.T) {
+	t.Parallel()
 	names := []string{"gastown", "beads", "quartz", "basalt", "topaz", "cobalt", "flint", "marble"}
 	rigs := make([]*rig.Rig, len(names))
 	for i, name := range names {
@@ -284,6 +289,7 @@ func TestBuildAllRigSeatsRunsEveryRigExactlyOnce(t *testing.T) {
 // host. Too small and a 47-seat listing serializes again; unbounded and the
 // fan-out defeats the purpose.
 func TestPolecatSeatPoolSizeIsBounded(t *testing.T) {
+	t.Parallel()
 	size := polecatSeatPoolSize()
 	if size < 4 {
 		t.Fatalf("polecatSeatPoolSize() = %d, want at least 4 so a many-seat listing overlaps its probes", size)
@@ -298,6 +304,7 @@ func TestPolecatSeatPoolSizeIsBounded(t *testing.T) {
 // could not be read must not be reported as idle. This is the wiring the pool
 // has to keep intact when it moves the build off the serial loop.
 func TestBuildPolecatSeatItemCarriesTheActiveWorkFailure(t *testing.T) {
+	t.Parallel()
 	item := buildPolecatSeatItem(
 		"gastown", "zircon", nil, nil,
 		os.ErrDeadlineExceeded,

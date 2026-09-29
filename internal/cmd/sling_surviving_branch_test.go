@@ -419,6 +419,7 @@ func TestFeederDispatchTallyTreatsReslingRefusalAsDeferral(t *testing.T) {
 // The scheduler leaves a refused dispatch queued without recording a failure,
 // so a preserved-work bead never trips the circuit breaker.
 func TestCapacityDispatchDeferralRecognizesReslingRefusal(t *testing.T) {
+	t.Parallel()
 	refusal := &reslingRefusal{msg: "refusing to re-sling gt-a: ..."}
 	if _, ok := capacityDispatchDeferral(fmt.Errorf("sling failed: %w", refusal)); !ok {
 		t.Fatal("a wrapped resling refusal must be a deferral")

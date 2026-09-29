@@ -13,6 +13,7 @@ import (
 )
 
 func TestShouldFireCrossRigEscalation_Debounces(t *testing.T) {
+	t.Parallel()
 	resetCrossRigEscalationStateForTest()
 	t.Cleanup(resetCrossRigEscalationStateForTest)
 
@@ -31,6 +32,7 @@ func TestShouldFireCrossRigEscalation_Debounces(t *testing.T) {
 }
 
 func TestShouldFireCrossRigEscalation_KeyedByRigAndPrefix(t *testing.T) {
+	t.Parallel()
 	resetCrossRigEscalationStateForTest()
 	t.Cleanup(resetCrossRigEscalationStateForTest)
 

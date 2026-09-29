@@ -454,6 +454,7 @@ func TestBdCmd_AllCombinations(t *testing.T) {
 }
 
 func TestBdCmd_ConcurrentBuild(t *testing.T) {
+	t.Parallel()
 	// Test that concurrent Build() calls are safe
 	// Each Build() gets a snapshot via os.Environ(), so they should be independent
 	bdc := BdCmd("show", "id")

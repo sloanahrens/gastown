@@ -82,6 +82,7 @@ func TestRunPostMergeCommand_EmptyCommandNeitherEscalatesNorClears(t *testing.T)
 }
 
 func TestPostMergeFingerprintSharedByEscalateAndClear(t *testing.T) {
+	t.Parallel()
 	if got := postMergeFingerprint("gastown"); got != "post-merge-command:gastown" {
 		t.Fatalf("fingerprint = %q", got)
 	}

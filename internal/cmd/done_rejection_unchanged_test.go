@@ -24,6 +24,7 @@ import (
 // TestRejectedAttemptsFromNotes pins what the guard reads out of a bead's
 // notes: the branch, MR id and one-line reason of each rejection.
 func TestRejectedAttemptsFromNotes(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		notes string

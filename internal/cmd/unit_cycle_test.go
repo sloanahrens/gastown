@@ -95,6 +95,7 @@ func singleParams() unitCycleParams {
 }
 
 func TestCompleteUnitAndCycle_SingleDoesChoresPatrolAndRespawn(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	var out bytes.Buffer
 	p := singleParams()
@@ -130,6 +131,7 @@ func TestCompleteUnitAndCycle_SingleDoesChoresPatrolAndRespawn(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_NoAttestationWithoutLandedCommit(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
 	if len(f.comments) != 0 {
@@ -138,6 +140,7 @@ func TestCompleteUnitAndCycle_NoAttestationWithoutLandedCommit(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_NonPolecatBranchGetsNoMERGED(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	p := singleParams()
 	p.MRs[0].Branch = "crew/sloan/fix"
@@ -148,6 +151,7 @@ func TestCompleteUnitAndCycle_NonPolecatBranchGetsNoMERGED(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_NoMergeReadyMailIsReported(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	f.inbox = nil
 	var out bytes.Buffer
@@ -161,6 +165,7 @@ func TestCompleteUnitAndCycle_NoMergeReadyMailIsReported(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_BatchSkipsMERGEDAndTempButArchivesEach(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	p := singleParams()
 	p.Mode = unitBatch
@@ -184,6 +189,7 @@ func TestCompleteUnitAndCycle_BatchSkipsMERGEDAndTempButArchivesEach(t *testing.
 }
 
 func TestCompleteUnitAndCycle_GuardsSkipPatrolAndRespawnButKeepChores(t *testing.T) {
+	t.Parallel()
 	cases := map[string]func(p *unitCycleParams, f *fakeUnitCycle){
 		"human caller":       func(p *unitCycleParams, f *fakeUnitCycle) { f.env["GT_ROLE"] = "gastown/crew/sloan" },
 		"other rig refinery": func(p *unitCycleParams, f *fakeUnitCycle) { f.env["GT_ROLE"] = "hm/refinery" },
@@ -213,6 +219,7 @@ func TestCompleteUnitAndCycle_GuardsSkipPatrolAndRespawnButKeepChores(t *testing
 }
 
 func TestCompleteUnitAndCycle_KeptSessionKeepsItsPatrolWisp(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		mutate func(p *unitCycleParams, f *fakeUnitCycle)
 		cause  string
@@ -258,6 +265,7 @@ func TestCompleteUnitAndCycle_KeptSessionKeepsItsPatrolWisp(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_SingleSkipCauseNeverMentionsBatch(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	p := singleParams()
 	p.CycleEnabled = false
@@ -269,6 +277,7 @@ func TestCompleteUnitAndCycle_SingleSkipCauseNeverMentionsBatch(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_CyclePhaseOrder(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
 	if got := strings.Join(f.calls, ","); got != "patrol,record,respawn" {
@@ -277,6 +286,7 @@ func TestCompleteUnitAndCycle_CyclePhaseOrder(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_OldHandoffIsNotCooldown(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	f.hasHandoff, f.handoffAge = true, 10*time.Minute
 	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
@@ -286,6 +296,7 @@ func TestCompleteUnitAndCycle_OldHandoffIsNotCooldown(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_FailedMERGEDEscalatesAndOtherChoresRun(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	f.sendErr = errors.New("dolt down")
 	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
@@ -298,6 +309,7 @@ func TestCompleteUnitAndCycle_FailedMERGEDEscalatesAndOtherChoresRun(t *testing.
 }
 
 func TestCompleteUnitAndCycle_PatrolFailureStillRespawns(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	f.patrolErr = errors.New("bd timeout")
 	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
@@ -310,6 +322,7 @@ func TestCompleteUnitAndCycle_PatrolFailureStillRespawns(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_RespawnFailureEscalates(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	f.respawnErr = errors.New("no server")
 	rep := completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
@@ -322,6 +335,7 @@ func TestCompleteUnitAndCycle_RespawnFailureEscalates(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_BatchIsOneUnit(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	p := singleParams()
 	p.Mode = unitBatch
@@ -335,6 +349,7 @@ func TestCompleteUnitAndCycle_BatchIsOneUnit(t *testing.T) {
 // I1: batch recovery runs `gt mq post-merge --no-cycle` so the first
 // recovered member cannot respawn the session mid-recovery.
 func TestCompleteUnitAndCycle_NoCycleRunsChoresButNeverCycles(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	p := singleParams()
 	p.CycleSuppressed = true
@@ -354,6 +369,7 @@ func TestCompleteUnitAndCycle_NoCycleRunsChoresButNeverCycles(t *testing.T) {
 // I2: the witness wake-up nudge is delivered in the background by Send; the
 // unit must wait for it before the process can exit or respawn.
 func TestCompleteUnitAndCycle_WaitsForNotificationsBeforeCycling(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	completeUnitAndCycle(singleParams(), f.deps(&bytes.Buffer{}))
 	if got := strings.Join(f.seq, ","); got != "send,wait,patrol,record,respawn" {
@@ -362,6 +378,7 @@ func TestCompleteUnitAndCycle_WaitsForNotificationsBeforeCycling(t *testing.T) {
 }
 
 func TestCompleteUnitAndCycle_WaitsForNotificationsWhenKeptOrSendFails(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	f.sendErr = errors.New("dolt down")
 	p := singleParams()
@@ -373,6 +390,7 @@ func TestCompleteUnitAndCycle_WaitsForNotificationsWhenKeptOrSendFails(t *testin
 }
 
 func TestCompleteUnitAndCycle_NoWaitWithoutSend(t *testing.T) {
+	t.Parallel()
 	f := refineryFake()
 	p := singleParams()
 	p.Mode = unitBatch
@@ -385,6 +403,7 @@ func TestCompleteUnitAndCycle_NoWaitWithoutSend(t *testing.T) {
 // M4: a real chore failure prints ✗ (the formula's fallback trigger); ○ is
 // only for nothing-to-do.
 func TestCompleteUnitAndCycle_ChoreFailuresPrintCross(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		mutate func(f *fakeUnitCycle)
 		want   string

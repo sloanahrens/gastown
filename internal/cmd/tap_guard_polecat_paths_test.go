@@ -239,6 +239,7 @@ func TestPolecatPathGuardFollowsSymlinks(t *testing.T) {
 // tree, next to ~/.ssh. A mis-set environment must yield no roots at all rather
 // than a wide one.
 func TestClaudeConfigScratchRoots(t *testing.T) {
+	t.Parallel()
 	const home = "/town/home"
 	cases := []struct {
 		name      string

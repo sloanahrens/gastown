@@ -12,6 +12,7 @@ import (
 // ResultSuccess checkmark (gt-hrt9): a warning is a run that found something
 // and reported it, not a quiet success.
 func TestPluginHistoryGlyph(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		result    plugin.RunResult
 		wantIcon  string

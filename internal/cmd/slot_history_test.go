@@ -34,6 +34,7 @@ func secondsPtr(s float64) *float64 { return &s }
 // JSON alone, with the wait reason and its evidence attached to each entry —
 // the amendment's whole point is that a 29-minute wait says what it waited for.
 func TestPrintSlotStatusJSON_CarriesTheHistory(t *testing.T) {
+	t.Parallel()
 	history := []slot.HistoryEntry{
 		{
 			TS: "2026-09-10T20:39:00Z", Role: "gastown/refinery", Slot: 0, PID: 62965,
@@ -91,6 +92,7 @@ func TestPrintSlotStatusJSON_CarriesTheHistory(t *testing.T) {
 // TestPrintSlotStatusJSON_OmitsAnEmptyHistory keeps a town that has never run a
 // container-backed suite from reporting a history of nothing.
 func TestPrintSlotStatusJSON_OmitsAnEmptyHistory(t *testing.T) {
+	t.Parallel()
 	out := slotStatusJSONOf(t, slot.Report{Total: 1}, nil)
 	var decoded map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
@@ -105,6 +107,7 @@ func TestPrintSlotStatusJSON_OmitsAnEmptyHistory(t *testing.T) {
 // reason detail per entry, an open hold the pool still counts, and a caller
 // that gave up.
 func TestPrintSlotHistory(t *testing.T) {
+	t.Parallel()
 	open := slot.HistoryEntry{
 		TS: "2026-09-10T20:39:00Z", Role: "gastown/refinery", Slot: 0, PID: 62965,
 		WaitedS: 1740, TimeoutS: 3600,
@@ -162,6 +165,7 @@ func TestPrintSlotHistory(t *testing.T) {
 // TestPrintSlotHistory_ShowsAtMostTheRecentTail keeps the live picture (held,
 // by whom) at the top of `gt slot status` for a ring file that has filled up.
 func TestPrintSlotHistory_ShowsAtMostTheRecentTail(t *testing.T) {
+	t.Parallel()
 	history := make([]slot.HistoryEntry, 0, slotHistoryShown+3)
 	for i := 0; i < slotHistoryShown+3; i++ {
 		history = append(history, slot.HistoryEntry{
@@ -199,6 +203,7 @@ const (
 // must say abandoned — not "held open", which is how the phantom entry came to
 // claim a holder the pool itself did not count while the header read 0/5 held.
 func TestPrintSlotHistory_AbandonedAfterHolderIsKilled(t *testing.T) {
+	t.Parallel()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
@@ -325,6 +330,7 @@ func waitForSlotFree(t *testing.T, townRoot string) {
 // path. It stubs the container lister itself, since the parent's override is
 // process-local.
 func TestHelperHoldBatchSlotUntilKilled(t *testing.T) {
+	t.Parallel()
 	if os.Getenv(slotHistoryHelperEnvVar) != "1" {
 		t.Skip("not invoked as batch-slot holder helper")
 	}
@@ -343,6 +349,7 @@ func TestHelperHoldBatchSlotUntilKilled(t *testing.T) {
 // TestPrintSlotHistory_Empty renders nothing for a town with no history, rather
 // than a header with no entries under it.
 func TestPrintSlotHistory_Empty(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)

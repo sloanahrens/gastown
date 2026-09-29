@@ -11,6 +11,7 @@ import (
 )
 
 func TestParseHooksFile(t *testing.T) {
+	t.Parallel()
 	// Create a temp directory with a test settings file
 	tmpDir := t.TempDir()
 	claudeDir := filepath.Join(tmpDir, ".claude")
@@ -182,6 +183,7 @@ func TestParseHooksFileEmptyHooks(t *testing.T) {
 }
 
 func TestDiscoverHooksCrewLevel(t *testing.T) {
+	t.Parallel()
 	// Create a temp directory structure simulating a Gas Town workspace
 	tmpDir := t.TempDir()
 

@@ -163,6 +163,7 @@ func TestRenderDependencyMergeStatusWarnsOnUnmergedBlocker(t *testing.T) {
 // pass either way; what it actually pins is same-pointer identity, which only
 // the short-circuit produces.
 func TestBeadWithFullDependenciesSkipsShowWhenNoDependencies(t *testing.T) {
+	t.Parallel()
 	bead := &beads.Issue{ID: "gt-does-not-exist-anywhere", DependencyCount: 0}
 	if got := beadWithFullDependencies(RoleContext{}, bead); got != bead {
 		t.Fatalf("beadWithFullDependencies() = %#v, want the same bead pointer unchanged", got)
@@ -172,6 +173,7 @@ func TestBeadWithFullDependenciesSkipsShowWhenNoDependencies(t *testing.T) {
 // TestBeadWithFullDependenciesNilBead: findAgentWork can return a nil bead
 // (no work hooked); the re-fetch helper must not panic on it.
 func TestBeadWithFullDependenciesNilBead(t *testing.T) {
+	t.Parallel()
 	if got := beadWithFullDependencies(RoleContext{}, nil); got != nil {
 		t.Fatalf("beadWithFullDependencies(nil) = %#v, want nil", got)
 	}

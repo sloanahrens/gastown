@@ -16,6 +16,7 @@ import (
 // a P0, so they outranked real work and read to the dispatcher as a queue of
 // emergencies.
 func TestFilterIdentityBeads_ExcludesAlertRecords(t *testing.T) {
+	t.Parallel()
 	issues := []*beads.Issue{
 		{ID: "gt-real", Title: "Fix the thing", Priority: 2, Labels: []string{"gt:task"}},
 		{ID: "gt-real2", Title: "Another piece of work", Priority: 1, Labels: []string{"gt:bug"}},
@@ -49,6 +50,7 @@ func TestFilterIdentityBeads_ExcludesAlertRecords(t *testing.T) {
 // copies carry, so ordinary work must survive it — including work whose
 // severity a human happened to tag.
 func TestFilterIdentityBeads_KeepsRealWorkSharingAnAlertLabel(t *testing.T) {
+	t.Parallel()
 	issues := []*beads.Issue{
 		{ID: "gt-sev", Title: "Investigate high-severity crash", Priority: 1, Labels: []string{"gt:bug", "severity:high"}},
 		{ID: "gt-msg", Title: "Reply to the witness", Priority: 2, Type: "task", Labels: []string{"gt:message", "msg-type:task"}},
@@ -62,6 +64,7 @@ func TestFilterIdentityBeads_KeepsRealWorkSharingAnAlertLabel(t *testing.T) {
 }
 
 func TestIsEscalationTitle(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		title string
 		want  bool

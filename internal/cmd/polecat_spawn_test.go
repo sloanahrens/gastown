@@ -53,6 +53,7 @@ func TestResolveSpawnBaseBranch(t *testing.T) {
 // buildRefineryPatrolVars already do) makes the rig-root value visible with
 // no rig-local settings/config.json present at all.
 func TestPolecatIntegrationEnabledReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 	rigPath := filepath.Join(townRoot, rigName)
@@ -78,6 +79,7 @@ func TestPolecatIntegrationEnabledReadsRigRootMergeQueue(t *testing.T) {
 // TestPolecatIntegrationEnabledDefaultsTrue guards the nil-safe default: no
 // config at any tier must not disable integration sourcing.
 func TestPolecatIntegrationEnabledDefaultsTrue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if got := polecatIntegrationEnabled(townRoot, "norig"); got != true {
 		t.Errorf("polecatIntegrationEnabled() = %v, want true (no config at any tier defaults enabled)", got)
@@ -113,6 +115,7 @@ func (f *idlePolecatReuseFake) Get(name string) (*polecat.Polecat, error) {
 // the fresh allocation, which attaches a worktree to that same branch with
 // `git worktree add --force` and so rebuilds the conflict the refusal found.
 func TestReuseIdlePolecatForSling_StopsOnHeldBranch(t *testing.T) {
+	t.Parallel()
 	branch := "polecat/quartz/gt-9ed0+mudclpwf"
 	fake := &idlePolecatReuseFake{
 		idle: &polecat.Polecat{Name: "alpha"},
@@ -142,6 +145,7 @@ func TestReuseIdlePolecatForSling_StopsOnHeldBranch(t *testing.T) {
 // half of the fallback: a polecat that needs recovery is not a held branch, so
 // the caller still allocates a fresh one.
 func TestReuseIdlePolecatForSling_FallsBackOnRecoverableReuseFailure(t *testing.T) {
+	t.Parallel()
 	fake := &idlePolecatReuseFake{
 		idle:     &polecat.Polecat{Name: "alpha"},
 		reuseErr: fmt.Errorf("%w: uncommitted work in worktree", polecat.ErrPolecatNeedsRecovery),
@@ -161,6 +165,7 @@ func TestReuseIdlePolecatForSling_FallsBackOnRecoverableReuseFailure(t *testing.
 // TestReuseIdlePolecatForSling_NoIdlePolecat covers the ordinary no-op paths:
 // nothing to reuse, and a lookup that failed.
 func TestReuseIdlePolecatForSling_NoIdlePolecat(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name string
 		fake *idlePolecatReuseFake
