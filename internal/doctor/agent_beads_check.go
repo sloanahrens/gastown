@@ -271,15 +271,15 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 				err := bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
 				if err != nil {
 					// bd update failed explicitly — fall back to direct SQL.
-					sqlErr := addLabelSQL(workDir, id, "gt:agent")
+					sqlErr := addLabelSQL(ctx, workDir, id, "gt:agent")
 					if sqlErr != nil {
 						return fmt.Errorf("adding gt:agent label to %s: bd update: %w; SQL fallback: %v", id, err, sqlErr)
 					}
 				}
 				// Verify the label was actually added — bd update can exit 0
 				// without modifying beads with unroutable legacy prefixes (GH#2127).
-				if err == nil && !verifyLabelAdded(workDir, id, "gt:agent") {
-					sqlErr := addLabelSQL(workDir, id, "gt:agent")
+				if err == nil && !verifyLabelAdded(ctx, workDir, id, "gt:agent") {
+					sqlErr := addLabelSQL(ctx, workDir, id, "gt:agent")
 					if sqlErr != nil {
 						return fmt.Errorf("adding gt:agent label to %s: bd update was no-op, SQL fallback: %w", id, sqlErr)
 					}
@@ -317,13 +317,13 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 			if !beads.HasLabel(issue, "gt:agent") {
 				err := bd.Update(id, beads.UpdateOptions{AddLabels: []string{"gt:agent"}})
 				if err != nil {
-					if sqlErr := addLabelSQL(workDir, id, "gt:agent"); sqlErr != nil {
+					if sqlErr := addLabelSQL(ctx, workDir, id, "gt:agent"); sqlErr != nil {
 						return fmt.Errorf("adding gt:agent label to legacy bead %s: bd update: %w; SQL fallback: %v", id, err, sqlErr)
 					}
-				} else if !verifyLabelAdded(workDir, id, "gt:agent") {
+				} else if !verifyLabelAdded(ctx, workDir, id, "gt:agent") {
 					// bd update can exit 0 without modifying beads with
 					// unroutable legacy prefixes (GH#2127).
-					if sqlErr := addLabelSQL(workDir, id, "gt:agent"); sqlErr != nil {
+					if sqlErr := addLabelSQL(ctx, workDir, id, "gt:agent"); sqlErr != nil {
 						return fmt.Errorf("adding gt:agent label to legacy bead %s: bd update was no-op, SQL fallback: %w", id, sqlErr)
 					}
 				}
@@ -339,7 +339,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		// bead where bd create --labels only writes to the labels table, not
 		// wisp_labels. Doctor checks query wisps via JOIN wisp_labels, so the label
 		// must exist there or the check still reports the bead as missing. See gt-3vx.
-		_ = addWispLabelSQL(workDir, id, "gt:agent")
+		_ = addWispLabelSQL(ctx, workDir, id, "gt:agent")
 		return nil
 	}
 
@@ -471,11 +471,11 @@ func listCrewWorkers(townRoot, rigName string) []string {
 // addLabelSQL adds a label to a bead via direct SQL INSERT.
 // This bypasses bd's prefix routing, which silently fails for beads with
 // legacy/unroutable prefixes (GH#2127).
-func addLabelSQL(workDir, beadID, label string) error { //nolint:unparam // label is a parameter on purpose; every caller happens to add gt:agent today
+func addLabelSQL(ctx *CheckContext, workDir, beadID, label string) error { //nolint:unparam // label is a parameter on purpose; every caller happens to add gt:agent today
 	escapedID := strings.ReplaceAll(beadID, "'", "''")
 	escapedLabel := strings.ReplaceAll(label, "'", "''")
 	query := fmt.Sprintf("INSERT IGNORE INTO labels (issue_id, label) VALUES ('%s', '%s')", escapedID, escapedLabel)
-	return execBdSQLWrite(workDir, query)
+	return execBdSQLWrite(ctx, workDir, query)
 }
 
 // addWispLabelSQL adds a label to a wisp bead via direct SQL INSERT into wisp_labels.
@@ -483,21 +483,20 @@ func addLabelSQL(workDir, beadID, label string) error { //nolint:unparam // labe
 // not wisp_labels. Doctor checks and bd list for wisps join on wisp_labels to resolve
 // labels, so the label must be present there for wisp-backed beads to be visible.
 // See gt-3vx.
-func addWispLabelSQL(workDir, beadID, label string) error {
+func addWispLabelSQL(ctx *CheckContext, workDir, beadID, label string) error {
 	escapedID := strings.ReplaceAll(beadID, "'", "''")
 	escapedLabel := strings.ReplaceAll(label, "'", "''")
 	query := fmt.Sprintf("INSERT IGNORE INTO wisp_labels (issue_id, label) VALUES ('%s', '%s')", escapedID, escapedLabel)
-	return execBdSQLWrite(workDir, query)
+	return execBdSQLWrite(ctx, workDir, query)
 }
 
 // verifyLabelAdded checks whether a label exists on a bead by querying labels table.
 // Returns false if the label is not found or the query fails.
-func verifyLabelAdded(workDir, beadID, label string) bool {
+func verifyLabelAdded(ctx *CheckContext, workDir, beadID, label string) bool {
 	escapedID := strings.ReplaceAll(beadID, "'", "''")
 	escapedLabel := strings.ReplaceAll(label, "'", "''")
 	query := fmt.Sprintf("SELECT 1 FROM labels WHERE issue_id = '%s' AND label = '%s' LIMIT 1", escapedID, escapedLabel)
-	cmd := beads.CommandWithEnv(workDir, nil, "sql", query)
-	output, err := cmd.CombinedOutput()
+	output, err := ctx.bd(workDir, nil).SQL(query)
 	if err != nil {
 		return false
 	}

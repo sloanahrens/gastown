@@ -272,7 +272,7 @@ func (c *PatrolNotStuckCheck) Run(ctx *CheckContext) *CheckResult {
 		rigPath := filepath.Join(ctx.TownRoot, rigName)
 
 		// Query Dolt database (the only supported backend).
-		stuck, err := c.checkStuckWispsDolt(rigPath, rigName)
+		stuck, err := c.checkStuckWispsDolt(ctx, rigPath, rigName)
 		if err != nil {
 			// Dolt query failed — report as error rather than silently skipping.
 			stuckWisps = append(stuckWisps, fmt.Sprintf("%s: Dolt query failed: %v", rigName, err))
@@ -304,8 +304,8 @@ const stuckWispsQuery = `SELECT id, title, status, updated_at FROM issues WHERE 
 
 // checkStuckWispsDolt queries the Dolt database for stuck wisps using bd sql.
 // Returns an error if the query fails (caller should fall back to JSONL).
-func (c *PatrolNotStuckCheck) checkStuckWispsDolt(rigPath string, rigName string) ([]string, error) {
-	records, err := runBdSQLCSV(rigPath, stuckWispsQuery)
+func (c *PatrolNotStuckCheck) checkStuckWispsDolt(ctx *CheckContext, rigPath string, rigName string) ([]string, error) {
+	records, err := runBdSQLCSV(ctx, rigPath, stuckWispsQuery)
 	if err != nil {
 		return nil, err
 	}

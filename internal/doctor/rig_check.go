@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -869,13 +868,12 @@ func (c *BeadsConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Check if bd command works
-	cmd := beads.CommandWithEnv(c.rigPath, nil, "stats", "--json")
-	if err := cmd.Run(); err != nil {
+	if _, err := ctx.bd(c.rigPath, nil).StatsJSON(); err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: "bd command failed",
-			Details: []string{fmt.Sprintf("Error: %v", err)},
+			Details: []string{fmt.Sprintf("Error: %v", bdCause(err))},
 			FixHint: "Check beads installation and .beads/ configuration",
 		}
 	}
@@ -1053,35 +1051,27 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 		// Run bd init with the configured prefix (Dolt is the only backend since bd v0.51.0).
 		// Gas Town rigs use Dolt server mode via the shared town Dolt sql-server.
-		initArgs := []string{"init"}
-		if prefix != "" {
-			initArgs = append(initArgs, "--prefix", prefix)
-		}
-		initArgs = append(initArgs, "--database", ctx.RigName)
-		initArgs = append(initArgs, "--server")
 		doltCfg := doltserver.DefaultConfig(ctx.TownRoot)
-		initArgs = append(initArgs, "--server-port", strconv.Itoa(doltCfg.Port))
 		bdEnv := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
 			"BEADS_DIR="+rigBeadsDir,
 			"BEADS_DOLT_SERVER_DATABASE="+ctx.RigName,
 		)
-		cmd := beads.CommandWithEnv(rigPath, bdEnv, initArgs...)
-		if output, err := cmd.CombinedOutput(); err != nil {
+		bd := ctx.bd(rigPath, bdEnv)
+		if err := bd.InitDatabase(beads.InitOptions{Prefix: prefix, Database: ctx.RigName, ServerPort: doltCfg.Port}); err != nil {
+			err = bdCause(err)
 			// bd might not be installed — create config.yaml via shared helper.
 			if writeErr := beads.EnsureConfigYAML(rigBeadsDir, prefix); writeErr != nil {
 				return fmt.Errorf("bd init failed (%v) and fallback config creation failed: %w", err, writeErr)
 			}
 			// Continue - minimal config created
 		} else {
-			_ = output // bd init succeeded
 			// Configure Gas Town bead types (beads v0.46.0+). Rig remains durable,
 			// not infra/wisp-backed.
 			for _, cfg := range []struct{ key, value string }{
 				{"types.custom", constants.BeadsCustomTypes},
 				{"types.infra", constants.BeadsInfraTypes},
 			} {
-				configCmd := beads.CommandWithEnv(rigPath, bdEnv, "config", "set", cfg.key, cfg.value)
-				_, _ = configCmd.CombinedOutput() // Ignore errors - older beads don't need this
+				_ = bd.ConfigSet(cfg.key, cfg.value) // Ignore errors - older beads don't need this
 			}
 		}
 		if err := doltserver.EnsureMetadataForBeadsDir(ctx.TownRoot, rigBeadsDir, ctx.RigName, ctx.RigName); err != nil {

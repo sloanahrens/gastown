@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -292,18 +291,13 @@ type dbPrefixGetter interface {
 	GetDBPrefix(rigPath string) (string, error)
 }
 
-// realDBPrefixGetter shells out to bd to query the database.
-type realDBPrefixGetter struct{}
+// realDBPrefixGetter asks bd for the database's issue_prefix ("" when unset).
+type realDBPrefixGetter struct{ ctx *CheckContext }
 
 func (r *realDBPrefixGetter) GetDBPrefix(rigPath string) (string, error) {
 	beadsDir := beads.ResolveBeadsDir(rigPath)
 	env := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="), beadsCommandEnv(beadsDir)...)
-	cmd := beads.CommandWithEnv(rigPath, env, "config", "get", "issue_prefix")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(output)), nil
+	return r.ctx.bd(rigPath, env).ConfigGet("issue_prefix")
 }
 
 // DatabasePrefixCheck detects when a rig's database has a different issue_prefix
@@ -400,7 +394,7 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check if bd command is available (skip when using injected mock)
 	if c.prefixGetter == nil {
-		if _, err := exec.LookPath("bd"); err != nil {
+		if !ctx.bdInstalled() {
 			return &CheckResult{
 				Name:     c.Name(),
 				Status:   StatusSkipped,
@@ -412,7 +406,7 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 
 	getter := c.prefixGetter
 	if getter == nil {
-		getter = &realDBPrefixGetter{}
+		getter = &realDBPrefixGetter{ctx: ctx}
 	}
 
 	// Resolve the town root's canonical beads directory so we can detect

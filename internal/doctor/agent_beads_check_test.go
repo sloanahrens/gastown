@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -664,20 +665,26 @@ func TestListCrewWorkers_FiltersWorktrees(t *testing.T) {
 	}
 }
 
-// TestAddWispLabelSQL_ErrorsGracefully verifies addWispLabelSQL doesn't panic
-// and returns an error when bd is unavailable (no Dolt server).
-// This is a regression guard for gt-3vx: after CreateAgentBead, the gt:agent
-// label must also be inserted into wisp_labels so doctor checks that join
-// wisp_labels can find the bead.
-func TestAddWispLabelSQL_ErrorsGracefully(t *testing.T) {
-	tmpDir := t.TempDir()
-	err := addWispLabelSQL(tmpDir, "gt-gastown-witness", "gt:agent")
-	// bd sql will fail without a Dolt server — just verify no panic and that the
-	// function returns an error (not silently discarding the failure).
-	if err == nil {
-		t.Log("addWispLabelSQL succeeded (Dolt server is running)")
-	} else {
-		t.Logf("addWispLabelSQL returned expected error without Dolt: %v", err)
+// TestAddWispLabelSQL_WritesWispLabels is the regression guard for gt-3vx:
+// after CreateAgentBead, the gt:agent label must also go into wisp_labels so
+// doctor checks that join wisp_labels find the bead. A failed write must be
+// returned, not discarded.
+func TestAddWispLabelSQL_WritesWispLabels(t *testing.T) {
+	t.Parallel()
+	bd := newFakeBD()
+	dir := t.TempDir()
+	db := bd.db(dir)
+	db.OnSQL(csvAnswer())
+	if err := addWispLabelSQL(bd.ctx(t.TempDir()), dir, "gt-gastown-witness", "gt:agent"); err != nil {
+		t.Fatal(err)
+	}
+	want := "INSERT IGNORE INTO wisp_labels (issue_id, label) VALUES ('gt-gastown-witness', 'gt:agent')"
+	if got := db.SQLStatements(); len(got) != 1 || got[0] != want {
+		t.Errorf("statements = %q, want %q", got, want)
+	}
+	db.OnSQL(func(string) ([][]string, error) { return nil, errors.New("no Dolt server") })
+	if err := addWispLabelSQL(bd.ctx(t.TempDir()), dir, "gt-x", "gt:agent"); err == nil || !strings.Contains(err.Error(), "no Dolt server") {
+		t.Errorf("failed write = %v, want the bd error", err)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -54,7 +53,7 @@ func (c *CheckJSONLBloat) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		liveCount, err := queryLiveIssueCount(rigDir)
+		liveCount, err := queryLiveIssueCount(ctx, rigDir)
 		if err != nil {
 			continue // DB not reachable for this rig
 		}
@@ -123,18 +122,10 @@ func countJSONLEntries(rigDir string) (total, ephemeral int, err error) {
 
 // queryLiveIssueCount returns the total count of issues in the live DB.
 // Counts all records (including closed) to match countJSONLEntries which also counts all.
-func queryLiveIssueCount(rigDir string) (int, error) {
-	cmd := beads.CommandWithEnv(rigDir, nil, "sql", "--csv", "SELECT COUNT(*) as cnt FROM issues")
-	output, err := cmd.CombinedOutput()
+func queryLiveIssueCount(ctx *CheckContext, rigDir string) (int, error) {
+	cnt, err := ctx.bd(rigDir, nil).CountIssues()
 	if err != nil {
-		return 0, fmt.Errorf("bd sql: %w", err)
+		return 0, fmt.Errorf("bd sql: %w", bdCause(err))
 	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) < 2 {
-		return 0, nil
-	}
-	cnt := 0
-	fmt.Sscanf(strings.TrimSpace(lines[1]), "%d", &cnt)
 	return cnt, nil
 }

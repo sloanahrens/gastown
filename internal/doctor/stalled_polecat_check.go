@@ -1,8 +1,6 @@
 package doctor
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -326,21 +324,12 @@ func lookupBeadStatus(townRoot, beadID string) (string, bool) {
 		return "", false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), beadStatusTimeout)
-	defer cancel()
-
-	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.ReadOnlyRouting, "show", beadID, "--json")
-	out, err := cmd.Output()
-	if err != nil {
+	env := beads.EnvForSubprocessMode(os.Environ(), beadsDir, beads.ReadOnlyRouting)
+	issue, err := beads.NewPlain(townRoot, env).WithTimeout(beadStatusTimeout).Show(beadID)
+	if err != nil || issue == nil {
 		return "", false
 	}
-	var issues []struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(out, &issues); err != nil || len(issues) == 0 {
-		return "", false
-	}
-	return issues[0].Status, true
+	return issue.Status, true
 }
 
 // findRigs returns the list of rig names to check.
