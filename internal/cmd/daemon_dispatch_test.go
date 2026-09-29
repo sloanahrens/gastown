@@ -375,6 +375,7 @@ func TestReadyIssuesUnlimited_DanglingRedirectHasNoReadyWork(t *testing.T) {
 // is reachable under the resolved beads directory, not when a tracked
 // metadata.json merely names one.
 func TestHasBeadsDatabase(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, townRoot, rigPath string)

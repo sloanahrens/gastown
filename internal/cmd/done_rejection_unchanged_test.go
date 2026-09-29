@@ -222,6 +222,7 @@ func checkRefusal(t *testing.T, f rejectedReworkFixture, notes string, tips func
 // bug: the polecat was slung the rejected branch, made no commits, and gt done
 // submitted an MR whose patch-id equalled the rejected MR's.
 func TestReportUnchangedSinceRejection_RefusesZeroCommitRework(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 
 	err := checkRefusal(t, f, rejectionNotes(f.branch, "gt-wisp-v8j9"), tipsOf(map[string]string{"gt-wisp-v8j9": f.rejectedSHA}))
@@ -241,6 +242,7 @@ func TestReportUnchangedSinceRejection_RefusesZeroCommitRework(t *testing.T) {
 // newer target and nothing else. Patch-id is base-invariant, so the rebase does
 // not launder the rejected diff.
 func TestReportUnchangedSinceRejection_RefusesContentIdenticalRebase(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 
 	writeTestFile(t, filepath.Join(f.seed, "keep.txt"), "keep\nmain touch\n")
@@ -260,6 +262,7 @@ func TestReportUnchangedSinceRejection_RefusesContentIdenticalRebase(t *testing.
 // same no-op wearing a fresh branch name: the guard compares content, not
 // identity, so a new branch carrying the rejected change-set is refused too.
 func TestReportUnchangedSinceRejection_RefusesIdenticalDiffOnANewBranch(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 
 	runGitCmd(t, f.polecat, "checkout", "-b", "polecat/zircon/gt-test+abc123", "origin/main")
@@ -276,6 +279,7 @@ func TestReportUnchangedSinceRejection_RefusesIdenticalDiffOnANewBranch(t *testi
 // keep working: one commit that answers the findings makes the diff different,
 // so the same branch submits cleanly.
 func TestReportUnchangedSinceRejection_AllowsFixCommit(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 
 	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork\naddressed the finding\n")
@@ -293,6 +297,7 @@ func TestReportUnchangedSinceRejection_AllowsFixCommit(t *testing.T) {
 // the MR's recorded tip would compare the attempt with itself and refuse a
 // legitimate fix.
 func TestReportUnchangedSinceRejection_AllowsFixAlreadyPushedOverTheBranch(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 
 	writeTestFile(t, filepath.Join(f.polecat, "shared.txt"), "base\nwork\naddressed the finding\n")
@@ -309,6 +314,7 @@ func TestReportUnchangedSinceRejection_AllowsFixAlreadyPushedOverTheBranch(t *te
 // rejection whose content this branch does not carry (a different branch's
 // attempt, or the same branch before its fix) does not block submission.
 func TestReportUnchangedSinceRejection_UnrelatedRejectedMR(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 
 	other := "polecat/zircon/gt-other+s1"
@@ -329,6 +335,7 @@ func TestReportUnchangedSinceRejection_UnrelatedRejectedMR(t *testing.T) {
 // clone never fetched. None is evidence that the content changed, but refusing
 // on them strands a polecat with no way to clear the guard.
 func TestReportUnchangedSinceRejection_UnknownTip(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 	notes := rejectionNotes(f.branch, "gt-wisp-v8j9")
 
@@ -351,6 +358,7 @@ func TestReportUnchangedSinceRejection_UnknownTip(t *testing.T) {
 // TestReportUnchangedSinceRejection_NoRejectionNotes is the ordinary path: a
 // bead that was never rejected is not gated on content at all.
 func TestReportUnchangedSinceRejection_NoRejectionNotes(t *testing.T) {
+	t.Parallel()
 	f := newRejectedReworkFixture(t)
 
 	if err := checkRefusal(t, f, "Findings: look at the do_flush helper.\n", tipsOf(nil)); err != nil {

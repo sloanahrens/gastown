@@ -46,6 +46,7 @@ func initInventoryGitWorktree(t *testing.T) string {
 // the verdict re-derives from a live probe of the worktree, and both are
 // tagged with where they came from.
 func TestPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
+	t.Parallel()
 	cleanWorktree := initInventoryGitWorktree(t)
 
 	dirtyWorktree := initInventoryGitWorktree(t)

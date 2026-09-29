@@ -27,6 +27,7 @@ func (f fakeInventoryIssueReader) Show(id string) (*beads.Issue, error) {
 // submitted tip is on the integration branch by ancestry or by a squash merge
 // that leaves no ancestry behind.
 func TestPolecatInventoryDanglingMRGate(t *testing.T) {
+	t.Parallel()
 	landedRepo, landedBranch := initOrphanCleanupRepo(t, true)
 	runOrphanCleanupGit(t, landedRepo, "checkout", landedBranch)
 	unlandedRepo, unlandedBranch := initOrphanCleanupRepo(t, false)

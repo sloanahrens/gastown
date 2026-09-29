@@ -991,6 +991,7 @@ func TestRunDefaultTestVerification_MixedDeletionAndNestedModuleBuildsBoth(t *te
 // an output directory, and a listing that fails must not be reported as a main
 // package (the build that follows says why in the compiler's own words).
 func TestModuleHasMainPackage(t *testing.T) {
+	t.Parallel()
 	t.Run("a module with a main package reports true", func(t *testing.T) {
 		dir, _ := initVerifyTestGoRepo(t)
 		addMainPackage(t, dir)

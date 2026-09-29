@@ -18,6 +18,7 @@ import (
 // test_command (gt-btw1) and refuse when it fails, succeed when it passes,
 // and skip cleanly when there is nothing to verify.
 func TestRunDefaultTestVerification(t *testing.T) {
+	t.Parallel()
 	// runDefaultTestVerification's slot.Acquire call checks `docker ps`
 	// regardless of townRoot (gt-jqif): even though every subtest below
 	// passes its own fresh t.TempDir() as townRoot — so the flock itself
@@ -632,6 +633,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 }
 
 func TestChangedGoPackages(t *testing.T) {
+	t.Parallel()
 	t.Run("no go files changed reports changedGoFiles=false", func(t *testing.T) {
 		dir, base := initVerifyTestGoRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("docs\n"), 0o644); err != nil {

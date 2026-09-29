@@ -67,6 +67,7 @@ func TestAutoSaveTipGate(t *testing.T) {
 // commit is refused, the exact command in the refusal clears it, and the branch
 // is then submittable as a single real commit.
 func TestAutoSaveTipGate_RefusalCommandClearsTheTip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "work")
 	testRunGit(t, dir, "init", "--initial-branch", "main", repo)

@@ -243,6 +243,7 @@ func TestHelperMQBatchReentrantAcquire(t *testing.T) {
 // MRs behind a 29-minute wait (gt-dc81), and it is the one an operator needs to
 // see without reading panes.
 func TestAcquireBatchGateSlot_RecordsTheSameTelemetry(t *testing.T) {
+	t.Parallel()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 

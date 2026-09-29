@@ -78,6 +78,7 @@ func writeGoMod(t *testing.T, dir string, withTestcontainers bool) {
 }
 
 func TestResolvePreVerifyTestSlot(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		gomod string // "", "plain", "tc"
@@ -197,6 +198,7 @@ func TestRunPreVerificationGates_FailingSuiteReleasesSlot(t *testing.T) {
 // Behaviour is unchanged for a rig whose suite cannot start containers: no
 // slot is taken at all.
 func TestRunPreVerificationGates_NoContainerSuiteTakesNoSlot(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		cmd  string

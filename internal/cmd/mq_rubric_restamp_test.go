@@ -94,6 +94,7 @@ func writeRubricRestampFile(t *testing.T, dir, name, content string) {
 // manifest on disk must be left exactly as LoadManifest found it (mayor
 // design decision: a rubric change never self-deploys).
 func TestDetectRubricChangeAfterMerge_TouchedReportsLandedSHA(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 	baseSum := sha256.Sum256([]byte(restampBaseRubric))
@@ -137,6 +138,7 @@ func TestDetectRubricChangeAfterMerge_TouchedReportsLandedSHA(t *testing.T) {
 // TestDetectRubricChangeAfterMerge_UntouchedIsNoOp: an MR that never touches
 // .om.json reports no change.
 func TestDetectRubricChangeAfterMerge_UntouchedIsNoOp(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, false)
 	rigDir := t.TempDir()
 	baseSum := sha256.Sum256([]byte(restampBaseRubric))
@@ -161,6 +163,7 @@ func TestDetectRubricChangeAfterMerge_UntouchedIsNoOp(t *testing.T) {
 // TestDetectRubricChangeAfterMerge_NoRubricConfiguredIsNoOp: a rig with no
 // rubric in its manifest has nothing to detect.
 func TestDetectRubricChangeAfterMerge_NoRubricConfiguredIsNoOp(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 	if err := editorial.SaveManifest(rigDir, &editorial.Manifest{}); err != nil {
@@ -181,6 +184,7 @@ func TestDetectRubricChangeAfterMerge_NoRubricConfiguredIsNoOp(t *testing.T) {
 // manifest deployed at all (e.g. a test fixture, or a rig predating the
 // harness) is not this function's failure to report.
 func TestDetectRubricChangeAfterMerge_NoManifestIsNoOp(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	mr := &refinery.MergeRequest{ID: "gt-mr-1", TargetBranch: "main"}
 	touched, _, sha, err := detectRubricChangeAfterMerge(t.TempDir(), git.NewGit(clone), mr, head)
@@ -198,6 +202,7 @@ func TestDetectRubricChangeAfterMerge_NoManifestIsNoOp(t *testing.T) {
 // detectRubricChangeAfterMerge resolves the manifest path purely as a
 // string against rigDir/refinery/rig, so no repo needs to exist there.
 func TestDetectRubricChangeAfterMerge_AbsoluteRubricPathIsResolved(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 
@@ -232,6 +237,7 @@ func TestDetectRubricChangeAfterMerge_AbsoluteRubricPathIsResolved(t *testing.T)
 // files at the same paths, so the manifest path must still resolve even
 // though it names the OTHER clone (gt-7bvf).
 func TestDetectRubricChangeAfterMerge_AbsoluteRubricPathUnderSiblingCloneIsResolved(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 
@@ -264,6 +270,7 @@ func TestDetectRubricChangeAfterMerge_AbsoluteRubricPathUnderSiblingCloneIsResol
 // a sibling rig clone must be reported as touched, never as untouched — an
 // unresolvable path can silently disable every rubric protection (gt-7bvf).
 func TestDetectRubricChangeAfterMerge_UnresolvableRubricPathFailsClosed(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 
@@ -289,6 +296,7 @@ func TestDetectRubricChangeAfterMerge_UnresolvableRubricPathFailsClosed(t *testi
 // file that exists but fails to parse must be reported as an error, not
 // silently treated the same as no manifest deployed at all.
 func TestDetectRubricChangeAfterMerge_CorruptManifestReturnsError(t *testing.T) {
+	t.Parallel()
 	clone, head := initRubricRestampRepo(t, true)
 	rigDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(rigDir, ".gastown-harness-manifest.json"), []byte("{not json"), 0o644); err != nil {
