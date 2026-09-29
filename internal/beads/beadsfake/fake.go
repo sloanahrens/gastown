@@ -53,6 +53,15 @@ type Fake struct {
 	clock  clockwork.Clock
 	seq    int
 	issues map[string]*record
+
+	// The maintenance surface (admin.go).
+	config   map[string]string
+	dropped  map[string]bool
+	sql      func(query string) ([][]string, error)
+	sqlLog   []string
+	inits    []beads.InitOptions
+	gcCalls  int
+	failures map[string]error
 }
 
 // Option configures a Fake.

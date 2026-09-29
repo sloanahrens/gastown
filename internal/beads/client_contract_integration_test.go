@@ -24,11 +24,19 @@ func TestIntegrationClientContract(t *testing.T) {
 	if err != nil || port == 0 {
 		t.Fatalf("no Dolt test container (port %q): %v", testutil.DoltContainerPort(), err)
 	}
-	beadsfake.RunClientContract(t, func(t *testing.T) beads.Client {
+	newDB := func(t *testing.T) *beads.Beads {
 		b := beads.NewIsolatedWithPort(t.TempDir(), port)
 		if err := b.Init("gt"); err != nil {
 			t.Fatalf("bd init on the test container: %v", err)
 		}
 		return b
+	}
+	t.Run("client", func(t *testing.T) {
+		t.Parallel()
+		beadsfake.RunClientContract(t, func(t *testing.T) beads.Client { return newDB(t) })
+	})
+	t.Run("admin", func(t *testing.T) {
+		t.Parallel()
+		beadsfake.RunAdminContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t) })
 	})
 }
