@@ -142,29 +142,22 @@ func TestTriggerMayorDispatch_SingleFlight(t *testing.T) {
 	d.mayorDispatchRunning.Store(false)
 
 	// A clear guard starts a cycle, and the cycle clears the guard when it
-	// finishes, so the patrol is not permanently single-shot.
-	if !waitForMayorDispatchIdle(d, 5*time.Second) {
-		t.Fatal("cycle never cleared the running guard")
+	// finishes, so the patrol is not permanently single-shot. The waits are on
+	// the cycle goroutine itself, not on the guard against a clock.
+	if !d.triggerMayorDispatch() {
+		t.Fatal("expected a clear guard to start a cycle")
+	}
+	d.mayorDispatchCycles.Wait()
+	if d.mayorDispatchRunning.Load() {
+		t.Fatal("cycle finished without clearing the running guard")
 	}
 	if !d.triggerMayorDispatch() {
 		t.Error("expected the patrol to run again after the previous cycle finished")
 	}
-	if !waitForMayorDispatchIdle(d, 5*time.Second) {
-		t.Fatal("second cycle never cleared the running guard")
+	d.mayorDispatchCycles.Wait()
+	if d.mayorDispatchRunning.Load() {
+		t.Fatal("second cycle finished without clearing the running guard")
 	}
-}
-
-// waitForMayorDispatchIdle blocks until the patrol's single-flight guard is
-// clear, so the test observes the goroutine's exit rather than racing it.
-func waitForMayorDispatchIdle(d *Daemon, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !d.mayorDispatchRunning.Load() {
-			return true
-		}
-		time.Sleep(time.Millisecond)
-	}
-	return false
 }
 
 func TestNudgeMayor_RefusesEmptyMessage(t *testing.T) {

@@ -269,7 +269,7 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 	// Verify the dependency actually exists via a method that works in embedded mode.
 	deps, err := store.GetDependencies(ctx, blocked.ID)
 	if err != nil {
-		t.Skipf("store.GetDependencies failed (embedded Dolt limitation): %v", err)
+		t.Fatalf("store.GetDependencies: %v", err)
 	}
 	if len(deps) == 0 {
 		t.Fatal("expected at least 1 dependency to be created")
@@ -277,15 +277,7 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 
 	result := isIssueBlocked(ctx, store, blocked.ID, nil)
 
-	// GetDependenciesWithMetadata may not work in embedded Dolt mode
-	// (nested query limitation). If it fails, isIssueBlocked returns false
-	// (fail-open). Skip the assertion in that case rather than silently passing.
 	if !result {
-		// Check if the fail-open case: GetDependenciesWithMetadata may have failed
-		_, metaErr := store.GetDependenciesWithMetadata(ctx, blocked.ID)
-		if metaErr != nil {
-			t.Skipf("GetDependenciesWithMetadata not supported in embedded mode: %v — fail-open expected", metaErr)
-		}
 		t.Error("isIssueBlocked should return true when issue has open blocker")
 	}
 }
@@ -454,12 +446,7 @@ func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing
 
 	result := isIssueBlocked(ctx, store, blocked.ID, nil)
 
-	// Check if GetDependenciesWithMetadata works in embedded mode
 	if !result {
-		_, metaErr := store.GetDependenciesWithMetadata(ctx, blocked.ID)
-		if metaErr != nil {
-			t.Skipf("GetDependenciesWithMetadata not supported in embedded mode: %v", metaErr)
-		}
 		t.Error("isIssueBlocked should return true for merge-blocks dep when blocker is closed without merge")
 	}
 }
@@ -512,11 +499,6 @@ func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
 
 	// Blocker is closed with "Merged in mr-xyz" — should NOT be blocked
 	if isIssueBlocked(ctx, store, blocked.ID, nil) {
-		// Check if it's the embedded Dolt issue
-		_, metaErr := store.GetDependenciesWithMetadata(ctx, blocked.ID)
-		if metaErr != nil {
-			t.Skipf("GetDependenciesWithMetadata not supported in embedded mode: %v", metaErr)
-		}
 		t.Error("isIssueBlocked should return false when merge-blocks blocker has CloseReason 'Merged in ...'")
 	}
 }
@@ -575,10 +557,6 @@ func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
 
 	// Tombstone always unblocks, regardless of dep type
 	if isIssueBlocked(ctx, store, blocked.ID, nil) {
-		_, metaErr := store.GetDependenciesWithMetadata(ctx, blocked.ID)
-		if metaErr != nil {
-			t.Skipf("GetDependenciesWithMetadata not supported in embedded mode: %v", metaErr)
-		}
 		t.Error("isIssueBlocked should return false when merge-blocks blocker is tombstoned")
 	}
 }
@@ -991,11 +969,7 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
-		// If gt was not called at all, check if GetDependenciesWithMetadata
-		// failed (embedded Dolt nested query limitation). This means both
-		// isIssueBlocked and getConvoyTrackedIssues may fail.
-		t.Logf("gt stub not called; log messages: %v", *logMsgs)
-		t.Skipf("gt stub was not called — likely embedded Dolt nested query limitation")
+		t.Fatalf("gt stub was not called (%v): the unblocked task was never dispatched. log messages: %v", err, *logMsgs)
 	}
 	logStr := strings.TrimSpace(string(logData))
 
@@ -1433,7 +1407,7 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 
 	// The convoy should be returned (it was found as a tracker)
 	if len(result) == 0 {
-		t.Skipf("no tracking convoys found — GetDependentsWithMetadata may not work in embedded Dolt")
+		t.Fatal("no tracking convoys found for an issue a convoy tracks")
 	}
 
 	// Verify the staged convoy was skipped via log messages
@@ -1518,7 +1492,7 @@ func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
 	result := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-08", logger, gtPath, nil)
 
 	if len(result) == 0 {
-		t.Skipf("no tracking convoys found — GetDependentsWithMetadata may not work in embedded Dolt")
+		t.Fatal("no tracking convoys found for an issue a convoy tracks")
 	}
 
 	// Verify the staged convoy was skipped
@@ -1608,7 +1582,7 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 
 	result1 := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-staged", logger1, gtPath, nil)
 	if len(result1) == 0 {
-		t.Skipf("no tracking convoys found — GetDependentsWithMetadata may not work in embedded Dolt")
+		t.Fatal("no tracking convoys found for an issue a convoy tracks")
 	}
 
 	foundStagedSkip := false
@@ -1771,7 +1745,7 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 	}
 
 	if found == nil {
-		t.Skipf("oag-19dd9 not found in tracked issues (GetDependenciesWithMetadata may not work in embedded Dolt)")
+		t.Fatalf("cross-rig bead oag-19dd9 is missing from the convoy's tracked issues %+v: a convoy that tracks another rig's bead must list it", tracked)
 	}
 
 	// The critical assertion: the cross-rig bead should show fresh "closed" status,
@@ -1951,7 +1925,7 @@ exit 0
 	// Verify gt nudge was called for gastown/witness.
 	logData, err := os.ReadFile(gtLogPath)
 	if err != nil {
-		t.Skipf("gt stub not called (no log): %v", err)
+		t.Fatalf("gt stub not called (no log): %v\nlogger output: %v", err, logged)
 	}
 	logStr := string(logData)
 	if !strings.Contains(logStr, "nudge") || !strings.Contains(logStr, "gastown/witness") {

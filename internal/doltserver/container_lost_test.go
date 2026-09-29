@@ -10,7 +10,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// lostContainerMarkers are the error fragments that mean the shared test Dolt
+// lostContainerMarkers are the error fragments that mean the test Dolt
 // container stopped answering, rather than Dolt answering the query (gt-qkuj).
 //
 // This package's container-backed tests reach that container with a raw
@@ -28,10 +28,7 @@ import (
 //	divergence_test.go:108: create database dolt_remotes_check_div_...: invalid connection
 //	divergence_test.go:136: ping Dolt container: invalid connection
 //
-// A saturating host starves the Docker VM under the suite, and a starved Dolt
-// server is indistinguishable from a dead one at this layer: the connection
-// dies before the query is answered, so the failure lands in the query rather
-// than in the response to it.
+// Those were the container dying, not a starved one: see failContainerErr.
 var lostContainerMarkers = []string{
 	"invalid connection",       // go-sql-driver ErrInvalidConn: the connection died before use
 	"unexpected EOF",           // the server closed the socket mid-packet
@@ -41,15 +38,12 @@ var lostContainerMarkers = []string{
 	"connection refused",       // the container is gone: nothing is accepting
 }
 
-// isLostContainerErr reports whether err is a lost connection to the shared test
+// isLostContainerErr reports whether err is a lost connection to the test
 // Dolt container rather than an answer from it.
 //
-// Scoping is the point. A predicate that returned true for anything would turn
-// every regression this suite exists to catch into a skip, which is the guard
-// bypass gt-cbtl had to undo in internal/cmd. So the sentinel and the markers
-// above are the whole test: a syntax error, a duplicate key, a divergence
-// verdict that is wrong, or a bug that makes FetchAndVerify return any other
-// error all keep failing the test.
+// It only labels a failure: failContainerErr fails the test either way. The
+// classifier stays narrow so that label never calls an answer from Dolt (a
+// syntax error, a wrong divergence verdict) a lost container.
 func isLostContainerErr(err error) bool {
 	if err == nil {
 		return false
@@ -79,24 +73,20 @@ func isLostContainerErr(err error) bool {
 	return false
 }
 
-// skipOrFailContainerLost skips t when the shared test Dolt container stopped
-// answering, and fails t for every other error (gt-qkuj).
+// failContainerErr fails t on err, and names a lost container as such.
 //
-// The skip is the same trade two sibling suites already make for a gone
-// container (internal/cmd's patrol and rig_park suites, via
-// testutil.SkipOrFailContainerInit, gt-cbtl): a container that vanished under a
-// starved Docker VM is an absence of evidence, not evidence about the code
-// under test. Which is why the classifier above is narrow — the moment it
-// widens, the suite goes green under load while hiding the regressions it was
-// written for.
-//
-// Called from a subtest this skips that subtest; the container stays gone, so
-// the sibling subtests and every later test in the package skip too, instead of
-// reddening the package on a container nobody can reach.
-func skipOrFailContainerLost(t *testing.T, err error, what string) {
+// It used to skip on a lost container (gt-qkuj), reading the loss as a
+// starved Docker VM. The loss was the container dying: the dolt-sql-server
+// image's entrypoint keeps running init SQL under `set -e` after dolt prints
+// "Server ready", and a test's CREATE DATABASE overlapping it made that SQL
+// fail and the entrypoint exit 1 (2 of 3 containers in a probe; 0 of 3 once
+// the harness waits for the entrypoint's last log line). A container that
+// dies under the suite is a broken test environment, which a skip turns into
+// a green run with no coverage, so it fails like any other error.
+func failContainerErr(t *testing.T, err error, what string) {
 	t.Helper()
 	if isLostContainerErr(err) {
-		t.Skipf("test Dolt container gone, skipping: %s: %v", what, err)
+		t.Fatalf("test Dolt container stopped answering: %s: %v", what, err)
 	}
 	t.Fatalf("%s: %v", what, err)
 }
@@ -140,7 +130,7 @@ func TestIsLostContainerErr(t *testing.T) {
 	}
 	for _, err := range kept {
 		if isLostContainerErr(err) {
-			t.Errorf("isLostContainerErr(%v) = true, want false — a skip here hides a regression", err)
+			t.Errorf("isLostContainerErr(%v) = true, want false — a lost container is reported for what is a regression", err)
 		}
 	}
 }

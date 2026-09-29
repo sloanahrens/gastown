@@ -271,6 +271,12 @@ type Daemon struct {
 	// cycle is still running is skipped rather than piling up concurrently.
 	mainBranchTestRunning atomic.Bool
 
+	// mainBranchTestCycles counts the cycle goroutines triggerMainBranchTests
+	// has started and not yet finished, including the last-run write after
+	// the cycle. Waiting on it is how a caller knows a triggered cycle is
+	// wholly done, rather than polling mainBranchTestRunning against a clock.
+	mainBranchTestCycles sync.WaitGroup
+
 	// mainBranchTestWaitingSlot is true only while a main_branch_test run is
 	// blocked in acquireMainBranchTestSlot. Killing a run in that state costs
 	// nothing (an interrupted run is a non-verdict, gt-59yz), so
@@ -323,6 +329,11 @@ type Daemon struct {
 	// dispatch-check` and then nudges, either of which can take tens of
 	// seconds, and running them inline would hold the tick loop (gt-59o9).
 	mayorDispatchRunning atomic.Bool
+
+	// mayorDispatchCycles counts the cycle goroutines triggerMayorDispatch has
+	// started and not yet finished, so a caller can wait for a triggered
+	// cycle to end instead of polling mayorDispatchRunning against a clock.
+	mayorDispatchCycles sync.WaitGroup
 
 	// patrolWatchdogRunning is the single-flight guard for the patrol_watchdog
 	// patrol, on its own goroutine: it checks every known rig's witness and

@@ -22,7 +22,7 @@ import (
 // (dolt_remotes, dolt_remote_branches, dolt_log) are the part most likely to
 // rot, and a fake would encode the same assumptions as the implementation.
 func TestFetchAndVerify(t *testing.T) {
-	admin := doltTestAdmin(t)
+	admin := doltTestServer(t)
 
 	t.Run("no remote has nothing to verify", func(t *testing.T) {
 		conn, name := createDivergenceTestDB(t, admin)
@@ -30,7 +30,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		got, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			skipOrFailContainerLost(t, err, "FetchAndVerify on a remote-less database")
+			failContainerErr(t, err, "FetchAndVerify on a remote-less database")
 		}
 		if len(got.Remotes) != 0 {
 			t.Errorf("Remotes = %v, want empty for a database with no remote", got.Remotes)
@@ -47,7 +47,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		got, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			skipOrFailContainerLost(t, err, "FetchAndVerify after a push")
+			failContainerErr(t, err, "FetchAndVerify after a push")
 		}
 		if len(got.Remotes) != 1 || got.Remotes[0] != "origin" {
 			t.Errorf("Remotes = %v, want [origin]", got.Remotes)
@@ -80,7 +80,7 @@ func TestFetchAndVerify(t *testing.T) {
 		if err := consumer.QueryRow(
 			"SELECT COUNT(*) FROM dolt_remote_branches WHERE name = 'remotes/origin/main'",
 		).Scan(&tracking); err != nil {
-			skipOrFailContainerLost(t, err, "count remote-tracking refs before fetch")
+			failContainerErr(t, err, "count remote-tracking refs before fetch")
 		}
 		if tracking != 0 {
 			t.Fatalf("consumer already tracks %d remote ref(s) before any fetch — this case can no longer prove the fetch ran", tracking)
@@ -88,7 +88,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		got, err := fetchAndVerify(t, consumer, consumerName)
 		if err != nil {
-			skipOrFailContainerLost(t, err, "FetchAndVerify on a diverged consumer")
+			failContainerErr(t, err, "FetchAndVerify on a diverged consumer")
 		}
 		if !got.Diverged {
 			t.Fatalf("consumer reported no divergence against a remote whose history it does not share (remotes=%v head=%q) — the fetch did not run, or the tracking ref was read from the wrong name",
@@ -112,7 +112,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		before, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			skipOrFailContainerLost(t, err, "FetchAndVerify before flatten")
+			failContainerErr(t, err, "FetchAndVerify before flatten")
 		}
 		if before.Diverged {
 			t.Fatalf("premise broken: %s is already diverged before the flatten (head=%s)", name, before.RemoteHead)
@@ -122,7 +122,7 @@ func TestFetchAndVerify(t *testing.T) {
 
 		after, err := fetchAndVerify(t, conn, name)
 		if err != nil {
-			skipOrFailContainerLost(t, err, "FetchAndVerify after flatten")
+			failContainerErr(t, err, "FetchAndVerify after flatten")
 		}
 		if !after.Diverged {
 			t.Fatalf("flatten left the remote holding commits local no longer has, but the pre-flight cleared it (head=%s)", after.RemoteHead)
@@ -230,13 +230,13 @@ func TestFetchAndVerify(t *testing.T) {
 
 // TestFetchAndVerifyRejectsInvalidDatabaseName pins the identifier check: the
 // database name is interpolated into a query by callers, so a name that is not
-// a plain identifier must be refused before anything reaches the server.
+// a plain identifier must be refused before anything reaches the server. The
+// connection is nil, so a check that let any query through panics instead of
+// passing.
 func TestFetchAndVerifyRejectsInvalidDatabaseName(t *testing.T) {
-	admin := doltTestAdmin(t)
-	conn, _ := createDivergenceTestDB(t, admin)
-
+	t.Parallel()
 	for _, name := range []string{"", "bad name", "db;DROP DATABASE gt", "db`x"} {
-		if _, err := fetchAndVerify(t, conn, name); err == nil {
+		if _, err := fetchAndVerify(t, nil, name); err == nil {
 			t.Errorf("FetchAndVerify(%q) = nil error, want a refusal", name)
 		} else if !strings.Contains(err.Error(), "invalid database name") {
 			t.Errorf("FetchAndVerify(%q) error = %v, want it to name the invalid identifier", name, err)
@@ -246,51 +246,55 @@ func TestFetchAndVerifyRejectsInvalidDatabaseName(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-// doltTestAdmin returns a server-level connection to the shared ephemeral Dolt
-// container, skipping when container tests are not opted in.
-func doltTestAdmin(t *testing.T) *sql.DB {
-	t.Helper()
-	testutil.RequireDoltContainer(t)
+// divergenceServer is a Dolt server of this test's own and a server-level
+// connection to it.
+type divergenceServer struct {
+	admin *sql.DB
+	port  string
+}
 
-	dsn := "root:@tcp(127.0.0.1:" + testutil.DoltContainerPort() + ")/"
+// doltTestServer starts a Dolt container for the calling test alone, skipping
+// when container tests are not opted in. The divergence cases create
+// databases, and a CREATE, DROP or purge on the package's shared container
+// would change the catalog under whatever else is using it, which the pool
+// (testutil/doltpool.go) exists to rule out. The container goes when the test
+// ends, and every database with it.
+func doltTestServer(t *testing.T) *divergenceServer {
+	t.Helper()
+	port := testutil.StartIsolatedDoltContainer(t)
+
+	dsn := "root:@tcp(127.0.0.1:" + port + ")/"
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		skipOrFailContainerLost(t, err, "open admin connection")
+		failContainerErr(t, err, "open admin connection")
 	}
 	if err := db.Ping(); err != nil {
 		db.Close()
-		skipOrFailContainerLost(t, err, "ping Dolt container")
+		failContainerErr(t, err, "ping Dolt container")
 	}
 	t.Cleanup(func() { db.Close() })
-	return db
+	return &divergenceServer{admin: db, port: port}
 }
 
-// createDivergenceTestDB creates a fresh database on the container and returns
-// a connection bound to it. The "dolt_remotes_check_" prefix is registered with
-// the orphan-cleanup call sites that match database names, so a leaked database
-// here is still recognized as test cruft.
-func createDivergenceTestDB(t *testing.T, admin *sql.DB) (*sql.DB, string) {
+// createDivergenceTestDB creates a fresh database on the test's own container
+// and returns a connection bound to it. Nothing drops it: the container goes
+// at the end of the test.
+func createDivergenceTestDB(t *testing.T, srv *divergenceServer) (*sql.DB, string) {
 	t.Helper()
 
 	name := fmt.Sprintf("dolt_remotes_check_div_%d", time.Now().UnixNano())
-	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE `%s`", name)); err != nil {
-		skipOrFailContainerLost(t, err, "create database "+name)
+	if _, err := srv.admin.Exec(fmt.Sprintf("CREATE DATABASE `%s`", name)); err != nil {
+		failContainerErr(t, err, "create database "+name)
 	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name)); err != nil {
-			t.Logf("drop database %s: %v", name, err)
-		}
-		_, _ = admin.Exec("CALL dolt_purge_dropped_databases()")
-	})
 
-	dsn := "root:@tcp(127.0.0.1:" + testutil.DoltContainerPort() + ")/" + name + "?parseTime=true"
+	dsn := "root:@tcp(127.0.0.1:" + srv.port + ")/" + name + "?parseTime=true"
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
-		skipOrFailContainerLost(t, err, "open connection to "+name)
+		failContainerErr(t, err, "open connection to "+name)
 	}
 	if err := conn.Ping(); err != nil {
 		conn.Close()
-		skipOrFailContainerLost(t, err, "ping "+name)
+		failContainerErr(t, err, "ping "+name)
 	}
 	t.Cleanup(func() { conn.Close() })
 	return conn, name
@@ -329,7 +333,7 @@ func flattenHistory(t *testing.T, conn *sql.DB, dbName string) {
 	if err := conn.QueryRow(fmt.Sprintf(
 		"SELECT commit_hash FROM `%s`.dolt_log ORDER BY date ASC LIMIT 1", dbName,
 	)).Scan(&root); err != nil {
-		skipOrFailContainerLost(t, err, "find root commit of "+dbName)
+		failContainerErr(t, err, "find root commit of "+dbName)
 	}
 	execSQL(t, conn, fmt.Sprintf("CALL DOLT_RESET('--soft','%s')", root))
 	commitAll(t, conn, "flatten history")
@@ -358,6 +362,6 @@ func commitAll(t *testing.T, conn *sql.DB, message string) {
 func execSQL(t *testing.T, conn *sql.DB, query string, args ...any) {
 	t.Helper()
 	if _, err := conn.Exec(query, args...); err != nil {
-		skipOrFailContainerLost(t, err, fmt.Sprintf("exec %q", query))
+		failContainerErr(t, err, fmt.Sprintf("exec %q", query))
 	}
 }

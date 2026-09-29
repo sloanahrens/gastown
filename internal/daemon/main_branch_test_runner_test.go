@@ -1845,12 +1845,9 @@ func TestTriggerMainBranchTests_SingleFlight(t *testing.T) {
 	// Wait for the goroutine launched above to finish and clear the flag,
 	// so the "already running" case below tests a real in-flight state
 	// rather than racing the first goroutine's cleanup.
-	deadline := time.Now().Add(2 * time.Second)
-	for d.mainBranchTestRunning.Load() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for first cycle to clear mainBranchTestRunning")
-		}
-		time.Sleep(time.Millisecond)
+	waitForMainBranchTestCycle(t, d)
+	if d.mainBranchTestRunning.Load() {
+		t.Fatal("the first cycle finished without clearing mainBranchTestRunning")
 	}
 
 	// Simulate a still-running cycle and verify the next tick is skipped,
@@ -1864,18 +1861,14 @@ func TestTriggerMainBranchTests_SingleFlight(t *testing.T) {
 	}
 }
 
-// waitForMainBranchTestCycle blocks until triggerMainBranchTests's goroutine
-// clears mainBranchTestRunning (the cycle, and the persistence decision after
-// it, have both completed) or the deadline passes.
+// waitForMainBranchTestCycle blocks until every cycle goroutine
+// triggerMainBranchTests started has finished: the cycle, and the persistence
+// decision after it. It waits on the cycle itself rather than polling
+// mainBranchTestRunning against a real-time deadline, which failed whenever
+// the cycle's work outlasted the deadline on a loaded host.
 func waitForMainBranchTestCycle(t *testing.T, d *Daemon) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for d.mainBranchTestRunning.Load() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for main_branch_test cycle to finish")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	d.mainBranchTestCycles.Wait()
 }
 
 // TestTriggerMainBranchTests_OverdueRunsAndPersists exercises the actual
@@ -1914,6 +1907,11 @@ func TestTriggerMainBranchTests_OverdueRunsAndPersists(t *testing.T) {
 		t.Fatalf("loadPatrolLastRun: %v", err)
 	} else if !found {
 		t.Fatal("expected a persisted last-run after a cycle that tested a rig")
+	}
+	// A cycle whose every tested rig passed retires the failure alert.
+	clears := d.notifier.(*notifyfake.Recorder).Of(notifyfake.KindClear)
+	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{alertKeyMainBranchTest}) {
+		t.Errorf("alert clears = %+v, want one clearing %s", clears, alertKeyMainBranchTest)
 	}
 
 	// Immediately re-checking must now decline: the cycle just ran, so nothing
