@@ -10,7 +10,8 @@
 # false positive (the specific error is deliberately narrowed, e.g.
 # os.IsNotExist), add a one-line comment above the entry saying so.
 internal/beads/beads.go:*Beads.CreateIfNoDuplicate
-internal/beads/beads_agent.go:*Beads.ClearAgentActiveMRIfMatches
+# Moved from *Beads.ClearAgentActiveMRIfMatches (gt-22hdp.13); narrowed on purpose: only ErrNotFound (no agent bead, so nothing to clear) returns false, nil.
+internal/beads/client_helpers.go:clearAgentActiveMRIfMatches
 internal/cmd/prime.go:checkSlungWork
 internal/cmd/prime.go:ralphLoopPluginInstalledIn
 internal/cmd/prime_payload.go:staticRoleText
