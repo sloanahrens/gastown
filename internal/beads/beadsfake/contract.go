@@ -55,6 +55,7 @@ var contractCases = []contractCase{
 	{"children", contractChildren},
 	{"release", contractRelease},
 	{"batch close refusal", contractBatchCloseRefusal},
+	{"batch close of a blocks chain in reverse order", contractBatchCloseChain},
 	{"append notes", contractAppendNotes},
 	{"guarded transfer", contractGuardedTransfer},
 	{"guard and note edges", contractGuardEdges},
@@ -706,6 +707,36 @@ func contractBatchCloseRefusal(t *testing.T, s *scope) {
 
 	// Forced, nothing is refused.
 	mustDo(t, "a forced batch close", s.ForceCloseWithReason("forced", other.ID, theirs.ID))
+}
+
+// contractBatchCloseChain pins that bd closes a batch in argument order,
+// refusing an issue whose blocker is still open at its turn even when the
+// blocker comes later in the same batch. A molecule's steps form such a
+// chain, and Children lists them in ID order, not dependency order.
+func contractBatchCloseChain(t *testing.T, s *scope) {
+	// s1 <- s2 <- s3: s2 depends on s1, s3 on s2.
+	var chain []*beads.Issue
+	for i := 0; i < 3; i++ {
+		chain = append(chain, s.mustCreate(t, beads.CreateOptions{Title: "step", Priority: -1}))
+		if i > 0 {
+			mustDo(t, "AddDependency", s.AddDependency(chain[i].ID, chain[i-1].ID))
+		}
+	}
+	s1, s2, s3 := chain[0].ID, chain[1].ID, chain[2].ID
+	partial(t, "closing the chain last-first", s.Close(s3, s2, s1), []string{s1}, []string{s2, s3})
+	partial(t, "closing the rest last-first", s.Close(s3, s2), []string{s2}, []string{s3})
+	mustDo(t, "closing the last step", s.Close(s3))
+
+	// In dependency order the same batch closes whole.
+	var fwd []string
+	for i := 0; i < 3; i++ {
+		is := s.mustCreate(t, beads.CreateOptions{Title: "step", Priority: -1})
+		if i > 0 {
+			mustDo(t, "AddDependency", s.AddDependency(is.ID, fwd[i-1]))
+		}
+		fwd = append(fwd, is.ID)
+	}
+	mustDo(t, "closing a chain first-first", s.Close(fwd...))
 }
 
 // partial checks that err reports a partial close of exactly closed and

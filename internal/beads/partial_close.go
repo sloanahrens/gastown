@@ -45,6 +45,10 @@ func (e *PartialCloseError) Unwrap() error {
 // ClosedIDs returns the issues of ids a close that returned err actually
 // closed: all of them when err is nil, the Closed list of a
 // *PartialCloseError, and none for any other error.
+//
+// It is pessimistic when it cannot know: if bd reported the batch closed but
+// the re-read that checks it failed, the close returns that re-read error
+// and ClosedIDs counts none, though bd may have closed some or all of ids.
 func ClosedIDs(ids []string, err error) []string {
 	if err == nil {
 		return ids
