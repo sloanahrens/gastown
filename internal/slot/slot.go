@@ -454,6 +454,14 @@ type Report struct {
 	HeldCount int
 	Total     int
 	Reserved  int
+
+	// YieldingToGate is true when the pool yields to the gate
+	// (Pool.YieldToGate) and a live gate holds a gate-reserved slot: a new
+	// non-gate suite waits ("waiting: gate running") until it releases.
+	// GateHolder is that gate's owner, nil when its metadata is unreadable.
+	// Neither makes the report Busy: gates may still start.
+	YieldingToGate bool
+	GateHolder     *Owner
 }
 
 // Busy reports whether a new suite could NOT be admitted right now: every

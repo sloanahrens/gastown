@@ -39,6 +39,11 @@ const (
 	// Docker VM is idle — the daemon is unreachable, wedged, or refuses the
 	// socket — so the gate waits rather than granting unverified (gt-a8kx).
 	WaitReasonDaemonUnreachable WaitReason = "daemon_unreachable"
+
+	// WaitReasonGateRunning: a gate holds a gate-reserved slot, and a non-gate
+	// caller does not start a suite beside it while the pool yields to the
+	// gate (Pool.YieldToGate, gt-22hdp.29). Holder names the gate.
+	WaitReasonGateRunning WaitReason = "gate_running"
 )
 
 // waitWatch accumulates what kept one Acquire call from granting, so the
@@ -63,6 +68,9 @@ type waitWatch struct {
 	// the first inconclusive-probe error, kept for the same reason.
 	containers []string
 	dockerErr  string
+	// gateHolder is the first running gate observed while yielding to it,
+	// the evidence for WaitReasonGateRunning.
+	gateHolder *Owner
 }
 
 func newWaitWatch(clock clockwork.Clock) *waitWatch {
@@ -102,6 +110,12 @@ func (w *waitWatch) noteHolder(owner *Owner) {
 	}
 }
 
+func (w *waitWatch) noteGateHolder(owner *Owner) {
+	if w.gateHolder == nil {
+		w.gateHolder = owner
+	}
+}
+
 func (w *waitWatch) noteContainers(names []string) {
 	if len(w.containers) == 0 {
 		w.containers = names
@@ -128,14 +142,24 @@ type waitInfo struct {
 
 // info snapshots the watch against the timeout the caller asked for.
 func (w *waitWatch) info(timeout time.Duration, timedOut bool) waitInfo {
-	return waitInfo{
-		Reason:     w.reason(),
+	info := waitInfo{
 		Waited:     w.waited(),
 		Timeout:    timeout,
 		TimedOut:   timedOut,
-		Holder:     w.holder,
 		Containers: w.containers,
 		DockerErr:  w.dockerErr,
+	}
+	w.attribute(&info, w.reason())
+	return info
+}
+
+// attribute sets info's reason and the holder that is its evidence: the gate
+// yielded to for WaitReasonGateRunning, the token holder otherwise.
+func (w *waitWatch) attribute(info *waitInfo, reason WaitReason) {
+	info.Reason = reason
+	info.Holder = w.holder
+	if reason == WaitReasonGateRunning {
+		info.Holder = w.gateHolder
 	}
 }
 
@@ -145,7 +169,7 @@ func (w *waitWatch) info(timeout time.Duration, timedOut bool) waitInfo {
 // no time against it yet and reason() is still empty (gt-78b8).
 func (w *waitWatch) blockedInfo(timeout time.Duration, reason WaitReason) waitInfo {
 	info := w.info(timeout, false)
-	info.Reason = reason
+	w.attribute(&info, reason)
 	return info
 }
 
@@ -169,6 +193,11 @@ func (i waitInfo) describe() string {
 			return "docker probe inconclusive: " + i.DockerErr
 		}
 		return "docker probe inconclusive"
+	case WaitReasonGateRunning:
+		if i.Holder != nil {
+			return fmt.Sprintf("gate running: %s pid %d holds gate-reserved slot %d; non-gate suites yield to it", i.Holder.Role, i.Holder.PID, i.Holder.Slot)
+		}
+		return "gate running: a gate-reserved slot is held; non-gate suites yield to it"
 	default:
 		return ""
 	}
@@ -219,7 +248,8 @@ type HistoryEntry struct {
 	TimedOut bool       `json:"timed_out,omitempty"`
 	Reason   WaitReason `json:"reason,omitempty"`
 	// HolderRole/HolderPID are the token holder waited behind, for
-	// WaitReasonTokenHeld; Containers the unwrapped suite, for
+	// WaitReasonTokenHeld, or the gate yielded to, for WaitReasonGateRunning;
+	// Containers the unwrapped suite, for
 	// WaitReasonUnwrappedContainers; DockerError the failed probe, for
 	// WaitReasonDaemonUnreachable. The overseer's gt-dc81 amendment requires the
 	// reason to be legible here, not just its enum name.

@@ -37,7 +37,24 @@ type Pool struct {
 	// Slots > 1; with Slots == 1 nothing is reserved (reserving the only
 	// slot would lock polecats out entirely).
 	ReservedForGate int
+	// YieldToGate makes a NEW non-gate acquisition wait while any
+	// gate-reserved slot is held by a live process, so a refinery gate never
+	// shares the machine with a crew or agent suite that started after it
+	// (gt-22hdp.29: a 7-12 min gate took 24 min beside two crew make-test
+	// runs). A holder that is already running is never preempted, and a gate
+	// acquisition never yields. No effect when ReservedForGate is 0.
+	YieldToGate bool
+	// MaxGateYield bounds how long one acquisition yields to running gates
+	// in total, so a hung gate or gates running back to back cannot starve
+	// the rest of the town; after it the waiter competes for a shared slot
+	// as before. Values <= 0 mean DefaultMaxGateYield.
+	MaxGateYield time.Duration
 }
+
+// DefaultMaxGateYield is Pool.MaxGateYield's default: longer than a slow gate
+// (24 min measured beside two crew suites, gt-22hdp.29), short enough that a
+// wedged one costs the town one wait rather than the day.
+const DefaultMaxGateYield = 30 * time.Minute
 
 // DefaultPool is the pre-pool behavior: one slot, nothing reserved. Acquire
 // and Status use it.
@@ -50,6 +67,9 @@ func (p Pool) normalized() Pool {
 	}
 	if p.ReservedForGate < 0 {
 		p.ReservedForGate = 0
+	}
+	if p.MaxGateYield <= 0 {
+		p.MaxGateYield = DefaultMaxGateYield
 	}
 	if p.Slots == 1 {
 		p.ReservedForGate = 0
@@ -363,12 +383,31 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 		return h
 	}
 
+	// Yielding to a running gate (gt-22hdp.29) applies to a non-gate caller
+	// only, and not to work nested under a gate's own hold: yielding to the
+	// very gate it runs inside would stall that gate on itself. yielded is
+	// this call's total time spent yielding, bounded by MaxGateYield so no
+	// gate — hung, leaked or merely followed by another — starves it.
+	yieldApplies := pool.YieldToGate && pool.ReservedForGate > 0 && !IsGateRole(role) && !g.underGateHold(townRoot)
+	var yielded time.Duration
+	yieldCapLogged := false
+
 	for {
 		passStart := g.clock.Now()
 		// passReason is why this pass could not grant; "" means nothing
 		// blocked it, which only a grant can end.
 		var passReason WaitReason
+		if yieldApplies && yielded < pool.MaxGateYield {
+			if owner, running := g.runningGate(townRoot, pool); running {
+				watch.noteGateHolder(owner)
+				passReason = WaitReasonGateRunning
+			}
+		}
 		for _, i := range candidates {
+			if passReason == WaitReasonGateRunning {
+				// Yielding: this pass takes no slot at all.
+				break
+			}
 			unlock, ok, err := lock.FlockTryAcquire(SlotLockPath(townRoot, i))
 			if err != nil {
 				return nil, err
@@ -461,8 +500,63 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 		g.clock.Sleep(g.pollInterval)
 		// Credited after the sleep so a blocked pass carries the poll interval
 		// it spent waiting, not just the microseconds its probes took.
-		watch.credit(passReason, g.clock.Since(passStart))
+		passTime := g.clock.Since(passStart)
+		watch.credit(passReason, passTime)
+		if passReason == WaitReasonGateRunning {
+			yielded += passTime
+			if yielded >= pool.MaxGateYield && !yieldCapLogged {
+				yieldCapLogged = true
+				fmt.Fprintf(g.probeOut, "gt slot: %s yielded %s to running gates, reaching the yield cap %s; competing for a shared slot now\n",
+					role, yielded.Round(time.Second), pool.MaxGateYield.Round(time.Second))
+			}
+		}
 	}
+}
+
+// underGateHold reports whether this process descends from a gate's hold on
+// townRoot's pool, by the reentrant marker it inherited (see ReentrantEnvVar).
+func (g *Gate) underGateHold(townRoot string) bool {
+	m, ok := g.reentrantHolder()
+	return ok && m.validAncestor(townRoot, g.pid) && IsGateRole(m.role)
+}
+
+// runningGate reports whether a live gate holds one of pool's gate-reserved
+// slots, and that gate's owner (nil when its metadata is unreadable). Only
+// gate roles can take a reserved slot, so a held one is a running gate.
+//
+// Liveness is the pool's usual one: the flock, which the kernel drops when
+// its holder dies, so a gate that crashes or is killed stops being waited on
+// at the next poll. A flock still held whose recorded owner process is gone
+// — the descriptor outlived its holder in some orphan — is a leak, not a
+// running gate, and is not yielded to.
+func (g *Gate) runningGate(townRoot string, pool Pool) (*Owner, bool) {
+	pool = pool.normalized()
+	for i := 0; i < pool.ReservedForGate; i++ {
+		path := SlotLockPath(townRoot, i)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		unlock, ok, err := lock.FlockTryAcquire(path)
+		if err != nil {
+			continue
+		}
+		if ok {
+			unlock()
+			continue
+		}
+		owner := readSlotOwner(townRoot, i)
+		if g.ownerGone(owner) {
+			continue
+		}
+		return owner, true
+	}
+	return nil, false
+}
+
+// ownerGone reports whether owner names a process that certainly no longer
+// exists. Unknown owners are not gone.
+func (g *Gate) ownerGone(owner *Owner) bool {
+	return owner != nil && owner.PID > 0 && g.owner.gone(owner.PID)
 }
 
 // SlotState is the resolved state of one slot in a StatusPool report.
@@ -496,7 +590,7 @@ func StatusPool(townRoot string, pool Pool) (Report, error) {
 
 // StatusPool is the package-level StatusPool on this gate.
 func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
-	rep, err := StatusPoolLocksOnly(townRoot, pool)
+	rep, err := g.StatusPoolLocksOnly(townRoot, pool)
 	if err != nil {
 		return Report{}, err
 	}
@@ -543,6 +637,11 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 // the web dashboard's Gate panel, the refinery's Busy() check, Acquire itself
 // — keep using StatusPool/Status.
 func StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
+	return NewGate().StatusPoolLocksOnly(townRoot, pool)
+}
+
+// StatusPoolLocksOnly is the package-level StatusPoolLocksOnly on this gate.
+func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 	pool = pool.normalized()
 	var rep Report
 
@@ -584,6 +683,19 @@ func StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 	}
 	rep.Total = len(rep.Slots)
 	rep.Reserved = pool.ReservedForGate
+
+	// The yield state reads the rows just probed rather than probing again:
+	// a held reserved slot whose owner is still alive is a running gate (see
+	// runningGate).
+	if pool.YieldToGate {
+		for _, st := range rep.Slots {
+			if st.Index < pool.ReservedForGate && st.Held && !g.ownerGone(st.Owner) {
+				rep.YieldingToGate = true
+				rep.GateHolder = st.Owner
+				break
+			}
+		}
+	}
 
 	// Markers are appended after the pool's own rows and counted in neither
 	// Total nor HeldCount: a review in flight holds no pool slot, and a pool
