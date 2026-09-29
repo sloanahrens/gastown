@@ -27,3 +27,47 @@ func TestReduce(t *testing.T) {
 		t.Errorf("commands = %+v", snap.Commands)
 	}
 }
+
+func TestSubcommandOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		help string
+		want bool
+		err  bool
+	}{
+		{"not runnable", "Manage molecules\n\nUsage:\n  bd mol [command]\n\nAvailable Commands:\n", true, false},
+		{"runnable parent", "Usage:\n  bd mol wisp [proto-id] [flags]\n  bd mol wisp [command]\n\n", false, false},
+		{"no usage section", "something else\n", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SubcommandOnly(tc.help)
+			if (err != nil) != tc.err || got != tc.want {
+				t.Fatalf("SubcommandOnly = %v, %v; want %v, err=%v", got, err, tc.want, tc.err)
+			}
+		})
+	}
+}
+
+func TestMarkSubcommandOnly(t *testing.T) {
+	t.Parallel()
+	snap := Snapshot{Commands: []Command{{Path: "mol"}, {Path: "mol wisp"}, {Path: "mol wisp list"}, {Path: "show"}}}
+	var asked []string
+	help := func(path string) (string, error) {
+		asked = append(asked, path)
+		if path == "mol" {
+			return "Usage:\n  bd mol [command]\n", nil
+		}
+		return "Usage:\n  bd mol wisp [id] [flags]\n  bd mol wisp [command]\n", nil
+	}
+	if err := MarkSubcommandOnly(&snap, help); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(asked, ",") != "mol,mol wisp" {
+		t.Errorf("help asked for %v; want only the parents", asked)
+	}
+	if !snap.Commands[0].SubcommandOnly || snap.Commands[1].SubcommandOnly {
+		t.Errorf("commands = %+v", snap.Commands)
+	}
+}

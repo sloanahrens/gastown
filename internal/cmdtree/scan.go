@@ -50,14 +50,45 @@ func commandWords(rest string) []string {
 	return words
 }
 
-// scanShellLine returns the invocations on one line of shell-like text.
+// scanShellLine returns the invocations on one line of shell-like text. A
+// mention bounded by whitespace inside an open quote is text, not a command
+// (log "Installing gt from ..."), unless a shell operator puts it in command
+// position ("... && gt prime").
 func scanShellLine(file string, line int, text string) []Ref {
 	trimmed := strings.TrimSpace(text)
 	if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
 		return nil
 	}
+	return scanMatches(file, line, text, func(boundary byte, start int) bool {
+		if !isSpace(boundary) || !insideQuote(text[:start]) {
+			return true
+		}
+		return commandPosition(text[:start])
+	})
+}
+
+// scanInlineSpan returns the invocations in one markdown code span. Spans are
+// often prose (`Rogue bd check: clean`), so gt/bd counts only in command
+// position: at the start of the span or after a shell operator, past any
+// VAR=value assignments.
+func scanInlineSpan(file string, line int, span string) []Ref {
+	return scanMatches(file, line, span, func(_ byte, start int) bool {
+		return commandPosition(span[:start])
+	})
+}
+
+// scanMatches collects the invocations in text that keep accepts; boundary
+// is the byte before gt/bd (0 at the start of text).
+func scanMatches(file string, line int, text string, keep func(boundary byte, start int) bool) []Ref {
 	var refs []Ref
 	for _, m := range invocation.FindAllStringSubmatchIndex(text, -1) {
+		var boundary byte
+		if m[2] > m[0] {
+			boundary = text[m[0]]
+		}
+		if !keep(boundary, m[2]) {
+			continue
+		}
 		words := commandWords(text[m[1]:])
 		if len(words) == 0 {
 			continue
@@ -65,6 +96,37 @@ func scanShellLine(file string, line int, text string) []Ref {
 		refs = append(refs, Ref{File: file, Line: line, Bin: text[m[2]:m[3]], Words: words})
 	}
 	return refs
+}
+
+func isSpace(b byte) bool { return b == ' ' || b == '\t' }
+
+// insideQuote reports whether prefix ends inside an unclosed shell quote.
+func insideQuote(prefix string) bool {
+	var quote byte
+	for i := 0; i < len(prefix); i++ {
+		c := prefix[i]
+		switch {
+		case c == '\\' && quote != '\'':
+			i++
+		case quote == 0 && (c == '"' || c == '\''):
+			quote = c
+		case c == quote:
+			quote = 0
+		}
+	}
+	return quote != 0
+}
+
+var (
+	trailingAssignments = regexp.MustCompile(`(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+$`)
+	commandPositionEnd  = regexp.MustCompile("(?:^|&&|\\|\\||\\||;|\\$\\(|\\(|\\{|`|(?:^|\\s)(?:then|do|else|exec|xargs|if|while|until|!))\\s*$")
+)
+
+// commandPosition reports whether a command starting right after prefix is
+// in command position.
+func commandPosition(prefix string) bool {
+	prefix = trailingAssignments.ReplaceAllString(prefix, "")
+	return commandPositionEnd.MatchString(prefix)
 }
 
 // ScanShell treats every non-comment line of text as shell. firstLine is the
@@ -95,7 +157,7 @@ func (m *markdown) line(file string, n int, text string) []Ref {
 	}
 	var refs []Ref
 	for _, span := range inlineCode.FindAllStringSubmatch(text, -1) {
-		refs = append(refs, scanShellLine(file, n, span[1])...)
+		refs = append(refs, scanInlineSpan(file, n, span[1])...)
 	}
 	return refs
 }
@@ -123,17 +185,33 @@ var tomlUnescaper = strings.NewReplacer(`\\`, `\`, `\n`, "\n", `\"`, `"`, `\t`, 
 // ScanTOMLMarkdown scans a formula: TOML whose string values are markdown.
 // Single-line strings carry their newlines as \n escapes, so each physical
 // line is un-escaped and its logical lines all report the physical line.
+// Keys and tables are recognised only outside multiline strings, where a
+// shell line such as fail=0 would otherwise read as one.
 func ScanTOMLMarkdown(file, text string) []Ref {
 	var md markdown
 	var refs []Ref
+	multi := "" // closing delimiter of the multiline string we are in
 	for i, raw := range strings.Split(text, "\n") {
-		if tomlTable.MatchString(raw) {
-			md.inFence = false
-			continue
-		}
-		if loc := tomlKey.FindStringIndex(raw); loc != nil {
-			md.inFence = false
-			raw = raw[loc[1]:]
+		if multi != "" {
+			if strings.Contains(raw, multi) {
+				multi = ""
+			}
+		} else {
+			if tomlTable.MatchString(raw) {
+				md.inFence = false
+				continue
+			}
+			if m := tomlKey.FindStringSubmatchIndex(raw); m != nil {
+				md.inFence = false
+				open := ""
+				if m[2] >= 0 {
+					open = raw[m[2]:m[3]]
+				}
+				raw = raw[m[1]:]
+				if (open == `"""` || open == "'''") && !strings.Contains(raw, open) {
+					multi = open
+				}
+			}
 		}
 		for _, l := range strings.Split(tomlUnescaper.Replace(raw), "\n") {
 			refs = append(refs, md.line(file, i+1, l)...)
@@ -232,6 +310,36 @@ func ScanGo(file string, src []byte) ([]Ref, error) {
 	return refs, nil
 }
 
+// jsExec matches an exec-style call whose program is gt or bd and whose
+// arguments are an array literal: pi.exec("gt", ["prime", "--hook"]).
+var (
+	jsExec   = regexp.MustCompile(`(?s)\bexec\w*\(\s*["'](gt|bd)["']\s*,\s*\[([^\]]*)\]`)
+	jsString = regexp.MustCompile(`^["']([^"']*)["']$`)
+)
+
+// ScanJS finds exec("gt"|"bd", [...]) calls in JavaScript and TypeScript hook
+// templates. Other strings in those files are log and error text that names
+// gt in prose ("gt tap guard rejected this operation"), so they are not read.
+func ScanJS(file, text string) []Ref {
+	var refs []Ref
+	for _, m := range jsExec.FindAllStringSubmatchIndex(text, -1) {
+		var words []string
+		for _, el := range strings.Split(text[m[4]:m[5]], ",") {
+			lit := jsString.FindStringSubmatch(strings.TrimSpace(el))
+			if lit == nil || !cmdWord.MatchString(lit[1]) {
+				break
+			}
+			words = append(words, lit[1])
+		}
+		if len(words) == 0 {
+			continue
+		}
+		line := 1 + strings.Count(text[:m[0]], "\n")
+		refs = append(refs, Ref{File: file, Line: line, Bin: text[m[2]:m[3]], Words: words})
+	}
+	return refs
+}
+
 type scanFunc func(file string, src []byte) ([]Ref, error)
 
 func textScan(fn func(file, text string) []Ref) scanFunc {
@@ -242,6 +350,7 @@ var (
 	scanShellFile = textScan(func(file, text string) []Ref { return ScanShell(file, text, 1) })
 	scanMDFile    = textScan(ScanMarkdown)
 	scanTOMLFile  = textScan(ScanTOMLMarkdown)
+	scanJSFile    = textScan(ScanJS)
 )
 
 // scannerFor picks the scanner for a repo-relative path, or nil when the
@@ -263,6 +372,9 @@ func scannerFor(rel string) scanFunc {
 			return scanTOMLFile
 		}
 	case under("internal/hooks/templates/"):
+		if ext == ".js" || ext == ".ts" {
+			return scanJSFile
+		}
 		return scanShellFile
 	case under("internal/templates/"), under("templates/"):
 		if ext == ".md" || ext == ".tmpl" {

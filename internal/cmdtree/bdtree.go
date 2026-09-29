@@ -17,10 +17,7 @@ import (
 //go:embed bd-command-tree.json
 var bdCommandTree []byte
 
-// LoadBdTree returns the bd command tree from the embedded snapshot. The
-// snapshot does not record which commands accept positional arguments, so
-// every parent is treated as argument-free: a plain word after a bd parent
-// must be one of its subcommands.
+// LoadBdTree returns the bd command tree from the embedded snapshot.
 func LoadBdTree() (*Tree, bdsnapshot.Snapshot, error) {
 	var snap bdsnapshot.Snapshot
 	if err := json.Unmarshal(bdCommandTree, &snap); err != nil {
@@ -31,17 +28,7 @@ func LoadBdTree() (*Tree, bdsnapshot.Snapshot, error) {
 	}
 	t := NewTree()
 	for _, c := range snap.Commands {
-		t.Add(strings.Fields(c.Path), c.Aliases, true)
+		t.Add(strings.Fields(c.Path), c.Aliases, !c.SubcommandOnly)
 	}
-	markParentsArgumentFree(t.root)
 	return t, snap, nil
-}
-
-func markParentsArgumentFree(n *Node) {
-	for _, c := range n.Children {
-		if len(c.Children) > 0 {
-			c.TakesArgs = false
-		}
-		markParentsArgumentFree(c)
-	}
 }

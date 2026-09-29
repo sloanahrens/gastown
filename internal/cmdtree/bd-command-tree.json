@@ -24,7 +24,8 @@
   ],
   "commands": [
     {
-      "path": "admin"
+      "path": "admin",
+      "subcommand_only": true
     },
     {
       "path": "admin cleanup",
@@ -64,7 +65,8 @@
       ]
     },
     {
-      "path": "ado"
+      "path": "ado",
+      "subcommand_only": true
     },
     {
       "path": "ado projects"
@@ -112,7 +114,8 @@
       ]
     },
     {
-      "path": "audit"
+      "path": "audit",
+      "subcommand_only": true
     },
     {
       "path": "audit label",
@@ -136,7 +139,8 @@
       ]
     },
     {
-      "path": "backup"
+      "path": "backup",
+      "subcommand_only": true
     },
     {
       "path": "backup init",
@@ -257,7 +261,8 @@
       ]
     },
     {
-      "path": "completion"
+      "path": "completion",
+      "subcommand_only": true
     },
     {
       "path": "completion bash",
@@ -284,7 +289,8 @@
       ]
     },
     {
-      "path": "config"
+      "path": "config",
+      "subcommand_only": true
     },
     {
       "path": "config apply",
@@ -326,7 +332,8 @@
       "path": "config validate"
     },
     {
-      "path": "conflicts"
+      "path": "conflicts",
+      "subcommand_only": true
     },
     {
       "path": "conflicts list"
@@ -578,7 +585,8 @@
       ]
     },
     {
-      "path": "dolt"
+      "path": "dolt",
+      "subcommand_only": true
     },
     {
       "path": "dolt clean-databases",
@@ -613,7 +621,8 @@
       ]
     },
     {
-      "path": "dolt remote"
+      "path": "dolt remote",
+      "subcommand_only": true
     },
     {
       "path": "dolt remote add",
@@ -681,7 +690,8 @@
       ]
     },
     {
-      "path": "epic"
+      "path": "epic",
+      "subcommand_only": true
     },
     {
       "path": "epic close-eligible",
@@ -697,7 +707,8 @@
       ]
     },
     {
-      "path": "events"
+      "path": "events",
+      "subcommand_only": true
     },
     {
       "path": "events export",
@@ -733,7 +744,8 @@
       ]
     },
     {
-      "path": "federation"
+      "path": "federation",
+      "subcommand_only": true
     },
     {
       "path": "federation add-peer",
@@ -787,7 +799,8 @@
       "path": "forget"
     },
     {
-      "path": "formula"
+      "path": "formula",
+      "subcommand_only": true
     },
     {
       "path": "formula convert",
@@ -813,7 +826,8 @@
       "path": "formula show"
     },
     {
-      "path": "gate"
+      "path": "gate",
+      "subcommand_only": true
     },
     {
       "path": "gate add-waiter"
@@ -874,7 +888,8 @@
       ]
     },
     {
-      "path": "github"
+      "path": "github",
+      "subcommand_only": true
     },
     {
       "path": "github pull",
@@ -908,7 +923,8 @@
       ]
     },
     {
-      "path": "gitlab"
+      "path": "gitlab",
+      "subcommand_only": true
     },
     {
       "path": "gitlab projects"
@@ -977,7 +993,8 @@
       ]
     },
     {
-      "path": "hooks"
+      "path": "hooks",
+      "subcommand_only": true
     },
     {
       "path": "hooks install",
@@ -1102,7 +1119,8 @@
       "path": "init-safety"
     },
     {
-      "path": "jira"
+      "path": "jira",
+      "subcommand_only": true
     },
     {
       "path": "jira pull",
@@ -1135,7 +1153,8 @@
       ]
     },
     {
-      "path": "kv"
+      "path": "kv",
+      "subcommand_only": true
     },
     {
       "path": "kv clear"
@@ -1150,7 +1169,8 @@
       "path": "kv set"
     },
     {
-      "path": "label"
+      "path": "label",
+      "subcommand_only": true
     },
     {
       "path": "label add"
@@ -1168,7 +1188,8 @@
       "path": "label remove"
     },
     {
-      "path": "linear"
+      "path": "linear",
+      "subcommand_only": true
     },
     {
       "path": "linear pull",
@@ -1304,7 +1325,8 @@
       "path": "memories"
     },
     {
-      "path": "merge-slot"
+      "path": "merge-slot",
+      "subcommand_only": true
     },
     {
       "path": "merge-slot acquire",
@@ -1451,7 +1473,8 @@
       "path": "mol",
       "aliases": [
         "protomolecule"
-      ]
+      ],
+      "subcommand_only": true
     },
     {
       "path": "mol bond",
@@ -1584,7 +1607,8 @@
       ]
     },
     {
-      "path": "notion"
+      "path": "notion",
+      "subcommand_only": true
     },
     {
       "path": "notion connect",
@@ -1676,7 +1700,8 @@
       ]
     },
     {
-      "path": "provenance"
+      "path": "provenance",
+      "subcommand_only": true
     },
     {
       "path": "provenance by-ref"
@@ -1818,7 +1843,8 @@
       ]
     },
     {
-      "path": "repo"
+      "path": "repo",
+      "subcommand_only": true
     },
     {
       "path": "repo add",
@@ -1853,7 +1879,8 @@
       ]
     },
     {
-      "path": "rules"
+      "path": "rules",
+      "subcommand_only": true
     },
     {
       "path": "rules audit",
@@ -2012,7 +2039,8 @@
       ]
     },
     {
-      "path": "swarm"
+      "path": "swarm",
+      "subcommand_only": true
     },
     {
       "path": "swarm create",
@@ -2130,7 +2158,8 @@
       ]
     },
     {
-      "path": "upgrade"
+      "path": "upgrade",
+      "subcommand_only": true
     },
     {
       "path": "upgrade ack"
@@ -2142,7 +2171,8 @@
       "path": "upgrade status"
     },
     {
-      "path": "vc"
+      "path": "vc",
+      "subcommand_only": true
     },
     {
       "path": "vc commit",
@@ -2167,7 +2197,8 @@
       "path": "where"
     },
     {
-      "path": "worktree"
+      "path": "worktree",
+      "subcommand_only": true
     },
     {
       "path": "worktree create",

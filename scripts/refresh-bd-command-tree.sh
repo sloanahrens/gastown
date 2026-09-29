@@ -8,10 +8,11 @@
 #   make bd-command-tree BEADS_SRC=<checkout> [BEADS_REF=<ref>]
 #
 # Exports BEADS_REF with git archive (the checkout is not modified), builds bd
-# into a temporary directory (never on PATH), runs `bd capabilities --json` in
-# an empty directory (the command opens no store), and reduces the output.
-# Refresh when the fork's commands change or its contract_version is bumped,
-# and update the contract_version assertion in bdtree_test.go with it.
+# into a temporary directory (never on PATH), and runs gen-bd-tree against it:
+# `bd capabilities --json` plus `bd <parent> --help` for each parent, in an
+# empty directory (neither opens a store). Refresh when the fork's commands
+# change or its contract_version is bumped, and update the contract_version
+# assertion in internal/cmdtree/bdtree_test.go with it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,11 +23,10 @@ OUT="$ROOT/internal/cmdtree/bd-command-tree.json"
 commit="$(git -C "$SRC" rev-parse --verify "$REF^{commit}")"
 work="$(mktemp -d "${TMPDIR:-/tmp}/bd-command-tree.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/src" "$work/empty"
+mkdir -p "$work/src"
 
 git -C "$SRC" archive "$commit" | tar -x -C "$work/src"
 (cd "$work/src" && go build -ldflags "-X main.Commit=$commit" -o "$work/bd" ./cmd/bd)
-(cd "$work/empty" && BD_DISABLE_METRICS=1 "$work/bd" capabilities --json) >"$work/caps.json"
-(cd "$ROOT" && go run ./internal/cmdtree/gen-bd-tree -source "sloanahrens/beads $REF") <"$work/caps.json" >"$work/tree.json"
+(cd "$ROOT" && go run ./internal/cmdtree/gen-bd-tree -bd "$work/bd" -source "sloanahrens/beads $REF") >"$work/tree.json"
 mv "$work/tree.json" "$OUT"
 echo "wrote $OUT from $REF ($commit)"
