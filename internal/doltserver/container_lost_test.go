@@ -10,7 +10,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-// lostContainerMarkers are the error fragments that mean the shared test Dolt
+// lostContainerMarkers are the error fragments that mean the test Dolt
 // container stopped answering, rather than Dolt answering the query (gt-qkuj).
 //
 // This package's container-backed tests reach that container with a raw
@@ -38,7 +38,7 @@ var lostContainerMarkers = []string{
 	"connection refused",       // the container is gone: nothing is accepting
 }
 
-// isLostContainerErr reports whether err is a lost connection to the shared test
+// isLostContainerErr reports whether err is a lost connection to the test
 // Dolt container rather than an answer from it.
 //
 // It only labels a failure: failContainerErr fails the test either way. The

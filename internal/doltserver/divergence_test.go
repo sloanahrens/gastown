@@ -22,7 +22,7 @@ import (
 // (dolt_remotes, dolt_remote_branches, dolt_log) are the part most likely to
 // rot, and a fake would encode the same assumptions as the implementation.
 func TestFetchAndVerify(t *testing.T) {
-	admin := doltTestAdmin(t)
+	admin := doltTestServer(t)
 
 	t.Run("no remote has nothing to verify", func(t *testing.T) {
 		conn, name := createDivergenceTestDB(t, admin)
@@ -230,13 +230,13 @@ func TestFetchAndVerify(t *testing.T) {
 
 // TestFetchAndVerifyRejectsInvalidDatabaseName pins the identifier check: the
 // database name is interpolated into a query by callers, so a name that is not
-// a plain identifier must be refused before anything reaches the server.
+// a plain identifier must be refused before anything reaches the server. The
+// connection is nil, so a check that let any query through panics instead of
+// passing.
 func TestFetchAndVerifyRejectsInvalidDatabaseName(t *testing.T) {
-	admin := doltTestAdmin(t)
-	conn, _ := createDivergenceTestDB(t, admin)
-
+	t.Parallel()
 	for _, name := range []string{"", "bad name", "db;DROP DATABASE gt", "db`x"} {
-		if _, err := fetchAndVerify(t, conn, name); err == nil {
+		if _, err := fetchAndVerify(t, nil, name); err == nil {
 			t.Errorf("FetchAndVerify(%q) = nil error, want a refusal", name)
 		} else if !strings.Contains(err.Error(), "invalid database name") {
 			t.Errorf("FetchAndVerify(%q) error = %v, want it to name the invalid identifier", name, err)
@@ -246,13 +246,24 @@ func TestFetchAndVerifyRejectsInvalidDatabaseName(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-// doltTestAdmin returns a server-level connection to the shared ephemeral Dolt
-// container, skipping when container tests are not opted in.
-func doltTestAdmin(t *testing.T) *sql.DB {
-	t.Helper()
-	testutil.RequireDoltContainer(t)
+// divergenceServer is a Dolt server of this test's own and a server-level
+// connection to it.
+type divergenceServer struct {
+	admin *sql.DB
+	port  string
+}
 
-	dsn := "root:@tcp(127.0.0.1:" + testutil.DoltContainerPort() + ")/"
+// doltTestServer starts a Dolt container for the calling test alone, skipping
+// when container tests are not opted in. The divergence cases create
+// databases, and a CREATE, DROP or purge on the package's shared container
+// would change the catalog under whatever else is using it, which the pool
+// (testutil/doltpool.go) exists to rule out. The container goes when the test
+// ends, and every database with it.
+func doltTestServer(t *testing.T) *divergenceServer {
+	t.Helper()
+	port := testutil.StartIsolatedDoltContainer(t)
+
+	dsn := "root:@tcp(127.0.0.1:" + port + ")/"
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		failContainerErr(t, err, "open admin connection")
@@ -262,28 +273,21 @@ func doltTestAdmin(t *testing.T) *sql.DB {
 		failContainerErr(t, err, "ping Dolt container")
 	}
 	t.Cleanup(func() { db.Close() })
-	return db
+	return &divergenceServer{admin: db, port: port}
 }
 
-// createDivergenceTestDB creates a fresh database on the container and returns
-// a connection bound to it. The "dolt_remotes_check_" prefix is registered with
-// the orphan-cleanup call sites that match database names, so a leaked database
-// here is still recognized as test cruft.
-func createDivergenceTestDB(t *testing.T, admin *sql.DB) (*sql.DB, string) {
+// createDivergenceTestDB creates a fresh database on the test's own container
+// and returns a connection bound to it. Nothing drops it: the container goes
+// at the end of the test.
+func createDivergenceTestDB(t *testing.T, srv *divergenceServer) (*sql.DB, string) {
 	t.Helper()
 
 	name := fmt.Sprintf("dolt_remotes_check_div_%d", time.Now().UnixNano())
-	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE `%s`", name)); err != nil {
+	if _, err := srv.admin.Exec(fmt.Sprintf("CREATE DATABASE `%s`", name)); err != nil {
 		failContainerErr(t, err, "create database "+name)
 	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name)); err != nil {
-			t.Logf("drop database %s: %v", name, err)
-		}
-		_, _ = admin.Exec("CALL dolt_purge_dropped_databases()")
-	})
 
-	dsn := "root:@tcp(127.0.0.1:" + testutil.DoltContainerPort() + ")/" + name + "?parseTime=true"
+	dsn := "root:@tcp(127.0.0.1:" + srv.port + ")/" + name + "?parseTime=true"
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
 		failContainerErr(t, err, "open connection to "+name)
