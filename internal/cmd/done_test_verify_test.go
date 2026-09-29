@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/lintlock"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // initVerifyTestGoRepo builds a tiny Go module with two packages (pkga,
@@ -98,15 +100,6 @@ func stubVerifyGate(
 // seconds.
 func stubVerifyLintRetryDelay(vg *testVerifyGate, delays ...time.Duration) {
 	vg.lintRetryDelays = delays
-}
-
-// stubLintLockRetryDelay is stubVerifyLintRetryDelay for the pre-verification
-// gates (runPreVerificationGates), which still read lintlock.RetryDelay.
-func stubLintLockRetryDelay(t *testing.T, delays ...time.Duration) {
-	t.Helper()
-	prev := lintlock.RetryDelay
-	lintlock.RetryDelay = delays
-	t.Cleanup(func() { lintlock.RetryDelay = prev })
 }
 
 // stubVerifyProgress shortens the gate's progress interval so a test can
@@ -1252,4 +1245,37 @@ func TestRunDefaultTestVerification_SlotWaitPrintsProgressBeforeGivingUp(t *test
 // collaborators, which the stub helpers above replace one at a time.
 func newTestVerifyGate() *testVerifyGate {
 	return defaultTestVerifyGate()
+}
+
+// TestDefaultTestVerifyGateWiring guards the defaults gt done's gate runs
+// with: every test drives its own testVerifyGate, so nothing else notices a
+// default that silently stops taking the slot (a no-op acquireSlot would run
+// container suites outside it) or stops watching for stray containers (an
+// interval of 0 disables gt-0ss4's watch).
+func TestDefaultTestVerifyGateWiring(t *testing.T) {
+	t.Parallel()
+	vg := defaultTestVerifyGate()
+	funcIs := func(name string, got, want any) {
+		t.Helper()
+		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(want).Pointer() {
+			t.Errorf("default gate's %s is not the production function", name)
+		}
+	}
+	funcIs("acquireSlot", vg.acquireSlot, acquireVerifySlot)
+	funcIs("runSuite", vg.runSuite, runVerifySuite)
+	funcIs("buildModule", vg.buildModule, goBuildWholeModule)
+	funcIs("watch.containers", vg.watch.containers, slot.GateContainers)
+	funcIs("watch.slotHeld", vg.watch.slotHeld, gateSlotHeld)
+	if vg.watch.interval != containerWatchInterval {
+		t.Errorf("watch.interval = %s, want %s", vg.watch.interval, containerWatchInterval)
+	}
+	if vg.lintTimeout != defaultLintVerifyTimeout {
+		t.Errorf("lintTimeout = %s, want %s", vg.lintTimeout, defaultLintVerifyTimeout)
+	}
+	if vg.progressInterval != testVerifyProgressInterval {
+		t.Errorf("progressInterval = %s, want %s", vg.progressInterval, testVerifyProgressInterval)
+	}
+	if vg.lintRetryDelays != nil || vg.env != nil {
+		t.Errorf("lintRetryDelays = %v, env set = %t; want nil (lintlock.RetryDelay, os.Environ)", vg.lintRetryDelays, vg.env != nil)
+	}
 }

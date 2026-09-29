@@ -20,8 +20,9 @@ import (
 // that started it, so a package running one container-backed test puts a
 // matching container up for seconds. One `docker ps` per poll — bounded by
 // slot's own dockerPSTimeout when the daemon is wedged — against a suite that
-// runs for minutes. A var so tests can drive the watch without waiting out the
-// real interval; 0 disables it (see containerWatchDeps.start).
+// runs for minutes. Tests drive the watch with their own containerWatchDeps
+// interval rather than waiting out this one; an interval of 0 disables the
+// watch (see containerWatchDeps.start).
 const containerWatchInterval = 5 * time.Second
 
 // containerWatchDeps is what a container watch polls, and how often. Tests
