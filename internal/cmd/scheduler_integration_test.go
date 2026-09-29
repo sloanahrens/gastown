@@ -5,7 +5,7 @@
 // dry-run, circuit breaker) against a Dolt-server-backed beads DB. No Claude
 // credentials, no agent sessions.
 //
-// Requires a Dolt server (managed by requireDoltServer/cleanupDoltServer).
+// Requires a Dolt server (managed by requireDoltServer).
 //
 // Run with:
 //
