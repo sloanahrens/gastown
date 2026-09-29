@@ -1,5 +1,7 @@
 # Releasing Gas Town
 
+> **This fork does not publish releases.** The upstream release, Windows CI and project-management workflows were removed (gt-22hdp.43); this document describes the upstream process only.
+
 ## Distribution Channels
 
 | Channel | Mechanism | Automatic? |
