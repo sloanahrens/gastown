@@ -62,7 +62,7 @@ id), so it is checked first.
 ## Step 1: Resolve town and enumerate operational rigs
 
 ```bash
-TOWN_ROOT="${GT_TOWN_ROOT:?}"   # set by the daemon for every plugin run
+TOWN_ROOT="${GT_TOWN_ROOT:?GT_TOWN_ROOT is unset; the daemon sets it for every plugin run}"
 RIG_LIST=$(gt rig list --json | jq -r '
   .[] | select((.status // "" | ascii_downcase) == "operational") | .name
 ')

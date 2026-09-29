@@ -4,6 +4,11 @@
 // or untyped argv: nothing else notices when a command they name is renamed
 // or removed, and an agent handed "unknown command" improvises.
 //
+// The scan is best-effort: it checks the leading command words of each
+// invocation it can see (code blocks, inline code in command position, shell
+// lines, exec literals) and skips prose, text inside quotes, and argv built
+// at runtime. Per-source floors in the gate catch a scanner gone blind.
+//
 // gt's tree comes from its cobra root in-process; bd's from a checked-in
 // snapshot of `bd capabilities --json` (see bdtree.go). The gate that runs
 // the check over the repository lives in internal/cmd, the only package that
