@@ -288,7 +288,7 @@ var maintenanceQuietFn = func(d *Daemon) (bool, string) { return d.maintenanceQu
 // in-flight marker. Locks-only: no docker ps.
 var maintenanceSlotHoldersFn = func(townRoot string) ([]string, error) {
 	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	rep, err := slot.StatusPoolLocksOnly(townRoot, slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()})
+	rep, err := slot.StatusPoolLocksOnly(townRoot, slot.PoolFromConfig(cg))
 	if err != nil {
 		return nil, err
 	}

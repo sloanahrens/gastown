@@ -2290,7 +2290,7 @@ var gateSlotNone = gateSlotEvidence{Detail: "gate-slot=none"}
 // this half of the liveness check.
 func readHeldGateSlot(townRoot, rigName, polecatName string) gateSlotEvidence {
 	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	rep, err := slot.StatusPoolLocksOnly(townRoot, slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()})
+	rep, err := slot.StatusPoolLocksOnly(townRoot, slot.PoolFromConfig(cg))
 	if err != nil {
 		// A pool we could not read and a pool with no holder are different
 		// facts. Reporting both as "none" asserts something never observed,

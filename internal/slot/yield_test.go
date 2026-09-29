@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // yieldPool is the town's shape (operational.container_gate on 2026-09-29):
@@ -306,5 +308,28 @@ func TestYield_StatusShowsGateRunning(t *testing.T) {
 	}
 	if rep.YieldingToGate || rep.GateHolder != nil {
 		t.Fatalf("status after the gate released: yielding=%v holder=%+v", rep.YieldingToGate, rep.GateHolder)
+	}
+}
+
+// TestPoolFromConfig: the town's operational.container_gate block maps onto a
+// Pool, and an unset block yields to the gate by default.
+func TestPoolFromConfig(t *testing.T) {
+	t.Parallel()
+	slots, reserved, off := 4, 2, false
+
+	got := PoolFromConfig(&config.ContainerGateThresholds{Slots: &slots, ReservedForGate: &reserved})
+	want := Pool{Slots: 4, ReservedForGate: 2, YieldToGate: true, MaxGateYield: config.DefaultContainerGateMaxGateYield}
+	if got != want {
+		t.Fatalf("PoolFromConfig(defaults) = %+v, want %+v", got, want)
+	}
+
+	got = PoolFromConfig(&config.ContainerGateThresholds{Slots: &slots, ReservedForGate: &reserved, YieldToGate: &off, MaxGateYield: "5m"})
+	want = Pool{Slots: 4, ReservedForGate: 2, YieldToGate: false, MaxGateYield: 5 * time.Minute}
+	if got != want {
+		t.Fatalf("PoolFromConfig(overrides) = %+v, want %+v", got, want)
+	}
+
+	if got := PoolFromConfig(nil); got != (Pool{Slots: 1, YieldToGate: true, MaxGateYield: config.DefaultContainerGateMaxGateYield}) {
+		t.Fatalf("PoolFromConfig(nil) = %+v, want the single-slot default", got)
 	}
 }

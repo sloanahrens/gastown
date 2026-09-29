@@ -142,6 +142,8 @@ const (
 const (
 	DefaultContainerGateSlots           = 1
 	DefaultContainerGateReservedForGate = 0
+	DefaultContainerGateYieldToGate     = true
+	DefaultContainerGateMaxGateYield    = 30 * time.Minute
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -183,6 +185,27 @@ func (g *ContainerGateThresholds) ReservedForGateV() int {
 		return *g.ReservedForGate
 	}
 	return DefaultContainerGateReservedForGate
+}
+
+// YieldToGateV reports whether new non-gate suites wait while a gate holds a
+// gate-reserved slot (default true).
+func (g *ContainerGateThresholds) YieldToGateV() bool {
+	if g != nil && g.YieldToGate != nil {
+		return *g.YieldToGate
+	}
+	return DefaultContainerGateYieldToGate
+}
+
+// MaxGateYieldD returns the configured or default cap on one acquisition's
+// total yield to running gates. An invalid or non-positive value falls back to
+// the default: a zero cap would silently turn yielding off.
+func (g *ContainerGateThresholds) MaxGateYieldD() time.Duration {
+	if g != nil && g.MaxGateYield != "" {
+		if d, err := time.ParseDuration(g.MaxGateYield); err == nil && d > 0 {
+			return d
+		}
+	}
+	return DefaultContainerGateMaxGateYield
 }
 
 // GetSessionConfig returns the session thresholds, never nil.

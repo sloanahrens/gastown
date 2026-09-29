@@ -79,7 +79,7 @@ var processAlive = processAliveOS
 // directory (gt-1ln0).
 var gateSlotReport = func(townRoot string) (slot.Report, error) {
 	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	return slot.StatusPool(townRoot, slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()})
+	return slot.StatusPool(townRoot, slot.PoolFromConfig(cg))
 }
 
 // FetchGate reads the container-gate pool for the dashboard's Gate panel.
