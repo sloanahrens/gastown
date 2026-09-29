@@ -1221,5 +1221,15 @@ else
   fail "install success: rc=$rc $(cat "$T/gt.log" 2>/dev/null)"
 fi
 
+# --- GT_TOWN_ROOT unset: fail loudly, never guess a town. gt has no command
+# that prints the town root (the old `gt town root` fallback printed help and
+# exited 0), so the plugin must stop before touching anything (gt-fcxe9.5). ---
+T=$(make_town)
+rc=0
+( export GT_TEST_TOWN="$T" HOME="$T" PATH="$T/bin:/opt/homebrew/bin:/usr/bin:/bin"; unset GT_TOWN_ROOT; bash "$RUN_SH" ) > "$T/run.out" 2>&1 || rc=$?
+if [ "$rc" = "0" ]; then fail "unset town root: exit 0, want a failure: $(cat "$T/run.out")"; else pass "unset town root: fails (exit $rc)"; fi
+if grep -q "GT_TOWN_ROOT is unset" "$T/run.out"; then pass "unset town root: says why"; else fail "unset town root: no reason given: $(cat "$T/run.out")"; fi
+if [ -e "$T/build.marker" ]; then fail "unset town root: make build ran"; else pass "unset town root: no build"; fi
+
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all rebuild-gt tests passed"

@@ -428,6 +428,27 @@ run_script() {
   return "$rc"
 }
 
+# GT_TOWN_ROOT unset: skip with the reason. gt has no command that prints
+# the town root (the old `gt town root` fallback printed help), so the
+# script must not guess one (gt-fcxe9.5).
+test_unset_town_root_skips() {
+  local town rc=0
+
+  setup_case
+  town="$GT_TOWN_ROOT"
+  unset GT_TOWN_ROOT
+  run_script_once || rc=$?
+  export GT_TOWN_ROOT="$town"
+
+  if [ "$rc" -eq 0 ]; then
+    record_pass "unset town root: exits 0 (skip)"
+  else
+    record_fail "unset town root: exit $rc"
+  fi
+  assert_file_contains "$TEST_STATE/output.log" "GT_TOWN_ROOT is unset" "unset town root: logs the reason"
+  assert_file_empty "$TEST_STATE/health_calls.log" "unset town root: checks no agents"
+}
+
 test_healthy_runtime() {
   local runtime="$1"
 
@@ -940,6 +961,8 @@ test_mass_death_recheck_one_remaining_restarts
 test_mass_death_recheck_reclassifies_dead_statuses
 test_mass_death_skips_actions
 test_invalid_mass_death_threshold_defaults
+
+test_unset_town_root_skips
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

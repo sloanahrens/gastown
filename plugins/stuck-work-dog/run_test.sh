@@ -280,6 +280,25 @@ run_plugin() {
   "$SCRIPT" > "$TEST_STATE/stdout.log" 2>"$TEST_STATE/stderr.log"
 }
 
+# GT_TOWN_ROOT unset: skip with the reason. gt has no command that prints
+# the town root (the old `gt town root` fallback printed help), so the
+# script must not guess one (gt-fcxe9.5).
+test_unset_town_root_skips() {
+  local rc=0
+
+  setup_test "unset_town_root"
+  unset GT_TOWN_ROOT
+  run_plugin || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    record_pass "unset_town_root: exits 0 (skip)"
+  else
+    record_fail "unset_town_root: exit $rc"
+  fi
+  assert_file_contains "$TEST_STATE/stdout.log" "GT_TOWN_ROOT is unset" "unset_town_root: logs the reason"
+  assert_file_empty "$TEST_STATE/escalate.log" "unset_town_root: no escalations"
+}
+
 # --- Test 1: no operational rigs — skip cleanly, still records success ------
 test_no_rigs() {
   setup_test "no_rigs"
@@ -543,6 +562,8 @@ test_queue_stall_fires_when_only_another_rig_has_a_batch
 test_queue_stall_fires_when_slot_status_unreadable
 test_no_unexpected_calls
 test_failed_escalation_exits_nonzero
+
+test_unset_town_root_skips
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="

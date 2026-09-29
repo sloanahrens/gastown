@@ -276,6 +276,26 @@ JSON
     "5 notes: the breaching worker's key is not cleared"
 }
 
+# GT_TOWN_ROOT unset: fail loudly with the reason. gt has no command that
+# prints the town root (the old `gt town root` fallback printed help and
+# exited 0), so the run must not continue against a guessed town (gt-fcxe9.5).
+test_unset_town_root_fails() {
+  echo ""
+  echo "=== unset GT_TOWN_ROOT ==="
+  new_case
+  unset GT_TOWN_ROOT
+
+  run_plugin "$CASE_DIR/out"
+  export GT_TOWN_ROOT="$CASE_DIR/town"
+
+  if [ "$PLUGIN_RC" = "0" ]; then
+    record_fail "unset town root: exited 0; want a failure"
+  else
+    record_pass "unset town root: fails (rc=$PLUGIN_RC)"
+  fi
+  assert_file_contains "$CASE_DIR/out" "GT_TOWN_ROOT is unset" "unset town root: says why"
+}
+
 test_empty_window_is_success() {
   echo ""
   echo "=== empty window ==="
@@ -662,6 +682,8 @@ test_registry_failure_is_fatal
 test_no_operational_rigs
 test_missing_checkout_is_fatal
 test_shared_checkout_is_read_once
+
+test_unset_town_root_fails
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then
