@@ -22,7 +22,15 @@ import (
 // that base to exercise changedGoPackages / runDefaultTestVerification.
 func initVerifyTestGoRepo(t *testing.T) (dir, base string) {
 	t.Helper()
-	dir = t.TempDir()
+	return cachedGitFixture(t, "verify-test-go-repo", func(dir string) (string, error) {
+		return buildVerifyTestGoRepo(t, dir), nil
+	})
+}
+
+// buildVerifyTestGoRepo makes initVerifyTestGoRepo's repo in dir and returns
+// its base commit.
+func buildVerifyTestGoRepo(t *testing.T, dir string) (base string) {
+	t.Helper()
 	runGit := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -57,7 +65,7 @@ func initVerifyTestGoRepo(t *testing.T) (dir, base string) {
 	runGit("commit", "-q", "-m", "base")
 	base = runGit("rev-parse", "HEAD")
 	runGit("update-ref", "refs/remotes/origin/main", base)
-	return dir, base
+	return base
 }
 
 // stubVerifyGate replaces the gate's slot-acquire and suite-runner hooks for

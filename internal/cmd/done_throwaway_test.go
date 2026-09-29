@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,14 @@ import (
 // cleans the branch up from there.
 func newThrowawayScenario(t *testing.T, throwawayPath string) string {
 	t.Helper()
-	dir := t.TempDir()
+	return cachedGitFixtureStrings(t, fmt.Sprint("newThrowawayScenario", throwawayPath), func(dir string) []string {
+		return []string{buildNewThrowawayScenario(t, dir, throwawayPath)}
+	})[0]
+}
+
+// buildNewThrowawayScenario makes newThrowawayScenario's repos under dir.
+func buildNewThrowawayScenario(t *testing.T, dir string, throwawayPath string) string {
+	t.Helper()
 	remote := filepath.Join(dir, "origin.git")
 	seed := filepath.Join(dir, "seed")
 	polecat := filepath.Join(dir, "polecat")

@@ -1486,7 +1486,14 @@ func TestHasSubmittableWorkForRecoveryFallback(t *testing.T) {
 
 func setupRecoveryGitRepo(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	return cachedGitFixtureStrings(t, "setupRecoveryGitRepo", func(root string) []string {
+		return []string{buildSetupRecoveryGitRepo(t, root)}
+	})[0]
+}
+
+// buildSetupRecoveryGitRepo makes setupRecoveryGitRepo's repos under root.
+func buildSetupRecoveryGitRepo(t *testing.T, root string) string {
+	t.Helper()
 	remote := filepath.Join(root, "remote.git")
 	repo := filepath.Join(root, "repo")
 	runCmd(t, root, "git", "init", "--bare", remote)

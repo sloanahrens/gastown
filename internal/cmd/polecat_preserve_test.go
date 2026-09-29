@@ -28,7 +28,16 @@ func gitNow(t *testing.T, dir string, args ...string) string {
 // remote path, and the branch name.
 func setupPreserveRepo(t *testing.T) (repo, remote, branch string) {
 	t.Helper()
-	dir := t.TempDir()
+	p := cachedGitFixtureStrings(t, "setupPreserveRepo", func(dir string) []string {
+		repo, remote, branch := buildSetupPreserveRepo(t, dir)
+		return []string{repo, remote, branch}
+	})
+	return p[0], p[1], p[2]
+}
+
+// buildSetupPreserveRepo makes setupPreserveRepo's repos under dir.
+func buildSetupPreserveRepo(t *testing.T, dir string) (repo, remote, branch string) {
+	t.Helper()
 	remote = filepath.Join(dir, "remote.git")
 	repo = filepath.Join(dir, "repo")
 	runGitCmd(t, "", "init", "--bare", remote)

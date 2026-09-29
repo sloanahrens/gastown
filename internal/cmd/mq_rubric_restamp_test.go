@@ -3,6 +3,7 @@ package cmd
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,7 +39,17 @@ const restampChangedRubric = `{
 // resolution test, whose manifest declares an absolute rubric path).
 func initRubricRestampRepo(t *testing.T, touchRubric bool) (clone, landedHead string) {
 	t.Helper()
-	tmp := t.TempDir()
+	root, f := cachedGitFixture(t, fmt.Sprintf("rubric-restamp touch=%v", touchRubric), func(dir string) ([2]string, error) {
+		clone, landedHead := buildRubricRestampRepo(t, dir, touchRubric)
+		rel, err := filepath.Rel(dir, clone)
+		return [2]string{rel, landedHead}, err
+	})
+	return filepath.Join(root, f[0]), f[1]
+}
+
+// buildRubricRestampRepo makes initRubricRestampRepo's repos under tmp.
+func buildRubricRestampRepo(t *testing.T, tmp string, touchRubric bool) (clone, landedHead string) {
+	t.Helper()
 	originPath := filepath.Join(tmp, "origin.git")
 	runRubricRestampGit(t, tmp, "init", "--bare", "-b", "main", originPath)
 

@@ -144,9 +144,25 @@ type rejectedReworkFixture struct {
 // newRejectedReworkFixture builds origin.git with a base commit, clones it into
 // a seed checkout (main) and a polecat checkout, and leaves the polecat on a
 // pushed work branch whose only change is a line in shared.txt.
+//
+// The repos are a copy of ones built once per test binary (cachedGitFixture).
 func newRejectedReworkFixture(t *testing.T) rejectedReworkFixture {
 	t.Helper()
-	dir := t.TempDir()
+	_, f := cachedGitFixture(t, "rejected-rework", func(dir string) (rejectedReworkFixture, error) {
+		return buildRejectedReworkFixture(t, dir), nil
+	})
+	return f
+}
+
+// rewriteRoot moves the fixture's paths to a copy of its template.
+func (f rejectedReworkFixture) rewriteRoot(oldRoot, newRoot string) any {
+	f.seed = strings.Replace(f.seed, oldRoot, newRoot, 1)
+	f.polecat = strings.Replace(f.polecat, oldRoot, newRoot, 1)
+	return f
+}
+
+func buildRejectedReworkFixture(t *testing.T, dir string) rejectedReworkFixture {
+	t.Helper()
 	remote := filepath.Join(dir, "origin.git")
 	seed := filepath.Join(dir, "seed")
 	polecat := filepath.Join(dir, "polecat")

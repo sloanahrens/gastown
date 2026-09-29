@@ -36,7 +36,16 @@ type scenarioPaths struct {
 // work branch. Files at the base commit: shared.txt ("base") and keep.txt.
 func newRevertScenario(t *testing.T) scenarioPaths {
 	t.Helper()
-	dir := t.TempDir()
+	p := cachedGitFixtureStrings(t, "newRevertScenario", func(dir string) []string {
+		sp := buildNewRevertScenario(t, dir)
+		return []string{sp.seed, sp.polecat}
+	})
+	return scenarioPaths{seed: p[0], polecat: p[1]}
+}
+
+// buildNewRevertScenario makes newRevertScenario's repos under dir.
+func buildNewRevertScenario(t *testing.T, dir string) scenarioPaths {
+	t.Helper()
 	remote := filepath.Join(dir, "origin.git")
 	seed := filepath.Join(dir, "seed")
 	polecat := filepath.Join(dir, "polecat")

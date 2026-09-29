@@ -489,7 +489,17 @@ func TestParseStopCheckProcessTable(t *testing.T) {
 
 func initPolecatStopTestRepo(t *testing.T) string {
 	t.Helper()
-	tmp := t.TempDir()
+	root, _ := cachedGitFixture(t, "polecat-stop", func(dir string) (struct{}, error) {
+		buildPolecatStopTestRepo(t, dir)
+		return struct{}{}, nil
+	})
+	return filepath.Join(root, "repo")
+}
+
+// buildPolecatStopTestRepo makes initPolecatStopTestRepo's repo at tmp/repo,
+// with its origin at tmp/origin.git.
+func buildPolecatStopTestRepo(t *testing.T, tmp string) {
+	t.Helper()
 	repo := filepath.Join(tmp, "repo")
 	origin := filepath.Join(tmp, "origin.git")
 
@@ -509,7 +519,6 @@ func initPolecatStopTestRepo(t *testing.T) string {
 	runPolecatStopTestGit(t, repo, "push", "-u", "origin", "main")
 	runPolecatStopTestGit(t, repo, "checkout", "-b", polecatStopTestBranch)
 
-	return repo
 }
 
 func writePolecatStopTestFile(t *testing.T, repo, rel, contents string) {

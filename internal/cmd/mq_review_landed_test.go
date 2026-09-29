@@ -135,9 +135,27 @@ func approveGate(t *testing.T) func(editorial.ReviewRequest) editorial.ReviewRes
 //
 // No beads store is needed: a landed review mints no MR bead and the gate is
 // faked, so the command never reads or writes beads.
+//
+// The town is a copy of one built once per test binary (cachedGitFixture).
 func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir string) {
 	t.Helper()
-	town := t.TempDir()
+	root, _ := cachedGitFixture(t, "review-landed-rig "+defaultBranch, func(dir string) (struct{}, error) {
+		buildTestRigRoot(t, dir, defaultBranch)
+		return struct{}{}, nil
+	})
+	town := filepath.Join(root, "town")
+	rigDir = filepath.Join(town, "gastown")
+	repoDir = filepath.Join(rigDir, "refinery", "rig")
+	cwd = filepath.Join(rigDir, "polecats", "shale")
+	t.Chdir(cwd)
+	return cwd, repoDir, rigDir
+}
+
+// buildTestRigRoot lays out testRigRoot's town under root/town, with the
+// refinery clone's remote at root/origin.git.
+func buildTestRigRoot(t *testing.T, root, defaultBranch string) {
+	t.Helper()
+	town := filepath.Join(root, "town")
 	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -149,14 +167,14 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 		[]byte(`{"version":1,"rigs":{"gastown":{"git_url":"file:///nonexistent","beads":{"repo":"local","prefix":"gt"}}}}`+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	rigDir = filepath.Join(town, "gastown")
-	repoDir = filepath.Join(rigDir, "refinery", "rig")
+	rigDir := filepath.Join(town, "gastown")
+	repoDir := filepath.Join(rigDir, "refinery", "rig")
 	if err := os.MkdirAll(repoDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	// cwd names the rig: findCurrentRig reads the first component of the path
 	// from the town root, so no GT_RIG is needed.
-	cwd = filepath.Join(rigDir, "polecats", "shale")
+	cwd := filepath.Join(rigDir, "polecats", "shale")
 	if err := os.MkdirAll(cwd, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +196,10 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	}
 	run(repoDir, "init", "--initial-branch", defaultBranch)
 	run(repoDir, "commit", "--allow-empty", "-m", "base")
-	bare := t.TempDir()
+	bare := filepath.Join(root, "origin.git")
+	if err := os.MkdirAll(bare, 0755); err != nil {
+		t.Fatal(err)
+	}
 	run(bare, "init", "--bare", "--initial-branch", defaultBranch)
 	run(repoDir, "remote", "add", "origin", bare)
 	run(repoDir, "push", "-u", "origin", defaultBranch)
@@ -194,9 +215,6 @@ func testRigRoot(t *testing.T, defaultBranch string) (cwd, repoDir, rigDir strin
 	run(repoDir, "checkout", "-b", "unpushed-branch")
 	run(repoDir, "commit", "--allow-empty", "-m", "unpushed")
 	run(repoDir, "checkout", defaultBranch)
-
-	t.Chdir(cwd)
-	return cwd, repoDir, rigDir
 }
 
 func revForCmd(t *testing.T, dir, ref string) string {

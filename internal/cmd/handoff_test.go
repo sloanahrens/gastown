@@ -553,7 +553,14 @@ func TestDetectTownRootFromCwd_EnvFallback(t *testing.T) {
 // The caller is responsible for cleanup via t.Cleanup or defer os.RemoveAll.
 func makeTestGitRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	return cachedGitFixtureStrings(t, "makeTestGitRepo", func(dir string) []string {
+		return []string{buildMakeTestGitRepo(t, dir)}
+	})[0]
+}
+
+// buildMakeTestGitRepo makes makeTestGitRepo's repos under dir.
+func buildMakeTestGitRepo(t *testing.T, dir string) string {
+	t.Helper()
 	for _, args := range [][]string{
 		{"git", "-C", dir, "init"},
 		{"git", "-C", dir, "config", "user.email", "test@test.com"},

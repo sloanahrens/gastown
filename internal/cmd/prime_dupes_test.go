@@ -18,7 +18,14 @@ import (
 // commit, and returns its root; the caller removes it.
 func gitRootFixture(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	return cachedGitFixtureStrings(t, "gitRootFixture", func(root string) []string {
+		return []string{buildGitRootFixture(t, root)}
+	})[0]
+}
+
+// buildGitRootFixture makes gitRootFixture's repos under root.
+func buildGitRootFixture(t *testing.T, root string) string {
+	t.Helper()
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
