@@ -1,75 +1,79 @@
 package doctor
 
 import (
-	"fmt"
+	"context"
+	"errors"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
-// BeadsBinaryCheck verifies that the beads (bd) binary is installed and meets
-// the minimum version requirement. This is an informational check with no
-// auto-fix — the user must install or upgrade bd manually.
+// bdHandshakeTimeout bounds the two bd calls the check makes.
+const bdHandshakeTimeout = 30 * time.Second
+
+// BeadsBinaryCheck reports the bd startup handshake: the bd on PATH must be a
+// beads fork build whose JSON contract gt knows and whose schema level
+// equals the database migration level. It has no auto-fix: gastown never
+// installs bd.
 type BeadsBinaryCheck struct {
 	BaseCheck
+	// run answers bd calls; nil runs the bd on PATH in the town root.
+	run deps.BDRunner
+	// lookPath finds bd for the report; nil is exec.LookPath.
+	lookPath func(string) (string, error)
 }
 
-// NewBeadsBinaryCheck creates a new beads binary version check.
+// NewBeadsBinaryCheck creates the bd handshake check.
 func NewBeadsBinaryCheck() *BeadsBinaryCheck {
 	return &BeadsBinaryCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        "beads-binary",
-			CheckDescription: "Check that beads (bd) is installed and meets minimum version",
+			CheckDescription: "Check that bd is a known fork build at the database's schema level",
 			CheckCategory:    CategoryInfrastructure,
 		},
 	}
 }
 
-// Run checks if bd is available in PATH and reports its version status.
+// Run performs the handshake and reports what it found against what the
+// town needs.
 func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
-	status, version := deps.CheckBeads()
+	lookPath := c.lookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	run := c.run
+	if run == nil {
+		run = deps.NewBDProcessRunner(ctx.TownRoot)
+	}
+	path, _ := lookPath("bd")
 
-	switch status {
-	case deps.BeadsOK:
+	hctx, cancel := context.WithTimeout(context.Background(), bdHandshakeTimeout)
+	defer cancel()
+	hs, err := deps.CheckBDHandshake(hctx, path, run)
+	if err == nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("bd %s", version),
-		}
-
-	case deps.BeadsNotFound:
-		return &CheckResult{
-			Name:   c.Name(),
-			Status: StatusError,
-			Message: "beads (bd) not found in PATH",
-			Details: []string{
-				"The bd CLI is required for beads operations",
-			},
-			FixHint: fmt.Sprintf("Install: go install %s", deps.BeadsInstallPath),
-		}
-
-	case deps.BeadsTooOld:
-		return &CheckResult{
-			Name:   c.Name(),
-			Status: StatusError,
-			Message: fmt.Sprintf("bd %s is too old (minimum: %s)", version, deps.MinBeadsVersion),
-			Details: []string{
-				fmt.Sprintf("Installed version %s does not meet the minimum requirement of %s", version, deps.MinBeadsVersion),
-			},
-			FixHint: fmt.Sprintf("Upgrade: go install %s", deps.BeadsInstallPath),
-		}
-
-	case deps.BeadsUnknown:
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusWarning,
-			Message: "bd found but version could not be determined",
-			FixHint: fmt.Sprintf("Try reinstalling: go install %s", deps.BeadsInstallPath),
+			Message: hs.String(),
 		}
 	}
-
-	return &CheckResult{
+	msg := err.Error()
+	lines := strings.Split(msg, "\n")
+	result := &CheckResult{
 		Name:    c.Name(),
-		Status:  StatusOK,
-		Message: "bd available",
+		Status:  StatusError,
+		Message: strings.TrimPrefix(lines[0], deps.ErrBDHandshake.Error()+": "),
+		FixHint: deps.BDInstallHint,
 	}
+	for _, l := range lines[1:] {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "fix:") {
+			result.Details = append(result.Details, l)
+		}
+	}
+	if !errors.Is(err, deps.ErrBDHandshake) {
+		result.Details = append(result.Details, msg)
+	}
+	return result
 }

@@ -1,170 +1,91 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/deps"
 )
+
+type fakeExitStatus int
+
+func (e fakeExitStatus) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e fakeExitStatus) ExitCode() int { return int(e) }
+
+const (
+	forkVersionJSON      = `{"build":"da4983e","build_id":"da4983e","commit":"da4983e","contract_version":1,"db_schema_version":66,"version":"1.2.2"}`
+	installedVersionJSON = `{"build":"537accb","commit":"537accbea9ca","schema_version":1,"version":"1.2.2"}`
+)
+
+func handshakeCheck(version string, versionErr error, dbLevel int) *BeadsBinaryCheck {
+	c := NewBeadsBinaryCheck()
+	c.lookPath = func(string) (string, error) { return "/opt/bd", nil }
+	c.run = func(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
+		if args[0] == "version" {
+			return []byte(version), nil, versionErr
+		}
+		return []byte(fmt.Sprintf(`[{"version": %d}]`, dbLevel)), nil, nil
+	}
+	return c
+}
 
 func TestBeadsBinaryCheck_Metadata(t *testing.T) {
 	t.Parallel()
 	check := NewBeadsBinaryCheck()
-
 	if check.Name() != "beads-binary" {
 		t.Errorf("Name() = %q, want %q", check.Name(), "beads-binary")
-	}
-	if check.Description() != "Check that beads (bd) is installed and meets minimum version" {
-		t.Errorf("Description() = %q", check.Description())
 	}
 	if check.Category() != CategoryInfrastructure {
 		t.Errorf("Category() = %q, want %q", check.Category(), CategoryInfrastructure)
 	}
 	if check.CanFix() {
-		t.Error("CanFix() should return false (user must install/upgrade bd manually)")
+		t.Error("CanFix() should return false: gastown never installs bd")
 	}
 }
 
-func TestBeadsBinaryCheck_BdInstalled(t *testing.T) {
+func TestBeadsBinaryCheck_HandshakePasses(t *testing.T) {
 	t.Parallel()
-	// Skip if bd is not actually installed in the test environment
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed, skipping installed-path test")
+	result := handshakeCheck(forkVersionJSON, nil, 66).Run(&CheckContext{TownRoot: t.TempDir()})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v: %s %v", result.Status, result.Message, result.Details)
 	}
-
-	check := NewBeadsBinaryCheck()
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	result := check.Run(ctx)
-	// Non-hermetic: the installed bd may or may not meet MinBeadsVersion.
-	// We just verify it produces a meaningful result (not NotFound/Unknown).
-	switch result.Status {
-	case StatusOK:
-		if !strings.Contains(result.Message, "bd") {
-			t.Errorf("expected version string in message, got %q", result.Message)
-		}
-	case StatusError:
-		if !strings.Contains(result.Message, "too old") {
-			t.Errorf("expected 'too old' in error message, got %q", result.Message)
-		}
-	default:
-		t.Errorf("unexpected status %v when bd is installed: %s", result.Status, result.Message)
-	}
-}
-
-// writeFakeBd creates a platform-appropriate fake "bd" executable in dir.
-func writeFakeBd(t *testing.T, dir string, script string, batScript string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		path := filepath.Join(dir, "bd.bat")
-		if err := os.WriteFile(path, []byte(batScript), 0755); err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		path := filepath.Join(dir, "bd")
-		if err := os.WriteFile(path, []byte(script), 0755); err != nil {
-			t.Fatal(err)
+	for _, want := range []string{"da4983e", "schema<=66", "contract 1", "database at 66"} {
+		if !strings.Contains(result.Message, want) {
+			t.Errorf("message %q lacks %q", result.Message, want)
 		}
 	}
 }
 
-func TestBeadsBinaryCheck_HermeticSuccess(t *testing.T) {
-	fakeDir := t.TempDir()
-	// Use deps.MinBeadsVersion so this test stays in sync when the minimum is bumped.
-	writeFakeBd(t, fakeDir,
-		fmt.Sprintf("#!/bin/sh\necho 'bd version %s'\n", deps.MinBeadsVersion),
-		fmt.Sprintf("@echo off\r\necho bd version %s\r\n", deps.MinBeadsVersion),
-	)
-
-	t.Setenv("PATH", fakeDir)
-
-	check := NewBeadsBinaryCheck()
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	result := check.Run(ctx)
-	switch result.Status {
-	case StatusOK:
-		if !strings.Contains(result.Message, deps.MinBeadsVersion) {
-			t.Errorf("expected version in message, got %q", result.Message)
-		}
-	case StatusWarning:
-		// Under heavy CI load the fake bd may time out; tolerate gracefully.
-		t.Logf("fake bd timed out under load (got StatusWarning); skipping assertion")
-	default:
-		t.Errorf("expected StatusOK (or StatusWarning under load), got %v: %s", result.Status, result.Message)
-	}
-}
-
-func TestBeadsBinaryCheck_BdNotInPath(t *testing.T) {
-	emptyDir := t.TempDir()
-	t.Setenv("PATH", emptyDir)
-
-	check := NewBeadsBinaryCheck()
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	result := check.Run(ctx)
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError when bd is not in PATH, got %v: %s", result.Status, result.Message)
-	}
-	if result.Message != "beads (bd) not found in PATH" {
-		t.Errorf("unexpected message: %q", result.Message)
-	}
-	if result.FixHint == "" {
-		t.Error("expected a fix hint with install instructions")
-	}
-	if !strings.Contains(result.FixHint, "beads/cmd/bd") {
-		t.Errorf("fix hint should reference beads install path, got %q", result.FixHint)
-	}
-}
-
-func TestBeadsBinaryCheck_BdTooOld(t *testing.T) {
-	fakeDir := t.TempDir()
-	writeFakeBd(t, fakeDir,
-		"#!/bin/sh\necho 'bd version 0.44.0'\n",
-		"@echo off\r\necho bd version 0.44.0\r\n",
-	)
-
-	t.Setenv("PATH", fakeDir)
-
-	check := NewBeadsBinaryCheck()
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	result := check.Run(ctx)
-	switch result.Status {
-	case StatusError:
-		if !strings.Contains(result.Message, "too old") {
-			t.Errorf("expected 'too old' in message, got %q", result.Message)
-		}
-		if result.FixHint == "" {
-			t.Error("expected a fix hint with upgrade instructions")
-		}
-	case StatusWarning:
-		// Under heavy CI load the fake bd may time out; tolerate gracefully.
-		t.Logf("fake bd timed out under load (got StatusWarning); skipping assertion")
-	default:
-		t.Errorf("expected StatusError (or StatusWarning under load), got %v: %s", result.Status, result.Message)
-	}
-}
-
-func TestBeadsBinaryCheck_BdVersionUnparseable(t *testing.T) {
-	fakeDir := t.TempDir()
-	writeFakeBd(t, fakeDir,
-		"#!/bin/sh\necho 'some garbage output'\n",
-		"@echo off\r\necho some garbage output\r\n",
-	)
-
-	t.Setenv("PATH", fakeDir)
-
-	check := NewBeadsBinaryCheck()
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	result := check.Run(ctx)
-	if result.Status != StatusWarning {
-		t.Errorf("expected StatusWarning when bd version unparseable, got %v: %s", result.Status, result.Message)
+func TestBeadsBinaryCheck_Refusals(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		check *BeadsBinaryCheck
+		want  string
+	}{
+		{"installed pre-D1 build", handshakeCheck(installedVersionJSON, nil, 66), "no contract_version"},
+		{"schema mismatch", handshakeCheck(forkVersionJSON, nil, 65), "database is at 65"},
+		{"not on PATH", handshakeCheck("", &exec.Error{Name: "bd", Err: exec.ErrNotFound}, 0), "not found on PATH"},
+		{"unparseable version", handshakeCheck("some garbage output", nil, 0), "not JSON"},
+		{"version fails", handshakeCheck("", fakeExitStatus(1), 0), "bd version --json failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			result := tc.check.Run(&CheckContext{TownRoot: t.TempDir()})
+			if result.Status != StatusError {
+				t.Fatalf("status = %v, want StatusError: %s", result.Status, result.Message)
+			}
+			if !strings.Contains(result.Message, tc.want) {
+				t.Errorf("message %q lacks %q", result.Message, tc.want)
+			}
+			details := strings.Join(result.Details, "\n")
+			if !strings.Contains(details, "found:") || !strings.Contains(details, "required:") {
+				t.Errorf("details must name found vs required:\n%s", details)
+			}
+			if !strings.Contains(result.FixHint, "make safe-install") || strings.Contains(result.FixHint, "go install") {
+				t.Errorf("fix hint = %q, want make safe-install and never go install", result.FixHint)
+			}
+		})
 	}
 }

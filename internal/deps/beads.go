@@ -6,33 +6,26 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-// MinBeadsVersion is the minimum compatible beads version for this Gas Town release.
-// Update this when Gas Town requires new beads features.
-const MinBeadsVersion = "0.57.0"
-
-// BeadsInstallPath is the go install path for beads.
-const BeadsInstallPath = "github.com/steveyegge/beads/cmd/bd@latest"
-
 // BeadsStatus represents the state of the beads installation.
 type BeadsStatus int
 
 const (
-	BeadsOK       BeadsStatus = iota // bd found, version compatible
+	BeadsOK       BeadsStatus = iota // bd found and reported a version
 	BeadsNotFound                    // bd not in PATH
-	BeadsTooOld                      // bd found but version too old
-	BeadsUnknown                     // bd found but couldn't parse version
+	BeadsUnknown                     // bd found but its version could not be read
 )
 
-// CheckBeads checks if bd is installed and compatible.
+// CheckBeads checks that bd is on PATH and reports a version. It is a cheap
+// presence probe, not a compatibility verdict: whether the town may run on
+// this bd is CheckBDHandshake's decision (schema level and JSON contract),
+// because a semver says nothing about either.
 // Returns status and the installed version (if found).
 func CheckBeads() (BeadsStatus, string) {
 	// Check if bd exists in PATH
@@ -67,87 +60,27 @@ func beadsStatusFromOutput(output []byte, err error) (BeadsStatus, string) {
 	if version == "" {
 		return BeadsUnknown, ""
 	}
-
-	// Compare versions
-	if CompareVersions(version, MinBeadsVersion) < 0 {
-		return BeadsTooOld, version
-	}
-
 	return BeadsOK, version
 }
 
-// EnsureBeads checks for bd and installs it if missing or outdated.
-// Returns nil if bd is available and compatible.
-// If autoInstall is true, will attempt to install bd when missing.
-func EnsureBeads(autoInstall bool) error {
-	status, version := CheckBeads()
+// EnsureBeads returns nil when bd is on PATH and reports a version. It never
+// installs bd: gastown installing upstream bd@latest over the fork is how
+// production gets migrated or skewed (G3-07). An unreadable version is an
+// error, not a pass.
+func EnsureBeads() error {
+	status, _ := CheckBeads()
+	return beadsErrorForStatus(status)
+}
 
+func beadsErrorForStatus(status BeadsStatus) error {
 	switch status {
 	case BeadsOK:
 		return nil
-
 	case BeadsNotFound:
-		if !autoInstall {
-			return fmt.Errorf("beads (bd) not found in PATH\n\nInstall with: go install %s", BeadsInstallPath)
-		}
-		return installBeads()
-
-	case BeadsTooOld:
-		return fmt.Errorf("beads version %s is too old (minimum: %s)\n\nUpgrade with: go install %s",
-			version, MinBeadsVersion, BeadsInstallPath)
-
-	case BeadsUnknown:
-		// Found bd but couldn't determine version - proceed with warning
-		return nil
+		return fmt.Errorf("beads (bd) not found in PATH\n\nFix: %s", BDInstallHint)
+	default:
+		return fmt.Errorf("beads (bd) is on PATH but its version could not be determined\n\nFix: %s", BDInstallHint)
 	}
-
-	return nil
-}
-
-// installBeads runs go install to install the latest beads.
-// GOBIN is set to ~/.local/bin so the binary lands in the canonical
-// location rather than the default $GOPATH/bin (~/go/bin/).
-func installBeads() error {
-	fmt.Printf("   beads (bd) not found. Installing...\n")
-
-	cmd := exec.Command("go", "install", BeadsInstallPath)
-	util.SetDetachedProcessGroup(cmd)
-	cmd.Env = appendGOBIN(cmd.Environ())
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to install beads: %s\n%s", err, string(output))
-	}
-
-	// Verify installation
-	status, version := CheckBeads()
-	if status == BeadsNotFound {
-		return fmt.Errorf("beads installed but not in PATH - ensure $GOPATH/bin is in your PATH")
-	}
-	if status == BeadsTooOld {
-		return fmt.Errorf("installed beads %s but minimum required is %s", version, MinBeadsVersion)
-	}
-
-	fmt.Printf("   ✓ Installed beads %s\n", version)
-	return nil
-}
-
-// appendGOBIN returns env with GOBIN set to ~/.local/bin so that
-// `go install` places binaries in the canonical location instead of
-// the default $GOPATH/bin (which creates a stale shadow copy).
-func appendGOBIN(env []string) []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return env // fall back to default
-	}
-	gobin := filepath.Join(home, ".local", "bin")
-	// Replace existing GOBIN if present, otherwise append.
-	for i, e := range env {
-		if strings.HasPrefix(e, "GOBIN=") {
-			env[i] = "GOBIN=" + gobin
-			return env
-		}
-	}
-	return append(env, "GOBIN="+gobin)
 }
 
 // parseBeadsVersion extracts version from "bd version X.Y.Z ..." output.

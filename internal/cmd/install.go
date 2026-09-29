@@ -146,7 +146,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	// Ensure beads (bd) is available before proceeding
 	if !installNoBeads {
-		if err := deps.EnsureBeads(true); err != nil {
+		if err := deps.EnsureBeads(); err != nil {
 			return fmt.Errorf("beads dependency check failed: %w", err)
 		}
 		if err := ensureInstallDoltReady(); err != nil {

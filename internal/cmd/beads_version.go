@@ -2,7 +2,6 @@
 package cmd
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/steveyegge/gastown/internal/deps"
@@ -13,23 +12,15 @@ var (
 	versionCheckOnce         sync.Once
 )
 
-// CheckBeadsVersion verifies that the installed beads version meets the minimum requirement.
-// Returns nil if the version is sufficient, or an error with details if not.
+// CheckBeadsVersion verifies that bd is on PATH and reports a version.
+// Returns nil if so, or an error with the install hint if not.
 // The check is performed only once per process execution.
 func CheckBeadsVersion() error {
 	versionCheckOnce.Do(func() {
-		status, version := deps.CheckBeads()
-		switch status {
-		case deps.BeadsOK:
-			cachedVersionCheckResult = nil
-		case deps.BeadsUnknown:
-			cachedVersionCheckResult = fmt.Errorf("beads (bd) version could not be determined\n\nTry reinstalling: go install %s", deps.BeadsInstallPath)
-		case deps.BeadsNotFound:
-			cachedVersionCheckResult = fmt.Errorf("beads (bd) not found in PATH\n\nInstall with: go install %s", deps.BeadsInstallPath)
-		case deps.BeadsTooOld:
-			cachedVersionCheckResult = fmt.Errorf("beads %s is required, but %s is installed\n\nUpgrade: go install %s",
-				deps.MinBeadsVersion, version, deps.BeadsInstallPath)
-		}
+		// Presence and a readable version only: a cheap probe that must not
+		// block read-only commands. The schema/contract handshake gates the
+		// town-running commands (requireBDHandshake).
+		cachedVersionCheckResult = deps.EnsureBeads()
 	})
 	return cachedVersionCheckResult
 }

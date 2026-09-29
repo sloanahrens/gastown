@@ -22,7 +22,7 @@ func belowVersion(v string) string {
 
 func TestBelowVersion(t *testing.T) {
 	t.Parallel()
-	for _, v := range []string{"2.0.7", "0.57.0", "3.0.0", MinBeadsVersion, MinDoltVersion, MinClaudeCodeVersion, RecommendedClaudeCodeVersion} {
+	for _, v := range []string{"2.0.7", "0.57.0", "3.0.0", MinDoltVersion, MinClaudeCodeVersion, RecommendedClaudeCodeVersion} {
 		if b := belowVersion(v); CompareVersions(b, v) >= 0 {
 			t.Errorf("belowVersion(%q) = %q, not below it", v, b)
 		}

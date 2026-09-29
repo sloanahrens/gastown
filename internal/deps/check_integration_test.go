@@ -26,7 +26,7 @@ func TestMain(m *testing.M) {
 func TestIntegrationCheckBeads(t *testing.T) {
 	status, version := CheckBeads()
 	if status != BeadsOK || version == "" {
-		t.Fatalf("CheckBeads() = %d, %q; want BeadsOK (%d) and a version (bd >= %s must be on PATH)", status, version, BeadsOK, MinBeadsVersion)
+		t.Fatalf("CheckBeads() = %d, %q; want BeadsOK (%d) and a version (bd must be on PATH)", status, version, BeadsOK)
 	}
 }
 
@@ -87,7 +87,7 @@ func TestIntegrationCheckBeadsStripsTargetEnv(t *testing.T) {
 	echo leaked
 	exit 0
 fi
-echo "bd version `+MinBeadsVersion+`"
+echo "bd version 1.2.2"
 `)
 	t.Setenv("BEADS_DIR", "/stale/.beads")
 	t.Setenv("BEADS_DOLT_PORT", "1")
@@ -99,7 +99,7 @@ echo "bd version `+MinBeadsVersion+`"
 	}
 
 	t.Setenv("PATH", dir)
-	if status, version := CheckBeads(); status != BeadsOK || version != MinBeadsVersion {
-		t.Errorf("CheckBeads() = %d, %q; want BeadsOK, %q (target env stripped)", status, version, MinBeadsVersion)
+	if status, version := CheckBeads(); status != BeadsOK || version != "1.2.2" {
+		t.Errorf("CheckBeads() = %d, %q; want BeadsOK, 1.2.2 (target env stripped)", status, version)
 	}
 }

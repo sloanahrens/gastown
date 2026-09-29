@@ -2,8 +2,10 @@ package deps
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,9 +64,10 @@ func TestBeadsStatusFromOutput(t *testing.T) {
 	}{
 		{"exec error", "bd version 0.60.0", errors.New("exit status 1"), BeadsUnknown, ""},
 		{"unparseable", "garbage", nil, BeadsUnknown, ""},
-		{"too old", "bd version " + belowVersion(MinBeadsVersion), nil, BeadsTooOld, belowVersion(MinBeadsVersion)},
-		{"at minimum", "bd version " + MinBeadsVersion + " (dev: main@abc)", nil, BeadsOK, MinBeadsVersion},
-		{"newer", "bd version 1.2.3", nil, BeadsOK, "1.2.3"},
+		// No semver floor: an old number is not evidence of anything. The
+		// schema/contract handshake decides whether the town may run.
+		{"old semver", "bd version 0.1.0", nil, BeadsOK, "0.1.0"},
+		{"fork with schema suffix", "bd version 1.2.2 (da4983e: da4983e) schema<=66", nil, BeadsOK, "1.2.2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -77,24 +80,59 @@ func TestBeadsStatusFromOutput(t *testing.T) {
 	}
 }
 
-func TestAppendGOBIN(t *testing.T) {
+// TestBeadsErrorForStatus pins that gt never installs bd and never passes
+// a bd it could not identify (G3-07, G5-03, B5-03).
+func TestBeadsErrorForStatus(t *testing.T) {
 	t.Parallel()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// No home directory (e.g. under env -i): the env is returned as-is.
-		if got := appendGOBIN([]string{"PATH=/bin"}); len(got) != 1 || got[0] != "PATH=/bin" {
-			t.Errorf("appendGOBIN without a home = %v, want it unchanged", got)
+	if err := beadsErrorForStatus(BeadsOK); err != nil {
+		t.Errorf("BeadsOK: %v", err)
+	}
+	for _, status := range []BeadsStatus{BeadsNotFound, BeadsUnknown} {
+		err := beadsErrorForStatus(status)
+		if err == nil {
+			t.Errorf("status %d: want error, got nil", status)
+			continue
 		}
-		return
+		if !strings.Contains(err.Error(), "make safe-install") {
+			t.Errorf("status %d: error lacks the safe-install hint: %v", status, err)
+		}
+		if strings.Contains(err.Error(), "go install") {
+			t.Errorf("status %d: error suggests go install: %v", status, err)
+		}
 	}
-	want := "GOBIN=" + filepath.Join(home, ".local", "bin")
+}
 
-	got := appendGOBIN([]string{"PATH=/bin"})
-	if len(got) != 2 || got[0] != "PATH=/bin" || got[1] != want {
-		t.Errorf("appendGOBIN without GOBIN = %v, want [PATH=/bin %s]", got, want)
+// TestNoBDGoInstallAnywhere fails on any non-test source that would install
+// or tell someone to install bd with go install: upstream bd@latest over
+// the fork migrates or skews production.
+func TestNoBDGoInstallAnywhere(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join("..", "..")
+	var hits []string
+	for _, dir := range []string{"internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			for i, line := range strings.Split(string(data), "\n") {
+				if strings.Contains(line, "beads/cmd/bd") && (strings.Contains(line, "go install") || strings.Contains(line, "@latest")) {
+					hits = append(hits, fmt.Sprintf("%s:%d: %s", path, i+1, strings.TrimSpace(line)))
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	got = appendGOBIN([]string{"GOBIN=/elsewhere", "PATH=/bin"})
-	if len(got) != 2 || got[0] != want || got[1] != "PATH=/bin" {
-		t.Errorf("appendGOBIN with GOBIN = %v, want [%s PATH=/bin]", got, want)
+	if len(hits) > 0 {
+		t.Fatalf("bd go-install path in source:\n%s", strings.Join(hits, "\n"))
 	}
 }
