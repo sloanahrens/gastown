@@ -1,6 +1,6 @@
 +++
 name = "dolt-archive"
-description = "Offsite backup: JSONL snapshots to git, dolt push to GitHub/DoltHub"
+description = "Offsite backup: JSONL snapshots to git"
 version = 1
 
 [gate]
@@ -20,14 +20,15 @@ severity = "critical"
 
 # Dolt Archive
 
-Gets production data off this machine. Three layers:
+Gets production data off this machine. Two layers:
 
 1. **JSONL export** — Human-readable snapshots (saved us in Clown Show #13)
 2. **Git push** — JSONL files committed and pushed to GitHub
-3. **Dolt push** — Native Dolt replication to GitHub/DoltHub (if configured)
 
 JSONL is the last-resort recovery layer. Always maintain it regardless of
-whether the other layers work.
+whether the git push works. There is no Dolt push: Dolt remote sync was
+removed (ADR 0002), and the Dolt data directory is backed up at the
+filesystem level instead.
 
 ## Config
 
@@ -156,50 +157,7 @@ else
 fi
 ```
 
-## Step 3: Dolt native push
-
-Push production databases to GitHub/DoltHub remotes via `dolt push`.
-
-```bash
-echo "=== Dolt Push ==="
-DOLT_PUSHED=0
-DOLT_PUSH_FAILED=0
-
-for DB in "${PROD_DBS[@]}"; do
-  DB_DIR="$DOLT_DATA_DIR/$DB"
-
-  if [ ! -d "$DB_DIR/.dolt" ]; then
-    echo "  $DB: no .dolt directory, skipping"
-    continue
-  fi
-
-  # Check if remotes are configured
-  REMOTES=$(cd "$DB_DIR" && dolt remote -v 2>/dev/null | grep -v "^$" | head -5)
-
-  if [ -z "$REMOTES" ]; then
-    echo "  $DB: no remotes configured, skipping dolt push"
-    continue
-  fi
-
-  echo "  $DB: pushing to remotes..."
-
-  # Push to each remote
-  cd "$DB_DIR"
-  for REMOTE_NAME in $(dolt remote -v 2>/dev/null | awk '{print $1}' | sort -u); do
-    if timeout 120 dolt push "$REMOTE_NAME" main 2>/dev/null; then
-      echo "    $REMOTE_NAME: pushed"
-      DOLT_PUSHED=$((DOLT_PUSHED + 1))
-    else
-      echo "    $REMOTE_NAME: FAILED"
-      DOLT_PUSH_FAILED=$((DOLT_PUSH_FAILED + 1))
-    fi
-  done
-done
-
-echo "Dolt push: $DOLT_PUSHED succeeded, $DOLT_PUSH_FAILED failed"
-```
-
-## Step 4: Verify remote has data
+## Step 3: Verify remote has data
 
 Verify that the backup data has successfully reached the remote and is accessible.
 
@@ -235,37 +193,17 @@ if [ -d "$BACKUP_REPO/.git" ]; then
   fi
 fi
 
-# Verify dolt push (check if remotes have our commits)
-for DB in "${PROD_DBS[@]}"; do
-  DB_DIR="$DOLT_DATA_DIR/$DB"
-  if [ -d "$DB_DIR/.dolt" ]; then
-    # Check if any dolt remotes are reachable
-    REMOTE_HEADS=$(cd "$DB_DIR" && dolt remote -v 2>/dev/null | awk '{print $1}' | sort -u)
-    if [ -n "$REMOTE_HEADS" ]; then
-      cd "$DB_DIR"
-      # Verify at least one remote has data
-      for REMOTE in $REMOTE_HEADS; do
-        if dolt log "$REMOTE/main" -n 1 > /dev/null 2>&1; then
-          echo "  dolt: $DB on $REMOTE verified"
-          VERIFY_PASSED=$((VERIFY_PASSED + 1))
-          break
-        fi
-      done
-    fi
-  fi
-done
-
 echo "Verified: $VERIFY_PASSED, failed: $VERIFY_FAILED"
 ```
 
 ## Record Result
 
 ```bash
-SUMMARY="Archive: jsonl=$EXPORTED/$((EXPORTED + EXPORT_FAILED)), git=${GIT_PUSHED}, dolt_push=$DOLT_PUSHED/$((DOLT_PUSHED + DOLT_PUSH_FAILED)), verify=$VERIFY_PASSED/$((VERIFY_PASSED + VERIFY_FAILED))"
+SUMMARY="Archive: jsonl=$EXPORTED/$((EXPORTED + EXPORT_FAILED)), git=${GIT_PUSHED}, verify=$VERIFY_PASSED/$((VERIFY_PASSED + VERIFY_FAILED))"
 echo "=== $SUMMARY ==="
 
 RESULT="success"
-if [ "$EXPORT_FAILED" -gt 0 ] || [ "$DOLT_PUSH_FAILED" -gt 0 ] || [ "$VERIFY_FAILED" -gt 0 ]; then
+if [ "$EXPORT_FAILED" -gt 0 ] || [ "$VERIFY_FAILED" -gt 0 ]; then
   RESULT="warning"
 fi
 

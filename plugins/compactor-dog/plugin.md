@@ -90,9 +90,9 @@ STATE_FILE="$HOME/gt/.dolt-data/.compactor-state.json"
 `run.sh` defaults to **monitor-only** (check-only) mode. No data is modified.
 
 Compaction requires the explicit `--compact` flag and is **never** the default:
-it rewrites commit history (flatten) and force-pushes to the DB's remotes. The
-dog must not pass `--compact` on its own initiative — it escalates, and the
-operator decides.
+it rewrites commit history (flatten). Nothing is pushed: Dolt remote sync was
+removed (ADR 0002). The dog must not pass `--compact` on its own initiative —
+it escalates, and the operator decides.
 
 ```bash
 # Monitor only (default, safe to run automatically)
@@ -104,7 +104,7 @@ bash plugins/compactor-dog/run.sh --threshold 1000
 # Preview what compaction would do — dry-run only takes effect with --compact
 bash plugins/compactor-dog/run.sh --compact --dry-run
 
-# Operator-only: actually compact (DESTRUCTIVE — flatten + force-push)
+# Operator-only: actually compact (DESTRUCTIVE — flatten)
 bash plugins/compactor-dog/run.sh --compact
 ```
 

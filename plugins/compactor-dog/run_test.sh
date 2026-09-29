@@ -55,7 +55,7 @@ if [[ "$RUN_SH_REGEX" != "$TEST_REGEX" ]]; then
 fi
 
 # Verify compaction is not the default (gt-e14c). The destructive path
-# (flatten + force-push) must require an explicit --compact flag; a plain
+# (flatten) must require an explicit --compact flag; a plain
 # `bash run.sh` has to stay monitor-only.
 if ! grep -q '^CHECK_ONLY=true' "$SCRIPT_DIR/run.sh"; then
   echo "FAIL: run.sh no longer defaults CHECK_ONLY=true — destructive compaction is the default"

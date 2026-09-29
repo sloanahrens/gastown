@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# dolt-archive/run.sh — Deterministic JSONL backup + git push + dolt push.
+# dolt-archive/run.sh — Deterministic JSONL backup + git push.
 #
-# Exports production databases to JSONL, commits to git backup repo,
-# and pushes Dolt remotes. JSONL is the last-resort recovery layer.
+# Exports production databases to JSONL and commits them to the git backup
+# repo. JSONL is the last-resort recovery layer. It no longer pushes Dolt
+# remotes (ADR 0002); --skip-dolt-push is still accepted and does nothing.
 #
-# Usage: ./run.sh [--databases db1,db2,...] [--skip-git] [--skip-dolt-push]
+# Usage: ./run.sh [--databases db1,db2,...] [--skip-git]
 
 set -euo pipefail
 
@@ -18,7 +19,6 @@ JSONL_EXPORT_DIR="$HOME/gt/.dolt-archive/jsonl"
 BACKUP_REPO="$HOME/gt/.dolt-archive/git"
 DEFAULT_DBS="auto"
 SKIP_GIT=false
-SKIP_DOLT_PUSH=false
 
 # --- Argument parsing --------------------------------------------------------
 
@@ -26,9 +26,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --databases)    DEFAULT_DBS="$2"; shift 2 ;;
     --skip-git)     SKIP_GIT=true; shift ;;
-    --skip-dolt-push) SKIP_DOLT_PUSH=true; shift ;;
+    --skip-dolt-push) shift ;;  # no-op: Dolt remote push was removed (ADR 0002)
     --help|-h)
-      echo "Usage: $0 [--databases db1,db2,...] [--skip-git] [--skip-dolt-push]"
+      echo "Usage: $0 [--databases db1,db2,...] [--skip-git]"
       exit 0
       ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -191,56 +191,16 @@ if ! $SKIP_GIT; then
   fi
 fi
 
-# --- Step 3: Dolt native push ------------------------------------------------
-
-DOLT_PUSHED=0
-DOLT_PUSH_FAILED=0
-
-if ! $SKIP_DOLT_PUSH; then
-  log ""
-  log "=== Dolt Push ==="
-
-  for DB in "${PROD_DBS[@]}"; do
-    DB_DIR="$DOLT_DATA_DIR/$DB"
-
-    if [[ ! -d "$DB_DIR/.dolt" ]]; then
-      log "  $DB: no .dolt directory, skipping"
-      continue
-    fi
-
-    REMOTES=$(cd "$DB_DIR" && { dolt remote -v 2>/dev/null | grep -v "^$" | head -5 || true; })
-    if [[ -z "$REMOTES" ]]; then
-      log "  $DB: no remotes configured, skipping"
-      continue
-    fi
-
-    log "  $DB: pushing to remotes..."
-    cd "$DB_DIR"
-
-    for REMOTE_NAME in $(dolt remote -v 2>/dev/null | awk '{print $1}' | sort -u || true); do
-      if timeout 120 dolt push "$REMOTE_NAME" main 2>/dev/null; then
-        log "    $REMOTE_NAME: pushed"
-        DOLT_PUSHED=$((DOLT_PUSHED + 1))
-      else
-        log "    $REMOTE_NAME: FAILED"
-        DOLT_PUSH_FAILED=$((DOLT_PUSH_FAILED + 1))
-      fi
-    done
-  done
-
-  log "Dolt push: $DOLT_PUSHED succeeded, $DOLT_PUSH_FAILED failed"
-fi
-
-# --- Step 4: Report results --------------------------------------------------
+# --- Step 3: Report results --------------------------------------------------
 
 log ""
 log "=== Archive Cycle Complete ==="
 
-SUMMARY="Archive: jsonl=$EXPORTED/$((EXPORTED + EXPORT_FAILED)), git=${GIT_PUSHED}, dolt_push=$DOLT_PUSHED/$((DOLT_PUSHED + DOLT_PUSH_FAILED))"
+SUMMARY="Archive: jsonl=$EXPORTED/$((EXPORTED + EXPORT_FAILED)), git=${GIT_PUSHED}"
 log "$SUMMARY"
 
 RESULT="success"
-if [[ "$EXPORT_FAILED" -gt 0 ]] || [[ "$DOLT_PUSH_FAILED" -gt 0 ]] || [[ -n "$GIT_PRECONDITION_FAILED" ]]; then
+if [[ "$EXPORT_FAILED" -gt 0 ]] || [[ -n "$GIT_PRECONDITION_FAILED" ]]; then
   RESULT="warning"
 fi
 
