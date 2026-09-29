@@ -77,7 +77,7 @@ exit 0
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Call findStrandedConvoys — it should query bd list --status=open
-	stranded, err := findStrandedConvoys(townBeads)
+	stranded, err := findStrandedConvoysWith(townBeads, noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -159,7 +159,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	_, err := findStrandedConvoys(townBeads)
+	_, err := findStrandedConvoysWith(townBeads, noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}

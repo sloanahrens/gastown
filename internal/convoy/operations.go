@@ -189,12 +189,12 @@ var blockingDepTypes = map[string]bool{
 }
 
 // isIssueBlocked reports whether issueID has a blocking dependency that is
-// not satisfied; blockReason says which.
+// not satisfied; BlockReason says which.
 func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) bool {
-	return blockReason(ctx, store, issueID, resolver) != ""
+	return BlockReason(ctx, store, issueID, resolver) != ""
 }
 
-// blockReason returns why issueID may not be dispatched because of its
+// BlockReason returns why issueID may not be dispatched because of its
 // dependencies, or "" when none blocks it. A blocks, conditional-blocks,
 // waits-for or merge-blocks dependency blocks unless its target is closed or
 // tombstoned; a merge-blocks target must also carry a CloseReason starting
@@ -222,7 +222,7 @@ func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, 
 //
 // store is the caller's town store. It answers for hq when the resolver holds
 // no hq store, which is how gt close builds its resolver.
-func blockReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
+func BlockReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
 	storeFor := func(name string) (beadsdk.Storage, error) {
 		if resolver == nil {
 			return store, nil
@@ -410,7 +410,7 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		// Check blocking dependencies: blocks and conditional-blocks with
 		// non-closed targets prevent dispatch. parent-child is NOT treated
 		// as blocking (consistent with molecule step behavior).
-		if reason := blockReason(ctx, store, issue.ID, resolver); reason != "" {
+		if reason := BlockReason(ctx, store, issue.ID, resolver); reason != "" {
 			logger("%s: convoy %s: %s is blocked (%s), skipping", caller, convoyID, issue.ID, reason)
 			continue
 		}

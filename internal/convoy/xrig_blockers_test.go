@@ -263,14 +263,14 @@ func TestBlockReason_OwningStoreFailureIsUnreadable(t *testing.T) {
 	ctx := context.Background()
 
 	x := newXrigTown(t, beadsdk.StatusClosed)
-	reason := blockReason(ctx, x.hq, "gt-work", x.closeResolver(nil, "oag"))
+	reason := BlockReason(ctx, x.hq, "gt-work", x.closeResolver(nil, "oag"))
 	if !strings.Contains(reason, "oag-x") || !strings.Contains(reason, "unreadable") || !strings.Contains(reason, "connection refused") {
 		t.Errorf("open failure: reason = %q, want oag-x unreadable with the open error", reason)
 	}
 
 	y := newXrigTown(t, beadsdk.StatusClosed)
 	y.oag.readErr = errors.New("dolt: query timeout")
-	reason = blockReason(ctx, y.hq, "gt-work", y.resolver(true))
+	reason = BlockReason(ctx, y.hq, "gt-work", y.resolver(true))
 	if !strings.Contains(reason, "oag-x") || !strings.Contains(reason, "unreadable") || !strings.Contains(reason, "query timeout") {
 		t.Errorf("read failure: reason = %q, want oag-x unreadable with the read error", reason)
 	}
@@ -285,10 +285,10 @@ func TestBlockReason_HomeRigStoreUnavailableBlocks(t *testing.T) {
 	x := newXrigTown(t, beadsdk.StatusClosed)
 
 	daemonNoGastown := NewStoreResolver(x.townRoot, map[string]beadsdk.Storage{"hq": x.hq, "oag": x.oag})
-	if reason := blockReason(ctx, x.hq, "gt-sib", daemonNoGastown); !strings.Contains(reason, "gastown") {
+	if reason := BlockReason(ctx, x.hq, "gt-sib", daemonNoGastown); !strings.Contains(reason, "gastown") {
 		t.Errorf("daemon resolver without the gastown store: reason = %q, want a block naming rig gastown", reason)
 	}
-	if reason := blockReason(ctx, x.hq, "gt-sib", x.closeResolver(nil, "gastown")); !strings.Contains(reason, "gastown") || !strings.Contains(reason, "connection refused") {
+	if reason := BlockReason(ctx, x.hq, "gt-sib", x.closeResolver(nil, "gastown")); !strings.Contains(reason, "gastown") || !strings.Contains(reason, "connection refused") {
 		t.Errorf("close resolver failing to open gastown: reason = %q, want a block naming rig gastown and the error", reason)
 	}
 }
@@ -303,7 +303,7 @@ func TestStoreResolver_CachesFailedOpen(t *testing.T) {
 	r := x.closeResolver(opens, "oag")
 
 	for i := 0; i < 3; i++ {
-		if reason := blockReason(ctx, x.hq, "gt-work", r); reason == "" {
+		if reason := BlockReason(ctx, x.hq, "gt-work", r); reason == "" {
 			t.Fatalf("lookup %d: gt-work must be blocked while oag cannot open", i)
 		}
 	}

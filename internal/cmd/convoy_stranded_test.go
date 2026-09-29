@@ -38,12 +38,15 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "blocked open issue not ready",
+			// bd show's blocked flag drops cross-rig blockers, so readiness
+			// does not read it: the stranded scan asks convoyops.BlockReason
+			// instead (gt-j02xy, TestFindStrandedConvoys_CrossRigBlockerNotReady).
+			name: "bd show blocked flag not consulted",
 			in: trackedIssueInfo{
 				Status:  "open",
 				Blocked: true,
 			},
-			want: false,
+			want: true,
 		},
 		{
 			name: "open unassigned issue ready",
@@ -66,11 +69,6 @@ func TestIsReadyIssue_BlockingAndStatus(t *testing.T) {
 			name: "hooked unassigned issue treated ready for recovery",
 			in:   trackedIssueInfo{Status: "hooked"},
 			want: true,
-		},
-		{
-			name: "blocked in_progress issue not ready",
-			in:   trackedIssueInfo{Status: "in_progress", Blocked: true},
-			want: false,
 		},
 		// Readiness is an allowlist (gt-t08jn): every status the tracker says
 		// is not ready work stays off the feeders, assigned or not.
