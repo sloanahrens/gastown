@@ -1,5 +1,6 @@
 // Package bdgate lets the gt binary refuse to start agent sessions unless the
-// bd startup handshake passed (gt-7iwy0.1). The session-starting code calls
+// town startup checks pass: the town config files parse (gt-fcxe9.10) and
+// the bd startup handshake passed (gt-7iwy0.1). The session-starting code calls
 // Require; only the gt entry point installs the check, so library callers
 // and package tests run with no gate.
 package bdgate

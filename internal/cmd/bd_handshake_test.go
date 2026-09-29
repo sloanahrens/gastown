@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/bdgate"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
@@ -27,7 +30,29 @@ func stubBDHandshake(t *testing.T, fn func(ctx context.Context) (*deps.BDHandsha
 		bdHandshakeCheck = old
 		resetBDHandshakeCache()
 	})
+	// The town config check reads the town the test's cwd sits in; a
+	// handshake test must not depend on the live town's files.
+	stubTownConfig(t, func() error { return nil })
 	return &calls
+}
+
+// stubTownConfig replaces the town config parse check for one test.
+func stubTownConfig(t *testing.T, fn func() error) *int {
+	t.Helper()
+	calls := 0
+	old := townConfigCheck
+	townConfigCheck = func() error {
+		calls++
+		return fn()
+	}
+	t.Cleanup(func() { townConfigCheck = old })
+	return &calls
+}
+
+// brokenTownConfig is what the town config check returns for a file that
+// does not parse.
+func brokenTownConfig() error {
+	return &config.ParseError{Path: "/town/settings/config.json", Offset: 12, Line: 1, Column: 12, Err: errors.New("invalid character '}'")}
 }
 
 func findCommand(t *testing.T, path string) *cobra.Command {
@@ -146,6 +171,21 @@ func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
 		}
 	}
 	walk(rootCmd)
+
+	// Every gated command also refuses an unparseable town config file, and
+	// does so before the handshake runs (gt-fcxe9.10).
+	handshakes := stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) {
+		return &deps.BDHandshake{DBSchema: 66}, nil
+	})
+	stubTownConfig(t, brokenTownConfig)
+	for path := range bdHandshakeGatedCommands {
+		if err := persistentPreRun(findCommand(t, path), nil); !errors.Is(err, config.ErrUnparseable) {
+			t.Errorf("%q with an unparseable town config: persistentPreRun = %v, want the config refusal", path, err)
+		}
+	}
+	if *handshakes != 0 {
+		t.Errorf("handshake ran %d times; the config refusal must come first", *handshakes)
+	}
 }
 
 func TestInstallSessionGateRoutesSessionStartsThroughTheHandshake(t *testing.T) {
@@ -168,5 +208,60 @@ func TestDefaultBDHandshakeRefusesOutsideATown(t *testing.T) {
 	_, err := defaultBDHandshakeCheck(context.Background())
 	if !errors.Is(err, deps.ErrBDHandshake) || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
 		t.Fatalf("defaultBDHandshakeCheck outside a town = %v", err)
+	}
+}
+
+// TestSessionGateRefusesAnUnparseableTownConfig: the gate every agent
+// session start calls refuses on a broken config file, every time (not
+// cached), even after the handshake passed.
+func TestSessionGateRefusesAnUnparseableTownConfig(t *testing.T) {
+	stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) { return &deps.BDHandshake{DBSchema: 66}, nil })
+	broken := false
+	stubTownConfig(t, func() error {
+		if broken {
+			return brokenTownConfig()
+		}
+		return nil
+	})
+	installSessionGate()
+	t.Cleanup(func() { bdgate.Set(nil) })
+	if err := bdgate.Require(); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+	broken = true
+	if err := bdgate.Require(); !errors.Is(err, config.ErrUnparseable) {
+		t.Fatalf("config broken after a pass: bdgate.Require() = %v, want the config refusal", err)
+	}
+}
+
+// TestSessionGateRefusesSpawnOnARealBrokenSettingsFile is G3-04 end to end
+// with the real check: a broken settings/config.json refuses the spawn and
+// names the file, instead of moving the role to the default agent.
+func TestSessionGateRefusesSpawnOnARealBrokenSettingsFile(t *testing.T) {
+	stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) { return &deps.BDHandshake{DBSchema: 66}, nil })
+	townConfigCheck = defaultTownConfigCheck // stubBDHandshake's cleanup restores it
+
+	town := t.TempDir()
+	for rel, body := range map[string]string{
+		"mayor/town.json":      `{"type":"town","version":2,"name":"t"}`,
+		"settings/config.json": "{\"role_agents\": {\"polecat\": \"deepseek-flash\",}}",
+	} {
+		p := filepath.Join(town, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(town)
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
+
+	installSessionGate()
+	t.Cleanup(func() { bdgate.Set(nil) })
+	err := bdgate.Require()
+	if !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), filepath.Join("settings", "config.json")) || !strings.Contains(err.Error(), "offset") {
+		t.Fatalf("bdgate.Require() = %v, want a refusal naming settings/config.json and the offset", err)
 	}
 }

@@ -815,7 +815,10 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		if err != nil || port < 1024 || port > 65535 {
 			return fmt.Errorf("invalid value for %s: expected port number 1024-65535", key)
 		}
-		patrolCfg := daemon.LoadPatrolConfig(townRoot)
+		patrolCfg, err := daemon.ReadPatrolConfig(townRoot)
+		if err != nil {
+			return err
+		}
 		if patrolCfg == nil {
 			patrolCfg = &daemon.DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1}
 		}
@@ -913,7 +916,10 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		return getMaintenanceConfig(townRoot, key)
 
 	case "dolt.port":
-		patrolCfg := daemon.LoadPatrolConfig(townRoot)
+		patrolCfg, err := daemon.ReadPatrolConfig(townRoot)
+		if err != nil {
+			return err
+		}
 		if patrolCfg != nil {
 			if v, ok := patrolCfg.Env["GT_DOLT_PORT"]; ok {
 				fmt.Println(v)
@@ -936,7 +942,10 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 
 // setMaintenanceConfig sets a maintenance.* key in daemon.json (patrol config).
 func setMaintenanceConfig(townRoot, key, value string) error {
-	patrolConfig := daemon.LoadPatrolConfig(townRoot)
+	patrolConfig, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return err
+	}
 	if patrolConfig == nil {
 		patrolConfig = &daemon.DaemonPatrolConfig{
 			Type:    "daemon-patrol-config",
@@ -1038,7 +1047,10 @@ func setMaintenanceConfig(townRoot, key, value string) error {
 
 // getMaintenanceConfig gets a maintenance.* key from daemon.json (patrol config).
 func getMaintenanceConfig(townRoot, key string) error {
-	patrolConfig := daemon.LoadPatrolConfig(townRoot)
+	patrolConfig, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return err
+	}
 
 	var value string
 	switch key {
@@ -1101,7 +1113,10 @@ func getMaintenanceConfig(townRoot, key string) error {
 
 // setLifecycleConfig sets a lifecycle.* key in daemon.json.
 func setLifecycleConfig(townRoot, key, value string) error {
-	patrolConfig := daemon.LoadPatrolConfig(townRoot)
+	patrolConfig, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return err
+	}
 	if patrolConfig == nil {
 		patrolConfig = daemon.DefaultLifecycleConfig()
 	}
@@ -1231,7 +1246,10 @@ func setLifecycleConfig(townRoot, key, value string) error {
 
 // getLifecycleConfig gets a lifecycle.* key from daemon.json.
 func getLifecycleConfig(townRoot, key string) error {
-	patrolConfig := daemon.LoadPatrolConfig(townRoot)
+	patrolConfig, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return err
+	}
 
 	var value string
 	switch key {

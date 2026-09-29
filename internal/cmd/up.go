@@ -157,6 +157,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// existing config. Errors are non-fatal — the town can run without lifecycle
 	// automation, it just won't have automated maintenance.
 	if err := daemon.EnsureLifecycleConfigFile(townRoot); err != nil {
+		// A daemon.json that does not parse is never rewritten and the town
+		// does not start from defaults (gt-fcxe9.10).
+		if errors.Is(err, config.ErrUnparseable) {
+			return err
+		}
 		fmt.Fprintf(os.Stderr, "Warning: could not configure lifecycle defaults: %v\n", err)
 	}
 

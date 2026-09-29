@@ -9,12 +9,14 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/bdgate"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
 // bdHandshakeGatedCommands are the commands that run the town: they start
 // the daemon, start agent sessions, or spawn polecats. Each refuses to run
-// unless the bd on PATH passes the startup handshake (deps.CheckBDHandshake).
+// unless the town config files parse (daemon.CheckTownConfig, gt-fcxe9.10)
+// and the bd on PATH passes the startup handshake (deps.CheckBDHandshake).
 // Every other command, including every read-only one, runs against whatever
 // bd is installed. TestBDHandshakeGatedCommandsExist pins that each path
 // exists, so a rename cannot drop a command out of the gate.
@@ -122,6 +124,32 @@ func requireBDHandshake() error {
 	return nil
 }
 
+// townConfigCheck reports a town config file that does not parse. Tests
+// replace it; nothing else should.
+var townConfigCheck = defaultTownConfigCheck
+
+// defaultTownConfigCheck checks the config files of the town the working
+// directory (or GT_TOWN_ROOT / GT_ROOT) belongs to. Outside a town there is
+// nothing to check; the handshake refuses that case on its own.
+func defaultTownConfigCheck() error {
+	dir := detectTownRootFromCwd()
+	if dir == "" {
+		return nil
+	}
+	return daemon.CheckTownConfig(dir)
+}
+
+// requireTownStart is the startup gate for town-running commands and agent
+// session starts: the town config files must parse (checked on every call,
+// so a file broken while the daemon runs stops its next session start), then
+// the bd handshake must pass (a pass is cached).
+func requireTownStart() error {
+	if err := townConfigCheck(); err != nil {
+		return err
+	}
+	return requireBDHandshake()
+}
+
 // resetBDHandshakeCache forgets a cached pass (tests).
 func resetBDHandshakeCache() {
 	bdHandshakeMu.Lock()
@@ -130,10 +158,10 @@ func resetBDHandshakeCache() {
 }
 
 // installSessionGate makes every agent-session start in this process run the
-// handshake first (bdgate.Require in session.StartSession and the role
+// town config check and the handshake first (bdgate.Require in session.StartSession and the role
 // managers' Start). It covers session starts the command list above does not
 // name, and the daemon's own restarts. Only Execute installs it, so package
 // tests that call Start directly run ungated.
 func installSessionGate() {
-	bdgate.Set(requireBDHandshake)
+	bdgate.Set(requireTownStart)
 }
