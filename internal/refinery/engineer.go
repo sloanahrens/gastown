@@ -3668,7 +3668,7 @@ func (e *Engineer) postMergeConvoyCheck(mr *MRInfo) {
 	// Step 2: For each closed convoy, check if it has a swarm with an
 	// integration branch that needs landing.
 	for _, convoy := range closedConvoys {
-		e.landConvoySwarm(townRoot, convoy)
+		e.landConvoySwarm(convoy)
 	}
 
 	// Step 3: Notify deacon of convoy-eligible merges for immediate feeding.
@@ -3907,12 +3907,10 @@ func (e *Engineer) claimConvoyCompletionNotification(townRoot, convoyID, fallbac
 }
 
 // landConvoySwarm reports a completed convoy whose molecule still has a
-// swarm/<molecule> integration branch. It used to exec `gt swarm land`, but
-// gt has no swarm command any more, so every attempt failed and was logged as
-// a Warning while the branch sat unlanded (gt-fcxe9.5, deep review G4-03).
-// Nothing lands these branches automatically now; the message says so, so an
-// operator can land the branch by hand.
-func (e *Engineer) landConvoySwarm(_ string, convoy convoyInfo) {
+// swarm/<molecule> integration branch. Nothing lands these branches
+// automatically (gt has no swarm command), so the message tells the operator
+// to merge the branch by hand.
+func (e *Engineer) landConvoySwarm(convoy convoyInfo) {
 	// ZFC: Use typed accessor instead of parsing description text
 	fields := beads.ParseConvoyFields(&beads.Issue{Description: convoy.Description})
 	var moleculeID string

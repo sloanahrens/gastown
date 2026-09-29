@@ -20,7 +20,7 @@ func TestLandConvoySwarmReportsBranchNotLanded(t *testing.T) {
 	}
 	e := newTestEngineer(t, workDir, g)
 
-	e.landConvoySwarm(t.TempDir(), convoyInfo{ID: "hq-cv-1", Description: "Convoy tracking 1 issue\nMolecule: mol-x"})
+	e.landConvoySwarm(convoyInfo{ID: "hq-cv-1", Description: "Convoy tracking 1 issue\nMolecule: mol-x"})
 
 	if calls := readLog(t, gtLog); calls != "" {
 		t.Errorf("landConvoySwarm exec'd gt: %q", calls)
