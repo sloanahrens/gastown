@@ -3,6 +3,7 @@ package daemon
 import (
 	"time"
 
+	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -15,6 +16,7 @@ type sessionTmux interface {
 	KillSession(name string) error
 	KillSessionWithProcesses(name string) error
 	IsAgentAlive(session string) bool
+	CheckSessionHealth(session string, maxInactivity time.Duration) tmux.ZombieStatus
 	IsAvailable() bool
 	GetSessionCreatedTime(name string) (time.Time, error)
 	GetPaneID(session string) (string, error)
@@ -30,3 +32,14 @@ type sessionTmux interface {
 }
 
 var _ sessionTmux = (*tmux.Tmux)(nil)
+
+// dogSessions is the dog session surface the handler drives:
+// *dog.SessionManager in production, a fake over the test's tmux in tests.
+type dogSessions interface {
+	SessionName(dogName string) string
+	IsRunning(dogName string) (bool, error)
+	Start(dogName string, opts dog.SessionStartOptions) error
+	Stop(dogName string, force bool) error
+}
+
+var _ dogSessions = (*dog.SessionManager)(nil)

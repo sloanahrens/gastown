@@ -81,6 +81,19 @@ func (f *fakeTmux) IsAgentAlive(session string) bool {
 	return f.IsAgentRunning(session)
 }
 
+// CheckSessionHealth mirrors *tmux.Tmux without the activity level, which
+// needs window activity the fake does not model: SessionDead for a missing
+// session, AgentDead for a pane back at a shell, else SessionHealthy.
+func (f *fakeTmux) CheckSessionHealth(session string, _ time.Duration) tmux.ZombieStatus {
+	if alive, err := f.HasSession(session); err != nil || !alive {
+		return tmux.SessionDead
+	}
+	if !f.IsAgentAlive(session) {
+		return tmux.AgentDead
+	}
+	return tmux.SessionHealthy
+}
+
 func (f *fakeTmux) IsAvailable() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
