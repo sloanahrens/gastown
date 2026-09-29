@@ -52,7 +52,7 @@ func TestParentCommandsAreNotHelpOnly(t *testing.T) {
 
 func TestRequireSubcommandExitsTwo(t *testing.T) { /* no args and unknown arg both give exitCodeForError == 2 */ }
 
-func TestTapGuardUnknownGuardExitsTwo(t *testing.T) {
+func TestTapGuardUnknownGuardBlocks(t *testing.T) {
 	c, rest, err := rootCmd.Find([]string{"tap", "guard", "no-such-guard"})
 	// err nil, c == tapGuardCmd, c.RunE(c, rest) -> exit 2
 }
@@ -66,7 +66,7 @@ Commands are resolved with `rootCmd.Find` and the RunE is called directly, so no
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `go test ./internal/cmd -run 'TestParentCommandsAreNotHelpOnly|TestRequireSubcommandExitsTwo|TestTapGuardUnknownGuardExitsTwo|TestPrefixMatchingDisabled' -count=1`
+Run: `go test ./internal/cmd -run 'TestParentCommandsAreNotHelpOnly|TestRequireSubcommandExitsTwo|TestTapGuardUnknownGuardBlocks|TestPrefixMatchingDisabled' -count=1`
 Expected: FAIL listing the 15 parents, exit 1 not 2, `stat` resolving to `status`.
 
 - [ ] **Step 3: Implement**
@@ -85,7 +85,7 @@ In `TestCommandTokensResolve`, after `cmdtree.FromCobra`, walk rootCmd and `Mark
 
 **Files:**
 - Create: `internal/testdb/testdb.go`, `internal/testdb/testdb_test.go`
-- Modify: `internal/reaper/reaper.go`, `internal/daemon/jsonl_git_backup.go`, `internal/cmd/dolt.go` (cleanup hint glob, migrate skip), `internal/beads/beads.go` + `bd_container_retry.go` (mint prefix), `internal/testutil/doltpool.go` (store and SQL pool names)
+- Modify: `internal/reaper/reaper.go`, `internal/daemon/jsonl_git_backup.go`, `internal/cmd/dolt.go` (cleanup hint glob, migrate skip), `internal/beads/beads.go` (mint prefix), `internal/testutil/doltpool.go` (store and SQL pool names)
 
 **Interfaces:**
 - Produces: `testdb.MintPrefix = "testdb_"`, `testdb.RemotesCheckPrefix = "dolt_remotes_check_"`, `testdb.Prefixes() []string` (copy), `testdb.IsTestDatabaseName(name string) bool` (case-insensitive prefix match).

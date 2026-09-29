@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -62,6 +63,13 @@ func TestOneDefinition(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	self := filepath.Join(root, "internal", "testdb")
+	// A prefix counts where a name would start: at the start of the literal
+	// or after a non-identifier byte (space, |, (, ^, quote), so a word that
+	// merely contains one, like "beads_types", is not a copy.
+	prefixUse := make([]*regexp.Regexp, len(prefixes))
+	for i, p := range prefixes {
+		prefixUse[i] = regexp.MustCompile(`(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(p))
+	}
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -96,8 +104,8 @@ func TestOneDefinition(t *testing.T) {
 			if err != nil {
 				return true
 			}
-			for _, p := range prefixes {
-				if strings.Contains(v, p) {
+			for i, p := range prefixes {
+				if prefixUse[i].MatchString(v) {
 					rel, _ := filepath.Rel(root, path)
 					t.Errorf("%s:%d: string literal %q names test-database prefix %q; use internal/testdb", rel, fset.Position(lit.Pos()).Line, v, p)
 				}

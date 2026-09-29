@@ -158,3 +158,31 @@ func TestGtTakesArgs(t *testing.T) {
 		t.Error("an ExactArgs(1) leaf takes arguments")
 	}
 }
+
+// TestMarkRequireSubcommandHelpOnly drives the failing branch the lint relies
+// on: an invocation that stops on a requireSubcommand parent (by name or by
+// alias) must resolve as help-only, while its subcommands and a runnable
+// leaf still resolve.
+func TestMarkRequireSubcommandHelpOnly(t *testing.T) {
+	t.Parallel()
+	root := &cobra.Command{Use: "gt"}
+	parent := &cobra.Command{Use: "p", Aliases: []string{"pp"}, RunE: requireSubcommand}
+	parent.AddCommand(&cobra.Command{Use: "child", Run: func(*cobra.Command, []string) {}})
+	root.AddCommand(parent, &cobra.Command{Use: "leaf", Run: func(*cobra.Command, []string) {}})
+
+	tree := cmdtree.FromCobra(root, gtTakesArgs)
+	if r := tree.Resolve([]string{"p"}); !r.OK || r.HelpOnly {
+		t.Fatalf("before marking, Resolve(p) = %+v; FromCobra alone must not flag a runnable parent", r)
+	}
+	markRequireSubcommandHelpOnly(tree, root)
+	for _, words := range [][]string{{"p"}, {"pp"}} {
+		if r := tree.Resolve(words); r.OK || !r.HelpOnly {
+			t.Errorf("Resolve(%v) = %+v, want a help-only failure", words, r)
+		}
+	}
+	for _, words := range [][]string{{"p", "child"}, {"pp", "child"}, {"leaf"}} {
+		if r := tree.Resolve(words); !r.OK {
+			t.Errorf("Resolve(%v) = %+v, want OK", words, r)
+		}
+	}
+}
