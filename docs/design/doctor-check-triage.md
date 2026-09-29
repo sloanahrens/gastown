@@ -160,7 +160,7 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `rig-is-git-repo` | Rig | occasional | RigChecks() bundle item, runs once per registered rig at boot/upgrade (16-check bundle multiplied by rig count -- too expensive to run whole on every patrol tick); re-evaluate per-rig only when a rig is added/changed. |
 | `sparse-checkout` | Rig | occasional | Per-rig structural/config check; validates state that changes only when a rig is added or reconfigured. |
 | `stale-agent-beads` | Rig | occasional | Per-rig structural/config check; validates state that changes only when a rig is added or reconfigured. |
-| `sync-remote-owner` | Rig | occasional | Per-rig structural/config check; validates state that changes only when a rig is added or reconfigured. |
+| `dolt-remote-leftovers` | Infrastructure | occasional | Read-only file scan for Dolt remotes, git-remote-cache dirs and sync.remote left from the removed remote sync (ADR 0002); the state changes only when an operator removes it. |
 | `testutil-symlink` | Rig | occasional | RigChecks() bundle item, runs once per registered rig at boot/upgrade (16-check bundle multiplied by rig count -- too expensive to run whole on every patrol tick); re-evaluate per-rig only when a rig is added/changed. |
 | `witness-exists` | Rig | occasional | RigChecks() bundle item, runs once per registered rig at boot/upgrade (16-check bundle multiplied by rig count -- too expensive to run whole on every patrol tick); re-evaluate per-rig only when a rig is added/changed. |
 | `worktree-gitdir-valid` | Rig | occasional | Per-rig structural/config check; validates state that changes only when a rig is added or reconfigured. |
