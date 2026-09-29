@@ -7,11 +7,8 @@ import (
 	"testing"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 )
-
-type dbAccessor interface {
-	beadsDBAccessor
-}
 
 // TestSchemaLevelProblem is the guard's verdict without a database: equal
 // levels pass, anything else (including a read failure or an unknown bd
@@ -41,58 +38,76 @@ func TestSchemaLevelProblem(t *testing.T) {
 	}
 }
 
-// storeSchemaLevel reads the level the store's database reports, the way
-// the guard does, so the Docker tests assert against the real table.
-func storeSchemaLevel(t *testing.T, store beadsdk.Storage) int {
-	t.Helper()
-	level, err := readStoreSchemaLevel(context.Background(), store)
-	if err != nil {
-		t.Fatalf("readStoreSchemaLevel: %v", err)
-	}
-	return level
+// fakeStoreProbe answers the compatibility reads for one store.
+type fakeStoreProbe struct {
+	level      int
+	levelErr   error
+	tailErr    error
+	journal    string
+	journalErr error
 }
 
-func TestCheckBeadsStoreCompatibility_AllowsMatchingSchemaLevel(t *testing.T) {
-	t.Parallel()
-	takeStoreSlot(t)
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	level := storeSchemaLevel(t, store)
-	if level <= 0 {
-		t.Fatalf("a migrated store reports schema level %d", level)
+func (f *fakeStoreProbe) SchemaLevel(context.Context) (int, error) { return f.level, f.levelErr }
+func (f *fakeStoreProbe) EventsTail(int64, int) (*beads.EventsPage, error) {
+	if f.tailErr != nil {
+		return nil, f.tailErr
 	}
-	if err := checkBeadsStoreCompatibility(context.Background(), map[string]beadsdk.Storage{"hq": store}, level); err != nil {
-		t.Fatalf("checkBeadsStoreCompatibility returned unexpected error: %v", err)
+	return &beads.EventsPage{}, nil
+}
+func (f *fakeStoreProbe) JournalConfig() (string, error) { return f.journal, f.journalErr }
+
+// probesFor serves each store name's fake.
+func probesFor(fakes map[string]*fakeStoreProbe) func(string, string) (storeProbe, error) {
+	return func(_, name string) (storeProbe, error) {
+		f, ok := fakes[name]
+		if !ok {
+			return nil, errors.New("no probe for " + name)
+		}
+		return f, nil
 	}
 }
 
-// TestCheckBeadsStoreCompatibility_RejectsSchemaAheadOfBD seeds
-// schema_migrations, the table bd actually advances, not metadata.bd_version,
-// which the fork never writes (the old guard read it and could never fire).
-func TestCheckBeadsStoreCompatibility_RejectsSchemaAheadOfBD(t *testing.T) {
+// The compat check reads every store through bd (gt-7iwy0.2): the schema
+// level from schema_migrations via bd sql, the events journal via a
+// one-record tail, and the journal setting via bd config get. A level other
+// than bd's, a failed read, or a journal bd cannot tail refuses; a journal
+// switched off in config.yaml is only reported, because gastown's own bd
+// calls journal regardless (BD_EVENTS_JOURNAL=1).
+func TestCheckBeadsStoreCompatibility_ReadsThroughBD(t *testing.T) {
 	t.Parallel()
-	takeStoreSlot(t)
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	acc, ok := store.(dbAccessor)
-	if !ok || acc.DB() == nil {
-		t.Fatal("test store does not expose its database")
-	}
-	level := storeSchemaLevel(t, store)
-	if _, err := acc.DB().ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", level+1); err != nil {
-		t.Fatalf("seed schema_migrations: %v", err)
-	}
-
-	err := checkBeadsStoreCompatibility(ctx, map[string]beadsdk.Storage{"hq": store}, level)
-	if err == nil {
-		t.Fatal("expected incompatibility error, got nil")
-	}
-	want := "database schema " + itoa(level+1) + " does not match bd schema " + itoa(level)
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("error %q lacks %q", err, want)
+	for _, tc := range []struct {
+		name    string
+		probe   fakeStoreProbe
+		problem string
+		warning string
+	}{
+		{"compatible", fakeStoreProbe{level: 66, journal: "true"}, "", ""},
+		{"database ahead", fakeStoreProbe{level: 67, journal: "true"}, "database schema 67 does not match bd schema 66", ""},
+		{"schema read fails", fakeStoreProbe{levelErr: errors.New("the database schema is ahead of this bd (bd exit 26)"), journal: "true"}, "cannot read schema_migrations: the database schema is ahead", ""},
+		{"journal unreadable", fakeStoreProbe{level: 66, tailErr: errors.New("bd events tail: store_unavailable"), journal: "true"}, "events journal probe failed: bd events tail: store_unavailable", ""},
+		{"journal off in config", fakeStoreProbe{level: 66, journal: "false"}, "", "events journal is off in its config.yaml"},
+		{"journal config unreadable", fakeStoreProbe{level: 66, journalErr: errors.New("exit 1")}, "", "cannot read events-journal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			probe := tc.probe
+			var warnings []string
+			err := checkBeadsStoreCompatibility(context.Background(), t.TempDir(), []string{"gastown"}, 66,
+				probesFor(map[string]*fakeStoreProbe{"gastown": &probe}), func(w string) { warnings = append(warnings, w) })
+			switch {
+			case tc.problem == "" && err != nil:
+				t.Fatalf("unexpected refusal: %v", err)
+			case tc.problem != "" && (err == nil || !strings.Contains(err.Error(), tc.problem)):
+				t.Fatalf("err = %v, want a refusal naming %q", err, tc.problem)
+			}
+			joined := strings.Join(warnings, "\n")
+			if tc.warning == "" && joined != "" || tc.warning != "" && !strings.Contains(joined, tc.warning) {
+				t.Errorf("warnings = %q, want %q", warnings, tc.warning)
+			}
+			if tc.warning != "" && !strings.Contains(joined, "bd config set events-journal true") {
+				t.Errorf("warning %q does not say how to turn the journal on", joined)
+			}
+		})
 	}
 }
 
@@ -123,7 +138,7 @@ func TestVerifyBeadsStoresBlocksOnBDSchemaLevel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			bdSchemaLevel = func(context.Context, string) (int, error) { return tc.level, tc.err }
 			store := &closeRecorder{}
-			err := verifyBeadsStores(context.Background(), nil, t.TempDir(), map[string]beadsdk.Storage{"hq": store})
+			err := verifyBeadsStores(context.Background(), nil, t.TempDir(), map[string]beadsdk.Storage{"hq": store}, probesFor(nil))
 			if err == nil || !strings.Contains(err.Error(), "daemon startup blocked") || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("verifyBeadsStores = %v, want a startup block naming %q", err, tc.want)
 			}
@@ -131,5 +146,22 @@ func TestVerifyBeadsStoresBlocksOnBDSchemaLevel(t *testing.T) {
 				t.Error("stores were not closed on refusal")
 			}
 		})
+	}
+}
+
+func TestParseConfigGetValue(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		`{"schema_version":1,"contract_version":1,"data":{"key":"events-journal","location":"config.yaml","value":"false"},"pagination":null,"error":null}`: "false",
+		`{"key":"events-journal","location":"env var","value":"true"}`:                                                                                       "true",
+	} {
+		if got, err := parseConfigGetValue([]byte(in)); err != nil || got != want {
+			t.Errorf("parseConfigGetValue(%s) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "events-journal (not set)", `{"schema_version":1,"contract_version":1,"data":null,"error":{"kind":"internal"}}`} {
+		if got, err := parseConfigGetValue([]byte(bad)); err == nil {
+			t.Errorf("parseConfigGetValue(%q) = %q, want an error", bad, got)
+		}
 	}
 }

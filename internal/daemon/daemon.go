@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1614,8 +1615,9 @@ var bdSchemaLevel = func(ctx context.Context, townRoot string) (int, error) {
 
 // verifyBeadsStores is the daemon's startup gate on opened stores: bd must
 // report the schema level it migrates to, and every store must be at that
-// level with pollable event tables. On refusal it closes every store.
-func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]beadsdk.Storage) error {
+// level with a journal bd can tail. Every read goes through bd (probeFor;
+// gt-7iwy0.2), not the store handles. On refusal it closes every store.
+func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]beadsdk.Storage, probeFor func(townRoot, name string) (storeProbe, error)) error {
 	bdSchema, err := bdSchemaLevel(ctx, townRoot)
 	if err == nil && bdSchema <= 0 {
 		err = fmt.Errorf("bd version --json reports no db_schema_version (a bd build from before the machine surface); install the beads fork's bd with make safe-install")
@@ -1624,34 +1626,117 @@ func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string,
 		closeBeadsStores(logger, stores)
 		return fmt.Errorf("daemon startup blocked: cannot read bd's schema level: %w", err)
 	}
-	if err := checkBeadsStoreCompatibility(ctx, stores, bdSchema); err != nil {
+	names := make([]string, 0, len(stores))
+	for name, store := range stores {
+		if store != nil {
+			names = append(names, name)
+		}
+	}
+	warn := func(w string) {
+		if logger != nil {
+			logger.Printf("Convoy: %s", w)
+		}
+	}
+	if err := checkBeadsStoreCompatibility(ctx, townRoot, names, bdSchema, probeFor, warn); err != nil {
 		closeBeadsStores(logger, stores)
 		return err
 	}
 	return nil
 }
 
+// storeProbe is what the compatibility check reads about one store, all
+// through bd.
+type storeProbe interface {
+	// SchemaLevel is the database's highest applied migration.
+	SchemaLevel(ctx context.Context) (int, error)
+	// EventsTail reads the events journal; the check reads one record.
+	EventsTail(since int64, limit int) (*beads.EventsPage, error)
+	// JournalConfig is events-journal as the store's config.yaml sets it,
+	// read without gastown's BD_EVENTS_JOURNAL override.
+	JournalConfig() (string, error)
+}
+
+// bdStoreProbe reads a store's compatibility facts through the bd on PATH,
+// pinned to the store's beads directory.
+type bdStoreProbe struct {
+	dir    string
+	run    deps.BDRunner
+	client *beads.Beads
+}
+
+// newBDStoreProbe returns the probe for the named store ("hq" or a rig).
+func newBDStoreProbe(townRoot, name string) (storeProbe, error) {
+	dir := doltserver.FindRigBeadsDir(townRoot, name)
+	if dir == "" {
+		return nil, fmt.Errorf("no beads directory for store %q", name)
+	}
+	return &bdStoreProbe{dir: dir, run: deps.NewBDProcessRunner(filepath.Dir(dir)), client: beads.NewWithBeadsDir(townRoot, dir)}, nil
+}
+
+// pinned runs bd with BEADS_DIR set to the store's directory and
+// BD_EVENTS_JOURNAL cleared, so bd reports the workspace's own settings.
+func (p *bdStoreProbe) pinned(ctx context.Context, extraEnv []string, args ...string) ([]byte, []byte, error) {
+	env := append([]string{"BEADS_DIR=" + p.dir, "BD_EVENTS_JOURNAL="}, extraEnv...)
+	return p.run(ctx, env, args...)
+}
+
+func (p *bdStoreProbe) SchemaLevel(ctx context.Context) (int, error) {
+	return deps.ReadDBSchemaLevel(ctx, p.pinned)
+}
+
+func (p *bdStoreProbe) EventsTail(since int64, limit int) (*beads.EventsPage, error) {
+	return p.client.EventsTail(since, limit)
+}
+
+func (p *bdStoreProbe) JournalConfig() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), beads.ResolveSubprocessTimeout())
+	defer cancel()
+	stdout, stderr, err := p.pinned(ctx, []string{"BD_MACHINE=1"}, "config", "get", "events-journal", "--json")
+	if err != nil {
+		return "", fmt.Errorf("bd config get events-journal: %w (%s)", err, strings.TrimSpace(string(stderr)))
+	}
+	return parseConfigGetValue(stdout)
+}
+
+// parseConfigGetValue reads the value from bd config get --json: the
+// machine envelope's data, or the legacy {key, value, location} object.
+func parseConfigGetValue(out []byte) (string, error) {
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	body := bytes.TrimSpace(out)
+	if json.Unmarshal(body, &env) == nil && len(env.Data) > 0 && string(env.Data) != "null" {
+		body = env.Data
+	}
+	var kv struct {
+		Value *string `json:"value"`
+	}
+	if err := json.Unmarshal(body, &kv); err != nil || kv.Value == nil {
+		return "", fmt.Errorf("bd config get --json: no value in %q", util.FirstLine(string(out)))
+	}
+	return strings.TrimSpace(*kv.Value), nil
+}
+
 // checkBeadsStoreCompatibility refuses stores whose database schema level
-// is not the level bd migrates to (bdSchema), or whose event tables cannot
-// be polled. It compares schema integers read from schema_migrations, the
-// table bd advances; the metadata.bd_version semver it used to read is a key
-// the fork never writes, so that guard could not fire (B5-02).
-func checkBeadsStoreCompatibility(ctx context.Context, stores map[string]beadsdk.Storage, bdSchema int) error {
-	if len(stores) == 0 {
+// is not the level bd migrates to (bdSchema), or whose events journal bd
+// cannot read. It compares schema integers read from schema_migrations, the
+// table bd advances (B5-02). A journal left off in a store's config.yaml is
+// passed to warn, not refused: gastown's own bd calls journal regardless.
+func checkBeadsStoreCompatibility(ctx context.Context, townRoot string, names []string, bdSchema int, probeFor func(townRoot, name string) (storeProbe, error), warn func(string)) error {
+	if len(names) == 0 {
 		return nil
 	}
-
-	names := make([]string, 0, len(stores))
-	for name := range stores {
-		names = append(names, name)
-	}
+	names = append([]string(nil), names...)
 	sort.Strings(names)
 
 	var problems []string
 	for _, name := range names {
-		problem := checkSingleBeadsStoreCompatibility(ctx, name, stores[name], bdSchema)
+		problem, warning := checkSingleBeadsStoreCompatibility(ctx, townRoot, name, bdSchema, probeFor)
 		if problem != "" {
 			problems = append(problems, problem)
+		}
+		if warning != "" && warn != nil {
+			warn(warning)
 		}
 	}
 	if len(problems) == 0 {
@@ -1664,27 +1749,35 @@ func checkBeadsStoreCompatibility(ctx context.Context, stores map[string]beadsdk
 		strings.Join(problems, "\n  "), remediation)
 }
 
-func checkSingleBeadsStoreCompatibility(ctx context.Context, name string, store beadsdk.Storage, bdSchema int) string {
-	if store == nil {
-		return ""
-	}
-
+func checkSingleBeadsStoreCompatibility(ctx context.Context, townRoot, name string, bdSchema int, probeFor func(townRoot, name string) (storeProbe, error)) (problem, warning string) {
 	label := displayBeadsStoreName(name)
+	probe, err := probeFor(townRoot, name)
+	if err != nil {
+		return fmt.Sprintf("%s: %v", label, err), ""
+	}
+
 	var reasons []string
-
-	level, err := readStoreSchemaLevel(ctx, store)
-	if problem := schemaLevelProblem(level, err, bdSchema); problem != "" {
-		reasons = append(reasons, problem)
+	level, err := probe.SchemaLevel(ctx)
+	if p := schemaLevelProblem(level, err, bdSchema); p != "" {
+		reasons = append(reasons, p)
+	}
+	if _, err := probe.EventsTail(0, 1); err != nil {
+		var trunc *beads.EventsTruncatedError
+		if !errors.As(err, &trunc) {
+			reasons = append(reasons, fmt.Sprintf("events journal probe failed: %v", err))
+		}
+	}
+	if len(reasons) > 0 {
+		problem = fmt.Sprintf("%s: %s", label, strings.Join(reasons, "; "))
 	}
 
-	if err := probeStoreEventSchema(ctx, store); err != nil {
-		reasons = append(reasons, fmt.Sprintf("event polling probe failed: %v", err))
+	switch v, err := probe.JournalConfig(); {
+	case err != nil:
+		warning = fmt.Sprintf("%s: cannot read events-journal from its config (%v); bd calls made outside gt may not journal, so convoy closes they make wait for the stranded scan. Check with bd config get events-journal; enable with bd config set events-journal true", label, err)
+	case v != "true":
+		warning = fmt.Sprintf("%s: events journal is off in its config.yaml (events-journal=%q): closes made by bd calls outside gt are not journaled and wait for the stranded scan. Enable with bd config set events-journal true in that beads directory and commit the config.yaml", label, v)
 	}
-
-	if len(reasons) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%s: %s", label, strings.Join(reasons, "; "))
+	return problem, warning
 }
 
 // schemaLevelProblem is the verdict on one store: "" when the database is at
@@ -1700,55 +1793,6 @@ func schemaLevelProblem(level int, readErr error, bdSchema int) string {
 		return fmt.Sprintf("database schema %d does not match bd schema %d", level, bdSchema)
 	}
 	return ""
-}
-
-// readStoreSchemaLevel reads the highest applied migration from the store's
-// schema_migrations table.
-func readStoreSchemaLevel(ctx context.Context, store beadsdk.Storage) (int, error) {
-	dbAccessor, ok := store.(beadsDBAccessor)
-	if !ok || dbAccessor.DB() == nil {
-		return 0, fmt.Errorf("store does not expose its database")
-	}
-	var level sql.NullInt64
-	if err := dbAccessor.DB().QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&level); err != nil {
-		return 0, err
-	}
-	if !level.Valid {
-		return 0, fmt.Errorf("schema_migrations is empty")
-	}
-	return int(level.Int64), nil
-}
-
-func probeStoreEventSchema(ctx context.Context, store beadsdk.Storage) error {
-	if dbAccessor, ok := store.(beadsDBAccessor); ok && dbAccessor.DB() != nil {
-		for _, table := range []string{"events", "wisp_events"} {
-			if err := probeEventTable(ctx, dbAccessor.DB(), table); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// Fall back to the typed API if the store doesn't expose raw SQL.
-	_, err := store.GetAllEventsSince(ctx, time.Now().Add(24*time.Hour).UTC())
-	return err
-}
-
-func probeEventTable(ctx context.Context, db *sql.DB, table string) error {
-	query := fmt.Sprintf("SELECT id, created_at FROM %s ORDER BY created_at DESC LIMIT 1", table)
-
-	var (
-		id        string
-		createdAt time.Time
-	)
-	err := db.QueryRowContext(ctx, query).Scan(&id, &createdAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("%s table probe: %w", table, err)
-	}
-	return nil
 }
 
 func displayBeadsStoreName(name string) string {
@@ -2809,7 +2853,7 @@ func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
 		return storeOpenResult{Missing: missing}, nil
 	}
 
-	if err := verifyBeadsStores(d.ctx, d.logger, d.config.TownRoot, stores); err != nil {
+	if err := verifyBeadsStores(d.ctx, d.logger, d.config.TownRoot, stores, newBDStoreProbe); err != nil {
 		return storeOpenResult{Missing: missing}, err
 	}
 
