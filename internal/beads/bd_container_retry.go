@@ -393,7 +393,7 @@ func (r *bdInitRetryReset) next(args []string) []string {
 		fmt.Fprintf(os.Stderr, "beads: could not clear the workspace a failed bd init left at %s, retrying as-is: %v\n", r.dir, err)
 		return args
 	}
-	return remintTestDatabase(args)
+	return remintTestDatabase(args, filepath.Dir(r.dir))
 }
 
 // remintTestDatabase returns args with Init's testdb_ name replaced by a fresh
@@ -402,12 +402,13 @@ func (r *bdInitRetryReset) next(args []string) []string {
 // bdInitOnTestDatabase reaches the rewrite, and the check is repeated here so
 // the predicate and the rewrite cannot disagree about which argv they mean.
 // Both flag spellings are rewritten, for the same reason. The database the
-// failed attempt used is abandoned; it goes with the test container.
-func remintTestDatabase(args []string) []string {
+// failed attempt used stays leased to ownerDir, the init's workDir, until
+// that directory is gone.
+func remintTestDatabase(args []string, ownerDir string) []string {
 	if !bdInitOnTestDatabase(args) {
 		return args
 	}
-	name, err := testDatabaseFor(serverPortArg(args))
+	name, err := testDatabaseFor(serverPortArg(args), ownerDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "beads: no fresh test database for the retried bd init, retrying on the same one: %v\n", err)
 		return args

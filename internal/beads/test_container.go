@@ -160,7 +160,7 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 	if !hasDatabaseArg(args) {
 		if port := serverPortArg(args); port > 0 {
 			if src := testDatabaseSource.Load(); src != nil {
-				name, err := (*src)(port)
+				name, err := (*src)(port, dir)
 				if err != nil {
 					return nil, fmt.Errorf("RunTestContainerInit: %w", err)
 				}

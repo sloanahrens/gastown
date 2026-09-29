@@ -1139,7 +1139,7 @@ func (b *Beads) Init(prefix string) error {
 	}
 	args = append(args, "--quiet")
 	if b.serverPort > 0 {
-		name, err := testDatabaseFor(b.serverPort)
+		name, err := testDatabaseFor(b.serverPort, b.workDir)
 		if err != nil {
 			return err
 		}
@@ -1188,14 +1188,15 @@ func testDatabaseName() string {
 // running fails their information_schema reads and savepoints on the same
 // server ("could not resolve initial root for database X/"), which is what
 // broke concurrent bd inits there; taking pre-created databases leaves the
-// catalog unchanged for the whole test run. It returns "" for a port that is
-// not the pool's container.
-var testDatabaseSource atomic.Pointer[func(port int) (string, error)]
+// catalog unchanged for the whole test run. ownerDir is the directory bd init
+// runs in: the pool lends the database until that directory, a test's, is
+// gone. It returns "" for a port that is not the pool's container.
+var testDatabaseSource atomic.Pointer[func(port int, ownerDir string) (string, error)]
 
 // SetTestDatabaseSource installs the source isolated test inits take their
 // database from (see testDatabaseSource). Only a test binary may set it; nil
 // removes it.
-func SetTestDatabaseSource(fn func(port int) (string, error)) {
+func SetTestDatabaseSource(fn func(port int, ownerDir string) (string, error)) {
 	if !testing.Testing() {
 		return
 	}
@@ -1206,12 +1207,12 @@ func SetTestDatabaseSource(fn func(port int) (string, error)) {
 	testDatabaseSource.Store(&fn)
 }
 
-// testDatabaseFor returns the database an isolated init against port uses:
-// one from testDatabaseSource when it serves that port, else a freshly minted
-// testdb_ name bd init will create.
-func testDatabaseFor(port int) (string, error) {
+// testDatabaseFor returns the database an isolated init in ownerDir against
+// port uses: one from testDatabaseSource when it serves that port, else a
+// freshly minted testdb_ name bd init will create.
+func testDatabaseFor(port int, ownerDir string) (string, error) {
 	if src := testDatabaseSource.Load(); src != nil {
-		name, err := (*src)(port)
+		name, err := (*src)(port, ownerDir)
 		if err != nil {
 			return "", fmt.Errorf("test database for port %d: %w", port, err)
 		}
