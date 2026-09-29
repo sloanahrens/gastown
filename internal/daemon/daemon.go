@@ -472,6 +472,16 @@ func New(config *Config) (*Daemon, error) {
 	}
 
 	logger := log.New(logWriter, "", log.LstdFlags)
+
+	// Fail closed on a town config file that does not parse (gt-fcxe9.10):
+	// starting from compiled defaults would re-enable patrols the operator
+	// turned off and move every role to the default agent. Checked before any
+	// env, tmux or file side effect.
+	if err := CheckTownConfig(config.TownRoot); err != nil {
+		logger.Printf("Refusing to start: %v", err)
+		return nil, fmt.Errorf("refusing to start the daemon: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// PATCH-007 (hq-olcb): Augment PATH with common user/local bin
@@ -511,6 +521,11 @@ func New(config *Config) (*Daemon, error) {
 	// opt-in patrols (compactor, reaper, doctor, JSONL backup, dolt backup)
 	// remain disabled if the file was created before they were implemented.
 	if err := EnsureLifecycleConfigFile(config.TownRoot); err != nil {
+		if errors.Is(err, agentconfig.ErrUnparseable) {
+			cancel()
+			logger.Printf("Refusing to start: %v", err)
+			return nil, fmt.Errorf("refusing to start the daemon: %w", err)
+		}
 		logger.Printf("Warning: failed to ensure lifecycle config: %v", err)
 	}
 	patrolConfig := LoadPatrolConfig(config.TownRoot)

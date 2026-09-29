@@ -147,8 +147,14 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 // patrols, and saves the result. Returns nil on success.
 //
 // This is the top-level function called by gt init and gt up.
+//
+// A daemon.json that does not parse is returned as an error and never
+// rewritten (gt-fcxe9.10): only an absent file is created from defaults.
 func EnsureLifecycleConfigFile(townRoot string) error {
-	config := LoadPatrolConfig(townRoot)
+	config, err := ReadPatrolConfig(townRoot)
+	if err != nil {
+		return err
+	}
 	if config == nil {
 		config = DefaultLifecycleConfig()
 		return SavePatrolConfig(townRoot, config)

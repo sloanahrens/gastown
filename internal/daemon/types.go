@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 )
 
@@ -208,6 +209,10 @@ func PatrolConfigFile(townRoot string) string {
 
 // LoadPatrolConfig loads patrol configuration from mayor/daemon.json.
 // Returns nil if the file doesn't exist or can't be parsed.
+//
+// It returns nil both when the file is absent and when it does not parse, so
+// it is for read-only callers only. Anything that writes the file back, or
+// starts the town from it, uses ReadPatrolConfig (gt-fcxe9.10).
 func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 	configFile := PatrolConfigFile(townRoot)
 	data, err := os.ReadFile(configFile)
@@ -224,9 +229,32 @@ func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 	return &config
 }
 
-// SavePatrolConfig saves patrol configuration to mayor/daemon.json.
+// ReadPatrolConfig loads mayor/daemon.json, telling absent (nil, nil) from
+// unparseable (nil, *config.ParseError naming the file and offset).
+func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
+	configFile := PatrolConfigFile(townRoot)
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var cfg DaemonPatrolConfig
+	if err := agentconfig.DecodeJSONFile(configFile, data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// SavePatrolConfig saves patrol configuration to mayor/daemon.json. It
+// refuses to replace a file that does not parse: the caller could not have
+// read it, so what it would write is built from defaults (G3-03).
 func SavePatrolConfig(townRoot string, config *DaemonPatrolConfig) error {
 	configFile := PatrolConfigFile(townRoot)
+	if _, err := ReadPatrolConfig(townRoot); err != nil {
+		return err
+	}
 
 	// Ensure mayor directory exists
 	if err := os.MkdirAll(filepath.Dir(configFile), 0755); err != nil {
