@@ -199,9 +199,9 @@ func TestDoltRemoteLeftovers_UnreadableRigConfigWarns(t *testing.T) {
 	}
 }
 
-// Route paths come from a file; one that climbs out of the town is skipped,
-// never read.
-func TestDoltRemoteLeftovers_RouteOutsideTownIsIgnored(t *testing.T) {
+// Route paths come from a file; one that climbs out of the town is not read,
+// and the check says it skipped it rather than reporting the town clean.
+func TestDoltRemoteLeftovers_RouteOutsideTownIsReportedNotRead(t *testing.T) {
 	t.Parallel()
 	town, _, _ := leftoversTown(t)
 	outside := t.TempDir()
@@ -220,7 +220,47 @@ func TestDoltRemoteLeftovers_RouteOutsideTownIsIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := runLeftovers(t, town)
-	if res.Status != StatusOK {
-		t.Fatalf("status = %v, want OK (route outside the town is ignored); details %v", res.Status, res.Details)
+	if res.Status != StatusWarning {
+		t.Fatalf("status = %v, want Warning naming the skipped route", res.Status)
+	}
+	joined := strings.Join(res.Details, "\n")
+	if !strings.Contains(joined, "route ev-") || !strings.Contains(joined, "not scanned") {
+		t.Errorf("details %q should name the skipped route", joined)
+	}
+	if strings.Contains(joined, "sync.remote git+https://x/y.git") {
+		t.Errorf("check read a config outside the town: %q", joined)
+	}
+}
+
+// An absolute route path is skipped the same way, and reported.
+func TestDoltRemoteLeftovers_AbsoluteRouteIsReported(t *testing.T) {
+	t.Parallel()
+	town, _, _ := leftoversTown(t)
+	route := `{"prefix":"ab-","path":"/somewhere/else"}` + "\n"
+	if err := os.WriteFile(filepath.Join(town, ".beads", "routes.jsonl"), []byte(route), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := runLeftovers(t, town)
+	if res.Status != StatusWarning || !strings.Contains(strings.Join(res.Details, "\n"), "route ab-") {
+		t.Fatalf("status = %v details %v, want a Warning naming route ab-", res.Status, res.Details)
+	}
+}
+
+// A database directory whose .dolt or git-remote-cache cannot be examined is
+// reported, not read as clean.
+func TestDoltRemoteLeftovers_UnstattableDoltDirWarns(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	town, doltDir, _ := leftoversTown(t)
+	dbDir := filepath.Dir(doltDir)
+	if err := os.Chmod(dbDir, 0o000); err != nil { // stat of dbDir/.dolt now fails with EACCES
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dbDir, 0o755) })
+	res := runLeftovers(t, town)
+	if res.Status != StatusWarning || !strings.Contains(strings.Join(res.Details, "\n"), "cannot examine") {
+		t.Fatalf("status = %v details %v, want a Warning saying the database could not be examined", res.Status, res.Details)
 	}
 }

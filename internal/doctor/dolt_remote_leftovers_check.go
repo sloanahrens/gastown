@@ -90,7 +90,11 @@ func scanDoltDataDirForRemotes(dataDir string) []string {
 		db := entry.Name()
 		doltDir := filepath.Join(dataDir, db, ".dolt")
 		if _, err := os.Stat(doltDir); err != nil {
-			continue // not a Dolt database
+			if errors.Is(err, os.ErrNotExist) {
+				continue // not a Dolt database
+			}
+			details = append(details, fmt.Sprintf("%s: cannot examine %s: %v", db, doltDir, err))
+			continue
 		}
 
 		remotes, err := readDoltRepoStateRemotes(filepath.Join(doltDir, "repo_state.json"))
@@ -102,8 +106,11 @@ func scanDoltDataDirForRemotes(dataDir string) []string {
 		}
 
 		cache := filepath.Join(doltDir, "git-remote-cache")
-		if info, err := os.Stat(cache); err == nil && info.IsDir() {
+		switch info, err := os.Stat(cache); {
+		case err == nil && info.IsDir():
 			details = append(details, fmt.Sprintf("%s: %s exists", db, cache))
+		case err != nil && !errors.Is(err, os.ErrNotExist):
+			details = append(details, fmt.Sprintf("%s: cannot examine %s: %v", db, cache, err))
 		}
 	}
 	return details
@@ -143,13 +150,19 @@ func scanBeadsConfigsForSyncRemote(townRoot string) []string {
 		return []string{fmt.Sprintf("cannot load routes.jsonl to find rig configs: %v", err)}
 	}
 
+	var details []string
 	paths := map[string]bool{".": true} // the town's own .beads
 	for _, r := range routes {
-		// Route paths come from a file: drop absolute paths and ones that
-		// climb out with "..". Symlinks under the town are not resolved; the
-		// check only reads a config.yaml and echoes its sync.remote.
+		// Route paths come from a file: an absolute path or one that climbs
+		// out with ".." is not read, and is reported so the town does not
+		// read as clean. Symlinks under the town are not resolved; the check
+		// only reads a config.yaml and echoes its sync.remote.
 		p := filepath.Clean(r.Path)
-		if r.Path == "" || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
+		if r.Path == "" {
+			continue
+		}
+		if filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
+			details = append(details, fmt.Sprintf("route %s path %q is outside the town; not scanned", r.Prefix, r.Path))
 			continue
 		}
 		paths[p] = true
@@ -160,7 +173,6 @@ func scanBeadsConfigsForSyncRemote(townRoot string) []string {
 	}
 	sort.Strings(sorted)
 
-	var details []string
 	for _, p := range sorted {
 		configPath := filepath.Join(townRoot, p, ".beads", "config.yaml")
 		remote, ok, err := readSyncRemote(configPath)
