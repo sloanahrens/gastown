@@ -299,11 +299,14 @@ sleep {{scan_interval_seconds}}
 ```
 
 **4. Respawn by looping back to list-open-prs:**
-After sleep, close this step and immediately reopen list-open-prs to begin the next cycle.
+After sleep, reopen the cycle's closed steps and set this one back to open,
+so the molecule starts again at list-open-prs. Use this molecule's step
+bead ids.
 
 ```bash
 # Respawn: start the next patrol cycle
-bd mol step respawn --target list-open-prs
+bd reopen <list-open-prs-id> <check-review-status-id> <check-ci-status-id> <dispatch-work-id>
+bd update <loop-or-exit-id> --status=open
 ```
 
 **Context filling:** If the session is near context capacity, use `gt handoff` to
