@@ -53,11 +53,13 @@ description = """
 Kill Claude processes but leave polecat sandboxes intact.
 
 ```bash
-# Stop all polecat Claude sessions
-gt stop --all --preserve-sandbox
+# Stop every polecat's Claude session; worktrees, branches and hooks stay
+gt polecat list --all --json | jq -r '.[] | "\\(.rig)/\\(.name)"' | while read -r p; do
+  gt session stop "$p"
+done
 
 # Verify sandboxes still exist
-gt polecats --all --status
+gt polecat list --all
 ```
 
 What this does:
@@ -71,7 +73,9 @@ What this does NOT do:
 - Remove hook attachments
 - Lose any git state
 
-After restart, polecats can be respawned and will resume from their hooks.
+Each stop is recorded as deliberate, so the witness does not restart the
+session. After restart, resume a polecat with `gt session start <rig>/<polecat>`;
+it picks up from its hook.
 
 Note: Crew workers are NOT stopped (they're user-managed).
 """
