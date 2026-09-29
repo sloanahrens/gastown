@@ -39,8 +39,10 @@ func TestCommandTokensResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadBdTree: %v", err)
 	}
+	gtTree := cmdtree.FromCobra(rootCmd, gtTakesArgs)
+	markRequireSubcommandHelpOnly(gtTree, rootCmd)
 	trees := map[string]*cmdtree.Tree{
-		"gt": cmdtree.FromCobra(rootCmd, gtTakesArgs),
+		"gt": gtTree,
 		"bd": bdTree,
 	}
 
@@ -79,6 +81,29 @@ func TestCommandTokensResolve(t *testing.T) {
 		len(violations), snap.Source, snap.ContractVersion, strings.Join(lines, "\n"))
 }
 
+// isRequireSubcommand reports whether c's RunE is requireSubcommand.
+func isRequireSubcommand(c *cobra.Command) bool {
+	return c.RunE != nil && reflect.ValueOf(c.RunE).Pointer() == reflect.ValueOf(requireSubcommand).Pointer()
+}
+
+// markRequireSubcommandHelpOnly marks every requireSubcommand parent
+// help-only in tree. cmdtree.FromCobra only marks parents cobra cannot run;
+// a requireSubcommand parent runs, but only to fail, so an invocation that
+// stops on one is as broken as one that stops on a help-only parent.
+func markRequireSubcommandHelpOnly(tree *cmdtree.Tree, root *cobra.Command) {
+	var walk func(c *cobra.Command, path []string)
+	walk = func(c *cobra.Command, path []string) {
+		for _, child := range c.Commands() {
+			p := append(append([]string(nil), path...), child.Name())
+			if child.HasSubCommands() && isRequireSubcommand(child) {
+				tree.MarkHelpOnly(p)
+			}
+			walk(child, p)
+		}
+	}
+	walk(root, nil)
+}
+
 // refSource buckets a repo-relative path by the scanner input it belongs to.
 func refSource(file string) string {
 	switch {
@@ -106,7 +131,7 @@ func gtTakesArgs(c *cobra.Command) bool {
 	if !c.Runnable() {
 		return false
 	}
-	if c.RunE != nil && reflect.ValueOf(c.RunE).Pointer() == reflect.ValueOf(requireSubcommand).Pointer() {
+	if isRequireSubcommand(c) {
 		return false
 	}
 	if c.Args != nil && c.Args(c, nil) == nil && c.Args(c, []string{"x"}) != nil {

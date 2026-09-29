@@ -13,6 +13,7 @@ import (
 
 var beadCmd = &cobra.Command{
 	Use:     "bead",
+	RunE:    requireSubcommand,
 	Aliases: []string{"bd"},
 	GroupID: GroupWork,
 	Short:   "Bead management utilities",

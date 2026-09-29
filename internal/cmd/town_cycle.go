@@ -24,7 +24,7 @@ func getTownLevelSessions() []string {
 // tmux run-shell which may execute from outside the workspace directory.
 func isTownLevelSession(sessionName string) bool {
 	// Town-level sessions are identified by their fixed names
-	mayorSession := getMayorSessionName()  // "hq-mayor"
+	mayorSession := getMayorSessionName()   // "hq-mayor"
 	deaconSession := getDeaconSessionName() // "hq-deacon"
 	return sessionName == mayorSession || sessionName == deaconSession
 }
@@ -40,6 +40,7 @@ func init() {
 
 var townCmd = &cobra.Command{
 	Use:   "town",
+	RunE:  requireSubcommand,
 	Short: "Town-level operations",
 	Long:  `Commands for town-level operations including session cycling.`,
 }

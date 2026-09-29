@@ -11,6 +11,7 @@ func init() {
 
 var signalCmd = &cobra.Command{
 	Use:     "signal",
+	RunE:    requireSubcommand,
 	GroupID: GroupAgents,
 	Short:   "Claude Code hook signal handlers",
 	Long: `Signal handlers for Claude Code hooks.

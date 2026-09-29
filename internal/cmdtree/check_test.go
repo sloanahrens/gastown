@@ -31,7 +31,7 @@ func TestCheck(t *testing.T) {
 		`a.toml:3: gt mq close: unknown subcommand "close" for "gt mq"`,
 		`a.toml:4: bd sync: ` + BdSyncDenied,
 		`a.toml:6: bd daemons killall: unknown command "daemons" for bd`,
-		`a.toml:7: gt town: "gt town" has no Run: cobra prints help and exits 0`,
+		`a.toml:7: gt town: "gt town" stops on a parent command: name one of its subcommands`,
 		`a.toml:9: gt mq close: unknown subcommand "close" for "gt mq"`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {

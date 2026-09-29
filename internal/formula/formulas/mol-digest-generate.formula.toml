@@ -93,7 +93,7 @@ bd list --status=closed --updated-after={{since}}
 
 b) **Agent activity:**
 ```bash
-gt polecats <rig>           # Polecat activity
+gt polecat list <rig>       # Polecat activity
 gt feed --since={{since}}   # Activity feed entries
 ```
 

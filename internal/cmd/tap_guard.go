@@ -12,6 +12,7 @@ import (
 
 var tapGuardCmd = &cobra.Command{
 	Use:   "guard",
+	RunE:  requireSubcommand,
 	Short: "Block forbidden operations (PreToolUse hook)",
 	Long: `Block forbidden operations via Claude Code PreToolUse hooks.
 
@@ -117,7 +118,7 @@ var prWorkflowCommandPrefixes = [][]string{
 // branches is the rehearsal the formula mandates, not the feature-branch
 // creation this guard exists to block.
 var refRehearsalBranchNames = map[string]bool{
-	"temp":        true,
+	"temp":         true,
 	"temp-resolve": true,
 }
 

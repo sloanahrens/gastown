@@ -2,7 +2,7 @@ description = """
 Reap stale wisps and close stale issues across all Dolt databases.
 
 The Reaper Dog executes this formula to clean up wisp and issue tables.
-SQL operations are exposed via `gt reaper` CLI helpers — the Dog calls
+SQL operations are exposed as gt reaper subcommands — the Dog calls
 these commands, inspects results, and uses judgment for anomalies.
 
 ## Dog Contract
@@ -63,8 +63,8 @@ bead by label or id pattern, and have no active dependencies. On top of that:
 
 ## Scope Boundary (gt-61x, enforced at runtime since gt-9iv)
 
-This formula's writes are limited to wisp/issue/mail ROWS via the `gt reaper`
-and `gt convoy check` commands listed in the steps. The command_allowlist
+This formula's writes are limited to wisp/issue/mail ROWS via the gt reaper
+subcommands and `gt convoy check` listed in the steps. The command_allowlist
 declared below is ENFORCED by the dog session's formula-allowlist guard:
 shell commands outside the allowlist (plus the standard dog lifecycle
 baseline) are blocked before they run. Database-level operations

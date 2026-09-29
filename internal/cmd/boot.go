@@ -26,6 +26,7 @@ var (
 
 var bootCmd = &cobra.Command{
 	Use:     "boot",
+	RunE:    requireSubcommand,
 	GroupID: GroupAgents,
 	Short:   "Manage Boot (Deacon watchdog)",
 	Long: `Manage Boot - the daemon's watchdog for Deacon triage.

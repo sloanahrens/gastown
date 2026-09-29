@@ -69,6 +69,7 @@ type CallbackResult struct {
 
 var callbacksCmd = &cobra.Command{
 	Use:     "callbacks",
+	RunE:    requireSubcommand,
 	GroupID: GroupAgents,
 	Short:   "Handle agent callbacks",
 	Long: `Handle callbacks from agents during Deacon patrol.

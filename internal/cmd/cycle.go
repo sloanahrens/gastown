@@ -33,6 +33,7 @@ func init() {
 
 var cycleCmd = &cobra.Command{
 	Use:   "cycle",
+	RunE:  requireSubcommand,
 	Short: "Cycle between sessions in the same group",
 	Long: `Cycle between related tmux sessions based on the current session type.
 

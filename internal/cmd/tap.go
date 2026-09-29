@@ -6,6 +6,7 @@ import (
 
 var tapCmd = &cobra.Command{
 	Use:   "tap",
+	RunE:  requireSubcommand,
 	Short: "Claude Code hook handlers",
 	Long: `Hook handlers for Claude Code PreToolUse and PostToolUse events.
 

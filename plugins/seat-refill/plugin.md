@@ -134,7 +134,7 @@ everywhere or not at all: a process without it still watches
 `ESTOP.<rig>` holds only that rig's dispatch. An explicit `gt sling` typed by
 the operator or the mayor still works.
 
-**Disabling the gate.** `gt plugin` has no pause; a plugin whose gate is a
+**Disabling the gate.** gt plugin has no pause command; a plugin whose gate is a
 cooldown runs whenever that cooldown has elapsed. To stop it for longer than a
 hold, change this file's gate type to `manual` and run `gt plugin sync`.
 

@@ -24,6 +24,7 @@ var (
 
 var patrolCmd = &cobra.Command{
 	Use:     "patrol",
+	RunE:    requireSubcommand,
 	GroupID: GroupDiag,
 	Short:   "Patrol digest management",
 	Long: `Manage patrol cycle digests.

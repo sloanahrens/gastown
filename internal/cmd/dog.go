@@ -47,6 +47,7 @@ var (
 
 var dogCmd = &cobra.Command{
 	Use:     "dog",
+	RunE:    requireSubcommand,
 	Aliases: []string{"dogs"},
 	GroupID: GroupAgents,
 	Short:   "Manage dogs (cross-rig infrastructure workers)",

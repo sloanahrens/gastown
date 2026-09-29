@@ -11,6 +11,7 @@ import (
 
 var issueCmd = &cobra.Command{
 	Use:     "issue",
+	RunE:    requireSubcommand,
 	GroupID: GroupConfig,
 	Short:   "Manage current issue for status line display",
 	Long: `Manage the current issue displayed in the tmux status line.

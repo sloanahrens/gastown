@@ -30,9 +30,10 @@ type Node struct {
 	// When false, a plain word after it can only be a subcommand, so an
 	// unrecognized one is a violation.
 	TakesArgs bool
-	// HelpOnly marks a parent with no Run: cobra answers it, and any
-	// unknown subcommand under it, with help and exit status 0 (deep review
-	// G4-04), so an invocation that stops on it has done nothing.
+	// HelpOnly marks a parent that does nothing by itself: one with no Run,
+	// which cobra answers with help and exit status 0 (deep review G4-04), or
+	// one whose Run only fails asking for a subcommand. An invocation that
+	// stops on it has done nothing.
 	HelpOnly bool
 }
 

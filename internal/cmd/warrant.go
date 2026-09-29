@@ -37,6 +37,7 @@ type Warrant struct {
 
 var warrantCmd = &cobra.Command{
 	Use:   "warrant",
+	RunE:  requireSubcommand,
 	Short: "Manage death warrants for stuck agents",
 	Long: `Manage death warrants for agents that need termination.
 

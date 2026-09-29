@@ -409,6 +409,7 @@ func Execute() int {
 		}
 	}
 
+	strictCompletionCmd(rootCmd)
 	if err := rootCmd.Execute(); err != nil {
 		// Silent and coded exits carry their own status; other errors were
 		// already printed by cobra and exit 1.
@@ -434,8 +435,11 @@ const (
 )
 
 func init() {
-	// Enable prefix matching for subcommands (e.g., "gt ref at" -> "gt refinery attach")
-	cobra.EnablePrefixMatching = true
+	// Prefix matching stays off: with it on, "gt stat" ran "gt status" and a
+	// truncated word in a formula, hook or script ran whatever command it
+	// happened to prefix (deep review G4-11, gt-fcxe9.6). Use Aliases for
+	// shortcuts.
+	cobra.EnablePrefixMatching = false
 
 	// Define command groups (order determines help output order)
 	rootCmd.AddGroup(
@@ -466,16 +470,41 @@ func buildCommandPath(cmd *cobra.Command) string {
 	return strings.Join(parts, " ")
 }
 
-// requireSubcommand returns a RunE function for parent commands that require
-// a subcommand. Without this, Cobra silently shows help and exits 0 for
-// unknown subcommands like "gt mol foobar", masking errors.
+// requireSubcommand is the RunE of every parent command. Without a RunE,
+// cobra shows help and exits 0 for a missing or unknown subcommand like
+// "gt mol foobar", so a typo'd formula step "succeeds" and a misnamed
+// "gt tap guard" hook allows every tool call (gt-fcxe9.6). It fails with
+// exit status 2, which a Claude Code PreToolUse hook treats as block; cobra
+// prints the error and the parent's usage to stderr.
+// TestParentCommandsAreNotHelpOnly enforces it on the whole tree.
 func requireSubcommand(cmd *cobra.Command, args []string) error {
+	return &ExitCodeError{Code: 2, Err: subcommandError(cmd, args)}
+}
+
+// strictCompletionCmd adds cobra's default completion command now, instead
+// of lazily inside Execute, and gives it requireSubcommand: cobra builds it
+// with no Run, so "gt completion <typo>" printed help and exited 0.
+func strictCompletionCmd(root *cobra.Command) {
+	root.InitDefaultCompletionCmd()
+	for _, c := range root.Commands() {
+		if c.Name() == "completion" && c.HasSubCommands() && !c.Runnable() {
+			c.RunE = requireSubcommand
+		}
+	}
+}
+
+func subcommandError(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("requires a subcommand\n\nRun '%s --help' for usage", buildCommandPath(cmd))
 	}
 	unknown := args[0]
 	errMsg := fmt.Sprintf("unknown command %q for %q", unknown, buildCommandPath(cmd))
-	// Use cobra's suggestion engine (Levenshtein + SuggestFor lists)
+	// Use cobra's suggestion engine (Levenshtein + SuggestFor lists). cobra
+	// only defaults the distance on its own unknown-command path, so without
+	// this a RunE parent suggested prefixes only.
+	if cmd.SuggestionsMinimumDistance <= 0 {
+		cmd.SuggestionsMinimumDistance = 2
+	}
 	if suggestions := cmd.SuggestionsFor(unknown); len(suggestions) > 0 {
 		errMsg += "\n\nDid you mean"
 		if len(suggestions) == 1 {

@@ -27,6 +27,7 @@ var (
 
 var activityCmd = &cobra.Command{
 	Use:     "activity",
+	RunE:    requireSubcommand,
 	GroupID: GroupDiag,
 	Short:   "Emit and view activity events",
 	Long: `Emit and view activity events for the Gas Town activity feed.

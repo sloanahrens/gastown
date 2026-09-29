@@ -136,7 +136,7 @@ need a command outside the list, escalate (`gt escalate`) and move on.
 
 ### mol-dog-reaper — Wisp and issue cleanup
 
-**CLI**: `gt reaper <subcommand>` (no shell scripts — all Go CLI)
+**CLI**: gt reaper subcommands (no shell scripts — all Go CLI)
 
 ```bash
 gt reaper databases --json                          # List databases to scan
@@ -147,7 +147,7 @@ gt reaper auto-close --db=<name> --dry-run --json   # Preview stale issues (prin
 gt reaper auto-close --db=<name> --preview=<hash> --json  # Close exactly that previewed set
 ```
 
-`gt reaper` inherits `GT_DOLT_HOST` / `GT_DOLT_PORT` from the daemon environment.
+Every gt reaper subcommand inherits `GT_DOLT_HOST` / `GT_DOLT_PORT` from the daemon environment.
 
 Steps: scan → reap → purge → auto-close → report
 

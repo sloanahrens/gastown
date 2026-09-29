@@ -107,7 +107,7 @@ Determine how many polecats are available for dispatch.
 
 **1. For each rig that has ready issues:**
 ```bash
-gt polecats <rig>
+gt polecat list <rig>
 # Shows polecat status: idle, working, etc.
 ```
 

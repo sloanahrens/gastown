@@ -29,6 +29,7 @@ var (
 
 var slotCmd = &cobra.Command{
 	Use:     "slot",
+	RunE:    requireSubcommand,
 	GroupID: GroupServices,
 	Short:   "Coordinate the town-level container-suite gate slot",
 	Long: `The container-suite gate slot ensures only one Docker-backed test suite

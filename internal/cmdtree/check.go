@@ -50,7 +50,7 @@ func Check(refs []Ref, trees map[string]*Tree) []Violation {
 			continue // comment prose that only mentions gt/bd
 		}
 		if res.HelpOnly {
-			out = append(out, Violation{Ref: r, Reason: fmt.Sprintf("%q has no Run: cobra prints help and exits 0", r.Bin+" "+res.MatchedPath())})
+			out = append(out, Violation{Ref: r, Reason: fmt.Sprintf("%q stops on a parent command: name one of its subcommands", r.Bin+" "+res.MatchedPath())})
 			continue
 		}
 		reason := fmt.Sprintf("unknown command %q for %s", res.Unknown, r.Bin)

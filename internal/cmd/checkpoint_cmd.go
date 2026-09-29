@@ -14,6 +14,7 @@ import (
 
 var checkpointCmd = &cobra.Command{
 	Use:     "checkpoint",
+	RunE:    requireSubcommand,
 	GroupID: GroupDiag,
 	Short:   "Manage session checkpoints for crash recovery",
 	Long: `Manage checkpoints for polecat session crash recovery.
