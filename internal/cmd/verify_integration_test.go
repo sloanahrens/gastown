@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -657,15 +658,16 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		townRoot := t.TempDir()
 		dir := newRepoWithTwoChangedPackages(t)
 		stubVerifyProgress(vg, 5*time.Millisecond)
+		// Each stub holds its phase open until the gate has logged a
+		// progress line for it. A fixed 30ms sleep let a loaded -race run
+		// finish the wait before the first 5ms tick was written.
+		logPath := testVerifyLogPath(dir)
 		stubVerifyGate(t, vg,
 			func(_ string, _ string, _ time.Duration) (func(), error) {
-				// Long enough for at least one progress tick to fire.
-				time.Sleep(30 * time.Millisecond)
-				return func() {}, nil
+				return func() {}, waitForVerifyLogLine(logPath, "still waiting for the container-gate slot")
 			},
 			func(_ context.Context, _ string, _ string, _ []string, _ *os.File) error {
-				time.Sleep(30 * time.Millisecond)
-				return nil
+				return waitForVerifyLogLine(logPath, "test-verify still running")
 			})
 
 		mq := &config.MergeQueueConfig{TestCommand: dockerTestsEnv + "=1 go test ./..."}
@@ -689,6 +691,23 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 			t.Errorf("verify log does not report the slot wait:\n%s", logText)
 		}
 	})
+}
+
+// waitForVerifyLogLine polls the gate's verify log until it contains want,
+// for a stub that must stay in its phase until the gate has reported
+// progress on it. It gives up after a minute, so a gate that never reports
+// fails the test instead of hanging it.
+func waitForVerifyLogLine(logPath, want string) error {
+	deadline := time.Now().Add(time.Minute)
+	for {
+		if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), want) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("verify log %s never got %q", logPath, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestChangedGoPackages(t *testing.T) {
