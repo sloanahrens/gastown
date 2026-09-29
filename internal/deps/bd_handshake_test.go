@@ -52,6 +52,7 @@ func (f *fakeBD) run(_ context.Context, env []string, args ...string) ([]byte, [
 func dbLevel(n int) string { return fmt.Sprintf(`[{"version": %d}]`, n) }
 
 func TestParseBDVersionJSON(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		out  string
@@ -62,6 +63,7 @@ func TestParseBDVersionJSON(t *testing.T) {
 		{"installed 537accb", bdVersion537accb, BDVersionInfo{Version: "1.2.2", Build: "537accb", Commit: "537accbea9ca6f2be8d478ac97c5137bce4ac1b2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := ParseBDVersionJSON([]byte(tc.out))
 			if err != nil {
 				t.Fatalf("ParseBDVersionJSON: %v", err)
@@ -79,6 +81,7 @@ func TestParseBDVersionJSON(t *testing.T) {
 }
 
 func TestCheckBDHandshake_AcceptsForkBuildAtDBLevel(t *testing.T) {
+	t.Parallel()
 	f := &fakeBD{version: bdVersionDa4983e, sqlOut: dbLevel(66)}
 	hs, err := CheckBDHandshake(context.Background(), "/bin/bd", f.run)
 	if err != nil {
@@ -97,6 +100,7 @@ func TestCheckBDHandshake_AcceptsForkBuildAtDBLevel(t *testing.T) {
 }
 
 func TestCheckBDHandshake_DBLevelAsString(t *testing.T) {
+	t.Parallel()
 	f := &fakeBD{version: bdVersionDa4983e, sqlOut: `{"schema_version":1,"contract_version":1,"data":[{"version":"66"}],"pagination":null,"error":null}`}
 	if _, err := CheckBDHandshake(context.Background(), "/bin/bd", f.run); err != nil {
 		t.Fatalf("CheckBDHandshake: %v", err)
@@ -104,6 +108,7 @@ func TestCheckBDHandshake_DBLevelAsString(t *testing.T) {
 }
 
 func TestCheckBDHandshake_Refusals(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		bd        *fakeBD
@@ -168,6 +173,7 @@ func TestCheckBDHandshake_Refusals(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := CheckBDHandshake(context.Background(), "/usr/local/bin/bd", tc.bd.run)
 			if err == nil {
 				t.Fatal("want refusal, got nil")
