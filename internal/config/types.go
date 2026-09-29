@@ -272,6 +272,15 @@ type ContainerGateThresholds struct {
 	// merge path never waits behind polecat pre-verify suites (default 0).
 	// Clamped to Slots-1; ignored when Slots is 1.
 	ReservedForGate *int `json:"reserved_for_gate,omitempty"`
+	// YieldToGate makes a new non-gate suite (crew, polecat) wait while a
+	// gate holds a gate-reserved slot, so the merge gate never shares the
+	// machine with a suite that started after it. Running suites are never
+	// preempted and gates never yield (default true, gt-22hdp.29).
+	YieldToGate *bool `json:"yield_to_gate,omitempty"`
+	// MaxGateYield caps how long one non-gate acquisition yields to running
+	// gates in total, so a hung gate or back-to-back gates cannot starve it
+	// (default "30m").
+	MaxGateYield string `json:"max_gate_yield,omitempty"`
 }
 
 // SessionThresholds configures session management timeouts.

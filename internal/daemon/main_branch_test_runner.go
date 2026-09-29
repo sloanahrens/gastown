@@ -830,7 +830,7 @@ var errMainBranchTestGateBusy = errors.New("skipped: gate busy")
 // setup commands ran.
 var mainBranchTestGatePoolStatusFn = func(townRoot string) (slot.Report, error) {
 	cg := agentconfig.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	pool := slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()}
+	pool := slot.PoolFromConfig(cg)
 	return slot.StatusPoolLocksOnly(townRoot, pool)
 }
 
@@ -1215,7 +1215,7 @@ func (d *Daemon) runRigGates(ctx context.Context, rigName, commit, workDir strin
 // comment.
 func acquireMainBranchTestSlot(townRoot, rigName string) (*slot.Handle, error) {
 	cg := agentconfig.LoadOperationalConfig(townRoot).GetContainerGateConfig()
-	pool := slot.Pool{Slots: cg.SlotsV(), ReservedForGate: cg.ReservedForGateV()}
+	pool := slot.PoolFromConfig(cg)
 	return slot.AcquirePoolReal(townRoot, rigName+"/main-branch-test", mainBranchTestSlotTimeout, pool)
 }
 

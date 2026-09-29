@@ -586,3 +586,46 @@ func TestPressureThresholds_JSON(t *testing.T) {
 		t.Errorf("JSON max sessions: got %v, want 8", raw.Daemon.PressureMaxSessionsV())
 	}
 }
+
+// TestContainerGateThresholds_YieldDefaults: yielding to a running gate is on
+// by default (gt-22hdp.29), with a 30-minute cap.
+func TestContainerGateThresholds_YieldDefaults(t *testing.T) {
+	t.Parallel()
+
+	var op *OperationalConfig
+	cg := op.GetContainerGateConfig()
+	if !cg.YieldToGateV() {
+		t.Error("YieldToGate: got false, want default true")
+	}
+	if got := cg.MaxGateYieldD(); got != 30*time.Minute {
+		t.Errorf("MaxGateYield: got %v, want 30m", got)
+	}
+}
+
+// TestContainerGateThresholds_YieldOverrides: the knob turns yielding off, the
+// cap accepts a duration, and an invalid or non-positive cap keeps the default.
+func TestContainerGateThresholds_YieldOverrides(t *testing.T) {
+	t.Parallel()
+
+	var cfg struct {
+		Operational *OperationalConfig `json:"operational"`
+	}
+	raw := `{"operational":{"container_gate":{"slots":4,"reserved_for_gate":2,"yield_to_gate":false,"max_gate_yield":"45m"}}}`
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cg := cfg.Operational.GetContainerGateConfig()
+	if cg.YieldToGateV() {
+		t.Error("YieldToGate: got true, want false from config")
+	}
+	if got := cg.MaxGateYieldD(); got != 45*time.Minute {
+		t.Errorf("MaxGateYield: got %v, want 45m", got)
+	}
+
+	for _, bad := range []string{"soon", "0s", "-5m"} {
+		cg := &ContainerGateThresholds{MaxGateYield: bad}
+		if got := cg.MaxGateYieldD(); got != DefaultContainerGateMaxGateYield {
+			t.Errorf("MaxGateYield %q: got %v, want default %v", bad, got, DefaultContainerGateMaxGateYield)
+		}
+	}
+}
