@@ -642,6 +642,12 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 	if err := validateDaemonPatrolConfig(config); err != nil {
 		return err
 	}
+	// Syntax only: this package's DaemonPatrolConfig is not the daemon's type
+	// (G3-19), so a field-type check here could refuse a file the daemon reads.
+	var anyJSON any
+	if err := refuseToReplaceUnparseable(path, &anyJSON); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
@@ -1168,7 +1174,7 @@ func LoadOrCreateTownSettings(path string) (*TownSettings, error) {
 	}
 
 	var settings TownSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
+	if err := DecodeJSONFile(path, data, &settings); err != nil {
 		return nil, err
 	}
 	return &settings, nil
@@ -1181,6 +1187,10 @@ func SaveTownSettings(path string, settings *TownSettings) error {
 	}
 	if settings.Version > CurrentTownSettingsVersion {
 		return fmt.Errorf("%w: got %d, max supported %d", ErrInvalidVersion, settings.Version, CurrentTownSettingsVersion)
+	}
+
+	if err := refuseToReplaceUnparseable(path, &TownSettings{}); err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

@@ -1,0 +1,105 @@
+package config
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+)
+
+// ErrUnparseable marks a town config file that exists but does not decode
+// into its Go type. gt fails closed on it: the town does not start, no
+// session spawns, and no writer replaces the file (gt-fcxe9.10, G3-03, G3-04).
+// A missing file is a different answer and is not this error.
+var ErrUnparseable = errors.New("config file does not parse")
+
+// ParseError names the file and where decoding failed.
+type ParseError struct {
+	Path   string
+	Offset int64 // byte offset reported by the decoder, 0 when unknown
+	Line   int   // 1-based, 0 when unknown
+	Column int   // 1-based, 0 when unknown
+	Err    error
+}
+
+func (e *ParseError) Error() string {
+	where := "does not parse"
+	if e.Offset > 0 {
+		where = fmt.Sprintf("does not parse at offset %d (line %d, column %d)", e.Offset, e.Line, e.Column)
+	}
+	msg := strings.ReplaceAll(e.Err.Error(), "\n", " ")
+	return fmt.Sprintf("%s: %s: %s; gt will not start the town from it and will never rewrite it: fix the file by hand", e.Path, where, msg)
+}
+
+// Is makes errors.Is(err, ErrUnparseable) true for every ParseError.
+func (e *ParseError) Is(target error) bool { return target == ErrUnparseable }
+
+func (e *ParseError) Unwrap() error { return e.Err }
+
+// DecodeJSONFile decodes data (read from path) into v and returns a
+// *ParseError, with the decoder's byte offset turned into a line and column,
+// when it does not decode.
+func DecodeJSONFile(path string, data []byte, v any) error {
+	err := json.Unmarshal(data, v)
+	if err == nil {
+		return nil
+	}
+	pe := &ParseError{Path: path, Err: err}
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syn):
+		pe.Offset = syn.Offset
+	case errors.As(err, &typ):
+		pe.Offset = typ.Offset
+	}
+	if pe.Offset > 0 {
+		pe.Line, pe.Column = lineColumn(data, pe.Offset)
+	}
+	return pe
+}
+
+// lineColumn converts a decoder offset (bytes consumed, so the failing byte is
+// at offset-1) into a 1-based line and column.
+func lineColumn(data []byte, offset int64) (line, col int) {
+	at := int(offset) - 1
+	if at > len(data) {
+		at = len(data)
+	}
+	if at < 0 {
+		at = 0
+	}
+	before := data[:at]
+	line = bytes.Count(before, []byte("\n")) + 1
+	col = at - (bytes.LastIndexByte(before, '\n') + 1) + 1
+	return line, col
+}
+
+// CheckJSONFileParses reports whether the file at path decodes into v. An
+// absent file is nil; a present one that does not decode is a *ParseError;
+// any other read failure is returned as is.
+func CheckJSONFileParses(path string, v any) error {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return DecodeJSONFile(path, data, v)
+}
+
+// refuseToReplaceUnparseable is the guard every writer of a town config file
+// runs first: a file it could not have read must not be replaced by whatever
+// the caller built from defaults.
+func refuseToReplaceUnparseable(path string, v any) error {
+	if err := CheckJSONFileParses(path, v); err != nil {
+		if errors.Is(err, ErrUnparseable) {
+			return err
+		}
+		return fmt.Errorf("checking %s before writing: %w", path, err)
+	}
+	return nil
+}
