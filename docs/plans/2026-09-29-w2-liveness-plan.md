@@ -1,3 +1,5 @@
+> Status: active (2026-09). Stopgaps for gt-fcxe9.1 and gt-fcxe9.7 on branch crew/sloan/w2-liveness; superseded by the ADR 0003 supervisor refactor.
+
 # Liveness stopgaps (gt-fcxe9.1, gt-fcxe9.7) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
