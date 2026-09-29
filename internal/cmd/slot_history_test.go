@@ -330,7 +330,6 @@ func waitForSlotFree(t *testing.T, townRoot string) {
 // path. It stubs the container lister itself, since the parent's override is
 // process-local.
 func TestHelperHoldBatchSlotUntilKilled(t *testing.T) {
-	t.Parallel()
 	if os.Getenv(slotHistoryHelperEnvVar) != "1" {
 		t.Skip("not invoked as batch-slot holder helper")
 	}

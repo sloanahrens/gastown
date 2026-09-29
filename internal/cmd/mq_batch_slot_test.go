@@ -75,7 +75,6 @@ func TestAcquireBatchGateSlot_NeverInvokesRealDockerCLI(t *testing.T) {
 // no configured gate command never touches Docker, so acquireBatchGateSlot
 // must not touch the townwide lock at all.
 func TestAcquireBatchGateSlot_SkipsWhenNoGateCommand(t *testing.T) {
-	t.Parallel()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
@@ -100,7 +99,6 @@ func TestAcquireBatchGateSlot_SkipsWhenNoGateCommand(t *testing.T) {
 // acquire-around-batch branch attempt 2 flagged as untested: a configured
 // gate command must hold the townwide slot until the caller releases it.
 func TestAcquireBatchGateSlot_AcquiresWhenGateCommandConfigured(t *testing.T) {
-	t.Parallel()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
@@ -167,7 +165,6 @@ const (
 // and the `--role` flag's doc in slot.go). A gate-command subprocess that
 // nests its own `gt slot run` must pass this role to stay reentrant.
 func TestAcquireBatchGateSlot_ReentrantChildProcessSkipsFlock(t *testing.T) {
-	t.Parallel()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
@@ -212,7 +209,6 @@ func TestAcquireBatchGateSlot_ReentrantChildProcessSkipsFlock(t *testing.T) {
 // near-instantly via the reentrant fast path rather than blocking on the
 // flock its parent still holds.
 func TestHelperMQBatchReentrantAcquire(t *testing.T) {
-	t.Parallel()
 	if os.Getenv(mqBatchReentrantHelperEnvVar) != "1" {
 		t.Skip("not invoked as mq-batch reentrant-acquire helper")
 	}
@@ -247,7 +243,6 @@ func TestHelperMQBatchReentrantAcquire(t *testing.T) {
 // MRs behind a 29-minute wait (gt-dc81), and it is the one an operator needs to
 // see without reading panes.
 func TestAcquireBatchGateSlot_RecordsTheSameTelemetry(t *testing.T) {
-	t.Parallel()
 	stubNoContainers(t)
 	townRoot := t.TempDir()
 
