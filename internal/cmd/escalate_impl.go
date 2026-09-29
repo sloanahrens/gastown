@@ -427,7 +427,7 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 // as phantom open escalations on the dashboard or in `bd ready`. Returns the
 // number closed.
 func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string) (int, error) {
-	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--include-infra", "--json")
+	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--include-infra", "--limit=0", "--json")
 	if err != nil {
 		return 0, fmt.Errorf("listing delivery beads: %w", err)
 	}
@@ -444,11 +444,23 @@ func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string
 	for _, issue := range issues {
 		ids = append(ids, issue.ID)
 	}
+	return closeDeliveryBeads(bd, ids, escalationID, closedBy)
+}
+
+// closeDeliveryBeads closes an escalation's delivery beads ids and returns
+// how many closed, forcing past the recipients' assignee fence. The count is
+// only the beads that closed.
+func closeDeliveryBeads(bd beads.Client, ids []string, escalationID, closedBy string) (int, error) {
 	reason := fmt.Sprintf("escalation %s closed by %s", escalationID, closedBy)
-	if err := bd.CloseWithReason(reason, ids...); err != nil {
-		return 0, fmt.Errorf("closing %d delivery bead(s): %w", len(ids), err)
+	// Forced: each delivery bead is assigned to its recipient, and bd
+	// refuses an unforced close of another actor's issue. These beads are
+	// gastown's delivery bookkeeping, not work.
+	err := bd.ForceCloseWithReason(reason, ids...)
+	closed := len(beads.ClosedIDs(ids, err))
+	if err != nil {
+		return closed, fmt.Errorf("closing %d delivery bead(s): %w", len(ids), err)
 	}
-	return len(ids), nil
+	return closed, nil
 }
 
 func runEscalateStale(cmd *cobra.Command, args []string) error {

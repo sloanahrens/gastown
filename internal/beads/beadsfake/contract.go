@@ -55,8 +55,11 @@ var contractCases = []contractCase{
 	{"children", contractChildren},
 	{"release", contractRelease},
 	{"batch close refusal", contractBatchCloseRefusal},
+	{"batch close of a blocks chain in reverse order", contractBatchCloseChain},
 	{"append notes", contractAppendNotes},
 	{"guarded transfer", contractGuardedTransfer},
+	{"guard and note edges", contractGuardEdges},
+	{"merge request blockers", contractMergeRequestBlockers},
 	{"merge requests", contractMergeRequests},
 	{"agent active_mr", contractAgentActiveMR},
 	{"merge slot", contractMergeSlot},
@@ -657,15 +660,17 @@ func contractRelease(t *testing.T, s *scope) {
 	}
 }
 
-// contractBatchCloseRefusal pins what bd does with a batch close in which
-// some issues are refused: it closes the rest and reports success. Only a
-// batch in which every issue is refused fails. So a caller cannot learn from
-// a nil error that every issue it named closed.
+// contractBatchCloseRefusal pins what a batch close in which some issues are
+// refused returns. bd 1.2 closes the rest and exits 0; the Client re-reads
+// the batch and reports the issues left open as a *beads.PartialCloseError
+// wrapping beads.ErrCloseRefused, so a caller never counts a refused issue
+// as closed. A batch in which every issue is refused fails as bd fails it.
 func contractBatchCloseRefusal(t *testing.T, s *scope) {
 	first := s.mustCreate(t, beads.CreateOptions{Title: "closable", Priority: -1})
 	parent := s.mustCreate(t, beads.CreateOptions{Title: "parent", Priority: -1})
 	s.mustCreate(t, beads.CreateOptions{Title: "open child", Parent: parent.ID, Priority: -1})
-	mustDo(t, "a batch close whose later issue is refused", s.CloseWithReason("batch", first.ID, parent.ID))
+	partial(t, "a batch close whose later issue is refused",
+		s.CloseWithReason("batch", first.ID, parent.ID), []string{first.ID}, []string{parent.ID})
 	if got := s.mustShow(t, first.ID); got.Status != "closed" || got.CloseReason != "batch" {
 		t.Errorf("the closable issue: status %q reason %q, want closed \"batch\"", got.Status, got.CloseReason)
 	}
@@ -676,16 +681,85 @@ func contractBatchCloseRefusal(t *testing.T, s *scope) {
 	other := s.mustCreate(t, beads.CreateOptions{Title: "parent 2", Priority: -1})
 	s.mustCreate(t, beads.CreateOptions{Title: "open child 2", Parent: other.ID, Priority: -1})
 	last := s.mustCreate(t, beads.CreateOptions{Title: "closable last", Priority: -1})
-	mustDo(t, "a batch close whose first issue is refused", s.CloseWithReason("batch", other.ID, last.ID))
+	partial(t, "a batch close whose first issue is refused",
+		s.Close(other.ID, last.ID), []string{last.ID}, []string{other.ID})
 	if st := s.mustShow(t, last.ID).Status; st != "closed" {
 		t.Errorf("the issue after the refused one: status %q, want closed", st)
 	}
+
+	// The assignee and blocker refusals are skipped the same way, and an
+	// issue the batch finds already closed counts as closed.
+	theirs := s.mustCreate(t, beads.CreateOptions{Title: "alice's", Priority: -1})
+	mustDo(t, "assign", s.Update(theirs.ID, beads.UpdateOptions{Assignee: ptr(s.who("alice"))}))
+	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocker", Priority: -1})
+	blocked := s.mustCreate(t, beads.CreateOptions{Title: "blocked", Priority: -1})
+	mustDo(t, "AddDependency", s.AddDependency(blocked.ID, blocker.ID))
+	mine := s.mustCreate(t, beads.CreateOptions{Title: "mine", Priority: -1})
+	partial(t, "a batch close with an assignee and a blocker refusal",
+		s.Close(theirs.ID, first.ID, blocked.ID, mine.ID), []string{first.ID, mine.ID}, []string{theirs.ID, blocked.ID})
 
 	refused(t, "a batch close in which every issue is refused", s.CloseWithReason("batch", other.ID, parent.ID))
 	for _, id := range []string{other.ID, parent.ID} {
 		if st := s.mustShow(t, id).Status; st != "open" {
 			t.Errorf("%s status %q after an all-refused batch, want open", id, st)
 		}
+	}
+
+	// Forced, nothing is refused.
+	mustDo(t, "a forced batch close", s.ForceCloseWithReason("forced", other.ID, theirs.ID))
+}
+
+// contractBatchCloseChain pins that bd closes a batch in argument order,
+// refusing an issue whose blocker is still open at its turn even when the
+// blocker comes later in the same batch. A molecule's steps form such a
+// chain, and Children lists them in ID order, not dependency order.
+func contractBatchCloseChain(t *testing.T, s *scope) {
+	// s1 <- s2 <- s3: s2 depends on s1, s3 on s2.
+	var chain []*beads.Issue
+	for i := 0; i < 3; i++ {
+		chain = append(chain, s.mustCreate(t, beads.CreateOptions{Title: "step", Priority: -1}))
+		if i > 0 {
+			mustDo(t, "AddDependency", s.AddDependency(chain[i].ID, chain[i-1].ID))
+		}
+	}
+	s1, s2, s3 := chain[0].ID, chain[1].ID, chain[2].ID
+	partial(t, "closing the chain last-first", s.Close(s3, s2, s1), []string{s1}, []string{s2, s3})
+	partial(t, "closing the rest last-first", s.Close(s3, s2), []string{s2}, []string{s3})
+	mustDo(t, "closing the last step", s.Close(s3))
+
+	// In dependency order the same batch closes whole.
+	var fwd []string
+	for i := 0; i < 3; i++ {
+		is := s.mustCreate(t, beads.CreateOptions{Title: "step", Priority: -1})
+		if i > 0 {
+			mustDo(t, "AddDependency", s.AddDependency(is.ID, fwd[i-1]))
+		}
+		fwd = append(fwd, is.ID)
+	}
+	mustDo(t, "closing a chain first-first", s.Close(fwd...))
+}
+
+// partial checks that err reports a partial close of exactly closed and
+// notClosed.
+func partial(t *testing.T, what string, err error, closed, notClosed []string) {
+	t.Helper()
+	var pe *beads.PartialCloseError
+	if !errors.As(err, &pe) {
+		t.Errorf("%s = %v, want a *beads.PartialCloseError", what, err)
+		return
+	}
+	if !errors.Is(err, beads.ErrCloseRefused) || errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("%s = %v, want it to wrap ErrCloseRefused and not ErrNotFound", what, err)
+	}
+	if g, w := sorted(pe.Closed...), sorted(closed...); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: Closed = %v, want %v", what, g, w)
+	}
+	if g, w := sorted(pe.NotClosed...), sorted(notClosed...); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: NotClosed = %v, want %v", what, g, w)
+	}
+	all := append(append([]string{}, closed...), notClosed...)
+	if g, w := sorted(beads.ClosedIDs(all, err)...), sorted(closed...); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: ClosedIDs = %v, want %v", what, g, w)
 	}
 }
 
@@ -748,6 +822,104 @@ func contractGuardedTransfer(t *testing.T, s *scope) {
 	}
 	if _, err := s.ReleaseIfAssignee("gt-nosuch", alice); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("ReleaseIfAssignee(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// contractGuardEdges pins the guarded writes' and AppendNotes' edges.
+func contractGuardEdges(t *testing.T, s *scope) {
+	alice, bob := s.who("alice"), s.who("bob")
+
+	// An empty guard means unassigned: it does not match an assigned issue.
+	held := s.mustCreate(t, beads.CreateOptions{Title: "held", Priority: -1})
+	mustDo(t, "assign", s.Update(held.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
+	if ok, err := s.TransferIfAssignee(held.ID, "", beads.StatusHooked, bob); err != nil || ok {
+		t.Errorf("TransferIfAssignee(assigned, guard \"\") = %v, %v; want false, nil", ok, err)
+	}
+	if ok, err := s.ReleaseIfAssignee(held.ID, ""); err != nil || ok {
+		t.Errorf("ReleaseIfAssignee(assigned, guard \"\") = %v, %v; want false, nil", ok, err)
+	}
+	if got := s.mustShow(t, held.ID); got.Assignee != alice || got.Status != "open" {
+		t.Errorf("a failed empty guard changed the issue to %q/%q", got.Status, got.Assignee)
+	}
+	if _, err := s.TransferIfAssignee("gt-nosuch", alice, beads.StatusHooked, bob); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("TransferIfAssignee(missing) = %v, want ErrNotFound", err)
+	}
+
+	// A transfer to closed passes the close fence an update does: a parent
+	// with an open child stays open.
+	parent := s.mustCreate(t, beads.CreateOptions{Title: "parent", Priority: -1})
+	s.mustCreate(t, beads.CreateOptions{Title: "open child", Parent: parent.ID, Priority: -1})
+	mustDo(t, "assign parent", s.Update(parent.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
+	ok, err := s.TransferIfAssignee(parent.ID, alice, string(beads.StatusClosed), alice)
+	if ok {
+		t.Errorf("TransferIfAssignee(parent with an open child -> closed) = true, want it refused")
+	}
+	refused(t, "TransferIfAssignee(parent with an open child -> closed)", err)
+	if st := s.mustShow(t, parent.ID).Status; st != "open" {
+		t.Errorf("refused transfer left the parent %q", st)
+	}
+	// Close's assignee fence is not an update's: the holder's issue closes.
+	done := s.mustCreate(t, beads.CreateOptions{Title: "alice's done", Priority: -1})
+	mustDo(t, "assign done", s.Update(done.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
+	if ok, err := s.TransferIfAssignee(done.ID, alice, string(beads.StatusClosed), alice); err != nil || !ok {
+		t.Errorf("TransferIfAssignee(alice's issue -> closed) = %v, %v; want true, nil", ok, err)
+	}
+	if st := s.mustShow(t, done.ID).Status; st != "closed" {
+		t.Errorf("transfer to closed left status %q", st)
+	}
+
+	// Release reopens a closed issue.
+	closed := s.mustCreate(t, beads.CreateOptions{Title: "closed", Priority: -1})
+	mustDo(t, "close", s.Close(closed.ID))
+	mustDo(t, "Release(closed)", s.Release(closed.ID))
+	if got := s.mustShow(t, closed.ID); got.Status != "open" || got.ClosedAt != "" || got.Assignee != "" {
+		t.Errorf("Release(closed): status %q closed_at %q assignee %q, want open", got.Status, got.ClosedAt, got.Assignee)
+	}
+
+	// An empty note appends nothing.
+	noted := s.mustCreate(t, beads.CreateOptions{Title: "noted", Priority: -1})
+	mustDo(t, "AppendNotes(\"\") with no notes", s.AppendNotes(noted.ID, ""))
+	if n := s.mustShow(t, noted.ID).Notes; n != "" {
+		t.Errorf("notes after an empty append = %q, want none", n)
+	}
+	mustDo(t, "append", s.AppendNotes(noted.ID, "one"))
+	mustDo(t, "AppendNotes(\"\") with notes", s.AppendNotes(noted.ID, ""))
+	if n := s.mustShow(t, noted.ID).Notes; n != "one" {
+		t.Errorf("notes after an empty append = %q, want \"one\"", n)
+	}
+}
+
+// contractMergeRequestBlockers pins ListMergeRequests' dependency
+// hydration: an MR's open blockers come back in BlockedBy, and a closed one
+// no longer blocks.
+func contractMergeRequestBlockers(t *testing.T, s *scope) {
+	const mrLabel = "gt:merge-request"
+	desc := "branch: polecat/nux/" + s.tag + "\ntarget: main\nsource_issue: gt-src"
+	mr := s.mustCreate(t, beads.CreateOptions{Title: "blocked MR", Labels: []string{mrLabel}, Description: desc, Priority: -1})
+	free := s.mustCreate(t, beads.CreateOptions{Title: "free MR", Labels: []string{mrLabel}, Description: desc, Priority: -1})
+	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocker", Priority: -1})
+	mustDo(t, "AddDependency", s.AddDependency(mr.ID, blocker.ID))
+
+	blockers := func() map[string][]string {
+		t.Helper()
+		got, err := beads.ListMergeRequests(s.Client, beads.ListOptions{Label: mrLabel, Status: "open", Priority: -1})
+		s.want(t, "ListMergeRequests", got, err, mr.ID, free.ID)
+		out := map[string][]string{}
+		for _, is := range s.mine(got) {
+			out[is.ID] = is.BlockedBy
+			if is.BlockedByCount != len(is.BlockedBy) {
+				t.Errorf("%s: BlockedByCount %d, BlockedBy %v", is.ID, is.BlockedByCount, is.BlockedBy)
+			}
+		}
+		return out
+	}
+	got := blockers()
+	if !reflect.DeepEqual(got[mr.ID], []string{blocker.ID}) || len(got[free.ID]) != 0 {
+		t.Errorf("BlockedBy = %v, want %s blocked by %s and %s by nothing", got, mr.ID, blocker.ID, free.ID)
+	}
+	mustDo(t, "close the blocker", s.Close(blocker.ID))
+	if got := blockers(); len(got[mr.ID]) != 0 {
+		t.Errorf("BlockedBy after the blocker closed = %v, want none", got[mr.ID])
 	}
 }
 

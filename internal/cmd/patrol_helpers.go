@@ -115,8 +115,9 @@ func findActivePatrol(cfg PatrolConfig) (patrolID, patrolLine string, found bool
 
 	// Clean up stale patrols (capped at maxStalePurgePerRun)
 	for _, id := range staleIDs {
-		closeDescendants(b, id)
-		if err := b.ForceCloseWithReason("stale patrol cleanup", id); err != nil {
+		if _, err := closeStepsThenRoot(b, id, func() error {
+			return b.ForceCloseWithReason("stale patrol cleanup", id)
+		}); err != nil {
 			style.PrintWarning("could not close stale patrol %s: %v", id, err)
 		}
 	}
@@ -189,8 +190,9 @@ func burnPreviousPatrolWisps(cfg PatrolConfig) {
 		}
 
 		// Close all descendant wisps, then the root
-		closeDescendants(b, bead.ID)
-		if err := b.ForceCloseWithReason("burned: replaced by new patrol cycle", bead.ID); err != nil {
+		if _, err := closeStepsThenRoot(b, bead.ID, func() error {
+			return b.ForceCloseWithReason("burned: replaced by new patrol cycle", bead.ID)
+		}); err != nil {
 			style.PrintWarning("burn: could not close patrol %s: %v", bead.ID, err)
 			continue
 		}

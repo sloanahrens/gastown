@@ -2254,16 +2254,19 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 						canCloseIssue = false
 					}
 					if canCloseIssue && attachmentFields.AttachedMolecule != "" {
-						if n := closeDescendants(noMergeBd, attachmentFields.AttachedMolecule); n > 0 {
-							fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, attachmentFields.AttachedMolecule)
+						molID := attachmentFields.AttachedMolecule
+						n, molErr := closeStepsThenRoot(noMergeBd, molID, func() error {
+							err := forceCloseIssueWithRetry(noMergeBd.ForceCloseWithReason, molID, "done", "Attached molecule %s closed")
+							if errors.Is(err, beads.ErrNotFound) {
+								return nil
+							}
+							return err
+						})
+						if n > 0 {
+							fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, molID)
 						}
-						if closeErr := forceCloseIssueWithRetry(
-							noMergeBd.ForceCloseWithReason,
-							attachmentFields.AttachedMolecule,
-							"done",
-							"Attached molecule %s closed",
-						); closeErr != nil && !errors.Is(closeErr, beads.ErrNotFound) {
-							style.PrintWarning("could not close attached molecule %s after 3 attempts: %v", attachmentFields.AttachedMolecule, closeErr)
+						if molErr != nil {
+							style.PrintWarning("could not close attached molecule %s: %v", molID, molErr)
 							canCloseIssue = false
 						}
 					}
@@ -3440,23 +3443,26 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
 				// bd close doesn't cascade — without this, open/in_progress steps
 				// from the molecule stay stuck forever after gt done completes.
 				// Order: step children -> wisp root -> base bead.
-				if n := closeDescendants(hookBd, attachment.AttachedMolecule); n > 0 {
-					fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, attachment.AttachedMolecule)
-				}
-
-				// Close the wisp root with --force and audit reason.
+				//
+				// Then close the wisp root with --force and audit reason.
 				// ForceCloseWithReason handles any status (hooked, open, in_progress)
 				// and records the reason + session for attribution.
-				// Same pattern as gt mol burn/squash (#1879).
-				if closeErr := hookBd.ForceCloseWithReason("done", attachment.AttachedMolecule); closeErr != nil {
-					if !errors.Is(closeErr, beads.ErrNotFound) {
-						fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s: %v\n", attachment.AttachedMolecule, closeErr)
-						// Don't try to close hookedBeadID - it may still be blocked.
-						// But DO clear hooks and update agent state (goto doneStateUpdate)
-						// so the polecat isn't stuck in 'working' state (za-o9e).
-						goto doneStateUpdate
+				// Not found = already burned/deleted by another path, continue.
+				n, molErr := closeStepsThenRoot(hookBd, attachment.AttachedMolecule, func() error {
+					if err := hookBd.ForceCloseWithReason("done", attachment.AttachedMolecule); err != nil && !errors.Is(err, beads.ErrNotFound) {
+						return err
 					}
-					// Not found = already burned/deleted by another path, continue
+					return nil
+				})
+				if n > 0 {
+					fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, attachment.AttachedMolecule)
+				}
+				if molErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s: %v\n", attachment.AttachedMolecule, molErr)
+					// Don't try to close hookedBeadID - it may still be blocked.
+					// But DO clear hooks and update agent state (goto doneStateUpdate)
+					// so the polecat isn't stuck in 'working' state (za-o9e).
+					goto doneStateUpdate
 				}
 			}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -86,7 +87,10 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Recursively close all descendant step issues before detaching
 	// This prevents orphaned step issues from accumulating (gt-psj76.1)
-	childrenClosed := closeDescendants(b, moleculeID)
+	childrenClosed, stepsForced, descErr := discardDescendants(b, moleculeID)
+	if descErr != nil {
+		style.PrintWarning("closing descendants of %s: %v", moleculeID, descErr)
+	}
 	defer func() {
 		ctx := context.Background()
 		if cmd != nil {
@@ -119,6 +123,7 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 			"from":            target,
 			"handoff_id":      handoff.ID,
 			"children_closed": childrenClosed,
+			"children_forced": stepsForced,
 			"root_closed":     rootClosed,
 		}
 		enc := json.NewEncoder(os.Stdout)
@@ -130,6 +135,9 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 		style.Bold.Render("🔥"), moleculeID, target)
 	if childrenClosed > 0 {
 		fmt.Printf("  Closed %d step issues\n", childrenClosed)
+	}
+	if stepsForced > 0 {
+		fmt.Printf("  Force-closed %d step issues bd refused to close\n", stepsForced)
 	}
 
 	return nil
@@ -240,7 +248,10 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Recursively close all descendant step issues before squashing
 	// This prevents orphaned step issues from accumulating (gt-psj76.1)
-	childrenClosed := closeDescendants(b, moleculeID)
+	childrenClosed, stepsForced, descErr := discardDescendants(b, moleculeID)
+	if descErr != nil {
+		style.PrintWarning("closing descendants of %s: %v", moleculeID, descErr)
+	}
 
 	// Skip digest creation if --no-digest flag is set (gt-t2bjt).
 	// Patrol molecules (deacon, witness, refinery) run frequently and their
@@ -335,6 +346,7 @@ squashed_at: %s
 			"from":            target,
 			"handoff_id":      handoff.ID,
 			"children_closed": childrenClosed,
+			"children_forced": stepsForced,
 			"digest_skipped":  moleculeNoDigest,
 			"root_closed":     rootClosed,
 		}
@@ -353,8 +365,132 @@ squashed_at: %s
 	if childrenClosed > 0 {
 		fmt.Printf("  Closed %d step issues\n", childrenClosed)
 	}
+	if stepsForced > 0 {
+		fmt.Printf("  Force-closed %d step issues bd refused to close\n", stepsForced)
+	}
 
 	return nil
+}
+
+// closeUntilNoProgress closes ids unforced, retrying the ones bd refused
+// while each pass closes at least one. bd closes a batch in argument order
+// and refuses an issue whose blocker is still open at its turn, even when
+// the blocker is later in the same batch; a molecule's steps are chained by
+// blocks dependencies and Children lists them in ID order, so one pass can
+// close only part of a chain that would close whole. Only the issues still
+// refused when a pass makes no progress are reported, in a
+// *beads.PartialCloseError.
+func closeUntilNoProgress(b beads.Client, ids []string) error {
+	var closed []string
+	pending := ids
+	for {
+		err := b.Close(pending...)
+		if err == nil {
+			return nil
+		}
+		var pe *beads.PartialCloseError
+		if !errors.As(err, &pe) || len(pe.Closed) == 0 {
+			// No progress: bd refused every issue left (a single refused
+			// issue, or a batch refused whole), or the close failed.
+			if len(closed) == 0 {
+				return err
+			}
+			// The previous pass reported pending as refused.
+			return &beads.PartialCloseError{Closed: closed, NotClosed: pending, Err: errors.Join(beads.ErrCloseRefused, err)}
+		}
+		closed = append(closed, pe.Closed...)
+		pending = pe.NotClosed
+	}
+}
+
+// discardDescendants closes parentID's descendants for an explicit discard
+// (gt mol burn and squash). It closes them unforced first, then force-closes
+// whatever bd refused, so no open step is left under the root the caller
+// closes next. It returns the steps closed unforced and the steps forced.
+func discardDescendants(b beads.Client, parentID string) (closed, forced int, err error) {
+	closed, err = closeDescendantsImpl(b, parentID, false)
+	if err == nil {
+		return closed, 0, nil
+	}
+	forced, err = closeDescendantsImpl(b, parentID, true)
+	return closed, forced, err
+}
+
+// closeStepsThenRoot closes a molecule whose work is claimed complete (gt
+// done, the patrol helpers): its descendants, unforced, and then the root
+// through closeRoot, but only when no descendant is left open. A step bd
+// refuses stays open and so does the root, so unfinished work stays visible
+// (gt-7lx3); the error names each open step and why it is open. A failure
+// that leaves no step known to be open (the steps could not be listed) is
+// logged and the root still closes, as gt done always has. It returns the
+// steps closed.
+func closeStepsThenRoot(b beads.Client, molID string, closeRoot func() error) (int, error) {
+	steps, err := closeDescendantsImpl(b, molID, false)
+	if err != nil {
+		open := openDescendants(b, molID)
+		switch {
+		case len(open) > 0:
+			return steps, fmt.Errorf("leaving molecule %s open: %d step(s) still open: %s: %w",
+				molID, len(open), strings.Join(open, "; "), err)
+		case errors.Is(err, beads.ErrCloseRefused):
+			return steps, fmt.Errorf("leaving molecule %s open: %w", molID, err)
+		}
+		style.PrintWarning("closing descendants of %s: %v", molID, err)
+	}
+	return steps, closeRoot()
+}
+
+// openDescendants describes parentID's descendants that are not closed, each
+// as "<id> (<why>)".
+func openDescendants(b beads.Client, parentID string) []string {
+	children, err := b.Children(parentID)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, child := range children {
+		out = append(out, openDescendants(b, child.ID)...)
+		if child.Status != string(beads.StatusClosed) {
+			out = append(out, fmt.Sprintf("%s (%s)", child.ID, openStepReason(b, child)))
+		}
+	}
+	return out
+}
+
+// openStepReason says why bd would refuse to close is: another assignee, an
+// open blocker, or an open child.
+func openStepReason(b beads.Client, is *beads.Issue) string {
+	if full, err := b.Show(is.ID); err == nil {
+		is = full
+	}
+	var why []string
+	if is.Assignee != "" {
+		why = append(why, "assigned to "+is.Assignee)
+	}
+	var blockers []string
+	for _, d := range is.Dependencies {
+		if d.DependencyType == "blocks" && d.Status != string(beads.StatusClosed) {
+			blockers = append(blockers, d.ID)
+		}
+	}
+	if len(blockers) > 0 {
+		why = append(why, "blocked by "+strings.Join(blockers, ", "))
+	}
+	if kids, err := b.Children(is.ID); err == nil {
+		n := 0
+		for _, k := range kids {
+			if k.Status != string(beads.StatusClosed) {
+				n++
+			}
+		}
+		if n > 0 {
+			why = append(why, fmt.Sprintf("%d open child(ren)", n))
+		}
+	}
+	if len(why) == 0 {
+		return "status " + is.Status
+	}
+	return strings.Join(why, "; ")
 }
 
 // closeDescendants recursively closes all descendant issues of a parent.
@@ -375,7 +511,7 @@ func forceCloseDescendants(b *beads.Beads, parentID string) (int, error) {
 	return closeDescendantsImpl(b, parentID, true)
 }
 
-func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, error) {
+func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, error) {
 	// Uses Children (bd show --children), not List(ListOptions{Parent:
 	// parentID}) (bd list --parent): the latter only checks the persistent
 	// dependencies table and silently misses ephemeral wisp children,
@@ -415,12 +551,15 @@ func closeDescendantsImpl(b *beads.Beads, parentID string, force bool) (int, err
 		if force {
 			closeErr = b.ForceCloseWithReason("burned: force-close descendants", idsToClose...)
 		} else {
-			closeErr = b.Close(idsToClose...)
+			closeErr = closeUntilNoProgress(b, idsToClose)
 		}
+		// A batch close can close some children and have bd refuse others
+		// (a *beads.PartialCloseError): count only the ones that closed, and
+		// report the rest so no caller takes a stranded step for a closed
+		// one (gt-7lx3).
+		totalClosed += len(beads.ClosedIDs(idsToClose, closeErr))
 		if closeErr != nil {
 			errs = append(errs, fmt.Errorf("closing children of %s: %w", parentID, closeErr))
-		} else {
-			totalClosed += len(idsToClose)
 		}
 	}
 

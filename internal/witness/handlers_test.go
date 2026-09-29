@@ -3228,6 +3228,11 @@ func TestDetectOrphanedMolecules_WithMockBd(t *testing.T) {
 						return `[{"status":"hooked","description":"attached_molecule: gt-mol-orphan\nattached_at: 2026-01-15T10:00:00Z\ndispatched_by: mayor"}]`, nil
 					case "gt-mol-orphan":
 						return `[{"status":"open"}]`, nil
+					case "--json":
+						// The re-read after the batch close of the steps.
+						if strings.Contains(joined, "gt-step-001") {
+							return `[{"id":"gt-step-001","status":"closed"},{"id":"gt-step-002","status":"closed"}]`, nil
+						}
 					}
 				}
 				return `[{"status":"open","description":""}]`, nil

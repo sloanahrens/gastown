@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/townlog"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -308,6 +309,13 @@ func handlePolecatDone(townRoot string, msg *mail.Message, dryRun bool) (string,
 
 // handleMergeCompleted processes a merge completion callback from Refinery.
 func handleMergeCompleted(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	cwd, _ := os.Getwd()
+	return handleMergeCompletedWith(beads.New(cwd), townRoot, msg, dryRun)
+}
+
+// handleMergeCompletedWith is handleMergeCompleted closing the source issue
+// through bd.
+func handleMergeCompletedWith(bd beads.Client, townRoot string, msg *mail.Message, dryRun bool) (string, error) {
 	matches := patternMergeCompleted.FindStringSubmatch(msg.Subject)
 	if len(matches) < 2 {
 		return "", fmt.Errorf("could not parse branch from subject: %q", msg.Subject)
@@ -340,10 +348,15 @@ func handleMergeCompleted(townRoot string, msg *mail.Message, dryRun bool) (stri
 
 	// Close the source issue if we have it
 	if sourceIssue != "" {
-		cwd, _ := os.Getwd()
-		bd := beads.New(cwd)
+		// Close only what the refinery itself closes on merge: not
+		// no_merge, review_only or merge_strategy local work.
+		if issue, err := bd.Show(sourceIssue); err == nil {
+			if block := refinery.MergedWorkBeadCloseBlockReason(issue); block != "" {
+				return fmt.Sprintf("logged merge for %s, not closing %s (%s)", branch, sourceIssue, block), nil
+			}
+		}
 		reason := fmt.Sprintf("Merged in %s", mergeCommit)
-		if err := bd.Close(sourceIssue, reason); err != nil {
+		if err := bd.CloseWithReason(reason, sourceIssue); err != nil {
 			// Non-fatal: issue might already be closed or not exist
 			return fmt.Sprintf("logged merge for %s (could not close %s: %v)",
 				branch, sourceIssue, err), nil
