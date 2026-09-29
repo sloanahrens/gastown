@@ -63,10 +63,7 @@ to final land, without any manual branch targeting.
 
 9. **Report when complete.** When all children under the epic are closed,
    `gt mq integration status` reports the branch ready to land and the
-   Refinery nudges the mayor. gt does not land integration branches. The `gt mq integration land` command
-   was removed (gt-fcxe9.4): it was an unreviewed route to the base branch and it
-   never landed anything. Landing waits for the single landing path (gt-v4ssj,
-   ADR 0004).
+   Refinery nudges the mayor. See [Landing](#landing).
 
 ## Concept
 
@@ -172,10 +169,7 @@ The Refinery processes these MRs and merges them to the integration branch.
 ### 5. Ready to Land
 
 Once all children are closed and all MRs merged, `gt mq integration status`
-reports `ready_to_land: true`. gt does not land integration branches. The `gt mq integration land` command
-was removed (gt-fcxe9.4): it was an unreviewed route to the base branch and it
-never landed anything. Landing waits for the single landing path (gt-v4ssj,
-ADR 0004).
+reports `ready_to_land: true`. See [Landing](#landing).
 
 ## Auto-Detection
 

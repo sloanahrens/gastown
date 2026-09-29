@@ -1285,8 +1285,8 @@ func (g *Git) Push(remote, branch string, force bool) error {
 // deliberate, gate-checked push to the default branch made from a polecat
 // context (gt-ibt8). Every other push to the default branch from a polecat
 // context is refused by that hook, so a Refinery merge MUST pass it to
-// PushWithEnv; a plain Push will be refused. (The second signal, for
-// `gt done --merge direct`, was deleted with that path in gt-fcxe9.4.) As of gt-9tf9, EnvRefineryMerge alone is not enough: the
+// PushWithEnv; a plain Push will be refused. EnvRefineryMerge alone is not
+// enough (gt-9tf9): the
 // hook also requires a Refinery identity signal (GT_REFINERY=1 or
 // GT_ROLE=*/refinery) in the same environment, and refuses a polecat-shaped
 // GT_ROLE outright regardless of that signal - so a caller running outside an
