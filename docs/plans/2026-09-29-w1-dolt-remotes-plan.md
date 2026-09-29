@@ -1,4 +1,4 @@
-> Status: executed 2026-09-29 on branch crew/sloan/w1-dolt-remotes. Tracked in gt-8z769.1 (epic gt-8z769).
+> Status: historical (2026-09). Merged in: gt-8z769.1. Not maintained.
 
 # W1: Remove Dolt remote sync (gt-8z769.1) Implementation Plan
 

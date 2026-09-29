@@ -666,15 +666,21 @@ Dolt server stays up throughout.
 
    ```bash
    dq() { dolt --host 127.0.0.1 --port "${GT_DOLT_PORT:-3307}" --user root --password "" --no-tls "$@"; }
+   safe() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "SKIP unsafe name: $1" >&2; return 1; }; }
    dq sql -r csv -q "SHOW DATABASES" | tail -n +2 | grep -v -E '^(information_schema|mysql)$' |
      while read -r DB; do
-       dq --use-db "$DB" sql -r csv -q "SELECT name, url FROM dolt_remotes" </dev/null | tail -n +2 |
-         while IFS=, read -r NAME URL; do
-           echo "$DB: removing $NAME ($URL)"
+       safe "$DB" || continue
+       dq --use-db "$DB" sql -r csv -q "SELECT name FROM dolt_remotes" </dev/null | tail -n +2 |
+         while read -r NAME; do
+           safe "$NAME" || continue
+           echo "$DB: removing remote $NAME"
            dq --use-db "$DB" sql -q "CALL DOLT_REMOTE('remove', '$NAME')" </dev/null
          done
      done
    ```
+
+   A name the loop skips as unsafe is handled by hand after a look at
+   `SELECT name, url FROM dolt_remotes`.
 
 3. Remove each database's `git-remote-cache`. The cache is only read or
    written by a push or fetch, and there is no remote left to push to. Move
@@ -684,11 +690,13 @@ Dolt server stays up throughout.
    ```bash
    TRASH=~/gt/.dolt-remote-cache-trash-$(date +%Y%m%d)
    mkdir -p "$TRASH"
-   for DB in $(ls -d ~/gt/.dolt-data/*/.dolt/git-remote-cache 2>/dev/null | awk -F/ '{print $(NF-2)}'); do
-     du -sh ~/gt/.dolt-data/$DB/.dolt/git-remote-cache
-     mv ~/gt/.dolt-data/$DB/.dolt/git-remote-cache "$TRASH/$DB"
-     test ! -e ~/gt/.dolt-data/$DB/.dolt/git-remote-cache && echo "$DB: cache gone"
-     du -sh ~/gt/.dolt-data/$DB/.dolt
+   for CACHE in ~/gt/.dolt-data/*/.dolt/git-remote-cache; do
+     [ -d "$CACHE" ] || continue
+     DB=$(basename "$(dirname "$(dirname "$CACHE")")")
+     du -sh "$CACHE"
+     mv "$CACHE" "$TRASH/$DB"
+     test ! -e "$CACHE" && echo "$DB: cache gone"
+     du -sh "$(dirname "$CACHE")"
    done
    gt dolt status          # server healthy, latency normal
    bd list --limit 1       # from ~/gt/gastown: gt reads work

@@ -145,8 +145,9 @@ func scanBeadsConfigsForSyncRemote(townRoot string) []string {
 
 	paths := map[string]bool{".": true} // the town's own .beads
 	for _, r := range routes {
-		// Route paths come from a file: keep only ones that stay inside the
-		// town, so the check never reads outside it.
+		// Route paths come from a file: drop absolute paths and ones that
+		// climb out with "..". Symlinks under the town are not resolved; the
+		// check only reads a config.yaml and echoes its sync.remote.
 		p := filepath.Clean(r.Path)
 		if r.Path == "" || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
 			continue
