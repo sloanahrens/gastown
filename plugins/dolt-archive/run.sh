@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --databases)    DEFAULT_DBS="$2"; shift 2 ;;
     --skip-git)     SKIP_GIT=true; shift ;;
-    --skip-dolt-push) shift ;;  # no-op: Dolt remote push was removed (ADR 0002)
+    --skip-dolt-push) echo "dolt-archive: --skip-dolt-push is a no-op; Dolt remote push was removed (ADR 0002)" >&2; shift ;;
     --help|-h)
       echo "Usage: $0 [--databases db1,db2,...] [--skip-git]"
       exit 0

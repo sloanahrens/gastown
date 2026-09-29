@@ -667,6 +667,7 @@ Dolt server stays up throughout.
    ```bash
    dq() { dolt --host 127.0.0.1 --port "${GT_DOLT_PORT:-3307}" --user root --password "" --no-tls "$@"; }
    safe() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "SKIP unsafe name: $1" >&2; return 1; }; }
+   # -r csv prints a header row first; tail drops it.
    dq sql -r csv -q "SHOW DATABASES" | tail -n +2 | grep -v -E '^(information_schema|mysql)$' |
      while read -r DB; do
        safe "$DB" || continue
@@ -693,6 +694,7 @@ Dolt server stays up throughout.
    for CACHE in ~/gt/.dolt-data/*/.dolt/git-remote-cache; do
      [ -d "$CACHE" ] || continue
      DB=$(basename "$(dirname "$(dirname "$CACHE")")")
+     [ -e "$TRASH/$DB" ] && { echo "$DB: $TRASH/$DB already exists, skipped"; continue; }
      du -sh "$CACHE"
      mv "$CACHE" "$TRASH/$DB"
      test ! -e "$CACHE" && echo "$DB: cache gone"
