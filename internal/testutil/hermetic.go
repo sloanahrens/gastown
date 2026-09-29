@@ -572,6 +572,8 @@ func writeSandboxGitConfig(home string) error {
 	gpgsign = false
 [tag]
 	gpgsign = false
+[core]
+	fsync = none
 `
 	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o644); err != nil {
 		return fmt.Errorf("writing sandbox gitconfig: %w", err)
