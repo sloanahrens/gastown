@@ -19,12 +19,22 @@ import (
 func main() {
 	budget := flag.Duration("budget", 10*time.Second, "per-package test time limit for converted packages")
 	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget")
+	overList := flag.String("overbudget", "internal/testpolicy/overbudget.txt", "converted packages exempt from the budget while a bead tracks their overrun; their times are reported on every run")
 	flag.Parse()
 
 	exempt, err := testpolicy.ReadList(*list)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "budget:", err)
 		os.Exit(2)
+	}
+	overEntries, err := testpolicy.ReadOverBudget(*overList)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "budget:", err)
+		os.Exit(2)
+	}
+	tracked := make(map[string]string, len(overEntries))
+	for _, e := range overEntries {
+		tracked[e.Package] = e.Bead
 	}
 	cmd := exec.Command("go", append([]string{"test", "-json"}, flag.Args()...)...)
 	cmd.Stderr = os.Stderr
@@ -37,7 +47,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "budget:", err)
 		os.Exit(2)
 	}
-	over, scanErr := testpolicy.WatchBudget(stdout, os.Stdout, *budget, exempt, "github.com/steveyegge/gastown")
+	over, trackedRuns, scanErr := testpolicy.WatchBudgetTracked(stdout, os.Stdout, *budget, exempt, tracked, "github.com/steveyegge/gastown")
 	if scanErr != nil {
 		// WatchBudget stopped reading before the child was done writing (for
 		// example a single line over its 16 MB scan buffer); drain the pipe
@@ -47,6 +57,12 @@ func main() {
 	}
 	waitErr := cmd.Wait()
 
+	if len(trackedRuns) > 0 {
+		fmt.Fprintf(os.Stderr, "over budget (tracked, limit %s):\n", *budget)
+		for _, r := range trackedRuns {
+			fmt.Fprintf(os.Stderr, "  %s took %s (%s)\n", r.Package, r.Elapsed.Round(time.Millisecond), r.Bead)
+		}
+	}
 	for _, o := range over {
 		fmt.Fprintf(os.Stderr, "BUDGET: %s took %s (limit %s); slowest:", o.Package, o.Elapsed.Round(time.Millisecond), *budget)
 		for _, t := range o.Slowest {

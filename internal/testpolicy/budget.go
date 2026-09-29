@@ -46,6 +46,15 @@ type pkgOutput struct {
 // test binary ran longer than budget. Package names are reported relative to
 // module.
 func WatchBudget(r io.Reader, w io.Writer, budget time.Duration, exempt map[string]bool, module string) ([]Overrun, error) {
+	over, _, err := WatchBudgetTracked(r, w, budget, exempt, nil, module)
+	return over, err
+}
+
+// WatchBudgetTracked is WatchBudget that also exempts the packages in tracked
+// (overbudget.txt: package to bead id) and returns the time each of them
+// took, so the caller can report them on every run.
+func WatchBudgetTracked(r io.Reader, w io.Writer, budget time.Duration, exempt map[string]bool, tracked map[string]string, module string) ([]Overrun, []TrackedRun, error) {
+	var runs []TrackedRun
 	tests := map[string][]TestTime{}
 	bufs := map[string]*pkgOutput{}
 	var over []Overrun
@@ -108,6 +117,10 @@ func WatchBudget(r io.Reader, w io.Writer, budget time.Duration, exempt map[stri
 			continue
 		}
 		d := time.Duration(ev.Elapsed * float64(time.Second))
+		if bead, ok := tracked[pkg]; ok {
+			runs = append(runs, TrackedRun{pkg, bead, d})
+			continue
+		}
 		if d > budget && !exempt[pkg] {
 			ts := tests[pkg]
 			sort.Slice(ts, func(i, j int) bool { return ts[i].Elapsed > ts[j].Elapsed })
@@ -117,5 +130,5 @@ func WatchBudget(r io.Reader, w io.Writer, budget time.Duration, exempt map[stri
 			over = append(over, Overrun{pkg, d, ts})
 		}
 	}
-	return over, sc.Err()
+	return over, runs, sc.Err()
 }
