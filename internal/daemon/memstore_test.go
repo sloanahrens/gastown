@@ -23,13 +23,14 @@ import (
 // embedded Storage, so a test that strays past it fails loudly.
 //
 // It copies the Dolt store's observable behavior where the manager depends
-// on it (TestIntegrationMemStoreMatchesBeadsStore pins each point against a
+// on it (TestMemStoreMatchesBeadsStore pins each point against a
 // real store):
 //   - CreateIssue records "created", CloseIssue "closed", and UpdateIssue with
 //     a status "closed" / "reopened" (from closed) / "status_changed", as
 //     issueops.DetermineEventType decides.
 //   - Events are dated to the second, like the events table's DATETIME, and
-//     GetAllEventsSince returns those strictly after since, oldest first.
+//     GetAllEventsSince returns those strictly after since, oldest second
+//     first; within one second, in reverse write order (Dolt promises none).
 //   - Dependency reads resolve a target through the issues it holds, so an
 //     edge to an issue in another store (external) lists no local issue.
 type memStore struct {
@@ -283,9 +284,13 @@ func (s *memStore) GetAllEventsSince(ctx context.Context, since time.Time) ([]*b
 	if s.eventsErr != nil {
 		return nil, s.eventsErr
 	}
+	// Oldest second first, like the Dolt store's ORDER BY created_at. Within
+	// one second that order is undefined, so memStore returns those events
+	// newest first: a test that relies on write order inside a second fails
+	// here instead of passing on luck against Dolt.
 	var out []*beadsdk.Event
-	for _, e := range s.events {
-		if e.CreatedAt.After(since) {
+	for i := len(s.events) - 1; i >= 0; i-- {
+		if e := s.events[i]; e.CreatedAt.After(since) {
 			c := *e
 			out = append(out, &c)
 		}
@@ -536,6 +541,30 @@ func TestMemStoreContract(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("memStore observation:\n got  %+v\n want %+v", got, want)
+	}
+
+	// Within one second memStore returns events newest first, so no test can
+	// lean on a write order the Dolt store does not promise.
+	clk := newFixedClock()
+	same, sameCleanup := newMemStore(t)
+	defer sameCleanup()
+	same.now = clk.Now
+	ctx := context.Background()
+	for _, id := range []string{"gt-s1", "gt-s2", "gt-s3"} {
+		if err := same.CreateIssue(ctx, &beadsdk.Issue{ID: id, Title: id}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clk.Advance(time.Second)
+	if err := same.CreateIssue(ctx, &beadsdk.Issue{ID: "gt-s4", Title: "later"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := same.GetAllEventsSince(ctx, time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := eventSummary(events), "gt-s3:created gt-s2:created gt-s1:created gt-s4:created"; got != want {
+		t.Errorf("event order = %q, want %q (same second newest first, seconds oldest first)", got, want)
 	}
 }
 
