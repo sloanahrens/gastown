@@ -25,10 +25,8 @@ escalate_failed() {
 
 TOWN_ROOT="${GT_TOWN_ROOT:-}"
 if [ -z "$TOWN_ROOT" ]; then
-  if ! TOWN_ROOT=$(gt town root 2>/dev/null); then
-    log "SKIP: could not resolve town root"
-    exit 0
-  fi
+  log "SKIP: could not resolve town root: GT_TOWN_ROOT is unset"
+  exit 0
 fi
 
 integer_or_default() {
