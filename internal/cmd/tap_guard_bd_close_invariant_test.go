@@ -266,6 +266,7 @@ func TestBdCloseInvariantRefusal(t *testing.T) {
 type bdCloseInvariantFixture struct {
 	town string
 	work string
+	env  map[string]string
 }
 
 func (f bdCloseInvariantFixture) payload(command string) string {
@@ -274,11 +275,13 @@ func (f bdCloseInvariantFixture) payload(command string) string {
 
 func (f bdCloseInvariantFixture) run(t *testing.T, command string) error {
 	t.Helper()
-	var err error
-	withStdin(t, f.payload(command), func() {
-		err = runTapGuardBdCloseInvariant(tapGuardBdCloseInvariantCmd, nil)
-	})
-	return err
+	return tapGuardBdCloseInvariant(strings.NewReader(f.payload(command)), f.process(f.work))
+}
+
+// process is the guard's view of a session with the fixture's environment,
+// whose working directory is wd.
+func (f bdCloseInvariantFixture) process(wd string) guardProcess {
+	return guardProcess{getenv: envMap(f.env), getwd: func() (string, error) { return wd, nil }}
 }
 
 // newBdCloseInvariantFixture builds the fixture town on the given polecat
@@ -301,15 +304,11 @@ func newBdCloseInvariantFixture(t *testing.T, branch string, commitsAhead int) b
 	work := filepath.Join(town, rig, "polecats", "malachite", rig)
 
 	// Agent identity, as a spawned session carries it. The git checkout itself
-	// supplies the branch, via the payload cwd — the test process stays in the
-	// repo worktree, so nothing here depends on the guard's os.Getwd fallback
-	// happening to match.
-	t.Setenv("GT_TOWN_ROOT", town)
-	t.Setenv("GT_ROOT", town)
-	t.Setenv("GT_RIG", rig)
-	t.Setenv("GT_POLECAT", "malachite")
+	// supplies the branch, via the payload cwd, so nothing here depends on the
+	// guard's getwd fallback.
+	env := map[string]string{"GT_TOWN_ROOT": town, "GT_ROOT": town, "GT_RIG": rig, "GT_POLECAT": "malachite"}
 
-	return bdCloseInvariantFixture{town: town, work: work}
+	return bdCloseInvariantFixture{town: town, work: work, env: env}
 }
 
 // buildBdCloseInvariantTown lays out newBdCloseInvariantFixture's town and
@@ -365,6 +364,7 @@ func buildBdCloseInvariantTown(t *testing.T, town, rig, branch string, commitsAh
 // cut for, so the guard must not judge it — scoping by the agent's hook_bead
 // instead of the branch would have blocked this documented workflow.
 func TestRunTapGuardBdCloseInvariant_ConflictTaskCloseAllowed(t *testing.T) {
+	t.Parallel()
 	f := newBdCloseInvariantFixture(t, "polecat/malachite/gt-arno+muck73gu", 3)
 
 	if err := f.run(t, "bd close gt-conflict-task"); err != nil {
@@ -377,6 +377,7 @@ func TestRunTapGuardBdCloseInvariant_ConflictTaskCloseAllowed(t *testing.T) {
 // commits and nothing tracking them, must be blocked — this is the exact bypass
 // of gt-6hmz that never reaches done.go.
 func TestRunTapGuardBdCloseInvariant_SelfCloseBlocked(t *testing.T) {
+	t.Parallel()
 	f := newBdCloseInvariantFixture(t, "polecat/malachite/gt-arno+muck73gu", 3)
 
 	err := f.run(t, "bd close gt-arno")
@@ -393,6 +394,7 @@ func TestRunTapGuardBdCloseInvariant_SelfCloseBlocked(t *testing.T) {
 // branch with no commits of its own must pass, or the guard would block the
 // documented way to close a bead that turned out to need no work.
 func TestRunTapGuardBdCloseInvariant_ZeroCommitsAllowed(t *testing.T) {
+	t.Parallel()
 	f := newBdCloseInvariantFixture(t, "polecat/malachite/gt-arno+muck73gu", 0)
 
 	if err := f.run(t, `bd close gt-arno --reason "no-changes: nothing to do"`); err != nil {
@@ -405,6 +407,7 @@ func TestRunTapGuardBdCloseInvariant_ZeroCommitsAllowed(t *testing.T) {
 // done passes an empty close reason. If the guard did not read --reason, the
 // operator override would be unreachable for every raw close.
 func TestRunTapGuardBdCloseInvariant_OperatorOverrideAllowed(t *testing.T) {
+	t.Parallel()
 	f := newBdCloseInvariantFixture(t, "polecat/malachite/gt-arno+muck73gu", 3)
 
 	if err := f.run(t, `bd close gt-arno --reason "cancel: work abandoned, superseded by gt-x"`); err != nil {
@@ -417,6 +420,7 @@ func TestRunTapGuardBdCloseInvariant_OperatorOverrideAllowed(t *testing.T) {
 // bead whose id does not appear in this branch is not this guard's business,
 // however much unmerged work the branch carries.
 func TestRunTapGuardBdCloseInvariant_OtherRigsBranchUntouched(t *testing.T) {
+	t.Parallel()
 	f := newBdCloseInvariantFixture(t, "polecat/malachite/gt-arno+muck73gu", 3)
 
 	if err := f.run(t, "bd close hq-cv-vbvss gt-other"); err != nil {
@@ -428,6 +432,7 @@ func TestRunTapGuardBdCloseInvariant_OtherRigsBranchUntouched(t *testing.T) {
 // "nothing to compare against itself" rule at the guard boundary: on the rig's
 // default branch the invariant is not evaluable, so a close passes.
 func TestRunTapGuardBdCloseInvariant_OnDefaultBranchAllowed(t *testing.T) {
+	t.Parallel()
 	f := newBdCloseInvariantFixture(t, "main", 0)
 
 	if err := f.run(t, "bd close gt-arno"); err != nil {
@@ -439,6 +444,7 @@ func TestRunTapGuardBdCloseInvariant_OnDefaultBranchAllowed(t *testing.T) {
 // check: outside a Gas Town agent session the guard must never fire, however
 // close the command looks to the bypass it exists to stop.
 func TestRunTapGuardBdCloseInvariant_NonAgentContextAllowed(t *testing.T) {
+	t.Parallel()
 	f := newBdCloseInvariantFixture(t, "polecat/malachite/gt-arno+muck73gu", 3)
 	// A human working in the repo: no role env, and a path with no
 	// /polecats/, /crew/ or /deacon/dogs/ component.
@@ -451,14 +457,11 @@ func TestRunTapGuardBdCloseInvariant_NonAgentContextAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, env := range []string{"GT_POLECAT", "GT_CREW", "GT_WITNESS", "GT_REFINERY", "GT_MAYOR", "GT_DEACON", "GT_DOG_NAME"} {
-		t.Setenv(env, "")
+		delete(f.env, env)
 	}
 
 	payload := fmt.Sprintf(`{"tool_name":"Bash","cwd":%q,"tool_input":{"command":"bd close gt-arno"}}`, plain)
-	var err error
-	withStdin(t, payload, func() {
-		err = runTapGuardBdCloseInvariant(tapGuardBdCloseInvariantCmd, nil)
-	})
+	err := tapGuardBdCloseInvariant(strings.NewReader(payload), f.process(plain))
 	if err != nil {
 		t.Errorf("expected the guard to be a no-op outside an agent context, got error: %v", err)
 	}
@@ -468,13 +471,11 @@ func TestRunTapGuardBdCloseInvariant_NonAgentContextAllowed(t *testing.T) {
 // the guard is on every Bash call in the town, so anything that is not a
 // bd close must pass without even resolving git scope.
 func TestRunTapGuardBdCloseInvariant_UnrelatedCommandAllowed(t *testing.T) {
-	t.Setenv("GT_POLECAT", "malachite")
+	t.Parallel()
+	proc := guardProcess{getenv: envMap(map[string]string{"GT_POLECAT": "malachite"}), getwd: os.Getwd}
 
 	hookInput := `{"tool_name":"Bash","tool_input":{"command":"ls -la && bd list --status=open"}}`
-	var err error
-	withStdin(t, hookInput, func() {
-		err = runTapGuardBdCloseInvariant(tapGuardBdCloseInvariantCmd, nil)
-	})
+	err := tapGuardBdCloseInvariant(strings.NewReader(hookInput), proc)
 	if err != nil {
 		t.Errorf("expected a non-close command to be allowed, got error: %v", err)
 	}
@@ -494,5 +495,19 @@ func TestRigBeadsWorkspaceExists(t *testing.T) {
 	}
 	if !rigBeadsWorkspaceExists(dir) {
 		t.Error("a directory holding .beads must report true")
+	}
+}
+
+// TestRealGuardProcessIsTheProcess: runTapGuardBdCloseInvariant hands the
+// guard realGuardProcess, which must read the real environment and working
+// directory.
+func TestRealGuardProcessIsTheProcess(t *testing.T) {
+	t.Parallel()
+	p := realGuardProcess()
+	if reflect.ValueOf(p.getenv).Pointer() != reflect.ValueOf(os.Getenv).Pointer() {
+		t.Error("realGuardProcess does not read the environment through os.Getenv")
+	}
+	if reflect.ValueOf(p.getwd).Pointer() != reflect.ValueOf(os.Getwd).Pointer() {
+		t.Error("realGuardProcess does not read the working directory through os.Getwd")
 	}
 }
