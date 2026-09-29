@@ -106,6 +106,11 @@ func CodeOf(t *testing.T, cmd *cobra.Command) int {
 func CodeOfErr(t *testing.T, cmd *cobra.Command) (int, error) {
 	t.Helper()
 	err := cmd.Execute()
+	// Execute re-adds the default help command to the root it runs from
+	// (cobra's InitDefaultHelpCmd removes and adds it on every call), which
+	// marks the root unsorted. Sort it again before a parallel test walks
+	// the shared tree (TestCommandTreeWalkIsReadOnlyUnderParallelTests).
+	presortCommandTree(cmd.Root())
 	if err == nil {
 		return 0, nil
 	}
