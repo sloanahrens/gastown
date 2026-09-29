@@ -4,7 +4,7 @@
 # plugins, hooks and Go exec literals against (gt-fcxe9.5).
 #
 # Usage:
-#   BEADS_SRC=<beads fork checkout> [BEADS_REF=origin/main] scripts/refresh-bd-command-tree.sh
+#   BEADS_SRC=<beads fork checkout> [BEADS_REF=origin/main] [BEADS_SOURCE=<name>] scripts/refresh-bd-command-tree.sh
 #   make bd-command-tree BEADS_SRC=<checkout> [BEADS_REF=<ref>]
 #
 # Exports BEADS_REF with git archive (the checkout is not modified), builds bd
@@ -18,6 +18,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${BEADS_SRC:?set BEADS_SRC to a beads fork checkout}"
 REF="${BEADS_REF:-origin/main}"
+# BEADS_SOURCE names the bd fork in the snapshot's "source" field.
+NAME="${BEADS_SOURCE:-sloanahrens/beads}"
 OUT="$ROOT/internal/cmdtree/bd-command-tree.json"
 
 commit="$(git -C "$SRC" rev-parse --verify "$REF^{commit}")"
@@ -27,6 +29,6 @@ mkdir -p "$work/src"
 
 git -C "$SRC" archive "$commit" | tar -x -C "$work/src"
 (cd "$work/src" && go build -ldflags "-X main.Commit=$commit" -o "$work/bd" ./cmd/bd)
-(cd "$ROOT" && go run ./internal/cmdtree/gen-bd-tree -bd "$work/bd" -source "sloanahrens/beads $REF") >"$work/tree.json"
+(cd "$ROOT" && go run ./internal/cmdtree/gen-bd-tree -bd "$work/bd" -source "$NAME $REF") >"$work/tree.json"
 mv "$work/tree.json" "$OUT"
 echo "wrote $OUT from $REF ($commit)"
