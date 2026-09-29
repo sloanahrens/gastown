@@ -252,6 +252,12 @@ func TestReuseIdlePolecat_IgnoresPrunableHolder(t *testing.T) {
 	if tip := gitProbeOutput(t, reused.ClonePath, "rev-parse", "HEAD"); tip != resumeSHA {
 		t.Errorf("HEAD = %s, want the resume branch's origin tip %s (worktree %s)", tip, resumeSHA, alpha.ClonePath)
 	}
+	// The stale registration is pruned, not just ignored: git 2.50 refuses the
+	// checkout above while it exists, and 2.42 does not, so this is the
+	// assertion that holds the fix on either version (gt-22hdp.39).
+	if listed := gitProbeOutput(t, mayorRig, "worktree", "list", "--porcelain"); strings.Contains(listed, deadPath) {
+		t.Errorf("the deleted holder is still registered:\n%s", listed)
+	}
 }
 
 // branchAtNewCommit creates branch at a fresh commit parented on ref, without

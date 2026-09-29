@@ -11,6 +11,7 @@ Before you write or convert a test in this repository, read this page. It covers
 
 - `make test` runs the unit tier through the budget runner (`internal/testpolicy/cmd/budget`).
 - `make test-integration` runs `go test -tags integration -run '^TestIntegration' ./...`. Tests that need Docker still need a `gt slot run` around the call.
+- The refinery gate runs only `make test`. The integration tier runs in two other places: the CI integration job on every push, and the daemon's `main_branch_test` patrol, which runs `make test-integration` on main once a day under its slot hold and escalates a red run (knobs `integration_interval`, default 24h, and `integration_timeout`, default 30m).
 - `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
 
 The unit tier does no real I/O that carries a wall-clock timeout. That includes sockets and dials: a 200 ms dial in `internal/tmux` timed out under load (a 1-in-600 failure) and blocked other runs for 150 s in socket syscalls. The `no-network` rule enforces this for sockets, and the same rule applies by review to anything else with a deadline. Put such I/O behind a seam and script it; the filesystem through `t.TempDir` is fine.

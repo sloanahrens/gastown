@@ -90,11 +90,22 @@ func TestUnlinkDeadSocketFileRemovesStaleFile(t *testing.T) {
 // function's call.
 func TestUnlinkDeadSocketFileLeavesNonSocketFile(t *testing.T) {
 	t.Parallel()
-	fs := newFakeSockets()
-	fs.set("/s/plain", sockFile)
-	unlinkDeadSocketFile(newFixedClock(), *fs.ops(), "/s/plain")
-	if fs.state("/s/plain") != sockFile {
-		t.Error("unlinked a file that was never a socket")
+	for _, kernel := range []struct {
+		name  string
+		linux bool
+	}{{"darwin", false}, {"linux", true}} {
+		for _, st := range []sockState{sockFile, sockDir, sockSymlink} {
+			fs := newFakeSockets()
+			// On Linux the dial of a non-socket is refused exactly like a dead
+			// socket's, so the refusal alone cannot tell them apart; the
+			// nightly deleted a plain file this way (gt-22hdp.39).
+			fs.linuxConnect = kernel.linux
+			fs.set("/s/plain", st)
+			unlinkDeadSocketFile(newFixedClock(), *fs.ops(), "/s/plain")
+			if fs.state("/s/plain") != st {
+				t.Errorf("%s: unlinked a path (state %d) that was never a socket", kernel.name, st)
+			}
+		}
 	}
 }
 

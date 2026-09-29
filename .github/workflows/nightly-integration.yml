@@ -12,7 +12,12 @@ jobs:
   integration-full:
     name: Full Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # ./... (20m budget) plus four scheduler batches (20m each); 30m was too short.
+    timeout-minutes: 75
+    env:
+      # Container-backed tests are opt-in; without this every integration
+      # TestMain failed on "dolt setup failed" (gt-22hdp.39).
+      GT_TEST_DOCKER: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -21,6 +26,11 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+
+      # ICU: cgo builds of gt and bd (setup-bd builds with cgo). tmux: the
+      # integration tier drives a real tmux server.
+      - name: Install ICU4C development headers and tmux
+        run: sudo apt-get update && sudo apt-get install -y libicu-dev tmux
 
       - name: Configure Git
         run: |
@@ -48,8 +58,12 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
-      - name: Build
-        run: go build -v ./cmd/gt
+      # On PATH, as in the CI integration job: tests that shell out to gt
+      # must find this build, not nothing.
+      - name: Build gt
+        run: |
+          make build
+          cp gt "$(go env GOPATH)/bin/"
 
       - name: Run all integration tests
         run: |

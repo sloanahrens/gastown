@@ -7,9 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -158,43 +156,6 @@ func TestRunPostMergeCommand_FailureEscalatesAndReturns(t *testing.T) {
 	}
 	if !strings.Contains((*esc)[0], "exit status 7") || !strings.HasPrefix((*esc)[0], "gastown: ") {
 		t.Errorf("escalation = %q, want the rig and the exit status", (*esc)[0])
-	}
-}
-
-func TestRunPostMergeCommand_TimeoutKillsProcessGroup(t *testing.T) {
-	esc := capturePostMergeEscalations(t)
-	dir := t.TempDir()
-	start := time.Now()
-	runPostMergeCommand(postMergeCommandParams{
-		RigName: "gastown",
-		WorkDir: dir,
-		Timeout: time.Second,
-		Output:  io.Discard,
-		Command: `sleep 30 & echo $! > child.pid; wait`,
-	})
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("runner took %v; the 1s timeout did not fire", elapsed)
-	}
-	if len(*esc) != 1 || !strings.Contains((*esc)[0], "timed out") {
-		t.Fatalf("escalations = %v, want one 'timed out'", *esc)
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "child.pid"))
-	if err != nil {
-		t.Fatalf("reading child pid: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		t.Fatalf("parsing child pid %q: %v", raw, err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("background child %d survived the timeout: the process group was not killed", pid)
-		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 

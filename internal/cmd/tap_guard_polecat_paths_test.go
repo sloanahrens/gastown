@@ -34,6 +34,7 @@ type polecatTestTown struct {
 	worktree string
 	sibling  string
 	repoGit  string
+	hostTmp  string // stands in for the host's /tmp (see hostTempScratchDirs)
 }
 
 func newPolecatTestTown(t *testing.T) polecatTestTown {
@@ -71,6 +72,17 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 		t.Fatalf("creating the temp root: %v", err)
 	}
 	t.Setenv("TMPDIR", filepath.Join(root, "tmp")) // $TMPDIR and /tmp-adjacent rules stay hermetic
+	// The host's /tmp and /var/tmp are scratch space, but on Linux t.TempDir()
+	// is itself under /tmp, which made this whole fixture — its $HOME and its
+	// town — scratch space there and not on macOS. The fixture's host temp dir
+	// is its own directory instead, so the rules are judged the same on both.
+	hostTmp := filepath.Join(root, "hosttmp")
+	if err := os.MkdirAll(hostTmp, 0o755); err != nil {
+		t.Fatalf("creating the host temp dir: %v", err)
+	}
+	origHostTemp := hostTempScratchDirs
+	hostTempScratchDirs = []string{hostTmp}
+	t.Cleanup(func() { hostTempScratchDirs = origHostTemp })
 	t.Setenv("GT_TOWN_ROOT", town)
 	t.Setenv("GT_ROOT", town)
 	t.Setenv("GT_RIG", rig)
@@ -91,6 +103,7 @@ func newPolecatTestTown(t *testing.T) polecatTestTown {
 		worktree: worktree,
 		sibling:  sibling,
 		repoGit:  filepath.Join(rigRoot, ".repo.git"),
+		hostTmp:  hostTmp,
 	}
 }
 
@@ -127,6 +140,39 @@ func TestRunTapGuardPolecatPaths_BlocksLiveHookPayload(t *testing.T) {
 	err := p.run(t, "Edit", fileInput(filepath.Join(p.sibling, "internal.go")))
 	if err == nil {
 		t.Fatalf("expected an Edit inside %s/polecats/%s/ to be blocked, got nil error", p.rig, p.other)
+	}
+}
+
+// TestRunTapGuardPolecatPaths_TownUnderTempDirStillGuarded pins the guard for a
+// town that lives inside a temp directory. The temp dirs are scratch space a
+// polecat may always write to, but a scratch root that contains the town must
+// not exempt the town: it made every sibling worktree, mayor/ and settings/
+// writable. On Linux t.TempDir() is under /tmp, which is how every
+// polecat-paths test failed on the CI runner while passing on macOS, whose
+// TMPDIR is /var/folders (gt-22hdp.39).
+func TestRunTapGuardPolecatPaths_TownUnderTempDirStillGuarded(t *testing.T) {
+	p := newPolecatTestTown(t)
+	t.Setenv("TMPDIR", p.root) // the town's parent is the session's temp dir
+
+	for _, target := range []string{
+		filepath.Join(p.sibling, "internal.go"),
+		filepath.Join(p.town, "mayor", "state.json"),
+		filepath.Join(p.town, "settings", "config.json"),
+	} {
+		if err := p.run(t, "Edit", fileInput(target)); err == nil {
+			t.Errorf("Edit of %s allowed: a temp dir that contains the town exempted the whole town", target)
+		}
+	}
+	if err := p.run(t, "Bash", commandInput("cp x "+filepath.Join(p.sibling, "y.go"))); err == nil {
+		t.Errorf("cp into the sibling worktree allowed: a temp dir that contains the town exempted the whole town")
+	}
+	// The temp dir outside the town is still scratch space.
+	if err := p.run(t, "Edit", fileInput(filepath.Join(p.root, "tmp", "scratch.txt"))); err != nil {
+		t.Errorf("Edit in the temp dir outside the town blocked: %v", err)
+	}
+	// And the worktree is still the polecat's own.
+	if err := p.run(t, "Edit", fileInput(filepath.Join(p.worktree, "main.go"))); err != nil {
+		t.Errorf("Edit in the own worktree blocked: %v", err)
 	}
 }
 
@@ -189,7 +235,7 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 		{"another agent's workspace", "Write", fileInput(filepath.Join(p.rigRoot, "crew", "alice", "x.go")), true},
 		{"shared install dir, outside the town tree", "Write", fileInput(filepath.Join(p.root, ".local", "bin", "bd")), true},
 		{"shared install dir via tilde", "Write", fileInput("~/.local/bin/bd"), true},
-		{"tmp", "Write", fileInput("/tmp/polecat-paths-probe/x.go"), false},
+		{"tmp", "Write", fileInput(filepath.Join(p.hostTmp, "polecat-paths-probe", "x.go")), false},
 		{"session scratchpad", "Write", fileInput(filepath.Join(p.town, ".claude-town", "projects", "p", "notes.md")), false},
 		{"notebook in sibling worktree", "NotebookEdit", notebookInput(filepath.Join(p.sibling, "nb.ipynb")), true},
 		{"notebook in own worktree", "NotebookEdit", notebookInput(filepath.Join(p.worktree, "nb.ipynb")), false},
