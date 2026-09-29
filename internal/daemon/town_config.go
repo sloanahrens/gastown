@@ -7,6 +7,15 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
+func init() {
+	// config.SaveDaemonPatrolConfig must refuse the same daemon.json the
+	// startup gate refuses, which needs this package's type.
+	config.RegisterDaemonPatrolConfigCheck(func(path string) error {
+		var cfg DaemonPatrolConfig
+		return config.CheckJSONFileParses(path, &cfg)
+	})
+}
+
 // CheckTownConfig reports every town config file that exists but does not
 // decode: mayor/daemon.json into DaemonPatrolConfig and settings/config.json
 // into config.TownSettings. An absent file passes (first run creates it).

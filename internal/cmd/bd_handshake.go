@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"sync"
@@ -129,12 +130,12 @@ func requireBDHandshake() error {
 var townConfigCheck = defaultTownConfigCheck
 
 // defaultTownConfigCheck checks the config files of the town the working
-// directory (or GT_TOWN_ROOT / GT_ROOT) belongs to. Outside a town there is
-// nothing to check; the handshake refuses that case on its own.
+// directory (or GT_TOWN_ROOT / GT_ROOT) belongs to. Outside a town it
+// refuses: files it cannot find are not files that parse.
 func defaultTownConfigCheck() error {
 	dir := detectTownRootFromCwd()
 	if dir == "" {
-		return nil
+		return errors.New("not in a Gas Town workspace, so the town config files cannot be checked")
 	}
 	return daemon.CheckTownConfig(dir)
 }

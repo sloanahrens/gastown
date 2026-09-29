@@ -105,8 +105,10 @@ func TestCheckTownConfig(t *testing.T) {
 
 // TestNewRefusesAnUnparseableTownConfig: the daemon does not start on a
 // config it cannot read, and refuses before touching tmux or the file.
+//
+//testpolicy:allow parallel — New reaches os.Setenv on its success path, so
+// this test must not run beside a parallel test that reads the environment.
 func TestNewRefusesAnUnparseableTownConfig(t *testing.T) {
-	t.Parallel()
 	town := t.TempDir()
 	path := writeTownFile(t, town, "mayor/daemon.json", brokenDaemonJSON)
 	d, err := New(&Config{TownRoot: town, LogFile: filepath.Join(town, "daemon", "daemon.log"), PidFile: filepath.Join(town, "daemon", "daemon.pid")})
@@ -114,4 +116,32 @@ func TestNewRefusesAnUnparseableTownConfig(t *testing.T) {
 		t.Fatalf("New = %v, %v; want a refusal", d, err)
 	}
 	requireUnchanged(t, path, brokenDaemonJSON)
+}
+
+// TestCheckTownConfigRefusesAnUnreadableFile: a config path that exists but
+// cannot be read is a refusal too, not a pass.
+func TestCheckTownConfigRefusesAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "settings", "config.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTownConfig(town); err == nil {
+		t.Fatal("CheckTownConfig with an unreadable settings/config.json = nil, want an error")
+	}
+}
+
+// TestConfigSaveDaemonPatrolConfigTypeChecksAgainstTheDaemonType: the config
+// package's writer must refuse a daemon.json the daemon cannot decode (a field
+// of the wrong type), not only a syntax error, so no writer replaces a file
+// the gate refuses.
+func TestConfigSaveDaemonPatrolConfigTypeChecksAgainstTheDaemonType(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	const typeBroken = `{"patrols": {"witness": {"enabled": "no"}}}`
+	path := writeTownFile(t, town, "mayor/daemon.json", typeBroken)
+	if err := config.SaveDaemonPatrolConfig(path, config.NewDaemonPatrolConfig()); !errors.Is(err, config.ErrUnparseable) {
+		t.Fatalf("config.SaveDaemonPatrolConfig over a type-broken daemon.json = %v, want ErrUnparseable", err)
+	}
+	requireUnchanged(t, path, typeBroken)
 }

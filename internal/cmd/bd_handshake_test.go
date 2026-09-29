@@ -265,3 +265,14 @@ func TestSessionGateRefusesSpawnOnARealBrokenSettingsFile(t *testing.T) {
 		t.Fatalf("bdgate.Require() = %v, want a refusal naming settings/config.json and the offset", err)
 	}
 }
+
+// TestDefaultTownConfigCheckRefusesOutsideATown: with no town root there are
+// no config files to check, and "nothing to check" must not read as a pass.
+func TestDefaultTownConfigCheckRefusesOutsideATown(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
+	if err := defaultTownConfigCheck(); err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+		t.Fatalf("defaultTownConfigCheck outside a town = %v, want a refusal", err)
+	}
+}

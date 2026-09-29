@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -342,6 +343,13 @@ func (d *Daemon) identityToSession(identity string) string {
 // restartSession starts a new session for the given agent.
 // Uses role config if available, falls back to hardcoded defaults.
 func (d *Daemon) restartSession(sessionName, identity string) error {
+	// This builds the session directly rather than through a role manager,
+	// so it asks the startup gate itself: an unparseable town config or a
+	// failed bd handshake refuses the restart (gt-fcxe9.10, gt-7iwy0.1).
+	if err := bdgate.Require(); err != nil {
+		return fmt.Errorf("refusing to restart %s: %w", identity, err)
+	}
+
 	// Get role config for this identity
 	roleConfig, parsed, err := d.getRoleConfigForIdentity(identity)
 	if err != nil {

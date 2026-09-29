@@ -642,10 +642,7 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 	if err := validateDaemonPatrolConfig(config); err != nil {
 		return err
 	}
-	// Syntax only: this package's DaemonPatrolConfig is not the daemon's type
-	// (G3-19), so a field-type check here could refuse a file the daemon reads.
-	var anyJSON any
-	if err := refuseToReplaceUnparseable(path, &anyJSON); err != nil {
+	if err := checkExistingDaemonPatrolConfig(path); err != nil {
 		return err
 	}
 

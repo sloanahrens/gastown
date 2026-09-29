@@ -103,3 +103,29 @@ func refuseToReplaceUnparseable(path string, v any) error {
 	}
 	return nil
 }
+
+// daemonPatrolConfigCheck decodes an existing daemon.json into the daemon's
+// own type, which this package cannot import (G3-19). The daemon package
+// installs it at init, so every gt binary checks a daemon.json the same way
+// the startup gate does; without it only syntax is checked.
+var daemonPatrolConfigCheck func(path string) error
+
+// RegisterDaemonPatrolConfigCheck installs the daemon.json decode check that
+// SaveDaemonPatrolConfig runs before replacing the file.
+func RegisterDaemonPatrolConfigCheck(fn func(path string) error) {
+	daemonPatrolConfigCheck = fn
+}
+
+func checkExistingDaemonPatrolConfig(path string) error {
+	if daemonPatrolConfigCheck != nil {
+		if err := daemonPatrolConfigCheck(path); err != nil {
+			if errors.Is(err, ErrUnparseable) {
+				return err
+			}
+			return fmt.Errorf("checking %s before writing: %w", path, err)
+		}
+		return nil
+	}
+	var anyJSON any
+	return refuseToReplaceUnparseable(path, &anyJSON)
+}

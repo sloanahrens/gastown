@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -511,6 +512,12 @@ func runDeaconStart(cmd *cobra.Command, args []string) error {
 
 // startDeaconSession creates and initializes the Deacon tmux session.
 func startDeaconSession(t *tmux.Tmux, sessionName, agentOverride string) error {
+	// Starts the session directly, not through deacon.Manager, so it asks
+	// the startup gate itself (gt-fcxe9.10, gt-7iwy0.1).
+	if err := bdgate.Require(); err != nil {
+		return err
+	}
+
 	// Find workspace root
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
