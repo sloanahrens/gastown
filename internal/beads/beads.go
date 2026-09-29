@@ -3232,12 +3232,41 @@ func (b *Beads) closeWithOptions(opts closeOptions, ids ...string) error {
 			targets[targetDir] = target
 		}
 		if len(groups) > 1 || groups[currentDir] == nil {
+			// Each database closes its own group. A refused issue in one
+			// group does not stop the others; the partial results merge
+			// into one *PartialCloseError.
+			var partial *PartialCloseError
 			for targetDir, groupIDs := range groups {
-				if err := targets[targetDir].closeInCurrentDB(opts, groupIDs...); err != nil {
-					return err
+				err := targets[targetDir].closeInCurrentDB(opts, groupIDs...)
+				var pe *PartialCloseError
+				switch {
+				case err == nil:
+					if partial == nil {
+						partial = &PartialCloseError{}
+					}
+					partial.Closed = append(partial.Closed, groupIDs...)
+				case errors.As(err, &pe):
+					if partial == nil {
+						partial = &PartialCloseError{}
+					}
+					partial.Closed = append(partial.Closed, pe.Closed...)
+					partial.NotClosed = append(partial.NotClosed, pe.NotClosed...)
+				default:
+					if partial == nil {
+						return err
+					}
+					// Groups before this one ran: report what they
+					// closed, and every other issue as not closed.
+					if len(partial.NotClosed) > 0 {
+						err = errors.Join(ErrCloseRefused, err)
+					}
+					return notClosedExcept(ids, partial.Closed, err)
 				}
 			}
-			return nil
+			if partial == nil || len(partial.NotClosed) == 0 {
+				return nil
+			}
+			return partial
 		}
 	}
 
@@ -3267,8 +3296,52 @@ func (b *Beads) closeInCurrentDB(opts closeOptions, ids ...string) error {
 		args = append(args, "--session="+sessionID)
 	}
 
-	_, err := b.run(args...)
-	return err
+	if _, err := b.run(args...); err != nil {
+		return err
+	}
+	if opts.force || len(ids) < 2 {
+		// bd fails a single refused issue, and --force refuses none.
+		return nil
+	}
+	return b.verifyBatchClosed(ids)
+}
+
+// notClosedExcept is the *PartialCloseError for a batch of ids of which
+// only closed closed, the rest for cause.
+func notClosedExcept(ids, closed []string, cause error) *PartialCloseError {
+	done := make(map[string]bool, len(closed))
+	for _, id := range closed {
+		done[id] = true
+	}
+	pe := &PartialCloseError{Closed: closed, Err: cause}
+	for _, id := range ids {
+		if !done[id] {
+			pe.NotClosed = append(pe.NotClosed, id)
+		}
+	}
+	return pe
+}
+
+// verifyBatchClosed re-reads the issues of a multi-issue close bd reported
+// as done. bd 1.2 skips a refused issue in a batch and still exits 0, so the
+// issues still open are the refused ones.
+func (b *Beads) verifyBatchClosed(ids []string) error {
+	got, err := b.showMultipleLocal(ids)
+	if err != nil {
+		return fmt.Errorf("re-reading %d closed issue(s): %w", len(ids), err)
+	}
+	pe := &PartialCloseError{}
+	for _, id := range ids {
+		if is, ok := got[id]; ok && is.Status == string(StatusClosed) {
+			pe.Closed = append(pe.Closed, id)
+		} else {
+			pe.NotClosed = append(pe.NotClosed, id)
+		}
+	}
+	if len(pe.NotClosed) == 0 {
+		return nil
+	}
+	return pe
 }
 
 // Release moves an in_progress issue back to open status.

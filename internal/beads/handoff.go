@@ -160,12 +160,19 @@ func (b *Beads) ClearMail(reason string) (*ClearMailResult, error) {
 		}
 	}
 
-	// Close non-pinned messages in batch
+	// Close non-pinned messages in batch. When bd refuses some and closes
+	// the rest (a *PartialCloseError), count only the closed ones and go on
+	// to the pinned messages; any other failure closed nothing.
+	var closeErr error
 	if len(toClose) > 0 {
-		if err := b.CloseWithReason(reason, toClose...); err != nil {
-			return nil, fmt.Errorf("closing messages: %w", err)
+		err := b.CloseWithReason(reason, toClose...)
+		result.Closed = len(ClosedIDs(toClose, err))
+		if err != nil {
+			if !errors.Is(err, ErrCloseRefused) {
+				return nil, fmt.Errorf("closing messages: %w", err)
+			}
+			closeErr = fmt.Errorf("closing messages: %w", err)
 		}
-		result.Closed = len(toClose)
 	}
 
 	// Clear pinned messages — continue on error so partial progress isn't lost
@@ -180,11 +187,11 @@ func (b *Beads) ClearMail(reason string) (*ClearMailResult, error) {
 	}
 
 	if len(clearErrs) > 0 {
-		return result, fmt.Errorf("partial failure clearing %d/%d pinned messages: %w",
-			len(clearErrs), len(toClear), errors.Join(clearErrs...))
+		return result, errors.Join(closeErr, fmt.Errorf("partial failure clearing %d/%d pinned messages: %w",
+			len(clearErrs), len(toClear), errors.Join(clearErrs...)))
 	}
 
-	return result, nil
+	return result, closeErr
 }
 
 // CloseStaleHookedMailBeads closes any gt:message beads in status=hooked assigned

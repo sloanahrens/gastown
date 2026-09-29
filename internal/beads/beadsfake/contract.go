@@ -657,15 +657,17 @@ func contractRelease(t *testing.T, s *scope) {
 	}
 }
 
-// contractBatchCloseRefusal pins what bd does with a batch close in which
-// some issues are refused: it closes the rest and reports success. Only a
-// batch in which every issue is refused fails. So a caller cannot learn from
-// a nil error that every issue it named closed.
+// contractBatchCloseRefusal pins what a batch close in which some issues are
+// refused returns. bd 1.2 closes the rest and exits 0; the Client re-reads
+// the batch and reports the issues left open as a *beads.PartialCloseError
+// wrapping beads.ErrCloseRefused, so a caller never counts a refused issue
+// as closed. A batch in which every issue is refused fails as bd fails it.
 func contractBatchCloseRefusal(t *testing.T, s *scope) {
 	first := s.mustCreate(t, beads.CreateOptions{Title: "closable", Priority: -1})
 	parent := s.mustCreate(t, beads.CreateOptions{Title: "parent", Priority: -1})
 	s.mustCreate(t, beads.CreateOptions{Title: "open child", Parent: parent.ID, Priority: -1})
-	mustDo(t, "a batch close whose later issue is refused", s.CloseWithReason("batch", first.ID, parent.ID))
+	partial(t, "a batch close whose later issue is refused",
+		s.CloseWithReason("batch", first.ID, parent.ID), []string{first.ID}, []string{parent.ID})
 	if got := s.mustShow(t, first.ID); got.Status != "closed" || got.CloseReason != "batch" {
 		t.Errorf("the closable issue: status %q reason %q, want closed \"batch\"", got.Status, got.CloseReason)
 	}
@@ -676,16 +678,55 @@ func contractBatchCloseRefusal(t *testing.T, s *scope) {
 	other := s.mustCreate(t, beads.CreateOptions{Title: "parent 2", Priority: -1})
 	s.mustCreate(t, beads.CreateOptions{Title: "open child 2", Parent: other.ID, Priority: -1})
 	last := s.mustCreate(t, beads.CreateOptions{Title: "closable last", Priority: -1})
-	mustDo(t, "a batch close whose first issue is refused", s.CloseWithReason("batch", other.ID, last.ID))
+	partial(t, "a batch close whose first issue is refused",
+		s.Close(other.ID, last.ID), []string{last.ID}, []string{other.ID})
 	if st := s.mustShow(t, last.ID).Status; st != "closed" {
 		t.Errorf("the issue after the refused one: status %q, want closed", st)
 	}
+
+	// The assignee and blocker refusals are skipped the same way, and an
+	// issue the batch finds already closed counts as closed.
+	theirs := s.mustCreate(t, beads.CreateOptions{Title: "alice's", Priority: -1})
+	mustDo(t, "assign", s.Update(theirs.ID, beads.UpdateOptions{Assignee: ptr(s.who("alice"))}))
+	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocker", Priority: -1})
+	blocked := s.mustCreate(t, beads.CreateOptions{Title: "blocked", Priority: -1})
+	mustDo(t, "AddDependency", s.AddDependency(blocked.ID, blocker.ID))
+	mine := s.mustCreate(t, beads.CreateOptions{Title: "mine", Priority: -1})
+	partial(t, "a batch close with an assignee and a blocker refusal",
+		s.Close(theirs.ID, first.ID, blocked.ID, mine.ID), []string{first.ID, mine.ID}, []string{theirs.ID, blocked.ID})
 
 	refused(t, "a batch close in which every issue is refused", s.CloseWithReason("batch", other.ID, parent.ID))
 	for _, id := range []string{other.ID, parent.ID} {
 		if st := s.mustShow(t, id).Status; st != "open" {
 			t.Errorf("%s status %q after an all-refused batch, want open", id, st)
 		}
+	}
+
+	// Forced, nothing is refused.
+	mustDo(t, "a forced batch close", s.ForceCloseWithReason("forced", other.ID, theirs.ID))
+}
+
+// partial checks that err reports a partial close of exactly closed and
+// notClosed.
+func partial(t *testing.T, what string, err error, closed, notClosed []string) {
+	t.Helper()
+	var pe *beads.PartialCloseError
+	if !errors.As(err, &pe) {
+		t.Errorf("%s = %v, want a *beads.PartialCloseError", what, err)
+		return
+	}
+	if !errors.Is(err, beads.ErrCloseRefused) || errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("%s = %v, want it to wrap ErrCloseRefused and not ErrNotFound", what, err)
+	}
+	if g, w := sorted(pe.Closed...), sorted(closed...); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: Closed = %v, want %v", what, g, w)
+	}
+	if g, w := sorted(pe.NotClosed...), sorted(notClosed...); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: NotClosed = %v, want %v", what, g, w)
+	}
+	all := append(append([]string{}, closed...), notClosed...)
+	if g, w := sorted(beads.ClosedIDs(all, err)...), sorted(closed...); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: ClosedIDs = %v, want %v", what, g, w)
 	}
 }
 
