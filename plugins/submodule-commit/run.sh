@@ -35,7 +35,7 @@ while IFS= read -r REPO_PATH; do
   RESOLVED+=("$REPO_PATH")
   [ ! -f "$REPO_PATH/.gitmodules" ] && continue
   RIG_NAME=$(basename "$REPO_PATH")
-  PLUGIN_ENABLED=$(gt rig show "$RIG_NAME" --json 2>/dev/null \
+  PLUGIN_ENABLED=$(gt rig settings show "$RIG_NAME" 2>/dev/null \
     | jq -r '.plugins["submodule-commit"].enabled // false' 2>/dev/null || echo "false")
   if [ "$PLUGIN_ENABLED" = "true" ]; then
     ENABLED_RIGS+=("$REPO_PATH")
@@ -74,7 +74,7 @@ for REPO_PATH in "${ENABLED_RIGS[@]}"; do
   RIG_NAME=$(basename "$REPO_PATH")
 
   # Get plugin config
-  RIG_CONFIG=$(gt rig show "$RIG_NAME" --json 2>/dev/null \
+  RIG_CONFIG=$(gt rig settings show "$RIG_NAME" 2>/dev/null \
     | jq -r '.plugins["submodule-commit"] // {}' 2>/dev/null || echo "{}")
   PUSH_ENABLED=$(echo "$RIG_CONFIG" | jq -r '.push_enabled // false')
   ALLOWLIST=$(echo "$RIG_CONFIG" | jq -r '.allowlist // [] | .[]' 2>/dev/null || true)
