@@ -432,31 +432,39 @@ Bash call with
 keeps it running across your turns, and notifies you when it exits:
 
 ```bash
-gt mq batch run <rig> --json > /tmp/<rig>-batch.json 2> /tmp/<rig>-batch.err
-echo "BATCH_EXIT=$?" >> /tmp/<rig>-batch.err
+GATE_DIR="${TMPDIR:-/tmp}/gt-refinery-$(id -u)"; mkdir -p -m 700 "$GATE_DIR"
+gt mq batch run <rig> --json > "$GATE_DIR/<rig>-batch.json" 2> "$GATE_DIR/<rig>-batch.err"
+echo "BATCH_EXIT=$?" >> "$GATE_DIR/<rig>-batch.err"
 ```
 
-Fixed paths, so nothing has to be remembered across calls. Wait for the
+Fixed paths, so nothing has to be remembered across calls. They sit under
+your own uid's mode-0700 directory, never bare in `/tmp`: the result file
+decides what gets cleaned up as landed, so a predictable name in a
+world-writable directory is one another local user can pre-create or symlink.
+Each fenced block is its own shell, so the later calls spell the directory
+out as `"${TMPDIR:-/tmp}/gt-refinery-$(id -u)"` rather than expecting
+`$GATE_DIR` to survive. Wait for the
 completion notification; to see progress in the meantime, a short separate
-call `tail -n 3 /tmp/<rig>-batch.json` shows the `[Batch]` / `[Bisect]`
+call `tail -n 3 "${TMPDIR:-/tmp}/gt-refinery-$(id -u)/<rig>-batch.json"` shows the `[Batch]` / `[Bisect]`
 lines as they land. While it runs do nothing else to the rig checkout or
 the queue — the batch holds the gate slot and owns {{target_branch}} in the
 rig checkout.
 
-When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
+When the notification arrives, `tail -n 1 "${TMPDIR:-/tmp}/gt-refinery-$(id -u)/<rig>-batch.err"` decides:
 
 - `BATCH_EXIT=0` or `BATCH_EXIT=<non-zero>` — the run ended. The .json
   file holds the `[Batch]` / `[Bisect]` progress lines FOLLOWED BY the JSON
   result when one was produced (both go to stdout), so extract the trailing
   object rather than parsing the whole file:
   ```bash
-  sed -n '/^{/,$p' /tmp/<rig>-batch.json > /tmp/<rig>-batch-result.json
-  test -s /tmp/<rig>-batch-result.json && echo HAS_JSON || echo NO_JSON
+  GATE_DIR="${TMPDIR:-/tmp}/gt-refinery-$(id -u)"
+  sed -n '/^{/,$p' "$GATE_DIR/<rig>-batch.json" > "$GATE_DIR/<rig>-batch-result.json"
+  test -s "$GATE_DIR/<rig>-batch-result.json" && echo HAS_JSON || echo NO_JSON
   ```
   `NO_JSON` with exit 0 is a normal not-batched exit (below
   `merge_queue.batch_min_count`, no eligible MRs, merge_strategy=pr): nothing
   was landed; go to Step 6. `HAS_JSON`: read `.merged[]`, `.culprits[]`,
-  `.conflicts[]` and `.error` from `/tmp/<rig>-batch-result.json`, then
+  `.conflicts[]` and `.error` from `"${TMPDIR:-/tmp}/gt-refinery-$(id -u)/<rig>-batch-result.json"`, then
   answer two questions in this order, whatever the exit code:
 
   1. Did the run fail before or beside the landing? A non-zero exit whose
@@ -474,7 +482,7 @@ When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
      behind (`.error` records only the first such failure, and a batch that
      shrank to one member reports it with an empty `.merged[]`). Find every
      one with
-     `grep -E 'Post-merge (proof|cleanup) failed for' /tmp/<rig>-batch.json`
+     `grep -E 'Post-merge (proof|cleanup) failed for' "${TMPDIR:-/tmp}/gt-refinery-$(id -u)/<rig>-batch.json"`
      and run the verified cleanup for each, never a manual close:
      `gt mq post-merge <rig> <mr-id> --skip-branch-delete --no-cycle` re-runs
      the post-merge proof and closes MR and source issue together (the tool
@@ -486,7 +494,7 @@ When the notification arrives, `tail -n 1 /tmp/<rig>-batch.err` decides:
      itself; do not send it a second time.
   `NO_JSON` with a non-zero exit is the same kind of infra failure earlier
   in the run (candidate listing, gate-slot wait): nothing was landed;
-  escalate it the same way (tail of `/tmp/<rig>-batch.err`, mail the mayor)
+  escalate it the same way (tail of `"${TMPDIR:-/tmp}/gt-refinery-$(id -u)/<rig>-batch.err"`, mail the mayor)
   and go to Step 6.
 - no `BATCH_EXIT=` line at all — the process died abnormally (killed,
   crashed, session lost). Do NOT wait. The container-gate slot needs
@@ -694,15 +702,15 @@ description = """
 
 If run_tests is "false": STOP HERE. Skip everything below and proceed to the next step.
 
-**0. Gate load check (mayor standing rule):** Before starting — or retrying —
-a full-suite gate, check 1-minute load average:
-```bash
-sysctl -n vm.loadavg 2>/dev/null || uptime   # macOS vs Linux fallback
-```
-Do NOT start or retry a full-suite gate while 1-min loadavg > 60. If a gate
-is killed or times out under load, the result is INCONCLUSIVE — never count
-it as a failure against the branch. Wait for load to drop and retry, or
-escalate if it stays high.
+**0. Take the gate slot straight away (gt-22hdp.34):** Do not wait for host
+load to drop before starting — or retrying — a full-suite gate; go straight to
+the checks and the wrapped test run below. `gt slot run --role
+{{rig}}/refinery` takes a gate-reserved slot, and while it holds one, NEW crew
+and polecat suites wait for it to finish. It never preempts suites already
+running, so the first gate after a busy spell may share the machine with them.
+If a gate is killed or times out under load, the result is INCONCLUSIVE —
+never count it as a failure against the branch. Retry it; escalate to the
+mayor if it keeps dying the same way.
 
 **1. Run quality checks (skip any that are not configured):**
 
@@ -764,8 +772,13 @@ to a file so a red run stays inspectable. No pipeline: the exit code must
 come straight from the gate, and PIPESTATUS does not exist in zsh:
 
 ```bash
-gt slot run --role {{rig}}/refinery -- {{test_command}} > /tmp/<mr-bead-id>-gate.log 2>&1; echo "GATE_EXIT=$?"; tail -40 /tmp/<mr-bead-id>-gate.log
+GATE_DIR="${TMPDIR:-/tmp}/gt-refinery-$(id -u)"; mkdir -p -m 700 "$GATE_DIR"
+gt slot run --role {{rig}}/refinery -- {{test_command}} > "$GATE_DIR/<mr-bead-id>-gate.log" 2>&1; echo "GATE_EXIT=$?"; tail -40 "$GATE_DIR/<mr-bead-id>-gate.log"
 ```
+
+The log goes under your own uid's mode-0700 directory, never under a
+predictable name directly in `/tmp`, for the same reason as the review JSON
+below.
 
 Never run the gate in the background and sleep-poll it: the call returns
 the instant the suite exits, while a `sleep 290` poll loop leaves the
