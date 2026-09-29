@@ -195,6 +195,19 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	})
 }
 
+// amendPolecatStopCommitDate re-dates repo's HEAD commit, author and
+// committer, to when.
+func amendPolecatStopCommitDate(t *testing.T, repo string, when time.Time) {
+	t.Helper()
+	date := when.Format(time.RFC3339)
+	cmd := exec.Command("git", "commit", "--amend", "--no-edit", "--date", date)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+date)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit --amend: %v\n%s", err, out)
+	}
+}
+
 // TestPolecatStopCommittedWithinGrace guards the second turn-boundary signal
 // for gt-couv: a commit that just landed means the polecat is very likely
 // still mid-formula (about to build/lint/test), while an old commit carries
@@ -203,6 +216,10 @@ func TestPolecatStopCommittedWithinGrace(t *testing.T) {
 	t.Parallel()
 	t.Run("fresh commit is within grace", func(t *testing.T) {
 		repo := initPolecatStopTestRepo(t)
+		// The repo is a copy of a template built once per test binary, so
+		// its commit is as old as the template. Re-date it to now: this case
+		// is about a commit that just landed.
+		amendPolecatStopCommitDate(t, repo, time.Now())
 
 		recent, err := polecatStopCommittedWithinGrace(repo)
 		if err != nil {
@@ -215,13 +232,7 @@ func TestPolecatStopCommittedWithinGrace(t *testing.T) {
 
 	t.Run("old commit is outside grace", func(t *testing.T) {
 		repo := initPolecatStopTestRepo(t)
-		oldDate := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-		cmd := exec.Command("git", "commit", "--amend", "--no-edit", "--date", oldDate)
-		cmd.Dir = repo
-		cmd.Env = append(os.Environ(), "GIT_COMMITTER_DATE="+oldDate)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git commit --amend: %v\n%s", err, out)
-		}
+		amendPolecatStopCommitDate(t, repo, time.Now().Add(-10*time.Minute))
 
 		recent, err := polecatStopCommittedWithinGrace(repo)
 		if err != nil {
