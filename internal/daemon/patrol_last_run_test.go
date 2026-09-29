@@ -18,6 +18,7 @@ import (
 // this package calls to decide due-ness, so this test walks a restart
 // timeline against it directly rather than duplicating the walk per patrol.
 func TestEvaluatePatrolDueFiresAcrossRestarts(t *testing.T) {
+	t.Parallel()
 	const interval = 15 * time.Minute
 	// Restart cadence shorter than the interval — the exact shape from the
 	// bug report (daemon restarts every ~13.5m against a 15m patrol).
@@ -64,6 +65,7 @@ func TestEvaluatePatrolDueFiresAcrossRestarts(t *testing.T) {
 // file must not be read as "not due" — a monitor that goes silent on broken
 // state is the exact failure gt-ima2/gt-gxpwc describe.
 func TestEvaluatePatrolDueRunsWhenLastRunStateUnreadable(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	path := patrolLastRunPath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -85,6 +87,7 @@ func TestEvaluatePatrolDueRunsWhenLastRunStateUnreadable(t *testing.T) {
 // TestEvaluatePatrolDueSkipsWhenNotDue covers the other half: inside the
 // interval, the patrol must stay down rather than firing on every check.
 func TestEvaluatePatrolDueSkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	if err := savePatrolLastRun(townRoot, "checkpoint_dog", now.Add(-5*time.Minute)); err != nil {
@@ -103,6 +106,7 @@ func TestEvaluatePatrolDueSkipsWhenNotDue(t *testing.T) {
 // TestShortPatrolCheckTick pins the min(5m, interval/4) relationship and its
 // floor/ceiling clamps.
 func TestShortPatrolCheckTick(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		interval time.Duration
 		want     time.Duration
@@ -130,6 +134,7 @@ func TestShortPatrolCheckTick(t *testing.T) {
 // instead of 8. This walks that identical timeline at shortPatrolCheckTick's
 // cadence instead of the bare interval and asserts the patrol keeps pace.
 func TestShortPatrolCheckTickAvoidsSteadyStateHalfRate(t *testing.T) {
+	t.Parallel()
 	const interval = 15 * time.Minute
 	const cycleDuration = 2 * time.Minute
 	const walked = 2 * time.Hour
@@ -172,6 +177,7 @@ func TestShortPatrolCheckTickAvoidsSteadyStateHalfRate(t *testing.T) {
 // refinement: a completion this process recorded but failed to persist must
 // not be repeated by the next check in the same process.
 func TestEvaluatePatrolDueUsesInMemoryWhenNewer(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	if err := savePatrolLastRun(townRoot, "main_branch_test", now.Add(-2*time.Hour)); err != nil {

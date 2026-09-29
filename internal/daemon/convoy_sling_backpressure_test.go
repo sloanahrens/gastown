@@ -72,6 +72,7 @@ func newBackpressureLogger() (*[]string, func(string, ...interface{})) {
 // deferral and leaves the bead exactly as it found it — no failure line, no
 // status write, no cleanup.
 func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -81,12 +82,12 @@ func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
 		t.Fatalf("write refuse flag: %v", err)
 	}
 	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, refuseFlag)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		return nil, fmt.Errorf("no git repo under %s", rigRoot)
-	})
 
 	logged, logger := newBackpressureLogger()
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("no git repo under %s", rigRoot)
+	}
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -141,6 +142,7 @@ func TestFeedFirstReady_DefersOnQueueBackpressure(t *testing.T) {
 // contract: deferring must not strand the bead. With the queue drained the
 // next scan feeds the same bead, so deferral costs a tick, not the work.
 func TestFeedFirstReady_ReoffersDeferredBeadNextTick(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -150,12 +152,12 @@ func TestFeedFirstReady_ReoffersDeferredBeadNextTick(t *testing.T) {
 		t.Fatalf("write refuse flag: %v", err)
 	}
 	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, refuseFlag)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		return nil, fmt.Errorf("no git repo under %s", rigRoot)
-	})
 
 	logged, logger := newBackpressureLogger()
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("no git repo under %s", rigRoot)
+	}
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -308,6 +310,7 @@ func TestSlingDeferralReason(t *testing.T) {
 // work survives is deferred by the feeder, never logged as a failed sling, and
 // nothing but the sling ran against it.
 func TestFeedFirstReady_DefersOnSurvivingWorkRefusal(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -316,12 +319,12 @@ func TestFeedFirstReady_DefersOnSurvivingWorkRefusal(t *testing.T) {
 		t.Fatalf("write refuse flag: %v", err)
 	}
 	townRoot, gtPath, slingLogPath := refusingFeedRig(t, refuseFlag, survivingWorkRefusalStderr)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		return nil, fmt.Errorf("no git repo under %s", rigRoot)
-	})
 
 	logged, logger := newBackpressureLogger()
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("no git repo under %s", rigRoot)
+	}
 	m.feedFirstReady(strandedConvoyInfo{
 		ID:          "hq-cv1",
 		Title:       "Preserved work",

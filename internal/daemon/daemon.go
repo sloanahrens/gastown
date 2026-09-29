@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/jonboulle/clockwork"
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -58,7 +59,7 @@ import (
 type Daemon struct {
 	config        *Config
 	patrolConfig  *DaemonPatrolConfig
-	tmux          *tmux.Tmux
+	tmux          sessionTmux
 	logger        *log.Logger
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -102,6 +103,22 @@ type Daemon struct {
 	// daemon (see notify()).
 	notifier notify.Notifier
 
+	// clock times the daemon's own waits (see clk()); nil is the real clock.
+	clock clockwork.Clock
+
+	// startDeaconFn replaces deacon.Manager's Start in tests, which drive the
+	// restart paths against a fake tmux that deacon.Manager cannot see. Nil
+	// uses the manager.
+	startDeaconFn func() error
+
+	// spawnBootFn replaces boot.Boot's Spawn in tests, for the same reason.
+	// Nil spawns through boot.Boot.
+	spawnBootFn func(b *boot.Boot) error
+
+	// hostLoadFn pins the host-load reading main_branch_test decides on
+	// (see hostLoad); nil measures the real host.
+	hostLoadFn func() hostLoad
+
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
 	// instead of each paying a bd subprocess - which, on a CPU-starved host,
@@ -119,6 +136,10 @@ type Daemon struct {
 	// the failure but has no town to escalate into (gt-4nu3).
 	rigStatusAlert func(key, source, message string)
 	rigStatusClear func(reason string, keys ...string)
+
+	// rigBeadShowFn replaces the bd show behind the rig docked/parked read in
+	// tests; nil runs bd (see showRigBead).
+	rigBeadShowFn func(rigPath, rigBeadID string) (*beads.Issue, error)
 
 	// checkpointRevertAlert raises the escalation for a checkpoint_dog WIP
 	// commit that would revert content already merged to main (gt-2bp8). New
@@ -1895,7 +1916,7 @@ func (d *Daemon) ensureBootRunning() {
 
 	// Spawn Boot in a fresh tmux session
 	d.logger.Println("Spawning Boot for triage...")
-	if err := b.Spawn(""); err != nil {
+	if err := d.spawnBoot(b); err != nil {
 		d.logger.Printf("Error spawning Boot: %v, falling back to direct Deacon check", err)
 		// Fallback: ensure Deacon is running directly
 		d.ensureDeaconRunning()
@@ -2052,9 +2073,7 @@ func (d *Daemon) ensureDeaconRunning() {
 		}
 	}
 
-	mgr := deacon.NewManager(d.config.TownRoot)
-
-	if err := mgr.Start(""); err != nil {
+	if err := d.startDeacon(); err != nil {
 		if err == deacon.ErrAlreadyRunning {
 			// Deacon is running - record success to reset backoff
 			if d.restartTracker != nil {
@@ -2080,6 +2099,24 @@ func (d *Daemon) ensureDeaconRunning() {
 	d.metrics.recordRestart(d.ctx, "deacon")
 	telemetry.RecordDaemonRestart(d.ctx, "deacon")
 	d.logger.Println("Deacon started successfully")
+}
+
+// spawnBoot starts a fresh Boot session (boot.Boot.Spawn replaces any live
+// one), or runs spawnBootFn when a test set one.
+func (d *Daemon) spawnBoot(b *boot.Boot) error {
+	if d.spawnBootFn != nil {
+		return d.spawnBootFn(b)
+	}
+	return b.Spawn("")
+}
+
+// startDeacon starts the Deacon session through deacon.Manager, or through
+// startDeaconFn when a test set one.
+func (d *Daemon) startDeacon() error {
+	if d.startDeaconFn != nil {
+		return d.startDeaconFn()
+	}
+	return deacon.NewManager(d.config.TownRoot).Start("")
 }
 
 // deaconGracePeriod returns the config-driven deacon grace period.
@@ -2324,7 +2361,7 @@ func (d *Daemon) restartStuckDeacon(sessionName, reason string) {
 	}
 
 	// Brief pause for tmux cleanup
-	time.Sleep(2 * time.Second)
+	d.clk().Sleep(2 * time.Second)
 
 	// Respawn via ensureDeaconRunning (which uses deacon.Manager)
 	d.ensureDeaconRunning()
@@ -2952,12 +2989,12 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 // already stale on arrival - a 60s read with a 60s window buys nothing, and
 // every call site in the tick re-pays the budget the memo exists to save.
 func (d *Daemon) rigBeadVerdict(rigName string) (rigBeadEntry, bool) {
-	if entry, ok := d.rigOperational.get(rigName, time.Now()); ok {
+	if entry, ok := d.rigOperational.get(rigName, d.clk().Now()); ok {
 		return entry, entry.failed == ""
 	}
 
 	rigBeadID, verdict, err := d.queryRigBead(rigName)
-	now := time.Now()
+	now := d.clk().Now()
 	if err != nil {
 		// The category is in the line on purpose: "assuming not operational"
 		// alone left a starved-host timeout and a missing identity bead looking
@@ -2994,9 +3031,7 @@ func (d *Daemon) queryRigBead(rigName string) (string, rigBeadVerdict, error) {
 	}
 
 	rigBeadID := fmt.Sprintf("%s-rig-%s", prefix, rigName)
-	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
-	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
-	issue, err := bd.Show(rigBeadID)
+	issue, err := d.showRigBead(rigPath, rigBeadID)
 	if err != nil {
 		return rigBeadID, rigBeadActive, err
 	}
@@ -3010,6 +3045,15 @@ func (d *Daemon) queryRigBead(rigName string) (string, rigBeadVerdict, error) {
 		}
 	}
 	return rigBeadID, rigBeadActive, nil
+}
+
+// showRigBead reads a rig's identity bead with bd show, or through
+// rigBeadShowFn when a test set one.
+func (d *Daemon) showRigBead(rigPath, rigBeadID string) (*beads.Issue, error) {
+	if d.rigBeadShowFn != nil {
+		return d.rigBeadShowFn(rigPath, rigBeadID)
+	}
+	return beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath)).Show(rigBeadID)
 }
 
 // autoRestartDisabled reports whether a resolved auto_restart value turns

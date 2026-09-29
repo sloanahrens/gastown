@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,7 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
-	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // testStubWispTree replaces the wisp-tree read for the duration of the test.
@@ -40,16 +39,42 @@ func testStubCloseStaleWisp(t *testing.T, fn func(townRoot, wispID string, tree 
 func testHandlerDaemon(t *testing.T, townRoot string) *Daemon {
 	t.Helper()
 	return &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: discardLogger,
+		config:   &Config{TownRoot: townRoot},
+		logger:   discardLogger,
+		tmux:     newFakeTmux(newFixedClock()),
+		notifier: notifyfake.New(),
 	}
 }
 
-func requireTmux(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
+// fakeDogSessions is dogSessions over a test daemon's fakeTmux. Sessions are
+// named exactly as dog.SessionManager names them.
+type fakeDogSessions struct {
+	tm      *fakeTmux
+	started []string
+}
+
+func handlerDogSessions(d *Daemon) *fakeDogSessions {
+	return &fakeDogSessions{tm: d.tmux.(*fakeTmux)}
+}
+
+func (f *fakeDogSessions) SessionName(dogName string) string {
+	return dog.NewSessionManager(nil, "", nil).SessionName(dogName)
+}
+
+func (f *fakeDogSessions) IsRunning(dogName string) (bool, error) {
+	return f.tm.HasSession(f.SessionName(dogName))
+}
+
+func (f *fakeDogSessions) Start(dogName string, _ dog.SessionStartOptions) error {
+	f.started = append(f.started, dogName)
+	return f.tm.NewSessionWithCommandAndEnv(f.SessionName(dogName), "", "claude", nil)
+}
+
+func (f *fakeDogSessions) Stop(dogName string, _ bool) error {
+	if running, _ := f.IsRunning(dogName); !running {
+		return dog.ErrSessionNotFound
 	}
+	return f.tm.KillSession(f.SessionName(dogName))
 }
 
 // testSetupDogState creates a dog directory with a .dog.json state file.
@@ -114,15 +139,13 @@ func testSetupWorkingDogState(t *testing.T, townRoot, name, work string, lastAct
 }
 
 func TestDetectStaleWorkingDogs_ClearsStaleWorkers(t *testing.T) {
-	requireTmux(t)
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Dog working for 3 hours with no activity — should be cleared.
 	testSetupWorkingDogState(t, townRoot, "stale", constants.MolConvoyFeed, time.Now().Add(-3*time.Hour))
@@ -142,32 +165,19 @@ func TestDetectStaleWorkingDogs_ClearsStaleWorkers(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_KillsSessionBeforeClearing(t *testing.T) {
-	requireTmux(t)
-
-	oldSocket := tmux.GetDefaultSocket()
-	socketName := constants.TestSocketName("gt-test-dog-stale")
-	tmux.SetDefaultSocket(socketName)
-	// This test runs on its own socket rather than the package one, so it owns
-	// tearing that server down: killing the last session leaves the server (and
-	// its socket file) behind, which tmux.KillServer clears (gt-20di).
-	t.Cleanup(func() { _ = tmux.NewTmuxWithSocket(socketName).KillServer() })
-	t.Cleanup(func() { tmux.SetDefaultSocket(oldSocket) })
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	testSetupWorkingDogState(t, townRoot, "stale", constants.MolConvoyFeed, time.Now().Add(-3*time.Hour))
 
 	sessionName := sm.SessionName("stale")
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession(%q): %v", sessionName, err)
-	}
-	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+	tm := sm.tm
+	tm.addSession(sessionName, "claude", time.Now().Add(-3*time.Hour))
 
 	d.detectStaleWorkingDogs(mgr, sm, &config.DaemonThresholds{})
 
@@ -189,13 +199,13 @@ func TestDetectStaleWorkingDogs_KillsSessionBeforeClearing(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_SkipsRecentWorkers(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Dog working for 30 minutes — should NOT be cleared.
 	testSetupWorkingDogState(t, townRoot, "active", constants.MolConvoyFeed, time.Now().Add(-30*time.Minute))
@@ -215,13 +225,13 @@ func TestDetectStaleWorkingDogs_SkipsRecentWorkers(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_SkipsIdleDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Idle dog with old last_active — should NOT be touched by this function.
 	testSetupDogState(t, townRoot, "idle-old", dog.StateIdle, time.Now().Add(-5*time.Hour))
@@ -238,32 +248,33 @@ func TestDetectStaleWorkingDogs_SkipsIdleDogs(t *testing.T) {
 }
 
 func TestDetectStaleWorkingDogs_EmptyKennel(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Should not panic or error with empty kennel.
 	d.detectStaleWorkingDogs(mgr, sm, &config.DaemonThresholds{})
 }
 
 func TestDetectStaleWorkingDogs_Constants(t *testing.T) {
+	t.Parallel()
 	if staleWorkingTimeout != 2*time.Hour {
 		t.Errorf("staleWorkingTimeout = %v, want 2h", staleWorkingTimeout)
 	}
 }
 
 func TestReapIdleDogs_SkipsWorkingDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Create a working dog with old LastActive — should NOT be reaped.
 	testSetupDogState(t, townRoot, "worker", dog.StateWorking, time.Now().Add(-5*time.Hour))
@@ -276,13 +287,13 @@ func TestReapIdleDogs_SkipsWorkingDogs(t *testing.T) {
 }
 
 func TestReapIdleDogs_SkipsRecentlyActiveDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Create idle dogs that were active recently — should NOT be reaped.
 	for i := 0; i < 6; i++ {
@@ -303,6 +314,7 @@ func TestReapIdleDogs_SkipsRecentlyActiveDogs(t *testing.T) {
 }
 
 func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows: requires tmux")
 	}
@@ -311,8 +323,7 @@ func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Create 6 idle dogs: 4 recent, 2 long-idle.
 	// Pool is 6 > maxDogPoolSize(4), so long-idle dogs should be removed.
@@ -345,13 +356,13 @@ func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
 }
 
 func TestReapIdleDogs_DoesNotRemoveWhenPoolAtMaxSize(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Create exactly maxDogPoolSize idle dogs, all long-idle.
 	// Pool is NOT oversized, so none should be removed.
@@ -372,6 +383,7 @@ func TestReapIdleDogs_DoesNotRemoveWhenPoolAtMaxSize(t *testing.T) {
 }
 
 func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows: requires tmux")
 	}
@@ -380,8 +392,7 @@ func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Create 7 idle dogs, all long-idle.
 	// Should remove 3 to get down to maxDogPoolSize(4).
@@ -402,6 +413,7 @@ func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
 }
 
 func TestReapIdleDogs_MixedStates(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows: requires tmux")
 	}
@@ -410,8 +422,7 @@ func TestReapIdleDogs_MixedStates(t *testing.T) {
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// 2 working + 3 recent idle + 2 long-idle = 7 total.
 	// Pool is oversized (7 > 4). Only long-idle IDLE dogs should be removed.
@@ -449,19 +460,20 @@ func TestReapIdleDogs_MixedStates(t *testing.T) {
 }
 
 func TestReapIdleDogs_EmptyKennel(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	// Should not panic or error with empty kennel.
 	d.reapIdleDogs(mgr, sm, &config.DaemonThresholds{})
 }
 
 func TestReapIdleDogs_Constants(t *testing.T) {
+	t.Parallel()
 	if dogIdleSessionTimeout != 1*time.Hour {
 		t.Errorf("dogIdleSessionTimeout = %v, want 1h", dogIdleSessionTimeout)
 	}
@@ -474,6 +486,7 @@ func TestReapIdleDogs_Constants(t *testing.T) {
 }
 
 func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -490,8 +503,7 @@ func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	d.dispatchPlugins(mgr, sm, rigsConfig)
 
@@ -520,7 +532,7 @@ func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 	}
 
 	mgr := dog.NewManager(townRoot, nil)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got == nil {
@@ -577,7 +589,7 @@ func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
 	})
 
 	mgr := dog.NewManager(townRoot, nil)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got == nil {
@@ -636,7 +648,7 @@ func TestFindDispatchableDog_ClosesStaleWisp(t *testing.T) {
 	})
 
 	mgr := dog.NewManager(townRoot, nil)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got == nil {
@@ -689,7 +701,7 @@ func TestFindDispatchableDog_KeepsProgressedWisp(t *testing.T) {
 	})
 
 	mgr := dog.NewManager(townRoot, nil)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got != nil {
@@ -726,7 +738,7 @@ func TestFindDispatchableDog_NilWhenAllDogsHooked(t *testing.T) {
 	})
 
 	mgr := dog.NewManager(townRoot, nil)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got != nil {
@@ -750,7 +762,7 @@ func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
 	}
 
 	mgr := dog.NewManager(townRoot, nil)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
 	if got == nil {
@@ -762,14 +774,13 @@ func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
 }
 
 func TestCleanupStuckDogs_ClearsDeadSessionWorker(t *testing.T) {
-	requireTmux(t)
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	testSetupWorkingDogState(t, townRoot, "alpha", constants.MolDogReaper, time.Now())
 
@@ -788,32 +799,20 @@ func TestCleanupStuckDogs_ClearsDeadSessionWorker(t *testing.T) {
 }
 
 func TestCleanupStuckDogs_ClearsAgentDeadWorker(t *testing.T) {
-	requireTmux(t)
-
-	oldSocket := tmux.GetDefaultSocket()
-	socketName := constants.TestSocketName("gt-test-dog-cleanup")
-	tmux.SetDefaultSocket(socketName)
-	// Same as TestDetectStaleWorkingDogs_KillsSessionBeforeClearing: this test
-	// owns the server it binds, so it tears it down (gt-20di).
-	t.Cleanup(func() { _ = tmux.NewTmuxWithSocket(socketName).KillServer() })
-	t.Cleanup(func() { tmux.SetDefaultSocket(oldSocket) })
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	tm := tmux.NewTmux()
-	sm := dog.NewSessionManager(tm, townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	testSetupWorkingDogState(t, townRoot, "alpha", constants.MolDogReaper, time.Now())
 
+	// The session is up but its pane is back at a shell: the agent died.
 	sessionName := sm.SessionName("alpha")
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession(%q): %v", sessionName, err)
-	}
-	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
-	time.Sleep(200 * time.Millisecond)
+	tm := sm.tm
+	tm.addSession(sessionName, "", time.Now())
 
 	d.cleanupStuckDogs(mgr, sm)
 
@@ -835,12 +834,13 @@ func TestCleanupStuckDogs_ClearsAgentDeadWorker(t *testing.T) {
 }
 
 func TestCleanupStuckDogs_SkipsIdleDogs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
 	mgr := dog.NewManager(townRoot, rigsConfig)
-	sm := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
+	sm := handlerDogSessions(d)
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 
@@ -1012,6 +1012,7 @@ func TestCloseStaleWisp_RealBodySurfacesCloseFailure(t *testing.T) {
 // plain RFC3339 made every comparison fail, which silently disabled the whole
 // recovery path (fail-safe, but inert).
 func TestIsWispStale(t *testing.T) {
+	t.Parallel()
 	idleSince := time.Date(2026, 9, 18, 11, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -1175,12 +1176,17 @@ func TestWispTreeTimeoutIsBounded(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	// The bound is what is under test, not the production 5s value: a hung bd
+	// must be killed at the budget, whatever the budget is.
+	const budget = 200 * time.Millisecond
 	start := time.Now()
-	_, err := wispTree(t.TempDir(), "wisp-x")
+	_, err := wispTreeWithin(t.TempDir(), "wisp-x", budget)
 	if err == nil {
-		t.Fatal("wispTree() error = nil, want a timeout error from a hung bd")
+		t.Fatal("wispTreeWithin() error = nil, want a timeout error from a hung bd")
 	}
-	if elapsed := time.Since(start); elapsed > 3*dogHookedFormulaCheckTimeout {
-		t.Errorf("wispTree() took %v, want it bounded near dogHookedFormulaCheckTimeout (%v)", elapsed, dogHookedFormulaCheckTimeout)
+	// Generous against load: the hung bd sleeps 60s, so anything short of that
+	// proves the budget, not the child, ended the call.
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("wispTreeWithin() took %v, want it bounded near its %v budget", elapsed, budget)
 	}
 }

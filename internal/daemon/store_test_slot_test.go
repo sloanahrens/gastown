@@ -37,6 +37,7 @@ func takeStoreSlot(t *testing.T) {
 // cap needs a barrier, since a loaded host starves goroutines before they
 // converge (gt-hvzy.2).
 func TestStoreTestSlotsNeverExceedTheBound(t *testing.T) {
+	t.Parallel()
 	const callers = 12
 	limit := int64(cap(storeTestSlots))
 

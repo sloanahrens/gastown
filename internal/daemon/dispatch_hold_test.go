@@ -27,6 +27,7 @@ func writeOperatorHold(t *testing.T, townRoot string) {
 }
 
 func TestFeedFirstReady_OperatorHold_SlingsNothing(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -55,6 +56,7 @@ func TestFeedFirstReady_OperatorHold_SlingsNothing(t *testing.T) {
 }
 
 func TestRunScheduledSlings_OperatorHold_DispatchesNothingAndCountsNoFailure(t *testing.T) {
+	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
 	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	writeOperatorHold(t, d.config.TownRoot)

@@ -11,6 +11,7 @@ const testStaleFor = 5 * time.Minute
 // the cycle, since the daemon has no way to know how long that cycle had
 // already been current before it started looking.
 func TestDeaconCycleTracker_Baseline(t *testing.T) {
+	t.Parallel()
 	var tr deaconCycleTracker
 	now := time.Now()
 
@@ -26,6 +27,7 @@ func TestDeaconCycleTracker_Baseline(t *testing.T) {
 // TestDeaconCycleTracker_AgesStaticCycle covers the samples after the
 // baseline: the same cycle ages, a new cycle re-baselines.
 func TestDeaconCycleTracker_AgesStaticCycle(t *testing.T) {
+	t.Parallel()
 	var tr deaconCycleTracker
 	start := time.Now()
 	tr.observe(7, testStaleFor, start)
@@ -59,6 +61,7 @@ func TestDeaconCycleTracker_AgesStaticCycle(t *testing.T) {
 // occasional sample inside the window breaks the run, so two "consecutive"
 // ticks means two samples that both saw the cycle past the threshold.
 func TestDeaconCycleTracker_StallCounterResetsBelowThreshold(t *testing.T) {
+	t.Parallel()
 	var tr deaconCycleTracker
 	start := time.Now()
 	tr.observe(7, testStaleFor, start)
@@ -81,6 +84,7 @@ func TestDeaconCycleTracker_StallCounterResetsBelowThreshold(t *testing.T) {
 // TestDeaconCycleTracker_Reset verifies that a reset drops everything the
 // tracker knew, so a gap between observations cannot be reported as a stall.
 func TestDeaconCycleTracker_Reset(t *testing.T) {
+	t.Parallel()
 	tr := deaconCycleTracker{
 		cycle:        7,
 		changedAt:    time.Now().Add(-time.Hour),

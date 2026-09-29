@@ -1057,7 +1057,7 @@ func (d *Daemon) escalateAlertErr(key, source, message string) error {
 			if attempt < maxEscalationRetries-1 {
 				backoff := time.Duration(attempt+1) * time.Second
 				d.logger.Printf("escalate(%s): retrying in %s …", source, backoff)
-				time.Sleep(backoff)
+				d.clk().Sleep(backoff)
 			}
 			continue
 		}
@@ -1088,7 +1088,7 @@ func (d *Daemon) escalateAlertErr(key, source, message string) error {
 		if attempt < maxEscalationRetries-1 {
 			backoff := time.Duration(attempt+1) * time.Second
 			d.logger.Printf("escalate(%s): retrying in %s …", source, backoff)
-			time.Sleep(backoff)
+			d.clk().Sleep(backoff)
 		}
 	}
 

@@ -14,6 +14,7 @@ import (
 // the events writer lock. A wedged writer must not stall daemon startup, and
 // Stop must not wait out the lock timeout either (claude-9jq review).
 func TestKRCPruner_StartAndStopDoNotBlockOnHeldLock(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	eventsPath := filepath.Join(townRoot, events.EventsFile)
 	expired := `{"ts":"2000-01-01T00:00:00Z","type":"sling","actor":"old"}` + "\n"
@@ -50,6 +51,7 @@ func TestKRCPruner_StartAndStopDoNotBlockOnHeldLock(t *testing.T) {
 
 // The first prune still runs promptly after Start when the lock is free.
 func TestKRCPruner_StartPrunesInBackground(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	eventsPath := filepath.Join(townRoot, events.EventsFile)
 	expired := `{"ts":"2000-01-01T00:00:00Z","type":"sling","actor":"old"}` + "\n"

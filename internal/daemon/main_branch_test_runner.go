@@ -442,11 +442,16 @@ func measureHostLoad() hostLoad {
 	return h
 }
 
-// measureHostLoadFn is the seam tests use to pin a host-load reading;
-// production always measures the real host (see stubHostLoad). Without it the
-// skip decision could only be tested by saturating the actual machine
-// (gt-f57o, same pattern as slot.SetContainerListerForTest).
-var measureHostLoadFn = measureHostLoad
+// hostLoad reads the host's load through hostLoadFn, the seam tests use to
+// pin a reading; production (nil) always measures the real host. Without it
+// the skip decision could only be tested by saturating the actual machine
+// (gt-f57o).
+func (d *Daemon) hostLoad() hostLoad {
+	if d.hostLoadFn != nil {
+		return d.hostLoadFn()
+	}
+	return measureHostLoad()
+}
 
 // EstimateCPUIdlePercent gives callers outside this package the same
 // host-busy signal hostBusyReason uses (gt-f57o): one load-average read, no
@@ -812,7 +817,7 @@ var errMainBranchTestGateBusy = errors.New("skipped: gate busy")
 
 // mainBranchTestGatePoolStatusFn reads the container-gate pool's held/owner
 // picture for the skip decision. A package variable, following this package's
-// *Fn seam convention (measureHostLoadFn, maintenanceExecFn), so a test can
+// *Fn seam convention (maintenanceExecFn), so a test can
 // pin a pool state — "gastown/refinery holds slot 0" — without racing a real
 // refinery into a real flock.
 //
@@ -830,7 +835,7 @@ var mainBranchTestGatePoolStatusFn = func(townRoot string) (slot.Report, error) 
 }
 
 // mainBranchTestRigFn runs one rig's main-branch check for a cycle. A package
-// variable, following this package's *Fn seam convention (measureHostLoadFn,
+// variable, following this package's *Fn seam convention (
 // mainBranchTestGatePoolStatusFn), so a cycle test can hand the loop a pass, a
 // failure, or an interruption directly: the alert arithmetic below is decided
 // over the *verdicts*, and reaching each shape through the real path would mean
@@ -871,7 +876,7 @@ func (d *Daemon) runMainBranchTests() int {
 	// logged with the measured values so a silently-never-running patrol is
 	// visible in the daemon log rather than inferred from a missing cycle.
 	if minIdle := mainBranchTestMinCPUIdlePercent(d.patrolConfig); minIdle > 0 {
-		host := measureHostLoadFn()
+		host := d.hostLoad()
 		if reason := hostBusyReason(minIdle, host); reason != "" {
 			d.logger.Printf("main_branch_test: skipped: %s", reason)
 			return 0
@@ -1310,11 +1315,11 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, work
 	util.SetProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
-	startHost := measureHostLoadFn()
+	startHost := d.hostLoad()
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
-	endHost := measureHostLoadFn()
+	endHost := d.hostLoad()
 	if err == nil {
 		return nil
 	}

@@ -47,8 +47,15 @@ func TestGitChildEnv_RecoversMissingIdentity(t *testing.T) {
 	// Simulate a daemon child that lost USER/LOGNAME (the gh#zt1w failure mode).
 	// HOME stays set so user.Current() succeeds without needing getpwuid.
 	t.Setenv("HOME", "/tmp/fake-home")
-	os.Unsetenv("USER")
-	os.Unsetenv("LOGNAME")
+	// Unset, not empty: gitChildEnv treats "USER=" as present. t.Setenv
+	// first so the originals come back when the test ends; a bare
+	// os.Unsetenv left the rest of the run without USER and LOGNAME.
+	for _, k := range []string{"USER", "LOGNAME"} {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatalf("unset %s: %v", k, err)
+		}
+	}
 
 	got := envMap(gitChildEnv())
 	if got["USER"] == "" {
@@ -63,6 +70,7 @@ func TestGitChildEnv_RecoversMissingIdentity(t *testing.T) {
 }
 
 func TestEnsureGitRepoInitialized_CreatesMissingRepo(t *testing.T) {
+	t.Parallel()
 	gitRepo := filepath.Join(t.TempDir(), "nested", "git")
 
 	if _, err := os.Stat(gitRepo); !os.IsNotExist(err) {
@@ -79,6 +87,7 @@ func TestEnsureGitRepoInitialized_CreatesMissingRepo(t *testing.T) {
 }
 
 func TestEnsureGitRepoInitialized_NoOpOnExistingRepo(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 
@@ -101,6 +110,7 @@ func TestEnsureGitRepoInitialized_NoOpOnExistingRepo(t *testing.T) {
 }
 
 func TestEnsureGitRepoInitialized_SetsPostBufferOnFreshRepo(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 
 	if err := ensureGitRepoInitialized(gitRepo); err != nil {
@@ -114,6 +124,7 @@ func TestEnsureGitRepoInitialized_SetsPostBufferOnFreshRepo(t *testing.T) {
 }
 
 func TestEnsureGitRepoInitialized_SetsPostBufferOnExistingRepo(t *testing.T) {
+	t.Parallel()
 	// Regression for gt-kxa1: a repo initialized before this fix (or with the
 	// config lost some other way) must also get covered, not just fresh inits.
 	gitRepo := t.TempDir()
@@ -139,6 +150,7 @@ func gitConfigGet(t *testing.T, gitRepo, key string) string {
 }
 
 func TestIsPostBufferPushError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		errMsg string
@@ -180,6 +192,7 @@ func TestIsPostBufferPushError(t *testing.T) {
 }
 
 func TestPostBufferHint_NamesCauseAndFix(t *testing.T) {
+	t.Parallel()
 	hint := postBufferHint("2.9 MiB")
 	if !contains(hint, "http.postBuffer") {
 		t.Errorf("hint should name http.postBuffer, got: %s", hint)
@@ -190,6 +203,7 @@ func TestPostBufferHint_NamesCauseAndFix(t *testing.T) {
 }
 
 func TestPostBufferHint_OkWithoutPackSize(t *testing.T) {
+	t.Parallel()
 	hint := postBufferHint("")
 	if !contains(hint, "http.postBuffer") {
 		t.Errorf("hint should still name http.postBuffer with no pack size, got: %s", hint)
@@ -197,6 +211,7 @@ func TestPostBufferHint_OkWithoutPackSize(t *testing.T) {
 }
 
 func TestCommitAndPushJsonlBackup_NoRemoteIsError(t *testing.T) {
+	t.Parallel()
 	// Regression for gt-kme: a JSONL backup repo with commits but no configured
 	// remote used to be reported as a silent success ("skipping push"), even
 	// though the data never left the machine. It must now be a hard error so
@@ -230,6 +245,7 @@ func TestCommitAndPushJsonlBackup_NoRemoteIsError(t *testing.T) {
 }
 
 func TestDiscoverJsonlBackupDatabases(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 
 	makeDbDir := func(name string) {
@@ -265,6 +281,7 @@ func TestDiscoverJsonlBackupDatabases(t *testing.T) {
 }
 
 func TestDiscoverJsonlBackupDatabases_MissingDataDir(t *testing.T) {
+	t.Parallel()
 	got := discoverJsonlBackupDatabases(filepath.Join(t.TempDir(), "does-not-exist"))
 	if got != nil {
 		t.Errorf("expected nil for missing data dir, got %v", got)
@@ -282,6 +299,7 @@ func envMap(env []string) map[string]string {
 }
 
 func TestIsTestPollution(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		record   map[string]interface{}
@@ -380,6 +398,7 @@ func TestIsTestPollution(t *testing.T) {
 }
 
 func TestFilterTestPollution(t *testing.T) {
+	t.Parallel()
 	// Build JSONL with mix of good and bad records.
 	good1, _ := json.Marshal(map[string]interface{}{"id": "gt-abc1", "title": "Fix bug"})
 	good2, _ := json.Marshal(map[string]interface{}{"id": "gt-def2", "title": "Add feature"})
@@ -413,6 +432,7 @@ func TestFilterTestPollution(t *testing.T) {
 }
 
 func TestFilterTestPollution_NoRemoval(t *testing.T) {
+	t.Parallel()
 	good1, _ := json.Marshal(map[string]interface{}{"id": "gt-abc1", "title": "Fix bug"})
 	good2, _ := json.Marshal(map[string]interface{}{"id": "gt-def2", "title": "Add feature"})
 	input := string(good1) + "\n" + string(good2) + "\n"
@@ -430,6 +450,7 @@ func TestFilterTestPollution_NoRemoval(t *testing.T) {
 }
 
 func TestFilterTestPollution_EmptyInput(t *testing.T) {
+	t.Parallel()
 	filtered, removed := filterTestPollution([]byte(""))
 	if removed != 0 {
 		t.Errorf("expected 0 removed, got %d", removed)
@@ -440,6 +461,7 @@ func TestFilterTestPollution_EmptyInput(t *testing.T) {
 }
 
 func TestSpikeThreshold(t *testing.T) {
+	t.Parallel()
 	// nil config → default
 	if got := spikeThreshold(nil); got != defaultSpikeThreshold {
 		t.Errorf("expected %v, got %v", defaultSpikeThreshold, got)
@@ -474,6 +496,7 @@ func TestSpikeThreshold(t *testing.T) {
 }
 
 func TestFormatSpikeReport(t *testing.T) {
+	t.Parallel()
 	spikes := []spikeInfo{
 		{DB: "prod_beads", File: "prod_beads/issues.jsonl", Previous: 100, Current: 150, Delta: 0.50,
 			Baseline: "prod_beads: 100 (HEAD), 90 (HEAD~1)"},
@@ -509,6 +532,7 @@ func TestFormatSpikeReport(t *testing.T) {
 }
 
 func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
+	t.Parallel()
 	// Commits exist but none carry per-database counts, and there is no cache —
 	// history this detector cannot read. verifyExportCounts must fail loud
 	// instead of silently treating the export as a first export (gt-tj-he).
@@ -529,6 +553,7 @@ func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
 }
 
 func TestRecomputeSpikeBaseline_FreshRepoBootstraps(t *testing.T) {
+	t.Parallel()
 	// A freshly initialized backup repo has no commits at all (what
 	// ensureGitRepoInitialized leaves behind: `git init`, no seed commit).
 	// There is no level to compare against and no spike is possible without
@@ -545,6 +570,7 @@ func TestRecomputeSpikeBaseline_FreshRepoBootstraps(t *testing.T) {
 }
 
 func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
+	t.Parallel()
 	// First run on a fresh town must not be blocked: with no baseline, halting
 	// leaves the patrol permanently inert (no baseline → no commit → never a
 	// baseline). The run proceeds and its commit seeds the next run's baseline.
@@ -576,6 +602,7 @@ func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
 }
 
 func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
+	t.Parallel()
 	// Steady state: recompute rewrites the cache every tick, so it is warm on
 	// essentially every run while history carries the newest commit. A cached
 	// level must never shadow a committed one — an earlier revision seeded the
@@ -619,6 +646,7 @@ func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
 }
 
 func TestVerifyExportCounts_FirstExport(t *testing.T) {
+	t.Parallel()
 	// History exists for db1, but db2 is being exported for the first time:
 	// it is absent from the baseline window and must be skipped, not spiked.
 	gitRepo := t.TempDir()
@@ -638,6 +666,7 @@ func TestVerifyExportCounts_FirstExport(t *testing.T) {
 }
 
 func TestVerifyExportCounts_WithinThreshold(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
@@ -657,6 +686,7 @@ func TestVerifyExportCounts_WithinThreshold(t *testing.T) {
 }
 
 func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
@@ -682,6 +712,7 @@ func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
 }
 
 func TestVerifyExportCounts_Drop(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
@@ -704,6 +735,7 @@ func TestVerifyExportCounts_Drop(t *testing.T) {
 }
 
 func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
@@ -723,6 +755,7 @@ func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
 }
 
 func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
@@ -750,6 +783,7 @@ func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 }
 
 func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
+	t.Parallel()
 	// The gt-tj-he scenario: a spike halt blocked the commit that would have
 	// refreshed the baseline, so the repo's newest committed level is stale
 	// (1000) while the export already holds 400. The baseline window must be
@@ -809,6 +843,7 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 }
 
 func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) {
+	t.Parallel()
 	// Follow-up run while the halt is still in place: the newest committed
 	// level is still 1000 and the cache was just refreshed with the same
 	// committed window, so the detector still sees 400 vs 1000 and must
@@ -840,6 +875,7 @@ func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) 
 }
 
 func TestRecomputeSpikeBaseline_RollingWindow(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "db1"), 0755)
@@ -868,6 +904,7 @@ func TestRecomputeSpikeBaseline_RollingWindow(t *testing.T) {
 }
 
 func TestRecomputeSpikeBaseline_CacheSeedsAcrossHalt(t *testing.T) {
+	t.Parallel()
 	// History exists but carries no counts (a repo whose count-bearing commits
 	// were reset), while a cache written by an earlier run holds the last known
 	// levels. The cache is the only remaining source, so it seeds the window
@@ -898,6 +935,7 @@ func TestRecomputeSpikeBaseline_CacheSeedsAcrossHalt(t *testing.T) {
 }
 
 func TestCachedSpikeBaseline_RelabelsDedupesAndTrims(t *testing.T) {
+	t.Parallel()
 	// The cache is untrusted input: a truncated or hand-edited file must not be
 	// able to make "the newest level" depend on sort internals. Entries come
 	// back re-labeled as cache-sourced, re-based so the newest is age 0,
@@ -948,6 +986,7 @@ func TestCachedSpikeBaseline_RelabelsDedupesAndTrims(t *testing.T) {
 }
 
 func TestRecomputeSpikeBaseline_NoneAvailable(t *testing.T) {
+	t.Parallel()
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo) // only the non-count "init" commit
 
@@ -958,6 +997,7 @@ func TestRecomputeSpikeBaseline_NoneAvailable(t *testing.T) {
 }
 
 func TestParseCommitCounts(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject string
 		want    map[string]int
@@ -985,6 +1025,7 @@ func TestParseCommitCounts(t *testing.T) {
 }
 
 func TestSpikeBaselineHistorySaveLoad(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// No cache file → nil.
@@ -1022,6 +1063,7 @@ func TestSpikeBaselineHistorySaveLoad(t *testing.T) {
 }
 
 func TestSpikeHistoryDetail(t *testing.T) {
+	t.Parallel()
 	sb := &spikeBaseline{
 		Window: 3,
 		Counts: map[string][]spikeCommit{
@@ -1058,6 +1100,7 @@ func TestSpikeHistoryDetail(t *testing.T) {
 }
 
 func TestCountFileLines(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.jsonl")
 
@@ -1073,6 +1116,7 @@ func TestCountFileLines(t *testing.T) {
 }
 
 func TestCountFileLines_Empty(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.jsonl")
 	os.WriteFile(path, []byte(""), 0644)
@@ -1087,6 +1131,7 @@ func TestCountFileLines_Empty(t *testing.T) {
 }
 
 func TestParseLineCount(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected int
@@ -1221,6 +1266,7 @@ func commitBackup(t *testing.T, gitRepo, db string, n int) {
 }
 
 func TestEscalationTitle_SingleLineUnchanged(t *testing.T) {
+	t.Parallel()
 	got := escalationTitle("jsonl_git_backup", "git push failed 3 consecutive times")
 	want := "jsonl_git_backup: git push failed 3 consecutive times"
 	if got != want {
@@ -1229,6 +1275,7 @@ func TestEscalationTitle_SingleLineUnchanged(t *testing.T) {
 }
 
 func TestEscalationTitle_MultilineCollapsedToFirstLine(t *testing.T) {
+	t.Parallel()
 	// This is the gt-qna failure mode: the daemon hands escalate() the full
 	// go-test failure output (many lines). The title must never contain a
 	// newline — bd 1.0.3+ rejects newline-containing flag values, which was
@@ -1267,6 +1314,7 @@ func TestEscalationTitle_CarriageReturnEndsTheLine(t *testing.T) {
 }
 
 func TestEscalationTitle_TruncatedToMaxLen(t *testing.T) {
+	t.Parallel()
 	longLine := strings.Repeat("x", maxEscalationTitleLen*2)
 	got := escalationTitle("source", longLine)
 	if n := len([]rune(got)); n > maxEscalationTitleLen {
@@ -1280,6 +1328,7 @@ func TestEscalationTitle_TruncatedToMaxLen(t *testing.T) {
 // TestDefaultEscalationTimeout verifies the per-attempt timeout is long enough
 // to survive slot-starvation (the condition that produced gt-tlwv drops).
 func TestDefaultEscalationTimeout(t *testing.T) {
+	t.Parallel()
 	if defaultEscalationTimeout != 60*time.Second {
 		t.Errorf("defaultEscalationTimeout = %v, want 60s", defaultEscalationTimeout)
 	}
@@ -1287,6 +1336,7 @@ func TestDefaultEscalationTimeout(t *testing.T) {
 
 // TestMaxEscalationRetries verifies the retry budget.
 func TestMaxEscalationRetries(t *testing.T) {
+	t.Parallel()
 	if maxEscalationRetries != 3 {
 		t.Errorf("maxEscalationRetries = %d, want 3", maxEscalationRetries)
 	}
@@ -1298,15 +1348,24 @@ func TestMaxEscalationRetries(t *testing.T) {
 // exit 1 immediately, confirming the function retries transient failures
 // instead of giving up after one attempt.
 func TestEscalate_RetriesOnTimeout(t *testing.T) {
+	t.Parallel()
 	flaky := &flakyEscalations{Recorder: notifyfake.New(), failures: 2}
+	clk := newFixedClock()
 	d := &Daemon{
 		logger:   log.New(io.Discard, "", 0),
 		config:   &Config{TownRoot: t.TempDir()},
 		notifier: flaky,
+		clock:    clk,
 	}
 
-	if err := d.escalateAlertErr("k", "main_branch_test", "test failed"); err != nil {
+	var err error
+	runOnClock(t, clk, time.Second, func() { err = d.escalateAlertErr("k", "main_branch_test", "test failed") })
+	if err != nil {
 		t.Fatalf("escalateAlertErr = %v, want success on the third attempt", err)
+	}
+	// The retries back off 1 s, then 2 s, on the daemon's clock.
+	if waited := clk.Since(testEpoch); waited != 3*time.Second {
+		t.Errorf("backoff before the third attempt = %s, want 3s (1s then 2s)", waited)
 	}
 	if flaky.attempts != 3 {
 		t.Errorf("escalation attempts = %d, want 3", flaky.attempts)
@@ -1337,6 +1396,7 @@ func (f *flakyEscalations) Escalate(ctx context.Context, e notify.Escalation) er
 // escalate always fails, the full message is logged to the feed (not just
 // the title).
 func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	eventsFile := filepath.Join(townRoot, ".events.jsonl")
 	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o755); err != nil {
@@ -1348,16 +1408,18 @@ func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
 	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
 
 	logger := log.New(io.Discard, "", 0)
+	clk := newFixedClock()
 	d := &Daemon{
 		logger: logger,
 		config: &Config{
 			TownRoot: townRoot,
 		},
 		notifier: rec,
+		clock:    clk,
 	}
 
 	testMessage := "main branch test failures:\ngastown: gate \"test\": exit status 1"
-	d.escalate("main_branch_test", testMessage)
+	runOnClock(t, clk, time.Second, func() { d.escalate("main_branch_test", testMessage) })
 
 	// Verify the events file received the escalation_dropped event with the
 	// full message (not just the title).
@@ -1425,13 +1487,16 @@ func TestEscalate_TimedOutAttemptsAreLoggedAsTimeouts(t *testing.T) {
 	rec := notifyfake.New()
 	rec.Fail(notifyfake.KindEscalate, fmt.Errorf("gt escalate: %w (signal: killed)", context.DeadlineExceeded))
 	var logs bytes.Buffer
+	clk := newFixedClock()
 	d := &Daemon{
 		logger:   log.New(&logs, "", 0),
 		config:   &Config{TownRoot: townRoot},
 		notifier: rec,
+		clock:    clk,
 	}
 
-	err := d.escalateAlertErr("k", "main_branch_test", "test failed")
+	var err error
+	runOnClock(t, clk, time.Second, func() { err = d.escalateAlertErr("k", "main_branch_test", "test failed") })
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("escalateAlertErr = %v, want the wrapped deadline", err)
 	}
@@ -1496,6 +1561,7 @@ func ageIndexLock(t *testing.T, gitRepo string, age time.Duration) string {
 }
 
 func TestRunGitCmd_TimeoutIsDistinguishable(t *testing.T) {
+	t.Parallel()
 	// gt-1aj2: callers clear an orphaned index lock when a command is killed on
 	// its deadline, so a timeout must be tellable apart from a normal git error.
 	gitRepo := t.TempDir()
@@ -1513,6 +1579,7 @@ func TestRunGitCmd_TimeoutIsDistinguishable(t *testing.T) {
 }
 
 func TestIsIndexLockExistsError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		errMsg string
@@ -1537,6 +1604,7 @@ func TestIsIndexLockExistsError(t *testing.T) {
 }
 
 func TestClearStaleIndexLock_RespectsGrace(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 
 	t.Run("stale is removed", func(t *testing.T) {
@@ -1573,6 +1641,7 @@ func TestClearStaleIndexLock_RespectsGrace(t *testing.T) {
 }
 
 func TestClearIndexLockModifiedSince_OnlyRecent(t *testing.T) {
+	t.Parallel()
 	// A lock written after a command started is that command's own orphan.
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 
@@ -1600,6 +1669,7 @@ func TestClearIndexLockModifiedSince_OnlyRecent(t *testing.T) {
 }
 
 func TestRunGitIndexCmd_RecoversFromStaleLock(t *testing.T) {
+	t.Parallel()
 	// A lock orphaned by a dead tick must not fail the next one (gt-1aj2).
 	gitRepo := t.TempDir()
 	initGitRepo(t, gitRepo)
@@ -1626,6 +1696,7 @@ func TestRunGitIndexCmd_RecoversFromStaleLock(t *testing.T) {
 }
 
 func TestRunGitIndexCmd_LeavesFreshLock(t *testing.T) {
+	t.Parallel()
 	// A lock with a live owner is not an orphan: failing is correct, and the
 	// lock must survive so the real owner can finish.
 	gitRepo := t.TempDir()
@@ -1646,6 +1717,7 @@ func TestRunGitIndexCmd_LeavesFreshLock(t *testing.T) {
 }
 
 func TestCommitAndPushJsonlBackup_RecoversFromStaleIndexLock(t *testing.T) {
+	t.Parallel()
 	// End-to-end for gt-1aj2: the tick after a killed `git add` used to fail
 	// with "index.lock: File exists" forever, and three such ticks escalated.
 	root := t.TempDir()
@@ -1692,6 +1764,7 @@ func TestCommitAndPushJsonlBackup_RecoversFromStaleIndexLock(t *testing.T) {
 // on disk, the trigger must decline to start a cycle rather than firing on
 // every tick (or every restart) regardless of the persisted schedule.
 func TestTriggerJsonlGitBackup_SkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := savePatrolLastRun(townRoot, "jsonl_git_backup", time.Now()); err != nil {
 		t.Fatalf("seed last run: %v", err)

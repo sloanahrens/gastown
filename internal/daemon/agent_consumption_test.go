@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -294,31 +295,22 @@ func TestRunningAgentRestartHint(t *testing.T) {
 // literal name: the rig prefix comes from the session registry, which a test
 // binary does not populate, so a hardcoded prefix would test the test.
 func TestProbeRunningRolesTargetTheRigSessions(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
-	logPath := writeFakeTmuxPane(t, []string{daemonWedgedPane})
-	d := newConsumptionTestDaemon(t)
+	t.Parallel()
+	tm := newFakeTmux(newFixedClock())
+	d := &Daemon{
+		config:   &Config{TownRoot: t.TempDir()},
+		tmux:     tm,
+		logger:   log.New(io.Discard, "", 0),
+		notifier: notifyfake.New(),
+	}
 
 	d.probeRunningWitness("gastown")
 	d.probeRunningRefinery("gastown")
 
-	logged, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read tmux log: %v", err)
-	}
-
-	const capture = "capture-pane -p -e -t "
 	var targets []string
-	for _, line := range strings.Split(string(logged), "\n") {
-		idx := strings.Index(line, capture)
-		if idx < 0 {
-			continue
-		}
-		rest := line[idx+len(capture):]
-		if end := strings.Index(rest, " "); end >= 0 {
-			rest = rest[:end]
-		}
-		if len(targets) == 0 || targets[len(targets)-1] != rest {
-			targets = append(targets, rest)
+	for _, call := range tm.daemonCalls() {
+		if session, ok := strings.CutPrefix(call, "DetectComposerStallTracked "); ok {
+			targets = append(targets, session)
 		}
 	}
 

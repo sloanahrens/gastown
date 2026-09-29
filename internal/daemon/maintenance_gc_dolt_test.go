@@ -13,6 +13,7 @@ import (
 // on a server and that history survives it. Skips when the container is
 // unavailable (GT_TEST_DOCKER=0 or no Docker).
 func TestDoltGCFullAgainstRealServer(t *testing.T) {
+	t.Parallel()
 	d := testDoltRemotesDaemon(t)
 	dbName := createTestDB(t)
 

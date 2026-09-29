@@ -7,6 +7,7 @@ import (
 )
 
 func TestCapEventRowValues_TruncatesLongValuesOnly(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("n", 20000)
 	row := json.RawMessage(`{"id":"e1","event_type":"updated","old_value":"` + long + `","new_value":"short","comment":"` + long + `"}`)
 
@@ -33,6 +34,7 @@ func TestCapEventRowValues_TruncatesLongValuesOnly(t *testing.T) {
 }
 
 func TestCapEventRowValues_SmallRowUnchanged(t *testing.T) {
+	t.Parallel()
 	row := json.RawMessage(`{"id":"e2","old_value":"a","new_value":null}`)
 	got, err := capEventRowValues(row, 8192)
 	if err != nil {
@@ -44,6 +46,7 @@ func TestCapEventRowValues_SmallRowUnchanged(t *testing.T) {
 }
 
 func TestCapEventRowValues_CutsOnRuneBoundary(t *testing.T) {
+	t.Parallel()
 	// "é" is two bytes; a limit landing mid-rune must back up to the rune start.
 	value := strings.Repeat("é", 100)
 	row, _ := json.Marshal(map[string]string{"old_value": value})

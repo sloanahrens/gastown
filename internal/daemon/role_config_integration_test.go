@@ -13,6 +13,7 @@ import (
 // TestGetRoleConfigForIdentity_UsesBuiltinDefaults tests that the daemon
 // uses built-in role definitions from embedded TOML files when no overrides exist.
 func TestGetRoleConfigForIdentity_UsesBuiltinDefaults(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	d := &Daemon{
@@ -40,6 +41,7 @@ func TestGetRoleConfigForIdentity_UsesBuiltinDefaults(t *testing.T) {
 // TestGetRoleConfigForIdentity_TownOverride tests that town-level TOML overrides
 // are merged with built-in defaults.
 func TestGetRoleConfigForIdentity_TownOverride(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create town-level override
@@ -88,6 +90,7 @@ start_command = "exec echo custom-town-command"
 // TestGetRoleConfigForIdentity_RigOverride tests that rig-level TOML overrides
 // take precedence over town-level overrides.
 func TestGetRoleConfigForIdentity_RigOverride(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "myrig")
 

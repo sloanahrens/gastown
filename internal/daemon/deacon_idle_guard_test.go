@@ -3,79 +3,55 @@ package daemon
 import (
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
-// writeFakeTmuxWithSession creates a fake tmux binary that reports the Deacon
-// session as existing (has-session returns 0). Used for deacon idle guard tests
-// where the session must be present so checkDeaconHeartbeat reaches the nudge path.
-func writeFakeTmuxWithSession(t *testing.T, dir string) {
+// newDeaconHeartbeatDaemon builds a Daemon whose Deacon session is live in a
+// fake tmux (its pane runs claude), with the stuck-Deacon restart's respawn
+// wired to bring that session back. The restart's pause runs on clk.
+func newDeaconHeartbeatDaemon(t *testing.T, townRoot string, stores map[string]beadsdk.Storage) (*Daemon, *fakeTmux, *clockwork.FakeClock) {
 	t.Helper()
-	script := `#!/usr/bin/env bash
-set -euo pipefail
-
-cmd=""
-skip_next=0
-for arg in "$@"; do
-  if [[ "$skip_next" -eq 1 ]]; then
-    skip_next=0
-    continue
-  fi
-  if [[ "$arg" == "-u" ]]; then
-    continue
-  fi
-  if [[ "$arg" == "-L" ]]; then
-    skip_next=1
-    continue
-  fi
-  cmd="$arg"
-  break
-done
-
-if [[ -n "${TMUX_LOG:-}" ]]; then
-  printf "%s %s\n" "$cmd" "$*" >> "$TMUX_LOG"
-fi
-
-if [[ "${1:-}" == "-V" ]]; then
-  echo "tmux 3.3a"
-  exit 0
-fi
-
-# Session exists: has-session returns 0 so the nudge path is reachable.
-if [[ "$cmd" == "has-session" ]]; then
-  exit 0
-fi
-
-# The pane already runs claude. The very-stale path respawns the Deacon and
-# then waits in tmux.WaitForCommand for the pane command to stop being a
-# shell; with no answer here GetPaneCommand errors and the wait runs the
-# whole constants.ClaudeStartTimeout (180s) before the test can finish.
-if [[ "$cmd" == "display-message" ]]; then
-  echo "claude"
-  exit 0
-fi
-
-exit 0
-`
-	path := filepath.Join(dir, "tmux")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
+	clk := newFixedClock()
+	tm := newFakeTmux(clk)
+	name := session.DeaconSessionName()
+	tm.addSession(name, "claude", clk.Now())
+	d := newTestDaemonWithStores(t, townRoot, stores)
+	d.tmux = tm
+	d.clock = clk
+	d.notifier = notifyfake.New()
+	d.startDeaconFn = func() error {
+		if has, _ := tm.HasSession(name); has {
+			return deacon.ErrAlreadyRunning
+		}
+		tm.addSession(name, "claude", clk.Now())
+		return nil
 	}
+	return d, tm, clk
+}
+
+// deaconHealthChecks counts the heartbeat nudges delivered to the Deacon.
+func deaconHealthChecks(tm *fakeTmux) int {
+	n := 0
+	for _, sent := range tm.Sent(session.DeaconSessionName()) {
+		if strings.HasPrefix(sent, "HEALTH_CHECK:") {
+			n++
+		}
+	}
+	return n
 }
 
 // TestCheckDeaconHeartbeat_IdleGuard verifies that the nudge is suppressed when
 // the Deacon heartbeat is stale but no active work is in flight (idle guard).
 func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows — fake tmux requires bash")
-	}
+	t.Parallel()
 
 	tests := []struct {
 		name             string
@@ -143,25 +119,20 @@ func TestCheckDeaconHeartbeat_IdleGuard(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			townRoot := t.TempDir()
-			fakeBinDir := t.TempDir()
-			tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-			if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-				t.Fatalf("create tmux log: %v", err)
-			}
-
-			writeFakeTmuxWithSession(t, fakeBinDir)
-			t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("TMUX_LOG", tmuxLog)
-
 			writeDeaconHeartbeat(t, townRoot, tc.heartbeatAge)
 
-			d := newTestDaemonWithStores(t, townRoot, tc.stores)
+			d, tm, clk := newDeaconHeartbeatDaemon(t, townRoot, tc.stores)
 
 			logBuf := &strings.Builder{}
 			d.logger = log.New(logBuf, "", 0)
 
-			d.checkDeaconHeartbeat()
+			runOnClock(t, clk, time.Second, d.checkDeaconHeartbeat)
+
+			if got, want := deaconHealthChecks(tm) == 1, tc.wantNudgeLog; got != want {
+				t.Errorf("%s\nnudge delivered=%v, want=%v (sent: %q)", tc.desc, got, want, tm.Sent(session.DeaconSessionName()))
+			}
 
 			logOutput := logBuf.String()
 

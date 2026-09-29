@@ -10,6 +10,7 @@ import (
 // TestRigWorkerPoolConcurrencyLimit verifies that the pool never runs more than
 // the configured number of rigs simultaneously.
 func TestRigWorkerPoolConcurrencyLimit(t *testing.T) {
+	t.Parallel()
 	const (
 		numRigs    = 20
 		maxWorkers = 5
@@ -51,6 +52,7 @@ func TestRigWorkerPoolConcurrencyLimit(t *testing.T) {
 // TestRigWorkerPoolContextTimeout verifies that per-rig context timeouts fire and
 // allow the remaining rigs to proceed unblocked.
 func TestRigWorkerPoolContextTimeout(t *testing.T) {
+	t.Parallel()
 	const (
 		numRigs    = 5
 		rigTimeout = 50 * time.Millisecond
@@ -92,6 +94,7 @@ func TestRigWorkerPoolContextTimeout(t *testing.T) {
 // TestRigWorkerPoolSlowRigDoesNotBlockOthers verifies that one slow rig does not
 // prevent the remaining rigs from completing within a reasonable wall-clock window.
 func TestRigWorkerPoolSlowRigDoesNotBlockOthers(t *testing.T) {
+	t.Parallel()
 	const (
 		slowRig    = "slow-rig"
 		rigTimeout = 200 * time.Millisecond

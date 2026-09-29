@@ -94,6 +94,7 @@ func TestClearAlerts_NoKeysIsANoOp(t *testing.T) {
 // the two halves of the lifecycle — dedupe would merge unrelated alerts, or
 // auto-close would stop finding the alert it is meant to close.
 func TestAlertKeysAreDistinctAndNonEmpty(t *testing.T) {
+	t.Parallel()
 	keys := map[string]string{
 		"alertKeyMainBranchTest": alertKeyMainBranchTest,
 		"alertKeyJSONLInit":      alertKeyJSONLInit,

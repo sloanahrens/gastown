@@ -9,6 +9,7 @@ import (
 )
 
 func TestMayorDispatchInterval(t *testing.T) {
+	t.Parallel()
 	if got := mayorDispatchInterval(nil); got != defaultMayorDispatchInterval {
 		t.Errorf("expected default interval %v, got %v", defaultMayorDispatchInterval, got)
 	}
@@ -42,6 +43,7 @@ func TestMayorDispatchInterval(t *testing.T) {
 // watcher finish (gt-8hi4w, same shape as the seat-refill plugin's own bound,
 // gt-hen4o).
 func TestMayorNudgeTimeoutExceedsWaitIdleBudget(t *testing.T) {
+	t.Parallel()
 	const waitIdleBudget = 15*time.Second + 60*time.Second
 	if mayorNudgeTimeout <= waitIdleBudget {
 		t.Fatalf("mayorNudgeTimeout (%s) must exceed gt nudge's own wait-idle budget (%s)",
@@ -50,6 +52,7 @@ func TestMayorNudgeTimeoutExceedsWaitIdleBudget(t *testing.T) {
 }
 
 func TestIsPatrolEnabled_MayorDispatchDefaultsOn(t *testing.T) {
+	t.Parallel()
 	// Default-ON is the point of this patrol: the failure it exists for is
 	// silence on a town whose config says nothing about dispatch.
 	if !IsPatrolEnabled(nil, "mayor_dispatch") {
@@ -71,6 +74,7 @@ func TestIsPatrolEnabled_MayorDispatchDefaultsOn(t *testing.T) {
 }
 
 func TestParseDispatchCheck(t *testing.T) {
+	t.Parallel()
 	// The nudge path: a decision plus the message to deliver.
 	result, err := parseDispatchCheck([]byte(`{
 		"seats": {"source": "polecat_pool", "capacity": 4, "occupied": 3, "free": 1},
@@ -96,6 +100,7 @@ func TestParseDispatchCheck(t *testing.T) {
 }
 
 func TestParseDispatchCheck_RejectsUnusableOutput(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		out  string
@@ -124,6 +129,7 @@ func TestParseDispatchCheck_RejectsUnusableOutput(t *testing.T) {
 // triggerMayorDispatch reads it, and no read made after that call returns
 // separates a held guard from a cleared one (gt-hvzy.9).
 func TestTriggerMayorDispatch_SingleFlight(t *testing.T) {
+	t.Parallel()
 	// The patrol is disabled for this daemon so runMayorDispatch returns at the
 	// door: this test is about the guard, and a cycle that reached the check
 	// would shell out to a gt binary this test does not have.
@@ -161,6 +167,7 @@ func TestTriggerMayorDispatch_SingleFlight(t *testing.T) {
 }
 
 func TestNudgeMayor_RefusesEmptyMessage(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 	err := d.nudgeMayor("   ")
 	if err == nil {

@@ -8,6 +8,7 @@ import (
 )
 
 func TestCopyTruncateRotate(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "test.log")
 
@@ -39,6 +40,7 @@ func TestCopyTruncateRotate(t *testing.T) {
 }
 
 func TestCopyTruncateRotate_ShiftsBackups(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "test.log")
 
@@ -66,6 +68,7 @@ func TestCopyTruncateRotate_ShiftsBackups(t *testing.T) {
 }
 
 func TestRotateLogs_SkipsSmallFiles(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -88,6 +91,7 @@ func TestRotateLogs_SkipsSmallFiles(t *testing.T) {
 }
 
 func TestForceRotateLogs_RotatesSmallFiles(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -107,6 +111,7 @@ func TestForceRotateLogs_RotatesSmallFiles(t *testing.T) {
 }
 
 func TestForceRotateLogs_SkipsEmptyFiles(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
@@ -129,6 +134,7 @@ func TestForceRotateLogs_SkipsEmptyFiles(t *testing.T) {
 }
 
 func TestCleanStaleArchives_RemovesOldFiles(t *testing.T) {
+	t.Parallel()
 	daemonDir := t.TempDir()
 
 	// Create a stale archive (8 days old)
@@ -179,6 +185,7 @@ func TestCleanStaleArchives_RemovesOldFiles(t *testing.T) {
 }
 
 func TestCleanStaleArchives_IgnoresNonTimestamped(t *testing.T) {
+	t.Parallel()
 	daemonDir := t.TempDir()
 
 	// Lumberjack-style rotation (not timestamped) — should NOT be removed
@@ -201,6 +208,7 @@ func TestCleanStaleArchives_IgnoresNonTimestamped(t *testing.T) {
 }
 
 func TestStaleArchivePattern(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		match bool
@@ -224,6 +232,7 @@ func TestStaleArchivePattern(t *testing.T) {
 }
 
 func TestEnforceDiskBudget_DeletesOldestFirst(t *testing.T) {
+	t.Parallel()
 	daemonDir := t.TempDir()
 
 	// Create gz files totaling more than daemonDiskBudget is irrelevant for test,
@@ -269,6 +278,7 @@ func TestEnforceDiskBudget_DeletesOldestFirst(t *testing.T) {
 }
 
 func TestCleanDaemonDir_Integration(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {

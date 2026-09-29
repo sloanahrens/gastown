@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseWindowTime(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input      string
 		wantHour   int
@@ -50,6 +51,7 @@ func TestParseWindowTime(t *testing.T) {
 // maintenanceWindowEnd is the first instant isInMaintenanceWindow reports
 // false: the deferral streak and the window share one length.
 func TestMaintenanceWindowEndMatchesWindow(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 2, 28, 3, 20, 0, 0, time.Local)
 	end := maintenanceWindowEnd(now, "03:00")
 	if want := time.Date(2026, 2, 28, 3, 0, 0, 0, time.Local).Add(maintenanceWindowLength); !end.Equal(want) {
@@ -64,6 +66,7 @@ func TestMaintenanceWindowEndMatchesWindow(t *testing.T) {
 }
 
 func TestIsInMaintenanceWindow(t *testing.T) {
+	t.Parallel()
 	loc := time.Local
 
 	tests := []struct {
@@ -133,6 +136,7 @@ func TestIsInMaintenanceWindow(t *testing.T) {
 }
 
 func TestShouldRunMaintenance(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 2, 28, 3, 0, 0, 0, time.Local)
 
 	tests := []struct {
@@ -214,6 +218,7 @@ func TestShouldRunMaintenance(t *testing.T) {
 }
 
 func TestMaintenanceThreshold(t *testing.T) {
+	t.Parallel()
 	// Nil config returns default
 	if got := maintenanceThreshold(nil); got != defaultMaintenanceThreshold {
 		t.Errorf("expected default %d, got %d", defaultMaintenanceThreshold, got)
@@ -235,6 +240,7 @@ func TestMaintenanceThreshold(t *testing.T) {
 }
 
 func TestMaintenanceWindow(t *testing.T) {
+	t.Parallel()
 	// Nil config returns empty
 	if got := maintenanceWindow(nil); got != "" {
 		t.Errorf("expected empty, got %q", got)
@@ -255,6 +261,7 @@ func TestMaintenanceWindow(t *testing.T) {
 }
 
 func TestMaintenanceInterval(t *testing.T) {
+	t.Parallel()
 	// Nil config returns "daily"
 	if got := maintenanceInterval(nil); got != "daily" {
 		t.Errorf("expected daily, got %q", got)
@@ -281,6 +288,7 @@ func TestMaintenanceInterval(t *testing.T) {
 }
 
 func TestIsPatrolEnabledScheduledMaintenance(t *testing.T) {
+	t.Parallel()
 	// Nil config — disabled (opt-in)
 	if IsPatrolEnabled(nil, "scheduled_maintenance") {
 		t.Error("expected scheduled_maintenance disabled with nil config")
@@ -306,6 +314,7 @@ func TestIsPatrolEnabledScheduledMaintenance(t *testing.T) {
 }
 
 func TestMaintenanceMode(t *testing.T) {
+	t.Parallel()
 	withMode := func(mode string) *DaemonPatrolConfig {
 		return &DaemonPatrolConfig{
 			Patrols: &PatrolsConfig{
@@ -348,6 +357,7 @@ func TestMaintenanceMode(t *testing.T) {
 }
 
 func TestMaintenanceMonitorMessage(t *testing.T) {
+	t.Parallel()
 	targets := []maintenanceTarget{
 		{name: "gastown", commits: 1524},
 		{name: "hq", commits: 1204},
@@ -374,6 +384,7 @@ func TestMaintenanceMonitorMessage(t *testing.T) {
 }
 
 func TestTailLines(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		output string

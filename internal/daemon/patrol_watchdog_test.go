@@ -9,6 +9,7 @@ import (
 )
 
 func TestPatrolWatchdogInterval(t *testing.T) {
+	t.Parallel()
 	if got := patrolWatchdogInterval(nil); got != defaultPatrolWatchdogInterval {
 		t.Errorf("expected default interval %v, got %v", defaultPatrolWatchdogInterval, got)
 	}
@@ -31,6 +32,7 @@ func TestPatrolWatchdogInterval(t *testing.T) {
 }
 
 func TestPatrolWatchdogCadenceAndMultiplier_Defaults(t *testing.T) {
+	t.Parallel()
 	if got := patrolWatchdogCadence(nil); got != defaultPatrolWatchdogCadence {
 		t.Errorf("expected default cadence %v, got %v", defaultPatrolWatchdogCadence, got)
 	}
@@ -43,6 +45,7 @@ func TestPatrolWatchdogCadenceAndMultiplier_Defaults(t *testing.T) {
 }
 
 func TestPatrolWatchdogCadenceAndMultiplier_Configured(t *testing.T) {
+	t.Parallel()
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
 			PatrolWatchdog: &PatrolWatchdogConfig{Enabled: true, CadenceStr: "20m", Multiplier: 5},
@@ -57,6 +60,7 @@ func TestPatrolWatchdogCadenceAndMultiplier_Configured(t *testing.T) {
 }
 
 func TestPatrolWatchdogNudgeEnabled_ExplicitFalse(t *testing.T) {
+	t.Parallel()
 	off := false
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
@@ -72,6 +76,7 @@ func TestPatrolWatchdogNudgeEnabled_ExplicitFalse(t *testing.T) {
 // exists for is silence — a role that looks alive but isn't patrolling — so
 // like mayor_dispatch it must not need an opt-in to run.
 func TestIsPatrolEnabled_PatrolWatchdogDefaultsOn(t *testing.T) {
+	t.Parallel()
 	if !IsPatrolEnabled(nil, "patrol_watchdog") {
 		t.Error("expected patrol_watchdog to be enabled with a nil config")
 	}
@@ -86,6 +91,7 @@ func TestIsPatrolEnabled_PatrolWatchdogDefaultsOn(t *testing.T) {
 }
 
 func TestPatrolWatchdogTargets_DeaconPlusEachRig(t *testing.T) {
+	t.Parallel()
 	targets := patrolWatchdogTargets("/town", []string{"gastown"})
 
 	if len(targets) != 3 {
@@ -150,6 +156,7 @@ func stubTarget(role, rig string) patrolWatchdogTarget {
 // is far past the threshold must come back as a Fail finding. No real
 // tmux/bd/mail is touched — both readers are injected fakes.
 func TestAssessPatrolWatchdogTargets_StaleAliveRole_DrivesTheAlarm(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	targets := []patrolWatchdogTarget{stubTarget("witness", "gastown")}
 
@@ -180,6 +187,7 @@ func TestAssessPatrolWatchdogTargets_StaleAliveRole_DrivesTheAlarm(t *testing.T)
 }
 
 func TestAssessPatrolWatchdogTargets_DeadSession_NoAlarm(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	targets := []patrolWatchdogTarget{stubTarget("witness", "gastown")}
 
@@ -206,6 +214,7 @@ func TestAssessPatrolWatchdogTargets_DeadSession_NoAlarm(t *testing.T) {
 // end-to-end path also honors "an unreadable receipt is Unknown, never
 // healthy" — a bd failure on a live session must not surface as Pass.
 func TestAssessPatrolWatchdogTargets_UnreadableReceipt_IsUnknown(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	targets := []patrolWatchdogTarget{stubTarget("deacon", "")}
 
@@ -224,6 +233,7 @@ func TestAssessPatrolWatchdogTargets_UnreadableReceipt_IsUnknown(t *testing.T) {
 }
 
 func TestAssessPatrolWatchdogTargets_FreshAliveRole_Passes(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	targets := []patrolWatchdogTarget{stubTarget("refinery", "gastown")}
 
@@ -242,6 +252,7 @@ func TestAssessPatrolWatchdogTargets_FreshAliveRole_Passes(t *testing.T) {
 }
 
 func TestPatrolWatchdogAlertKey_TownLevelRole(t *testing.T) {
+	t.Parallel()
 	key := patrolWatchdogAlertKey(stubTarget("deacon", ""))
 	if key != "patrol_watchdog:deacon" {
 		t.Errorf("unexpected alert key %q", key)

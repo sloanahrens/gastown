@@ -138,6 +138,7 @@ func holdDaemonLock(t *testing.T, pid int) string {
 }
 
 func TestIsGTDaemonArgs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		args []string
 		want bool
@@ -187,6 +188,7 @@ func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
 // stale or foreign PID) must not be signaled, and nothing is cleaned up
 // while the lock is held.
 func TestStopDaemonDoesNotSignalUnrelatedProcess(t *testing.T) {
+	t.Parallel()
 	skipOnWindows(t)
 	victim := startUnrelatedSleep(t)
 	townRoot := holdDaemonLock(t, victim.pid())
@@ -205,6 +207,7 @@ func TestStopDaemonDoesNotSignalUnrelatedProcess(t *testing.T) {
 
 // The real daemon — a process whose argv is `gt daemon run` — is stopped.
 func TestStopDaemonSignalsVerifiedDaemon(t *testing.T) {
+	t.Parallel()
 	skipOnWindows(t)
 	daemonProc := startImpersonator(t, "gt", "daemon", "run")
 	townRoot := holdDaemonLock(t, daemonProc.pid())
@@ -241,6 +244,7 @@ func newStopTestManager(t *testing.T, pid int) (*DoltServerManager, *strings.Bui
 // comes from a pid file plus "something answers on the port". An unrelated
 // process in that slot must survive.
 func TestDoltStopDoesNotSignalUnrelatedProcess(t *testing.T) {
+	t.Parallel()
 	skipOnWindows(t)
 	victim := startUnrelatedSleep(t)
 	m, logs := newStopTestManager(t, victim.pid())
@@ -296,6 +300,7 @@ func TestDoltStopKeepsPIDFileWhenIdentityUnverified(t *testing.T) {
 }
 
 func TestDoltStopSignalsVerifiedDoltServer(t *testing.T) {
+	t.Parallel()
 	skipOnWindows(t)
 	server := startImpersonator(t, "dolt", "sql-server", "--config", "/nonexistent/config.yaml")
 	m, logs := newStopTestManager(t, server.pid())
@@ -317,6 +322,7 @@ func TestDoltStopSignalsVerifiedDoltServer(t *testing.T) {
 // container port, held on the host by com.docker.backend. Test managers
 // route that call through the seam.
 func TestEnsureRunningIdentityFailureUsesKillImpostersSeam(t *testing.T) {
+	t.Parallel()
 	m := newTestManager(t)
 	m.runningFn = func() (int, bool) { return 1234, true }
 	m.identityCheckFn = func() error { return errors.New("imposter") }
@@ -334,6 +340,7 @@ func TestEnsureRunningIdentityFailureUsesKillImpostersSeam(t *testing.T) {
 
 // newTestManager must never fall through to the real KillImposters.
 func TestNewTestManagerStubsKillImposters(t *testing.T) {
+	t.Parallel()
 	if newTestManager(t).killImpostersFn == nil {
 		t.Fatal("newTestManager leaves killImpostersFn nil: an identity failure would reach doltserver.KillImposters")
 	}

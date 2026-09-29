@@ -93,6 +93,7 @@ func writeDeaconHealthSelfProbeBudget(t *testing.T, townRoot, budget string) {
 }
 
 func TestSendDeaconSelfProbe_Success_RecordsBaseline(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	sender := &fakeRouter{}
 
@@ -118,6 +119,7 @@ func TestSendDeaconSelfProbe_Success_RecordsBaseline(t *testing.T) {
 }
 
 func TestSendDeaconSelfProbe_Failure_PreservesPreviousBaselineAndRecordsError(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	sentAt := time.Now().Add(-2 * time.Minute)
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", sentAt)
@@ -142,6 +144,7 @@ func TestSendDeaconSelfProbe_Failure_PreservesPreviousBaselineAndRecordsError(t 
 }
 
 func TestEvaluateDeaconSelfProbe_NoBaseline_Skipped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	verdict := evaluateDeaconSelfProbeWith(&fakeDeaconInboxLister{}, townRoot)
@@ -152,6 +155,7 @@ func TestEvaluateDeaconSelfProbe_NoBaseline_Skipped(t *testing.T) {
 }
 
 func TestEvaluateDeaconSelfProbe_AckedWithinBudget_OK(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "1m")
 	sentAt := time.Now().Add(-2 * time.Minute)
@@ -169,6 +173,7 @@ func TestEvaluateDeaconSelfProbe_AckedWithinBudget_OK(t *testing.T) {
 }
 
 func TestEvaluateDeaconSelfProbe_AckedLate_Error(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "30s")
 	sentAt := time.Now().Add(-2 * time.Minute)
@@ -193,6 +198,7 @@ func TestEvaluateDeaconSelfProbe_AckedLate_Error(t *testing.T) {
 // judged against self_probe_budget BEFORE being counted as Error. Elapsed
 // (5m) is inside the budget (15m), so this is not evidence of failure yet.
 func TestEvaluateDeaconSelfProbe_UnackedWithinBudget_Pending(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-5*time.Minute))
@@ -214,6 +220,7 @@ func TestEvaluateDeaconSelfProbe_UnackedWithinBudget_Pending(t *testing.T) {
 // escalation fires only after the budget is exceeded and the patrol had its
 // chance to ack, not merely because a probe is outstanding.
 func TestEvaluateDeaconSelfProbe_UnackedPastBudget_Error(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-20*time.Minute))
@@ -240,6 +247,7 @@ func TestEvaluateDeaconSelfProbe_UnackedPastBudget_Error(t *testing.T) {
 // Without the guard this reads as Error, which is how a healthy patrol paged
 // the Mayor on every probe.
 func TestEvaluateDeaconSelfProbe_UnackedPastBudget_NoAckOpportunity_Pending(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-20*time.Minute))
@@ -262,6 +270,7 @@ func TestEvaluateDeaconSelfProbe_UnackedPastBudget_NoAckOpportunity_Pending(t *t
 // an ack-probes run from BEFORE the probe was sent proves only that the patrol
 // was cycling earlier, not that this probe ever had its chance.
 func TestEvaluateDeaconSelfProbe_StaleAckRun_Pending(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-20*time.Minute))
@@ -283,6 +292,7 @@ func TestEvaluateDeaconSelfProbe_StaleAckRun_Pending(t *testing.T) {
 // merely slow to ack, it has stopped cycling — the failure the probe exists to
 // catch, and the one the no-opportunity guard would otherwise hide forever.
 func TestEvaluateDeaconSelfProbe_NoAckRunPastCeiling_Error(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-40*time.Minute))
@@ -307,6 +317,7 @@ func TestEvaluateDeaconSelfProbe_NoAckRunPastCeiling_Error(t *testing.T) {
 // for a cycle, that ack is healthy — not the "acked late" Error a 15m budget
 // produced on every probe.
 func TestEvaluateDeaconSelfProbe_AckedLateOnCoveringCycle_OK(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "45m")
 	sentAt := time.Now().Add(-40 * time.Minute)
@@ -324,6 +335,7 @@ func TestEvaluateDeaconSelfProbe_AckedLateOnCoveringCycle_OK(t *testing.T) {
 }
 
 func TestEvaluateDeaconSelfProbe_ProbeMissing_Skipped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-10*time.Minute))
 
@@ -337,6 +349,7 @@ func TestEvaluateDeaconSelfProbe_ProbeMissing_Skipped(t *testing.T) {
 }
 
 func TestEvaluateDeaconSelfProbe_InboxUnreadable_Skipped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-10*time.Minute))
 
@@ -357,6 +370,7 @@ func TestEvaluateDeaconSelfProbe_InboxUnreadable_Skipped(t *testing.T) {
 // makes the two config keys disagree, so reading the wrong one is
 // unmistakable: an ack 90s later must fail, not pass.
 func TestDeaconSelfProbeBudget_ReadsSelfProbeBudget_NotPingTimeout(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "30s")
 
@@ -388,6 +402,7 @@ func (r *fakeAlertRecorder) clear(reason string, keys ...string) {
 // probe at all — ack is deliberately withheld, evaluation runs
 // deaconSelfProbeErrorThreshold times, and only the last one may escalate.
 func TestDeaconSelfProbe_EscalatesAfterConsecutiveErrors(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	sentAt := time.Now().Add(-1 * time.Hour)
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", sentAt)
@@ -431,6 +446,7 @@ func TestDeaconSelfProbe_EscalatesAfterConsecutiveErrors(t *testing.T) {
 // escalate` dedupes on it) rather than staying silent — a stuck deacon must
 // not go quiet just because the mayor already knows once.
 func TestDeaconSelfProbe_EscalatesOnceThenDedupes(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
 	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
@@ -456,6 +472,7 @@ func TestDeaconSelfProbe_EscalatesOnceThenDedupes(t *testing.T) {
 // one or two Errors are noise (a slow tick, a transient Dolt hiccup), not
 // evidence of a stuck deacon, and must not page the mayor.
 func TestDeaconSelfProbe_BelowThreshold_NoEscalation(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
 	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
@@ -477,6 +494,7 @@ func TestDeaconSelfProbe_BelowThreshold_NoEscalation(t *testing.T) {
 // recovers must not stay flagged, and a later relapse must count from zero,
 // not resume from where the old streak left off.
 func TestDeaconSelfProbe_Recovery_ResetsCounterAndClears(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "1h") // generous, so the OK round doesn't trip on latency
@@ -518,6 +536,7 @@ func TestDeaconSelfProbe_Recovery_ResetsCounterAndClears(t *testing.T) {
 // (probe missing, inbox unreadable) is not evidence either way and must
 // neither mask a real failure streak nor falsely reset one.
 func TestDeaconSelfProbe_Skipped_LeavesCounterUntouched(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-1*time.Hour))
 	writeAckProbesRunForTest(t, townRoot, time.Now().Add(-30*time.Minute))
@@ -547,6 +566,7 @@ func TestDeaconSelfProbe_Skipped_LeavesCounterUntouched(t *testing.T) {
 // escalate if the gate were missing (see
 // TestDeaconSelfProbe_EscalatesAfterConsecutiveErrors); paused, none may.
 func TestRunDeaconSelfProbeCycle_PausedDeacon_NoEscalation(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := deacon.Pause(townRoot, "test", "test"); err != nil {
 		t.Fatalf("deacon.Pause: %v", err)
@@ -579,6 +599,7 @@ func TestRunDeaconSelfProbeCycle_PausedDeacon_NoEscalation(t *testing.T) {
 // paused" — copying heartbeat.go:156's precedent. A corrupt pause file must
 // not silently re-enable evaluation and escalation.
 func TestRunDeaconSelfProbeCycle_UnreadablePauseState_FailsClosed(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	pauseFile := deacon.GetPauseFile(townRoot)
 	if err := os.MkdirAll(filepath.Dir(pauseFile), 0755); err != nil {
@@ -609,6 +630,7 @@ func TestRunDeaconSelfProbeCycle_UnreadablePauseState_FailsClosed(t *testing.T) 
 // replaces the baseline's nonce, so there is exactly one at any time, not a
 // list that grows with every unacked round.
 func TestRunDeaconSelfProbeCycle_BoundsBacklogToOneOutstandingProbe(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	recorder := &fakeAlertRecorder{}
 	sender := &fakeRouter{}
@@ -638,6 +660,7 @@ func TestRunDeaconSelfProbeCycle_BoundsBacklogToOneOutstandingProbe(t *testing.T
 // inert (every probe judged at ~one doctor-dog interval old, never at its
 // real age). The same nonce must survive a pending tick.
 func TestRunDeaconSelfProbeCycle_PendingWithinBudget_DoesNotResend(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeDeaconHealthSelfProbeBudget(t, townRoot, "15m")
 	writeDeaconSelfProbeBaselineForTest(t, townRoot, "nonce-1", time.Now().Add(-5*time.Minute))
@@ -668,6 +691,7 @@ func TestRunDeaconSelfProbeCycle_PendingWithinBudget_DoesNotResend(t *testing.T)
 // `gt deacon resume` judges an hours-old probe against the budget and can
 // page the mayor immediately.
 func TestRunDeaconSelfProbeCycle_Pause_ResetsBaselineSoStaleProbeIsNeverJudged(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// A streak already in progress before the pause.
 	if err := writeDeaconSelfProbeBaseline(deaconSelfProbeStatePath(townRoot), deaconSelfProbeBaseline{
@@ -717,6 +741,7 @@ func TestRunDeaconSelfProbeCycle_Pause_ResetsBaselineSoStaleProbeIsNeverJudged(t
 }
 
 func TestEvaluateDeaconSelfProbe_LastSendFailed_Skipped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	statePath := deaconSelfProbeStatePath(townRoot)
 	if err := writeDeaconSelfProbeBaseline(statePath, deaconSelfProbeBaseline{
@@ -745,6 +770,7 @@ func TestEvaluateDeaconSelfProbe_LastSendFailed_Skipped(t *testing.T) {
 // reads: `gt deacon ack-probes` writes it, and an evaluation in a later process
 // must read the same time back (hq-90m15).
 func TestRecordDeaconAckProbesRun_RoundTrips(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if _, ok := readDeaconAckProbesRun(townRoot); ok {

@@ -7,6 +7,7 @@ import (
 )
 
 func TestLoadPatrolConfig(t *testing.T) {
+	t.Parallel()
 	// Create a temp dir with test config
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -46,6 +47,7 @@ func TestLoadPatrolConfig(t *testing.T) {
 }
 
 func TestIsPatrolEnabled_NilConfig(t *testing.T) {
+	t.Parallel()
 	// Should default to enabled when config is nil
 	if !IsPatrolEnabled(nil, "refinery") {
 		t.Error("expected default to be enabled")
@@ -53,6 +55,7 @@ func TestIsPatrolEnabled_NilConfig(t *testing.T) {
 }
 
 func TestIsPatrolEnabled_DoltRemotes(t *testing.T) {
+	t.Parallel()
 	// dolt_remotes defaults to disabled even with nil config (opt-in patrol)
 	if IsPatrolEnabled(nil, "dolt_remotes") {
 		t.Error("expected dolt_remotes to be disabled with nil config")
@@ -80,6 +83,7 @@ func TestIsPatrolEnabled_DoltRemotes(t *testing.T) {
 }
 
 func TestSaveAndLoadPatrolConfig(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	threshold := 500
@@ -123,6 +127,7 @@ func TestSaveAndLoadPatrolConfig(t *testing.T) {
 }
 
 func TestLoadDisabledPatrolsFromTownSettings(t *testing.T) {
+	t.Parallel()
 	// No settings file: returns nil
 	tmpDir := t.TempDir()
 	got := loadDisabledPatrolsFromTownSettings(tmpDir)
@@ -168,6 +173,7 @@ func TestLoadDisabledPatrolsFromTownSettings(t *testing.T) {
 }
 
 func TestIsPatrolActive(t *testing.T) {
+	t.Parallel()
 	// Patrol enabled in daemon config, not in disabled list → active
 	d := &Daemon{
 		patrolConfig:    nil, // nil config = all default-enabled patrols enabled
@@ -214,6 +220,7 @@ func TestIsPatrolActive(t *testing.T) {
 }
 
 func TestDoltRemotesInterval(t *testing.T) {
+	t.Parallel()
 	// Default interval
 	if got := doltRemotesInterval(nil); got != defaultDoltRemotesInterval {
 		t.Errorf("expected default interval %v, got %v", defaultDoltRemotesInterval, got)

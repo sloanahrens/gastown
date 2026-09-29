@@ -7,6 +7,7 @@ import (
 )
 
 func TestQuotaDogInterval(t *testing.T) {
+	t.Parallel()
 	// Default interval
 	if got := quotaDogInterval(nil); got != defaultQuotaDogInterval {
 		t.Errorf("expected default interval %v, got %v", defaultQuotaDogInterval, got)
@@ -33,6 +34,7 @@ func TestQuotaDogInterval(t *testing.T) {
 }
 
 func TestIsPatrolEnabled_QuotaDog(t *testing.T) {
+	t.Parallel()
 	// Nil config: disabled (opt-in patrol)
 	if IsPatrolEnabled(nil, "quota_dog") {
 		t.Error("expected quota_dog to be disabled with nil config")
@@ -60,6 +62,7 @@ func TestIsPatrolEnabled_QuotaDog(t *testing.T) {
 }
 
 func TestQuotaDogConfigJSON(t *testing.T) {
+	t.Parallel()
 	jsonData := `{"enabled": true, "interval": "3m"}`
 
 	var config QuotaDogConfig
@@ -76,6 +79,7 @@ func TestQuotaDogConfigJSON(t *testing.T) {
 }
 
 func TestQuotaDogDefaultConstants(t *testing.T) {
+	t.Parallel()
 	if defaultQuotaDogInterval != 5*time.Minute {
 		t.Errorf("expected default interval 5m, got %v", defaultQuotaDogInterval)
 	}
@@ -85,6 +89,7 @@ func TestQuotaDogDefaultConstants(t *testing.T) {
 }
 
 func TestQuotaResumeInterval(t *testing.T) {
+	t.Parallel()
 	// Default interval
 	if got := quotaResumeInterval(nil); got != defaultQuotaResumeInterval {
 		t.Errorf("expected default interval %v, got %v", defaultQuotaResumeInterval, got)
@@ -115,6 +120,7 @@ func TestQuotaResumeInterval(t *testing.T) {
 // (which is opt-in and needs an account pool). An explicit config entry
 // can still turn it off.
 func TestIsPatrolEnabled_QuotaResume(t *testing.T) {
+	t.Parallel()
 	// Nil config: enabled by default — must work with no daemon.json at all.
 	if !IsPatrolEnabled(nil, "quota_resume") {
 		t.Error("expected quota_resume to be enabled with nil config")

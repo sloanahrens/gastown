@@ -11,6 +11,7 @@ import (
 // 'gt daemon clear-backoff'.
 
 func TestObserveHeartbeat_NotInCrashLoop_NoOp(t *testing.T) {
+	t.Parallel()
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{})
 
 	if rt.ObserveHeartbeat("deacon", 5, true) {
@@ -19,6 +20,7 @@ func TestObserveHeartbeat_NotInCrashLoop_NoOp(t *testing.T) {
 }
 
 func TestObserveHeartbeat_ClearsAfterSustainedRecovery(t *testing.T) {
+	t.Parallel()
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{
 		CrashLoopRecoveryWindow: 10 * time.Minute,
 	})
@@ -47,6 +49,7 @@ func TestObserveHeartbeat_ClearsAfterSustainedRecovery(t *testing.T) {
 }
 
 func TestObserveHeartbeat_StaleHeartbeatResetsWindow(t *testing.T) {
+	t.Parallel()
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{
 		CrashLoopRecoveryWindow: 10 * time.Minute,
 	})
@@ -72,6 +75,7 @@ func TestObserveHeartbeat_StaleHeartbeatResetsWindow(t *testing.T) {
 }
 
 func TestObserveHeartbeat_StuckCycleResetsWindow(t *testing.T) {
+	t.Parallel()
 	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{
 		CrashLoopRecoveryWindow: 10 * time.Minute,
 	})

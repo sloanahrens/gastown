@@ -139,6 +139,11 @@ type strandedConvoyInfo struct {
 // any rig are detected. Convoys live in the hq store, so convoy lookups always use hqStore.
 // Parked rigs are skipped during event polling.
 type ConvoyManager struct {
+	// listOriginBranchesFn and deadHolderWorktreeStateFn replace the git reads
+	// behind the dead-holder checks in tests; nil runs the real ones.
+	listOriginBranchesFn      func(rigRoot string) ([]string, error)
+	deadHolderWorktreeStateFn func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error)
+
 	townRoot     string
 	scanInterval time.Duration
 	ctx          context.Context
@@ -1212,9 +1217,15 @@ func (m *ConvoyManager) convoyStatusOf(convoyID string) (string, bool) {
 	return string(issue.Status), true
 }
 
-// listOriginBranchesFn is a seam for tests. Production uses
+// listOriginBranches lists the polecat branches on a rig's origin through
+// listOriginBranchesFn, a seam for tests; nil (production) uses
 // polecat.ListOriginPolecatBranches.
-var listOriginBranchesFn = polecat.ListOriginPolecatBranches
+func (m *ConvoyManager) listOriginBranches(rigRoot string) ([]string, error) {
+	if m.listOriginBranchesFn != nil {
+		return m.listOriginBranchesFn(rigRoot)
+	}
+	return polecat.ListOriginPolecatBranches(rigRoot)
+}
 
 // survivingBranchFor reports whether issueID already has a polecat branch on
 // the rig's origin remote, and returns it. A surviving branch means the work
@@ -1275,7 +1286,7 @@ func (m *ConvoyManager) originBranchesWithErr(rig string) originBranchesResult {
 		return res
 	}
 
-	branches, err := listOriginBranchesFn(filepath.Join(m.townRoot, rig))
+	branches, err := m.listOriginBranches(filepath.Join(m.townRoot, rig))
 	res := originBranchesResult{branches: branches, err: err}
 	m.originBranchesCache[rig] = res
 	return res
@@ -1344,10 +1355,15 @@ type deadHolderWorktreeState struct {
 	Status       *git.UncommittedWorkStatus
 }
 
-// deadHolderWorktreeStateFn resolves a dead holder's worktree state. A var so
-// tests can substitute a fake without real git repos; production uses
-// defaultDeadHolderWorktreeState.
-var deadHolderWorktreeStateFn = defaultDeadHolderWorktreeState
+// deadHolderWorktreeState resolves a dead holder's worktree state through
+// deadHolderWorktreeStateFn, a seam so tests can substitute a fake without
+// real git repos; nil (production) uses defaultDeadHolderWorktreeState.
+func (m *ConvoyManager) deadHolderWorktreeState(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
+	if m.deadHolderWorktreeStateFn != nil {
+		return m.deadHolderWorktreeStateFn(townRoot, assignee, issueID)
+	}
+	return defaultDeadHolderWorktreeState(townRoot, assignee, issueID)
+}
 
 // defaultDeadHolderWorktreeState inspects the assignee's worktree directly,
 // using the same path resolution the deacon's stale-hook scan uses. Returns a
@@ -1429,7 +1445,7 @@ func (m *ConvoyManager) resolveDeadHolderWork(rig, assignee, issueID string) (fe
 		return false, ""
 	}
 
-	state, err := deadHolderWorktreeStateFn(m.townRoot, assignee, issueID)
+	state, err := m.deadHolderWorktreeState(m.townRoot, assignee, issueID)
 	if err != nil {
 		msg := fmt.Sprintf("%s: %s's worktree state could not be determined (%s), not re-slinging blind",
 			issueID, assignee, util.FirstLine(err.Error()))

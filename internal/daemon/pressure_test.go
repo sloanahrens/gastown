@@ -5,6 +5,7 @@ import (
 )
 
 func TestIsAgentSession(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want bool
@@ -27,6 +28,7 @@ func TestIsAgentSession(t *testing.T) {
 }
 
 func TestLoadAverage1_DoesNotPanic(t *testing.T) {
+	t.Parallel()
 	load := loadAverage1()
 	if load < 0 {
 		t.Errorf("load average should be >= 0, got %f", load)
@@ -34,6 +36,7 @@ func TestLoadAverage1_DoesNotPanic(t *testing.T) {
 }
 
 func TestAvailableMemoryGB_DoesNotPanic(t *testing.T) {
+	t.Parallel()
 	mem := availableMemoryGB()
 	if mem < 0 {
 		t.Errorf("available memory should be >= 0, got %f", mem)

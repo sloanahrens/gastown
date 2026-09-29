@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/dog"
@@ -13,12 +14,21 @@ import (
 // agentCapturingSM records the startup options the dispatcher passes, so a
 // test can see the agent preset the dog session will run.
 type agentCapturingSM struct {
+	mu   sync.Mutex
 	opts []dog.SessionStartOptions
 }
 
 func (s *agentCapturingSM) Start(_ string, opts dog.SessionStartOptions) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.opts = append(s.opts, opts)
 	return nil
+}
+
+func (s *agentCapturingSM) options() []dog.SessionStartOptions {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]dog.SessionStartOptions(nil), s.opts...)
 }
 
 func newDispatchTestDaemon(t *testing.T) *Daemon {
@@ -36,6 +46,7 @@ func newDispatchTestDaemon(t *testing.T) *Daemon {
 // without the key leaves the override empty so the session keeps resolving
 // role_agents.dog.
 func TestDispatchPluginToDog_PluginAgentReachesSessionOptions(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		agent string
@@ -71,6 +82,7 @@ func TestDispatchPluginToDog_PluginAgentReachesSessionOptions(t *testing.T) {
 // A script plugin the daemon ran itself and that failed is handed to a dog;
 // that dog must run the plugin's preset too.
 func TestScriptPluginFailureHandoff_KeepsPluginAgent(t *testing.T) {
+	t.Parallel()
 	d := newDispatchTestDaemon(t)
 	mgr, sm, router, rec := &fakeMgr{}, &agentCapturingSM{}, &fakeRouter{}, &fakeRecorder{}
 
@@ -79,11 +91,12 @@ func TestScriptPluginFailureHandoff_KeepsPluginAgent(t *testing.T) {
 
 	d.startScriptPlugin(p, mgr, sm, router, rec)
 
-	waitFor(t, func() bool { return len(sm.opts) == 1 })
-	if sm.opts[0].AgentOverride != "claude-opus" {
-		t.Errorf("handoff AgentOverride = %q, want %q", sm.opts[0].AgentOverride, "claude-opus")
+	waitFor(t, func() bool { return len(sm.options()) == 1 })
+	if opts := sm.options(); opts[0].AgentOverride != "claude-opus" {
+		t.Errorf("handoff AgentOverride = %q, want %q", opts[0].AgentOverride, "claude-opus")
 	}
-	if len(router.sent) != 1 {
-		t.Errorf("handoff mail sent = %d, want 1", len(router.sent))
+	// The mail goes out before the session starts, so it is in by now.
+	if sent := router.sentMessages(); len(sent) != 1 {
+		t.Errorf("handoff mail sent = %d, want 1", len(sent))
 	}
 }
