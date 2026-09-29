@@ -41,9 +41,7 @@ var (
 // The cache is keyed by the resolved bd path so tests and subprocess stubs that
 // replace bd on PATH get re-probed instead of reusing stale capability state.
 var (
-	bdAllowStaleMu     sync.Mutex
-	bdAllowStalePath   string
-	bdAllowStaleResult bool
+	bdAllowStaleMu sync.Mutex
 	// bdAllowStaleProbeTimeout, when non-zero, overrides the capability-probe
 	// timeout. Zero (the default) means "use defaultBdAllowStaleProbeTimeout".
 	// Tests set this directly to exercise timeout handling without waiting for
@@ -80,10 +78,49 @@ func resolveBdAllowStaleProbeTimeout() time.Duration {
 // ResetBdAllowStaleCacheForTest clears the cached bd --allow-stale capability.
 // It exists for tests that swap bd binaries on PATH within a single process.
 func ResetBdAllowStaleCacheForTest() {
-	bdAllowStaleMu.Lock()
-	bdAllowStalePath = ""
-	bdAllowStaleResult = false
-	bdAllowStaleMu.Unlock()
+	bdAllowStale.reset()
+}
+
+// allowStaleCache remembers, per bd binary path, whether bd accepts
+// --allow-stale.
+type allowStaleCache struct {
+	mu     sync.Mutex
+	path   string
+	result bool
+}
+
+// bdAllowStale is the process's cache for the bd on PATH.
+var bdAllowStale allowStaleCache
+
+func (c *allowStaleCache) reset() {
+	c.mu.Lock()
+	c.path, c.result = "", false
+	c.mu.Unlock()
+}
+
+// supported answers for the bd at path, running probe on a cache miss.
+// probe reports whether bd accepted the flag and whether that answer is
+// definitive. Only a definitive answer is cached.
+func (c *allowStaleCache) supported(path string, probe func() (supported, definitive bool)) bool {
+	c.mu.Lock()
+	if c.path == path {
+		r := c.result
+		c.mu.Unlock()
+		return r
+	}
+	c.mu.Unlock()
+	ok, definitive := probe()
+	if !definitive {
+		// A timeout says nothing about the flag: answer "unsupported" for
+		// this call only, and probe again next time (gt-22hdp.27).
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.path != path {
+		c.path, c.result = path, ok
+	}
+	return c.result
 }
 
 // SetBdAllowStaleProbeTimeoutForTest overrides the capability-probe timeout
@@ -118,15 +155,15 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 		return false
 	}
 
-	bdAllowStaleMu.Lock()
-	cachedPath := bdAllowStalePath
-	cachedResult := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
+	return bdAllowStale.supported(bdPath, func() (bool, bool) { return probeAllowStale(bdPath, env) })
+}
 
-	if cachedPath == bdPath {
-		return cachedResult
-	}
-
+// probeAllowStale runs `bd --allow-stale version` under the probe timeout.
+// bd v0.60+ exits 0 even on an unknown flag, printing the error, so the
+// output decides. The answer is definitive only when bd ran and exited
+// within the timeout: a timeout or a failure to start says nothing about
+// the flag, and fails closed (unsupported) for this call only.
+func probeAllowStale(bdPath string, env []string) (supported, definitive bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), resolveBdAllowStaleProbeTimeout())
 	defer cancel()
 
@@ -138,22 +175,21 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 	var combinedOut bytes.Buffer
 	cmd.Stdout = &combinedOut
 	cmd.Stderr = &combinedOut
-	err = cmd.Run()
-	// bd v0.60+ exits 0 even on unknown flags, printing the error to stderr.
-	// Check output for "unknown flag" to detect lack of support. Treat probe
-	// errors/timeouts as unsupported so higher-level commands fail closed
-	// instead of hanging on a wedged bd subprocess.
-	probeOut := strings.TrimSpace(combinedOut.String())
-	supported := err == nil && probeOut != "" && !strings.Contains(probeOut, "unknown flag")
+	err := cmd.Run()
+	return allowStaleAnswer(ctx, err, combinedOut.String())
+}
 
-	bdAllowStaleMu.Lock()
-	if bdAllowStalePath != bdPath {
-		bdAllowStalePath = bdPath
-		bdAllowStaleResult = supported
+// allowStaleAnswer reads a probe's outcome: whether bd accepted
+// --allow-stale, and whether that is a definitive answer worth caching.
+func allowStaleAnswer(ctx context.Context, err error, output string) (supported, definitive bool) {
+	out := strings.TrimSpace(output)
+	supported = err == nil && out != "" && !strings.Contains(out, "unknown flag")
+	if ctx.Err() != nil {
+		return false, false
 	}
-	result := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
-	return result
+	var exit interface{ ExitCode() int }
+	definitive = err == nil || errors.As(err, &exit)
+	return supported && definitive, definitive
 }
 
 // MaybePrependAllowStale prepends --allow-stale to args if bd supports it.

@@ -1455,16 +1455,14 @@ func TestIsFlagLikeTitle(t *testing.T) {
 }
 
 func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
-	bdAllowStaleMu.Lock()
-	prevPath := bdAllowStalePath
-	prevResult := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
+	bdAllowStale.mu.Lock()
+	prevPath, prevResult := bdAllowStale.path, bdAllowStale.result
+	bdAllowStale.mu.Unlock()
 	ResetBdAllowStaleCacheForTest()
 	t.Cleanup(func() {
-		bdAllowStaleMu.Lock()
-		bdAllowStalePath = prevPath
-		bdAllowStaleResult = prevResult
-		bdAllowStaleMu.Unlock()
+		bdAllowStale.mu.Lock()
+		bdAllowStale.path, bdAllowStale.result = prevPath, prevResult
+		bdAllowStale.mu.Unlock()
 	})
 
 	supportingDir := t.TempDir()
@@ -1485,18 +1483,16 @@ func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 }
 
 func TestBdSupportsAllowStale_TimeoutTreatsProbeAsUnsupported(t *testing.T) {
-	bdAllowStaleMu.Lock()
-	prevPath := bdAllowStalePath
-	prevResult := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
+	bdAllowStale.mu.Lock()
+	prevPath, prevResult := bdAllowStale.path, bdAllowStale.result
+	bdAllowStale.mu.Unlock()
 	prevTimeout := bdAllowStaleProbeTimeout
 	ResetBdAllowStaleCacheForTest()
 	bdAllowStaleProbeTimeout = 100 * time.Millisecond
 	t.Cleanup(func() {
-		bdAllowStaleMu.Lock()
-		bdAllowStalePath = prevPath
-		bdAllowStaleResult = prevResult
-		bdAllowStaleMu.Unlock()
+		bdAllowStale.mu.Lock()
+		bdAllowStale.path, bdAllowStale.result = prevPath, prevResult
+		bdAllowStale.mu.Unlock()
 		bdAllowStaleProbeTimeout = prevTimeout
 	})
 
@@ -5170,16 +5166,14 @@ func TestInitPassesServerFlag(t *testing.T) {
 		t.Skip("uses Unix shell script bd stub")
 	}
 
-	bdAllowStaleMu.Lock()
-	prevPath := bdAllowStalePath
-	prevResult := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
+	bdAllowStale.mu.Lock()
+	prevPath, prevResult := bdAllowStale.path, bdAllowStale.result
+	bdAllowStale.mu.Unlock()
 	ResetBdAllowStaleCacheForTest()
 	t.Cleanup(func() {
-		bdAllowStaleMu.Lock()
-		bdAllowStalePath = prevPath
-		bdAllowStaleResult = prevResult
-		bdAllowStaleMu.Unlock()
+		bdAllowStale.mu.Lock()
+		bdAllowStale.path, bdAllowStale.result = prevPath, prevResult
+		bdAllowStale.mu.Unlock()
 	})
 
 	stubDir := t.TempDir()
@@ -5245,16 +5239,14 @@ func TestInitUsesUniqueDatabasePerCall(t *testing.T) {
 		t.Skip("uses Unix shell script bd stub")
 	}
 
-	bdAllowStaleMu.Lock()
-	prevPath := bdAllowStalePath
-	prevResult := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
+	bdAllowStale.mu.Lock()
+	prevPath, prevResult := bdAllowStale.path, bdAllowStale.result
+	bdAllowStale.mu.Unlock()
 	ResetBdAllowStaleCacheForTest()
 	t.Cleanup(func() {
-		bdAllowStaleMu.Lock()
-		bdAllowStalePath = prevPath
-		bdAllowStaleResult = prevResult
-		bdAllowStaleMu.Unlock()
+		bdAllowStale.mu.Lock()
+		bdAllowStale.path, bdAllowStale.result = prevPath, prevResult
+		bdAllowStale.mu.Unlock()
 	})
 
 	stubDir := t.TempDir()
@@ -5959,16 +5951,14 @@ func TestRunEnv_StripsPollutedDoltEnvAndUsesRigMetadata(t *testing.T) {
 		t.Skip("uses Unix shell script bd stub")
 	}
 
-	bdAllowStaleMu.Lock()
-	prevPath := bdAllowStalePath
-	prevResult := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
+	bdAllowStale.mu.Lock()
+	prevPath, prevResult := bdAllowStale.path, bdAllowStale.result
+	bdAllowStale.mu.Unlock()
 	ResetBdAllowStaleCacheForTest()
 	t.Cleanup(func() {
-		bdAllowStaleMu.Lock()
-		bdAllowStalePath = prevPath
-		bdAllowStaleResult = prevResult
-		bdAllowStaleMu.Unlock()
+		bdAllowStale.mu.Lock()
+		bdAllowStale.path, bdAllowStale.result = prevPath, prevResult
+		bdAllowStale.mu.Unlock()
 	})
 
 	// The bd stub compares $PWD (physical path from the shell's getcwd) against
