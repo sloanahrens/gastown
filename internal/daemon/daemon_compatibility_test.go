@@ -95,3 +95,41 @@ func TestCheckBeadsStoreCompatibility_RejectsSchemaAheadOfBD(t *testing.T) {
 		t.Fatalf("error %q lacks %q", err, want)
 	}
 }
+
+// closeRecorder is a store that only records Close; the guard must refuse
+// before it reads anything from a store.
+type closeRecorder struct {
+	beadsdk.Storage
+	closed bool
+}
+
+func (c *closeRecorder) Close() error { c.closed = true; return nil }
+
+// TestVerifyBeadsStoresBlocksOnBDSchemaLevel drives the startup gate through
+// the bdSchemaLevel seam: a failed read and a bd that reports no schema level
+// (a pre-machine-surface build) each block startup and close every store.
+func TestVerifyBeadsStoresBlocksOnBDSchemaLevel(t *testing.T) {
+	old := bdSchemaLevel
+	t.Cleanup(func() { bdSchemaLevel = old })
+	for _, tc := range []struct {
+		name  string
+		level int
+		err   error
+		want  string
+	}{
+		{"read fails", 0, errors.New("bd version --json: exit status 1"), "cannot read bd's schema level: bd version --json: exit status 1"},
+		{"no level reported", 0, nil, "reports no db_schema_version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bdSchemaLevel = func(context.Context, string) (int, error) { return tc.level, tc.err }
+			store := &closeRecorder{}
+			err := verifyBeadsStores(context.Background(), nil, t.TempDir(), map[string]beadsdk.Storage{"hq": store})
+			if err == nil || !strings.Contains(err.Error(), "daemon startup blocked") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("verifyBeadsStores = %v, want a startup block naming %q", err, tc.want)
+			}
+			if !store.closed {
+				t.Error("stores were not closed on refusal")
+			}
+		})
+	}
+}

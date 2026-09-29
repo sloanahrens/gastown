@@ -1597,6 +1597,25 @@ var bdSchemaLevel = func(ctx context.Context, townRoot string) (int, error) {
 	return info.DBSchemaVersion, nil
 }
 
+// verifyBeadsStores is the daemon's startup gate on opened stores: bd must
+// report the schema level it migrates to, and every store must be at that
+// level with pollable event tables. On refusal it closes every store.
+func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]beadsdk.Storage) error {
+	bdSchema, err := bdSchemaLevel(ctx, townRoot)
+	if err == nil && bdSchema <= 0 {
+		err = fmt.Errorf("bd version --json reports no db_schema_version (a bd build from before the machine surface); install the beads fork's bd with make safe-install")
+	}
+	if err != nil {
+		closeBeadsStores(logger, stores)
+		return fmt.Errorf("daemon startup blocked: cannot read bd's schema level: %w", err)
+	}
+	if err := checkBeadsStoreCompatibility(ctx, stores, bdSchema); err != nil {
+		closeBeadsStores(logger, stores)
+		return err
+	}
+	return nil
+}
+
 // checkBeadsStoreCompatibility refuses stores whose database schema level
 // is not the level bd migrates to (bdSchema), or whose event tables cannot
 // be polled. It compares schema integers read from schema_migrations, the
@@ -2769,13 +2788,7 @@ func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
 		return storeOpenResult{Missing: missing}, nil
 	}
 
-	bdSchema, err := bdSchemaLevel(d.ctx, d.config.TownRoot)
-	if err != nil {
-		closeBeadsStores(d.logger, stores)
-		return storeOpenResult{Missing: missing}, fmt.Errorf("daemon startup blocked: cannot read bd's schema level: %w", err)
-	}
-	if err := checkBeadsStoreCompatibility(d.ctx, stores, bdSchema); err != nil {
-		closeBeadsStores(d.logger, stores)
+	if err := verifyBeadsStores(d.ctx, d.logger, d.config.TownRoot, stores); err != nil {
 		return storeOpenResult{Missing: missing}, err
 	}
 
