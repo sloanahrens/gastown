@@ -165,7 +165,7 @@ Merge confirmed. Clean up the polecat.
 
 **1. Kill the polecat session:**
 ```bash
-gt session kill {{rig}}/polecats/{{polecat}}
+gt session stop {{rig}}/{{polecat}}
 ```
 
 **2. Remove worktree (if ephemeral):**
