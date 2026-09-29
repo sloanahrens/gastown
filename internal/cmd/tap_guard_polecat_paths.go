@@ -28,8 +28,10 @@ import (
 //     never blocks anything in a non-polecat session.
 //  2. Canonicalise before comparing. Every target is expanded (~, $HOME, and
 //     any other variable this process can see), resolved against the session
-//     cwd, and symlink-resolved through its longest existing prefix — so a
-//     file that does not exist yet still resolves through its parent. Compare
+//     cwd, and symlink-resolved component by component exactly as the kernel
+//     does (see resolveLikeKernel) — so "sym/.." and a dangling link are judged
+//     where a write really lands, and a file that does not exist yet still
+//     resolves through its parent. Compare
 //     by whole path components with a trailing separator, so /worktree-evil
 //     never matches /worktree.
 //  3. Fail CLOSED. A target the guard is asked to check but cannot resolve is
@@ -99,8 +101,9 @@ owner cannot see, which is how gt-hmaf's incident happened.
     for every agent on the host (gt-tnts5).
 
 Paths are expanded (~, $HOME, and any variable this process can see), resolved
-against the session cwd, symlink-resolved through their longest existing
-prefix, and compared by whole path components. A target that cannot be
+against the session cwd, symlink-resolved component by component the way the
+kernel resolves them (a dangling link is judged by the target a write through
+it creates), and compared by whole path components. A target that cannot be
 resolved is DENIED — the guard fails closed rather than guessing.
 
 Exit codes:
@@ -497,20 +500,23 @@ func splitPolecatLayout(path string) (polecatLayout, bool) {
 }
 
 // canonicalizeToolPath resolves a path supplied by a tool call to the absolute,
-// symlink-resolved, cleaned path it names:
+// symlink-resolved, cleaned path the kernel would write to:
 //
 //   - ~, $HOME, ${HOME} and any other variable this process can see are
 //     expanded ($TMPDIR, $GT_POLECAT_PATH, ... — the guard runs with the
 //     session's environment);
 //   - a relative path resolves against cwd (the session's working directory);
-//   - symlinks are resolved in the longest existing prefix, and the remaining
-//     components are appended — so a file that does not exist yet still
-//     resolves through its parent, which is how a Write to a new file is
-//     judged without failing open on the missing leaf.
+//   - the result is resolved the way the kernel resolves it (see
+//     resolveLikeKernel): component by component, following each symlink as
+//     it is met — so "sym/.." is the parent of sym's TARGET, relative link
+//     text is relative to the link's own directory, and a dangling link is
+//     judged by the target a write through it would create. Components that
+//     do not exist yet are kept as spelled, which is how a Write to a new file
+//     is judged without failing open on the missing leaf.
 //
 // ok is false when the path cannot be resolved at all — an unknown variable, an
-// unresolvable home directory, a command substitution, no usable cwd, or no
-// existing ancestor. Callers must treat !ok as DENY (fail closed, rule 3).
+// unresolvable home directory, a command substitution, no usable cwd, or a
+// symlink loop. Callers must treat !ok as DENY (fail closed, rule 3).
 func canonicalizeToolPath(raw, cwd string) (string, bool) {
 	if raw == "" {
 		return "", false
@@ -529,28 +535,102 @@ func canonicalizeToolPath(raw, cwd string) (string, bool) {
 		return "", false // a variable this process cannot see
 	}
 	if !filepath.IsAbs(expanded) {
-		if cwd == "" {
+		if cwd == "" || !filepath.IsAbs(cwd) {
 			return "", false
 		}
-		expanded = filepath.Join(cwd, expanded)
+		// Concatenate, never filepath.Join: Join cleans, and a lexical clean
+		// before symlink resolution is exactly the "sym/.." mistake.
+		expanded = cwd + string(filepath.Separator) + expanded
 	}
-	expanded = filepath.Clean(expanded)
+	return resolveLikeKernel(expanded)
+}
 
-	// Resolve symlinks in the longest existing prefix; keep walking up until a
-	// component resolves (or the root is reached, which always resolves).
-	dir, rest := expanded, ""
-	for {
-		resolved, err := filepath.EvalSymlinks(dir)
-		if err == nil {
-			return filepath.Join(resolved, rest), true
+// maxSymlinkFollows bounds how many symlinks resolveLikeKernel follows for one
+// path, the way the kernel's own limit (MAXSYMLINKS: 32 on macOS, 40 on Linux)
+// turns a link cycle into ELOOP instead of a hang.
+const maxSymlinkFollows = 40
+
+// resolveLikeKernel resolves an absolute path the way namei does (gt-22hdp.41).
+// The previous implementation cleaned the path lexically and then resolved its
+// longest existing prefix with filepath.EvalSymlinks, which disagreed with the
+// kernel three ways, each a way to write into the town from a path that looked
+// like scratch:
+//
+//  1. "a/sym/../f" was cleaned to "a/f"; the kernel follows sym first and takes
+//     ".." from its target.
+//  2. A dangling link could not be EvalSymlinks'd, so the walk fell back to the
+//     link's parent directory — while a write through a dangling final link
+//     creates the file at the link's target.
+//  3. Relative link text in such a chain was never read at all, instead of
+//     being resolved against the link's own directory.
+//
+// The walk: start at the root; for each component, ".." moves to the parent of
+// the path resolved so far (which is symlink-free, so its lexical parent is its
+// real parent) and "." is skipped. Anything else is appended and Lstat'ed; a
+// symlink is replaced by its Readlink text — absolute text restarts from the
+// root, relative text continues from the link's directory — and that text's
+// components are resolved before the rest. A component that does not exist is
+// kept as spelled (the Lstat of everything below it fails the same way), so a
+// not-yet-created file or directory run still resolves. More than
+// maxSymlinkFollows links is a loop: fail closed.
+func resolveLikeKernel(path string) (string, bool) {
+	if !filepath.IsAbs(path) {
+		return "", false
+	}
+	root := filepath.VolumeName(path) + string(filepath.Separator)
+	resolved := root
+	pending := kernelPathComponents(path[len(filepath.VolumeName(path)):])
+	follows := 0
+	for len(pending) > 0 {
+		name := pending[0]
+		pending = pending[1:]
+		switch name {
+		case ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved) // Dir of the root is the root, as in the kernel
+			continue
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
+		next := filepath.Join(resolved, name)
+		info, err := os.Lstat(next)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			// Missing (a file or directory the write will create), a real file or
+			// directory, or unreadable (the polecat runs as this same user, so
+			// its own write cannot traverse it either): keep it as spelled.
+			resolved = next
+			continue
+		}
+		follows++
+		if follows > maxSymlinkFollows {
 			return "", false
 		}
-		rest = filepath.Join(filepath.Base(dir), rest)
-		dir = parent
+		text, err := os.Readlink(next)
+		if err != nil || text == "" {
+			return "", false
+		}
+		if filepath.IsAbs(text) {
+			resolved = filepath.VolumeName(text) + string(filepath.Separator)
+			text = text[len(filepath.VolumeName(text)):]
+		}
+		// Relative text: resolved is still the link's directory.
+		pending = append(kernelPathComponents(text), pending...)
 	}
+	return resolved, true
+}
+
+// kernelPathComponents splits a path into its non-empty components, keeping "."
+// and ".." (they are resolved in order, never cleaned away). It splits on the
+// OS separator only: a backslash is an ordinary filename byte on Unix, which is
+// why dog.go's splitPathComponents is not reused here.
+func kernelPathComponents(path string) []string {
+	parts := strings.Split(path, string(filepath.Separator))
+	out := parts[:0]
+	for _, part := range parts {
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // expandEnvVars expands $VAR and ${VAR} for every variable this process can see.
