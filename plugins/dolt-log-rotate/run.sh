@@ -8,7 +8,7 @@ set -euo pipefail
 
 # --- Configuration -----------------------------------------------------------
 
-TOWN_ROOT="${GT_TOWN_ROOT:-$(gt town root 2>/dev/null)}"
+TOWN_ROOT="${GT_TOWN_ROOT:?GT_TOWN_ROOT is unset; the daemon sets it for every plugin run}"
 LOG_DIR="${TOWN_ROOT}/daemon"
 LOG_FILE="${LOG_DIR}/dolt.log"
 MAX_MB="${GT_DOLT_LOG_MAX_MB:-100}"
