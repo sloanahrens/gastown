@@ -156,7 +156,10 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 
 		// Re-check: abort kill if agent started, the answer is unknown, or
 		// the session was replaced.
-		if alive, aliveErr := t.IsAgentAliveChecked(sessionID); aliveErr != nil || alive {
+		if alive, aliveErr := t.IsAgentAliveChecked(sessionID); aliveErr != nil {
+			log.Printf("warning: witness session %s: agent liveness unknown on re-check (%v); not killing", sessionID, aliveErr)
+			return ErrAlreadyRunning
+		} else if alive {
 			return ErrAlreadyRunning
 		}
 		if createdNow, _ := t.GetSessionCreatedUnix(sessionID); createdAt > 0 && createdNow != createdAt {

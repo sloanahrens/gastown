@@ -228,73 +228,95 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		// Session exists - check if runtime is still running (hq-95xfq, gt-7zl)
-		// If runtime exited or sitting at shell, restart with proper context.
-		// Use IsAgentAliveChecked (checks descendant processes) instead of
-		// IsAgentRunning (pane command only), since mayor launches via bash
-		// wrapper. A failed query is UNKNOWN: never kill and respawn a Mayor
-		// that may be working; attach and let the operator see (gt-fcxe9.1).
-		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
-		if aliveErr != nil {
-			style.PrintWarning("could not verify the Mayor agent is running (%v); attaching without restart", aliveErr)
-		} else if !alive {
-			// Runtime has exited, restart it with proper context
-			fmt.Println("Runtime exited, restarting with context...")
-
-			paneID, err := t.GetPaneID(sessionID)
-			if err != nil {
-				return fmt.Errorf("getting pane ID: %w", err)
-			}
-
-			// Build startup beacon for context (like gt handoff does)
-			beacon := session.FormatStartupBeacon(session.BeaconConfig{
-				Recipient: "mayor",
-				Sender:    "human",
-				Topic:     "attach",
-			})
-
-			// Build startup command with beacon
-			startupCmd, err := config.BuildAgentStartupCommandWithAgentOverride("mayor", "", townRoot, "", beacon, mayorAgentOverride)
-			if err != nil {
-				return fmt.Errorf("building startup command: %w", err)
-			}
-
-			// Resolve CLAUDE_CONFIG_DIR and prepend it so the respawned process
-			// uses the correct account (mirrors what StartTMUX does).
-			accountsPath := constants.MayorAccountsPath(townRoot)
-			claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
-			if claudeConfigDir == "" {
-				claudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
-			}
-			if claudeConfigDir != "" {
-				startupCmd = config.PrependEnv(startupCmd, map[string]string{"CLAUDE_CONFIG_DIR": claudeConfigDir})
-				_ = t.SetEnvironment(sessionID, "CLAUDE_CONFIG_DIR", claudeConfigDir)
-			}
-
-			// Set remain-on-exit so the pane survives process death during respawn.
-			// Without this, killing processes causes tmux to destroy the pane.
-			if err := t.SetRemainOnExit(paneID, true); err != nil {
-				style.PrintWarning("could not set remain-on-exit: %v", err)
-			}
-
-			// Kill all processes in the pane before respawning to prevent orphan leaks
-			// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
-			if err := t.KillPaneProcesses(paneID); err != nil {
-				// Non-fatal but log the warning
-				style.PrintWarning("could not kill pane processes: %v", err)
-			}
-
-			// Note: respawn-pane automatically resets remain-on-exit to off
-			if err := t.RespawnPane(paneID, startupCmd); err != nil {
-				return fmt.Errorf("restarting runtime: %w", err)
-			}
-
-			fmt.Printf("%s Mayor restarted with context\n", style.Bold.Render("✓"))
+		if err := restartMayorRuntimeIfDead(t, sessionID, townRoot); err != nil {
+			return err
 		}
 	}
 
 	// Use shared attach helper (smart: links if inside tmux, attaches if outside)
 	return attachToTmuxSession(sessionID)
+}
+
+// mayorRuntimeTmux is the tmux surface restartMayorRuntimeIfDead drives.
+type mayorRuntimeTmux interface {
+	IsAgentAliveChecked(session string) (bool, error)
+	GetPaneID(session string) (string, error)
+	SetEnvironment(session, key, value string) error
+	SetRemainOnExit(pane string, on bool) error
+	KillPaneProcesses(pane string) error
+	RespawnPane(pane, command string) error
+}
+
+var _ mayorRuntimeTmux = (*tmux.Tmux)(nil)
+
+// restartMayorRuntimeIfDead respawns the Mayor's runtime inside an existing
+// session when the agent has exited (hq-95xfq, gt-7zl). It uses
+// IsAgentAliveChecked (descendant processes) rather than the pane command,
+// since the Mayor launches via a bash wrapper. A failed liveness query is
+// unknown: it warns and leaves the session alone (gt-fcxe9.1).
+func restartMayorRuntimeIfDead(t mayorRuntimeTmux, sessionID, townRoot string) error {
+	alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+	if aliveErr != nil {
+		style.PrintWarning("could not verify the Mayor agent is running (%v); attaching without restart", aliveErr)
+		return nil
+	}
+	if alive {
+		return nil
+	}
+
+	// Runtime has exited, restart it with proper context
+	fmt.Println("Runtime exited, restarting with context...")
+
+	paneID, err := t.GetPaneID(sessionID)
+	if err != nil {
+		return fmt.Errorf("getting pane ID: %w", err)
+	}
+
+	// Build startup beacon for context (like gt handoff does)
+	beacon := session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: "mayor",
+		Sender:    "human",
+		Topic:     "attach",
+	})
+
+	// Build startup command with beacon
+	startupCmd, err := config.BuildAgentStartupCommandWithAgentOverride("mayor", "", townRoot, "", beacon, mayorAgentOverride)
+	if err != nil {
+		return fmt.Errorf("building startup command: %w", err)
+	}
+
+	// Resolve CLAUDE_CONFIG_DIR and prepend it so the respawned process
+	// uses the correct account (mirrors what StartTMUX does).
+	accountsPath := constants.MayorAccountsPath(townRoot)
+	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
+	if claudeConfigDir == "" {
+		claudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	}
+	if claudeConfigDir != "" {
+		startupCmd = config.PrependEnv(startupCmd, map[string]string{"CLAUDE_CONFIG_DIR": claudeConfigDir})
+		_ = t.SetEnvironment(sessionID, "CLAUDE_CONFIG_DIR", claudeConfigDir)
+	}
+
+	// Set remain-on-exit so the pane survives process death during respawn.
+	// Without this, killing processes causes tmux to destroy the pane.
+	if err := t.SetRemainOnExit(paneID, true); err != nil {
+		style.PrintWarning("could not set remain-on-exit: %v", err)
+	}
+
+	// Kill all processes in the pane before respawning to prevent orphan leaks
+	// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
+	if err := t.KillPaneProcesses(paneID); err != nil {
+		// Non-fatal but log the warning
+		style.PrintWarning("could not kill pane processes: %v", err)
+	}
+
+	// Note: respawn-pane automatically resets remain-on-exit to off
+	if err := t.RespawnPane(paneID, startupCmd); err != nil {
+		return fmt.Errorf("restarting runtime: %w", err)
+	}
+
+	fmt.Printf("%s Mayor restarted with context\n", style.Bold.Render("✓"))
+	return nil
 }
 
 // gracefullyShutdownACP removes the PID file to signal the ACP proxy to exit,
