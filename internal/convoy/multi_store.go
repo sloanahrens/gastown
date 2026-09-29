@@ -116,8 +116,9 @@ func (r *StoreResolver) owningStore(id string) beadsdk.Storage {
 }
 
 // ResolveIssues fetches fresh issue data for the given IDs, looking up each
-// issue in the appropriate store based on its prefix. Issues found in any store
-// are returned in the result map. Issues not found in any store are omitted.
+// issue in the appropriate store based on its prefix, opening that store when
+// the resolver was built to. Issues found in any store are returned in the
+// result map. Issues not found in any store are omitted.
 func (r *StoreResolver) ResolveIssues(ctx context.Context, ids []string) map[string]*beadsdk.Issue {
 	result := make(map[string]*beadsdk.Issue, len(ids))
 	if len(ids) == 0 {
@@ -134,8 +135,8 @@ func (r *StoreResolver) ResolveIssues(ctx context.Context, ids []string) map[str
 		}
 	}
 
-	for storeName, storeIDs := range byStore {
-		store := r.storeNamed(storeName)
+	for _, storeIDs := range byStore {
+		store := r.owningStore(storeIDs[0])
 		if store == nil {
 			continue
 		}
@@ -152,21 +153,6 @@ func (r *StoreResolver) ResolveIssues(ctx context.Context, ids []string) map[str
 	}
 
 	return result
-}
-
-// ResolveDepsWithMetadata fetches dependency metadata for an issue, trying
-// the appropriate store for that issue's prefix. Returns nil on any error.
-func (r *StoreResolver) ResolveDepsWithMetadata(ctx context.Context, issueID string) []*beadsdk.IssueWithDependencyMetadata {
-	store := r.storeNamed(r.storeForID(issueID))
-	if store == nil {
-		return nil
-	}
-
-	deps, err := store.GetDependenciesWithMetadata(ctx, issueID)
-	if err != nil {
-		return nil
-	}
-	return deps
 }
 
 // storeForID returns the store name for a given issue ID based on prefix routing.

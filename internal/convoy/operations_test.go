@@ -1733,7 +1733,7 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 	townRoot, _ := setupTownRootWithCrossRig(t, 0,
 		`[{"id":"oag-19dd9","status":"closed","assignee":"gastown/polecats/alpha","priority":2,"issue_type":"task"}]`)
 
-	tracked := getConvoyTrackedIssues(ctx, store, convoy.ID, townRoot, nil)
+	tracked := getConvoyTrackedIssues(ctx, store, convoy.ID, townRoot, nil, func(string, ...interface{}) {})
 
 	// Find the cross-rig bead in tracked results
 	var found *trackedIssue
@@ -2226,4 +2226,12 @@ func (s *unreadableStorage) GetIssue(context.Context, string) (*beadsdk.Issue, e
 
 func (s *unreadableStorage) GetIssueComments(context.Context, string) ([]*beadsdk.Comment, error) {
 	return nil, fmt.Errorf("dolt unreachable")
+}
+
+// GetDependencyRecords still answers: beadsdk.Storage does not declare it, so
+// the embedded interface would hide the real store's method, and the feed
+// would hold the bead for want of raw records instead of for its unreadable
+// record.
+func (s *unreadableStorage) GetDependencyRecords(ctx context.Context, issueID string) ([]*beadsdk.Dependency, error) {
+	return s.Storage.(dependencyRecordReader).GetDependencyRecords(ctx, issueID)
 }
