@@ -32,24 +32,6 @@ const (
 	maintainQueryTimeout = 30 * time.Second
 )
 
-// maintainDivergenceBudget bounds the pre-flight divergence check for one
-// database with remoteCount configured remotes. FetchAndVerify spends
-// DivergenceFetchTimeout per remote, so the deadline must scale with the
-// actual remote count rather than a number hardcoded for a specific case —
-// a single shared budget sized for fewer remotes than the database actually
-// has starves the last one(s) (gt-aku6). maintainQueryTimeout covers the
-// list-remotes/active-branch/ancestor queries that run outside any single
-// fetch's own timeout. A database with zero remotes still gets one budget's
-// worth, so the list-remotes query itself is not run against an
-// already-expired context.
-func maintainDivergenceBudget(remoteCount int) time.Duration {
-	n := remoteCount
-	if n < 1 {
-		n = 1
-	}
-	return time.Duration(n)*doltserver.DivergenceFetchTimeout + maintainQueryTimeout
-}
-
 var (
 	maintainForce         bool
 	maintainDryRun        bool
@@ -71,13 +53,6 @@ This encapsulates the maintenance procedure:
   3. Flatten databases over commit threshold
   4. Run dolt_gc() on each database
 
-Before flattening anything, each candidate database is checked against its
-Dolt remote: if the remote holds commits this database does not have, the
-flatten is refused. Flattening rewrites the commit graph, so squashing a
-database that has diverged from its remote makes the two histories disagree
-and any later force-push drops the remote-only commits. Pass --force-diverged
-to skip the check and flatten regardless.
-
 Each database is also probed for a configured backup remote. When a probe fails
 the run stops before touching anything: a probe that did not answer is not
 evidence that a database is unbacked, and flattening one without a backup
@@ -95,8 +70,7 @@ Examples:
   gt maintain                # Interactive (shows plan, asks confirmation)
   gt maintain --force        # Non-interactive (daemon/cron use)
   gt maintain --dry-run      # Preview what would happen
-  gt maintain --threshold 50 # Custom commit threshold
-  gt maintain --force-diverged  # Flatten even over a diverged remote`,
+  gt maintain --threshold 50 # Custom commit threshold`,
 	RunE: runMaintain,
 }
 
@@ -104,7 +78,12 @@ func init() {
 	maintainCmd.Flags().BoolVar(&maintainForce, "force", false, "Non-interactive mode (skip confirmation)")
 	maintainCmd.Flags().BoolVar(&maintainDryRun, "dry-run", false, "Preview without making changes")
 	maintainCmd.Flags().IntVar(&maintainThreshold, "threshold", defaultMaintainThreshold, "Commit count threshold for flatten")
-	maintainCmd.Flags().BoolVar(&maintainForceDiverged, "force-diverged", false, "Flatten even when a database's remote has diverged (skips the pre-flight)")
+	// --force-diverged skipped the Dolt remote divergence pre-flight. The
+	// remotes and the pre-flight are gone (ADR 0002); the flag still parses so
+	// existing scripts keep working, and does nothing.
+	maintainCmd.Flags().BoolVar(&maintainForceDiverged, "force-diverged", false, "No-op: Dolt remotes were removed (ADR 0002)")
+	_ = maintainCmd.Flags().MarkDeprecated("force-diverged", "Dolt remotes were removed (ADR 0002); there is nothing to diverge from")
+	_ = maintainCmd.Flags().MarkHidden("force-diverged")
 	rootCmd.AddCommand(maintainCmd)
 }
 
@@ -121,118 +100,6 @@ type maintainDBInfo struct {
 	// meaningless — not a "no" — and must not be read as one (gt-ij15).
 	backupKnown bool
 	backupErr   error
-	// preflight is the remote-divergence check for this database, as of the
-	// plan phase. It is only populated for databases the plan means to
-	// flatten; a database that is below threshold is never fetched. It backs
-	// the plan display only — the flatten phase re-runs the check
-	// immediately before flattening rather than trusting this snapshot
-	// (gt-aku6), since backup and reap can take minutes and nothing else
-	// re-verifies on the daemon's unattended --force path.
-	preflight maintainPreflight
-}
-
-// maintainPreflight is the outcome of the remote-divergence check for one
-// database.
-//
-// It is a guard, so every way it can fail ends in a refusal: flattening a
-// database whose remote has moved on makes the two histories disagree, and the
-// force-push that follows a flatten then deletes the remote-only commits.
-// "Could not check" is refused alongside "checked, diverged" because only a
-// completed check licenses the destructive write.
-type maintainPreflight struct {
-	// Remotes lists every remote the check ran on, in the order checked;
-	// empty when the database has no remote, in which case there is nothing
-	// a flatten could destroy.
-	Remotes []string
-	// Diverged is true when the remote holds commits absent from local history.
-	Diverged bool
-	// Err is set when the check could not complete (unreachable remote, query
-	// failure). It is not a pass.
-	Err error
-}
-
-// refusal returns the reason this database must not be flattened, or "" when
-// the pre-flight cleared it. forceDiverged is --force-diverged, which skips the
-// check (and therefore every refusal it could produce).
-func (p maintainPreflight) refusal(forceDiverged bool) string {
-	if forceDiverged {
-		return ""
-	}
-	if p.Err != nil {
-		return fmt.Sprintf("cannot verify remote (%v) — pass --force-diverged to flatten anyway", p.Err)
-	}
-	if p.Diverged {
-		return fmt.Sprintf("diverged from %s; pass --force-diverged", divergenceRemote(p))
-	}
-	return ""
-}
-
-// divergenceRemote names the remote a refusal is about: the single remote a
-// divergence was found on, the (short) list of checked remotes when a failed
-// check stopped partway, or "(no remote)" when there was nothing to verify.
-func divergenceRemote(p maintainPreflight) string {
-	if len(p.Remotes) == 0 {
-		return "(no remote)"
-	}
-	return strings.Join(p.Remotes, ",")
-}
-
-// maintainCheckDivergenceFn is the pre-flight runMaintain invokes at both call
-// sites, named so a test can stand in a scripted answer: it is the seam a
-// dropped flatten-phase re-check has to reappear through (gt-aku6).
-var maintainCheckDivergenceFn = maintainCheckDivergence
-
-// maintainCheckDivergence runs the pre-flight for one database: fetch its
-// remotes and report whether any of them has commits this database lacks.
-//
-// It sizes its own deadline from the database's actual remote count
-// (maintainDivergenceBudget) rather than trusting the caller for one, so a
-// database with more remotes than some hardcoded assumption still gets a
-// full per-fetch budget for each of them — a fixed budget sized for fewer
-// remotes starves the later ones and spuriously refuses the flatten
-// (gt-aku6). ctx still bounds the overall call for cancellation.
-//
-// A database with no remote, or with no push yet, clears the check. Any error
-// is handed back inside the result rather than raised, because callers need to
-// refuse per-database while still finishing the rest of the maintenance run.
-func maintainCheckDivergence(ctx context.Context, config *doltserver.Config, dbName string) maintainPreflight {
-	db, err := maintainOpenDB(config, dbName)
-	if err != nil {
-		return maintainPreflight{Err: err}
-	}
-	defer db.Close()
-
-	remotes, err := doltserver.ListRemotes(ctx, db)
-	if err != nil {
-		return maintainPreflight{Err: fmt.Errorf("list remotes: %w", err)}
-	}
-
-	budgetCtx, cancel := context.WithTimeout(ctx, maintainDivergenceBudget(len(remotes)))
-	defer cancel()
-
-	div, err := doltserver.FetchAndVerify(budgetCtx, db, dbName)
-	if err != nil {
-		return maintainPreflight{Remotes: div.Remotes, Err: err}
-	}
-	return maintainPreflight{Remotes: div.Remotes, Diverged: div.Diverged}
-}
-
-// maintainRecheckDivergence re-runs the divergence check immediately before
-// flattening db, rather than trusting the plan phase's snapshot (db.preflight):
-// backup and reap ran in between, and on the daemon's --force path nothing
-// else re-verifies — there is no operator confirming a plan close enough in
-// time for it to still be trustworthy. A remote that gained commits during
-// that window must still refuse (gt-aku6).
-//
-// It calls the maintainCheckDivergenceFn seam rather than maintainCheckDivergence
-// directly so a test can script the re-check's answer and confirm it actually
-// fires a second time, rather than the flatten loop silently falling back to
-// the stale plan-phase verdict.
-func maintainRecheckDivergence(config *doltserver.Config, db maintainDBInfo, forceDiverged bool) maintainPreflight {
-	if forceDiverged {
-		return db.preflight
-	}
-	return maintainCheckDivergenceFn(context.Background(), config, db.name)
 }
 
 // needsFlatten reports whether the flatten phase should process this database.
@@ -246,24 +113,17 @@ func (db maintainDBInfo) needsFlatten(threshold int) bool {
 }
 
 // maintainPlanRow is one database's classification in the maintenance plan:
-// whether it flattens, is refused, and its backup state. It mirrors the
-// decisions runMaintain's plan-display loop renders, split into a pure
-// function of maintainDBInfo so the counting rules — a refused database is
-// never counted as flattening, and an unknown commit count is counted at most
+// whether it flattens and its backup state. It mirrors the decisions
+// runMaintain's plan-display loop renders, split into a pure function of
+// maintainDBInfo so the counting rules — an unknown commit count is counted
 // once, only for a database that will actually flatten — have a test that
 // does not require a live Dolt server (gt-aku6).
 type maintainPlanRow struct {
-	// willFlatten is true when the database is at or over threshold and the
-	// pre-flight did not refuse it.
+	// willFlatten is true when the database is at or over threshold (or its
+	// count is unknown).
 	willFlatten bool
-	// refused is true when the database needed to flatten but the pre-flight
-	// (or --force-diverged's absence of one) refused it. refusalReason is the
-	// human-readable reason in that case.
-	refused       bool
-	refusalReason string
 	// countUnknown is true only when willFlatten is also true and the commit
-	// count measurement failed — never set for a refused database, since a
-	// refused database was not flattened regardless of what its count was.
+	// count measurement failed.
 	countUnknown bool
 	// hasBackup and backupUnknown mirror maintainDBInfo's own backup fields;
 	// exactly one may be true, matching the mutually exclusive plan tags.
@@ -273,16 +133,11 @@ type maintainPlanRow struct {
 
 // maintainClassifyForPlan applies the plan's flatten/refusal/backup decisions
 // to one database, exactly as runMaintain's plan-display loop does.
-func maintainClassifyForPlan(db maintainDBInfo, threshold int, forceDiverged bool) maintainPlanRow {
+func maintainClassifyForPlan(db maintainDBInfo, threshold int) maintainPlanRow {
 	var row maintainPlanRow
 	if db.needsFlatten(threshold) {
-		if reason := db.preflight.refusal(forceDiverged); reason != "" {
-			row.refused = true
-			row.refusalReason = reason
-		} else {
-			row.willFlatten = true
-			row.countUnknown = !db.countKnown
-		}
+		row.willFlatten = true
+		row.countUnknown = !db.countKnown
 	}
 	switch {
 	case !db.backupKnown:
@@ -398,35 +253,23 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 			info.hasBackup = hasBackup
 			info.backupKnown = true
 		}
-		// Pre-flight only what the plan would flatten: the check costs a
-		// network fetch, and a database below threshold is never touched.
-		if info.needsFlatten(maintainThreshold) && !maintainForceDiverged {
-			info.preflight = maintainCheckDivergence(context.Background(), config, dbName)
-		}
 		dbInfos = append(dbInfos, info)
 	}
 
 	// Display plan.
 	flattenCount := 0
-	refusedCount := 0
 	backupCount := 0
 	unknownCount := 0
 	unknownBackupCount := 0
 	fmt.Printf("\n%s Maintenance plan:\n", style.Bold.Render("●"))
 	for _, db := range dbInfos {
-		row := maintainClassifyForPlan(db, maintainThreshold, maintainForceDiverged)
+		row := maintainClassifyForPlan(db, maintainThreshold)
 		tags := ""
-		switch {
-		case row.refused:
-			tags += fmt.Sprintf(" %s", style.Warning.Render("→ REFUSED: "+row.refusalReason))
-			refusedCount++
-		case row.willFlatten:
+		if row.willFlatten {
 			reason := ""
 			if row.countUnknown {
-				// unknownCount feeds the "flattened, not skipped" line below,
-				// so it counts only databases that will actually flatten — an
-				// unknown count on a refused database was not flattened, and
-				// saying so was the whole point of gt-racu.
+				// unknownCount feeds the "flattened, not skipped" line below
+				// (gt-racu).
 				reason = " (count unknown)"
 				unknownCount++
 			}
@@ -452,10 +295,6 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Will gc: %d\n", len(dbInfos))
 	if unknownCount > 0 {
 		fmt.Printf("  Unknown commit counts: %d (flattened, not skipped)\n", unknownCount)
-	}
-	if refusedCount > 0 {
-		fmt.Printf("  Refused: %d (remote diverged or unverifiable — see reasons above)\n", refusedCount)
-		fmt.Printf("  Re-run with --force-diverged to flatten anyway\n")
 	}
 	if unknownBackupCount > 0 {
 		fmt.Printf("  Backup state unknown: %d (probe failed — see reasons above)\n", unknownBackupCount)
@@ -523,17 +362,10 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 
 	// Phase 4: Flatten (server up).
 	totalFlattened := 0
-	var refused []string
-	if flattenCount > 0 || refusedCount > 0 {
+	if flattenCount > 0 {
 		fmt.Printf("\n%s Flattening databases...\n", style.Bold.Render("●"))
 		for _, db := range dbInfos {
 			if !db.needsFlatten(maintainThreshold) {
-				continue
-			}
-			preflight := maintainRecheckDivergence(config, db, maintainForceDiverged)
-			if reason := preflight.refusal(maintainForceDiverged); reason != "" {
-				fmt.Printf("  %s %s: refused — %s\n", style.Warning.Render("!"), db.name, reason)
-				refused = append(refused, db.name)
 				continue
 			}
 			if err := maintainFlattenDB(config, db.name); err != nil {
@@ -572,17 +404,6 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Wisps reaped: %d\n", totalReaped)
 	fmt.Printf("  Databases flattened: %d\n", totalFlattened)
 	fmt.Printf("  Databases gc'd: %d\n", gcCount)
-
-	// A refusal is not a successful run. Backup, reap and gc did their work,
-	// but the flatten the operator asked for did not happen and will not be
-	// retried — so exit non-zero and say which databases were left alone.
-	// Scheduled maintenance escalates on a non-zero exit, which is how the
-	// refusal reaches a human (see internal/daemon/scheduled_maintenance.go).
-	if len(refused) > 0 {
-		fmt.Printf("  Refused to flatten: %d (%s)\n", len(refused), strings.Join(refused, ", "))
-		return fmt.Errorf("refused to flatten %d database(s) with a diverged or unverifiable remote: %s",
-			len(refused), strings.Join(refused, ", "))
-	}
 
 	return nil
 }

@@ -407,10 +407,9 @@ func (d *Daemon) runScheduledMaintenance() {
 // --force`, which flattens every database over threshold. Only reachable when
 // maintenance.mode is explicitly "flatten".
 //
-// `gt maintain` applies its own remote-divergence pre-flight and refuses a
-// database whose remote has moved on, so a non-zero exit here can mean "nothing
-// was flattened on purpose" rather than a crash — the output tail is included
-// in the escalation for that reason.
+// A non-zero exit can come from any phase (a failed backup probe refuses the
+// whole run before anything is touched), so the output tail is included in the
+// escalation.
 func (d *Daemon) maintenanceFlatten(threshold int) {
 	d.logger.Printf("scheduled_maintenance: mode=%s — running gt maintain --force --threshold %d",
 		MaintenanceModeFlatten, threshold)

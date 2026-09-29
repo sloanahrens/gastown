@@ -43,13 +43,13 @@ var lostContainerMarkers = []string{
 //
 // It only labels a failure: failContainerErr fails the test either way. The
 // classifier stays narrow so that label never calls an answer from Dolt (a
-// syntax error, a wrong divergence verdict) a lost container.
+// syntax error, a wrong query result) a lost container.
 func isLostContainerErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	// The suite's own budgets are not a lost container. context.DeadlineExceeded
-	// is FetchAndVerify's 90s fetch budget or the caller's; treating it as
+	// is the test's own query budget or the caller's; treating it as
 	// environmental would make a genuinely hung container — the failure mode
 	// the budget exists to bound — look the same as a starved one.
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
