@@ -178,9 +178,10 @@ func isSystemDB(name string) bool {
 	case "information_schema", "mysql", "dolt_cluster":
 		return true
 	}
-	lower := strings.ToLower(name)
+	// Case-sensitive, unlike internal/testdb: a false skip here silently
+	// drops a database's snapshots, so match only the exact spelling.
 	for _, prefix := range testDatabasePrefixes {
-		if strings.HasPrefix(lower, prefix) {
+		if strings.HasPrefix(name, prefix) {
 			return true
 		}
 	}

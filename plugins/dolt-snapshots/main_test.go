@@ -92,6 +92,11 @@ func TestIsSystemDB(t *testing.T) {
 		{"beads_t123", true},
 		{"beads_pt456", true},
 		{"doctest_xyz", true},
+		{"beads_vr1", true},
+		{"doctortest_x", true},
+		{"benchdb_x", true},
+		{"dolt_remotes_check_pool_0", true},
+		{"TESTDB_x", false}, // case-sensitive: never skip a real database by accident
 		{"hq", false},
 		{"petals", false},
 		{"sfgastown", false},

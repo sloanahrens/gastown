@@ -404,9 +404,11 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	portStr := port
 	t.Setenv("GT_DOLT_PORT", portStr)
 	t.Setenv("BEADS_TEST_SERVER", "1")
-	if n, err := strconv.Atoi(portStr); err == nil {
-		beads.RegisterTestServerPort(n)
+	n, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Dolt container mapped port %q is not a number: %v", portStr, err)
 	}
+	beads.RegisterTestServerPort(n)
 	return portStr
 }
 
