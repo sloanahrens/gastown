@@ -700,6 +700,17 @@ type Beads struct {
 	// for closing the store.
 	store beadsdk.Storage
 
+	// exec runs every bd subprocess; nil means the real bd on PATH (see
+	// runner). Tests of this package inject a recording runner.
+	exec bdRunFunc
+
+	// plain marks a wrapper built by NewPlain: bd runs in workDir with
+	// exactly plainEnv, and none of the routing policy below applies.
+	plain    bool
+	plainEnv []string
+	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
+	plainTimeout time.Duration
+
 	// Lazy-cached town root for routing resolution.
 	// Populated on first call to getTownRoot() to avoid filesystem walk on every operation.
 	townRoot     string
@@ -772,6 +783,7 @@ type beadsFields struct {
 	townRoot   string
 	noRoute    bool
 	agentScope bool
+	exec       bdRunFunc
 }
 
 // newBeads is the single composite-literal construction point for *Beads.
@@ -787,6 +799,7 @@ func newBeads(f beadsFields) *Beads {
 		townRoot:   f.townRoot,
 		noRoute:    f.noRoute,
 		agentScope: f.agentScope,
+		exec:       f.exec,
 	}
 }
 
@@ -856,6 +869,7 @@ func (b *Beads) ForAgentBead() *Beads {
 		store:      b.store,
 		townRoot:   b.getTownRoot(),
 		agentScope: true,
+		exec:       b.exec,
 	})
 }
 
@@ -908,6 +922,7 @@ func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 		serverPort: b.serverPort,
 		townRoot:   b.getTownRoot(),
 		noRoute:    true,
+		exec:       b.exec,
 	})
 }
 
@@ -1053,6 +1068,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 		serverPort: b.serverPort,
 		townRoot:   b.townRoot,
 		noRoute:    true,
+		exec:       b.exec,
 	})
 }
 
@@ -1371,7 +1387,7 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
 	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
-	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
+	fullArgs := b.allowStaleArgs(runEnv, args)
 
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
@@ -1380,15 +1396,21 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	err := newBDCmd(ctx, b.workDir, runEnv, stdinData, fullArgs, &stdout, &stderr).Run()
+	run := func(argv []string) error {
+		stdout.Reset()
+		stderr.Reset()
+		out, errOut, err := b.runner()(ctx, bdCall{dir: b.workDir, env: runEnv, stdin: stdinData, args: argv})
+		stdout.Write(out)
+		stderr.Write(errOut)
+		return err
+	}
+	err := run(fullArgs)
 
 	// If bd doesn't support --flat, retry without it. The retry is done here
 	// (not in callers like List) so that InjectFlatForListJSON doesn't re-add
 	// --flat on the retry path.
 	if err != nil && bdRejectedFlat(stderr.String()) {
-		stdout.Reset()
-		stderr.Reset()
-		err = newBDCmd(ctx, b.workDir, runEnv, stdinData, stripFlatFlag(fullArgs), &stdout, &stderr).Run()
+		err = run(stripFlatFlag(fullArgs))
 	}
 
 	if err != nil {
@@ -1442,7 +1464,7 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 	// An --if-assignee/--if-status precondition that no longer held: bd
 	// wrote nothing. Checked first, so a guard message never reads as a
 	// "not found" or a generic failure.
-	var exitErr *exec.ExitError
+	var exitErr interface{ ExitCode() int }
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == bdGuardNotHeldExit {
 		return fmt.Errorf("bd %s: %s: %w", strings.Join(args, " "), stderr, ErrGuardNotHeld)
 	}
@@ -2693,7 +2715,7 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 			for targetDir, groupIDs := range groups {
 				target := b
 				if targetDir != fallbackDir {
-					target = NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
+					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec})
 				}
 				issues, err := target.showMultipleLocal(groupIDs)
 				if err != nil {
@@ -2780,6 +2802,7 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 			beadsDir:   targetDir,
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
+			exec:       b.exec,
 		})
 		return bdForCreate.Create(opts)
 	}
@@ -2855,6 +2878,7 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 			beadsDir:   targetDir,
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
+			exec:       b.exec,
 		})
 		return bdForCreate.CreateWithID(id, opts)
 	}

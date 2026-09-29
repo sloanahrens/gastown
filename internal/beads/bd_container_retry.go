@@ -277,6 +277,9 @@ var bdContainerRetryBackoffFn = bdContainerRetryBackoff
 // returned unchanged, so an exhausted retry reads as the failure it is, and
 // every attempt is recorded by telemetry in runBdOnce.
 func (b *Beads) runBdWithRetry(stdinData []byte, runEnv []string, args []string) ([]byte, error) {
+	if b.plain {
+		return b.runPlain(stdinData, args)
+	}
 	attempts := 1
 	if b.targetsTestDoltContainer() {
 		attempts = bdContainerRetryAttempts
