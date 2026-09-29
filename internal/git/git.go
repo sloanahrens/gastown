@@ -206,20 +206,58 @@ const remoteQueryTimeout = 30 * time.Second
 const notesFetchTimeout = 30 * time.Second
 
 // timedCommandWaitDelay bounds how long a timed-out git command may keep
-// Run() waiting on its output pipes after the context is done. The process
-// group kill (SIGTERM, then SIGKILL after util.ProcessGroupKillGrace) reaches
-// every helper; this is the backstop should one still hold a pipe.
+// Run() waiting for git to exit after the context is done. The process group
+// kill (SIGTERM, then SIGKILL after util.ProcessGroupKillGrace) reaches every
+// helper; this is the backstop should git itself survive it.
 var timedCommandWaitDelay = util.ProcessGroupKillGrace + 3*time.Second
 
 // boundRemoteCommand makes a context-bound git command killable as a whole.
 // A remote command is not one process: over http(s) git forks
-// git-remote-http, which inherits the stdout/stderr pipes. The default
-// context cancel kills only git, so the helper — still waiting on a stalled
-// server — keeps the pipe open and cmd.Run() never returns. Canceling the
-// process group kills the helper too, and WaitDelay caps the pipe wait.
+// git-remote-http. The default context cancel kills only git, leaving the
+// helper waiting on a stalled server. Canceling the process group kills the
+// helper too, and WaitDelay caps the wait for git to exit.
+//
+// Callers capture output with runCapturingOutput, never with pipes: a helper
+// (git-remote-http, a credential helper) inherits git's output descriptors
+// and can outlive git. With pipes, Run() then waits for that helper to close
+// them, and WaitDelay turns a git that exited 0 into "exec: WaitDelay expired
+// before I/O complete" — a push that landed reported as failed (gt-22hdp.50).
 func boundRemoteCommand(cmd *exec.Cmd) {
 	util.SetProcessGroup(cmd)
 	cmd.WaitDelay = timedCommandWaitDelay
+}
+
+// runCapturingOutput runs cmd with its stdout and stderr written to temporary
+// files and returns what git wrote to each. Files, unlike pipes, need no
+// copying goroutine that Run() must wait on, so Run() returns as soon as git
+// exits: a grandchild still holding the descriptors neither delays the result
+// nor fails it, and git's own output is complete in the file once it has
+// exited.
+func runCapturingOutput(cmd *exec.Cmd) (stdout, stderr string, err error) {
+	outFile, err := os.CreateTemp("", "gt-git-stdout-*")
+	if err != nil {
+		return "", "", fmt.Errorf("creating git stdout file: %w", err)
+	}
+	defer func() { _ = outFile.Close(); _ = os.Remove(outFile.Name()) }()
+	errFile, err := os.CreateTemp("", "gt-git-stderr-*")
+	if err != nil {
+		return "", "", fmt.Errorf("creating git stderr file: %w", err)
+	}
+	defer func() { _ = errFile.Close(); _ = os.Remove(errFile.Name()) }()
+
+	cmd.Stdout = outFile
+	cmd.Stderr = errFile
+	runErr := cmd.Run()
+
+	outBytes, readErr := os.ReadFile(outFile.Name())
+	if readErr != nil && runErr == nil {
+		return "", "", fmt.Errorf("reading git stdout: %w", readErr)
+	}
+	errBytes, readErr := os.ReadFile(errFile.Name())
+	if readErr != nil && runErr == nil {
+		return "", "", fmt.Errorf("reading git stderr: %w", readErr)
+	}
+	return string(outBytes), string(errBytes), runErr
 }
 
 // runWithTimeout executes a git command with a deadline. If the command does
@@ -243,19 +281,15 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 		cmd.Dir = g.workDir
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	stdout, stderr, err := runCapturingOutput(cmd)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
 		}
-		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
+		return "", g.wrapError(err, stdout, stderr, args)
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimSpace(stdout), nil
 }
 
 // runWithEnv executes a git command with additional environment variables.
@@ -296,10 +330,7 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, err := runCapturingOutput(cmd)
 	if err != nil {
 		if timeout > 0 {
 			// Check if the context's deadline was exceeded
@@ -307,9 +338,9 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 				return "", fmt.Errorf("git %s timed out after %v (remote may be unreachable)", args[0], timeout)
 			}
 		}
-		return "", g.wrapError(err, stdout.String(), stderr.String(), args)
+		return "", g.wrapError(err, stdout, stderr, args)
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimSpace(stdout), nil
 }
 
 // runWithStdin executes a git command, feeding it stdin, and returns stdout.
