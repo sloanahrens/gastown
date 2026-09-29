@@ -1,3 +1,5 @@
+> Status: implemented on crew/sloan/w2-lint (gt-fcxe9.5). Historical once merged; not maintained.
+
 # Command-Tree Lint Implementation Plan (gt-fcxe9.5)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -17,6 +19,14 @@
 - `bd sync` is deny-listed with the message: "bd sync is the Dolt federation loop in this fork; never call it from an agent".
 - Do not touch `internal/formula` parser semantics, bd itself, or formula structure beyond the token fixes. No baseline or allow-list for real violations: fix the files.
 - Every fix is its own commit with the rationale.
+
+**As built (differs from the tasks below):**
+- The gate test was committed last, after every fix, so no commit on the branch is red. Its commit message carries the 38-line failure list from origin/main.
+- The bd snapshot records `subcommand_only` per parent, read from each parent's `--help` usage lines. Strict argument-free bd parents flagged `bd mol wisp <proto-id>` falsely.
+- JS/TS hook templates are scanned for `exec("gt"|"bd", [...])` calls only. Their other strings are log text.
+- Shell text inside an open quote, and inline code spans, count only in command position. TOML keys are recognised only outside multiline strings.
+- gt leaves whose `Args` rejects any argument (cobra.NoArgs) are argument-free too.
+- Fixes went beyond the seven gt tokens: the lint also found `gt town root` (six plugin sites), `gt rig show`, `gt rig path`, `gt mol step context-check`, `bd mol step respawn`, `bd mol list` and `bd daemons`.
 
 ---
 
