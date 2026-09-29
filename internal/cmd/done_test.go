@@ -2418,12 +2418,11 @@ func TestHookedBeadCloseNotRestrictedToHookedStatus(t *testing.T) {
 // TestPushSubmoduleChanges_Integration verifies that pushSubmoduleChanges detects
 // modified submodules and pushes their commits before the parent repo push (gt-dzs).
 func TestPushSubmoduleChanges_Integration(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 
-	// Allow file:// transport for submodule operations
-	t.Setenv("GIT_CONFIG_COUNT", "1")
-	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
-	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+	// testRunGit allows the file transport for the submodule clone; the push
+	// pushSubmoduleChanges makes is a plain push, which git allows over it.
 
 	// Create a "remote" bare repo for the submodule
 	subRemote := filepath.Join(tmp, "sub-remote.git")
