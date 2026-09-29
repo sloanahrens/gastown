@@ -76,3 +76,56 @@ func TestSlotHistoryReason_GateRunning(t *testing.T) {
 		t.Fatalf("slotHistoryReason without a holder = %q", got)
 	}
 }
+
+// TestSyncGateIntent: gt mq next is the refinery's per-MR touch point, so it
+// registers the rig's pending gate when the refinery picks a ready MR and
+// clears it when the queue is empty — no formula change needed. Anyone else
+// running gt mq next (an operator, a dog) never registers one.
+func TestSyncGateIntent(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	pool := slot.Pool{Slots: 4, ReservedForGate: 2, YieldToGate: true}
+	pending := func() *slot.GateIntent {
+		t.Helper()
+		rep, err := slot.StatusPoolLocksOnly(town, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep.GatePending
+	}
+
+	syncGateIntent(town, "gastown", "gastown/crew/sloan", "gt-wisp-1")
+	if p := pending(); p != nil {
+		t.Fatalf("a crew caller registered a gate intent: %+v", p)
+	}
+
+	syncGateIntent(town, "gastown", "gastown/refinery", "gt-wisp-1")
+	if p := pending(); p == nil || p.Role != "gastown/refinery" || p.Ref != "gt-wisp-1" {
+		t.Fatalf("refinery picking an MR: intent = %+v", p)
+	}
+
+	syncGateIntent(town, "gastown", "gastown/crew/sloan", "")
+	if p := pending(); p != nil {
+		t.Fatalf("an empty queue left the intent registered: %+v", p)
+	}
+}
+
+// TestPrintSlotStatusText_ShowsWaitingGatePending: with no gate holding a slot
+// yet but one registered, status says new suites wait on the pending gate.
+func TestPrintSlotStatusText_ShowsWaitingGatePending(t *testing.T) {
+	t.Parallel()
+	rep := slot.Report{
+		Slots:          []slot.SlotState{{Index: 0}, {Index: 1}, {Index: 2}, {Index: 3}},
+		Total:          4,
+		Reserved:       2,
+		YieldingToGate: true,
+		GatePending:    &slot.GateIntent{Role: "gastown/refinery", Ref: "gt-wisp-rpf", RegisteredAt: time.Now().Add(-2 * time.Minute), ExpiresAt: time.Now().Add(28 * time.Minute)},
+	}
+	out := slotStatusTextOf(t, rep)
+	if !strings.Contains(out, "waiting: gate pending") || !strings.Contains(out, "gastown/refinery") || !strings.Contains(out, "gt-wisp-rpf") {
+		t.Errorf("status with a pending gate does not explain the wait:\n%s", out)
+	}
+	if got := slotHistoryReason(slot.HistoryEntry{Reason: slot.WaitReasonGatePending, HolderRole: "gastown/refinery"}); got != "gate_pending: gastown/refinery" {
+		t.Errorf("slotHistoryReason(gate_pending) = %q", got)
+	}
+}

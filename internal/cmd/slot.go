@@ -366,6 +366,11 @@ func printGateYield(cmd *cobra.Command, rep slot.Report) {
 	if !rep.YieldingToGate {
 		return
 	}
+	if p := rep.GatePending; p != nil && rep.GateHolder == nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "  new non-gate suites: waiting: gate pending — %s is about to gate %s (registered %s ago, expires in %s); they start when it clears\n",
+			p.Role, p.Ref, time.Since(p.RegisteredAt).Round(time.Second), time.Until(p.ExpiresAt).Round(time.Second))
+		return
+	}
 	who := "a gate (owner metadata unavailable)"
 	if g := rep.GateHolder; g != nil {
 		who = fmt.Sprintf("%s (pid %d, slot %d)", g.Role, g.PID, g.Slot)
@@ -457,6 +462,11 @@ func slotHistoryReason(e slot.HistoryEntry) string {
 			return fmt.Sprintf("gate_running: %s (pid %d)", e.HolderRole, e.HolderPID)
 		}
 		return string(slot.WaitReasonGateRunning)
+	case slot.WaitReasonGatePending:
+		if e.HolderRole != "" {
+			return "gate_pending: " + e.HolderRole
+		}
+		return string(slot.WaitReasonGatePending)
 	default:
 		return ""
 	}
@@ -477,6 +487,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report, history []slot.His
 		Reserved            int                 `json:"reserved_for_gate"`
 		YieldingToGate      bool                `json:"yielding_to_gate"`
 		GateHolder          *slot.Owner         `json:"gate_holder,omitempty"`
+		GatePending         *slot.GateIntent    `json:"gate_pending,omitempty"`
 		History             []slot.ResolvedHold `json:"history,omitempty"`
 	}
 	enc := json.NewEncoder(cmd.OutOrStdout())
@@ -495,6 +506,7 @@ func printSlotStatusJSON(cmd *cobra.Command, rep slot.Report, history []slot.His
 		Reserved:            rep.Reserved,
 		YieldingToGate:      rep.YieldingToGate,
 		GateHolder:          rep.GateHolder,
+		GatePending:         rep.GatePending,
 		History:             slot.ResolveHolds(history, rep),
 	})
 }
