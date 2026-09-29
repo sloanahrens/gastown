@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/jonboulle/clockwork"
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -101,6 +102,9 @@ type Daemon struct {
 	// notifier sends mail, nudges and escalations; nil means gt run as the
 	// daemon (see notify()).
 	notifier notify.Notifier
+
+	// clock times the daemon's own waits (see clk()); nil is the real clock.
+	clock clockwork.Clock
 
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup

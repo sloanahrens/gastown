@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,15 +12,17 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/formula"
+	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 func TestParseWispID(t *testing.T) {
@@ -424,6 +427,8 @@ type dogPourTestRig struct {
 	fake   *fakePourBd
 	logbuf *bytes.Buffer
 	waits  []time.Duration
+	notes  *notifyfake.Recorder
+	clock  *clockwork.FakeClock
 }
 
 func newDogPourTestRig(t *testing.T, townRoot string) *dogPourTestRig {
@@ -432,10 +437,14 @@ func newDogPourTestRig(t *testing.T, townRoot string) *dogPourTestRig {
 	rig := &dogPourTestRig{
 		fake:   &fakePourBd{},
 		logbuf: &bytes.Buffer{},
+		notes:  notifyfake.New(),
+		clock:  newFixedClock(),
 	}
 	rig.daemon = &Daemon{
-		config: &Config{TownRoot: townRoot},
-		logger: log.New(rig.logbuf, "", 0),
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(rig.logbuf, "", 0),
+		notifier: rig.notes,
+		clock:    rig.clock,
 	}
 	rig.daemon.dogPourBdFn = rig.fake.run
 	rig.daemon.dogPourWaitFn = func(d time.Duration) {
@@ -444,31 +453,13 @@ func newDogPourTestRig(t *testing.T, townRoot string) *dogPourTestRig {
 	return rig
 }
 
-// fakeGtWithStdin installs a fake `gt` that records each invocation's argv and
-// stdin, so a test can assert on the escalation body and not just its
-// fingerprint. Returns the log path.
-func fakeGtWithStdin(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for gt")
+// escalations returns every escalation the rig's daemon attempted, in order.
+func (r *dogPourTestRig) escalations() []notify.Escalation {
+	var out []notify.Escalation
+	for _, c := range r.notes.Escalations() {
+		out = append(out, c.Escalation)
 	}
-
-	logPath := filepath.Join(t.TempDir(), "gt-calls.log")
-	script := `#!/usr/bin/env bash
-{
-  printf 'ARGV: %s\n' "$*"
-  printf 'STDIN: '
-  cat
-  printf '\n--END--\n'
-} >> "` + logPath + `"
-exit 0
-`
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
+	return out
 }
 
 func readFileOrEmpty(t *testing.T, path string) string {
@@ -514,7 +505,7 @@ func dogCycleEvents(t *testing.T, townRoot string) []map[string]interface{} {
 // retry inside the cycle must turn that back into a run instead of dropping the
 // patrol until the next tick.
 func TestPourDogMolecule_RetriesATransientFailureWithinOneCycle(t *testing.T) {
-	gtLog := fakeGtWithStdin(t)
+	t.Parallel()
 	rig := newDogPourTestRig(t, t.TempDir())
 	rig.fake.failFor = 1 // first attempt fails, the retry succeeds
 
@@ -539,8 +530,8 @@ func TestPourDogMolecule_RetriesATransientFailureWithinOneCycle(t *testing.T) {
 	if len(rig.fake.pourArgs) != 2 || !reflect.DeepEqual(rig.fake.pourArgs[0], wantArgs) || !reflect.DeepEqual(rig.fake.pourArgs[1], wantArgs) {
 		t.Errorf("pour argv = %v, want two identical %v", rig.fake.pourArgs, wantArgs)
 	}
-	if calls := readFileOrEmpty(t, gtLog); calls != "" {
-		t.Errorf("a pour that recovered must not escalate, got:\n%s", calls)
+	if calls := rig.notes.Calls(); len(calls) != 0 {
+		t.Errorf("a pour that recovered must not escalate, got: %+v", calls)
 	}
 }
 
@@ -549,7 +540,7 @@ func TestPourDogMolecule_RetriesATransientFailureWithinOneCycle(t *testing.T) {
 // failing branch is what runs, and the escalation must fire on the Nth
 // consecutive failure — and not before it.
 func TestPourDogMolecule_EscalatesAfterConsecutiveFailedCycles(t *testing.T) {
-	gtLog := fakeGtWithStdin(t)
+	t.Parallel()
 	rig := newDogPourTestRig(t, t.TempDir())
 	rig.fake.failFor = -1 // every pour of every cycle fails, all attempts
 
@@ -560,8 +551,8 @@ func TestPourDogMolecule_EscalatesAfterConsecutiveFailedCycles(t *testing.T) {
 		if mol.outcome != dogCycleSkipped {
 			t.Fatalf("cycle %d: outcome = %q, want %q", cycle, mol.outcome, dogCycleSkipped)
 		}
-		if calls := readFileOrEmpty(t, gtLog); calls != "" {
-			t.Fatalf("cycle %d escalated before the %d-consecutive-failure threshold:\n%s",
+		if calls := rig.notes.Calls(); len(calls) != 0 {
+			t.Fatalf("cycle %d escalated before the %d-consecutive-failure threshold: %+v",
 				cycle, dogPourEscalateAfter, calls)
 		}
 	}
@@ -569,27 +560,31 @@ func TestPourDogMolecule_EscalatesAfterConsecutiveFailedCycles(t *testing.T) {
 	mol := rig.daemon.pourDogMolecule(pourTestFormula, nil)
 	mol.close()
 
-	calls := readFileOrEmpty(t, gtLog)
-	if !strings.Contains(calls, "escalate") {
-		t.Fatalf("the %dth consecutive failed pour must escalate; no escalation was raised:\n%s",
-			dogPourEscalateAfter, calls)
+	escs := rig.escalations()
+	if len(escs) != 1 {
+		t.Fatalf("the %dth consecutive failed pour must escalate once; escalations: %+v",
+			dogPourEscalateAfter, escs)
 	}
-	if want := "--fingerprint " + dogPourAlertKey(pourTestFormula); !strings.Contains(calls, want) {
-		t.Errorf("escalation must carry the per-dog alert key %q, got:\n%s", want, calls)
+	esc := escs[0]
+	if want := dogPourAlertKey(pourTestFormula); esc.Fingerprint != want {
+		t.Errorf("escalation must carry the per-dog alert key %q, got %q", want, esc.Fingerprint)
 	}
-	if !strings.Contains(calls, pourTestFormula) {
-		t.Errorf("escalation must name the dog that cannot pour, got:\n%s", calls)
+	if !strings.EqualFold(esc.Severity, "high") {
+		t.Errorf("escalation severity = %q, want HIGH", esc.Severity)
 	}
-	if !strings.Contains(calls, "outcome=skipped") {
-		t.Errorf("escalation must say the cycles were skipped, not merely that something failed, got:\n%s", calls)
+	if !strings.Contains(esc.Description+esc.Reason, pourTestFormula) {
+		t.Errorf("escalation must name the dog that cannot pour, got: %+v", esc)
+	}
+	if !strings.Contains(esc.Description+esc.Reason, "outcome=skipped") {
+		t.Errorf("escalation must say the cycles were skipped, not merely that something failed, got: %+v", esc)
 	}
 	// The title is truncated at maxEscalationTitleLen, so the cause has to reach
-	// the bead through the stdin body.
-	if !strings.Contains(calls, "STDIN: mol-dog-doctor") {
-		t.Errorf("escalation must carry the cycle detail in its body, got:\n%s", calls)
+	// the bead through the body (gt escalate --stdin).
+	if !strings.HasPrefix(esc.Reason, "mol-dog-doctor") {
+		t.Errorf("escalation must carry the cycle detail in its body, got reason %q", esc.Reason)
 	}
-	if !strings.Contains(calls, "dolt circuit breaker is open") {
-		t.Errorf("escalation body must carry the underlying failure, got:\n%s", calls)
+	if !strings.Contains(esc.Reason, "dolt circuit breaker is open") {
+		t.Errorf("escalation body must carry the underlying failure, got reason %q", esc.Reason)
 	}
 
 	// The retry is not a substitute for the alarm: every attempt of every cycle
@@ -603,7 +598,7 @@ func TestPourDogMolecule_EscalatesAfterConsecutiveFailedCycles(t *testing.T) {
 	for cycle := 0; cycle < dogPourEscalateAfter; cycle++ {
 		rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
 	}
-	if got := strings.Count(readFileOrEmpty(t, gtLog), "escalate -s HIGH"); got != 1 {
+	if got := len(rig.escalations()); got != 1 {
 		t.Errorf("expected exactly one escalation for the whole failure streak, got %d", got)
 	}
 
@@ -617,14 +612,14 @@ func TestPourDogMolecule_EscalatesAfterConsecutiveFailedCycles(t *testing.T) {
 // and the next outage starts a fresh streak rather than tripping on the
 // lifetime total.
 func TestPourDogMolecule_RecoveryClearsTheAlarmAndResetsTheStreak(t *testing.T) {
-	gtLog := fakeGtWithStdin(t)
+	t.Parallel()
 	rig := newDogPourTestRig(t, t.TempDir())
 	rig.fake.failFor = -1
 
 	for cycle := 0; cycle < dogPourEscalateAfter; cycle++ {
 		rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
 	}
-	if got := strings.Count(readFileOrEmpty(t, gtLog), "escalate -s HIGH"); got != 1 {
+	if got := len(rig.escalations()); got != 1 {
 		t.Fatalf("expected exactly one escalation after %d failed cycles, got %d", dogPourEscalateAfter, got)
 	}
 
@@ -636,12 +631,12 @@ func TestPourDogMolecule_RecoveryClearsTheAlarmAndResetsTheStreak(t *testing.T) 
 	if recovered.outcome != dogCycleRan {
 		t.Fatalf("outcome after recovery = %q, want %q", recovered.outcome, dogCycleRan)
 	}
-	clears := readFileOrEmpty(t, gtLog)
-	if !strings.Contains(clears, "escalate clear") {
-		t.Fatalf("a recovered dog must close the escalation it raised, gt calls:\n%s", clears)
+	clears := rig.notes.Clears()
+	if len(clears) == 0 {
+		t.Fatalf("a recovered dog must close the escalation it raised, calls: %+v", rig.notes.Calls())
 	}
-	if want := "--fingerprint " + dogPourAlertKey(pourTestFormula); !strings.Contains(clears, want) {
-		t.Errorf("the clear must name the same key the escalation used (%q), got:\n%s", want, clears)
+	if want := []string{dogPourAlertKey(pourTestFormula)}; !reflect.DeepEqual(clears[0].Fingerprints, want) {
+		t.Errorf("the clear must name the same key the escalation used (%q), got %v", want, clears[0].Fingerprints)
 	}
 
 	// The streak restarted: two more failures are NOT the fourth and fifth of
@@ -650,7 +645,7 @@ func TestPourDogMolecule_RecoveryClearsTheAlarmAndResetsTheStreak(t *testing.T) 
 	for cycle := 0; cycle < dogPourEscalateAfter-1; cycle++ {
 		rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
 	}
-	if got := strings.Count(readFileOrEmpty(t, gtLog), "escalate -s HIGH"); got != 1 {
+	if got := len(rig.escalations()); got != 1 {
 		t.Errorf("failures after a recovery must start a new streak (want 1 escalation, got %d)", got)
 	}
 }
@@ -661,7 +656,7 @@ func TestPourDogMolecule_RecoveryClearsTheAlarmAndResetsTheStreak(t *testing.T) 
 // so it records outcome=ran in the log and nothing in the feed; a skipped cycle
 // has no receipt of its own and goes to the feed with its reason.
 func TestDogCycleOutcome_SkippedIsDistinguishableFromACleanRun(t *testing.T) {
-	fakeGtWithStdin(t)
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	clean := newDogPourTestRig(t, townRoot)
@@ -718,7 +713,7 @@ func TestDogCycleOutcome_SkippedIsDistinguishableFromACleanRun(t *testing.T) {
 // no receipt. That is a broken receipt, not a clean run, and it counts toward
 // the same alarm as a failed pour.
 func TestPourDogMolecule_PouredButUnaddressableIsAFailedCycle(t *testing.T) {
-	gtLog := fakeGtWithStdin(t)
+	t.Parallel()
 	rig := newDogPourTestRig(t, t.TempDir())
 	rig.fake.noID = true
 
@@ -732,8 +727,8 @@ func TestPourDogMolecule_PouredButUnaddressableIsAFailedCycle(t *testing.T) {
 
 	rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
 
-	if calls := readFileOrEmpty(t, gtLog); !strings.Contains(calls, "escalate") {
-		t.Fatalf("a dog whose molecules can never be addressed must reach the alarm, got:\n%s", calls)
+	if escs := rig.escalations(); len(escs) != 1 {
+		t.Fatalf("a dog whose molecules can never be addressed must reach the alarm, got: %+v", escs)
 	}
 }
 
@@ -743,7 +738,7 @@ func TestPourDogMolecule_PouredButUnaddressableIsAFailedCycle(t *testing.T) {
 // nothing. Labeling that outcome=ran would leave the silence gt-i3rpw is about
 // reading as a good cycle.
 func TestPourDogMolecule_StepDiscoveryFailureIsNotACleanRun(t *testing.T) {
-	gtLog := fakeGtWithStdin(t)
+	t.Parallel()
 	rig := newDogPourTestRig(t, t.TempDir())
 	rig.fake.failShow = true // pour succeeds; `show --children` does not
 
@@ -760,8 +755,8 @@ func TestPourDogMolecule_StepDiscoveryFailureIsNotACleanRun(t *testing.T) {
 
 	rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
 
-	if calls := readFileOrEmpty(t, gtLog); !strings.Contains(calls, "escalate") {
-		t.Fatalf("a dog whose steps can never be read back must reach the alarm, got:\n%s", calls)
+	if escs := rig.escalations(); len(escs) != 1 {
+		t.Fatalf("a dog whose steps can never be read back must reach the alarm, got: %+v", escs)
 	}
 }
 
@@ -771,7 +766,7 @@ func TestPourDogMolecule_StepDiscoveryFailureIsNotACleanRun(t *testing.T) {
 // nothing will ever close — the flood closeRemainingSteps exists to prevent.
 // The cycle must be skipped once, counted, and left to the alarm.
 func TestPourDogMolecule_DoesNotRetryAPourThatTimedOut(t *testing.T) {
-	gtLog := fakeGtWithStdin(t)
+	t.Parallel()
 	rig := newDogPourTestRig(t, t.TempDir())
 	rig.fake.failFor = -1
 	rig.fake.timeout = true
@@ -791,8 +786,8 @@ func TestPourDogMolecule_DoesNotRetryAPourThatTimedOut(t *testing.T) {
 	if reason := mol.outcomeReason; !strings.Contains(reason, "timed out") {
 		t.Errorf("the reason must name the timeout, got %q", reason)
 	}
-	if calls := readFileOrEmpty(t, gtLog); calls != "" {
-		t.Errorf("one skipped cycle is below the threshold and must not escalate, got:\n%s", calls)
+	if calls := rig.notes.Calls(); len(calls) != 0 {
+		t.Errorf("one skipped cycle is below the threshold and must not escalate, got: %+v", calls)
 	}
 }
 
@@ -801,23 +796,18 @@ func TestPourDogMolecule_DoesNotRetryAPourThatTimedOut(t *testing.T) {
 // (a bead write) fails too. A dropped escalation must not latch the streak as
 // reported, or the dog stays silent for the rest of the outage.
 func TestPourDogMolecule_RetriesAnEscalationThatFailedToSend(t *testing.T) {
-	// A gt that fails every call: escalate exit 1, so all three attempts drop.
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mocks for gt")
-	}
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte("#!/usr/bin/env bash\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write failing gt: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	rig := newDogPourTestRig(t, townRoot)
 	rig.fake.failFor = -1
+	// gt escalate fails every call, so all three attempts drop.
+	rig.notes.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (<no output>)"))
 
-	for cycle := 0; cycle < dogPourEscalateAfter; cycle++ {
-		rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
-	}
+	runOnClock(t, rig.clock, time.Second, func() {
+		for cycle := 0; cycle < dogPourEscalateAfter; cycle++ {
+			rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
+		}
+	})
 
 	// The send failed, so the streak is not latched as reported; the next failed
 	// cycle must try to escalate again rather than assume the alert landed.
@@ -834,11 +824,15 @@ func TestPourDogMolecule_RetriesAnEscalationThatFailedToSend(t *testing.T) {
 	if before == 0 {
 		t.Fatal("a gt that always fails must leave an escalation_dropped record")
 	}
+	sent := len(rig.escalations())
 
-	rig.daemon.pourDogMolecule(pourTestFormula, nil).close()
+	runOnClock(t, rig.clock, time.Second, func() { rig.daemon.pourDogMolecule(pourTestFormula, nil).close() })
 
 	if got := attempts(); got <= before {
 		t.Errorf("dropped escalation records = %d, want more than %d — the next failed cycle must retry the alarm", got, before)
+	}
+	if got := len(rig.escalations()); got != sent+maxEscalationRetries {
+		t.Errorf("escalation attempts after the next failed cycle = %d, want %d", got, sent+maxEscalationRetries)
 	}
 }
 

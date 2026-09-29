@@ -1298,15 +1298,24 @@ func TestMaxEscalationRetries(t *testing.T) {
 // exit 1 immediately, confirming the function retries transient failures
 // instead of giving up after one attempt.
 func TestEscalate_RetriesOnTimeout(t *testing.T) {
+	t.Parallel()
 	flaky := &flakyEscalations{Recorder: notifyfake.New(), failures: 2}
+	clk := newFixedClock()
 	d := &Daemon{
 		logger:   log.New(io.Discard, "", 0),
 		config:   &Config{TownRoot: t.TempDir()},
 		notifier: flaky,
+		clock:    clk,
 	}
 
-	if err := d.escalateAlertErr("k", "main_branch_test", "test failed"); err != nil {
+	var err error
+	runOnClock(t, clk, time.Second, func() { err = d.escalateAlertErr("k", "main_branch_test", "test failed") })
+	if err != nil {
 		t.Fatalf("escalateAlertErr = %v, want success on the third attempt", err)
+	}
+	// The retries back off 1 s, then 2 s, on the daemon's clock.
+	if waited := clk.Since(testEpoch); waited != 3*time.Second {
+		t.Errorf("backoff before the third attempt = %s, want 3s (1s then 2s)", waited)
 	}
 	if flaky.attempts != 3 {
 		t.Errorf("escalation attempts = %d, want 3", flaky.attempts)
@@ -1337,6 +1346,7 @@ func (f *flakyEscalations) Escalate(ctx context.Context, e notify.Escalation) er
 // escalate always fails, the full message is logged to the feed (not just
 // the title).
 func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	eventsFile := filepath.Join(townRoot, ".events.jsonl")
 	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o755); err != nil {
@@ -1348,16 +1358,18 @@ func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
 	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
 
 	logger := log.New(io.Discard, "", 0)
+	clk := newFixedClock()
 	d := &Daemon{
 		logger: logger,
 		config: &Config{
 			TownRoot: townRoot,
 		},
 		notifier: rec,
+		clock:    clk,
 	}
 
 	testMessage := "main branch test failures:\ngastown: gate \"test\": exit status 1"
-	d.escalate("main_branch_test", testMessage)
+	runOnClock(t, clk, time.Second, func() { d.escalate("main_branch_test", testMessage) })
 
 	// Verify the events file received the escalation_dropped event with the
 	// full message (not just the title).
@@ -1425,13 +1437,16 @@ func TestEscalate_TimedOutAttemptsAreLoggedAsTimeouts(t *testing.T) {
 	rec := notifyfake.New()
 	rec.Fail(notifyfake.KindEscalate, fmt.Errorf("gt escalate: %w (signal: killed)", context.DeadlineExceeded))
 	var logs bytes.Buffer
+	clk := newFixedClock()
 	d := &Daemon{
 		logger:   log.New(&logs, "", 0),
 		config:   &Config{TownRoot: townRoot},
 		notifier: rec,
+		clock:    clk,
 	}
 
-	err := d.escalateAlertErr("k", "main_branch_test", "test failed")
+	var err error
+	runOnClock(t, clk, time.Second, func() { err = d.escalateAlertErr("k", "main_branch_test", "test failed") })
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("escalateAlertErr = %v, want the wrapped deadline", err)
 	}
