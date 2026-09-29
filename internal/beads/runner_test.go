@@ -258,3 +258,35 @@ func TestNewPlainBDCmdWiring(t *testing.T) {
 	}
 }
 
+// TestReleaseFallsBackWithoutForce: deps.MinBeadsVersion still admits bd
+// builds older than the claim fence, which may not know `update --force`.
+// On such a bd, Release retries without it, as --flat already falls back,
+// instead of failing every release.
+func TestReleaseFallsBackWithoutForce(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		for _, a := range args {
+			if a == "--force" {
+				return reply{stderr: "Error: unknown flag: --force\n", err: exitError{1}}
+			}
+		}
+		return reply{}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+	if err := b.ReleaseWithReason("gt-1", "worker died"); err != nil {
+		t.Fatalf("ReleaseWithReason on a bd without --force: %v", err)
+	}
+	want := []string{
+		"update gt-1 --status=open --assignee= --force --notes=Released: worker died",
+		"update gt-1 --status=open --assignee= --notes=Released: worker died",
+	}
+	if got := r.argvs(); !reflect.DeepEqual(got, want) {
+		t.Errorf("calls = %q\nwant    %q", got, want)
+	}
+
+	// Any other failure is not retried.
+	other := newRecorder(func([]string) reply { return reply{stderr: "Error: issue not found", err: exitError{1}} })
+	if err := newRecordedBeads(t.TempDir(), other).Release("gt-2"); err == nil || len(other.calls()) != 1 {
+		t.Errorf("Release on a missing issue = %v after %d calls, want one failing call", err, len(other.calls()))
+	}
+}

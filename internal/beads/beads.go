@@ -3278,7 +3278,23 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 	}
 
 	_, err := b.run(args...)
+	if err != nil && strings.Contains(err.Error(), "unknown flag: --force") {
+		// A bd older than the claim fence has no --force on update, and no
+		// fence for it to override either (deps.MinBeadsVersion admits it).
+		_, err = b.run(removeArg(args, "--force")...)
+	}
 	return err
+}
+
+// removeArg returns args without any element equal to drop.
+func removeArg(args []string, drop string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != drop {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // AddDependency adds a dependency: issue depends on dependsOn.
