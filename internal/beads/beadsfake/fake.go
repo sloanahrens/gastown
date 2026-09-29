@@ -65,6 +65,11 @@ type Fake struct {
 	sqlLog   []string
 	inits    []beads.InitOptions
 	failures map[string]error
+
+	// journal is the events journal (bd events tail): one record per
+	// create, update, close and comment, as gastown's bd calls journal with
+	// BD_EVENTS_JOURNAL=1.
+	journal []beads.EventRecord
 }
 
 // Option configures a Fake.
@@ -423,6 +428,7 @@ func (f *Fake) Create(opts beads.CreateOptions) (*beads.Issue, error) {
 		},
 	}
 	f.issues[id] = r
+	f.journalWrite("create", id)
 	return f.snapshot(r), nil
 }
 
@@ -586,6 +592,7 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 		is.Labels = sortedSet(kept)
 	}
 	is.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return nil
 }
 
@@ -622,6 +629,7 @@ func (f *Fake) close(reason string, force bool, ids []string) error {
 		f.setStatus(r, string(beads.StatusClosed), reason)
 		r.issue.UpdatedAt = f.now()
 		closed = append(closed, id)
+		f.journalWrite("close", id)
 	}
 	switch {
 	case len(refused) == 0:
@@ -666,6 +674,7 @@ func (f *Fake) ReleaseWithReason(id, reason string) error {
 		r.issue.Notes = "Released: " + reason
 	}
 	r.issue.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return nil
 }
 
@@ -688,6 +697,7 @@ func (f *Fake) AppendNotes(id, note string) error {
 	}
 	r.issue.Notes += note
 	r.issue.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return nil
 }
 
@@ -721,6 +731,7 @@ func (f *Fake) TransferIfAssignee(id, expected, status, assignee string) (bool, 
 	f.setStatus(r, status, "")
 	r.issue.Assignee = assignee
 	r.issue.UpdatedAt = f.now()
+	f.journalWrite("update", id)
 	return true, nil
 }
 
@@ -740,6 +751,7 @@ func (f *Fake) AddComment(id, text string) error {
 		Text:      text,
 		CreatedAt: f.now(),
 	})
+	f.journalWrite("comment", id)
 	return nil
 }
 

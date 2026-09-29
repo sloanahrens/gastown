@@ -82,7 +82,8 @@ type Client interface {
 var _ Client = (*Beads)(nil)
 
 // Admin is the maintenance surface beadsfake models: config keys, table
-// probes, counts, stats, the wisp list and gc's dry-run candidates.
+// probes, counts, stats, the wisp list, gc's dry-run candidates and the
+// events journal.
 // beadsfake.RunAdminContract pins the fake to *Beads on it. (SQL, SQLCSV and
 // InitDatabase are on *Beads too, but a fake can only script or record them.)
 type Admin interface {
@@ -93,6 +94,9 @@ type Admin interface {
 	StatsJSON() ([]byte, error)
 	MolWispList() ([]*Issue, error)
 	WispGCCandidates(age time.Duration) ([]string, error)
+	// EventsTail reads the events journal after since, at most limit
+	// records (0 = all); a pruned-past since is *EventsTruncatedError.
+	EventsTail(since int64, limit int) (*EventsPage, error)
 }
 
 var _ Admin = (*Beads)(nil)

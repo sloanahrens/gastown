@@ -2,6 +2,7 @@ package beadsfake
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,49 @@ var adminCases = []struct {
 	{"tables", adminTables},
 	{"wisp list", adminWispList},
 	{"wisp gc candidates", adminWispGCCandidates},
+	{"events journal", adminEventsJournal},
+}
+
+// adminEventsJournal pins EventsTail over the mutations the convoy manager
+// reads: a close is op close with status closed, and a reopen is an update
+// whose status is no longer closed. The database is shared with the other
+// cases, so it asserts only on its own issue's records.
+func adminEventsJournal(t *testing.T, s *adminScope) {
+	start, err := s.EventsTail(0, 0)
+	if err != nil {
+		t.Fatalf("EventsTail(0): %v", err)
+	}
+	head := start.NextSince
+	is := s.mustCreate(t, beads.CreateOptions{Title: "journaled", Priority: -1})
+	mustDo(t, "close", s.Close(is.ID))
+	mustDo(t, "reopen", s.Update(is.ID, beads.UpdateOptions{Status: ptr("open")}))
+
+	page, err := s.EventsTail(head, 0)
+	if err != nil {
+		t.Fatalf("EventsTail(%d): %v", head, err)
+	}
+	var got []string
+	for _, r := range page.Records {
+		if r.Seq <= head {
+			t.Errorf("record seq %d is not after since %d", r.Seq, head)
+		}
+		if r.IssueID == is.ID {
+			got = append(got, r.Op+":"+r.Status)
+		}
+	}
+	if want := []string{"create:open", "close:closed", "update:open"}; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("journal for %s = %q, want %q", is.ID, got, want)
+	}
+	if page.More || page.NextSince <= head {
+		t.Errorf("full read = next %d more %v, want next past %d and no more", page.NextSince, page.More, head)
+	}
+	if again, err := s.EventsTail(page.NextSince, 0); err != nil || len(again.Records) != 0 || again.NextSince != page.NextSince {
+		t.Errorf("EventsTail(next) = %+v, %v; want nothing new and the same cursor", again, err)
+	}
+	one, err := s.EventsTail(head, 1)
+	if err != nil || len(one.Records) != 1 || !one.More || one.NextSince != one.Records[0].Seq {
+		t.Errorf("EventsTail(head, 1) = %+v, %v; want one record and more", one, err)
+	}
 }
 
 func adminConfig(t *testing.T, s *adminScope) {
