@@ -119,7 +119,10 @@ Find molecules attached to dead sessions.
 
 **1. List active molecules:**
 ```bash
-bd mol list --active
+# --include-infra: molecules are often wisps, which bd list hides by default.
+# --limit=0: the default page is 50 rows, and a full page looks complete.
+bd list --status=in_progress --include-infra --json --limit=0
+bd list --status=hooked --include-infra --json --limit=0
 ```
 
 **2. For each molecule, check owner session:**
