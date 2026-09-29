@@ -92,6 +92,16 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 		// `var _ I = (*T)(nil)` declares no variable, so `_ = x` in a parallel
 		// test writes nothing global.
 		"TestParallelBlankAssignment": false,
+		// A method and a free function can share a name; they are different
+		// functions. The free Install is clean even though a method named
+		// Install declared before it writes the seam, and the free Poke writes
+		// the seam even though a clean method named Poke is declared first.
+		"TestParallelCallsFreeInstall": false,
+		"TestParallelCallsFreePoke":    true,
+		// The same collision across packages: other.Test calls pkg.Store and
+		// pkg.Nudge, where only the free functions are what the call names.
+		"TestParallelCallsOtherStore": false,
+		"TestParallelCallsOtherNudge": true,
 	}
 	seen := map[string]bool{}
 	for _, line := range got {
@@ -134,6 +144,38 @@ func SetSeam(v int) { Seam = v }
 
 // ReadSeam reads it.
 func ReadSeam() int { return Seam }
+
+// Store and Nudge each exist twice: as a method and as a free function. Only
+// the method Store and the free Nudge write the seam.
+type Box struct{}
+
+func (Box) Store(v int) { Seam = v }
+
+func Store() {}
+
+type Nudger struct{}
+
+func (Nudger) Nudge() {}
+
+func Nudge(v int) { Seam = v }
+`,
+		"other/other_test.go": `package other
+
+import (
+	"testing"
+
+	"example.test/pkg"
+)
+
+func TestParallelCallsOtherStore(t *testing.T) {
+	t.Parallel()
+	pkg.Store()
+}
+
+func TestParallelCallsOtherNudge(t *testing.T) {
+	t.Parallel()
+	pkg.Nudge(8)
+}
 `,
 		"pkg/seam_test.go": `package pkg
 
@@ -245,6 +287,28 @@ func TestParallelBlankAssignment(t *testing.T) {
 	t.Parallel()
 	_ = seamReader{}.read()
 	t.Cleanup(func() { _ = seamReader{}.read() })
+}
+
+type installer struct{}
+
+func (installer) Install(v int) { Seam = v }
+
+func Install() {}
+
+func TestParallelCallsFreeInstall(t *testing.T) {
+	t.Parallel()
+	Install()
+}
+
+type poker struct{}
+
+func (*poker) Poke() {}
+
+func Poke(v int) { Seam = v }
+
+func TestParallelCallsFreePoke(t *testing.T) {
+	t.Parallel()
+	Poke(7)
 }
 `,
 	}
@@ -417,13 +481,13 @@ type pkgAnalysis struct {
 	root         string // scan root, so reported paths are relative to it
 	importPath   string
 	pkgLevel     map[string]bool              // package-scope names declared in this dir
-	funcs        map[string]*ast.FuncDecl     // func name -> declaration
-	bodyOf       map[string]*ast.BlockStmt    // func name -> body
-	lineOf       map[string]int               // func name -> declaration line
-	fileOf       map[string]string            // func name -> source path
-	waived       map[string]bool              // func name -> carries the waiver comment
-	direct       map[string]*globalWrite      // func name -> its own global write
-	crossSeam    map[string][]globalWrite     // func name -> global writes via other packages
+	funcs        map[string]*ast.FuncDecl     // func key -> declaration
+	bodyOf       map[string]*ast.BlockStmt    // func key -> body
+	lineOf       map[string]int               // func key -> declaration line
+	fileOf       map[string]string            // func key -> source path
+	waived       map[string]bool              // func key -> carries the waiver comment
+	direct       map[string]*globalWrite      // func key -> its own global write
+	crossSeam    map[string][]globalWrite     // func key -> global writes via other packages
 	imports      map[string]map[string]bool   // file path -> alias -> is-our-module
 	crossTargets map[string]map[string]string // file path -> alias -> import path
 	parseErrors  []string
@@ -509,7 +573,10 @@ func (pa *pkgAnalysis) collectDecls(f *ast.File) {
 				}
 			}
 		case *ast.FuncDecl:
-			pa.pkgLevel[d.Name.Name] = true
+			// A method's name is scoped to its receiver type, not the package.
+			if d.Recv == nil {
+				pa.pkgLevel[d.Name.Name] = true
+			}
 		}
 	}
 }
@@ -547,7 +614,7 @@ func (pa *pkgAnalysis) collectBodies(s *seamScanner, f *ast.File) {
 		if !ok || fd.Body == nil {
 			continue
 		}
-		name := fd.Name.Name
+		name := funcKey(fd)
 		if _, seen := pa.funcs[name]; seen {
 			continue
 		}
@@ -561,6 +628,41 @@ func (pa *pkgAnalysis) collectBodies(s *seamScanner, f *ast.File) {
 			pa.direct[name] = w
 		}
 		pa.bodyOf[name] = fd.Body
+	}
+}
+
+// funcKey names a declaration so that a method and a free function never share
+// a key. A free function is keyed by its bare name, which is what a call like
+// `Poke()` or `pkg.Poke()` names. A method is keyed by receiver type and name
+// ("poker.Poke"), which no such call can name: keyed by bare name, whichever of
+// the two was declared first stood in for both, so a free function inherited a
+// same-named method's write (a false alarm) or hid its own write behind a clean
+// method (a missed swap).
+func funcKey(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return fd.Name.Name
+	}
+	return recvTypeName(fd.Recv.List[0].Type) + "." + fd.Name.Name
+}
+
+// recvTypeName strips a receiver's pointer and type parameters down to the
+// type's name: *T, T[K], and *T[K, V] all name T.
+func recvTypeName(expr ast.Expr) string {
+	for {
+		switch e := expr.(type) {
+		case *ast.StarExpr:
+			expr = e.X
+		case *ast.ParenExpr:
+			expr = e.X
+		case *ast.IndexExpr:
+			expr = e.X
+		case *ast.IndexListExpr:
+			expr = e.X
+		case *ast.Ident:
+			return e.Name
+		default:
+			return "?"
+		}
 	}
 }
 
@@ -871,6 +973,9 @@ func (pa *pkgAnalysis) crossWrites(s *seamScanner, path string, body *ast.BlockS
 			return true
 		}
 		target := pa.crossTargets[path][base.Name]
+		// pkg.Name names a free function, and mutator keys free functions by
+		// bare name and methods by Recv.Name, so this lookup cannot land on a
+		// method that happens to share the name.
 		if !s.mutator[target][sel.Sel.Name] {
 			return true
 		}
@@ -925,7 +1030,9 @@ func (pa *pkgAnalysis) mutates(name string, stack map[string]bool) bool {
 	return found
 }
 
-// calleeNames lists the same-package function names a call could name.
+// calleeNames lists the same-package function keys a call could name. A bare
+// `f()` names a free function, whose key is its bare name; it never names a
+// method, whose key is Recv.Name.
 //
 // Method calls are deliberately not followed. Without type information a
 // `x.Run()` can only be matched by the name "Run", and every package in this
@@ -950,7 +1057,7 @@ func calleeNames(call *ast.CallExpr, ourAliases map[string]bool) []string {
 func (pa *pkgAnalysis) parallelSwaps() []string {
 	out := append([]string{}, pa.parseErrors...)
 	for name, fd := range pa.funcs {
-		if !strings.HasPrefix(name, "Test") || pa.waived[name] || fd == nil || fd.Body == nil {
+		if fd == nil || fd.Recv != nil || !strings.HasPrefix(name, "Test") || pa.waived[name] || fd.Body == nil {
 			continue
 		}
 		if !callsParallel(fd.Body) || !pa.mutates(name, map[string]bool{}) {
