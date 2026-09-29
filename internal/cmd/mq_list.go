@@ -13,7 +13,9 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 func runMQList(cmd *cobra.Command, args []string) error {
@@ -30,9 +32,44 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	// Create beads wrapper for the rig - use BeadsPath() to get the git-synced location
 	b := beads.New(r.BeadsPath())
 
+	// The town is only needed for the gate intent; a lookup failure just
+	// skips it.
+	townRoot, _ := workspace.FindFromCwdOrError()
+	return listMergeQueue(mqListEnv{rig: r, lister: b, beads: b, townRoot: townRoot, callerRole: os.Getenv("GT_ROLE")}, rigName, mqListFlags{
+		ready: mqListReady, status: mqListStatus, worker: mqListWorker,
+		epic: mqListEpic, json: mqListJSON, verify: mqListVerify,
+	})
+}
+
+// mrLister is the merge-queue query gt mq list makes.
+type mrLister interface {
+	ListMergeRequests(opts beads.ListOptions) ([]*beads.Issue, error)
+}
+
+// mqListEnv is what listMergeQueue runs against: the rig, its merge queue,
+// the beads handle integration-branch lookups use (only with --epic), and the
+// town and caller role the gate intent is synced for.
+type mqListEnv struct {
+	rig        *rig.Rig
+	lister     mrLister
+	beads      *beads.Beads
+	townRoot   string
+	callerRole string
+}
+
+// mqListFlags are gt mq list's flags, captured once per call.
+type mqListFlags struct {
+	ready, json, verify  bool
+	status, worker, epic string
+}
+
+// listMergeQueue is gt mq list after the rig is resolved.
+func listMergeQueue(env mqListEnv, rigName string, f mqListFlags) error {
+	r := env.rig
+
 	// Create git client for branch verification when --verify is set
 	var gitClient *git.Git
-	if mqListVerify {
+	if f.verify {
 		// Use the refinery's rig worktree to check branches
 		refineryRigPath := filepath.Join(r.Path, "refinery", "rig")
 		gitClient = git.NewGit(refineryRigPath)
@@ -49,9 +86,9 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Apply status filter if specified
-	if mqListStatus != "" {
-		opts.Status = mqListStatus
-	} else if !mqListReady {
+	if f.status != "" {
+		opts.Status = f.status
+	} else if !f.ready {
 		// Default to open if not showing ready
 		opts.Status = "open"
 	}
@@ -62,12 +99,12 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	// mark its unblocked sibling "duplicate" rather than "ready".
 	var duplicates []refinery.DuplicateBranchMR
 
-	if mqListReady {
+	if f.ready {
 		// Query all open MRs and filter out blocked ones manually.
 		// Cannot use b.Ready() because it excludes ephemeral beads,
 		// and MRs are ephemeral by design (see gt-t5t6y).
 		opts.Status = "open"
-		allOpen, err := b.ListMergeRequests(opts)
+		allOpen, err := env.lister.ListMergeRequests(opts)
 		if err != nil {
 			return fmt.Errorf("querying ready MRs: %w", err)
 		}
@@ -79,7 +116,8 @@ func runMQList(cmd *cobra.Command, args []string) error {
 			issues = append(issues, issue)
 		}
 	} else {
-		issues, err = b.ListMergeRequests(opts)
+		var err error
+		issues, err = env.lister.ListMergeRequests(opts)
 		if err != nil {
 			return fmt.Errorf("querying merge queue: %w", err)
 		}
@@ -90,8 +128,12 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	// gt mq list, never gt mq next again, so this is where a drained queue
 	// clears the pending-gate intent (gt-22hdp.29) instead of leaving crew
 	// yielding to it until it expires.
-	if mqListCoversQueue(mqListStatus, mqListWorker, mqListEpic) && !queueHasReadyMR(issues, rigName) {
-		syncGateIntentFromEnv(rigName, "")
+	// It is also the call the refinery actually makes to find its MR: the live
+	// agent picked gt-wisp-gig with gt mq list and gt mq show and never ran
+	// gt mq next (gt-22hdp.37), so a merge gate listing a ready MR registers
+	// the intent here too. Anyone else only ever clears.
+	if mqListCoversQueue(f.status, f.worker, f.epic) && env.townRoot != "" {
+		syncGateIntent(env.townRoot, rigName, env.callerRole, firstReadyMR(issues, rigName))
 	}
 
 	// mark every MR that shares a branch with another open MR so the
@@ -119,17 +161,17 @@ func runMQList(cmd *cobra.Command, args []string) error {
 
 	for _, issue := range issues {
 		// Manual status filtering as workaround for bd list not respecting --status filter
-		if mqListReady {
+		if f.ready {
 			// Ready view should only show open MRs
 			if issue.Status != "open" {
 				continue
 			}
-		} else if mqListStatus != "" && !strings.EqualFold(mqListStatus, "all") {
+		} else if f.status != "" && !strings.EqualFold(f.status, "all") {
 			// Explicit status filter should match exactly
-			if !strings.EqualFold(issue.Status, mqListStatus) {
+			if !strings.EqualFold(issue.Status, f.status) {
 				continue
 			}
-		} else if mqListStatus == "" && issue.Status != "open" {
+		} else if f.status == "" && issue.Status != "open" {
 			// Default case (no status specified) should only show open
 			continue
 		}
@@ -144,35 +186,35 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		}
 
 		// Filter by worker
-		if mqListWorker != "" {
+		if f.worker != "" {
 			worker := ""
 			if fields != nil {
 				worker = fields.Worker
 			}
-			if !strings.EqualFold(worker, mqListWorker) {
+			if !strings.EqualFold(worker, f.worker) {
 				continue
 			}
 		}
 
 		// Filter by epic (target branch)
-		if mqListEpic != "" {
+		if f.epic != "" {
 			target := ""
 			if fields != nil {
 				target = fields.Target
 			}
-			expectedTarget := resolveIntegrationBranchName(b, r.Path, mqListEpic)
+			expectedTarget := resolveIntegrationBranchName(env.beads, r.Path, f.epic)
 			if target != expectedTarget {
 				continue
 			}
 		}
 
 		// Check branch existence if --verify is set (local + remote-tracking refs)
-		branchMissing, branchVerifyErr := verifyBranch(mqListVerify, gitClient, fields)
+		branchMissing, branchVerifyErr := verifyBranch(f.verify, gitClient, fields)
 
 		// Check whether the submitted commit already landed on target — an MR
 		// a prior refinery pass merged and pushed but crashed before finishing
 		// bookkeeping still reads 'open'/'ready' otherwise (gt-wh66).
-		alreadyLanded := verifyAlreadyLanded(mqListVerify, gitClient, fields)
+		alreadyLanded := verifyAlreadyLanded(f.verify, gitClient, fields)
 
 		// Calculate priority score
 		score := calculateMRScore(issue, fields, now)
@@ -194,7 +236,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	}
 
 	// JSON output
-	if mqListJSON {
+	if f.json {
 		// listedIssue always carries display status and the duplicate-branch
 		// flag (gt-k1qf) so automation agrees with the human-readable table;
 		// verification fields stay empty unless --verify was passed.
@@ -214,7 +256,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 				DuplicateBranch: duplicateIDs[s.issue.ID],
 				AlreadyLanded:   s.alreadyLanded,
 			}
-			if mqListVerify && s.fields != nil && s.fields.Branch != "" {
+			if f.verify && s.fields != nil && s.fields.Branch != "" {
 				if s.branchVerifyErr {
 					li.VerifyError = true
 				} else {
@@ -236,7 +278,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create styled table - add GIT column when --verify is set
-	table := style.NewTable(buildMQListColumns(mqListVerify)...)
+	table := style.NewTable(buildMQListColumns(f.verify)...)
 
 	// Add rows using scored items (already sorted by score)
 	for _, item := range scored {
@@ -297,7 +339,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 
 		// Format branch status when --verify is set
 		gitStatus := ""
-		if mqListVerify {
+		if f.verify {
 			if item.branchVerifyErr {
 				gitStatus = style.Warning.Render("ERR")
 			} else if item.branchMissing {
@@ -317,7 +359,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		}
 
 		// Build row with conditional GIT column
-		if mqListVerify {
+		if f.verify {
 			table.AddRow(displayID, scoreStr, priority, convoyDisplay, branch, target, styledStatus, gitStatus, style.Dim.Render(age))
 		} else {
 			table.AddRow(displayID, scoreStr, priority, convoyDisplay, branch, target, styledStatus, style.Dim.Render(age))
@@ -337,7 +379,7 @@ func runMQList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show summary of missing branches when --verify is set
-	if mqListVerify {
+	if f.verify {
 		missingCount := 0
 		for _, item := range scored {
 			if item.branchMissing {
