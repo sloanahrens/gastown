@@ -942,3 +942,34 @@ func TestDeleteLegacyAgentBead_RefusesRatherThanRerouteDelete(t *testing.T) {
 		t.Fatalf("DeleteLegacyAgentBead must never call bd delete for an ID absent from this store; log:\n%s", log)
 	}
 }
+
+// Agent-bead creates go through bd create alone: the in-process store
+// create is gone (gt-7iwy0.2), so the first write is bd's and nothing is
+// attempted before it.
+func TestCreateAgentBead_WritesThroughBDCreateOnly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rec := newRecorder(func(args []string) reply {
+		if len(args) > 0 && args[0] == "create" {
+			return reply{stdout: `{"id":"gt-r-polecat-x","title":"x","status":"open"}`}
+		}
+		return reply{}
+	})
+	b := newRecordedBeads(dir, rec)
+	issue, err := b.CreateAgentBead("gt-r-polecat-x", "x", &AgentFields{RoleType: "polecat", Rig: "r"})
+	if err != nil {
+		t.Fatalf("CreateAgentBead: %v", err)
+	}
+	if issue.ID != "gt-r-polecat-x" {
+		t.Errorf("issue.ID = %q", issue.ID)
+	}
+	var creates []string
+	for _, argv := range rec.argvs() {
+		if strings.HasPrefix(argv, "create ") {
+			creates = append(creates, argv)
+		}
+	}
+	if len(creates) != 1 || !strings.Contains(creates[0], "--id=gt-r-polecat-x") || !strings.Contains(creates[0], "--labels=gt:agent") {
+		t.Errorf("bd creates = %q, want one create --id=gt-r-polecat-x --labels=gt:agent", creates)
+	}
+}
