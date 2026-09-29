@@ -9,7 +9,6 @@ This formula orchestrates a complete release cycle:
 5. CI verification (GitHub Actions)
 6. Artifact verification (GitHub, npm, PyPI)
 7. Local installation update
-8. Daemon restart
 
 ## Usage
 
@@ -317,28 +316,9 @@ Should show {{version}}.
 """
 
 [[steps]]
-id = "restart-daemons"
-title = "Restart daemons"
-needs = ["local-install"]
-description = """
-Restart bd daemons to pick up new version.
-
-```bash
-bd daemons killall
-```
-
-Daemons will auto-restart with new version on next bd command.
-
-Verify:
-```bash
-bd daemons list
-```
-"""
-
-[[steps]]
 id = "release-complete"
 title = "Release complete"
-needs = ["restart-daemons"]
+needs = ["local-install"]
 description = """
 Release v{{version}} is complete!
 
@@ -348,7 +328,6 @@ Summary:
 - CI artifacts built
 - npm and PyPI packages published
 - Local installation updated
-- Daemons restarted
 
 Optional next steps:
 - Announce on social media
