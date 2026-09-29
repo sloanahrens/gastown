@@ -4,6 +4,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"os"
 	"path/filepath"
 	"sort"
@@ -143,6 +144,10 @@ type StartResult struct {
 // crew cycle bindings, etc.) should be handled by the caller before/after
 // calling StartSession.
 func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error) {
+	// Refuse before any side effect when the gt binary's bd handshake failed.
+	if err := bdgate.Require(); err != nil {
+		return nil, err
+	}
 	// Generate the GASTA run ID — the root identifier for all telemetry emitted
 	// by this agent session and its subprocesses (bd, mail, …).
 	runID := uuid.New().String()

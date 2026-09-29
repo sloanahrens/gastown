@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"io"
 	"log"
 	"os"
@@ -204,6 +205,10 @@ func (m *Manager) StartAllowingForkRig(foreground bool, agentOverride string) er
 }
 
 func (m *Manager) start(foreground bool, agentOverride string, allowForkRig bool) error {
+	// Refuse before any side effect when the gt binary's bd handshake failed.
+	if err := bdgate.Require(); err != nil {
+		return err
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 

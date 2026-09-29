@@ -3,6 +3,7 @@ package deacon
 import (
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"os"
 	"path/filepath"
 	"time"
@@ -97,6 +98,10 @@ func (m *Manager) stopNudgePoller(sessionID string) {
 // agentOverride allows specifying an alternate agent alias (e.g., for testing).
 // Restarts are handled by daemon via ensureDeaconRunning on each heartbeat.
 func (m *Manager) Start(agentOverride string) error {
+	// Refuse before any side effect when the gt binary's bd handshake failed.
+	if err := bdgate.Require(); err != nil {
+		return err
+	}
 	t := m.tmux
 	sessionID := m.SessionName()
 

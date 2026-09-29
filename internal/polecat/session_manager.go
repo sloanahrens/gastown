@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -391,6 +392,10 @@ func (m *SessionManager) ensureRuntimeWorkspace(workDir, runtimeConfigDir string
 }
 
 func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
+	// Refuse before any side effect when the gt binary's bd handshake failed.
+	if err := bdgate.Require(); err != nil {
+		return err
+	}
 	if !m.hasPolecat(polecat) {
 		return fmt.Errorf("%w: %s", ErrPolecatNotFound, polecat)
 	}

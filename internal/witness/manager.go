@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"log"
 	"os"
 	"path/filepath"
@@ -114,6 +115,10 @@ func (m *Manager) prepareWitnessDir(townRoot string) (string, error) {
 // envOverrides are KEY=VALUE pairs that override all other env var sources.
 // ZFC-compliant: no state file, tmux session is source of truth.
 func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []string) error {
+	// Refuse before any side effect when the gt binary's bd handshake failed.
+	if err := bdgate.Require(); err != nil {
+		return err
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 

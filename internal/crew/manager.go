@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"os"
 	"path/filepath"
 	"strings"
@@ -702,6 +703,10 @@ func (m *Manager) SessionName(name string) string {
 // Start creates and starts a tmux session for a crew member.
 // If the crew member doesn't exist, it will be created first.
 func (m *Manager) Start(name string, opts StartOptions) error {
+	// Refuse before any side effect when the gt binary's bd handshake failed.
+	if err := bdgate.Require(); err != nil {
+		return err
+	}
 	if err := validateCrewName(name); err != nil {
 		return err
 	}

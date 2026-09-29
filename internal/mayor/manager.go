@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,10 @@ func (m *Manager) mayorDir() string {
 // It checks both TMUX and ACP modes and returns ErrAlreadyRunning if active.
 // agentOverride optionally specifies a different agent alias to use.
 func (m *Manager) Start(agentOverride string) error {
+	// Refuse before any side effect when the gt binary's bd handshake failed.
+	if err := bdgate.Require(); err != nil {
+		return err
+	}
 	status, err := m.CombinedStatus()
 	if err == nil && status.Active {
 		switch status.Mode {

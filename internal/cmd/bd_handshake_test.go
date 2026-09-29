@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
@@ -124,4 +125,14 @@ func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
 		}
 	}
 	walk(rootCmd)
+}
+
+func TestInstallSessionGateRoutesSessionStartsThroughTheHandshake(t *testing.T) {
+	refusal := fmt.Errorf("%w: no contract_version", deps.ErrBDHandshake)
+	stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) { return nil, refusal })
+	installSessionGate()
+	t.Cleanup(func() { bdgate.Set(nil) })
+	if err := bdgate.Require(); !errors.Is(err, deps.ErrBDHandshake) {
+		t.Fatalf("bdgate.Require() = %v, want the handshake refusal", err)
+	}
 }

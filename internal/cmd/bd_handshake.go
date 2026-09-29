@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
@@ -109,4 +110,13 @@ func requireBDHandshake() error {
 		_, bdHandshakeErr = bdHandshakeCheck(ctx)
 	})
 	return bdHandshakeErr
+}
+
+// installSessionGate makes every agent-session start in this process run the
+// handshake first (bdgate.Require in session.StartSession and the role
+// managers' Start). It covers session starts the command list above does not
+// name, and the daemon's own restarts. Only Execute installs it, so package
+// tests that call Start directly run ungated.
+func installSessionGate() {
+	bdgate.Set(requireBDHandshake)
 }
