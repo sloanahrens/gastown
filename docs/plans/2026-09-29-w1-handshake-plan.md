@@ -145,7 +145,7 @@ func CheckBDHandshake(ctx context.Context, bdPath string, run BDRunner) (*BDHand
 `doneExitCloseFailed=13`; `type doneLanding` accumulator replacing `doneErrors`.
 
 - [x] Failing tests: accumulator precedence (push > unverified > MR > close)
-  and message listing every failure; Execute maps CodedExitError to its
+  and message listing every failure; Execute maps ExitCodeError to its
   code; runDone with a fake bd whose `create` fails returns code 12; the
   `--skip-verify` alias sets skip-tests and no longer skips push verification.
 - [x] Record every unlanded outcome (direct push, direct verify, branch push,
