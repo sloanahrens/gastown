@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -424,6 +426,10 @@ if [ "$1" = "comments" ] && [ "$2" = "add" ]; then
   exit 0
 fi
 if [ "$1" = "close" ]; then
+  if [ -n "$GT_TEST_BD_CLOSE_FAILS" ]; then
+    echo "Error: database not found: gastown" >&2
+    exit 1
+  fi
   exit 0
 fi
 echo "unexpected bd command: $*" >&2
@@ -501,6 +507,92 @@ func resetDoneFlagsForTest(t *testing.T) {
 	})
 }
 
+// runDoneForExitCode runs gt done as a polecat in the routed test town with
+// branchSetup shaping the repo, and returns runDone's error.
+func runDoneForExitCode(t *testing.T, branchSetup func(t *testing.T, workDir string)) error {
+	t.Helper()
+	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
+	setupRoutedSubmitCommandTown(t, workDir)
+	branchSetup(t, workDir)
+	installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
+	resetDoneFlagsForTest(t)
+	oldDelays := pushLandingRetryDelays
+	pushLandingRetryDelays = []time.Duration{0}
+	t.Cleanup(func() { pushLandingRetryDelays = oldDelays })
+	townRoot := routedSourceTestTownRoot(workDir)
+	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+	t.Setenv("GT_ROOT", townRoot)
+	t.Setenv("GT_ROLE", "gastown/polecats/refuge")
+	t.Setenv("GT_RIG", "gastown")
+	t.Setenv("GT_POLECAT", "refuge")
+	t.Setenv("BD_ACTOR", "gastown/polecats/refuge")
+	t.Chdir(workDir)
+
+	doneIssue = "bd-source"
+	doneCleanupStatus = "unpushed"
+	doneSkipTests = true
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	return runDone(nil, nil)
+}
+
+// installRemoteHook writes a git hook into the test repo's bare origin.
+func installRemoteHook(t *testing.T, workDir, hook, body string) {
+	t.Helper()
+	out, err := exec.Command("git", "-C", workDir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		t.Fatalf("origin url: %v", err)
+	}
+	path := filepath.Join(strings.TrimSpace(string(out)), "hooks", hook)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write %s hook: %v", hook, err)
+	}
+}
+
+func assertDoneExitCode(t *testing.T, err error, want int, wantText string) {
+	t.Helper()
+	var coded *ExitCodeError
+	if !errors.As(err, &coded) || coded.Code != want {
+		t.Fatalf("runDone error = %T %v, want *ExitCodeError with code %d", err, err, want)
+	}
+	if !strings.Contains(err.Error(), wantText) {
+		t.Errorf("error %q lacks %q", err, wantText)
+	}
+}
+
+// TestRunDoneExitsPushFailedWhenOriginRejects: origin refuses the branch on
+// every attempt, so the work is only local: exit 10.
+func TestRunDoneExitsPushFailedWhenOriginRejects(t *testing.T) {
+	err := runDoneForExitCode(t, func(t *testing.T, workDir string) {
+		setupRoutedSubmitGitRepo(t, workDir, false)
+		installRemoteHook(t, workDir, "pre-receive", "echo 'rejected by test hook' >&2\nexit 1\n")
+	})
+	assertDoneExitCode(t, err, doneExitPushFailed, "feature/routed-submit")
+}
+
+// TestRunDoneExitsPushUnverifiedWhenOriginDropsTheBranch: every push command
+// succeeds but origin never holds the commit afterwards: exit 11.
+func TestRunDoneExitsPushUnverifiedWhenOriginDropsTheBranch(t *testing.T) {
+	err := runDoneForExitCode(t, func(t *testing.T, workDir string) {
+		setupRoutedSubmitGitRepo(t, workDir, false)
+		installRemoteHook(t, workDir, "post-receive", "git update-ref -d refs/heads/feature/routed-submit\nexit 0\n")
+	})
+	assertDoneExitCode(t, err, doneExitPushUnverified, "feature/routed-submit")
+}
+
+// TestRunDoneExitsCloseFailedOnNoMRClose: a branch with nothing ahead of main
+// closes its source bead without an MR; bd cannot close it: exit 13. Push
+// verification of the no-MR close runs (it is no longer skippable) and
+// passes, because HEAD is on origin/main.
+func TestRunDoneExitsCloseFailedOnNoMRClose(t *testing.T) {
+	t.Setenv("GT_TEST_BD_CLOSE_FAILS", "1")
+	err := runDoneForExitCode(t, func(t *testing.T, workDir string) {
+		setupRoutedSubmitGitRepo(t, workDir, false)
+		runGitForMQSubmitTest(t, workDir, "reset", "--hard", "main")
+	})
+	assertDoneExitCode(t, err, doneExitCloseFailed, "could not close issue bd-source")
+}
+
 // TestRunDoneExitsNonZeroWhenMRCreateFails: the branch is pushed but bd
 // could not create the MR bead. gt done used to print a warning, notify the
 // witness and exit 0, so no caller could tell dropped work from landed work
@@ -537,4 +629,17 @@ func TestRunDoneExitsNonZeroWhenMRCreateFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "MR bead creation failed") {
 		t.Errorf("error %q does not say what failed", err)
 	}
+}
+
+// TestRunDoneClassifiesOnTheLastPushAttempt: the first push fails, the retry
+// push succeeds, and origin still does not hold the commit. The push did not
+// fail; origin is unverified: exit 11, not 10 (om review).
+func TestRunDoneClassifiesOnTheLastPushAttempt(t *testing.T) {
+	err := runDoneForExitCode(t, func(t *testing.T, workDir string) {
+		setupRoutedSubmitGitRepo(t, workDir, false)
+		marker := filepath.Join(t.TempDir(), "rejected-once")
+		installRemoteHook(t, workDir, "pre-receive", "if [ ! -e '"+marker+"' ]; then touch '"+marker+"'; echo 'transient rejection' >&2; exit 1; fi\nexit 0\n")
+		installRemoteHook(t, workDir, "post-receive", "git update-ref -d refs/heads/feature/routed-submit\nexit 0\n")
+	})
+	assertDoneExitCode(t, err, doneExitPushUnverified, "feature/routed-submit")
 }

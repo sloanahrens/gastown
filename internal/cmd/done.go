@@ -2146,8 +2146,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			if pushedCommitSHA == "" {
 				pushedCommitSHA, _ = g.Rev("HEAD")
 			}
+			// lastPushErr is the most recent push attempt's outcome: the exit
+			// status says whether the final send failed (10) or succeeded while
+			// origin still lacks the commit (11), not what the first try did.
+			lastPushErr := pushErr
 			if recovered, verifyErr := landBranchPushBeforeMR(
-				func() error { return pushBranchToOrigin(g, townRoot, rigName, refspec) },
+				func() error {
+					lastPushErr = pushBranchToOrigin(g, townRoot, rigName, refspec)
+					return lastPushErr
+				},
 				func() error { return verifyPushLandedBeforeMR(g, townRoot, rigName, branch, pushedCommitSHA) },
 				time.Sleep,
 			); verifyErr != nil {
@@ -2155,7 +2162,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				// re-sent, so a first failing attempt never strands the work.
 				pushFailed = true
 				errMsg := unlandedPushMessage(branch, pushErr, pushFailureDetail, verifyErr)
-				if pushErr != nil {
+				if lastPushErr != nil {
 					landing.fail(doneExitPushFailed, errMsg, verifyErr)
 				} else {
 					landing.fail(doneExitPushUnverified, errMsg, verifyErr)
