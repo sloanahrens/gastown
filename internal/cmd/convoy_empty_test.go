@@ -216,6 +216,11 @@ case "$pos0" in
     echo '[{"id":"gt-ready1","title":"Ready issue","status":"open","issue_type":"task","assignee":"","blocked_by":[],"blocked_by_count":0,"dependencies":[]}]'
     exit 0
     ;;
+  query)
+    # The fork's --json query prints "[]" for no rows, never nothing.
+    echo '[]'
+    exit 0
+    ;;
   *)
     exit 0
     ;;

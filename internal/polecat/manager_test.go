@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1595,9 +1596,17 @@ func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
 
 	// From here on 'show' reports agent_state=done instead of idle, with
 	// the same clean facts (no hook, no active MR) otherwise.
+	doneAgent := func(id string) string {
+		return fmt.Sprintf(`{"id":%q,"title":"agent","issue_type":"agent","description":"agent\n\nrole_type: polecat\nagent_state: done\nhook_bead: null\ncleanup_status: clean\nactive_mr: null"}`, id)
+	}
 	bd.become(&fakeBd{answer: func(cmd string, args []string) string {
 		if cmd == "show" {
-			return fmt.Sprintf(`[{"id":%q,"title":"agent","issue_type":"agent","description":"agent\n\nrole_type: polecat\nagent_state: done\nhook_bead: null\ncleanup_status: clean\nactive_mr: null"}]`, showID(args))
+			return "[" + doneAgent(showID(args)) + "]"
+		}
+		if cmd == "list" && slices.Contains(args, "--label=gt:agent") {
+			// The agent listing reports the same bead: an empty answer here
+			// used to fail the listing and only reached show by accident.
+			return "[" + doneAgent("gt-rig-polecat-toast") + "]"
 		}
 		return ""
 	}})

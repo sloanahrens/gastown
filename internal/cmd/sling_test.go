@@ -2166,6 +2166,9 @@ case "$cmd" in
   cook)
     exit 0
     ;;
+  list|query)
+    echo '[]'
+    ;;
   mol)
     sub="$1"
     shift || true
@@ -2185,6 +2188,14 @@ set "cmd=%1"
 set "sub=%2"
 if "%cmd%"=="formula" (
   echo {"name":"mol-anything"}
+  exit /b 0
+)
+if "%cmd%"=="list" (
+  echo []
+  exit /b 0
+)
+if "%cmd%"=="query" (
+  echo []
   exit /b 0
 )
 if "%cmd%"=="cook" exit /b 0

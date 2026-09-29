@@ -44,6 +44,7 @@ func TestBDReportedNotFound(t *testing.T) {
 		{"issue not found colon", 1, "", "Error: issue not found: gt-nope", true},
 		{"resolver", 1, "", `Error: no issue found matching "gt-nope"`, true},
 		{"wisp", 1, "", "Error: wisp gt-wisp-9 not found", true},
+		{"no issue found colon", 1, "", "Error: no issue found: tr-rig-testrig", true},
 		{"legacy json other error", 1, `{"error": "database not found: gastown"}`, "", false},
 		{"guard exit", 13, "", "guard not held", false},
 	} {

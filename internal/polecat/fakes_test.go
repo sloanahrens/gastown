@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -71,6 +72,11 @@ func (f *fakeBd) run(_ context.Context, c beads.BDCall) ([]byte, []byte, error) 
 	}
 	if out == bdMissing {
 		return nil, nil, &exec.Error{Name: "bd", Err: exec.ErrNotFound}
+	}
+	if out == "" && (cmd == "list" || cmd == "query") && slices.Contains(c.Args, "--json") {
+		// The fork's --json list/query prints "[]" for no rows, never nothing;
+		// gastown treats empty output from a --json call as a failed read.
+		out = "[]"
 	}
 	if msg, failed := strings.CutPrefix(out, bdFailure); failed {
 		return nil, []byte(msg), bdExit{1}
