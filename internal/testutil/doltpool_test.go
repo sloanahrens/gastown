@@ -177,6 +177,24 @@ func TestDoltPoolReclaimsABdInitLeaseOnceItsDirIsGone(t *testing.T) {
 	}
 }
 
+func TestDoltPoolRefusesABdInitWithoutAnAbsoluteDir(t *testing.T) {
+	p, _ := newFakeDoltPool(t, 1, 0)
+	for _, dir := range []string{"", "relative/rig"} {
+		if name, err := p.initSource(p.port, dir); err == nil {
+			t.Errorf("initSource(%q) = %s; want a refusal, since a lease that cannot see its directory never ends", dir, name)
+		}
+	}
+	if p.inUse != 0 {
+		t.Fatalf("a refused bd init leased %d databases", p.inUse)
+	}
+	if name, err := p.initSource(p.port, t.TempDir()); err != nil || name != p.stores[0].name {
+		t.Errorf("initSource(abs) = %q, %v; want the pool's database", name, err)
+	}
+	if name, err := p.initSource(p.port+1, t.TempDir()); err != nil || name != "" {
+		t.Errorf("initSource(other port) = %q, %v; want no answer", name, err)
+	}
+}
+
 func TestDoltPoolKeepsABdInitLeaseWhoseDirNeverExisted(t *testing.T) {
 	p, _ := newFakeDoltPool(t, 1, 0)
 	if _, err := p.acquire(leaseInit, "bd init in nowhere", filepath.Join(t.TempDir(), "never")); err != nil {

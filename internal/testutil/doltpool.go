@@ -273,6 +273,11 @@ func (p *doltDBPool) initSource(port int, ownerDir string) (string, error) {
 	if port != p.port {
 		return "", nil
 	}
+	if !filepath.IsAbs(ownerDir) {
+		// The lease ends when ownerDir is gone; an empty or relative one
+		// could never be checked, and the database would be lost.
+		return "", fmt.Errorf("dolt test pool: a bd init lease needs the absolute directory the init runs in, got %q", ownerDir)
+	}
 	e, err := p.acquire(leaseInit, "bd init in "+ownerDir, ownerDir)
 	if err != nil {
 		return "", err
