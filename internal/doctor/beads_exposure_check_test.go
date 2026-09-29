@@ -40,11 +40,11 @@ func tempGitRepo(t *testing.T, dir string) {
 }
 
 // newExposureTown lays out a minimal town root with one rig and five clones
-// (mayor, refinery, both witness layouts, one polecat), each a real git repo
-// holding an empty .beads/. The probe override is a map keyed by clone path so
-// order in the enumeration never matters to the test. It wires beadProbes to
-// the map and restores the real probe on cleanup, so tests set the per-clone
-// outcome without fabricating broken git repos.
+// (mayor, refinery, both witness layouts, one polecat), each holding an empty
+// .beads/. The clones are plain directories with an empty .git/, which is all
+// the clone enumeration looks for: the check's probe is the only thing that
+// asks git, and exposureCheck replaces it with a lookup in the
+// returned map, keyed by clone path so enumeration order never matters.
 func newExposureTown(t *testing.T) (string, map[string]string, map[string]probeResult) {
 	t.Helper()
 	town := t.TempDir()
@@ -54,7 +54,6 @@ func newExposureTown(t *testing.T) (string, map[string]string, map[string]probeR
 		t.Fatal(err)
 	}
 	clonePaths := map[string]string{}
-	probes := map[string]probeResult{}
 	for _, layout := range []struct{ name, sub string }{
 		{"mayor", "mayor/rig"},
 		{"refinery", "refinery/rig"},
@@ -63,18 +62,21 @@ func newExposureTown(t *testing.T) (string, map[string]string, map[string]probeR
 		{"polecat", "polecats/pc1/testrig"},
 	} {
 		clonePath := filepath.Join(rigPath, layout.sub)
-		tempGitRepo(t, clonePath)
-		if err := os.MkdirAll(filepath.Join(clonePath, ".beads"), 0o755); err != nil {
-			t.Fatalf("creating clone %s: %v", layout.name, err)
+		for _, sub := range []string{".git", ".beads"} {
+			if err := os.MkdirAll(filepath.Join(clonePath, sub), 0o755); err != nil {
+				t.Fatalf("creating clone %s: %v", layout.name, err)
+			}
 		}
 		clonePaths[layout.name] = clonePath
 	}
-	m := probes
-	beadProbes = func(p string) probeResult {
-		return m[p]
-	}
-	t.Cleanup(func() { beadProbes = beadsUntrackedAndUnignored })
-	return town, clonePaths, probes
+	return town, clonePaths, map[string]probeResult{}
+}
+
+// exposureCheck is a BeadsExposureCheck whose probe answers from probes.
+func exposureCheck(probes map[string]probeResult) *BeadsExposureCheck {
+	c := NewBeadsExposureCheck()
+	c.probe = func(p string) probeResult { return probes[p] }
+	return c
 }
 
 func TestBeadsExposureCheck_NoRigs(t *testing.T) {
@@ -86,11 +88,12 @@ func TestBeadsExposureCheck_NoRigs(t *testing.T) {
 }
 
 func TestBeadsExposureCheck_AllProtected(t *testing.T) {
+	t.Parallel()
 	town, clonePaths, probes := newExposureTown(t)
 	for p := range clonePaths {
 		probes[p] = probeProtected
 	}
-	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: town})
+	result := exposureCheck(probes).Run(&CheckContext{TownRoot: town})
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK when all protected, got %v: %s", result.Status, result.Message)
 	}
@@ -100,6 +103,7 @@ func TestBeadsExposureCheck_AllProtected(t *testing.T) {
 }
 
 func TestBeadsExposureCheck_ExposedClone(t *testing.T) {
+	t.Parallel()
 	town, clonePaths, probes := newExposureTown(t)
 	probes[clonePaths["mayor"]] = probeExposed
 	for p := range clonePaths {
@@ -107,7 +111,7 @@ func TestBeadsExposureCheck_ExposedClone(t *testing.T) {
 			probes[p] = probeProtected
 		}
 	}
-	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: town})
+	result := exposureCheck(probes).Run(&CheckContext{TownRoot: town})
 	if result.Status != StatusWarning {
 		t.Fatalf("expected StatusWarning, got %v: %s", result.Status, result.Message)
 	}
@@ -123,8 +127,12 @@ func TestBeadsExposureCheck_ExposedClone(t *testing.T) {
 		t.Error("expected a fix hint on warning")
 	}
 
-	// Fix must target exactly the exposed clone and write its exclude file.
-	check := NewBeadsExposureCheck()
+	// Fix must target exactly the exposed clone and write its exclude file,
+	// which needs a real repository to resolve.
+	if out, err := exec.Command("git", "-C", clonePaths["mayor"], "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	check := exposureCheck(probes)
 	check.Run(&CheckContext{TownRoot: town})
 	if len(check.exposedClones) != 1 || check.exposedClones[0] != clonePaths["mayor"] {
 		t.Fatalf("exposedClones = %v, want [%s]", check.exposedClones, clonePaths["mayor"])
@@ -141,7 +149,32 @@ func TestBeadsExposureCheck_ExposedClone(t *testing.T) {
 	}
 }
 
+// TestBeadsExposureCheck_ProbesWithGitByDefault is the wiring guard for the
+// probe seam: a check built by NewBeadsExposureCheck asks git, so a real
+// clone with an untracked .beads/ is reported exposed.
+func TestBeadsExposureCheck_ProbesWithGitByDefault(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rigPath := filepath.Join(town, "testrig")
+	if err := os.MkdirAll(filepath.Join(rigPath, "refinery"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	clone := filepath.Join(rigPath, "mayor", "rig")
+	tempGitRepo(t, clone)
+	if err := os.MkdirAll(filepath.Join(clone, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clone, ".beads", "marker"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: town})
+	if result.Status != StatusWarning || !strings.Contains(result.Message, "1 clone(s)") {
+		t.Fatalf("real untracked .beads/: got %v (%s), want a warning for 1 clone", result.Status, result.Message)
+	}
+}
+
 func TestBeadsExposureCheck_OnlyUnresolvedIsSkipped(t *testing.T) {
+	t.Parallel()
 	town, clonePaths, probes := newExposureTown(t)
 	probes[clonePaths["mayor"]] = probeUnresolved
 	for p := range clonePaths {
@@ -149,7 +182,7 @@ func TestBeadsExposureCheck_OnlyUnresolvedIsSkipped(t *testing.T) {
 			probes[p] = probeProtected
 		}
 	}
-	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: town})
+	result := exposureCheck(probes).Run(&CheckContext{TownRoot: town})
 	// A skipped check must never aggregate as a pass (gt-whvu).
 	if result.Status != StatusSkipped {
 		t.Fatalf("expected StatusSkipped (unknown), got %v: %s", result.Status, result.Message)
@@ -164,6 +197,7 @@ func TestBeadsExposureCheck_OnlyUnresolvedIsSkipped(t *testing.T) {
 }
 
 func TestBeadsExposureCheck_ExposedPlusUnresolvedIsWarning(t *testing.T) {
+	t.Parallel()
 	town, clonePaths, probes := newExposureTown(t)
 	probes[clonePaths["mayor"]] = probeExposed
 	probes[clonePaths["refinery"]] = probeUnresolved
@@ -172,7 +206,7 @@ func TestBeadsExposureCheck_ExposedPlusUnresolvedIsWarning(t *testing.T) {
 			probes[p] = probeProtected
 		}
 	}
-	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: town})
+	result := exposureCheck(probes).Run(&CheckContext{TownRoot: town})
 	// Proven exposure outranks unknown: the fixable finding is the actionable one.
 	if result.Status != StatusWarning {
 		t.Fatalf("expected StatusWarning, got %v: %s", result.Status, result.Message)
@@ -187,13 +221,14 @@ func TestBeadsExposureCheck_ExposedPlusUnresolvedIsWarning(t *testing.T) {
 }
 
 func TestBeadsExposureCheck_NoBeadsDirs(t *testing.T) {
-	town, clonePaths, _ := newExposureTown(t)
+	t.Parallel()
+	town, clonePaths, probes := newExposureTown(t)
 	for _, p := range clonePaths {
 		if err := os.RemoveAll(filepath.Join(p, ".beads")); err != nil {
 			t.Fatal(err)
 		}
 	}
-	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: town})
+	result := exposureCheck(probes).Run(&CheckContext{TownRoot: town})
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK, got %v: %s", result.Status, result.Message)
 	}
@@ -203,6 +238,7 @@ func TestBeadsExposureCheck_NoBeadsDirs(t *testing.T) {
 }
 
 func TestBeadsExposureCheck_FixSkipsUnresolved(t *testing.T) {
+	t.Parallel()
 	town, clonePaths, probes := newExposureTown(t)
 	probes[clonePaths["mayor"]] = probeUnresolved
 	probes[clonePaths["refinery"]] = probeUnresolved
@@ -211,7 +247,7 @@ func TestBeadsExposureCheck_FixSkipsUnresolved(t *testing.T) {
 			probes[p] = probeProtected
 		}
 	}
-	check := NewBeadsExposureCheck()
+	check := exposureCheck(probes)
 	check.Run(&CheckContext{TownRoot: town})
 	// Nothing proven exposed, so Fix must touch nothing.
 	if len(check.exposedClones) != 0 {

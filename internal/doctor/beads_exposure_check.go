@@ -25,12 +25,12 @@ import (
 // --ignored`, not by scanning .gitignore text — a clone protected only by
 // info/exclude has no matching .gitignore line to find, and a stale
 // .gitignore line can't prove anything about the clone's actual git state.
-// beadProbes is the injected seam for beadsUntrackedAndUnignored so tests can
-// exercise the pass/unknown split without fabricating broken git repos.
-var beadProbes = beadsUntrackedAndUnignored
-
 type BeadsExposureCheck struct {
 	FixableCheck
+	// probe reports one clone's .beads/ exposure. Nil means
+	// beadsUntrackedAndUnignored; tests set it to exercise the pass/unknown
+	// split without fabricating broken git repos.
+	probe            func(clonePath string) probeResult
 	exposedClones    []string
 	unresolvedClones []string
 }
@@ -77,7 +77,7 @@ func (c *BeadsExposureCheck) Run(ctx *CheckContext) *CheckResult {
 				continue // nothing to protect yet in this clone
 			}
 			checked++
-			switch beadProbes(clonePath) {
+			switch c.probeClone(clonePath) {
 			case probeExposed:
 				c.exposedClones = append(c.exposedClones, clonePath)
 			case probeUnresolved:
@@ -129,6 +129,14 @@ func (c *BeadsExposureCheck) Run(ctx *CheckContext) *CheckResult {
 		Details: details,
 		FixHint: "Repair the affected clone(s) (corrupt .git, git missing, safe.directory refusal), then re-run 'gt doctor'",
 	}
+}
+
+// probeClone runs the injected probe, or the real git probe when none is set.
+func (c *BeadsExposureCheck) probeClone(clonePath string) probeResult {
+	if c.probe == nil {
+		return beadsUntrackedAndUnignored(clonePath)
+	}
+	return c.probe(clonePath)
 }
 
 // relToTown renders clonePath relative to the town root for report details.
