@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -253,7 +252,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		// Check if rig identity bead exists
 		if configPrefix != "" {
 			rigBeadID := fmt.Sprintf("%s-rig-%s", configPrefix, rigName)
-			if !c.rigBeadExists(rigBeadID, rigPath, beadsDir) {
+			if !c.rigBeadExists(ctx, rigBeadID, rigPath, beadsDir) {
 				c.missingRigBeads = append(c.missingRigBeads, rigBeadInfo{
 					rigName: rigName,
 					prefix:  configPrefix,
@@ -440,9 +439,12 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 			"BEADS_DIR="+beadsDir,
 			"BEADS_DOLT_SERVER_DATABASE="+rigName,
 		)
-		cmd := beads.CommandWithEnv(cmdDir, cmdEnv, "init", "--prefix", entry.BeadsConfig.Prefix, "--database", rigName, "--server", "--server-port", strconv.Itoa(doltCfg.Port), "--force", "--destroy-token="+destroyToken)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("could not initialize Dolt DB for %s: %w\n%s", rigName, err, string(output))
+		err := ctx.bd(cmdDir, cmdEnv).InitDatabase(beads.InitOptions{
+			Prefix: entry.BeadsConfig.Prefix, Database: rigName, ServerPort: doltCfg.Port,
+			Force: true, DestroyToken: destroyToken,
+		})
+		if err != nil {
+			return fmt.Errorf("could not initialize Dolt DB for %s: %w\n%s", rigName, bdCause(err), bdOutput(err))
 		}
 	}
 
@@ -535,12 +537,6 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		if _, err := bd.CreateRigBead(info.rigName, fields); err != nil {
 			return fmt.Errorf("could not create rig bead for %s: %w", info.rigName, err)
 		}
-
-		// Add status:docked label if the rig should be docked
-		rigBeadID := fmt.Sprintf("%s-rig-%s", info.prefix, info.rigName)
-		cmdEnv := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR="), "BEADS_DIR="+beadsDir)
-		cmd := beads.CommandWithEnv(rigPath, cmdEnv, "label", rigBeadID, "--add", "status:docked")
-		_ = cmd.Run() // Best effort - ignore errors
 	}
 
 	return nil
@@ -564,15 +560,8 @@ func (c *RigConfigSyncCheck) doltDatabaseExists(ctx *CheckContext, dbName string
 }
 
 // rigBeadExists checks if a rig identity bead exists.
-func (c *RigConfigSyncCheck) rigBeadExists(rigBeadID, rigPath, beadsDir string) bool {
-	// Try to show the bead using bd
+func (c *RigConfigSyncCheck) rigBeadExists(ctx *CheckContext, rigBeadID, rigPath, beadsDir string) bool {
 	cmdEnv := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR="), "BEADS_DIR="+beadsDir)
-	cmd := beads.CommandWithEnv(rigPath, cmdEnv, "show", rigBeadID, "--json")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-
-	// Check if the output contains the bead ID
-	return strings.Contains(string(output), rigBeadID)
+	issue, err := ctx.bd(rigPath, cmdEnv).Show(rigBeadID)
+	return err == nil && issue != nil && issue.ID == rigBeadID
 }

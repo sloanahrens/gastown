@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -327,17 +328,20 @@ func TestPatrolHooksWiredCheck_FixPreservesExisting(t *testing.T) {
 }
 
 func TestCheckStuckWispsDolt_ErrorOnMissingBd(t *testing.T) {
-	// When bd is not available or rigPath is invalid, checkStuckWispsDolt should return an error.
-	// With Dolt-only mode, there is no JSONL fallback.
+	t.Parallel()
+	// When bd sql fails, checkStuckWispsDolt returns the error: with
+	// Dolt-only mode there is no JSONL fallback.
+	bd := newFakeBD()
+	bd.db("/nonexistent/rig/path").OnSQL(func(string) ([][]string, error) { return nil, errors.New("no beads database found") })
 	check := NewPatrolNotStuckCheck()
-	_, err := check.checkStuckWispsDolt("/nonexistent/rig/path", "testrig")
-	if err == nil {
-		t.Error("expected error when bd sql fails on nonexistent path")
+	if _, err := check.checkStuckWispsDolt(bd.ctx(t.TempDir()), "/nonexistent/rig/path", "testrig"); err == nil {
+		t.Error("expected error when bd sql fails")
 	}
 }
 
 func TestPatrolNotStuckCheck_Run_DoltFailureReportsError(t *testing.T) {
-	// When Dolt fails for a rig, the check should report the error in details
+	t.Parallel()
+	// When Dolt fails for a rig, the check reports the error in details
 	// rather than silently returning OK.
 	tmpDir := t.TempDir()
 
@@ -355,23 +359,17 @@ func TestPatrolNotStuckCheck_Run_DoltFailureReportsError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), rigsData, 0644); err != nil {
 		t.Fatalf("write rigs.json: %v", err)
 	}
-
-	// Create rig directory but no Dolt database — bd sql will fail
 	rigDir := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
 
-	check := NewPatrolNotStuckCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	// Should report warning with Dolt failure detail (not silently OK)
-	if result.Status == StatusOK && len(result.Details) == 0 {
-		// If bd is not installed, the check reports the error; if bd is installed
-		// but no database exists, it also reports an error. Either way, we should
-		// see details about the failure unless the check happens to return no stuck wisps.
-		// This is acceptable — the key behavior is that we DON'T silently fall back to JSONL.
+	bd := newFakeBD()
+	bd.db(rigDir).OnSQL(func(string) ([][]string, error) { return nil, errors.New("no beads database found") })
+	result := NewPatrolNotStuckCheck().Run(bd.ctx(tmpDir))
+	if result.Status != StatusWarning || len(result.Details) != 1 ||
+		!strings.Contains(result.Details[0], "testrig: Dolt query failed: no beads database found") {
+		t.Errorf("result = %v %q %q, want a warning naming the failed rig", result.Status, result.Message, result.Details)
 	}
 }
 

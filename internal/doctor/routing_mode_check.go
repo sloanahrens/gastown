@@ -1,12 +1,9 @@
 package doctor
 
 import (
-	"bytes"
 	"fmt"
 	"path/filepath"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // RoutingModeCheck detects when beads routing.mode is set to "auto", which can
@@ -36,7 +33,7 @@ func NewRoutingModeCheck() *RoutingModeCheck {
 func (c *RoutingModeCheck) Run(ctx *CheckContext) *CheckResult {
 	// Check town-level beads config
 	townBeadsDir := filepath.Join(ctx.TownRoot, ".beads")
-	result := c.checkRoutingMode(townBeadsDir, "town")
+	result := c.checkRoutingMode(ctx, townBeadsDir, "town")
 	if result.Status != StatusOK {
 		return result
 	}
@@ -44,7 +41,7 @@ func (c *RoutingModeCheck) Run(ctx *CheckContext) *CheckResult {
 	// Also check rig-level beads if specified
 	if ctx.RigName != "" {
 		rigBeadsDir := filepath.Join(ctx.RigPath(), ".beads")
-		rigResult := c.checkRoutingMode(rigBeadsDir, fmt.Sprintf("rig '%s'", ctx.RigName))
+		rigResult := c.checkRoutingMode(ctx, rigBeadsDir, fmt.Sprintf("rig '%s'", ctx.RigName))
 		if rigResult.Status != StatusOK {
 			return rigResult
 		}
@@ -58,41 +55,37 @@ func (c *RoutingModeCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // checkRoutingMode checks the routing mode in a specific beads directory.
-func (c *RoutingModeCheck) checkRoutingMode(beadsDir, location string) *CheckResult {
-	// Run bd config get routing.mode
-	cmd := beads.CommandWithEnv(filepath.Dir(beadsDir), nil, "config", "get", "routing.mode")
-	// cmd.Environ() carries PWD=filepath.Dir(beadsDir), which bd reads.
-	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+beadsDir)
+func (c *RoutingModeCheck) checkRoutingMode(ctx *CheckContext, beadsDir, location string) *CheckResult {
+	// Run bd config get routing.mode. The environment carries
+	// PWD=filepath.Dir(beadsDir), which bd reads.
+	dir := filepath.Dir(beadsDir)
+	mode, err := ctx.bd(dir, append(environWithPWD(dir), "BEADS_DIR="+beadsDir)).ConfigGet("routing.mode")
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// If the config key doesn't exist, that means it defaults to "auto"
-		if strings.Contains(stderr.String(), "not found") || strings.Contains(stderr.String(), "not set") {
-			return &CheckResult{
-				Name:    c.Name(),
-				Status:  StatusWarning,
-				Message: fmt.Sprintf("routing.mode not set at %s (defaults to auto)", location),
-				Details: []string{
-					"Auto routing mode uses git remote URL to detect user role",
-					"Non-SSH URLs (HTTPS or file paths) trigger routing to ~/.beads-planning",
-					"This causes mail and issues to be stored in the wrong location",
-					"See: https://github.com/steveyegge/beads/issues/1165",
-				},
-				FixHint: "Run 'gt doctor --fix' or 'bd config set routing.mode explicit'",
-			}
+	// An unset key (bd exits 0 and prints "routing.mode (not set)"; older bd
+	// failed saying "not found"/"not set") defaults to "auto".
+	if msg := bdOutput(err); mode == "" && (err == nil || strings.Contains(msg, "not found") || strings.Contains(msg, "not set")) {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("routing.mode not set at %s (defaults to auto)", location),
+			Details: []string{
+				"Auto routing mode uses git remote URL to detect user role",
+				"Non-SSH URLs (HTTPS or file paths) trigger routing to ~/.beads-planning",
+				"This causes mail and issues to be stored in the wrong location",
+				"See: https://github.com/steveyegge/beads/issues/1165",
+			},
+			FixHint: "Run 'gt doctor --fix' or 'bd config set routing.mode explicit'",
 		}
+	}
+	if err != nil {
 		// Other error - report as warning
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("Could not check routing.mode at %s: %v", location, err),
+			Message: fmt.Sprintf("Could not check routing.mode at %s: %v", location, bdCause(err)),
 		}
 	}
 
-	mode := strings.TrimSpace(stdout.String())
 	if mode != "explicit" {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -119,14 +112,14 @@ func (c *RoutingModeCheck) checkRoutingMode(beadsDir, location string) *CheckRes
 func (c *RoutingModeCheck) Fix(ctx *CheckContext) error {
 	// Fix town-level beads
 	townBeadsDir := filepath.Join(ctx.TownRoot, ".beads")
-	if err := c.setRoutingMode(townBeadsDir); err != nil {
+	if err := c.setRoutingMode(ctx, townBeadsDir); err != nil {
 		return fmt.Errorf("fixing town beads: %w", err)
 	}
 
 	// Also fix rig-level beads if specified
 	if ctx.RigName != "" {
 		rigBeadsDir := filepath.Join(ctx.RigPath(), ".beads")
-		if err := c.setRoutingMode(rigBeadsDir); err != nil {
+		if err := c.setRoutingMode(ctx, rigBeadsDir); err != nil {
 			return fmt.Errorf("fixing rig %s beads: %w", ctx.RigName, err)
 		}
 	}
@@ -135,12 +128,10 @@ func (c *RoutingModeCheck) Fix(ctx *CheckContext) error {
 }
 
 // setRoutingMode sets routing.mode to "explicit" in the specified beads directory.
-func (c *RoutingModeCheck) setRoutingMode(beadsDir string) error {
-	cmd := beads.CommandWithEnv(filepath.Dir(beadsDir), nil, "config", "set", "routing.mode", "explicit")
-	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+beadsDir)
-
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("bd config set failed: %s", strings.TrimSpace(string(output)))
+func (c *RoutingModeCheck) setRoutingMode(ctx *CheckContext, beadsDir string) error {
+	dir := filepath.Dir(beadsDir)
+	if err := ctx.bd(dir, append(environWithPWD(dir), "BEADS_DIR="+beadsDir)).ConfigSet("routing.mode", "explicit"); err != nil {
+		return fmt.Errorf("bd config set failed: %s", bdOutput(err))
 	}
 
 	return nil

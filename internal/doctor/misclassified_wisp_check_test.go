@@ -1,9 +1,9 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -254,38 +254,25 @@ func TestMisclassifiedWispDependencyMigrationIsTypedAndFailClosed(t *testing.T) 
 }
 
 func TestMisclassifiedWispDependencyCopyFailureSkipsDeletes(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd-sql.log")
-	script := `#!/usr/bin/env bash
-query="${@: -1}"
-printf '%s\n' "$query" >> "$BD_SQL_LOG"
-if [[ "$query" == *"SELECT 1 FROM"* ]]; then
-  exit 0
-fi
-if [[ "$query" == *"INSERT IGNORE INTO wisp_dependencies"* ]]; then
-  echo "copy failed"
-  exit 7
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_SQL_LOG", logPath)
+	t.Parallel()
+	bd := newFakeBD()
+	workDir := t.TempDir()
+	db := bd.db(workDir)
+	db.OnSQL(func(query string) ([][]string, error) {
+		if strings.Contains(query, "INSERT IGNORE INTO wisp_dependencies") {
+			return nil, errors.New("copy failed")
+		}
+		return nil, nil
+	})
 
-	err := NewCheckMisclassifiedWisps().purgeRigBatch(&CheckContext{TownRoot: t.TempDir()}, t.TempDir(), "gt", "'gt-wisp-a'")
+	err := NewCheckMisclassifiedWisps().purgeRigBatch(bd.ctx(t.TempDir()), workDir, "gt", "'gt-wisp-a'")
 	if err == nil || !strings.Contains(err.Error(), "copying wisp_dependencies") {
 		t.Fatalf("purgeRigBatch error = %v, want copying wisp_dependencies", err)
 	}
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read query log: %v", err)
+	log := strings.Join(db.SQLStatements(), "\n")
+	if !strings.Contains(log, "INSERT IGNORE INTO wisp_dependencies") {
+		t.Fatalf("the dependency copy never ran:\n%s", log)
 	}
-	log := string(data)
 	for _, forbidden := range []string{
 		"DELETE FROM dependencies",
 		"DELETE FROM issues",

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -488,10 +487,6 @@ func TestDatabasePrefixCheck_DetectsMismatchForOwnDB(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_UsesMetadataDatabaseEnv(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd stub is shell-specific")
-	}
-
 	tmpDir := t.TempDir()
 	townBeads := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(townBeads, 0755); err != nil {
@@ -510,30 +505,28 @@ func TestDatabasePrefixCheck_UsesMetadataDatabaseEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
-	script := `#!/usr/bin/env bash
-if [ "$1 $2 $3" = "config get issue_prefix" ]; then
-  if [ "$BEADS_DIR" = "$EXPECT_BEADS_DIR" ] && [ "$BEADS_DOLT_SERVER_DATABASE" = "gastown" ]; then
-    printf 'gt\n'
-  else
-    printf 'hq\n'
-  fi
-  exit 0
-fi
-exit 1
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("EXPECT_BEADS_DIR", beadsDir)
+	// Stale ambient targets the check must replace, not inherit.
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "stale")
 	t.Setenv("BEADS_DIR", filepath.Join(tmpDir, "wrong", ".beads"))
 
+	bd := newFakeBD()
+	if err := bd.db(rigPath).ConfigSet("issue_prefix", "gt"); err != nil {
+		t.Fatal(err)
+	}
 	check := NewDatabasePrefixCheck()
-	result := check.Run(&CheckContext{TownRoot: tmpDir})
+	result := check.Run(bd.ctx(tmpDir))
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK with metadata-selected database, got %v: %s details=%v", result.Status, result.Message, result.Details)
+	}
+	opens := bd.opened()
+	if len(opens) != 1 || opens[0].dir != rigPath {
+		t.Fatalf("bd opens = %+v, want one in %s", opens, rigPath)
+	}
+	if v, n := envLookup(opens[0].env, "BEADS_DIR"); n != 1 || v != beadsDir {
+		t.Errorf("BEADS_DIR = %q (x%d), want %q once", v, n, beadsDir)
+	}
+	if v, n := envLookup(opens[0].env, "BEADS_DOLT_SERVER_DATABASE"); n != 1 || v != "gastown" {
+		t.Errorf("BEADS_DOLT_SERVER_DATABASE = %q (x%d), want gastown once", v, n)
 	}
 }
 

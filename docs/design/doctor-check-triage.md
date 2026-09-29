@@ -61,7 +61,7 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `stale-beads-redirect` | Cleanup | cadence | Cheap file scan for stale .beads redirect files; a stale redirect silently misroutes beads until caught. |
 | `stale-runtime-files` | Cleanup | cadence | Cheap scan for stale PID files/wisp configs after a rig is removed; cheap and left-behind state accumulates until swept. |
 | `unregistered-beads-dirs` | Cleanup | cadence | Cheap directory scan; a stray .beads dir is a routing hazard best caught quickly. |
-| `wisp-gc` | Cleanup | cadence | Cheap Dolt query for abandoned wisps (>1h); already time-windowed for a patrol cadence. |
+| `wisp-gc` | Cleanup | cadence | Report-only: counts abandoned wisps (>1h) from `bd mol wisp gc --dry-run`; never deletes (fix is a no-op). |
 | `zombie-sessions` | Cleanup | cadence | Detects tmux sessions with dead Claude processes; cheap, and a zombie blocks its polecat until noticed. |
 | `hook-attachment-valid` | Hooks | cadence | Cheap Dolt lookup; a hook pointing at a closed molecule strands the agent immediately. |
 | `hook-singleton` | Hooks | cadence | Cheap Dolt lookup; more than one handoff bead per agent is an active routing hazard. |

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -626,7 +625,7 @@ func NewCustomTypesCheck() *CustomTypesCheck {
 // Run checks if custom types are properly configured.
 func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	// Check if bd command is available
-	if _, err := exec.LookPath("bd"); err != nil {
+	if !ctx.bdInstalled() {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -643,10 +642,9 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Get current custom types configuration
-	// Use Output() not CombinedOutput() to avoid capturing bd's stderr messages
-	cmd := beads.CommandWithEnv(beadsDir, doctorConfigEnv(beadsDir), "config", "get", "types.custom")
-	output, err := cmd.Output()
+	// Get current custom types configuration (stdout only: bd's stderr
+	// messages stay out of the value).
+	configuredTypes, err := ctx.bd(beadsDir, doctorConfigEnv(beadsDir)).ConfigGet("types.custom")
 	if err != nil {
 		// If config key doesn't exist, types are not configured
 		c.targetBeadsDir = beadsDir
@@ -663,8 +661,6 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Parse configured types, filtering out bd "Note:" messages that may appear in stdout
-	configuredTypes := parseConfigOutput(output)
 	configuredSet := make(map[string]bool)
 	if configuredTypes != "" {
 		for _, t := range strings.Split(configuredTypes, ",") {
@@ -681,9 +677,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(missing) == 0 {
-		infraCmd := beads.CommandWithEnv(beadsDir, doctorConfigEnv(beadsDir), "config", "get", "types.infra")
-		infraOutput, infraErr := infraCmd.Output()
-		configuredInfra := parseConfigOutput(infraOutput)
+		configuredInfra, infraErr := ctx.bd(beadsDir, doctorConfigEnv(beadsDir)).ConfigGet("types.infra")
 		if infraErr != nil || configuredInfra != constants.BeadsInfraTypes {
 			c.targetBeadsDir = beadsDir
 			details := []string{
@@ -737,11 +731,11 @@ func parseConfigOutput(output []byte) string {
 
 // Fix registers the missing custom types.
 func (c *CustomTypesCheck) Fix(ctx *CheckContext) error {
-	getCmd := beads.CommandWithEnv(c.targetBeadsDir, doctorConfigEnv(c.targetBeadsDir), "config", "get", "types.custom")
-	existingOutput, _ := getCmd.Output()
+	bd := ctx.bd(c.targetBeadsDir, doctorConfigEnv(c.targetBeadsDir))
+	existing, _ := bd.ConfigGet("types.custom")
 
 	typeSet := make(map[string]bool)
-	if existing := parseConfigOutput(existingOutput); existing != "" {
+	if existing != "" {
 		for _, typ := range strings.Split(existing, ",") {
 			typ = strings.TrimSpace(typ)
 			if typ != "" {
@@ -759,15 +753,11 @@ func (c *CustomTypesCheck) Fix(ctx *CheckContext) error {
 	}
 	sort.Strings(merged)
 
-	cmd := beads.CommandWithEnv(c.targetBeadsDir, doctorConfigEnv(c.targetBeadsDir), "config", "set", "types.custom", strings.Join(merged, ","))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("bd config set types.custom: %s", strings.TrimSpace(string(output)))
+	if err := bd.ConfigSet("types.custom", strings.Join(merged, ",")); err != nil {
+		return fmt.Errorf("bd config set types.custom: %s", bdOutput(err))
 	}
-	infraCmd := beads.CommandWithEnv(c.targetBeadsDir, doctorConfigEnv(c.targetBeadsDir), "config", "set", "types.infra", constants.BeadsInfraTypes)
-	infraOutput, err := infraCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("bd config set types.infra: %s", strings.TrimSpace(string(infraOutput)))
+	if err := bd.ConfigSet("types.infra", constants.BeadsInfraTypes); err != nil {
+		return fmt.Errorf("bd config set types.infra: %s", bdOutput(err))
 	}
 	return nil
 }
@@ -794,7 +784,7 @@ func NewCustomStatusesCheck() *CustomStatusesCheck {
 
 // Run checks if custom statuses are properly configured.
 func (c *CustomStatusesCheck) Run(ctx *CheckContext) *CheckResult {
-	if _, err := exec.LookPath("bd"); err != nil {
+	if !ctx.bdInstalled() {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -812,8 +802,7 @@ func (c *CustomStatusesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Get current custom statuses configuration
-	cmd := beads.CommandWithEnv(beadsDir, doctorConfigEnv(beadsDir), "config", "get", "status.custom")
-	output, err := cmd.Output()
+	configuredStatuses, err := ctx.bd(beadsDir, doctorConfigEnv(beadsDir)).ConfigGet("status.custom")
 	if err != nil {
 		c.targetBeadsDir = beadsDir
 		c.missingStatuses = constants.BeadsCustomStatusesList()
@@ -829,7 +818,6 @@ func (c *CustomStatusesCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	configuredStatuses := parseConfigOutput(output)
 	configuredSet := make(map[string]bool)
 	if configuredStatuses != "" {
 		for _, s := range strings.Split(configuredStatuses, ",") {
@@ -871,12 +859,12 @@ func (c *CustomStatusesCheck) Run(ctx *CheckContext) *CheckResult {
 // Fix registers the missing custom statuses by merging with existing ones.
 func (c *CustomStatusesCheck) Fix(ctx *CheckContext) error {
 	// Read existing statuses
-	getCmd := beads.CommandWithEnv(c.targetBeadsDir, doctorConfigEnv(c.targetBeadsDir), "config", "get", "status.custom")
-	existingOutput, _ := getCmd.Output()
+	bd := ctx.bd(c.targetBeadsDir, doctorConfigEnv(c.targetBeadsDir))
+	existing, _ := bd.ConfigGet("status.custom")
 
 	// Build merged set
 	statusSet := make(map[string]bool)
-	if existing := parseConfigOutput(existingOutput); existing != "" {
+	if existing != "" {
 		for _, s := range strings.Split(existing, ",") {
 			s = strings.TrimSpace(s)
 			if s != "" {
@@ -894,10 +882,8 @@ func (c *CustomStatusesCheck) Fix(ctx *CheckContext) error {
 	}
 	sort.Strings(merged)
 
-	cmd := beads.CommandWithEnv(c.targetBeadsDir, doctorConfigEnv(c.targetBeadsDir), "config", "set", "status.custom", strings.Join(merged, ","))
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("bd config set status.custom: %s", strings.TrimSpace(string(output)))
+	if err := bd.ConfigSet("status.custom", strings.Join(merged, ",")); err != nil {
+		return fmt.Errorf("bd config set status.custom: %s", bdOutput(err))
 	}
 	return nil
 }

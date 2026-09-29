@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -64,7 +63,7 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 
 	for _, db := range databases {
 		rigDir := filepath.Join(ctx.TownRoot, db)
-		rows, err := queryNullAssigneeBeads(rigDir)
+		rows, err := queryNullAssigneeBeads(ctx, rigDir)
 		if err != nil {
 			// Non-fatal: Dolt might not be running or rig may not be bd-managed.
 			continue
@@ -121,7 +120,7 @@ func (c *NullAssigneeCheck) Fix(ctx *CheckContext) error {
 		rigDir := filepath.Join(ctx.TownRoot, db)
 
 		// Reset beads via direct SQL (bypasses bd ORM which fails on NULL assignee).
-		if err := execBdSQLWrite(rigDir, nullAssigneeFixQuery); err != nil {
+		if err := execBdSQLWrite(ctx, rigDir, nullAssigneeFixQuery); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: update failed: %v", db, err))
 			continue
 		}
@@ -143,8 +142,8 @@ func (c *NullAssigneeCheck) Fix(ctx *CheckContext) error {
 
 // queryNullAssigneeBeads returns in_progress beads with NULL/empty assignee for a rig.
 // Uses bd sql --csv (raw SQL passthrough, not affected by bd ORM deserialization).
-func queryNullAssigneeBeads(rigDir string) ([]nullAssigneeRow, error) {
-	records, err := runBdSQLCSV(rigDir, nullAssigneeSelectQuery)
+func queryNullAssigneeBeads(ctx *CheckContext, rigDir string) ([]nullAssigneeRow, error) {
+	records, err := runBdSQLCSV(ctx, rigDir, nullAssigneeSelectQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +166,9 @@ func queryNullAssigneeBeads(rigDir string) ([]nullAssigneeRow, error) {
 }
 
 // execBdSQLWrite executes a SQL write statement via bd sql.
-func execBdSQLWrite(rigDir, query string) error {
-	cmd := beads.CommandWithEnv(rigDir, nil, "sql", query)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+func execBdSQLWrite(ctx *CheckContext, rigDir, query string) error {
+	if _, err := ctx.bd(rigDir, nil).SQL(query); err != nil {
+		return fmt.Errorf("%s: %w", bdOutput(err), bdCause(err))
 	}
 	return nil
 }

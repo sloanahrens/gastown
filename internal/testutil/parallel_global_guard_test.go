@@ -86,6 +86,9 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 		"TestParallelDeferRestores":    true,
 		"TestParallelDeferArgRestores": true,  // defer func(v int) { Seam = v }(Seam)
 		"TestParallelDeferUnlocksOnly": false, // a defer that restores nothing is no swap
+		// A named result that shares its name with a package-level func or
+		// method is a local: writing it is no global write (beads allowStaleAnswer).
+		"TestParallelNamedResultShadows": false,
 	}
 	seen := map[string]bool{}
 	for _, line := range got {
@@ -210,6 +213,21 @@ func bumpLocked() {
 func TestParallelDeferUnlocksOnly(t *testing.T) {
 	t.Parallel()
 	bumpLocked()
+}
+
+type cache struct{}
+
+func (cache) answer() bool { return true }
+
+func classify(n int) (answer bool, sure bool) {
+	answer = n > 0
+	sure = true
+	return answer, sure
+}
+
+func TestParallelNamedResultShadows(t *testing.T) {
+	t.Parallel()
+	_, _ = classify(1)
 }
 `,
 	}
@@ -590,8 +608,11 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 				}
 			}
 		case *ast.FuncLit:
-			if node.Type.Params != nil {
-				for _, field := range node.Type.Params.List {
+			for _, fl := range []*ast.FieldList{node.Type.Params, node.Type.Results} {
+				if fl == nil {
+					continue
+				}
+				for _, field := range fl.List {
 					for _, id := range field.Names {
 						locals[id.Name] = true
 					}
@@ -611,6 +632,15 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 		for _, id := range field.Names {
 			locals[id.Name] = true
 			params[id.Name] = true
+		}
+	}
+	// Named results are locals too; writing one is no global write even when
+	// a package-level func or method shares its name.
+	if fd.Type.Results != nil {
+		for _, field := range fd.Type.Results.List {
+			for _, id := range field.Names {
+				locals[id.Name] = true
+			}
 		}
 	}
 

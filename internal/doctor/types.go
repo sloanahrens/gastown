@@ -73,6 +73,10 @@ type CheckContext struct {
 	Verbose         bool   // Enable verbose output
 	RestartSessions bool   // Restart patrol sessions when fixing (requires explicit --restart-sessions flag)
 	NoStart         bool   // Suppress starting daemon/agents during --fix
+
+	// openBD opens the bd client checks run maintenance commands through.
+	// Nil means the real bd CLI (see bd); tests set a beadsfake.
+	openBD bdOpener
 }
 
 // RigPath returns the full path to the rig directory.

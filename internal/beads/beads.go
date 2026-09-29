@@ -41,9 +41,7 @@ var (
 // The cache is keyed by the resolved bd path so tests and subprocess stubs that
 // replace bd on PATH get re-probed instead of reusing stale capability state.
 var (
-	bdAllowStaleMu     sync.Mutex
-	bdAllowStalePath   string
-	bdAllowStaleResult bool
+	bdAllowStaleMu sync.Mutex
 	// bdAllowStaleProbeTimeout, when non-zero, overrides the capability-probe
 	// timeout. Zero (the default) means "use defaultBdAllowStaleProbeTimeout".
 	// Tests set this directly to exercise timeout handling without waiting for
@@ -80,10 +78,49 @@ func resolveBdAllowStaleProbeTimeout() time.Duration {
 // ResetBdAllowStaleCacheForTest clears the cached bd --allow-stale capability.
 // It exists for tests that swap bd binaries on PATH within a single process.
 func ResetBdAllowStaleCacheForTest() {
-	bdAllowStaleMu.Lock()
-	bdAllowStalePath = ""
-	bdAllowStaleResult = false
-	bdAllowStaleMu.Unlock()
+	bdAllowStale.reset()
+}
+
+// allowStaleCache remembers, per bd binary path, whether bd accepts
+// --allow-stale.
+type allowStaleCache struct {
+	mu     sync.Mutex
+	path   string
+	result bool
+}
+
+// bdAllowStale is the process's cache for the bd on PATH.
+var bdAllowStale allowStaleCache
+
+func (c *allowStaleCache) reset() {
+	c.mu.Lock()
+	c.path, c.result = "", false
+	c.mu.Unlock()
+}
+
+// supported answers for the bd at path, running probe on a cache miss.
+// probe reports whether bd accepted the flag and whether that answer is
+// definitive. Only a definitive answer is cached.
+func (c *allowStaleCache) supported(path string, probe func() (supported, definitive bool)) bool {
+	c.mu.Lock()
+	if c.path == path {
+		r := c.result
+		c.mu.Unlock()
+		return r
+	}
+	c.mu.Unlock()
+	ok, definitive := probe()
+	if !definitive {
+		// A timeout says nothing about the flag: answer "unsupported" for
+		// this call only, and probe again next time (gt-22hdp.27).
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.path != path {
+		c.path, c.result = path, ok
+	}
+	return c.result
 }
 
 // SetBdAllowStaleProbeTimeoutForTest overrides the capability-probe timeout
@@ -118,15 +155,15 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 		return false
 	}
 
-	bdAllowStaleMu.Lock()
-	cachedPath := bdAllowStalePath
-	cachedResult := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
+	return bdAllowStale.supported(bdPath, func() (bool, bool) { return probeAllowStale(bdPath, env) })
+}
 
-	if cachedPath == bdPath {
-		return cachedResult
-	}
-
+// probeAllowStale runs `bd --allow-stale version` under the probe timeout.
+// bd v0.60+ exits 0 even on an unknown flag, printing the error, so the
+// output decides. The answer is definitive only when bd ran and exited
+// within the timeout: a timeout or a failure to start says nothing about
+// the flag, and fails closed (unsupported) for this call only.
+func probeAllowStale(bdPath string, env []string) (supported, definitive bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), resolveBdAllowStaleProbeTimeout())
 	defer cancel()
 
@@ -138,22 +175,21 @@ func BdSupportsAllowStaleWithEnv(env []string) bool {
 	var combinedOut bytes.Buffer
 	cmd.Stdout = &combinedOut
 	cmd.Stderr = &combinedOut
-	err = cmd.Run()
-	// bd v0.60+ exits 0 even on unknown flags, printing the error to stderr.
-	// Check output for "unknown flag" to detect lack of support. Treat probe
-	// errors/timeouts as unsupported so higher-level commands fail closed
-	// instead of hanging on a wedged bd subprocess.
-	probeOut := strings.TrimSpace(combinedOut.String())
-	supported := err == nil && probeOut != "" && !strings.Contains(probeOut, "unknown flag")
+	err := cmd.Run()
+	return allowStaleAnswer(ctx, err, combinedOut.String())
+}
 
-	bdAllowStaleMu.Lock()
-	if bdAllowStalePath != bdPath {
-		bdAllowStalePath = bdPath
-		bdAllowStaleResult = supported
+// allowStaleAnswer reads a probe's outcome: whether bd accepted
+// --allow-stale, and whether that is a definitive answer worth caching.
+func allowStaleAnswer(ctx context.Context, err error, output string) (supported, definitive bool) {
+	out := strings.TrimSpace(output)
+	supported = err == nil && out != "" && !strings.Contains(out, "unknown flag")
+	if ctx.Err() != nil {
+		return false, false
 	}
-	result := bdAllowStaleResult
-	bdAllowStaleMu.Unlock()
-	return result
+	var exit interface{ ExitCode() int }
+	definitive = err == nil || errors.As(err, &exit)
+	return supported && definitive, definitive
 }
 
 // MaybePrependAllowStale prepends --allow-stale to args if bd supports it.
@@ -700,6 +736,17 @@ type Beads struct {
 	// for closing the store.
 	store beadsdk.Storage
 
+	// exec runs every bd subprocess; nil means the real bd on PATH (see
+	// runner). Tests of this package inject a recording runner.
+	exec bdRunFunc
+
+	// plain marks a wrapper built by NewPlain: bd runs in workDir with
+	// exactly plainEnv, and none of the routing policy below applies.
+	plain    bool
+	plainEnv []string
+	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
+	plainTimeout time.Duration
+
 	// Lazy-cached town root for routing resolution.
 	// Populated on first call to getTownRoot() to avoid filesystem walk on every operation.
 	townRoot     string
@@ -772,6 +819,7 @@ type beadsFields struct {
 	townRoot   string
 	noRoute    bool
 	agentScope bool
+	exec       bdRunFunc
 }
 
 // newBeads is the single composite-literal construction point for *Beads.
@@ -787,6 +835,7 @@ func newBeads(f beadsFields) *Beads {
 		townRoot:   f.townRoot,
 		noRoute:    f.noRoute,
 		agentScope: f.agentScope,
+		exec:       f.exec,
 	}
 }
 
@@ -856,6 +905,7 @@ func (b *Beads) ForAgentBead() *Beads {
 		store:      b.store,
 		townRoot:   b.getTownRoot(),
 		agentScope: true,
+		exec:       b.exec,
 	})
 }
 
@@ -908,6 +958,7 @@ func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 		serverPort: b.serverPort,
 		townRoot:   b.getTownRoot(),
 		noRoute:    true,
+		exec:       b.exec,
 	})
 }
 
@@ -1053,6 +1104,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 		serverPort: b.serverPort,
 		townRoot:   b.townRoot,
 		noRoute:    true,
+		exec:       b.exec,
 	})
 }
 
@@ -1371,7 +1423,7 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 
 	// Conditionally use --allow-stale to prevent failures when db is temporarily stale
 	// (e.g., after daemon is killed during shutdown). Only if bd supports it.
-	fullArgs := MaybePrependAllowStaleWithEnv(runEnv, args)
+	fullArgs := b.allowStaleArgs(runEnv, args)
 
 	// Bound the subprocess runtime so a slow Dolt response doesn't leave bd
 	// blocking forever (under memory pressure that invites Jetsam SIGKILL).
@@ -1380,15 +1432,21 @@ func (b *Beads) runBdOnce(stdinData []byte, runEnv []string, args []string) (_ [
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	err := newBDCmd(ctx, b.workDir, runEnv, stdinData, fullArgs, &stdout, &stderr).Run()
+	run := func(argv []string) error {
+		stdout.Reset()
+		stderr.Reset()
+		out, errOut, err := b.runner()(ctx, bdCall{dir: b.workDir, env: runEnv, stdin: stdinData, args: argv})
+		stdout.Write(out)
+		stderr.Write(errOut)
+		return err
+	}
+	err := run(fullArgs)
 
 	// If bd doesn't support --flat, retry without it. The retry is done here
 	// (not in callers like List) so that InjectFlatForListJSON doesn't re-add
 	// --flat on the retry path.
 	if err != nil && bdRejectedFlat(stderr.String()) {
-		stdout.Reset()
-		stderr.Reset()
-		err = newBDCmd(ctx, b.workDir, runEnv, stdinData, stripFlatFlag(fullArgs), &stdout, &stderr).Run()
+		err = run(stripFlatFlag(fullArgs))
 	}
 
 	if err != nil {
@@ -1442,7 +1500,7 @@ func (b *Beads) wrapError(err error, stderr string, args []string) error {
 	// An --if-assignee/--if-status precondition that no longer held: bd
 	// wrote nothing. Checked first, so a guard message never reads as a
 	// "not found" or a generic failure.
-	var exitErr *exec.ExitError
+	var exitErr interface{ ExitCode() int }
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == bdGuardNotHeldExit {
 		return fmt.Errorf("bd %s: %s: %w", strings.Join(args, " "), stderr, ErrGuardNotHeld)
 	}
@@ -2693,7 +2751,7 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 			for targetDir, groupIDs := range groups {
 				target := b
 				if targetDir != fallbackDir {
-					target = NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
+					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec})
 				}
 				issues, err := target.showMultipleLocal(groupIDs)
 				if err != nil {
@@ -2780,6 +2838,7 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 			beadsDir:   targetDir,
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
+			exec:       b.exec,
 		})
 		return bdForCreate.Create(opts)
 	}
@@ -2855,6 +2914,7 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 			beadsDir:   targetDir,
 			serverPort: b.serverPort,
 			isolated:   b.isolated,
+			exec:       b.exec,
 		})
 		return bdForCreate.CreateWithID(id, opts)
 	}
@@ -3227,7 +3287,9 @@ func (b *Beads) Release(id string) error {
 }
 
 // ReleaseWithReason moves an in_progress issue back to open status with a reason.
-// The reason is added as a note to the issue for tracking purposes.
+// The reason is added as a note to the issue for tracking purposes. It
+// overrides the holder's claim (bd --force): releasing is for a worker that
+// is gone.
 func (b *Beads) ReleaseWithReason(id, reason string) error {
 	if b.store != nil {
 		updates := map[string]interface{}{
@@ -3242,7 +3304,9 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 		return b.store.UpdateIssue(ctx, id, updates, b.getActor())
 	}
 
-	args := []string{"update", id, "--status=open", "--assignee="}
+	// --force: the claim being cleared belongs to a worker that died, and bd
+	// refuses to reassign another actor's in_progress claim without it.
+	args := []string{"update", id, "--status=open", "--assignee=", "--force"}
 
 	// Add reason as a note if provided
 	if reason != "" {
@@ -3250,7 +3314,23 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 	}
 
 	_, err := b.run(args...)
+	if err != nil && strings.Contains(err.Error(), "unknown flag: --force") {
+		// A bd older than the claim fence has no --force on update, and no
+		// fence for it to override either (deps.MinBeadsVersion admits it).
+		_, err = b.run(removeArg(args, "--force")...)
+	}
 	return err
+}
+
+// removeArg returns args without any element equal to drop.
+func removeArg(args []string, drop string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != drop {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // AddDependency adds a dependency: issue depends on dependsOn.
