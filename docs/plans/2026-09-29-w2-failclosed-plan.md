@@ -1,4 +1,4 @@
-> Status: in progress on branch crew/sloan/w2-failclosed (2026-09-29). Tracked in gt-fcxe9.10, gt-fcxe9.4.
+> Status: implemented on branch crew/sloan/w2-failclosed (2026-09-29), awaiting landing. Tracked in gt-fcxe9.10, gt-fcxe9.4.
 
 # W2: town config fails closed; delete `--merge direct` and `gt mq integration land`
 
@@ -65,8 +65,8 @@ func DecodeJSONFile(path string, data []byte, v any) error // *ParseError on jso
 func CheckJSONFileParses(path string, v any) error // nil when absent; *ParseError when present and broken; read errors returned as-is
 ```
 
-- [ ] Failing tests: trailing comma -> offset, line 3 col N, message names the path, one line, `errors.Is(err, ErrUnparseable)`; type error (`"version": "x"`) carries an offset; empty file is unparseable; `LoadOrCreateTownSettings` on a broken file returns `*ParseError`, absent returns defaults; `SaveTownSettings` over a broken file returns `ErrUnparseable` and the bytes are unchanged; `SaveDaemonPatrolConfig` the same.
-- [ ] Implement; green `go test ./internal/config/`; commit `fix(config): typed parse error with offset; never overwrite an unparseable settings file`.
+- [x] Failing tests: trailing comma -> offset, line 3 col N, message names the path, one line, `errors.Is(err, ErrUnparseable)`; type error (`"version": "x"`) carries an offset; empty file is unparseable; `LoadOrCreateTownSettings` on a broken file returns `*ParseError`, absent returns defaults; `SaveTownSettings` over a broken file returns `ErrUnparseable` and the bytes are unchanged; `SaveDaemonPatrolConfig` the same.
+- [x] Implement; green `go test ./internal/config/`; commit `fix(config): typed parse error with offset; never overwrite an unparseable settings file`.
 
 ### Task 2: daemon.json fails closed (gt-fcxe9.10, G3-03)
 
@@ -75,9 +75,9 @@ func CheckJSONFileParses(path string, v any) error // nil when absent; *ParseErr
 **Produces:** `func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error)` ((nil,nil) when absent);
 `func CheckTownConfig(townRoot string) error` (daemon.json into `DaemonPatrolConfig`, settings/config.json into `config.TownSettings`, errors joined).
 
-- [ ] Failing tests: `EnsureLifecycleConfigFile` on a broken daemon.json returns `ErrUnparseable` naming the file and leaves the bytes unchanged (today it writes defaults); absent file still created; `SavePatrolConfig` refuses over a broken file; `CheckTownConfig` names each broken file with offset and passes on absent/valid files; `New` refuses on a broken daemon.json.
-- [ ] `LoadPatrolConfig` keeps its signature for read-only callers (stderr line unchanged); writers go through `ReadPatrolConfig`. `New` calls `CheckTownConfig` before any side effect beyond opening its log, and `EnsureLifecycleConfigFile` errors are fatal.
-- [ ] Green; commit `fix(daemon): refuse to start on an unparseable daemon.json or settings file; never rewrite it`.
+- [x] Failing tests: `EnsureLifecycleConfigFile` on a broken daemon.json returns `ErrUnparseable` naming the file and leaves the bytes unchanged (today it writes defaults); absent file still created; `SavePatrolConfig` refuses over a broken file; `CheckTownConfig` names each broken file with offset and passes on absent/valid files; `New` refuses on a broken daemon.json.
+- [x] `LoadPatrolConfig` keeps its signature for read-only callers (stderr line unchanged); writers go through `ReadPatrolConfig`. `New` calls `CheckTownConfig` before any side effect beyond opening its log, and `EnsureLifecycleConfigFile` errors are fatal.
+- [x] Green; commit `fix(daemon): refuse to start on an unparseable daemon.json or settings file; never rewrite it`.
 
 ### Task 3: gated commands and session starts refuse (gt-fcxe9.10)
 
@@ -85,37 +85,37 @@ func CheckJSONFileParses(path string, v any) error // nil when absent; *ParseErr
 
 **Produces:** `var townConfigCheck = defaultTownConfigCheck` seam; `func requireTownStart() error` = config check (every call) then `requireBDHandshake()` (pass cached). `installSessionGate` installs `requireTownStart`.
 
-- [ ] Failing tests: extend `TestBDHandshakeClassifiesEveryTownVerb`'s tree walk so every gated command's `persistentPreRun` returns `ErrUnparseable` when the config check fails, before the handshake runs; the session gate returns the config refusal; with a real temp town holding a broken `settings/config.json`, `bdgate.Require()` names that file (no stub: proves spawn refusal instead of default agent); `setLifecycleConfig` / `setMaintenanceConfig` / `dolt.port` set on a broken daemon.json error and leave the file unchanged.
-- [ ] Implement; `up.go` treats an `ErrUnparseable` from `EnsureLifecycleConfigFile` as fatal.
-- [ ] Green; commit `fix(cmd): town-running commands and session starts refuse an unparseable town config`.
+- [x] Failing tests: extend `TestBDHandshakeClassifiesEveryTownVerb`'s tree walk so every gated command's `persistentPreRun` returns `ErrUnparseable` when the config check fails, before the handshake runs; the session gate returns the config refusal; with a real temp town holding a broken `settings/config.json`, `bdgate.Require()` names that file (no stub: proves spawn refusal instead of default agent); `setLifecycleConfig` / `setMaintenanceConfig` / `dolt.port` set on a broken daemon.json error and leave the file unchanged.
+- [x] Implement; `up.go` treats an `ErrUnparseable` from `EnsureLifecycleConfigFile` as fatal.
+- [x] Green; commit `fix(cmd): town-running commands and session starts refuse an unparseable town config`.
 
 ### Task 4: doctor reports it (gt-fcxe9.10)
 
 **Files:** create `internal/doctor/town_config_check.go` + test; modify `lifecycle_defaults_check.go`, `internal/cmd/doctor.go` (register).
 
-- [ ] Failing tests: `town-config-parse` check is StatusError naming file+offset on a broken file, OK otherwise, not fixable; lifecycle-defaults check on a broken daemon.json is StatusError (not "not found"), and its Fix returns an error and leaves bytes unchanged.
-- [ ] Green; commit `feat(doctor): report an unparseable town config file as a failed check`.
+- [x] Failing tests: `town-config-parse` check is StatusError naming file+offset on a broken file, OK otherwise, not fixable; lifecycle-defaults check on a broken daemon.json is StatusError (not "not found"), and its Fix returns an error and leaves bytes unchanged.
+- [x] Green; commit `feat(doctor): report an unparseable town config file as a failed check`.
 
 ### Task 5: delete `gt done --merge direct` (gt-fcxe9.4, G2-02)
 
-**Files:** `internal/cmd/done.go` (both blocks, `doneDirectMergeSkipReason`), `sling.go`, `convoy.go` (`--merge` accepts `mr|local`), `sling_convoy.go` (`IsOwnedDirect`), `protocol/types.go` (`IsOwnedDirect` if unused), `refinery/engineer.go` (the two `gt:owned-direct` label skips, nothing else), `git/git.go` (`EnvDoneDirectMerge`), `.githooks/pre-push` + `pre-push_test.sh` (`GT_DONE_DIRECT_MERGE` trust), `docs/concepts/convoy.md`, tests.
+**Files:** `internal/cmd/done.go` (both blocks, `doneDirectMergeSkipReason`), `sling.go`, `convoy.go` (`--merge` accepts `mr|local`), `sling_convoy.go` (`IsOwnedDirect`), `protocol/types.go` (`IsOwnedDirect` if unused), `git/git.go` (`EnvDoneDirectMerge`), `.githooks/pre-push` + `pre-push_test.sh` (`GT_DONE_DIRECT_MERGE` trust), `docs/concepts/convoy.md`, tests.
 
-- [ ] Failing tests: `gt sling --merge=direct` and `gt convoy create --merge=direct` are rejected; a source test asserts `internal/` non-test Go has no `GT_DONE_DIRECT_MERGE` / `gt:owned-direct`; pre-push test: polecat push to main with `GT_DONE_DIRECT_MERGE=1` is refused.
-- [ ] Delete; a convoy whose description still says `Merge: direct` falls through to the MR path (safe default).
-- [ ] Green; commit `refactor(done)!: delete the --merge direct convoy landing path`.
+- [x] Failing tests: `gt sling --merge=direct` and `gt convoy create --merge=direct` are rejected; a source test asserts `internal/` non-test Go has no `GT_DONE_DIRECT_MERGE` / `gt:owned-direct`; pre-push test: polecat push to main with `GT_DONE_DIRECT_MERGE=1` is refused.
+- [x] Delete; a convoy whose description still says `Merge: direct` falls through to the MR path (safe default).
+- [x] Green; commit `refactor(done)!: delete the --merge direct convoy landing path`.
 
 ### Task 6: delete `gt mq integration land` (gt-fcxe9.4)
 
 **Files:** `internal/cmd/mq.go`, `mq_integration.go` (land + helpers only it uses), `mq_integration_test.go`, `git/git.go` (`PushWithEnv` doc), `.githooks/pre-push` (`GT_INTEGRATION_LAND` bypass; the guard stays and now always blocks), `pre-push_test.sh`, refinery formula `check-integration-branches` step and `refinery.md.tmpl` lines, `config/types.go` (auto-land field doc: no effect), `docs/reference.md`, `docs/concepts/integration-branches.md`.
 
-- [ ] Failing tests: `gt mq integration land` is not in the command tree (`create`, `status` still are); `gt mq integration status` output no longer suggests `land`; pre-push refuses integration content even with `GT_INTEGRATION_LAND=1`; formula text no longer names the command.
-- [ ] Delete; green; commit `refactor(mq)!: delete gt mq integration land`.
+- [x] Failing tests: `gt mq integration land` is not in the command tree (`create`, `status` still are); `gt mq integration status` output no longer suggests `land`; pre-push refuses integration content even with `GT_INTEGRATION_LAND=1`; formula text no longer names the command.
+- [x] Delete; green; commit `refactor(mq)!: delete gt mq integration land`.
 
 ### Task 7: gates, review, push
 
-- [ ] `make lint`, `go build ./...`, touched + importing packages, full `make test` under `gt slot run` (timed), all by exit code.
-- [ ] `om review -base origin/main` until approve.
-- [ ] Attribution grep empty; `git push origin crew/sloan/w2-failclosed`.
+- [x] `make lint`, `go build ./...`, touched + importing packages, full `make test` under `gt slot run` (timed), all by exit code.
+- [x] `om review -base origin/main` until approve.
+- [x] Attribution grep empty; `git push origin crew/sloan/w2-failclosed`.
 
 ## Decisions recorded
 
@@ -128,3 +128,24 @@ func CheckJSONFileParses(path string, v any) error // nil when absent; *ParseErr
   (gt-y3pgh.1) replaces them with one validated load.
 - The integration-branch guardrail in the pre-push hook stays, without the
   bypass: nothing in gt lands integration branches until `Land()` (gt-v4ssj).
+
+## Execution notes
+
+- The two `gt:owned-direct` label reads in `internal/refinery/engineer.go`
+  stay: one is inside `recheckMRStillMergeable`, a batch-engine merge gate
+  this ticket must not touch. Nothing sets the label any more, and the
+  engine is deleted whole at un-park (gt-v4ssj.6).
+- Review found two session creators outside the role managers: the daemon's
+  lifecycle `restartSession` and the deacon command's `startDeaconSession`.
+  Both now call `bdgate.Require`, and the pinned call-site test names them.
+- `config.SaveDaemonPatrolConfig` decodes an existing daemon.json into the
+  daemon's own type through a check the daemon package registers at init
+  (the config package cannot import it). Every gt binary links the daemon
+  package; a binary that does not gets a syntax-only check.
+- `defaultTownConfigCheck` refuses when no town root resolves. The handshake
+  already refused that case, so no gated command changes behaviour.
+- daemon.json is read once at daemon start, so a file broken while the
+  daemon runs does not change patrols. settings/config.json is re-read at
+  runtime by `LoadOperationalConfig` and the role-agent resolvers; every
+  session start refuses through the gate, but operational thresholds still
+  fall back to compiled defaults mid-run until the kernel (gt-y3pgh.1).

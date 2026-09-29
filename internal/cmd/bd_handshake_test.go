@@ -276,3 +276,33 @@ func TestDefaultTownConfigCheckRefusesOutsideATown(t *testing.T) {
 		t.Fatalf("defaultTownConfigCheck outside a town = %v, want a refusal", err)
 	}
 }
+
+// TestDefaultTownConfigCheckPassesFromInsideATown: a gated command run from a
+// rig or polecat worktree deep inside a town with valid config files passes;
+// town-root resolution is the same one the handshake uses.
+func TestDefaultTownConfigCheckPassesFromInsideATown(t *testing.T) {
+	town := t.TempDir()
+	for rel, body := range map[string]string{
+		"mayor/town.json":      `{"type":"town","version":2,"name":"t"}`,
+		"mayor/daemon.json":    `{"type":"daemon-patrol-config","version":1}`,
+		"settings/config.json": `{"type":"town-settings","version":1}`,
+	} {
+		p := filepath.Join(town, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	worktree := filepath.Join(town, "gastown", "polecats", "onyx", "gastown")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(worktree)
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
+	if err := defaultTownConfigCheck(); err != nil {
+		t.Fatalf("defaultTownConfigCheck from a polecat worktree = %v", err)
+	}
+}
