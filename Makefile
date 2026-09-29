@@ -235,6 +235,11 @@ test: test-makefile
 	# container suite. A hardcoded =1 here is invisible to every caller that
 	# tries to turn containers off (a recipe assignment beats the child env),
 	# so the gate stayed welded to the town-wide slot.
+	# The budget runner (internal/testpolicy/cmd/budget) runs converted
+	# packages through its CPU-measuring -exec wrapper, which bypasses go
+	# test's result cache, and the packages in unconverted.txt through plain
+	# go test afterwards, so those stay "(cached)" on an unchanged tree
+	# (gt-22hdp.53).
 	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./...
 
 # test-changed runs the same hermetic suite as `test` over a caller-supplied

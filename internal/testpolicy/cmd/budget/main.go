@@ -1,13 +1,26 @@
-// Command budget runs `go test -json <args>` and fails when a converted package
-// (one not listed in unconverted.txt) uses more user CPU than the budget.
+// Command budget runs go test over the module's packages and fails when a
+// converted package (one not listed in unconverted.txt) uses more user CPU
+// than the budget.
 //
 //	go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./...
 //
-// It measures CPU by running every test binary through itself: `go test
-// -exec "<budget> -exec-test"` makes each binary a child of this command,
-// which waits for it and records the CPU time wait4 reports for the binary
-// and every descendant it waited for. docs/testing.md ("The time budget")
-// explains why the budget is on user CPU and not on wall time.
+// It measures CPU by running every converted package's test binary through
+// itself: `go test -json -exec "<budget> -exec-test"` makes each binary a
+// child of this command, which waits for it and records the CPU time wait4
+// reports for the binary and every descendant it waited for. docs/testing.md
+// ("The time budget") explains why the budget is on user CPU and not on wall
+// time.
+//
+// -exec turns off go test's result cache (a cached package runs no binary,
+// so there would be nothing to measure), and the budget judges nothing in
+// an unconverted package, so the runner splits the package list: the
+// converted packages run first through the exec wrapper, then the
+// unconverted ones through plain go test, cache and all, with the same
+// arguments. The two halves run one after the other, not side by side: each
+// go test already runs up to -p (GOMAXPROCS) packages at once, so running
+// both together would double the processes competing for the host and
+// compile the dependencies they share twice. The budget report comes after
+// both, and either half failing fails the run.
 package main
 
 import (
@@ -41,7 +54,7 @@ func main() {
 // it fails, 1 when only the budget fails, 2 when the runner itself fails.
 func run() int {
 	budget := flag.Duration("budget", 10*time.Second, "per-package user CPU limit for converted packages (the test binary and the processes it waited for)")
-	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget")
+	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget; they run through plain go test, with its result cache")
 	overList := flag.String("overbudget", "internal/testpolicy/overbudget.txt", "converted packages exempt from the budget while a bead tracks their overrun; their times are reported on every run")
 	flag.Parse()
 
@@ -61,52 +74,40 @@ func run() int {
 	if err != nil {
 		return fail(err)
 	}
-	self, err := os.Executable()
-	if err != nil {
-		return fail(err)
-	}
-	cpuDir, err := os.MkdirTemp("", "gt-budget-cpu-")
-	if err != nil {
-		return fail(err)
-	}
-	defer os.RemoveAll(cpuDir)
 
-	// go test splits -exec into words, honoring single and double quotes but
-	// no escapes; single quotes keep a path with spaces in one word, and a
-	// path with a single quote in it cannot be passed at all.
-	if strings.Contains(self, "'") {
-		return fail(fmt.Errorf("cannot pass %q to go test -exec: it contains a single quote", self))
-	}
-	// -exec turns off go test's result cache: a cached package runs no
-	// binary, so there would be nothing to measure.
-	args := append([]string{"test", "-json", "-exec", "'" + self + "' " + execTestArg}, flag.Args()...)
-	cmd := exec.Command("go", args...)
-	cmd.Env = append(os.Environ(), testpolicy.CPUDirEnv+"="+cpuDir)
-	cmd.Stderr = os.Stderr
-	stdout, err := cmd.StdoutPipe()
+	before, patterns, after := testpolicy.SplitTestArgs(flag.Args())
+	pkgs, err := listPackages(testpolicy.TagsArgs(flag.Args()), patterns)
 	if err != nil {
 		return fail(err)
 	}
-	if err := cmd.Start(); err != nil {
-		return fail(err)
+	judged, cached := testpolicy.PartitionPackages(pkgs, module, exempt)
+	if len(pkgs) == 0 {
+		// Nothing matched: let go test say so, in one budgeted run over
+		// the arguments as given.
+		judged = patterns
 	}
-	var readErr error
-	cpu := func(pkg string) (testpolicy.CPUTime, bool) {
-		c, ok, err := testpolicy.ReadCPU(cpuDir, filepath.Join(root, filepath.FromSlash(pkg)))
-		if err != nil && readErr == nil {
-			readErr = fmt.Errorf("reading CPU time of %s: %w", pkg, err)
+	withPkgs := func(p []string) []string {
+		return append(append(append([]string{}, before...), p...), after...)
+	}
+
+	var res testpolicy.BudgetResult
+	var judgedErr error
+	code := 0
+	if len(judged) > 0 {
+		res, code, judgedErr = runJudged(withPkgs(judged), root, *budget, exempt, tracked)
+		if judgedErr != nil {
+			return fail(judgedErr)
 		}
-		return c, ok
 	}
-	res, scanErr := testpolicy.WatchBudgetTracked(stdout, os.Stdout, *budget, exempt, tracked, "github.com/steveyegge/gastown", cpu)
-	if scanErr != nil {
-		// WatchBudget stopped reading before the child was done writing (for
-		// example a single line over its 16 MB scan buffer); drain the pipe
-		// so the child's next Write doesn't block on a full pipe buffer and
-		// hang cmd.Wait() forever.
-		_, _ = io.Copy(io.Discard, stdout)
+	if len(cached) > 0 && !interrupted(code) {
+		c, err := runCached(withPkgs(cached))
+		if err != nil {
+			return fail(err)
+		}
+		if code == 0 {
+			code = c
+		}
 	}
-	waitErr := cmd.Wait()
 
 	if len(res.SlowWall) > 0 {
 		fmt.Fprintf(os.Stderr, "over %s of wall time (reported only; the budget is on user CPU):\n", *budget)
@@ -131,16 +132,117 @@ func run() int {
 		}
 		fmt.Fprintln(os.Stderr)
 	}
-	var exitErr *exec.ExitError
-	switch {
-	case errors.As(waitErr, &exitErr):
-		return exitErr.ExitCode()
-	case waitErr != nil || scanErr != nil || readErr != nil:
-		return fail(errors.Join(waitErr, scanErr, readErr))
-	case len(res.Over) > 0:
+	if code == 0 && len(res.Over) > 0 {
 		return 1
 	}
-	return 0
+	return code
+}
+
+// module is the main module's path; package names in unconverted.txt and
+// overbudget.txt are relative to it.
+const module = "github.com/steveyegge/gastown"
+
+// interrupted reports whether go test's exit code says a signal ended it
+// (exec.ExitError.ExitCode is -1 then): the run is being stopped, so the
+// second half must not start.
+func interrupted(code int) bool { return code < 0 }
+
+// listPackages resolves go test's package patterns to import paths with go
+// list, under the same build tags. -e keeps packages that fail to load in
+// the list, so go test reports their errors as it would have.
+func listPackages(tags, patterns []string) ([]string, error) {
+	args := append(append([]string{"list", "-e", "-f", "{{.ImportPath}}"}, tags...), patterns...)
+	cmd := exec.Command("go", args...)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list %s: %w", strings.Join(patterns, " "), err)
+	}
+	return strings.Fields(string(out)), nil
+}
+
+// runCached runs plain go test (no -json, no -exec, so its result cache
+// applies) with its output passed straight through, and returns its exit
+// code.
+func runCached(args []string) (int, error) {
+	cmd := exec.Command("go", append([]string{"test"}, args...)...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return exitCode(cmd.Run())
+}
+
+// exitCode is the exit code of a command that ran, or the error when it did
+// not run at all.
+func exitCode(err error) (int, error) {
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		return 0, nil
+	case errors.As(err, &exitErr):
+		return exitErr.ExitCode(), nil
+	default:
+		return 0, err
+	}
+}
+
+// runJudged runs go test -json over the converted packages with every test
+// binary under this command's exec wrapper, copies plain go test text to
+// stdout, and returns what the budget found and go test's exit code. The
+// error is for the runner's own failures.
+func runJudged(goTestArgs []string, root string, budget time.Duration, exempt map[string]bool, tracked map[string]string) (testpolicy.BudgetResult, int, error) {
+	var res testpolicy.BudgetResult
+	self, err := os.Executable()
+	if err != nil {
+		return res, 0, err
+	}
+	cpuDir, err := os.MkdirTemp("", "gt-budget-cpu-")
+	if err != nil {
+		return res, 0, err
+	}
+	defer os.RemoveAll(cpuDir)
+
+	// go test splits -exec into words, honoring single and double quotes but
+	// no escapes; single quotes keep a path with spaces in one word, and a
+	// path with a single quote in it cannot be passed at all.
+	if strings.Contains(self, "'") {
+		return res, 0, fmt.Errorf("cannot pass %q to go test -exec: it contains a single quote", self)
+	}
+	// -exec turns off go test's result cache: a cached package runs no
+	// binary, so there would be nothing to measure.
+	args := append([]string{"test", "-json", "-exec", "'" + self + "' " + execTestArg}, goTestArgs...)
+	cmd := exec.Command("go", args...)
+	cmd.Env = append(os.Environ(), testpolicy.CPUDirEnv+"="+cpuDir)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return res, 0, err
+	}
+	if err := cmd.Start(); err != nil {
+		return res, 0, err
+	}
+	var readErr error
+	cpu := func(pkg string) (testpolicy.CPUTime, bool) {
+		c, ok, err := testpolicy.ReadCPU(cpuDir, filepath.Join(root, filepath.FromSlash(pkg)))
+		if err != nil && readErr == nil {
+			readErr = fmt.Errorf("reading CPU time of %s: %w", pkg, err)
+		}
+		return c, ok
+	}
+	res, scanErr := testpolicy.WatchBudgetTracked(stdout, os.Stdout, budget, exempt, tracked, module, cpu)
+	if scanErr != nil {
+		// WatchBudget stopped reading before the child was done writing (for
+		// example a single line over its 16 MB scan buffer); drain the pipe
+		// so the child's next Write doesn't block on a full pipe buffer and
+		// hang cmd.Wait() forever.
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+	code, waitErr := exitCode(cmd.Wait())
+	if code != 0 {
+		return res, code, nil
+	}
+	if err := errors.Join(waitErr, scanErr, readErr); err != nil {
+		return res, 0, err
+	}
+	return res, 0, nil
 }
 
 func usage(c testpolicy.CPUTime, unmeasured bool, wall time.Duration) string {

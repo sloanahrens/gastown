@@ -20,30 +20,52 @@ import (
 // stderr combined.
 func runBudget(t *testing.T, budget, fixture string) (int, string) {
 	t.Helper()
+	return runBudgetArgs(t, budget, nil, "-count=1", fixturePkg(fixture))
+}
+
+// fixturePkg is the package pattern of a fixture under testdata/budget.
+func fixturePkg(fixture string) string {
+	return "./internal/testpolicy/testdata/budget/" + fixture
+}
+
+// runBudgetArgs runs the budget runner from the repo root with args as its
+// go test arguments, an empty overbudget list, and an unconverted list
+// naming the given fixtures, and returns its exit code and its stdout and
+// stderr combined.
+func runBudgetArgs(t *testing.T, budget string, unconverted []string, args ...string) (int, string) {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
-	empty := filepath.Join(t.TempDir(), "empty.txt")
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.txt")
 	if err := os.WriteFile(empty, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "run", "./internal/testpolicy/cmd/budget",
-		"-budget", budget, "-unconverted", empty, "-overbudget", empty,
-		"--", "-count=1", "./internal/testpolicy/testdata/budget/"+fixture)
+	var list strings.Builder
+	for _, f := range unconverted {
+		list.WriteString("internal/testpolicy/testdata/budget/" + f + "\n")
+	}
+	listFile := filepath.Join(dir, "unconverted.txt")
+	if err := os.WriteFile(listFile, []byte(list.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", append([]string{"run", "./internal/testpolicy/cmd/budget",
+		"-budget", budget, "-unconverted", listFile, "-overbudget", empty, "--"}, args...)...)
 	cmd.Dir = root
-	var stderr bytes.Buffer
-	cmd.Stdout = &stderr
-	cmd.Stderr = &stderr
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	err = cmd.Run()
 	var exitErr *exec.ExitError
 	switch {
 	case err == nil:
-		return 0, stderr.String()
+		return 0, out.String()
 	case errors.As(err, &exitErr):
-		return exitErr.ExitCode(), stderr.String()
+		return exitErr.ExitCode(), out.String()
 	default:
-		t.Fatalf("go run budget: %v\n%s", err, stderr.String())
+		t.Fatalf("go run budget: %v\n%s", err, out.String())
 		return 0, ""
 	}
 }
@@ -96,5 +118,66 @@ func TestIntegrationBudgetReportsSignal(t *testing.T) {
 	}
 	if !strings.Contains(out, "signal: killed") {
 		t.Fatalf("output has no \"signal: killed\" line:\n%s", out)
+	}
+}
+
+// TestIntegrationBudgetCachesUnconverted checks that the runner leaves go
+// test's result cache on for unconverted packages: run twice on an
+// unchanged tree, the second run reports the unconverted fixture
+// "(cached)", while the judged fixture runs again under the exec wrapper
+// (a cached package runs no binary, so the budget would have nothing to
+// measure).
+func TestIntegrationBudgetCachesUnconverted(t *testing.T) {
+	t.Parallel()
+	args := []string{"-timeout", "5m", fixturePkg("cached"), fixturePkg("quick")}
+	for run := 1; run <= 2; run++ {
+		code, out := runBudgetArgs(t, "10s", []string{"cached"}, args...)
+		if code != 0 {
+			t.Fatalf("run %d: exit code = %d, want 0; output:\n%s", run, code, out)
+		}
+		if run == 1 {
+			continue
+		}
+		if !regexp.MustCompile(`(?m)^ok\s+\S+/testdata/budget/cached\s+\(cached\)`).MatchString(out) {
+			t.Fatalf("second run did not reuse the cached result of the unconverted fixture:\n%s", out)
+		}
+		if !regexp.MustCompile(`(?m)^ok\s+\S+/testdata/budget/quick\s`).MatchString(out) ||
+			regexp.MustCompile(`(?m)^ok\s+\S+/testdata/budget/quick\s+\(cached\)`).MatchString(out) {
+			t.Fatalf("second run did not run the judged fixture again:\n%s", out)
+		}
+	}
+}
+
+// TestIntegrationBudgetUnconvertedFailureFails checks that a failure in the
+// unconverted half fails the run and is shown the way plain go test shows
+// it, and that an empty judged half runs nothing (go test with no packages
+// would test the current directory instead).
+func TestIntegrationBudgetUnconvertedFailureFails(t *testing.T) {
+	t.Parallel()
+	code, out := runBudgetArgs(t, "10s", []string{"sigkill"}, "-count=1", fixturePkg("sigkill"))
+	if code == 0 {
+		t.Fatalf("exit code = 0, want a failure; output:\n%s", out)
+	}
+	if !strings.Contains(out, "signal: killed") || !regexp.MustCompile(`(?m)^FAIL\s+\S+/testdata/budget/sigkill\s`).MatchString(out) {
+		t.Fatalf("output lacks the sigkill fixture's signal and FAIL lines:\n%s", out)
+	}
+	if strings.Contains(out, "no Go files") {
+		t.Fatalf("the empty judged half ran go test on the current directory:\n%s", out)
+	}
+}
+
+// TestIntegrationBudgetJudgedFailureWithCachedPass checks that a budget
+// failure in the judged half fails the run although the unconverted half
+// passes, and that the BUDGET report comes after both halves' output.
+func TestIntegrationBudgetJudgedFailureWithCachedPass(t *testing.T) {
+	t.Parallel()
+	code, out := runBudgetArgs(t, "1s", []string{"cached"}, "-count=1", fixturePkg("childcpu"), fixturePkg("cached"))
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (childcpu over budget); output:\n%s", code, out)
+	}
+	budgetAt := strings.Index(out, "BUDGET: internal/testpolicy/testdata/budget/childcpu")
+	cachedAt := regexp.MustCompile(`(?m)^ok\s+\S+/testdata/budget/cached\s`).FindStringIndex(out)
+	if budgetAt < 0 || cachedAt == nil || budgetAt < cachedAt[0] {
+		t.Fatalf("want the unconverted fixture's ok line, then the BUDGET line for childcpu:\n%s", out)
 	}
 }
