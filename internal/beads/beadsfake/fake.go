@@ -663,8 +663,12 @@ func (f *Fake) ReleaseWithReason(id, reason string) error {
 }
 
 // AppendNotes appends note to the issue's notes, after a newline when
-// there are notes already, as bd update --append-notes does.
+// there are notes already, as bd update --append-notes does. An empty note
+// is a no-op, as on *beads.Beads, which sends bd nothing for it.
 func (f *Fake) AppendNotes(id, note string) error {
+	if note == "" {
+		return nil
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.issues[id]
@@ -688,7 +692,9 @@ func (f *Fake) ReleaseIfAssignee(id, expected string) (bool, error) {
 // TransferIfAssignee sets status and assignee only while expected is the
 // assignee (an empty expected means unassigned), and reports false with no
 // error, writing nothing, when it is not. The guard stands in for the claim
-// fence: an in_progress claim moves when its holder is the one expected.
+// fence: an in_progress claim moves when its holder is the one expected. A
+// transfer to closed is refused, as an update to closed is, for an issue
+// with an open child or blocker.
 func (f *Fake) TransferIfAssignee(id, expected, status, assignee string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -698,6 +704,11 @@ func (f *Fake) TransferIfAssignee(id, expected, status, assignee string) (bool, 
 	}
 	if r.issue.Assignee != expected {
 		return false, nil
+	}
+	if status == string(beads.StatusClosed) {
+		if err := f.updateCloseRefusal(r); err != nil {
+			return false, err
+		}
 	}
 	f.tick()
 	f.setStatus(r, status, "")

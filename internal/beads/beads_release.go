@@ -42,8 +42,12 @@ func (b *Beads) TransferIfAssignee(id, expected, status, assignee string) (trans
 
 // AppendNotes appends note to an issue's notes (bd update --append-notes),
 // which bd joins to existing notes with a newline. It routes by the issue's
-// prefix the way Update does.
+// prefix the way Update does. An empty note is a no-op.
 func (b *Beads) AppendNotes(id, note string) error {
+	if note == "" {
+		// bd would append a bare newline to existing notes.
+		return nil
+	}
 	if !b.noRoute {
 		if target := b.forIssueID(id); target != b {
 			return target.AppendNotes(id, note)

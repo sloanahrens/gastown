@@ -57,6 +57,8 @@ var contractCases = []contractCase{
 	{"batch close refusal", contractBatchCloseRefusal},
 	{"append notes", contractAppendNotes},
 	{"guarded transfer", contractGuardedTransfer},
+	{"guard and note edges", contractGuardEdges},
+	{"merge request blockers", contractMergeRequestBlockers},
 	{"merge requests", contractMergeRequests},
 	{"agent active_mr", contractAgentActiveMR},
 	{"merge slot", contractMergeSlot},
@@ -789,6 +791,104 @@ func contractGuardedTransfer(t *testing.T, s *scope) {
 	}
 	if _, err := s.ReleaseIfAssignee("gt-nosuch", alice); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("ReleaseIfAssignee(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// contractGuardEdges pins the guarded writes' and AppendNotes' edges.
+func contractGuardEdges(t *testing.T, s *scope) {
+	alice, bob := s.who("alice"), s.who("bob")
+
+	// An empty guard means unassigned: it does not match an assigned issue.
+	held := s.mustCreate(t, beads.CreateOptions{Title: "held", Priority: -1})
+	mustDo(t, "assign", s.Update(held.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
+	if ok, err := s.TransferIfAssignee(held.ID, "", beads.StatusHooked, bob); err != nil || ok {
+		t.Errorf("TransferIfAssignee(assigned, guard \"\") = %v, %v; want false, nil", ok, err)
+	}
+	if ok, err := s.ReleaseIfAssignee(held.ID, ""); err != nil || ok {
+		t.Errorf("ReleaseIfAssignee(assigned, guard \"\") = %v, %v; want false, nil", ok, err)
+	}
+	if got := s.mustShow(t, held.ID); got.Assignee != alice || got.Status != "open" {
+		t.Errorf("a failed empty guard changed the issue to %q/%q", got.Status, got.Assignee)
+	}
+	if _, err := s.TransferIfAssignee("gt-nosuch", alice, beads.StatusHooked, bob); !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("TransferIfAssignee(missing) = %v, want ErrNotFound", err)
+	}
+
+	// A transfer to closed passes the close fence an update does: a parent
+	// with an open child stays open.
+	parent := s.mustCreate(t, beads.CreateOptions{Title: "parent", Priority: -1})
+	s.mustCreate(t, beads.CreateOptions{Title: "open child", Parent: parent.ID, Priority: -1})
+	mustDo(t, "assign parent", s.Update(parent.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
+	ok, err := s.TransferIfAssignee(parent.ID, alice, string(beads.StatusClosed), alice)
+	if ok {
+		t.Errorf("TransferIfAssignee(parent with an open child -> closed) = true, want it refused")
+	}
+	refused(t, "TransferIfAssignee(parent with an open child -> closed)", err)
+	if st := s.mustShow(t, parent.ID).Status; st != "open" {
+		t.Errorf("refused transfer left the parent %q", st)
+	}
+	// Close's assignee fence is not an update's: the holder's issue closes.
+	done := s.mustCreate(t, beads.CreateOptions{Title: "alice's done", Priority: -1})
+	mustDo(t, "assign done", s.Update(done.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
+	if ok, err := s.TransferIfAssignee(done.ID, alice, string(beads.StatusClosed), alice); err != nil || !ok {
+		t.Errorf("TransferIfAssignee(alice's issue -> closed) = %v, %v; want true, nil", ok, err)
+	}
+	if st := s.mustShow(t, done.ID).Status; st != "closed" {
+		t.Errorf("transfer to closed left status %q", st)
+	}
+
+	// Release reopens a closed issue.
+	closed := s.mustCreate(t, beads.CreateOptions{Title: "closed", Priority: -1})
+	mustDo(t, "close", s.Close(closed.ID))
+	mustDo(t, "Release(closed)", s.Release(closed.ID))
+	if got := s.mustShow(t, closed.ID); got.Status != "open" || got.ClosedAt != "" || got.Assignee != "" {
+		t.Errorf("Release(closed): status %q closed_at %q assignee %q, want open", got.Status, got.ClosedAt, got.Assignee)
+	}
+
+	// An empty note appends nothing.
+	noted := s.mustCreate(t, beads.CreateOptions{Title: "noted", Priority: -1})
+	mustDo(t, "AppendNotes(\"\") with no notes", s.AppendNotes(noted.ID, ""))
+	if n := s.mustShow(t, noted.ID).Notes; n != "" {
+		t.Errorf("notes after an empty append = %q, want none", n)
+	}
+	mustDo(t, "append", s.AppendNotes(noted.ID, "one"))
+	mustDo(t, "AppendNotes(\"\") with notes", s.AppendNotes(noted.ID, ""))
+	if n := s.mustShow(t, noted.ID).Notes; n != "one" {
+		t.Errorf("notes after an empty append = %q, want \"one\"", n)
+	}
+}
+
+// contractMergeRequestBlockers pins ListMergeRequests' dependency
+// hydration: an MR's open blockers come back in BlockedBy, and a closed one
+// no longer blocks.
+func contractMergeRequestBlockers(t *testing.T, s *scope) {
+	const mrLabel = "gt:merge-request"
+	desc := "branch: polecat/nux/" + s.tag + "\ntarget: main\nsource_issue: gt-src"
+	mr := s.mustCreate(t, beads.CreateOptions{Title: "blocked MR", Labels: []string{mrLabel}, Description: desc, Priority: -1})
+	free := s.mustCreate(t, beads.CreateOptions{Title: "free MR", Labels: []string{mrLabel}, Description: desc, Priority: -1})
+	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocker", Priority: -1})
+	mustDo(t, "AddDependency", s.AddDependency(mr.ID, blocker.ID))
+
+	blockers := func() map[string][]string {
+		t.Helper()
+		got, err := beads.ListMergeRequests(s.Client, beads.ListOptions{Label: mrLabel, Status: "open", Priority: -1})
+		s.want(t, "ListMergeRequests", got, err, mr.ID, free.ID)
+		out := map[string][]string{}
+		for _, is := range s.mine(got) {
+			out[is.ID] = is.BlockedBy
+			if is.BlockedByCount != len(is.BlockedBy) {
+				t.Errorf("%s: BlockedByCount %d, BlockedBy %v", is.ID, is.BlockedByCount, is.BlockedBy)
+			}
+		}
+		return out
+	}
+	got := blockers()
+	if !reflect.DeepEqual(got[mr.ID], []string{blocker.ID}) || len(got[free.ID]) != 0 {
+		t.Errorf("BlockedBy = %v, want %s blocked by %s and %s by nothing", got, mr.ID, blocker.ID, free.ID)
+	}
+	mustDo(t, "close the blocker", s.Close(blocker.ID))
+	if got := blockers(); len(got[mr.ID]) != 0 {
+		t.Errorf("BlockedBy after the blocker closed = %v, want none", got[mr.ID])
 	}
 }
 
