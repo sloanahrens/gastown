@@ -34,6 +34,11 @@ func (b *Beads) lockAgentBead(id string) (*flock.Flock, error) {
 	return fl, nil
 }
 
+// unlockAgentBead releases a lock from lockAgentBead. An unlock error is
+// dropped: the lock file's descriptor closes with it, and the write it guarded
+// has already succeeded or failed on its own.
+func unlockAgentBead(fl *flock.Flock) { _ = fl.Unlock() }
+
 // AgentFields holds structured fields for agent beads.
 // These are stored as "key: value" lines in the description.
 type AgentFields struct {
@@ -587,7 +592,7 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 	if lockErr != nil {
 		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
 	}
-	defer func() { _ = fl.Unlock() }()
+	defer unlockAgentBead(fl)
 	return clearAgentActiveMRIfMatches(b, id, expectedMR)
 }
 
