@@ -188,93 +188,169 @@ var blockingDepTypes = map[string]bool{
 	"merge-blocks":       true,
 }
 
-// isIssueBlocked checks if an issue has unclosed blocking dependencies.
-// Returns true if any blocks, conditional-blocks, waits-for, or merge-blocks
-// dependency targets an issue that is not closed/tombstone.
-//
-// For merge-blocks dependencies, "closed" alone is not sufficient — the
-// blocker must have a CloseReason starting with "Merged in " to confirm
-// that the code was actually integrated. This prevents dispatching work
-// against un-merged code (see #1893).
-//
-// When a StoreResolver is provided, cross-database dependencies are resolved
-// by querying the appropriate rig store for fresh status. Without a resolver,
-// this falls back to the hq store's dependency metadata snapshot, which may
-// be stale for cross-rig issues (see GH #2624).
+// isIssueBlocked reports whether issueID has a blocking dependency that is
+// not satisfied; BlockReason says which.
 func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) bool {
-	if store == nil {
-		return false // fail-open: no store means we can't check deps
+	return BlockReason(ctx, store, issueID, resolver) != ""
+}
+
+// BlockReason returns why issueID may not be dispatched because of its
+// dependencies, or "" when none blocks it. A blocks, conditional-blocks,
+// waits-for or merge-blocks dependency blocks unless its target is closed or
+// tombstoned; a merge-blocks target must also carry a CloseReason starting
+// with "Merged in ", so work is not dispatched against un-merged code (#1893).
+// parent-child does not block.
+//
+// The edges come from the issue's raw dependency records in its home store
+// (the resolver redirects a rig bead there). The joined view,
+// GetDependenciesWithMetadata, drops every edge whose target is not in that
+// store — every blocker in another rig, stored as "external:<prefix>:<id>" —
+// and read that way a bead blocked by another rig's open bead was fed
+// (gt-j02xy). Each blocker's status is then read in the rig that owns its
+// prefix, falling back to the home store.
+//
+// This fails safe. Each of these counts as blocking, with a reason naming it:
+//   - the bead's own rig store cannot be reached (reading the town store
+//     instead finds none of its edges and would say "not blocked");
+//   - the dependency records cannot be read, or the store cannot give raw
+//     records at all;
+//   - a blocker's rig store cannot be opened or read ("unreadable");
+//   - no store has the blocker ("unresolved in any rig").
+//
+// The one exception is no store at all, which is the town-level gap the store
+// alert reports (FeedHold makes the same call).
+//
+// store is the caller's town store. It answers for hq when the resolver holds
+// no hq store, which is how gt close builds its resolver.
+func BlockReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
+	storeFor := func(name string) (beadsdk.Storage, error) {
+		if resolver == nil {
+			return store, nil
+		}
+		found, err := resolver.storeByName(name)
+		if found != nil {
+			return found, nil
+		}
+		if name == "hq" && store != nil {
+			return store, nil
+		}
+		return nil, err
 	}
 
-	// Try the resolver first for cross-database accuracy. The resolver looks up
-	// deps in the issue's home store (based on prefix routing), which returns
-	// current status. Fall back to hq store if resolver is nil or returns nothing.
-	var deps []*beadsdk.IssueWithDependencyMetadata
+	home := store
 	if resolver != nil {
-		deps = resolver.ResolveDepsWithMetadata(ctx, issueID)
-	}
-	if len(deps) == 0 {
+		name := resolver.storeForID(issueID)
 		var err error
-		deps, err = store.GetDependenciesWithMetadata(ctx, issueID)
-		if err != nil {
-			return false // On error, assume not blocked (fail-open)
+		if home, err = storeFor(name); err != nil {
+			return fmt.Sprintf("store of rig %s unavailable (%s)", name, util.FirstLine(err.Error()))
 		}
 	}
+	if home == nil {
+		return ""
+	}
 
-	// For cross-rig blocking deps, the metadata snapshot status may be stale.
-	// Collect blocker IDs whose status we need to verify via the resolver.
-	var staleCandidateIDs []string
-	var staleCandidateTypes []string
+	reader, ok := home.(dependencyRecordReader)
+	if !ok {
+		return fmt.Sprintf("store %T cannot read raw dependency records, so cross-rig blockers are unknown", home)
+	}
+	records, err := reader.GetDependencyRecords(ctx, issueID)
+	if err != nil {
+		return "dependency records unreadable (" + util.FirstLine(err.Error()) + ")"
+	}
 
-	for _, d := range deps {
-		depType := string(d.DependencyType)
+	type blocker struct{ id, depType string }
+	var blockers []blocker
+	for _, d := range records {
+		depType := string(d.Type)
 		if !blockingDepTypes[depType] {
 			continue
 		}
-		status := string(d.Status)
-		if status == "tombstone" {
-			continue // always unblocked
+		blockers = append(blockers, blocker{id: extractIssueID(d.DependsOnID), depType: depType})
+	}
+	if len(blockers) == 0 {
+		return ""
+	}
+
+	found := make(map[string]*beadsdk.Issue, len(blockers))
+	readErr := make(map[string]string)
+	lookup := func(s beadsdk.Storage, ids []string) error {
+		issues, err := s.GetIssuesByIDs(ctx, ids)
+		if err != nil {
+			return err
 		}
-		if status == "closed" {
-			// For merge-blocks: "closed" alone is not enough — need merge confirmation
-			if depType == "merge-blocks" && !strings.HasPrefix(d.CloseReason, "Merged in ") {
-				return true // closed but not merged = still blocked
+		for _, iss := range issues {
+			if iss != nil {
+				found[iss.ID] = iss
 			}
-			continue // closed = unblocked for non-merge-blocks
 		}
-		// Status is not closed/tombstone. If we have a resolver, the dep might
-		// actually be closed in its home store but stale in the snapshot.
+		return nil
+	}
+
+	// Each blocker is read in the store that owns its prefix.
+	byStore := make(map[string][]string)
+	for _, b := range blockers {
+		name := ""
 		if resolver != nil {
-			staleCandidateIDs = append(staleCandidateIDs, extractIssueID(d.ID))
-			staleCandidateTypes = append(staleCandidateTypes, depType)
-		} else {
-			return true // not closed = blocked (no resolver to verify)
+			name = resolver.storeForID(b.id)
 		}
+		byStore[name] = append(byStore[name], b.id)
 	}
-
-	// Verify stale candidates via cross-store resolution
-	if len(staleCandidateIDs) > 0 {
-		freshMap := resolver.ResolveIssues(ctx, staleCandidateIDs)
-		for i, id := range staleCandidateIDs {
-			fresh, ok := freshMap[id]
-			if !ok {
-				return true // can't resolve = assume blocked
-			}
-			freshStatus := string(fresh.Status)
-			if freshStatus == "tombstone" {
-				continue
-			}
-			if freshStatus != "closed" {
-				return true // confirmed not closed
-			}
-			// For merge-blocks: check close reason from fresh data
-			if staleCandidateTypes[i] == "merge-blocks" && !strings.HasPrefix(fresh.CloseReason, "Merged in ") {
-				return true
+	for name, ids := range byStore {
+		owner, err := storeFor(name)
+		if err == nil && owner == nil {
+			err = fmt.Errorf("no store for %s", name)
+		}
+		if err == nil {
+			err = lookup(owner, ids)
+		}
+		if err != nil {
+			for _, id := range ids {
+				readErr[id] = util.FirstLine(err.Error())
 			}
 		}
 	}
+	// A blocker its owner did not produce may still sit beside the bead or in
+	// the town store.
+	for _, fallback := range []beadsdk.Storage{home, store} {
+		var missing []string
+		for _, b := range blockers {
+			if found[b.id] == nil {
+				missing = append(missing, b.id)
+			}
+		}
+		if len(missing) == 0 || fallback == nil {
+			continue
+		}
+		if err := lookup(fallback, missing); err != nil {
+			for _, id := range missing {
+				if readErr[id] == "" {
+					readErr[id] = util.FirstLine(err.Error())
+				}
+			}
+		}
+	}
 
-	return false
+	for _, b := range blockers {
+		iss := found[b.id]
+		if iss == nil {
+			if msg := readErr[b.id]; msg != "" {
+				return fmt.Sprintf("%s blocker %s unreadable (%s)", b.depType, b.id, msg)
+			}
+			return fmt.Sprintf("%s blocker %s unresolved in any rig", b.depType, b.id)
+		}
+		switch status := string(iss.Status); status {
+		case "tombstone":
+			continue
+		case "closed":
+			if b.depType == "merge-blocks" && !strings.HasPrefix(iss.CloseReason, "Merged in ") {
+				return fmt.Sprintf("merge-blocks %s closed without a merge", b.id)
+			}
+			continue
+		default:
+			return fmt.Sprintf("%s %s (%s)", b.depType, b.id, status)
+		}
+	}
+	return ""
 }
 
 // feedNextReadyIssue finds the next ready issue in a convoy and dispatches it
@@ -295,7 +371,7 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		return
 	}
 
-	tracked := getConvoyTrackedIssues(ctx, store, convoyID, townRoot, resolver)
+	tracked := getConvoyTrackedIssues(ctx, store, convoyID, townRoot, resolver, logger)
 	if len(tracked) == 0 {
 		return
 	}
@@ -334,8 +410,8 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 		// Check blocking dependencies: blocks and conditional-blocks with
 		// non-closed targets prevent dispatch. parent-child is NOT treated
 		// as blocking (consistent with molecule step behavior).
-		if isIssueBlocked(ctx, store, issue.ID, resolver) {
-			logger("%s: convoy %s: %s is blocked, skipping", caller, convoyID, issue.ID)
+		if reason := BlockReason(ctx, store, issue.ID, resolver); reason != "" {
+			logger("%s: convoy %s: %s is blocked (%s), skipping", caller, convoyID, issue.ID, reason)
 			continue
 		}
 
@@ -392,9 +468,13 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 // which is every cross-rig bead ("external:<prefix>:<id>") a town convoy
 // tracks. With it the cross-rig resolution below could never run, and such a
 // convoy fed nothing.
-func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID, townRoot string, resolver *StoreResolver) []trackedIssue {
+func getConvoyTrackedIssues(ctx context.Context, store beadsdk.Storage, convoyID, townRoot string, resolver *StoreResolver, logger func(format string, args ...interface{})) []trackedIssue {
 	ids, err := trackedIDs(ctx, store, convoyID)
-	if err != nil || len(ids) == 0 {
+	if err != nil {
+		logger("convoy %s: cannot read tracked beads: %s", convoyID, util.FirstLine(err.Error()))
+		return nil
+	}
+	if len(ids) == 0 {
 		return nil
 	}
 
@@ -462,22 +542,13 @@ type dependencyRecordReader interface {
 // trackedIDs returns the IDs of the beads convoyID tracks, cross-rig ones
 // included, with any external:<prefix>: wrapper stripped.
 func trackedIDs(ctx context.Context, store beadsdk.Storage, convoyID string) ([]string, error) {
-	var ids []string
 	reader, ok := store.(dependencyRecordReader)
 	if !ok {
-		// A store without raw edge reads offers only the joined view, which
-		// lists local targets alone.
-		deps, err := store.GetDependenciesWithMetadata(ctx, convoyID)
-		if err != nil {
-			return nil, err
-		}
-		for _, d := range deps {
-			if string(d.DependencyType) == "tracks" {
-				ids = append(ids, extractIssueID(d.ID))
-			}
-		}
-		return ids, nil
+		// The joined view is no substitute: it lists local targets alone and
+		// would silently drop every cross-rig tracked bead.
+		return nil, fmt.Errorf("store %T cannot read raw dependency records", store)
 	}
+	var ids []string
 	deps, err := reader.GetDependencyRecords(ctx, convoyID)
 	if err != nil {
 		return nil, err

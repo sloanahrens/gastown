@@ -122,7 +122,7 @@ func TestCheckSingleConvoy_EmptyConvoyDryRun(t *testing.T) {
 func TestFindStrandedConvoys_EmptyConvoyFlagged(t *testing.T) {
 	_, townBeads, _ := mockBdForConvoyTest(t, "hq-empty3", "Stranded empty convoy")
 
-	stranded, err := findStrandedConvoys(townBeads)
+	stranded, err := findStrandedConvoysWith(townBeads, noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -227,7 +227,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Pass townRoot (not .beads) — matches getTownBeadsDir() which returns the workspace root.
-	stranded, err := findStrandedConvoys(townRoot)
+	stranded, err := findStrandedConvoysWith(townRoot, noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -347,7 +347,16 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	stranded, err := findStrandedConvoys(townRoot)
+	// Both beads are blocked by gt-blocker1, as the blocker check reports.
+	blockedByBlocker1 := func(string) (blockCheck, func(), error) {
+		return func(id string) string {
+			if strings.HasPrefix(id, "gt-busy") {
+				return "blocks gt-blocker1 (open)"
+			}
+			return ""
+		}, func() {}, nil
+	}
+	stranded, err := findStrandedConvoysWith(townRoot, blockedByBlocker1)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
