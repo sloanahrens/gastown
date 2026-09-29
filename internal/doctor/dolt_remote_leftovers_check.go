@@ -145,9 +145,13 @@ func scanBeadsConfigsForSyncRemote(townRoot string) []string {
 
 	paths := map[string]bool{".": true} // the town's own .beads
 	for _, r := range routes {
-		if r.Path != "" {
-			paths[r.Path] = true
+		// Route paths come from a file: keep only ones that stay inside the
+		// town, so the check never reads outside it.
+		p := filepath.Clean(r.Path)
+		if r.Path == "" || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
+			continue
 		}
+		paths[p] = true
 	}
 	sorted := make([]string, 0, len(paths))
 	for p := range paths {
@@ -158,7 +162,11 @@ func scanBeadsConfigsForSyncRemote(townRoot string) []string {
 	var details []string
 	for _, p := range sorted {
 		configPath := filepath.Join(townRoot, p, ".beads", "config.yaml")
-		if remote, ok := readSyncRemote(configPath); ok {
+		remote, ok, err := readSyncRemote(configPath)
+		switch {
+		case err != nil:
+			details = append(details, fmt.Sprintf("%s: cannot read: %v", configPath, err))
+		case ok:
 			details = append(details, fmt.Sprintf("%s: sync.remote %s", configPath, remote))
 		}
 	}
@@ -168,11 +176,15 @@ func scanBeadsConfigsForSyncRemote(townRoot string) []string {
 // readSyncRemote reads the sync.remote value from a beads config.yaml, if
 // present and non-empty. Deliberately line-oriented (not a full YAML parse)
 // to match how bd itself treats this file — see beadsConfigHasSyncRemote in
-// internal/rig/manager.go.
-func readSyncRemote(configPath string) (string, bool) {
+// internal/rig/manager.go. A missing file has no sync.remote; any other read
+// failure is returned, never read as "not set".
+func readSyncRemote(configPath string) (string, bool, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return "", false
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -182,9 +194,9 @@ func readSyncRemote(configPath string) (string, bool) {
 		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "sync.remote:"))
 		value = strings.Trim(value, `"'`)
 		if value == "" {
-			return "", false
+			return "", false, nil
 		}
-		return value, true
+		return value, true, nil
 	}
-	return "", false
+	return "", false, nil
 }

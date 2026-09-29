@@ -178,3 +178,49 @@ func TestDoltRemoteLeftovers_UnlistableDataDirWarns(t *testing.T) {
 		t.Errorf("details %q should say the data dir could not be listed", joined)
 	}
 }
+
+// A rig config.yaml that exists but cannot be read is not evidence that it
+// has no sync.remote.
+func TestDoltRemoteLeftovers_UnreadableRigConfigWarns(t *testing.T) {
+	t.Parallel()
+	town, _, cfg := leftoversTown(t)
+	if err := os.Remove(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(cfg, 0o755); err != nil { // reading a directory fails
+		t.Fatal(err)
+	}
+	res := runLeftovers(t, town)
+	if res.Status != StatusWarning {
+		t.Fatalf("status = %v, want Warning for an unreadable rig config.yaml", res.Status)
+	}
+	if joined := strings.Join(res.Details, "\n"); !strings.Contains(joined, "cannot read") {
+		t.Errorf("details %q should say the config could not be read", joined)
+	}
+}
+
+// Route paths come from a file; one that climbs out of the town is skipped,
+// never read.
+func TestDoltRemoteLeftovers_RouteOutsideTownIsIgnored(t *testing.T) {
+	t.Parallel()
+	town, _, _ := leftoversTown(t)
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, ".beads", "config.yaml"), []byte("sync.remote: \"git+https://x/y.git\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(town, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := `{"prefix":"ev-","path":"` + rel + `"}` + "\n"
+	if err := os.WriteFile(filepath.Join(town, ".beads", "routes.jsonl"), []byte(route), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := runLeftovers(t, town)
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v, want OK (route outside the town is ignored); details %v", res.Status, res.Details)
+	}
+}
