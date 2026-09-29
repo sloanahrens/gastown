@@ -333,3 +333,31 @@ func TestPoolFromConfig(t *testing.T) {
 		t.Fatalf("PoolFromConfig(nil) = %+v, want the single-slot default", got)
 	}
 }
+
+// TestYield_StaleGateMarkerStillYields: a gate's marker outlives its hold in
+// every process spawned while it held (the daemon's agents, gt-off9). Such a
+// process is not nested under the gate that is running now, so it yields to it
+// like anyone else.
+func TestYield_StaleGateMarkerStillYields(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	pool := yieldPool()
+	pool.MaxGateYield = 4 * tg.pollInterval
+
+	// Inherited from a main-branch-test hold on slot 1 that has since ended.
+	child := tg.child()
+	child.env.Setenv(ReentrantEnvVar, reentrantEnvValue(town, 1, "gastown/main-branch-test", foreignPID()+7))
+
+	gate := tg.mustAcquirePool(t, town, "gastown/refinery", pool)
+	defer release(t, gate)
+
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, "gastown/crew/sloan", time.Hour, pool) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release(t, h)
+	if elapsed != pool.MaxGateYield {
+		t.Fatalf("stale-marker acquire waited %s, want it to yield to the running gate for the cap %s", elapsed, pool.MaxGateYield)
+	}
+}

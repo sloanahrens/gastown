@@ -513,11 +513,32 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 	}
 }
 
-// underGateHold reports whether this process descends from a gate's hold on
-// townRoot's pool, by the reentrant marker it inherited (see ReentrantEnvVar).
+// underGateHold reports whether this process runs under a gate hold that is
+// still in force: it inherited a gate role's reentrant marker (see
+// ReentrantEnvVar) and the slot that marker names is still held by the pid it
+// names. A marker outlives its hold in every process spawned while the hold
+// was active (gt-off9), so the marker alone is not enough.
 func (g *Gate) underGateHold(townRoot string) bool {
 	m, ok := g.reentrantHolder()
-	return ok && m.validAncestor(townRoot, g.pid) && IsGateRole(m.role)
+	if !ok || !m.validAncestor(townRoot, g.pid) || !IsGateRole(m.role) {
+		return false
+	}
+	i, _ := slotIndexFromLockPath(townRoot, m.lockPath)
+	if _, err := os.Stat(m.lockPath); err != nil {
+		// Probing would create the file, and a created slot file is a slot
+		// Status then reports (discoverSlots).
+		return false
+	}
+	unlock, free, err := lock.FlockTryAcquire(m.lockPath)
+	if err != nil {
+		return false
+	}
+	if free {
+		unlock()
+		return false
+	}
+	owner := readSlotOwner(townRoot, i)
+	return owner != nil && owner.PID == m.pid
 }
 
 // runningGate reports whether a live gate holds one of pool's gate-reserved
