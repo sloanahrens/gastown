@@ -18,6 +18,11 @@ type Ref struct {
 	Line  int      // physical line in File
 	Bin   string   // "gt" or "bd"
 	Words []string // leading command-like words after Bin, as written
+	// Comment marks an invocation found in a shell or JS comment line. Check
+	// counts it only when its first word names a real command, so a comment
+	// such as "# Close with: bd gate close <id>" is checked and "# the gt
+	// binary" is not.
+	Comment bool
 }
 
 // Token renders the invocation as "gt mq close".
@@ -50,14 +55,30 @@ func commandWords(rest string) []string {
 	return words
 }
 
-// scanShellLine returns the invocations on one line of shell-like text. A
+// scanShellLine returns the invocations on one line of shell-like text.
+// Comment lines are read too, with every invocation marked Comment. A
 // mention bounded by whitespace inside an open quote is text, not a command
 // (log "Installing gt from ..."), unless a shell operator puts it in command
 // position ("... && gt prime").
 func scanShellLine(file string, line int, text string) []Ref {
 	trimmed := strings.TrimSpace(text)
 	if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
-		return nil
+		// In a comment, gt/bd counts only where an instruction would put it:
+		// at the comment's start, after a colon ("Close with: bd gate close"),
+		// or after a shell operator. "The gt boot command handles this" is prose.
+		body := strings.TrimLeft(text, "#/ \t-*")
+		offset := len(text) - len(body)
+		refs := scanMatches(file, line, text, func(_ byte, start int) bool {
+			if start < offset {
+				return false
+			}
+			prefix := text[offset:start]
+			return strings.HasSuffix(strings.TrimRight(prefix, " \t"), ":") || commandPosition(prefix)
+		})
+		for i := range refs {
+			refs[i].Comment = true
+		}
+		return refs
 	}
 	return scanMatches(file, line, text, func(boundary byte, start int) bool {
 		if !isSpace(boundary) || !insideQuote(text[:start]) {

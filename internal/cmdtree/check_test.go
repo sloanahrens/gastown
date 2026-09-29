@@ -18,6 +18,9 @@ func TestCheck(t *testing.T) {
 		{File: "a.toml", Line: 4, Bin: "bd", Words: []string{"sync"}},
 		{File: "a.toml", Line: 5, Bin: "bd", Words: []string{"list"}},
 		{File: "a.toml", Line: 6, Bin: "bd", Words: []string{"daemons", "killall"}},
+		{File: "a.toml", Line: 7, Bin: "gt", Words: []string{"town"}},
+		{File: "a.toml", Line: 8, Bin: "gt", Words: []string{"binary", "is"}, Comment: true},
+		{File: "a.toml", Line: 9, Bin: "gt", Words: []string{"mq", "close"}, Comment: true},
 	}
 	var got []string
 	for _, v := range Check(refs, map[string]*Tree{"gt": gt, "bd": bd}) {
@@ -28,6 +31,8 @@ func TestCheck(t *testing.T) {
 		`a.toml:3: gt mq close: unknown subcommand "close" for "gt mq"`,
 		`a.toml:4: bd sync: ` + BdSyncDenied,
 		`a.toml:6: bd daemons killall: unknown command "daemons" for bd`,
+		`a.toml:7: gt town: "gt town" has no Run: cobra prints help and exits 0`,
+		`a.toml:9: gt mq close: unknown subcommand "close" for "gt mq"`,
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("Check:\n got\n%s\n want\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

@@ -30,5 +30,12 @@ func LoadBdTree() (*Tree, bdsnapshot.Snapshot, error) {
 	for _, c := range snap.Commands {
 		t.Add(strings.Fields(c.Path), c.Aliases, !c.SubcommandOnly)
 	}
+	// A subcommand-only bd parent is not runnable, so cobra answers it with
+	// help and exit 0, the same as a gt parent with no Run.
+	for _, c := range snap.Commands {
+		if c.SubcommandOnly {
+			t.MarkHelpOnly(strings.Fields(c.Path))
+		}
+	}
 	return t, snap, nil
 }

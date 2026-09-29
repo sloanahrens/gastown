@@ -12,7 +12,11 @@ import (
 func refStrings(refs []Ref) []string {
 	out := make([]string, 0, len(refs))
 	for _, r := range refs {
-		out = append(out, strings.TrimSpace(strconv.Itoa(r.Line)+":"+r.Bin+" "+strings.Join(r.Words, " ")))
+		line := strconv.Itoa(r.Line) + ":" + r.Bin + " " + strings.Join(r.Words, " ")
+		if r.Comment {
+			line += " #"
+		}
+		out = append(out, strings.TrimSpace(line))
 	}
 	return out
 }
@@ -43,20 +47,25 @@ func TestScanShell(t *testing.T) {
 		`echo 'Run gt prime first'`,              // 12: text inside an open quote
 		`echo "done" && gt done`,                 // 13: quote closed before gt
 		`R="${GT_TOWN_ROOT:-$(gt town root)}"`,   // 14: closing braces stop words
-		`a=[$(bd list)]`,                         // 15
+		"# The gt boot command handles this",     // 16: comment prose
+		"# - Close with: bd gate close <id>",     // 17: comment after a colon
+		`a=[$(bd list)]`,                         // 17                         // 15
 	}, "\n")
 	assertRefs(t, ScanShell("f.sh", text, 1),
 		"1:gt rig list",
 		"2:bd close gt-abc",
 		"3:gt rigs",
 		"4:gt rigs",
+		"5:gt context #",
+		"6:bd daemons list #",
 		"7:gt tap guard pr-workflow",
 		"8:gt prime",
 		"8:gt mail inbox",
 		"10:bd list",
 		"13:gt done",
 		"14:gt town root",
-		"15:bd list",
+		"16:bd gate close #",
+		"17:bd list",
 	)
 }
 
@@ -78,6 +87,7 @@ func TestScanMarkdown(t *testing.T) {
 		"2:gt mq close",
 		"2:bd show x",
 		"4:gt session kill",
+		"5:bd sync #",
 		"9:gt done",
 		"9:bd list",
 		"10:gt rig list",

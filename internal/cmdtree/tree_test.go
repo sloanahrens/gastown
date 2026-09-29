@@ -18,6 +18,9 @@ func testTree() *Tree {
 	t.Add([]string{"hook"}, nil, true)
 	t.Add([]string{"hook", "show"}, nil, true)
 	t.Add([]string{"version"}, nil, false)
+	t.Add([]string{"town"}, nil, false)
+	t.Add([]string{"town", "next"}, nil, true)
+	t.MarkHelpOnly([]string{"town"})
 	return t
 }
 
@@ -44,6 +47,9 @@ func TestResolve(t *testing.T) {
 		{"no words", nil, true, "", ""},
 		{"word after an argument-free leaf", []string{"version", "check"}, false, "version", "check"},
 		{"flag-like after an argument-free leaf", []string{"version", "gt-1"}, true, "version", ""},
+		{"help-only parent alone", []string{"town"}, false, "town", ""},
+		{"help-only parent with unknown sub", []string{"town", "root"}, false, "town", "root"},
+		{"help-only parent with known sub", []string{"town", "next"}, true, "town next", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,5 +79,8 @@ func TestFromCobra(t *testing.T) {
 	}
 	if r := tree.Resolve([]string{"mq", "close"}); r.OK {
 		t.Errorf("Resolve(mq close) OK; want unknown subcommand")
+	}
+	if r := tree.Resolve([]string{"mq"}); r.OK || !r.HelpOnly {
+		t.Errorf("Resolve(mq) = %+v; want a help-only failure (mq has no Run)", r)
 	}
 }

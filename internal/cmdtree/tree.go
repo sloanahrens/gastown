@@ -30,6 +30,10 @@ type Node struct {
 	// When false, a plain word after it can only be a subcommand, so an
 	// unrecognized one is a violation.
 	TakesArgs bool
+	// HelpOnly marks a parent with no Run: cobra answers it, and any
+	// unknown subcommand under it, with help and exit status 0 (deep review
+	// G4-04), so an invocation that stops on it has done nothing.
+	HelpOnly bool
 }
 
 // Tree is a command tree rooted at the binary.
@@ -63,6 +67,22 @@ func (t *Tree) Add(path, aliases []string, takesArgs bool) {
 	}
 }
 
+// MarkHelpOnly marks the command at path as a help-only parent. It is a
+// no-op for a path the tree does not hold.
+func (t *Tree) MarkHelpOnly(path []string) {
+	n := t.root
+	for _, name := range path {
+		child, ok := n.Children[name]
+		if !ok {
+			return
+		}
+		n = child
+	}
+	if n != t.root {
+		n.HelpOnly = true
+	}
+}
+
 // FromCobra builds a Tree from a cobra root, hidden commands included (they
 // run just the same). takesArgs decides each command's TakesArgs.
 func FromCobra(root *cobra.Command, takesArgs func(*cobra.Command) bool) *Tree {
@@ -72,6 +92,9 @@ func FromCobra(root *cobra.Command, takesArgs func(*cobra.Command) bool) *Tree {
 		for _, child := range c.Commands() {
 			p := append(append([]string(nil), path...), child.Name())
 			t.Add(p, child.Aliases, takesArgs(child))
+			if !child.Runnable() && child.HasSubCommands() {
+				t.MarkHelpOnly(p)
+			}
 			walk(child, p)
 		}
 	}
@@ -83,7 +106,10 @@ func FromCobra(root *cobra.Command, takesArgs func(*cobra.Command) bool) *Tree {
 type Resolution struct {
 	Matched []string // the words that named commands, as written
 	Unknown string   // the word that failed to resolve, when !OK
-	OK      bool
+	// HelpOnly is set when the words stop on a help-only parent: every word
+	// resolved, but the command does nothing.
+	HelpOnly bool
+	OK       bool
 }
 
 // MatchedPath is Matched joined with spaces.
@@ -98,7 +124,8 @@ var plainWord = regexp.MustCompile(`^[a-z][a-z-]*$`)
 // command. Later words descend while they name children; at the first one
 // that does not, the invocation fails only if the command reached takes no
 // positional arguments and the word is plain: an unknown subcommand under a
-// parent, or a stray word after a leaf that rejects arguments.
+// parent, or a stray word after a leaf that rejects arguments. Words that
+// all resolve but stop on a help-only parent fail with HelpOnly set.
 func (t *Tree) Resolve(words []string) Resolution {
 	var r Resolution
 	n := t.root
@@ -113,7 +140,14 @@ func (t *Tree) Resolve(words []string) Resolution {
 			r.Unknown = w
 			return r
 		}
-		break
+		// A plain word after an argument-taking command is an argument;
+		// anything else ends the command words.
+		r.OK = true
+		return r
+	}
+	if n != t.root && n.HelpOnly {
+		r.HelpOnly = true
+		return r
 	}
 	r.OK = true
 	return r
