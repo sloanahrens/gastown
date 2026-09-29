@@ -280,17 +280,7 @@ func dispatchable(is *beads.Issue) bool {
 
 // blocked reports whether r depends, through "blocks", on an issue that is
 // not closed. Callers hold f.mu.
-func (f *Fake) blocked(r *record) bool {
-	for _, e := range r.deps {
-		if e.typ != depBlocks {
-			continue
-		}
-		if t, ok := f.issues[e.to]; ok && t.issue.Status != string(beads.StatusClosed) {
-			return true
-		}
-	}
-	return false
-}
+func (f *Fake) blocked(r *record) bool { return len(f.openBlockers(r)) > 0 }
 
 // Ready returns the open issues that nothing open blocks, leaving out the
 // town's bookkeeping labels and types (constants.NonDispatchableBead*).
@@ -437,12 +427,43 @@ func errNotActors(id, assignee, actor string) error {
 	return fmt.Errorf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override", id, assignee, actor)
 }
 
-// closeRefusal is why bd would refuse to close r without --force, or nil.
-// Callers hold f.mu.
-func (f *Fake) closeRefusal(r *record) error {
+// errBlocked is bd's refusal to close an issue an open issue blocks.
+func errBlocked(id string, by []string) error {
+	return fmt.Errorf("cannot close blocked issue: %s is blocked by %v (use --force to override)", id, by)
+}
+
+// openBlockers lists the issues r depends on ("blocks") that are not
+// closed. Callers hold f.mu.
+func (f *Fake) openBlockers(r *record) []string {
+	var out []string
+	for _, e := range r.deps {
+		if t, ok := f.issues[e.to]; ok && e.typ == depBlocks && t.issue.Status != string(beads.StatusClosed) {
+			out = append(out, e.to)
+		}
+	}
+	return out
+}
+
+// updateCloseRefusal is why bd would refuse to move r to closed through an
+// update without --force: open children or an open blocker. Callers hold
+// f.mu.
+func (f *Fake) updateCloseRefusal(r *record) error {
 	id := r.issue.ID
 	if n := f.openChildren(id); n > 0 {
 		return errOpenChildren(id, n)
+	}
+	if by := f.openBlockers(r); len(by) > 0 {
+		return errBlocked(id, by)
+	}
+	return nil
+}
+
+// closeRefusal is why bd would refuse to close r without --force: an update's
+// refusals, or an assignee other than the actor. Callers hold f.mu.
+func (f *Fake) closeRefusal(r *record) error {
+	id := r.issue.ID
+	if err := f.updateCloseRefusal(r); err != nil {
+		return err
 	}
 	if a := r.issue.Assignee; a != "" && a != f.actor {
 		return errNotActors(id, a, f.actor)
@@ -473,7 +494,8 @@ func (f *Fake) setStatus(r *record, status, reason string) {
 
 // Update applies opts. Like bd it refuses, unless opts.Force, to reassign an
 // in_progress issue another assignee holds, and to close an issue that has
-// open children. (Close's assignee refusal does not apply to an update.) SetLabels replaces the labels; otherwise AddLabels and
+// open children or an open blocker. (Close's assignee refusal does not apply
+// to an update.) SetLabels replaces the labels; otherwise AddLabels and
 // RemoveLabels apply.
 func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 	f.mu.Lock()
@@ -488,8 +510,8 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 			return errClaimHeld(id, r.issue.Assignee)
 		}
 		if opts.Status != nil && *opts.Status == string(beads.StatusClosed) {
-			if n := f.openChildren(id); n > 0 {
-				return errOpenChildren(id, n)
+			if err := f.updateCloseRefusal(r); err != nil {
+				return err
 			}
 		}
 	}
@@ -553,7 +575,8 @@ func (f *Fake) close(reason string, force bool, ids []string) error {
 }
 
 // Close closes ids with bd's default reason, "Closed". An issue with open
-// children, or assigned to someone other than the actor, is refused.
+// children or an open blocker, or assigned to someone other than the actor,
+// is refused.
 func (f *Fake) Close(ids ...string) error { return f.close("", false, ids) }
 
 // CloseWithReason closes ids recording reason, with Close's refusals.

@@ -300,6 +300,20 @@ func contractCloseFence(t *testing.T, c beads.Client) {
 	mustDo(t, "close parent of closed child", c.Close(other.ID))
 	_ = child
 
+	// bd refuses to close an issue an open issue blocks, by close or by
+	// update.
+	blocker := mustCreate(t, c, beads.CreateOptions{Title: "blocker", Priority: -1})
+	blocked := mustCreate(t, c, beads.CreateOptions{Title: "blocked", Priority: -1})
+	mustDo(t, "AddDependency", c.AddDependency(blocked.ID, blocker.ID))
+	if err := c.Close(blocked.ID); err == nil {
+		t.Error("closing an issue with an open blocker succeeded")
+	}
+	if err := c.Update(blocked.ID, beads.UpdateOptions{Status: ptr("closed")}); err == nil {
+		t.Error("Update(status=closed) of an issue with an open blocker succeeded")
+	}
+	mustDo(t, "force close blocked", c.ForceCloseWithReason("forced", blocked.ID))
+	mustDo(t, "close the blocker itself", c.Close(blocker.ID))
+
 	// bd refuses to close an issue assigned to someone other than the
 	// actor. "alice" is never the actor of either implementation.
 	theirs := mustCreate(t, c, beads.CreateOptions{Title: "alice's", Priority: -1})
