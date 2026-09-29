@@ -3,6 +3,7 @@ package convoy
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -31,6 +32,11 @@ type StoreResolver struct {
 	// opened names the stores open produced, so Close can release them.
 	opened map[string]beadsdk.Storage
 
+	// failed remembers a store open could not produce, with its error, for
+	// the life of this resolver: a rig that is down is tried once per gt
+	// close, not once per lookup.
+	failed map[string]error
+
 	mu sync.Mutex
 }
 
@@ -50,6 +56,7 @@ func NewOpeningStoreResolver(townRoot string, open func(name string) (beadsdk.St
 	return &StoreResolver{
 		stores:   make(map[string]beadsdk.Storage),
 		opened:   make(map[string]beadsdk.Storage),
+		failed:   make(map[string]error),
 		townRoot: townRoot,
 		open:     open,
 	}
@@ -71,6 +78,7 @@ func (r *StoreResolver) Close() error {
 		delete(r.stores, name)
 	}
 	r.opened = make(map[string]beadsdk.Storage)
+	r.failed = make(map[string]error)
 	return first
 }
 
@@ -87,32 +95,49 @@ func (r *StoreResolver) storeNamed(name string) beadsdk.Storage {
 // owningStore returns the store holding id, opening it on demand when this
 // resolver was built to, or nil when no store for id is reachable.
 func (r *StoreResolver) owningStore(id string) beadsdk.Storage {
-	name := r.storeForID(id)
+	store, _ := r.storeByName(r.storeForID(id))
+	return store
+}
+
+// storeByName returns the store named name ("hq" or a rig name), opening it
+// on demand when this resolver was built to, or the reason it has none. hq is
+// never opened here: a caller holding a resolver without hq holds the town
+// store itself.
+func (r *StoreResolver) storeByName(name string) (beadsdk.Storage, error) {
+	if r == nil {
+		return nil, fmt.Errorf("no store resolver")
+	}
 	if name == "" {
-		return nil
+		return nil, fmt.Errorf("no route for store")
 	}
 	if store := r.storeNamed(name); store != nil {
-		return store
+		return store, nil
 	}
 	if r.open == nil || name == "hq" {
-		return nil
+		return nil, fmt.Errorf("no open store for %s", name)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// Re-checked under the lock: a concurrent resolution may have opened it.
 	if store := r.stores[name]; store != nil {
-		return store
+		return store, nil
+	}
+	if err := r.failed[name]; err != nil {
+		return nil, err
 	}
 	store, err := r.open(name)
-	if err != nil || store == nil {
-		// Not remembered: the next resolution retries, so a rig store that
-		// opens late is picked up without a restart.
-		return nil
+	if err == nil && store == nil {
+		err = fmt.Errorf("no store for %s", name)
+	}
+	if err != nil {
+		err = fmt.Errorf("opening store for %s: %w", name, err)
+		r.failed[name] = err
+		return nil, err
 	}
 	r.stores[name] = store
 	r.opened[name] = store
-	return store
+	return store, nil
 }
 
 // ResolveIssues fetches fresh issue data for the given IDs, looking up each

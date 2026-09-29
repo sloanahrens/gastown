@@ -2,6 +2,7 @@ package convoy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,8 @@ type fakeRigStore struct {
 	beadsdk.Storage
 	issues map[string]*beadsdk.Issue
 	deps   []*beadsdk.Dependency
+	// readErr, when set, fails GetIssuesByIDs: a rig whose Dolt went away.
+	readErr error
 }
 
 func newFakeRigStore(issues ...*beadsdk.Issue) *fakeRigStore {
@@ -43,6 +46,9 @@ func (s *fakeRigStore) GetIssueComments(context.Context, string) ([]*beadsdk.Com
 }
 
 func (s *fakeRigStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*beadsdk.Issue, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
 	var out []*beadsdk.Issue
 	for _, id := range ids {
 		if iss, ok := s.issues[id]; ok {
@@ -111,6 +117,33 @@ func newXrigTown(t *testing.T, blockerStatus beadsdk.Status) *xrigTown {
 		t.Fatalf("WriteRoutes: %v", err)
 	}
 	return x
+}
+
+// withHQBlocker re-points gt-work's blocker at hq-blk, a town-level bead.
+// Production stores such an edge as the bare ID.
+func (x *xrigTown) withHQBlocker(status beadsdk.Status) *xrigTown {
+	x.hq.issues["hq-blk"] = &beadsdk.Issue{ID: "hq-blk", Title: "hq-blk", Status: status, IssueType: beadsdk.TypeTask}
+	x.gastown.deps = nil
+	x.gastown.edge("gt-work", "hq-blk", "blocks")
+	return x
+}
+
+// closeResolver is the resolver gt close builds: it holds no store up front,
+// never holds hq, and opens a rig's store on first use (close.go). opens
+// counts open calls per rig; failOpen names rigs whose open fails.
+func (x *xrigTown) closeResolver(opens map[string]int, failOpen ...string) *StoreResolver {
+	rigs := map[string]beadsdk.Storage{"gastown": x.gastown, "oag": x.oag}
+	return NewOpeningStoreResolver(x.townRoot, func(name string) (beadsdk.Storage, error) {
+		if opens != nil {
+			opens[name]++
+		}
+		for _, f := range failOpen {
+			if f == name {
+				return nil, errors.New("dial tcp 127.0.0.1:3307: connection refused")
+			}
+		}
+		return rigs[name], nil
+	})
 }
 
 func (x *xrigTown) resolver(withOag bool) *StoreResolver {
@@ -185,7 +218,8 @@ func TestFeedNextReadyIssue_ThirdRigClosedBlockerFeeds(t *testing.T) {
 }
 
 // TestFeedNextReadyIssue_UnresolvableBlockerHolds is the fail-safe ruling: a
-// blocker no rig can answer for counts as blocking, and the log names it.
+// blocker whose rig store is not open counts as blocking, and the log names it
+// as unreadable, not as missing.
 func TestFeedNextReadyIssue_UnresolvableBlockerHolds(t *testing.T) {
 	t.Parallel()
 	x := newXrigTown(t, beadsdk.StatusClosed)
@@ -198,8 +232,119 @@ func TestFeedNextReadyIssue_UnresolvableBlockerHolds(t *testing.T) {
 	if !strings.Contains(slung, "sling gt-sib gastown") {
 		t.Errorf("expected the unblocked sibling gt-sib to be slung, got %q (log %v)", slung, logged)
 	}
-	if !loggedLine(logged, "gt-work", "oag-x", "unresolved") {
+	if !loggedLine(logged, "gt-work", "oag-x", "unreadable") {
+		t.Errorf("expected a log naming the unreadable blocker oag-x of gt-work, got %v", logged)
+	}
+}
+
+// TestFeedNextReadyIssue_DanglingBlockerHolds: the owning rig answers and has
+// no such bead (a hard-deleted blocker leaves its external edge behind). The
+// bead is held and the log says the blocker is unresolved.
+func TestFeedNextReadyIssue_DanglingBlockerHolds(t *testing.T) {
+	t.Parallel()
+	x := newXrigTown(t, beadsdk.StatusClosed)
+	delete(x.oag.issues, "oag-x")
+
+	slung, logged := x.feed(t, x.resolver(true))
+
+	if strings.Contains(slung, "gt-work") {
+		t.Errorf("gt-work's blocker oag-x is gone; it must not be slung, got %q", slung)
+	}
+	if !loggedLine(logged, "gt-work", "oag-x", "unresolved in any rig") {
 		t.Errorf("expected a log naming the unresolved blocker oag-x of gt-work, got %v", logged)
+	}
+}
+
+// TestBlockReason_OwningStoreFailureIsUnreadable (review minor 3): an open or
+// read failure in the blocker's rig is reported as unreadable with the error,
+// not as a blocker no rig has. The bead is held either way.
+func TestBlockReason_OwningStoreFailureIsUnreadable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	x := newXrigTown(t, beadsdk.StatusClosed)
+	reason := blockReason(ctx, x.hq, "gt-work", x.closeResolver(nil, "oag"))
+	if !strings.Contains(reason, "oag-x") || !strings.Contains(reason, "unreadable") || !strings.Contains(reason, "connection refused") {
+		t.Errorf("open failure: reason = %q, want oag-x unreadable with the open error", reason)
+	}
+
+	y := newXrigTown(t, beadsdk.StatusClosed)
+	y.oag.readErr = errors.New("dolt: query timeout")
+	reason = blockReason(ctx, y.hq, "gt-work", y.resolver(true))
+	if !strings.Contains(reason, "oag-x") || !strings.Contains(reason, "unreadable") || !strings.Contains(reason, "query timeout") {
+		t.Errorf("read failure: reason = %q, want oag-x unreadable with the read error", reason)
+	}
+}
+
+// TestBlockReason_HomeRigStoreUnavailableBlocks (review minor 4): with the
+// bead's own rig store missing, the town store has none of its edges, and
+// reading it there would say "not blocked". It blocks, naming the rig.
+func TestBlockReason_HomeRigStoreUnavailableBlocks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	x := newXrigTown(t, beadsdk.StatusClosed)
+
+	daemonNoGastown := NewStoreResolver(x.townRoot, map[string]beadsdk.Storage{"hq": x.hq, "oag": x.oag})
+	if reason := blockReason(ctx, x.hq, "gt-sib", daemonNoGastown); !strings.Contains(reason, "gastown") {
+		t.Errorf("daemon resolver without the gastown store: reason = %q, want a block naming rig gastown", reason)
+	}
+	if reason := blockReason(ctx, x.hq, "gt-sib", x.closeResolver(nil, "gastown")); !strings.Contains(reason, "gastown") || !strings.Contains(reason, "connection refused") {
+		t.Errorf("close resolver failing to open gastown: reason = %q, want a block naming rig gastown and the error", reason)
+	}
+}
+
+// TestStoreResolver_CachesFailedOpen (review minor 5): a rig that failed to
+// open is not re-opened for every lookup within one resolver's life.
+func TestStoreResolver_CachesFailedOpen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	x := newXrigTown(t, beadsdk.StatusClosed)
+	opens := map[string]int{}
+	r := x.closeResolver(opens, "oag")
+
+	for i := 0; i < 3; i++ {
+		if reason := blockReason(ctx, x.hq, "gt-work", r); reason == "" {
+			t.Fatalf("lookup %d: gt-work must be blocked while oag cannot open", i)
+		}
+	}
+	if opens["oag"] != 1 {
+		t.Errorf("oag opened %d times, want 1 (a failed open is remembered for the resolver's life)", opens["oag"])
+	}
+}
+
+// TestFeedNextReadyIssue_HQBlocker (review I1) runs an hq-level blocker
+// through both production resolvers: the daemon's, which holds every store
+// including hq, and gt close's, which holds none and never opens hq (the
+// caller's town store answers for hq). Open holds; closed feeds.
+func TestFeedNextReadyIssue_HQBlocker(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"daemon", "close"} {
+		for _, status := range []beadsdk.Status{beadsdk.StatusOpen, beadsdk.StatusClosed} {
+			kind, status := kind, status
+			t.Run(kind+"/"+string(status), func(t *testing.T) {
+				t.Parallel()
+				x := newXrigTown(t, beadsdk.StatusClosed).withHQBlocker(status)
+				r := x.resolver(true)
+				if kind == "close" {
+					r = x.closeResolver(nil)
+				}
+
+				slung, logged := x.feed(t, r)
+
+				if status == beadsdk.StatusOpen {
+					if strings.Contains(slung, "gt-work") {
+						t.Errorf("gt-work is blocked by open hq-blk; must not be slung, got %q", slung)
+					}
+					if !loggedLine(logged, "gt-work", "hq-blk (open)") {
+						t.Errorf("expected a log naming gt-work blocked by open hq-blk, got %v", logged)
+					}
+					return
+				}
+				if !strings.Contains(slung, "sling gt-work gastown") {
+					t.Errorf("hq-blk is closed; expected gt-work slung, got %q (log %v)", slung, logged)
+				}
+			})
+		}
 	}
 }
 
@@ -210,13 +355,8 @@ func TestFeedNextReadyIssue_UnresolvableBlockerHolds(t *testing.T) {
 func TestFeedNextReadyIssue_OpeningResolverReachesBlockerRig(t *testing.T) {
 	t.Parallel()
 	x := newXrigTown(t, beadsdk.StatusClosed)
-	rigs := map[string]beadsdk.Storage{"gastown": x.gastown, "oag": x.oag}
-	resolver := NewOpeningStoreResolver(x.townRoot, func(name string) (beadsdk.Storage, error) {
-		return rigs[name], nil
-	})
-	resolver.stores["hq"] = x.hq
 
-	slung, logged := x.feed(t, resolver)
+	slung, logged := x.feed(t, x.closeResolver(nil))
 
 	if !strings.Contains(slung, "sling gt-work gastown") {
 		t.Errorf("gt-work's blocker oag-x is closed in oag; expected gt-work slung, got %q (log %v)", slung, logged)

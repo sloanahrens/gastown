@@ -209,15 +209,40 @@ func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, 
 // (gt-j02xy). Each blocker's status is then read in the rig that owns its
 // prefix, falling back to the home store.
 //
-// This fails safe: a blocker no store can answer for, a dependency read that
-// errors, or a store that cannot give raw records all count as blocking. The
-// one exception is no store at all, which is the town-level gap the store
+// This fails safe. Each of these counts as blocking, with a reason naming it:
+//   - the bead's own rig store cannot be reached (reading the town store
+//     instead finds none of its edges and would say "not blocked");
+//   - the dependency records cannot be read, or the store cannot give raw
+//     records at all;
+//   - a blocker's rig store cannot be opened or read ("unreadable");
+//   - no store has the blocker ("unresolved in any rig").
+//
+// The one exception is no store at all, which is the town-level gap the store
 // alert reports (FeedHold makes the same call).
+//
+// store is the caller's town store. It answers for hq when the resolver holds
+// no hq store, which is how gt close builds its resolver.
 func blockReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
+	storeFor := func(name string) (beadsdk.Storage, error) {
+		if resolver == nil {
+			return store, nil
+		}
+		found, err := resolver.storeByName(name)
+		if found != nil {
+			return found, nil
+		}
+		if name == "hq" && store != nil {
+			return store, nil
+		}
+		return nil, err
+	}
+
 	home := store
 	if resolver != nil {
-		if owner := resolver.owningStore(issueID); owner != nil {
-			home = owner
+		name := resolver.storeForID(issueID)
+		var err error
+		if home, err = storeFor(name); err != nil {
+			return fmt.Sprintf("store of rig %s unavailable (%s)", name, util.FirstLine(err.Error()))
 		}
 	}
 	if home == nil {
@@ -235,40 +260,72 @@ func blockReason(ctx context.Context, store beadsdk.Storage, issueID string, res
 
 	type blocker struct{ id, depType string }
 	var blockers []blocker
-	var ids []string
 	for _, d := range records {
 		depType := string(d.Type)
 		if !blockingDepTypes[depType] {
 			continue
 		}
-		id := extractIssueID(d.DependsOnID)
-		blockers = append(blockers, blocker{id: id, depType: depType})
-		ids = append(ids, id)
+		blockers = append(blockers, blocker{id: extractIssueID(d.DependsOnID), depType: depType})
 	}
 	if len(blockers) == 0 {
 		return ""
 	}
 
-	found := make(map[string]*beadsdk.Issue, len(ids))
-	if resolver != nil {
-		for id, iss := range resolver.ResolveIssues(ctx, ids) {
-			found[id] = iss
-		}
-	}
-	var missing []string
-	for _, id := range ids {
-		if found[id] == nil {
-			missing = append(missing, id)
-		}
-	}
-	if len(missing) > 0 {
-		local, err := home.GetIssuesByIDs(ctx, missing)
+	found := make(map[string]*beadsdk.Issue, len(blockers))
+	readErr := make(map[string]string)
+	lookup := func(s beadsdk.Storage, ids []string) error {
+		issues, err := s.GetIssuesByIDs(ctx, ids)
 		if err != nil {
-			return "blocker status unreadable (" + util.FirstLine(err.Error()) + ")"
+			return err
 		}
-		for _, iss := range local {
+		for _, iss := range issues {
 			if iss != nil {
 				found[iss.ID] = iss
+			}
+		}
+		return nil
+	}
+
+	// Each blocker is read in the store that owns its prefix.
+	byStore := make(map[string][]string)
+	for _, b := range blockers {
+		name := ""
+		if resolver != nil {
+			name = resolver.storeForID(b.id)
+		}
+		byStore[name] = append(byStore[name], b.id)
+	}
+	for name, ids := range byStore {
+		owner, err := storeFor(name)
+		if err == nil && owner == nil {
+			err = fmt.Errorf("no store for %s", name)
+		}
+		if err == nil {
+			err = lookup(owner, ids)
+		}
+		if err != nil {
+			for _, id := range ids {
+				readErr[id] = util.FirstLine(err.Error())
+			}
+		}
+	}
+	// A blocker its owner did not produce may still sit beside the bead or in
+	// the town store.
+	for _, fallback := range []beadsdk.Storage{home, store} {
+		var missing []string
+		for _, b := range blockers {
+			if found[b.id] == nil {
+				missing = append(missing, b.id)
+			}
+		}
+		if len(missing) == 0 || fallback == nil {
+			continue
+		}
+		if err := lookup(fallback, missing); err != nil {
+			for _, id := range missing {
+				if readErr[id] == "" {
+					readErr[id] = util.FirstLine(err.Error())
+				}
 			}
 		}
 	}
@@ -276,6 +333,9 @@ func blockReason(ctx context.Context, store beadsdk.Storage, issueID string, res
 	for _, b := range blockers {
 		iss := found[b.id]
 		if iss == nil {
+			if msg := readErr[b.id]; msg != "" {
+				return fmt.Sprintf("%s blocker %s unreadable (%s)", b.depType, b.id, msg)
+			}
 			return fmt.Sprintf("%s blocker %s unresolved in any rig", b.depType, b.id)
 		}
 		switch status := string(iss.Status); status {
