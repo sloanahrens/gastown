@@ -151,16 +151,45 @@ type Manager struct {
 	git      *git.Git
 	beads    *beads.Beads
 	namePool *NamePool
-	tmux     *tmux.Tmux
+	// tmux is nil when the caller has no tmux; NewManager never stores a
+	// typed-nil *tmux.Tmux here, so the nil checks below stay meaningful.
+	tmux     sessionProbe
 	townRoot string // Computed once at construction; used by agentBeadID for deterministic IDs
 	// spawnGraceWindow is the window a dispatched-but-not-yet-live polecat is
 	// read as spawning rather than stalled (see SpawnGrace). Resolved once at
 	// construction from the town's witness thresholds.
 	spawnGraceWindow time.Duration
+	// afterNamedReserved, when set, runs once AddNamedWithOptions has
+	// reserved the name and released the pool lock, before the worktree is
+	// built: the window a concurrent allocation would otherwise race into.
+	afterNamedReserved func(name string)
 }
+
+// sessionProbe is the tmux surface a Manager uses: session existence, the
+// kill, and the liveness probes behind isSessionProcessDead. *tmux.Tmux
+// provides it.
+type sessionProbe interface {
+	HasSession(name string) (bool, error)
+	KillSessionWithProcesses(name string) error
+	IsAgentAliveChecked(session string) (bool, error)
+	GetPanePID(target string) (string, error)
+}
+
+var _ sessionProbe = (*tmux.Tmux)(nil)
 
 // NewManager creates a new polecat manager.
 func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux) *Manager {
+	var probe sessionProbe
+	if t != nil {
+		probe = t
+	}
+	return newManager(r, g, probe, nil)
+}
+
+// newManager is NewManager with its collaborators injected: tmux answers the
+// session probes (nil for none), and bd, when non-nil, answers every bd call
+// the manager's beads wrapper makes instead of the bd on PATH.
+func newManager(r *rig.Rig, g *git.Git, t sessionProbe, bd beads.BDRunner) *Manager {
 	// Use the resolved beads directory to find where bd commands should run.
 	// For tracked beads: rig/.beads/redirect -> mayor/rig/.beads, so use mayor/rig
 	// For local beads: rig/.beads is the database, so use rig root
@@ -216,7 +245,7 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux) *Manager {
 	return &Manager{
 		rig:              r,
 		git:              g,
-		beads:            beads.NewWithBeadsDir(beadsPath, resolvedBeads),
+		beads:            beads.NewWithBeadsDirAndRunner(beadsPath, resolvedBeads, bd),
 		namePool:         pool,
 		tmux:             t,
 		townRoot:         townRoot,
@@ -747,11 +776,6 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 	return name, p, nil
 }
 
-// afterNamedPolecatReserved is a test seam: it runs once AddNamedWithOptions
-// has reserved the name and released the pool lock, before the worktree is
-// built — the window a concurrent allocation would otherwise race into.
-var afterNamedPolecatReserved = func(name string) {}
-
 // AddNamedWithOptions creates a polecat by an operator-chosen name (gt sling
 // <bead> <rig>/<name> --create, gt-2w4f9). It reserves the name the way
 // AllocateAndAdd does — directory created under the pool lock — so a
@@ -802,7 +826,9 @@ func (m *Manager) AddNamedWithOptions(name string, opts AddOptions) (*Polecat, e
 
 	// The directory now reserves the name: reconcilePoolInternal sees it.
 	_ = poolLock.Unlock()
-	afterNamedPolecatReserved(name)
+	if m.afterNamedReserved != nil {
+		m.afterNamedReserved(name)
+	}
 
 	p, err := m.addWithOptionsLocked(name, opts, polecatDir)
 	_ = polecatLock.Unlock()
@@ -2255,7 +2281,7 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 //
 // Returns true only when we can confirm the process is dead, not on transient
 // failures (gt-kncti: permission denied false positives).
-func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) bool {
+func isSessionProcessDead(t sessionProbe, sessionName string, townRoot string) bool {
 	// Primary: heartbeat-based liveness check (gt-qjtq ZFC fix).
 	if townRoot != "" {
 		stale, exists := IsSessionHeartbeatStale(townRoot, sessionName)
@@ -2266,7 +2292,7 @@ func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) boo
 			if t == nil {
 				return false
 			}
-			alive, err := sessionAgentAlive(t, sessionName)
+			alive, err := t.IsAgentAliveChecked(sessionName)
 			if err != nil {
 				return false
 			}
@@ -2303,10 +2329,6 @@ func isSessionProcessDead(t *tmux.Tmux, sessionName string, townRoot string) boo
 		return true
 	}
 	return false
-}
-
-var sessionAgentAlive = func(t *tmux.Tmux, sessionName string) (bool, error) {
-	return t.IsAgentAliveChecked(sessionName)
 }
 
 // pendingMaxAge is how long a .pending reservation marker may exist before
@@ -3291,7 +3313,7 @@ func (m *Manager) polecatSessionState(name string) (running bool, stale bool) {
 		return false, false
 	}
 
-	return true, NewSessionManager(m.tmux, m.rig).isSessionStale(sessionName)
+	return true, isSessionProcessDead(m.tmux, sessionName, filepath.Dir(m.rig.Path))
 }
 
 func isCurrentHookedIssueForAssignee(issue *beads.Issue, assignee string) bool {

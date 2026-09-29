@@ -2,15 +2,11 @@ package polecat
 
 import (
 	"errors"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -73,6 +69,7 @@ func (f *survivalFixture) push(t *testing.T, refs ...string) {
 const survivalIssue = "gt-elvf4"
 
 func TestSurvivingWorkForIssue(t *testing.T) {
+	t.Parallel()
 	const (
 		older = "polecat/basalt/gt-elvf4+mu5wzd6q"
 		newer = "polecat/agate/gt-elvf4+mu72g5cz"
@@ -216,37 +213,22 @@ func assertSurvivor(t *testing.T, rigRoot, want string) {
 	}
 }
 
-// installWorkBeadBd is a bd stub for unassignWorkBeads: `list` returns one
-// in_progress work bead assigned to gastown/polecats/basalt, and every call's
-// argv is appended to the returned log.
-func installWorkBeadBd(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX bd stub")
-	}
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "bd.log")
-	script := `#!/bin/sh
-echo "$@" >> '` + logPath + `'
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    list) echo '[{"id":"gt-elvf4","title":"work","status":"in_progress","assignee":"gastown/polecats/basalt","issue_type":"task"}]'; exit 0 ;;
-    *) exit 0 ;;
-  esac
-done
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
+// newWorkBeadBd is the bd unassignWorkBeads sees: `list` returns one
+// in_progress work bead assigned to gastown/polecats/basalt, and every other
+// call succeeds silently.
+func newWorkBeadBd() *fakeBd {
+	return &fakeBd{answer: func(cmd string, _ []string) string {
+		if cmd == "list" {
+			return `[{"id":"gt-elvf4","title":"work","status":"in_progress","assignee":"gastown/polecats/basalt","issue_type":"task"}]`
+		}
+		return ""
+	}}
 }
 
 // Polecat removal gives a hooked bead back only when its work does not
 // survive, and then only through the guarded write (gt-vm5g4).
 func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
+	t.Parallel()
 	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
 	for _, tc := range []struct {
 		name        string
@@ -265,16 +247,16 @@ func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			f := newSurvivalFixture(t)
 			tc.setup(t, f)
-			logPath := installWorkBeadBd(t)
+			bd := newWorkBeadBd()
 
-			mgr := NewManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil)
+			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil, bd)
 			mgr.unassignWorkBeads("basalt")
 
-			logged, _ := os.ReadFile(logPath)
 			var releases []string
-			for _, line := range strings.Split(string(logged), "\n") {
+			for _, line := range bd.argvs() {
 				if strings.Contains(line, "--status=open") {
 					releases = append(releases, line)
 				}
@@ -292,77 +274,17 @@ func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
 	}
 }
 
-// An https origin that stalls must not hang the predicate: over http git
-// forks git-remote-http, and the bounded remote calls kill that helper along
-// with git, so the answer comes back "unknown" near the bound (gt-vm5g4).
-func TestSurvivingWorkStallingHTTPOriginIsUnknownAndBounded(t *testing.T) {
-	for _, k := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"} {
-		t.Setenv(k, "")
-	}
-	t.Setenv("GIT_TERMINAL_PROMPT", "0")
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// TestNewWorkSurvivalUsesTheRemoteQueryTimeout is the wiring guard for the
+// fetch bound: the exported constructor bounds every remote call by git's
+// RemoteQueryTimeout, the bound the stalling-origin integration test proves.
+func TestNewWorkSurvivalUsesTheRemoteQueryTimeout(t *testing.T) {
+	t.Parallel()
+	f := newSurvivalFixture(t)
+	w, err := NewWorkSurvival(f.rigRoot)
 	if err != nil {
-		t.Skipf("no loopback listener: %v", err)
+		t.Fatal(err)
 	}
-	var (
-		mu   sync.Mutex
-		held []net.Conn
-	)
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			held = append(held, c) // accept, then say nothing
-			mu.Unlock()
-		}
-	}()
-	t.Cleanup(func() {
-		_ = ln.Close()
-		mu.Lock()
-		defer mu.Unlock()
-		for _, c := range held {
-			_ = c.Close()
-		}
-	})
-	const bound = time.Second
-	prev := workSurvivalFetchTimeout
-	workSurvivalFetchTimeout = bound
-	t.Cleanup(func() { workSurvivalFetchTimeout = prev })
-	stallURL := "http://" + ln.Addr().String() + "/repo.git"
-
-	for _, tc := range []struct {
-		name       string
-		localWork  bool
-		remoteHits int // stalled remote calls before the answer: ls-remote, then the base fetch
-	}{
-		{name: "no local candidate", remoteHits: 1},
-		{name: "local candidate needs the base refresh", localWork: true, remoteHits: 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newSurvivalFixture(t)
-			if tc.localWork {
-				branch := "polecat/basalt/" + survivalIssue + "+mu5wzd6q"
-				f.branchWithWork(t, branch, "work.txt")
-				f.push(t, branch)
-				runGit(t, f.bare, "fetch", "-q", "origin", "+refs/heads/*:refs/heads/*")
-			}
-			runGit(t, f.bare, "remote", "set-url", "origin", stallURL)
-			start := time.Now()
-			got, err := SurvivingWorkForIssue(f.rigRoot, survivalIssue)
-			elapsed := time.Since(start)
-			t.Logf("returned in %v", elapsed.Round(10*time.Millisecond))
-			if err == nil {
-				t.Fatalf("want unknown (error) from a stalling origin, got branch %q", got)
-			}
-			if !strings.Contains(err.Error(), "timed out") {
-				t.Fatalf("want a timeout in the unknown answer, got %v", err)
-			}
-			if limit := time.Duration(tc.remoteHits)*bound + 8*time.Second; elapsed > limit {
-				t.Fatalf("predicate took %v, limit %v", elapsed, limit)
-			}
-		})
+	if w.fetchTimeout != git.RemoteQueryTimeout {
+		t.Fatalf("fetchTimeout = %v, want git.RemoteQueryTimeout (%v)", w.fetchTimeout, git.RemoteQueryTimeout)
 	}
 }

@@ -10,6 +10,7 @@ import (
 )
 
 func TestFormatGeneratedBranchName_ActionCompatible(t *testing.T) {
+	t.Parallel()
 	branch := FormatGeneratedBranchName("alpha", "gt-pin-bd-metadata", "mk123456")
 	if strings.Contains(branch, "@") {
 		t.Fatalf("FormatGeneratedBranchName() = %q, must not contain @", branch)
@@ -25,6 +26,7 @@ func TestFormatGeneratedBranchName_ActionCompatible(t *testing.T) {
 }
 
 func TestParseBranchName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		branch        string
@@ -104,6 +106,7 @@ func TestParseBranchName(t *testing.T) {
 }
 
 func TestBranchNameMetaGeneratedAt(t *testing.T) {
+	t.Parallel()
 	now := time.Now().Truncate(time.Millisecond)
 	suffix := strconv.FormatInt(now.UnixMilli(), 36)
 
@@ -157,6 +160,7 @@ func TestBranchNameMetaGeneratedAt(t *testing.T) {
 }
 
 func TestParseGeneratedBranchNameRejectsRawDashedIssues(t *testing.T) {
+	t.Parallel()
 	rejects := []string{
 		"polecat/alpha/gt-pin-bd-metadata",
 		"polecat/alpha/gt-jns7.1-mk123456",

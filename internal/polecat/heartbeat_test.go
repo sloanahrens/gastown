@@ -7,11 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func TestTouchAndReadSessionHeartbeat(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// No heartbeat initially
@@ -40,6 +39,7 @@ func TestTouchAndReadSessionHeartbeat(t *testing.T) {
 }
 
 func TestTouchSessionHeartbeatWithState(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	TouchSessionHeartbeatWithState(townRoot, "gt-test-state", HeartbeatExiting, "gt done", "gt-abc123")
@@ -61,6 +61,7 @@ func TestTouchSessionHeartbeatWithState(t *testing.T) {
 }
 
 func TestSessionHeartbeat_EffectiveState(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		state HeartbeatState
@@ -84,6 +85,7 @@ func TestSessionHeartbeat_EffectiveState(t *testing.T) {
 }
 
 func TestSessionHeartbeat_IsV2(t *testing.T) {
+	t.Parallel()
 	// v1 heartbeat (no state)
 	v1 := &SessionHeartbeat{Timestamp: time.Now()}
 	if v1.IsV2() {
@@ -98,6 +100,7 @@ func TestSessionHeartbeat_IsV2(t *testing.T) {
 }
 
 func TestIsSessionHeartbeatStale_NoFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	stale, exists := IsSessionHeartbeatStale(townRoot, "nonexistent")
@@ -110,6 +113,7 @@ func TestIsSessionHeartbeatStale_NoFile(t *testing.T) {
 }
 
 func TestIsSessionHeartbeatStale_Fresh(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	TouchSessionHeartbeat(townRoot, "gt-test-fresh")
@@ -124,6 +128,7 @@ func TestIsSessionHeartbeatStale_Fresh(t *testing.T) {
 }
 
 func TestIsSessionHeartbeatStale_Old(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Write a heartbeat with an old timestamp
@@ -148,6 +153,7 @@ func TestIsSessionHeartbeatStale_Old(t *testing.T) {
 }
 
 func TestRemoveSessionHeartbeat(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	TouchSessionHeartbeat(townRoot, "gt-test-remove")
@@ -169,12 +175,14 @@ func TestRemoveSessionHeartbeat(t *testing.T) {
 }
 
 func TestRemoveSessionHeartbeat_NoopOnMissing(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// Should not panic or error on missing file
 	RemoveSessionHeartbeat(townRoot, "nonexistent")
 }
 
 func TestIsSessionProcessDead_HeartbeatFresh(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	sessionName := "gt-test-hb-alive"
 
@@ -206,9 +214,8 @@ func writeStaleSessionHeartbeat(t *testing.T, townRoot, sessionName string) {
 }
 
 func TestIsSessionProcessDead_HeartbeatStaleUsesAgentLiveness(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	oldSessionAgentAlive := sessionAgentAlive
-	t.Cleanup(func() { sessionAgentAlive = oldSessionAgentAlive })
 
 	tests := []struct {
 		name     string
@@ -223,30 +230,27 @@ func TestIsSessionProcessDead_HeartbeatStaleUsesAgentLiveness(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			sessionName := "gt-test-hb-stale-" + tt.name
 			writeStaleSessionHeartbeat(t, townRoot, sessionName)
 
-			called := false
-			sessionAgentAlive = func(_ *tmux.Tmux, gotSession string) (bool, error) {
-				called = true
-				if gotSession != sessionName {
-					t.Fatalf("liveness checked session %q, want %q", gotSession, sessionName)
-				}
-				return tt.alive, tt.aliveErr
-			}
+			tm := newFakeProbe()
+			tm.setAlive(sessionName, tt.alive)
+			tm.aliveErr = tt.aliveErr
 
-			dead := isSessionProcessDead(tmux.NewTmuxWithSocket("gt-unused-test-socket"), sessionName, townRoot)
+			dead := isSessionProcessDead(tm, sessionName, townRoot)
 			if dead != tt.wantDead {
 				t.Fatalf("isSessionProcessDead() = %v, want %v", dead, tt.wantDead)
 			}
-			if !called {
-				t.Fatal("expected stale heartbeat to check agent liveness")
+			if got := tm.probedSessions(); len(got) != 1 || got[0] != sessionName {
+				t.Fatalf("liveness probed %v, want exactly [%s]", got, sessionName)
 			}
 		})
 	}
 }
 
 func TestIsSessionProcessDead_HeartbeatStaleWithoutTmuxFailsClosed(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	sessionName := "gt-test-hb-stale-no-tmux"
 	writeStaleSessionHeartbeat(t, townRoot, sessionName)
@@ -258,6 +262,7 @@ func TestIsSessionProcessDead_HeartbeatStaleWithoutTmuxFailsClosed(t *testing.T)
 }
 
 func TestIsSessionProcessDead_EmptyTownRoot(t *testing.T) {
+	t.Parallel()
 	// With empty townRoot, heartbeat check is skipped entirely.
 	// This tests backward compatibility when townRoot isn't available.
 	// We can't test the full PID fallback without a real tmux session,
@@ -276,6 +281,7 @@ func TestIsSessionProcessDead_EmptyTownRoot(t *testing.T) {
 }
 
 func TestReadSessionHeartbeat_V1BackwardsCompat(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Write a v1 heartbeat (timestamp only, no state field)
@@ -340,6 +346,7 @@ func writeHeartbeat(t *testing.T, townRoot, sessionName string, hb SessionHeartb
 // stop. Dropping the ticker (keeping only the first write) fails the second;
 // dropping the stop path fails the third.
 func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	sessionName := "myr-mycat"
 	interval := 20 * time.Millisecond
@@ -426,6 +433,7 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 // Like its sibling above, this is a bound, not a tolerance — it does not sleep
 // past the race, it makes the race unable to happen.
 func TestStartHeartbeatKeepAlive_StopIsABarrier(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	sessionName := "myr-barrier"
 	const interval = 250 * time.Microsecond
@@ -458,6 +466,7 @@ func TestStartHeartbeatKeepAlive_StopIsABarrier(t *testing.T) {
 // session to renew (crew/dog sessions, or a run with GT_SESSION unset): the
 // helper must return a usable stop and must not invent a heartbeat file.
 func TestStartHeartbeatKeepAlive_NoIdentityIsNoop(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	for _, tc := range []struct{ name, townRoot, session string }{
@@ -477,6 +486,7 @@ func TestStartHeartbeatKeepAlive_NoIdentityIsNoop(t *testing.T) {
 }
 
 func TestReadSessionHeartbeat_V2AllStates(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	dir := filepath.Join(townRoot, ".runtime", "heartbeats")

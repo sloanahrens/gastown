@@ -45,6 +45,7 @@ func assertStillParked(t *testing.T, mgr *Manager, name string) {
 // that honours the marker then ignored the new session's crash. The parked
 // slot sorts first, so without the gate it is the one picked.
 func TestFindIdlePolecat_SkipsParkedPolecat(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	addCleanIdlePolecat(t, mgr, "alpha")
 	addCleanIdlePolecat(t, mgr, "bravo")
@@ -67,6 +68,7 @@ func TestFindIdlePolecat_SkipsParkedPolecat(t *testing.T) {
 // there is nothing to reuse, so the sling falls back to allocating a new
 // polecat exactly as it does with an empty pool.
 func TestFindIdlePolecat_AllParkedYieldsNone(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	addCleanIdlePolecat(t, mgr, "alpha")
 	addCleanIdlePolecat(t, mgr, "bravo")
@@ -88,6 +90,7 @@ func TestFindIdlePolecat_AllParkedYieldsNone(t *testing.T) {
 // the same verdict, so a parked slot must not count as reusable capacity, and
 // the refusal must say why.
 func TestReuseDecisionForPolecat_ParkedNamesTheReason(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	addCleanIdlePolecat(t, mgr, "alpha")
 
@@ -110,6 +113,7 @@ func TestReuseDecisionForPolecat_ParkedNamesTheReason(t *testing.T) {
 // as "allocate new"), leaves the marker in place, and leaves the worktree on
 // its old branch.
 func TestReuseIdlePolecat_RefusesParkedPolecat(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	p := addCleanIdlePolecat(t, mgr, "alpha")
 	branchBefore, err := git.NewGit(p.ClonePath).CurrentBranch()
@@ -143,6 +147,7 @@ func TestReuseIdlePolecat_RefusesParkedPolecat(t *testing.T) {
 // for it), while ErrPolecatNeedsRecovery still matches so the unnamed sling
 // keeps allocating a new polecat.
 func TestReuseIdlePolecat_ParkedRefusalIsDistinguishable(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	addCleanIdlePolecat(t, mgr, "alpha")
 	parkPolecat(t, mgr, "alpha")
@@ -160,6 +165,7 @@ func TestReuseIdlePolecat_ParkedRefusalIsDistinguishable(t *testing.T) {
 // still blocks reuse (fail closed), but the refusal says the marker could not
 // be read instead of passing for an ordinary park.
 func TestParkedReuseBlocker_UnreadableMarkerSurfacesTheError(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	addCleanIdlePolecat(t, mgr, "alpha")
 	path := agentpause.FilePath(mgr.townRoot, mgr.rig.Name, constants.RolePolecat, "alpha")

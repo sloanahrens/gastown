@@ -25,6 +25,7 @@ func (f fakeActiveMRReader) Show(issueID string) (*beads.Issue, error) {
 }
 
 func TestAssessActiveMR(t *testing.T) {
+	t.Parallel()
 	reader := fakeActiveMRReader{issues: map[string]*beads.Issue{
 		"mr-open":        &beads.Issue{ID: "mr-open", Status: "open"},
 		"mr-closed":      &beads.Issue{ID: "mr-closed", Status: "closed"},
@@ -71,6 +72,7 @@ func TestAssessActiveMR(t *testing.T) {
 // when the work it carried is independently proven to be on origin/main, and a
 // live MR is decided without ever consulting that evidence.
 func TestAssessActiveMRWithLandedEvidence(t *testing.T) {
+	t.Parallel()
 	reader := fakeActiveMRReader{issues: map[string]*beads.Issue{
 		"mr-open":     {ID: "mr-open", Status: "open"},
 		"mr-rejected": {ID: "mr-rejected", Status: "closed"},
@@ -210,6 +212,7 @@ func TestAssessActiveMRWithLandedEvidence(t *testing.T) {
 // did not have. A closed MR whose *source* cannot be read is a different case:
 // the MR itself is verifiably closed, so landed work is allowed to settle it.
 func TestAssessActiveMRWithLandedEvidenceLookupErrorDoesNotProbe(t *testing.T) {
+	t.Parallel()
 	reader := fakeActiveMRReader{
 		issues: map[string]*beads.Issue{"gt-closed": {ID: "gt-closed", Status: "closed"}},
 		errs:   map[string]error{"mr-error": errors.New("bd exploded")},
@@ -236,6 +239,7 @@ func TestAssessActiveMRWithLandedEvidenceLookupErrorDoesNotProbe(t *testing.T) {
 }
 
 func TestAssessActiveMRLookupErrorsFailClosed(t *testing.T) {
+	t.Parallel()
 	reader := fakeActiveMRReader{
 		issues: map[string]*beads.Issue{"gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}},
 		errs:   map[string]error{"mr-error": errors.New("bd exploded"), "gt-error": errors.New("bd exploded")},
@@ -251,6 +255,7 @@ func TestAssessActiveMRLookupErrorsFailClosed(t *testing.T) {
 }
 
 func TestActiveMRRemovalBlockerUsesActiveMRPolicy(t *testing.T) {
+	t.Parallel()
 	reader := fakeActiveMRReader{issues: map[string]*beads.Issue{
 		"mr-open":     {ID: "mr-open", Status: "open"},
 		"mr-progress": {ID: "mr-progress", Status: "in_progress"},
@@ -291,6 +296,7 @@ func TestActiveMRRemovalBlockerUsesActiveMRPolicy(t *testing.T) {
 }
 
 func TestActiveMRRemovalBlockerLookupErrorsFailClosed(t *testing.T) {
+	t.Parallel()
 	reader := fakeActiveMRReader{
 		issues: map[string]*beads.Issue{"gt-closed": {ID: "gt-closed", Status: "closed"}},
 		errs:   map[string]error{"mr-error": errors.New("bd exploded")},

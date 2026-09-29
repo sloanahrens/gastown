@@ -228,3 +228,17 @@ func TestManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing.T) {
 		t.Fatalf("FindIdlePolecat() = %q, want nil while session %s needs review", idle.Name, sessionName)
 	}
 }
+
+// The AddWithOptions file-layout tests against a real bd on the test Dolt
+// container; the unit tier runs the same checks against the fake bd.
+func TestIntegrationAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
+	checkAddWithOptions_NoPrimeMDCreatedLocally(t, true)
+}
+
+func TestIntegrationAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
+	checkAddWithOptions_NoFilesAddedToRepo(t, true)
+}
+
+func TestIntegrationAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
+	checkAddWithOptions_SettingsInstalledInPolecatsDir(t, true)
+}

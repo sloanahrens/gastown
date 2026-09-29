@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -690,7 +691,11 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 // This happens when the agent crashes during startup but tmux keeps the dead pane.
 // Delegates to isSessionProcessDead to avoid duplicating process-check logic (gt-qgzj1h).
 func (m *SessionManager) isSessionStale(sessionID string) bool {
-	return isSessionProcessDead(m.tmux, sessionID, filepath.Dir(m.rig.Path))
+	var probe sessionProbe
+	if m.tmux != nil {
+		probe = m.tmux
+	}
+	return isSessionProcessDead(probe, sessionID, filepath.Dir(m.rig.Path))
 }
 
 // Stop terminates a polecat session.
@@ -778,6 +783,12 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 // time.Local (not time.Parse, which defaults to UTC) or the recovered instant is
 // off by the machine's UTC offset — see gt-jy5.
 func parseSessionCreatedTime(created string) time.Time {
+	return parseSessionCreatedTimeIn(created, time.Local)
+}
+
+// parseSessionCreatedTimeIn is parseSessionCreatedTime for a machine whose
+// local zone is loc.
+func parseSessionCreatedTimeIn(created string, loc *time.Location) time.Time {
 	formats := []string{
 		"2006-01-02 15:04:05",
 		"Mon Jan 2 15:04:05 2006",
@@ -786,7 +797,7 @@ func parseSessionCreatedTime(created string) time.Time {
 		time.UnixDate,
 	}
 	for _, format := range formats {
-		if t, err := time.ParseInLocation(format, created, time.Local); err == nil {
+		if t, err := time.ParseInLocation(format, created, loc); err == nil {
 			return t
 		}
 	}
@@ -974,6 +985,22 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 // Non-fatal: if verification fails or times out, the session is left running.
 // The witness zombie patrol will eventually detect and handle truly idle polecats.
 func (m *SessionManager) verifyStartupNudgeDelivery(sessionID string, rc *config.RuntimeConfig, retryContent string) {
+	verifyStartupNudge(m.tmux, clockwork.NewRealClock(), filepath.Dir(m.rig.Path), sessionID, rc, retryContent)
+}
+
+// startupNudgeTmux is the tmux surface verifyStartupNudge drives. *tmux.Tmux
+// provides it.
+type startupNudgeTmux interface {
+	HasSession(name string) (bool, error)
+	IsIdle(session string) bool
+	NudgeSession(session, message string) error
+}
+
+var _ startupNudgeTmux = (*tmux.Tmux)(nil)
+
+// verifyStartupNudge is verifyStartupNudgeDelivery against tm, waiting on
+// clk, with thresholds read from townRoot's operational config.
+func verifyStartupNudge(tm startupNudgeTmux, clk clockwork.Clock, townRoot, sessionID string, rc *config.RuntimeConfig, retryContent string) {
 	// Only verify for agents with prompt detection. Without ReadyPromptPrefix,
 	// we can't distinguish "idle at prompt" from "busy processing".
 	if rc == nil || rc.Tmux == nil || rc.Tmux.ReadyPromptPrefix == "" {
@@ -983,7 +1010,6 @@ func (m *SessionManager) verifyStartupNudgeDelivery(sessionID string, rc *config
 	// Use configurable thresholds from operational config so operators can tune
 	// via settings/config.json without rebuilding. Both fall back to compiled-in
 	// defaults when no config is present. (Re-wired after revert of #3100.)
-	townRoot := filepath.Dir(m.rig.Path)
 	opCfg := config.LoadOperationalConfig(townRoot)
 	sessionCfg := opCfg.GetSessionConfig()
 	verifyDelay := sessionCfg.StartupNudgeVerifyDelayD()
@@ -995,10 +1021,10 @@ func (m *SessionManager) verifyStartupNudgeDelivery(sessionID string, rc *config
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Wait for the agent to process the nudge before checking.
-		time.Sleep(verifyDelay)
+		clk.Sleep(verifyDelay)
 
 		// Check if session is still alive
-		running, err := m.tmux.HasSession(sessionID)
+		running, err := tm.HasSession(sessionID)
 		if err != nil || !running {
 			return // Session died, nothing to verify
 		}
@@ -1008,14 +1034,14 @@ func (m *SessionManager) verifyStartupNudgeDelivery(sessionID string, rc *config
 		// running tools, generating a response), the status bar shows the busy
 		// indicator and IsIdle returns false — even though ❯ may still be
 		// visible in the pane from before Claude started output.
-		if !m.tmux.IsIdle(sessionID) {
+		if !tm.IsIdle(sessionID) {
 			return // Agent is busy — nudge was received and is being processed
 		}
 
 		// Agent is truly idle (no busy indicator, prompt visible) — nudge was likely lost. Retry.
 		fmt.Fprintf(os.Stderr, "[startup-nudge] attempt %d/%d: agent %s idle at prompt, retrying nudge\n",
 			attempt, maxRetries, sessionID)
-		if err := m.tmux.NudgeSession(sessionID, retryContent); err != nil {
+		if err := tm.NudgeSession(sessionID, retryContent); err != nil {
 			fmt.Fprintf(os.Stderr, "[startup-nudge] retry nudge failed for %s: %v\n", sessionID, err)
 			return
 		}
@@ -1023,7 +1049,7 @@ func (m *SessionManager) verifyStartupNudgeDelivery(sessionID string, rc *config
 
 	// If we exhausted retries and the agent is still idle, log a warning.
 	// The witness zombie patrol will handle this case.
-	if m.tmux.IsIdle(sessionID) {
+	if tm.IsIdle(sessionID) {
 		fmt.Fprintf(os.Stderr, "[startup-nudge] WARNING: agent %s still idle after %d nudge retries\n",
 			sessionID, maxRetries)
 	}

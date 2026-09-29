@@ -70,6 +70,7 @@ func runLiveGit(t *testing.T, dir string, args ...string) {
 // from, and fails closed rather than reporting a clean worktree when it cannot
 // measure at all.
 func TestProbeLiveGitState(t *testing.T) {
+	t.Parallel()
 	t.Run("clean worktree is measured live and clean", func(t *testing.T) {
 		got := ProbeLiveGitState(initLiveGitRepo(t))
 		if got.Source != GitStateSourceLive {
@@ -181,6 +182,7 @@ func TestProbeLiveGitState(t *testing.T) {
 // The verdict re-derives from the live probe; the recorded cleanup_status is a
 // hint that can only ever make the verdict stricter, never cleaner.
 func TestDecideWorkstateRedrivesGitFromLiveProbe(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		in               WorkstateInput
@@ -269,6 +271,7 @@ func TestDecideWorkstateRedrivesGitFromLiveProbe(t *testing.T) {
 }
 
 func TestRecordedCleanupBlocks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		status CleanupStatus

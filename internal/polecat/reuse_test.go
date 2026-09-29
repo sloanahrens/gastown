@@ -3,6 +3,7 @@ package polecat
 import "testing"
 
 func TestDecideSlotReuse(t *testing.T) {
+	t.Parallel()
 	base := SlotReuseInput{State: StateIdle, CleanupStatus: CleanupClean}
 	tests := []struct {
 		name   string

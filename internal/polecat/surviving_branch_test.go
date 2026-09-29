@@ -9,6 +9,7 @@ import (
 )
 
 func TestMatchSurvivingBranches(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		branches []string
@@ -115,6 +116,7 @@ func TestMatchSurvivingBranches(t *testing.T) {
 }
 
 func TestBranchRevision(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		branch string
 		issue  string
@@ -137,6 +139,7 @@ func TestBranchRevision(t *testing.T) {
 // a real (local, hermetic) git remote: a rig root with the shared bare repo
 // layout and an origin holding polecat branches.
 func TestFindSurvivingBranchesForIssue_ReadsOrigin(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}

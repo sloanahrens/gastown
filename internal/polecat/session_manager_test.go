@@ -3,22 +3,22 @@ package polecat
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	gtruntime "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
 
 func setupTestRegistryForSession(t *testing.T) {
@@ -30,10 +30,6 @@ func setupTestRegistryForSession(t *testing.T) {
 	session.SetDefaultRegistry(reg)
 	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 }
-
-// testSessionCounter provides unique session names across -count=N runs
-// to prevent "duplicate session" races with tmux's async cleanup.
-var testSessionCounter atomic.Int64
 
 func requireTmux(t *testing.T) {
 	t.Helper()
@@ -130,30 +126,43 @@ func TestSessionName(t *testing.T) {
 // reported uptime by exactly the machine's UTC offset (e.g. 5h under CDT)
 // and causing freshly-dispatched, live polecats to be reported stalled/dead.
 func TestParseSessionCreatedTime_NonUTCLocal(t *testing.T) {
-	origLocal := time.Local
-	t.Cleanup(func() { time.Local = origLocal })
-	// Simulate a non-UTC machine (e.g. CDT, UTC-5) without depending on the
-	// system zoneinfo database being installed.
-	time.Local = time.FixedZone("TEST-5", -5*60*60)
+	t.Parallel()
+	// A non-UTC machine (e.g. CDT, UTC-5), without depending on the system
+	// zoneinfo database and without touching the process-wide time.Local.
+	local := time.FixedZone("TEST-5", -5*60*60)
 
 	// Mirror Tmux.GetSessionInfo's production path: a Unix instant formatted
-	// via time.Unix(...).Format(layout) in the Local zone, with no zone
+	// via time.Unix(...).Format(layout) in the local zone, with no zone
 	// indicator retained in the resulting string.
-	created := time.Now().In(time.Local).Add(-1 * time.Minute)
+	created := time.Now().In(local).Add(-1 * time.Minute)
 	str := created.Format("2006-01-02 15:04:05")
 
-	got := parseSessionCreatedTime(str)
+	got := parseSessionCreatedTimeIn(str, local)
 	if got.IsZero() {
-		t.Fatalf("parseSessionCreatedTime(%q) returned zero time", str)
+		t.Fatalf("parseSessionCreatedTimeIn(%q) returned zero time", str)
 	}
 
 	uptime := time.Since(got)
 	if uptime < 0 || uptime > 5*time.Minute {
-		t.Errorf("uptime = %v, want ~1m (the pre-fix bug reports ~5h1m under a UTC-5 Local zone)", uptime)
+		t.Errorf("uptime = %v, want ~1m (the pre-fix bug reports ~5h1m under a UTC-5 local zone)", uptime)
+	}
+}
+
+// TestParseSessionCreatedTimeReadsTheLocalZone is the wiring guard for
+// parseSessionCreatedTime: tmux prints session_created in the machine's
+// zone, so the exported path must parse in time.Local. (On a machine whose
+// zone is UTC this cannot tell Local from UTC.)
+func TestParseSessionCreatedTimeReadsTheLocalZone(t *testing.T) {
+	t.Parallel()
+	instant := time.Unix(1_790_000_000, 0)
+	str := instant.In(time.Local).Format("2006-01-02 15:04:05")
+	if got := parseSessionCreatedTime(str); !got.Equal(instant) {
+		t.Fatalf("parseSessionCreatedTime(%q) = %v, want %v", str, got, instant)
 	}
 }
 
 func TestSessionManagerPolecatDir(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{
 		Name:     "gastown",
 		Path:     "/home/user/ai/gastown",
@@ -169,6 +178,7 @@ func TestSessionManagerPolecatDir(t *testing.T) {
 }
 
 func TestHasPolecat(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	// hasPolecat checks filesystem, so create actual directories
 	for _, name := range []string{"Toast", "Cheedo"} {
@@ -206,6 +216,7 @@ func TestHasPolecat(t *testing.T) {
 }
 
 func TestStartPolecatNotFound(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{
 		Name:     "gastown",
 		Polecats: []string{"Toast"},
@@ -312,6 +323,7 @@ func TestInjectNotFound(t *testing.T) {
 // This is a regression test for gt-y41ep - env vars must be exported inline
 // because tmux SetEnvironment only affects new panes, not the current shell.
 func TestPolecatCommandFormat(t *testing.T) {
+	t.Parallel()
 	// This test verifies the expected command format.
 	// The actual command is built in Start() but we test the format here
 	// to document and verify the expected behavior.
@@ -358,6 +370,7 @@ func TestPolecatCommandFormat(t *testing.T) {
 // the branch and path without a working directory.
 // Regression test for PR #1402.
 func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
+	t.Parallel()
 	rigName := "gastown"
 	polecatName := "Toast"
 	workDir := "/tmp/fake-worktree"
@@ -406,6 +419,7 @@ func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 }
 
 func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
+	t.Parallel()
 	workDir, repoGit := setupSessionBranchTestRepo(t)
 
 	baseSHA, err := repoGit.Rev("origin/main")
@@ -456,6 +470,7 @@ func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
 }
 
 func TestEnsureCanonicalSessionBranch_KeepsCurrentIssueBranch(t *testing.T) {
+	t.Parallel()
 	workDir, repoGit := setupSessionBranchTestRepo(t)
 
 	currentBranch := "polecat/toast/gt-9qb@seed"
@@ -478,6 +493,7 @@ func TestEnsureCanonicalSessionBranch_KeepsCurrentIssueBranch(t *testing.T) {
 // is needed, and origin/<default> does not resolve — so the session used to
 // start on the base branch with nothing reported anywhere.
 func TestEnsureCanonicalSessionBranch_MissingBaseRefFailsOnBaseBranch(t *testing.T) {
+	t.Parallel()
 	workDir, repoGit := setupSessionBranchTestRepo(t)
 	strandCanonicalBaseRef(t, workDir)
 
@@ -497,6 +513,7 @@ func TestEnsureCanonicalSessionBranch_MissingBaseRefFailsOnBaseBranch(t *testing
 // branch conflict with the uncommitted working tree a killed polecat left
 // behind (lapis's "WIP: checkpoint (auto)" on local main, gt-ns8t).
 func TestEnsureCanonicalSessionBranch_CheckoutRefusedFailsOnBaseBranch(t *testing.T) {
+	t.Parallel()
 	workDir, repoGit := setupSessionBranchTestRepo(t)
 	baseSHA, err := repoGit.Rev("origin/main")
 	if err != nil {
@@ -539,6 +556,7 @@ func TestEnsureCanonicalSessionBranch_CheckoutRefusedFailsOnBaseBranch(t *testin
 // `gt session restart` runs under util.ExecRun and its stderr is discarded on
 // exit 0 (gt-ns8t).
 func TestEnsureCanonicalSessionBranch_RecordsRepairFailure(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "gastown")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -589,6 +607,7 @@ func TestEnsureCanonicalSessionBranch_RecordsRepairFailure(t *testing.T) {
 // The bug was that hookIssue/validateIssue used workDir directly instead of
 // resolving via routes.jsonl. Now they call resolveBeadsDir which we test here.
 func TestSessionManager_resolveBeadsDir(t *testing.T) {
+	t.Parallel()
 	// Set up a mock town with routes.jsonl
 	townRoot := t.TempDir()
 	townBeadsDir := filepath.Join(townRoot, ".beads")
@@ -718,110 +737,136 @@ func TestAgentEnvOmitsGTAgent_FallbackRequired(t *testing.T) {
 	}
 }
 
-// fastStartupNudgeRig returns a rig whose town (the parent of the rig dir)
-// configures a 200ms startup-nudge verify delay. verifyStartupNudgeDelivery
-// reads operational.session.startup_nudge_verify_delay from
-// <townRoot>/settings/config.json with townRoot = Dir(rig.Path); left at the
-// compiled-in default the two retries sleep 25s each, and every test that
-// drives the retry loop against a live fake pane paid ~57s for nothing
-// (gt-0mbw).
-func fastStartupNudgeRig(t *testing.T) *rig.Rig {
-	t.Helper()
-	townRoot := t.TempDir()
-	settingsDir := filepath.Join(townRoot, "settings")
-	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
-		t.Fatalf("mkdir settings: %v", err)
+// startupNudgeRC is a runtime whose idle agent shows the ❯ prompt, so the
+// startup-nudge verification runs.
+func startupNudgeRC() *config.RuntimeConfig {
+	return &config.RuntimeConfig{
+		PromptMode: "arg",
+		Hooks:      &config.RuntimeHooksConfig{Provider: "claude"},
+		Tmux:       &config.RuntimeTmuxConfig{ReadyPromptPrefix: "❯ "},
 	}
-	cfg := `{"type":"town-settings","version":1,"operational":{"session":{"startup_nudge_verify_delay":"200ms"}}}`
-	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(cfg), 0o644); err != nil {
-		t.Fatalf("write settings: %v", err)
-	}
-	return &rig.Rig{Name: "test-rig", Path: filepath.Join(townRoot, "test-rig")}
 }
 
-// TestVerifyStartupNudgeDelivery_IdleAgent tests that verifyStartupNudgeDelivery
-// detects an idle agent (at prompt, no busy indicator) and retries the nudge.
-// Uses a real tmux session with a shell prompt that matches the ReadyPromptPrefix.
+// TestVerifyStartupNudgeDelivery_IdleAgent: an agent still idle at its prompt
+// after each verify delay has lost the nudge, so every attempt re-sends it,
+// one default delay apart.
 func TestVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
-	requireTmux(t)
-
-	tm := tmux.NewTmux()
-	// Use a unique session name per invocation to avoid "duplicate session" races
-	// with tmux's async cleanup when running with -count=N. (Fixes gt-eo8d)
-	sessionName := fmt.Sprintf("gt-test-nudge-%d", testSessionCounter.Add(1))
-
-	// Clean up any stale session from a previous crashed test run
-	_ = tm.KillSession(sessionName)
-
-	// Create a tmux session with a shell
-	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
-		t.Fatalf("NewSession: %v", err)
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(testEpoch)
+	tm := tmuxfake.New(clk)
+	const name = "gt-test-nudge"
+	if err := tm.NewSession(name, ""); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
+	tm.SetIdle(name, true)
 
-	// Configure the shell to show the Claude prompt prefix, simulating an idle agent.
-	// The prompt "❯ " is what Claude Code shows when idle.
-	// No "esc to interrupt" busy indicator — simulates a truly idle agent.
-	time.Sleep(300 * time.Millisecond) // Let shell initialize
-	_ = tm.SendKeys(sessionName, "export PS1='❯ '")
-	time.Sleep(300 * time.Millisecond)
-
-	r := fastStartupNudgeRig(t)
-	m := NewSessionManager(tm, r)
-
-	rc := &config.RuntimeConfig{
-		Tmux: &config.RuntimeTmuxConfig{
-			ReadyPromptPrefix: "❯ ",
-		},
-	}
-
-	// IsIdle should detect the idle state (prompt visible, no busy indicator)
-	if !tm.IsIdle(sessionName) {
-		t.Log("Warning: idle state not detected (tmux timing); skipping idle verification")
-		t.Skip("idle detection unreliable in test environment")
-	}
-
-	// verifyStartupNudgeDelivery should detect idle state and retry.
-	// We can't easily assert the retry happened, but we verify it doesn't panic/hang.
-	// Use a goroutine with timeout to prevent test hanging.
-	// fastStartupNudgeRig sets the verify delay to 200ms, so the retry loop
-	// itself takes well under a second; 90s is only a hang guard.
 	done := make(chan struct{})
 	go func() {
-		m.verifyStartupNudgeDelivery(sessionName, rc, "check your hook")
+		verifyStartupNudge(tm, clk, t.TempDir(), name, startupNudgeRC(), "check your hook")
 		close(done)
 	}()
+	driveClock(t, clk, config.DefaultStartupNudgeVerifyDelay, done)
 
-	select {
-	case <-done:
-		// Success - function completed
-	case <-time.After(90 * time.Second):
-		t.Fatal("verifyStartupNudgeDelivery hung (exceeded 90s timeout)")
+	sent := tm.Sent(name)
+	if len(sent) != config.DefaultStartupNudgeMaxRetries {
+		t.Fatalf("sent %d nudges %q, want one per attempt (%d)", len(sent), sent, config.DefaultStartupNudgeMaxRetries)
+	}
+	for _, s := range sent {
+		if s != "check your hook" {
+			t.Fatalf("re-sent %q, want the retry content", s)
+		}
+	}
+	if got, want := clk.Since(testEpoch), time.Duration(config.DefaultStartupNudgeMaxRetries)*config.DefaultStartupNudgeVerifyDelay; got != want {
+		t.Fatalf("verification waited %v, want %d default delays (%v)", got, config.DefaultStartupNudgeMaxRetries, want)
 	}
 }
 
-// TestVerifyStartupNudgeDelivery_NilConfig verifies that verifyStartupNudgeDelivery
-// exits immediately when runtime config has no prompt detection.
-func TestVerifyStartupNudgeDelivery_NilConfig(t *testing.T) {
-	requireTmux(t)
-
-	r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
-	m := NewSessionManager(tmux.NewTmux(), r)
-
-	// Should return immediately without error for nil config
-	m.verifyStartupNudgeDelivery("nonexistent-session", nil, "")
-
-	// And for config without prompt prefix
-	rc := &config.RuntimeConfig{
-		Tmux: &config.RuntimeTmuxConfig{
-			ReadyPromptPrefix: "",
-			ReadyDelayMs:      1000,
-		},
+// TestVerifyStartupNudgeDelivery_BusyAgentIsLeftAlone: an agent that is not
+// idle got the nudge; nothing is re-sent.
+func TestVerifyStartupNudgeDelivery_BusyAgentIsLeftAlone(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(testEpoch)
+	tm := tmuxfake.New(clk)
+	const name = "gt-test-busy"
+	if err := tm.NewSession(name, ""); err != nil {
+		t.Fatal(err)
 	}
-	m.verifyStartupNudgeDelivery("nonexistent-session", rc, "")
+
+	done := make(chan struct{})
+	go func() {
+		verifyStartupNudge(tm, clk, t.TempDir(), name, startupNudgeRC(), "check your hook")
+		close(done)
+	}()
+	driveClock(t, clk, config.DefaultStartupNudgeVerifyDelay, done)
+	if sent := tm.Sent(name); len(sent) != 0 {
+		t.Fatalf("busy agent was re-nudged: %q", sent)
+	}
+}
+
+// TestModeAStartupVerifyIsNonBlocking pins why Start runs the Mode A
+// verification on a goroutine (hi-y44): the verification waits a full verify
+// delay before its first look at the pane, so a synchronous call would hold
+// every polecat start for it. Until the clock moves, nothing is checked or
+// sent and the call has not returned.
+func TestModeAStartupVerifyIsNonBlocking(t *testing.T) {
+	t.Parallel()
+	rc := startupNudgeRC()
+	if info := gtruntime.GetStartupFallbackInfo(rc); info.SendBeaconNudge || info.SendStartupNudge {
+		t.Fatal("expected Mode A: !SendBeaconNudge && !SendStartupNudge")
+	}
+	clk := clockwork.NewFakeClockAt(testEpoch)
+	tm := tmuxfake.New(clk)
+	const name = "gt-test-modeA"
+	if err := tm.NewSession(name, ""); err != nil {
+		t.Fatal(err)
+	}
+	tm.SetIdle(name, true)
+
+	done := make(chan struct{})
+	go func() {
+		verifyStartupNudge(tm, clk, t.TempDir(), name, rc, "[GAS TOWN] test")
+		close(done)
+	}()
+	if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+		t.Fatal("verification returned before its first verify delay")
+	default:
+	}
+	if sent := tm.Sent(name); len(sent) != 0 {
+		t.Fatalf("verification acted before its first verify delay: %q", sent)
+	}
+	driveClock(t, clk, config.DefaultStartupNudgeVerifyDelay, done)
+}
+
+// TestVerifyStartupNudgeDelivery_NilConfig verifies that the verification
+// exits at once, touching no session, when the runtime has no prompt
+// detection.
+func TestVerifyStartupNudgeDelivery_NilConfig(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(testEpoch)
+	tm := tmuxfake.New(clk)
+	const name = "gt-test-nilcfg"
+	if err := tm.NewSession(name, ""); err != nil {
+		t.Fatal(err)
+	}
+	tm.SetIdle(name, true)
+	for _, rc := range []*config.RuntimeConfig{
+		nil,
+		{Tmux: &config.RuntimeTmuxConfig{ReadyPromptPrefix: "", ReadyDelayMs: 1000}},
+	} {
+		// Returns without blocking on the clock: nobody advances it here.
+		verifyStartupNudge(tm, clk, t.TempDir(), name, rc, "")
+	}
+	if sent := tm.Sent(name); len(sent) != 0 {
+		t.Fatalf("sent %q with no prompt detection", sent)
+	}
 }
 
 func TestPromptlessFallbackIncludesPrimeAndWorkInstructions(t *testing.T) {
+	t.Parallel()
 	beaconConfig := session.BeaconConfig{
 		Recipient:               session.BeaconRecipient("polecat", "toast", "demo"),
 		Sender:                  "witness",
@@ -846,6 +891,7 @@ func TestPromptlessFallbackIncludesPrimeAndWorkInstructions(t *testing.T) {
 // Fresh spawns may show the Claude Code splash with the CLI beacon pre-filled but
 // not auto-submitted; the condition triggers verifyStartupNudgeDelivery as a safety net.
 func TestModeABeaconVerificationCondition(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		rc        *config.RuntimeConfig
@@ -890,70 +936,6 @@ func TestModeABeaconVerificationCondition(t *testing.T) {
 					gotModeA, tt.wantModeA, info.SendBeaconNudge, info.SendStartupNudge)
 			}
 		})
-	}
-}
-
-// TestModeAStartupVerifyIsNonBlocking exercises the Mode A async verification path
-// that Start uses for hook+prompt agents (hi-y44). Confirms that verifyStartupNudgeDelivery
-// runs as a goroutine — a synchronous call on this path added ~25s to every successful
-// polecat startup because the function sleeps before its first idle check.
-func TestModeAStartupVerifyIsNonBlocking(t *testing.T) {
-	requireTmux(t)
-
-	tm := tmux.NewTmux()
-	sessionName := fmt.Sprintf("gt-test-modeA-%d", testSessionCounter.Add(1))
-	_ = tm.KillSession(sessionName)
-
-	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	t.Cleanup(func() { _ = tm.KillSession(sessionName) })
-
-	time.Sleep(300 * time.Millisecond)
-	_ = tm.SendKeys(sessionName, "export PS1='❯ '")
-	time.Sleep(300 * time.Millisecond)
-
-	r := fastStartupNudgeRig(t)
-	m := NewSessionManager(tm, r)
-
-	rc := &config.RuntimeConfig{
-		PromptMode: "arg",
-		Hooks:      &config.RuntimeHooksConfig{Provider: "claude"},
-		Tmux: &config.RuntimeTmuxConfig{
-			ReadyPromptPrefix: "❯ ",
-		},
-	}
-
-	// Confirm this is a Mode A agent (the condition Start checks before the goroutine).
-	info := gtruntime.GetStartupFallbackInfo(rc)
-	if info.SendBeaconNudge || info.SendStartupNudge {
-		t.Fatal("expected Mode A: !SendBeaconNudge && !SendStartupNudge")
-	}
-
-	// Replicate what Start does on the Mode A path: launch verifyStartupNudgeDelivery
-	// as a goroutine. The caller must return before the verify delay (25s default) elapses.
-	callerReturned := make(chan time.Duration, 1)
-	goroutineDone := make(chan struct{})
-
-	launchStart := time.Now()
-	go func() {
-		m.verifyStartupNudgeDelivery(sessionName, rc, "[GAS TOWN] test ← witness / Run `gt prime --hook`")
-		close(goroutineDone)
-	}()
-	callerReturned <- time.Since(launchStart)
-
-	// Caller side: goroutine launch should be near-instant.
-	elapsed := <-callerReturned
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("goroutine launch blocked caller for %v; expected <500ms (async regression)", elapsed)
-	}
-
-	// Goroutine side: fastStartupNudgeRig sets the verify delay to 200ms, so
-	// the retry loop finishes in well under a second; 90s is only a hang guard.
-	select {
-	case <-goroutineDone:
-	case <-time.After(90 * time.Second):
-		t.Fatal("Mode A verifyStartupNudgeDelivery goroutine hung (exceeded 90s timeout)")
 	}
 }
 
@@ -1015,6 +997,7 @@ func TestValidateSessionName(t *testing.T) {
 }
 
 func TestPolecatSlot(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := tmpDir
 	polecatsDir := filepath.Join(rigPath, "polecats")
@@ -1065,6 +1048,7 @@ func TestPolecatSlot(t *testing.T) {
 }
 
 func TestParseFreshBranchName_RoundTrip(t *testing.T) {
+	t.Parallel()
 	sm := &SessionManager{}
 
 	cases := []struct {
@@ -1098,6 +1082,7 @@ func TestParseFreshBranchName_RoundTrip(t *testing.T) {
 }
 
 func TestParseFreshBranchName_IssueTimestampSeparators(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		branch string
@@ -1122,6 +1107,7 @@ func TestParseFreshBranchName_IssueTimestampSeparators(t *testing.T) {
 }
 
 func TestParseFreshBranchName_Rejects(t *testing.T) {
+	t.Parallel()
 	rejects := []string{
 		"main",
 		"master",
@@ -1147,6 +1133,7 @@ func TestParseFreshBranchName_Rejects(t *testing.T) {
 }
 
 func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
+	t.Parallel()
 	// Non-standard canonical branch (e.g., "develop") — must be honored even
 	// though the old string-heuristic hardcoded "main"/"master".
 	cases := []struct {
@@ -1215,6 +1202,7 @@ func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
 // rather than via session.StartSession) must pre-seed Claude's folder-trust
 // entry, or the session stalls on the folder-trust dialog.
 func TestEnsureRuntimeWorkspace_SeedsTrustForNeverTrustedWorktree(t *testing.T) {
+	t.Parallel()
 	rigPath := t.TempDir()
 	configDir := t.TempDir()
 	workDir := t.TempDir() // fresh worktree: no trust entry exists anywhere

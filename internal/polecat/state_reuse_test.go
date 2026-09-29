@@ -9,6 +9,7 @@ import "testing"
 // reusable pool that 'gt sling' could never allocate from and every spawn
 // fell through to the per-rig directory cap.
 func TestStateIsReuseEligible(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		state State
 		want  bool
@@ -32,6 +33,7 @@ func TestStateIsReuseEligible(t *testing.T) {
 // exactly the set IsReuseEligible rejects, and a clean StateDone polecat must
 // come out Reusable so the allocator's candidate filter and the verdict agree.
 func TestDecideWorkstateAgreesWithReuseEligibility(t *testing.T) {
+	t.Parallel()
 	for _, s := range []State{StateIdle, StateDone, StateWorking, StateStalled, StateReviewNeeded} {
 		d := DecideWorkstate(WorkstateInput{State: s, CleanupStatus: CleanupClean})
 		if s.IsReuseEligible() != d.Reusable {

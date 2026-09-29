@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseTargetCleanPolicy(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -41,6 +42,7 @@ func TestParseTargetCleanPolicy(t *testing.T) {
 }
 
 func TestTargetCleanPolicyString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		policy TargetCleanPolicy
 		want   string
@@ -58,6 +60,7 @@ func TestTargetCleanPolicyString(t *testing.T) {
 }
 
 func TestShouldCleanTarget(t *testing.T) {
+	t.Parallel()
 	perBead := TargetCleanPolicy{Mode: TargetCleanModePerBead}
 	never := TargetCleanPolicy{Mode: TargetCleanModeNever}
 	every3 := TargetCleanPolicy{Mode: TargetCleanModeEveryNBeads, EveryN: 3}
@@ -90,6 +93,7 @@ func TestShouldCleanTarget(t *testing.T) {
 }
 
 func TestCounterPersistence(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Missing file → 0
 	if got := readTargetCleanCounter(dir); got != 0 {
@@ -119,6 +123,7 @@ func TestCounterPersistence(t *testing.T) {
 }
 
 func TestCleanTargetDir(t *testing.T) {
+	t.Parallel()
 	clonePath := t.TempDir()
 	targetDir := filepath.Join(clonePath, "target")
 	debugDir := filepath.Join(targetDir, "debug")
@@ -155,6 +160,7 @@ func TestCleanTargetDir(t *testing.T) {
 }
 
 func TestCleanTargetDirSafety(t *testing.T) {
+	t.Parallel()
 	// Empty path rejected.
 	if _, _, err := cleanTargetDir(""); err == nil {
 		t.Error("empty clonePath should error")
@@ -181,6 +187,7 @@ func TestCleanTargetDirSafety(t *testing.T) {
 }
 
 func TestRunTargetCleanHook_PerBead(t *testing.T) {
+	t.Parallel()
 	polecatDir := t.TempDir()
 	clonePath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(clonePath, "target", "debug"), 0o755); err != nil {
@@ -206,6 +213,7 @@ func TestRunTargetCleanHook_PerBead(t *testing.T) {
 }
 
 func TestRunTargetCleanHook_Never(t *testing.T) {
+	t.Parallel()
 	polecatDir := t.TempDir()
 	clonePath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(clonePath, "target"), 0o755); err != nil {
@@ -229,6 +237,7 @@ func TestRunTargetCleanHook_Never(t *testing.T) {
 }
 
 func TestRunTargetCleanHook_EveryNBeads(t *testing.T) {
+	t.Parallel()
 	polecatDir := t.TempDir()
 	clonePath := t.TempDir()
 	policy := TargetCleanPolicy{Mode: TargetCleanModeEveryNBeads, EveryN: 3}
@@ -287,6 +296,7 @@ func TestRunTargetCleanHook_EveryNBeads(t *testing.T) {
 }
 
 func TestRunTargetCleanHook_MissingTargetIsNoop(t *testing.T) {
+	t.Parallel()
 	polecatDir := t.TempDir()
 	clonePath := t.TempDir()
 	// No target/ directory at all (first-ever reuse / non-Rust rig).
@@ -304,6 +314,7 @@ func TestRunTargetCleanHook_MissingTargetIsNoop(t *testing.T) {
 }
 
 func TestFormatBytes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		n    int64
 		want string

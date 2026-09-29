@@ -6,6 +6,7 @@ import (
 )
 
 func TestState_IsWorking(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		state  State
 		expect bool
@@ -27,6 +28,7 @@ func TestState_IsWorking(t *testing.T) {
 }
 
 func TestPolecat_Summary(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	p := &Polecat{
 		Name:      "alpha",
@@ -52,6 +54,7 @@ func TestPolecat_Summary(t *testing.T) {
 }
 
 func TestPolecat_Summary_NoIssue(t *testing.T) {
+	t.Parallel()
 	p := &Polecat{
 		Name:  "beta",
 		State: StateDone,
@@ -64,6 +67,7 @@ func TestPolecat_Summary_NoIssue(t *testing.T) {
 }
 
 func TestState_IsStalled(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		state  State
 		expect bool
@@ -86,6 +90,7 @@ func TestState_IsStalled(t *testing.T) {
 }
 
 func TestCleanupStatus_IsSafe(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status CleanupStatus
 		expect bool
@@ -106,6 +111,7 @@ func TestCleanupStatus_IsSafe(t *testing.T) {
 }
 
 func TestCleanupStatus_RequiresRecovery(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status CleanupStatus
 		expect bool
@@ -126,6 +132,7 @@ func TestCleanupStatus_RequiresRecovery(t *testing.T) {
 }
 
 func TestCleanupStatus_CanForceRemove(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		status CleanupStatus
 		expect bool

@@ -33,6 +33,7 @@ func runLandedGitOut(t *testing.T, dir string, args ...string) string {
 // the tracking ref for the branch, the local probe answers exactly what the
 // network query answers — the common case, and the one the listing runs on.
 func TestProbeLiveGitStateLocalMatchesLiveOnAPushedBranch(t *testing.T) {
+	t.Parallel()
 	repo := initLandedRepo(t)
 	repo.startLandedBranch(t, "polecat/zircon/gt-8q0s+abc")
 
@@ -59,6 +60,7 @@ func TestProbeLiveGitStateLocalMatchesLiveOnAPushedBranch(t *testing.T) {
 // instead fall through to the integration branch and report the work as
 // unpreserved.
 func TestProbeLiveGitStateLocalRejectsABranchThatOnlyExistsLocally(t *testing.T) {
+	t.Parallel()
 	repo := initLandedRepo(t)
 	runLandedGit(t, repo.work, "checkout", "-b", "unpushed-work")
 	writeLandedFile(t, filepath.Join(repo.work, "feature.txt"), "not pushed anywhere\n")
@@ -98,6 +100,7 @@ func TestProbeLiveGitStateLocalRejectsABranchThatOnlyExistsLocally(t *testing.T)
 // TestProbeLiveGitStateLocalIsLooserWhenTheTrackingRefOutlivesTheBranch pins
 // it; this test covers the half that errs safe.
 func TestProbeLiveGitStateLocalIsStricterWhenTheTrackingRefIsGone(t *testing.T) {
+	t.Parallel()
 	repo := initLandedRepo(t)
 	repo.startLandedBranch(t, "polecat/zircon/gt-8q0s+pruned")
 
@@ -121,6 +124,7 @@ func TestProbeLiveGitStateLocalIsStricterWhenTheTrackingRefIsGone(t *testing.T) 
 // must not change how an unmeasurable worktree is classified. Both report an
 // attempted-and-failed probe, never a clean worktree and never a recorded one.
 func TestProbeLiveGitStateLocalFailsClosedLikeTheLiveProbe(t *testing.T) {
+	t.Parallel()
 	gone := filepath.Join(t.TempDir(), "gone")
 	live := ProbeLiveGitState(gone)
 	local := ProbeLiveGitStateLocal(gone)
@@ -155,6 +159,7 @@ func TestProbeLiveGitStateLocalFailsClosedLikeTheLiveProbe(t *testing.T) {
 // trusted, so it skips a recovery it could still make. A caller that must not
 // take that chance asks the remote.
 func TestProbeLiveGitStateLocalIsLooserWhenTheTrackingRefOutlivesTheBranch(t *testing.T) {
+	t.Parallel()
 	const branch = "polecat/zircon/gt-8q0s+stale"
 
 	repo := initLandedRepo(t)
@@ -190,6 +195,7 @@ func TestProbeLiveGitStateLocalIsLooserWhenTheTrackingRefOutlivesTheBranch(t *te
 // are facts no probe variant is allowed to skip, so the two agree on them even
 // though their branch evidence differs.
 func TestProbeLiveGitStateLocalMeasuresTheSameFactsAsTheLiveOne(t *testing.T) {
+	t.Parallel()
 	repo := initLandedRepo(t)
 	repo.startLandedBranch(t, "polecat/zircon/gt-8q0s+dirty")
 	writeLandedFile(t, filepath.Join(repo.work, "uncommitted.txt"), "churn\n")

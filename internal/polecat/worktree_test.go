@@ -8,6 +8,7 @@ import (
 )
 
 func TestVerifyWorktreeExistsStructuralFailures(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 
 	t.Run("missing directory", func(t *testing.T) {

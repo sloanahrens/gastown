@@ -63,6 +63,7 @@ func (r landedRepo) startLandedBranch(t *testing.T, branch string) {
 // rests on: work that is already in origin/main (by merge or by squash) is
 // landed, everything else — including every way of not knowing — is not.
 func TestProbeWorkLandedOnRef(t *testing.T) {
+	t.Parallel()
 	const branch = "polecat/opal/gt-eoi9+mu8i3jnq"
 
 	t.Run("merged branch is landed", func(t *testing.T) {

@@ -3,6 +3,7 @@ package polecat
 import "testing"
 
 func TestDecideWorkstateCanonicalFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   WorkstateInput
@@ -165,6 +166,7 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 // allowMissingForPartialSpawn must only waive a missing/unknown status
 // alongside the same live safety facts every other case requires.
 func TestResolveIgnoreCleanupStatusPartialSpawnStillGated(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		status       CleanupStatus
@@ -253,6 +255,7 @@ func TestResolveIgnoreCleanupStatusPartialSpawnStillGated(t *testing.T) {
 // unreachable), but still requires the same hook/active-MR safety facts as
 // every other exception — it must never bypass those.
 func TestResolveIgnoreCleanupStatusGoneWorktreeStillGated(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		status       CleanupStatus
@@ -333,6 +336,7 @@ func TestResolveIgnoreCleanupStatusGoneWorktreeStillGated(t *testing.T) {
 // or a pending active MR must still block, proving the new exception does
 // not blanket-waive real risk signals.
 func TestNewWorkstateInputGoneWorktreeReclaimableOnlyWhenNoOtherRisk(t *testing.T) {
+	t.Parallel()
 	base := WorkstateFacts{
 		State:                       StateIdle,
 		CleanupStatus:               "",
@@ -381,6 +385,7 @@ func TestNewWorkstateInputGoneWorktreeReclaimableOnlyWhenNoOtherRisk(t *testing.
 // work-at-risk signal (hooked bead, active MR, unpushed/dirty git) present
 // on its own. Each must block SAFE_TO_NUKE independently.
 func TestNewWorkstateInputWorkAtRiskSignalsBlockIndependentlyWithEmptyCleanupStatus(t *testing.T) {
+	t.Parallel()
 	base := WorkstateFacts{State: StateIdle, CleanupStatus: "", HookBeadSafe: true}
 
 	tests := []struct {
@@ -440,6 +445,7 @@ func TestNewWorkstateInputWorkAtRiskSignalsBlockIndependentlyWithEmptyCleanupSta
 // Without this, a blanket fail-closed change would pass every regression
 // test above while stranding the rig at its polecat cap.
 func TestNewWorkstateInputRealisticCleanPolecatStillClears(t *testing.T) {
+	t.Parallel()
 	facts := WorkstateFacts{
 		State:           StateDone,
 		CleanupStatus:   CleanupClean,
@@ -463,6 +469,7 @@ func TestNewWorkstateInputRealisticCleanPolecatStillClears(t *testing.T) {
 // combination is the verified path CanIgnoreStaleCleanupStatus's narrow
 // hatches could not reach — see ResolveIgnoreCleanupStatus.
 func TestNewWorkstateInputMissingCleanupStatusClearsOnLiveCleanProbe(t *testing.T) {
+	t.Parallel()
 	facts := WorkstateFacts{
 		State:          StateIdle,
 		CleanupStatus:  "",
@@ -491,6 +498,7 @@ func TestNewWorkstateInputMissingCleanupStatusClearsOnLiveCleanProbe(t *testing.
 // in that case) — hook_bead/push_failed/mr_failed/active_mr are unverified,
 // so a clean local git check alone must not promote the missing status.
 func TestNewWorkstateInputMissingCleanupStatusStillBlocksWithoutAgentBeadRead(t *testing.T) {
+	t.Parallel()
 	facts := WorkstateFacts{
 		State:          StateIdle,
 		CleanupStatus:  "",
@@ -515,6 +523,7 @@ func TestNewWorkstateInputMissingCleanupStatusStillBlocksWithoutAgentBeadRead(t 
 // true, which would otherwise satisfy every other precondition for clearing.
 // A genuinely dirty seat must always block.
 func TestNewWorkstateInputMissingCleanupStatusStillBlocksOnLiveDirtyProbe(t *testing.T) {
+	t.Parallel()
 	facts := WorkstateFacts{
 		State:          StateIdle,
 		CleanupStatus:  "",
@@ -545,6 +554,7 @@ func TestNewWorkstateInputMissingCleanupStatusStillBlocksOnLiveDirtyProbe(t *tes
 // with no probe attempted (the caller never measured git at all) must still
 // fail closed, exactly as before gt-ui2x.
 func TestNewWorkstateInputMissingCleanupStatusStillBlocksWithoutLiveProbe(t *testing.T) {
+	t.Parallel()
 	facts := WorkstateFacts{
 		State:         StateIdle,
 		CleanupStatus: "",

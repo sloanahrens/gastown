@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,15 +15,15 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/testutil"
-	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 func TestHasSubmittableWorkForWorkstateUsesBranchTargetStatus(t *testing.T) {
+	t.Parallel()
 	repo := setupManagerSquashPreservedRepo(t)
 	if got := hasSubmittableWorkForWorkstate(repo, []string{"integration/test"}); got {
 		t.Fatal("squash-preserved branch should not require MQ submission through manager workstate helper")
@@ -96,194 +95,36 @@ func runManagerGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// installMockBd places a fake bd binary in PATH that handles the commands
-// needed by AddWithOptions (init, create, show, config, update, slot, etc.).
-// This allows polecat tests to run without a real bd installation.
-//
-// On Windows, uses a .cmd→PowerShell wrapper (batch echo mangles JSON quotes).
-// Pattern borrowed from internal/cmd/rig_integration_test.go:mockBdCommand.
-func installMockBd(t *testing.T) {
+// initAddTestBeads readies the beads side of an AddWithOptions test. With
+// realBd it initializes a real beads database on the test Dolt container and
+// returns nil, so the manager runs the real bd; otherwise it returns the
+// fake agent bd and writes the type-config sentinel so EnsureCustomTypes is
+// a no-op.
+func initAddTestBeads(t *testing.T, mayorRig, mayorBeads string, realBd bool) *fakeBd {
 	t.Helper()
-	binDir := t.TempDir()
-
-	if runtime.GOOS == "windows" {
-		psPath := filepath.Join(binDir, "bd.ps1")
-		psScript := `# Mock bd for polecat tests (PowerShell)
-$cmd = ''
-foreach ($arg in $args) {
-  if ($arg -like '--*') { continue }
-  $cmd = $arg
-  break
-}
-switch ($cmd) {
-  'init'   { exit 0 }
-  'config' { exit 0 }
-  'create' {
-    $beadId = 'mock-1'
-    foreach ($arg in $args) {
-      if ($arg -like '--id=*') { $beadId = $arg.Substring(5) }
-    }
-    Write-Output ("{""id"":""" + $beadId + """,""status"":""open"",""created_at"":""2025-01-01T00:00:00Z""}")
-    exit 0
-  }
-  'show' {
-			Write-Output '[{"id":"gt-gastown-polecat-toast","title":"agent","issue_type":"agent","description":"agent\n\nrole_type: polecat\nagent_state: idle\nhook_bead: null\ncleanup_status: clean\nactive_mr: null\nbranch: polecat/toast/gt-work@abc123","status":"open","created_at":"2025-01-01T00:00:00Z"}]'
-			exit 0
-  }
-  default { exit 0 }
-}
-`
-		cmdScript := "@echo off\r\npwsh -NoProfile -NoLogo -File \"" + psPath + "\" %*\r\n"
-		if err := os.WriteFile(psPath, []byte(psScript), 0644); err != nil {
-			t.Fatalf("write mock bd.ps1: %v", err)
+	if realBd {
+		testutil.RequireDoltContainer(t)
+		port, _ := strconv.Atoi(testutil.DoltContainerPort())
+		if err := beads.NewIsolatedWithPort(mayorRig, port).Init("gt"); err != nil {
+			t.Fatalf("bd init: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(binDir, "bd.cmd"), []byte(cmdScript), 0644); err != nil {
-			t.Fatalf("write mock bd.cmd: %v", err)
-		}
-	} else {
-		script := `#!/bin/sh
-# Mock bd for polecat tests.
-# Find the actual command (skip global flags like --allow-stale).
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;; # skip flags
-    *) cmd="$arg"; break ;;
-  esac
-done
-case "$cmd" in
-  init|config|update|slot|reopen|migrate)
-    exit 0
-    ;;
-  create)
-    bead_id="mock-1"
-    for arg in "$@"; do
-      case "$arg" in
-        --id=*) bead_id="${arg#--id=}" ;;
-      esac
-    done
-    echo "{\"id\":\"$bead_id\",\"status\":\"open\",\"created_at\":\"2025-01-01T00:00:00Z\"}"
-    exit 0
-    ;;
-  show)
-    id=""
-    seen_show=0
-    for arg in "$@"; do
-      if [ "$seen_show" = 0 ]; then
-        [ "$arg" = "show" ] && seen_show=1
-        continue
-      fi
-      case "$arg" in --*) continue ;; esac
-      id="$arg"
-      break
-    done
-    printf '[{"id":"%s","title":"agent","issue_type":"agent","description":"agent\\n\\nrole_type: polecat\\nagent_state: idle\\nhook_bead: null\\ncleanup_status: clean\\nactive_mr: null\\nbranch: polecat/toast/gt-work@abc123"}]\n' "$id"
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-		if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-			t.Fatalf("write mock bd: %v", err)
-		}
+		return nil
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func installEmptyMockBd(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mock for bd")
-	}
-
-	binDir := t.TempDir()
-	script := `#!/bin/sh
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    *) cmd="$arg"; break ;;
-  esac
-done
-case "$cmd" in
-  show|list)
-    printf '[]\n'
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write mock bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-// installMockBdMissingCleanupStatus behaves like installMockBd but omits
-// cleanup_status from the agent bead description entirely, simulating a
-// polecat whose cleanup_status was never (or not yet) reported.
-func installMockBdMissingCleanupStatus(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mock for bd")
-	}
-
-	binDir := t.TempDir()
-	script := `#!/bin/sh
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    *) cmd="$arg"; break ;;
-  esac
-done
-case "$cmd" in
-  init|config|update|slot|reopen|migrate)
-    exit 0
-    ;;
-  create)
-    bead_id="mock-1"
-    for arg in "$@"; do
-      case "$arg" in
-        --id=*) bead_id="${arg#--id=}" ;;
-      esac
-    done
-    echo "{\"id\":\"$bead_id\",\"status\":\"open\",\"created_at\":\"2025-01-01T00:00:00Z\"}"
-    exit 0
-    ;;
-  show)
-    id=""
-    seen_show=0
-    for arg in "$@"; do
-      if [ "$seen_show" = 0 ]; then
-        [ "$arg" = "show" ] && seen_show=1
-        continue
-      fi
-      case "$arg" in --*) continue ;; esac
-      id="$arg"
-      break
-    done
-    printf '[{"id":"%s","title":"agent","issue_type":"agent","description":"agent\\n\\nrole_type: polecat\\nagent_state: idle\\nhook_bead: null\\nactive_mr: null\\nbranch: polecat/toast/gt-work@abc123"}]\n' "$id"
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write mock bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
+	return newAgentBd(true)
 }
 
 func setupCanonicalBranchManagerTest(t *testing.T) (*Manager, string) {
 	t.Helper()
-	installMockBd(t)
+	mgr, mayorRig, _ := setupCanonicalBranchManagerTestBd(t)
+	return mgr, mayorRig
+}
+
+// setupCanonicalBranchManagerTestBd is setupCanonicalBranchManagerTest that
+// also returns the manager's fake bd, for tests that change its answers.
+func setupCanonicalBranchManagerTestBd(t *testing.T) (*Manager, string, *fakeBd) {
+	t.Helper()
+	bd := newAgentBd(true)
 
 	root := t.TempDir()
 	mayorRig := filepath.Join(root, "mayor", "rig")
@@ -333,7 +174,7 @@ func setupCanonicalBranchManagerTest(t *testing.T) (*Manager, string) {
 	}
 
 	r := &rig.Rig{Name: "rig", Path: root}
-	return NewManager(r, git.NewGit(root), nil), mayorRig
+	return newTestManager(r, git.NewGit(root), nil, bd), mayorRig, bd
 }
 
 func createStalePolecatCommit(t *testing.T, repoPath, startPoint, branchName string) string {
@@ -363,35 +204,16 @@ func createStalePolecatCommit(t *testing.T, repoPath, startPoint, branchName str
 }
 
 func TestManagerGetMapsDoneAgentStateFromBead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script bd stub not supported on Windows")
-	}
-
-	binDir := t.TempDir()
-	bdScript := `#!/bin/sh
-cmd=""
-for arg in "$@"; do
-  case "$arg" in --*) ;; *) cmd="$arg"; break ;; esac
-done
-case "$cmd" in
-  list)
-    echo '[]'
-    ;;
-  show)
-    printf '%s\n' '[{"id":"gt-testrig-polecat-toast","title":"agent","issue_type":"agent","status":"open","description":"agent\n\nrole_type: polecat\nrig: testrig\nagent_state: done\nhook_bead: null\ncleanup_status: clean"}]'
-    ;;
-  config|update|slot)
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Parallel()
+	bd := &fakeBd{answer: func(cmd string, _ []string) string {
+		switch cmd {
+		case "list":
+			return "[]"
+		case "show":
+			return `[{"id":"gt-testrig-polecat-toast","title":"agent","issue_type":"agent","status":"open","description":"agent\n\nrole_type: polecat\nrig: testrig\nagent_state: done\nhook_bead: null\ncleanup_status: clean"}]`
+		}
+		return ""
+	}}
 
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "testrig")
@@ -399,7 +221,7 @@ esac
 		t.Fatalf("mkdir polecat path: %v", err)
 	}
 
-	mgr := NewManager(&rig.Rig{Name: "testrig", Path: rigPath}, git.NewGit(rigPath), nil)
+	mgr := newTestManager(&rig.Rig{Name: "testrig", Path: rigPath}, git.NewGit(rigPath), nil, bd)
 	p, err := mgr.Get("toast")
 	if err != nil {
 		t.Fatalf("mgr.Get(toast): %v", err)
@@ -413,6 +235,7 @@ esac
 }
 
 func TestStateIsWorking(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		state   State
 		working bool
@@ -430,6 +253,7 @@ func TestStateIsWorking(t *testing.T) {
 }
 
 func TestPolecatSummary(t *testing.T) {
+	t.Parallel()
 	p := &Polecat{
 		Name:  "Toast",
 		State: StateWorking,
@@ -449,12 +273,13 @@ func TestPolecatSummary(t *testing.T) {
 }
 
 func TestListEmpty(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	r := &rig.Rig{
 		Name: "test-rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	polecats, err := m.List()
 	if err != nil {
@@ -466,12 +291,13 @@ func TestListEmpty(t *testing.T) {
 }
 
 func TestGetNotFound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	r := &rig.Rig{
 		Name: "test-rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	_, err := m.Get("nonexistent")
 	if err != ErrPolecatNotFound {
@@ -480,12 +306,13 @@ func TestGetNotFound(t *testing.T) {
 }
 
 func TestRemoveNotFound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	r := &rig.Rig{
 		Name: "test-rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	err := m.Remove("nonexistent", false)
 	if err != ErrPolecatNotFound {
@@ -494,6 +321,7 @@ func TestRemoveNotFound(t *testing.T) {
 }
 
 func TestActiveWorkBeadsForCleanupFiltersAssignedIssues(t *testing.T) {
+	t.Parallel()
 	issues := []*beads.Issue{
 		{ID: "open-work", Status: "open", Type: "task"},
 		{ID: "progress-work", Status: "in_progress", Type: "task"},
@@ -528,11 +356,12 @@ func issueIDs(issues []*beads.Issue) []string {
 }
 
 func TestPolecatDir(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{
 		Name: "test-rig",
 		Path: "/home/user/ai/test-rig",
 	}
-	m := NewManager(r, git.NewGit(r.Path), nil)
+	m := newTestManager(r, git.NewGit(r.Path), nil, newNoDatabaseBd())
 
 	dir := m.polecatDir("Toast")
 	expected := "/home/user/ai/test-rig/polecats/Toast"
@@ -542,11 +371,12 @@ func TestPolecatDir(t *testing.T) {
 }
 
 func TestAssigneeID(t *testing.T) {
+	t.Parallel()
 	r := &rig.Rig{
 		Name: "test-rig",
 		Path: "/home/user/ai/test-rig",
 	}
-	m := NewManager(r, git.NewGit(r.Path), nil)
+	m := newTestManager(r, git.NewGit(r.Path), nil, newNoDatabaseBd())
 
 	id := m.assigneeID("Toast")
 	expected := "test-rig/polecats/Toast"
@@ -574,8 +404,8 @@ func TestAgentBeadID_Deterministic(t *testing.T) {
 
 	// Construct two Managers from the same rig path — they must produce
 	// identical agentBeadIDs regardless of construction context.
-	m1 := NewManager(r, git.NewGit(rigPath), nil)
-	m2 := NewManager(r, git.NewGit(rigPath), nil)
+	m1 := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
+	m2 := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
 
 	id1a := m1.agentBeadID("Toast")
 	id1b := m1.agentBeadID("Toast")
@@ -608,7 +438,7 @@ func TestAgentBeadID_Deterministic(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(origDir) }()
 
-	m3 := NewManager(r, git.NewGit(rigPath), nil)
+	m3 := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
 	id3 := m3.agentBeadID("Toast")
 	if id1a != id3 {
 		t.Errorf("agentBeadID differs after cwd change: %q (original) vs %q (after chdir)", id1a, id3)
@@ -616,6 +446,7 @@ func TestAgentBeadID_Deterministic(t *testing.T) {
 }
 
 func TestNewManager_NamepoolFromRigConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "myrig")
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
@@ -629,7 +460,7 @@ func TestNewManager_NamepoolFromRigConfig(t *testing.T) {
 	}
 
 	r := &rig.Rig{Name: "myrig", Path: rigPath}
-	m := NewManager(r, git.NewGit(rigPath), nil)
+	m := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
 	pool := m.GetNamePool()
 
 	name, err := pool.Allocate()
@@ -647,12 +478,7 @@ func TestNewManager_NamepoolFromRigConfig(t *testing.T) {
 func TestGetReturnsWorkingWithoutBeads(t *testing.T) {
 	// When beads is not available, Get should return StateWorking
 	// (assume the polecat is doing something if it exists)
-	//
-	// Skip if bd is installed - the test assumes bd is unavailable, but when bd
-	// is present it queries beads and returns actual state instead of defaulting.
-	if _, err := exec.LookPath("bd"); err == nil {
-		t.Skip("skipping: bd is installed, test requires bd to be unavailable")
-	}
+	t.Parallel()
 
 	root := t.TempDir()
 	polecatDir := filepath.Join(root, "polecats", "Test")
@@ -670,7 +496,7 @@ func TestGetReturnsWorkingWithoutBeads(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newMissingBd())
 
 	// Get should return polecat with StateWorking (assume active if beads unavailable)
 	polecat, err := m.Get("Test")
@@ -687,6 +513,7 @@ func TestGetReturnsWorkingWithoutBeads(t *testing.T) {
 }
 
 func TestListWithPolecats(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// Create some polecat directories (state is now derived from beads, not state files)
@@ -709,7 +536,7 @@ func TestListWithPolecats(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	polecats, err := m.List()
 	if err != nil {
@@ -733,10 +560,7 @@ func TestListWithPolecats(t *testing.T) {
 // returns the right polecats — an absence-only assertion would pass even if
 // the batching were silently reverted to per-polecat querying.
 func TestList_BatchesBeadsQueriesAcrossPolecats(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script bd stub not supported on Windows")
-	}
-
+	t.Parallel()
 	root := t.TempDir()
 	names := []string{"toast", "cheedo", "capable", "dag", "furiosa"}
 	for _, name := range names {
@@ -749,33 +573,16 @@ func TestList_BatchesBeadsQueriesAcrossPolecats(t *testing.T) {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}
 
-	callLog := filepath.Join(t.TempDir(), "bd-calls.log")
-	binDir := t.TempDir()
-	script := `#!/bin/sh
-echo "$*" >> "` + callLog + `"
-cmd=""
-for arg in "$@"; do
-  case "$arg" in --*) ;; *) cmd="$arg"; break ;; esac
-done
-case "$cmd" in
-  list|query)
-    printf '[]\n'
-    ;;
-  show)
-    printf '[]\n'
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	bd := &fakeBd{answer: func(cmd string, _ []string) string {
+		switch cmd {
+		case "list", "query", "show":
+			return "[]"
+		}
+		return ""
+	}}
 
 	r := &rig.Rig{Name: "test-rig", Path: root}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, bd)
 
 	polecats, err := m.List()
 	if err != nil {
@@ -785,27 +592,9 @@ esac
 		t.Fatalf("polecats count = %d, want %d", len(polecats), len(names))
 	}
 
-	data, err := os.ReadFile(callLog)
-	if err != nil {
-		t.Fatalf("reading bd call log: %v", err)
-	}
-	allCalls := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(allCalls) == 1 && allCalls[0] == "" {
-		allCalls = nil
-	}
-
-	// Exclude the one-time "bd --allow-stale version" capability probe: it's
-	// cached per bd-binary-path for the life of the process (see
-	// BdSupportsAllowStaleWithEnv), so it fires at most once regardless of
-	// polecat count, but it isn't one of the rig-wide beads queries this
-	// test is guarding.
-	var calls []string
-	for _, call := range allCalls {
-		if strings.Contains(call, "version") {
-			continue
-		}
-		calls = append(calls, call)
-	}
+	// argvs leaves out the "bd --allow-stale version" capability probe: it
+	// is not one of the rig-wide beads queries this test is guarding.
+	calls := bd.argvs()
 
 	// Batched: 4 rig-wide queries total, independent of polecat count —
 	// hooked list, assigned/status query, agent-beads list, and the
@@ -815,7 +604,7 @@ esac
 	const wantBatchedCalls = 4
 	if len(calls) != wantBatchedCalls {
 		t.Fatalf("bd invoked %d times (excluding the version probe) for %d polecats — want exactly %d rig-wide queries (batched); got calls:\n%s",
-			len(calls), len(names), wantBatchedCalls, data)
+			len(calls), len(names), wantBatchedCalls, strings.Join(calls, "\n"))
 	}
 }
 
@@ -825,6 +614,7 @@ esac
 // polecat lifecycle operations that don't require beads.
 
 func TestSetStateWithoutBeads(t *testing.T) {
+	t.Parallel()
 	// SetState should not error when beads is not available
 	root := t.TempDir()
 	polecatDir := filepath.Join(root, "polecats", "Test")
@@ -841,7 +631,7 @@ func TestSetStateWithoutBeads(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	// SetState should succeed (no-op when no issue assigned)
 	err := m.SetState("Test", StateWorking)
@@ -851,6 +641,7 @@ func TestSetStateWithoutBeads(t *testing.T) {
 }
 
 func TestClearIssueWithoutAssignment(t *testing.T) {
+	t.Parallel()
 	// ClearIssue should not error when no issue is assigned
 	root := t.TempDir()
 	polecatDir := filepath.Join(root, "polecats", "Test")
@@ -867,7 +658,7 @@ func TestClearIssueWithoutAssignment(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	// ClearIssue should succeed even when no issue assigned
 	err := m.ClearIssue("Test")
@@ -884,7 +675,7 @@ func TestClearIssueWithoutAssignment(t *testing.T) {
 func TestAddWithOptions_HasAgentsMD(t *testing.T) {
 	// This test verifies that AGENTS.md exists in polecat worktrees after creation.
 	// AGENTS.md is critical for polecats to "land the plane" properly.
-	installMockBd(t)
+	t.Parallel()
 
 	root := t.TempDir()
 
@@ -950,7 +741,7 @@ func TestAddWithOptions_HasAgentsMD(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newAgentBd(true))
 
 	// Create polecat via AddWithOptions
 	polecat, err := m.AddWithOptions("TestAgent", AddOptions{})
@@ -1070,7 +861,7 @@ func TestReconcilePoolWith(t *testing.T) {
 				Name: "myrig",
 				Path: tmpDir,
 			}
-			m := NewManager(r, nil, nil)
+			m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 			// Call ReconcilePoolWith
 			m.ReconcilePoolWith(tt.namesWithDirs, tt.namesWithSessions)
@@ -1119,26 +910,19 @@ func TestReconcilePoolWith(t *testing.T) {
 }
 
 func TestReconcilePoolWith_KeepsDirBackedStaleSession(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux not supported on Windows")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "myrig")
-	tm := tmux.NewTmuxWithSocket(constants.TestSocketName("gt-test-reconcile"))
-	t.Cleanup(func() { _ = tm.KillServer() })
-
-	m := NewManager(&rig.Rig{Name: "myrig", Path: rigPath}, nil, tm)
+	tm := newFakeProbe()
+	m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, nil, tm, newNoDatabaseBd())
 	activeName := "toast"
 	orphanName := "nux"
 	activeSession := session.PolecatSessionName(session.PrefixFor("myrig"), activeName)
 	orphanSession := session.PolecatSessionName(session.PrefixFor("myrig"), orphanName)
 
 	for _, sessionName := range []string{activeSession, orphanSession} {
-		if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+		if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
 			t.Fatalf("create tmux session %s: %v", sessionName, err)
 		}
 	}
@@ -1219,7 +1003,7 @@ func TestReconcilePoolWith_Allocation(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := NewManager(r, nil, nil)
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	// Mark first few pool names as in-use via directories
 	// (furiosa, nux, slit are first 3 in mad-max theme)
@@ -1256,7 +1040,7 @@ func TestReconcilePoolWith_OrphanDoesNotBlockAllocation(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := NewManager(r, nil, nil)
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	// furiosa has orphan session (no dir) - should NOT block allocation
 	m.ReconcilePoolWith([]string{}, []string{"furiosa"})
@@ -1273,6 +1057,7 @@ func TestReconcilePoolWith_OrphanDoesNotBlockAllocation(t *testing.T) {
 }
 
 func TestIsDoltConfigError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -1310,6 +1095,7 @@ func TestIsDoltConfigError(t *testing.T) {
 }
 
 func TestIsDoltOptimisticLockError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -1336,6 +1122,7 @@ func TestIsDoltOptimisticLockError(t *testing.T) {
 }
 
 func TestIsCurrentHookedIssueForAssignee(t *testing.T) {
+	t.Parallel()
 	assignee := "testrig/polecats/toast"
 
 	tests := []struct {
@@ -1383,6 +1170,7 @@ func TestIsCurrentHookedIssueForAssignee(t *testing.T) {
 }
 
 func TestBuildBranchName(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Initialize a git repo for config access
@@ -1451,17 +1239,20 @@ func TestBuildBranchName(t *testing.T) {
 				Path: tmpDir,
 			}
 
-			// Override system defaults for this test if template is set
+			// Set the template in this rig's wisp layer, which outranks the
+			// system default. rig.SystemDefaults is process-wide and read by
+			// every parallel test, so it is never written here.
+			wispCfg := wisp.NewConfig(filepath.Dir(r.Path), r.Name)
 			if tt.template != "" {
-				origDefault := rig.SystemDefaults["polecat_branch_template"]
-				rig.SystemDefaults["polecat_branch_template"] = tt.template
-				defer func() {
-					rig.SystemDefaults["polecat_branch_template"] = origDefault
-				}()
+				if err := wispCfg.Set("polecat_branch_template", tt.template); err != nil {
+					t.Fatalf("set wisp template: %v", err)
+				}
+			} else if err := wispCfg.Unset("polecat_branch_template"); err != nil {
+				t.Fatalf("unset wisp template: %v", err)
 			}
 
 			g := git.NewGit(tmpDir)
-			m := NewManager(r, g, nil)
+			m := newTestManager(r, g, nil, newNoDatabaseBd())
 
 			got := m.buildBranchName("alpha", tt.issue)
 
@@ -1487,6 +1278,7 @@ func TestBuildBranchName(t *testing.T) {
 }
 
 func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	gitCmd := exec.Command("git", "init")
 	gitCmd.Dir = tmpDir
@@ -1496,7 +1288,7 @@ func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
 
 	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
 	g := git.NewGit(tmpDir)
-	m := NewManager(r, g, nil)
+	m := newTestManager(r, g, nil, newNoDatabaseBd())
 
 	validator := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9/_.#+,-]*$`)
 	cases := []struct {
@@ -1525,6 +1317,13 @@ func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
 }
 
 func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
+	t.Parallel()
+	checkAddWithOptions_NoPrimeMDCreatedLocally(t, false)
+}
+
+// checkAddWithOptions_NoPrimeMDCreatedLocally is TestAddWithOptions_NoPrimeMDCreatedLocally against the fake bd, or with realBd
+// against a real bd on the test Dolt container (the integration tier).
+func checkAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T, realBd bool) {
 	// This test verifies that ProvisionPrimeMDForWorktree does NOT create
 	// a local .beads/PRIME.md in the worktree when there's no tracked one.
 	//
@@ -1559,18 +1358,7 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 	// Initialize beads database so agent bead creation works.
 	// Use real bd if available; fall back to a mock for environments (like
 	// Windows CI) where bd is not installed.
-	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
-	} else {
-		installMockBd(t)
-		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
-	}
+	bd := initAddTestBeads(t, mayorRig, mayorBeads, realBd)
 
 	// Initialize git repo in mayor/rig WITHOUT any .beads/PRIME.md
 	cmd := exec.Command("git", "init")
@@ -1611,7 +1399,7 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, bd)
 
 	// Create polecat
 	polecat, err := m.AddWithOptions("TestNoLocal", AddOptions{})
@@ -1640,6 +1428,7 @@ func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 }
 
 func TestAddWithOptions_UsesCanonicalOriginDefaultBranch(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
 	mayorGit := git.NewGit(mayorRig)
@@ -1673,6 +1462,7 @@ func TestAddWithOptions_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 }
 
 func TestAllocateAndAdd_RunsWispSetupCommand(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("setup-marker"))
 
@@ -1691,6 +1481,7 @@ func TestAllocateAndAdd_RunsWispSetupCommand(t *testing.T) {
 }
 
 func TestAddWithOptions_SetupCommandFailureRollsBack(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	writeWispSetupCommand(t, mgr, setupCommandFail())
 
@@ -1709,6 +1500,7 @@ func TestAddWithOptions_SetupCommandFailureRollsBack(t *testing.T) {
 }
 
 func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
 	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
@@ -1743,10 +1535,8 @@ func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 // must be able to hand it out, or every rig freezes at its polecat directory
 // cap the moment agent_state=done accumulates and nothing is ever idle.
 func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script bd stub not supported on Windows")
-	}
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	t.Parallel()
+	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
@@ -1754,40 +1544,14 @@ func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
 	}
 	_ = git.NewGit(p.ClonePath).CleanForce()
 
-	// Override the bd stub installed by setupCanonicalBranchManagerTest so
-	// 'show' reports agent_state=done instead of idle — same clean facts
-	// (no hook, no active MR) otherwise. Prepending to the current PATH
-	// keeps it ahead of the earlier idle-reporting mock.
-	binDir := t.TempDir()
-	script := `#!/bin/sh
-cmd=""
-for arg in "$@"; do
-  case "$arg" in --*) ;; *) cmd="$arg"; break ;; esac
-done
-case "$cmd" in
-  show)
-    id=""
-    seen_show=0
-    for arg in "$@"; do
-      if [ "$seen_show" = 0 ]; then
-        [ "$arg" = "show" ] && seen_show=1
-        continue
-      fi
-      case "$arg" in --*) continue ;; esac
-      id="$arg"
-      break
-    done
-    printf '[{"id":"%s","title":"agent","issue_type":"agent","description":"agent\\n\\nrole_type: polecat\\nagent_state: done\\nhook_bead: null\\ncleanup_status: clean\\nactive_mr: null"}]\n' "$id"
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// From here on 'show' reports agent_state=done instead of idle, with
+	// the same clean facts (no hook, no active MR) otherwise.
+	bd.become(&fakeBd{answer: func(cmd string, args []string) string {
+		if cmd == "show" {
+			return fmt.Sprintf(`[{"id":%q,"title":"agent","issue_type":"agent","description":"agent\n\nrole_type: polecat\nagent_state: done\nhook_bead: null\ncleanup_status: clean\nactive_mr: null"}]`, showID(args))
+		}
+		return ""
+	}})
 
 	found, err := mgr.FindIdlePolecat()
 	if err != nil {
@@ -1805,6 +1569,7 @@ esac
 }
 
 func TestReuseIdlePolecat_SetupCommandFailureCleansWorktree(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
 	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
@@ -1881,7 +1646,8 @@ func setupCommandWriteMarkerAndFail(marker string) string {
 // the case that must NOT take this path: an unreadable bead leaves those
 // same facts unverified, so it keeps failing closed regardless of git state.
 func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit(t *testing.T) {
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	t.Parallel()
+	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
@@ -1893,7 +1659,7 @@ func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLive
 	// else (agent_state, hook_bead) still reads as idle/unhooked, and the
 	// worktree itself is locally clean, verified by workstateInputForPolecat's
 	// own live probe (GitStateSourceLive) — not a bypass of it.
-	installMockBdMissingCleanupStatus(t)
+	bd.become(newAgentBd(false))
 
 	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
 	if d.Verdict != WorkstateVerdictSafeToNuke {
@@ -1916,7 +1682,8 @@ func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLive
 // and the missing/unknown CleanupUnknown default set at the top of
 // workstateInputForPolecat must keep blocking.
 func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *testing.T) {
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	t.Parallel()
+	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
@@ -1924,10 +1691,10 @@ func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *t
 	}
 	_ = git.NewGit(p.ClonePath).CleanForce()
 
-	// installEmptyMockBd's `show` returns an empty result, so GetAgentBead
+	// newEmptyBd's `show` returns an empty result, so GetAgentBead
 	// resolves to (nil, nil, nil) — exactly the not-found shape workstateInputForPolecat
 	// must not treat as "safe to ignore the missing cleanup_status".
-	installEmptyMockBd(t)
+	bd.become(newEmptyBd())
 
 	d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
 	if d.Verdict != WorkstateVerdictNeedsRecovery {
@@ -1948,6 +1715,7 @@ func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *t
 // so a stash taken on seat A's branch must disqualify only seat A, never seat
 // B, even though both worktrees see the identical raw `git stash list` output.
 func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
 	seatA, err := mgr.AddWithOptions("seata", AddOptions{})
@@ -1995,6 +1763,7 @@ func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
 }
 
 func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
 	mayorGit := git.NewGit(mayorRig)
@@ -2032,6 +1801,7 @@ func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 // fresh polecat/<name>/<bead>+<ts> branch. This lets `gt sling --branch/--pr`
 // resume work on an existing PR branch without creating duplicates.
 func TestAddWithOptions_ResumeBranch(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
 	// Create a "PR branch" with a marker commit, mimicking an existing open PR a
@@ -2072,6 +1842,13 @@ func TestAddWithOptions_ResumeBranch(t *testing.T) {
 }
 
 func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
+	t.Parallel()
+	checkAddWithOptions_NoFilesAddedToRepo(t, false)
+}
+
+// checkAddWithOptions_NoFilesAddedToRepo is TestAddWithOptions_NoFilesAddedToRepo against the fake bd, or with realBd
+// against a real bd on the test Dolt container (the integration tier).
+func checkAddWithOptions_NoFilesAddedToRepo(t *testing.T, realBd bool) {
 	// This test verifies the invariant that polecat creation does NOT add any
 	// TRACKED files to the repo's directory structure. The user's code should stay pure.
 	//
@@ -2105,18 +1882,7 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 	// Initialize beads database so agent bead creation works.
 	// Use real bd if available; fall back to a mock for environments (like
 	// Windows CI) where bd is not installed.
-	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
-	} else {
-		installMockBd(t)
-		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
-	}
+	bd := initAddTestBeads(t, mayorRig, mayorBeads, realBd)
 
 	// Initialize a CLEAN git repo with known files only
 	cmd := exec.Command("git", "init")
@@ -2182,7 +1948,7 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, bd)
 
 	// Create polecat
 	polecat, err := m.AddWithOptions("TestClean", AddOptions{})
@@ -2221,6 +1987,13 @@ func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 }
 
 func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
+	t.Parallel()
+	checkAddWithOptions_SettingsInstalledInPolecatsDir(t, false)
+}
+
+// checkAddWithOptions_SettingsInstalledInPolecatsDir is TestAddWithOptions_SettingsInstalledInPolecatsDir against the fake bd, or with realBd
+// against a real bd on the test Dolt container (the integration tier).
+func checkAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T, realBd bool) {
 	// This test verifies that polecat creation installs .claude/settings.json
 	// in the SHARED polecats/ parent directory (not inside individual worktrees).
 	// Claude Code with --settings supports parent directory settings, and placing
@@ -2251,18 +2024,7 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 	// Initialize beads database so agent bead creation works.
 	// Use real bd if available; fall back to a mock for environments (like
 	// Windows CI) where bd is not installed.
-	if _, err := exec.LookPath("bd"); err == nil {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		bd := beads.NewIsolatedWithPort(mayorRig, port)
-		if err := bd.Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
-		}
-	} else {
-		installMockBd(t)
-		// Write the type-config sentinel so EnsureCustomTypes is a no-op.
-		_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
-	}
+	bd := initAddTestBeads(t, mayorRig, mayorBeads, realBd)
 
 	// Initialize a git repo
 	cmd := exec.Command("git", "init")
@@ -2303,7 +2065,7 @@ func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, bd)
 
 	// Create polecat
 	polecat, err := m.AddWithOptions("TestSettings", AddOptions{})
@@ -2404,7 +2166,7 @@ func TestPendingMarkerBlocksReallocation(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := NewManager(r, nil, nil)
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	// Simulate AllocateName: create polecats/ dir and write a .pending marker
 	// for "furiosa" (as if AllocateName ran but AddWithOptions hasn't yet).
@@ -2446,7 +2208,7 @@ func TestStalePendingMarkerIsCleanedUp(t *testing.T) {
 		Name: "myrig",
 		Path: tmpDir,
 	}
-	m := NewManager(r, nil, nil)
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	polecatsDir := filepath.Join(tmpDir, "polecats")
 	if err := os.MkdirAll(polecatsDir, 0755); err != nil {
@@ -2477,7 +2239,7 @@ func TestCleanupOrphanPolecatStatePreservesUnverifiedBrokenPolecat(t *testing.T)
 
 	tmpDir := t.TempDir()
 	r := &rig.Rig{Name: "myrig", Path: tmpDir}
-	m := NewManager(r, nil, nil)
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	polecatDir := filepath.Join(tmpDir, "polecats", "furiosa")
 	clonePath := filepath.Join(polecatDir, r.Name)
@@ -2493,14 +2255,11 @@ func TestCleanupOrphanPolecatStatePreservesUnverifiedBrokenPolecat(t *testing.T)
 }
 
 func TestCleanupOrphanPolecatStatePreservesOldLayoutWorktree(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	installEmptyMockBd(t)
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	r := &rig.Rig{Name: "myrig", Path: tmpDir}
-	m := NewManager(r, nil, tmux.NewTmux())
+	m := newTestManager(r, nil, newFakeProbe(), newEmptyBd())
 
 	polecatDir := filepath.Join(tmpDir, "polecats", "furiosa")
 	if err := os.MkdirAll(polecatDir, 0755); err != nil {
@@ -2522,11 +2281,9 @@ func TestCleanupOrphanPolecatStatePreservesOldLayoutWorktree(t *testing.T) {
 }
 
 func TestReclaimBrokenIdlePolecatRemovesCleanStructuralFailure(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
-	mgr.tmux = tmux.NewTmux()
-	if !mgr.tmux.IsAvailable() {
-		t.Skip("tmux is required to prove no live polecat session")
-	}
+	mgr.tmux = newFakeProbe() // no session: the proof that no polecat is live
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
@@ -2551,11 +2308,9 @@ func TestReclaimBrokenIdlePolecatRemovesCleanStructuralFailure(t *testing.T) {
 // the slot the way it did for peridot: "Reclaiming broken idle polecat
 // peridot before allocation... was not safe to reclaim: cleanup_status=".
 func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	mgr.tmux = tmux.NewTmux()
-	if !mgr.tmux.IsAvailable() {
-		t.Skip("tmux is required to prove no live polecat session")
-	}
+	t.Parallel()
+	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
+	mgr.tmux = newFakeProbe() // no session: the proof that no polecat is live
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
@@ -2568,10 +2323,10 @@ func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
 		t.Fatalf("remove worktree: %v", err)
 	}
 
-	// Swap to a mock bd that omits cleanup_status entirely, matching a
+	// Swap to a bd that omits cleanup_status entirely, matching a
 	// polecat that never ran a fresh cleanup check against the (now gone)
 	// worktree.
-	installMockBdMissingCleanupStatus(t)
+	bd.become(newAgentBd(false))
 
 	if err := mgr.ReclaimBrokenIdlePolecat("toast"); err != nil {
 		t.Fatalf("ReclaimBrokenIdlePolecat: %v, want success — a gone worktree with no branch/MR/active work at risk must be reclaimable despite a missing cleanup_status", err)
@@ -2582,6 +2337,7 @@ func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
 }
 
 func TestReclaimBrokenIdlePolecatFailsClosedWithoutSessionEvidence(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
@@ -2606,6 +2362,7 @@ func TestReclaimBrokenIdlePolecatFailsClosedWithoutSessionEvidence(t *testing.T)
 // Regression test for gt-2vs22: cleanupOnError previously only removed the directory,
 // leaking pool names on spawn failure.
 func TestAddWithOptions_RollbackReleasesName(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// Create mayor/rig directory structure (acts as repo base)
@@ -2646,7 +2403,7 @@ func TestAddWithOptions_RollbackReleasesName(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	// Allocate a name (simulates what gt sling does before AddWithOptions)
 	name, err := m.AllocateName()
@@ -2692,6 +2449,7 @@ func TestAddWithOptions_RollbackReleasesName(t *testing.T) {
 // registration is cleaned up along with the directory and pool name.
 // Regression test for gt-2vs22.
 func TestAddWithOptions_RollbackCleansWorktree(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// Create mayor/rig directory structure
@@ -2729,55 +2487,13 @@ func TestAddWithOptions_RollbackCleansWorktree(t *testing.T) {
 		t.Fatalf("git update-ref: %v\n%s", err, out)
 	}
 
-	// Install a mock bd that FAILS on create (simulates agent bead creation failure)
-	binDir := t.TempDir()
-	if runtime.GOOS == "windows" {
-		psPath := filepath.Join(binDir, "bd.ps1")
-		psScript := `$cmd = ''
-foreach ($arg in $args) {
-  if ($arg -like '--*') { continue }
-  $cmd = $arg
-  break
-}
-switch ($cmd) {
-  'create' {
-    Write-Error 'error: database not initialized'
-    exit 1
-  }
-  default { exit 0 }
-}
-`
-		cmdScript := "@echo off\r\npwsh -NoProfile -NoLogo -File \"" + psPath + "\" %*\r\n"
-		if err := os.WriteFile(psPath, []byte(psScript), 0644); err != nil {
-			t.Fatalf("write mock bd.ps1: %v", err)
+	// A bd that FAILS on create (simulates agent bead creation failure).
+	bd := &fakeBd{answer: func(cmd string, _ []string) string {
+		if cmd == "create" {
+			return bdFailure + "error: database not initialized\n"
 		}
-		if err := os.WriteFile(filepath.Join(binDir, "bd.cmd"), []byte(cmdScript), 0644); err != nil {
-			t.Fatalf("write mock bd.cmd: %v", err)
-		}
-	} else {
-		script := `#!/bin/sh
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    *) cmd="$arg"; break ;;
-  esac
-done
-case "$cmd" in
-  create)
-    echo "error: database not initialized" >&2
-    exit 1
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`
-		if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-			t.Fatalf("write mock bd: %v", err)
-		}
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		return ""
+	}}
 
 	// Create rig-level .beads directory
 	rigBeads := filepath.Join(root, ".beads")
@@ -2798,7 +2514,7 @@ esac
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, bd)
 
 	// Allocate a name
 	name, err := m.AllocateName()
@@ -2846,10 +2562,7 @@ esac
 // manager's agent-bead lifecycle (create on spawn, reset on nuke) operates on
 // the RIG-LOCAL database — the canonical home of rig agent beads (gt-8we).
 func TestManagerAgentLifecycleUsesRigLocalBeadsDir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mock for bd")
-	}
-
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "gastown"
 	rigPath := filepath.Join(townRoot, rigName)
@@ -2885,46 +2598,23 @@ func TestManagerAgentLifecycleUsesRigLocalBeadsDir(t *testing.T) {
 		}
 	}
 
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "bd.log")
-	script := fmt.Sprintf(`#!/bin/sh
-LOG=%q
-EXPECTED=%q
-printf 'env=%%s args=%%s\n' "${BEADS_DIR:-<unset>}" "$*" >> "$LOG"
-cmd=""
-for arg in "$@"; do
-  case "$arg" in
-    --*) ;;
-    *) cmd="$arg"; break ;;
-  esac
-done
-if [ "$cmd" != "version" ] && [ "${BEADS_DIR:-}" != "$EXPECTED" ]; then
-  echo "wrong BEADS_DIR ${BEADS_DIR:-<unset>}" >&2
-  exit 9
-fi
-case "$cmd" in
-  version|update|config|reopen)
-    exit 0
-    ;;
-  create)
-    printf '%%s\n' '{"id":"gt-gastown-polecat-rust","title":"gt-gastown-polecat-rust","status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: spawning\nhook_bead: gt-work"}'
-    exit 0
-    ;;
-  show)
-    printf '%%s\n' '[{"id":"gt-gastown-polecat-rust","title":"gt-gastown-polecat-rust","issue_type":"task","labels":["gt:agent"],"status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: gt-work\nactive_mr: gt-mr\ncleanup_status: has_unpushed"}]'
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`, logPath, rigBeadsDir)
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
-		t.Fatalf("write mock bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// bd refuses (exit 9) any call made with a BEADS_DIR other than the
+	// rig's own.
+	bd := &fakeBd{answerCall: func(c beads.BDCall) string {
+		cmd, _ := bdCommand(c.Args)
+		if dir, _ := envValue(c.Env, "BEADS_DIR"); dir != rigBeadsDir {
+			return bdFailure + "wrong BEADS_DIR " + dir + "\n"
+		}
+		switch cmd {
+		case "create":
+			return `{"id":"gt-gastown-polecat-rust","title":"gt-gastown-polecat-rust","status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: spawning\nhook_bead: gt-work"}`
+		case "show":
+			return `[{"id":"gt-gastown-polecat-rust","title":"gt-gastown-polecat-rust","issue_type":"task","labels":["gt:agent"],"status":"open","description":"role_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: gt-work\nactive_mr: gt-mr\ncleanup_status: has_unpushed"}]`
+		}
+		return ""
+	}}
 
-	m := NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), nil)
+	m := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), nil, bd)
 	agentID := m.agentBeadID("rust")
 	if err := m.createAgentBeadWithRetry(agentID, &beads.AgentFields{RoleType: "polecat", Rig: rigName, AgentState: "spawning"}); err != nil {
 		t.Fatalf("createAgentBeadWithRetry: %v", err)
@@ -2933,19 +2623,24 @@ esac
 		t.Fatalf("resetAgentBeadForReuse: %v", err)
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read mock log: %v", err)
+	var sawCreate, sawShow, sawUpdate bool
+	for _, c := range bd.recorded() {
+		cmd, _ := bdCommand(c.Args)
+		if cmd == "version" {
+			continue
+		}
+		if dir, _ := envValue(c.Env, "BEADS_DIR"); dir != rigBeadsDir {
+			t.Fatalf("bd %v ran with BEADS_DIR=%q, want the rig-local %q (agent beads are rig-local, gt-8we)", c.Args, dir, rigBeadsDir)
+		}
+		sawCreate = sawCreate || cmd == "create"
+		sawShow = sawShow || cmd == "show"
+		sawUpdate = sawUpdate || cmd == "update"
 	}
-	logOutput := string(logBytes)
-	if strings.Contains(logOutput, "env="+townBeadsDir) {
-		t.Fatalf("manager agent lifecycle used town BEADS_DIR (agent beads are rig-local, gt-8we); log:\n%s", logOutput)
+	if !sawCreate {
+		t.Fatalf("manager create never reached bd; calls: %v", bd.argvs())
 	}
-	if !strings.Contains(logOutput, "env="+rigBeadsDir+" args=") || !strings.Contains(logOutput, "args=create") {
-		t.Fatalf("manager create did not use rig-local BEADS_DIR; log:\n%s", logOutput)
-	}
-	if !strings.Contains(logOutput, "args=show") || !strings.Contains(logOutput, "args=update") {
-		t.Fatalf("manager reset did not use rig-local BEADS_DIR for show/update; log:\n%s", logOutput)
+	if !sawShow || !sawUpdate {
+		t.Fatalf("manager reset did not show and update the agent bead; calls: %v", bd.argvs())
 	}
 }
 
@@ -2954,6 +2649,7 @@ esac
 // fail at worktree creation (no origin/main), but the allocated names must
 // all be unique — the race condition would show as duplicate names.
 func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
+	t.Parallel()
 	const concurrency = 20
 	root := t.TempDir()
 
@@ -2989,7 +2685,7 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := NewManager(r, git.NewGit(root), nil)
+	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
 
 	// Launch concurrent AllocateAndAdd calls. They will fail at worktree
 	// creation (no origin/main), but the names they attempt must be unique.
@@ -3029,12 +2725,7 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 // with a live Claude session at a dead ❯ prompt must have their session killed so
 // StartSession can create a fresh session with a proper gt prime --hook cycle.
 func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux not supported on Windows")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	rigName := "testreuse"
@@ -3047,24 +2738,15 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 		t.Fatalf("mkdir polecat dir: %v", err)
 	}
 
-	// Register a unique prefix for session naming
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", rigName)
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-
-	tm := tmux.NewTmux()
+	tm := newFakeProbe()
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := NewManager(r, git.NewGit(rigPath), tm)
+	mgr := newTestManager(r, git.NewGit(rigPath), tm, newNoDatabaseBd())
 
 	// Create a live tmux session (simulates Claude sitting at ❯ after gt done)
-	sessMgr := NewSessionManager(tm, r)
-	sessionName := sessMgr.SessionName(polecatName)
-	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
-	t.Cleanup(func() { _ = tm.KillSessionWithProcesses(sessionName) })
 
 	// Write a fresh heartbeat (simulating a session that just finished gt done
 	// but hasn't gone stale yet — this is the exact scenario that previously
@@ -3113,13 +2795,7 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 }
 
 func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux not supported on Windows")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	installMockBd(t)
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	rigName := "testrepair"
@@ -3170,21 +2846,14 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 		t.Fatalf("create old worktree: %v", err)
 	}
 
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", rigName)
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-
-	tm := tmux.NewTmux()
+	tm := newFakeProbe()
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
-	if err := tm.NewSessionWithCommand(sessionName, oldClonePath, "sleep 300"); err != nil {
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, oldClonePath, "sleep 300", nil); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
-	t.Cleanup(func() { _ = tm.KillSessionWithProcesses(sessionName) })
 	TouchSessionHeartbeat(townRoot, sessionName)
 
-	mgr := NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tm)
+	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tm, newAgentBd(true))
 	if _, err := mgr.RepairWorktreeWithOptions(polecatName, true, AddOptions{HookBead: "gt-next"}); err != nil {
 		t.Fatalf("RepairWorktreeWithOptions: %v", err)
 	}
@@ -3202,12 +2871,7 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 // handles the stale-session case correctly (regression: the original code path
 // that worked before the fix should still work after).
 func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux not supported on Windows")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	rigName := "teststale"
@@ -3219,22 +2883,14 @@ func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
 		t.Fatalf("mkdir polecat dir: %v", err)
 	}
 
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", rigName)
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-
-	tm := tmux.NewTmux()
+	tm := newFakeProbe() // the pane runs no agent, as "sleep 300" did
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := NewManager(r, git.NewGit(rigPath), tm)
+	mgr := newTestManager(r, git.NewGit(rigPath), tm, newNoDatabaseBd())
 
-	sessMgr := NewSessionManager(tm, r)
-	sessionName := sessMgr.SessionName(polecatName)
-	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
-	t.Cleanup(func() { _ = tm.KillSessionWithProcesses(sessionName) })
 
 	// Write a STALE heartbeat (old timestamp)
 	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
@@ -3270,12 +2926,7 @@ func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
 // normally when there's no existing session (the most common reuse case: session
 // was already killed by the Witness or expired).
 func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux not supported on Windows")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	rigName := "testnoop"
@@ -3287,15 +2938,8 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 		t.Fatalf("mkdir polecat dir: %v", err)
 	}
 
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", rigName)
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-
-	tm := tmux.NewTmux()
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := NewManager(r, git.NewGit(rigPath), tm)
+	mgr := newTestManager(r, git.NewGit(rigPath), newFakeProbe(), newNoDatabaseBd())
 
 	// No tmux session, no heartbeat — the common idle case
 	_, reuseErr := mgr.ReuseIdlePolecat(polecatName, AddOptions{})
@@ -3317,6 +2961,7 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 // exclusively at rig-root onboarding time (gt-me9t) never surfaced it to
 // polecat worktree setup.
 func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	worktreePath := filepath.Join(rigPath, "polecats", "jasper")
@@ -3348,6 +2993,7 @@ func TestResolveSetupCommandReadsRigRootMergeQueue(t *testing.T) {
 // rig-local settings/config.json has the final say over the repo-committed
 // and rig-root layers.
 func TestResolveSetupCommandPrecedence(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
 	worktreePath := filepath.Join(rigPath, "polecats", "jasper")
@@ -3386,22 +3032,18 @@ func TestResolveSetupCommandPrecedence(t *testing.T) {
 // work hooked but no live tmux session yet, must report spawning rather than
 // stalled while its agent bead is inside the spawn grace window, and must
 // report stalled the moment the window passes. The unit tests cover
-// SpawnGrace itself; this covers the full loadFromBeads derivation with a
-// real beads client and a session that is genuinely absent, including the
-// fail-toward-stalled case of an unparseable bead timestamp.
+// SpawnGrace itself; this covers the full loadFromBeads derivation through
+// the beads client, including the fail-toward-stalled case of an unparseable
+// bead timestamp.
+//
+// loadFromBeads only reaches the session-down state (and therefore the
+// spawn grace) when it can PROVE the session is absent: a nil tmux means
+// "state unknown" and defaults to alive. A tmux that answers has-session
+// with (false, nil) is that proof. Real tmux gives the same answer for a
+// socket with no server and for a server without the session; the tmux
+// package's session contract pins both.
 func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script bd stub not supported on Windows")
-	}
-	// loadFromBeads only reaches the session-down state (and therefore the
-	// spawn grace) when it can PROVE the session is absent — a nil tmux
-	// client means "state unknown" and must default to alive. Proving it
-	// requires a real has-session probe against a socket that exists but
-	// hosts nothing, so this test needs tmux.
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-
+	t.Parallel()
 	const (
 		agentName   = "basalt"
 		rigName     = "testrig"
@@ -3416,148 +3058,55 @@ func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
 	// loadFromBeads calls inside one subtest is a multi-minute pause.
 	fresh := now.Add(-30 * time.Second).Format(time.RFC3339)
 	stale := now.Add(-10 * time.Minute).Format(time.RFC3339)
-	callLog := filepath.Join(t.TempDir(), "bd-calls.log")
 
-	// bd stub that answers the rig-wide queries loadFromBeads issues:
-	// the agent bead (spawning, dated per the test), a hooked work bead,
-	// and the assigned-issue query.
-	// The beads client may prepend --allow-stale, so dispatch on the first
-	// non-flag argument. The JSON description uses \n escapes for real
-	// newlines (which ParseAgentFields splits on); in this Go raw string
-	// those are written as \n (backslash+n) so the emitted JSON contains
-	// the two-char escape, not an embedded newline. The quoted heredoc
-	// delimiter (<<'STUBJSON') copies the bytes verbatim — no shell
-	// expansion. The test-varying timestamp goes through a placeholder
-	// that sed substitutes, not a shell variable expansion.
-	bdStub := `#!/bin/sh
-echo "BD-CALL[$$] $*" >> "` + callLog + `"
-cmd=""
-for a in "$@"; do
-    case "$a" in
-        -*) ;;
-        *) cmd="$a"; break ;;
-    esac
-done
-case "$cmd" in
-    version)
-        echo "bd 9.9-stub"
-        ;;
-    show)
-        seen=0
-        id=""
-        for a in "$@"; do
-            case "$a" in
-                --allow-stale) ;;
-                version|show|list) if [ "$seen" = "0" ]; then seen=1; fi ;;
-                *) if [ "$seen" = "1" ] && [ -z "$id" ]; then id="$a"; fi ;;
-            esac
-        done
-        if [ "$id" = "` + agentBeadID + `" ]; then
-            cat <<'STUBJSON' | sed "s/@@AGENT_UPDATED_AT@@/$AGENT_UPDATED_AT/"
-[{"id":"` + agentBeadID + `","issue_type":"agent","status":"open","updated_at":"@@AGENT_UPDATED_AT@@","description":"agent\n\nrole_type: polecat\nrig: ` + rigName + `\nagent_state: spawning\nhook_bead: ` + hookedID + `\ncleanup_status: clean"}]
-STUBJSON
-        else
-            printf '[]\n'
-        fi
-        ;;
-    list)
-        if printf '%s\n' "$@" | grep -q 'hooked'; then
-            cat <<'STUBJSON'
-[{"id":"` + hookedID + `","status":"hooked","assignee":"` + assigneeIDT + `","updated_at":"` + fresh + `"}]
-STUBJSON
-        else
-            printf '[]\n'
-        fi
-        ;;
-    *)
-        ;;
-esac
-exit 0
-`
-
-	root := t.TempDir()
-	for _, dir := range []string{
-		filepath.Join(root, "polecats", agentName),
-		filepath.Join(root, "mayor", "rig"),
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdStub), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("AGENT_UPDATED_AT", stale)
-
-	r := &rig.Rig{Name: rigName, Path: root}
-	// The grace path of loadFromBeads is only reached when the manager can
-	// PROVE the session is down: HasSession against a socket with no server
-	// running returns (false, nil) — but that is the same answer a socket
-	// with a server but no matching session gives, so the test drives the
-	// real tmux client both ways and asserts both. Bring up a disposable
-	// server on the test socket; the subtests kill it between cases.
-	socket := constants.TestSocketName("gt-test-spawn-grace")
-	tm := tmux.NewTmuxWithSocket(socket)
-	probeSession := constants.TestSocketName("gt-test-spawn-grace-probe")
-	tmuxAvailable := func() bool { _, err := exec.LookPath("tmux"); return err == nil }
-	if tmuxAvailable() {
-		if err := tm.NewSessionWithCommand(probeSession, root, "sleep 300"); err != nil {
-			t.Skipf("cannot start probe tmux server on test socket: %v", err)
-		}
-		t.Cleanup(func() { _ = tm.KillServer() })
-	}
-	mgr := &Manager{
-		rig:              r,
-		git:              git.NewGit(root),
-		beads:            beads.NewRigLocal(filepath.Join(root, "mayor", "rig")),
-		tmux:             tm,
-		townRoot:         root,
-		spawnGraceWindow: 5 * time.Minute,
+	// bd that answers the rig-wide queries loadFromBeads issues: the agent
+	// bead (spawning, dated per case), a hooked work bead, and the
+	// assigned-issue query.
+	bdFor := func(updatedAt string) *fakeBd {
+		return &fakeBd{answer: func(cmd string, args []string) string {
+			switch cmd {
+			case "show":
+				if showID(args) == agentBeadID {
+					return `[{"id":"` + agentBeadID + `","issue_type":"agent","status":"open","updated_at":"` + updatedAt +
+						`","description":"agent\n\nrole_type: polecat\nrig: ` + rigName + `\nagent_state: spawning\nhook_bead: ` + hookedID + `\ncleanup_status: clean"}]`
+				}
+				return "[]"
+			case "list":
+				if strings.Contains(strings.Join(args, " "), "hooked") {
+					return `[{"id":"` + hookedID + `","status":"hooked","assignee":"` + assigneeIDT + `","updated_at":"` + fresh + `"}]`
+				}
+				return "[]"
+			}
+			return ""
+		}}
 	}
 
-	// Each case asserts the same three facts against whatever live-session
-	// topology the case carries: the work bead is still reported as the
-	// polecat's issue (proof the hooked-work branch is the one taken), the
-	// state is the want, and a direct SpawnGrace evaluation on the bead's
-	// own data agrees with it. Cases:
-	//   fresh + no server  — no socket file at all (fresh tmux start)
-	//   fresh + empty server — the reported shape: dispatched, socket up,
-	//     session not created yet
-	//   expired + server   — the window passed; the same evidence is stalled
-	//   undateable + server — a bead nobody can date fails toward stalled
 	cases := []struct {
 		name      string
 		updatedAt string
-		serverUp  bool
 		wantState State
 	}{
-		{"fresh dispatch, no server yet", fresh, false, StateSpawning},
-		{"fresh dispatch, server up but no session yet", fresh, true, StateSpawning},
-		{"grace window expired reads stalled", stale, true, StateStalled},
-		{"undateable agent bead fails toward stalled", "not-a-time", true, StateStalled},
+		{"fresh dispatch, no session yet", fresh, StateSpawning},
+		{"grace window expired reads stalled", stale, StateStalled},
+		{"undateable agent bead fails toward stalled", "not-a-time", StateStalled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("AGENT_UPDATED_AT", tc.updatedAt)
-			if tc.serverUp && !tmuxAvailable() {
-				// Without a tmux binary no socket is ever created, so the
-				// server-up shape cannot be reproduced; the no-server shape
-				// exercises the same SpawnGrace input, so degrade to it.
-				t.Logf("tmux unavailable; testing the no-server shape instead of %q", tc.name)
-			} else if tc.serverUp {
-				if err := tm.KillServer(); err != nil {
-					t.Fatalf("tear down probe server: %v", err)
-				}
-				if err := tm.NewSessionWithCommand(probeSession, root, "sleep 300"); err != nil {
-					t.Fatalf("start probe server: %v", err)
-				}
-			} else if !tc.serverUp && tmuxAvailable() {
-				if err := tm.KillServer(); err != nil {
-					t.Fatalf("tear down probe server: %v", err)
+			t.Parallel()
+			root := t.TempDir()
+			for _, dir := range []string{
+				filepath.Join(root, "polecats", agentName),
+				filepath.Join(root, "mayor", "rig"),
+			} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", dir, err)
 				}
 			}
+			bd := bdFor(tc.updatedAt)
+			// No session on the fake tmux: the session is provably down.
+			mgr := newTestManager(&rig.Rig{Name: rigName, Path: root}, git.NewGit(root), newFakeProbe(), bd)
+			mgr.spawnGraceWindow = 5 * time.Minute
+
 			p, err := mgr.loadFromBeads(agentName, nil)
 			if err != nil {
 				t.Fatalf("loadFromBeads: %v", err)
@@ -3571,13 +3120,13 @@ exit 0
 			// Direct evaluation of the exact function loadFromBeads calls, on
 			// the same bead: it must agree with the state the derivation
 			// produced. A mismatch means the derivation consumed something
-			// other than the bead this stub returned.
+			// other than the bead this fake returned.
 			agentIssue, fields, err := mgr.beads.GetAgentBead(mgr.agentBeadID(agentName))
 			if err != nil {
 				t.Fatalf("GetAgentBead: %v", err)
 			}
 			if fields == nil {
-				t.Fatalf("fields nil; the bead the stub returned is not surviving GetAgentBead (issue=%+v)", agentIssue)
+				t.Fatalf("fields nil; the bead the fake returned is not surviving GetAgentBead (issue=%+v)", agentIssue)
 			}
 			if got := SpawnGrace(fields.AgentState, AgentBeadUpdatedAt(agentIssue), time.Now(), mgr.spawnGraceWindow); got != (p.State == StateSpawning) {
 				t.Errorf("SpawnGrace(%q, %v, now, %v) = %v, but loadFromBeads produced %q — the derivation is not consuming this bead's data",

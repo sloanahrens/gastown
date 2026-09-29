@@ -9,6 +9,7 @@ import (
 )
 
 func TestNamePool_Allocate(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +38,7 @@ func TestNamePool_Allocate(t *testing.T) {
 }
 
 func TestNamePool_Release(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -64,6 +66,7 @@ func TestNamePool_Release(t *testing.T) {
 }
 
 func TestNamePool_PrefersOrder(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +98,7 @@ func TestNamePool_PrefersOrder(t *testing.T) {
 }
 
 func TestNamePool_Overflow(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +130,7 @@ func TestNamePool_Overflow(t *testing.T) {
 }
 
 func TestNamePool_OverflowNotReusable(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -156,6 +161,7 @@ func TestNamePool_OverflowNotReusable(t *testing.T) {
 }
 
 func TestNamePool_SaveLoad(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -205,6 +211,7 @@ func TestNamePool_SaveLoad(t *testing.T) {
 }
 
 func TestNamePool_Reconcile(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +237,7 @@ func TestNamePool_Reconcile(t *testing.T) {
 }
 
 func TestNamePool_ReconcileAdvancesOverflowPastNumericPolecats(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -250,6 +258,7 @@ func TestNamePool_ReconcileAdvancesOverflowPastNumericPolecats(t *testing.T) {
 }
 
 func TestNamePool_IsPoolName(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -279,6 +288,7 @@ func TestNamePool_IsPoolName(t *testing.T) {
 }
 
 func TestNamePool_ActiveNames(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -303,6 +313,7 @@ func TestNamePool_ActiveNames(t *testing.T) {
 }
 
 func TestNamePool_MarkInUse(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -328,6 +339,7 @@ func TestNamePool_MarkInUse(t *testing.T) {
 }
 
 func TestNamePool_StateFilePath(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -348,6 +360,7 @@ func TestNamePool_StateFilePath(t *testing.T) {
 }
 
 func TestNamePool_Themes(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -378,6 +391,7 @@ func TestNamePool_Themes(t *testing.T) {
 }
 
 func TestNamePool_CustomNames(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -399,6 +413,7 @@ func TestNamePool_CustomNames(t *testing.T) {
 }
 
 func TestListThemes(t *testing.T) {
+	t.Parallel()
 	themes := ListThemes()
 	if len(themes) != 3 {
 		t.Errorf("expected 3 themes, got %d", len(themes))
@@ -414,6 +429,7 @@ func TestListThemes(t *testing.T) {
 }
 
 func TestGetThemeNames(t *testing.T) {
+	t.Parallel()
 	names, err := GetThemeNames("mad-max")
 	if err != nil {
 		t.Fatalf("GetThemeNames error: %v", err)
@@ -433,6 +449,7 @@ func TestGetThemeNames(t *testing.T) {
 }
 
 func TestNamePool_Reset(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -465,6 +482,7 @@ func TestNamePool_Reset(t *testing.T) {
 }
 
 func TestThemeForRig(t *testing.T) {
+	t.Parallel()
 	// Different rigs should get different themes (with high probability)
 	themes := make(map[string]bool)
 	for _, rigName := range []string{"gastown", "beads", "myproject", "webapp"} {
@@ -477,6 +495,7 @@ func TestThemeForRig(t *testing.T) {
 }
 
 func TestThemeForRigDeterministic(t *testing.T) {
+	t.Parallel()
 	// Same rig name should always get same theme
 	theme1 := ThemeForRig("myrig")
 	theme2 := ThemeForRig("myrig")
@@ -486,6 +505,7 @@ func TestThemeForRigDeterministic(t *testing.T) {
 }
 
 func TestThemeForRigAvoiding(t *testing.T) {
+	t.Parallel()
 	themes := ListThemes()
 
 	t.Run("avoids used themes", func(t *testing.T) {
@@ -538,6 +558,7 @@ func TestThemeForRigAvoiding(t *testing.T) {
 }
 
 func TestNamePool_ReservedNamesExcluded(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -570,6 +591,7 @@ func TestNamePool_ReservedNamesExcluded(t *testing.T) {
 }
 
 func TestNamePool_ReservedNamesInCustomNames(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-test-*")
 	if err != nil {
 		t.Fatal(err)
@@ -603,6 +625,7 @@ func TestNamePool_ReservedNamesInCustomNames(t *testing.T) {
 // --- Custom theme tests ---
 
 func TestParseThemeFile(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-theme-*")
 	if err != nil {
 		t.Fatal(err)
@@ -642,6 +665,7 @@ samwise
 }
 
 func TestParseThemeFile_MinLength(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-theme-*")
 	if err != nil {
 		t.Fatal(err)
@@ -665,6 +689,7 @@ func TestParseThemeFile_MinLength(t *testing.T) {
 }
 
 func TestParseThemeFile_ReservedNames(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-theme-*")
 	if err != nil {
 		t.Fatal(err)
@@ -690,6 +715,7 @@ func TestParseThemeFile_ReservedNames(t *testing.T) {
 }
 
 func TestParseThemeFile_InvalidFormat(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-theme-*")
 	if err != nil {
 		t.Fatal(err)
@@ -716,6 +742,7 @@ func TestParseThemeFile_InvalidFormat(t *testing.T) {
 }
 
 func TestParseThemeFile_Empty(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-theme-*")
 	if err != nil {
 		t.Fatal(err)
@@ -735,6 +762,7 @@ func TestParseThemeFile_Empty(t *testing.T) {
 }
 
 func TestResolveThemeNames_Builtin(t *testing.T) {
+	t.Parallel()
 	names, err := ResolveThemeNames("/nonexistent", "mad-max")
 	if err != nil {
 		t.Fatalf("ResolveThemeNames error: %v", err)
@@ -745,6 +773,7 @@ func TestResolveThemeNames_Builtin(t *testing.T) {
 }
 
 func TestResolveThemeNames_Custom(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-resolve-*")
 	if err != nil {
 		t.Fatal(err)
@@ -771,6 +800,7 @@ func TestResolveThemeNames_Custom(t *testing.T) {
 }
 
 func TestResolveThemeNames_NotFound(t *testing.T) {
+	t.Parallel()
 	_, err := ResolveThemeNames("/nonexistent", "no-such-theme")
 	if err == nil {
 		t.Error("expected error for missing theme")
@@ -778,6 +808,7 @@ func TestResolveThemeNames_NotFound(t *testing.T) {
 }
 
 func TestListAllThemes(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-list-*")
 	if err != nil {
 		t.Fatal(err)
@@ -819,6 +850,7 @@ func TestListAllThemes(t *testing.T) {
 }
 
 func TestIsBuiltinTheme(t *testing.T) {
+	t.Parallel()
 	if !IsBuiltinTheme("mad-max") {
 		t.Error("mad-max should be built-in")
 	}
@@ -831,6 +863,7 @@ func TestIsBuiltinTheme(t *testing.T) {
 }
 
 func TestValidatePoolName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		wantErr bool
@@ -856,6 +889,7 @@ func TestValidatePoolName(t *testing.T) {
 }
 
 func TestSetTheme_Custom(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-settheme-*")
 	if err != nil {
 		t.Fatal(err)
@@ -883,6 +917,7 @@ func TestSetTheme_Custom(t *testing.T) {
 }
 
 func TestCustomTheme_Allocation(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-alloc-*")
 	if err != nil {
 		t.Fatal(err)
@@ -919,6 +954,7 @@ func TestCustomTheme_Allocation(t *testing.T) {
 }
 
 func TestSaveCustomTheme(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-save-*")
 	if err != nil {
 		t.Fatal(err)
@@ -946,6 +982,7 @@ func TestSaveCustomTheme(t *testing.T) {
 }
 
 func TestSaveCustomTheme_AppendName(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-append-*")
 	if err != nil {
 		t.Fatal(err)
@@ -995,6 +1032,7 @@ func TestSaveCustomTheme_AppendName(t *testing.T) {
 }
 
 func TestSaveCustomTheme_BuiltinConflict(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-save-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1008,6 +1046,7 @@ func TestSaveCustomTheme_BuiltinConflict(t *testing.T) {
 }
 
 func TestDeleteCustomTheme(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-delete-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1032,6 +1071,7 @@ func TestDeleteCustomTheme(t *testing.T) {
 }
 
 func TestDeleteCustomTheme_BuiltinRefused(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-delete-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1045,6 +1085,7 @@ func TestDeleteCustomTheme_BuiltinRefused(t *testing.T) {
 }
 
 func TestFindRigsUsingTheme(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-findrig-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1099,6 +1140,7 @@ func TestFindRigsUsingTheme(t *testing.T) {
 }
 
 func TestDeleteCustomTheme_NotFound(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-delete-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1112,6 +1154,7 @@ func TestDeleteCustomTheme_NotFound(t *testing.T) {
 }
 
 func TestDeleteCustomTheme_PathTraversal(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-delete-traversal-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1131,6 +1174,7 @@ func TestDeleteCustomTheme_PathTraversal(t *testing.T) {
 }
 
 func TestAppendToCustomTheme(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-append-atomic-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1175,6 +1219,7 @@ func TestAppendToCustomTheme(t *testing.T) {
 }
 
 func TestParseThemeFile_MaxSize(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-maxsize-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1201,6 +1246,7 @@ func TestParseThemeFile_MaxSize(t *testing.T) {
 }
 
 func TestGetNames_FallbackOnDeletedThemeFile(t *testing.T) {
+	t.Parallel()
 	tmpDir, err := os.MkdirTemp("", "namepool-fallback-*")
 	if err != nil {
 		t.Fatal(err)
@@ -1250,6 +1296,7 @@ func TestGetNames_FallbackOnDeletedThemeFile(t *testing.T) {
 }
 
 func TestGetNames_UnresolvableTheme_FallsBackToDefault(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	pool := NewNamePoolWithConfig(tmpDir, "testrig", "nonexistent-theme", nil, 10)

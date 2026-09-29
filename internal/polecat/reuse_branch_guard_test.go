@@ -16,6 +16,7 @@ import (
 // TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone is the regression:
 // the branch the worktree was holding must still name its own commit after reuse.
 func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
 	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
@@ -73,6 +74,7 @@ func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 // (no --branch): a reuse resets to origin/main, and the branch the worktree was
 // holding must not follow it there.
 func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
 	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
@@ -110,6 +112,7 @@ func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
 // of the crossed swap: when the resume target is checked out in a different
 // worktree, reuse must refuse loudly and leave both worktrees untouched.
 func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
 	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
@@ -165,6 +168,7 @@ func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 // a refused reuse lands on: attaching a brand-new worktree to the held branch
 // with `worktree add --force`, which git permits and so needs the same check.
 func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 
 	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
@@ -220,6 +224,7 @@ func TestHeldByOtherWorktree_FailsClosedOnUnreadableList(t *testing.T) {
 // there to conflict with, and refusing would strand the resume until someone
 // pruned the stale entry by hand.
 func TestReuseIdlePolecat_IgnoresPrunableHolder(t *testing.T) {
+	t.Parallel()
 	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
 	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
 

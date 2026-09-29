@@ -29,6 +29,7 @@ import (
 // layer gets tested, and workstate.go itself (home of the constructor) is
 // exempt from the "elsewhere" check trivially.
 func TestNoWorkstateInputLiteralsOutsideConstructor(t *testing.T) {
+	t.Parallel()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

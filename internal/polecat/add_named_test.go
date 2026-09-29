@@ -15,6 +15,7 @@ import (
 // lock is released and before the worktree exists — the race window — and
 // asks the allocator for a name there.
 func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 
 	// The name the pool would hand out next.
@@ -36,9 +37,7 @@ func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	var early *result
-	prev := afterNamedPolecatReserved
-	t.Cleanup(func() { afterNamedPolecatReserved = prev })
-	afterNamedPolecatReserved = func(name string) {
+	mgr.afterNamedReserved = func(name string) {
 		go func() {
 			n, err := mgr.AllocateName()
 			done <- result{n, err}
@@ -75,6 +74,7 @@ func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 }
 
 func TestAddNamedWithOptions_RefusesExistingAndInvalidNames(t *testing.T) {
+	t.Parallel()
 	mgr, _ := setupCanonicalBranchManagerTest(t)
 	if _, err := mgr.AddNamedWithOptions("toast", AddOptions{}); err != nil {
 		t.Fatalf("AddNamedWithOptions(toast): %v", err)

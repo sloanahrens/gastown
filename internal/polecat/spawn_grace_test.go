@@ -13,6 +13,7 @@ import (
 // earns the grace — and every missing fact (no window, no timestamp, no clock,
 // a bead that already says working) falls back to the existing stalled verdict.
 func TestSpawnGrace(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 9, 19, 16, 32, 0, 0, time.UTC)
 	const grace = 5 * time.Minute
 
@@ -118,6 +119,7 @@ func TestSpawnGrace(t *testing.T) {
 }
 
 func TestSessionDownState(t *testing.T) {
+	t.Parallel()
 	if got := sessionDownState(true); got != StateSpawning {
 		t.Errorf("sessionDownState(true) = %q, want %q", got, StateSpawning)
 	}
@@ -130,6 +132,7 @@ func TestSessionDownState(t *testing.T) {
 // on: a bead nobody can date must yield the zero time, never a panic and never
 // "now".
 func TestAgentBeadUpdatedAt(t *testing.T) {
+	t.Parallel()
 	if got := AgentBeadUpdatedAt(nil); !got.IsZero() {
 		t.Errorf("AgentBeadUpdatedAt(nil) = %s, want zero time", got)
 	}

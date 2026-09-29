@@ -12,6 +12,7 @@ import (
 // them across every lifecycle state, because an empty Blockers list is a
 // property of the refusal path, not of one caller.
 func TestDecideWorkstateNamesItsRefusalPredicate(t *testing.T) {
+	t.Parallel()
 	mutations := []struct {
 		name        string
 		apply       func(*WorkstateInput)
@@ -99,6 +100,7 @@ func TestDecideWorkstateNamesItsRefusalPredicate(t *testing.T) {
 // back from Get as StateReviewNeeded. The refusal must name that state — the
 // classifier holds it in hand — and stay fail-closed.
 func TestDecideWorkstateReviewNeededNamesLifecycleState(t *testing.T) {
+	t.Parallel()
 	in := WorkstateInput{
 		State:          StateReviewNeeded,
 		CleanupStatus:  CleanupUnpushed,

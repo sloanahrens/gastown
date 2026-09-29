@@ -8,6 +8,7 @@ import "testing"
 // agent bead at all — the exact shape a paused polecat's dead session takes
 // once the bead mirror write failed or never ran.
 func TestAssessStalenessHonoursPauseMarker(t *testing.T) {
+	t.Parallel()
 	info := &StalenessInfo{
 		Name:          "flint",
 		CommitsBehind: 999,
@@ -30,6 +31,7 @@ func TestAssessStalenessHonoursPauseMarker(t *testing.T) {
 // (e.g. an older pause, or a marker that was hand-deleted) but the bead
 // mirror still reads paused.
 func TestAssessStalenessBeadMirrorAloneStillProtects(t *testing.T) {
+	t.Parallel()
 	info := &StalenessInfo{
 		Name:          "flint",
 		CommitsBehind: 999,
@@ -45,6 +47,7 @@ func TestAssessStalenessBeadMirrorAloneStillProtects(t *testing.T) {
 // a blanket "never clean up" — an unpaused, far-behind, sessionless polecat
 // is still swept.
 func TestAssessStalenessUnpausedStillGetsSwept(t *testing.T) {
+	t.Parallel()
 	info := &StalenessInfo{
 		Name:          "flint",
 		CommitsBehind: 999,

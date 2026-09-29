@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -13,11 +14,6 @@ import (
 // ErrNoRigRepo means the rig has neither a shared bare repo nor a mayor/rig
 // clone, so there is no git state to judge surviving work from.
 var ErrNoRigRepo = errors.New("rig has no git repo (neither .repo.git nor mayor/rig)")
-
-// workSurvivalFetchTimeout bounds every remote call the predicate makes
-// (ls-remote and fetch); a timeout makes the answer unknown. A variable so
-// tests can shorten it.
-var workSurvivalFetchTimeout = git.RemoteQueryTimeout
 
 // WorkSurvival is the one "does this bead's polecat work survive?" predicate
 // (gt-vm5g4, gt-7evi4). Every path that releases a hooked bead — nuke, polecat
@@ -41,6 +37,9 @@ var workSurvivalFetchTimeout = git.RemoteQueryTimeout
 type WorkSurvival struct {
 	g             *git.Git
 	defaultBranch string
+	// fetchTimeout bounds every remote call the predicate makes (ls-remote
+	// and fetch); a timeout makes the answer unknown.
+	fetchTimeout time.Duration
 
 	basesReady bool
 	bases      []string // origin/<default> first, then origin/integration/*
@@ -55,6 +54,12 @@ type WorkSurvival struct {
 // NewWorkSurvival prepares the predicate for one rig. It returns ErrNoRigRepo
 // when the rig has no git repo.
 func NewWorkSurvival(rigRoot string) (*WorkSurvival, error) {
+	return newWorkSurvival(rigRoot, git.RemoteQueryTimeout)
+}
+
+// newWorkSurvival is NewWorkSurvival with every remote call bounded by
+// fetchTimeout.
+func newWorkSurvival(rigRoot string, fetchTimeout time.Duration) (*WorkSurvival, error) {
 	root := rigGitRepo(rigRoot)
 	if root == "" {
 		return nil, ErrNoRigRepo
@@ -69,7 +74,7 @@ func NewWorkSurvival(rigRoot string) (*WorkSurvival, error) {
 	if cfg, err := rig.LoadRigConfig(rigRoot); err == nil && cfg.DefaultBranch != "" {
 		defaultBranch = cfg.DefaultBranch
 	}
-	return &WorkSurvival{g: g, defaultBranch: defaultBranch}, nil
+	return &WorkSurvival{g: g, defaultBranch: defaultBranch, fetchTimeout: fetchTimeout}, nil
 }
 
 // SurvivingWorkForIssue is NewWorkSurvival(rigRoot).ForIssue(issueID).
@@ -189,7 +194,7 @@ func (w *WorkSurvival) listOrigin() {
 		return
 	}
 	w.originListed = true
-	refs, err := w.g.ListRemoteRefsWithHashesTimeout("origin", "refs/heads/polecat/", workSurvivalFetchTimeout)
+	refs, err := w.g.ListRemoteRefsWithHashesTimeout("origin", "refs/heads/polecat/", w.fetchTimeout)
 	if err != nil {
 		w.originErr = err
 		return
@@ -218,7 +223,7 @@ func (w *WorkSurvival) baseRefs() ([]string, error) {
 	}
 	w.bases = []string{"origin/" + w.defaultBranch}
 
-	integration, err := w.g.ListRemoteRefsWithHashesTimeout("origin", "refs/heads/integration/", workSurvivalFetchTimeout)
+	integration, err := w.g.ListRemoteRefsWithHashesTimeout("origin", "refs/heads/integration/", w.fetchTimeout)
 	if err != nil {
 		w.basesErr = fmt.Errorf("listing origin integration branches: %w", err)
 		return nil, w.basesErr
@@ -251,9 +256,8 @@ func (w *WorkSurvival) ensureRef(branch, wantHash string) error {
 	return nil
 }
 
-// fetch updates refs/remotes/origin/<branch>, bounded by
-// workSurvivalFetchTimeout.
+// fetch updates refs/remotes/origin/<branch>, bounded by w.fetchTimeout.
 func (w *WorkSurvival) fetch(branch string) error {
 	return w.g.FetchRefspecWithTimeout("origin",
-		"+refs/heads/"+branch+":refs/remotes/origin/"+branch, workSurvivalFetchTimeout)
+		"+refs/heads/"+branch+":refs/remotes/origin/"+branch, w.fetchTimeout)
 }

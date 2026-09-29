@@ -8,6 +8,7 @@ import (
 )
 
 func TestBrokenIdleReclaimDispositionBlocker(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		d    WorkstateDisposition
@@ -45,6 +46,7 @@ func TestBrokenIdleReclaimDispositionBlocker(t *testing.T) {
 }
 
 func TestBrokenIdleReclaimMRBlocker(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		branch string
@@ -68,6 +70,7 @@ func TestBrokenIdleReclaimMRBlocker(t *testing.T) {
 }
 
 func TestBrokenIdleReclaimAgentBlocker(t *testing.T) {
+	t.Parallel()
 	base := func() *beads.AgentFields {
 		return &beads.AgentFields{
 			AgentState:    string(beads.AgentStateIdle),
@@ -115,6 +118,7 @@ func TestBrokenIdleReclaimAgentBlocker(t *testing.T) {
 // evidence, not an unknown, and must still block even with the worktree
 // gone — that data existed and is now unrecoverable.
 func TestBrokenIdleReclaimAgentBlockerGoneWorktree(t *testing.T) {
+	t.Parallel()
 	base := func() *beads.AgentFields {
 		return &beads.AgentFields{
 			AgentState:    string(beads.AgentStateIdle),
