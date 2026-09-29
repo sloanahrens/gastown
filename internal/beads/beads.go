@@ -1572,7 +1572,10 @@ func isSubprocessCrash(err error) bool {
 // appended by run(). This was the root cause of gt-uygpe / GH #803.
 func (b *Beads) buildRunEnv() []string {
 	if b.isolated {
-		env := filterBeadsEnv(os.Environ())
+		// filterBeadsEnv keeps BD_* variables, and an inherited
+		// BD_ALLOW_REMOTE_MIGRATE=1 would open bd's migrate gate wherever
+		// this client lands; only a registered test container gets it.
+		env := stripEnvPrefixes(filterBeadsEnv(os.Environ()), allowRemoteMigrateEnv+"=")
 		if b.serverPort > 0 {
 			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=", allowRemoteMigrateEnv+"=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))
@@ -1606,7 +1609,10 @@ func (b *Beads) buildRunEnv() []string {
 // In isolated mode: also strips BD_ACTOR, BEADS_*, GT_ROOT, HOME.
 func (b *Beads) buildRoutingEnv() []string {
 	if b.isolated {
-		env := filterBeadsEnv(os.Environ())
+		// filterBeadsEnv keeps BD_* variables, and an inherited
+		// BD_ALLOW_REMOTE_MIGRATE=1 would open bd's migrate gate wherever
+		// this client lands; only a registered test container gets it.
+		env := stripEnvPrefixes(filterBeadsEnv(os.Environ()), allowRemoteMigrateEnv+"=")
 		if b.serverPort > 0 {
 			env = stripEnvPrefixes(env, "GT_DOLT_PORT=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_TEST_SERVER=", allowRemoteMigrateEnv+"=")
 			env = append(env, fmt.Sprintf("GT_DOLT_PORT=%d", b.serverPort))

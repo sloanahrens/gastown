@@ -122,6 +122,6 @@ List (union of every copy plus upstream beads): `testdb_`, `beads_t`, `beads_pt`
 
 ## Known limits
 
-- cobra adds its `completion` command lazily at Execute time, so the tree walk cannot see it; it is out of scope.
+- cobra adds its `completion` command lazily inside Execute. Execute now adds it first through `strictCompletionCmd`, which gives it requireSubcommand, and the tree-walk test calls the same helper. `gt completion <typo>` exits 1 from cobra's own argument check; bare `gt completion` exits 2.
 - Disabling prefix matching breaks operator muscle memory such as `gt ref at`; aliases are the supported shortcut.
 - bd itself still honours `BEADS_TEST_SERVER=1` on any port (B2-03 fix direction a lives in beads, not here).
