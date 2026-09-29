@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"os/exec"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -21,8 +22,7 @@ type bdCLI interface {
 	TableExists(name string) bool
 	StatsJSON() ([]byte, error)
 	InitDatabase(opts beads.InitOptions) error
-	MolWispList() ([]*beads.Issue, error)
-	GCWisps() error
+	WispGCCandidates(age time.Duration) ([]string, error)
 	Show(id string) (*beads.Issue, error)
 }
 

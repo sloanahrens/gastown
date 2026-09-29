@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -35,65 +38,106 @@ func writeRigsFixture(t *testing.T, townRoot string, rigs ...string) {
 	}
 }
 
-// TestWispGCCheckCountsAbandonedWisps: the check used to unmarshal `bd mol
-// wisp list --json` as a bare array, but bd 1.x prints an object, so it
-// counted zero abandoned wisps on every run (reproduced against bd 1.2.2's
-// output through a PATH stub before the fix; beads.MolWispList now reads
-// it, TestMolWispListReadsBdObject). The fake's wisps are stamped at its
-// 2026-01-02 epoch, long past the 1h threshold.
-func TestWispGCCheckCountsAbandonedWisps(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	writeRigsFixture(t, town, "rig1", "rig2")
-	bd := newFakeBD()
-	db := bd.db(filepath.Join(town, "rig1"))
-	for _, title := range []string{"old a", "old b", "closed"} {
+// wispRig gives rig a fake database on clk with wisps: two open ones and a
+// closed one, a durable issue, and an in-progress wisp.
+func wispRig(t *testing.T, bd *fakeBD, town, rig string, clk clockwork.Clock) *beadsfake.Fake {
+	t.Helper()
+	db := beadsfake.New(beadsfake.WithClock(clk))
+	bd.put(filepath.Join(town, rig), db)
+	for _, title := range []string{"old a", "old b", "closed", "working"} {
 		w, err := db.Create(beads.CreateOptions{Title: title, Priority: -1, Ephemeral: true})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if title == "closed" {
-			if err := db.Close(w.ID); err != nil {
-				t.Fatal(err)
-			}
+		switch title {
+		case "closed":
+			err = db.Close(w.ID)
+		case "working":
+			err = db.Update(w.ID, beads.UpdateOptions{Status: ptrTo("in_progress")})
+		}
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 	if _, err := db.Create(beads.CreateOptions{Title: "durable", Priority: -1}); err != nil {
 		t.Fatal(err)
 	}
+	return db
+}
 
-	c := NewWispGCCheck()
-	ctx := bd.ctx(town)
-	r := c.Run(ctx)
-	if r.Status != StatusWarning || !strings.Contains(r.Message, "2 abandoned wisp(s)") {
+func ptrTo[T any](v T) *T { return &v }
+
+// TestWispGCCheckCountsGCCandidates: the count is bd gc's own dry-run
+// candidates, so the warning names exactly what gc would delete: the two
+// idle open wisps, not the closed or in-progress ones.
+func TestWispGCCheckCountsGCCandidates(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRigsFixture(t, town, "rig1", "rig2")
+	clk := clockwork.NewFakeClockAt(beadsfake.Epoch)
+	bd := newFakeBD()
+	wispRig(t, bd, town, "rig1", clk)
+	clk.Advance(2 * time.Hour)
+
+	r := NewWispGCCheck().Run(bd.ctx(town))
+	if r.Status != StatusWarning || !strings.Contains(r.Message, "2 abandoned wisp(s)") ||
+		len(r.Details) != 1 || !strings.HasPrefix(r.Details[0], "rig1: 2 ") {
 		t.Fatalf("Run = %v %q %q, want 2 abandoned wisps in rig1", r.Status, r.Message, r.Details)
-	}
-	if err := c.Fix(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if n := db.GCCount(); n != 1 {
-		t.Errorf("rig1 wisp gc ran %d times, want 1", n)
-	}
-	if n := bd.db(filepath.Join(town, "rig2")).GCCount(); n != 0 {
-		t.Errorf("rig2 (nothing abandoned) wisp gc ran %d times", n)
 	}
 }
 
-func TestWispGCCheckFixReportsGCFailure(t *testing.T) {
+func TestWispGCCheckFreshWispsAreOK(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeRigsFixture(t, town, "rig1")
+	clk := clockwork.NewFakeClockAt(beadsfake.Epoch)
 	bd := newFakeBD()
-	db := bd.db(filepath.Join(town, "rig1"))
-	if _, err := db.Create(beads.CreateOptions{Title: "old", Priority: -1, Ephemeral: true}); err != nil {
+	wispRig(t, bd, town, "rig1", clk)
+	clk.Advance(30 * time.Minute)
+	if r := NewWispGCCheck().Run(bd.ctx(town)); r.Status != StatusOK {
+		t.Errorf("Run = %v %q, want OK for wisps idle 30m", r.Status, r.Message)
+	}
+}
+
+// TestWispGCCheckFixDeletesNothing is the C1 guard: gt doctor --fix (which
+// the mol-session-gc formula runs) must not collect wisps, because age gc
+// deletes open merge-request wisps too. The check is not fixable, a doctor
+// fix leaves every wisp in place, and doctor's bd surface (bdCLI) has no
+// method that runs gc at all.
+func TestWispGCCheckFixDeletesNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRigsFixture(t, town, "rig1")
+	clk := clockwork.NewFakeClockAt(beadsfake.Epoch)
+	bd := newFakeBD()
+	db := wispRig(t, bd, town, "rig1", clk)
+	clk.Advance(2 * time.Hour)
+	before, err := db.MolWispList()
+	if err != nil {
 		t.Fatal(err)
 	}
-	db.FailWith("mol wisp gc", errors.New("dolt unreachable"))
-	c := NewWispGCCheck()
-	ctx := bd.ctx(town)
-	c.Run(ctx)
-	if err := c.Fix(ctx); err == nil || !strings.Contains(err.Error(), "rig1") || !strings.Contains(err.Error(), "dolt unreachable") {
-		t.Errorf("Fix = %v, want rig1's gc failure", err)
+
+	check := NewWispGCCheck()
+	if check.CanFix() {
+		t.Fatal("wisp-gc is fixable; doctor --fix would run it")
+	}
+	d := NewDoctor()
+	d.Register(check)
+	report := d.Fix(bd.ctx(town))
+	for _, r := range report.Checks {
+		if r.Fixed {
+			t.Errorf("%s reported fixed", r.Name)
+		}
+	}
+	after, err := db.MolWispList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) || len(after) != 3 {
+		t.Errorf("wisps after doctor --fix = %d, before %d; want all 3 open or in-progress wisps kept", len(after), len(before))
+	}
+	if cands, _ := db.WispGCCandidates(time.Hour); len(cands) != 2 {
+		t.Errorf("gc candidates after doctor --fix = %v, want both still there", cands)
 	}
 }
 
@@ -102,8 +146,8 @@ func TestWispGCCheckListFailureCountsNothing(t *testing.T) {
 	town := t.TempDir()
 	writeRigsFixture(t, town, "rig1")
 	bd := newFakeBD()
-	bd.db(filepath.Join(town, "rig1")).FailWith("mol wisp list", errors.New("no wisps table"))
+	bd.db(filepath.Join(town, "rig1")).FailWith("mol wisp gc", errors.New("no wisps table"))
 	if r := NewWispGCCheck().Run(bd.ctx(town)); r.Status != StatusOK {
-		t.Errorf("Run = %v %q, want OK when the wisp list fails", r.Status, r.Message)
+		t.Errorf("Run = %v %q, want OK when the dry run fails", r.Status, r.Message)
 	}
 }

@@ -1,5 +1,7 @@
 package beads
 
+import "time"
+
 // Client is the issue-store surface that code outside this package uses
 // most: reading, listing, creating, updating and closing issues, their
 // comments and dependencies, the ready queue, and claim release. *Beads
@@ -59,3 +61,19 @@ type Client interface {
 }
 
 var _ Client = (*Beads)(nil)
+
+// Admin is the maintenance surface beadsfake models: config keys, table
+// probes, counts, stats, the wisp list and gc's dry-run candidates.
+// beadsfake.RunAdminContract pins the fake to *Beads on it. (SQL, SQLCSV and
+// InitDatabase are on *Beads too, but a fake can only script or record them.)
+type Admin interface {
+	ConfigGet(key string) (string, error)
+	ConfigSet(key, value string) error
+	CountIssues() (int, error)
+	TableExists(name string) bool
+	StatsJSON() ([]byte, error)
+	MolWispList() ([]*Issue, error)
+	WispGCCandidates(age time.Duration) ([]string, error)
+}
+
+var _ Admin = (*Beads)(nil)

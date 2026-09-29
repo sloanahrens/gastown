@@ -11,8 +11,8 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// TestIntegrationClientContract runs the Client contract against bd on a
-// database from the shared test Dolt container's pool, through the exported
+// TestIntegrationClientContract runs the Client and Admin contracts against
+// bd on databases from the shared test Dolt container's pool, through the exported
 // constructor. It needs GT_TEST_DOCKER=1 and Docker (run it under gt slot
 // run); without them it fails rather than skips.
 func TestIntegrationClientContract(t *testing.T) {
@@ -26,8 +26,11 @@ func TestIntegrationClientContract(t *testing.T) {
 	if err != nil || port == 0 {
 		t.Fatalf("no Dolt test container (port %q): %v", testutil.DoltContainerPort(), err)
 	}
-	newDB := func(t *testing.T) *beads.Beads {
-		b := beads.NewIsolatedWithPort(t.TempDir(), port)
+	// One database per contract: the client cases share theirs (each asserts
+	// only on its own issues), the admin cases run in turn on theirs. Two bd
+	// inits a run instead of one per case.
+	newDB := func(t *testing.T, dir string) *beads.Beads {
+		b := beads.NewIsolatedWithPort(dir, port)
 		if err := b.Init("gt"); err != nil {
 			t.Fatalf("bd init on the test container: %v", err)
 		}
@@ -35,10 +38,11 @@ func TestIntegrationClientContract(t *testing.T) {
 	}
 	t.Run("client", func(t *testing.T) {
 		t.Parallel()
-		beadsfake.RunClientContract(t, func(t *testing.T) beads.Client { return newDB(t) })
+		shared := newDB(t, t.TempDir())
+		beadsfake.RunClientContract(t, func(*testing.T) beads.Client { return shared })
 	})
 	t.Run("admin", func(t *testing.T) {
 		t.Parallel()
-		beadsfake.RunAdminContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t) })
+		beadsfake.RunAdminContract(t, func(t *testing.T) beadsfake.AdminClient { return newDB(t, t.TempDir()) })
 	})
 }

@@ -51,6 +51,9 @@ type Fake struct {
 	prefix string
 	actor  string
 	clock  clockwork.Clock
+	// own is the default clock when no WithClock was given. It moves one
+	// second at every write, as timestamps on a real database move on.
+	own *clockwork.FakeClock
 	seq    int
 	issues map[string]*record
 
@@ -60,7 +63,6 @@ type Fake struct {
 	sql      func(query string) ([][]string, error)
 	sqlLog   []string
 	inits    []beads.InitOptions
-	gcCalls  int
 	failures map[string]error
 }
 
@@ -74,19 +76,22 @@ func WithPrefix(p string) Option { return func(f *Fake) { f.prefix = p } }
 // (default "tester").
 func WithActor(a string) Option { return func(f *Fake) { f.actor = a } }
 
-// WithClock sets the clock timestamps come from (default a fake clock at a
-// fixed epoch).
-func WithClock(c clockwork.Clock) Option { return func(f *Fake) { f.clock = c } }
+// WithClock sets the clock timestamps come from. The default is a fake clock
+// at Epoch that the Fake advances one second at every write; a clock given
+// here is only read.
+func WithClock(c clockwork.Clock) Option { return func(f *Fake) { f.clock, f.own = c, nil } }
 
 // Epoch is the default fake clock's start.
 var Epoch = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 // New returns an empty database.
 func New(opts ...Option) *Fake {
+	own := clockwork.NewFakeClockAt(Epoch)
 	f := &Fake{
 		prefix: "gt",
 		actor:  "tester",
-		clock:  clockwork.NewFakeClockAt(Epoch),
+		clock:  own,
+		own:    own,
 		issues: map[string]*record{},
 	}
 	for _, o := range opts {
@@ -96,6 +101,14 @@ func New(opts ...Option) *Fake {
 }
 
 func (f *Fake) now() string { return f.clock.Now().UTC().Format(time.RFC3339) }
+
+// tick moves the Fake's own clock one second, at the start of every write.
+// Callers hold f.mu.
+func (f *Fake) tick() {
+	if f.own != nil {
+		f.own.Advance(time.Second)
+	}
+}
 
 func notFound(id string) error { return fmt.Errorf("%s: %w", id, beads.ErrNotFound) }
 
@@ -122,14 +135,19 @@ func (f *Fake) snapshot(r *record) *beads.Issue {
 	return &is
 }
 
-// ordered returns every record, newest first (bd lists newest first).
-// Callers hold f.mu.
+// ordered returns every record in bd list's order: priority first (0 is
+// highest), then newest first. Callers hold f.mu.
 func (f *Fake) ordered() []*record {
 	out := make([]*record, 0, len(f.issues))
 	for _, r := range f.issues {
 		out = append(out, r)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].seq > out[j].seq })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].issue.Priority != out[j].issue.Priority {
+			return out[i].issue.Priority < out[j].issue.Priority
+		}
+		return out[i].seq > out[j].seq
+	})
 	return out
 }
 
@@ -347,6 +365,7 @@ func (f *Fake) Create(opts beads.CreateOptions) (*beads.Issue, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.tick()
 	f.seq++
 	id := fmt.Sprintf("%s-f%d", f.prefix, f.seq)
 	var deps []edge
@@ -359,7 +378,7 @@ func (f *Fake) Create(opts beads.CreateOptions) (*beads.Issue, error) {
 		id = fmt.Sprintf("%s.%d", opts.Parent, p.children)
 		deps = append(deps, edge{to: opts.Parent, typ: depParentChild})
 	}
-	if opts.Ephemeral {
+	if opts.Ephemeral && opts.Parent == "" {
 		id = fmt.Sprintf("%s-wisp-%d", f.prefix, f.seq)
 	}
 	labels := opts.Labels
@@ -486,13 +505,11 @@ func errOpenChildren(id string, n int) error {
 }
 
 // setStatus moves r to status, stamping or clearing the close fields as bd
-// does. Callers hold f.mu.
+// does. reason is recorded as given: bd close defaults it to "Closed", an
+// update to status closed leaves it empty. Callers hold f.mu.
 func (f *Fake) setStatus(r *record, status, reason string) {
 	r.issue.Status = status
 	if status == string(beads.StatusClosed) {
-		if reason == "" {
-			reason = defaultCloseReason
-		}
 		r.issue.ClosedAt = f.now()
 		r.issue.CloseReason = reason
 		return
@@ -513,6 +530,7 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 	if !ok {
 		return notFound(id)
 	}
+	f.tick()
 	if !opts.Force {
 		if opts.Assignee != nil && r.issue.Status == string(beads.StatusInProgress) &&
 			r.issue.Assignee != "" && r.issue.Assignee != *opts.Assignee {
@@ -567,11 +585,18 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 func (f *Fake) close(reason string, force bool, ids []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.tick()
+	if reason == "" {
+		reason = defaultCloseReason
+	}
+	// A missing ID fails the whole batch before anything closes, as bd does.
 	for _, id := range ids {
-		r, ok := f.issues[id]
-		if !ok {
+		if _, ok := f.issues[id]; !ok {
 			return notFound(id)
 		}
+	}
+	for _, id := range ids {
+		r := f.issues[id]
 		if !force {
 			if err := f.closeRefusal(r); err != nil {
 				return err
@@ -609,6 +634,7 @@ func (f *Fake) ReleaseWithReason(id, reason string) error {
 	if !ok {
 		return notFound(id)
 	}
+	f.tick()
 	f.setStatus(r, string(beads.StatusOpen), "")
 	r.issue.Assignee = ""
 	if reason != "" {
@@ -626,6 +652,7 @@ func (f *Fake) AddComment(id, text string) error {
 	if !ok {
 		return notFound(id)
 	}
+	f.tick()
 	r.comments = append(r.comments, beads.Comment{
 		ID:        fmt.Sprintf("c%d", len(r.comments)+1),
 		IssueID:   id,

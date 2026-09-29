@@ -38,6 +38,13 @@ func (f *fakeBD) db(dir string) *beadsfake.Fake {
 	return d
 }
 
+// put makes d the database for dir.
+func (f *fakeBD) put(dir string, d *beadsfake.Fake) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dbs[filepath.Clean(dir)] = d
+}
+
 func (f *fakeBD) open(dir string, env []string) bdCLI {
 	d := f.db(dir)
 	f.mu.Lock()

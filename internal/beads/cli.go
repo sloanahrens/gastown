@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Typed wrappers over the bd maintenance subcommands (config, sql, stats,
@@ -150,8 +151,21 @@ func parseMolWispList(out []byte) ([]*Issue, error) {
 	return wisps, nil
 }
 
-// GCWisps runs bd mol wisp gc, which deletes abandoned wisps.
-func (b *Beads) GCWisps() error {
-	_, err := b.run("mol", "wisp", "gc")
-	return err
+// WispGCCandidates returns the IDs bd mol wisp gc would delete for an age
+// threshold, without deleting anything (--dry-run): open wisps idle longer
+// than age that nothing blocks, hooks or pins, and their unprotected
+// dependents. gastown deliberately has no method that runs the real gc: an
+// open merge-request wisp queued past the threshold is a candidate too.
+func (b *Beads) WispGCCandidates(age time.Duration) ([]string, error) {
+	out, err := b.run("mol", "wisp", "gc", "--dry-run", "--json", "--age", age.String())
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		CleanedIDs []string `json:"cleaned_ids"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &res); err != nil {
+		return nil, fmt.Errorf("parsing bd mol wisp gc --dry-run: %w", err)
+	}
+	return res.CleanedIDs, nil
 }

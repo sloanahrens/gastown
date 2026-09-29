@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newPlainRecorded(t *testing.T, r *recorder) *Beads {
@@ -24,6 +25,8 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 			return reply{stdout: "routing.mode (not set)\n"}
 		case "sql --csv SELECT COUNT(*) as cnt FROM issues":
 			return reply{stdout: "cnt\n7\n", stderr: "warning: noise on stderr\n"}
+		case "mol wisp gc --dry-run --json --age 1h30m0s":
+			return reply{stdout: `{"cleaned_ids":[],"cleaned_count":0,"dry_run":true}`}
 		case "sql SELECT 1 FROM `nosuch` LIMIT 1":
 			return reply{stderr: "Error: table not found: nosuch", err: exitError{1}}
 		}
@@ -54,7 +57,7 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 	if err := b.InitDatabase(InitOptions{Database: "hq"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.GCWisps(); err != nil {
+	if _, err := b.WispGCCandidates(90 * time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -67,7 +70,7 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 		"stats --json",
 		"init --prefix gt --database gastown --server --server-port 3307 --force --destroy-token=DESTROY-gt",
 		"init --database hq --server",
-		"mol wisp gc",
+		"mol wisp gc --dry-run --json --age 1h30m0s",
 	}
 	if got := r.argvs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("argv:\n got %q\nwant %q", got, want)
@@ -153,5 +156,21 @@ func TestMolWispListReadsBdObject(t *testing.T) {
 	var cliErr *CLIError
 	if _, err := newPlainRecorded(t, r).MolWispList(); !errors.As(err, &cliErr) {
 		t.Errorf("failure = %v, want *CLIError", err)
+	}
+}
+
+// TestWispGCCandidatesReadsDryRun pins the dry-run object bd prints
+// (cmd/bd/wisp.go WispGCResult) and that only a dry run is ever sent.
+func TestWispGCCandidatesReadsDryRun(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func([]string) reply {
+		return reply{stdout: `{"cleaned_ids":["gt-wisp-a","gt-wisp-b"],"cleaned_count":0,"candidates":2,"dry_run":true}`}
+	})
+	got, err := newPlainRecorded(t, r).WispGCCandidates(time.Hour)
+	if err != nil || !reflect.DeepEqual(got, []string{"gt-wisp-a", "gt-wisp-b"}) {
+		t.Fatalf("WispGCCandidates = %v, %v", got, err)
+	}
+	if argv := r.argvs(); len(argv) != 1 || argv[0] != "mol wisp gc --dry-run --json --age 1h0m0s" {
+		t.Errorf("argv = %q", argv)
 	}
 }

@@ -4,23 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// Admin is the bd maintenance surface: config keys, table probes, stats and
-// wisp listing, as *beads.Beads provides them. RunAdminContract pins the
-// fake to bd on it.
-type Admin interface {
-	ConfigGet(key string) (string, error)
-	ConfigSet(key, value string) error
-	CountIssues() (int, error)
-	TableExists(name string) bool
-	StatsJSON() ([]byte, error)
-	MolWispList() ([]*beads.Issue, error)
-}
-
-var _ Admin = (*Fake)(nil)
+var _ beads.Admin = (*Fake)(nil)
 
 // bdTables are the tables a fresh bd database has that callers probe for.
 var bdTables = []string{"issues", "wisps", "labels", "wisp_labels", "dependencies", "wisp_dependencies", "comments", "events", "config"}
@@ -146,23 +135,63 @@ func (f *Fake) MolWispList() ([]*beads.Issue, error) {
 	return out, nil
 }
 
-// GCWisps records a bd mol wisp gc. Garbage collection is not modeled:
-// nothing is deleted. GCCount reports the calls.
-func (f *Fake) GCWisps() error {
+// protectedStatuses are the statuses bd's age gc never reclaims: work in
+// progress (in_progress, blocked, hooked) and frozen (deferred, pinned).
+var protectedStatuses = map[string]bool{
+	"in_progress": true, "blocked": true, "hooked": true, "deferred": true, "pinned": true,
+}
+
+// WispGCCandidates returns the wisps bd mol wisp gc --dry-run reports for
+// age: open wisps idle longer than age that no open issue blocks and no
+// open issue hooks (hook_bead), plus, as bd cascades, their unprotected
+// wisp dependents of any age. Nothing is deleted; the Fake has no gc.
+func (f *Fake) WispGCCandidates(age time.Duration) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failure("mol wisp gc"); err != nil {
-		return err
+		return nil, err
 	}
-	f.gcCalls++
-	return nil
-}
-
-// GCCount is how many times GCWisps ran.
-func (f *Fake) GCCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.gcCalls
+	hooked := map[string]bool{}
+	for _, r := range f.issues {
+		if r.issue.HookBead != "" && r.issue.Status != string(beads.StatusClosed) {
+			hooked[r.issue.HookBead] = true
+		}
+	}
+	protected := func(r *record) bool {
+		return !r.issue.Ephemeral || r.issue.Status == string(beads.StatusClosed) ||
+			protectedStatuses[r.issue.Status] || f.blocked(r) || hooked[r.issue.ID]
+	}
+	now := f.clock.Now()
+	picked := map[string]bool{}
+	var out []string
+	for _, r := range f.ordered() {
+		if protected(r) {
+			continue
+		}
+		updated, err := time.Parse(time.RFC3339, r.issue.UpdatedAt)
+		if err == nil && now.Sub(updated) > age {
+			picked[r.issue.ID] = true
+			out = append(out, r.issue.ID)
+		}
+	}
+	// Cascade: wisps depending on a candidate, transitively.
+	for grew := true; grew; {
+		grew = false
+		for _, r := range f.ordered() {
+			if picked[r.issue.ID] || protected(r) {
+				continue
+			}
+			for _, e := range r.deps {
+				if picked[e.to] {
+					picked[r.issue.ID] = true
+					out = append(out, r.issue.ID)
+					grew = true
+					break
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // InitDatabase records a bd init and sets issue_prefix when opts has one.
@@ -240,7 +269,7 @@ func (f *Fake) SQL(query string) ([]byte, error) {
 // FailWith makes the maintenance command named by op fail with err until
 // cleared with a nil err. op is the bd subcommand as the fake names it:
 // "config get <key>", "config set <key>", "stats", "mol wisp list",
-// "mol wisp gc" or "init".
+// "mol wisp gc" (the dry run) or "init".
 func (f *Fake) FailWith(op string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
