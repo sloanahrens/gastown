@@ -3490,17 +3490,34 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 	info, err := d.getAgentBeadInfo(agentBeadID)
 	if err != nil {
-		// Agent bead doesn't exist or error - polecat might not be registered
+		// Not found or unreadable is UNKNOWN, not "not registered": say so,
+		// so a crash detector running blind is visible in the log (G1-01).
+		d.logger.Printf("UNKNOWN: crash detection for %s/%s skipped: session %s is dead but agent bead %s could not be read: %v",
+			rigName, polecatName, sessionName, agentBeadID, err)
 		return
 	}
 
-	// Check if polecat has hooked work
-	if info.HookBead == "" {
-		// No hooked work - this polecat is orphaned (should have self-nuked).
-		// Self-cleaning model: polecats nuke themselves on completion.
-		// An orphan with a dead session doesn't need restart - it needs cleanup.
-		// Let the Witness handle orphan detection/cleanup during patrol.
-		return
+	// Find the hooked work. The agent bead's hook_bead slot has not been
+	// written since hq-l6mm5 (updateAgentHookBead is a no-op); the work
+	// bead's status+assignee is authoritative. Use the slot only when a
+	// legacy row still carries it.
+	hookBead := info.HookBead
+	if hookBead == "" {
+		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+		work, werr := d.assignedActiveWorkBead(rigName, assignee)
+		if werr != nil {
+			d.logger.Printf("UNKNOWN: crash detection for %s/%s skipped: session %s is dead and assigned work could not be read: %v",
+				rigName, polecatName, sessionName, werr)
+			return
+		}
+		if work == "" {
+			// No hooked work - this polecat is orphaned (should have self-nuked).
+			// Self-cleaning model: polecats nuke themselves on completion.
+			// An orphan with a dead session doesn't need restart - it needs cleanup.
+			// Let the Witness handle orphan detection/cleanup during patrol.
+			return
+		}
+		hookBead = work
 	}
 
 	// Terminal state guard: skip polecats in intentional shutdown states.
@@ -3522,9 +3539,9 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// but may not be cleared from the agent bead before the session stops.
 	// Without this check, every heartbeat cycle fires a false CRASHED_POLECAT alert
 	// for the dead session + non-empty hook_bead combination.
-	if d.isBeadClosed(info.HookBead) {
+	if d.isBeadClosed(hookBead) {
 		d.logger.Printf("Skipping crash detection for %s/%s: hook_bead %s is already closed (work completed normally)",
-			rigName, polecatName, info.HookBead)
+			rigName, polecatName, hookBead)
 		return
 	}
 
@@ -3565,7 +3582,7 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 
 	// Polecat has work but session is dead - this is a crash!
 	d.logger.Printf("CRASH DETECTED: polecat %s/%s has hook_bead=%s but session %s is dead",
-		rigName, polecatName, info.HookBead, sessionName)
+		rigName, polecatName, hookBead, sessionName)
 
 	// Track this death for mass death detection
 	d.recordSessionDeath(sessionName)
@@ -3575,7 +3592,7 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		events.SessionDeathPayload(sessionName, rigName+"/polecats/"+polecatName, "crash detected by daemon health check", "daemon"))
 
 	// Notify witness — stuck-agent-dog plugin handles context-aware restart
-	d.notifyWitnessOfCrashedPolecat(rigName, polecatName, info.HookBead)
+	d.notifyWitnessOfCrashedPolecat(rigName, polecatName, hookBead)
 }
 
 // recordSessionDeath records a session death and checks for mass death pattern.
@@ -3677,6 +3694,48 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 		}
 	}
 	return false
+}
+
+// assignedActiveWorkBead returns the ID of a work bead assigned to the polecat
+// with status hooked or in_progress, read from the rig's database the way
+// hasAssignedOpenWork does, or "" when there is none. An error means every
+// query failed, so the answer is unknown.
+func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error) {
+	rigDir := beads.GetRigDirForName(d.config.TownRoot, rigName)
+	var lastErr error
+	failed := 0
+	statuses := []string{"hooked", "in_progress"}
+	for _, status := range statuses {
+		args := beads.InjectFlatForListJSON([]string{"list", "--assignee=" + assignee, "--status=" + status, "--json"})
+		env := bdReadOnlyRoutingEnv(d.config.TownRoot)
+		if rigDir != "" {
+			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
+		}
+		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
+		output, err := cmd.Output()
+		if err != nil {
+			lastErr = err
+			failed++
+			continue
+		}
+		var issues []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(output, &issues); err != nil {
+			lastErr = fmt.Errorf("parsing bd list output: %w", err)
+			failed++
+			continue
+		}
+		for _, issue := range issues {
+			if issue.ID != "" {
+				return issue.ID, nil
+			}
+		}
+	}
+	if failed == len(statuses) {
+		return "", lastErr
+	}
+	return "", nil
 }
 
 // notifyWitnessOfCrashedPolecat notifies the witness when a polecat crash is detected.

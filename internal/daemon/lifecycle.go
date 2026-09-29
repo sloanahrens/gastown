@@ -824,22 +824,36 @@ func (d *Daemon) getAgentBeadState(agentBeadID string) (string, error) {
 	return info.State, nil
 }
 
-// getAgentBeadInfo fetches and parses an agent bead by ID.
+// agentBeadsDir returns the database an agent bead canonically lives in: the
+// one its prefix routes to, rig-local for rig-prefixed agents and the town for
+// hq- agents. This is the resolver beads.ForAgentBead uses (gt-a6g completed
+// the gt-8we migration; there is no town fallback for rig-prefixed IDs).
 //
-// Agent beads (gt:agent-labeled, one per polecat/witness/refinery/dog) live
-// in the town/hq Dolt DB but their IDs carry the rig prefix (e.g. za-zack-
-// polecat-furiosa). Without forcing BEADS_DIR to the town's .beads, prefix
-// routing would send the lookup to the rig's DB and return "issue not found"
-// — which the reaper at daemon.go:2796 interprets as a stale polecat and
-// kills mid-work after 3x threshold (hq-3kri). Pin the lookup to the town
-// .beads so the reaper sees the truth.
+// The daemon used to pin every agent-bead read to the town .beads (hq-3kri,
+// from when agent rows lived there). After gt-prk moved them rig-local, that
+// pin read "not found" or a stale legacy row, and crash detection, GUPP and
+// the orphaned-work scan ran blind (G1-01).
+func (d *Daemon) agentBeadsDir(agentBeadID string) string {
+	return beads.ResolveBeadsDirForID(beads.GetTownBeadsPath(d.config.TownRoot), agentBeadID)
+}
+
+// rigAgentBeadsDir returns the database holding rigName's polecat agent beads,
+// resolved the same way as a single polecat agent bead ID.
+func (d *Daemon) rigAgentBeadsDir(rigName string) string {
+	prefix := beads.GetPrefixForRig(d.config.TownRoot, rigName)
+	return d.agentBeadsDir(beads.PolecatBeadIDWithPrefix(prefix, rigName, "probe"))
+}
+
+// getAgentBeadInfo fetches and parses an agent bead by ID from its canonical
+// database (see agentBeadsDir).
 func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
-	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "show", agentBeadID, "--json")
+	beadsDir := d.agentBeadsDir(agentBeadID)
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(beadsDir), "show", agentBeadID, "--json")
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("bd show %s: %w", agentBeadID, err)
+		return nil, fmt.Errorf("bd show %s (BEADS_DIR=%s): %w", agentBeadID, beadsDir, err)
 	}
 
 	// bd show --json returns an array with one element
@@ -858,7 +872,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	}
 
 	if len(issues) == 0 {
-		return nil, fmt.Errorf("agent bead not found: %s", agentBeadID)
+		return nil, fmt.Errorf("agent bead not found: %s (BEADS_DIR=%s)", agentBeadID, beadsDir)
 	}
 
 	issue := issues[0]
@@ -893,7 +907,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 // Used for TOCTOU re-verification before taking destructive action on agents.
 // Returns empty string on error or if no hook_bead is set.
 func (d *Daemon) getAgentHookBead(agentBeadID string) string {
-	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "show", agentBeadID, "--json")
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(d.agentBeadsDir(agentBeadID)), "show", agentBeadID, "--json")
 	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
@@ -978,18 +992,20 @@ func identityToBDActor(identity string) string {
 // Defined in constants package — this alias avoids updating all call sites.
 const GUPPViolationTimeout = constants.GUPPViolationTimeout
 
-// listAgentBeadsJSON queries both the issues and wisps tables for agent beads
-// and unmarshals the combined results into the provided slice pointer.
-// The wisps query is best-effort (gracefully ignored if table doesn't exist).
-func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
+// listAgentBeadsJSON queries both the issues and wisps tables of rigName's
+// agent-bead database (see rigAgentBeadsDir) and unmarshals the combined
+// results into the provided slice pointer. The wisps query is best-effort
+// (gracefully ignored if table doesn't exist).
+func (d *Daemon) listAgentBeadsJSON(rigName string, dest interface{}) error {
+	beadsDir := d.rigAgentBeadsDir(rigName)
 	// Query issues table (backward compat during migration)
-	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "list", "--label=gt:agent", "--json", "--flat")
+	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(beadsDir), "list", "--label=gt:agent", "--json", "--flat")
 	util.SetDetachedProcessGroup(cmd)
 
 	issuesOutput, issuesErr := cmd.Output()
 
 	// Query wisps table (primary source after agent bead migration)
-	wispCmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(filepath.Join(d.config.TownRoot, ".beads")), "mol", "wisp", "list", "--json")
+	wispCmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyPinnedEnv(beadsDir), "mol", "wisp", "list", "--json")
 	util.SetDetachedProcessGroup(wispCmd)
 
 	wispOutput, _ := wispCmd.Output() // Best-effort: wisps table may not exist
@@ -998,9 +1014,9 @@ func (d *Daemon) listAgentBeadsJSON(dest interface{}) error {
 	combined := mergeAgentBeadJSON(wispOutput, issuesOutput)
 	if combined == nil {
 		if issuesErr != nil {
-			return fmt.Errorf("bd list failed: %w", issuesErr)
+			return fmt.Errorf("bd list failed (BEADS_DIR=%s): %w", beadsDir, issuesErr)
 		}
-		return fmt.Errorf("no agent beads found")
+		return fmt.Errorf("no agent beads found (BEADS_DIR=%s)", beadsDir)
 	}
 
 	return json.Unmarshal(combined, dest)
@@ -1093,7 +1109,7 @@ func (d *Daemon) checkRigGUPPViolations(rigName string) {
 		Type        string   `json:"issue_type"`
 	}
 
-	if err := d.listAgentBeadsJSON(&agents); err != nil {
+	if err := d.listAgentBeadsJSON(rigName, &agents); err != nil {
 		// Suppress warning when there are simply no agent beads (expected when all rigs are docked)
 		d.logger.Printf("Warning: listing agent beads failed for GUPP check: %v", err)
 		return
@@ -1209,7 +1225,7 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 		Type        string   `json:"issue_type"`
 	}
 
-	if err := d.listAgentBeadsJSON(&agents); err != nil {
+	if err := d.listAgentBeadsJSON(rigName, &agents); err != nil {
 		d.logger.Printf("Warning: listing agent beads failed for orphaned work check: %v", err)
 		return
 	}
