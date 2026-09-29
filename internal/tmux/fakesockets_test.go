@@ -21,13 +21,17 @@ const (
 )
 
 // fakeSockets is a scripted socket directory for the socketOps seam. Its dial
-// answers are the ones real connect(2) gives on macOS and Linux for each kind
-// of file; the TestIntegration socket tests pin that behavior.
+// answers are the ones real connect(2) gives for each kind of file; the
+// TestIntegration socket tests pin that behavior. The two kernels differ on a
+// path that is not a socket: macOS answers ENOTSOCK, Linux ECONNREFUSED — the
+// same answer as a dead socket (af_unix refuses any inode that is not a
+// socket). linuxConnect selects Linux's answer.
 type fakeSockets struct {
-	mu       sync.Mutex
-	files    map[string]sockState
-	dialErrs map[string][]error // queued answers, consumed before the state's
-	removed  []string
+	mu           sync.Mutex
+	files        map[string]sockState
+	dialErrs     map[string][]error // queued answers, consumed before the state's
+	removed      []string
+	linuxConnect bool
 }
 
 func newFakeSockets() *fakeSockets {
@@ -99,6 +103,9 @@ func (f *fakeSockets) ops() *socketOps {
 			case sockLive:
 				return nil
 			default: // regular file, directory, symlink to a non-socket
+				if f.linuxConnect {
+					return op(syscall.ECONNREFUSED)
+				}
 				return op(syscall.ENOTSOCK)
 			}
 		},

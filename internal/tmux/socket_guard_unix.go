@@ -89,9 +89,10 @@ const (
 // exits, so without this the file outlives its server forever (gt-20di).
 //
 // A live listener is left alone: a refused connection is the only proof that
-// nothing is behind the file. That also covers a path that cannot be dialed at
-// all — a plain file sitting where a socket belongs, the shape gt-h9z guards
-// against — which is not this function's state to change.
+// nothing is behind the file. A path that is not a socket at all — a plain
+// file sitting where a socket belongs, the shape gt-h9z guards against — is
+// not this function's state to change, and is checked by its mode, since
+// Linux refuses a connect to it just as it refuses a dead socket.
 func unlinkDeadSocketFile(clk clockwork.Clock, ops socketOps, socketPath string) {
 	deadline := clk.Now().Add(socketUnlinkWait)
 	for {
@@ -100,7 +101,14 @@ func unlinkDeadSocketFile(clk clockwork.Clock, ops socketOps, socketPath string)
 			return
 		}
 		if stale {
-			_ = ops.remove(socketPath)
+			// The refusal is proof only for a socket. Linux refuses a connect
+			// to any inode that is not a socket with the same ECONNREFUSED a
+			// dead socket gets, so without this a plain file, a directory or
+			// a symlink at the path read as a dead socket and was deleted
+			// (gt-22hdp.39; macOS answers ENOTSOCK, which hid it).
+			if info, err := ops.lstat(socketPath); err == nil && info.Mode()&os.ModeSocket != 0 {
+				_ = ops.remove(socketPath)
+			}
 			return
 		}
 		if !clk.Now().Before(deadline) {
