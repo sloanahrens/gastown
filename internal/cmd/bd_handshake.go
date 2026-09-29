@@ -81,8 +81,12 @@ var (
 	// town root. Tests replace it; nothing else should.
 	bdHandshakeCheck = defaultBDHandshakeCheck
 
-	bdHandshakeOnce sync.Once
-	bdHandshakeErr  error
+	// bdHandshakePassed remembers a pass for the life of the process. A
+	// refusal is not remembered: the daemon starts sessions for hours, and
+	// once the operator installs the right bd or Dolt recovers, the next
+	// session start must see it.
+	bdHandshakeMu     sync.Mutex
+	bdHandshakePassed bool
 )
 
 func defaultBDHandshakeCheck(ctx context.Context) (*deps.BDHandshake, error) {
@@ -101,15 +105,28 @@ func requiresBDHandshake(cmd *cobra.Command) bool {
 	return cmd != nil && bdHandshakeGatedCommands[cmd.CommandPath()]
 }
 
-// requireBDHandshake runs the handshake once per process and returns its
-// refusal, if any.
+// requireBDHandshake returns the handshake's refusal, if any. A pass is
+// cached for the process; a refusal is re-checked on the next call.
 func requireBDHandshake() error {
-	bdHandshakeOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), bdHandshakeTimeout)
-		defer cancel()
-		_, bdHandshakeErr = bdHandshakeCheck(ctx)
-	})
-	return bdHandshakeErr
+	bdHandshakeMu.Lock()
+	defer bdHandshakeMu.Unlock()
+	if bdHandshakePassed {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bdHandshakeTimeout)
+	defer cancel()
+	if _, err := bdHandshakeCheck(ctx); err != nil {
+		return err
+	}
+	bdHandshakePassed = true
+	return nil
+}
+
+// resetBDHandshakeCache forgets a cached pass (tests).
+func resetBDHandshakeCache() {
+	bdHandshakeMu.Lock()
+	defer bdHandshakeMu.Unlock()
+	bdHandshakePassed = false
 }
 
 // installSessionGate makes every agent-session start in this process run the

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -23,12 +22,10 @@ func stubBDHandshake(t *testing.T, fn func(ctx context.Context) (*deps.BDHandsha
 		calls++
 		return fn(ctx)
 	}
-	bdHandshakeOnce = sync.Once{}
-	bdHandshakeErr = nil
+	resetBDHandshakeCache()
 	t.Cleanup(func() {
 		bdHandshakeCheck = old
-		bdHandshakeOnce = sync.Once{}
-		bdHandshakeErr = nil
+		resetBDHandshakeCache()
 	})
 	return &calls
 }
@@ -84,11 +81,35 @@ func TestPersistentPreRunRefusesGatedCommandOnFailedHandshake(t *testing.T) {
 	if !errors.Is(err, deps.ErrBDHandshake) {
 		t.Fatalf("persistentPreRun(gt up) = %v, want the handshake refusal", err)
 	}
-	if err := requireBDHandshake(); !errors.Is(err, deps.ErrBDHandshake) {
-		t.Fatalf("cached result lost: %v", err)
-	}
 	if *calls != 1 {
-		t.Errorf("handshake ran %d times, want once per process", *calls)
+		t.Errorf("handshake ran %d times, want 1", *calls)
+	}
+}
+
+// TestRequireBDHandshakeCachesOnlySuccess: a long-lived process (the daemon
+// starts sessions for hours) must recover once bd or Dolt is fixed, so a
+// refusal is re-checked on the next call and only a pass is remembered.
+func TestRequireBDHandshakeCachesOnlySuccess(t *testing.T) {
+	fail := true
+	calls := stubBDHandshake(t, func(context.Context) (*deps.BDHandshake, error) {
+		if fail {
+			return nil, fmt.Errorf("%w: store unavailable", deps.ErrBDHandshake)
+		}
+		return &deps.BDHandshake{DBSchema: 66}, nil
+	})
+	if err := requireBDHandshake(); err == nil {
+		t.Fatal("first call: want refusal")
+	}
+	fail = false
+	if err := requireBDHandshake(); err != nil {
+		t.Fatalf("after bd was fixed: %v", err)
+	}
+	fail = true
+	if err := requireBDHandshake(); err != nil {
+		t.Fatalf("a pass must be cached: %v", err)
+	}
+	if *calls != 2 {
+		t.Errorf("handshake ran %d times, want 2 (refusal re-checked, pass cached)", *calls)
 	}
 }
 
