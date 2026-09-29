@@ -1,11 +1,13 @@
 package rig
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -349,5 +351,35 @@ func TestGetConfig_BeadLabel(t *testing.T) {
 	// Either SourceBead (if beads is set up) or SourceSystem
 	if result.Source != SourceBead && result.Source != SourceSystem {
 		t.Logf("source is %s (expected SourceBead or SourceSystem)", result.Source)
+	}
+}
+
+// TestGetConfig_BeadLabelThroughRunner pins the rig identity bead layer
+// through the Rig's BDRunner: the label on the bead the runner returns wins
+// over the system default, and the read names the rig identity bead.
+func TestGetConfig_BeadLabelThroughRunner(t *testing.T) {
+	t.Parallel()
+	rigPath := filepath.Join(t.TempDir(), "testrig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var shown []string
+	r := &Rig{
+		Name: "testrig",
+		Path: rigPath,
+		BDRunner: func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+			if len(c.Args) > 1 && c.Args[0] == "show" {
+				shown = append(shown, c.Args[1])
+				return []byte(`[{"id":"gt-rig-testrig","title":"testrig","status":"open","labels":["polecat_branch_template:team/{name}"]}]`), nil, nil
+			}
+			return nil, nil, nil
+		},
+	}
+	result := r.GetConfigWithSource("polecat_branch_template")
+	if result.Source != SourceBead || result.Value != "team/{name}" {
+		t.Fatalf("GetConfigWithSource = %+v, want the bead label team/{name}", result)
+	}
+	if len(shown) != 1 || shown[0] != "gt-rig-testrig" {
+		t.Fatalf("bd show calls = %v, want one read of gt-rig-testrig", shown)
 	}
 }

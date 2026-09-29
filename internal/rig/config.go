@@ -206,7 +206,7 @@ func (r *Rig) getBeadLabel(key string) interface{} {
 
 	// Load the bead
 	beadsDir := beads.ResolveBeadsDir(r.Path)
-	bd := beads.NewWithBeadsDir(r.Path, beadsDir)
+	bd := beads.NewWithBeadsDirAndRunner(r.Path, beadsDir, r.BDRunner)
 
 	issue, err := bd.Show(rigBeadID)
 	if err != nil {
