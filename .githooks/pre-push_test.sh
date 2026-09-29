@@ -217,8 +217,9 @@ unset GT_INTEGRATION_LAND 2>/dev/null || true
 assert_block "Integration merge blocked (no env var)" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
-# Test 7: Push to default branch with integration merge + GT_INTEGRATION_LAND=1 — ALLOWED
-echo "Test 7: Push to default branch with integration merge + GT_INTEGRATION_LAND=1"
+# Test 7: GT_INTEGRATION_LAND=1 no longer bypasses the integration guard —
+# gt mq integration land was removed (gt-fcxe9.4) — BLOCKED
+echo "Test 7: Push to default branch with integration merge + GT_INTEGRATION_LAND=1 — BLOCKED"
 setup_repos
 cd "$TMPDIR/local"
 git checkout -b integration/epic-3 >/dev/null 2>&1
@@ -230,7 +231,7 @@ git checkout "$DEFAULT_BRANCH" >/dev/null 2>&1
 remote_sha=$(get_sha HEAD)
 git merge --no-ff integration/epic-3 -m "land integration" >/dev/null 2>&1
 local_sha=$(get_sha HEAD)
-GT_INTEGRATION_LAND=1 assert_pass "Integration merge allowed (env var set)" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+GT_INTEGRATION_LAND=1 assert_block "Integration merge blocked even with GT_INTEGRATION_LAND=1" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
 # Test 8: Push to default branch with non-integration merge — allowed

@@ -55,11 +55,6 @@ var (
 	// Status command flags
 	mqStatusJSON bool
 
-	// Integration land flags
-	mqIntegrationLandForce     bool
-	mqIntegrationLandSkipTests bool
-	mqIntegrationLandDryRun    bool
-
 	// Integration status flags
 	mqIntegrationStatusJSON bool
 
@@ -370,12 +365,12 @@ var mqIntegrationCmd = &cobra.Command{
 	Long: `Manage integration branches for batch work on epics.
 
 Integration branches allow multiple MRs for an epic to target a shared
-branch instead of main. After all epic work is complete, the integration
-branch is landed to main as a single atomic unit.
+branch instead of main. gt does not land an integration branch on main:
+the unreviewed "land" command was removed (gt-fcxe9.4), and landing waits
+for the single landing path (gt-v4ssj).
 
 Commands:
   create  Create an integration branch for an epic
-  land    Merge integration branch to main
   status  Show integration branch status`,
 }
 
@@ -415,36 +410,6 @@ Examples:
   # Creates klauern/PROJ-1234/RA-123`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMqIntegrationCreate,
-}
-
-var mqIntegrationLandCmd = &cobra.Command{
-	Use:   "land <epic-id>",
-	Short: "Merge integration branch to main",
-	Long: `Merge an epic's integration branch to main.
-
-Lands all work for an epic by merging its integration branch to main
-as a single atomic merge commit.
-
-Actions:
-  1. Verify all MRs targeting integration/<epic> are merged
-  2. Verify integration branch exists
-  3. Merge integration/<epic> to main (--no-ff)
-  4. Run tests on main
-  5. Push to origin
-  6. Delete integration branch
-  7. Update epic status
-
-Options:
-  --force       Land even if some MRs still open
-  --skip-tests  Skip test run
-  --dry-run     Preview only, make no changes
-
-Examples:
-  gt mq integration land gt-auth-epic
-  gt mq integration land gt-auth-epic --dry-run
-  gt mq integration land gt-auth-epic --force --skip-tests`,
-	Args: cobra.ExactArgs(1),
-	RunE: runMqIntegrationLand,
 }
 
 var mqIntegrationStatusCmd = &cobra.Command{
@@ -516,12 +481,6 @@ func init() {
 	mqIntegrationCreateCmd.Flags().StringVar(&mqIntegrationCreateBaseBranch, "base-branch", "", "Create integration branch from this branch instead of main")
 	mqIntegrationCreateCmd.Flags().BoolVar(&mqIntegrationCreateForce, "force", false, "Recreate integration branch even if one already exists")
 	mqIntegrationCmd.AddCommand(mqIntegrationCreateCmd)
-
-	// Integration land flags
-	mqIntegrationLandCmd.Flags().BoolVar(&mqIntegrationLandForce, "force", false, "Land even if some MRs still open")
-	mqIntegrationLandCmd.Flags().BoolVar(&mqIntegrationLandSkipTests, "skip-tests", false, "Skip test run")
-	mqIntegrationLandCmd.Flags().BoolVar(&mqIntegrationLandDryRun, "dry-run", false, "Preview only, make no changes")
-	mqIntegrationCmd.AddCommand(mqIntegrationLandCmd)
 
 	// Integration status flags
 	mqIntegrationStatusCmd.Flags().BoolVar(&mqIntegrationStatusJSON, "json", false, "Output as JSON")

@@ -1299,10 +1299,8 @@ const (
 	EnvRefineryMerge = "GT_REFINERY_MERGE=1"
 )
 
-// PushWithEnv pushes with additional environment variables.
-// Used by gt mq integration land to set GT_INTEGRATION_LAND=1, which the
-// pre-push hook checks to allow integration branch content landing on main,
-// and by the Refinery landing named on EnvRefineryMerge above.
+// PushWithEnv pushes with additional environment variables. Used by the
+// Refinery landing named on EnvRefineryMerge above.
 func (g *Git) PushWithEnv(remote, branch string, force bool, env []string) error {
 	if err := g.RefuseForkBackedDefaultPush(remote, branch, g.RemoteDefaultBranch()); err != nil {
 		return err

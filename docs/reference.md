@@ -784,10 +784,6 @@ gt mq integration create <epic-id> --branch "feat/{title}"  # Custom template
 gt mq integration create <epic-id> --base-branch develop   # Non-main base
 gt mq integration status <epic-id>              # Show branch status
 gt mq integration status <epic-id> --json       # JSON output
-gt mq integration land <epic-id>                # Merge to base branch (default: main)
-gt mq integration land <epic-id> --dry-run      # Preview only
-gt mq integration land <epic-id> --force        # Land with open MRs
-gt mq integration land <epic-id> --skip-tests   # Skip test run
 ```
 
 See [Integration Branches](concepts/integration-branches.md) for the full workflow.

@@ -1493,9 +1493,10 @@ type MergeQueueConfig struct {
 	// Default: "integration/{epic}"
 	IntegrationBranchTemplate string `json:"integration_branch_template,omitempty"`
 
-	// IntegrationBranchAutoLand controls whether the refinery should automatically
-	// land integration branches when all children of the epic are closed.
-	// Nil defaults to false (manual landing required).
+	// IntegrationBranchAutoLand has no effect: gt does not land integration
+	// branches since gt mq integration land was removed (gt-fcxe9.4). Kept so
+	// existing rig settings still parse; the landing path (gt-v4ssj) decides
+	// its fate.
 	IntegrationBranchAutoLand *bool `json:"integration_branch_auto_land,omitempty"`
 
 	// MergeStrategy controls how the refinery lands approved work: "direct" (default)
@@ -1713,9 +1714,8 @@ func (c *MergeQueueConfig) IsRefineryIntegrationEnabled() bool {
 	return *c.IntegrationBranchRefineryEnabled
 }
 
-// IsIntegrationBranchAutoLandEnabled returns whether the refinery should
-// auto-land integration branches when all epic children are closed.
-// Nil-safe, defaults to false (manual landing required).
+// IsIntegrationBranchAutoLandEnabled reports the (no-effect) auto-land
+// setting passed to the refinery formula. Nil-safe, defaults to false.
 func (c *MergeQueueConfig) IsIntegrationBranchAutoLandEnabled() bool {
 	if c.IntegrationBranchAutoLand == nil {
 		return false

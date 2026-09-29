@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,70 +11,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// TestLandConflictError_ErrorsAs verifies that callers (notably the refinery
-// formula's consolidation-failure-handler) can detect a consolidation merge
-// conflict via errors.As, instead of parsing message text. Regression test
-// for hq-j6hur.3.7 (gh#3604): refinery left dirty worktree on consolidation
-// conflict because the failure was an opaque string-wrapped error.
-func TestLandConflictError_ErrorsAs(t *testing.T) {
-	t.Parallel()
-	underlying := fmt.Errorf("git merge exit 1: CONFLICT in foo.go")
-	wrapped := fmt.Errorf("integration land failed: %w", &LandConflictError{
-		EpicID:        "gt-epic-99",
-		Branch:        "integration/auth",
-		TargetBranch:  "main",
-		ConflictPaths: []string{"foo.go", "bar.go"},
-		Underlying:    underlying,
-	})
-
-	var lce *LandConflictError
-	if !errors.As(wrapped, &lce) {
-		t.Fatalf("errors.As should match LandConflictError; got %T", wrapped)
-	}
-	if lce.EpicID != "gt-epic-99" {
-		t.Errorf("EpicID = %q, want gt-epic-99", lce.EpicID)
-	}
-	if len(lce.ConflictPaths) != 2 {
-		t.Errorf("ConflictPaths = %v, want 2 paths", lce.ConflictPaths)
-	}
-	if !errors.Is(lce, underlying) {
-		t.Errorf("errors.Is should unwrap to underlying merge error")
-	}
-
-	msg := lce.Error()
-	if !strings.Contains(msg, "integration/auth") || !strings.Contains(msg, "main") {
-		t.Errorf("Error() should mention branch and target, got %q", msg)
-	}
-	if !strings.Contains(msg, "foo.go") {
-		t.Errorf("Error() should list conflict files, got %q", msg)
-	}
-}
-
-// TestLandConflictError_NoFiles covers the case where conflict-file detection
-// failed (e.g., GetConflictingFiles returned nil) — the error message must
-// still be informative.
-func TestLandConflictError_NoFiles(t *testing.T) {
-	t.Parallel()
-	lce := &LandConflictError{
-		EpicID:       "gt-epic-99",
-		Branch:       "integration/auth",
-		TargetBranch: "main",
-		Underlying:   fmt.Errorf("merge failed"),
-	}
-	msg := lce.Error()
-	if !strings.Contains(msg, "integration/auth") || !strings.Contains(msg, "main") {
-		t.Errorf("Error() should mention branch and target, got %q", msg)
-	}
-	if !strings.Contains(msg, "merge failed") {
-		t.Errorf("Error() should embed underlying message, got %q", msg)
-	}
-}
-
-// TestMakeTestMR_RealisticFields verifies that makeTestMR produces MR beads
-// matching real beads structure: Type "task" with label "gt:merge-request",
-// NOT Type "merge-request". This is the regression test for Bug 1 from
-// PR #1226 review: mq_integration.go queries Type: "merge-request" but
-// real MR beads have Type: "task" with label "gt:merge-request".
 func TestMakeTestMR_RealisticFields(t *testing.T) {
 	t.Parallel()
 	mr := makeTestMR("mr-1", "polecat/Nux/gt-001", "main", "Nux", "open")
@@ -309,100 +243,6 @@ func TestResolveEpicBranch_LegacyFallback(t *testing.T) {
 				t.Errorf("resolveEpicBranch() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestFilterMRsByTarget(t *testing.T) {
-	t.Parallel()
-	// Create test MRs with different targets
-	mrs := []*beads.Issue{
-		makeTestMR("mr-1", "polecat/Nux/gt-001", "integration/gt-epic", "Nux", "open"),
-		makeTestMR("mr-2", "polecat/Toast/gt-002", "main", "Toast", "open"),
-		makeTestMR("mr-3", "polecat/Able/gt-003", "integration/gt-epic", "Able", "open"),
-		makeTestMR("mr-4", "polecat/Baker/gt-004", "integration/gt-other", "Baker", "open"),
-	}
-
-	tests := []struct {
-		name         string
-		targetBranch string
-		wantCount    int
-		wantIDs      []string
-	}{
-		{
-			name:         "filter to integration/gt-epic",
-			targetBranch: "integration/gt-epic",
-			wantCount:    2,
-			wantIDs:      []string{"mr-1", "mr-3"},
-		},
-		{
-			name:         "filter to main",
-			targetBranch: "main",
-			wantCount:    1,
-			wantIDs:      []string{"mr-2"},
-		},
-		{
-			name:         "filter to non-existent branch",
-			targetBranch: "integration/no-such-epic",
-			wantCount:    0,
-			wantIDs:      []string{},
-		},
-		{
-			name:         "filter to other integration branch",
-			targetBranch: "integration/gt-other",
-			wantCount:    1,
-			wantIDs:      []string{"mr-4"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := filterMRsByTarget(mrs, tt.targetBranch)
-			if len(got) != tt.wantCount {
-				t.Errorf("filterMRsByTarget() returned %d MRs, want %d", len(got), tt.wantCount)
-			}
-
-			// Verify correct IDs
-			gotIDs := make(map[string]bool)
-			for _, mr := range got {
-				gotIDs[mr.ID] = true
-			}
-			for _, wantID := range tt.wantIDs {
-				if !gotIDs[wantID] {
-					t.Errorf("filterMRsByTarget() missing expected MR %s", wantID)
-				}
-			}
-		})
-	}
-}
-
-func TestFilterMRsByTarget_EmptyInput(t *testing.T) {
-	t.Parallel()
-	got := filterMRsByTarget(nil, "integration/gt-epic")
-	if got != nil {
-		t.Errorf("filterMRsByTarget(nil) = %v, want nil", got)
-	}
-
-	got = filterMRsByTarget([]*beads.Issue{}, "integration/gt-epic")
-	if len(got) != 0 {
-		t.Errorf("filterMRsByTarget([]) = %v, want empty slice", got)
-	}
-}
-
-func TestFilterMRsByTarget_NoMRFields(t *testing.T) {
-	t.Parallel()
-	// Issue with MR label but no MR fields in description
-	plainIssue := &beads.Issue{
-		ID:          "issue-1",
-		Title:       "Not an MR",
-		Type:        "task",
-		Status:      "open",
-		Labels:      []string{"gt:merge-request"},
-		Description: "Just a plain description with no MR fields",
-	}
-
-	got := filterMRsByTarget([]*beads.Issue{plainIssue}, "main")
-	if len(got) != 0 {
-		t.Errorf("filterMRsByTarget() should filter out issues without MR fields, got %d", len(got))
 	}
 }
 
@@ -797,34 +637,6 @@ func TestGetIntegrationBranchTemplate(t *testing.T) {
 			t.Errorf("got %q, want %q", got, "{prefix}/{epic}")
 		}
 	})
-}
-
-// TestGetTestCommandReadsRigRootMergeQueue reproduces gt-xwt9: getTestCommand
-// read only rigPath/settings/config.json via config.LoadRigSettings, so a
-// rig-root-only test_command (gt-me9t's floor) was silently ignored by `gt mq
-// integration land`'s pre-land test run. Routing through
-// rig.ResolveMergeQueueConfig makes the rig-root value visible with no
-// rig-local settings/config.json present at all.
-func TestGetTestCommandReadsRigRootMergeQueue(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	rigPath := filepath.Join(townRoot, "testrig")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rigConfig := `{
-  "type": "rig",
-  "version": 1,
-  "name": "testrig",
-  "merge_queue": {"test_command": "make test"}
-}`
-	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := getTestCommand(rigPath); got != "make test" {
-		t.Errorf("getTestCommand() = %q, want %q (rig-root merge_queue floor invisible to integration land)", got, "make test")
-	}
 }
 
 func TestIsReadyToLand(t *testing.T) {

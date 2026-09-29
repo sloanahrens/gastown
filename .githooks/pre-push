@@ -4,8 +4,9 @@
 # PRs are for external contributors only.
 #
 # Also enforces integration branch landing guardrails: pushes to the default
-# branch that introduce integration branch content are blocked unless
-# GT_INTEGRATION_LAND=1 is set (only gt mq integration land sets this).
+# branch that introduce integration branch content are blocked. There is no
+# bypass: the command that had one (integration land) was removed
+# (gt-fcxe9.4).
 #
 # Also refuses pushes to the default branch from a polecat (gt-ibt8). The
 # branch allowlist below predates the role check and lets the default branch
@@ -232,7 +233,7 @@ while read local_ref local_sha remote_ref remote_sha; do
   # check if any integration branch tip is newly reachable from this push.
   # This catches merges (--no-ff, --ff-only, default) and rebases.
   # Only cherry-picks (new SHAs) are not detected — Layer 1 covers those.
-  if [[ "$branch" == "$default_branch" ]] && [[ "$GT_INTEGRATION_LAND" != "1" ]]; then
+  if [[ "$branch" == "$default_branch" ]]; then
     # Skip for deletions or initial pushes
     if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]] || \
        [[ "$local_sha" == "0000000000000000000000000000000000000000" ]]; then
@@ -245,8 +246,7 @@ while read local_ref local_sha remote_ref remote_sha; do
     # silently allowing unverified integration branch content through.
     integration_refs=$(git ls-remote --quiet origin "refs/heads/integration/*" 2>&1) || {
       echo "WARNING: Cannot verify integration branches (remote unreachable)."
-      echo "Push to $default_branch blocked. Retry when network is available,"
-      echo "or set GT_INTEGRATION_LAND=1 if this is an intentional land operation."
+      echo "Push to $default_branch blocked. Retry when network is available."
       exit 1
     }
     for ref in $(echo "$integration_refs" | awk '{print $1}'); do
@@ -254,10 +254,9 @@ while read local_ref local_sha remote_ref remote_sha; do
          ! git merge-base --is-ancestor "$ref" "$remote_sha"; then
         echo "BLOCKED: Push to $default_branch introduces integration branch content."
         echo ""
-        echo "Integration branches must be landed via: gt mq integration land <epic-id>"
-        echo ""
-        echo "This guardrail prevents accidental landing of integration branches."
-        echo "The gt mq integration land command sets GT_INTEGRATION_LAND=1 to bypass this check."
+        echo "gt does not land integration branches: the land command was removed"
+        echo "(gt-fcxe9.4) and landing waits for the single landing path (gt-v4ssj)."
+        echo "This guardrail prevents landing integration branch content on $default_branch."
         exit 1
       fi
     done

@@ -61,16 +61,12 @@ to final land, without any manual branch targeting.
    gt sling gt-auth-middleware gastown --no-convoy
    ```
 
-9. **Land when complete.** When all children under the epic are closed, the
-   integration branch is ready to land. If `integration_branch_auto_land` is
-   enabled, the Refinery does this automatically during patrol. Otherwise,
-   land manually:
-   ```bash
-   gt mq integration land gt-auth-epic
-   ```
-   This merges the integration branch back to its base branch (main by
-   default) as a single merge commit, deletes the branch, and closes the
-   epic.
+9. **Report when complete.** When all children under the epic are closed,
+   `gt mq integration status` reports the branch ready to land and the
+   Refinery nudges the mayor. gt does not land integration branches. The `gt mq integration land` command
+   was removed (gt-fcxe9.4): it was an unreviewed route to the base branch and it
+   never landed anything. Landing waits for the single landing path (gt-v4ssj,
+   ADR 0004).
 
 ## Concept
 
@@ -108,14 +104,14 @@ Integration branches batch epic work on a shared branch, then land atomically:
                  integration/gt-auth-epic
                     (shared branch)
                                │
-                               ▼ gt mq integration land
+                               ▼ (landing: not supported, see below)
                           base branch
                     (main or --base-branch)
                      (single merge commit)
 ```
 
 All child MRs merge into the integration branch first. Children can build on
-each other's work. When everything is ready, one command lands it all.
+each other's work. When everything is ready, it lands together.
 
 ### With vs Without
 
@@ -173,19 +169,13 @@ gt done
 
 The Refinery processes these MRs and merges them to the integration branch.
 
-### 5. Land When Complete
+### 5. Ready to Land
 
-Once all children are closed and all MRs merged:
-
-```bash
-gt mq integration land gt-auth-epic
-# → Verified all MRs merged
-# → Merged integration/gt-auth-epic → base branch (--no-ff)
-# → Tests passed
-# → Pushed to origin
-# → Deleted integration/gt-auth-epic
-# → Closed epic gt-auth-epic
-```
+Once all children are closed and all MRs merged, `gt mq integration status`
+reports `ready_to_land: true`. gt does not land integration branches. The `gt mq integration land` command
+was removed (gt-fcxe9.4): it was an unreviewed route to the base branch and it
+never landed anything. Landing waits for the single landing path (gt-v4ssj,
+ADR 0004).
 
 ## Auto-Detection
 
@@ -327,49 +317,6 @@ gt mq integration status <epic-id> [flags]
 3. All children are closed
 4. No pending MRs (all submitted work is merged)
 
-### `gt mq integration land <epic-id>`
-
-Merge an epic's integration branch back to its base branch.
-
-```bash
-gt mq integration land <epic-id> [flags]
-```
-
-**Flags:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--force` | Land even if some MRs still open | `false` |
-| `--skip-tests` | Skip test run after merge | `false` |
-| `--dry-run` | Preview only, make no changes | `false` |
-
-**What it does:**
-
-1. Verifies epic exists and has an integration branch
-2. Reads base branch from epic metadata (defaults to the rig's `default_branch` if not stored)
-3. Checks all MRs targeting integration branch are merged
-4. Fetches latest refs and checks idempotency (if already merged, skips to cleanup)
-5. Acquires file lock (prevents concurrent land races)
-6. Creates a temporary worktree (avoids disrupting running agents)
-7. Merges integration branch to base branch using `--no-ff`
-8. Runs tests (unless `--skip-tests`)
-9. Verifies merge brought changes (guards against empty merges)
-10. Pushes to origin
-11. Deletes integration branch (local and remote)
-12. Closes the epic
-
-**Idempotent retry:** If land crashes after pushing but before cleanup (branch
-deletion / epic close), rerunning the same command is safe. The idempotency
-check detects that the integration branch is already an ancestor of the target
-and skips directly to cleanup.
-
-**Error cases:**
-
-- Epic has no integration branch
-- Pending MRs exist (use `--force` to override)
-- Tests fail
-- Empty merge (no changes to land)
-
 ## Configuration
 
 ### Default Branch
@@ -409,58 +356,37 @@ All integration branch fields live under `merge_queue` in rig settings (`setting
 | `integration_branch_polecat_enabled` | `*bool` | `true` | Polecats auto-source worktrees from integration branches |
 | `integration_branch_refinery_enabled` | `*bool` | `true` | `gt mq submit` and `gt done` auto-detect integration branches as MR targets |
 | `integration_branch_template` | `string` | `"integration/{title}"` | Branch name template (supports `{title}`, `{epic}`, `{prefix}`, `{user}`) |
-| `integration_branch_auto_land` | `*bool` | `false` | Refinery patrol auto-lands when all children closed |
+| `integration_branch_auto_land` | `*bool` | `false` | No effect: gt does not land integration branches (gt-fcxe9.4) |
 
 **Note:** `*bool` fields use pointer semantics — `null`/omitted means "use default"
-(true for polecat/refinery enabled, false for auto-land). Set explicitly to `false`
+(true for polecat/refinery enabled). Set explicitly to `false`
 to disable.
 
-## Auto-Landing
+## Landing
 
-When `integration_branch_auto_land` is `true`, the Refinery patrol automatically
-lands integration branches that are ready.
-
-### How It Works
-
-During each patrol cycle, the Refinery:
-
-1. Lists all open epics: `bd list --type=epic --status=open`
-2. Checks each epic's integration branch: `gt mq integration status <epic-id>`
-3. If `ready_to_land: true`: runs `gt mq integration land <epic-id>`
-4. If not ready: skips (epic work is incomplete)
-
-### Conditions for Auto-Land
-
-Both config gates must be true:
-
-- `integration_branch_refinery_enabled: true` (integration feature is on)
-- `integration_branch_auto_land: true` (auto-landing is on)
-
-If either is false, the patrol step exits early.
-
-### When to Enable
-
-| Scenario | Recommendation |
-|----------|---------------|
-| Trusted CI, no human review needed | Enable auto-land |
-| Need human sign-off before landing | Keep disabled (default), land manually |
-| Mix of both | Keep disabled, use `gt mq integration land` for manual control |
+gt does not land integration branches. The `gt mq integration land` command
+was removed (gt-fcxe9.4): it was an unreviewed route to the base branch and it
+never landed anything. Landing waits for the single landing path (gt-v4ssj,
+ADR 0004). During each patrol cycle the Refinery lists open epics, runs
+`gt mq integration status <epic-id>`, and nudges the mayor about each branch
+that is ready. It never lands one.
 
 ## Safety Guardrails
 
-Integration branch landing is protected by a three-layer defense:
+Nothing may land an integration branch, and two layers enforce it.
 
 ### Layer 1: Formula and Role Instructions
 
-The refinery formula and role template explicitly forbid landing integration
-branches via raw git commands. Only `gt mq integration land` is authorized.
+The refinery formula and role template forbid landing integration branches,
+by raw git or otherwise.
 
 ### Layer 2: Pre-Push Hook
 
 The `.githooks/pre-push` hook detects when a push to the default branch
 introduces integration branch content. It uses ancestry-based detection:
 if any `origin/integration/*` branch tip becomes newly reachable from the
-pushed commits, the push is blocked unless `GT_INTEGRATION_LAND=1` is set.
+pushed commits, the push is blocked. There is no bypass variable: the
+`GT_INTEGRATION_LAND=1` bypass went with the land command (gt-fcxe9.4).
 
 The default branch is detected dynamically via `refs/remotes/origin/HEAD`
 (fallback: `main`), so this works regardless of the rig's branch naming.
@@ -475,28 +401,6 @@ those cases.
 
 **Requires**: `core.hooksPath` must be configured for the hook to be active.
 New rigs get this automatically. Existing rigs: run `gt doctor --fix`.
-
-### Layer 3: Authorized Code Path
-
-The `gt mq integration land` command uses `PushWithEnv()` to set
-`GT_INTEGRATION_LAND=1`, allowing the push through the hook. Raw `git push`
-from any agent or user does not set this variable and will be blocked.
-Manually setting the env var is possible but is not part of the supported
-workflow — the variable is a policy-based trust boundary, not a
-capability-based security mechanism.
-
-### Why Three Layers?
-
-| Layer | Type | Strength | Limitation |
-|-------|------|----------|------------|
-| Formula/Role | Soft | Covers all branch patterns | AI agents can ignore instructions |
-| Pre-push hook | Hard | Blocks all merge styles at git boundary | Only matches `integration/*` prefix; env var is policy-based |
-| Code path | Hard | Land command sets bypass env var | Requires hook to be active |
-
-The layers complement each other. The formula covers custom templates; the hook
-provides hard enforcement for default templates (catching merges, fast-forwards,
-and rebases via ancestry detection); the code path ensures the CLI command can
-bypass the hook.
 
 ## Build Pipeline Configuration
 
@@ -576,13 +480,6 @@ Auto-detection handles this. If you find yourself manually targeting, check that
 - The integration branch actually exists
 - `integration_branch_refinery_enabled` is not `false`
 - The issue is a child (or descendant) of the epic
-
-### Landing Partial Epics
-
-**Wrong:** Using `--force` to land when children are still open.
-
-This defeats the purpose. The integration branch exists so work lands together.
-If you need to land early, close or remove the incomplete children first.
 
 ## See Also
 
