@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -48,27 +51,11 @@ fi
 	return path
 }
 
-// Stub behaviors for the branches the lookup can take.
-const (
-	// rigStatusStubOperational answers with a rig identity bead that carries no
-	// status label: an operational rig, the common case.
-	rigStatusStubOperational = `echo '[{"id":"tr-rig-testrig","labels":[]}]'`
-	// rigStatusStubDocked answers with the global docked label.
-	rigStatusStubDocked = `echo '[{"id":"tr-rig-testrig","labels":["status:docked"]}]'`
-	// rigStatusStubMissing answers the way bd does when the bead is not there.
-	rigStatusStubMissing = `echo 'Error: no issue found: tr-rig-testrig' >&2
+// rigStatusStubMissing answers the way bd does when the identity bead is not
+// there. TestIsRigOperational_MissingBeadIsDistinctFromTimeout runs it through
+// the real bd read: the wiring guard for showRigBead's default.
+const rigStatusStubMissing = `echo 'Error: no issue found: tr-rig-testrig' >&2
 exit 1`
-	// rigStatusStubSlow blocks past any budget the test sets, so the subprocess
-	// is killed at its deadline. It execs sleep so the killed process is the
-	// one holding stdout - a shell that merely waits on a child would survive
-	// the kill and hold the pipe open.
-	rigStatusStubSlow = `exec sleep 60`
-	// rigStatusStubSlowAnswer takes long enough to answer that the difference
-	// between a window measured before the read and one measured after it is
-	// unambiguous, while staying far under the budget.
-	rigStatusStubSlowAnswer = `sleep 0.05
-echo '[{"id":"tr-rig-testrig","labels":[]}]'`
-)
 
 // rigStatusAlerts records the escalations a test daemon raises and clears.
 // Mutex-guarded because the daemon performs both off the calling goroutine.
@@ -119,10 +106,84 @@ type rigStatusFixture struct {
 	daemon    *Daemon
 	townRoot  string
 	rigName   string
-	binDir    string
-	countPath string
+	binDir    string // stub-bd fixtures only
+	countPath string // stub-bd fixtures only
 	logBuf    *bytes.Buffer
 	alerts    *rigStatusAlerts
+
+	// In-process fixtures (newRigStatusFakeFixture) answer the read from show,
+	// on clock, instead of from a bd on PATH.
+	clock *clockwork.FakeClock
+	mu    sync.Mutex
+	show  rigShow
+	shows int
+}
+
+// rigShow is how an in-process fixture answers the identity-bead read. It may
+// move clk to stand for the read's duration.
+type rigShow func(clk *clockwork.FakeClock) (*beads.Issue, error)
+
+// In-process counterparts of the stub behaviors below.
+var (
+	rigShowOperational rigShow = func(*clockwork.FakeClock) (*beads.Issue, error) {
+		return &beads.Issue{ID: "tr-rig-testrig"}, nil
+	}
+	rigShowDocked rigShow = func(*clockwork.FakeClock) (*beads.Issue, error) {
+		return &beads.Issue{ID: "tr-rig-testrig", Labels: []string{"status:docked"}}, nil
+	}
+	// rigShowTimedOut is what beads returns for a bd killed at its subprocess
+	// deadline: an error wrapping context.DeadlineExceeded (pinned in
+	// internal/beads by TestInitDeadlineIsReportedAsTimeout).
+	rigShowTimedOut rigShow = func(*clockwork.FakeClock) (*beads.Issue, error) {
+		return nil, fmt.Errorf("bd show tr-rig-testrig: %w (after 60s)", context.DeadlineExceeded)
+	}
+	// rigShowSlowAnswer spends 50ms of the clock before answering.
+	rigShowSlowAnswer rigShow = func(clk *clockwork.FakeClock) (*beads.Issue, error) {
+		clk.Advance(50 * time.Millisecond)
+		return &beads.Issue{ID: "tr-rig-testrig"}, nil
+	}
+)
+
+// newRigStatusFakeFixture is newRigStatusFixture with the identity-bead read
+// answered in process by show, and the memo's clock a fake: no bd, no PATH,
+// no wall-clock waits.
+func newRigStatusFakeFixture(t *testing.T, show rigShow) *rigStatusFixture {
+	t.Helper()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("creating rig dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"beads":{"prefix":"tr"}}`), 0o644); err != nil {
+		t.Fatalf("writing rig config.json: %v", err)
+	}
+	f := &rigStatusFixture{
+		townRoot: townRoot,
+		rigName:  rigName,
+		logBuf:   &bytes.Buffer{},
+		alerts:   &rigStatusAlerts{},
+		clock:    newFixedClock(),
+		show:     show,
+	}
+	f.daemon = &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(f.logBuf, "", 0),
+		clock:  f.clock,
+	}
+	f.daemon.rigStatusAlert = f.alerts.alert
+	f.daemon.rigStatusClear = f.alerts.clear
+	f.daemon.rigBeadShowFn = func(_, id string) (*beads.Issue, error) {
+		f.mu.Lock()
+		f.shows++
+		show := f.show
+		f.mu.Unlock()
+		if id != "tr-rig-testrig" {
+			return nil, fmt.Errorf("unexpected rig bead %q", id)
+		}
+		return show(f.clock)
+	}
+	return f
 }
 
 func newRigStatusFixture(t *testing.T, showScript string) *rigStatusFixture {
@@ -167,6 +228,13 @@ func newRigStatusFixture(t *testing.T, showScript string) *rigStatusFixture {
 	}
 }
 
+// setShow swaps how an in-process fixture answers.
+func (f *rigStatusFixture) setShow(show rigShow) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.show = show
+}
+
 // setShowScript swaps what the stub bd answers, so a test can take the same rig
 // from failing lookups to answering ones.
 func (f *rigStatusFixture) setShowScript(t *testing.T, showScript string) {
@@ -177,6 +245,11 @@ func (f *rigStatusFixture) setShowScript(t *testing.T, showScript string) {
 // showCount is the number of `bd show` calls the stub has served.
 func (f *rigStatusFixture) showCount(t *testing.T) int {
 	t.Helper()
+	if f.clock != nil {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.shows
+	}
 	data, err := os.ReadFile(f.countPath)
 	if os.IsNotExist(err) {
 		return 0
@@ -198,7 +271,7 @@ func (f *rigStatusFixture) expire(t *testing.T, rigName string) {
 	if !ok {
 		t.Fatalf("no memoized entry for rig %s", rigName)
 	}
-	entry.expiresAt = time.Now().Add(-time.Second)
+	entry.expiresAt = f.daemon.clk().Now().Add(-time.Second)
 	cache.entries[rigName] = entry
 }
 
@@ -221,20 +294,21 @@ func (f *rigStatusFixture) memoized(t *testing.T, rigName string) rigBeadEntry {
 // the convoy manager's isRigParked), and each of those used to pay its own bd
 // subprocess. Within the TTL window only the first pays.
 func TestIsRigOperational_MemoizesDeterminationWithinTTL(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
-		showScript   string
+		show         rigShow
 		wantOperable bool
 		wantReason   string
 	}{
 		{
 			name:         "operational rig",
-			showScript:   rigStatusStubOperational,
+			show:         rigShowOperational,
 			wantOperable: true,
 		},
 		{
 			name:         "docked rig",
-			showScript:   rigStatusStubDocked,
+			show:         rigShowDocked,
 			wantOperable: false,
 			wantReason:   "rig is docked (global)",
 		},
@@ -242,7 +316,8 @@ func TestIsRigOperational_MemoizesDeterminationWithinTTL(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newRigStatusFixture(t, tc.showScript)
+			t.Parallel()
+			f := newRigStatusFakeFixture(t, tc.show)
 
 			for i := 0; i < 3; i++ {
 				operational, reason := f.daemon.isRigOperational(f.rigName)
@@ -289,14 +364,15 @@ func TestIsRigOperational_MemoizesDeterminationWithinTTL(t *testing.T) {
 // expiring from before the read leaves the entry dead on arrival, and every call
 // site in the tick re-pays the budget the memo exists to save.
 func TestIsRigOperational_MemoWindowStartsWhenTheReadAnswers(t *testing.T) {
-	f := newRigStatusFixture(t, rigStatusStubSlowAnswer)
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowSlowAnswer)
 
-	start := time.Now()
+	start := f.clock.Now()
 	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
 		t.Fatalf("stub answers a status-less bead, got not operational: %q", reason)
 	}
 
-	// The stub sleeps well past this margin before answering, so an expiry
+	// The read spends 50ms, well past this margin, before answering, so an expiry
 	// measured from the call would land at start+TTL and fail this.
 	entry := f.memoized(t, f.rigName)
 	if floor := start.Add(rigOperationalCacheTTL + 20*time.Millisecond); !entry.expiresAt.After(floor) {
@@ -311,7 +387,8 @@ func TestIsRigOperational_MemoWindowStartsWhenTheReadAnswers(t *testing.T) {
 // bead read behind it is memoized for a minute. (The dock label is global and
 // read over a subprocess, so that one is bounded by the memo instead.)
 func TestIsRigOperational_ParkTakesEffectWithoutWaitingForTheMemo(t *testing.T) {
-	f := newRigStatusFixture(t, rigStatusStubOperational)
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
 
 	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
 		t.Fatalf("rig starts operational, got %q", reason)
@@ -343,10 +420,8 @@ func TestIsRigOperational_ParkTakesEffectWithoutWaitingForTheMemo(t *testing.T) 
 // it go, which is long enough for the recovery clear to have run out of order if
 // nothing serialized them.
 func TestIsRigOperational_EscalationsForARigAreSerialized(t *testing.T) {
-	// Shrink the bd subprocess budget: the blocked raise has to be standing
-	// while the rig recovers, and the failure it comes from must not cost 60s.
-	t.Setenv("GT_BD_TIMEOUT_SEC", "1")
-	f := newRigStatusFixture(t, rigStatusStubSlow)
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowTimedOut)
 
 	raiseStarted := make(chan struct{})
 	releaseRaise := make(chan struct{})
@@ -377,7 +452,7 @@ func TestIsRigOperational_EscalationsForARigAreSerialized(t *testing.T) {
 	<-raiseStarted
 
 	// The rig answers again while that raise is still in flight.
-	f.setShowScript(t, rigStatusStubOperational)
+	f.setShow(rigShowOperational)
 	f.expire(t, f.rigName)
 	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
 		t.Fatalf("recovered rig reported not operational: %q", reason)
@@ -415,10 +490,8 @@ func TestIsRigOperational_EscalationsForARigAreSerialized(t *testing.T) {
 // the failure must be logged as a timeout, and the suppression must be
 // escalated - once per failure episode, not once per call site.
 func TestIsRigOperational_TimeoutFailsClosedAndEscalates(t *testing.T) {
-	// Shrink the bd subprocess budget so the test does not wait out the
-	// production 60s; the branch under test is the same one.
-	t.Setenv("GT_BD_TIMEOUT_SEC", "1")
-	f := newRigStatusFixture(t, rigStatusStubSlow)
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowTimedOut)
 
 	operational, reason := f.daemon.isRigOperational(f.rigName)
 	if operational {
@@ -477,7 +550,7 @@ func TestIsRigOperational_TimeoutFailsClosedAndEscalates(t *testing.T) {
 
 	// The alert must not outlive the condition: once the rig answers, the
 	// escalation is cleared.
-	f.setShowScript(t, rigStatusStubOperational)
+	f.setShow(rigShowOperational)
 	f.expire(t, f.rigName)
 	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
 		t.Fatalf("recovered rig reported not operational: %q", reason)
@@ -530,7 +603,8 @@ func TestIsRigOperational_MissingBeadIsDistinctFromTimeout(t *testing.T) {
 // the cache honest; the assertion after the race is that the memo it left behind
 // is populated and usable rather than corrupted.
 func TestIsRigOperational_ConcurrentCallers(t *testing.T) {
-	f := newRigStatusFixture(t, rigStatusStubOperational)
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
 
 	var wg sync.WaitGroup
 	results := make([]bool, 8)
