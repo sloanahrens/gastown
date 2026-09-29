@@ -50,6 +50,7 @@ Infrastructure checks:
   - daemon                   Check if daemon is running (fixable)
   - boot-health              Check Boot watchdog health (vet mode)
   - town-beads-config        Verify town .beads/config.yaml exists (fixable)
+  - dolt-remote-leftovers    Warn on Dolt remotes, git-remote-cache dirs and sync.remote (report only)
 
 Cleanup checks (fixable):
   - orphan-sessions          Detect orphaned tmux sessions
