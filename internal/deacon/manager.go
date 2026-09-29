@@ -3,11 +3,11 @@ package deacon
 import (
 	"errors"
 	"fmt"
-	"github.com/steveyegge/gastown/internal/bdgate"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"

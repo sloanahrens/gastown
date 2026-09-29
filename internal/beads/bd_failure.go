@@ -22,11 +22,11 @@ const (
 // failed. The call's answer is unknown; it is never evidence of absence.
 var ErrUnavailable = errors.New("bd could not answer")
 
-// bdNotFoundSentence matches the sentences bd itself writes for an unknown
-// issue or wisp id. Each names the bead ("issue <id> not found", "issue not
-// found: <id>", "no issue found matching ...", "no issue found: <id>"), so Dolt's "database not
-// found", "table not found", "column not found", an exec "executable file
-// not found" or a bare "not found" never match.
+// bdNotFoundSentence matches only the sentences bd writes for an unknown
+// issue or wisp id, each of which names the bead: "issue <id> not found",
+// "issue not found: <id>", "no issue found matching ...", "no issue found:
+// <id>". Dolt's "database/table/column not found", exec's "executable file
+// not found" and a bare "not found" do not match (gt-fcxe9.2).
 var bdNotFoundSentence = regexp.MustCompile(`(?i)\b(?:issue|wisp)\s+'?[a-z0-9][\w.\-]*'?\s+not found\b|\b(?:issue|wisp) not found\b|\bno issues? found(?: matching\b|: )`)
 
 // BDReportedNotFound reports whether a failed bd call is bd saying the id
