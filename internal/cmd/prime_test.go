@@ -687,12 +687,12 @@ func TestFormatSessionMetadataLine(t *testing.T) {
 }
 
 func TestStructuredOutputOnlyForSessionStart(t *testing.T) {
-	origStructured := primeStructuredSessionStartOutput
-	defer func() { primeStructuredSessionStartOutput = origStructured }()
+	keepPrimeHookState(t)
 
 	// Simulate a non-SessionStart hook event (e.g., Stop)
 	primeStructuredSessionStartOutput = false
 	input := hookInput{HookEventName: "Stop"}
+	primeHookEventName = input.HookEventName
 	primeStructuredSessionStartOutput = input.HookEventName == "SessionStart"
 	if primeStructuredSessionStartOutput {
 		t.Fatal("primeStructuredSessionStartOutput should be false for HookEventName=Stop")

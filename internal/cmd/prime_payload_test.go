@@ -334,7 +334,19 @@ func TestAssemblePrimePayload_StaticTextAfterHookedWorkWhenNotDelivered(t *testi
 	}
 }
 
+// keepPrimeHookState restores the hook globals readHookSessionID writes when
+// the test ends, so a hook event one test reads (PreCompact suppresses the
+// session beacon) does not leak into the next serial test.
+func keepPrimeHookState(t *testing.T) {
+	t.Helper()
+	event, structured, seen := primeHookEventName, primeStructuredSessionStartOutput, primeHookInputSeen
+	t.Cleanup(func() {
+		primeHookEventName, primeStructuredSessionStartOutput, primeHookInputSeen = event, structured, seen
+	})
+}
+
 func TestReadHookSessionID_RecordsHookEventName(t *testing.T) {
+	keepPrimeHookState(t)
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
