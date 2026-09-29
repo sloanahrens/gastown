@@ -567,6 +567,15 @@ type MainBranchTestConfig struct {
 	// escalation is what gets the held pool looked at. A value <= 0 disables
 	// the bound.
 	GateBusyStarveAfterStr string `json:"gate_busy_starve_after,omitempty"`
+
+	// IntegrationIntervalStr is how often each rig's integration tier runs
+	// (see main_branch_integration.go), e.g. "24h". Default: 24h. A value
+	// <= 0 ("0s") turns the integration run off.
+	IntegrationIntervalStr string `json:"integration_interval,omitempty"`
+
+	// IntegrationTimeoutStr bounds one integration run, separately from
+	// TimeoutStr. Default: 30m.
+	IntegrationTimeoutStr string `json:"integration_timeout,omitempty"`
 }
 
 // defaultGateBusyStarveAfter is how long a rig may be skipped for a busy gate
@@ -1174,7 +1183,14 @@ func (d *Daemon) testRigMainBranch(rigName, rigPath string, timeout time.Duratio
 	runCtx, runCancel := context.WithTimeout(d.ctx, timeout)
 	defer runCancel()
 
-	return d.runRigGates(runCtx, rigName, commit, worktreePath, gateCfg)
+	gateErr := d.runRigGates(runCtx, rigName, commit, worktreePath, gateCfg)
+
+	// The integration tier runs under the same slot hold and on the same
+	// worktree, after the gates and whatever they concluded: it is a separate
+	// signal with its own cadence, clock and alert (gt-22hdp.39).
+	d.runRigIntegration(d.ctx, rigName, commit, worktreePath)
+
+	return gateErr
 }
 
 // runRigGates runs the configured setup command (if any) followed by gates

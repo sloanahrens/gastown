@@ -71,6 +71,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				// above is visible in a generated config, next to the knob
 				// that turns it on (gt-lf2r).
 				GateBusyStarveAfterStr: defaultGateBusyStarveAfter.String(),
+				// The integration tier's cadence, written out for the same
+				// reason: a generated config should show that the patrol also
+				// runs `make test-integration` daily (gt-22hdp.39).
+				IntegrationIntervalStr: defaultMainBranchIntegrationInterval.String(),
 			},
 			// dolt_remotes defaults to disabled in IsPatrolEnabled (opt-in), so
 			// a freshly generated daemon.json stays a no-op for towns whose
