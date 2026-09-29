@@ -22,9 +22,17 @@ type restartProbe struct {
 // shimTmux replaces tmux on PATH for the duration of the test. The shim
 // reports a session that exists (has-session) whose pane runs a shell
 // (display-message/list-panes) and whose session env holds nothing
-// (show-environment), so IsAgentAlive reports the agent as exited — the
-// restart branch. Every invocation is appended to the returned log.
+// (show-environment), so IsAgentAliveChecked reports the agent as exited —
+// the restart branch. Every invocation is appended to the returned log.
 func shimTmux(t *testing.T) *restartProbe {
+	t.Helper()
+	return shimTmuxWith(t, false)
+}
+
+// shimTmuxWith is shimTmux; with showEnvFails, every show-environment call
+// fails the way a saturated tmux server does, so the liveness answer is
+// unknown rather than "exited".
+func shimTmuxWith(t *testing.T, showEnvFails bool) *restartProbe {
 	t.Helper()
 
 	if runtime.GOOS == "windows" {
@@ -47,7 +55,11 @@ func shimTmux(t *testing.T) *restartProbe {
 	b.WriteString("  has-session) exit 0 ;;\n")
 	// No session environment: an unset key reports "unknown variable", which
 	// getEnvironmentOptional reads as absent rather than as an error.
-	b.WriteString("  show-environment) echo \"unknown variable\" >&2; exit 1 ;;\n")
+	if showEnvFails {
+		b.WriteString("  show-environment) echo \"server exited unexpectedly\" >&2; exit 1 ;;\n")
+	} else {
+		b.WriteString("  show-environment) echo \"unknown variable\" >&2; exit 1 ;;\n")
+	}
 	b.WriteString("  display-message)\n")
 	b.WriteString("    for a in \"$@\"; do\n")
 	b.WriteString("      case \"$a\" in\n")
@@ -172,5 +184,32 @@ func TestStartOrRestartCrewMember_RestartsWhenEnvResolves(t *testing.T) {
 	}
 	if !probe.sentKeys(t) {
 		t.Errorf("no send-keys invocation; a restart typed nothing: %v", probe.invocations(t))
+	}
+}
+
+// G4-01: when the liveness query itself fails, gt start must not type a
+// startup command into the pane. The old error-dropping check read the failure
+// as "agent exited" and pasted `exec claude ...` into a running Claude TUI.
+func TestStartOrRestartCrewMember_UnknownLivenessSendsNothing(t *testing.T) {
+	probe := shimTmuxWith(t, true)
+	const setVar = "GT_TEST_CREW_UNKNOWN_TOKEN"
+	t.Setenv(setVar, "live-token")
+
+	r, townRoot := restartFixture(t, "alice", setVar)
+	tm := tmux.NewTmuxWithSocket("gt-test-crew-restart-unknown")
+
+	msg, started := startOrRestartCrewMember(tm, r, "alice", townRoot)
+
+	if started {
+		t.Errorf("started = true on an unknown liveness answer: %q", msg)
+	}
+	if probe.sentKeys(t) {
+		t.Fatalf("a command was typed into a session whose liveness is unknown; invocations: %v", probe.invocations(t))
+	}
+	if !strings.Contains(msg, "unknown") {
+		t.Errorf("message %q does not report the unknown liveness", msg)
+	}
+	if logged := probe.invocations(t); !strings.Contains(strings.Join(logged, "\n"), "show-environment") {
+		t.Errorf("shim saw no show-environment call, so the liveness check never ran: %v", logged)
 	}
 }

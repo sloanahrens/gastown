@@ -841,8 +841,14 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 				return fmt.Errorf("killing existing session: %w", err)
 			}
 		} else {
-			// Normal start - session exists, check if agent is actually running
-			if t.IsAgentAlive(sessionID) {
+			// Normal start - session exists, check if agent is actually running.
+			// A failed liveness query is UNKNOWN: refuse instead of killing a
+			// session that may be working (G4-01).
+			alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+			if aliveErr != nil {
+				return fmt.Errorf("checking agent liveness in %s (not killing): %w", sessionID, aliveErr)
+			}
+			if alive {
 				return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
 			}
 			// Zombie session - kill and recreate.

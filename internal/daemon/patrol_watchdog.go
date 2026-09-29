@@ -289,7 +289,14 @@ func (d *Daemon) runPatrolWatchdog() {
 	findings := assessPatrolWatchdogTargets(
 		targets,
 		func(target patrolWatchdogTarget) bool {
-			return d.tmux.IsAgentAlive(target.Session)
+			// A failed liveness query is unknown, not dead: keep judging the
+			// patrol by its receipts rather than passing it silently (G4-01).
+			alive, err := d.tmux.IsAgentAliveChecked(target.Session)
+			if err != nil {
+				d.logger.Printf("patrol_watchdog: %s liveness unknown (%v); judging by receipts", target.Session, err)
+				return true
+			}
+			return alive
 		},
 		func(target patrolWatchdogTarget) (time.Time, guard.Result) {
 			return witness.LastCompletedPatrol(bd, target.WorkDir, target.Assignee, target.PatrolMol)

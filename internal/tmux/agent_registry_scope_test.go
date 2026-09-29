@@ -41,10 +41,10 @@ func TestIsAgentAliveLegacyFallbackUsesTownRegistry(t *testing.T) {
 	tm, _ := f.tmux(nil)
 	tm.getenv = func(string) string { return "" }
 
-	if !tm.IsAgentAlive("gt-nix") {
-		t.Error("gt-nix: want alive via its town's claude process_names override")
+	if alive, err := tm.IsAgentAliveChecked("gt-nix"); err != nil || !alive {
+		t.Errorf("gt-nix: want alive via its town's claude process_names override (err=%v)", err)
 	}
-	if tm.IsAgentAlive("gt-plain") {
-		t.Error("gt-plain: want not alive; its town has no override, so another town's must not apply")
+	if alive, err := tm.IsAgentAliveChecked("gt-plain"); err != nil || alive {
+		t.Errorf("gt-plain: want not alive; its town has no override, so another town's must not apply (err=%v)", err)
 	}
 }

@@ -25,7 +25,7 @@ var (
 // tmuxOps abstracts tmux operations for testing.
 type tmuxOps interface {
 	HasSession(name string) (bool, error)
-	IsAgentAlive(session string) bool
+	IsAgentAliveChecked(session string) (bool, error)
 	KillSessionWithProcesses(name string) error
 	NewSessionWithCommand(name, workDir, command string) error
 	NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error
@@ -108,8 +108,14 @@ func (m *Manager) Start(agentOverride string) error {
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
-		// Session exists - check if agent is actually running (healthy vs zombie)
-		if t.IsAgentAlive(sessionID) {
+		// Session exists - check if agent is actually running (healthy vs zombie).
+		// A failed liveness query is UNKNOWN: treat the deacon as running and
+		// leave it alone rather than kill a session that may be working (G4-01).
+		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+		if aliveErr != nil {
+			return fmt.Errorf("%w (agent liveness unknown: %v)", ErrAlreadyRunning, aliveErr)
+		}
+		if alive {
 			m.startNudgePoller(sessionID)
 			return ErrAlreadyRunning
 		}

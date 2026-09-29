@@ -751,3 +751,49 @@ func TestReapIdlePolecat_SkipsPolecatRenewingExitingHeartbeat(t *testing.T) {
 		t.Fatalf("expected reap reason %q, got: %q", polecat.HeartbeatExiting, logBuf.String())
 	}
 }
+
+// G4-01: an unanswerable liveness query is UNKNOWN, not dead. With the agent
+// bead unreadable and no assigned work, a confirmed-dead agent is reaped at 2x
+// the idle threshold; an unknown one must wait for the 3x ceiling like a live
+// one. The session's pane runs a shell, so the old error-dropping check read
+// the failure as dead and reaped at 2.5x.
+func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
+	old := session.DefaultRegistry()
+	reg := session.NewPrefixRegistry()
+	reg.Register("myr", "myr")
+	session.SetDefaultRegistry(reg)
+	defer session.SetDefaultRegistry(old)
+
+	binDir := t.TempDir()
+	bdPath := writeFakeBDLookupFail(t, binDir, false /* no work */)
+
+	townRoot := t.TempDir()
+	var logBuf strings.Builder
+	tm := polecatSessionTmux("bash", time.Now().Add(-time.Hour))
+	tm.setAliveErr("myr-mycat", fmt.Errorf("tmux show-environment: timed out"))
+	d := &Daemon{
+		config:   &Config{TownRoot: townRoot},
+		logger:   log.New(&logBuf, "", 0),
+		tmux:     tm,
+		notifier: notifyfake.New(),
+		bdPath:   bdPath,
+	}
+
+	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")
+	_ = os.MkdirAll(filepath.Dir(hbPath), 0755)
+	staleHB := polecat.SessionHeartbeat{
+		Timestamp: time.Now().UTC().Add(-38 * time.Minute), // 2.5x the 15m timeout
+		State:     polecat.HeartbeatWorking,
+	}
+	data, _ := json.Marshal(staleHB)
+	_ = os.WriteFile(hbPath, data, 0644)
+
+	d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
+
+	if strings.Contains(logBuf.String(), "Reaping idle polecat") {
+		t.Fatalf("reaped a polecat whose liveness is unknown: %q", logBuf.String())
+	}
+	if alive, _ := d.tmux.HasSession("myr-mycat"); !alive {
+		t.Fatal("session was killed on an unknown liveness answer")
+	}
+}

@@ -290,7 +290,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Update tmux session environment for liveness detection.
-	// IsAgentAlive reads GT_PROCESS_NAMES via tmux show-environment (session env),
+	// IsAgentAliveChecked reads GT_PROCESS_NAMES via tmux show-environment (session env),
 	// not from shell exports. The restart command sets shell exports for the child
 	// process, but we must also update the session env so liveness checks work.
 	// Placed after the dry-run guard to avoid mutating session state during dry-run.
@@ -1060,7 +1060,7 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 }
 
 // updateSessionEnvForHandoff updates the tmux session environment with the
-// agent name and process names for liveness detection. IsAgentAlive reads
+// agent name and process names for liveness detection. IsAgentAliveChecked reads
 // GT_PROCESS_NAMES from the tmux session env (via tmux show-environment), not
 // from shell exports in the pane. Without this, post-handoff liveness checks
 // would use stale values from the previous agent.

@@ -2447,7 +2447,7 @@ func BuildStartupCommand(envVars map[string]string, rigPath, prompt string) (str
 	if rc.Session != nil && rc.Session.SessionIDEnv != "" {
 		resolvedEnv["GT_SESSION_ID_ENV"] = rc.Session.SessionIDEnv
 	}
-	// Set GT_AGENT from resolved agent name so IsAgentAlive can detect
+	// Set GT_AGENT from resolved agent name so IsAgentAliveChecked can detect
 	// non-Claude processes (e.g., opencode). Without this, witness patrol
 	// falls back to ["node", "claude"] process detection and auto-nukes
 	// polecats running non-Claude agents. See: gt-agent-role-agents.
@@ -2728,7 +2728,7 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	if rc.Session != nil && rc.Session.SessionIDEnv != "" {
 		resolvedEnv["GT_SESSION_ID_ENV"] = rc.Session.SessionIDEnv
 	}
-	// Record agent name so IsAgentAlive can detect the running process.
+	// Record agent name so IsAgentAliveChecked can detect the running process.
 	// Explicit override takes priority; fall back to resolved agent name.
 	agentForProcess := rc.ResolvedAgent
 	if agentOverride != "" {

@@ -5712,7 +5712,7 @@ func TestBuildStartupCommandWithAgentOverride_GTAgentFromResolvedAgent(t *testin
 
 // TestBuildStartupCommand_RoleAgentsSetGTAgent verifies that when a non-Claude agent
 // is configured via role_agents, GT_AGENT is set in the startup command.
-// Without this, IsAgentAlive falls back to ["node", "claude"] and witness patrol
+// Without this, IsAgentAliveChecked falls back to ["node", "claude"] and witness patrol
 // auto-nukes polecats running non-Claude agents. See: fix/gt-agent-role-agents.
 func TestBuildStartupCommand_RoleAgentsSetGTAgent(t *testing.T) {
 	t.Parallel()
@@ -5741,7 +5741,7 @@ func TestBuildStartupCommand_RoleAgentsSetGTAgent(t *testing.T) {
 		t.Fatalf("BuildStartupCommand returned an error: %v", err)
 	}
 
-	// GT_AGENT must be set to "opencode" so IsAgentAlive detects the process
+	// GT_AGENT must be set to "opencode" so IsAgentAliveChecked detects the process
 	if !strings.Contains(cmd, "GT_AGENT=opencode") {
 		t.Errorf("expected GT_AGENT=opencode in command, got: %q", cmd)
 	}

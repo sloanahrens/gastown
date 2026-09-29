@@ -291,7 +291,9 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 			_ = t.KillSessionWithProcesses(cfg.SessionID)
 			return nil, fmt.Errorf("startup blocked: %w", err)
 		}
-		if status := t.CheckSessionHealth(cfg.SessionID, 0); status != tmux.SessionHealthy {
+		// AgentUnknown (a failed liveness query) is not evidence the startup
+		// failed; only a confirmed unhealthy status kills the new session.
+		if status := t.CheckSessionHealth(cfg.SessionID, 0); status != tmux.SessionHealthy && status != tmux.AgentUnknown {
 			_ = t.KillSessionWithProcesses(cfg.SessionID)
 			return nil, fmt.Errorf("session %s unhealthy during startup: %s", cfg.SessionID, status)
 		}
@@ -464,8 +466,16 @@ func KillExistingSession(t *tmux.Tmux, sessionID string, checkAlive bool) (bool,
 		return false, nil
 	}
 
-	if checkAlive && t.IsAgentAlive(sessionID) {
-		return false, fmt.Errorf("session already running: %s", sessionID)
+	if checkAlive {
+		// Only a confirmed dead agent is killed. A failed liveness query is
+		// UNKNOWN: refuse rather than kill a session that may be working (G4-01).
+		alive, err := t.IsAgentAliveChecked(sessionID)
+		if err != nil {
+			return false, fmt.Errorf("session %s: agent liveness unknown, not killing: %w", sessionID, err)
+		}
+		if alive {
+			return false, fmt.Errorf("session already running: %s", sessionID)
+		}
 	}
 
 	if err := t.KillSessionWithProcesses(sessionID); err != nil {

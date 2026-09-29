@@ -228,7 +228,7 @@ func TestLoadAgentRegistryForTown(t *testing.T) {
 
 func TestGetProcessNamesRespectsRegistryOverride(t *testing.T) {
 	// Regression test: settings/agents.json overrides must be visible to
-	// GetProcessNames so that liveness checks (IsAgentAlive, daemon heartbeat,
+	// GetProcessNames so that liveness checks (IsAgentAliveChecked, daemon heartbeat,
 	// cleanup) respect user-configured process names.
 	// Real-world case: NixOS wraps claude as ".claude-unwrapped".
 	t.Parallel()
@@ -448,7 +448,7 @@ func TestResolveProcessNames(t *testing.T) {
 
 	// Regression: custom agents wrapped in `env -u VAR <real-binary>` (or
 	// nohup/sudo/etc.) used to fall through to GT_PROCESS_NAMES=<wrapper>,
-	// which IsAgentAlive could never match — wrapper has exec'd into the real
+	// which IsAgentAliveChecked could never match — wrapper has exec'd into the real
 	// binary by then. ResolveProcessNames must look past the wrapper.
 	wrapperCases := []struct {
 		name    string

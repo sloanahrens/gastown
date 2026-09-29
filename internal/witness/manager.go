@@ -51,7 +51,9 @@ func NewManager(r *rig.Rig) *Manager {
 func (m *Manager) IsRunning() (bool, error) {
 	t := tmux.NewTmux()
 	status := t.CheckSessionHealth(m.SessionName(), 0)
-	return status == tmux.SessionHealthy, nil
+	// AgentUnknown counts as running: a false answer leads callers to start
+	// a second witness into a live session (G4-01).
+	return status == tmux.SessionHealthy || status == tmux.AgentUnknown, nil
 }
 
 // IsHealthy checks if the witness is running and has been active recently.
@@ -130,8 +132,14 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
-		// Session exists - check if Claude is actually running (healthy vs zombie)
-		if t.IsAgentAlive(sessionID) {
+		// Session exists - check if Claude is actually running (healthy vs zombie).
+		// A failed liveness query is UNKNOWN: report the witness as running
+		// rather than kill a session that may be working (G4-01).
+		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+		if aliveErr != nil {
+			return fmt.Errorf("%w (agent liveness unknown: %v)", ErrAlreadyRunning, aliveErr)
+		}
+		if alive {
 			// Healthy - Claude is running
 			return ErrAlreadyRunning
 		}
@@ -143,8 +151,9 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		createdAt, _ := t.GetSessionCreatedUnix(sessionID)
 		time.Sleep(constants.ZombieKillGracePeriod)
 
-		// Re-check: abort kill if agent started or session was replaced
-		if t.IsAgentAlive(sessionID) {
+		// Re-check: abort kill if agent started, the answer is unknown, or
+		// the session was replaced.
+		if alive, aliveErr := t.IsAgentAliveChecked(sessionID); aliveErr != nil || alive {
 			return ErrAlreadyRunning
 		}
 		if createdNow, _ := t.GetSessionCreatedUnix(sessionID); createdAt > 0 && createdNow != createdAt {

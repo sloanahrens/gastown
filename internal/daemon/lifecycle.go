@@ -1128,8 +1128,14 @@ func (d *Daemon) checkRigGUPPViolations(rigName string) {
 		polecatName := strings.TrimPrefix(agent.ID, prefix)
 		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 
-		// Check if tmux session exists and agent is running
-		if d.tmux.IsAgentAlive(sessionName) {
+		// Check if tmux session exists and agent is running. A failed
+		// liveness query is unknown: skip this agent this cycle (G4-01).
+		agentAlive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName)
+		if aliveErr != nil {
+			d.logger.Printf("GUPP check: agent %s liveness unknown (%v); skipped", agent.ID, aliveErr)
+			continue
+		}
+		if agentAlive {
 			// Session is alive - check if it's been stuck too long
 			updatedAt, err := time.Parse(time.RFC3339, agent.UpdatedAt)
 			if err != nil {
@@ -1235,15 +1241,19 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 		polecatName := strings.TrimPrefix(agent.ID, prefix)
 		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 
-		// Session running = not orphaned (work is being processed)
-		if d.tmux.IsAgentAlive(sessionName) {
+		// Session running = not orphaned (work is being processed). A failed
+		// liveness query is unknown, not dead: skip this cycle (G4-01).
+		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil {
+			d.logger.Printf("Orphaned work check: agent %s liveness unknown (%v); skipped", agent.ID, aliveErr)
+			continue
+		} else if alive {
 			continue
 		}
 
 		// TOCTOU guard: re-verify agent state before taking action.
 		// Between the bd list above and now, the agent may have been
 		// restarted or its hook_bead cleared. Re-check both conditions.
-		if d.tmux.IsAgentAlive(sessionName) {
+		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil || alive {
 			continue
 		}
 		currentHookBead := d.getAgentHookBead(agent.ID)

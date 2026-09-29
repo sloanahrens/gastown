@@ -74,7 +74,7 @@ type AgentEnvConfig struct {
 
 	// Agent is the agent override (e.g., "codex", "gemini").
 	// If set, GT_AGENT is written to the tmux session table via SetEnvironment
-	// so that IsAgentAlive and waitForPolecatReady can read it via GetEnvironment.
+	// so that IsAgentAliveChecked and waitForPolecatReady can read it via GetEnvironment.
 	// Without this, GetEnvironment returns empty (tmux show-environment reads the
 	// session table, not the process env set via exec env in the startup command).
 	Agent string
@@ -201,7 +201,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 
 	// Set GT_AGENT when an agent override is in use.
 	// This makes the override visible via tmux show-environment so that
-	// IsAgentAlive and waitForPolecatReady use the correct process names.
+	// IsAgentAliveChecked and waitForPolecatReady use the correct process names.
 	// EnvAgentOverride records that the pin came from --agent rather than from
 	// role_agents resolution, so a handoff can tell a deliberate override from
 	// a stale snapshot of config it is free to re-resolve (gt-di8p).

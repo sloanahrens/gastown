@@ -100,7 +100,7 @@ type SessionStartOptions struct {
 
 	// Agent is the agent override for this polecat session (e.g., "codex", "gemini").
 	// If set, GT_AGENT is written to the tmux session environment table so that
-	// IsAgentAlive and waitForPolecatReady read the correct process names.
+	// IsAgentAliveChecked and waitForPolecatReady read the correct process names.
 	Agent string
 }
 
@@ -406,7 +406,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// If an existing session's pane process has died, kill the stale session
 	// and proceed rather than returning ErrSessionRunning (gt-jn40ft).
 	//
-	// For zombie detection, use IsAgentAlive directly rather than the
+	// For zombie detection, use IsAgentAliveChecked directly rather than the
 	// heartbeat-primary isSessionStale path. The pane process is often a
 	// shell or wrapper that outlives the agent, so heartbeat-fresh + pane-PID
 	// alive can hide a dead agent — wedging gt session restart with
@@ -422,7 +422,13 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		return fmt.Errorf("checking session: %w", err)
 	}
 	if running {
-		if m.tmux.IsAgentAlive(sessionID) {
+		// A failed liveness query is UNKNOWN, not a zombie: refuse the start
+		// rather than kill a session that may be working (G4-01).
+		alive, aliveErr := m.tmux.IsAgentAliveChecked(sessionID)
+		if aliveErr != nil {
+			return fmt.Errorf("checking agent liveness in %s (not killing): %w", sessionID, aliveErr)
+		}
+		if alive {
 			return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
 		}
 		if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
@@ -652,12 +658,14 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if !running {
 		return fmt.Errorf("session %s died during startup (agent command may have failed)", sessionID)
 	}
-	if status := m.tmux.CheckSessionHealth(sessionID, 0); status != tmux.SessionHealthy {
+	// AgentUnknown (a failed liveness query) is not evidence the startup
+	// failed; only a confirmed unhealthy status kills the new session.
+	if status := m.tmux.CheckSessionHealth(sessionID, 0); status != tmux.SessionHealthy && status != tmux.AgentUnknown {
 		_ = m.tmux.KillSessionWithProcesses(sessionID)
 		return fmt.Errorf("session %s unhealthy during startup: %s", sessionID, status)
 	}
 
-	// Validate GT_AGENT is set. Without GT_AGENT, IsAgentAlive falls back to
+	// Validate GT_AGENT is set. Without GT_AGENT, IsAgentAliveChecked falls back to
 	// ["node", "claude"] process detection and witness patrol will auto-nuke
 	// polecats running non-Claude agents (e.g., opencode). Fail fast.
 	gtAgent, _ := m.tmux.GetEnvironment(sessionID, "GT_AGENT")
@@ -736,7 +744,9 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 func (m *SessionManager) IsRunning(polecat string) (bool, error) {
 	sessionID := m.SessionName(polecat)
 	status := m.tmux.CheckSessionHealth(sessionID, 0)
-	return status == tmux.SessionHealthy, nil
+	// AgentUnknown counts as running: callers start a session when this
+	// is false, and a second start into a live session is the harm (G4-01).
+	return status == tmux.SessionHealthy || status == tmux.AgentUnknown, nil
 }
 
 // Status returns detailed status for a polecat session.

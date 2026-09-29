@@ -538,7 +538,7 @@ func hookSessionBeaconLines(sessionID, source string) []string {
 // signalAgentReady sets GT_AGENT_READY=1 in the current tmux session environment.
 // Called from the agent's SessionStart hook to signal that the agent has started.
 // WaitForCommand polls for this variable as a ZFC-compliant alternative to
-// probing the process tree via IsAgentAlive.
+// probing the process tree via IsAgentAliveChecked.
 // Uses ResolveCurrentSession to find our session on the town socket — raw
 // exec.Command("tmux", ...) would use the default socket and miss the gastown server.
 func signalAgentReady() {

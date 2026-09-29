@@ -151,7 +151,13 @@ func (h *handlers) detectStalledRefinery(workDir, rigName string, dryRun bool) *
 	}
 	result.Checked = 1
 
-	if !t.IsAgentAlive(sessionName) {
+	alive, aliveErr := t.IsAgentAliveChecked(sessionName)
+	if aliveErr != nil {
+		result.Errors = append(result.Errors,
+			fmt.Errorf("refinery %s agent liveness unknown: %w", sessionName, aliveErr))
+		return result
+	}
+	if !alive {
 		// Session alive, agent process dead: the daemon's respawn path.
 		return result
 	}

@@ -453,7 +453,7 @@ func startConfiguredCrew(t *tmux.Tmux, rigs []*rig.Rig, townRoot string, mu *syn
 }
 
 // startOrRestartCrewMember starts or restarts a single crew member and returns a status message.
-// Uses IsAgentAlive for robust zombie detection (checks pane command + descendant processes),
+// Uses IsAgentAliveChecked for robust zombie detection (checks pane command + descendant processes),
 // and delegates zombie cleanup to crewMgr.Start() which kills the zombie session and recreates
 // it with fresh env vars and runtime settings. A restart whose agent env does not validate
 // (an unset ${VAR} reference) keeps the existing session and reports the reason.
@@ -463,7 +463,13 @@ func startOrRestartCrewMember(t *tmux.Tmux, r *rig.Rig, crewName, townRoot strin
 		// Session exists - check if agent is still alive
 		// Uses descendant process check instead of pane command check,
 		// since crew members launch via bash -c wrappers (see #1315, #1330).
-		if !t.IsAgentAlive(sessionID) {
+		// A failed liveness query is UNKNOWN: type nothing into the pane,
+		// which may hold a running agent (G4-01).
+		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+		if aliveErr != nil {
+			return fmt.Sprintf("  %s %s/%s agent liveness unknown (%v); session left alone\n", style.Dim.Render("○"), r.Name, crewName, aliveErr), false
+		}
+		if !alive {
 			// Agent has exited, restart it
 			// Build startup beacon for predecessor discovery via /resume
 			address := session.BeaconRecipient("crew", crewName, r.Name)

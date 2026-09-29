@@ -103,7 +103,15 @@ func ObserveRealActivity(t *tmux.Tmux, polecatName, sessionName, workDir string)
 		return act
 	}
 
-	act.AgentAlive = t.IsAgentAlive(sessionName)
+	// A failed liveness query leaves AgentAlive false with the error
+	// recorded: every consumer reads a false AgentAlive as "decline to
+	// judge" (no stall verdict, no stopped-work confirmation), never as a
+	// reason to act (G4-01).
+	if alive, err := t.IsAgentAliveChecked(sessionName); err != nil {
+		act.Errors = append(act.Errors, fmt.Sprintf("agent liveness unknown: %v", err))
+	} else {
+		act.AgentAlive = alive
+	}
 
 	if workDir == "" {
 		if path, err := t.PaneCurrentPath(sessionName); err == nil {

@@ -14,6 +14,7 @@ type mockTmux struct {
 	hasSessionResult bool
 	hasSessionErr    error
 	agentAlive       bool
+	agentAliveErr    error
 	killErr          error
 	newSessionErr    error
 	waitErr          error
@@ -30,8 +31,11 @@ func (m *mockTmux) HasSession(name string) (bool, error) {
 	return m.hasSessionResult, m.hasSessionErr
 }
 
-func (m *mockTmux) IsAgentAlive(_ string) bool {
-	return m.agentAlive
+func (m *mockTmux) IsAgentAliveChecked(_ string) (bool, error) {
+	if m.agentAliveErr != nil {
+		return false, m.agentAliveErr
+	}
+	return m.agentAlive, nil
 }
 
 func (m *mockTmux) KillSessionWithProcesses(name string) error {
@@ -144,6 +148,28 @@ func TestStart_AlreadyRunningRepairsNudgePoller(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("startPoller calls = %d, want 1", calls)
+	}
+}
+
+// TestStart_LivenessUnknownDoesNotKill is G4-01: a failed liveness query on
+// an existing deacon session is UNKNOWN. Start must not kill it; it reports
+// the deacon as already running with the reason.
+func TestStart_LivenessUnknownDoesNotKill(t *testing.T) {
+	mock := &mockTmux{
+		hasSessionResult: true,
+		agentAliveErr:    errors.New("tmux show-environment: timed out"),
+	}
+	m := newTestManager(t.TempDir(), mock)
+
+	err := m.Start("")
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("Start() error = %v, want ErrAlreadyRunning", err)
+	}
+	if len(mock.killCalls) != 0 {
+		t.Fatalf("Start() killed %v on an unknown liveness answer", mock.killCalls)
+	}
+	if mock.newSessionCalls != 0 {
+		t.Fatalf("Start() created %d session(s) on an unknown liveness answer", mock.newSessionCalls)
 	}
 }
 

@@ -2048,7 +2048,7 @@ func TestDetectZombie_DoneOrNukedNotZombie(t *testing.T) {
 func TestDetectZombie_AgentDeadInLiveSession(t *testing.T) {
 	t.Parallel()
 	// Verify the logic: live session + agent process dead → zombie
-	// This is the gt-kj6r6 fix: DetectZombiePolecats now checks IsAgentAlive
+	// This is the gt-kj6r6 fix: DetectZombiePolecats now checks IsAgentAliveChecked
 	// for sessions that DO exist, catching the tmux-alive-but-agent-dead class.
 	sessionAlive := true
 	agentAlive := false
@@ -2213,13 +2213,13 @@ func TestDetectZombieLiveSession_SpawningStuckNoHookNoHeartbeat(t *testing.T) {
 	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
-	// Declare the pane's process name so IsAgentAlive matches it as "alive" —
+	// Declare the pane's process name so IsAgentAliveChecked matches it as "alive" —
 	// simulates a live agent process (bare Claude prompt) rather than a dead one.
 	if err := tm.SetEnvironment(sessionName, "GT_PROCESS_NAMES", "sleep"); err != nil {
 		t.Fatalf("set GT_PROCESS_NAMES: %v", err)
 	}
 
-	if !tm.IsAgentAlive(sessionName) {
+	if alive, err := tm.IsAgentAliveChecked(sessionName); err != nil || !alive {
 		t.Fatal("precondition failed: fake session should report agent alive")
 	}
 
@@ -2451,11 +2451,11 @@ func TestDetectZombieLiveSession_WorkingDoneIntentIsNotStuckInDone(t *testing.T)
 	if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
 		t.Fatalf("create tmux session: %v", err)
 	}
-	// Declare the pane's process name so IsAgentAlive matches it as "alive".
+	// Declare the pane's process name so IsAgentAliveChecked matches it as "alive".
 	if err := tm.SetEnvironment(sessionName, "GT_PROCESS_NAMES", "sleep"); err != nil {
 		t.Fatalf("set GT_PROCESS_NAMES: %v", err)
 	}
-	if !tm.IsAgentAlive(sessionName) {
+	if alive, err := tm.IsAgentAliveChecked(sessionName); err != nil || !alive {
 		t.Fatal("precondition failed: fake session should report agent alive")
 	}
 

@@ -675,7 +675,12 @@ func gatherStatus() (TownStatus, error) {
 				sessionWg.Add(1)
 				go func(name string) {
 					defer sessionWg.Done()
-					alive := t.IsAgentAlive(name)
+					// A failed liveness query is unknown, not dead: show
+					// the session as present rather than hide it (G4-01).
+					alive, aliveErr := t.IsAgentAliveChecked(name)
+					if aliveErr != nil {
+						alive = true
+					}
 					sessionMu.Lock()
 					allSessions[name] = alive
 					sessionMu.Unlock()

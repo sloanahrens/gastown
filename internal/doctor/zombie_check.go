@@ -12,7 +12,7 @@ import (
 // tests can inject a failure without a real tmux server.
 type zombieSessionLister interface {
 	ListSessions() ([]string, error)
-	IsAgentAlive(session string) bool
+	IsAgentAliveChecked(session string) (bool, error)
 	KillSessionWithProcesses(name string) error
 }
 
@@ -73,6 +73,7 @@ func (c *ZombieSessionCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check each Gas Town session for zombie status
 	var zombies []string
+	var unknown []string
 	var healthyCount int
 
 	for _, sess := range sessions {
@@ -91,16 +92,31 @@ func (c *ZombieSessionCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		// Check if Claude is running in this session
-		if t.IsAgentAlive(sess) {
+		// Check if Claude is running in this session. A failed query is
+		// UNKNOWN, never dead: under load `tmux show-environment` times out and
+		// the old error-dropping check turned that into a zombie kill (G4-01).
+		alive, err := t.IsAgentAliveChecked(sess)
+		switch {
+		case err != nil:
+			unknown = append(unknown, fmt.Sprintf("Unknown: %s (liveness query failed: %v); not treated as a zombie", sess, err))
+		case alive:
 			healthyCount++
-		} else {
+		default:
 			zombies = append(zombies, sess)
 		}
 	}
 
 	// Cache zombies for Fix
 	c.zombieSessions = zombies
+
+	if len(zombies) == 0 && len(unknown) > 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("unknown: could not verify %d session(s)", len(unknown)),
+			Details: unknown,
+		}
+	}
 
 	if len(zombies) == 0 {
 		msg := "No zombie sessions found"
@@ -114,10 +130,11 @@ func (c *ZombieSessionCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	details := make([]string, len(zombies))
-	for i, session := range zombies {
-		details[i] = fmt.Sprintf("Zombie: %s (tmux alive, Claude dead)", session)
+	details := make([]string, 0, len(zombies)+len(unknown))
+	for _, session := range zombies {
+		details = append(details, fmt.Sprintf("Zombie: %s (tmux alive, Claude dead)", session))
 	}
+	details = append(details, unknown...)
 
 	return &CheckResult{
 		Name:    c.Name(),
@@ -150,7 +167,9 @@ func (c *ZombieSessionCheck) Fix(ctx *CheckContext) error {
 		// TOCTOU guard: re-verify Claude is still dead in this session.
 		// Between Run() identifying zombies and Fix() killing them,
 		// a Claude process may have started (e.g., session was restarted).
-		if t.IsAgentAlive(sess) {
+		// Only a confirmed "not alive" answer proceeds; a query error is
+		// UNKNOWN and the session is left alone (G4-01).
+		if alive, err := t.IsAgentAliveChecked(sess); err != nil || alive {
 			continue
 		}
 

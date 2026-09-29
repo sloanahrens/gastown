@@ -2586,7 +2586,12 @@ func (d *Daemon) ensureMayorRunning() {
 			// During handoffs the agent is briefly undetectable, so we
 			// only restart if the session has been a zombie for multiple
 			// consecutive patrol cycles (debounce).
-			if !d.isMayorAgentAlive(mgr) {
+			alive, aliveErr := d.isMayorAgentAlive(mgr)
+			if aliveErr != nil {
+				// Unknown is not a zombie cycle: neither count it toward the
+				// restart debounce nor reset the count (G4-01).
+				d.logger.Printf("Mayor agent liveness unknown (%v); not counted as a zombie cycle", aliveErr)
+			} else if !alive {
 				d.mayorZombieCount++
 				if d.mayorZombieCount >= 3 {
 					d.logger.Printf("Mayor zombie detected (%d cycles), restarting", d.mayorZombieCount)
@@ -2617,9 +2622,10 @@ func (d *Daemon) ensureMayorRunning() {
 }
 
 // isMayorAgentAlive checks if the Mayor's agent process is running in tmux.
-func (d *Daemon) isMayorAgentAlive(mgr *mayor.Manager) bool {
+// A non-nil error means the answer is unknown, not that the Mayor is dead.
+func (d *Daemon) isMayorAgentAlive(mgr *mayor.Manager) (bool, error) {
 	t := tmux.NewTmux()
-	return t.IsAgentAlive(mgr.SessionName())
+	return t.IsAgentAliveChecked(mgr.SessionName())
 }
 
 // killDeaconSessions kills leftover deacon and boot tmux sessions.
@@ -3786,7 +3792,11 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 			// Use 3x threshold (not 2x) to avoid killing polecats during transient
 			// infrastructure degradation when the agent process is alive but not
 			// detectable (e.g. long thinking sessions, slow process inspection).
-			if staleDuration >= timeout*3 || !d.tmux.IsAgentAlive(sessionName) && staleDuration >= timeout*2 {
+			// A failed liveness query is unknown, not dead: it never earns
+			// the shorter 2x threshold (G4-01).
+			alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName)
+			confirmedDead := aliveErr == nil && !alive
+			if staleDuration >= timeout*3 || confirmedDead && staleDuration >= timeout*2 {
 				d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-bead-lookup-failed")
 			}
 			return
@@ -3814,7 +3824,11 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		// No hooked work + stale heartbeat — but check if the agent process
 		// is still actively running before reaping. A failed gt sling rollback
 		// can clear the hook while the agent is still working (GH#3342).
-		if d.tmux.IsAgentAlive(sessionName) {
+		// A failed liveness query is unknown: leave the session alone (G4-01).
+		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil {
+			d.logger.Printf("Not reaping %s/%s: agent liveness unknown (%v)", rigName, polecatName, aliveErr)
+			return
+		} else if alive {
 			return
 		}
 		d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-no-hook")

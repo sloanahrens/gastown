@@ -196,7 +196,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 			SessionName:      sessionID,
 		})
 		// Merge liveness-critical env vars (GT_AGENT, GT_PROCESS_NAMES) so that
-		// IsAgentAlive can detect non-Claude runtimes. Without this, attach
+		// IsAgentAliveChecked can detect non-Claude runtimes. Without this, attach
 		// misclassifies live sessions as dead and recreates them.
 		envVars = session.MergeRuntimeLivenessEnv(envVars, runtimeConfig)
 		for k, v := range envVars {
@@ -263,11 +263,17 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		// Uses descendant process check instead of pane command check,
 		// since crew members launch via bash -c wrappers that cause
 		// false-negative detection with IsAgentRunning (see #1315, #1330).
-		if !t.IsAgentAlive(sessionID) {
+		// A failed liveness query is UNKNOWN: refuse to respawn a pane that
+		// may hold a running agent (G4-01).
+		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+		if aliveErr != nil {
+			return fmt.Errorf("could not verify agent in %s is running (not restarting): %w", sessionID, aliveErr)
+		}
+		if !alive {
 			// Runtime has exited, restart it using respawn-pane
 			fmt.Printf("Runtime exited, restarting...\n")
 
-			// Refresh liveness env vars before restart so the next IsAgentAlive
+			// Refresh liveness env vars before restart so the next IsAgentAliveChecked
 			// check can detect non-Claude runtimes.
 			restartEnv := config.AgentEnv(config.AgentEnvConfig{
 				Role:             "crew",
@@ -345,8 +351,13 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	// Check if we're already in the target session
 	if isInTmuxSession(sessionID) {
 		// Check if agent is already alive - don't restart if so
-		// Uses descendant process check (see #1315, #1330).
-		if t.IsAgentAlive(sessionID) {
+		// Uses descendant process check (see #1315, #1330). A failed
+		// liveness query is UNKNOWN: do not start a second agent (G4-01).
+		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+		if aliveErr != nil {
+			return fmt.Errorf("could not verify agent in %s is running (not starting another): %w", sessionID, aliveErr)
+		}
+		if alive {
 			// Agent is already running, nothing to do
 			fmt.Printf("Already in %s session with agent running.\n", name)
 			return nil

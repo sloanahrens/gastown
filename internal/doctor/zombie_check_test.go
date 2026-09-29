@@ -10,7 +10,8 @@ import (
 type fakeZombieLister struct {
 	sessions []string
 	listErr  error
-	alive    map[string]bool // session -> IsAgentAlive result
+	alive    map[string]bool  // session -> IsAgentAliveChecked result
+	aliveErr map[string]error // session -> IsAgentAliveChecked error
 	killed   []string
 }
 
@@ -21,8 +22,11 @@ func (f *fakeZombieLister) ListSessions() ([]string, error) {
 	return f.sessions, nil
 }
 
-func (f *fakeZombieLister) IsAgentAlive(session string) bool {
-	return f.alive[session]
+func (f *fakeZombieLister) IsAgentAliveChecked(session string) (bool, error) {
+	if err := f.aliveErr[session]; err != nil {
+		return false, err
+	}
+	return f.alive[session], nil
 }
 
 func (f *fakeZombieLister) KillSessionWithProcesses(name string) error {
@@ -118,4 +122,63 @@ func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 	_ = check.Fix(ctx)
 
 	// The test passes if no panic occurred and crew sessions are protected by the safeguard
+}
+
+// TestZombieSessionCheck_LivenessErrorIsNotAZombie is G4-01: a liveness
+// query that fails (tmux show-environment timing out under load) is UNKNOWN,
+// not dead. Run must not list the session as a zombie and Fix must not kill it.
+func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
+	t.Parallel()
+	lister := &fakeZombieLister{
+		sessions: []string{"hq-deacon", "hq-boot"},
+		alive:    map[string]bool{"hq-boot": false},
+		aliveErr: map[string]error{"hq-deacon": errors.New("tmux show-environment: timed out")},
+	}
+	check := NewZombieSessionCheckWithLister(lister)
+	ctx := &CheckContext{TownRoot: t.TempDir()}
+
+	result := check.Run(ctx)
+	for _, d := range result.Details {
+		if strings.Contains(d, "Zombie: hq-deacon") {
+			t.Fatalf("session with an unknown liveness answer listed as zombie: %v", result.Details)
+		}
+	}
+	foundUnknown := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "hq-deacon") && strings.Contains(strings.ToLower(d), "unknown") {
+			foundUnknown = true
+		}
+	}
+	if !foundUnknown {
+		t.Errorf("expected the unknown session reported as unknown, got %v", result.Details)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, k := range lister.killed {
+		if k == "hq-deacon" {
+			t.Fatal("Fix killed a session whose liveness query failed")
+		}
+	}
+}
+
+// TestZombieSessionCheck_FixRecheckErrorSkipsKill: the TOCTOU re-check in Fix
+// must also treat a query error as unknown and leave the session alone.
+func TestZombieSessionCheck_FixRecheckErrorSkipsKill(t *testing.T) {
+	t.Parallel()
+	lister := &fakeZombieLister{
+		sessions: []string{"hq-deacon"},
+		alive:    map[string]bool{"hq-deacon": false},
+	}
+	check := NewZombieSessionCheckWithLister(lister)
+	ctx := &CheckContext{TownRoot: t.TempDir()}
+	_ = check.Run(ctx)
+	lister.aliveErr = map[string]error{"hq-deacon": errors.New("tmux: server busy")}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if len(lister.killed) != 0 {
+		t.Fatalf("Fix killed %v after a failed re-check", lister.killed)
+	}
 }

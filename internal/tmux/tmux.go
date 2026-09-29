@@ -2872,6 +2872,10 @@ const (
 	// AgentHung means the tmux session and agent process exist but there has
 	// been no tmux activity for longer than the specified threshold.
 	AgentHung
+	// AgentUnknown means the session exists but the agent-liveness query
+	// failed (e.g. `tmux show-environment` timed out under load). It is not a
+	// zombie: callers must report it and never kill or restart on it (G4-01).
+	AgentUnknown
 )
 
 // String returns a human-readable label for the zombie status.
@@ -2885,6 +2889,8 @@ func (z ZombieStatus) String() string {
 		return "agent-dead"
 	case AgentHung:
 		return "agent-hung"
+	case AgentUnknown:
+		return "agent-unknown"
 	default:
 		return "unknown"
 	}
@@ -2899,7 +2905,8 @@ func (z ZombieStatus) IsZombie() bool {
 // CheckSessionHealth determines the health status of an agent session.
 // It performs three levels of checking:
 //  1. Session existence (tmux has-session)
-//  2. Agent process liveness (IsAgentAlive — checks process tree)
+//  2. Agent process liveness (IsAgentAliveChecked — checks process tree);
+//     a failed query returns AgentUnknown, never AgentDead
 //  3. Activity staleness (GetWindowActivity — checks tmux pane output timestamp)
 //
 // The maxInactivity parameter controls how long a session can be idle before
@@ -2933,7 +2940,11 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 	}
 
 	// Level 2: Is the agent process running inside the session?
-	if !t.IsAgentAlive(session) {
+	agentAlive, err := t.IsAgentAliveChecked(session)
+	if err != nil {
+		return AgentUnknown
+	}
+	if !agentAlive {
 		return AgentDead
 	}
 
@@ -3755,17 +3766,15 @@ func (t *Tmux) matchesPaneRuntimeChecked(session, cmd, pid string, processNames 
 	return false, nil
 }
 
-// IsAgentAlive checks if an agent is running in the session using agent-agnostic detection.
-// It reads GT_PROCESS_NAMES from the session environment for accurate process detection,
-// falling back to GT_AGENT-based lookup for legacy sessions.
-// This is the preferred method for zombie detection across all agent types.
-func (t *Tmux) IsAgentAlive(session string) bool {
-	alive, _ := t.IsAgentAliveChecked(session)
-	return alive
-}
-
-// IsAgentAliveChecked is like IsAgentAlive, but preserves liveness-query errors
-// for callers that must not treat unknown state as confirmed death.
+// IsAgentAliveChecked reports whether an agent is running in the session using
+// agent-agnostic detection: GT_PROCESS_NAMES (or the GT_AGENT registry entry)
+// matched against the pane command and its descendants.
+//
+// A non-nil error means the answer is UNKNOWN, not dead. The error-dropping
+// IsAgentAlive wrapper was deleted (G4-01): gt doctor --fix, gt mayor attach
+// and gt start each killed or typed into live sessions when a tmux query
+// failed under load. Callers that kill, restart, respawn or send keys must act
+// only on (false, nil).
 func (t *Tmux) IsAgentAliveChecked(session string) (bool, error) {
 	processNames, err := t.resolveSessionProcessNamesChecked(session)
 	if err != nil {
@@ -5145,8 +5154,14 @@ func (t *Tmux) CleanupOrphanedSessions(isGTSession func(string) bool) (cleaned i
 			continue
 		}
 
-		// Check if the session is a zombie (tmux alive, agent dead)
-		if !t.IsAgentAlive(sess) {
+		// Check if the session is a zombie (tmux alive, agent dead). A failed
+		// liveness query is unknown, not dead: leave the session alone.
+		alive, aliveErr := t.IsAgentAliveChecked(sess)
+		if aliveErr != nil {
+			fmt.Printf("  warning: liveness of %s unknown (%v); not cleaned\n", sess, aliveErr)
+			continue
+		}
+		if !alive {
 			// Kill the zombie session
 			if killErr := t.KillSessionWithProcesses(sess); killErr != nil {
 				// Log but continue - other sessions may still need cleanup

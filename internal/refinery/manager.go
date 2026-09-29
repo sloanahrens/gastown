@@ -159,7 +159,9 @@ func (m *Manager) IsRunning() (bool, error) {
 	t := tmux.NewTmux()
 	sessionName := m.SessionName()
 	status := t.CheckSessionHealth(sessionName, 0)
-	return status == tmux.SessionHealthy, nil
+	// AgentUnknown counts as running: a false answer leads callers to start
+	// a second refinery into a live session (G4-01).
+	return status == tmux.SessionHealthy || status == tmux.AgentUnknown, nil
 }
 
 // IsHealthy checks if the refinery is running and has been active recently.

@@ -230,9 +230,14 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 	} else {
 		// Session exists - check if runtime is still running (hq-95xfq, gt-7zl)
 		// If runtime exited or sitting at shell, restart with proper context.
-		// Use IsAgentAlive (checks descendant processes) instead of IsAgentRunning
-		// (pane command only), since mayor launches via bash wrapper.
-		if !t.IsAgentAlive(sessionID) {
+		// Use IsAgentAliveChecked (checks descendant processes) instead of
+		// IsAgentRunning (pane command only), since mayor launches via bash
+		// wrapper. A failed query is UNKNOWN: never kill and respawn a Mayor
+		// that may be working; attach and let the operator see (G4-01).
+		alive, aliveErr := t.IsAgentAliveChecked(sessionID)
+		if aliveErr != nil {
+			style.PrintWarning("could not verify the Mayor agent is running (%v); attaching without restart", aliveErr)
+		} else if !alive {
 			// Runtime has exited, restart it with proper context
 			fmt.Println("Runtime exited, restarting with context...")
 

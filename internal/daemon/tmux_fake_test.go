@@ -26,6 +26,7 @@ type fakeTmux struct {
 	createdErr  error
 	unavailable bool
 	hasErr      error
+	aliveErr    map[string]error                // per session: IsAgentAliveChecked fails with this
 	stalls      map[string][]tmux.ComposerStall // per session, consumed in order; the last repeats
 	stallErr    map[string]error
 	calls       []string // daemon-only calls, "<method> <session>", in order
@@ -39,6 +40,7 @@ func newFakeTmux(clk clockwork.Clock) *fakeTmux {
 		created:  map[string]time.Time{},
 		stalls:   map[string][]tmux.ComposerStall{},
 		stallErr: map[string]error{},
+		aliveErr: map[string]error{},
 	}
 }
 
@@ -76,20 +78,39 @@ func (f *fakeTmux) HasSession(name string) (bool, error) {
 	return f.Server.HasSession(name)
 }
 
-// IsAgentAlive reports whether the pane runs something other than a shell,
-// the fake's stand-in for *tmux.Tmux's process-tree check.
-func (f *fakeTmux) IsAgentAlive(session string) bool {
-	return f.IsAgentRunning(session)
+// IsAgentAliveChecked reports whether the pane runs something other than a
+// shell, the fake's stand-in for *tmux.Tmux's process-tree check, or the error
+// the test set for session (a liveness query that could not be answered).
+func (f *fakeTmux) IsAgentAliveChecked(session string) (bool, error) {
+	f.mu.Lock()
+	err := f.aliveErr[session]
+	f.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	return f.IsAgentRunning(session), nil
+}
+
+// setAliveErr makes IsAgentAliveChecked fail for session.
+func (f *fakeTmux) setAliveErr(session string, err error) {
+	f.mu.Lock()
+	f.aliveErr[session] = err
+	f.mu.Unlock()
 }
 
 // CheckSessionHealth mirrors *tmux.Tmux without the activity level, which
 // needs window activity the fake does not model: SessionDead for a missing
-// session, AgentDead for a pane back at a shell, else SessionHealthy.
+// session, AgentUnknown for a failed liveness query, AgentDead for a pane
+// back at a shell, else SessionHealthy.
 func (f *fakeTmux) CheckSessionHealth(session string, _ time.Duration) tmux.ZombieStatus {
 	if alive, err := f.HasSession(session); err != nil || !alive {
 		return tmux.SessionDead
 	}
-	if !f.IsAgentAlive(session) {
+	alive, err := f.IsAgentAliveChecked(session)
+	if err != nil {
+		return tmux.AgentUnknown
+	}
+	if !alive {
 		return tmux.AgentDead
 	}
 	return tmux.SessionHealthy

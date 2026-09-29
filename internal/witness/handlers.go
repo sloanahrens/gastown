@@ -1805,7 +1805,7 @@ type DetectZombiePolecatsResult struct {
 //   - Session-dead: tmux session is dead but agent bead still shows agent_state=
 //     "working", "running", or "spawning", or has a hook_bead assigned.
 //   - Agent-dead: tmux session exists but the agent process (Claude/node) inside
-//     it has died. Detected via IsAgentAlive. See gt-kj6r6.
+//     it has died. Detected via IsAgentAliveChecked. See gt-kj6r6.
 //
 // Zombies cannot send POLECAT_DONE or other signals, so they sit undetected
 // by the reactive signal-based patrol. This function provides proactive detection.
@@ -2096,7 +2096,15 @@ func (h *handlers) detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName
 
 	// Tmux alive but agent process dead (gt-kj6r6).
 	// gt-dsgp: Restart instead of nuke — preserve worktree and branch.
-	if !t.IsAgentAlive(sessionName) {
+	// Only a confirmed dead agent is restarted. A failed liveness query is
+	// UNKNOWN and is logged, never acted on (G4-01).
+	agentAlive, aliveErr := t.IsAgentAliveChecked(sessionName)
+	if aliveErr != nil {
+		log.Printf("warning: %s/%s agent liveness unknown (%v); not treated as dead this cycle",
+			rigName, polecatName, aliveErr)
+		return ZombieResult{}, false
+	}
+	if !agentAlive {
 		zombie := ZombieResult{
 			PolecatName:    polecatName,
 			AgentState:     snapState,
@@ -2772,7 +2780,11 @@ func (h *handlers) detectStalledPolecats(workDir, rigName string) *DetectStalled
 		if !sessionAlive {
 			continue // Dead session — zombie detection handles this
 		}
-		if !t.IsAgentAlive(sessionName) {
+		if alive, aliveErr := t.IsAgentAliveChecked(sessionName); aliveErr != nil {
+			result.Errors = append(result.Errors,
+				fmt.Errorf("agent liveness unknown for %s: %w", sessionName, aliveErr))
+			continue
+		} else if !alive {
 			continue // Dead agent — zombie detection handles this
 		}
 

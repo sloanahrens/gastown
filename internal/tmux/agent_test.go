@@ -30,7 +30,7 @@ func TestEnsureSessionFresh_ZombieSession(t *testing.T) {
 	old := f.addSession("gt-x", "bash")
 	clk := newFixedClock()
 	tm, s := f.tmux(clk)
-	if tm.IsAgentAlive("gt-x") {
+	if alive, err := tm.IsAgentAliveChecked("gt-x"); err != nil || alive {
 		t.Fatal("fixture: a bare shell must not read as a live agent")
 	}
 	if err := driven(t, clk, processKillGracePeriod, func() error { return tm.EnsureSessionFresh("gt-x", "") }); err != nil {

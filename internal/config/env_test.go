@@ -275,7 +275,7 @@ func TestAgentEnv_WithoutAgentOverride(t *testing.T) {
 // TestAgentEnv_WithoutAgentOverride_RequiresFallback documents that callers
 // must set GT_AGENT from RuntimeConfig.ResolvedAgent when AgentEnvConfig.Agent
 // is empty. AgentEnv intentionally omits GT_AGENT without an explicit override,
-// but tmux session table consumers (IsAgentAlive, GT_AGENT validation) need it.
+// but tmux session table consumers (IsAgentAliveChecked, GT_AGENT validation) need it.
 // Regression test for PR #1776 which removed the session_manager.go fallback.
 func TestAgentEnv_WithoutAgentOverride_RequiresFallback(t *testing.T) {
 	t.Parallel()
