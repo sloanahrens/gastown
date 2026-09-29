@@ -51,6 +51,15 @@ while IFS= read -r REPO_PATH; do
   fi
 done < <(echo "$RIG_JSON" | jq -r '.[] | select(.repo_path != null and .repo_path != "") | .repo_path' 2>/dev/null)
 
+# A skip receipt reads as healthy, so an unreadable opt-in is also escalated,
+# under one key that folds repeat runs into the open escalation.
+if [ ${#UNREADABLE[@]} -gt 0 ]; then
+  gt escalate "submodule-commit: ${#UNREADABLE[@]} rig(s) with submodules have no readable opt-in" -s low \
+    --source "plugin:submodule-commit" --fingerprint "submodule-commit:opt-in-unreadable" \
+    --reason "Rigs: ${UNREADABLE[*]}. gt rig settings show carries no plugins key, so submodule-commit cannot tell whether these rigs opted in and treats them as off (gt-fcxe9.13)." \
+    >/dev/null 2>&1 || log "WARN: could not escalate the unreadable opt-in"
+fi
+
 if [ ${#RESOLVED[@]} -eq 0 ]; then
   log "FAIL: no rigs with repo paths (gt rig list --json emitted no repo_path field — gt-chqi)"
   gt plugin record-run --plugin submodule-commit --result failure \

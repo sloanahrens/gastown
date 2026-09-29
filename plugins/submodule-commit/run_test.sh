@@ -37,6 +37,7 @@ setup_case() {
   : > "$CASE_DIR/myrig/.gitmodules"
   printf '%s' "$1" > "$CASE_DIR/settings.json"
   : > "$CASE_DIR/record.log"
+  : > "$CASE_DIR/escalate.log"
   cat > "$CASE_DIR/bin/gt" <<SH
 #!/usr/bin/env bash
 case "\$1 \$2" in
@@ -45,6 +46,7 @@ case "\$1 \$2" in
     [ -s "$CASE_DIR/settings.json" ] || exit 1
     cat "$CASE_DIR/settings.json" ;;
   "plugin record-run") printf '%s\n' "\$*" >> "$CASE_DIR/record.log" ;;
+  escalate*) printf '%s\n' "\$*" >> "$CASE_DIR/escalate.log" ;;
   *) echo "fake gt: unexpected: \$*" >&2; exit 2 ;;
 esac
 SH
@@ -62,12 +64,15 @@ run_plugin
 if [ "$PLUGIN_RC" -eq 0 ]; then record_pass "no plugins key: exits 0 (skip)"; else record_fail "no plugins key: exit $PLUGIN_RC: $(cat "$CASE_DIR/out.log")"; fi
 assert_contains "$CASE_DIR/out.log" "no readable submodule-commit opt-in" "no plugins key: warns"
 assert_contains "$CASE_DIR/record.log" "no readable opt-in: myrig" "no plugins key: receipt names the rig"
+assert_contains "$CASE_DIR/escalate.log" "--fingerprint submodule-commit:opt-in-unreadable" "no plugins key: escalates under one folding key"
+assert_contains "$CASE_DIR/escalate.log" "myrig" "no plugins key: escalation names the rig"
 
 # An explicit opt-out is a deliberate off: no warning.
 setup_case '{"type":"rig-settings","version":1,"plugins":{"submodule-commit":{"enabled":false}}}'
 run_plugin
 if [ "$PLUGIN_RC" -eq 0 ]; then record_pass "explicit off: exits 0 (skip)"; else record_fail "explicit off: exit $PLUGIN_RC"; fi
 assert_not_contains "$CASE_DIR/out.log" "no readable submodule-commit opt-in" "explicit off: no warning"
+if [ -s "$CASE_DIR/escalate.log" ]; then record_fail "explicit off: escalated: $(cat "$CASE_DIR/escalate.log")"; else record_pass "explicit off: no escalation"; fi
 
 # gt rig settings show fails (unknown rig): also unreadable, also loud.
 setup_case ''
