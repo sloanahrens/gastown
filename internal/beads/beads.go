@@ -2094,12 +2094,6 @@ func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 		return nil, err
 	}
 
-	// Build dedup map from issues
-	seen := make(map[string]bool, len(issueResults))
-	for _, issue := range issueResults {
-		seen[issue.ID] = true
-	}
-
 	// 2. Query the wisps table for merge-request wisps with full data. A
 	// PreloadLabeledWisps cache covering this label (gt-92zx: shared with
 	// ListAgentBeadsFromWisps so both answer from one bd sql round trip
@@ -2121,16 +2115,7 @@ func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 			wisps = nil
 		}
 	}
-	for _, w := range wisps {
-		if seen[w.ID] || !mrWispStatusMatches(w.Status, opts.Status) {
-			continue
-		}
-		seen[w.ID] = true
-		issueResults = append(issueResults, w)
-	}
-
-	issueResults = filterMergeRequestsByRig(issueResults, opts.Rig)
-	return b.hydrateMergeRequestDetails(issueResults)
+	return finishMergeRequests(b, issueResults, wisps, opts)
 }
 
 // mrWispStatusMatches replicates the wisps-table status filter
@@ -2300,7 +2285,7 @@ func filterMergeRequestsByRig(issues []*Issue, rigName string) []*Issue {
 	return filtered
 }
 
-func (b *Beads) hydrateMergeRequestDetails(issues []*Issue) ([]*Issue, error) {
+func hydrateMergeRequestDetails(c Client, issues []*Issue) ([]*Issue, error) {
 	if len(issues) == 0 {
 		return issues, nil
 	}
@@ -2315,7 +2300,7 @@ func (b *Beads) hydrateMergeRequestDetails(issues []*Issue) ([]*Issue, error) {
 		return issues, nil
 	}
 
-	details, err := b.ShowMultiple(ids)
+	details, err := c.ShowMultiple(ids)
 	if err != nil {
 		return nil, fmt.Errorf("hydrating merge-request dependencies: %w", err)
 	}
