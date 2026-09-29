@@ -3,3 +3,4 @@
 # optionally followed by "# note". The bead tracks getting the package under
 # budget. This list only shrinks: removing a line lowers maxOverBudget in
 # policy_test.go in the same change.
+internal/git gt-22hdp.35 # 30-45 s under gate load; 1900 git execs, mostly production code under test

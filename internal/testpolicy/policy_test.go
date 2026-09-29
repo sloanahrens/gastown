@@ -16,14 +16,14 @@ var seed = flag.Bool("seed", false, "print the unconverted.txt a fresh checkout 
 // ratchet was added (Ruling R11). The list only shrinks: converting a
 // package deletes its line from unconverted.txt AND lowers maxUnconverted
 // here, in the same change. It must never grow.
-const maxUnconverted = 41
+const maxUnconverted = 40
 
 // maxOverBudget is the number of entries overbudget.txt holds (Ruling R25):
 // packages that meet every rule but still exceed the converted-package time
 // budget, each with the bead tracking the overrun. Like maxUnconverted it
 // only shrinks: getting a package under budget deletes its line AND lowers
 // this, in the same change.
-const maxOverBudget = 0
+const maxOverBudget = 1
 
 // TestPolicy applies the unit-test rules to every package not listed in
 // unconverted.txt, and fails a listed package that already passes, so the
