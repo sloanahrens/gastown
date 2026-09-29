@@ -258,7 +258,7 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 	}
 }
 
-// TestPolecatPathGuardFollowsSymlinks pins the EvalSymlinks leg: a symlink
+// TestPolecatPathGuardFollowsSymlinks pins the symlink leg: a symlink
 // created inside the worktree that points at a sibling's worktree must not be
 // a way in.
 func TestPolecatPathGuardFollowsSymlinks(t *testing.T) {
