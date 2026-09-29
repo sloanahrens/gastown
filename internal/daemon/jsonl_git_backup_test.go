@@ -47,8 +47,15 @@ func TestGitChildEnv_RecoversMissingIdentity(t *testing.T) {
 	// Simulate a daemon child that lost USER/LOGNAME (the gh#zt1w failure mode).
 	// HOME stays set so user.Current() succeeds without needing getpwuid.
 	t.Setenv("HOME", "/tmp/fake-home")
-	os.Unsetenv("USER")
-	os.Unsetenv("LOGNAME")
+	// Unset, not empty: gitChildEnv treats "USER=" as present. t.Setenv
+	// first so the originals come back when the test ends; a bare
+	// os.Unsetenv left the rest of the run without USER and LOGNAME.
+	for _, k := range []string{"USER", "LOGNAME"} {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatalf("unset %s: %v", k, err)
+		}
+	}
 
 	got := envMap(gitChildEnv())
 	if got["USER"] == "" {
