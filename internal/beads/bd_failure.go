@@ -100,6 +100,8 @@ func exitCodeOf(err error) int {
 type unavailableError struct {
 	msg   string
 	cause error
+	// stdout is bd's stdout, which in machine mode is the error envelope.
+	stdout []byte
 }
 
 func (e *unavailableError) Error() string { return e.msg }
@@ -129,4 +131,37 @@ func IsBDNotFound(err error) bool {
 		return false
 	}
 	return BDReportedNotFound(exitCodeOf(err), nil, []byte(err.Error()))
+}
+
+// bdErrorID is one failed id in a machine-mode envelope's error.ids.
+type bdErrorID struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+}
+
+// machineErrorOf reads the machine-mode envelope a failed bd call left on
+// stdout: its error kind and the per-id failures of a batch. ok is false when
+// the call left no envelope (a bd without machine mode, or a failure before
+// bd wrote one).
+func machineErrorOf(err error) (kind string, ids []bdErrorID, ok bool) {
+	var ue *unavailableError
+	if !errors.As(err, &ue) {
+		return "", nil, false
+	}
+	trimmed := bytes.TrimSpace(ue.stdout)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return "", nil, false
+	}
+	var env struct {
+		ContractVersion int `json:"contract_version"`
+		Error           *struct {
+			Kind string      `json:"kind"`
+			IDs  []bdErrorID `json:"ids"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(trimmed, &env) != nil || env.ContractVersion == 0 || env.Error == nil || env.Error.Kind == "" {
+		return "", nil, false
+	}
+	return env.Error.Kind, env.Error.IDs, true
 }

@@ -1401,6 +1401,16 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	return b.runBdWithRetry(stdinData, runEnv, args)
 }
 
+// runMachine runs one bd call in machine mode (BD_MACHINE=1): a failure exits
+// with bd's typed status and leaves the error envelope on stdout, which
+// machineErrorOf reads. Only callers that ignore stdout on success, or parse
+// the envelope, may use it: machine mode wraps every payload.
+func (b *Beads) runMachine(args ...string) ([]byte, error) {
+	beadsDir := b.getResolvedBeadsDir()
+	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir, "BD_MACHINE=1")
+	return b.runBdWithRetry(nil, runEnv, args)
+}
+
 // runReadyCLI executes a bd ready --json invocation with BD_JSON_ENVELOPE=1
 // set, so bd's paginated-ready branch (cmd/bd/output.go
 // outputJSONWithPagination) answers with the schema_version/data/pagination
@@ -1531,11 +1541,11 @@ func (b *Beads) wrapError(err error, stdout []byte, stderr string, args []string
 		// beside them. Every other message stays byte-identical, keeping log
 		// and caller expectations stable (gt-824d).
 		if errors.Is(err, context.DeadlineExceeded) {
-			return &unavailableError{msg: fmt.Sprintf("bd %s: %s: %v", strings.Join(args, " "), stderr, err), cause: err}
+			return &unavailableError{msg: fmt.Sprintf("bd %s: %s: %v", strings.Join(args, " "), stderr, err), cause: err, stdout: stdout}
 		}
-		return &unavailableError{msg: fmt.Sprintf("bd %s: %s", strings.Join(args, " "), stderr), cause: err}
+		return &unavailableError{msg: fmt.Sprintf("bd %s: %s", strings.Join(args, " "), stderr), cause: err, stdout: stdout}
 	}
-	return &unavailableError{msg: fmt.Sprintf("bd %s: %v", strings.Join(args, " "), err), cause: err}
+	return &unavailableError{msg: fmt.Sprintf("bd %s: %v", strings.Join(args, " "), err), cause: err, stdout: stdout}
 }
 
 // isSubprocessCrash returns true if the error indicates the subprocess crashed
@@ -3301,14 +3311,71 @@ func (b *Beads) closeInCurrentDB(opts closeOptions, ids ...string) error {
 		args = append(args, "--session="+sessionID)
 	}
 
-	if _, err := b.run(args...); err != nil {
-		return err
+	// Machine mode: bd's exit status and envelope say which ids of a batch
+	// failed. Only the exit status is read on success, so the envelope's
+	// wrapping of stdout changes nothing here.
+	if _, err := b.runMachine(args...); err != nil {
+		if opts.force || len(ids) < 2 {
+			return err
+		}
+		return b.batchCloseFailure(ids, err)
 	}
 	if opts.force || len(ids) < 2 {
 		// bd fails a single refused issue, and --force refuses none.
 		return nil
 	}
+	// A bd from before the machine surface skips a refused issue in a batch
+	// and still exits 0.
 	return b.verifyBatchClosed(ids)
+}
+
+// batchCloseFailure turns a failed multi-issue close into the
+// *PartialCloseError callers split on. bd with the machine surface names the
+// failed ids (partial, exit 22) or refuses the whole batch (refused, exit
+// 21); a bd without it exits 1 with prose, so the batch is re-read. Only a
+// re-read that fails returns bd's error as is.
+func (b *Beads) batchCloseFailure(ids []string, err error) error {
+	switch kind, failed, ok := machineErrorOf(err); {
+	case ok && kind == "partial":
+		notClosed := make(map[string]bool, len(failed))
+		allRefused := len(failed) > 0
+		for _, f := range failed {
+			notClosed[f.ID] = true
+			if f.Kind != "refused" {
+				allRefused = false
+			}
+		}
+		pe := &PartialCloseError{Err: err}
+		if allRefused {
+			pe.Err = errors.Join(ErrCloseRefused, err)
+		}
+		for _, id := range ids {
+			if notClosed[id] {
+				pe.NotClosed = append(pe.NotClosed, id)
+			} else {
+				pe.Closed = append(pe.Closed, id)
+			}
+		}
+		return pe
+	case ok && kind == "refused":
+		return &PartialCloseError{NotClosed: append([]string(nil), ids...), Err: errors.Join(ErrCloseRefused, err)}
+	case ok:
+		// Another typed failure (not_found, store_unavailable, ...) is not a
+		// partial close: bd says nothing about individual ids.
+		return err
+	}
+	got := b.verifyBatchClosed(ids)
+	var pe *PartialCloseError
+	switch {
+	case got == nil:
+		// Every issue is closed despite bd's failure: the batch landed.
+		return nil
+	case errors.As(got, &pe):
+		pe.Err = err
+		return pe
+	default:
+		return err
+	}
 }
 
 // notClosedExcept is the *PartialCloseError for a batch of ids of which
@@ -3327,9 +3394,11 @@ func notClosedExcept(ids, closed []string, cause error) *PartialCloseError {
 	return pe
 }
 
-// verifyBatchClosed re-reads the issues of a multi-issue close bd reported
-// as done. bd 1.2 skips a refused issue in a batch and still exits 0, so the
-// issues still open are the refused ones.
+// verifyBatchClosed re-reads the issues of a multi-issue close. bd builds
+// from before the machine surface skip a refused issue in a batch and still
+// exit 0, and exit 1 with prose on other partial failures, so the issues
+// still open are the ones that did not close. bd with the machine surface
+// names them itself (batchCloseFailure).
 func (b *Beads) verifyBatchClosed(ids []string) error {
 	got, err := b.showMultipleLocal(ids)
 	if err != nil {

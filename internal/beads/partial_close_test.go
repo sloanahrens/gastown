@@ -183,3 +183,104 @@ func TestClearMailCountsOnlyClosedMessages(t *testing.T) {
 		t.Errorf("ClearMail = closed %d cleared %d, want 2 and 1", res.Closed, res.Cleared)
 	}
 }
+
+// machinePartial is bd da4983e's machine-mode answer to a batch close where
+// some ids failed: exit 22, error.kind "partial", the failures in error.ids.
+func machinePartial(kind string, failed ...string) reply {
+	var ids []string
+	for _, id := range failed {
+		ids = append(ids, `{"id":"`+id+`","kind":"`+kind+`","message":"cannot close `+id+`"}`)
+	}
+	return reply{
+		stdout: `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"partial","message":"closed some","ids":[` + strings.Join(ids, ",") + `]}}`,
+		stderr: "Error: cannot close " + strings.Join(failed, ", "),
+		err:    exitError{22},
+	}
+}
+
+// TestBatchCloseRunsInMachineModeAndReadsThePartialSplit: bd exits non-zero
+// on a partial batch close (22 in machine mode). Close must not return that
+// as a plain error: callers need which ids closed.
+func TestBatchCloseRunsInMachineModeAndReadsThePartialSplit(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		if cmdOf(args) == "close" {
+			return machinePartial("refused", "gt-b")
+		}
+		return reply{stdout: "[]"}
+	})
+	b := NewIsolated(t.TempDir())
+	b.exec = r.exec
+
+	err := b.CloseWithReason("done", "gt-a", "gt-b", "gt-c")
+	var pe *PartialCloseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("CloseWithReason = %T %v, want a *PartialCloseError", err, err)
+	}
+	if !reflect.DeepEqual(pe.Closed, []string{"gt-a", "gt-c"}) || !reflect.DeepEqual(pe.NotClosed, []string{"gt-b"}) {
+		t.Errorf("Closed %v NotClosed %v, want [gt-a gt-c] and [gt-b]", pe.Closed, pe.NotClosed)
+	}
+	if !errors.Is(err, ErrCloseRefused) {
+		t.Errorf("refused failures must wrap ErrCloseRefused: %v", err)
+	}
+	for _, c := range r.calls() {
+		if cmdOf(c.args) == "show" {
+			t.Errorf("the envelope named the failures; no re-read needed, got %q", c.args)
+		}
+		if cmdOf(c.args) == "close" {
+			if v, ok := lastEnvValue(c.env, "BD_MACHINE"); !ok || v != "1" {
+				t.Errorf("close ran without BD_MACHINE=1: env %v", c.env)
+			}
+		}
+	}
+}
+
+// TestBatchCloseLegacyNonZeroExitReReads: a bd without machine mode that
+// exits 1 on a partial batch leaves no envelope; Close re-reads the batch.
+func TestBatchCloseLegacyNonZeroExitReReads(t *testing.T) {
+	t.Parallel()
+	statuses := map[string]string{"gt-a": "closed", "gt-b": "open"}
+	r := newRecorder(func(args []string) reply {
+		switch cmdOf(args) {
+		case "close":
+			return reply{stderr: "Error: cannot close gt-b: blocked by open dependency", err: exitError{1}}
+		case "show":
+			return showStatuses(args, statuses)
+		}
+		return reply{}
+	})
+	b := NewIsolated(t.TempDir())
+	b.exec = r.exec
+	err := b.CloseWithReason("done", "gt-a", "gt-b")
+	var pe *PartialCloseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("CloseWithReason = %T %v, want a *PartialCloseError", err, err)
+	}
+	if !reflect.DeepEqual(pe.Closed, []string{"gt-a"}) || !reflect.DeepEqual(pe.NotClosed, []string{"gt-b"}) {
+		t.Errorf("Closed %v NotClosed %v", pe.Closed, pe.NotClosed)
+	}
+	if !strings.Contains(err.Error(), "blocked by open dependency") {
+		t.Errorf("bd's reason lost: %v", err)
+	}
+}
+
+// TestBatchCloseAllRefused: machine exit 21 closes nothing.
+func TestBatchCloseAllRefused(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		if cmdOf(args) == "close" {
+			return reply{
+				stdout: `{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"error":{"kind":"refused","message":"refused"}}`,
+				err:    exitError{21},
+			}
+		}
+		return reply{stdout: "[]"}
+	})
+	b := NewIsolated(t.TempDir())
+	b.exec = r.exec
+	err := b.CloseWithReason("done", "gt-a", "gt-b")
+	var pe *PartialCloseError
+	if !errors.As(err, &pe) || len(pe.Closed) != 0 || !reflect.DeepEqual(pe.NotClosed, []string{"gt-a", "gt-b"}) || !errors.Is(err, ErrCloseRefused) {
+		t.Fatalf("CloseWithReason = %v, want nothing closed, both refused", err)
+	}
+}
