@@ -72,6 +72,11 @@ type Manager struct {
 	router            *mail.Router // Mail router for RECOVERED_BEAD notices on manual reject (gt-2usm)
 	recoverDeadWorker func(deadWorkerRecoveryRequest) bool
 
+	// beads is the merge-request store; nil means a fresh
+	// beads.New(rig.BeadsPath()) per operation (see beadsClient). Unit tests
+	// set an in-memory beadsfake.
+	beads beads.Client
+
 	// notifier sends the manager's nudges; nil means gt run from workDir.
 	notifier notify.Notifier
 
@@ -104,9 +109,18 @@ func NewManager(r *rig.Rig) *Manager {
 	// writer actually reaches recovery log lines instead of a frozen
 	// construction-time copy.
 	m.recoverDeadWorker = func(req deadWorkerRecoveryRequest) bool {
-		return newDeadWorkerRecoverer(r, m.router, m.output, nil)(req)
+		return newDeadWorkerRecoverer(r, m.router, m.output, m.beadsClient())(req)
 	}
 	return m
+}
+
+// beadsClient returns the store the manager reads and closes merge requests
+// in: the injected one, or bd on the rig's beads database.
+func (m *Manager) beadsClient() beads.Client {
+	if m.beads != nil {
+		return m.beads
+	}
+	return beads.New(m.rig.BeadsPath())
 }
 
 // SetOutput sets the output writer for user-facing messages.
@@ -714,8 +728,8 @@ func (m *Manager) Stop() error {
 func (m *Manager) Queue() ([]QueueItem, error) {
 	// Query beads for open merge-request issues
 	// BeadsPath() returns the git-synced beads location
-	b := beads.New(m.rig.BeadsPath())
-	issues, err := b.ListMergeRequests(beads.ListOptions{
+	b := m.beadsClient()
+	issues, err := beads.ListMergeRequests(b, beads.ListOptions{
 		Label:    "gt:merge-request",
 		Status:   "open",
 		Priority: -1, // No priority filter
@@ -937,7 +951,7 @@ func (m *Manager) FindMR(idOrBranch string) (*MergeRequest, error) {
 	return nil, ErrMRNotFound
 }
 
-func (m *Manager) findMRForTerminalCleanup(idOrBranch string, b *beads.Beads) (*MergeRequest, error) {
+func (m *Manager) findMRForTerminalCleanup(idOrBranch string, b beads.Client) (*MergeRequest, error) {
 	mr, err := m.FindMR(idOrBranch)
 	if err == nil {
 		return mr, nil
@@ -959,7 +973,7 @@ func (m *Manager) findMRForTerminalCleanup(idOrBranch string, b *beads.Beads) (*
 // FindMRForPostMerge resolves an MR using the same open/terminal lookup rules
 // as PostMerge, so callers can prove the merge before closing beads.
 func (m *Manager) FindMRForPostMerge(idOrBranch string) (*MergeRequest, error) {
-	b := beads.New(m.rig.BeadsPath())
+	b := m.beadsClient()
 	return m.findMRForTerminalCleanup(idOrBranch, b)
 }
 
@@ -1078,7 +1092,7 @@ func (m *Manager) RejectMRRecording(idOrBranch string, reason string, notify boo
 }
 
 func (m *Manager) rejectMR(idOrBranch string, reason string, notify bool, noRecover bool, rec *RejectionRecord) (*MergeRequest, error) {
-	b := beads.New(m.rig.BeadsPath())
+	b := m.beadsClient()
 	mr, err := m.findMRForTerminalCleanup(idOrBranch, b)
 	if err != nil {
 		return nil, err
@@ -1178,7 +1192,7 @@ func (m *Manager) RecordRejectionFindings(mr *MergeRequest, reason string, rec R
 	if mr == nil {
 		return nil
 	}
-	return recordRejectionFindings(beads.New(m.rig.BeadsPath()), rejectionRequest(mr, m.rig.Name, reason, &rec))
+	return recordRejectionFindings(m.beadsClient(), rejectionRequest(mr, m.rig.Name, reason, &rec))
 }
 
 // PostMergeResult holds the result of a post-merge cleanup operation.
@@ -1194,7 +1208,7 @@ type PostMergeResult struct {
 // It closes the MR bead and its source issue. Branch deletion is handled
 // by the caller since the Manager doesn't have git access.
 func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
-	b := beads.New(m.rig.BeadsPath())
+	b := m.beadsClient()
 	mr, err := m.findMRForTerminalCleanup(idOrBranch, b)
 	if err != nil {
 		return nil, err
@@ -1208,12 +1222,12 @@ func (m *Manager) PostMergeMR(mr *MergeRequest) (*PostMergeResult, error) {
 	if mr == nil {
 		return nil, ErrMRNotFound
 	}
-	b := beads.New(m.rig.BeadsPath())
+	b := m.beadsClient()
 	return m.postMergeMR(b, mr)
 }
 
-func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResult, error) {
-	workBeadID := resolveMergedWorkBead(b.ForAgentBead(), mergedWorkBeadCloseRequest{
+func (m *Manager) postMergeMR(b beads.Client, mr *MergeRequest) (*PostMergeResult, error) {
+	workBeadID := resolveMergedWorkBead(beads.ForAgentBead(b), mergedWorkBeadCloseRequest{
 		MRID:        mr.ID,
 		Branch:      mr.Branch,
 		SourceIssue: mr.IssueID,

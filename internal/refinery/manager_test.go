@@ -5,15 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 // setupTestRegistry confirms the package-wide registry TestMain installed
@@ -401,30 +400,21 @@ func TestManager_Status_NotRunning(t *testing.T) {
 	t.Logf("Status returned error (expected): %v", err)
 }
 
-func TestManager_Queue_NoBeads(t *testing.T) {
+// TestManager_Queue_Empty: a store with no merge requests is an empty
+// queue, not an error. (It replaces TestManager_Queue_NoBeads, which only
+// logged whatever real bd did without a database.)
+func TestManager_Queue_Empty(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupTestManager(t)
-
-	// Queue returns error when no beads database exists
-	// This is expected - beads requires initialization
-	_, err := mgr.Queue()
-	if err == nil {
-		// If beads is somehow available, queue should be empty
-		t.Log("Queue() succeeded unexpectedly (beads may be available)")
-		return
+	mgr, _ := setupFakeBeadsManager(t)
+	queue, err := mgr.Queue()
+	if err != nil || len(queue) != 0 {
+		t.Fatalf("Queue() = %v, %v; want empty, nil", queue, err)
 	}
-	// Error is expected when beads isn't initialized
-	t.Logf("Queue() returned error (expected without beads): %v", err)
 }
 
 func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	t.Parallel()
+	mgr, b := setupFakeBeadsManager(t)
 
 	openIssue, err := b.Create(beads.CreateOptions{
 		Title:  "Open MR",
@@ -467,17 +457,12 @@ func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
 	}
 }
 
-func TestManager_FindMR_NoBeads(t *testing.T) {
+func TestManager_FindMR_NotFound(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupTestManager(t)
-
-	// FindMR returns error when no beads database exists
-	_, err := mgr.FindMR("nonexistent-mr")
-	if err == nil {
-		t.Error("FindMR() expected error")
+	mgr, _ := setupFakeBeadsManager(t)
+	if _, err := mgr.FindMR("nonexistent-mr"); !errors.Is(err, ErrMRNotFound) {
+		t.Errorf("FindMR(nonexistent) = %v, want ErrMRNotFound", err)
 	}
-	// Any error is acceptable when beads isn't initialized
-	t.Logf("FindMR() returned error (expected): %v", err)
 }
 
 func TestManager_RegisterMR_Deprecated(t *testing.T) {
@@ -538,13 +523,7 @@ func TestCompareScoredIssues_UsesDeterministicIDTieBreaker(t *testing.T) {
 
 func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	// Create a source issue
 	srcIssue, err := b.Create(beads.CreateOptions{
@@ -589,13 +568,7 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 
 func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -617,9 +590,7 @@ func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create MR issue: %v", err)
 	}
-	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
-		t.Fatalf("set active_mr: %v", err)
-	}
+	setAgentActiveMR(t, b, agentIssue.ID, mrIssue.ID)
 
 	// This test is about active_mr clearing, not dead-worker recovery —
 	// stub it out so RejectMR doesn't reach for real tmux/mail.
@@ -644,13 +615,8 @@ func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
 // all — the recovery seam below did not exist on this path. Deleting the
 // recoverDeadWorker call in RejectMR (or gating it wrong) makes this fail.
 func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	t.Parallel()
+	mgr, b := setupFakeBeadsManager(t)
 
 	// Simulate the real-world orphan scenario from gt-2usm: the polecat
 	// already ran `gt done`, which closed its source bead, before the
@@ -718,13 +684,7 @@ func TestManager_RejectMR_CallsDeadWorkerRecovery(t *testing.T) {
 // findings on it — so the next attempt re-merged the same defect.
 func TestManager_RejectMRRecording_NoRecoverStillRecords(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -772,13 +732,7 @@ func TestManager_RejectMRRecording_NoRecoverStillRecords(t *testing.T) {
 // attempt number by counting them (gt-s4f6).
 func TestManager_RejectMRRecording_OneBlockWhenRecoveryAlsoWrites(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -834,13 +788,7 @@ func TestManager_RejectMRRecording_OneBlockWhenRecoveryAlsoWrites(t *testing.T) 
 // from NewManager end to end.
 func TestManager_RejectMR_SupersededSourceBead_NotReopened(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -880,13 +828,7 @@ func TestManager_RejectMR_SupersededSourceBead_NotReopened(t *testing.T) {
 // explicit operator opt-out for superseded/duplicate/cancelled MRs.
 func TestManager_RejectMR_NoRecoverSkipsRecovery(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -933,13 +875,7 @@ func TestManager_RejectMR_NoRecoverSkipsRecovery(t *testing.T) {
 // that was false whenever the bead was already closed).
 func TestManager_RejectMR_SourceIssueStatusIsReadBack(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -997,13 +933,7 @@ func TestManager_RejectMR_SourceIssueStatusIsReadBack(t *testing.T) {
 
 func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -1025,9 +955,7 @@ func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create MR issue: %v", err)
 	}
-	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
-		t.Fatalf("set active_mr: %v", err)
-	}
+	setAgentActiveMR(t, b, agentIssue.ID, mrIssue.ID)
 
 	result, err := mgr.PostMerge(mrIssue.ID)
 	if err != nil {
@@ -1044,13 +972,7 @@ func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
 
 func TestManager_PostMerge_ClosesWorkBeadFromAgentFallbackBeforeActiveMRClear(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -1072,14 +994,11 @@ func TestManager_PostMerge_ClosesWorkBeadFromAgentFallbackBeforeActiveMRClear(t 
 	if err != nil {
 		t.Fatalf("create MR issue: %v", err)
 	}
-	branch := "polecat/test/gt-xyz"
-	lastSourceIssue := srcIssue.ID
-	if err := b.UpdateAgentDescriptionFields(agentIssue.ID, beads.AgentFieldUpdates{Branch: &branch, LastSourceIssue: &lastSourceIssue}); err != nil {
-		t.Fatalf("set fallback metadata: %v", err)
-	}
-	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
-		t.Fatalf("set active_mr: %v", err)
-	}
+	editAgentFields(t, b, agentIssue.ID, func(f *beads.AgentFields) {
+		f.Branch = "polecat/test/gt-xyz"
+		f.LastSourceIssue = srcIssue.ID
+	})
+	setAgentActiveMR(t, b, agentIssue.ID, mrIssue.ID)
 
 	result, err := mgr.PostMerge(mrIssue.ID)
 	if err != nil {
@@ -1099,13 +1018,7 @@ func TestManager_PostMerge_ClosesWorkBeadFromAgentFallbackBeforeActiveMRClear(t 
 
 func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -1127,9 +1040,7 @@ func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create MR issue: %v", err)
 	}
-	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
-		t.Fatalf("set active_mr: %v", err)
-	}
+	setAgentActiveMR(t, b, agentIssue.ID, mrIssue.ID)
 	if err := b.CloseWithReason("merged", mrIssue.ID); err != nil {
 		t.Fatalf("close MR issue: %v", err)
 	}
@@ -1148,13 +1059,7 @@ func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
 
 func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -1191,13 +1096,7 @@ func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
 
 func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	t.Parallel()
-	mgr, rigPath := setupTestManager(t)
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	mgr, b := setupFakeBeadsManager(t)
 
 	// Create and close an MR bead
 	mrIssue, err := b.Create(beads.CreateOptions{
@@ -1221,15 +1120,14 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 
 func TestManager_PostMerge_NotFound(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupTestManager(t)
+	mgr, _ := setupFakeBeadsManager(t)
 
-	_, err := mgr.PostMerge("nonexistent-mr-id")
-	if err == nil {
-		t.Error("PostMerge() expected error for nonexistent MR")
+	if _, err := mgr.PostMerge("nonexistent-mr-id"); !errors.Is(err, ErrMRNotFound) {
+		t.Errorf("PostMerge(nonexistent) = %v, want ErrMRNotFound", err)
 	}
 }
 
-func assertAgentActiveMR(t *testing.T, b *beads.Beads, agentID string, want string) {
+func assertAgentActiveMR(t *testing.T, b beads.Client, agentID string, want string) {
 	t.Helper()
 	issue, err := b.Show(agentID)
 	if err != nil {
@@ -1241,7 +1139,7 @@ func assertAgentActiveMR(t *testing.T, b *beads.Beads, agentID string, want stri
 	}
 }
 
-func assertIssueStatus(t *testing.T, b *beads.Beads, issueID string, want string) {
+func assertIssueStatus(t *testing.T, b beads.Client, issueID string, want string) {
 	t.Helper()
 	issue, err := b.Show(issueID)
 	if err != nil {
@@ -1252,7 +1150,7 @@ func assertIssueStatus(t *testing.T, b *beads.Beads, issueID string, want string
 	}
 }
 
-func assertMRCloseReason(t *testing.T, b *beads.Beads, mrID string, want string) {
+func assertMRCloseReason(t *testing.T, b beads.Client, mrID string, want string) {
 	t.Helper()
 	issue, err := b.Show(mrID)
 	if err != nil {
@@ -1264,5 +1162,36 @@ func assertMRCloseReason(t *testing.T, b *beads.Beads, mrID string, want string)
 	}
 	if fields.CloseReason != want {
 		t.Fatalf("MR close_reason = %q, want %q", fields.CloseReason, want)
+	}
+}
+
+// setupFakeBeadsManager is setupTestManager with its merge-request store an
+// in-memory beadsfake instead of bd on a Dolt database.
+func setupFakeBeadsManager(t *testing.T) (*Manager, *beadsfake.Fake) {
+	t.Helper()
+	mgr, _ := setupTestManager(t)
+	fake := beadsfake.New()
+	mgr.beads = fake
+	return mgr, fake
+}
+
+// setAgentActiveMR points an agent bead's active_mr at mrID, as gt done does.
+func setAgentActiveMR(t *testing.T, b beads.Client, agentID, mrID string) {
+	t.Helper()
+	editAgentFields(t, b, agentID, func(f *beads.AgentFields) { f.ActiveMR = mrID })
+}
+
+// editAgentFields rewrites an agent bead's description fields through edit,
+// as beads.UpdateAgentDescriptionFields does.
+func editAgentFields(t *testing.T, b beads.Client, agentID string, edit func(*beads.AgentFields)) {
+	t.Helper()
+	issue, fields, err := beads.GetAgentBead(b, agentID)
+	if err != nil || issue == nil {
+		t.Fatalf("GetAgentBead(%s) = %v, %v", agentID, issue, err)
+	}
+	edit(fields)
+	desc := beads.FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(agentID, beads.UpdateOptions{Description: &desc}); err != nil {
+		t.Fatalf("update agent %s: %v", agentID, err)
 	}
 }

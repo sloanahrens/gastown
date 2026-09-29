@@ -9,14 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -300,15 +299,10 @@ func TestEngineerCloseMRWithReasonNormalizesSuperseded(t *testing.T) {
 	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonSuperseded))
 }
 
-func setupEngineerTerminalCloseTest(t *testing.T, activeMR string) (*Engineer, *beads.Beads, *beads.Issue, *beads.Issue, *beads.Issue) {
+func setupEngineerTerminalCloseTest(t *testing.T, activeMR string) (*Engineer, *beadsfake.Fake, *beads.Issue, *beads.Issue, *beads.Issue) {
 	t.Helper()
-	testutil.RequireDoltContainer(t)
-	port, _ := strconv.Atoi(testutil.DoltContainerPort())
 	rigPath := t.TempDir()
-	b := beads.NewIsolatedWithPort(rigPath, port)
-	if err := b.Init("gt"); err != nil {
-		testutil.FailContainerInit(t, b, err)
-	}
+	b := beadsfake.New()
 
 	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
 	if err != nil {
@@ -331,9 +325,7 @@ func setupEngineerTerminalCloseTest(t *testing.T, activeMR string) (*Engineer, *
 		t.Fatalf("create MR issue: %v", err)
 	}
 	if activeMR == "gt-wisp-old" {
-		if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
-			t.Fatalf("set active_mr: %v", err)
-		}
+		setAgentActiveMR(t, b, agentIssue.ID, mrIssue.ID)
 	}
 
 	e := &Engineer{

@@ -46,24 +46,25 @@ func (f *fakeRejectedBeads) Update(id string, opts beads.UpdateOptions) error {
 	return nil
 }
 
-func (f *fakeRejectedBeads) Run(args ...string) ([]byte, error) {
-	f.runCalls = append(f.runCalls, args)
+// AppendNotes records the call as the argv `bd update <id> --append-notes
+// <note>` sends, and appends the note the way bd does (a newline between
+// notes; beadsfake.RunClientContract pins it), so a test can assert the
+// bead's end state rather than one call's argv. The write is an append
+// because it runs while the owning polecat may still be appending its own
+// notes, and a replace drops whatever landed between read and write
+// (gt-nxvg).
+func (f *fakeRejectedBeads) AppendNotes(id, note string) error {
+	f.runCalls = append(f.runCalls, []string{"update", id, "--append-notes", note})
 	if f.runErr != nil {
-		return nil, f.runErr
+		return f.runErr
 	}
-	// Model `bd update <id> --append-notes <note>`, so a test can assert the
-	// bead's end state rather than one call's argv. The write is an append
-	// because it runs while the owning polecat may still be appending its own
-	// notes, and a replace drops whatever landed between read and write
-	// (gt-nxvg).
-	if note, ok := appendNotesArg(args); ok && f.issue != nil {
-		if existing := strings.TrimSpace(f.issue.Notes); existing != "" {
-			f.issue.Notes = existing + "\n\n" + note
-		} else {
-			f.issue.Notes = note
+	if f.issue != nil {
+		if f.issue.Notes != "" {
+			f.issue.Notes += "\n"
 		}
+		f.issue.Notes += note
 	}
-	return nil, nil
+	return nil
 }
 
 // appendNotesArg returns the note of a `bd update ... --append-notes <note>`

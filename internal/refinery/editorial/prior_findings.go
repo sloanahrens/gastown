@@ -42,7 +42,7 @@ var priorFindingLineRE = regexp.MustCompile(`^[-•]\s*id:(\S+)\s+sev:(\S+)\s+(.
 // of drifting — `gt mq review` (cmd/mq_review.go) and the batch path
 // (om-gate T7, refinery/batch_editorial.go) both call this rather than each
 // keeping its own copy.
-func BuildPriorFindings(bd *beads.Beads, sourceIssue string, attempt int) []PriorFinding {
+func BuildPriorFindings(bd beads.Client, sourceIssue string, attempt int) []PriorFinding {
 	if sourceIssue == "" {
 		return nil
 	}

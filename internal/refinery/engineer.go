@@ -313,7 +313,7 @@ var mergeSlotSeq uint64
 // and processes them according to the merge queue design.
 type Engineer struct {
 	rig                   *rig.Rig
-	beads                 *beads.Beads
+	beads                 beads.Client // NewEngineer: beads.New(r.Path); unit tests: beadsfake
 	git                   *git.Git
 	config                *MergeQueueConfig
 	prProvider            PRProvider // VCS-specific PR operations (nil when MergeStrategy != "pr")
@@ -1963,7 +1963,7 @@ func (e *Engineer) resolveFastPath(mr *MRInfo) bool {
 
 // HandleMRInfoSuccess handles a successful merge from MRInfo.
 func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) bool {
-	workBeadID := resolveMergedWorkBead(e.beads.ForAgentBead(), mergedWorkBeadCloseRequest{
+	workBeadID := resolveMergedWorkBead(beads.ForAgentBead(e.beads), mergedWorkBeadCloseRequest{
 		MRID:        mr.ID,
 		Branch:      mr.Branch,
 		SourceIssue: mr.SourceIssue,
@@ -3224,7 +3224,7 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 	// Query beads for all open merge-request issues.
 	// Cannot use ReadyWithType here because bd ready excludes ephemeral beads,
 	// and MRs are ephemeral by design. Use List + manual blocker check instead.
-	issues, err := e.beads.ListMergeRequests(beads.ListOptions{
+	issues, err := beads.ListMergeRequests(e.beads, beads.ListOptions{
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1, // No priority filter
@@ -3301,7 +3301,7 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 // This queries beads for blocked merge-request issues.
 func (e *Engineer) ListBlockedMRs() ([]*MRInfo, error) {
 	// Query all merge-request issues (both ready and blocked)
-	issues, err := e.beads.ListMergeRequests(beads.ListOptions{
+	issues, err := beads.ListMergeRequests(e.beads, beads.ListOptions{
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1, // No priority filter
@@ -3348,7 +3348,7 @@ func (e *Engineer) ListBlockedMRs() ([]*MRInfo, error) {
 // so agents can detect orphaned MRs. Designed for agent-side queue health analysis
 // (ZFC: Go transports data, agent decides what's interesting).
 func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
-	issues, err := e.beads.ListMergeRequests(beads.ListOptions{
+	issues, err := beads.ListMergeRequests(e.beads, beads.ListOptions{
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1,
@@ -3428,7 +3428,7 @@ func safeBranchExistenceCheck(check func() (bool, error)) (exists bool, warn str
 // ListQueueAnomalies finds stale claims and orphaned branches in open MRs.
 // This gives Witness/Refinery patrols deterministic signals for deadlock risk.
 func (e *Engineer) ListQueueAnomalies(now time.Time) ([]*MRAnomaly, error) {
-	issues, err := e.beads.ListMergeRequests(beads.ListOptions{
+	issues, err := beads.ListMergeRequests(e.beads, beads.ListOptions{
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1,

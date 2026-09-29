@@ -180,7 +180,7 @@ func RejectionFindingsFromNote(findings []editorial.Finding) []RejectionFinding 
 type rejectedSourceBeads interface {
 	Show(id string) (*beads.Issue, error)
 	Update(id string, opts beads.UpdateOptions) error
-	Run(args ...string) ([]byte, error)
+	AppendNotes(id, note string) error
 }
 
 // workerNameFromMR extracts the bare polecat name from an MR's Worker field,
@@ -267,7 +267,7 @@ func appendRejectionNote(bd rejectedSourceBeads, issue *beads.Issue, note string
 	if strings.Contains(issue.Notes, note) {
 		return nil
 	}
-	if _, err := bd.Run("update", issue.ID, "--append-notes", note); err != nil {
+	if err := bd.AppendNotes(issue.ID, note); err != nil {
 		return fmt.Errorf("appending rejection note to %s: %w", issue.ID, err)
 	}
 	return nil
