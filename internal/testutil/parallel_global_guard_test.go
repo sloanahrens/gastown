@@ -89,6 +89,9 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 		// A named result that shares its name with a package-level func or
 		// method is a local: writing it is no global write (beads allowStaleAnswer).
 		"TestParallelNamedResultShadows": false,
+		// `var _ I = (*T)(nil)` declares no variable, so `_ = x` in a parallel
+		// test writes nothing global.
+		"TestParallelBlankAssignment": false,
 	}
 	seen := map[string]bool{}
 	for _, line := range got {
@@ -228,6 +231,20 @@ func classify(n int) (answer bool, sure bool) {
 func TestParallelNamedResultShadows(t *testing.T) {
 	t.Parallel()
 	_, _ = classify(1)
+}
+
+type reader interface{ read() int }
+
+type seamReader struct{}
+
+func (seamReader) read() int { return Seam }
+
+var _ reader = seamReader{}
+
+func TestParallelBlankAssignment(t *testing.T) {
+	t.Parallel()
+	_ = seamReader{}.read()
+	t.Cleanup(func() { _ = seamReader{}.read() })
 }
 `,
 	}
@@ -480,6 +497,11 @@ func (pa *pkgAnalysis) collectDecls(f *ast.File) {
 				switch sp := spec.(type) {
 				case *ast.ValueSpec:
 					for _, n := range sp.Names {
+						// `var _ I = (*T)(nil)` declares nothing: the blank
+						// identifier is never a variable, so `_ = x` is no write.
+						if n.Name == "_" {
+							continue
+						}
 						pa.pkgLevel[n.Name] = true
 					}
 				case *ast.TypeSpec:
