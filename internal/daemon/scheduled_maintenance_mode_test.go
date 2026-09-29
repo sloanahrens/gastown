@@ -106,10 +106,10 @@ func TestScheduledMaintenanceBelowThresholdIsQuiet(t *testing.T) {
 func maintenanceTestDaemon(t *testing.T) (*Daemon, string) {
 	t.Helper()
 
-	// testDoltRemotesDaemon is the shared constructor for a Daemon whose Dolt
+	// testDoltServerDaemon is the shared constructor for a Daemon whose Dolt
 	// port resolves to the package's container rather than to the live town on
 	// :3307; it refuses to run if the port resolves anywhere else.
-	d := testDoltRemotesDaemon(t)
+	d := testDoltServerDaemon(t)
 	dbName := createTestDB(t)
 
 	conn, err := d.compactorOpenDB(dbName)

@@ -1,7 +1,5 @@
 package daemon
 
-import "time"
-
 // DefaultLifecycleConfig returns a DaemonPatrolConfig with sensible defaults
 // for the six-stage Dolt lifecycle (CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN).
 //
@@ -76,14 +74,6 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				// runs `make test-integration` daily (gt-22hdp.39).
 				IntegrationIntervalStr: defaultMainBranchIntegrationInterval.String(),
 			},
-			// dolt_remotes defaults to disabled in IsPatrolEnabled (opt-in), so
-			// a freshly generated daemon.json stays a no-op for towns whose
-			// databases have no remote configured. A town that wants scheduled
-			// remote pushes flips enabled to true.
-			DoltRemotes: &DoltRemotesConfig{
-				Enabled:  false,
-				Interval: 15 * time.Minute,
-			},
 			Handler: &PatrolConfig{
 				Enabled: true,
 			},
@@ -142,10 +132,6 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.MainBranchTest == nil {
 		p.MainBranchTest = d.MainBranchTest
-		changed = true
-	}
-	if p.DoltRemotes == nil {
-		p.DoltRemotes = d.DoltRemotes
 		changed = true
 	}
 	if p.Handler == nil {

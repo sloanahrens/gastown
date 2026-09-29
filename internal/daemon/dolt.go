@@ -24,9 +24,32 @@ const doltCmdTimeout = 15 * time.Second
 
 // doltServerStopBudget bounds how long stopLocked waits for the Dolt SQL
 // server to exit on its own before sending SIGKILL. It is part of
-// ShutdownBudget (see dolt_remotes.go) — the real wall-clock ceiling a daemon
-// restart has to account for, not an estimate.
+// ShutdownBudget — the real wall-clock ceiling a daemon restart has to account
+// for, not an estimate.
 const doltServerStopBudget = 30 * time.Second
+
+// otelShutdownBudget bounds Shutdown's OTel flush (daemon.go). Part of
+// ShutdownBudget below.
+const otelShutdownBudget = 5 * time.Second
+
+// ShutdownBudget is the real wall-clock ceiling on Daemon.shutdown(): the sum
+// of its two bounded steps in the order they run — the Dolt SQL server's own
+// graceful-stop wait (doltServerStopBudget) before it SIGKILLs, then the OTel
+// flush. Everything else in shutdown (stopping the curator, convoy manager,
+// KRC pruner) is in-process and returns immediately. Shutdown no longer
+// pushes Dolt remotes (ADR 0002), so there is no third step.
+//
+// This is the actual value a daemon restart must plan around — not an
+// estimate — because both restart paths bound the OLD daemon's lifetime by a
+// mechanism outside shutdown() itself: `gt daemon restart`'s launchd
+// supervisor (internal/cmd/daemon_supervisor.go) sets the job's ExitTimeOut
+// to this same budget, so a SIGTERM'd daemon that hasn't exited by then is
+// SIGKILLed regardless of which step it is on; the hand path's StopDaemon
+// (daemon.go) uses a much shorter ShutdownNotifyDelay (500ms) before it does
+// the same. Either way, ShutdownBudget is the longest the old process can
+// legitimately take, and it is what waitForRestart's poll budget is derived
+// from.
+const ShutdownBudget = doltServerStopBudget + otelShutdownBudget
 
 // DefaultDoltHealthCheckInterval is how often the dedicated Dolt health check
 // ticker fires, independent of the general daemon heartbeat (3 min).

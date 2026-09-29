@@ -863,19 +863,6 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Dolt health check ticker started (interval %v)", interval)
 	}
 
-	// Start dedicated Dolt remotes push ticker if configured.
-	// This runs at a lower frequency (default 15 min) than the heartbeat (3 min)
-	// to periodically push databases to their git remotes.
-	var doltRemotesTicker *time.Ticker
-	var doltRemotesChan <-chan time.Time
-	if d.isPatrolActive("dolt_remotes") {
-		interval := doltRemotesInterval(d.patrolConfig)
-		doltRemotesTicker = time.NewTicker(interval)
-		doltRemotesChan = doltRemotesTicker.C
-		defer doltRemotesTicker.Stop()
-		d.logger.Printf("Dolt remotes push ticker started (interval %v)", interval)
-	}
-
 	// Start dedicated Dolt backup ticker if configured.
 	// Runs filesystem backup sync (dolt backup sync) for production databases.
 	// The ticker is a check cadence — due-ness comes from a persisted
@@ -1141,13 +1128,6 @@ func (d *Daemon) Run() (err error) {
 			// of the 3-minute general heartbeat.
 			if !d.isShutdownInProgress() {
 				d.ensureDoltServerRunning()
-			}
-
-		case <-doltRemotesChan:
-			// Periodic Dolt remote push — pushes databases to their configured
-			// git remotes on a 15-minute cadence (independent of heartbeat).
-			if !d.isShutdownInProgress() {
-				d.pushDoltRemotes()
 			}
 
 		case <-doltBackupChan:
@@ -3096,11 +3076,6 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		d.logger.Println("KRC pruner stopped")
 	}
 
-	// Push Dolt remotes before stopping the server (if patrol is enabled).
-	// Bounded: an unreachable remote must not make shutdown open-ended (see
-	// pushDoltRemotesBounded).
-	d.pushDoltRemotesBounded()
-
 	// Stop Dolt server if we're managing it. An upgrade restart leaves Dolt
 	// running: the server is detached and the next daemon adopts it via
 	// dolt.pid + port probe (isRunning). Bouncing the data plane several
@@ -3116,7 +3091,7 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	}
 
 	// Flush and stop OTel providers. Bounded so it cannot block shutdown; part
-	// of ShutdownBudget (see dolt_remotes.go).
+	// of ShutdownBudget.
 	if d.otelProvider != nil {
 		shutCtx, cancel := context.WithTimeout(context.Background(), otelShutdownBudget)
 		defer cancel()

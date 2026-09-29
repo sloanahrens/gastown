@@ -125,7 +125,6 @@ type PatrolsConfig struct {
 	Deacon         *PatrolConfig          `json:"deacon,omitempty"`
 	Handler        *PatrolConfig          `json:"handler,omitempty"`
 	DoltServer     *DoltServerConfig      `json:"dolt_server,omitempty"`
-	DoltRemotes    *DoltRemotesConfig     `json:"dolt_remotes,omitempty"`
 	DoltBackup     *DoltBackupConfig      `json:"dolt_backup,omitempty"`
 	JsonlGitBackup *JsonlGitBackupConfig  `json:"jsonl_git_backup,omitempty"`
 	WispReaper     *WispReaperConfig      `json:"wisp_reaper,omitempty"`
@@ -147,26 +146,6 @@ type PatrolsConfig struct {
 	// session is alive but whose last COMPLETED patrol cycle is older than
 	// N x its cadence — awake but not patrolling (gt-4z3b7).
 	PatrolWatchdog *PatrolWatchdogConfig `json:"patrol_watchdog,omitempty"`
-}
-
-// DoltRemotesConfig holds configuration for the dolt_remotes patrol.
-// This patrol periodically pushes Dolt databases to their configured remotes.
-type DoltRemotesConfig struct {
-	// Enabled controls whether remote push runs.
-	Enabled bool `json:"enabled"`
-
-	// Interval is how often to push (default 15m).
-	Interval time.Duration `json:"interval,omitempty"`
-
-	// Databases lists specific database names to push.
-	// If empty, auto-discovers databases with configured remotes.
-	Databases []string `json:"databases,omitempty"`
-
-	// Remote is the remote name to push to (default "origin").
-	Remote string `json:"remote,omitempty"`
-
-	// Branch is the branch to push (default "main").
-	Branch string `json:"branch,omitempty"`
 }
 
 // DoltBackupConfig holds configuration for the dolt_backup patrol.
@@ -259,17 +238,11 @@ func SavePatrolConfig(townRoot string, config *DaemonPatrolConfig) error {
 
 // IsPatrolEnabled checks if a patrol is enabled in the config.
 // Returns true if the config doesn't exist (default enabled for backwards compatibility).
-// Exception: opt-in patrols (dolt_remotes) default to disabled.
+// Exception: the opt-in patrols checked first below default to disabled.
 func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	// Opt-in patrols: disabled unless explicitly enabled in config.
 	// Must check before the nil-config fallback, otherwise nil config
 	// returns true for patrols that should default to disabled.
-	if patrol == "dolt_remotes" {
-		if config == nil || config.Patrols == nil || config.Patrols.DoltRemotes == nil {
-			return false
-		}
-		return config.Patrols.DoltRemotes.Enabled
-	}
 	if patrol == "scheduled_slings" {
 		if config == nil || config.Patrols == nil || config.Patrols.ScheduledSlings == nil {
 			return false

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestDefaultLifecycleConfig(t *testing.T) {
@@ -74,16 +73,6 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 		t.Error("expected maintenance threshold 1000")
 	}
 
-	// dolt_remotes is opt-in in IsPatrolEnabled; the generated default keeps
-	// enabled: false so fresh towns with no Dolt remote configured see no
-	// change in behavior.
-	if p.DoltRemotes == nil || p.DoltRemotes.Enabled {
-		t.Error("expected dolt_remotes to be disabled by default")
-	}
-	if p.DoltRemotes == nil || p.DoltRemotes.Interval != 15*time.Minute {
-		t.Errorf("expected dolt_remotes interval 15m, got %v", p.DoltRemotes.Interval)
-	}
-
 	if p.MainBranchTest == nil || !p.MainBranchTest.Enabled {
 		t.Error("expected main_branch_test to be enabled")
 	}
@@ -121,9 +110,6 @@ func TestEnsureLifecycleDefaults_EmptyConfig(t *testing.T) {
 	}
 	if config.Patrols.CheckpointDog == nil || !config.Patrols.CheckpointDog.Enabled {
 		t.Error("expected checkpoint_dog to be set")
-	}
-	if config.Patrols.DoltRemotes == nil {
-		t.Error("expected dolt_remotes to be set")
 	}
 	if config.Patrols.Handler == nil || !config.Patrols.Handler.Enabled {
 		t.Error("expected handler to be set")
@@ -184,7 +170,6 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			DoltBackup:           &DoltBackupConfig{Enabled: false},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Threshold: &threshold},
 			MainBranchTest:       &MainBranchTestConfig{Enabled: false},
-			DoltRemotes:          &DoltRemotesConfig{Enabled: false},
 			Handler:              &PatrolConfig{Enabled: false},
 		},
 	}

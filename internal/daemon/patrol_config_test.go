@@ -3,6 +3,8 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -51,34 +53,6 @@ func TestIsPatrolEnabled_NilConfig(t *testing.T) {
 	// Should default to enabled when config is nil
 	if !IsPatrolEnabled(nil, "refinery") {
 		t.Error("expected default to be enabled")
-	}
-}
-
-func TestIsPatrolEnabled_DoltRemotes(t *testing.T) {
-	t.Parallel()
-	// dolt_remotes defaults to disabled even with nil config (opt-in patrol)
-	if IsPatrolEnabled(nil, "dolt_remotes") {
-		t.Error("expected dolt_remotes to be disabled with nil config")
-	}
-
-	// dolt_remotes defaults to disabled when patrols section exists but DoltRemotes is nil
-	config := &DaemonPatrolConfig{
-		Patrols: &PatrolsConfig{},
-	}
-	if IsPatrolEnabled(config, "dolt_remotes") {
-		t.Error("expected dolt_remotes to be disabled by default")
-	}
-
-	// Explicitly enabled
-	config.Patrols.DoltRemotes = &DoltRemotesConfig{Enabled: true}
-	if !IsPatrolEnabled(config, "dolt_remotes") {
-		t.Error("expected dolt_remotes to be enabled when configured")
-	}
-
-	// Explicitly disabled
-	config.Patrols.DoltRemotes = &DoltRemotesConfig{Enabled: false}
-	if IsPatrolEnabled(config, "dolt_remotes") {
-		t.Error("expected dolt_remotes to be disabled when explicitly disabled")
 	}
 }
 
@@ -219,23 +193,42 @@ func TestIsPatrolActive(t *testing.T) {
 	}
 }
 
-func TestDoltRemotesInterval(t *testing.T) {
+// The dolt_remotes patrol is gone (ADR 0002): the config schema has no key
+// for it, so nothing can switch a Dolt remote push back on from daemon.json.
+func TestPatrolsConfig_HasNoDoltRemotesKey(t *testing.T) {
 	t.Parallel()
-	// Default interval
-	if got := doltRemotesInterval(nil); got != defaultDoltRemotesInterval {
-		t.Errorf("expected default interval %v, got %v", defaultDoltRemotesInterval, got)
+	typ := reflect.TypeOf(PatrolsConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		if tag := typ.Field(i).Tag.Get("json"); strings.HasPrefix(tag, "dolt_remotes") {
+			t.Fatalf("PatrolsConfig.%s still maps dolt_remotes", typ.Field(i).Name)
+		}
 	}
+}
 
-	// Custom interval
-	config := &DaemonPatrolConfig{
-		Patrols: &PatrolsConfig{
-			DoltRemotes: &DoltRemotesConfig{
-				Enabled:  true,
-				Interval: 5 * 60 * 1000000000, // 5 minutes in nanoseconds
-			},
-		},
+// A daemon.json written before the removal still carries a dolt_remotes
+// block. It must load cleanly, with its other patrols intact.
+func TestLoadPatrolConfig_IgnoresLegacyDoltRemotesKey(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if got := doltRemotesInterval(config); got != 5*60*1000000000 {
-		t.Errorf("expected 5m interval, got %v", got)
+	legacy := `{"type":"daemon-patrol-config","version":1,"patrols":{"dolt_remotes":{"enabled":true,"interval":900000000000},"dolt_backup":{"enabled":true}}}`
+	if err := os.WriteFile(PatrolConfigFile(town), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := LoadPatrolConfig(town)
+	if cfg == nil || cfg.Patrols == nil || cfg.Patrols.DoltBackup == nil || !cfg.Patrols.DoltBackup.Enabled {
+		t.Fatalf("legacy config with dolt_remotes failed to load: %+v", cfg)
+	}
+}
+
+// Shutdown no longer pushes Dolt remotes, so its budget is the Dolt server's
+// graceful stop plus the OTel flush and nothing else.
+func TestShutdownBudget_HasNoRemotePushStep(t *testing.T) {
+	t.Parallel()
+	if ShutdownBudget != doltServerStopBudget+otelShutdownBudget {
+		t.Fatalf("ShutdownBudget = %v, want %v (Dolt stop + OTel flush only)",
+			ShutdownBudget, doltServerStopBudget+otelShutdownBudget)
 	}
 }

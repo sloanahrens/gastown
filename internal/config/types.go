@@ -131,7 +131,7 @@ type TownSettings struct {
 	// without editing mayor/daemon.json. Patrol names match the keys used
 	// in daemon.json patrols section (e.g., "deacon", "witness", "refinery",
 	// "doctor_dog", "compactor_dog", "checkpoint_dog", "wisp_reaper",
-	// "dolt_remotes", "dolt_backup", "jsonl_git_backup", "scheduled_maintenance",
+	// "dolt_backup", "jsonl_git_backup", "scheduled_maintenance",
 	// "main_branch_test", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]
 	DisabledPatrols []string `json:"disabled_patrols,omitempty"`

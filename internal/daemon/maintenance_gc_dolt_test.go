@@ -14,10 +14,10 @@ import (
 // unavailable (GT_TEST_DOCKER=0 or no Docker).
 func TestDoltGCFullAgainstRealServer(t *testing.T) {
 	t.Parallel()
-	d := testDoltRemotesDaemon(t)
+	d := testDoltServerDaemon(t)
 	dbName := createTestDB(t)
 
-	conn, err := d.openDoltDB(dbName)
+	conn, err := openTestDoltDB(d, dbName)
 	if err != nil {
 		t.Fatalf("connect to %s: %v", dbName, err)
 	}
@@ -54,7 +54,7 @@ func TestDoltGCFullAgainstRealServer(t *testing.T) {
 	}
 
 	// A fresh connection: the gc may invalidate the session that ran it.
-	after, err := d.openDoltDB(dbName)
+	after, err := openTestDoltDB(d, dbName)
 	if err != nil {
 		t.Fatalf("reconnect to %s: %v", dbName, err)
 	}

@@ -209,7 +209,7 @@ func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 	var taskRan []bool
 	maintenanceGCExecFn = func(_ context.Context, d *Daemon, db string) error {
 		f.gcCalls = append(f.gcCalls, db)
-		for _, name := range []string{"dolt_backup", "dolt_remotes", "wisp_reaper", "jsonl_git_backup", "compactor_dog"} {
+		for _, name := range []string{"dolt_backup", "wisp_reaper", "jsonl_git_backup", "compactor_dog"} {
 			release, ok := d.tryDoltTask(name)
 			taskRan = append(taskRan, ok)
 			if ok {
@@ -255,14 +255,12 @@ func TestWrappedDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		WispReaper:     &WispReaperConfig{Enabled: true},
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true},
-		DoltRemotes:    &DoltRemotesConfig{Enabled: true},
 	}}
 	d.doltMaintMu.Lock()
 	d.reapWisps()
 	d.syncJsonlGitBackup()
-	d.pushDoltRemotes()
 	d.doltMaintMu.Unlock()
-	for _, want := range []string{"wisp_reaper: skipped: gc in flight", "jsonl_git_backup: skipped: gc in flight", "dolt_remotes: skipped: gc in flight"} {
+	for _, want := range []string{"wisp_reaper: skipped: gc in flight", "jsonl_git_backup: skipped: gc in flight"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log missing %q:\n%s", want, logs.String())
 		}
