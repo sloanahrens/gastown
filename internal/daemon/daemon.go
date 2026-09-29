@@ -115,6 +115,10 @@ type Daemon struct {
 	// Nil spawns through boot.Boot.
 	spawnBootFn func(b *boot.Boot) error
 
+	// hostLoadFn pins the host-load reading main_branch_test decides on
+	// (see hostLoad); nil measures the real host.
+	hostLoadFn func() hostLoad
+
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
 	// instead of each paying a bd subprocess - which, on a CPU-starved host,

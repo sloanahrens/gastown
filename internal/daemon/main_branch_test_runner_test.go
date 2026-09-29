@@ -675,21 +675,12 @@ func TestMinCPUIdlePercentConfigWiring(t *testing.T) {
 	}
 }
 
-// stubHostLoad pins the host-load reading for the duration of t so the
-// host-busy decision is testable without saturating the real machine.
-func stubHostLoad(t *testing.T, h hostLoad) {
-	t.Helper()
-	prev := measureHostLoadFn
-	measureHostLoadFn = func() hostLoad { return h }
-	t.Cleanup(func() { measureHostLoadFn = prev })
-}
-
 // TestRunMainBranchTests_SkipsWhenHostBusy is the gt-f57o acceptance case for
 // "run it while the box is saturated, the runner reports skipped, not FAILED":
 // with the gate configured, a busy host must end the cycle as a labelled skip
 // — not a red verdict, and not a cycle that quietly runs anyway.
 func TestRunMainBranchTests_SkipsWhenHostBusy(t *testing.T) {
-	stubHostLoad(t, hostLoad{IdlePercent: 4.0, Load1: 7.68, NumCPU: 8})
+	t.Parallel()
 
 	minIdle := 25.0
 	var logged bytes.Buffer
@@ -701,6 +692,7 @@ func TestRunMainBranchTests_SkipsWhenHostBusy(t *testing.T) {
 			},
 		},
 	}
+	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 4.0, Load1: 7.68, NumCPU: 8} }
 
 	d.runMainBranchTests()
 
@@ -719,7 +711,7 @@ func TestRunMainBranchTests_SkipsWhenHostBusy(t *testing.T) {
 // TestRunMainBranchTests_RunsWhenHostIdleEnough is the guard's other half: the
 // gate must not skip a cycle it has no reason to skip.
 func TestRunMainBranchTests_RunsWhenHostIdleEnough(t *testing.T) {
-	stubHostLoad(t, hostLoad{IdlePercent: 87.5, Load1: 1.0, NumCPU: 8})
+	t.Parallel()
 
 	minIdle := 25.0
 	var logged bytes.Buffer
@@ -732,6 +724,7 @@ func TestRunMainBranchTests_RunsWhenHostIdleEnough(t *testing.T) {
 			},
 		},
 	}
+	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 87.5, Load1: 1.0, NumCPU: 8} }
 
 	d.runMainBranchTests()
 
@@ -750,7 +743,7 @@ func TestRunMainBranchTests_RunsWhenHostIdleEnough(t *testing.T) {
 // cycle, so a config typo or an unset knob can never silently stop the patrol
 // that catches regressions in main.
 func TestRunMainBranchTests_HostBusyGateDisabledByDefault(t *testing.T) {
-	stubHostLoad(t, hostLoad{IdlePercent: 0, Load1: 40, NumCPU: 8})
+	t.Parallel()
 
 	var logged bytes.Buffer
 	d := &Daemon{
@@ -762,6 +755,7 @@ func TestRunMainBranchTests_HostBusyGateDisabledByDefault(t *testing.T) {
 			},
 		},
 	}
+	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 0, Load1: 40, NumCPU: 8} }
 
 	d.runMainBranchTests()
 
@@ -776,7 +770,7 @@ func TestRunMainBranchTests_HostBusyGateDisabledByDefault(t *testing.T) {
 // rejected. A misconfiguration that looks like a satisfied minimum would be
 // invisible in exactly the situation the gate exists to make legible.
 func TestRunMainBranchTests_OutOfRangeFloorIsNotSilent(t *testing.T) {
-	stubHostLoad(t, hostLoad{IdlePercent: 0, Load1: 40, NumCPU: 8})
+	t.Parallel()
 
 	minIdle := 150.0
 	var logged bytes.Buffer
@@ -789,6 +783,7 @@ func TestRunMainBranchTests_OutOfRangeFloorIsNotSilent(t *testing.T) {
 			},
 		},
 	}
+	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 0, Load1: 40, NumCPU: 8} }
 
 	d.runMainBranchTests()
 
@@ -1216,12 +1211,13 @@ func TestRunCommandOnWorktree_LogLineNamesTheTestedHead(t *testing.T) {
 // package by hand — the failing test and its assertion, the tested sha, and
 // the host load the verdict was produced under.
 func TestRunCommandOnWorktree_BodyNamesTestAndHostLoad(t *testing.T) {
-	stubHostLoad(t, hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8})
+	t.Parallel()
 
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
 	}
+	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8} }
 
 	cmd := "printf '%s' " + shellQuote(goTestFixtureOneFailingPackage) + "; exit 1"
 
@@ -1293,7 +1289,7 @@ func timedOutCommand() string {
 // the verdict is a timeout because the context's deadline expired, not because
 // of which signal the group-kill reached for (gt-6t43).
 func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
-	stubHostLoad(t, hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8})
+	t.Parallel()
 	workDir := t.TempDir()
 	writeTree(t, workDir, map[string]string{
 		"go.mod":                  "module github.com/steveyegge/gastown\n",
@@ -1304,6 +1300,7 @@ func TestRunCommandOnWorktree_TimeoutIsReportedAsTimeout(t *testing.T) {
 		config: &Config{TownRoot: t.TempDir()},
 		logger: discardLogger,
 	}
+	d.hostLoadFn = func() hostLoad { return hostLoad{IdlePercent: 3.5, Load1: 7.72, NumCPU: 8} }
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -2060,7 +2057,7 @@ func poolHeldBy(roles ...string) slot.Report {
 
 // stubGatePool pins the container-gate pool's held/owner picture for the
 // duration of t so the skip decision is driven by a named pool state instead of
-// racing a real refinery into a real flock — the same need stubHostLoad serves
+// racing a real refinery into a real flock — the same need hostLoadFn serves
 // for the host-busy gate (gt-lf2r).
 func stubGatePool(t *testing.T, rep slot.Report) {
 	t.Helper()
