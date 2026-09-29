@@ -46,9 +46,23 @@ func TestCommandTokensResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanRepo: %v", err)
 	}
-	if len(refs) < 100 {
-		// A scanner regression that finds nothing would pass silently.
-		t.Fatalf("ScanRepo found only %d gt/bd invocations; the scanner is not reading the repo", len(refs))
+	// A scanner that goes blind on one kind of file would pass silently, so
+	// each source must still yield a floor of invocations. The floors sit near
+	// half of the 2026-09-29 counts (formulas 772, templates 332, plugins 234,
+	// go 153, hooks 17, role configs 3); lower one only when files that call
+	// gt/bd were really removed.
+	floors := map[string]int{"formulas": 350, "templates": 150, "plugins": 100, "go": 70, "hooks": 8, "roles": 2}
+	counts := map[string]int{}
+	for _, r := range refs {
+		counts[refSource(r.File)]++
+	}
+	for src, floor := range floors {
+		if counts[src] < floor {
+			t.Errorf("ScanRepo found %d gt/bd invocations in %s (floor %d); the scanner has stopped reading those files", counts[src], src, floor)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
 	}
 
 	violations := cmdtree.Check(refs, trees)
@@ -61,6 +75,25 @@ func TestCommandTokensResolve(t *testing.T) {
 	}
 	t.Fatalf("%d gt/bd invocation(s) do not resolve against the command trees (gt: this binary; bd: %s, contract_version %d):\n%s",
 		len(violations), snap.Source, snap.ContractVersion, strings.Join(lines, "\n"))
+}
+
+// refSource buckets a repo-relative path by the scanner input it belongs to.
+func refSource(file string) string {
+	switch {
+	case strings.HasSuffix(file, ".go"):
+		return "go"
+	case strings.HasPrefix(file, "internal/formula/formulas/"):
+		return "formulas"
+	case strings.HasPrefix(file, "internal/hooks/templates/"):
+		return "hooks"
+	case strings.HasPrefix(file, "internal/templates/"), strings.HasPrefix(file, "templates/"):
+		return "templates"
+	case strings.HasPrefix(file, "plugins/"):
+		return "plugins"
+	case strings.HasPrefix(file, "internal/config/roles/"):
+		return "roles"
+	}
+	return "other"
 }
 
 // gtTakesArgs reports whether a gt command accepts positional arguments. A
