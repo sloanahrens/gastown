@@ -66,6 +66,7 @@ func moveDir(src, dest string) error {
 type Git struct {
 	workDir string
 	gitDir  string // Optional: explicit git directory (for bare repos)
+	gh      ghFunc // runs the gh CLI; nil means the real gh on PATH
 }
 
 // ErrUnsafeTownRootGitMutation is returned when a mutating git operation would
@@ -2166,9 +2167,7 @@ func (g *Git) IsPullRequestApproved(pr *PullRequestInfo) (bool, error) {
 	if pr.BaseRepo != "" {
 		args = append(args, "--repo", pr.BaseRepo)
 	}
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = g.workDir
-	out, err := cmd.Output()
+	out, _, err := g.ghRunner()(g.workDir, args...)
 	if err != nil {
 		return false, fmt.Errorf("gh pr view failed: %w", err)
 	}
@@ -2201,11 +2200,9 @@ func (g *Git) GhPrMergePullRequest(pr *PullRequestInfo, method string) (string, 
 	if pr.BaseRepo != "" {
 		args = append(args, "--repo", pr.BaseRepo)
 	}
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = g.workDir
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := g.ghRunner()(g.workDir, args...)
 	if err != nil {
-		return "", fmt.Errorf("gh pr merge failed: %s: %w", strings.TrimSpace(string(out)), err)
+		return "", fmt.Errorf("gh pr merge failed: %s: %w", strings.TrimSpace(string(stdout)+string(stderr)), err)
 	}
 
 	// After merge, pull the target branch to get the merge commit locally
