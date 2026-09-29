@@ -17,6 +17,7 @@ func testTree() *Tree {
 	t.Add([]string{"mq", "reject"}, nil, true)
 	t.Add([]string{"hook"}, nil, true)
 	t.Add([]string{"hook", "show"}, nil, true)
+	t.Add([]string{"version"}, nil, false)
 	return t
 }
 
@@ -41,6 +42,8 @@ func TestResolve(t *testing.T) {
 		{"argument-free parent alone", []string{"mq"}, true, "mq", ""},
 		{"argument-free parent with non-word arg", []string{"mq", "gt-12"}, true, "mq", ""},
 		{"no words", nil, true, "", ""},
+		{"word after an argument-free leaf", []string{"version", "check"}, false, "version", "check"},
+		{"flag-like after an argument-free leaf", []string{"version", "gt-1"}, true, "version", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

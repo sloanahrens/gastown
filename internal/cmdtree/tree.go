@@ -22,8 +22,8 @@ type Node struct {
 	Name     string
 	Children map[string]*Node
 	// TakesArgs reports whether the command accepts positional arguments.
-	// When false and the command has children, a plain word after it can
-	// only be a subcommand, so an unrecognised one is a violation.
+	// When false, a plain word after it can only be a subcommand, so an
+	// unrecognised one is a violation.
 	TakesArgs bool
 }
 
@@ -91,8 +91,9 @@ var plainWord = regexp.MustCompile(`^[a-z][a-z-]*$`)
 
 // Resolve walks words down the tree. The first word must name a top-level
 // command. Later words descend while they name children; at the first one
-// that does not, the invocation fails only if the command reached has
-// children, takes no positional arguments, and the word is plain.
+// that does not, the invocation fails only if the command reached takes no
+// positional arguments and the word is plain: an unknown subcommand under a
+// parent, or a stray word after a leaf that rejects arguments.
 func (t *Tree) Resolve(words []string) Resolution {
 	var r Resolution
 	n := t.root
@@ -103,7 +104,7 @@ func (t *Tree) Resolve(words []string) Resolution {
 			n = child
 			continue
 		}
-		if i == 0 || (len(n.Children) > 0 && !n.TakesArgs && plainWord.MatchString(w)) {
+		if i == 0 || (!n.TakesArgs && plainWord.MatchString(w)) {
 			r.Unknown = w
 			return r
 		}
