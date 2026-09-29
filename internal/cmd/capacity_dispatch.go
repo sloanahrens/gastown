@@ -26,38 +26,38 @@ import (
 // stuck context keeps re-appearing on every dispatch tick.
 const crossRigEscalationDebounce = time.Hour
 
-// crossRigEscalationState tracks last-escalation timestamps per (rig, prefix).
+// escalationDebouncer tracks last-escalation timestamps per (rig, prefix).
 // Process-local — debounce resets on daemon restart, which is fine: a new
 // process should be allowed to surface the issue once.
-var (
-	crossRigEscalationMu   sync.Mutex
-	crossRigEscalationLast = map[string]time.Time{}
-)
+type escalationDebouncer struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// crossRigEscalations is the dispatch path's debounce state. Tests build
+// their own escalationDebouncer rather than sharing this one.
+var crossRigEscalations = &escalationDebouncer{}
 
 // crossRigEscalationKey returns the debounce key for a (rig, prefix) pair.
 func crossRigEscalationKey(rig, prefix string) string {
 	return rig + "/" + prefix
 }
 
-// shouldFireCrossRigEscalation reports whether enough time has elapsed since
-// the last escalation for this (rig, prefix) pair to fire a new one. Updates
-// the timestamp on a positive answer.
-func shouldFireCrossRigEscalation(rig, prefix string, now time.Time) bool {
-	crossRigEscalationMu.Lock()
-	defer crossRigEscalationMu.Unlock()
+// shouldFire reports whether enough time has elapsed since the last
+// escalation for this (rig, prefix) pair to fire a new one. Updates the
+// timestamp on a positive answer.
+func (d *escalationDebouncer) shouldFire(rig, prefix string, now time.Time) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	key := crossRigEscalationKey(rig, prefix)
-	if last, ok := crossRigEscalationLast[key]; ok && now.Sub(last) < crossRigEscalationDebounce {
+	if last, ok := d.last[key]; ok && now.Sub(last) < crossRigEscalationDebounce {
 		return false
 	}
-	crossRigEscalationLast[key] = now
+	if d.last == nil {
+		d.last = map[string]time.Time{}
+	}
+	d.last[key] = now
 	return true
-}
-
-// resetCrossRigEscalationStateForTest clears the debounce map. Test-only.
-func resetCrossRigEscalationStateForTest() {
-	crossRigEscalationMu.Lock()
-	defer crossRigEscalationMu.Unlock()
-	crossRigEscalationLast = map[string]time.Time{}
 }
 
 // fireCrossRigEscalation invokes `gt escalate` with a MEDIUM severity. Best
@@ -823,7 +823,7 @@ func validatePendingBeadForDispatch(townRoot string, b capacity.PendingBead, esc
 	fmt.Fprintf(os.Stderr,
 		"%s dispatch_refused reason=cross_rig_prefix bead=%s target_rig=%s rig_prefix=%s bead_prefix=%s\n",
 		style.Warning.Render("⚠"), b.WorkBeadID, b.TargetRig, rigPrefix, gotPrefix)
-	if escalate && shouldFireCrossRigEscalation(b.TargetRig, gotPrefix, time.Now()) {
+	if escalate && crossRigEscalations.shouldFire(b.TargetRig, gotPrefix, time.Now()) {
 		fireCrossRigEscalation(b.TargetRig, gotPrefix, b.WorkBeadID)
 	}
 	return capacity.ErrCrossRigPrefix
