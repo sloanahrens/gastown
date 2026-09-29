@@ -33,14 +33,18 @@ type bdRunFunc func(ctx context.Context, c bdCall) (stdout, stderr []byte, err e
 // runBDProcess is the real bdRunFunc: it runs bd from PATH.
 func runBDProcess(ctx context.Context, c bdCall) ([]byte, []byte, error) {
 	var stdout, stderr bytes.Buffer
-	var cmd *exec.Cmd
-	if c.plain {
-		cmd = newPlainBDCmd(ctx, c, &stdout, &stderr)
-	} else {
-		cmd = newBDCmd(ctx, c.dir, c.env, c.stdin, c.args, &stdout, &stderr)
-	}
-	err := cmd.Run()
+	err := newBDProcess(ctx, c, &stdout, &stderr).Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// newBDProcess builds the subprocess for c: a plain call the way
+// CommandWithEnv built one (newPlainBDCmd), any other the routed way
+// (newBDCmd).
+func newBDProcess(ctx context.Context, c bdCall, stdout, stderr *bytes.Buffer) *exec.Cmd {
+	if c.plain {
+		return newPlainBDCmd(ctx, c, stdout, stderr)
+	}
+	return newBDCmd(ctx, c.dir, c.env, c.stdin, c.args, stdout, stderr)
 }
 
 // newPlainBDCmd builds a plain call's bd subprocess the way CommandWithEnv
