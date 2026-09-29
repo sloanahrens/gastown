@@ -27,14 +27,28 @@ type postMergeCommandParams struct {
 	MRIDs     []string
 	Timeout   time.Duration
 	Output    io.Writer
+
+	// escalate and clearEscalation override the operator alerts, so tests
+	// never exec a real gt; nil means escalatePostMergeCommand and
+	// clearPostMergeCommandEscalation.
+	escalate        func(rigName, msg string)
+	clearEscalation func(rigName string)
 }
 
-// Test seams: swapped by tests, the real implementations in production.
-var (
-	postMergeCommandFn = runPostMergeCommand
-	postMergeEscalate  = escalatePostMergeCommand
-	postMergeClear     = clearPostMergeCommandEscalation
-)
+// alerts returns the escalate and clear funcs this run reports through.
+func (p postMergeCommandParams) alerts() (escalate func(rigName, msg string), clear func(rigName string)) {
+	escalate, clear = p.escalate, p.clearEscalation
+	if escalate == nil {
+		escalate = escalatePostMergeCommand
+	}
+	if clear == nil {
+		clear = clearPostMergeCommandEscalation
+	}
+	return escalate, clear
+}
+
+// Test seam: swapped by tests, the real implementation in production.
+var postMergeCommandFn = runPostMergeCommand
 
 // postMergeClearTimeout bounds the best-effort escalation clear, so a slow
 // `gt escalate clear` under Dolt load cannot stall the post-merge step.
@@ -47,6 +61,7 @@ func runPostMergeCommand(p postMergeCommandParams) {
 	if strings.TrimSpace(p.Command) == "" {
 		return
 	}
+	escalate, clearEscalation := p.alerts()
 	out := p.Output
 	if out == nil {
 		out = os.Stdout
@@ -80,7 +95,7 @@ func runPostMergeCommand(p postMergeCommandParams) {
 		fmt.Fprintf(out, "%s post-merge command finished in %s\n", style.Bold.Render("✓"), time.Since(start).Round(time.Second))
 		// A success closes any alert an earlier failure (or lock-busy
 		// collision) left open, so the next real failure is not ignored.
-		postMergeClear(p.RigName)
+		clearEscalation(p.RigName)
 		return
 	}
 	reason := err.Error()
@@ -88,7 +103,7 @@ func runPostMergeCommand(p postMergeCommandParams) {
 		reason = fmt.Sprintf("timed out after %s", timeout)
 	}
 	style.PrintWarning("post-merge command failed (%s); the merge stands", reason)
-	postMergeEscalate(p.RigName, fmt.Sprintf("post-merge command failed on %s at %s: %s (command: %s)", p.RigName, p.MergedSHA, reason, p.Command))
+	escalate(p.RigName, fmt.Sprintf("post-merge command failed on %s at %s: %s (command: %s)", p.RigName, p.MergedSHA, reason, p.Command))
 }
 
 // escalatePostMergeCommand notifies the operator that a rig's post-merge

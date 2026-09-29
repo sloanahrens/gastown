@@ -19,16 +19,18 @@ import (
 // broke `go vet ./...` on the Windows runner.
 
 func TestRunPostMergeCommand_TimeoutKillsProcessGroup(t *testing.T) {
-	esc := capturePostMergeEscalations(t)
+	t.Parallel()
+	var a postMergeAlerts
+	esc := &a.escalations
 	dir := t.TempDir()
 	start := time.Now()
-	runPostMergeCommand(postMergeCommandParams{
+	runPostMergeCommand(a.wire(postMergeCommandParams{
 		RigName: "gastown",
 		WorkDir: dir,
 		Timeout: time.Second,
 		Output:  io.Discard,
 		Command: `sleep 30 & echo $! > child.pid; wait`,
-	})
+	}))
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("runner took %v; the 1s timeout did not fire", elapsed)
 	}

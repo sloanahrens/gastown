@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,37 +16,46 @@ import (
 	"github.com/steveyegge/gastown/internal/refinery"
 )
 
-// capturePostMergeEscalations swaps postMergeEscalate for the test's
-// duration. Tests that use it swap a package var, so they must not run with
-// t.Parallel.
-func capturePostMergeEscalations(t *testing.T) *[]string {
-	t.Helper()
-	esc, _ := capturePostMergeAlerts(t)
-	return esc
+// postMergeAlerts records the escalations and clears one run reports, so no
+// test ever execs a real gt. Each test owns its own, so the tests run in
+// parallel.
+type postMergeAlerts struct {
+	escalations []string
+	clears      []string
 }
 
-// capturePostMergeAlerts swaps both alert seams, the escalate and the clear,
-// so no test ever execs a real gt. It returns the escalations and the rigs
-// whose escalation was cleared.
-func capturePostMergeAlerts(t *testing.T) (*[]string, *[]string) {
-	t.Helper()
-	var got, clears []string
-	origEsc, origClear := postMergeEscalate, postMergeClear
-	postMergeEscalate = func(rigName, msg string) { got = append(got, rigName+": "+msg) }
-	postMergeClear = func(rigName string) { clears = append(clears, rigName) }
-	t.Cleanup(func() { postMergeEscalate, postMergeClear = origEsc, origClear })
-	return &got, &clears
+// wire points p's alerts at a and returns p.
+func (a *postMergeAlerts) wire(p postMergeCommandParams) postMergeCommandParams {
+	p.escalate = func(rigName, msg string) { a.escalations = append(a.escalations, rigName+": "+msg) }
+	p.clearEscalation = func(rigName string) { a.clears = append(a.clears, rigName) }
+	return p
+}
+
+// TestPostMergeCommandParamsAlertsDefaultToTheRealOnes is the wiring guard for
+// the alert seam: a run with no override reports through the real escalate
+// and clear.
+func TestPostMergeCommandParamsAlertsDefaultToTheRealOnes(t *testing.T) {
+	t.Parallel()
+	escalate, clear := postMergeCommandParams{}.alerts()
+	if reflect.ValueOf(escalate).Pointer() != reflect.ValueOf(escalatePostMergeCommand).Pointer() {
+		t.Error("default escalate is not escalatePostMergeCommand")
+	}
+	if reflect.ValueOf(clear).Pointer() != reflect.ValueOf(clearPostMergeCommandEscalation).Pointer() {
+		t.Error("default clear is not clearPostMergeCommandEscalation")
+	}
 }
 
 func TestRunPostMergeCommand_SuccessClearsEscalation(t *testing.T) {
-	esc, clears := capturePostMergeAlerts(t)
-	runPostMergeCommand(postMergeCommandParams{
+	t.Parallel()
+	var a postMergeAlerts
+	esc, clears := &a.escalations, &a.clears
+	runPostMergeCommand(a.wire(postMergeCommandParams{
 		RigName: "gastown",
 		WorkDir: t.TempDir(),
 		Timeout: 10 * time.Second,
 		Output:  io.Discard,
 		Command: "true",
-	})
+	}))
 	if len(*esc) != 0 {
 		t.Errorf("success escalated: %v", *esc)
 	}
@@ -55,14 +65,16 @@ func TestRunPostMergeCommand_SuccessClearsEscalation(t *testing.T) {
 }
 
 func TestRunPostMergeCommand_FailureEscalatesWithoutClear(t *testing.T) {
-	esc, clears := capturePostMergeAlerts(t)
-	runPostMergeCommand(postMergeCommandParams{
+	t.Parallel()
+	var a postMergeAlerts
+	esc, clears := &a.escalations, &a.clears
+	runPostMergeCommand(a.wire(postMergeCommandParams{
 		RigName: "gastown",
 		WorkDir: t.TempDir(),
 		Timeout: 10 * time.Second,
 		Output:  io.Discard,
 		Command: "exit 3",
-	})
+	}))
 	if len(*esc) != 1 {
 		t.Fatalf("escalations = %v, want exactly 1", *esc)
 	}
@@ -72,8 +84,10 @@ func TestRunPostMergeCommand_FailureEscalatesWithoutClear(t *testing.T) {
 }
 
 func TestRunPostMergeCommand_EmptyCommandNeitherEscalatesNorClears(t *testing.T) {
-	esc, clears := capturePostMergeAlerts(t)
-	runPostMergeCommand(postMergeCommandParams{RigName: "gastown", WorkDir: t.TempDir(), Output: io.Discard})
+	t.Parallel()
+	var a postMergeAlerts
+	esc, clears := &a.escalations, &a.clears
+	runPostMergeCommand(a.wire(postMergeCommandParams{RigName: "gastown", WorkDir: t.TempDir(), Output: io.Discard}))
 	if len(*esc) != 0 || len(*clears) != 0 {
 		t.Fatalf("empty command: escalations=%v clears=%v, want none", *esc, *clears)
 	}
@@ -96,9 +110,11 @@ func capturePostMergeCommandCalls(t *testing.T) *[]postMergeCommandParams {
 }
 
 func TestRunPostMergeCommand_EmptyCommandIsNoop(t *testing.T) {
-	esc := capturePostMergeEscalations(t)
+	t.Parallel()
+	var a postMergeAlerts
+	esc := &a.escalations
 	var out bytes.Buffer
-	runPostMergeCommand(postMergeCommandParams{RigName: "gastown", WorkDir: t.TempDir(), Output: &out})
+	runPostMergeCommand(a.wire(postMergeCommandParams{RigName: "gastown", WorkDir: t.TempDir(), Output: &out}))
 	if out.Len() != 0 {
 		t.Errorf("empty command wrote output: %q", out.String())
 	}
@@ -108,9 +124,11 @@ func TestRunPostMergeCommand_EmptyCommandIsNoop(t *testing.T) {
 }
 
 func TestRunPostMergeCommand_PassesEnvAndWorkDir(t *testing.T) {
-	esc := capturePostMergeEscalations(t)
+	t.Parallel()
+	var a postMergeAlerts
+	esc := &a.escalations
 	dir := t.TempDir()
-	runPostMergeCommand(postMergeCommandParams{
+	runPostMergeCommand(a.wire(postMergeCommandParams{
 		RigName:   "gastown",
 		TownRoot:  "/town",
 		WorkDir:   dir,
@@ -119,7 +137,7 @@ func TestRunPostMergeCommand_PassesEnvAndWorkDir(t *testing.T) {
 		Timeout:   10 * time.Second,
 		Output:    io.Discard,
 		Command:   `printf '%s|%s|%s|%s|%s\n' "$GT_MERGED_SHA" "$GT_RIG" "$GT_TOWN_ROOT" "$GT_MR_IDS" "$(pwd -P)" > env.txt`,
-	})
+	}))
 	if len(*esc) != 0 {
 		t.Fatalf("successful command escalated: %v", *esc)
 	}
@@ -138,16 +156,18 @@ func TestRunPostMergeCommand_PassesEnvAndWorkDir(t *testing.T) {
 }
 
 func TestRunPostMergeCommand_FailureEscalatesAndReturns(t *testing.T) {
-	esc := capturePostMergeEscalations(t)
+	t.Parallel()
+	var a postMergeAlerts
+	esc := &a.escalations
 	var out bytes.Buffer
-	runPostMergeCommand(postMergeCommandParams{
+	runPostMergeCommand(a.wire(postMergeCommandParams{
 		RigName:   "gastown",
 		WorkDir:   t.TempDir(),
 		MergedSHA: "abc123",
 		Timeout:   10 * time.Second,
 		Output:    &out,
 		Command:   "echo building; exit 7",
-	})
+	}))
 	if !strings.Contains(out.String(), "building") {
 		t.Errorf("command output not streamed: %q", out.String())
 	}
