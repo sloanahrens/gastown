@@ -192,7 +192,7 @@ gt convoy create --from-epic gt-epic-abc
 gt convoy create --from-epic gt-epic-abc "Custom convoy name"
 
 # Combine with other flags
-gt convoy create --from-epic gt-epic-abc --owned --merge=direct
+gt convoy create --from-epic gt-epic-abc --owned --merge=local
 ```
 
 **How it works:**

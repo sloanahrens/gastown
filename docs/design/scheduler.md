@@ -128,7 +128,7 @@ Sling context beads eliminate all of this:
 | `args` | string | Natural language instructions for executor |
 | `vars` | string | Newline-separated formula variables (`key=value`) |
 | `enqueued_at` | RFC3339 | Timestamp of schedule |
-| `merge` | string | Merge strategy: `direct`, `mr`, `local` |
+| `merge` | string | Merge strategy: `mr`, `local` |
 | `convoy` | string | Convoy bead ID (set after auto-convoy creation) |
 | `base_branch` | string | Override base branch for polecat worktree |
 | `no_merge` | bool | Skip merge queue on completion |

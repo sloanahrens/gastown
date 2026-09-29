@@ -243,17 +243,11 @@ type PolecatDonePayload struct {
 	// ConvoyOwned indicates the convoy has caller-managed lifecycle.
 	ConvoyOwned bool `json:"convoy_owned,omitempty"`
 
-	// MergeStrategy is the convoy's merge strategy (direct, mr, local).
+	// MergeStrategy is the convoy's merge strategy (mr, local).
 	MergeStrategy string `json:"merge_strategy,omitempty"`
 
 	// Errors contains any non-fatal errors encountered during gt done.
 	Errors string `json:"errors,omitempty"`
-}
-
-// SkipMergeFlow returns true if this polecat's work should bypass the
-// standard witness/refinery merge pipeline (owned convoy + direct merge).
-func (p *PolecatDonePayload) SkipMergeFlow() bool {
-	return p.ConvoyOwned && p.MergeStrategy == "direct"
 }
 
 // ConvoyNeedsFeedingPayload contains the data for a CONVOY_NEEDS_FEEDING message.

@@ -58,11 +58,12 @@ func checkEpicTypeError(id, issueType string) error {
 // ---------------------------------------------------------------------------
 
 func TestConvoyCreate_InvalidMergeFlag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		value   string
 		wantErr bool
 	}{
-		{"direct", false},
+		{"direct", true}, // removed in gt-fcxe9.4
 		{"mr", false},
 		{"local", false},
 		{"", false},
@@ -72,19 +73,7 @@ func TestConvoyCreate_InvalidMergeFlag(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		convoyMerge = tt.value
-		// We can't call runConvoyCreate without bd, but we can test the
-		// validation logic directly.
-		var err error
-		if convoyMerge != "" {
-			switch convoyMerge {
-			case "direct", "mr", "local":
-				// Valid
-			default:
-				err = fmt.Errorf("invalid --merge value %q: must be direct, mr, or local", convoyMerge)
-			}
-		}
-
+		err := validateConvoyMergeFlag(tt.value)
 		if tt.wantErr && err == nil {
 			t.Errorf("merge=%q: expected error, got nil", tt.value)
 		}
@@ -92,7 +81,6 @@ func TestConvoyCreate_InvalidMergeFlag(t *testing.T) {
 			t.Errorf("merge=%q: unexpected error: %v", tt.value, err)
 		}
 	}
-	convoyMerge = "" // reset
 }
 
 // ---------------------------------------------------------------------------

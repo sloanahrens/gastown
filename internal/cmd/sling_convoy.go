@@ -113,13 +113,7 @@ func convoyTracksBead(beadsDir, convoyID, beadID string) bool {
 type ConvoyInfo struct {
 	ID            string // Convoy bead ID (e.g., "hq-cv-abc")
 	Owned         bool   // true if convoy has gt:owned label
-	MergeStrategy string // "direct", "mr", "local", or "" (default = mr)
-}
-
-// IsOwnedDirect returns true if the convoy is owned with direct merge strategy.
-// This is the key check for skipping witness/refinery merge pipeline.
-func (c *ConvoyInfo) IsOwnedDirect() bool {
-	return c != nil && c.Owned && c.MergeStrategy == "direct"
+	MergeStrategy string // "mr", "local", or "" (default = mr)
 }
 
 // getConvoyInfoForIssue checks if an issue is tracked by a convoy and returns its info.
@@ -364,7 +358,7 @@ func createBatchConvoy(beadIDs []string, rigName string, owned bool, mergeStrate
 
 // createAutoConvoy creates an auto-convoy for a single issue and tracks it.
 // If owned is true, the convoy is marked with the gt:owned label for caller-managed lifecycle.
-// mergeStrategy is optional: "direct", "mr", or "local" (empty = default mr).
+// mergeStrategy is optional: "mr" or "local" (empty = default mr).
 // agent is the runtime agent requested with --agent at sling time (empty if
 // none). formula is the formula requested with --formula at sling time (empty
 // if none). Both are persisted on the convoy so that a convoy feeder
@@ -423,4 +417,19 @@ func createAutoConvoy(beadID, beadTitle string, owned bool, mergeStrategy, baseB
 	}
 
 	return convoyID, nil
+}
+
+// validateConvoyMergeFlag checks a --merge value for gt sling and gt convoy
+// create. "direct" was removed (gt-fcxe9.4): it pushed polecat branches to
+// the default branch from gt done with no gate, no om review and no merge
+// slot (G2-02), and no convoy ever used it.
+func validateConvoyMergeFlag(v string) error {
+	switch v {
+	case "", "mr", "local":
+		return nil
+	case "direct":
+		return fmt.Errorf("--merge=direct was removed (gt-fcxe9.4): work lands through the merge queue (--merge=mr, the default) or stays on its branch (--merge=local)")
+	default:
+		return fmt.Errorf("invalid --merge value %q: must be mr or local", v)
+	}
 }

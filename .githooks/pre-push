@@ -92,44 +92,22 @@ is_refinery_caller() {
 
 # is_polecat_main_push_allowed reports whether this particular push to the
 # default branch, from a caller is_polecat_caller already flagged as a
-# polecat, is one of the two deliberate, gate-checked pushes that role is
-# sanctioned to make:
+# polecat, is the one deliberate, gate-checked push that role is sanctioned
+# to make:
 #
 #   GT_REFINERY_MERGE=1    - the Refinery's merge (internal/refinery/batch.go,
 #                            internal/refinery/engineer.go). Requires
 #                            is_refinery_caller corroboration; refused without
 #                            it (gt-9tf9).
-#   GT_DONE_DIRECT_MERGE=1 - `gt done` landing a convoy whose merge_strategy is
-#                            "direct" (internal/cmd/done.go), which deliberately
-#                            runs inside a polecat's own session, so there is no
-#                            separate identity to require. It stays a bare
-#                            env-var trust boundary: a hostile or hand-typed
-#                            polecat session can still export this name and
-#                            push past `gt done`'s own eligibility checks.
-#                            Closing that gap needs a server-side backstop
-#                            (branch protection with a Refinery-only push
-#                            identity); tracked as gt-wvp3c, not fixed here.
 #
-# A legitimate call site sets exactly one of these per push, so both set at
-# once is refused rather than trusted - it doesn't stop the GT_DONE_DIRECT_MERGE
-# gap above (a caller can still set that flag alone), it only catches a
-# contradictory/hand-crafted env (gt-9tf9).
+# GT_DONE_DIRECT_MERGE=1 (`gt done` landing a --merge direct convoy) is no
+# longer trusted: that landing path was deleted (gt-fcxe9.4), so a polecat
+# setting it is refused like any other polecat push to the default branch.
 is_polecat_main_push_allowed() {
-  local refinery_flag=0 direct_flag=0
-  [[ "${GT_REFINERY_MERGE:-0}" == "1" ]] && refinery_flag=1
-  [[ "${GT_DONE_DIRECT_MERGE:-0}" == "1" ]] && direct_flag=1
-
-  if [[ "$refinery_flag" == "1" && "$direct_flag" == "1" ]]; then
-    return 1
-  fi
-
-  if [[ "$refinery_flag" == "1" ]]; then
+  if [[ "${GT_REFINERY_MERGE:-0}" == "1" ]]; then
     is_refinery_caller && return 0
     return 1
   fi
-
-  [[ "$direct_flag" == "1" ]] && return 0
-
   return 1
 }
 
@@ -138,12 +116,13 @@ is_polecat_main_push_allowed() {
 # operator sees "identity mismatch" or "both flags set" instead of just
 # guessing from the generic refusal banner below.
 describe_main_push_denial() {
-  if [[ "${GT_REFINERY_MERGE:-0}" == "1" && "${GT_DONE_DIRECT_MERGE:-0}" == "1" ]]; then
-    echo "Both GT_REFINERY_MERGE=1 and GT_DONE_DIRECT_MERGE=1 are set. No gt code path"
-    echo "sets both for the same push, so this looks tampered rather than legitimate -"
-    echo "refusing rather than guessing which one to trust (gt-9tf9)."
+  if [[ "${GT_DONE_DIRECT_MERGE:-0}" == "1" ]]; then
+    echo "GT_DONE_DIRECT_MERGE=1 was set, but gt done no longer lands work on"
+    echo "the default branch: the --merge direct convoy path was deleted"
+    echo "(gt-fcxe9.4). Work lands through the merge queue."
     echo ""
-  elif [[ "${GT_REFINERY_MERGE:-0}" == "1" ]]; then
+  fi
+  if [[ "${GT_REFINERY_MERGE:-0}" == "1" ]]; then
     echo "GT_REFINERY_MERGE=1 was set, but this session's identity doesn't look like"
     echo "the Refinery (GT_REFINERY=${GT_REFINERY:-<unset>}, GT_ROLE=${GT_ROLE:-<unset>})."
     echo "The env var alone is not enough to grant this (gt-9tf9) - it must come from"
@@ -184,9 +163,8 @@ while read local_ref local_sha remote_ref remote_sha; do
     echo "Detected as a polecat via GT_ROLE=${GT_ROLE:-<unset>} and cwd $PWD."
     echo ""
     describe_main_push_denial
-    echo "If this push is a legitimate landing (Refinery merge, or a gt done"
-    echo "direct-merge convoy) it must come from that gt code path, which sets"
-    echo "GT_REFINERY_MERGE=1 / GT_DONE_DIRECT_MERGE=1 for this push."
+    echo "If this push is a legitimate Refinery merge it must come from that gt"
+    echo "code path, which sets GT_REFINERY_MERGE=1 for this push."
     echo ""
     echo "Two other flows push the default branch and get no env signal here,"
     echo "because a signal an agent sets for itself is a user override, not a"

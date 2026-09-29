@@ -101,14 +101,8 @@ func (h *DefaultWitnessHandler) HandleMergeFailed(payload *MergeFailedPayload) e
 }
 
 // HandlePolecatDone handles a POLECAT_DONE notification.
-// When a polecat signals completion, the Witness decides whether to register
-// the work for merge processing or skip it (for owned+direct convoys).
-//
-// For standard convoys: the merge pipeline proceeds normally (MR bead exists,
-// refinery will process it).
-//
-// For owned+direct convoys: the polecat already pushed to main and closed its
-// issue. The witness skips merge flow registration — only cleanup remains.
+// The merge pipeline proceeds normally: the MR bead exists and the refinery
+// will process it.
 func (h *DefaultWitnessHandler) HandlePolecatDone(payload *PolecatDonePayload) error {
 	_, _ = fmt.Fprintf(h.Output, "[Witness] POLECAT_DONE received for polecat %s\n", payload.Polecat)
 	_, _ = fmt.Fprintf(h.Output, "  Exit: %s\n", payload.ExitType)
@@ -116,23 +110,6 @@ func (h *DefaultWitnessHandler) HandlePolecatDone(payload *PolecatDonePayload) e
 		_, _ = fmt.Fprintf(h.Output, "  Issue: %s\n", payload.Issue)
 	}
 	_, _ = fmt.Fprintf(h.Output, "  Branch: %s\n", payload.Branch)
-
-	if payload.SkipMergeFlow() {
-		_, _ = fmt.Fprintf(h.Output, "[Witness] ✓ Owned+direct convoy %s — merge flow skipped\n", payload.ConvoyID)
-		_, _ = fmt.Fprintf(h.Output, "  Polecat already pushed to main. Proceeding with cleanup only.\n")
-
-		// Initiate polecat cleanup (same as HandleMerged)
-		nukeResult := witness.AutoNukeIfClean(h.WorkDir, h.Rig, payload.Polecat)
-		if nukeResult.Nuked {
-			fmt.Fprintf(h.Output, "[Witness] ✓ Auto-nuked polecat %s: %s\n", payload.Polecat, nukeResult.Reason)
-		} else if nukeResult.Skipped {
-			fmt.Fprintf(h.Output, "[Witness] ⚠ Cleanup skipped for %s: %s\n", payload.Polecat, nukeResult.Reason)
-		} else if nukeResult.Error != nil {
-			fmt.Fprintf(h.Output, "[Witness] ✗ Cleanup failed for %s: %v\n", payload.Polecat, nukeResult.Error)
-		}
-
-		return nil
-	}
 
 	// Standard flow: log receipt, merge pipeline will handle the rest
 	if payload.MR != "" {

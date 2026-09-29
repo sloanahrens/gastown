@@ -838,33 +838,6 @@ func TestSlingGenerateShortID_Unique(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ConvoyInfo.IsOwnedDirect tests
-// ---------------------------------------------------------------------------
-
-func TestConvoyInfo_IsOwnedDirect(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		info *ConvoyInfo
-		want bool
-	}{
-		{"nil receiver", nil, false},
-		{"owned + direct", &ConvoyInfo{Owned: true, MergeStrategy: "direct"}, true},
-		{"owned + mr", &ConvoyInfo{Owned: true, MergeStrategy: "mr"}, false},
-		{"not owned + direct", &ConvoyInfo{Owned: false, MergeStrategy: "direct"}, false},
-		{"not owned + empty", &ConvoyInfo{Owned: false, MergeStrategy: ""}, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := tc.info.IsOwnedDirect()
-			if got != tc.want {
-				t.Errorf("IsOwnedDirect() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // createAutoConvoy tests
 // ---------------------------------------------------------------------------
 

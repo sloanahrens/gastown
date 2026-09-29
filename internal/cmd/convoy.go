@@ -232,7 +232,6 @@ notification by default). If not specified, defaults to created_by.
 The --notify flag adds additional subscribers beyond the owner.
 
 The --merge flag sets the merge strategy for all work in the convoy:
-  direct  Push branch directly to main (no MR, no refinery)
   mr      Create merge-request bead, refinery processes (default)
   local   Keep on feature branch (for upstream PRs, human review)
 
@@ -243,11 +242,10 @@ Examples:
   gt convoy create "Feature rollout" gt-a gt-b --owner mayor/ --notify ops/
   gt convoy create "Feature rollout" gt-a gt-b gt-c --molecule mol-release
   gt convoy create --owned "Manual deploy" gt-abc           # caller-managed lifecycle
-  gt convoy create "Quick fix" gt-abc --merge=direct        # bypass refinery
 
   # Auto-discover issues from an epic's children:
   gt convoy create --from-epic gt-epic-abc
-  gt convoy create --from-epic gt-epic-abc --owned --merge=direct`,
+  gt convoy create --from-epic gt-epic-abc --owned --merge=local`,
 	Args:         cobra.ArbitraryArgs,
 	SilenceUsage: true,
 	RunE:         runConvoyCreate,
@@ -392,7 +390,7 @@ func init() {
 	convoyCreateCmd.Flags().StringVar(&convoyNotify, "notify", "", "Additional address to notify on completion (default: mayor/ if flag used without value)")
 	convoyCreateCmd.Flags().Lookup("notify").NoOptDefVal = "mayor/"
 	convoyCreateCmd.Flags().BoolVar(&convoyOwned, "owned", false, "Mark convoy as caller-managed lifecycle (no automatic witness/refinery registration)")
-	convoyCreateCmd.Flags().StringVar(&convoyMerge, "merge", "", "Merge strategy: direct (push to main), mr (merge queue, default), local (keep on branch)")
+	convoyCreateCmd.Flags().StringVar(&convoyMerge, "merge", "", "Merge strategy: mr (merge queue, default), local (keep on branch)")
 	convoyCreateCmd.Flags().StringVar(&convoyBaseBranch, "base-branch", "", "Target branch for polecats (e.g., 'feat/extraction-review')")
 	convoyCreateCmd.Flags().StringVar(&convoyFromEpic, "from-epic", "", "Auto-discover tracked issues from an epic's slingable children")
 
@@ -713,13 +711,8 @@ func collectEpicChildren(epicID string) ([]string, error) {
 
 func runConvoyCreate(cmd *cobra.Command, args []string) error {
 	// Validate --merge flag if provided
-	if convoyMerge != "" {
-		switch convoyMerge {
-		case "direct", "mr", "local":
-			// Valid
-		default:
-			return fmt.Errorf("invalid --merge value %q: must be direct, mr, or local", convoyMerge)
-		}
+	if err := validateConvoyMergeFlag(convoyMerge); err != nil {
+		return err
 	}
 
 	var name string
@@ -2481,7 +2474,7 @@ func hasAllLabels(labels, required []string) bool {
 
 // convoyMergeFromFields extracts the merge strategy from a convoy description
 // using the typed ConvoyFields accessor.
-// Returns the strategy string ("direct", "mr", "local") or empty string if not set.
+// Returns the strategy string ("mr", "local") or empty string if not set.
 func convoyMergeFromFields(description string) string {
 	fields := beads.ParseConvoyFields(&beads.Issue{Description: description})
 	if fields == nil {

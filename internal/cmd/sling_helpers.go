@@ -552,7 +552,7 @@ type beadFieldUpdates struct {
 	ReviewOnly       bool     // Review-only mode: assignee must not merge/commit/push
 	Mode             *string  // Execution mode: nil means unchanged, "" clears, "ralph" enables Ralph mode
 	ConvoyID         string   // Convoy bead ID (e.g., "hq-cv-abc")
-	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local"
+	MergeStrategy    string   // Convoy merge strategy: "mr", "local"
 	ConvoyOwned      bool     // Convoy has gt:owned label (caller-managed lifecycle)
 	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
 }

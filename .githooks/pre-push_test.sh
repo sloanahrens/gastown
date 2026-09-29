@@ -390,15 +390,17 @@ local_sha=$(get_sha HEAD)
 assert_pass "Refinery merge allowed" run_hook_env "GT_ROLE=gastown/refinery GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
-# Test 21: gt done direct-merge convoy (GT_DONE_DIRECT_MERGE=1) — allowed
-echo "Test 21: Default push with GT_DONE_DIRECT_MERGE=1 (gt done direct convoy)"
+# Test 21: GT_DONE_DIRECT_MERGE=1 is no longer an allow signal — the gt done
+# --merge direct path was deleted (gt-fcxe9.4), so a polecat setting it is
+# refused like any other polecat push to the default branch.
+echo "Test 21: Default push with GT_DONE_DIRECT_MERGE=1 from a polecat — BLOCKED"
 setup_repos
 cd "$TMPDIR/local"
 remote_sha=$(get_sha HEAD)
 echo "direct merge" >> file.txt
 git add file.txt && git commit -m "direct merge" >/dev/null 2>&1
 local_sha=$(get_sha HEAD)
-assert_pass "gt done direct merge allowed" run_hook_env "GT_ROLE=gastown/polecats/flint GT_DONE_DIRECT_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+assert_block "GT_DONE_DIRECT_MERGE no longer admits a polecat push" run_hook_env "GT_ROLE=gastown/polecats/flint GT_DONE_DIRECT_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
 # Test 22: cwd alone identifies the polecat worktree (no GT_ROLE at all)
@@ -529,11 +531,10 @@ local_sha=$(get_sha HEAD)
 assert_pass "GT_REFINERY=1 corroborates GT_REFINERY_MERGE=1" run_hook_env "GT_REFINERY=1 GT_REFINERY_MERGE=1" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
-# Test 32: both allow flags set at once (contradictory — no gt code path does
-# this) — BLOCKED from a polecat session, fail closed on ambiguity rather
-# than picking one, even though GT_REFINERY_MERGE alone would need refinery
-# identity and GT_DONE_DIRECT_MERGE alone would be enough on its own.
-echo "Test 32: Both GT_REFINERY_MERGE=1 and GT_DONE_DIRECT_MERGE=1 set — BLOCKED (ambiguous)"
+# Test 32: GT_DONE_DIRECT_MERGE=1 beside GT_REFINERY_MERGE=1 from a polecat
+# session — BLOCKED: the refinery flag needs refinery identity and the
+# direct flag grants nothing since gt-fcxe9.4.
+echo "Test 32: Both GT_REFINERY_MERGE=1 and GT_DONE_DIRECT_MERGE=1 set from a polecat — BLOCKED"
 setup_repos
 cd "$TMPDIR/local"
 remote_sha=$(get_sha HEAD)
