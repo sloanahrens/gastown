@@ -16,6 +16,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
@@ -364,6 +365,9 @@ func startSharedDoltContainer() {
 	// (e.g. refinery's Manager, which inherits os.Environ() directly) need it
 	// too, not just testutil.RequireDoltContainer's direct callers.
 	os.Setenv("BEADS_TEST_SERVER", "1") //nolint:tenv // intentional process-wide env
+	// Isolated beads clients strip BEADS_*; they pass BEADS_TEST_SERVER to bd
+	// only for a registered port (gt-fcxe9.9).
+	beads.RegisterTestServerPort(portNum)
 }
 
 // StartIsolatedDoltContainer starts a per-test Dolt container and returns the
@@ -400,6 +404,9 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	portStr := port
 	t.Setenv("GT_DOLT_PORT", portStr)
 	t.Setenv("BEADS_TEST_SERVER", "1")
+	if n, err := strconv.Atoi(portStr); err == nil {
+		beads.RegisterTestServerPort(n)
+	}
 	return portStr
 }
 

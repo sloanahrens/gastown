@@ -195,3 +195,51 @@ func hasDatabaseArg(args []string) bool {
 	}
 	return false
 }
+
+// productionDoltPort is the town's Dolt server port (doltserver.DefaultPort;
+// doltserver imports this package, so it cannot be referenced here). No
+// isolated client declares it a test server, registered or not.
+const productionDoltPort = 3307
+
+// testServerPorts holds the ports of Dolt servers testutil started as
+// throwaway test containers (RegisterTestServerPort).
+var testServerPorts struct {
+	sync.Mutex
+	ports map[int]bool
+}
+
+// RegisterTestServerPort records port as a Dolt test container this process
+// started. Only an isolated client on a registered port passes
+// BEADS_TEST_SERVER=1 to bd, which lets bd connect testdb_* databases; on any
+// other port bd's test-database firewall stays on (gt-fcxe9.9, deep review
+// B2-03: an isolated client on 3307 used to mint testdb_* on production).
+// productionDoltPort and non-positive ports are ignored. testutil calls this
+// for every container it starts; nothing else should.
+func RegisterTestServerPort(port int) {
+	if port <= 0 || port == productionDoltPort {
+		return
+	}
+	testServerPorts.Lock()
+	defer testServerPorts.Unlock()
+	if testServerPorts.ports == nil {
+		testServerPorts.ports = map[int]bool{}
+	}
+	testServerPorts.ports[port] = true
+}
+
+// unregisterTestServerPort drops port from the registry (tests only).
+func unregisterTestServerPort(port int) {
+	testServerPorts.Lock()
+	defer testServerPorts.Unlock()
+	delete(testServerPorts.ports, port)
+}
+
+// isTestServerPort reports whether port is a registered test container.
+func isTestServerPort(port int) bool {
+	if port <= 0 || port == productionDoltPort {
+		return false
+	}
+	testServerPorts.Lock()
+	defer testServerPorts.Unlock()
+	return testServerPorts.ports[port]
+}

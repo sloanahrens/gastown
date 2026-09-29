@@ -291,6 +291,8 @@ func TestTestContainerEnvOnlyOnTestContainerCalls(t *testing.T) {
 	t.Setenv(allowRemoteMigrateEnv, "0") // inherited: must be replaced, not duplicated, on container calls
 	dir := t.TempDir()
 
+	RegisterTestServerPort(45678) // what testutil does for its containers
+	t.Cleanup(func() { unregisterTestServerPort(45678) })
 	container := NewIsolatedWithPort(dir, 45678)
 	for name, env := range map[string][]string{
 		"run":     container.buildRunEnv(),
@@ -309,6 +311,8 @@ func TestTestContainerEnvOnlyOnTestContainerCalls(t *testing.T) {
 		b    *Beads
 	}{
 		{name: "isolated without a port", b: NewIsolated(dir)},
+		{name: "isolated on an unregistered port", b: NewIsolatedWithPort(dir, 45679)},
+		{name: "isolated on the production port", b: NewIsolatedWithPort(dir, productionDoltPort)},
 		{name: "real town", b: New(dir)},
 		{name: "real town with beads dir", b: NewWithBeadsDir(dir, filepath.Join(dir, ".beads"))},
 	} {

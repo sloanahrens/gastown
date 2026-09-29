@@ -1579,15 +1579,17 @@ func (b *Beads) buildRunEnv() []string {
 			env = append(env, fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
-			// This port always points at testutil's ephemeral Dolt container
-			// (never production), so declare it a dedicated test server. Without
-			// this, bd refuses to connect the testdb_* databases minted by
-			// Init() (gt-uq28): "set BEADS_TEST_SERVER=1 on a dedicated test
-			// server, or use test helpers in internal/storage/dolt/testserver".
-			env = append(env, "BEADS_TEST_SERVER=1")
+			// Declare a dedicated test server only for a container testutil
+			// registered: bd then connects the testdb_* databases Init()
+			// mints (gt-uq28). Any other port, 3307 above all, keeps bd's
+			// test-database firewall on (gt-fcxe9.9, deep review B2-03).
 			// Resume, don't refuse, a testdb_ an interrupted init left
-			// half-migrated (gt-elvf4; testContainerEnv).
-			env = append(env, testContainerEnv()...)
+			// half-migrated (gt-elvf4; testContainerEnv). Same gate: on an
+			// unregistered port it would let bd migrate a real database.
+			if isTestServerPort(b.serverPort) {
+				env = append(env, "BEADS_TEST_SERVER=1")
+				env = append(env, testContainerEnv()...)
+			}
 		}
 		return SuppressBDSideEffects(env)
 	}
@@ -1611,15 +1613,17 @@ func (b *Beads) buildRoutingEnv() []string {
 			env = append(env, fmt.Sprintf("BEADS_DOLT_SERVER_PORT=%d", b.serverPort))
 			env = append(env, fmt.Sprintf("BEADS_DOLT_PORT=%d", b.serverPort))
 			env = append(env, "BEADS_DOLT_AUTO_START=0")
-			// This port always points at testutil's ephemeral Dolt container
-			// (never production), so declare it a dedicated test server. Without
-			// this, bd refuses to connect the testdb_* databases minted by
-			// Init() (gt-uq28): "set BEADS_TEST_SERVER=1 on a dedicated test
-			// server, or use test helpers in internal/storage/dolt/testserver".
-			env = append(env, "BEADS_TEST_SERVER=1")
+			// Declare a dedicated test server only for a container testutil
+			// registered: bd then connects the testdb_* databases Init()
+			// mints (gt-uq28). Any other port, 3307 above all, keeps bd's
+			// test-database firewall on (gt-fcxe9.9, deep review B2-03).
 			// Resume, don't refuse, a testdb_ an interrupted init left
-			// half-migrated (gt-elvf4; testContainerEnv).
-			env = append(env, testContainerEnv()...)
+			// half-migrated (gt-elvf4; testContainerEnv). Same gate: on an
+			// unregistered port it would let bd migrate a real database.
+			if isTestServerPort(b.serverPort) {
+				env = append(env, "BEADS_TEST_SERVER=1")
+				env = append(env, testContainerEnv()...)
+			}
 		}
 		return SuppressBDSideEffects(env)
 	}
