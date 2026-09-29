@@ -141,7 +141,9 @@ func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 	deadline := newGatedDeadline()
 	go func() {
 		for {
-			if _, err := os.Stat(pidFile); err == nil {
+			// The whole line, not just the file: `echo $! > f` creates f
+			// before it writes the pid.
+			if raw, err := os.ReadFile(pidFile); err == nil && strings.HasSuffix(string(raw), "\n") {
 				deadline.expire()
 				return
 			}
@@ -167,7 +169,12 @@ func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("child pid not recorded: %v", err)
 	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		// Never signal a pid we did not read: kill(0, ...) is this test
+		// binary's own process group.
+		t.Fatalf("child pid file holds %q, not a pid", raw)
+	}
 	gone := time.Now().Add(3 * time.Second)
 	for time.Now().Before(gone) {
 		if err := syscall.Kill(pid, 0); err != nil {
