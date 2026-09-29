@@ -15,7 +15,8 @@ import (
 func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 	t.Helper()
 
-	t.Setenv("BEADS_TEST_MODE", "1")
+	// BEADS_TEST_MODE is set once, process-wide, by TestMain — not here — so
+	// that this helper's callers can call t.Parallel() (see testmain_test.go).
 
 	ctx := context.Background()
 	// Fails, never skips, on an open error: a skipped store test is lost
@@ -34,6 +35,7 @@ func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 
 func TestSetupTestStore_OpensStore(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	if store == nil {
@@ -43,6 +45,7 @@ func TestSetupTestStore_OpensStore(t *testing.T) {
 
 func TestGetTrackingConvoys_FiltersByTracksType(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -131,6 +134,7 @@ func TestGetTrackingConvoys_FiltersByTracksType(t *testing.T) {
 
 func TestIsConvoyClosed_ReturnsCorrectStatus(t *testing.T) {
 	store, cleanup := setupTestStore(t)
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()

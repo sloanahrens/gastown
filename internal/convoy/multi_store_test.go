@@ -15,7 +15,8 @@ import (
 // setupTestStoreWithPrefix opens a test store and sets a specific prefix.
 func setupTestStoreWithPrefix(t *testing.T, prefix string) (beadsdk.Storage, func()) {
 	t.Helper()
-	t.Setenv("BEADS_TEST_MODE", "1")
+	// BEADS_TEST_MODE is set once, process-wide, by TestMain — not here — so
+	// that this helper's callers can call t.Parallel() (see testmain_test.go).
 
 	ctx := context.Background()
 	// Fails, never skips, on an open error: a skipped store test is lost
@@ -32,6 +33,7 @@ func setupTestStoreWithPrefix(t *testing.T, prefix string) (beadsdk.Storage, fun
 
 func TestStoreResolver_ResolveIssues_SingleStore(t *testing.T) {
 	store, cleanup := setupTestStoreWithPrefix(t, "hq")
+	t.Parallel()
 	defer cleanup()
 
 	ctx := context.Background()
@@ -78,6 +80,7 @@ func TestStoreResolver_ResolveIssues_CrossStore(t *testing.T) {
 	hqStore, hqCleanup := setupTestStoreWithPrefix(t, "hq")
 	defer hqCleanup()
 	dsStore, dsCleanup := setupTestStoreWithPrefix(t, "ds")
+	t.Parallel()
 	defer dsCleanup()
 
 	ctx := context.Background()
@@ -145,6 +148,7 @@ func TestStoreResolver_ResolveIssues_CrossStore(t *testing.T) {
 }
 
 func TestStoreResolver_NilStores(t *testing.T) {
+	t.Parallel()
 	resolver := NewStoreResolver("/nonexistent", nil)
 	result := resolver.ResolveIssues(context.Background(), []string{"ds-abc"})
 	if len(result) != 0 {
@@ -153,6 +157,7 @@ func TestStoreResolver_NilStores(t *testing.T) {
 }
 
 func TestStoreResolver_EmptyIDs(t *testing.T) {
+	t.Parallel()
 	resolver := NewStoreResolver("/nonexistent", map[string]beadsdk.Storage{})
 	result := resolver.ResolveIssues(context.Background(), nil)
 	if len(result) != 0 {
@@ -161,6 +166,7 @@ func TestStoreResolver_EmptyIDs(t *testing.T) {
 }
 
 func TestStoreResolver_StoreForID_ExternalFormat(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	os.MkdirAll(beadsDir, 0755)
