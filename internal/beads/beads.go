@@ -3493,6 +3493,14 @@ func (b *Beads) AddDependency(issue, dependsOn string) error {
 	return err
 }
 
+// AddTypedDependency records that issue depends on dependsOn with relation
+// depType, through bd dep add --type. It has no in-process store branch: it
+// is one of the writes moved off the library (gt-7iwy0.2).
+func (b *Beads) AddTypedDependency(issue, dependsOn, depType string) error {
+	_, err := b.run("dep", "add", issue, dependsOn, "--type="+depType)
+	return err
+}
+
 // RemoveDependency removes a dependency.
 func (b *Beads) RemoveDependency(issue, dependsOn string) error {
 	if b.store != nil {

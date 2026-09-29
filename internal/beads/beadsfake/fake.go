@@ -12,6 +12,7 @@ package beadsfake
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,6 +120,9 @@ func (f *Fake) snapshot(r *record) *beads.Issue {
 	is.Labels = append([]string(nil), r.issue.Labels...)
 	is.Dependencies = nil
 	for _, e := range r.deps {
+		if isExternalRef(e.to) {
+			continue // bd's show omits external targets
+		}
 		dep := beads.IssueDep{ID: e.to, DependencyType: e.typ}
 		if t, ok := f.issues[e.to]; ok {
 			dep.Title, dep.Status, dep.Priority, dep.Type = t.issue.Title, t.issue.Status, t.issue.Priority, t.issue.Type
@@ -129,7 +133,7 @@ func (f *Fake) snapshot(r *record) *beads.Issue {
 			is.Parent = e.to
 		}
 	}
-	is.DependencyCount = len(r.deps)
+	is.DependencyCount = len(is.Dependencies)
 	is.Comments = nil
 	is.Metadata = append([]byte(nil), r.issue.Metadata...)
 	return &is
@@ -756,6 +760,33 @@ func (f *Fake) AddDependency(issue, dependsOn string) error {
 	r.deps = append(r.deps, edge{to: dependsOn, typ: depBlocks})
 	return nil
 }
+
+// AddTypedDependency makes issue depend on dependsOn with relation depType.
+// issue must exist; dependsOn must too unless it is an external:<rig>:<id>
+// reference, which bd records without resolving. Adding the same edge again
+// is a no-op.
+func (f *Fake) AddTypedDependency(issue, dependsOn, depType string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.issues[issue]
+	if !ok {
+		return notFound(issue)
+	}
+	if _, ok := f.issues[dependsOn]; !ok && !isExternalRef(dependsOn) {
+		return notFound(dependsOn)
+	}
+	for _, e := range r.deps {
+		if e.to == dependsOn && e.typ == depType {
+			return nil
+		}
+	}
+	r.deps = append(r.deps, edge{to: dependsOn, typ: depType})
+	return nil
+}
+
+// isExternalRef reports whether id is a cross-database reference
+// (external:<rig>:<id>), which bd stores but show does not list.
+func isExternalRef(id string) bool { return strings.HasPrefix(id, "external:") }
 
 // RemoveDependency removes the dependency of issue on dependsOn.
 func (f *Fake) RemoveDependency(issue, dependsOn string) error {

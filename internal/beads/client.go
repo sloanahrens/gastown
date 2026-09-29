@@ -56,7 +56,11 @@ type Client interface {
 	AddComment(id, comment string) error
 	// AddDependency makes issue depend on (be blocked by) dependsOn.
 	AddDependency(issue, dependsOn string) error
-	// RemoveDependency removes that dependency.
+	// AddTypedDependency records that issue depends on dependsOn with
+	// relation depType (bd's dependency_type: "tracks", "blocks", ...). An
+	// external:<rig>:<id> target need not exist in this database.
+	AddTypedDependency(issue, dependsOn, depType string) error
+	// RemoveDependency removes that dependency, whatever its type.
 	RemoveDependency(issue, dependsOn string) error
 	// AppendNotes appends note to the issue's notes, on a new line when
 	// there are notes already.

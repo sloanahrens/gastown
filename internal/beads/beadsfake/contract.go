@@ -51,6 +51,7 @@ var contractCases = []contractCase{
 	{"assignee queries", contractAssigneeQueries},
 	{"comments", contractComments},
 	{"dependencies and ready", contractDependencies},
+	{"typed dependencies", contractTypedDependencies},
 	{"ready filter", contractReadyFilter},
 	{"children", contractChildren},
 	{"release", contractRelease},
@@ -588,6 +589,37 @@ func contractDependencies(t *testing.T, s *scope) {
 	}
 	ready, err = s.Ready()
 	s.want(t, "Ready after RemoveDependency", ready, err, blocker.ID, blocked.ID)
+}
+
+// contractTypedDependencies pins AddTypedDependency the way convoys use it:
+// a tracks edge to a local issue shows on Show and does not block, a tracks
+// edge to an external:<rig>:<id> target is accepted although no such issue
+// exists here (bd's show omits it), and RemoveDependency drops either.
+func contractTypedDependencies(t *testing.T, s *scope) {
+	tracker := s.mustCreate(t, beads.CreateOptions{Title: "tracker", Priority: -1})
+	local := s.mustCreate(t, beads.CreateOptions{Title: "tracked", Priority: -1})
+	external := "external:" + s.tag + ":" + s.tag + "-abc"
+	mustDo(t, "AddTypedDependency(local)", s.AddTypedDependency(tracker.ID, local.ID, "tracks"))
+	mustDo(t, "AddTypedDependency(external)", s.AddTypedDependency(tracker.ID, external, "tracks"))
+	got := s.mustShow(t, tracker.ID)
+	if depOn(got, local.ID, "tracks") == nil {
+		t.Fatalf("Show(tracker).Dependencies = %+v, want tracks on %s", got.Dependencies, local.ID)
+	}
+	for _, d := range got.Dependencies {
+		if d.ID == external {
+			t.Errorf("Show(tracker) listed the external edge %+v; bd's show omits external targets", d)
+		}
+	}
+	ready, err := s.Ready()
+	s.want(t, "Ready with a tracks edge", ready, err, tracker.ID, local.ID)
+	mustDo(t, "RemoveDependency(local)", s.RemoveDependency(tracker.ID, local.ID))
+	mustDo(t, "RemoveDependency(external)", s.RemoveDependency(tracker.ID, external))
+	if got := s.mustShow(t, tracker.ID); len(got.Dependencies) != 0 {
+		t.Errorf("Dependencies after remove = %+v", got.Dependencies)
+	}
+	if err := s.AddTypedDependency(s.tag+"-nosuch", local.ID, "tracks"); err == nil {
+		t.Error("AddTypedDependency from a missing issue succeeded")
+	}
 }
 
 func contractReadyFilter(t *testing.T, s *scope) {

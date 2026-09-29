@@ -14,6 +14,7 @@ import (
 // migrated site from growing a store call back.
 var libraryFreeFiles = []string{
 	"beads_agent.go",
+	"../cmd/tracking_relations.go",
 }
 
 func TestMigratedFilesImportNoBeadsLibrary(t *testing.T) {
