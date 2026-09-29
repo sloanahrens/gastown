@@ -469,7 +469,7 @@ bd gate list --json
 
 # For each timer gate, check if elapsed:
 # - CreatedAt + Timeout < Now → gate is ready to close
-# - Close with: bd gate close <id> --reason "Timer elapsed"
+# - Close with: bd gate resolve <id> --reason "Timer elapsed"
 ```
 
 **GitHub gates** (await_type: gh:run, gh:pr) - handled in separate step.
