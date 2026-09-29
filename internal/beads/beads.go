@@ -180,15 +180,21 @@ func probeAllowStale(bdPath string, env []string) (supported, definitive bool) {
 }
 
 // allowStaleAnswer reads a probe's outcome: whether bd accepted
-// --allow-stale, and whether that is a definitive answer worth caching.
+// --allow-stale, and whether that is a definitive answer worth caching. Only
+// two outcomes are: bd exited 0 (it ran the command, so it parsed the flag),
+// or bd said "unknown flag", whatever its exit status. Any other failure (a
+// timeout, a failure to start, or a nonzero exit over a lock or an
+// unreachable database) says nothing about the flag, and is unsupported for
+// this call only (gt-22hdp.27).
 func allowStaleAnswer(ctx context.Context, err error, output string) (supported, definitive bool) {
 	out := strings.TrimSpace(output)
-	supported = err == nil && out != "" && !strings.Contains(out, "unknown flag")
+	unknownFlag := strings.Contains(out, "unknown flag")
+	supported = err == nil && out != "" && !unknownFlag
 	if ctx.Err() != nil {
 		return false, false
 	}
 	var exit interface{ ExitCode() int }
-	definitive = err == nil || errors.As(err, &exit)
+	definitive = err == nil || (errors.As(err, &exit) && unknownFlag)
 	return supported && definitive, definitive
 }
 
