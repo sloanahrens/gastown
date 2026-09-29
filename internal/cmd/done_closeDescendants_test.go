@@ -57,13 +57,16 @@ func TestDoneCloseDescendantsWithChildren(t *testing.T) {
 while [ "$1" = "--allow-stale" ]; do shift; done
 cmd="$1"
 shift || true
+# st prints a step's status: closed once a close call named it.
+st() { if grep -qx "$1" "%[1]s" 2>/dev/null; then echo closed; else echo open; fi; }
 case "$cmd" in
   show)
+    while [ "$1" = "--json" ]; do shift; done
     beadID="$1"
     if echo "$*" | grep -q -- "--children"; then
       case "$beadID" in
         gt-wisp-xyz)
-          echo '{"gt-wisp-xyz":[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"open"}]}'
+          echo "{\"gt-wisp-xyz\":[{\"id\":\"gt-step-1\",\"title\":\"Step 1\",\"status\":\"$(st gt-step-1)\"},{\"id\":\"gt-step-2\",\"title\":\"Step 2\",\"status\":\"$(st gt-step-2)\"}]}"
           ;;
         *)
           echo '{}'
@@ -80,6 +83,16 @@ case "$cmd" in
         gt-wisp-xyz)
           echo '[{"id":"gt-wisp-xyz","title":"mol-polecat-work","status":"open","ephemeral":true}]'
           ;;
+        gt-step-*)
+          # The re-read after the batch close: each step as closed once
+          # a close named it.
+          out=""
+          for id in "$@"; do
+            case "$id" in --*) continue ;; esac
+            out="$out${out:+,}{\"id\":\"$id\",\"status\":\"$(st "$id")\"}"
+          done
+          echo "[$out]"
+          ;;
       esac
     fi
     ;;
@@ -95,7 +108,7 @@ case "$cmd" in
     # Log bead IDs only, skip flags (--reason, --force, --session)
     for arg in "$@"; do
       case "$arg" in --*) continue ;; esac
-      echo "$arg" >> "%s"
+      echo "$arg" >> "%[1]s"
     done
     ;;
   agent|update|slot)
