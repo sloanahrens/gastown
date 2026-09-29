@@ -1116,7 +1116,7 @@ func TestHasPendingMRFromSnapshotAssessesMRStatus(t *testing.T) {
 			name: "missing MR with terminal source is not pending",
 			show: func(id string) (string, error) {
 				if id == "gt-mr" {
-					return "", errors.New("not found")
+					return "", errors.New("Error: issue gt-mr not found")
 				}
 				return issueJSON(id, "closed", ""), nil
 			},
@@ -1179,12 +1179,12 @@ func TestHasPendingMRUsesAgentLastSourceIssue(t *testing.T) {
 				case "gt-agent":
 					return `[{"active_mr":"gt-mr","description":"active_mr: gt-mr\nlast_source_issue: gt-src\n"}]`, nil
 				case "gt-mr":
-					return "", errors.New("not found")
+					return "", errors.New("Error: issue gt-mr not found")
 				case "gt-src":
 					return `[{"id":"gt-src","status":"closed"}]`, nil
 				}
 			}
-			return "", errors.New("not found")
+			return "", errors.New("Error: issue gt-mr not found")
 		},
 		func(args []string) error { return nil },
 	)
@@ -1205,7 +1205,7 @@ func TestHasPendingMRFromSnapshotRequiresGitSafe(t *testing.T) {
 				return "[]", nil
 			case "show":
 				if args[1] == "gt-mr" {
-					return "", errors.New("not found")
+					return "", errors.New("Error: issue gt-mr not found")
 				}
 				return `[{"id":"gt-src","status":"closed"}]`, nil
 			}
@@ -1243,7 +1243,7 @@ func TestHasPendingMRCleanupWispFailsClosed(t *testing.T) {
 						return `[{"active_mr":"gt-mr","description":"active_mr: gt-mr\nlast_source_issue: gt-src\n"}]`, nil
 					}
 					if args[0] == "show" && args[1] == "gt-mr" {
-						return "", errors.New("not found")
+						return "", errors.New("Error: issue gt-mr not found")
 					}
 					return `[{"id":"gt-src","status":"closed"}]`, nil
 				},

@@ -110,3 +110,23 @@ func (e *unavailableError) Unwrap() []error {
 	}
 	return []error{e.cause, ErrUnavailable}
 }
+
+// IsBDNotFound reports whether err is bd saying the id does not exist. It
+// is the one rule for callers that hold an error rather than bd's streams:
+// a wrapped ErrNotFound, a *CLIError that BDReportedNotFound classified as
+// absence, or an error whose text is bd's own not-found sentence (callers
+// that carried only stderr). Everything else, including every
+// ErrUnavailable, is not.
+func IsBDNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNotFound) {
+		return true
+	}
+	var cli *CLIError
+	if errors.As(err, &cli) || errors.Is(err, ErrUnavailable) {
+		return false
+	}
+	return BDReportedNotFound(exitCodeOf(err), nil, []byte(err.Error()))
+}

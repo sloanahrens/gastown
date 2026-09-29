@@ -262,13 +262,13 @@ func (b *Beads) DeleteRigBead(name string) error {
 
 // ListRigBeads returns all rig beads.
 func (b *Beads) ListRigBeads() (map[string]*RigFields, error) {
-	out, err := b.run("list", "--label=gt:rig", "--json")
+	out, err := b.run("list", "--label=gt:rig", "--json", "--limit=0")
 	if err != nil {
 		return nil, err
 	}
 
-	if !isJSONBytes(out) {
-		return nil, nil
+	if err := RequireJSON(out, "bd list"); err != nil {
+		return nil, err
 	}
 	var issues []*Issue
 	if err := json.Unmarshal(out, &issues); err != nil {

@@ -1743,10 +1743,8 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 		return nil, err
 	}
 
-	// bd list --json may return plain text (e.g., "No issues found.") instead
-	// of an empty JSON array when there are no results. Handle gracefully.
-	if len(out) == 0 || !isJSONBytes(out) {
-		return nil, nil
+	if err := RequireJSON(out, "bd list"); err != nil {
+		return nil, err
 	}
 
 	var issues []*Issue
@@ -1802,11 +1800,8 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(out) == 0 {
-		return nil, nil
-	}
-	if !isJSONBytes(out) {
-		return nil, fmt.Errorf("bd query returned non-JSON output")
+	if err := RequireJSON(out, "bd query"); err != nil {
+		return nil, err
 	}
 
 	var issues []*Issue
@@ -1862,11 +1857,8 @@ func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStat
 	if err != nil {
 		return nil, err
 	}
-	if len(out) == 0 {
-		return nil, nil
-	}
-	if !isJSONBytes(out) {
-		return nil, fmt.Errorf("bd query returned non-JSON output")
+	if err := RequireJSON(out, "bd query"); err != nil {
+		return nil, err
 	}
 
 	var issues []*Issue
@@ -1920,8 +1912,8 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 		return nil, err
 	}
 
-	if len(out) == 0 || !isJSONBytes(out) {
-		return nil, nil
+	if err := RequireJSON(out, "bd query"); err != nil {
+		return nil, err
 	}
 
 	var issues []*Issue
@@ -2059,15 +2051,26 @@ func stripStdoutWarnings(data []byte) []byte {
 	return bytes.Join(cleaned, []byte("\n"))
 }
 
-// IsJSONBytes reports whether b holds JSON rather than plain text, by its
-// first non-whitespace byte. Callers that parse bd output use it to tell an
-// empty result ("No issues found.") from a real payload, instead of reporting
-// a parse error for a query that simply matched nothing.
-func IsJSONBytes(b []byte) bool { return isJSONBytes(b) }
+// RequireJSON returns an error naming the first line of out unless out is
+// JSON. A --json call that printed prose or nothing did not answer: the
+// fork's --json path always emits JSON, "[]" for no results, and its only
+// "No issues found." is the pretty renderer, reached when --json was lost.
+// Reading that as zero results turns a failure into "no work" (B5-05).
+func RequireJSON(out []byte, what string) error {
+	if isJSONBytes(out) {
+		return nil
+	}
+	first := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(first, '\n'); i >= 0 {
+		first = strings.TrimSpace(first[:i])
+	}
+	if first == "" {
+		return fmt.Errorf("%s: printed nothing where JSON was expected", what)
+	}
+	return fmt.Errorf("%s: printed non-JSON output where JSON was expected: %q", what, first)
+}
 
 // isJSONBytes returns true if the byte slice starts with [ or { (after whitespace).
-// bd list --json may return plain text like "No issues found." instead of JSON
-// when there are no results.
 func isJSONBytes(b []byte) bool {
 	for _, c := range b {
 		switch c {
@@ -2194,8 +2197,8 @@ func (b *Beads) queryWisps(query string) ([]*Issue, error) {
 	if sqlErr != nil {
 		return nil, sqlErr
 	}
-	if len(sqlOut) == 0 || !isJSONBytes(sqlOut) {
-		return nil, nil
+	if err := RequireJSON(sqlOut, "bd sql"); err != nil {
+		return nil, err
 	}
 
 	var rows []struct {

@@ -112,11 +112,9 @@ func defaultBDExecWithOutput(workDir string, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return "", beads.SubprocessFailureError(ctx, timeout, fmt.Errorf("%s", errMsg))
-		}
-		return "", beads.SubprocessFailureError(ctx, timeout, err)
+		// A *beads.CLIError keeps bd's exit status and both streams, so
+		// isBdNotFoundError classifies on bd's answer, not on text (G5-02).
+		return "", &beads.CLIError{Args: args, Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), Err: beads.SubprocessFailureError(ctx, timeout, err)}
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
@@ -716,9 +714,11 @@ func findMRBeadForBranch(bd *BdCli, workDir, branch string) string {
 	// Use "bd query" with ephemeral=true to search the wisps table where
 	// MR beads live (GH#2446). "bd list --type=merge-request" only searches
 	// the issues table and misses wisps.
+	// --limit 0: bd query caps at 50 rows by default and says nothing to a
+	// program, so a branch's MR past row 50 read as "no MR" (B1-04).
 	output, err := bd.Exec(workDir, "query",
 		"ephemeral=true AND label=gt:merge-request AND status=open",
-		"--json")
+		"--json", "--limit", "0")
 	if err != nil || output == "" || output == "[]" || output == "null" {
 		return ""
 	}
@@ -4455,10 +4455,9 @@ func (s beadCLIShower) Show(issueID string) (*beads.Issue, error) {
 	return &issues[0], nil
 }
 
+// isBdNotFoundError reports whether err is bd confirming the bead does not
+// exist. A missing bd binary, a Dolt "database not found", "no such host"
+// and every other failure are outages, never absence (G5-02, gt-udrrw).
 func isBdNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "no such")
+	return beads.IsBDNotFound(err)
 }

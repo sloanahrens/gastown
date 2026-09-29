@@ -425,3 +425,25 @@ exit 0
 		}
 	}
 }
+
+// TestExecScheduledSlingRunnerListBeadsRejectsProse: prose from a --json list
+// is a failed read. Read as "no runs", it re-dispatched on every tick (B5-05).
+func TestExecScheduledSlingRunnerListBeadsRejectsProse(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stubDir, "bd"), []byte("#!/bin/sh\necho 'No issues found.'\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: filepath.Join(stubDir, "bd"), gtPath: "gt"}
+	got, err := r.listBeads(context.Background(), "gastown", docAuditEntry.label())
+	if err == nil {
+		t.Fatalf("listBeads on prose = %v, nil; want an error", got)
+	}
+	if !strings.Contains(err.Error(), "No issues found.") {
+		t.Errorf("error %q does not name the output", err)
+	}
+}

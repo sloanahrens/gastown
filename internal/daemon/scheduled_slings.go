@@ -232,10 +232,10 @@ func (r *execScheduledSlingRunner) listBeads(ctx context.Context, rig, label str
 	if err != nil {
 		return nil, err
 	}
-	// bd list --json may answer "No issues found." as plain text rather than an
-	// empty array; that is an empty result, not a parse failure (see listIssues).
-	if len(out) == 0 || !beads.IsJSONBytes(out) {
-		return nil, nil
+	// Prose or nothing from a --json call is a failed read, never "no
+	// runs": reading it as empty re-dispatches on every tick (B5-05).
+	if err := beads.RequireJSON(out, "bd list"); err != nil {
+		return nil, err
 	}
 	return parseScheduledBeads(out)
 }

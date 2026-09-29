@@ -62,6 +62,8 @@ switch ($cmd) {
 			exit 0
 		  }
   'migrate' { exit 0 }
+  'list' { Write-Output '[]'; exit 0 }
+  'query' { Write-Output '[]'; exit 0 }
   default { exit 0 }
 }
 `
@@ -108,6 +110,11 @@ case "$cmd" in
 	    exit 0
     ;;
   migrate)
+    exit 0
+    ;;
+  list|query)
+    # The fork's --json list/query answers "[]" for no rows, never nothing.
+    echo '[]'
     exit 0
     ;;
   *)

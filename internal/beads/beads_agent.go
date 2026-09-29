@@ -684,8 +684,8 @@ func (b *Beads) GetAgentBeadInStoreOnly(id string) (*Issue, *AgentFields, error)
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(out) == 0 || !isJSONBytes(out) {
-		return nil, nil, nil
+	if err := RequireJSON(out, "bd list"); err != nil {
+		return nil, nil, err
 	}
 	var issues []*Issue
 	if err := json.Unmarshal(out, &issues); err != nil {
