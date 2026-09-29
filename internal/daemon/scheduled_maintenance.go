@@ -153,7 +153,7 @@ func maintenanceMode(config *DaemonPatrolConfig) string {
 
 // maintenanceExecFn runs `gt maintain --force --threshold N`. A package
 // variable, following this package's *Fn seam convention (wispTreeFn,
-// closeStaleWispFn, listOriginBranchesFn), so a test can drive the flatten
+// closeStaleWispFn), so a test can drive the flatten
 // branch without a real gt binary and a real town — and, more importantly, can
 // assert that monitor mode never reaches it at all.
 var maintenanceExecFn = func(ctx context.Context, gtPath, dir string, threshold int) ([]byte, error) {

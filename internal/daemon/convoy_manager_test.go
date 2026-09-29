@@ -1676,12 +1676,12 @@ exit 0
 // Without it the daemon re-dispatched with the rig default, silently
 // overriding every per-bead routing decision whenever a first sling failed.
 func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -1690,6 +1690,7 @@ func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-agent1",
@@ -1727,12 +1728,12 @@ func TestFeedFirstReady_PassesConvoyAgent(t *testing.T) {
 // when no agent was recorded the feed falls back to gt sling's own resolution,
 // but it must name the rig default it expects instead of applying it silently.
 func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -1741,6 +1742,7 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-noagent",
@@ -1777,12 +1779,12 @@ func TestFeedFirstReady_NoAgent_LogsRigDefault(t *testing.T) {
 // the convoy open, and the daemon's re-feed ran the bead under gt sling's
 // default formula instead of the one the original sling asked for.
 func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -1791,6 +1793,7 @@ func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-formula1",
@@ -1828,14 +1831,15 @@ func TestFeedFirstReady_PassesConvoyFormula(t *testing.T) {
 // when no formula was recorded, the feed passes no --formula and leaves
 // resolution to gt sling's own default, rather than inventing one.
 func TestFeedFirstReady_NoFormula_OmitsFlag(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
 	townRoot, gtPath, slingLogPath, _ := feedTestRig(t)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
 
 	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv-noformula",
@@ -3536,14 +3540,6 @@ exit 0
 	return townRoot, filepath.Join(binDir, "gt"), slingLogPath, logged
 }
 
-// withOriginBranches replaces the origin branch-listing seam for a test.
-func withOriginBranches(t *testing.T, fn func(rigRoot string) ([]string, error)) {
-	t.Helper()
-	orig := listOriginBranchesFn
-	listOriginBranchesFn = fn
-	t.Cleanup(func() { listOriginBranchesFn = orig })
-}
-
 // TestFeedFirstReady_SkipsIssueWithSurvivingBranch is the regression test for
 // gt-3qfp: a bead whose previous holder died mid-work (never ran `gt done`) is
 // still marked ready by the stranded scan, because liveness is judged only by
@@ -3551,17 +3547,12 @@ func withOriginBranches(t *testing.T, fn func(rigRoot string) ([]string, error))
 // that is already preserved on origin — the mechanism behind gt-ibt8's four
 // polecats and gt-da2x's three.
 func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		return []string{
-			"polecat/pearl/gt-stranded1+mu72g5cz",
-			"polecat/agate/gt-other+mtukyuns",
-		}, nil
-	})
 
 	var mu sync.Mutex
 	logger := func(format string, args ...interface{}) {
@@ -3570,6 +3561,12 @@ func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return []string{
+			"polecat/pearl/gt-stranded1+mu72g5cz",
+			"polecat/agate/gt-other+mtukyuns",
+		}, nil
+	}
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -3611,19 +3608,20 @@ func TestFeedFirstReady_SkipsIssueWithSurvivingBranch(t *testing.T) {
 // unreadable remote (no repo, network error) must not stall the stranded scan,
 // which is the thing that keeps convoys moving.
 func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
 
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		return nil, fmt.Errorf("no git repo under %s", rigRoot)
-	})
 
 	logger := func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}
 	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("no git repo under %s", rigRoot)
+	}
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -3647,15 +3645,16 @@ func TestFeedFirstReady_FeedsWhenBranchLookupFails(t *testing.T) {
 // one against an unreachable remote blocks the whole scan for the query
 // timeout.
 func TestOriginBranches_CachesPerScan(t *testing.T) {
+	t.Parallel()
 	townRoot, gtPath, _, _ := feedTestRig(t)
 
 	var calls int32
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		atomic.AddInt32(&calls, 1)
-		return []string{"polecat/pearl/gt-issue1+mu72g5cz"}, nil
-	})
 
 	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		atomic.AddInt32(&calls, 1)
+		return []string{"polecat/pearl/gt-issue1+mu72g5cz"}, nil
+	}
 
 	for i := 0; i < 5; i++ {
 		m.survivingBranchFor("gt", "gt-issue1")
@@ -3674,10 +3673,10 @@ func TestOriginBranches_CachesPerScan(t *testing.T) {
 	// Failures are cached for the scan too, so an unreachable remote is not
 	// retried once per ready issue.
 	m.resetOriginBranches()
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		atomic.AddInt32(&calls, 1)
 		return nil, fmt.Errorf("remote unreachable")
-	})
+	}
 	for i := 0; i < 5; i++ {
 		if _, ok := m.survivingBranchFor("gt", "gt-issue1"); ok {
 			t.Fatal("expected fail-open (no surviving branch) on lookup error")
@@ -3742,11 +3741,8 @@ func newDeadHolderWorktree(t *testing.T, townRoot, rig, name, branch string) (wo
 	return worktreePath, originPath
 }
 
-// t.Parallel is deliberately omitted: this test uses withOriginBranches,
-// which overrides the package-level listOriginBranchesFn var — the same
-// reason TestFeedFirstReady_SkipsIssueWithSurvivingBranch and its siblings
-// run serially.
 func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -3779,12 +3775,12 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 
 	// The rig-level shared-repo listing (survivingBranchFor's source) has
 	// nothing — the branch was never pushed, so it cannot appear there.
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
 
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -3816,8 +3812,8 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 	}
 }
 
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -3853,12 +3849,11 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 		t.Fatalf("write dirty file: %v", err)
 	}
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -3885,8 +3880,8 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 	}
 }
 
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -3914,14 +3909,13 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		return nil, fmt.Errorf("remote unreachable")
-	})
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return nil, fmt.Errorf("remote unreachable")
+	}
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -3948,8 +3942,8 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 	}
 }
 
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -3978,14 +3972,13 @@ func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *t
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue4+def456"
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) {
-		return []string{branch}, nil
-	})
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
+		return []string{branch}, nil
+	}
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -4023,16 +4016,8 @@ func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *t
 	}
 }
 
-// withDeadHolderWorktreeState replaces the worktree-state seam for a test.
-func withDeadHolderWorktreeState(t *testing.T, fn func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error)) {
-	t.Helper()
-	orig := deadHolderWorktreeStateFn
-	deadHolderWorktreeStateFn = fn
-	t.Cleanup(func() { deadHolderWorktreeStateFn = orig })
-}
-
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *testing.T) {
+	t.Parallel()
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -4057,15 +4042,14 @@ func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *test
 
 	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
-	withDeadHolderWorktreeState(t, func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
-		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: exit status 128")
-	})
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.deadHolderWorktreeStateFn = func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
+		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: exit status 128")
+	}
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -4092,8 +4076,8 @@ func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *test
 	}
 }
 
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
+	t.Parallel()
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -4118,12 +4102,11 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 		t.Fatalf("mkdir rig root: %v", err)
 	}
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -4146,8 +4129,8 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 	}
 }
 
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -4173,12 +4156,11 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	otherBranch := "polecat/basalt/gt-other9+zzz999"
 	newDeadHolderWorktree(t, townRoot, "gt", "basalt", otherBranch)
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -4201,8 +4183,8 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	}
 }
 
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -4235,12 +4217,11 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 		t.Fatalf("write runtime dirt: %v", err)
 	}
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -4263,8 +4244,8 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 	}
 }
 
-// t.Parallel is deliberately omitted; see TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips.
 func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
 	}
@@ -4298,12 +4279,11 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 	// by hand" escalation preserveWorktreeBranch raises when neither lands.
 	runDeadHolderGit(t, worktreePath, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
 
-	withOriginBranches(t, func(rigRoot string) ([]string, error) { return nil, nil })
-
 	var escalated []string
 	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtPath, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
