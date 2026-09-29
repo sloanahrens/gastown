@@ -95,13 +95,17 @@ func run() int {
 	var judgedErr error
 	code := 0
 	if len(judged) > 0 {
+		start := time.Now()
 		res, code, judgedErr = runJudged(withPkgs(judged), root, *budget, exempt, tracked)
+		fmt.Fprintf(os.Stderr, "budget: %d converted packages took %s\n", len(judged), time.Since(start).Round(time.Second))
 		if judgedErr != nil {
 			return fail(judgedErr)
 		}
 	}
 	if len(cached) > 0 && !interrupted(code) {
+		start := time.Now()
 		c, err := runCached(withPkgs(cached))
+		fmt.Fprintf(os.Stderr, "budget: %d unconverted packages took %s\n", len(cached), time.Since(start).Round(time.Second))
 		if err != nil {
 			return fail(err)
 		}
