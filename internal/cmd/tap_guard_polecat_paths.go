@@ -258,6 +258,11 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			if reason := s.checkBashArgs(args, base); reason != "" {
 				return reason
 			}
+			if base == "ln" {
+				if reason := s.checkSymlinkText(args); reason != "" {
+					return reason
+				}
+			}
 		case base == "cd" || base == "pushd":
 			// cd is not a write, but it decides where every later relative path
 			// lands: a polecat that walks into a sibling worktree (or the
@@ -311,22 +316,178 @@ func (s polecatPathScope) checkBashArgs(args []string, command string) string {
 // allowing them is what keeps ordinary commands from being blocked.
 func (s polecatPathScope) checkBashTarget(raw, context string) string {
 	for _, candidate := range bashPathCandidates(raw) {
-		target, ok := canonicalizeToolPath(candidate, s.cwd)
-		if !ok {
-			return fmt.Sprintf("%s path %q cannot be resolved (unknown variable or missing parent) — refusing to guess; name an explicit path inside your worktree: %s", context, candidate, s.worktree)
+		if reason := s.checkBashPathFrom(candidate, s.cwd, context); reason != "" {
+			return reason
 		}
-		if s.isProtectedBinPath(target) {
-			return fmt.Sprintf("%s target is a shared host binary directory: %s. Polecats must never write there — a stub or partial write breaks gt/bd for every agent on the host (gt-tnts5).", context, target)
-		}
-		if !s.isTownPath(target) {
-			continue
-		}
-		if s.isWorktreePath(target) || s.isOwnDirPath(target) || s.isRepoGitPath(target) || s.isScratchPath(target) {
-			continue
-		}
-		return fmt.Sprintf("%s target is inside the town but not yours: %s (your worktree: %s, your polecat dir: %s, %s is allowed). Polecats work only in their own worktree.", context, target, s.worktree, s.ownDir, bareRepoDir)
 	}
 	return ""
+}
+
+// checkBashPathFrom decides one path, resolved against base, by the Bash rule:
+// only town-internal paths that are not the polecat's own (and the shared bin
+// directory) are denied.
+func (s polecatPathScope) checkBashPathFrom(candidate, base, context string) string {
+	target, ok := canonicalizeToolPath(candidate, base)
+	if !ok {
+		return fmt.Sprintf("%s path %q cannot be resolved (unknown variable or missing parent) — refusing to guess; name an explicit path inside your worktree: %s", context, candidate, s.worktree)
+	}
+	if s.isProtectedBinPath(target) {
+		return fmt.Sprintf("%s target is a shared host binary directory: %s. Polecats must never write there — a stub or partial write breaks gt/bd for every agent on the host (gt-tnts5).", context, target)
+	}
+	if !s.isTownPath(target) {
+		return ""
+	}
+	if s.isWorktreePath(target) || s.isOwnDirPath(target) || s.isRepoGitPath(target) || s.isScratchPath(target) {
+		return ""
+	}
+	return fmt.Sprintf("%s target is inside the town but not yours: %s (your worktree: %s, your polecat dir: %s, %s is allowed). Polecats work only in their own worktree.", context, target, s.worktree, s.ownDir, bareRepoDir)
+}
+
+// checkSymlinkText judges the link text of "ln -s TEXT... LINK" where the kernel
+// will read it: relative to the directory the link is created in, not the
+// session cwd (gt-22hdp.41). checkBashArgs already judged every operand against
+// the cwd; a link planted in scratch whose relative text climbs into the town
+// passes that check, and then any later write through the link (by a script
+// the guard never sees) lands in the town. Each text is therefore also judged
+// from each directory the link may be created in. "ln -r" computes the text
+// from cwd-relative operands, which checkBashArgs covers, so it is skipped.
+func (s polecatPathScope) checkSymlinkText(args []string) string {
+	ln := parseLnArgs(args)
+	if !ln.symbolic || ln.relative || len(ln.texts) == 0 {
+		return ""
+	}
+	for _, text := range ln.texts {
+		for _, dir := range s.symlinkDirs(ln) {
+			if reason := s.checkBashPathFrom(text, dir, "ln -s link text"); reason != "" {
+				return reason
+			}
+		}
+	}
+	return ""
+}
+
+// symlinkDirs returns the canonical directories an ln invocation may create its
+// links in: -t DIR; else the destination's parent directory, plus the
+// destination itself when it is an existing directory (ln then creates the link
+// inside it); else, with a single operand, the cwd.
+func (s polecatPathScope) symlinkDirs(ln lnArgs) []string {
+	var raws []string
+	switch {
+	case ln.targetDir != "":
+		raws = append(raws, ln.targetDir)
+	case ln.dest != "":
+		raws = append(raws, pathDirPart(ln.dest))
+		if dest, ok := canonicalizeToolPath(ln.dest, s.cwd); ok {
+			if info, err := os.Stat(dest); err == nil && info.IsDir() {
+				raws = append(raws, dest)
+			}
+		}
+	default:
+		raws = append(raws, ".")
+	}
+	var dirs []string
+	for _, raw := range raws {
+		dir, ok := canonicalizeToolPath(raw, s.cwd)
+		if !ok {
+			// Only an unresolvable spelling gets here (an unknown variable), and
+			// checkBashArgs has already denied that same operand fail-closed.
+			continue
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+// pathDirPart returns the directory part of a path as spelled — everything
+// before its final component — without cleaning it (a lexical clean before
+// symlink resolution is the "sym/.." mistake). A bare name's directory is ".".
+func pathDirPart(path string) string {
+	trimmed := strings.TrimRight(path, string(filepath.Separator))
+	if trimmed == "" {
+		return string(filepath.Separator)
+	}
+	idx := strings.LastIndex(trimmed, string(filepath.Separator))
+	switch {
+	case idx < 0:
+		return "."
+	case idx == 0:
+		return string(filepath.Separator)
+	}
+	return trimmed[:idx]
+}
+
+// lnArgs is the part of an ln command line that decides where its links point.
+type lnArgs struct {
+	symbolic  bool
+	relative  bool     // -r / --relative: text computed from cwd-relative operands
+	targetDir string   // -t DIR / --target-directory=DIR
+	texts     []string // link texts (the TARGET operands)
+	dest      string   // the LINK_NAME or DIRECTORY operand, when not -t
+}
+
+// parseLnArgs reads GNU and BSD ln's option syntax: clustered short flags
+// (-sfn), -t/-S taking a value (attached or as the next word), the long forms,
+// and "--" ending options.
+func parseLnArgs(args []string) lnArgs {
+	var (
+		ln       lnArgs
+		operands []string
+	)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			operands = append(operands, args[i+1:]...)
+			i = len(args)
+		case arg == "--symbolic":
+			ln.symbolic = true
+		case arg == "--relative":
+			ln.relative = true
+		case strings.HasPrefix(arg, "--target-directory="):
+			ln.targetDir = strings.TrimPrefix(arg, "--target-directory=")
+		case arg == "--target-directory" || arg == "--suffix":
+			if i+1 < len(args) {
+				if arg == "--target-directory" {
+					ln.targetDir = args[i+1]
+				}
+				i++
+			}
+		case strings.HasPrefix(arg, "--"):
+			// --force, --no-dereference, --suffix=X, ...: no path.
+		case strings.HasPrefix(arg, "-") && len(arg) > 1:
+		cluster:
+			for j := 1; j < len(arg); j++ {
+				switch arg[j] {
+				case 's':
+					ln.symbolic = true
+				case 'r':
+					ln.relative = true
+				case 't', 'S':
+					value := arg[j+1:]
+					if value == "" && i+1 < len(args) {
+						i++
+						value = args[i]
+					}
+					if arg[j] == 't' {
+						ln.targetDir = value
+					}
+					break cluster
+				}
+			}
+		default:
+			operands = append(operands, arg)
+		}
+	}
+	switch {
+	case ln.targetDir != "":
+		ln.texts = operands
+	case len(operands) == 1:
+		ln.texts = operands
+	case len(operands) > 1:
+		ln.texts = operands[:len(operands)-1]
+		ln.dest = operands[len(operands)-1]
+	}
+	return ln
 }
 
 // isTownPath reports whether target lies inside the town — the tree this guard
