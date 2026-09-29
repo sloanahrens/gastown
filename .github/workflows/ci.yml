@@ -176,7 +176,7 @@ jobs:
 
       # tmux: the integration tier drives a real tmux server.
       - name: Install ICU4C development headers and tmux
-        run: sudo apt-get install -y libicu-dev tmux
+        run: sudo apt-get update && sudo apt-get install -y libicu-dev tmux
 
       - name: Configure Git
         run: |

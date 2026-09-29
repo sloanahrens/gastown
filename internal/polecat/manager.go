@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -2097,7 +2098,7 @@ func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
 		if wt.Branch != branch {
 			continue
 		}
-		if _, err := os.Stat(wt.Path); err != nil {
+		if _, err := os.Stat(wt.Path); errors.Is(err, fs.ErrNotExist) {
 			// A deleted worktree keeps its registration, branch line and all. No
 			// directory means no HEAD there to conflict with (gt-0kk2).
 			deleted = wt.Path

@@ -12,7 +12,8 @@ jobs:
   integration-full:
     name: Full Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # ./... (20m budget) plus four scheduler batches (20m each); 30m was too short.
+    timeout-minutes: 75
     env:
       # Container-backed tests are opt-in; without this every integration
       # TestMain failed on "dolt setup failed" (gt-22hdp.39).
@@ -29,7 +30,7 @@ jobs:
       # ICU: cgo builds of gt and bd (setup-bd builds with cgo). tmux: the
       # integration tier drives a real tmux server.
       - name: Install ICU4C development headers and tmux
-        run: sudo apt-get install -y libicu-dev tmux
+        run: sudo apt-get update && sudo apt-get install -y libicu-dev tmux
 
       - name: Configure Git
         run: |
