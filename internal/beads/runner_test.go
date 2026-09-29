@@ -282,8 +282,8 @@ func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
 	}
 }
 
-// TestReleaseFallsBackWithoutForce: gt commands outside the handshake gate still run on bd
-// builds older than the claim fence, which may not know `update --force`.
+// TestReleaseFallsBackWithoutForce: a bd build older than the claim fence
+// may not know `update --force`.
 // On such a bd, Release retries without it, as --flat already falls back,
 // instead of failing every release.
 func TestReleaseFallsBackWithoutForce(t *testing.T) {

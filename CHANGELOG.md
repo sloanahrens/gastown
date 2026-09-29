@@ -14,9 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   role refuse to run unless the `bd` on PATH is a beads fork build whose JSON
   contract version gt knows and whose schema level (`bd version --json`
   `db_schema_version`) equals the database's `schema_migrations` level. The
-  refusal names what bd reported against what the town needs. `gt doctor`'s
-  `beads-binary` check runs the same handshake. Read-only commands are not
-  gated.
+  refusal names what bd reported against what the town needs. Every agent
+  session start in the `gt` binary (session.StartSession and the role
+  managers' Start) asks the same gate, so a command path the list does not
+  name, or the daemon's own restarts, cannot start a session on an unknown
+  bd. `gt doctor`'s `beads-binary` check runs the same handshake. Read-only
+  commands are not gated.
 
 - **Hermetic test-isolation harness** (gt-lwi) — running `go test ./...` from
   a worktree inside a live town can no longer mutate that town. A process-wide
@@ -60,9 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gt done` exits non-zero when work did not land** (gt-fcxe9.3) — exit 10
   push failed, 11 push not verified on origin, 12 MR bead not created or not
   trusted, 13 source bead not closed, after the witness notification and
-  session handling have run. `--skip-tests` skips the test gate;
-  `--skip-verify` is a deprecated alias for it and no longer skips push
-  verification, which has no off switch. MR beads record `skip_tests: true`.
+  session handling have run. `--skip-tests` skips the test gate.
+  `--skip-verify` used to skip both the test gate (MR path) and push
+  verification (every path); it is now a deprecated alias for `--skip-tests`,
+  so on the MR path it still skips tests and on the no-MR and direct-merge
+  paths it skips nothing. Push verification has no off switch. MR beads
+  record `skip_tests: true`.
 
 - **A rogue-bd scan spares the build output of the repo that builds `bd`**
   (gt-5zsc) — step 18 of `mol-deacon-patrol` flagged `<worktree-root>/bd` in
