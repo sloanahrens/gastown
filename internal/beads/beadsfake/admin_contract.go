@@ -16,7 +16,7 @@ type AdminClient interface {
 
 // RunAdminContract checks the maintenance surface (Admin) every
 // implementation must share. newImpl must return an empty database whose
-// issue prefix is "gt". SQL, InitDatabase and GCWisps are not modelled by
+// issue prefix is "gt". SQL, InitDatabase and GCWisps are not modeled by
 // the fake (they are scripted or recorded), so they are not pinned here.
 func RunAdminContract(t *testing.T, newImpl func(t *testing.T) AdminClient) {
 	t.Helper()

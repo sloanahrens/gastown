@@ -410,7 +410,7 @@ const escalationStubPayload = `[{"id":"hq-wisp1","title":"Dolt: server unreachab
 // tests depend on instead of just recording argv, and logs each invocation's
 // argv plus BEADS_DIR. It returns the log path.
 //
-// rejectFlat selects which bd is modelled:
+// rejectFlat selects which bd is modeled:
 //   - false (bd v0.59+): `list --json` emits human-readable tree text unless
 //     --flat is passed, so a caller that drops the injection cannot parse.
 //   - true (bd < v0.59): --flat is an unknown flag, so a caller that injects it

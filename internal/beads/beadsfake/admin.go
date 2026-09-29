@@ -26,7 +26,7 @@ var _ Admin = (*Fake)(nil)
 var bdTables = []string{"issues", "wisps", "labels", "wisp_labels", "dependencies", "wisp_dependencies", "comments", "events", "config"}
 
 // ErrNotScripted is returned by SQL and SQLCSV when the test did not script
-// an answer (OnSQL). SQL is not modelled.
+// an answer (OnSQL). SQL is not modeled.
 var ErrNotScripted = errors.New("beadsfake: SQL not scripted")
 
 func (f *Fake) configMap() map[string]string {
@@ -146,7 +146,7 @@ func (f *Fake) MolWispList() ([]*beads.Issue, error) {
 	return out, nil
 }
 
-// GCWisps records a bd mol wisp gc. Garbage collection is not modelled:
+// GCWisps records a bd mol wisp gc. Garbage collection is not modeled:
 // nothing is deleted. GCCount reports the calls.
 func (f *Fake) GCWisps() error {
 	f.mu.Lock()

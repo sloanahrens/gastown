@@ -294,7 +294,7 @@ func (f *Fake) blocked(r *record) bool { return len(f.openBlockers(r)) > 0 }
 // Ready returns the open issues that nothing open blocks, leaving out the
 // town's bookkeeping labels and types (constants.NonDispatchableBead*).
 // Parent-child links do not block. Only direct "blocks" dependencies are
-// modelled.
+// modeled.
 func (f *Fake) Ready() ([]*beads.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
