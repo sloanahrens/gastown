@@ -129,12 +129,7 @@ bd show {{convoy}}
 # Status should be "closed"
 ```
 
-**3. Sync to persist:**
-```bash
-bd sync
-```
-
-**Exit criteria:** Convoy closed, changes synced."""
+**Exit criteria:** Convoy closed."""
 
 [[steps]]
 id = "notify-overseer"
