@@ -138,10 +138,7 @@ func runPatrolReportFor(out io.Writer, roleInfo RoleInfo, summary, steps string,
 	}
 
 	// Close the current patrol root with the summary
-	b := cfg.Beads
-	if b == nil {
-		b = beads.New(cfg.BeadsDir)
-	}
+	b := cfg.client()
 
 	// Build step audit checklist. The audit is the anti-shortcut record, so a
 	// malformed entry (a bare step id with no ":STATUS") fails the command

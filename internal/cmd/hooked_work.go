@@ -16,7 +16,7 @@ import (
 // This costs two subprocesses. For a fleet-wide lookup use
 // beads.ListAssignedIssueStatuses, which unions both tables in one query
 // (gt-t8tu); this is left for the per-parent child scan.
-func listBeadsAcrossTables(b *beads.Beads, opts beads.ListOptions) ([]*beads.Issue, error) {
+func listBeadsAcrossTables(b beads.Client, opts beads.ListOptions) ([]*beads.Issue, error) {
 	limit := opts.Limit
 
 	issueOpts := opts
@@ -42,7 +42,7 @@ func listBeadsAcrossTables(b *beads.Beads, opts beads.ListOptions) ([]*beads.Iss
 	return merged, nil
 }
 
-func listAssignedActiveWork(b *beads.Beads, assignee string) ([]*beads.Issue, error) {
+func listAssignedActiveWork(b beads.Client, assignee string) ([]*beads.Issue, error) {
 	assignments, err := listAssignedActiveWorkAcrossStatuses(b, assignee)
 	if err != nil {
 		return nil, err
@@ -52,7 +52,7 @@ func listAssignedActiveWork(b *beads.Beads, assignee string) ([]*beads.Issue, er
 
 // listAssignedActiveWorkAcrossStatuses returns every active assignment for
 // assignee, newest first, from one query over both statuses and both tables.
-func listAssignedActiveWorkAcrossStatuses(b *beads.Beads, assignee string) ([]*beads.Issue, error) {
+func listAssignedActiveWorkAcrossStatuses(b beads.Client, assignee string) ([]*beads.Issue, error) {
 	assignments, err := b.ListAssignedIssueStatuses(assignee, activeWorkStatuses()...)
 	if err != nil {
 		return nil, err
@@ -78,7 +78,7 @@ func preferHooked(assignments []*beads.Issue) []*beads.Issue {
 	return mergeBeadLists(inProgress, nil)
 }
 
-func listChildrenAcrossTables(b *beads.Beads, parentID string) ([]*beads.Issue, error) {
+func listChildrenAcrossTables(b beads.Client, parentID string) ([]*beads.Issue, error) {
 	return listBeadsAcrossTables(b, beads.ListOptions{
 		Parent:   parentID,
 		Status:   "all",

@@ -495,7 +495,7 @@ func openStepReason(b beads.Client, is *beads.Issue) string {
 
 // closeDescendants recursively closes all descendant issues of a parent.
 // Returns the count of issues closed. Logs warnings on errors but doesn't fail.
-func closeDescendants(b *beads.Beads, parentID string) int {
+func closeDescendants(b beads.Client, parentID string) int {
 	count, err := closeDescendantsImpl(b, parentID, false)
 	if err != nil {
 		style.PrintWarning("closing descendants of %s: %v", parentID, err)
@@ -507,7 +507,7 @@ func closeDescendants(b *beads.Beads, parentID string) int {
 // which succeeds even for beads in invalid states. Returns the count of
 // issues closed and any error encountered. Callers should check the error
 // to avoid closing a parent while children survive (gt-7lx3).
-func forceCloseDescendants(b *beads.Beads, parentID string) (int, error) {
+func forceCloseDescendants(b beads.Client, parentID string) (int, error) {
 	return closeDescendantsImpl(b, parentID, true)
 }
 

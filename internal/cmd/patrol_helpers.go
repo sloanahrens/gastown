@@ -42,7 +42,16 @@ type PatrolConfig struct {
 	HeaderTitle   string       // "Patrol Status", etc.
 	WorkLoopSteps []string     // role-specific instructions
 	ExtraVars     []string     // additional --var key=value args for wisp creation
-	Beads         *beads.Beads // optional injected beads instance (for test isolation)
+	Beads         beads.Client // optional injected beads client (for tests); nil means beads.New(BeadsDir)
+}
+
+// client returns the client the patrol helpers read and close through: the
+// injected one, or bd in BeadsDir.
+func (cfg PatrolConfig) client() beads.Client {
+	if cfg.Beads != nil {
+		return cfg.Beads
+	}
+	return beads.New(cfg.BeadsDir)
 }
 
 // maxStalePurgePerRun caps the number of stale patrol beads cleaned up in a
@@ -65,10 +74,7 @@ const maxStalePurgePerRun = 5
 // cleaned up incrementally (up to maxStalePurgePerRun per call); any
 // remaining stale beads are cleaned by burnPreviousPatrolWisps at cycle end.
 func findActivePatrol(cfg PatrolConfig) (patrolID, patrolLine string, found bool, err error) {
-	b := cfg.Beads
-	if b == nil {
-		b = beads.New(cfg.BeadsDir)
-	}
+	b := cfg.client()
 
 	// Find active patrol beads for this agent across durable issues and wisps.
 	hookedBeads, listErr := listAssignedActiveWorkAcrossStatuses(b, cfg.Assignee)
@@ -143,7 +149,7 @@ func findActivePatrol(cfg PatrolConfig) (patrolID, patrolLine string, found bool
 // to protect against a race where a freshly created wisp hasn't had its step
 // children materialized yet. This prevents findActivePatrol from closing a
 // just-created patrol during the window between root creation and step population.
-func checkHasOpenChildren(b *beads.Beads, parentID string) (bool, error) {
+func checkHasOpenChildren(b beads.Client, parentID string) (bool, error) {
 	children, err := listChildrenAcrossTables(b, parentID)
 	if err != nil {
 		return false, err
@@ -171,10 +177,7 @@ func formatBeadLine(issue *beads.Issue) string {
 // without the previous one being properly closed (gt-92jh).
 // Errors are logged as warnings but don't block new patrol creation.
 func burnPreviousPatrolWisps(cfg PatrolConfig) {
-	b := cfg.Beads
-	if b == nil {
-		b = beads.New(cfg.BeadsDir)
-	}
+	b := cfg.client()
 
 	// Find all active patrol beads for this agent across durable issues and wisps.
 	hookedBeads, err := listAssignedActiveWorkAcrossStatuses(b, cfg.Assignee)
