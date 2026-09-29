@@ -33,6 +33,9 @@ type Client interface {
 	ListAssignedIssueStatuses(assignee string, statuses ...IssueStatus) ([]*Issue, error)
 	// Ready returns open, unblocked, dispatchable issues.
 	Ready() ([]*Issue, error)
+	// ReadyAll returns every issue Ready would, without bd's default page
+	// cap; a page bd reports as cut is an error.
+	ReadyAll() ([]*Issue, error)
 	// Children returns the direct children of parentID.
 	Children(parentID string) ([]*Issue, error)
 	// Comments returns the comments on an issue, oldest first.

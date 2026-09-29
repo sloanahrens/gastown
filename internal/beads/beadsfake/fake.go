@@ -331,6 +331,9 @@ func (f *Fake) Ready() ([]*beads.Issue, error) {
 	return out, nil
 }
 
+// ReadyAll is Ready: the fake has no page cap to lift.
+func (f *Fake) ReadyAll() ([]*beads.Issue, error) { return f.Ready() }
+
 // Children returns the issues and wisps whose parent is parentID.
 func (f *Fake) Children(parentID string) ([]*beads.Issue, error) {
 	f.mu.Lock()

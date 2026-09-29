@@ -635,6 +635,8 @@ func contractReadyFilter(t *testing.T, s *scope) {
 	kid := s.mustCreate(t, beads.CreateOptions{Title: "kid", Parent: parent.ID, Priority: -1})
 	ready, err := s.Ready()
 	s.want(t, "Ready", ready, err, work.ID, parent.ID, kid.ID)
+	all, err := s.ReadyAll()
+	s.want(t, "ReadyAll", all, err, work.ID, parent.ID, kid.ID)
 }
 
 func contractChildren(t *testing.T, s *scope) {

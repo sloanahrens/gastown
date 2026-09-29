@@ -2509,6 +2509,36 @@ func (b *Beads) Ready() ([]*Issue, error) {
 	return parseReadyOutput(out)
 }
 
+// ReadyAll returns every ready issue, with the bookkeeping families excluded
+// as Ready excludes them. It is one machine-mode bd call with --limit 0, so
+// bd's default page of 100 does not apply, and a page bd still reports as
+// truncated is an error: a board silently cut at 100 is the under-report the
+// dispatch patrol exists to catch (gt-59o9). It has no in-process store
+// branch (gt-7iwy0.2).
+func (b *Beads) ReadyAll() ([]*Issue, error) {
+	args := append(readyCliArgs(), "--limit", "0")
+	out, err := b.runMachine(args...)
+	if err != nil {
+		return nil, err
+	}
+	env, isEnvelope, err := decodeMachineEnvelope(out, "bd ready")
+	if err != nil {
+		return nil, err
+	}
+	data := bytes.TrimSpace(out)
+	if isEnvelope {
+		if env.Pagination != nil && env.Pagination.Truncated {
+			return nil, fmt.Errorf("bd ready --limit 0 returned a truncated page (%d issues); refusing to read it as the whole board", env.Pagination.Returned)
+		}
+		data = env.Data
+	}
+	var issues []*Issue
+	if err := json.Unmarshal(data, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd ready output: %w", err)
+	}
+	return issues, nil
+}
+
 // ReadyDispatchable returns ready issues with the town's bookkeeping
 // families (mail, escalations, identity, merge queue, event records)
 // excluded server-side by the same filter Ready sends (gt-0q80): the
