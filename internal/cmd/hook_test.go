@@ -10,7 +10,41 @@ import (
 // TestHookPolecatEnvCheck verifies that the polecat guard in runHook uses
 // GT_ROLE as the authoritative check, so coordinators with a stale GT_POLECAT
 // in their environment are not blocked from hooking (GH #1707).
+// TestRunHookAppliesThePolecatRefusal: runHook refuses a polecat session
+// from the process environment, and lets a coordinator with a stale
+// GT_POLECAT past the refusal (it then fails later, on the dummy bead).
+func TestRunHookAppliesThePolecatRefusal(t *testing.T) {
+	for _, tt := range []struct {
+		name, role, polecat string
+		wantBlock           bool
+	}{
+		{name: "polecat", role: "gastown/polecats/Toast", polecat: "Toast", wantBlock: true},
+		{name: "mayor with stale GT_POLECAT", role: "mayor", polecat: "alpha", wantBlock: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GT_ROLE", tt.role)
+			t.Setenv("GT_POLECAT", tt.polecat)
+
+			var blocked bool
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Panic means we got past the guard — not blocked
+						blocked = false
+					}
+				}()
+				err := runHook(nil, []string{"fake-bead-id"})
+				blocked = err != nil && strings.Contains(err.Error(), "polecats cannot hook")
+			}()
+			if blocked != tt.wantBlock {
+				t.Errorf("runHook blocked = %v, want %v (GT_ROLE=%q GT_POLECAT=%q)", blocked, tt.wantBlock, tt.role, tt.polecat)
+			}
+		})
+	}
+}
+
 func TestHookPolecatEnvCheck(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		role      string
@@ -69,23 +103,9 @@ func TestHookPolecatEnvCheck(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_ROLE", tt.role)
-			t.Setenv("GT_POLECAT", tt.polecat)
-
-			// We only test the polecat guard, so we call runHook with a dummy arg.
-			// It will either fail at the guard or fail later (missing bead, etc.).
-			// We only care whether the error is the polecat-block message.
-			var blocked bool
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						// Panic means we got past the guard — not blocked
-						blocked = false
-					}
-				}()
-				err := runHook(nil, []string{"fake-bead-id"})
-				blocked = err != nil && strings.Contains(err.Error(), "polecats cannot hook")
-			}()
+			t.Parallel()
+			err := hookPolecatRefusal(envMap(map[string]string{"GT_ROLE": tt.role, "GT_POLECAT": tt.polecat}))
+			blocked := err != nil && strings.Contains(err.Error(), "polecats cannot hook")
 
 			if blocked != tt.wantBlock {
 				if tt.wantBlock {
