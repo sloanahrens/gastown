@@ -216,7 +216,7 @@ check-version-tag:
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
-test: test-makefile
+test:
 	# -timeout 20m: the 10m default is a per-package budget and internal/cmd
 	# and internal/refinery legitimately run 500-600s under contention, so
 	# every gate against them flapped on the budget rather than a hung test
@@ -239,7 +239,16 @@ test: test-makefile
 	# -exec wrapper, which bypasses the test result cache, and runs the
 	# packages in unconverted.txt afterwards without the wrapper, so those
 	# stay "(cached)" on an unchanged tree (gt-22hdp.53).
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./...
+	# The shell-script tests (test-makefile, ~130s one after another) run
+	# beside the Go suite instead of before it; their output is held and
+	# printed after it, and either failing fails the target (gt-22hdp.60).
+	@log=$$(mktemp -t gt-test-makefile); \
+	$(MAKE) --no-print-directory test-makefile >"$$log" 2>&1 & mk=$$!; \
+	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./...; go_rc=$$?; \
+	wait $$mk; mk_rc=$$?; \
+	echo "=== test-makefile (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \
+	if [ $$mk_rc -ne 0 ]; then echo "test-makefile failed (exit $$mk_rc)" >&2; fi; \
+	[ $$go_rc -eq 0 ] && [ $$mk_rc -eq 0 ]
 
 # test-changed runs the same hermetic suite as `test` over a caller-supplied
 # package list, for `gt done`'s pre-verify gate (merge_queue.test_verify_command
