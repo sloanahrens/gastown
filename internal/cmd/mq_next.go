@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -189,10 +190,26 @@ func syncGateIntent(townRoot, rigName, callerRole, nextID string) {
 	switch {
 	case nextID == "":
 		err = slot.ClearGateIntent(townRoot, rigName)
-	case slot.IsGateRole(callerRole):
+	case slot.IsMergeGateRole(callerRole):
 		err = slot.RegisterGateIntent(townRoot, rigName, nextID)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gt mq next: %v\n", err)
 	}
+}
+
+// queueHasReadyMR reports whether issues holds a ready MR for rigName, by the
+// same readiness gt mq next selects on. MR wisps are shared across rigs, so
+// an MR whose rig field names another rig does not count.
+func queueHasReadyMR(issues []*beads.Issue, rigName string) bool {
+	for _, issue := range issues {
+		if !isMergeRequestReadyForSelection(issue) {
+			continue
+		}
+		if f := beads.ParseMRFields(issue); f != nil && f.Rig != "" && !strings.EqualFold(f.Rig, rigName) {
+			continue
+		}
+		return true
+	}
+	return false
 }

@@ -86,6 +86,14 @@ func runMQList(cmd *cobra.Command, args []string) error {
 		duplicates = refinery.DuplicateBranchMRs(issues, rigName)
 	}
 
+	// After the last merge the refinery's loop goes through queue-scan's
+	// gt mq list, never gt mq next again, so this is where a drained queue
+	// clears the pending-gate intent (gt-22hdp.29) instead of leaving crew
+	// yielding to it until it expires.
+	if mqListCoversQueue(mqListStatus, mqListWorker, mqListEpic) && !queueHasReadyMR(issues, rigName) {
+		syncGateIntentFromEnv(rigName, "")
+	}
+
 	// mark every MR that shares a branch with another open MR so the
 	// single-MR patrol path (queue-scan/process-branch) refuses to gate
 	// either one, same as the batch path (ListReadyMRs).
@@ -527,4 +535,11 @@ func verifyAlreadyLanded(verify bool, client mrLandedVerifier, fields *beads.MRF
 		return false
 	}
 	return client.CommitLandedOnTarget("origin", fields.Target, fields.CommitSHA)
+}
+
+// mqListCoversQueue reports whether a gt mq list with these filters lists the
+// rig's whole open queue, so that finding no ready MR in it means the queue
+// has none. --ready lists a subset of open MRs, which is still every ready one.
+func mqListCoversQueue(status, worker, epic string) bool {
+	return (status == "" || strings.EqualFold(status, "open")) && worker == "" && epic == ""
 }

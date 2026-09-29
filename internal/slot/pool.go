@@ -545,7 +545,7 @@ func (g *Gate) underGateHold(townRoot string) bool {
 	return owner != nil && owner.PID == m.pid
 }
 
-// runningGate reports whether a live merge gate (isMergeGateRole) holds one of
+// runningGate reports whether a live merge gate (IsMergeGateRole) holds one of
 // pool's gate-reserved slots, and that gate's owner.
 //
 // It reads the slots' owner files and checks the owner's pid, and never
@@ -560,7 +560,7 @@ func (g *Gate) runningGate(townRoot string, pool Pool) (*Owner, bool) {
 	pool = pool.normalized()
 	for i := 0; i < pool.ReservedForGate; i++ {
 		owner := readSlotOwner(townRoot, i)
-		if owner == nil || !isMergeGateRole(owner.Role) || owner.PID <= 0 || g.ownerGone(owner) {
+		if owner == nil || !IsMergeGateRole(owner.Role) || owner.PID <= 0 || g.ownerGone(owner) {
 			continue
 		}
 		return owner, true
@@ -704,7 +704,7 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 	// runningGate).
 	if pool.YieldToGate {
 		for _, st := range rep.Slots {
-			if st.Index < pool.ReservedForGate && st.Held && st.Owner != nil && isMergeGateRole(st.Owner.Role) && !g.ownerGone(st.Owner) {
+			if st.Index < pool.ReservedForGate && st.Held && st.Owner != nil && IsMergeGateRole(st.Owner.Role) && !g.ownerGone(st.Owner) {
 				rep.YieldingToGate = true
 				rep.GateHolder = st.Owner
 				break
@@ -781,10 +781,10 @@ func (r Report) AllHeld() bool {
 	return r.Total > 0 && r.HeldCount == r.Total
 }
 
-// isMergeGateRole reports whether role is on the merge path: the refinery's
+// IsMergeGateRole reports whether role is on the merge path: the refinery's
 // own gate ("<rig>/refinery") or its batch gate ("<rig>/refinery-batch").
 // Only these are yielded to. The daemon's main-branch test is a gate role for
 // slot reservation but not on the merge path, so crew do not wait on it.
-func isMergeGateRole(role string) bool {
+func IsMergeGateRole(role string) bool {
 	return strings.HasSuffix(role, "/refinery") || strings.HasSuffix(role, "/refinery-batch")
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -127,5 +128,65 @@ func TestPrintSlotStatusText_ShowsWaitingGatePending(t *testing.T) {
 	}
 	if got := slotHistoryReason(slot.HistoryEntry{Reason: slot.WaitReasonGatePending, HolderRole: "gastown/refinery"}); got != "gate_pending: gastown/refinery" {
 		t.Errorf("slotHistoryReason(gate_pending) = %q", got)
+	}
+}
+
+// TestQueueHasReadyMR (I1): the check gt mq list uses to clear a stale gate
+// intent once the rig's queue has no ready MR left. A blocked MR, a closed
+// one or another rig's MR does not keep the intent alive.
+func TestQueueHasReadyMR(t *testing.T) {
+	t.Parallel()
+	ready := &beads.Issue{ID: "gt-1", Status: "open", Description: "branch: b\nrig: gastown"}
+	blocked := &beads.Issue{ID: "gt-2", Status: "open", BlockedByCount: 1, Description: "rig: gastown"}
+	closed := &beads.Issue{ID: "gt-3", Status: "closed", Description: "rig: gastown"}
+	otherRig := &beads.Issue{ID: "hm-1", Status: "open", Description: "rig: hm"}
+
+	if !queueHasReadyMR([]*beads.Issue{blocked, ready}, "gastown") {
+		t.Error("a ready MR was not seen")
+	}
+	if queueHasReadyMR([]*beads.Issue{blocked, closed, otherRig}, "gastown") {
+		t.Error("blocked, closed and other-rig MRs counted as ready")
+	}
+	if queueHasReadyMR(nil, "gastown") {
+		t.Error("an empty queue counted as ready")
+	}
+}
+
+// TestMQListCoversQueue (I1): gt mq list may clear the intent only when its
+// listing is the whole open queue; a --worker, --epic or non-open --status
+// view says nothing about the rest of the queue.
+func TestMQListCoversQueue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		status, worker, epic string
+		want                 bool
+	}{
+		{"", "", "", true},
+		{"open", "", "", true},
+		{"closed", "", "", false},
+		{"all", "", "", false},
+		{"", "amber", "", false},
+		{"", "", "gt-epic", false},
+	}
+	for _, c := range cases {
+		if got := mqListCoversQueue(c.status, c.worker, c.epic); got != c.want {
+			t.Errorf("mqListCoversQueue(%q, %q, %q) = %v, want %v", c.status, c.worker, c.epic, got, c.want)
+		}
+	}
+}
+
+// TestSyncGateIntent_OnlyMergeGateRegisters (M3): the daemon's main-branch
+// test is not on the merge path and never registers a gate intent.
+func TestSyncGateIntent_OnlyMergeGateRegisters(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	pool := slot.Pool{Slots: 4, ReservedForGate: 2, YieldToGate: true}
+	syncGateIntent(town, "gastown", "gastown/main-branch-test", "gt-wisp-1")
+	rep, err := slot.StatusPoolLocksOnly(town, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.GatePending != nil {
+		t.Fatalf("main-branch-test registered an intent: %+v", rep.GatePending)
 	}
 }

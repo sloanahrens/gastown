@@ -59,8 +59,8 @@ func TestYield_BatchGateIsYieldedTo(t *testing.T) {
 		"gastown/refinery": true, "hm/refinery-batch": true,
 		"gastown/main-branch-test": false, "gastown/crew/sloan": false, "gastown/refinery-impostor-polecat": false,
 	} {
-		if got := isMergeGateRole(role); got != want {
-			t.Errorf("isMergeGateRole(%q) = %v, want %v", role, got, want)
+		if got := IsMergeGateRole(role); got != want {
+			t.Errorf("IsMergeGateRole(%q) = %v, want %v", role, got, want)
 		}
 	}
 }
