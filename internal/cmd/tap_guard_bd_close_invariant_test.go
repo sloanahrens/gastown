@@ -288,10 +288,34 @@ func (f bdCloseInvariantFixture) run(t *testing.T, command string) error {
 // "main", because closeTimeBranchTarget resolves the target through
 // CleanBaseRef("origin", ...) — the same path gt done takes, and the case
 // gt-6hmz's finding 1 was about (a stale local main overcounts commits).
+//
+// The town is a copy of one built once per test binary for each branch and
+// commit count (cachedGitFixture); the agent identity is set per test.
 func newBdCloseInvariantFixture(t *testing.T, branch string, commitsAhead int) bdCloseInvariantFixture {
 	t.Helper()
 	const rig = "gastown"
-	town := t.TempDir()
+	town, _ := cachedGitFixture(t, fmt.Sprintf("bd-close-invariant %s %d", branch, commitsAhead), func(town string) (struct{}, error) {
+		buildBdCloseInvariantTown(t, town, rig, branch, commitsAhead)
+		return struct{}{}, nil
+	})
+	work := filepath.Join(town, rig, "polecats", "malachite", rig)
+
+	// Agent identity, as a spawned session carries it. The git checkout itself
+	// supplies the branch, via the payload cwd — the test process stays in the
+	// repo worktree, so nothing here depends on the guard's os.Getwd fallback
+	// happening to match.
+	t.Setenv("GT_TOWN_ROOT", town)
+	t.Setenv("GT_ROOT", town)
+	t.Setenv("GT_RIG", rig)
+	t.Setenv("GT_POLECAT", "malachite")
+
+	return bdCloseInvariantFixture{town: town, work: work}
+}
+
+// buildBdCloseInvariantTown lays out newBdCloseInvariantFixture's town and
+// polecat checkout under town.
+func buildBdCloseInvariantTown(t *testing.T, town, rig, branch string, commitsAhead int) {
+	t.Helper()
 
 	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
@@ -331,17 +355,6 @@ func newBdCloseInvariantFixture(t *testing.T, branch string, commitsAhead int) b
 		testRunGit(t, work, "add", ".")
 		testRunGit(t, work, "commit", "-m", "polecat work")
 	}
-
-	// Agent identity, as a spawned session carries it. The git checkout itself
-	// supplies the branch, via the payload cwd — the test process stays in the
-	// repo worktree, so nothing here depends on the guard's os.Getwd fallback
-	// happening to match.
-	t.Setenv("GT_TOWN_ROOT", town)
-	t.Setenv("GT_ROOT", town)
-	t.Setenv("GT_RIG", rig)
-	t.Setenv("GT_POLECAT", "malachite")
-
-	return bdCloseInvariantFixture{town: town, work: work}
 }
 
 // TestRunTapGuardBdCloseInvariant_ConflictTaskCloseAllowed is the false-positive
