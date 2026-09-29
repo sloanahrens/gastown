@@ -19,7 +19,9 @@ func TestIntegrationClientContract(t *testing.T) {
 	if !testutil.DockerTestsEnabled() {
 		t.Fatal("TestIntegrationClientContract needs the Dolt test container: run under gt slot run with GT_TEST_DOCKER=1")
 	}
-	t.Run("container", func(t *testing.T) { testutil.RequireDoltContainer(t) })
+	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
+		t.Fatalf("Dolt test container: %v", err)
+	}
 	port, err := strconv.Atoi(testutil.DoltContainerPort())
 	if err != nil || port == 0 {
 		t.Fatalf("no Dolt test container (port %q): %v", testutil.DoltContainerPort(), err)
