@@ -546,7 +546,7 @@ func TestRemintTestDatabase(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := remintTestDatabase(tt.args)
+			got := remintTestDatabase(tt.args, t.TempDir())
 			if db := databaseFlag(t, got); db == original || !strings.HasPrefix(db, testDatabasePrefix) {
 				t.Errorf("--database = %q, want a fresh %s name", db, testDatabasePrefix)
 			}
@@ -564,7 +564,7 @@ func TestRemintTestDatabase(t *testing.T) {
 	// No minted name to replace: the reset never reaches this shape, and the
 	// rewrite must not invent a database for it.
 	untouched := []string{"init", "--prefix", "gt", "--quiet", "--server"}
-	if got := remintTestDatabase(untouched); strings.Join(got, " ") != strings.Join(untouched, " ") {
+	if got := remintTestDatabase(untouched, t.TempDir()); strings.Join(got, " ") != strings.Join(untouched, " ") {
 		t.Errorf("remintTestDatabase(%q) = %q, want it unchanged", untouched, got)
 	}
 }

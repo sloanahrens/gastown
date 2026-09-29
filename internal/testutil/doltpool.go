@@ -4,13 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"flag"
 	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,25 +34,40 @@ import (
 // So the catalog never changes while tests run. Every database a test process
 // needs is created when its container starts, before any test can reach the
 // container, and nothing is dropped: the container, and every database in it,
-// goes at teardown. Isolated beads Inits (beads.SetTestDatabaseSource) and
-// in-process test stores (OpenTestStore) take their database from the pool.
+// goes at teardown. Isolated beads Inits (beads.SetTestDatabaseSource),
+// in-process test stores (OpenTestStore) and plain SQL tests
+// (TakePooledSQLDatabase) lease their database from the pool.
 //
-// Each entry is a store path whose BEADS_TEST_MODE database name
+// The pool is a fixed size, whatever -count says. A lease is exclusive, and
+// when it ends the database is reset to the commit it was handed out at and
+// goes back to the pool (resetDoltDatabase): the branch is reset hard, and
+// branches, tags, remotes and tables that commit does not hold are removed. No
+// database is created or dropped for it. It used to hand every test a database
+// of its own for the whole run, so the container held 128 databases per -count
+// iteration: 722 databases and 9.9 GiB at -count=5 of internal/convoy, and
+// every query on the single-core server got slower with the catalog.
+//
+// A store database keeps its migration: the first OpenTestStore on it migrates
+// it and records the commit, and later lessees get it reset to that commit.
+// Dolt keeps the tables bd marks dolt_ignore (wisps, local state) outside every
+// commit, so a reset removes them and the next open recreates them.
+//
+// Each store entry is a store path whose BEADS_TEST_MODE database name
 // ("testdb_" + FNV-64a of the path, beads internal/storage/dolt
 // applyConfigDefaults) is what the pool created, so the same entry serves a
 // bd init (the name) and a beadsdk.Open (the path).
 
-// doltPoolPerRun is how many databases the pool holds per -count iteration.
-// Measured per iteration on 2026-09-28: daemon 35, convoy 32, refinery 19,
-// cmd 12, mail 1 — so a package can nearly quadruple its store tests before it
-// runs out, and teardown warns once a run uses three quarters. Creating the
-// 128 empty databases takes about 0.4s.
-const doltPoolPerRun = 128
+// doltPoolStores is how many store databases the pool holds, shared by
+// OpenTestStore and isolated bd inits. It bounds how many tests can hold one
+// at once, not how many a run uses. Before leases were returned, one -count
+// iteration used 35 (daemon), 32 (convoy), 19 (refinery) and 12 (cmd), one
+// after another or a handful at a time. Each database costs the container
+// about 13 MiB whether or not it is used.
+const doltPoolStores = 32
 
-// doltSQLPoolPerRun is how many plain SQL databases (TakePooledSQLDatabase)
-// the pool holds per -count iteration. Measured 2026-09-28: daemon uses 7 per
-// iteration; the rest of the pool's users take store databases.
-const doltSQLPoolPerRun = 16
+// doltPoolSQLDatabases is how many plain SQL databases (TakePooledSQLDatabase)
+// the pool holds. Daemon, their only user, took 7 per -count iteration.
+const doltPoolSQLDatabases = 8
 
 // doltSQLPoolPrefix names the plain SQL databases. Tests push them over real
 // remotes, and pushDatabase refuses the "test" prefixes the store databases
@@ -64,50 +77,100 @@ const doltSQLPoolPerRun = 16
 // these as it skips the store databases.
 const doltSQLPoolPrefix = "dolt_remotes_check_pool_"
 
-// doltPoolDDLTimeout bounds each CREATE DATABASE of the pool.
+// doltPoolDDLTimeout bounds each CREATE DATABASE of the pool, and each reset.
 const doltPoolDDLTimeout = 2 * time.Minute
 
-var doltPool struct {
+// doltPoolLeaseWait is how long a lease waits for a database to come back
+// before it fails. The pool never grows: creating a database while tests run
+// is the catalog change it exists to prevent.
+const doltPoolLeaseWait = 2 * time.Minute
+
+// doltPoolSessionWait is how long a release waits for its lessee's sessions
+// on the database to end. A store's close and a bd subprocess's exit end
+// theirs at once; the wait covers the server noticing a closed connection.
+const doltPoolSessionWait = 10 * time.Second
+
+// doltPoolReclaimPoll is how often a waiting lease looks again for a bd init
+// lease whose owner directory is gone (see doltPoolEntry.ownerDir).
+const doltPoolReclaimPoll = 100 * time.Millisecond
+
+// doltLeaseKind is what a lease needs from its database.
+type doltLeaseKind int
+
+const (
+	// leaseStore is an in-process store (OpenTestStore). It prefers a
+	// database already migrated, since a store open migrates.
+	leaseStore doltLeaseKind = iota
+	// leaseInit is an isolated bd init. It needs an empty database, since bd
+	// init records a project identity and a prefix.
+	leaseInit
+	// leaseSQL is a plain SQL database (TakePooledSQLDatabase).
+	leaseSQL
+)
+
+func (k doltLeaseKind) String() string {
+	switch k {
+	case leaseStore:
+		return "store"
+	case leaseInit:
+		return "bd init"
+	default:
+		return "SQL"
+	}
+}
+
+// doltPoolEntry is one database of the pool.
+type doltPoolEntry struct {
+	name string
+	dir  string // store entries: the directory holding path, cleared between leases
+	path string // store entries: dir/.beads/dolt, the beadsdk.Open path
+
+	initCommit string // the database's only commit when the pool created it
+	head       string // the commit a release resets to: initCommit, or the migration's
+	migrated   bool   // head is the commit an OpenTestStore migration left
+
+	leased bool
+	used   bool   // leased at least once before
+	owner  string // who holds the lease, for the exhaustion error
+	// ownerDir is set for a bd init lease (beads.SetTestDatabaseSource), whose
+	// caller has no testing.TB to end the lease with. The lease ends once the
+	// directory, which is the test's (a t.TempDir), has existed and is gone:
+	// the testing package removes a t.TempDir after the test's other cleanups.
+	ownerDir     string
+	ownerDirSeen bool
+	broken       error // a reset failed; the entry is never leased again
+}
+
+// doltDBPool is a fixed set of databases on one Dolt server.
+type doltDBPool struct {
+	mu     sync.Mutex
+	port   int
+	base   string
+	stores []*doltPoolEntry
+	sql    []*doltPoolEntry
+	names  map[string]bool
+	freed  chan struct{} // closed, and replaced, whenever a lease ends
+	wait   time.Duration
+	// sessionWait is how long a release waits for the lessee's sessions on
+	// the database to end before it ends them itself.
+	sessionWait time.Duration
+	reset       func(e *doltPoolEntry, commit string) error
+	db          *sql.DB
+
+	leases, reuses, inUse, peak int
+	reclaimErrs                 []error // failed resets of reclaimed bd init leases
+}
+
+// sharedDoltPool is the shared test container's pool; nil until it starts.
+var sharedDoltPool struct {
 	sync.Mutex
-	port    int
-	base    string
-	entries []string // store paths, in creation order
-	next    int      // index of the next entry to hand out
-	sql     []string // plain SQL database names, in creation order
-	sqlNext int      // index of the next plain SQL database to hand out
-	names   map[string]bool
+	p *doltDBPool
 }
 
-// testCount is this test binary's -test.count. The shared container can start
-// from TestMain, before the testing package parses its flags, so os.Args is
-// read when the flag is still at its default.
-func testCount() int {
-	if f := flag.Lookup("test.count"); f != nil && flag.Parsed() {
-		if n, err := strconv.Atoi(f.Value.String()); err == nil && n > 0 {
-			return n
-		}
-	}
-	return testCountFromArgs(os.Args[1:])
-}
-
-func testCountFromArgs(args []string) int {
-	for i, a := range args {
-		for _, name := range []string{"-test.count", "--test.count"} {
-			v := ""
-			switch {
-			case a == name && i+1 < len(args):
-				v = args[i+1]
-			case strings.HasPrefix(a, name+"="):
-				v = a[len(name)+1:]
-			default:
-				continue
-			}
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				return n
-			}
-		}
-	}
-	return 1
+func currentDoltPool() *doltDBPool {
+	sharedDoltPool.Lock()
+	defer sharedDoltPool.Unlock()
+	return sharedDoltPool.p
 }
 
 // beadsTestModeDatabase is the database name beadsdk.Open picks for dbPath
@@ -118,122 +181,374 @@ func beadsTestModeDatabase(dbPath string) string {
 	return fmt.Sprintf("testdb_%x", h.Sum64())
 }
 
-// createDoltPool creates the pool on the container at port. It runs inside the
-// shared container's sync.Once, so no test can reach the container until it
-// returns. It installs the pool as the source of isolated beads Inits.
-func createDoltPool(port int) error {
+// newDoltDBPool lays out a pool of stores store databases and sqlDBs plain SQL
+// databases for the server at port, without touching the server.
+func newDoltDBPool(port, stores, sqlDBs int) (*doltDBPool, error) {
 	base, err := os.MkdirTemp("", "gt-doltpool-")
 	if err != nil {
-		return fmt.Errorf("dolt test pool dir: %w", err)
+		return nil, fmt.Errorf("dolt test pool dir: %w", err)
 	}
-	size := doltPoolPerRun * testCount()
-	entries := make([]string, size)
-	sqlNames := make([]string, doltSQLPoolPerRun*testCount())
-	names := make(map[string]bool, size+len(sqlNames))
-	create := make([]string, 0, size+len(sqlNames))
-	for i := range entries {
-		entries[i] = filepath.Join(base, fmt.Sprintf("s%04d", i), ".beads", "dolt")
-		create = append(create, beadsTestModeDatabase(entries[i]))
-	}
-	for i := range sqlNames {
-		sqlNames[i] = fmt.Sprintf("%s%04d", doltSQLPoolPrefix, i)
-		create = append(create, sqlNames[i])
-	}
-	for _, name := range create {
-		names[name] = true
-	}
+	p := &doltDBPool{
+		port:  port,
+		base:  base,
+		names: make(map[string]bool, stores+sqlDBs),
+		freed: make(chan struct{}),
+		wait:  doltPoolLeaseWait,
 
-	db, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?timeout=30s", port))
-	if err != nil {
-		return fmt.Errorf("dolt test pool: %w", err)
+		sessionWait: doltPoolSessionWait,
 	}
-	defer db.Close()
-	// The guard at teardown allows the image's own databases and the pool's,
-	// nothing else; a fresh container holding anything more means the image
-	// changed under doltImageDatabases, and the guard would misjudge it.
-	if err := verifyDoltCatalog(db, nil); err != nil {
-		return fmt.Errorf("dolt test pool: the fresh container is not what doltImageDatabases describes: %w", err)
+	for i := range stores {
+		dir := filepath.Join(base, fmt.Sprintf("s%04d", i))
+		path := filepath.Join(dir, ".beads", "dolt")
+		p.stores = append(p.stores, &doltPoolEntry{name: beadsTestModeDatabase(path), dir: dir, path: path})
 	}
-	for i, name := range create {
-		ctx, cancel := context.WithTimeout(context.Background(), doltPoolDDLTimeout)
-		_, err := db.ExecContext(ctx, "CREATE DATABASE `"+name+"`")
-		cancel()
-		if err != nil {
-			return fmt.Errorf("dolt test pool: create database %d of %d (%s): %w", i+1, len(create), name, err)
-		}
+	for i := range sqlDBs {
+		p.sql = append(p.sql, &doltPoolEntry{name: fmt.Sprintf("%s%04d", doltSQLPoolPrefix, i)})
 	}
-
-	doltPool.Lock()
-	doltPool.port, doltPool.base, doltPool.entries, doltPool.next, doltPool.names = port, base, entries, 0, names
-	doltPool.sql, doltPool.sqlNext = sqlNames, 0
-	doltPool.Unlock()
-	beads.SetTestDatabaseSource(func(p int) (string, error) {
-		if p != port {
-			return "", nil
-		}
-		path, err := takeDoltPoolPath()
-		if err != nil {
-			return "", err
-		}
-		return beadsTestModeDatabase(path), nil
-	})
-	return nil
-}
-
-// takeDoltPoolPath hands out the next pool entry's store path, created on disk.
-func takeDoltPoolPath() (string, error) {
-	doltPool.Lock()
-	defer doltPool.Unlock()
-	if doltPool.next >= len(doltPool.entries) {
-		return "", fmt.Errorf("the shared test Dolt container's database pool is exhausted (%d databases, %d per -count iteration): "+
-			"raise doltPoolPerRun in internal/testutil/doltpool.go — creating a database while tests run would reopen the catalog race it prevents",
-			len(doltPool.entries), doltPoolPerRun)
-	}
-	p := doltPool.entries[doltPool.next]
-	doltPool.next++
-	if err := os.MkdirAll(p, 0o755); err != nil {
-		return "", fmt.Errorf("dolt test pool store dir: %w", err)
+	for _, e := range p.all() {
+		p.names[e.name] = true
 	}
 	return p, nil
 }
 
-// TakePooledSQLDatabase hands t an empty database on the shared test Dolt
-// container, created with the pool before any test ran, for a test that works
-// with a database directly over SQL rather than through a beads store. The
-// test owns it for the rest of the run and must not drop it: it goes with the
-// container, and a DROP while other tests run is the catalog change the pool
-// prevents. Its name starts with doltSQLPoolPrefix.
+func (p *doltDBPool) all() []*doltPoolEntry {
+	return append(append([]*doltPoolEntry{}, p.stores...), p.sql...)
+}
+
+// create creates every database of the pool on its server and records each
+// one's initial commit. It must run before any test can reach the server.
+func (p *doltDBPool) create() error {
+	db, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?timeout=30s", p.port))
+	if err != nil {
+		return fmt.Errorf("dolt test pool: %w", err)
+	}
+	p.db = db
+	p.reset = func(e *doltPoolEntry, commit string) error {
+		return resetDoltDatabase(db, e.name, commit, p.sessionWait)
+	}
+	entries := p.all()
+	for i, e := range entries {
+		ctx, cancel := context.WithTimeout(context.Background(), doltPoolDDLTimeout)
+		_, err := db.ExecContext(ctx, "CREATE DATABASE `"+e.name+"`")
+		if err == nil {
+			e.initCommit, err = doltHead(ctx, db, e.name)
+			e.head = e.initCommit
+		}
+		cancel()
+		if err != nil {
+			return fmt.Errorf("dolt test pool: create database %d of %d (%s): %w", i+1, len(entries), e.name, err)
+		}
+	}
+	return nil
+}
+
+// createDoltPool creates the pool on the container at port. It runs inside the
+// shared container's sync.Once, so no test can reach the container until it
+// returns. It installs the pool as the source of isolated beads Inits.
+func createDoltPool(port int) error {
+	p, err := newDoltDBPool(port, doltPoolStores, doltPoolSQLDatabases)
+	if err != nil {
+		return err
+	}
+	// The guard at teardown allows the image's own databases and the pool's,
+	// nothing else; a fresh container holding anything more means the image
+	// changed under doltImageDatabases, and the guard would misjudge it.
+	if err := verifyDoltCatalogAt(port, nil); err != nil {
+		return fmt.Errorf("dolt test pool: the fresh container is not what doltImageDatabases describes: %w", err)
+	}
+	if err := p.create(); err != nil {
+		p.close()
+		return err
+	}
+	sharedDoltPool.Lock()
+	sharedDoltPool.p = p
+	sharedDoltPool.Unlock()
+	beads.SetTestDatabaseSource(p.initSource)
+	return nil
+}
+
+// initSource is the pool's beads.SetTestDatabaseSource: it leases a bd init
+// in ownerDir on port a database, until ownerDir is gone.
+func (p *doltDBPool) initSource(port int, ownerDir string) (string, error) {
+	if port != p.port {
+		return "", nil
+	}
+	if !filepath.IsAbs(ownerDir) {
+		// The lease ends when ownerDir is gone; an empty or relative one
+		// could never be checked, and the database would be lost.
+		return "", fmt.Errorf("dolt test pool: a bd init lease needs the absolute directory the init runs in, got %q", ownerDir)
+	}
+	e, err := p.acquire(leaseInit, "bd init in "+ownerDir, ownerDir)
+	if err != nil {
+		return "", err
+	}
+	return e.name, nil
+}
+
+// close forgets the pool's connection and store directories.
+func (p *doltDBPool) close() {
+	if p.db != nil {
+		_ = p.db.Close()
+	}
+	if p.base != "" {
+		_ = os.RemoveAll(p.base)
+	}
+}
+
+// acquire leases a database of kind to owner, waiting up to p.wait for one to
+// come back when none is free. ownerDir, when set, ends the lease once that
+// directory has existed and is gone. It never creates a database.
+func (p *doltDBPool) acquire(kind doltLeaseKind, owner, ownerDir string) (*doltPoolEntry, error) {
+	deadline := time.Now().Add(p.wait)
+	for {
+		p.mu.Lock()
+		stale := p.staleLocked()
+		var e *doltPoolEntry
+		if len(stale) == 0 {
+			e = p.pickLocked(kind)
+		}
+		if e != nil {
+			e.leased, e.owner, e.ownerDir, e.ownerDirSeen = true, owner, ownerDir, false
+			if ownerDir != "" {
+				if info, err := os.Stat(ownerDir); err == nil && info.IsDir() {
+					e.ownerDirSeen = true
+				}
+			}
+			p.leases++
+			if e.used {
+				p.reuses++
+			}
+			e.used = true
+			p.inUse++
+			p.peak = max(p.peak, p.inUse)
+		}
+		freed := p.freed
+		p.mu.Unlock()
+
+		if e != nil {
+			return e, p.prepare(kind, e)
+		}
+		if len(stale) > 0 {
+			for _, s := range stale {
+				if err := p.release(s); err != nil {
+					p.mu.Lock()
+					p.reclaimErrs = append(p.reclaimErrs, err)
+					p.mu.Unlock()
+				}
+			}
+			continue
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, p.exhausted(kind)
+		}
+		timer := time.NewTimer(min(remaining, doltPoolReclaimPoll))
+		select {
+		case <-freed:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+}
+
+// staleLocked returns the bd init leases whose owner directory is gone,
+// still marked leased so no other caller takes them before they are reset.
+func (p *doltDBPool) staleLocked() []*doltPoolEntry {
+	var stale []*doltPoolEntry
+	for _, e := range p.stores {
+		if !e.leased || e.ownerDir == "" || e.broken != nil {
+			continue
+		}
+		_, err := os.Stat(e.ownerDir)
+		switch {
+		case err == nil:
+			e.ownerDirSeen = true
+		case os.IsNotExist(err) && e.ownerDirSeen:
+			e.ownerDir = "" // claimed by this sweep
+			stale = append(stale, e)
+		}
+	}
+	return stale
+}
+
+// pickLocked returns a free entry for kind, or nil.
+func (p *doltDBPool) pickLocked(kind doltLeaseKind) *doltPoolEntry {
+	if kind == leaseSQL {
+		return firstFree(p.sql, func(*doltPoolEntry) bool { return true })
+	}
+	wantMigrated := kind == leaseStore
+	if e := firstFree(p.stores, func(e *doltPoolEntry) bool { return e.migrated == wantMigrated }); e != nil {
+		return e
+	}
+	return firstFree(p.stores, func(*doltPoolEntry) bool { return true })
+}
+
+func firstFree(entries []*doltPoolEntry, ok func(*doltPoolEntry) bool) *doltPoolEntry {
+	for _, e := range entries {
+		if !e.leased && e.broken == nil && ok(e) {
+			return e
+		}
+	}
+	return nil
+}
+
+// prepare makes a just-leased entry ready for kind: a bd init gets its
+// database back to the initial commit if a store had migrated it, and a store
+// gets its directory. A failure returns the entry to the pool.
+func (p *doltDBPool) prepare(kind doltLeaseKind, e *doltPoolEntry) error {
+	var err error
+	switch {
+	case kind == leaseInit && e.migrated:
+		if err = p.reset(e, e.initCommit); err == nil {
+			p.mu.Lock()
+			e.head, e.migrated = e.initCommit, false
+			p.mu.Unlock()
+		}
+	case kind == leaseStore:
+		err = os.MkdirAll(e.path, 0o755)
+	}
+	if err != nil {
+		_ = p.release(e)
+		return fmt.Errorf("dolt test pool: preparing %s for a %s lease: %w", e.name, kind, err)
+	}
+	return nil
+}
+
+// markMigrated records e's current head as the commit its later lessees get:
+// the store open that just migrated it committed the schema.
+func (p *doltDBPool) markMigrated(e *doltPoolEntry) error {
+	if err := p.recordHead(e); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	e.migrated = true
+	p.mu.Unlock()
+	return nil
+}
+
+// recordHead makes e's current head the commit a release returns it to.
+func (p *doltDBPool) recordHead(e *doltPoolEntry) error {
+	ctx, cancel := context.WithTimeout(context.Background(), doltPoolDDLTimeout)
+	defer cancel()
+	head, err := doltHead(ctx, p.db, e.name)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	e.head = head
+	p.mu.Unlock()
+	return nil
+}
+
+// release resets e to its head and ends its lease. An entry that cannot be
+// reset is never leased again, and the error says why.
+func (p *doltDBPool) release(e *doltPoolEntry) error {
+	err := p.reset(e, e.head)
+	if e.dir != "" {
+		if rmErr := os.RemoveAll(e.dir); rmErr != nil && err == nil {
+			err = fmt.Errorf("clearing store dir: %w", rmErr)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil {
+		err = fmt.Errorf("dolt test pool: returning %s (leased by %s) to the pool: %w", e.name, e.owner, err)
+		e.broken = err
+	} else {
+		e.leased, e.owner, e.ownerDir, e.ownerDirSeen = false, "", "", false
+	}
+	p.inUse--
+	close(p.freed)
+	p.freed = make(chan struct{})
+	return err
+}
+
+// exhausted is the error for a lease that found no database in time.
+func (p *doltDBPool) exhausted(kind doltLeaseKind) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entries, knob := p.stores, "doltPoolStores"
+	if kind == leaseSQL {
+		entries, knob = p.sql, "doltPoolSQLDatabases"
+	}
+	var holders []string
+	for _, e := range entries {
+		switch {
+		case e.broken != nil:
+			holders = append(holders, e.name+": unusable, "+e.broken.Error())
+		case e.leased:
+			h := e.name + ": " + e.owner
+			if e.ownerDir != "" && !e.ownerDirSeen {
+				h += " (its directory never existed, so the lease cannot end)"
+			}
+			holders = append(holders, h)
+		}
+	}
+	return fmt.Errorf("the test Dolt pool has no free database for a %s lease after %s: all %d are leased — "+
+		"a test that holds more at once than %s allows, or leases that never end:\n  %s\n"+
+		"Raise %s in internal/testutil/doltpool.go if the tests need more at once; creating a database while "+
+		"tests run would reopen the catalog race the pool prevents",
+		kind, p.wait, len(entries), knob, strings.Join(holders, "\n  "), knob)
+}
+
+// leaseForTest leases a database of kind for t, returned to the pool when t
+// ends — failed or not. A reset that fails fails t.
+func (p *doltDBPool) leaseForTest(t testing.TB, kind doltLeaseKind) *doltPoolEntry {
+	t.Helper()
+	e, err := p.acquire(kind, t.Name(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := p.release(e); err != nil {
+			t.Errorf("%v", err)
+		}
+	})
+	return e
+}
+
+// TakePooledSQLDatabase leases t an empty database on the shared test Dolt
+// container, for a test that works with a database directly over SQL rather
+// than through a beads store. The lease ends with t: the database is reset to
+// its initial commit (resetDoltDatabase) and goes back to the pool. The test
+// must not drop it: a DROP while other tests run is the catalog change the
+// pool prevents. It must close every connection it opened on it before it
+// ends, or the release kills them and fails t. Tables it creates are dropped
+// at release, so their AUTO_INCREMENT counters go with them; a reset cannot
+// restore the counter of a table it committed as a reset point
+// (checkDoltDatabaseAt). Its name starts with doltSQLPoolPrefix.
 func TakePooledSQLDatabase(t testing.TB) string {
 	t.Helper()
-	doltPool.Lock()
-	defer doltPool.Unlock()
-	if doltPool.port == 0 {
+	p := currentDoltPool()
+	if p == nil {
 		t.Fatal("TakePooledSQLDatabase: the shared test Dolt container has no pool; start it first (RequireDoltContainer or WithDolt)")
 	}
-	if doltPool.sqlNext >= len(doltPool.sql) {
-		t.Fatalf("the shared test Dolt container's SQL database pool is exhausted (%d databases, %d per -count iteration): "+
-			"raise doltSQLPoolPerRun in internal/testutil/doltpool.go — creating a database while tests run would reopen the catalog race it prevents",
-			len(doltPool.sql), doltSQLPoolPerRun)
-	}
-	name := doltPool.sql[doltPool.sqlNext]
-	doltPool.sqlNext++
-	return name
+	return p.leaseForTest(t, leaseSQL).name
 }
 
 // IsDoltPoolDatabase reports whether name is one of the databases the shared
 // test container's pool created before tests ran.
 func IsDoltPoolDatabase(name string) bool {
-	doltPool.Lock()
-	defer doltPool.Unlock()
-	return doltPool.names[name]
+	p := currentDoltPool()
+	return p != nil && p.names[name]
 }
 
-// DoltPoolUsage reports how many pool databases have been handed out, and the
-// pool's size.
-func DoltPoolUsage() (used, size int) {
-	doltPool.Lock()
-	defer doltPool.Unlock()
-	return doltPool.next, len(doltPool.entries)
+// DoltPoolUsage reports how many of the pool's store databases are leased now,
+// and how many it holds.
+func DoltPoolUsage() (leased, size int) {
+	p := currentDoltPool()
+	if p == nil {
+		return 0, 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, e := range p.stores {
+		if e.leased {
+			n++
+		}
+	}
+	return n, len(p.stores)
 }
 
 // doltImageDatabases are the databases a fresh container of DoltDockerImage
@@ -368,21 +683,19 @@ func parseUndropRefusal(msg string) ([]string, error) {
 	return names, nil
 }
 
-// checkDoltPoolCatalog runs verifyDoltCatalog against the shared container
-// the pool lives on. It is a no-op when no pool was created.
-func checkDoltPoolCatalog() error {
-	doltPool.Lock()
-	port, names := doltPool.port, doltPool.names
-	doltPool.Unlock()
-	if port == 0 {
-		return nil
-	}
+// verifyDoltCatalogAt runs verifyDoltCatalog against the server at port.
+func verifyDoltCatalogAt(port int, pool map[string]bool) error {
 	db, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?timeout=30s", port))
 	if err != nil {
-		return fmt.Errorf("%w: cannot check it: %v", ErrDoltCatalogChanged, err)
+		return err
 	}
 	defer db.Close()
-	if err := verifyDoltCatalog(db, names); err != nil {
+	return verifyDoltCatalog(db, pool)
+}
+
+// checkDoltPoolCatalog runs verifyDoltCatalog against the server p lives on.
+func checkDoltPoolCatalog(p *doltDBPool) error {
+	if err := verifyDoltCatalogAt(p.port, p.names); err != nil {
 		if errors.Is(err, ErrDoltCatalogChanged) {
 			return err
 		}
@@ -392,27 +705,40 @@ func checkDoltPoolCatalog() error {
 }
 
 // releaseDoltPool checks the shared container's catalog (checkDoltPoolCatalog),
-// then forgets the pool and removes the store directories it handed out. It
-// runs while the container is still up, just before it is terminated, and its
-// error fails the package: the catalog guard.
+// reports the pool's use, then forgets the pool. It runs while the container
+// is still up, just before it is terminated, and its error fails the package:
+// the catalog guard, and any reclaimed bd init lease that could not be reset.
 func releaseDoltPool() error {
-	catalogErr := checkDoltPoolCatalog()
-	doltPool.Lock()
-	base := doltPool.base
-	used, size := doltPool.next, len(doltPool.entries)
-	sqlUsed, sqlSize := doltPool.sqlNext, len(doltPool.sql)
-	doltPool.port, doltPool.base, doltPool.entries, doltPool.next, doltPool.names = 0, "", nil, 0, nil
-	doltPool.sql, doltPool.sqlNext = nil, 0
-	doltPool.Unlock()
+	sharedDoltPool.Lock()
+	p := sharedDoltPool.p
+	sharedDoltPool.p = nil
+	sharedDoltPool.Unlock()
+	if p == nil {
+		return nil
+	}
 	beads.SetTestDatabaseSource(nil)
-	if size > 0 && used*4 >= size*3 {
-		fmt.Fprintf(os.Stderr, "testutil: shared Dolt container used %d of its %d pooled databases; raise doltPoolPerRun before it runs out\n", used, size)
+	catalogErr := checkDoltPoolCatalog(p)
+	p.mu.Lock()
+	var stuck []string
+	for _, e := range p.stores {
+		if e.leased && e.ownerDir != "" {
+			if _, err := os.Stat(e.ownerDir); err == nil {
+				stuck = append(stuck, e.owner)
+			}
+		}
 	}
-	if sqlSize > 0 && sqlUsed*4 >= sqlSize*3 {
-		fmt.Fprintf(os.Stderr, "testutil: shared Dolt container used %d of its %d pooled SQL databases; raise doltSQLPoolPerRun before it runs out\n", sqlUsed, sqlSize)
+	fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: %d leases (%d of a returned database), at most %d at once, of %d store and %d SQL databases\n",
+		p.leases, p.reuses, p.peak, len(p.stores), len(p.sql))
+	if len(stuck) > 0 {
+		sort.Strings(stuck)
+		fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: %d bd init leases never ended, because their directory outlived the test: %s\n",
+			len(stuck), strings.Join(stuck, ", "))
 	}
-	if base != "" {
-		_ = os.RemoveAll(base)
+	if total := len(p.stores) + len(p.sql); p.peak*4 >= total*3 {
+		fmt.Fprintf(os.Stderr, "testutil: Dolt test pool: tests held %d of its %d databases at once; raise doltPoolStores before leases start waiting\n", p.peak, total)
 	}
-	return catalogErr
+	errs := append([]error{catalogErr}, p.reclaimErrs...)
+	p.mu.Unlock()
+	p.close()
+	return errors.Join(errs...)
 }
