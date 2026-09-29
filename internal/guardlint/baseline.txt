@@ -12,6 +12,8 @@
 internal/beads/beads.go:*Beads.CreateIfNoDuplicate
 # Moved from *Beads.ClearAgentActiveMRIfMatches (gt-22hdp.13); narrowed on purpose: only ErrNotFound (no agent bead, so nothing to clear) returns false, nil.
 internal/beads/client_helpers.go:clearAgentActiveMRIfMatches
+# Was the func-literal var gateSlotHeld, which guardlint could not see; made a named func when the watch's collaborators were injected (gt-22hdp.13). Deliberate, and nothing is swallowed: the error is returned beside held=true and the watch logs itself as blind (see its doc).
+internal/cmd/done_test_verify_container_watch.go:gateSlotHeld
 internal/cmd/prime.go:checkSlungWork
 internal/cmd/prime.go:ralphLoopPluginInstalledIn
 internal/cmd/prime_payload.go:staticRoleText
