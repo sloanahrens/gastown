@@ -12,22 +12,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Monitor",
         "hooks": [
           {
             "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow",
-            "if": "Bash(gh pr create*)"
-          },
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow",
-            "if": "Bash(git checkout -b*)"
-          },
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} tap guard pr-workflow",
-            "if": "Bash(git switch -c*)"
+            "command": "{{GT_BIN}} tap guard pr-workflow"
           }
         ]
       }
