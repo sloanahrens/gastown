@@ -3359,7 +3359,8 @@ func (g *Git) CheckBranchContamination(baseRef string) (BranchContamination, err
 // all worktrees. Counting all stashes is incorrect for worktree-based polecats:
 // a fresh polecat worktree would inherit stash count from siblings, blocking
 // Remove(force=true) on work it never created. Filter by current branch name
-// to only count stashes that actually belong to this worktree.
+// to only count stashes that actually belong to this worktree; a detached HEAD
+// counts only "(no branch)" stashes (see stashOwnerFilter).
 func (g *Git) StashCount() (int, error) {
 	out, err := g.run("stash", "list")
 	if err != nil {
@@ -3370,34 +3371,61 @@ func (g *Git) StashCount() (int, error) {
 		return 0, nil
 	}
 
-	// Get current branch to filter stashes.
-	// If we can't determine the branch (detached HEAD, error), count all
-	// stashes as a safe fallback — better to over-count than silently lose work.
-	branch, branchErr := g.CurrentBranch()
-	filterByBranch := branchErr == nil && branch != "" && branch != "HEAD"
+	filter := g.stashOwnerFilter()
 
-	// Stash reflog lines have the format:
-	//   stash@{N}: WIP on <branch>: <hash> <message>
-	//   stash@{N}: On <branch>: <message>
-	// We anchor the match to ": WIP on <branch>:" or ": On <branch>:" to avoid
-	// false positives from commit messages that happen to contain "on <branch>:".
-	wipPrefix := ": WIP on " + branch + ":"
-	onPrefix := ": On " + branch + ":"
-
-	lines := strings.Split(out, "\n")
 	count := 0
-	for _, line := range lines {
-		if line == "" {
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" || !filter.matches(line) {
 			continue
-		}
-		if filterByBranch {
-			if !strings.Contains(line, wipPrefix) && !strings.Contains(line, onPrefix) {
-				continue
-			}
 		}
 		count++
 	}
 	return count, nil
+}
+
+// detachedStashLabel is the branch name git writes into a stash message made
+// from a detached HEAD ("WIP on (no branch): ..." / "On (no branch): ...").
+const detachedStashLabel = "(no branch)"
+
+// stashOwnerFilter selects the `git stash list` lines that belong to one
+// worktree. The zero value (empty label) matches every line.
+type stashOwnerFilter struct {
+	label string
+}
+
+// stashOwnerFilter returns the filter for the current worktree. A stash is
+// attributed by the branch label git wrote into its message. A detached HEAD
+// owns only stashes labelled "(no branch)": counting every stash would charge
+// a detached worktree with the work of every sibling on a real branch, which
+// parked clean detached polecats as NEEDS_RECOVERY. Detached worktrees still
+// share the "(no branch)" pool with each other, an over-count that is safe.
+// Only when the branch cannot be read at all does the filter match every line,
+// because losing a stash is worse than over-counting.
+func (g *Git) stashOwnerFilter() stashOwnerFilter {
+	branch, err := g.CurrentBranch()
+	switch {
+	case err != nil || branch == "":
+		return stashOwnerFilter{}
+	case branch == "HEAD":
+		return stashOwnerFilter{label: detachedStashLabel}
+	default:
+		return stashOwnerFilter{label: branch}
+	}
+}
+
+// matches reports whether a stash list line carries the filter's label.
+// Stash reflog lines have the format:
+//
+//	stash@{N}: WIP on <branch>: <hash> <message>
+//	stash@{N}: On <branch>: <message>
+//
+// The match is anchored to ": WIP on <label>:" or ": On <label>:" to avoid
+// false positives from commit messages that happen to contain "on <branch>:".
+func (f stashOwnerFilter) matches(line string) bool {
+	if f.label == "" {
+		return true
+	}
+	return strings.Contains(line, ": WIP on "+f.label+":") || strings.Contains(line, ": On "+f.label+":")
 }
 
 // StashCountAll returns the total number of repo-wide stashes visible from the
@@ -3441,20 +3469,12 @@ func (g *Git) StashListForBranch() ([]StashEntry, error) {
 		return nil, nil
 	}
 
-	branch, branchErr := g.CurrentBranch()
-	filterByBranch := branchErr == nil && branch != "" && branch != "HEAD"
-	wipPrefix := ": WIP on " + branch + ":"
-	onPrefix := ": On " + branch + ":"
+	filter := g.stashOwnerFilter()
 
 	var entries []StashEntry
 	for _, line := range strings.Split(out, "\n") {
-		if line == "" {
+		if line == "" || !filter.matches(line) {
 			continue
-		}
-		if filterByBranch {
-			if !strings.Contains(line, wipPrefix) && !strings.Contains(line, onPrefix) {
-				continue
-			}
 		}
 		// Lines have the form "stash@{N}: <message>"
 		colonIdx := strings.Index(line, ":")

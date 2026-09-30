@@ -2113,40 +2113,60 @@ func TestStashCount_FiltersByBranch(t *testing.T) {
 	}
 }
 
-// TestStashCount_DetachedHEAD verifies that StashCount counts all stashes
-// when in detached HEAD state (cannot determine branch, falls back to counting all).
+// TestStashCount_DetachedHEAD verifies that a detached HEAD counts only the
+// stashes git labels "(no branch)". Stashes are shared repo-wide, so counting
+// every stash would flag each clean detached polecat worktree NEEDS_RECOVERY
+// because a sibling on a real branch has one parked (gt-farju).
 func TestStashCount_DetachedHEAD(t *testing.T) {
 	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
 
-	// Create a stash on main
-	if err := os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("dirty"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("git", "add", ".")
-	cmd.Dir = dir
-	_ = cmd.Run()
-	cmd = exec.Command("git", "stash", "push", "-m", "some-stash")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git stash: %v", err)
+	stash := func(file, msg string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, file), []byte("dirty"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, dir, "add", file)
+		runGit(t, dir, "stash", "push", "-m", msg)
 	}
 
-	// Detach HEAD
-	cmd = exec.Command("git", "checkout", "--detach")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git checkout --detach: %v", err)
-	}
+	// A sibling's stash, made on a real branch.
+	stash("sibling.txt", "sibling-wip")
 
-	// In detached HEAD, StashCount should count all stashes (safe fallback)
+	runGit(t, dir, "checkout", "--detach")
+
 	count, err := g.StashCount()
 	if err != nil {
 		t.Fatalf("StashCount: %v", err)
 	}
+	if count != 0 {
+		t.Errorf("StashCount in detached HEAD = %d, want 0 (branch stash is a sibling's)", count)
+	}
+	entries, err := g.StashListForBranch()
+	if err != nil {
+		t.Fatalf("StashListForBranch: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("StashListForBranch in detached HEAD = %d entries, want 0", len(entries))
+	}
+
+	// The detached worktree's own stash is still counted.
+	stash("own.txt", "own-wip")
+
+	count, err = g.StashCount()
+	if err != nil {
+		t.Fatalf("StashCount: %v", err)
+	}
 	if count != 1 {
-		t.Errorf("StashCount in detached HEAD = %d, want 1 (should count all stashes)", count)
+		t.Errorf("StashCount after detached stash = %d, want 1", count)
+	}
+	entries, err = g.StashListForBranch()
+	if err != nil {
+		t.Fatalf("StashListForBranch: %v", err)
+	}
+	if len(entries) != 1 || !strings.Contains(entries[0].Message, "own-wip") {
+		t.Errorf("StashListForBranch in detached HEAD = %+v, want just own-wip", entries)
 	}
 }
 
