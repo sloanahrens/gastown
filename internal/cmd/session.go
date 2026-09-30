@@ -51,6 +51,11 @@ var sessionCmd = &cobra.Command{
 Sessions are tmux sessions running Claude for each polecat.
 Use the subcommands to start, stop, attach, and monitor sessions.
 
+Addresses are <rig>/<name>. <name> is a polecat, or one of the rig's roles
+(witness, refinery), which own sessions named after themselves. An address
+that names neither is refused as not found by every subcommand, so a session
+that does not exist is never reported as a stopped or restarted one.
+
 TIP: To send messages to a running session, use 'gt nudge' (not 'session inject').
 The nudge command uses reliable delivery that works correctly with Claude Code.`,
 }
@@ -305,37 +310,93 @@ func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error
 	return polecatMgr, r, nil
 }
 
+// sessionSeat is a resolved `gt session` address: the <rig>/<name> the caller
+// named, the kind of seat it is, and the session manager that serves its rig.
+type sessionSeat struct {
+	Rig  string
+	Name string
+	// Role is constants.RolePolecat, RoleWitness or RoleRefinery — what <name>
+	// is in that rig.
+	Role string
+	Mgr  *polecat.SessionManager
+}
+
+// resolveSessionSeat parses a <rig>/<name> address and resolves it against the
+// rig it names.
+//
+// Every `gt session` verb resolves its argument here, so one address gets one
+// answer wherever it is used. They used to disagree: `gt session status
+// gastown/<gone>` printed "State: ○ stopped" and exited 0 for a polecat whose
+// directory was gone, while `gt session start` refused that same address as
+// not found and `gt session restart` reported "Session restarted" for it
+// (gt-pud2g). A witness recovering a stalled polecat reads that success line
+// and moves on, leaving the polecat with no session and nobody watching it.
+//
+// The seats are the rig's polecats — its polecats/ directories, the same
+// source the witness zombie detector walks — plus the rig's single-instance
+// roles, which own sessions named after themselves (gt-witness, gt-refinery)
+// and are addressed the same way.
+func resolveSessionSeat(args []string) (sessionSeat, error) {
+	rigName, name, err := parseAddress(args[0])
+	if err != nil {
+		return sessionSeat{}, err
+	}
+
+	mgr, r, err := getSessionManager(rigName)
+	if err != nil {
+		return sessionSeat{}, err
+	}
+
+	seat := sessionSeat{Rig: rigName, Name: name, Role: sessionRoleForName(name), Mgr: mgr}
+	if seat.Role != constants.RolePolecat || mgr.HasPolecat(name) {
+		return seat, nil
+	}
+
+	suggestions := suggest.FindSimilar(name, r.Polecats, 3)
+	hint := fmt.Sprintf("Create with: gt polecat identity add %s %s", rigName, name)
+	return sessionSeat{}, errors.New(suggest.FormatSuggestion("Polecat", name, suggestions, hint))
+}
+
+// sessionRoleForName classifies the <name> of a `gt session` address. A name
+// that is not one of the rig's roles is a polecat name: polecats are per-rig
+// directories rather than fixed roles, so they cannot be recognized by name
+// alone and are checked against the rig instead (resolveSessionSeat).
+func sessionRoleForName(name string) string {
+	switch name {
+	case constants.RoleWitness, constants.RoleRefinery:
+		return name
+	default:
+		return constants.RolePolecat
+	}
+}
+
+// requirePolecat refuses a seat that is not a polecat. Only a polecat has a
+// sandbox to start a session in: a rig role is started by its own command,
+// which builds a role session rather than a polecat one.
+func (s sessionSeat) requirePolecat() error {
+	if s.Role == constants.RolePolecat {
+		return nil
+	}
+	return fmt.Errorf("%s is the rig's %s role, not a polecat; start it with: gt %s start %s",
+		s.Name, s.Role, s.Role, s.Rig)
+}
+
 func runSessionStart(cmd *cobra.Command, args []string) error {
-	rigName, polecatName, err := parseAddress(args[0])
+	seat, err := resolveSessionSeat(args)
 	if err != nil {
 		return err
 	}
-
-	polecatMgr, r, err := getSessionManager(rigName)
-	if err != nil {
+	if err := seat.requirePolecat(); err != nil {
 		return err
 	}
-
-	// Check polecat exists
-	found := false
-	for _, p := range r.Polecats {
-		if p == polecatName {
-			found = true
-			break
-		}
-	}
-	if !found {
-		suggestions := suggest.FindSimilar(polecatName, r.Polecats, 3)
-		hint := fmt.Sprintf("Create with: gt polecat identity add %s %s", rigName, polecatName)
-		return fmt.Errorf("%s", suggest.FormatSuggestion("Polecat", polecatName, suggestions, hint))
-	}
+	rigName, polecatName := seat.Rig, seat.Name
 
 	opts := polecat.SessionStartOptions{
 		Issue: sessionIssue,
 	}
 
 	fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
-	if err := polecatMgr.Start(polecatName, opts); err != nil {
+	if err := seat.Mgr.Start(polecatName, opts); err != nil {
 		return fmt.Errorf("starting session: %w", err)
 	}
 
@@ -484,17 +545,12 @@ func clearParkedSession(townRoot, rigName, polecatName string) bool {
 }
 
 func runSessionAttach(cmd *cobra.Command, args []string) error {
-	rigName, polecatName, err := parseAddress(args[0])
+	seat, err := resolveSessionSeat(args)
 	if err != nil {
 		return err
 	}
 
-	polecatMgr, _, err := getSessionManager(rigName)
-	if err != nil {
-		return err
-	}
-
-	running, err := polecatMgr.IsRunning(polecatName)
+	running, err := seat.Mgr.IsRunning(seat.Name)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -505,7 +561,7 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	// Hand the terminal off to tmux via syscall.Exec so tmux inherits our
 	// controlling TTY directly. Running tmux as a subprocess with buffered
 	// stdio triggers "open terminal failed: not a terminal".
-	return attachToTmuxSession(polecatMgr.SessionName(polecatName))
+	return attachToTmuxSession(seat.Mgr.SessionName(seat.Name))
 }
 
 // SessionListItem represents a session in list output.
@@ -596,12 +652,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 }
 
 func runSessionCapture(cmd *cobra.Command, args []string) error {
-	rigName, polecatName, err := parseAddress(args[0])
-	if err != nil {
-		return err
-	}
-
-	polecatMgr, _, err := getSessionManager(rigName)
+	seat, err := resolveSessionSeat(args)
 	if err != nil {
 		return err
 	}
@@ -619,7 +670,7 @@ func runSessionCapture(cmd *cobra.Command, args []string) error {
 		lines = n
 	}
 
-	output, err := polecatMgr.Capture(polecatName, lines)
+	output, err := seat.Mgr.Capture(seat.Name, lines)
 	if err != nil {
 		return fmt.Errorf("capturing output: %w", err)
 	}
@@ -629,7 +680,7 @@ func runSessionCapture(cmd *cobra.Command, args []string) error {
 }
 
 func runSessionInject(cmd *cobra.Command, args []string) error {
-	rigName, polecatName, err := parseAddress(args[0])
+	seat, err := resolveSessionSeat(args)
 	if err != nil {
 		return err
 	}
@@ -648,30 +699,28 @@ func runSessionInject(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no message provided (use -m or -f)")
 	}
 
-	polecatMgr, _, err := getSessionManager(rigName)
-	if err != nil {
-		return err
-	}
-
-	if err := polecatMgr.Inject(polecatName, message); err != nil {
+	if err := seat.Mgr.Inject(seat.Name, message); err != nil {
 		return fmt.Errorf("injecting message: %w", err)
 	}
 
 	fmt.Printf("%s Message sent to %s/%s\n",
-		style.Bold.Render("✓"), rigName, polecatName)
+		style.Bold.Render("✓"), seat.Rig, seat.Name)
 	return nil
 }
 
 func runSessionRestart(cmd *cobra.Command, args []string) error {
-	rigName, polecatName, err := parseAddress(args[0])
+	// Resolve the seat before anything else: restart must refuse exactly the
+	// addresses start refuses, and refuse them before it prints a "Starting
+	// session for …" line that reads as a restart in progress (gt-pud2g).
+	seat, err := resolveSessionSeat(args)
 	if err != nil {
 		return err
 	}
-
-	polecatMgr, _, err := getSessionManager(rigName)
-	if err != nil {
+	if err := seat.requirePolecat(); err != nil {
 		return err
 	}
+	rigName, polecatName := seat.Rig, seat.Name
+	polecatMgr := seat.Mgr
 
 	// Check if running
 	running, err := polecatMgr.IsRunning(polecatName)
@@ -746,17 +795,17 @@ func sessionRestartWakeContext(requestedBy string) string {
 }
 
 func runSessionStatus(cmd *cobra.Command, args []string) error {
-	rigName, polecatName, err := parseAddress(args[0])
+	// Resolve the seat first. A status answer is read as a fact about a seat
+	// that exists: without this, `gt session status gastown/<gone>` reported
+	// "State: ○ stopped" with exit 0 for a polecat that was never there,
+	// indistinguishable from a real polecat between restarts (gt-pud2g).
+	seat, err := resolveSessionSeat(args)
 	if err != nil {
 		return err
 	}
+	rigName, polecatName := seat.Rig, seat.Name
 
-	polecatMgr, _, err := getSessionManager(rigName)
-	if err != nil {
-		return err
-	}
-
-	info, err := polecatMgr.Status(polecatName)
+	info, err := seat.Mgr.Status(polecatName)
 	if err != nil {
 		return fmt.Errorf("getting status: %w", err)
 	}
