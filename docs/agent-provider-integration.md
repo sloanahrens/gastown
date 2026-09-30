@@ -284,7 +284,6 @@ or Gemini CLI), Gas Town can install hooks automatically.
 | `PreCompact` | Before context compaction | `gt prime --hook` |
 | `UserPromptSubmit` | User sends a message | `gt mail check --inject` |
 | `PreToolUse` | Before tool execution | `gt tap guard pr-workflow` (guards PR creation) |
-| `Stop` | Session ends | `gt costs record` |
 
 Reference template: `internal/hooks/templates/claude/settings-autonomous.json`
 
@@ -487,7 +486,6 @@ Use this only when both of these are true:
 This installs `.codex/hooks.json` through the existing provider installer path and keeps the implementation intentionally small:
 - `SessionStart` runs `gt prime --hook`
 - Autonomous `SessionStart` also runs `gt mail check --inject`
-- `Stop` runs `gt costs record`
 
 Example custom profile:
 

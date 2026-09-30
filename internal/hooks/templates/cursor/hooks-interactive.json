@@ -29,11 +29,6 @@
       {
         "command": "{{GT_BIN}} mail check --inject"
       }
-    ],
-    "stop": [
-      {
-        "command": "{{GT_BIN}} costs record &"
-      }
     ]
   }
 }

@@ -980,9 +980,6 @@ func TestInstallForRole_CodexRoleAware(t *testing.T) {
 	if string(got) != string(want) {
 		t.Error("codex interactive: content mismatch")
 	}
-	if !strings.Contains(string(got), "costs record >/dev/null 2>&1 &") {
-		t.Error("codex interactive: stop hook should silence gt costs record output")
-	}
 
 	dir2 := t.TempDir()
 	err = InstallForRole("codex", dir2, dir2, "polecat", ".codex", "hooks.json", "codex", false)
@@ -997,9 +994,6 @@ func TestInstallForRole_CodexRoleAware(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Error("codex autonomous: content mismatch")
-	}
-	if !strings.Contains(string(got), "costs record >/dev/null 2>&1 &") {
-		t.Error("codex autonomous: stop hook should silence gt costs record output")
 	}
 }
 

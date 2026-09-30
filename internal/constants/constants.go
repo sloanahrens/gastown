@@ -211,7 +211,7 @@ const (
 	//   convoy        - Cross-project work tracking
 	//   slot          - Exclusive access / merge slots
 	//   queue         - Message queue routing (gt mail queue)
-	//   event         - Session/cost events (gt costs record)
+	//   event         - Session events
 	//   message       - Mail system (gt mail send, mailbox, router)
 	//   molecule      - Work decomposition (patrol checks, gt swarm)
 	//   gate          - Async coordination (bd gate wait, park/resume)
