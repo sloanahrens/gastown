@@ -460,6 +460,7 @@ func TestResumeClearsASupervisorFreeze(t *testing.T) {
 	seat := intent.Seat{Rig: "gastown", Role: "polecat", Name: "flint"}
 	if _, err := intent.Update(town, seat, func(r *intent.Record) error {
 		r.Frozen = true
+		r.Restarts = []time.Time{time.Now(), time.Now(), time.Now()}
 		r.Reason = "restart budget exhausted"
 		r.PausedBy = "supervisor"
 		return nil
@@ -474,5 +475,10 @@ func TestResumeClearsASupervisorFreeze(t *testing.T) {
 	}
 	if paused, _, err := IsPaused(town, "gastown", "polecat", "flint"); err != nil || paused {
 		t.Fatalf("after resume: paused=%v err=%v", paused, err)
+	}
+	// Resuming a frozen seat also empties its budget; otherwise the next
+	// restart would freeze it again at once.
+	if rec, _ := intent.Read(town, seat); len(rec.Restarts) != 0 {
+		t.Fatalf("restarts after resuming a frozen seat = %d, want 0", len(rec.Restarts))
 	}
 }

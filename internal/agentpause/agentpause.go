@@ -138,7 +138,7 @@ func Pause(townRoot, rig, role, name, reason, pausedBy, priorAgentState string) 
 
 // Resume clears the hold: desired=run, not frozen, no pause reason. The
 // record itself stays, because it also carries the seat's restart budget
-// and incarnation. Resuming an agent that has no record is a no-op.
+// and incarnation; resuming a frozen seat empties the budget. Resuming an agent that has no record is a no-op.
 func Resume(townRoot, rig, role, name string) error {
 	path := FilePath(townRoot, rig, role, name)
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
@@ -146,6 +146,12 @@ func Resume(townRoot, rig, role, name string) error {
 	}
 	_, err := intent.Update(townRoot, intent.Seat{Rig: rig, Role: role, Name: name}, func(r *intent.Record) error {
 		r.Desired = intent.DesiredRun
+		if r.Frozen {
+			// A supervisor freeze is an exhausted restart budget; resuming
+			// without emptying it would freeze the seat again on its next
+			// restart.
+			r.Restarts = nil
+		}
 		r.Frozen = false
 		r.Reason = ""
 		r.PausedAt = time.Time{}
