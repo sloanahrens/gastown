@@ -49,6 +49,10 @@ type Lander struct {
 	Landings *LandingsFile
 	Out      io.Writer
 	Now      func() time.Time
+	// RangeChecks run on base..head before the merge (the landing worker
+	// passes AttributionCheck). A returned Rejection is written to the bead
+	// like any other.
+	RangeChecks []RangeCheck
 
 	afterPush func() // test seam: runs between the push and the read-back
 }
@@ -218,6 +222,15 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// operator push): not the author's to rework.
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
 			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s) with no landing record; nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
+	}
+	for _, check := range l.RangeChecks {
+		rej, err := check(g, base, w.Head)
+		if err != nil {
+			return Result{}, &InfraError{Stage: "range check", Err: err}
+		}
+		if rej != nil {
+			return Result{}, l.reject(issue, w, rej, nil)
+		}
 	}
 	if same, err := g.TreesIdentical(base, w.Head); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}

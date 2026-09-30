@@ -323,3 +323,44 @@ func TestClearSubmittedWithoutRecordWritesNothing(t *testing.T) {
 		t.Fatalf("ClearSubmitted created a record (stat err %v)", err)
 	}
 }
+
+func TestClearLandedStopsTheSubmittedSeat(t *testing.T) {
+	town := t.TempDir()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if err := MarkSubmitted(town, polecat, "gt-abc", "gt done", now); err != nil {
+		t.Fatal(err)
+	}
+	// A different bead leaves the seat alone.
+	if changed, err := ClearLanded(town, polecat, "gt-other", "landing worker", now); err != nil || changed {
+		t.Fatalf("ClearLanded(other) = %v, %v; want no change", changed, err)
+	}
+	changed, err := ClearLanded(town, polecat, "gt-abc", "landing worker", now)
+	if err != nil || !changed {
+		t.Fatalf("ClearLanded = %v, %v; want a change", changed, err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Submitted() || rec.EffectiveDesired() != DesiredStop || rec.WorkBead != "" || rec.Actor != "landing worker" {
+		t.Fatalf("record after ClearLanded: %+v", rec)
+	}
+	// A second call is a no-op.
+	if changed, err := ClearLanded(town, polecat, "gt-abc", "landing worker", now); err != nil || changed {
+		t.Fatalf("second ClearLanded = %v, %v; want no change", changed, err)
+	}
+}
+
+func TestClearLandedLeavesAParkedSeat(t *testing.T) {
+	town := t.TempDir()
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	if _, err := Update(town, polecat, func(r *Record) error { r.Desired = DesiredPark; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := ClearLanded(town, polecat, "gt-abc", "landing worker", now); err != nil || changed {
+		t.Fatalf("ClearLanded on a parked seat = %v, %v; want no change", changed, err)
+	}
+	if rec, _ := Read(town, polecat); rec.EffectiveDesired() != DesiredPark {
+		t.Fatalf("parked seat became %s", rec.EffectiveDesired())
+	}
+}

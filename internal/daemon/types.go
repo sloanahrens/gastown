@@ -127,6 +127,7 @@ type (
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	PatrolWatchdogConfig       = agentconfig.PatrolWatchdogConfig
+	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
 )
 
 // PatrolConfigFile returns the path to the patrol config file.
@@ -226,6 +227,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.MainBranchTest.Enabled
+	}
+	// landing_worker is opt-in: it pushes main, so only an explicit
+	// enabled:true turns it on (gt-v4ssj.2).
+	if patrol == "landing_worker" {
+		if config == nil || config.Patrols == nil || config.Patrols.LandingWorker == nil {
+			return false
+		}
+		return config.Patrols.LandingWorker.Enabled
 	}
 	if patrol == "quota_dog" {
 		if config == nil || config.Patrols == nil || config.Patrols.QuotaDog == nil {
