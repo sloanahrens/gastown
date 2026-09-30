@@ -492,6 +492,14 @@ func feedNextReadyIssue(ctx context.Context, store beadsdk.Storage, townRoot, co
 			continue
 		}
 
+		// A sling that just failed at session start left this bead in the
+		// state this loop feeds; retrying at once fails the same way and
+		// crowds out the operator's own retry (gt-wacl).
+		if reason := dispatch.StartupBackoff(townRoot, issue.ID); reason != "" {
+			logger("%s: convoy %s: %s not dispatched: %s", caller, convoyID, issue.ID, reason)
+			continue
+		}
+
 		agent, agentDesc := FeedDispatchAgent(convoyAgent, townRoot, rig)
 		logger("%s: convoy %s: feeding next ready issue %s to %s (%s)", caller, convoyID, issue.ID, rig, agentDesc)
 		if convoyFormula != "" {

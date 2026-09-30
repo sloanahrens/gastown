@@ -1117,6 +1117,16 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			continue
 		}
 
+		// A sling that just failed at session start left this bead in the
+		// state the scan feeds; retrying at once fails the same way, spends a
+		// respawn attempt and holds the per-bead sling flock against the
+		// operator's own retry (gt-wacl). Checked after the cheap holds
+		// above and before the convoy re-read so a resting bead costs nothing.
+		if reason := dispatch.StartupBackoff(m.townRoot, issueID); reason != "" {
+			m.logger("Convoy %s: %s not dispatched: %s", c.ID, issueID, reason)
+			continue
+		}
+
 		// A convoy the operator closed between the stranded scan and here must
 		// not be fed. The scan's list is a snapshot from the top of the cycle
 		// (findStranded) and the checks above it are not cheap, so a close

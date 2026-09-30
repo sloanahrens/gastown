@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -50,6 +51,11 @@ type SpawnedPolecatInfo struct {
 	// BranchCreated is true when this sling created Branch. A resumed branch
 	// (--branch / --pr) existed before the sling and is never deleted by it.
 	BranchCreated bool
+
+	// HookBead is the bead this spawn was made for; empty when unknown. A
+	// failed session start is recorded against it so the automatic
+	// dispatchers back off (gt-wacl).
+	HookBead string
 
 	// Internal fields for deferred session start
 	account string
@@ -301,6 +307,7 @@ func reuseIdlePolecatForSling(
 		// branch stays checked out there, so rollback leaves that too.
 		FreshSpawn:    false,
 		BranchCreated: opts.ResumeBranch == "",
+		HookBead:      opts.HookBead,
 		account:       opts.Account,
 		agent:         opts.Agent,
 	}, nil
@@ -655,6 +662,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 		FreshSpawn:  true,
 		// A resume dispatch checks out a branch that already existed.
 		BranchCreated: opts.ResumeBranch == "",
+		HookBead:      opts.HookBead,
 		account:       opts.Account,
 		agent:         opts.Agent,
 	}, nil
@@ -665,6 +673,33 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 // sees its work when gt prime runs on session start.
 // Returns the pane ID after session start.
 func (s *SpawnedPolecatInfo) StartSession() (string, error) {
+	pane, err := s.startSession()
+	s.noteStartOutcome(err)
+	return pane, err
+}
+
+// noteStartOutcome records a failed session start against the bead, and
+// clears the record on a successful one. A sling that fails here leaves the
+// bead open and unassigned — the state the convoy feeders dispatch from — so
+// without the record they re-sling it on their next tick (gt-wacl).
+func (s *SpawnedPolecatInfo) noteStartOutcome(startErr error) {
+	if s.HookBead == "" {
+		return
+	}
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return
+	}
+	if startErr == nil {
+		dispatch.ClearStartupFailure(townRoot, s.HookBead)
+		return
+	}
+	if err := dispatch.RecordStartupFailure(townRoot, s.HookBead, startErr.Error()); err != nil {
+		style.PrintWarning("could not record the startup failure for %s: %v", s.HookBead, err)
+	}
+}
+
+func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// The tmux session this starts is what the pool counts, so the seat claim
 	// this process made for it (sling_pool.go) is redundant the moment the
 	// session exists — and holding both would read one polecat as two seats.
