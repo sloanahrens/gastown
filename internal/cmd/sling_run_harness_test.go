@@ -40,6 +40,7 @@ type slingHarness struct {
 	stored         map[string][]beadFieldUpdates
 	crew           map[string]bool         // "<rig>/<name>" crew members on disk
 	hookedFormulas map[string]*beads.Issue // agent -> formula wisp hooked to it
+	batchOpts      slingOptions            // what the last batch path was handed
 }
 
 const slingTestTown = "/town"
@@ -83,12 +84,14 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			return "", false
 		},
 		idType: func(string) (string, error) { return "task", nil },
-		batchSchedule: func(ids []string, rig, _ string) error {
+		batchSchedule: func(o slingOptions, ids []string, rig, _ string) error {
 			h.record("batch schedule %s -> %s", strings.Join(ids, ","), rig)
+			h.batchOpts = o
 			return nil
 		},
-		batchSling: func(ids []string, rig, _ string) error {
+		batchSling: func(o slingOptions, ids []string, rig, _ string) error {
 			h.record("batch sling %s -> %s", strings.Join(ids, ","), rig)
+			h.batchOpts = o
 			return nil
 		},
 		rigFromBeadIDs: func([]string, string) (string, error) { return "gastown", nil },
@@ -202,9 +205,9 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		wakeRig:  func(rig string) { h.record("wake rig %s", rig) },
 
 		requester: func() string { return "tester" },
-		notifyWitness: func(_ string, msg *mail.Message) error {
+		notifyWitness: func(_ string, msg *mail.Message) (func(), error) {
 			h.record("mail %s %s", msg.To, msg.Subject)
-			return nil
+			return func() { h.record("mail delivered %s", msg.To) }, nil
 		},
 		clearReassigned: func(_, assignee string) { h.record("clear reassigned %s", assignee) },
 		unhook:          func(_, id string) error { h.record("unhook %s", id); return nil },

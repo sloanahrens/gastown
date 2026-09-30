@@ -38,26 +38,28 @@ type batchSlingOptions struct {
 	noBoot        bool
 }
 
-// batchSlingOptionsFromFlags is the options the cobra flags hold.
-func batchSlingOptionsFromFlags() batchSlingOptions {
+// batchSlingOptionsFrom is the part of a sling's options a batch reads.
+// runSling passes its run's options, which carry --stdin and --pr as
+// resolved, not the raw flags.
+func batchSlingOptionsFrom(o slingOptions) batchSlingOptions {
 	return batchSlingOptions{
-		formula:       slingFormula,
-		hookRawBead:   slingHookRawBead,
-		dryRun:        slingDryRun,
-		force:         slingForce,
-		maxConcurrent: slingMaxConcurrent,
-		ralph:         slingRalph,
-		argsText:      slingArgs,
-		vars:          append([]string(nil), slingVars...),
-		merge:         slingMerge,
-		baseBranch:    slingBaseBranch,
-		account:       slingAccount,
-		agent:         slingAgent,
-		noConvoy:      slingNoConvoy,
-		owned:         slingOwned,
-		noMerge:       slingNoMerge,
-		reviewOnly:    slingReviewOnly,
-		noBoot:        slingNoBoot,
+		formula:       o.formula,
+		hookRawBead:   o.hookRawBead,
+		dryRun:        o.dryRun,
+		force:         o.force,
+		maxConcurrent: o.maxConcurrent,
+		ralph:         o.ralph,
+		argsText:      o.argsText,
+		vars:          append([]string(nil), o.vars...),
+		merge:         o.merge,
+		baseBranch:    o.baseBranch,
+		account:       o.account,
+		agent:         o.agent,
+		noConvoy:      o.noConvoy,
+		owned:         o.owned,
+		noMerge:       o.noMerge,
+		reviewOnly:    o.reviewOnly,
+		noBoot:        o.noBoot,
 	}
 }
 
@@ -77,10 +79,10 @@ type batchSling struct {
 	sleep             func(time.Duration)
 }
 
-// realBatchSling is a batch sling with the running gt's flags and collaborators.
-func realBatchSling() batchSling {
+// realBatchSling is a batch sling with opts and the running gt's collaborators.
+func realBatchSling(opts slingOptions) batchSling {
 	return batchSling{
-		opts:              batchSlingOptionsFromFlags(),
+		opts:              batchSlingOptionsFrom(opts),
 		out:               os.Stdout,
 		verifyBead:        verifyBeadExists,
 		verifyInTargetRig: verifyBeadExistsInTargetRigDatabase,
@@ -96,7 +98,12 @@ func realBatchSling() batchSling {
 // runBatchSling handles slinging multiple beads to a rig.
 // Each bead gets its own freshly spawned polecat.
 func runBatchSling(beadIDs []string, rigName string, townBeadsDir string) error {
-	return realBatchSling().run(beadIDs, rigName, townBeadsDir)
+	return runBatchSlingWith(slingOptionsFromFlags(), beadIDs, rigName, townBeadsDir)
+}
+
+// runBatchSlingWith is runBatchSling with opts in place of the flags.
+func runBatchSlingWith(opts slingOptions, beadIDs []string, rigName string, townBeadsDir string) error {
+	return realBatchSling(opts).run(beadIDs, rigName, townBeadsDir)
 }
 
 // run is runBatchSling with this batch sling's options and collaborators.

@@ -185,7 +185,12 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 		if err := h.sling(slingBead, holder); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
-		h.wantCalls("mail", "mail gastown/witness LIFECYCLE:Shutdown Nux")
+		// The shutdown mail's delivery is awaited when the command ends,
+		// not before the hook.
+		h.wantCalls("mail", "mail gastown/witness LIFECYCLE:Shutdown Nux", "mail delivered gastown/witness")
+		if log := strings.Join(h.log(), "\n"); strings.Index(log, "mail delivered") < strings.Index(log, "hook gt-abc123") {
+			t.Errorf("waited for the mail before the hook:\n%s", log)
+		}
 		h.wantCalls("clear reassigned", "clear reassigned "+holder)
 		h.wantCalls("unhook", "unhook "+slingBead)
 		h.wantCalls("hook", "hook gt-abc123 "+holder)
@@ -804,5 +809,26 @@ func TestSlingDuplicateContent(t *testing.T) {
 				t.Fatalf("sling: %v", err)
 			}
 		})
+	}
+}
+
+// TestSlingBatchGetsTheResolvedRequest: the batch paths get the run's
+// options as resolved, so --stdin's instructions and the branch --pr names
+// reach every bead of a batch, not the raw flags.
+func TestSlingBatchGetsTheResolvedRequest(t *testing.T) {
+	t.Parallel()
+	for _, deferred := range []bool{false, true} {
+		h := newSlingHarness(t)
+		h.run.shouldDefer = func() (bool, error) { return deferred, nil }
+		h.run.opts.stdin = true
+		h.run.stdin = strings.NewReader("do the thing\n")
+		h.run.opts.resumePR = 42
+		h.run.resolvePRBranch = func(int) (string, error) { return "feature/pr-42", nil }
+		if err := h.sling("gt-a", "gt-b", "gt-c", "gastown"); err != nil {
+			t.Fatalf("deferred=%v: sling: %v", deferred, err)
+		}
+		if h.batchOpts.argsText != "do the thing" || h.batchOpts.resumeBranch != "feature/pr-42" {
+			t.Errorf("deferred=%v: batch got args %q, resume branch %q", deferred, h.batchOpts.argsText, h.batchOpts.resumeBranch)
+		}
 	}
 }

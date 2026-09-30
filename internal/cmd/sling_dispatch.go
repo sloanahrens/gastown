@@ -282,11 +282,13 @@ func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
 					Type:     mail.TypeTask,
 					Priority: mail.PriorityHigh,
 				}
-				if err := d.notifyWitness(townRoot, shutdownMsg); err != nil {
+				wait, err := d.notifyWitness(townRoot, shutdownMsg)
+				if err != nil {
 					fmt.Fprintf(d.out, "  %s Could not send shutdown to witness: %v\n", style.Dim.Render("Warning:"), err)
 				} else {
 					fmt.Fprintf(d.out, "  %s Sent LIFECYCLE:Shutdown to %s/witness for %s\n", style.Bold.Render("→"), oldRigName, oldPolecatName)
 				}
+				wait()
 			}
 
 			// gt-skwt: clear the outgoing polecat's agent-bead state now,

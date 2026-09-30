@@ -18,59 +18,61 @@ import (
 // the cobra flag globals once, so a run never reads or writes a package
 // global and a test states its flags as a literal.
 type slingOptions struct {
-	subject      string
-	message      string
-	dryRun       bool
-	on           string   // --on: the bead a formula is applied to
-	vars         []string // --var
-	argsText     string   // --args
-	stdin        bool
-	hookRawBead  bool
-	create       bool
-	force        bool
-	account      string
-	agent        string
-	noConvoy     bool
-	owned        bool
-	noMerge      bool
-	merge        string
-	noBoot       bool
-	baseBranch   string
-	resumeBranch string
-	resumePR     int
-	ralph        bool
-	formula      string
-	crew         string
-	reviewOnly   bool
+	subject       string
+	message       string
+	dryRun        bool
+	on            string   // --on: the bead a formula is applied to
+	vars          []string // --var
+	argsText      string   // --args
+	stdin         bool
+	hookRawBead   bool
+	create        bool
+	force         bool
+	account       string
+	agent         string
+	noConvoy      bool
+	owned         bool
+	noMerge       bool
+	merge         string
+	noBoot        bool
+	baseBranch    string
+	resumeBranch  string
+	resumePR      int
+	maxConcurrent int
+	ralph         bool
+	formula       string
+	crew          string
+	reviewOnly    bool
 }
 
 // slingOptionsFromFlags is the options the cobra flags hold.
 func slingOptionsFromFlags() slingOptions {
 	return slingOptions{
-		subject:      slingSubject,
-		message:      slingMessage,
-		dryRun:       slingDryRun,
-		on:           slingOnTarget,
-		vars:         append([]string(nil), slingVars...),
-		argsText:     slingArgs,
-		stdin:        slingStdin,
-		hookRawBead:  slingHookRawBead,
-		create:       slingCreate,
-		force:        slingForce,
-		account:      slingAccount,
-		agent:        slingAgent,
-		noConvoy:     slingNoConvoy,
-		owned:        slingOwned,
-		noMerge:      slingNoMerge,
-		merge:        slingMerge,
-		noBoot:       slingNoBoot,
-		baseBranch:   slingBaseBranch,
-		resumeBranch: slingResumeBranch,
-		resumePR:     slingResumePR,
-		ralph:        slingRalph,
-		formula:      slingFormula,
-		crew:         slingCrew,
-		reviewOnly:   slingReviewOnly,
+		subject:       slingSubject,
+		message:       slingMessage,
+		dryRun:        slingDryRun,
+		on:            slingOnTarget,
+		vars:          append([]string(nil), slingVars...),
+		argsText:      slingArgs,
+		stdin:         slingStdin,
+		hookRawBead:   slingHookRawBead,
+		create:        slingCreate,
+		force:         slingForce,
+		account:       slingAccount,
+		agent:         slingAgent,
+		noConvoy:      slingNoConvoy,
+		owned:         slingOwned,
+		noMerge:       slingNoMerge,
+		merge:         slingMerge,
+		noBoot:        slingNoBoot,
+		baseBranch:    slingBaseBranch,
+		resumeBranch:  slingResumeBranch,
+		resumePR:      slingResumePR,
+		maxConcurrent: slingMaxConcurrent,
+		ralph:         slingRalph,
+		formula:       slingFormula,
+		crew:          slingCrew,
+		reviewOnly:    slingReviewOnly,
 	}
 }
 
@@ -97,8 +99,8 @@ type slingDeps struct {
 	shouldDefer            func() (bool, error)
 	isRigName              func(target string) (string, bool)
 	idType                 func(id string) (string, error)
-	batchSchedule          func(beadIDs []string, rigName, townRoot string) error
-	batchSling             func(beadIDs []string, rigName, townBeadsDir string) error
+	batchSchedule          func(opts slingOptions, beadIDs []string, rigName, townRoot string) error
+	batchSling             func(opts slingOptions, beadIDs []string, rigName, townBeadsDir string) error
 	rigFromBeadIDs         func(beadIDs []string, townRoot string) (string, error)
 	scheduleBead           func(beadID, rigName string, opts ScheduleOptions) error
 	rigForBead             func(townRoot, beadID string) string
@@ -142,7 +144,7 @@ type slingDeps struct {
 
 	// Reassignment away from a previous holder.
 	requester          func() string
-	notifyWitness      func(townRoot string, msg *mail.Message) error
+	notifyWitness      func(townRoot string, msg *mail.Message) (wait func(), err error)
 	clearReassigned    func(townRoot, assignee string)
 	unhook             func(townRoot, beadID string) error
 	recordReassignment func(townRoot, beadID, from, to, requester string)
@@ -210,8 +212,8 @@ func realSlingDeps() *slingDeps {
 		shouldDefer:            shouldDeferDispatch,
 		isRigName:              IsRigName,
 		idType:                 detectSchedulerIDType,
-		batchSchedule:          runBatchSchedule,
-		batchSling:             runBatchSling,
+		batchSchedule:          runBatchScheduleWith,
+		batchSling:             runBatchSlingWith,
 		rigFromBeadIDs:         resolveRigFromBeadIDs,
 		rigForBead:             resolveRigForBead,
 		rigBeadsDir:            beads.ResolveRepoAliasBeadsDir,
@@ -338,11 +340,11 @@ func setBDAutoCommitOff() (restore func()) {
 	}
 }
 
-// sendWitnessShutdown mails msg and waits for its notifications.
-func sendWitnessShutdown(townRoot string, msg *mail.Message) error {
+// sendWitnessShutdown mails msg; wait blocks until its notifications are
+// delivered.
+func sendWitnessShutdown(townRoot string, msg *mail.Message) (wait func(), err error) {
 	router := mail.NewRouter(townRoot)
-	defer router.WaitPendingNotifications()
-	return router.Send(msg)
+	return router.WaitPendingNotifications, router.Send(msg)
 }
 
 // unhookFromPreviousOwner sets a force-reassigned bead back to open with no

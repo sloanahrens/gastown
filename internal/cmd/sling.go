@@ -368,13 +368,13 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 						return fmt.Errorf("%s '%s' cannot be batch-scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)", idType, id, id)
 					}
 				}
-				return r.batchSchedule(beadIDs, rigName, townRoot)
+				return r.batchSchedule(r.opts, beadIDs, rigName, townRoot)
 			}
 			// Explicit rig: print tip about auto-resolve
 			fmt.Fprintf(r.out, "  %s the rig can be auto-resolved from bead prefixes. "+
 				"You can omit <%s>.\n",
 				style.Dim.Render("Tip:"), rigName)
-			return r.batchSling(beadIDs, rigName, townBeadsDir)
+			return r.batchSling(r.opts, beadIDs, rigName, townBeadsDir)
 		}
 		// No explicit rig -- try auto-resolving from bead prefixes
 		if allBeadIDs(args) {
@@ -382,7 +382,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			if err != nil {
 				return err
 			}
-			return r.batchSling(args, rigName, townBeadsDir)
+			return r.batchSling(r.opts, args, rigName, townBeadsDir)
 		}
 	}
 
@@ -575,7 +575,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			if err != nil {
 				return err
 			}
-			return r.batchSling(args, rigName, townBeadsDir)
+			return r.batchSling(r.opts, args, rigName, townBeadsDir)
 		}
 	}
 
@@ -937,7 +937,9 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 						Type:     mail.TypeTask,
 						Priority: mail.PriorityHigh,
 					}
-					if err := r.notifyWitness(townRoot, shutdownMsg); err != nil {
+					wait, err := r.notifyWitness(townRoot, shutdownMsg)
+					defer wait()
+					if err != nil {
 						fmt.Fprintf(r.out, "%s Could not send shutdown to witness: %v\n", style.Dim.Render("Warning:"), err)
 					} else {
 						fmt.Fprintf(r.out, "%s Sent LIFECYCLE:Shutdown to %s/witness for %s\n", style.Bold.Render("→"), oldRigName, oldPolecatName)

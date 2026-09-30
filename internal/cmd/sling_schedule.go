@@ -254,7 +254,12 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 // runBatchSchedule schedules multiple beads for deferred dispatch.
 // Returns error when all schedule attempts fail.
 func runBatchSchedule(beadIDs []string, rigName, townRoot string) error {
-	if slingDryRun {
+	return runBatchScheduleWith(slingOptionsFromFlags(), beadIDs, rigName, townRoot)
+}
+
+// runBatchScheduleWith is runBatchSchedule with opts in place of the flags.
+func runBatchScheduleWith(o slingOptions, beadIDs []string, rigName, townRoot string) error {
+	if o.dryRun {
 		fmt.Printf("%s Would schedule %d beads to rig '%s':\n", style.Bold.Render("📋"), len(beadIDs), rigName)
 		for _, beadID := range beadIDs {
 			fmt.Printf("  Would schedule: %s → %s\n", beadID, rigName)
@@ -266,24 +271,24 @@ func runBatchSchedule(beadIDs []string, rigName, townRoot string) error {
 
 	successCount := 0
 	for _, beadID := range beadIDs {
-		formula := resolveFormula(slingFormula, slingHookRawBead, townRoot, rigName)
+		formula := resolveFormula(o.formula, o.hookRawBead, townRoot, rigName)
 		err := scheduleBead(beadID, rigName, ScheduleOptions{
 			Formula:      formula,
-			Args:         slingArgs,
-			Vars:         slingVars,
-			NoConvoy:     slingNoConvoy,
-			Owned:        slingOwned,
-			Merge:        slingMerge,
-			BaseBranch:   slingBaseBranch,
-			ResumeBranch: slingResumeBranch,
+			Args:         o.argsText,
+			Vars:         o.vars,
+			NoConvoy:     o.noConvoy,
+			Owned:        o.owned,
+			Merge:        o.merge,
+			BaseBranch:   o.baseBranch,
+			ResumeBranch: o.resumeBranch,
 			DryRun:       false,
-			Force:        slingForce,
-			NoMerge:      slingNoMerge,
-			ReviewOnly:   slingReviewOnly,
-			Account:      slingAccount,
-			Agent:        slingAgent,
-			HookRawBead:  slingHookRawBead,
-			Ralph:        slingRalph,
+			Force:        o.force,
+			NoMerge:      o.noMerge,
+			ReviewOnly:   o.reviewOnly,
+			Account:      o.account,
+			Agent:        o.agent,
+			HookRawBead:  o.hookRawBead,
+			Ralph:        o.ralph,
 		})
 		if err != nil {
 			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)

@@ -143,9 +143,13 @@ func TestExecuteSlingForceStealsFromALivePolecat(t *testing.T) {
 	if _, err := h.run.executeSling(p); err != nil {
 		t.Fatalf("executeSling: %v", err)
 	}
-	h.wantCalls("mail", "mail gastown/witness LIFECYCLE:Shutdown Nux")
+	// The dispatch waits for the mail's delivery before it spawns.
+	h.wantCalls("mail", "mail gastown/witness LIFECYCLE:Shutdown Nux", "mail delivered gastown/witness")
 	h.wantCalls("clear reassigned", "clear reassigned gastown/polecats/Nux")
 	h.wantCalls("reassign", "reassign gt-abc123 gastown/polecats/Nux -> gastown/polecats/Toast")
+	if log := strings.Join(h.log(), "\n"); strings.Index(log, "mail delivered") > strings.Index(log, "spawn gastown") {
+		t.Errorf("spawned before the shutdown mail was delivered:\n%s", log)
+	}
 }
 
 // TestExecuteSlingDeadHolder: a dead holder is auto-forced once the survival
