@@ -350,11 +350,16 @@ func handleMergeCompletedWith(bd beads.Client, townRoot string, msg *mail.Messag
 	// Close the source issue if we have it
 	if sourceIssue != "" {
 		// Close only what the refinery itself closes on merge: not
-		// no_merge, review_only or merge_strategy local work.
-		if issue, err := bd.Show(sourceIssue); err == nil {
-			if block := refinery.MergedWorkBeadCloseBlockReason(issue); block != "" {
-				return fmt.Sprintf("logged merge for %s, not closing %s (%s)", branch, sourceIssue, block), nil
-			}
+		// no_merge, review_only or merge_strategy local work. If the issue
+		// cannot be read the guard cannot be evaluated, so leave it open
+		// rather than close work the refinery would have kept.
+		issue, err := bd.Show(sourceIssue)
+		if err != nil {
+			return fmt.Sprintf("logged merge for %s, not closing %s (could not read it: %v)",
+				branch, sourceIssue, err), nil
+		}
+		if block := refinery.MergedWorkBeadCloseBlockReason(issue); block != "" {
+			return fmt.Sprintf("logged merge for %s, not closing %s (%s)", branch, sourceIssue, block), nil
 		}
 		reason := fmt.Sprintf("Merged in %s", mergeCommit)
 		if err := bd.CloseWithReason(reason, sourceIssue); err != nil {
