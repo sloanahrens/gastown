@@ -1,13 +1,11 @@
 package daemon
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/dog"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -16,37 +14,18 @@ import (
 // replaces these seams, so without a guard a seam whose nil path stopped
 // calling the real thing would pass every other test.
 
-// TestListOriginBranchesReadsTheRigOrigin guards listOriginBranches' nil
-// path: it lists the polecat branches on the rig's real origin remote.
-func TestListOriginBranchesReadsTheRigOrigin(t *testing.T) {
+// TestGitSeamsDefaultToRealGit guards the git seams' nil paths: with no
+// opener set, the daemon and the convoy manager open a *git.Git on the
+// directory asked for.
+func TestGitSeamsDefaultToRealGit(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	origin := filepath.Join(t.TempDir(), "origin.git")
-	if err := os.MkdirAll(origin, 0o755); err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	if g, ok := (&Daemon{}).gitAt(dir).(*git.Git); !ok || g.WorkDir() != dir {
+		t.Errorf("Daemon.gitAt(%s) = %T; want a *git.Git on it", dir, (&Daemon{}).gitAt(dir))
 	}
-	runDeadHolderGit(t, origin, "init", "--bare")
-
-	clone := filepath.Join(townRoot, "gt", "mayor", "rig")
-	if err := os.MkdirAll(clone, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	const branch = "polecat/basalt/gt-issue1+abc123"
-	runDeadHolderGit(t, clone, "init")
-	runDeadHolderGit(t, clone, "config", "user.email", "test@test.com")
-	runDeadHolderGit(t, clone, "config", "user.name", "Test")
-	runDeadHolderGit(t, clone, "remote", "add", "origin", origin)
-	runDeadHolderGit(t, clone, "checkout", "-b", branch)
-	runDeadHolderGit(t, clone, "commit", "--allow-empty", "-m", "work")
-	runDeadHolderGit(t, clone, "push", "origin", branch)
-
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
-	got, err := m.listOriginBranches(filepath.Join(townRoot, "gt"))
-	if err != nil {
-		t.Fatalf("listOriginBranches: %v", err)
-	}
-	if want := []string{branch}; !reflect.DeepEqual(got, want) {
-		t.Errorf("listOriginBranches = %v, want %v from the rig's origin", got, want)
+	m := &ConvoyManager{}
+	if g, ok := m.gitAt(dir).(*git.Git); !ok || g.WorkDir() != dir {
+		t.Errorf("ConvoyManager.gitAt(%s) = %T; want a *git.Git on it", dir, m.gitAt(dir))
 	}
 }
 

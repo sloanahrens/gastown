@@ -8,4 +8,5 @@ internal/doltserver
 internal/git
 internal/git/gitfake
 internal/land
+internal/polecat
 internal/rig

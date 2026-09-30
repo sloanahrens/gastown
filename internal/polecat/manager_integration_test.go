@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -232,13 +233,25 @@ func TestManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing.T) {
 // The AddWithOptions file-layout tests against a real bd on the test Dolt
 // container; the unit tier runs the same checks against the fake bd.
 func TestIntegrationAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
-	checkAddWithOptions_NoPrimeMDCreatedLocally(t, true)
+	checkAddWithOptions_NoPrimeMDCreatedLocally(t, realAddBeads)
 }
 
 func TestIntegrationAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
-	checkAddWithOptions_NoFilesAddedToRepo(t, true)
+	checkAddWithOptions_NoFilesAddedToRepo(t, realAddBeads)
 }
 
 func TestIntegrationAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
-	checkAddWithOptions_SettingsInstalledInPolecatsDir(t, true)
+	checkAddWithOptions_SettingsInstalledInPolecatsDir(t, realAddBeads)
+}
+
+// realAddBeads initializes a real beads database on the test Dolt container
+// in mayorRig and returns nil, so the manager runs the real bd.
+func realAddBeads(t *testing.T, mayorRig, _ string) *fakeBd {
+	t.Helper()
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	if err := beads.NewIsolatedWithPort(mayorRig, port).Init("gt"); err != nil {
+		t.Fatalf("bd init: %v", err)
+	}
+	return nil
 }

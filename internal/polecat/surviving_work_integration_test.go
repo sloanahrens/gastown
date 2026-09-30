@@ -4,6 +4,7 @@ package polecat
 
 import (
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -60,16 +61,28 @@ func TestIntegrationSurvivingWorkStallingHTTPOriginIsUnknownAndBounded(t *testin
 		{name: "local candidate needs the base refresh", localWork: true, remoteHits: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newSurvivalFixture(t)
+			// A rig whose .repo.git has origin at the stalling URL, and, for
+			// the local candidate, the branch with work in it already.
+			tmp := t.TempDir()
+			rigRoot := filepath.Join(tmp, "gastown")
+			bare := filepath.Join(rigRoot, ".repo.git")
+			runGit(t, tmp, "init", "--bare", "--initial-branch=main", bare)
 			if tc.localWork {
+				seed := filepath.Join(tmp, "seed")
 				branch := "polecat/basalt/" + survivalIssue + "+mu5wzd6q"
-				f.branchWithWork(t, branch, "work.txt")
-				f.push(t, branch)
-				runGit(t, f.bare, "fetch", "-q", "origin", "+refs/heads/*:refs/heads/*")
+				runGit(t, tmp, "init", "--initial-branch=main", seed)
+				seedFile(t, filepath.Join(seed, "base.txt"), "base\n")
+				runGit(t, seed, "add", "-A")
+				runGit(t, seed, "commit", "-m", "base")
+				runGit(t, seed, "checkout", "-q", "-b", branch)
+				seedFile(t, filepath.Join(seed, "work.txt"), "work.txt\n")
+				runGit(t, seed, "add", "-A")
+				runGit(t, seed, "commit", "-m", "work on "+branch)
+				runGit(t, seed, "push", "-q", bare, "main", branch)
 			}
-			runGit(t, f.bare, "remote", "set-url", "origin", stallURL)
+			runGit(t, bare, "remote", "add", "origin", stallURL)
 			start := time.Now()
-			w, err := newWorkSurvival(f.rigRoot, bound)
+			w, err := newWorkSurvival(gitOpener{}, rigRoot, bound)
 			if err != nil {
 				t.Fatal(err)
 			}

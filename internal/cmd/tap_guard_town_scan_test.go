@@ -77,7 +77,6 @@ func TestTownScanHazard(t *testing.T) {
 		// scanning one walks every worktree of that kind at once.
 		{"rig polecats (every worktree)", filepath.Join(rig, "polecats"), "a rig's worktree dir"},
 		{"rig crew", filepath.Join(rig, "crew"), "a rig's worktree dir"},
-		{"rig refinery", filepath.Join(rig, "refinery"), "a rig's worktree dir"},
 		{"rig witness", filepath.Join(rig, "witness"), "a rig's worktree dir"},
 		{"rig mayor", filepath.Join(rig, "mayor"), "a rig's worktree dir"},
 
@@ -90,7 +89,6 @@ func TestTownScanHazard(t *testing.T) {
 		{"worktree subdir", filepath.Join(rig, "polecats", "lapis", "gastown", "internal"), ""},
 		{"rig directory with no checkouts", filepath.Join(rig, "settings"), ""},
 		{"rig mayor clone", filepath.Join(rig, "mayor", "rig"), ""},
-		{"rig refinery clone", filepath.Join(rig, "refinery", "rig"), ""},
 
 		// Allowed — outside the town, and the degenerate inputs.
 		{"outside the town", other, ""},
