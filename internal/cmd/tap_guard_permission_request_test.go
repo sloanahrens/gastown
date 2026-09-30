@@ -315,3 +315,24 @@ func TestPermissionRequestShapeLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestPermissionRequestTreatsMonitorAsShell pins gt-nol0q: Monitor carries a
+// shell command like Bash, so its denial names the command and steers the retry
+// by command shape rather than falling to the non-shell wording.
+func TestPermissionRequestTreatsMonitorAsShell(t *testing.T) {
+	asPolecat(t)
+	raw := strings.Replace(bashPermissionPayload("cd /tmp/w && touch f"), `"tool_name":"Bash"`, `"tool_name":"Monitor"`, 1)
+	hook := payloadInput(t, raw)
+	if hook.ToolName != "Monitor" {
+		t.Fatalf("payload tool = %q, want Monitor", hook.ToolName)
+	}
+	message := promptDeniedMessage(hook, "")
+	for _, want := range []string{"the Monitor command", "cd /tmp/w && touch f", "Retry without cd"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message missing %q: %q", want, message)
+		}
+	}
+	if got := promptShape(hook); got != "bash cd-compound-write" {
+		t.Errorf("promptShape = %q, want bash cd-compound-write", got)
+	}
+}

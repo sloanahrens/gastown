@@ -124,11 +124,19 @@ func unattendedPromptRole(role string) bool {
 	return strings.Contains(role, "/polecats/") || strings.Contains(role, "/dogs/")
 }
 
+// isShellTool reports whether a tool carries a shell command in
+// tool_input.command: Bash, and Monitor, which runs the same command shape as
+// a background watch. It mirrors shellExecutingToolMatcher in internal/hooks,
+// the registration this guard answers for (gt-nol0q).
+func isShellTool(name string) bool {
+	return name == "Bash" || name == "Monitor"
+}
+
 // promptRequestSummary names what asked, in the form the model needs to
 // recognize the call it made.
 func promptRequestSummary(hook permissionRequestInput) string {
-	if hook.ToolName == "Bash" && hook.ToolInput.Command != "" {
-		return fmt.Sprintf("the Bash command %q", hook.ToolInput.Command)
+	if isShellTool(hook.ToolName) && hook.ToolInput.Command != "" {
+		return fmt.Sprintf("the %s command %q", hook.ToolName, hook.ToolInput.Command)
 	}
 	if path := hook.ToolInput.FilePath; path != "" {
 		return fmt.Sprintf("%s on %s", hook.ToolName, path)
@@ -152,7 +160,7 @@ func promptDeniedMessage(hook permissionRequestInput, escalation string) string 
 // promptRetryGuidance names a formulation that raises no prompt, chosen from
 // the shape that raised this one.
 func promptRetryGuidance(hook permissionRequestInput) string {
-	if hook.ToolName != "Bash" {
+	if !isShellTool(hook.ToolName) {
 		return "Retry in a form that needs no approval, or escalate if this one is required."
 	}
 	segments := commandSegments(hook.ToolInput.Command)
@@ -277,7 +285,7 @@ func escalateParkedPromptOnce(hook permissionRequestInput) string {
 // promptShape labels the denied call for the mail subject and the rate-limit
 // key: two denials of the same shape in one session share a marker.
 func promptShape(hook permissionRequestInput) string {
-	if hook.ToolName != "Bash" {
+	if !isShellTool(hook.ToolName) {
 		return hook.ToolName
 	}
 	segments := commandSegments(hook.ToolInput.Command)

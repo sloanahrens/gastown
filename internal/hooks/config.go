@@ -429,9 +429,13 @@ func DefaultOverrides() map[string]*HooksConfig {
 			// guard turns the ask into a denial that names a retry that will
 			// not ask. Interactive roles carry no PermissionRequest entry, so
 			// their prompts keep reaching a person.
+			//
+			// The shell entry uses shellExecutingToolMatcher so a Monitor
+			// call, which runs the same command shape and can raise the same
+			// prompt, is denied instead of parking the session (gt-nol0q).
 			PermissionRequest: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{{
 						Type:    "command",
 						Command: gtCommand("gt tap guard permission-request"),
@@ -538,10 +542,11 @@ func DefaultOverrides() map[string]*HooksConfig {
 				},
 			},
 			// A dog also runs with nobody at the pane; see the polecats
-			// override for why the ask is denied rather than raised (gt-8stz).
+			// override for why the ask is denied rather than raised (gt-8stz),
+			// and why the shell entry matches Monitor too (gt-nol0q).
 			PermissionRequest: []HookEntry{
 				{
-					Matcher: "Bash",
+					Matcher: shellExecutingToolMatcher,
 					Hooks: []Hook{{
 						Type:    "command",
 						Command: gtCommand("gt tap guard permission-request"),
