@@ -292,4 +292,3 @@ func ExpandPattern(pattern, townRoot, rig, name, role, prefix string) string {
 	result = strings.ReplaceAll(result, "{prefix}", prefix)
 	return result
 }
-

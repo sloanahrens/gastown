@@ -23,7 +23,7 @@ const maxUnconverted = 38
 // budget, each with the bead tracking the overrun. Like maxUnconverted it
 // only shrinks: getting a package under budget deletes its line AND lowers
 // this, in the same change.
-const maxOverBudget = 1
+const maxOverBudget = 0
 
 // TestPolicy applies the unit-test rules to every package not listed in
 // unconverted.txt, and fails a listed package that already passes, so the

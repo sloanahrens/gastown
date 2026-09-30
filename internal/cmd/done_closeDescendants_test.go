@@ -367,44 +367,6 @@ func TestCloseDescendantsMoleculeNotFound(t *testing.T) {
 	}
 }
 
-// TestDoneLeavesHookedBeadOpenWithPendingMRNote verifies that gt done does
-// NOT close the hooked source bead when it just submitted an MR (via the
-// agent bead's active_mr field) — it records a comment naming the MR
-// instead and leaves the bead's status untouched. "Closed" now means
-// "merged" everywhere a human or a dependency check reads it: the
-// refinery's closeMergedWorkBead is the only thing that closes the source
-// bead, at real merge success (gt-pqqz). Before this, every polecat on this
-// rig being transient meant gt done closed the source issue seconds after
-// creating its MR, well before the MR reached the merge queue, making a
-// dependency or a human reading "closed" as "landed" when it only meant
-// "submitted."
-func TestDoneLeavesHookedBeadOpenWithPendingMRNote(t *testing.T) {
-	t.Parallel()
-	fb := &inprocBD{answer: pendingMRBD}
-	runDoneStateUpdate(t, fb)
-
-	calls := fb.log()
-	if calls == "" {
-		t.Fatal("no bd comments/close calls were recorded")
-	}
-
-	commentLine := ""
-	for _, line := range strings.Split(strings.TrimSpace(calls), "\n") {
-		if strings.HasPrefix(line, "close ") && strings.Contains(line, "gt-base-123") {
-			t.Fatalf("hooked bead gt-base-123 was closed at MR-submission time — it must stay open until the refinery closes it at merge (gt-pqqz)\nCalls:\n%s", calls)
-		}
-		if strings.HasPrefix(line, "comments ") && strings.Contains(line, "gt-base-123") {
-			commentLine = line
-		}
-	}
-	if commentLine == "" {
-		t.Fatalf("hooked bead gt-base-123 got no pending-MR comment\nCalls:\n%s", calls)
-	}
-	if !strings.Contains(commentLine, "gt-mr-42") {
-		t.Errorf("pending-MR comment did not name the MR, got: %q", commentLine)
-	}
-}
-
 // runDoneStateUpdate runs updateAgentStateOnDone as polecat gastown/nux,
 // from the rig directory of a fresh town whose routes send gt- to the
 // gastown rig, with fb as bd. No git repository holds the town, so there is
@@ -641,30 +603,6 @@ func moleculeNotFoundBD(f *inprocBD, cmd string, args []string) bdAnswer {
 			return bdAnswer{code: 1}
 		}
 		f.logLine("close_attempt: " + id + " (success)")
-	}
-	return bdAnswer{}
-}
-
-// pendingMRBD: the agent bead's active_mr names the MR this gt done just
-// submitted, and the hooked bead is a plain open bead with no molecule.
-// Every close and comments call is logged whole.
-func pendingMRBD(f *inprocBD, cmd string, args []string) bdAnswer {
-	switch cmd {
-	case "show":
-		if argsMention(args, "--children") {
-			return bdOut("{}\n")
-		}
-		switch firstArg(args) {
-		case "gt-gastown-polecat-nux":
-			return bdOut(`[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","status":"open","hook_bead":"gt-base-123","agent_state":"working","description":"active_mr: gt-mr-42"}]` + "\n")
-		case "gt-base-123":
-			return bdOut(`[{"id":"gt-base-123","title":"Base bead","status":"open"}]` + "\n")
-		}
-		return bdAnswer{}
-	case "list":
-		return bdOut("[]\n")
-	case "close", "comments":
-		f.logLine(cmd + " " + strings.Join(args, " "))
 	}
 	return bdAnswer{}
 }

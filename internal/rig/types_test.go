@@ -63,15 +63,6 @@ func TestBeadsPath_AlwaysReturnsRigRoot(t *testing.T) {
 			wantPath: "/home/user/gt/testrig",
 		},
 		{
-			name: "rig with refinery only",
-			rig: Rig{
-				Name:        "testrig",
-				Path:        "/home/user/gt/testrig",
-				HasRefinery: true,
-			},
-			wantPath: "/home/user/gt/testrig",
-		},
-		{
 			name: "rig with no agents",
 			rig: Rig{
 				Name: "testrig",
@@ -90,33 +81,12 @@ func TestBeadsPath_AlwaysReturnsRigRoot(t *testing.T) {
 			wantPath: "/home/user/gt/testrig",
 		},
 		{
-			name: "rig with mayor and refinery",
-			rig: Rig{
-				Name:        "testrig",
-				Path:        "/home/user/gt/testrig",
-				HasMayor:    true,
-				HasRefinery: true,
-			},
-			wantPath: "/home/user/gt/testrig",
-		},
-		{
-			name: "rig with witness and refinery",
-			rig: Rig{
-				Name:        "testrig",
-				Path:        "/home/user/gt/testrig",
-				HasWitness:  true,
-				HasRefinery: true,
-			},
-			wantPath: "/home/user/gt/testrig",
-		},
-		{
 			name: "rig with all agents",
 			rig: Rig{
-				Name:        "fullrig",
-				Path:        "/tmp/gt/fullrig",
-				HasMayor:    true,
-				HasWitness:  true,
-				HasRefinery: true,
+				Name:       "fullrig",
+				Path:       "/tmp/gt/fullrig",
+				HasMayor:   true,
+				HasWitness: true,
 			},
 			wantPath: "/tmp/gt/fullrig",
 		},

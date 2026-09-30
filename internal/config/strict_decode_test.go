@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -151,22 +152,24 @@ func TestDecodeYAMLFileRejectsUnknownKeys(t *testing.T) {
 // shadows a promoted one; the walker must agree on both.
 func TestDecodeJSONFileAmbiguousPromotedFieldIsUnknown(t *testing.T) {
 	t.Parallel()
-	type a struct {
+	type A struct {
 		X int `json:"x"`
 	}
-	type b struct {
+	type B struct {
 		X string `json:"x"`
 	}
-	var ambiguous struct {
-		a
-		b
-	}
+	// Built at run time: a struct literal embedding both is exactly the
+	// duplicate json tag go vet reports, and the ambiguity is the point.
+	ambiguous := reflect.New(reflect.StructOf([]reflect.StructField{
+		{Name: "A", Type: reflect.TypeOf(A{}), Anonymous: true},
+		{Name: "B", Type: reflect.TypeOf(B{}), Anonymous: true},
+	})).Interface()
 	var pe *ParseError
-	if err := DecodeJSONFile("f.json", []byte(`{"x": 1}`), &ambiguous); !errors.As(err, &pe) || len(pe.Keys) != 1 || pe.Keys[0] != "x" {
+	if err := DecodeJSONFile("f.json", []byte(`{"x": 1}`), ambiguous); !errors.As(err, &pe) || len(pe.Keys) != 1 || pe.Keys[0] != "x" {
 		t.Fatalf("ambiguous promoted key = %v, want it reported unknown", err)
 	}
 	var shadowed struct {
-		a
+		A
 		X string `json:"x"`
 	}
 	if err := DecodeJSONFile("f.json", []byte(`{"x": "s"}`), &shadowed); err != nil || shadowed.X != "s" {

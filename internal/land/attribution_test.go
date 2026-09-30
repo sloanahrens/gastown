@@ -31,20 +31,10 @@ func TestAttributionLine(t *testing.T) {
 	}
 }
 
-// amendBranch rewrites the work branch's commit message and force-pushes it.
-func (f *landFixture) amendBranch(msg string) {
-	f.t.Helper()
-	gitT(f.t, f.seed, "checkout", "-q", f.work.Branch)
-	gitT(f.t, f.seed, "commit", "-q", "--amend", "-m", msg)
-	gitT(f.t, f.seed, "push", "-q", "-f", "origin", f.work.Branch)
-	f.work.Head = gitT(f.t, f.seed, "rev-parse", "HEAD")
-	gitT(f.t, f.seed, "checkout", "-q", "main")
-}
-
 func TestLandRefusesAttributionTrailerAsRework(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	f.amendBranch("feat: add b\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>")
+	f.setBranch("feat: add b\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>")
 	l := f.lander()
 	l.RangeChecks = []RangeCheck{AttributionCheck}
 	_, err := l.Land(context.Background(), f.work)
@@ -60,7 +50,7 @@ func TestLandRefusesAttributionTrailerAsRework(t *testing.T) {
 func TestLandAllowsProductMention(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	f.amendBranch("fix: Claude Code hooks fire on every Bash call")
+	f.setBranch("fix: Claude Code hooks fire on every Bash call")
 	l := f.lander()
 	l.RangeChecks = []RangeCheck{AttributionCheck}
 	// The same landing also proves a disabled review lands as "skipped".

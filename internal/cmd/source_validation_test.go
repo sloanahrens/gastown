@@ -66,48 +66,6 @@ func TestResolveSubmitSourceIssueFailureNamesRoutingContext(t *testing.T) {
 	}
 }
 
-func TestValidateMergeRequestSourceUsesPreResolvedSource(t *testing.T) {
-	t.Parallel()
-	mr := &beads.Issue{ID: "gt-mr", Description: "source_issue: bd-source\n"}
-	if err := validateMergeRequestSource(mr, "bd-source", nil); err == nil || !strings.Contains(err.Error(), "pre-resolved") {
-		t.Fatalf("validateMergeRequestSource without source = %v, want pre-resolved error", err)
-	}
-	if err := validateMergeRequestSource(mr, "bd-source", &beads.Issue{ID: "bd-source", Type: "task"}); err != nil {
-		t.Fatalf("validateMergeRequestSource with routed source: %v", err)
-	}
-}
-
-func TestMqSubmitPathUsesRoutedSourceAndCurrentRigQueueBeads(t *testing.T) {
-	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
-
-	currentBD := beads.New(workDir)
-	source, err := resolveSubmitSourceIssue(workDir, "bd-source")
-	if err != nil {
-		t.Fatalf("resolveSubmitSourceIssue: %v", err)
-	}
-
-	if _, err := currentBD.Create(beads.CreateOptions{
-		Title:       "Merge: bd-source",
-		Labels:      []string{"gt:merge-request"},
-		Priority:    source.Issue.Priority,
-		Description: "branch: polecat/refuge/bd-source\ntarget: main\nsource_issue: bd-source\nrig: gastown",
-		Ephemeral:   true,
-		Rig:         "gastown",
-	}); err != nil {
-		t.Fatalf("current-rig MR create: %v", err)
-	}
-	if err := source.BD.AddComment("bd-source", "MR created: gt-mr"); err != nil {
-		t.Fatalf("source back-link comment: %v", err)
-	}
-
-	log := readSubmitSourceBDLog(t, logPath)
-	assertBDLogContains(t, log, ownerBeadsDir, "show bd-source --json")
-	assertBDLogContains(t, log, currentBeadsDir, "create --json")
-	assertBDLogContains(t, log, ownerBeadsDir, "comments add bd-source")
-	assertBDLogNotContains(t, log, currentBeadsDir, "show bd-source --json")
-}
-
 func TestDoneNoMRClosePathUsesRoutedSourceBeads(t *testing.T) {
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)

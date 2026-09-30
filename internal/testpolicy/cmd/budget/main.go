@@ -58,7 +58,8 @@ func run() int {
 	budget := flag.Duration("budget", 10*time.Second, "per-package user CPU limit for converted packages (the test binary and the processes it waited for)")
 	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget; they run through plain go test, with its result cache")
 	overList := flag.String("overbudget", "internal/testpolicy/overbudget.txt", "converted packages exempt from the budget while a bead tracks their overrun; their times are reported on every run")
-	fastTier := flag.Bool("fast-tier", false, "run the fast tier (make gate): leave out the packages in -slow, and fail any package that ran longer than testpolicy.FastTierMaxWall of wall time")
+	fastTier := flag.Bool("fast-tier", false, "run the fast tier (make gate): leave out the packages in -slow, and warn about any package that ran longer than testpolicy.FastTierMaxWall of wall time")
+	strictWall := flag.Bool("strict-wall", false, "with -fast-tier, fail a package over testpolicy.FastTierMaxWall of wall time instead of warning (make tier-check)")
 	slowList := flag.String("slow", "internal/testpolicy/slow.txt", "the slow tier's packages, which -fast-tier leaves out; `make test-slow` runs them")
 	flag.Parse()
 
@@ -73,6 +74,9 @@ func run() int {
 	tracked := make(map[string]string, len(overEntries))
 	for _, e := range overEntries {
 		tracked[e.Package] = e.Bead
+	}
+	if *strictWall && !*fastTier {
+		return fail(errors.New("-strict-wall needs -fast-tier"))
 	}
 	root, err := moduleRoot()
 	if err != nil {
@@ -160,19 +164,23 @@ func run() int {
 		code = 1
 	}
 	if *fastTier && !interrupted(code) {
-		if c := checkFastTier(probe, &summary, len(judged)+len(cached), *slowList); code == 0 {
+		if c := checkFastTier(probe, &summary, len(judged)+len(cached), *slowList, *strictWall); code == 0 {
 			code = c
 		}
 	}
 	return code
 }
 
-// checkFastTier reads the package summary lines the probe kept and returns 1
-// when a package ran longer than testpolicy.FastTierMaxWall, naming it. It
-// fails closed: a run whose output yields no wall time and no cached
-// package, or a summary line it cannot read, fails too, because silence
-// there would read as every package being fast.
-func checkFastTier(probe *summaryLines, summary io.Reader, ran int, slowList string) int {
+// checkFastTier reads the package summary lines the probe kept. A package
+// that ran longer than testpolicy.FastTierMaxWall is named on a TIER: line,
+// and the check returns 1 for it only when strictWall is set. Wall time
+// depends on host load (a package measured at 13.9 s took 37.7 s beside six
+// other gates), and a landing must not be refused for contention, so `make
+// gate` only warns and `make tier-check` fails. Output it cannot read fails
+// closed either way: a run whose output yields no wall time and no cached
+// package, or a summary line it cannot read, returns 1, because silence there
+// would read as every package being fast.
+func checkFastTier(probe *summaryLines, summary io.Reader, ran int, slowList string, strictWall bool) int {
 	if err := probe.Flush(); err != nil {
 		fmt.Fprintln(os.Stderr, "TIER: reading package summaries:", err)
 		return 1
@@ -192,9 +200,15 @@ func checkFastTier(probe *summaryLines, summary io.Reader, ran int, slowList str
 		code = 1
 	}
 	for _, o := range testpolicy.WallOverruns(sum.Walls, testpolicy.FastTierMaxWall) {
-		fmt.Fprintf(os.Stderr, "TIER: %s took %s of wall time, over the fast tier's %s: make its tests faster, or move it to the slow tier by adding \"%s <measured wall> # <why>\" to %s\n",
-			o.Package, o.Wall.Round(100*time.Millisecond), testpolicy.FastTierMaxWall, o.Package, slowList)
-		code = 1
+		note := "warning only, since wall time depends on host load and make gate never fails on it; make tier-check does"
+		if strictWall {
+			note = "failing: make tier-check judges wall time"
+		}
+		fmt.Fprintf(os.Stderr, "TIER: %s took %s of wall time, over the fast tier's %s (%s). Make its tests faster, or move it to the slow tier by adding \"%s <measured wall> # <why>\" to %s\n",
+			o.Package, o.Wall.Round(100*time.Millisecond), testpolicy.FastTierMaxWall, note, o.Package, slowList)
+		if strictWall {
+			code = 1
+		}
 	}
 	return code
 }

@@ -139,7 +139,7 @@ func TestSummaryLines_CapsPartialLine(t *testing.T) {
 func TestCheckFastTier_FailsClosedOnEmptyProbe(t *testing.T) {
 	t.Parallel()
 	var summary bytes.Buffer
-	if code := checkFastTier(&summaryLines{w: &summary}, &summary, 3, "slow.txt"); code == 0 {
+	if code := checkFastTier(&summaryLines{w: &summary}, &summary, 3, "slow.txt", false); code == 0 {
 		t.Fatal("checkFastTier passed a run of 3 packages whose output had no summary line; want it to fail closed")
 	}
 }
@@ -151,28 +151,33 @@ func TestCheckFastTier_FailsClosedOnUnreadableTime(t *testing.T) {
 	var summary bytes.Buffer
 	probe := &summaryLines{w: &summary}
 	_, _ = probe.Write([]byte("ok  \tgithub.com/steveyegge/gastown/internal/a\t1.0s\nok  \tgithub.com/steveyegge/gastown/internal/b\tsoon\n"))
-	if code := checkFastTier(probe, &summary, 2, "slow.txt"); code == 0 {
+	if code := checkFastTier(probe, &summary, 2, "slow.txt", false); code == 0 {
 		t.Fatal("checkFastTier passed a summary line with an unreadable time; want it to fail closed")
 	}
 }
 
 // TestCheckFastTier_Verdicts: fast packages pass, an all-cached run passes,
-// and a package over the limit fails.
+// and a package over the limit passes by default (make gate: wall time depends
+// on host load, and a landing must not be refused for contention, gt-z7qtk)
+// but fails under strictWall (make tier-check).
 func TestCheckFastTier_Verdicts(t *testing.T) {
 	t.Parallel()
 	over := (testpolicy.FastTierMaxWall + time.Second).String()
 	for _, tc := range []struct {
 		name, text string
+		strict     bool
 		want       int
 	}{
-		{"fast", "ok  \tgithub.com/steveyegge/gastown/internal/a\t1.0s\n", 0},
-		{"all cached", "ok  \tgithub.com/steveyegge/gastown/internal/a\t(cached)\n", 0},
-		{"over", "ok  \tgithub.com/steveyegge/gastown/internal/a\t" + over + "\n", 1},
+		{"fast", "ok  \tgithub.com/steveyegge/gastown/internal/a\t1.0s\n", false, 0},
+		{"all cached", "ok  \tgithub.com/steveyegge/gastown/internal/a\t(cached)\n", false, 0},
+		{"wall overrun does not fail the gate", "ok  \tgithub.com/steveyegge/gastown/internal/a\t" + over + "\n", false, 0},
+		{"wall overrun fails tier-check", "ok  \tgithub.com/steveyegge/gastown/internal/a\t" + over + "\n", true, 1},
+		{"fast passes tier-check", "ok  \tgithub.com/steveyegge/gastown/internal/a\t1.0s\n", true, 0},
 	} {
 		var summary bytes.Buffer
 		probe := &summaryLines{w: &summary}
 		_, _ = probe.Write([]byte(tc.text))
-		if got := checkFastTier(probe, &summary, 1, "slow.txt"); got != tc.want {
+		if got := checkFastTier(probe, &summary, 1, "slow.txt", tc.strict); got != tc.want {
 			t.Errorf("%s: checkFastTier = %d, want %d", tc.name, got, tc.want)
 		}
 	}

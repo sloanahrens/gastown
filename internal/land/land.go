@@ -26,6 +26,31 @@ type Beads interface {
 
 var _ Beads = beads.Client(nil)
 
+// Repo is the part of *git.Git Land works through: the lander's clone, and
+// each throwaway worktree added from it (docs/testing.md, "Seams for external
+// tools"). Tests pass gitfake.
+type Repo interface {
+	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
+	Rev(ref string) (string, error)
+	IsAncestor(ancestor, descendant string) (bool, error)
+	PushRemoteBranchTip(remote, branch string) (string, error)
+	TreesIdentical(a, b string) (bool, error)
+	CommitMessages(base, head string) ([]git.CommitMessage, error)
+	CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error)
+	PatchID(base, head string) (string, error)
+	WorktreeAddDetached(path, ref string) error
+	WorktreeRemove(path string, force bool) error
+	WorktreePrune() error
+	MergeNoFF(branch, message string) error
+	MergeSquash(branch, message string) error
+	GetConflictingFiles() ([]string, error)
+	AbortMerge() error
+	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
+	VerifyPushedCommit(remote, branch, commit string) error
+}
+
+var _ Repo = (*git.Git)(nil)
+
 // Lander lands work for one rig. It holds no state between calls; the caller
 // (the daemon's landing worker, gt-v4ssj.2) runs one Land at a time per rig.
 type Lander struct {
@@ -59,7 +84,8 @@ type Lander struct {
 	// false, such a landing stops with an *InfraError instead.
 	ReviewErrorLands bool
 
-	afterPush func() // test seam: runs between the push and the read-back
+	afterPush func()                // test seam: runs between the push and the read-back
+	openRepo  func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
 }
 
 // Result describes a landing.
@@ -164,6 +190,13 @@ func (l *Lander) logf(format string, args ...any) {
 	}
 }
 
+func (l *Lander) open(dir string) Repo {
+	if l.openRepo != nil {
+		return l.openRepo(dir)
+	}
+	return git.NewGit(dir)
+}
+
 func (l *Lander) now() time.Time {
 	if l.Now != nil {
 		return l.Now()
@@ -187,7 +220,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "read bead", Err: err}
 	}
 	remote := l.remote()
-	g := git.NewGit(l.Repo)
+	g := l.open(l.Repo)
 	// A landing whose bead record was left incomplete (RecordError) is
 	// finished from the landings file, never landed twice. This runs before
 	// the readiness checks, because the partial record may already have
@@ -254,9 +287,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "worktree", Err: err}
 	}
 	defer cleanup()
-	wt := git.NewGit(dir)
+	wt := l.open(dir)
 
-	merged, rej, err := mergeWork(wt, dir, w, base)
+	merged, rej, err := mergeWork(wt, w, base)
 	if err != nil {
 		return Result{}, err
 	}
@@ -327,7 +360,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 
 const fetchTimeout = 2 * time.Minute
 
-func (l *Lander) fetchTarget(g *git.Git, target string) error {
+func (l *Lander) fetchTarget(g Repo, target string) error {
 	remote := l.remote()
 	return g.FetchRefspecWithTimeout(remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", target, remote, target), fetchTimeout)
 }
@@ -336,7 +369,7 @@ func (l *Lander) fetchTarget(g *git.Git, target string) error {
 // w when its commit is on the target. It returns nil, nil when there is
 // nothing to repair. An error reading the file or the target stops Land: a
 // landing it cannot rule out must not be landed a second time.
-func (l *Lander) repairRecord(g *git.Git, w Work) (*Result, error) {
+func (l *Lander) repairRecord(g Repo, w Work) (*Result, error) {
 	rec, found, err := l.Landings.Find(w.BeadID, w.Head)
 	if err != nil {
 		return nil, &InfraError{Stage: "read landings file", Err: err}
@@ -396,7 +429,7 @@ func policyRejection(issue *beads.Issue) *Rejection {
 
 // checkHeadPushed asserts origin/<branch> carries the declared head, so Land
 // never merges a commit the author did not push (gt-sda9).
-func (l *Lander) checkHeadPushed(g *git.Git, w Work) (*Rejection, error) {
+func (l *Lander) checkHeadPushed(g Repo, w Work) (*Rejection, error) {
 	remote := l.remote()
 	tip, err := g.PushRemoteBranchTip(remote, w.Branch)
 	if err != nil {
@@ -422,7 +455,7 @@ func (l *Lander) checkHeadPushed(g *git.Git, w Work) (*Rejection, error) {
 }
 
 // addWorktree adds a detached worktree at base under WorkRoot.
-func (l *Lander) addWorktree(g *git.Git, base string) (string, func(), error) {
+func (l *Lander) addWorktree(g Repo, base string) (string, func(), error) {
 	if err := os.MkdirAll(l.WorkRoot, 0o700); err != nil {
 		return "", nil, err
 	}
@@ -448,9 +481,9 @@ func (l *Lander) addWorktree(g *git.Git, base string) (string, func(), error) {
 // mergeWork merges the declared head into the worktree at base: --no-ff, or
 // a squash when the range still holds auto-save commits so none reach the
 // target (the refinery's stackMerge behavior).
-func mergeWork(wt *git.Git, dir string, w Work, base string) (string, *Rejection, error) {
+func mergeWork(wt Repo, w Work, base string) (string, *Rejection, error) {
 	msg := fmt.Sprintf("land: %s (%s) onto %s (%s)\n\nWork: %s", w.Branch, shortSHA(w.Head), w.Target, shortSHA(base), w.BeadID)
-	hasAutoSave, err := checkpoint.HasAutoSaveCommits(dir, base, w.Head)
+	hasAutoSave, err := hasAutoSaveCommits(wt, base, w.Head)
 	if err != nil {
 		return "", nil, &InfraError{Stage: "inspect range", Err: err}
 	}
@@ -473,6 +506,22 @@ func mergeWork(wt *git.Git, dir string, w Work, base string) (string, *Rejection
 		return "", nil, &InfraError{Stage: "merge", Err: err}
 	}
 	return merged, nil, nil
+}
+
+// hasAutoSaveCommits reports whether base..head, the commits the landing
+// brings onto the target, holds a machine-generated auto-save commit.
+func hasAutoSaveCommits(g Repo, base, head string) (bool, error) {
+	msgs, err := g.CommitMessages(base, head)
+	if err != nil {
+		return false, fmt.Errorf("listing commits %s..%s: %w", shortSHA(base), shortSHA(head), err)
+	}
+	for _, m := range msgs {
+		subject, _, _ := strings.Cut(m.Message, "\n")
+		if checkpoint.IsAutoSaveSubject(subject) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // gateAndReview runs the gate and om on the same tree and range at once.

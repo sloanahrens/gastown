@@ -7,8 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestParseBdCloseInvocations pins the command shape recognition: which
@@ -184,62 +182,44 @@ func TestBranchNamesBead(t *testing.T) {
 }
 
 // TestBdCloseInvariantRefusal pins the decision table at the guard's own
-// boundary: the three gt-6hmz exits, and refusal when none holds. It is the
+// boundary: the two gt-6hmz exits, and refusal when none holds. It is the
 // guard's contract that it refuses exactly what gt done refuses.
 func TestBdCloseInvariantRefusal(t *testing.T) {
 	t.Parallel()
-	scope := func(count int, pendingMR string, mrs map[string]*beads.Issue) bdCloseInvariantScope {
+	scope := func(count int) bdCloseInvariantScope {
 		return bdCloseInvariantScope{
-			branch:    "polecat/malachite/gt-arno+muck73gu",
-			target:    "origin/main",
-			counter:   fakeCloseTimeCommitCounter{count: count},
-			mrTracker: fakeCloseTimeMRTracker{issues: mrs},
-			pendingMR: pendingMR,
+			branch:  "polecat/malachite/gt-arno+muck73gu",
+			target:  "origin/main",
+			counter: fakeCloseTimeCommitCounter{count: count},
 		}
 	}
 
 	t.Run("exit (a): zero commits ahead", func(t *testing.T) {
 		t.Parallel()
-		if got := bdCloseInvariantRefusal(scope(0, "", nil), "gt-arno", ""); got != "" {
+		if got := bdCloseInvariantRefusal(scope(0), "gt-arno", ""); got != "" {
 			t.Errorf("expected close allowed with zero commits ahead, got %q", got)
 		}
 	})
 
-	t.Run("exit (b): live MR from the agent bead", func(t *testing.T) {
+	t.Run("exit (b): supersede reason", func(t *testing.T) {
 		t.Parallel()
-		mrs := map[string]*beads.Issue{"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "open"}}
-		if got := bdCloseInvariantRefusal(scope(4, "gt-wisp-mr1", mrs), "gt-arno", ""); got != "" {
-			t.Errorf("expected close allowed when a live MR tracks the issue, got %q", got)
-		}
-	})
-
-	t.Run("exit (b) does not trust a stale pointer to a closed MR", func(t *testing.T) {
-		t.Parallel()
-		mrs := map[string]*beads.Issue{"gt-wisp-mr1": {ID: "gt-wisp-mr1", Status: "closed"}}
-		if got := bdCloseInvariantRefusal(scope(4, "gt-wisp-mr1", mrs), "gt-arno", ""); got == "" {
-			t.Error("expected refusal when the active_mr pointer names an already-closed MR")
-		}
-	})
-
-	t.Run("exit (c): supersede reason", func(t *testing.T) {
-		t.Parallel()
-		if got := bdCloseInvariantRefusal(scope(4, "", nil), "gt-arno", "supersede: folded into gt-x"); got != "" {
+		if got := bdCloseInvariantRefusal(scope(4), "gt-arno", "supersede: folded into gt-x"); got != "" {
 			t.Errorf("expected supersede: reason to allow the close, got %q", got)
 		}
 	})
 
-	t.Run("exit (c): cancel reason", func(t *testing.T) {
+	t.Run("exit (b): cancel reason", func(t *testing.T) {
 		t.Parallel()
-		if got := bdCloseInvariantRefusal(scope(4, "", nil), "gt-arno", "cancel: abandoned"); got != "" {
+		if got := bdCloseInvariantRefusal(scope(4), "gt-arno", "cancel: abandoned"); got != "" {
 			t.Errorf("expected cancel: reason to allow the close, got %q", got)
 		}
 	})
 
 	t.Run("refuses unmerged work with nothing tracking it", func(t *testing.T) {
 		t.Parallel()
-		got := bdCloseInvariantRefusal(scope(4, "", nil), "gt-arno", "")
+		got := bdCloseInvariantRefusal(scope(4), "gt-arno", "")
 		if got == "" {
-			t.Fatal("expected refusal for unmerged commits with no MR and no override reason")
+			t.Fatal("expected refusal for unmerged commits with no override reason")
 		}
 		if !strings.Contains(got, "polecat/malachite/gt-arno+muck73gu") {
 			t.Errorf("refusal must name the branch, got %q", got)
@@ -251,7 +231,7 @@ func TestBdCloseInvariantRefusal(t *testing.T) {
 
 	t.Run("a done-style reason is not an override", func(t *testing.T) {
 		t.Parallel()
-		if got := bdCloseInvariantRefusal(scope(4, "", nil), "gt-arno", "done"); got == "" {
+		if got := bdCloseInvariantRefusal(scope(4), "gt-arno", "done"); got == "" {
 			t.Error("expected a non-prefix reason to still be refused")
 		}
 	})
@@ -260,9 +240,8 @@ func TestBdCloseInvariantRefusal(t *testing.T) {
 // bdCloseInvariantFixture is a hermetic town: a real "mayor/town.json" marker
 // so workspace.Find resolves it, a rig directory, and a real git checkout at
 // the polecat worktree path. Nothing here touches the operator's town, so a
-// guard run against it neither reads nor mutates production state — in
-// particular the rig has no .beads database, so no bd subprocess is spawned
-// (see rigBeadsWorkspaceExists).
+// guard run against it neither reads nor mutates production state; the guard
+// itself runs no bd subprocess.
 type bdCloseInvariantFixture struct {
 	town string
 	work string
@@ -478,23 +457,6 @@ func TestRunTapGuardBdCloseInvariant_UnrelatedCommandAllowed(t *testing.T) {
 	err := tapGuardBdCloseInvariant(strings.NewReader(hookInput), proc)
 	if err != nil {
 		t.Errorf("expected a non-close command to be allowed, got error: %v", err)
-	}
-}
-
-// TestRigBeadsWorkspaceExists pins the precondition that keeps the guard from
-// shelling out to bd in a directory with no database — the state a fixture town
-// (and a broken rig) is in.
-func TestRigBeadsWorkspaceExists(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	if rigBeadsWorkspaceExists(dir) {
-		t.Error("a directory with no .beads database must report false")
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if !rigBeadsWorkspaceExists(dir) {
-		t.Error("a directory holding .beads must report true")
 	}
 }
 

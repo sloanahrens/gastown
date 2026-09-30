@@ -1802,3 +1802,59 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 		assertNoParenMatchers(t, tmplFile, loadClaudeTemplateHooks(t, tmplFile))
 	}
 }
+
+// A hooks-base.json written before gt costs was deleted (gt-638go.2) carries
+// a Stop hook running "gt costs record". It must not reach the expected
+// config, or every sync rewrites a hook that fails on every Stop (gt-31vjc).
+func TestComputeExpectedDropsRetiredCommandHooks(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	staleBase := &HooksConfig{
+		Stop: []HookEntry{
+			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "/Users/x/.local/bin/gt costs record &"}}},
+		},
+		PreCompact: []HookEntry{
+			{Matcher: "", Hooks: []Hook{
+				{Type: "command", Command: "gt mq list"},
+				{Type: "command", Command: "gt prime --hook"},
+			}},
+		},
+	}
+	if err := SaveBase(staleBase); err != nil {
+		t.Fatalf("SaveBase failed: %v", err)
+	}
+
+	expected, err := ComputeExpected("mayor")
+	if err != nil {
+		t.Fatalf("ComputeExpected failed: %v", err)
+	}
+	for _, et := range EventTypes {
+		for _, entry := range expected.GetEntries(et) {
+			for _, h := range entry.Hooks {
+				if runsRetiredGTSubcommand(h.Command) {
+					t.Errorf("%s still runs retired command %q", et, h.Command)
+				}
+			}
+		}
+	}
+	if len(expected.PreCompact) != 1 || len(expected.PreCompact[0].Hooks) != 1 || expected.PreCompact[0].Hooks[0].Command != "gt prime --hook" {
+		t.Errorf("PreCompact should keep only the live hook, got %+v", expected.PreCompact)
+	}
+}
+
+func TestRunsRetiredGTSubcommand(t *testing.T) {
+	for cmd, want := range map[string]bool{
+		"gt costs record &":                     true,
+		"/Users/x/.local/bin/gt costs record &": true,
+		"gt mq list":                            true,
+		"gt prime --hook":                       false,
+		"gt":                                    false,
+		"echo gt costs":                         false,
+		"gtx costs":                             false,
+	} {
+		if got := runsRetiredGTSubcommand(cmd); got != want {
+			t.Errorf("runsRetiredGTSubcommand(%q) = %v, want %v", cmd, got, want)
+		}
+	}
+}

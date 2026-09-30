@@ -73,13 +73,6 @@ type WitnessHandler interface {
 	HandleReworkRequest(payload *ReworkRequestPayload) error
 }
 
-// RefineryHandler defines the interface for Refinery protocol handlers.
-// The Refinery receives messages from Witness about ready branches.
-type RefineryHandler interface {
-	// HandleMergeReady is called when a polecat's work is verified and ready.
-	HandleMergeReady(payload *MergeReadyPayload) error
-}
-
 // WrapWitnessHandlers creates mail handlers from a WitnessHandler.
 func WrapWitnessHandlers(h WitnessHandler) *HandlerRegistry {
 	registry := NewHandlerRegistry()
@@ -106,21 +99,6 @@ func WrapWitnessHandlers(h WitnessHandler) *HandlerRegistry {
 			return err
 		}
 		return h.HandleReworkRequest(payload)
-	})
-
-	return registry
-}
-
-// WrapRefineryHandlers creates mail handlers from a RefineryHandler.
-func WrapRefineryHandlers(h RefineryHandler) *HandlerRegistry {
-	registry := NewHandlerRegistry()
-
-	registry.Register(TypeMergeReady, func(msg *mail.Message) error {
-		payload, err := ParseMergeReadyPayload(msg.Body)
-		if err != nil {
-			return err
-		}
-		return h.HandleMergeReady(payload)
 	})
 
 	return registry

@@ -164,7 +164,8 @@ type Hermetic struct {
 }
 
 type hermeticConfig struct {
-	dolt bool
+	dolt  bool
+	noGit bool
 }
 
 // HermeticOption configures StartHermetic/HermeticMain.
@@ -178,6 +179,35 @@ type HermeticOption func(*hermeticConfig)
 // not start fails StartHermetic.
 func WithDolt() HermeticOption {
 	return func(c *hermeticConfig) { c.dolt = true }
+}
+
+// WithoutGit puts a git on PATH that refuses to run, ahead of the real one.
+// A package listed in internal/testpolicy/gitfree.txt passes it from its
+// unit-tier TestMain, so a git process started anywhere in that tier, even
+// from production code, fails the test that started it instead of running
+// (docs/testing.md, "Seams for external tools"). The integration tier's
+// TestMain does not pass it.
+func WithoutGit() HermeticOption {
+	return func(c *hermeticConfig) { c.noGit = true }
+}
+
+// noGitMessage is what the refusing git writes to stderr.
+const noGitMessage = "git: this package's unit tier runs no git (internal/testpolicy/gitfree.txt); use gitfake or canned output, or move the test to the integration tier"
+
+// installRefusingGit writes a git that prints noGitMessage and exits 1 into
+// dir, and puts dir first on PATH.
+func installRefusingGit(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating refusing-git dir: %w", err)
+	}
+	script := "#!/bin/sh\necho \"" + noGitMessage + "\" >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: the refusing git must be executable
+		return fmt.Errorf("writing refusing git: %w", err)
+	}
+	return os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // HermeticMain is the standard TestMain body:
@@ -325,6 +355,12 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 			}
 			fmt.Fprintf(os.Stderr,
 				"hermetic harness: Dolt container unavailable (%v); Dolt-dependent tests will skip\n", err)
+		}
+	}
+
+	if h.cfg.noGit {
+		if err := installRefusingGit(filepath.Join(sandbox, "nogit")); err != nil {
+			return nil, err
 		}
 	}
 
