@@ -7,6 +7,7 @@ import (
 )
 
 func TestAddressToIdentity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address  string
 		expected string
@@ -46,6 +47,7 @@ func TestAddressToIdentity(t *testing.T) {
 }
 
 func TestIdentityToAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		identity string
 		expected string
@@ -78,6 +80,7 @@ func TestIdentityToAddress(t *testing.T) {
 }
 
 func TestPriorityToBeads(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		priority Priority
 		expected int
@@ -100,6 +103,7 @@ func TestPriorityToBeads(t *testing.T) {
 }
 
 func TestPriorityFromInt(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		p        int
 		expected Priority
@@ -121,6 +125,7 @@ func TestPriorityFromInt(t *testing.T) {
 }
 
 func TestParsePriority(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		s        string
 		expected Priority
@@ -145,6 +150,7 @@ func TestParsePriority(t *testing.T) {
 }
 
 func TestParseMessageType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		s        string
 		expected MessageType
@@ -170,6 +176,7 @@ func TestParseMessageType(t *testing.T) {
 }
 
 func TestNewMessage(t *testing.T) {
+	t.Parallel()
 	msg := NewMessage("mayor/", "gastown/Toast", "Test Subject", "Test Body")
 
 	if msg.From != "mayor/" {
@@ -202,6 +209,7 @@ func TestNewMessage(t *testing.T) {
 }
 
 func TestNewReplyMessage(t *testing.T) {
+	t.Parallel()
 	original := &Message{
 		ID:       "orig-001",
 		ThreadID: "thread-001",
@@ -230,6 +238,7 @@ func TestNewReplyMessage(t *testing.T) {
 }
 
 func TestBeadsMessageToMessage(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	bm := BeadsMessage{
 		ID:          "hq-test",
@@ -268,6 +277,7 @@ func TestBeadsMessageToMessage(t *testing.T) {
 }
 
 func TestBeadsMessageToMessageWithReplyTo(t *testing.T) {
+	t.Parallel()
 	bm := BeadsMessage{
 		ID:          "hq-reply",
 		Title:       "Reply Subject",
@@ -290,6 +300,7 @@ func TestBeadsMessageToMessageWithReplyTo(t *testing.T) {
 }
 
 func TestBeadsMessageToMessageWithEscalationTypeAndLabels(t *testing.T) {
+	t.Parallel()
 	bm := BeadsMessage{
 		ID:          "hq-esc",
 		Title:       "Escalation subject",
@@ -325,6 +336,7 @@ func TestBeadsMessageToMessageWithEscalationTypeAndLabels(t *testing.T) {
 }
 
 func TestBeadsMessageToMessagePriorities(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		priority int
 		expected Priority
@@ -350,6 +362,7 @@ func TestBeadsMessageToMessagePriorities(t *testing.T) {
 }
 
 func TestBeadsMessageToMessageTypes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		msgType  string
 		expected MessageType
@@ -375,6 +388,7 @@ func TestBeadsMessageToMessageTypes(t *testing.T) {
 }
 
 func TestBeadsMessageToMessageEmptyLabels(t *testing.T) {
+	t.Parallel()
 	bm := BeadsMessage{
 		ID:          "hq-empty",
 		Title:       "Empty Labels",
@@ -395,6 +409,7 @@ func TestBeadsMessageToMessageEmptyLabels(t *testing.T) {
 }
 
 func TestNewQueueMessage(t *testing.T) {
+	t.Parallel()
 	msg := NewQueueMessage("mayor/", "work-requests", "New Task", "Please process this")
 
 	if msg.From != "mayor/" {
@@ -421,6 +436,7 @@ func TestNewQueueMessage(t *testing.T) {
 }
 
 func TestNewChannelMessage(t *testing.T) {
+	t.Parallel()
 	msg := NewChannelMessage("deacon/", "alerts", "System Alert", "System is healthy")
 
 	if msg.From != "deacon/" {
@@ -441,6 +457,7 @@ func TestNewChannelMessage(t *testing.T) {
 }
 
 func TestMessageIsQueueMessage(t *testing.T) {
+	t.Parallel()
 	directMsg := NewMessage("mayor/", "gastown/Toast", "Test", "Body")
 	queueMsg := NewQueueMessage("mayor/", "work-requests", "Task", "Body")
 	channelMsg := NewChannelMessage("deacon/", "alerts", "Alert", "Body")
@@ -457,6 +474,7 @@ func TestMessageIsQueueMessage(t *testing.T) {
 }
 
 func TestMessageIsChannelMessage(t *testing.T) {
+	t.Parallel()
 	directMsg := NewMessage("mayor/", "gastown/Toast", "Test", "Body")
 	queueMsg := NewQueueMessage("mayor/", "work-requests", "Task", "Body")
 	channelMsg := NewChannelMessage("deacon/", "alerts", "Alert", "Body")
@@ -473,6 +491,7 @@ func TestMessageIsChannelMessage(t *testing.T) {
 }
 
 func TestMessageIsDirectMessage(t *testing.T) {
+	t.Parallel()
 	directMsg := NewMessage("mayor/", "gastown/Toast", "Test", "Body")
 	queueMsg := NewQueueMessage("mayor/", "work-requests", "Task", "Body")
 	channelMsg := NewChannelMessage("deacon/", "alerts", "Alert", "Body")
@@ -489,6 +508,7 @@ func TestMessageIsDirectMessage(t *testing.T) {
 }
 
 func TestMessageValidate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		msg     *Message
@@ -644,6 +664,7 @@ func findSubstring(s, substr string) bool {
 }
 
 func TestBeadsMessageParseQueueChannelLabels(t *testing.T) {
+	t.Parallel()
 	claimedTime := time.Date(2026, 1, 14, 12, 0, 0, 0, time.UTC)
 	claimedAtStr := claimedTime.Format(time.RFC3339)
 
@@ -677,6 +698,7 @@ func TestBeadsMessageParseQueueChannelLabels(t *testing.T) {
 }
 
 func TestBeadsMessageParseChannelLabel(t *testing.T) {
+	t.Parallel()
 	bm := BeadsMessage{
 		ID:          "hq-channel",
 		Title:       "Channel Message",
@@ -697,6 +719,7 @@ func TestBeadsMessageParseChannelLabel(t *testing.T) {
 }
 
 func TestBeadsMessageIsQueueMessage(t *testing.T) {
+	t.Parallel()
 	queueMsg := BeadsMessage{
 		ID:     "hq-queue",
 		Labels: []string{"queue:work-requests"},
@@ -722,6 +745,7 @@ func TestBeadsMessageIsQueueMessage(t *testing.T) {
 }
 
 func TestBeadsMessageIsChannelMessage(t *testing.T) {
+	t.Parallel()
 	queueMsg := BeadsMessage{
 		ID:     "hq-queue",
 		Labels: []string{"queue:work-requests"},
@@ -747,6 +771,7 @@ func TestBeadsMessageIsChannelMessage(t *testing.T) {
 }
 
 func TestBeadsMessageIsDirectMessage(t *testing.T) {
+	t.Parallel()
 	queueMsg := BeadsMessage{
 		ID:     "hq-queue",
 		Labels: []string{"queue:work-requests"},
@@ -772,6 +797,7 @@ func TestBeadsMessageIsDirectMessage(t *testing.T) {
 }
 
 func TestMessageIsClaimed(t *testing.T) {
+	t.Parallel()
 	unclaimed := NewQueueMessage("mayor/", "work-requests", "Task", "Body")
 	if unclaimed.IsClaimed() {
 		t.Error("Unclaimed message should not be claimed")
@@ -788,6 +814,7 @@ func TestMessageIsClaimed(t *testing.T) {
 }
 
 func TestParseLabelsIdempotent(t *testing.T) {
+	t.Parallel()
 	bm := BeadsMessage{
 		ID:    "hq-test",
 		Title: "Test",
@@ -849,6 +876,7 @@ func TestParseLabelsIdempotent(t *testing.T) {
 }
 
 func TestParseLabelsIdempotentViaPublicMethods(t *testing.T) {
+	t.Parallel()
 	bm := BeadsMessage{
 		ID:       "hq-test",
 		Title:    "Test",
@@ -873,6 +901,7 @@ func TestParseLabelsIdempotentViaPublicMethods(t *testing.T) {
 }
 
 func TestToMessage_DeliveryStatePendingOnPartialAck(t *testing.T) {
+	t.Parallel()
 	bm := BeadsMessage{
 		ID:       "hq-test",
 		Title:    "Test",
@@ -894,6 +923,7 @@ func TestToMessage_DeliveryStatePendingOnPartialAck(t *testing.T) {
 }
 
 func TestSuppressNotifyNotSerialized(t *testing.T) {
+	t.Parallel()
 	msg := NewMessage("mayor/", "gastown/Toast", "Test", "Body")
 	msg.SuppressNotify = true
 
@@ -918,6 +948,7 @@ func TestSuppressNotifyNotSerialized(t *testing.T) {
 }
 
 func TestNewMessageValidatesForCrossRigAddresses(t *testing.T) {
+	t.Parallel()
 	// Regression test: cross-rig addresses like "beads/crew/emma" must have
 	// auto-generated ID and pass validation (gt-rud3p).
 	crossRigAddresses := []string{
@@ -946,6 +977,7 @@ func TestNewMessageValidatesForCrossRigAddresses(t *testing.T) {
 }
 
 func TestNewMessageFanOutCopiesGetUniqueIDs(t *testing.T) {
+	t.Parallel()
 	// When fanning out to multiple recipients, copies with cleared IDs
 	// should get unique IDs from sendToSingle (gt-rud3p).
 	msg := NewMessage("gastown/dag", "beads/crew/emma", "Test", "Body")

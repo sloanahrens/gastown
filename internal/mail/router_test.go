@@ -1,14 +1,9 @@
 package mail
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,15 +13,11 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func TestDetectTownRoot(t *testing.T) {
-	// Unset GT_TOWN_ROOT/GT_ROOT so tests exercise workspace.Find fallback.
-	// (The real session always has these set; this tests the detection logic itself.)
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
+	t.Parallel()
 
 	// Create temp directory structure
 	tmpDir := t.TempDir()
@@ -74,7 +65,8 @@ func TestDetectTownRoot(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := detectTownRoot(tt.startDir)
+			// No GT_TOWN_ROOT/GT_ROOT, so detection is workspace.Find's alone.
+			got := detectTownRoot(tt.startDir, noEnv)
 			if got != tt.want {
 				t.Errorf("detectTownRoot(%q) = %q, want %q", tt.startDir, got, tt.want)
 			}
@@ -86,6 +78,7 @@ func TestDetectTownRoot(t *testing.T) {
 // over workspace detection, preventing rig-level mayor/town.json from being
 // mistaken for the town root.
 func TestDetectTownRoot_PrefersEnvVar(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// Outer town root (the actual town)
 	outerTown := filepath.Join(tmpDir, "town")
@@ -106,30 +99,27 @@ func TestDetectTownRoot_PrefersEnvVar(t *testing.T) {
 	}
 
 	t.Run("env var overrides nested workspace detection", func(t *testing.T) {
-		t.Setenv("GT_TOWN_ROOT", outerTown)
+		getenv := envOf(map[string]string{"GT_TOWN_ROOT": outerTown})
 		// Starting from the nested rig would normally find the rig's own
 		// mayor/town.json first. With GT_TOWN_ROOT set, we get the outer town.
-		got := detectTownRoot(nestedRig)
+		got := detectTownRoot(nestedRig, getenv)
 		if got != outerTown {
 			t.Errorf("detectTownRoot(%q) = %q, want %q (outer town root via env var)", nestedRig, got, outerTown)
 		}
 	})
 
 	t.Run("GT_ROOT also works", func(t *testing.T) {
-		t.Setenv("GT_TOWN_ROOT", "")
-		t.Setenv("GT_ROOT", outerTown)
-		got := detectTownRoot(nestedRig)
+		getenv := envOf(map[string]string{"GT_ROOT": outerTown})
+		got := detectTownRoot(nestedRig, getenv)
 		if got != outerTown {
 			t.Errorf("detectTownRoot(%q) = %q, want %q (outer town root via GT_ROOT)", nestedRig, got, outerTown)
 		}
 	})
 
 	t.Run("falls back to workspace.Find without env vars", func(t *testing.T) {
-		t.Setenv("GT_TOWN_ROOT", "")
-		t.Setenv("GT_ROOT", "")
 		// Without env vars, starting from the nested rig finds the nested
 		// mayor/town.json (the bug this fix addresses — documenting current behavior).
-		got := detectTownRoot(nestedRig)
+		got := detectTownRoot(nestedRig, noEnv)
 		// workspace.Find returns the nested rig since it stops at first primary marker
 		if got != nestedRig {
 			t.Logf("detectTownRoot fallback returned %q (expected %q for nested-workspace scenario)", got, nestedRig)
@@ -137,7 +127,16 @@ func TestDetectTownRoot_PrefersEnvVar(t *testing.T) {
 	})
 }
 
+// noEnv is an environment with nothing set.
+func noEnv(string) string { return "" }
+
+// envOf is an environment holding exactly vars.
+func envOf(vars map[string]string) func(string) string {
+	return func(k string) string { return vars[k] }
+}
+
 func TestIsTownLevelAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    bool
@@ -164,14 +163,7 @@ func TestIsTownLevelAddress(t *testing.T) {
 }
 
 func TestAddressToSessionIDs(t *testing.T) {
-	// Set up prefix registry for test
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
-
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    []string
@@ -233,6 +225,7 @@ func TestAddressToSessionIDs(t *testing.T) {
 }
 
 func TestIsSelfMail(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		from string
 		to   string
@@ -265,6 +258,7 @@ func TestIsSelfMail(t *testing.T) {
 }
 
 func TestShouldBeWisp(t *testing.T) {
+	t.Parallel()
 	r := &Router{}
 
 	tests := []struct {
@@ -373,6 +367,7 @@ func TestShouldBeWisp(t *testing.T) {
 }
 
 func TestResolveBeadsDir(t *testing.T) {
+	t.Parallel()
 	// With town root set
 	r := NewRouterWithTownRoot("/work/dir", "/home/user/gt")
 	got := r.resolveBeadsDir()
@@ -414,59 +409,30 @@ func TestResolveBeadsDir(t *testing.T) {
 // the same address specifically to catch a regression that drops that
 // filter.
 func TestRouterBatchMailSummaries(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fake bd is POSIX-only")
-	}
-
-	binDir := t.TempDir()
-	callLog := filepath.Join(t.TempDir(), "bd-sql.log")
-	fakeBD := filepath.Join(binDir, "bd")
+	t.Parallel()
 	// The fixture identity "gastown/max" is what "gastown/crew/max" must
 	// normalize to (AddressToIdentity strips the "crew/" role segment). The
 	// fake only emits the gastown/max-owned rows when the query's identity
 	// list actually names the normalized, quoted identity 'gastown/max' —
 	// simulating a real DB where a message is never assigned to the raw,
 	// un-normalized address, so a query for the raw address returns nothing.
-	script := `#!/bin/sh
-if [ "$1" = "sql" ]; then
-  printf '%s\n' "$3" >> "$BD_SQL_LOG"
-  case "$3" in
-    *"FROM issues"*)
-      case "$3" in
-        *"'gastown/max'"*)
-          printf '%s\n' '[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":0},{"id":"issue-already-read","title":"Already read","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":1},{"id":"issue-cc-both","title":"CC to max and mayor","status":"open","assignee":"someone/else","cc_labels_csv":"cc:gastown/max,cc:mayor/","is_read":0}]'
-          ;;
-        *)
-          printf '[]\n'
-          ;;
-      esac
-      ;;
-    *"FROM wisps"*)
-      case "$3" in
-        *"'gastown/max'"*)
-          printf '%s\n' '[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-already-read","title":"Wisp already read","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,read","assignee_match":1,"cc_match":0}]'
-          ;;
-        *)
-          printf '[]\n'
-          ;;
-      esac
-      ;;
-    *)
-      printf '[]\n'
-      ;;
-  esac
-  exit 0
-fi
-printf 'unexpected bd args: %s\n' "$*" >&2
-exit 1
-`
-	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_SQL_LOG", callLog)
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		if c.Args[0] != "sql" {
+			return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+		}
+		query := c.Args[2]
+		named := strings.Contains(query, "'gastown/max'")
+		switch {
+		case strings.Contains(query, "FROM issues") && named:
+			return `[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":0},{"id":"issue-already-read","title":"Already read","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":1},{"id":"issue-cc-both","title":"CC to max and mayor","status":"open","assignee":"someone/else","cc_labels_csv":"cc:gastown/max,cc:mayor/","is_read":0}]`, "", 0
+		case strings.Contains(query, "FROM wisps") && named:
+			return `[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-already-read","title":"Wisp already read","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,read","assignee_match":1,"cc_match":0}]`, "", 0
+		}
+		return "[]\n", "", 0
+	}}
 
 	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir())
+	r.bd = bd.run
 	// "gastown/crew/max" is the raw GGT address form (as discoverRigAgents
 	// builds it); it must be normalized to "gastown/max" before querying.
 	summaries, err := r.BatchMailSummaries([]string{"gastown/crew/max", "mayor/"})
@@ -494,13 +460,8 @@ exit 1
 		t.Errorf("mayor/ FirstSubject = %q, want %q", got, "CC to max and mayor")
 	}
 
-	logBytes, err := os.ReadFile(callLog)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
-	}
-	queries := strings.Split(strings.TrimSpace(string(logBytes)), "\n")
-	if len(queries) != 2 {
-		t.Fatalf("bd sql calls = %d, want 2 (one issues, one wisps) regardless of address count; log:\n%s", len(queries), string(logBytes))
+	if calls := bd.argvs(); len(calls) != 2 {
+		t.Fatalf("bd sql calls = %d, want 2 (one issues, one wisps) regardless of address count; calls:\n%s", len(calls), strings.Join(calls, "\n"))
 	}
 }
 
@@ -512,43 +473,20 @@ exit 1
 // to clear (they're filtered out of `gt mail inbox` by the same prefix, so
 // there was nothing to read/ack).
 func TestRouterBatchMailSummariesExcludesDeaconSelfProbes(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fake bd is POSIX-only")
-	}
-
-	binDir := t.TempDir()
-	fakeBD := filepath.Join(binDir, "bd")
-	script := `#!/bin/sh
-if [ "$1" = "sql" ]; then
-  case "$3" in
-    *"FROM issues"*)
-      printf '[]\n'
-      ;;
-    *"FROM wisps"*)
-      case "$3" in
-        *"'gastown/max'"*)
-          printf '%s\n' '[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-probe","title":"` + constants.DeaconSelfProbeSubjectPrefix + ` nonce-abc","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0}]'
-          ;;
-        *)
-          printf '[]\n'
-          ;;
-      esac
-      ;;
-    *)
-      printf '[]\n'
-      ;;
-  esac
-  exit 0
-fi
-printf 'unexpected bd args: %s\n' "$*" >&2
-exit 1
-`
-	if err := os.WriteFile(fakeBD, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Parallel()
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		if c.Args[0] != "sql" {
+			return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+		}
+		query := c.Args[2]
+		if strings.Contains(query, "FROM wisps") && strings.Contains(query, "'gastown/max'") {
+			return `[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-probe","title":"` + constants.DeaconSelfProbeSubjectPrefix + ` nonce-abc","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0}]`, "", 0
+		}
+		return "[]\n", "", 0
+	}}
 
 	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir())
+	r.bd = bd.run
 	summaries, err := r.BatchMailSummaries([]string{"gastown/max"})
 	if err != nil {
 		t.Fatalf("BatchMailSummaries: %v", err)
@@ -565,10 +503,7 @@ exit 1
 }
 
 func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses a bash bd stub")
-	}
-
+	t.Parallel()
 	tmpDir := t.TempDir()
 	townRoot := filepath.Join(tmpDir, "town")
 	senderDir := filepath.Join(townRoot, "barnaby", "crew", "tom")
@@ -596,63 +531,42 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 	// Stub bd to reproduce the old behavior where --id msg-* with --ephemeral
 	// would fail prefix validation before ephemeral handling.
 	// The fix: sendToSingle no longer passes --id to bd create.
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	bdStub := filepath.Join(binDir, "bd")
-	script := `#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ "${1:-}" == "config" || "${1:-}" == "init" ]]; then
-  exit 0
-fi
-
-if [[ "${1:-}" == "list" ]]; then
-  echo "[]"
-  exit 0
-fi
-
-if [[ "${1:-}" == "mol" && "${2:-}" == "wisp" && "${3:-}" == "list" ]]; then
-  echo "[]"
-  exit 0
-fi
-
-if [[ "${1:-}" == "create" ]]; then
-  has_ephemeral=false
-  msg_id=""
-  i=1
-  while [[ $i -le $# ]]; do
-    arg="${!i}"
-    if [[ "$arg" == "--ephemeral" ]]; then
-      has_ephemeral=true
-    elif [[ "$arg" == "--id" ]]; then
-      ((i++))
-      msg_id="${!i:-}"
-    elif [[ "$arg" == --id=* ]]; then
-      msg_id="${arg#--id=}"
-    fi
-    ((i++))
-  done
-
-  if [[ "$has_ephemeral" == "true" && "$msg_id" == msg-* ]]; then
-    echo "prefix mismatch: database uses 'hq-' (allowed: hq,hq-cv) but ID '$msg_id' doesn't match any allowed prefix" >&2
-    exit 1
-  fi
-
-  echo "hq-testmail-1"
-  exit 0
-fi
-
-echo "unsupported bd args: $*" >&2
-exit 1
-`
-	if err := os.WriteFile(bdStub, []byte(script), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// bd answers config, list and wisp list with nothing, and create with
+	// an ID; the old code passed --id msg-* with --ephemeral, which bd
+	// rejected with a prefix mismatch (the fix: sendToSingle no longer
+	// passes --id to bd create).
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		args := c.Args
+		switch {
+		case args[0] == "config" || args[0] == "init":
+			return "", "", 0
+		case args[0] == "list":
+			return "[]\n", "", 0
+		case len(args) >= 3 && args[0] == "mol" && args[1] == "wisp" && args[2] == "list":
+			return "[]\n", "", 0
+		case args[0] == "create":
+			ephemeral, id := false, ""
+			for i := 0; i < len(args); i++ {
+				switch {
+				case args[i] == "--ephemeral":
+					ephemeral = true
+				case args[i] == "--id" && i+1 < len(args):
+					i++
+					id = args[i]
+				case strings.HasPrefix(args[i], "--id="):
+					id = strings.TrimPrefix(args[i], "--id=")
+				}
+			}
+			if ephemeral && strings.HasPrefix(id, "msg-") {
+				return "", "prefix mismatch: database uses 'hq-' (allowed: hq,hq-cv) but ID '" + id + "' doesn't match any allowed prefix", 1
+			}
+			return "hq-testmail-1\n", "", 0
+		}
+		return "", "unsupported bd args: " + strings.Join(args, " "), 1
+	}}
 
 	r := NewRouter(senderDir)
+	r.bd = bd.run
 	msg := &Message{
 		From:           "barnaby/crew/tom",
 		To:             "barnaby/troy",
@@ -676,10 +590,7 @@ exit 1
 // ClearReplyReminders removes nothing, leaving the reminder to fire long
 // after the thread was read, replied to, or deleted (gt-5mac).
 func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses a bash bd stub")
-	}
-
+	t.Parallel()
 	tmpDir := t.TempDir()
 	townRoot := filepath.Join(tmpDir, "town")
 	senderDir := filepath.Join(townRoot, "barnaby", "crew", "tom")
@@ -702,44 +613,42 @@ func TestSendToSingle_BackfillsEmptyThreadID(t *testing.T) {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	argsLog := filepath.Join(tmpDir, "bd-create-args.log")
-	bdStub := filepath.Join(binDir, "bd")
-	script := `#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ "${1:-}" == "config" || "${1:-}" == "init" ]]; then
-  exit 0
-fi
-
-if [[ "${1:-}" == "list" ]]; then
-  echo "[]"
-  exit 0
-fi
-
-if [[ "${1:-}" == "mol" && "${2:-}" == "wisp" && "${3:-}" == "list" ]]; then
-  echo "[]"
-  exit 0
-fi
-
-if [[ "${1:-}" == "create" ]]; then
-  echo "$@" >> "` + argsLog + `"
-  echo "hq-testmail-1"
-  exit 0
-fi
-
-echo "unsupported bd args: $*" >&2
-exit 1
-`
-	if err := os.WriteFile(bdStub, []byte(script), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// bd answers config, list and wisp list with nothing, and create with
+	// an ID; the old code passed --id msg-* with --ephemeral, which bd
+	// rejected with a prefix mismatch (the fix: sendToSingle no longer
+	// passes --id to bd create).
+	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		args := c.Args
+		switch {
+		case args[0] == "config" || args[0] == "init":
+			return "", "", 0
+		case args[0] == "list":
+			return "[]\n", "", 0
+		case len(args) >= 3 && args[0] == "mol" && args[1] == "wisp" && args[2] == "list":
+			return "[]\n", "", 0
+		case args[0] == "create":
+			ephemeral, id := false, ""
+			for i := 0; i < len(args); i++ {
+				switch {
+				case args[i] == "--ephemeral":
+					ephemeral = true
+				case args[i] == "--id" && i+1 < len(args):
+					i++
+					id = args[i]
+				case strings.HasPrefix(args[i], "--id="):
+					id = strings.TrimPrefix(args[i], "--id=")
+				}
+			}
+			if ephemeral && strings.HasPrefix(id, "msg-") {
+				return "", "prefix mismatch: database uses 'hq-' (allowed: hq,hq-cv) but ID '" + id + "' doesn't match any allowed prefix", 1
+			}
+			return "hq-testmail-1\n", "", 0
+		}
+		return "", "unsupported bd args: " + strings.Join(args, " "), 1
+	}}
 
 	r := NewRouter(senderDir)
+	r.bd = bd.run
 	// Built as a plain struct literal with no ThreadID set, matching how
 	// system notices like RECOVERED_BEAD are constructed in production.
 	msg := &Message{
@@ -758,16 +667,19 @@ exit 1
 		t.Fatal("Send left ThreadID empty; reply-reminders for this message can never be cleared")
 	}
 
-	logged, err := os.ReadFile(argsLog)
-	if err != nil {
-		t.Fatalf("read bd create args log: %v", err)
+	var logged string
+	for _, argv := range bd.argvs() {
+		if strings.HasPrefix(argv, "create ") {
+			logged += argv + "\n"
+		}
 	}
-	if !strings.Contains(string(logged), "thread:"+msg.ThreadID) {
+	if !strings.Contains(logged, "thread:"+msg.ThreadID) {
 		t.Errorf("bd create args = %q, want a thread:%s label", logged, msg.ThreadID)
 	}
 }
 
 func TestNewRouterWithTownRoot(t *testing.T) {
+	t.Parallel()
 	r := NewRouterWithTownRoot("/work/rig", "/home/gt")
 	if filepath.ToSlash(r.workDir) != "/work/rig" {
 		t.Errorf("workDir = %q, want '/work/rig'", r.workDir)
@@ -780,6 +692,7 @@ func TestNewRouterWithTownRoot(t *testing.T) {
 // ============ Mailing List Tests ============
 
 func TestIsListAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    bool
@@ -804,6 +717,7 @@ func TestIsListAddress(t *testing.T) {
 }
 
 func TestParseListName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    string
@@ -825,6 +739,7 @@ func TestParseListName(t *testing.T) {
 }
 
 func TestIsQueueAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    bool
@@ -850,6 +765,7 @@ func TestIsQueueAddress(t *testing.T) {
 }
 
 func TestParseQueueName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    string
@@ -871,6 +787,7 @@ func TestParseQueueName(t *testing.T) {
 }
 
 func TestExpandList(t *testing.T) {
+	t.Parallel()
 	// Create temp directory with messaging config
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, "config")
@@ -947,6 +864,7 @@ func TestExpandList(t *testing.T) {
 }
 
 func TestExpandListNoTownRoot(t *testing.T) {
+	t.Parallel()
 	r := &Router{workDir: "/tmp", townRoot: ""}
 	_, err := r.expandList("oncall")
 	if err == nil {
@@ -958,6 +876,7 @@ func TestExpandListNoTownRoot(t *testing.T) {
 }
 
 func TestExpandQueue(t *testing.T) {
+	t.Parallel()
 	// Create temp directory with messaging config
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, "config")
@@ -1040,6 +959,7 @@ func TestExpandQueue(t *testing.T) {
 }
 
 func TestExpandQueueNoTownRoot(t *testing.T) {
+	t.Parallel()
 	r := &Router{workDir: "/tmp", townRoot: ""}
 	_, err := r.expandQueue("work")
 	if err == nil {
@@ -1053,6 +973,7 @@ func TestExpandQueueNoTownRoot(t *testing.T) {
 // ============ Announce Address Tests ============
 
 func TestIsAnnounceAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    bool
@@ -1079,6 +1000,7 @@ func TestIsAnnounceAddress(t *testing.T) {
 }
 
 func TestParseAnnounceName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    string
@@ -1116,6 +1038,7 @@ func containsHelper(s, substr string) bool {
 // ============ @group Address Tests ============
 
 func TestIsGroupAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address string
 		want    bool
@@ -1144,6 +1067,7 @@ func TestIsGroupAddress(t *testing.T) {
 }
 
 func TestParseGroupAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		address      string
 		wantType     GroupType
@@ -1210,6 +1134,7 @@ func TestParseGroupAddress(t *testing.T) {
 }
 
 func TestAgentBeadToAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		bead *agentBead
@@ -1349,6 +1274,7 @@ func TestAgentBeadToAddress(t *testing.T) {
 }
 
 func TestParseAgentAddressFromDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		desc string
@@ -1392,6 +1318,7 @@ func TestParseAgentAddressFromDescription(t *testing.T) {
 }
 
 func TestExpandAnnounce(t *testing.T) {
+	t.Parallel()
 	// Create temp directory with messaging config
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, "config")
@@ -1474,6 +1401,7 @@ func TestExpandAnnounce(t *testing.T) {
 }
 
 func TestExpandAnnounceNoTownRoot(t *testing.T) {
+	t.Parallel()
 	r := &Router{workDir: "/tmp", townRoot: ""}
 	_, err := r.expandAnnounce("alerts")
 	if err == nil {
@@ -1486,128 +1414,8 @@ func TestExpandAnnounceNoTownRoot(t *testing.T) {
 
 // ============ Recipient Validation Tests ============
 
-func TestValidateRecipient(t *testing.T) {
-	// Skip if bd CLI is not available or not functional (e.g., missing DLLs on Windows CI)
-	if out, err := exec.Command("bd", "version").CombinedOutput(); err != nil {
-		t.Skipf("bd CLI not functional, skipping test: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-
-	// Start an ephemeral Dolt container to prevent bd init from creating
-	// databases on the production server (port 3307).
-	testutil.RequireDoltContainer(t)
-	doltPort, _ := strconv.Atoi(testutil.DoltContainerPort())
-
-	// Create isolated beads environment for testing
-	tmpDir := t.TempDir()
-	townRoot := tmpDir
-
-	// Create .beads directory and initialize
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("creating beads dir: %v", err)
-	}
-
-	// Use beads.NewIsolatedWithPort with a unique random prefix to avoid Dolt
-	// primary key collisions with production beads (e.g., gt-mayor).
-	// NewIsolatedWithPort directs bd init to the ephemeral server via
-	// --server-port and GT_DOLT_PORT, and uses --db flag for subsequent
-	// commands (bypassing Dolt). We set BEADS_DB so that the Router's
-	// external bd calls also use the same isolated SQLite database.
-	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
-	prefix := "vr" + hex.EncodeToString(buf[:])
-	b := beads.NewIsolatedWithPort(townRoot, doltPort)
-	if err := b.Init(prefix); err != nil {
-		t.Fatalf("bd init: %v", err)
-	}
-
-	// Point BEADS_DB at the isolated SQLite file so the Router's
-	// runBdCommand (which inherits process env) uses it too.
-	beadsDB := filepath.Join(beadsDir, "beads.db")
-	t.Setenv("BEADS_DB", beadsDB)
-
-	// Register type config required for agent beads.
-	if _, err := b.Run("config", "set", "types.custom", constants.BeadsCustomTypes); err != nil {
-		t.Fatalf("config set types.custom: %v", err)
-	}
-	if _, err := b.Run("config", "set", "types.infra", constants.BeadsInfraTypes); err != nil {
-		t.Fatalf("config set types.infra: %v", err)
-	}
-
-	// Create test agent beads with gt:agent label.
-	// Safe to use "gt-" prefixed IDs since both NewIsolated (--db) and the
-	// Router (BEADS_DB env) point to the same local SQLite database.
-	createAgent := func(id, title string) {
-		if _, err := b.Run("create", title, "--labels=gt:agent", "--id="+id, "--force"); err != nil {
-			t.Fatalf("creating agent %s: %v", id, err)
-		}
-	}
-
-	createAgent("gt-mayor", "Mayor agent")
-	createAgent("gt-deacon", "Deacon agent")
-	createAgent("gt-testrig-witness", "Test witness")
-	createAgent("gt-testrig-crew-alice", "Test crew alice")
-	createAgent("gt-testrig-polecat-bob", "Test polecat bob")
-
-	// Create dog directory for workspace fallback validation (deacon/dogs/fido).
-	// The workspace fallback handles cases where agent beads are missing or
-	// the bead DB is unavailable (e.g., after Dolt reset).
-	dogDir := filepath.Join(townRoot, "deacon", "dogs", "fido")
-	if err := os.MkdirAll(dogDir, 0755); err != nil {
-		t.Fatalf("creating dog dir: %v", err)
-	}
-
-	r := NewRouterWithTownRoot(townRoot, townRoot)
-
-	tests := []struct {
-		name     string
-		identity string
-		wantErr  bool
-		errMsg   string
-	}{
-		// Overseer is always valid (human operator, no agent bead)
-		{"overseer", "overseer", false, ""},
-
-		// Town-level agents (validated against beads)
-		{"mayor", "mayor/", false, ""},
-		{"deacon", "deacon/", false, ""},
-
-		// Rig-level agents (validated against beads)
-		{"witness", "testrig/witness", false, ""},
-		{"crew member", "testrig/alice", false, ""},
-		{"polecat", "testrig/bob", false, ""},
-
-		// Dog agents (validated via workspace fallback: deacon/dogs/<name> directory)
-		{"dog agent", "deacon/dogs/fido", false, ""},
-
-		// Invalid addresses - should fail
-		{"bare name", "ruby", true, "no agent found"},
-		{"nonexistent rig agent", "testrig/nonexistent", true, "no agent found"},
-		{"wrong rig", "wrongrig/alice", true, "no agent found"},
-		{"misrouted town agent", "testrig/mayor", true, "no agent found"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := r.validateRecipient(tt.identity)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("validateRecipient(%q) expected error, got nil", tt.identity)
-				} else if tt.errMsg != "" && !contains(err.Error(), tt.errMsg) {
-					t.Errorf("validateRecipient(%q) error = %v, want containing %q", tt.identity, err, tt.errMsg)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("validateRecipient(%q) unexpected error: %v", tt.identity, err)
-				}
-			}
-		})
-	}
-}
-
 func TestValidateAgentWorkspaceDog(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create dog directory structure: deacon/dogs/fido
@@ -1643,18 +1451,8 @@ func TestValidateAgentWorkspaceDog(t *testing.T) {
 	}
 }
 
-func setupTestRegistryForAddressTest(t *testing.T) {
-	t.Helper()
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-}
-
 func TestAddressToAgentBeadID(t *testing.T) {
-	setupTestRegistryForAddressTest(t)
+	t.Parallel()
 
 	tests := []struct {
 		name     string
@@ -1786,6 +1584,7 @@ func TestAddressToAgentBeadID(t *testing.T) {
 // ============ Crew Shorthand Resolution Tests ============
 
 func TestResolveCrewShorthand(t *testing.T) {
+	t.Parallel()
 	// Create a realistic town directory structure
 	tmpDir := t.TempDir()
 
@@ -1865,6 +1664,7 @@ func TestResolveCrewShorthand(t *testing.T) {
 }
 
 func TestValidateRecipientFilesystemFallback(t *testing.T) {
+	t.Parallel()
 	// Create a realistic town directory structure without any agent beads
 	tmpDir := t.TempDir()
 
@@ -1889,6 +1689,8 @@ func TestValidateRecipientFilesystemFallback(t *testing.T) {
 	}
 
 	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	// No agent beads: every bd query fails as it does with no database.
+	r.bd = noBeadsDatabase
 
 	tests := []struct {
 		name     string
@@ -1925,6 +1727,7 @@ func TestValidateRecipientFilesystemFallback(t *testing.T) {
 }
 
 func TestValidateRecipientFilesystemFallbackWithRouteErrors(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	for _, subpath := range []string{
@@ -1945,6 +1748,8 @@ func TestValidateRecipientFilesystemFallbackWithRouteErrors(t *testing.T) {
 	}
 
 	r := NewRouterWithTownRoot(tmpDir, tmpDir)
+	// No agent beads: every bd query fails as it does with no database.
+	r.bd = noBeadsDatabase
 
 	for _, identity := range []string{"sfn1_fast/arch", "sfn1_fast/crew/arch"} {
 		t.Run(identity, func(t *testing.T) {
@@ -2041,12 +1846,15 @@ func (f *fakeNotifyTmux) nudgesTo(session string) []string {
 // TestNotifyRecipient_IdleAgent verifies that an idle agent (prompt visible)
 // receives a direct nudge instead of a queued one.
 func TestNotifyRecipient_IdleAgent(t *testing.T) {
+	t.Parallel()
 	sessionName := "gt-crew-idletest"
 	fake := newFakeNotifyTmux(sessionName)
 	fake.idle[sessionName] = true
 
 	townRoot := t.TempDir()
 	r := &Router{
+		// No agent bead mutes the session: bd has no database.
+		bd:                noBeadsDatabase,
 		workDir:           t.TempDir(),
 		townRoot:          townRoot,
 		tmux:              fake,
@@ -2092,11 +1900,14 @@ func TestNotifyRecipient_IdleAgent(t *testing.T) {
 // TestNotifyRecipient_BusyAgent verifies that a busy agent (no prompt visible)
 // gets a queued nudge instead of an immediate one.
 func TestNotifyRecipient_BusyAgent(t *testing.T) {
+	t.Parallel()
 	sessionName := "gt-crew-busytest"
 	fake := newFakeNotifyTmux(sessionName) // live, never idle
 
 	townRoot := t.TempDir()
 	r := &Router{
+		// No agent bead mutes the session: bd has no database.
+		bd:       noBeadsDatabase,
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -2148,12 +1959,15 @@ func TestNotifyRecipient_BusyAgent(t *testing.T) {
 }
 
 func TestNotifyRecipient_CanonicalAliasFansOutToBusyCandidates(t *testing.T) {
+	t.Parallel()
 	crewSession := "gt-crew-aliasfanout"
 	polecatSession := "gt-aliasfanout"
 	fake := newFakeNotifyTmux(crewSession, polecatSession) // both live and busy
 
 	townRoot := t.TempDir()
 	r := &Router{
+		// No agent bead mutes the session: bd has no database.
+		bd:       noBeadsDatabase,
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -2193,11 +2007,14 @@ func TestNotifyRecipient_CanonicalAliasFansOutToBusyCandidates(t *testing.T) {
 }
 
 func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T) {
+	t.Parallel()
 	fake := newFakeNotifyTmux()
 	fake.noServer = true
 
 	townRoot := t.TempDir()
 	r := &Router{
+		// No agent bead mutes the session: bd has no database.
+		bd:       noBeadsDatabase,
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -2239,11 +2056,14 @@ func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T)
 }
 
 func TestNotifyRecipient_DogQueuesDogSessionNotDeacon(t *testing.T) {
+	t.Parallel()
 	fake := newFakeNotifyTmux()
 	fake.noServer = true
 
 	townRoot := t.TempDir()
 	r := &Router{
+		// No agent bead mutes the session: bd has no database.
+		bd:       noBeadsDatabase,
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -2288,11 +2108,14 @@ func TestNotifyRecipient_DogQueuesDogSessionNotDeacon(t *testing.T) {
 }
 
 func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) {
+	t.Parallel()
 	sessionName := "gt-crew-busy-escalation"
 	fake := newFakeNotifyTmux(sessionName) // live, never idle
 
 	townRoot := t.TempDir()
 	r := &Router{
+		// No agent bead mutes the session: bd has no database.
+		bd:       noBeadsDatabase,
 		workDir:  t.TempDir(),
 		townRoot: townRoot,
 		tmux:     fake,
@@ -2334,6 +2157,7 @@ func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) 
 }
 
 func TestFormatNotificationMessageForEscalation(t *testing.T) {
+	t.Parallel()
 	msg := &Message{
 		From:     "gastown/witness",
 		Subject:  "[HIGH] Polecat stuck",
@@ -2351,6 +2175,7 @@ func TestFormatNotificationMessageForEscalation(t *testing.T) {
 }
 
 func TestRouterSendEscalationAddsStructuredLabels(t *testing.T) {
+	t.Parallel()
 	r := &Router{}
 	msg := &Message{From: "deacon/", Type: TypeEscalation, ThreadID: "hq-abc123"}
 	labels := r.buildLabels(msg)
@@ -2375,6 +2200,7 @@ func containsLabel(labels []string, want string) bool {
 // TestEnqueueReplyReminder_Basic verifies that a deferred reply-reminder nudge is
 // enqueued with the correct sender, message content, and DeliverAfter timestamp.
 func TestEnqueueReplyReminder_Basic(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	r := &Router{
 		workDir:  t.TempDir(),
@@ -2449,6 +2275,7 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 }
 
 func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
+	t.Parallel()
 	for _, from := range []string{"gt-sling", "sling", "gt-done", "system", "daemon", "unknown"} {
 		t.Run(from, func(t *testing.T) {
 			townRoot := t.TempDir()
@@ -2475,6 +2302,7 @@ func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
 }
 
 func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
+	t.Parallel()
 	for _, from := range []string{"overseer", "mayor/", "deacon/", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust", "deacon/dogs/alpha"} {
 		t.Run(from, func(t *testing.T) {
 			townRoot := t.TempDir()
@@ -2501,6 +2329,7 @@ func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
 }
 
 func TestSenderCanReceiveReply(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		from string
 		want bool
@@ -2556,6 +2385,7 @@ func TestSenderCanReceiveReply(t *testing.T) {
 }
 
 func TestClearReplyReminders(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
 	sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
@@ -2593,6 +2423,7 @@ func TestClearReplyReminders(t *testing.T) {
 // TestEnqueueReplyReminder_SkipsReply verifies that reply-type messages do not
 // trigger a reply reminder (would be redundant noise).
 func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	r := &Router{workDir: t.TempDir(), townRoot: townRoot}
 	msg := &Message{
@@ -2612,6 +2443,7 @@ func TestEnqueueReplyReminder_SkipsReply(t *testing.T) {
 // TestEnqueueReplyReminder_NoTownRoot verifies that the function is a no-op
 // when no town root is set (nudge queue requires a town root).
 func TestEnqueueReplyReminder_NoTownRoot(t *testing.T) {
+	t.Parallel()
 	r := &Router{workDir: t.TempDir(), townRoot: ""}
 	msg := &Message{From: "mayor/", To: "gastown/crew/bob", Subject: "task"}
 	// Should not panic or error — just silently skip.
@@ -2621,6 +2453,7 @@ func TestEnqueueReplyReminder_NoTownRoot(t *testing.T) {
 // TestEnqueueReplyReminder_DisabledByConfig verifies that setting
 // reply_reminder_delay = "0s" suppresses all reply reminders.
 func TestEnqueueReplyReminder_DisabledByConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Write a settings/config.json with reply_reminder_delay disabled.

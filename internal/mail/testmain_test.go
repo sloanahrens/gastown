@@ -1,18 +1,26 @@
+//go:build !integration
+
 package mail
 
 import (
 	"os"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// TestMain runs this package's tests under the hermetic harness (gt-lwi):
-// GT_*/BD_* env scrubbed, HOME and town root redirected to a sandbox, Dolt
-// ports poisoned so nothing reaches the production server, and a tripwire
-// that fails the run if any state leaks into a live town. Tests that need a
-// Dolt server start the shared container lazily via RequireDoltContainer;
-// Finish terminates it.
+// TestMain runs the unit tier under the hermetic harness (gt-lwi) with a
+// refusing git on PATH (internal/testpolicy/gitfree.txt). bd answers through
+// the bdScript runner, so no bd process or Dolt container is involved; the
+// real bd and Dolt paths are the integration tier's
+// (testmain_integration_test.go).
 func TestMain(m *testing.M) {
-	os.Exit(testutil.HermeticMain(m))
+	// Every test sees the same prefix registry, set once here rather than
+	// swapped per test, so the tests can run in parallel.
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	reg.Register("bd", "beads")
+	session.SetDefaultRegistry(reg)
+	os.Exit(testutil.HermeticMain(m, testutil.WithoutGit()))
 }
