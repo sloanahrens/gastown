@@ -31,3 +31,8 @@ func TestFakeInspection(t *testing.T) {
 		t.Error("unknown ids and repositories answer nil and empty")
 	}
 }
+
+func TestFakeBranchContract(t *testing.T) {
+	t.Parallel()
+	RunBranchContract(t, func(t *testing.T) BranchEnv { return New() })
+}

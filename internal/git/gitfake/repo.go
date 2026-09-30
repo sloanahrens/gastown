@@ -71,12 +71,20 @@ var _ Repo = (*handle)(nil)
 // locate finds the repository and worktree at h.dir. wt is nil for a bare
 // repository. Callers hold f.mu.
 func (h *handle) locate(args ...string) (*repo, *worktree, error) {
-	if r := h.f.repos[h.dir]; r != nil {
-		return r, r.main, nil
+	if r, wt := h.f.at(h.dir); r != nil && onDisk(r, wt) {
+		return r, wt, nil
 	}
-	for _, r := range h.f.repos {
-		if wt := r.worktrees[h.dir]; wt != nil {
-			return r, wt, nil
+	// Like git, an existing directory inside a checkout resolves to that
+	// checkout; a directory that does not exist is no repository at all
+	// (git.Git refuses a missing working directory before running git).
+	if _, err := os.Stat(h.dir); err == nil {
+		for dir := filepath.Dir(h.dir); ; dir = filepath.Dir(dir) {
+			if r, wt := h.f.at(dir); r != nil && onDisk(r, wt) {
+				return r, wt, nil
+			}
+			if filepath.Dir(dir) == dir {
+				break
+			}
 		}
 	}
 	return nil, nil, gitErr(128, "fatal: not a git repository (or any of the parent directories): .git", args...)
@@ -462,6 +470,9 @@ func (h *handle) WorktreeAddDetached(path, ref string) error {
 		return gitErr(128, "fatal: could not create work tree dir '"+path+"': "+err.Error(), args...)
 	}
 	r.worktrees[abs] = &worktree{path: abs, head: id}
+	if err := layoutWorktree(r, abs); err != nil {
+		return gitErr(128, "fatal: "+err.Error(), args...)
+	}
 	return nil
 }
 
@@ -482,6 +493,7 @@ func (h *handle) WorktreeRemove(path string, _ bool) error {
 		return gitErr(128, fmt.Sprintf("fatal: '%s' is not a working tree", path), args...)
 	}
 	delete(r.worktrees, abs)
+	_ = os.RemoveAll(worktreeGitDir(r, abs))
 	if err := os.RemoveAll(abs); err != nil {
 		return gitErr(128, "fatal: failed to delete '"+path+"': "+err.Error(), args...)
 	}

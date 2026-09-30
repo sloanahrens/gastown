@@ -3,7 +3,6 @@ package polecat
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,7 +62,7 @@ func (v SurvivalVerdict) NothingToProtect() bool { return v.Branch == "" && v.Er
 // One WorkSurvival serves many beads in one rig: the origin listings and the
 // base-branch refreshes are done at most once, and every fetch is bounded.
 type WorkSurvival struct {
-	g             *git.Git
+	g             gitRepo
 	defaultBranch string
 	// fetchTimeout bounds every remote call the predicate makes (ls-remote
 	// and fetch); a timeout makes the answer unknown.
@@ -82,22 +81,17 @@ type WorkSurvival struct {
 // NewWorkSurvival prepares the predicate for one rig. It returns ErrNoRigRepo
 // when the rig has no git repo.
 func NewWorkSurvival(rigRoot string) (*WorkSurvival, error) {
-	return newWorkSurvival(rigRoot, git.RemoteQueryTimeout)
+	return newWorkSurvival(gitOpener{}, rigRoot, git.RemoteQueryTimeout)
 }
 
 // newWorkSurvival is NewWorkSurvival with every remote call bounded by
 // fetchTimeout.
-func newWorkSurvival(rigRoot string, fetchTimeout time.Duration) (*WorkSurvival, error) {
+func newWorkSurvival(gits gitOpener, rigRoot string, fetchTimeout time.Duration) (*WorkSurvival, error) {
 	root := rigGitRepo(rigRoot)
 	if root == "" {
 		return nil, ErrNoRigRepo
 	}
-	var g *git.Git
-	if filepath.Base(root) == ".repo.git" {
-		g = git.NewGitWithDir(root, "")
-	} else {
-		g = git.NewGit(root)
-	}
+	g := openRigRepo(gits, root)
 	defaultBranch := "main"
 	if cfg, err := rig.LoadRigConfig(rigRoot); err == nil && cfg.DefaultBranch != "" {
 		defaultBranch = cfg.DefaultBranch

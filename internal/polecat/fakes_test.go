@@ -14,9 +14,9 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // agentShowJSON is the agent bead the bd stand-ins answer `show` with: an
@@ -192,14 +192,15 @@ func newEmptyBd() *fakeBd {
 	}}
 }
 
-// newTestManager is NewManager with a fake bd, and a fake tmux when tm is
-// non-nil. Nothing it builds reads PATH or reaches a tmux server.
+// newTestManager is NewManager with a fake bd, a fake tmux when tm is
+// non-nil, and git answered by w (a fresh, empty world when nil). Nothing it
+// builds reads PATH, reaches a tmux server or runs git.
 //
 // With a fake bd, the rig's own config reads (the rig identity bead) go to it
 // too, and when the rig's beads directory exists the types sentinel is
 // written there: beads.EnsureCustomTypes runs bd itself, outside any runner,
 // unless the sentinel says the custom types are already configured.
-func newTestManager(r *rig.Rig, g *git.Git, tm sessionProbe, bd *fakeBd) *Manager {
+func newTestManager(r *rig.Rig, w *world, tm sessionProbe, bd *fakeBd) *Manager {
 	var run beads.BDRunner
 	if bd != nil {
 		run = bd.run
@@ -208,7 +209,17 @@ func newTestManager(r *rig.Rig, g *git.Git, tm sessionProbe, bd *fakeBd) *Manage
 		}
 		markTypesConfigured(beads.ResolveBeadsDir(r.Path))
 	}
-	return newManager(r, g, tm, run)
+	if w == nil {
+		w = newWorld()
+	}
+	m := newManager(r, w.repo(r.Path), tm, run)
+	m.gits = w.opener()
+	// rig.EnsureLocalExcludePatterns runs git itself, so the test writes its
+	// patterns into the world's exclude file directly.
+	m.ensureExcludes = func(worktreePath string) error { return writeLocalExcludes(w, worktreePath) }
+	// util.CheckDiskSpace runs diskutil on macOS; the disk is never full.
+	m.diskSpace = func(string) (util.DiskSpaceLevel, string, error) { return util.DiskSpaceOK, "", nil }
+	return m
 }
 
 // markTypesConfigured writes the custom-types sentinel into an existing
@@ -300,4 +311,23 @@ func (f *fakeBd) recorded() []beads.BDCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]beads.BDCall(nil), f.calls...)
+}
+
+// localExcludePatterns mirrors rig.gasTownLocalExcludePatterns: what
+// rig.EnsureLocalExcludePatterns writes into a worktree's info/exclude.
+var localExcludePatterns = []string{
+	".runtime/", ".claude/", ".opencode/", ".logs/", "__pycache__/", "state.json",
+	"CLAUDE.md", "CLAUDE.local.md", "GEMINI.md", ".beads/",
+}
+
+// writeLocalExcludes is rig.EnsureLocalExcludePatterns for a checkout in w.
+func writeLocalExcludes(w *world, worktreePath string) error {
+	path, err := w.ExcludePath(worktreePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(strings.Join(localExcludePatterns, "\n")+"\n"), 0o644)
 }
