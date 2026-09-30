@@ -1,6 +1,7 @@
 package slot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -124,14 +125,17 @@ type MarkerHandle struct {
 const markerAcquireRetryWindow = 50 * time.Millisecond
 const markerAcquireRetryInterval = 2 * time.Millisecond
 
-// acquireMarkerFlock is lock.FlockTryAcquire retried across
+// acquireMarkerFlock is lock.FlockTryAcquireStable retried across
 // markerAcquireRetryWindow instead of failing on the first contended attempt.
-func acquireMarkerFlock(clock clockwork.Clock, path string) (unlock func(), ok bool, err error) {
+// The stable variant is what lets Release unlink a file it still holds: an
+// attempt that opened that file starts over from a fresh open rather than
+// accepting a lock on the inode the unlink left nameless (gt-xtfnq).
+func acquireMarkerFlock(clock clockwork.Clock, path string) (unlock func(), err error) {
 	deadline := clock.Now().Add(markerAcquireRetryWindow)
 	for {
-		unlock, ok, err = lock.FlockTryAcquire(path)
-		if err != nil || ok || clock.Now().After(deadline) {
-			return unlock, ok, err
+		unlock, err = lock.FlockTryAcquireStable(path)
+		if err == nil || !errors.Is(err, lock.ErrFlockHeld) || clock.Now().After(deadline) {
+			return unlock, err
 		}
 		clock.Sleep(markerAcquireRetryInterval)
 	}
@@ -150,12 +154,12 @@ func (g *Gate) AcquireMarker(townRoot, name, role string) (*MarkerHandle, error)
 	if err := os.MkdirAll(LockDir(townRoot), 0755); err != nil {
 		return nil, fmt.Errorf("creating lock directory: %w", err)
 	}
-	unlock, ok, err := acquireMarkerFlock(g.clock, MarkerLockPath(townRoot, name))
+	unlock, err := acquireMarkerFlock(g.clock, MarkerLockPath(townRoot, name))
 	if err != nil {
+		if errors.Is(err, lock.ErrFlockHeld) {
+			return nil, &MarkerHeldError{Name: name, Owner: readOwnerFile(MarkerOwnerPath(townRoot, name))}
+		}
 		return nil, fmt.Errorf("acquiring marker %q: %w", name, err)
-	}
-	if !ok {
-		return nil, &MarkerHeldError{Name: name, Owner: readOwnerFile(MarkerOwnerPath(townRoot, name))}
 	}
 	h := &MarkerHandle{townRoot: townRoot, name: name, unlock: pinHold(unlock)}
 	if err := atomicfile.EnsureDirAndWriteJSON(MarkerOwnerPath(townRoot, name), Owner{
@@ -172,13 +176,14 @@ func (g *Gate) AcquireMarker(townRoot, name, role string) (*MarkerHandle, error)
 }
 
 // Release drops the marker: the owner file, then the lock file itself, then
-// the flock. Removing the lock file while still holding it is safe — nobody
-// else can hold the same inode concurrently — and is what keeps one file per
-// ever-reviewed MR from accumulating forever (gt-97cm finding 3); an opener
-// that races the unlink either contends with us on the doomed inode (and
-// retries via acquireMarkerFlock) or opens after it and gets a fresh,
-// uncontended one. liveMarkers does the same sweep for a marker released by a
-// killed process, which never runs this method at all.
+// the flock. Removing the lock file while still holding it is what keeps one
+// file per ever-reviewed MR from accumulating forever (gt-97cm finding 3). It
+// is safe only because every acquirer verifies it locked the file the path
+// names (lock.FlockTryAcquireStable): an opener whose open landed before this
+// unlink holds a descriptor on an inode with no name left, and trusting the
+// flock it took after h.unlock would let it and a fresh open of the same path
+// both take the marker (gt-xtfnq). liveMarkers does the same sweep for a marker
+// released by a killed process, which never runs this method at all.
 func (h *MarkerHandle) Release() error {
 	if h.released {
 		return nil
@@ -220,17 +225,23 @@ func liveMarkers(townRoot string) []markerRecord {
 
 	var out []markerRecord
 	for _, slug := range slugs {
-		// FlockTryAcquire reporting success means the lock was FREE and this
-		// probe now holds it; a live holder is the failure to acquire.
-		unlock, tookIt, err := lock.FlockTryAcquire(MarkerLockPath(townRoot, slug))
+		// The stable variant keeps the probe off an inode a concurrent Release
+		// has already unlinked; taking that for the free inode a dead holder
+		// left would sweep a live marker out from under its new holder
+		// (gt-xtfnq).
+		unlock, err := lock.FlockTryAcquireStable(MarkerLockPath(townRoot, slug))
 		switch {
+		case errors.Is(err, lock.ErrFlockHeld):
+			// Held: the marker this row is for.
 		case err != nil:
 			// Unreadable: a row is lost, never the whole report.
 			continue
-		case tookIt:
-			// Free: sweep both files now, while our own hold guarantees nobody
-			// is mid-acquire on this inode, so a marker nobody re-acquires does
-			// not cost every future status read a probe forever (finding 3).
+		default:
+			// Free: sweep both files, so a marker nobody re-acquires does not
+			// cost every future status read a probe forever (finding 3). Our
+			// hold keeps a peer off this name while we remove it; one that
+			// already opened the file reopens rather than lock the nameless
+			// inode we are about to leave behind.
 			_ = os.Remove(MarkerOwnerPath(townRoot, slug))
 			_ = os.Remove(MarkerLockPath(townRoot, slug))
 			unlock()
