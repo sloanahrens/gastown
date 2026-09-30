@@ -3,7 +3,6 @@
 internal/cmd 301s # tests exec git (52 sites), bd (39) and tmux; 31 tmux.New
 internal/witness 95s # real tmux (13 tmux.New) and git, hermetic harness
 internal/beads 88s # bd subprocess, git repos and a Dolt container port; D1 rewrites the package
-internal/rig 88s # tests exec git (12 sites) over real clones
 internal/dog 82s # tests exec git (16 sites), hermetic harness
 internal/daemon 81s # real git repos (26 initGitRepo), tmux and Dolt
 internal/polecat 77s # tests exec git (44 sites), 21 tmux.New, Dolt container
