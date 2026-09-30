@@ -33,7 +33,7 @@ type StageInput struct {
 // ---------------------------------------------------------------------------
 
 // convoyTrackedBeadIDs returns the set of bead IDs tracked by a convoy.
-// Uses bdDepListRawIDs to query the raw dependencies table, which works
+// Uses convoy.DepListRawIDs to query the raw dependencies table, which works
 // for cross-database deps where tracked issues live in a different Dolt
 // database (e.g., ds-* issues tracked by an hq-cv-* convoy). See GH #2624.
 func convoyTrackedBeadIDs(townBeads, convoyID string) (map[string]bool, error) {

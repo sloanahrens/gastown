@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -107,7 +106,9 @@ type storeRecoveryState struct {
 	loggedAt time.Time
 }
 
-// strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
+// strandedConvoyInfo is one convoy of the stranded scan (convoy.StrandedConvoy
+// with created_at parsed). Its JSON tags are what tests decode a scan fixture
+// from.
 type strandedConvoyInfo struct {
 	ID           string   `json:"id"`
 	Title        string   `json:"title"`
@@ -220,6 +221,12 @@ type ConvoyManager struct {
 	// supplies one to drive the closed-convoy guard without a Dolt server.
 	convoyStatus func(convoyID string) (string, bool)
 
+	// findStrandedFn and checkConvoyFn replace the stranded scan and the
+	// completion check in tests; nil runs the real ones from internal/convoy.
+	findStrandedFn func(ctx context.Context) ([]strandedConvoyInfo, error)
+	checkConvoyFn  convoy.Checker
+
+	// gtPath is the gt binary the feeder runs for gt sling.
 	gtPath string
 
 	// started guards against double-call of Start() which would spawn duplicate goroutines.
@@ -867,7 +874,7 @@ func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRec
 
 		m.logger("Convoy: close detected: %s (from %s)", issueID, name)
 		resolver := convoy.NewStoreResolver(m.townRoot, stores)
-		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.isRigParked, resolver)
+		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.checkConvoy, m.isRigParked, resolver)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
 	}
 	return true
@@ -978,28 +985,46 @@ func (m *ConvoyManager) scan() {
 	m.trackBlockedHolds(stranded, time.Now())
 }
 
-// findStranded runs `gt convoy stranded --json` and parses the output.
+// findStranded runs the stranded scan: convoys with ready work and no
+// workers, or empty convoys that need cleanup.
 func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "stranded", "--json")
-	cmd.Dir = m.townRoot
-	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s", util.FirstLine(stderr.String()))
+	if m.findStrandedFn != nil {
+		return m.findStrandedFn(m.ctx)
 	}
-
-	var stranded []strandedConvoyInfo
-	if err := json.Unmarshal(stdout.Bytes(), &stranded); err != nil {
-		// Include first line of raw output for debugging (e.g., non-JSON warnings on stdout)
-		raw := util.FirstLine(stdout.String())
-		return nil, fmt.Errorf("parsing stranded JSON: %w (raw: %q)", err, raw)
+	town := convoy.Town{Root: m.townRoot, Env: bdReadOnlyRoutingEnv(m.townRoot)}
+	found, err := town.FindStranded(m.ctx)
+	if err != nil {
+		return nil, err
 	}
+	return strandedFromConvoy(found), nil
+}
 
-	return stranded, nil
+// strandedFromConvoy converts the scan's result, parsing created_at. A
+// created_at that does not parse reads as zero, which the empty-convoy grace
+// period treats as unknown age.
+func strandedFromConvoy(found []convoy.StrandedConvoy) []strandedConvoyInfo {
+	out := make([]strandedConvoyInfo, 0, len(found))
+	for _, c := range found {
+		info := strandedConvoyInfo{
+			ID:           c.ID,
+			Title:        c.Title,
+			TrackedCount: c.TrackedCount,
+			ReadyCount:   c.ReadyCount,
+			ReadyIssues:  c.ReadyIssues,
+			BaseBranch:   c.BaseBranch,
+			Agent:        c.Agent,
+			Formula:      c.Formula,
+			Owned:        c.Owned,
+		}
+		if created, err := time.Parse(time.RFC3339, c.CreatedAt); err == nil {
+			info.CreatedAt = created
+		}
+		for _, h := range c.Held {
+			info.Held = append(info.Held, strandedHold(h))
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 // feedFirstReady iterates through all ready issues in a stranded convoy and
@@ -1607,35 +1632,30 @@ func deadHolderRefSuffixSHA(sha string) string {
 	return sha
 }
 
-// checkConvoyCompletion runs gt convoy check to auto-close a convoy whose
-// tracked issues may all be closed. This handles the case where the event poll
-// missed the close events (e.g., daemon restart, Dolt latency).
-func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
-	cmd.Dir = m.townRoot
-	cmd.Env = bdMutationRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+// checkConvoy runs the completion check on one convoy, closing it when every
+// tracked issue is resolved.
+func (m *ConvoyManager) checkConvoy(ctx context.Context, convoyID string) error {
+	if m.checkConvoyFn != nil {
+		return m.checkConvoyFn(ctx, convoyID)
+	}
+	return convoy.Town{Root: m.townRoot, Env: bdMutationRoutingEnv(m.townRoot)}.Checker()(ctx, convoyID)
+}
 
-	if err := cmd.Run(); err != nil {
-		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(stderr.String()))
+// checkConvoyCompletion checks a convoy whose tracked issues may all be
+// closed. This handles the case where the event poll missed the close events
+// (e.g., daemon restart, Dolt latency).
+func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
+	if err := m.checkConvoy(m.ctx, convoyID); err != nil {
+		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(err.Error()))
 	}
 }
 
-// closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.
+// closeEmptyConvoy auto-closes an empty convoy through the completion check.
 func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	m.logger("Convoy %s: auto-closing (empty)", convoyID)
 
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
-	cmd.Dir = m.townRoot
-	cmd.Env = bdMutationRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(stderr.String()))
+	if err := m.checkConvoy(m.ctx, convoyID); err != nil {
+		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(err.Error()))
 	}
 }
 

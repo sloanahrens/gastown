@@ -42,7 +42,7 @@ func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 
 // scanTestOpts configures the mockGtForScanTest helper.
 type scanTestOpts struct {
-	strandedJSON  string // JSON for `gt convoy stranded --json`; default "[]"
+	strandedJSON  string // the stranded scan's result as JSON; default "[]"
 	slingFailOnce bool   // first sling invocation exits 1, subsequent succeed
 	routes        string // routes.jsonl content; empty = no routes file
 }
@@ -54,6 +54,42 @@ type scanTestPaths struct {
 	gtPath       string // absolute path to the mock gt binary
 	slingLogPath string // sling call log; absent if sling was never called
 	checkLogPath string // convoy check call log; absent if check was never called
+	strandedJSON string // what the manager's stranded scan returns (see manager)
+}
+
+// manager builds a ConvoyManager over the mock town whose stranded scan
+// returns p.strandedJSON and whose completion check appends "convoy check
+// <id>" to checkLogPath. gt sling still runs the mock gt binary.
+func (p scanTestPaths) manager(logger func(string, ...interface{})) *ConvoyManager {
+	m := NewConvoyManager(p.townRoot, logger, p.gtPath, 10*time.Minute, nil, nil, nil)
+	m.installScanFakes(p.strandedJSON, p.checkLogPath)
+	return m
+}
+
+// installScanFakes replaces m's stranded scan with one that returns
+// strandedJSON, and its completion check with one that appends "convoy check
+// <id>" to checkLogPath (nothing is logged when it is empty), so a test
+// reaches no bd.
+func (m *ConvoyManager) installScanFakes(strandedJSON, checkLogPath string) {
+	m.findStrandedFn = func(context.Context) ([]strandedConvoyInfo, error) {
+		var stranded []strandedConvoyInfo
+		if err := json.Unmarshal([]byte(strandedJSON), &stranded); err != nil {
+			return nil, err
+		}
+		return stranded, nil
+	}
+	m.checkConvoyFn = func(_ context.Context, convoyID string) error {
+		if checkLogPath == "" {
+			return nil
+		}
+		f, err := os.OpenFile(checkLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = fmt.Fprintf(f, "convoy check %s\n", convoyID)
+		return err
+	}
 }
 
 // mockGtForScanTest creates a mock gt binary and directory layout for scan tests.
@@ -92,16 +128,8 @@ func mockGtForScanTest(t *testing.T, opts scanTestOpts) scanTestPaths {
 	}
 
 	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '` + strings.ReplaceAll(strandedJSON, "'", "'\\''") + `'
-  exit 0
-fi
 if [ "$1" = "sling" ]; then
   echo "$@" >> "` + slingLogPath + `"` + slingFailClause + `
-  exit 0
-fi
-if [ "$1" = "convoy" ] && [ "$2" = "check" ]; then
-  echo "$@" >> "` + checkLogPath + `"
   exit 0
 fi
 exit 0
@@ -117,6 +145,7 @@ exit 0
 		gtPath:       filepath.Join(binDir, "gt"),
 		slingLogPath: slingLogPath,
 		checkLogPath: checkLogPath,
+		strandedJSON: strandedJSON,
 	}
 }
 
@@ -250,7 +279,7 @@ func TestScanStranded_FeedsReadyIssues(t *testing.T) {
 		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(func(string, ...interface{}) {})
 	m.scan()
 
 	data, err := os.ReadFile(paths.slingLogPath)
@@ -273,7 +302,7 @@ func TestScanStranded_ClosesEmptyConvoys(t *testing.T) {
 		strandedJSON: `[{"id":"hq-empty1","title":"Empty","ready_count":0,"ready_issues":[]}]`,
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(func(string, ...interface{}) {})
 	m.scan()
 
 	data, err := os.ReadFile(paths.checkLogPath)
@@ -304,7 +333,7 @@ func TestScanStranded_GracePeriodSkipsRecentConvoy(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 	m.scan()
 
 	// Convoy check must NOT have been called — grace period should protect it.
@@ -340,7 +369,7 @@ func TestScanStranded_GracePeriodAllowsOldConvoy(t *testing.T) {
 		strandedJSON: strandedJSON,
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(func(string, ...interface{}) {})
 	m.scan()
 
 	data, err := os.ReadFile(paths.checkLogPath)
@@ -367,7 +396,7 @@ func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 	m.scan()
 
 	// Negative: sling must not have been called
@@ -408,7 +437,7 @@ func TestScanStranded_DispatchFailure(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 	m.scan()
 
 	logMu.Lock()
@@ -443,7 +472,6 @@ func TestConvoyManager_DoubleStop_Idempotent(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then echo '[]'; fi
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
@@ -455,6 +483,7 @@ exit 0
 
 	townRoot := t.TempDir()
 	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m.findStrandedFn = noStranded
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -471,13 +500,9 @@ func TestStart_DoubleCall_Guarded(t *testing.T) {
 	binDir := t.TempDir()
 	townRoot := t.TempDir()
 
-	// Mock gt that returns empty stranded list and logs sling/check calls
+	// Mock gt that logs sling calls
 	slingLogPath := filepath.Join(binDir, "sling.log")
 	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '[]'
-  exit 0
-fi
 if [ "$1" = "sling" ]; then
   echo "$@" >> "` + slingLogPath + `"
   exit 0
@@ -497,6 +522,7 @@ exit 0
 	}
 
 	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m.findStrandedFn = noStranded
 
 	// First Start should succeed
 	if err := m.Start(); err != nil {
@@ -928,30 +954,6 @@ func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 	}
 }
 
-func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
-	t.Parallel()
-	jsonStr := `[{"id":"hq-cv1","title":"My Convoy","ready_count":2,"ready_issues":["gt-a","gt-b"],"base_branch":"main","agent":"deepseek-flash"}]`
-	var result []strandedConvoyInfo
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(result) != 1 {
-		t.Fatalf("expected 1 convoy, got %d", len(result))
-	}
-	c := result[0]
-	if c.ID != "hq-cv1" || c.Title != "My Convoy" || c.ReadyCount != 2 {
-		t.Errorf("unexpected convoy: %+v", c)
-	}
-	if len(c.ReadyIssues) != 2 || c.ReadyIssues[0] != "gt-a" || c.ReadyIssues[1] != "gt-b" {
-		t.Errorf("unexpected ready_issues: %v", c.ReadyIssues)
-	}
-	// The agent recorded by `gt convoy stranded --json` must survive decoding:
-	// dropping it here is how the feeder lost the sling-time --agent (gt-yg24).
-	if c.Agent != "deepseek-flash" {
-		t.Errorf("Agent = %q, want %q", c.Agent, "deepseek-flash")
-	}
-}
-
 func TestFeedFirstReady_MultipleReadyIssues_DispatchesOnlyFirst(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
@@ -1312,86 +1314,10 @@ exit 0
 	}
 }
 
-func TestFindStranded_GtFailure_ReturnsError(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo "something went wrong" >&2
-  exit 1
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "something went wrong") {
-		t.Errorf("expected error to contain stderr message, got: %v", err)
-	}
-}
-
-func TestFindStranded_InvalidJSON_ReturnsError(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo "this is not valid JSON at all"
-  exit 0
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
-	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "parsing stranded JSON") {
-		t.Errorf("expected error to mention 'parsing stranded JSON', got: %v", err)
-	}
-}
-
 func TestScan_FindStrandedError_LogsAndContinues(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
-	}
-
-	binDir := t.TempDir()
-	townRoot := t.TempDir()
-
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo "stranded command failed" >&2
-  exit 1
-fi
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(binDir, "gt"), []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
 	}
 
 	var logged []string
@@ -1399,7 +1325,10 @@ exit 0
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, nil, nil, nil)
+	m.findStrandedFn = func(context.Context) ([]strandedConvoyInfo, error) {
+		return nil, errors.New("stranded command failed")
+	}
 
 	// scan() should not panic even when findStranded fails
 	m.scan()
@@ -2379,7 +2308,7 @@ func TestScanStranded_OwnedConvoy_SkipsAutoFeed(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 	m.scan()
 
 	if _, err := os.Stat(paths.slingLogPath); err == nil {
@@ -2410,7 +2339,7 @@ func TestScanStranded_NonOwnedConvoy_StillFed(t *testing.T) {
 		routes:       `{"prefix":"gt-","path":"gt/.beads"}` + "\n",
 	})
 
-	m := NewConvoyManager(paths.townRoot, func(string, ...interface{}) {}, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(func(string, ...interface{}) {})
 	m.scan()
 
 	data, err := os.ReadFile(paths.slingLogPath)
@@ -2462,14 +2391,10 @@ func TestScan_ContextCancelled_MidIteration(t *testing.T) {
 
 	slingLogPath := filepath.Join(binDir, "sling.log")
 
-	// Mock gt: stranded returns list; sling records itself, then blocks for
-	// longer than the test waits. Only the scan's cancellation ends it sooner,
-	// so a scan that did not kill its in-flight sling would fail the wait below.
+	// Mock gt: sling records itself, then blocks for longer than the test
+	// waits. Only the scan's cancellation ends it sooner, so a scan that did
+	// not kill its in-flight sling would fail the wait below.
 	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '` + strings.ReplaceAll(string(jsonBytes), "'", "'\\''") + `'
-  exit 0
-fi
 if [ "$1" = "sling" ]; then
   echo "$@" >> "` + slingLogPath + `"
   sleep 120
@@ -2490,6 +2415,11 @@ exit 0
 	}
 
 	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m.findStrandedFn = func(context.Context) ([]strandedConvoyInfo, error) {
+		var stranded []strandedConvoyInfo
+		err := json.Unmarshal(jsonBytes, &stranded)
+		return stranded, err
+	}
 
 	// Run scan in a goroutine and cancel context after a brief delay
 	done := make(chan struct{})
@@ -2574,7 +2504,7 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 		logMu.Unlock()
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, paths.gtPath, 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 	m.scan()
 
 	// Verify ready convoys were dispatched via sling
@@ -3466,7 +3396,7 @@ func TestRecoveryMode_ClearedAfterSuccessfulScan(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, filepath.Join(paths.binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 
 	// Set recovery mode
 	m.recoveryMode.Store(true)
@@ -3506,7 +3436,7 @@ func TestScanMu_PreventsConcurrentScans(t *testing.T) {
 		mu.Unlock()
 	}
 
-	m := NewConvoyManager(paths.townRoot, logger, filepath.Join(paths.binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 
 	// Launch multiple concurrent scans
 	var wg sync.WaitGroup
@@ -3546,7 +3476,7 @@ func TestStartupSweep_RunsAfterDelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	m := NewConvoyManager(paths.townRoot, logger, filepath.Join(paths.binDir, "gt"), 10*time.Minute, nil, nil, nil)
+	m := paths.manager(logger)
 	m.ctx = ctx
 
 	// Run startup sweep directly (it waits 10s normally, but we can test the
@@ -4895,3 +4825,7 @@ func TestFeedFirstReady_BacksOffAfterStartupFailure(t *testing.T) {
 		t.Errorf("once the record is cleared gt-issue1 should feed: %q", data)
 	}
 }
+
+// noStranded is a stranded scan that finds nothing, so a manager that runs
+// scans in a test reaches no bd.
+func noStranded(context.Context) ([]strandedConvoyInfo, error) { return nil, nil }

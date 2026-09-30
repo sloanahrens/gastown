@@ -1,10 +1,11 @@
 package daemon
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/convoy"
 )
 
 // heldAlerts records what trackBlockedHolds raises and clears.
@@ -163,17 +164,42 @@ func TestTrackBlockedHolds_NoAlertHooksStillTracks(t *testing.T) {
 	m.trackBlockedHolds(heldConvoy("hq-cv1"), t0.Add(2*time.Hour))
 }
 
-// TestStrandedConvoyInfo_HeldJSONParsing pins the wire shape shared with `gt
-// convoy stranded --json`: the daemon escalates only what it can decode.
-func TestStrandedConvoyInfo_HeldJSONParsing(t *testing.T) {
+// TestStrandedFromConvoy_CarriesEveryField: the manager feeds from the scan's
+// typed result. Dropping the agent is how the feeder once lost the sling-time
+// --agent (gt-yg24), and dropping a hold hides it from the escalation.
+func TestStrandedFromConvoy_CarriesEveryField(t *testing.T) {
 	t.Parallel()
-	jsonStr := `[{"id":"hq-cv1","title":"C","tracked_count":2,"ready_count":1,"ready_issues":["gt-sib"],` +
-		`"held":[{"issue":"gt-work","blocker":"oag-x","cause":"unresolved","reason":"blocks blocker oag-x unresolved in any rig"}]}]`
-	var got []strandedConvoyInfo
-	if err := json.Unmarshal([]byte(jsonStr), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	created := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	got := strandedFromConvoy([]convoy.StrandedConvoy{{
+		ID:           "hq-cv1",
+		Title:        "C",
+		TrackedCount: 2,
+		ReadyCount:   1,
+		ReadyIssues:  []string{"gt-sib"},
+		Held:         []convoy.StrandedHold{convoy.StrandedHold(danglingHold)},
+		CreatedAt:    created.Format(time.RFC3339),
+		BaseBranch:   "main",
+		Agent:        "deepseek-flash",
+		Formula:      "mol-custom",
+		Owned:        true,
+	}, {
+		ID:        "hq-cv2",
+		CreatedAt: "not a time",
+	}})
+	if len(got) != 2 {
+		t.Fatalf("got %d convoys, want 2", len(got))
 	}
-	if len(got) != 1 || len(got[0].Held) != 1 || got[0].Held[0] != danglingHold {
-		t.Errorf("decoded %+v, want one hold %+v", got, danglingHold)
+	c := got[0]
+	if c.ID != "hq-cv1" || c.Title != "C" || c.TrackedCount != 2 || c.ReadyCount != 1 || len(c.ReadyIssues) != 1 || c.ReadyIssues[0] != "gt-sib" {
+		t.Errorf("counts and ready issues not carried: %+v", c)
+	}
+	if len(c.Held) != 1 || c.Held[0] != danglingHold {
+		t.Errorf("Held = %+v, want one hold %+v", c.Held, danglingHold)
+	}
+	if !c.CreatedAt.Equal(created) || c.BaseBranch != "main" || c.Agent != "deepseek-flash" || c.Formula != "mol-custom" || !c.Owned {
+		t.Errorf("routing fields not carried: %+v", c)
+	}
+	if !got[1].CreatedAt.IsZero() {
+		t.Errorf("an unparseable created_at = %v, want the zero time", got[1].CreatedAt)
 	}
 }
