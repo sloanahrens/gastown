@@ -23,8 +23,6 @@ internal/polecat
 internal/protocol
 internal/quota
 internal/reaper
-internal/refinery
-internal/refinery/editorial
 internal/rig
 internal/runtime
 internal/scheduler/capacity
