@@ -31,29 +31,16 @@ func TestConvoyManager_FullLifecycle(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Set up mock gt that returns stranded convoys and logs all calls.
+	// The stranded scan returns one empty convoy and the completion check logs
+	// the convoy it was asked to check.
 	binDir := t.TempDir()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 
-	callLogPath := filepath.Join(binDir, "gt-calls.log")
+	checkLogPath := filepath.Join(binDir, "check.log")
 	strandedJSON := `[{"id":"cv-test1","title":"Test Convoy","ready_count":0,"ready_issues":[]}]`
-
-	gtScript := fmt.Sprintf(`#!/bin/sh
-echo "$@" >> "%s"
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '%s'
-  exit 0
-fi
-exit 0
-`, callLogPath, strandedJSON)
-
-	gtPath := filepath.Join(binDir, "gt")
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
 
 	var mu = &sync.Mutex{}
 	var logged []string
@@ -64,7 +51,8 @@ exit 0
 	}
 
 	// Start with short scan interval so stranded scan fires quickly.
-	m := NewConvoyManager(townRoot, logger, gtPath, 500*time.Millisecond, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 500*time.Millisecond, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m.installScanFakes(strandedJSON, checkLogPath)
 
 	// S-08: Start should succeed.
 	if err := m.Start(); err != nil {
@@ -145,9 +133,9 @@ exit 0
 		t.Errorf("double Start() guard did not fire; logs:\n%s", strings.Join(logSnapshot, "\n"))
 	}
 
-	// Verify gt was actually called (S-10: resolved path worked).
-	if _, err := os.Stat(callLogPath); err != nil {
-		t.Errorf("gt was never called (resolved path may be broken): %v", err)
+	// The scan reached the completion check for the empty convoy.
+	if data, err := os.ReadFile(checkLogPath); err != nil || !strings.Contains(string(data), "cv-test1") {
+		t.Errorf("completion check never ran for cv-test1: %v %q", err, data)
 	}
 }
 
@@ -249,13 +237,6 @@ func TestConvoyManager_LoggingFlow(t *testing.T) {
 
 	slingLogPath := filepath.Join(binDir, "sling.log")
 	gtScript := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '[]'
-  exit 0
-fi
-if [ "$1" = "convoy" ] && [ "$2" = "check" ]; then
-  exit 0
-fi
 if [ "$1" = "sling" ]; then
   echo "$@" >> "%s"
   exit 0
@@ -280,6 +261,7 @@ exit 0
 	// Start manager with short scan interval; event poll is 5s (fixed).
 	stores := map[string]beadsdk.Storage{"hq": store}
 	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
+m.installScanFakes("[]", "")
 	// Start the cursor at zero so the poll processes events instead of warming up.
 	startCursorsAtZero(m)
 	// Drive one poll manually instead of waiting for the 5s ticker.
@@ -374,10 +356,6 @@ func TestConvoyManager_LoggingFlow_NoReadyIssues(t *testing.T) {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '[]'
-  exit 0
-fi
 exit 0
 `
 	gtPath := filepath.Join(binDir, "gt")
@@ -395,6 +373,7 @@ exit 0
 
 	stores := map[string]beadsdk.Storage{"hq": store}
 	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
+m.installScanFakes("[]", "")
 	// Start the cursor at zero so the poll processes events instead of warming up.
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(stores)
@@ -483,17 +462,9 @@ func TestConvoyManager_MultipleTrackingConvoys(t *testing.T) {
 	}
 
 	checkLogPath := filepath.Join(binDir, "check.log")
-	gtScript := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '[]'
-  exit 0
-fi
-if [ "$1" = "convoy" ] && [ "$2" = "check" ]; then
-  echo "$3" >> "%s"
-  exit 0
-fi
+	gtScript := `#!/bin/sh
 exit 0
-`, checkLogPath)
+`
 
 	gtPath := filepath.Join(binDir, "gt")
 	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
@@ -510,6 +481,7 @@ exit 0
 
 	stores := map[string]beadsdk.Storage{"hq": store}
 	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
+m.installScanFakes("[]", checkLogPath)
 	// Start the cursor at zero so the poll processes events instead of warming up.
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(stores)
@@ -606,13 +578,6 @@ func TestConvoyManager_ParkedRig_SkipsFeedOnEventPoll(t *testing.T) {
 
 	slingLogPath := filepath.Join(binDir, "sling.log")
 	gtScript := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  echo '[]'
-  exit 0
-fi
-if [ "$1" = "convoy" ] && [ "$2" = "check" ]; then
-  exit 0
-fi
 if [ "$1" = "sling" ]; then
   echo "$@" >> "%s"
   exit 0
@@ -636,6 +601,7 @@ exit 0
 	parked := func(rig string) bool { return rig == "gt" }
 	stores := map[string]beadsdk.Storage{"hq": store}
 	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, parked)
+m.installScanFakes("[]", "")
 	// Start the cursor at zero so the poll processes events instead of warming up.
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(stores)
@@ -700,26 +666,18 @@ func TestConvoyManager_ShutdownKillsHangingSubprocess(t *testing.T) {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 
-	// Mock gt that hangs on stranded (simulates a stuck subprocess).
-	gtScript := `#!/bin/sh
-if [ "$1" = "convoy" ] && [ "$2" = "stranded" ]; then
-  sleep 999
-  exit 0
-fi
-exit 0
-`
-	gtPath := filepath.Join(binDir, "gt")
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0755); err != nil {
-		t.Fatalf("write mock gt: %v", err)
-	}
-
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
 	// Short scan interval so the hanging gt fires immediately.
-	m := NewConvoyManager(townRoot, logger, gtPath, 100*time.Millisecond, nil, nil, nil)
+	m := NewConvoyManager(townRoot, logger, "gt", 100*time.Millisecond, nil, nil, nil)
+	// A stuck scan: it returns only when the manager's context is cancelled.
+	m.findStrandedFn = func(ctx context.Context) ([]strandedConvoyInfo, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

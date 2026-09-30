@@ -27,7 +27,7 @@ func slingGenerateShortID() string {
 // isTrackedByConvoy checks if an issue is already being tracked by a convoy.
 // Returns the convoy ID if tracked, empty string otherwise.
 //
-// Uses bdDepListRawIDs for cross-database dep resolution (GH #2624).
+// Uses convoy.DepListRawIDs for cross-database dep resolution (GH #2624).
 // For direction=up queries, the raw SQL approach queries the same table but
 // looks for rows where depends_on_id matches the beadID, returning the
 // issue_id (which is the convoy). Since this only returns IDs (no issue_type
@@ -95,7 +95,7 @@ func findConvoyByDescription(townRoot, beadID string) string {
 }
 
 // convoyTracksBead checks if a convoy has a tracks dependency on the given beadID.
-// Uses bdDepListRawIDs for cross-database dep resolution (GH #2624).
+// Uses convoy.DepListRawIDs for cross-database dep resolution (GH #2624).
 func convoyTracksBead(beadsDir, convoyID, beadID string) bool {
 	trackedIDs, err := convoyops.DepListRawIDs(beadsDir, convoyID, "down", "tracks")
 	if err != nil {

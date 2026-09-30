@@ -296,7 +296,7 @@ type epicChild struct {
 }
 
 // getEpicChildren returns child issues of an epic via dependency lookup.
-// Prefers raw SQL (bdDepListRawIDs) which handles cross-database deps correctly.
+// Prefers raw SQL (convoy.DepListRawIDs) which handles cross-database deps correctly.
 // Falls back to bd dep list for older bd versions (see GH #2624, #2832).
 func getEpicChildren(epicID string) ([]epicChild, error) {
 	dir := resolveBeadDir(epicID)
