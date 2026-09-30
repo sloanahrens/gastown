@@ -5,7 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -76,4 +79,53 @@ func TestDaemonCheck_Run_SurfacesSupervisedStatus(t *testing.T) {
 	if !found {
 		t.Errorf("DaemonCheck.Run() details = %v, want a 'Supervised: ' line", result.Details)
 	}
+}
+
+// TestDaemonCheck_Run_HeartbeatsAreDecimal pins the heartbeat detail to the
+// decimal count. string(rune(n)) printed the code point instead — 65 as "A" —
+// so a healthy run surfaced a glyph where the count belongs (gt-abbr).
+func TestDaemonCheck_Run_HeartbeatsAreDecimal(t *testing.T) {
+	townRoot := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+
+	// IsRunning reports a daemon only while the lock is held, so the test
+	// plays the daemon and holds it (gt-utuk).
+	if err := os.MkdirAll(filepath.Join(townRoot, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := flock.New(filepath.Join(townRoot, "daemon", "daemon.lock"))
+	if err := lock.Lock(); err != nil {
+		t.Fatalf("holding daemon lock: %v", err)
+	}
+	t.Cleanup(func() { _ = lock.Unlock() })
+
+	state := &daemon.State{
+		Running:        true,
+		PID:            os.Getpid(),
+		StartedAt:      time.Now().Add(-time.Hour),
+		HeartbeatCount: 65,
+	}
+	if err := daemon.SaveState(townRoot, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	prev := daemonJobState
+	t.Cleanup(func() { daemonJobState = prev })
+	daemonJobState = func(k string) templates.SupervisorState {
+		return templates.SupervisorState{Kind: k, Loaded: true, LastExit: -1}
+	}
+
+	result := NewDaemonCheck().Run(&CheckContext{TownRoot: townRoot})
+	if result.Status != StatusOK {
+		t.Fatalf("Run() status = %v (%s), want StatusOK", result.Status, result.Message)
+	}
+
+	want := "Heartbeats: 65"
+	for _, d := range result.Details {
+		if d == want {
+			return
+		}
+	}
+	t.Errorf("Run() details = %v, want %q", result.Details, want)
 }

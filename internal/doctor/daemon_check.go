@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,7 +60,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 	if kind, missing := templates.SupervisorJobMissing(ctx.TownRoot, daemonJobState); missing {
 		msg := "Daemon supervisor job is not loaded (" + kind + ")"
 		if running {
-			msg += "; daemon PID " + itoa(pid) + " is unsupervised"
+			msg += "; daemon PID " + strconv.Itoa(pid) + " is unsupervised"
 		} else {
 			msg += " and the daemon is not running"
 		}
@@ -80,7 +81,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 			uptime := time.Since(state.StartedAt).Round(time.Second)
 			details = append(details, "Uptime: "+uptime.String())
 			if state.HeartbeatCount > 0 {
-				details = append(details, "Heartbeats: "+string(rune(state.HeartbeatCount)))
+				details = append(details, "Heartbeats: "+strconv.FormatInt(state.HeartbeatCount, 10))
 			}
 		}
 		details = append(details, "Supervised: "+templates.SupervisorStatusLine(ctx.TownRoot, pid, templates.SupervisorJobState))
@@ -88,7 +89,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: "Daemon is running (PID " + itoa(pid) + ")",
+			Message: "Daemon is running (PID " + strconv.Itoa(pid) + ")",
 			Details: details,
 		}
 	}
@@ -146,24 +147,4 @@ func (c *DaemonCheck) Fix(ctx *CheckContext) error {
 	time.Sleep(300 * time.Millisecond)
 
 	return nil
-}
-
-// itoa is a simple int to string helper
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	s := ""
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	for i > 0 {
-		s = string(rune('0'+i%10)) + s
-		i /= 10
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
 }
