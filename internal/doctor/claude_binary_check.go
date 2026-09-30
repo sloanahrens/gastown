@@ -11,6 +11,10 @@ import (
 // other agents), so missing Claude Code is a warning, not an error.
 type ClaudeBinaryCheck struct {
 	BaseCheck
+
+	// probe finds claude and classifies its version. Nil is
+	// deps.CheckClaudeCode; tests answer with a status.
+	probe func() (deps.ClaudeCodeStatus, string)
 }
 
 // NewClaudeBinaryCheck creates a new Claude Code binary version check.
@@ -26,7 +30,11 @@ func NewClaudeBinaryCheck() *ClaudeBinaryCheck {
 
 // Run checks if Claude Code is available in PATH and reports its version status.
 func (c *ClaudeBinaryCheck) Run(ctx *CheckContext) *CheckResult {
-	status, version := deps.CheckClaudeCode()
+	probe := c.probe
+	if probe == nil {
+		probe = deps.CheckClaudeCode
+	}
+	status, version := probe()
 
 	switch status {
 	case deps.ClaudeCodeOK:
