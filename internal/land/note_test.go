@@ -105,3 +105,16 @@ func TestLandingRecordNoteAndCloseReason(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatRejectionNoteBoundsTailLines(t *testing.T) {
+	t.Parallel()
+	got := FormatRejectionNote(RejectionNote{Reason: "r", Branch: "b", Target: "t", MR: "m", GateTail: strings.Repeat("x", 5000) + "\nshort\n"})
+	for _, line := range strings.Split(got, "\n") {
+		if len(line) > gateTailLineMax+10 {
+			t.Fatalf("tail line of %d bytes written", len(line))
+		}
+	}
+	if !strings.Contains(got, "\n  | short") {
+		t.Errorf("short line lost: %s", got)
+	}
+}

@@ -84,11 +84,18 @@ func FormatRejectionNote(n RejectionNote) string {
 	if tail := strings.TrimRight(n.GateTail, "\n"); tail != "" {
 		note += "\nGate tail:"
 		for _, line := range strings.Split(tail, "\n") {
+			if len(line) > gateTailLineMax {
+				line = line[:gateTailLineMax] + " …"
+			}
 			note += "\n  | " + defuseMarkers(line)
 		}
 	}
 	return note
 }
+
+// gateTailLineMax bounds each quoted output line, so one runaway line (a
+// dumped blob, a minified file) cannot bloat the bead's notes.
+const gateTailLineMax = 400
 
 // defuseMarkers keeps a quoted output line from carrying a block marker that
 // another reader splits the notes on.
