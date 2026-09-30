@@ -11,8 +11,8 @@ import (
 )
 
 func TestPolecatSessionSet(t *testing.T) {
-	setupPolecatTestRegistry(t)
-	sessions := newPolecatSessionSet([]string{
+	t.Parallel()
+	sessions := newPolecatSessionSet(polecatTestRegistry(), []string{
 		"gt-thunder",
 		"gt-crew-dom",
 		"gp-mirelurk",
@@ -58,7 +58,7 @@ func (f fakeSessionLister) GetSessionCreatedTime(name string) (time.Time, error)
 // (GT_AGENT, written at spawn), resolved once per list — not per polecat from
 // the agent bead, which does not carry it.
 func TestLoadPolecatSessionSetReadsAgent(t *testing.T) {
-	setupPolecatTestRegistry(t)
+	t.Parallel()
 	created := time.Date(2026, 9, 19, 16, 0, 0, 0, time.UTC)
 	lister := fakeSessionLister{
 		sessions: []string{"gt-topaz", "gt-thunder"},
@@ -69,7 +69,7 @@ func TestLoadPolecatSessionSetReadsAgent(t *testing.T) {
 		created: map[string]time.Time{"gt-topaz": created},
 	}
 
-	sessions, err := loadPolecatSessionSet(lister)
+	sessions, err := loadPolecatSessionSet(polecatTestRegistry(), lister)
 	if err != nil {
 		t.Fatalf("loadPolecatSessionSet: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestLoadPolecatSessionSetReadsAgent(t *testing.T) {
 // after it. Without the grace, every dispatch is "stalled" the instant it is
 // slung, and the restart paths chase a session that is still booting.
 func TestBuildPolecatInventoryItemSpawnGrace(t *testing.T) {
-	setupPolecatTestRegistry(t)
+	t.Parallel()
 	now := time.Date(2026, 9, 19, 16, 32, 0, 0, time.UTC)
 	const grace = 5 * time.Minute
 
@@ -157,7 +157,7 @@ func TestBuildPolecatInventoryItemSpawnGrace(t *testing.T) {
 // and got the witness to raise a second session on finished work. A live
 // session still reads working, and the state survives list reconciliation.
 func TestBuildPolecatInventoryItemSubmittedIsNotStalled(t *testing.T) {
-	setupPolecatTestRegistry(t)
+	t.Parallel()
 	hooked := &beads.Issue{
 		ID: "gt-hook", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/topaz",
 		Labels: []string{"gt:ready-to-land"},
@@ -178,15 +178,15 @@ func TestBuildPolecatInventoryItemSubmittedIsNotStalled(t *testing.T) {
 	}
 
 	live := buildPolecatInventoryItem("gastown", "topaz", fields, hooked,
-		newPolecatSessionSet([]string{"gt-topaz"}), polecatInventoryEnv{})
+		newPolecatSessionSet(polecatTestRegistry(), []string{"gt-topaz"}), polecatInventoryEnv{})
 	if !live.SessionRunning || live.State != polecat.StateWorking {
 		t.Errorf("live session: running=%v state=%q, want running and %q", live.SessionRunning, live.State, polecat.StateWorking)
 	}
 }
 
 func TestBuildPolecatInventoryItem(t *testing.T) {
-	setupPolecatTestRegistry(t)
-	sessions := newPolecatSessionSet([]string{"gt-running"})
+	t.Parallel()
+	sessions := newPolecatSessionSet(polecatTestRegistry(), []string{"gt-running"})
 	tests := []struct {
 		name         string
 		polecatName  string

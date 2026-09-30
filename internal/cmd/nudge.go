@@ -902,7 +902,12 @@ func shouldNudgeTarget(townRoot, targetAddress string, force bool) (bool, string
 //   - "gt-gastown-alpha" -> "gastown/alpha"
 //   - "hq-mayor" -> "mayor"
 func sessionNameToAddress(sessionName string) string {
-	identity, err := session.ParseSessionName(sessionName)
+	return sessionNameToAddressIn(session.DefaultRegistry(), sessionName)
+}
+
+// sessionNameToAddressIn is sessionNameToAddress reading rig prefixes from reg.
+func sessionNameToAddressIn(reg *session.PrefixRegistry, sessionName string) string {
+	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		return ""
 	}

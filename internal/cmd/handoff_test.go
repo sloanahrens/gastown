@@ -15,13 +15,16 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-func setupHandoffTestRegistry(t *testing.T) {
-	t.Helper()
+// handoffTestRegistry maps the rig prefixes the handoff tests use.
+func handoffTestRegistry() *session.PrefixRegistry {
 	reg := session.NewPrefixRegistry()
 	reg.Register("gt", "gastown")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	return reg
+}
+
+// buildTestRestartCommand is buildRestartCommand parsing with handoffTestRegistry.
+func buildTestRestartCommand(sessionName string) (string, error) {
+	return buildRestartCommandWithOpts(sessionName, buildRestartCommandOpts{Registry: handoffTestRegistry()})
 }
 
 func TestResolvePathToSessionRejectsUnsafeSegments(t *testing.T) {
@@ -59,7 +62,7 @@ func TestHandoffStdinFlag(t *testing.T) {
 }
 
 func TestSessionWorkDir(t *testing.T) {
-	setupHandoffTestRegistry(t)
+	t.Parallel()
 	townRoot := "/home/test/gt"
 
 	tests := []struct {
@@ -84,7 +87,7 @@ func TestSessionWorkDir(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotDir, err := sessionWorkDir(tt.sessionName, townRoot)
+			gotDir, err := sessionWorkDir(handoffTestRegistry(), tt.sessionName, townRoot)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("sessionWorkDir() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -97,8 +100,6 @@ func TestSessionWorkDir(t *testing.T) {
 }
 
 func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
-	setupHandoffTestRegistry(t)
-
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
 	origTownRoot := os.Getenv("GT_TOWN_ROOT")
@@ -160,7 +161,7 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -175,8 +176,6 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 	// is fully merged into the respawn command, not just NODE_OPTIONS.
 	// Without this, custom env vars like ANTHROPIC_BASE_URL configured for
 	// proxied Claude were silently dropped on handoff/respawn.
-	setupHandoffTestRegistry(t)
-
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
 	origTownRoot := os.Getenv("GT_TOWN_ROOT")
@@ -230,7 +229,7 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -251,8 +250,6 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 }
 
 func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
-	setupHandoffTestRegistry(t)
-
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
 	origTownRoot := os.Getenv("GT_TOWN_ROOT")
@@ -308,7 +305,7 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -331,8 +328,6 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 }
 
 func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
-	setupHandoffTestRegistry(t)
-
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
 	origTownRoot := os.Getenv("GT_TOWN_ROOT")
@@ -375,6 +370,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 
 	t.Run("custom ContinuePrompt overrides default", func(t *testing.T) {
 		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+			Registry:        handoffTestRegistry(),
 			ContinueSession: true,
 			ContinuePrompt:  "Context compacted. Continue your previous task.",
 		})
@@ -391,6 +387,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 
 	t.Run("empty ContinuePrompt falls back to default", func(t *testing.T) {
 		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+			Registry:        handoffTestRegistry(),
 			ContinueSession: true,
 		})
 		if err != nil {
@@ -406,6 +403,7 @@ func TestBuildRestartCommandWithOpts_ContinuePrompt(t *testing.T) {
 
 	t.Run("ContinueSession false uses beacon", func(t *testing.T) {
 		cmd, err := buildRestartCommandWithOpts("gt-crew-bear", buildRestartCommandOpts{
+			Registry:        handoffTestRegistry(),
 			ContinueSession: false,
 		})
 		if err != nil {
@@ -783,8 +781,6 @@ func TestWarnHandoffGitStatus(t *testing.T) {
 
 func TestHandoffProcessNames(t *testing.T) {
 	t.Run("same-agent restart preserves GT_PROCESS_NAMES from env", func(t *testing.T) {
-		setupHandoffTestRegistry(t)
-
 		tmpTown := t.TempDir()
 		mayorDir := filepath.Join(tmpTown, "mayor")
 		os.MkdirAll(mayorDir, 0755)
@@ -798,7 +794,7 @@ func TestHandoffProcessNames(t *testing.T) {
 		t.Cleanup(func() { os.Chdir(origCwd) })
 
 		// Same-agent restart should preserve existing process names from env
-		cmd, err := buildRestartCommand("gt-crew-propane")
+		cmd, err := buildTestRestartCommand("gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -808,8 +804,6 @@ func TestHandoffProcessNames(t *testing.T) {
 	})
 
 	t.Run("first boot without GT_PROCESS_NAMES computes from config", func(t *testing.T) {
-		setupHandoffTestRegistry(t)
-
 		tmpTown := t.TempDir()
 		mayorDir := filepath.Join(tmpTown, "mayor")
 		os.MkdirAll(mayorDir, 0755)
@@ -824,7 +818,7 @@ func TestHandoffProcessNames(t *testing.T) {
 		t.Cleanup(func() { os.Chdir(origCwd) })
 
 		// No GT_PROCESS_NAMES in env — should compute from agent config
-		cmd, err := buildRestartCommand("gt-crew-propane")
+		cmd, err := buildTestRestartCommand("gt-crew-propane")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1063,8 +1057,6 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 // GT_AGENT alone no longer means "override" after gt-di8p — the resolver is
 // now chosen by GT_AGENT_OVERRIDE, which only --agent spawns set.
 func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing.T) {
-	setupHandoffTestRegistry(t)
-
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
 	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
@@ -1142,7 +1134,7 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-crew-holden")
+	cmd, err := buildTestRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -1176,8 +1168,6 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 // claude-opus-cycle (gt-di8p). The mapping is live config; the pin is a
 // snapshot of it taken at spawn.
 func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) {
-	setupHandoffTestRegistry(t)
-
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
 	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
@@ -1243,7 +1233,7 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	spawned, err := buildRestartCommand("gt-crew-holden")
+	spawned, err := buildTestRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand before the config change: %v", err)
 	}
@@ -1255,7 +1245,7 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 	// session still carries the old GT_AGENT.
 	writeRigRoleAgents("claude-opus-cycle")
 
-	handoff, err := buildRestartCommand("gt-crew-holden")
+	handoff, err := buildTestRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand after the config change: %v", err)
 	}
@@ -1276,7 +1266,7 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 	_ = os.Setenv("GT_AGENT", "claude-opus")
 	_ = os.Setenv("GT_AGENT_OVERRIDE", "1")
 
-	overridden, err := buildRestartCommand("gt-crew-holden")
+	overridden, err := buildTestRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand with an explicit override: %v", err)
 	}
@@ -1297,8 +1287,6 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 // swapped for the role's preset — and a change to the worker's own mapping must
 // take effect, exactly as it would on a fresh spawn (gt-di8p).
 func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
-	setupHandoffTestRegistry(t)
-
 	origCwd, _ := os.Getwd()
 	origGTAgent := os.Getenv("GT_AGENT")
 	origGTAgentOverride := os.Getenv("GT_AGENT_OVERRIDE")
@@ -1369,7 +1357,7 @@ func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
 		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-crew-toast")
+	cmd, err := buildTestRestartCommand("gt-crew-toast")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -1385,7 +1373,7 @@ func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
 	// spawn of the same worker resolves worker_agents first.
 	writeWorkerAgent("claude-worker2")
 
-	changed, err := buildRestartCommand("gt-crew-toast")
+	changed, err := buildTestRestartCommand("gt-crew-toast")
 	if err != nil {
 		t.Fatalf("buildRestartCommand after the worker mapping change: %v", err)
 	}

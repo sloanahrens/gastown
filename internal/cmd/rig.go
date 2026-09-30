@@ -846,7 +846,7 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 
 	// Check for running tmux sessions before removing
 	t := tmux.NewTmux()
-	sessions, sessErr := findRigSessions(t, name)
+	sessions, sessErr := findRigSessions(t, session.DefaultRegistry(), name)
 	if sessErr != nil {
 		if !rigRemoveForce {
 			return fmt.Errorf("could not verify session state for rig %s: %w (use --force to skip check)", name, sessErr)
@@ -1745,17 +1745,18 @@ func syncRigHooks(townRoot, rigName string) error {
 // findRigSessions returns all tmux sessions belonging to the given rig.
 // All rig sessions share the "<rigPrefix>-" prefix, so this catches polecat
 // and crew sessions in one pass.
-func findRigSessions(t *tmux.Tmux, rigName string) ([]string, error) {
+func findRigSessions(t *tmux.Tmux, reg *session.PrefixRegistry, rigName string) ([]string, error) {
 	all, err := t.ListSessions()
 	if err != nil {
 		return nil, fmt.Errorf("listing tmux sessions: %w", err)
 	}
-	return rigSessionsIn(all, rigName), nil
+	return rigSessionsIn(reg, all, rigName), nil
 }
 
-// rigSessionsIn returns the sessions in all that belong to rigName.
-func rigSessionsIn(all []string, rigName string) []string {
-	prefix := session.PrefixFor(rigName) + "-"
+// rigSessionsIn returns the sessions in all that belong to rigName, whose
+// prefix reg supplies.
+func rigSessionsIn(reg *session.PrefixRegistry, all []string, rigName string) []string {
+	prefix := reg.PrefixForRig(rigName) + "-"
 	var matches []string
 	for _, name := range all {
 		if strings.HasPrefix(name, prefix) {
@@ -1768,7 +1769,7 @@ func rigSessionsIn(all []string, rigName string) []string {
 // countRigSessions counts the sessions in all that belong to rigName: the
 // rig reads as running while any of its agents has a session.
 func countRigSessions(all []string, rigName string) int {
-	return len(rigSessionsIn(all, rigName))
+	return len(rigSessionsIn(session.DefaultRegistry(), all, rigName))
 }
 
 // commitTownConfigChanges commits town-level config files (rigs.json, daemon.json,

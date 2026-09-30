@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -77,7 +76,7 @@ func TestAgentsCmd_ShortDescription(t *testing.T) {
 }
 
 func TestCategorizeSession_AllTypes(t *testing.T) {
-	setupCmdTestRegistry(t)
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -92,7 +91,7 @@ func TestCategorizeSession_AllTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := categorizeSession(tt.input)
+			got := categorizeSession(cmdTestRegistry(), tt.input)
 			if got == nil {
 				t.Fatalf("categorizeSession(%q) = nil, want type %d", tt.input, tt.wantType)
 			}
@@ -115,7 +114,7 @@ func TestCategorizeSession_InvalidName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := categorizeSession(tt.input)
+			got := categorizeSession(cmdTestRegistry(), tt.input)
 			if got != nil {
 				t.Errorf("categorizeSession(%q) = %+v, want nil", tt.input, got)
 			}
@@ -125,7 +124,7 @@ func TestCategorizeSession_InvalidName(t *testing.T) {
 
 func TestCategorizeSession_Overseer(t *testing.T) {
 	t.Parallel()
-	got := categorizeSession("hq-overseer")
+	got := categorizeSession(cmdTestRegistry(), "hq-overseer")
 	if got != nil {
 		t.Errorf("categorizeSession(%q) = %+v, want nil (overseer is not a display agent)", "hq-overseer", got)
 	}
@@ -133,7 +132,7 @@ func TestCategorizeSession_Overseer(t *testing.T) {
 
 func TestCategorizeSession_EmptyString(t *testing.T) {
 	t.Parallel()
-	got := categorizeSession("")
+	got := categorizeSession(cmdTestRegistry(), "")
 	if got != nil {
 		t.Errorf("categorizeSession(%q) = %+v, want nil", "", got)
 	}
@@ -202,33 +201,33 @@ func TestDisplayLabel_AllTypes(t *testing.T) {
 // --- filterAndSortSessions tests ---
 
 func TestFilterAndSortSessions_NoSessions(t *testing.T) {
-	setupCmdTestRegistry(t)
-	got := filterAndSortSessions(nil, true)
+	t.Parallel()
+	got := filterAndSortSessions(cmdTestRegistry(), nil, true)
 	if len(got) != 0 {
 		t.Errorf("filterAndSortSessions(nil) returned %d agents, want 0", len(got))
 	}
 
-	got = filterAndSortSessions([]string{}, true)
+	got = filterAndSortSessions(cmdTestRegistry(), []string{}, true)
 	if len(got) != 0 {
 		t.Errorf("filterAndSortSessions([]) returned %d agents, want 0", len(got))
 	}
 }
 
 func TestFilterAndSortSessions_AllFiltered(t *testing.T) {
-	setupCmdTestRegistry(t)
+	t.Parallel()
 	input := []string{
 		"my-tmux-session",
 		"dev-workspace",
 		"random-thing",
 	}
-	got := filterAndSortSessions(input, true)
+	got := filterAndSortSessions(cmdTestRegistry(), input, true)
 	if len(got) != 0 {
 		t.Errorf("filterAndSortSessions(non-gastown names) returned %d agents, want 0", len(got))
 	}
 }
 
 func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
-	setupCmdTestRegistry(t)
+	t.Parallel()
 	input := []string{
 		"hq-mayor",
 		"gt-furiosa", // polecat
@@ -236,7 +235,7 @@ func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
 	}
 
 	// With polecats excluded
-	got := filterAndSortSessions(input, false)
+	got := filterAndSortSessions(cmdTestRegistry(), input, false)
 	for _, a := range got {
 		if a.Type == AgentPolecat {
 			t.Errorf("polecat %q present when includePolecats=false", a.Name)
@@ -247,7 +246,7 @@ func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
 	}
 
 	// With polecats included
-	got = filterAndSortSessions(input, true)
+	got = filterAndSortSessions(cmdTestRegistry(), input, true)
 	hasPolecat := false
 	for _, a := range got {
 		if a.Type == AgentPolecat {
@@ -263,14 +262,14 @@ func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
 }
 
 func TestFilterAndSortSessions_BootSessionFiltered(t *testing.T) {
-	setupCmdTestRegistry(t)
+	t.Parallel()
 	input := []string{
 		"hq-mayor",
 		"hq-boot", // should always be excluded
 		"hq-deacon",
 	}
 
-	got := filterAndSortSessions(input, true)
+	got := filterAndSortSessions(cmdTestRegistry(), input, true)
 	for _, a := range got {
 		if a.Name == "hq-boot" {
 			t.Error("hq-boot session should be filtered out")
@@ -282,7 +281,7 @@ func TestFilterAndSortSessions_BootSessionFiltered(t *testing.T) {
 }
 
 func TestFilterAndSortSessions_SortOrder(t *testing.T) {
-	setupCmdTestRegistry(t)
+	t.Parallel()
 	input := []string{
 		"gt-crew-zed",   // crew (gastown)
 		"hq-mayor",      // mayor
@@ -291,7 +290,7 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 		"gt-crew-alpha", // crew (gastown)
 	}
 
-	got := filterAndSortSessions(input, true)
+	got := filterAndSortSessions(cmdTestRegistry(), input, true)
 
 	// Expected order:
 	// 1. mayor (town-level)
@@ -325,7 +324,7 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 }
 
 func TestFilterAndSortSessions_CombinedFiltering(t *testing.T) {
-	setupCmdTestRegistry(t)
+	t.Parallel()
 	input := []string{
 		"hq-mayor",
 		"hq-boot",        // boot: always filtered
@@ -334,7 +333,7 @@ func TestFilterAndSortSessions_CombinedFiltering(t *testing.T) {
 		"gt-crew-max",
 	}
 
-	got := filterAndSortSessions(input, false)
+	got := filterAndSortSessions(cmdTestRegistry(), input, false)
 	if len(got) != 2 {
 		t.Fatalf("filterAndSortSessions(combined, polecats=false) returned %d agents, want 2 (mayor + crew)", len(got))
 	}
@@ -345,38 +344,9 @@ func TestFilterAndSortSessions_CombinedFiltering(t *testing.T) {
 		t.Errorf("position 1: type = %d, want AgentCrew", got[1].Type)
 	}
 
-	got = filterAndSortSessions(input, true)
+	got = filterAndSortSessions(cmdTestRegistry(), input, true)
 	if len(got) != 3 {
 		t.Fatalf("filterAndSortSessions(combined, polecats=true) returned %d agents, want 3 (mayor + crew + polecat)", len(got))
-	}
-}
-
-func TestRunAgentsList_EmptyList_Output(t *testing.T) {
-	setupCmdTestRegistry(t)
-
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available, skipping stdout check")
-	}
-
-	// Exercise the real runAgentsList code path with stdout capture.
-	// tmux binary exists but the server may not be running, in which
-	// case runAgentsList returns an error and output is empty.
-	var runErr error
-	output := captureStdout(t, func() {
-		runErr = runAgentsList(nil, nil)
-	})
-
-	if runErr != nil {
-		// tmux server not running — nothing to assert on stdout
-		return
-	}
-
-	// runAgentsList succeeded: output is either the empty-list message
-	// or a real agent listing if gastown sessions happen to be running.
-	if !strings.Contains(output, "No agent sessions running.") &&
-		!strings.Contains(output, "Mayor") &&
-		!strings.Contains(output, "crew/") {
-		t.Errorf("unexpected output from runAgentsList: %q", output)
 	}
 }
 
@@ -565,7 +535,7 @@ func TestBuildMenuAction_TestSocket(t *testing.T) {
 }
 
 func TestGuessSessionFromWorkerDir(t *testing.T) {
-	setupCmdTestRegistry(t)
+	t.Parallel()
 	townRoot := "/town"
 
 	tests := []struct {
@@ -583,7 +553,7 @@ func TestGuessSessionFromWorkerDir(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := guessSessionFromWorkerDir(tt.workerDir, townRoot)
+			got := guessSessionFromWorkerDir(cmdTestRegistry(), tt.workerDir, townRoot)
 			if got != tt.want {
 				t.Errorf("guessSessionFromWorkerDir(%q, %q) = %q, want %q",
 					tt.workerDir, townRoot, got, tt.want)

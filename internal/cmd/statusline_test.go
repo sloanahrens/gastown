@@ -10,15 +10,13 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 )
 
-func setupCmdTestRegistry(t *testing.T) {
-	t.Helper()
+// cmdTestRegistry maps the rig prefixes the agents tests use.
+func cmdTestRegistry() *session.PrefixRegistry {
 	registry := session.NewPrefixRegistry()
 	registry.Register("gt", "gastown")
 	registry.Register("do", "coder_dotfiles")
 	registry.Register("mr", "myrig")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(registry)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	return registry
 }
 
 func TestStatusLineAvoidsBeadsHotPath(t *testing.T) {

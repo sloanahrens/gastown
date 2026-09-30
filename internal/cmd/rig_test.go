@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/session"
 )
 
 func TestIsGitRemoteURL(t *testing.T) {
@@ -61,16 +59,4 @@ func TestIsGitRemoteURL(t *testing.T) {
 			}
 		})
 	}
-}
-
-func setupRigTestRegistry(t *testing.T) {
-	t.Helper()
-	reg := session.NewPrefixRegistry()
-	// Use zz-prefixed names to avoid collisions with real rig sessions
-	// (e.g. "tr" collides with production rigs that use that prefix).
-	reg.Register("zztr", "testrig1223")
-	reg.Register("zzor", "otherrig")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 }

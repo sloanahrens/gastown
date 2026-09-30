@@ -173,6 +173,12 @@ var sanitizeRe = regexp.MustCompile(`[^a-z0-9-]+`)
 // Uses the directory basename plus a short hash of the canonical path to ensure
 // uniqueness even when two towns share the same basename (e.g., ~/gt and ~/work/gt).
 // Format: "basename-hash6" (e.g., "gt-a1b2c3").
+// TownSocketName is the tmux socket InitRegistry selects for townRoot when
+// GT_TMUX_SOCKET is unset, derived without touching process state.
+func TownSocketName(townRoot string) string {
+	return townSocketName(townRoot)
+}
+
 func townSocketName(townRoot string) string {
 	base := sanitizeTownName(filepath.Base(townRoot))
 

@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -434,7 +435,7 @@ func currentPolecatSessions() (polecatSessionSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
 	}
-	return newPolecatSessionSet(sessionNames), nil
+	return newPolecatSessionSet(session.DefaultRegistry(), sessionNames), nil
 }
 
 func listPolecatDirectoryNames(rigPath string) ([]string, error) {

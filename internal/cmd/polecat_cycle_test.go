@@ -7,20 +7,18 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 )
 
-func setupPolecatTestRegistry(t *testing.T) {
-	t.Helper()
+// polecatTestRegistry maps the rig prefixes the polecat tests use.
+func polecatTestRegistry() *session.PrefixRegistry {
 	reg := session.NewPrefixRegistry()
 	reg.Register("gt", "gastown")
 	reg.Register("gp", "greenplace")
 	reg.Register("bd", "beads")
 	reg.Register("mr", "my-rig")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	return reg
 }
 
 func TestParsePolecatSessionName(t *testing.T) {
-	setupPolecatTestRegistry(t)
+	t.Parallel()
 	tests := []struct {
 		name        string
 		sessionName string
@@ -120,7 +118,7 @@ func TestParsePolecatSessionName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotRig, gotPolecat, gotOk := parsePolecatSessionName(tt.sessionName)
+			gotRig, gotPolecat, gotOk := parsePolecatSessionNameIn(polecatTestRegistry(), tt.sessionName)
 			if gotRig != tt.wantRig || gotPolecat != tt.wantPolecat || gotOk != tt.wantOk {
 				t.Errorf("parsePolecatSessionName(%q) = (%q, %q, %v), want (%q, %q, %v)",
 					tt.sessionName, gotRig, gotPolecat, gotOk, tt.wantRig, tt.wantPolecat, tt.wantOk)

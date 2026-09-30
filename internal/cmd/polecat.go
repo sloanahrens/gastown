@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -835,7 +836,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	}
 
 	// Collect polecats from all rigs
-	sessions, err := loadPolecatSessionSet(newPoolSessionLister())
+	sessions, err := loadPolecatSessionSet(session.DefaultRegistry(), newPoolSessionLister())
 	if err != nil {
 		return fmt.Errorf("listing tmux sessions: %w", err)
 	}
@@ -1090,7 +1091,7 @@ func runPolecatRemove(cmd *cobra.Command, args []string) error {
 // produce one (the tmux listing failed, or the worktree is not a listed seat);
 // the caller then keeps the manager's own reading rather than failing status.
 func polecatListRow(r *rig.Rig, name string) (PolecatListItem, bool) {
-	sessions, err := loadPolecatSessionSet(newPoolSessionLister())
+	sessions, err := loadPolecatSessionSet(session.DefaultRegistry(), newPoolSessionLister())
 	if err != nil {
 		return PolecatListItem{}, false
 	}
