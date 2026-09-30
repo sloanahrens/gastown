@@ -1385,7 +1385,7 @@ func townRootOf(townBeads string) string {
 
 // openStrandedBlockCheck is the production blocker check for the stranded
 // scan: convoyops.BlockReason over the town store and a resolver that opens
-// each rig's store on first use, the plumbing gt close uses (close.go). bd
+// each rig's store on first use. bd
 // show cannot be used for this: its dependencies join each edge to an issue
 // row in the bead's own database and drop every cross-rig blocker, so the
 // daemon's stranded feed slung beads another rig's open bead blocked

@@ -66,7 +66,7 @@ sometimes across the entire town. Think of crew as chiefs of staff, not grunt wo
 | **Context** | Deep — sessions go long, read background materials, design discussions | Shallow — fresh per task, reset at completion |
 | **Work style** | "Fat" work: exploration, review, dispatch, strategy | Granular tasks: one bug, one feature, one fix |
 | **Supervision** | Self-managed, no Witness | Witness monitors lifecycle |
-| **Scope** | Cross-rig via `{{ cmd }} worktree` and `{{ cmd }} sling` | Scoped to one rig |
+| **Scope** | Cross-rig via `{{ cmd }} sling` | Scoped to one rig |
 
 ### How Crew Work
 
@@ -176,24 +176,10 @@ You work from: {{ .WorkDir }}
 This is a full git clone of the project repository. You have complete autonomy
 over this workspace.
 
-## Cross-Rig Worktrees
-
-When you need to work on a different rig, create a worktree in the target rig:
-
-```bash
-gt worktree beads            # Creates {{ .TownRoot }}/beads/crew/{{ .RigName }}-{{ .Polecat }}/
-gt worktree list             # List your worktrees across all rigs
-gt worktree remove beads     # Remove when done
-```
-
-**Key principles:**
-- **Identity preserved**: Your `BD_ACTOR` stays `{{ .RigName }}/crew/{{ .Polecat }}` even in the beads worktree
-- **No conflicts**: Each crew member gets their own worktree in the target rig
-- **Persistent**: Worktrees survive sessions (matches your crew lifecycle)
+## Cross-Rig Work
 
 | Scenario | Approach |
 |----------|----------|
-| Quick/substantial fix in another rig | Use `{{ cmd }} worktree` |
 | Work should be done by target rig's workers | `{{ cmd }} convoy create` + `{{ cmd }} sling` to target rig |
 | Infrastructure task | Leave it to the Deacon's dogs |
 
@@ -331,15 +317,6 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 Get their name/email from the PR. This ensures they appear in `git log`, GitHub's
 contributor graph, and `git shortlog`. Without it, their contribution is invisible
 in git history — only a closed PR comment links them to the work.
-
-### Cross-Rig Work (gt worktree)
-
-`{{ cmd }} worktree` creates a branch for working in another rig's codebase. Complete
-{{ if .IsForkRig -}}
-the work in one session if possible and complete that rig's PR/no-merge workflow; do not route upstream changes through a local Refinery/MQ.
-{{ else -}}
-the work in one session if possible and submit to that rig's Refinery immediately.
-{{ end }}
 
 ## Key Commands
 

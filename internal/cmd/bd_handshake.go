@@ -46,7 +46,6 @@ var bdHandshakeGatedCommands = map[string]bool{
 	"gt session restart":  true,
 	"gt scheduler run":    true,
 	"gt formula run":      true,
-	"gt synthesis start":  true,
 }
 
 // bdHandshakeTownVerbs are the command names that start or dispatch things.
@@ -62,7 +61,6 @@ var bdHandshakeTownVerbs = map[string]bool{
 // session, daemon or polecat, with the reason each is exempt.
 var bdHandshakeNotTownRunning = map[string]string{
 	"gt boot":             "command group; its spawn verb is gated",
-	"gt resume":           "reads the inbox for handoff messages",
 	"gt agent resume":     "clears a pause flag; starts no session",
 	"gt deacon resume":    "clears a pause flag; starts no session",
 	"gt mountain resume":  "re-enables wave dispatch, which goes through gt sling (gated)",

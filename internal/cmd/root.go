@@ -180,7 +180,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	touchDeaconHeartbeat()
 
 	// Skip beads check for exempt commands
-	if beadsExempt || isRoleCommand(cmd) {
+	if beadsExempt {
 		return nil
 	}
 
@@ -196,18 +196,6 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 func isCommandOrAncestorExempt(cmd *cobra.Command, exemptions map[string]bool) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		if exemptions[c.Name()] {
-			return true
-		}
-	}
-	return false
-}
-
-// isRoleCommand returns true when the invoked command belongs to the `gt role` tree.
-// Role introspection commands are often used in scripts and tests that expect clean
-// output; beads version warnings are unrelated noise for these commands.
-func isRoleCommand(cmd *cobra.Command) bool {
-	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "role" {
 			return true
 		}
 	}

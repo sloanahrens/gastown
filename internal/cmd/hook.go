@@ -668,3 +668,26 @@ func sessionNameToCanonicalAddress(sessionName, targetHint string) (string, bool
 func findTownRoot() (string, error) {
 	return workspace.FindFromCwd()
 }
+
+// isBeadID checks if a string looks like a bead ID.
+// Bead IDs have the format <prefix>-<id> where prefix starts with a
+// lowercase letter and may contain underscores (e.g. gt-abc123,
+// japanese_reader-id3a).
+func isBeadID(s string) bool {
+	dashIdx := strings.Index(s, "-")
+	if dashIdx <= 0 || dashIdx >= len(s)-1 {
+		return false
+	}
+	for i, c := range s[:dashIdx] {
+		if i == 0 {
+			if c < 'a' || c > 'z' {
+				return false
+			}
+			continue
+		}
+		if !((c >= 'a' && c <= 'z') || c == '_') {
+			return false
+		}
+	}
+	return true
+}

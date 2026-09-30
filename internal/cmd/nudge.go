@@ -99,7 +99,7 @@ Channel syntax:
                   Patterns like "gastown/polecats/*" are expanded.
 
 DND (Do Not Disturb):
-  If the target has DND enabled (gt dnd on), the nudge is skipped.
+  If the target has DND enabled, the nudge is skipped.
   Use --force to override DND and send anyway.
 
 Examples:

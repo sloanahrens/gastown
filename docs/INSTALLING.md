@@ -186,7 +186,6 @@ gt rig add myproject https://github.com/you/repo.git
 ```bash
 cd ~/gt
 
-gt enable              # enable Gas Town system-wide
 gt up                  # Start all services. Use gt down or gt shutdown for stopping. 
 
 gt doctor --fix        # Run health checks and fix post-install warnings

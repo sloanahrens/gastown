@@ -108,32 +108,11 @@ Dogs are the Deacon's helpers for system-level tasks:
 - **Boot**: Triages Deacon health on daemon tick
 - Future dogs might handle: log rotation, health checks, etc.
 
-If you need to do work in another rig, use **worktrees**, not dogs.
+If you need to do work in another rig, dispatch it there, not to dogs.
 
-## Cross-Rig Work Patterns
+## Cross-Rig Work
 
-When a crew member needs to work on another rig:
-
-### Option 1: Worktrees (Preferred)
-
-Create a worktree in the target rig:
-
-```bash
-# gastown/crew/joe needs to fix a beads bug
-gt worktree beads
-# Creates ~/gt/beads/crew/gastown-joe/
-# Identity preserved: BD_ACTOR = gastown/crew/joe
-```
-
-Directory structure:
-```
-~/gt/beads/crew/gastown-joe/     # joe from gastown working on beads
-~/gt/gastown/crew/beads-wolf/    # wolf from beads working on gastown
-```
-
-### Option 2: Dispatch to Local Workers
-
-For work that should be owned by the target rig:
+When work belongs to another rig, dispatch it to that rig's workers:
 
 ```bash
 # Create issue in target rig
@@ -144,14 +123,7 @@ gt convoy create "Auth fix" bd-xyz
 gt sling bd-xyz beads
 ```
 
-### When to Use Which
-
-| Scenario | Approach |
-|----------|----------|
-| You need to fix something quick | Worktree |
-| Work should appear in your CV | Worktree |
-| Work should be done by target rig team | Dispatch |
-| Infrastructure/system task | Let Deacon handle it |
+Infrastructure and system tasks belong to the Deacon.
 
 ## Directory Structure
 

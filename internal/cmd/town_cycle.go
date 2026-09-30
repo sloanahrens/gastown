@@ -2,14 +2,7 @@ package cmd
 
 import (
 	"fmt"
-
-	"github.com/spf13/cobra"
 )
-
-// townCycleSession is the --session flag for town next/prev commands.
-// When run via tmux key binding (run-shell), the session context may not be
-// correct, so we pass the session name explicitly via #{session_name} expansion.
-var townCycleSession string
 
 // getTownLevelSessions returns the town-level session names for the current workspace.
 func getTownLevelSessions() []string {
@@ -27,48 +20,6 @@ func isTownLevelSession(sessionName string) bool {
 	mayorSession := getMayorSessionName()   // "hq-mayor"
 	deaconSession := getDeaconSessionName() // "hq-deacon"
 	return sessionName == mayorSession || sessionName == deaconSession
-}
-
-func init() {
-	rootCmd.AddCommand(townCmd)
-	townCmd.AddCommand(townNextCmd)
-	townCmd.AddCommand(townPrevCmd)
-
-	townNextCmd.Flags().StringVar(&townCycleSession, "session", "", "Override current session (used by tmux binding)")
-	townPrevCmd.Flags().StringVar(&townCycleSession, "session", "", "Override current session (used by tmux binding)")
-}
-
-var townCmd = &cobra.Command{
-	Use:   "town",
-	RunE:  requireSubcommand,
-	Short: "Town-level operations",
-	Long:  `Commands for town-level operations including session cycling.`,
-}
-
-var townNextCmd = &cobra.Command{
-	Use:   "next",
-	Short: "Switch to next town session (mayor/deacon)",
-	Long: `Switch to the next town-level session in the cycle order.
-Town sessions cycle between Mayor and Deacon.
-
-This command is typically invoked via the C-b n keybinding when in a
-town-level session (Mayor or Deacon).`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return cycleTownSession(1, townCycleSession)
-	},
-}
-
-var townPrevCmd = &cobra.Command{
-	Use:   "prev",
-	Short: "Switch to previous town session (mayor/deacon)",
-	Long: `Switch to the previous town-level session in the cycle order.
-Town sessions cycle between Mayor and Deacon.
-
-This command is typically invoked via the C-b p keybinding when in a
-town-level session (Mayor or Deacon).`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return cycleTownSession(-1, townCycleSession)
-	},
 }
 
 // cycleTownSession switches to the next or previous town-level session.

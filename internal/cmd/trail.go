@@ -507,3 +507,17 @@ func relativeTime(t time.Time) string {
 		return fmt.Sprintf("%d days ago", days)
 	}
 }
+
+// parseDuration parses a duration string with support for days (d).
+func parseDuration(s string) (time.Duration, error) {
+	// Check for days suffix
+	if strings.HasSuffix(s, "d") {
+		days := strings.TrimSuffix(s, "d")
+		var d int
+		if _, err := fmt.Sscanf(days, "%d", &d); err != nil {
+			return 0, fmt.Errorf("invalid days format: %s", s)
+		}
+		return time.Duration(d) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
+}

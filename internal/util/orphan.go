@@ -220,12 +220,6 @@ func saveOrphanState(state map[int]signalState) error {
 	return saveSignalState(orphanStateFile, state)
 }
 
-// processExists checks if a process is still running.
-func processExists(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
-}
-
 // getProcessCwd returns the current working directory of a process.
 // On Linux, reads /proc/<pid>/cwd. On macOS and other Unix, uses lsof.
 // Returns empty string if the cwd cannot be determined.

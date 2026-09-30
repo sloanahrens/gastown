@@ -263,8 +263,7 @@ docker compose exec gastown zsh   # or bash
 Inside the container, finish bootstrapping.
 
 ```bash
-gt enable                         # enable Gas Town global state
-gt shell install                  # install shell integration
+gt install /gt --force --shell    # enable Gas Town and install shell integration
 gt up --restore                   # start services and restore worker settings
 gh auth login                     # optional: required for private GitHub rigs
 gt mayor attach

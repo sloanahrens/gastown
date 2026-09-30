@@ -31,7 +31,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 
 | Command | What it does |
 |---------|-------------|
-| `gt prune-branches` | Removes stale local polecat tracking branches (`git fetch --prune` + safe delete) |
 | `gt orphans` | Finds orphaned commits never merged (detection only) |
 | `gt orphans kill` | Prunes orphaned commits (`git gc --prune=now`) + kills orphaned processes |
 
@@ -89,7 +88,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 
 | Command | What it does |
 |---------|-------------|
-| `gt close <bead-id>` | Closes beads (lifecycle termination) |
 | `gt unsling` / `gt unhook` | Removes work from agent's hook, resets bead status to "open" |
 | `gt hook clear` | Alias for unsling |
 
@@ -120,19 +118,13 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 
 | Command | What it does |
 |---------|-------------|
-| `gt namepool reset` | Releases all claimed polecat names |
-| `gt checkpoint clear` | Removes checkpoint file |
-| `gt issue clear` | Clears issue from tmux status line |
 | `gt doctor --fix` | Auto-fixes: orphan sessions, wisp GC, stale redirects, worktree validity |
 
 ## System-Level Cleanup
 
 | Command | What it does |
 |---------|-------------|
-| `gt disable --clean` | Disables gastown + removes shell integration |
-| `gt shell remove` | Removes shell integration from RC files |
 | `gt config agent remove <name>` | Removes custom agent definition |
-| `gt uninstall` | Full removal: shell integration, wrapper scripts, state/config/cache dirs |
 | `make clean` | Removes compiled `gt` binary |
 
 ## Scripts
@@ -160,9 +152,9 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 |-------|-------|-------------|
 | **L0** | Ephemeral data | `gt compact`, `gt krc prune` (TTL-based lifecycle) |
 | **L1** | Processes | `gt cleanup`, `gt orphans procs kill`, `gt deacon cleanup-orphans` |
-| **L2** | Git artifacts | `gt prune-branches`, `gt polecat gc`, `gt orphans kill` |
+| **L2** | Git artifacts | `gt polecat gc` |
 | **L3** | Agents/sessions | `gt polecat nuke`, `gt done`, `gt shutdown`, `gt down` |
 | **L4** | Workspace | `gt rig reset`, `gt doctor --fix`, `gt dolt cleanup` |
-| **L5** | System | `gt uninstall`, `gt disable --clean` |
+| **L5** | System | `make clean` |
 
 **Total: ~62 commands/functions** across the cleanup ecosystem.
