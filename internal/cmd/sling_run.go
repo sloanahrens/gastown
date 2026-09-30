@@ -4,11 +4,13 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -131,6 +133,12 @@ type slingDeps struct {
 	startSession    func(spawn *SpawnedPolecatInfo) (string, error)
 	startDelayedDog func(dog *DogDispatchInfo) (string, error)
 	cleanupSpawned  func(spawn *SpawnedPolecatInfo, rigName, convoyID string)
+	resolveAgent    func(target string) (agentID, pane, hookRoot string, err error)
+	dispatchDog     func(dogName string, opts DogDispatchOptions) (*DogDispatchInfo, error)
+	cwdTown         func() string
+	crewExists      func(townRoot, rigName, name string) bool
+	peekPool        func(townRoot, beadID, requested string) (agent, reason string, err error)
+	wakeRig         func(rigName string)
 
 	// Reassignment away from a previous holder.
 	requester          func() string
@@ -158,6 +166,21 @@ type slingDeps struct {
 	logFeed            func(eventType, actor string, payload map[string]interface{}) error
 	enqueueNudge       func(townRoot, session string, n nudge.QueuedNudge) error
 
+	// A standalone formula sling's wisp and the dog that may run it.
+	findHookedFormula    func(workDir, targetAgent, formulaName string) (*beads.Issue, error)
+	cookFormula          func(formulaName, workDir, townRoot string) error
+	createWisp           func(formulaName, workDir, townRoot string, vars []string) ([]byte, error)
+	hookWisp             func(beadID, targetAgent, hookDir string) error
+	burnWisp             func(wispRootID, workDir string) error
+	cleanupFailedDogWisp func(wispRootID, workDir string) error
+	cleanupStaleDogWisp  func(wispRootID, workDir string) error
+	clearDogWork         func(dog *DogDispatchInfo) error
+	nudgeSession         func(session, message string) error
+	nudgePane            func(pane, message string) error
+
+	// The sling context a scheduled bead waits in, in the target rig's beads.
+	slingContexts func(rigBeadsDir string) slingContextStore
+
 	// Undoing a partial sling.
 	rollbackArtifacts func(spawn *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string)
 	restoreRawFields  func(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo)
@@ -172,7 +195,7 @@ type slingDeps struct {
 // realSlingDeps is the running gt's collaborators. The package seams some of
 // them read are still replaced by tests of other commands.
 func realSlingDeps() *slingDeps {
-	return &slingDeps{
+	d := &slingDeps{
 		getenv:        os.Getenv,
 		out:           os.Stdout,
 		stdin:         os.Stdin,
@@ -190,11 +213,9 @@ func realSlingDeps() *slingDeps {
 		batchSchedule:          runBatchSchedule,
 		batchSling:             runBatchSling,
 		rigFromBeadIDs:         resolveRigFromBeadIDs,
-		scheduleBead:           scheduleBead,
 		rigForBead:             resolveRigForBead,
 		rigBeadsDir:            beads.ResolveRepoAliasBeadsDir,
 		resolveFormula:         resolveFormula,
-		slingFormula:           runSlingFormula,
 		convoySchedule:         runConvoyScheduleByID,
 		convoySling:            runConvoySlingByID,
 		epicSchedule:           runEpicScheduleByID,
@@ -215,12 +236,17 @@ func realSlingDeps() *slingDeps {
 		crossRigGuard:      checkCrossRigGuard,
 
 		resolveSelf:     resolveSelfTarget,
-		resolveTarget:   resolveTarget,
 		spawnPolecat:    spawnPolecatForSling,
 		admitPolecat:    acquirePolecatAdmissionFn,
 		startSession:    func(s *SpawnedPolecatInfo) (string, error) { return s.StartSession() },
 		startDelayedDog: func(d *DogDispatchInfo) (string, error) { return d.StartDelayedSession() },
 		cleanupSpawned:  cleanupSpawnedPolecat,
+		resolveAgent:    resolveTargetAgentFn,
+		dispatchDog:     DispatchToDog,
+		cwdTown:         townFromCwd,
+		crewExists:      crewDirExists,
+		peekPool:        peekPolecatPoolAgent,
+		wakeRig:         wakeRigAgents,
 
 		requester:          reassignRequester,
 		notifyWitness:      sendWitnessShutdown,
@@ -246,7 +272,22 @@ func realSlingDeps() *slingDeps {
 		logFeed:            events.LogFeed,
 		enqueueNudge:       nudge.Enqueue,
 
-		rollbackArtifacts: rollbackSlingArtifacts,
+		findHookedFormula:    findHookedFormulaSingletonFn,
+		cookFormula:          cookStandaloneFormula,
+		createWisp:           createFormulaWisp,
+		hookWisp:             hookBeadWithRetryFn,
+		burnWisp:             burnSlingWispFn,
+		cleanupFailedDogWisp: cleanupFailedDogFormulaWisp,
+		cleanupStaleDogWisp:  cleanupStaleDogFormulaWisp,
+		clearDogWork:         (*DogDispatchInfo).clearWorkIfMatches,
+		nudgeSession:         func(session, msg string) error { return tmux.NewTmux().NudgeSession(session, msg) },
+		nudgePane:            func(pane, msg string) error { return tmux.NewTmux().NudgePane(pane, msg) },
+
+		slingContexts: func(rigBeadsDir string) slingContextStore {
+			return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
+		},
+
+		rollbackArtifacts: rollbackSlingArtifactsFn,
 		restoreRawFields:  restoreRollbackRawWorkflowFieldsFromCurrent,
 		restorePinned:     restorePinnedBead,
 
@@ -254,6 +295,9 @@ func realSlingDeps() *slingDeps {
 		ensureAgentReady:  ensureAgentReady,
 		injectStartPrompt: injectStartPrompt,
 	}
+	d.resolveTarget = d.resolveSlingTarget
+	d.scheduleBead = d.scheduleSlingBead
+	return d
 }
 
 // slingRun is one gt sling invocation: its options, its town and its
@@ -268,7 +312,9 @@ type slingRun struct {
 // newSlingRun is a run of the real gt from the cwd's town.
 func newSlingRun(opts slingOptions) *slingRun {
 	townRoot, err := workspace.FindFromCwd()
-	return &slingRun{slingDeps: realSlingDeps(), opts: opts, townRoot: townRoot, townErr: err}
+	r := &slingRun{slingDeps: realSlingDeps(), opts: opts, townRoot: townRoot, townErr: err}
+	r.slingFormula = r.runFormula
+	return r
 }
 
 // orphanMolecule is isOrphanMolecule judged by this run's liveness check.

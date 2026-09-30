@@ -20,7 +20,13 @@ import (
 // Returns (true, nil) when max_polecats > 0 (deferred dispatch).
 // Returns (false, nil) when max_polecats <= 0 (direct dispatch).
 func shouldDeferDispatch() (bool, error) {
-	townRoot, err := workspace.FindFromCwd()
+	return shouldDeferDispatchWith(workspace.FindFromCwd, config.LoadOrCreateTownSettings)
+}
+
+// shouldDeferDispatchWith is shouldDeferDispatch with the town found by
+// findTown and its settings read by loadSettings.
+func shouldDeferDispatchWith(findTown func() (string, error), loadSettings func(path string) (*config.TownSettings, error)) (bool, error) {
+	townRoot, err := findTown()
 	if err != nil {
 		// FindFromCwd errs only when the cwd itself is unreadable — "no
 		// town" is an empty root below. Reading that as "direct dispatch"
@@ -32,7 +38,7 @@ func shouldDeferDispatch() (bool, error) {
 	}
 
 	settingsPath := config.TownSettingsPath(townRoot)
-	settings, err := config.LoadOrCreateTownSettings(settingsPath)
+	settings, err := loadSettings(settingsPath)
 	if err != nil {
 		return false, fmt.Errorf("loading town settings: %w (dispatch blocked — fix config or use gt config set scheduler.max_polecats -1)", err)
 	}
@@ -69,32 +75,45 @@ type ScheduleOptions struct {
 	Ralph        bool     // Ralph Wiggum loop mode
 }
 
-// scheduleBead schedules a bead for deferred dispatch via the capacity scheduler.
-// Creates a sling context bead to hold scheduling state. The work bead is never modified.
+// slingContextStore is the slice of a rig's beads a scheduled bead's sling
+// context lives in.
+type slingContextStore interface {
+	FindOpenSlingContext(workBeadID string) (*beads.Issue, *capacity.SlingContextFields, error)
+	CreateSlingContext(workBeadTitle, workBeadID string, fields *capacity.SlingContextFields) (*beads.Issue, error)
+	UpdateSlingContextFields(contextID string, fields *capacity.SlingContextFields) error
+}
+
+// scheduleBead schedules a bead with the running gt's collaborators.
 func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+	return realSlingDeps().scheduleSlingBead(beadID, rigName, opts)
+}
+
+// scheduleSlingBead schedules a bead for deferred dispatch via the capacity scheduler.
+// Creates a sling context bead to hold scheduling state. The work bead is never modified.
+func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptions) error {
+	townRoot, err := d.townOrEnv()
 	if err != nil {
 		return err
 	}
 
-	if err := verifyBeadExists(beadID); err != nil {
+	if err := d.verifyBead(beadID); err != nil {
 		return fmt.Errorf("bead '%s' not found", beadID)
 	}
 
-	if _, isRig := IsRigName(rigName); !isRig {
+	if _, isRig := d.isRigName(rigName); !isRig {
 		return fmt.Errorf("'%s' is not a known rig", rigName)
 	}
-	if err := verifyBeadExistsInTargetRigDatabase(beadID, rigName, townRoot); err != nil {
+	if err := d.verifyInTargetRig(beadID, rigName, townRoot); err != nil {
 		return err
 	}
 
 	if !opts.Force {
-		if err := checkCrossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
+		if err := d.crossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
 			return err
 		}
 	}
 
-	info, err := getBeadInfo(beadID)
+	info, err := d.beadInfo(beadID)
 	if err != nil {
 		return fmt.Errorf("checking bead status: %w", err)
 	}
@@ -105,17 +124,17 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	// Create the sling context in the target rig's beads dir so that the target
 	// rig's witness can discover it during patrol. Previously this used the HQ
 	// beads dir, which meant non-HQ rig witnesses never saw the context. (GH#3468)
-	rigBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, rigName)
+	rigBeadsDir, ok := d.rigBeadsDir(townRoot, rigName)
 	if !ok {
 		return fmt.Errorf("cannot resolve target rig %q beads database for bead %s", rigName, beadID)
 	}
-	rigBeads := beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
+	rigBeads := d.slingContexts(rigBeadsDir)
 	existingCtx, _, findErr := rigBeads.FindOpenSlingContext(beadID)
 	if findErr != nil {
 		return fmt.Errorf("checking for existing sling context: %w", findErr)
 	}
 	if existingCtx != nil {
-		fmt.Printf("%s Bead %s is already scheduled (context: %s), no-op\n",
+		fmt.Fprintf(d.out, "%s Bead %s is already scheduled (context: %s), no-op\n",
 			style.Dim.Render("○"), beadID, existingCtx.ID)
 		return nil
 	}
@@ -135,24 +154,24 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 	}
 
 	if opts.Formula != "" {
-		if err := verifyFormulaExists(opts.Formula, filepath.Dir(rigBeadsDir), townRoot); err != nil {
+		if err := d.verifyFormula(opts.Formula, filepath.Dir(rigBeadsDir), townRoot); err != nil {
 			return fmt.Errorf("formula %q not found: %w", opts.Formula, err)
 		}
 	}
 
 	if opts.DryRun {
-		fmt.Printf("Would schedule %s → %s\n", beadID, rigName)
-		fmt.Printf("  Would create sling context bead\n")
+		fmt.Fprintf(d.out, "Would schedule %s → %s\n", beadID, rigName)
+		fmt.Fprintf(d.out, "  Would create sling context bead\n")
 		if !opts.NoConvoy {
-			fmt.Printf("  Would create auto-convoy\n")
+			fmt.Fprintf(d.out, "  Would create auto-convoy\n")
 		}
 		return nil
 	}
 
 	// Cook formula after dry-run check to avoid side effects
 	if opts.Formula != "" {
-		workDir := beads.ResolveHookDir(townRoot, beadID, "")
-		if err := CookFormula(opts.Formula, workDir, townRoot); err != nil {
+		workDir := d.hookDir(townRoot, beadID, "")
+		if err := d.cook(opts.Formula, workDir, townRoot); err != nil {
 			return fmt.Errorf("formula %q failed to cook: %w", opts.Formula, err)
 		}
 	}
@@ -205,30 +224,30 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 
 	// Auto-convoy (unless --no-convoy)
 	if !opts.NoConvoy {
-		existingConvoy := isTrackedByConvoy(beadID)
+		existingConvoy := d.trackedByConvoy(beadID)
 		if existingConvoy == "" {
 			// Persist the requested agent and formula so a convoy re-feed
 			// keeps them (gt-yg24, gt-4lor).
-			convoyID, err := createAutoConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent, opts.Formula)
+			convoyID, err := d.createConvoy(beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent, opts.Formula)
 			if err != nil {
-				fmt.Printf("%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
+				fmt.Fprintf(d.out, "%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
 			} else {
-				fmt.Printf("%s Created convoy %s\n", style.Bold.Render("→"), convoyID)
+				fmt.Fprintf(d.out, "%s Created convoy %s\n", style.Bold.Render("→"), convoyID)
 				// Update the context bead fields with convoy ID
 				fields.Convoy = convoyID
 				if updateErr := rigBeads.UpdateSlingContextFields(ctxBead.ID, fields); updateErr != nil {
-					fmt.Printf("%s Could not update context with convoy: %v\n", style.Dim.Render("Warning:"), updateErr)
+					fmt.Fprintf(d.out, "%s Could not update context with convoy: %v\n", style.Dim.Render("Warning:"), updateErr)
 				}
 			}
 		} else {
-			fmt.Printf("%s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
+			fmt.Fprintf(d.out, "%s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
 		}
 	}
 
-	actor := resolveSlingActor()
-	_ = events.LogFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
+	actor := d.actor()
+	_ = d.logFeed(events.TypeSchedulerEnqueue, actor, events.SchedulerEnqueuePayload(beadID, rigName))
 
-	fmt.Printf("%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)
+	fmt.Fprintf(d.out, "%s Scheduled %s → %s (context: %s)\n", style.Bold.Render("✓"), beadID, rigName, ctxBead.ID)
 	return nil
 }
 
@@ -342,13 +361,19 @@ func areScheduled(beadIDs []string) map[string]bool {
 // ambient/cwd discovery, which can silently diverge from the caller's town
 // under test isolation or multi-town use (gt-80o).
 func areScheduledForTown(townRoot string, beadIDs []string) map[string]bool {
+	return areScheduledWith(townRoot, beadIDs, workspace.FindFromCwd, beads.AreScheduled)
+}
+
+// areScheduledWith is areScheduledForTown with the cwd's town found by
+// findTown and the sling contexts read by lookup.
+func areScheduledWith(townRoot string, beadIDs []string, findTown func() (string, error), lookup func(townRoot string, beadIDs []string) map[string]bool) map[string]bool {
 	result := make(map[string]bool)
 	if len(beadIDs) == 0 {
 		return result
 	}
 
 	if townRoot == "" {
-		found, err := workspace.FindFromCwd()
+		found, err := findTown()
 		if err != nil || found == "" {
 			// Can't determine town root — fail closed (treat all as scheduled)
 			for _, id := range beadIDs {
@@ -359,7 +384,7 @@ func areScheduledForTown(townRoot string, beadIDs []string) map[string]bool {
 		townRoot = found
 	}
 
-	return beads.AreScheduled(townRoot, beadIDs)
+	return lookup(townRoot, beadIDs)
 }
 
 // isScheduled checks if a single bead has an open sling context.

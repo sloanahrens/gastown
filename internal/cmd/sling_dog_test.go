@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"io"
+	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 )
@@ -154,15 +157,18 @@ func TestDogTargetsAreNotMistakenForRigs(t *testing.T) {
 }
 
 // TestDogDispatchSlingArgsRoundTripThroughCommandTree parses the argv the
-// daemon's wisp_reaper execs against the real command tree.
+// daemon's wisp_reaper execs against the real sling command's flags.
 //
 // Nothing else can catch this: the daemon runs that argv as a subprocess, so a
 // flag that disappears from the CLI (D7, 388d0320) breaks dog dispatch without a
 // compile error anywhere, and the sweep's designed response to a failed dispatch
 // is to degrade to its inline scan. This is the compile error (gt-4k3fj.10).
 //
-// Not parallel: parsing writes the sling command's package-level flag vars.
+// The argv is parsed into a copy of the flags it names, each with a value of
+// its own, so the parse writes none of the sling command's package-level flag
+// vars and the test runs in parallel.
 func TestDogDispatchSlingArgsRoundTripThroughCommandTree(t *testing.T) {
+	t.Parallel()
 	argv := daemon.SlingDogArgs(constants.MolDogReaper, map[string]string{
 		"max_age":         "24h0m0s",
 		"purge_age":       "168h0m0s",
@@ -174,39 +180,56 @@ func TestDogDispatchSlingArgsRoundTripThroughCommandTree(t *testing.T) {
 		"databases":       "hq,gt",
 	})
 
-	sling, rest, err := rootCmd.Find(argv[:1])
-	if err != nil {
-		t.Fatalf("the daemon execs `gt %s`, which the command tree does not have: %v", argv[0], err)
-	}
-	if sling.CommandPath() != "gt sling" {
-		t.Fatalf("`gt %s` resolved to %q, not the sling command", argv[0], sling.CommandPath())
-	}
-	if len(rest) != 0 {
-		t.Fatalf("`gt %s` left argv %v unconsumed", argv[0], rest)
+	if slingCmd.Name() != argv[0] || slingCmd.Parent() != rootCmd {
+		t.Fatalf("the daemon execs `gt %s`, which the command tree does not have (sling command %q)", argv[0], slingCmd.CommandPath())
 	}
 
-	// ParseFlags is the call cobra's own Execute makes: it merges the root's
-	// persistent flags first, so this sees the same surface the daemon's
-	// subprocess does, unknown flags included.
-	//
 	// A positive control leads, because a flag set that parsed nothing would
 	// pass the real assertion vacuously.
-	if err := sling.ParseFlags([]string{"--no-such-flag"}); err == nil {
+	if err := slingFlagCopy(argv[1:]).Parse([]string{"--no-such-flag"}); err == nil {
 		t.Fatal("parsing an unknown flag succeeded; this test proves nothing")
 	}
-	if err := sling.ParseFlags(argv[1:]); err != nil {
+	fs := slingFlagCopy(argv[1:])
+	if err := fs.Parse(argv[1:]); err != nil {
 		t.Fatalf("the daemon's dog dispatch argv is rejected by `gt sling`: %v\nargv: %v", err, argv)
 	}
 	// The positional shape too: argv[1] is the formula, argv[2] the target.
-	if err := sling.Args(sling, sling.Flags().Args()); err != nil {
-		t.Errorf("`gt sling` rejects the dispatch's positional shape %v: %v", sling.Flags().Args(), err)
+	if err := slingCmd.Args(slingCmd, fs.Args()); err != nil {
+		t.Errorf("`gt sling` rejects the dispatch's positional shape %v: %v", fs.Args(), err)
 	}
-	if pos := sling.Flags().Args(); len(pos) != 2 || pos[0] != constants.MolDogReaper || pos[1] != "deacon/dogs" {
+	if pos := fs.Args(); len(pos) != 2 || pos[0] != constants.MolDogReaper || pos[1] != "deacon/dogs" {
 		t.Errorf("`gt sling` read the dispatch's positionals as %v, want [%s deacon/dogs]",
 			pos, constants.MolDogReaper)
 	}
-
-	// The parse above sets the package-level flag vars for every test that runs
-	// after this one in the same process.
-	t.Cleanup(func() { slingVars = nil })
 }
+
+// slingFlagCopy is a flag set holding a copy of every sling flag argv names,
+// each parsing into a value of its own. A flag sling does not have is left
+// out, so parsing argv rejects it as unknown.
+func slingFlagCopy(argv []string) *pflag.FlagSet {
+	fs := pflag.NewFlagSet("sling", pflag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	for _, arg := range argv {
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name := strings.SplitN(strings.TrimPrefix(arg, "--"), "=", 2)[0]
+		f := slingCmd.Flags().Lookup(name)
+		if f == nil || fs.Lookup(name) != nil {
+			continue
+		}
+		fs.AddFlag(&pflag.Flag{Name: f.Name, Shorthand: f.Shorthand, Usage: f.Usage,
+			NoOptDefVal: f.NoOptDefVal, Value: &flagSink{typ: f.Value.Type()}})
+	}
+	return fs
+}
+
+// flagSink is a flag value that accepts anything and keeps it.
+type flagSink struct {
+	typ  string
+	vals []string
+}
+
+func (s *flagSink) Set(v string) error { s.vals = append(s.vals, v); return nil }
+func (s *flagSink) String() string     { return strings.Join(s.vals, ",") }
+func (s *flagSink) Type() string       { return s.typ }

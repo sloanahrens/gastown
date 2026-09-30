@@ -1,168 +1,151 @@
 package cmd
 
 import (
+	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/dog"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
-func runSlingFormulaSourceForTest(t *testing.T) string {
+// dogFormulaHarness is a harness whose target resolution is the real one, so
+// a dog target dispatches through the fake dog pool.
+func dogFormulaHarness(t *testing.T) *slingHarness {
 	t.Helper()
-	data, err := os.ReadFile("sling_formula.go")
-	if err != nil {
-		t.Fatalf("read sling_formula.go: %v", err)
-	}
-	source := string(data)
-	funcStart := strings.Index(source, "func runSlingFormula(")
-	if funcStart == -1 {
-		t.Fatal("runSlingFormula not found")
-	}
-	body := source[funcStart:]
-	nextFunc := strings.Index(body[1:], "\nfunc ")
-	if nextFunc != -1 {
-		body = body[:nextFunc+1]
-	}
-	return body
+	h := newSlingHarness(t)
+	h.run.resolveTarget = h.run.resolveSlingTarget
+	return h
 }
 
-func TestRunSlingFormulaCleansDelayedDogFailure(t *testing.T) {
-	t.Parallel()
-	body := runSlingFormulaSourceForTest(t)
-
-	for _, want := range []string{
-		") (err error)",
-		"defer func()",
-		"cleanupDelayedDogFormulaFailure(err, delayedDogInfo, wispRootID, formulaWorkDir)",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("runSlingFormula missing %q", want)
+// indexOf is the position of call in the log, or -1.
+func (h *slingHarness) indexOf(call string) int {
+	for i, c := range h.log() {
+		if c == call {
+			return i
 		}
 	}
+	return -1
+}
 
-	unlockDeferIdx := strings.Index(body, "defer assigneeUnlock()")
-	cleanupDeferIdx := strings.Index(body, "defer func()")
-	if unlockDeferIdx == -1 || cleanupDeferIdx == -1 || unlockDeferIdx > cleanupDeferIdx {
-		t.Fatal("dog formula cleanup must be deferred after assignee unlock so it runs before unlocking")
+// TestRunSlingFormulaCleansDelayedDogFailure: a delayed dog's formula sling
+// that fails after creating its wisp burns that wisp and clears the dog's
+// assignment, and does both while it still holds the assignee lock.
+func TestRunSlingFormulaCleansDelayedDogFailure(t *testing.T) {
+	t.Parallel()
+	h := dogFormulaHarness(t)
+	h.run.startDelayedDog = func(*DogDispatchInfo) (string, error) { return "", errors.New("tmux down") }
+
+	err := h.run.runFormula(context.Background(), []string{"mol-dog-reaper", "deacon/dogs/alpha"})
+	wantSlingErr(t, err, "starting delayed dog session")
+	burn, clear, unlock := h.indexOf("cleanup dog wisp gt-wisp-new"), h.indexOf("clear dog work alpha"), h.indexOf("unlock assignee deacon/dogs/alpha")
+	if burn < 0 || clear < 0 || unlock < 0 || burn > unlock || clear > unlock {
+		t.Fatalf("dog cleanup must burn the wisp and clear the work before the unlock\nlog:\n  %s", strings.Join(h.log(), "\n  "))
 	}
 }
 
+// TestCleanupDelayedDogFormulaFailureClearsWorkAfterWispCleanupError: a
+// failed wisp burn does not stop the dog's assignment being cleared, and the
+// error carries both the sling's failure and the burn's.
 func TestCleanupDelayedDogFormulaFailureClearsWorkAfterWispCleanupError(t *testing.T) {
-	prevCleanup := cleanupFailedDogFormulaWispFn
-	cleanupFailedDogFormulaWispFn = func(string, string) error {
-		return errors.New("close failed")
-	}
-	t.Cleanup(func() { cleanupFailedDogFormulaWispFn = prevCleanup })
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.run.cleanupFailedDogWisp = func(string, string) error { return errors.New("close failed") }
+	dog := &DogDispatchInfo{DogName: "alpha", workDesc: "mol-dog-reaper", ownsWork: true}
 
-	townRoot := t.TempDir()
-	rigsConfig := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
-	startedAt := time.Now().Truncate(time.Second)
-	writeDogStateForDispatchTest(t, townRoot, "alpha", &dog.DogState{
-		Name:          "alpha",
-		State:         dog.StateWorking,
-		Work:          "mol-dog-reaper",
-		WorkStartedAt: startedAt,
-		LastActive:    startedAt,
-		CreatedAt:     startedAt,
-		UpdatedAt:     startedAt,
-	})
-	dispatch := &DogDispatchInfo{
-		DogName:       "alpha",
-		townRoot:      townRoot,
-		workDesc:      "mol-dog-reaper",
-		workStartedAt: startedAt,
-		ownsWork:      true,
-		rigsConfig:    rigsConfig,
-	}
-
-	err := cleanupDelayedDogFormulaFailure(errors.New("start failed"), dispatch, "gt-wisp", townRoot)
+	err := h.run.cleanupDelayedDogFormulaFailure(errors.New("start failed"), dog, "gt-wisp", slingTestTown)
 	if err == nil || !strings.Contains(err.Error(), "start failed") || !strings.Contains(err.Error(), "close failed") {
 		t.Fatalf("cleanup error = %v, want joined start and close errors", err)
 	}
-
-	got, err := dog.NewManager(townRoot, rigsConfig).Get("alpha")
-	if err != nil {
-		t.Fatalf("Get() after cleanup: %v", err)
-	}
-	if got.State != dog.StateIdle || got.Work != "" || !got.WorkStartedAt.IsZero() {
-		t.Fatalf("cleanup did not clear dog assignment: state=%q work=%q started=%v", got.State, got.Work, got.WorkStartedAt)
-	}
+	h.wantCalls("clear dog work", "clear dog work alpha")
 }
 
+// TestRunSlingFormulaSerializesWholeDogPool: a formula slung to the dog pool
+// takes one pool-wide lock before choosing a dog, not a per-formula lock.
 func TestRunSlingFormulaSerializesWholeDogPool(t *testing.T) {
 	t.Parallel()
-	body := runSlingFormulaSourceForTest(t)
-	if !strings.Contains(body, `tryAcquireSlingAssigneeLock(townRoot, "deacon/dogs")`) {
-		t.Fatal("dog-pool formula dispatch must use one pool-wide lock, not a per-formula lock")
+	h := dogFormulaHarness(t)
+
+	if err := h.run.runFormula(context.Background(), []string{"mol-dog-reaper", "deacon/dogs"}); err != nil {
+		t.Fatalf("runFormula: %v", err)
 	}
-	if strings.Contains(body, `tryAcquireSlingAssigneeLock(townRoot, "deacon/dogs/"+formulaName)`) {
-		t.Fatal("dog-pool formula dispatch still uses per-formula locking")
+	h.wantCalls("lock assignee", "lock assignee deacon/dogs", "lock assignee deacon/dogs/alpha")
+	if h.indexOf("lock assignee deacon/dogs") > h.indexOf("dispatch dog alpha") {
+		t.Fatalf("the pool lock must be held before a dog is chosen\nlog:\n  %s", strings.Join(h.log(), "\n  "))
 	}
 }
 
+// reusedDog is a dog already working on formula, dispatched without owning
+// the work, and the wisp it has hooked.
+func reusedDog(formula string) (*DogDispatchInfo, *beads.Issue) {
+	started := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	dog := &DogDispatchInfo{DogName: "alpha", AgentID: "deacon/dogs/alpha", sessionDelayed: true,
+		workDesc: formula, workStartedAt: started}
+	wisp := &beads.Issue{ID: "gt-wisp-existing",
+		Description: "attached_formula: " + formula + "\nattached_at: " + started.Add(time.Minute).Format(time.RFC3339Nano)}
+	return dog, wisp
+}
+
+// TestRunSlingFormulaExistingHookedDogStartsDelayedSession: a dog reused for
+// the formula it already has hooked is a no-op for the wisp, but its delayed
+// session is still started and nudged before the sling returns.
 func TestRunSlingFormulaExistingHookedDogStartsDelayedSession(t *testing.T) {
 	t.Parallel()
-	body := runSlingFormulaSourceForTest(t)
+	h := dogFormulaHarness(t)
+	dog, wisp := reusedDog("mol-dog-reaper")
+	h.run.dispatchDog = func(string, DogDispatchOptions) (*DogDispatchInfo, error) { return dog, nil }
+	h.hookedFormulas["deacon/dogs/alpha"] = wisp
 
-	existingIdx := strings.Index(body, "shouldReuseExistingFormula(existing, delayedDogInfo, slingForce)")
-	if existingIdx == -1 {
-		t.Fatal("existing hooked formula no-op block not found")
+	if err := h.run.runFormula(context.Background(), []string{"mol-dog-reaper", "deacon/dogs/alpha"}); err != nil {
+		t.Fatalf("runFormula: %v", err)
 	}
-	existingBlock := body[existingIdx:]
-	stepIdx := strings.Index(existingBlock, "\n\t// Step 1:")
-	if stepIdx == -1 {
-		t.Fatal("could not isolate existing hooked formula block")
+	start, nudge := h.indexOf("start dog alpha"), -1
+	for i, c := range h.log() {
+		if strings.HasPrefix(c, "nudge session hq-dog-alpha:") {
+			nudge = i
+		}
 	}
-	existingBlock = existingBlock[:stepIdx]
-	startIdx := strings.Index(existingBlock, "delayedDogInfo.StartDelayedSession()")
-	completeIdx := strings.Index(existingBlock, "delayedDogComplete = true")
-	nudgeIdx := strings.Index(existingBlock, "nudgeFormulaDog(delayedDogInfo, formulaSlingPrompt(formulaName))")
-	returnIdx := strings.LastIndex(existingBlock, "return nil")
-	if startIdx == -1 {
-		t.Fatal("existing hooked formula path must start the delayed dog session")
+	if start < 0 || nudge < start {
+		t.Fatalf("the reused dog must be started, then nudged\nlog:\n  %s", strings.Join(h.log(), "\n  "))
 	}
-	if completeIdx == -1 || completeIdx < startIdx {
-		t.Fatal("existing hooked formula path must mark delayed dog startup complete")
-	}
-	if nudgeIdx == -1 || nudgeIdx < completeIdx {
-		t.Fatal("existing hooked formula path must nudge the dog before returning")
-	}
-	if returnIdx != -1 && returnIdx < nudgeIdx {
-		t.Fatal("existing hooked formula path returns before starting/nudging dog")
-	}
+	h.wantNo("create wisp")
+	h.wantNo("clear dog work")
 }
 
+// TestRunSlingFormulaNonOwnedDogReuseCannotCreateFreshWisp: a dog dispatched
+// to reuse work it does not own, whose wisp is gone by the time it is
+// checked, aborts before creating a fresh wisp.
 func TestRunSlingFormulaNonOwnedDogReuseCannotCreateFreshWisp(t *testing.T) {
 	t.Parallel()
-	body := runSlingFormulaSourceForTest(t)
-	reuseIdx := strings.Index(body, "shouldReuseExistingFormula(existing, delayedDogInfo, slingForce)")
-	guardIdx := strings.Index(body, "delayedDogInfo != nil && !delayedDogInfo.ownsWork")
-	stepIdx := strings.Index(body, "// Step 1: Cook the formula")
-	if reuseIdx == -1 || guardIdx == -1 || stepIdx == -1 {
-		t.Fatal("could not find dog reuse guard or cook step")
-	}
-	if guardIdx < reuseIdx || guardIdx > stepIdx {
-		t.Fatal("non-owned dog reuse must abort before creating a fresh formula wisp")
-	}
+	h := dogFormulaHarness(t)
+	dog, _ := reusedDog("mol-dog-reaper")
+	h.run.dispatchDog = func(string, DogDispatchOptions) (*DogDispatchInfo, error) { return dog, nil }
+
+	err := h.run.runFormula(context.Background(), []string{"mol-dog-reaper", "deacon/dogs/alpha"})
+	wantSlingErr(t, err, "dog formula reuse became stale")
+	h.wantNo("cook")
+	h.wantNo("create wisp")
 }
 
+// TestRunSlingFormulaDogNudgeBeforeEmptyPaneReturn: a dog's session is
+// nudged by session name even when starting it reported no pane, rather than
+// taking the generic "no pane to nudge" return.
 func TestRunSlingFormulaDogNudgeBeforeEmptyPaneReturn(t *testing.T) {
 	t.Parallel()
-	body := runSlingFormulaSourceForTest(t)
+	h := dogFormulaHarness(t)
+	h.run.startDelayedDog = func(dog *DogDispatchInfo) (string, error) {
+		h.record("start dog %s", dog.DogName)
+		return "", nil
+	}
 
-	dogNudgeIdx := strings.LastIndex(body, "nudgeFormulaDog(delayedDogInfo, prompt)")
-	emptyPaneIdx := strings.Index(body, "if targetPane == \"\" {")
-	if dogNudgeIdx == -1 {
-		t.Fatal("dog-specific nudge call not found")
+	if err := h.run.runFormula(context.Background(), []string{"mol-dog-reaper", "deacon/dogs/alpha"}); err != nil {
+		t.Fatalf("runFormula: %v", err)
 	}
-	if emptyPaneIdx == -1 {
-		t.Fatal("empty-pane return block not found")
+	if len(h.matching("nudge session hq-dog-alpha:")) != 1 {
+		t.Fatalf("the dog was not nudged by session\nlog:\n  %s", strings.Join(h.log(), "\n  "))
 	}
-	if dogNudgeIdx > emptyPaneIdx {
-		t.Fatal("dog-specific nudge must run before generic empty-pane return")
+	if strings.Contains(h.out.String(), "No pane to nudge") {
+		t.Fatal("the dog took the empty-pane return instead of its session nudge")
 	}
 }
