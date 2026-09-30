@@ -656,9 +656,10 @@ func slotChildPath(envAssigns []string) string {
 
 // lookPathForSlot resolves name against an explicit PATH the way exec.LookPath
 // resolves against the ambient one, including an empty entry meaning the
-// current directory. exec.LookPath offers no way to substitute a PATH but does
-// resolve a name containing a separator directly, so joining each entry and
-// delegating keeps exec.LookPath's own answer to "is this an executable file".
+// current directory and a relative result refused with exec.ErrDot.
+// exec.LookPath offers no way to substitute a PATH but does resolve a name
+// containing a separator directly, so joining each entry and delegating keeps
+// exec.LookPath's own answer to "is this an executable file".
 func lookPathForSlot(name, pathEnv string) (string, error) {
 	if strings.ContainsRune(name, os.PathSeparator) {
 		resolved, err := exec.LookPath(name)
@@ -678,9 +679,19 @@ func lookPathForSlot(name, pathEnv string) (string, error) {
 			// name to search the ambient PATH for (gt-f4xe).
 			candidate = "." + string(os.PathSeparator) + name
 		}
-		if resolved, err := exec.LookPath(candidate); err == nil {
-			return resolved, nil
+		resolved, err := exec.LookPath(candidate)
+		if err != nil {
+			continue
 		}
+		if !filepath.IsAbs(resolved) {
+			// A candidate always carries a separator, so this resolution is
+			// exec.LookPath's path branch: it answers only "is this an
+			// executable file", never the ErrDot check its bare-name branch
+			// applies. What would run is whatever the working directory holds
+			// under this name at exec time (gt-8p4f).
+			return "", &exec.Error{Name: name, Err: exec.ErrDot}
+		}
+		return resolved, nil
 	}
 	return "", fmt.Errorf("executable file not found in $PATH: %s", name)
 }

@@ -64,6 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gt slot run` refuses a program its PATH reaches through the working
+  directory** (gt-8p4f) — the hand-rolled PATH search checked every candidate
+  with `exec.LookPath`, but a candidate always carries a separator, so that
+  answered only "is this an executable file" and skipped the `exec.ErrDot`
+  check a bare name gets: an empty or relative `PATH` entry made gt execute
+  whatever sat under that name in its own working directory. The resolution
+  now returns `exec.ErrDot` as `exec.LookPath` does, and naming the program by
+  path (`./make`) remains the way to run it deliberately.
+
 - **gastown never installs bd** (gt-fcxe9.8, gt-7iwy0.1) — `gt install` and
   `gt rig add` no longer `go install` upstream `bd@latest` into
   `~/.local/bin` when bd is missing, and no hint suggests it; the only install

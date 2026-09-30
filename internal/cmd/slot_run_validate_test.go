@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -182,6 +184,38 @@ func TestSlotChildPath(t *testing.T) {
 	}
 }
 
+// TestResolveSlotCommandRefusesProgramFromCwd pins the rule for a program the
+// child's PATH reaches inside the working directory: gt refuses it with
+// exec.ErrDot rather than exec a file whose identity depends on where gt
+// happens to run. Naming the same program by path is the deliberate way to run
+// that file, and still resolves.
+func TestResolveSlotCommandRefusesProgramFromCwd(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", binDir, err)
+	}
+	writeExecutable(t, binDir, "probe-gt-f4xe")
+	t.Chdir(root)
+
+	// Both entries name the working directory. A literal "." entry is a
+	// separate defect (gt-h9wh) and is not covered here.
+	for _, pathEnv := range []string{string(os.PathListSeparator) + "bin", "bin"} {
+		if _, err := resolveSlotCommand([]string{"PATH=" + pathEnv}, []string{"probe-gt-f4xe"}); !errors.Is(err, exec.ErrDot) {
+			t.Errorf("resolveSlotCommand(PATH=%q) = %v, want an error satisfying errors.Is(err, exec.ErrDot)", pathEnv, err)
+		}
+	}
+
+	byPath := "bin" + string(os.PathSeparator) + "probe-gt-f4xe"
+	program, err := resolveSlotCommand(nil, []string{byPath})
+	if err != nil {
+		t.Fatalf("resolveSlotCommand(%q) = %v, want the named path to resolve", byPath, err)
+	}
+	if program != byPath {
+		t.Errorf("resolveSlotCommand(%q) resolved %q, want the path the operator named", byPath, program)
+	}
+}
+
 // TestLookPathForSlot covers the pieces exec.LookPath would handle for us if it
 // took a PATH: a bare name searched across the entries, and an empty entry
 // meaning the current directory.
@@ -203,14 +237,16 @@ func TestLookPathForSlot(t *testing.T) {
 	// and in a shell's PATH. The stub is reachable through that entry alone:
 	// the other entry is an empty directory and the ambient PATH holds another
 	// directory, so a resolution that fell through to the ambient PATH finds
-	// nothing where the empty entry should have found the stub.
+	// nothing where the empty entry should have found the stub. Finding the
+	// stub there is what ErrDot reports, so the error is the evidence the entry
+	// — not the ambient PATH — matched.
 	t.Chdir(binDir)
 	ambientDir := t.TempDir()
 	writeExecutable(t, ambientDir, "sh")
 	t.Setenv("PATH", ambientDir)
 	onlyCwd := string(os.PathListSeparator) + t.TempDir()
-	if _, err := lookPathForSlot("probe-gt-f4xe", onlyCwd); err != nil {
-		t.Errorf("empty PATH entry should mean the current directory: %v", err)
+	if _, err := lookPathForSlot("probe-gt-f4xe", onlyCwd); !errors.Is(err, exec.ErrDot) {
+		t.Errorf("empty PATH entry resolved to %v, want exec.ErrDot", err)
 	}
 	// The same shape on the negative side: sh is on the ambient PATH and in
 	// neither entry here, so the empty entry must not resolve through it.
