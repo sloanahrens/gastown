@@ -1278,21 +1278,34 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	return polecat, nil
 }
 
-// Remove deletes a polecat worktree.
-// If force is true, removes even with uncommitted changes and unpushed commits.
-// Stashes still block removal with force (use nuclear=true to bypass all checks).
-func (m *Manager) Remove(name string, force bool) error {
-	return m.RemoveWithOptions(name, force, false, false)
+// RemoveOptions controls Manager.RemoveWithOptions.
+type RemoveOptions struct {
+	// Force bypasses the uncommitted-changes and unpushed-commit checks.
+	Force bool
+	// Nuclear bypasses every safety check, including stashes.
+	Nuclear bool
+	// SelfNuke bypasses the cwd-in-worktree check, for a polecat deleting its
+	// own worktree.
+	SelfNuke bool
+	// Judged carries the surviving-work verdict the caller already reached for
+	// a bead, keyed by bead id. unassignWorkBeads replays it instead of asking
+	// again, so one removal cannot act on a different answer than the caller's
+	// pre-removal decision did (gt-kud90).
+	Judged map[string]SurvivalVerdict
 }
 
-// RemoveWithOptions deletes a polecat worktree with explicit control over safety checks.
-// force=true: bypass uncommitted changes and unpushed commits check
-// nuclear=true: bypass ALL safety checks including stashes
-// selfNuke=true: bypass cwd-in-worktree check (for polecat deleting its own worktree)
+// Remove deletes a polecat worktree, blocking on uncommitted or unpushed work
+// unless force is set.
+func (m *Manager) Remove(name string, force bool) error {
+	return m.RemoveWithOptions(name, RemoveOptions{Force: force})
+}
+
+// RemoveWithOptions deletes a polecat worktree with explicit control over
+// safety checks.
 //
 // ZFC #10: Uses cleanup_status from agent bead if available (polecat self-report),
 // falls back to git check for backward compatibility.
-func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) (retErr error) {
+func (m *Manager) RemoveWithOptions(name string, opts RemoveOptions) (retErr error) {
 	defer func() { telemetry.RecordPolecatRemove(context.Background(), name, retErr) }()
 	// Acquire per-polecat file lock to prevent concurrent Remove races
 	fl, err := m.lockPolecat(name)
@@ -1301,10 +1314,10 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	}
 	defer func() { _ = fl.Unlock() }()
 
-	return m.removeWithOptionsLocked(name, force, nuclear, selfNuke)
+	return m.removeWithOptionsLocked(name, opts)
 }
 
-func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke bool) error {
+func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error {
 	if !m.exists(name) {
 		return ErrPolecatNotFound
 	}
@@ -1315,14 +1328,14 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 	polecatDir := m.polecatDir(name)
 
 	// Check for uncommitted work unless bypassed
-	if !nuclear {
+	if !opts.Nuclear {
 		// ZFC #10: First try to read cleanup_status from agent bead
 		// This is the ZFC-compliant path - trust what the polecat reported
 		cleanupStatus := m.getCleanupStatusFromBead(name, nil)
 
 		if cleanupStatus != CleanupUnknown {
 			// ZFC path: Use polecat's self-reported status
-			if err := m.checkCleanupStatus(name, cleanupStatus, force); err != nil {
+			if err := m.checkCleanupStatus(name, cleanupStatus, opts.Force); err != nil {
 				return err
 			}
 		} else {
@@ -1330,7 +1343,7 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 			polecatGit := git.NewGit(clonePath)
 			status, err := polecatGit.CheckUncommittedWork()
 			if err == nil && !status.Clean() {
-				if force {
+				if opts.Force {
 					// Force mode: bypass uncommitted changes and unpushed commits.
 					// Only block on stashes, which represent intentional work-in-progress.
 					if status.StashCount > 0 {
@@ -1346,7 +1359,7 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 	// Even nuclear mode must not delete worktrees with pending MRs unless
 	// --force explicitly accepts that risk. Use the shared classifier so removal
 	// fails closed the same way recovery/listing do.
-	if !force {
+	if !opts.Force {
 		if activeMR, blocker := m.ActiveMRRemovalBlocker(name); blocker != "" {
 			return fmt.Errorf("cannot remove polecat %s: MR %s is still pending in merge queue (%s)\nRefinery will process the MR and clean up after merge\nUse --force to override (risks data loss)", name, activeMR, blocker)
 		}
@@ -1370,14 +1383,14 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 	// Unassign any work beads still pointing at this polecat (gt-e4u1).
 	// Without this, beads remain assigned to a ghost polecat (status in_progress,
 	// assignee set) after removal, permanently stuck with no one working on them.
-	m.unassignWorkBeads(name)
+	m.unassignWorkBeads(name, opts.Judged)
 
 	// Check if user's shell is cd'd into the worktree (prevents broken shell)
 	// This check runs unless selfNuke=true (polecat deleting its own worktree).
 	// When a polecat calls `gt done`, it's inside its worktree by design - the session
 	// will be killed immediately after, so breaking the shell is expected and harmless.
 	// See: https://github.com/steveyegge/gastown/issues/942
-	if !selfNuke {
+	if !opts.SelfNuke {
 		cwd, cwdErr := os.Getwd()
 		if cwdErr == nil {
 			// Normalize paths for comparison
@@ -1435,7 +1448,7 @@ func (m *Manager) removeWithOptionsLocked(name string, force, nuclear, selfNuke 
 	}
 
 	// Try to remove as a worktree first (use force flag for worktree removal too)
-	if err := repoGit.WorktreeRemove(clonePath, force); err != nil {
+	if err := repoGit.WorktreeRemove(clonePath, opts.Force); err != nil {
 		// Fall back to direct removal if worktree removal fails
 		// (e.g., if this is an old-style clone, not a worktree)
 		if removeErr := os.RemoveAll(clonePath); removeErr != nil {
@@ -1568,7 +1581,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 		return fmt.Errorf("not safe to reclaim: %s", blocker)
 	}
 
-	return m.removeWithOptionsLocked(name, false, false, false)
+	return m.removeWithOptionsLocked(name, RemoveOptions{})
 }
 
 // verifyRemovalComplete checks that polecat directories were actually removed.
@@ -2984,7 +2997,10 @@ func (m *Manager) ClearIssue(name string) error {
 // stays hooked, with a warning — except for a rig with no git repo, which has
 // no branch to protect. The release itself is the guarded compare-and-release
 // (--if-assignee), so a bead re-slung meanwhile is left with its new owner.
-func (m *Manager) unassignWorkBeads(name string) {
+//
+// judged holds verdicts the caller reached before removal, keyed by bead id;
+// those beads are replayed rather than asked about again (RemoveOptions.Judged).
+func (m *Manager) unassignWorkBeads(name string, judged map[string]SurvivalVerdict) {
 	assignee := m.assigneeID(name)
 	issues, err := m.beads.ListByAssignee(assignee)
 	if err != nil {
@@ -3003,7 +3019,11 @@ func (m *Manager) unassignWorkBeads(name string) {
 	survival, survivalErr := NewWorkSurvival(m.rig.Path)
 
 	for _, issue := range work {
-		if keep, why := keepForSurvivingWork(survival, survivalErr, issue.ID); keep {
+		verdict, ok := judged[issue.ID]
+		if !ok {
+			verdict = survivalVerdictFor(survival, survivalErr, issue.ID)
+		}
+		if keep, why := keepForSurvivingWork(verdict, issue.ID); keep {
 			fmt.Printf("  Keeping %s hooked to %s: %s\n", issue.ID, assignee, why)
 			continue
 		}
@@ -3026,21 +3046,24 @@ func (m *Manager) unassignWorkBeads(name string) {
 	}
 }
 
+// survivalVerdictFor asks one bead's survival question, folding a
+// predicate-level failure into the verdict so callers classify one value.
+func survivalVerdictFor(w *WorkSurvival, wErr error, issueID string) SurvivalVerdict {
+	if wErr != nil {
+		return VerdictFrom("", wErr)
+	}
+	branch, err := w.ForIssue(issueID)
+	return VerdictFrom(branch, err)
+}
+
 // keepForSurvivingWork decides whether a removed polecat's work bead must stay
 // hooked because its work survives, returning the reason when it must.
-func keepForSurvivingWork(survival *WorkSurvival, survivalErr error, issueID string) (bool, string) {
-	if survivalErr != nil {
-		if errors.Is(survivalErr, ErrNoRigRepo) {
-			return false, ""
-		}
-		return true, fmt.Sprintf("could not check for surviving work: %v", survivalErr)
-	}
-	branch, err := survival.ForIssue(issueID)
+func keepForSurvivingWork(v SurvivalVerdict, issueID string) (bool, string) {
 	switch {
-	case err != nil:
-		return true, fmt.Sprintf("could not check for surviving work: %v", err)
-	case branch != "":
-		return true, fmt.Sprintf("work survives on %s (resume with gt sling %s <rig> --branch %s)", branch, issueID, branch)
+	case v.Unknown():
+		return true, fmt.Sprintf("could not check for surviving work: %v", v.Err)
+	case v.SurvivesOn() != "":
+		return true, fmt.Sprintf("work survives on %s (resume with gt sling %s <rig> --branch %s)", v.SurvivesOn(), issueID, v.SurvivesOn())
 	}
 	return false, ""
 }

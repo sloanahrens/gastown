@@ -2743,7 +2743,11 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	)
 
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)
-	if err := mgr.RemoveWithOptions(polecatName, opts.Force, true, false); err != nil {
+	if err := mgr.RemoveWithOptions(polecatName, polecat.RemoveOptions{
+		Force:   opts.Force,
+		Nuclear: true,
+		Judged:  hookedWork.judged(),
+	}); err != nil {
 		if errors.Is(err, polecat.ErrPolecatNotFound) {
 			fmt.Printf("  %s worktree already gone\n", style.Dim.Render("○"))
 			resetPolecatAgentBeadForReuse(r, rigName, polecatName)
@@ -2817,15 +2821,10 @@ type nukeHookedWork struct {
 	survives func(beadID string) (string, error)
 	agentID  string
 	beadID   string
-}
-
-// workSurvivalVerdict classifies a survival answer: the branch the work
-// survives on, or unknown (an error other than "the rig has no git repo").
-func workSurvivalVerdict(branch string, err error) (survivesOn string, unknown bool) {
-	if err != nil && !errors.Is(err, polecat.ErrNoRigRepo) {
-		return "", true
-	}
-	return branch, false
+	// verdict is the survival answer the pre-removal decision rested on; it is
+	// handed to removal so the two steps cannot reach different verdicts for
+	// this bead (gt-kud90).
+	verdict polecat.SurvivalVerdict
 }
 
 // startNukeHookedWork decides what happens to the nuked polecat's hooked work
@@ -2851,11 +2850,22 @@ func startNukeHookedWork(rel polecatWorkReleaser, survives func(beadID string) (
 	if held, _ := heldBy(rel, h.agentID, beadID); !held {
 		return nil
 	}
-	if branch, unknown := workSurvivalVerdict(survives(beadID)); branch != "" || unknown {
-		return h
+	h.verdict = polecat.VerdictFrom(survives(beadID))
+	if h.verdict.NothingToProtect() {
+		h.release()
+		return nil
 	}
-	h.release()
-	return nil
+	return h
+}
+
+// judged reports the verdict this nuke reached for its hooked bead before
+// removal, so removal's unassignWorkBeads replays it instead of asking about
+// the same bead a second time (gt-kud90).
+func (h *nukeHookedWork) judged() map[string]polecat.SurvivalVerdict {
+	if h == nil {
+		return nil
+	}
+	return map[string]polecat.SurvivalVerdict{h.beadID: h.verdict}
 }
 
 func (h *nukeHookedWork) release() {
@@ -2865,10 +2875,10 @@ func (h *nukeHookedWork) release() {
 }
 
 // finish settles a kept hook once removal (and the local branch delete) is
-// over. Survival is asked again, because removal can change the answer: work
-// that no longer survives is released (guarded), and a hook that stays gets a
-// comment built from the final answer — the resume command for a branch, or
-// the command to re-check an unknown answer.
+// over. Survival is asked again — the verdict carried from before removal is
+// stale by now, because deleting the local branch can drop the last copy of the
+// work — and the hook that stays gets a comment built from the final answer:
+// the resume command for a branch, or the command to re-check an unknown one.
 func (h *nukeHookedWork) finish() {
 	if h == nil {
 		return
@@ -2876,7 +2886,8 @@ func (h *nukeHookedWork) finish() {
 	if held, _ := heldBy(h.rel, h.agentID, h.beadID); !held {
 		return
 	}
-	branch, unknown := workSurvivalVerdict(h.survives(h.beadID))
+	verdict := polecat.VerdictFrom(h.survives(h.beadID))
+	branch := verdict.SurvivesOn()
 	rigName := strings.SplitN(h.agentID, "/", 2)[0]
 	var note, text string
 	switch {
@@ -2887,7 +2898,7 @@ func (h *nukeHookedWork) finish() {
 			"Resume it:          gt sling %s %s --branch %s\n"+
 			"Discard and redo:   gt sling %s %s --force",
 			h.agentID, branch, h.beadID, rigName, branch, h.beadID, rigName)
-	case unknown:
+	case verdict.Unknown():
 		note = "could not verify surviving work"
 		text = fmt.Sprintf("gt polecat nuke: %s was nuked; hook kept: could not verify surviving work; "+
 			"run gt polecat surviving-work %s", h.agentID, h.beadID)
