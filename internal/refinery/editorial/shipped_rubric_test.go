@@ -88,3 +88,36 @@ func TestShippedRubricCarriesAlarmingBranchCriterion(t *testing.T) {
 	}
 	t.Fatalf("the shipped rubric %s carries no %q criterion: the class gt-07mfu gated (a check whose failure path is untested, so a broken check reads exactly like a passing one) is unguarded until it is restored", shippedRubricPath(t), alarmingBranchCriterion)
 }
+
+// instructionProliferationCriterion is the criterion gt-1zff added: adding a
+// second statement of an instruction that already exists is itself the
+// finding, whether or not the copies agree. It names the class
+// docs-and-comments reaches only after copies have drifted, so the same test
+// shape applies — delete it and this fails by name rather than the town
+// quietly reviewing without it.
+const instructionProliferationCriterion = "instruction-proliferation"
+
+// TestShippedRubricCarriesInstructionProliferationCriterion pins the
+// criterion and the two things that make it gradeable: the weight that lets
+// it move the score, and guidance that still makes agreement a non-defence.
+// A reword that keeps the name but lets "the copies agree today" answer the
+// finding is what this catches, since that wording is the whole difference
+// between this criterion and docs-and-comments' staleness test.
+func TestShippedRubricCarriesInstructionProliferationCriterion(t *testing.T) {
+	for _, c := range shippedRubricCriteria(t) {
+		if c.Name != instructionProliferationCriterion {
+			continue
+		}
+		if c.Weight != 2 {
+			t.Errorf("%s weight = %v, want 2: gt-1zff weights it to move the score without blocking alone, the shape docs-and-comments already has", instructionProliferationCriterion, c.Weight)
+		}
+		if !strings.Contains(c.Guidance, "agree today") {
+			t.Errorf("%s guidance no longer refuses the defence that the copies currently agree: %q", instructionProliferationCriterion, c.Guidance)
+		}
+		if !strings.Contains(c.Guidance, "R2") {
+			t.Errorf("%s guidance no longer points at the rule it enforces (R2, one place per meaning), so a reviewer has nothing to cite: %q", instructionProliferationCriterion, c.Guidance)
+		}
+		return
+	}
+	t.Fatalf("the shipped rubric %s carries no %q criterion: the class gt-1zff gated (a second copy of an instruction scores clean until the copies drift, and the later MR that touches one is charged for it) is unguarded until it is restored", shippedRubricPath(t), instructionProliferationCriterion)
+}
