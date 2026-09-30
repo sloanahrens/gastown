@@ -187,6 +187,13 @@ func (g *Git) BlobDiffLines(oldBlob, newBlob string) (added, removed map[string]
 	return added, removed, nil
 }
 
+// BlobContent returns the text of a blob object, addressed by its sha rather
+// than by a path, so a caller can read content no path in the working tree
+// currently holds.
+func (g *Git) BlobContent(sha string) (string, error) {
+	return g.run("cat-file", "blob", sha)
+}
+
 // CommitSubject returns the subject line of a single commit.
 func (g *Git) CommitSubject(rev string) (string, error) {
 	return g.run("log", "-1", "--format=%s", rev)

@@ -316,21 +316,24 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 		return true, fmt.Sprintf("could not inspect the pending checkpoint tree (git write-tree failed): %v", err)
 	}
 
-	found, err := gtgit.DetectRevertedMerges(gtgit.NewGit(workDir), target, pendingTree)
+	report, err := gtgit.DetectRevertedMerges(gtgit.NewGit(workDir), target, pendingTree)
 	if err != nil {
 		return true, fmt.Sprintf("could not verify the pending checkpoint against %s: %v", target, err)
 	}
-	if len(found) == 0 {
+	// Relocations are not a reason to block a checkpoint: the code they move
+	// survives in the package, so the checkpoint cannot delete merged work
+	// (gt-x748o).
+	if len(report.Reverted) == 0 {
 		return false, ""
 	}
 
 	var paths []string
-	for _, f := range found {
+	for _, f := range report.Reverted {
 		paths = append(paths, f.Paths...)
 	}
 	reason = fmt.Sprintf(
 		"staged content reverts %d commit(s) already merged to %s, across %d path(s): %s",
-		len(found), target, len(paths), strings.Join(paths, ", "))
+		len(report.Reverted), target, len(paths), strings.Join(paths, ", "))
 
 	if alert := d.checkpointRevertAlert; alert != nil {
 		key := fmt.Sprintf("checkpoint_dog:revert-guard:%s/%s", rigName, polecatName)

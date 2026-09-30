@@ -47,6 +47,9 @@ const revertPathsPerCommit = 4
 // view that makes the failure self-evident to the polecat that caused it: a
 // correct branch lists the polecat's own files, and the two branches in gt-63sz
 // listed 9 and 17 files each, nearly none of them the author's.
+//
+// Changes the branch merely relocated are printed and accepted: their code is
+// still in the tree, so there is nothing to refuse (gt-x748o).
 func reportRevertedMerges(g *git.Git, target string) error {
 	if stat, err := g.DiffStatThreeDot(target, "HEAD"); err != nil {
 		style.PrintWarning("could not compute branch diff against %s: %v", target, err)
@@ -58,7 +61,7 @@ func reportRevertedMerges(g *git.Git, target string) error {
 		fmt.Println()
 	}
 
-	found, err := git.DetectRevertedMerges(g, target, "HEAD")
+	report, err := git.DetectRevertedMerges(g, target, "HEAD")
 	if err != nil {
 		// Refuse rather than submit: this check exists because a branch that
 		// reverts merged work is silently accepted by everything downstream,
@@ -67,10 +70,34 @@ func reportRevertedMerges(g *git.Git, target string) error {
 			"Refusing to submit rather than risk reverting merged work. "+
 			"Run `git fetch origin && git rebase %s`, then re-run gt done.", target, err, target)
 	}
-	if len(found) == 0 {
+	if note := relocatedMergesNote(g, report.Relocated); note != "" {
+		fmt.Print(note)
+	}
+	if len(report.Reverted) == 0 {
 		return nil
 	}
-	return revertedMergeRefusal(g, target, found)
+	return revertedMergeRefusal(g, target, report.Reverted)
+}
+
+// relocatedMergesNote names the merged changes the branch moves rather than
+// undoes, or "" when there are none. The guard accepts these, so the note is
+// informational: it exists so the polecat that wrote the move — and anyone
+// reading its submission — can see what the guard saw and why it did not
+// refuse.
+func relocatedMergesNote(g *git.Git, relocated []git.RevertedMerge) string {
+	if len(relocated) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("  Relocated — moved within its package, not undone, so the code they carry survives:\n")
+	for _, f := range relocated {
+		fmt.Fprintf(&b, "    %s %s\n", shortSHA(f.Commit), commitSubjectOrUnavailable(g, f.Commit))
+		for _, path := range f.Paths {
+			fmt.Fprintf(&b, "      moved: %s\n", path)
+		}
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 // revertedMergeRefusal builds the refusal error for a branch that undoes merged
@@ -86,11 +113,7 @@ func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) 
 			fmt.Fprintf(&b, "  ... and %d more\n", len(found)-revertReportLimit)
 			break
 		}
-		subject, err := g.CommitSubject(f.Commit)
-		if err != nil || subject == "" {
-			subject = "(subject unavailable)"
-		}
-		fmt.Fprintf(&b, "  %s %s\n", shortSHA(f.Commit), subject)
+		fmt.Fprintf(&b, "  %s %s\n", shortSHA(f.Commit), commitSubjectOrUnavailable(g, f.Commit))
 		for j, path := range f.Paths {
 			if j == revertPathsPerCommit {
 				fmt.Fprintf(&b, "      ... and %d more paths\n", len(f.Paths)-revertPathsPerCommit)
@@ -107,4 +130,14 @@ func revertedMergeRefusal(g *git.Git, target string, found []git.RevertedMerge) 
 	fmt.Fprintf(&b, "Then confirm the branch lists only YOUR files and re-run gt done:\n"+
 		"  git diff --stat %s...HEAD", target)
 	return fmt.Errorf("%s", b.String())
+}
+
+// commitSubjectOrUnavailable names a commit for a report line, standing in for
+// a subject this repository cannot produce rather than dropping the commit.
+func commitSubjectOrUnavailable(g *git.Git, commit string) string {
+	subject, err := g.CommitSubject(commit)
+	if err != nil || subject == "" {
+		return "(subject unavailable)"
+	}
+	return subject
 }
