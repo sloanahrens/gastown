@@ -33,8 +33,8 @@ func TestZombieSessionCheck_FixHonorsAParkedSeat(t *testing.T) {
 	town := t.TempDir()
 	lister := &fakeZombieLister{alive: map[string]bool{}}
 	check := NewZombieSessionCheckWithLister(lister)
-	check.zombieSessions = []string{"hq-deacon", "hq-mayor"}
-	parkSession(t, town, "hq-deacon")
+	check.zombieSessions = []string{"hq-dog-alpha", "hq-mayor"}
+	parkSession(t, town, "hq-dog-alpha")
 
 	err := check.Fix(&CheckContext{TownRoot: town})
 

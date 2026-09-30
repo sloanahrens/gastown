@@ -48,7 +48,6 @@ Infrastructure checks:
   - stale-binary             Check if gt binary is up to date with repo
   - beads-binary             Check that beads (bd) is installed and meets minimum version
   - daemon                   Check if daemon is running (fixable)
-  - boot-health              Check Boot watchdog health (vet mode)
   - town-beads-config        Verify town .beads/config.yaml exists (fixable)
   - dolt-remote-leftovers    Warn on Dolt remotes, git-remote-cache dirs and sync.remote (report only)
 
@@ -116,7 +115,6 @@ Dolt checks:
   - dolt-orphaned-databases  Detect orphaned dolt databases
 
 Patrol checks:
-  - patrol-molecules-exist   Verify patrol molecules exist
   - patrol-hooks-wired       Verify daemon triggers patrols
   - patrol-not-stuck         Detect stale wisps (>1h)
   - patrol-plugins-accessible Verify plugin directories
