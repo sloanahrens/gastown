@@ -120,3 +120,16 @@ func TestUpdateConfigJSONMutateErrorWritesNothing(t *testing.T) {
 		t.Errorf("file changed: %q", got)
 	}
 }
+
+// TestSaveTownSettingsCreatesThePrivateMode: a new settings/config.json is
+// 0600 because agent presets carry API tokens until gt-y3pgh.5.
+func TestSaveTownSettingsCreatesThePrivateMode(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "settings", "config.json")
+	if err := SaveTownSettings(path, NewTownSettings()); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("new settings file mode = %v (%v), want 0600", fi.Mode().Perm(), err)
+	}
+}

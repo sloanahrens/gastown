@@ -239,3 +239,23 @@ func TestAccessorsReturnCopies(t *testing.T) {
 		t.Error("DaemonEnv()/RigNames() share state with the kernel")
 	}
 }
+
+// TestCheckRefusesAnUnreadableFile: a kernel path that exists but cannot be
+// read fails the gate; it is never taken for an absent file.
+func TestCheckRefusesAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	for _, file := range []string{FileSettings, FileDaemonEnv, FileDolt, FileDaemon} {
+		root := copyLiveTown(t)
+		path := filepath.Join(root, file)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(path, 0o755); err != nil { // a directory cannot be read as a file
+			t.Fatal(err)
+		}
+		err := Check(root)
+		if err == nil || !strings.Contains(err.Error(), path) {
+			t.Errorf("%s unreadable: Check = %v, want an error naming %s", file, err, path)
+		}
+	}
+}
