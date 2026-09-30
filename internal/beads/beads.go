@@ -2509,13 +2509,11 @@ func (b *Beads) Ready() ([]*Issue, error) {
 	return parseReadyOutput(out)
 }
 
-// ReadyAll returns every ready issue, with the bookkeeping families excluded
-// as Ready excludes them. It is one machine-mode bd call with --limit 0, so
-// bd's default page of 100 does not apply, and a page bd still reports as
-// truncated is an error: a board silently cut at 100 is the under-report the
-// dispatch patrol exists to catch (gt-59o9). It has no in-process store
-// branch (gt-7iwy0.2).
+// ReadyAll returns every ready issue Ready would, uncapped, and errors on a
+// page bd reports as truncated (gt-59o9).
 func (b *Beads) ReadyAll() ([]*Issue, error) {
+	// One machine-mode bd ready --limit 0: bd's default page of 100 does not
+	// apply, and the envelope's pagination says whether bd cut it anyway.
 	args := append(readyCliArgs(), "--limit", "0")
 	out, err := b.runMachine(args...)
 	if err != nil {
