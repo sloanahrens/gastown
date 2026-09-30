@@ -225,14 +225,14 @@ func TestSessionHealthArgErrorRejectsRigNameAddress(t *testing.T) {
 	t.Parallel()
 
 	for _, addr := range []string{"gastown/witness", "gastown/polecats/granite", "om-witness/crew/bob"} {
-		err := sessionHealthArgError(addr)
+		err := sessionHealthArgError(session.NewPrefixRegistry(), addr)
 		if err == nil {
 			t.Errorf("sessionHealthArgError(%q) = nil, want error", addr)
 			continue
 		}
 		msg := err.Error()
-		// Registry-independent assertions: reachable regardless of which rigs
-		// the prefix registry happens to know in this process.
+		// Registry-independent assertions: they hold whichever rigs the
+		// registry knows.
 		if !strings.Contains(msg, "tmux session name") {
 			t.Errorf("sessionHealthArgError(%q) message %q does not name the expected argument form", addr, msg)
 		}
@@ -242,16 +242,12 @@ func TestSessionHealthArgErrorRejectsRigNameAddress(t *testing.T) {
 	}
 }
 
-// Not parallel: swaps the package-level prefix registry.
 func TestSessionHealthArgErrorSuggestsSessionNameForKnownRig(t *testing.T) {
-	prev := session.DefaultRegistry()
-	t.Cleanup(func() { session.SetDefaultRegistry(prev) })
-
+	t.Parallel()
 	reg := session.NewPrefixRegistry()
 	reg.Register("gt", "gastown")
-	session.SetDefaultRegistry(reg)
 
-	err := sessionHealthArgError("gastown/witness")
+	err := sessionHealthArgError(reg, "gastown/witness")
 	if err == nil {
 		t.Fatal("sessionHealthArgError(gastown/witness) = nil, want error")
 	}
@@ -261,7 +257,7 @@ func TestSessionHealthArgErrorSuggestsSessionNameForKnownRig(t *testing.T) {
 
 	// An unregistered rig has no derivable prefix — PrefixFor falls back to the
 	// default, so a guess would be plausible but wrong. Offer nothing.
-	err = sessionHealthArgError("nosuchrig/witness")
+	err = sessionHealthArgError(reg, "nosuchrig/witness")
 	if err == nil {
 		t.Fatal("sessionHealthArgError(nosuchrig/witness) = nil, want error")
 	}
@@ -274,7 +270,7 @@ func TestSessionHealthArgErrorRejectsEmpty(t *testing.T) {
 	t.Parallel()
 
 	for _, arg := range []string{"", "   "} {
-		if err := sessionHealthArgError(arg); err == nil {
+		if err := sessionHealthArgError(session.NewPrefixRegistry(), arg); err == nil {
 			t.Errorf("sessionHealthArgError(%q) = nil, want error", arg)
 		}
 	}
@@ -286,7 +282,7 @@ func TestSessionHealthArgErrorAcceptsSessionNames(t *testing.T) {
 	// Names that cannot be resolved by rig/name parsing must pass through
 	// untouched: whether they exist is tmux's question, not this validator's.
 	for _, name := range []string{"gt-witness", "gt-session-health-test-nonexistent", "hq-mayor", "gt-crew-bob"} {
-		if err := sessionHealthArgError(name); err != nil {
+		if err := sessionHealthArgError(session.NewPrefixRegistry(), name); err != nil {
 			t.Errorf("sessionHealthArgError(%q) = %v, want nil", name, err)
 		}
 	}

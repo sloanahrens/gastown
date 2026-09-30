@@ -711,6 +711,9 @@ type buildRestartCommandOpts struct {
 	// ContinueSession is true. If empty, falls back to a generic
 	// continuation message.
 	ContinuePrompt string
+	// Registry supplies the rig prefixes the session name parses with; nil
+	// reads session.DefaultRegistry().
+	Registry *session.PrefixRegistry
 }
 
 func buildRestartCommand(sessionName string) (string, error) {
@@ -772,6 +775,11 @@ func liveRespawnConfig(role, agentName, townRoot, rigPath string) (*config.Runti
 }
 
 func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpts) (string, error) {
+	reg := opts.Registry
+	if reg == nil {
+		reg = session.DefaultRegistry()
+	}
+
 	// Detect town root from current directory
 	townRoot := detectTownRootFromCwd()
 	if townRoot == "" {
@@ -779,13 +787,13 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 	}
 
 	// Determine the working directory for this session type
-	workDir, err := sessionWorkDir(sessionName, townRoot)
+	workDir, err := sessionWorkDir(reg, sessionName, townRoot)
 	if err != nil {
 		return "", err
 	}
 
 	// Parse the session name to get the identity (used for GT_ROLE and beacon)
-	identity, err := session.ParseSessionName(sessionName)
+	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		return "", fmt.Errorf("cannot parse session name %q: %w", sessionName, err)
 	}
@@ -1121,8 +1129,8 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName string) {
 }
 
 // sessionWorkDir returns the correct working directory for a session.
-// This is the canonical home for each role type.
-func sessionWorkDir(sessionName, townRoot string) (string, error) {
+// This is the canonical home for each role type. reg supplies the rig prefixes.
+func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (string, error) {
 	// Get session names for comparison
 	mayorSession := getMayorSessionName()
 	switch {
@@ -1133,7 +1141,7 @@ func sessionWorkDir(sessionName, townRoot string) (string, error) {
 
 	case strings.Contains(sessionName, "-crew-"):
 		// gt-<rig>-crew-<name> -> <townRoot>/<rig>/crew/<name>
-		rig, name, _, ok := parseCrewSessionName(sessionName)
+		rig, name, _, ok := parseCrewSessionNameIn(reg, sessionName)
 		if !ok {
 			return "", fmt.Errorf("cannot parse crew session name: %s", sessionName)
 		}
@@ -1141,7 +1149,7 @@ func sessionWorkDir(sessionName, townRoot string) (string, error) {
 
 	default:
 		// Parse session name to determine role and resolve paths
-		identity, err := session.ParseSessionName(sessionName)
+		identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 		if err != nil {
 			return "", fmt.Errorf("unknown session type: %s (%w)", sessionName, err)
 		}

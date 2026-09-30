@@ -119,7 +119,12 @@ func detectCrewFromCwd() (*crewDetection, error) {
 // Format: <prefix>-crew-<name>
 // Returns empty strings and false if the format doesn't match.
 func parseCrewSessionName(sessionName string) (rigName, crewName, prefix string, ok bool) {
-	identity, err := session.ParseSessionName(sessionName)
+	return parseCrewSessionNameIn(session.DefaultRegistry(), sessionName)
+}
+
+// parseCrewSessionNameIn is parseCrewSessionName reading rig prefixes from reg.
+func parseCrewSessionNameIn(reg *session.PrefixRegistry, sessionName string) (rigName, crewName, prefix string, ok bool) {
+	identity, err := session.ParseSessionNameWithRegistry(sessionName, reg)
 	if err != nil {
 		return "", "", "", false
 	}

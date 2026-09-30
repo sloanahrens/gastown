@@ -808,7 +808,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 
 func runSessionHealth(cmd *cobra.Command, args []string) error {
 	sessionName := args[0]
-	if err := sessionHealthArgError(sessionName); err != nil {
+	if err := sessionHealthArgError(session.DefaultRegistry(), sessionName); err != nil {
 		return err
 	}
 	status := tmux.NewTmux().CheckSessionHealth(sessionName, sessionHealthMaxInactivity)
@@ -845,7 +845,9 @@ func runSessionHealth(cmd *cobra.Command, args []string) error {
 // callers ask on purpose: plugins/stuck-agent-dog/run.sh turns health's
 // session-dead verdict into a polecat restart, and a non-zero exit there reads
 // as "health unavailable" and skips the restart instead.
-func sessionHealthArgError(arg string) error {
+//
+// reg supplies the rig prefixes the "Did you mean" hint resolves with.
+func sessionHealthArgError(reg *session.PrefixRegistry, arg string) error {
 	if strings.TrimSpace(arg) == "" {
 		return fmt.Errorf("missing session name (usage: gt session health <tmux-session>)")
 	}
@@ -856,7 +858,7 @@ func sessionHealthArgError(arg string) error {
 	lines := []string{fmt.Sprintf(
 		"invalid session name %q: gt session health takes a tmux session name, not a rig/name address",
 		arg)}
-	if resolved := tmuxSessionForAddress(arg); resolved != "" {
+	if resolved := tmuxSessionForAddress(reg, arg); resolved != "" {
 		lines = append(lines, fmt.Sprintf("Did you mean: gt session health %s", resolved))
 	}
 	lines = append(lines, fmt.Sprintf("For session details by rig/name, use: gt session status %s", arg))
@@ -866,18 +868,18 @@ func sessionHealthArgError(arg string) error {
 // tmuxSessionForAddress maps a rig/name address ("gastown/witness") to the tmux
 // session name it runs as ("gt-witness"), for use in an error hint.
 //
-// Returns "" unless the address's rig is registered with the prefix registry:
+// Returns "" unless the address's rig is registered with reg:
 // PrefixFor falls back to the default prefix for unknown rigs, so an
 // unregistered rig would yield a plausible but wrong session name.
-func tmuxSessionForAddress(addr string) string {
+func tmuxSessionForAddress(reg *session.PrefixRegistry, addr string) string {
 	parts := strings.Split(addr, "/")
 	if len(parts) < 2 || parts[0] == "" {
 		return ""
 	}
-	if _, known := session.DefaultRegistry().AllRigs()[parts[0]]; !known {
+	if _, known := reg.AllRigs()[parts[0]]; !known {
 		return ""
 	}
-	resolved, _ := session.AssigneeSessionName(addr)
+	resolved, _ := reg.AssigneeSessionName(addr)
 	return resolved
 }
 

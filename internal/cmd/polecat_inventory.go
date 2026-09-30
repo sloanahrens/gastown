@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 const polecatSessionKeySep = "\x00"
@@ -174,8 +175,8 @@ type polecatActiveWorkEvidence struct {
 	Submitted bool
 }
 
-func newPolecatSessionSet(sessionNames []string) polecatSessionSet {
-	return newPolecatSessionSetFromNames(nil, sessionNames)
+func newPolecatSessionSet(reg *session.PrefixRegistry, sessionNames []string) polecatSessionSet {
+	return newPolecatSessionSetFromNames(reg, nil, sessionNames)
 }
 
 // newPolecatSessionSetFromNames indexes sessions by rig/polecat and, when a
@@ -183,11 +184,12 @@ func newPolecatSessionSet(sessionNames []string) polecatSessionSet {
 // GT_AGENT is written into the session environment at spawn
 // (SessionStartOptions.Agent / AgentEnv fallback) — the same read sling_pool
 // already pays for. Callers that only need liveness (capacity) pass a nil
-// lister and skip the per-session tmux reads.
-func newPolecatSessionSetFromNames(t sessionLister, sessionNames []string) polecatSessionSet {
+// lister and skip the per-session tmux reads. reg supplies the rig prefixes
+// session names are parsed with.
+func newPolecatSessionSetFromNames(reg *session.PrefixRegistry, t sessionLister, sessionNames []string) polecatSessionSet {
 	sessions := make(polecatSessionSet, len(sessionNames))
 	for _, sessionName := range sessionNames {
-		rigName, polecatName, ok := parsePolecatSessionName(sessionName)
+		rigName, polecatName, ok := parsePolecatSessionNameIn(reg, sessionName)
 		if !ok {
 			continue
 		}
@@ -207,12 +209,12 @@ func newPolecatSessionSetFromNames(t sessionLister, sessionNames []string) polec
 
 // loadPolecatSessionSet lists live sessions once and enriches every polecat
 // session with its agent and creation time.
-func loadPolecatSessionSet(t sessionLister) (polecatSessionSet, error) {
+func loadPolecatSessionSet(reg *session.PrefixRegistry, t sessionLister) (polecatSessionSet, error) {
 	names, err := t.ListSessions()
 	if err != nil {
 		return nil, err
 	}
-	return newPolecatSessionSetFromNames(t, names), nil
+	return newPolecatSessionSetFromNames(reg, t, names), nil
 }
 
 func (s polecatSessionSet) lookup(rigName, polecatName string) (string, bool) {
@@ -233,9 +235,9 @@ func (s polecatSessionSet) namesForRig(rigName string) []string {
 		return nil
 	}
 	var names []string
-	for _, entry := range s {
-		sessionRig, _, ok := parsePolecatSessionName(entry.Name)
-		if ok && sessionRig == rigName {
+	keyPrefix := rigName + polecatSessionKeySep
+	for key, entry := range s {
+		if strings.HasPrefix(key, keyPrefix) {
 			names = append(names, entry.Name)
 		}
 	}

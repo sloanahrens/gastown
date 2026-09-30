@@ -321,7 +321,6 @@ func TestFindRigSessions(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	setupRigTestRegistry(t)
 
 	tm := tmux.NewTmux()
 
@@ -346,7 +345,7 @@ func TestFindRigSessions(t *testing.T) {
 		}
 	}()
 
-	got, err := findRigSessions(tm, "testrig1223")
+	got, err := findRigSessions(tm, rigTestRegistry(), "testrig1223")
 	if err != nil {
 		t.Fatalf("findRigSessions: %v", err)
 	}
@@ -382,12 +381,9 @@ func TestFindRigSessions_NoSessions(t *testing.T) {
 	// Register a unique prefix for a rig that has no sessions
 	reg := session.NewPrefixRegistry()
 	reg.Register("zz", "nonexistentrig999")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	defer session.SetDefaultRegistry(old)
 
 	tm := tmux.NewTmux()
-	got, err := findRigSessions(tm, "nonexistentrig999")
+	got, err := findRigSessions(tm, reg, "nonexistentrig999")
 	if err != nil {
 		t.Fatalf("findRigSessions: %v", err)
 	}
@@ -570,4 +566,13 @@ func TestDeliverNudge_ImmediateMode_ForceOverridesBusyRefusal(t *testing.T) {
 	// width varies, so flattenPane (see its comment) is what makes the search
 	// independent of where the pane wrapped (gt-isp0).
 	waitForPaneText(t, tm, sessionName, message, 40)
+}
+
+// rigTestRegistry maps the rig prefixes TestFindRigSessions uses. zz-prefixed
+// names avoid collisions with real rig sessions.
+func rigTestRegistry() *session.PrefixRegistry {
+	reg := session.NewPrefixRegistry()
+	reg.Register("zztr", "testrig1223")
+	reg.Register("zzor", "otherrig")
+	return reg
 }

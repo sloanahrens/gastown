@@ -173,7 +173,7 @@ func TestPolecatMRIndexStatusFor(t *testing.T) {
 // hardcode status=unknown here, so the list could never say what the MR's real
 // state was.
 func TestPolecatInventoryMRJoin(t *testing.T) {
-	setupPolecatTestRegistry(t)
+	t.Parallel()
 
 	tests := []struct {
 		name             string
@@ -351,7 +351,7 @@ func TestPolecatListJSONAddsAgentAndMRFields(t *testing.T) {
 // so `gt polecat status` used to print the opposite verdict for the same
 // polecat. Status now takes the list row's state and issue.
 func TestPolecatStatusAgreesWithListOnStaleAgentState(t *testing.T) {
-	setupPolecatTestRegistry(t)
+	t.Parallel()
 
 	row := buildPolecatSeatItem("gastown", "jade",
 		&beads.AgentFields{AgentState: string(beads.AgentStateWorking), CleanupStatus: string(polecat.CleanupClean)},
