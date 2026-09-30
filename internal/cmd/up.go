@@ -244,6 +244,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// 2. Deacon
 	go func() {
 		defer startupWg.Done()
+		// patrols.deacon.enabled=false means no deacon session at all: the
+		// daemon would kill one on its next heartbeat (ADR 0005).
+		if !daemon.IsPatrolEnabled(daemon.LoadPatrolConfig(townRoot), constants.RoleDeacon) {
+			deaconResult = agentStartResult{name: "Deacon", ok: true, detail: "skipped (patrols.deacon disabled)"}
+			return
+		}
 		deaconMgr := deacon.NewManager(townRoot)
 		if err := deaconMgr.Start(""); err != nil {
 			if err == deacon.ErrAlreadyRunning {
@@ -683,6 +689,12 @@ func upStartWitness(rigName string, r *rig.Rig) agentStartResult {
 		if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
 			return agentStartResult{name: name, ok: true, detail: fmt.Sprintf("skipped (rig %s)", reason)}
 		}
+	}
+
+	// patrols.witness disabled, or this rig in its disabled_rigs: the
+	// patrol_scan tick covers the rig and no witness session runs (ADR 0005).
+	if !daemon.WitnessWantedInRig(daemon.LoadPatrolConfig(filepath.Dir(r.Path)), rigName) {
+		return agentStartResult{name: name, ok: true, detail: "skipped (witness disabled for rig)"}
 	}
 
 	mgr := witness.NewManager(r)

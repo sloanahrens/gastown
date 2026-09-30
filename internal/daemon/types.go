@@ -124,6 +124,7 @@ type (
 	QuotaDogConfig             = agentconfig.QuotaDogConfig
 	MayorDispatchConfig        = agentconfig.MayorDispatchConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
+	PatrolScanConfig           = agentconfig.PatrolScanConfig
 	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
@@ -274,6 +275,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.SpecDispatch.Enabled
 	}
+	// patrol_scan defaults OFF: it restarts polecats on its own, so the
+	// operator opts in (gt-4k3fj.6, ADR 0005).
+	if patrol == "patrol_scan" {
+		if config == nil || config.Patrols == nil || config.Patrols.PatrolScan == nil {
+			return false
+		}
+		return config.Patrols.PatrolScan.Enabled
+	}
 	// patrol_watchdog defaults ON for the same reason mayor_dispatch does: it
 	// exists to catch a role going silent while still looking alive (gt-4z3b7),
 	// and a detector that has to be switched on cannot prevent the state it
@@ -317,8 +326,33 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Rigs
 		}
+	case "patrol_scan":
+		if config.Patrols.PatrolScan != nil {
+			return config.Patrols.PatrolScan.Rigs
+		}
 	}
 	return nil // All rigs
+}
+
+// WitnessWantedInRig reports whether the town wants a witness LLM session in
+// rigName: the witness patrol is enabled and the rig is not in
+// patrols.witness.disabled_rigs. It is the per-rig off switch that lets the
+// patrol_scan tick replace the witness one rig at a time (ADR 0005). The
+// rigs allowlist is not consulted here: a rig outside it is not ensured, but
+// its session is not killed either, as before.
+func WitnessWantedInRig(config *DaemonPatrolConfig, rigName string) bool {
+	if !IsPatrolEnabled(config, constants.RoleWitness) {
+		return false
+	}
+	if config == nil || config.Patrols == nil || config.Patrols.Witness == nil {
+		return true
+	}
+	for _, r := range config.Patrols.Witness.DisabledRigs {
+		if r == rigName {
+			return false
+		}
+	}
+	return true
 }
 
 // loadDisabledPatrolsFromTownSettings loads the disabled_patrols list from
