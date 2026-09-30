@@ -7,9 +7,11 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -226,14 +228,37 @@ func addBeadDependency(t *testing.T, blocked, blocker, dir string) {
 }
 
 // addBeadDependencyOfType adds a dependency with a specific type (e.g., "tracks",
-// "depends_on"). The from bead must exist in the local DB at dir; the to bead can
-// be in a different DB if routes.jsonl is present in dir's .beads/.
+// "parent-child"). The from bead must exist in the local DB at dir; the to bead
+// can be in a different DB if routes.jsonl is present in dir's .beads/.
 func addBeadDependencyOfType(t *testing.T, from, to, depType, dir string) {
 	t.Helper()
 	cmd := exec.Command("bd", "dep", "add", from, to, "--type="+depType)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd dep add %s %s --type=%s failed: %v\n%s", from, to, depType, err, out)
+	}
+}
+
+// addCrossRigEpicChild links an epic to a child that lives in another rig's
+// database. A parent-child edge to a foreign bead ID cannot go in
+// depends_on_issue_id (fk_dep_issue_target requires the row in the local
+// issues table), and bd's own `dep add` refuses the external: form for
+// parent-child ("external capability dependencies cannot use parent-child
+// edges"). The edge therefore goes in as the external reference bd itself
+// writes for cross-database targets, in the epic's own database, which is the
+// shape the epic reader resolves (rawDepSQLArgs in convoy.go:
+// COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)).
+func addCrossRigEpicChild(t *testing.T, epicID, childID, dir string) {
+	t.Helper()
+	prefix := strings.TrimSuffix(beads.ExtractPrefix(childID), "-")
+	query := fmt.Sprintf(
+		"INSERT INTO dependencies (id, issue_id, type, created_by, depends_on_external) "+
+			"VALUES (UUID(), '%s', 'parent-child', 'integration-test', 'external:%s:%s')",
+		epicID, prefix, childID)
+	cmd := exec.Command("bd", "sql", query)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("linking cross-rig child %s to epic %s failed: %v\n%s", childID, epicID, err, out)
 	}
 }
 
