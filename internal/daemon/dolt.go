@@ -1425,12 +1425,18 @@ func (m *DoltServerManager) checkDatabaseIdentityLocked() error {
 
 	// Use the doltserver package's verification which checks --data-dir
 	// on the process command line and falls back to database comparison.
-	legitimate, err := doltserver.VerifyServerDataDir(m.townRoot)
-	if err != nil {
-		return fmt.Errorf("server identity verification failed: %w", err)
-	}
-	if !legitimate {
-		return fmt.Errorf("server is an imposter (wrong data directory)")
+	identity := doltserver.VerifyServerDataDir(m.townRoot)
+	switch {
+	case identity.IsFail():
+		return fmt.Errorf("server is an imposter (wrong data directory): %w", identity.Err())
+	case identity.IsUnknown() && errors.Is(identity.Err(), doltserver.ErrExpectedDatabasesUnreadable):
+		// A restart cannot fix an unreadable data directory, so the identity
+		// check does not fail on it; the expected-databases check below cannot
+		// run either, so say so and stop here.
+		m.logger("Dolt identity check skipped: %v", identity.Err())
+		return nil
+	case identity.IsUnknown():
+		return fmt.Errorf("server identity verification failed: %w", identity.Err())
 	}
 
 	// Additional check: verify expected databases have data.

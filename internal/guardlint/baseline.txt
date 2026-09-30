@@ -1,46 +1,64 @@
-# Fail-open guard functions found in internal/ when this check was
-# introduced (gt-udrrw). Each one already returns a bare ok/true or swallows
-# an error to nil from inside a branch that observed a non-nil error — the
-# class gt-udrrw catalogs, migrated one instance of onto guard.Result
-# (internal/witness/state_collapse.go's getBeadRecord) as the worked example.
-#
-# Grandfathered here so make lint passes today; each is a candidate for its
-# own small migration MR onto guard.Result (internal/guard). Do not add new
-# entries for code you are writing now — fix it instead, or if the flag is a
-# false positive (the specific error is deliberately narrowed, e.g.
-# os.IsNotExist), add a one-line comment above the entry saying so.
+# Functions guardlint flags that are not fail-open guards (gt-udrrw). Each
+# returns a bare ok/true or swallows an error to nil from inside a branch that
+# observed a non-nil error; the genuine fail-open guards have migrated onto
+# guard.Result (internal/guard, worked example internal/witness/state_collapse.go's
+# getBeadRecord), and what remains is annotated with why it is deliberate
+# (gt-bfale). Do not add new entries for code you are writing now — fix it
+# instead, or if the flag is a false positive (the specific error is
+# deliberately narrowed, e.g. os.IsNotExist), add a one-line comment above the
+# entry saying so.
+# deliberate best-effort dedup: a failed title search creates the bug rather than dropping the report, and the worst outcome is one duplicate
 internal/beads/beads.go:*Beads.CreateIfNoDuplicate
 # Moved from *Beads.ClearAgentActiveMRIfMatches (gt-22hdp.13); narrowed on purpose: only ErrNotFound (no agent bead, so nothing to clear) returns false, nil.
 internal/beads/client_helpers.go:clearAgentActiveMRIfMatches
 # Was the func-literal var gateSlotHeld, which guardlint could not see; made a named func when the watch's collaborators were injected (gt-22hdp.13). Deliberate, and nothing is swallowed: the error is returned beside held=true and the watch logs itself as blind (see its doc).
 internal/cmd/done_test_verify_container_watch.go:gateSlotHeld
+# not a guard: the bool is "hooked work was found", returned true beside the error so the caller still skips the normal startup directive
 internal/cmd/prime.go:checkSlungWork
+# deliberate os.IsNotExist narrowing: a missing manifest means the plugin is not installed; every other read error is returned
 internal/cmd/prime.go:ralphLoopPluginInstalledIn
+# deliberate: CONTEXT.md is optional, so prime carries on without it; a non-NotExist read error is warned on stderr instead of aborting startup (gt-bfale)
 internal/cmd/prime_payload.go:staticRoleText
-internal/cmd/sling_schedule.go:shouldDeferDispatch
+# not a guard: the bool is "a change was applied"; DND reset is best-effort startup work that must not block gt up
 internal/cmd/up.go:disableCurrentAgentDND
+# deliberate fail-open throttle: an unreadable slot state allows the send and returns the error beside true; the worst outcome is one repeated nudge
 internal/daemon/notification.go:*NotificationManager.SendIfReady
+# deliberate fail-open throttle: see SendIfReady
 internal/daemon/notification.go:*NotificationManager.shouldSendLocked
+# deliberate os.IsNotExist narrowing: no file means never run; a corrupt file is an error the caller reports and then runs the patrol anyway (gt-ima2)
 internal/daemon/patrol_last_run.go:loadPatrolLastRun
+# deliberate os.IsNotExist narrowing: no PID file means no owner; os.FindProcess never errs on unix, so alive=false there is not a swallowed read
 internal/daemon/pidfile.go:verifyPIDOwnership
+# deliberate: a diff that cannot be patch-id'd falls to the uncovered branch, which reports it as an error (see its comment)
 internal/doctor/editorial_coverage_check.go:*coverageNoteIndex.parked
-internal/doltserver/doltserver.go:CheckReadOnly
+# not a guard: the flagged true is serverWasRunning returned beside a real error
 internal/doltserver/doltserver.go:InitRig
-internal/doltserver/doltserver.go:VerifyServerDataDir
+# deliberate exit-status narrowing: git exits 1 for "no such branch"; every other failure is returned
 internal/git/git.go:*Git.BranchExists
+# deliberate narrowing: only "No such remote" is false; every other failure is returned
 internal/git/git.go:*Git.HasUpstreamRemote
+# deliberate exit-status narrowing: git exits 1 for "not an ancestor"; every other failure is returned
 internal/git/git.go:*Git.IsAncestor
+# deliberate exit-status narrowing: git show-ref exits 1 when there are no refs, which is what empty means; every other failure is returned
 internal/git/git.go:*Git.IsEmpty
+# deliberate narrowing: only git's "ref missing" answers are false; every other failure is returned
 internal/git/git.go:*Git.RefExists
+# deliberate exit-status narrowing: git exits 1 for "no such ref"; every other failure is returned
 internal/git/git.go:*Git.RemoteTrackingBranchExists
+# deliberate: the prune ran and only the state save failed, so the result is returned as ran=true; the next tick prunes again
 internal/krc/autoprune.go:AutoPrune
+# deliberate EWOULDBLOCK narrowing: contention is (nil, false, nil); every other failure is returned. FlockTryAcquireStable names contention with ErrFlockHeld
 internal/lock/flock_unix.go:FlockTryAcquire
+# deliberate os.IsNotExist narrowing: a missing target/ is a no-op; every other stat failure is returned
 internal/polecat/target_clean.go:cleanTargetDir
+# deliberate os.IsNotExist narrowing: an absent file is (false, nil); a present but unreadable one is an error
 internal/templates/supervisor_state.go:SupervisorFileIsFor
+# deliberate narrowing: a refused connection or missing file is the proof the socket is stale; every other dial error is returned
 internal/tmux/socket_guard_unix.go:unixSocketStale
+# deliberate narrowing: no session or no server is false; every other failure is returned, except on Windows where psmux's bare exit 1 cannot be told apart
 internal/tmux/tmux.go:*Tmux.HasSession
+# deliberate narrowing: ps exiting "no match" is false; every other failure is returned
 internal/tmux/tmux.go:processMatchesNamesChecked
-internal/witness/handlers.go:_verifyCommitOnMain
 # deliberate os.IsNotExist narrowing: a missing state file means nothing to reset (gt-wdv9)
 internal/patrolstate/patrolstate.go:ResetCounter
 # deliberate os.ErrNotExist narrowing: found=false tells "never written" apart from a read error (claude-8w7)

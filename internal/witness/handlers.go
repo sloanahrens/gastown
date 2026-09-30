@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
@@ -492,10 +493,10 @@ func (h *handlers) handleMerged(bd *BdCli, workDir, rigName string, msg *mail.Me
 	}
 
 	// Verify the polecat's commit is actually on main before allowing nuke.
-	onMain, err := h.verifyCommitOnMain(workDir, rigName, payload.PolecatName)
-	if err != nil {
-		result.Action = fmt.Sprintf("warning: couldn't verify commit on main for %s: %v", payload.PolecatName, err)
-	} else if !onMain {
+	verdict := h.verifyCommitOnMain(workDir, rigName, payload.PolecatName)
+	if verdict.IsUnknown() {
+		result.Action = fmt.Sprintf("warning: couldn't verify commit on main for %s: %v", payload.PolecatName, verdict.Err())
+	} else if verdict.IsFail() {
 		result.Handled = true
 		result.WispCreated = wispID
 		result.Error = fmt.Errorf("polecat %s commit is NOT on main - MERGED signal may be stale, DO NOT NUKE", payload.PolecatName)
@@ -1514,17 +1515,20 @@ func AutoNukeIfClean(workDir, rigName, polecatName string) *NukePolecatResult {
 // (e.g., "gastown" for gastown.git). This function checks ALL remotes to find
 // the one containing the default branch with the merged commit.
 //
-// Returns:
-//   - true, nil: commit is verified on default branch
-//   - false, nil: commit is NOT on default branch (don't nuke!)
-//   - false, error: couldn't verify (treat as unsafe)
+// Returns guard.Result:
+//   - Pass: commit is verified on the default branch
+//   - Fail: commit is confirmed NOT on the default branch (don't nuke!)
+//   - Unknown: the check could not run (no town, no HEAD, or every ancestor
+//     check errored so none answered). A remote that lacks the default branch
+//     errors too, so it counts as "not there" only once another candidate
+//     answered definitively (gt-udrrw, gt-bfale).
 //
 // Tests fake it through handlers.verifyCommitOnMainFn.
-func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
+func _verifyCommitOnMain(workDir, rigName, polecatName string) guard.Result {
 	// Find town root from workDir
 	townRoot, err := workspace.Find(workDir)
 	if err != nil || townRoot == "" {
-		return false, fmt.Errorf("finding town root: %v", err)
+		return guard.Unknown(fmt.Errorf("finding town root: %v", err))
 	}
 
 	// Get configured default branch for this rig
@@ -1548,8 +1552,10 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 	// Get the current HEAD commit SHA
 	commitSHA, err := g.Rev("HEAD")
 	if err != nil {
-		return false, fmt.Errorf("getting polecat HEAD: %w", err)
+		return guard.Unknown(fmt.Errorf("getting polecat HEAD: %w", err))
 	}
+
+	notOnMain := guard.Fail(fmt.Sprintf("commit %s is not on %s", commitSHA, defaultBranch))
 
 	// Get all configured remotes and check each one for the commit
 	// This handles multi-remote setups where code may be on a remote other than "origin"
@@ -1558,28 +1564,43 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 		// If we can't list remotes, fall back to checking just the local branch
 		isOnDefaultBranch, err := g.IsAncestor(commitSHA, defaultBranch)
 		if err != nil {
-			return false, fmt.Errorf("checking if commit is on %s: %w", defaultBranch, err)
+			return guard.Unknown(fmt.Errorf("checking if commit is on %s: %w", defaultBranch, err))
 		}
-		return isOnDefaultBranch, nil
+		if !isOnDefaultBranch {
+			return notOnMain
+		}
+		return guard.Pass()
 	}
 
-	// Try each remote/<defaultBranch> until we find one where commit is an ancestor
+	// Try each remote/<defaultBranch> until we find one where commit is an
+	// ancestor, then the local default branch (in case we're not tracking a
+	// remote). answered records that some candidate said "not an ancestor";
+	// lastErr keeps why the others could not answer.
+	candidates := make([]string, 0, len(remotes)+1)
 	for _, remote := range remotes {
-		remoteBranch := remote + "/" + defaultBranch
-		isOnRemote, err := g.IsAncestor(commitSHA, remoteBranch)
-		if err == nil && isOnRemote {
-			return true, nil
+		candidates = append(candidates, remote+"/"+defaultBranch)
+	}
+	candidates = append(candidates, defaultBranch)
+
+	answered := false
+	var lastErr error
+	for _, candidate := range candidates {
+		isOn, err := g.IsAncestor(commitSHA, candidate)
+		switch {
+		case err != nil:
+			lastErr = fmt.Errorf("checking if commit is on %s: %w", candidate, err)
+		case isOn:
+			return guard.Pass()
+		default:
+			answered = true
 		}
 	}
 
-	// Also try the local default branch (in case we're not tracking a remote)
-	isOnDefaultBranch, err := g.IsAncestor(commitSHA, defaultBranch)
-	if err == nil && isOnDefaultBranch {
-		return true, nil
+	if !answered {
+		return guard.Unknown(lastErr)
 	}
-
 	// Commit is not on any remote's default branch
-	return false, nil
+	return notOnMain
 }
 
 // verifyBranchAlreadyMerged checks whether the polecat's current branch work has
@@ -1639,7 +1660,7 @@ func (h *handlers) _verifyBranchAlreadyMerged(workDir, rigName, polecatName, hoo
 	}
 
 	// Fast path: reuse existing ancestor check.
-	if onMain, err := h.verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+	if h.verifyCommitOnMain(workDir, rigName, polecatName).IsPass() {
 		return true, nil
 	}
 
@@ -3350,7 +3371,7 @@ func (h *handlers) resetAbandonedBead(bd *BdCli, workDir, rigName, hookBead, pol
 	// Guard: if the polecat's commit is already on the default branch,
 	// the work is done — close the bead instead of resetting for re-dispatch.
 	// This prevents the spawn-storm / duplicate-work loop described in #2036.
-	if onMain, err := h.verifyCommitOnMain(workDir, rigName, polecatName); err == nil && onMain {
+	if h.verifyCommitOnMain(workDir, rigName, polecatName).IsPass() {
 		reason := fmt.Sprintf("Work already on main (verified by witness, polecat %s)", polecatName)
 		if err := bd.Run(workDir, "close", hookBead, "-r", reason); err != nil {
 			fmt.Fprintf(os.Stderr, "witness: failed to close bead %s (work already on main): %v\n", hookBead, err)

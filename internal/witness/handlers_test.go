@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -2482,8 +2483,8 @@ func TestResetAbandonedBead_ClosesWhenWorkOnMain(t *testing.T) {
 	h := newTestHandlers()
 	// When verifyCommitOnMain returns true, resetAbandonedBead should close the
 	// bead instead of resetting it for re-dispatch. This is the fix for #2036.
-	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) (bool, error) {
-		return true, nil // work is on main
+	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) guard.Result {
+		return guard.Pass() // work is on main
 	}
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
@@ -2525,8 +2526,8 @@ func TestResetAbandonedBead_ResetsWhenWorkNotOnMain(t *testing.T) {
 	h := newTestHandlers()
 	// When verifyCommitOnMain returns false, resetAbandonedBead should reset
 	// the bead for re-dispatch (existing behavior).
-	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) (bool, error) {
-		return false, nil // work NOT on main
+	h.verifyCommitOnMainFn = func(workDir, rigName, polecatName string) guard.Result {
+		return guard.Fail("work NOT on main")
 	}
 	bd, mock := mockBd(
 		func(args []string) (string, error) {
@@ -4535,7 +4536,7 @@ func TestRestartPolecatSessionPanicsWithoutFakeExecutor(t *testing.T) {
 // guarded on the dead polecat still holding the bead.
 func TestResetAbandonedBead_SurvivingWorkKeepsHook(t *testing.T) {
 	h := newTestHandlers()
-	h.verifyCommitOnMainFn = func(string, string, string) (bool, error) { return false, nil }
+	h.verifyCommitOnMainFn = func(string, string, string) guard.Result { return guard.Fail("not on main") }
 	for _, tc := range []struct {
 		name      string
 		branch    string

@@ -53,6 +53,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	configpkg "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -1201,38 +1202,55 @@ func doltProcessOwnerPath(townRoot string, pid int) string {
 	)
 }
 
+// ErrExpectedDatabasesUnreadable means VerifyServerDataDir could not list the
+// databases this town expects (an unreadable data directory), so the
+// served-databases comparison never ran. It is Unknown, not Pass — a caller
+// that carries on anyway, as the daemon and Start do because a restart cannot
+// fix an unreadable directory, decides that at its own call site.
+var ErrExpectedDatabasesUnreadable = errors.New("expected databases could not be listed")
+
 // VerifyServerDataDir checks whether the running Dolt server is serving the
-// expected databases from the correct data directory. Returns true if the server
-// is legitimate (serving databases from config.DataDir), false if it's an imposter
-// (e.g., started from a different data directory with different/empty databases).
-func VerifyServerDataDir(townRoot string) (bool, error) {
+// expected databases from the correct data directory. Returns guard.Result:
+// Pass when the server is legitimate (serving databases from config.DataDir,
+// or the town expects none to compare), Fail when it is an imposter (started
+// from a different data directory with different/empty databases), Unknown
+// when the check could not run — the server is not running, its databases
+// could not be queried, or the expected ones could not be listed (wrapping
+// ErrExpectedDatabasesUnreadable). gt-udrrw, gt-bfale.
+func VerifyServerDataDir(townRoot string) guard.Result {
 	config := DefaultConfig(townRoot)
 
 	// First check: inspect the state file for data-dir (ZFC fix: gt-utuk).
 	running, pid, err := IsRunning(townRoot)
-	if err != nil || !running {
-		return false, fmt.Errorf("server not running")
+	if err != nil {
+		return guard.Unknown(fmt.Errorf("checking whether server is running: %w", err))
+	}
+	if !running {
+		return guard.Unknown(fmt.Errorf("server not running"))
 	}
 
 	ownerPath := doltProcessOwnerPath(townRoot, pid)
 	if ownerPath != "" {
 		expectedDir, _ := filepath.Abs(config.DataDir)
 		if !doltProcessMatchesTown(townRoot, pid, config) {
-			return false, fmt.Errorf("server ownership mismatch: expected %s, got %s (PID %d)", expectedDir, ownerPath, pid)
+			return guard.Fail(fmt.Sprintf("server ownership mismatch: expected %s, got %s (PID %d)", expectedDir, ownerPath, pid))
 		}
-		return true, nil
+		return guard.Pass()
 	}
 
 	// No state file or PID mismatch — check served databases
 	fsDatabases, fsErr := ListDatabases(townRoot)
-	if fsErr != nil || len(fsDatabases) == 0 {
-		// Can't verify if no databases expected
-		return true, nil
+	if fsErr != nil {
+		return guard.Unknown(fmt.Errorf("%w: %w", ErrExpectedDatabasesUnreadable, fsErr))
+	}
+	if len(fsDatabases) == 0 {
+		// Nothing expected, so nothing to compare the server against.
+		return guard.Pass()
 	}
 
 	served, _, verifyErr := VerifyDatabases(townRoot)
 	if verifyErr != nil {
-		return false, fmt.Errorf("could not query server databases: %w", verifyErr)
+		return guard.Unknown(fmt.Errorf("could not query server databases: %w", verifyErr))
 	}
 
 	// If the server is serving none of our expected databases, it's an imposter
@@ -1246,11 +1264,11 @@ func VerifyServerDataDir(townRoot string) (bool, error) {
 			matchCount++
 		}
 	}
-	if matchCount == 0 && len(fsDatabases) > 0 {
-		return false, fmt.Errorf("server serves none of the expected %d databases — likely an imposter", len(fsDatabases))
+	if matchCount == 0 {
+		return guard.Fail(fmt.Sprintf("server serves none of the expected %d databases — likely an imposter", len(fsDatabases)))
 	}
 
-	return true, nil
+	return guard.Pass()
 }
 
 // KillImposters finds and kills any dolt sql-server process on the configured
@@ -1954,8 +1972,15 @@ func Start(townRoot string) error {
 		} else {
 			// Server is running with valid data dir — check if it's an imposter
 			// (e.g., bd launched its own dolt server from a different data directory).
-			legitimate, verifyErr := VerifyServerDataDir(townRoot)
-			if verifyErr == nil && !legitimate {
+			identity := VerifyServerDataDir(townRoot)
+			if identity.IsUnknown() && errors.Is(identity.Err(), ErrExpectedDatabasesUnreadable) {
+				// A restart cannot fix an unreadable data directory, so this
+				// one Unknown keeps the server rather than killing it — said
+				// out loud instead of read as Pass.
+				fmt.Fprintf(os.Stderr, "Warning: could not verify Dolt server identity, keeping it: %v\n", identity.Err())
+				identity = guard.Pass()
+			}
+			if identity.IsFail() {
 				fmt.Fprintf(os.Stderr, "Warning: running Dolt server (PID %d) is an imposter — killing and restarting\n", pid)
 				if killErr := KillImposters(townRoot); killErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to kill imposter: %v\n", killErr)
@@ -1965,9 +1990,9 @@ func Start(townRoot string) error {
 					fmt.Fprintf(os.Stderr, "Warning: port %d still occupied after imposter kill: %v\n", config.Port, err)
 				}
 				// Fall through to start a new server
-			} else if verifyErr != nil && !legitimate {
+			} else if identity.IsUnknown() {
 				// Verification failed but server is suspicious — log and try to kill
-				fmt.Fprintf(os.Stderr, "Warning: could not verify Dolt server identity: %v — killing and restarting\n", verifyErr)
+				fmt.Fprintf(os.Stderr, "Warning: could not verify Dolt server identity: %v — killing and restarting\n", identity.Err())
 				if killErr := KillImposters(townRoot); killErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to kill imposter: %v\n", killErr)
 				}
@@ -4278,12 +4303,17 @@ func GetHealthMetrics(townRoot string) *HealthMetrics {
 	metrics.DiskUsageHuman = formatBytes(diskBytes)
 
 	// 4. Read-only probe: attempt a test write
-	readOnly, _ := CheckReadOnly(townRoot)
-	metrics.ReadOnly = readOnly
-	if readOnly {
+	probe := CheckReadOnly(townRoot)
+	metrics.ReadOnly = probe.IsFail()
+	if probe.IsFail() {
 		metrics.Healthy = false
 		metrics.Warnings = append(metrics.Warnings,
 			"server is in READ-ONLY mode — requires restart to recover")
+	} else if probe.IsUnknown() && !errors.Is(probe.Err(), errNoProbeDatabase) {
+		// Not read-only as far as anyone can tell, but nobody could tell:
+		// ReadOnly=false must not read as a passed probe.
+		metrics.Warnings = append(metrics.Warnings,
+			fmt.Sprintf("read-only probe could not run: %v", probe.Err()))
 	}
 
 	// 5. Commit freshness: check the most recent commit across all databases.
@@ -4301,17 +4331,29 @@ func GetHealthMetrics(townRoot string) *HealthMetrics {
 	return metrics
 }
 
+// errNoProbeDatabase means CheckReadOnly had no database to aim its write
+// probe at. It is Unknown like any probe that could not run; RecoverReadOnly
+// names it as its one deliberate no-op.
+var errNoProbeDatabase = errors.New("no database to probe")
+
 // CheckReadOnly probes the Dolt server to detect read-only state by attempting
 // a test write. The server can enter read-only mode under concurrent write load
 // ("cannot update manifest: database is read only") and will NOT self-recover.
-// Returns (true, nil) if read-only, (false, nil) if writable, (false, err) on probe failure.
-func CheckReadOnly(townRoot string) (bool, error) {
+// Returns guard.Result: Pass if the server is writable, Fail if it is
+// read-only, Unknown if the probe could not run — no database to aim at, or
+// the write probe failed for some reason other than read-only. Unknown is not
+// "writable": a caller that acts only on Fail has decided that itself
+// (gt-udrrw, gt-bfale).
+func CheckReadOnly(townRoot string) guard.Result {
 	config := DefaultConfig(townRoot)
 
 	// Need a database to test writes against
 	databases, err := ListDatabases(townRoot)
-	if err != nil || len(databases) == 0 {
-		return false, nil // Can't probe without a database
+	if err != nil {
+		return guard.Unknown(fmt.Errorf("listing databases for write probe: %w", err))
+	}
+	if len(databases) == 0 {
+		return guard.Unknown(errNoProbeDatabase)
 	}
 
 	db := databases[0]
@@ -4332,12 +4374,12 @@ func CheckReadOnly(townRoot string) (bool, error) {
 	if err != nil {
 		msg := strings.TrimSpace(string(output))
 		if IsReadOnlyError(msg) {
-			return true, nil
+			return guard.Fail(msg)
 		}
-		return false, fmt.Errorf("write probe failed: %w (%s)", err, msg)
+		return guard.Unknown(fmt.Errorf("write probe failed: %w (%s)", err, msg))
 	}
 
-	return false, nil
+	return guard.Pass()
 }
 
 // IsReadOnlyError checks if an error message indicates a Dolt read-only state.
@@ -4355,12 +4397,13 @@ func IsReadOnlyError(msg string) bool {
 // it can call this to attempt recovery without waiting for the daemon's 30s loop.
 // Returns nil if recovery succeeded, an error if recovery failed or wasn't needed.
 func RecoverReadOnly(townRoot string) error {
-	readOnly, err := CheckReadOnly(townRoot)
-	if err != nil {
-		return fmt.Errorf("read-only probe failed: %w", err)
+	probe := CheckReadOnly(townRoot)
+	if probe.IsUnknown() && !errors.Is(probe.Err(), errNoProbeDatabase) {
+		return fmt.Errorf("read-only probe failed: %w", probe.Err())
 	}
-	if !readOnly {
-		return nil // Server is writable, no recovery needed
+	if !probe.IsFail() {
+		// Writable, or (errNoProbeDatabase) nothing to probe: no recovery needed.
+		return nil
 	}
 
 	fmt.Printf("Dolt server is in read-only mode, attempting recovery...\n")
@@ -4395,14 +4438,14 @@ func RecoverReadOnly(townRoot string) error {
 		}
 		time.Sleep(backoff)
 
-		readOnly, err = CheckReadOnly(townRoot)
-		if err != nil {
+		probe = CheckReadOnly(townRoot)
+		if probe.IsUnknown() {
 			if attempt == maxAttempts {
-				return fmt.Errorf("post-restart probe failed after %d attempts: %w", maxAttempts, err)
+				return fmt.Errorf("post-restart probe failed after %d attempts: %w", maxAttempts, probe.Err())
 			}
 			continue
 		}
-		if !readOnly {
+		if probe.IsPass() {
 			fmt.Printf("Dolt server recovered from read-only state\n")
 			return nil
 		}

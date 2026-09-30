@@ -22,6 +22,12 @@ import (
 func shouldDeferDispatch() (bool, error) {
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
+		// FindFromCwd errs only when the cwd itself is unreadable — "no
+		// town" is an empty root below. Reading that as "direct dispatch"
+		// would bypass a configured scheduler cap (gt-udrrw, gt-bfale).
+		return false, fmt.Errorf("finding town root: %w (dispatch blocked — run from a readable directory)", err)
+	}
+	if townRoot == "" {
 		return false, nil // No town — direct dispatch
 	}
 

@@ -32,6 +32,31 @@ func TestAreScheduledFailClosed(t *testing.T) {
 	}
 }
 
+// TestShouldDeferDispatchNoTownIsDirect pins the one case where an absent
+// answer legitimately means "direct dispatch": the cwd is readable and simply
+// not inside a town. It must not fall through to LoadOrCreateTownSettings
+// with an empty root, which would write settings/config.json into the cwd
+// (gt-udrrw, gt-bfale).
+func TestShouldDeferDispatchNoTownIsDirect(t *testing.T) {
+	tmpDir := t.TempDir()
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir to temp dir: %v", err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	deferred, err := shouldDeferDispatch()
+	if err != nil {
+		t.Fatalf("shouldDeferDispatch outside a town: unexpected error %v", err)
+	}
+	if deferred {
+		t.Error("shouldDeferDispatch outside a town = true, want false (direct dispatch)")
+	}
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "settings")); !os.IsNotExist(statErr) {
+		t.Errorf("shouldDeferDispatch wrote settings into the cwd (stat err = %v)", statErr)
+	}
+}
+
 // TestAreScheduledEmptyInput verifies areScheduled returns empty map for no input.
 func TestAreScheduledEmptyInput(t *testing.T) {
 	t.Parallel()

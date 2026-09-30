@@ -1122,7 +1122,11 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 		removedNames = append(removedNames, o.Name)
 
 		// Health check after each DROP to catch read-only early (gt-r1cyd)
-		if readOnly, _ := doltserver.CheckReadOnly(townRoot); readOnly {
+		probe := doltserver.CheckReadOnly(townRoot)
+		if probe.IsUnknown() {
+			fmt.Printf("  %s Read-only probe could not run: %v\n", style.Bold.Render("!"), probe.Err())
+		}
+		if probe.IsFail() {
 			fmt.Printf("  %s Server went read-only after DROP — attempting recovery...\n", style.Bold.Render("!"))
 			if recoverErr := doltserver.RecoverReadOnly(townRoot); recoverErr != nil {
 				fmt.Printf("  %s Recovery failed: %v\n", style.Bold.Render("✗"), recoverErr)

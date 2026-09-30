@@ -533,8 +533,8 @@ func canReuseInstallDoltServer(townRoot string, port int) bool {
 	if err != nil || len(databases) == 0 {
 		return false
 	}
-	legitimate, err := doltserver.VerifyServerDataDir(townRoot)
-	return err == nil && legitimate
+	// Unknown (a server that cannot be verified as this town's) is not a pass.
+	return doltserver.VerifyServerDataDir(townRoot).IsPass()
 }
 
 func useExternalTestDoltServer(port int) bool {
