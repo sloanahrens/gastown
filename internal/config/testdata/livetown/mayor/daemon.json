@@ -88,6 +88,10 @@
         "gastown"
       ]
     },
+    "quota_resume": {
+      "enabled": true,
+      "interval": "5m"
+    },
     "patrol_watchdog": {
       "enabled": true,
       "cadence": "30m",
