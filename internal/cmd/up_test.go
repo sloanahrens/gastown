@@ -5,8 +5,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -33,35 +31,6 @@ func TestAgentStartResult_Fields(t *testing.T) {
 	}
 	if result.detail != "gt-gastown-witness" {
 		t.Errorf("detail = %q, want %q", result.detail, "gt-gastown-witness")
-	}
-}
-
-func TestUpStartRefinerySkipsForkRig(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("mock tmux script uses POSIX shell")
-	}
-	townRoot := t.TempDir()
-	rigPath := filepath.Join(townRoot, "testrig")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatalf("mkdir rig: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"upstream_url":"https://github.com/upstream/repo"}`), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "tmux.log")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + logPath + "\"\ncase \"$1\" in has-session) exit 1 ;; *) exit 0 ;; esac\n"
-	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	result := upStartRefinery("testrig", &rig.Rig{Name: "testrig", Path: rigPath})
-	if !result.ok {
-		t.Fatalf("upStartRefinery ok = false, detail=%s", result.detail)
-	}
-	if !strings.Contains(result.detail, "fork-backed rig") {
-		t.Fatalf("detail = %q, want fork-backed skip", result.detail)
 	}
 }
 
@@ -176,7 +145,7 @@ func TestSemaphoreLimitsConcurrency(t *testing.T) {
 func TestStartRigAgentsWithPrefetch_EmptyRigs(t *testing.T) {
 	t.Parallel()
 	// Test with empty inputs
-	witnessResults, refineryResults := startRigAgentsWithPrefetch(
+	witnessResults := startRigAgentsWithPrefetch(
 		[]string{},
 		make(map[string]*rig.Rig),
 		make(map[string]error),
@@ -184,9 +153,6 @@ func TestStartRigAgentsWithPrefetch_EmptyRigs(t *testing.T) {
 
 	if len(witnessResults) != 0 {
 		t.Errorf("witnessResults should be empty, got %d entries", len(witnessResults))
-	}
-	if len(refineryResults) != 0 {
-		t.Errorf("refineryResults should be empty, got %d entries", len(refineryResults))
 	}
 }
 
@@ -197,7 +163,7 @@ func TestStartRigAgentsWithPrefetch_RecordsErrors(t *testing.T) {
 		"badrig": fmt.Errorf("rig not found"),
 	}
 
-	witnessResults, refineryResults := startRigAgentsWithPrefetch(
+	witnessResults := startRigAgentsWithPrefetch(
 		[]string{"badrig"},
 		make(map[string]*rig.Rig),
 		rigErrors,
@@ -210,15 +176,6 @@ func TestStartRigAgentsWithPrefetch_RecordsErrors(t *testing.T) {
 		t.Error("witnessResults should have badrig entry")
 	} else if result.ok {
 		t.Error("badrig witness result should not be ok")
-	}
-
-	if len(refineryResults) != 1 {
-		t.Errorf("refineryResults should have 1 entry, got %d", len(refineryResults))
-	}
-	if result, ok := refineryResults["badrig"]; !ok {
-		t.Error("refineryResults should have badrig entry")
-	} else if result.ok {
-		t.Error("badrig refinery result should not be ok")
 	}
 }
 

@@ -3332,7 +3332,6 @@ func TestParseAgentBeadID(t *testing.T) {
 		{"gt-my-rig-polecat-witness", "my-rig", "polecat", "witness", true},
 		// Collapsed form: prefix == rig (e.g., rig "ff" with prefix "ff")
 		{"ff-witness", "ff", "witness", "", true},                // collapsed rig-level singleton
-		{"ff-refinery", "ff", "refinery", "", true},              // collapsed rig-level singleton
 		{"ff-polecat-nux", "ff", "polecat", "nux", true},         // collapsed named agent
 		{"ff-crew-dave", "ff", "crew", "dave", true},             // collapsed named agent
 		{"ff-polecat-war-boy", "ff", "polecat", "war-boy", true}, // collapsed named with hyphen
@@ -3378,14 +3377,14 @@ func TestIsAgentSessionBead(t *testing.T) {
 		{"gt-mayor", true},
 		{"gt-deacon", true},
 		{"gt-gastown-witness", true},
-		{"gt-gastown-refinery", true},
+		{"gt-gastown-refinery", false}, // refinery role removed (gt-v4ssj.6)
 		{"gt-gastown-crew-joe", true},
 		{"gt-gastown-polecat-capable", true},
 		// Agent session beads with bd- prefix (should return true)
 		{"bd-mayor", true},
 		{"bd-deacon", true},
 		{"bd-beads-witness", true},
-		{"bd-beads-refinery", true},
+		{"bd-beads-refinery", false}, // refinery role removed (gt-v4ssj.6)
 		{"bd-beads-crew-joe", true},
 		{"bd-beads-polecat-pearl", true},
 		// Regular work beads (should return false)

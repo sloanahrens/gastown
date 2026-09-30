@@ -25,6 +25,10 @@ type DaemonPatrolConfig struct {
 
 // PatrolsConfig holds configuration for all patrols.
 type PatrolsConfig struct {
+	// Refinery is ignored: the refinery was deleted (gt-v4ssj.6) and the
+	// landing worker replaced it. It stays in the schema only so existing
+	// daemon.json files, which the kernel decodes strictly, still load.
+	// Deprecated: remove "patrols.refinery" from mayor/daemon.json.
 	Refinery             *PatrolConfig               `json:"refinery,omitempty"`
 	Witness              *PatrolConfig               `json:"witness,omitempty"`
 	Deacon               *PatrolConfig               `json:"deacon,omitempty"`
@@ -546,8 +550,6 @@ func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
 	switch name {
 	case "witness":
 		return p.Witness
-	case "refinery":
-		return p.Refinery
 	case "deacon":
 		return p.Deacon
 	case "handler":

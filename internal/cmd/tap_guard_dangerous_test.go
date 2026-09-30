@@ -779,7 +779,7 @@ func TestInPolecatSession(t *testing.T) {
 		{"GT_ROLE polecat and path marker agree", "gastown/polecats/flint", worktree, true},
 		{"GT_ROLE bare polecat", "polecat", "", true},
 		{"GT_ROLE crew beats a stale path marker", "gastown/crew/alice", worktree, false},
-		{"GT_ROLE refinery beats a stale path marker", "gastown/refinery", worktree, false},
+		{"GT_ROLE witness beats a stale path marker", "gastown/witness", worktree, false},
 		{"GT_ROLE mayor beats a stale path marker", "mayor", worktree, false},
 		{"GT_ROLE witness beats a stale path marker", "gastown/witness", worktree, false},
 		{"no GT_ROLE falls back to the path marker", "", worktree, true},
@@ -819,7 +819,7 @@ func TestPolecatMainPushReachesGuard(t *testing.T) {
 		{"GT_ROLE polecat", "gastown/polecats/flint", "", true},
 		{"GT_ROLE polecat and path marker agree", "gastown/polecats/flint", worktree, true},
 		{"path marker alone, no GT_ROLE", "", worktree, true},
-		{"refinery with a stale path marker", "gastown/refinery", worktree, false},
+		{"crew with a stale path marker", "gastown/crew/max", worktree, false},
 		{"crew with a stale path marker", "gastown/crew/alice", worktree, false},
 		{"neither signal", "", "", false},
 	}
@@ -1571,68 +1571,9 @@ func TestMatchesWitnessGitPush(t *testing.T) {
 	}
 }
 
-// TestMatchesRefineryRawNotesPush: a refinery session pushing refs/notes/
-// directly is blocked, whatever the remote or the exact refspec form,
-// including the --all/--mirror forms that carry refs/notes/om implicitly;
-// the same commands pass for a non-refinery session, and an ordinary branch
-// push from a refinery is untouched (gt-qhhlr). This does not cover a
-// compound command that runs git push after another program's own tokens
-// (e.g. `echo x && git push ...`) — that gap is pre-existing shared
-// behavior in inCommandPosition, not specific to this guard.
-func TestMatchesRefineryRawNotesPush(t *testing.T) {
-	t.Parallel()
-	blocked := []string{
-		"git push origin refs/notes/om",
-		"git push origin refs/notes/om:refs/notes/om",
-		"git push upstream refs/notes/om --force",
-		"git -C /x push origin refs/notes/om",
-		"timeout 60 git push origin refs/notes/om",
-		"git push origin --all",
-		"git push origin --mirror",
-	}
-	allowed := []string{
-		"git push origin main",
-		"git push origin polecat/slate/gt-nkyy+x",
-		"git fetch origin refs/notes/om:refs/notes/om",
-		"git log --oneline refs/notes/om",
-		"echo git push origin refs/notes/om",
-	}
-	for _, c := range blocked {
-		reason, alt := matchesRefineryRawNotesPush(shellTokenize(c), true)
-		if reason == "" || alt == "" {
-			t.Errorf("refinery notes push not blocked (or no alternative): %q", c)
-		}
-		if reason, _ := matchesRefineryRawNotesPush(shellTokenize(c), false); reason != "" {
-			t.Errorf("non-refinery command blocked by the refinery notes rule: %q", c)
-		}
-	}
-	for _, c := range allowed {
-		if reason, _ := matchesRefineryRawNotesPush(shellTokenize(c), true); reason != "" {
-			t.Errorf("refinery command wrongly blocked: %q (%s)", c, reason)
-		}
-	}
-}
-
 // Through evaluateDangerousCommand with the role taken from GT_ROLE, as the
-// hook sees it: a refinery pushing refs/notes/om directly is blocked, but
-// its ordinary branch pushes are not (gt-qhhlr).
-func TestRefineryRawNotesPushReachesGuard(t *testing.T) {
-	t.Setenv("GT_ROLE", "gastown/refinery")
-	if reason, _ := evaluateDangerousCommand("git push origin refs/notes/om", 0, ""); reason != refineryRawNotesPushReason {
-		t.Errorf("refinery notes push: reason = %q, want %q", reason, refineryRawNotesPushReason)
-	}
-	if reason, _ := evaluateDangerousCommand("git push origin main", 0, ""); reason != "" {
-		t.Errorf("refinery branch push blocked: %q", reason)
-	}
-	t.Setenv("GT_ROLE", "gastown/polecats/slate")
-	if reason, _ := evaluateDangerousCommand("git push origin refs/notes/om", 0, ""); reason != "" {
-		t.Errorf("non-refinery notes push blocked: %q", reason)
-	}
-}
-
-// Through evaluateDangerousCommand with the role taken from GT_ROLE, as the
-// hook sees it: the witness is blocked, a polecat pushing its own branch and
-// a refinery are not.
+// hook sees it: the witness is blocked, a polecat pushing its own branch is
+// not.
 func TestWitnessGitPushReachesGuard(t *testing.T) {
 	cmd := "git push origin polecat/slate/gt-nkyy+x --force-with-lease=polecat/slate/gt-nkyy+x:8fdf345"
 	t.Setenv("GT_POLECAT_PATH", "")
@@ -1643,10 +1584,6 @@ func TestWitnessGitPushReachesGuard(t *testing.T) {
 	t.Setenv("GT_ROLE", "gastown/polecats/slate")
 	if reason, _ := evaluateDangerousCommand(cmd, 0, ""); reason != "" {
 		t.Errorf("polecat own-branch push blocked: %q", reason)
-	}
-	t.Setenv("GT_ROLE", "gastown/refinery")
-	if reason, _ := evaluateDangerousCommand(cmd, 0, ""); reason != "" {
-		t.Errorf("refinery push blocked: %q", reason)
 	}
 }
 

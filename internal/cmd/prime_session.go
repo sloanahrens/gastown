@@ -310,7 +310,7 @@ func emitSessionEvent(ctx RoleContext) {
 
 	// Determine topic from hook state or default
 	topic := ""
-	if ctx.Role == RoleWitness || ctx.Role == RoleRefinery || ctx.Role == RoleDeacon {
+	if ctx.Role == RoleWitness || ctx.Role == RoleDeacon {
 		topic = "patrol"
 	}
 

@@ -9,7 +9,6 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/style"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -32,14 +31,6 @@ func patrolConfigForRole(ctx RoleContext) (PatrolConfig, bool) {
 			BeadsDir:      ctx.TownRoot,
 			Assignee:      patrolAssignee("witness", ctx.Rig),
 			ExtraVars:     buildWitnessPatrolVars(ctx),
-		}, true
-	case RoleRefinery:
-		return PatrolConfig{
-			RoleName:      "refinery",
-			PatrolMolName: constants.MolRefineryPatrol,
-			BeadsDir:      ctx.TownRoot,
-			Assignee:      patrolAssignee("refinery", ctx.Rig),
-			ExtraVars:     buildRefineryPatrolVars(ctx),
 		}, true
 	case RoleDeacon:
 		return PatrolConfig{
@@ -72,10 +63,6 @@ type patrolSuspend struct {
 	unreadable error
 }
 
-// refineryActiveSafetyStopFn is a seam so tests can drive the precheck
-// deterministically instead of depending on a live bd binary.
-var refineryActiveSafetyStopFn = refinery.ActiveSafetyStop
-
 // patrolSuspended reports whether this patrol role's patrol is suspended right
 // now. An empty reason means the role should be running a patrol.
 func patrolSuspended(ctx RoleContext) patrolSuspend {
@@ -97,27 +84,6 @@ func patrolSuspended(ctx RoleContext) patrolSuspend {
 		}
 		if stopped, why := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
 			return patrolSuspend{reason: fmt.Sprintf("Rig %s is %s", ctx.Rig, why)}
-		}
-	case RoleRefinery:
-		// A wisp seeded without a rig carries the assignee "/refinery", which
-		// nothing looks up: the rig has to be known before one is created.
-		if ctx.Rig == "" {
-			return patrolSuspend{reason: "No rig resolved for this refinery session"}
-		}
-		if stopped, why := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
-			return patrolSuspend{reason: fmt.Sprintf("Rig %s is %s", ctx.Rig, why)}
-		}
-		stop, err := refineryActiveSafetyStopFn(ctx.TownRoot, ctx.Rig)
-		if err != nil {
-			return patrolSuspend{
-				reason:     fmt.Sprintf("Refinery %s safety stop unreadable (%v)", ctx.Rig, err),
-				unreadable: err,
-			}
-		}
-		if stop != nil {
-			return patrolSuspend{
-				reason: fmt.Sprintf("Refinery %s is %s", ctx.Rig, stop.Reason()),
-			}
 		}
 	}
 	return patrolSuspend{}
@@ -216,11 +182,6 @@ func ensurePrimePatrol(ctx RoleContext) (primePatrolStatus, error) {
 	}
 
 	patrolID, err = spawnPatrolFn(cfg)
-	if errors.Is(err, refinery.ErrSafetyStopped) {
-		// The stop landed between the check above and the spawn.
-		status.Suspended = err.Error()
-		return status, nil
-	}
 	if patrolID == "" {
 		// Confirmed: no live patrol exists and seeding one produced nothing to
 		// hook onto. This is the one path prime must fail loudly over.

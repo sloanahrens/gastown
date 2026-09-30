@@ -352,33 +352,10 @@ func (h *handlers) handlePolecatDonePendingMR(bd *BdCli, workDir, rigName string
 		return result
 	}
 
-	h.notifyRefineryMergeReady(workDir, rigName, result)
-
 	result.Handled = true
 	result.WispCreated = wispID
-	result.Action = fmt.Sprintf("deferred cleanup for %s (pending MR=%s, nudged refinery)", payload.PolecatName, payload.MRID)
+	result.Action = fmt.Sprintf("deferred cleanup for %s (pending MR=%s)", payload.PolecatName, payload.MRID)
 	return result
-}
-
-// notifyRefineryMergeReady emits a MERGE_READY channel event and nudges the
-// Refinery to check the merge queue. The channel event unblocks the refinery's
-// await-event loop instantly; the tmux nudge is a belt-and-suspenders fallback
-// for when the refinery is at the Claude prompt rather than in await-event.
-// Errors are non-fatal (Refinery will still pick up work on next patrol cycle).
-func (h *handlers) notifyRefineryMergeReady(workDir, rigName string, result *HandlerResult) {
-	townRoot, _ := workspace.Find(workDir)
-	// Emit file-based event so refinery's await-event unblocks instantly.
-	if townRoot != "" {
-		_, _ = channelevents.EmitToTown(townRoot, "refinery", rigName, "MERGE_READY", []string{
-			"source=witness",
-			"rig=" + rigName,
-		})
-	}
-	if nudgeErr := h.nudgeRefinery(townRoot, rigName); nudgeErr != nil {
-		if result.Error == nil {
-			result.Error = fmt.Errorf("nudging refinery: %w (non-fatal)", nudgeErr)
-		}
-	}
 }
 
 // handlePolecatDoneNoMR handles a POLECAT_DONE with no pending MR.
@@ -742,40 +719,6 @@ func findMRBeadForBranch(bd *BdCli, workDir, branch string) string {
 		}
 	}
 	return ""
-}
-
-// _nudgeRefinery wakes the refinery session to check the merge queue.
-// Uses immediate delivery: sends directly to the tmux pane.
-// No cooperative queue — idle agents never call Drain(), so queued
-// nudges would be stuck forever. Direct delivery is safe: if the
-// agent is busy, text buffers in tmux and is processed at next prompt.
-//
-// Tests fake it through handlers.nudgeRefineryFn to get a real failure — a
-// fake tmux binary can't easily produce one, since HasSession's ErrNoServer
-// handling collapses "no server at all" into (false, nil) before
-// NudgeSession is ever attempted (gt-mf5q review).
-func _nudgeRefinery(townRoot, rigName string) error {
-	initRegistryFromTownRoot(townRoot)
-	sessionName := session.RefinerySessionName(session.PrefixFor(rigName))
-
-	// Check if refinery is running
-	t := tmux.NewTmux()
-	running, err := t.HasSession(sessionName)
-	if err != nil {
-		return fmt.Errorf("checking refinery session: %w", err)
-	}
-
-	if !running {
-		// Refinery not running - daemon will start it on next heartbeat.
-		// MR beads are discoverable from the merge queue.
-		return nil
-	}
-
-	// Immediate delivery: send directly to tmux pane.
-	// No cooperative queue — idle agents never call Drain(), so queued
-	// nudges would be stuck forever. Direct delivery is safe: if the
-	// agent is busy, text buffers in tmux and is processed at next prompt.
-	return t.NudgeSession(sessionName, "New MR available - check merge queue for pending work")
 }
 
 func defaultSlotOpenRecoveryCheck(workDir, rigName, polecatName string) (string, error) {
@@ -3101,25 +3044,13 @@ func (h *handlers) processDiscoveredCompletion(bd *BdCli, workDir, rigName strin
 			discovery.Error = fmt.Errorf("updating wisp state: %w", err)
 		}
 
-		// Nudge refinery to check merge queue (no permanent mail needed). A
-		// nudge failure is non-fatal and must NOT block clearing completion
-		// metadata: the wisp above is already created and tracked, so
-		// leaving metadata set would only cause this completion to be
-		// rediscovered — and re-idempotency-checked into a retry of the
-		// state update, not the nudge specifically — on the next cycle.
-		townRoot, _ := workspace.Find(workDir)
-		nudgeErr := h.nudgeRefinery(townRoot, rigName)
-
-		verb := "merge-ready-nudged"
+		verb := "merge-ready"
 		if !isNew {
 			verb = "already-tracked"
 		}
 		discovery.Action = fmt.Sprintf("%s (MR=%s, wisp=%s)", verb, payload.MRID, wispID)
 		if len(closedDups) > 0 {
 			discovery.Action += fmt.Sprintf(", closed-dup=%s", strings.Join(closedDups, ","))
-		}
-		if nudgeErr != nil {
-			discovery.Action += fmt.Sprintf(", nudge-failed=%v", nudgeErr)
 		}
 
 		// Notify Mayor that a slot is open even with pending MR — polecat is idle. (GH#2727)

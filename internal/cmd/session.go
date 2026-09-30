@@ -315,7 +315,7 @@ func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error
 type sessionSeat struct {
 	Rig  string
 	Name string
-	// Role is constants.RolePolecat, RoleWitness or RoleRefinery — what <name>
+	// Role is constants.RolePolecat or RoleWitness — what <name>
 	// is in that rig.
 	Role string
 	Mgr  *polecat.SessionManager
@@ -363,7 +363,7 @@ func resolveSessionSeat(args []string) (sessionSeat, error) {
 // alone and are checked against the rig instead (resolveSessionSeat).
 func sessionRoleForName(name string) string {
 	switch name {
-	case constants.RoleWitness, constants.RoleRefinery:
+	case constants.RoleWitness:
 		return name
 	default:
 		return constants.RolePolecat

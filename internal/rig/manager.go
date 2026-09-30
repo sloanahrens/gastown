@@ -1467,12 +1467,6 @@ func (m *Manager) initAgentBeads(rigPath, rigName, prefix string) error {
 			rig:      rigName,
 			desc:     fmt.Sprintf("Witness for %s - monitors polecat health and progress.", rigName),
 		},
-		{
-			id:       beads.RefineryBeadIDWithPrefix(prefix, rigName),
-			roleType: "refinery",
-			rig:      rigName,
-			desc:     fmt.Sprintf("Refinery for %s - processes merge queue.", rigName),
-		},
 	}
 
 	// Note: Mayor and Deacon are now created by gt install in town beads.

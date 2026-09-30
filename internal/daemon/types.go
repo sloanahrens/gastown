@@ -290,10 +290,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	}
 
 	switch patrol {
-	case constants.RoleRefinery:
-		if config.Patrols.Refinery != nil {
-			return config.Patrols.Refinery.Enabled
-		}
 	case constants.RoleWitness:
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Enabled
@@ -317,10 +313,6 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 	}
 
 	switch patrol {
-	case constants.RoleRefinery:
-		if config.Patrols.Refinery != nil {
-			return config.Patrols.Refinery.Rigs
-		}
 	case constants.RoleWitness:
 		if config.Patrols.Witness != nil {
 			return config.Patrols.Witness.Rigs

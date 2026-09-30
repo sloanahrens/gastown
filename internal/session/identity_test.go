@@ -64,19 +64,21 @@ func TestParseSessionName(t *testing.T) {
 			wantName: "my-dog",
 		},
 
-		// Rig prefix "hq" collision: hq-refinery/hq-witness/hq-<polecat>
+		// Rig prefix "hq" collision: hq-witness/hq-<polecat>
 		// should resolve as rig-level roles when "hq" is a registered prefix.
+		{
+			// Refinery role removed (gt-v4ssj.6): no longer parses as refinery.
+			name:       "refinery session parses as polecat",
+			session:    "gt-refinery",
+			wantRole:   RolePolecat,
+			wantRig:    "gastown",
+			wantName:   "refinery",
+			wantPrefix: "gt",
+		},
 		{
 			name:       "hq prefix witness",
 			session:    "hq-witness",
 			wantRole:   RoleWitness,
-			wantRig:    "knjn",
-			wantPrefix: "hq",
-		},
-		{
-			name:       "hq prefix refinery",
-			session:    "hq-refinery",
-			wantRole:   RoleRefinery,
 			wantRig:    "knjn",
 			wantPrefix: "hq",
 		},
@@ -118,22 +120,6 @@ func TestParseSessionName(t *testing.T) {
 			wantRole:   RoleWitness,
 			wantRig:    "hop",
 			wantPrefix: "hop",
-		},
-
-		// Refinery (new format: <prefix>-refinery)
-		{
-			name:       "refinery gastown",
-			session:    "gt-refinery",
-			wantRole:   RoleRefinery,
-			wantRig:    "gastown",
-			wantPrefix: "gt",
-		},
-		{
-			name:       "refinery multi-word prefix",
-			session:    "mp-refinery",
-			wantRole:   RoleRefinery,
-			wantRig:    "my-project",
-			wantPrefix: "mp",
 		},
 
 		// Crew (new format: <prefix>-crew-<name>)
@@ -272,11 +258,6 @@ func TestAgentIdentity_SessionName(t *testing.T) {
 			want:     "gt-witness",
 		},
 		{
-			name:     "refinery",
-			identity: AgentIdentity{Role: RoleRefinery, Rig: "beads", Prefix: "bd"},
-			want:     "bd-refinery",
-		},
-		{
 			name:     "crew",
 			identity: AgentIdentity{Role: RoleCrew, Rig: "gastown", Name: "max", Prefix: "gt"},
 			want:     "gt-crew-max",
@@ -329,11 +310,6 @@ func TestAgentIdentity_Address(t *testing.T) {
 			want:     "gastown/witness",
 		},
 		{
-			name:     "refinery",
-			identity: AgentIdentity{Role: RoleRefinery, Rig: "my-project", Prefix: "mp"},
-			want:     "my-project/refinery",
-		},
-		{
 			name:     "crew",
 			identity: AgentIdentity{Role: RoleCrew, Rig: "gastown", Name: "max", Prefix: "gt"},
 			want:     "gastown/crew/max",
@@ -371,13 +347,11 @@ func TestParseSessionName_RoundTrip(t *testing.T) {
 		"hq-deacon",
 		"hq-dog-alpha",
 		"gt-witness",
-		"bd-refinery",
 		"gt-crew-max",
 		"gt-morsov",
 		"hop-ostrom",
 		"sky-furiosa",
 		"hq-witness",
-		"hq-refinery",
 		"hq-jasper",
 		"hq-crew-rushd",
 	}
@@ -418,9 +392,11 @@ func TestParseAddress(t *testing.T) {
 			want:    AgentIdentity{Role: RoleWitness, Rig: "gastown", Prefix: PrefixFor("gastown")},
 		},
 		{
-			name:    "refinery",
+			// Refinery role removed (gt-v4ssj.6): "<rig>/refinery" is now
+			// just a polecat that happens to be named "refinery".
+			name:    "refinery is no longer a role",
 			address: "rig-a/refinery",
-			want:    AgentIdentity{Role: RoleRefinery, Rig: "rig-a", Prefix: PrefixFor("rig-a")},
+			want:    AgentIdentity{Role: RolePolecat, Rig: "rig-a", Name: "refinery", Prefix: PrefixFor("rig-a")},
 		},
 		{
 			name:    "crew",

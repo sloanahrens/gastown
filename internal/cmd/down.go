@@ -178,26 +178,6 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Phase 1: Stop refineries
-	for _, rigName := range rigs {
-		sessionName := session.RefinerySessionName(session.PrefixFor(rigName))
-		if downDryRun {
-			if running, _ := t.HasSession(sessionName); running {
-				printDownStatus(fmt.Sprintf("Refinery (%s)", rigName), true, "would stop")
-			}
-			continue
-		}
-		wasRunning, err := stopSession(t, sessionName)
-		if err != nil {
-			printDownStatus(fmt.Sprintf("Refinery (%s)", rigName), false, err.Error())
-			allOK = false
-		} else if wasRunning {
-			printDownStatus(fmt.Sprintf("Refinery (%s)", rigName), true, "stopped")
-		} else {
-			printDownStatus(fmt.Sprintf("Refinery (%s)", rigName), true, "not running")
-		}
-	}
-
 	// Phase 2: Stop witnesses
 	for _, rigName := range rigs {
 		sessionName := session.WitnessSessionName(session.PrefixFor(rigName))

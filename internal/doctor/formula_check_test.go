@@ -124,7 +124,7 @@ func TestFormulaCheck_Run_HandEditedIsAWarning(t *testing.T) {
 	}
 
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	edited := "mol-refinery-patrol.formula.toml"
+	edited := "mol-witness-patrol.formula.toml"
 	editedPath := filepath.Join(formulasDir, edited)
 	if err := os.WriteFile(editedPath, []byte("# hand-edited\n"), 0o644); err != nil {
 		t.Fatal(err)

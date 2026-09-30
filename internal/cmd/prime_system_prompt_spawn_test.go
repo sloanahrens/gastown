@@ -19,7 +19,6 @@ func newSpawnRenderTown(t *testing.T, rigName, polecat string) (town, rigPath st
 	for _, d := range []string{
 		filepath.Join(rigPath, "polecats", polecat, rigName),
 		filepath.Join(rigPath, "witness"),
-		filepath.Join(rigPath, "refinery", "rig"),
 		filepath.Join(town, "mayor"),
 		filepath.Join(town, "deacon"),
 	} {
@@ -82,7 +81,6 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 		{"polecat", "nux", RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: filepath.Join(rigPath, "polecats", "nux", "myrig")}},
 		{"crew", "sloan", RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "sloan", TownRoot: town, WorkDir: filepath.Join(rigPath, "crew", "sloan")}},
 		{"witness", "", RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: town, WorkDir: filepath.Join(rigPath, "witness")}},
-		{"refinery", "", RoleContext{Role: RoleRefinery, Rig: "myrig", TownRoot: town, WorkDir: filepath.Join(rigPath, "refinery", "rig")}},
 		{"mayor", "", RoleContext{Role: RoleMayor, TownRoot: town, WorkDir: filepath.Join(town, "mayor")}},
 		{"deacon", "", RoleContext{Role: RoleDeacon, TownRoot: town, WorkDir: filepath.Join(town, "deacon")}},
 		// gt prime inside a dog session derives the dog from its kennel cwd
@@ -120,7 +118,6 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 		{"polecat", "nux", filepath.Join(rigPath, "polecats", "nux", "myrig")},
 		{"crew", "sloan", filepath.Join(rigPath, "crew", "sloan")},
 		{"witness", "", filepath.Join(rigPath, "witness")},
-		{"refinery", "", filepath.Join(rigPath, "refinery", "rig")},
 		{"mayor", "", filepath.Join(town, "mayor")},
 		{"deacon", "", filepath.Join(town, "deacon")},
 		{"dog", "alpha", filepath.Join(town, "deacon", "dogs", "alpha")},

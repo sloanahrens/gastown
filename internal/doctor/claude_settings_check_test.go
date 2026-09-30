@@ -509,36 +509,6 @@ func TestClaudeSettingsCheck_WrongLocationWitness(t *testing.T) {
 	}
 }
 
-func TestClaudeSettingsCheck_WrongLocationRefinery(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-
-	// Create stale settings.local.json at refinery parent dir (old filename, wrong)
-	// The correct file is refinery/.claude/settings.json
-	wrongSettings := filepath.Join(tmpDir, rigName, "refinery", ".claude", "settings.local.json")
-	createValidSettings(t, wrongSettings)
-
-	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-
-	result := check.Run(ctx)
-
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError for wrong location, got %v", result.Status)
-	}
-	found := false
-	for _, d := range result.Details {
-		if strings.Contains(d, "wrong location") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected details to mention wrong location, got %v", result.Details)
-	}
-}
-
 func TestClaudeSettingsCheck_MultipleStaleFiles(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -1247,43 +1217,6 @@ func TestClaudeSettingsCheck_MissingWitnessSettings(t *testing.T) {
 	}
 }
 
-func TestClaudeSettingsCheck_MissingRefinerySettings(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-
-	// Create refinery directory but NOT the settings.json at refinery/.claude/
-	refineryDir := filepath.Join(tmpDir, rigName, "refinery")
-	if err := os.MkdirAll(refineryDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-
-	result := check.Run(ctx)
-
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError for missing refinery settings, got %v", result.Status)
-	}
-
-	// Verify the staleSettings entry has missingFile set to true
-	if len(check.staleSettings) != 1 {
-		t.Fatalf("expected 1 stale setting, got %d", len(check.staleSettings))
-	}
-	if !check.staleSettings[0].missingFile {
-		t.Error("expected missingFile to be true for missing refinery settings")
-	}
-	if check.staleSettings[0].agentType != "refinery" {
-		t.Errorf("expected agentType 'refinery', got %q", check.staleSettings[0].agentType)
-	}
-
-	// Should include hint about restarting agents
-	if !strings.Contains(result.FixHint, "restart") {
-		t.Errorf("expected fix hint to mention restart, got %q", result.FixHint)
-	}
-}
-
 func TestClaudeSettingsCheck_MissingCrewSettings(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -1356,7 +1289,6 @@ func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
 	// Create multiple role directories without settings.json at parent level
 	dirs := []string{
 		filepath.Join(tmpDir, rigName, "witness"),
-		filepath.Join(tmpDir, rigName, "refinery"),
 		filepath.Join(tmpDir, rigName, "crew"),
 	}
 	for _, dir := range dirs {
@@ -1374,9 +1306,9 @@ func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
 		t.Errorf("expected StatusError for missing settings, got %v", result.Status)
 	}
 
-	// Should report 3 missing files
-	if len(check.staleSettings) != 3 {
-		t.Errorf("expected 3 stale settings, got %d", len(check.staleSettings))
+	// Should report 2 missing files
+	if len(check.staleSettings) != 2 {
+		t.Errorf("expected 2 stale settings, got %d", len(check.staleSettings))
 	}
 
 	// All should have missingFile set to true
@@ -1387,8 +1319,8 @@ func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
 	}
 
 	// Message should mention multiple agents
-	if !strings.Contains(result.Message, "3") {
-		t.Errorf("expected message to mention 3 agents, got %q", result.Message)
+	if !strings.Contains(result.Message, "2") {
+		t.Errorf("expected message to mention 2 agents, got %q", result.Message)
 	}
 }
 
@@ -1401,9 +1333,9 @@ func TestClaudeSettingsCheck_MixedMissingAndStale(t *testing.T) {
 	witnessSettings := filepath.Join(tmpDir, rigName, "witness", ".claude", "settings.json")
 	createValidSettings(t, witnessSettings)
 
-	// Create refinery directory without settings (missing)
-	refineryDir := filepath.Join(tmpDir, rigName, "refinery")
-	if err := os.MkdirAll(refineryDir, 0755); err != nil {
+	// Create crew directory without settings (missing)
+	crewDir := filepath.Join(tmpDir, rigName, "crew")
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1423,7 +1355,7 @@ func TestClaudeSettingsCheck_MixedMissingAndStale(t *testing.T) {
 	// Should have 3 issues:
 	// 1. mayor stale settings.local.json (wrongLocation)
 	// 2. mayor missing settings.json (reported separately from stale)
-	// 3. refinery missing settings.json
+	// 3. crew missing settings.json
 	if len(check.staleSettings) != 3 {
 		t.Errorf("expected 3 stale settings, got %d: %+v", len(check.staleSettings), check.staleSettings)
 	}

@@ -366,7 +366,6 @@ func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
 	t.Helper()
 	town := t.TempDir()
 	writeDaemonTownFile(t, town, "testrig/config.json", `{"beads":{"prefix":"gt"}}`)
-	writeDaemonTownFile(t, town, "events/refinery/testrig/pending.event", "{}")
 	binDir := t.TempDir()
 	writeDaemonNoSafetyStopMockBD(t, binDir, filepath.Join(binDir, "bd.log"))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -385,12 +384,11 @@ func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
 }
 
 // Unknown is never acted on (G1-09): a tmux that cannot answer starts no
-// witness, refinery or mayor.
+// witness or mayor.
 func TestEnsurePaths_UnknownStartsNothing(t *testing.T) {
 	for name, ensure := range map[string]func(*Daemon){
-		"witness":  func(d *Daemon) { d.ensureWitnessRunning("testrig") },
-		"refinery": func(d *Daemon) { d.ensureRefineryRunning("testrig") },
-		"mayor":    func(d *Daemon) { d.ensureMayorRunning() },
+		"witness": func(d *Daemon) { d.ensureWitnessRunning("testrig") },
+		"mayor":   func(d *Daemon) { d.ensureMayorRunning() },
 	} {
 		t.Run(name, func(t *testing.T) {
 			d, buf, restarts := unknownTmuxDaemon(t)

@@ -156,8 +156,6 @@ func (a *agentAddr) roleAndName() (string, string) {
 	switch a.Role {
 	case session.RoleWitness:
 		return constants.RoleWitness, ""
-	case session.RoleRefinery:
-		return constants.RoleRefinery, ""
 	case session.RoleCrew:
 		return constants.RoleCrew, a.Name
 	case session.RolePolecat:

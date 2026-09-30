@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/formula"
-	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -333,8 +331,8 @@ func truncateDescription(desc string, maxLen int) string {
 // call (empty for a dry run, which skips it); the patrol branches render from
 // it instead of re-running discovery and seeding a second time (gt-e1ie).
 func outputMoleculeContext(ctx RoleContext, patrolStatus primePatrolStatus) {
-	// Applies to polecats, crew workers, deacon, witness, and refinery
-	if ctx.Role != RolePolecat && ctx.Role != RoleCrew && ctx.Role != RoleDeacon && ctx.Role != RoleWitness && ctx.Role != RoleRefinery {
+	// Applies to polecats, crew workers, deacon, and witness
+	if ctx.Role != RolePolecat && ctx.Role != RoleCrew && ctx.Role != RoleDeacon && ctx.Role != RoleWitness {
 		return
 	}
 
@@ -347,12 +345,6 @@ func outputMoleculeContext(ctx RoleContext, patrolStatus primePatrolStatus) {
 	// For Witness, use special patrol molecule handling (auto-bonds on startup)
 	if ctx.Role == RoleWitness {
 		outputWitnessPatrolContext(ctx, patrolStatus)
-		return
-	}
-
-	// For Refinery, use special patrol molecule handling (auto-bonds on startup)
-	if ctx.Role == RoleRefinery {
-		outputRefineryPatrolContext(ctx, patrolStatus)
 		return
 	}
 
@@ -398,24 +390,6 @@ func outputWitnessPatrolContext(ctx RoleContext, status primePatrolStatus) {
 	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig, cfg.ExtraVars)
 }
 
-// outputRefineryPatrolContext shows patrol molecule status for the Refinery.
-// Refinery AUTO-BONDS its patrol molecule on startup if one isn't already running.
-func outputRefineryPatrolContext(ctx RoleContext, status primePatrolStatus) {
-	if status.Role == "" {
-		return
-	}
-	if status.Suspended != "" || status.PrecheckUncertain {
-		outputPatrolSuspended(status)
-		return
-	}
-	cfg := status.Config
-	cfg.HeaderEmoji = "🔧"
-	cfg.HeaderTitle = "Refinery Patrol Status"
-	cfg.WorkLoopSteps = patrolWorkLoopSteps(cfg.RoleName)
-	outputPatrolContext(cfg, status)
-	showFormulaStepsFull(constants.MolRefineryPatrol, ctx.TownRoot, ctx.Rig, cfg.ExtraVars)
-}
-
 // outputPatrolSuspended reports an operator stop, or an operator-stop check
 // that itself could not be confirmed (PrecheckUncertain) — both withhold the
 // checklist: whether a patrol should even run is unknown in either case, not
@@ -443,99 +417,6 @@ func buildWitnessPatrolVars(ctx RoleContext) []string {
 	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
 	prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
 	vars = append(vars, fmt.Sprintf("prefix=%s", prefix))
-	return vars
-}
-
-// buildRefineryPatrolVars loads rig MQ settings and returns --var key=value
-// strings for the refinery patrol formula.
-func buildRefineryPatrolVars(ctx RoleContext) []string {
-	var vars []string
-	if ctx.TownRoot == "" || ctx.Rig == "" {
-		return vars
-	}
-	rigPath := filepath.Join(ctx.TownRoot, ctx.Rig)
-
-	// Always inject target_branch from rig config — this is independent of
-	// merge queue settings and must not be gated behind MQ existence.
-	// Without this, rigs with no settings/config.json or no merge_queue
-	// section get the formula default ("main") instead of their configured
-	// default_branch.
-	defaultBranch := "main"
-	rigCfg, err := rig.LoadRigConfig(rigPath)
-	if err == nil && rigCfg != nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
-	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
-	vars = append(vars, fmt.Sprintf("target_branch=%s", defaultBranch))
-
-	// MQ-specific vars: resolved across rig root -> repo -> rig-local (gt-egiv),
-	// the same precedence every gate-command call site must use. Falls back to
-	// the layered rig config (bead labels / wisp layer) below if nothing resolves.
-	mq := rig.ResolveMergeQueueConfig(ctx.TownRoot, ctx.Rig)
-	if mq != nil {
-		vars = append(vars, fmt.Sprintf("integration_branch_refinery_enabled=%t", mq.IsRefineryIntegrationEnabled()))
-		vars = append(vars, fmt.Sprintf("integration_branch_auto_land=%t", mq.IsIntegrationBranchAutoLandEnabled()))
-		vars = append(vars, fmt.Sprintf("run_tests=%t", mq.IsRunTestsEnabled()))
-		if mq.SetupCommand != "" {
-			vars = append(vars, fmt.Sprintf("setup_command=%s", mq.SetupCommand))
-		}
-		if mq.TypecheckCommand != "" {
-			vars = append(vars, fmt.Sprintf("typecheck_command=%s", mq.TypecheckCommand))
-		}
-		if mq.LintCommand != "" {
-			vars = append(vars, fmt.Sprintf("lint_command=%s", mq.LintCommand))
-		}
-		if mq.TestCommand != "" {
-			vars = append(vars, fmt.Sprintf("test_command=%s", mq.TestCommand))
-		}
-		if mq.BuildCommand != "" {
-			vars = append(vars, fmt.Sprintf("build_command=%s", mq.BuildCommand))
-		}
-		vars = append(vars, fmt.Sprintf("delete_merged_branches=%t", mq.IsDeleteMergedBranchesEnabled()))
-		vars = append(vars, fmt.Sprintf("judgment_enabled=%t", mq.IsJudgmentEnabled()))
-		vars = append(vars, fmt.Sprintf("review_depth=%s", mq.GetReviewDepth()))
-		if mq.MergeStrategy != "" {
-			vars = append(vars, fmt.Sprintf("merge_strategy=%s", mq.MergeStrategy))
-		}
-		vars = append(vars, fmt.Sprintf("require_review=%t", mq.IsRequireReviewEnabled()))
-		vars = append(vars, fmt.Sprintf("batch_enabled=%t", mq.IsBatchEnabled()))
-		vars = append(vars, fmt.Sprintf("batch_min_age=%s", mq.GetBatchMinAge()))
-		vars = append(vars, fmt.Sprintf("batch_max=%d", mq.GetBatchMax()))
-		vars = append(vars, fmt.Sprintf("batch_min_count=%d", mq.GetBatchMinCount()))
-		if mq.Editorial != nil {
-			ed := mq.Editorial.WithDefaults()
-			vars = append(vars, fmt.Sprintf("editorial_required=%t", ed.Required))
-			vars = append(vars, fmt.Sprintf("editorial_command=%s", ed.Command))
-			if ed.MinVersion != "" {
-				vars = append(vars, fmt.Sprintf("editorial_min_version=%s", ed.MinVersion))
-			}
-			vars = append(vars, fmt.Sprintf("editorial_max_attempts=%d", ed.MaxAttempts))
-			vars = append(vars, fmt.Sprintf("editorial_review_parallelism=%d", ed.ReviewParallelism))
-		}
-		return vars
-	}
-
-	// Fallback: read command vars from rig identity bead labels.
-	// This is the path for rigs using `gt rig config set --global` (bead layer).
-	// We use native bd routing (no explicit BEADS_DIR) to avoid dolt database
-	// name mismatches that occur when bypassing the routing system.
-	if rigCfg != nil && rigCfg.Beads != nil && rigCfg.Beads.Prefix != "" {
-		rigBeadID := beads.RigBeadIDWithPrefix(rigCfg.Beads.Prefix, ctx.Rig)
-		bd := beads.New(ctx.TownRoot)
-		if issue, err := bd.Show(rigBeadID); err == nil {
-			labelMap := make(map[string]string, len(issue.Labels))
-			for _, label := range issue.Labels {
-				if idx := strings.IndexByte(label, ':'); idx > 0 {
-					labelMap[label[:idx]] = label[idx+1:]
-				}
-			}
-			for _, key := range []string{"integration_branch_refinery_enabled", "integration_branch_auto_land", "run_tests", "delete_merged_branches", "setup_command", "typecheck_command", "lint_command", "test_command", "build_command", "merge_strategy", "require_review", "batch_enabled", "batch_min_age", "batch_max", "batch_min_count"} {
-				if val := labelMap[key]; val != "" {
-					vars = append(vars, fmt.Sprintf("%s=%s", key, val))
-				}
-			}
-		}
-	}
 	return vars
 }
 

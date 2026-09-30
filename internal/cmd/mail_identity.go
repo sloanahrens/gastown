@@ -138,11 +138,6 @@ func detectSenderFromRole(role string) string {
 			return fmt.Sprintf("%s/witness", rig)
 		}
 		return detectSenderFromCwd()
-	case constants.RoleRefinery:
-		if rig != "" {
-			return fmt.Sprintf("%s/refinery", rig)
-		}
-		return detectSenderFromCwd()
 	case "dog":
 		dogName := os.Getenv("GT_DOG_NAME")
 		if dogName != "" {
@@ -267,10 +262,6 @@ func identityFromAgentFile(parsed agentIdentityFile) string {
 	case constants.RoleWitness:
 		if rig != "" {
 			return fmt.Sprintf("%s/witness", rig)
-		}
-	case constants.RoleRefinery:
-		if rig != "" {
-			return fmt.Sprintf("%s/refinery", rig)
 		}
 	case constants.RoleCrew:
 		if rig != "" && name != "" {

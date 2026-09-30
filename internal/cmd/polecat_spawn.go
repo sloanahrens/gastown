@@ -831,7 +831,7 @@ func IsRigName(target string) (string, bool) {
 
 	// Check known non-rig role names
 	switch strings.ToLower(target) {
-	case constants.RoleMayor, "may", constants.RoleDeacon, "dea", constants.RoleCrew, constants.RoleWitness, "wit", constants.RoleRefinery, "ref":
+	case constants.RoleMayor, "may", constants.RoleDeacon, "dea", constants.RoleCrew, constants.RoleWitness, "wit", "ref":
 		return "", false
 	}
 
@@ -862,4 +862,18 @@ func IsRigName(target string) (string, bool) {
 // has a broken .git reference, or fails basic git validation. (GH#2056)
 func verifyWorktreeExists(clonePath string) error {
 	return polecat.VerifyWorktreeExists(clonePath)
+}
+
+// getRigGit returns a Git object for the rig's repository.
+// Prefers .repo.git (bare repo) if it exists, falls back to mayor/rig.
+func getRigGit(rigPath string) (*git.Git, error) {
+	bareRepoPath := filepath.Join(rigPath, ".repo.git")
+	if info, err := os.Stat(bareRepoPath); err == nil && info.IsDir() {
+		return git.NewGitWithDir(bareRepoPath, ""), nil
+	}
+	mayorPath := filepath.Join(rigPath, "mayor", "rig")
+	if _, err := os.Stat(mayorPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("no repo base found (neither .repo.git nor mayor/rig exists)")
+	}
+	return git.NewGit(mayorPath), nil
 }

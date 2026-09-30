@@ -645,9 +645,8 @@ func NewDaemonPatrolConfig() *DaemonPatrolConfig {
 			Interval: "3m",
 		},
 		Patrols: &PatrolsConfig{
-			Deacon:   &PatrolConfig{Enabled: true, Interval: "5m", Agent: "deacon"},
-			Witness:  &PatrolConfig{Enabled: true, Interval: "5m", Agent: "witness"},
-			Refinery: &PatrolConfig{Enabled: true, Interval: "5m", Agent: "refinery"},
+			Deacon:  &PatrolConfig{Enabled: true, Interval: "5m", Agent: "deacon"},
+			Witness: &PatrolConfig{Enabled: true, Interval: "5m", Agent: "witness"},
 		},
 	}
 }

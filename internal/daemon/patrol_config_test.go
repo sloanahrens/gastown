@@ -23,8 +23,7 @@ func TestLoadPatrolConfig(t *testing.T) {
 		"type": "daemon-patrol-config",
 		"version": 1,
 		"patrols": {
-			"refinery": {"enabled": false},
-			"witness": {"enabled": true}
+			"witness": {"enabled": false}
 		}
 	}`
 	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(configJSON), 0644); err != nil {
@@ -38,11 +37,8 @@ func TestLoadPatrolConfig(t *testing.T) {
 	}
 
 	// Test enabled flags
-	if IsPatrolEnabled(config, "refinery") {
-		t.Error("expected refinery to be disabled")
-	}
-	if !IsPatrolEnabled(config, "witness") {
-		t.Error("expected witness to be enabled")
+	if IsPatrolEnabled(config, "witness") {
+		t.Error("expected witness to be disabled")
 	}
 	if !IsPatrolEnabled(config, "deacon") {
 		t.Error("expected deacon to be enabled (default)")

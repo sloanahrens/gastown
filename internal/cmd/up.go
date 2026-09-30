@@ -25,7 +25,6 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -351,21 +350,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 		services = append(services, orphanServices...)
 	}
 
-	// 5 & 6. Witnesses and Refineries (using prefetched rigs)
-	witnessResults, refineryResults := startRigAgentsWithPrefetch(rigs, prefetchedRigs, rigErrors)
+	// 5. Witnesses (using prefetched rigs)
+	witnessResults := startRigAgentsWithPrefetch(rigs, prefetchedRigs, rigErrors)
 
-	// Collect results in order: all witnesses first, then all refineries
 	for _, rigName := range rigs {
 		if result, ok := witnessResults[rigName]; ok {
 			services = append(services, ServiceStatus{Name: result.name, Type: constants.RoleWitness, Rig: rigName, OK: result.ok, Detail: result.detail})
-			if !result.ok {
-				allOK = false
-			}
-		}
-	}
-	for _, rigName := range rigs {
-		if result, ok := refineryResults[rigName]; ok {
-			services = append(services, ServiceStatus{Name: result.name, Type: constants.RoleRefinery, Rig: rigName, OK: result.ok, Detail: result.detail})
 			if !result.ok {
 				allOK = false
 			}
@@ -602,45 +592,35 @@ func prefetchRigs(rigNames []string) (map[string]*rig.Rig, map[string]error) {
 
 // agentTask represents a unit of work for the agent worker pool.
 type agentTask struct {
-	rigName   string
-	rigObj    *rig.Rig
-	isWitness bool // true for witness, false for refinery
+	rigName string
+	rigObj  *rig.Rig
 }
 
 // agentResultMsg carries result back from worker to collector.
 type agentResultMsg struct {
-	rigName   string
-	isWitness bool
-	result    agentStartResult
+	rigName string
+	result  agentStartResult
 }
 
-// startRigAgentsWithPrefetch starts all Witnesses and Refineries using pre-loaded rig configs.
+// startRigAgentsWithPrefetch starts all Witnesses using pre-loaded rig configs.
 // Uses a worker pool with fixed goroutine count to limit concurrency and reduce overhead.
-func startRigAgentsWithPrefetch(rigNames []string, prefetchedRigs map[string]*rig.Rig, rigErrors map[string]error) (witnessResults, refineryResults map[string]agentStartResult) {
-	n := len(rigNames)
-	witnessResults = make(map[string]agentStartResult, n)
-	refineryResults = make(map[string]agentStartResult, n)
+func startRigAgentsWithPrefetch(rigNames []string, prefetchedRigs map[string]*rig.Rig, rigErrors map[string]error) (witnessResults map[string]agentStartResult) {
+	witnessResults = make(map[string]agentStartResult, len(rigNames))
 
-	if n == 0 {
+	if len(rigNames) == 0 {
 		return
 	}
 
 	// Record errors for rigs that failed to load
 	for rigName, err := range rigErrors {
-		errDetail := err.Error()
 		witnessResults[rigName] = agentStartResult{
 			name:   "Witness (" + rigName + ")",
 			ok:     false,
-			detail: errDetail,
-		}
-		refineryResults[rigName] = agentStartResult{
-			name:   "Refinery (" + rigName + ")",
-			ok:     false,
-			detail: errDetail,
+			detail: err.Error(),
 		}
 	}
 
-	numTasks := len(prefetchedRigs) * 2 // witness + refinery per rig
+	numTasks := len(prefetchedRigs)
 	if numTasks == 0 {
 		return
 	}
@@ -661,16 +641,9 @@ func startRigAgentsWithPrefetch(rigNames []string, prefetchedRigs map[string]*ri
 		go func() {
 			defer wg.Done()
 			for task := range tasks {
-				var result agentStartResult
-				if task.isWitness {
-					result = upStartWitness(task.rigName, task.rigObj)
-				} else {
-					result = upStartRefinery(task.rigName, task.rigObj)
-				}
 				results <- agentResultMsg{
-					rigName:   task.rigName,
-					isWitness: task.isWitness,
-					result:    result,
+					rigName: task.rigName,
+					result:  upStartWitness(task.rigName, task.rigObj),
 				}
 			}
 		}()
@@ -678,8 +651,7 @@ func startRigAgentsWithPrefetch(rigNames []string, prefetchedRigs map[string]*ri
 
 	// Enqueue all tasks
 	for rigName, r := range prefetchedRigs {
-		tasks <- agentTask{rigName: rigName, rigObj: r, isWitness: true}
-		tasks <- agentTask{rigName: rigName, rigObj: r, isWitness: false}
+		tasks <- agentTask{rigName: rigName, rigObj: r}
 	}
 	close(tasks)
 
@@ -691,11 +663,7 @@ func startRigAgentsWithPrefetch(rigNames []string, prefetchedRigs map[string]*ri
 
 	// Collect results - no locking needed, single goroutine collects
 	for msg := range results {
-		if msg.isWitness {
-			witnessResults[msg.rigName] = msg.result
-		} else {
-			refineryResults[msg.rigName] = msg.result
-		}
+		witnessResults[msg.rigName] = msg.result
 	}
 
 	return
@@ -721,36 +689,6 @@ func upStartWitness(rigName string, r *rig.Rig) agentStartResult {
 	if err := mgr.Start(false, "", nil); err != nil {
 		if err == witness.ErrAlreadyRunning {
 			return agentStartResult{name: name, ok: true, detail: mgr.SessionName()}
-		}
-		return agentStartResult{name: name, ok: false, detail: err.Error()}
-	}
-	return agentStartResult{name: name, ok: true, detail: mgr.SessionName()}
-}
-
-// upStartRefinery starts a refinery for the given rig and returns a result struct.
-// Respects parked/docked status - skips starting if rig is not operational.
-func upStartRefinery(rigName string, r *rig.Rig) agentStartResult {
-	name := "Refinery (" + rigName + ")"
-
-	// Check if rig is parked or docked (wisp + bead labels).
-	// Skip the check if auto_start_on_up is set — that overrides dock status.
-	// Also check deprecated auto_start_on_boot for backwards compatibility with
-	// rigs that still have the old key in their config.
-	if !r.GetBoolConfig("auto_start_on_up") && !r.GetBoolConfig("auto_start_on_boot") {
-		townRoot := filepath.Dir(r.Path)
-		if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
-			return agentStartResult{name: name, ok: true, detail: fmt.Sprintf("skipped (rig %s)", reason)}
-		}
-	}
-
-	mgr := refinery.NewManager(r)
-	mgr.SetStartAttribution("gt-up", "gt up")
-	if err := mgr.Start(false, ""); err != nil {
-		if errors.Is(err, refinery.ErrAlreadyRunning) {
-			return agentStartResult{name: name, ok: true, detail: mgr.SessionName()}
-		}
-		if errors.Is(err, refinery.ErrForkRig) {
-			return agentStartResult{name: name, ok: true, detail: "skipped (fork-backed rig; use PR workflow)"}
 		}
 		return agentStartResult{name: name, ok: false, detail: err.Error()}
 	}

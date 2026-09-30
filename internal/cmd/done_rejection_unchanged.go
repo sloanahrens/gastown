@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/refinery"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -88,12 +88,12 @@ func rejectionKindFromSummary(summary string) string {
 // Branch:/MR:/Head: line in a block is read — the block runs to the next
 // marker, so later appended prose belongs to no rejection.
 func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
-	if !strings.Contains(notes, refinery.MergeRejectionNoteMarker) {
+	if !strings.Contains(notes, dispatch.MergeRejectionNoteMarker) {
 		return nil
 	}
 	var out []rejectedAttempt
 	seen := make(map[string]bool)
-	for _, block := range strings.Split(notes, refinery.MergeRejectionNoteMarker)[1:] {
+	for _, block := range strings.Split(notes, dispatch.MergeRejectionNoteMarker)[1:] {
 		var a rejectedAttempt
 		lines := strings.Split(block, "\n")
 		a.summary = strings.TrimSpace(lines[0])

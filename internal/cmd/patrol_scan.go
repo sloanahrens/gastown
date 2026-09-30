@@ -23,7 +23,6 @@ var (
 	patrolScanVerbose           bool
 	patrolScanActivityThreshold time.Duration
 	patrolScanStallWindow       time.Duration
-	patrolScanDryRun            bool
 )
 
 var patrolScanCmd = &cobra.Command{
@@ -38,9 +37,6 @@ Detections:
   - Zombies: Dead sessions with active agent state, dead agent processes,
     stuck done-intent, closed beads with live sessions
   - Stalls: Agents stuck at startup prompts
-  - Refinery stall: A live refinery holding unsubmitted composer input while
-    producing no output (gt-hkhu). Queued input is submitted on detection,
-    unless --dry-run is set.
   - Completions: Agent bead metadata indicating gt done was called
   - Activity: Real work recency per live session, from the agent's transcript
     and pane content — NOT from the pane's rendered spinner/elapsed label
@@ -48,7 +44,7 @@ Detections:
 Actions taken automatically:
   - Zombie restart: Sessions are restarted (not nuked) to preserve worktrees
   - Cleanup wisps: Created for dirty state tracking
-  - Completion routing: MR cleanup wisps created, refinery nudged
+  - Completion routing: MR cleanup wisps created
 
 The activity section is report-only: it never restarts anything. It exists so
 that a "hung session" judgement can be backed by evidence. Each scan applies
@@ -70,8 +66,7 @@ Examples:
   gt patrol scan                    # Scan current rig
   gt patrol scan --rig gastown      # Scan specific rig
   gt patrol scan --json             # Machine-readable output
-  gt patrol scan --notify           # Send mail on zombie detection
-  gt patrol scan --dry-run          # Detect a stalled refinery without submitting its queued input`,
+  gt patrol scan --notify           # Send mail on zombie detection`,
 	RunE: runPatrolScan,
 }
 
@@ -84,8 +79,6 @@ func init() {
 		"Age of last real activity that marks a polecat as a stall candidate (report-only)")
 	patrolScanCmd.Flags().DurationVar(&patrolScanStallWindow, "stall-window", constants.HungSessionThreshold,
 		"Minimum time between the persisted sample 1 and a later scan for a stall verdict (gt-xb27)")
-	patrolScanCmd.Flags().BoolVar(&patrolScanDryRun, "dry-run", false,
-		"Report a stalled refinery composer without submitting its queued input (om major on gt-wisp-q9os)")
 
 	patrolCmd.AddCommand(patrolScanCmd)
 }
@@ -98,40 +91,9 @@ type PatrolScanOutput struct {
 	Timestamp   string                    `json:"timestamp"`
 	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
 	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
-	Refinery    *PatrolScanRefineryOutput `json:"refinery,omitempty"`
 	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
 	Activity    *PatrolScanActivityOutput `json:"activity,omitempty"`
 	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
-}
-
-// PatrolScanRefineryOutput holds the refinery composer-stall check (gt-hkhu).
-type PatrolScanRefineryOutput struct {
-	Checked int                      `json:"checked"`
-	Found   int                      `json:"found"`
-	Stalls  []PatrolScanRefineryItem `json:"stalls,omitempty"`
-	Errors  []string                 `json:"errors,omitempty"`
-}
-
-// PatrolScanRefineryItem is a single refinery stall in scan output.
-type PatrolScanRefineryItem struct {
-	Session           string  `json:"session"`
-	Agent             string  `json:"agent"`
-	StallType         string  `json:"stall_type"`
-	State             string  `json:"state"`
-	InactivitySeconds float64 `json:"inactivity_seconds"`
-	// PendingSeconds is how long the composer had been continuously observed
-	// holding unsubmitted input. It is non-zero whenever an earlier probe
-	// started the run, including when the silence window is what tripped this
-	// verdict; it is zero only on the first observation, and it does NOT say
-	// which clock fired (gt-afa7).
-	PendingSeconds float64 `json:"pending_seconds"`
-	// PendingSamples is how many consecutive observations have seen the
-	// composer pending. The age only counts once several samples spanning a
-	// minimum window agree, so this is what tells a run that was restarted
-	// mid-flight from one that has been continuously unattended (gt-afa7).
-	PendingSamples int    `json:"pending_samples"`
-	Action         string `json:"action"`
-	Error          string `json:"error,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -266,13 +228,6 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	stallResult := runPatrolScanPhase(diagnostics, "stall detection", func() *witness.DetectStalledPolecatsResult {
 		return witness.DetectStalledPolecats(workDir, rigName)
 	})
-	// Separate from stall detection: the refinery is not a polecat and has no
-	// heartbeat, so the polecat sweep never looks at it. A refinery holding a
-	// composed-but-unsubmitted instruction reads as running to every other
-	// check while MRs age behind it (gt-hkhu).
-	refineryResult := runPatrolScanPhase(diagnostics, "refinery stall detection", func() *witness.DetectRefineryStallResult {
-		return witness.DetectStalledRefinery(workDir, rigName, patrolScanDryRun)
-	})
 	completionResult := runPatrolScanPhase(diagnostics, "completion discovery", func() *witness.DiscoverCompletionsResult {
 		return witness.DiscoverCompletions(bd, workDir, rigName, router)
 	})
@@ -304,10 +259,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts, stallChecks)
+		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, activityResult, receipts, stallChecks)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, refineryResult, completionResult, activityResult, receipts, stallChecks)
+	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, activityResult, receipts, stallChecks)
 }
 
 func runPatrolScanPhase[T any](diagnostics io.Writer, name string, fn func() T) T {
@@ -406,7 +361,7 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(mayorMsg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, receipts []witness.PatrolReceipt, stallChecks []witness.StallCheck) error {
+func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, receipts []witness.PatrolReceipt, stallChecks []witness.StallCheck) error {
 	output := PatrolScanOutput{
 		Rig:       rigName,
 		Timestamp: timestamp,
@@ -458,34 +413,6 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 			so.Stalls = append(so.Stalls, item)
 		}
 		output.Stalls = so
-	}
-
-	// Refinery composer stall
-	if refineryResult != nil {
-		ro := &PatrolScanRefineryOutput{
-			Checked: refineryResult.Checked,
-			Found:   len(refineryResult.Stalls),
-		}
-		for _, s := range refineryResult.Stalls {
-			item := PatrolScanRefineryItem{
-				Session:           s.Session,
-				Agent:             s.Agent,
-				StallType:         s.StallType,
-				State:             s.State,
-				InactivitySeconds: s.Inactivity.Seconds(),
-				PendingSeconds:    s.PendingFor.Seconds(),
-				PendingSamples:    s.PendingSamples,
-				Action:            s.Action,
-			}
-			if s.Error != nil {
-				item.Error = s.Error.Error()
-			}
-			ro.Stalls = append(ro.Stalls, item)
-		}
-		for _, e := range refineryResult.Errors {
-			ro.Errors = append(ro.Errors, e.Error())
-		}
-		output.Refinery = ro
 	}
 
 	// Completions
@@ -578,7 +505,7 @@ func stallChecksByPolecat(checks []witness.StallCheck) map[string]witness.StallC
 	return m
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, refineryResult *witness.DetectRefineryStallResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, _ []witness.PatrolReceipt, stallChecks []witness.StallCheck) error {
+func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, activityResult []witness.RealActivity, _ []witness.PatrolReceipt, stallChecks []witness.StallCheck) error {
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
 	// Zombies
@@ -636,39 +563,6 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 				if s.Error != nil {
 					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", s.Error)))
 				}
-			}
-		}
-		fmt.Println()
-	}
-
-	// Refinery composer stall (gt-hkhu)
-	if refineryResult != nil && (len(refineryResult.Stalls) > 0 || patrolScanVerbose) {
-		fmt.Printf("%s Refinery Stall Detection: checked %d session(s)\n",
-			style.Bold.Render("🏭"), refineryResult.Checked)
-
-		if len(refineryResult.Stalls) == 0 {
-			fmt.Printf("  %s\n", style.Dim.Render("No composer stalls detected"))
-		} else {
-			for _, s := range refineryResult.Stalls {
-				// Report the age only when there is one. On a first
-				// observation it is zero, and "input waiting 0s" reads as input
-				// that just arrived rather than as the silence window having
-				// tripped — the opposite of what happened (gt-afa7).
-				clocks := fmt.Sprintf("silent %s", s.Inactivity.Round(time.Second))
-				if s.PendingFor > 0 {
-					clocks += fmt.Sprintf(", input waiting %s over %d observation(s)",
-						s.PendingFor.Round(time.Second), s.PendingSamples)
-				}
-				fmt.Printf("  ⚠ %s: %s (composer %s, %s) → %s\n",
-					s.Agent, s.StallType, s.State, clocks, s.Action)
-				if s.Error != nil {
-					fmt.Printf("    %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", s.Error)))
-				}
-			}
-		}
-		if len(refineryResult.Errors) > 0 && patrolScanVerbose {
-			for _, e := range refineryResult.Errors {
-				fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("Error: %v", e)))
 			}
 		}
 		fmt.Println()
@@ -752,11 +646,6 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			staleCandidates++
 		}
 	}
-	refineryStallCount := 0
-	if refineryResult != nil {
-		refineryStallCount = len(refineryResult.Stalls)
-	}
-
 	stalledCount := 0
 	for _, c := range stallChecks {
 		if c.Stalled {
@@ -764,11 +653,11 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		}
 	}
 
-	if zombieCount == 0 && stallCount == 0 && refineryStallCount == 0 && completionCount == 0 && stalledCount == 0 {
+	if zombieCount == 0 && stallCount == 0 && completionCount == 0 && stalledCount == 0 {
 		fmt.Printf("%s All clear — no issues detected\n", style.Success.Render("✓"))
 	} else {
-		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d refinery stall(s), %d completion(s), %d activity candidate(s), %d stalled vs sample 1\n",
-			zombieCount, activeCount, stallCount, refineryStallCount, completionCount, staleCandidates, stalledCount)
+		fmt.Printf("Summary: %d zombie(s) (%d active-work), %d stall(s), %d completion(s), %d activity candidate(s), %d stalled vs sample 1\n",
+			zombieCount, activeCount, stallCount, completionCount, staleCandidates, stalledCount)
 	}
 
 	return nil

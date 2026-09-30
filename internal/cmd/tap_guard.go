@@ -275,34 +275,6 @@ const (
 func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
 	command := extractCommand(input)
 
-	// The refinery's mandated merge-rehearsal checkouts (mol-refinery-patrol
-	// step 1: "git checkout -b temp origin/<branch>"; mol-polecat-
-	// conflict-resolve: "git checkout -b temp-resolve origin/<branch>")
-	// legitimately need to create a branch — the same shape
-	// isGasTownAgentContext() otherwise blocks for every role.
-	//
-	// Two command shapes are exempt, and the shape that matched this
-	// command's OWN routing into the guard (the "if" glob it fired under)
-	// decides which applies — the one isLeadingBranchCreation's doc states
-	// for the leading command:
-	//   - isLeadingBranchCreation: the command's FIRST segment is a branch
-	//     creation of any name (the Bash(git checkout -b*) glob). The
-	//     chains gt-cyz8 and its tests pin stay exempt under it, including
-	//     a PR create glued AFTER the checkout on the same line.
-	//   - isRehearsalBranchCreation: the fix for gt-mo53, where the
-	//     formula's multi-line step (fetch / checkout -b temp / merge) runs
-	//     as one compound call and the checkout sits on a LATER segment the
-	//     leading check misses. Scoped to the literal rehearsal branch
-	//     names (temp, temp-resolve), and never firing when the call holds
-	//     a "gh pr create" anywhere (isPRCreateCommand) — the PR path this
-	//     guard exists to block, and the shape its own
-	//     Bash(gh pr create*) routing matches.
-	if isRefineryRole() &&
-		(isLeadingBranchCreation(command) ||
-			(isRehearsalBranchCreation(command) && !isPRCreateCommand(command))) {
-		return prWorkflowAllow
-	}
-
 	// gt-6hg7: a polecat that resumes a branch whose push already went out
 	// (the gt-i0z3 class — mol-polecat-work's branch reuse rebases AND adds
 	// fix commits, so the patch-ids differ and gt done's recoverDivergedPush
@@ -448,19 +420,6 @@ func isMaintainerOrigin() bool {
 	// - https://github.com/steveyegge/gastown.git
 	// - git@github.com:steveyegge/gastown.git
 	return strings.Contains(url, "steveyegge/gastown")
-}
-
-// isRefineryRole reports whether the current process is running as the
-// refinery role, via either signal a refinery session may carry:
-// GT_REFINERY (set directly in tmux env — see gt-r2xm's mayor comment,
-// since hooks-overrides could not subtract the compiled default rule) or
-// GT_ROLE resolving to "<rig>/refinery".
-func isRefineryRole() bool {
-	if os.Getenv("GT_REFINERY") != "" {
-		return true
-	}
-	role, _, _ := parseRoleString(os.Getenv("GT_ROLE"))
-	return role == RoleRefinery
 }
 
 // isPolecatSession reports whether the current process is running as a

@@ -211,12 +211,11 @@ running plugin keeps the daemon from its idle-point upgrade restart.
 (gt-htx3), so the build waits for a town with nothing in flight:
 
 - no gate-class role holding a container-gate slot, no container running
-  outside the gate, and no saturated pool (`gt slot status --json`), and
-- no MR a refinery is mid-merge on
-  (`gt mq list gastown --status=in_progress --json`).
+  outside the gate, and no saturated pool (`gt slot status --json`).
 
-Under `REBUILD_GT_STARVE_MINUTES` either reading defers the run; past it the
-first is waited out (Starvation above).
+Under `REBUILD_GT_STARVE_MINUTES` that reading defers the run; past it the
+slot is waited out (Starvation above). The merge-queue in-flight reading was
+deleted with the merge queue (gt-v4ssj.6).
 
 There is no second reading before the install: `install-gt.sh` only renames
 the binary and leaves the restart to the daemon's idle point (claude-7fc).

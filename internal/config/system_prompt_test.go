@@ -13,7 +13,7 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 	rig := "/town/myrig"
 	cases := map[string]string{
 		"witness":  "/town/myrig/witness/.claude/system-prompt.md",
-		"refinery": "/town/myrig/refinery/.claude/system-prompt.md",
+		"refinery": "", // role removed (gt-v4ssj.6)
 		"mayor":    "/town/mayor/.claude/system-prompt.md",
 		"deacon":   "/town/deacon/.claude/system-prompt.md",
 		"dog":      "", // per agent: needs a name, see below

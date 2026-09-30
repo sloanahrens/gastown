@@ -301,32 +301,6 @@ func TestDetermineColorClass(t *testing.T) {
 	}
 }
 
-func TestGetRefineryStatusHint(t *testing.T) {
-	// Create a minimal fetcher for testing
-	f := &LiveConvoyFetcher{}
-
-	tests := []struct {
-		name            string
-		mergeQueueCount int
-		want            string
-	}{
-		{"idle when no PRs", 0, "Idle - Waiting for PRs"},
-		{"singular PR", 1, "Processing 1 PR"},
-		{"multiple PRs", 2, "Processing 2 PRs"},
-		{"many PRs", 10, "Processing 10 PRs"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := f.getRefineryStatusHint(tt.mergeQueueCount)
-			if got != tt.want {
-				t.Errorf("getRefineryStatusHint(%d) = %q, want %q",
-					tt.mergeQueueCount, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseActivityTimestamp(t *testing.T) {
 	tests := []struct {
 		name      string

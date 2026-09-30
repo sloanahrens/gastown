@@ -1879,9 +1879,6 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		return nil, nil
 	}
 
-	// Pre-fetch merge queue count to determine refinery idle status
-	mergeQueueCount := f.getMergeQueueCount()
-
 	var workers []WorkerRow
 	// rendered records the rig/name pairs the tmux pass already covers, so the
 	// inventory pass below adds a row only for a polecat with no session.
@@ -1927,16 +1924,6 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		// Determine agent type and worker name
 		workerName := identity.Name
 		agentType := constants.RolePolecat // Default for ephemeral sessions (polecats, crew)
-		if identity.Role == session.RoleRefinery {
-			agentType = constants.RoleRefinery
-			// Refinery identities carry no per-agent Name (there's one
-			// refinery per rig, so AgentIdentity.Name is always empty for
-			// this role) - without this the Polecats panel rendered an
-			// unlabeled "refinery" row, and the workerName == "refinery"
-			// check below (for status hints) could never match.
-			workerName = "refinery"
-		}
-
 		// Parse activity timestamp
 		var activityUnix int64
 		if _, err := fmt.Sscanf(parts[1], "%d", &activityUnix); err != nil || activityUnix == 0 {
@@ -1945,13 +1932,7 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		activityTime := time.Unix(activityUnix, 0)
 		activityAge := time.Since(activityTime)
 
-		// Get status hint - special handling for refinery
-		var statusHint string
-		if workerName == "refinery" {
-			statusHint = f.getRefineryStatusHint(mergeQueueCount)
-		} else {
-			statusHint = f.getWorkerStatusHint(sessionName)
-		}
+		statusHint := f.getWorkerStatusHint(sessionName)
 
 		// Look up assigned issue for this worker
 		// Assignee format: "rigname/polecats/workername"
@@ -2155,17 +2136,6 @@ func (f *LiveConvoyFetcher) getMergeQueueCount() int {
 		return 0
 	}
 	return len(mergeQueue)
-}
-
-// getRefineryStatusHint returns appropriate status for refinery based on merge queue.
-func (f *LiveConvoyFetcher) getRefineryStatusHint(mergeQueueCount int) string {
-	if mergeQueueCount == 0 {
-		return "Idle - Waiting for PRs"
-	}
-	if mergeQueueCount == 1 {
-		return "Processing 1 PR"
-	}
-	return fmt.Sprintf("Processing %d PRs", mergeQueueCount)
 }
 
 // parseActivityTimestamp parses a Unix timestamp string from tmux.

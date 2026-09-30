@@ -32,12 +32,6 @@ func TestPatrolAssignee_MatchesHookQueryAddress(t *testing.T) {
 			rig:      "gastown",
 			identity: &session.AgentIdentity{Role: session.RoleWitness, Rig: "gastown", Prefix: session.PrefixFor("gastown")},
 		},
-		{
-			name:     "refinery is rig-scoped and must not carry a trailing slash",
-			roleName: "refinery",
-			rig:      "gastown",
-			identity: &session.AgentIdentity{Role: session.RoleRefinery, Rig: "gastown", Prefix: session.PrefixFor("gastown")},
-		},
 	}
 
 	for _, tt := range tests {

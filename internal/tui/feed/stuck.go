@@ -292,8 +292,6 @@ func deriveSessionName(rig, role, name string) string {
 		return session.DeaconSessionName()
 	case constants.RoleWitness:
 		return session.WitnessSessionName(session.PrefixFor(rig))
-	case constants.RoleRefinery:
-		return session.RefinerySessionName(session.PrefixFor(rig))
 	case constants.RoleCrew:
 		return session.CrewSessionName(session.PrefixFor(rig), name)
 	case constants.RolePolecat:

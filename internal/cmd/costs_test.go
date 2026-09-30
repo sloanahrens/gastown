@@ -54,14 +54,6 @@ func TestDeriveSessionName(t *testing.T) {
 			expected: "gt-witness",
 		},
 		{
-			name: "refinery session",
-			envVars: map[string]string{
-				"GT_ROLE": "refinery",
-				"GT_RIG":  "gastown",
-			},
-			expected: "gt-refinery",
-		},
-		{
 			name: "mayor session",
 			envVars: map[string]string{
 				"GT_ROLE": "mayor",
@@ -111,13 +103,13 @@ func TestDeriveSessionName(t *testing.T) {
 			expected: "gt-witness",
 		},
 		{
-			name: "compound refinery with stale GT_POLECAT is NOT polecat session",
+			name: "compound witness with stale GT_POLECAT is NOT polecat session",
 			envVars: map[string]string{
-				"GT_ROLE":    "gastown/refinery",
+				"GT_ROLE":    "gastown/witness",
 				"GT_RIG":     "gastown",
 				"GT_POLECAT": "toast",
 			},
-			expected: "gt-refinery",
+			expected: "gt-witness",
 		},
 		{
 			name: "compound crew with stale GT_POLECAT is NOT polecat session",

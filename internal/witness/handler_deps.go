@@ -22,11 +22,9 @@ import (
 // cannot see each other's fakes. These used to be package-level function
 // variables that tests swapped and restored, which raced against every
 // parallel test that read them (TestProcessDiscoveredCompletion_
-// NudgeFailureDoesNotBlockMetadataClear swapped nudgeRefinery under
+// NudgeFailureDoesNotBlockMetadataClear swapped a nudge seam under
 // t.Parallel while its neighbors called it).
 type handlers struct {
-	// nudgeRefineryFn wakes the refinery to check the merge queue.
-	nudgeRefineryFn func(townRoot, rigName string) error
 	// slotOpenRecoveryCheckFn runs `gt polecat check-recovery` for a polecat.
 	slotOpenRecoveryCheckFn func(workDir, rigName, polecatName string) (string, error)
 	// runSchedulerForSlotOpenFn gives the scheduler a chance to fill a freed slot.
@@ -77,13 +75,6 @@ func (h *handlers) notify(townRoot string) notify.Notifier {
 
 // newHandlers returns the production handlers: every collaborator real.
 func newHandlers() *handlers { return &handlers{} }
-
-func (h *handlers) nudgeRefinery(townRoot, rigName string) error {
-	if h.nudgeRefineryFn != nil {
-		return h.nudgeRefineryFn(townRoot, rigName)
-	}
-	return _nudgeRefinery(townRoot, rigName)
-}
 
 func (h *handlers) slotOpenRecoveryCheck(workDir, rigName, polecatName string) (string, error) {
 	if h.slotOpenRecoveryCheckFn != nil {
