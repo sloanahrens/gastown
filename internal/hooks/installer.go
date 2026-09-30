@@ -128,14 +128,21 @@ func needsUpgrade(content []byte) bool {
 	if hasParenPreToolUseMatcher(content) {
 		return true
 	}
+	// Stale pattern: a PreToolUse matcher naming Bash but not Monitor, the
+	// shape the shipped settings-autonomous.json/settings-interactive.json
+	// templates wrote. The paren check above cannot see it ("Bash" has no
+	// "("), so such a file was judged current and kept every self-filtering
+	// shell guard invisible to Monitor (gt-ly9c4).
+	if hasBareBashPreToolUseMatcher(content) {
+		return true
+	}
 	return false
 }
 
-// hasParenPreToolUseMatcher reports whether content is a settings.json whose
-// PreToolUse section has a matcher containing "(" — a dead permission-rule
-// pattern rather than a tool name (gt-5ihs). Non-JSON or non-settings
-// content simply fails to unmarshal and is treated as not-stale here.
-func hasParenPreToolUseMatcher(content []byte) bool {
+// preToolUseMatchers returns the matcher strings of a settings.json's
+// PreToolUse entries. Non-JSON or non-settings content yields nil, so every
+// caller treats unreadable content as not-stale.
+func preToolUseMatchers(content []byte) []string {
 	var settings struct {
 		Hooks struct {
 			PreToolUse []struct {
@@ -144,10 +151,47 @@ func hasParenPreToolUseMatcher(content []byte) bool {
 		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(content, &settings); err != nil {
-		return false
+		return nil
 	}
+	matchers := make([]string, 0, len(settings.Hooks.PreToolUse))
 	for _, entry := range settings.Hooks.PreToolUse {
-		if strings.Contains(entry.Matcher, "(") {
+		matchers = append(matchers, entry.Matcher)
+	}
+	return matchers
+}
+
+// hasParenPreToolUseMatcher reports whether content is a settings.json whose
+// PreToolUse section has a matcher containing "(" — a dead permission-rule
+// pattern rather than a tool name (gt-5ihs).
+func hasParenPreToolUseMatcher(content []byte) bool {
+	for _, matcher := range preToolUseMatchers(content) {
+		if strings.Contains(matcher, "(") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasBareBashPreToolUseMatcher reports whether content is a settings.json
+// whose PreToolUse section has a matcher naming the Bash tool without naming
+// Monitor, which leaves a Monitor-run command (same tool_input.command as
+// Bash) outside every guard mounted on that entry (gt-vx2mm, gt-ly9c4).
+//
+// Matched per "|"-separated token rather than by string equality so a
+// compound matcher that omits Monitor ("Bash|Edit") is caught too, while a
+// different tool name such as "BashOutput" is not mistaken for Bash.
+func hasBareBashPreToolUseMatcher(content []byte) bool {
+	for _, matcher := range preToolUseMatchers(content) {
+		hasBash, hasMonitor := false, false
+		for _, name := range strings.Split(matcher, "|") {
+			switch strings.TrimSpace(name) {
+			case "Bash":
+				hasBash = true
+			case "Monitor":
+				hasMonitor = true
+			}
+		}
+		if hasBash && !hasMonitor {
 			return true
 		}
 	}

@@ -580,6 +580,80 @@ func TestInstallForRole_UpgradesStaleParenMatcher(t *testing.T) {
 	}
 }
 
+// TestInstallForRole_UpgradesStaleBareBashMatcher pins gt-ly9c4: the shipped
+// Claude templates wrote their PreToolUse guards on a bare "Bash" matcher, so
+// an agent scaffolded before the fix has a settings.json whose matcher names
+// Bash but not Monitor — invisible to Monitor, which carries the same
+// tool_input.command shape (gt-vx2mm). needsUpgrade's paren check cannot see
+// that shape, so such a file was judged current and never upgraded. Catch it
+// and rewrite from the template.
+func TestInstallForRole_UpgradesStaleBareBashMatcher(t *testing.T) {
+	dir := t.TempDir()
+	hooksPath := filepath.Join(dir, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(hooksPath), 0755)
+
+	stale := `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "gt tap guard pr-workflow", "if": "Bash(gh pr create*)"},
+          {"type": "command", "command": "gt tap guard dangerous-command"}
+        ]
+      }
+    ]
+  }
+}`
+	os.WriteFile(hooksPath, []byte(stale), 0644)
+
+	if err := InstallForRole("claude", dir, dir, "crew", ".claude", "settings.json", "claude", true); err != nil {
+		t.Fatalf("InstallForRole: %v", err)
+	}
+
+	got, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read upgraded settings: %v", err)
+	}
+	if hasBareBashPreToolUseMatcher(got) {
+		t.Error("stale bare \"Bash\" PreToolUse matcher was not upgraded (gt-ly9c4)")
+	}
+	if !strings.Contains(string(got), `"Bash|Monitor"`) {
+		t.Errorf("upgraded settings do not match Monitor; got:\n%s", got)
+	}
+	if strings.Contains(string(got), `"if"`) {
+		t.Errorf("upgraded settings still carry an If field (gt-3mp1); got:\n%s", got)
+	}
+}
+
+// TestNeedsUpgradeIgnoresCurrentMatchers guards the other direction: a
+// settings.json that already routes its shell guards through
+// shellExecutingToolMatcher (and a non-Bash matcher such as the Edit|Write
+// family) must NOT be treated as stale, or every install would clobber a
+// customised file.
+func TestNeedsUpgradeIgnoresCurrentMatchers(t *testing.T) {
+	current := []byte(`{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash|Monitor", "hooks": [{"type": "command", "command": "gt tap guard pr-workflow"}]},
+      {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{"type": "command", "command": "gt tap guard polecat-paths"}]}
+    ]
+  }
+}`)
+	if needsUpgrade(current) {
+		t.Error("needsUpgrade flagged an up-to-date settings.json as stale")
+	}
+
+	// A Monitor-only matcher is equally current, and "BashOutput" is a
+	// different tool name — neither may be mistaken for a Bash matcher.
+	for _, matcher := range []string{"Monitor", "BashOutput", "BashOutput|Monitor"} {
+		content := []byte(`{"hooks":{"PreToolUse":[{"matcher":"` + matcher + `","hooks":[{"type":"command","command":"gt tap guard pr-workflow"}]}]}}`)
+		if needsUpgrade(content) {
+			t.Errorf("needsUpgrade flagged matcher %q as a bare-Bash matcher", matcher)
+		}
+	}
+}
+
 func TestOpenCodeTemplateUsesHookModeAndCompoundRoles(t *testing.T) {
 	content, err := resolveAndSubstitute("opencode", "gastown.js", "polecat")
 	if err != nil {

@@ -675,6 +675,14 @@ func TestBuiltinHooksNeverUseIf(t *testing.T) {
 	for target, override := range DefaultOverrides() {
 		check("DefaultOverrides["+target+"]", override)
 	}
+
+	// The templates bypass DefaultBase/DefaultOverrides entirely, so the
+	// invariant has to be asserted against them directly — both shipped
+	// templates still carried an If-gated pr-workflow hook long after the
+	// built-ins dropped theirs (gt-ly9c4).
+	for _, tmplFile := range claudeSettingsTemplates {
+		check(tmplFile, loadClaudeTemplateHooks(t, tmplFile))
+	}
 }
 
 // requireUngatedGuardCommand asserts that cfg's PreToolUse has a bare
@@ -1008,6 +1016,14 @@ func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
 		}
 		assertNoBareBashMatcher("ComputeExpected("+target+")", cfg)
 	}
+
+	// The templates bypass DefaultBase/DefaultOverrides entirely and are
+	// written verbatim by writeTemplate, so a bare "Bash" matcher here is the
+	// bypass itself, not a duplicate of one — this is exactly where gt-ly9c4
+	// lived, long after TestPreToolUseGuardsCoverMonitorTool started passing.
+	for _, tmplFile := range claudeSettingsTemplates {
+		assertNoBareBashMatcher(tmplFile, loadClaudeTemplateHooks(t, tmplFile))
+	}
 }
 
 func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
@@ -1069,6 +1085,35 @@ func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
 		}
 	}
 	return HookEntry{}, false
+}
+
+// claudeSettingsTemplates are the embedded Claude settings templates that
+// InstallForRole writes verbatim (installer.go writeTemplate) for every Claude
+// role off the managed-merge path — mayor, deacon and crew. They bypass
+// DefaultBase and DefaultOverrides entirely, so every invariant asserted
+// against those built-ins has to be asserted against the templates too, or a
+// freshly installed host ships the bug the invariant was written to catch
+// (gt-ly9c4).
+var claudeSettingsTemplates = []string{
+	"templates/claude/settings-autonomous.json",
+	"templates/claude/settings-interactive.json",
+}
+
+// loadClaudeTemplateHooks parses one embedded Claude settings template and
+// returns its hooks section.
+func loadClaudeTemplateHooks(t *testing.T, tmplFile string) *HooksConfig {
+	t.Helper()
+	data, err := templateFS.ReadFile(tmplFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", tmplFile, err)
+	}
+	var settings struct {
+		Hooks HooksConfig `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parsing %s: %v", tmplFile, err)
+	}
+	return &settings.Hooks
 }
 
 // TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings pins the
@@ -1756,23 +1801,10 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 		assertNoParenMatchers(t, "ComputeExpected("+target+")", expected)
 	}
 
-	// The embedded settings-autonomous.json/settings-interactive.json
-	// templates are what InstallForRole writes verbatim for a fresh
-	// polecat/crew scaffold (installer.go writeTemplate) — bypassing
-	// DefaultBase/DefaultOverrides entirely. A stale paren-style matcher
-	// here reintroduces gt-5ihs for every newly onboarded agent even after
-	// DefaultBase is fixed, so the templates need their own guard.
-	for _, tmplFile := range []string{"templates/claude/settings-autonomous.json", "templates/claude/settings-interactive.json"} {
-		data, err := templateFS.ReadFile(tmplFile)
-		if err != nil {
-			t.Fatalf("reading %s: %v", tmplFile, err)
-		}
-		var settings struct {
-			Hooks HooksConfig `json:"hooks"`
-		}
-		if err := json.Unmarshal(data, &settings); err != nil {
-			t.Fatalf("parsing %s: %v", tmplFile, err)
-		}
-		assertNoParenMatchers(t, tmplFile, &settings.Hooks)
+	// A stale paren-style matcher in the templates reintroduces gt-5ihs for
+	// every newly onboarded agent even after DefaultBase is fixed, so the
+	// templates need their own guard.
+	for _, tmplFile := range claudeSettingsTemplates {
+		assertNoParenMatchers(t, tmplFile, loadClaudeTemplateHooks(t, tmplFile))
 	}
 }
