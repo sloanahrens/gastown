@@ -894,7 +894,7 @@ var memoryTypeLabels = map[string]string{
 // runMemoryInject loads memories from beads kv and outputs an index of them
 // during prime. Memories are grouped by type and ordered by priority (feedback
 // first). Only previews are rendered — the values themselves are several
-// paragraphs each, and paging them in on demand via `gt memories <key>` keeps
+// paragraphs each, and paging them in on demand via `bd kv get <key>` keeps
 // the section from dominating the prime payload.
 func runMemoryInject(workDir string) {
 	primeTools{}.memoryIndex(workDir)

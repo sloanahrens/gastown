@@ -47,6 +47,16 @@ var deletedCommands = [][]string{
 	{"town"},
 	{"namepool"},
 	{"role"},
+	{"remember"},
+	{"memories"},
+	{"forget"},
+	{"trail"},
+	{"orphans"},
+	{"cleanup"},
+	{"vitals"},
+	{"start"},
+	{"crew", "next"},
+	{"crew", "prev"},
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the

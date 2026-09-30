@@ -23,7 +23,6 @@ import (
 // exists, so a rename cannot drop a command out of the gate.
 var bdHandshakeGatedCommands = map[string]bool{
 	"gt up":               true,
-	"gt start":            true,
 	"gt daemon start":     true,
 	"gt daemon run":       true,
 	"gt daemon restart":   true,

@@ -272,33 +272,29 @@ content, interpret the prose instructions, and execute them.
 
 Note: Beads changes are persisted immediately to Dolt — no sync step needed.
 
-## Memory: Use `{{ cmd }} remember`, Not MEMORY.md
+## Memory: Use `bd remember`, Not MEMORY.md
 
-Gas Town has its own memory system that replaces Claude Code's built-in
+Gas Town keeps memories in the beads store instead of Claude Code's built-in
 filesystem auto-memory. **Do NOT write to `~/.claude/*/memory/`.**
 
 ```bash
-{{ cmd }} remember "insight"                       # Store (auto-key)
-{{ cmd }} remember --key my-slug "insight"          # Store with explicit key
-{{ cmd }} remember --type feedback "don't do X"     # Store typed memory
-{{ cmd }} remember --with gastown/witness "insight we established together"  # Joint memory
-{{ cmd }} memories                                  # List all
-{{ cmd }} memories search-term                      # Search
-{{ cmd }} forget my-slug                            # Remove
+bd remember "insight"                  # Store (auto-key)
+bd remember "insight" --key my-slug    # Store with explicit key
+bd memories                            # List all
+bd memories search-term                # Search
+bd forget my-slug                      # Remove
 ```
 
-**Why this matters:** `{{ cmd }} remember` stores memories in Dolt, shared across
-all agents in the town, injected at prime time. Claude Code's MEMORY.md files
-are per-project-path, invisible to other agents, and not injected at prime.
+**Why this matters:** `bd remember` stores memories in Dolt, shared across
+all agents in the town, and prime lists them for mayor and crew. Claude Code's
+MEMORY.md files are per-project-path, invisible to other agents, and not
+injected at prime.
 
-**Attribution is machine-set, not free text.** `{{ cmd }} remember` stamps the
-memory with the identity that actually ran the command (BD_ACTOR, falling back
-to GT_ROLE) — you cannot type a different attribution into the content and
-have it stick. For a memory two or more agents established together, name the
-others with `--with` instead of writing "X and I" into the body; otherwise the
-stored tag names only you even though the content reads as joint (gt-04h).
+**Name who established it.** A memory carries no author tag, so say in the
+content who established it and cite the bead that settled it. For a memory
+two or more agents established together, name each of them (gt-04h).
 
-**What to save** (types: `feedback`, `project`, `user`, `reference`, `general`):
+**What to save**:
 - **feedback**: User corrections or confirmed approaches — saves repeat guidance
 - **project**: Ongoing work context, deadlines, decisions not derivable from code
 - **user**: User's role, preferences, expertise level

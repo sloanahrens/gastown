@@ -71,7 +71,7 @@ func TestBDHandshakeGatedCommandsExist(t *testing.T) {
 	for path := range bdHandshakeGatedCommands {
 		findCommand(t, path)
 	}
-	for _, want := range []string{"gt up", "gt start", "gt daemon start", "gt daemon run", "gt sling", "gt witness start", "gt refinery start", "gt crew start", "gt mayor start", "gt deacon start", "gt session start"} {
+	for _, want := range []string{"gt up", "gt daemon start", "gt daemon run", "gt sling", "gt witness start", "gt refinery start", "gt crew start", "gt mayor start", "gt deacon start", "gt session start"} {
 		if !bdHandshakeGatedCommands[want] {
 			t.Errorf("%q must be gated by the bd handshake", want)
 		}

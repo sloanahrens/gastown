@@ -64,7 +64,7 @@ Infrastructure agents stopped:
   • Daemon     - Go background process
   • Dolt       - Shared SQL database server
 
-This is a "pause" operation - use 'gt start' to bring everything back up.
+This is a "pause" operation - use 'gt up' to bring everything back up.
 For permanent cleanup (removing worktrees), use 'gt shutdown' instead.
 
 Use cases:

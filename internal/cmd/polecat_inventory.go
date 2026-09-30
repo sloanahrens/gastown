@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -829,4 +830,25 @@ func parsePolecatAgentFields(issue *beads.Issue) *beads.AgentFields {
 	fields := beads.ParseAgentFields(issue.Description)
 	fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
 	return fields
+}
+
+// resolvePolecatWorktree determines the worktree path for a polecat,
+// mirroring the canonical clonePath logic in polecat/session_manager.go.
+func resolvePolecatWorktree(polecatsDir, polecatName, rigName string) string {
+	// New structure: polecats/<name>/<rigname>/
+	newPath := filepath.Join(polecatsDir, polecatName, rigName)
+	if info, err := os.Stat(newPath); err == nil && info.IsDir() {
+		return newPath
+	}
+
+	// Old structure: polecats/<name>/ (backward compat)
+	oldPath := filepath.Join(polecatsDir, polecatName)
+	if info, err := os.Stat(oldPath); err == nil && info.IsDir() {
+		gitPath := filepath.Join(oldPath, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			return oldPath
+		}
+	}
+
+	return "" // No valid worktree found
 }

@@ -211,7 +211,7 @@ gt config default-agent codex-low
 You can also override the agent per command without changing defaults:
 
 ```bash
-gt start --agent codex-low
+gt mayor start --agent codex-low
 gt sling gt-abc12 myproject --agent claude-haiku
 ```
 

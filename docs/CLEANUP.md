@@ -8,9 +8,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 
 | Command | What it does |
 |---------|-------------|
-| `gt cleanup` | Kills orphaned Claude processes not tied to active tmux sessions |
-| `gt orphans procs list` | Lists orphaned Claude processes (PPID=1) |
-| `gt orphans procs kill` | Kills orphaned Claude processes (`--aggressive` for tmux-verified) |
 | `gt deacon cleanup-orphans` | Kills orphaned Claude subagent processes (no controlling TTY) |
 | `gt deacon zombie-scan` | Finds/kills zombie Claude processes not in active tmux sessions |
 
@@ -26,13 +23,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt polecat check-recovery` | Pre-nuke safety check (SAFE_TO_NUKE vs NEEDS_RECOVERY) |
 | `gt polecat identity remove <rig> <name>` | Removes a polecat identity |
 | `gt done` | Polecat self-cleaning: pushes branch, submits MR/PR path as configured, preserves handoff metadata, kills own session. MR skipped for `--status ESCALATED\|DEFERRED` or `no_merge` paths |
-
-## Git Artifact Cleanup
-
-| Command | What it does |
-|---------|-------------|
-| `gt orphans` | Finds orphaned commits never merged (detection only) |
-| `gt orphans kill` | Prunes orphaned commits (`git gc --prune=now`) + kills orphaned processes |
 
 ## Rig-Level Cleanup
 
@@ -151,7 +141,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | Layer | Scope | Key Commands |
 |-------|-------|-------------|
 | **L0** | Ephemeral data | `gt compact`, `gt krc prune` (TTL-based lifecycle) |
-| **L1** | Processes | `gt cleanup`, `gt orphans procs kill`, `gt deacon cleanup-orphans` |
+| **L1** | Processes | `gt deacon cleanup-orphans` |
 | **L2** | Git artifacts | `gt polecat gc` |
 | **L3** | Agents/sessions | `gt polecat nuke`, `gt done`, `gt shutdown`, `gt down` |
 | **L4** | Workspace | `gt rig reset`, `gt doctor --fix`, `gt dolt cleanup` |
