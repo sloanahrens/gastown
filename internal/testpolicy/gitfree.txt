@@ -9,6 +9,7 @@ internal/formula
 internal/git
 internal/git/gitfake
 internal/land
+internal/mail
 internal/polecat
 internal/rig
 internal/testutil
