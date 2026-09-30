@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -101,6 +103,56 @@ func TestSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
 	}
 
 	waitForGone(t, grandchild)
+}
+
+// TestSetProcessGroup_CancelSendsSIGTERMFirst guards the half of gt-6t43's
+// shared change that a group dying on either signal does not distinguish: the
+// group is signalled politely before anything is forced on it. The trap writes
+// a marker, so a Cancel that reached for SIGKILL — what every caller had
+// before gt-6t43 — leaves the marker unwritten and fails here.
+//
+// It runs against the shipped ProcessGroupKillGrace rather than a stub: the
+// trap has to win the window this test leaves it, and a default too short to
+// hold one is the regression worth failing on.
+func TestSetProcessGroup_CancelSendsSIGTERMFirst(t *testing.T) {
+	t.Parallel()
+
+	marker := filepath.Join(t.TempDir(), "reaped")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// $0 is the marker path (sh -c script name). The group waits on a
+	// backgrounded sleep, so it survives until something signals it. The
+	// subshell resets SIGTERM to its default: a shell with a TERM trap hands
+	// that disposition to what it backgrounds, so otherwise the sleep would
+	// outlast the polite signal and the escalation would end the group
+	// instead — reachable, but not what this test is measuring.
+	cmd := exec.CommandContext(ctx, "sh", "-c", `trap 'touch "$0"; exit 0' TERM; (trap - TERM; sleep 60) & echo $!; wait`, marker)
+	SetProcessGroup(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = KillProcessGroup(cmd) })
+	grandchild := readPID(t, stdout)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("cmd.Wait() = %v, want context.Canceled from the cancelled context", err)
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("the group's TERM trap did not run: %v — Cancel skipped SIGTERM", err)
+	}
+	waitForGone(t, grandchild)
+	waitForGroupGone(t, cmd.Process.Pid)
 }
 
 // startInGroup starts sh with script under SetProcessGroup and returns the

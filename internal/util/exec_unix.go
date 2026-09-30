@@ -12,6 +12,10 @@ import (
 // ProcessGroupKillGrace bounds how long KillProcessGroup waits for a process
 // group to exit on SIGTERM before escalating to SIGKILL. A var rather than a
 // const so a test can drive the escalation without sleeping out the default.
+//
+// A group that ignores SIGTERM costs every caller that bounds a command with a
+// context deadline this much past it, so it is part of the bound those callers
+// keep.
 var ProcessGroupKillGrace = 2 * time.Second
 
 // processGroupKillPoll is how often KillProcessGroup re-checks whether the
