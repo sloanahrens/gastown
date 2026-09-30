@@ -17,6 +17,14 @@ RUN_LOG_DIR=""
 COMPACTOR_LOCK_DIR=$(mktemp -d)
 RUN_LOG_DIRS="$COMPACTOR_LOCK_DIR"
 export COMPACTOR_LOCKFILE="$COMPACTOR_LOCK_DIR/compactor-dog.lock"
+# run.sh also reads the host's live mayor/daemon.json (threshold and
+# scheduled_maintenance.mode) for whatever a case leaves unpinned, and this
+# town runs gc mode at 20000 — a different answer from the monitor defaults
+# the cases were written against. Point GT_HOME at an empty dir so no case
+# depends on the machine it runs on; the config-root test below plants a
+# daemon.json of its own.
+export GT_HOME="$COMPACTOR_LOCK_DIR/gt-home"
+mkdir -p "$GT_HOME"
 run_test_cleanup() { rm -rf ${RUN_LOG_DIRS:-}; }
 trap run_test_cleanup EXIT
 
@@ -584,6 +592,45 @@ fi
 if ! grep -q 'ESCALATE .*hq' "$LOG/ops" 2>/dev/null; then
   echo "FAIL: monitor mode must still escalate a sub-daemon-threshold candidate (hq, 600) — the gc-mode gate should not apply here"
   FAILURES=$((FAILURES + 1))
+fi
+
+# (h) Config root: run.sh reads $GT_HOME/mayor/daemon.json as written, with no
+# "/gt" appended — GT_HOME is the town root itself. Plant a daemon.json whose
+# threshold (100) sits below the fixture's hq count (600) and leave the
+# threshold and mode unpinned: hq is then at/above the daemon's line, so the
+# script defers it and raises nothing. If run.sh looked anywhere else it would
+# fall back to 2000/monitor and escalate hq instead. This is the GT_HOME-set,
+# unpinned shape production runs in, which the pinned cases above never reach.
+if command -v jq >/dev/null 2>&1; then
+  FAKE_DIR_CONFIG=$(mktemp -d)
+  CONFIG_HOME=$(mktemp -d)
+  RUN_LOG_DIRS="$RUN_LOG_DIRS $FAKE_DIR_CONFIG $CONFIG_HOME"
+  write_fake_dolt_counts "$FAKE_DIR_CONFIG" 600 10
+  mkdir -p "$CONFIG_HOME/mayor"
+  printf '%s\n' '{"patrols":{"compactor_dog":{"threshold":100},"scheduled_maintenance":{"mode":"monitor"}}}' \
+    > "$CONFIG_HOME/mayor/daemon.json"
+  d=$(run_log_dir)
+  RUN_LOG_DIRS="$RUN_LOG_DIRS $d"
+  if (
+    export PATH="$FAKE_DIR_CONFIG:$PATH"
+    export RUN_LOG="$d/ops"
+    export GT_HOME="$CONFIG_HOME"
+    bash "$SCRIPT_DIR/run.sh"
+  ) >/dev/null 2>&1; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+  if [[ "$RUN_RC" -ne 0 ]]; then
+    echo "FAIL: check-only with a planted daemon.json exited $RUN_RC, want 0"
+    FAILURES=$((FAILURES + 1))
+  fi
+  if grep -q '^ESCALATE ' "$d/ops" 2>/dev/null; then
+    echo "FAIL: run.sh did not read \$GT_HOME/mayor/daemon.json (threshold 100): hq (600) was escalated instead of deferred"
+    FAILURES=$((FAILURES + 1))
+  fi
+else
+  echo "SKIP: config-root test needs jq"
 fi
 
 echo ""
