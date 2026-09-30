@@ -11,6 +11,7 @@ import (
 )
 
 func TestClassifyAgentKeysOnProvider(t *testing.T) {
+	t.Parallel()
 	agents := map[string]*config.RuntimeConfig{
 		"claude-sonnet":   {Provider: "claude", Command: "claude"},
 		"deepseek-flash":  {Provider: "claude", Command: "claude", Env: map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"}},
@@ -30,8 +31,8 @@ func TestClassifyAgentKeysOnProvider(t *testing.T) {
 		"bare-claude":     ClassHooked,
 		"bare-other":      ClassHookless,
 		"claude-imposter": ClassHookless, // the name never decides
-		"claude":          ClassHooked,   // built-in preset
-		"claude-opus":     ClassHookless, // not in the table, not a preset: fail closed
+		"claude":          ClassHookless, // not in the table: provider unknown, fail closed
+		"claude-opus":     ClassHookless, // not in the table: fail closed
 		"gemini":          ClassHookless,
 		"":                ClassHookless,
 	}
@@ -43,6 +44,7 @@ func TestClassifyAgentKeysOnProvider(t *testing.T) {
 }
 
 func TestHostSafetyTerm(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		text string
 		want string
@@ -94,6 +96,7 @@ func TestHostSafetyTerm(t *testing.T) {
 }
 
 func TestEligible(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		edit func(*Spec)
 		ok   bool
@@ -120,6 +123,7 @@ func TestEligible(t *testing.T) {
 }
 
 func TestOrderIsPriorityThenCreatedThenID(t *testing.T) {
+	t.Parallel()
 	specs := []Spec{
 		{ID: "gt-c", Priority: 2, CreatedAt: "2026-09-29T10:00:00Z"},
 		{ID: "gt-b", Priority: 1, CreatedAt: "2026-09-29T12:00:00Z"},
@@ -152,6 +156,7 @@ func baseBudget() Budget {
 func hostSafe(s *Spec) { s.Labels = append(s.Labels, HostSafeLabel) }
 
 func TestChooseSeatFailsClosed(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		live     map[string]int
@@ -201,6 +206,7 @@ func TestChooseSeatFailsClosed(t *testing.T) {
 }
 
 func TestBudgetBumpAndPicture(t *testing.T) {
+	t.Parallel()
 	b := baseBudget()
 	b.SetLive(map[string]int{"claude-sonnet": 1})
 	b.Bump("claude-sonnet", b.Now)
@@ -213,6 +219,7 @@ func TestBudgetBumpAndPicture(t *testing.T) {
 }
 
 func TestRetryOnContention(t *testing.T) {
+	t.Parallel()
 	contention := errors.New("bd mol bond: Error 1213 (40001): serialization failure: this transaction conflicts")
 	var slept []time.Duration
 	sleep := func(d time.Duration) { slept = append(slept, d) }

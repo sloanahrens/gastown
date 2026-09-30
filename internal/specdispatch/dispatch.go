@@ -29,9 +29,9 @@ const (
 //
 // An agent in the table is hooked iff its provider is "claude"; an empty
 // provider is resolved from the command, since the town runtime default is
-// the claude CLI. An agent the table does not carry is looked up as a
-// built-in preset, and only the claude preset is hooked. Anything unknown is
-// hookless: a class that cannot be established does not get the guarded one.
+// the claude CLI. An agent the table does not carry is hookless: its provider
+// cannot be established from settings, and an unknown class does not get the
+// guarded seat.
 func ClassifyAgent(name string, agents map[string]*config.RuntimeConfig) Class {
 	name = strings.TrimSpace(name)
 	if rc, ok := agents[name]; ok && rc != nil {
@@ -46,9 +46,6 @@ func ClassifyAgent(name string, agents map[string]*config.RuntimeConfig) Class {
 			return ClassHooked
 		}
 		return ClassHookless
-	}
-	if preset := config.GetAgentPresetByName(name); preset != nil && string(preset.Name) == "claude" {
-		return ClassHooked
 	}
 	return ClassHookless
 }

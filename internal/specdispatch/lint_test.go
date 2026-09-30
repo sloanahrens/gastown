@@ -41,6 +41,7 @@ func goodSpec() Spec {
 func defaultTemplate() Template { return Template{Sections: DefaultSections, Source: "built-in"} }
 
 func TestLintCleanSpec(t *testing.T) {
+	t.Parallel()
 	v := Lint(goodSpec(), defaultTemplate())
 	if !v.Clean() {
 		t.Fatalf("clean spec refused: %s", v.Line("gt-good"))
@@ -52,6 +53,7 @@ func TestLintCleanSpec(t *testing.T) {
 
 // Every required field, removed one at a time, must refuse and name that field.
 func TestLintNamesEveryMissingField(t *testing.T) {
+	t.Parallel()
 	removeSection := func(name string) func(*Spec) {
 		return func(s *Spec) {
 			var kept []string
@@ -120,6 +122,7 @@ func TestLintNamesEveryMissingField(t *testing.T) {
 }
 
 func TestLintAcceptanceFallsBackToDescriptionSection(t *testing.T) {
+	t.Parallel()
 	s := goodSpec()
 	s.Acceptance = ""
 	s.Description += "\n\n## Acceptance criteria\n- [ ] a\n- [ ] b\n"
@@ -129,6 +132,7 @@ func TestLintAcceptanceFallsBackToDescriptionSection(t *testing.T) {
 }
 
 func TestCountAcceptance(t *testing.T) {
+	t.Parallel()
 	cases := map[string]int{
 		"":                            0,
 		"   ":                         0,
@@ -146,6 +150,7 @@ func TestCountAcceptance(t *testing.T) {
 // The real template's headings must parse to the built-in list, so the lint
 // and /workorder read one shape.
 func TestParseTemplateSectionsMatchesTemplateShape(t *testing.T) {
+	t.Parallel()
 	template := "# Spec template\n\n```bash\nbd create --description=\"## Goal\n<x>\n\n## Constraints\n<y>\n\n## Out of scope\n<z>\n\n## Gate\n<g>\n\n## Size\none worker, one MR\"\n```\n"
 	got := ParseTemplateSections(template)
 	if strings.Join(got, "|") != strings.Join(DefaultSections, "|") {
@@ -159,6 +164,7 @@ func TestParseTemplateSectionsMatchesTemplateShape(t *testing.T) {
 }
 
 func TestLoadTemplateFileWinsAndFallsBack(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "spec-template.md")
 	if err := os.WriteFile(path, []byte("## Goal\n## Rollback\n"), 0o644); err != nil {
