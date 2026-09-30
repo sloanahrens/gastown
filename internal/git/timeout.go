@@ -25,7 +25,7 @@ func (e *timeoutError) Unwrap() error { return ErrTimedOut }
 // WithTimeout returns a copy of g whose calls are killed after d, the
 // receiver left as it was. A method that sets its own deadline (a push's, a
 // fetch's) keeps it; d bounds every call that sets none. Zero is today's
-// behaviour: no deadline. A killed call's error matches ErrTimedOut.
+// behavior: no deadline. A killed call's error matches ErrTimedOut.
 func (g *Git) WithTimeout(d time.Duration) *Git {
 	c := *g
 	c.timeout = d
