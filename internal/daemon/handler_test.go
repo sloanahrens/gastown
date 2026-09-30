@@ -10,9 +10,8 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// writeTestPlugin writes a town-level plugin.md (and, when script is set, a
-// run.sh) under townRoot/plugins/name.
-func writeTestPlugin(t *testing.T, townRoot, name, pluginMD, script string) {
+// writeTestPlugin writes a town-level plugin.md under townRoot/plugins/name.
+func writeTestPlugin(t *testing.T, townRoot, name, pluginMD string) {
 	t.Helper()
 	dir := filepath.Join(townRoot, "plugins", name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -20,11 +19,6 @@ func writeTestPlugin(t *testing.T, townRoot, name, pluginMD, script string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "plugin.md"), []byte(pluginMD), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
-	}
-	if script != "" {
-		if err := os.WriteFile(filepath.Join(dir, "run.sh"), []byte(script), 0o755); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
 	}
 }
 
@@ -40,9 +34,9 @@ func TestDispatchPlugins_RunsOnlyScriptPlugins(t *testing.T) {
 	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(logs, "", 0), execCmd: bash.run}
 
 	writeTestPlugin(t, townRoot, "test-manual",
-		"+++\nname = \"test-manual\"\ndescription = \"manual gate plugin\"\n\n[gate]\ntype = \"manual\"\n+++\n\n# Instructions\n", "")
+		"+++\nname = \"test-manual\"\ndescription = \"manual gate plugin\"\n\n[gate]\ntype = \"manual\"\n+++\n\n# Instructions\n")
 	writeTestPlugin(t, townRoot, "test-agent",
-		"+++\nname = \"test-agent\"\ndescription = \"instructions only\"\n\n[gate]\ntype = \"cooldown\"\n+++\n\n# Instructions\n", "")
+		"+++\nname = \"test-agent\"\ndescription = \"instructions only\"\n\n[gate]\ntype = \"cooldown\"\n+++\n\n# Instructions\n")
 
 	d.dispatchPlugins(&config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}})
 
