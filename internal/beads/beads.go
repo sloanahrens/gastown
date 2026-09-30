@@ -811,6 +811,13 @@ type Beads struct {
 	// without a gt:agent label row — so the agent side reads this. nil means
 	// "not warmed": the reader runs its own "bd mol wisp list" unchanged.
 	wispSnapshot []*Issue
+
+	// issueSnapshot is the issues-table counterpart of wispSnapshot, warmed by
+	// PreloadIssues() (beads_issue_snapshot.go). listIssues, ListAgentBeads and
+	// ListIssueStatuses answer from it when it covers the question asked and
+	// otherwise run their own bd subprocess unchanged. Same caveat as the other
+	// caches: it never refreshes.
+	issueSnapshot *issueSnapshot
 }
 
 // beadsFields holds every constructor-settable field of Beads. It exists so
@@ -1728,6 +1735,10 @@ func (b *Beads) List(opts ListOptions) ([]*Issue, error) {
 }
 
 func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
+	if issues, ok := b.issueSnapshot.list(opts); ok {
+		return issues, nil
+	}
+
 	args := []string{"list", "--json"}
 
 	if opts.Status != "" {
@@ -1810,6 +1821,10 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 			all = append(all, issues...)
 		}
 		return all, nil
+	}
+
+	if issues, ok := b.issueSnapshot.byStatus(unique); ok {
+		return issues, nil
 	}
 
 	statusClauses := make([]string, 0, len(unique))
@@ -2214,6 +2229,20 @@ func (b *Beads) listAllWisps() ([]*Issue, error) {
 // place the bd sql invocation, the JSON-vs-empty guard, and the row-to-Issue
 // mapping live, so every wisps reader agrees on what a row means.
 func (b *Beads) queryWisps(query string) ([]*Issue, error) {
+	rows, err := b.queryIssueRows(query)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*Issue, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, row.toIssue(true))
+	}
+	return result, nil
+}
+
+// queryIssueRows runs one bd sql SELECT over the wisps or issues table and
+// decodes its rows, guarding against bd printing something that is not JSON.
+func (b *Beads) queryIssueRows(query string) ([]bdSQLIssueRow, error) {
 	sqlOut, sqlErr := b.run("sql", "--json", query)
 	if sqlErr != nil {
 		return nil, sqlErr
@@ -2222,42 +2251,52 @@ func (b *Beads) queryWisps(query string) ([]*Issue, error) {
 		return nil, err
 	}
 
-	var rows []struct {
-		ID          string `json:"id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		Status      string `json:"status"`
-		Priority    int    `json:"priority"`
-		Assignee    string `json:"assignee"`
-		CreatedAt   string `json:"created_at"`
-		UpdatedAt   string `json:"updated_at"`
-		CreatedBy   string `json:"created_by"`
-		LabelsCSV   string `json:"labels_csv"`
-	}
+	var rows []bdSQLIssueRow
 	if jsonErr := json.Unmarshal(sqlOut, &rows); jsonErr != nil {
 		return nil, fmt.Errorf("parsing bd sql output: %w", jsonErr)
 	}
+	return rows, nil
+}
 
-	result := make([]*Issue, 0, len(rows))
-	for _, row := range rows {
-		issue := &Issue{
-			ID:          row.ID,
-			Title:       row.Title,
-			Description: row.Description,
-			Status:      row.Status,
-			Priority:    row.Priority,
-			Assignee:    row.Assignee,
-			CreatedAt:   row.CreatedAt,
-			UpdatedAt:   row.UpdatedAt,
-			CreatedBy:   row.CreatedBy,
-			Ephemeral:   true,
-		}
-		if row.LabelsCSV != "" {
-			issue.Labels = strings.Split(row.LabelsCSV, ",")
-		}
-		result = append(result, issue)
+// bdSQLIssueRow is one row of the wisps and issues SELECTs in this package
+// (wispSelectColumns, issueSelectColumns): the columns they share, plus the
+// two only the issues read selects (issue_type, ephemeral). A column a query
+// did not select decodes to its zero value.
+type bdSQLIssueRow struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Priority    int    `json:"priority"`
+	IssueType   string `json:"issue_type"`
+	Assignee    string `json:"assignee"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	CreatedBy   string `json:"created_by"`
+	Ephemeral   int    `json:"ephemeral"`
+	LabelsCSV   string `json:"labels_csv"`
+}
+
+// toIssue maps the row to an Issue. ephemeral is true for a wisps-table row,
+// whose table already says so; an issues-table row carries its own flag.
+func (r bdSQLIssueRow) toIssue(ephemeral bool) *Issue {
+	issue := &Issue{
+		ID:          r.ID,
+		Title:       r.Title,
+		Description: r.Description,
+		Status:      r.Status,
+		Priority:    r.Priority,
+		Type:        r.IssueType,
+		Assignee:    r.Assignee,
+		CreatedAt:   r.CreatedAt,
+		UpdatedAt:   r.UpdatedAt,
+		CreatedBy:   r.CreatedBy,
+		Ephemeral:   ephemeral || r.Ephemeral != 0,
 	}
-	return result, nil
+	if r.LabelsCSV != "" {
+		issue.Labels = strings.Split(r.LabelsCSV, ",")
+	}
+	return issue
 }
 
 // PreloadLabeledWisps warms this *Beads' wisp cache with one bd sql round trip
