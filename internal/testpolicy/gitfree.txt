@@ -5,9 +5,11 @@
 # gitfake or canned output adds its line and raises minGitFree in
 # gitfree_test.go.
 internal/doltserver
+internal/formula
 internal/git
 internal/git/gitfake
 internal/land
 internal/polecat
 internal/rig
+internal/testutil
 internal/util

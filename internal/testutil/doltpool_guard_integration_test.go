@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build integration && !windows
 
 package testutil
 
@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-// TestDoltCatalogGuardFiresOnRealServer is the guard's mutation proof against
+// TestIntegrationDoltCatalogGuardFiresOnRealServer is the guard's mutation proof against
 // the real image: on a container holding the image's databases and a pool, the
 // guard passes; a stray CREATE DATABASE, and a CREATE then DROP that leaves
 // SHOW DATABASES as it was, each fail it by name. It runs on its own container
 // so its catalog changes cannot reach any other test.
-func TestDoltCatalogGuardFiresOnRealServer(t *testing.T) {
+func TestIntegrationDoltCatalogGuardFiresOnRealServer(t *testing.T) {
 	port := StartIsolatedDoltContainer(t)
 	db, err := sql.Open("mysql", "root:@tcp(127.0.0.1:"+port+")/?timeout=30s")
 	if err != nil {

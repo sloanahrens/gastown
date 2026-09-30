@@ -19,24 +19,17 @@ func portNotMappedErr() error {
 	return fmt.Errorf("starting Dolt container: initialize: port %q not found", doltContainerPort)
 }
 
-// stubPortWaitSleep replaces the wait's sleep for one test, so a test can run
-// the whole poll budget without spending it.
-func stubPortWaitSleep(sleep func(time.Duration)) func() {
-	previous := portWaitSleep
-	portWaitSleep = sleep
-	return func() { portWaitSleep = previous }
-}
-
 // A container that answers on the first lookup is not delayed at all.
 func TestWaitForMappedPortImmediate(t *testing.T) {
+	t.Parallel()
 	sleeps := 0
-	defer stubPortWaitSleep(func(time.Duration) { sleeps++ })()
+	sleep := func(time.Duration) { sleeps++ }
 
 	lookups := 0
-	port, err := waitForMappedPort(context.Background(), func(context.Context, string) (string, error) {
+	port, err := waitForMappedPortSleeping(context.Background(), func(context.Context, string) (string, error) {
 		lookups++
 		return "55015", nil
-	})
+	}, sleep)
 	if err != nil || port != "55015" {
 		t.Fatalf("waitForMappedPort = (%q, %v), want (55015, nil)", port, err)
 	}
@@ -48,18 +41,19 @@ func TestWaitForMappedPortImmediate(t *testing.T) {
 // The lookup failing for a few polls and then answering is the race the wait
 // exists for: the startup must ride it out.
 func TestWaitForMappedPortWaitsOutTransientLookups(t *testing.T) {
+	t.Parallel()
 	sleeps := 0
-	defer stubPortWaitSleep(func(time.Duration) { sleeps++ })()
+	sleep := func(time.Duration) { sleeps++ }
 
 	const transient = 3
 	lookups := 0
-	port, err := waitForMappedPort(context.Background(), func(_ context.Context, containerPort string) (string, error) {
+	port, err := waitForMappedPortSleeping(context.Background(), func(_ context.Context, containerPort string) (string, error) {
 		lookups++
 		if lookups <= transient {
 			return "", fmt.Errorf("initialize: port %q not found", containerPort)
 		}
 		return "55016", nil
-	})
+	}, sleep)
 	if err != nil || port != "55016" {
 		t.Fatalf("waitForMappedPort = (%q, %v), want (55016, nil)", port, err)
 	}
@@ -71,14 +65,15 @@ func TestWaitForMappedPortWaitsOutTransientLookups(t *testing.T) {
 // A port that never appears fails the wait at the budget, reporting the lookup
 // error itself rather than "timed out".
 func TestWaitForMappedPortGivesUpAtBudget(t *testing.T) {
+	t.Parallel()
 	sleeps := 0
-	defer stubPortWaitSleep(func(time.Duration) { sleeps++ })()
+	sleep := func(time.Duration) { sleeps++ }
 
 	lookups := 0
-	port, err := waitForMappedPort(context.Background(), func(_ context.Context, containerPort string) (string, error) {
+	port, err := waitForMappedPortSleeping(context.Background(), func(_ context.Context, containerPort string) (string, error) {
 		lookups++
 		return "", fmt.Errorf("port %q not found", containerPort)
-	})
+	}, sleep)
 	if port != "" {
 		t.Fatalf("port = %q, want empty", port)
 	}
@@ -123,6 +118,7 @@ func (f *fakeContainerStart) hooks() containerStartHooks {
 }
 
 func TestRetryContainerStartSucceedsFirstAttempt(t *testing.T) {
+	t.Parallel()
 	f := &fakeContainerStart{t: t, ctr: &dolt.DoltContainer{}, failures: []error{nil}}
 
 	ctr, err := retryContainerStart(context.Background(), f.hooks())
@@ -138,6 +134,7 @@ func TestRetryContainerStartSucceedsFirstAttempt(t *testing.T) {
 // A port that was not mapped yet is waited out and retried, and the container
 // the failed attempt left behind is reaped rather than leaked.
 func TestRetryContainerStartRetriesUnmappedPort(t *testing.T) {
+	t.Parallel()
 	f := &fakeContainerStart{t: t, ctr: &dolt.DoltContainer{}, failures: []error{portNotMappedErr(), nil}}
 
 	ctr, err := retryContainerStart(context.Background(), f.hooks())
@@ -155,6 +152,7 @@ func TestRetryContainerStartRetriesUnmappedPort(t *testing.T) {
 // The reaper still removing the previous container is retried too, and needs no
 // port wait: that failure says nothing about this container's bindings.
 func TestRetryContainerStartRetriesReaperRemoving(t *testing.T) {
+	t.Parallel()
 	reaperErr := errors.New("unexpected container status \"removing\"")
 	f := &fakeContainerStart{t: t, ctr: &dolt.DoltContainer{}, failures: []error{reaperErr, nil}}
 
@@ -169,6 +167,7 @@ func TestRetryContainerStartRetriesReaperRemoving(t *testing.T) {
 // The retry is bounded, and when it runs out the failure names the container's
 // own output instead of ending at the port lookup.
 func TestRetryContainerStartExhaustedReportsLogs(t *testing.T) {
+	t.Parallel()
 	f := &fakeContainerStart{
 		t:        t,
 		ctr:      &dolt.DoltContainer{},
@@ -198,6 +197,7 @@ func TestRetryContainerStartExhaustedReportsLogs(t *testing.T) {
 // An error the retry does not recognise is reported at once, still with the
 // container's logs.
 func TestRetryContainerStartDoesNotRetryOtherFailures(t *testing.T) {
+	t.Parallel()
 	f := &fakeContainerStart{
 		t:        t,
 		ctr:      &dolt.DoltContainer{},
@@ -219,6 +219,7 @@ func TestRetryContainerStartDoesNotRetryOtherFailures(t *testing.T) {
 // verbatim: there is no log to read, and the callers match on this text to skip
 // rather than fail.
 func TestRetryContainerStartReportsStartFailureWithoutContainer(t *testing.T) {
+	t.Parallel()
 	dockerErr := errors.New("testcontainers docker unavailable: rootless Docker not found")
 	f := &fakeContainerStart{t: t, failures: []error{dockerErr}}
 
@@ -232,6 +233,7 @@ func TestRetryContainerStartReportsStartFailureWithoutContainer(t *testing.T) {
 }
 
 func TestWithContainerLogs(t *testing.T) {
+	t.Parallel()
 	base := portNotMappedErr()
 	tests := []struct {
 		name    string
@@ -277,6 +279,7 @@ func TestWithContainerLogs(t *testing.T) {
 }
 
 func TestIsRetriableContainerStartErr(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error

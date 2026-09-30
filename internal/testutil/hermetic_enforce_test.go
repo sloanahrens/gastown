@@ -1,11 +1,12 @@
 package testutil
 
 import (
+	"go/build"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -13,9 +14,7 @@ import (
 // hermeticExempt lists packages that are allowed to skip the hermetic
 // TestMain harness despite having a risky test dependency closure. Every
 // entry needs a justification; prefer adopting the harness over adding one.
-var hermeticExempt = map[string]string{
-	"github.com/steveyegge/gastown/internal/testutil": "the harness itself; its tests build and probe sandbox fixtures directly",
-}
+var hermeticExempt = map[string]string{}
 
 // riskyDepPattern matches dependency import paths that can reach live town
 // state: the beads SDK (Dolt-backed issue tracker) and the Dolt server
@@ -37,47 +36,28 @@ var harnessMarker = regexp.MustCompile(`testutil\.(HermeticMain|StartHermetic)\(
 //
 // This is the CI guard for gt-lwi: running `go test ./...` from a worktree
 // inside a live town must never mutate that town.
+//
+// Each test binary's dependency closure comes from the shared parse of the
+// module (sharedRepoTree), not from `go list -test`: the closure follows the
+// module's own packages through their build-selected files, and a dependency
+// outside the module is judged by its import path.
+// TestIntegrationHermeticGuardAgreesWithGoList checks the result against go
+// list.
 func TestHermeticHarnessEnforced(t *testing.T) {
-	goBin, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("go tool not available")
-	}
-	moduleRoot := findModuleRoot(t)
-
-	// One `go list -test` pass gives every test binary's full dependency
-	// closure. Lines look like: <import-path>|<dep>,<dep>,...
-	cmd := exec.Command(goBin, "list", "-test", "-f", "{{.ImportPath}}|{{join .Deps \",\"}}", "./...") //nolint:gosec // fixed args
-	cmd.Dir = moduleRoot
-	out, err := cmd.Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			t.Fatalf("go list -test failed: %v\n%s", err, ee.Stderr)
-		}
-		t.Fatalf("go list -test failed: %v", err)
-	}
+	t.Parallel()
+	tree := sharedRepoTree(t)
 
 	var flagged []string
-	seen := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		path, deps, ok := strings.Cut(line, "|")
-		if !ok || !strings.HasSuffix(path, ".test") {
-			continue
-		}
-		pkg := strings.TrimSuffix(path, ".test")
-		if seen[pkg] {
-			continue
-		}
-		seen[pkg] = true
-
+	for pkg, deps := range tree.testBinaryDeps() {
 		risky := false
-		for _, dep := range strings.Split(deps, ",") {
+		for dep := range deps {
 			if riskyDepPattern.MatchString(dep) {
 				risky = true
 				break
 			}
 		}
 		if !risky {
-			risky = packageTestSourceIsRisky(t, moduleRoot, pkg)
+			risky = packageTestSourceIsRisky(t, tree.root, pkg)
 		}
 		if !risky {
 			continue
@@ -85,7 +65,7 @@ func TestHermeticHarnessEnforced(t *testing.T) {
 		if _, exempt := hermeticExempt[pkg]; exempt {
 			continue
 		}
-		if !packageUsesHarness(t, moduleRoot, pkg) {
+		if !packageUsesHarness(t, tree.root, pkg) {
 			flagged = append(flagged, pkg)
 		}
 	}
@@ -98,6 +78,109 @@ func TestHermeticHarnessEnforced(t *testing.T) {
 			"or add an entry to hermeticExempt with a justification (internal/testutil/hermetic_enforce_test.go).",
 			strings.Join(flagged, "\n  "))
 	}
+}
+
+// buildFiles returns dir's files the default build context selects (GOOS,
+// GOARCH and build constraints, no tags), with or without its tests.
+func (tr *repoTree) buildFiles(dir string, tests bool) []*repoFile {
+	var out []*repoFile
+	for _, f := range tr.files[dir] {
+		if f.ast == nil || (!tests && strings.HasSuffix(f.name, "_test.go")) {
+			continue
+		}
+		if ok, err := build.Default.MatchFile(dir, f.name); err != nil || !ok {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+func importsOf(files []*repoFile) []string {
+	var out []string
+	for _, f := range files {
+		for _, imp := range f.ast.Imports {
+			if p, err := strconv.Unquote(imp.Path.Value); err == nil {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// testBinaryDeps returns, for every package with test files, what `go list
+// -test` reports as its test binary's Deps: every package it links, found by
+// following the module's packages through their non-test files. Packages
+// under directories go ./... skips (a leading "." or "_") are left out.
+func (tr *repoTree) testBinaryDeps() map[string]map[string]bool {
+	closure := map[string]map[string]bool{} // import path -> its deps, module packages only
+	var depsOf func(path string) map[string]bool
+	depsOf = func(path string) map[string]bool {
+		if d, ok := closure[path]; ok {
+			return d
+		}
+		deps := map[string]bool{}
+		closure[path] = deps // cycles are compile errors; this just stops the walk
+		dir := filepath.Join(tr.root, filepath.FromSlash(strings.TrimPrefix(strings.TrimPrefix(path, tr.module), "/")))
+		for _, imp := range importsOf(tr.buildFiles(dir, false)) {
+			deps[imp] = true
+			if imp == tr.module || strings.HasPrefix(imp, tr.module+"/") {
+				for d := range depsOf(imp) {
+					deps[d] = true
+				}
+			}
+		}
+		return deps
+	}
+
+	out := map[string]map[string]bool{}
+	for _, dir := range tr.dirs {
+		rel, _ := filepath.Rel(tr.root, dir)
+		if skippedByGoList(rel) {
+			continue
+		}
+		files := tr.buildFiles(dir, true)
+		hasTest := false
+		for _, f := range files {
+			if strings.HasSuffix(f.name, "_test.go") {
+				hasTest = true
+				break
+			}
+		}
+		if !hasTest {
+			continue
+		}
+		pkg := tr.importPath(dir)
+		deps := map[string]bool{}
+		for _, imp := range importsOf(files) {
+			deps[imp] = true
+			if imp == tr.module || strings.HasPrefix(imp, tr.module+"/") {
+				for d := range depsOf(imp) {
+					deps[d] = true
+				}
+			}
+		}
+		for d := range depsOf(pkg) {
+			deps[d] = true
+		}
+		delete(deps, pkg)
+		out[pkg] = deps
+	}
+	return out
+}
+
+// skippedByGoList reports whether ./... leaves out the directory at rel: one
+// with any path element starting with "." or "_".
+func skippedByGoList(rel string) bool {
+	if rel == "." {
+		return false
+	}
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if strings.HasPrefix(part, ".") || strings.HasPrefix(part, "_") {
+			return true
+		}
+	}
+	return false
 }
 
 // packageDir maps an import path in this module to its directory.
@@ -145,22 +228,4 @@ func readTestFiles(t *testing.T, dir string) [][]byte {
 		files = append(files, data)
 	}
 	return files
-}
-
-func findModuleRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("go.mod not found above test working directory")
-		}
-		dir = parent
-	}
 }

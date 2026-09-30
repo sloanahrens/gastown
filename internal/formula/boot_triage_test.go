@@ -6,6 +6,7 @@ import (
 )
 
 func TestBootTriageFormulaUsesNudgeForWake(t *testing.T) {
+	t.Parallel()
 	content, err := formulasFS.ReadFile("formulas/mol-boot-triage.formula.toml")
 	if err != nil {
 		t.Fatalf("reading boot triage formula: %v", err)

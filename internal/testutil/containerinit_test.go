@@ -13,6 +13,7 @@ import (
 // "container gone"; a genuine bd, Dolt or Beads.Init regression reads as bd's
 // answer. Both fail the test.
 func TestUnrelatedInitErrorFailsTheTest(t *testing.T) {
+	t.Parallel()
 	container := beads.NewIsolatedWithPort(t.TempDir(), 55107)
 	production := beads.New(t.TempDir())
 

@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build integration && !windows
 
 package testutil
 
@@ -14,7 +14,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 )
 
-// TestDoltPoolResetsAReturnedDatabaseOnARealServer is the reuse proof against
+// TestIntegrationDoltPoolResetsAReturnedDatabaseOnARealServer is the reuse proof against
 // the real image: a one-database pool lends its store to a test that dirties
 // it every way a test can — issues, a wisp in a dolt_ignore table, config, a
 // branch, a tag, a remote, a table of its own, uncommitted rows — and the next
@@ -22,7 +22,7 @@ import (
 // init lease then gets it back empty, and a SQL database is reset the same
 // way. The server's catalog is the same at the end as at the start. It runs on
 // its own container, so its pool cannot reach any other test.
-func TestDoltPoolResetsAReturnedDatabaseOnARealServer(t *testing.T) {
+func TestIntegrationDoltPoolResetsAReturnedDatabaseOnARealServer(t *testing.T) {
 	port := StartIsolatedDoltContainer(t)
 	portNum, err := strconv.Atoi(port)
 	if err != nil {

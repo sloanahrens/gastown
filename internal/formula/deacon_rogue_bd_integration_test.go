@@ -1,3 +1,5 @@
+//go:build integration
+
 package formula
 
 import (
@@ -218,7 +220,7 @@ func classOf(t *testing.T, out, path string) string {
 // flagged <worktree-root>/bd in every beads worktree that had ever run `make
 // build`, and neutralizing those (chmod 644) breaks the rig's own build and
 // test loop. A town whose only bd is that build output reports clean.
-func TestDeaconRogueBdCheckSparesBuildOutputOfTheBdRepo(t *testing.T) {
+func TestIntegrationDeaconRogueBdCheckSparesBuildOutputOfTheBdRepo(t *testing.T) {
 	town := newRogueBdTown(t)
 	built := town.newBdSourceWorktree(t, "beads", "dust")
 
@@ -239,7 +241,7 @@ func TestDeaconRogueBdCheckSparesBuildOutputOfTheBdRepo(t *testing.T) {
 // covers the bd source's own ignored build output and nothing else. It runs
 // step 18's shell against a town holding one of each shape a bd can take and
 // reads the verdict printed for each (gt-li4t).
-func TestDeaconRogueBdCheckFlagsEveryShadow(t *testing.T) {
+func TestIntegrationDeaconRogueBdCheckFlagsEveryShadow(t *testing.T) {
 	town := newRogueBdTown(t)
 	built := town.newBdSourceWorktree(t, "beads", "dust")
 	worktree := filepath.Dir(built)
