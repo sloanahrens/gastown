@@ -6,3 +6,4 @@
 # gitfree_test.go.
 internal/git
 internal/git/gitfake
+internal/land

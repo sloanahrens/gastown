@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,14 +13,18 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
-// landFixture is a bare origin with main and one pushed work branch, a
-// separate clone the Lander adds worktrees from, and a work bead marked ready.
+// landFixture is an origin with main and one pushed work branch, a clone
+// the Lander adds worktrees from, and a work bead marked ready. The
+// repositories live in a gitfake world; newRealLandFixture builds the same
+// shape with real git for the integration tier (git is nil there).
 type landFixture struct {
 	t        *testing.T
+	git      *gitfake.Fake
 	origin   string
-	seed     string // the author's clone
 	repo     string // the lander's clone
 	workRoot string
 	town     string
@@ -30,77 +33,62 @@ type landFixture struct {
 	bd       *beadsfake.Fake
 	gate     *fakeGate
 	review   *fakeReviewer
+
+	realPushMain   func(name, body string) string
+	realOriginMain func() string
+	realParents    func(commit string) []string
 }
 
-func gitT(t *testing.T, dir string, args ...string) string {
+const fixtureBranch = "polecat/opal/gt-abc+x1"
+
+func newLandFixtureAt(t *testing.T) *landFixture {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func writeT(t *testing.T, dir, name, body string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func identity(t *testing.T, dir string) {
-	gitT(t, dir, "config", "user.email", "test@example.com")
-	gitT(t, dir, "config", "user.name", "Test User")
-	gitT(t, dir, "config", "core.hooksPath", "/dev/null")
+	root := t.TempDir()
+	return &landFixture{t: t, origin: filepath.Join(root, "origin.git"), repo: filepath.Join(root, "lander"),
+		workRoot: filepath.Join(root, "work"), town: filepath.Join(root, "town")}
 }
 
 // newLandFixture builds origin with a.txt on main and a branch that adds
-// b.txt. mainEdit, when set, runs on the author's clone at main after the
-// branch is pushed, and its commit is pushed to origin/main.
+// b.txt, in a gitfake world.
 func newLandFixture(t *testing.T) *landFixture {
 	t.Helper()
-	root := t.TempDir()
-	f := &landFixture{t: t, origin: filepath.Join(root, "origin.git"), seed: filepath.Join(root, "seed"), repo: filepath.Join(root, "lander"), workRoot: filepath.Join(root, "work"), town: filepath.Join(root, "town")}
-	gitT(t, root, "init", "-q", "--bare", "-b", "main", f.origin)
-	gitT(t, root, "clone", "-q", f.origin, f.seed)
-	identity(t, f.seed)
-	gitT(t, f.seed, "checkout", "-q", "-b", "main")
-	writeT(t, f.seed, "a.txt", "one\ntwo\nthree\n")
-	gitT(t, f.seed, "add", "a.txt")
-	gitT(t, f.seed, "commit", "-q", "-m", "main: seed")
-	gitT(t, f.seed, "push", "-q", "origin", "main")
-	branch := "polecat/opal/gt-abc+x1"
-	gitT(t, f.seed, "checkout", "-q", "-b", branch)
-	writeT(t, f.seed, "b.txt", "work\n")
-	gitT(t, f.seed, "add", "b.txt")
-	gitT(t, f.seed, "commit", "-q", "-m", "feat: add b")
-	gitT(t, f.seed, "push", "-q", "origin", branch)
-	head := gitT(t, f.seed, "rev-parse", "HEAD")
-	gitT(t, f.seed, "checkout", "-q", "main")
-	gitT(t, root, "clone", "-q", f.origin, f.repo)
-	identity(t, f.repo)
-	f.base = gitT(t, f.seed, "rev-parse", "origin/main")
-	f.work = Work{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: head, Target: "main", Worker: "opal"}
+	f := newLandFixtureAt(t)
+	f.git = gitfake.New()
+	f.git.InitBare(t, f.origin)
+	f.base = f.git.Commit(t, f.origin, "main", "main: seed", map[string]string{"a.txt": "one\ntwo\nthree\n"})
+	f.git.SetRef(t, f.origin, "refs/heads/"+fixtureBranch, f.base)
+	head := f.git.Commit(t, f.origin, fixtureBranch, "feat: add b", map[string]string{"b.txt": "work\n"})
+	f.git.Clone(t, f.origin, f.repo)
+	f.ready(head)
+	return f
+}
+
+// ready declares the work at head and seeds its bead, gate and reviewer.
+func (f *landFixture) ready(head string) {
+	f.work = Work{BeadID: "gt-abc", Rig: "gastown", Branch: fixtureBranch, Head: head, Target: "main", Worker: "opal"}
 	f.bd = beadsfake.New(beadsfake.WithPrefix("gt"))
 	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal",
 		Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
 	f.gate = &fakeGate{fn: func(string) GateResult { return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}} }}
 	f.review = &fakeReviewer{fn: func(string) (Verdict, error) { return Verdict{Verdict: VerdictApprove, Score: 0.9}, nil }}
-	return f
 }
 
-// pushMain commits body to name on origin/main from the author's clone.
+// pushMain commits body to name on origin/main.
 func (f *landFixture) pushMain(name, body string) string {
 	f.t.Helper()
-	gitT(f.t, f.seed, "checkout", "-q", "main")
-	gitT(f.t, f.seed, "pull", "-q", "--ff-only", "origin", "main")
-	writeT(f.t, f.seed, name, body)
-	gitT(f.t, f.seed, "add", name)
-	gitT(f.t, f.seed, "commit", "-q", "-m", "main: "+name)
-	gitT(f.t, f.seed, "push", "-q", "origin", "main")
-	return gitT(f.t, f.seed, "rev-parse", "HEAD")
+	if f.git == nil {
+		return f.realPushMain(name, body)
+	}
+	return f.git.Commit(f.t, f.origin, "main", "main: "+name, map[string]string{name: body})
+}
+
+// setBranch points the work branch on origin at a new commit on base with
+// message, carrying the branch's change, and declares it the head.
+func (f *landFixture) setBranch(message string) {
+	f.t.Helper()
+	f.git.SetRef(f.t, f.origin, "refs/heads/"+fixtureBranch, f.base)
+	head := f.git.Commit(f.t, f.origin, fixtureBranch, message, map[string]string{"b.txt": "work\n"})
+	f.work.Head = head
 }
 
 func (f *landFixture) lander() *Lander {
@@ -108,11 +96,27 @@ func (f *landFixture) lander() *Lander {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	return &Lander{Repo: f.repo, WorkRoot: f.workRoot, Gate: f.gate, Reviewer: f.review, Beads: f.bd, Landings: lf,
+	l := &Lander{Repo: f.repo, WorkRoot: f.workRoot, Gate: f.gate, Reviewer: f.review, Beads: f.bd, Landings: lf,
 		Now: func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) }}
+	if f.git != nil {
+		l.openRepo = func(dir string) Repo { return f.git.Open(dir) }
+	}
+	return l
 }
 
-func (f *landFixture) originMain() string { return gitT(f.t, f.origin, "rev-parse", "refs/heads/main") }
+func (f *landFixture) parents(commit string) []string {
+	if f.git == nil {
+		return f.realParents(commit)
+	}
+	return f.git.Parents(commit)
+}
+
+func (f *landFixture) originMain() string {
+	if f.git == nil {
+		return f.realOriginMain()
+	}
+	return f.git.Ref(f.origin, "refs/heads/main")
+}
 
 func (f *landFixture) bead() *beads.Issue {
 	f.t.Helper()
@@ -202,7 +206,13 @@ func (f *landFixture) assertRejected(t *testing.T, err error, kind RejectionKind
 
 func TestLandMergesGatesPushesAndRecords(t *testing.T) {
 	t.Parallel()
-	f := newLandFixture(t)
+	landsAndRecords(t, newLandFixture(t))
+}
+
+// landsAndRecords lands the fixture's work onto a main that moved on, and
+// checks the merge, the gate and review, the push and the whole record. The
+// integration tier runs it over real git.
+func landsAndRecords(t *testing.T, f *landFixture) {
 	moved := f.pushMain("c.txt", "other\n") // main moved on since the branch
 	f.base = moved
 	var gatedHasBoth bool
@@ -222,9 +232,8 @@ func TestLandMergesGatesPushesAndRecords(t *testing.T) {
 	if got := f.originMain(); got != res.LandedCommit {
 		t.Fatalf("origin/main = %s, want landed %s", got, res.LandedCommit)
 	}
-	parents := strings.Fields(gitT(t, f.origin, "rev-list", "--parents", "-n", "1", res.LandedCommit))
-	if len(parents) != 3 || parents[1] != moved || parents[2] != f.work.Head {
-		t.Fatalf("landed commit parents = %v, want [%s %s]", parents[1:], moved, f.work.Head)
+	if parents := f.parents(res.LandedCommit); len(parents) != 2 || parents[0] != moved || parents[1] != f.work.Head {
+		t.Fatalf("landed commit parents = %v, want [%s %s]", parents, moved, f.work.Head)
 	}
 	if res.Base != moved || res.PatchID == "" {
 		t.Fatalf("result = %+v", res)
@@ -259,9 +268,36 @@ func TestLandMergesGatesPushesAndRecords(t *testing.T) {
 	}
 }
 
-func TestLandConflictIsARejectionWithFiles(t *testing.T) {
+// An auto-save commit in the range is squashed away: the landed commit has
+// one parent, main, and carries the branch's whole change.
+func TestLandSquashesARangeWithAutoSaveCommits(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
+	head := f.git.Commit(t, f.origin, fixtureBranch, checkpoint.WIPCommitPrefix+" 2026-09-30", map[string]string{"c.txt": "wip\n"})
+	f.work.Head = head
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if parents := f.git.Parents(res.LandedCommit); len(parents) != 1 || parents[0] != f.base {
+		t.Fatalf("landed commit parents = %v, want the squash's single parent %s", parents, f.base)
+	}
+	if tree := f.git.Tree(res.LandedCommit); tree["b.txt"] != "work\n" || tree["c.txt"] != "wip\n" {
+		t.Fatalf("landed tree = %v, want the branch's b.txt and c.txt", tree)
+	}
+	if f.originMain() != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want %s", f.originMain(), res.LandedCommit)
+	}
+}
+
+func TestLandConflictIsARejectionWithFiles(t *testing.T) {
+	t.Parallel()
+	conflictIsARejection(t, newLandFixture(t))
+}
+
+// conflictIsARejection lands a branch that conflicts with main. The
+// integration tier runs it over real git.
+func conflictIsARejection(t *testing.T, f *landFixture) {
 	// The branch and main both write b.txt differently.
 	f.base = f.pushMain("b.txt", "main's b\n")
 	_, err := f.lander().Land(context.Background(), f.work)
@@ -330,7 +366,7 @@ func TestLandReadBackFailureWritesNoRecord(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	l.afterPush = func() { gitT(t, f.origin, "update-ref", "refs/heads/main", f.base) }
+	l.afterPush = func() { f.git.SetRef(t, f.origin, "refs/heads/main", f.base) }
 	_, err := l.Land(context.Background(), f.work)
 	if !errors.Is(err, ErrReadBack) {
 		t.Fatalf("Land error = %v, want ErrReadBack", err)
@@ -502,7 +538,7 @@ func TestLandRepairsAnIncompleteRecord(t *testing.T) {
 func TestLandHeadAlreadyOnTargetNeedsAHuman(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	gitT(t, f.seed, "push", "-q", "origin", f.work.Head+":refs/heads/main")
+	f.git.SetRef(t, f.origin, "refs/heads/main", f.work.Head)
 	f.base = f.work.Head
 	_, err := f.lander().Land(context.Background(), f.work)
 	rej := f.assertRejected(t, err, RejectEmpty, LabelNeedsHuman)
