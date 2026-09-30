@@ -1,267 +1,92 @@
 package polecat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
 func TestHasSubmittableWorkForWorkstateUsesBranchTargetStatus(t *testing.T) {
 	t.Parallel()
-	repo := setupManagerSquashPreservedRepo(t)
-	if got := hasSubmittableWorkForWorkstate(repo, []string{"integration/test"}); got {
+	w, repo := setupManagerSquashPreservedRepo(t)
+	if got := hasSubmittableWorkForWorkstate(w.repo(repo), []string{"integration/test"}); got {
 		t.Fatal("squash-preserved branch should not require MQ submission through manager workstate helper")
 	}
 
-	managerWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
-	runManagerGit(t, repo, "add", "feature.txt")
-	runManagerGit(t, repo, "commit", "-m", "extra local work")
-	if got := hasSubmittableWorkForWorkstate(repo, []string{"integration/test"}); !got {
+	w.writeAndCommit(t, repo, "extra local work", map[string]string{"feature.txt": "one\ntwo\nthree\n"})
+	if got := hasSubmittableWorkForWorkstate(w.repo(repo), []string{"integration/test"}); !got {
 		t.Fatal("new local work after squash preservation should still require MQ submission")
 	}
 }
 
-func setupManagerSquashPreservedRepo(t *testing.T) string {
+// setupManagerSquashPreservedRepo is a repo on polecat/squash, two
+// checkpoint commits ahead of main, whose change origin's integration/test
+// carries as one squash commit, then moves past.
+func setupManagerSquashPreservedRepo(t *testing.T) (*world, string) {
 	t.Helper()
+	w := newWorld()
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
 	repo := filepath.Join(root, "repo")
-	runManagerGit(t, root, "init", "--bare", remote)
-	if err := os.MkdirAll(repo, 0755); err != nil {
-		t.Fatal(err)
-	}
-	runManagerGit(t, repo, "init")
-	runManagerGit(t, repo, "config", "user.email", "test@example.com")
-	runManagerGit(t, repo, "config", "user.name", "Test User")
-	managerWriteFile(t, filepath.Join(repo, "README.md"), "base\n")
-	runManagerGit(t, repo, "add", "README.md")
-	runManagerGit(t, repo, "commit", "-m", "base")
-	runManagerGit(t, repo, "branch", "-M", "main")
-	runManagerGit(t, repo, "remote", "add", "origin", remote)
-	runManagerGit(t, repo, "push", "-u", "origin", "main")
-	runManagerGit(t, repo, "switch", "-c", "integration/test")
-	runManagerGit(t, repo, "push", "-u", "origin", "integration/test")
-	if err := exec.Command("git", "-C", repo, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
-		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
-	}
-
-	runManagerGit(t, repo, "switch", "-c", "polecat/squash")
-	managerWriteFile(t, filepath.Join(repo, "feature.txt"), "one\n")
-	runManagerGit(t, repo, "add", "feature.txt")
-	runManagerGit(t, repo, "commit", "-m", "checkpoint one")
-	managerWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\n")
-	runManagerGit(t, repo, "add", "feature.txt")
-	runManagerGit(t, repo, "commit", "-m", "checkpoint two")
-	runManagerGit(t, repo, "switch", "integration/test")
-	runManagerGit(t, repo, "merge", "--squash", "polecat/squash")
-	runManagerGit(t, repo, "commit", "-m", "squash polecat work")
-	managerWriteFile(t, filepath.Join(repo, "target.txt"), "target advanced\n")
-	runManagerGit(t, repo, "add", "target.txt")
-	runManagerGit(t, repo, "commit", "-m", "advance target")
-	runManagerGit(t, repo, "push", "origin", "integration/test")
-	runManagerGit(t, repo, "switch", "polecat/squash")
-	return repo
-}
-
-func managerWriteFile(t *testing.T, path, data string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func runManagerGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
-	}
-}
-
-// initAddTestBeads readies the beads side of an AddWithOptions test. With
-// realBd it initializes a real beads database on the test Dolt container and
-// returns nil, so the manager runs the real bd; otherwise it returns the
-// fake agent bd and writes the type-config sentinel so EnsureCustomTypes is
-// a no-op.
-func initAddTestBeads(t *testing.T, mayorRig, mayorBeads string, realBd bool) *fakeBd {
-	t.Helper()
-	if realBd {
-		testutil.RequireDoltContainer(t)
-		port, _ := strconv.Atoi(testutil.DoltContainerPort())
-		if err := beads.NewIsolatedWithPort(mayorRig, port).Init("gt"); err != nil {
-			t.Fatalf("bd init: %v", err)
+	w.InitBare(t, remote)
+	w.Commit(t, remote, "main", "base", map[string]string{"README.md": "base\n"})
+	w.Clone(t, remote, repo)
+	g := w.OpenWorktreeRepo(repo)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
 		}
-		return nil
 	}
+	must(g.CheckoutNewBranch("integration/test", "main"))
+	must(g.Push("origin", "integration/test", false))
+	must(g.CheckoutNewBranch("polecat/squash", "integration/test"))
+	w.writeAndCommit(t, repo, "checkpoint one", map[string]string{"feature.txt": "one\n"})
+	w.writeAndCommit(t, repo, "checkpoint two", map[string]string{"feature.txt": "one\ntwo\n"})
+	must(g.Checkout("integration/test"))
+	must(g.MergeSquash("polecat/squash", "squash polecat work"))
+	w.writeAndCommit(t, repo, "advance target", map[string]string{"target.txt": "target advanced\n"})
+	must(g.Push("origin", "integration/test", false))
+	must(g.Checkout("polecat/squash"))
+	return w, repo
+}
+
+// addBeads readies the beads side of an AddWithOptions test and returns
+// the bd the manager runs: fakeAddBeads in the unit tier, realAddBeads (a
+// real bd on the test Dolt container) in the integration tier.
+type addBeads func(t *testing.T, mayorRig, mayorBeads string) *fakeBd
+
+// fakeAddBeads returns the fake agent bd and writes the type-config sentinel
+// so EnsureCustomTypes is a no-op.
+func fakeAddBeads(_ *testing.T, _, mayorBeads string) *fakeBd {
 	_ = os.WriteFile(filepath.Join(mayorBeads, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644)
 	return newAgentBd(true)
 }
 
-func setupCanonicalBranchManagerTest(t *testing.T) (*Manager, string) {
+// createStalePolecatCommit creates branchName at startPoint in the checkout
+// at repoPath, commits a marker file to it, and returns the commit.
+func createStalePolecatCommit(t *testing.T, w *world, repoPath, startPoint, branchName string) string {
 	t.Helper()
-	mgr, mayorRig, _ := setupCanonicalBranchManagerTestBd(t)
-	return mgr, mayorRig
-}
-
-// setupCanonicalBranchManagerTestBd is setupCanonicalBranchManagerTest that
-// also returns the manager's fake bd, for tests that change its answers.
-func setupCanonicalBranchManagerTestBd(t *testing.T) (*Manager, string, *fakeBd) {
-	t.Helper()
-	town := cachedGitFixture(t, "canonical-branch-manager", func(town string) {
-		buildCanonicalRig(t, filepath.Join(town, "rig"))
-	})
-	return canonicalManager(t, town)
-}
-
-// canonicalManager is a manager, with the fake agent bd, for the canonical
-// rig at town/rig, and that rig's mayor/rig clone.
-func canonicalManager(t *testing.T, town string) (*Manager, string, *fakeBd) {
-	t.Helper()
-	bd := newAgentBd(true)
-	root := filepath.Join(town, "rig")
-	r := &rig.Rig{Name: "rig", Path: root}
-	return newTestManager(r, git.NewGit(root), nil, bd), filepath.Join(root, "mayor", "rig"), bd
-}
-
-// buildCanonicalRig lays out the canonical rig at root: a mayor/rig clone
-// with one commit and an origin/main tracking ref, and a .beads redirect to
-// mayor/rig/.beads.
-func buildCanonicalRig(t *testing.T, root string) {
-	t.Helper()
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	rigBeads := filepath.Join(root, ".beads")
-	if err := os.MkdirAll(rigBeads, 0755); err != nil {
-		t.Fatalf("mkdir rig .beads: %v", err)
-	}
-	mayorBeads := filepath.Join(mayorRig, ".beads")
-	if err := os.MkdirAll(mayorBeads, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig/.beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write rig redirect: %v", err)
-	}
-
-	cmd := exec.Command("git", "init", "-b", "main")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	readmePath := filepath.Join(mayorRig, "README.md")
-	if err := os.WriteFile(readmePath, []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write README.md: %v", err)
-	}
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("README.md"); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
-}
-
-// setupCanonicalWithPolecats is setupCanonicalBranchManagerTestBd with the
-// named polecats already added through AddWithOptions (and, with clean, their
-// worktrees then cleaned of untracked files with git clean).
-// The rig is built once per test binary for each name list and copied, so
-// each test pays for the copy, not for the adds.
-func setupCanonicalWithPolecats(t *testing.T, clean bool, names ...string) (*Manager, string, *fakeBd, map[string]*Polecat) {
-	t.Helper()
-	key := fmt.Sprintf("canonical-with-polecats clean=%v %s", clean, strings.Join(names, ","))
-	town := cachedGitFixture(t, key, func(town string) {
-		buildCanonicalRig(t, filepath.Join(town, "rig"))
-		mgr, _, _ := canonicalManager(t, town)
-		added := map[string]*Polecat{}
-		for _, name := range names {
-			p, err := mgr.AddWithOptions(name, AddOptions{})
-			if err != nil {
-				t.Fatalf("AddWithOptions(%s): %v", name, err)
-			}
-			if clean {
-				_ = git.NewGit(p.ClonePath).CleanForce()
-			}
-			added[name] = p
-		}
-		data, err := json.Marshal(added)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// The template's own path, replaced below by the copy's.
-		data = append([]byte(town+"\n"), data...)
-		if err := os.WriteFile(filepath.Join(town, "polecats.json"), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	})
-	data, err := os.ReadFile(filepath.Join(town, "polecats.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmplRoot, body, _ := strings.Cut(string(data), "\n")
-	added := map[string]*Polecat{}
-	if err := json.Unmarshal([]byte(strings.ReplaceAll(body, tmplRoot, town)), &added); err != nil {
-		t.Fatal(err)
-	}
-	mgr, mayorRig, bd := canonicalManager(t, town)
-	return mgr, mayorRig, bd, added
-}
-
-func createStalePolecatCommit(t *testing.T, repoPath, startPoint, branchName string) string {
-	t.Helper()
-
-	repoGit := git.NewGit(repoPath)
-	if err := repoGit.CheckoutNewBranch(branchName, startPoint); err != nil {
+	if err := w.repo(repoPath).CheckoutNewBranch(branchName, startPoint); err != nil {
 		t.Fatalf("checkout stale branch %s from %s: %v", branchName, startPoint, err)
 	}
-
 	fileName := strings.NewReplacer("/", "-", "@", "-").Replace(branchName) + ".txt"
-	if err := os.WriteFile(filepath.Join(repoPath, fileName), []byte(branchName+"\n"), 0644); err != nil {
-		t.Fatalf("write stale branch marker: %v", err)
-	}
-	if err := repoGit.Add(fileName); err != nil {
-		t.Fatalf("git add stale branch marker: %v", err)
-	}
-	if err := repoGit.Commit("Create stale polecat branch"); err != nil {
-		t.Fatalf("git commit stale branch marker: %v", err)
-	}
-
-	sha, err := repoGit.Rev("HEAD")
-	if err != nil {
-		t.Fatalf("resolve stale branch commit: %v", err)
-	}
-	return sha
+	return w.writeAndCommit(t, repoPath, "Create stale polecat branch", map[string]string{fileName: branchName + "\n"})
 }
 
 func TestManagerGetMapsDoneAgentStateFromBead(t *testing.T) {
@@ -282,7 +107,7 @@ func TestManagerGetMapsDoneAgentStateFromBead(t *testing.T) {
 		t.Fatalf("mkdir polecat path: %v", err)
 	}
 
-	mgr := newTestManager(&rig.Rig{Name: "testrig", Path: rigPath}, git.NewGit(rigPath), nil, bd)
+	mgr := newTestManager(&rig.Rig{Name: "testrig", Path: rigPath}, nil, nil, bd)
 	p, err := mgr.Get("toast")
 	if err != nil {
 		t.Fatalf("mgr.Get(toast): %v", err)
@@ -340,7 +165,7 @@ func TestListEmpty(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	polecats, err := m.List()
 	if err != nil {
@@ -358,7 +183,7 @@ func TestGetNotFound(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	_, err := m.Get("nonexistent")
 	if err != ErrPolecatNotFound {
@@ -373,7 +198,7 @@ func TestRemoveNotFound(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	err := m.Remove("nonexistent", false)
 	if err != ErrPolecatNotFound {
@@ -422,7 +247,7 @@ func TestPolecatDir(t *testing.T) {
 		Name: "test-rig",
 		Path: "/home/user/ai/test-rig",
 	}
-	m := newTestManager(r, git.NewGit(r.Path), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	dir := m.polecatDir("Toast")
 	expected := "/home/user/ai/test-rig/polecats/Toast"
@@ -437,7 +262,7 @@ func TestAssigneeID(t *testing.T) {
 		Name: "test-rig",
 		Path: "/home/user/ai/test-rig",
 	}
-	m := newTestManager(r, git.NewGit(r.Path), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	id := m.assigneeID("Toast")
 	expected := "test-rig/polecats/Toast"
@@ -465,8 +290,8 @@ func TestAgentBeadID_Deterministic(t *testing.T) {
 
 	// Construct two Managers from the same rig path — they must produce
 	// identical agentBeadIDs regardless of construction context.
-	m1 := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
-	m2 := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
+	m1 := newTestManager(r, nil, nil, newNoDatabaseBd())
+	m2 := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	id1a := m1.agentBeadID("Toast")
 	id1b := m1.agentBeadID("Toast")
@@ -499,7 +324,7 @@ func TestAgentBeadID_Deterministic(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(origDir) }()
 
-	m3 := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
+	m3 := newTestManager(r, nil, nil, newNoDatabaseBd())
 	id3 := m3.agentBeadID("Toast")
 	if id1a != id3 {
 		t.Errorf("agentBeadID differs after cwd change: %q (original) vs %q (after chdir)", id1a, id3)
@@ -521,7 +346,7 @@ func TestNewManager_NamepoolFromRigConfig(t *testing.T) {
 	}
 
 	r := &rig.Rig{Name: "myrig", Path: rigPath}
-	m := newTestManager(r, git.NewGit(rigPath), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 	pool := m.GetNamePool()
 
 	name, err := pool.Allocate()
@@ -557,7 +382,7 @@ func TestGetReturnsWorkingWithoutBeads(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newMissingBd())
+	m := newTestManager(r, nil, nil, newMissingBd())
 
 	// Get should return polecat with StateWorking (assume active if beads unavailable)
 	polecat, err := m.Get("Test")
@@ -597,7 +422,7 @@ func TestListWithPolecats(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	polecats, err := m.List()
 	if err != nil {
@@ -643,7 +468,7 @@ func TestList_BatchesBeadsQueriesAcrossPolecats(t *testing.T) {
 	}}
 
 	r := &rig.Rig{Name: "test-rig", Path: root}
-	m := newTestManager(r, git.NewGit(root), nil, bd)
+	m := newTestManager(r, nil, nil, bd)
 
 	polecats, err := m.List()
 	if err != nil {
@@ -692,7 +517,7 @@ func TestSetStateWithoutBeads(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	// SetState should succeed (no-op when no issue assigned)
 	err := m.SetState("Test", StateWorking)
@@ -719,7 +544,7 @@ func TestClearIssueWithoutAssignment(t *testing.T) {
 		Name: "test-rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, nil, nil, newNoDatabaseBd())
 
 	// ClearIssue should succeed even when no issue assigned
 	err := m.ClearIssue("Test")
@@ -732,101 +557,6 @@ func TestClearIssueWithoutAssignment(t *testing.T) {
 // We no longer write CLAUDE.md to worktrees - Gas Town context is injected
 // ephemerally via SessionStart hook (gt prime) to prevent leaking internal
 // architecture into project repos.
-
-func TestAddWithOptions_HasAgentsMD(t *testing.T) {
-	// This test verifies that AGENTS.md exists in polecat worktrees after creation.
-	// AGENTS.md is critical for polecats to "land the plane" properly.
-	t.Parallel()
-
-	root := t.TempDir()
-
-	// Create mayor/rig directory structure (this acts as repo base when no .repo.git)
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Initialize git repo in mayor/rig
-	cmd := exec.Command("git", "init")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	// Create AGENTS.md with test content
-	agentsMDContent := []byte("# AGENTS.md\n\nTest content for polecats.\n")
-	agentsMDPath := filepath.Join(mayorRig, "AGENTS.md")
-	if err := os.WriteFile(agentsMDPath, agentsMDContent, 0644); err != nil {
-		t.Fatalf("write AGENTS.md: %v", err)
-	}
-
-	// Commit AGENTS.md so it's part of the repo
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("AGENTS.md"); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Add AGENTS.md"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	// AddWithOptions needs origin/main to exist. Add self as origin and create tracking ref.
-	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	// When using a local directory as remote, fetch doesn't create tracking branches.
-	// Create origin/main manually since AddWithOptions expects origin/main by default.
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
-
-	// Create rig-level .beads directory with redirect to mayor/rig/.beads
-	rigBeads := filepath.Join(root, ".beads")
-	if err := os.MkdirAll(rigBeads, 0755); err != nil {
-		t.Fatalf("mkdir rig .beads: %v", err)
-	}
-	mayorBeads := filepath.Join(mayorRig, ".beads")
-	if err := os.MkdirAll(mayorBeads, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig/.beads: %v", err)
-	}
-	rigRedirect := filepath.Join(rigBeads, "redirect")
-	if err := os.WriteFile(rigRedirect, []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write rig redirect: %v", err)
-	}
-
-	// Create rig pointing to root
-	r := &rig.Rig{
-		Name: "rig",
-		Path: root,
-	}
-	m := newTestManager(r, git.NewGit(root), nil, newAgentBd(true))
-
-	// Create polecat via AddWithOptions
-	polecat, err := m.AddWithOptions("TestAgent", AddOptions{})
-	if err != nil {
-		t.Fatalf("AddWithOptions: %v", err)
-	}
-
-	// Verify AGENTS.md exists in the worktree
-	worktreeAgentsMD := filepath.Join(polecat.ClonePath, "AGENTS.md")
-	if _, err := os.Stat(worktreeAgentsMD); os.IsNotExist(err) {
-		t.Errorf("AGENTS.md does not exist in worktree at %s", worktreeAgentsMD)
-	}
-
-	// Verify content matches
-	content, err := os.ReadFile(worktreeAgentsMD)
-	if err != nil {
-		t.Fatalf("read worktree AGENTS.md: %v", err)
-	}
-	gotContent := strings.ReplaceAll(string(content), "\r\n", "\n")
-	wantContent := strings.ReplaceAll(string(agentsMDContent), "\r\n", "\n")
-	if gotContent != wantContent {
-		t.Errorf("AGENTS.md content = %q, want %q", gotContent, wantContent)
-	}
-}
 
 // TestReconcilePoolWith tests all permutations of directory and session existence.
 // This is the core allocation policy logic.
@@ -1234,17 +964,10 @@ func TestBuildBranchName(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Initialize a git repo for config access
-	gitCmd := exec.Command("git", "init")
-	gitCmd.Dir = tmpDir
-	if err := gitCmd.Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-
-	// Set git user.name for testing
-	configCmd := exec.Command("git", "config", "user.name", "testuser")
-	configCmd.Dir = tmpDir
-	if err := configCmd.Run(); err != nil {
+	// A git repo for config access, with user.name set.
+	w := newWorld()
+	w.InitRepo(t, tmpDir)
+	if err := w.repo(tmpDir).ConfigSet("user.name", "testuser"); err != nil {
 		t.Fatalf("git config: %v", err)
 	}
 
@@ -1312,8 +1035,7 @@ func TestBuildBranchName(t *testing.T) {
 				t.Fatalf("unset wisp template: %v", err)
 			}
 
-			g := git.NewGit(tmpDir)
-			m := newTestManager(r, g, nil, newNoDatabaseBd())
+			m := newTestManager(r, w, nil, newNoDatabaseBd())
 
 			got := m.buildBranchName("alpha", tt.issue)
 
@@ -1341,15 +1063,11 @@ func TestBuildBranchName(t *testing.T) {
 func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	gitCmd := exec.Command("git", "init")
-	gitCmd.Dir = tmpDir
-	if err := gitCmd.Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
+	w := newWorld()
+	w.InitRepo(t, tmpDir)
 
 	r := &rig.Rig{Name: "test-rig", Path: tmpDir}
-	g := git.NewGit(tmpDir)
-	m := newTestManager(r, g, nil, newNoDatabaseBd())
+	m := newTestManager(r, w, nil, newNoDatabaseBd())
 
 	validator := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9/_.#+,-]*$`)
 	cases := []struct {
@@ -1379,12 +1097,12 @@ func TestBuildBranchName_ClaudeActionCompatible(t *testing.T) {
 
 func TestAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T) {
 	t.Parallel()
-	checkAddWithOptions_NoPrimeMDCreatedLocally(t, false)
+	checkAddWithOptions_NoPrimeMDCreatedLocally(t, fakeAddBeads)
 }
 
-// checkAddWithOptions_NoPrimeMDCreatedLocally is TestAddWithOptions_NoPrimeMDCreatedLocally against the fake bd, or with realBd
-// against a real bd on the test Dolt container (the integration tier).
-func checkAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T, realBd bool) {
+// checkAddWithOptions_NoPrimeMDCreatedLocally is TestAddWithOptions_NoPrimeMDCreatedLocally against the fake bd, or against a real bd on the test Dolt container (the
+// integration tier, realAddBeads).
+func checkAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T, beadsFor addBeads) {
 	// This test verifies that ProvisionPrimeMDForWorktree does NOT create
 	// a local .beads/PRIME.md in the worktree when there's no tracked one.
 	//
@@ -1392,75 +1110,8 @@ func checkAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T, realBd bool) {
 	// follow redirects correctly, it may create PRIME.md locally instead
 	// of at the rig-level beads location.
 
-	root := t.TempDir()
-
-	// Create mayor/rig directory structure
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Create rig-level .beads directory
-	rigBeads := filepath.Join(root, ".beads")
-	if err := os.MkdirAll(rigBeads, 0755); err != nil {
-		t.Fatalf("mkdir rig .beads: %v", err)
-	}
-
-	// Create redirect at rig level pointing to mayor/rig/.beads
+	m, _, mayorRig := addRig(t, beadsFor, map[string]string{"README.md": "# Test\n"})
 	mayorBeads := filepath.Join(mayorRig, ".beads")
-	if err := os.MkdirAll(mayorBeads, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig/.beads: %v", err)
-	}
-	rigRedirect := filepath.Join(rigBeads, "redirect")
-	if err := os.WriteFile(rigRedirect, []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write rig redirect: %v", err)
-	}
-
-	// Initialize beads database so agent bead creation works.
-	// Use real bd if available; fall back to a mock for environments (like
-	// Windows CI) where bd is not installed.
-	bd := initAddTestBeads(t, mayorRig, mayorBeads, realBd)
-
-	// Initialize git repo in mayor/rig WITHOUT any .beads/PRIME.md
-	cmd := exec.Command("git", "init")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	// Create a dummy file and commit (NO .beads/PRIME.md)
-	dummyPath := filepath.Join(mayorRig, "README.md")
-	if err := os.WriteFile(dummyPath, []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write README.md: %v", err)
-	}
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("README.md"); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit without PRIME.md"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	// AddWithOptions needs origin/main to exist. Add self as origin and create tracking ref.
-	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	// When using a local directory as remote, fetch doesn't create tracking branches.
-	// Create origin/main manually since AddWithOptions expects origin/main by default.
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
-
-	// Create rig pointing to root
-	r := &rig.Rig{
-		Name: "rig",
-		Path: root,
-	}
-	m := newTestManager(r, git.NewGit(root), nil, bd)
 
 	// Create polecat
 	polecat, err := m.AddWithOptions("TestNoLocal", AddOptions{})
@@ -1490,21 +1141,21 @@ func checkAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T, realBd bool) {
 
 func TestAddWithOptions_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
+	mgr, mayorRig, _, w := canonicalRig(t)
 
-	mayorGit := git.NewGit(mayorRig)
+	mayorGit := w.repo(mayorRig)
 	baseSHA, err := mayorGit.Rev("origin/main")
 	if err != nil {
 		t.Fatalf("resolve origin/main: %v", err)
 	}
-	staleSHA := createStalePolecatCommit(t, mayorRig, "main", "polecat/stale-source")
+	staleSHA := createStalePolecatCommit(t, w, mayorRig, "main", "polecat/stale-source")
 
 	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
 		t.Fatalf("AddWithOptions: %v", err)
 	}
 
-	worktreeGit := git.NewGit(polecat.ClonePath)
+	worktreeGit := w.repo(polecat.ClonePath)
 	staleAncestor, err := worktreeGit.IsAncestor(staleSHA, polecat.Branch)
 	if err != nil {
 		t.Fatalf("check stale ancestry: %v", err)
@@ -1524,13 +1175,15 @@ func TestAddWithOptions_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 
 func TestAllocateAndAdd_RunsWispSetupCommand(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("setup-marker"))
+	mgr, _, _, _ := canonicalRig(t)
+	writeWispSetupCommand(t, mgr, "make setup")
+	setup := scriptSetup(mgr, writeMarker("setup-marker", "setup"))
 
 	_, polecat, err := mgr.AllocateAndAdd(AddOptions{})
 	if err != nil {
 		t.Fatalf("AllocateAndAdd: %v", err)
 	}
+	setup.ranIn(t, polecat.ClonePath, mgr.rig.Path, "make setup")
 
 	data, err := os.ReadFile(filepath.Join(polecat.ClonePath, "setup-marker"))
 	if err != nil {
@@ -1543,8 +1196,9 @@ func TestAllocateAndAdd_RunsWispSetupCommand(t *testing.T) {
 
 func TestAddWithOptions_SetupCommandFailureRollsBack(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
-	writeWispSetupCommand(t, mgr, setupCommandFail())
+	mgr, _, _, _ := canonicalRig(t)
+	writeWispSetupCommand(t, mgr, "make setup")
+	scriptSetup(mgr, func(string) error { return errors.New("exit status 7") })
 
 	_, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err == nil {
@@ -1562,9 +1216,10 @@ func TestAddWithOptions_SetupCommandFailureRollsBack(t *testing.T) {
 
 func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 	t.Parallel()
-	mgr, _, _, added := setupCanonicalWithPolecats(t, true, "toast")
+	mgr, _, _, added, _ := canonicalWithPolecats(t, true, "toast")
 	polecat := added["toast"]
-	writeWispSetupCommand(t, mgr, setupCommandWriteMarker("reuse-setup-marker"))
+	writeWispSetupCommand(t, mgr, "make setup")
+	scriptSetup(mgr, writeMarker("reuse-setup-marker", "setup"))
 
 	reused, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
 	if err != nil {
@@ -1592,7 +1247,7 @@ func TestReuseIdlePolecat_RunsSetupCommand(t *testing.T) {
 // cap the moment agent_state=done accumulates and nothing is ever idle.
 func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
 	t.Parallel()
-	mgr, _, bd, _ := setupCanonicalWithPolecats(t, true, "toast")
+	mgr, _, bd, _, _ := canonicalWithPolecats(t, true, "toast")
 
 	// From here on 'show' reports agent_state=done instead of idle, with
 	// the same clean facts (no hook, no active MR) otherwise.
@@ -1628,8 +1283,14 @@ func TestFindIdlePolecat_AcceptsDoneCandidateWithZeroIdle(t *testing.T) {
 
 func TestReuseIdlePolecat_SetupCommandFailureCleansWorktree(t *testing.T) {
 	t.Parallel()
-	mgr, _, _, _ := setupCanonicalWithPolecats(t, true, "toast")
-	writeWispSetupCommand(t, mgr, setupCommandWriteMarkerAndFail("dirty-setup-marker"))
+	mgr, _, _, _, _ := canonicalWithPolecats(t, true, "toast")
+	writeWispSetupCommand(t, mgr, "make setup")
+	scriptSetup(mgr, func(dir string) error {
+		if err := writeMarker("dirty-setup-marker", "dirty")(dir); err != nil {
+			return err
+		}
+		return errors.New("exit status 7")
+	})
 
 	_, err := mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
 	if err == nil {
@@ -1659,25 +1320,80 @@ func writeWispSetupCommand(t *testing.T, mgr *Manager, command string) {
 	}
 }
 
-func setupCommandWriteMarker(marker string) string {
-	if os.PathSeparator == '\\' {
-		return "echo setup> " + marker
-	}
-	return "printf setup > " + marker
+// setupScript answers setup_command in place of the shell: it records each
+// call and runs effect in the directory the command would have run in.
+type setupScript struct {
+	mu     sync.Mutex
+	calls  []setupCall
+	effect func(dir string) error
 }
 
-func setupCommandFail() string {
-	if os.PathSeparator == '\\' {
-		return "exit /b 7"
-	}
-	return "exit 7"
+type setupCall struct {
+	dir  string
+	env  []string
+	argv []string
 }
 
-func setupCommandWriteMarkerAndFail(marker string) string {
-	if os.PathSeparator == '\\' {
-		return "echo dirty> " + marker + " & exit /b 7"
+// scriptSetup makes mgr run setup_command through a new setupScript.
+func scriptSetup(mgr *Manager, effect func(dir string) error) *setupScript {
+	s := &setupScript{effect: effect}
+	mgr.runSetup = func(_ context.Context, dir string, env []string, name string, args ...string) error {
+		s.mu.Lock()
+		s.calls = append(s.calls, setupCall{dir: dir, env: env, argv: append([]string{name}, args...)})
+		s.mu.Unlock()
+		return s.effect(dir)
 	}
-	return "printf dirty > " + marker + "; exit 7"
+	return s
+}
+
+// ranIn fails t unless setup ran once, in worktree, as the shell running
+// command, with the worktree and rig paths in its environment.
+func (s *setupScript) ranIn(t *testing.T, worktree, rigPath, command string) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.calls) != 1 {
+		t.Fatalf("setup_command ran %d times, want once: %+v", len(s.calls), s.calls)
+	}
+	c := s.calls[0]
+	if c.dir != worktree || c.argv[len(c.argv)-1] != command {
+		t.Errorf("setup ran %q in %s, want %q in %s", c.argv, c.dir, command, worktree)
+	}
+	if !slices.Contains(c.env, "GT_WORKTREE_PATH="+worktree) || !slices.Contains(c.env, "GT_RIG_PATH="+rigPath) {
+		t.Errorf("setup env = %q, want GT_WORKTREE_PATH and GT_RIG_PATH", c.env)
+	}
+}
+
+// writeMarker is a setup effect that writes body to name in the worktree.
+func writeMarker(name, body string) func(dir string) error {
+	return func(dir string) error {
+		return os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
+	}
+}
+
+// A setup_command that outlives its bound is reported as a timeout, not as
+// the killed shell's exit status.
+func TestRunSetupCommandReportsATimeout(t *testing.T) {
+	t.Parallel()
+	mgr, worktree, _, _ := canonicalRig(t)
+	writeWispSetupCommand(t, mgr, "make setup")
+	mgr.setupTimeout = time.Millisecond
+	mgr.runSetup = func(ctx context.Context, _ string, _ []string, _ string, _ ...string) error {
+		<-ctx.Done()
+		return errors.New("signal: killed")
+	}
+	if err := mgr.runSetupCommand(worktree); err == nil || !strings.Contains(err.Error(), "setup_command timed out after 1ms") {
+		t.Fatalf("runSetupCommand = %v, want a timeout", err)
+	}
+}
+
+// setupShellCommand runs setup_command through $SHELL -c, /bin/sh when unset.
+func TestSetupShellCommand(t *testing.T) {
+	t.Parallel()
+	shell, args := setupShellCommand("make setup")
+	if len(args) != 2 || args[0] != "-c" || args[1] != "make setup" || shell == "" {
+		t.Fatalf("setupShellCommand = %q %q", shell, args)
+	}
 }
 
 // TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit
@@ -1699,7 +1415,7 @@ func setupCommandWriteMarkerAndFail(marker string) string {
 // same facts unverified, so it keeps failing closed regardless of git state.
 func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLiveGit(t *testing.T) {
 	t.Parallel()
-	mgr, _, bd, _ := setupCanonicalWithPolecats(t, true, "toast")
+	mgr, _, bd, _, _ := canonicalWithPolecats(t, true, "toast")
 
 	// Swap to a mock bd that omits cleanup_status entirely while everything
 	// else (agent_state, hook_bead) still reads as idle/unhooked, and the
@@ -1729,7 +1445,7 @@ func TestWorkstateDispositionForPolecat_MissingCleanupStatusClearsOnVerifiedLive
 // workstateInputForPolecat must keep blocking.
 func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *testing.T) {
 	t.Parallel()
-	mgr, _, bd, _ := setupCanonicalWithPolecats(t, true, "toast")
+	mgr, _, bd, _, _ := canonicalWithPolecats(t, true, "toast")
 
 	// newEmptyBd's `show` returns an empty result, so GetAgentBead
 	// resolves to (nil, nil, nil) — exactly the not-found shape workstateInputForPolecat
@@ -1756,28 +1472,19 @@ func TestWorkstateDispositionForPolecat_UnreadableAgentBeadStillFailsClosed(t *t
 // B, even though both worktrees see the identical raw `git stash list` output.
 func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
 	t.Parallel()
-	mgr, _, _, added := setupCanonicalWithPolecats(t, false, "seata")
+	mgr, _, _, added, w := canonicalWithPolecats(t, false, "seata")
 	seatA := added["seata"]
 	if _, err := mgr.AddWithOptions("seatb", AddOptions{}); err != nil {
 		t.Fatalf("AddWithOptions(seatb): %v", err)
 	}
-	_ = git.NewGit(seatA.ClonePath).CleanForce()
+	_ = w.repo(seatA.ClonePath).CleanForce()
 
 	// Stash uncommitted work on seat A's branch only. Both worktrees share the
 	// same underlying repo, so this stash lands in the one shared refs/stash.
-	seatAGit := git.NewGit(seatA.ClonePath)
 	if err := os.WriteFile(filepath.Join(seatA.ClonePath, "README.md"), []byte("seata wip\n"), 0644); err != nil {
 		t.Fatalf("write seata dirt: %v", err)
 	}
-	runManagerGit(t, seatA.ClonePath, "stash", "push", "-m", "seata-wip")
-
-	total, err := seatAGit.StashCountAll()
-	if err != nil {
-		t.Fatalf("StashCountAll: %v", err)
-	}
-	if total != 1 {
-		t.Fatalf("StashCountAll = %d, want 1 shared repo stash", total)
-	}
+	w.Stash(t, seatA.ClonePath, "seata-wip")
 
 	dA := mgr.WorkstateDispositionForPolecat("seata", StateIdle, "")
 	if dA.Reason != "git-stash" {
@@ -1800,9 +1507,9 @@ func TestWorkstateDispositionForPolecat_StashScopedToOwningSeat(t *testing.T) {
 
 func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
+	mgr, mayorRig, _, w := canonicalRig(t)
 
-	mayorGit := git.NewGit(mayorRig)
+	mayorGit := w.repo(mayorRig)
 	baseSHA, err := mayorGit.Rev("origin/main")
 	if err != nil {
 		t.Fatalf("resolve origin/main: %v", err)
@@ -1813,13 +1520,13 @@ func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 		t.Fatalf("AddWithOptions: %v", err)
 	}
 
-	staleSHA := createStalePolecatCommit(t, polecat.ClonePath, "HEAD", "polecat/toast-stale")
+	staleSHA := createStalePolecatCommit(t, w, polecat.ClonePath, "HEAD", "polecat/toast-stale")
 
 	_, err = mgr.ReuseIdlePolecat("toast", AddOptions{HookBead: "gt-next"})
 	if !errors.Is(err, ErrPolecatNeedsRecovery) {
 		t.Fatalf("ReuseIdlePolecat error = %v, want ErrPolecatNeedsRecovery", err)
 	}
-	worktreeGit := git.NewGit(polecat.ClonePath)
+	worktreeGit := w.repo(polecat.ClonePath)
 	currentSHA, err := worktreeGit.Rev("HEAD")
 	if err != nil {
 		t.Fatalf("resolve current HEAD: %v", err)
@@ -1838,15 +1545,15 @@ func TestReuseIdlePolecat_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 // resume work on an existing PR branch without creating duplicates.
 func TestAddWithOptions_ResumeBranch(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
+	mgr, mayorRig, _, w := canonicalRig(t)
 
 	// Create a "PR branch" with a marker commit, mimicking an existing open PR a
 	// polecat needs to resume. It is created as a ref alone: leaving it checked
 	// out in the rig's own clone would make this a second test, of the refusal to
 	// attach another worktree to a live ref (gt-0kk2).
 	prBranch := "polecat/example/gh-1234@abcdef"
-	prCommit := branchAtNewCommit(t, mayorRig, prBranch, "main", "PR work (gh-1234)")
-	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+prBranch, prCommit)
+	prCommit := w.branchAtNewCommit(t, mayorRig, prBranch, w.rev(t, mayorRig, "main"), "PR work (gh-1234)")
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+prBranch, prCommit)
 
 	polecat, err := mgr.AddWithOptions("toast", AddOptions{ResumeBranch: prBranch})
 	if err != nil {
@@ -1857,7 +1564,7 @@ func TestAddWithOptions_ResumeBranch(t *testing.T) {
 		t.Fatalf("polecat.Branch = %q, want %q (ResumeBranch should override fresh-branch naming)", polecat.Branch, prBranch)
 	}
 
-	worktreeGit := git.NewGit(polecat.ClonePath)
+	worktreeGit := w.repo(polecat.ClonePath)
 	current, err := worktreeGit.CurrentBranch()
 	if err != nil {
 		t.Fatalf("CurrentBranch: %v", err)
@@ -1879,12 +1586,12 @@ func TestAddWithOptions_ResumeBranch(t *testing.T) {
 
 func TestAddWithOptions_NoFilesAddedToRepo(t *testing.T) {
 	t.Parallel()
-	checkAddWithOptions_NoFilesAddedToRepo(t, false)
+	checkAddWithOptions_NoFilesAddedToRepo(t, fakeAddBeads)
 }
 
-// checkAddWithOptions_NoFilesAddedToRepo is TestAddWithOptions_NoFilesAddedToRepo against the fake bd, or with realBd
-// against a real bd on the test Dolt container (the integration tier).
-func checkAddWithOptions_NoFilesAddedToRepo(t *testing.T, realBd bool) {
+// checkAddWithOptions_NoFilesAddedToRepo is TestAddWithOptions_NoFilesAddedToRepo against the fake bd, or against a real bd on the test Dolt container (the
+// integration tier, realAddBeads).
+func checkAddWithOptions_NoFilesAddedToRepo(t *testing.T, beadsFor addBeads) {
 	// This test verifies the invariant that polecat creation does NOT add any
 	// TRACKED files to the repo's directory structure. The user's code should stay pure.
 	//
@@ -1893,84 +1600,14 @@ func checkAddWithOptions_NoFilesAddedToRepo(t *testing.T, realBd bool) {
 	// polecats/.claude/settings.json directory (outside worktrees), so they
 	// never appear in any worktree's git status.
 
-	root := t.TempDir()
-
-	// Create mayor/rig directory structure
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Create rig-level .beads directory with redirect
-	rigBeads := filepath.Join(root, ".beads")
-	if err := os.MkdirAll(rigBeads, 0755); err != nil {
-		t.Fatalf("mkdir rig .beads: %v", err)
-	}
-	mayorBeads := filepath.Join(mayorRig, ".beads")
-	if err := os.MkdirAll(mayorBeads, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig/.beads: %v", err)
-	}
-	rigRedirect := filepath.Join(rigBeads, "redirect")
-	if err := os.WriteFile(rigRedirect, []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write rig redirect: %v", err)
-	}
-
-	// Initialize beads database so agent bead creation works.
-	// Use real bd if available; fall back to a mock for environments (like
-	// Windows CI) where bd is not installed.
-	bd := initAddTestBeads(t, mayorRig, mayorBeads, realBd)
-
-	// Initialize a CLEAN git repo with known files only
-	cmd := exec.Command("git", "init")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	// Create .gitignore with .claude/ and .beads/ (standard practice)
-	// .claude/ - Claude Code local state
-	// .beads/ - Gas Town local state (redirect file)
-	gitignorePath := filepath.Join(mayorRig, ".gitignore")
-	if err := os.WriteFile(gitignorePath, []byte(".claude/\n.beads/\n"), 0644); err != nil {
-		t.Fatalf("write .gitignore: %v", err)
-	}
-
-	// Create minimal repo content (NO .beads, NO .claude, NO CLAUDE.md)
-	readmePath := filepath.Join(mayorRig, "README.md")
-	if err := os.WriteFile(readmePath, []byte("# Clean Repo\n"), 0644); err != nil {
-		t.Fatalf("write README.md: %v", err)
-	}
-	srcDir := filepath.Join(mayorRig, "src")
-	if err := os.MkdirAll(srcDir, 0755); err != nil {
-		t.Fatalf("mkdir src: %v", err)
-	}
-	mainPath := filepath.Join(srcDir, "main.go")
-	if err := os.WriteFile(mainPath, []byte("package main\n"), 0644); err != nil {
-		t.Fatalf("write main.go: %v", err)
-	}
-
-	// Commit everything
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("."); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit - clean repo"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	// AddWithOptions needs origin/main to exist. Add self as origin and create tracking ref.
-	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	// When using a local directory as remote, fetch doesn't create tracking branches.
-	// Create origin/main manually since AddWithOptions expects origin/main by default.
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
+	// A clean repo with known files only: .gitignore with .claude/ (Claude
+	// Code local state) and .beads/ (the redirect), and no .beads, .claude or
+	// CLAUDE.md.
+	m, w, mayorRig := addRig(t, beadsFor, map[string]string{
+		".gitignore":  ".claude/\n.beads/\n",
+		"README.md":   "# Clean Repo\n",
+		"src/main.go": "package main\n",
+	})
 
 	// Create AGENTS.md in mayor/rig AFTER git commit (NOT tracked in git)
 	// This triggers the fallback copy during polecat install
@@ -1978,13 +1615,6 @@ func checkAddWithOptions_NoFilesAddedToRepo(t *testing.T, realBd bool) {
 	if err := os.WriteFile(agentsMDPath, []byte("# AGENTS\n\nFallback content.\n"), 0644); err != nil {
 		t.Fatalf("write AGENTS.md: %v", err)
 	}
-
-	// Create rig and polecat manager
-	r := &rig.Rig{
-		Name: "rig",
-		Path: root,
-	}
-	m := newTestManager(r, git.NewGit(root), nil, bd)
 
 	// Create polecat
 	polecat, err := m.AddWithOptions("TestClean", AddOptions{})
@@ -1994,19 +1624,14 @@ func checkAddWithOptions_NoFilesAddedToRepo(t *testing.T, realBd bool) {
 
 	// Run git status in worktree - should show nothing except .beads/ (infrastructure)
 	// Settings are at polecats/.claude/settings.json (outside worktree) so won't appear
-	cmd = exec.Command("git", "status", "--porcelain")
-	cmd.Dir = polecat.ClonePath
-	out, err := cmd.CombinedOutput()
+	st, err := w.repo(polecat.ClonePath).CheckUncommittedWork()
 	if err != nil {
-		t.Fatalf("git status: %v\n%s", err, out)
+		t.Fatalf("git status: %v", err)
 	}
 
 	// Filter out expected infrastructure files
 	var unexpected []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if line == "" {
-			continue
-		}
+	for _, line := range append(append([]string{}, st.ModifiedFiles...), st.UntrackedFiles...) {
 		// .beads/ is expected - it contains the redirect file for shared beads
 		if strings.Contains(line, ".beads") {
 			continue
@@ -2024,84 +1649,18 @@ func checkAddWithOptions_NoFilesAddedToRepo(t *testing.T, realBd bool) {
 
 func TestAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) {
 	t.Parallel()
-	checkAddWithOptions_SettingsInstalledInPolecatsDir(t, false)
+	checkAddWithOptions_SettingsInstalledInPolecatsDir(t, fakeAddBeads)
 }
 
-// checkAddWithOptions_SettingsInstalledInPolecatsDir is TestAddWithOptions_SettingsInstalledInPolecatsDir against the fake bd, or with realBd
-// against a real bd on the test Dolt container (the integration tier).
-func checkAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T, realBd bool) {
+// checkAddWithOptions_SettingsInstalledInPolecatsDir is TestAddWithOptions_SettingsInstalledInPolecatsDir against the fake bd, or against a real bd on the test Dolt container (the
+// integration tier, realAddBeads).
+func checkAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T, beadsFor addBeads) {
 	// This test verifies that polecat creation installs .claude/settings.json
 	// in the SHARED polecats/ parent directory (not inside individual worktrees).
 	// Claude Code with --settings supports parent directory settings, and placing
 	// them at the polecats/ level avoids polluting individual worktree repos.
 
-	root := t.TempDir()
-
-	// Create mayor/rig directory structure
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Create rig-level .beads directory with redirect
-	rigBeads := filepath.Join(root, ".beads")
-	if err := os.MkdirAll(rigBeads, 0755); err != nil {
-		t.Fatalf("mkdir rig .beads: %v", err)
-	}
-	mayorBeads := filepath.Join(mayorRig, ".beads")
-	if err := os.MkdirAll(mayorBeads, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig/.beads: %v", err)
-	}
-	rigRedirect := filepath.Join(rigBeads, "redirect")
-	if err := os.WriteFile(rigRedirect, []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write rig redirect: %v", err)
-	}
-
-	// Initialize beads database so agent bead creation works.
-	// Use real bd if available; fall back to a mock for environments (like
-	// Windows CI) where bd is not installed.
-	bd := initAddTestBeads(t, mayorRig, mayorBeads, realBd)
-
-	// Initialize a git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	readmePath := filepath.Join(mayorRig, "README.md")
-	if err := os.WriteFile(readmePath, []byte("# Test Repo\n"), 0644); err != nil {
-		t.Fatalf("write README.md: %v", err)
-	}
-
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("."); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	// AddWithOptions needs origin/main to exist. Add self as origin and create tracking ref.
-	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	// When using a local directory as remote, fetch doesn't create tracking branches.
-	// Create origin/main manually since AddWithOptions expects origin/main by default.
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
-
-	// Create rig and polecat manager
-	r := &rig.Rig{
-		Name: "rig",
-		Path: root,
-	}
-	m := newTestManager(r, git.NewGit(root), nil, bd)
+	m, _, _ := addRig(t, beadsFor, map[string]string{"README.md": "# Test Repo\n"})
 
 	// Create polecat
 	polecat, err := m.AddWithOptions("TestSettings", AddOptions{})
@@ -2318,7 +1877,7 @@ func TestCleanupOrphanPolecatStatePreservesOldLayoutWorktree(t *testing.T) {
 
 func TestReclaimBrokenIdlePolecatRemovesCleanStructuralFailure(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	mgr, _, _, _ := canonicalRig(t)
 	mgr.tmux = newFakeProbe() // no session: the proof that no polecat is live
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
@@ -2345,7 +1904,7 @@ func TestReclaimBrokenIdlePolecatRemovesCleanStructuralFailure(t *testing.T) {
 // peridot before allocation... was not safe to reclaim: cleanup_status=".
 func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
 	t.Parallel()
-	mgr, _, bd := setupCanonicalBranchManagerTestBd(t)
+	mgr, _, bd, _ := canonicalRig(t)
 	mgr.tmux = newFakeProbe() // no session: the proof that no polecat is live
 
 	p, err := mgr.AddWithOptions("toast", AddOptions{})
@@ -2374,7 +1933,7 @@ func TestReclaimBrokenIdlePolecatMissingCleanupStatusReclaimable(t *testing.T) {
 
 func TestReclaimBrokenIdlePolecatFailsClosedWithoutSessionEvidence(t *testing.T) {
 	t.Parallel()
-	mgr, _, _, added := setupCanonicalWithPolecats(t, false, "toast")
+	mgr, _, _, added, _ := canonicalWithPolecats(t, false, "toast")
 	p := added["toast"]
 	if err := os.Remove(filepath.Join(p.ClonePath, ".git")); err != nil {
 		t.Fatalf("break worktree .git: %v", err)
@@ -2403,39 +1962,20 @@ func TestAddWithOptions_RollbackReleasesName(t *testing.T) {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}
 
-	// Initialize git repo in mayor/rig
-	cmd := exec.Command("git", "init")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	// Create and commit a file
-	if err := os.WriteFile(filepath.Join(mayorRig, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("."); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	// Add origin remote pointing to a nonexistent path so that fetch fails
-	// and origin/main is never created. This causes AddWithOptions to fail at
-	// ref validation, testing rollback.
-	cmd = exec.Command("git", "remote", "add", "origin", "/nonexistent/repo")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
+	// A repo with one commit whose origin is a path with no repository, so
+	// the fetch fails and origin/main is never created. This causes
+	// AddWithOptions to fail at ref validation, testing rollback.
+	w := newWorld()
+	w.InitRepo(t, mayorRig)
+	w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, mayorRig)
+	w.AddRemote(t, mayorRig, "origin", "/nonexistent/repo")
 
 	r := &rig.Rig{
 		Name: "rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, w, nil, newNoDatabaseBd())
 
 	// Allocate a name (simulates what gt sling does before AddWithOptions)
 	name, err := m.AllocateName()
@@ -2490,34 +2030,13 @@ func TestAddWithOptions_RollbackCleansWorktree(t *testing.T) {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}
 
-	// Initialize git repo with a commit
-	cmd := exec.Command("git", "init")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(mayorRig, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("."); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	// Set up origin/main ref (so worktree creation succeeds)
-	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
+	// A repo with a commit and origin/main, so worktree creation succeeds.
+	w := newWorld()
+	w.InitRepo(t, mayorRig)
+	head := w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, mayorRig)
+	w.AddRemote(t, mayorRig, "origin", mayorRig)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
 
 	// A bd that FAILS on create (simulates agent bead creation failure).
 	bd := &fakeBd{answer: func(cmd string, _ []string) string {
@@ -2546,7 +2065,7 @@ func TestAddWithOptions_RollbackCleansWorktree(t *testing.T) {
 		Name: "rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, bd)
+	m := newTestManager(r, w, nil, bd)
 
 	// Allocate a name
 	name, err := m.AllocateName()
@@ -2578,14 +2097,13 @@ func TestAddWithOptions_RollbackCleansWorktree(t *testing.T) {
 	// The branch ref may remain (cleaned later by CleanupStaleBranches),
 	// but the worktree entry should be removed so git doesn't track a stale path.
 	clonePath := filepath.Join(polecatDir, r.Name)
-	cmd = exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = mayorRig
-	out, cmdErr := cmd.CombinedOutput()
-	if cmdErr == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, clonePath) {
-				t.Errorf("stale worktree entry for %s still registered in git after rollback", clonePath)
-			}
+	list, err := w.repo(mayorRig).WorktreeList()
+	if err != nil {
+		t.Fatalf("worktree list: %v", err)
+	}
+	for _, wt := range list {
+		if wt.Path == clonePath {
+			t.Errorf("stale worktree entry for %s still registered in git after rollback", clonePath)
 		}
 	}
 }
@@ -2646,7 +2164,7 @@ func TestManagerAgentLifecycleUsesRigLocalBeadsDir(t *testing.T) {
 		return ""
 	}}
 
-	m := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), nil, bd)
+	m := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, nil, nil, bd)
 	agentID := m.agentBeadID("rust")
 	if err := m.createAgentBeadWithRetry(agentID, &beads.AgentFields{RoleType: "polecat", Rig: rigName, AgentState: "spawning"}); err != nil {
 		t.Fatalf("createAgentBeadWithRetry: %v", err)
@@ -2691,33 +2209,19 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 		t.Fatalf("mkdir mayor/rig: %v", err)
 	}
 
-	// Initialize git repo with origin remote (will fail fetch, that's expected)
-	cmdInit := exec.Command("git", "init")
-	cmdInit.Dir = mayorRig
-	if out, err := cmdInit.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(mayorRig, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("."); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-	cmdRemote := exec.Command("git", "remote", "add", "origin", "/nonexistent/repo")
-	cmdRemote.Dir = mayorRig
-	if out, err := cmdRemote.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
+	// A repo whose origin is not a repository (every fetch fails, as
+	// expected).
+	w := newWorld()
+	w.InitRepo(t, mayorRig)
+	w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, mayorRig)
+	w.AddRemote(t, mayorRig, "origin", "/nonexistent/repo")
 
 	r := &rig.Rig{
 		Name: "rig",
 		Path: root,
 	}
-	m := newTestManager(r, git.NewGit(root), nil, newNoDatabaseBd())
+	m := newTestManager(r, w, nil, newNoDatabaseBd())
 
 	// Launch concurrent AllocateAndAdd calls. They will fail at worktree
 	// creation (no origin/main), but the names they attempt must be unique.
@@ -2758,7 +2262,7 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 // the rollback path then RemoveAll's it — deleting the other polecat.
 func TestAllocateAndAdd_LeavesPolecatCreatedOutsidePool(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	mgr, _, _, _ := canonicalRig(t)
 
 	// The name the pool would hand out next.
 	taken, err := mgr.AllocateName()
@@ -2810,7 +2314,7 @@ func TestAllocateAndAdd_LeavesPolecatCreatedOutsidePool(t *testing.T) {
 // outside the pool fails the allocation instead of spinning under the pool lock.
 func TestAllocateAndAdd_GivesUpWhenEveryDrawnNameIsTaken(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	mgr, _, _, _ := canonicalRig(t)
 
 	calls := 0
 	mgr.afterPoolNameAllocated = func(name string) {
@@ -2849,7 +2353,7 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 
 	tm := newFakeProbe()
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := newTestManager(r, git.NewGit(rigPath), tm, newNoDatabaseBd())
+	mgr := newTestManager(r, nil, tm, newNoDatabaseBd())
 
 	// Create a live tmux session (simulates Claude sitting at ❯ after gt done)
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
@@ -2923,31 +2427,13 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 		t.Fatalf("write beads redirect: %v", err)
 	}
 
-	cmd := exec.Command("git", "init", "-b", "main")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(mayorRig, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write README: %v", err)
-	}
-	mayorGit := git.NewGit(mayorRig)
-	if err := mayorGit.Add("README.md"); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := mayorGit.Commit("Initial commit"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-	cmd = exec.Command("git", "remote", "add", "origin", mayorRig)
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
+	w := newWorld()
+	w.InitRepo(t, mayorRig)
+	head := w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, mayorRig)
+	w.AddRemote(t, mayorRig, "origin", mayorRig)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
+	mayorGit := w.repo(mayorRig)
 
 	polecatName := "toast"
 	oldClonePath := filepath.Join(rigPath, "polecats", polecatName, rigName)
@@ -2962,7 +2448,7 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 	}
 	TouchSessionHeartbeat(townRoot, sessionName)
 
-	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tm, newAgentBd(true))
+	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, w, tm, newAgentBd(true))
 	if _, err := mgr.RepairWorktreeWithOptions(polecatName, true, AddOptions{HookBead: "gt-next"}); err != nil {
 		t.Fatalf("RepairWorktreeWithOptions: %v", err)
 	}
@@ -2994,7 +2480,7 @@ func TestReuseIdlePolecat_KillsStaleSession(t *testing.T) {
 
 	tm := newFakeProbe() // the pane runs no agent, as "sleep 300" did
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := newTestManager(r, git.NewGit(rigPath), tm, newNoDatabaseBd())
+	mgr := newTestManager(r, nil, tm, newNoDatabaseBd())
 
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 	if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
@@ -3048,7 +2534,7 @@ func TestReuseIdlePolecat_NoSessionNoop(t *testing.T) {
 	}
 
 	r := &rig.Rig{Name: rigName, Path: rigPath}
-	mgr := newTestManager(r, git.NewGit(rigPath), newFakeProbe(), newNoDatabaseBd())
+	mgr := newTestManager(r, nil, newFakeProbe(), newNoDatabaseBd())
 
 	// No tmux session, no heartbeat — the common idle case
 	_, reuseErr := mgr.ReuseIdlePolecat(polecatName, AddOptions{})
@@ -3213,7 +2699,7 @@ func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
 			}
 			bd := bdFor(tc.updatedAt)
 			// No session on the fake tmux: the session is provably down.
-			mgr := newTestManager(&rig.Rig{Name: rigName, Path: root}, git.NewGit(root), newFakeProbe(), bd)
+			mgr := newTestManager(&rig.Rig{Name: rigName, Path: root}, nil, newFakeProbe(), bd)
 			mgr.spawnGraceWindow = 5 * time.Minute
 
 			p, err := mgr.loadFromBeads(agentName, nil)

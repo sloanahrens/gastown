@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -41,6 +40,10 @@ func structuralWorktreeError(path string, format string, args ...any) error {
 // VerifyWorktreeExists checks that clonePath is a git worktree whose .git
 // indirection points at an existing gitdir.
 func VerifyWorktreeExists(clonePath string) error {
+	return verifyWorktreeExists(gitOpener{}, clonePath)
+}
+
+func verifyWorktreeExists(gits gitOpener, clonePath string) error {
 	info, err := os.Stat(clonePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -77,9 +80,8 @@ func VerifyWorktreeExists(clonePath string) error {
 		}
 	}
 
-	cmd := exec.Command("git", "-C", clonePath, "rev-parse", "--git-dir")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("worktree at %s is not a valid git repository: %s", clonePath, strings.TrimSpace(string(output)))
+	if _, err := gits.Open(clonePath).GitDir(); err != nil {
+		return fmt.Errorf("worktree at %s is not a valid git repository: %w", clonePath, err)
 	}
 
 	return nil

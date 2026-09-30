@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build integration && !windows
 
 package polecat
 
@@ -15,7 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-// TestRunSetupCommand_TimeoutTakesTheGroupAndItsGrace guards both bounds the
+// TestIntegrationRunSetupCommand_TimeoutTakesTheGroupAndItsGrace guards both bounds the
 // setup command inherits from util.SetProcessGroup's Cancel since gt-6t43: the
 // timeout ends the whole group the command leads — not the shell alone, which
 // would leave a `pnpm install` running against the worktree the rollback is
@@ -30,8 +30,8 @@ import (
 // that nothing survives is the one that has to hold whatever the host is doing.
 //
 // Not parallel: it writes util.ProcessGroupKillGrace and SHELL.
-func TestRunSetupCommand_TimeoutTakesTheGroupAndItsGrace(t *testing.T) {
-	mgr, worktree := setupCanonicalBranchManagerTest(t)
+func TestIntegrationRunSetupCommand_TimeoutTakesTheGroupAndItsGrace(t *testing.T) {
+	mgr, worktree, _, _ := canonicalRig(t)
 
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
 	// trap '' TERM is inherited across the exec, so nothing in the group

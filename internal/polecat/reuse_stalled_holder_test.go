@@ -2,6 +2,7 @@ package polecat
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,16 +20,16 @@ const stalledBead = "gt-x"
 // whose bead stalledBead is still hooked, holds heldBranch, which origin also
 // has at main's commit. alpha is the polecat that resumes it. labels are the
 // hooked bead's labels, as a JSON array body.
-func stalledHolderFixture(t *testing.T, labels string) (mgr *Manager, alpha, beta *Polecat, heldBranch, tip string) {
+func stalledHolderFixture(t *testing.T, labels string) (mgr *Manager, w *world, alpha, beta *Polecat, heldBranch, tip string) {
 	t.Helper()
-	mgr, mayorRig, bd, added := setupCanonicalWithPolecats(t, false, "alpha", "beta")
+	mgr, mayorRig, bd, added, w := canonicalWithPolecats(t, false, "alpha", "beta")
 	alpha, beta = added["alpha"], added["beta"]
 
-	tip = gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+	tip = w.rev(t, mayorRig, "origin/main")
 	heldBranch = "polecat/beta/gt-x+aaa"
-	runGit(t, mayorRig, "update-ref", "refs/heads/"+heldBranch, tip)
-	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, tip)
-	runGit(t, beta.ClonePath, "checkout", heldBranch)
+	w.SetRef(t, mayorRig, "refs/heads/"+heldBranch, tip)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+heldBranch, tip)
+	w.switchTo(t, beta.ClonePath, heldBranch)
 
 	// A fake tmux with no session: the session is provably down. Without one,
 	// the manager cannot tell a dead session from a live one.
@@ -45,12 +46,12 @@ func stalledHolderFixture(t *testing.T, labels string) (mgr *Manager, alpha, bet
 		return base(cmd, args)
 	}
 	bd.mu.Unlock()
-	return mgr, alpha, beta, heldBranch, tip
+	return mgr, w, alpha, beta, heldBranch, tip
 }
 
 func TestReuseIdlePolecat_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing.T) {
 	t.Parallel()
-	mgr, alpha, beta, heldBranch, tip := stalledHolderFixture(t, `[]`)
+	mgr, w, alpha, beta, heldBranch, tip := stalledHolderFixture(t, `[]`)
 
 	if p, err := mgr.loadFromBeads("beta", nil); err != nil || p.State != StateStalled {
 		t.Fatalf("fixture: beta = %+v, %v; want a stalled polecat", p, err)
@@ -63,31 +64,31 @@ func TestReuseIdlePolecat_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing
 	if reused.ClonePath != alpha.ClonePath {
 		t.Errorf("reused %s, want alpha's worktree %s", reused.ClonePath, alpha.ClonePath)
 	}
-	if head := gitProbeOutput(t, alpha.ClonePath, "symbolic-ref", "--short", "HEAD"); head != heldBranch {
+	if head := w.branch(t, alpha.ClonePath); head != heldBranch {
 		t.Errorf("alpha HEAD = %q, want %q", head, heldBranch)
 	}
 
 	// beta gave up the checkout, not the branch.
-	if out, err := runGitOutput(beta.ClonePath, "symbolic-ref", "-q", "HEAD"); err == nil {
-		t.Errorf("beta is still on a branch (%s), want a detached HEAD", out)
+	if b := w.branch(t, beta.ClonePath); b != "HEAD" {
+		t.Errorf("beta is still on a branch (%s), want a detached HEAD", b)
 	}
-	if got := gitProbeOutput(t, alpha.ClonePath, "rev-parse", "refs/heads/"+heldBranch); got != tip {
+	if got := w.rev(t, alpha.ClonePath, "refs/heads/"+heldBranch); got != tip {
 		t.Errorf("refs/heads/%s = %s, want %s", heldBranch, got, tip)
 	}
 }
 
 func TestAddWithOptions_ResumesBranchHeldByStalledPolecatOnSameBead(t *testing.T) {
 	t.Parallel()
-	mgr, _, beta, heldBranch, _ := stalledHolderFixture(t, `[]`)
+	mgr, w, _, beta, heldBranch, _ := stalledHolderFixture(t, `[]`)
 
 	gamma, err := mgr.AddWithOptions("gamma", AddOptions{HookBead: stalledBead, ResumeBranch: heldBranch})
 	if err != nil {
 		t.Fatalf("AddWithOptions refused a branch held by a stalled polecat on the same bead: %v", err)
 	}
-	if head := gitProbeOutput(t, gamma.ClonePath, "symbolic-ref", "--short", "HEAD"); head != heldBranch {
+	if head := w.branch(t, gamma.ClonePath); head != heldBranch {
 		t.Errorf("gamma HEAD = %q, want %q", head, heldBranch)
 	}
-	if _, err := runGitOutput(beta.ClonePath, "symbolic-ref", "-q", "HEAD"); err == nil {
+	if w.branch(t, beta.ClonePath) != "HEAD" {
 		t.Error("beta is still on the branch gamma resumed")
 	}
 }
@@ -101,7 +102,7 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 		name   string
 		labels string
 		bead   string // the bead alpha is slung; stalledBead when empty
-		setup  func(t *testing.T, mgr *Manager, beta *Polecat)
+		setup  func(t *testing.T, w *world, mgr *Manager, beta *Polecat)
 	}{
 		{
 			name: "a different bead than the one it holds",
@@ -117,34 +118,37 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 		},
 		{
 			name: "uncommitted edits",
-			setup: func(t *testing.T, _ *Manager, beta *Polecat) {
+			setup: func(t *testing.T, w *world, _ *Manager, beta *Polecat) {
 				dirtyWorktree(t, beta.ClonePath)
 			},
 		},
 		{
 			name: "stashed work",
-			setup: func(t *testing.T, _ *Manager, beta *Polecat) {
+			setup: func(t *testing.T, w *world, _ *Manager, beta *Polecat) {
 				dirtyWorktree(t, beta.ClonePath)
-				runGit(t, beta.ClonePath, "stash", "push", "-u", "-m", "beta-stash")
+				w.Stash(t, beta.ClonePath, "beta-stash")
 			},
 		},
 		{
 			name: "a commit origin does not have",
-			setup: func(t *testing.T, _ *Manager, beta *Polecat) {
+			setup: func(t *testing.T, w *world, _ *Manager, beta *Polecat) {
 				// The fixture's origin is the rig's own repo, which the polecat
 				// worktrees share, so a new commit would already be "on origin".
 				// Give origin a repo of its own that has the branch at its old tip.
-				bare := t.TempDir()
-				runGit(t, beta.ClonePath, "clone", "--bare", "--no-local", ".", bare)
-				runGit(t, beta.ClonePath, "remote", "set-url", "origin", bare)
+				bare := filepath.Join(t.TempDir(), "origin.git")
+				w.InitBare(t, bare)
+				tip := w.rev(t, beta.ClonePath, "HEAD")
+				branch := w.branch(t, beta.ClonePath)
+				w.SetRef(t, bare, "refs/heads/"+branch, tip)
+				w.SetRef(t, bare, "refs/heads/main", tip)
+				w.AddRemote(t, beta.ClonePath, "origin", bare)
 				dirtyWorktree(t, beta.ClonePath)
-				runGit(t, beta.ClonePath, "-c", "user.name=t", "-c", "user.email=t@example.com",
-					"commit", "-a", "-m", "unpushed")
+				w.CommitWorktree(t, beta.ClonePath, "unpushed")
 			},
 		},
 		{
 			name: "live session",
-			setup: func(t *testing.T, mgr *Manager, _ *Polecat) {
+			setup: func(t *testing.T, _ *world, mgr *Manager, _ *Polecat) {
 				sess := session.PolecatSessionName(session.PrefixFor(mgr.rig.Name), "beta")
 				if err := mgr.tmux.(*fakeProbe).NewSessionWithCommandAndEnv(sess, t.TempDir(), "sleep 300", nil); err != nil {
 					t.Fatalf("create session: %v", err)
@@ -159,9 +163,9 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 			if labels == "" {
 				labels = `[]`
 			}
-			mgr, _, beta, heldBranch, _ := stalledHolderFixture(t, labels)
+			mgr, w, _, beta, heldBranch, _ := stalledHolderFixture(t, labels)
 			if tc.setup != nil {
-				tc.setup(t, mgr, beta)
+				tc.setup(t, w, mgr, beta)
 			}
 			bead := tc.bead
 			switch bead {
@@ -178,7 +182,7 @@ func TestReuseIdlePolecat_KeepsRefusingStalledHolderItMustNotRelease(t *testing.
 			if !strings.Contains(err.Error(), "holder not released") {
 				t.Errorf("refusal does not say why the holder was kept: %v", err)
 			}
-			if head := gitProbeOutput(t, beta.ClonePath, "symbolic-ref", "--short", "HEAD"); head != heldBranch {
+			if head := w.branch(t, beta.ClonePath); head != heldBranch {
 				t.Errorf("beta HEAD = %q, want it left on %q", head, heldBranch)
 			}
 		})

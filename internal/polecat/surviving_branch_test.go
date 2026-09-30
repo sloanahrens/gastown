@@ -1,8 +1,6 @@
 package polecat
 
 import (
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -140,40 +138,26 @@ func TestBranchRevision(t *testing.T) {
 // layout and an origin holding polecat branches.
 func TestFindSurvivingBranchesForIssue_ReadsOrigin(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-
 	tmp := t.TempDir()
 	originDir := filepath.Join(tmp, "origin.git")
 	rigRoot := filepath.Join(tmp, "gastown")
 
-	runGit(t, tmp, "init", "--bare", originDir)
-	if err := os.MkdirAll(rigRoot, 0755); err != nil {
-		t.Fatalf("mkdir rig root: %v", err)
+	// Seed the origin with two branches for the same issue and one for
+	// another.
+	w := newWorld()
+	w.InitBare(t, originDir)
+	seed := w.Commit(t, originDir, "main", "seed (gt-ibt8)", map[string]string{"f.txt": "hello\n"})
+	for _, b := range []string{"polecat/flint/gt-ibt8+mu5wzd6q", "polecat/pearl/gt-ibt8+mu72g5cz", "polecat/agate/gt-4vbn+mtukyuns"} {
+		w.SetRef(t, originDir, "refs/heads/"+b, seed)
 	}
-
-	// Seed the origin with two branches for the same issue. The refs are
-	// written directly so the test needs no commits or worktree.
-	seed := filepath.Join(tmp, "seed")
-	runGit(t, tmp, "init", seed)
-	runGit(t, seed, "config", "user.email", "test@example.com")
-	runGit(t, seed, "config", "user.name", "test")
-	seedFile(t, filepath.Join(seed, "f.txt"), "hello\n")
-	runGit(t, seed, "add", "f.txt")
-	runGit(t, seed, "commit", "-m", "seed (gt-ibt8)")
-	runGit(t, seed, "branch", "polecat/flint/gt-ibt8+mu5wzd6q")
-	runGit(t, seed, "branch", "polecat/pearl/gt-ibt8+mu72g5cz")
-	runGit(t, seed, "branch", "polecat/agate/gt-4vbn+mtukyuns")
-	runGit(t, seed, "remote", "add", "origin", originDir)
-	runGit(t, seed, "push", "origin", "polecat/flint/gt-ibt8+mu5wzd6q", "polecat/pearl/gt-ibt8+mu72g5cz", "polecat/agate/gt-4vbn+mtukyuns")
 
 	// Rig uses the shared bare repo layout (polecat.Manager.repoBase).
 	bare := filepath.Join(rigRoot, ".repo.git")
-	runGit(t, tmp, "init", "--bare", bare)
-	runGit(t, bare, "remote", "add", "origin", originDir)
+	w.InitBare(t, bare)
+	w.AddRemote(t, bare, "origin", originDir)
+	gits := w.opener()
 
-	got, err := FindSurvivingBranchesForIssue(rigRoot, "gt-ibt8")
+	got, err := findSurvivingBranchesForIssue(gits, rigRoot, "gt-ibt8")
 	if err != nil {
 		t.Fatalf("FindSurvivingBranchesForIssue: %v", err)
 	}
@@ -183,7 +167,7 @@ func TestFindSurvivingBranchesForIssue_ReadsOrigin(t *testing.T) {
 	}
 
 	// A bead with no surviving branch reports none, without error.
-	none, err := FindSurvivingBranchesForIssue(rigRoot, "gt-nope")
+	none, err := findSurvivingBranchesForIssue(gits, rigRoot, "gt-nope")
 	if err != nil {
 		t.Fatalf("FindSurvivingBranchesForIssue(no branch): %v", err)
 	}
@@ -192,7 +176,7 @@ func TestFindSurvivingBranchesForIssue_ReadsOrigin(t *testing.T) {
 	}
 
 	// SurvivingBranchForIssue returns the newest match.
-	newest, err := SurvivingBranchForIssue(rigRoot, "gt-ibt8")
+	newest, err := survivingBranchForIssue(gits, rigRoot, "gt-ibt8")
 	if err != nil {
 		t.Fatalf("SurvivingBranchForIssue: %v", err)
 	}
@@ -201,29 +185,7 @@ func TestFindSurvivingBranchesForIssue_ReadsOrigin(t *testing.T) {
 	}
 
 	// No repo at all must error rather than silently report "no branch".
-	if _, err := FindSurvivingBranchesForIssue(filepath.Join(tmp, "missing"), "gt-ibt8"); err == nil {
+	if _, err := findSurvivingBranchesForIssue(gits, filepath.Join(tmp, "missing"), "gt-ibt8"); err == nil {
 		t.Error("expected error for rig root without a git repo")
-	}
-}
-
-func seedFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
-func runGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
-		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
 	}
 }

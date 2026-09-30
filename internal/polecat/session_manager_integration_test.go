@@ -46,7 +46,7 @@ func fastStartupNudgeRig(t *testing.T) *rig.Rig {
 // sitting at the ❯ prompt, on the real clock and the town's configured 200ms
 // verify delay, the lost nudge is typed into the pane again.
 func TestIntegrationVerifyStartupNudgeDelivery_IdleAgent(t *testing.T) {
-	requireTmux(t)
+	requireTmuxIntegration(t)
 
 	tm := tmux.NewTmux()
 	sessionName := fmt.Sprintf("gt-test-nudge-%d", testSessionCounter.Add(1))

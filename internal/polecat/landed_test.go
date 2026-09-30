@@ -2,69 +2,77 @@ package polecat
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
-// landedRepo is a worktree with a real origin/main behind it, so
-// ProbeWorkLandedOnRef can be measured against actual git state rather than a
-// fake: the question it answers ("is this work already in the integration
-// branch") is a git question, and the merge-tree no-op arm only exists because
-// squash merges leave no ancestry to follow.
+// landedRepo is a clone with an origin behind it, in a gitfake world, so
+// probeWorkLandedOnRef is measured against modeled git state: the question it
+// answers ("is this work already in the integration branch") is a git
+// question, and the merge-tree no-op arm only exists because squash merges
+// leave no ancestry to follow. gitfake's contract pins the verdicts it uses.
 type landedRepo struct {
+	w      *world
 	work   string
 	origin string
 }
 
-func runLandedGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v in %s: %v: %s", args, dir, err, out)
-	}
-}
-
 func initLandedRepo(t *testing.T) landedRepo {
 	t.Helper()
-	// Built once per test binary and copied: a bare origin with one commit
-	// on main, and a clone of it.
-	root := cachedGitFixture(t, "landed-repo", func(root string) {
-		origin := filepath.Join(root, "origin")
-		work := filepath.Join(root, "work")
-		for _, dir := range []string{origin, work} {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				t.Fatalf("mkdir %s: %v", dir, err)
-			}
-		}
-		runLandedGit(t, origin, "init", "--bare", "-b", "main")
-		runLandedGit(t, work, "clone", origin, ".")
-		runLandedGit(t, work, "config", "user.email", "test@test.com")
-		runLandedGit(t, work, "config", "user.name", "Test User")
-		writeLandedFile(t, filepath.Join(work, "README.md"), "# Test\n")
-		runLandedGit(t, work, "add", ".")
-		runLandedGit(t, work, "commit", "-m", "initial")
-		runLandedGit(t, work, "push", "origin", "main")
-	})
-	return landedRepo{work: filepath.Join(root, "work"), origin: filepath.Join(root, "origin")}
+	root := t.TempDir()
+	r := landedRepo{w: newWorld(), work: filepath.Join(root, "work"), origin: filepath.Join(root, "origin")}
+	r.w.InitBare(t, r.origin)
+	r.w.Commit(t, r.origin, "main", "initial", map[string]string{"README.md": "# Test\n"})
+	r.w.Clone(t, r.origin, r.work)
+	return r
 }
 
-func writeLandedFile(t *testing.T, path, content string) {
+func (r landedRepo) g() gitRepo { return r.w.repo(r.work) }
+
+func (r landedRepo) do(t *testing.T, err error) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("write %s: %v", path, err)
+	if err != nil {
+		t.Fatal(err)
 	}
+}
+
+func (r landedRepo) commit(t *testing.T, name, content, message string) {
+	t.Helper()
+	r.w.writeAndCommit(t, r.work, message, map[string]string{name: content})
+}
+
+func (r landedRepo) probe(branch string) LandedEvidence {
+	return probeWorkLandedOnRef(r.w.opener(), r.work, branch, "origin")
 }
 
 // startLandedBranch creates and pushes a polecat branch carrying one change.
 func (r landedRepo) startLandedBranch(t *testing.T, branch string) {
 	t.Helper()
-	runLandedGit(t, r.work, "checkout", "-b", branch)
-	writeLandedFile(t, filepath.Join(r.work, "feature.txt"), "the fix\n")
-	runLandedGit(t, r.work, "add", ".")
-	runLandedGit(t, r.work, "commit", "-m", "the fix")
-	runLandedGit(t, r.work, "push", "origin", branch)
+	r.do(t, r.g().CheckoutNewBranch(branch, "HEAD"))
+	r.commit(t, "feature.txt", "the fix\n", "the fix")
+	r.do(t, r.g().Push("origin", branch, false))
+}
+
+// landOnMain checks out main, lands branch on it with merge and pushes main.
+func (r landedRepo) landOnMain(t *testing.T, branch string, merge func(gitfake.WorktreeRepo) error) {
+	t.Helper()
+	r.do(t, r.g().Checkout("main"))
+	r.do(t, merge(r.w.OpenWorktreeRepo(r.work)))
+	r.do(t, r.g().Push("origin", "main", false))
+}
+
+func noFF(branch string) func(gitfake.WorktreeRepo) error {
+	return func(g gitfake.WorktreeRepo) error { return g.MergeNoFF(branch, "merge polecat work") }
+}
+
+func squash(branch string) func(gitfake.WorktreeRepo) error {
+	return func(g gitfake.WorktreeRepo) error { return g.MergeSquash(branch, "squash polecat work") }
+}
+
+func ffOnly(branch string) func(gitfake.WorktreeRepo) error {
+	return func(g gitfake.WorktreeRepo) error { return g.ResetHard(branch) }
 }
 
 // TestProbeWorkLandedOnRef covers the evidence the dangling-active_mr gate
@@ -78,11 +86,9 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--no-ff", "-m", "merge polecat work", branch)
-		runLandedGit(t, repo.work, "push", "origin", "main")
+		repo.landOnMain(t, branch, noFF(branch))
 
-		got := ProbeWorkLandedOnRef(repo.work, branch, "origin")
+		got := repo.probe(branch)
 		if !got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified", got)
 		}
@@ -95,14 +101,11 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--squash", branch)
-		runLandedGit(t, repo.work, "commit", "-m", "squash polecat work")
-		runLandedGit(t, repo.work, "push", "origin", "main")
+		repo.landOnMain(t, branch, squash(branch))
 
 		// The squash leaves no ancestry to follow: this is the arm that makes
 		// a finished polecat's slot reclaimable at all.
-		got := ProbeWorkLandedOnRef(repo.work, branch, "origin")
+		got := repo.probe(branch)
 		if !got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified for a squash-merged branch", got)
 		}
@@ -113,7 +116,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
 
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+		if got := repo.probe(branch); got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for unmerged work", got)
 		}
 	})
@@ -122,10 +125,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--squash", branch)
-		runLandedGit(t, repo.work, "commit", "-m", "squash polecat work")
-		runLandedGit(t, repo.work, "push", "origin", "main")
+		repo.landOnMain(t, branch, squash(branch))
 
 		// The submitted tip is on main; the local branch has since grown a
 		// commit that is on neither. That leftover is the reuse gate's business
@@ -133,12 +133,10 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		// UnpushedCommits), not this probe's — asking the local ref here would
 		// report "unpreserved" about an MR that demonstrably landed, which is
 		// the stranding this fix exists to remove (gt-wprt's opal and topaz).
-		runLandedGit(t, repo.work, "checkout", branch)
-		writeLandedFile(t, filepath.Join(repo.work, "left-behind.txt"), "unpushed\n")
-		runLandedGit(t, repo.work, "add", ".")
-		runLandedGit(t, repo.work, "commit", "-m", "not pushed anywhere")
+		repo.do(t, repo.g().Checkout(branch))
+		repo.commit(t, "left-behind.txt", "unpushed\n", "not pushed anywhere")
 
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); !got.Verified {
+		if got := repo.probe(branch); !got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified: the submitted tip landed", got)
 		}
 	})
@@ -147,15 +145,12 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--squash", branch)
-		runLandedGit(t, repo.work, "commit", "-m", "squash polecat work")
-		runLandedGit(t, repo.work, "push", "origin", "main")
-		runLandedGit(t, repo.work, "push", "origin", "--delete", branch)
+		repo.landOnMain(t, branch, squash(branch))
+		repo.w.DeleteRef(t, repo.origin, "refs/heads/"+branch)
 
 		// The usual post-merge cleanup: the submitted ref is gone, so the local
 		// branch stands in — and it is on main.
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); !got.Verified {
+		if got := repo.probe(branch); !got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified after the submitted branch was deleted", got)
 		}
 	})
@@ -164,17 +159,15 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--no-ff", "-m", "merge polecat work", branch)
-		runLandedGit(t, repo.work, "push", "origin", "main")
-		runLandedGit(t, repo.work, "push", "origin", "--delete", branch)
+		repo.landOnMain(t, branch, noFF(branch))
+		repo.w.DeleteRef(t, repo.origin, "refs/heads/"+branch)
 
 		// A --no-ff merge leaves the branch tip an ancestor of integration, so
 		// the ancestry arm alone cannot tell it from a ref that was never
 		// committed to. It is distinguishable by how integration reached it:
 		// the merge, not integration's own first-parent line. Losing this case
 		// is the false negative the divergence guard was rejected for.
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); !got.Verified {
+		if got := repo.probe(branch); !got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified for a --no-ff merge whose remote branch was deleted", got)
 		}
 	})
@@ -183,10 +176,8 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--no-ff", "-m", "merge polecat work", branch)
-		runLandedGit(t, repo.work, "push", "origin", "main")
-		runLandedGit(t, repo.work, "push", "origin", "--delete", branch)
+		repo.landOnMain(t, branch, noFF(branch))
+		repo.w.DeleteRef(t, repo.origin, "refs/heads/"+branch)
 
 		// Integration keeps moving after the merge landed, the ordinary case
 		// since a landed check typically runs well after other work has
@@ -195,12 +186,10 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		// ref^ would find head is not that single immediate parent and wrongly
 		// conclude head sits off the line, reintroducing the false negative
 		// this probe exists to fix.
-		writeLandedFile(t, filepath.Join(repo.work, "later.txt"), "later main work\n")
-		runLandedGit(t, repo.work, "add", ".")
-		runLandedGit(t, repo.work, "commit", "-m", "later main commit")
-		runLandedGit(t, repo.work, "push", "origin", "main")
+		repo.commit(t, "later.txt", "later main work\n", "later main commit")
+		repo.do(t, repo.g().Push("origin", "main", false))
 
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); !got.Verified {
+		if got := repo.probe(branch); !got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified for a --no-ff merge once integration has advanced further", got)
 		}
 	})
@@ -209,16 +198,14 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--ff-only", branch)
-		runLandedGit(t, repo.work, "push", "origin", "main")
-		runLandedGit(t, repo.work, "push", "origin", "--delete", branch)
+		repo.landOnMain(t, branch, ffOnly(branch))
+		repo.w.DeleteRef(t, repo.origin, "refs/heads/"+branch)
 
 		// A fast-forward leaves the tip equal to integration's tip — byte for
 		// byte the state a branch that was created and never committed to is
 		// in. This asserts the fail-closed answer for that unresolvable case
 		// rather than leaving it to chance; refCarriesOwnWork says why.
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+		if got := repo.probe(branch); got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified: a fast-forward landing is indistinguishable from an empty branch", got)
 		}
 	})
@@ -230,9 +217,9 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		// branch created from origin/main and left there. The remote-tracking
 		// ref is therefore a trivial ancestor of integration, and the guard
 		// has to apply to it too, not just to the local fallback.
-		runLandedGit(t, repo.work, "push", "origin", "main:"+branch)
+		repo.do(t, repo.g().Push("origin", "main:"+branch, false))
 
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+		if got := repo.probe(branch); got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a pushed branch with no commits of its own", got)
 		}
 	})
@@ -245,9 +232,9 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		// This is the fail-open the probe must not take (gt-7pec): the local
 		// branch stands in for a submitted branch, and this one submitted
 		// nothing.
-		runLandedGit(t, repo.work, "checkout", "-b", branch)
+		repo.do(t, repo.g().CheckoutNewBranch(branch, "HEAD"))
 
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+		if got := repo.probe(branch); got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a branch with no commits of its own", got)
 		}
 	})
@@ -258,13 +245,12 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		// A ref left at an earlier commit of main and never advanced: an
 		// ancestor of integration because it is main's own history, which is
 		// not this branch's work.
-		runLandedGit(t, repo.work, "branch", branch)
-		writeLandedFile(t, filepath.Join(repo.work, "unrelated.txt"), "unrelated main work\n")
-		runLandedGit(t, repo.work, "add", ".")
-		runLandedGit(t, repo.work, "commit", "-m", "unrelated main commit")
-		runLandedGit(t, repo.work, "push", "origin", "main")
+		head, _ := repo.g().Rev("HEAD")
+		repo.w.SetRef(t, repo.work, "refs/heads/"+branch, head)
+		repo.commit(t, "unrelated.txt", "unrelated main work\n", "unrelated main commit")
+		repo.do(t, repo.g().Push("origin", "main", false))
 
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); got.Verified {
+		if got := repo.probe(branch); got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified for a stale branch with no commits of its own", got)
 		}
 	})
@@ -273,15 +259,14 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		t.Parallel()
 		repo := initLandedRepo(t)
 		repo.startLandedBranch(t, branch)
-		runLandedGit(t, repo.work, "checkout", "main")
-		runLandedGit(t, repo.work, "merge", "--squash", branch)
-		runLandedGit(t, repo.work, "commit", "-m", "squash polecat work")
-		runLandedGit(t, repo.work, "push", "origin", "main")
-		writeLandedFile(t, filepath.Join(repo.work, "README.md"), "# Unrelated leftovers\n")
+		repo.landOnMain(t, branch, squash(branch))
+		if err := os.WriteFile(filepath.Join(repo.work, "README.md"), []byte("# Unrelated leftovers\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 
 		// The landed question is about committed work; uncommitted leftovers of
 		// their own are the reuse gate's business, not this probe's.
-		if got := ProbeWorkLandedOnRef(repo.work, branch, "origin"); !got.Verified {
+		if got := repo.probe(branch); !got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want verified despite a dirty worktree", got)
 		}
 	})
@@ -304,7 +289,7 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				if got := ProbeWorkLandedOnRef(tc.path, tc.branch, "origin"); got.Verified {
+				if got := probeWorkLandedOnRef(repo.w.opener(), tc.path, tc.branch, "origin"); got.Verified {
 					t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified", got)
 				}
 			})
@@ -313,8 +298,11 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 
 	t.Run("no origin remote fails closed", func(t *testing.T) {
 		t.Parallel()
-		dir := initLiveGitRepo(t) // local-only repo: no origin, no origin/main
-		if got := ProbeWorkLandedOnRef(dir, "main", "origin"); got.Verified {
+		w := newWorld()
+		dir := t.TempDir() // local-only repo: no origin, no origin/main
+		w.InitRepo(t, dir)
+		w.Commit(t, dir, "main", "initial", map[string]string{"README.md": "# Test\n"})
+		if got := probeWorkLandedOnRef(w.opener(), dir, "main", "origin"); got.Verified {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified without an origin", got)
 		}
 	})

@@ -147,8 +147,11 @@ func (e *UncommittedWorkError) Unwrap() error {
 
 // Manager handles polecat lifecycle.
 type Manager struct {
-	rig      *rig.Rig
-	git      *git.Git
+	rig *rig.Rig
+	git gitRepo
+	// gits opens git on other directories: worktrees, the repo base,
+	// branch holders. Its zero value opens *git.Git.
+	gits     gitOpener
 	beads    *beads.Beads
 	namePool *NamePool
 	// tmux is nil when the caller has no tmux; NewManager never stores a
@@ -167,6 +170,15 @@ type Manager struct {
 	// draws from the pool, before it takes the per-polecat lock: the window a
 	// create that does not use the pool lock races into (gt-dziey).
 	afterPoolNameAllocated func(name string)
+	// diskSpace reports the free space at a path; nil means
+	// util.CheckDiskSpace, which runs diskutil on macOS.
+	diskSpace func(path string) (util.DiskSpaceLevel, string, error)
+	// ensureExcludes writes gt's patterns into a worktree's local git
+	// exclude file; nil means rig.EnsureLocalExcludePatterns, which runs git.
+	ensureExcludes func(worktreePath string) error
+	// runSetup runs setup_command's shell; nil runs it for real
+	// (runSetupProcess). Tests record the call instead.
+	runSetup setupRunner
 	// setupTimeout, when positive, bounds one setup_command run; zero means
 	// setupCmdTimeout. Tests set it so the timeout path takes milliseconds
 	// instead of half an hour.
@@ -191,13 +203,17 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux) *Manager {
 	if t != nil {
 		probe = t
 	}
-	return newManager(r, g, probe, nil)
+	var repo gitRepo
+	if g != nil {
+		repo = g
+	}
+	return newManager(r, repo, probe, nil)
 }
 
 // newManager is NewManager with its collaborators injected: tmux answers the
 // session probes (nil for none), and bd, when non-nil, answers every bd call
 // the manager's beads wrapper makes instead of the bd on PATH.
-func newManager(r *rig.Rig, g *git.Git, t sessionProbe, bd beads.BDRunner) *Manager {
+func newManager(r *rig.Rig, g gitRepo, t sessionProbe, bd beads.BDRunner) *Manager {
 	// Use the resolved beads directory to find where bd commands should run.
 	// For tracked beads: rig/.beads/redirect -> mayor/rig/.beads, so use mayor/rig
 	// For local beads: rig/.beads is the database, so use rig root
@@ -521,12 +537,12 @@ func (m *Manager) checkCleanupStatus(name string, status CleanupStatus, force bo
 // repoBase returns the git directory and Git object to use for worktree operations.
 // Prefers the shared bare repo (.repo.git) if it exists, otherwise falls back to mayor/rig.
 // The bare repo architecture allows all worktrees (refinery, polecats) to share branch visibility.
-func (m *Manager) repoBase() (*git.Git, error) {
+func (m *Manager) repoBase() (gitRepo, error) {
 	// First check for shared bare repo (new architecture)
 	bareRepoPath := filepath.Join(m.rig.Path, ".repo.git")
 	if info, err := os.Stat(bareRepoPath); err == nil && info.IsDir() {
 		// Bare repo exists - use it
-		return git.NewGitWithDir(bareRepoPath, ""), nil
+		return m.gits.OpenDir(bareRepoPath, ""), nil
 	}
 
 	// Fall back to mayor/rig (legacy architecture)
@@ -534,7 +550,7 @@ func (m *Manager) repoBase() (*git.Git, error) {
 	if _, err := os.Stat(mayorPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("no repo base found (neither .repo.git nor mayor/rig exists)")
 	}
-	return git.NewGit(mayorPath), nil
+	return m.gits.Open(mayorPath), nil
 }
 
 // polecatDir returns the parent directory for a polecat.
@@ -880,7 +896,7 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	defer func() { telemetry.RecordPolecatSpawn(context.Background(), name, retErr) }()
 
 	// Pre-check: Verify sufficient disk space before expensive worktree creation.
-	if level, msg, err := util.CheckDiskSpace(m.rig.Path); err == nil && level == util.DiskSpaceCritical {
+	if level, msg, err := m.checkDiskSpace(m.rig.Path); err == nil && level == util.DiskSpaceCritical {
 		return nil, fmt.Errorf("%w: %s", ErrDiskSpaceLow, msg)
 	}
 
@@ -985,7 +1001,7 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		style.PrintWarning("could not copy overlay files: %v", err)
 	}
 
-	if err := rig.EnsureLocalExcludePatterns(clonePath); err != nil {
+	if err := m.ensureLocalExcludes(clonePath); err != nil {
 		style.PrintWarning("could not update local git excludes: %v", err)
 	}
 
@@ -1060,7 +1076,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	// beads state — all requiring disk I/O. If the disk is nearly full, fail early
 	// with a clear message rather than leaving a half-created polecat.
 	// See: disk-space-resilience — 5 polecats died silently on disk exhaustion.
-	if level, msg, err := util.CheckDiskSpace(m.rig.Path); err == nil && level == util.DiskSpaceCritical {
+	if level, msg, err := m.checkDiskSpace(m.rig.Path); err == nil && level == util.DiskSpaceCritical {
 		return nil, fmt.Errorf("%w: %s", ErrDiskSpaceLow, msg)
 	}
 
@@ -1217,7 +1233,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	}
 
 	// Keep worktree runtime ignores local so the tracked tree stays clean.
-	if err := rig.EnsureLocalExcludePatterns(clonePath); err != nil {
+	if err := m.ensureLocalExcludes(clonePath); err != nil {
 		style.PrintWarning("could not update local git excludes: %v", err)
 	}
 
@@ -1344,7 +1360,7 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 			}
 		} else {
 			// Fallback path: Check git directly (for polecats that haven't reported yet)
-			polecatGit := git.NewGit(clonePath)
+			polecatGit := m.gits.Open(clonePath)
 			status, err := polecatGit.CheckUncommittedWork()
 			if err == nil && !status.Clean() {
 				if opts.Force {
@@ -1419,7 +1435,7 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 	// nuking a stalled polecat (e.g., after disk space recovery) permanently loses
 	// any commits on the branch. The push is non-blocking: failures are warnings,
 	// not errors, so nuke still proceeds. See: disk-space-resilience.
-	polecatGit := git.NewGit(clonePath)
+	polecatGit := m.gits.Open(clonePath)
 	if branch, brErr := polecatGit.CurrentBranch(); brErr == nil && branch != "" {
 		pushed, unpushedCount, checkErr := polecatGit.BranchPushedToRemote(branch, "origin")
 		if checkErr == nil && !pushed && unpushedCount > 0 {
@@ -1439,12 +1455,12 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 		// This handles edge cases where the repo base is corrupted but worktree entries exist.
 		bareRepoPath := filepath.Join(m.rig.Path, ".repo.git")
 		if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
-			bareGit := git.NewGitWithDir(bareRepoPath, "")
+			bareGit := m.gits.OpenDir(bareRepoPath, "")
 			_ = bareGit.WorktreePrune()
 		}
 		mayorRigPath := filepath.Join(m.rig.Path, "mayor", "rig")
 		if info, statErr := os.Stat(mayorRigPath); statErr == nil && info.IsDir() {
-			mayorGit := git.NewGit(mayorRigPath)
+			mayorGit := m.gits.Open(mayorRigPath)
 			_ = mayorGit.WorktreePrune()
 		}
 		// Fall back to direct removal if repo base not found
@@ -1550,7 +1566,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 		return fmt.Errorf("not a clean idle polecat: state=%s issue=%s", current.State, current.Issue)
 	}
 
-	if err := VerifyWorktreeExists(current.ClonePath); err == nil {
+	if err := verifyWorktreeExists(m.gits, current.ClonePath); err == nil {
 		return fmt.Errorf("worktree is healthy: %s", current.ClonePath)
 	} else if !IsStructuralWorktreeError(err) {
 		return fmt.Errorf("worktree check did not prove structural damage: %w", err)
@@ -1741,7 +1757,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 
 	// Get the old clone path (may be old or new structure)
 	oldClonePath := m.clonePath(name)
-	polecatGit := git.NewGit(oldClonePath)
+	polecatGit := m.gits.Open(oldClonePath)
 
 	// New clone path uses new structure
 	polecatDir := m.polecatDir(name)
@@ -1890,7 +1906,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	}
 
 	// Keep worktree runtime ignores local so the tracked tree stays clean.
-	if err := rig.EnsureLocalExcludePatterns(newClonePath); err != nil {
+	if err := m.ensureLocalExcludes(newClonePath); err != nil {
 		style.PrintWarning("could not update local git excludes: %v", err)
 	}
 
@@ -2006,7 +2022,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		}
 	}
 
-	polecatGit := git.NewGit(clonePath)
+	polecatGit := m.gits.Open(clonePath)
 
 	// Fetch latest from origin (non-fatal: may be offline)
 	repoGit, err := m.repoBase()
@@ -2167,7 +2183,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 // fails on every git version checked (2.42, 2.50), and `checkout` fails on
 // 2.50 though not on 2.42, so calling the branch free while leaving the
 // registration made the caller's next step fail (gt-22hdp.39).
-func heldByOtherWorktree(g *git.Git, branch string, exempt ...string) error {
+func heldByOtherWorktree(g gitRepo, branch string, exempt ...string) error {
 	if branch == "" {
 		return nil
 	}
@@ -2223,7 +2239,7 @@ func (e *branchHeldError) Unwrap() error { return ErrBranchHeld }
 // not preserved on origin or an MR target, so the holder's checkout guards
 // nothing and the branch ref survives its detach. Any other holder, or any
 // doubt about this one, still refuses (gt-l9td, gt-70m1).
-func (m *Manager) claimBranch(g *git.Git, branch, bead string, exempt ...string) error {
+func (m *Manager) claimBranch(g gitRepo, branch, bead string, exempt ...string) error {
 	err := heldByOtherWorktree(g, branch, exempt...)
 	var held *branchHeldError
 	if !errors.As(err, &held) {
@@ -2285,7 +2301,7 @@ func (m *Manager) releaseHolder(holderPath, branch, bead string) error {
 	} else if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
 		return fmt.Errorf("polecat %s is not reusable: %s", name, decision.Reason)
 	}
-	if err := git.NewGit(holderPath).CheckoutDetachForce("HEAD"); err != nil {
+	if err := m.gits.Open(holderPath).CheckoutDetachForce("HEAD"); err != nil {
 		return fmt.Errorf("detaching polecat %s: %w", name, err)
 	}
 	return nil
@@ -2780,8 +2796,8 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// gt-2h6: a structurally gone worktree can never self-report a fresh
 	// CleanupStatus again, so a missing/unknown status must not permanently
 	// veto reclaiming this slot. See ResolveIgnoreCleanupStatus.
-	facts.WorktreeStructurallyMissing = IsStructuralWorktreeError(VerifyWorktreeExists(clonePath))
-	g := git.NewGit(clonePath)
+	facts.WorktreeStructurallyMissing = IsStructuralWorktreeError(verifyWorktreeExists(m.gits, clonePath))
+	g := m.gits.Open(clonePath)
 	// claude-41j.1 D9: this is the reuse gate's live probe, and it is the
 	// primary source for the verdict — the recorded cleanup_status is demoted
 	// to a hint (RecordedCleanupBlocks). Label the facts so the verdict and
@@ -2852,7 +2868,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		// pointer left in that state refuses every new spawn once the rig is at
 		// its directory cap.
 		assessment := AssessActiveMRWithLandedEvidence(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe},
-			func() LandedEvidence { return ProbeWorkLandedOnRef(clonePath, facts.Branch, "origin") })
+			func() LandedEvidence { return probeWorkLandedOnRef(m.gits, clonePath, facts.Branch, "origin") })
 		if assessment.Pending {
 			facts.ActiveMRBlocker = assessment.Reason
 		}
@@ -2866,7 +2882,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		workIssue = sourceHint
 	}
 	facts.MQCheckRequired = facts.Branch != ""
-	facts.HasSubmittableWork = hasSubmittableWorkForWorkstate(clonePath, targetRefs)
+	facts.HasSubmittableWork = hasSubmittableWorkForWorkstate(m.gits.Open(clonePath), targetRefs)
 	facts.AssignedBeadTerminal = m.assignedBeadTerminal(workIssue)
 	facts.MQNotRequired = m.mqNotRequiredSource(workIssue)
 	if facts.MQCheckRequired && facts.HasSubmittableWork && !facts.AssignedBeadTerminal && !facts.MQNotRequired {
@@ -2917,8 +2933,7 @@ func (m *Manager) mqNotRequiredSource(issueID string) bool {
 	return attachment.NoMerge || attachment.ReviewOnly || strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
 }
 
-func hasSubmittableWorkForWorkstate(worktreePath string, targetRefs []string) bool {
-	g := git.NewGit(worktreePath)
+func hasSubmittableWorkForWorkstate(g gitRepo, targetRefs []string) bool {
 	branch, _ := g.CurrentBranch()
 	status, err := g.BranchTargetStatus(branch, "origin", targetRefs)
 	return err == nil && status.UnpreservedPatchCount > 0
@@ -3167,8 +3182,8 @@ func (m *Manager) unassignWorkBeads(name string, judged map[string]SurvivalVerdi
 	// One origin listing for every bead being released: each per-issue lookup is
 	// its own ls-remote, and an unreachable remote costs the full query timeout
 	// (see ListOriginPolecatBranches).
-	originBranches, originErr := ListOriginPolecatBranches(m.rig.Path)
-	survival, survivalErr := NewWorkSurvival(m.rig.Path)
+	originBranches, originErr := listOriginPolecatBranches(m.gits, m.rig.Path)
+	survival, survivalErr := newWorkSurvival(m.gits, m.rig.Path, git.RemoteQueryTimeout)
 
 	for _, issue := range work {
 		// Submitted for landing: the landing worker owns the bead until it
@@ -3396,7 +3411,7 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	clonePath := m.clonePath(name)
 
 	// Get actual branch from worktree (branches are now timestamped)
-	polecatGit := git.NewGit(clonePath)
+	polecatGit := m.gits.Open(clonePath)
 	branchName, err := polecatGit.CurrentBranch()
 	if err != nil {
 		// Fall back to old format if we can't read the branch
@@ -3555,15 +3570,12 @@ func (m *Manager) setupSharedBeads(clonePath string) error {
 
 	// Propagate beads git config to the worktree so bd commands in polecat
 	// sessions don't warn about missing role/prefix.
+	g := m.gits.Open(clonePath)
 	prefix := beads.GetPrefixForRig(townRoot, m.rig.Name)
 	if prefix != "" {
-		cmd := exec.Command("git", "-C", clonePath, "config", "beads.issue-prefix", prefix)
-		util.SetDetachedProcessGroup(cmd)
-		_ = cmd.Run()
+		_ = g.ConfigSet("beads.issue-prefix", prefix)
 	}
-	cmd := exec.Command("git", "-C", clonePath, "config", "beads.role", "contributor")
-	util.SetDetachedProcessGroup(cmd)
-	_ = cmd.Run()
+	_ = g.ConfigSet("beads.role", "contributor")
 
 	return nil
 }
@@ -3601,18 +3613,17 @@ func (m *Manager) runSetupCommand(worktreePath string) error {
 	defer cancel()
 
 	shell, args := setupShellCommand(setupCmd)
-	cmd := exec.CommandContext(ctx, shell, args...) //nolint:gosec // setup_command is operator-controlled rig configuration.
-	util.SetProcessGroup(cmd)
-	cmd.Dir = worktreePath
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(),
+	env := []string{
 		fmt.Sprintf("GT_WORKTREE_PATH=%s", worktreePath),
 		fmt.Sprintf("GT_RIG_PATH=%s", m.rig.Path),
-	)
+	}
+	run := m.runSetup
+	if run == nil {
+		run = runSetupProcess
+	}
 
 	fmt.Println("Running setup_command...")
-	if err := cmd.Run(); err != nil {
+	if err := run(ctx, worktreePath, env, shell, args...); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("setup_command timed out after %s", timeout)
 		}
@@ -3620,6 +3631,22 @@ func (m *Manager) runSetupCommand(worktreePath string) error {
 	}
 	fmt.Println("Ran setup_command")
 	return nil
+}
+
+// setupRunner runs a setup_command's shell in dir with env added to the
+// process's own, until it exits or ctx is done.
+type setupRunner func(ctx context.Context, dir string, env []string, name string, args ...string) error
+
+// runSetupProcess is the real setupRunner: the shell runs in its own process
+// group, so a timeout kills everything it started, with its output on ours.
+func runSetupProcess(ctx context.Context, dir string, env []string, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // setup_command is operator-controlled rig configuration.
+	util.SetProcessGroup(cmd)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), env...)
+	return cmd.Run()
 }
 
 func setupShellCommand(command string) (string, []string) {
@@ -3735,10 +3762,10 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 		// Check for active tmux session
 		// Session name follows pattern: gt-<rig>-<polecat>
 		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), p.Name)
-		info.HasActiveSession = checkTmuxSession(sessionName)
+		info.HasActiveSession = m.hasActiveSession(sessionName)
 
 		// Check how far behind main
-		polecatGit := git.NewGit(p.ClonePath)
+		polecatGit := m.gits.Open(p.ClonePath)
 		info.CommitsBehind = countCommitsBehind(polecatGit, defaultBranch)
 
 		// Check for uncommitted work (excluding .beads/ files which are synced across worktrees)
@@ -3771,6 +3798,30 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 	return results, nil
 }
 
+func (m *Manager) checkDiskSpace(path string) (util.DiskSpaceLevel, string, error) {
+	if m.diskSpace != nil {
+		return m.diskSpace(path)
+	}
+	return util.CheckDiskSpace(path)
+}
+
+func (m *Manager) ensureLocalExcludes(worktreePath string) error {
+	if m.ensureExcludes != nil {
+		return m.ensureExcludes(worktreePath)
+	}
+	return rig.EnsureLocalExcludePatterns(worktreePath)
+}
+
+// hasActiveSession asks the manager's tmux whether sessionName exists, or
+// the default tmux server when the manager has none.
+func (m *Manager) hasActiveSession(sessionName string) bool {
+	if m.tmux != nil {
+		running, err := m.tmux.HasSession(sessionName)
+		return err == nil && running
+	}
+	return checkTmuxSession(sessionName)
+}
+
 // checkTmuxSession checks if a tmux session exists.
 func checkTmuxSession(sessionName string) bool {
 	// Use has-session command which returns 0 if session exists
@@ -3779,7 +3830,7 @@ func checkTmuxSession(sessionName string) bool {
 }
 
 // countCommitsBehind counts how many commits a worktree is behind origin/<defaultBranch>.
-func countCommitsBehind(g *git.Git, defaultBranch string) int {
+func countCommitsBehind(g gitRepo, defaultBranch string) int {
 	// Use rev-list to count commits: origin/main..HEAD shows commits ahead,
 	// HEAD..origin/main shows commits behind
 	remoteBranch := "origin/" + defaultBranch
