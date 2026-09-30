@@ -20,8 +20,6 @@
     "batch_min_age": "5m",
     "batch_max": 10,
     "test_verify_command": "make test-changed PKGS='{packages}'",
-    "post_merge_command": "bash scripts/install-after-merge.sh",
-    "post_merge_timeout": "20m",
     "cycle_session_after_merge": true
   },
   "witness": {

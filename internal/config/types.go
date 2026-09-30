@@ -1448,17 +1448,6 @@ type MergeQueueConfig struct {
 	// rigs that never configure it keep upstream (pre-gate) behavior.
 	Editorial *EditorialConfig `json:"editorial,omitempty"`
 
-	// PostMergeCommand is inert: its runner went with the refinery, and
-	// nothing reads it (gt-z0l3s). It stays only because the live gastown
-	// rig config still carries post_merge_command and rig configs decode
-	// strictly; drop the key from <town>/gastown/config.json first, then this
-	// field and PostMergeTimeout. Installing is `make install`
-	// (scripts/install-gt.sh).
-	PostMergeCommand string `json:"post_merge_command,omitempty"`
-
-	// PostMergeTimeout is inert, like PostMergeCommand.
-	PostMergeTimeout string `json:"post_merge_timeout,omitempty"`
-
 	// PostLandCommand runs once per landing, after the push and the record,
 	// in a throwaway worktree at the landed commit (the slow test tier, e.g.
 	// "make test-slow"). The landing worker runs it asynchronously, one at a
@@ -1641,23 +1630,6 @@ func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {
 		return 0
 	}
 	return c.MaxReadyForDispatch
-}
-
-// DefaultPostMergeTimeout covers the install script's 5m lock wait plus a
-// cold-cache build, well under the refinery shell tool's 45m ceiling.
-const DefaultPostMergeTimeout = 20 * time.Minute
-
-// GetPostMergeTimeout returns the post-merge command timeout. Nil-safe; an
-// empty, unparsable or non-positive value yields DefaultPostMergeTimeout.
-func (c *MergeQueueConfig) GetPostMergeTimeout() time.Duration {
-	if c == nil || c.PostMergeTimeout == "" {
-		return DefaultPostMergeTimeout
-	}
-	d, err := time.ParseDuration(c.PostMergeTimeout)
-	if err != nil || d <= 0 {
-		return DefaultPostMergeTimeout
-	}
-	return d
 }
 
 // HasAnyGateCommand reports whether at least one of the five gate commands
