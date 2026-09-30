@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -167,6 +170,76 @@ func TestBeadWithFullDependenciesSkipsShowWhenNoDependencies(t *testing.T) {
 	bead := &beads.Issue{ID: "gt-does-not-exist-anywhere", DependencyCount: 0}
 	if got := beadWithFullDependencies(RoleContext{}, bead); got != bead {
 		t.Fatalf("beadWithFullDependencies() = %#v, want the same bead pointer unchanged", got)
+	}
+}
+
+// installFakeBdShow puts a POSIX-shell `bd` on PATH whose `show` prints
+// showJSON and exits with showExit, and returns the file that logs each
+// invocation's argv (one per line). Not parallel-safe: it sets PATH.
+func installFakeBdShow(t *testing.T, showJSON string, showExit int) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell fake bd")
+	}
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "bd.log")
+	payload := filepath.Join(binDir, "show.json")
+	if err := os.WriteFile(payload, []byte(showJSON), 0o644); err != nil {
+		t.Fatalf("write fake show payload: %v", err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> '" + logPath + "'\n" +
+		"case \"$1\" in\n" +
+		"  show) cat '" + payload + "'; exit " + strconv.Itoa(showExit) + ";;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// TestBeadWithFullDependenciesRefetchesViaShow is the positive half of the
+// fast-path test above: a bead that `bd list` reported with dependencies
+// (DependencyCount > 0 but bare relation records, so no usable IDs) is
+// replaced by the full record `bd show` returns, whose dependencies carry the
+// id and status the merge-status check needs.
+func TestBeadWithFullDependenciesRefetchesViaShow(t *testing.T) {
+	logPath := installFakeBdShow(t,
+		`[{"id":"gt-hooked","title":"Hooked","status":"hooked","dependency_count":1,`+
+			`"dependencies":[{"id":"gt-blocker","title":"Blocker","status":"closed","dependency_type":"blocks"}]}]`, 0)
+
+	listed := &beads.Issue{ID: "gt-hooked", DependencyCount: 1}
+	ctx := RoleContext{WorkDir: t.TempDir()}
+
+	got := beadWithFullDependencies(ctx, listed)
+	if got == listed {
+		t.Fatal("beadWithFullDependencies() returned the listed bead; want the re-fetched one")
+	}
+	if len(got.Dependencies) != 1 || got.Dependencies[0].ID != "gt-blocker" || got.Dependencies[0].Status != "closed" {
+		t.Fatalf("re-fetched dependencies = %#v, want gt-blocker (closed)", got.Dependencies)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake bd log: %v", err)
+	}
+	if !strings.Contains(string(data), "show gt-hooked") {
+		t.Fatalf("bd was not asked to show gt-hooked; log:\n%s", data)
+	}
+}
+
+// TestBeadWithFullDependenciesFallsBackWhenShowFails: a re-fetch that errors
+// must not lose the hooked bead.
+func TestBeadWithFullDependenciesFallsBackWhenShowFails(t *testing.T) {
+	installFakeBdShow(t, "", 1)
+
+	listed := &beads.Issue{ID: "gt-hooked", DependencyCount: 1}
+	ctx := RoleContext{WorkDir: t.TempDir()}
+
+	if got := beadWithFullDependencies(ctx, listed); got != listed {
+		t.Fatalf("beadWithFullDependencies() = %#v, want the listed bead after a failed show", got)
 	}
 }
 
