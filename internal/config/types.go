@@ -2,15 +2,12 @@
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
@@ -1314,77 +1311,6 @@ func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {
 		return 0
 	}
 	return c.MaxReadyForDispatch
-}
-
-// HasAnyGateCommand reports whether at least one of the five gate commands
-// (setup, typecheck, lint, test, build) is configured. Nil-safe.
-//
-// Used to decide whether a --pre-verified claim is even possible to honor:
-// a rig with zero configured gate commands has nothing a polecat could have
-// run, so the claim has no basis (gt-k4sy).
-func (c *MergeQueueConfig) HasAnyGateCommand() bool {
-	if c == nil {
-		return false
-	}
-	return c.SetupCommand != "" || c.TypecheckCommand != "" || c.LintCommand != "" ||
-		c.TestCommand != "" || c.BuildCommand != ""
-}
-
-// GateSetSHA returns a sha256 hex digest identifying the ordered set of
-// non-empty gate commands (setup, typecheck, lint, build, test) in cfg.
-// Nil-safe: a nil cfg hashes the same as an empty gate set.
-//
-// A `gt done --pre-verified` stamp records this alongside its verification
-// so the refinery's fast-path can detect when the gate set has changed
-// since the polecat verified — a rig that adds, removes, or edits a gate
-// command must invalidate any pre-verification recorded against the old
-// set (om-gate T8).
-func GateSetSHA(cfg *MergeQueueConfig) string {
-	if cfg == nil {
-		cfg = &MergeQueueConfig{}
-	}
-	ordered := []string{cfg.SetupCommand, cfg.TypecheckCommand, cfg.LintCommand, cfg.BuildCommand, cfg.TestCommand}
-	nonEmpty := make([]string, 0, len(ordered))
-	for _, c := range ordered {
-		if c != "" {
-			nonEmpty = append(nonEmpty, c)
-		}
-	}
-	sum := sha256.Sum256([]byte(strings.Join(nonEmpty, "\n")))
-	return hex.EncodeToString(sum[:])
-}
-
-// CombineGateSetSHA folds a set of named gate commands (name -> shell
-// command) into the hash GateSetSHA produces, yielding one hash that
-// changes if either binding changes. Nil or empty namedGates hashes
-// identically to GateSetSHA(cfg) alone.
-//
-// This is the single algorithm the pre-verification producer (`gt done`,
-// stamping pre_verified_gates) and consumer (the refinery's fast-path
-// staleness check) must both call — hashed two ways, the values never agree
-// and the fast-path never fires (om-gate T8).
-func CombineGateSetSHA(cfg *MergeQueueConfig, namedGates map[string]string) string {
-	base := GateSetSHA(cfg)
-	if len(namedGates) == 0 {
-		return base
-	}
-
-	names := make([]string, 0, len(namedGates))
-	for name := range namedGates {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var b strings.Builder
-	b.WriteString(base)
-	for _, name := range names {
-		b.WriteString("\x00")
-		b.WriteString(name)
-		b.WriteString("\x00")
-		b.WriteString(namedGates[name])
-	}
-	sum := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(sum[:])
 }
 
 // boolPtr returns a pointer to a bool value.

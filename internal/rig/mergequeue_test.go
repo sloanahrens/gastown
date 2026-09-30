@@ -177,8 +177,7 @@ func TestResolveMergeQueueConfig_Editorial(t *testing.T) {
 }
 
 // TestResolveMergeQueueConfig_NoConfig verifies the nil-townRoot/nil-rigName
-// and no-config-anywhere cases return nil, matching HasAnyGateCommand's
-// nil-safety.
+// and no-config-anywhere cases return nil.
 func TestResolveMergeQueueConfig_NoConfig(t *testing.T) {
 	t.Parallel()
 	if got := ResolveMergeQueueConfig("", "gastown"); got != nil {
