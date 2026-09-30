@@ -400,7 +400,13 @@ func ensureDatabaseInitialized(beadsDir string) error {
 		}
 	}
 
-	// No database found — need to initialize.
+	// No database found — need to initialize. Name it: bd's own last resort is
+	// its built-in default "beads", which it creates on whatever server the
+	// environment points at (gt-170zk).
+	dbName, err := InitDatabaseTarget(beadsDir)
+	if err != nil {
+		return err
+	}
 	prefix := detectPrefix(beadsDir)
 
 	// bd init must run from the parent directory (not inside .beads/).
@@ -410,11 +416,13 @@ func ensureDatabaseInitialized(beadsDir string) error {
 	if prefix != "" {
 		initArgs = append(initArgs, "--prefix", prefix)
 	}
-	initArgs = append(initArgs, "--server")
+	// --database is the authoritative selector: without it bd derives the name
+	// from the prefix, from its cwd, or from its default "beads".
+	initArgs = append(initArgs, "--database", dbName, "--server")
 	cmd := exec.Command("bd", initArgs...)
 	cmd.Dir = parentDir
 	util.SetDetachedProcessGroup(cmd)
-	initEnv := BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+	initEnv := withDatabaseTarget(BuildMutationPinnedBDEnv(os.Environ(), beadsDir), dbName)
 	cmd.Env = initEnv
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Handle "already initialized" gracefully, matching install.go behavior.
@@ -422,9 +430,18 @@ func ensureDatabaseInitialized(beadsDir string) error {
 		// a valid database state.
 		outputStr := string(output)
 		if strings.Contains(outputStr, "already initialized") {
-			return nil
+			// Record the name even here: the workspace must not be left
+			// naming no database (gt-170zk).
+			return EnsureMetadataDatabase(beadsDir, dbName)
 		}
 		return fmt.Errorf("bd init: %s: %w", strings.TrimSpace(outputStr), err)
+	}
+
+	// Record the name the init used: bd init --server writes dolt_mode=server
+	// without dolt_database (internal/rig/manager.go), leaving a workspace
+	// where later bd opens fall back to the default "beads" (gt-170zk).
+	if err := EnsureMetadataDatabase(beadsDir, dbName); err != nil {
+		return err
 	}
 
 	// Explicitly set issue_prefix — bd init --prefix may not persist it
@@ -433,7 +450,7 @@ func ensureDatabaseInitialized(beadsDir string) error {
 		pfxCmd := exec.Command("bd", "config", "set", "issue_prefix", prefix)
 		pfxCmd.Dir = parentDir
 		util.SetDetachedProcessGroup(pfxCmd)
-		pfxEnv := BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+		pfxEnv := withDatabaseTarget(BuildMutationPinnedBDEnv(os.Environ(), beadsDir), dbName)
 		pfxCmd.Env = pfxEnv
 		_, _ = pfxCmd.CombinedOutput() // Best effort — crash prevention guard
 	}
@@ -445,7 +462,7 @@ func ensureDatabaseInitialized(beadsDir string) error {
 	// After bd init --server, the Dolt SQL server may need time to register
 	// the new database in its catalog. Retry once after a short delay if the
 	// first migrate attempt fails (GH#1769).
-	migrateEnv := BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+	migrateEnv := withDatabaseTarget(BuildMutationPinnedBDEnv(os.Environ(), beadsDir), dbName)
 	migrateCmd := exec.Command("bd", "migrate", "--yes")
 	migrateCmd.Dir = parentDir
 	migrateCmd.Env = migrateEnv
