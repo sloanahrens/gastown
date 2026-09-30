@@ -45,8 +45,6 @@ internal/git/git.go:*Git.IsEmpty
 internal/git/git.go:*Git.RefExists
 # deliberate exit-status narrowing: git exits 1 for "no such ref"; every other failure is returned
 internal/git/git.go:*Git.RemoteTrackingBranchExists
-# deliberate: the prune ran and only the state save failed, so the result is returned as ran=true; the next tick prunes again
-internal/krc/autoprune.go:AutoPrune
 # deliberate EWOULDBLOCK narrowing: contention is (nil, false, nil); every other failure is returned. FlockTryAcquireStable names contention with ErrFlockHeld
 internal/lock/flock_unix.go:FlockTryAcquire
 # deliberate os.IsNotExist narrowing: a missing target/ is a no-op; every other stat failure is returned
