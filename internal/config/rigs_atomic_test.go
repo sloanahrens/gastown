@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -100,34 +101,20 @@ func TestSaveRigsConfig_AtomicAgainstConcurrentReaders(t *testing.T) {
 	}
 }
 
-// TestLoadRigsConfig_RetriesOnTruncatedRead simulates a transient read where
-// the first attempt sees a zero-byte file (as from a non-atomic concurrent
-// writer) and verifies LoadRigsConfig's retry recovers.
-func TestLoadRigsConfig_RetriesOnTruncatedRead(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rigs.json")
-
-	// Write an empty file, then race a proper write against LoadRigsConfig.
+// TestSaveRigsConfigRefusesAnEmptyFile: every rigs.json writer is atomic
+// now, so a zero-byte rigs.json is damage, not a write in flight. The writer
+// refuses to replace it (gt-y3pgh.1) and the file stays for the operator.
+func TestSaveRigsConfigRefusesAnEmptyFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "rigs.json")
 	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
 		t.Fatalf("write empty: %v", err)
 	}
-
-	// Kick off a writer that fixes the file after a brief moment.
-	done := make(chan error, 1)
-	go func() {
-		done <- SaveRigsConfig(path, &RigsConfig{Version: 1, Rigs: map[string]RigEntry{"a": {}}})
-	}()
-
-	// Wait for the writer to finish so the retry has real contents to parse.
-	if err := <-done; err != nil {
-		t.Fatalf("SaveRigsConfig: %v", err)
+	err := SaveRigsConfig(path, &RigsConfig{Version: 1, Rigs: map[string]RigEntry{"a": {}}})
+	if !errors.Is(err, ErrUnparseable) {
+		t.Fatalf("SaveRigsConfig over an empty file = %v, want ErrUnparseable", err)
 	}
-
-	cfg, err := LoadRigsConfig(path)
-	if err != nil {
-		t.Fatalf("LoadRigsConfig after retry: %v", err)
-	}
-	if _, ok := cfg.Rigs["a"]; !ok {
-		t.Fatalf("expected rig 'a' in result, got %v", cfg.Rigs)
+	if data, _ := os.ReadFile(path); len(data) != 0 {
+		t.Fatalf("empty rigs.json was rewritten: %q", data)
 	}
 }

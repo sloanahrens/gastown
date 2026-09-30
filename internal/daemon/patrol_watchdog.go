@@ -31,29 +31,6 @@ const (
 	defaultPatrolWatchdogMultiplier = 3
 )
 
-// PatrolWatchdogConfig holds configuration for the patrol_watchdog patrol.
-type PatrolWatchdogConfig struct {
-	// Enabled controls whether the patrol runs. Defaults to true (see
-	// IsPatrolEnabled) — an explicit false is required to turn it off.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often the watchdog checks, as a string (e.g. "10m").
-	IntervalStr string `json:"interval,omitempty"`
-
-	// CadenceStr is the expected time between a role's completed patrol
-	// cycles, as a string (e.g. "10m"). Applied uniformly to every role;
-	// per-role overrides can be added later if cadences diverge.
-	CadenceStr string `json:"cadence,omitempty"`
-
-	// Multiplier is how many cadences of silence are tolerated before a role
-	// is considered stale. Zero means "use the default" (3).
-	Multiplier int `json:"multiplier,omitempty"`
-
-	// Nudge controls whether a stale-but-alive role is also sent a "resume
-	// patrol" nudge in addition to being escalated. Defaults to true.
-	Nudge *bool `json:"nudge,omitempty"`
-}
-
 func patrolWatchdogInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.PatrolWatchdog != nil {
 		if config.Patrols.PatrolWatchdog.IntervalStr != "" {

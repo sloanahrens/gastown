@@ -213,7 +213,7 @@ func TestPatrolHooksWiredCheck_EmptyPatrols(t *testing.T) {
 	cfg := &config.DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
-		Patrols: map[string]config.PatrolConfig{},
+		Patrols: &config.PatrolsConfig{},
 	}
 	path := config.DaemonPatrolConfigPath(tmpDir)
 	if err := config.SaveDaemonPatrolConfig(path, cfg); err != nil {
@@ -237,11 +237,11 @@ func TestPatrolHooksWiredCheck_HeartbeatEnabled(t *testing.T) {
 	cfg := &config.DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
-		Heartbeat: &config.HeartbeatConfig{
+		Heartbeat: &config.PatrolConfig{
 			Enabled:  true,
 			Interval: "3m",
 		},
-		Patrols: map[string]config.PatrolConfig{},
+		Patrols: &config.PatrolsConfig{},
 	}
 	path := config.DaemonPatrolConfigPath(tmpDir)
 	if err := config.SaveDaemonPatrolConfig(path, cfg); err != nil {
@@ -287,8 +287,8 @@ func TestPatrolHooksWiredCheck_Fix(t *testing.T) {
 	if loaded.Type != "daemon-patrol-config" {
 		t.Errorf("Type = %q, want 'daemon-patrol-config'", loaded.Type)
 	}
-	if len(loaded.Patrols) != 3 {
-		t.Errorf("Patrols count = %d, want 3", len(loaded.Patrols))
+	if loaded.Patrols.Count() != 3 {
+		t.Errorf("Patrols count = %d, want 3", loaded.Patrols.Count())
 	}
 
 	result = check.Run(ctx)
@@ -304,8 +304,8 @@ func TestPatrolHooksWiredCheck_FixPreservesExisting(t *testing.T) {
 	existing := &config.DaemonPatrolConfig{
 		Type:    "daemon-patrol-config",
 		Version: 1,
-		Patrols: map[string]config.PatrolConfig{
-			"custom": {Enabled: true, Agent: "custom-agent"},
+		Patrols: &config.PatrolsConfig{
+			Handler: &config.PatrolConfig{Enabled: true, Agent: "custom-agent"},
 		},
 	}
 	path := config.DaemonPatrolConfigPath(tmpDir)
@@ -330,10 +330,10 @@ func TestPatrolHooksWiredCheck_FixPreservesExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 	}
-	if len(loaded.Patrols) != 1 {
-		t.Errorf("Patrols count = %d, want 1 (should preserve existing)", len(loaded.Patrols))
+	if loaded.Patrols.Count() != 1 {
+		t.Errorf("Patrols count = %d, want 1 (should preserve existing)", loaded.Patrols.Count())
 	}
-	if _, ok := loaded.Patrols["custom"]; !ok {
+	if loaded.Patrols.RolePatrol("handler") == nil {
 		t.Error("existing custom patrol was overwritten")
 	}
 }

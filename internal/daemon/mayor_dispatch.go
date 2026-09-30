@@ -39,15 +39,6 @@ const (
 	mayorNudgeTimeout = 90 * time.Second
 )
 
-// MayorDispatchConfig holds configuration for the mayor_dispatch patrol.
-type MayorDispatchConfig struct {
-	// Enabled controls whether the patrol runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to check, as a string (e.g., "30m").
-	IntervalStr string `json:"interval,omitempty"`
-}
-
 // mayorDispatchInterval returns the configured interval, or the default (30m).
 func mayorDispatchInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.MayorDispatch != nil {

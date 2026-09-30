@@ -9,43 +9,6 @@ import (
 	"time"
 )
 
-// RestartTrackerConfig holds configurable parameters for restart tracking.
-// All fields have sensible defaults if zero-valued.
-type RestartTrackerConfig struct {
-	// InitialBackoff is the delay before the first retry (default 30s).
-	InitialBackoff time.Duration `json:"initial_backoff,omitempty"`
-
-	// MaxBackoff is the maximum backoff delay (default 10m).
-	MaxBackoff time.Duration `json:"max_backoff,omitempty"`
-
-	// BackoffMultiplier scales the backoff on each retry (default 2.0).
-	BackoffMultiplier float64 `json:"backoff_multiplier,omitempty"`
-
-	// CrashLoopWindow is the time window for counting crash-loop restarts (default 15m).
-	CrashLoopWindow time.Duration `json:"crash_loop_window,omitempty"`
-
-	// CrashLoopCount is how many restarts within the window trigger crash-loop state (default 5).
-	CrashLoopCount int `json:"crash_loop_count,omitempty"`
-
-	// StabilityPeriod is how long an agent must run without restarting
-	// before its backoff resets (default 30m).
-	StabilityPeriod time.Duration `json:"stability_period,omitempty"`
-
-	// PauseBackoff is the fixed delay applied when an agent is paused due
-	// to a transient external limit (e.g., Claude usage-limit reached)
-	// rather than a true crash. Does not escalate and does not count toward
-	// the crash-loop fault budget. Default 60s — long enough for the
-	// quota_dog patrol to rotate accounts (5m cadence), short enough to
-	// recover quickly when the limit resets.
-	PauseBackoff time.Duration `json:"pause_backoff,omitempty"`
-
-	// CrashLoopRecoveryWindow is how long an agent's heartbeat must be
-	// continuously fresh with an advancing cycle count before a crash-loop
-	// flag is auto-cleared (default 10m). Prevents stale flags from an
-	// earlier outage from pinning a now-healthy agent indefinitely (gt-ayx).
-	CrashLoopRecoveryWindow time.Duration `json:"crash_loop_recovery_window,omitempty"`
-}
-
 // DefaultRestartTrackerConfig returns the default restart tracker configuration.
 func DefaultRestartTrackerConfig() RestartTrackerConfig {
 	return RestartTrackerConfig{
@@ -61,7 +24,7 @@ func DefaultRestartTrackerConfig() RestartTrackerConfig {
 }
 
 // withDefaults returns a config with zero fields filled from defaults.
-func (c RestartTrackerConfig) withDefaults() RestartTrackerConfig {
+func restartTrackerWithDefaults(c RestartTrackerConfig) RestartTrackerConfig {
 	d := DefaultRestartTrackerConfig()
 	if c.InitialBackoff <= 0 {
 		c.InitialBackoff = d.InitialBackoff
@@ -133,7 +96,7 @@ type AgentRestartInfo struct {
 func NewRestartTracker(townRoot string, cfg RestartTrackerConfig) *RestartTracker {
 	return &RestartTracker{
 		townRoot: townRoot,
-		config:   cfg.withDefaults(),
+		config:   restartTrackerWithDefaults(cfg),
 		state:    &RestartState{Agents: make(map[string]*AgentRestartInfo)},
 	}
 }

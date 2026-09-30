@@ -1,0 +1,8 @@
+{
+  "type": "overseer",
+  "version": 1,
+  "name": "Town Operator",
+  "email": "operator@example.com",
+  "username": "operator",
+  "source": "git-config"
+}

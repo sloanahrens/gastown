@@ -10,13 +10,13 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/bdgate"
-	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // bdHandshakeGatedCommands are the commands that run the town: they start
 // the daemon, start agent sessions, or spawn polecats. Each refuses to run
-// unless the town config files parse (daemon.CheckTownConfig, gt-fcxe9.10)
+// unless the town config files parse (townconfig.Check, gt-fcxe9.10, gt-y3pgh.1)
 // and the bd on PATH passes the startup handshake (deps.CheckBDHandshake).
 // Every other command, including every read-only one, runs against whatever
 // bd is installed. TestBDHandshakeGatedCommandsExist pins that each path
@@ -137,7 +137,10 @@ func defaultTownConfigCheck() error {
 	if dir == "" {
 		return errors.New("not in a Gas Town workspace, so the town config files cannot be checked")
 	}
-	return daemon.CheckTownConfig(dir)
+	// Load, not Check: a town-running command needs a whole town, so a root
+	// found by its mayor/ directory alone (no mayor/town.json) is refused.
+	_, err := townconfig.Load(dir)
+	return err
 }
 
 // requireTownStart is the startup gate for town-running commands and agent

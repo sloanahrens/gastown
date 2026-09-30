@@ -1,0 +1,19 @@
+{
+  "type": "rig",
+  "version": 1,
+  "name": "om",
+  "git_url": "git@github.com:operator/organic-mechanic.git",
+  "default_branch": "main",
+  "created_at": "2026-09-07T21:58:16.663955-05:00",
+  "beads": {
+    "prefix": "om"
+  },
+  "merge_queue": {
+    "build_command": "make build",
+    "test_command": "make test",
+    "lint_command": "make lint",
+    "editorial": {
+      "required": true
+    }
+  }
+}
