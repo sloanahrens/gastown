@@ -112,6 +112,12 @@ type SlingSpawnOptions struct {
 	BaseBranch    string // Override base branch for polecat worktree (e.g., "develop", "release/v2")
 	ResumeBranch  string // Resume an existing branch (e.g. PR head) instead of creating polecat/<name>/<bead>+<ts>
 	SkipAdmission bool   // Caller already holds a polecat admission reservation
+	// AgentBeatsRoute makes Agent outrank the bead's route:* labels in the
+	// polecat pool. Only the spec dispatcher sets it: it names a hooked agent
+	// for a host-safety spec, and a route:flash label must not move that spec
+	// onto a hookless seat (gt-4k3fj.5). Every other caller keeps gt-4lbz,
+	// where the label outranks a convoy's recorded agent.
+	AgentBeatsRoute bool
 	// Name is the exact polecat a named sling targets (gt sling <bead>
 	// <rig>/<name>). Set, it is reused or — with Create — created by that
 	// name, or the sling is refused; the pool never substitutes another
@@ -433,7 +439,11 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	// (gt-4lbz). An agent the pool does not own leaves it with no opinion and the
 	// request stands. The reason line always names the agent the pool chose, and
 	// a pool whose seats are all at their cap refuses the sling.
-	poolAgent, poolReason, poolErr := resolvePolecatPoolAgent(townRoot, opts.HookBead, opts.Agent)
+	resolvePool := resolvePolecatPoolAgent
+	if opts.AgentBeatsRoute && opts.Agent != "" {
+		resolvePool = resolvePolecatPoolAgentExplicit
+	}
+	poolAgent, poolReason, poolErr := resolvePool(townRoot, opts.HookBead, opts.Agent)
 	if poolErr != nil {
 		return nil, poolErr
 	}

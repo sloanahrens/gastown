@@ -41,6 +41,7 @@ type PatrolsConfig struct {
 	QuotaDog             *QuotaDogConfig             `json:"quota_dog,omitempty"`
 	QuotaResume          *QuotaDogConfig             `json:"quota_resume,omitempty"`
 	MayorDispatch        *MayorDispatchConfig        `json:"mayor_dispatch,omitempty"`
+	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
@@ -371,6 +372,50 @@ type MayorDispatchConfig struct {
 
 	// IntervalStr is how often to check, as a string (e.g., "30m").
 	IntervalStr string `json:"interval,omitempty"`
+}
+
+// SpecDispatchConfig configures the spec dispatcher ticker (gt-4k3fj.5): a
+// ready, unassigned, spec-labeled feature bead that passes the spec lint is
+// slung onto a polecat seat within the seat-class budget. Off unless enabled.
+type SpecDispatchConfig struct {
+	// Enabled turns the ticker on. Default off.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the tick cadence (default "60s").
+	IntervalStr string `json:"interval,omitempty"`
+
+	// Seats are per agent, each with its own cap, and classed by the agent's
+	// provider: provider=claude is hooked (managed settings and guards), any
+	// other provider is hookless. A spec uses hooked seats only, unless it
+	// carries label host-safe and names no host-touching command or path.
+
+	// HookedAgent is a provider=claude agent seat the dispatcher may use
+	// beside the pool's overflow_agent. Default "claude-sonnet"; ignored when
+	// its provider is not claude.
+	HookedAgent string `json:"hooked_agent,omitempty"`
+
+	// MaxHooked caps live polecats on HookedAgent (default 2). Zero means
+	// default; a negative value closes the seat.
+	MaxHooked int `json:"max_hooked,omitempty"`
+
+	// HooklessAgent is an optional extra seat, typically a non-claude
+	// provider. Only host-safe specs use a hookless seat.
+	HooklessAgent string `json:"hookless_agent,omitempty"`
+
+	// MaxHookless caps live polecats on HooklessAgent (default 2). The pool's
+	// overflow_agent seat is capped by polecat_pool.max_overflow instead
+	// (default 2 when unset).
+	MaxHookless int `json:"max_hookless,omitempty"`
+
+	// PreferHooked puts the HookedAgent seat first. Default: the pool's
+	// overflow_agent first, then HooklessAgent, then HookedAgent.
+	PreferHooked bool `json:"prefer_hooked,omitempty"`
+
+	// MaxPerTick bounds slings per tick (default 1).
+	MaxPerTick int `json:"max_per_tick,omitempty"`
+
+	// Template overrides the spec template path.
+	Template string `json:"template,omitempty"`
 }
 
 // RestartTrackerConfig holds configurable parameters for restart tracking.

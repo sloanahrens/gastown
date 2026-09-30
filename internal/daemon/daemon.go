@@ -346,6 +346,11 @@ type Daemon struct {
 	// cycle to end instead of polling mayorDispatchRunning against a clock.
 	mayorDispatchCycles sync.WaitGroup
 
+	// specDispatchRunning / specDispatchCycles are the spec_dispatch ticker's
+	// single-flight guard and cycle count (gt-4k3fj.5, spec_dispatch.go).
+	specDispatchRunning atomic.Bool
+	specDispatchCycles  sync.WaitGroup
+
 	// patrolWatchdogRunning is the single-flight guard for the patrol_watchdog
 	// patrol, on its own goroutine: it checks every known rig's witness and
 	// refinery plus the deacon, each read involving a bd subprocess and a
@@ -1064,6 +1069,17 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 
+	// Start the spec dispatcher ticker if enabled (default off, gt-4k3fj.5).
+	var specDispatchTicker *time.Ticker
+	var specDispatchChan <-chan time.Time
+	if d.isPatrolActive("spec_dispatch") {
+		interval := specDispatchInterval(d.patrolConfig)
+		specDispatchTicker = time.NewTicker(interval)
+		specDispatchChan = specDispatchTicker.C
+		defer specDispatchTicker.Stop()
+		d.logger.Printf("Spec dispatch ticker started (interval %v)", interval)
+	}
+
 	// Start the patrol watchdog ticker if configured. Flags a patrol role
 	// (witness, deacon, refinery) whose session is alive but whose last
 	// COMPLETED patrol cycle is older than N x its cadence (gt-4z3b7).
@@ -1226,6 +1242,13 @@ func (d *Daemon) Run() (err error) {
 			// hold for 15s (gt-59o9).
 			if !d.isShutdownInProgress() {
 				d.triggerMayorDispatch()
+			}
+
+		case <-specDispatchChan:
+			// Spec dispatcher tick — lints ready spec beads and slings clean
+			// ones within the seat budget, on its own goroutine (gt-4k3fj.5).
+			if !d.isShutdownInProgress() {
+				d.triggerSpecDispatch()
 			}
 
 		case <-patrolWatchdogChan:

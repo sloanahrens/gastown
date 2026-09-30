@@ -884,6 +884,27 @@ func resolvePolecatPoolAgent(townRoot, beadID, requested string) (agent, reason 
 	return poolRoute(townRoot, beadID, requested, true)
 }
 
+// resolvePolecatPoolAgentExplicit is resolvePolecatPoolAgent for a caller whose
+// requested agent is a decision, not a default: the bead's route:* labels are
+// set aside so the request is judged by the seat rules alone. Caps still hold —
+// a requested pool seat at its cap is refused as before (gt-4k3fj.5, gt-sisll).
+func resolvePolecatPoolAgentExplicit(townRoot, beadID, requested string) (agent, reason string, err error) {
+	return poolRouteWith(townRoot, beadID, requested, true, true)
+}
+
+// withoutRouteLabels drops the route:* overrides from a bead's labels.
+func withoutRouteLabels(labels []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, l := range labels {
+		switch strings.ToLower(strings.TrimSpace(l)) {
+		case routeLocalLabel, routeFlashLabel:
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 // peekPolecatPoolAgent is resolvePolecatPoolAgent without the side effects:
 // `gt sling --dry-run` must print the route it would take — a refusal included,
 // since that is the route a live sling would take — without claiming a seat or
@@ -935,6 +956,12 @@ func poolUncountedFallback(pool *config.PolecatPool) string {
 // poolRoute decides the route. live distinguishes a sling that will spawn from
 // a dry run: only a live sling claims a seat or writes labels.
 func poolRoute(townRoot, beadID, requested string, live bool) (agent, reason string, err error) {
+	return poolRouteWith(townRoot, beadID, requested, live, false)
+}
+
+// poolRouteWith is poolRoute; explicit sets the bead's route:* labels aside
+// so a named agent outranks them.
+func poolRouteWith(townRoot, beadID, requested string, live, explicit bool) (agent, reason string, err error) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil || ts == nil || ts.PolecatPool == nil {
 		return "", "", nil
@@ -946,6 +973,9 @@ func poolRoute(townRoot, beadID, requested string, live bool) (agent, reason str
 	var beadErr error
 	if beadID != "" {
 		bead, beadErr = poolBeadLookup(townRoot, beadID)
+	}
+	if explicit && requested != "" {
+		bead.Labels = withoutRouteLabels(bead.Labels)
 	}
 	sessions, err := listPolecatSessions(newPoolSessionLister(), townRoot)
 	if err != nil {
