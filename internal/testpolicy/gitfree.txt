@@ -19,6 +19,7 @@ internal/reaper
 internal/rig
 internal/runtime
 internal/scheduler/capacity
+internal/session
 internal/templates
 internal/testutil
 internal/util

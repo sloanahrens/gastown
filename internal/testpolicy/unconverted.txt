@@ -10,5 +10,4 @@ internal/hooks
 internal/mayor
 internal/nudge
 internal/plugin
-internal/session
 internal/telemetry
