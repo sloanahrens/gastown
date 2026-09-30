@@ -174,15 +174,6 @@ func TestResolveMergeQueueConfig_Editorial(t *testing.T) {
 	if !mq.Editorial.Required {
 		t.Error("Editorial.Required = false, want true (from rig-root floor)")
 	}
-	if mq.Editorial.MaxAttempts != 5 {
-		t.Errorf("Editorial.MaxAttempts = %d, want 5 (default)", mq.Editorial.MaxAttempts)
-	}
-	if mq.Editorial.ReviewParallelism != 3 {
-		t.Errorf("Editorial.ReviewParallelism = %d, want 3 (default)", mq.Editorial.ReviewParallelism)
-	}
-	if mq.Editorial.Command != "scripts/om-gate.sh" {
-		t.Errorf("Editorial.Command = %q, want %q (default)", mq.Editorial.Command, "scripts/om-gate.sh")
-	}
 }
 
 // TestResolveMergeQueueConfig_NoConfig verifies the nil-townRoot/nil-rigName

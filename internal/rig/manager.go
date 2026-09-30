@@ -1080,12 +1080,7 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	}
 
 	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
-	mq = config.MergeSettingsCommand(mq, localMQ)
-	if mq != nil && mq.Editorial != nil {
-		defaulted := mq.Editorial.WithDefaults()
-		mq.Editorial = &defaulted
-	}
-	return mq
+	return config.MergeSettingsCommand(mq, localMQ)
 }
 
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates
