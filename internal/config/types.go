@@ -1448,6 +1448,14 @@ type MergeQueueConfig struct {
 	// TestCommand is the command to run for tests.
 	TestCommand string `json:"test_command,omitempty"`
 
+	// PresubmitCommand is the command gt done runs on the rebased branch
+	// before pushing (gt-ssyxd). Empty means `make presubmit` when a Go
+	// repo's Makefile has that target: lint, build and the tests of the
+	// changed packages only. With no such target gt done falls back to
+	// `make gate` or the lint/build/test commands. The landing worker's own
+	// gate on the merged tree (Gate) is unaffected.
+	PresubmitCommand string `json:"presubmit_command,omitempty"`
+
 	// Gate is the one command the landing worker runs on the merged tree
 	// (land.LandGate, ADR 0004). Exit 0 lands; anything else rejects. Empty
 	// means `make gate` when the repo's Makefile has that target, else

@@ -836,6 +836,18 @@ func TestMergeSettingsCommand(t *testing.T) {
 		}
 	})
 
+	// gt-ssyxd: presubmit_command follows the same non-empty-wins rule.
+	t.Run("presubmit_command survives the merge", func(t *testing.T) {
+		t.Parallel()
+		repo := &MergeQueueConfig{PresubmitCommand: "make presubmit"}
+		if got := MergeSettingsCommand(repo, &MergeQueueConfig{}).PresubmitCommand; got != "make presubmit" {
+			t.Errorf("presubmit_command = %q, want the repo value (not overridden)", got)
+		}
+		if got := MergeSettingsCommand(repo, &MergeQueueConfig{PresubmitCommand: "make quick"}).PresubmitCommand; got != "make quick" {
+			t.Errorf("presubmit_command = %q, want the local override", got)
+		}
+	})
+
 	t.Run("local overrides batch settings", func(t *testing.T) {
 		t.Parallel()
 		repo := &MergeQueueConfig{BatchEnabled: boolPtr(false), BatchMinAge: "2h", BatchMax: 5, BatchMinCount: 3}

@@ -147,8 +147,28 @@ func goGate(lint, test string, unitOnly bool) CommandGate {
 // test_command, defaulting to `make lint` and `make test`. Any other tree runs
 // the rig's lint, build and test commands. A rig with none of them is refused:
 // "no gate configured" must stop a landing, never wave it through (G2-11).
+//
+// In the unit tier (gt done's pre-submit) the merge_queue.presubmit_command
+// wins when set, else `make presubmit` when a Go repo's Makefile has that
+// target, else `make gate`, else the steps above (gt-ssyxd). Land never calls
+// this; it uses LandGate, whose full gate is not weakened by any of it.
 func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGate, error) {
+	if unitOnly && mq != nil {
+		// An explicit presubmit_command replaces the steps on any tree.
+		if c := strings.TrimSpace(mq.PresubmitCommand); c != "" {
+			if optsIntoContainers(c) {
+				return CommandGate{}, fmt.Errorf("the rig's presubmit_command %q opts into the container suite, which the unit tier cannot run: it holds no container-gate slot (gt-0ss4)", c)
+			}
+			return CommandGate{Steps: []Step{{Name: "presubmit", Command: c, Env: []string{"GT_TEST_DOCKER=0"}, LockRetry: true}}}, nil
+		}
+	}
 	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		if unitOnly && hasMakeTarget(dir, "presubmit") {
+			// gt-ssyxd: the landing worker gates the merged tree with the
+			// full `make gate`; the author's pre-submit is lint, build and
+			// the tests of the changed packages only.
+			return CommandGate{Steps: []Step{{Name: "presubmit", Command: "make presubmit", LockRetry: true}}}, nil
+		}
 		if unitOnly && hasMakeTarget(dir, "gate") {
 			// D9's `make gate` is lint, build and the unit tier in one
 			// target, with containers forced off.

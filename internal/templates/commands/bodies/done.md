@@ -45,7 +45,7 @@ gt done
 
 ## While it runs
 
-**`gt done` runs the local gate itself (lint, build and the unit tier of the tests; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.**
+**`gt done` runs the local gate itself (lint, build and the tests of the packages your branch changed; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.**
 
 **Never script a retry around `gt done`.** The dangerous-command guard refuses
 the loop shape. If it exits non-zero it names what failed (exit codes 10-16,
