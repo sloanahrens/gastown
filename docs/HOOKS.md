@@ -60,19 +60,20 @@ Town-level targets:
 - `deacon/dogs/<name>/.claude/settings.json` (key: `dog`, one per kennel with a
   `.dog.json`; all dogs share the `dog` override key)
 
-The `dog` override adds a PreToolUse guard on every Bash command
+The `dog` override adds a PreToolUse guard on every shell command
 (`gt tap guard formula-allowlist`, gt-9iv): when the dog's assigned formula
 declares a `command_allowlist` in its TOML, commands outside that list (plus a
 built-in lifecycle baseline) are blocked before they run.
 
 The `polecats` override adds the polecat-paths guard (`gt tap guard
-polecat-paths`, gt-hmaf) on the `Bash` and `Edit|Write|MultiEdit|NotebookEdit`
-matchers: a cross-worktree edit corrupts a branch its owner cannot see.
-File-writing tools are limited to the polecat's own worktree (plus temp dirs
-and the session scratchpad), and Bash writes — interpreters, `curl -o`,
-redirections, `cd` and `git -C` targets — are blocked when they name a town
-path outside it, its polecat directory, or its rig's `.repo.git`. Reads stay
-allowed anywhere; an unresolvable target is blocked.
+polecat-paths`, gt-hmaf) on the `Bash|Monitor` and
+`Edit|Write|MultiEdit|NotebookEdit` matchers: a cross-worktree edit corrupts
+a branch its owner cannot see. File-writing tools are limited to the
+polecat's own worktree (plus temp dirs and the session scratchpad), and
+shell writes — interpreters, `curl -o`, redirections, `cd` and `git -C`
+targets — are blocked when they name a town path outside it, its polecat
+directory, or its rig's `.repo.git`. Reads stay allowed anywhere; an
+unresolvable target is blocked.
 
 The `polecats` and `dog` overrides deny permission prompts nobody can answer
 (`gt tap guard permission-request`, gt-8stz); attended roles carry no entry.
@@ -81,20 +82,20 @@ They deny the question tool too (`gt tap guard question-tool`, gt-163k8, matcher
 sat 4h26m on one.
 
 The `bd-close-invariant` guard (`gt tap guard bd-close-invariant`, gt-arno) runs
-on the `Bash` matcher for every role, from `DefaultBase()`. It is the town-wide
-half of the gt-6hmz close-time invariant: `gt done` applies that invariant to
-its own self-close, but `bd` is an external binary, so a raw `bd close <id>`
-never reaches gt's Go code. This guard parses the command from the hook payload
-and evaluates the same predicate, refusing exactly what `gt done` refuses — plus
-the `supersede:`/`cancel:` operator override a raw close can carry. Only ids
-naming the bead the current branch was cut for are judged; other closes and
-unresolvable input pass.
+on the `Bash|Monitor` matcher for every role, from `DefaultBase()`. It is the
+town-wide half of the gt-6hmz close-time invariant: `gt done` applies that
+invariant to its own self-close, but `bd` is an external binary, so a raw
+`bd close <id>` never reaches gt's Go code. This guard parses the command from
+the hook payload and evaluates the same predicate, refusing exactly what
+`gt done` refuses — plus the `supersede:`/`cancel:` operator override a raw
+close can carry. Only ids naming the bead the current branch was cut for are
+judged; other closes and unresolvable input pass.
 
 The `boot` override adds the raw-tmux-send-keys guard (`gt tap guard
-boot-sendkeys`, gt-3mp1) on the `Bash` matcher. Boot is the ephemeral agent
-that starts the Deacon after a town restart; typing into the Deacon's pane
-with a raw `tmux send-keys` can leave text staged but unsubmitted in the TUI,
-so boot must use `gt nudge --mode=immediate deacon` instead. The guard reads
+boot-sendkeys`, gt-3mp1) on the `Bash|Monitor` matcher. Boot is the ephemeral
+agent that starts the Deacon after a town restart; typing into the Deacon's
+pane with a raw `tmux send-keys` can leave text staged but unsubmitted in the
+TUI, so boot must use `gt nudge --mode=immediate deacon` instead. The guard reads
 `tool_input.command` off stdin and blocks only a genuine tmux send-keys
 invocation — after gt-3mp1 it no longer relies on an `if` glob to decide when
 to run, because that glob fired on unrelated boot commands.
@@ -203,7 +204,7 @@ Additional hooks exist in settings.json files but are not yet in the registry:
 - **bd init guard** (gastown/crew, beads/crew) - blocks `bd init*` inside `.beads/`
 - **mol patrol guards** (gastown roles) - blocks persistent patrol molecules
 - **polecat-paths guard** (polecats) - blocks Edit/Write/MultiEdit/NotebookEdit
-  targets outside the polecat's own worktree, and Bash writes into a sibling
+  targets outside the polecat's own worktree, and shell writes into a sibling
   worktree or the town's mayor/deacon/settings trees (gt-hmaf)
 - **tmux clear-history** (gastown root) - clears terminal history on session start
 - **SessionStart .beads/ validation** (gastown/crew, beads/crew) - validates CWD
@@ -225,24 +226,18 @@ Additional hooks exist in settings.json files but are not yet in the registry:
 
 ## Known Gaps
 
-1. **Registry doesn't cover all active hooks** — Several hooks in settings.json
-   files are not in `registry.toml` (bd-init-guard, mol-patrol-guard, tmux-clear,
-   cwd-validation). These should be added so `gt hooks install` can manage them.
+1. **Registry doesn't cover all active hooks** — the hooks listed above should
+   be added so `gt hooks install` can manage them.
 
-2. **No `gt tap` commands beyond pr-workflow** — The tap framework has only one
-   guard implemented. `gt tap guard dangerous-command` is referenced in the
-   registry but does not exist yet. Priority order: dangerous-command, bd-init,
-   mol-patrol, then audit git-push.
-
-3. **No `gt tap disable/enable` convenience commands** — Per-worktree
+2. **No `gt tap disable/enable` convenience commands** — Per-worktree
    enable/disable is possible via the override mechanism (`gt hooks override`
    with empty hooks list), but there is no convenience wrapper yet.
 
-4. **Private hooks (settings.local.json)** — Claude Code supports
+3. **Private hooks (settings.local.json)** — Claude Code supports
    `settings.local.json` for personal overrides. Gas Town doesn't manage
    these yet. Low priority since Gas Town is primarily agent-operated.
 
-5. **Hook ordering** — No action needed currently. The merge chain
+4. **Hook ordering** — No action needed currently. The merge chain
    (base -> override) produces deterministic order, and per-matcher merge
    ensures one entry per event type.
 
@@ -269,16 +264,19 @@ the matcher kind (gt-5ihs):
 - **Permission-pattern matcher** (contains `(`, e.g. `Bash(git push*)`, or
   the empty `""` matcher used by non-PreToolUse event types) — the override
   **replaces** the base entry entirely.
-- **Bare tool-name matcher** (no parentheses, e.g. `Bash`, `Edit|Write`) —
-  the override's hooks are **unioned** into the base entry's hooks instead,
-  keyed by `(command, if)` so re-merging stays idempotent. Every PreToolUse
-  guard must route through a bare tool-name matcher post-gt-5ihs (Claude
-  Code's matcher only ever matches the tool name), so pr-workflow,
-  dangerous-command, and per-role guards like formula-allowlist commonly
-  all share matcher `"Bash"`, discriminated by the guard itself
-  self-inspecting the command, not by matcher. Whole-entry replace would
-  silently drop one layer's guards whenever another layer also targets
-  `"Bash"`.
+- **Bare tool-name matcher** (no parentheses, e.g. `Edit|Write`) — the
+  override's hooks are **unioned** into the base entry's hooks instead,
+  keyed by `(command, if)` so re-merging stays idempotent. Every
+  shell-executing PreToolUse guard shares one bare matcher,
+  `"Bash|Monitor"`, because Claude Code's matcher only ever matches the
+  tool name (gt-5ihs) and Monitor runs the same command shape as Bash
+  (gt-vx2mm): bare `"Bash"` would leave `rm -rf`, a force push, or an
+  unwrapped suite unblocked there. The guard discriminates by
+  self-inspecting the command, not by matcher — `Bash|Monitor` is
+  `shellExecutingToolMatcher` (`internal/hooks/config.go`), and a guard
+  branching on `tool_name` instead needs its own case per named tool.
+  Whole-entry replace would silently drop one layer's guards whenever
+  another layer also targets that matcher.
 
   Built-in hooks do not use the `if` field at all (gt-3mp1). Claude Code's
   `if` evaluator resolves a command it cannot statically analyze — a brace
@@ -296,7 +294,7 @@ Example base (bare matcher — unions):
 ```json
 {
   "PreToolUse": [
-    { "matcher": "Bash", "hooks": [
+    { "matcher": "Bash|Monitor", "hooks": [
       { "type": "command", "command": "gt tap guard dangerous-command" }
     ] }
   ]
@@ -307,7 +305,7 @@ Override for dog:
 ```json
 {
   "PreToolUse": [
-    { "matcher": "Bash", "hooks": [
+    { "matcher": "Bash|Monitor", "hooks": [
       { "type": "command", "command": "gt tap guard formula-allowlist" }
     ] }
   ]
@@ -315,9 +313,9 @@ Override for dog:
 ```
 
 Result: dog sessions get **both** `dangerous-command` and
-`formula-allowlist` on the same `"Bash"` matcher — not just the override's
-hook. To disable a single one of several bare-matcher guards, there is
-currently no per-hook removal: an override entry with an empty hooks list
+`formula-allowlist` on the same `"Bash|Monitor"` matcher — not just the
+override's hook. To disable a single one of several bare-matcher guards, there
+is currently no per-hook removal: an override entry with an empty hooks list
 removes the *entire* matcher's hooks from every layer, not just the
 override layer's own contribution.
 
