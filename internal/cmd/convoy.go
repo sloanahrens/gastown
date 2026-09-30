@@ -2180,11 +2180,8 @@ func convoyLabels(owned bool) string {
 	return "gt:convoy"
 }
 
-func listConvoyIssues(townBeads, status string, all bool, extraLabels ...string) ([]convoyListIssue, error) {
+func listConvoyIssues(townBeads, status string, all bool) ([]convoyListIssue, error) {
 	args := []string{"list", "--label=gt:convoy", "--json", "--limit=0"}
-	for _, label := range extraLabels {
-		args = append(args, "--label="+label)
-	}
 	if status != "" {
 		args = append(args, "--status="+status)
 	} else if all {
@@ -2213,7 +2210,7 @@ func listConvoyIssues(townBeads, status string, all bool, extraLabels ...string)
 		return nil, err
 	}
 	for _, issue := range legacy {
-		if seen[issue.ID] || issue.IssueType != "convoy" || !hasAllLabels(issue.Labels, extraLabels) {
+		if seen[issue.ID] || issue.IssueType != "convoy" {
 			continue
 		}
 		convoys = append(convoys, issue)
@@ -2232,15 +2229,6 @@ func readConvoyIssues(townBeads string, args ...string) ([]convoyListIssue, erro
 		return nil, err
 	}
 	return issues, nil
-}
-
-func hasAllLabels(labels, required []string) bool {
-	for _, label := range required {
-		if !hasLabel(labels, label) {
-			return false
-		}
-	}
-	return true
 }
 
 // convoyMergeFromFields extracts the merge strategy from a convoy description
