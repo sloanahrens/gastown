@@ -167,6 +167,12 @@ func EnsureLocalExcludePatterns(worktreePath string) error {
 	return ensureLocalExcludePatterns(worktreePath, git.NewGit(worktreePath))
 }
 
+// EnsureLocalExcludePatternsIn is EnsureLocalExcludePatterns through g, the
+// git of worktreePath, for a caller that opens its own (a fake in tests).
+func EnsureLocalExcludePatternsIn(worktreePath string, g interface{ CommonDir() (string, error) }) error {
+	return ensureLocalExcludePatterns(worktreePath, g)
+}
+
 // ensureLocalExcludePatterns is EnsureLocalExcludePatterns through g, the git
 // of worktreePath.
 func ensureLocalExcludePatterns(worktreePath string, g interface{ CommonDir() (string, error) }) error {

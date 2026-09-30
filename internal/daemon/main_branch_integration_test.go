@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -265,29 +264,19 @@ func TestTestRigMainBranch_RunsTheIntegrationTier(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), cfg, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src := t.TempDir()
-	git := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"}, args...)...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	git(src, "init", "-q")
-	mk := "test-integration:\n\t@true\n"
-	if err := os.WriteFile(filepath.Join(src, "Makefile"), []byte(mk), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git(src, "add", "Makefile")
-	git(src, "commit", "-q", "-m", "tier")
-	git(townRoot, "clone", "-q", "--bare", src, filepath.Join(rigPath, ".repo.git"))
-	git(filepath.Join(rigPath, ".repo.git"), "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-
 	var logged bytes.Buffer
 	gate := newGateShell(gateExit("", 0))
 	d := integrationDaemon(townRoot, &logged, &MainBranchTestConfig{Enabled: true}, gate)
 	d.ctx = context.Background()
+
+	// The rig's bare repo, cloned from an origin whose main declares the tier.
+	f := useGitfake(t, d)
+	src := filepath.Join(t.TempDir(), "src.git")
+	f.InitBare(t, src)
+	f.Commit(t, src, "main", "tier", map[string]string{"Makefile": "test-integration:\n\t@true\n"})
+	if err := f.Open(townRoot).CloneBareWithBranch(src, filepath.Join(rigPath, ".repo.git"), "main"); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := d.testRigMainBranch("gastown", rigPath, time.Minute); err != nil {
 		t.Fatalf("testRigMainBranch: %v\n%s", err, logged.String())

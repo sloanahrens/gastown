@@ -642,6 +642,9 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			// server. Without this, bd auto-starts its own server on a random
 			// port, causing "database not found" errors. (GH #2405)
 			initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
+			// The clone is the user's repo: bd's editor-agent setup would leave
+			// .agents/, .codex/ and .cursor/ untracked in it (gt-22hdp.40).
+			initArgs = append(initArgs, "--skip-agents")
 			// If the cloned repo's config.yaml has sync.remote, bd init blocks
 			// waiting for interactive confirmation (stdin is /dev/null here).
 			// Pass explicit flags to bypass the safety check. (GH #3873)
@@ -1266,6 +1269,9 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
 	// --force ensures bd 1.0+ persists issue_prefix on existing server-side DBs.
 	initArgs = append(initArgs, "--force")
+	// A rig directory is the user's repo too: bd's editor-agent setup would
+	// leave .agents/, .codex/ and .cursor/ untracked in it (gt-22hdp.40).
+	initArgs = append(initArgs, "--skip-agents")
 	_, bdInitErr := m.combinedBD(rigPath, filteredEnv, initArgs...)
 	if bdInitErr != nil {
 		// bd might not be installed or failed — the shared helper below will

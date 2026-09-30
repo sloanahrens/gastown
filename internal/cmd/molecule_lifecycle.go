@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"strings"
@@ -18,14 +19,19 @@ import (
 )
 
 // runMoleculeBurn burns (destroys) the current molecule attachment.
-func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
-	cwd, err := os.Getwd()
+func runMoleculeBurn(cmd *cobra.Command, args []string) error {
+	return moleculeBurn(cmd, realMoleculeLifecycleEnv(), args)
+}
+
+// moleculeBurn is gt mol burn in e.
+func moleculeBurn(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (retErr error) {
+	cwd, err := e.getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
 	}
 
 	// Find town root
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding workspace: %w", err)
 	}
@@ -39,7 +45,7 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 		target = args[0]
 	} else {
 		// Auto-detect using env-aware role detection
-		roleInfo, err := GetRoleWithContext(cwd, townRoot)
+		roleInfo, err := getRoleWithContextEnv(cwd, townRoot, e.getenv)
 		if err != nil {
 			return fmt.Errorf("detecting role: %w", err)
 		}
@@ -57,12 +63,12 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Find beads directory
-	workDir, err := findLocalBeadsDir()
+	workDir, err := e.beadsWorkDir()
 	if err != nil {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.New(workDir)
+	b := beads.NewWithBeadsDirAndRunner(workDir, "", e.bd)
 
 	// Find agent's pinned bead (handoff bead)
 	role := extractRoleFromIdentity(target)
@@ -78,7 +84,7 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 	// Check for attached molecule
 	attachment := beads.ParseAttachmentFields(handoff)
 	if attachment == nil || attachment.AttachedMolecule == "" {
-		fmt.Printf("%s No molecule attached to %s - nothing to burn\n",
+		fmt.Fprintf(e.out, "%s No molecule attached to %s - nothing to burn\n",
 			style.Dim.Render("ℹ"), target)
 		return nil
 	}
@@ -117,7 +123,7 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 		rootClosed = false
 	}
 
-	if moleculeJSON {
+	if e.json {
 		result := map[string]interface{}{
 			"burned":          moleculeID,
 			"from":            target,
@@ -126,47 +132,52 @@ func runMoleculeBurn(cmd *cobra.Command, args []string) (retErr error) {
 			"children_forced": stepsForced,
 			"root_closed":     rootClosed,
 		}
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(e.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(result)
 	}
 
-	fmt.Printf("%s Burned molecule %s from %s\n",
+	fmt.Fprintf(e.out, "%s Burned molecule %s from %s\n",
 		style.Bold.Render("🔥"), moleculeID, target)
 	if childrenClosed > 0 {
-		fmt.Printf("  Closed %d step issues\n", childrenClosed)
+		fmt.Fprintf(e.out, "  Closed %d step issues\n", childrenClosed)
 	}
 	if stepsForced > 0 {
-		fmt.Printf("  Force-closed %d step issues bd refused to close\n", stepsForced)
+		fmt.Fprintf(e.out, "  Force-closed %d step issues bd refused to close\n", stepsForced)
 	}
 
 	return nil
 }
 
 // runMoleculeSquash squashes the current molecule into a digest.
-func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
+func runMoleculeSquash(cmd *cobra.Command, args []string) error {
+	return moleculeSquash(cmd, realMoleculeLifecycleEnv(), args)
+}
+
+// moleculeSquash is gt mol squash in e.
+func moleculeSquash(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (retErr error) {
 	// Parse jitter early so invalid flags fail fast, but defer the sleep
 	// until after workspace/attachment validation so no-op invocations
 	// (wrong directory, no attached molecule) don't wait unnecessarily.
 	var jitterMax time.Duration
-	if moleculeJitter != "" {
+	if e.jitter != "" {
 		var err error
-		jitterMax, err = time.ParseDuration(moleculeJitter)
+		jitterMax, err = time.ParseDuration(e.jitter)
 		if err != nil {
-			return fmt.Errorf("invalid --jitter duration %q: %w", moleculeJitter, err)
+			return fmt.Errorf("invalid --jitter duration %q: %w", e.jitter, err)
 		}
 		if jitterMax < 0 {
 			return fmt.Errorf("--jitter must be non-negative, got %v", jitterMax)
 		}
 	}
 
-	cwd, err := os.Getwd()
+	cwd, err := e.getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
 	}
 
 	// Find town root
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding workspace: %w", err)
 	}
@@ -180,7 +191,7 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
 		target = args[0]
 	} else {
 		// Auto-detect using env-aware role detection
-		roleInfo, err := GetRoleWithContext(cwd, townRoot)
+		roleInfo, err := getRoleWithContextEnv(cwd, townRoot, e.getenv)
 		if err != nil {
 			return fmt.Errorf("detecting role: %w", err)
 		}
@@ -198,12 +209,12 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Find beads directory
-	workDir, err := findLocalBeadsDir()
+	workDir, err := e.beadsWorkDir()
 	if err != nil {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.New(workDir)
+	b := beads.NewWithBeadsDirAndRunner(workDir, "", e.bd)
 
 	// Find agent's pinned bead (handoff bead)
 	role := extractRoleFromIdentity(target)
@@ -219,7 +230,7 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
 	// Check for attached molecule
 	attachment := beads.ParseAttachmentFields(handoff)
 	if attachment == nil || attachment.AttachedMolecule == "" {
-		fmt.Printf("%s No molecule attached to %s - nothing to squash\n",
+		fmt.Fprintf(e.out, "%s No molecule attached to %s - nothing to squash\n",
 			style.Dim.Render("ℹ"), target)
 		return nil
 	}
@@ -228,7 +239,7 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
 
 	var doneSteps, totalSteps int
 	defer func() {
-		telemetry.RecordMolSquash(cmd.Context(), moleculeID, doneSteps, totalSteps, !moleculeNoDigest, retErr)
+		telemetry.RecordMolSquash(cmd.Context(), moleculeID, doneSteps, totalSteps, !e.noDigest, retErr)
 	}()
 
 	// Apply jitter before acquiring any Dolt locks.
@@ -238,7 +249,7 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
 	if jitterMax > 0 {
 		//nolint:gosec // weak RNG is fine for jitter
 		sleep := time.Duration(rand.Int63n(int64(jitterMax)))
-		fmt.Fprintf(os.Stderr, "jitter: sleeping %v before squash\n", sleep)
+		fmt.Fprintf(e.errOut, "jitter: sleeping %v before squash\n", sleep)
 		select {
 		case <-cmd.Context().Done():
 			return cmd.Context().Err()
@@ -256,7 +267,7 @@ func runMoleculeSquash(cmd *cobra.Command, args []string) (retErr error) {
 	// Skip digest creation if --no-digest flag is set (gt-t2bjt).
 	// Patrol molecules (deacon, witness, refinery) run frequently and their
 	// digests pollute the database with thousands of low-value beads.
-	if !moleculeNoDigest {
+	if !e.noDigest {
 		// Get progress info for the digest
 		progress, _ := getMoleculeProgressInfo(b, moleculeID)
 
@@ -269,8 +280,8 @@ agent: %s
 squashed_at: %s
 `, moleculeID, target, time.Now().UTC().Format(time.RFC3339))
 
-		if moleculeSummary != "" {
-			digestDesc += fmt.Sprintf("\n## Summary\n%s\n", moleculeSummary)
+		if e.summary != "" {
+			digestDesc += fmt.Sprintf("\n## Summary\n%s\n", e.summary)
 		}
 
 		if progress != nil {
@@ -319,7 +330,7 @@ squashed_at: %s
 
 	// Detach the molecule from the handoff bead with audit logging
 	detachReason := "molecule squashed (no digest)"
-	if !moleculeNoDigest {
+	if !e.noDigest {
 		detachReason = "molecule squashed"
 	}
 	_, err = b.DetachMoleculeWithAudit(handoff.ID, beads.DetachOptions{
@@ -340,33 +351,33 @@ squashed_at: %s
 		rootClosed = false
 	}
 
-	if moleculeJSON {
+	if e.json {
 		result := map[string]interface{}{
 			"squashed":        moleculeID,
 			"from":            target,
 			"handoff_id":      handoff.ID,
 			"children_closed": childrenClosed,
 			"children_forced": stepsForced,
-			"digest_skipped":  moleculeNoDigest,
+			"digest_skipped":  e.noDigest,
 			"root_closed":     rootClosed,
 		}
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(e.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(result)
 	}
 
-	if moleculeNoDigest {
-		fmt.Printf("%s Squashed molecule %s (no digest)\n",
+	if e.noDigest {
+		fmt.Fprintf(e.out, "%s Squashed molecule %s (no digest)\n",
 			style.Bold.Render("📦"), moleculeID)
 	} else {
-		fmt.Printf("%s Squashed molecule %s\n",
+		fmt.Fprintf(e.out, "%s Squashed molecule %s\n",
 			style.Bold.Render("📦"), moleculeID)
 	}
 	if childrenClosed > 0 {
-		fmt.Printf("  Closed %d step issues\n", childrenClosed)
+		fmt.Fprintf(e.out, "  Closed %d step issues\n", childrenClosed)
 	}
 	if stepsForced > 0 {
-		fmt.Printf("  Force-closed %d step issues bd refused to close\n", stepsForced)
+		fmt.Fprintf(e.out, "  Force-closed %d step issues bd refused to close\n", stepsForced)
 	}
 
 	return nil
@@ -576,4 +587,37 @@ func closeDescendantsImpl(b beads.Client, parentID string, force bool) (int, err
 		return totalClosed, errors.Join(errs...)
 	}
 	return totalClosed, nil
+}
+
+// moleculeLifecycleEnv is what gt mol burn and squash read from the process
+// and their flags: the cwd, the town, the environment role detection reads,
+// the local beads workspace, how bd is reached, and where output goes.
+// realMoleculeLifecycleEnv is the running gt's; tests give a town and an
+// in-process bd, so they need no stub on PATH, chdir, Setenv or flag globals.
+type moleculeLifecycleEnv struct {
+	getwd        func() (string, error)
+	findTown     func() (string, error)
+	getenv       func(string) string
+	beadsWorkDir func() (string, error)
+	bd           beads.BDRunner
+	out, errOut  io.Writer
+	json         bool
+	jitter       string
+	noDigest     bool
+	summary      string
+}
+
+func realMoleculeLifecycleEnv() moleculeLifecycleEnv {
+	return moleculeLifecycleEnv{
+		getwd:        os.Getwd,
+		findTown:     workspace.FindFromCwd,
+		getenv:       os.Getenv,
+		beadsWorkDir: findLocalBeadsDir,
+		out:          os.Stdout,
+		errOut:       os.Stderr,
+		json:         moleculeJSON,
+		jitter:       moleculeJitter,
+		noDigest:     moleculeNoDigest,
+		summary:      moleculeSummary,
+	}
 }

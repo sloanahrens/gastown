@@ -4,9 +4,12 @@ package daemon
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // Wiring guards whose production collaborator is a real process: each leaves
@@ -23,59 +26,48 @@ func TestIntegrationHostLoadMeasuresTheRealHost(t *testing.T) {
 	}
 }
 
-func writeFakeTmux(t *testing.T, dir string) {
+// TestIntegrationListOriginBranchesReadsTheRigOrigin guards listOriginBranches' nil
+// path: it lists the polecat branches on the rig's real origin remote.
+func TestIntegrationListOriginBranchesReadsTheRigOrigin(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wireGit(t, origin, "init", "--bare")
+
+	clone := filepath.Join(townRoot, "gt", "mayor", "rig")
+	if err := os.MkdirAll(clone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const branch = "polecat/basalt/gt-issue1+abc123"
+	wireGit(t, clone, "init")
+	wireGit(t, clone, "config", "user.email", "test@test.com")
+	wireGit(t, clone, "config", "user.name", "Test")
+	wireGit(t, clone, "remote", "add", "origin", origin)
+	wireGit(t, clone, "checkout", "-b", branch)
+	wireGit(t, clone, "commit", "--allow-empty", "-m", "work")
+	wireGit(t, clone, "push", "origin", branch)
+
+	m := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 10*time.Minute, nil, nil, nil)
+	got, err := m.listOriginBranches(filepath.Join(townRoot, "gt"))
+	if err != nil {
+		t.Fatalf("listOriginBranches: %v", err)
+	}
+	if want := []string{branch}; !reflect.DeepEqual(got, want) {
+		t.Errorf("listOriginBranches = %v, want %v from the rig's origin", got, want)
+	}
+}
+
+// wireGit runs git in dir for a wiring guard's fixture, isolated from the
+// host's git config.
+func wireGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	script := `#!/usr/bin/env bash
-set -euo pipefail
-
-cmd=""
-skip_next=0
-for arg in "$@"; do
-  if [[ "$skip_next" -eq 1 ]]; then
-    skip_next=0
-    continue
-  fi
-  if [[ "$arg" == "-u" ]]; then
-    continue
-  fi
-  if [[ "$arg" == "-L" ]]; then
-    skip_next=1
-    continue
-  fi
-  cmd="$arg"
-  break
-done
-
-if [[ -n "${TMUX_LOG:-}" ]]; then
-  printf "%s %s\n" "$cmd" "$*" >> "$TMUX_LOG"
-fi
-
-if [[ "${1:-}" == "-V" ]]; then
-  echo "tmux 3.3a"
-  exit 0
-fi
-
-# Keep session checks simple for this regression repro: no existing boot session.
-# TMUX_FAKE_SESSION=alive reports the queried session as live instead, and
-# TMUX_FAKE_SESSION_CREATED supplies the creation time the turn-budget guard reads.
-if [[ "$cmd" == "has-session" ]]; then
-  if [[ "${TMUX_FAKE_SESSION:-}" == "alive" ]]; then
-    exit 0
-  fi
-  exit 1
-fi
-
-if [[ "$cmd" == "list-sessions" ]]; then
-  if [[ -n "${TMUX_FAKE_SESSION_CREATED:-}" ]]; then
-    printf "%s\n" "$TMUX_FAKE_SESSION_CREATED"
-  fi
-  exit 0
-fi
-
-exit 0
-`
-	path := filepath.Join(dir, "tmux")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }

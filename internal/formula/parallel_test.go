@@ -25,6 +25,7 @@ needs = ["b"]
 `
 
 func TestParallelReadySteps(t *testing.T) {
+	t.Parallel()
 	f, err := Parse([]byte(sequentialFormula))
 	if err != nil {
 		t.Fatalf("Failed to parse formula: %v", err)

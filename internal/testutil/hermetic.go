@@ -38,7 +38,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -77,11 +76,11 @@ var liveTownResolvers = []liveTownResolver{
 // guard working — so anything that returns a root inside the live town is a
 // leak and fails the whole run at TestMain, before a test body can write
 // (gt-dr664).
-func assertLiveTownRefused(dir string) error {
+func (h *harnessHost) assertLiveTownRefused(dir string) error {
 	var leaks []string
-	for _, r := range liveTownResolvers {
+	for _, r := range h.resolvers {
 		root, refusedLoudly := probeResolver(r.resolve, dir)
-		if refusedLoudly || root == "" || !workspace.IsForbiddenRoot(root) {
+		if refusedLoudly || root == "" || !h.forbidden(root) {
 			continue
 		}
 		leaks = append(leaks, fmt.Sprintf("  - %s resolved %s", r.name, root))
@@ -92,7 +91,7 @@ func assertLiveTownRefused(dir string) error {
 	return fmt.Errorf("in-process town-root resolvers reached the live town at %s:\n%s\n\n"+
 		"Route the resolver's refusal through workspace.RefuseForbiddenRoot so tests fail\n"+
 		"loudly instead of opening production beads and its Dolt server (gt-dr664)",
-		workspace.ForbiddenTownRoot(), strings.Join(leaks, "\n"))
+		getenv(h.env, workspace.EnvForbiddenTownRoot), strings.Join(leaks, "\n"))
 }
 
 // probeResolver calls a resolver that may refuse loudly; refusedLoudly reports
@@ -160,6 +159,7 @@ type Hermetic struct {
 	// from a tmux pane. Finish tripwires on test sessions found there.
 	LiveTmuxSocket string
 
+	host *harnessHost // nil is processHost
 	cfg  hermeticConfig
 	snap *townSnapshot
 	// refusedGitLog is where WithoutGit's refusing git records calls; ""
@@ -207,7 +207,7 @@ const refusedGitLog = "refused.log"
 // installRefusingGit writes the refusing git into dir and puts dir first on
 // PATH. It returns the refused-call log's path, or "" where no refusing git
 // is installed (Windows).
-func installRefusingGit(dir string) (string, error) {
+func (h *harnessHost) installRefusingGit(dir string) (string, error) {
 	if runtime.GOOS == "windows" {
 		return "", nil
 	}
@@ -215,7 +215,7 @@ func installRefusingGit(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return log, os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log, h.env.Setenv("PATH", dir+string(os.PathListSeparator)+getenv(h.env, "PATH"))
 }
 
 // writeRefusingGit writes a git into dir that appends its working directory
@@ -298,7 +298,12 @@ func HermeticMain(m *testing.M, opts ...HermeticOption) int {
 // mutates process-wide state (env, temp dirs) and is meant to be called once,
 // from TestMain, before m.Run().
 func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
-	h := &Hermetic{}
+	return processHost().startHermetic(opts...)
+}
+
+// startHermetic is StartHermetic on host.
+func (host *harnessHost) startHermetic(opts ...HermeticOption) (*Hermetic, error) {
+	h := &Hermetic{host: host}
 	for _, opt := range opts {
 		opt(&h.cfg)
 	}
@@ -307,13 +312,13 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	// An outer harness (nested `go test` runs) may have set the forbidden
 	// root already, which blinds FindFromCwd to it — inherit it in that case
 	// so the guard and tripwire survive nesting.
-	h.StartDir, _ = os.Getwd() //nolint:errcheck // "" just disables the startup probe
-	if root, err := workspace.FindFromCwd(); err == nil && root != "" {
+	h.StartDir, _ = host.getwd() //nolint:errcheck // "" just disables the startup probe
+	if root, err := host.findTown(); err == nil && root != "" {
 		h.RealTownRoot = root
-	} else if root := os.Getenv(workspace.EnvForbiddenTownRoot); root != "" {
+	} else if root := getenv(host.env, workspace.EnvForbiddenTownRoot); root != "" {
 		h.RealTownRoot = root
-	} else if root := os.Getenv("GT_TOWN_ROOT"); root != "" {
-		if ok, _ := workspace.IsWorkspace(root); ok {
+	} else if root := getenv(host.env, "GT_TOWN_ROOT"); root != "" {
+		if ok, _ := host.isWorkspace(root); ok {
 			h.RealTownRoot = root
 		}
 	}
@@ -323,7 +328,7 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 
 	// An outer harness (e.g. a test that runs `go test` as a subprocess) may
 	// have provided an ephemeral Dolt server already; keep its routing.
-	externalDolt := os.Getenv("GT_TEST_EXTERNAL_DOLT") == "1"
+	externalDolt := getenv(host.env, "GT_TEST_EXTERNAL_DOLT") == "1"
 
 	// Capture before the scrub below strips it: AllowLiveTmuxEnv is a
 	// BEADS_* var, so scrubProcessEnv always removes it regardless of
@@ -333,23 +338,23 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	// the caller's real opt-out instead of an env that was already wiped
 	// before anything checked it. Without this, BEADS_TEST_ALLOW_LIVE_TMUX=1
 	// was a documented but dead opt-out (gt-yav3 MR1 bounce).
-	allowLiveTmux := os.Getenv(AllowLiveTmuxEnv) == "1"
+	allowLiveTmux := getenv(host.env, AllowLiveTmuxEnv) == "1"
 
 	// Same reason as allowLiveTmux: scrubInheritedTmuxVars removes this, and
 	// the tripwire in Finish compares against the server the test process was
 	// itself launched inside. Captured here, before the scrub.
-	h.LiveTmuxSocket = tmux.SocketFromEnv()
+	h.LiveTmuxSocket = socketFromTMUX(getenv(host.env, "TMUX"))
 
-	scrubProcessEnv(externalDolt)
-	scrubInheritedTmuxVars()
+	scrubEnv(host.env, externalDolt)
+	scrubTmuxVars(host.env)
 
 	if allowLiveTmux {
-		if err := os.Setenv(AllowLiveTmuxEnv, "1"); err != nil {
+		if err := host.env.Setenv(AllowLiveTmuxEnv, "1"); err != nil {
 			return nil, fmt.Errorf("restoring %s: %w", AllowLiveTmuxEnv, err)
 		}
 	}
 
-	sandbox, err := os.MkdirTemp("", "gt-hermetic-")
+	sandbox, err := os.MkdirTemp(host.tempDir, "gt-hermetic-")
 	if err != nil {
 		return nil, fmt.Errorf("creating sandbox: %w", err)
 	}
@@ -375,7 +380,7 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	// $HOME), which would make any `go` invocation from a test re-download
 	// the module cache and, on a host with a keg-only icu4c, lose the cgo
 	// flags. Pin the current effective values before HOME changes.
-	if err := preserveGoEnv(); err != nil {
+	if err := host.preserveGoEnv(); err != nil {
 		return nil, err
 	}
 
@@ -405,41 +410,41 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 		setenvs["BEADS_DOLT_PORT"] = poisonDoltPort
 	}
 	for k, v := range setenvs {
-		if err := os.Setenv(k, v); err != nil {
+		if err := host.env.Setenv(k, v); err != nil {
 			return nil, fmt.Errorf("setting %s: %w", k, err)
 		}
 	}
 	if h.cfg.dolt {
 		// Replaces the poisoned port vars with the container's mapped port.
-		if err := ensureDoltContainerForTestMain(); err != nil {
-			if DockerTestsEnabled() {
+		if err := host.ensureDolt(); err != nil {
+			if dockerTestsEnabled(host.env) {
 				// Opted in: the run wants the container coverage, so a
 				// missing container fails the package rather than letting
 				// its container tests skip.
 				_ = os.RemoveAll(sandbox)
 				return nil, fmt.Errorf("%s=1 opted in to the container-backed tests, but the Dolt container is unavailable: %w", DockerTestsEnv, err)
 			}
-			fmt.Fprintf(os.Stderr,
+			fmt.Fprintf(host.stderr,
 				"hermetic harness: Dolt container unavailable (%v); Dolt-dependent tests will skip\n", err)
 		}
 	}
 
 	if h.cfg.noGit {
-		log, err := installRefusingGit(filepath.Join(sandbox, "nogit"))
+		log, err := host.installRefusingGit(filepath.Join(sandbox, "nogit"))
 		if err != nil {
 			return nil, err
 		}
 		h.refusedGitLog = log
 	}
 
-	h.TmuxSocket = isolateTmuxSocket()
+	h.TmuxSocket = host.isolateTmuxSocket()
 
 	// The env scrub above only reaches resolvers that consult it. Probe them
 	// from the package's own directory — the one cwd guaranteed to sit inside
 	// the live worktree — so a resolver that ignores the guard fails here
 	// rather than mid-test.
 	if h.RealTownRoot != "" {
-		if err := assertLiveTownRefused(h.StartDir); err != nil {
+		if err := host.assertLiveTownRefused(h.StartDir); err != nil {
 			return nil, err
 		}
 	}
@@ -456,25 +461,17 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 // server, flapping zombie/capacity readings and risking a phantom-session
 // auto-nuke). Returns the socket name bound, or "" when tmux isn't
 // installed or AllowLiveTmuxEnv opts out.
-func isolateTmuxSocket() string {
-	if os.Getenv(AllowLiveTmuxEnv) == "1" {
+func (h *harnessHost) isolateTmuxSocket() string {
+	if getenv(h.env, AllowLiveTmuxEnv) == "1" {
 		return ""
 	}
-	if _, err := exec.LookPath("tmux"); err != nil {
+	if _, err := h.lookPath("tmux"); err != nil {
 		return ""
 	}
-	socket := fmt.Sprintf("gt-test-%d", os.Getpid())
-	tmux.SetDefaultSocket(socket)
+	socket := fmt.Sprintf("gt-test-%d", h.pid)
+	h.setTmuxSocket(socket)
 	return socket
 }
-
-// ensureDoltContainerForTestMain is EnsureDoltContainerForTestMain, indirected
-// so a test can force its failure without Docker.
-var ensureDoltContainerForTestMain = EnsureDoltContainerForTestMain
-
-// terminateDoltContainer is TerminateDoltContainer, indirected so a test can
-// force the cleanup-failure branch below without starting a real container.
-var terminateDoltContainer = TerminateDoltContainer
 
 // Finish tears down the sandbox and runs the tripwire against the live town
 // snapshot. It returns the exit code for os.Exit: the m.Run() code, forced to
@@ -483,48 +480,52 @@ var terminateDoltContainer = TerminateDoltContainer
 // while tests ran (ErrDoltCatalogChanged), or when the container fails to
 // terminate.
 func (h *Hermetic) Finish(code int) int {
+	host := h.host
+	if host == nil {
+		host = processHost()
+	}
 	// No-op when no container was started; also covers containers started
 	// lazily by tests via RequireDoltContainer.
-	if err := terminateDoltContainer(); errors.Is(err, ErrDoltCatalogChanged) {
-		fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
-		fmt.Fprintf(os.Stderr, "DOLT CATALOG GUARD: %v\n", err)
-		fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("=", 72))
+	if err := host.terminateDolt(); errors.Is(err, ErrDoltCatalogChanged) {
+		fmt.Fprintf(host.stderr, "\n%s\n", strings.Repeat("=", 72))
+		fmt.Fprintf(host.stderr, "DOLT CATALOG GUARD: %v\n", err)
+		fmt.Fprintf(host.stderr, "%s\n", strings.Repeat("=", 72))
 		if code == 0 {
 			code = 1
 		}
 	} else if err != nil {
-		fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
-		fmt.Fprintf(os.Stderr, "HERMETIC TRIPWIRE: shared Dolt container failed to terminate: %v\n", err)
-		fmt.Fprintf(os.Stderr, "A container that fails to terminate keeps running and holding\n")
-		fmt.Fprintf(os.Stderr, "memory on the shared Docker VM (gt-p98h, gt-n5g6). Investigate\n")
-		fmt.Fprintf(os.Stderr, "rather than re-running: repeated leaks exhaust it town-wide.\n")
-		fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("=", 72))
+		fmt.Fprintf(host.stderr, "\n%s\n", strings.Repeat("=", 72))
+		fmt.Fprintf(host.stderr, "HERMETIC TRIPWIRE: shared Dolt container failed to terminate: %v\n", err)
+		fmt.Fprintf(host.stderr, "A container that fails to terminate keeps running and holding\n")
+		fmt.Fprintf(host.stderr, "memory on the shared Docker VM (gt-p98h, gt-n5g6). Investigate\n")
+		fmt.Fprintf(host.stderr, "rather than re-running: repeated leaks exhaust it town-wide.\n")
+		fmt.Fprintf(host.stderr, "%s\n", strings.Repeat("=", 72))
 		if code == 0 {
 			code = 1
 		}
 	}
 	// Read before the sandbox that holds it is removed.
-	code = failOnRefusedGit(code, h.refusedGitLog, os.Stderr)
+	code = failOnRefusedGit(code, h.refusedGitLog, host.stderr)
 	if h.SandboxDir != "" {
 		_ = os.RemoveAll(h.SandboxDir)
 	}
 	if h.TmuxSocket != "" {
-		_ = exec.Command("tmux", "-L", h.TmuxSocket, "kill-server").Run() //nolint:errcheck // best-effort cleanup
-		_ = os.Remove(filepath.Join(tmux.SocketDir(), h.TmuxSocket))
+		_, _ = host.run("tmux", "-L", h.TmuxSocket, "kill-server") //nolint:errcheck // best-effort cleanup
+		_ = os.Remove(filepath.Join(host.tmuxSocketDir(), h.TmuxSocket))
 	}
 
 	if h.LiveTmuxSocket != "" {
-		if leaks := liveTmuxTestSessions(h.LiveTmuxSocket); len(leaks) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
-			fmt.Fprintf(os.Stderr, "HERMETIC TRIPWIRE: tests created %d session(s) on the live tmux server %q\n",
+		if leaks := host.tmuxSessions(h.LiveTmuxSocket); len(leaks) > 0 {
+			fmt.Fprintf(host.stderr, "\n%s\n", strings.Repeat("=", 72))
+			fmt.Fprintf(host.stderr, "HERMETIC TRIPWIRE: tests created %d session(s) on the live tmux server %q\n",
 				len(leaks), h.LiveTmuxSocket)
 			for _, l := range leaks {
-				fmt.Fprintf(os.Stderr, "  - %s\n", l)
+				fmt.Fprintf(host.stderr, "  - %s\n", l)
 			}
-			fmt.Fprintf(os.Stderr, "A session named gt-test-* on the live server reads as a phantom polecat\n")
-			fmt.Fprintf(os.Stderr, "in the roster and is a target for auto-nuke (gt-2bj). Name a session\n")
-			fmt.Fprintf(os.Stderr, "socket (tmux -L gt-test-<something>) instead of using the inherited one.\n")
-			fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("=", 72))
+			fmt.Fprintf(host.stderr, "A session named gt-test-* on the live server reads as a phantom polecat\n")
+			fmt.Fprintf(host.stderr, "in the roster and is a target for auto-nuke (gt-2bj). Name a session\n")
+			fmt.Fprintf(host.stderr, "socket (tmux -L gt-test-<something>) instead of using the inherited one.\n")
+			fmt.Fprintf(host.stderr, "%s\n", strings.Repeat("=", 72))
 			if code == 0 {
 				code = 1
 			}
@@ -533,14 +534,14 @@ func (h *Hermetic) Finish(code int) int {
 
 	if h.snap != nil {
 		if leaks := h.snap.diff(); len(leaks) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 72))
-			fmt.Fprintf(os.Stderr, "HERMETIC TRIPWIRE: tests leaked state into the live town at %s\n", h.snap.root)
+			fmt.Fprintf(host.stderr, "\n%s\n", strings.Repeat("=", 72))
+			fmt.Fprintf(host.stderr, "HERMETIC TRIPWIRE: tests leaked state into the live town at %s\n", h.snap.root)
 			for _, l := range leaks {
-				fmt.Fprintf(os.Stderr, "  - %s\n", l)
+				fmt.Fprintf(host.stderr, "  - %s\n", l)
 			}
-			fmt.Fprintf(os.Stderr, "Tests must never write to a real town. Route writes through the\n")
-			fmt.Fprintf(os.Stderr, "sandbox (testutil.Hermetic.TownRoot / ScratchTown) instead.\n")
-			fmt.Fprintf(os.Stderr, "%s\n", strings.Repeat("=", 72))
+			fmt.Fprintf(host.stderr, "Tests must never write to a real town. Route writes through the\n")
+			fmt.Fprintf(host.stderr, "sandbox (testutil.Hermetic.TownRoot / ScratchTown) instead.\n")
+			fmt.Fprintf(host.stderr, "%s\n", strings.Repeat("=", 72))
 			if code == 0 {
 				code = 1
 			}
@@ -581,15 +582,15 @@ func sandboxCircuitDir(home string) string {
 	return dir
 }
 
-// scrubProcessEnv removes every GT_*, BD_* and BEADS_* variable from the
-// process environment so tests and their subprocesses cannot inherit live
-// town context from the invoking agent session. When keepDolt is true the
-// Dolt passthrough variables survive (an outer runner provided the server).
-// It leaves bd's telemetry switched off (bdTelemetryOff).
-func scrubProcessEnv(keepDolt bool) {
+// scrubEnv removes every GT_*, BD_* and BEADS_* variable from env so tests
+// and their subprocesses cannot inherit live town context from the invoking
+// agent session. When keepDolt is true the Dolt passthrough variables survive
+// (an outer runner provided the server). It leaves bd's telemetry switched
+// off (bdTelemetryOff).
+func scrubEnv(env environment, keepDolt bool) {
 	defer func() {
 		for k, v := range bdTelemetryOff {
-			_ = os.Setenv(k, v)
+			_ = env.Setenv(k, v)
 		}
 	}()
 	// DockerTestsEnv is the caller's opt-in to container-backed tests, not
@@ -604,7 +605,7 @@ func scrubProcessEnv(keepDolt bool) {
 			keep[k] = true
 		}
 	}
-	for _, kv := range os.Environ() {
+	for _, kv := range env.Environ() {
 		name, _, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
@@ -615,7 +616,7 @@ func scrubProcessEnv(keepDolt bool) {
 		if keep[name] {
 			continue
 		}
-		_ = os.Unsetenv(name)
+		_ = env.Unsetenv(name)
 	}
 }
 
@@ -623,12 +624,12 @@ func scrubProcessEnv(keepDolt bool) {
 // tmux honors ahead of its own default socket.
 var liveTmuxVars = []string{"TMUX", "TMUX_PANE", "TMUX_TMPDIR"}
 
-// scrubInheritedTmuxVars drops the invoking agent's tmux identity, so a bare
+// scrubTmuxVars drops the invoking agent's tmux identity from env, so a bare
 // `tmux` in a test or its subprocess cannot reach the live town server. No
 // socket-scoped wrapper covers a shell-out; the scrub does (gt-2bj).
-func scrubInheritedTmuxVars() {
+func scrubTmuxVars(env environment) {
 	for _, v := range liveTmuxVars {
-		_ = os.Unsetenv(v)
+		_ = env.Unsetenv(v)
 	}
 }
 
@@ -734,19 +735,19 @@ var goEnvCarryVars = []string{"GOPATH", "GOCACHE", "GOMODCACHE"}
 // subprocess a test spawns, which is broader than the cache-location carry
 // it replaces. Accepted: those are the same values a developer's own shell
 // already sees outside the harness.
-func preserveGoEnv() error {
-	goBin, err := exec.LookPath("go")
+func (h *harnessHost) preserveGoEnv() error {
+	goBin, err := h.lookPath("go")
 	if err != nil {
 		return nil
 	}
 
-	if os.Getenv("GOENV") == "" {
-		out, err := exec.Command(goBin, "env", "GOENV").Output()
+	if getenv(h.env, "GOENV") == "" {
+		out, err := h.run(goBin, "env", "GOENV")
 		if err != nil {
 			return fmt.Errorf("asking the go tool for GOENV: %w", err)
 		}
 		if goEnvPath := strings.TrimSpace(string(out)); goEnvPath != "" {
-			if err := os.Setenv("GOENV", goEnvPath); err != nil {
+			if err := h.env.Setenv("GOENV", goEnvPath); err != nil {
 				return fmt.Errorf("pinning GOENV: %w", err)
 			}
 		}
@@ -754,7 +755,7 @@ func preserveGoEnv() error {
 
 	var missing []string
 	for _, v := range goEnvCarryVars {
-		if os.Getenv(v) == "" {
+		if getenv(h.env, v) == "" {
 			missing = append(missing, v)
 		}
 	}
@@ -764,7 +765,7 @@ func preserveGoEnv() error {
 	// -json: values are space-bearing flag strings and may legitimately be
 	// empty, so splitting output on newlines would be lossy.
 	args := append([]string{"env", "-json"}, missing...)
-	out, err := exec.Command(goBin, args...).Output() //nolint:gosec // fixed args
+	out, err := h.run(goBin, args...)
 	if err != nil {
 		return fmt.Errorf("asking the go tool for %s: %w", strings.Join(missing, ", "), err)
 	}
@@ -776,7 +777,7 @@ func preserveGoEnv() error {
 		if values[v] == "" {
 			continue
 		}
-		if err := os.Setenv(v, values[v]); err != nil {
+		if err := h.env.Setenv(v, values[v]); err != nil {
 			return fmt.Errorf("carrying %s into the hermetic environment: %w", v, err)
 		}
 	}
@@ -832,15 +833,21 @@ func HermeticTest(t testing.TB) string {
 	// and the scrub needs to remove them entirely.
 	saved := os.Environ()
 	t.Cleanup(func() {
-		os.Clearenv()
+		os.Clearenv() //testpolicy:allow prod-no-setenv — restores the environment HermeticTest rewrote for this test
 		for _, kv := range saved {
 			if name, val, ok := strings.Cut(kv, "="); ok {
-				_ = os.Setenv(name, val)
+				_ = os.Setenv(name, val) //testpolicy:allow prod-no-setenv — restores the environment HermeticTest rewrote for this test
 			}
 		}
 	})
+	return processHost().hermeticTest(t)
+}
 
-	scrubProcessEnv(os.Getenv("GT_TEST_EXTERNAL_DOLT") == "1")
+// hermeticTest is HermeticTest's treatment of host's environment, which the
+// caller restores.
+func (h *harnessHost) hermeticTest(t testing.TB) string {
+	t.Helper()
+	scrubEnv(h.env, getenv(h.env, "GT_TEST_EXTERNAL_DOLT") == "1")
 
 	sandbox := t.TempDir()
 	home := filepath.Join(sandbox, "home")
@@ -857,7 +864,7 @@ func HermeticTest(t testing.TB) string {
 	if err := writeSandboxGitConfig(home); err != nil {
 		t.Fatal(err)
 	}
-	if err := preserveGoEnv(); err != nil {
+	if err := h.preserveGoEnv(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -870,23 +877,23 @@ func HermeticTest(t testing.TB) string {
 		"BEADS_DOLT_AUTO_START": "0",
 		BeadsCircuitDirEnv:      sandboxCircuitDir(home),
 	}
-	startDir, _ := os.Getwd() //nolint:errcheck // "" just disables the startup probe
+	startDir, _ := h.getwd() //nolint:errcheck // "" just disables the startup probe
 	realRoot := ""
-	if root, err := workspace.FindFromCwd(); err == nil && root != "" {
+	if root, err := h.findTown(); err == nil && root != "" {
 		realRoot = root
 		testEnvs[workspace.EnvForbiddenTownRoot] = root
 	}
 	for k, v := range testEnvs {
-		if err := os.Setenv(k, v); err != nil {
+		if err := h.env.Setenv(k, v); err != nil {
 			t.Fatalf("setting %s: %v", k, err)
 		}
 	}
-	if os.Getenv("GT_TEST_EXTERNAL_DOLT") != "1" {
-		_ = os.Setenv("GT_DOLT_PORT", poisonDoltPort)
-		_ = os.Setenv("BEADS_DOLT_PORT", poisonDoltPort)
+	if getenv(h.env, "GT_TEST_EXTERNAL_DOLT") != "1" {
+		_ = h.env.Setenv("GT_DOLT_PORT", poisonDoltPort)
+		_ = h.env.Setenv("BEADS_DOLT_PORT", poisonDoltPort)
 	}
 	if realRoot != "" {
-		if err := assertLiveTownRefused(startDir); err != nil {
+		if err := h.assertLiveTownRefused(startDir); err != nil {
 			t.Fatal(err)
 		}
 	}

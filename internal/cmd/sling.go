@@ -1351,6 +1351,12 @@ func rawWorkflowFieldValues(info *beadInfo) (noMerge, reviewOnly bool, attachedA
 }
 
 func restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
+	return restoreRollbackRawWorkflowFieldsVia(nil, beadID, townRoot, hookWorkDir, info, originalInfo)
+}
+
+// restoreRollbackRawWorkflowFieldsVia is restoreRollbackRawWorkflowFields
+// with bd answered by run (nil: bd on PATH).
+func restoreRollbackRawWorkflowFieldsVia(run beads.BDRunner, beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
 	if info == nil {
 		return false, nil
 	}
@@ -1378,6 +1384,7 @@ func restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info
 		Dir(updateDir).
 		StripBeadsDir().
 		WithAutoCommit().
+		Via(run).
 		Run(); err != nil {
 		return false, err
 	}
@@ -1542,58 +1549,5 @@ func resolvePRBranch(prNumber int) (string, error) {
 // beadID is the bead this sling touched ("" when the failure came before the
 // sling wrote to any bead); it is never unhooked from a different assignee.
 func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string) {
-	townRoot, err := workspace.FindFromCwdOrError()
-
-	// 1. Burn any attached molecules from partial formula instantiation.
-	// This clears attached_molecule metadata and closes stale wisps that
-	// otherwise block subsequent sling attempts.
-	// Some failure modes happen before any bead is hooked (e.g., wisp creation fails).
-	if beadID != "" {
-		if err != nil {
-			fmt.Printf("  %s Could not find workspace to rollback bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-		} else {
-			info, infoErr := getBeadInfoForRollback(beadID)
-			if infoErr != nil {
-				fmt.Printf("  %s Could not inspect bead %s for stale molecules: %v\n", style.Dim.Render("Warning:"), beadID, infoErr)
-			} else {
-				existingMolecules := collectExistingMoleculesForRollback(info)
-				if depMolecules, depErr := collectExistingMoleculeDeps(beadID, townRoot); depErr != nil {
-					fmt.Printf("  %s Could not inspect canonical molecule bonds for %s: %v\n", style.Dim.Render("Warning:"), beadID, depErr)
-				} else {
-					existingMolecules = appendUniqueMolecules(existingMolecules, depMolecules...)
-				}
-				canClearWorkflowFields := len(existingMolecules) == 0
-				if len(existingMolecules) > 0 {
-					if burnErr := burnExistingMoleculesForRollback(existingMolecules, beadID, townRoot); burnErr != nil {
-						fmt.Printf("  %s Could not burn stale molecule(s) from %s: %v\n", style.Dim.Render("Warning:"), beadID, burnErr)
-					} else {
-						fmt.Printf("  %s Burned %d stale molecule(s): %s\n",
-							style.Dim.Render("○"), len(existingMolecules), strings.Join(existingMolecules, ", "))
-						if refreshed, refreshErr := getBeadInfoForRollback(beadID); refreshErr != nil {
-							fmt.Printf("  %s Could not refresh bead %s after molecule cleanup: %v\n", style.Dim.Render("Warning:"), beadID, refreshErr)
-						} else {
-							info = refreshed
-							canClearWorkflowFields = true
-						}
-					}
-				}
-				if canClearWorkflowFields {
-					if cleared, clearErr := clearRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info); clearErr != nil {
-						fmt.Printf("  %s Could not clear raw workflow metadata from %s: %v\n", style.Dim.Render("Warning:"), beadID, clearErr)
-					} else if cleared {
-						fmt.Printf("  %s Cleared raw workflow metadata from %s\n", style.Dim.Render("○"), beadID)
-					}
-				}
-			}
-		}
-	}
-
-	// 2. Release the bead — only while it is still hooked to this polecat —
-	// and undo the spawn: a fresh sandbox is removed, a reused one is kept with
-	// its slot reset, and only a branch this sling created may go (gt-7evi4).
-	if spawnInfo == nil {
-		releasePoolSeatClaim()
-		return
-	}
-	cleanupSpawnedPolecatWork(spawnInfo, spawnInfo.RigName, beadID, hookWorkDir, convoyID)
+	realSlingRollback().rollback(spawnInfo, beadID, hookWorkDir, convoyID)
 }

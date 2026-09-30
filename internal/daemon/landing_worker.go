@@ -403,10 +403,21 @@ func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.D
 	}
 }
 
+// landingRemoteGit is the git surface gitRemote reads: *git.Git over the
+// rig's bare repository in production, gitfake in tests.
+type landingRemoteGit interface {
+	PushRemoteBranchTip(remote, branch string) (string, error)
+	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
+	RefExists(ref string) (bool, error)
+	IsAncestor(ancestor, descendant string) (bool, error)
+}
+
+var _ landingRemoteGit = (*git.Git)(nil)
+
 // gitRemote answers the worker's questions about origin from the rig's
 // bare repository.
 type gitRemote struct {
-	g      *git.Git
+	g      landingRemoteGit
 	remote string
 }
 

@@ -97,3 +97,24 @@ func (e *realEnv) OpenWithDir(gitDir, workDir string) gitfake.Repo {
 func TestIntegrationGitfakeRepoContract(t *testing.T) {
 	gitfake.RunRepoContract(t, func(t *testing.T) gitfake.Env { return &realEnv{} })
 }
+
+// CommitWorktree is git add -A; git commit in the checkout at dir.
+func (e *realEnv) CommitWorktree(t testing.TB, dir, message string) string {
+	t.Helper()
+	e.git(t, dir, "", nil, "add", "-A")
+	e.commits++
+	date := fmt.Sprintf("@%d +0000", 1_700_000_000+e.commits)
+	e.git(t, dir, "", []string{"GIT_AUTHOR_DATE=" + date, "GIT_COMMITTER_DATE=" + date}, "commit", "-q", "-m", message)
+	return e.git(t, dir, "", nil, "rev-parse", "HEAD")
+}
+
+func (e *realEnv) Stash(t testing.TB, dir, message string) {
+	t.Helper()
+	e.git(t, dir, "", nil, "stash", "push", "-q", "-m", message)
+}
+
+func (e *realEnv) OpenBranchRepo(dir string) gitfake.BranchRepo { return git.NewGit(dir) }
+
+func TestIntegrationGitfakeBranchContract(t *testing.T) {
+	gitfake.RunBranchContract(t, func(t *testing.T) gitfake.BranchEnv { return &realEnv{} })
+}

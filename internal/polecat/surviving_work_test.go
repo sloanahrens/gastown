@@ -2,7 +2,6 @@ package polecat
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,66 +10,82 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// survivalFixture is a hermetic rig: a local bare "origin", a seed clone that
-// writes to it, and a rig root with the shared .repo.git layout.
+// survivalFixture is a rig in a gitfake world: a bare "origin", a seed
+// clone that writes to it, and a rig root with the shared .repo.git layout.
 type survivalFixture struct {
+	w                                *world
 	tmp, origin, seed, rigRoot, bare string
 }
 
 func newSurvivalFixture(t *testing.T) *survivalFixture {
 	t.Helper()
-	// Built once per test binary and copied: origin.git with one commit on
-	// main, the seed clone that pushed it, and the rig's empty .repo.git
-	// with origin configured.
-	tmp := cachedGitFixture(t, "survival-fixture", func(tmp string) {
-		f := &survivalFixture{
-			tmp:     tmp,
-			origin:  filepath.Join(tmp, "origin.git"),
-			seed:    filepath.Join(tmp, "seed"),
-			rigRoot: filepath.Join(tmp, "gastown"),
-		}
-		f.bare = filepath.Join(f.rigRoot, ".repo.git")
-		runGit(t, tmp, "init", "--bare", "--initial-branch=main", f.origin)
-		runGit(t, tmp, "init", "--initial-branch=main", f.seed)
-		runGit(t, f.seed, "config", "user.email", "test@example.com")
-		runGit(t, f.seed, "config", "user.name", "test")
-		f.commit(t, "base.txt", "base\n", "base")
-		runGit(t, f.seed, "remote", "add", "origin", f.origin)
-		runGit(t, f.seed, "push", "origin", "main")
-		if err := os.MkdirAll(f.rigRoot, 0755); err != nil {
-			t.Fatal(err)
-		}
-		runGit(t, tmp, "init", "--bare", f.bare)
-		runGit(t, f.bare, "remote", "add", "origin", f.origin)
-	})
+	tmp := t.TempDir()
 	f := &survivalFixture{
+		w:       newWorld(),
 		tmp:     tmp,
 		origin:  filepath.Join(tmp, "origin.git"),
 		seed:    filepath.Join(tmp, "seed"),
 		rigRoot: filepath.Join(tmp, "gastown"),
 	}
 	f.bare = filepath.Join(f.rigRoot, ".repo.git")
+	f.w.InitBare(t, f.origin)
+	f.w.Commit(t, f.origin, "main", "base", map[string]string{"base.txt": "base\n"})
+	f.w.Clone(t, f.origin, f.seed)
+	f.w.InitBare(t, f.bare)
+	f.w.AddRemote(t, f.bare, "origin", f.origin)
 	return f
+}
+
+func (f *survivalFixture) g() gitRepo { return f.w.repo(f.seed) }
+
+func (f *survivalFixture) do(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *survivalFixture) commit(t *testing.T, file, content, msg string) {
 	t.Helper()
-	seedFile(t, filepath.Join(f.seed, file), content)
-	runGit(t, f.seed, "add", file)
-	runGit(t, f.seed, "commit", "-m", msg)
+	f.w.writeAndCommit(t, f.seed, msg, map[string]string{file: content})
 }
 
 // branchWithWork creates branch off main in the seed with one commit.
 func (f *survivalFixture) branchWithWork(t *testing.T, branch, file string) {
 	t.Helper()
-	runGit(t, f.seed, "checkout", "-q", "-b", branch, "main")
+	f.do(t, f.g().CheckoutNewBranch(branch, "main"))
 	f.commit(t, file, file+"\n", "work on "+branch)
-	runGit(t, f.seed, "checkout", "-q", "main")
+	f.do(t, f.g().Checkout("main"))
+}
+
+// branchAt points a new seed branch at main.
+func (f *survivalFixture) branchAt(t *testing.T, branch string) {
+	t.Helper()
+	main, err := f.g().Rev("main")
+	f.do(t, err)
+	f.w.SetRef(t, f.seed, "refs/heads/"+branch, main)
 }
 
 func (f *survivalFixture) push(t *testing.T, refs ...string) {
 	t.Helper()
-	runGit(t, f.seed, append([]string{"push", "-q", "origin"}, refs...)...)
+	for _, ref := range refs {
+		f.do(t, f.g().Push("origin", ref, false))
+	}
+}
+
+// mergeIntoMain merges branch into the seed's main with a merge commit.
+func (f *survivalFixture) mergeIntoMain(t *testing.T, branch string) {
+	t.Helper()
+	f.do(t, f.w.OpenBranchRepo(f.seed).MergeNoFF(branch, "merge"))
+}
+
+// survivingWork is SurvivingWorkForIssue over f's world.
+func (f *survivalFixture) survivingWork(rigRoot string) (string, error) {
+	w, err := newWorkSurvival(f.w.opener(), rigRoot, git.RemoteQueryTimeout)
+	if err != nil {
+		return "", err
+	}
+	return w.ForIssue(survivalIssue)
 }
 
 const survivalIssue = "gt-elvf4"
@@ -87,15 +102,15 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		f := newSurvivalFixture(t)
 		f.branchWithWork(t, older, "work.txt")
 		f.push(t, older)
-		assertSurvivor(t, f.rigRoot, older)
+		assertSurvivor(t, f, older)
 	})
 
 	t.Run("branch equal to main does not survive", func(t *testing.T) {
 		t.Parallel()
 		f := newSurvivalFixture(t)
-		runGit(t, f.seed, "branch", older, "main")
+		f.branchAt(t, older)
 		f.push(t, older)
-		assertSurvivor(t, f.rigRoot, "")
+		assertSurvivor(t, f, "")
 	})
 
 	t.Run("merged branch does not survive", func(t *testing.T) {
@@ -103,9 +118,9 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		f := newSurvivalFixture(t)
 		f.branchWithWork(t, older, "work.txt")
 		f.push(t, older)
-		runGit(t, f.seed, "merge", "-q", "--no-ff", "-m", "merge", older)
+		f.mergeIntoMain(t, older)
 		f.push(t, "main")
-		assertSurvivor(t, f.rigRoot, "")
+		assertSurvivor(t, f, "")
 	})
 
 	t.Run("rebase-merged branch does not survive (patch-id, not ancestry)", func(t *testing.T) {
@@ -116,9 +131,9 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		// main moves on, then takes the same patch as a new commit: the
 		// branch tip is not an ancestor of main, but its patch is on main.
 		f.commit(t, "other.txt", "other\n", "unrelated")
-		runGit(t, f.seed, "cherry-pick", older)
+		f.commit(t, "work.txt", "work.txt\n", "work on "+older)
 		f.push(t, "main")
-		assertSurvivor(t, f.rigRoot, "")
+		assertSurvivor(t, f, "")
 	})
 
 	t.Run("local-only branch with unpushed work survives", func(t *testing.T) {
@@ -126,17 +141,17 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		f := newSurvivalFixture(t)
 		f.branchWithWork(t, older, "work.txt")
 		// The rig repo holds the branch; origin never saw it.
-		runGit(t, f.seed, "push", "-q", f.bare, older+":refs/heads/"+older)
-		assertSurvivor(t, f.rigRoot, older)
+		f.do(t, f.g().Push(f.bare, older+":refs/heads/"+older, false))
+		assertSurvivor(t, f, older)
 	})
 
 	t.Run("newest branch merged, older one still carries work", func(t *testing.T) {
 		t.Parallel()
 		f := newSurvivalFixture(t)
 		f.branchWithWork(t, older, "old.txt")
-		runGit(t, f.seed, "branch", newer, "main")
+		f.branchAt(t, newer)
 		f.push(t, older, newer)
-		assertSurvivor(t, f.rigRoot, older)
+		assertSurvivor(t, f, older)
 	})
 
 	t.Run("other beads' branches are ignored", func(t *testing.T) {
@@ -144,66 +159,64 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		f := newSurvivalFixture(t)
 		f.branchWithWork(t, "polecat/basalt/gt-other+mu5wzd6q", "work.txt")
 		f.push(t, "polecat/basalt/gt-other+mu5wzd6q")
-		assertSurvivor(t, f.rigRoot, "")
+		assertSurvivor(t, f, "")
 	})
 
 	t.Run("idle polecat on an epic branch merged into integration does not survive", func(t *testing.T) {
 		t.Parallel()
 		f := newSurvivalFixture(t)
-		runGit(t, f.seed, "checkout", "-q", "-b", "integration/epic-x", "main")
+		f.do(t, f.g().CheckoutNewBranch("integration/epic-x", "main"))
 		f.commit(t, "epic.txt", "epic\n", "epic groundwork")
-		runGit(t, f.seed, "checkout", "-q", "-b", older, "integration/epic-x")
+		f.do(t, f.g().CheckoutNewBranch(older, "integration/epic-x"))
 		f.commit(t, "work.txt", "work\n", "work on the epic")
-		runGit(t, f.seed, "checkout", "-q", "integration/epic-x")
-		runGit(t, f.seed, "merge", "-q", "--no-ff", "-m", "merge into epic", older)
-		runGit(t, f.seed, "checkout", "-q", "main")
+		f.do(t, f.g().Checkout("integration/epic-x"))
+		f.do(t, f.w.OpenBranchRepo(f.seed).MergeNoFF(older, "merge into epic"))
+		f.do(t, f.g().Checkout("main"))
 		f.push(t, older, "integration/epic-x")
 		// The work (and the epic's own groundwork) is on the integration
 		// branch, not on main: judged against main alone it would survive.
-		assertSurvivor(t, f.rigRoot, "")
+		assertSurvivor(t, f, "")
 	})
 
 	t.Run("epic branch with work not yet in integration survives", func(t *testing.T) {
 		t.Parallel()
 		f := newSurvivalFixture(t)
-		runGit(t, f.seed, "checkout", "-q", "-b", "integration/epic-x", "main")
+		f.do(t, f.g().CheckoutNewBranch("integration/epic-x", "main"))
 		f.commit(t, "epic.txt", "epic\n", "epic groundwork")
-		runGit(t, f.seed, "checkout", "-q", "-b", older, "integration/epic-x")
+		f.do(t, f.g().CheckoutNewBranch(older, "integration/epic-x"))
 		f.commit(t, "work.txt", "work\n", "work on the epic")
-		runGit(t, f.seed, "checkout", "-q", "main")
+		f.do(t, f.g().Checkout("main"))
 		f.push(t, older, "integration/epic-x")
-		assertSurvivor(t, f.rigRoot, older)
+		assertSurvivor(t, f, older)
 	})
 
 	t.Run("stale local origin ref is re-fetched", func(t *testing.T) {
 		t.Parallel()
 		f := newSurvivalFixture(t)
 		// The rig repo last saw the branch at main's tip (no work) ...
-		runGit(t, f.seed, "branch", older, "main")
+		f.branchAt(t, older)
 		f.push(t, older)
-		runGit(t, f.bare, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+		f.do(t, f.w.repo(f.bare).Fetch("origin"))
 		// ... then work landed on origin.
-		runGit(t, f.seed, "checkout", "-q", older)
+		f.do(t, f.g().Checkout(older))
 		f.commit(t, "work.txt", "work\n", "late work")
-		runGit(t, f.seed, "checkout", "-q", "main")
+		f.do(t, f.g().Checkout("main"))
 		f.push(t, older)
-		assertSurvivor(t, f.rigRoot, older)
+		assertSurvivor(t, f, older)
 	})
 
 	t.Run("unreachable origin with no local candidate is unknown", func(t *testing.T) {
 		t.Parallel()
 		f := newSurvivalFixture(t)
-		if err := os.RemoveAll(f.origin); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := SurvivingWorkForIssue(f.rigRoot, survivalIssue); err == nil {
+		f.w.RemoveRepo(t, f.origin)
+		if got, err := f.survivingWork(f.rigRoot); err == nil {
 			t.Fatalf("want an error for an unreachable origin, got branch %q", got)
 		}
 	})
 
 	t.Run("no rig repo", func(t *testing.T) {
 		t.Parallel()
-		if _, err := SurvivingWorkForIssue(t.TempDir(), survivalIssue); !errors.Is(err, ErrNoRigRepo) {
+		if _, err := newSurvivalFixture(t).survivingWork(t.TempDir()); !errors.Is(err, ErrNoRigRepo) {
 			t.Fatalf("err = %v, want ErrNoRigRepo", err)
 		}
 	})
@@ -240,9 +253,9 @@ func TestVerdictFromClassifiesTheAnswer(t *testing.T) {
 	}
 }
 
-func assertSurvivor(t *testing.T, rigRoot, want string) {
+func assertSurvivor(t *testing.T, f *survivalFixture, want string) {
 	t.Helper()
-	got, err := SurvivingWorkForIssue(rigRoot, survivalIssue)
+	got, err := f.survivingWork(f.rigRoot)
 	if err != nil {
 		t.Fatalf("SurvivingWorkForIssue: %v", err)
 	}
@@ -280,7 +293,7 @@ func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
 		{name: "merged branch releases the hook", wantRelease: true, setup: func(t *testing.T, f *survivalFixture) {
 			f.branchWithWork(t, branch, "work.txt")
 			f.push(t, branch)
-			runGit(t, f.seed, "merge", "-q", "--no-ff", "-m", "merge", branch)
+			f.mergeIntoMain(t, branch)
 			f.push(t, "main")
 		}},
 	} {
@@ -290,7 +303,7 @@ func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
 			tc.setup(t, f)
 			bd := newWorkBeadBd()
 
-			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil, bd)
+			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, bd)
 			mgr.unassignWorkBeads("basalt", nil)
 
 			releases := guardedReleases(bd)
@@ -347,7 +360,7 @@ func TestUnassignWorkBeadsReplaysJudgedVerdict(t *testing.T) {
 			}
 			bd := newWorkBeadBd()
 
-			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil, bd)
+			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, bd)
 			mgr.unassignWorkBeads("basalt", map[string]SurvivalVerdict{survivalIssue: tc.judged})
 
 			held := len(guardedReleases(bd)) == 0
@@ -381,7 +394,7 @@ func TestUnassignWorkBeadsKeepsSubmittedWork(t *testing.T) {
 	f := newSurvivalFixture(t)
 	f.branchWithWork(t, branch, "work.txt")
 	f.push(t, branch)
-	runGit(t, f.seed, "merge", "-q", "--no-ff", "-m", "merge", branch)
+	f.mergeIntoMain(t, branch)
 	f.push(t, "main")
 	bd := &fakeBd{answer: func(cmd string, _ []string) string {
 		if cmd == "list" {
@@ -389,7 +402,7 @@ func TestUnassignWorkBeadsKeepsSubmittedWork(t *testing.T) {
 		}
 		return ""
 	}}
-	mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil, bd)
+	mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, bd)
 	mgr.unassignWorkBeads("basalt", nil)
 	if releases := guardedReleases(bd); len(releases) != 0 {
 		t.Fatalf("submitted work was released: %v", releases)

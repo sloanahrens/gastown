@@ -15,8 +15,8 @@ import (
 const blockedHoldEscalationAfter = 10 * time.Minute
 
 // strandedHold is one bead the stranded scan kept back because a blocker could
-// not be resolved or read. It mirrors the cmd package's strandedHold, which
-// writes it into `gt convoy stranded --json`.
+// not be resolved or read: convoy.StrandedHold, kept as its own type so the
+// scan fixtures in tests decode as JSON.
 type strandedHold struct {
 	Issue string `json:"issue"`
 	// Blocker is "" when the failed read was the bead's own.

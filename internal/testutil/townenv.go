@@ -20,8 +20,14 @@ import (
 // their own temporary town structure (via t.TempDir) do NOT need this guard.
 func RequireTownEnv(t *testing.T) string {
 	t.Helper()
+	return requireTownEnv(t, workspace.FindFromCwd)
+}
 
-	root, err := workspace.FindFromCwd()
+// requireTownEnv is RequireTownEnv with the workspace found by find.
+func requireTownEnv(t *testing.T, find func() (string, error)) string {
+	t.Helper()
+
+	root, err := find()
 	if err != nil {
 		t.Skipf("skipping: not in a Gas Town workspace (%v)", err)
 	}

@@ -359,32 +359,7 @@ func areScheduledForTown(townRoot string, beadIDs []string) map[string]bool {
 		townRoot = found
 	}
 
-	// Scan all rig beads dirs (sling contexts live in target rig's DB). (GH#3468)
-	contexts, err := listAllSlingContexts(townRoot)
-	if err != nil {
-		for _, id := range beadIDs {
-			result[id] = true
-		}
-		return result
-	}
-
-	// Build lookup of work bead IDs from open contexts. Cleanup owns stale-state
-	// closure; idempotency must not use a different definition of scheduled.
-	scheduledWorkBeads := make(map[string]bool)
-	for _, ctx := range contexts {
-		fields := beads.ParseSlingContextFields(ctx.Description)
-		if fields != nil {
-			scheduledWorkBeads[fields.WorkBeadID] = true
-		}
-	}
-
-	// Filter to just the requested IDs
-	for _, id := range beadIDs {
-		if scheduledWorkBeads[id] {
-			result[id] = true
-		}
-	}
-	return result
+	return beads.AreScheduled(townRoot, beadIDs)
 }
 
 // isScheduled checks if a single bead has an open sling context.

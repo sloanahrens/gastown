@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/channelevents"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/style"
@@ -154,11 +156,6 @@ func init() {
 }
 
 func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
-	// Validate channel name (prevent path traversal)
-	if !validChannelName.MatchString(awaitEventChannel) {
-		return fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", awaitEventChannel)
-	}
-
 	// Resolve event directory
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil || townRoot == "" {
@@ -166,19 +163,60 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		home, _ := os.UserHomeDir()
 		townRoot = filepath.Join(home, "gt")
 	}
+	return awaitEventFromFlags().run(townRoot)
+}
+
+// awaitEventRun is one gt mol await-event: its flags, where it writes, how
+// it reaches bd, and the lookups it makes. awaitEventFromFlags builds the
+// command's own; tests build one with an in-process bd, so they need no stub
+// on PATH, no chdir, no Setenv and no flag globals.
+type awaitEventRun struct {
+	channel, rig, agentBead, contextCheck string
+	quiet, json, cleanup                  bool
+	backoff                               awaitSignalBackoff
+	bd                                    beads.BDRunner
+	out                                   io.Writer
+	beadsDir                              func() (string, error)
+	eventRig                              func(townRoot, explicit string) string
+	drainNudges                           func(townRoot string) []nudge.QueuedNudge
+}
+
+func awaitEventFromFlags() awaitEventRun {
+	return awaitEventRun{
+		channel:      awaitEventChannel,
+		rig:          awaitEventRig,
+		agentBead:    awaitEventAgentBead,
+		contextCheck: awaitEventContextCheckInterval,
+		quiet:        awaitEventQuiet,
+		json:         moleculeJSON,
+		cleanup:      awaitEventCleanup,
+		backoff:      awaitEventBackoffFromFlags(),
+		out:          os.Stdout,
+		beadsDir:     resolveAgentTrackingBeadsDir,
+		eventRig:     resolveEventRig,
+		drainNudges:  drainSessionNudges,
+	}
+}
+
+// run waits for an event on the channel in townRoot.
+func (r awaitEventRun) run(townRoot string) error {
+	// Validate channel name (prevent path traversal)
+	if !validChannelName.MatchString(r.channel) {
+		return fmt.Errorf("invalid channel name %q: must match [a-zA-Z0-9_-]", r.channel)
+	}
 
 	// Per-rig channels are watched at events/<channel>/<rig>/ so this
 	// consumer never sees (or deletes) another rig's wake events (gt-dsj).
-	rigName := resolveEventRig(townRoot, awaitEventRig)
-	if channelevents.IsPerRig(awaitEventChannel) {
+	rigName := r.eventRig(townRoot, r.rig)
+	if channelevents.IsPerRig(r.channel) {
 		if rigName == "" {
-			return fmt.Errorf("channel %q is per-rig but no rig context found: pass --rig or run inside a rig", awaitEventChannel)
+			return fmt.Errorf("channel %q is per-rig but no rig context found: pass --rig or run inside a rig", r.channel)
 		}
 		if !validChannelName.MatchString(rigName) {
 			return fmt.Errorf("invalid rig name %q: must match [a-zA-Z0-9_-]", rigName)
 		}
 	}
-	eventDir := channelevents.Dir(townRoot, awaitEventChannel, rigName)
+	eventDir := channelevents.Dir(townRoot, r.channel, rigName)
 	if err := os.MkdirAll(eventDir, 0755); err != nil {
 		return fmt.Errorf("creating event directory: %w", err)
 	}
@@ -187,14 +225,14 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	var idleCycles int
 	var backoffUntil time.Time
 	var beadsDir string
-	if awaitEventAgentBead != "" {
+	if r.agentBead != "" {
 		var wdErr error
-		beadsDir, wdErr = resolveAgentTrackingBeadsDir()
+		beadsDir, wdErr = r.beadsDir()
 		if wdErr == nil {
-			labels, labErr := getAgentLabels(awaitEventAgentBead, beadsDir)
+			labels, labErr := getAgentLabelsVia(r.bd, r.agentBead, beadsDir)
 			if labErr != nil {
-				if !awaitEventQuiet {
-					fmt.Printf("%s Could not read agent bead (starting at idle=0): %v\n",
+				if !r.quiet {
+					fmt.Fprintf(r.out, "%s Could not read agent bead (starting at idle=0): %v\n",
 						style.Dim.Render("⚠"), labErr)
 				}
 			} else {
@@ -213,15 +251,15 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	}
 
 	// Calculate timeout (with backoff if configured)
-	fullTimeout, err := calculateEventTimeout(idleCycles)
+	fullTimeout, err := r.backoff.eventTimeout(idleCycles)
 	if err != nil {
 		return fmt.Errorf("invalid timeout configuration: %w", err)
 	}
 
 	// Parse context-check interval (optional)
 	var contextCheckInterval time.Duration
-	if awaitEventContextCheckInterval != "" {
-		contextCheckInterval, err = time.ParseDuration(awaitEventContextCheckInterval)
+	if r.contextCheck != "" {
+		contextCheckInterval, err = time.ParseDuration(r.contextCheck)
 		if err != nil {
 			return fmt.Errorf("invalid context-check-interval: %w", err)
 		}
@@ -231,13 +269,13 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	timeout := fullTimeout
 	resumed := false
 	now := time.Now()
-	if awaitEventAgentBead != "" && !backoffUntil.IsZero() && backoffUntil.After(now) {
+	if r.agentBead != "" && !backoffUntil.IsZero() && backoffUntil.After(now) {
 		remaining := backoffUntil.Sub(now)
 		if remaining <= fullTimeout {
 			timeout = remaining
 			resumed = true
-			if !awaitEventQuiet && !moleculeJSON {
-				fmt.Printf("%s Resuming backoff window (%v remaining)\n",
+			if !r.quiet && !r.json {
+				fmt.Fprintf(r.out, "%s Resuming backoff window (%v remaining)\n",
 					style.Dim.Render("↻"), remaining.Round(time.Second))
 			}
 		}
@@ -246,13 +284,13 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	// Persist backoff-until for crash recovery.
 	// When resuming an existing window, keep the original deadline stable across
 	// context-yield re-entry instead of rewriting it on every invocation.
-	if awaitEventAgentBead != "" && beadsDir != "" && !resumed {
-		_ = setAgentBackoffUntil(awaitEventAgentBead, beadsDir, now.Add(timeout))
+	if r.agentBead != "" && beadsDir != "" && !resumed {
+		_ = setAgentBackoffUntilVia(r.bd, r.agentBead, beadsDir, now.Add(timeout))
 	}
 
-	if !awaitEventQuiet && !moleculeJSON {
-		fmt.Printf("%s Awaiting event on channel %q (timeout: %v, idle: %d)...\n",
-			style.Dim.Render("⏳"), awaitEventChannel, timeout, idleCycles)
+	if !r.quiet && !r.json {
+		fmt.Fprintf(r.out, "%s Awaiting event on channel %q (timeout: %v, idle: %d)...\n",
+			style.Dim.Render("⏳"), r.channel, timeout, idleCycles)
 	}
 
 	startTime := time.Now()
@@ -268,16 +306,16 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	result.Elapsed = time.Since(startTime)
 
 	// Update agent bead idle cycles and heartbeat
-	if awaitEventAgentBead != "" && beadsDir != "" {
+	if r.agentBead != "" && beadsDir != "" {
 		// Always update heartbeat (both event and timeout) so witness doesn't
 		// think we're dead during long idle periods.
-		_ = updateAgentHeartbeat(awaitEventAgentBead, beadsDir)
+		_ = updateAgentHeartbeatVia(r.bd, r.agentBead, beadsDir)
 
 		if result.Reason == "timeout" {
 			newIdle := idleCycles + 1
-			if setErr := setAgentIdleCycles(awaitEventAgentBead, beadsDir, newIdle); setErr != nil {
-				if !awaitEventQuiet {
-					fmt.Printf("%s Failed to update idle count: %v\n",
+			if setErr := setAgentIdleCyclesVia(r.bd, r.agentBead, beadsDir, newIdle); setErr != nil {
+				if !r.quiet {
+					fmt.Fprintf(r.out, "%s Failed to update idle count: %v\n",
 						style.Dim.Render("⚠"), setErr)
 				}
 			} else {
@@ -286,7 +324,7 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		} else if result.Reason == "event" {
 			// Reset idle on event received
 			if idleCycles > 0 {
-				_ = setAgentIdleCycles(awaitEventAgentBead, beadsDir, 0)
+				_ = setAgentIdleCyclesVia(r.bd, r.agentBead, beadsDir, 0)
 			}
 			result.IdleCycles = 0
 		}
@@ -296,12 +334,12 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		// Keep the backoff window across context-yield so the next invocation
 		// resumes the remaining wait instead of restarting the same idle tier.
 		if result.Reason == "event" || result.Reason == "timeout" {
-			_ = clearAgentBackoffUntil(awaitEventAgentBead, beadsDir)
+			_ = clearAgentBackoffUntilVia(r.bd, r.agentBead, beadsDir)
 		}
 	}
 
 	// Cleanup event files if requested
-	if awaitEventCleanup && result.Reason == "event" {
+	if r.cleanup && result.Reason == "event" {
 		for _, ef := range result.Events {
 			_ = os.Remove(ef.Path)
 		}
@@ -318,46 +356,46 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	// Drain nudges queued for this session (gt-saz7a). Included in the JSON
 	// result so a --json caller doesn't lose them; printed as a
 	// system-reminder block below for the normal (human-readable) path.
-	result.Nudges = drainSessionNudges(townRoot)
+	result.Nudges = r.drainNudges(townRoot)
 
 	// Output
-	if moleculeJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if r.json {
+		enc := json.NewEncoder(r.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(result)
 	}
 
-	if !awaitEventQuiet {
+	if !r.quiet {
 		switch result.Reason {
 		case "event":
-			fmt.Printf("%s %d event(s) received after %v\n",
+			fmt.Fprintf(r.out, "%s %d event(s) received after %v\n",
 				style.Bold.Render("✓"), len(result.Events), result.Elapsed.Round(time.Millisecond))
 			for _, ef := range result.Events {
 				// Show event type from content
 				var parsed map[string]interface{}
 				if json.Unmarshal(ef.Content, &parsed) == nil {
 					if t, ok := parsed["type"].(string); ok {
-						fmt.Printf("  %s %s\n", style.Dim.Render("→"), t)
+						fmt.Fprintf(r.out, "  %s %s\n", style.Dim.Render("→"), t)
 					}
 				}
 			}
 		case "timeout":
-			fmt.Printf("%s Timeout after %v (idle cycle: %d)\n",
+			fmt.Fprintf(r.out, "%s Timeout after %v (idle cycle: %d)\n",
 				style.Dim.Render("⏱"), result.Elapsed.Round(time.Millisecond), result.IdleCycles)
 		case "context-yield":
-			fmt.Printf("%s Context-check interval reached after %v\n",
+			fmt.Fprintf(r.out, "%s Context-check interval reached after %v\n",
 				style.Dim.Render("↺"), result.Elapsed.Round(time.Millisecond))
-			fmt.Printf("\n%s Assess context usage before re-entering event wait.\n",
+			fmt.Fprintf(r.out, "\n%s Assess context usage before re-entering event wait.\n",
 				style.Bold.Render("CONTEXT: check"))
-			fmt.Printf("If context is OK, call await-event again. If context is high, hand off.\n")
+			fmt.Fprintf(r.out, "If context is OK, call await-event again. If context is high, hand off.\n")
 		}
 
 		// Output effort recommendation for the next patrol cycle.
 		if result.EffortLevel == "abbreviated" {
-			fmt.Printf("\n%s Run ABBREVIATED patrol: quick checks only, skip optional steps.\n",
+			fmt.Fprintf(r.out, "\n%s Run ABBREVIATED patrol: quick checks only, skip optional steps.\n",
 				style.Bold.Render("EFFORT: reduced"))
 		} else {
-			fmt.Printf("\n%s Run full patrol.\n",
+			fmt.Fprintf(r.out, "\n%s Run full patrol.\n",
 				style.Bold.Render("EFFORT: full"))
 		}
 	}
@@ -366,7 +404,7 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 	// long-running patrol turn sees them as soon as it reaches this step
 	// boundary rather than losing them to a suppressed progress message.
 	if len(result.Nudges) > 0 {
-		fmt.Print(nudge.FormatForInjection(result.Nudges))
+		_, _ = fmt.Fprint(r.out, nudge.FormatForInjection(result.Nudges))
 	}
 
 	return nil
@@ -374,15 +412,25 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 
 // calculateEventTimeout mirrors calculateEffectiveTimeout for await-event.
 func calculateEventTimeout(idleCycles int) (time.Duration, error) {
-	if awaitEventBackoffBase != "" {
-		base, err := time.ParseDuration(awaitEventBackoffBase)
+	return awaitEventBackoffFromFlags().eventTimeout(idleCycles)
+}
+
+func awaitEventBackoffFromFlags() awaitSignalBackoff {
+	return awaitSignalBackoff{timeout: awaitEventTimeout, base: awaitEventBackoffBase, max: awaitEventBackoffMax, mult: awaitEventBackoffMult}
+}
+
+// eventTimeout is calculateEventTimeout for these flags: await-event's
+// backoff, which has no single-wait clamp.
+func (bo awaitSignalBackoff) eventTimeout(idleCycles int) (time.Duration, error) {
+	if bo.base != "" {
+		base, err := time.ParseDuration(bo.base)
 		if err != nil {
 			return 0, fmt.Errorf("invalid backoff-base: %w", err)
 		}
 
 		var maxDur time.Duration
-		if awaitEventBackoffMax != "" {
-			maxDur, err = time.ParseDuration(awaitEventBackoffMax)
+		if bo.max != "" {
+			maxDur, err = time.ParseDuration(bo.max)
 			if err != nil {
 				return 0, fmt.Errorf("invalid backoff-max: %w", err)
 			}
@@ -397,14 +445,14 @@ func calculateEventTimeout(idleCycles int) (time.Duration, error) {
 			if maxDur > 0 && timeout >= maxDur {
 				return maxDur, nil
 			}
-			timeout *= time.Duration(awaitEventBackoffMult)
+			timeout *= time.Duration(bo.mult)
 		}
 		if maxDur > 0 && timeout > maxDur {
 			return maxDur, nil
 		}
 		return timeout, nil
 	}
-	return time.ParseDuration(awaitEventTimeout)
+	return time.ParseDuration(bo.timeout)
 }
 
 // waitForEventFiles checks for pending events, then polls until events appear or timeout.

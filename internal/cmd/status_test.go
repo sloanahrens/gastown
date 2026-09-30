@@ -48,9 +48,8 @@ func TestDiscoverRigAgents_UsesRigPrefix(t *testing.T) {
 	})
 
 	r := &rig.Rig{
-		Name:       "beads",
-		Path:       filepath.Join(townRoot, "beads"),
-		HasWitness: true,
+		Name: "beads",
+		Path: filepath.Join(townRoot, "beads"),
 	}
 
 	allAgentBeads := map[string]*beads.Issue{
@@ -113,9 +112,8 @@ func TestDiscoverRigAgents_ZombieSessionNotRunning(t *testing.T) {
 	})
 
 	r := &rig.Rig{
-		Name:       "gastown",
-		Path:       filepath.Join(townRoot, "gastown"),
-		HasWitness: true,
+		Name: "gastown",
+		Path: filepath.Join(townRoot, "gastown"),
 	}
 
 	// allSessions has the witness session but marked as zombie (false).
@@ -145,9 +143,8 @@ func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
 	})
 
 	r := &rig.Rig{
-		Name:       "gastown",
-		Path:       filepath.Join(townRoot, "gastown"),
-		HasWitness: true,
+		Name: "gastown",
+		Path: filepath.Join(townRoot, "gastown"),
 	}
 
 	// Empty sessions map - no tmux sessions exist at all

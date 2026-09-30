@@ -358,3 +358,14 @@ func runFreshSetupOutputCmd(t *testing.T, dir string, env []string, name string,
 	}
 	return string(out)
 }
+
+// resolveSymlinks resolves all symlinks in a path.
+// On macOS, t.TempDir() returns /var/... but the OS resolves it to /private/var/...
+func resolveSymlinks(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", path, err)
+	}
+	return resolved
+}

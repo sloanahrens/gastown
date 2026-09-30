@@ -53,7 +53,7 @@ type LiveGitState struct {
 // A caller measuring one worktree should use it; a caller measuring every seat
 // in the town should use ProbeLiveGitStateLocal.
 func ProbeLiveGitState(worktreePath string) LiveGitState {
-	return probeLiveGitState(worktreePath, (*git.Git).CheckUncommittedWork)
+	return probeLiveGitState(gitOpener{}, worktreePath, gitRepo.CheckUncommittedWork)
 }
 
 // ProbeLiveGitStateLocal is ProbeLiveGitState without the network round trip:
@@ -79,7 +79,7 @@ func ProbeLiveGitState(worktreePath string) LiveGitState {
 // git.BranchPreservationStatusLocal for the boundary and for the callers that
 // need the live probe instead.
 func ProbeLiveGitStateLocal(worktreePath string) LiveGitState {
-	return probeLiveGitState(worktreePath, (*git.Git).CheckUncommittedWorkLocal)
+	return probeLiveGitState(gitOpener{}, worktreePath, gitRepo.CheckUncommittedWorkLocal)
 }
 
 // probeLiveGitState is the shared body of the two probes. The worktree check,
@@ -87,8 +87,8 @@ func ProbeLiveGitStateLocal(worktreePath string) LiveGitState {
 // how the unpushed-commit count is derived differs, and that is the single
 // parameter, so the two fidelity levels cannot drift into disagreeing about
 // what a probe measures.
-func probeLiveGitState(worktreePath string, checkUncommittedWork func(*git.Git) (*git.UncommittedWorkStatus, error)) LiveGitState {
-	if !IsWorktreeRoot(worktreePath) {
+func probeLiveGitState(gits gitOpener, worktreePath string, checkUncommittedWork func(gitRepo) (*git.UncommittedWorkStatus, error)) LiveGitState {
+	if !isWorktreeRoot(gits, worktreePath) {
 		// See IsWorktreeRoot: without this the upward resolution below would
 		// measure the enclosing repository (the rig root, for a leftover
 		// polecat directory) and report *its* branch, dirt, and stashes as this
@@ -97,7 +97,7 @@ func probeLiveGitState(worktreePath string, checkUncommittedWork func(*git.Git) 
 		return liveGitUnknown(worktreePath, "resolving worktree root", errors.New("path is not a git worktree root"))
 	}
 
-	g := git.NewGit(worktreePath)
+	g := gits.Open(worktreePath)
 
 	branch, err := g.CurrentBranch()
 	if err != nil {
@@ -134,10 +134,14 @@ func probeLiveGitState(worktreePath string, checkUncommittedWork func(*git.Git) 
 // of another tree's state, so callers treat "not a worktree root" as an
 // unmeasurable worktree — which the verdict fails closed on.
 func IsWorktreeRoot(path string) bool {
+	return isWorktreeRoot(gitOpener{}, path)
+}
+
+func isWorktreeRoot(gits gitOpener, path string) bool {
 	if path == "" {
 		return false
 	}
-	top, err := git.NewGit(path).TopLevel()
+	top, err := gits.Open(path).TopLevel()
 	if err != nil {
 		return false
 	}

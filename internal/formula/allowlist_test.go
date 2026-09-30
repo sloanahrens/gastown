@@ -18,6 +18,7 @@ var testAllowlist = []string{
 }
 
 func TestCheckCommandAllowed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -88,6 +89,7 @@ func TestCheckCommandAllowed(t *testing.T) {
 }
 
 func TestCheckCommandAllowedErrorNamesSegment(t *testing.T) {
+	t.Parallel()
 	err := CheckCommandAllowed("gt reaper scan && gt dolt cleanup --force", testAllowlist)
 	if err == nil {
 		t.Fatal("expected error")
@@ -98,6 +100,7 @@ func TestCheckCommandAllowedErrorNamesSegment(t *testing.T) {
 }
 
 func TestMergeAllowlist(t *testing.T) {
+	t.Parallel()
 	got := mergeAllowlist([]string{"gt reaper", "jq"}, []string{"jq", "gt escalate"})
 	want := []string{"gt reaper", "jq", "gt escalate"}
 	if len(got) != len(want) {
@@ -115,6 +118,7 @@ func TestMergeAllowlist(t *testing.T) {
 }
 
 func TestParse_CommandAllowlist(t *testing.T) {
+	t.Parallel()
 	f, err := Parse([]byte(`
 formula = "test-allowlist"
 description = "Test"
@@ -140,6 +144,7 @@ title = "Step 1"
 }
 
 func TestValidate_CommandAllowlistEmptyEntry(t *testing.T) {
+	t.Parallel()
 	_, err := Parse([]byte(`
 formula = "test-allowlist"
 type = "workflow"
@@ -157,6 +162,7 @@ title = "Step 1"
 // TestResolve_CommandAllowlistInherited verifies that command_allowlist
 // entries are inherited through extends and merged with the child's (gt-9iv).
 func TestResolve_CommandAllowlistInherited(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	parent := `
 formula = "allowlist-parent"

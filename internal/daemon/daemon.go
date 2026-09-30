@@ -93,6 +93,14 @@ type Daemon struct {
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
 
+	// openGitFn opens the git repository at a directory (see gitAt); nil
+	// opens a *git.Git. Tests hand it a gitfake world.
+	openGitFn func(dir string) daemonGit
+
+	// buildCommitFn replaces the daemon's own build commit (see buildCommit)
+	// in tests; nil reads the version package's.
+	buildCommitFn func() string
+
 	// dogSessionsFn builds the dog session surface the handler drives over a
 	// dog manager; nil builds a *dog.SessionManager on the town's tmux (see
 	// dogSessions).
@@ -1281,8 +1289,14 @@ func (d *Daemon) heartbeatWork(state *State) {
 	// loop whose commands no longer exist.
 	d.killRetiredPatrolSessions()
 
-	// 6. Ensure Mayor is running (restart if dead)
-	d.ensureMayorRunning()
+	// 6. Ensure Mayor is running (restart if dead); patrols.mayor {"enabled": false}
+	// in mayor/daemon.json turns the supervision off (the town runs without a
+	// resident Mayor while polecats and om cover the work).
+	if d.isPatrolActive(constants.RoleMayor) {
+		d.ensureMayorRunning()
+	} else {
+		d.logger.Printf("Mayor patrol disabled in config, skipping")
+	}
 
 	// 6.5. Handle Dog lifecycle: cleanup stuck dogs and dispatch plugins
 	// Pressure-gated: dog dispatch spawns new agent sessions.

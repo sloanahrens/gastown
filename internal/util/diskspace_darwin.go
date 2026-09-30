@@ -18,6 +18,12 @@ import (
 // local copies, Time Machine snapshots, etc.) in the available bytes,
 // preventing false-positive "disk exhausted" blocks on macOS.
 func GetDiskSpace(path string) (*DiskSpaceInfo, error) {
+	return getDiskSpace(path, apfsContainerSpace)
+}
+
+// getDiskSpace is GetDiskSpace with the APFS container query (diskutil)
+// injected.
+func getDiskSpace(path string, apfsSpace apfsSpaceFunc) (*DiskSpaceInfo, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return nil, fmt.Errorf("statfs %s: %w", path, err)
@@ -32,7 +38,7 @@ func GetDiskSpace(path string) (*DiskSpaceInfo, error) {
 	// macOS reclaims automatically under pressure — statfs Bavail omits it.
 	if int8SliceToString(stat.Fstypename[:]) == "apfs" {
 		mountPoint := int8SliceToString(stat.Mntonname[:])
-		if containerFree, containerSize, err := apfsContainerSpaceFn(mountPoint); err == nil {
+		if containerFree, containerSize, err := apfsSpace(mountPoint); err == nil {
 			free = containerFree
 			if containerSize > 0 {
 				total = containerSize
@@ -72,10 +78,6 @@ func int8SliceToString(b []int8) string {
 	}
 	return string(buf)
 }
-
-// apfsContainerSpaceFn is the function used to query APFS container space.
-// It is a variable so tests can replace it with a stub.
-var apfsContainerSpaceFn = apfsContainerSpace
 
 // apfsContainerSpace returns the APFS container free and total bytes by
 // calling diskutil. Returns an error if diskutil is unavailable or the output

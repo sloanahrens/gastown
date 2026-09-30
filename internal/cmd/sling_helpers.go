@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -249,16 +250,22 @@ func collectExistingMoleculesForBead(info *beadInfo, beadID, townRoot string) ([
 }
 
 func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
+	return collectExistingMoleculeDepsVia(nil, beadID, townRoot)
+}
+
+// collectExistingMoleculeDepsVia is collectExistingMoleculeDeps with bd
+// answered by run (nil: bd on PATH).
+func collectExistingMoleculeDepsVia(run beads.BDRunner, beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
 	}
-	if !isValidBeadID(beadID) {
+	if !beads.IsValidBeadID(beadID) {
 		return nil, fmt.Errorf("invalid bead ID: %q", beadID)
 	}
 
 	dir := resolveBeadDirFromTownRoot(townRoot, beadID)
 	query := fmt.Sprintf(`SELECT DISTINCT wisp_dependencies.issue_id FROM wisp_dependencies JOIN wisps ON wisps.id = wisp_dependencies.issue_id WHERE wisps.issue_type = 'molecule' AND wisps.status NOT IN ('closed', 'tombstone') AND wisp_dependencies.type IN ('blocks', 'conditional-blocks', 'parent-child') AND (wisp_dependencies.depends_on_issue_id = '%[1]s' OR wisp_dependencies.depends_on_wisp_id = '%[1]s' OR wisp_dependencies.depends_on_external = '%[1]s' OR %[2]s)`, beadID, sqlExternalDepTargetClause(beadID))
-	out, err := runBdJSON(dir, "sql", query, "--json")
+	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{Run: run}, dir, "sql", query, "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +296,12 @@ func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
 // Matches nukeCleanupMolecules pattern. Returns an error if detach fails, since
 // proceeding with a stale attached_molecule reference creates harder-to-debug orphans.
 func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
+	return burnExistingMoleculesVia(nil, molecules, beadID, townRoot)
+}
+
+// burnExistingMoleculesVia is burnExistingMolecules with bd answered by run
+// (nil: bd on PATH).
+func burnExistingMoleculesVia(run beads.BDRunner, molecules []string, beadID, townRoot string) error {
 	if len(molecules) == 0 {
 		return nil
 	}
@@ -301,7 +314,7 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 	//   4. Force-close molecule roots
 	// Closing descendants first ensures that if detach succeeds but a later step
 	// crashes, we don't leave a detached root with live children.
-	bd := beads.New(burnDir)
+	bd := beads.NewWithBeadsDirAndRunner(burnDir, "", run)
 
 	// Step 1: Force-close descendant steps before detaching. Uses force variant
 	// since burn is a destructive recovery path where prior state may be inconsistent.
@@ -506,6 +519,21 @@ func bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID string) *bdCmd {
 // Resolves the rig directory from the bead's prefix for correct dolt access.
 func getBeadInfo(beadID string) (*beadInfo, error) {
 	out, err := bdShowBeadOutput(beadID)
+	if err != nil {
+		return nil, fmt.Errorf("bead '%s' not found", beadID)
+	}
+	return parseBeadInfo(beadID, out)
+}
+
+// getBeadInfoVia is getBeadInfoFromTownRoot answered by run (nil: bd on
+// PATH): the direct show in the bead's rig, then the routed show.
+func getBeadInfoVia(run beads.BDRunner, townRoot, beadID string) (*beadInfo, error) {
+	out, err := bdShowBeadDirectCmdFromTownRoot(townRoot, beadID).Via(run).Stderr(io.Discard).Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		if routed, routedErr := bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID).Via(run).Stderr(io.Discard).Output(); routedErr == nil && len(strings.TrimSpace(string(routed))) > 0 {
+			out, err = routed, nil
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("bead '%s' not found", beadID)
 	}
@@ -1316,7 +1344,7 @@ var isHookedAgentDeadFn = isHookedAgentDead
 // Returns true if the session is confirmed dead. Returns false if alive or if we
 // can't determine liveness (conservative: don't auto-force on uncertainty).
 func isHookedAgentDead(assignee string) bool {
-	sessionName, _ := assigneeToSessionName(assignee)
+	sessionName, _ := session.AssigneeSessionName(assignee)
 	if sessionName == "" {
 		return false // Unknown format, can't determine
 	}

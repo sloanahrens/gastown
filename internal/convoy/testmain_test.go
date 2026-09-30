@@ -15,17 +15,14 @@ import (
 // container is terminated at cleanup, instead of accumulating as orphans in
 // the shared production Dolt data dir.
 //
-// When Docker is unavailable the whole package is skipped, matching the
-// pre-harness behavior (every test here needs the store).
+// Without a container (make gate runs with GT_TEST_DOCKER=0) the store tests
+// skip themselves through testutil.OpenTestStore; the tests that use a fake
+// bd on PATH need no container and still run.
 func TestMain(m *testing.M) {
 	h, err := testutil.StartHermetic(testutil.WithDolt())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "convoy TestMain: %v\n", err)
 		os.Exit(1)
-	}
-	if testutil.DoltContainerPort() == "" {
-		fmt.Fprintln(os.Stderr, "convoy TestMain: skipping — Dolt container unavailable")
-		os.Exit(h.Finish(0))
 	}
 	os.Exit(h.Finish(m.Run()))
 }

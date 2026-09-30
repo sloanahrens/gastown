@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -295,7 +296,7 @@ type epicChild struct {
 }
 
 // getEpicChildren returns child issues of an epic via dependency lookup.
-// Prefers raw SQL (bdDepListRawIDs) which handles cross-database deps correctly.
+// Prefers raw SQL (convoy.DepListRawIDs) which handles cross-database deps correctly.
 // Falls back to bd dep list for older bd versions (see GH #2624, #2832).
 func getEpicChildren(epicID string) ([]epicChild, error) {
 	dir := resolveBeadDir(epicID)
@@ -316,7 +317,10 @@ func getEpicChildren(epicID string) ([]epicChild, error) {
 
 	// Prefer raw SQL — handles cross-database deps. Falls back to bd dep list
 	// if bd sql is not available (older bd versions).
-	childIDs, err := bdDepListRawIDs(sqlDir, epicID, "down", "depends_on")
+	// The edge is parent-child (issue_id=epic, target=child): "depends_on" is
+	// a column name, not a bd dependency type, and no row ever carries it, so
+	// filtering by it found no children at all (gt-nc8wn).
+	childIDs, err := convoyops.DepListRawIDs(sqlDir, epicID, "down", "parent-child")
 	if err != nil {
 		// bd sql not supported — fall back to bd dep list.
 		childIDs, err = bdDepListFallback(dir, epicID)
@@ -352,7 +356,7 @@ func getEpicChildren(epicID string) ([]epicChild, error) {
 // is not available.
 func bdDepListFallback(dir, epicID string) ([]string, error) {
 	stdout, err := BdCmd("dep", "list", epicID,
-		"--direction=down", "--type=depends_on", "--json").
+		"--direction=down", "--type=parent-child", "--json").
 		AllowStale().
 		Dir(dir).
 		StripBeadsDir().

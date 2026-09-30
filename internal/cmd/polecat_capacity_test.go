@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -366,8 +367,9 @@ func TestCapacitySnapshotRecoveryBlockedDoesNotAlwaysConsumeFreeCapacity(t *test
 }
 
 func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
-	out := captureStdout(t, func() {
-		printDryRunPlan(capacity.DispatchPlan{
+	t.Parallel()
+	out := captureTo(func(w io.Writer) {
+		printDryRunPlanTo(w, capacity.DispatchPlan{
 			ToDispatch: []capacity.PendingBead{{ID: "ctx-1", WorkBeadID: "gt-one", TargetRig: "gastown"}},
 			Skipped:    2,
 			Reason:     "capacity",
@@ -390,8 +392,9 @@ func TestPrintDryRunPlanUsesCapacitySnapshot(t *testing.T) {
 }
 
 func TestPrintDryRunPlanValidationReasonNotCapacity(t *testing.T) {
-	out := captureStdout(t, func() {
-		printDryRunPlan(capacity.DispatchPlan{
+	t.Parallel()
+	out := captureTo(func(w io.Writer) {
+		printDryRunPlanTo(w, capacity.DispatchPlan{
 			Skipped: 2,
 			Reason:  "validation",
 		}, polecatCapacitySnapshot{Max: 2, Free: 2}, 5)
@@ -405,15 +408,16 @@ func TestPrintDryRunPlanValidationReasonNotCapacity(t *testing.T) {
 }
 
 func TestPrintDispatchNoOpReportsExplicitReason(t *testing.T) {
-	out := captureStdout(t, func() {
-		printDispatchNoOp(capacity.DispatchReport{Reason: "none"}, polecatCapacitySnapshot{})
+	t.Parallel()
+	out := captureTo(func(w io.Writer) {
+		printDispatchNoOpTo(w, capacity.DispatchReport{Reason: "none"}, polecatCapacitySnapshot{})
 	})
 	if !strings.Contains(out, "No ready beads scheduled for dispatch") {
 		t.Fatalf("none output = %q", out)
 	}
 
-	out = captureStdout(t, func() {
-		printDispatchNoOp(capacity.DispatchReport{Reason: "validation", Skipped: 1}, polecatCapacitySnapshot{})
+	out = captureTo(func(w io.Writer) {
+		printDispatchNoOpTo(w, capacity.DispatchReport{Reason: "validation", Skipped: 1}, polecatCapacitySnapshot{})
 	})
 	if !strings.Contains(out, "No dispatchable beads") || !strings.Contains(out, "validation") {
 		t.Fatalf("validation output = %q", out)
@@ -585,6 +589,32 @@ func setupPolecatCapacityRigs(t *testing.T, rigNames ...string) string {
 	return townRoot
 }
 
+// setupPolecatCapacityTown is setupPolecatCapacityRigs without the chdir, for
+// tests that hand the town to acquirePolecatAdmission themselves and can run
+// in parallel.
+func setupPolecatCapacityTown(t *testing.T, rigNames ...string) string {
+	t.Helper()
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	configureScheduler(t, townRoot, -1, 1)
+	rigs := make(map[string]config.RigEntry, len(rigNames))
+	for _, name := range rigNames {
+		if err := os.MkdirAll(filepath.Join(townRoot, name, "polecats"), 0755); err != nil {
+			t.Fatalf("mkdir rig %s: %v", name, err)
+		}
+		rigs[name] = config.RigEntry{GitURL: "https://example.invalid/" + name + ".git"}
+	}
+	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{
+		Version: config.CurrentRigsVersion,
+		Rigs:    rigs,
+	}); err != nil {
+		t.Fatalf("SaveRigsConfig: %v", err)
+	}
+	return townRoot
+}
+
 func setRigMaxPolecats(t *testing.T, townRoot, rigName string, cap int) {
 	t.Helper()
 	if err := wisp.NewConfig(townRoot, rigName).Set("max_polecats", cap); err != nil {
@@ -597,7 +627,8 @@ func setRigMaxPolecats(t *testing.T, townRoot, rigName string, cap int) {
 // so a rig's max_polecats could not hold it to N concurrent polecats. The town
 // cap stays off; the rig cap must still refuse the second slot.
 func TestAcquirePolecatAdmissionEnforcesRigCapInDirectMode(t *testing.T) {
-	townRoot := setupPolecatCapacityRigs(t, "gastown")
+	t.Parallel()
+	townRoot := setupPolecatCapacityTown(t, "gastown")
 	setRigMaxPolecats(t, townRoot, "gastown", 1)
 
 	first, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
@@ -638,7 +669,8 @@ func TestAcquirePolecatAdmissionEnforcesRigCapInDirectMode(t *testing.T) {
 // no max_polecats of its own is uncapped, so nothing about this change throttles
 // the rigs that never asked for a cap (gt-1kbi).
 func TestAcquirePolecatAdmissionLeavesUncappedRigAlone(t *testing.T) {
-	townRoot := setupPolecatCapacityRigs(t, "gastown")
+	t.Parallel()
+	townRoot := setupPolecatCapacityTown(t, "gastown")
 
 	handle, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
 	if err != nil {
@@ -656,7 +688,8 @@ func TestAcquirePolecatAdmissionLeavesUncappedRigAlone(t *testing.T) {
 // TestAcquirePolecatAdmissionRigCapIsPerRig: one rig's cap must not spend another
 // rig's slots.
 func TestAcquirePolecatAdmissionRigCapIsPerRig(t *testing.T) {
-	townRoot := setupPolecatCapacityRigs(t, "gastown", "hm")
+	t.Parallel()
+	townRoot := setupPolecatCapacityTown(t, "gastown", "hm")
 	setRigMaxPolecats(t, townRoot, "gastown", 1)
 
 	first, _, err := acquirePolecatAdmission(townRoot, "gastown", "gt-one", "test")
@@ -680,7 +713,8 @@ func TestAcquirePolecatAdmissionRigCapIsPerRig(t *testing.T) {
 // caps are on: the rig cap is read from the town snapshot's per-rig accounting,
 // and it refuses even though the town still has free slots.
 func TestAcquirePolecatAdmissionRigCapBindsUnderTownCap(t *testing.T) {
-	townRoot := setupPolecatCapacityRigs(t, "gastown", "hm")
+	t.Parallel()
+	townRoot := setupPolecatCapacityTown(t, "gastown", "hm")
 	configureScheduler(t, townRoot, 5, 1)
 	setRigMaxPolecats(t, townRoot, "gastown", 1)
 
@@ -708,4 +742,11 @@ func TestAcquirePolecatAdmissionRigCapBindsUnderTownCap(t *testing.T) {
 		t.Fatalf("hm admission while gastown is at its rig cap: %v", err)
 	}
 	defer other.Release()
+}
+
+// captureTo returns what write wrote.
+func captureTo(write func(w io.Writer)) string {
+	var b strings.Builder
+	write(&b)
+	return b.String()
 }

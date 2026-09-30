@@ -7,6 +7,7 @@ import "testing"
 // via a short-lived CLI invocation, so its PPID becomes 1 by design). These
 // tests cover IsOrphaned in isolation.
 func TestDoltListenerIsOrphaned(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		ppid int

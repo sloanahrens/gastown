@@ -153,7 +153,7 @@ func TestReadyIssueFilterLogic_FindsReadyIssue(t *testing.T) {
 
 func TestCheckConvoysForIssue_NilStore(t *testing.T) {
 	// Nil store returns nil immediately (no convoy checks).
-	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil)
+	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil, nil)
 	if result != nil {
 		t.Errorf("expected nil for nil store, got %v", result)
 	}
@@ -162,7 +162,7 @@ func TestCheckConvoysForIssue_NilStore(t *testing.T) {
 func TestCheckConvoysForIssue_NilLogger(t *testing.T) {
 	// Nil logger should not panic — gets replaced with no-op internally.
 	// With nil store, returns nil.
-	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil)
+	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil, nil)
 	if result != nil {
 		t.Errorf("expected nil for nil store, got %v", result)
 	}
@@ -695,6 +695,10 @@ func makeGTStub(t *testing.T, exitCode int) (gtPath, logPath string) {
 	}
 	return gtPath, logPath
 }
+
+// noopChecker is a Checker that closes nothing, so a test of the event path
+// runs no bd.
+func noopChecker(context.Context, string) error { return nil }
 
 // makeLogger returns a logger that captures messages and a pointer to the slice.
 func makeLogger() (func(string, ...interface{}), *[]string) {
@@ -1404,7 +1408,7 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 	logger, logMsgs := makeLogger()
 
 	// Call CheckConvoysForIssue with the tracked issue's ID (simulating close event)
-	result := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-07", logger, gtPath, nil)
+	result := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-07", logger, gtPath, noopChecker, nil)
 
 	// The convoy should be returned (it was found as a tracker)
 	if len(result) == 0 {
@@ -1490,7 +1494,7 @@ func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
 	gtPath, _ := makeGTStub(t, 0)
 	logger, logMsgs := makeLogger()
 
-	result := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-08", logger, gtPath, nil)
+	result := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-08", logger, gtPath, noopChecker, nil)
 
 	if len(result) == 0 {
 		t.Fatal("no tracking convoys found for an issue a convoy tracks")
@@ -1581,7 +1585,7 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 	townRoot := setupTownRoot(t)
 	gtPath, _ := makeGTStub(t, 0)
 
-	result1 := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-staged", logger1, gtPath, nil)
+	result1 := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-staged", logger1, gtPath, noopChecker, nil)
 	if len(result1) == 0 {
 		t.Fatal("no tracking convoys found for an issue a convoy tracks")
 	}
@@ -1611,7 +1615,7 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 
 	// Phase 3: Call CheckConvoysForIssue again — now the convoy should be processed
 	logger2, logMsgs2 := makeLogger()
-	_ = CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-open", logger2, gtPath, nil)
+	_ = CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-open", logger2, gtPath, noopChecker, nil)
 
 	// Verify "checking convoy" WAS logged (convoy is now open and being processed)
 	foundChecking := false

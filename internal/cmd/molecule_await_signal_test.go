@@ -1,15 +1,23 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/nudge"
 )
 
 func TestCalculateEffectiveTimeout(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		timeout     string
@@ -126,16 +134,13 @@ func TestCalculateEffectiveTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set package-level variables
-			awaitSignalTimeout = tt.timeout
-			awaitSignalBackoffBase = tt.backoffBase
-			awaitSignalBackoffMult = tt.backoffMult
+			t.Parallel()
+			bo := awaitSignalBackoff{timeout: tt.timeout, base: tt.backoffBase, mult: tt.backoffMult, max: tt.backoffMax}
 			if tt.backoffMult == 0 {
-				awaitSignalBackoffMult = 2 // default
+				bo.mult = 2 // default
 			}
-			awaitSignalBackoffMax = tt.backoffMax
 
-			got, err := calculateEffectiveTimeout(tt.idleCycles)
+			got, err := bo.effectiveTimeout(tt.idleCycles)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("calculateEffectiveTimeout() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -370,163 +375,21 @@ func TestBackoffWindowResumption(t *testing.T) {
 	}
 }
 
-func TestRunMoleculeAwaitSignalAgentBeadUsesCwdRigBeadsDirWhenBeadsDirPointsTown(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX shell fake bd")
-	}
-
-	tmp, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-	townRoot := filepath.Join(tmp, "gt")
-	townBeads := filepath.Join(townRoot, ".beads")
-	rigWorkDir := filepath.Join(townRoot, "gastown", "refinery", "rig")
-	rigRedirect := filepath.Join(rigWorkDir, ".beads")
-	rigBeads := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
-
-	for _, dir := range []string{
-		filepath.Join(townRoot, "mayor"),
-		townBeads,
-		rigRedirect,
-		rigBeads,
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("write town marker: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigRedirect, "redirect"), []byte("../../mayor/rig/.beads"), 0o644); err != nil {
-		t.Fatalf("write rig redirect: %v", err)
-	}
-	metadata := []byte(`{"dolt_database":"rigdb","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`)
-	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), metadata, 0o644); err != nil {
-		t.Fatalf("write rig metadata: %v", err)
-	}
-
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	logPath := filepath.Join(tmp, "bd.log")
-	bdScript := `#!/bin/sh
-printf 'cmd=%s BEADS_DIR=%s DB=%s READONLY=%s AUTO=%s\n' "$1" "${BEADS_DIR-}" "${BEADS_DOLT_SERVER_DATABASE-}" "${BD_READONLY-}" "${BD_DOLT_AUTO_COMMIT-}" >> "$BD_LOG"
-case "$1" in
-  show)
-    printf '[{"labels":["gt:agent","idle:0"]}]\n'
-    ;;
-  update)
-    ;;
-  *)
-    printf 'unexpected bd command: %s\n' "$1" >&2
-    exit 1
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("BEADS_DIR", townBeads)
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "town")
-	t.Setenv("BD_READONLY", "true")
-	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(rigWorkDir); err != nil {
-		t.Fatalf("chdir rig work dir: %v", err)
-	}
-
-	oldTimeout := awaitSignalTimeout
-	oldBackoffBase := awaitSignalBackoffBase
-	oldBackoffMult := awaitSignalBackoffMult
-	oldBackoffMax := awaitSignalBackoffMax
-	oldQuiet := awaitSignalQuiet
-	oldAgentBead := awaitSignalAgentBead
-	oldJSON := moleculeJSON
-	t.Cleanup(func() {
-		awaitSignalTimeout = oldTimeout
-		awaitSignalBackoffBase = oldBackoffBase
-		awaitSignalBackoffMult = oldBackoffMult
-		awaitSignalBackoffMax = oldBackoffMax
-		awaitSignalQuiet = oldQuiet
-		awaitSignalAgentBead = oldAgentBead
-		moleculeJSON = oldJSON
-	})
-
-	awaitSignalTimeout = "1ms"
-	awaitSignalBackoffBase = ""
-	awaitSignalBackoffMult = 2
-	awaitSignalBackoffMax = ""
-	awaitSignalQuiet = true
-	awaitSignalAgentBead = "gt-gastown-refinery"
-	moleculeJSON = false
-
-	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
-		t.Fatalf("runMoleculeAwaitSignal() error = %v", err)
-	}
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
-	}
-	log := strings.TrimSpace(string(data))
-	if log == "" {
-		t.Fatal("fake bd was not invoked")
-	}
-
-	for _, line := range strings.Split(log, "\n") {
-		if !strings.Contains(line, "BEADS_DIR="+rigBeads) {
-			t.Fatalf("bd call was not pinned to rig beads %q: %s\nfull log:\n%s", rigBeads, line, log)
-		}
-		if strings.Contains(line, "BEADS_DIR="+townBeads) {
-			t.Fatalf("bd call used inherited town BEADS_DIR %q: %s\nfull log:\n%s", townBeads, line, log)
-		}
-		if !strings.Contains(line, "DB=rigdb") {
-			t.Fatalf("bd call was not pinned to rig database: %s\nfull log:\n%s", line, log)
-		}
-		if strings.Contains(line, "DB=town") {
-			t.Fatalf("bd call used inherited town database: %s\nfull log:\n%s", line, log)
-		}
-		if strings.Contains(line, "cmd=show") {
-			if !strings.Contains(line, "READONLY=true") || !strings.Contains(line, "AUTO=off") {
-				t.Fatalf("bd read was not read-only pinned: %s\nfull log:\n%s", line, log)
-			}
-		}
-		if strings.Contains(line, "cmd=update") {
-			if !strings.Contains(line, "READONLY= ") && !strings.HasSuffix(line, "READONLY= AUTO=on") {
-				t.Fatalf("bd mutation inherited read-only mode: %s\nfull log:\n%s", line, log)
-			}
-			if !strings.Contains(line, "AUTO=on") {
-				t.Fatalf("bd mutation was not auto-commit pinned: %s\nfull log:\n%s", line, log)
-			}
-		}
-	}
+// awaitSignalTown is a minimal town with an in-process bd that reports the
+// given agent labels and logs every call. showFails lists the 1-based show
+// calls that fail, to model a transient or lasting read failure.
+type awaitSignalTown struct {
+	townRoot, beadsDir string
+	bd                 *inprocBD
+	stderr             bytes.Buffer
+	run                awaitSignalRun
 }
 
-// awaitSignalFakeTown builds a minimal town whose bd is a fake that reports
-// the given agent labels and logs every call's arguments. It chdirs into the
-// town and resets the await-signal flag globals afterwards.
-func awaitSignalFakeTown(t *testing.T, labels string) (townRoot, bdLog string) {
+func newAwaitSignalTown(t *testing.T, labels string, showFails ...int) *awaitSignalTown {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("uses a POSIX shell fake bd")
-	}
-	tmp, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	townRoot = filepath.Join(tmp, "gt")
-	townBeads := filepath.Join(townRoot, ".beads")
-	for _, dir := range []string{filepath.Join(townRoot, "mayor"), townBeads} {
+	townRoot := filepath.Join(t.TempDir(), "gt")
+	beadsDir := filepath.Join(townRoot, ".beads")
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), beadsDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -535,71 +398,50 @@ func awaitSignalFakeTown(t *testing.T, labels string) (townRoot, bdLog string) {
 		t.Fatal(err)
 	}
 	metadata := []byte(`{"dolt_database":"hq","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`)
-	if err := os.WriteFile(filepath.Join(townBeads, "metadata.json"), metadata, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
+	shows := 0
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		switch cmd {
+		case "show":
+			f.mu.Lock()
+			shows++
+			n := shows
+			f.mu.Unlock()
+			for _, fail := range showFails {
+				if n == fail {
+					return bdAnswer{stderr: fmt.Sprintf("show %d failed", n), code: 1}
+				}
+			}
+			return bdOut(`[{"labels":` + labels + `}]`)
+		case "update":
+			return bdOut("")
+		}
+		return bdAnswer{stderr: "unexpected bd command: " + cmd, code: 1}
+	}}
+	w := &awaitSignalTown{townRoot: townRoot, beadsDir: beadsDir, bd: bd}
+	w.run = awaitSignalRun{
+		agentBead:   "hq-deacon",
+		rig:         awaitSignalRigAny,
+		quiet:       true,
+		bd:          bd.run,
+		out:         io.Discard,
+		errOut:      &w.stderr,
+		eventRig:    resolveEventRig,
+		drainNudges: func(string) []nudge.QueuedNudge { return nil },
 	}
-	bdLog = filepath.Join(tmp, "bd.log")
-	// BD_SHOW_FAIL lists the 1-based show calls that fail (e.g. " 1 " or
-	// " 2 3 4 5 "), so a test can model a transient or lasting read failure.
-	bdScript := `#!/bin/sh
-printf '%s\n' "$*" >> "$BD_LOG"
-case "$1" in
-  show)
-    n=$(( $(cat "$BD_LOG.shows" 2>/dev/null || echo 0) + 1 ))
-    echo "$n" > "$BD_LOG.shows"
-    case "${BD_SHOW_FAIL-}" in *" $n "*) echo "show $n failed" >&2; exit 1 ;; esac
-    printf '[{"labels":` + labels + `}]\n' ;;
-  update) ;;
-  *) printf 'unexpected bd command: %s\n' "$1" >&2; exit 1 ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", bdLog)
-	t.Setenv("BD_SHOW_FAIL", "")
-	t.Setenv("BEADS_DIR", "")
-
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatal(err)
-	}
-
-	oldTimeout, oldBase, oldMult, oldMax := awaitSignalTimeout, awaitSignalBackoffBase, awaitSignalBackoffMult, awaitSignalBackoffMax
-	oldQuiet, oldBead, oldRig, oldJSON := awaitSignalQuiet, awaitSignalAgentBead, awaitSignalRig, moleculeJSON
-	t.Cleanup(func() {
-		_ = os.Chdir(oldWd)
-		awaitSignalTimeout, awaitSignalBackoffBase, awaitSignalBackoffMult, awaitSignalBackoffMax = oldTimeout, oldBase, oldMult, oldMax
-		awaitSignalQuiet, awaitSignalAgentBead, awaitSignalRig, moleculeJSON = oldQuiet, oldBead, oldRig, oldJSON
-	})
-	awaitSignalQuiet = true
-	awaitSignalAgentBead = "hq-deacon"
-	awaitSignalRig = awaitSignalRigAny
-	moleculeJSON = false
-	return townRoot, bdLog
+	return w
 }
 
 // idleLabelChanges returns the idle:N values bd updates wrote that differ from
 // initial. The fake's show always returns the initial labels, so other
 // read-modify-write updates (heartbeat, backoff-until) re-send the initial
 // idle label unchanged; only a differing value is an idle write.
-func idleLabelChanges(t *testing.T, bdLog, initial string) []string {
-	t.Helper()
-	data, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
-	}
+func idleLabelChanges(bd *inprocBD, initial string) []string {
 	var idle []string
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range strings.Split(bd.log(), "\n") {
 		if !strings.HasPrefix(line, "update ") {
 			continue
 		}
@@ -612,62 +454,108 @@ func idleLabelChanges(t *testing.T, bdLog, initial string) []string {
 	return idle
 }
 
+// TestAwaitSignalPinsBDToTheRigBeads: every bd call await-signal makes is
+// pinned to the agent bead's beads directory and database, reads read-only
+// and writes auto-committed, whatever the session inherited.
+func TestAwaitSignalPinsBDToTheRigBeads(t *testing.T) {
+	t.Parallel()
+	w := newAwaitSignalTown(t, `["gt:agent","idle:0"]`)
+	var calls []beads.BDCall
+	var mu sync.Mutex
+	inner := w.bd.run
+	w.run.bd = func(ctx context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		mu.Lock()
+		calls = append(calls, c)
+		mu.Unlock()
+		return inner(ctx, c)
+	}
+	w.run.backoff = awaitSignalBackoff{timeout: "1ms", mult: 2}
+	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
+		t.Fatalf("await-signal: %v", err)
+	}
+	if len(calls) == 0 {
+		t.Fatal("bd was not called")
+	}
+	for _, c := range calls {
+		env := envMap(envSlice(c.Env))
+		if env("BEADS_DIR") != w.beadsDir || env("BEADS_DOLT_SERVER_DATABASE") != "hq" {
+			t.Errorf("bd %v ran with BEADS_DIR=%q DB=%q, want %q and hq", c.Args, env("BEADS_DIR"), env("BEADS_DOLT_SERVER_DATABASE"), w.beadsDir)
+		}
+		switch c.Args[0] {
+		case "show":
+			if env("BD_READONLY") != "true" || env("BD_DOLT_AUTO_COMMIT") != "off" {
+				t.Errorf("read %v not read-only pinned: READONLY=%q AUTO=%q", c.Args, env("BD_READONLY"), env("BD_DOLT_AUTO_COMMIT"))
+			}
+		case "update":
+			if env("BD_READONLY") != "" || env("BD_DOLT_AUTO_COMMIT") != "on" {
+				t.Errorf("write %v not auto-commit pinned: READONLY=%q AUTO=%q", c.Args, env("BD_READONLY"), env("BD_DOLT_AUTO_COMMIT"))
+			}
+		}
+	}
+}
+
+// envSlice turns KEY=VALUE pairs into a map; a later pair wins, as exec's
+// environment does.
+func envSlice(env []string) map[string]string {
+	m := map[string]string{}
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
 // A real event must reset the idle counter inside await-signal. The formula
 // used to leave the reset to the agent, which skipped it 20 of 20 times, so
 // every deacon wait sat at the backoff cap (claude-9jq).
 func TestRunMoleculeAwaitSignal_SignalResetsIdle(t *testing.T) {
-	townRoot, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
-	awaitSignalBackoffBase = "20s" // a missed wake fails in 20s, not minutes
-	awaitSignalBackoffMult = 2
-	awaitSignalBackoffMax = "20s"
+	t.Parallel()
+	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`)
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
 
-	keepAppendingEvents(t, townRoot)
+	keepAppendingEvents(t, w.townRoot)
 
 	start := time.Now()
-	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed >= 20*time.Second {
 		t.Fatalf("wait ran %v; the event should have woken it", elapsed)
 	}
-	if got := idleLabelChanges(t, bdLog, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
+	if got := idleLabelChanges(w.bd, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
 		t.Fatalf("idle label updates = %q, want exactly [idle:0]", got)
 	}
 }
 
 // Timeouts keep backing off: idle goes up by one, never back to zero.
 func TestRunMoleculeAwaitSignal_TimeoutIncrementsIdle(t *testing.T) {
-	_, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
-	awaitSignalBackoffBase = "1ms"
-	awaitSignalBackoffMult = 1
-	awaitSignalBackoffMax = ""
+	t.Parallel()
+	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`)
+	w.run.backoff = awaitSignalBackoff{base: "1ms", mult: 1}
 
-	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
-	if got := idleLabelChanges(t, bdLog, "idle:5"); len(got) != 1 || got[0] != "idle:6" {
+	if got := idleLabelChanges(w.bd, "idle:5"); len(got) != 1 || got[0] != "idle:6" {
 		t.Fatalf("idle label updates = %q, want exactly [idle:6]", got)
 	}
 }
 
 // A signal at idle 0 has nothing to reset, so no extra bd write is spent.
 func TestRunMoleculeAwaitSignal_SignalAtIdleZeroSkipsWrite(t *testing.T) {
-	townRoot, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:0"]`)
-	awaitSignalBackoffBase = "20s" // a missed wake fails in 20s, not minutes
-	awaitSignalBackoffMult = 2
-	awaitSignalBackoffMax = "20s"
+	t.Parallel()
+	w := newAwaitSignalTown(t, `["gt:agent","idle:0"]`)
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
 
-	keepAppendingEvents(t, townRoot)
+	keepAppendingEvents(t, w.townRoot)
 
-	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
 	// Every update re-sends idle:0 unchanged, so count updates instead. The
 	// fake never reports a backoff-until label, so clearing it is a no-op.
-	data, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := w.bd.log()
 	if n := strings.Count(string(data), "update "); n != 2 {
 		t.Fatalf("bd updates = %d, want 2 (backoff-until set, heartbeat); an idle reset at idle 0 is a wasted write\n%s", n, data)
 	}
@@ -706,17 +594,15 @@ func keepAppendingEvents(t *testing.T, townRoot string) {
 // When the idle read failed (a transient bd error), the counter is unknown and
 // may be high: a real wake must still try to reset it.
 func TestRunMoleculeAwaitSignal_SignalResetsIdleWhenReadFailed(t *testing.T) {
-	townRoot, bdLog := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
-	t.Setenv("BD_SHOW_FAIL", " 1 ") // only the initial idle read fails
-	awaitSignalBackoffBase = "20s"  // a missed wake fails in 20s, not minutes
-	awaitSignalBackoffMult = 2
-	awaitSignalBackoffMax = "20s"
+	t.Parallel()
+	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`, 1)               // only the initial idle read fails
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
 
-	keepAppendingEvents(t, townRoot)
-	if err := runMoleculeAwaitSignal(nil, nil); err != nil {
+	keepAppendingEvents(t, w.townRoot)
+	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
 		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
-	if got := idleLabelChanges(t, bdLog, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
+	if got := idleLabelChanges(w.bd, "idle:5"); len(got) != 1 || got[0] != "idle:0" {
 		t.Fatalf("idle label changes = %q, want exactly [idle:0]", got)
 	}
 }
@@ -724,21 +610,18 @@ func TestRunMoleculeAwaitSignal_SignalResetsIdleWhenReadFailed(t *testing.T) {
 // A failed reset is reported on stderr even under --quiet: the formula tells
 // the agent to reset by hand only when it sees this warning.
 func TestRunMoleculeAwaitSignal_ResetFailureWarnsUnderQuiet(t *testing.T) {
-	townRoot, _ := awaitSignalFakeTown(t, `["gt:agent","idle:5"]`)
+	t.Parallel()
 	// Show calls: 1 idle read, 2 backoff-until set, 3 heartbeat, 4 idle
 	// reset. Fail the reset's read so the reset itself fails.
-	t.Setenv("BD_SHOW_FAIL", " 4 ")
-	awaitSignalBackoffBase = "20s" // a missed wake fails in 20s, not minutes
-	awaitSignalBackoffMult = 2
-	awaitSignalBackoffMax = "20s"
-	awaitSignalQuiet = true
+	w := newAwaitSignalTown(t, `["gt:agent","idle:5"]`, 4)
+	w.run.backoff = awaitSignalBackoff{base: "20s", mult: 2, max: "20s"} // a missed wake fails in 20s, not minutes
+	w.run.quiet = true
 
-	keepAppendingEvents(t, townRoot)
-	var runErr error
-	stderr := captureStderr(t, func() { runErr = runMoleculeAwaitSignal(nil, nil) })
-	if runErr != nil {
-		t.Fatalf("runMoleculeAwaitSignal: %v", runErr)
+	keepAppendingEvents(t, w.townRoot)
+	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
+		t.Fatalf("runMoleculeAwaitSignal: %v", err)
 	}
+	stderr := w.stderr.String()
 	if !strings.Contains(stderr, "Failed to reset agent bead idle count") {
 		t.Fatalf("stderr = %q, want the reset-failure warning", stderr)
 	}

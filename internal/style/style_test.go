@@ -61,19 +61,19 @@ func TestPrefixVariables(t *testing.T) {
 func TestPrintWarning(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	fprintWarning(&buf, "test warning: %s", "value")
+	FprintWarning(&buf, "test warning: %s", "value")
 	out := stripAnsi(buf.String())
 	if !strings.Contains(out, "Warning:") || !strings.HasSuffix(out, " test warning: value\n") {
-		t.Errorf("fprintWarning output = %q, want a Warning: label and the formatted message on one line", out)
+		t.Errorf("FprintWarning output = %q, want a Warning: label and the formatted message on one line", out)
 	}
 }
 
 func TestPrintWarning_NoFormatArgs(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	fprintWarning(&buf, "simple warning")
+	FprintWarning(&buf, "simple warning")
 	if !strings.HasSuffix(stripAnsi(buf.String()), " simple warning\n") {
-		t.Errorf("fprintWarning output = %q, want it to end with the message", buf.String())
+		t.Errorf("FprintWarning output = %q, want it to end with the message", buf.String())
 	}
 }
 
@@ -81,7 +81,7 @@ func TestMultiplePrintWarning(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	for i := 0; i < 3; i++ {
-		fprintWarning(&buf, "warning %d", i)
+		FprintWarning(&buf, "warning %d", i)
 	}
 	if n := strings.Count(buf.String(), "\n"); n != 3 {
 		t.Errorf("Expected 3 lines of output, got %d: %q", n, buf.String())

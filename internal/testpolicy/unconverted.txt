@@ -4,14 +4,11 @@ internal/beads
 internal/cmd
 internal/config
 internal/convoy
-internal/crew
 internal/daemon
 internal/deacon
 internal/doctor
 internal/dog
-internal/doltserver
 internal/feed
-internal/formula
 internal/hooks
 internal/mail
 internal/mayor
@@ -25,6 +22,4 @@ internal/scheduler/capacity
 internal/session
 internal/telemetry
 internal/templates
-internal/testutil
-internal/util
 internal/witness

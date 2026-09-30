@@ -12,6 +12,7 @@ import (
 
 // TestGetEmbeddedFormulas verifies embedded formulas can be read and hashed.
 func TestGetEmbeddedFormulas(t *testing.T) {
+	t.Parallel()
 	embedded, err := getEmbeddedFormulas()
 	if err != nil {
 		t.Fatalf("getEmbeddedFormulas() error: %v", err)
@@ -35,6 +36,7 @@ func TestGetEmbeddedFormulas(t *testing.T) {
 
 // TestProvisionFormulas_FreshInstall tests provisioning to an empty directory.
 func TestProvisionFormulas_FreshInstall(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	count, err := ProvisionFormulas(tmpDir)
@@ -69,6 +71,7 @@ func TestProvisionFormulas_FreshInstall(t *testing.T) {
 
 // TestProvisionFormulas_SkipsExisting tests that existing files are not overwritten.
 func TestProvisionFormulas_SkipsExisting(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create formulas directory with a custom formula
@@ -101,6 +104,7 @@ func TestProvisionFormulas_SkipsExisting(t *testing.T) {
 
 // TestCheckFormulaHealth_AllOK tests when all formulas are up to date.
 func TestCheckFormulaHealth_AllOK(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision fresh
@@ -131,6 +135,7 @@ func TestCheckFormulaHealth_AllOK(t *testing.T) {
 
 // TestCheckFormulaHealth_UserModified tests detection of user-modified formulas.
 func TestCheckFormulaHealth_UserModified(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision fresh
@@ -175,6 +180,7 @@ func TestCheckFormulaHealth_UserModified(t *testing.T) {
 
 // TestCheckFormulaHealth_Missing tests detection of deleted formulas.
 func TestCheckFormulaHealth_Missing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision fresh
@@ -203,6 +209,7 @@ func TestCheckFormulaHealth_Missing(t *testing.T) {
 
 // TestCheckFormulaHealth_Outdated simulates an outdated formula.
 func TestCheckFormulaHealth_Outdated(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision fresh
@@ -231,7 +238,7 @@ func TestCheckFormulaHealth_Outdated(t *testing.T) {
 		break
 	}
 	if targetFormula == "" {
-		t.Skip("no formulas installed")
+		t.Fatal("no formulas installed")
 	}
 
 	// Write a file that simulates "old version" - content differs from embedded
@@ -268,6 +275,7 @@ func TestCheckFormulaHealth_Outdated(t *testing.T) {
 
 // TestUpdateFormulas_UpdatesOutdated tests that outdated formulas are updated.
 func TestUpdateFormulas_UpdatesOutdated(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision fresh
@@ -289,7 +297,7 @@ func TestUpdateFormulas_UpdatesOutdated(t *testing.T) {
 		break
 	}
 	if targetFormula == "" {
-		t.Skip("no formulas installed")
+		t.Fatal("no formulas installed")
 	}
 
 	// Write old content
@@ -334,6 +342,7 @@ func TestUpdateFormulas_UpdatesOutdated(t *testing.T) {
 
 // TestUpdateFormulas_SkipsModified tests that user-modified formulas are skipped.
 func TestUpdateFormulas_SkipsModified(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision fresh
@@ -355,7 +364,7 @@ func TestUpdateFormulas_SkipsModified(t *testing.T) {
 		break
 	}
 	if targetFormula == "" {
-		t.Skip("no formulas installed")
+		t.Fatal("no formulas installed")
 	}
 
 	// Write different content that doesn't match installed hash
@@ -389,6 +398,7 @@ func TestUpdateFormulas_SkipsModified(t *testing.T) {
 
 // TestUpdateFormulas_ReinstallsMissing tests that deleted formulas are reinstalled.
 func TestUpdateFormulas_ReinstallsMissing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision fresh
@@ -410,7 +420,7 @@ func TestUpdateFormulas_ReinstallsMissing(t *testing.T) {
 		break
 	}
 	if targetFormula == "" {
-		t.Skip("no formulas installed")
+		t.Fatal("no formulas installed")
 	}
 
 	formulaPath := filepath.Join(formulasDir, targetFormula)
@@ -436,6 +446,7 @@ func TestUpdateFormulas_ReinstallsMissing(t *testing.T) {
 
 // TestUpdateFormulas_InstallsNew tests that new formulas are installed.
 func TestUpdateFormulas_InstallsNew(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create directory structure but with empty installed record
@@ -472,6 +483,7 @@ func TestUpdateFormulas_InstallsNew(t *testing.T) {
 
 // TestInstalledRecordPersistence tests that the installed record survives across operations.
 func TestInstalledRecordPersistence(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Provision
@@ -506,6 +518,7 @@ func TestInstalledRecordPersistence(t *testing.T) {
 
 // TestCheckFormulaHealth_NewFormula tests detection of new formulas that were never installed.
 func TestCheckFormulaHealth_NewFormula(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create formulas directory with empty installed record
@@ -538,6 +551,7 @@ func TestCheckFormulaHealth_NewFormula(t *testing.T) {
 // TestCheckFormulaHealth_Untracked tests detection of files that exist but aren't
 // in .installed.json and don't match embedded (e.g., from older gt version).
 func TestCheckFormulaHealth_Untracked(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Get embedded formulas
@@ -586,6 +600,7 @@ func TestCheckFormulaHealth_Untracked(t *testing.T) {
 
 // TestUpdateFormulas_UpdatesUntracked tests that untracked files get updated.
 func TestUpdateFormulas_UpdatesUntracked(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Get embedded formulas
@@ -665,6 +680,7 @@ func TestUpdateFormulas_UpdatesUntracked(t *testing.T) {
 // TestProvisionFormulas_StatError tests that ProvisionFormulas returns an error
 // when os.Stat fails with something other than IsNotExist (e.g. permission denied).
 func TestProvisionFormulas_StatError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Get at least one embedded formula name
@@ -718,7 +734,9 @@ func TestProvisionFormulas_StatError(t *testing.T) {
 // TestCheckFormulaHealth_ErrorCounter tests that CheckFormulaHealth increments
 // the Error counter for files that can't be read (e.g. permission denied).
 func TestCheckFormulaHealth_ErrorCounter(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
+		//testpolicy:allow no-skip — os.Chmod(path, 0000) does not prevent reading on Windows
 		t.Skip("os.Chmod(path, 0000) does not prevent reading on Windows")
 	}
 	tmpDir := t.TempDir()
@@ -742,7 +760,7 @@ func TestCheckFormulaHealth_ErrorCounter(t *testing.T) {
 		break
 	}
 	if targetFormula == "" {
-		t.Skip("no formulas installed")
+		t.Fatal("no formulas installed")
 	}
 
 	formulaPath := filepath.Join(formulasDir, targetFormula)
@@ -780,6 +798,7 @@ func TestCheckFormulaHealth_ErrorCounter(t *testing.T) {
 
 // TestCheckFormulaHealth_MixedScenarios tests a mix of OK, untracked, and modified.
 func TestCheckFormulaHealth_MixedScenarios(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Get embedded formulas
@@ -788,7 +807,7 @@ func TestCheckFormulaHealth_MixedScenarios(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(embedded) < 3 {
-		t.Skip("need at least 3 formulas for this test")
+		t.Fatal("need at least 3 formulas for this test")
 	}
 
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
@@ -867,6 +886,7 @@ func TestCheckFormulaHealth_MixedScenarios(t *testing.T) {
 
 // TestResolveFormulaContent verifies resolution order: rig > town > embedded.
 func TestResolveFormulaContent(t *testing.T) {
+	t.Parallel()
 	t.Run("returns embedded formula when no disk overrides exist", func(t *testing.T) {
 		content, err := ResolveFormulaContent("mol-polecat-work", "", "")
 		if err != nil {
@@ -959,6 +979,7 @@ func TestResolveFormulaContent(t *testing.T) {
 
 // TestGetEmbeddedFormulaContent verifies extraction of individual embedded formulas.
 func TestGetEmbeddedFormulaContent(t *testing.T) {
+	t.Parallel()
 	// Known embedded formula should succeed
 	content, err := GetEmbeddedFormulaContent("mol-polecat-work")
 	if err != nil {
@@ -1016,6 +1037,7 @@ func provisionTownWithHandEdit(t *testing.T, edited []byte) (townRoot, formulasD
 // touching the town — an agent refused to run sync against the live town for
 // want of exactly this (gt-dt7r).
 func TestPlanFormulaSync_WritesNothing(t *testing.T) {
+	t.Parallel()
 	townRoot, formulasDir, name := provisionTownWithHandEdit(t,
 		[]byte("# hand-edited by a human\n"))
 
@@ -1066,6 +1088,7 @@ func TestPlanFormulaSync_WritesNothing(t *testing.T) {
 // content and leaves the displaced edit recoverable, so --force is a migration
 // rather than a deletion.
 func TestSyncFormulas_ForceOverwritesAndBacksUp(t *testing.T) {
+	t.Parallel()
 	edited := "# the human's only copy\n"
 	townRoot, formulasDir, name := provisionTownWithHandEdit(t, []byte(edited))
 
@@ -1119,6 +1142,7 @@ func TestSyncFormulas_ForceOverwritesAndBacksUp(t *testing.T) {
 // TestReadForceBackupManifest_AbsentIsEmpty verifies an untouched town reports no
 // displaced copies rather than an error, so callers can read it unconditionally.
 func TestReadForceBackupManifest_AbsentIsEmpty(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if _, err := ProvisionFormulas(townRoot); err != nil {
 		t.Fatalf("ProvisionFormulas() error: %v", err)
@@ -1137,6 +1161,7 @@ func TestReadForceBackupManifest_AbsentIsEmpty(t *testing.T) {
 // blanket overwrite: a town with nothing hand-edited syncs to the same plan a
 // plain sync produces.
 func TestSyncFormulas_ForceLeavesCleanTownUntouched(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if _, err := ProvisionFormulas(townRoot); err != nil {
 		t.Fatalf("ProvisionFormulas() error: %v", err)
@@ -1161,6 +1186,7 @@ func TestSyncFormulas_ForceLeavesCleanTownUntouched(t *testing.T) {
 // newer embedded content — the difference between "your edit is safe" and "a
 // merged fix is going nowhere" (gt-dt7r).
 func TestSyncPlan_SupersededMarksBlockedNewerContent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		recordStaleHash bool

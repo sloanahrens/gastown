@@ -54,6 +54,8 @@ type repo struct {
 	has       map[string]bool
 	main      *worktree
 	worktrees map[string]*worktree
+	config    map[string]string // local config; worktrees share it
+	stashes   []stash           // newest first, like git stash list
 }
 
 // worktree is a checkout: its own HEAD (for a repository's main checkout,
@@ -78,6 +80,7 @@ type Fake struct {
 	objects map[string]*commit
 	repos   map[string]*repo
 	seq     int
+	wt      worktreeState // staging and trees (index.go)
 }
 
 // New returns an empty world.
@@ -95,6 +98,10 @@ func (f *Fake) InitBare(t testing.TB, dir string) {
 	dir = clean(dir)
 	f.repos[dir] = &repo{path: dir, bare: true, refs: map[string]string{}, head: "refs/heads/main",
 		remotes: map[string]string{}, has: map[string]bool{}, worktrees: map[string]*worktree{}}
+	// The directory is written where it can be, for consumers that stat it;
+	// a fixture may name a path it cannot create, and the model does not
+	// need it.
+	_ = layoutRepo(f.repos[dir])
 }
 
 // Commit makes a commit in the repository at dir on branch: its parent is
@@ -105,7 +112,7 @@ func (f *Fake) Commit(t testing.TB, dir, branch, message string, files map[strin
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.repos[clean(dir)]
+	r := f.repoAt(dir)
 	if r == nil {
 		t.Fatalf("gitfake: no repository at %s", dir)
 	}
@@ -132,7 +139,7 @@ func (f *Fake) SetRef(t testing.TB, dir, ref, id string) {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.repos[clean(dir)]
+	r := f.repoAt(dir)
 	if r == nil || f.objects[id] == nil {
 		t.Fatalf("gitfake: SetRef %s %s in %s: no such repository or commit", ref, id, dir)
 	}
@@ -165,6 +172,7 @@ func (f *Fake) Clone(t testing.TB, src, dest string) {
 		r.refs[s.head] = id
 	}
 	f.repos[dest] = r
+	cloned(r, s)
 	if err := materializeCheckout(dest, f.treeOf(r.refs[r.head])); err != nil {
 		t.Fatalf("gitfake: Clone: %v", err)
 	}
@@ -217,7 +225,7 @@ func (f *Fake) Tree(id string) map[string]string {
 func (f *Fake) Ref(dir, ref string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if r := f.repos[clean(dir)]; r != nil {
+	if r := f.repoAt(dir); r != nil {
 		return r.refs[ref]
 	}
 	return ""
