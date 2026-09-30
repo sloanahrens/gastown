@@ -211,36 +211,37 @@ func TestNukeHookedWorkEndToEnd(t *testing.T) {
 		wantHeld     bool   // still hooked to the nuked polecat at the end
 		wantComment  string // substring of the one comment ("" = no comment)
 		wantAttempts int    // release writes attempted
+		wantAsks     int    // survival questions put to the predicate
 	}{
 		{name: "hooked, surviving work: still hooked after removal", status: "hooked", who: me, p: working,
-			survives: survivesWith(branch, nil), wantHeld: true, wantComment: "gt sling gt-elvf4 gastown --branch " + branch},
+			survives: survivesWith(branch, nil), wantHeld: true, wantComment: "gt sling gt-elvf4 gastown --branch " + branch, wantAsks: 2},
 		{name: "in_progress, surviving work: kept, one comment, no release attempts", status: "in_progress", who: me, p: working,
-			survives: survivesWith(branch, nil), wantHeld: true, wantComment: "--branch " + branch},
+			survives: survivesWith(branch, nil), wantHeld: true, wantComment: "--branch " + branch, wantAsks: 2},
 		{name: "hooked, merged branch: released", status: "hooked", who: me, p: working,
-			survives: survivesWith("", nil), wantAttempts: 1},
+			survives: survivesWith("", nil), wantAttempts: 1, wantAsks: 1},
 		{name: "survival unknown: kept, unknown comment", status: "in_progress", who: me, p: working,
-			survives: survivesWith("", unreachable), wantHeld: true,
+			survives: survivesWith("", unreachable), wantHeld: true, wantAsks: 2,
 			wantComment: "hook kept: could not verify surviving work; run gt polecat surviving-work gt-elvf4"},
 		{name: "rig with no git repo: released", status: "hooked", who: me, p: working,
-			survives: survivesWith("", polecat.ErrNoRigRepo), wantAttempts: 1},
+			survives: survivesWith("", polecat.ErrNoRigRepo), wantAttempts: 1, wantAsks: 1},
 		{name: "survived before removal, gone after the branch delete: released at finish", status: "hooked", who: me, p: working,
-			survives: survivesSeq([2]any{branch}, [2]any{branch}, [2]any{""}), wantAttempts: 1},
+			survives: survivesSeq([2]any{branch}, [2]any{""}), wantAttempts: 1, wantAsks: 2},
 		{name: "survived before removal, unknown after: kept, unknown comment", status: "hooked", who: me, p: working,
-			survives: survivesSeq([2]any{branch}, [2]any{branch}, [2]any{"", unreachable}), wantHeld: true,
+			survives: survivesSeq([2]any{branch}, [2]any{"", unreachable}), wantHeld: true, wantAsks: 2,
 			wantComment: "could not verify surviving work"},
 		{name: "unknown before removal, survives after: comment names the final branch", status: "hooked", who: me, p: working,
-			survives: survivesSeq([2]any{"", unreachable}, [2]any{"", unreachable}, [2]any{branch}), wantHeld: true,
+			survives: survivesSeq([2]any{"", unreachable}, [2]any{branch}), wantHeld: true, wantAsks: 2,
 			wantComment: "--branch " + branch},
 		{name: "reaped before the nuke: hook read off the agent bead, released", status: "hooked", who: me,
-			readHook: func() string { return "gt-elvf4" }, survives: survivesWith("", nil), wantAttempts: 1},
+			readHook: func() string { return "gt-elvf4" }, survives: survivesWith("", nil), wantAttempts: 1, wantAsks: 1},
 		{name: "reaped before the nuke with surviving work: kept", status: "hooked", who: me,
-			readHook: func() string { return "gt-elvf4" }, survives: survivesWith(branch, nil), wantHeld: true, wantComment: "--branch " + branch},
+			readHook: func() string { return "gt-elvf4" }, survives: survivesWith(branch, nil), wantHeld: true, wantAsks: 2, wantComment: "--branch " + branch},
 		{name: "already re-slung elsewhere: untouched", status: "hooked", who: "gastown/polecats/granite", p: working,
-			survives: survivesWith(branch, nil)},
+			survives: survivesWith(branch, nil), wantAsks: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rel := &countingReleaser{fakeWorkReleaser: fakeWorkReleaser{beads: map[string][2]string{"gt-elvf4": {tc.status, tc.who}}}}
-			runNukeHookFlowCounting(rel, tc.p, tc.readHook, tc.survives)
+			asks := runNukeHookFlowCounting(rel, tc.p, tc.readHook, tc.survives)
 
 			cur := rel.beads["gt-elvf4"]
 			if held := cur[1] == me; held != tc.wantHeld {
@@ -255,6 +256,9 @@ func TestNukeHookedWorkEndToEnd(t *testing.T) {
 			}
 			if rel.attempts != tc.wantAttempts {
 				t.Fatalf("release attempts = %d, want %d", rel.attempts, tc.wantAttempts)
+			}
+			if asks != tc.wantAsks {
+				t.Fatalf("survival questions asked = %d, want %d (the hooked bead is judged once before removal and re-checked once at the end)", asks, tc.wantAsks)
 			}
 		})
 	}
@@ -271,17 +275,64 @@ func (c *countingReleaser) ReleaseBead(beadID, expected string) (bool, error) {
 	return c.fakeWorkReleaser.ReleaseBead(beadID, expected)
 }
 
+// The verdict the nuke reaches before removal is the one it hands to removal,
+// so the two steps cannot ask the same bead separately and act on different
+// answers (gt-kud90).
+func TestNukeHandsItsVerdictToRemoval(t *testing.T) {
+	t.Parallel()
+	const me = "gastown/polecats/basalt"
+	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
+	working := &polecat.Polecat{Name: "basalt", Rig: "gastown", Issue: "gt-elvf4"}
+
+	for _, tc := range []struct {
+		name         string
+		survives     func(string) (string, error)
+		wantSurvives string
+		wantUnknown  bool
+		wantNothing  bool // released at the start: there is no hook left to hand on
+	}{
+		{name: "surviving work hands the branch on", survives: survivesWith(branch, nil), wantSurvives: branch},
+		{name: "an unknown answer hands the unknown on", survives: survivesWith("", errors.New("origin unreachable")), wantUnknown: true},
+		{name: "nothing to protect releases the bead instead", survives: survivesWith("", nil), wantNothing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-elvf4": {"in_progress", me}}}
+			h := startNukeHookedWork(rel, tc.survives, "gastown", "basalt", working, nil)
+
+			judged := h.judged()
+			if tc.wantNothing {
+				if judged != nil {
+					t.Fatalf("judged = %v, want none: the hook was released", judged)
+				}
+				return
+			}
+			v, ok := judged["gt-elvf4"]
+			if !ok || v.SurvivesOn() != tc.wantSurvives || v.Unknown() != tc.wantUnknown {
+				t.Fatalf("judged = %+v (present %v), want survives=%q unknown=%v", v, ok, tc.wantSurvives, tc.wantUnknown)
+			}
+		})
+	}
+}
+
 // runNukeHookFlowCounting drives the nuke's hooked-work steps in order: decide
-// before removal, remove (mgr.RemoveWithOptions' unassignWorkBeads keeps
-// surviving or unknown work and otherwise makes the same guarded release), then
-// report after.
-func runNukeHookFlowCounting(rel *countingReleaser, p *polecat.Polecat, readHook func() string, survives func(string) (string, error)) {
-	h := startNukeHookedWork(rel, survives, "gastown", "basalt", p, readHook)
-	if branch, unknown := workSurvivalVerdict(survives("gt-elvf4")); branch == "" && !unknown {
-		// Removal's own guarded release: a no-op when the start already released.
+// before removal, remove (mgr.RemoveWithOptions' unassignWorkBeads replays the
+// verdict the start reached for the hooked bead instead of asking again), then
+// report after. It returns how many questions the flow put to the predicate,
+// so a bead judged twice is visible.
+func runNukeHookFlowCounting(rel *countingReleaser, p *polecat.Polecat, readHook func() string, survives func(string) (string, error)) (asks int) {
+	ask := func(beadID string) (string, error) {
+		asks++
+		return survives(beadID)
+	}
+	h := startNukeHookedWork(rel, ask, "gastown", "basalt", p, readHook)
+	if verdict, ok := h.judged()["gt-elvf4"]; ok && verdict.NothingToProtect() {
+		// Removal's own guarded release on the replayed verdict: a no-op when
+		// the start already released the bead.
 		if held, _ := heldBy(rel, "gastown/polecats/basalt", "gt-elvf4"); held {
 			_, _ = rel.ReleaseBead("gt-elvf4", "gastown/polecats/basalt")
 		}
 	}
 	h.finish()
+	return asks
 }
