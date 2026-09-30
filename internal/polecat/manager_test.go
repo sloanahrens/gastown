@@ -2751,6 +2751,83 @@ func TestAllocateAndAdd_NoDuplicateNames(t *testing.T) {
 	}
 }
 
+// TestAllocateAndAdd_LeavesPolecatCreatedOutsidePool guards gt-dziey: the name
+// the pool draws can already be a polecat directory created outside the pool
+// (gt polecat add → AddWithOptions, which takes only the per-polecat lock).
+// MkdirAll succeeds on that existing directory, which hides the collision, and
+// the rollback path then RemoveAll's it — deleting the other polecat.
+func TestAllocateAndAdd_LeavesPolecatCreatedOutsidePool(t *testing.T) {
+	t.Parallel()
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	// The name the pool would hand out next.
+	taken, err := mgr.AllocateName()
+	if err != nil {
+		t.Fatalf("AllocateName: %v", err)
+	}
+	_ = os.Remove(mgr.pendingPath(taken))
+	mgr.ReleaseName(taken)
+
+	// The window the manual create lands in: after the pool has drawn the
+	// name, before AllocateAndAdd takes the per-polecat lock. Plant the other
+	// polecat's worktree, as the manual add would have left it.
+	manualWorktree := filepath.Join(mgr.polecatDir(taken), mgr.rig.Name)
+	manualReadme := filepath.Join(manualWorktree, "README.md")
+	calls := 0
+	var hookErr error
+	mgr.afterPoolNameAllocated = func(name string) {
+		calls++
+		if name != taken || hookErr != nil {
+			return
+		}
+		if err := os.MkdirAll(manualWorktree, 0755); err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = os.WriteFile(manualReadme, []byte("manual polecat\n"), 0644)
+	}
+
+	got, _, err := mgr.AllocateAndAdd(AddOptions{})
+	if hookErr != nil {
+		t.Fatalf("planting the polecat at %q: %v", taken, hookErr)
+	}
+	if _, statErr := os.Stat(manualReadme); statErr != nil {
+		t.Fatalf("AllocateAndAdd destroyed the polecat that already held %q: %v (AllocateAndAdd: %v)", taken, statErr, err)
+	}
+	if calls < 2 {
+		t.Fatalf("the pool drew %d name(s) and returned %q; want %q skipped as taken", calls, got, taken)
+	}
+	if err != nil {
+		t.Fatalf("AllocateAndAdd: %v", err)
+	}
+	if got == taken {
+		t.Fatalf("AllocateAndAdd built into %q, a polecat created outside the pool", taken)
+	}
+}
+
+// TestAllocateAndAdd_GivesUpWhenEveryDrawnNameIsTaken pins the backstop on the
+// re-check: the pool is not asked forever, so a rig whose names are all taken
+// outside the pool fails the allocation instead of spinning under the pool lock.
+func TestAllocateAndAdd_GivesUpWhenEveryDrawnNameIsTaken(t *testing.T) {
+	t.Parallel()
+	mgr, _ := setupCanonicalBranchManagerTest(t)
+
+	calls := 0
+	mgr.afterPoolNameAllocated = func(name string) {
+		calls++
+		if err := os.MkdirAll(filepath.Join(mgr.polecatDir(name), mgr.rig.Name), 0755); err != nil {
+			t.Errorf("planting %q: %v", name, err)
+		}
+	}
+
+	if _, _, err := mgr.AllocateAndAdd(AddOptions{}); err == nil {
+		t.Fatal("AllocateAndAdd succeeded; want an error when every drawn name is taken")
+	}
+	if calls < 2 {
+		t.Fatalf("the pool drew %d name(s); want the allocation retried before giving up", calls)
+	}
+}
+
 // TestReuseIdlePolecat_KillsLiveSession verifies that ReuseIdlePolecat kills
 // an existing live (non-stale) tmux session instead of returning ErrSessionRunning.
 // This is the regression test for the sling-reuse-stale-session bug: idle polecats

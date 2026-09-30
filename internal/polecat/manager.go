@@ -163,6 +163,10 @@ type Manager struct {
 	// reserved the name and released the pool lock, before the worktree is
 	// built: the window a concurrent allocation would otherwise race into.
 	afterNamedReserved func(name string)
+	// afterPoolNameAllocated, when set, runs for each name AllocateAndAdd
+	// draws from the pool, before it takes the per-polecat lock: the window a
+	// create that does not use the pool lock races into (gt-dziey).
+	afterPoolNameAllocated func(name string)
 }
 
 // sessionProbe is the tmux surface a Manager uses: session existence, the
@@ -719,26 +723,56 @@ func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 
 	m.reconcilePoolInternal()
 
-	name, err := m.namePool.Allocate()
-	if err != nil {
-		_ = poolLock.Unlock()
-		return "", nil, err
-	}
+	// A drawn name can already be a polecat created outside the pool: the
+	// manual add path (gt polecat add → AddWithOptions) takes only the
+	// per-polecat lock, so it lands between the reconcile above and the
+	// per-polecat lock below, unseen by that reconcile. MkdirAll then succeeds
+	// on the directory it made, hiding the collision until the rollback path
+	// RemoveAll's it. Re-check under the per-polecat lock and draw another
+	// name instead (gt-dziey).
+	//
+	// Retries terminate: Allocate marks the name in use and reconcile does not
+	// run again here, so each attempt consumes a distinct name.
+	const allocationAttempts = 3
+	var (
+		name        string
+		polecatLock *flock.Flock
+		polecatDir  string
+	)
+	for attempt := 0; ; attempt++ {
+		if name, err = m.namePool.Allocate(); err != nil {
+			_ = poolLock.Unlock()
+			return "", nil, err
+		}
 
-	if err := m.namePool.Save(); err != nil {
-		_ = poolLock.Unlock()
-		return "", nil, fmt.Errorf("saving pool state: %w", err)
-	}
+		if err := m.namePool.Save(); err != nil {
+			_ = poolLock.Unlock()
+			return "", nil, fmt.Errorf("saving pool state: %w", err)
+		}
 
-	// Acquire per-polecat lock while still holding pool lock
-	polecatLock, err := m.lockPolecat(name)
-	if err != nil {
-		_ = poolLock.Unlock()
-		return "", nil, err
+		if m.afterPoolNameAllocated != nil {
+			m.afterPoolNameAllocated(name)
+		}
+
+		// Acquire per-polecat lock while still holding pool lock
+		if polecatLock, err = m.lockPolecat(name); err != nil {
+			_ = poolLock.Unlock()
+			return "", nil, err
+		}
+
+		polecatDir = m.polecatDir(name)
+		if !m.exists(name) {
+			break
+		}
+
+		_ = polecatLock.Unlock()
+		if attempt+1 >= allocationAttempts {
+			_ = poolLock.Unlock()
+			return "", nil, fmt.Errorf("allocating a polecat name: %d names drawn are each already a polecat created outside the pool", allocationAttempts)
+		}
 	}
 
 	// Create polecat directory while holding both locks
-	polecatDir := m.polecatDir(name)
 	if err := os.MkdirAll(polecatDir, 0755); err != nil {
 		_ = polecatLock.Unlock()
 		_ = poolLock.Unlock()
@@ -998,6 +1032,12 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 // AddWithOptions creates a new polecat with the specified options.
 // This allows setting hook_bead atomically at creation time, avoiding
 // cross-beads routing issues when slinging work to new polecats.
+//
+// Unlike the pool paths (AllocateAndAdd, AddNamedWithOptions) this one takes
+// only the per-polecat lock: the caller named the polecat, so there is no name
+// to draw from the pool. Every creation path takes that lock before MkdirAll,
+// and AllocateAndAdd re-checks existence under it, so a name is either free
+// here or already built (gt-dziey).
 func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retErr error) {
 	defer func() { telemetry.RecordPolecatSpawn(context.Background(), name, retErr) }()
 	// Acquire per-polecat file lock to prevent concurrent Add/Remove/Repair races
