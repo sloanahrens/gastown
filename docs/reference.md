@@ -803,7 +803,7 @@ bd dep add <child> <parent>  # child depends on parent
 ### Reading a bead's history
 
 `bd history <id>` prints one snapshot per retained Dolt commit. A flatten
-(`gt maintain`, `gt dolt flatten`, compactor-dog) discards those commits, and
+(`gt maintain`, compactor-dog, or the offline procedure in [dolt-history-offline.md](dolt-history-offline.md)) discards those commits, and
 the command does not say so — a bead whose snapshots begin at the flatten reads
 exactly like one whose snapshots begin at its creation, so a field showing a
 single value looks like a field that never changed.

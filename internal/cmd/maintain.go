@@ -584,3 +584,35 @@ func maintainGCDatabase(config *doltserver.Config, dbName string) error {
 	}
 	return nil
 }
+
+// flattenGetRowCounts returns table -> row count for all user tables.
+func flattenGetRowCounts(db *sql.DB, dbName string) (map[string]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	query := fmt.Sprintf("SELECT table_name FROM information_schema.tables WHERE table_schema = '%s' AND table_name NOT LIKE 'dolt_%%'", dbName)
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+
+	counts := make(map[string]int, len(tables))
+	for _, table := range tables {
+		var count int
+		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`", dbName, table)).Scan(&count); err != nil {
+			return nil, fmt.Errorf("count %s: %w", table, err)
+		}
+		counts[table] = count
+	}
+	return counts, nil
+}

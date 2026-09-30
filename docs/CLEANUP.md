@@ -72,7 +72,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 |---------|-------------|
 | `gt dolt cleanup` | Removes orphaned databases from `.dolt-data/` |
 | `gt dolt stop` | Stops the Dolt SQL server |
-| `gt dolt rollback [backup-dir]` | Restores `.beads` from backup, resets metadata |
 
 ## Bead / Hook Cleanup
 
