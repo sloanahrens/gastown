@@ -269,7 +269,8 @@ gate: lint
 	@# The fast tier: every package not in $(SLOW_LIST). -fast-tier fails a
 	@# package that ran longer than the fast tier allows, naming it, but only
 	@# as a warning: wall time depends on host load (gt-z7qtk). The user-CPU
-	@# budget is the failing check; make tier-check fails on wall (gt-z862q).
+	@# budget is the failing check when load < ncpu or GATE_STRICT_BUDGET=1,
+	@# reported otherwise (gt-3vbfn); make tier-check fails on wall (gt-z862q).
 	@# The budget runner measures converted
 	@# packages through its CPU-measuring -exec wrapper, which bypasses the
 	@# test result cache, and runs the packages in unconverted.txt afterwards

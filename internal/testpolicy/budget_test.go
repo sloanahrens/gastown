@@ -173,3 +173,68 @@ func TestWatchBudgetFailWholePackageInterleaved(t *testing.T) {
 		t.Fatalf("output = %q, want %q (x's block contiguous, then y's summary)", out.String(), want)
 	}
 }
+
+func TestEnforceBudget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		load1     float64
+		loadKnown bool
+		strict    bool
+		want      bool
+	}{
+		{"quiet host", 3.5, true, false, true},
+		{"load at ncpu", 16, true, false, false},
+		{"loaded host", 30, true, false, false},
+		{"loaded host, strict", 30, true, true, true},
+		{"load unknown", 0, false, false, false},
+		{"load unknown, strict", 0, false, true, true},
+	} {
+		got, why := EnforceBudget(tc.load1, tc.loadKnown, 16, tc.strict)
+		if got != tc.want || why == "" {
+			t.Errorf("%s: EnforceBudget(%v, %v, 16, %v) = %v, %q; want %v with a reason", tc.name, tc.load1, tc.loadKnown, tc.strict, got, why, tc.want)
+		}
+	}
+}
+
+// TestBudgetFails checks that a CPU overrun fails only an enforced run, and
+// a missing measurement fails every run.
+func TestBudgetFails(t *testing.T) {
+	t.Parallel()
+	cpu := []Overrun{{Package: "internal/a", CPU: CPUTime{User: 11 * time.Second}}}
+	unmeasured := []Overrun{{Package: "internal/b", Unmeasured: true}}
+	for _, tc := range []struct {
+		name    string
+		over    []Overrun
+		enforce bool
+		want    bool
+	}{
+		{"none", nil, true, false},
+		{"cpu overrun, enforced", cpu, true, true},
+		{"cpu overrun, reported", cpu, false, false},
+		{"unmeasured, reported", unmeasured, false, true},
+		{"both, reported", append(append([]Overrun{}, cpu...), unmeasured...), false, true},
+	} {
+		if got := BudgetFails(tc.over, tc.enforce); got != tc.want {
+			t.Errorf("%s: BudgetFails(enforce=%v) = %v, want %v", tc.name, tc.enforce, got, tc.want)
+		}
+	}
+}
+
+func TestParseLoad1(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]float64{
+		"1.23 4.56 7.89 2/345 6789\n": 1.23,
+		"{ 27.65 30.07 30.59 }\n":     27.65,
+	} {
+		got, err := ParseLoad1(in)
+		if err != nil || got != want {
+			t.Errorf("ParseLoad1(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "{ }", "busy"} {
+		if _, err := ParseLoad1(in); err == nil {
+			t.Errorf("ParseLoad1(%q) succeeded, want an error", in)
+		}
+	}
+}
