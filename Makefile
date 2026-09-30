@@ -82,7 +82,7 @@ lint-tools:
 lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint exits in 5s naming the module lock; the gate and gt done wait it out and retry)"
-	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+	golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
@@ -253,6 +253,12 @@ NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins -name go.mod -not -
 # scripts/makefile-gate_test.sh can drive the gate's failure paths with a stub.
 GATE_SHELL_TESTS ?= scripts/test-makefile.sh
 
+# The gate's lint waits its turn on golangci-lint's module lock instead of
+# exiting in 5s: the gate is judged by its exit code alone, so a contended
+# lint must not read as red. Plain `make lint` keeps the fast exit that gt
+# done's and the refinery's retry policy reads (internal/lintlock, gt-kqwu).
+# A target-specific variable, so it reaches the lint prerequisite.
+gate: LINT_RUNNER_FLAGS := --allow-serial-runners
 gate: lint
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }

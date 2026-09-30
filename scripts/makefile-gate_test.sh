@@ -53,6 +53,12 @@ else
   fail "gate runs the shell tests (scripts/test-makefile.sh) as part of the unit tier" "$out"
 fi
 
+if grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' <<<"$out" && ! dry lint | grep -q -F -- '--allow-serial-runners'; then
+  pass "gate's lint waits on the lint lock; plain make lint keeps the fast contention exit"
+else
+  fail "gate's lint waits on the lint lock; plain make lint keeps the fast contention exit" "$(grep -F 'golangci-lint run' <<<"$out")"
+fi
+
 if grep -q -E 'slot +run' <<<"$out"; then
   fail "gate never takes the container-gate slot" "$(grep -E 'slot +run' <<<"$out")"
 else
@@ -147,7 +153,7 @@ exit 0
 STUB
 cat >"$TMP/bin/golangci-lint" <<'STUB'
 #!/usr/bin/env bash
-echo "golangci-lint $1" >>"$STUB_LOG"
+echo "golangci-lint $*" >>"$STUB_LOG"
 [[ "$1" == run && -n "${STUB_LINT_FAIL:-}" ]] && exit 1
 exit 0
 STUB
@@ -176,14 +182,14 @@ run_gate() {
 }
 
 rc=$(run_gate)
-if [[ "$rc" == 0 ]] && grep -q -F 'gate: PASSED' "$TMP/err" && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls"; then
-  pass "green stubs: exit 0, both unit halves ran, the suite saw GT_TEST_DOCKER=0 despite an inherited 1"
+if [[ "$rc" == 0 ]] && grep -q -F 'gate: PASSED' "$TMP/err" && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
+  pass "green stubs: exit 0, lint waited on the lock, both unit halves ran, the suite saw GT_TEST_DOCKER=0 despite an inherited 1"
 else
-  fail "green stubs: exit 0, both unit halves ran, the suite saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "green stubs: exit 0, lint waited on the lock, both unit halves ran, the suite saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 rc=$(run_gate -o docs-lint -- STUB_LINT_FAIL=1)
-if [[ "$rc" != 0 ]] && grep -q -x 'golangci-lint run' "$TMP/calls" && ! grep -q -E '^go (build|run)' "$TMP/calls"; then
+if [[ "$rc" != 0 ]] && grep -q -E '^golangci-lint run' "$TMP/calls" && ! grep -q -E '^go (build|run)' "$TMP/calls"; then
   pass "lint fails: non-zero, nothing built or tested"
 else
   fail "lint fails: non-zero, nothing built or tested (rc=$rc)" "$(cat "$TMP/calls")"
