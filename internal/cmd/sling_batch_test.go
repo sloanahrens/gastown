@@ -73,7 +73,7 @@ exit 0
 	}
 
 	beadIDs := []string{"gt-aaa", "gt-bbb", "gt-ccc"}
-	convoyID, _, err := createBatchConvoy(beadIDs, "gastown", false, "mr", "")
+	convoyID, _, err := createBatchConvoy(beadIDs, "gastown", false, "mr", "", "", "")
 	if err != nil {
 		t.Fatalf("createBatchConvoy() error: %v", err)
 	}
@@ -167,7 +167,7 @@ exit 0
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, _, err = createBatchConvoy([]string{"gt-aaa"}, "gastown", true, "direct", "")
+	_, _, err = createBatchConvoy([]string{"gt-aaa"}, "gastown", true, "direct", "", "", "")
 	if err != nil {
 		t.Fatalf("createBatchConvoy() error: %v", err)
 	}
@@ -180,6 +180,66 @@ exit 0
 
 	if !strings.Contains(logContent, "--labels=gt:convoy,gt:owned") {
 		t.Errorf("create command missing convoy/owned labels in log:\n%q", logContent)
+	}
+}
+
+// TestCreateBatchConvoy_PersistsAgentAndFormula verifies that the agent and
+// formula requested at sling time land in the convoy description, so a feeder
+// re-dispatching a bead re-uses them instead of the rig default (gt-zh89d).
+func TestCreateBatchConvoy_PersistsAgentAndFormula(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	logPath := filepath.Join(townRoot, "bd.log")
+
+	bdScript := `#!/bin/sh
+printf 'CMD:' >> "` + logPath + `"
+for arg in "$@"; do printf '%s\0' "$arg"; done >> "` + logPath + `"
+printf '\n' >> "` + logPath + `"
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	_, _, err = createBatchConvoy([]string{"gt-aaa", "gt-bbb"}, "gastown", false, "mr", "", " codex ", " mol-custom ")
+	if err != nil {
+		t.Fatalf("createBatchConvoy() error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	logContent := string(logBytes)
+	for _, want := range []string{"\nagent: codex\n", "\nformula: mol-custom\x00"} {
+		if !strings.Contains(logContent, want) {
+			t.Errorf("create description missing %q:\n%q", want, logContent)
+		}
 	}
 }
 
@@ -226,7 +286,7 @@ exit 0
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, _, err = createBatchConvoy([]string{"gt-aaa", "gt-bbb"}, "gastown", false, "direct", "")
+	_, _, err = createBatchConvoy([]string{"gt-aaa", "gt-bbb"}, "gastown", false, "direct", "", "", "")
 	if err != nil {
 		t.Fatalf("createBatchConvoy() error: %v", err)
 	}
@@ -248,7 +308,7 @@ exit 0
 // an error when called with no bead IDs.
 func TestCreateBatchConvoy_EmptyBeadIDs(t *testing.T) {
 	t.Parallel()
-	_, _, err := createBatchConvoy(nil, "gastown", false, "", "")
+	_, _, err := createBatchConvoy(nil, "gastown", false, "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for empty bead IDs, got nil")
 	}
@@ -297,7 +357,7 @@ exit 0
 		t.Fatalf("chdir: %v", err)
 	}
 
-	_, _, err = createBatchConvoy([]string{"gt-a", "gt-b", "gt-c", "gt-d", "gt-e"}, "myrig", false, "", "")
+	_, _, err = createBatchConvoy([]string{"gt-a", "gt-b", "gt-c", "gt-d", "gt-e"}, "myrig", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("createBatchConvoy() error: %v", err)
 	}
@@ -383,7 +443,7 @@ exit 0
 	}
 
 	// Should NOT return error — partial tracking is acceptable
-	convoyID, tracked, err := createBatchConvoy([]string{"gt-aaa", "gt-bbb", "gt-ccc"}, "gastown", false, "", "")
+	convoyID, tracked, err := createBatchConvoy([]string{"gt-aaa", "gt-bbb", "gt-ccc"}, "gastown", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("createBatchConvoy() should not error on partial dep failure: %v", err)
 	}
@@ -1460,7 +1520,7 @@ exit 0
 		t.Fatalf("chdir: %v", err)
 	}
 
-	convoyID, tracked, err := createBatchConvoy([]string{"gt-aaa", "gt-bbb", "gt-ccc"}, "gastown", false, "", "")
+	convoyID, tracked, err := createBatchConvoy([]string{"gt-aaa", "gt-bbb", "gt-ccc"}, "gastown", false, "", "", "", "")
 	if err != nil {
 		t.Fatalf("createBatchConvoy() error: %v", err)
 	}
