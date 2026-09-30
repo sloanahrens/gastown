@@ -415,6 +415,12 @@ func verifyBeadExists(beadID string) error {
 // spawning polecats or creating molecule/hook side effects for beads that only
 // resolve from HQ or another rig database.
 func verifyBeadExistsInTargetRigDatabase(beadID, targetRig, townRoot string) error {
+	return verifyBeadExistsInTargetRigDatabaseVia(nil, beadID, targetRig, townRoot)
+}
+
+// verifyBeadExistsInTargetRigDatabaseVia is
+// verifyBeadExistsInTargetRigDatabase with bd answered by run (nil: bd on PATH).
+func verifyBeadExistsInTargetRigDatabaseVia(run beads.BDRunner, beadID, targetRig, townRoot string) error {
 	if beadID == "" {
 		return nil
 	}
@@ -437,9 +443,10 @@ func verifyBeadExistsInTargetRigDatabase(beadID, targetRig, townRoot string) err
 		WithBeadsDir(targetBeadsDir).
 		StripBeadsDir().
 		Stderr(io.Discard).
+		Via(run).
 		Output()
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		if routedBeadExistsForTargetRig(beadID, targetRig, townRoot) {
+		if routedBeadExistsForTargetRig(run, beadID, targetRig, townRoot) {
 			return nil
 		}
 		return fmt.Errorf("bead %s is not present in target rig %q beads database; refusing to sling before creating hooks or molecule side effects", beadID, targetRig)
@@ -450,7 +457,7 @@ func verifyBeadExistsInTargetRigDatabase(beadID, targetRig, townRoot string) err
 		return fmt.Errorf("checking target rig %q database for bead %s: %w", targetRig, beadID, err)
 	}
 	if len(infos) == 0 {
-		if routedBeadExistsForTargetRig(beadID, targetRig, townRoot) {
+		if routedBeadExistsForTargetRig(run, beadID, targetRig, townRoot) {
 			return nil
 		}
 		return fmt.Errorf("bead %s is not present in target rig %q beads database; refusing to sling before creating hooks or molecule side effects", beadID, targetRig)
@@ -459,12 +466,12 @@ func verifyBeadExistsInTargetRigDatabase(beadID, targetRig, townRoot string) err
 	return nil
 }
 
-func routedBeadExistsForTargetRig(beadID, targetRig, townRoot string) bool {
+func routedBeadExistsForTargetRig(run beads.BDRunner, beadID, targetRig, townRoot string) bool {
 	prefixRig := beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(beadID))
 	if prefixRig != targetRig {
 		return false
 	}
-	out, err := bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID).Stderr(io.Discard).Output()
+	out, err := bdShowBeadRoutedCmdFromTownRoot(townRoot, beadID).Via(run).Stderr(io.Discard).Output()
 	return err == nil && len(strings.TrimSpace(string(out))) > 0
 }
 
@@ -655,6 +662,32 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 		issue = &issues[0]
 	}
 
+	newDesc := applyBeadFieldUpdates(issue, updates)
+	if logPath != "" {
+		_ = os.WriteFile(logPath, []byte(newDesc), 0644)
+		return nil
+	}
+
+	updateDir := resolveBeadDir(beadID)
+	if townRoot != "" {
+		updateDir = resolveBeadDirFromTownRoot(townRoot, beadID)
+	}
+	if err := BdCmd("update", beadID, "--description="+newDesc).
+		Dir(updateDir).
+		StripBeadsDir().
+		WithAutoCommit().
+		Run(); err != nil {
+		return fmt.Errorf("updating bead description: %w", err)
+	}
+
+	return nil
+}
+
+// applyBeadFieldUpdates returns issue's description with updates applied to
+// its attachment fields: the one write storeFieldsInBead makes. Workflow
+// metadata (a molecule, a formula, no_merge or review_only) always carries a
+// fresh attached_at unless updates names one.
+func applyBeadFieldUpdates(issue *beads.Issue, updates beadFieldUpdates) string {
 	// Get or create attachment fields
 	fields := beads.ParseAttachmentFields(issue)
 	if fields == nil {
@@ -711,26 +744,7 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 		fields.FormulaVars = updates.FormulaVars
 	}
 
-	// Write back once
-	newDesc := beads.SetAttachmentFields(issue, fields)
-	if logPath != "" {
-		_ = os.WriteFile(logPath, []byte(newDesc), 0644)
-		return nil
-	}
-
-	updateDir := resolveBeadDir(beadID)
-	if townRoot != "" {
-		updateDir = resolveBeadDirFromTownRoot(townRoot, beadID)
-	}
-	if err := BdCmd("update", beadID, "--description="+newDesc).
-		Dir(updateDir).
-		StripBeadsDir().
-		WithAutoCommit().
-		Run(); err != nil {
-		return fmt.Errorf("updating bead description: %w", err)
-	}
-
-	return nil
+	return beads.SetAttachmentFields(issue, fields)
 }
 
 // injectStartPrompt sends a prompt to the target pane to start working.
@@ -1030,6 +1044,25 @@ func formulaBeadBdCmd(beadID, formulaWorkDir, townRoot string, args ...string) *
 	return BdCmd(args...).Dir(formulaWorkDir).WithBeadsDir(targetBeadsDir).WithGTRoot(townRoot)
 }
 
+// formulaBD is how formula instantiation reaches bd: run answers every bd call
+// (nil: the bd on PATH) and sleep is the pause between contention retries of
+// the bond. InstantiateFormulaOnBead, CookFormula and bondFormulaDirect are
+// its methods on realFormulaBD.
+type formulaBD struct {
+	run   beads.BDRunner
+	sleep func(time.Duration)
+}
+
+// realFormulaBD is the bd on PATH with the real retry backoff.
+func realFormulaBD() formulaBD {
+	return formulaBD{sleep: bdContentionSleep}
+}
+
+// beadCmd is formulaBeadBdCmd answered by f.run.
+func (f formulaBD) beadCmd(beadID, formulaWorkDir, townRoot string, args ...string) *bdCmd {
+	return formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, args...).Via(f.run)
+}
+
 // InstantiateFormulaOnBead bonds a formula directly to a bead.
 // This is the formula-on-bead pattern used by issue #288 for auto-applying mol-polecat-work.
 //
@@ -1043,7 +1076,12 @@ func formulaBeadBdCmd(beadID, formulaWorkDir, townRoot string, args ...string) *
 //   - extraVars: additional --var values supplied by the user
 //
 // Returns the spawned molecule root ID while leaving the base bead as the hook target.
-func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
+func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (*FormulaOnBeadResult, error) {
+	return realFormulaBD().instantiate(ctx, formulaName, beadID, title, hookWorkDir, townRoot, skipCook, extraVars)
+}
+
+// instantiate is InstantiateFormulaOnBead with bd reached through f.
+func (f formulaBD) instantiate(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
 	defer func() { telemetry.RecordFormulaInstantiate(ctx, formulaName, beadID, retErr) }()
 	// Route bd mutations to the correct beads context for the target bead.
 	formulaWorkDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
@@ -1055,7 +1093,7 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 	resolvedFormula := formulaName
 	var formulaCleanup func()
 	if !skipCook {
-		if err := formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, "cook", formulaName).
+		if err := f.beadCmd(beadID, formulaWorkDir, townRoot, "cook", formulaName).
 			WithAutoCommit().
 			Run(); err != nil {
 			// Retry with embedded formula
@@ -1064,7 +1102,7 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 				defer formulaCleanup()
 			}
 			if resolvedFormula != formulaName {
-				if retryErr := formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, "cook", resolvedFormula).
+				if retryErr := f.beadCmd(beadID, formulaWorkDir, townRoot, "cook", resolvedFormula).
 					WithAutoCommit().
 					Run(); retryErr != nil {
 					telemetry.RecordMolCook(ctx, formulaName, retryErr)
@@ -1082,7 +1120,7 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 	if err != nil {
 		return nil, err
 	}
-	wispRootID, err := bondFormulaDirect(resolvedFormula, formulaName, beadID, formulaWorkDir, townRoot, formulaVars)
+	wispRootID, err := f.bond(resolvedFormula, formulaName, beadID, formulaWorkDir, townRoot, formulaVars)
 	if err != nil {
 		return nil, fmt.Errorf("bonding formula %s to bead %s: %w", formulaName, beadID, err)
 	}
@@ -1131,6 +1169,11 @@ func rigNameForBead(townRoot, beadID string) string {
 // write paths; this is the retry on top that keeps one contended commit from
 // failing a dispatch.
 func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
+	return realFormulaBD().bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoot, vars)
+}
+
+// bond is bondFormulaDirect with bd reached through f.
+func (f formulaBD) bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
 	bondArgs := []string{"mol", "bond", bondTarget, beadID, "--json", "--ephemeral"}
 	for _, variable := range vars {
 		bondArgs = append(bondArgs, "--var", variable)
@@ -1138,7 +1181,7 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 
 	var lastErr error
 	for attempt := 1; attempt <= bdContentionAttempts; attempt++ {
-		bondOut, err := formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, bondArgs...).
+		bondOut, err := f.beadCmd(beadID, formulaWorkDir, townRoot, bondArgs...).
 			WithAutoCommit().
 			Output()
 		if err == nil {
@@ -1163,7 +1206,7 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 
 		wait := slingBackoff(attempt, bdContentionBackoffMin, bdContentionBackoffMax)
 		fmt.Printf("  %s Bond attempt %d lost to Dolt contention, retrying in %v...\n", style.Warning.Render("⚠"), attempt, wait)
-		bdContentionSleep(wait)
+		f.sleep(wait)
 	}
 	return "", lastErr
 }
@@ -1346,10 +1389,16 @@ func formulaSearchPaths(townRoot, rigName string) []string {
 // townRoot is required for GT_ROOT so bd can find town-level formulas.
 // Falls back to embedded formula extraction if bd can't find the formula on disk.
 func CookFormula(formulaName, workDir, townRoot string) error {
+	return realFormulaBD().cook(formulaName, workDir, townRoot)
+}
+
+// cook is CookFormula with bd reached through f.
+func (f formulaBD) cook(formulaName, workDir, townRoot string) error {
 	err := BdCmd("cook", formulaName).
 		Dir(workDir).
 		WithAutoCommit().
 		WithGTRoot(townRoot).
+		Via(f.run).
 		Run()
 	if err == nil {
 		return nil
@@ -1366,6 +1415,7 @@ func CookFormula(formulaName, workDir, townRoot string) error {
 		Dir(workDir).
 		WithAutoCommit().
 		WithGTRoot(townRoot).
+		Via(f.run).
 		Run()
 }
 
@@ -1498,6 +1548,15 @@ func (e *reslingRefusal) Is(target error) bool { return target == errReslingRefu
 // failed attempt, and a run whose every attempt was deferred is not an error.
 type feederDispatchTally struct {
 	success, deferred, failed int
+	// out receives the per-bead and summary lines; nil is stdout.
+	out io.Writer
+}
+
+func (t *feederDispatchTally) writer() io.Writer {
+	if t.out == nil {
+		return os.Stdout
+	}
+	return t.out
 }
 
 // record counts err (nil = dispatched), prints a line for a deferral or a
@@ -1509,10 +1568,10 @@ func (t *feederDispatchTally) record(beadID string, err error) bool {
 		return true
 	case errors.Is(err, errReslingRefused):
 		t.deferred++
-		fmt.Printf("  %s %s deferred: %v\n", style.Dim.Render("○"), beadID, err)
+		fmt.Fprintf(t.writer(), "  %s %s deferred: %v\n", style.Dim.Render("○"), beadID, err)
 	default:
 		t.failed++
-		fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)
+		fmt.Fprintf(t.writer(), "  %s %s: %v\n", style.Dim.Render("✗"), beadID, err)
 	}
 	return false
 }
@@ -1521,7 +1580,7 @@ func (t *feederDispatchTally) record(beadID string, err error) bool {
 // was dispatched and at least one attempt really failed.
 func (t *feederDispatchTally) result(kind, id string) error {
 	if t.deferred > 0 {
-		fmt.Printf("  Deferred: %d (a dead holder's work survives or cannot be verified)\n", t.deferred)
+		fmt.Fprintf(t.writer(), "  Deferred: %d (a dead holder's work survives or cannot be verified)\n", t.deferred)
 	}
 	if t.success == 0 && t.failed > 0 {
 		return fmt.Errorf("all %d dispatch attempts failed for %s %s", t.failed, kind, id)
@@ -1544,13 +1603,19 @@ var orphanEpisodeLabels = []string{"gt:preserved-orphan", "gt:survival-unknown",
 // and no write. workDir is the hook write's work dir, so an unrouted bead is
 // read from the same database the hook just wrote.
 func clearOrphanEpisodeLabels(townRoot, beadID, workDir string) {
+	clearOrphanEpisodeLabelsVia(nil, os.Stdout, townRoot, beadID, workDir)
+}
+
+// clearOrphanEpisodeLabelsVia is clearOrphanEpisodeLabels with bd answered by
+// run (nil: bd on PATH) and its warnings written to w.
+func clearOrphanEpisodeLabelsVia(run beads.BDRunner, w io.Writer, townRoot, beadID, workDir string) {
 	if beadID == "" {
 		return
 	}
-	b := beads.New(beads.ResolveHookDir(townRoot, beadID, workDir))
+	b := beads.NewWithBeadsDirAndRunner(beads.ResolveHookDir(townRoot, beadID, workDir), "", run)
 	issue, err := b.Show(beadID)
 	if err != nil {
-		fmt.Printf("  %s Could not read %s to clear orphan labels: %v\n", style.Dim.Render("Warning:"), beadID, err)
+		fmt.Fprintf(w, "  %s Could not read %s to clear orphan labels: %v\n", style.Dim.Render("Warning:"), beadID, err)
 		return
 	}
 	var present []string
@@ -1566,7 +1631,7 @@ func clearOrphanEpisodeLabels(townRoot, beadID, workDir string) {
 		return
 	}
 	if err := b.Update(beadID, beads.UpdateOptions{RemoveLabels: present}); err != nil {
-		fmt.Printf("  %s Could not clear orphan labels %v on %s: %v\n", style.Dim.Render("Warning:"), present, beadID, err)
+		fmt.Fprintf(w, "  %s Could not clear orphan labels %v on %s: %v\n", style.Dim.Render("Warning:"), present, beadID, err)
 	}
 }
 
@@ -1594,16 +1659,23 @@ func survivingBranchesForBead(townRoot, beadID string) []string {
 // of the old value is the Dolt events table. Best-effort: a beads failure warns
 // and returns, because a missing audit line must not abort a dispatch.
 func recordReassignment(townRoot, beadID, from, to, requester string) {
+	recordReassignmentVia(nil, survivingBranchesForBead, os.Stdout, townRoot, beadID, from, to, requester)
+}
+
+// recordReassignmentVia is recordReassignment with bd answered by run (nil:
+// bd on PATH), the old holder's branches listed by branches, and its report
+// written to w.
+func recordReassignmentVia(run beads.BDRunner, branches func(townRoot, beadID string) []string, w io.Writer, townRoot, beadID, from, to, requester string) {
 	if beadID == "" || from == "" || from == to {
 		return
 	}
 	dir := beads.ResolveHookDir(townRoot, beadID, "")
-	b := beads.New(dir)
-	if err := b.RecordReassignment(beadID, from, to, requester, survivingBranchesForBead(townRoot, beadID)); err != nil {
-		fmt.Printf("  %s Could not record reassignment of %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
+	b := beads.NewWithBeadsDirAndRunner(dir, "", run)
+	if err := b.RecordReassignment(beadID, from, to, requester, branches(townRoot, beadID)); err != nil {
+		fmt.Fprintf(w, "  %s Could not record reassignment of %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
 		return
 	}
-	fmt.Printf("  %s Recorded reassignment of %s: %s -> %s\n", style.Dim.Render("○"), beadID, from, to)
+	fmt.Fprintf(w, "  %s Recorded reassignment of %s: %s -> %s\n", style.Dim.Render("○"), beadID, from, to)
 }
 
 // reassignRequester names the actor behind a reassignment for the durable
@@ -1627,16 +1699,27 @@ func hookBeadWithRetry(beadID, targetAgent, hookDir string) error {
 }
 
 func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string) error {
+	verify := func(id string) (*beadInfo, error) { return getBeadInfoFromTownRoot(townRoot, id) }
+	if os.Getenv("GT_TEST_SKIP_HOOK_VERIFY") != "" {
+		verify = nil
+	}
+	return hookBeadWithRetryVia(nil, verify, beadID, targetAgent, hookDir)
+}
+
+// hookBeadWithRetryVia is hookBeadWithRetryWithTownRoot with the hook write
+// answered by run (nil: bd on PATH) and each landed write read back by verify
+// (nil: no read-back).
+func hookBeadWithRetryVia(run beads.BDRunner, verify func(beadID string) (*beadInfo, error), beadID, targetAgent, hookDir string) error {
 	const maxRetries = 10
 	const baseBackoff = 500 * time.Millisecond
 	const maxBackoff = 30 * time.Second
-	skipVerify := os.Getenv("GT_TEST_SKIP_HOOK_VERIFY") != ""
 
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		out, err := BdCmd("update", beadID, "--status=hooked", "--assignee="+targetAgent).
 			Dir(hookDir).
 			WithAutoCommit().
+			Via(run).
 			CombinedOutput()
 		if err != nil {
 			if len(out) > 0 {
@@ -1656,11 +1739,11 @@ func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string
 			return fmt.Errorf("hooking bead after %d attempts: %w", maxRetries, err)
 		}
 
-		if skipVerify {
+		if verify == nil {
 			break
 		}
 
-		verifyInfo, verifyErr := getBeadInfoFromTownRoot(townRoot, beadID)
+		verifyInfo, verifyErr := verify(beadID)
 		if verifyErr != nil {
 			lastErr = fmt.Errorf("verifying hook: %w", verifyErr)
 			if attempt < maxRetries {

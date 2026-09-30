@@ -5,12 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 // The fixtures below are transcribed from the beads named in gt-mcq — the two
@@ -335,22 +332,19 @@ func TestFindDuplicateMatchesSkipsSelfAndEmpty(t *testing.T) {
 // TestCheckSlingDuplicatesSkipsBareBead locks in the cost control: a bead that
 // names no tests and no files must not pay for a pool fetch at all.
 func TestCheckSlingDuplicatesSkipsBareBead(t *testing.T) {
-	resetDuplicatePoolCache()
-	t.Cleanup(resetDuplicatePoolCache)
-
+	t.Parallel()
 	fetched := 0
-	restore := swapFetchDuplicatePoolFn(func(string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
 		fetched++
 		return nil, nil
 	})
-	defer restore()
 
 	info := &beadInfo{
 		Title:       "Sling: a bead with bare prose",
 		Status:      "open",
 		Description: "attached_formula: mol-polecat-work\nattached_vars: [\"feature=Sling: a bead with bare prose\"]",
 	}
-	candidate, matches, err := checkSlingDuplicates(t.TempDir(), "gt-bare", info)
+	candidate, matches, err := pools.check(t.TempDir(), "gt-bare", info)
 	if err != nil {
 		t.Fatalf("checkSlingDuplicates: %v", err)
 	}
@@ -365,20 +359,17 @@ func TestCheckSlingDuplicatesSkipsBareBead(t *testing.T) {
 // TestCheckSlingDuplicatesCheckErrorIsNotFatal pins the advisory contract: a bd
 // failure must never refuse a sling, only surface as a check error.
 func TestCheckSlingDuplicatesCheckErrorIsNotFatal(t *testing.T) {
-	resetDuplicatePoolCache()
-	t.Cleanup(resetDuplicatePoolCache)
-
-	restore := swapFetchDuplicatePoolFn(func(string) ([]duplicateCandidate, error) {
+	t.Parallel()
+	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
 		return nil, os.ErrDeadlineExceeded
 	})
-	defer restore()
 
 	info := &beadInfo{
 		Title:       "fix TestFoo in internal/cmd/sling.go",
 		Status:      "open",
 		Description: "TestFoo fails on main.",
 	}
-	candidate, matches, err := checkSlingDuplicates(t.TempDir(), "gt-cand", info)
+	candidate, matches, err := pools.check(t.TempDir(), "gt-cand", info)
 	if err == nil {
 		t.Fatal("expected the pool error to be reported")
 	}
@@ -395,31 +386,28 @@ func TestCheckSlingDuplicatesCheckErrorIsNotFatal(t *testing.T) {
 // the other was checked. Registering a dispatched bead makes the second see the
 // first.
 func TestDuplicateIntraBatchDetection(t *testing.T) {
-	resetDuplicatePoolCache()
-	t.Cleanup(resetDuplicatePoolCache)
-
+	t.Parallel()
 	fetched := 0
-	restore := swapFetchDuplicatePoolFn(func(string) ([]duplicateCandidate, error) {
+	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
 		fetched++
 		return nil, nil
 	})
-	defer restore()
 
 	beadsDir := t.TempDir()
 	first := newDuplicateCandidate("gt-3vr", bead3vrTitle, "open", bead3vrDesc)
 	second := newDuplicateCandidate("gt-rl0", beadRl0Title, "open", beadRl0Desc)
 
 	// First dispatch sees an empty pool and finds nothing.
-	matches := findDuplicateMatches(first, mustPool(t, beadsDir))
+	matches := findDuplicateMatches(first, mustPool(t, pools, beadsDir))
 	if len(matches) != 0 {
 		t.Fatalf("expected an empty pool, got %+v", matches)
 	}
 
 	// Its hook lands, so it joins the pool.
-	noteDispatchedCandidate(beadsDir, first)
+	pools.noteDispatched(beadsDir, first)
 
 	// The second dispatch in the same batch now sees it.
-	matches = findDuplicateMatches(second, mustPool(t, beadsDir))
+	matches = findDuplicateMatches(second, mustPool(t, pools, beadsDir))
 	if len(matches) != 1 || !matches[0].Blocking() {
 		t.Fatalf("expected the intra-batch duplicate to be caught, got %+v", matches)
 	}
@@ -431,8 +419,8 @@ func TestDuplicateIntraBatchDetection(t *testing.T) {
 	}
 
 	// Registering the same bead twice must not duplicate it.
-	noteDispatchedCandidate(beadsDir, first)
-	pool := mustPool(t, beadsDir)
+	pools.noteDispatched(beadsDir, first)
+	pool := mustPool(t, pools, beadsDir)
 	if len(pool) != 1 {
 		t.Errorf("expected one registered candidate, got %d", len(pool))
 	}
@@ -447,234 +435,111 @@ func TestNoteSlingCandidateDispatchedNilIsSafe(t *testing.T) {
 	noteSlingCandidateDispatched(t.TempDir(), nil)
 }
 
-// TestExecuteSling_RefusesDuplicateHiddenInPoolDesignNotes is the acceptance
-// bar this file was missing (gt-hgvu, om major on gt-wisp-j5i): the earlier
+// TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes is the acceptance bar
+// this file was missing (gt-hgvu, om major on gt-wisp-j5i): the earlier
 // pair-replay tests above build both sides of the comparison with
 // newDuplicateCandidate, which hands the pool bead full title+description+
 // design+notes text directly. That is not what production does — the pool
-// comes from listDuplicateCandidates, which runs bd list, and bd list's JSON
+// comes from listDuplicateCandidatesVia, which runs bd list, and bd list's JSON
 // never carries design or notes at all. The real gt-g6b defect (see the
 // fixture comment above) named its shared tests only in design and notes, so
 // a check that only ever exercises fully-populated candidates can pass while
-// the wired-up pipeline still misses that exact case. This test drives
-// executeSling end to end through a bd stub shaped like production: the pool
-// bead's `bd list` row is silent on the shared test, and the overlap is
-// recoverable only from a separate `bd show` of that bead — the batched call
-// fetchDuplicateFullText makes.
-func TestExecuteSling_RefusesDuplicateHiddenInPoolDesignNotes(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-	townRoot := t.TempDir()
-	writeDesignNotesDuplicateBDStub(t, townRoot)
-	t.Setenv("PATH", filepath.Join(townRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+// the wired-up pipeline still misses that exact case. This test drives the
+// check through the production pool fetch over a bd shaped like production:
+// the pool bead's `bd list` row is silent on the shared test, and the overlap
+// is recoverable only from the batched `bd show` fetchDuplicateFullText makes.
+func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
+	t.Parallel()
+	townRoot := duplicateTown(t)
+	bd := designNotesDuplicateBD()
+	pools := newDuplicatePools(func(beadsDir string) ([]duplicateCandidate, error) {
+		return fetchDuplicatePoolVia(bd.run, func(dir string, err error) {
+			t.Errorf("enrichment of %s failed: %v", dir, err)
+		}, beadsDir)
+	})
 
-	params := SlingParams{
-		BeadID:   "gt-newbead",
-		RigName:  "testrig",
-		TownRoot: townRoot,
+	info := &beadInfo{Title: "Fix TestFoo flake", Status: "open", Description: "TestFoo fails after the refactor."}
+	candidate, matches, err := pools.check(townRoot, "gt-newbead", info)
+	if err != nil {
+		t.Fatalf("checkSlingDuplicates: %v", err)
 	}
-
-	result, err := executeSling(params)
-	if err == nil {
-		t.Fatal("expected executeSling to refuse: the shared test lives in the pool bead's design/notes")
+	if candidate == nil {
+		t.Fatal("a bead naming TestFoo should be checked")
 	}
-	if result == nil || result.ErrMsg != errSlingDuplicateContent.Error() {
-		t.Errorf("expected ErrMsg=%q, got %+v", errSlingDuplicateContent.Error(), result)
+	decision := decideSlingDuplicates("gt-newbead", matches)
+	if !decision.Blocked {
+		t.Fatalf("expected a refusal: the shared test lives in the pool bead's design/notes, got %+v", matches)
 	}
 	for _, want := range []string{"TestFoo", "gt-pool1", "--force"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("refusal should mention %q: %v", want, err)
+		if !strings.Contains(decision.Message, want) {
+			t.Errorf("refusal should mention %q:\n%s", want, decision.Message)
 		}
 	}
 }
 
-// writeDesignNotesDuplicateBDStub stands up a fake town for
-// TestExecuteSling_RefusesDuplicateHiddenInPoolDesignNotes: the candidate
-// gt-newbead names TestFoo in its description; the pool bead gt-pool1 names
-// TestFoo only in design and notes, which its `bd list` row cannot carry —
-// only a `bd show gt-pool1` reveals it, exactly as fetchDuplicateFullText
-// fetches it in production.
-func writeDesignNotesDuplicateBDStub(t *testing.T, townRoot string) {
+// duplicateTown is a temp town whose gt- prefix routes to the gastown rig,
+// where the duplicate check reads its pool.
+func duplicateTown(t *testing.T) string {
 	t.Helper()
-
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads"), 0o755); err != nil {
 		t.Fatalf("mkdir rig .beads: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"),
-		[]byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0o644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	candShowPath := filepath.Join(townRoot, "cand-show.json")
-	poolShowPath := filepath.Join(townRoot, "pool-show.json")
-	activePath := filepath.Join(townRoot, "active.json")
-	closedPath := filepath.Join(townRoot, "closed.json")
-
-	writeJSON := func(path string, body string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
-	}
-	writeJSON(candShowPath, `[{"id":"gt-newbead","title":"Fix TestFoo flake","status":"open",`+
-		`"assignee":"","description":"TestFoo fails after the refactor."}]`)
-	writeJSON(closedPath, `[]`)
-	writeJSON(activePath, `[{"id":"gt-pool1","title":"Some pool bead","status":"open",`+
-		`"description":"Unrelated prose, no test names here.","close_reason":""}]`)
-	writeJSON(poolShowPath, `[{"id":"gt-pool1","title":"Some pool bead","status":"open",`+
-		`"description":"Unrelated prose, no test names here.",`+
-		`"design":"Root cause: TestFoo fails intermittently under load.",`+
-		`"notes":"Added regression coverage: TestFoo."}]`)
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	script := `#!/bin/sh
-set -eu
-if [ "${1:-}" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
-  echo "bd test"
-  exit 0
-fi
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --allow-stale) shift ;;
-    *) break ;;
-  esac
-done
-cmd="${1:-}"
-case "$cmd" in
-  show)
-    case " $* " in
-      *" gt-newbead "*) cat "$BD_DUPE_CAND_SHOW_FILE" ;;
-      *) cat "$BD_DUPE_POOL_SHOW_FILE" ;;
-    esac
-    ;;
-  list)
-    case "$*" in
-      *--closed-after=*) cat "$BD_DUPE_CLOSED_FILE" ;;
-      *) cat "$BD_DUPE_ACTIVE_FILE" ;;
-    esac
-    ;;
-  version) echo "bd test" ;;
-esac
-exit 0
-`
-	writeBDStub(t, binDir, script, "")
-	t.Setenv("BD_DUPE_CAND_SHOW_FILE", candShowPath)
-	t.Setenv("BD_DUPE_POOL_SHOW_FILE", poolShowPath)
-	t.Setenv("BD_DUPE_ACTIVE_FILE", activePath)
-	t.Setenv("BD_DUPE_CLOSED_FILE", closedPath)
+	writeGastownRoutes(t, townRoot)
+	return townRoot
 }
 
-// TestScheduledDispatchesRunDuplicateCheck is the gt-skk7 / gt-eisp2 wiring
+// designNotesDuplicateBD answers the pool reads for
+// TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes: the live list holds
+// gt-pool1, whose row is silent on TestFoo, the closed list is empty, and
+// only `bd show gt-pool1` reveals TestFoo in design and notes.
+func designNotesDuplicateBD() *inprocBD {
+	return &inprocBD{answer: func(_ *inprocBD, cmd string, args []string) bdAnswer {
+		switch cmd {
+		case "list":
+			if argsMention(args, "--closed-after=") {
+				return bdOut(`[]`)
+			}
+			return bdOut(`[{"id":"gt-pool1","title":"Some pool bead","status":"open",` +
+				`"description":"Unrelated prose, no test names here.","close_reason":""}]`)
+		case "show":
+			return bdOut(`[{"id":"gt-pool1","title":"Some pool bead","status":"open",` +
+				`"description":"Unrelated prose, no test names here.",` +
+				`"design":"Root cause: TestFoo fails intermittently under load.",` +
+				`"notes":"Added regression coverage: TestFoo."}]`)
+		}
+		return bdAnswer{stderr: "unexpected bd " + cmd, code: 1}
+	}}
+}
+
+// TestSchedulerSlingParamsRunDuplicateCheck is the gt-skk7 / gt-eisp2 wiring
 // test. Every scheduler used to set SkipDuplicateCheck on what is actually the
 // bead's FIRST dispatch, so the check never ran on those paths at all. The
-// operator's 'gt sling <convoy|epic>' has no earlier checked sling; neither
-// does 'gt sling --deferred', whose runSling returns into scheduleBead before
-// the check and reaches the capacity dispatcher unchecked. A batch of beads
-// dispatched together are the same-defect pair that no title dedupe sees
-// (gt-mcq).
-func TestScheduledDispatchesRunDuplicateCheck(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
+// operator's 'gt sling <convoy|epic>' has no earlier checked sling, so the
+// params each builds must leave the check on and carry --force, the escape
+// hatch these schedulers document. That executeSling refuses on those params
+// is TestExecuteSlingDuplicateContent.
+func TestSchedulerSlingParamsRunDuplicateCheck(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	writeDuplicateBDStub(t, townRoot)
-	t.Setenv("PATH", filepath.Join(townRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	job := convoyDispatchJob{
 		candidate: convoyCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"},
 		agent:     "deepseek-flash",
 	}
-	// --no-boot keeps the run off the rig's agents, as the daemon passes it.
-	convoyOpts := convoyScheduleOpts{Formula: "mol-polecat-work", NoBoot: true}
-	epicOpts := epicScheduleOpts{Formula: "mol-polecat-work", NoBoot: true}
-
 	epicChild := epicDispatchCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"}
 
-	paths := []struct {
-		name string
-		// run dispatches gt-3vr as the path does; force does the same with
-		// --force, and is nil for a path that has none to pass (a queued
-		// context does not carry one).
-		run   func() (*SlingResult, error)
-		force func() (*SlingResult, error)
-		// discardsResult marks a path whose wrapper returns no SlingResult on error.
-		discardsResult bool
-	}{
-		{
-			name: "gt sling <convoy> -> runConvoySlingByID",
-			run:  func() (*SlingResult, error) { return executeSling(convoySlingParams(job, convoyOpts, townRoot)) },
-			force: func() (*SlingResult, error) {
-				params := convoySlingParams(job, convoyOpts, townRoot)
-				params.Force = true
-				return executeSling(params)
-			},
-		},
-		{
-			name: "gt sling <epic> -> runEpicSlingByID",
-			run: func() (*SlingResult, error) {
-				return executeSling(epicSlingParams(epicChild, "mol-polecat-work", epicOpts, townRoot))
-			},
-			force: func() (*SlingResult, error) {
-				params := epicSlingParams(epicChild, "mol-polecat-work", epicOpts, townRoot)
-				params.Force = true
-				return executeSling(params)
-			},
-		},
-		{
-			name:           "gt sling --deferred -> dispatchSingleBead",
-			discardsResult: true,
-			run: func() (*SlingResult, error) {
-				return dispatchSingleBead(capacity.PendingBead{
-					ID:         "gt-sc-3vr",
-					WorkBeadID: "gt-3vr",
-					TargetRig:  "gastown",
-					Context: &capacity.SlingContextFields{
-						WorkBeadID: "gt-3vr",
-						TargetRig:  "gastown",
-						Formula:    "mol-polecat-work",
-					},
-				}, townRoot, "test")
-			},
-		},
-	}
-
-	for _, path := range paths {
-		t.Run(path.name, func(t *testing.T) {
-			resetDuplicatePoolCache()
-			t.Cleanup(resetDuplicatePoolCache)
-
-			result, err := path.run()
-			if err == nil {
-				t.Fatal("expected a refusal: gt-3vr names the test gt-rl0 already owns")
+	for _, force := range []bool{false, true} {
+		for name, params := range map[string]SlingParams{
+			"gt sling <convoy>": convoySlingParams(job, convoyScheduleOpts{Formula: "mol-polecat-work", NoBoot: true, Force: force}, townRoot),
+			"gt sling <epic>":   epicSlingParams(epicChild, "mol-polecat-work", epicScheduleOpts{Formula: "mol-polecat-work", NoBoot: true, Force: force}, townRoot),
+		} {
+			if params.SkipDuplicateCheck {
+				t.Errorf("%s (force=%v): SkipDuplicateCheck set on a first dispatch", name, force)
 			}
-			if !path.discardsResult && (result == nil || result.ErrMsg != errSlingDuplicateContent.Error()) {
-				t.Errorf("expected ErrMsg=%q, got %+v", errSlingDuplicateContent.Error(), result)
+			if params.Force != force {
+				t.Errorf("%s: Force = %v, want %v", name, params.Force, force)
 			}
-			for _, want := range []string{"TestHermeticHarnessEnforced", "gt-rl0", "--force"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("refusal should mention %q: %v", want, err)
-				}
-			}
-
-			// --force is the escape hatch these schedulers already document, so
-			// it must reach the check through their own params. Past the check
-			// the dispatch fails for want of a real rig; only the refusal
-			// matters here.
-			if path.force == nil {
-				return
-			}
-			if _, err := path.force(); err != nil && strings.Contains(err.Error(), "TestHermeticHarnessEnforced") {
-				t.Fatalf("--force must bypass the duplicate check: %v", err)
-			}
-		})
+		}
 	}
 }
 
@@ -683,76 +548,11 @@ func TestScheduledDispatchesRunDuplicateCheck(t *testing.T) {
 // circuit breaker instead of leaving it queued. It stays true until the
 // overlapping bead closes, so a silent deferral would stall the bead.
 func TestCapacityDispatchDuplicateRefusalIsAFailure(t *testing.T) {
+	t.Parallel()
 	refusal := fmt.Errorf("sling failed: %w", errors.New("refusing to sling gt-3vr: duplicate content of gt-rl0 (use --force)"))
 	if why, deferred := capacityDispatchDeferral(refusal); deferred {
 		t.Fatalf("a duplicate refusal must not be deferred (%q)", why)
 	}
-}
-
-// writeDuplicateBDStub stands up a fake town whose bd answers `show` for gt-3vr
-// and `list` for gt-rl0, the pair from gt-mcq.
-func writeDuplicateBDStub(t *testing.T, townRoot string) {
-	t.Helper()
-
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
-		t.Fatalf("mkdir rig .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"),
-		[]byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0o644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	showPath := filepath.Join(townRoot, "show.json")
-	activePath := filepath.Join(townRoot, "active.json")
-	closedPath := filepath.Join(townRoot, "closed.json")
-
-	writeJSON := func(path string, body string) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-			t.Fatalf("write %s: %v", path, err)
-		}
-	}
-	writeJSON(showPath, `[{"id":"gt-3vr","title":`+jsonString(bead3vrTitle)+`,"status":"open","assignee":"","description":`+jsonString(bead3vrDesc)+`}]`)
-	writeJSON(closedPath, `[]`)
-	writeJSON(activePath, `[{"id":"gt-rl0","title":`+jsonString(beadRl0Title)+`,"status":"open","description":`+jsonString(beadRl0Desc)+`,"close_reason":""}]`)
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	script := `#!/bin/sh
-set -eu
-if [ "${1:-}" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
-  echo "bd test"
-  exit 0
-fi
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --allow-stale) shift ;;
-    *) break ;;
-  esac
-done
-cmd="${1:-}"
-case "$cmd" in
-  show) cat "$BD_DUPE_SHOW_FILE" ;;
-  list)
-    case "$*" in
-      *--closed-after=*) cat "$BD_DUPE_CLOSED_FILE" ;;
-      *) cat "$BD_DUPE_ACTIVE_FILE" ;;
-    esac
-    ;;
-  version) echo "bd test" ;;
-esac
-exit 0
-`
-	writeBDStub(t, binDir, script, "")
-	t.Setenv("BD_DUPE_SHOW_FILE", showPath)
-	t.Setenv("BD_DUPE_ACTIVE_FILE", activePath)
-	t.Setenv("BD_DUPE_CLOSED_FILE", closedPath)
 }
 
 func newDuplicateCandidate(id, title, status string, parts ...string) duplicateCandidate {
@@ -764,19 +564,13 @@ func newDuplicateCandidate(id, title, status string, parts ...string) duplicateC
 	}
 }
 
-func mustPool(t *testing.T, beadsDir string) []duplicateCandidate {
+func mustPool(t *testing.T, pools *duplicatePools, beadsDir string) []duplicateCandidate {
 	t.Helper()
-	pool, err := duplicatePoolFor(beadsDir)
+	pool, err := pools.poolFor(beadsDir)
 	if err != nil {
 		t.Fatalf("duplicatePoolFor: %v", err)
 	}
 	return pool
-}
-
-func swapFetchDuplicatePoolFn(fn func(string) ([]duplicateCandidate, error)) func() {
-	previous := fetchDuplicatePoolFn
-	fetchDuplicatePoolFn = fn
-	return func() { fetchDuplicatePoolFn = previous }
 }
 
 func assertStrings(t *testing.T, label string, got, want []string) {
@@ -822,39 +616,20 @@ func jsonString(s string) string {
 // reported, since a pool without design/notes text silently misses the gt-g6b
 // class of overlap.
 func TestListDuplicateCandidates_EnrichmentFailureDegradesLoudly(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-	townRoot := t.TempDir()
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	script := `#!/bin/sh
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --allow-stale) shift ;;
-    *) break ;;
-  esac
-done
-case "${1:-}" in
-  show) echo "dolt connection refused" >&2; exit 1 ;;
-  list) echo '[{"id":"gt-pool1","title":"Some pool bead","status":"open","description":"Touches internal/cmd/sling_duplicate.go and TestFoo."}]' ;;
-esac
-exit 0
-`
-	writeBDStub(t, binDir, script, "")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Parallel()
+	beadsDir := t.TempDir()
+	bd := &inprocBD{answer: func(_ *inprocBD, cmd string, _ []string) bdAnswer {
+		if cmd == "show" {
+			return bdAnswer{stderr: "dolt connection refused", code: 1}
+		}
+		return bdOut(`[{"id":"gt-pool1","title":"Some pool bead","status":"open","description":"Touches internal/cmd/sling_duplicate.go and TestFoo."}]`)
+	}}
 
 	var warnedDir string
 	var warnedErr error
-	previous := duplicateEnrichmentWarnFn
-	duplicateEnrichmentWarnFn = func(beadsDir string, err error) {
-		warnedDir, warnedErr = beadsDir, err
-	}
-	t.Cleanup(func() { duplicateEnrichmentWarnFn = previous })
+	warn := func(beadsDir string, err error) { warnedDir, warnedErr = beadsDir, err }
 
-	got, err := listDuplicateCandidates(townRoot, []string{"open"}, time.Time{})
+	got, err := listDuplicateCandidatesVia(bd.run, warn, beadsDir, []string{"open"}, time.Time{})
 	if err != nil {
 		t.Fatalf("a failed enrichment must not fail the pool fetch: %v", err)
 	}
@@ -867,8 +642,8 @@ exit 0
 	if warnedErr == nil {
 		t.Fatal("a failed enrichment must be reported, not swallowed")
 	}
-	if warnedDir != townRoot {
-		t.Errorf("warning names %q, want %q", warnedDir, townRoot)
+	if warnedDir != beadsDir {
+		t.Errorf("warning names %q, want %q", warnedDir, beadsDir)
 	}
 	if !strings.Contains(warnedErr.Error(), "dolt connection refused") {
 		t.Errorf("warning error should carry bd's stderr: %v", warnedErr)
@@ -878,19 +653,11 @@ exit 0
 // TestListDuplicateCandidates_EnrichmentSuccessIsQuiet guards the other side:
 // a healthy enrichment must not emit the degraded-check warning.
 func TestListDuplicateCandidates_EnrichmentSuccessIsQuiet(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-	townRoot := t.TempDir()
-	writeDesignNotesDuplicateBDStub(t, townRoot)
-	t.Setenv("PATH", filepath.Join(townRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	t.Parallel()
 	warned := false
-	previous := duplicateEnrichmentWarnFn
-	duplicateEnrichmentWarnFn = func(string, error) { warned = true }
-	t.Cleanup(func() { duplicateEnrichmentWarnFn = previous })
+	warn := func(string, error) { warned = true }
 
-	got, err := listDuplicateCandidates(filepath.Join(townRoot, "gastown", "mayor", "rig"), []string{"open"}, time.Time{})
+	got, err := listDuplicateCandidatesVia(designNotesDuplicateBD().run, warn, t.TempDir(), []string{"open"}, time.Time{})
 	if err != nil {
 		t.Fatalf("listDuplicateCandidates: %v", err)
 	}

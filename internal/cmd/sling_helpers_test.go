@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -122,43 +121,23 @@ func TestCollectExistingMoleculesFiltersClosedMolecules(t *testing.T) {
 	}
 }
 
+// TestCollectExistingMoleculeDepsReadsCanonicalWispEdges: the molecules
+// bonded to a bead come from one sql query over the wisp dependency edges,
+// whose rows are deduplicated in order.
 func TestCollectExistingMoleculeDepsReadsCanonicalWispEdges(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses Unix shell script bd stub")
-	}
+	t.Parallel()
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		if cmd == "sql" && len(args) > 0 &&
+			strings.Contains(args[0], "wisp_dependencies") &&
+			strings.Contains(args[0], "depends_on_issue_id") &&
+			strings.Contains(args[0], "depends_on_wisp_id") {
+			return bdOut(`[{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-other"}]`)
+		}
+		return bdAnswer{stderr: "unexpected query", code: 1}
+	}}
 
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "bd.log")
-	script := `#!/bin/sh
-echo "$*" >> "${BD_LOG}"
-if [ "$1" = "sql" ]; then
-  case "$2" in
-    *wisp_dependencies*depends_on_issue_id*depends_on_wisp_id*)
-      echo '[{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-other"}]'
-      exit 0
-      ;;
-  esac
-  echo 'unexpected query' >&2
-  exit 1
-fi
-exit 1
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_LOG", logPath)
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(binDir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	got, err := collectExistingMoleculeDeps("gt-work", "")
+	got, err := collectExistingMoleculeDepsVia(bd.run, "gt-work", t.TempDir())
 	if err != nil {
 		t.Fatalf("collectExistingMoleculeDeps: %v", err)
 	}
@@ -206,34 +185,20 @@ func TestIsSlingConfigError(t *testing.T) {
 	}
 }
 
+// TestHookBeadWithRetryFailsFastOnBdStderr: a Dolt/beads configuration
+// failure bd reports on stderr is not retried, and the error carries bd's
+// words plus the reconciliation guidance (gt-2ra).
 func TestHookBeadWithRetryFailsFastOnBdStderr(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("uses Unix shell script bd stub")
-	}
-	beads.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+	t.Parallel()
+	calls := 0
+	bd := &inprocBD{answer: func(_ *inprocBD, cmd string, _ []string) bdAnswer {
+		if cmd == "update" {
+			calls++
+		}
+		return bdAnswer{stderr: "Dolt circuit breaker is open: server appears down", code: 1}
+	}}
 
-	binDir := t.TempDir()
-	countPath := filepath.Join(binDir, "count")
-	script := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "--allow-stale" ]; then
-  echo "Error: unknown flag: --allow-stale" >&2
-  exit 0
-fi
-count=0
-if [ -f %[1]q ]; then count=$(cat %[1]q); fi
-count=$((count + 1))
-printf '%%s' "$count" > %[1]q
-echo "Dolt circuit breaker is open: server appears down" >&2
-exit 1
-`, countPath)
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
-
-	err := hookBeadWithRetry("gt-work", "gastown/polecats/rust", t.TempDir())
+	err := hookBeadWithRetryVia(bd.run, nil, "gt-work", "gastown/polecats/rust", t.TempDir())
 	if err == nil {
 		t.Fatal("hookBeadWithRetry error = nil, want fail-fast error")
 	}
@@ -243,12 +208,8 @@ exit 1
 	if !strings.Contains(err.Error(), "Safe next action") {
 		t.Fatalf("error missing reconciliation guidance: %v", err)
 	}
-	countBytes, readErr := os.ReadFile(countPath)
-	if readErr != nil {
-		t.Fatalf("read count: %v", readErr)
-	}
-	if got := strings.TrimSpace(string(countBytes)); got != "1" {
-		t.Fatalf("bd update invoked %s times, want 1", got)
+	if calls != 1 {
+		t.Fatalf("bd update invoked %d times, want 1", calls)
 	}
 }
 
@@ -402,6 +363,7 @@ func TestShouldAcceptPermissionWarning_ResolvedPreset(t *testing.T) {
 }
 
 func TestFormulaShowHasBody(t *testing.T) {
+	t.Parallel()
 	for out, want := range map[string]bool{
 		"":                    false,
 		"\n":                  false,

@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -24,6 +26,7 @@ func writeGastownRoutes(t *testing.T, townRoot string) {
 // Convoy and epic feeders count a resling refusal as a deferral: not a
 // success, not a failed attempt, and a run of only deferrals is not an error.
 func TestFeederDispatchTallyTreatsReslingRefusalAsDeferral(t *testing.T) {
+	t.Parallel()
 	refusal := &reslingRefusal{msg: "refusing to re-sling gt-a: ..."}
 	cases := []struct {
 		name    string
@@ -37,25 +40,24 @@ func TestFeederDispatchTallyTreatsReslingRefusalAsDeferral(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var tally feederDispatchTally
-			var err error
-			out := captureStdout(t, func() {
-				for i, e := range tc.errs {
-					ok := tally.record(fmt.Sprintf("gt-%d", i), e)
-					if ok != (e == nil) {
-						t.Errorf("record(%v) = %v", e, ok)
-					}
+			t.Parallel()
+			var out strings.Builder
+			tally := feederDispatchTally{out: &out}
+			for i, e := range tc.errs {
+				ok := tally.record(fmt.Sprintf("gt-%d", i), e)
+				if ok != (e == nil) {
+					t.Errorf("record(%v) = %v", e, ok)
 				}
-				err = tally.result("convoy", "hq-cv-1")
-			})
+			}
+			err := tally.result("convoy", "hq-cv-1")
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("want no error, got %v", err)
 			}
 			if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
-			if errors.Is(tc.errs[0], errReslingRefused) && strings.Contains(out, "✗ gt-0") {
-				t.Fatalf("a refusal was printed as a failure:\n%s", out)
+			if errors.Is(tc.errs[0], errReslingRefused) && strings.Contains(out.String(), "✗ gt-0") {
+				t.Fatalf("a refusal was printed as a failure:\n%s", out.String())
 			}
 		})
 	}
@@ -80,9 +82,7 @@ func TestCapacityDispatchDeferralRecognizesReslingRefusal(t *testing.T) {
 // clearOrphanEpisodeLabels removes only the episode labels the bead carries,
 // writes nothing when it carries none, and never fails the caller.
 func TestClearOrphanEpisodeLabels(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX bd stub")
-	}
+	t.Parallel()
 	cases := []struct {
 		name       string
 		labels     string
@@ -97,39 +97,26 @@ func TestClearOrphanEpisodeLabels(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			townRoot := t.TempDir()
-			binDir := filepath.Join(townRoot, "bin")
-			for _, d := range []string{filepath.Join(townRoot, ".beads"), binDir} {
-				if err := os.MkdirAll(d, 0o755); err != nil {
-					t.Fatal(err)
+			if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+				f.logLine(cmd + " " + strings.Join(args, " "))
+				if cmd == "show" {
+					if tc.showFails {
+						return bdAnswer{stderr: "boom", code: 1}
+					}
+					return bdOut(`[{"id":"gt-lbl1","title":"t","status":"hooked","labels":[` + tc.labels + `]}]`)
 				}
-			}
-			logPath := filepath.Join(townRoot, "bd.log")
-			fail := ""
-			if tc.showFails {
-				fail = "1"
-			}
-			script := `#!/bin/sh
-echo "$*" >> "` + logPath + `"
-for a in "$@"; do
-  case "$a" in
-  show)
-    [ -n "` + fail + `" ] && { echo "boom" >&2; exit 1; }
-    echo '[{"id":"gt-lbl1","title":"t","status":"hooked","labels":[` + tc.labels + `]}]'
-    exit 0 ;;
-  update) exit 0 ;;
-  esac
-done
-exit 0
-`
-			_ = writeBDStub(t, binDir, script, "")
-			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+				return bdOut("")
+			}}
 
-			_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "gt-lbl1", "") })
+			clearOrphanEpisodeLabelsVia(bd.run, io.Discard, townRoot, "gt-lbl1", "")
 
-			data, _ := os.ReadFile(logPath)
 			var updates []string
-			for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			for _, l := range strings.Split(strings.TrimSpace(bd.log()), "\n") {
 				if i := strings.Index(l, "update "); i >= 0 {
 					updates = append(updates, l[i:])
 				}
@@ -141,7 +128,7 @@ exit 0
 				return
 			}
 			if len(updates) != 1 || !strings.HasPrefix(updates[0], tc.wantUpdate) {
-				t.Fatalf("updates = %v, want one starting %q\nlog:\n%s", updates, tc.wantUpdate, data)
+				t.Fatalf("updates = %v, want one starting %q\nlog:\n%s", updates, tc.wantUpdate, bd.log())
 			}
 		})
 	}
@@ -150,36 +137,32 @@ exit 0
 // An unrouted bead is cleared in the hook write's work dir, not the town
 // root: the labels live in the database the hook just wrote.
 func TestClearOrphanEpisodeLabelsUsesHookWorkDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	workDir := t.TempDir()
-	binDir := filepath.Join(townRoot, "bin")
-	for _, d := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(workDir, ".beads"), binDir} {
+	for _, d := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(workDir, ".beads")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	logPath := filepath.Join(townRoot, "bd-cwd.log")
-	script := `#!/bin/sh
-for a in "$@"; do
-  case "$a" in
-  show)
-    pwd -P >> "` + logPath + `"
-    echo '[{"id":"zz-lbl2","title":"t","status":"hooked","labels":["gt:preserved-orphan"]}]'
-    exit 0 ;;
-  update) exit 0 ;;
-  esac
-done
-exit 0
-`
-	_ = writeBDStub(t, binDir, script, "")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var mu sync.Mutex
+	var showDirs []string
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		for _, a := range c.Args {
+			if a == "show" {
+				mu.Lock()
+				showDirs = append(showDirs, c.Dir)
+				mu.Unlock()
+				return []byte(`[{"id":"zz-lbl2","title":"t","status":"hooked","labels":["gt:preserved-orphan"]}]`), nil, nil
+			}
+		}
+		return nil, nil, nil
+	}
 
-	_ = captureStdout(t, func() { clearOrphanEpisodeLabels(townRoot, "zz-lbl2", workDir) })
+	clearOrphanEpisodeLabelsVia(run, io.Discard, townRoot, "zz-lbl2", workDir)
 
-	data, _ := os.ReadFile(logPath)
-	want, _ := filepath.EvalSymlinks(workDir)
-	if got := strings.TrimSpace(string(data)); got != want {
-		t.Fatalf("bd show ran in %q, want hook work dir %q", got, want)
+	if len(showDirs) != 1 || showDirs[0] != workDir {
+		t.Fatalf("bd show ran in %q, want hook work dir %q", showDirs, workDir)
 	}
 }
 

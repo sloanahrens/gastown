@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,110 +264,43 @@ func TestExtractIssueID(t *testing.T) {
 	}
 }
 
-func TestRoutedBeadReadUsesCanonicalShowWithoutUnsupportedAllowStale(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows: shell stub uses POSIX syntax")
-	}
-	beads.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
-
-	townRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
+// TestGetBeadInfoViaReadsRoutedBeadFromRigDatabase: a rig-prefixed bead is
+// read from the rig's database its route names, not the town's, and the
+// issue fields survive the parse.
+func TestGetBeadInfoViaReadsRoutedBeadFromRigDatabase(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
 	beadID := "gt-new123"
-	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
-	rigBeadsDir := filepath.Join(rigDir, ".beads")
-	for _, dir := range []string{filepath.Join(townRoot, "mayor"), filepath.Join(townRoot, ".beads"), rigBeadsDir} {
+	rigBeadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
+	for _, dir := range []string{filepath.Join(townRoot, ".beads"), rigBeadsDir} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","name":"test"}`), 0644); err != nil {
-		t.Fatalf("write town.json: %v", err)
-	}
-	routes := strings.Join([]string{
-		`{"prefix":"gt-","path":"gastown/mayor/rig"}`,
-		`{"prefix":"hq-","path":"."}`,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes.jsonl: %v", err)
+	writeTestRoutes(t, townRoot, []beads.Route{{Prefix: "gt-", Path: "gastown/mayor/rig"}, {Prefix: "hq-", Path: "."}})
+
+	var mu sync.Mutex
+	var showDirs []string
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		beadsDir := envSlice(c.Env)["BEADS_DIR"]
+		mu.Lock()
+		showDirs = append(showDirs, beadsDir)
+		mu.Unlock()
+		if beadsDir != rigBeadsDir {
+			return nil, []byte("wrong database: " + beadsDir), inprocBDExit(1)
+		}
+		return []byte(`[{"id":"gt-new123","title":"Routed bead","status":"open","assignee":"","description":"body","issue_type":"bug","labels":["x"],"dependencies":[{"id":"gt-wisp-old","status":"open"}]}]`), nil, nil
 	}
 
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-set -eu
-printf '%s|%s|%s\n' "$(pwd)" "${BEADS_DIR:-}" "$*" >> "${BD_LOG}"
-if [ "$1" = "--allow-stale" ]; then
-  echo "Error: unknown flag: --allow-stale" >&2
-  exit 1
-fi
-case "$1" in
-  version)
-    echo "bd 1.0.3"
-    ;;
-  show)
-    if [ "${BEADS_DIR:-}" != "${RIG_BEADS}" ]; then
-      echo "wrong database: ${BEADS_DIR:-}" >&2
-      exit 1
-    fi
-    echo '[{"id":"gt-new123","title":"Routed bead","status":"open","assignee":"","description":"body","issue_type":"bug","labels":["x"],"dependencies":[{"id":"gt-wisp-old","status":"open"}]}]'
-    ;;
-esac
-`
-	_ = writeBDStub(t, binDir, bdScript, "")
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("RIG_BEADS", rigBeadsDir)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BEADS_DIR", filepath.Join(townRoot, ".beads"))
-	t.Setenv("GT_ROOT", townRoot)
-
-	cwd, err := os.Getwd()
+	info, err := getBeadInfoVia(run, townRoot, beadID)
 	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	if err := verifyBeadExists(beadID); err != nil {
-		t.Fatalf("verifyBeadExists: %v", err)
-	}
-	info, err := getBeadInfoFromTownRoot(townRoot, beadID)
-	if err != nil {
-		t.Fatalf("getBeadInfoFromTownRoot: %v", err)
+		t.Fatalf("getBeadInfoVia: %v (show BEADS_DIRs %q)", err, showDirs)
 	}
 	if info.Title != "Routed bead" || info.IssueType != "bug" || len(info.Labels) != 1 || len(info.Dependencies) != 1 {
 		t.Fatalf("info = %+v, want routed issue fields preserved", info)
 	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
-	}
-	showCalls := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(logBytes)), "\n") {
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) != 3 || !strings.Contains(parts[2], "show "+beadID) {
-			continue
-		}
-		showCalls++
-		if strings.Contains(parts[2], "--allow-stale") {
-			t.Fatalf("bd show used unsupported --allow-stale: %q", line)
-		}
-		if parts[1] != rigBeadsDir {
-			t.Fatalf("bd show BEADS_DIR = %q, want %q (line %q)", parts[1], rigBeadsDir, line)
-		}
-	}
-	if showCalls == 0 {
-		t.Fatalf("no bd show calls logged: %s", logBytes)
+	if len(showDirs) != 1 || showDirs[0] != rigBeadsDir {
+		t.Fatalf("bd show BEADS_DIRs = %q, want one show against %q", showDirs, rigBeadsDir)
 	}
 }
 
@@ -503,101 +437,51 @@ exit /b 0
 	}
 }
 
+// TestTargetRigDatabaseAllowsRouteResolvedGtBead: a gt- bead whose id also
+// reads like an hq one is checked in the target rig's own database, pinned to
+// that rig's Dolt database name, and found there.
 func TestTargetRigDatabaseAllowsRouteResolvedGtBead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows: shell stub uses POSIX env logging")
-	}
-	beads.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
-
-	townRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
+	t.Parallel()
+	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
 	for _, dir := range []string{filepath.Join(townRoot, ".beads"), filepath.Join(townRoot, "mayor", "rig"), filepath.Join(rigDir, ".beads")} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	routes := strings.Join([]string{
-		`{"prefix":"gt-","path":"gastown/mayor/rig"}`,
-		`{"prefix":"hq-","path":"."}`,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes.jsonl: %v", err)
-	}
+	writeTestRoutes(t, townRoot, []beads.Route{{Prefix: "gt-", Path: "gastown/mayor/rig"}, {Prefix: "hq-", Path: "."}})
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"dolt_database":"gastown","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`), 0644); err != nil {
 		t.Fatalf("write rig metadata: %v", err)
 	}
 
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
+	var mu sync.Mutex
+	var calls []beads.BDCall
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		mu.Lock()
+		calls = append(calls, c)
+		mu.Unlock()
+		return []byte(`[{"title":"Route issue","status":"open","assignee":"","description":""}]`), nil, nil
 	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-set -e
-if [ "$1" = "--allow-stale" ] && [ "${2:-}" = "version" ]; then
-  echo 'bd version 1.0.0'
-  exit 0
-fi
-printf '%s|%s|%s|%s|%s|%s\n' "$*" "$(pwd)" "${BEADS_DIR:-}" "${BEADS_DOLT_DATA_DIR:-}" "${GT_DOLT_DATA:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" >> "${BD_LOG}"
-cmd="$1"
-shift || true
-if [ "$cmd" = "--allow-stale" ]; then
-  cmd="$1"
-  shift || true
-fi
-case "$cmd" in
-  show)
-    echo '[{"title":"Route issue","status":"open","assignee":"","description":""}]'
-    ;;
-  *)
-    echo "unexpected command: $cmd" >&2
-    exit 2
-    ;;
-esac
-`
-	_ = writeBDStub(t, binDir, bdScript, "")
 
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GT_DOLT_DATA", filepath.Join(townRoot, ".dolt-data"))
-	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(townRoot, "wrong-data"))
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "hq")
-
-	if err := verifyBeadExistsInTargetRigDatabase("gt-hq-oy83-cleanup", "gastown", townRoot); err != nil {
+	if err := verifyBeadExistsInTargetRigDatabaseVia(run, "gt-hq-oy83-cleanup", "gastown", townRoot); err != nil {
 		t.Fatalf("verifyBeadExistsInTargetRigDatabase: %v", err)
 	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want one direct show", len(calls))
 	}
-	line := strings.TrimSpace(string(logBytes))
-	parts := strings.Split(line, "|")
-	if len(parts) != 6 {
-		t.Fatalf("malformed bd log: %q", line)
+	c := calls[0]
+	if !strings.Contains(strings.Join(c.Args, " "), "show gt-hq-oy83-cleanup --json") {
+		t.Fatalf("bd args = %q, want route-resolved show", c.Args)
 	}
-	if !strings.Contains(parts[0], "show gt-hq-oy83-cleanup --json") {
-		t.Fatalf("bd args = %q, want route-resolved show", parts[0])
+	if c.Dir != rigDir {
+		t.Fatalf("bd cwd = %q, want %q", c.Dir, rigDir)
 	}
-	if parts[1] != rigDir {
-		t.Fatalf("bd cwd = %q, want %q", parts[1], rigDir)
+	env := envSlice(c.Env)
+	if want := filepath.Join(rigDir, ".beads"); env["BEADS_DIR"] != want {
+		t.Fatalf("BEADS_DIR = %q, want %q", env["BEADS_DIR"], want)
 	}
-	if want := filepath.Join(rigDir, ".beads"); parts[2] != want {
-		t.Fatalf("BEADS_DIR = %q, want %q", parts[2], want)
-	}
-	if parts[3] != "" {
-		t.Fatalf("BEADS_DOLT_DATA_DIR leaked: %q", parts[3])
-	}
-	if parts[4] != "" {
-		t.Fatalf("GT_DOLT_DATA leaked: %q", parts[4])
-	}
-	if parts[5] != "gastown" {
-		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want gastown", parts[5])
+	if env["BEADS_DOLT_SERVER_DATABASE"] != "gastown" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want gastown", env["BEADS_DOLT_SERVER_DATABASE"])
 	}
 }
 
@@ -913,7 +797,11 @@ func TestTargetRigDatabaseLookupFailsClosedWithoutTownRoot(t *testing.T) {
 	}
 }
 
-func TestRestoreRollbackRawWorkflowFieldsFromCurrentRestoresOriginalValues(t *testing.T) {
+// TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues: a rollback puts
+// the raw workflow fields back to their pre-sling values and keeps the
+// current metadata and body.
+func TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues(t *testing.T) {
+	t.Parallel()
 	current := strings.Join([]string{
 		"no_merge: true",
 		"review_only: true",
@@ -921,16 +809,20 @@ func TestRestoreRollbackRawWorkflowFieldsFromCurrentRestoresOriginalValues(t *te
 		"",
 		"Keep this body.",
 	}, "\n")
-	townRoot, _, descPath := setupMutableBDRawSlingTest(t, current)
+	bead := &mutableBead{id: "gt-rawrollback", status: "hooked", desc: current}
+	townRoot := t.TempDir()
 	original := &beadInfo{Description: strings.Join([]string{
 		"no_merge: true",
 		"",
 		"Original body.",
 	}, "\n")}
 
-	restoreRollbackRawWorkflowFieldsFromCurrent("gt-rawrollback", townRoot, filepath.Join(townRoot, "gastown", "polecats", "toast"), original)
+	restored, err := restoreRollbackRawWorkflowFieldsVia(mutableBD(bead).run, "gt-rawrollback", townRoot, filepath.Join(townRoot, "gastown", "polecats", "toast"), &beadInfo{Description: current}, original)
+	if err != nil || !restored {
+		t.Fatalf("restoreRollbackRawWorkflowFields = %v, %v; want restored", restored, err)
+	}
 
-	desc := readMutableBDDescription(t, descPath)
+	desc := bead.description()
 	fields := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
 	if fields == nil || !fields.NoMerge || fields.ReviewOnly {
 		t.Fatalf("rollback did not restore original workflow values: %+v\n%s", fields, desc)
@@ -1374,324 +1266,19 @@ exit /b 0
 	}
 }
 
-// TestSlingFormulaOnBeadPassesFeatureAndIssueVars verifies that when using
-// gt sling <formula> --on <bead>, both --var feature=<title> and --var issue=<beadID>
-// are passed to the canonical bd mol bond command.
-func TestSlingFormulaOnBeadPassesFeatureAndIssueVars(t *testing.T) {
-	townRoot := t.TempDir()
-
-	// Minimal workspace marker so workspace.FindFromCwd() succeeds.
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Create a rig path that owns gt-* beads, and a routes.jsonl pointing to it.
-	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.MkdirAll(rigDir, 0755); err != nil {
-		t.Fatalf("mkdir rigDir: %v", err)
-	}
-	routes := strings.Join([]string{
-		`{"prefix":"gt-","path":"gastown/mayor/rig"}`,
-		`{"prefix":"hq-","path":"."}`,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes.jsonl: %v", err)
-	}
-
-	// Stub bd so we can observe the arguments passed to mol bond.
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	// The stub returns a specific title so we can verify it appears in --var feature=
-	bdScript := `#!/bin/sh
-set -e
-echo "ARGS:$*" >> "${BD_LOG}"
-cmd="$1"
-shift || true
-case "$cmd" in
-  show)
-    echo '[{"title":"My Test Feature","status":"open","assignee":"","description":""}]'
-    ;;
-  formula)
-    # formula show <name> - must output something for verifyFormulaExists
-    echo '{"name":"mol-review"}'
-    exit 0
-    ;;
-  cook)
-    exit 0
-    ;;
-	  mol)
-		sub="$1"
-		shift || true
-		case "$sub" in
-		  wisp)
-			echo 'legacy mol wisp should not be called' >&2
-			exit 1
-			;;
-		  bond)
-			echo '{"result_id":"gt-abc123","id_mapping":{"mol-review":"gt-wisp-xyz"}}'
-			;;
-		esac
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo ARGS:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-if "%cmd%"=="show" (
-  echo [{^"title^":^"My Test Feature^",^"status^":^"open^",^"assignee^":^"^",^"description^":^"^"}]
-  exit /b 0
-)
-if "%cmd%"=="formula" (
-  echo {^"name^":^"mol-review^"}
-  exit /b 0
-)
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo legacy mol wisp should not be called 1>&2
-    exit /b 1
-  )
-  if "%sub%"=="bond" (
-    echo {^"result_id^":^"gt-abc123^",^"id_mapping^":{^"mol-review^":^"gt-wisp-xyz^"}}
-    exit /b 0
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	attachedLogPath := filepath.Join(townRoot, "attached-molecule.log")
-	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", attachedLogPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "mayor")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("TMUX_PANE", "") // Prevent inheriting real tmux pane from test runner
-
-	cwd, err := os.Getwd()
+// TestFormulaVarsForBeadPassesFeatureAndIssueVars verifies that gt sling
+// <formula> --on <bead> bonds with --var feature=<title> and --var
+// issue=<beadID> first, then the caller's vars, even for a formula gt cannot
+// load to backfill defaults.
+func TestFormulaVarsForBeadPassesFeatureAndIssueVars(t *testing.T) {
+	t.Parallel()
+	vars, err := formulaVarsForBead("mol-review", "gt-abc123", "My Test Feature", t.TempDir(), []string{"k=v"})
 	if err != nil {
-		t.Fatalf("getwd: %v", err)
+		t.Fatalf("formulaVarsForBead: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	// Ensure we don't leak global flag state across tests.
-	prevOn := slingOnTarget
-	prevVars := slingVars
-	prevDryRun := slingDryRun
-	prevNoConvoy := slingNoConvoy
-	t.Cleanup(func() {
-		slingOnTarget = prevOn
-		slingVars = prevVars
-		slingDryRun = prevDryRun
-		slingNoConvoy = prevNoConvoy
-	})
-
-	slingDryRun = false
-	slingNoConvoy = true
-	slingVars = nil
-	slingOnTarget = "gt-abc123"
-
-	// Prevent real tmux nudge from firing during tests (causes agent self-interruption)
-	t.Setenv("GT_TEST_NO_NUDGE", "1")
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1") // Stub bd doesn't track state
-
-	if err := runSling(nil, []string{"mol-review"}); err != nil {
-		t.Fatalf("runSling: %v", err)
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
-	}
-
-	// Find the mol bond command and verify both --var arguments
-	logLines := strings.Split(string(logBytes), "\n")
-	var bondLine string
-	for _, line := range logLines {
-		if strings.Contains(line, "mol bond") {
-			bondLine = line
-			break
-		}
-	}
-
-	if bondLine == "" {
-		t.Fatalf("mol bond command not found in log: %s", string(logBytes))
-	}
-
-	// Verify --var feature=<title> is present
-	if !containsVarArg(bondLine, "feature", "My Test Feature") {
-		t.Errorf("mol bond missing --var feature=<title>\ngot: %s", bondLine)
-	}
-
-	// Verify --var issue=<beadID> is present
-	if !containsVarArg(bondLine, "issue", "gt-abc123") {
-		t.Errorf("mol bond missing --var issue=<beadID>\ngot: %s", bondLine)
-	}
-}
-
-// TestVerifyBeadExistsAllowStale reproduces the bug in gtl-ncq where beads
-// visible via regular bd show fail due to database staleness.
-// The fix uses --allow-stale to skip the staleness check for existence verification.
-func TestVerifyBeadExistsAllowStale(t *testing.T) {
-	beads.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
-
-	townRoot := t.TempDir()
-
-	// Create minimal workspace structure
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Create a stub bd that always succeeds for "show" commands.
-	// The real test is that verifyBeadExists calls bd show and parses
-	// the output correctly. The --allow-stale flag may or may not be
-	// present depending on BdSupportsAllowStale() cache state.
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	bdScript := `#!/bin/sh
-set -e
-cmd="$1"
-shift || true
-# Strip --allow-stale if present (it's a global flag before subcommand)
-if [ "$cmd" = "--allow-stale" ]; then
-  cmd="$1"
-  shift || true
-fi
-case "$cmd" in
-  show)
-    echo '[{"title":"Test bead","status":"open","assignee":""}]'
-    ;;
-  version)
-    echo "bd 0.1.0"
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-set "cmd=%1"
-if "%cmd%"=="--allow-stale" set "cmd=%2"
-if "%cmd%"=="show" (
-  echo [{"title":"Test bead","status":"open","assignee":""}]
-  exit /b 0
-)
-if "%cmd%"=="version" (
-  echo bd 0.1.0
-  exit /b 0
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	// EXPECTED: verifyBeadExists should use --allow-stale and succeed
-	beadID := "jv-v599"
-	err = verifyBeadExists(beadID)
-	if err != nil {
-		t.Errorf("verifyBeadExists(%q) failed: %v\nExpected --allow-stale to skip sync check", beadID, err)
-	}
-}
-
-func TestBdCmdStripsUnsupportedAllowStale(t *testing.T) {
-	beads.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
-
-	townRoot := t.TempDir()
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-printf '%s\n' "$*" >> "$BD_LOG"
-for arg in "$@"; do
-  if [ "$arg" = "--allow-stale" ]; then
-    echo "Error: unknown flag: --allow-stale" >&2
-    exit 1
-  fi
-done
-case "$1" in
-  show)
-    echo '[{"title":"Routed bead","status":"open","assignee":""}]'
-    ;;
-  version)
-    echo "bd version 1.0.3"
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
->>"%BD_LOG%" echo %*
-for %%A in (%*) do if "%%~A"=="--allow-stale" (
-  echo Error: unknown flag: --allow-stale 1>&2
-  exit /b 1
-)
-if "%1"=="show" (
-  echo [{"title":"Routed bead","status":"open","assignee":""}]
-  exit /b 0
-)
-if "%1"=="version" (
-  echo bd version 1.0.3
-  exit /b 0
-)
-exit /b 1
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	out, err := BdCmd("show", "gt-rca-epic-routing.3", "--json").
-		AllowStale().
-		Dir(townRoot).
-		Output()
-	if err != nil {
-		t.Fatalf("BdCmd show with unsupported --allow-stale failed: %v", err)
-	}
-	if !strings.Contains(string(out), "Routed bead") {
-		t.Fatalf("BdCmd show output = %q, want routed bead JSON", string(out))
-	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
-	}
-	log := string(logBytes)
-	if strings.Contains(log, "show gt-rca-epic-routing.3 --json --allow-stale") {
-		t.Fatalf("BdCmd passed unsupported --allow-stale to show command:\n%s", log)
-	}
-	if !strings.Contains(log, "show gt-rca-epic-routing.3 --json") {
-		t.Fatalf("BdCmd did not run expected show command:\n%s", log)
+	want := []string{"feature=My Test Feature", "issue=gt-abc123", "k=v"}
+	if strings.Join(vars, "|") != strings.Join(want, "|") {
+		t.Fatalf("vars = %q, want %q", vars, want)
 	}
 }
 
@@ -1896,38 +1483,24 @@ func TestIsHookedAgentDead_NoTmuxSession(t *testing.T) {
 	_ = result
 }
 
+// TestHookBeadWithRetryForcesAutoCommit: the hook write commits on its own,
+// so the read-back and every later bd call see it.
 func TestHookBeadWithRetryForcesAutoCommit(t *testing.T) {
-	townRoot := t.TempDir()
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
+	t.Parallel()
+	var got beads.BDCall
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		got = c
+		return nil, nil, nil
+	}
 
-	bdScript := `#!/usr/bin/env sh
-printf 'ENV:BD_DOLT_AUTO_COMMIT=%s|%s\n' "$BD_DOLT_AUTO_COMMIT" "$*" >> "$BD_LOG"
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo ENV:BD_DOLT_AUTO_COMMIT=%BD_DOLT_AUTO_COMMIT%^|%*>>"%BD_LOG%"
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
-	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
-
-	if err := hookBeadWithRetry("gt-test123", "gastown/polecats/toast", townRoot); err != nil {
+	if err := hookBeadWithRetryVia(run, nil, "gt-test123", "gastown/polecats/toast", t.TempDir()); err != nil {
 		t.Fatalf("hookBeadWithRetry: %v", err)
 	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read bd log: %v", err)
+	if strings.Join(got.Args, " ") != "update gt-test123 --status=hooked --assignee=gastown/polecats/toast" {
+		t.Fatalf("hook argv = %q", got.Args)
 	}
-	logText := string(logBytes)
-	if !strings.Contains(logText, "ENV:BD_DOLT_AUTO_COMMIT=on|") {
-		t.Fatalf("hook update did not force auto-commit; log:\n%s", logText)
+	if v := envSlice(got.Env)["BD_DOLT_AUTO_COMMIT"]; v != "on" {
+		t.Fatalf("hook update BD_DOLT_AUTO_COMMIT = %q, want on", v)
 	}
 }
 
@@ -1962,23 +1535,16 @@ func TestBuildSlingFieldUpdatesIncludesConvoyFields(t *testing.T) {
 	}
 }
 
+// TestStoreFieldsInBeadConvoyFields: convoy membership lands in the bead's
+// attachment fields.
 func TestStoreFieldsInBeadConvoyFields(t *testing.T) {
-	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", filepath.Join(t.TempDir(), "mol.log"))
-	logPath := os.Getenv("GT_TEST_ATTACHED_MOLECULE_LOG")
-
-	if err := storeFieldsInBead("gt-test123", beadFieldUpdates{
+	t.Parallel()
+	text := applyBeadFieldUpdates(&beads.Issue{}, beadFieldUpdates{
 		ConvoyID:      "hq-cv-test1",
 		MergeStrategy: "local",
 		ConvoyOwned:   true,
-	}); err != nil {
-		t.Fatalf("storeFieldsInBead: %v", err)
-	}
+	})
 
-	body, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	text := string(body)
 	if !strings.Contains(text, "convoy_id: hq-cv-test1") {
 		t.Fatalf("missing convoy_id in description:\n%s", text)
 	}
@@ -2011,21 +1577,15 @@ func TestBeadFieldModeUpdateCanClearStaleRalphMode(t *testing.T) {
 	}
 }
 
+// TestStoreFieldsInBeadFormulaSetsAttachedAt: attaching a formula stamps
+// attached_at.
 func TestStoreFieldsInBeadFormulaSetsAttachedAt(t *testing.T) {
-	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", filepath.Join(t.TempDir(), "mol.log"))
-	logPath := os.Getenv("GT_TEST_ATTACHED_MOLECULE_LOG")
-
-	if err := storeFieldsInBead("gt-test123", beadFieldUpdates{
+	t.Parallel()
+	body := applyBeadFieldUpdates(&beads.Issue{}, beadFieldUpdates{
 		AttachedFormula: "mol-dog-reaper",
-	}); err != nil {
-		t.Fatalf("storeFieldsInBead: %v", err)
-	}
+	})
 
-	body, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	fields := beads.ParseAttachmentFields(&beads.Issue{Description: string(body)})
+	fields := beads.ParseAttachmentFields(&beads.Issue{Description: body})
 	if fields == nil || fields.AttachedFormula != "mol-dog-reaper" || fields.AttachedAt == "" {
 		t.Fatalf("formula attachment fields = %#v, want formula and attached_at", fields)
 	}
@@ -2034,27 +1594,19 @@ func TestStoreFieldsInBeadFormulaSetsAttachedAt(t *testing.T) {
 	}
 }
 
+// TestStoreFieldsInBeadRawReviewRefreshesAttachedAt: re-slinging raw review
+// work refreshes a stale attached_at.
 func TestStoreFieldsInBeadRawReviewRefreshesAttachedAt(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "raw-review.log")
-	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", logPath)
-
+	t.Parallel()
 	stale := "2026-06-30T12:00:00Z"
-	if err := os.WriteFile(logPath, []byte("attached_at: "+stale+"\nno_merge: true\nreview_only: true\n"), 0644); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
+	issue := &beads.Issue{Description: "attached_at: " + stale + "\nno_merge: true\nreview_only: true\n"}
 
-	if err := storeFieldsInBead("gt-test123", beadFieldUpdates{
+	body := applyBeadFieldUpdates(issue, beadFieldUpdates{
 		NoMerge:    true,
 		ReviewOnly: true,
-	}); err != nil {
-		t.Fatalf("storeFieldsInBead: %v", err)
-	}
+	})
 
-	body, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	fields := beads.ParseAttachmentFields(&beads.Issue{Description: string(body)})
+	fields := beads.ParseAttachmentFields(&beads.Issue{Description: body})
 	if fields == nil || !fields.NoMerge || !fields.ReviewOnly {
 		t.Fatalf("raw review fields = %#v", fields)
 	}
