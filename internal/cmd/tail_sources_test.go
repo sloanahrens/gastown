@@ -367,3 +367,55 @@ func TestEventsSource_TruthyConfigIsOn(t *testing.T) {
 		}
 	}
 }
+
+func TestEventsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
+	down := errors.New("bd events tail: exit status 25")
+	j := &fakeTailJournal{config: "false", errs: []error{down}, records: []beads.EventRecord{
+		{Seq: 1, TS: "2026-09-30T12:00:00Z", Op: "create", IssueID: "gt-old"},
+		{Seq: 2, TS: "2026-09-30T13:59:00Z", Op: "create", IssueID: "gt-new"},
+	}}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:00:00Z"), now: fixedNow}
+	want := []string{
+		"gastown events journal off in config (events-journal=false): only mutations made through gt are journaled",
+		"gastown events read failed: bd events tail: exit status 25",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("failed first poll = %q", got)
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"gastown events create gt-new seq=2"}) {
+		t.Fatalf("retry ignored the cutoff or repeated the notice: %q", got)
+	}
+}
+
+func TestLandingsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gastown.jsonl")
+	if err := os.Mkdir(path, 0o700); err != nil { // unreadable as a file
+		t.Fatal(err)
+	}
+	s := &landingsSource{rig: "gastown", reader: &landings.Reader{Path: path}, cutoff: at("2026-09-30T13:00:00Z"), now: fixedNow}
+	if got := texts(s.Poll()); len(got) != 1 || !strings.HasPrefix(got[0], "gastown landings read failed: ") {
+		t.Fatalf("failed first poll = %q", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, path, `{"bead":"gt-old","landed_at":"2026-09-30T12:00:00Z"}`+"\n"+`{"bead":"gt-new","landed_at":"2026-09-30T13:59:00Z"}`+"\n")
+	got := texts(s.Poll())
+	if len(got) != 1 || !strings.HasPrefix(got[0], "gastown landings landed gt-new ") {
+		t.Fatalf("retry ignored the cutoff: %q", got)
+	}
+}
+
+func TestDaemonSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
+	dir := t.TempDir()
+	writeGz(t, filepath.Join(dir, "daemon-2026-09-30T13-30-00.000.log.gz"), "2026/09/30 08:10:00 in-backup\n")
+	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T13:00:00Z"), loc: tailTestLoc, now: fixedNow}
+	got := texts(s.Poll())
+	if len(got) != 2 || got[0] != "town daemon in-backup" || !strings.HasPrefix(got[1], "town daemon cannot read daemon.log: ") {
+		t.Fatalf("failed first poll = %q", got)
+	}
+	appendFile(t, filepath.Join(dir, "daemon.log"), "2026/09/30 07:00:00 too-old\n2026/09/30 08:40:00 in-window\n")
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"town daemon in-window"}) {
+		t.Fatalf("retry ignored the cutoff or reread the backups: %q", got)
+	}
+}

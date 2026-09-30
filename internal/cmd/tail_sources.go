@@ -76,9 +76,13 @@ type eventsSource struct {
 	now      func() time.Time
 	pageSize int
 
-	started bool
-	since   int64
-	failed  tailOnce
+	configChecked bool
+	// backlogDone is set by the first read that reaches the journal's head;
+	// until then every record is cut at the cutoff, so a first read that
+	// fails is retried as a backlog read, never as a dump from seq 0.
+	backlogDone bool
+	since       int64
+	failed      tailOnce
 }
 
 func (s *eventsSource) line(at time.Time, format string, args ...any) tailLine {
@@ -94,9 +98,9 @@ func (s *eventsSource) Poll() []tailLine {
 		return nil
 	}
 	var out []tailLine
-	backlog := !s.started
-	if backlog {
-		s.started = true
+	backlog := !s.backlogDone
+	if !s.configChecked {
+		s.configChecked = true
 		// The journal is off in production until the paired install turns it
 		// on. gt's own bd calls journal regardless (BD_EVENTS_JOURNAL=1), so
 		// the journal is read anyway; the operator is told it is partial.
@@ -159,6 +163,7 @@ func (s *eventsSource) Poll() []tailLine {
 			s.since = page.NextSince
 		}
 		if !page.More || !advanced {
+			s.backlogDone = true
 			return out
 		}
 	}
@@ -198,14 +203,16 @@ type landingsSource struct {
 func (s *landingsSource) Poll() []tailLine {
 	now := s.now()
 	backlog := !s.started
-	s.started = true
 	recs, bad, err := s.reader.ReadNew()
 	if err != nil {
+		// started stays false: the retry is still a backlog read, cut at the
+		// cutoff.
 		if s.failed.first(err.Error()) {
 			return []tailLine{{At: now, Rig: s.rig, Kind: tailKindLandings, Text: "read failed: " + err.Error()}}
 		}
 		return nil
 	}
+	s.started = true
 	s.failed.clear()
 	var out []tailLine
 	// A line that is not a record is counted, never echoed: the stream must
@@ -254,11 +261,15 @@ type daemonSource struct {
 	now       func() time.Time
 	rigFilter *regexp.Regexp // nil = every line
 
-	started bool
-	offset  int64
-	info    os.FileInfo
-	lastAt  time.Time
-	failed  tailOnce
+	// started is set by the first successful daemon.log read; until then
+	// every line is cut at the cutoff. backupsRead keeps a retried first
+	// read from printing the backups twice.
+	started     bool
+	backupsRead bool
+	offset      int64
+	info        os.FileInfo
+	lastAt      time.Time
+	failed      tailOnce
 }
 
 // tailRigFilter matches a line naming rig as a whole word: "gastown" in
@@ -275,7 +286,6 @@ func (s *daemonSource) Poll() []tailLine {
 	now := s.now()
 	var out []tailLine
 	backlog := !s.started
-	s.started = true
 	emit := func(raw string) {
 		at, text := s.parse(raw)
 		if backlog && (at.IsZero() || at.Before(s.cutoff)) {
@@ -289,7 +299,8 @@ func (s *daemonSource) Poll() []tailLine {
 		}
 		out = append(out, s.line(at, text))
 	}
-	if backlog {
+	if !s.backupsRead {
+		s.backupsRead = true
 		for _, b := range s.backups() {
 			if err := readDaemonBackup(b, emit); err != nil {
 				out = append(out, s.line(now, "cannot read "+filepath.Base(b)+": "+err.Error()))
@@ -301,6 +312,7 @@ func (s *daemonSource) Poll() []tailLine {
 			out = append(out, s.line(now, "cannot read daemon.log: "+err.Error()))
 		}
 	} else {
+		s.started = true
 		s.failed.clear()
 		if note != "" {
 			// The notice goes before the new file's lines.
@@ -385,7 +397,8 @@ func readDaemonBackup(path string, emit func(string)) error {
 
 // readCurrent reads daemon.log's complete lines past the offset. A file that
 // was replaced (lumberjack renamed it to a backup) or shrank is read from
-// its start, and note says so.
+// its start, and note says so. Lines the old file gained between the last
+// poll and the rename are not read: they are in the newest backup.
 func (s *daemonSource) readCurrent(emit func(string)) (note string, err error) {
 	f, err := os.Open(filepath.Join(s.dir, "daemon.log"))
 	if err != nil {
