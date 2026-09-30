@@ -12,3 +12,4 @@ internal/git/gitfake
 internal/land
 internal/polecat
 internal/rig
+internal/testutil

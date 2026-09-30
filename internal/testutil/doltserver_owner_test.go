@@ -16,11 +16,12 @@ import (
 // ownership rather than by age (gt-ehlga). Reads the request the options
 // build; starts nothing.
 func TestDoltContainerOpts_LabelsOwnerProcess(t *testing.T) {
+	t.Parallel()
 	host, err := os.Hostname()
 	if err != nil || host == "" {
-		t.Skipf("no hostname on this machine: %v", err)
+		t.Fatalf("no hostname on this machine: %v", err)
 	}
-	req := applyOpts(t)
+	req := applyOpts(t, newMapEnv())
 	if got := req.Labels[slot.OwnerPIDLabel]; got != strconv.Itoa(os.Getpid()) {
 		t.Errorf("Labels[%s] = %q, want this test process's pid %d", slot.OwnerPIDLabel, got, os.Getpid())
 	}

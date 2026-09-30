@@ -2,7 +2,6 @@ package testutil
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -45,8 +44,8 @@ const parallelGlobalWaiver = "parallel-global-ok"
 // install-once and never restore (TestMain, sync.Once), which is what
 // internal/refinery's TestMain does and what makes t.Parallel safe there.
 func TestNoParallelTestsReachProcessGlobalSwaps(t *testing.T) {
-	root := repoRoot(t)
-	scanner := newSeamScanner(t, root)
+	t.Parallel()
+	scanner := newSeamScanner(sharedRepoTree(t))
 
 	violations := scanner.scan(t)
 	if len(violations) == 0 {
@@ -67,8 +66,12 @@ func TestNoParallelTestsReachProcessGlobalSwaps(t *testing.T) {
 // tree. So it is run over a fixture whose verdict is known, covering each way a
 // swap can be safe or unsafe.
 func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
-	fixture := writeGuardFixture(t)
-	scanner := newSeamScanner(t, fixture)
+	t.Parallel()
+	fixture, err := loadRepoTree(writeGuardFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := newSeamScanner(fixture)
 	got := scanner.scan(t)
 
 	// Test names, not line numbers: the fixture is edited more often than the
@@ -341,6 +344,7 @@ func repoRoot(t *testing.T) string {
 // test package, or an exported test seam in another package — a writer of a
 // process global?
 type seamScanner struct {
+	tree    *repoTree
 	root    string
 	module  string
 	fset    *token.FileSet
@@ -349,60 +353,16 @@ type seamScanner struct {
 	mutator map[string]map[string]bool
 }
 
-func newSeamScanner(t *testing.T, root string) *seamScanner {
-	t.Helper()
+func newSeamScanner(tree *repoTree) *seamScanner {
 	return &seamScanner{
-		root:    root,
-		module:  modulePath(t, root),
-		fset:    token.NewFileSet(),
+		tree:    tree,
+		root:    tree.root,
+		module:  tree.module,
+		fset:    tree.fset,
+		dirs:    tree.dirs,
 		pkgs:    map[string]*pkgAnalysis{},
 		mutator: map[string]map[string]bool{},
 	}
-}
-
-func modulePath(t *testing.T, root string) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
-	if err != nil {
-		t.Fatalf("read go.mod: %v", err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
-			return strings.TrimSpace(rest)
-		}
-	}
-	t.Fatalf("go.mod at %s has no module line", root)
-	return ""
-}
-
-func (s *seamScanner) runDirs(t *testing.T) []string {
-	t.Helper()
-	err := filepath.WalkDir(s.root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		switch d.Name() {
-		case "vendor", ".git", "testdata", "node_modules":
-			return filepath.SkipDir
-		}
-		// A nested module (plugins/dolt-snapshots) has its own import paths;
-		// resolving its packages against this module's prefix would be wrong.
-		if path != s.root {
-			if _, statErr := os.Stat(filepath.Join(path, "go.mod")); statErr == nil {
-				return filepath.SkipDir
-			}
-		}
-		s.dirs = append(s.dirs, path)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk %s: %v", s.root, err)
-	}
-	sort.Strings(s.dirs)
-	return s.dirs
 }
 
 // scan runs in three passes because the passes depend on each other in one
@@ -412,7 +372,6 @@ func (s *seamScanner) runDirs(t *testing.T) []string {
 // parsing them.
 func (s *seamScanner) scan(t *testing.T) []string {
 	t.Helper()
-	s.runDirs(t)
 	for _, dir := range s.dirs {
 		s.analysis(dir)
 	}
@@ -495,10 +454,6 @@ type pkgAnalysis struct {
 }
 
 func parseDir(s *seamScanner, dir string) *pkgAnalysis {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
 	pa := &pkgAnalysis{
 		root:         s.root,
 		importPath:   s.importPath(dir),
@@ -514,18 +469,13 @@ func parseDir(s *seamScanner, dir string) *pkgAnalysis {
 		crossTargets: map[string]map[string]string{},
 	}
 	var files []*ast.File
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		f, err := parser.ParseFile(s.fset, path, nil, parser.ParseComments)
-		if err != nil {
+	for _, rf := range s.tree.files[dir] {
+		name, f := rf.name, rf.ast
+		if rf.err != nil {
 			// A file this package cannot parse is this guard's problem to
 			// report, not to skip: silently ignoring it would let a swap hide
 			// behind a syntax error.
-			pa.parseErrors = append(pa.parseErrors, path+": "+err.Error())
+			pa.parseErrors = append(pa.parseErrors, rf.path+": "+rf.err.Error())
 			continue
 		}
 		files = append(files, f)

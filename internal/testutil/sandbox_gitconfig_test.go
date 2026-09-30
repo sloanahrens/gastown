@@ -2,55 +2,53 @@ package testutil
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// The sandbox gitconfig turns off git's fsync for every package under the
-// hermetic harness: nothing a test writes outlives the test binary, and the
-// flushes serialise parallel git-heavy tests (gt-22hdp.33).
-func TestSandboxGitConfigDisablesFsync(t *testing.T) {
+// The sandbox gitconfig gives tests a git identity, turns off git's fsync
+// (nothing a test writes outlives the test binary, and the flushes serialise
+// parallel git-heavy tests, gt-22hdp.33), and points init at a minimal
+// template: hooks/ and info/exclude, which code under test may write into,
+// without the stock template's inert sample hooks. That git reads it so is
+// TestIntegrationSandboxGitConfig*'s.
+func TestSandboxGitConfig(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	if err := writeSandboxGitConfig(home); err != nil {
 		t.Fatalf("writeSandboxGitConfig: %v", err)
 	}
-	out, err := exec.Command("git", "config", "--file", filepath.Join(home, ".gitconfig"), "core.fsync").Output()
-	if err != nil {
-		t.Fatalf("git config core.fsync: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != "none" {
-		t.Fatalf("core.fsync = %q, want none", got)
-	}
-}
-
-// The sandbox template keeps what code under test may write into (hooks/,
-// info/exclude) and drops the stock template's inert sample hooks.
-func TestSandboxGitConfigUsesMinimalTemplate(t *testing.T) {
-	t.Parallel()
-	home := t.TempDir()
-	if err := writeSandboxGitConfig(home); err != nil {
-		t.Fatalf("writeSandboxGitConfig: %v", err)
-	}
-	repo := filepath.Join(t.TempDir(), "repo")
-	cmd := exec.Command("git", "init", "-q", repo)
-	cmd.Env = append(os.Environ(), "HOME="+home, "GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"), "GIT_CONFIG_NOSYSTEM=1")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	if info, err := os.Stat(filepath.Join(repo, ".git", "hooks")); err != nil || !info.IsDir() {
-		t.Fatalf(".git/hooks missing from a repo made with the sandbox template: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(repo, ".git", "info", "exclude")); err != nil {
-		t.Fatalf(".git/info/exclude missing from a repo made with the sandbox template: %v", err)
-	}
-	samples, err := filepath.Glob(filepath.Join(repo, ".git", "hooks", "*.sample"))
+	data, err := os.ReadFile(filepath.Join(home, ".gitconfig"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(samples) != 0 {
-		t.Fatalf("sample hooks in a repo made with the sandbox template: %v", samples)
+	template := filepath.Join(home, ".git-template")
+	for _, want := range []string{
+		"[user]\n\tname = Hermetic Test\n\temail = hermetic@test.invalid",
+		"[init]\n\tdefaultBranch = main\n\ttemplateDir = " + template + "\n",
+		"[core]\n\tfsync = none",
+		"[commit]\n\tgpgsign = false",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf(".gitconfig lacks %q:\n%s", want, data)
+		}
+	}
+	entries, err := os.ReadDir(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, " ") != "hooks info" {
+		t.Errorf("template holds %q, want hooks and info only", names)
+	}
+	if hooks, _ := os.ReadDir(filepath.Join(template, "hooks")); len(hooks) != 0 {
+		t.Errorf("template hooks/ is not empty: %d entries", len(hooks))
+	}
+	if _, err := os.Stat(filepath.Join(template, "info", "exclude")); err != nil {
+		t.Errorf("template has no info/exclude: %v", err)
 	}
 }

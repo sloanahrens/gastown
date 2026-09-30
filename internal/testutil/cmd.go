@@ -25,8 +25,13 @@ func isTelemetrySwitch(kv string) bool {
 }
 
 func CleanGTEnv(extraEnv ...string) []string {
+	return cleanGTEnv(os.Environ(), extraEnv...)
+}
+
+// cleanGTEnv is CleanGTEnv from base instead of the process environment.
+func cleanGTEnv(base []string, extraEnv ...string) []string {
 	var clean []string
-	for _, e := range os.Environ() {
+	for _, e := range base {
 		if strings.HasPrefix(e, "GT_") &&
 			!strings.HasPrefix(e, "GT_DOLT_PORT=") &&
 			!strings.HasPrefix(e, "GT_DOLT_HOST=") &&

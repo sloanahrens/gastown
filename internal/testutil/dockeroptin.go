@@ -1,7 +1,5 @@
 package testutil
 
-import "os"
-
 // The opt-in lives in a file with no build constraint: hermetic.go (every
 // platform) reads it, and it used to sit in doltserver.go (!windows), which
 // broke `go build ./...` on Windows.
@@ -21,5 +19,9 @@ const DockerTestsEnv = "GT_TEST_DOCKER"
 // DockerTestsEnabled reports whether container-backed tests may run in this
 // process.
 func DockerTestsEnabled() bool {
-	return os.Getenv(DockerTestsEnv) == "1"
+	return dockerTestsEnabled(procEnv{})
+}
+
+func dockerTestsEnabled(env environment) bool {
+	return getenv(env, DockerTestsEnv) == "1"
 }

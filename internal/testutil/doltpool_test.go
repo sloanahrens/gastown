@@ -53,6 +53,7 @@ func newFakeDoltPool(t *testing.T, stores, sqlDBs int) (*doltDBPool, *fakeResets
 }
 
 func TestDoltPoolReturnsALeaseResetWhenItsTestEnds(t *testing.T) {
+	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
 	var first, second string
 	t.Run("first", func(t *testing.T) { first = p.leaseForTest(t, leaseStore).name })
@@ -83,6 +84,7 @@ func (c *cleanupTB) Errorf(string, ...any) {
 }
 
 func TestDoltPoolReturnsTheLeaseOfAFailedTest(t *testing.T) {
+	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
 	failing := &cleanupTB{TB: t}
 	e := p.leaseForTest(failing, leaseStore)
@@ -102,6 +104,7 @@ func TestDoltPoolReturnsTheLeaseOfAFailedTest(t *testing.T) {
 }
 
 func TestDoltPoolExhaustedFailsWithoutCreatingADatabase(t *testing.T) {
+	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 1)
 	if _, err := p.acquire(leaseStore, "TestHolder", ""); err != nil {
 		t.Fatal(err)
@@ -125,6 +128,7 @@ func TestDoltPoolExhaustedFailsWithoutCreatingADatabase(t *testing.T) {
 }
 
 func TestDoltPoolLeaseWaitsForARelease(t *testing.T) {
+	t.Parallel()
 	p, _ := newFakeDoltPool(t, 1, 0)
 	p.wait = time.Hour
 	held, err := p.acquire(leaseStore, "TestHolder", "")
@@ -150,6 +154,7 @@ func TestDoltPoolLeaseWaitsForARelease(t *testing.T) {
 }
 
 func TestDoltPoolReclaimsABdInitLeaseOnceItsDirIsGone(t *testing.T) {
+	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
 	owner := filepath.Join(t.TempDir(), "rig")
 	if err := os.Mkdir(owner, 0o755); err != nil {
@@ -178,6 +183,7 @@ func TestDoltPoolReclaimsABdInitLeaseOnceItsDirIsGone(t *testing.T) {
 }
 
 func TestDoltPoolRefusesABdInitWithoutAnAbsoluteDir(t *testing.T) {
+	t.Parallel()
 	p, _ := newFakeDoltPool(t, 1, 0)
 	for _, dir := range []string{"", "relative/rig"} {
 		if name, err := p.initSource(p.port, dir); err == nil {
@@ -196,6 +202,7 @@ func TestDoltPoolRefusesABdInitWithoutAnAbsoluteDir(t *testing.T) {
 }
 
 func TestDoltPoolKeepsABdInitLeaseWhoseDirNeverExisted(t *testing.T) {
+	t.Parallel()
 	p, _ := newFakeDoltPool(t, 1, 0)
 	if _, err := p.acquire(leaseInit, "bd init in nowhere", filepath.Join(t.TempDir(), "never")); err != nil {
 		t.Fatal(err)
@@ -207,6 +214,7 @@ func TestDoltPoolKeepsABdInitLeaseWhoseDirNeverExisted(t *testing.T) {
 }
 
 func TestDoltPoolStoreAndInitLeasesPickTheirState(t *testing.T) {
+	t.Parallel()
 	p, resets := newFakeDoltPool(t, 2, 0)
 	migrated := p.stores[1]
 	migrated.head, migrated.migrated = "mig1", true
@@ -247,6 +255,7 @@ func TestDoltPoolStoreAndInitLeasesPickTheirState(t *testing.T) {
 }
 
 func TestDoltPoolNeverLendsADatabaseItCouldNotReset(t *testing.T) {
+	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
 	e, err := p.acquire(leaseStore, "TestDirtier", "")
 	if err != nil {
@@ -262,6 +271,7 @@ func TestDoltPoolNeverLendsADatabaseItCouldNotReset(t *testing.T) {
 }
 
 func TestCatalogViolations(t *testing.T) {
+	t.Parallel()
 	pool := map[string]bool{"testdb_a": true, "testdb_b": true}
 	image := []string{"gt_test", "information_schema", "mysql"}
 	with := func(extra ...string) []string { return append(append([]string{}, image...), extra...) }
@@ -309,6 +319,7 @@ func TestCatalogViolations(t *testing.T) {
 // The refusals are dolt 2.0.7's own words, captured from DoltDockerImage;
 // TestDoltCatalogGuardFiresOnRealServer checks them against the real server.
 func TestParseUndropRefusal(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		msg     string
 		want    []string
