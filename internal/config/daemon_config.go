@@ -487,6 +487,12 @@ type LandingWorkerConfig struct {
 	// om_verdict "error:<reason>".
 	OMTimeoutStr string `json:"om_timeout,omitempty"`
 
+	// WorkRoot is where throwaway landing and post-landing worktrees are
+	// created (a <rig> directory under it, 0700). It must not be under the
+	// town root: the git guard refuses worktrees there. Empty means
+	// $TMPDIR/gt-landing-<uid>.
+	WorkRoot string `json:"work_root,omitempty"`
+
 	// PostLandTimeoutStr bounds one run of the rig's
 	// merge_queue.post_land_command (e.g. "60m"). Default 60m.
 	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
