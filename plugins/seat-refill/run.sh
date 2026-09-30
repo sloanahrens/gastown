@@ -206,6 +206,12 @@ agent_live() {
 # in a rig the pool may serve. Notification envelopes are titles *about* work
 # (STATE_COLLAPSE, an escalation) rather than work, so they stay out —
 # dispatch-check draws the same line for the same reason (gt-59o9).
+#
+# The operator label takes a bead out too. It reserves the work for the human
+# operator, who does it by hand, and the nudge below is what put gt-nj23.9 to
+# the mayor after the operator had taken it (gt-21pl0). The convoy feeders
+# read the same reservation on the bead's record; this is the one dispatcher
+# that asks rather than slings, so it has to read it here.
 
 operational_rigs() {
   local out rows
@@ -245,6 +251,7 @@ while IFS= read -r RIG; do
     | select((.priority // 99) <= $maxp)
     | select((.issue_type // "") == "task" or (.issue_type // "") == "bug" or (.issue_type // "") == "feature")
     | select((.assignee // "") == "")
+    | select(([(.labels // [])[] | ascii_downcase] | index("operator")) == null)
     | select((.title // "") | test("^(STATE_COLLAPSE|\\[HIGH\\]|\\[CRITICAL\\]|\\[MEDIUM\\]|main_branch_test:|HANDOFF|merge-slot)") | not)
     | [$rig, .id, (.priority | tostring), ((.labels // []) | join(","))] | @tsv
   ' 2>/dev/null) || {

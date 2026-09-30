@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
@@ -213,6 +214,16 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	if isDeferredBead(info) && !explicitForce {
 		result.ErrMsg = "deferred"
 		return result, fmt.Errorf("bead %s is deferred (use --force to override)", params.BeadID)
+	}
+
+	// Guard against dispatching a bead the human operator owns (gt-21pl0).
+	// Mirrors the guard in runSling so the batch and queue callers — which
+	// include the daemon's convoy feeders — refuse one too, and read the
+	// refusal as a deferral rather than a failed dispatch.
+	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee); reason != "" && !explicitForce {
+		result.ErrMsg = "operator-reserved"
+		return result, fmt.Errorf("%s %s is the operator's work (%s)\nAn agent does not take it. Use --force to sling it to one anyway",
+			dispatch.SlingRefusalMarker, params.BeadID, reason)
 	}
 
 	// Content duplicate check (gt-mcq): refuse a bead whose named tests and

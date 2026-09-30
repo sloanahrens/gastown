@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -546,6 +547,13 @@ func isActionableReadyBead(issue *beads.Issue) bool {
 		return false
 	}
 	if beads.IsNonDispatchableBead(issue) {
+		return false
+	}
+	// Work the operator reserved is not the mayor's to sling: naming one here
+	// is what sends the mayor into a sling that refuses (gt-21pl0). The rule is
+	// the convoy feeders' own, so this check and seat-refill's draw the same
+	// line the sling guard does.
+	if dispatch.OperatorReservation(issue.Labels, issue.Assignee) != "" {
 		return false
 	}
 
