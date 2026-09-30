@@ -1,4 +1,4 @@
-> Status: implementing on crew/sloan/gt-tail (gt-s3rec.6). Historical once merged; not maintained.
+> Status: implemented on crew/sloan/gt-tail (gt-s3rec.6). Historical once merged; not maintained.
 
 # gt tail: the one operator stream (gt-s3rec.6) Implementation Plan
 
@@ -48,8 +48,8 @@ func Path(townRoot, rig string) (string, error)
 type Reader struct { Path string /* unexported offset, partial */ }
 func (r *Reader) ReadNew() (recs []Record, bad []string, err error) // missing file = nothing, not an error
 ```
-- [ ] Failing tests: JSON tags round-trip a d2-land line byte-for-byte field set; two appends read as two records, a third after an append reads only the new one; a partial trailing line is held until its newline; a truncated/replaced file (size < offset) rereads from 0; a malformed line is returned in `bad` and reading continues; missing file returns nothing; invalid rig names refused like `RigLandingsFile`.
-- [ ] Implement; commit `feat(landings): reader for the per-rig landings file`.
+- [x] Failing tests: JSON tags round-trip a d2-land line byte-for-byte field set; two appends read as two records, a third after an append reads only the new one; a partial trailing line is held until its newline; a truncated/replaced file (size < offset) rereads from 0; a malformed line is returned in `bad` and reading continues; missing file returns nothing; invalid rig names refused like `RigLandingsFile`.
+- [x] Implement; commit `feat(landings): reader for the per-rig landings file`.
 
 ### Task 2: line model, merge and render
 
@@ -62,27 +62,33 @@ func renderTailLine(l tailLine, loc *time.Location) string
 func parseTailSince(s string, now time.Time, loc *time.Location) (time.Time, error)
 func parseTailKinds(s string) (map[string]bool, error)
 ```
-- [ ] Failing tests: merge ordering and stability; render sanitizes newlines/control chars and empty rig to `-`; `--since` accepts `15m`, `2h`, `1d`, RFC3339, `2006-01-02T15:04:05` and `2006-01-02 15:04` local, `2006-01-02`; rejects junk; `--kind` accepts subsets, rejects unknown kinds and empty.
-- [ ] Commit `feat(tail): line model, merge and render`.
+- [x] Failing tests: merge ordering and stability; render sanitizes newlines/control chars and empty rig to `-`; `--since` accepts `15m`, `2h`, `1d`, RFC3339, `2006-01-02T15:04:05` and `2006-01-02 15:04` local, `2006-01-02`; rejects junk; `--kind` accepts subsets, rejects unknown kinds and empty.
+- [x] Commit `feat(tail): line model, merge and render`.
 
 ### Task 3: sources
 
 - **events** (`eventsSource{rig, journal tailJournal, cutoff, since int64, started bool, lastErr string}` with `tailJournal interface{ EventsTail(int64,int) (*beads.EventsPage, error); ConfigGet(string) (string, error) }`): first poll reads config once (off/unreadable = one line), pages from 0 with limit 500 until `!More`, filters by ts; later polls from cursor. Truncation resumes at `Floor-1` (or head) with one line. Read errors print once per distinct message. Text: `<op> <issue> status=<s> actor=<a> seq=<n>`. Unparseable ts uses the poll time and appends `ts=<raw>`.
 - **landings** (`landingsSource{rig, reader, cutoff}`): text `landed <bead> <branch> -> <target> commit=<12> patch=<12> gate=<g> om=<verdict>/<score> route=<r>`; bad lines as `unreadable landings line: <line>`.
 - **daemon** (`daemonSource{dir, cutoff, offset, lastAt, rigFilter}`): first poll reads qualifying backups (gz or plain) then daemon.log to EOF; later polls from offset; size < offset resets to 0 with one line `daemon.log rotated`. Rig column `town`; with `--rig`, only lines naming the rig as a word.
-- [ ] Failing tests with a fake journal (off config, paging, truncation, error dedupe, cutoff), temp landings files, temp daemon dir with a gz backup, continuation lines and rotation.
-- [ ] Commit `feat(tail): events, landings and daemon sources`.
+- [x] Failing tests with a fake journal (off config, paging, truncation, error dedupe, cutoff), temp landings files, temp daemon dir with a gz backup, continuation lines and rotation.
+- [x] Commit `feat(tail): events, landings and daemon sources`.
 
 ### Task 4: the verb
 
 `gt tail [--rig <name>] [--since <dur|ts>] [--follow] [--kind events,landings,daemon] [--interval 3s]`, GroupDiag. Rigs = `hq` + the rig registry; `--rig` must be one of them. `--since` default `15m`. Without `--follow`: one poll of every source, merged, printed, exit 0. With `--follow`: that, then poll every interval until SIGINT/SIGTERM. Events client: `beads.NewWithBeadsDir(townRoot, doltserver.FindRigBeadsDir(townRoot, rig))`; a rig with no beads dir prints one line.
-- [ ] Failing tests: golden merged stream from fake sources (`testdata/tail_golden.txt`) via `runTailWith`; follow loop prints the second batch after the first and stops on context cancel; unknown `--rig` errors.
-- [ ] Commit `feat(tail): gt tail, the one operator stream`.
+- [x] Failing tests: golden merged stream from fake sources (`testdata/tail_golden.txt`) via `runTailWith`; follow loop prints the second batch after the first and stops on context cancel; unknown `--rig` errors.
+- [x] Commit `feat(tail): gt tail, the one operator stream`.
 
 ### Task 5: gates and review
 
-- [ ] `make lint`, `go build ./...`, `go test ./internal/landings/ ./internal/cmd/ -run 'Tail|CommandTokens'`, then `gt slot run -- make test`, all by exit code, wall time recorded.
-- [ ] `om review -base origin/main` at the midpoint (after Task 3) and the end; fix blockers/majors.
-- [ ] Attribution grep empty; `git push origin crew/sloan/gt-tail`.
+- [x] `make lint`, `go build ./...`, `go test ./internal/landings/ ./internal/cmd/ -run 'Tail|CommandTokens'`, then `gt slot run -- make test`, all by exit code, wall time recorded.
+- [x] `om review -base origin/main` at the midpoint (after Task 3) and the end; fix blockers/majors.
+- [x] Attribution grep empty; `git push origin crew/sloan/gt-tail`.
 
 ## Execution notes
+
+- **Journal-off read (changed from Finding 2):** `(*Beads).ConfigGet` runs bd with gt's own `BD_EVENTS_JOURNAL=1`, so it answers `1` for every store. The production journal (`tailBDJournal`) reads `bd config get events-journal --json` with that override cleared and `BEADS_DIR` pinned, as the daemon's startup check does, through the new `beads.ParseConfigGetJSON` (own commit). The daemon keeps its private copy of the parser; folding it onto the beads one is a one-line follow-up left out to stay clear of daemon.go.
+- **Unreadable landings lines** are counted (`unreadable landings line (N bytes)`), never echoed (om midpoint).
+- **Landings contract:** the d2-land plan never gained a "Landings file contract" section; its code (`internal/land` LandingRecord at ca8f8046) is the contract. It has `bead` and `landed_at`, no `actor`.
+- **Live check (town parked, 2026-09-29):** every store answers `events-journal=false` and the journal holds no records; `--since 1d --kind daemon` printed 10292 lines in about 1s; the default run took 3s (two bd calls per store).
+- **Deferred:** line-length caps on daemon.log and landings reads (a single unterminated line is buffered whole); DST-ambiguous daemon.log hour; a rotation between the backlog's backup listing and the daemon.log open loses those lines.
