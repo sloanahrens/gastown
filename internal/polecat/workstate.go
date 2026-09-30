@@ -203,6 +203,16 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		if in.ActiveWorkBlocker != "" {
 			d.Blockers = append(d.Blockers, in.ActiveWorkBlocker)
 		}
+		// The lifecycle state short-circuits the predicate checks below, but
+		// the live probe already measured what is at risk. Report it beside
+		// the state blocker so a reviewer can tell whether the work is
+		// preserved without re-probing by hand (gt-d9z9z). Report-only:
+		// verdict, reason and capacity stay decided by the lifecycle state.
+		// A WORKING seat is skipped — a live session's dirty tree is expected
+		// and no recovery decision hangs on it.
+		if verdict != WorkstateVerdictWorking {
+			d.Blockers = append(d.Blockers, liveGitRiskBlockers(in)...)
+		}
 		return d
 	}
 
@@ -249,17 +259,13 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		block("git-check-failed", blocker, true)
 	}
 	if in.GitDirty {
-		blocker := in.GitDirtyReason
-		if blocker == "" {
-			blocker = "git_state=has_uncommitted"
-		}
-		block("git-dirty", blocker, true)
+		block("git-dirty", gitDirtyBlocker(in), true)
 	}
 	if in.StashCount > 0 {
-		block("git-stash", "git_state=has_stash stash_count="+itoa(in.StashCount), true)
+		block("git-stash", gitStashBlocker(in), true)
 	}
 	if in.UnpushedCommits > 0 {
-		block("git-unpushed", "git_state=has_unpushed unpushed_commits="+itoa(in.UnpushedCommits), true)
+		block("git-unpushed", gitUnpushedBlocker(in), true)
 	}
 	activeMRBlocks := in.ActiveMRBlocker != ""
 	if activeMRBlocks {
@@ -323,6 +329,42 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		d.ReuseStatus = "idle-clean"
 	}
 	return d
+}
+
+func gitDirtyBlocker(in WorkstateInput) string {
+	if in.GitDirtyReason != "" {
+		return in.GitDirtyReason
+	}
+	return "git_state=has_uncommitted"
+}
+
+func gitStashBlocker(in WorkstateInput) string {
+	return "git_state=has_stash stash_count=" + itoa(in.StashCount)
+}
+
+func gitUnpushedBlocker(in WorkstateInput) string {
+	return "git_state=has_unpushed unpushed_commits=" + itoa(in.UnpushedCommits)
+}
+
+// liveGitRiskBlockers names the at-risk git facts a live probe measured, in
+// the same wording the predicate checks use. It returns nothing unless the
+// facts were actually measured (GitStateSourceLive): an unknown or never-run
+// probe carries zero values that mean "not measured", not "clean".
+func liveGitRiskBlockers(in WorkstateInput) []string {
+	if in.GitStateSource != GitStateSourceLive {
+		return nil
+	}
+	var blockers []string
+	if in.GitDirty {
+		blockers = append(blockers, gitDirtyBlocker(in))
+	}
+	if in.StashCount > 0 {
+		blockers = append(blockers, gitStashBlocker(in))
+	}
+	if in.UnpushedCommits > 0 {
+		blockers = append(blockers, gitUnpushedBlocker(in))
+	}
+	return blockers
 }
 
 // CanIgnoreStaleCleanupStatus returns true when a dirty persisted

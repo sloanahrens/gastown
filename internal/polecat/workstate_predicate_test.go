@@ -122,3 +122,61 @@ func TestDecideWorkstateReviewNeededNamesLifecycleState(t *testing.T) {
 		t.Fatalf("Reason = %q, want not-idle", d.Reason)
 	}
 }
+
+// TestDecideWorkstateNotIdleReportsMeasuredGitRisk pins gt-d9z9z: a lifecycle
+// state short-circuits the predicate checks, but the at-risk facts a live probe
+// already measured must still reach the refusal, without moving the verdict,
+// reason or capacity semantics the lifecycle state decides.
+func TestDecideWorkstateNotIdleReportsMeasuredGitRisk(t *testing.T) {
+	t.Parallel()
+	base := WorkstateInput{
+		State:           StateReviewNeeded,
+		CleanupStatus:   CleanupUnpushed,
+		Branch:          "polecat/flint",
+		GitDirty:        true,
+		StashCount:      1,
+		UnpushedCommits: 2,
+	}
+
+	t.Run("live probe facts are named after the lifecycle state", func(t *testing.T) {
+		in := base
+		in.GitStateSource = GitStateSourceLive
+		d := DecideWorkstate(in)
+		want := []string{
+			"lifecycle_state=review-needed",
+			"git_state=has_uncommitted",
+			"git_state=has_stash stash_count=1",
+			"git_state=has_unpushed unpushed_commits=2",
+		}
+		if !slices.Equal(d.Blockers, want) {
+			t.Fatalf("Blockers = %v, want %v", d.Blockers, want)
+		}
+		if d.Verdict != WorkstateVerdictNeedsRecovery || d.Reason != "not-idle" || !d.CountsTowardCapacity || d.Reusable || d.SafeToNuke {
+			t.Fatalf("disposition = %+v, want the lifecycle-state verdict unchanged", d)
+		}
+	})
+
+	for _, source := range []string{GitStateSourceRecorded, GitStateSourceUnknown, ""} {
+		t.Run("unmeasured source "+source+" adds nothing", func(t *testing.T) {
+			in := base
+			in.GitStateSource = source
+			d := DecideWorkstate(in)
+			if want := []string{"lifecycle_state=review-needed"}; !slices.Equal(d.Blockers, want) {
+				t.Fatalf("Blockers = %v, want %v: zero values from an unmeasured probe are not facts", d.Blockers, want)
+			}
+		})
+	}
+
+	t.Run("working seat is not annotated", func(t *testing.T) {
+		in := base
+		in.State = StateWorking
+		in.GitStateSource = GitStateSourceLive
+		d := DecideWorkstate(in)
+		if d.Verdict != WorkstateVerdictWorking {
+			t.Fatalf("Verdict = %s, want WORKING", d.Verdict)
+		}
+		if want := []string{"lifecycle_state=working"}; !slices.Equal(d.Blockers, want) {
+			t.Fatalf("Blockers = %v, want %v", d.Blockers, want)
+		}
+	})
+}

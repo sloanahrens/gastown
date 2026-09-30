@@ -1531,3 +1531,40 @@ func runCmd(t *testing.T, dir, name string, args ...string) {
 		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
 	}
 }
+
+// TestCheckRecoveryTextSurfacesMeasuredRiskUnderLifecycleRefusal pins gt-d9z9z:
+// a seat refused on lifecycle state must still show the unpushed/stash/dirty
+// facts the live probe measured, or a reviewer cannot tell whether the work is
+// preserved from the report alone.
+func TestCheckRecoveryTextSurfacesMeasuredRiskUnderLifecycleRefusal(t *testing.T) {
+	t.Parallel()
+	d := polecat.DecideWorkstate(polecat.WorkstateInput{
+		State:           polecat.StateReviewNeeded,
+		CleanupStatus:   polecat.CleanupUnpushed,
+		Branch:          "polecat/flint",
+		StashCount:      1,
+		UnpushedCommits: 2,
+		GitStateSource:  polecat.GitStateSourceLive,
+	})
+
+	status := RecoveryStatus{Rig: "gastown", Polecat: "flint"}
+	applyWorkstateDispositionToRecoveryStatus(&status, d)
+
+	var buf bytes.Buffer
+	renderCheckRecoveryText(&buf, status)
+	text := buf.String()
+
+	for _, want := range []string{
+		"NEEDS_RECOVERY",
+		"lifecycle_state=review-needed",
+		"git_state=has_unpushed unpushed_commits=2",
+		"git_state=has_stash stash_count=1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("refusal text %q missing %q", text, want)
+		}
+	}
+	if status.Reason != "not-idle" {
+		t.Fatalf("Reason = %q, want not-idle: the lifecycle state still decides the reason", status.Reason)
+	}
+}
