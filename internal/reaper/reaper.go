@@ -843,7 +843,7 @@ func Purge(db *sql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Dur
 	result := &PurgeResult{Database: dbName, DryRun: dryRun}
 
 	// Purge closed wisps.
-	purged, anomalies, err := purgeClosedWisps(db, w, dbName, purgeAge, dryRun)
+	purged, anomalies, err := purgeClosedWisps(db, w, purgeAge, dryRun)
 	if err != nil {
 		return nil, fmt.Errorf("purge wisps: %w", err)
 	}
@@ -860,7 +860,7 @@ func Purge(db *sql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Dur
 	return result, nil
 }
 
-func purgeClosedWisps(db *sql.DB, w Writer, dbName string, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
+func purgeClosedWisps(db *sql.DB, w Writer, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
