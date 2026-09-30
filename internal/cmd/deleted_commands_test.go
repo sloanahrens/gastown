@@ -11,6 +11,7 @@ import (
 var deletedCommands = [][]string{
 	{"proxy-subcmds"},
 	{"wl"},
+	{"mayor", "acp"},
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the
