@@ -179,11 +179,10 @@ func (s *landingsSource) Poll() []tailLine {
 	}
 	s.failed.clear()
 	var out []tailLine
+	// A line that is not a record is counted, never echoed: the stream must
+	// not republish whatever text ended up in the file.
 	for _, b := range bad {
-		if len(b) > 200 {
-			b = b[:200] + "..."
-		}
-		out = append(out, tailLine{At: now, Rig: s.rig, Kind: tailKindLandings, Text: "unreadable landings line: " + b})
+		out = append(out, tailLine{At: now, Rig: s.rig, Kind: tailKindLandings, Text: fmt.Sprintf("unreadable landings line (%d bytes)", len(b))})
 	}
 	for _, r := range recs {
 		at := r.LandedAt

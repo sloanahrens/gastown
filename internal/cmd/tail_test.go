@@ -68,7 +68,7 @@ func TestParseTailSince(t *testing.T) {
 			t.Errorf("parseTailSince(%q) = %v, %v; want %v", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "yesterday", "-5m", "5x", "1.5d"} {
+	for _, bad := range []string{"", "yesterday", "-5m", "5x", "1.5d", "99999999999d", "36501d"} {
 		if _, err := parseTailSince(bad, now, tailTestLoc); err == nil {
 			t.Errorf("parseTailSince(%q) accepted", bad)
 		}

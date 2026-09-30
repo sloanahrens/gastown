@@ -183,7 +183,7 @@ func TestLandingsSource_BacklogFollowAndBadLines(t *testing.T) {
 	}
 	appendFile(t, path, "garbage\n"+`{"bead":"gt-new","rig":"gastown","landed_at":"2026-09-30T14:00:05Z"}`+"\n")
 	want = []string{
-		"gastown landings unreadable landings line: garbage",
+		"gastown landings unreadable landings line (7 bytes)",
 		"gastown landings landed gt-new - -> - commit=- patch=- gate=- om=-/0.00 route=-",
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
@@ -288,7 +288,6 @@ func TestDaemonSource_RigFilterKeepsLinesNamingTheRig(t *testing.T) {
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("filtered = %q", got)
 	}
-	var _ *regexp.Regexp = tailRigFilter("x")
 }
 
 func TestDaemonSource_MissingLogSaysSoOnce(t *testing.T) {
@@ -299,5 +298,36 @@ func TestDaemonSource_MissingLogSaysSoOnce(t *testing.T) {
 	}
 	if got := s.Poll(); len(got) != 0 {
 		t.Fatalf("repeated: %q", texts(got))
+	}
+}
+
+func TestEventsSource_PruneThatCannotAdvanceIsAReadFailure(t *testing.T) {
+	// bd reports a floor and head at or below the cursor: resuming would not
+	// move forward, so the read fails once instead of looping.
+	j := &fakeTailJournal{config: "true", errs: []error{&beads.EventsTruncatedError{Since: 0, Floor: 0, Head: 0}}}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: tailNow, now: fixedNow}
+	got := texts(s.Poll())
+	want := []string{"gastown events read failed: events journal pruned past --since 0 (oldest retained 0, head 0)"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	if len(j.calls) != 1 {
+		t.Fatalf("calls = %v", j.calls)
+	}
+}
+
+func TestDaemonSource_CorruptBackupIsOneLineAndTheLogStillReads(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "daemon-2026-09-30T13-30-00.000.log.gz"), []byte("this is plainly not a gzip stream"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, filepath.Join(dir, "daemon.log"), "2026/09/30 08:01:00 alive\n")
+	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:45:00Z"), loc: tailTestLoc, now: fixedNow}
+	want := []string{
+		"town daemon cannot read daemon-2026-09-30T13-30-00.000.log.gz: gzip: invalid header",
+		"town daemon alive",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q\nwant %q", got, want)
 	}
 }

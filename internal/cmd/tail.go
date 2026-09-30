@@ -81,6 +81,9 @@ func tailText(s string) string {
 
 var tailDaysRe = regexp.MustCompile(`^([0-9]+)d$`)
 
+// tailMaxSinceDays bounds "--since Nd" well inside time.Duration's range.
+const tailMaxSinceDays = 36500
+
 // parseTailSince reads --since: a duration back from now ("15m", "2h", "1d",
 // "0" for now), an RFC3339 timestamp, or a local time as
 // "2006-01-02T15:04:05", "2006-01-02 15:04" or "2006-01-02".
@@ -91,9 +94,10 @@ func parseTailSince(s string, now time.Time, loc *time.Location) (time.Time, err
 	}
 	if m := tailDaysRe.FindStringSubmatch(s); m != nil {
 		n, err := strconv.Atoi(m[1])
-		if err == nil {
-			return now.Add(-time.Duration(n) * 24 * time.Hour), nil
+		if err != nil || n > tailMaxSinceDays {
+			return time.Time{}, fmt.Errorf("--since %q: at most %dd", s, tailMaxSinceDays)
 		}
+		return now.Add(-time.Duration(n) * 24 * time.Hour), nil
 	}
 	if d, err := time.ParseDuration(s); err == nil {
 		if d < 0 {

@@ -1,6 +1,6 @@
 // Package landings reads a rig's append-only landings file: one JSON object
-// per landing, written by the D2 landing worker (internal/land on
-// crew/sloan/d2-land, gt-v4ssj.9) after the target's tip is read back.
+// per landing, written by the D2 landing worker (gt-v4ssj.9) after the
+// target's tip is read back.
 //
 // This package only reads. The writer owns the file's permissions and the
 // record's meaning; Record mirrors the writer's JSON keys, and a test pins
