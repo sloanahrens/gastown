@@ -725,26 +725,84 @@ var polecatSummaryWorkStatusRank = func() map[string]int {
 	return ranks
 }()
 
-func listActivePolecatWorkByName(bd *beads.Beads, rigName string) (map[string]*beads.Issue, error) {
+// listActivePolecatWorkByName maps each polecat of rigName to the work bead
+// that keeps it from being reclaimed.
+//
+// The rig's own store is listed first, but a hook can live in another store:
+// a bead slung from the town carries the hq- prefix and never appears in the
+// rig listing. hooks (polecat name -> the hook_bead on its agent bead, see
+// polecatHookBeads) closes that gap: every hook the listing did not return is
+// read through prefix routing and judged the same way, so a polecat hooked to
+// an hq- bead carries the same assigned_work blocker as one hooked to a
+// rig-local bead (gt-3ur1a). The bead stays the authority — a stale hook_bead
+// whose bead no longer names this polecat as assignee is ignored.
+func listActivePolecatWorkByName(bd beads.Client, rigName string, hooks map[string]string) (map[string]*beads.Issue, error) {
 	byName := make(map[string]*beads.Issue)
 	issues, err := bd.ListIssueStatuses(polecatSummaryWorkStatuses...)
 	if err != nil {
 		return nil, err
 	}
+	listed := make(map[string]struct{}, len(issues))
 	for _, issue := range issues {
-		evidence := assessPolecatAssignedIssueWork(issue)
-		if !evidence.BlocksCleanup {
+		listed[issue.ID] = struct{}{}
+		recordPolecatWork(byName, rigName, issue)
+	}
+
+	var unlisted []string
+	seen := make(map[string]struct{}, len(hooks))
+	for _, hookID := range hooks {
+		if _, ok := listed[hookID]; ok {
 			continue
 		}
-		name, ok := polecatNameFromAssignee(rigName, issue.Assignee)
-		if !ok {
+		if _, ok := seen[hookID]; ok {
 			continue
 		}
-		if current := byName[name]; current == nil || polecatSummaryIssueRank(issue) < polecatSummaryIssueRank(current) {
-			byName[name] = issue
-		}
+		seen[hookID] = struct{}{}
+		unlisted = append(unlisted, hookID)
+	}
+	if len(unlisted) == 0 {
+		return byName, nil
+	}
+	sort.Strings(unlisted)
+	hooked, err := bd.ShowMultiple(unlisted)
+	if err != nil {
+		return nil, fmt.Errorf("resolving hook beads outside the rig listing: %w", err)
+	}
+	for _, issue := range hooked {
+		recordPolecatWork(byName, rigName, issue)
 	}
 	return byName, nil
+}
+
+// recordPolecatWork files issue under the polecat it is assigned to, keeping
+// the highest-ranked issue when a polecat holds several.
+func recordPolecatWork(byName map[string]*beads.Issue, rigName string, issue *beads.Issue) {
+	if !assessPolecatAssignedIssueWork(issue).BlocksCleanup {
+		return
+	}
+	name, ok := polecatNameFromAssignee(rigName, issue.Assignee)
+	if !ok {
+		return
+	}
+	if current := byName[name]; current == nil || polecatSummaryIssueRank(issue) < polecatSummaryIssueRank(current) {
+		byName[name] = issue
+	}
+}
+
+// polecatHookBeads returns each named polecat's hook_bead, read from its agent
+// bead in agents. Polecats with no agent bead or no hook are left out.
+func polecatHookBeads(names []string, agentBeadID func(name string) string, agents map[string]*beads.Issue) map[string]string {
+	hooks := make(map[string]string)
+	for _, name := range names {
+		fields := parsePolecatAgentFields(agents[agentBeadID(name)])
+		if fields == nil {
+			continue
+		}
+		if hook := strings.TrimSpace(fields.HookBead); hook != "" {
+			hooks[name] = hook
+		}
+	}
+	return hooks
 }
 
 func polecatSummaryIssueRank(issue *beads.Issue) int {
