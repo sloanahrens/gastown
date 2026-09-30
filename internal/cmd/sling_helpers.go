@@ -1149,28 +1149,51 @@ func rigNameForBead(townRoot, beadID string) string {
 }
 
 // bondFormulaDirect attaches a formula to a bead through bd's canonical bond path.
+//
+// The bond is the write that spawns the wisp and attaches it, and it is the one
+// step of a sling an unrelated writer can take from under it: under load the
+// convoy's bulk wisp closes commit against it often enough that Dolt aborts it
+// (gt-4ckuf). An abort there is a dead end for the operator — the sling exits
+// non-zero with the bead left open and unassigned — so the attempt is repeated
+// while bd reports contention. bd's storage layer owns the broad fix across its
+// write paths; this is the retry on top that keeps one contended commit from
+// failing a dispatch.
 func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
 	bondArgs := []string{"mol", "bond", bondTarget, beadID, "--json", "--ephemeral"}
 	for _, variable := range vars {
 		bondArgs = append(bondArgs, "--var", variable)
 	}
-	bondOut, err := formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, bondArgs...).
-		WithAutoCommit().
-		Output()
-	if err != nil {
+
+	var lastErr error
+	for attempt := 1; attempt <= bdContentionAttempts; attempt++ {
+		bondOut, err := formulaBeadBdCmd(beadID, formulaWorkDir, townRoot, bondArgs...).
+			WithAutoCommit().
+			Output()
+		if err == nil {
+			rootID := parseBondSpawnRootID(bondOut, formulaName, beadID, "")
+			if rootID == "" {
+				return "", fmt.Errorf("direct bond output missing spawned root id (output: %s)", trimJSONForError(bondOut))
+			}
+			return rootID, nil
+		}
+
 		// bd --json reports its failure as {"error": ...} on stdout, so the
 		// cause is in bondOut; err alone is only "exit status 1".
-		if cause := bdJSONErrorMessage(bondOut); cause != "" {
-			return "", fmt.Errorf("%w: %s (args: %s)", err, cause, strings.Join(bondArgs, " "))
+		cause := bdJSONErrorMessage(bondOut)
+		if cause != "" {
+			lastErr = fmt.Errorf("%w: %s (args: %s)", err, cause, strings.Join(bondArgs, " "))
+		} else {
+			lastErr = fmt.Errorf("%w (args: %s)", err, strings.Join(bondArgs, " "))
 		}
-		return "", fmt.Errorf("%w (args: %s)", err, strings.Join(bondArgs, " "))
-	}
+		if !bdContentionRetryable(err, cause) || attempt == bdContentionAttempts {
+			break
+		}
 
-	rootID := parseBondSpawnRootID(bondOut, formulaName, beadID, "")
-	if rootID == "" {
-		return "", fmt.Errorf("direct bond output missing spawned root id (output: %s)", trimJSONForError(bondOut))
+		wait := slingBackoff(attempt, bdContentionBackoffMin, bdContentionBackoffMax)
+		fmt.Printf("  %s Bond attempt %d lost to Dolt contention, retrying in %v...\n", style.Warning.Render("⚠"), attempt, wait)
+		bdContentionSleep(wait)
 	}
-	return rootID, nil
+	return "", lastErr
 }
 
 // bdJSONErrorMessage returns the "error" field of a bd --json failure payload,

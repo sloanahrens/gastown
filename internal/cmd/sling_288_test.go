@@ -1054,22 +1054,18 @@ echo '{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}'
 }
 
 // bd --json prints its failure to stdout; the bond error must carry that cause,
-// not just "exit status 1" (gt-4k3fj.12).
+// not just "exit status 1" (gt-4k3fj.12). A 1213 is retried first (gt-4ckuf),
+// so this also pins the retry's cap: exhaustion reports the cause, having made
+// exactly bdContentionAttempts attempts rather than looping.
 func TestBondFormulaDirectErrorCarriesBdJSONCause(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("stub prints JSON from a POSIX shell script")
 	}
-	townRoot := t.TempDir()
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	bdScript := `#!/bin/sh
+	townRoot, logPath := setUpContentionStub(t, `#!/bin/sh
+echo "CMD:$*" >> "${BD_LOG}"
 echo '{"error":"creating wisp: sql commit (regular): Error 1213 (40001): serialization failure","schema_version":1}'
 exit 1
-`
-	_ = writeBDStub(t, binDir, bdScript, "")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+`)
 
 	_, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
 	if err == nil {
@@ -1077,5 +1073,8 @@ exit 1
 	}
 	if !strings.Contains(err.Error(), "Error 1213 (40001): serialization failure") {
 		t.Fatalf("error hides bd's cause: %v", err)
+	}
+	if got := countStubAttempts(t, logPath, "CMD:mol bond"); got != bdContentionAttempts {
+		t.Fatalf("bond attempts = %d, want the cap %d", got, bdContentionAttempts)
 	}
 }
