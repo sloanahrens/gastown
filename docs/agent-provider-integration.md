@@ -451,8 +451,7 @@ Gas Town builds the command as: `kiro exec -p "prompt" --json`
 ### Session forking
 
 If your agent supports forking a past session (creating a read-only copy
-for inspection), set `supports_fork_session: true`. Used by the `gt seance`
-command for talking to past agent sessions.
+for inspection), set `supports_fork_session: true`.
 
 ### Wrapper scripts
 

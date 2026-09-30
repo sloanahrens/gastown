@@ -68,6 +68,8 @@ var deletedCommands = [][]string{
 	{"quota"},
 	{"account"},
 	{"costs"},
+	{"seance"},
+	{"mountain"},
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the

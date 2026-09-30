@@ -103,15 +103,6 @@ Severity-routed issue escalation. Agents that hit blockers escalate via `gt esca
 
 Config-driven capacity governor for polecat dispatch. Prevents API rate limit exhaustion by batching dispatch under configurable concurrency limits. Default is direct dispatch; set `scheduler.max_polecats` to enable deferred dispatch with the daemon. See [Scheduler](docs/design/scheduler.md).
 
-### Seance 👻
-
-Session discovery and continuation. Discovers previous agent sessions via `.events.jsonl` logs, enabling agents to query their predecessors for context and decisions from earlier work.
-
-```bash
-gt seance                       # List discoverable predecessor sessions
-gt seance --talk <id> -p "What did you find?"  # One-shot question
-```
-
 > **New to Gas Town?** See the [Glossary](docs/glossary.md) for a complete guide to terminology and concepts.
 
 ## Installation
@@ -613,18 +604,6 @@ gt scheduler resume                      # Resume dispatch
 ```
 
 Default mode (`max_polecats = -1`) dispatches immediately via `gt sling`. When a limit is set, the daemon dispatches incrementally, respecting capacity. See [Scheduler design](docs/design/scheduler.md).
-
-## Seance
-
-Discover and query previous agent sessions:
-
-```bash
-gt seance                              # List discoverable predecessor sessions
-gt seance --talk <id>                  # Full context conversation with predecessor
-gt seance --talk <id> -p "Question?"   # One-shot question to predecessor
-```
-
-Seance discovers sessions via `.events.jsonl` logs, enabling agents to recover context and decisions from earlier work without re-reading entire codebases.
 
 ## Telemetry (OpenTelemetry)
 
