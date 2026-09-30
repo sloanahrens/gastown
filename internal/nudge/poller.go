@@ -48,14 +48,16 @@ func pollerPidFile(townRoot, session string) string {
 	return filepath.Join(pollerPidDir(townRoot), safe+".pid")
 }
 
-// pollerExecutable resolves the binary to run as the poller; a var so tests
-// can hand it a path without exec'ing anything.
-var pollerExecutable = os.Executable
-
 // StartPoller launches a background `gt nudge-poller <session>` process.
 // The process is detached (Setpgid) so it survives the caller's exit.
 // Returns the PID of the launched process, or an error.
 func StartPoller(townRoot, session string) (int, error) {
+	return startPoller(townRoot, session, os.Executable)
+}
+
+// startPoller is StartPoller with the binary lookup injected, so tests can
+// hand it a path without exec'ing anything.
+func startPoller(townRoot, session string, executable func() (string, error)) (int, error) {
 	pidDir := pollerPidDir(townRoot)
 	if err := os.MkdirAll(pidDir, 0755); err != nil {
 		return 0, fmt.Errorf("creating poller pid dir: %w", err)
@@ -67,7 +69,7 @@ func StartPoller(townRoot, session string) (int, error) {
 	}
 
 	// Find the gt binary.
-	gtBin, err := pollerExecutable()
+	gtBin, err := executable()
 	if err != nil {
 		return 0, fmt.Errorf("finding gt binary: %w", err)
 	}

@@ -141,6 +141,12 @@ func randomSuffix() string {
 // The nudge will be picked up by the agent's hook at the next turn boundary.
 // Returns an error if the queue is full (MaxQueueDepth reached).
 func Enqueue(townRoot, session string, nudge QueuedNudge) error {
+	return enqueue(townRoot, session, nudge, ExpiryObserver)
+}
+
+// enqueue is Enqueue reporting expiries to observe, so tests can collect them
+// without swapping ExpiryObserver.
+func enqueue(townRoot, session string, nudge QueuedNudge, observe func(ExpiryEvent)) error {
 	dir := queueDir(townRoot, session)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating nudge queue dir: %w", err)
@@ -155,7 +161,7 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 		// idle. Without this, a queue full of garbage past its own TTL stays
 		// full forever and rejects every new nudge (gt-9le0e: gt-witness sat
 		// at 50/50 with 41 expired entries). Prune before trusting the count.
-		pruneExpired(townRoot, session)
+		pruneExpired(townRoot, session, observe)
 		pending, _ = Pending(townRoot, session)
 		if pending >= maxDepth {
 			return fmt.Errorf("nudge queue for %s is full (%d/%d pending)", session, pending, maxDepth)
@@ -214,6 +220,10 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 // Retries are additionally spaced by RequeueBackoff so that even the bounded
 // number of retries cannot repeat at the poll interval.
 func Requeue(townRoot, session string, nudges []QueuedNudge) error {
+	return requeue(townRoot, session, nudges, ExpiryObserver)
+}
+
+func requeue(townRoot, session string, nudges []QueuedNudge, observe func(ExpiryEvent)) error {
 	cfg := nudgeConfig(townRoot)
 	maxAttempts := cfg.MaxDeliveryAttemptsV()
 	backoff := cfg.RequeueBackoffD()
@@ -221,7 +231,7 @@ func Requeue(townRoot, session string, nudges []QueuedNudge) error {
 
 	for _, n := range nudges {
 		if !n.ExpiresAt.IsZero() && now.After(n.ExpiresAt) {
-			reportExpiry(townRoot, session, n, expirySourceRequeue)
+			reportExpiry(townRoot, session, n, expirySourceRequeue, observe)
 			continue
 		}
 
@@ -241,7 +251,7 @@ func Requeue(townRoot, session string, nudges []QueuedNudge) error {
 			}
 		}
 
-		if err := Enqueue(townRoot, session, n); err != nil {
+		if err := enqueue(townRoot, session, n, observe); err != nil {
 			return err
 		}
 	}
@@ -259,6 +269,10 @@ func Requeue(townRoot, session string, nudges []QueuedNudge) error {
 // reportExpiry instead. Orphaned .claimed files from crashed drainers are swept
 // if older than 5 minutes.
 func Drain(townRoot, session string) ([]QueuedNudge, error) {
+	return drain(townRoot, session, ExpiryObserver)
+}
+
+func drain(townRoot, session string, observe func(ExpiryEvent)) ([]QueuedNudge, error) {
 	dir := queueDir(townRoot, session)
 
 	entries, err := os.ReadDir(dir)
@@ -352,7 +366,7 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 		// reported rather than dropped, so the sender's intent survives the
 		// queue entry (gt-oexm).
 		if !n.ExpiresAt.IsZero() && now.After(n.ExpiresAt) {
-			reportExpiry(townRoot, session, n, expirySourceDrain)
+			reportExpiry(townRoot, session, n, expirySourceDrain, observe)
 			if rmErr := os.Remove(claimPath); rmErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to remove expired nudge %s: %v\n", entry.Name(), rmErr)
 			}
@@ -387,7 +401,7 @@ func Drain(townRoot, session string) ([]QueuedNudge, error) {
 // Uses the same claim-then-check dance as Drain so a concurrent Drain or
 // prune can't double-process the same file; unlike Drain, a live entry is
 // unclaimed and put back rather than returned to a caller.
-func pruneExpired(townRoot, session string) {
+func pruneExpired(townRoot, session string, observe func(ExpiryEvent)) {
 	dir := queueDir(townRoot, session)
 
 	entries, err := os.ReadDir(dir)
@@ -429,7 +443,7 @@ func pruneExpired(townRoot, session string) {
 			continue
 		}
 
-		reportExpiry(townRoot, session, n, expirySourcePrune)
+		reportExpiry(townRoot, session, n, expirySourcePrune, observe)
 		if rmErr := os.Remove(claimPath); rmErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to remove expired nudge %s: %v\n", entry.Name(), rmErr)
 		}
@@ -439,10 +453,10 @@ func pruneExpired(townRoot, session string) {
 // reportExpiry announces a nudge that reached ExpiresAt undelivered, on three
 // channels so no delivery plane can lose it: the message is copied under the
 // queue's expired/ directory, the expiry is printed to stderr, and
-// ExpiryObserver is called to carry it on to mail. The copy is attempted first
+// observe (ExpiryObserver outside tests) is called to carry it on to mail. The copy is attempted first
 // so the record survives this process; the observer runs even when the copy
 // fails, because mail is then the only durable notice left (gt-oexm).
-func reportExpiry(townRoot, session string, n QueuedNudge, source string) {
+func reportExpiry(townRoot, session string, n QueuedNudge, source string, observe func(ExpiryEvent)) {
 	n.ExpiredAt = time.Now()
 	trace, traceErr := writeExpiredTrace(townRoot, session, n)
 
@@ -456,8 +470,8 @@ func reportExpiry(townRoot, session string, n QueuedNudge, source string) {
 			detail, session, source, trace)
 	}
 
-	if ExpiryObserver != nil {
-		ExpiryObserver(ExpiryEvent{
+	if observe != nil {
+		observe(ExpiryEvent{
 			TownRoot: townRoot,
 			Session:  session,
 			Nudge:    n,

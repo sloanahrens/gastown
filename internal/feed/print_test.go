@@ -32,6 +32,7 @@ func writeTestEvents(t *testing.T, events []GtEvent) string {
 }
 
 func TestPrintGtEvents_ReadsAndFormats(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	townRoot := writeTestEvents(t, []GtEvent{
 		{Timestamp: now.Add(-2 * time.Minute).Format(time.RFC3339), Source: "test", Type: "create", Actor: "gastown/witness", Visibility: "feed", Payload: map[string]interface{}{"message": "created issue"}},
@@ -40,22 +41,15 @@ func TestPrintGtEvents_ReadsAndFormats(t *testing.T) {
 	})
 
 	// Capture stdout
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var out strings.Builder
 
-	err := PrintGtEvents(townRoot, PrintOptions{Limit: 10})
-
-	w.Close()
-	os.Stdout = oldStdout
+	err := PrintGtEvents(townRoot, PrintOptions{Limit: 10, Out: &out})
 
 	if err != nil {
 		t.Fatalf("PrintGtEvents returned error: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := out.String()
 
 	// Should have 3 lines of output (oldest first)
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -74,6 +68,7 @@ func TestPrintGtEvents_ReadsAndFormats(t *testing.T) {
 }
 
 func TestPrintGtEvents_LimitApplied(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	var events []GtEvent
 	for i := 0; i < 20; i++ {
@@ -88,22 +83,15 @@ func TestPrintGtEvents_LimitApplied(t *testing.T) {
 	}
 	townRoot := writeTestEvents(t, events)
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var out strings.Builder
 
-	err := PrintGtEvents(townRoot, PrintOptions{Limit: 5})
-
-	w.Close()
-	os.Stdout = oldStdout
+	err := PrintGtEvents(townRoot, PrintOptions{Limit: 5, Out: &out})
 
 	if err != nil {
 		t.Fatalf("PrintGtEvents returned error: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := out.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) != 5 {
@@ -112,28 +100,22 @@ func TestPrintGtEvents_LimitApplied(t *testing.T) {
 }
 
 func TestPrintGtEvents_SinceFilter(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	townRoot := writeTestEvents(t, []GtEvent{
 		{Timestamp: now.Add(-2 * time.Hour).Format(time.RFC3339), Source: "test", Type: "create", Actor: "old", Visibility: "feed", Payload: map[string]interface{}{"message": "old event"}},
 		{Timestamp: now.Add(-30 * time.Second).Format(time.RFC3339), Source: "test", Type: "create", Actor: "new", Visibility: "feed", Payload: map[string]interface{}{"message": "new event"}},
 	})
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var out strings.Builder
 
-	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100, Since: "5m"})
-
-	w.Close()
-	os.Stdout = oldStdout
+	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100, Since: "5m", Out: &out})
 
 	if err != nil {
 		t.Fatalf("PrintGtEvents returned error: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := out.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) != 1 {
@@ -145,6 +127,7 @@ func TestPrintGtEvents_SinceFilter(t *testing.T) {
 }
 
 func TestPrintGtEvents_TypeFilter(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	townRoot := writeTestEvents(t, []GtEvent{
 		{Timestamp: now.Add(-2 * time.Minute).Format(time.RFC3339), Source: "test", Type: "create", Actor: "a", Visibility: "feed", Payload: map[string]interface{}{"message": "created"}},
@@ -152,22 +135,15 @@ func TestPrintGtEvents_TypeFilter(t *testing.T) {
 		{Timestamp: now.Format(time.RFC3339), Source: "test", Type: "create", Actor: "c", Visibility: "feed", Payload: map[string]interface{}{"message": "created again"}},
 	})
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var out strings.Builder
 
-	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100, Type: "create"})
-
-	w.Close()
-	os.Stdout = oldStdout
+	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100, Type: "create", Out: &out})
 
 	if err != nil {
 		t.Fatalf("PrintGtEvents returned error: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := out.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) != 2 {
@@ -176,6 +152,7 @@ func TestPrintGtEvents_TypeFilter(t *testing.T) {
 }
 
 func TestPrintGtEvents_NoEventsFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir() // no .events.jsonl
 	err := PrintGtEvents(dir, PrintOptions{Limit: 10})
 	if err == nil {
@@ -187,6 +164,7 @@ func TestPrintGtEvents_NoEventsFile(t *testing.T) {
 }
 
 func TestPrintGtEvents_VisibilityFiltering(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	townRoot := writeTestEvents(t, []GtEvent{
 		{Timestamp: now.Format(time.RFC3339), Source: "test", Type: "create", Actor: "a", Visibility: "feed", Payload: map[string]interface{}{"message": "visible"}},
@@ -194,22 +172,15 @@ func TestPrintGtEvents_VisibilityFiltering(t *testing.T) {
 		{Timestamp: now.Format(time.RFC3339), Source: "test", Type: "create", Actor: "c", Visibility: "both", Payload: map[string]interface{}{"message": "also visible"}},
 	})
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var out strings.Builder
 
-	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100})
-
-	w.Close()
-	os.Stdout = oldStdout
+	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100, Out: &out})
 
 	if err != nil {
 		t.Fatalf("PrintGtEvents returned error: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := out.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) != 2 {
@@ -218,6 +189,7 @@ func TestPrintGtEvents_VisibilityFiltering(t *testing.T) {
 }
 
 func TestPrintGtEvents_InvalidSinceDuration(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	townRoot := writeTestEvents(t, []GtEvent{
 		{Timestamp: now.Format(time.RFC3339), Source: "test", Type: "create", Actor: "a", Visibility: "feed", Payload: map[string]interface{}{"message": "event"}},
@@ -233,6 +205,7 @@ func TestPrintGtEvents_InvalidSinceDuration(t *testing.T) {
 }
 
 func TestPrintGtEvents_FollowStreamsAppended(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, ".events.jsonl")
@@ -245,11 +218,10 @@ func TestPrintGtEvents_FollowStreamsAppended(t *testing.T) {
 	os.WriteFile(eventsPath, append(initial, '\n'), 0644)
 
 	// Capture stdout
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var out strings.Builder
 
 	ctx, cancel := context.WithCancel(context.Background())
+	tick := make(chan time.Time)
 	var wg sync.WaitGroup
 	var printErr error
 
@@ -257,11 +229,12 @@ func TestPrintGtEvents_FollowStreamsAppended(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		printErr = PrintGtEvents(dir, PrintOptions{Limit: 100, Follow: true, Ctx: ctx})
+		printErr = PrintGtEvents(dir, PrintOptions{Limit: 100, Follow: true, Ctx: ctx, Out: &out, tick: tick})
 	}()
 
-	// Wait for initial event to be printed, then append a second event
-	time.Sleep(500 * time.Millisecond)
+	// A tick is only received once the initial batch is printed and the
+	// follow loop is waiting.
+	tick <- time.Time{}
 
 	appended, _ := json.Marshal(GtEvent{
 		Timestamp: now.Add(1 * time.Second).Format(time.RFC3339), Source: "test", Type: "sling",
@@ -271,17 +244,14 @@ func TestPrintGtEvents_FollowStreamsAppended(t *testing.T) {
 	f.Write(append(appended, '\n'))
 	f.Close()
 
-	// Wait for the tail loop to pick it up, then cancel
-	time.Sleep(500 * time.Millisecond)
+	// The first tick polls the appended line; the second is received only
+	// once that poll has printed it.
+	tick <- time.Time{}
+	tick <- time.Time{}
 	cancel()
 	wg.Wait()
 
-	w.Close()
-	os.Stdout = oldStdout
-
-	buf := make([]byte, 8192)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := out.String()
 
 	if printErr != nil {
 		t.Logf("PrintGtEvents returned: %v (expected for follow mode)", printErr)
@@ -309,6 +279,7 @@ func TestPrintGtEvents_FollowStreamsAppended(t *testing.T) {
 }
 
 func TestPrintGtEvents_RigFilter(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	townRoot := writeTestEvents(t, []GtEvent{
 		{Timestamp: now.Add(-2 * time.Minute).Format(time.RFC3339), Source: "test", Type: "create", Actor: "greenplace/witness", Visibility: "feed", Payload: map[string]interface{}{"message": "greenplace event", "rig": "greenplace"}},
@@ -316,22 +287,15 @@ func TestPrintGtEvents_RigFilter(t *testing.T) {
 		{Timestamp: now.Format(time.RFC3339), Source: "test", Type: "sling", Actor: "greenplace/crew/joe", Visibility: "feed", Payload: map[string]interface{}{"bead": "gt-1", "target": "p1", "rig": "greenplace"}},
 	})
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var out strings.Builder
 
-	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100, Rig: "greenplace"})
-
-	w.Close()
-	os.Stdout = oldStdout
+	err := PrintGtEvents(townRoot, PrintOptions{Limit: 100, Rig: "greenplace", Out: &out})
 
 	if err != nil {
 		t.Fatalf("PrintGtEvents returned error: %v", err)
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := out.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) != 2 {
@@ -345,6 +309,7 @@ func TestPrintGtEvents_RigFilter(t *testing.T) {
 }
 
 func TestMatchesFilters(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	event := &Event{
 		Time:    now,
