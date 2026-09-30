@@ -196,11 +196,12 @@ func TestResolveSlotCommandRefusesProgramFromCwd(t *testing.T) {
 		t.Fatalf("creating %s: %v", binDir, err)
 	}
 	writeExecutable(t, binDir, "probe-gt-f4xe")
+	writeExecutable(t, root, "probe-gt-f4xe")
 	t.Chdir(root)
 
-	// Both entries name the working directory. A literal "." entry is a
-	// separate defect (gt-h9wh) and is not covered here.
-	for _, pathEnv := range []string{string(os.PathListSeparator) + "bin", "bin"} {
+	// Each entry names the working directory or a directory under it: a
+	// literal "." entry, an empty entry, and a relative one (gt-h9wh).
+	for _, pathEnv := range []string{".", string(os.PathListSeparator) + "bin", "bin"} {
 		if _, err := resolveSlotCommand([]string{"PATH=" + pathEnv}, []string{"probe-gt-f4xe"}); !errors.Is(err, exec.ErrDot) {
 			t.Errorf("resolveSlotCommand(PATH=%q) = %v, want an error satisfying errors.Is(err, exec.ErrDot)", pathEnv, err)
 		}
@@ -255,6 +256,35 @@ func TestLookPathForSlot(t *testing.T) {
 	}
 	if _, err := lookPathForSlot("probe-gt-f4xe", ""); err == nil {
 		t.Error("an empty PATH has no entries, so nothing should resolve")
+	}
+}
+
+// TestLookPathForSlotDotEntryNamesTheWorkingDirectory pins the rule gt-h9wh
+// adds: a literal "." entry names the working directory, as an empty entry
+// does, and does not send the search to gt's own PATH. The ambient PATH holds
+// a program under the same name, so a search that escaped the entry resolves
+// that one — the wrong file rather than an error.
+func TestLookPathForSlotDotEntryNamesTheWorkingDirectory(t *testing.T) {
+	cwdDir := t.TempDir()
+	writeExecutable(t, cwdDir, "probe-gt-f4xe")
+	ambientDir := t.TempDir()
+	decoy := writeExecutable(t, ambientDir, "probe-gt-f4xe")
+	writeExecutable(t, ambientDir, "ambient-only-gt-h9wh")
+	t.Chdir(cwdDir)
+	t.Setenv("PATH", ambientDir)
+
+	for _, entry := range []string{".", "./"} {
+		pathEnv := entry + string(os.PathListSeparator) + t.TempDir()
+		got, err := lookPathForSlot("probe-gt-f4xe", pathEnv)
+		if !errors.Is(err, exec.ErrDot) {
+			t.Errorf("lookPathForSlot(\"probe-gt-f4xe\", PATH=%q) = %q, %v; the working directory holds it, so want an error satisfying errors.Is(err, exec.ErrDot), not the ambient PATH's %q", pathEnv, got, err, decoy)
+		}
+	}
+
+	// Negative side: the entry holds no such program, so the search must not
+	// reach the ambient PATH that does.
+	if _, err := lookPathForSlot("ambient-only-gt-h9wh", "."); err == nil {
+		t.Error("a \".\" PATH entry resolved through the ambient PATH")
 	}
 }
 

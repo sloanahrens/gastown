@@ -655,8 +655,8 @@ func slotChildPath(envAssigns []string) string {
 }
 
 // lookPathForSlot resolves name against an explicit PATH the way exec.LookPath
-// resolves against the ambient one, including an empty entry meaning the
-// current directory and a relative result refused with exec.ErrDot.
+// resolves against the ambient one, including an entry naming the current
+// directory — empty or "." — and a relative result refused with exec.ErrDot.
 // exec.LookPath offers no way to substitute a PATH but does resolve a name
 // containing a separator directly, so joining each entry and delegating keeps
 // exec.LookPath's own answer to "is this an executable file".
@@ -673,10 +673,13 @@ func lookPathForSlot(name, pathEnv string) (string, error) {
 	}
 	for _, dir := range filepath.SplitList(pathEnv) {
 		candidate := filepath.Join(dir, name)
-		if dir == "" {
-			// An empty entry means the current directory. filepath.Join would
-			// clean "./name" to a bare name, which exec.LookPath reads as a
-			// name to search the ambient PATH for (gt-f4xe).
+		if !strings.ContainsRune(candidate, os.PathSeparator) {
+			// The entry named the current directory and Join cleaned it away:
+			// what is left is a bare name, which exec.LookPath reads as one to
+			// search the ambient PATH for, so the entry would resolve gt's own
+			// PATH instead (gt-f4xe, gt-h9wh). Writing "./name" holds the
+			// search in the entry, and the relative result the ErrDot check
+			// below refuses is then this entry's file, not another's.
 			candidate = "." + string(os.PathSeparator) + name
 		}
 		resolved, err := exec.LookPath(candidate)
