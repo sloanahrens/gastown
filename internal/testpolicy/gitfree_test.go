@@ -9,7 +9,7 @@ import (
 // minGitFree is the number of entries gitfree.txt holds. The list only
 // grows: converting a package onto gitfake adds its line AND raises this, in
 // the same change.
-const minGitFree = 5
+const minGitFree = 6
 
 func TestGitFreeFindingsFixtures(t *testing.T) {
 	t.Parallel()
@@ -22,6 +22,7 @@ func TestGitFreeFindingsFixtures(t *testing.T) {
 		{"execgit", []int{11, 12}, true}, // exec.Command and CommandContext with "git"; "gitk" is not git
 		{"newgit", []int{11, 12}, true},  // git.NewGit and git.NewGitWithDir, under an import alias
 		{"inpkg", []int{7}, true},        // NewGit unqualified inside package git
+		{"testutil", nil, true},          // WithoutGit unqualified inside package testutil
 		{"nomain", nil, false},           // HermeticMain without WithoutGit
 		{"integration_only", nil, true},  // only an integration-tagged file runs git
 		{"allowed", nil, true},           // an exemption with a reason

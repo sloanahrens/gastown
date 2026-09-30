@@ -27,7 +27,8 @@ var realGitConstructors = map[string]bool{"NewGit": true, "NewGitWithDir": true}
 // GitFreeFindings checks the unit-tier test files of one package directory
 // against the no-git rule: no exec.Command("git"), and no git.NewGit or
 // git.NewGitWithDir (unqualified inside package git itself). It also
-// reports whether a unit-tier file calls testutil.WithoutGit, which the
+// reports whether a unit-tier file calls testutil.WithoutGit (unqualified
+// inside package testutil itself), which the
 // package's TestMain must pass so git reached through production code fails
 // too. Files excluded by build constraints with no extra tags are skipped,
 // so an integration-tagged file never counts.
@@ -67,6 +68,9 @@ func GitFreeFindings(dir string) (vs []Violation, withoutGit bool, err error) {
 			case *ast.Ident:
 				if f.Name.Name == "git" && fn.Obj == nil && realGitConstructors[fn.Name] {
 					add(c, fn.Name+" builds a Git that runs real git; give it a scripted runner")
+				}
+				if f.Name.Name == "testutil" && fn.Obj == nil && fn.Name == "WithoutGit" {
+					withoutGit = true // testutil's own TestMain, unqualified
 				}
 			case *ast.SelectorExpr:
 				x, ok := fn.X.(*ast.Ident)
