@@ -258,3 +258,135 @@ func TestValidateMoleculePrereqs(t *testing.T) {
 		})
 	}
 }
+
+// TestCrewWorkerFromBranch pins the crew namespace parse: crew/<name> and
+// crew/<name>/<topic> name a crew member, and nothing else does.
+func TestCrewWorkerFromBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		branch string
+		want   string
+	}{
+		{branch: "crew/sloan", want: "sloan"},
+		{branch: "crew/sloan/convert-batch1", want: "sloan"},
+		{branch: "crew/", want: ""},
+		{branch: "crew", want: ""},
+		{branch: "crew/sloan-ish", want: "sloan-ish"},
+		{branch: "polecat/pearl/gt-x+abc", want: ""},
+		{branch: "docs/test-rewrite-design", want: ""},
+		{branch: "main", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.branch, func(t *testing.T) {
+			if got := crewWorkerFromBranch(tt.branch); got != tt.want {
+				t.Errorf("crewWorkerFromBranch(%q) = %q, want %q", tt.branch, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSubmitterFromAssignee pins the last-resort tier: only this rig's own
+// polecat and crew addresses name a submitter, so a cross-rig or unrecognized
+// assignee leaves the MR unattributable rather than pointing the note at
+// someone who never touched the branch.
+func TestSubmitterFromAssignee(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		assignee string
+		rigName  string
+		want     string
+	}{
+		{name: "own crew member", assignee: "gastown/crew/sloan", rigName: "gastown", want: "sloan"},
+		{name: "own polecat", assignee: "gastown/polecats/jasper", rigName: "gastown", want: "jasper"},
+		{name: "another rig's crew", assignee: "beads/crew/sloan", rigName: "gastown", want: ""},
+		{name: "unknown kind", assignee: "gastown/witness/w", rigName: "gastown", want: ""},
+		{name: "bare name", assignee: "sloan", rigName: "gastown", want: ""},
+		{name: "unassigned", assignee: "", rigName: "gastown", want: ""},
+		{name: "no rig name", assignee: "gastown/crew/sloan", rigName: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := submitterFromAssignee(tt.assignee, tt.rigName); got != tt.want {
+				t.Errorf("submitterFromAssignee(%q, %q) = %q, want %q", tt.assignee, tt.rigName, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSubmitWorker pins the attribution precedence gt-arqw3 needs: every
+// submit path names a submitter when anything left in the environment or the
+// bead does, and names none when nothing does — a guess here would be read
+// back as a real worker by the quality-review plugin's per-worker grouping.
+func TestSubmitWorker(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		branch       string
+		branchWorker string
+		session      string
+		assignee     string
+		want         string
+	}{
+		{
+			name:         "polecat session on its own branch",
+			branch:       "polecat/pearl/gt-arqw3+muo4awbh",
+			branchWorker: "pearl",
+			session:      "pearl",
+			assignee:     "gastown/polecats/pearl",
+			want:         "pearl",
+		},
+		{
+			name:     "crew session on a crew branch",
+			branch:   "crew/sloan/convert-batch1",
+			session:  "sloan",
+			assignee: "gastown/crew/sloan",
+			want:     "sloan",
+		},
+		{
+			name:     "crew session on a hand-cut topic branch",
+			branch:   "docs/test-rewrite-design",
+			session:  "sloan",
+			assignee: "gastown/crew/sloan",
+			want:     "sloan",
+		},
+		{
+			name:     "operator at a shell falls back to the bead",
+			branch:   "docs/test-rewrite-design",
+			assignee: "gastown/crew/sloan",
+			want:     "sloan",
+		},
+		{
+			name:         "unmanned shell on a crew branch",
+			branch:       "crew/sloan/ci",
+			branchWorker: "",
+			assignee:     "",
+			want:         "sloan",
+		},
+		{
+			// gt-fl0n: a --branch rework reuses the original polecat's branch
+			// under a different worker, so the session wins over the branch.
+			name:         "session outranks the branch it was handed",
+			branch:       "polecat/jasper/gt-163k8+mukavhbq",
+			branchWorker: "jasper",
+			session:      "pearl",
+			want:         "pearl",
+		},
+		{
+			name:   "nothing names a submitter",
+			branch: "docs/test-rewrite-design",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := submitWorker(tt.branch, tt.branchWorker, tt.session, tt.assignee, "gastown")
+			if got != tt.want {
+				t.Errorf("submitWorker() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

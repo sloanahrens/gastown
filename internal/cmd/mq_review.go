@@ -270,7 +270,7 @@ func doMQReview(mrID string) (editorial.ReviewResult, error) {
 		RigDir:        r.Path,
 		RepoDir:       gitDir,
 		MRID:          mrID,
-		Worker:        fields.Worker,
+		Worker:        fields.Attribution(),
 		Rig:           fields.Rig,
 		Target:        fields.Target,
 		Branch:        fields.Branch,

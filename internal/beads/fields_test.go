@@ -262,6 +262,93 @@ func TestFormatAttachmentFieldsConvoy(t *testing.T) {
 	}
 }
 
+// --- MRFields.Submitter (gt-arqw3) ---
+
+func TestMRFieldsSubmitter(t *testing.T) {
+	tests := []struct {
+		name          string
+		description   string
+		wantWorker    string
+		wantSubmitter string
+		wantAttrib    string
+	}{
+		{
+			name:          "explicit submitter beside a polecat worker",
+			description:   "branch: polecat/pearl/gt-x+abc\nworker: pearl\nsubmitter: pearl",
+			wantWorker:    "pearl",
+			wantSubmitter: "pearl",
+			wantAttrib:    "pearl",
+		},
+		{
+			name:          "crew submitter with no polecat worker",
+			description:   "branch: crew/sloan/ci\nsubmitter: sloan",
+			wantWorker:    "",
+			wantSubmitter: "sloan",
+			wantAttrib:    "sloan",
+		},
+		{
+			// The shape every MR bead written before the field existed has.
+			name:          "worker alone answers as the attribution",
+			description:   "branch: polecat/pearl/gt-x+abc\nworker: pearl",
+			wantWorker:    "pearl",
+			wantSubmitter: "",
+			wantAttrib:    "pearl",
+		},
+		{
+			name:          "no identity at all stays empty",
+			description:   "branch: docs/design",
+			wantWorker:    "",
+			wantSubmitter: "",
+			wantAttrib:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := ParseMRFields(&Issue{Description: tt.description})
+			if fields == nil {
+				t.Fatal("ParseMRFields() = nil, want non-nil")
+			}
+			if fields.Worker != tt.wantWorker {
+				t.Errorf("Worker = %q, want %q", fields.Worker, tt.wantWorker)
+			}
+			if fields.Submitter != tt.wantSubmitter {
+				t.Errorf("Submitter = %q, want %q", fields.Submitter, tt.wantSubmitter)
+			}
+			if got := fields.Attribution(); got != tt.wantAttrib {
+				t.Errorf("Attribution() = %q, want %q", got, tt.wantAttrib)
+			}
+		})
+	}
+}
+
+func TestMRFieldsSubmitterRoundTrip(t *testing.T) {
+	original := &MRFields{
+		Branch:      "crew/sloan/ci",
+		Target:      "main",
+		SourceIssue: "gt-x",
+		Submitter:   "sloan",
+		Rig:         "gastown",
+	}
+	parsed := ParseMRFields(&Issue{Description: FormatMRFields(original)})
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	if parsed.Submitter != original.Submitter {
+		t.Errorf("Submitter: got %q, want %q", parsed.Submitter, original.Submitter)
+	}
+	if parsed.Worker != "" {
+		t.Errorf("Worker: got %q, want \"\" (a crew submit has no polecat branch)", parsed.Worker)
+	}
+}
+
+func TestFormatMRFieldsOmitsEmptySubmitter(t *testing.T) {
+	got := FormatMRFields(&MRFields{Branch: "docs/design", Target: "main"})
+	if strings.Contains(got, "submitter") {
+		t.Errorf("FormatMRFields should not include submitter when empty, got:\n%s", got)
+	}
+}
+
 func TestConvoyFieldsRoundTrip(t *testing.T) {
 	original := &AttachmentFields{
 		AttachedMolecule: "gt-wisp-abc",
