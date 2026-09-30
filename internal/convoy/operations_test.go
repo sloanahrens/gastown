@@ -1848,11 +1848,12 @@ func TestFireCrossRigDepNotifications_EmptyPrefix(t *testing.T) {
 	FireCrossRigDepNotifications(context.Background(), "noprefixid", "/tmp", map[string]beadsdk.Storage{"test": store}, nil)
 }
 
-func TestFireCrossRigDepNotifications_NotifiesWitnessOnCrossRigBlocker(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+// A close that unblocks an issue in another rig is logged, naming the issue and
+// its rig, and nothing else is done: the rig's witness it used to nudge was
+// deleted (bbc95aa1), and the unblocked issue needs no signal to become ready.
+// A blocked issue is ready again once bd sees its blocker closed, and the feeds
+// and stranded scan that dispatch convoy work read readiness, not nudges.
+func TestFireCrossRigDepNotifications_LogsCrossRigUnblock(t *testing.T) {
 	// Set up a real store that simulates the "gastown" rig.
 	// In it we create gt-dep which is blocked by external:bd:bd-closed.
 	store, cleanup := setupTestStore(t)
@@ -1898,22 +1899,6 @@ func TestFireCrossRigDepNotifications_NotifiesWitnessOnCrossRigBlocker(t *testin
 		t.Fatalf("WriteFile routes.jsonl: %v", err)
 	}
 
-	// Set up a mock gt binary that logs nudge calls.
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll binDir: %v", err)
-	}
-	gtLogPath := filepath.Join(townRoot, "gt.log")
-	gtScript := fmt.Sprintf(`#!/bin/sh
-echo "CMD:$*" >> %q
-exit 0
-`, gtLogPath)
-	gtPath := filepath.Join(binDir, "gt")
-	if err := os.WriteFile(gtPath, []byte(gtScript), 0o755); err != nil {
-		t.Fatalf("write gt stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	// stores: "gastown" → store (has gt-dep1 blocked by external:bd:bd-closed)
 	//         "beads"   → (closed issue's home store, skipped by FireCrossRigDepNotifications)
 	stores := map[string]beadsdk.Storage{
@@ -1927,14 +1912,9 @@ exit 0
 
 	FireCrossRigDepNotifications(ctx, "bd-closed", townRoot, stores, logger)
 
-	// Verify gt nudge was called for gastown/witness.
-	logData, err := os.ReadFile(gtLogPath)
-	if err != nil {
-		t.Fatalf("gt stub not called (no log): %v\nlogger output: %v", err, logged)
-	}
-	logStr := string(logData)
-	if !strings.Contains(logStr, "nudge") || !strings.Contains(logStr, "gastown/witness") {
-		t.Errorf("expected gt nudge gastown/witness in log, got: %q\nlogger output: %v", logStr, logged)
+	want := "CrossRig: bd-closed closed, unblocking gt-dep1 (Waiting on beads fix, rig gastown)"
+	if len(logged) != 1 || logged[0] != want {
+		t.Errorf("logged %q, want [%q]", logged, want)
 	}
 }
 

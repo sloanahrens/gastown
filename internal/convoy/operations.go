@@ -711,15 +711,17 @@ func fetchCrossRigBeadStatus(townRoot string, ids []string) map[string]*beadsdk.
 }
 
 // FireCrossRigDepNotifications checks if any issues in other rigs were unblocked
-// by the closure of closedIssueID. For each affected rig, sends a nudge to that
-// rig's witness so it can react to the resolved dependency.
+// by the closure of closedIssueID and logs the first one found in each affected
+// rig. Logging is all it does: the rig witness it used to nudge is gone
+// (bbc95aa1), and an unblocked issue needs no signal, since bd reports it ready
+// once its blocker closes and dispatch reads readiness.
 //
 // Cross-rig deps are stored in the dependent issue's store as "external:<prefix>:<id>".
 // To find them, this function queries each rig store using the external-wrapped form
 // of the closed issue ID.
 //
-// This is best-effort: failures are silently logged. The closed issue's own store
-// is skipped (same-rig deps don't need cross-rig notification).
+// It is best-effort: a store that fails its lookup is skipped, as is the closed
+// issue's own store (same-rig deps are not cross-rig unblocks).
 func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot string, stores map[string]beadsdk.Storage, logger func(format string, args ...interface{})) {
 	if logger == nil {
 		logger = func(format string, args ...interface{}) {}
