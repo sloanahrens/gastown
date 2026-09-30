@@ -618,35 +618,29 @@ func TestScheduleBeadRejectsMissingTargetRigDatabaseBeforeContext(t *testing.T) 
 	}
 }
 
+// TestBatchSlingRejectsMissingTargetRigDatabaseBeforeSpawn: a bead the
+// target rig's database does not hold stops the whole batch before any
+// formula is cooked or any polecat is spawned.
 func TestBatchSlingRejectsMissingTargetRigDatabaseBeforeSpawn(t *testing.T) {
-	townRoot, _ := setupCrossDatabaseSlingGuardTest(t)
-
-	prevDryRun := slingDryRun
-	prevForce := slingForce
-	prevSpawn := spawnPolecatForSling
-	t.Cleanup(func() {
-		slingDryRun = prevDryRun
-		slingForce = prevForce
-		spawnPolecatForSling = prevSpawn
-	})
-	slingDryRun = false
-	slingForce = false
-
-	spawnCalled := false
-	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
-		spawnCalled = true
-		return &SpawnedPolecatInfo{RigName: rigName, PolecatName: "toast", ClonePath: filepath.Join(townRoot, "fake-polecat")}, nil
+	t.Parallel()
+	f := newBatchSlingFake(t)
+	f.b.resolveFormula = func(string, bool, string, string) string { return "mol-polecat-work" }
+	f.b.verifyInTargetRig = func(beadID, targetRig, townRoot string) error {
+		if beadID == "gt-r2405" {
+			return errors.New("bead " + beadID + " is not present in target rig " + targetRig + " beads database")
+		}
+		return nil
 	}
 
-	err := runBatchSling([]string{"gt-r2405"}, "gastown", filepath.Join(townRoot, ".beads"))
+	err := f.b.run([]string{"gt-ok", "gt-r2405"}, "gastown", filepath.Join(t.TempDir(), ".beads"))
 	if err == nil {
 		t.Fatal("expected target-rig database validation error")
 	}
 	if !strings.Contains(err.Error(), "not present in target rig") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if spawnCalled {
-		t.Fatal("spawnPolecatForSling was called before target-rig database validation rejected the bead")
+	if len(f.executed) != 0 || f.cooked != 0 {
+		t.Fatalf("slung %v and cooked %d times before target-rig validation rejected the batch", f.executed, f.cooked)
 	}
 }
 

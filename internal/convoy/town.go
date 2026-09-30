@@ -21,6 +21,8 @@ type Town struct {
 	Out io.Writer
 	// Warn receives warnings; nil discards them.
 	Warn io.Writer
+	// Run answers the town's bd calls in process; nil is the bd on PATH.
+	Run beads.BDRunner
 }
 
 // StdTown is a Town whose output goes to the terminal: what the CLI uses.
@@ -30,15 +32,15 @@ func StdTown(root string) Town {
 
 // bdJSON runs bd in dir with the town's environment.
 func (t Town) bdJSON(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env}, dir, args...)
+	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, Run: t.Run}, dir, args...)
 }
 
 func (t Town) bdJSONAllowStale(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AllowStale: true}, dir, args...)
+	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AllowStale: true, Run: t.Run}, dir, args...)
 }
 
 func (t Town) bdJSONAutoCommit(dir string, args ...string) ([]byte, error) {
-	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AutoCommit: true}, dir, args...)
+	return beads.RunBdJSONWith(beads.BdJSONOptions{Env: t.Env, AutoCommit: true, Run: t.Run}, dir, args...)
 }
 
 // bd builds a bd command that starts from the town's environment.
@@ -47,7 +49,7 @@ func (t Town) bd(args ...string) *beads.BdCmd {
 	if t.Env != nil {
 		c.WithEnv(t.Env)
 	}
-	return c.Stderr(t.warnWriter())
+	return c.Stderr(t.warnWriter()).Via(t.Run)
 }
 
 func (t Town) outWriter() io.Writer {
