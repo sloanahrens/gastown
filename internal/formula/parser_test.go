@@ -922,6 +922,71 @@ func TestResolve_MonorepoTDD(t *testing.T) {
 	}
 }
 
+// TestMergeSteps_ChildOverridesInPlace pins the extends rule bd also applies:
+// a child step with a parent's ID replaces it at the parent's position.
+func TestMergeSteps_ChildOverridesInPlace(t *testing.T) {
+	t.Parallel()
+	parent := []Step{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}, {ID: "c", Title: "C"}}
+	child := []Step{{ID: "b", Title: "B2"}, {ID: "d", Title: "D"}}
+
+	got := mergeSteps(parent, child)
+
+	var titles []string
+	for _, s := range got {
+		titles = append(titles, s.ID+"="+s.Title)
+	}
+	if want := "a=A b=B2 c=C d=D"; strings.Join(titles, " ") != want {
+		t.Errorf("mergeSteps = %v, want %s", titles, want)
+	}
+	if parent[1].Title != "B" {
+		t.Error("mergeSteps modified the parent slice")
+	}
+}
+
+// TestResolve_DocAudit guards gt-g7yy6: mol-doc-audit carries only its delta on
+// mol-polecat-work, and must still resolve to the eight-step audit loop.
+func TestResolve_DocAudit(t *testing.T) {
+	t.Parallel()
+	load := func(name string) *Formula {
+		data, err := GetEmbeddedFormulaContent(name)
+		if err != nil {
+			t.Fatalf("GetEmbeddedFormulaContent(%s): %v", name, err)
+		}
+		f, err := Parse(data)
+		if err != nil {
+			t.Fatalf("Parse(%s): %v", name, err)
+		}
+		return f
+	}
+	resolved, err := Resolve(load("mol-doc-audit"), nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	want := "load-context branch-setup audit commit-changes self-review build-check pre-verify submit-and-exit"
+	if got := strings.Join(stepIDs(resolved), " "); got != want {
+		t.Fatalf("steps = %s, want %s", got, want)
+	}
+	if got := resolved.GetStep("audit").Needs; len(got) != 1 || got[0] != "branch-setup" {
+		t.Errorf("audit.Needs = %v, want [branch-setup]", got)
+	}
+	if got := resolved.GetStep("commit-changes").Needs; len(got) != 1 || got[0] != "audit" {
+		t.Errorf("commit-changes.Needs = %v, want [audit]", got)
+	}
+	if got := resolved.GetStep("self-review").Title; got != "Self-review: only the slice changed" {
+		t.Errorf("self-review.Title = %q, want the doc-audit override", got)
+	}
+	parent := load("mol-polecat-work")
+	if resolved.GetStep("pre-verify").Description != parent.GetStep("pre-verify").Description {
+		t.Error("pre-verify should be inherited from mol-polecat-work unchanged")
+	}
+	for _, v := range []string{"issue", "base_branch", "slice_docs", "slice_go", "test_command"} {
+		if _, ok := resolved.Vars[v]; !ok {
+			t.Errorf("resolved vars missing %q", v)
+		}
+	}
+}
+
 // stepIDs returns the IDs of all steps in a formula for test diagnostics.
 func stepIDs(f *Formula) []string {
 	ids := make([]string, len(f.Steps))
