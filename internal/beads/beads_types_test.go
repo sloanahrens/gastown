@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,19 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
+
+// writeNamedBeadsWorkspace creates a .beads directory that names its database,
+// which a workspace must do to be initialized at all (gt-170zk).
+func writeNamedBeadsWorkspace(t *testing.T, beadsDir string) {
+	t.Helper()
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"zztest"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func installMockBDRecorder(t *testing.T) string {
 	t.Helper()
@@ -344,9 +358,7 @@ func TestEnsureCustomTypes(t *testing.T) {
 		logPath := installMockBDRecorder(t)
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			t.Fatal(err)
-		}
+		writeNamedBeadsWorkspace(t, beadsDir)
 
 		// Create sentinel file with old/legacy content (gt-zmy, gt-26f)
 		sentinelPath := filepath.Join(beadsDir, typesSentinel)
@@ -366,7 +378,8 @@ func TestEnsureCustomTypes(t *testing.T) {
 		}
 
 		logOutput := readMockBDLog(t, logPath)
-		for _, want := range []string{"init", "config set types.custom", "config set types.infra"} {
+		// No "init" here: the workspace already names its database.
+		for _, want := range []string{"config set types.custom", "config set types.infra"} {
 			if !strings.Contains(logOutput, want) {
 				t.Fatalf("mock bd log %q missing %q", logOutput, want)
 			}
@@ -377,9 +390,7 @@ func TestEnsureCustomTypes(t *testing.T) {
 		logPath := installMockBDRecorder(t)
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			t.Fatal(err)
-		}
+		writeNamedBeadsWorkspace(t, beadsDir)
 
 		// This was the real pre-fix sentinel format. It must be stale so existing
 		// databases receive the durable-rig infra config.
@@ -537,9 +548,7 @@ esac
 
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			t.Fatal(err)
-		}
+		writeNamedBeadsWorkspace(t, beadsDir)
 
 		ResetEnsuredDirs()
 
@@ -603,9 +612,7 @@ func TestEnsureCustomStatuses(t *testing.T) {
 		logPath := installMockBDRecorder(t)
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			t.Fatal(err)
-		}
+		writeNamedBeadsWorkspace(t, beadsDir)
 
 		// Create sentinel file with old/stale content
 		sentinelPath := filepath.Join(beadsDir, statusesSentinel)
@@ -629,7 +636,8 @@ func TestEnsureCustomStatuses(t *testing.T) {
 		}
 
 		logOutput := readMockBDLog(t, logPath)
-		for _, want := range []string{"init", "config get status.custom", "config set status.custom"} {
+		// No "init" here: the workspace already names its database.
+		for _, want := range []string{"config get status.custom", "config set status.custom"} {
 			if !strings.Contains(logOutput, want) {
 				t.Fatalf("mock bd log %q missing %q", logOutput, want)
 			}
@@ -842,27 +850,30 @@ func TestEnsureDatabaseInitialized(t *testing.T) {
 		}
 
 		logOutput := readMockBDLog(t, logPath)
-		for _, want := range []string{"init --prefix gt --server", "config set issue_prefix", "migrate --yes"} {
+		// --database names the database init creates: bd would otherwise name
+		// it itself, and its last resort is the built-in default "beads"
+		// (gt-170zk).
+		for _, want := range []string{"init --prefix gt --database missing_db --server", "config set issue_prefix", "migrate --yes"} {
 			if !strings.Contains(logOutput, want) {
 				t.Fatalf("mock bd log %q missing %q", logOutput, want)
 			}
 		}
 	})
 
-	t.Run("no database artifacts — attempts bd init", func(t *testing.T) {
+	t.Run("no database artifacts — refuses to let bd choose a database", func(t *testing.T) {
 		logPath := installMockBDRecorder(t)
 		beadsDir := filepath.Join(t.TempDir(), ".beads")
 		os.MkdirAll(beadsDir, 0755)
 
-		if err := ensureDatabaseInitialized(beadsDir); err != nil {
-			t.Fatalf("ensureDatabaseInitialized: %v", err)
+		// A workspace that names no database is not one gt may initialize:
+		// bd init would fall back to its built-in default "beads" and CREATE
+		// it on the town's shared Dolt server (gt-170zk).
+		err := ensureDatabaseInitialized(beadsDir)
+		if !errors.Is(err, ErrNoConfiguredDatabase) {
+			t.Fatalf("ensureDatabaseInitialized = %v, want ErrNoConfiguredDatabase", err)
 		}
-
-		logOutput := readMockBDLog(t, logPath)
-		for _, want := range []string{"init --prefix gt --server", "config set issue_prefix", "migrate --yes"} {
-			if !strings.Contains(logOutput, want) {
-				t.Fatalf("mock bd log %q missing %q", logOutput, want)
-			}
+		if logOutput := readMockBDLog(t, logPath); logOutput != "" {
+			t.Fatalf("bd ran against an unnamed workspace: %q", logOutput)
 		}
 	})
 }
