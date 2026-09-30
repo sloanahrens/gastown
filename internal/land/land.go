@@ -39,10 +39,10 @@ type Lander struct {
 	// Route names who landed, for the record ("daemon" when empty).
 	Route string
 
-	// Gate runs on the merged tree. For a Go rig with container-backed
-	// tests the caller must pass WithSlot(RigGate(...), gt, role): Land does
-	// not take the container-gate slot itself, and an unwrapped full tier
-	// starts containers beside the rest of the town.
+	// Gate runs on the merged tree. The landing worker passes
+	// WithSlot(LandGate(tree, rigMergeQueueConfig), gt, role): LandGate reads
+	// the rig's merge_queue.gate, and WithSlot holds the container-gate slot
+	// for the `make test` fallback only. Land does not take the slot itself.
 	Gate     Gate
 	Reviewer Reviewer
 	Beads    Beads

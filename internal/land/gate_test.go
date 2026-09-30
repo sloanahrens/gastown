@@ -326,3 +326,55 @@ func TestRigGateUnitTierRefusesAContainerOptIn(t *testing.T) {
 		t.Errorf("an explicit opt-out was refused: %v", err)
 	}
 }
+
+func writeMakefile(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range map[string]string{"go.mod": "module x\n", "Makefile": body} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// Land's gate comes from the rig: merge_queue.gate, else make gate when the
+// target exists, else make test (the only one WithSlot wraps).
+func TestLandGateComesFromTheRig(t *testing.T) {
+	t.Parallel()
+	withGate := writeMakefile(t, "lint:\n\ttrue\ngate: lint\n\ttrue\n")
+	noGate := writeMakefile(t, "GATE := x\ngate-docs:\n\ttrue\ntest:\n\ttrue\n")
+	hm := "gt slot run --role hm/crew/sloan -- make test"
+	for _, tc := range []struct {
+		name, dir string
+		mq        *config.MergeQueueConfig
+		want      string
+		step      string
+	}{
+		{"rig setting wins", withGate, &config.MergeQueueConfig{Gate: hm}, hm, "gate"},
+		{"make gate target", withGate, &config.MergeQueueConfig{}, "make gate", "gate"},
+		{"make test fallback", noGate, nil, "make test", "test"},
+	} {
+		g := LandGate(tc.dir, tc.mq)
+		if len(g.Steps) != 1 || g.Steps[0].Command != tc.want || g.Steps[0].Name != tc.step {
+			t.Errorf("%s: steps = %+v, want one %q step %q", tc.name, g.Steps, tc.step, tc.want)
+		}
+		wrapped := WithSlot(g, "gt", "r").Steps[0].Wrap != nil
+		if wrapped != (tc.step == "test") {
+			t.Errorf("%s: WithSlot wrapped=%v", tc.name, wrapped)
+		}
+	}
+}
+
+// With D9's make gate present, gt done's unit tier is that one target.
+func TestRigGateUsesMakeGateWhenPresent(t *testing.T) {
+	t.Parallel()
+	g, err := RigGate(writeMakefile(t, "gate:\n\ttrue\n"), &config.MergeQueueConfig{TestCommand: "make test"}, true)
+	if err != nil || len(g.Steps) != 1 || g.Steps[0].Command != "make gate" {
+		t.Fatalf("RigGate = %+v, %v; want make gate", g.Steps, err)
+	}
+	g, err = RigGate(writeMakefile(t, "test:\n\ttrue\n"), nil, true)
+	if err != nil || len(g.Steps) != 3 {
+		t.Fatalf("RigGate without a gate target = %+v, %v", g.Steps, err)
+	}
+}

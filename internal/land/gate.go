@@ -149,6 +149,11 @@ func goGate(lint, test string, unitOnly bool) CommandGate {
 // "no gate configured" must stop a landing, never wave it through (G2-11).
 func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGate, error) {
 	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		if unitOnly && hasMakeTarget(dir, "gate") {
+			// D9's `make gate` is lint, build and the unit tier in one
+			// target, with containers forced off.
+			return CommandGate{Steps: []Step{{Name: "gate", Command: "make gate", LockRetry: true}}}, nil
+		}
 		lint, test := "make lint", "make test"
 		if mq != nil {
 			if c := strings.TrimSpace(mq.LintCommand); c != "" {
@@ -179,6 +184,30 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 		return CommandGate{}, fmt.Errorf("no gate configured for %s: it is not a Go module and the rig sets no lint_command, build_command or test_command", dir)
 	}
 	return CommandGate{Steps: steps}, nil
+}
+
+// LandGate is the gate Land runs on the merged tree, one command from the
+// rig's settings: merge_queue.gate when set, else `make gate` when the
+// Makefile has that target, else `make test`. Only the `make test` fallback
+// needs the container slot; its step is named "test", so WithSlot wraps it
+// and nothing else. A configured gate that needs a slot wraps itself.
+func LandGate(dir string, mq *config.MergeQueueConfig) CommandGate {
+	if mq != nil && strings.TrimSpace(mq.Gate) != "" {
+		return CommandGate{Steps: []Step{{Name: "gate", Command: strings.TrimSpace(mq.Gate), LockRetry: true}}}
+	}
+	if hasMakeTarget(dir, "gate") {
+		return CommandGate{Steps: []Step{{Name: "gate", Command: "make gate", LockRetry: true}}}
+	}
+	return CommandGate{Steps: []Step{{Name: "test", Command: "make test", LockRetry: true}}}
+}
+
+// hasMakeTarget reports whether dir's Makefile defines target.
+func hasMakeTarget(dir, target string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "Makefile")) //nolint:gosec // G304: the gated tree's own Makefile
+	if err != nil {
+		return false
+	}
+	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `\s*:([^=]|$)`).Match(data)
 }
 
 // containerOptInRE matches a command that sets GT_TEST_DOCKER to anything but

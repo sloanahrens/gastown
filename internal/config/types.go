@@ -1523,6 +1523,13 @@ type MergeQueueConfig struct {
 	// TestCommand is the command to run for tests.
 	TestCommand string `json:"test_command,omitempty"`
 
+	// Gate is the one command the landing worker runs on the merged tree
+	// (land.LandGate, ADR 0004). Exit 0 lands; anything else rejects. Empty
+	// means `make gate` when the repo's Makefile has that target, else
+	// `make test`. A Docker-backed gate carries its own slot wrapper, e.g.
+	// "gt slot run --role hm/crew/sloan -- make test".
+	Gate string `json:"gate,omitempty"`
+
 	// TestVerifyRunTimeout overrides the wall-clock run budget for gt done's
 	// default test-verify gate, once the container-gate slot is held (gt-pnkd).
 	// A Go duration string, e.g. "40m". Empty uses the 30m floor: the gate
