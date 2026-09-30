@@ -3,6 +3,7 @@ package editorial
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -87,4 +88,45 @@ func TestShippedRubricCarriesAlarmingBranchCriterion(t *testing.T) {
 		return
 	}
 	t.Fatalf("the shipped rubric %s carries no %q criterion: the class gt-07mfu gated (a check whose failure path is untested, so a broken check reads exactly like a passing one) is unguarded until it is restored", shippedRubricPath(t), alarmingBranchCriterion)
+}
+
+// repoContextFile is the document the docs-and-comments criterion grades
+// against: the repository's own writing standard.
+const repoContextFile = "docs/writing-for-agents.md"
+
+// docsAndCommentsCriterion is the criterion gt-nj23.5 added and gt-9yu4q
+// reworded. It arrived citing the standard as the range "R1-R13"; the standard
+// gained R14 (gt-jq95) after that line was written, so a reviewer reading the
+// range literally left R14's class ungraded exactly where it most often
+// appears — a claim written into a doc, which the om gate executes nothing to
+// check.
+const docsAndCommentsCriterion = "docs-and-comments"
+
+// frozenRuleRange matches a citation naming both ends of a rule range, the
+// form that rots the moment the standard gains a rule.
+var frozenRuleRange = regexp.MustCompile(`\bR\d+\s*[-–—]\s*R\d+\b`)
+
+// TestShippedRubricCarriesDocsAndCommentsCriterion pins the three things
+// gt-9yu4q's reword must keep: the criterion's name, the pointer it grades by
+// (R1 — a line that names another document states what it is), and the drift
+// requirement that gives the criterion its teeth. A deliberate reword rewords
+// this test in the same commit; a reword that leaves the name and drops the
+// pointer is what it is here to catch.
+func TestShippedRubricCarriesDocsAndCommentsCriterion(t *testing.T) {
+	for _, c := range shippedRubricCriteria(t) {
+		if c.Name != docsAndCommentsCriterion {
+			continue
+		}
+		if !strings.Contains(c.Guidance, repoContextFile) {
+			t.Errorf("%s guidance no longer names %s, so the reviewer has nothing left to read: %q", docsAndCommentsCriterion, repoContextFile, c.Guidance)
+		}
+		if m := frozenRuleRange.FindString(c.Guidance); m != "" {
+			t.Errorf("%s guidance cites the rule set as a frozen range (%q). The range stops at the rules that existed when the line was written, so every rule added later is silently ungraded; cite the rules by pointer to %s instead", docsAndCommentsCriterion, m, repoContextFile)
+		}
+		if !strings.Contains(c.Guidance, "stale or contradicted") {
+			t.Errorf("%s guidance no longer names the drift it grades: %q", docsAndCommentsCriterion, c.Guidance)
+		}
+		return
+	}
+	t.Fatalf("the shipped rubric %s carries no %q criterion: the class gt-nj23.5 gated (a stale or contradicted doc or comment that nothing reads) is ungraded until it is restored", shippedRubricPath(t), docsAndCommentsCriterion)
 }
