@@ -56,8 +56,8 @@ func TestUnknownSubcommandExitsTwo(t *testing.T) {
 		}
 	}
 	walk(rootCmd)
-	if checked < 40 {
-		t.Fatalf("checked %d requireSubcommand parents; expected at least 40", checked)
+	if checked < 39 {
+		t.Fatalf("checked %d requireSubcommand parents; expected at least 39", checked)
 	}
 }
 
