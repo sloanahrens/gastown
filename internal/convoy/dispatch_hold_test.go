@@ -268,3 +268,50 @@ func TestDispatchHoldReason_OperatorReservation(t *testing.T) {
 		t.Error("deacon path must hold operator work, got no hold")
 	}
 }
+
+// TestHold_RigStoreNotOpen_ReportsNoHold is gt-2ppfg: a rig whose store never
+// opened is the town-level gap the store alert reports, and the hold rule must
+// reach that verdict on the bead's own route rather than by reading there. The
+// caller holds the town store, which has no record of a rig bead, so the wrong
+// store answers "no record" about a bead that has one — the reading that made
+// the event-driven feed hold beads the stranded scan fed.
+func TestHold_RigStoreNotOpen_ReportsNoHold(t *testing.T) {
+	ctx := context.Background()
+	townRoot := setupTownRoot(t)
+	townStore := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{}}
+
+	// The daemon's store map has hq but not the "testrig" the bead routes to:
+	// a rig that never opened.
+	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{"hq": townStore})
+
+	// Both feeders' rules, and the deacon's, answer the gap the same way.
+	if hold := FeedHold(ctx, townStore, "test-rigbead", resolver); hold != (Hold{}) {
+		t.Errorf("a rig whose store is not open must report no hold, got %+v", hold)
+	}
+	if reason := DispatchHoldReason(ctx, townStore, "test-rigbead", resolver); reason != "" {
+		t.Errorf("deacon path: want no hold for a rig with no store, got %q", reason)
+	}
+
+	// The gap is the missing store, not a missing record: a bead the town
+	// store does own still holds when its record is absent.
+	if hold := FeedHold(ctx, townStore, "hq-absent", resolver); !hold.Unreadable || !strings.Contains(hold.Reason, "no record") {
+		t.Errorf("an hq bead with no record must still hold, got %+v", hold)
+	}
+}
+
+// TestHold_RigStoreReadable_StillHoldsUnreadableRecord is the other half of
+// gt-2ppfg: a rig store the resolver does have is read, and a record it cannot
+// answer for holds the bead. Failing open on the gap must not fail open on a
+// store that opened and then could not read.
+func TestHold_RigStoreReadable_StillHoldsUnreadableRecord(t *testing.T) {
+	ctx := context.Background()
+	townRoot := setupTownRoot(t)
+	townStore := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{}}
+	broken := &fakeHoldStorage{readErr: errors.New("dolt: connection refused")}
+
+	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{"hq": townStore, "testrig": broken})
+
+	if hold := FeedHold(ctx, townStore, "test-rigbead", resolver); !hold.Unreadable || !strings.Contains(hold.Reason, "record unreadable") {
+		t.Errorf("a rig store that cannot read the record must hold it, got %+v", hold)
+	}
+}
