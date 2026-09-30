@@ -147,6 +147,10 @@ type ConvoyManager struct {
 	listOriginBranchesFn      func(rigRoot string) ([]string, error)
 	deadHolderWorktreeStateFn func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error)
 
+	// openGitFn opens a dead holder's worktree for the state read and the
+	// preserve push; nil opens a *git.Git. Tests hand it a gitfake world.
+	openGitFn func(dir string) deadHolderGit
+
 	townRoot     string
 	scanInterval time.Duration
 	ctx          context.Context
@@ -1373,7 +1377,27 @@ func (m *ConvoyManager) deadHolderWorktreeState(townRoot, assignee, issueID stri
 	if m.deadHolderWorktreeStateFn != nil {
 		return m.deadHolderWorktreeStateFn(townRoot, assignee, issueID)
 	}
-	return defaultDeadHolderWorktreeState(townRoot, assignee, issueID)
+	return m.defaultDeadHolderWorktreeState(townRoot, assignee, issueID)
+}
+
+// deadHolderGit is the git surface dead-holder recovery reads and pushes
+// through: *git.Git in production, gitfake in tests.
+type deadHolderGit interface {
+	CurrentBranch() (string, error)
+	CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStatus, error)
+	Rev(ref string) (string, error)
+	Push(remote, refspec string, force bool) error
+	VerifyPushedCommit(remote, branch, commit string) error
+}
+
+var _ deadHolderGit = (*git.Git)(nil)
+
+// gitAt opens the repository at dir through openGitFn, or as a *git.Git.
+func (m *ConvoyManager) gitAt(dir string) deadHolderGit {
+	if m.openGitFn != nil {
+		return m.openGitFn(dir)
+	}
+	return git.NewGit(dir)
 }
 
 // defaultDeadHolderWorktreeState inspects the assignee's worktree directly,
@@ -1382,13 +1406,13 @@ func (m *ConvoyManager) deadHolderWorktreeState(townRoot, assignee, issueID stri
 // returns an error only when a worktree that should hold issueID's work could
 // not be read, which the caller must treat as "state undetermined" rather
 // than "clean" (gt-utt4).
-func defaultDeadHolderWorktreeState(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
+func (m *ConvoyManager) defaultDeadHolderWorktreeState(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
 	path := deacon.AssigneeWorktreePath(townRoot, assignee)
 	if path == "" {
 		return deadHolderWorktreeState{}, nil
 	}
 
-	g := git.NewGit(path)
+	g := m.gitAt(path)
 	branch, err := g.CurrentBranch()
 	if err != nil {
 		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: %w", err)
@@ -1488,7 +1512,7 @@ func (m *ConvoyManager) resolveDeadHolderWork(rig, assignee, issueID string) (fe
 
 	// Clean of real dirt with commits that never reached origin: safe to
 	// publish, since this only pushes what the holder already committed.
-	if err := preserveWorktreeBranch(git.NewGit(state.WorktreePath), state.Branch); err != nil {
+	if err := preserveWorktreeBranch(m.gitAt(state.WorktreePath), state.Branch); err != nil {
 		msg := fmt.Sprintf("%s: pushing %s's unpushed work on %s failed (%s), not re-slinging blind — resolve by hand, then reopen",
 			issueID, assignee, state.Branch, util.FirstLine(err.Error()))
 		m.raiseDeadHolderAlert(issueKey, msg)
@@ -1568,7 +1592,7 @@ func (m *ConvoyManager) claimAlertOnceThisScan(key string) bool {
 // rejected push (remote branch moved on), publish under a
 // <branch>-<sha7> side ref instead — that name cannot conflict, so a
 // rejection there means the remote itself is unusable.
-func preserveWorktreeBranch(g *git.Git, branch string) error {
+func preserveWorktreeBranch(g deadHolderGit, branch string) error {
 	tip, err := g.Rev("refs/heads/" + branch)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", branch, err)
