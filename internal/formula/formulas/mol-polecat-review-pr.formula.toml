@@ -64,22 +64,36 @@ The hook_bead references the PR to review. Read the tracking issue:
 bd show {{issue}}           # Full issue details including PR URL
 ```
 
-**3. Fetch the PR:**
+**3. Bind and validate the PR URL:**
 ```bash
-gh pr view {{pr_url}} --json title,body,author,files,commits
-gh pr diff {{pr_url}}       # See the actual changes
+PR_URL=$(cat <<'GT_PR_URL_EOF'
+{{pr_url}}
+GT_PR_URL_EOF
+)
+case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
 ```
 
-**4. Understand the PR:**
+The PR URL is free text from the bead. Every `gh` command reads `"$PR_URL"`,
+quoted; the URL never appears on a command line as a template value. On STOP,
+run no `gh` command and mail Witness.
+
+**4. Fetch the PR:**
+```bash
+gh pr view "$PR_URL" --json title,body,author,files,commits
+gh pr diff "$PR_URL"        # See the actual changes
+```
+
+**5. Understand the PR:**
 - What is the PR trying to accomplish?
 - What files are changed?
 - Is there a linked issue?
 - Does the PR description explain the "why"?
 
-**5. Check PR status:**
+**6. Check PR status:**
 ```bash
-gh pr checks {{pr_url}}     # CI status
-gh pr view {{pr_url}} --json mergeable,reviewDecision
+gh pr checks "$PR_URL"      # CI status
+gh pr view "$PR_URL" --json mergeable,reviewDecision
 ```
 
 **Exit criteria:** You understand the PR's purpose and scope."""
@@ -91,9 +105,16 @@ needs = ["load-context"]
 description = """
 Perform a thorough code review of the PR.
 
-**1. Review the diff systematically:**
+**1. Review the diff systematically.** Each step runs in a fresh shell, so bind
+and validate the PR URL again:
 ```bash
-gh pr diff {{pr_url}}
+PR_URL=$(cat <<'GT_PR_URL_EOF'
+{{pr_url}}
+GT_PR_URL_EOF
+)
+case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
+gh pr diff "$PR_URL"
 ```
 
 **2. Check for common issues:**
@@ -127,9 +148,16 @@ needs = ["review-code"]
 description = """
 Ensure tests pass and coverage is adequate.
 
-**1. Check CI status:**
+**1. Check CI status.** Each step runs in a fresh shell, so bind and validate
+the PR URL again:
 ```bash
-gh pr checks {{pr_url}}
+PR_URL=$(cat <<'GT_PR_URL_EOF'
+{{pr_url}}
+GT_PR_URL_EOF
+)
+case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
+gh pr checks "$PR_URL"
 ```
 
 All required checks should pass. If not, note which are failing.
@@ -174,21 +202,24 @@ Be specific about what needs to change. Provide examples if helpful.
 The contributor should be able to act on your feedback.
 
 **3. If NEEDS_DISCUSSION:**
+Bind the PR URL first (each step runs in a fresh shell):
 ```bash
-gt mail send {{rig}}/witness -s "PR review needs discussion" --stdin <<'BODY'
-PR: {{pr_url}}
-Issue: {{issue}}
+PR_URL=$(cat <<'GT_PR_URL_EOF'
+{{pr_url}}
+GT_PR_URL_EOF
+)
+{ printf 'PR: %s\nIssue: {{issue}}\n' "$PR_URL"; cat <<'BODY'
 Question: <what needs clarification>
 BODY
+} | gt mail send {{rig}}/witness -s "PR review needs discussion" --stdin
 ```
 
 **4. If BLOCK (security):**
 ```bash
-gt mail send {{rig}}/witness -s "SECURITY: PR blocked" --stdin <<'BODY'
-PR: {{pr_url}}
-Issue: {{issue}}
+{ printf 'PR: %s\nIssue: {{issue}}\n' "$PR_URL"; cat <<'BODY'
 Concern: <security issue found>
 BODY
+} | gt mail send {{rig}}/witness -s "SECURITY: PR blocked" --stdin
 ```
 
 **Exit criteria:** You've made a clear decision with rationale."""
@@ -200,16 +231,24 @@ needs = ["make-decision"]
 description = """
 Submit your review via GitHub.
 
-**1. Submit the review:**
+**1. Submit the review.** Each step runs in a fresh shell, so bind and validate
+the PR URL again:
 ```bash
+PR_URL=$(cat <<'GT_PR_URL_EOF'
+{{pr_url}}
+GT_PR_URL_EOF
+)
+case "$PR_URL" in *[!A-Za-z0-9._/:-]*|'') PR_URL="" ;; https://github.com/*/*/pull/[0-9]*) ;; *) PR_URL="" ;; esac
+[ -n "$PR_URL" ] || echo "STOP: pr_url is not a GitHub PR URL; mail Witness"
+
 # For APPROVE:
-gh pr review {{pr_url}} --approve --body "LGTM. <brief summary of what's good>"
+gh pr review "$PR_URL" --approve --body "LGTM. <brief summary of what's good>"
 
 # For REQUEST_CHANGES:
-gh pr review {{pr_url}} --request-changes --body "<detailed feedback>"
+gh pr review "$PR_URL" --request-changes --body "<detailed feedback>"
 
 # For COMMENT (needs discussion):
-gh pr review {{pr_url}} --comment --body "<questions or discussion points>"
+gh pr review "$PR_URL" --comment --body "<questions or discussion points>"
 ```
 
 **2. Add inline comments if needed:**
@@ -225,10 +264,15 @@ needs = ["submit-review"]
 description = """
 Create beads for any followup work discovered during review.
 
-**1. For issues found that are outside PR scope:**
+**1. For issues found that are outside PR scope.** Each step runs in a fresh
+shell, so bind the PR URL again:
 ```bash
+PR_URL=$(cat <<'GT_PR_URL_EOF'
+{{pr_url}}
+GT_PR_URL_EOF
+)
 bd create --type=bug --title="Found during PR review: <description>" \
-  --description="Discovered while reviewing {{pr_url}}.
+  --description="Discovered while reviewing ${PR_URL}.
 
   <details of the issue>"
 ```
@@ -236,7 +280,7 @@ bd create --type=bug --title="Found during PR review: <description>" \
 **2. For improvements suggested but not required:**
 ```bash
 bd create --type=task --title="Improvement: <description>" \
-  --description="Suggested during review of {{pr_url}}.
+  --description="Suggested during review of ${PR_URL}.
 
   <details of the improvement>"
 ```
