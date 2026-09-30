@@ -175,6 +175,10 @@ func TestMatchesGitClean(t *testing.T) {
 		{"force flag before a dry-run flag", "git clean -f -n", true},
 		{"git clean -n -f", "git clean -n -f", true},
 		{"glued to a shell operator", "cd /tmp && git clean -fdx", true},
+		{"backgrounded behind a text-only command", "echo hi & git clean -f", true},
+		{"glued to a background operator", "echo hi &git clean -fdx", true},
+		{"backgrounded after another command", "sleep 5 & git clean -fd", true},
+		{"force flag after a redirection", "git clean 2>&1 -f", true},
 		{"behind a leading env assignment", "GIT_DIR=.git git clean -fd", true},
 		{"behind git's -C option", "git -C /tmp/repo clean -fd", true},
 		{"absolute path to git", "/usr/bin/git clean -fd", true},
@@ -196,6 +200,8 @@ func TestMatchesGitClean(t *testing.T) {
 		{"force flag from a probe on another command", `test -f .git/MERGE_HEAD && echo "clean"`, false},
 		{"git subcommand other than clean", "git status -f", false},
 		{"force flag owned by a later command in the same segment", "git clean -n; git push -f origin main", false},
+		{"words split across a background operator", `echo "git clean" & echo "-f"`, false},
+		{"clean written to stderr", "echo clean 2>&1", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -829,6 +835,53 @@ func TestShellTokenizeSplitsUnquotedNewlines(t *testing.T) {
 			[]string{"echo", "a\nb"}},
 		{"newline inside a quoted argument is one token", "git commit -m \"fix: use gh pr create\"\nls",
 			[]string{"git", "commit", "-m", "fix: use gh pr create", ";", "ls"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellTokenize(tt.command)
+			if len(got) != len(tt.want) {
+				t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestShellTokenizeSplitsBackgroundAmpersand pins the gt-wwwht tokenizer
+// rule: a background '&' starts a new command exactly as ';' does and must
+// surface as its own separator token — while a '&' that belongs to a
+// redirection (2>&1, &>file) stays glued to the redirect and splits nothing.
+// The split is what stops a text-only command in front of the '&' from
+// speaking for the real command behind it ("echo hi & git clean -f").
+func TestShellTokenizeSplitsBackgroundAmpersand(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"background ampersand is its own token", "echo hi & git clean -f",
+			[]string{"echo", "hi", "&", "git", "clean", "-f"}},
+		{"glued background ampersand still splits", "echo hi&git clean -f",
+			[]string{"echo", "hi", "&", "git", "clean", "-f"}},
+		{"file-descriptor duplication stays one token", "git clean -f 2>&1",
+			[]string{"git", "clean", "-f", "2>&1"}},
+		{"stderr redirection stays one token", "foo >&2",
+			[]string{"foo", ">&2"}},
+		{"stdout-and-stderr redirect stays one token", "make test &>/tmp/log",
+			[]string{"make", "test", "&>/tmp/log"}},
+		{"appending stdout-and-stderr redirect stays one token", "make test &>>/tmp/log",
+			[]string{"make", "test", "&>>/tmp/log"}},
+		{"ampersand spaced from a redirect is background", "make test & >/tmp/log",
+			[]string{"make", "test", "&", ">/tmp/log"}},
+		{"double ampersand is one token", "echo hi && git status",
+			[]string{"echo", "hi", "&&", "git", "status"}},
+		{"quoted ampersand stays opaque", `echo "a & b"`,
+			[]string{"echo", "a & b"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
