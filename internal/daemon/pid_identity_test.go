@@ -96,6 +96,13 @@ func startUnrelatedSleep(t *testing.T) *ownedChild {
 // argv0, with args, so ps shows exactly `<dir>/argv0 args...`.
 func startImpersonator(t *testing.T, argv0 string, args ...string) *ownedChild {
 	t.Helper()
+	return startImpersonatorIn(t, "", argv0, args...)
+}
+
+// startImpersonatorIn is startImpersonator with the child's working
+// directory set to dir ("" inherits ours): the daemon's town is its cwd.
+func startImpersonatorIn(t *testing.T, dir, argv0 string, args ...string) *ownedChild {
+	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
@@ -105,6 +112,7 @@ func startImpersonator(t *testing.T, argv0 string, args ...string) *ownedChild {
 		t.Fatalf("symlink: %v", err)
 	}
 	cmd := exec.Command(link, args...)
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), signalTargetHelperEnv+"=1")
 	return startOwnedChild(t, cmd)
 }
@@ -121,6 +129,14 @@ func skipOnWindows(t *testing.T) {
 func holdDaemonLock(t *testing.T, pid int) string {
 	t.Helper()
 	townRoot := t.TempDir()
+	holdDaemonLockIn(t, townRoot, pid)
+	return townRoot
+}
+
+// holdDaemonLockIn is holdDaemonLock for a town that already exists, so a
+// daemon impersonator can be started with that town as its cwd first.
+func holdDaemonLockIn(t *testing.T, townRoot string, pid int) {
+	t.Helper()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -134,7 +150,6 @@ func holdDaemonLock(t *testing.T, pid int) string {
 	if _, err := writePIDFile(filepath.Join(daemonDir, "daemon.pid"), pid); err != nil {
 		t.Fatal(err)
 	}
-	return townRoot
 }
 
 func TestIsGTDaemonArgs(t *testing.T) {
@@ -159,28 +174,101 @@ func TestIsGTDaemonArgs(t *testing.T) {
 
 func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
 	skipOnWindows(t)
-	orig := processArgsFn
-	t.Cleanup(func() { processArgsFn = orig })
+	townRoot := t.TempDir()
+	origArgs, origCWD := processArgsFn, processCWDFn
+	t.Cleanup(func() { processArgsFn, processCWDFn = origArgs, origCWD })
+	processCWDFn = func(int) string { return townRoot }
 
 	processArgsFn = func(int) []string { return nil }
-	if err := verifyGTDaemonPID(4242); err == nil {
+	if err := verifyGTDaemonPID(townRoot, 4242); err == nil {
 		t.Error("an unreadable command line was accepted as the daemon")
 	}
 	processArgsFn = func(int) []string {
 		return []string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend"}
 	}
-	if err := verifyGTDaemonPID(4242); err == nil || !strings.Contains(err.Error(), "not the gt daemon") {
+	if err := verifyGTDaemonPID(townRoot, 4242); err == nil || !strings.Contains(err.Error(), "not the gt daemon") {
 		t.Errorf("Docker's backend accepted as the daemon: %v", err)
 	}
 	processArgsFn = func(int) []string { return []string{"gt", "daemon", "run"} }
-	if err := verifyGTDaemonPID(4242); err != nil {
+	if err := verifyGTDaemonPID(townRoot, 4242); err != nil {
 		t.Errorf("gt daemon run rejected: %v", err)
 	}
-	if err := verifyGTDaemonPID(os.Getpid()); err == nil {
+	if err := verifyGTDaemonPID(townRoot, os.Getpid()); err == nil {
 		t.Error("this process accepted as the daemon")
 	}
-	if err := verifyGTDaemonPID(0); err == nil {
+	if err := verifyGTDaemonPID(townRoot, 0); err == nil {
 		t.Error("PID 0 accepted")
+	}
+}
+
+// gt-l9s6f: `gt daemon run` names no town in its argv; the town is the
+// daemon's working directory. A daemon in another town — or one whose cwd
+// cannot be read — is not this town's to signal.
+func TestVerifyGTDaemonPIDIsTownScoped(t *testing.T) {
+	skipOnWindows(t)
+	parent := t.TempDir()
+	townRoot := filepath.Join(parent, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling whose name extends the town's: a string-prefix check would
+	// call it inside the town.
+	prefixSibling := townRoot + "-two"
+	link := filepath.Join(parent, "link")
+	if err := os.MkdirAll(prefixSibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(townRoot, link); err != nil {
+		t.Fatal(err)
+	}
+
+	origArgs, origCWD := processArgsFn, processCWDFn
+	t.Cleanup(func() { processArgsFn, processCWDFn = origArgs, origCWD })
+	processArgsFn = func(int) []string { return []string{"gt", "daemon", "run"} }
+
+	cases := []struct {
+		name     string
+		townRoot string
+		cwd      string
+		wantErr  string // "" = accepted
+	}{
+		{"town root", townRoot, townRoot, ""},
+		{"below the town root", townRoot, filepath.Join(townRoot, "mayor"), ""},
+		{"town root spelled through a symlink", link, townRoot, ""},
+		{"another town", townRoot, t.TempDir(), "another town"},
+		{"prefix sibling", townRoot, prefixSibling, "another town"},
+		{"parent of the town", townRoot, parent, "another town"},
+		{"cwd unreadable", townRoot, "", "unreadable"},
+	}
+	for _, c := range cases {
+		processCWDFn = func(int) string { return c.cwd }
+		err := verifyGTDaemonPID(c.townRoot, 4242)
+		switch {
+		case c.wantErr == "" && err != nil:
+			t.Errorf("%s: rejected: %v", c.name, err)
+		case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+			t.Errorf("%s: err = %v, want one mentioning %q", c.name, err, c.wantErr)
+		}
+	}
+}
+
+// A live `gt daemon run` in ANOTHER town, named by this town's daemon.pid (a
+// reused PID), must survive StopDaemon.
+func TestStopDaemonDoesNotSignalOtherTownsDaemon(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+	foreign := startImpersonatorIn(t, t.TempDir(), "gt", "daemon", "run")
+	townRoot := holdDaemonLock(t, foreign.pid())
+
+	err := StopDaemon(townRoot)
+	if err == nil || !strings.Contains(err.Error(), "another town") {
+		t.Fatalf("StopDaemon = %v, want a refusal naming another town", err)
+	}
+	if foreign.exited(700 * time.Millisecond) {
+		t.Fatalf("StopDaemon signaled another town's daemon (pid %d): %v", foreign.pid(), foreign.err)
+	}
+	if _, statErr := os.Stat(filepath.Join(townRoot, "daemon", "daemon.pid")); statErr != nil {
+		t.Errorf("refusal removed daemon.pid: %v", statErr)
 	}
 }
 
@@ -209,8 +297,9 @@ func TestStopDaemonDoesNotSignalUnrelatedProcess(t *testing.T) {
 func TestStopDaemonSignalsVerifiedDaemon(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
-	daemonProc := startImpersonator(t, "gt", "daemon", "run")
-	townRoot := holdDaemonLock(t, daemonProc.pid())
+	townRoot := t.TempDir()
+	daemonProc := startImpersonatorIn(t, townRoot, "gt", "daemon", "run")
+	holdDaemonLockIn(t, townRoot, daemonProc.pid())
 
 	if err := StopDaemon(townRoot); err != nil {
 		t.Fatalf("StopDaemon: %v", err)
@@ -284,7 +373,7 @@ func TestDoltStopKeepsPIDFileWhenIdentityUnverified(t *testing.T) {
 	}
 	orig := verifyDoltSQLServerFn
 	t.Cleanup(func() { verifyDoltSQLServerFn = orig })
-	verifyDoltSQLServerFn = func(pid int) error {
+	verifyDoltSQLServerFn = func(string, int) error {
 		return fmt.Errorf("ps failed: %w", doltserver.ErrIdentityUnverified)
 	}
 
@@ -302,8 +391,9 @@ func TestDoltStopKeepsPIDFileWhenIdentityUnverified(t *testing.T) {
 func TestDoltStopSignalsVerifiedDoltServer(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
-	server := startImpersonator(t, "dolt", "sql-server", "--config", "/nonexistent/config.yaml")
-	m, logs := newStopTestManager(t, server.pid())
+	m, logs := newStopTestManager(t, 0)
+	server := startImpersonator(t, "dolt", "sql-server", "--config", townDoltConfig(m.townRoot))
+	m.runningFn = func() (int, bool) { return server.pid(), true }
 
 	if err := m.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -313,6 +403,42 @@ func TestDoltStopSignalsVerifiedDoltServer(t *testing.T) {
 	}
 	if !server.terminatedBySignal(syscall.SIGTERM) {
 		t.Errorf("dolt sql-server ended by %v, want SIGTERM", server.err)
+	}
+}
+
+// townDoltConfig is the --config path Gas Town starts townRoot's dolt with.
+func townDoltConfig(townRoot string) string {
+	return filepath.Join(doltserver.DefaultConfig(townRoot).DataDir, "config.yaml")
+}
+
+// gt-l9s6f: a dolt sql-server serving ANOTHER town's data dir passes the
+// "is dolt" check, but a pid file naming it is stale for this town: the
+// manager must not signal it, and drops the pid file.
+func TestDoltStopDoesNotSignalOtherTownsDolt(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+	m, logs := newStopTestManager(t, 0)
+	otherTown := t.TempDir()
+	foreign := startImpersonator(t, "dolt", "sql-server", "--config", townDoltConfig(otherTown))
+	m.runningFn = func() (int, bool) { return foreign.pid(), true }
+	if err := os.MkdirAll(filepath.Join(m.townRoot, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writePIDFile(m.pidFile(), foreign.pid()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if foreign.exited(700 * time.Millisecond) {
+		t.Fatalf("Dolt stop signaled another town's dolt (pid %d): %v", foreign.pid(), foreign.err)
+	}
+	if !strings.Contains(logs.String(), "Not stopping PID") {
+		t.Errorf("refusal not logged: %q", logs.String())
+	}
+	if _, err := os.Stat(m.pidFile()); !os.IsNotExist(err) {
+		t.Errorf("stale pid file naming another town's dolt was kept: %v", err)
 	}
 }
 

@@ -377,26 +377,6 @@ func TestReapOwnedTestServersHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-func TestIsDoltSQLServerArgs(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{name: "plain dolt", args: []string{"dolt", "sql-server", "--config", "/tmp/gt/.dolt-data/config.yaml"}, want: true},
-		{name: "absolute dolt", args: []string{"/usr/bin/dolt", "sql-server"}, want: true},
-		{name: "not sql server", args: []string{"dolt", "status"}, want: false},
-		{name: "grep", args: []string{"grep", "dolt", "sql-server"}, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isDoltSQLServerArgs(tt.args); got != tt.want {
-				t.Fatalf("isDoltSQLServerArgs(%v) = %v, want %v", tt.args, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestDoltProcessOwnerPathFromEvidence(t *testing.T) {
 	tests := []struct {
 		name             string

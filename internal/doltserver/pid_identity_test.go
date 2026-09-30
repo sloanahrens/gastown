@@ -119,9 +119,13 @@ func startPortHolder(t *testing.T, dir string) (*child, int) {
 	return nil, 0
 }
 
-func startSleep(t *testing.T) *child {
+// startSleep starts `sleep 60` with cwd dir ("" inherits ours). A dolt's town
+// is read from its data-dir, config or cwd, so dir is what makes the sleep
+// stand in for that town's server.
+func startSleep(t *testing.T, dir string) *child {
 	t.Helper()
 	cmd := exec.Command("sleep", "60")
+	cmd.Dir = dir
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -163,25 +167,6 @@ func stubArgs(t *testing.T, fn func(int) []string) {
 	orig := processArgsForIdentity
 	t.Cleanup(func() { processArgsForIdentity = orig })
 	processArgsForIdentity = fn
-}
-
-func TestIsDoltSQLServerArgsAcceptsGlobalFlagsAndRejectsDocker(t *testing.T) {
-	cases := []struct {
-		args []string
-		want bool
-	}{
-		{[]string{"/opt/homebrew/bin/dolt", "sql-server", "--config", "/t/.dolt-data/config.yaml"}, true},
-		{[]string{"dolt", "--data-dir", "/x", "sql-server"}, true},
-		{[]string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend", "services"}, false},
-		{[]string{"dolt", "sql"}, false},
-		{[]string{"/bin/sleep", "sql-server"}, false},
-		{nil, false},
-	}
-	for _, c := range cases {
-		if got := isDoltSQLServerArgs(c.args); got != c.want {
-			t.Errorf("isDoltSQLServerArgs(%q) = %v, want %v", c.args, got, c.want)
-		}
-	}
 }
 
 func TestVerifyDoltSQLServerPID(t *testing.T) {
@@ -328,7 +313,7 @@ func TestStopOrphanedServerKillsVerifiedDolt(t *testing.T) {
 	skipOnWindows(t)
 	t.Setenv("GT_DOLT_PORT", strconv.Itoa(closedPort(t)))
 	townRoot := resolvedTempDir(t)
-	victim := startSleep(t)
+	victim := startSleep(t, townRoot) // cwd = town root: this town's server
 	stubArgs(t, func(pid int) []string {
 		if pid == victim.pid() {
 			return []string{"dolt", "sql-server"}
@@ -344,6 +329,80 @@ func TestStopOrphanedServerKillsVerifiedDolt(t *testing.T) {
 	var exitErr *exec.ExitError
 	if !errors.As(victim.err, &exitErr) || exitErr.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
 		t.Errorf("orphan ended by %v, want SIGKILL", victim.err)
+	}
+}
+
+// gt-l9s6f: a dolt that answers to another town's directory passes the "is
+// dolt" check but is not this town's to kill; the pid file naming it is stale.
+func TestStopOrphanedServerNeverKillsOtherTownsDolt(t *testing.T) {
+	skipOnWindows(t)
+	t.Setenv("GT_DOLT_PORT", strconv.Itoa(closedPort(t)))
+	townRoot := resolvedTempDir(t)
+	foreign := startSleep(t, resolvedTempDir(t)) // cwd = some other town
+	stubArgs(t, func(pid int) []string {
+		if pid == foreign.pid() {
+			return []string{"dolt", "sql-server"}
+		}
+		return nil
+	})
+	cfg := DefaultConfig(townRoot)
+	if err := os.MkdirAll(filepath.Dir(cfg.PidFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.PidFile, []byte(strconv.Itoa(foreign.pid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stopOrphanedServer(townRoot, foreign.pid())
+
+	if foreign.exited(500 * time.Millisecond) {
+		t.Fatalf("orphan fallback killed another town's dolt: %v", foreign.err)
+	}
+	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
+		t.Errorf("stopOrphanedServer kept a pid file naming another town's dolt: %v", err)
+	}
+}
+
+func TestVerifyTownDoltSQLServerPID(t *testing.T) {
+	skipOnWindows(t)
+	townRoot := resolvedTempDir(t)
+	ours := startSleep(t, townRoot)
+	theirs := startSleep(t, resolvedTempDir(t))
+	stubArgs(t, func(int) []string { return []string{"dolt", "sql-server"} })
+
+	if err := VerifyTownDoltSQLServerPID(townRoot, ours.pid()); err != nil {
+		t.Errorf("this town's dolt rejected: %v", err)
+	}
+	err := VerifyTownDoltSQLServerPID(townRoot, theirs.pid())
+	if !errors.Is(err, ErrOtherTownDolt) || !IsStalePIDFileErr(err) {
+		t.Errorf("another town's dolt: %v, want ErrOtherTownDolt", err)
+	}
+	// No such process: argv is stubbed as dolt but no data-dir, config or cwd
+	// can be read, so nothing shows whose server it is.
+	err = VerifyTownDoltSQLServerPID(townRoot, 1<<22+7)
+	if !errors.Is(err, ErrIdentityUnverified) || IsStalePIDFileErr(err) {
+		t.Errorf("ownerless dolt: %v, want ErrIdentityUnverified and no stale-pid-file verdict", err)
+	}
+	// Not dolt at all still reports the non-dolt error, ahead of the town check.
+	stubArgs(t, func(int) []string { return []string{"sleep", "60"} })
+	if err := VerifyTownDoltSQLServerPID(townRoot, ours.pid()); !errors.Is(err, ErrNotDoltSQLServer) {
+		t.Errorf("non-dolt: %v, want ErrNotDoltSQLServer", err)
+	}
+}
+
+// killTownDolt is the force-kill for this town's own server: the same
+// verdicts, and a foreign town's dolt is never signaled.
+func TestKillTownDoltSparesOtherTownsDolt(t *testing.T) {
+	skipOnWindows(t)
+	townRoot := resolvedTempDir(t)
+	foreign := startSleep(t, resolvedTempDir(t))
+	stubArgs(t, func(int) []string { return []string{"dolt", "sql-server"} })
+
+	if err := killTownDolt(townRoot, foreign.pid()); !errors.Is(err, ErrOtherTownDolt) {
+		t.Errorf("killTownDolt = %v, want ErrOtherTownDolt", err)
+	}
+	if foreign.exited(300 * time.Millisecond) {
+		t.Fatalf("killTownDolt signaled another town's dolt: %v", foreign.err)
 	}
 }
 
