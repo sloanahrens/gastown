@@ -331,6 +331,62 @@ func TestResolveTarget_DeadNamedPolecatKeepsItsName(t *testing.T) {
 	}
 }
 
+// TestResolveTarget_DryRunNamedPolecatKeepsHandsOff: the dead-polecat
+// fallback must not spawn under --dry-run. It used to reuse the named
+// polecat for real (detach, reset --hard, clean -f, a new branch, hook_bead)
+// or build its worktree under --create, then let runSling return the dry-run
+// report (gt-hw2gj).
+func TestResolveTarget_DryRunNamedPolecatKeepsHandsOff(t *testing.T) {
+	for _, tt := range []struct {
+		target string
+		create bool
+	}{
+		{"gastown/polecats/garnet", false},
+		{"gastown/polecats/garnet", true},
+		{"gastown/garnet", true},
+	} {
+		t.Run(fmt.Sprintf("%s create=%v", tt.target, tt.create), func(t *testing.T) {
+			townRoot := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			prevResolve := resolveTargetAgentFn
+			prevSpawn := spawnPolecatForSling
+			t.Cleanup(func() {
+				resolveTargetAgentFn = prevResolve
+				spawnPolecatForSling = prevSpawn
+			})
+			resolveTargetAgentFn = func(string) (string, string, string, error) {
+				return "", "", "", errors.New("no session")
+			}
+			spawned := false
+			spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				spawned = true
+				return nil, errors.New("unexpected spawn")
+			}
+
+			res, err := resolveTarget(tt.target, ResolveTargetOptions{
+				DryRun: true, Create: tt.create, NoBoot: true, TownRoot: townRoot,
+			})
+			if err != nil {
+				t.Fatalf("resolveTarget: %v", err)
+			}
+			if spawned {
+				t.Fatalf("dry run spawned or reused %s", tt.target)
+			}
+			if res.Agent != "gastown/polecats/garnet" {
+				t.Fatalf("Agent = %q; want gastown/polecats/garnet", res.Agent)
+			}
+			if res.NewPolecatInfo != nil {
+				t.Fatalf("dry run reported a spawned polecat: %+v", res.NewPolecatInfo)
+			}
+			if res.Pane == "" {
+				t.Fatal("dry run left the pane empty; runSling prints it as the start prompt target")
+			}
+		})
+	}
+}
+
 // TestNamedPolecatRefusal_HintPerCause: the refusal's hint must fit the
 // cause. A parked polecat is resumed with gt agent resume; a polecat already
 // holding the slung bead resumes that session; any other refusal must not

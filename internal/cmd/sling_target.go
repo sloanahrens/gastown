@@ -287,6 +287,18 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			if nameErr != nil {
 				return nil, nameErr
 			}
+			if opts.DryRun {
+				// The spawn below is not a preview: it reuses the named
+				// polecat for real — detach, reset --hard, clean -f, a new
+				// branch, hook_bead — or builds its worktree under --create
+				// (gt-hw2gj). The rig branch above guards the same way. The
+				// name is fixed here, so no pool peek is needed to print the
+				// route.
+				fmt.Printf("Would reuse/create named polecat %s/%s\n", rigName, polecatName)
+				result.Agent = fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+				result.Pane = "<named-pane>"
+				return result, nil
+			}
 			fmt.Printf("Target polecat %s/%s has no active session; using that polecat (reuse, or create with --create)...\n", rigName, polecatName)
 			spawnOpts := SlingSpawnOptions{
 				Name:          polecatName,
