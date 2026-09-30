@@ -77,6 +77,7 @@ Examples:
   gt maintain --force        # Non-interactive (daemon/cron use)
   gt maintain --dry-run      # Preview what would happen
   gt maintain --threshold 50 # Custom commit threshold`,
+	Args: cobra.NoArgs,
 	RunE: runMaintain,
 }
 

@@ -108,6 +108,7 @@ Use --cleanup-orphans-grace-secs to set that grace period.
 Orphaned Claude processes are always cleaned up after session termination.
 By default, a 5-second grace period is used. The --cleanup-orphans flag
 extends this to --cleanup-orphans-grace-secs (default 60s) for stubborn processes.`,
+	Args: cobra.NoArgs,
 	RunE: runShutdown,
 }
 
