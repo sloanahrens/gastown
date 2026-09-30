@@ -296,9 +296,6 @@ const (
 
 	// RoleBoot is the boot watchdog role (modeled as a deacon dog).
 	RoleBoot = "boot"
-
-	// RoleDog is the deacon dog role (town-level infrastructure worker).
-	RoleDog = "dog"
 )
 
 // Role emojis - centralized for easy customization.
@@ -323,7 +320,9 @@ const (
 	EmojiBoot = "🐾"
 )
 
-// Molecule formula names for dog and convoy workflows.
+// Molecule formula names for the daemon's patrol receipts and convoy
+// workflows. The mol-dog-* names are historical: they are poured by the
+// daemon's in-process patrols (the *_dog jobs), not run by any agent.
 // These are used as formula identifiers in `bd mol wisp <name>` commands.
 const (
 	// MolDogReaper is the wisp reaper dog formula name.

@@ -47,20 +47,6 @@ func TestParseSessionName(t *testing.T) {
 			wantName: "boot",
 		},
 
-		// Dogs (town-level: hq-dog-<name>)
-		{
-			name:     "dog alpha",
-			session:  "hq-dog-alpha",
-			wantRole: RoleDog,
-			wantName: "alpha",
-		},
-		{
-			name:     "dog hyphenated name",
-			session:  "hq-dog-my-dog",
-			wantRole: RoleDog,
-			wantName: "my-dog",
-		},
-
 		// Rig prefix "hq" collision: hq-witness/hq-<polecat>
 		// should resolve as rig-level roles when "hq" is a registered prefix.
 		{
@@ -270,11 +256,6 @@ func TestAgentIdentity_SessionName(t *testing.T) {
 			identity: AgentIdentity{Role: RolePolecat, Rig: "hop", Name: "ostrom", Prefix: "hop"},
 			want:     "hop-ostrom",
 		},
-		{
-			name:     "dog",
-			identity: AgentIdentity{Role: RoleDog, Name: "alpha"},
-			want:     "hq-dog-alpha",
-		},
 	}
 
 	for _, tt := range tests {
@@ -318,11 +299,6 @@ func TestAgentIdentity_Address(t *testing.T) {
 			identity: AgentIdentity{Role: RolePolecat, Rig: "gastown", Name: "Toast", Prefix: "gt"},
 			want:     "gastown/polecats/Toast",
 		},
-		{
-			name:     "dog",
-			identity: AgentIdentity{Role: RoleDog, Name: "alpha"},
-			want:     "deacon/dogs/alpha",
-		},
 	}
 
 	for _, tt := range tests {
@@ -342,7 +318,6 @@ func TestParseSessionName_RoundTrip(t *testing.T) {
 	sessions := []string{
 		"hq-mayor",
 		"hq-deacon",
-		"hq-dog-alpha",
 		"gt-witness",
 		"gt-crew-max",
 		"gt-morsov",

@@ -49,7 +49,6 @@ var envCheckedRoles = map[session.Role]bool{
 	session.RoleOverseer: true,
 	session.RoleCrew:     true,
 	session.RolePolecat:  true,
-	session.RoleDog:      true,
 }
 
 // EnvVarsCheck verifies that tmux session environment variables match expected values.

@@ -16,7 +16,7 @@ log() { echo "[git-hygiene] $*"; }
 
 # A broken or empty rig list is the exact condition this plugin guards
 # against (gt-chqi): exiting 0 serializes as a success receipt on top of
-# nothing. FAIL LOUD — nonzero exit, a failure record, a dog from the daemon.
+# nothing. FAIL LOUD — nonzero exit, a failure record, an escalation from the daemon.
 RIG_JSON=$(gt rig list --json 2>/dev/null) || {
   log "FAIL: could not get rig list (gt rig list --json)"
   gt plugin record-run --plugin git-hygiene --result failure \

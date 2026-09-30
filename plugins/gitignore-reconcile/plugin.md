@@ -33,7 +33,7 @@ rule was added continue to be tracked until manually untracked.
 A broken or empty rig list is the condition this plugin guards against
 (gt-chqi): exit 0 here serializes as a success receipt on top of nothing, so
 the failure is invisible. FAIL LOUD instead — nonzero exit, a failure
-record, and a dog dispatched by the daemon.
+record, and a `gt escalate` raised by the daemon.
 
 ```bash
 RIG_JSON=$(gt rig list --json 2>/dev/null) || {

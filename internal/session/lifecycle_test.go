@@ -1,15 +1,13 @@
 package session
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
 
 func TestStartSession_RequiresSessionID(t *testing.T) {
+	t.Parallel()
 	_, err := StartSession(nil, SessionConfig{
 		WorkDir: "/tmp",
 		Role:    "polecat",
@@ -23,6 +21,7 @@ func TestStartSession_RequiresSessionID(t *testing.T) {
 }
 
 func TestStartSession_RequiresWorkDir(t *testing.T) {
+	t.Parallel()
 	_, err := StartSession(nil, SessionConfig{
 		SessionID: "gt-test",
 		Role:      "polecat",
@@ -36,6 +35,7 @@ func TestStartSession_RequiresWorkDir(t *testing.T) {
 }
 
 func TestStartSession_RequiresRole(t *testing.T) {
+	t.Parallel()
 	_, err := StartSession(nil, SessionConfig{
 		SessionID: "gt-test",
 		WorkDir:   "/tmp",
@@ -49,6 +49,7 @@ func TestStartSession_RequiresRole(t *testing.T) {
 }
 
 func TestBuildPrompt_BeaconOnly(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Beacon: BeaconConfig{
 			Recipient: "boot",
@@ -66,6 +67,7 @@ func TestBuildPrompt_BeaconOnly(t *testing.T) {
 }
 
 func TestBuildPrompt_WithInstructions(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Beacon: BeaconConfig{
 			Recipient: "boot",
@@ -84,6 +86,7 @@ func TestBuildPrompt_WithInstructions(t *testing.T) {
 }
 
 func TestBuildCommand_DefaultAgent(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Role:     "boot",
 		TownRoot: "/tmp/town",
@@ -97,43 +100,8 @@ func TestBuildCommand_DefaultAgent(t *testing.T) {
 	}
 }
 
-// A dog's kennel is reachable only through its name, so the startup command
-// must carry GT_DOG_NAME — that is what lets the spawn path resolve the dog's
-// per-agent system prompt file and add --append-system-prompt-file. Session
-// config (not the config package's renderer) is all this test needs: the file
-// already exists here, so no renderer has to be installed (gt-h7e5).
-func TestBuildCommand_DogCarriesItsName(t *testing.T) {
-	town := t.TempDir()
-	path := config.SystemPromptFilePath("dog", town, "", "alpha")
-	if path == "" {
-		t.Fatal("dog must have a per-agent system prompt path")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("dog role text\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd, err := buildCommand(SessionConfig{
-		SessionID: "hq-dog-alpha",
-		WorkDir:   filepath.Join(town, "deacon", "dogs", "alpha"),
-		Role:      "dog",
-		AgentName: "alpha",
-		TownRoot:  town,
-	}, "test prompt")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(cmd, "GT_DOG_NAME=alpha") {
-		t.Errorf("dog command does not carry GT_DOG_NAME:\n%s", cmd)
-	}
-	if !strings.Contains(cmd, "--append-system-prompt-file") || !strings.Contains(cmd, path) {
-		t.Errorf("dog command does not carry its system prompt file %s:\n%s", path, cmd)
-	}
-}
-
 func TestBuildCommand_WithAgentOverride(t *testing.T) {
+	t.Parallel()
 	cfg := SessionConfig{
 		Role:          "boot",
 		TownRoot:      "/tmp/town",
@@ -148,14 +116,8 @@ func TestBuildCommand_WithAgentOverride(t *testing.T) {
 	}
 }
 
-func TestKillExistingSession_NoSession(t *testing.T) {
-	// KillExistingSession with nil tmux would panic, but we test the logic
-	// by verifying it's callable. Full integration tests need a real tmux.
-	// This test verifies the function signature and basic flow.
-	t.Skip("requires tmux for integration testing")
-}
-
 func TestMapKeysSorted(t *testing.T) {
+	t.Parallel()
 	got := mapKeysSorted(map[string]string{
 		"GT_SESSION": "1",
 		"GT_ROLE":    "polecat",
@@ -174,6 +136,7 @@ func TestMapKeysSorted(t *testing.T) {
 }
 
 func TestMergeRuntimeLivenessEnv_SetsResolvedAgentAndProcessNames(t *testing.T) {
+	t.Parallel()
 	env := map[string]string{
 		"GT_ROLE": "polecat",
 	}
@@ -193,6 +156,7 @@ func TestMergeRuntimeLivenessEnv_SetsResolvedAgentAndProcessNames(t *testing.T) 
 }
 
 func TestMergeRuntimeLivenessEnv_RespectsExistingValues(t *testing.T) {
+	t.Parallel()
 	env := map[string]string{
 		"GT_AGENT":         "explicit-agent",
 		"GT_PROCESS_NAMES": "custom-bin,custom-agent",
@@ -213,6 +177,7 @@ func TestMergeRuntimeLivenessEnv_RespectsExistingValues(t *testing.T) {
 }
 
 func TestMergeRuntimeLivenessEnv_UsesEffectiveAgentForProcessNames(t *testing.T) {
+	t.Parallel()
 	// When AgentOverride sets GT_AGENT to a different agent than
 	// runtimeConfig.ResolvedAgent, process names must be resolved from
 	// the effective agent (GT_AGENT), not the workspace-default resolved agent.

@@ -6,13 +6,14 @@ import (
 )
 
 func TestBeaconRecipient(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name     string
-		role     string
-		agentNm  string
-		rig      string
-		want     string
-		wantNot  []string // must NOT contain these (path separators, etc.)
+		name    string
+		role    string
+		agentNm string
+		rig     string
+		want    string
+		wantNot []string // must NOT contain these (path separators, etc.)
 	}{
 		{
 			name:    "polecat with rig",
@@ -97,6 +98,7 @@ func TestBeaconRecipient(t *testing.T) {
 }
 
 func TestBeaconRecipientContainsNoPathSeparators(t *testing.T) {
+	t.Parallel()
 	// Exhaustive check: no BeaconRecipient output should contain "/" which
 	// could trick LLMs into interpreting it as a filesystem path.
 	cases := []struct{ role, name, rig string }{
@@ -123,6 +125,7 @@ func TestBeaconRecipientContainsNoPathSeparators(t *testing.T) {
 }
 
 func TestAgentIdentityBeaconAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		id      AgentIdentity
@@ -175,6 +178,7 @@ func TestAgentIdentityBeaconAddress(t *testing.T) {
 }
 
 func TestBeaconAddressVsAddress(t *testing.T) {
+	t.Parallel()
 	// Verify that BeaconAddress produces different (non-path) output
 	// while Address produces the traditional path-like output.
 	ids := []AgentIdentity{
@@ -210,6 +214,7 @@ func TestBeaconAddressVsAddress(t *testing.T) {
 }
 
 func TestFormatStartupBeacon(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		cfg     BeaconConfig
@@ -390,6 +395,7 @@ func TestFormatStartupBeacon(t *testing.T) {
 }
 
 func TestBuildStartupPrompt(t *testing.T) {
+	t.Parallel()
 	// BuildStartupPrompt combines beacon + instructions
 	cfg := BeaconConfig{
 		Recipient: "deacon",

@@ -300,13 +300,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create the dog kennel (deacon/dogs/). The directory keeps its historical
-	// name; the deacon role that once ran from deacon/ was deleted
-	// (gt-4k3fj.6.1).
-	if err := os.MkdirAll(filepath.Join(absPath, "deacon", "dogs"), 0755); err != nil {
-		fmt.Printf("   %s Could not create dog kennel directory: %v\n", style.Dim.Render("⚠"), err)
-	}
-
 	// Create plugins directory for town-level patrol plugins.
 	// This avoids gt doctor warning on fresh install.
 	pluginsDir := filepath.Join(absPath, "plugins")

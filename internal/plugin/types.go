@@ -8,11 +8,6 @@
 //   - Rig-level: <rig>/plugins/ (project-specific)
 package plugin
 
-import (
-	"fmt"
-	"strings"
-)
-
 // Plugin represents a discovered plugin definition.
 type Plugin struct {
 	// Name is the unique plugin identifier (from frontmatter).
@@ -42,16 +37,11 @@ type Plugin struct {
 	// Execution defines timeout and notification settings.
 	Execution *Execution `json:"execution,omitempty"`
 
-	// Agent names the agent preset that runs this plugin's dog session,
-	// overriding role_agents.dog. Empty means role_agents.dog, unchanged.
-	Agent string `json:"agent,omitempty"`
-
 	// Instructions is the markdown body (after frontmatter).
 	Instructions string `json:"instructions,omitempty"`
 
-	// HasRunScript is true when a run.sh exists alongside plugin.md.
-	// When true, FormatMailBody instructs the dog to execute the script
-	// instead of interpreting the markdown instructions.
+	// HasRunScript is true when a run.sh exists alongside plugin.md; the
+	// daemon runs it for a plugin whose [execution] type is "script".
 	HasRunScript bool `json:"has_run_script,omitempty"`
 }
 
@@ -117,14 +107,15 @@ type Tracking struct {
 type ExecutionType string
 
 const (
-	// ExecTypeAgent is the default: a dog worker interprets the markdown instructions.
+	// ExecTypeAgent is the default: markdown instructions for an agent. Nothing
+	// runs them automatically since the dog pack was retired (gt-ckunw).
 	ExecTypeAgent ExecutionType = "agent"
 
 	// ExecTypeScript means a run.sh script is executed directly.
 	ExecTypeScript ExecutionType = "script"
 
 	// ExecTypeExecWrapper wraps session startup commands.
-	// Instead of being dispatched to a dog, the wrapper tokens are inserted
+	// Instead of being run, the wrapper tokens are inserted
 	// between `exec env VAR=val ...` and the agent binary in the startup command.
 	// Example: ["exitbox", "run", "--profile=gastown-polecat", "--"]
 	ExecTypeExecWrapper ExecutionType = "exec-wrapper"
@@ -154,7 +145,7 @@ type Execution struct {
 	// "deferred: nothing accomplished, retry on the next heartbeat, write no
 	// run record" instead of an ordinary failure. It defaults to false: exit 3
 	// is otherwise just another nonzero exit, recorded as a failure and
-	// dispatched to a dog like any other. Without a per-plugin opt-in, every
+	// escalated like any other. Without a per-plugin opt-in, every
 	// script plugin would share one exit code's meaning, so a plugin that
 	// happens to exit 3 for an unrelated reason (a shell builtin, a tool it
 	// shells out to) would have a real failure silently swallowed as a
@@ -167,7 +158,6 @@ type PluginFrontmatter struct {
 	Name        string     `toml:"name"`
 	Description string     `toml:"description"`
 	Version     int        `toml:"version"`
-	Agent       string     `toml:"agent,omitempty"`
 	Gate        *Gate      `toml:"gate,omitempty"`
 	Tracking    *Tracking  `toml:"tracking,omitempty"`
 	Execution   *Execution `toml:"execution,omitempty"`
@@ -195,7 +185,6 @@ type PluginSummary struct {
 	RigName       string        `json:"rig_name,omitempty"`
 	GateType      GateType      `json:"gate_type,omitempty"`
 	ExecutionType ExecutionType `json:"execution_type,omitempty"`
-	Agent         string        `json:"agent,omitempty"`
 	Path          string        `json:"path"`
 }
 
@@ -220,63 +209,6 @@ func (p *Plugin) Summary() PluginSummary {
 		RigName:       p.RigName,
 		GateType:      gateType,
 		ExecutionType: execType,
-		Agent:         p.Agent,
 		Path:          p.Path,
 	}
-}
-
-// FormatFailureMailBody is the dispatch body for a dog when the daemon ran
-// a script-type plugin itself and it failed: the dog gets the exit status
-// and the output tail first, then the ordinary instructions, and is asked to
-// judge rather than blindly rerun.
-func (p *Plugin) FormatFailureMailBody(status string, outputTail string) string {
-	var sb strings.Builder
-	sb.WriteString("## Direct run failed\n\n")
-	sb.WriteString(fmt.Sprintf("The daemon ran `%s/run.sh` directly (execution type `script`) and it failed: **%s**.\n\n", p.Path, status))
-	sb.WriteString("Investigate the output below before doing anything. Rerun the script only if the failure looks transient (lock, network, a race with another agent); otherwise record the failure with what you found and escalate per the plugin's instructions.\n\n")
-	sb.WriteString("```\n")
-	sb.WriteString(strings.TrimRight(outputTail, "\n"))
-	sb.WriteString("\n```\n\n---\n\n")
-	sb.WriteString(p.FormatMailBody())
-	return sb.String()
-}
-
-// FormatMailBody formats the plugin as instructions for a dog worker.
-// This is the canonical formatting used by both the daemon dispatcher
-// and the gt dog dispatch command.
-func (p *Plugin) FormatMailBody() string {
-	if p.HasRunScript {
-		return fmt.Sprintf(
-			"Execute the following plugin script:\n\n"+
-				"**Plugin**: %s\n"+
-				"**Description**: %s\n\n"+
-				"```bash\ncd %s && bash run.sh\n```\n\n"+
-				"Run this command EXACTLY. Do NOT interpret the plugin.md instructions.\n"+
-				"Do NOT write your own implementation. Just run the script and report the output.\n\n"+
-				"After completion:\n"+
-				"1. The script should record a plugin-run receipt. If it did not, run `gt plugin record-run --plugin %s --result <outcome> --title \"Plugin run: %s\"`.\n"+
-				"2. Run `gt dog done` — this clears your work and auto-terminates the session. Run this even if recording fails.\n",
-			p.Name, p.Description, p.Path, p.Name, p.Name)
-	}
-
-	var sb strings.Builder
-
-	sb.WriteString("Execute the following plugin:\n\n")
-	sb.WriteString(fmt.Sprintf("**Plugin**: %s\n", p.Name))
-	sb.WriteString(fmt.Sprintf("**Description**: %s\n", p.Description))
-	if p.RigName != "" {
-		sb.WriteString(fmt.Sprintf("**Rig**: %s\n", p.RigName))
-	}
-	if p.Execution != nil && p.Execution.Timeout != "" {
-		sb.WriteString(fmt.Sprintf("**Timeout**: %s\n", p.Execution.Timeout))
-	}
-	sb.WriteString("\n---\n\n")
-	sb.WriteString("## Instructions\n\n")
-	sb.WriteString(p.Instructions)
-	sb.WriteString("\n\n---\n\n")
-	sb.WriteString("After completion:\n")
-	sb.WriteString("1. Follow the plugin's recording instructions above. If none are provided, run `gt plugin record-run --plugin " + p.Name + " --result <outcome> --title \"Plugin run: " + p.Name + "\"`.\n")
-	sb.WriteString("2. Run `gt dog done` — this clears your work and auto-terminates the session. Run this even if recording fails.\n")
-
-	return sb.String()
 }

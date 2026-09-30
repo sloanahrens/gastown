@@ -22,7 +22,7 @@ import (
 
 // SessionConfig describes how to create and start a tmux session.
 // This unifies the common startup pattern that was previously duplicated
-// across polecat, mayor, boot, deacon, witness, refinery, crew, and dog
+// across polecat, mayor, boot, deacon, witness, refinery and crew
 // session managers. Each of those managers previously had to coordinate
 // 4+ packages (config, runtime, session, tmux) manually.
 //
@@ -57,7 +57,7 @@ type SessionConfig struct {
 	RigName string
 
 	// AgentName is the specific agent name within a rig.
-	// Used for polecats, crew, and dogs. Empty for singletons.
+	// Used for polecats and crew. Empty for singletons.
 	AgentName string
 
 	// Command is a pre-built startup command. If non-empty, skips command building.
@@ -488,11 +488,9 @@ func buildPrompt(cfg SessionConfig) string {
 
 // buildCommand creates the startup command using the config package.
 //
-// The agent's own name rides along as GT_POLECAT / GT_CREW / GT_DOG_NAME. The
-// per-agent roles resolve their rendered system-prompt file from that name at
-// spawn time (config.withRoleSystemPromptFlag), so a dog's FIRST session gets
-// --append-system-prompt-file rather than a full static prime; the dog kennel
-// is only reachable through the name. Roles with no per-agent identity ignore
+// The agent's own name rides along as GT_POLECAT / GT_CREW. The per-agent
+// roles resolve their rendered system-prompt file from that name at spawn time
+// (config.withRoleSystemPromptFlag). Roles with no per-agent identity ignore
 // the field.
 func buildCommand(cfg SessionConfig, prompt string) (string, error) {
 	return config.BuildStartupCommandFromConfig(config.AgentEnvConfig{

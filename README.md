@@ -83,13 +83,12 @@ Git-backed issue tracking system that stores work state as structured data.
 
 Workflow templates that coordinate multi-step work. Formulas (TOML definitions) are instantiated as molecules with tracked steps. Two modes: root-only wisps (steps materialized at runtime, lightweight) and poured wisps (steps materialized as sub-wisps with checkpoint recovery). See [Molecules](docs/concepts/molecules.md).
 
-### Monitoring: Witness, Deacon, Dogs 🐕
+### Monitoring: Witness, Deacon
 
-A three-tier watchdog system keeps agents healthy:
+A watchdog system keeps agents healthy:
 
 - **Witness** - Per-rig lifecycle manager. Monitors polecats, detects stuck agents, triggers recovery, manages session cleanup.
 - **Deacon** - Background supervisor running continuous patrol cycles across all rigs.
-- **Dogs** - Infrastructure workers dispatched by the Deacon for maintenance tasks (e.g., Boot for triage).
 
 ### Refinery 🏭
 
@@ -566,7 +565,7 @@ Each rig has a Witness that monitors its polecats. The Witness detects stuck age
 
 ### Deacon (Cross-Rig)
 
-The Deacon runs continuous patrol cycles across all rigs, checking agent health, dispatching Dogs for maintenance tasks, and escalating issues that individual Witnesses can't resolve.
+The Deacon runs continuous patrol cycles across all rigs, checking agent health and escalating issues that individual Witnesses can't resolve.
 
 ### Escalation
 

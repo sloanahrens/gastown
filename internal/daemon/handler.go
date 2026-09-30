@@ -1,258 +1,31 @@
 package daemon
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/dog"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
-	"github.com/steveyegge/gastown/internal/supervisor"
-	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
-// dogHookedFormulaCheckTimeout bounds the bd subprocess findDispatchableDog
-// runs per idle dog so a slow Dolt response can't wedge the dispatch cycle.
-const dogHookedFormulaCheckTimeout = 5 * time.Second
-
-// Dog lifecycle defaults — now config-driven via operational.daemon thresholds.
-// These vars are still used as fallbacks and for tests; production code
-// should prefer d.daemonCfg() accessors loaded from TownSettings.
-var (
-	// dogIdleSessionTimeout is how long a dog can be idle with a live tmux
-	// session before the session is killed (default 1h).
-	// Configurable via operational.daemon.dog_idle_session_timeout.
-	dogIdleSessionTimeout = config.DefaultDogIdleSessionTimeout
-
-	// dogIdleRemoveTimeout is how long a dog can be idle before it is removed
-	// from the kennel entirely (only when pool is oversized, default 4h).
-	// Configurable via operational.daemon.dog_idle_remove_timeout.
-	dogIdleRemoveTimeout = config.DefaultDogIdleRemoveTimeout
-
-	// staleWorkingTimeout is how long a dog can be in state=working with no
-	// activity updates before it is considered stuck (default 2h).
-	// Configurable via operational.daemon.stale_working_timeout.
-	staleWorkingTimeout = config.DefaultStaleWorkingTimeout
-
-	// maxDogPoolSize is the target pool size (default 4).
-	// Configurable via operational.daemon.max_dog_pool_size.
-	maxDogPoolSize = config.DefaultMaxDogPoolSize
-)
-
-// handleDogs manages Dog lifecycle: cleanup stuck dogs, reap idle dogs, then dispatch plugins.
-// This is the main entry point called from heartbeat.
-func (d *Daemon) handleDogs() {
+// handlePlugins runs every due cooldown plugin. This is the main entry point
+// called from heartbeat.
+//
+// There is no agent behind a plugin any more: a script plugin runs in the
+// daemon and a failure logs and escalates (gt-ckunw). The LLM dog pack that
+// used to take non-script plugins and failed scripts was retired after its
+// dispatches stopped fixing what they were sent for.
+func (d *Daemon) handlePlugins() {
 	rigsConfig, err := d.loadRigsConfig()
 	if err != nil {
 		d.logger.Printf("Handler: failed to load rigs config: %v", err)
 		return
 	}
-
-	opCfg := d.loadOperationalConfig().GetDaemonConfig()
-
-	mgr := dog.NewManager(d.config.TownRoot, rigsConfig)
-	sm := d.dogSessions(mgr)
-
-	d.cleanupStuckDogs(mgr, sm)
-	d.detectStaleWorkingDogs(mgr, sm, opCfg)
-	d.reapIdleDogs(mgr, sm, opCfg)
-	d.dispatchPlugins(mgr, sm, rigsConfig)
+	d.dispatchPlugins(rigsConfig)
 }
 
-// handleDogsCleanupOnly runs dog lifecycle cleanup (stuck, stale, idle) without
-// dispatching new work. Used when pressure checks block new spawns.
-func (d *Daemon) handleDogsCleanupOnly() {
-	rigsConfig, err := d.loadRigsConfig()
-	if err != nil {
-		d.logger.Printf("Handler: failed to load rigs config: %v", err)
-		return
-	}
-
-	opCfg := d.loadOperationalConfig().GetDaemonConfig()
-
-	mgr := dog.NewManager(d.config.TownRoot, rigsConfig)
-	sm := d.dogSessions(mgr)
-
-	d.cleanupStuckDogs(mgr, sm)
-	d.detectStaleWorkingDogs(mgr, sm, opCfg)
-	d.reapIdleDogs(mgr, sm, opCfg)
-	// Skip dispatchPlugins — under pressure
-}
-
-// cleanupStuckDogs finds dogs in state=working whose tmux session or agent
-// process is dead and clears their work so they return to idle.
-func (d *Daemon) cleanupStuckDogs(mgr *dog.Manager, sm dogSessions) {
-	dogs, err := mgr.List()
-	if err != nil {
-		d.logger.Printf("Handler: failed to list dogs: %v", err)
-		return
-	}
-
-	for _, dg := range dogs {
-		if dg.State != dog.StateWorking {
-			continue
-		}
-
-		sessionID := sm.SessionName(dg.Name)
-		running, err := sm.IsRunning(dg.Name)
-		if err != nil {
-			d.logger.Printf("Handler: error checking session for dog %s: %v", dg.Name, err)
-			continue
-		}
-
-		if !running {
-			d.logger.Printf("Handler: dog %s is working but session is dead, clearing work", dg.Name)
-			d.clearDogWorkIfMatches(mgr, dg, "dead session")
-			continue
-		}
-
-		status := d.tmux.CheckSessionHealth(sessionID, 0)
-		if status != tmux.AgentDead {
-			continue
-		}
-
-		d.logger.Printf("Handler: dog %s (%s) is working but agent is dead, killing session and clearing work", dg.Name, sessionID)
-		if err := d.sup().Kill(dogSeat(dg.Name), "working dog with a dead agent", "daemon/dog-handler"); err != nil {
-			d.logRefusal(fmt.Sprintf("Handler: killing agent-dead session for dog %s (%s)", dg.Name, sessionID), err)
-			continue
-		}
-		d.clearDogWorkIfMatches(mgr, dg, "dead agent")
-	}
-}
-
-func (d *Daemon) clearDogWorkIfMatches(mgr *dog.Manager, dg *dog.Dog, reason string) {
-	cleared, err := mgr.ClearWorkIfMatches(dg.Name, dg.Work, dg.WorkStartedAt)
-	if err != nil {
-		d.logger.Printf("Handler: failed to clear work for dog %s (%s): %v", dg.Name, reason, err)
-		return
-	}
-	if !cleared {
-		d.logger.Printf("Handler: skipped clearing dog %s (%s): work assignment changed", dg.Name, reason)
-	}
-}
-
-// detectStaleWorkingDogs finds dogs in state=working whose last_active exceeds
-// staleWorkingTimeout. These dogs have live tmux sessions sitting idle at a
-// prompt — neither cleanupStuckDogs (needs dead session) nor reapIdleDogs
-// (needs state=idle) will catch them.
-func (d *Daemon) detectStaleWorkingDogs(mgr *dog.Manager, sm dogSessions, daemonCfg *config.DaemonThresholds) {
-	dogs, err := mgr.List()
-	if err != nil {
-		d.logger.Printf("Handler: failed to list dogs for stale-working check: %v", err)
-		return
-	}
-
-	threshold := daemonCfg.StaleWorkingTimeoutD()
-	now := time.Now()
-	for _, dg := range dogs {
-		if dg.State != dog.StateWorking {
-			continue
-		}
-
-		staleDuration := now.Sub(dg.LastActive)
-		if staleDuration < threshold {
-			continue
-		}
-
-		d.logger.Printf("Handler: dog %s stuck in working state (inactive %v, work: %s), clearing",
-			dg.Name, staleDuration.Truncate(time.Minute), dg.Work)
-
-		running, err := sm.IsRunning(dg.Name)
-		if err != nil {
-			d.logger.Printf("Handler: error checking session for stale dog %s: %v", dg.Name, err)
-			continue
-		}
-		if running {
-			// Kill the tmux session before clearing state so a failed kill does not
-			// return the dog to the idle pool with stale work still running.
-			why := fmt.Sprintf("stale working dog (inactive %v)", staleDuration.Truncate(time.Minute))
-			if err := d.sup().Kill(dogSeat(dg.Name), why, "daemon/dog-handler"); err != nil {
-				d.logRefusal(fmt.Sprintf("Handler: stopping session for stale dog %s", dg.Name), err)
-				continue
-			}
-		}
-
-		d.clearDogWorkIfMatches(mgr, dg, "stale working")
-	}
-}
-
-// reapIdleDogs kills tmux sessions for dogs that have been idle too long, and
-// removes long-idle dogs from the kennel when the pool is oversized.
-func (d *Daemon) reapIdleDogs(mgr *dog.Manager, sm dogSessions, daemonCfg *config.DaemonThresholds) {
-	dogs, err := mgr.List()
-	if err != nil {
-		d.logger.Printf("Handler: failed to list dogs for reaping: %v", err)
-		return
-	}
-
-	idleSessionTimeout := daemonCfg.DogIdleSessionTimeoutD()
-	idleRemoveTimeout := daemonCfg.DogIdleRemoveTimeoutD()
-	poolMax := daemonCfg.MaxDogPoolSizeV()
-
-	now := time.Now()
-	poolSize := len(dogs)
-
-	for _, dg := range dogs {
-		if dg.State != dog.StateIdle {
-			continue
-		}
-
-		idleDuration := now.Sub(dg.LastActive)
-
-		// Phase 1: kill stale tmux sessions for idle dogs.
-		if idleDuration >= idleSessionTimeout {
-			running, err := sm.IsRunning(dg.Name)
-			if err != nil {
-				d.logger.Printf("Handler: error checking session for idle dog %s: %v", dg.Name, err)
-				continue
-			}
-			if running {
-				d.logger.Printf("Handler: reaping idle dog %s session (idle %v)", dg.Name, idleDuration.Truncate(time.Minute))
-				why := fmt.Sprintf("idle dog (idle %v)", idleDuration.Truncate(time.Minute))
-				if err := d.sup().Kill(dogSeat(dg.Name), why, "daemon/dog-handler"); err != nil {
-					d.logRefusal(fmt.Sprintf("Handler: stopping session for idle dog %s", dg.Name), err)
-				}
-			}
-		}
-
-		// Phase 2: remove long-idle dogs when pool is oversized.
-		if poolSize > poolMax && idleDuration >= idleRemoveTimeout {
-			d.logger.Printf("Handler: removing long-idle dog %s from kennel (idle %v, pool %d/%d)",
-				dg.Name, idleDuration.Truncate(time.Minute), poolSize, poolMax)
-
-			// Ensure session is dead before removing; a refused or failed
-			// kill keeps the dog in the kennel.
-			running, _ := sm.IsRunning(dg.Name)
-			if running {
-				if err := d.sup().Kill(dogSeat(dg.Name), "removing long-idle dog", "daemon/dog-handler"); err != nil {
-					d.logRefusal(fmt.Sprintf("Handler: stopping session for long-idle dog %s", dg.Name), err)
-					continue
-				}
-			}
-
-			if err := mgr.Remove(dg.Name); err != nil {
-				d.logger.Printf("Handler: failed to remove idle dog %s: %v", dg.Name, err)
-				continue
-			}
-			poolSize--
-		}
-	}
-}
-
-// dispatchPlugins scans for plugins, evaluates cooldown gates, and dispatches
-// eligible plugins to idle dogs.
-func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm dogSessions, rigsConfig *config.RigsConfig) {
+// dispatchPlugins scans for plugins, evaluates cooldown gates, and starts
+// each eligible script plugin.
+func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 	// Get rig names for scanner
 	var rigNames []string
 	if rigsConfig != nil {
@@ -273,7 +46,6 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm dogSessions, rigsConfig *c
 	}
 
 	recorder := plugin.NewRecorder(d.config.TownRoot)
-	router := mail.NewRouterWithTownRoot(d.config.TownRoot, d.config.TownRoot)
 
 	for _, p := range plugins {
 		// Never auto-dispatch manual-gate plugins — they require an explicit trigger.
@@ -299,247 +71,18 @@ func (d *Daemon) dispatchPlugins(mgr *dog.Manager, sm dogSessions, rigsConfig *c
 			}
 		}
 
-		// Script-type plugins run in-process: no dog, no model. The run
-		// record is written when the script finishes (with its real result),
-		// and the in-flight guard keeps the next heartbeat from starting a
-		// second copy. A failure hands the plugin to a dog with the output.
-		if runsAsScript(p) {
-			d.startScriptPlugin(p, mgr, sm, router, recorder)
+		// Only script plugins run automatically: the daemon executes run.sh
+		// itself, writes the run record when it finishes (with its real
+		// result), and the in-flight guard keeps the next heartbeat from
+		// starting a second copy. A plugin with nothing to execute has no
+		// runner since the dog pack was retired (gt-ckunw); it is left
+		// unrecorded so the log keeps saying so.
+		if !runsAsScript(p) {
+			d.logger.Printf("Handler: skipping plugin %s (not a script plugin with a run.sh; nothing runs it)", p.Name)
 			continue
 		}
-
-		dogName, noDog := d.dispatchPluginToDog(p, mgr, sm, router, p.FormatMailBody())
-		if noDog {
-			// No dispatchable dog: defer the remaining plugins to the next
-			// heartbeat, as before.
-			return
-		}
-		if dogName == "" {
-			continue // assignment, mail or session start failed and was rolled back
-		}
-		// Record the dispatch immediately so the cooldown gate is satisfied
-		// for the next 1h regardless of what the dog does. Dogs create their
-		// own completion beads but don't reliably use the label convention the
-		// gate requires, causing infinite re-dispatch loops.
-		if _, err := recorder.RecordRun(plugin.PluginRunRecord{
-			PluginName: p.Name,
-			Result:     plugin.ResultSuccess,
-			Body:       fmt.Sprintf("Dispatched to dog %s", dogName),
-		}); err != nil {
-			d.logger.Printf("Handler: failed to record dispatch for plugin %s: %v", p.Name, err)
-		}
+		d.startScriptPlugin(p, recorder)
 	}
-}
-
-// findDispatchableDog returns the first dog in the kennel whose registry
-// state is idle, whose tmux session is NOT currently running, and which is
-// not still holding an open hooked formula molecule. Returns nil when no dog
-// satisfies all three conditions.
-//
-// The idle+no-session check exists because a dog can be marked idle (via gt
-// dog done or the reaper) before its tmux session fully terminates, producing
-// a transient window where sm.Start would fail with "session already
-// running". Picking that dog every dispatch tick infinite-loops the same
-// failed dispatch instead of advancing to another genuinely-free dog in the
-// pack. See gt-o24.
-//
-// IsRunning errors are logged and treated as "not dispatchable" so a flaky
-// tmux check can't wedge the whole dispatch cycle.
-//
-// The hooked-formula check exists because a dog dispatched with a formula
-// (e.g. mol-dog-reaper via `gt sling`) can end up with registry state=idle
-// again — its session exited, or `gt dog done` cleared the work record —
-// while the molecule wisp `gt sling` attached to its hook is still HOOKED
-// with open steps. Propulsion means a dog always runs whatever is on its
-// hook first: dispatching a plugin onto that dog abandons the plugin
-// assignment as soon as the dog boots and finds the stale hook, and the
-// hooked molecule never advances because nothing dispatches a session to
-// finish it either. Skipping such dogs for new plugin dispatch prevents that
-// abandon-and-strand cycle (gt-bygj); recovering the stranded hook itself is
-// a separate concern (the reaper / deacon patrol).
-func findDispatchableDog(mgr *dog.Manager, sm dogSessions, townRoot string, logger *log.Logger, wisps wispOps) *dog.Dog {
-	dogs, err := mgr.List()
-	if err != nil {
-		logger.Printf("Handler: failed to list dogs while picking dispatch target: %v", err)
-		return nil
-	}
-	// Hoisted out of the loop: every dog's hooked-formula check targets the
-	// same town database, so the bd subprocess routing/target config is
-	// computed once rather than rebuilt per dog.
-	beadsDir := filepath.Join(townRoot, ".beads")
-	for _, d := range dogs {
-		if d.State != dog.StateIdle {
-			continue
-		}
-		running, err := sm.IsRunning(d.Name)
-		if err != nil {
-			logger.Printf("Handler: IsRunning check failed for dog %s: %v; skipping", d.Name, err)
-			continue
-		}
-		if running {
-			continue
-		}
-		result, err := wisps.hookedFormula(townRoot, beadsDir, d.Name)
-		if err != nil {
-			logger.Printf("Handler: hooked-formula check failed for dog %s: %v; treating as dispatchable", d.Name, err)
-		} else if result.hasHooked {
-			// gt-da2x: `gt dog done` can leave the dog idle while its formula
-			// wisp stays hooked. When the wisp was created before the dog went
-			// idle and no step of it has any progress, the wisp is abandoned —
-			// close it so the dog becomes dispatchable again (next tick; the
-			// wisp is gone then, which is also why this WARN is naturally
-			// logged once).
-			tree, treeErr := wisps.wispTree(townRoot, result.wispID)
-			if treeErr != nil {
-				// Fail safe: without the tree we cannot tell an abandoned wisp
-				// from a live one, so leave it alone and keep skipping.
-				logger.Printf("Handler: wisp tree read failed for dog %s wisp %s: %v; not closing", d.Name, result.wispID, treeErr)
-			} else if isWispStale(d, result, tree) {
-				closed, closeErr := wisps.closeStaleWisp(townRoot, result.wispID, tree)
-				if closeErr != nil {
-					logger.Printf("Handler: closing abandoned wisp %s for dog %s failed: %v", result.wispID, d.Name, closeErr)
-				} else if closed > 0 {
-					logger.Printf("Handler: WARN: dog %s wisp %s abandoned (idle, zero step progress); closed %d bead(s), dog dispatchable next tick", d.Name, result.wispID, closed)
-					continue
-				}
-				// Close failed; the wisp is still hooked — fall through to the
-				// skip log below so the condition stays visible.
-			}
-			logger.Printf("Handler: dog %s is idle but still holds an open hooked formula molecule, skipping dispatch", d.Name)
-			continue
-		}
-		return d
-	}
-	return nil
-}
-
-// wispTree reads a formula wisp's root and every descendant under the
-// daemon's read-only routing env (BD_DOLT_AUTO_COMMIT=off / BD_READONLY).
-//
-// The env is the point: findDispatchableDog runs this on every dispatch tick
-// for every idle dog holding a hooked wisp, so a read that auto-commits would
-// reintroduce the gh#3596 connection churn that dogHasHookedFormulaWithID is
-// carefully arranged to avoid.
-func wispTree(townRoot, wispID string) ([]beads.WispStep, error) {
-	return wispTreeWithin(townRoot, wispID, dogHookedFormulaCheckTimeout)
-}
-
-// wispTreeWithin is wispTree with its time budget as a parameter, so a test
-// can bound a hung bd without waiting out the production budget.
-func wispTreeWithin(townRoot, wispID string, budget time.Duration) ([]beads.WispStep, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
-	return beads.WispTree(ctx, townRoot, bdReadOnlyRoutingEnv(townRoot), wispID)
-}
-
-// isWispStale reports whether an idle dog's hooked formula wisp should be
-// treated as abandoned (gt-da2x): the dog went idle after the wisp was
-// created AND no step of the wisp has any progress (zero in_progress/closed
-// steps — the dog bailed before doing any of the formula).
-//
-// Any uncertainty (unparseable wisp timestamp) resolves to "not stale": a
-// wisp is never closed on a guess, and leaving one hooked costs a wasted dog,
-// while closing a live one throws away the work it carries.
-func isWispStale(d *dog.Dog, result hookedFormulaResult, tree []beads.WispStep) bool {
-	wispCreatedAt := beads.ParseIssueTime(result.wispCreated)
-	if wispCreatedAt.IsZero() {
-		return false
-	}
-	if !d.LastActive.After(wispCreatedAt) {
-		return false // wisp created after the dog went idle: not abandoned
-	}
-	// tree[0] is the wisp root and is the hooked bead itself; only the steps
-	// below it say whether any work happened.
-	for _, step := range tree[1:] {
-		if step.Status == string(beads.StatusInProgress) || step.Status == string(beads.StatusClosed) {
-			return false
-		}
-	}
-	return true
-}
-
-// hookedFormulaResult holds the outcome of a hooked-formula check.
-type hookedFormulaResult struct {
-	hasHooked   bool
-	wispID      string // non-empty only when hasHooked is true
-	wispCreated string // wisp created_at as bd issued it (parsed by beads.ParseIssueTime), non-empty when hasHooked is true
-}
-
-// dogHasHookedFormulaWithID reports whether the dog identified by name
-// currently holds an open (status=hooked) formula molecule wisp — the
-// ephemeral molecule `gt sling` attaches to a dog's hook bead when dispatching
-// formula-driven work such as mol-dog-reaper or mol-dog-backup — and, when it
-// does, returns the wisp root's ID and created_at so callers can evaluate and
-// close it (gt-da2x). See findDispatchableDog.
-//
-// This shells out to bd directly (mirroring dogMol.runBd) rather than going
-// through beads.Beads.List, whose run() always resolves env via
-// buildRunEnv/BuildPinnedBDEnv — never the daemon's read-only routing env
-// that forces BD_DOLT_AUTO_COMMIT=off. findDispatchableDog calls this once
-// per idle dog on every dispatch tick, so without that env every poll opens
-// a fresh connection attempting a no-op auto-commit (gh#3596).
-func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
-	return dogHasHookedFormulaWithIDRun(nil, townRoot, beadsDir, dogName)
-}
-
-// dogHasHookedFormulaWithIDRun is dogHasHookedFormulaWithID with its bd run
-// through run (nil runs bd for real).
-func dogHasHookedFormulaWithIDRun(run cmdRunFunc, townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
-	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
-	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
-		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
-	args := []string{"query", "--json", queryExpr, "--limit=0"}
-
-	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
-	defer cancel()
-
-	cmd := beads.CommandContext(ctx, townRoot, beadsDir, beads.SubprocessModeForArgs(args), args...)
-	// Re-apply the process-group policy: ConfigureCommand installs Setpgid but
-	// no cancellation hook, which would leave the 5s timeout above unable to
-	// release a bd whose descendants hold the stdout pipe open — and this call
-	// runs on every dispatch tick.
-	util.SetProcessGroup(cmd.Cmd)
-	stdout, stderr, err := bdRunWith(run, cmd)
-	if err != nil {
-		if errMsg := strings.TrimSpace(string(stderr)); errMsg != "" {
-			return hookedFormulaResult{}, fmt.Errorf("%w: %s", err, errMsg)
-		}
-		return hookedFormulaResult{}, err
-	}
-
-	out := bytes.TrimSpace(stdout)
-	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
-		return hookedFormulaResult{}, nil
-	}
-
-	var hookedBeads []*beads.Issue
-	if err := json.Unmarshal(out, &hookedBeads); err != nil {
-		return hookedFormulaResult{}, fmt.Errorf("parsing bd query output: %w", err)
-	}
-
-	if wisp := beads.FirstFormulaWisp(hookedBeads); wisp != nil {
-		return hookedFormulaResult{hasHooked: true, wispID: wisp.ID, wispCreated: wisp.CreatedAt}, nil
-	}
-	return hookedFormulaResult{}, nil
-}
-
-// wispAbandonedReason is the close reason recorded on wisp steps the daemon
-// force-closes. It names the daemon as the actor so an operator reading the
-// bead later can tell this apart from a dog's own `gt dog done` cleanup.
-const wispAbandonedReason = "abandoned: idle dog, no step progress"
-
-// closeStaleWisp force-closes a formula wisp whose dog has been idle since
-// before the wisp existed and made no step progress, using the daemon's
-// mutation routing env for the writes and closing deepest-first so no parent
-// is closed while a child survives. Returns the number of beads closed.
-//
-// The tree is passed in rather than re-read: findDispatchableDog already read
-// it to make the staleness call, and a second bd round trip per idle dog per
-// tick is exactly the cost gt-da2x's read path is arranged to avoid.
-func closeStaleWisp(townRoot, _ string, tree []beads.WispStep) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), dogHookedFormulaCheckTimeout)
-	defer cancel()
-	return beads.CloseWispTree(ctx, townRoot, bdMutationRoutingEnv(townRoot), wispAbandonedReason, tree)
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.
@@ -552,81 +95,4 @@ func (d *Daemon) loadRigsConfig() (*config.RigsConfig, error) {
 // Returns a valid (never nil) config — accessors return defaults for nil fields.
 func (d *Daemon) loadOperationalConfig() *config.OperationalConfig {
 	return config.LoadOperationalConfig(d.config.TownRoot)
-}
-
-// dispatchPluginToDog assigns p to an idle dog, mails it body as its
-// instructions and starts its session. It returns the dog's name on
-// success; noDog is true when no dispatchable dog exists (the caller
-// defers). Other failures are logged and rolled back here and return
-// ("", false). The body is a parameter so the script path can hand a
-// failing plugin over with its output attached.
-func (d *Daemon) dispatchPluginToDog(p *plugin.Plugin, mgr dogManager, sm dogSessionStarter, router mailSender, body string) (dogName string, noDog bool) {
-	d.dispatchMu.Lock()
-	defer d.dispatchMu.Unlock()
-	// Find an idle dog that doesn't already have a live tmux session.
-	// A leaked session (dog marked idle before its tmux terminated) would
-	// cause sm.Start to fail with "session already running", and since
-	// mgr.List() returns dogs in directory order, GetIdleDog would always
-	// pick the same first idle dog — infinite-looping the same failed
-	// dispatch instead of advancing to the next idle dog in the pack.
-	// See gt-o24.
-	idleDog := d.findDog(mgr, sm)
-	if idleDog == nil {
-		d.logger.Printf("Handler: no dispatchable idle dogs available, deferring remaining plugins")
-		return "", true
-	}
-	workDesc := fmt.Sprintf("plugin:%s", p.Name)
-	if err := mgr.AssignWork(idleDog.Name, workDesc); err != nil {
-		d.logger.Printf("Handler: failed to assign work to dog %s: %v", idleDog.Name, err)
-		return "", false
-	}
-	// Send mail with plugin instructions BEFORE starting the session
-	// so the dog finds work in its inbox on first check.
-	msg := mail.NewMessage(
-		"daemon",
-		fmt.Sprintf("deacon/dogs/%s", idleDog.Name),
-		fmt.Sprintf("Plugin: %s", p.Name),
-		body,
-	)
-	msg.Type = mail.TypeTask
-	msg.Timestamp = time.Now()
-	if err := router.Send(msg); err != nil {
-		d.logger.Printf("Handler: failed to send mail to dog %s: %v", idleDog.Name, err)
-		if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
-			d.logger.Printf("Handler: failed to clear work after mail failure for dog %s: %v", idleDog.Name, clearErr)
-		}
-		return "", false
-	}
-	// p.Agent overrides role_agents.dog for this plugin's session. The scanner
-	// has already cleared a name the session cannot resolve (internal/plugin),
-	// so a non-empty value here is one the session start will accept.
-	sessOpts := dog.SessionStartOptions{WorkDesc: workDesc, AgentOverride: p.Agent}
-	if err := sm.Start(idleDog.Name, sessOpts); err != nil {
-		d.logger.Printf("Handler: failed to start session for dog %s: %v", idleDog.Name, err)
-		if clearErr := mgr.ClearWork(idleDog.Name); clearErr != nil {
-			d.logger.Printf("Handler: failed to clear work after start failure for dog %s: %v", idleDog.Name, clearErr)
-		}
-		return "", false
-	}
-	d.logger.Printf("Handler: dispatched plugin %s to dog %s", p.Name, idleDog.Name)
-	return idleDog.Name, false
-}
-
-// findDog resolves an idle, dispatchable dog through the real pack when the
-// collaborators are the concrete types, and through the test seam otherwise.
-func (d *Daemon) findDog(mgr dogManager, sm dogSessionStarter) *dog.Dog {
-	if d.findDogFn != nil {
-		return d.findDogFn()
-	}
-	realMgr, ok1 := mgr.(*dog.Manager)
-	realSM, ok2 := sm.(*dog.SessionManager)
-	if !ok1 || !ok2 {
-		return nil
-	}
-	return findDispatchableDog(realMgr, realSM, d.config.TownRoot, d.logger, d.seams.wisps)
-}
-
-// dogSeat is a dog's seat: town-level, named.
-func dogSeat(name string) supervisor.Seat {
-	return supervisor.SeatFor("", constants.RoleDog, name)
 }

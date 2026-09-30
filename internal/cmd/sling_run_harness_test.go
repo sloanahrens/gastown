@@ -175,24 +175,12 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("start session %s", s.PolecatName)
 			return "%1", nil
 		},
-		startDelayedDog: func(dog *DogDispatchInfo) (string, error) {
-			h.record("start dog %s", dog.DogName)
-			return "%2", nil
-		},
 		cleanupSpawned: func(s *SpawnedPolecatInfo, _, convoyID string) {
 			h.record("cleanup spawn %s convoy=%s", s.PolecatName, convoyID)
 		},
 		resolveAgent: func(target string) (string, string, string, error) {
 			h.record("resolve agent %s", target)
 			return "", "", "", errors.New("no session")
-		},
-		dispatchDog: func(name string, opts DogDispatchOptions) (*DogDispatchInfo, error) {
-			if name == "" {
-				name = "alpha"
-			}
-			h.record("dispatch dog %s", name)
-			return &DogDispatchInfo{DogName: name, AgentID: "deacon/dogs/" + name,
-				sessionDelayed: true, workDesc: opts.WorkDesc, ownsWork: true}, nil
 		},
 		cwdTown: func() string { return slingTestTown },
 		crewExists: func(_, rig, name string) bool {
@@ -278,18 +266,9 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("create wisp %s vars=%s", name, strings.Join(vars, ","))
 			return []byte(`{"root_id":"gt-wisp-new"}`), nil
 		},
-		hookWisp:             func(id, agent, _ string) error { h.record("hook %s %s", id, agent); return nil },
-		burnWisp:             func(id, _ string) error { h.record("burn wisp %s", id); return nil },
-		cleanupFailedDogWisp: func(id, _ string) error { h.record("cleanup dog wisp %s", id); return nil },
-		cleanupStaleDogWisp:  func(id, _ string) error { h.record("cleanup stale dog wisp %s", id); return nil },
-		clearDogWork: func(dog *DogDispatchInfo) error {
-			if dog != nil && dog.ownsWork {
-				h.record("clear dog work %s", dog.DogName)
-			}
-			return nil
-		},
-		nudgeSession: func(session, msg string) error { h.record("nudge session %s: %s", session, msg); return nil },
-		nudgePane:    func(pane, msg string) error { h.record("nudge pane %s: %s", pane, msg); return nil },
+		hookWisp:  func(id, agent, _ string) error { h.record("hook %s %s", id, agent); return nil },
+		burnWisp:  func(id, _ string) error { h.record("burn wisp %s", id); return nil },
+		nudgePane: func(pane, msg string) error { h.record("nudge pane %s: %s", pane, msg); return nil },
 
 		slingContexts: func(string) slingContextStore { return fakeSlingContexts{h} },
 

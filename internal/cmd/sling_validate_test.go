@@ -23,8 +23,8 @@ func TestValidateTarget(t *testing.T) {
 		{name: "rig/crew/name", target: "gastown/crew/burke", wantErr: false},
 		{name: "rig/witness", target: "gastown/witness", wantErr: false},
 		{name: "rig/refinery", target: "gastown/refinery", wantErr: false},
-		{name: "deacon/dogs", target: "deacon/dogs", wantErr: false},
-		{name: "deacon/dogs/name", target: "deacon/dogs/rex", wantErr: false},
+		{name: "deacon/dogs (retired)", target: "deacon/dogs", wantErr: true},
+		{name: "deacon/dogs/name (retired)", target: "deacon/dogs/rex", wantErr: true},
 		{name: "polecat shorthand", target: "gastown/nux", wantErr: false},
 		{name: "crew shorthand", target: "gastown/max", wantErr: false},
 

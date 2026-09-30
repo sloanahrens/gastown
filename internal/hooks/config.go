@@ -327,7 +327,7 @@ type Target struct {
 	Path     string // Full path to .claude/settings.json or .gemini/settings.json
 	Key      string // Override key: "gastown/crew", "mayor", etc.
 	Rig      string // Rig name or empty for town-level
-	Role     string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, polecat, mayor, dog.
+	Role     string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, polecat, mayor.
 	Provider string // Hook provider: "claude" (default/empty) or "gemini", etc.
 }
 
@@ -466,52 +466,6 @@ func DefaultOverrides() map[string]*HooksConfig {
 				},
 			},
 		},
-		// Dogs: formula command-allowlist enforcement (gt-9iv).
-		// Formulas may declare command_allowlist in their TOML; the guard
-		// constrains a dog's Bash commands to the declared entries (plus a
-		// built-in lifecycle baseline). No-op for dogs whose assigned work
-		// is not a formula or whose formula declares no allowlist.
-		"dog": {
-			UserPromptSubmit: []HookEntry{{Matcher: ""}},
-			PreToolUse: []HookEntry{
-				{
-					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: gtCommand("gt tap guard formula-allowlist"),
-					}},
-				},
-				{
-					// A dog also runs with nobody at the pane; see the
-					// polecats override for why the question tool is denied
-					// (gt-163k8).
-					Matcher: "AskUserQuestion",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: gtCommand("gt tap guard question-tool"),
-					}},
-				},
-			},
-			// A dog also runs with nobody at the pane; see the polecats
-			// override for why the ask is denied rather than raised (gt-8stz),
-			// and why the shell entry matches Monitor too (gt-nol0q).
-			PermissionRequest: []HookEntry{
-				{
-					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: gtCommand("gt tap guard permission-request"),
-					}},
-				},
-				{
-					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-					Hooks: []Hook{{
-						Type:    "command",
-						Command: gtCommand("gt tap guard permission-request"),
-					}},
-				},
-			},
-		},
 	}
 }
 
@@ -577,28 +531,6 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 		Key:  "mayor",
 		Role: "mayor",
 	})
-
-	// Dog kennels — each dog has its own settings file in its kennel dir
-	// (deacon/dogs/<name>), all sharing the "dog" override key. Only dirs
-	// with a .dog.json state file are kennels (gt-9iv); deacon/dogs/boot is the
-	// retired Boot watchdog's directory, not a kennel.
-	dogsDir := filepath.Join(townRoot, "deacon", "dogs")
-	if dogEntries, err := os.ReadDir(dogsDir); err == nil {
-		for _, entry := range dogEntries {
-			if !entry.IsDir() || entry.Name() == "boot" {
-				continue
-			}
-			kennelDir := filepath.Join(dogsDir, entry.Name())
-			if _, err := os.Stat(filepath.Join(kennelDir, ".dog.json")); err != nil {
-				continue
-			}
-			targets = append(targets, Target{
-				Path: filepath.Join(kennelDir, ".claude", "settings.json"),
-				Key:  "dog",
-				Role: "dog",
-			})
-		}
-	}
 
 	// Scan rigs
 	entries, err := os.ReadDir(townRoot)

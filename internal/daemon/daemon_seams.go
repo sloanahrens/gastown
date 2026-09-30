@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/slot"
 )
@@ -27,9 +26,6 @@ type daemonSeams struct {
 	// slots is the container gate the main-branch check takes its slot
 	// through; nil is package slot's default gate, which asks docker.
 	slots *slot.Gate
-
-	// wisps is the dog dispatcher's hooked-formula reads and stale-wisp close.
-	wisps wispOps
 }
 
 // runHeartbeatWork runs the body of one heartbeat.
@@ -112,35 +108,4 @@ func (s daemonSeams) escalateMainBranch(d *Daemon, key, source, message string) 
 		return
 	}
 	d.escalateAlert(key, source, message)
-}
-
-// wispOps is the dog dispatcher's view of formula wisps: the hooked-formula
-// check, the wisp tree read, and the abandoned-wisp close. Each nil field is
-// the real bd read or write; tests replace them to exercise the dispatch
-// decisions without a bd/Dolt backend.
-type wispOps struct {
-	hooked     func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error)
-	tree       func(townRoot, wispID string) ([]beads.WispStep, error)
-	closeStale func(townRoot, wispID string, tree []beads.WispStep) (int, error)
-}
-
-func (w wispOps) hookedFormula(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
-	if w.hooked != nil {
-		return w.hooked(townRoot, beadsDir, dogName)
-	}
-	return dogHasHookedFormulaWithID(townRoot, beadsDir, dogName)
-}
-
-func (w wispOps) wispTree(townRoot, wispID string) ([]beads.WispStep, error) {
-	if w.tree != nil {
-		return w.tree(townRoot, wispID)
-	}
-	return wispTree(townRoot, wispID)
-}
-
-func (w wispOps) closeStaleWisp(townRoot, wispID string, tree []beads.WispStep) (int, error) {
-	if w.closeStale != nil {
-		return w.closeStale(townRoot, wispID, tree)
-	}
-	return closeStaleWisp(townRoot, wispID, tree)
 }

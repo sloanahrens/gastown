@@ -11,7 +11,7 @@ import (
 
 // tap_guard_question_tool.go implements `gt tap guard question-tool`: a
 // PreToolUse hook that denies the interactive question tool (AskUserQuestion)
-// in a session with nobody at the pane (polecat, dog).
+// in a session with nobody at the pane (a polecat).
 //
 // Two incidents, same shape. gt-z83 (2026-09-08, polecat pyrite) and gt-163k8
 // (2026-09-23, polecat garnet, 4h26m with 0 commits) both parked on a
@@ -50,7 +50,7 @@ var tapGuardQuestionToolCmd = &cobra.Command{
 	Short: "Deny AskUserQuestion in a session with nobody at the pane",
 	Long: `Block the interactive question tool for unattended Gas Town sessions.
 
-Registered for the roles that run with nobody at the pane (polecat, dog) on the
+Registered for the role that runs with nobody at the pane (polecat) on the
 AskUserQuestion tool matcher. A question raised in such a session parks it on a
 dialog nobody can answer, while the session still reads as running, so no health
 check in the town treats it as broken — a polecat sat 4h26m this way (gt-163k8).

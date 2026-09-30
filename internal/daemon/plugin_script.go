@@ -12,21 +12,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/dog"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-// Script-type plugins run without a dog.
+// Script-type plugins run in the daemon.
 //
 // Measured 2026-09-18 (gt-fo2k): a dog session for a run.sh plugin was six
 // tool calls of ceremony around `bash run.sh` and a ~24k-token first turn,
 // 27 times in 90 minutes, with no judgment involved for 11 of 13 plugins.
-// The daemon can run the script itself, record the result from the exit
-// code, and hand the output to a dog only when the script fails — that is
-// the one moment an agent has something to decide.
+// The daemon runs the script itself and records the result from the exit
+// code. A failure used to go to a dog with the output; those dispatches
+// fixed nothing (gt-ckunw), so a failure now logs and escalates, one open
+// escalation per plugin, closed by its next good run.
 
 // defaultScriptTimeout bounds a run.sh whose plugin.md sets no
 // [execution] timeout.
@@ -51,7 +50,7 @@ const scriptOutputTail = 16 * 1024
 // heartbeat retries; the daemon log and the plugin's own last-run log carry
 // the trail instead of a bead per attempt.
 //
-// A deferral is NOT a failure: it hands nothing to a dog, and unlike a
+// A deferral is NOT a failure: it escalates nothing, and unlike a
 // failure it is expected to be the common outcome of a run whose window is
 // shut.
 //
@@ -60,7 +59,7 @@ const scriptOutputTail = 16 * 1024
 // exit 3 for an ordinary failure (a tool it shells out to uses that code, a
 // case statement's default arm). Without the opt-in, that failure would be
 // silently read as "nothing to see here, retry later" instead of recorded
-// and dispatched to a dog like every other nonzero exit (gt-oqbw).
+// and escalated like every other nonzero exit (gt-oqbw).
 const scriptExitDeferred = 3
 
 // scriptSkippedMarker is the line a run.sh prints on an exit-0 path that
@@ -69,22 +68,44 @@ const scriptExitDeferred = 3
 // the plugins had on 2026-09-18 (gt-chqi): the wrapper records whatever the
 // script's exit code says, and exit 0 meant "all fine" even when the script
 // had nothing to do. A skipped run is not a failure: it records a receipt,
-// satisfies the cooldown gate, and dispatches no dog.
+// satisfies the cooldown gate, and escalates nothing.
 const scriptSkippedMarker = "[plugin-result skipped]"
 
 // scriptRunner tracks plugins whose run.sh is executing in-process so a
 // heartbeat that fires mid-run neither starts a second copy nor waits on the
 // first. It is the in-flight half of the cooldown gate: the run record that
 // satisfies the gate is written when the script finishes, with its real
-// result, instead of at dispatch as the dog path does.
+// result.
+//
+// It also remembers which plugins have an escalation open, so a good run
+// closes it and a plugin that never failed costs no `gt escalate clear`.
+// The memory is the daemon's: after a restart an open escalation stays open
+// until the mayor closes it or the plugin fails and recovers again.
 type scriptRunner struct {
-	mu      sync.Mutex
-	running map[string]time.Time
-	active  sync.WaitGroup // one per run in flight, done when it finishes
+	mu        sync.Mutex
+	running   map[string]time.Time
+	escalated map[string]bool
+	active    sync.WaitGroup // one per run in flight, done when it finishes
 }
 
 func newScriptRunner() *scriptRunner {
-	return &scriptRunner{running: map[string]time.Time{}}
+	return &scriptRunner{running: map[string]time.Time{}, escalated: map[string]bool{}}
+}
+
+// markEscalated records that name has an escalation open.
+func (r *scriptRunner) markEscalated(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.escalated[name] = true
+}
+
+// takeEscalated reports whether name had an escalation open and forgets it.
+func (r *scriptRunner) takeEscalated(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	was := r.escalated[name]
+	delete(r.escalated, name)
+	return was
 }
 
 // tryStart marks name as running and reports whether the caller may start
@@ -146,7 +167,7 @@ func (r scriptResult) skipped() bool {
 // heartbeat (see scriptExitDeferred). Only a plugin that declares
 // [execution] allow_deferred_exit = true gets that reading of exit 3; for
 // every other script plugin it is an ordinary failure, recorded and
-// dispatched to a dog like any other nonzero exit. A run that never started,
+// escalated like any other nonzero exit. A run that never started,
 // timed out or failed some other way is not a deferral either way: those are
 // outcomes to record.
 func (r scriptResult) deferred(p *plugin.Plugin) bool {
@@ -154,7 +175,7 @@ func (r scriptResult) deferred(p *plugin.Plugin) bool {
 		r.err == nil && !r.timedOut && r.exitCode == scriptExitDeferred
 }
 
-// status is the one-line summary used in run records and mail.
+// status is the one-line summary used in run records and escalations.
 func (r scriptResult) status() string {
 	switch {
 	case r.timedOut:
@@ -168,8 +189,8 @@ func (r scriptResult) status() string {
 
 // runsAsScript reports whether the daemon should execute p itself: the
 // plugin declares [execution] type = "script" and ships a run.sh. A plugin
-// that declares script without a run.sh has nothing to run; it stays on the
-// dog path so the mismatch is visible in a session rather than silent.
+// that declares script without a run.sh has nothing to run; the handler
+// logs it as skipped every heartbeat so the mismatch stays visible.
 func runsAsScript(p *plugin.Plugin) bool {
 	return p != nil && p.HasRunScript && p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript
 }
@@ -263,16 +284,18 @@ func tail(s string, n int) string {
 }
 
 // scriptRunHooks are the side effects of a finished script run, split out
-// so tests can observe them without a beads store or a dog pack.
+// so tests can observe them without a beads store or a gt binary.
 type scriptRunHooks struct {
 	record    func(rec plugin.PluginRunRecord) error
 	onFailure func(p *plugin.Plugin, res scriptResult)
+	onSuccess func(p *plugin.Plugin)
 	logf      func(format string, args ...any)
 }
 
-// completeScriptRun records the result and, on failure, hands the plugin to
-// a dog with the output attached. A failed record must not hide the failure:
-// the dog dispatch runs regardless, and the record error is logged.
+// completeScriptRun records the result and, on failure, escalates it with
+// the output attached. A failed record must not hide the failure: the
+// escalation runs regardless, and the record error is logged. A good run
+// (success or skipped) calls onSuccess, which closes an open escalation.
 //
 // A deferral is the one outcome with no record: the record is what satisfies
 // the cooldown gate, and a run that accomplished nothing must not buy one
@@ -305,9 +328,12 @@ func completeScriptRun(p *plugin.Plugin, res scriptResult, h scriptRunHooks) {
 		} else {
 			h.logf("Handler: script plugin %s ok (%s)", p.Name, res.status())
 		}
+		if h.onSuccess != nil {
+			h.onSuccess(p)
+		}
 		return
 	}
-	h.logf("Handler: script plugin %s FAILED (%s); dispatching a dog with the output", p.Name, res.status())
+	h.logf("Handler: script plugin %s FAILED (%s); escalating", p.Name, res.status())
 	if h.onFailure != nil {
 		h.onFailure(p, res)
 	}
@@ -320,9 +346,9 @@ func scriptLogPath(townRoot, name string) string {
 }
 
 // startScriptPlugin runs p's run.sh in a goroutine (the heartbeat must not
-// wait on a script) and, when it finishes, records the run and dispatches a
-// dog on failure. A second heartbeat while the script runs is a no-op.
-func (d *Daemon) startScriptPlugin(p *plugin.Plugin, mgr dogManager, sm dogSessionStarter, router mailSender, recorder runRecorder) {
+// wait on a script) and, when it finishes, records the run and escalates a
+// failure. A second heartbeat while the script runs is a no-op.
+func (d *Daemon) startScriptPlugin(p *plugin.Plugin, recorder runRecorder) {
 	d.scriptsOnce.Do(func() { d.scripts = newScriptRunner() })
 	if !d.scripts.tryStart(p.Name) {
 		d.logger.Printf("Handler: script plugin %s still running, skipping", p.Name)
@@ -341,9 +367,10 @@ func (d *Daemon) startScriptPlugin(p *plugin.Plugin, mgr dogManager, sm dogSessi
 				return err
 			},
 			onFailure: func(p *plugin.Plugin, res scriptResult) {
-				d.dispatchPluginToDog(p, mgr, sm, router, p.FormatFailureMailBody(res.status(), res.output))
+				d.escalatePluginFailure(p, res, townRoot)
 			},
-			logf: d.logger.Printf,
+			onSuccess: d.clearPluginFailure,
+			logf:      d.logger.Printf,
 		})
 	}()
 }
@@ -359,22 +386,34 @@ func writeScriptLog(townRoot, name string, res scriptResult) {
 	_ = os.WriteFile(path, []byte(body), 0o644)
 }
 
-// The daemon's plugin dispatch talks to these three collaborators; they are
-// interfaces so the failure path can be exercised without a dog pack, a
-// tmux server or a beads store.
-type dogManager interface {
-	AssignWork(name, desc string) error
-	ClearWork(name string) error
+// pluginFailureAlertKey is the escalation fingerprint for one plugin's
+// failures: a plugin that keeps failing adds to one open escalation instead
+// of opening one per run.
+func pluginFailureAlertKey(name string) string {
+	return "plugin:" + name + ":failed"
 }
 
-type dogSessionStarter interface {
-	Start(name string, opts dog.SessionStartOptions) error
+// escalatePluginFailure raises (or adds to) p's failure escalation with the
+// output tail, and remembers it so the next good run closes it.
+func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townRoot string) {
+	msg := fmt.Sprintf("script plugin %s failed: %s\n\nThe daemon ran %s/run.sh; full output of the last run: %s\n\n%s",
+		p.Name, res.status(), p.Path, scriptLogPath(townRoot, p.Name), strings.TrimRight(res.output, "\n"))
+	if err := d.escalateAlertErr(pluginFailureAlertKey(p.Name), "plugin:"+p.Name, msg); err != nil {
+		return
+	}
+	d.scripts.markEscalated(p.Name)
 }
 
-type mailSender interface {
-	Send(msg *mail.Message) error
+// clearPluginFailure closes p's failure escalation when this daemon raised
+// one.
+func (d *Daemon) clearPluginFailure(p *plugin.Plugin) {
+	if d.scripts.takeEscalated(p.Name) {
+		d.clearAlerts(fmt.Sprintf("plugin %s ran clean", p.Name), pluginFailureAlertKey(p.Name))
+	}
 }
 
+// runRecorder writes a plugin run record; an interface so the handler can be
+// exercised without a beads store.
 type runRecorder interface {
 	RecordRun(rec plugin.PluginRunRecord) (string, error)
 }

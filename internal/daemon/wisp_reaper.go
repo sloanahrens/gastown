@@ -4,29 +4,25 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
 	// defaultWispReaperInterval is the patrol interval. Set to 1h since reaping
-	// is cleanup work, not latency-sensitive. Was 30m before Dog-driven refactor.
+	// is cleanup work, not latency-sensitive.
 	defaultWispReaperInterval = 1 * time.Hour
 	// Wisps older than this are reaped (closed). Configurable via formula var max_age.
 	defaultWispMaxAge = 24 * time.Hour
 	// Closed wisps older than this are permanently deleted. Formula var: purge_age.
 	defaultWispDeleteAge = 7 * 24 * time.Hour
-	// Alert threshold: if open wisp count exceeds this, the Dog should escalate.
+	// Alert threshold: if open wisp count exceeds this, the reaper warns.
 	// Shared with `gt reaper run` warning. See reaper.DefaultAlertThreshold.
 	wispAlertThreshold = reaper.DefaultAlertThreshold
 	// Closed mail older than this is permanently deleted. Formula var: mail_delete_age.
@@ -40,20 +36,6 @@ const (
 	// beads — every agent, dog, and patrol-molecule bead in the town. Auto-close
 	// is for work that was abandoned, and abandonment does not look like a week.
 	defaultStaleIssueAge = 30 * 24 * time.Hour
-
-	// reaperDispatchMaxAttempts bounds the retry of a single dog dispatch. Only a
-	// dispatch that provably committed nothing is retried (reaperDispatchRetryable),
-	// so three attempts cannot pin three wisps.
-	reaperDispatchMaxAttempts = 3
-
-	// reaperDispatchRetryDelay is the base backoff before a retry, multiplied by
-	// the attempt number. It targets contention that clears in seconds.
-	reaperDispatchRetryDelay = 2 * time.Second
-
-	// maxSummarizedOutputLen caps one subprocess's output in a log line. The
-	// daemon writes one unrotated log file, so one chatty failure must not be
-	// able to fill it.
-	maxSummarizedOutputLen = 2000
 )
 
 // wispReaperInterval returns the configured interval, or the default (1h).
@@ -108,9 +90,9 @@ func wispReaperStaleIssueAge(config *DaemonPatrolConfig) time.Duration {
 // WispReaperAutoCloseDisarmed reports whether daemon.json explicitly disarms
 // the wisp_reaper auto-close step (patrols.wisp_reaper.auto_close=false).
 //
-// This is read by `gt reaper auto-close` as well, so the setting disarms the
-// Dog-driven path too — not just the daemon's own inline fallback. A nil knob
-// is "unset", not "disarmed".
+// This is read by `gt reaper auto-close` as well, so the setting disarms a
+// hand-run sweep too, not just the daemon's own. A nil knob is "unset", not
+// "disarmed".
 func WispReaperAutoCloseDisarmed(config *DaemonPatrolConfig) bool {
 	if config == nil || config.Patrols == nil || config.Patrols.WispReaper == nil {
 		return false
@@ -119,22 +101,17 @@ func WispReaperAutoCloseDisarmed(config *DaemonPatrolConfig) bool {
 	return knob != nil && !*knob
 }
 
-// wispReaperAutoCloseEnabled reports whether a given execution path may
-// auto-close. The Dog-driven path is the designed home for the sweep, so an
-// unset knob leaves it enabled. The inline fallback is an error path: it runs
-// because Dog dispatch FAILED, and a dispatch failure must never be upgraded
-// into a destructive sweep, so it needs an explicit opt-in (gt-2qzr).
-func wispReaperAutoCloseEnabled(config *DaemonPatrolConfig, inlineFallback bool) bool {
-	if WispReaperAutoCloseDisarmed(config) {
+// wispReaperAutoCloseEnabled reports whether the daemon's sweep may
+// auto-close. Auto-close writes to durable issues, unlike reap/purge which
+// only retire ephemeral wisps, so it needs an explicit opt-in: an unset knob
+// leaves it off (gt-2qzr). The sweep used to run in a dog by default, with
+// this inline path as the fallback; the dogs were retired (gt-ckunw) and the
+// inline sweep kept the fallback's stricter rule.
+func wispReaperAutoCloseEnabled(config *DaemonPatrolConfig) bool {
+	if config == nil || config.Patrols == nil || config.Patrols.WispReaper == nil {
 		return false
 	}
-	if !inlineFallback {
-		return true
-	}
-	knob := (*bool)(nil)
-	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {
-		knob = config.Patrols.WispReaper.AutoClose
-	}
+	knob := config.Patrols.WispReaper.AutoClose
 	return knob != nil && *knob
 }
 
@@ -162,9 +139,8 @@ func ParseAgeDuration(s string) (time.Duration, error) {
 // is instead decided from the persisted last-run time in
 // daemon/patrol_last_run.json, which survives a restart (gt-ima2, gt-gxpwc).
 //
-// Dispatched onto its own goroutine, like the gt-ima2 fix for compactor_dog:
-// dispatchReaperDog shells out to `gt sling`, and running that inline would
-// stall every other tick behind it.
+// Run on its own goroutine, like the gt-ima2 fix for compactor_dog: a sweep
+// of every database would stall every other tick behind it.
 func (d *Daemon) triggerWispReaper() {
 	if !d.isPatrolActive("wisp_reaper") {
 		return
@@ -193,10 +169,9 @@ func (d *Daemon) triggerWispReaper() {
 	}()
 }
 
-// reapWisps is the thin orchestrator for the wisp_reaper patrol.
-// It pours a mol-dog-reaper molecule, then dispatches a Dog to execute it.
-// The Dog reads the formula steps and calls `gt reaper` CLI helpers.
-// Falls back to inline execution if Dog dispatch fails.
+// reapWisps is the thin orchestrator for the wisp_reaper patrol. It pours a
+// mol-dog-reaper molecule as the cycle's receipt and runs the sweep inline,
+// closing the molecule's steps as it goes.
 func (d *Daemon) reapWisps() {
 	if !d.isPatrolActive("wisp_reaper") {
 		return
@@ -233,9 +208,8 @@ func (d *Daemon) reapWisps() {
 		vars["dry_run"] = "true"
 	}
 	if WispReaperAutoCloseDisarmed(d.patrolConfig) {
-		// Belt and braces: the formula skips the step, and `gt reaper auto-close`
-		// independently refuses, so a Dog that ignores the instruction still
-		// cannot sweep.
+		// Recorded on the receipt, so the molecule says why auto-close did
+		// nothing.
 		vars["auto_close"] = "false"
 	}
 	if len(config.Databases) > 0 {
@@ -250,151 +224,7 @@ func (d *Daemon) reapWisps() {
 		d.logger.Printf("wisp_reaper: DRY RUN — reporting only, no changes will be made")
 	}
 
-	// Try dispatching to a Dog for formula-driven execution.
-	if err := d.dispatchReaperDog(vars); err != nil {
-		// The cause matters more than the fact: gt-2qzr was diagnosed late
-		// because the log recorded only "exit status 1", which said nothing
-		// about why the sweep had silently moved to the inline fallback.
-		d.logger.Printf("wisp_reaper: Dog dispatch failed (%v), running inline fallback", err)
-		d.reapWispsInline(config, maxAge, deleteAge, staleIssueAge, mol)
-		return
-	}
-
-	d.logger.Printf("wisp_reaper: dispatched to Dog for formula-driven execution")
-}
-
-// SlingDogArgs returns the argv `gt sling` is exec'd with to hand a formula to
-// the dog pool, with vars sorted so the argv is reproducible.
-//
-// Exported for the command tree's own package to parse: a dispatch that stops
-// parsing does not fail loudly, it degrades to the inline scan, so a flag
-// deleted from the CLI (D7, 388d0320) costs the Dog-driven reaper with no
-// symptom but a log line (gt-4k3fj.10).
-func SlingDogArgs(formula string, vars map[string]string) []string {
-	args := []string{"sling", formula, "deacon/dogs"}
-	keys := make([]string, 0, len(vars))
-	for k := range vars {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		args = append(args, "--var", k+"="+vars[k])
-	}
-	return args
-}
-
-// dispatchReaperDog dispatches the mol-dog-reaper formula to a Dog via gt sling.
-//
-// A dispatch that loses a Dolt race is retried rather than handed straight to
-// the inline fallback, which runs with auto-close disarmed. The daemon fires
-// this while its backup and jsonl sweeps are saturating the same server, so the
-// loss is recurring rather than exceptional (gt-4k3fj.10).
-func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
-	args := SlingDogArgs(constants.MolDogReaper, vars)
-	var lastErr error
-	for attempt := 1; attempt <= reaperDispatchMaxAttempts; attempt++ {
-		out, err := d.runReaperSling(args)
-		if err == nil {
-			return nil
-		}
-		// Capture output so a failure reports WHY it failed, not just that it did.
-		lastErr = fmt.Errorf("gt sling: %w: %s", err, summarizeCommandOutput(out))
-		if !reaperDispatchRetryable(string(out)) || attempt == reaperDispatchMaxAttempts {
-			break
-		}
-		delay := time.Duration(attempt) * reaperDispatchRetryDelay
-		d.logger.Printf("wisp_reaper: Dog dispatch attempt %d/%d lost to transient Dolt contention (%s); retrying in %s",
-			attempt, reaperDispatchMaxAttempts, summarizeCommandOutput(out), delay)
-		d.waitReaperDispatch(delay)
-	}
-	return lastErr
-}
-
-// reaperDispatchRetryable reports whether a failed dispatch is safe to repeat.
-//
-// A dispatch pins a wisp to a dog, so a repeat is safe only when the failure
-// provably committed nothing: the wisp-creating transaction aborted (Dolt 40001
-// serialization failure), was refused, or never got past an open circuit
-// breaker. Every marker is gated on "creating wisp", which is the error prefix
-// `gt sling` puts on a failed `bd mol wisp` (sling_formula.go). A transient
-// failure on any later step — parsing the wisp id, hooking it, starting the dog
-// — means the wisp exists, and re-running the command would create a second one,
-// orphaned. Renaming that prefix costs the retry and nothing else.
-//
-// A timeout, "unreachable" and a reset connection stay out even so: each can
-// mean the request landed and only the answer was lost, and repeating one would
-// set a second sweep racing the first, which is worse than the inline fallback
-// the retry avoids.
-//
-// The cause is read from the command's output rather than the exec error,
-// because os/exec reduces every non-zero exit to "exit status 1".
-func reaperDispatchRetryable(output string) bool {
-	if !strings.Contains(output, "creating wisp") {
-		return false
-	}
-	for _, marker := range []string{
-		"circuit breaker is open",
-		"connection refused",
-		"serialization failure", // Dolt 40001: aborted and rolled back
-	} {
-		if strings.Contains(output, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// runReaperSling execs the dispatch command. Tests replace reaperSlingFn to
-// drive the retry path without a gt binary.
-func (d *Daemon) runReaperSling(args []string) ([]byte, error) {
-	if d.reaperSlingFn != nil {
-		return d.reaperSlingFn(args)
-	}
-	cmd := exec.Command(d.gtPath, args...) //nolint:gosec // G204: d.gtPath resolved at daemon init via LookPath
-	cmd.Dir = d.config.TownRoot
-	// gt sling performs writes, so use mutation routing env: it preserves PATH
-	// while stripping stale bd target selectors and derived Beads endpoint aliases.
-	cmd.Env = bdMutationRoutingEnv(d.config.TownRoot)
-	util.SetDetachedProcessGroup(cmd)
-	return d.combinedOutput(cmd)
-}
-
-// waitReaperDispatch sleeps before retrying a dispatch. Tests replace the fn so
-// the retry path costs no wall-clock time.
-func (d *Daemon) waitReaperDispatch(delay time.Duration) {
-	if d.reaperSlingWaitFn != nil {
-		d.reaperSlingWaitFn(delay)
-		return
-	}
-	d.clk().Sleep(delay)
-}
-
-// summarizeCommandOutput renders subprocess output for a single log line, capped
-// at both ends. Cobra prints the cause first ("Error: <cause>") and a ~3KB usage
-// dump after it, so a tail-only cap keeps the usage dump and discards the one
-// line that says what happened — the misdiagnosis gt-4k3fj.10 records. Nothing
-// parses this; it goes to the log as-is.
-func summarizeCommandOutput(out []byte) string {
-	const elision = " …[elided]… "
-	s := strings.TrimSpace(string(out))
-	if s == "" {
-		return "(no output)"
-	}
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= maxSummarizedOutputLen {
-		return s
-	}
-	// Cut on rune boundaries: gt's own progress output carries multi-byte marks
-	// (✓, 🎯), and a log line that splits one is mojibake.
-	head := (maxSummarizedOutputLen - len(elision)) / 2
-	for head > 0 && !utf8.RuneStart(s[head]) {
-		head--
-	}
-	tail := len(s) - (maxSummarizedOutputLen - len(elision) - head)
-	for tail < len(s) && !utf8.RuneStart(s[tail]) {
-		tail++
-	}
-	return s[:head] + elision + s[tail:]
+	d.reapWispsInline(config, maxAge, deleteAge, staleIssueAge, mol)
 }
 
 // reaperWriter returns the bd writer for a live run against dbName, pinned to
@@ -410,9 +240,8 @@ func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error)
 	return reaper.WriterForDatabase(d.config.TownRoot, dbName)
 }
 
-// reapWispsInline is the fallback that runs the reaper cycle inline when
-// Dog dispatch is unavailable. Delegates to the reaper package, which selects
-// with SQL and writes through bd.
+// reapWispsInline runs the reaper cycle in the daemon. Delegates to the
+// reaper package, which selects with SQL and writes through bd.
 func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, staleIssueAge time.Duration, mol *dogMol) {
 	databases := config.Databases
 	host := d.doltServerHost()
@@ -424,7 +253,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		mol.failStep("scan", "no databases found")
 		return
 	}
-	d.logger.Printf("wisp_reaper: scanning %d databases (inline fallback)", len(databases))
+	d.logger.Printf("wisp_reaper: scanning %d databases", len(databases))
 	mol.closeStep("scan")
 
 	port := d.doltServerPort()
@@ -553,7 +382,8 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		}
 	}
 
-	// Step 3c: Close plugin dispatch mails (daemon→dog instruction beads that are never closed)
+	// Step 3c: Close plugin dispatch mails (daemon→dog instruction beads left
+	// open from before the dogs were retired)
 	pluginDispatchAge := 1 * time.Hour
 	var totalDispatchClosed int
 	for _, dbName := range databases {
@@ -588,14 +418,11 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 
 	// Step 4: Auto-close
 	//
-	// The inline path runs because Dog dispatch FAILED. Auto-close writes to
-	// durable issues, unlike reap/purge which only retire ephemeral wisps, so a
-	// dispatch error must not be upgraded into a sweep of the town's issue
-	// tracker (gt-2qzr). It therefore requires patrols.wisp_reaper.auto_close to
-	// be explicitly true — `dry_run` is not the disarm, because that knob also
-	// stops reap and purge.
-	if !wispReaperAutoCloseEnabled(d.patrolConfig, true) {
-		d.logger.Printf("wisp_reaper: auto-close skipped in inline fallback (set patrols.wisp_reaper.auto_close=true to allow)")
+	// Auto-close requires patrols.wisp_reaper.auto_close to be explicitly true
+	// (see wispReaperAutoCloseEnabled) — `dry_run` is not the disarm, because
+	// that knob also stops reap and purge.
+	if !wispReaperAutoCloseEnabled(d.patrolConfig) {
+		d.logger.Printf("wisp_reaper: auto-close skipped (set patrols.wisp_reaper.auto_close=true to allow)")
 		mol.closeStep("auto-close")
 	} else {
 		autoCloseErrors := 0

@@ -1,13 +1,14 @@
 # Plugin System Design
 
-> **Status: Design proposal -- not yet implemented**
+> **Status: Original design proposal (2026-01-11, crew/george session).**
 >
-> Design document for the Gas Town plugin system.
-> Written 2026-01-11, crew/george session.
+> The execution model shipped differently: the daemon runs cooldown script
+> plugins itself (see [Execution Model](#execution-model-daemon-runs-script-plugins)).
+> The Deacon and the dog worker pool this proposal relied on have been retired.
 
 ## Problem Statement
 
-Gas Town needs extensible, project-specific automation that runs during Deacon patrol cycles. The immediate use case is rebuilding stale binaries (gt, bd, wv), but the pattern generalizes to any periodic maintenance task.
+Gas Town needs extensible, project-specific automation that runs on daemon heartbeats. The immediate use case is rebuilding stale binaries (gt, bd, wv), but the pattern generalizes to any periodic maintenance task.
 
 Current state:
 - Plugin infrastructure exists conceptually (patrol step mentions it)
@@ -25,7 +26,7 @@ Plugin state (last run, run count, results) lives on the ledger as wisps, not in
 ### ZFC: Zero Framework Cognition
 > Agent decides. Go transports.
 
-The Deacon (agent) evaluates gates and decides whether to dispatch. Go code provides transport (`gt dog dispatch`) but doesn't make decisions.
+The plugin's own script decides whether there is work (and can report `[plugin-result skipped]`). The daemon only evaluates the gate, runs the script, and records the result.
 
 ### MEOW Stack Integration
 
@@ -63,44 +64,34 @@ The Deacon (agent) evaluates gates and decides whether to dispatch. Go code prov
 **Town-level** (`~/gt/plugins/`): Universal plugins that apply everywhere.
 **Rig-level** (`<rig>/plugins/`): Project-specific plugins.
 
-The Deacon scans both locations during patrol.
+The daemon scans both locations on each heartbeat.
 
-### Execution Model: Dog Dispatch
+### Execution Model: Daemon Runs Script Plugins
 
-**Key insight**: Plugin execution should not block Deacon patrol.
+**Key insight**: Plugin execution should not depend on an agent being awake.
 
-Dogs are reusable workers designed for infrastructure tasks. Plugin execution is dispatched to dogs:
+On each heartbeat the daemon scans plugins and, for every open cooldown gate,
+runs the plugin in-process:
 
 ```
-Deacon Patrol                    Dog Worker
-─────────────────               ─────────────────
-1. Scan plugins
-2. Evaluate gates
-3. For open gates:
-   └─ gt dog dispatch plugin     ──→ 4. Execute plugin
-      (non-blocking)                  5. Create result wisp
-                                      6. Send DOG_DONE
-4. Continue patrol
-   ...
-5. Process DOG_DONE              ←── (next cycle)
+Daemon heartbeat
+─────────────────
+1. Scan town + rig plugin dirs
+2. Evaluate cooldown gates (plugin-run receipts on the ledger)
+3. For each open gate on a script plugin
+   ([execution] type = "script" plus run.sh):
+   └─ run run.sh with a timeout
+4. Record a plugin-run receipt (success / skipped / failure)
+5. On failure: log it and raise `gt escalate` (severity high) under the
+   fingerprint plugin:<name>:failed, with the output tail.
+   The plugin's next good run (success or skipped) closes that escalation.
 ```
 
-Benefits:
-- Deacon stays responsive
-- Multiple plugins can run concurrently (different dogs)
-- Plugin failures don't stall patrol
-- Consistent with Dogs' purpose (infrastructure work)
+A cooldown plugin that is not a script plugin with a `run.sh` is logged as
+skipped every heartbeat: nothing runs markdown-instruction plugins any more.
+Manual-gate plugins are never auto-run; run them with `gt plugin run`.
 
-**Agent per plugin**: `role_agents.dog` answers for every dog session, but the
-two kinds of plugin want different models. A plugin whose `[execution] type` is
-`script` is bash the dog only launches, and a cheap or local preset runs it
-fine; an agent-type plugin (compactor-dog, stuck-agent-dog) needs a model that
-can read results and judge. Set the optional top-level `agent` key to route just
-that plugin's session. Unset means `role_agents.dog`, unchanged.
-
-The scanner resolves the name against the same lookup a session start uses and
-warns, leaving the plugin on `role_agents.dog`, when it resolves to nothing — a
-typo should change where one plugin runs, not take it offline.
+The old top-level `agent` key (per-plugin agent preset) is ignored.
 
 ### State Tracking: Wisps on the Ledger
 
@@ -175,7 +166,7 @@ notify_on_failure = true
 
 # Rebuild gt Binary
 
-Instructions for the dog worker to execute...
+What run.sh does, and the manual procedure if it fails...
 ```
 
 ### TOML Frontmatter Schema
@@ -185,9 +176,6 @@ Instructions for the dog worker to execute...
 name = "string"           # Unique plugin identifier
 description = "string"    # Human-readable description
 version = 1               # Schema version (for future evolution)
-
-agent = "claude-sonnet"   # Agent preset for this plugin's dog session.
-                          # Omit for role_agents.dog.
 
 [gate]
 type = "cooldown|cron|condition|event|manual"
@@ -202,6 +190,7 @@ labels = ["label:value", ...]  # Labels for execution wisps
 digest = true|false            # Include in daily digest
 
 [execution]
+type = "script"           # Daemon runs run.sh; required for auto-run
 timeout = "5m"            # Max execution time
 notify_on_failure = true  # Escalate on failure
 severity = "low"          # Escalation severity if failed
@@ -219,7 +208,7 @@ severity = "low"          # Escalation severity if failed
 
 ### Instructions Section
 
-The markdown body after the frontmatter contains agent-executable instructions. The dog worker reads and executes these steps.
+The markdown body after the frontmatter documents what `run.sh` does and how an operator runs or debugs it by hand. The daemon executes `run.sh`, not the markdown.
 
 Standard sections:
 - **Detection**: Check if action is needed
@@ -232,7 +221,6 @@ Standard sections:
 ## New Commands Required
 
 - **`gt stale`** -- Expose binary staleness check (human-readable, `--json`, `--quiet` exit code)
-- **`gt dog dispatch --plugin <name>`** -- Dispatch plugin execution to an idle dog (non-blocking)
 - **`gt plugin list|show|run|digest|history`** -- Plugin management and execution history
 
 ---
@@ -243,12 +231,12 @@ Standard sections:
 
 1. **`gt stale` command** - Expose CheckStaleBinary() via CLI
 2. **Plugin format spec** - Finalize TOML schema
-3. **Plugin scanning** - Deacon scans town + rig plugin dirs
+3. **Plugin scanning** - Daemon scans town + rig plugin dirs
 
 ### Phase 2: Execution
 
-4. **`gt dog dispatch --plugin`** - Formalized dog dispatch
-5. **Plugin execution in dogs** - Dog reads plugin.md, executes
+4. **Script execution** - Daemon runs the plugin's run.sh in-process
+5. **Failure escalation** - `gt escalate` under `plugin:<name>:failed`
 6. **Wisp creation** - Record results on ledger
 
 ### Phase 3: Gates & State
@@ -274,11 +262,9 @@ Standard sections:
 
 1. **Plugin discovery in multiple clones**: If gastown has crew/george, crew/max, crew/joe - which clone's plugins/ dir is canonical? Probably: scan all, dedupe by name, prefer rig-root if exists.
 
-2. **Dog assignment**: Should specific plugins prefer specific dogs? Or any idle dog?
+2. **Plugin dependencies**: Can plugins depend on other plugins? Probably not in v1.
 
-3. **Plugin dependencies**: Can plugins depend on other plugins? Probably not in v1.
-
-4. **Plugin disable/enable**: How to temporarily disable a plugin without deleting it? Label on a plugin bead? `enabled = false` in frontmatter?
+3. **Plugin disable/enable**: How to temporarily disable a plugin without deleting it? Label on a plugin bead? `enabled = false` in frontmatter?
 
 ---
 

@@ -49,7 +49,7 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `crew-state` | Cleanup | cadence | Cheap state.json read per crew worker; crew state drifts as often as crew members act, worth catching fast. |
 | `crew-worktrees` | Cleanup | cadence | Cheap directory scan for stale cross-rig worktrees; same drift profile as orphan-sessions/orphan-processes. |
 | `dolt-orphan-servers` | Cleanup | cadence | Cheap process scan for abandoned test dolt sql-server instances that otherwise leak until a human notices. |
-| `dolt-orphaned-databases` | Cleanup | cadence | Cheap `SHOW DATABASES` scan; orphan DBs are the same class the doctor-dog already patrols for slot-debris. |
+| `dolt-orphaned-databases` | Cleanup | cadence | Cheap `SHOW DATABASES` scan; orphan DBs are the same class the daemon's `doctor_dog` job already patrols for slot-debris. |
 | `jsonl-bloat` | Cleanup | cadence | Cheap file-size/staleness comparison; bloat is progressive and best caught early. |
 | `misclassified-wisps` | Cleanup | cadence | Cheap Dolt query; ephemeral beads misfiled into the issues table pollute reporting until caught. |
 | `null-assignee-steps` | Cleanup | cadence | Cheap Dolt query; a NULL-assignee in_progress bead is invisible to bd and blocks indefinitely -- exactly the deacon-self-probe failure class. |

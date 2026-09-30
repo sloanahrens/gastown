@@ -165,7 +165,7 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 }
 
 // reapNotes runs the debris reap. A removal that failed is a finding; a
-// docker that cannot be listed is a note, since no dog session can start it.
+// docker that cannot be listed is a note, since nothing here can start it.
 func reapNotes(p doctorProbes, r *doctorReport) []string {
 	var notes []string
 	rep, err := p.reap()
@@ -242,7 +242,7 @@ func (d *Daemon) runDoctorDog() {
 	}
 
 	findings := strings.Join(r.findings, "; ")
-	d.logger.Printf("doctor_dog: %d finding(s), pouring molecule for agent execution: %s", len(r.findings), findings)
+	d.logger.Printf("doctor_dog: %d finding(s), pouring the receipt molecule: %s", len(r.findings), findings)
 
 	mol := d.pourDogMolecule(constants.MolDogDoctor, map[string]string{
 		"port":              strconv.Itoa(d.doltServerPort()),

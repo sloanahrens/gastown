@@ -100,7 +100,7 @@ func getRoleWithContextEnv(cwd, townRoot string, getenv func(string) string) (Ro
 		// If env is incomplete (missing rig/polecat for roles that need them),
 		// fill gaps from cwd detection and mark as incomplete
 		needsRig := parsedRole == RolePolecat || parsedRole == RoleCrew
-		needsPolecat := parsedRole == RolePolecat || parsedRole == RoleCrew || parsedRole == RoleDog
+		needsPolecat := parsedRole == RolePolecat || parsedRole == RoleCrew
 
 		if needsRig && info.Rig == "" && cwdCtx.Rig != "" {
 			info.Rig = cwdCtx.Rig
@@ -161,22 +161,8 @@ func detectRole(cwd, townRoot string) RoleInfo {
 		return ctx
 	}
 
-	// deacon/dogs/boot/ was the retired Boot watchdog's home
-	// (gt-4k3fj.6.1): no role, and not a dog named "boot".
-	if len(parts) >= 3 && parts[0] == "deacon" && parts[1] == "dogs" && parts[2] == "boot" {
-		return ctx
-	}
-
-	// Check for dog role: deacon/dogs/<name>/
-	// Must check before deacon since dogs are under deacon directory
-	if len(parts) >= 3 && parts[0] == "deacon" && parts[1] == "dogs" {
-		ctx.Role = RoleDog
-		ctx.Polecat = parts[2] // dog name stored in Polecat field
-		return ctx
-	}
-
-	// deacon/ itself only hosts the dogs now: the deacon role was deleted
-	// (gt-4k3fj.6.1). It is not a rig.
+	// deacon/ held the deleted deacon, boot and dog roles (gt-4k3fj.6.1,
+	// gt-ckunw). It is not a rig and has no role.
 	if len(parts) >= 1 && parts[0] == "deacon" {
 		return ctx
 	}
@@ -231,8 +217,6 @@ func parseRoleString(s string) (Role, string, string) {
 	switch s {
 	case constants.RoleMayor:
 		return RoleMayor, "", ""
-	case "dog":
-		return RoleDog, "", ""
 	}
 
 	// Compound roles: rig/role or rig/polecats/name or rig/crew/name
@@ -305,11 +289,6 @@ func getRoleHome(role Role, rig, polecat, townRoot string) string {
 			return ""
 		}
 		return filepath.Join(townRoot, rig, "crew", polecat)
-	case RoleDog:
-		if polecat == "" {
-			return ""
-		}
-		return filepath.Join(townRoot, "deacon", "dogs", polecat)
 	default:
 		return ""
 	}

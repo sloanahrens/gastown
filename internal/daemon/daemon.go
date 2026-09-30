@@ -29,7 +29,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/dispatch"
-	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
@@ -107,12 +106,7 @@ type Daemon struct {
 	// in tests; nil reads the version package's.
 	buildCommitFn func() string
 
-	// dogSessionsFn builds the dog session surface the handler drives over a
-	// dog manager; nil builds a *dog.SessionManager on the town's tmux (see
-	// dogSessions).
-	dogSessionsFn func(mgr *dog.Manager) dogSessions
-
-	// seams replaces the heartbeat, upgrade, dog-dispatch and main-branch
+	// seams replaces the heartbeat, upgrade and main-branch
 	// collaborators in tests (see daemonSeams); the zero value is production.
 	seams daemonSeams
 
@@ -158,21 +152,6 @@ type Daemon struct {
 	// in-process (gt-fo2k). Lazily created; safe for concurrent use.
 	scripts     *scriptRunner
 	scriptsOnce sync.Once
-
-	// findDogFn overrides dog selection in tests; nil uses the real pack.
-	findDogFn func() *dog.Dog
-
-	// reaperSlingFn replaces the `gt sling` subprocess behind the wisp_reaper's
-	// dog dispatch, and reaperSlingWaitFn replaces its retry backoff, so tests
-	// drive the dispatch retry without a gt binary or real sleeps. Nil runs the
-	// real command and really sleeps (see runReaperSling, waitReaperDispatch).
-	reaperSlingFn     func(args []string) ([]byte, error)
-	reaperSlingWaitFn func(time.Duration)
-
-	// dispatchMu serializes dog dispatch: the heartbeat's dispatchPlugins and
-	// a script plugin's failure hand-off (a goroutine) both pick an idle dog
-	// and assign it, so they must not interleave.
-	dispatchMu sync.Mutex
 
 	// supervisor holds the only Kill and Restart the daemon uses (see
 	// sup()); tests may set it, otherwise it is built on first use.
@@ -1351,15 +1330,13 @@ func (d *Daemon) heartbeatWork(state *State) {
 		d.logger.Printf("Mayor patrol disabled in config, skipping")
 	}
 
-	// 6.5. Handle Dog lifecycle: cleanup stuck dogs and dispatch plugins
-	// Pressure-gated: dog dispatch spawns new agent sessions.
+	// 6.5. Run due plugins. Pressure-gated: a plugin run is new work the
+	// town can put off while it is loaded.
 	if d.isPatrolActive("handler") {
-		if p := d.checkPressure("dog"); !p.OK {
-			d.logger.Printf("Deferring dog dispatch: %s", p.Reason)
-			// Still run cleanup phases (stuck/stale/idle) — only skip dispatch
-			d.handleDogsCleanupOnly()
+		if p := d.checkPressure("plugin"); !p.OK {
+			d.logger.Printf("Deferring plugin runs: %s", p.Reason)
 		} else {
-			d.handleDogs()
+			d.handlePlugins()
 		}
 	} else {
 		d.logger.Printf("Handler patrol disabled in config, skipping")

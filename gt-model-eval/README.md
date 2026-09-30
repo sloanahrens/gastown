@@ -2,9 +2,15 @@
 
 Promptfoo-based model comparison framework for Gas Town patrol agents. Compare Claude Opus, Sonnet, and Haiku on patrol decision tasks to find where cheaper models match Opus quality.
 
+> **Status:** historical snapshot. The deacon, witness and dog agent roles
+> these suites exercise have since been retired from Gas Town (no deacon,
+> witness or dog sessions run, and `gt dog` no longer exists); their test files
+> are kept as a record of the protocols they measured. Only the refinery suites
+> describe a role that still runs.
+
 ## Why
 
-Gas Town multi-agent setups burn through Opus budget on patrol agents (deacon, witness, dogs) that follow prescriptive formulas. These agents parse shell output and make rule-based decisions — they may not need Opus-level reasoning. This framework provides **evidence** for safely downgrading roles to Sonnet or Haiku.
+Gas Town multi-agent setups burned through Opus budget on patrol agents (deacon, witness, dogs — all since retired) that followed prescriptive formulas. These agents parsed shell output and made rule-based decisions — they may not need Opus-level reasoning. This framework provides **evidence** for safely downgrading roles to Sonnet or Haiku.
 
 See [Discussion #1542](https://github.com/steveyegge/gastown/discussions/1542) and [Issue #1545](https://github.com/steveyegge/gastown/issues/1545).
 

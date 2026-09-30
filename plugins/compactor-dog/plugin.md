@@ -24,8 +24,9 @@ Monitors Dolt commit growth across all production databases and escalates to
 the Mayor when history compaction or flatten is needed. This is a judgment
 call, not a hard threshold trigger.
 
-**You are a dog agent (Claude). Gather the data below, then use your judgment
-to decide if maintenance is needed.** Consider:
+The daemon runs only `run.sh`. The steps below are a manual procedure for
+whoever picks up a failed run or a warning: gather the data, then use judgment
+to decide if maintenance is needed. Consider:
 
 - Commit count per DB (absolute size)
 - Growth rate (commits per hour since last check)
@@ -56,8 +57,8 @@ daemon threshold isn't a disk signal either, so those candidates defer too —
 otherwise a gc-mode town with the threshold raised to 20000 (this town's
 setting) re-escalates every DB from 500 to 20000 each 30-minute cycle (gt-124a6).
 
-A dog reads the judgment steps below only when `run.sh` exits nonzero (Dolt
-unreachable, no databases).
+Nothing runs the judgment steps below; a nonzero `run.sh` exit (Dolt
+unreachable, no databases) is escalated (see Record Result).
 
 **First, check the maintenance mode.** The judgment table in Step 6 depends
 on it:
@@ -91,8 +92,8 @@ STATE_FILE="$HOME/gt/.dolt-data/.compactor-state.json"
 
 Compaction requires the explicit `--compact` flag and is **never** the default:
 it rewrites commit history (flatten). Nothing is pushed: Dolt remote sync was
-removed (ADR 0002). The dog must not pass `--compact` on its own initiative —
-it escalates, and the operator decides.
+removed (ADR 0002). No automated run passes `--compact` — the plugin
+escalates, and the operator decides.
 
 ```bash
 # Monitor only (default, safe to run automatically)
@@ -195,7 +196,7 @@ echo "Total commits across all DBs: $TOTAL_COMMITS"
 
 ## Step 3: Check swarm activity
 
-Count active polecats and dogs to gauge expected commit velocity:
+Count active polecats to gauge expected commit velocity:
 
 ```bash
 echo ""
@@ -204,12 +205,9 @@ echo "=== Swarm Activity ==="
 # Count active tmux sessions (proxy for agent activity)
 POLECAT_SESSIONS=$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
   | grep -c 'polecat\|pcat' || echo 0)
-DOG_SESSIONS=$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
-  | grep -c 'dog' || echo 0)
 TOTAL_SESSIONS=$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')
 
 echo "  Active polecats: $POLECAT_SESSIONS"
-echo "  Active dogs: $DOG_SESSIONS"
 echo "  Total sessions: $TOTAL_SESSIONS"
 ```
 
@@ -265,8 +263,7 @@ cat > "$STATE_FILE" << STATEOF
 {
   "checked_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "total_commits": $TOTAL_COMMITS,
-  "active_polecats": $POLECAT_SESSIONS,
-  "active_dogs": $DOG_SESSIONS
+  "active_polecats": $POLECAT_SESSIONS
 }
 STATEOF
 
@@ -276,7 +273,7 @@ echo "State saved to $STATE_FILE"
 
 ## Step 6: Make the judgment call
 
-**This is where you (the dog agent) use judgment.** Review all the data
+**This is where you use judgment.** Review all the data
 gathered above and decide whether to escalate.
 
 **Guidelines for judgment** (not rules — context matters):
@@ -290,7 +287,7 @@ gathered above and decide whether to escalate.
 
 **Hard escalate line (no judgment override): any DB over 1000 commits.**
 The script's default threshold (500) matches the "Escalate" column above.
-The "Getting warm" band (200-500) is informational — the dog may monitor
+The "Getting warm" band (200-500) is informational — you may monitor
 without escalating if context justifies it.
 
 The table above is for `monitor` and `flatten` modes. **In `gc` mode:**
@@ -303,7 +300,7 @@ The table above is for `monitor` and `flatten` modes. **In `gc` mode:**
 - Runaway growth (e.g. >300/hr with no swarm) is still worth escalating, as a
   runaway writer, not a compaction request.
 - gc failures and skipped windows are escalated by the daemon's own
-  scheduled_maintenance patrol, not by this dog.
+  scheduled_maintenance patrol, not by this plugin.
 - Report what you saw (database, commit count or growth rate, whether a swarm
   explains it) and leave the remedy to the operator — never recommend
   compaction or flatten in gc mode.
@@ -353,16 +350,16 @@ Receipt outcomes, with who records them:
   work and could not report it, not a crash.
 - `run.sh --compact`: records `success` or `warning` (the compaction-error
   escalation) itself.
-- `run.sh` exits nonzero: the daemon records `failure` and dispatches a dog
-  with the output attached. The dog investigates, records `failure`, and
-  escalates if the failure looks permanent.
+- `run.sh` exits nonzero: the daemon records `failure` and raises
+  `gt escalate` (fingerprint `plugin:compactor-dog:failed`) with the output
+  tail. No agent is dispatched; the next good run closes the escalation.
 
 A run the daemon starts leaves two receipts: the daemon's, from the script's
 exit status, and the script's own from the list above. A `failure` from the
 script beside a `success` from the daemon means the process finished and the
 run still failed to deliver its signal.
 
-Dog escalation (only after a failed run):
+Manual escalation (only after investigating a failed run by hand):
 ```bash
 gt plugin record-run --plugin compactor-dog --result failure \
   --title "compactor-dog: FAILED" \

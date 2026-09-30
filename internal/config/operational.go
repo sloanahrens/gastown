@@ -46,11 +46,7 @@ const (
 const (
 	DefaultMassDeathWindow                = 30 * time.Second
 	DefaultMassDeathThreshold             = 3
-	DefaultDogIdleSessionTimeout          = 1 * time.Hour
 	DefaultPolecatIdleSessionTimeout      = 15 * time.Minute
-	DefaultDogIdleRemoveTimeout           = 4 * time.Hour
-	DefaultStaleWorkingTimeout            = 2 * time.Hour
-	DefaultMaxDogPoolSize                 = 4
 	DefaultMaxLifecycleMessageAge         = 6 * time.Hour
 	DefaultSyncFailureEscalationThreshold = 3
 	DefaultDoctorMolCooldown              = 5 * time.Minute
@@ -402,14 +398,6 @@ func (d *DaemonThresholds) MassDeathThresholdV() int {
 	return DefaultMassDeathThreshold
 }
 
-// DogIdleSessionTimeoutD returns the configured or default dog idle session timeout.
-func (d *DaemonThresholds) DogIdleSessionTimeoutD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.DogIdleSessionTimeout, DefaultDogIdleSessionTimeout)
-	}
-	return DefaultDogIdleSessionTimeout
-}
-
 // PolecatIdleSessionTimeoutD returns the configured or default polecat idle session timeout.
 // Polecats that have been idle (no hooked work, heartbeat state=idle) longer than this
 // threshold are auto-killed to prevent API slot burn. Default 15 minutes — long enough
@@ -419,30 +407,6 @@ func (d *DaemonThresholds) PolecatIdleSessionTimeoutD() time.Duration {
 		return ParseDurationOrDefault(d.PolecatIdleSessionTimeout, DefaultPolecatIdleSessionTimeout)
 	}
 	return DefaultPolecatIdleSessionTimeout
-}
-
-// DogIdleRemoveTimeoutD returns the configured or default dog idle remove timeout.
-func (d *DaemonThresholds) DogIdleRemoveTimeoutD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.DogIdleRemoveTimeout, DefaultDogIdleRemoveTimeout)
-	}
-	return DefaultDogIdleRemoveTimeout
-}
-
-// StaleWorkingTimeoutD returns the configured or default stale working timeout.
-func (d *DaemonThresholds) StaleWorkingTimeoutD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.StaleWorkingTimeout, DefaultStaleWorkingTimeout)
-	}
-	return DefaultStaleWorkingTimeout
-}
-
-// MaxDogPoolSizeV returns the configured or default max dog pool size.
-func (d *DaemonThresholds) MaxDogPoolSizeV() int {
-	if d != nil && d.MaxDogPoolSize != nil {
-		return *d.MaxDogPoolSize
-	}
-	return DefaultMaxDogPoolSize
 }
 
 // MaxLifecycleMessageAgeD returns the configured or default max lifecycle message age.

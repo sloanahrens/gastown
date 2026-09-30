@@ -127,19 +127,17 @@ type slingDeps struct {
 	crossRigGuard      func(beadID, targetAgent, townRoot string) error
 
 	// The target and its polecat.
-	resolveSelf     func() (agentID, pane, hookRoot string, err error)
-	resolveTarget   func(target string, opts ResolveTargetOptions) (*ResolvedTarget, error)
-	spawnPolecat    func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
-	admitPolecat    func(townRoot, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error)
-	startSession    func(spawn *SpawnedPolecatInfo) (string, error)
-	startDelayedDog func(dog *DogDispatchInfo) (string, error)
-	cleanupSpawned  func(spawn *SpawnedPolecatInfo, rigName, convoyID string)
-	resolveAgent    func(target string) (agentID, pane, hookRoot string, err error)
-	dispatchDog     func(dogName string, opts DogDispatchOptions) (*DogDispatchInfo, error)
-	cwdTown         func() string
-	crewExists      func(townRoot, rigName, name string) bool
-	peekPool        func(townRoot, beadID, requested string) (agent, reason string, err error)
-	wakeRig         func(rigName string)
+	resolveSelf    func() (agentID, pane, hookRoot string, err error)
+	resolveTarget  func(target string, opts ResolveTargetOptions) (*ResolvedTarget, error)
+	spawnPolecat   func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
+	admitPolecat   func(townRoot, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error)
+	startSession   func(spawn *SpawnedPolecatInfo) (string, error)
+	cleanupSpawned func(spawn *SpawnedPolecatInfo, rigName, convoyID string)
+	resolveAgent   func(target string) (agentID, pane, hookRoot string, err error)
+	cwdTown        func() string
+	crewExists     func(townRoot, rigName, name string) bool
+	peekPool       func(townRoot, beadID, requested string) (agent, reason string, err error)
+	wakeRig        func(rigName string)
 
 	// Reassignment away from a previous holder.
 	requester          func() string
@@ -166,17 +164,13 @@ type slingDeps struct {
 	logFeed            func(eventType, actor string, payload map[string]interface{}) error
 	enqueueNudge       func(townRoot, session string, n nudge.QueuedNudge) error
 
-	// A standalone formula sling's wisp and the dog that may run it.
-	findHookedFormula    func(workDir, targetAgent, formulaName string) (*beads.Issue, error)
-	cookFormula          func(formulaName, workDir, townRoot string) error
-	createWisp           func(formulaName, workDir, townRoot string, vars []string) ([]byte, error)
-	hookWisp             func(beadID, targetAgent, hookDir string) error
-	burnWisp             func(wispRootID, workDir string) error
-	cleanupFailedDogWisp func(wispRootID, workDir string) error
-	cleanupStaleDogWisp  func(wispRootID, workDir string) error
-	clearDogWork         func(dog *DogDispatchInfo) error
-	nudgeSession         func(session, message string) error
-	nudgePane            func(pane, message string) error
+	// A standalone formula sling's wisp.
+	findHookedFormula func(workDir, targetAgent, formulaName string) (*beads.Issue, error)
+	cookFormula       func(formulaName, workDir, townRoot string) error
+	createWisp        func(formulaName, workDir, townRoot string, vars []string) ([]byte, error)
+	hookWisp          func(beadID, targetAgent, hookDir string) error
+	burnWisp          func(wispRootID, workDir string) error
+	nudgePane         func(pane, message string) error
 
 	// The sling context a scheduled bead waits in, in the target rig's beads.
 	slingContexts func(rigBeadsDir string) slingContextStore
@@ -235,18 +229,16 @@ func realSlingDeps() *slingDeps {
 		noteDispatched:     noteSlingCandidateDispatched,
 		crossRigGuard:      checkCrossRigGuard,
 
-		resolveSelf:     resolveSelfTarget,
-		spawnPolecat:    spawnPolecatForSling,
-		admitPolecat:    acquirePolecatAdmissionFn,
-		startSession:    func(s *SpawnedPolecatInfo) (string, error) { return s.StartSession() },
-		startDelayedDog: func(d *DogDispatchInfo) (string, error) { return d.StartDelayedSession() },
-		cleanupSpawned:  cleanupSpawnedPolecat,
-		resolveAgent:    resolveTargetAgentFn,
-		dispatchDog:     DispatchToDog,
-		cwdTown:         townFromCwd,
-		crewExists:      crewDirExists,
-		peekPool:        peekPolecatPoolAgent,
-		wakeRig:         wakeRigAgents,
+		resolveSelf:    resolveSelfTarget,
+		spawnPolecat:   spawnPolecatForSling,
+		admitPolecat:   acquirePolecatAdmissionFn,
+		startSession:   func(s *SpawnedPolecatInfo) (string, error) { return s.StartSession() },
+		cleanupSpawned: cleanupSpawnedPolecat,
+		resolveAgent:   resolveTargetAgentFn,
+		cwdTown:        townFromCwd,
+		crewExists:     crewDirExists,
+		peekPool:       peekPolecatPoolAgent,
+		wakeRig:        wakeRigAgents,
 
 		requester:          reassignRequester,
 		clearReassigned:    clearReassignedPolecatState,
@@ -271,16 +263,12 @@ func realSlingDeps() *slingDeps {
 		logFeed:            events.LogFeed,
 		enqueueNudge:       nudge.Enqueue,
 
-		findHookedFormula:    findHookedFormulaSingletonFn,
-		cookFormula:          cookStandaloneFormula,
-		createWisp:           createFormulaWisp,
-		hookWisp:             hookBeadWithRetryFn,
-		burnWisp:             burnSlingWispFn,
-		cleanupFailedDogWisp: cleanupFailedDogFormulaWisp,
-		cleanupStaleDogWisp:  cleanupStaleDogFormulaWisp,
-		clearDogWork:         (*DogDispatchInfo).clearWorkIfMatches,
-		nudgeSession:         func(session, msg string) error { return tmux.NewTmux().NudgeSession(session, msg) },
-		nudgePane:            func(pane, msg string) error { return tmux.NewTmux().NudgePane(pane, msg) },
+		findHookedFormula: findHookedFormulaSingletonFn,
+		cookFormula:       cookStandaloneFormula,
+		createWisp:        createFormulaWisp,
+		hookWisp:          hookBeadWithRetryFn,
+		burnWisp:          burnSlingWispFn,
+		nudgePane:         func(pane, msg string) error { return tmux.NewTmux().NudgePane(pane, msg) },
 
 		slingContexts: func(rigBeadsDir string) slingContextStore {
 			return beads.NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)

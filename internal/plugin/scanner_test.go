@@ -651,36 +651,6 @@ version = 1
 	}
 }
 
-func TestFormatMailBody_WithRunScript(t *testing.T) {
-	p := &Plugin{
-		Name:         "test-plugin",
-		Description:  "A test plugin",
-		Path:         "/home/user/gt/plugins/test-plugin",
-		HasRunScript: true,
-	}
-
-	body := p.FormatMailBody()
-
-	// Must contain the bash command to run the script
-	if !strings.Contains(body, "cd /home/user/gt/plugins/test-plugin && bash run.sh") {
-		t.Error("expected mail body to contain run.sh execution command")
-	}
-	// Must instruct dog NOT to interpret markdown
-	if !strings.Contains(body, "Do NOT interpret the plugin.md instructions") {
-		t.Error("expected mail body to warn against interpreting markdown")
-	}
-	if !strings.Contains(body, "gt plugin record-run --plugin test-plugin --result <outcome>") {
-		t.Error("expected mail body to use canonical plugin run recorder")
-	}
-	if strings.Contains(body, "bd create --ephemeral") {
-		t.Error("expected mail body to avoid raw ephemeral receipt creation")
-	}
-	// Must NOT contain "## Instructions" section
-	if strings.Contains(body, "## Instructions") {
-		t.Error("expected mail body to NOT contain markdown instructions section")
-	}
-}
-
 func TestParsePluginMD_ExecWrapper(t *testing.T) {
 	content := []byte(`+++
 name = "exitbox-sandbox"
@@ -829,35 +799,5 @@ wrapper = ["exitbox", "run", "--"]
 	}
 	if wrappers[0].Name != "sandbox" {
 		t.Errorf("expected wrapper name 'sandbox', got %q", wrappers[0].Name)
-	}
-}
-
-func TestFormatMailBody_WithoutRunScript(t *testing.T) {
-	p := &Plugin{
-		Name:         "test-plugin",
-		Description:  "A test plugin",
-		Path:         "/home/user/gt/plugins/test-plugin",
-		Instructions: "Do the thing.",
-		HasRunScript: false,
-	}
-
-	body := p.FormatMailBody()
-
-	// Must contain the instructions section
-	if !strings.Contains(body, "## Instructions") {
-		t.Error("expected mail body to contain instructions section")
-	}
-	if !strings.Contains(body, "Do the thing.") {
-		t.Error("expected mail body to contain plugin instructions")
-	}
-	// Must NOT contain run.sh dispatch
-	if strings.Contains(body, "bash run.sh") {
-		t.Error("expected mail body to NOT contain run.sh command")
-	}
-	if !strings.Contains(body, "gt plugin record-run --plugin test-plugin --result <outcome>") {
-		t.Error("expected mail body to use canonical plugin run recorder")
-	}
-	if strings.Contains(body, "bd create --ephemeral") {
-		t.Error("expected mail body to avoid raw ephemeral receipt creation")
 	}
 }

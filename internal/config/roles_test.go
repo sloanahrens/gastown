@@ -36,13 +36,6 @@ func TestLoadBuiltinRoleDefinition(t *testing.T) {
 			wantPattern: "{prefix}-crew-{name}",
 			wantPreSync: true,
 		},
-		{
-			name:        "dog",
-			role:        "dog",
-			wantScope:   "town",
-			wantPattern: "gt-dog-{name}",
-			wantPreSync: false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -96,13 +89,12 @@ func TestLoadRoleDefinition_UnknownRole(t *testing.T) {
 
 func TestAllRoles(t *testing.T) {
 	roles := AllRoles()
-	if len(roles) != 4 {
-		t.Errorf("AllRoles() returned %d roles, want 4", len(roles))
+	if len(roles) != 3 {
+		t.Errorf("AllRoles() returned %d roles, want 3", len(roles))
 	}
 
 	expected := map[string]bool{
 		"mayor":   true,
-		"dog":     true,
 		"polecat": true,
 		"crew":    true,
 	}
@@ -116,8 +108,8 @@ func TestAllRoles(t *testing.T) {
 
 func TestTownRoles(t *testing.T) {
 	roles := TownRoles()
-	if len(roles) != 2 {
-		t.Errorf("TownRoles() returned %d roles, want 2", len(roles))
+	if len(roles) != 1 {
+		t.Errorf("TownRoles() returned %d roles, want 1", len(roles))
 	}
 
 	for _, r := range roles {

@@ -34,7 +34,6 @@ var slingCmd = &cobra.Command{
 This is THE command for assigning work in Gas Town. It handles:
   - Existing agents (mayor, crew, witness, refinery)
   - Auto-spawning polecats when target is a rig
-  - Dispatching to dogs (Deacon's helper workers)
   - Formula instantiation and wisp creation
   - Auto-convoy creation so the work is tracked
 
@@ -60,8 +59,6 @@ Target Resolution:
                                         # (new names: lowercase a-z0-9-, >3 chars, not reserved)
   gt sling gt-abc gastown --crew mel    # Crew member mel in gastown
   gt sling gt-abc mayor                 # Mayor
-  gt sling gt-abc deacon/dogs           # Auto-dispatch to idle dog
-  gt sling gt-abc deacon/dogs/alpha     # Specific dog
 
 Spawning Options (when target is a rig):
   gt sling gp-abc greenplace --create               # Create polecat if missing
@@ -500,16 +497,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				Ralph:        r.opts.ralph,
 			})
 		}
-		// Dog targets (deacon/dogs, deacon/dogs/<name>, dog:, dog:<name>) fall through
-		// to direct dispatch: dogs are a self-managed pool owned by the Deacon, not rig
-		// polecat slots, and therefore don't participate in the capacity scheduler.
-		// Without this fallthrough, dispatchFeedDog can't feed stranded convoys when a
-		// scheduler is active (bead aa-4yf2).
-		if _, isDog := IsDogTarget(args[1]); !isDog {
-			// Non-rig, non-dog target in deferred mode — reject to prevent bypassing capacity control
-			return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>\n'%s' is not a known rig", args[0], args[1])
-		}
-		// else: fall through to direct dispatch path below (resolveTarget handles dogs).
+		// Non-rig target in deferred mode — reject to prevent bypassing capacity control
+		return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>\n'%s' is not a known rig", args[0], args[1])
 	}
 
 	// Epic/convoy auto-detection (1 arg, no rig): works for both deferred and direct
@@ -778,7 +767,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// TODO(scheduler-unify): Migrate single-sling rig dispatch to use executeSling().
 	// The inline logic below duplicates executeSling's 12-step flow. Batch sling
 	// and scheduler dispatch already use the unified path. Single-sling is deferred
-	// because it handles non-rig targets (dogs, mayor, crew, self-sling, nudge)
+	// because it handles non-rig targets (mayor, crew, self-sling, nudge)
 	// that executeSling does not cover. The rig-target case could be factored out
 	// to use executeSling, limiting this to non-rig targets only.
 	//
@@ -809,7 +798,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	targetPane := resolved.Pane
 	hookWorkDir := resolved.WorkDir
 	hookSetAtomically := resolved.HookSetAtomically
-	delayedDogInfo := resolved.DelayedDogInfo
 	newPolecatInfo := resolved.NewPolecatInfo
 	isSelfSling := resolved.IsSelfSling
 	if newPolecatInfo != nil {
@@ -823,7 +811,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// rollbackBeadID stays "" until this sling first writes to the bead, so a
 	// failure before that never burns molecules or releases a hook this sling
 	// did not create. With no polecat spawned, the guard has nothing to own once
-	// the hook has landed (a delayed dog keeps its own failure handling).
+	// the hook has landed.
 	//
 	// The auto-convoy stays open on a rollback so the convoy feeder can
 	// re-dispatch the bead with the recorded agent (gt-yg24) — except when raw
@@ -1188,16 +1176,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	}
 	if mode != "" {
 		r.updateAgentMode(targetAgent, mode, hookWorkDir, townBeadsDir)
-	}
-
-	// Start delayed dog session now that hook is set
-	// This ensures dog sees the hook when gt prime runs on session start
-	if delayedDogInfo != nil {
-		pane, err := r.startDelayedDog(delayedDogInfo)
-		if err != nil {
-			return fmt.Errorf("starting delayed dog session: %w", err)
-		}
-		targetPane = pane
 	}
 
 	// Start polecat session now that attached_molecule is set.

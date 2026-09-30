@@ -14,6 +14,7 @@ const testRigsJSON = `{
 }`
 
 func TestBuildPrefixRegistryFromTown_CanonicalExists_FallbackCreated(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -42,6 +43,7 @@ func TestBuildPrefixRegistryFromTown_CanonicalExists_FallbackCreated(t *testing.
 }
 
 func TestBuildPrefixRegistryFromTown_CanonicalMissing_FallbackUsed(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// No mayor/rigs.json — only fallback at town root.
 	fallback := filepath.Join(townRoot, "rigs.json")
@@ -61,6 +63,7 @@ func TestBuildPrefixRegistryFromTown_CanonicalMissing_FallbackUsed(t *testing.T)
 }
 
 func TestBuildPrefixRegistryFromTown_BothMissing_EmptyRegistry(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// No rigs.json anywhere.
 
@@ -80,6 +83,7 @@ func TestBuildPrefixRegistryFromTown_BothMissing_EmptyRegistry(t *testing.T) {
 }
 
 func TestCopyFileIfNewer_AtomicWrite(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.json")
 	dst := filepath.Join(dir, "dst.json")
