@@ -391,6 +391,17 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 		return s.refuse(l, ErrBudgetExhausted, rec.Reason)
 	}
 
+	// Re-check the hold just before the executor, which may take minutes and
+	// so runs outside the seat lock: a pause that landed after the budget
+	// was counted still wins, and the stamp is given back.
+	if rec, err := intent.Read(s.o.TownRoot, IntentSeat(seat)); err != nil || rec.Held() {
+		s.releaseStamp(seat, now)
+		if err != nil {
+			return s.refuse(l, ErrIntentUnreadable, err.Error())
+		}
+		return s.refuseSeat(seat, l, ErrPaused, rec.HoldReason())
+	}
+
 	runErr := s.o.Restart(seat)
 	outcome := outcomeDone
 	switch {
@@ -407,12 +418,7 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 		}
 		if outcome == outcomeDeclined {
 			// Nothing was started: give back the stamp this attempt took.
-			for i := len(r.Restarts) - 1; i >= 0; i-- {
-				if r.Restarts[i].Equal(now) {
-					r.Restarts = append(r.Restarts[:i], r.Restarts[i+1:]...)
-					break
-				}
-			}
+			r.Restarts = withoutStamp(r.Restarts, now)
 		}
 		return nil
 	})
@@ -498,6 +504,24 @@ func ShutdownInProgress(townRoot string) bool {
 		return false
 	}
 	return true
+}
+
+// releaseStamp gives back the budget stamp a refused attempt took.
+func (s *Supervisor) releaseStamp(seat Seat, at time.Time) {
+	_, _ = intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
+		r.Restarts = withoutStamp(r.Restarts, at)
+		return nil
+	})
+}
+
+// withoutStamp removes the last restart stamp equal to at.
+func withoutStamp(ts []time.Time, at time.Time) []time.Time {
+	for i := len(ts) - 1; i >= 0; i-- {
+		if ts[i].Equal(at) {
+			return append(ts[:i], ts[i+1:]...)
+		}
+	}
+	return ts
 }
 
 func pruneBefore(ts []time.Time, cutoff time.Time) []time.Time {

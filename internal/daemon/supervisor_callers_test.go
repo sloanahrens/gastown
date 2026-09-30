@@ -464,3 +464,19 @@ func seedStalledSample(t *testing.T, d *Daemon, seat supervisor.Seat, tm *fakeTm
 		t.Fatal(err)
 	}
 }
+
+// A seat the daemon cannot start (a polecat: the witness restarts those)
+// declines the restart and spends no budget.
+func TestRestartSeat_NoStarterDeclinesWithoutSpendingBudget(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: newFakeTmux(newFixedClock())}
+	seat := supervisor.SeatFor("myr", "polecat", "mycat")
+	for i := 0; i < 4; i++ {
+		if err := d.sup().Restart(seat, "dead", "daemon"); !errors.Is(err, supervisor.ErrDeclined) {
+			t.Fatalf("attempt %d = %v, want ErrDeclined", i+1, err)
+		}
+	}
+	if rec, _ := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat)); rec.Frozen || len(rec.Restarts) != 0 {
+		t.Fatalf("record after declined restarts = %+v, want no budget spent", rec)
+	}
+}

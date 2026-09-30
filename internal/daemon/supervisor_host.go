@@ -54,8 +54,9 @@ func (d *Daemon) sup() *supervisor.Supervisor {
 	return d.supervisor
 }
 
-// errNoDaemonStarter is returned for a seat the daemon does not start.
-var errNoDaemonStarter = errors.New("the daemon has no start path for this role")
+// errNoDaemonStarter is returned, as a declined restart, for a seat the
+// daemon does not start: it spends no budget.
+var errNoDaemonStarter = fmt.Errorf("%w: the daemon has no start path for this role", supervisor.ErrDeclined)
 
 // restartSeat replaces a seat's session with a fresh one. It is the
 // supervisor's restart executor, run only after the guards pass.
