@@ -3,6 +3,5 @@
 internal/beads
 internal/cmd
 internal/config
-internal/hooks
 internal/mayor
 internal/telemetry

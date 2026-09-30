@@ -3,11 +3,11 @@ package hooks
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
 func TestMergeHooksNoOverrides(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt prime"}}},
@@ -25,6 +25,7 @@ func TestMergeHooksNoOverrides(t *testing.T) {
 }
 
 func TestMergeHooksNilBase(t *testing.T) {
+	t.Parallel()
 	overrides := map[string]*HooksConfig{
 		"crew": {
 			PreToolUse: []HookEntry{
@@ -41,6 +42,7 @@ func TestMergeHooksNilBase(t *testing.T) {
 }
 
 func TestMergeHooksRoleOverride(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt prime"}}},
@@ -77,6 +79,7 @@ func TestMergeHooksRoleOverride(t *testing.T) {
 }
 
 func TestMergeHooksSameMatcherReplaces(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt prime --old"}}},
@@ -102,6 +105,7 @@ func TestMergeHooksSameMatcherReplaces(t *testing.T) {
 }
 
 func TestMergeHooksDifferentMatcherAppends(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Bash(git push*)", Hooks: []Hook{{Type: "command", Command: "block-push"}}},
@@ -124,6 +128,7 @@ func TestMergeHooksDifferentMatcherAppends(t *testing.T) {
 }
 
 func TestMergeHooksEmptyHooksDisables(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		Stop: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt status"}}},
@@ -151,6 +156,7 @@ func TestMergeHooksEmptyHooksDisables(t *testing.T) {
 // in TestMergeHooksSameMatcherReplaces. Bare tool-name matchers (see below)
 // deliberately diverge from this.
 func TestMergeHooksParenMatcherStillReplaces(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Bash(git push*)", Hooks: []Hook{{Type: "command", Command: "block-push-old"}}},
@@ -182,6 +188,7 @@ func TestMergeHooksParenMatcherStillReplaces(t *testing.T) {
 // "Bash" guards (pr-workflow, dangerous-command, formula-allowlist all
 // legitimately share the matcher).
 func TestMergeHooksBareMatcherUnions(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Bash", Hooks: []Hook{
@@ -226,6 +233,7 @@ func TestMergeHooksBareMatcherUnions(t *testing.T) {
 // with the same (Command, If) is replaced in place, not appended again
 // (unionHooks/hookKey in merge.go).
 func TestMergeHooksBareMatcherUnionIsIdempotent(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Bash", Hooks: []Hook{
@@ -261,6 +269,7 @@ func TestMergeHooksBareMatcherUnionIsIdempotent(t *testing.T) {
 // must stay pinned so a future change to mergeEntries doesn't silently
 // narrow or widen it.
 func TestMergeHooksBareMatcherEmptyOverrideDisablesAll(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PreToolUse: []HookEntry{
 			{Matcher: "Bash", Hooks: []Hook{
@@ -286,6 +295,7 @@ func TestMergeHooksBareMatcherEmptyOverrideDisablesAll(t *testing.T) {
 }
 
 func TestMergeHooksRigRoleLayering(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "base-prime"}}},
@@ -317,6 +327,7 @@ func TestMergeHooksRigRoleLayering(t *testing.T) {
 }
 
 func TestMergeHooksDoesNotMutateBase(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "original"}}},
@@ -345,6 +356,7 @@ func TestMergeHooksDoesNotMutateBase(t *testing.T) {
 // caller of MergeHooks/Merge, including ComputeExpected (gt-8stz review,
 // finding 48f9948f3436).
 func TestMergeHooksPropagatesPermissionRequest(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		PermissionRequest: []HookEntry{
 			{Matcher: "Bash", Hooks: []Hook{{Type: "command", Command: "base guard"}}},
@@ -381,6 +393,7 @@ func TestMergeHooksPropagatesPermissionRequest(t *testing.T) {
 }
 
 func TestMergeHooksOverrideAddsNewType(t *testing.T) {
+	t.Parallel()
 	base := &HooksConfig{
 		SessionStart: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt prime"}}},
@@ -406,8 +419,9 @@ func TestMergeHooksOverrideAddsNewType(t *testing.T) {
 }
 
 func TestLoadAllOverrides(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Create some override files
 	crew := &HooksConfig{
@@ -415,7 +429,7 @@ func TestLoadAllOverrides(t *testing.T) {
 			{Matcher: "Bash(git push*)", Hooks: []Hook{{Type: "command", Command: "block"}}},
 		},
 	}
-	if err := SaveOverride("crew", crew); err != nil {
+	if err := home.saveOverride("crew", crew); err != nil {
 		t.Fatalf("SaveOverride crew: %v", err)
 	}
 
@@ -424,11 +438,11 @@ func TestLoadAllOverrides(t *testing.T) {
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gastown-prime"}}},
 		},
 	}
-	if err := SaveOverride("gastown/crew", gasCrewOverride); err != nil {
+	if err := home.saveOverride("gastown/crew", gasCrewOverride); err != nil {
 		t.Fatalf("SaveOverride gastown/crew: %v", err)
 	}
 
-	overrides, err := LoadAllOverrides()
+	overrides, err := home.loadAllOverrides()
 	if err != nil {
 		t.Fatalf("LoadAllOverrides: %v", err)
 	}
@@ -446,10 +460,11 @@ func TestLoadAllOverrides(t *testing.T) {
 }
 
 func TestLoadAllOverridesEmptyDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
-	overrides, err := LoadAllOverrides()
+	overrides, err := home.loadAllOverrides()
 	if err != nil {
 		t.Fatalf("LoadAllOverrides on empty dir: %v", err)
 	}
@@ -460,8 +475,9 @@ func TestLoadAllOverridesEmptyDir(t *testing.T) {
 }
 
 func TestLoadAllOverridesSkipsInvalidJSON(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Create a valid override first
 	crew := &HooksConfig{
@@ -469,17 +485,17 @@ func TestLoadAllOverridesSkipsInvalidJSON(t *testing.T) {
 			{Matcher: "Bash(git push*)", Hooks: []Hook{{Type: "command", Command: "block"}}},
 		},
 	}
-	if err := SaveOverride("crew", crew); err != nil {
+	if err := home.saveOverride("crew", crew); err != nil {
 		t.Fatalf("SaveOverride crew: %v", err)
 	}
 
 	// Write an invalid JSON file directly into overrides dir
-	invalidPath := filepath.Join(OverridesDir(), "polecats.json")
+	invalidPath := filepath.Join(home.overridesDir(), "polecats.json")
 	if err := os.WriteFile(invalidPath, []byte("{invalid json!!}"), 0644); err != nil {
 		t.Fatalf("writing invalid file: %v", err)
 	}
 
-	overrides, err := LoadAllOverrides()
+	overrides, err := home.loadAllOverrides()
 	if err != nil {
 		t.Fatalf("LoadAllOverrides should not return error for invalid JSON: %v", err)
 	}
@@ -496,15 +512,12 @@ func TestLoadAllOverridesSkipsInvalidJSON(t *testing.T) {
 }
 
 func TestLoadAllOverridesReturnsReadDirError(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("os.ReadDir on a file path does not reliably return an error on Windows")
-	}
-
+	t.Parallel()
 	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
+	home := configHome{home: tmpDir}
 
 	// Create the overrides dir as a file (not a directory) to force a ReadDir error
-	overridesDir := OverridesDir()
+	overridesDir := home.overridesDir()
 	if err := os.MkdirAll(filepath.Dir(overridesDir), 0755); err != nil {
 		t.Fatalf("creating parent dir: %v", err)
 	}
@@ -512,7 +525,7 @@ func TestLoadAllOverridesReturnsReadDirError(t *testing.T) {
 		t.Fatalf("writing file at overrides path: %v", err)
 	}
 
-	_, err := LoadAllOverrides()
+	_, err := home.loadAllOverrides()
 	if err == nil {
 		t.Fatal("expected error when overrides dir is not a directory")
 	}

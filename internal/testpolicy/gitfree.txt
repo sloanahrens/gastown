@@ -12,6 +12,7 @@ internal/doltserver
 internal/formula
 internal/git
 internal/git/gitfake
+internal/hooks
 internal/land
 internal/mail
 internal/plugin

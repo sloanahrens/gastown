@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestInstallForRole_RoleAware(t *testing.T) {
+	t.Parallel()
 	// Claude's only autonomous role, "polecat", is exercised separately
 	// (TestInstallForRole_PolecatClaudeSettingsUseManagedHooks): it routes
 	// through the JSON merge path, not the static template compared here
@@ -50,6 +50,7 @@ func TestInstallForRole_RoleAware(t *testing.T) {
 }
 
 func TestInstallForRole_ClaudeSettingsSuppressStartupPrompts(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		role string
@@ -101,6 +102,7 @@ func TestInstallForRole_ClaudeSettingsSuppressStartupPrompts(t *testing.T) {
 }
 
 func TestInstallForRole_ClaudeCurrentTemplatePreservesExistingSettings(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		role string
@@ -158,6 +160,7 @@ func TestInstallForRole_ClaudeCurrentTemplatePreservesExistingSettings(t *testin
 // (e.g. the PermissionRequest guard) reaches an existing settings file
 // instead of the install being a silent no-op.
 func TestInstallForRole_PolecatClaudeSettingsUseManagedHooks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		existing bool
@@ -169,7 +172,7 @@ func TestInstallForRole_PolecatClaudeSettingsUseManagedHooks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			setTestHome(t, dir)
+			home := configHome{home: dir}
 			settingsPath := filepath.Join(dir, ".claude", "settings.json")
 
 			if tt.existing {
@@ -185,7 +188,7 @@ func TestInstallForRole_PolecatClaudeSettingsUseManagedHooks(t *testing.T) {
 				}
 			}
 
-			if err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+			if err := home.installForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
 				t.Fatalf("InstallForRole: %v", err)
 			}
 
@@ -225,8 +228,8 @@ func TestInstallForRole_PolecatClaudeSettingsUseManagedHooks(t *testing.T) {
 // that override on every polecat spawn, and gt hooks sync would put it back
 // — the file would flip between the two on every spawn/sync cycle.
 func TestInstallForRole_PolecatUsesRigScopedOverrideKey(t *testing.T) {
-	home := t.TempDir()
-	setTestHome(t, home)
+	t.Parallel()
+	home := configHome{home: t.TempDir()}
 
 	override := &HooksConfig{
 		PreToolUse: []HookEntry{
@@ -238,7 +241,7 @@ func TestInstallForRole_PolecatUsesRigScopedOverrideKey(t *testing.T) {
 			},
 		},
 	}
-	if err := SaveOverride("gastown/polecats", override); err != nil {
+	if err := home.saveOverride("gastown/polecats", override); err != nil {
 		t.Fatalf("SaveOverride: %v", err)
 	}
 
@@ -251,7 +254,7 @@ func TestInstallForRole_PolecatUsesRigScopedOverrideKey(t *testing.T) {
 		t.Fatalf("mkdir settingsDir: %v", err)
 	}
 
-	if err := InstallForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+	if err := home.installForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
 		t.Fatalf("InstallForRole: %v", err)
 	}
 
@@ -280,10 +283,10 @@ func TestInstallForRole_PolecatUsesRigScopedOverrideKey(t *testing.T) {
 // settings, so installing on unreadable config (or leaving a stale copy in
 // place with no signal) is worse than blocking the spawn with a clear error.
 func TestInstallForRole_PolecatFailsClosedOnUnparseableBaseConfig(t *testing.T) {
-	home := t.TempDir()
-	setTestHome(t, home)
+	t.Parallel()
+	home := configHome{home: t.TempDir()}
 
-	basePath := BasePath()
+	basePath := home.basePath()
 	if err := os.MkdirAll(filepath.Dir(basePath), 0755); err != nil {
 		t.Fatalf("mkdir .gt: %v", err)
 	}
@@ -292,7 +295,7 @@ func TestInstallForRole_PolecatFailsClosedOnUnparseableBaseConfig(t *testing.T) 
 	}
 
 	dir := t.TempDir()
-	err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
+	err := home.installForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
 	if err == nil {
 		t.Fatal("expected error from malformed hooks-base.json, got nil")
 	}
@@ -306,8 +309,8 @@ func TestInstallForRole_PolecatFailsClosedOnUnparseableBaseConfig(t *testing.T) 
 // already-spawned polecat must abort the install rather than proceed as if
 // the file did not exist.
 func TestInstallForRole_PolecatFailsClosedOnCorruptExistingSettings(t *testing.T) {
-	home := t.TempDir()
-	setTestHome(t, home)
+	t.Parallel()
+	home := configHome{home: t.TempDir()}
 
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, ".claude", "settings.json")
@@ -318,7 +321,7 @@ func TestInstallForRole_PolecatFailsClosedOnCorruptExistingSettings(t *testing.T
 		t.Fatalf("write corrupt settings: %v", err)
 	}
 
-	err := InstallForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
+	err := home.installForRole("claude", dir, dir, "polecat", ".claude", "settings.json", "claude", true)
 	if err == nil {
 		t.Fatal("expected error from corrupt existing settings.json, got nil")
 	}
@@ -331,6 +334,7 @@ func TestInstallForRole_PolecatFailsClosedOnCorruptExistingSettings(t *testing.T
 }
 
 func TestInstallForRole_RoleAgnostic(t *testing.T) {
+	t.Parallel()
 	// OpenCode, Pi, OMP have single templates
 	tests := []struct {
 		provider  string
@@ -359,6 +363,7 @@ func TestInstallForRole_RoleAgnostic(t *testing.T) {
 }
 
 func TestOpenCodeTemplateFailureDiagnostics(t *testing.T) {
+	t.Parallel()
 	template, err := templateFS.ReadFile("templates/opencode/gastown.js")
 	if err != nil {
 		t.Fatalf("read opencode template: %v", err)
@@ -382,6 +387,7 @@ func TestOpenCodeTemplateFailureDiagnostics(t *testing.T) {
 }
 
 func TestOpenCodeTemplateUsesHookPrime(t *testing.T) {
+	t.Parallel()
 	template, err := templateFS.ReadFile("templates/opencode/gastown.js")
 	if err != nil {
 		t.Fatalf("read opencode template: %v", err)
@@ -403,6 +409,7 @@ func TestOpenCodeTemplateUsesHookPrime(t *testing.T) {
 }
 
 func TestInstallForRole_SkipsExisting(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
@@ -420,6 +427,7 @@ func TestInstallForRole_SkipsExisting(t *testing.T) {
 }
 
 func TestInstallForRole_UpgradesStaleExportPath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
@@ -444,6 +452,7 @@ func TestInstallForRole_UpgradesStaleExportPath(t *testing.T) {
 }
 
 func TestInstallForRole_UpgradesStaleOpenCodePrimeHook(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
@@ -476,6 +485,7 @@ export const GasTown = async ({ $ }) => {
 // gets auto-upgraded to the bare-tool-name + "if" layout instead of being
 // left with dead guards forever.
 func TestInstallForRole_UpgradesStaleParenMatcher(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
@@ -513,6 +523,7 @@ func TestInstallForRole_UpgradesStaleParenMatcher(t *testing.T) {
 // that shape, so such a file was judged current and never upgraded. Catch it
 // and rewrite from the template.
 func TestInstallForRole_UpgradesStaleBareBashMatcher(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".claude", "settings.json")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
@@ -557,6 +568,7 @@ func TestInstallForRole_UpgradesStaleBareBashMatcher(t *testing.T) {
 // family) must NOT be treated as stale, or every install would clobber a
 // customised file.
 func TestNeedsUpgradeIgnoresCurrentMatchers(t *testing.T) {
+	t.Parallel()
 	current := []byte(`{
   "hooks": {
     "PreToolUse": [
@@ -580,6 +592,7 @@ func TestNeedsUpgradeIgnoresCurrentMatchers(t *testing.T) {
 }
 
 func TestOpenCodeTemplateUsesHookModeAndCompoundRoles(t *testing.T) {
+	t.Parallel()
 	content, err := resolveAndSubstitute("opencode", "gastown.js", "polecat")
 	if err != nil {
 		t.Fatalf("resolveAndSubstitute: %v", err)
@@ -604,6 +617,7 @@ func TestOpenCodeTemplateUsesHookModeAndCompoundRoles(t *testing.T) {
 }
 
 func TestSyncForRole_UpdatesStaleContent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
@@ -630,6 +644,7 @@ func TestSyncForRole_UpdatesStaleContent(t *testing.T) {
 }
 
 func TestSyncForRole_SkipsMatchingContent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
 	os.MkdirAll(filepath.Dir(hooksPath), 0755)
@@ -648,6 +663,7 @@ func TestSyncForRole_SkipsMatchingContent(t *testing.T) {
 }
 
 func TestSyncForRole_CreatesNewFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".opencode/plugins", "gastown.js")
 
@@ -665,6 +681,7 @@ func TestSyncForRole_CreatesNewFile(t *testing.T) {
 }
 
 func TestSyncForRole_EmptyProvider(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	result, err := SyncForRole("", dir, dir, "crew", ".opencode/plugins", "gastown.js", "", false)
 	if err != nil {
@@ -676,6 +693,7 @@ func TestSyncForRole_EmptyProvider(t *testing.T) {
 }
 
 func TestSyncForRole_InvalidProvider(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	_, err := SyncForRole("nonexistent-provider", dir, dir, "crew", ".test", "settings.json", "nonexistent-provider", false)
 	if err == nil {
@@ -684,27 +702,23 @@ func TestSyncForRole_InvalidProvider(t *testing.T) {
 }
 
 func TestSyncForRole_WriteError(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not support read-only directories reliably")
-	}
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses directory permission bits; chmod read-only is not enforceable")
-	}
-
+	t.Parallel()
 	dir := t.TempDir()
-	// Create a read-only parent to prevent MkdirAll from creating the hooks dir
-	readOnlyDir := filepath.Join(dir, "readonly")
-	os.MkdirAll(readOnlyDir, 0755)
-	os.Chmod(readOnlyDir, 0444)
-	defer os.Chmod(readOnlyDir, 0755) // cleanup
+	// A regular file where the parent directory should be keeps MkdirAll
+	// from creating the hooks dir.
+	notADir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(notADir, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := SyncForRole("opencode", readOnlyDir, readOnlyDir, "crew", ".opencode/plugins", "gastown.js", "opencode", false)
+	_, err := SyncForRole("opencode", notADir, notADir, "crew", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err == nil {
-		t.Error("expected error when directory is read-only")
+		t.Error("expected error when the hooks dir cannot be created")
 	}
 }
 
 func TestSyncForRole_JSONWhitespaceInsensitive(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// First, create the file via SyncForRole
@@ -752,6 +766,7 @@ func TestSyncForRole_JSONWhitespaceInsensitive(t *testing.T) {
 }
 
 func TestSyncForRole_GeminiWithGTBinSubstitution(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	result, err := SyncForRole("gemini", dir, dir, "polecat", ".gemini", "settings.json", "gemini", false)
@@ -776,6 +791,7 @@ func TestSyncForRole_GeminiWithGTBinSubstitution(t *testing.T) {
 }
 
 func TestInstallForRole_SettingsDirVsWorkDir(t *testing.T) {
+	t.Parallel()
 	settingsDir := t.TempDir()
 	workDir := t.TempDir()
 
@@ -802,6 +818,7 @@ func TestInstallForRole_SettingsDirVsWorkDir(t *testing.T) {
 }
 
 func TestInstallForRole_EmptyProvider(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	err := InstallForRole("", dir, dir, "crew", ".claude", "settings.json", "", false)
 	if err != nil {
@@ -810,9 +827,7 @@ func TestInstallForRole_EmptyProvider(t *testing.T) {
 }
 
 func TestInstallForRole_Permissions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not preserve POSIX file mode bits from os.WriteFile")
-	}
+	t.Parallel()
 
 	dir := t.TempDir()
 
@@ -839,6 +854,7 @@ func TestInstallForRole_Permissions(t *testing.T) {
 }
 
 func TestInstallForRole_CursorRoleAware(t *testing.T) {
+	t.Parallel()
 	// Cursor uses hooks-autonomous.json / hooks-interactive.json naming
 	dir := t.TempDir()
 	err := InstallForRole("cursor", dir, dir, "polecat", ".cursor", "hooks.json", "cursor", false)
@@ -872,6 +888,7 @@ func TestInstallForRole_CursorRoleAware(t *testing.T) {
 }
 
 func TestInstallForRole_GeminiRoleAware(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	err := InstallForRole("gemini", dir, dir, "polecat", ".gemini", "settings.json", "gemini", false)
 	if err != nil {
@@ -891,6 +908,7 @@ func TestInstallForRole_GeminiRoleAware(t *testing.T) {
 }
 
 func TestInstallForRole_CodexRoleAware(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	err := InstallForRole("codex", dir, dir, "crew", ".codex", "hooks.json", "codex", false)
 	if err != nil {
@@ -923,6 +941,7 @@ func TestInstallForRole_CodexRoleAware(t *testing.T) {
 }
 
 func TestInstallForRole_CopilotRoleAware(t *testing.T) {
+	t.Parallel()
 	// Copilot uses gastown-autonomous.json / gastown-interactive.json naming
 	dir := t.TempDir()
 	err := InstallForRole("copilot", dir, dir, "polecat", ".github/hooks", "gastown.json", "copilot", false)
@@ -956,6 +975,7 @@ func TestInstallForRole_CopilotRoleAware(t *testing.T) {
 }
 
 func TestComputeExpectedTemplate_Gemini(t *testing.T) {
+	t.Parallel()
 	// Autonomous role should get settings-autonomous.json template
 	content, err := ComputeExpectedTemplate("gemini", "settings.json", "polecat")
 	if err != nil {
@@ -989,6 +1009,7 @@ func TestComputeExpectedTemplate_Gemini(t *testing.T) {
 }
 
 func TestTemplateContentEqual(t *testing.T) {
+	t.Parallel()
 	// Same JSON, different formatting
 	a := []byte(`{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"test"}]}]}}`)
 	b := []byte(`{

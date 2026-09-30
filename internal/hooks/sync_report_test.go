@@ -8,6 +8,7 @@ import (
 )
 
 func TestSyncReportRoundTrip(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	written := &SyncReport{
@@ -62,6 +63,7 @@ func TestSyncReportRoundTrip(t *testing.T) {
 }
 
 func TestReadSyncReportAbsent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	_, err := ReadSyncReport(townRoot)
@@ -74,6 +76,7 @@ func TestReadSyncReportAbsent(t *testing.T) {
 }
 
 func TestSyncReportCanaryPassed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		blocked SyncReportVerdict

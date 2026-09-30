@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +28,7 @@ import (
 // post-condition contract — N concurrent writers leave a valid JSON file
 // matching the template — which is what atomic-via-rename guarantees.
 func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const concurrency = 64
 
@@ -106,8 +106,8 @@ func TestInstallForRole_ConcurrentSpawnsProduceValidJSON(t *testing.T) {
 // the PermissionRequest guard — the atomic rename in SyncManagedClaudeSettings
 // should serialize the writes the same way it does for the template path.
 func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
-	home := t.TempDir()
-	setTestHome(t, home)
+	t.Parallel()
+	home := configHome{home: t.TempDir()}
 
 	rigRoot := t.TempDir()
 	settingsDir := filepath.Join(rigRoot, "gastown", "polecats")
@@ -127,7 +127,7 @@ func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			if err := InstallForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
+			if err := home.installForRole("claude", settingsDir, settingsDir, "polecat", ".claude", "settings.json", "claude", true); err != nil {
 				errs <- err
 			}
 		}()
@@ -165,32 +165,19 @@ func TestInstallForRole_ConcurrentPolecatSpawnsProduceValidJSON(t *testing.T) {
 
 // TestInstallForRole_AtomicWriteErrorPropagates covers the error-return
 // branch added in the gh#3500 fix: when the underlying atomic write fails
-// (here: target dir is read-only so os.CreateTemp returns EACCES), the
-// installer must surface the error rather than silently swallowing it.
+// (here: the target path is a non-empty directory, so the final rename
+// fails), the installer must surface the error rather than silently
+// swallowing it.
 func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("read-only directory write semantics differ on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("running as root bypasses directory permission checks")
-	}
-
+	t.Parallel()
 	dir := t.TempDir()
-	dotClaude := filepath.Join(dir, ".claude")
-	if err := os.MkdirAll(dotClaude, 0755); err != nil {
+	target := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(target, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// Seed the target with a stale marker so InstallForRole takes the write
-	// path (rather than the early-return on file-exists-and-current).
-	target := filepath.Join(dotClaude, "settings.json")
-	if err := os.WriteFile(target, []byte(`{"stale":true,"hint":"export PATH=/foo"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "occupied"), nil, 0644); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	// Make the directory read-only so atomicfile.WriteFile's CreateTemp fails.
-	if err := os.Chmod(dotClaude, 0555); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dotClaude, 0755) })
 
 	err := InstallForRole("claude", dir, dir, "witness", ".claude", "settings.json", "claude", true)
 	if err == nil {
@@ -205,28 +192,17 @@ func TestInstallForRole_AtomicWriteErrorPropagates(t *testing.T) {
 // to TestInstallForRole_AtomicWriteErrorPropagates — covers the second
 // atomic-write call site introduced in gh#3500.
 func TestSyncForRole_AtomicWriteErrorPropagates(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("read-only directory write semantics differ on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("running as root bypasses directory permission checks")
-	}
-
+	t.Parallel()
 	dir := t.TempDir()
-	pluginsDir := filepath.Join(dir, ".opencode", "plugins")
-	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+	// The target path is a non-empty directory, so the atomic write's final
+	// rename fails.
+	target := filepath.Join(dir, ".opencode", "plugins", "gastown.js")
+	if err := os.MkdirAll(target, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	target := filepath.Join(pluginsDir, "gastown.js")
-	// Seed with content that differs from the template so SyncForRole takes
-	// the write path (not the "content equal" early-return).
-	if err := os.WriteFile(target, []byte("// stale\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "occupied"), nil, 0644); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	if err := os.Chmod(pluginsDir, 0555); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(pluginsDir, 0755) })
 
 	_, err := SyncForRole("opencode", dir, dir, "polecat", ".opencode/plugins", "gastown.js", "opencode", false)
 	if err == nil {
