@@ -74,9 +74,20 @@ var ErrNoStarter = errors.New("supervisor has no restart executor")
 type Seat = session.AgentIdentity
 
 // SeatFor builds a seat. rig is empty for town-level seats; name is empty
-// for singletons.
+// for singletons. Its session name resolves the rig's prefix from
+// session.DefaultRegistry when asked; SeatIn resolves it up front.
 func SeatFor(rig, role, name string) Seat {
 	return Seat{Rig: rig, Role: session.Role(role), Name: name}
+}
+
+// SeatIn builds a seat whose rig prefix comes from reg, so naming its session
+// never reads the process-wide registry.
+func SeatIn(reg *session.PrefixRegistry, rig, role, name string) Seat {
+	seat := SeatFor(rig, role, name)
+	if rig != "" {
+		seat.Prefix = reg.PrefixForRig(rig)
+	}
+	return seat
 }
 
 // SeatForSession parses a tmux session name into its seat.

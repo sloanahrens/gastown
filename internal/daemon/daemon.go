@@ -2348,7 +2348,7 @@ func (d *Daemon) ensureWitnessesRunning() {
 		}
 	}
 	d.rigPool.runPerRig(d.ctx, off, func(ctx context.Context, rigName string) error {
-		d.killLeftover(supervisor.SeatFor(rigName, constants.RoleWitness, ""), "witness disabled for rig", "daemon/patrol-disabled")
+		d.killLeftover(supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RoleWitness, ""), "witness disabled for rig", "daemon/patrol-disabled")
 		return nil
 	})
 }
@@ -2358,7 +2358,7 @@ func (d *Daemon) ensureWitnessesRunning() {
 // In a rig that is not operational (docked/parked) a leftover witness is
 // killed through the supervisor instead (hq-snx61).
 func (d *Daemon) ensureWitnessRunning(rigName string) {
-	seat := supervisor.SeatFor(rigName, constants.RoleWitness, "")
+	seat := supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RoleWitness, "")
 	if operational, reason := d.isRigOperational(rigName); !operational {
 		d.logger.Printf("Skipping witness auto-start for %s: %s", rigName, reason)
 		d.killLeftover(seat, "rig "+reason, "daemon/rig-state")
@@ -2466,7 +2466,7 @@ func (d *Daemon) killDeaconSessions() {
 // the supervisor. Called when the witness patrol is disabled. (hq-2mstj)
 func (d *Daemon) killWitnessSessions() {
 	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		d.killLeftover(supervisor.SeatFor(rigName, constants.RoleWitness, ""), "patrol disabled", "daemon/patrol-disabled")
+		d.killLeftover(supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RoleWitness, ""), "patrol disabled", "daemon/patrol-disabled")
 		return nil
 	})
 }
@@ -3259,7 +3259,7 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// Dolt, and an unreadable record is a hold (fail closed). A polecat the
 	// operator parked — gt agent pause, or the deliberate stop gt session
 	// stop records (gt-fojqs) — has a dead session on purpose.
-	seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+	seat := supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RolePolecat, polecatName)
 	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat))
 	if err != nil || rec.Held() {
 		d.logger.Printf("Skipping crash detection for %s/%s: agent is parked (%s)",
@@ -3625,7 +3625,7 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		if d.hasAssignedOpenWork(rigName, assignee) {
 			return
 		}
-		seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+		seat := supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RolePolecat, polecatName)
 		res := d.assessSeat(seat, liveness.Input{Session: sessionName})
 		switch res.Verdict {
 		case liveness.Unknown:
@@ -3642,7 +3642,7 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 // which refuses it for a paused or e-stopped seat (G1-07, G1-08), and cleans
 // up after it.
 func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleDuration, timeout time.Duration, reason string) {
-	seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+	seat := supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RolePolecat, polecatName)
 	why := fmt.Sprintf("idle-reap: %s, idle %v (threshold %v)", reason, idleDuration.Truncate(time.Second), timeout)
 	if err := d.sup().Kill(seat, why, "daemon/idle-reaper"); err != nil {
 		d.logRefusal(fmt.Sprintf("Not reaping idle polecat %s/%s", rigName, polecatName), err)

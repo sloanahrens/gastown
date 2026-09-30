@@ -156,7 +156,7 @@ func (d *Daemon) probeRunningWitness(rigName string) {
 	d.checkAgentInputConsumption(runningAgent{
 		Role:    "witness",
 		Rig:     rigName,
-		Session: session.WitnessSessionName(session.PrefixFor(rigName)),
+		Session: session.WitnessSessionName(d.prefixRegistry().PrefixForRig(rigName)),
 	})
 }
 
