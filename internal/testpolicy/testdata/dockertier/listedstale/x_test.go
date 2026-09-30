@@ -1,0 +1,5 @@
+package listedstale
+
+import "testing"
+
+func TestNothing(t *testing.T) { t.Parallel() }
