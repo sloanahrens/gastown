@@ -244,9 +244,19 @@ check-version-tag:
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
+# Modules nested in this repository (plugins/*/go.mod). The root module's
+# `go build ./...` does not reach them, so the gate builds each in its own
+# directory.
+NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins -name go.mod -not -path '*/testdata/*' 2>/dev/null | LC_ALL=C sort))
+
+# The shell half of the unit tier. A make variable only so
+# scripts/makefile-gate_test.sh can drive the gate's failure paths with a stub.
+GATE_SHELL_TESTS ?= scripts/test-makefile.sh
+
 gate: lint
-	@echo "gate: build (go build ./...)" >&2
+	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
+	@for m in $(NESTED_MODULES); do (cd "$$m" && go build ./...) || { echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done
 	@# The unit tier. The shell tests run beside the Go suite (gt-22hdp.60);
 	@# their output is held and printed after it, and either failing fails the
 	@# gate. Both halves run in the background so the trap fires at once on
@@ -258,9 +268,9 @@ gate: lint
 	@# runs the packages in unconverted.txt afterwards with the cache
 	@# (gt-22hdp.53). go test's per-package -timeout default (10m) is the hang
 	@# detector.
-	@echo "gate: unit tier (budget runner beside scripts/test-makefile.sh)" >&2
+	@echo "gate: unit tier (budget runner beside $(GATE_SHELL_TESTS))" >&2
 	@log=$$(mktemp -t gt-test-makefile); \
-	bash scripts/test-makefile.sh >"$$log" 2>&1 & mk=$$!; \
+	bash $(GATE_SHELL_TESTS) >"$$log" 2>&1 & mk=$$!; \
 	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- ./... & gt=$$!; \
 	trap 'pkill -TERM -P $$mk 2>/dev/null; pkill -TERM -P $$gt 2>/dev/null; kill $$mk $$gt 2>/dev/null; rm -f "$$log"; exit 130' INT TERM; \
 	wait $$gt; go_rc=$$?; \
@@ -282,6 +292,7 @@ DOCKER_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' internal/testpolicy/dock
 #   make test-integration INTEGRATION_GO_TEST="gotestsum --junitfile j.xml --"
 INTEGRATION_GO_TEST ?= go test
 test-integration:
+	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
 	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' ./...
 	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) $(DOCKER_PKGS)
 
