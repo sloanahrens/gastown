@@ -42,6 +42,16 @@ func (r *tmuxEnvReaderWriter) SetEnvironment(session, key, value string) error {
 	return r.t.SetEnvironment(session, key, value)
 }
 
+// envCheckedRoles are the live session roles whose environment the check
+// verifies. Sessions of any other parsed role are skipped.
+var envCheckedRoles = map[session.Role]bool{
+	session.RoleMayor:    true,
+	session.RoleOverseer: true,
+	session.RoleCrew:     true,
+	session.RolePolecat:  true,
+	session.RoleDog:      true,
+}
+
 // EnvVarsCheck verifies that tmux session environment variables match expected values.
 type EnvVarsCheck struct {
 	FixableCheck
@@ -124,18 +134,14 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 			// Skip unparseable sessions
 			continue
 		}
-
-		// Determine role for AgentEnv lookup.
-		// Boot watchdog is parsed as deacon with name "boot", but AgentEnv
-		// uses "boot" as a distinct role for env var generation.
-		role := string(identity.Role)
-		if identity.Role == session.RoleDeacon && identity.Name == "boot" {
-			role = "boot"
+		if !envCheckedRoles[identity.Role] {
+			// Leftover session of a retired role: nothing sets its env any more.
+			continue
 		}
 
 		// Get expected env vars based on role
 		expected := config.AgentEnv(config.AgentEnvConfig{
-			Role:      role,
+			Role:      string(identity.Role),
 			Rig:       identity.Rig,
 			AgentName: identity.Name,
 			TownRoot:  ctx.TownRoot,
@@ -232,17 +238,12 @@ func (c *EnvVarsCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 		identity, err := session.ParseSessionName(sess)
-		if err != nil {
+		if err != nil || !envCheckedRoles[identity.Role] {
 			continue
 		}
 
-		role := string(identity.Role)
-		if identity.Role == session.RoleDeacon && identity.Name == "boot" {
-			role = "boot"
-		}
-
 		expected := config.AgentEnv(config.AgentEnvConfig{
-			Role:      role,
+			Role:      string(identity.Role),
 			Rig:       identity.Rig,
 			AgentName: identity.Name,
 			TownRoot:  ctx.TownRoot,

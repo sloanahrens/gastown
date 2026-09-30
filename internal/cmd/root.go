@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -118,7 +117,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	initCLITheme()
 
 	// gt done can autosave and push; prove ownership before shared pre-run writes.
-	if doneNeedsPolecatWorktree(cmd, os.Getenv) {
+	if doneNeedsPolecatWorktree(cmd, os.Getenv, doneCwd()) {
 		if _, err := resolveDonePolecatWorktree(); err != nil {
 			return err
 		}
@@ -175,7 +174,6 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	// kill threshold before checking in again, killing a healthy Deacon mid-step.
 	// Decoupling liveness from step duration: any gt command counts as evidence
 	// of life.
-	touchDeaconHeartbeat()
 
 	// Skip beads check for exempt commands
 	if beadsExempt {
@@ -212,9 +210,18 @@ func isDoneCommand(cmd *cobra.Command) bool {
 // doneNeedsPolecatWorktree reports whether cmd is a polecat's gt done, which
 // must prove it runs in the assigned polecat worktree before pre-run writes.
 // A crew submission has no polecat worktree and neither autosaves nor
-// pushes; runDoneCrew checks its own worktree (gt-3e7tk).
-func doneNeedsPolecatWorktree(cmd *cobra.Command, getenv func(string) string) bool {
-	return isDoneCommand(cmd) && !doneIsCrewRun(getenv)
+// pushes; runDoneCrew checks its own worktree (gt-3e7tk). Crew must be
+// detected positively (gt-avwp2): a polecat that lost its env hits the
+// guard and fails there.
+func doneNeedsPolecatWorktree(cmd *cobra.Command, getenv func(string) string, cwd string) bool {
+	return isDoneCommand(cmd) && !doneIsCrewRun(getenv, cwd)
+}
+
+// doneCwd is the process cwd, or "" when it is unavailable (the polecat
+// guard then reports the missing directory).
+func doneCwd() string {
+	cwd, _ := os.Getwd()
+	return cwd
 }
 
 // initCLITheme initializes the CLI color theme based on settings and environment.
@@ -259,53 +266,6 @@ func touchPolecatHeartbeat() {
 	}
 
 	polecat.TouchSessionHeartbeat(townRoot, sessionName)
-}
-
-// touchDeaconHeartbeat refreshes the Deacon's local liveness heartbeat
-// (deacon/heartbeat.json) on every gt command. Called from persistentPreRun.
-//
-// The daemon's stuck-agent-dog kills the Deacon when this file goes stale
-// for >20 minutes (deacon.HeartbeatVeryStaleThreshold). Before this, the file
-// was only refreshed by explicit "gt deacon heartbeat" calls written into
-// patrol formula prose at a few checkpoints — decoupled from how much actual
-// work happened between them. A step that runs many gt/bd commands during
-// genuine investigation, but never reaches the next checkpoint, could trip
-// the threshold and get killed mid-work even though the Deacon was actively
-// working the whole time (gt-13z).
-//
-// Deliberately cheap: unlike syncDeaconHeartbeatStores (used by the explicit
-// `gt deacon heartbeat` command), this skips the agent-bead Dolt sync — that's
-// a bd subprocess round-trip and too expensive to run on every gt invocation.
-// The local heartbeat.json write is plain file I/O and is the only store the
-// daemon's kill check reads (deacon.ReadHeartbeat).
-//
-// Best-effort: errors are silently ignored, and a pause is respected (a
-// paused Deacon should not appear to have a fresh heartbeat).
-func touchDeaconHeartbeat() {
-	if os.Getenv("GT_ROLE") != "deacon" {
-		return
-	}
-
-	townRoot := detectTownRootFromCwd()
-	if townRoot == "" {
-		return
-	}
-
-	_ = deacon.TouchIfActive(townRoot)
-
-	// Self-heal the background heartbeat poller (gt-nrl). Previously the
-	// poller was only armed once, at the tail of `gt deacon start` — a
-	// session that predates the poller's install, or one recreated outside
-	// that path (e.g. a town-wide tmux restart), ran unprotected for its
-	// whole life with nothing to re-arm it. StartHeartbeatPoller is
-	// idempotent (no-ops if a poller is already alive for this session), so
-	// calling it here — a path every deacon gt command hits — mirrors how
-	// nudge.StartPoller self-heals from gt nudge's wait-idle path.
-	if sessionName := os.Getenv("GT_SESSION"); sessionName != "" {
-		if _, err := deacon.StartHeartbeatPoller(townRoot, sessionName); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to arm deacon heartbeat poller: %v\n", err)
-		}
-	}
 }
 
 // warnIfTownRootOffMain prints a warning if the town root is not on main branch.

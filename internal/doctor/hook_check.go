@@ -449,21 +449,7 @@ func (c *OrphanedAttachmentsCheck) checkBeadsDir(ctx *CheckContext, beadsDir, to
 //   - "gastown/nux" → polecat at <townRoot>/gastown/polecats/nux
 //   - "gastown/crew/joe" → crew at <townRoot>/gastown/crew/joe
 //   - "mayor" → mayor at <townRoot>/mayor
-//   - "gastown-witness" → witness at <townRoot>/gastown/witness
-//   - "gastown-refinery" → refinery at <townRoot>/gastown/refinery
 func (c *OrphanedAttachmentsCheck) agentExists(agent, townRoot string) bool {
-	// Handle special roles with hyphen separator
-	if strings.HasSuffix(agent, "-witness") {
-		rig := strings.TrimSuffix(agent, "-witness")
-		path := filepath.Join(townRoot, rig, "witness")
-		return dirExists(path)
-	}
-	if strings.HasSuffix(agent, "-refinery") {
-		rig := strings.TrimSuffix(agent, "-refinery")
-		path := filepath.Join(townRoot, rig, "refinery")
-		return dirExists(path)
-	}
-
 	// Handle mayor
 	if agent == "mayor" {
 		return dirExists(filepath.Join(townRoot, "mayor"))

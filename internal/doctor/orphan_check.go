@@ -82,9 +82,8 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 	// Get list of valid rigs
 	validRigs := c.getValidRigs(ctx.TownRoot)
 
-	// Get session names for mayor/deacon
+	// Get session name for mayor
 	mayorSession := session.MayorSessionName()
-	deaconSession := session.DeaconSessionName()
 
 	// Check each session
 	var orphans []string
@@ -100,7 +99,7 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		if c.isValidSession(sess, validRigs, mayorSession, deaconSession) {
+		if c.isValidSession(sess, validRigs, mayorSession) {
 			validCount++
 		} else {
 			orphans = append(orphans, sess)
@@ -206,26 +205,13 @@ func (c *OrphanSessionCheck) getValidRigs(townRoot string) []string {
 // isValidSession checks if a session name matches expected Gas Town patterns.
 // Valid patterns:
 //   - hq-mayor (headquarters mayor session)
-//   - hq-deacon (headquarters deacon session)
-//   - gt-boot (boot watchdog session)
-//   - gt-<rig>-witness
-//   - gt-<rig>-refinery
-//   - gt-<rig>-<polecat> (where polecat is any name)
+//   - <prefix>-crew-<name>
+//   - <prefix>-<polecat> (where polecat is any name)
 //
 // Note: We can't verify polecat names without reading state, so we're permissive.
-func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, mayorSession, deaconSession string) bool {
+func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, mayorSession string) bool {
 	// Mayor session is always valid (dynamic name based on town)
 	if mayorSession != "" && sess == mayorSession {
-		return true
-	}
-
-	// Deacon session is always valid (dynamic name based on town)
-	if deaconSession != "" && sess == deaconSession {
-		return true
-	}
-
-	// Boot watchdog session is always valid
-	if sess == session.BootSessionName() {
 		return true
 	}
 
@@ -270,14 +256,8 @@ func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, may
 		return false
 	}
 
-	// witness, refinery, crew, and polecat are all valid roles
-	switch identity.Role {
-	case session.RoleWitness, session.RoleCrew, session.RolePolecat:
-		return true
-	}
-
-	// Any other role is assumed valid if the rig exists
-	// We can't easily verify without reading state, so accept it
+	// Crew and polecat sessions are valid, and any other role is assumed
+	// valid if the rig exists: we can't easily verify without reading state.
 	return true
 }
 

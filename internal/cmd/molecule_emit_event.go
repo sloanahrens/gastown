@@ -94,12 +94,9 @@ func runMoleculeEmitEvent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("channel %q is per-rig but no rig context found: pass --rig or run inside a rig", emitEventChannel)
 	}
 
-	path, err := emitChannelEventAndWake(townRoot, emitEventChannel, rigName, emitEventType, emitEventPayload)
+	path, err := channelevents.EmitToTown(townRoot, emitEventChannel, rigName, emitEventType, emitEventPayload)
 	if err != nil {
-		if path == "" {
-			return err
-		}
-		return fmt.Errorf("event written to %s, but the wake failed: %w", path, err)
+		return err
 	}
 
 	if moleculeJSON {

@@ -55,8 +55,9 @@ func TestCommandTokensResolve(t *testing.T) {
 	// half of the 2026-09-29 counts (formulas 772, templates 583, plugins 234,
 	// go 153, hooks 17, role configs 3; templates jumped from 332 once
 	// {{ cmd }} counted as gt); lower one only when files that call gt/bd were
-	// really removed.
-	floors := map[string]int{"formulas": 350, "templates": 290, "plugins": 100, "go": 70, "hooks": 8, "roles": 2}
+	// really removed. The witness/deacon deletion (gt-4k3fj.6.1) took formulas
+	// to 319 and the role configs to none, so both floors dropped with it.
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 100, "go": 70, "hooks": 8}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

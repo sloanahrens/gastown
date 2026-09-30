@@ -12,9 +12,6 @@ import (
 // .beads/metadata.json files pointing to Dolt databases but aren't registered
 // in rigs.json. These orphan directories cause phantom database creation on
 // the Dolt server whenever any bd command probes them.
-//
-// Also checks the deacon's beads config for database mismatches — the deacon
-// should use the same database as the town-level beads (hq).
 type UnregisteredBeadsDirsCheck struct {
 	BaseCheck
 }
@@ -34,7 +31,7 @@ func NewUnregisteredBeadsDirsCheck() *UnregisteredBeadsDirsCheck {
 // without being registered in rigs.json.
 var knownSystemDirs = map[string]bool{
 	"mayor":     true,
-	"deacon":    true,
+	"deacon":    true, // holds only the dog kennel (deacon/dogs)
 	".beads":    true,
 	".dolt-data": true,
 	".runtime":  true,
@@ -46,9 +43,6 @@ var knownSystemDirs = map[string]bool{
 func (c *UnregisteredBeadsDirsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Load registered rig names from rigs.json
 	registeredRigs := loadRegisteredRigNames(ctx.TownRoot)
-
-	// Read town-level database name for deacon mismatch detection
-	townDB := readDoltDatabase(filepath.Join(ctx.TownRoot, ".beads"))
 
 	var details []string
 
@@ -80,16 +74,6 @@ func (c *UnregisteredBeadsDirsCheck) Run(ctx *CheckContext) *CheckResult {
 			details = append(details, fmt.Sprintf(
 				"%s/ has .beads/metadata.json pointing to database %q (not a registered rig)",
 				name, db))
-		}
-	}
-
-	// Check deacon database mismatch
-	if townDB != "" {
-		deaconDB := readDoltDatabase(filepath.Join(ctx.TownRoot, "deacon", ".beads"))
-		if deaconDB != "" && deaconDB != townDB {
-			details = append(details, fmt.Sprintf(
-				"deacon/.beads/metadata.json points to %q but town beads uses %q",
-				deaconDB, townDB))
 		}
 	}
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for scripts/check-deploy-source.sh, the "deploy merged code only"
-# precondition of the Makefile's install and safe-install targets (gt-o848l).
+# precondition of the Makefile's install-local target (gt-o848l).
 #
 # The defects being guarded: the old check compared HEAD with the branch's
 # OWN upstream and skipped entirely on a detached HEAD or a branch with no

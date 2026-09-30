@@ -1,4 +1,4 @@
-package witness
+package polecat
 
 import (
 	"encoding/json"

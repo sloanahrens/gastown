@@ -60,9 +60,9 @@ func TestBareRepoExistsCheck_NoBareRepoNoWorktrees(t *testing.T) {
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	// Create refinery/rig with a .git directory (not a worktree)
-	refineryRig := filepath.Join(rigDir, "refinery", "rig", ".git")
-	if err := os.MkdirAll(refineryRig, 0755); err != nil {
+	// Create a polecat with a .git directory (not a worktree)
+	polecatWt := filepath.Join(rigDir, "polecats", "nux", rigName, ".git")
+	if err := os.MkdirAll(polecatWt, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -82,14 +82,14 @@ func TestBareRepoExistsCheck_MissingBareRepo(t *testing.T) {
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	// Create refinery/rig with a .git file pointing to missing .repo.git
-	refineryRig := filepath.Join(rigDir, "refinery", "rig")
-	if err := os.MkdirAll(refineryRig, 0755); err != nil {
+	// Create a polecat worktree with a .git file pointing to missing .repo.git
+	polecatWt := filepath.Join(rigDir, "polecats", "nux", filepath.Base(rigDir))
+	if err := os.MkdirAll(polecatWt, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	gitContent := "gitdir: " + filepath.Join(rigDir, ".repo.git", "worktrees", "rig") + "\n"
-	if err := os.WriteFile(filepath.Join(refineryRig, ".git"), []byte(gitContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(polecatWt, ".git"), []byte(gitContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -117,17 +117,17 @@ func TestBareRepoExistsCheck_MultipleWorktreesMissing(t *testing.T) {
 
 	bareRepoTarget := filepath.Join(rigDir, ".repo.git")
 
-	// Create refinery/rig worktree
-	refineryRig := filepath.Join(rigDir, "refinery", "rig")
-	if err := os.MkdirAll(refineryRig, 0755); err != nil {
+	// Create first polecat worktree
+	polecatWt := filepath.Join(rigDir, "polecats", "nux", filepath.Base(rigDir))
+	if err := os.MkdirAll(polecatWt, 0755); err != nil {
 		t.Fatal(err)
 	}
 	gitContent := "gitdir: " + filepath.Join(bareRepoTarget, "worktrees", "rig") + "\n"
-	if err := os.WriteFile(filepath.Join(refineryRig, ".git"), []byte(gitContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(polecatWt, ".git"), []byte(gitContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create polecat worktree
+	// Create second polecat worktree
 	polecatDir := filepath.Join(rigDir, "polecats", "worker1", rigName)
 	if err := os.MkdirAll(polecatDir, 0755); err != nil {
 		t.Fatal(err)
@@ -156,15 +156,15 @@ func TestBareRepoExistsCheck_RelativeGitdir(t *testing.T) {
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	// Create refinery/rig with a relative .git reference
-	refineryRig := filepath.Join(rigDir, "refinery", "rig")
-	if err := os.MkdirAll(refineryRig, 0755); err != nil {
+	// Create a polecat worktree with a relative .git reference
+	polecatWt := filepath.Join(rigDir, "polecats", "nux", filepath.Base(rigDir))
+	if err := os.MkdirAll(polecatWt, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Relative path from refinery/rig/ to .repo.git/worktrees/rig
-	gitContent := "gitdir: ../../.repo.git/worktrees/rig\n"
-	if err := os.WriteFile(filepath.Join(refineryRig, ".git"), []byte(gitContent), 0644); err != nil {
+	// Relative path from polecats/nux/<rig>/ to .repo.git/worktrees/rig
+	gitContent := "gitdir: ../../../.repo.git/worktrees/rig\n"
+	if err := os.WriteFile(filepath.Join(polecatWt, ".git"), []byte(gitContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,14 +184,14 @@ func TestBareRepoExistsCheck_NonRepoGitWorktree(t *testing.T) {
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	// Create refinery/rig with a .git file pointing to something other than .repo.git
-	refineryRig := filepath.Join(rigDir, "refinery", "rig")
-	if err := os.MkdirAll(refineryRig, 0755); err != nil {
+	// Create a polecat worktree with a .git file pointing to something other than .repo.git
+	polecatWt := filepath.Join(rigDir, "polecats", "nux", filepath.Base(rigDir))
+	if err := os.MkdirAll(polecatWt, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	gitContent := "gitdir: /some/other/path/worktrees/rig\n"
-	if err := os.WriteFile(filepath.Join(refineryRig, ".git"), []byte(gitContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(polecatWt, ".git"), []byte(gitContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -243,11 +243,11 @@ func storeObjects(t *testing.T, dir string) {
 	}
 }
 
-// setupWorktreeRef creates a refinery/rig directory with a .git file pointing to .repo.git.
+// setupWorktreeRef creates a polecat worktree (polecats/nux/<rig>) with a .git file pointing to .repo.git.
 func setupWorktreeRef(t *testing.T, rigDir, bareRepo string) {
 	t.Helper()
-	refineryRig := filepath.Join(rigDir, "refinery", "rig")
-	if err := os.MkdirAll(refineryRig, 0755); err != nil {
+	polecatWt := filepath.Join(rigDir, "polecats", "nux", filepath.Base(rigDir))
+	if err := os.MkdirAll(polecatWt, 0755); err != nil {
 		t.Fatal(err)
 	}
 	worktreeDir := filepath.Join(bareRepo, "worktrees", "rig")
@@ -255,7 +255,7 @@ func setupWorktreeRef(t *testing.T, rigDir, bareRepo string) {
 		t.Fatal(err)
 	}
 	gitContent := "gitdir: " + filepath.Join(bareRepo, "worktrees", "rig") + "\n"
-	if err := os.WriteFile(filepath.Join(refineryRig, ".git"), []byte(gitContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(polecatWt, ".git"), []byte(gitContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 }

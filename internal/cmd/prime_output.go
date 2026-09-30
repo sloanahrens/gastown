@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -37,16 +36,10 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 	switch ctx.Role {
 	case RoleMayor:
 		roleName = constants.RoleMayor
-	case RoleDeacon:
-		roleName = constants.RoleDeacon
-	case RoleWitness:
-		roleName = constants.RoleWitness
 	case RolePolecat:
 		roleName = constants.RolePolecat
 	case RoleCrew:
 		roleName = constants.RoleCrew
-	case RoleBoot:
-		roleName = "boot"
 	case RoleDog:
 		roleName = "dog"
 	default:
@@ -72,15 +65,6 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 		Polecat:       ctx.Polecat,
 		DogName:       ctx.Polecat, // ctx.Polecat holds the dog name for RoleDog
 		MayorSession:  session.MayorSessionName(),
-		DeaconSession: session.DeaconSessionName(),
-	}
-
-	if roleName == constants.RoleDeacon {
-		// Best-effort: the prompt falls back to a generic phrasing (see the
-		// deacon template) rather than failing prime if this can't resolve.
-		if count, err := deaconPatrolStepCount(ctx.TownRoot, ctx.Rig); err == nil {
-			data.PatrolStepCount = count
-		}
 	}
 
 	output, err := tmpl.RenderRole(roleName, data)
@@ -88,18 +72,6 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 		return "", fmt.Errorf("rendering template: %w", err)
 	}
 	return output, nil
-}
-
-// deaconPatrolStepCount returns the number of steps in the resolved
-// mol-deacon-patrol formula (extends and compose expansion applied), so the
-// live Deacon prompt can report a count that can't drift from the formula
-// that actually runs (gt-5adz).
-func deaconPatrolStepCount(townRoot, rigName string) (int, error) {
-	f, err := loadFormulaForVarDefaults("mol-deacon-patrol", townRoot, rigName)
-	if err != nil {
-		return 0, err
-	}
-	return len(f.Steps), nil
 }
 
 func roleRigContext(ctx RoleContext) (defaultBranch string, isForkRig bool, upstreamURL string) {
@@ -238,14 +210,10 @@ func outputPrimeContextFallback(ctx RoleContext) {
 	switch ctx.Role {
 	case RoleMayor:
 		outputMayorContext(ctx)
-	case RoleWitness:
-		outputWitnessContext(ctx)
 	case RolePolecat:
 		outputPolecatContext(ctx)
 	case RoleCrew:
 		outputCrewContext(ctx)
-	case RoleBoot:
-		outputBootContext(ctx)
 	default:
 		outputUnknownContext(ctx)
 	}
@@ -442,37 +410,13 @@ func outputCommandQuickReference(ctx RoleContext) {
 		fmt.Println("| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
 		fmt.Printf("| Escalate blocker | `%s escalate \"desc\" -s HIGH` | ~~waiting for human~~ (never wait) |\n", c)
 
-	case RoleWitness:
-		fmt.Println("| Want to... | Correct command | Common mistake |")
-		fmt.Println("|------------|----------------|----------------|")
-		fmt.Println("| Close/complete a bead | `bd close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
-		fmt.Printf("| Message a polecat | `%s nudge %s/<name> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c, ctx.Rig)
-		fmt.Printf("| Kill stuck polecat | `%s polecat nuke %s/<name> --force` | ~~gt polecat kill~~ (not a command) |\n", c, ctx.Rig)
-		fmt.Printf("| View polecat output | `%s peek %s/<name> 50` | |\n", c, ctx.Rig)
-		fmt.Println("| Create issues | `bd create \"title\"` | ~~gt issue create~~ (not a command) |")
-
-	case RoleDeacon:
-		fmt.Println("| Want to... | Correct command | Common mistake |")
-		fmt.Println("|------------|----------------|----------------|")
-		fmt.Printf("| Start rig agents | `%s rig start <rig>` | ~~gt rig boot~~ (starts without patrol) |\n", c)
-		fmt.Printf("| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
-		fmt.Printf("| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
-		fmt.Printf("| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
-
-	case RoleBoot:
-		fmt.Println("| Want to... | Correct command | Common mistake |")
-		fmt.Println("|------------|----------------|----------------|")
-		fmt.Printf("| Run triage | `%s boot triage` | ~~gt deacon heartbeat~~ (that's Deacon's job) |\n", c)
-		fmt.Printf("| Check Deacon health | `%s deacon status` | ~~gt status~~ (town-wide, not Deacon-specific) |\n", c)
-		fmt.Printf("| Nudge the Deacon | `%s nudge deacon \"msg\"` | ~~tmux send-keys~~ (blocked; can stage unsubmitted input) |\n", c)
 	}
 
 	fmt.Println()
 	fmt.Println("**Rig lifecycle commands (park vs dock vs stop):**")
 	fmt.Println("- `park/unpark` — Temporary pause. Daemon skips parked rigs.")
 	fmt.Println("- `dock/undock` — Persistent disable. Survives daemon restarts.")
-	fmt.Println("- `stop/start` — Immediate stop/start of rig patrol agents (witness + refinery).")
-	fmt.Println("- `restart/reboot` — Stop then start rig agents.")
+	fmt.Println("- `stop/shutdown` — Immediate stop of the rig's polecat sessions.")
 	fmt.Println()
 }
 
@@ -519,24 +463,6 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("4. Check for attached work: `" + cli.Name() + " hook`")
 		fmt.Println("   - If mol attached → **RUN IT** (no human input needed)")
 		fmt.Println("   - If no mol → await user instruction")
-	case RoleWitness:
-		if stopped, reason := IsRigParkedOrDocked(ctx.TownRoot, ctx.Rig); stopped {
-			fmt.Println()
-			fmt.Println("---")
-			fmt.Println()
-			fmt.Printf("Rig %s is %s. No patrol needed. Exit cleanly.\n", ctx.Rig, reason)
-			return
-		}
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are the Witness. Please:")
-		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
-		fmt.Println("2. Announce: \"Witness, checking in.\"")
-		fmt.Println("3. Check mail: `" + cli.Name() + " mail inbox` - look for 🤝 HANDOFF messages")
-		fmt.Println("4. Check for attached patrol: `" + cli.Name() + " hook`")
-		fmt.Println("   - If mol attached → **RUN IT** (resume from current step)")
-		fmt.Println("   - If no mol → create patrol: `" + cli.Name() + " patrol new`")
 	case RolePolecat:
 		fmt.Println()
 		fmt.Println("---")
@@ -565,23 +491,6 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("   - If no attachment → **STOP and wait for input**. Do NOT run")
 		fmt.Println("     any more commands. Do NOT poll mail. Do NOT check status.")
 		fmt.Println("     Sit idle at your prompt — a nudge or user message will arrive.")
-	case RoleDeacon:
-		// Skip startup protocol if paused - the pause message was already shown
-		paused, _, _ := deacon.IsPaused(ctx.TownRoot)
-		if paused {
-			return
-		}
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are the Deacon. Please:")
-		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context, mail, and pending work)")
-		fmt.Println("2. Announce: \"Deacon, checking in.\"")
-		fmt.Println("3. Signal awake: `" + cli.Name() + " deacon heartbeat \"starting patrol\"`")
-		fmt.Println("4. Check mail: `" + cli.Name() + " mail inbox` - look for 🤝 HANDOFF messages")
-		fmt.Println("5. Check for attached patrol: `" + cli.Name() + " hook`")
-		fmt.Println("   - If mol attached → **RUN IT** (resume from current step)")
-		fmt.Println("   - If no mol → create patrol: `bd mol wisp mol-deacon-patrol`")
 	case RoleDog:
 		fmt.Println()
 		fmt.Println("---")
@@ -598,14 +507,6 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("5. If nothing available → run `" + cli.Name() + " done` and exit")
 		fmt.Println()
 		fmt.Println("DO NOT sit idle waiting. Recover or terminate. (GH#2748)")
-	case RoleBoot:
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are Boot. Please:")
-		fmt.Println("1. Run `" + cli.Name() + " prime` (loads full context)")
-		fmt.Println("2. Run `" + cli.Name() + " boot triage` immediately")
-		fmt.Println("3. When triage completes, exit cleanly")
 	}
 }
 
@@ -818,32 +719,6 @@ func outputCheckpointContext(ctx RoleContext) {
 
 	fmt.Println("Use this context to resume work. The checkpoint will be updated as you progress.")
 	fmt.Println()
-}
-
-// outputDeaconPausedMessage outputs a prominent PAUSED message for the Deacon.
-// When paused, the Deacon must not perform any patrol actions.
-func outputDeaconPausedMessage(state *deacon.PauseState) {
-	fmt.Println()
-	fmt.Printf("%s\n\n", style.Bold.Render("## ⏸️  DEACON PAUSED"))
-	fmt.Println("You are paused and must NOT perform any patrol actions.")
-	fmt.Println()
-	if state.Reason != "" {
-		fmt.Printf("Reason: %s\n", state.Reason)
-	}
-	fmt.Printf("Paused at: %s\n", state.PausedAt.Format(time.RFC3339))
-	if state.PausedBy != "" {
-		fmt.Printf("Paused by: %s\n", state.PausedBy)
-	}
-	fmt.Println()
-	fmt.Println("Wait for human to run `" + cli.Name() + " deacon resume` before working.")
-	fmt.Println()
-	fmt.Println("**DO NOT:**")
-	fmt.Println("- Create patrol molecules")
-	fmt.Println("- Run heartbeats")
-	fmt.Println("- Check agent health")
-	fmt.Println("- Take any autonomous actions")
-	fmt.Println()
-	fmt.Println("You may respond to direct human questions.")
 }
 
 // explain outputs an explanatory message if --explain mode is enabled.

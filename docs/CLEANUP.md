@@ -128,7 +128,7 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `rollbackSlingArtifacts()` | `sling.go` | Cleans up partial sling failures |
 | `cleanStaleHookedBeads()` | `unsling.go` | Repairs beads stuck in "hooked" state |
 | `gt signal stop` | `signal_stop.go` | Clears stop-state temp files at turn boundaries |
-| `make install` | `Makefile` | Removes stale `~/go/bin/gt` and `~/bin/gt` binaries |
+| `make install-local` | `Makefile` | Removes stale `~/go/bin/gt` and `~/bin/gt` binaries (also run by `make install`) |
 
 ---
 

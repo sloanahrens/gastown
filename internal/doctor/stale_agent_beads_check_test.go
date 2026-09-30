@@ -234,7 +234,7 @@ func TestParseCrewOrPolecatFromID(t *testing.T) {
 		},
 		{
 			name:       "ID does not match pattern",
-			id:         "gt-gastown-witness",
+			id:         "gt-gastown-polecat-toast",
 			prefix:     "gt",
 			rigName:    "gastown",
 			role:       "crew",

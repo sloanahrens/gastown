@@ -129,22 +129,22 @@ func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{
-		sessions: []string{"hq-deacon", "hq-boot"},
-		alive:    map[string]bool{"hq-boot": false},
-		aliveErr: map[string]error{"hq-deacon": errors.New("tmux show-environment: timed out")},
+		sessions: []string{"hq-mayor", "hq-dog-alpha"},
+		alive:    map[string]bool{"hq-dog-alpha": false},
+		aliveErr: map[string]error{"hq-mayor": errors.New("tmux show-environment: timed out")},
 	}
 	check := NewZombieSessionCheckWithLister(lister)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 
 	result := check.Run(ctx)
 	for _, d := range result.Details {
-		if strings.Contains(d, "Zombie: hq-deacon") {
+		if strings.Contains(d, "Zombie: hq-mayor") {
 			t.Fatalf("session with an unknown liveness answer listed as zombie: %v", result.Details)
 		}
 	}
 	foundUnknown := false
 	for _, d := range result.Details {
-		if strings.Contains(d, "hq-deacon") && strings.Contains(strings.ToLower(d), "unknown") {
+		if strings.Contains(d, "hq-mayor") && strings.Contains(strings.ToLower(d), "unknown") {
 			foundUnknown = true
 		}
 	}
@@ -156,7 +156,7 @@ func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 		t.Fatalf("Fix: %v", err)
 	}
 	for _, k := range lister.killed {
-		if k == "hq-deacon" {
+		if k == "hq-mayor" {
 			t.Fatal("Fix killed a session whose liveness query failed")
 		}
 	}
@@ -167,13 +167,13 @@ func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 func TestZombieSessionCheck_FixRecheckErrorSkipsKill(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{
-		sessions: []string{"hq-deacon"},
-		alive:    map[string]bool{"hq-deacon": false},
+		sessions: []string{"hq-mayor"},
+		alive:    map[string]bool{"hq-mayor": false},
 	}
 	check := NewZombieSessionCheckWithLister(lister)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 	_ = check.Run(ctx)
-	lister.aliveErr = map[string]error{"hq-deacon": errors.New("tmux: server busy")}
+	lister.aliveErr = map[string]error{"hq-mayor": errors.New("tmux: server busy")}
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}

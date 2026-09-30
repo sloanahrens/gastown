@@ -100,8 +100,6 @@ func findRigClones(rigPath string) []string {
 
 	// Mayor clone
 	clones = append(clones, filepath.Join(rigPath, "mayor", "rig"))
-	// Refinery clone
-	clones = append(clones, filepath.Join(rigPath, "refinery", "rig"))
 
 	// Crew clones
 	crewDir := filepath.Join(rigPath, "crew")

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/formula"
 )
 
 // writeRigsJSON creates a mayor/rigs.json with a single rig entry.
@@ -37,117 +36,6 @@ func writeRigsJSON(t *testing.T, townRoot, rigName string) {
 	rigsPath := filepath.Join(mayorDir, "rigs.json")
 	if err := os.WriteFile(rigsPath, data, 0644); err != nil {
 		t.Fatalf("WriteFile rigs.json: %v", err)
-	}
-}
-
-func TestPatrolMoleculesExistCheck_NoRigs(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	mayorDir := filepath.Join(tmpDir, "mayor")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		t.Fatalf("MkdirAll mayor: %v", err)
-	}
-	// Write rigs.json with no rigs
-	rigsConfig := config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}}
-	data, _ := json.Marshal(rigsConfig)
-	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), data, 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	check := NewPatrolMoleculesExistCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	if result.Status != StatusOK {
-		t.Errorf("Status = %v, want OK (no rigs configured)", result.Status)
-	}
-}
-
-func TestPatrolMoleculesExistCheck_RigPathMissing_FallbackToTownRoot(t *testing.T) {
-	t.Parallel()
-	// Regression test for: when gt doctor runs from a mayor's canonical clone,
-	// TownRoot/rigName doesn't exist but patrol formulas are accessible from TownRoot.
-	// The check should fall back to TownRoot instead of reporting false missing formulas.
-	tmpDir := t.TempDir()
-
-	// Provision patrol formulas at TownRoot level (not at a rig subdirectory).
-	// This simulates formulas being accessible from the town root.
-	if _, err := formula.ProvisionFormulas(tmpDir); err != nil {
-		t.Fatalf("ProvisionFormulas: %v", err)
-	}
-
-	// Register "gastown" rig but do NOT create TownRoot/gastown directory.
-	// This simulates the mayor's clone scenario where the rig isn't a subdirectory.
-	writeRigsJSON(t, tmpDir, "gastown")
-
-	check := NewPatrolMoleculesExistCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	if result.Status != StatusOK {
-		t.Errorf("Status = %v, want OK (formulas accessible from TownRoot fallback)", result.Status)
-		for _, d := range result.Details {
-			t.Logf("  detail: %s", d)
-		}
-	}
-}
-
-func TestPatrolMoleculesExistCheck_RigPathExists_FormulasPresent(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	// Create the rig directory and provision formulas there.
-	rigDir := filepath.Join(tmpDir, "gastown")
-	if err := os.MkdirAll(rigDir, 0755); err != nil {
-		t.Fatalf("MkdirAll rig: %v", err)
-	}
-	if _, err := formula.ProvisionFormulas(rigDir); err != nil {
-		t.Fatalf("ProvisionFormulas: %v", err)
-	}
-
-	writeRigsJSON(t, tmpDir, "gastown")
-
-	check := NewPatrolMoleculesExistCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	if result.Status != StatusOK {
-		t.Errorf("Status = %v, want OK (formulas in rig dir)", result.Status)
-		for _, d := range result.Details {
-			t.Logf("  detail: %s", d)
-		}
-	}
-}
-
-func TestPatrolMoleculesExistCheck_RigPathExists_TownLevelFormulas(t *testing.T) {
-	t.Parallel()
-	// When the rig directory exists but has no .beads/formulas/, the check should
-	// find patrol formulas at the town level (.beads/formulas/) instead of
-	// reporting them as missing.
-	tmpDir := t.TempDir()
-
-	// Create the rig directory WITHOUT formulas.
-	rigDir := filepath.Join(tmpDir, "gastown")
-	if err := os.MkdirAll(rigDir, 0755); err != nil {
-		t.Fatalf("MkdirAll rig: %v", err)
-	}
-
-	// Provision formulas at the town root level only.
-	if _, err := formula.ProvisionFormulas(tmpDir); err != nil {
-		t.Fatalf("ProvisionFormulas at town root: %v", err)
-	}
-
-	writeRigsJSON(t, tmpDir, "gastown")
-
-	check := NewPatrolMoleculesExistCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	if result.Status != StatusOK {
-		t.Errorf("Status = %v, want OK (formulas accessible from town root)", result.Status)
-		for _, d := range result.Details {
-			t.Logf("  detail: %s", d)
-		}
 	}
 }
 
@@ -287,8 +175,8 @@ func TestPatrolHooksWiredCheck_Fix(t *testing.T) {
 	if loaded.Type != "daemon-patrol-config" {
 		t.Errorf("Type = %q, want 'daemon-patrol-config'", loaded.Type)
 	}
-	if loaded.Patrols.Count() != 2 {
-		t.Errorf("Patrols count = %d, want 2", loaded.Patrols.Count())
+	if loaded.Patrols.Count() != 1 || loaded.Patrols.PatrolScan == nil {
+		t.Errorf("Patrols count = %d, want 1 (patrol_scan)", loaded.Patrols.Count())
 	}
 
 	result = check.Run(ctx)

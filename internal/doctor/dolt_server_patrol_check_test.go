@@ -54,7 +54,7 @@ func TestDoltServerPatrolCheck_DownPatrolDisabled(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	// No dolt_server key in daemon.json → patrol not enabled.
-	writeDaemonConfig(t, townRoot, `{"refinery":{"enabled":true}}`)
+	writeDaemonConfig(t, townRoot, `{"doctor_dog":{"enabled":true}}`)
 
 	check := patrolCheck(t, false) // Dolt unreachable
 	result := check.Run(&CheckContext{TownRoot: townRoot})

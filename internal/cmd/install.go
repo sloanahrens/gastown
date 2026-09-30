@@ -273,7 +273,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Create a generic CLAUDE.md at the town root as an identity anchor.
 	// Claude Code sets its CWD to the git root (~/gt/), so mayor/CLAUDE.md is
 	// not loaded directly. This town-root file ensures agents running from within
-	// the town git tree (Mayor, Deacon) always get a baseline identity reminder.
+	// the town git tree (the Mayor) always get a baseline identity reminder.
 	// It is NOT role-specific — role context comes from gt prime.
 	// Crew/polecats have their own nested git repos and won't inherit this.
 	if created, err := createTownRootAgentMDs(absPath); err != nil {
@@ -300,24 +300,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create deacon directory and settings (deacon runs from ~/gt/deacon/)
-	deaconDir := filepath.Join(absPath, "deacon")
-	if err := os.MkdirAll(deaconDir, 0755); err != nil {
-		fmt.Printf("   %s Could not create deacon directory: %v\n", style.Dim.Render("⚠"), err)
-	} else {
-		deaconRuntimeConfig := config.ResolveRoleAgentConfig("deacon", absPath, deaconDir)
-		if err := runtime.EnsureSettingsForRole(deaconDir, deaconDir, "deacon", deaconRuntimeConfig); err != nil {
-			fmt.Printf("   %s Could not create deacon settings: %v\n", style.Dim.Render("⚠"), err)
-		} else {
-			fmt.Printf("   ✓ Created deacon/.claude/settings.json\n")
-		}
-	}
-
-	// Create boot directory (deacon/dogs/boot/) for Boot watchdog.
-	// This avoids gt doctor warning on fresh install.
-	bootDir := filepath.Join(deaconDir, "dogs", "boot")
-	if err := os.MkdirAll(bootDir, 0755); err != nil {
-		fmt.Printf("   %s Could not create boot directory: %v\n", style.Dim.Render("⚠"), err)
+	// Create the dog kennel (deacon/dogs/). The directory keeps its historical
+	// name; the deacon role that once ran from deacon/ was deleted
+	// (gt-4k3fj.6.1).
+	if err := os.MkdirAll(filepath.Join(absPath, "deacon", "dogs"), 0755); err != nil {
+		fmt.Printf("   %s Could not create dog kennel directory: %v\n", style.Dim.Render("⚠"), err)
 	}
 
 	// Create plugins directory for town-level patrol plugins.
@@ -388,7 +375,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			fmt.Printf("   ✓ Provisioned %d formulas\n", count)
 		}
 
-		// Create town-level agent beads (Mayor, Deacon).
+		// Create the town-level agent bead (the Mayor).
 		// These use hq- prefix and are stored in town beads for cross-rig coordination.
 		if err := initTownAgentBeads(absPath); err != nil {
 			fmt.Printf("   %s Could not create town-level agent beads: %v\n", style.Dim.Render("⚠"), err)
@@ -602,12 +589,12 @@ func doltReinstallHint(goos string) string {
 // createTownRootAgentMDs creates a minimal, non-role-specific CLAUDE.md at the
 // town root and symlinks AGENTS.md to it. Claude Code rebases its CWD to the
 // git root (~/gt/), so role-specific CLAUDE.md files in subdirectories
-// (mayor/, deacon/) are not loaded. This file provides a baseline identity
+// (mayor/) are not loaded. This file provides a baseline identity
 // anchor that survives compaction. AGENTS.md is a symlink so agent frameworks
 // that look for it (e.g. OpenCode) also pick up the same content.
 //
 // Crew and polecats have their own nested git repos, so they won't inherit this.
-// Only Mayor and Deacon (which run from within the town root git tree) see it.
+// Only the Mayor (which runs from within the town root git tree) sees it.
 //
 // Returns (created bool, error) - created is false if both files already exist.
 func createTownRootAgentMDs(townRoot string) (bool, error) {
@@ -824,10 +811,9 @@ func ensureCustomTypes(beadsPath string) error {
 
 // initTownAgentBeads creates town-level agent beads using hq- prefix.
 // This creates:
-//   - hq-mayor, hq-deacon (agent beads for town-level agents)
+//   - hq-mayor (the agent bead for the town-level Mayor)
 //
 // These beads are stored in town beads (~/gt/.beads/) and are shared across all rigs.
-// Rig-level agent beads (witness, refinery) are created by gt rig add in rig beads.
 //
 // Note: Role definitions are now config-based (internal/config/roles/*.toml),
 // not stored as beads. See config-based-roles.md for details.
@@ -856,11 +842,6 @@ func initTownAgentBeads(townPath string) error {
 			id:       beads.MayorBeadIDTown(),
 			roleType: "mayor",
 			title:    "Mayor - global coordinator, handles cross-rig communication and escalations.",
-		},
-		{
-			id:       beads.DeaconBeadIDTown(),
-			roleType: "deacon",
-			title:    "Deacon (daemon beacon) - receives mechanical heartbeats, runs town plugins and monitoring.",
 		},
 	}
 

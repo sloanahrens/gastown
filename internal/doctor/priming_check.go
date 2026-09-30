@@ -23,11 +23,11 @@ type PrimingCheck struct {
 }
 
 type primingIssue struct {
-	location    string // e.g., "mayor", "gastown/crew/max", "gastown/witness"
+	location    string // e.g., "mayor", "gastown/crew/max"
 	issueType   string // e.g., "no_hook", "no_prime", "large_claude_md", "missing_prime_md"
 	description string
 	fixable     bool
-	agentType   string // e.g., "witness", "refinery", "mayor", "deacon"
+	agentType   string // e.g., "mayor"
 	rigName     string // rig name (empty for town-level agents)
 }
 
@@ -62,14 +62,14 @@ func (c *PrimingCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check 1.5: Town root CLAUDE.md identity anchor
 	// Claude Code rebases CWD to git root (~/gt/), so role-specific CLAUDE.md
-	// in subdirectories (mayor/, deacon/) won't be loaded. A generic CLAUDE.md
+	// in subdirectories (mayor/) won't be loaded. A generic CLAUDE.md
 	// at the town root prevents identity drift after compaction.
 	townRootClaude := filepath.Join(ctx.TownRoot, "CLAUDE.md")
 	if !fileExists(townRootClaude) {
 		c.issues = append(c.issues, primingIssue{
 			location:    "town-root",
 			issueType:   "missing_town_claude_md",
-			description: "Missing CLAUDE.md at town root (identity anchor for Mayor/Deacon)",
+			description: "Missing CLAUDE.md at town root (identity anchor for Mayor)",
 			fixable:     true,
 		})
 		details = append(details, "town-root: Missing CLAUDE.md identity anchor")
@@ -99,17 +99,7 @@ func (c *PrimingCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Check 3: Deacon priming
-	deaconPath := filepath.Join(ctx.TownRoot, "deacon")
-	if dirExists(deaconPath) {
-		deaconIssues := c.checkAgentPriming(ctx.TownRoot, "deacon", "deacon", "")
-		for _, issue := range deaconIssues {
-			details = append(details, fmt.Sprintf("%s: %s", issue.location, issue.description))
-		}
-		c.issues = append(c.issues, deaconIssues...)
-	}
-
-	// Check 4: Rig-level agents (witness, refinery, crew, polecats)
+	// Check 3: Rig-level agents (crew, polecats)
 	rigIssues := c.checkRigPriming(ctx.TownRoot)
 	for _, issue := range rigIssues {
 		details = append(details, fmt.Sprintf("%s: %s", issue.location, issue.description))
@@ -207,7 +197,7 @@ func (c *PrimingCheck) checkRigPriming(townRoot string) []primingIssue {
 		rigName := entry.Name()
 		rigPath := filepath.Join(townRoot, rigName)
 
-		// Skip non-rig directories
+		// Skip non-rig directories (deacon/ holds only the dog kennel)
 		if rigName == "mayor" || rigName == "deacon" || rigName == "daemon" ||
 			rigName == "docs" || rigName[0] == '.' {
 			continue
@@ -230,7 +220,7 @@ func (c *PrimingCheck) checkRigPriming(townRoot string) []primingIssue {
 			})
 		}
 
-		// NOTE: CLAUDE.md inside worktrees (mayor/rig, refinery/rig, crew/<name>,
+		// NOTE: CLAUDE.md inside worktrees (mayor/rig, crew/<name>,
 		// polecats/<name>/<rig>) is the customer's legitimate repo file.
 		// Sparse checkout has been removed — these files are no longer hidden.
 		// Gas Town's context comes from gt prime via SessionStart hook.
@@ -238,7 +228,7 @@ func (c *PrimingCheck) checkRigPriming(townRoot string) []primingIssue {
 		// Detect stale CLAUDE.md/AGENTS.md at intermediate directories.
 		// These are no longer created — only ~/gt/CLAUDE.md (town root) exists.
 		// Full context is injected by `gt prime` via SessionStart hook.
-		for _, role := range []string{"refinery", "witness", "crew", "polecats"} {
+		for _, role := range []string{"crew", "polecats"} {
 			agentPath := filepath.Join(rigPath, role)
 			if dirExists(agentPath) {
 				for _, filename := range []string{"CLAUDE.md", "AGENTS.md"} {
@@ -253,20 +243,6 @@ func (c *PrimingCheck) checkRigPriming(townRoot string) []primingIssue {
 					}
 				}
 			}
-		}
-
-		// Check witness priming
-		witnessPath := filepath.Join(rigPath, "witness")
-		if dirExists(witnessPath) {
-			witnessIssues := c.checkAgentPriming(townRoot, filepath.Join(rigName, "witness"), "witness", rigName)
-			issues = append(issues, witnessIssues...)
-		}
-
-		// Check refinery priming
-		refineryPath := filepath.Join(rigPath, "refinery")
-		if dirExists(refineryPath) {
-			refineryIssues := c.checkAgentPriming(townRoot, filepath.Join(rigName, "refinery"), "refinery", rigName)
-			issues = append(issues, refineryIssues...)
 		}
 
 		// Check crew PRIME.md (shared settings, individual worktrees)

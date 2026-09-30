@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -205,4 +206,14 @@ func TestRunTapGuardDangerous_HeredocWrittenRetryScriptBlocked(t *testing.T) {
 	if !strings.Contains(stderr, doneSlotLoopReason) {
 		t.Errorf("refusal text is missing the reason:\n%s", stderr)
 	}
+}
+
+// jsonQuote produces a JSON string literal (with surrounding quotes) for use
+// building hand-written hook-input JSON in tests.
+func jsonQuote(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }

@@ -139,12 +139,6 @@ func TestTestutilSymlinkCheck_Fix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create refinery with real testutil directory
-	refineryTestutil := filepath.Join(tmpDir, rigName, "refinery", "rig", "internal", "testutil")
-	if err := os.MkdirAll(refineryTestutil, 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	check := NewTestutilSymlinkCheck()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
 
@@ -177,16 +171,6 @@ func TestTestutilSymlinkCheck_Fix(t *testing.T) {
 	canonicalResolved, _ := filepath.EvalSymlinks(canonical)
 	if resolved != canonicalResolved {
 		t.Errorf("crew symlink resolves to %s, want %s", resolved, canonicalResolved)
-	}
-
-	// Verify refinery symlink
-	refineryLink := filepath.Join(tmpDir, rigName, "refinery", "rig", "internal", "testutil")
-	info, err = os.Lstat(refineryLink)
-	if err != nil {
-		t.Fatalf("cannot stat refinery symlink: %v", err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Error("refinery testutil should be a symlink after fix")
 	}
 
 	// Verify canonical file is accessible through the symlink

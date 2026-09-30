@@ -17,7 +17,7 @@ func TestAgentBeadsShadowCheck_ReportsTownDuplicates(t *testing.T) {
 	if result.Status != StatusWarning {
 		t.Fatalf("status = %v, want warning; message: %s", result.Status, result.Message)
 	}
-	for _, want := range []string{"gs-gastown-witness", "gs-gastown-refinery"} {
+	for _, want := range []string{"gs-gastown-crew-alice"} {
 		found := false
 		for _, d := range result.Details {
 			if strings.HasPrefix(d, want) {

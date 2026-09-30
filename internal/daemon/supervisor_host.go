@@ -3,17 +3,13 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/mayor"
-	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
-	"github.com/steveyegge/gastown/internal/witness"
 )
 
 // The daemon hosts the town's long-lived supervisor (ADR 0003,
@@ -61,17 +57,6 @@ var errNoDaemonStarter = fmt.Errorf("%w: the daemon has no start path for this r
 // supervisor's restart executor, run only after the guards pass.
 func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 	switch seat.Role {
-	case session.RoleDeacon:
-		if seat.Name != "" {
-			return fmt.Errorf("%w: %s", errNoDaemonStarter, seat.SessionName())
-		}
-		if err := d.tmux.KillSessionWithProcesses(seat.SessionName()); err != nil {
-			return fmt.Errorf("clearing the old deacon session: %w", err)
-		}
-		return declineIf(d.startDeacon(), deacon.ErrAlreadyRunning)
-	case session.RoleWitness:
-		mgr := witness.NewManager(&rig.Rig{Name: seat.Rig, Path: filepath.Join(d.config.TownRoot, seat.Rig)})
-		return declineIf(mgr.Start(false, "", nil), witness.ErrAlreadyRunning)
 	case session.RoleMayor:
 		mgr := mayor.NewManager(d.config.TownRoot)
 		if err := mgr.Stop(); err != nil && !errors.Is(err, mayor.ErrNotRunning) {
@@ -80,10 +65,11 @@ func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 		return mgr.Start("")
 	case session.RolePolecat:
 		// Only the patrol_scan tick restarts polecats from the daemon
-		// (gt-4k3fj.6); in a rig it does not cover, the witness still does.
+		// (gt-4k3fj.6).
 		return d.restartPolecatSession(seat)
 	default:
-		// Dogs are restarted by their handler.
+		// Dogs are restarted by their handler; the deacon, boot and
+		// witness roles were deleted (gt-4k3fj.6.1).
 		return fmt.Errorf("%w: %s", errNoDaemonStarter, seat.SessionName())
 	}
 }

@@ -239,8 +239,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 	// Phase 4: Kill sessions in correct order
 	fmt.Printf("\nPhase 4: Terminating sessions...\n")
 	mayorSession := getMayorSessionName()
-	deaconSession := getDeaconSessionName()
-	stopped := killSessionsInOrder(t, gtSessions, mayorSession, deaconSession)
+	stopped := killSessionsInOrder(t, gtSessions, mayorSession)
 
 	// Phase 5: Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -278,8 +277,7 @@ func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) er
 	fmt.Println("Shutting down Gas Town...")
 
 	mayorSession := getMayorSessionName()
-	deaconSession := getDeaconSessionName()
-	stopped := killSessionsInOrder(t, gtSessions, mayorSession, deaconSession)
+	stopped := killSessionsInOrder(t, gtSessions, mayorSession)
 
 	// Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -319,48 +317,14 @@ func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) er
 }
 
 // killSessionsInOrder stops sessions in the correct shutdown order, matching gt down:
-//  1. Polecats and crew (workers - stop before monitors can restart them)
-//  2. Refineries (work processors)
-//  3. Witnesses (monitors - stop before deacon so they can't restart workers)
-//  4. Town sessions: Mayor, Boot, Deacon
-//     Boot monitors Deacon, so must be stopped before Deacon.
-//
-// mayorSession and deaconSession are the dynamic session names for the current town.
+// every rig-level session (polecats, crew, and any session left over from a
+// retired role) first, then the Mayor. mayorSession is the dynamic Mayor
+// session name for the current town.
 //
 // Returns the count of sessions that were successfully stopped (verified by checking
 // if the session no longer exists after the kill attempt).
-func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession, deaconSession string) int {
+func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession string) int {
 	stopped := 0
-	bootSession := session.BootSessionName()
-
-	// Build a set for O(1) lookup of town-level sessions
-	sessionSet := make(map[string]bool, len(sessions))
-	for _, s := range sessions {
-		sessionSet[s] = true
-	}
-
-	// Categorize sessions by type for ordered shutdown.
-	var polecats, witnesses []string
-	for _, sess := range sessions {
-		// Skip town-level sessions (handled explicitly below)
-		if sess == mayorSession || sess == deaconSession || sess == bootSession {
-			continue
-		}
-
-		// Categorize by role using proper session name parser
-		if identity, err := session.ParseSessionName(sess); err == nil {
-			switch identity.Role {
-			case session.RoleWitness:
-				witnesses = append(witnesses, sess)
-			default:
-				// Polecats, crew, and any other rig-level sessions
-				polecats = append(polecats, sess)
-			}
-		} else {
-			// Unknown pattern, treat as worker (stop early)
-			polecats = append(polecats, sess)
-		}
-	}
 
 	// Helper to kill a session and verify it was stopped
 	killAndVerify := func(sess string) bool {
@@ -384,35 +348,18 @@ func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession, deaconSe
 		return false
 	}
 
-	// 1. Stop polecats and crew first (workers)
-	for _, sess := range polecats {
+	hasMayor := false
+	for _, sess := range sessions {
+		if sess == mayorSession {
+			hasMayor = true
+			continue
+		}
 		if killAndVerify(sess) {
 			stopped++
 		}
 	}
-
-	// 2. Stop witnesses (monitors)
-	for _, sess := range witnesses {
-		if killAndVerify(sess) {
-			stopped++
-		}
-	}
-
-	// 3. Stop town sessions: Mayor, Boot, Deacon (matching TownSessions() order)
-	if sessionSet[mayorSession] {
-		if killAndVerify(mayorSession) {
-			stopped++
-		}
-	}
-	if sessionSet[bootSession] {
-		if killAndVerify(bootSession) {
-			stopped++
-		}
-	}
-	if sessionSet[deaconSession] {
-		if killAndVerify(deaconSession) {
-			stopped++
-		}
+	if hasMayor && killAndVerify(mayorSession) {
+		stopped++
 	}
 
 	return stopped

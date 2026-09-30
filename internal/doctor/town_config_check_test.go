@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const brokenDaemonJSONForDoctor = "{\"patrols\": {\"witness\": {\"enabled\": false},}}"
+const brokenDaemonJSONForDoctor = "{\"patrols\": {\"dog\": {\"enabled\": false},}}"
 
 func writeDoctorTownFile(t *testing.T, town, rel, body string) string {
 	t.Helper()

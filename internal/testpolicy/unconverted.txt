@@ -4,7 +4,6 @@ internal/beads
 internal/cmd
 internal/config
 internal/convoy
-internal/deacon
 internal/dog
 internal/feed
 internal/hooks
@@ -18,4 +17,3 @@ internal/scheduler/capacity
 internal/session
 internal/telemetry
 internal/templates
-internal/witness

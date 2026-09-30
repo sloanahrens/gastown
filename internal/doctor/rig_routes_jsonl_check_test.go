@@ -222,21 +222,21 @@ func TestRigRoutesJSONLCheck_FindRigDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Create deacon dir with .beads symlinked to town root .beads
-		deaconDir := filepath.Join(tmpDir, "deacon")
-		if err := os.MkdirAll(deaconDir, 0755); err != nil {
+		// Create a non-rig dir with .beads symlinked to town root .beads
+		linkedDir := filepath.Join(tmpDir, "linked")
+		if err := os.MkdirAll(linkedDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(townBeads, filepath.Join(deaconDir, ".beads")); err != nil {
+		if err := os.Symlink(townBeads, filepath.Join(linkedDir, ".beads")); err != nil {
 			t.Fatal(err)
 		}
 
 		check := NewRigRoutesJSONLCheck()
 		rigs := check.findRigDirectories(tmpDir)
 
-		// Should find realrig but NOT deacon
+		// Should find realrig but NOT the linked dir
 		if len(rigs) != 1 {
-			t.Errorf("expected 1 rig (deacon should be excluded), got %d: %v", len(rigs), rigs)
+			t.Errorf("expected 1 rig (linked dir should be excluded), got %d: %v", len(rigs), rigs)
 		}
 		if len(rigs) == 1 && !strings.HasSuffix(rigs[0], "realrig") {
 			t.Errorf("expected realrig, got %s", rigs[0])

@@ -150,7 +150,10 @@ func TestBeadsRedirectTargetCheck_PolecatBrokenTarget(t *testing.T) {
 	}
 }
 
-func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
+// TestBeadsRedirectTargetCheck_LeftoverRefineryIgnored verifies that a leftover
+// refinery/rig clone from the retired refinery role is not checked, even when
+// its redirect is broken.
+func TestBeadsRedirectTargetCheck_LeftoverRefineryIgnored(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -162,7 +165,7 @@ func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create refinery with redirect to non-existent target
+	// Create leftover refinery with redirect to non-existent target
 	if err := os.MkdirAll(refineryBeadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -174,8 +177,8 @@ func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
-	if result.Status != StatusWarning {
-		t.Errorf("Expected StatusWarning for refinery broken target, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusOK {
+		t.Errorf("Expected StatusOK for leftover refinery clone, got %v: %s", result.Status, result.Message)
 	}
 }
 
@@ -516,12 +519,6 @@ func TestExtractRigName(t *testing.T) {
 			name:         "normal crew path",
 			townRoot:     "/town",
 			worktreePath: "/town/myrig/crew/worker1",
-			want:         "myrig",
-		},
-		{
-			name:         "refinery path",
-			townRoot:     "/town",
-			worktreePath: "/town/myrig/refinery/rig",
 			want:         "myrig",
 		},
 		{

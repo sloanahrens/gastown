@@ -6,8 +6,7 @@
 // the events package (~/gt/.events.jsonl).
 //
 // Channel scoping (gt-dsj): channels are single-consumer, but some channel
-// names have one consumer PER RIG (every rig runs its own refinery and
-// witness). Those channels are per-rig: their events live in
+// names have one consumer PER RIG. Those channels are per-rig: their events live in
 // events/<channel>/<rig>/ so one rig's consumer can never read or delete
 // another rig's wake events. Town-global channels with a single consumer
 // (e.g. "mayor") keep the flat events/<channel>/ layout. This package is
@@ -36,7 +35,6 @@ var ValidChannelName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // consumer polls first).
 var perRigChannels = map[string]bool{
 	"refinery": true,
-	"witness":  true,
 }
 
 // emitSeq is an atomic counter to ensure unique event filenames even when
@@ -46,27 +44,6 @@ var emitSeq atomic.Uint64
 // IsPerRig reports whether events on the channel are scoped per rig.
 func IsPerRig(channel string) bool {
 	return perRigChannels[channel]
-}
-
-// sessionConsumers lists channels whose events reach their consumer only
-// through that consumer's agent session, because no process polls the event
-// directory for them. The value is the rig role whose session consumes the
-// channel.
-//
-// The witness patrol waits on await-signal, which tails the activity feed, so
-// nothing reads events/witness/<rig>/ and an emitted file wakes nobody
-// (gt-wpf0). Emitters must therefore deliver to the session. The refinery
-// channel is deliberately absent: its await-event subscriber polls the
-// directory, so there the file is the delivery.
-var sessionConsumers = map[string]string{
-	"witness": "witness",
-}
-
-// SessionConsumer returns the rig role whose agent session consumes the
-// channel, or "" when the channel is consumed by an await-event subscriber
-// polling its directory.
-func SessionConsumer(channel string) string {
-	return sessionConsumers[channel]
 }
 
 // Dir returns the directory holding pending events for a channel. Per-rig

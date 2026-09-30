@@ -25,8 +25,8 @@ type WorktreeGitdirCheck struct {
 }
 
 type brokenWorktree struct {
-	worktreePath      string // e.g., /home/bob/gt/wyvern/refinery/rig
-	gitdirTarget      string // e.g., /Users/bob/gt/wyvern/.repo.git/worktrees/rig (stale)
+	worktreePath      string // e.g., /home/bob/gt/wyvern/polecats/nux/wyvern
+	gitdirTarget      string // e.g., /Users/bob/gt/wyvern/.repo.git/worktrees/wyvern (stale)
 	rigPath           string // e.g., /home/bob/gt/wyvern
 	bareRepoPath      string // e.g., /Users/bob/gt/wyvern/.repo.git (from gitdir, may be stale)
 	correctedBareRepo string // e.g., /home/bob/gt/wyvern/.repo.git (inferred from town root)
@@ -46,7 +46,7 @@ func NewWorktreeGitdirCheck() *WorktreeGitdirCheck {
 	}
 }
 
-// Run scans all rigs and deacon dogs for worktrees with broken gitdir references.
+// Run scans all rigs and the dog kennel for worktrees with broken gitdir references.
 func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 	c.brokenWorktrees = nil
 	c.townRoot = ctx.TownRoot
@@ -80,9 +80,9 @@ func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 		c.checkRigWorktrees(rigPath, entry.Name())
 	}
 
-	// Scan deacon/dogs for cross-rig worktrees (not covered by rig scan
-	// because deacon/ doesn't have config.json or standard rig subdirs).
-	c.checkDeaconDogs(ctx.TownRoot)
+	// Scan the dog kennel (deacon/dogs) for cross-rig worktrees (not covered
+	// by the rig scan because deacon/ doesn't have config.json or rig subdirs).
+	c.checkDogKennel(ctx.TownRoot)
 
 	if len(c.brokenWorktrees) == 0 {
 		return &CheckResult{
@@ -112,10 +112,6 @@ func (c *WorktreeGitdirCheck) Run(ctx *CheckContext) *CheckResult {
 
 // checkRigWorktrees checks all worktrees within a single rig.
 func (c *WorktreeGitdirCheck) checkRigWorktrees(rigPath, rigName string) {
-	// Check refinery/rig
-	refineryRig := filepath.Join(rigPath, "refinery", "rig")
-	c.checkWorktree(refineryRig, rigPath)
-
 	// Check polecats (both structures: polecats/<name>/<rigname>/ and polecats/<name>/)
 	polecatsDir := filepath.Join(rigPath, "polecats")
 	polecatEntries, err := os.ReadDir(polecatsDir)
@@ -141,21 +137,16 @@ func (c *WorktreeGitdirCheck) checkRigWorktrees(rigPath, rigName string) {
 			c.checkWorktree(oldPath, rigPath)
 		}
 	}
-
-	// Check witness/rig
-	witnessRig := filepath.Join(rigPath, "witness", "rig")
-	if c.hasGitFile(witnessRig) {
-		c.checkWorktree(witnessRig, rigPath)
-	}
 }
 
-// checkDeaconDogs scans deacon/dogs/<dogname>/<rigname>/ for cross-rig worktrees.
-// Each dog directory contains worktrees of various rigs, created by gt sling.
-func (c *WorktreeGitdirCheck) checkDeaconDogs(townRoot string) {
+// checkDogKennel scans the dog kennel (deacon/dogs/<dogname>/<rigname>/) for
+// cross-rig worktrees. Each dog directory contains worktrees of various rigs,
+// created by gt sling.
+func (c *WorktreeGitdirCheck) checkDogKennel(townRoot string) {
 	dogsDir := filepath.Join(townRoot, "deacon", "dogs")
 	dogEntries, err := os.ReadDir(dogsDir)
 	if err != nil {
-		return // No deacon/dogs — that's fine
+		return // No dog kennel — that's fine
 	}
 
 	for _, dogEntry := range dogEntries {
@@ -362,7 +353,7 @@ func (c *WorktreeGitdirCheck) fixOneWorktree(ctx *CheckContext, bw brokenWorktre
 			bw.worktreePath, err, output)
 	}
 
-	// Directory already exists with content (common for deacon dogs after rsync).
+	// Directory already exists with content (common for dog worktrees after rsync).
 	// Manually register the worktree: create the entry in .repo.git/worktrees/
 	// and write a new .git file pointing to it.
 	return c.manualWorktreeRegister(bw.worktreePath, repoPath, branch)
@@ -435,7 +426,7 @@ func isRigDir(path string) bool {
 		return true
 	}
 	// Check for known rig subdirectories
-	markers := []string{"refinery", "witness", "polecats", "mayor"}
+	markers := []string{"polecats", "crew", "mayor"}
 	for _, marker := range markers {
 		if _, err := os.Stat(filepath.Join(path, marker)); err == nil {
 			return true

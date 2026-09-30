@@ -327,7 +327,7 @@ type Target struct {
 	Path     string // Full path to .claude/settings.json or .gemini/settings.json
 	Key      string // Override key: "gastown/crew", "mayor", etc.
 	Rig      string // Rig name or empty for town-level
-	Role     string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, witness, refinery, polecat, mayor, deacon.
+	Role     string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, polecat, mayor, dog.
 	Provider string // Hook provider: "claude" (default/empty) or "gemini", etc.
 }
 
@@ -411,9 +411,8 @@ func DefaultOverrides() map[string]*HooksConfig {
 					// The interactive question tool is never answerable here,
 					// and the dialog it raises parks the session while tmux
 					// still reports it running — a polecat sat 4h26m on one
-					// (gt-163k8), and the witness sweep that escapes such a
-					// dialog (gt-z83) only fires when a patrol pass sees the
-					// pane. Denying the tool the model calls on its own
+					// (gt-163k8), and nothing sweeps such a dialog away.
+					// Denying the tool the model calls on its own
 					// initiative is the half the PermissionRequest guard below
 					// cannot reach: that event answers a prompt the harness
 					// raises, and a model-initiated dialog raises none.
@@ -467,53 +466,6 @@ func DefaultOverrides() map[string]*HooksConfig {
 				},
 			},
 		},
-		// Witness roles: patrol-formula-guard (gt-e47hxn).
-		// Blocks patrol formulas from using persistent molecules — must use wisps.
-		// Without this, witnesses could accidentally create permanent patrol molecules
-		// that survive session restarts and accumulate unbounded.
-		"witness": {
-			UserPromptSubmit: []HookEntry{{Matcher: ""}},
-			// patrol-loop reads tool_input.command off stdin and inspects the
-			// actual command itself (see tap_guard_patrol_loop.go), so it
-			// self-filters and needs no If — unlike the leading-* "if" globs
-			// it replaces, it isn't fooled into blocking an unrelated command
-			// the Bash matcher's if-glob evaluator can't statically resolve
-			// (gt-qqfy).
-			PreToolUse: []HookEntry{
-				{
-					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{
-						{
-							Type:    "command",
-							Command: gtCommand("gt tap guard patrol-loop"),
-						},
-					},
-				},
-			},
-		},
-		"boot": {
-			UserPromptSubmit: []HookEntry{{Matcher: ""}},
-			// PreToolUse: the raw tmux send-keys guard (gt-3mp1). Formerly an
-			// inline echo+exit-2 command gated by If: "Bash(*tmux*send-keys*)",
-			// which depended entirely on the outer if-glob to decide when to
-			// fire — so post-gt-5ihs it fired on unrelated commands whenever
-			// Claude Code's "if" evaluator couldn't resolve the command
-			// (gt-3mp1), and it could not self-filter if the If were dropped.
-			// It is now a real guard command that reads tool_input.command
-			// off stdin and blocks only a genuine tmux send-keys invocation
-			// (see tap_guard_boot_sendkeys.go) — no If needed.
-			PreToolUse: []HookEntry{
-				{
-					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{
-						{
-							Type:    "command",
-							Command: gtCommand("gt tap guard boot-sendkeys"),
-						},
-					},
-				},
-			},
-		},
 		// Dogs: formula command-allowlist enforcement (gt-9iv).
 		// Formulas may declare command_allowlist in their TOML; the guard
 		// constrains a dog's Bash commands to the declared entries (plus a
@@ -532,7 +484,6 @@ func DefaultOverrides() map[string]*HooksConfig {
 				{
 					// A dog also runs with nobody at the pane; see the
 					// polecats override for why the question tool is denied
-					// rather than left to the witness recovery sweep
 					// (gt-163k8).
 					Matcher: "AskUserQuestion",
 					Hooks: []Hook{{
@@ -558,45 +509,6 @@ func DefaultOverrides() map[string]*HooksConfig {
 						Type:    "command",
 						Command: gtCommand("gt tap guard permission-request"),
 					}},
-				},
-			},
-		},
-		// Deacon roles: patrol-formula-guard (same as witness) plus
-		// anti-batch-loop guards. Deacons also run patrols and must use
-		// wisps, not persistent molecules, and must not batch multiple
-		// patrol cycles into a single for/seq or open-ended while loop.
-		// patrol-loop self-filters on tool_input.command (see
-		// tap_guard_patrol_loop.go), applying the loop checks only when it
-		// detects it's running as the deacon role — no If needed (gt-qqfy).
-		"deacon": {
-			UserPromptSubmit: []HookEntry{{Matcher: ""}},
-			PreToolUse: []HookEntry{
-				{
-					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{
-						{
-							Type:    "command",
-							Command: gtCommand("gt tap guard patrol-loop"),
-						},
-					},
-				},
-			},
-		},
-		// Refinery roles: patrol-formula-guard (same as witness).
-		// Refineries also run patrols and must use wisps, not persistent molecules.
-		"refinery": {
-			UserPromptSubmit: []HookEntry{{Matcher: ""}},
-			// patrol-loop self-filters on tool_input.command — no If needed
-			// (gt-qqfy). See the witness override above.
-			PreToolUse: []HookEntry{
-				{
-					Matcher: shellExecutingToolMatcher,
-					Hooks: []Hook{
-						{
-							Type:    "command",
-							Command: gtCommand("gt tap guard patrol-loop"),
-						},
-					},
 				},
 			},
 		},
@@ -659,34 +571,17 @@ func ComputeExpected(target string) (*HooksConfig, error) {
 func DiscoverTargets(townRoot string) ([]Target, error) {
 	var targets []Target
 
-	// Town-level targets (mayor/deacon cwd IS the settings dir)
+	// Town-level target (the mayor's cwd IS the settings dir)
 	targets = append(targets, Target{
 		Path: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
 		Key:  "mayor",
 		Role: "mayor",
 	})
-	targets = append(targets, Target{
-		Path: filepath.Join(townRoot, "deacon", ".claude", "settings.json"),
-		Key:  "deacon",
-		Role: "deacon",
-	})
-
-	// Boot watchdog — ephemeral Claude agent in deacon/dogs/boot/.
-	// Only added when the directory exists (gitignored and optional).
-	// Adding it here ensures HooksSyncCheck manages the file and Fix() preserves
-	// custom fields (e.g. model) via the LoadSettings → MarshalSettings round-trip.
-	bootDir := filepath.Join(townRoot, "deacon", "dogs", "boot")
-	if info, err := os.Stat(bootDir); err == nil && info.IsDir() {
-		targets = append(targets, Target{
-			Path: filepath.Join(bootDir, ".claude", "settings.json"),
-			Key:  "boot",
-			Role: "boot",
-		})
-	}
 
 	// Dog kennels — each dog has its own settings file in its kennel dir
 	// (deacon/dogs/<name>), all sharing the "dog" override key. Only dirs
-	// with a .dog.json state file are kennels; boot is handled above (gt-9iv).
+	// with a .dog.json state file are kennels (gt-9iv); deacon/dogs/boot is the
+	// retired Boot watchdog's directory, not a kennel.
 	dogsDir := filepath.Join(townRoot, "deacon", "dogs")
 	if dogEntries, err := os.ReadDir(dogsDir); err == nil {
 		for _, entry := range dogEntries {
@@ -720,7 +615,7 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 		rigName := entry.Name()
 		rigPath := filepath.Join(townRoot, rigName)
 
-		// Skip directories that aren't rigs (no crew/ or witness/ or polecats/ subdirs)
+		// Skip directories that aren't rigs (no crew/ or polecats/ subdirs)
 		if !isRig(rigPath) {
 			continue
 		}
@@ -749,28 +644,6 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 			})
 		}
 
-		// Witness — settings in the witness parent directory
-		witnessDir := filepath.Join(rigPath, "witness")
-		if info, err := os.Stat(witnessDir); err == nil && info.IsDir() {
-			targets = append(targets, Target{
-				Path: filepath.Join(witnessDir, ".claude", "settings.json"),
-				Key:  rigName + "/witness",
-				Rig:  rigName,
-				Role: "witness",
-			})
-		}
-
-		// Refinery — settings in the refinery parent directory
-		refineryDir := filepath.Join(rigPath, "refinery")
-		if info, err := os.Stat(refineryDir); err == nil && info.IsDir() {
-			targets = append(targets, Target{
-				Path: filepath.Join(refineryDir, ".claude", "settings.json"),
-				Key:  rigName + "/refinery",
-				Rig:  rigName,
-				Role: "refinery",
-			})
-		}
-
 	}
 
 	return targets, nil
@@ -782,7 +655,7 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 type RoleLocation struct {
 	Dir  string // Absolute path to the role's parent directory (e.g., .../rig/crew)
 	Rig  string // Rig name, or empty for town-level roles
-	Role string // Role name: crew, polecat, witness, refinery, mayor, deacon
+	Role string // Role name: crew, polecat, mayor
 }
 
 // DiscoverRoleLocations finds all role directories in a workspace.
@@ -792,7 +665,7 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 	var locations []RoleLocation
 
 	// Town-level roles
-	for _, role := range []string{"mayor", "deacon"} {
+	for _, role := range []string{"mayor"} {
 		dir := filepath.Join(townRoot, role)
 		if info, err := os.Stat(dir); err == nil && info.IsDir() {
 			locations = append(locations, RoleLocation{Dir: dir, Role: role})
@@ -822,8 +695,6 @@ func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
 		for _, sub := range []struct{ dir, role string }{
 			{"crew", "crew"},
 			{"polecats", "polecat"},
-			{"witness", "witness"},
-			{"refinery", "refinery"},
 		} {
 			dir := filepath.Join(rigPath, sub.dir)
 			if info, err := os.Stat(dir); err == nil && info.IsDir() {
@@ -893,9 +764,9 @@ func isGitWorktreeRoot(dir string) bool {
 	return err == nil
 }
 
-// isRig checks if a directory looks like a rig (has crew/, witness/, or polecats/ subdirectory).
+// isRig checks if a directory looks like a rig (has a crew/ or polecats/ subdirectory).
 func isRig(path string) bool {
-	for _, sub := range []string{"crew", "witness", "polecats", "refinery"} {
+	for _, sub := range []string{"crew", "polecats"} {
 		info, err := os.Stat(filepath.Join(path, sub))
 		if err == nil && info.IsDir() {
 			return true
@@ -1102,8 +973,7 @@ func NormalizeTarget(target string) (string, bool) {
 	}
 
 	validRoles := map[string]bool{
-		"crew": true, "witness": true, "refinery": true,
-		"polecats": true, "mayor": true, "deacon": true,
+		"crew": true, "polecats": true, "mayor": true,
 	}
 
 	// Simple role target
@@ -1130,7 +1000,7 @@ func NormalizeTarget(target string) (string, bool) {
 }
 
 // ValidTarget returns true if the target string is a valid override target.
-// Valid targets are roles (crew, witness, etc.) or rig/role combinations.
+// Valid targets are roles (crew, polecats, mayor) or rig/role combinations.
 // Accepts singular aliases (e.g., "polecat") — use NormalizeTarget to get canonical form.
 func ValidTarget(target string) bool {
 	_, ok := NormalizeTarget(target)
@@ -1239,7 +1109,7 @@ func DefaultBase() *HooksConfig {
 //
 //	"gastown/crew" -> ["crew", "gastown/crew"]
 //	"mayor"        -> ["mayor"]
-//	"beads/witness" -> ["witness", "beads/witness"]
+//	"beads/polecats" -> ["polecats", "beads/polecats"]
 func GetApplicableOverrides(target string) []string {
 	parts := strings.SplitN(target, "/", 2)
 	if len(parts) == 2 {
@@ -1270,26 +1140,47 @@ func loadConfig(path string) (*HooksConfig, error) {
 }
 
 // retiredGTSubcommands are gt subcommands that were deleted (the refinery
-// cutover gt-v4ssj.6 and the operator-surface deletion gt-638go.2). A hook
-// that still runs one fails on every event, and an on-disk hooks-base.json
-// written before the deletion carries one (the Stop hook "gt costs record").
+// cutover gt-v4ssj.6, the operator-surface deletion gt-638go.2, and the
+// witness/deacon deletion gt-4k3fj.6.1). A hook that still runs one fails on
+// every event, and an on-disk hooks-base.json written before the deletion
+// carries one (the Stop hook "gt costs record").
 var retiredGTSubcommands = map[string]bool{
 	"account":   true,
+	"boot":      true,
+	"callbacks": true,
 	"costs":     true,
 	"dashboard": true,
+	"deacon":    true,
 	"krc":       true,
 	"mountain":  true,
 	"mq":        true,
+	"patrol":    true,
 	"quota":     true,
 	"refinery":  true,
 	"seance":    true,
+	"warrant":   true,
+	"witness":   true,
+}
+
+// retiredTapGuards are `gt tap guard` guards that were deleted with the
+// roles they served (gt-4k3fj.6.1): patrol-loop guarded the witness, deacon
+// and refinery patrols, boot-sendkeys the Boot watchdog.
+var retiredTapGuards = map[string]bool{
+	"boot-sendkeys": true,
+	"patrol-loop":   true,
 }
 
 // runsRetiredGTSubcommand reports whether command invokes gt (bare or by
-// path) with a deleted subcommand.
+// path) with a deleted subcommand or a deleted tap guard.
 func runsRetiredGTSubcommand(command string) bool {
 	fields := strings.Fields(command)
-	return len(fields) >= 2 && filepath.Base(fields[0]) == "gt" && retiredGTSubcommands[fields[1]]
+	if len(fields) < 2 || filepath.Base(fields[0]) != "gt" {
+		return false
+	}
+	if retiredGTSubcommands[fields[1]] {
+		return true
+	}
+	return len(fields) >= 4 && fields[1] == "tap" && fields[2] == "guard" && retiredTapGuards[fields[3]]
 }
 
 // dropRetiredCommandHooks removes hooks that run a retired gt subcommand from

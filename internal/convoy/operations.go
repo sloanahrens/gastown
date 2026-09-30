@@ -769,16 +769,7 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 			}
 			notifiedRigs[depRig] = true
 
-			depTitle := dep.Title
-			logger("CrossRig: %s closed, unblocking %s (%s) — nudging %s/witness", closedIssueID, depID, depRig, depRig)
-
-			msg := fmt.Sprintf("Dependency resolved: %s — External dependency %s has closed. Unblocked: %s (%s). This issue may now proceed.",
-				closedIssueID, closedIssueID, depID, depTitle)
-			nudgeCmd := exec.Command("gt", "nudge", depRig+"/witness", "-m", msg)
-			nudgeCmd.Dir = townRoot
-			if err := nudgeCmd.Run(); err != nil {
-				logger("CrossRig: nudge %s/witness failed: %v", depRig, err)
-			}
+			logger("CrossRig: %s closed, unblocking %s (%s, rig %s)", closedIssueID, depID, dep.Title, depRig)
 		}
 	}
 }

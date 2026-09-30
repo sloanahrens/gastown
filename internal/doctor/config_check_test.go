@@ -178,16 +178,16 @@ func TestSessionHookCheck_Run(t *testing.T) {
 		}
 	})
 
-	t.Run("witness settings with --hook passes", func(t *testing.T) {
+	t.Run("crew settings with --hook passes", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
-		// Create rig structure with witness
+		// Create rig structure with crew
 		rigDir := filepath.Join(tmpDir, "myrig")
-		if err := os.MkdirAll(filepath.Join(rigDir, "witness"), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Join(rigDir, "crew"), 0755); err != nil {
 			t.Fatal(err)
 		}
-		// Settings at witness/.claude/settings.json (parent dir, loaded via --settings)
-		claudeDir := filepath.Join(rigDir, "witness", ".claude")
+		// Settings at crew/.claude/settings.json (parent dir, loaded via --settings)
+		claudeDir := filepath.Join(rigDir, "crew", ".claude")
 		if err := os.MkdirAll(claudeDir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -202,20 +202,20 @@ func TestSessionHookCheck_Run(t *testing.T) {
 		result := check.Run(ctx)
 
 		if result.Status != StatusOK {
-			t.Errorf("expected StatusOK for witness settings, got %v: %v", result.Status, result.Details)
+			t.Errorf("expected StatusOK for crew settings, got %v: %v", result.Status, result.Details)
 		}
 	})
 
-	t.Run("witness bare gt prime warns", func(t *testing.T) {
+	t.Run("crew bare gt prime warns", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
-		// Create rig structure with witness
+		// Create rig structure with crew
 		rigDir := filepath.Join(tmpDir, "myrig")
-		if err := os.MkdirAll(filepath.Join(rigDir, "witness"), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Join(rigDir, "crew"), 0755); err != nil {
 			t.Fatal(err)
 		}
-		// Settings at witness/.claude/settings.json (parent dir, loaded via --settings)
-		claudeDir := filepath.Join(rigDir, "witness", ".claude")
+		// Settings at crew/.claude/settings.json (parent dir, loaded via --settings)
+		claudeDir := filepath.Join(rigDir, "crew", ".claude")
 		if err := os.MkdirAll(claudeDir, 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +230,7 @@ func TestSessionHookCheck_Run(t *testing.T) {
 		result := check.Run(ctx)
 
 		if result.Status != StatusWarning {
-			t.Errorf("expected StatusWarning for witness bare gt prime, got %v", result.Status)
+			t.Errorf("expected StatusWarning for crew bare gt prime, got %v", result.Status)
 		}
 	})
 

@@ -74,7 +74,7 @@ func TestTestutilSymlinkCheck_NoCrew(t *testing.T) {
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK when no crew/refinery, got %v: %s", result.Status, result.Message)
+		t.Errorf("expected StatusOK when no crew, got %v: %s", result.Status, result.Message)
 	}
 }
 
@@ -120,7 +120,9 @@ func TestTestutilSymlinkCheck_CrewRealDir(t *testing.T) {
 	}
 }
 
-func TestTestutilSymlinkCheck_RefineryRealDir(t *testing.T) {
+// TestTestutilSymlinkCheck_LeftoverRefineryIgnored verifies that a leftover
+// refinery/rig clone from the retired refinery role is not checked.
+func TestTestutilSymlinkCheck_LeftoverRefineryIgnored(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
@@ -131,7 +133,7 @@ func TestTestutilSymlinkCheck_RefineryRealDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create refinery/rig with real testutil directory
+	// Create leftover refinery/rig with real testutil directory
 	refineryTestutil := filepath.Join(tmpDir, rigName, "refinery", "rig", "internal", "testutil")
 	if err := os.MkdirAll(refineryTestutil, 0755); err != nil {
 		t.Fatal(err)
@@ -142,11 +144,8 @@ func TestTestutilSymlinkCheck_RefineryRealDir(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	if result.Status != StatusWarning {
-		t.Errorf("expected StatusWarning for refinery real dir, got %v: %s", result.Status, result.Message)
-	}
-	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "refinery/rig") {
-		t.Errorf("expected detail about refinery/rig, got %v", result.Details)
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK for leftover refinery clone, got %v: %s %v", result.Status, result.Message, result.Details)
 	}
 }
 

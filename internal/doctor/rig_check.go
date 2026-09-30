@@ -111,7 +111,7 @@ func NewGitExcludeConfiguredCheck() *GitExcludeConfiguredCheck {
 
 // requiredExcludes returns the directories that should be excluded.
 func (c *GitExcludeConfiguredCheck) requiredExcludes() []string {
-	return []string{"/polecats/", "/witness/", "/refinery/", "/mayor/"}
+	return []string{"/polecats/", "/mayor/"}
 }
 
 // Run checks if .git/info/exclude contains required entries.
@@ -174,8 +174,8 @@ func (c *GitExcludeConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		_ = file.Close() //nolint:gosec // G104: best-effort close
 	}
 
-	// Check for missing entries. Accept either anchored (/refinery/) or
-	// legacy un-anchored (refinery/) forms — the un-anchored form is overly
+	// Check for missing entries. Accept either anchored (/polecats/) or
+	// legacy un-anchored (polecats/) forms — the un-anchored form is overly
 	// broad but still covers the required directory.
 	c.missingEntries = nil
 	for _, required := range c.requiredExcludes() {
@@ -279,7 +279,6 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 	// Check all clone locations
 	clonePaths := []string{
 		filepath.Join(rigPath, "mayor", "rig"),
-		filepath.Join(rigPath, "refinery", "rig"),
 	}
 
 	// Add crew clones
@@ -359,113 +358,6 @@ func (c *HooksPathConfiguredCheck) Fix(ctx *CheckContext) error {
 			return fmt.Errorf("failed to configure hooks for %s: %w", clonePath, err)
 		}
 	}
-	return nil
-}
-
-// WitnessExistsCheck verifies the witness directory structure exists.
-type WitnessExistsCheck struct {
-	FixableCheck
-	rigPath     string
-	needsCreate bool
-	needsClone  bool
-	needsMail   bool
-}
-
-// NewWitnessExistsCheck creates a new witness exists check.
-func NewWitnessExistsCheck() *WitnessExistsCheck {
-	return &WitnessExistsCheck{
-		FixableCheck: FixableCheck{
-			BaseCheck: BaseCheck{
-				CheckName:        "witness-exists",
-				CheckDescription: "Verify witness/ directory structure exists",
-				CheckCategory:    CategoryRig,
-			},
-		},
-	}
-}
-
-// Run checks if the witness directory structure exists.
-func (c *WitnessExistsCheck) Run(ctx *CheckContext) *CheckResult {
-	c.rigPath = ctx.RigPath()
-	if c.rigPath == "" {
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusError,
-			Message: "No rig specified",
-		}
-	}
-
-	witnessDir := filepath.Join(c.rigPath, "witness")
-	rigClone := filepath.Join(witnessDir, "rig")
-	mailInbox := filepath.Join(witnessDir, "mail", "inbox.jsonl")
-
-	var issues []string
-	c.needsCreate = false
-	c.needsClone = false
-	c.needsMail = false
-
-	// Check witness/ directory
-	if _, err := os.Stat(witnessDir); os.IsNotExist(err) {
-		issues = append(issues, "Missing: witness/")
-		c.needsCreate = true
-	} else {
-		// Check witness/rig/ clone
-		rigGit := filepath.Join(rigClone, ".git")
-		if _, err := os.Stat(rigGit); os.IsNotExist(err) {
-			issues = append(issues, "Missing: witness/rig/ (git clone)")
-			c.needsClone = true
-		}
-
-		// Check witness/mail/inbox.jsonl
-		if _, err := os.Stat(mailInbox); os.IsNotExist(err) {
-			issues = append(issues, "Missing: witness/mail/inbox.jsonl")
-			c.needsMail = true
-		}
-	}
-
-	if len(issues) == 0 {
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Witness structure exists",
-		}
-	}
-
-	return &CheckResult{
-		Name:    c.Name(),
-		Status:  StatusWarning,
-		Message: "Witness structure incomplete",
-		Details: issues,
-		FixHint: "Run 'gt doctor --fix' to create missing structure",
-	}
-}
-
-// Fix creates missing witness structure.
-func (c *WitnessExistsCheck) Fix(ctx *CheckContext) error {
-	witnessDir := filepath.Join(c.rigPath, "witness")
-
-	if c.needsCreate {
-		if err := os.MkdirAll(witnessDir, 0755); err != nil {
-			return fmt.Errorf("failed to create witness/: %w", err)
-		}
-	}
-
-	if c.needsMail {
-		mailDir := filepath.Join(witnessDir, "mail")
-		if err := os.MkdirAll(mailDir, 0755); err != nil {
-			return fmt.Errorf("failed to create witness/mail/: %w", err)
-		}
-		inboxPath := filepath.Join(mailDir, "inbox.jsonl")
-		if err := os.WriteFile(inboxPath, []byte{}, 0644); err != nil {
-			return fmt.Errorf("failed to create inbox.jsonl: %w", err)
-		}
-	}
-
-	// Note: Cannot auto-fix clone without knowing the repo URL
-	if c.needsClone {
-		return fmt.Errorf("cannot auto-create witness/rig/ clone (requires repo URL)")
-	}
-
 	return nil
 }
 
@@ -1099,7 +991,7 @@ func (c *BareRepoRefspecCheck) Run(ctx *CheckContext) *CheckResult {
 			Message: "Bare repo missing remote.origin.fetch refspec",
 			Details: []string{
 				"Worktrees cannot fetch or see origin/* refs without this config",
-				"This breaks refinery merge operations and causes stale origin/main",
+				"This breaks merge operations and causes stale origin/main",
 			},
 			FixHint: "Run 'gt doctor --fix' to configure the refspec",
 		}
@@ -1344,7 +1236,7 @@ func (c *DefaultBranchAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // BareRepoExistsCheck verifies that .repo.git exists when worktrees depend on it.
-// Worktrees (refinery/rig, polecats) created from the shared bare repo have .git files
+// Worktrees (polecats) created from the shared bare repo have .git files
 // pointing to .repo.git/worktrees/<name>. If .repo.git is missing (deleted, moved, or
 // never created), all those worktrees break with "fatal: not a git repository".
 type BareRepoExistsCheck struct {
@@ -1936,21 +1828,9 @@ func readRefsFromFiles(repoPath string) (map[string]string, error) {
 }
 
 // findWorktreeDirs returns paths to directories that may be git worktrees within a rig.
-// Checks refinery/rig and all polecat worktree directories.
+// Checks all polecat worktree directories.
 func (c *BareRepoExistsCheck) findWorktreeDirs(rigPath, rigName string) []string {
 	var dirs []string
-
-	// refinery/rig
-	refineryRig := filepath.Join(rigPath, "refinery", "rig")
-	if _, err := os.Stat(refineryRig); err == nil {
-		dirs = append(dirs, refineryRig)
-	}
-
-	// witness/rig
-	witnessRig := filepath.Join(rigPath, "witness", "rig")
-	if _, err := os.Stat(witnessRig); err == nil {
-		dirs = append(dirs, witnessRig)
-	}
 
 	// polecats/<name>/<rigname>/
 	polecatsDir := filepath.Join(rigPath, "polecats")
@@ -1986,7 +1866,6 @@ func RigChecks() []Check {
 		NewBareRepoExistsCheck(),
 		NewBareRepoRefspecCheck(),
 		NewDefaultBranchExistsCheck(),
-		NewWitnessExistsCheck(),
 		NewMayorCloneExistsCheck(),
 		NewPolecatClonesValidCheck(),
 		NewBeadsConfigValidCheck(),

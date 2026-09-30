@@ -17,8 +17,8 @@ const fakeRigName = "gastown"
 // merely looks like one. Returns town.
 //
 // The layout mirrors a live town: the town root's own directories, one rig
-// with that rig's standard subdirectories (polecats/, crew/, refinery/,
-// witness/, mayor/ — see rig.AgentDirs), the rig's bare repo, a rig
+// with that rig's standard subdirectories (polecats/, crew/, mayor/ — see
+// rig.AgentDirs), the rig's bare repo, a rig
 // directory that holds no checkouts, one polecat worktree, and one checkout
 // nested inside it.
 func makeFakeTown(t *testing.T, town string) string {
@@ -29,8 +29,6 @@ func makeFakeTown(t *testing.T, town string) string {
 		".dolt-data",
 		filepath.Join(fakeRigName, "polecats", "lapis", "gastown", "internal"),
 		filepath.Join(fakeRigName, "crew"),
-		filepath.Join(fakeRigName, "refinery", "rig"),
-		filepath.Join(fakeRigName, "witness"),
 		filepath.Join(fakeRigName, "mayor", "rig"),
 		filepath.Join(fakeRigName, "settings"),
 		filepath.Join(fakeRigName, ".repo.git"),
@@ -77,7 +75,6 @@ func TestTownScanHazard(t *testing.T) {
 		// scanning one walks every worktree of that kind at once.
 		{"rig polecats (every worktree)", filepath.Join(rig, "polecats"), "a rig's worktree dir"},
 		{"rig crew", filepath.Join(rig, "crew"), "a rig's worktree dir"},
-		{"rig witness", filepath.Join(rig, "witness"), "a rig's worktree dir"},
 		{"rig mayor", filepath.Join(rig, "mayor"), "a rig's worktree dir"},
 
 		// Blocked — bare repos, at any depth.
@@ -306,8 +303,8 @@ func TestMatchesUnboundedScanTownTree(t *testing.T) {
 // TestMatchesUnboundedScanPatternNotRoot pins the gt-yts7 false positive on
 // the guard's real entry point: a scan tool's search pattern is not a scan
 // root, so a pattern spelled like a directory at cwd is searched for, not
-// walked. cwd is the rig root, where polecats/, crew/, refinery/, witness/,
-// mayor/ and the rig's bare repo are each one bare word away.
+// walked. cwd is the rig root, where polecats/, crew/, mayor/ and the rig's
+// bare repo are each one bare word away.
 //
 // The boundary cases carry equal weight. The pattern slot is read that way
 // only when another argument names the path the walk starts from; a bare word

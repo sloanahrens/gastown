@@ -21,8 +21,8 @@ func tempGitRepo(t *testing.T, gf *gitfake.Fake, dir string) {
 	gf.CommitWorktree(t, dir, "init")
 }
 
-// newExposureTown lays out a minimal town root with one rig and five clones
-// (mayor, refinery, both witness layouts, one polecat), each holding an empty
+// newExposureTown lays out a minimal town root with one rig and three clones
+// (mayor, one crew member, one polecat), each holding an empty
 // .beads/. The clones are plain directories with an empty .git/, which is all
 // the clone enumeration looks for: the check's probe is the only thing that
 // asks git, and exposureCheck replaces it with a lookup in the
@@ -32,15 +32,13 @@ func newExposureTown(t *testing.T) (string, map[string]string, map[string]probeR
 	town := t.TempDir()
 	rigPath := filepath.Join(town, "testrig")
 	// A marker dir makes findAllRigs recognize testrig as a rig.
-	if err := os.MkdirAll(filepath.Join(rigPath, "refinery"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigPath, "crew"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	clonePaths := map[string]string{}
 	for _, layout := range []struct{ name, sub string }{
 		{"mayor", "mayor/rig"},
-		{"refinery", "refinery/rig"},
-		{"witness-rig", "witness/rig"},
-		{"witness-dir", "witness"},
+		{"crew", "crew/max"},
 		{"polecat", "polecats/pc1/testrig"},
 	} {
 		clonePath := filepath.Join(rigPath, layout.sub)
@@ -79,8 +77,8 @@ func TestBeadsExposureCheck_AllProtected(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK when all protected, got %v: %s", result.Status, result.Message)
 	}
-	if !strings.Contains(result.Message, "5 checked") {
-		t.Errorf("expected all 5 clones checked, got: %s", result.Message)
+	if !strings.Contains(result.Message, "3 checked") {
+		t.Errorf("expected all 3 clones checked, got: %s", result.Message)
 	}
 }
 
@@ -139,7 +137,7 @@ func TestBeadsExposureCheck_ProbesWithGitByDefault(t *testing.T) {
 	gf := gitfake.New()
 	town := t.TempDir()
 	rigPath := filepath.Join(town, "testrig")
-	if err := os.MkdirAll(filepath.Join(rigPath, "refinery"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigPath, "crew"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	clone := filepath.Join(rigPath, "mayor", "rig")
@@ -183,7 +181,7 @@ func TestBeadsExposureCheck_ExposedPlusUnresolvedIsWarning(t *testing.T) {
 	t.Parallel()
 	town, clonePaths, probes := newExposureTown(t)
 	probes[clonePaths["mayor"]] = probeExposed
-	probes[clonePaths["refinery"]] = probeUnresolved
+	probes[clonePaths["crew"]] = probeUnresolved
 	for p := range clonePaths {
 		if _, set := probes[p]; !set {
 			probes[p] = probeProtected
@@ -224,7 +222,7 @@ func TestBeadsExposureCheck_FixSkipsUnresolved(t *testing.T) {
 	t.Parallel()
 	town, clonePaths, probes := newExposureTown(t)
 	probes[clonePaths["mayor"]] = probeUnresolved
-	probes[clonePaths["refinery"]] = probeUnresolved
+	probes[clonePaths["crew"]] = probeUnresolved
 	for p := range clonePaths {
 		if _, set := probes[p]; !set {
 			probes[p] = probeProtected
@@ -288,32 +286,5 @@ func TestBeadsExposureProbe_UntrackedThenExcluded(t *testing.T) {
 	}
 	if got := beadsUntrackedAndUnignored(g); got != probeProtected {
 		t.Errorf("exclude-protected .beads: got %v, want probeProtected", got)
-	}
-}
-
-// TestFindBeadsClones_IncludesWitness verifies enumeration covers the witness
-// clone in both layouts (witness/rig legacy clone and the witness dir).
-func TestFindBeadsClones_IncludesWitness(t *testing.T) {
-	t.Parallel()
-	rigPath := t.TempDir()
-	for _, sub := range []string{"mayor/rig", "refinery/rig", "witness/rig", "witness", "polecats/pc1/testrig"} {
-		if err := os.MkdirAll(filepath.Join(rigPath, sub), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var witnessHits int
-	seen := map[string]bool{}
-	for _, p := range findBeadsClones(rigPath) {
-		if seen[p] {
-			t.Errorf("duplicate clone path in enumeration: %s", p)
-		}
-		seen[p] = true
-		rel, _ := filepath.Rel(rigPath, p)
-		if strings.HasPrefix(rel, "witness") {
-			witnessHits++
-		}
-	}
-	if witnessHits != 2 {
-		t.Errorf("expected both witness layouts enumerated, got %d witness paths", witnessHits)
 	}
 }

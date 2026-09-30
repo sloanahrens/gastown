@@ -1,8 +1,6 @@
 # The slow tier, which make gate skips and make test-slow runs (gt-z862q; internal/testpolicy/tier.go).
 # "<package> <measured wall> # <why>"; a package's wall must be at least testpolicy.FastTierMaxWall.
 internal/cmd 301s # tests exec git (52 sites), bd (39) and tmux; 31 tmux.New
-internal/witness 95s # real tmux (13 tmux.New) and git, hermetic harness
 internal/beads 88s # bd subprocess, git repos and a Dolt container port; D1 rewrites the package
 internal/dog 82s # tests exec git (16 sites), hermetic harness
-internal/deacon 32s # hermetic harness; cause not yet diagnosed, moved on measured wall alone
 internal/testpolicy 38s # budget-tool integration checks spawn go test subprocesses; false-rejected a landing under load (gt-xo7vg)

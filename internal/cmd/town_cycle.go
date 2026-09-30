@@ -6,20 +6,16 @@ import (
 
 // getTownLevelSessions returns the town-level session names for the current workspace.
 func getTownLevelSessions() []string {
-	mayorSession := getMayorSessionName()
-	deaconSession := getDeaconSessionName()
-	return []string{mayorSession, deaconSession}
+	return []string{getMayorSessionName()}
 }
 
 // isTownLevelSession checks if the given session name is a town-level session.
-// Town-level sessions (Mayor, Deacon) use the "hq-" prefix, so we can identify
+// Town-level sessions (the Mayor) use the "hq-" prefix, so we can identify
 // them by name alone without requiring workspace context. This is critical for
 // tmux run-shell which may execute from outside the workspace directory.
 func isTownLevelSession(sessionName string) bool {
 	// Town-level sessions are identified by their fixed names
-	mayorSession := getMayorSessionName()   // "hq-mayor"
-	deaconSession := getDeaconSessionName() // "hq-deacon"
-	return sessionName == mayorSession || sessionName == deaconSession
+	return sessionName == getMayorSessionName() // "hq-mayor"
 }
 
 // cycleTownSession switches to the next or previous town-level session.

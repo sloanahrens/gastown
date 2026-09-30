@@ -7,8 +7,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/cli"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -324,100 +322,6 @@ func truncateDescription(desc string, maxLen int) string {
 		desc = "(no description)"
 	}
 	return desc
-}
-
-// outputMoleculeContext checks if the agent is working on a molecule step and
-// shows progress. patrolStatus is the result of prime's own ensurePrimePatrol
-// call (empty for a dry run, which skips it); the patrol branches render from
-// it instead of re-running discovery and seeding a second time (gt-e1ie).
-func outputMoleculeContext(ctx RoleContext, patrolStatus primePatrolStatus) {
-	// Applies to polecats, crew workers, deacon, and witness
-	if ctx.Role != RolePolecat && ctx.Role != RoleCrew && ctx.Role != RoleDeacon && ctx.Role != RoleWitness {
-		return
-	}
-
-	// For Deacon, use special patrol molecule handling
-	if ctx.Role == RoleDeacon {
-		outputDeaconPatrolContext(ctx, patrolStatus)
-		return
-	}
-
-	// For Witness, use special patrol molecule handling (auto-bonds on startup)
-	if ctx.Role == RoleWitness {
-		outputWitnessPatrolContext(ctx, patrolStatus)
-		return
-	}
-
-	// For polecats with root-only wisps, formula steps are shown inline
-	// in outputMoleculeWorkflow() via the attached_formula field.
-	// No child-based tracking needed.
-}
-
-// outputDeaconPatrolContext shows patrol molecule status for the Deacon.
-// Deacon uses wisps (Wisp:true issues in main .beads/) for patrol cycles.
-// Deacon is a town-level role, so it uses town root beads (not rig beads).
-func outputDeaconPatrolContext(ctx RoleContext, status primePatrolStatus) {
-	if status.Role == "" {
-		return
-	}
-	if status.Suspended != "" || status.PrecheckUncertain {
-		outputPatrolSuspended(status)
-		return
-	}
-	cfg := status.Config
-	cfg.HeaderEmoji = "🔄"
-	cfg.HeaderTitle = "Patrol Status (Wisp-based)"
-	cfg.WorkLoopSteps = patrolWorkLoopSteps(cfg.RoleName)
-	outputPatrolContext(cfg, status)
-	showFormulaStepsFull(constants.MolDeaconPatrol, ctx.TownRoot, ctx.Rig)
-}
-
-// outputWitnessPatrolContext shows patrol molecule status for the Witness.
-// Witness AUTO-BONDS its patrol molecule on startup if one isn't already running.
-func outputWitnessPatrolContext(ctx RoleContext, status primePatrolStatus) {
-	if status.Role == "" {
-		return
-	}
-	if status.Suspended != "" || status.PrecheckUncertain {
-		outputPatrolSuspended(status)
-		return
-	}
-	cfg := status.Config
-	cfg.HeaderEmoji = constants.EmojiWitness
-	cfg.HeaderTitle = "Witness Patrol Status"
-	cfg.WorkLoopSteps = patrolWorkLoopSteps(cfg.RoleName)
-	outputPatrolContext(cfg, status)
-	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig, cfg.ExtraVars)
-}
-
-// outputPatrolSuspended reports an operator stop, or an operator-stop check
-// that itself could not be confirmed (PrecheckUncertain) — both withhold the
-// checklist: whether a patrol should even run is unknown in either case, not
-// just whether one already exists.
-func outputPatrolSuspended(status primePatrolStatus) {
-	if status.Pause != nil {
-		outputDeaconPausedMessage(status.Pause)
-		return
-	}
-	if status.PrecheckUncertain {
-		fmt.Printf("\n❓ Patrol state unknown — %s. Not seeding until this clears; retry `%s prime`.\n", status.Uncertain, cli.Name())
-		return
-	}
-	fmt.Printf("\n⏸️  %s — skipping patrol wisp generation.\n", status.Suspended)
-}
-
-// buildWitnessPatrolVars returns --var key=value strings for the witness
-// patrol formula. Injects rig name and prefix so the formula can construct
-// agent bead IDs without hardcoding the "gt" prefix (gt-48ay).
-func buildWitnessPatrolVars(ctx RoleContext) []string {
-	var vars []string
-	if ctx.TownRoot == "" || ctx.Rig == "" {
-		return vars
-	}
-	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
-	prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
-	vars = append(vars, fmt.Sprintf("prefix=%s", prefix))
-	return vars
 }
 
 // applyFormulaOverlays loads and applies overlays to a parsed formula.

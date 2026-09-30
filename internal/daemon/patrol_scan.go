@@ -246,7 +246,7 @@ var _ patrolscan.Env = (*patrolScanHost)(nil)
 func (h *patrolScanHost) town() string { return h.d.config.TownRoot }
 
 func (h *patrolScanHost) seat(rig, name string) supervisor.Seat {
-	return supervisor.SeatFor(rig, constants.RolePolecat, name)
+	return supervisor.SeatIn(h.d.prefixRegistry(), rig, constants.RolePolecat, name)
 }
 
 func (h *patrolScanHost) sessionName(rig, name string) string {

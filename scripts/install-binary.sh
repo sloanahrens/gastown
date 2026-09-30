@@ -17,7 +17,7 @@
 # partial one. Creating the temp in the destination directory (rather than
 # /tmp, which is often a different filesystem) is what keeps the rename atomic.
 #
-# The unique temp name is load-bearing too. safe-install previously copied to a
+# The unique temp name is load-bearing too. The old safe-install copied to a
 # FIXED name (gt.new) and then renamed it; two concurrent installs would write
 # into the same temp file and one would rename the other's half-written copy
 # into place — the same defect, just moved.

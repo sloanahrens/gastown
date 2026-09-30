@@ -36,8 +36,8 @@ func TestNoShellBdWritesToAgentBeads(t *testing.T) {
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	packages := []string{
-		"internal/cmd", "internal/witness", "internal/daemon",
-		"internal/polecat", "internal/doctor", "internal/deacon", "internal/dog",
+		"internal/cmd", "internal/daemon", "internal/polecat",
+		"internal/doctor", "internal/dog",
 	}
 	var violations []string
 	for _, pkg := range packages {

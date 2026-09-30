@@ -260,10 +260,9 @@ func envLookup(env []string, key string) (string, int) {
 // TestLiveFireProbeEnv pins the probe's environment contract: the probe
 // asserts what a polecat session's settings do, so it must carry the
 // polecat agent-context marker and nothing of the invoking session's
-// identity. Inheriting a refinery's GT_REFINERY/GT_ROLE handed the child
-// the pr-workflow guard's merge-rehearsal exemption, so the blocked shape's
-// 'git checkout -b' succeeded and the check reported a false failure
-// (gt-xy4b).
+// identity. An inherited role identity can hand the child a guard exemption
+// meant for that role, so the blocked shape's 'git checkout -b' succeeds and
+// the check reports a false failure (gt-xy4b).
 func TestLiveFireProbeEnv(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -273,12 +272,11 @@ func TestLiveFireProbeEnv(t *testing.T) {
 		wantKept []string
 	}{
 		{
-			name: "refinery session",
+			name: "crew session",
 			environ: []string{
-				"GT_REFINERY=1",
-				"GT_ROLE=gastown/refinery",
+				"GT_CREW=max",
+				"GT_ROLE=gastown/crew/max",
 				"GT_RIG=gastown",
-				"GT_REFINERY_WORKER=refinery-2",
 				"PATH=/usr/bin",
 				"GT_ROOT=/town",
 				"GT_DOLT_PORT=3307",

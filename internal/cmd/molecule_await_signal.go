@@ -378,18 +378,10 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 		result.EffortLevel = "abbreviated"
 	}
 
-	// Record how this wait ended for a patrol role that cycles its session at
-	// a quiet boundary (claude-8w7): gt patrol report reads it, so the agent
-	// never has to remember it. at_cap uses the FULL window, not a resumed
-	// remainder.
-	recordAwaitSignalOutcomeFor(townRoot, r.role, result, fullTimeout, r.backoff.cap())
-
 	// Drain nudges queued for this session (gt-saz7a). Included in the JSON
 	// result so a --json caller doesn't lose them; printed as a
 	// system-reminder block below for the normal (human-readable) path.
-	// A role that cycles its session leaves them for gt patrol report, which
-	// knows whether the session survives (awaitSignalDrainNudges).
-	result.Nudges = awaitSignalDrainNudges(townRoot, r.role, r.drainNudges)
+	result.Nudges = r.drainNudges(townRoot)
 
 	// Output result
 	if r.json {

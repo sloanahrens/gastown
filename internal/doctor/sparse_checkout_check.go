@@ -90,7 +90,7 @@ func (c *SparseCheckoutCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // discoverRigPaths finds all rig directories in the town root.
-// Skips known non-rig directories (mayor, deacon, daemon, .git, etc.).
+// Skips known non-rig directories (mayor, deacon (dog kennel), daemon, .git, etc.).
 func (c *SparseCheckoutCheck) discoverRigPaths(townRoot string) []string {
 	entries, err := os.ReadDir(townRoot)
 	if err != nil {
@@ -121,7 +121,6 @@ func (c *SparseCheckoutCheck) discoverRigPaths(townRoot string) []string {
 func (c *SparseCheckoutCheck) checkRig(ctx *CheckContext, rigPath string) {
 	repoPaths := []string{
 		filepath.Join(rigPath, "mayor", "rig"),
-		filepath.Join(rigPath, "refinery", "rig"),
 	}
 
 	// Add crew clones

@@ -846,41 +846,46 @@ func TestModeABeaconVerificationCondition(t *testing.T) {
 
 func TestValidateSessionName(t *testing.T) {
 	t.Parallel()
-	// TestMain registers gt and gm, so validateSessionName can resolve them.
 
 	tests := []struct {
 		name        string
 		sessionName string
+		rigPrefix   string
 		rigName     string
 		wantErr     bool
 	}{
 		{
 			name:        "valid themed name",
 			sessionName: "gm-furiosa",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     false,
 		},
 		{
 			name:        "valid overflow name (new format)",
 			sessionName: "gm-51",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     false,
 		},
 		{
 			name:        "malformed double-prefix (bug)",
 			sessionName: "gm-gastown_manager-51",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     true,
 		},
 		{
 			name:        "malformed double-prefix gastown",
 			sessionName: "gt-gastown-142",
+			rigPrefix:   "gt",
 			rigName:     "gastown",
 			wantErr:     true,
 		},
 		{
 			name:        "different rig (can't validate)",
 			sessionName: "gt-other-rig-name",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     false,
 		},
@@ -888,7 +893,7 @@ func TestValidateSessionName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSessionName(tt.sessionName, tt.rigName)
+			err := validateSessionName(tt.sessionName, tt.rigPrefix, tt.rigName)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateSessionName() error = %v, wantErr %v", err, tt.wantErr)
 			}

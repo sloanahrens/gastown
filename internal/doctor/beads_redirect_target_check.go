@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// BeadsRedirectTargetCheck validates that .beads/redirect files in crew/polecat/refinery
+// BeadsRedirectTargetCheck validates that .beads/redirect files in crew/polecat
 // worktrees point to targets that actually exist and have a working beads setup.
 //
 // This catches setup issues when cloning to a new machine where redirects might
@@ -234,7 +234,7 @@ func (c *BeadsRedirectTargetCheck) Fix(ctx *CheckContext) error {
 }
 
 // extractRigName derives the rig name from a worktree path within a town.
-// For example, "/town/myrig/refinery/rig" returns "myrig".
+// For example, "/town/myrig/crew/max" returns "myrig".
 func extractRigName(townRoot, worktreePath string) string {
 	relPath, err := filepath.Rel(townRoot, worktreePath)
 	if err != nil {

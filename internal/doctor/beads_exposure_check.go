@@ -66,7 +66,7 @@ func (c *BeadsExposureCheck) Run(ctx *CheckContext) *CheckResult {
 	seen := map[string]bool{}
 
 	for _, rigPath := range rigs {
-		for _, clonePath := range findBeadsClones(rigPath) {
+		for _, clonePath := range findRigClones(rigPath) {
 			if seen[clonePath] {
 				continue
 			}
@@ -186,20 +186,4 @@ func beadsUntrackedAndUnignored(g Repo) probeResult {
 		return probeExposed
 	}
 	return probeProtected
-}
-
-// findBeadsClones returns the clones in a rig that hold a .beads/ directory:
-// the standard clones (mayor, refinery, crew, polecats) plus the witness
-// agent's clone. witnessDir (internal/witness) prefers witness/rig/ for
-// legacy witness clones and falls back to witness/ itself; either layout can
-// hold a .beads/ (worktree-local or redirect-provisioned), so both are
-// enumerated. findRigClones is deliberately left as-is — it is shared with
-// the hooks-path check, and both paths are deduped by Run.
-func findBeadsClones(rigPath string) []string {
-	clones := findRigClones(rigPath)
-	clones = append(clones,
-		filepath.Join(rigPath, "witness", "rig"),
-		filepath.Join(rigPath, "witness"),
-	)
-	return clones
 }
