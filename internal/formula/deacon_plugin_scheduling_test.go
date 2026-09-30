@@ -18,6 +18,7 @@ import (
 // pinned here is that the step describes the daemon's ownership and points at
 // the manual trigger, rather than re-deriving gates itself.
 func TestDeaconPatrolDoesNotSchedulePlugins(t *testing.T) {
+	t.Parallel()
 	raw, err := GetEmbeddedFormulaContent("mol-deacon-patrol")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent(mol-deacon-patrol): %v", err)

@@ -18,6 +18,7 @@ var findingsWriteRE = regexp.MustCompile(`bd update[^\n]*?(--append-notes|--note
 // (mol-polecat-work's load-context) greps notes for the MERGE REJECTION
 // marker and the Branch: line, so a resumed bead needs both blocks intact.
 func TestFormulaNotesWritesAppend(t *testing.T) {
+	t.Parallel()
 	files, err := fs.Glob(formulasFS, "formulas/*.formula.toml")
 	if err != nil {
 		t.Fatalf("globbing embedded formulas: %v", err)

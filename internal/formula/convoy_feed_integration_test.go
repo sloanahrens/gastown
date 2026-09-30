@@ -22,10 +22,11 @@ import (
 // 3. The convoy input variable is marked as required
 // 4. Computed variables have empty defaults (not required as inputs)
 func TestConvoyFeedWorkflow_Integration(t *testing.T) {
+	t.Parallel()
 	formulaPath := filepath.Join("formulas", constants.MolConvoyFeed+".formula.toml")
 	data, err := os.ReadFile(formulaPath)
 	if err != nil {
-		t.Skipf("Formula file not found: %v", err)
+		t.Fatalf("Formula file not found: %v", err)
 	}
 
 	// Step 1: Parse the formula
@@ -97,12 +98,14 @@ func TestConvoyFeedWorkflow_Integration(t *testing.T) {
 // Deacon's dogs) can pass variable validation for wisp creation.
 //
 // Dog formulas are special because they're invoked via:
-//   gt sling mol-<name> deacon/dogs/<dog> --var convoy=<id>
+//
+//	gt sling mol-<name> deacon/dogs/<dog> --var convoy=<id>
 //
 // The wisp creation validates that all template variables are either:
 // - Provided via --var flags, OR
 // - Defined in [vars] with a default value
 func TestAllDogFormulas_CanBeWisped(t *testing.T) {
+	t.Parallel()
 	dogFormulas := []string{
 		constants.MolConvoyFeed,
 		constants.MolConvoyCleanup,
@@ -117,7 +120,7 @@ func TestAllDogFormulas_CanBeWisped(t *testing.T) {
 			path := filepath.Join(formulasDir, name+".formula.toml")
 			data, err := os.ReadFile(path)
 			if err != nil {
-				t.Skipf("Formula not found: %v", err)
+				t.Fatalf("Formula not found: %v", err)
 			}
 
 			f, err := Parse(data)
@@ -148,6 +151,7 @@ func TestAllDogFormulas_CanBeWisped(t *testing.T) {
 // TestPolecatFormulas_CanBeWisped verifies that polecat formulas pass variable validation.
 // These formulas are used when spawning polecats for code review and PR review tasks.
 func TestPolecatFormulas_CanBeWisped(t *testing.T) {
+	t.Parallel()
 	polecatFormulas := []struct {
 		name         string
 		requiredVars []string
@@ -168,7 +172,7 @@ func TestPolecatFormulas_CanBeWisped(t *testing.T) {
 			path := filepath.Join(formulasDir, tc.name+".formula.toml")
 			data, err := os.ReadFile(path)
 			if err != nil {
-				t.Skipf("Formula not found: %v", err)
+				t.Fatalf("Formula not found: %v", err)
 			}
 
 			f, err := Parse(data)
@@ -195,4 +199,3 @@ func TestPolecatFormulas_CanBeWisped(t *testing.T) {
 		})
 	}
 }
-

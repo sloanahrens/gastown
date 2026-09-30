@@ -8,6 +8,7 @@ import (
 )
 
 func TestParse_Workflow(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 description = "Test workflow"
 formula = "test-workflow"
@@ -57,6 +58,7 @@ required = true
 }
 
 func TestParse_Convoy(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 description = "Test convoy"
 formula = "test-convoy"
@@ -104,6 +106,7 @@ depends_on = ["leg1", "leg2"]
 }
 
 func TestParse_Expansion(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 description = "Test expansion"
 formula = "test-expansion"
@@ -139,6 +142,7 @@ needs = ["{target}.draft"]
 }
 
 func TestParse_WorkflowWithAcceptance(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 description = "Test workflow with acceptance"
 formula = "test-acceptance"
@@ -188,6 +192,7 @@ needs = ["implement"]
 }
 
 func TestParse_PourFlag(t *testing.T) {
+	t.Parallel()
 	// pour = true: steps should be materialized as sub-wisps
 	data := []byte(`
 description = "Test pour workflow"
@@ -213,6 +218,7 @@ description = "Do the first thing"
 }
 
 func TestParse_PourFlagDefault(t *testing.T) {
+	t.Parallel()
 	// Default: pour is false (inline/root-only)
 	data := []byte(`
 description = "Test inline workflow"
@@ -237,6 +243,7 @@ description = "Do the first thing"
 }
 
 func TestValidate_MissingName(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 type = "workflow"
 version = 1
@@ -252,6 +259,7 @@ title = "Step"
 }
 
 func TestValidate_InvalidType(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 formula = "test"
 type = "invalid"
@@ -267,6 +275,7 @@ id = "step1"
 }
 
 func TestValidate_DuplicateStepID(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 formula = "test"
 type = "workflow"
@@ -286,6 +295,7 @@ title = "Step 1 duplicate"
 }
 
 func TestValidate_UnknownDependency(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 formula = "test"
 type = "workflow"
@@ -303,6 +313,7 @@ needs = ["nonexistent"]
 }
 
 func TestValidate_Cycle(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 formula = "test"
 type = "workflow"
@@ -324,6 +335,7 @@ needs = ["step1"]
 }
 
 func TestTopologicalSort(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 formula = "test"
 type = "workflow"
@@ -370,6 +382,7 @@ needs = ["step1"]
 }
 
 func TestReadySteps(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 formula = "test"
 type = "workflow"
@@ -422,6 +435,7 @@ needs = ["step2", "step3"]
 }
 
 func TestConvoyReadySteps(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 formula = "test"
 type = "convoy"
@@ -525,6 +539,7 @@ description = "No agent override"
 // shiny-enterprise formula: inheriting steps from shiny and expanding the
 // "implement" step with the rule-of-five template.
 func TestResolve_ShinyEnterprise(t *testing.T) {
+	t.Parallel()
 	data, err := GetEmbeddedFormulaContent("shiny-enterprise")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
@@ -590,6 +605,7 @@ func TestResolve_ShinyEnterprise(t *testing.T) {
 // TestResolve_ShinySecure verifies that shiny-secure (extends shiny, aspects only)
 // resolves to the shiny steps without error.
 func TestResolve_ShinySecure(t *testing.T) {
+	t.Parallel()
 	data, err := GetEmbeddedFormulaContent("shiny-secure")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
@@ -619,6 +635,7 @@ func TestResolve_ShinySecure(t *testing.T) {
 
 // TestResolve_CycleDetection verifies that circular extends chains are rejected.
 func TestResolve_CycleDetection(t *testing.T) {
+	t.Parallel()
 	// Create two formulas that extend each other via a temp directory.
 	dir := t.TempDir()
 
@@ -657,6 +674,7 @@ extends = ["cycle-a"]
 
 // TestResolve_NoExtends verifies formulas without extends pass through unchanged.
 func TestResolve_NoExtends(t *testing.T) {
+	t.Parallel()
 	data, err := GetEmbeddedFormulaContent("shiny")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
@@ -679,6 +697,7 @@ func TestResolve_NoExtends(t *testing.T) {
 // TestParse_ExpansionWithAcceptance verifies that expansion templates can define
 // acceptance criteria and that they propagate to generated steps.
 func TestParse_ExpansionWithAcceptance(t *testing.T) {
+	t.Parallel()
 	data := []byte(`
 description = "Expansion with acceptance"
 formula = "test-acceptance-expansion"
@@ -782,6 +801,7 @@ needs = ["work"]
 
 // TestResolve_TDDCycle verifies the tdd-cycle expansion formula parses and validates.
 func TestResolve_TDDCycle(t *testing.T) {
+	t.Parallel()
 	data, err := GetEmbeddedFormulaContent("tdd-cycle")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
@@ -818,6 +838,7 @@ func TestResolve_TDDCycle(t *testing.T) {
 // TestResolve_MonorepoTDD verifies mol-polecat-work-monorepo-tdd resolves correctly:
 // the implement step is expanded into 5 TDD sub-steps.
 func TestResolve_MonorepoTDD(t *testing.T) {
+	t.Parallel()
 	data, err := GetEmbeddedFormulaContent("mol-polecat-work-monorepo-tdd")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
