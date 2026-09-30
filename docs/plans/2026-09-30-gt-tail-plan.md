@@ -92,3 +92,4 @@ func parseTailKinds(s string) (map[string]bool, error)
 - **Landings contract:** the d2-land plan never gained a "Landings file contract" section; its code (`internal/land` LandingRecord at ca8f8046) is the contract. It has `bead` and `landed_at`, no `actor`.
 - **Live check (town parked, 2026-09-29):** every store answers `events-journal=false` and the journal holds no records; `--since 1d --kind daemon` printed 10292 lines in about 1s; the default run took 3s (two bd calls per store).
 - **Deferred:** line-length caps on daemon.log and landings reads (a single unterminated line is buffered whole); DST-ambiguous daemon.log hour; a rotation between the backlog's backup listing and the daemon.log open loses those lines.
+- **Retry under the cutoff (om final):** a source whose first read fails keeps treating its next read as the backlog, so `--since` still applies; the daemon source reads its backups once. Each has a test.
