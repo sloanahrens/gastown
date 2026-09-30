@@ -3805,6 +3805,20 @@ func (t *Tmux) matchesPaneRuntimeChecked(session, cmd, pid string, processNames 
 // A non-nil error means the answer is UNKNOWN, not dead. Callers that kill,
 // restart, respawn or send keys act only on (false, nil) (gt-fcxe9.1).
 func (t *Tmux) IsAgentAliveChecked(session string) (bool, error) {
+	// A session that does not exist has no agent in it: dead, never unknown.
+	// The environment reads below cannot make that distinction — tmux answers
+	// a missing session's show-environment with "no such session", which is
+	// neither a missing variable (getEnvironmentOptional) nor ErrSessionNotFound
+	// (wrapError) — so the query came back an error, and a caller that fails
+	// safe on an error read the exited session as alive (gt-7jblf).
+	exists, err := t.HasSession(session)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+
 	processNames, err := t.resolveSessionProcessNamesChecked(session)
 	if err != nil {
 		return false, err
