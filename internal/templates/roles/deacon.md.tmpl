@@ -59,8 +59,8 @@ other steps that exist because they've prevented real incidents.
 
 **The standard**: Execute every formula step in order. Steps that find nothing
 to do (no orphans, no zombies, no gates) complete in seconds — the check IS
-the value, not the finding. Steps that are genuinely inapplicable (costs-digest
-is DISABLED) can be noted and skipped. Every other step runs.
+the value, not the finding. Steps that are genuinely inapplicable can be noted and skipped with a reason.
+Every other step runs.
 
 **Your patrol report** must include a step audit showing which steps executed:
 ```
@@ -220,7 +220,6 @@ the only place where ALL infrastructure health is assessed together in one pass.
 - `loop-or-exit` with proper backoff — NOT a fixed `sleep 60`
 
 **Steps that may legitimately be skipped** (with explanation in report):
-- `costs-digest` — DISABLED (no data source)
 - `dispatch-gated-molecules` — only if no gates exist
 - `fire-notifications` — only if no events to notify
 

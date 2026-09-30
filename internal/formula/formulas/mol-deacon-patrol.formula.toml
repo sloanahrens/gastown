@@ -673,7 +673,7 @@ gt rig status <rig>
 ```
 
 DOCKED rigs are intentionally offline (Mayor or human docked them). Do NOT:
-- Check their witness/refinery status
+- Check their witness status
 - Send health pings
 - Attempt restarts
 - Undock the rig (NEVER run `gt rig undock`)
