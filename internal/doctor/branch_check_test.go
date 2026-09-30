@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 func TestParseWorktreeConflict(t *testing.T) {
@@ -62,51 +64,24 @@ func TestParseWorktreeConflict(t *testing.T) {
 	}
 }
 
-// initBareWithCommit creates a bare repo with an initial commit on the main branch.
-func initBareWithCommit(t *testing.T, bareRepo string) {
-	t.Helper()
-
-	// Create a temporary regular repo, commit, then push to the bare repo
-	tmpInit := bareRepo + "-init"
-	runGit(t, "", "init", "-b", "main", tmpInit)
-	runGit(t, tmpInit, "commit", "--allow-empty", "-m", "initial commit")
-	runGit(t, tmpInit, "remote", "add", "bare", bareRepo)
-	runGit(t, tmpInit, "push", "bare", "main")
-	os.RemoveAll(tmpInit)
-}
-
-// TestCheckoutWithWorktreeRetry_BareRepoConflict sets up a real bare repo with
-// a worktree and verifies the retry path works. Note: whether git actually
-// blocks the checkout depends on git version (some versions allow checkout of
-// a branch that's only referenced by a bare repo's HEAD). This test verifies
-// the checkout succeeds regardless.
+// A branch a bare repository's HEAD names (.repo.git on main) is free for a
+// worktree to check out: git does not count a bare HEAD as checked out, so
+// the switch succeeds without the detach-and-retry.
 func TestCheckoutWithWorktreeRetry_BareRepoConflict(t *testing.T) {
 	t.Parallel()
+	f := gitfake.New()
 	tmpDir := t.TempDir()
-
-	// Create a bare repo (simulating .repo.git)
-	bareRepo := filepath.Join(tmpDir, "rig", ".repo.git")
-	runGit(t, "", "init", "--bare", "-b", "main", bareRepo)
-	initBareWithCommit(t, bareRepo)
-
-	// Bare repo now has main branch. Ensure HEAD points to it.
-	runGit(t, bareRepo, "symbolic-ref", "HEAD", "refs/heads/main")
-
-	// Create a worktree (simulating refinery/rig) on a different branch
+	bareRepo := fakeRemote(t, f, filepath.Join(tmpDir, "rig", ".repo.git"), nil)
 	worktreeDir := filepath.Join(tmpDir, "rig", "refinery", "rig")
-	runGit(t, bareRepo, "worktree", "add", "-b", "integration/test", worktreeDir)
-
-	// Attempt to switch the worktree to main. Whether this triggers the
-	// retry path depends on git version, but either way it must succeed.
-	check := NewBranchCheck()
-	err := check.checkoutWithWorktreeRetry(worktreeDir, "main")
-	if err != nil {
-		t.Fatalf("checkoutWithWorktreeRetry should succeed, got: %v", err)
+	if err := f.OpenBranchRepo(bareRepo).WorktreeAddFromRef(worktreeDir, "integration/test", "main"); err != nil {
+		t.Fatal(err)
 	}
 
-	// Verify the worktree is now on main
-	branch := getCurrentBranchHelper(t, worktreeDir)
-	if branch != "main" {
+	ctx := withGit(&CheckContext{}, f)
+	if err := NewBranchCheck().checkoutWithWorktreeRetry(ctx, worktreeDir, "main"); err != nil {
+		t.Fatalf("checkoutWithWorktreeRetry should succeed, got: %v", err)
+	}
+	if branch, _ := f.OpenBranchRepo(worktreeDir).CurrentBranch(); branch != "main" {
 		t.Errorf("expected worktree to be on 'main', got %q", branch)
 	}
 }
@@ -115,25 +90,21 @@ func TestCheckoutWithWorktreeRetry_BareRepoConflict(t *testing.T) {
 // with non-bare repos produce a clear error instead of silently failing.
 func TestCheckoutWithWorktreeRetry_NonBareRepoConflict(t *testing.T) {
 	t.Parallel()
+	f := gitfake.New()
 	tmpDir := t.TempDir()
-
-	// Create a regular (non-bare) repo with main branch
 	mainRepo := filepath.Join(tmpDir, "main-clone")
-	runGit(t, "", "init", "-b", "main", mainRepo)
-	runGit(t, mainRepo, "commit", "--allow-empty", "-m", "initial")
-
-	// Create a worktree from the regular repo
+	fakeClone(t, f, mainRepo)
 	worktreeDir := filepath.Join(tmpDir, "worktree")
-	runGit(t, mainRepo, "worktree", "add", "-b", "feature", worktreeDir)
+	if err := f.OpenBranchRepo(mainRepo).WorktreeAddFromRef(worktreeDir, "feature", "main"); err != nil {
+		t.Fatal(err)
+	}
 
-	check := NewBranchCheck()
-	err := check.checkoutWithWorktreeRetry(worktreeDir, "main")
+	err := NewBranchCheck().checkoutWithWorktreeRetry(withGit(&CheckContext{}, f), worktreeDir, "main")
 	if err == nil {
 		t.Fatal("expected error for non-bare repo conflict, got nil")
 	}
-
-	if !strings.Contains(err.Error(), "not a bare repo") {
-		t.Errorf("expected error to mention 'not a bare repo', got: %v", err)
+	if !strings.Contains(err.Error(), "not a bare repo") || !strings.Contains(err.Error(), mainRepo) {
+		t.Errorf("expected error to mention 'not a bare repo' and the holder, got: %v", err)
 	}
 }
 
@@ -141,22 +112,17 @@ func TestCheckoutWithWorktreeRetry_NonBareRepoConflict(t *testing.T) {
 // (no worktree conflict) still works.
 func TestCheckoutWithWorktreeRetry_NormalCheckout(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-
-	// Create a regular repo with two branches
-	repo := filepath.Join(tmpDir, "repo")
-	runGit(t, "", "init", "-b", "main", repo)
-	runGit(t, repo, "commit", "--allow-empty", "-m", "initial")
-	runGit(t, repo, "checkout", "-b", "feature")
-
-	check := NewBranchCheck()
-	err := check.checkoutWithWorktreeRetry(repo, "main")
-	if err != nil {
-		t.Fatalf("expected normal checkout to succeed, got: %v", err)
+	f := gitfake.New()
+	repo := filepath.Join(t.TempDir(), "repo")
+	fakeClone(t, f, repo)
+	if err := f.OpenBranchRepo(repo).CheckoutNewBranch("feature", "HEAD"); err != nil {
+		t.Fatal(err)
 	}
 
-	branch := getCurrentBranchHelper(t, repo)
-	if branch != "main" {
+	if err := NewBranchCheck().checkoutWithWorktreeRetry(withGit(&CheckContext{}, f), repo, "main"); err != nil {
+		t.Fatalf("expected normal checkout to succeed, got: %v", err)
+	}
+	if branch, _ := f.OpenBranchRepo(repo).CurrentBranch(); branch != "main" {
 		t.Errorf("expected repo to be on 'main', got %q", branch)
 	}
 }
@@ -164,20 +130,16 @@ func TestCheckoutWithWorktreeRetry_NormalCheckout(t *testing.T) {
 // TestCheckoutWithWorktreeRetry_BranchNotFound verifies clear error for missing branch.
 func TestCheckoutWithWorktreeRetry_BranchNotFound(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
+	f := gitfake.New()
+	repo := filepath.Join(t.TempDir(), "repo")
+	fakeClone(t, f, repo)
 
-	repo := filepath.Join(tmpDir, "repo")
-	runGit(t, "", "init", "-b", "main", repo)
-	runGit(t, repo, "commit", "--allow-empty", "-m", "initial")
-
-	check := NewBranchCheck()
-	err := check.checkoutWithWorktreeRetry(repo, "nonexistent-branch")
+	err := NewBranchCheck().checkoutWithWorktreeRetry(withGit(&CheckContext{}, f), repo, "nonexistent-branch")
 	if err == nil {
 		t.Fatal("expected error for nonexistent branch, got nil")
 	}
-
-	if !strings.Contains(err.Error(), "git checkout nonexistent-branch failed") {
-		t.Errorf("expected error about failed checkout, got: %v", err)
+	if !strings.Contains(err.Error(), "git checkout nonexistent-branch failed") || !strings.Contains(err.Error(), "did not match") {
+		t.Errorf("expected error about failed checkout carrying git's message, got: %v", err)
 	}
 }
 
@@ -197,18 +159,6 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v (dir=%s) failed: %v\n%s", args, dir, err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// getCurrentBranchHelper returns the current branch for a directory.
-func getCurrentBranchHelper(t *testing.T, dir string) string {
-	t.Helper()
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("failed to get branch for %s: %v", dir, err)
 	}
 	return strings.TrimSpace(string(out))
 }

@@ -81,6 +81,10 @@ type CheckContext struct {
 	// openRepair opens the bd client fixers write repairs through. Nil
 	// means the real bd CLI (see repair); tests record the calls.
 	openRepair bdRepairOpener
+
+	// openGit opens the git checks inspect and repair repositories through.
+	// Nil means the real git (git.NewGitWithDir); tests set gitfake.
+	openGit repoOpener
 }
 
 // RigPath returns the full path to the rig directory.

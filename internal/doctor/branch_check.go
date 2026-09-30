@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -40,7 +39,7 @@ func (c *BranchCheck) Run(ctx *CheckContext) *CheckResult {
 	dirs := c.findPersistentRoleDirs(ctx.TownRoot)
 
 	for _, dir := range dirs {
-		branch, err := c.getCurrentBranch(dir)
+		branch, err := c.getCurrentBranch(ctx, dir)
 		if err != nil {
 			// Skip directories that aren't git repos
 			continue
@@ -56,7 +55,7 @@ func (c *BranchCheck) Run(ctx *CheckContext) *CheckResult {
 	// Cache for Fix
 	c.offMainDirs = nil
 	for _, dir := range dirs {
-		branch, err := c.getCurrentBranch(dir)
+		branch, err := c.getCurrentBranch(ctx, dir)
 		if err != nil {
 			continue
 		}
@@ -100,15 +99,13 @@ func (c *BranchCheck) Fix(ctx *CheckContext) error {
 	for _, dir := range c.offMainDirs {
 		targetBranch := c.expectedBranch(ctx.TownRoot, dir)
 
-		if err := c.checkoutWithWorktreeRetry(dir, targetBranch); err != nil {
+		if err := c.checkoutWithWorktreeRetry(ctx, dir, targetBranch); err != nil {
 			lastErr = err
 			continue
 		}
 
 		// git pull --rebase
-		cmd := exec.Command("git", "pull", "--rebase")
-		cmd.Dir = dir
-		if err := cmd.Run(); err != nil {
+		if err := ctx.git(dir).PullRebase(); err != nil {
 			// Pull failure is not fatal, just warn
 			continue
 		}
@@ -120,19 +117,19 @@ func (c *BranchCheck) Fix(ctx *CheckContext) error {
 // checkoutWithWorktreeRetry attempts git checkout, and if it fails because the
 // branch is already checked out in another worktree (typically .repo.git), it
 // detaches that worktree's HEAD to free the branch and retries.
-func (c *BranchCheck) checkoutWithWorktreeRetry(dir, branch string) error {
-	cmd := exec.Command("git", "checkout", branch) //nolint:gosec // G204: branch name from config
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
+func (c *BranchCheck) checkoutWithWorktreeRetry(ctx *CheckContext, dir, branch string) error {
+	g := ctx.git(dir)
+	err := g.Checkout(branch)
 	if err == nil {
 		return nil
 	}
+	output := gitOutput(err)
 
 	// Check if failure is due to worktree branch conflict.
 	// Git error looks like: fatal: 'main' is already checked out at '/path/to/.repo.git'
-	conflictPath := parseWorktreeConflict(string(output))
+	conflictPath := parseWorktreeConflict(output)
 	if conflictPath == "" {
-		return fmt.Errorf("%s: git checkout %s failed: %s", dir, branch, strings.TrimSpace(string(output)))
+		return fmt.Errorf("%s: git checkout %s failed: %s", dir, branch, output)
 	}
 
 	// Only auto-resolve conflicts with bare repos (.repo.git).
@@ -144,18 +141,15 @@ func (c *BranchCheck) checkoutWithWorktreeRetry(dir, branch string) error {
 
 	// Detach the bare repo's HEAD to free the branch.
 	// We use checkout --detach which points HEAD at the current commit without a branch.
-	detachCmd := exec.Command("git", "-C", conflictPath, "checkout", "--detach") //nolint:gosec // G204: path from git output
-	if detachOutput, detachErr := detachCmd.CombinedOutput(); detachErr != nil {
+	if detachErr := ctx.git(conflictPath).CheckoutDetach("HEAD"); detachErr != nil {
 		return fmt.Errorf("%s: cannot detach HEAD in %s to free branch %q: %s",
-			dir, conflictPath, branch, strings.TrimSpace(string(detachOutput)))
+			dir, conflictPath, branch, gitOutput(detachErr))
 	}
 
 	// Retry the checkout now that the branch is freed.
-	retryCmd := exec.Command("git", "checkout", branch) //nolint:gosec // G204: branch name from config
-	retryCmd.Dir = dir
-	if retryOutput, retryErr := retryCmd.CombinedOutput(); retryErr != nil {
+	if retryErr := g.Checkout(branch); retryErr != nil {
 		return fmt.Errorf("%s: git checkout %s failed after detaching %s: %s",
-			dir, branch, conflictPath, strings.TrimSpace(string(retryOutput)))
+			dir, branch, conflictPath, gitOutput(retryErr))
 	}
 
 	return nil
@@ -290,14 +284,8 @@ func (c *BranchCheck) isRig(path string) bool {
 }
 
 // getCurrentBranch returns the current git branch for a directory.
-func (c *BranchCheck) getCurrentBranch(dir string) (string, error) {
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
+func (c *BranchCheck) getCurrentBranch(ctx *CheckContext, dir string) (string, error) {
+	return currentBranch(ctx.git(dir))
 }
 
 // relativePath returns path relative to base, or the full path if that fails.
@@ -350,7 +338,7 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	// Gather info about each clone
 	var infos []cloneInfo
 	for _, path := range clones {
-		info, err := c.getCloneInfo(path)
+		info, err := c.getCloneInfo(ctx, path)
 		if err != nil {
 			continue // Skip problematic clones
 		}
@@ -489,41 +477,23 @@ func (c *CloneDivergenceCheck) isGitRepo(path string) bool {
 }
 
 // getCloneInfo gathers information about a clone.
-func (c *CloneDivergenceCheck) getCloneInfo(path string) (cloneInfo, error) {
+func (c *CloneDivergenceCheck) getCloneInfo(ctx *CheckContext, path string) (cloneInfo, error) {
 	info := cloneInfo{path: path}
+	g := ctx.git(path)
 
-	// Get current branch
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = path
-	out, err := cmd.Output()
+	branch, err := currentBranch(g)
 	if err != nil {
 		return info, err
 	}
-	info.branch = strings.TrimSpace(string(out))
+	info.branch = branch
 
-	// Get HEAD SHA
-	cmd = exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = path
-	out, err = cmd.Output()
-	if err != nil {
+	if info.headSHA, err = g.Rev("HEAD"); err != nil {
 		return info, err
 	}
-	info.headSHA = strings.TrimSpace(string(out))
 
-	// Count commits behind origin/main (uses existing refs, may be stale)
-	cmd = exec.Command("git", "rev-list", "--count", "HEAD..origin/main")
-	cmd.Dir = path
-	out, err = cmd.Output()
-	if err != nil {
-		// origin/main might not exist, treat as 0 behind
-		info.behindBy = 0
-		return info, nil
-	}
-
-	var behind int
-	_, _ = fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &behind)
-	info.behindBy = behind
-
+	// Count commits behind origin/main (uses existing refs, may be stale);
+	// origin/main might not exist, which counts as 0 behind.
+	info.behindBy, _ = g.CountCommitsBehind("origin/main")
 	return info, nil
 }
 
