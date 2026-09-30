@@ -58,6 +58,8 @@ lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint exits in 5s naming the module lock; the gate and gt done wait it out and retry)"
 	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
+	@echo "lint: repo guards (replace directives, tracked issues.jsonl; carried over from upstream CI)"
+	bash scripts/repo-guards.sh
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
 
@@ -320,6 +322,8 @@ test-makefile:
 	bash plugins/seat-refill/run_test.sh
 	bash -n scripts/docs-lint.sh
 	bash scripts/docs-lint_test.sh
+	bash -n scripts/repo-guards.sh
+	bash scripts/repo-guards_test.sh
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

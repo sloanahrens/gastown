@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
 func TestMemorySummary(t *testing.T) {
@@ -680,5 +682,40 @@ func TestParseBdKvListJSONMalformed(t *testing.T) {
 	t.Parallel()
 	if _, err := parseBdKvListJSON([]byte(`{"gt.project.note":`)); err == nil {
 		t.Fatal("parseBdKvListJSON() error = nil, want malformed JSON error")
+	}
+}
+
+// TestRenderMemoryIndex_KeysAreBdKvGetArguments pins the retrieval path the
+// index advertises. Every rendered entry must be a kv key exactly as stored,
+// in both namespaces, so `bd kv get <key>` takes it verbatim; and `bd kv get`
+// must exist in the bd command surface this repo is linted against.
+func TestRenderMemoryIndex_KeysAreBdKvGetArguments(t *testing.T) {
+	t.Parallel()
+	kvs := map[string]string{
+		memoryKeyPrefix + "feedback.always-race":       "Run tests with -race.",
+		memoryKeyPrefix + "legacy-untyped":             "An untyped gt.* memory.",
+		memoryLegacyKeyPrefix + "project.merge-freeze": "Freeze merges on Fridays.",
+		memoryLegacyKeyPrefix + "dolt-phantoms":        "Phantom DBs hide in three places.",
+	}
+	out := renderMemoryIndex(collectMemories(kvs), memoryInjectMaxChars)
+
+	entry := regexp.MustCompile(`(?m)^- \*\*(.+?)\*\*: `)
+	var rendered []string
+	for _, m := range entry.FindAllStringSubmatch(out, -1) {
+		rendered = append(rendered, m[1])
+		if _, ok := kvs[m[1]]; !ok {
+			t.Errorf("index entry %q is not a stored kv key, so bd kv get cannot fetch it:\n%s", m[1], out)
+		}
+	}
+	if len(rendered) != len(kvs) {
+		t.Errorf("rendered %d entries %v, want %d:\n%s", len(rendered), rendered, len(kvs), out)
+	}
+
+	bdTree, _, err := cmdtree.LoadBdTree()
+	if err != nil {
+		t.Fatalf("LoadBdTree: %v", err)
+	}
+	if r := bdTree.Resolve([]string{"kv", "get"}); !r.OK {
+		t.Errorf("bd kv get does not resolve in the bd command tree: %+v", r)
 	}
 }

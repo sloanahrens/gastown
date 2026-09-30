@@ -1,4 +1,4 @@
-> Status: in progress (2026-09-29), gt-638go.6. Historical once merged; not maintained.
+> Status: historical (2026-09). Merged in: gt-638go.6. Not maintained.
 
 # D7 dead-surface deletion (gt-638go.6) Implementation Plan
 

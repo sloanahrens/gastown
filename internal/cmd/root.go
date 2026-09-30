@@ -204,7 +204,7 @@ func isCommandOrAncestorExempt(cmd *cobra.Command, exemptions map[string]bool) b
 
 // isDoneCommand reports whether cmd is the top-level `gt done` command.
 // It must not match subcommands that merely share the name — `gt dog done`,
-// `gt wl done`, `gt mol step done` — or they would trip the polecat-only
+// `gt mol step done` — or they would trip the polecat-only
 // worktree guard and skip telemetry init (gt-lt7).
 func isDoneCommand(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Name() == "done" &&

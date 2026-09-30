@@ -3,6 +3,8 @@ package cmd
 import (
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // deletedCommands lists command paths removed as dead or duplicate surface
@@ -69,11 +71,39 @@ var deletedCommands = [][]string{
 //
 // Not parallel: it walks the shared rootCmd, which other tests execute.
 func TestDeletedCommandsGone(t *testing.T) {
-	for _, path := range deletedCommands {
-		want := "gt " + strings.Join(path, " ")
-		c, _, err := rootCmd.Find(path)
-		if err == nil && c != nil && c.CommandPath() == want {
-			t.Errorf("%q resolves in the command tree; it was deleted in gt-638go.6", want)
+	// Positive control: the same lookup must find commands that stayed, or a
+	// broken lookup would pass every deleted path vacuously. These are the
+	// survivors of the clusters the deletions thinned.
+	for _, path := range [][]string{{"convoy", "check"}, {"convoy", "close"}, {"dolt", "status"}, {"cycle", "next"}, {"crew", "start"}, {"show"}, {"up"}, {"feed"}} {
+		if !resolvesExactly(path) {
+			t.Errorf("live command %q does not resolve; the lookup is broken", "gt "+strings.Join(path, " "))
 		}
 	}
+	for _, path := range deletedCommands {
+		if resolvesExactly(path) {
+			t.Errorf("%q resolves in the command tree; it was deleted in gt-638go.6", "gt "+strings.Join(path, " "))
+		}
+	}
+}
+
+// resolvesExactly reports whether path names a command in rootCmd, as opposed
+// to Find stopping on a parent or the root.
+func resolvesExactly(path []string) bool {
+	c, _, err := rootCmd.Find(path)
+	return err == nil && c != nil && c.CommandPath() == "gt "+strings.Join(path, " ")
+}
+
+// TestNoPolecatSafeAnnotation pins the proxy removal: the polecatSafe
+// annotation's only reader was gt proxy-subcmds, so no command may carry it.
+func TestNoPolecatSafeAnnotation(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if _, ok := c.Annotations["polecatSafe"]; ok {
+			t.Errorf("%q still carries the polecatSafe annotation, which nothing reads", c.CommandPath())
+		}
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(rootCmd)
 }

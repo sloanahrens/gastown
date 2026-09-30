@@ -215,9 +215,7 @@ Beads data falls into three planes with different characteristics:
 The operational plane lives entirely in the local Dolt server. The ledger
 plane is currently served by the JSONL Dog, which exports scrubbed snapshots
 to a git-backed archive every 15 minutes — this is the durable record that
-survives disasters (proven in Clown Show #13). The design plane will
-federate via DoltHub as part of the Wasteland commons (planned, not yet
-in active development).
+survives disasters (proven in Clown Show #13).
 
 ## Data Lifecycle: Think Git, Not SQL (CRITICAL)
 
@@ -725,12 +723,6 @@ Dolt server stays up throughout.
        printf '%s ' "$DB"; dq --use-db "$DB" sql -r csv -q "SELECT COUNT(*) FROM dolt_remotes" </dev/null | tail -1
      done   # expect every count to be 0
    ```
-
-### DoltHub (Wasteland)
-
-The wasteland commands (`gt wl`) still fork and push the `wl-commons`
-database on DoltHub. That is the commons product, not beads sync, and it is
-unaffected by the above: it never touches the town's beads databases.
 
 ## File Layout
 
