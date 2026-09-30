@@ -25,8 +25,17 @@ type WorkTree interface {
 
 	// Pushing and preservation (push.go).
 	Push(remote, refspec string, force bool) error
+	PushWithTimeout(remote, refspec string, force bool, timeout time.Duration) error
 	StashCount() (int, error)
 	CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStatus, error)
+
+	// The backup repository (backup.go).
+	InitRepo(branch string) error
+	ConfigSet(key, value string) error
+	ConfigGet(key string) (string, error)
+	CommitWithAuthor(message, author string) error
+	PackSize() (string, error)
+	LogAll(max int) ([]git.LogEntry, error)
 
 	git.RevertReader
 }
@@ -54,5 +63,5 @@ func (h *handle) CommitTime(rev string) (time.Time, error) {
 	if !ok || h.f.objects[id] == nil {
 		return time.Time{}, gitErr(128, "fatal: ambiguous argument '"+rev+"': unknown revision or path not in the working tree.", args...)
 	}
-	return time.Unix(int64(commitEpoch+h.f.objects[id].seq), 0).UTC(), nil
+	return commitTime(h.f.objects[id]), nil
 }

@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -20,34 +19,25 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/events"
+	gtgit "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
-func TestGitChildEnv_ForwardsExisting(t *testing.T) {
+func TestGitIdentityEnv_NothingToAddWhenPresent(t *testing.T) {
 	t.Parallel()
 	base := []string{"HOME=/tmp/fake-home", "USER=fakeuser", "LOGNAME=fakeuser", "SSH_AUTH_SOCK=/tmp/fake-agent.sock"}
 	noLookup := func() (*user.User, error) {
 		t.Error("identity looked up although HOME, USER and LOGNAME were all set")
 		return nil, errors.New("unexpected lookup")
 	}
-
-	got := envMap(gitChildEnvFrom(base, noLookup))
-	if got["HOME"] != "/tmp/fake-home" {
-		t.Errorf("HOME: got %q, want /tmp/fake-home", got["HOME"])
-	}
-	if got["USER"] != "fakeuser" {
-		t.Errorf("USER: got %q, want fakeuser", got["USER"])
-	}
-	if got["LOGNAME"] != "fakeuser" {
-		t.Errorf("LOGNAME: got %q, want fakeuser", got["LOGNAME"])
-	}
-	if got["SSH_AUTH_SOCK"] != "/tmp/fake-agent.sock" {
-		t.Errorf("SSH_AUTH_SOCK: got %q, want /tmp/fake-agent.sock", got["SSH_AUTH_SOCK"])
+	if got := gitIdentityEnvFrom(base, noLookup); len(got) != 0 {
+		t.Errorf("added %q; want nothing when the identity is all there", got)
 	}
 }
 
-func TestGitChildEnv_RecoversMissingIdentity(t *testing.T) {
+func TestGitIdentityEnv_RecoversMissingIdentity(t *testing.T) {
 	t.Parallel()
 	// A daemon child that lost USER/LOGNAME (the gh#zt1w failure mode). An
 	// empty "USER=" counts as present, so the keys are absent, not empty.
@@ -55,91 +45,79 @@ func TestGitChildEnv_RecoversMissingIdentity(t *testing.T) {
 	current := func() (*user.User, error) {
 		return &user.User{Username: "recovered", HomeDir: "/home/recovered"}, nil
 	}
-
-	got := envMap(gitChildEnvFrom(base, current))
-	if got["USER"] != "recovered" || got["LOGNAME"] != "recovered" {
-		t.Errorf("USER/LOGNAME = %q/%q, want both recovered from the user lookup", got["USER"], got["LOGNAME"])
-	}
-	if got["HOME"] != "/tmp/fake-home" {
-		t.Errorf("HOME = %q, want the inherited /tmp/fake-home kept over the lookup's", got["HOME"])
-	}
-	if got["PATH"] != "/usr/bin" {
-		t.Errorf("PATH = %q, want the rest of the environment passed through", got["PATH"])
+	got := gitIdentityEnvFrom(base, current)
+	if want := []string{"USER=recovered", "LOGNAME=recovered"}; !slices.Equal(got, want) {
+		t.Errorf("added %q, want %q (HOME was already set)", got, want)
 	}
 }
 
-func TestGitChildEnv_LookupFailureLeavesEnvUnchanged(t *testing.T) {
+func TestGitIdentityEnv_LookupFailureAddsNothing(t *testing.T) {
 	t.Parallel()
-	base := []string{"PATH=/usr/bin"}
-	got := gitChildEnvFrom(base, func() (*user.User, error) { return nil, errors.New("no user exists for uid 501") })
-	if !slices.Equal(got, base) {
-		t.Errorf("env = %v, want %v unchanged when the lookup fails", got, base)
+	got := gitIdentityEnvFrom([]string{"PATH=/usr/bin"}, func() (*user.User, error) {
+		return nil, errors.New("no user exists for uid 501")
+	})
+	if len(got) != 0 {
+		t.Errorf("added %q when the lookup failed; want nothing", got)
 	}
 }
 
-// TestGitChildEnv_StartsFromTheProcessEnvironment is the wiring guard for
-// gitChildEnvFrom: the wrapper must build on the daemon's own environment.
-func TestGitChildEnv_StartsFromTheProcessEnvironment(t *testing.T) {
+// TestBackupGitDefaultsToRealGit is the wiring guard for backupGitAt's nil
+// path: a *git.Git on the repository. The identity and deadline it carries
+// are exercised on real git by the integration tier's backup tests.
+func TestBackupGitDefaultsToRealGit(t *testing.T) {
 	t.Parallel()
-	path, ok := os.LookupEnv("PATH")
-	if !ok {
-		t.Fatal("PATH is unset in the test process; the guard has nothing to look for")
-	}
-	if got := envMap(gitChildEnv())["PATH"]; got != path {
-		t.Errorf("gitChildEnv PATH = %q, want the process's %q", got, path)
+	dir := t.TempDir()
+	if g, ok := (&Daemon{}).backupGitAt(dir, time.Minute).(*gtgit.Git); !ok || g.WorkDir() != dir {
+		t.Fatalf("backupGitAt = %T; want a *git.Git on %s", (&Daemon{}).backupGitAt(dir, time.Minute), dir)
 	}
 }
 
 func TestEnsureGitRepoInitialized_CreatesMissingRepo(t *testing.T) {
 	t.Parallel()
+	d, f := backupTestDaemon(t)
 	gitRepo := filepath.Join(t.TempDir(), "nested", "git")
 
 	if _, err := os.Stat(gitRepo); !os.IsNotExist(err) {
 		t.Fatalf("expected %s not to exist yet", gitRepo)
 	}
-
-	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		t.Fatalf("ensureGitRepoInitialized: %v", err)
 	}
-
 	if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
 		t.Fatalf("expected %s/.git to exist after init: %v", gitRepo, err)
+	}
+	if branch := f.Open(gitRepo).DefaultBranch(); branch != "main" {
+		t.Errorf("new repository's branch = %q, want main", branch)
 	}
 }
 
 func TestEnsureGitRepoInitialized_NoOpOnExistingRepo(t *testing.T) {
 	t.Parallel()
+	d, f := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
-
-	head, err := exec.Command("git", "-C", gitRepo, "rev-parse", "HEAD").Output()
+	initGitRepo(t, d, gitRepo)
+	head, err := f.Open(gitRepo).Rev("HEAD")
 	if err != nil {
-		t.Fatalf("rev-parse HEAD: %v", err)
+		t.Fatal(err)
 	}
 
-	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		t.Fatalf("ensureGitRepoInitialized on existing repo: %v", err)
 	}
-
-	headAfter, err := exec.Command("git", "-C", gitRepo, "rev-parse", "HEAD").Output()
-	if err != nil {
-		t.Fatalf("rev-parse HEAD after: %v", err)
-	}
-	if string(head) != string(headAfter) {
-		t.Errorf("existing repo history changed: before %q, after %q", head, headAfter)
+	if headAfter, err := f.Open(gitRepo).Rev("HEAD"); err != nil || headAfter != head {
+		t.Errorf("existing repo history changed: before %q, after %q (%v)", head, headAfter, err)
 	}
 }
 
 func TestEnsureGitRepoInitialized_SetsPostBufferOnFreshRepo(t *testing.T) {
 	t.Parallel()
+	d, f := backupTestDaemon(t)
 	gitRepo := t.TempDir()
 
-	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		t.Fatalf("ensureGitRepoInitialized: %v", err)
 	}
-
-	got := gitConfigGet(t, gitRepo, "http.postBuffer")
-	if got != gitPostBufferBytes {
+	if got := gitConfigGet(t, f, gitRepo, "http.postBuffer"); got != gitPostBufferBytes {
 		t.Errorf("http.postBuffer = %q, want %q", got, gitPostBufferBytes)
 	}
 }
@@ -148,26 +126,25 @@ func TestEnsureGitRepoInitialized_SetsPostBufferOnExistingRepo(t *testing.T) {
 	t.Parallel()
 	// Regression for gt-kxa1: a repo initialized before this fix (or with the
 	// config lost some other way) must also get covered, not just fresh inits.
+	d, f := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 
-	if err := ensureGitRepoInitialized(gitRepo); err != nil {
+	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		t.Fatalf("ensureGitRepoInitialized on existing repo: %v", err)
 	}
-
-	got := gitConfigGet(t, gitRepo, "http.postBuffer")
-	if got != gitPostBufferBytes {
+	if got := gitConfigGet(t, f, gitRepo, "http.postBuffer"); got != gitPostBufferBytes {
 		t.Errorf("http.postBuffer = %q, want %q", got, gitPostBufferBytes)
 	}
 }
 
-func gitConfigGet(t *testing.T, gitRepo, key string) string {
+func gitConfigGet(t *testing.T, f *gitfake.Fake, gitRepo, key string) string {
 	t.Helper()
-	out, err := exec.Command("git", "-C", gitRepo, "config", "--get", key).Output()
+	v, err := f.Open(gitRepo).(gitfake.WorkTree).ConfigGet(key)
 	if err != nil {
-		t.Fatalf("git config --get %s: %v", key, err)
+		t.Fatalf("config --get %s: %v", key, err)
 	}
-	return strings.TrimSpace(string(out))
+	return v
 }
 
 func TestIsPostBufferPushError(t *testing.T) {
@@ -237,8 +214,9 @@ func TestCommitAndPushJsonlBackup_NoRemoteIsError(t *testing.T) {
 	// remote used to be reported as a silent success ("skipping push"), even
 	// though the data never left the machine. It must now be a hard error so
 	// the daemon's consecutive-failure escalation fires.
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 
 	dbDir := filepath.Join(gitRepo, "testdb")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -246,7 +224,6 @@ func TestCommitAndPushJsonlBackup_NoRemoteIsError(t *testing.T) {
 	}
 	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 5)
 
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 	err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil)
 	if err == nil {
 		t.Fatal("expected an error when no remote is configured, got nil")
@@ -256,12 +233,8 @@ func TestCommitAndPushJsonlBackup_NoRemoteIsError(t *testing.T) {
 	}
 
 	// The commit itself should still have happened locally.
-	out, cerr := exec.Command("git", "-C", gitRepo, "log", "-1", "--format=%s").Output()
-	if cerr != nil {
-		t.Fatalf("git log: %v", cerr)
-	}
-	if !contains(string(out), "backup") {
-		t.Errorf("expected a local backup commit despite the push failure, got log: %q", out)
+	if subject := backupSubjects(t, d, gitRepo)[0]; !contains(subject, "backup") {
+		t.Errorf("expected a local backup commit despite the push failure, got %q", subject)
 	}
 }
 
@@ -554,15 +527,14 @@ func TestFormatSpikeReport(t *testing.T) {
 
 func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// Commits exist but none carry per-database counts, and there is no cache —
 	// history this detector cannot read. verifyExportCounts must fail loud
 	// instead of silently treating the export as a first export (gt-tj-he).
 	// (A repo with NO commits at all is a different case: see
 	// TestVerifyExportCounts_FreshRepoBootstraps.)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	initGitRepo(t, d, gitRepo)
 
 	_, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 100}, 0.20)
 	if err == nil {
@@ -575,6 +547,7 @@ func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
 
 func TestRecomputeSpikeBaseline_FreshRepoBootstraps(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// A freshly initialized backup repo has no commits at all (what
 	// ensureGitRepoInitialized leaves behind: `git init`, no seed commit).
 	// There is no level to compare against and no spike is possible without
@@ -582,9 +555,9 @@ func TestRecomputeSpikeBaseline_FreshRepoBootstraps(t *testing.T) {
 	// the first run and thereby prevent the very commit that seeds history
 	// (gt-tj-he).
 	gitRepo := t.TempDir()
-	initEmptyGitRepo(t, gitRepo)
+	initEmptyGitRepo(t, d, gitRepo)
 
-	sb, err := recomputeSpikeBaseline(gitRepo)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
 	if !errors.Is(err, errSpikeBaselineBootstrap) {
 		t.Fatalf("expected errSpikeBaselineBootstrap, got sb=%+v err=%v", sb, err)
 	}
@@ -592,13 +565,12 @@ func TestRecomputeSpikeBaseline_FreshRepoBootstraps(t *testing.T) {
 
 func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// First run on a fresh town must not be blocked: with no baseline, halting
 	// leaves the patrol permanently inert (no baseline → no commit → never a
 	// baseline). The run proceeds and its commit seeds the next run's baseline.
 	gitRepo := t.TempDir()
-	initEmptyGitRepo(t, gitRepo)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	initEmptyGitRepo(t, d, gitRepo)
 
 	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq"}, map[string]int{"hq": 1271}, 0.50)
 	if err != nil {
@@ -611,9 +583,9 @@ func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
 	// The run commits (that is what bootstrapping unblocks), and the next run
 	// derives its baseline from that commit.
 	os.MkdirAll(filepath.Join(gitRepo, "hq"), 0755)
-	commitBackup(t, gitRepo, "hq", 1271)
+	commitBackup(t, d, gitRepo, "hq", 1271)
 
-	sb, err := recomputeSpikeBaseline(gitRepo)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -624,6 +596,7 @@ func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
 
 func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// Steady state: recompute rewrites the cache every tick, so it is warm on
 	// essentially every run while history carries the newest commit. A cached
 	// level must never shadow a committed one — an earlier revision seeded the
@@ -631,10 +604,10 @@ func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
 	// cached level won the sort and the baseline sat one cycle behind forever
 	// (gt-tj-he).
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "hq"), 0755)
-	commitBackup(t, gitRepo, "hq", 1266)
-	commitBackup(t, gitRepo, "hq", 1271)
+	commitBackup(t, d, gitRepo, "hq", 1266)
+	commitBackup(t, d, gitRepo, "hq", 1271)
 
 	// Cache as written by the previous run, i.e. before the 1271 commit landed.
 	stale := &spikeBaseline{
@@ -648,7 +621,7 @@ func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
 		t.Fatalf("save cache: %v", err)
 	}
 
-	sb, err := recomputeSpikeBaseline(gitRepo)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -668,14 +641,13 @@ func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
 
 func TestVerifyExportCounts_FirstExport(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// History exists for db1, but db2 is being exported for the first time:
 	// it is absent from the baseline window and must be skipped, not spiked.
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "db1"), 0755)
-	commitBackup(t, gitRepo, "db1", 100)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "db1", 100)
 
 	spikes, err := d.verifyExportCounts(gitRepo, []string{"db2"}, map[string]int{"db2": 100}, 0.20)
 	if err != nil {
@@ -688,12 +660,11 @@ func TestVerifyExportCounts_FirstExport(t *testing.T) {
 
 func TestVerifyExportCounts_WithinThreshold(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
-	commitBackup(t, gitRepo, "testdb", 100)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "testdb", 100)
 
 	// 130 records = 30% increase. With 0.20 threshold and 2x asymmetric
 	// multiplier for increases, effective threshold is 0.40, so 30% is fine.
@@ -708,12 +679,11 @@ func TestVerifyExportCounts_WithinThreshold(t *testing.T) {
 
 func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
-	commitBackup(t, gitRepo, "testdb", 100)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "testdb", 100)
 
 	// 200 records = 100% jump. Even with 2x asymmetric multiplier (effective
 	// threshold 0.40), 100% exceeds it.
@@ -734,12 +704,11 @@ func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
 
 func TestVerifyExportCounts_Drop(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
-	commitBackup(t, gitRepo, "testdb", 100)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "testdb", 100)
 
 	// 60 records = 40% drop. Drops use the base threshold (no 2x multiplier)
 	// because losing data is more suspicious than gaining it.
@@ -757,12 +726,11 @@ func TestVerifyExportCounts_Drop(t *testing.T) {
 
 func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
-	commitBackup(t, gitRepo, "testdb", 10)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "testdb", 10)
 
 	// 5 records = 50% drop, but only 5 records absolute change.
 	// Below minAbsoluteDelta (20), so should NOT spike.
@@ -777,12 +745,11 @@ func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
 
 func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
-	commitBackup(t, gitRepo, "testdb", 100)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "testdb", 100)
 
 	// 70 records = 30% drop at 0.20 threshold → should spike (drops use base threshold)
 	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 70}, 0.20)
@@ -805,17 +772,16 @@ func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 
 func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// The gt-tj-he scenario: a spike halt blocked the commit that would have
 	// refreshed the baseline, so the repo's newest committed level is stale
 	// (1000) while the export already holds 400. The baseline window must be
 	// re-derived, and the halted level must survive via the cache so the next
 	// run does not re-halt forever against the stale value.
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
-	commitBackup(t, gitRepo, "testdb", 1000)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "testdb", 1000)
 
 	// First run after the halt: 400 vs committed 1000 = 60% drop → spikes.
 	counts := map[string]int{"testdb": 400}
@@ -838,7 +804,7 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 	}
 
 	// Commit the new level — the next backup commit records db=400.
-	commitBackup(t, gitRepo, "testdb", 400)
+	commitBackup(t, d, gitRepo, "testdb", 400)
 
 	// Second run: same count (400), with the cache left exactly as the first
 	// run wrote it (that is the steady state — recompute rewrites the cache
@@ -854,7 +820,7 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 	}
 	// Pin the level that made it stable: the committed 400, not the stale
 	// cached 1000 the halted run wrote.
-	sb, err := recomputeSpikeBaseline(gitRepo)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -865,17 +831,16 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 
 func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// Follow-up run while the halt is still in place: the newest committed
 	// level is still 1000 and the cache was just refreshed with the same
 	// committed window, so the detector still sees 400 vs 1000 and must
 	// spike again — a genuine unresolved halt keeps alerting (it is
 	// de-duplicated by the alert mechanism, not by a stale baseline).
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
-	commitBackup(t, gitRepo, "testdb", 1000)
-
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	commitBackup(t, d, gitRepo, "testdb", 1000)
 
 	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50)
 	if err != nil {
@@ -897,14 +862,15 @@ func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) 
 
 func TestRecomputeSpikeBaseline_RollingWindow(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 	os.MkdirAll(filepath.Join(gitRepo, "db1"), 0755)
 	for _, n := range []int{100, 110, 120, 130, 140, 150, 160, 170, 180} {
-		commitBackup(t, gitRepo, "db1", n)
+		commitBackup(t, d, gitRepo, "db1", n)
 	}
 
-	sb, err := recomputeSpikeBaseline(gitRepo)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -926,13 +892,14 @@ func TestRecomputeSpikeBaseline_RollingWindow(t *testing.T) {
 
 func TestRecomputeSpikeBaseline_CacheSeedsAcrossHalt(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	// History exists but carries no counts (a repo whose count-bearing commits
 	// were reset), while a cache written by an earlier run holds the last known
 	// levels. The cache is the only remaining source, so it seeds the window
 	// instead of leaving the patrol halted with nothing to compare against
 	// (gt-tj-he).
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	initGitRepo(t, d, gitRepo)
 
 	cache := &spikeBaseline{
 		Window:   defaultSpikeBaselineWindow,
@@ -945,7 +912,7 @@ func TestRecomputeSpikeBaseline_CacheSeedsAcrossHalt(t *testing.T) {
 		t.Fatalf("save cache: %v", err)
 	}
 
-	sb, err := recomputeSpikeBaseline(gitRepo)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1008,10 +975,11 @@ func TestCachedSpikeBaseline_RelabelsDedupesAndTrims(t *testing.T) {
 
 func TestRecomputeSpikeBaseline_NoneAvailable(t *testing.T) {
 	t.Parallel()
+	d, _ := backupTestDaemon(t)
 	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo) // only the non-count "init" commit
+	initGitRepo(t, d, gitRepo) // only the non-count "init" commit
 
-	sb, err := recomputeSpikeBaseline(gitRepo)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
 	if !errors.Is(err, errNoSpikeBaseline) {
 		t.Fatalf("expected errNoSpikeBaseline, got sb=%+v err=%v", sb, err)
 	}
@@ -1215,48 +1183,59 @@ func containsHelper(s, substr string) bool {
 	return false
 }
 
-func initGitRepo(t *testing.T, dir string) {
+// backupTestDaemon returns a daemon whose git is a fresh gitfake world, and
+// the world.
+func backupTestDaemon(t *testing.T) (*Daemon, *gitfake.Fake) {
 	t.Helper()
-	initEmptyGitRepo(t, dir)
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	return d, useGitfake(t, d)
+}
+
+func initGitRepo(t *testing.T, d *Daemon, dir string) {
+	t.Helper()
+	initEmptyGitRepo(t, d, dir)
 	// Need at least one commit for HEAD to exist.
 	readme := filepath.Join(dir, "README")
-	os.WriteFile(readme, []byte("init\n"), 0644)
-	commitAll(t, dir, "init")
+	if err := os.WriteFile(readme, []byte("init\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, d, dir, "init")
 }
 
 // initEmptyGitRepo initializes a git repo with no commits — what
 // ensureGitRepoInitialized leaves behind on a fresh town. recomputeSpikeBaseline
 // treats that state as a bootstrap, so tests must be able to produce it
 // (gt-tj-he).
-func initEmptyGitRepo(t *testing.T, dir string) {
+func initEmptyGitRepo(t *testing.T, d *Daemon, dir string) {
 	t.Helper()
-	cmds := [][]string{
-		{"git", "init", "-b", "main"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git init failed: %v: %s", err, out)
-		}
+	if err := d.backupGitAt(dir, 0).InitRepo("main"); err != nil {
+		t.Fatalf("git init: %v", err)
 	}
 }
 
-func commitAll(t *testing.T, dir, msg string) {
+func commitAll(t *testing.T, d *Daemon, dir, msg string) {
 	t.Helper()
-	cmds := [][]string{
-		{"git", "add", "-A"},
-		{"git", "commit", "-m", msg, "--author=Test <test@test.com>"},
+	g := d.backupGitAt(dir, 0)
+	if err := g.Add("-A"); err != nil {
+		t.Fatalf("git add: %v", err)
 	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v: %s", args, err, out)
-		}
+	if err := g.CommitWithAuthor(msg, "Test <test@test.com>"); err != nil {
+		t.Fatalf("git commit: %v", err)
 	}
+}
+
+// backupSubjects lists the backup repository's commit subjects, newest first.
+func backupSubjects(t *testing.T, d *Daemon, dir string) []string {
+	t.Helper()
+	entries, err := d.backupGitAt(dir, 0).LogAll(64)
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	subjects := make([]string, len(entries))
+	for i, e := range entries {
+		subjects[i] = e.Subject
+	}
+	return subjects
 }
 
 func writeNLines(t *testing.T, path string, n int) {
@@ -1280,10 +1259,10 @@ func itoa(i int) string {
 // backup-style subject line ("backup <ts>: <db>=<n>"), matching
 // commitAndPushJsonlBackup — the rolling spike baseline derives its window from
 // these subject lines (gt-tj-he).
-func commitBackup(t *testing.T, gitRepo, db string, n int) {
+func commitBackup(t *testing.T, d *Daemon, gitRepo, db string, n int) {
 	t.Helper()
 	writeNLines(t, filepath.Join(gitRepo, db, "issues.jsonl"), n)
-	commitAll(t, gitRepo, fmt.Sprintf("backup 2026-01-01 00:00: %s=%d", db, n))
+	commitAll(t, d, gitRepo, fmt.Sprintf("backup 2026-01-01 00:00: %s=%d", db, n))
 }
 
 func TestEscalationTitle_SingleLineUnchanged(t *testing.T) {
@@ -1581,24 +1560,6 @@ func ageIndexLock(t *testing.T, gitRepo string, age time.Duration) string {
 	return lockPath
 }
 
-func TestRunGitCmd_TimeoutIsDistinguishable(t *testing.T) {
-	t.Parallel()
-	// gt-1aj2: callers clear an orphaned index lock when a command is killed on
-	// its deadline, so a timeout must be tellable apart from a normal git error.
-	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
-
-	// An already-expired budget is the state a killed command ends in.
-	if err := d.runGitCmd(gitRepo, time.Nanosecond, "add", "-A", "."); !errors.Is(err, errGitCmdTimeout) {
-		t.Fatalf("expired budget: got %v, want errGitCmdTimeout", err)
-	}
-
-	if err := d.runGitCmd(gitRepo, 30*time.Second, "not-a-git-command"); err == nil || errors.Is(err, errGitCmdTimeout) {
-		t.Fatalf("real git failure: got %v, want a plain error", err)
-	}
-}
-
 func TestIsIndexLockExistsError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1624,13 +1585,23 @@ func TestIsIndexLockExistsError(t *testing.T) {
 	}
 }
 
+// lockTestRepo returns a directory laid out like the backup repository
+// (a .git directory to hold index.lock); nothing runs git in it.
+func lockTestRepo(t *testing.T) string {
+	t.Helper()
+	gitRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(gitRepo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return gitRepo
+}
+
 func TestClearStaleIndexLock_RespectsGrace(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 
 	t.Run("stale is removed", func(t *testing.T) {
-		gitRepo := t.TempDir()
-		initGitRepo(t, gitRepo)
+		gitRepo := lockTestRepo(t)
 		lockPath := ageIndexLock(t, gitRepo, 2*gitIndexLockGracePeriod)
 		if !d.clearStaleIndexLock(gitRepo, gitIndexLockGracePeriod) {
 			t.Fatal("expected a lock older than the grace period to be cleared")
@@ -1641,8 +1612,7 @@ func TestClearStaleIndexLock_RespectsGrace(t *testing.T) {
 	})
 
 	t.Run("fresh is left for its owner", func(t *testing.T) {
-		gitRepo := t.TempDir()
-		initGitRepo(t, gitRepo)
+		gitRepo := lockTestRepo(t)
 		lockPath := ageIndexLock(t, gitRepo, 0)
 		if d.clearStaleIndexLock(gitRepo, gitIndexLockGracePeriod) {
 			t.Fatal("a lock younger than the grace period must not be cleared")
@@ -1653,8 +1623,7 @@ func TestClearStaleIndexLock_RespectsGrace(t *testing.T) {
 	})
 
 	t.Run("absent is a no-op", func(t *testing.T) {
-		gitRepo := t.TempDir()
-		initGitRepo(t, gitRepo)
+		gitRepo := lockTestRepo(t)
 		if d.clearStaleIndexLock(gitRepo, gitIndexLockGracePeriod) {
 			t.Error("no lock on disk should report nothing cleared")
 		}
@@ -1666,8 +1635,7 @@ func TestClearIndexLockModifiedSince_OnlyRecent(t *testing.T) {
 	// A lock written after a command started is that command's own orphan.
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 
-	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	gitRepo := lockTestRepo(t)
 	started := time.Now().Add(-time.Second)
 	lockPath := ageIndexLock(t, gitRepo, 0)
 	if !d.clearIndexLockModifiedSince(gitRepo, started) {
@@ -1678,8 +1646,7 @@ func TestClearIndexLockModifiedSince_OnlyRecent(t *testing.T) {
 	}
 
 	// A lock predating the command belongs to somebody else.
-	gitRepo2 := t.TempDir()
-	initGitRepo(t, gitRepo2)
+	gitRepo2 := lockTestRepo(t)
 	lockPath2 := ageIndexLock(t, gitRepo2, time.Hour)
 	if d.clearIndexLockModifiedSince(gitRepo2, time.Now()) {
 		t.Fatal("a lock older than the command must not be cleared")
@@ -1689,94 +1656,119 @@ func TestClearIndexLockModifiedSince_OnlyRecent(t *testing.T) {
 	}
 }
 
-func TestRunGitIndexCmd_RecoversFromStaleLock(t *testing.T) {
+// indexLockErr is what git says when index.lock is held.
+var indexLockErr = errors.New("git add: fatal: Unable to create '/repo/.git/index.lock': File exists.")
+
+func TestRunGitIndexOp_RecoversFromStaleLock(t *testing.T) {
 	t.Parallel()
 	// A lock orphaned by a dead tick must not fail the next one (gt-1aj2).
-	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
-	if err := os.WriteFile(filepath.Join(gitRepo, "new.jsonl"), []byte("{}\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	gitRepo := lockTestRepo(t)
 	lockPath := ageIndexLock(t, gitRepo, 2*gitIndexLockGracePeriod)
 
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
-	if err := d.runGitIndexCmd(gitRepo, 30*time.Second, "add", "-A", "."); err != nil {
-		t.Fatalf("stale index lock should be cleared and the command retried: %v", err)
+	calls := 0
+	err := d.runGitIndexOp(gitRepo, "git add", func() error {
+		calls++
+		if _, err := os.Stat(lockPath); err == nil {
+			return indexLockErr
+		}
+		return nil
+	})
+	if err != nil || calls != 1 {
+		t.Fatalf("runGitIndexOp = %v after %d call(s); want the stale lock cleared before the one call", err, calls)
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Errorf("stale lock should be gone, stat err = %v", err)
 	}
-
-	out, err := exec.Command("git", "-C", gitRepo, "diff", "--cached", "--name-only").Output()
-	if err != nil {
-		t.Fatalf("git diff --cached: %v", err)
-	}
-	if !contains(string(out), "new.jsonl") {
-		t.Errorf("add should have staged new.jsonl, got: %q", out)
-	}
 }
 
-func TestRunGitIndexCmd_LeavesFreshLock(t *testing.T) {
+func TestRunGitIndexOp_LeavesFreshLock(t *testing.T) {
 	t.Parallel()
 	// A lock with a live owner is not an orphan: failing is correct, and the
-	// lock must survive so the real owner can finish.
-	gitRepo := t.TempDir()
-	initGitRepo(t, gitRepo)
+	// lock must survive so the real owner can finish. The lock may have
+	// appeared just before the command, so it is retried once.
+	gitRepo := lockTestRepo(t)
 	lockPath := ageIndexLock(t, gitRepo, 0)
 
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
-	err := d.runGitIndexCmd(gitRepo, 30*time.Second, "add", "-A", ".")
-	if err == nil {
-		t.Fatal("expected the live lock to fail the command")
-	}
-	if !isIndexLockExistsError(err) {
-		t.Errorf("expected an index.lock error, got: %v", err)
+	calls := 0
+	err := d.runGitIndexOp(gitRepo, "git add", func() error {
+		calls++
+		return indexLockErr
+	})
+	if !errors.Is(err, indexLockErr) || calls != 2 {
+		t.Fatalf("runGitIndexOp = %v after %d call(s); want the lock error after one retry", err, calls)
 	}
 	if _, statErr := os.Stat(lockPath); statErr != nil {
 		t.Errorf("a live owner's lock must not be removed: %v", statErr)
 	}
 }
 
-func TestCommitAndPushJsonlBackup_RecoversFromStaleIndexLock(t *testing.T) {
+func TestRunGitIndexOp_ClearsTheLockATimedOutCommandLeft(t *testing.T) {
 	t.Parallel()
-	// End-to-end for gt-1aj2: the tick after a killed `git add` used to fail
-	// with "index.lock: File exists" forever, and three such ticks escalated.
-	root := t.TempDir()
-	gitRepo := filepath.Join(root, "repo")
-	if err := os.MkdirAll(gitRepo, 0755); err != nil {
-		t.Fatal(err)
-	}
-	initGitRepo(t, gitRepo)
-
-	remote := filepath.Join(root, "origin.git")
-	if out, err := exec.Command("git", "init", "--bare", remote).CombinedOutput(); err != nil {
-		t.Fatalf("git init --bare: %v: %s", err, out)
-	}
-	if out, err := exec.Command("git", "-C", gitRepo, "remote", "add", "origin", remote).CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v: %s", err, out)
-	}
-
-	dbDir := filepath.Join(gitRepo, "testdb")
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 5)
-	lockPath := ageIndexLock(t, gitRepo, 2*gitIndexLockGracePeriod)
-
+	// gt-1aj2: a command killed on its deadline cannot release its own lock,
+	// so the lock it wrote is cleared at once and the timeout returned.
+	gitRepo := lockTestRepo(t)
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
-	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err != nil {
-		t.Fatalf("tick after a stale index lock should succeed, got: %v", err)
+	calls := 0
+	err := d.runGitIndexOp(gitRepo, "git add", func() error {
+		calls++
+		ageIndexLock(t, gitRepo, 0)
+		return fmt.Errorf("git add: %w", gtgit.ErrTimedOut)
+	})
+	if !errors.Is(err, gtgit.ErrTimedOut) || calls != 1 {
+		t.Fatalf("runGitIndexOp = %v after %d call(s); want the timeout, not retried", err, calls)
 	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Errorf("stale lock should have been cleared, stat err = %v", err)
+	if _, statErr := os.Stat(gitIndexLockPath(gitRepo)); !os.IsNotExist(statErr) {
+		t.Errorf("the timed-out command's lock should be cleared, stat err = %v", statErr)
+	}
+}
+
+func TestRunGitIndexOp_OtherFailuresAreNotRetried(t *testing.T) {
+	t.Parallel()
+	gitRepo := lockTestRepo(t)
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	calls := 0
+	failure := errors.New("git add: fatal: pathspec 'x' did not match any files")
+	if err := d.runGitIndexOp(gitRepo, "git add", func() error { calls++; return failure }); !errors.Is(err, failure) || calls != 1 {
+		t.Fatalf("runGitIndexOp = %v after %d call(s); want the failure, not retried", err, calls)
+	}
+}
+
+// commitAndPushJsonlBackup commits the exported files with the counts in the
+// subject and pushes the branch to origin.
+func TestCommitAndPushJsonlBackup_CommitsAndPushes(t *testing.T) {
+	t.Parallel()
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", "seed", map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+	if err := os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeNLines(t, filepath.Join(gitRepo, "testdb", "issues.jsonl"), 5)
+
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb", "gone"}, map[string]int{"testdb": 5}, []string{"gone"}); err != nil {
+		t.Fatalf("commitAndPushJsonlBackup: %v", err)
+	}
+	subject := backupSubjects(t, d, gitRepo)[0]
+	if !strings.HasPrefix(subject, "backup ") || !strings.Contains(subject, ": testdb=5 [FAILED: gone]") {
+		t.Errorf("commit subject = %q; want the counts and the failed database", subject)
+	}
+	head, _ := f.Open(gitRepo).Rev("HEAD")
+	if tip := f.Ref(remote, "refs/heads/main"); tip != head {
+		t.Errorf("origin main = %s, want the backup commit %s", tip, head)
 	}
 
-	out, err := exec.Command("git", "-C", remote, "log", "--all", "--format=%s").Output()
-	if err != nil {
-		t.Fatalf("git log on remote: %v", err)
+	// Nothing new to back up: no second commit.
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err != nil {
+		t.Fatalf("second run: %v", err)
 	}
-	if !contains(string(out), "backup") {
-		t.Errorf("expected the backup commit to reach the remote, got: %q", out)
+	if again, _ := f.Open(gitRepo).Rev("HEAD"); again != head {
+		t.Errorf("an unchanged export committed again (%s)", again)
 	}
 }
 

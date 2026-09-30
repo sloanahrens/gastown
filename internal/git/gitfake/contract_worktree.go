@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
@@ -326,7 +327,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		if err := g.Push("origin", "main", false); err == nil {
 			t.Error("a non-fast-forward push succeeded")
 		}
-		if err := g.Push("origin", "main", true); err != nil {
+		if err := g.PushWithTimeout("origin", "main", true, time.Minute); err != nil {
 			t.Errorf("forced push: %v", err)
 		}
 		if tip, _ := repo.PushRemoteBranchTip("origin", "main"); tip != local {
@@ -370,6 +371,89 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 		if st, err := g.CheckUncommittedWorkLocalFailClosed(); err != nil || st.UnpushedCommits != 0 {
 			t.Errorf("after pushing = %+v, %v; want nothing unpushed", st, err)
+		}
+	})
+
+	t.Run("InitRepo makes an empty repository and leaves an existing one alone", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		dir := filepath.Join(fx.root, "backup")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		g := fx.env.Open(dir).(WorkTree)
+		if err := g.InitRepo("main"); err != nil {
+			t.Fatalf("InitRepo: %v", err)
+		}
+		if !fx.env.Open(dir).IsRepo() {
+			t.Fatal("no repository after InitRepo")
+		}
+		if entries, err := g.LogAll(10); err != nil || len(entries) != 0 {
+			t.Errorf("LogAll of a new repository = %v, %v; want none", entries, err)
+		}
+		if size, err := g.PackSize(); err != nil || size != "0" {
+			t.Errorf("PackSize of a new repository = %q, %v; want 0", size, err)
+		}
+		wantStatus(t, g, true, map[string][]string{})
+		if err := fx.env.Open(fx.clone).(WorkTree).InitRepo("other"); err != nil {
+			t.Errorf("InitRepo on an existing repository: %v", err)
+		}
+		if head, err := fx.env.Open(fx.clone).Rev("HEAD"); err != nil || head != fx.base {
+			t.Errorf("re-init moved HEAD to %q, %v", head, err)
+		}
+		if branch, err := fx.env.Open(fx.clone).(WorkTree).CurrentBranch(); err != nil || branch != "main" {
+			t.Errorf("re-init changed the branch to %q, %v", branch, err)
+		}
+		if err := fx.env.Open(filepath.Join(fx.root, "missing")).(WorkTree).InitRepo("main"); err == nil {
+			t.Error("InitRepo in a missing directory succeeded")
+		}
+	})
+
+	t.Run("ConfigSet and ConfigGet round-trip a value", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone).(WorkTree)
+		if v, err := g.ConfigGet("http.postBuffer"); err != nil || v != "" {
+			t.Errorf("unset ConfigGet = %q, %v; want empty", v, err)
+		}
+		if err := g.ConfigSet("http.postBuffer", "524288000"); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := g.ConfigGet("http.postBuffer"); err != nil || v != "524288000" {
+			t.Errorf("ConfigGet = %q, %v; want 524288000", v, err)
+		}
+	})
+
+	t.Run("CommitWithAuthor commits on an unborn branch; LogAll lists newest first", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		dir := filepath.Join(fx.root, "backup")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		g := fx.env.Open(dir).(WorkTree)
+		if err := g.InitRepo("main"); err != nil {
+			t.Fatal(err)
+		}
+		for i, subject := range []string{"backup one: hq=1", "backup two: hq=2", "backup three: hq=3"} {
+			writeFiles(t, dir, map[string]string{"hq/issues.jsonl": strings.Repeat("x\n", i+1)})
+			if err := g.Add("-A", "."); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.CommitWithAuthor(subject+"\n\nbody", "Gas Town Daemon <daemon@gastown.local>"); err != nil {
+				t.Fatalf("CommitWithAuthor %d: %v", i, err)
+			}
+		}
+		entries, err := g.LogAll(2)
+		if err != nil || len(entries) != 2 {
+			t.Fatalf("LogAll(2) = %v, %v; want the two newest", entries, err)
+		}
+		if entries[0].Subject != "backup three: hq=3" || entries[1].Subject != "backup two: hq=2" {
+			t.Errorf("LogAll subjects = %q, %q; want three then two", entries[0].Subject, entries[1].Subject)
+		}
+		head, _ := fx.env.Open(dir).Rev("HEAD")
+		if entries[0].Hash != head || entries[0].Time.IsZero() {
+			t.Errorf("LogAll newest = %+v; want HEAD %s with a time", entries[0], head)
+		}
+		if branch, err := g.CurrentBranch(); err != nil || branch != "main" {
+			t.Errorf("CurrentBranch = %q, %v; want main", branch, err)
 		}
 	})
 }

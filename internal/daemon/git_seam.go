@@ -26,6 +26,17 @@ type daemonGit interface {
 	Commit(message string) error
 	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
 	git.RevertReader
+
+	// The JSONL backup repository.
+	InitRepo(branch string) error
+	ConfigSet(key, value string) error
+	RemoteURL(remote string) (string, error)
+	CurrentBranch() (string, error)
+	CommitWithAuthor(message, author string) error
+	Push(remote, refspec string, force bool) error
+	PushWithTimeout(remote, refspec string, force bool, timeout time.Duration) error
+	PackSize() (string, error)
+	LogAll(max int) ([]git.LogEntry, error)
 }
 
 var _ daemonGit = (*git.Git)(nil)

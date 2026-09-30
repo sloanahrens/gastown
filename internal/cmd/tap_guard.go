@@ -70,17 +70,13 @@ The guard blocks in two scenarios:
   1. Running as a Gas Town agent (crew, polecat, witness, etc.)
   2. Origin remote is steveyegge/gastown (maintainer should push directly)
 
-Two exemptions narrow the first scenario, each scoped to its role:
-  - the refinery's mandated merge rehearsal, "git checkout -b temp
-    origin/<branch>" (gt-r2xm) — allowed wherever the checkout sits in the
-    call when it names a rehearsal branch (temp, temp-resolve: the
-    formula's multi-line step runs as one compound call, gt-mo53);
+One exemption narrows the first scenario:
   - a polecat creating a local session branch inside its own worktree
     (gt-6hg7) — the escape route for a polecat that resumed a branch whose
     push had already gone out, where gt done's recoverDivergedPush refuses
     the force-push and the alternative this message used to offer (push to
     main) is itself blocked for polecats (gt-ibt8).
-"gh pr create" stays blocked for every role, including both of the above.
+"gh pr create" stays blocked for every role, the exemption included.
 
 Humans running outside Gas Town with a fork origin can still use PRs.
 
@@ -108,18 +104,6 @@ var prWorkflowCommandPrefixes = [][]string{
 	{"gh", "pr", "create"},
 	{"git", "checkout", "-b"},
 	{"git", "switch", "-c"},
-}
-
-// refRehearsalBranchNames are the literal local branch names the refinery's
-// mandated merge-rehearsal steps create (mol-refinery-patrol's
-// "git checkout -b temp origin/<branch>"; mol-polecat-conflict-resolve's
-// "git checkout -b temp-resolve origin/<branch>"). The refinery exemption
-// (gt-r2xm, gt-mo53) keys on this set: a checkout creating any of these
-// branches is the rehearsal the formula mandates, not the feature-branch
-// creation this guard exists to block.
-var refRehearsalBranchNames = map[string]bool{
-	"temp":         true,
-	"temp-resolve": true,
 }
 
 // shellCommandSeparators are shell operators that start a new command
@@ -294,10 +278,9 @@ func evaluatePRWorkflowGuard(input []byte) prWorkflowGuardDecision {
 	//   - isLeadingBranchCreation() — the command's FIRST word, so a branch
 	//     creation glued after an && cannot carry a later segment past the
 	//     guard (the gt-cyz8 escape).
-	//   - !isPRCreateCommand() — deliberately stricter than the refinery
-	//     exemption: "git checkout -b x && gh pr create" stays blocked for a
-	//     polecat. Unlike a merge rehearsal, a polecat has no reason to pair
-	//     the two, and the PR path is exactly what this guard is for.
+	//   - !isPRCreateCommand() — "git checkout -b x && gh pr create" stays
+	//     blocked for a polecat: a polecat has no reason to pair the two, and
+	//     the PR path is exactly what this guard is for.
 	//   - isInOwnPolecatWorktree() — the worktree is the thing a session
 	//     branch is being created for. A polecat that has wandered into a
 	//     sibling's worktree (the gt-hmaf cross-worktree class) or the rig
@@ -424,7 +407,7 @@ func isMaintainerOrigin() bool {
 
 // isPolecatSession reports whether the current process is running as a
 // polecat, by the same GT_ROLE-first rule `gt sling`, `gt hook` and
-// `gt handoff` use: a coordinator (mayor, witness, refinery) may carry a
+// `gt handoff` use: a coordinator (mayor, witness) may carry a
 // stale GT_POLECAT in its environment from having spawned polecats, so
 // GT_ROLE decides whenever it is set and GT_POLECAT is only the fallback.
 func isPolecatSession() bool {
@@ -465,14 +448,14 @@ func isInOwnPolecatWorktree(input []byte) bool {
 }
 
 // isPRCreateCommand reports whether command invokes "gh pr create" — the
-// one pr-workflow pattern that stays blocked for every role, refinery
-// included. Matched as three consecutive tokens (case-insensitive) rather
-// than a substring, so it isn't fooled by "gh" or "pr" appearing quoted
+// one pr-workflow pattern that stays blocked for every role. Matched as three
+// consecutive tokens (case-insensitive) rather than a substring, so it isn't
+// fooled by "gh" or "pr" appearing quoted
 // elsewhere in the command. The scan is per-segment, not per-token-position:
 // the exemption that consults this guard fires when the command's FIRST
 // token is gh, and the exemption's own test is segment-first, so a "gh pr
-// create" glued after an "&&" on one line must match here too or the
-// refinery exemption chains past it (gt-cyz8).
+// create" glued after an "&&" on one line must match here too, or the
+// exemption chains past it (gt-cyz8).
 func isPRCreateCommand(command string) bool {
 	for _, seg := range splitShellSegments(shellTokenize(strings.TrimSpace(command))) {
 		if len(seg) < 3 {
@@ -492,11 +475,8 @@ func isPRCreateCommand(command string) bool {
 // containment for the creation flag so an extra flag between the subcommand
 // and "-b"/"-c" (e.g. "git checkout -q -b temp") still matches.
 //
-// Both exemptions the pr-workflow guard grants are keyed on this one shape:
-// the refinery's mandated merge rehearsal (gt-r2xm) and a polecat's fresh
-// session branch (gt-6hg7). Each adds its own scope — role, and for a
-// polecat the worktree — but the command shape is shared, so the two cannot
-// drift apart on what "branch creation" means.
+// The one exemption the pr-workflow guard grants is keyed on this shape: a
+// polecat's fresh session branch (gt-6hg7), scoped to its own worktree.
 //
 // Leading-command by design: the hook "if" globs that route a command here
 // (Bash(git checkout -b*), Bash(gh pr create*)) are anchored to the

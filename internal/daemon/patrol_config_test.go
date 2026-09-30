@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestLoadPatrolConfig(t *testing.T) {
@@ -230,5 +232,21 @@ func TestShutdownBudget_HasNoRemotePushStep(t *testing.T) {
 	if ShutdownBudget != doltServerStopBudget+otelShutdownBudget {
 		t.Fatalf("ShutdownBudget = %v, want %v (Dolt stop + OTel flush only)",
 			ShutdownBudget, doltServerStopBudget+otelShutdownBudget)
+	}
+}
+
+func TestIsPatrolActiveMayorKnob(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{}
+	if !d.isPatrolActive(constants.RoleMayor) {
+		t.Fatal("mayor supervision must default to on with no config")
+	}
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{Mayor: &PatrolConfig{Enabled: false}}}
+	if d.isPatrolActive(constants.RoleMayor) {
+		t.Fatal("patrols.mayor.enabled=false must turn mayor supervision off")
+	}
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{Mayor: &PatrolConfig{Enabled: true}}}
+	if !d.isPatrolActive(constants.RoleMayor) {
+		t.Fatal("patrols.mayor.enabled=true must keep mayor supervision on")
 	}
 }
