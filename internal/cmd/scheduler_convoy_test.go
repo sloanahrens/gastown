@@ -16,10 +16,11 @@ import (
 // 'gt sling <convoy>' schedulers, which om flagged as still dropping the record.
 // A new dispatch path belongs in this table.
 //
-// Each row runs its path's own resolution — the immediate path builds its
-// SlingParams literal in runConvoySlingByID and takes the agent straight off the
-// job; the deferred path hands it to scheduleBead through
-// convoyScheduleOptionsFor, which the row exercises in full.
+// Each row runs its path's own SlingParams builder, because carrying the agent
+// across that boundary is the step that can drop it: the immediate path through
+// convoySlingParams, the deferred path through convoyScheduleOptionsFor. A row
+// that reads the planned job instead stops short of the only line a regression
+// in either path would break (gt-3e0wv).
 func TestConvoyDispatchPathsCarryRecordedAgent(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -47,11 +48,11 @@ func TestConvoyDispatchPathsCarryRecordedAgent(t *testing.T) {
 			},
 		},
 		{
-			name: "immediate: gt sling <convoy> -> executeSling",
+			name: "immediate: gt sling <convoy> -> convoySlingParams -> executeSling",
 			dispatchAgent: func(description string) string {
 				record := convoyRecord{ID: "gt-abc", Description: description}
 				jobs := planConvoyDispatch([]convoyCandidate{candidate}, record, townRoot)
-				return jobs[0].agent
+				return convoySlingParams(jobs[0], opts, townRoot).Agent
 			},
 		},
 	}
