@@ -74,6 +74,18 @@ type RevertReport struct {
 	Relocated []RevertedMerge
 }
 
+// RevertReader is the git surface DetectRevertedMerges reads: *Git, or a
+// consumer's fake of it.
+type RevertReader interface {
+	MergeBase(a, b string) (string, error)
+	TreeFileBlobs(rev string) (map[string]string, error)
+	CommitFileChanges(rev string, limit int) ([]CommitFileChange, error)
+	BlobContent(sha string) (string, error)
+	BlobDiffLines(oldBlob, newBlob string) (added, removed map[string]int, err error)
+}
+
+var _ RevertReader = (*Git)(nil)
+
 // DetectRevertedMerges reports the changes merged into target that
 // headTreeRef undoes, and the changes it relocates within their own package.
 // An empty report means headTreeRef's diff against target removes only content
@@ -106,7 +118,7 @@ type RevertReport struct {
 // Each detection is then classified against the rest of the path's package: an
 // observation whose added code survives there is a relocation, and every
 // observation is one or the other (gt-x748o).
-func DetectRevertedMerges(g *Git, target, headTreeRef string) (RevertReport, error) {
+func DetectRevertedMerges(g RevertReader, target, headTreeRef string) (RevertReport, error) {
 	mergeBase, err := g.MergeBase(target, "HEAD")
 	if err != nil {
 		return RevertReport{}, fmt.Errorf("resolving merge base of HEAD and %s: %w", target, err)
@@ -193,7 +205,7 @@ func addPath(bucket []RevertedMerge, at map[string]int, commit, path string) []R
 // Containment is required in both directions: a candidate that merely deletes
 // a file the commit touched, or that happens to add a line the commit
 // removed, is not reverting it.
-func changeIsInvertedBy(g *Git, preImage, postImage, base, head string) (bool, error) {
+func changeIsInvertedBy(g RevertReader, preImage, postImage, base, head string) (bool, error) {
 	branchAdded, branchRemoved, err := g.BlobDiffLines(base, head)
 	if err != nil {
 		return false, fmt.Errorf("diffing %s..%s: %w", base, head, err)
@@ -252,12 +264,12 @@ func multisetContains(have, want map[string]int) bool {
 // directory; a subdirectory is a different package, and code there does not
 // mean the change survived.
 type packageContent struct {
-	g     *Git
+	g     RevertReader
 	blobs map[string]string          // path -> blob sha, from the tree under search
 	lines map[string]map[string]bool // directory -> set of its lines, as changeMoved compares them
 }
 
-func newPackageContent(g *Git, blobs map[string]string) *packageContent {
+func newPackageContent(g RevertReader, blobs map[string]string) *packageContent {
 	return &packageContent{g: g, blobs: blobs, lines: map[string]map[string]bool{}}
 }
 
@@ -334,7 +346,7 @@ func (p *packageContent) readDir(dir string) (map[string]bool, error) {
 // postImage added. BlobDiffLines answers "no lines" for a side the path is
 // absent on — the honest answer for the containment test it serves, and a
 // useless one here, where a file the commit CREATED added every line it holds.
-func addedLines(g *Git, preImage, postImage string) (map[string]int, error) {
+func addedLines(g RevertReader, preImage, postImage string) (map[string]int, error) {
 	if postImage == "" {
 		return map[string]int{}, nil
 	}

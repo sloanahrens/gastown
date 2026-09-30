@@ -7,10 +7,23 @@ import (
 )
 
 // WorkTree is the part of *git.Git the fake answers for internal/daemon
-// beyond Repo: commit times so far. Open's result implements it; a consumer
-// asserts it from Repo. RunWorkTreeContract pins it to real git.
+// beyond Repo: commit times, the staging model (index.go), and the tree and
+// blob reads git.DetectRevertedMerges makes. Open's result implements it; a
+// consumer asserts it from Repo. RunWorkTreeContract pins it to real git.
 type WorkTree interface {
 	CommitTime(rev string) (time.Time, error)
+
+	Status() (*git.GitStatus, error)
+	Add(pathspecs ...string) error
+	ResetFiles(pathspecs ...string) error
+	StagedChanges() ([]git.StagedChange, error)
+	WriteTree() (string, error)
+	Commit(message string) error
+	CurrentBranch() (string, error)
+	GetUpstreamURL() (string, error)
+	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
+
+	git.RevertReader
 }
 
 var (
