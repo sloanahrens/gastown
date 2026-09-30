@@ -28,6 +28,7 @@ func repoRoot(t *testing.T) string {
 // leaves the repo untouched until `gt plugin sync` overwrites it. What the
 // test can catch is the committed state, and the parsed checks below do.
 func TestRebuildGTRunsOnTheDaemonPath(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(repoRoot(t), "plugins", "rebuild-gt", "plugin.md")
 
 	scanner := NewScanner(repoRoot(t), nil)

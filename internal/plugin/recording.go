@@ -53,11 +53,29 @@ type PluginRunBead struct {
 // Recorder handles plugin run recording and querying.
 type Recorder struct {
 	townRoot string
+	bd       bdRunner
 }
+
+// bdRunner runs one bd command against the town's beads and returns what it
+// wrote to stdout and stderr. Tests script it; production runs bd.
+type bdRunner func(ctx context.Context, mode beads.SubprocessEnvMode, args ...string) (stdout []byte, stderr string, err error)
 
 // NewRecorder creates a new plugin run recorder.
 func NewRecorder(townRoot string) *Recorder {
-	return &Recorder{townRoot: townRoot}
+	r := &Recorder{townRoot: townRoot}
+	r.bd = r.runBD
+	return r
+}
+
+// runBD runs bd from the town root, with the town's beads as the fallback
+// beads directory.
+func (r *Recorder) runBD(ctx context.Context, mode beads.SubprocessEnvMode, args ...string) ([]byte, string, error) {
+	cmd := beads.CommandContext(ctx, r.townRoot, beads.ResolveBeadsDir(r.townRoot), mode, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.String(), err
 }
 
 // RecordRun creates an ephemeral bead for a plugin run.
@@ -96,22 +114,16 @@ func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()
-	townBeads := beads.ResolveBeadsDir(r.townRoot)
-	cmd := beads.CommandContext(ctx, r.townRoot, townBeads, beads.MutationPinned, args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("creating plugin run bead: %s: %w", stderr.String(), err)
+	stdout, stderr, err := r.bd(ctx, beads.MutationPinned, args...)
+	if err != nil {
+		return "", fmt.Errorf("creating plugin run bead: %s: %w", stderr, err)
 	}
 
 	// Parse created bead ID from JSON output
 	var result struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+	if err := json.Unmarshal(stdout, &result); err != nil {
 		return "", fmt.Errorf("parsing bd create output: %w", err)
 	}
 
@@ -119,8 +131,7 @@ func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
 	// (which use --all to include closed beads) but should not stay open.
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer closeCancel()
-	closeCmd := beads.CommandContext(closeCtx, r.townRoot, townBeads, beads.MutationPinned, "close", result.ID, "--reason", "plugin run recorded")
-	_ = closeCmd.Run() // Best-effort — reaper will catch it if this fails
+	_, _, _ = r.bd(closeCtx, beads.MutationPinned, "close", result.ID, "--reason", "plugin run recorded") // Best-effort — reaper will catch it if this fails
 
 	return result.ID, nil
 }
@@ -173,18 +184,13 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 
 	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
 	defer cancel()
-	cmd := beads.CommandContext(ctx, r.townRoot, beads.ResolveBeadsDir(r.townRoot), beads.ReadOnlyPinned, args...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	stdout, stderr, err := r.bd(ctx, beads.ReadOnlyPinned, args...)
+	if err != nil {
 		// Empty result is OK (no runs found)
-		if stderr.Len() == 0 || stdout.String() == "[]\n" {
+		if stderr == "" || string(stdout) == "[]\n" {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("querying plugin runs: %s: %w", stderr.String(), err)
+		return nil, fmt.Errorf("querying plugin runs: %s: %w", stderr, err)
 	}
 
 	// Parse JSON output
@@ -194,9 +200,9 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 		CreatedAt string   `json:"created_at"`
 		Labels    []string `json:"labels"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &beads); err != nil {
+	if err := json.Unmarshal(stdout, &beads); err != nil {
 		// Empty array is valid
-		if stdout.String() == "[]\n" || stdout.Len() == 0 {
+		if string(stdout) == "[]\n" || len(stdout) == 0 {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("parsing bd list output: %w", err)

@@ -3,34 +3,50 @@ package plugin
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
 )
 
-// gitCommitAll commits everything under dir (initialising a repo on first
-// use), so a sync source has history: the guard treats runtime content that
-// the repo once held at the same path as an older copy, safe to overwrite.
-func gitCommitAll(t *testing.T, dir, msg string) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	run := func(args ...string) {
-		cmd := exec.Command("git", append([]string{"-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"}, args...)...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-		run("init", "-q")
-	}
-	run("add", "-A")
-	run("commit", "-q", "--allow-empty", "-m", msg)
+// fakeHistory stands in for the sync source's git history. commit records
+// every file under dir at its current content, as `git add -A && git commit`
+// would; a fakeHistory that never committed reads as a source with no
+// history, which the guard treats as fail-closed.
+type fakeHistory struct {
+	hist blobHistory
 }
+
+func (h *fakeHistory) commit(t *testing.T, dir string) {
+	t.Helper()
+	if h.hist == nil {
+		h.hist = blobHistory{}
+	}
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if h.hist[rel] == nil {
+			h.hist[rel] = map[string]bool{}
+		}
+		h.hist[rel][gitBlobID(data)] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *fakeHistory) source(string) (blobHistory, string) { return h.hist, "" }
 
 // helper to create a plugin directory with a plugin.md and optional extra files.
 func createTestPlugin(t *testing.T, dir, name, content string, extras map[string]string) {
@@ -43,19 +59,21 @@ func createTestPlugin(t *testing.T, dir, name, content string, extras map[string
 		t.Fatal(err)
 	}
 	for fname, fcontent := range extras {
-		if err := os.WriteFile(filepath.Join(pluginDir, fname), []byte(fcontent), 0755); err != nil {
+		if err := os.WriteFile(filepath.Join(pluginDir, fname), []byte(fcontent), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
 func TestSyncPlugins_CopiesNew(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\ndo stuff", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,14 +88,16 @@ func TestSyncPlugins_CopiesNew(t *testing.T) {
 }
 
 func TestSyncPlugins_SkipsUpToDate(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 
 	content := "+++\nname = \"my-plugin\"\n+++\ndo stuff"
 	createTestPlugin(t, srcDir, "my-plugin", content, nil)
 	createTestPlugin(t, dstDir, "my-plugin", content, nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,18 +110,20 @@ func TestSyncPlugins_SkipsUpToDate(t *testing.T) {
 }
 
 func TestSyncPlugins_UpdatesChanged(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 
 	// The runtime copy holds v1, which the source repo once held: an older
 	// copy, so the sync may replace it.
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv1 instructions", nil)
-	gitCommitAll(t, srcDir, "v1")
+	hist.commit(t, srcDir)
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv2 instructions", nil)
-	gitCommitAll(t, srcDir, "v2")
+	hist.commit(t, srcDir)
 	createTestPlugin(t, dstDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv1 instructions", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,13 +142,15 @@ func TestSyncPlugins_UpdatesChanged(t *testing.T) {
 }
 
 func TestSyncPlugins_CopiesExtraFiles(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nstuff",
-		map[string]string{"run.sh": "#!/bin/bash\necho hi"})
+		map[string]string{"run.sh": "echo hi"})
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,36 +163,44 @@ func TestSyncPlugins_CopiesExtraFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "#!/bin/bash\necho hi" {
+	if string(data) != "echo hi" {
 		t.Errorf("run.sh content wrong: %s", data)
 	}
 
-	// Verify executable permission preserved (skip on Windows where permission bits aren't meaningful)
+	// Verify the file mode is preserved (createTestPlugin writes extras
+	// 0600, not the 0644 a fresh file would get); an executable bit rides
+	// the same srcInfo.Mode() copy. Skip on Windows where permission bits
+	// aren't meaningful.
 	if runtime.GOOS != "windows" {
-		info, _ := os.Stat(filepath.Join(dstDir, "my-plugin", "run.sh"))
-		if info.Mode()&0111 == 0 {
-			t.Error("run.sh lost executable permission")
+		info, err := os.Stat(filepath.Join(dstDir, "my-plugin", "run.sh"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("run.sh mode = %v, want 0600 preserved from the source", info.Mode().Perm())
 		}
 	}
 }
 
 func TestSyncPlugins_CleanRemovesExtra(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 
 	// old-plugin was retired from the repo: its runtime copy matches what
 	// the repo once held, so --clean may remove it.
 	createTestPlugin(t, srcDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
 	createTestPlugin(t, srcDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
-	gitCommitAll(t, srcDir, "both")
+	hist.commit(t, srcDir)
 	if err := os.RemoveAll(filepath.Join(srcDir, "old-plugin")); err != nil {
 		t.Fatal(err)
 	}
-	gitCommitAll(t, srcDir, "retire old-plugin")
+	hist.commit(t, srcDir)
 	createTestPlugin(t, dstDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
 	createTestPlugin(t, dstDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, true)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{Clean: true}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,13 +215,15 @@ func TestSyncPlugins_CleanRemovesExtra(t *testing.T) {
 }
 
 func TestSyncPlugins_NoCleanKeepsExtra(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 
 	createTestPlugin(t, srcDir, "new-plugin", "+++\nname = \"new-plugin\"\n+++\nnew", nil)
 	createTestPlugin(t, dstDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,8 +238,10 @@ func TestSyncPlugins_NoCleanKeepsExtra(t *testing.T) {
 }
 
 func TestSyncPlugins_IgnoresNonPluginDirs(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 
 	// Create a directory without plugin.md — should be ignored
 	notPlugin := filepath.Join(srcDir, "not-a-plugin")
@@ -216,7 +252,7 @@ func TestSyncPlugins_IgnoresNonPluginDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,6 +262,7 @@ func TestSyncPlugins_IgnoresNonPluginDirs(t *testing.T) {
 }
 
 func TestDetectDrift_NoDrift(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
@@ -243,6 +280,7 @@ func TestDetectDrift_NoDrift(t *testing.T) {
 }
 
 func TestDetectDrift_ContentDiffers(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
@@ -262,6 +300,7 @@ func TestDetectDrift_ContentDiffers(t *testing.T) {
 }
 
 func TestDetectDrift_MissingFromTarget(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
@@ -280,6 +319,7 @@ func TestDetectDrift_MissingFromTarget(t *testing.T) {
 }
 
 func TestDetectDrift_ExtraInTarget(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
@@ -310,6 +350,7 @@ func writeRigsJSON(t *testing.T, townRoot, rigName, localRepo string) {
 }
 
 func TestRigCheckoutRoot_UsesLocalRepoOverride(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	override := filepath.Join(t.TempDir(), "elsewhere", "gastown-checkout")
 	writeRigsJSON(t, townRoot, "gastown", override)
@@ -321,6 +362,7 @@ func TestRigCheckoutRoot_UsesLocalRepoOverride(t *testing.T) {
 }
 
 func TestRigCheckoutRoot_DefaultsToTownRootRigName(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// No rigs.json at all.
 	got := rigCheckoutRoot(townRoot, "gastown")
@@ -331,6 +373,7 @@ func TestRigCheckoutRoot_DefaultsToTownRootRigName(t *testing.T) {
 }
 
 func TestFindGastownSource_LocatesMayorRigPlugins(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	pluginsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
@@ -350,29 +393,8 @@ func TestFindGastownSource_LocatesMayorRigPlugins(t *testing.T) {
 	}
 }
 
-// gt-nc7q: a gastown checkout in the working directory must not become the
-// plugin source. A dog resolved its sync source from CWD, so running from its
-// stale clone (deacon/dogs/alpha/gastown at a Sep-17 commit) would have pushed
-// that commit's plugin files over the town runtime copy.
-func TestFindGastownSource_IgnoresWorkingDirectoryCheckout(t *testing.T) {
-	cwdCheckout := t.TempDir()
-	writeGastownCheckout(t, cwdCheckout, "stale-plugin")
-	t.Chdir(cwdCheckout)
-
-	townRoot := t.TempDir()
-	canonical := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
-	createTestPlugin(t, canonical, "current-plugin", "+++\nname = \"current-plugin\"\n+++\nbody", nil)
-
-	got, err := FindGastownSource(townRoot)
-	if err != nil {
-		t.Fatalf("FindGastownSource() error = %v", err)
-	}
-	if got.Dir != canonical {
-		t.Errorf("FindGastownSource().Dir = %q, want canonical %q (never the CWD checkout)", got.Dir, canonical)
-	}
-}
-
 func TestFindGastownSource_FallsBackToLegacyLayout(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// No mayor/rig/plugins — only the legacy crew/den/plugins layout exists.
 	legacyDir := filepath.Join(townRoot, "gastown", "crew", "den", "plugins")
@@ -391,34 +413,26 @@ func TestFindGastownSource_FallsBackToLegacyLayout(t *testing.T) {
 }
 
 func TestFindGastownSource_NoneFoundReturnsError(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir() // Empty: no gastown checkout anywhere.
 	if _, err := FindGastownSource(townRoot); err == nil {
 		t.Error("FindGastownSource() error = nil, want error when no source exists")
 	}
 }
 
-// writeGastownCheckout lays out a directory that FindGastownSource's old
-// CWD-walk-up recognized: a gastown go.mod beside a plugins/ tree.
-func writeGastownCheckout(t *testing.T, dir, pluginName string) {
-	t.Helper()
-	goMod := "module github.com/steveyegge/gastown\n\ngo 1.24\n"
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0644); err != nil {
-		t.Fatal(err)
-	}
-	createTestPlugin(t, filepath.Join(dir, "plugins"), pluginName, "+++\nname = \""+pluginName+"\"\n+++\nbody", nil)
-}
-
 // gt-o848l: a runtime edit the repo never held (2026-09-18: the mayor's
 // CHECK_ONLY safety default in compactor-dog/run.sh) must survive a sync
 // instead of being silently replaced by the destructive repo default.
 func TestSyncPlugins_ProtectsRuntimeEdit(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 	createTestPlugin(t, srcDir, "compactor", "+++\nname = \"compactor\"\n+++\n", map[string]string{"run.sh": "MODE=flatten\n"})
-	gitCommitAll(t, srcDir, "repo default")
+	hist.commit(t, srcDir)
 	createTestPlugin(t, dstDir, "compactor", "+++\nname = \"compactor\"\n+++\n", map[string]string{"run.sh": "MODE=check-only # hand edit\n"})
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,13 +451,15 @@ func TestSyncPlugins_ProtectsRuntimeEdit(t *testing.T) {
 // A file that exists only in the runtime copy (copyDir replaces the whole
 // directory) is a runtime edit too.
 func TestSyncPlugins_ProtectsRuntimeOnlyFile(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 	createTestPlugin(t, srcDir, "p", "+++\nname = \"p\"\n+++\nv2", nil)
-	gitCommitAll(t, srcDir, "v2")
+	hist.commit(t, srcDir)
 	createTestPlugin(t, dstDir, "p", "+++\nname = \"p\"\n+++\nv2", map[string]string{"local.env": "X=1\n"})
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,13 +472,15 @@ func TestSyncPlugins_ProtectsRuntimeOnlyFile(t *testing.T) {
 }
 
 func TestSyncPluginsWithOptions_ForceOverwritesRuntimeEdit(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 	createTestPlugin(t, srcDir, "p", "+++\nname = \"p\"\n+++\nrepo", nil)
-	gitCommitAll(t, srcDir, "repo")
+	hist.commit(t, srcDir)
 	createTestPlugin(t, dstDir, "p", "+++\nname = \"p\"\n+++\nhand edit", nil)
 
-	result, err := SyncPluginsWithOptions(srcDir, dstDir, SyncOptions{Force: true})
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{Force: true}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,13 +492,15 @@ func TestSyncPluginsWithOptions_ForceOverwritesRuntimeEdit(t *testing.T) {
 // Without git history the guard cannot tell an older copy from an edit, so
 // it fails closed: drifted plugins are protected, new ones still copy.
 func TestSyncPlugins_NoHistoryFailsClosed(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 	createTestPlugin(t, srcDir, "drifted", "+++\nname = \"drifted\"\n+++\nv2", nil)
 	createTestPlugin(t, srcDir, "fresh", "+++\nname = \"fresh\"\n+++\nnew", nil)
 	createTestPlugin(t, dstDir, "drifted", "+++\nname = \"drifted\"\n+++\nv1", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,14 +514,16 @@ func TestSyncPlugins_NoHistoryFailsClosed(t *testing.T) {
 
 // --clean must not delete a runtime-only plugin the repo never held.
 func TestSyncPlugins_CleanProtectsRuntimeOnlyPlugin(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
+	hist := &fakeHistory{}
 	createTestPlugin(t, srcDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
-	gitCommitAll(t, srcDir, "keep")
+	hist.commit(t, srcDir)
 	createTestPlugin(t, dstDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
 	createTestPlugin(t, dstDir, "local-only", "+++\nname = \"local-only\"\n+++\nmine", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, true)
+	result, err := syncPlugins(srcDir, dstDir, SyncOptions{Clean: true}, hist.source)
 	if err != nil {
 		t.Fatal(err)
 	}

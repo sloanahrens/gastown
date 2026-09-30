@@ -5,5 +5,4 @@ internal/cmd
 internal/config
 internal/hooks
 internal/mayor
-internal/plugin
 internal/telemetry

@@ -1,14 +1,43 @@
 package plugin
 
 import (
-	"os"
-	"path/filepath"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
+// scriptedBD is a bdRunner that records each call's arguments, one line per
+// call, and answers from reply keyed by the bd verb (the first argument). An
+// unscripted verb fails, as the old fake bd's catch-all exit 2 did.
+type scriptedBD struct {
+	reply map[string]string
+	calls []string
+}
+
+func (s *scriptedBD) run(_ context.Context, _ beads.SubprocessEnvMode, args ...string) ([]byte, string, error) {
+	s.calls = append(s.calls, strings.Join(args, " "))
+	out, ok := s.reply[args[0]]
+	if !ok {
+		return nil, "unscripted bd " + args[0], errors.New("exit status 2")
+	}
+	return []byte(out), "", nil
+}
+
+// newScriptedRecorder is a Recorder whose bd is scripted by reply.
+func newScriptedRecorder(t *testing.T, reply map[string]string) (*Recorder, *scriptedBD) {
+	t.Helper()
+	bd := &scriptedBD{reply: reply}
+	r := NewRecorder(t.TempDir())
+	r.bd = bd.run
+	return r, bd
+}
+
 func TestPluginRunRecord(t *testing.T) {
+	t.Parallel()
 	record := PluginRunRecord{
 		PluginName: "test-plugin",
 		RigName:    "gastown",
@@ -28,24 +57,11 @@ func TestPluginRunRecord(t *testing.T) {
 }
 
 func TestRecordRunCreatesAndClosesReceipt(t *testing.T) {
-	townRoot := t.TempDir()
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd-args.log")
-	bdPath := filepath.Join(binDir, "bd")
-	fakeBD := "#!/usr/bin/env bash\n" +
-		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
-		"case \"$1\" in\n" +
-		"  create) printf '{\\\"id\\\":\\\"gt-test-run\\\"}\\n' ;;\n" +
-		"  close) exit 0 ;;\n" +
-		"  *) exit 2 ;;\n" +
-		"esac\n"
-	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_ARGS_LOG", logPath)
-
-	recorder := NewRecorder(townRoot)
+	t.Parallel()
+	recorder, bd := newScriptedRecorder(t, map[string]string{
+		"create": `{"id":"gt-test-run"}` + "\n",
+		"close":  "",
+	})
 	id, err := recorder.RecordRun(PluginRunRecord{
 		PluginName:  "tool-updater",
 		RigName:     "gastown",
@@ -61,11 +77,7 @@ func TestRecordRunCreatesAndClosesReceipt(t *testing.T) {
 		t.Fatalf("RecordRun id = %q, want gt-test-run", id)
 	}
 
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
-	}
-	log := string(data)
+	log := strings.Join(bd.calls, "\n")
 	for _, want := range []string{
 		"create --ephemeral --json -t chore --title=tool-updater: failed=brew",
 		"-l type:plugin-run",
@@ -83,6 +95,7 @@ func TestRecordRunCreatesAndClosesReceipt(t *testing.T) {
 }
 
 func TestRunResultConstants(t *testing.T) {
+	t.Parallel()
 	if ResultSuccess != "success" {
 		t.Errorf("expected ResultSuccess to be 'success', got %q", ResultSuccess)
 	}
@@ -113,6 +126,7 @@ func TestRunResultConstants(t *testing.T) {
 }
 
 func TestNewRecorder(t *testing.T) {
+	t.Parallel()
 	recorder := NewRecorder("/tmp/test-town")
 	if recorder == nil {
 		t.Fatal("NewRecorder returned nil")
@@ -122,47 +136,33 @@ func TestNewRecorder(t *testing.T) {
 	}
 }
 
-func TestCooldownDurationParsing(t *testing.T) {
+// TestRunsSinceSendsAbsoluteCutoff checks that a plugin gate duration is
+// read as Go's time.ParseDuration ("30m" is minutes) and sent to bd as an
+// absolute RFC3339 cutoff, never as the raw duration: bd's compact duration
+// reads "m" as months.
+func TestRunsSinceSendsAbsoluteCutoff(t *testing.T) {
 	t.Parallel()
-	// Verify that plugin gate durations (Go time.ParseDuration format)
-	// are parsed correctly. This is critical because bd's compact duration
-	// uses "m" for months, while Go uses "m" for minutes. The fix computes
-	// an absolute RFC3339 cutoff instead of passing the raw duration to bd.
-	cases := []struct {
-		input   string
-		wantDur time.Duration
-		wantErr bool
-	}{
-		{"5m", 5 * time.Minute, false},
-		{"30m", 30 * time.Minute, false},
-		{"1h", 1 * time.Hour, false},
-		{"24h", 24 * time.Hour, false},
-		{"1h30m", 90 * time.Minute, false},
-		{"500ms", 500 * time.Millisecond, false},
-		{"bogus", 0, true},
+	recorder, bd := newScriptedRecorder(t, map[string]string{"list": "[]\n"})
+	before := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	if _, err := recorder.GetRunsSince("p", "30m"); err != nil {
+		t.Fatalf("GetRunsSince: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.input, func(t *testing.T) {
-			d, err := time.ParseDuration(tc.input)
-			if tc.wantErr {
-				if err == nil {
-					t.Errorf("expected error for %q, got nil", tc.input)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error for %q: %v", tc.input, err)
-			}
-			if d != tc.wantDur {
-				t.Errorf("ParseDuration(%q) = %v, want %v", tc.input, d, tc.wantDur)
-			}
-			// Verify the cutoff time is in the past and approximately correct.
-			cutoff := time.Now().Add(-d)
-			elapsed := time.Since(cutoff)
-			if elapsed < d-time.Second || elapsed > d+time.Second {
-				t.Errorf("cutoff drift: expected ~%v ago, got %v ago", d, elapsed)
-			}
-		})
+	after := time.Now().Add(-30 * time.Minute)
+	var cutoff string
+	for _, a := range strings.Fields(strings.Join(bd.calls, " ")) {
+		if v, ok := strings.CutPrefix(a, "--created-after="); ok {
+			cutoff = v
+		}
+	}
+	got, err := time.Parse(time.RFC3339, cutoff)
+	if err != nil {
+		t.Fatalf("--created-after=%q is not RFC3339 (calls %q): %v", cutoff, bd.calls, err)
+	}
+	if got.Before(before) || got.After(after) {
+		t.Errorf("cutoff %v, want 30 minutes ago (between %v and %v)", got, before, after)
+	}
+	if _, err := recorder.GetRunsSince("p", "bogus"); err == nil {
+		t.Error("GetRunsSince(\"bogus\") = nil error, want a parse error")
 	}
 }
 
@@ -171,32 +171,13 @@ func TestCooldownDurationParsing(t *testing.T) {
 // even with --all. Without --include-infra, queryRuns always sees zero
 // results, so cooldown gates never see a "last run" and never gate.
 func TestQueryRunsIncludesInfraFlag(t *testing.T) {
-	townRoot := t.TempDir()
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd-args.log")
-	bdPath := filepath.Join(binDir, "bd")
-	fakeBD := "#!/usr/bin/env bash\n" +
-		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
-		"case \"$1\" in\n" +
-		"  list) printf '[]\\n' ;;\n" +
-		"  *) exit 2 ;;\n" +
-		"esac\n"
-	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_ARGS_LOG", logPath)
-
-	recorder := NewRecorder(townRoot)
+	t.Parallel()
+	recorder, bd := newScriptedRecorder(t, map[string]string{"list": "[]\n"})
 	if _, err := recorder.CountRunsSince("tool-updater", "1h"); err != nil {
 		t.Fatalf("CountRunsSince failed: %v", err)
 	}
 
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read fake bd log: %v", err)
-	}
-	log := string(data)
+	log := strings.Join(bd.calls, "\n")
 	if !strings.Contains(log, "--include-infra") {
 		t.Fatalf("queryRuns did not pass --include-infra, ephemeral receipts would never be found:\n%s", log)
 	}
@@ -208,23 +189,10 @@ func TestQueryRunsIncludesInfraFlag(t *testing.T) {
 // plugin holds the daemon off for a full cooldown window even though
 // nothing happened (gt-o1z7, finding f53b7b837c35).
 func TestCountRunsSinceExcludesPrinted(t *testing.T) {
-	townRoot := t.TempDir()
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd-args.log")
-	bdPath := filepath.Join(binDir, "bd")
-	fakeBD := "#!/usr/bin/env bash\n" +
-		"printf '%s\\n' \"$*\" >> \"$BD_ARGS_LOG\"\n" +
-		"case \"$1\" in\n" +
-		"  list) printf '[{\"id\":\"gt-1\",\"title\":\"Plugin run: p\",\"created_at\":\"2020-01-01T00:00:00Z\",\"labels\":[\"type:plugin-run\",\"plugin:p\",\"result:printed\"]}]\\n' ;;\n" +
-		"  *) exit 2 ;;\n" +
-		"esac\n"
-	if err := os.WriteFile(bdPath, []byte(fakeBD), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_ARGS_LOG", logPath)
-
-	recorder := NewRecorder(townRoot)
+	t.Parallel()
+	recorder, _ := newScriptedRecorder(t, map[string]string{
+		"list": `[{"id":"gt-1","title":"Plugin run: p","created_at":"2020-01-01T00:00:00Z","labels":["type:plugin-run","plugin:p","result:printed"]}]` + "\n",
+	})
 	count, err := recorder.CountRunsSince("p", "1h")
 	if err != nil {
 		t.Fatalf("CountRunsSince failed: %v", err)
@@ -233,7 +201,3 @@ func TestCountRunsSinceExcludesPrinted(t *testing.T) {
 		t.Fatalf("CountRunsSince = %d, want 0: a printed receipt must not satisfy the cooldown gate", count)
 	}
 }
-
-// Integration tests for RecordRun, GetLastRun, GetRunsSince require
-// a working beads installation and are skipped in unit tests.
-// These functions shell out to `bd` commands.
