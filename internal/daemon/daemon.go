@@ -812,7 +812,7 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.gtPath, 0, d.beadsStores, storeOpener, isRigParked)
-	d.convoyManager.SetAlertHooks(d.escalateAlert, d.clearAlerts)
+	d.convoyManager.SetAlertHooks(d.escalateAlert, d.clearAlertsErr)
 	if err := d.convoyManager.Start(); err != nil {
 		d.logger.Printf("Warning: failed to start convoy manager: %v", err)
 	} else {

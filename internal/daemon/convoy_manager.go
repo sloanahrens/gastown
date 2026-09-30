@@ -183,7 +183,7 @@ type ConvoyManager struct {
 	// Start() and read from the polling goroutine afterwards; nil disables
 	// alerting, which is the case in tests. See SetAlertHooks.
 	escalate        func(key, source, message string)
-	clearEscalation func(reason string, keys ...string)
+	clearEscalation func(reason string, keys ...string) error
 
 	// originBranchesCache caches each rig's origin polecat branch list (and any
 	// lookup error) for the duration of one stranded scan, so a convoy with
@@ -199,6 +199,14 @@ type ConvoyManager struct {
 	// subprocess, not N. Reset alongside originBranchesCache. Protected by
 	// originBranchesMu.
 	scanAlertKeysClaimed map[string]bool
+
+	// clearedAlertKeys holds the dead-holder alert keys whose last clear
+	// landed and that nothing has raised since, so a scan skips the `gt
+	// escalate clear` subprocess for them. It outlives a scan, unlike
+	// scanAlertKeysClaimed, and starts empty, so the first scan after a daemon
+	// restart clears each key once. Protected by alertStateMu.
+	clearedAlertKeys map[string]bool
+	alertStateMu     sync.Mutex
 
 	// isRigParked reports whether a rig is currently parked/docked.
 	// Parked rigs are skipped during event polling. May be nil (never parked).
@@ -363,7 +371,7 @@ func (m *ConvoyManager) Stop() {
 // Call before Start(): the hooks are read from the polling goroutines without
 // a lock, like every other manager callback. Nil (the default) keeps the
 // manager log-only, which is what tests want.
-func (m *ConvoyManager) SetAlertHooks(escalate func(key, source, message string), clear func(reason string, keys ...string)) {
+func (m *ConvoyManager) SetAlertHooks(escalate func(key, source, message string), clear func(reason string, keys ...string) error) {
 	m.escalate = escalate
 	m.clearEscalation = clear
 }
@@ -529,7 +537,7 @@ func (m *ConvoyManager) deliverStoreAlert(alert storeAlert) {
 	case alert.raise && m.escalate != nil:
 		m.escalate(requiredStoreAlertKey, "daemon/convoy", alert.msg)
 	case alert.clear && m.clearEscalation != nil:
-		m.clearEscalation("town store reopened", requiredStoreAlertKey)
+		_ = m.clearEscalation("town store reopened", requiredStoreAlertKey)
 	}
 }
 
@@ -1486,6 +1494,7 @@ func (m *ConvoyManager) resolveDeadHolderWork(rig, assignee, issueID string) (fe
 // must not each pay for their own synchronous gt escalate subprocess while
 // scanMu is held.
 func (m *ConvoyManager) raiseDeadHolderAlert(key, msg string) {
+	m.markAlertOpen(key)
 	if m.escalate == nil || !m.claimAlertOnceThisScan(key) {
 		return
 	}
@@ -1493,12 +1502,38 @@ func (m *ConvoyManager) raiseDeadHolderAlert(key, msg string) {
 }
 
 // clearDeadHolderAlert is raiseDeadHolderAlert's counterpart: closes key at
-// most once per scan once the condition it guarded has resolved.
+// most once per scan once the condition it guarded has resolved. A key whose
+// last clear landed costs nothing on later scans, so a steady town of
+// dead-holder issues does not run one subprocess per issue per scan under
+// scanMu (gt-iesba); a failed clear is retried on the next scan.
 func (m *ConvoyManager) clearDeadHolderAlert(key, reason string) {
-	if m.clearEscalation == nil || !m.claimAlertOnceThisScan(key) {
+	if m.clearEscalation == nil || m.alertKnownClear(key) || !m.claimAlertOnceThisScan(key) {
 		return
 	}
-	m.clearEscalation(reason, key)
+	if err := m.clearEscalation(reason, key); err != nil {
+		return
+	}
+	m.alertStateMu.Lock()
+	if m.clearedAlertKeys == nil {
+		m.clearedAlertKeys = make(map[string]bool)
+	}
+	m.clearedAlertKeys[key] = true
+	m.alertStateMu.Unlock()
+}
+
+// alertKnownClear reports whether key's last clear landed and nothing has
+// raised it since.
+func (m *ConvoyManager) alertKnownClear(key string) bool {
+	m.alertStateMu.Lock()
+	defer m.alertStateMu.Unlock()
+	return m.clearedAlertKeys[key]
+}
+
+// markAlertOpen forgets key's landed clear, so the next resolution clears it.
+func (m *ConvoyManager) markAlertOpen(key string) {
+	m.alertStateMu.Lock()
+	delete(m.clearedAlertKeys, key)
+	m.alertStateMu.Unlock()
 }
 
 // claimAlertOnceThisScan reports whether key has not yet been raised or
