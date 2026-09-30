@@ -616,7 +616,7 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
-	t.Run("a bare clone fetches a branch and adds worktrees on branches", func(t *testing.T) {
+	t.Run("a bare clone fetches a branch; CommonDir is shared with worktrees", func(t *testing.T) {
 		fx := newFixture(t, newEnv(t))
 		bare := filepath.Join(fx.root, "bare.git")
 		if err := fx.env.Open(fx.root).CloneBareWithBranch(fx.origin, bare, ""); err != nil {
@@ -635,28 +635,10 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 			t.Error("fetching a missing branch succeeded")
 		}
 		wtDir := filepath.Join(fx.root, "wt-main")
-		if err := b.WorktreeAddExisting(wtDir, "main"); err != nil {
-			t.Fatalf("WorktreeAddExisting: %v", err)
+		if err := b.WorktreeAddDetached(wtDir, "main"); err != nil {
+			t.Fatalf("WorktreeAddDetached on the bare clone: %v", err)
 		}
 		wt := fx.env.Open(wtDir)
-		if id, err := wt.Rev("HEAD"); err != nil || id != fx.base {
-			t.Errorf("worktree HEAD = %q, %v; want %s", id, err, fx.base)
-		}
-		if got := wt.DefaultBranch(); got != "main" {
-			t.Errorf("worktree DefaultBranch = %q; it is on main, not detached", got)
-		}
-		if got := readFile(t, filepath.Join(wtDir, "a.txt")); got != "one\ntwo\nthree\n" {
-			t.Errorf("a.txt = %q", got)
-		}
-		if err := wt.ConfigureHooksPath(); err != nil {
-			t.Errorf("ConfigureHooksPath without .githooks: %v", err)
-		}
-		if err := b.WorktreeAddExisting(filepath.Join(fx.root, "wt-again"), "main"); err == nil {
-			t.Error("adding a second worktree on main succeeded")
-		}
-		if err := b.WorktreeAddExisting(filepath.Join(fx.root, "wt-none"), "nope"); err == nil {
-			t.Error("adding a worktree on a missing branch succeeded")
-		}
 
 		_, linked := fx.worktree(t, fx.base)
 		for _, c := range []struct {

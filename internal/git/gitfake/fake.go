@@ -11,8 +11,7 @@
 //     line-level merge would combine the edits.
 //   - Commit ids are unique per commit made, not content hashes, and log
 //     order is the order commits were made (git's is commit date).
-//   - The town-root guard is not modeled, and hooks only as far as
-//     ConfigureHooksPath succeeding.
+//   - The town-root guard and hooks are not modeled.
 //   - A repository is the directory it was made at: a subdirectory of a
 //     checkout is not one. A clone of a remote whose HEAD names a missing
 //     branch, or that holds only tags, is not modeled.

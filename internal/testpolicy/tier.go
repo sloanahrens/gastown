@@ -14,13 +14,14 @@ import (
 // landing gate, runs every package NOT listed; `make test-slow` runs the
 // listed ones after landing. Each line is "<package> <wall> # <why>": the
 // wall the package took in the measurement that put it there (a Go duration,
-// e.g. 301s) and why it belongs in the slow tier. The gate fails any
+// e.g. 301s) and why it belongs in the slow tier. `make tier-check` fails any
 // fast-tier package whose wall time exceeds FastTierMaxWall, so the boundary
-// cannot drift silently.
+// cannot drift silently; `make gate` only warns, because wall time depends on
+// host load and a landing must not be refused for contention.
 
 // FastTierMaxWall is the one definition of the tier boundary: the most wall
-// time one fast-tier package may take in `make gate` before the gate fails
-// it, and the cut-off for slow.txt (every listed package measured at least
+// time one fast-tier package may take before `make tier-check` fails it (and
+// `make gate` warns), and the cut-off for slow.txt (every listed package measured at least
 // this much). The budget runner's -fast-tier flag reads it; nothing else
 // restates the number.
 const FastTierMaxWall = 30 * time.Second

@@ -14,7 +14,7 @@ import (
 )
 
 // The unit tier adds rigs through gitfake. These add them through real git:
-// the bare clone, the mayor clone, the refinery worktree, and what git makes
+// the bare clone, the mayor clone, and what git makes
 // of remotes gitfake does not model. bd stays in process.
 
 func gitT(t *testing.T, dir string, args ...string) string {
@@ -34,7 +34,7 @@ func realGitManager(t *testing.T) (*Manager, string, *config.RigsConfig) {
 	t.Helper()
 	root, rigsConfig := setupTestTown(t)
 	m, _, _ := testManager(root, rigsConfig)
-	m.git, m.openRepo, m.redirect = git.NewGit(root), nil, nil
+	m.git, m.openRepo = git.NewGit(root), nil
 	return m, root, rigsConfig
 }
 
@@ -81,10 +81,10 @@ func TestIntegrationAddRig(t *testing.T) {
 	if got := gitT(t, root, "--git-dir", bare, "symbolic-ref", "--short", "HEAD"); got != "develop" {
 		t.Errorf("bare HEAD = %q, want develop", got)
 	}
-	gitT(t, root, "--git-dir", bare, "rev-parse", "--verify", "refs/remotes/origin/develop")
-	if got := gitT(t, filepath.Join(rigPath, "refinery", "rig"), "rev-parse", "--abbrev-ref", "HEAD"); got != "develop" {
-		t.Errorf("refinery worktree on %q, want develop", got)
+	if got := gitT(t, mayor, "rev-parse", "--abbrev-ref", "HEAD"); got != "develop" {
+		t.Errorf("mayor clone on %q, want develop", got)
 	}
+	gitT(t, root, "--git-dir", bare, "rev-parse", "--verify", "refs/remotes/origin/develop")
 	for _, dir := range []string{bare, filepath.Join(mayor, ".git")} {
 		if got := gitT(t, root, "--git-dir", dir, "remote", "get-url", "upstream"); got != upstream {
 			t.Errorf("%s upstream = %q, want %q", dir, got, upstream)

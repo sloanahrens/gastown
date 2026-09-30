@@ -39,24 +39,8 @@ func TestLooksLikeProtocolPayload(t *testing.T) {
 	}{
 		{"refinery recovered bead", refineryRecoveredBeadBody, true},
 		{"witness recovered bead", witnessRecoveredBeadBody, true},
-		{"merge ready", formatMergeReadyBody(MergeReadyPayload{
-			Branch:   "polecat/nux/gt-abc",
-			Issue:    "gt-abc",
-			Polecat:  "nux",
-			Rig:      "gastown",
-			Verified: "clean git state, issue closed",
-		}), true},
-		{"fix needed", formatFixNeededBody(FixNeededPayload{
-			Branch:        "polecat/nux/gt-abc",
-			Issue:         "gt-abc",
-			Polecat:       "nux",
-			Rig:           "gastown",
-			TargetBranch:  "main",
-			FailureType:   "tests",
-			Error:         "TestFoo failed",
-			MRBeadID:      "gt-wisp-abc",
-			AttemptNumber: 1,
-		}), true},
+		{"merge ready", "Branch: polecat/nux/gt-abc\nIssue: gt-abc\nPolecat: nux\nRig: gastown\nVerified: clean git state, issue closed\n", true},
+		{"fix needed", "Branch: polecat/nux/gt-abc\nIssue: gt-abc\nFailure-Type: tests\nError: TestFoo failed\nMR-Bead-ID: gt-wisp-abc\nAttempt-Number: 1\n", true},
 
 		{"prose acknowledgement", "Ack on the closure, and one substantive addendum.\n" +
 			"I re-ran the checks read-only while waiting on the MRs; three of four fail.", false},

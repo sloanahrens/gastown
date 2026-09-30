@@ -145,9 +145,6 @@ type Manager struct {
 	env       []string                          // bd's base environment; nil: os.Environ()
 	bdVersion func() (deps.BeadsStatus, string) // nil: deps.CheckBeads
 	dolt      doltDatabases                     // nil: the town's Dolt server
-	// redirect points a worktree's .beads at the rig's; nil is
-	// beads.SetupRedirect, which runs git in a worktree that tracks .beads.
-	redirect func(townRoot, worktreePath string) error
 }
 
 // NewManager creates a new rig manager.
@@ -266,12 +263,6 @@ func (m *Manager) loadRig(name string, entry config.RigEntry) (*Rig, error) {
 		rig.HasWitness = true
 	}
 
-	// Check for refinery
-	refineryPath := filepath.Join(rigPath, "refinery", "rig")
-	if _, err := os.Stat(refineryPath); err == nil {
-		rig.HasRefinery = true
-	}
-
 	// Check for mayor clone
 	mayorPath := filepath.Join(rigPath, "mayor", "rig")
 	if _, err := os.Stat(mayorPath); err == nil {
@@ -332,7 +323,6 @@ func (m *Manager) resolveLocalRepo(path, gitURL string) (string, string) {
 //	<name>/                    # Container (NOT a git clone)
 //	├── config.json            # Rig configuration
 //	├── .beads/                # Rig-level issue tracking
-//	├── refinery/rig/          # Canonical main clone
 //	├── mayor/rig/             # Mayor's working clone
 //	├── witness/               # Witness agent (no clone)
 //	├── polecats/              # Worker directories (empty)
@@ -439,8 +429,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return nil, fmt.Errorf("saving rig config: %w", err)
 	}
 
-	// Create shared bare repo as source of truth for refinery and polecats.
-	// This allows refinery to see polecat branches without pushing to remote.
+	// Create shared bare repo as source of truth for polecat worktrees.
 	// Mayor remains a separate clone (doesn't need branch visibility).
 	fmt.Printf("  Cloning repository (this may take a moment)...\n")
 	bareRepoPath := filepath.Join(rigPath, ".repo.git")
@@ -547,8 +536,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	}
 
 	// Create mayor as regular clone (separate from bare repo).
-	// Mayor doesn't need to see polecat branches - that's refinery's job.
-	// This also allows mayor to stay on the default branch without conflicting with refinery.
+	// Mayor doesn't need to see polecat branches, and stays on the default branch.
 	// Uses --reference to borrow objects from the bare repo we just created,
 	// avoiding a redundant download from the remote (GH#1059).
 	fmt.Printf("  Creating mayor clone...\n")
@@ -752,43 +740,12 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 
 	// Provision PRIME.md with Gas Town context for all workers in this rig.
 	// This is the fallback if SessionStart hook fails - ensures ALL workers
-	// (crew, polecats, refinery, witness) have GUPP and essential Gas Town context.
+	// (crew, polecats, witness) have GUPP and essential Gas Town context.
 	// PRIME.md is read by bd prime and output to the agent.
 	// Use ResolveBeadsDir to follow redirect (writes to mayor/rig/.beads/ if tracked).
 	resolvedBeadsPath := beads.ResolveBeadsDir(rigPath)
 	if err := beads.ProvisionPrimeMD(resolvedBeadsPath); err != nil {
 		fmt.Printf("  Warning: Could not provision PRIME.md: %v\n", err)
-	}
-
-	// Create refinery as worktree from bare repo on default branch.
-	// Refinery needs to see polecat branches (shared .repo.git) and merges them.
-	// Being on the default branch allows direct merge workflow.
-	fmt.Printf("  Creating refinery worktree...\n")
-	refineryRigPath := filepath.Join(rigPath, "refinery", "rig")
-	if err := os.MkdirAll(filepath.Dir(refineryRigPath), 0755); err != nil {
-		return nil, fmt.Errorf("creating refinery dir: %w", err)
-	}
-	if err := bareGit.WorktreeAddExisting(refineryRigPath, defaultBranch); err != nil {
-		return nil, fmt.Errorf("creating refinery worktree: %w", err)
-	}
-	refineryGit := m.openGit(refineryRigPath)
-	if err := refineryGit.ConfigureHooksPath(); err != nil {
-		return nil, fmt.Errorf("configuring hooks for refinery: %w", err)
-	}
-	fmt.Printf("   ✓ Created refinery worktree\n")
-	// Set up beads redirect for refinery (points to rig-level .beads)
-	setupRedirect := beads.SetupRedirect
-	if m.redirect != nil {
-		setupRedirect = m.redirect
-	}
-	if err := setupRedirect(m.townRoot, refineryRigPath); err != nil {
-		fmt.Printf("  Warning: Could not set up refinery beads redirect: %v\n", err)
-	}
-	// Copy overlay files from .runtime/overlay/ to refinery root.
-	// This allows services to have .env and other config files at their root.
-	if err := CopyOverlay(rigPath, refineryRigPath); err != nil {
-		// Non-fatal - log warning but continue
-		fmt.Printf("  Warning: Could not copy overlay files to refinery: %v\n", err)
 	}
 
 	// NOTE: Claude settings are installed by the agent at startup, not here.
@@ -897,7 +854,7 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// Seeding at rig-add time would fork the config, silently shadowing
 	// any future repo-side updates.
 
-	// Create rig-level agent beads (witness, refinery) in rig beads.
+	// Create rig-level agent beads (witness) in rig beads.
 	// Town-level agents (mayor, deacon) are created by gt install in town beads.
 	if err := m.initAgentBeads(rigPath, opts.Name, opts.BeadsPrefix); err != nil {
 		// Non-fatal: log warning but continue
@@ -1439,13 +1396,13 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	return nil
 }
 
-// initAgentBeads creates rig-level agent beads for Witness and Refinery.
+// initAgentBeads creates rig-level agent beads for the Witness.
 // These agents use the rig's beads prefix and are stored in rig beads.
 //
 // Town-level agents (Mayor, Deacon) are created by gt install in town beads.
 // Role beads are also created by gt install with hq- prefix.
 //
-// Rig-level agents (Witness, Refinery) are created here in rig beads with rig prefix.
+// Rig-level agents (Witness) are created here in rig beads with rig prefix.
 // Format: <prefix>-<rig>-<role> (e.g., pi-pixelforge-witness)
 //
 // Agent beads track lifecycle state for ZFC compliance (gt-h3hak, gt-pinkq).
@@ -2042,7 +1999,7 @@ func (m *Manager) ListRigNames() []string {
 }
 
 // seedPatrolMolecules creates patrol molecule prototypes in the rig's beads database.
-// These molecules define the work loops for Deacon, Witness, and Refinery roles.
+// These molecules define the work loops for the Deacon and Witness roles.
 func (m *Manager) seedPatrolMolecules(rigPath string) error {
 	// Use bd command to seed molecules (more reliable than internal API)
 	if _, _, err := m.runBD(rigPath, nil, "mol", "seed", "--patrol"); err != nil {
@@ -2067,10 +2024,6 @@ func (m *Manager) seedPatrolMoleculesManually(rigPath string) error {
 		{
 			title: "Witness Patrol",
 			desc:  "Per-rig worker monitor patrol loop with progressive nudging.",
-		},
-		{
-			title: "Refinery Patrol",
-			desc:  "Merge queue processor patrol loop with verification gates.",
 		},
 	}
 

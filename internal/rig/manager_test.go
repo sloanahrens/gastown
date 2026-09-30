@@ -89,9 +89,6 @@ func TestDiscoverRigs(t *testing.T) {
 	if !rig.HasWitness {
 		t.Error("expected HasWitness = true")
 	}
-	if !rig.HasRefinery {
-		t.Error("expected HasRefinery = true")
-	}
 }
 
 func TestDiscoverRigs_SortedByName(t *testing.T) {
@@ -364,10 +361,9 @@ func TestListRigNames(t *testing.T) {
 func TestRigSummary(t *testing.T) {
 	t.Parallel()
 	rig := &Rig{
-		Name:        "test",
-		Polecats:    []string{"a", "b", "c"},
-		HasWitness:  true,
-		HasRefinery: false,
+		Name:       "test",
+		Polecats:   []string{"a", "b", "c"},
+		HasWitness: true,
 	}
 
 	summary := rig.Summary()
@@ -380,9 +376,6 @@ func TestRigSummary(t *testing.T) {
 	}
 	if !summary.HasWitness {
 		t.Error("expected HasWitness = true")
-	}
-	if summary.HasRefinery {
-		t.Error("expected HasRefinery = false")
 	}
 }
 
@@ -1558,8 +1551,8 @@ func TestAddRig_BranchFlag(t *testing.T) {
 	if exists, err := bareGit.RefExists("refs/remotes/origin/develop"); err != nil || !exists {
 		t.Errorf("refs/remotes/origin/develop in bare repo: %v, %v", exists, err)
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, "refinery", "rig", "develop.txt")); err != nil {
-		t.Errorf("refinery worktree is not on develop: %v", err)
+	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", "develop.txt")); err != nil {
+		t.Errorf("mayor clone is not on develop: %v", err)
 	}
 	cfg, err := LoadRigConfig(rigPath)
 	if err != nil {

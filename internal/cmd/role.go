@@ -259,6 +259,11 @@ func parseRoleString(s string) (Role, string, string) {
 		return Role(s), "", ""
 	case constants.RoleWitness:
 		return RoleWitness, rig, ""
+	case "refinery":
+		// The refinery role was deleted (gt-v4ssj.6). A stale GT_ROLE of
+		// <rig>/refinery is an unknown role, not a polecat named "refinery"
+		// (a name the pool already reserves).
+		return Role(s), "", ""
 	case "polecats":
 		if len(parts) >= 3 {
 			return RolePolecat, rig, parts[2]
@@ -279,7 +284,7 @@ func parseRoleString(s string) (Role, string, string) {
 // Format matches beads created_by convention:
 //   - Simple roles: "mayor", "deacon"
 //   - Dog roles: "deacon-boot" (hyphenated, matching BD_ACTOR)
-//   - Rig-specific: "gastown/witness", "gastown/refinery"
+//   - Rig-specific: "gastown/witness"
 //   - Workers: "gastown/crew/max", "gastown/polecats/Toast"
 func (info RoleInfo) ActorString() string {
 	switch info.Role {

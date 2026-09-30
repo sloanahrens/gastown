@@ -32,9 +32,6 @@ func testManager(root string, cfg *config.RigsConfig) (*Manager, *gitfake.Fake, 
 		env:       []string{},
 		bdVersion: func() (deps.BeadsStatus, string) { return deps.BeadsOK, "1.2.3" },
 		dolt:      newFakeDolt(),
-		// beads.SetupRedirect runs git in a worktree that tracks .beads;
-		// what it writes is beads' to test.
-		redirect: func(string, string) error { return nil },
 	}
 	return m, f, bd
 }

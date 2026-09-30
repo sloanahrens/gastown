@@ -29,8 +29,6 @@ type Repo interface {
 	DefaultBranch() string
 	RefExists(ref string) (bool, error)
 	CommonDir() (string, error)
-	WorktreeAddExisting(path, branch string) error
-	ConfigureHooksPath() error
 }
 
 var _ Repo = (*git.Git)(nil)

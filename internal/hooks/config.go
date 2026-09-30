@@ -1264,8 +1264,68 @@ func loadConfig(path string) (*HooksConfig, error) {
 	if err := validateUniqueMatchers(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
+	dropRetiredCommandHooks(&cfg)
 
 	return &cfg, nil
+}
+
+// retiredGTSubcommands are gt subcommands that were deleted (the refinery
+// cutover gt-v4ssj.6 and the operator-surface deletion gt-638go.2). A hook
+// that still runs one fails on every event, and an on-disk hooks-base.json
+// written before the deletion carries one (the Stop hook "gt costs record").
+var retiredGTSubcommands = map[string]bool{
+	"account":   true,
+	"costs":     true,
+	"dashboard": true,
+	"krc":       true,
+	"mountain":  true,
+	"mq":        true,
+	"quota":     true,
+	"refinery":  true,
+	"seance":    true,
+}
+
+// runsRetiredGTSubcommand reports whether command invokes gt (bare or by
+// path) with a deleted subcommand.
+func runsRetiredGTSubcommand(command string) bool {
+	fields := strings.Fields(command)
+	return len(fields) >= 2 && filepath.Base(fields[0]) == "gt" && retiredGTSubcommands[fields[1]]
+}
+
+// dropRetiredCommandHooks removes hooks that run a retired gt subcommand from
+// a loaded config, and entries left with no hooks, so sync stops writing them
+// into managed settings files.
+func dropRetiredCommandHooks(cfg *HooksConfig) {
+	for _, eventType := range EventTypes {
+		entries := cfg.GetEntries(eventType)
+		if len(entries) == 0 {
+			continue
+		}
+		kept := make([]HookEntry, 0, len(entries))
+		changed := false
+		for _, entry := range entries {
+			hooks := make([]Hook, 0, len(entry.Hooks))
+			for _, h := range entry.Hooks {
+				if runsRetiredGTSubcommand(h.Command) {
+					changed = true
+					continue
+				}
+				hooks = append(hooks, h)
+			}
+			if len(hooks) == 0 && len(entry.Hooks) > 0 {
+				changed = true
+				continue
+			}
+			entry.Hooks = hooks
+			kept = append(kept, entry)
+		}
+		if changed {
+			if len(kept) == 0 {
+				kept = nil
+			}
+			cfg.SetEntries(eventType, kept)
+		}
+	}
 }
 
 func validateUniqueMatchers(cfg *HooksConfig) error {

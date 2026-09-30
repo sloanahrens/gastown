@@ -13,11 +13,11 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -141,8 +141,8 @@ func DetectStateCollapse(bd *BdCli, refs *BranchRefSource, workDir, rigName stri
 			continue // still open, or a non-close terminal state (e.g. tombstone) — no collapse
 		}
 
-		// gt done closes the source issue as "pending_mr: <mr>" the moment it
-		// submits (beads.PendingMergeCloseReason), so a closed issue naming an
+		// gt done used to close the source issue as "pending_mr: <mr>" the
+		// moment it submitted, so a closed issue naming an
 		// MR that is still open in the queue is the ordinary in-flight
 		// workflow, not a collapse — the same false-positive class gt-akap
 		// fixed on the branch-driven side, and the dominant one here: the
@@ -440,10 +440,10 @@ func normalizeBranchRef(branch string) string {
 }
 
 // pendingMRFromCloseReason returns the MR id named by a "pending_mr: <id>"
-// close reason (beads.PendingMergeCloseReason, the reason gt done writes
-// when it self-closes a source issue immediately after submitting its MR),
-// or "" for any other reason. gt done writes nothing after the id but the
-// "(attempt N)" suffix (beads.PendingMergeCloseReason), so that is the only
+// close reason (the legacy reason gt done wrote when it self-closed a source
+// issue immediately after submitting its MR), or "" for any other reason.
+// gt done wrote nothing after the id but the "(attempt N)" suffix, so that
+// is the only
 // continuation this accepts; any other prose means the reason is not a gt
 // done self-close and must not be matched.
 func pendingMRFromCloseReason(closeReason string) string {
@@ -475,7 +475,7 @@ func pendingMRFromCloseReason(closeReason string) string {
 }
 
 // closureAttemptSuffixRe is the "(attempt N)" tail at the end of a
-// "pending_mr:" close reason (beads.PendingMergeCloseReason). It is
+// legacy "pending_mr:" close reason. It is
 // unanchored on purpose: callers match it either at the tail of the whole
 // reason (after the MR id) or against the reason as a whole, so the
 // "(attempt N)" sits mid-string. $ and the closing paren pin the number to
