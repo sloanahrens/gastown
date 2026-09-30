@@ -288,3 +288,19 @@ func TestCommandGateContendedLintWithoutDeadlineIsInfra(t *testing.T) {
 		t.Fatalf("gate = %+v, want an infrastructure error", res)
 	}
 }
+
+// A lint killed by the gate's own deadline linted nothing: an
+// infrastructure error, never a red verdict.
+func TestCommandGateLintKilledByDeadlineIsInfra(t *testing.T) {
+	t.Parallel()
+	g := GoGate(true)
+	g.run = func(ctx context.Context, _ string, _, _ []string, _ io.Writer) (int, error) {
+		return -1, context.DeadlineExceeded
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	res := g.Run(ctx, "/w")
+	if res.Passed || !errors.Is(res.Err, context.DeadlineExceeded) || len(res.Steps) != 1 {
+		t.Fatalf("gate = %+v, want an infrastructure error from the lint step alone", res)
+	}
+}

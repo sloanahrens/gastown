@@ -374,7 +374,7 @@ func TestLandBranchPushRejectingRemoteStillFails(t *testing.T) {
 func TestUnlandedPushMessageNamesTheHalfThatFailed(t *testing.T) {
 	t.Parallel()
 	const branch = "polecat/emerald/gt-0opm"
-	verifyErr := errors.New("verified_push_failed: branch is not at the commit this merge request would declare")
+	verifyErr := errors.New("verified_push_failed: branch is not at the commit gt done would declare ready to land")
 
 	t.Run("assertion only", func(t *testing.T) {
 		got := unlandedPushMessage(branch, nil, verifyErr)

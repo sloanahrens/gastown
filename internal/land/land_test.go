@@ -521,3 +521,30 @@ func TestLandUnknownVerdictIsInfra(t *testing.T) {
 	}
 	f.assertUntouched(t)
 }
+
+// TestLandRejectionLeavesABeadThatChangedHands: someone claimed the bead
+// while the gate ran. The rejection is noted, but the bead is not reopened or
+// unassigned out from under them.
+func TestLandRejectionLeavesABeadThatChangedHands(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		mayor := "mayor"
+		if err := f.bd.Update("gt-abc", beads.UpdateOptions{Assignee: &mayor, Force: true}); err != nil {
+			t.Error(err)
+		}
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+	}
+	_, err := f.lander().Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr == nil {
+		t.Fatalf("Land error = %v, want a gate rejection whose reopen was withheld", err)
+	}
+	b := f.bead()
+	if b.Assignee != "mayor" || b.Status == "open" || beads.HasLabel(b, LabelRework) {
+		t.Errorf("bead taken from its new holder: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
+	}
+	if CountRejections(b.Notes) != 1 {
+		t.Errorf("rejection not noted: %q", b.Notes)
+	}
+}

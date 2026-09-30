@@ -24,7 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while om reviews the same range, pushes with `--force-with-lease`, reads the
   tip back, and records the landing in `<town>/.runtime/landings/<rig>.jsonl`, a
   `LANDING RECORD` notes block and the close reason (`landed_commit`,
-  `patch_id`). The daemon worker that calls it is gt-v4ssj.2.
+  `patch_id`). no_merge and review_only work with commits is submitted like
+  any other and Land refuses it with `gt:needs-human`; a no-code completion
+  still closes its own bead. The daemon worker that calls Land is
+  gt-v4ssj.2: until it runs, submitted work waits on its label.
 
 - **bd startup handshake** (gt-7iwy0.1) — `gt up`, `gt start`, `gt daemon
   start|run|restart`, `gt sling` and the start/restart verbs of every agent

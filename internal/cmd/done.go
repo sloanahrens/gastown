@@ -1778,15 +1778,15 @@ var pushLandingRetryDelays = []time.Duration{3 * time.Second}
 // A failed first attempt is not a verdict: `git push` reports an error for
 // outcomes that leave the branch on origin anyway — a client-side timeout after
 // the receiving side took the objects, a worktree git context only the bare-repo
-// fallback could work around. Exiting there cost the merge request rather than a
-// retry: the branch was on origin, the issue stayed hooked, and the refinery,
-// blind to anything outside the queue by protocol, had nothing to look at.
+// fallback could work around. Exiting there used to cost the submission rather
+// than a retry, with the branch on origin and the issue still hooked.
 //
 // Origin is queried before anything is re-sent, so a landing already in place is
-// proven without a second push. attemptPush must therefore be idempotent —
-// callers pass the same branch:branch refspec the first attempt used, which is a
-// no-op fast-forward when origin has the commit and fails closed (never a force)
-// when it does not. recovered reports whether the retry was what proved it.
+// proven without a second push. attemptPush must therefore be idempotent:
+// pushBranchToOrigin re-reads origin's tip each time, sends nothing when it is
+// already the commit, and pushes under a lease on the tip it read (after the
+// divergence check), so a retry never clobbers work origin has and HEAD lacks.
+// recovered reports whether the retry was what proved it.
 func landBranchPush(attemptPush, verify func() error, sleep func(time.Duration)) (bool, error) {
 	verifyErr := verify()
 	for i := 0; verifyErr != nil && i < len(pushLandingRetryDelays); i++ {

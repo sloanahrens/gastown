@@ -39,6 +39,10 @@ type Lander struct {
 	// Route names who landed, for the record ("daemon" when empty).
 	Route string
 
+	// Gate runs on the merged tree. For a Go rig with container-backed
+	// tests the caller must pass WithSlot(RigGate(...), gt, role): Land does
+	// not take the container-gate slot itself, and an unwrapped full tier
+	// starts containers beside the rest of the town.
 	Gate     Gate
 	Reviewer Reviewer
 	Beads    Beads
@@ -499,6 +503,19 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
 		return rej
 	}
+	// The gate can run for an hour. A bead that changed hands meanwhile (no
+	// longer ready, closed, or claimed by someone else) keeps the note but is
+	// not reopened or unassigned: that would take work from whoever holds it.
+	now, err := l.Beads.Show(w.BeadID)
+	if err != nil {
+		rej.RecordErr = fmt.Errorf("re-reading the bead before reopening it: %w", err)
+		return rej
+	}
+	if !beads.HasLabel(now, LabelReadyToLand) || beads.IssueStatus(strings.TrimSpace(now.Status)).IsTerminal() || now.Assignee != issue.Assignee {
+		rej.RecordErr = fmt.Errorf("%s changed during the landing (status %s, assignee %q, ready=%v); the rejection is noted and the bead left as it is",
+			w.BeadID, now.Status, now.Assignee, beads.HasLabel(now, LabelReadyToLand))
+		return rej
+	}
 	label := LabelRework
 	if !rej.Rework {
 		label = LabelNeedsHuman
@@ -510,7 +527,8 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		AddLabels:    []string{label},
 		RemoveLabels: []string{LabelReadyToLand},
 		// The author's claim is over: gt done handed the work to the landing
-		// worker, and a rejection hands it back to dispatch.
+		// worker, and a rejection hands it back to dispatch. The re-read
+		// above established nobody else took it since.
 		Force: true,
 	}); err != nil {
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
