@@ -40,13 +40,25 @@ type convoyDispatchJob struct {
 	agentDesc string
 }
 
+// convoyRecord is a convoy's description as read for a re-dispatch, plus the
+// error when that read failed. A failed read is carried as an error rather than
+// folded into an empty description: "this convoy recorded no agent" and "this
+// convoy could not be read" are different claims, and reporting the second as
+// the first drops a sling-time routing decision with nothing in the log to show
+// for it (gt-d7hwr).
+type convoyRecord struct {
+	ID          string
+	Description string
+	Err         error
+}
+
 // planConvoyDispatch resolves the agent the convoy recorded at sling time for
 // every candidate, so a dispatch path cannot omit it and let the rig default
 // override the routing decision (gt-mxyk).
-func planConvoyDispatch(candidates []convoyCandidate, convoyDescription, townRoot string) []convoyDispatchJob {
+func planConvoyDispatch(candidates []convoyCandidate, record convoyRecord, townRoot string) []convoyDispatchJob {
 	jobs := make([]convoyDispatchJob, 0, len(candidates))
 	for _, c := range candidates {
-		agent, agentDesc := convoyRecordedAgent(convoyDescription, townRoot, c.RigName)
+		agent, agentDesc := convoyRecordedAgent(record, townRoot, c.RigName)
 		jobs = append(jobs, convoyDispatchJob{candidate: c, agent: agent, agentDesc: agentDesc})
 	}
 	return jobs
@@ -59,18 +71,29 @@ func planConvoyDispatch(candidates []convoyCandidate, convoyDescription, townRoo
 // agent is honored, or the choice is left to gt sling — never silently swapped
 // for the rig default (gt-mxyk). The decision is convoy.RedispatchAgent's, so
 // the manual and automatic paths cannot drift apart.
-func convoyRecordedAgent(convoyDescription, townRoot, rig string) (agent, description string) {
-	return convoy.RedispatchAgent(convoyDescription, townRoot, rig)
+//
+// A convoy whose record could not be read is a third case, and is named as one:
+// whether it recorded an agent is unknown, not settled, so the description
+// reports the failed read instead of the "no --agent recorded" default a
+// readable convoy with no record earns. The dispatch still falls back to gt
+// sling's own resolution as before — the fail-open is intended, the silence was
+// not (gt-d7hwr).
+func convoyRecordedAgent(record convoyRecord, townRoot, rig string) (agent, description string) {
+	if record.Err != nil {
+		return "", fmt.Sprintf("convoy %s could not be read (%v): its sling-time agent record is unavailable, leaving the agent choice to gt sling",
+			record.ID, record.Err)
+	}
+	return convoy.RedispatchAgent(record.Description, townRoot, rig)
 }
 
-// convoyDescriptionByID reads a convoy's description, empty when the convoy
-// cannot be read. The sling-time agent is recorded in that description (gt-yg24).
-func convoyDescriptionByID(convoyID string) string {
+// convoyRecordByID reads a convoy's description, carrying a failed read as an
+// error. The sling-time agent is recorded in that description (gt-yg24).
+func convoyRecordByID(convoyID string) convoyRecord {
 	info, err := bdShow(convoyID)
 	if err != nil {
-		return ""
+		return convoyRecord{ID: convoyID, Err: err}
 	}
-	return info.Description
+	return convoyRecord{ID: convoyID, Description: info.Description}
 }
 
 // convoyScheduleOptionsFor builds the deferred-dispatch options for one
@@ -206,10 +229,10 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 		style.Bold.Render("📋"), len(candidates), convoyID)
 
 	// The convoy's sling-time agent record, read once for every candidate below.
-	convoyDescription := convoyDescriptionByID(convoyID)
+	record := convoyRecordByID(convoyID)
 
 	successCount := 0
-	for _, job := range planConvoyDispatch(candidates, convoyDescription, townRoot) {
+	for _, job := range planConvoyDispatch(candidates, record, townRoot) {
 		fmt.Printf("  %s %s\n", style.Dim.Render("→"), job.agentDesc)
 		err := scheduleBead(job.candidate.ID, job.candidate.RigName, convoyScheduleOptionsFor(opts, job.agent))
 		if err != nil {
@@ -308,9 +331,9 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 		style.Bold.Render("▶"), len(candidates), convoyID)
 
 	// The convoy's sling-time agent record, read once for every candidate below.
-	convoyDescription := convoyDescriptionByID(convoyID)
+	record := convoyRecordByID(convoyID)
 
-	jobs := planConvoyDispatch(candidates, convoyDescription, townRoot)
+	jobs := planConvoyDispatch(candidates, record, townRoot)
 
 	var tally feederDispatchTally
 	successfulRigs := make(map[string]bool)
