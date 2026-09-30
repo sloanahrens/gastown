@@ -142,8 +142,8 @@ type pausedRig struct {
 // which `isRigOperational` refuses to auto-start one.
 //
 // opState is injected so tests can drive the split with no town on disk. The
-// daemon passes rig.GetOpState — the resolver `gt rig list` and the dashboard
-// share, which reads the wisp layer `gt rig park` writes and then the rig
+// daemon passes rig.GetOpState — the resolver `gt rig list` also uses, which
+// reads the wisp layer `gt rig park` writes and then the rig
 // identity bead's labels as the persistent fallback — rather than parsing the
 // wisp JSON here and drifting from the CLI's idea of parked. A read it could
 // not answer reports the rig operational, so a failed read leaves a rig inside

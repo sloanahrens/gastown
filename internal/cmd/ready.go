@@ -184,7 +184,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 				wispIDs := getWispIDs(townBeadsPath)
 				filtered = filterWisps(filtered, wispIDs)
 				// Only show work whose ID routes back to the source that reported it.
-				// Otherwise the dashboard can render a row that `gt sling <same-id>`
+				// Otherwise the board can show a row that `gt sling <same-id>`
 				// cannot resolve because routes.jsonl points that prefix elsewhere.
 				filtered = filterReadyIssuesByRoute(townRoot, "town", filtered)
 				// Filter identity beads (agents, roles, rigs) - not actionable work
@@ -543,8 +543,8 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 // stale record left by an alert producer before those producers keyed and
 // auto-closed their alerts (gt-vwry).
 //
-// These are excluded from the dashboard Ready list for the same reason agent
-// and rig identity beads are: they have no owner and nobody can "do" them.
+// These are excluded from the Ready list for the same reason agent and rig
+// identity beads are: they have no owner and nobody can "do" them.
 // They outrank real work (a critical escalation is a P0), so when a recurring
 // condition fired on every patrol cycle they crowded the top of the list and
 // the mayor, reading it as a queue of urgent work, declined to dispatch for
@@ -578,8 +578,8 @@ func isEscalationTitle(title string) bool {
 }
 
 // filterReadyIssuesByRoute keeps only issues whose prefix route matches the
-// source that reported them. Ready rows are actionable: the dashboard renders a
-// Sling button for each row, so the displayed ID must resolve through the same
+// source that reported them. Ready rows are actionable — each one is a bead a
+// caller can sling — so the displayed ID must resolve through the same
 // routes.jsonl path that produced it.
 func filterReadyIssuesByRoute(townRoot, source string, issues []*beads.Issue) []*beads.Issue {
 	if townRoot == "" {
@@ -617,9 +617,9 @@ func readyIssueRoutesToSource(townRoot, source, issueID string) bool {
 // runtime rather than work: mail, escalations, identity, merge requests and
 // slots, queues, and the deacon's event records (gt-b9wq).
 //
-// A ready row is a button, not a status. The dashboard draws a Sling control
-// beside every ID this list emits, so a row that no polecat can take is a
-// button that cannot work. Membership is beads.IsNonDispatchableBead, shared
+// A ready row is a dispatch candidate, not a status: every ID this list emits
+// is one a caller may sling, so a row that no polecat can take is a row that
+// cannot work. Membership is beads.IsNonDispatchableBead, shared
 // with `gt daemon dispatch-check`, so the board and the nudge it triggers
 // cannot disagree about what work is.
 //

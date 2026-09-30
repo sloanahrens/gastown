@@ -206,7 +206,7 @@ COMMANDS:
   close     Close a convoy (verifies all items done, or use --force)
   land      Land an owned convoy (cleanup worktrees, close convoy)
   status    Show convoy progress, tracked issues, and active workers
-  list      List convoys (the dashboard view)
+  list      List convoys
   watch     Subscribe to convoy completion notifications
   unwatch   Unsubscribe from convoy completion notifications`,
 }
@@ -2357,7 +2357,7 @@ func getTrackedIssues(townBeads, convoyID string) ([]trackedIssueInfo, error) {
 
 	// Drop tracked edges whose target is not a bead ID: no query can resolve
 	// one, so it came back as trackedStatusUnknown and held the convoy open
-	// forever (gt-gsky). The dashboard drops the same edge (gt-44z1).
+	// forever (gt-gsky, gt-44z1).
 	//
 	// A well-formed cross-rig target that is merely unreachable stays unknown
 	// and still blocks auto-close — the gt-bs6 contract.

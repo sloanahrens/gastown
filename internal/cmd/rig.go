@@ -2216,9 +2216,9 @@ func runRigRestart(cmd *cobra.Command, args []string) error {
 // getRigOperationalState returns the operational state and source for a rig,
 // as the strings GetRigLED and rigStatePriority switch on.
 //
-// The derivation itself lives in internal/rig so the dashboard's Rigs and
-// Merge Queue panels read the same state this list does — a rig that reads
-// as parked here and active on the page meant to warn about it is the whole
+// The derivation itself lives in internal/rig so every reader of a rig's
+// state — this list, `gt status`, the doctor — agrees: a rig that reads as
+// parked here and active in the report meant to warn about it is the whole
 // point of OpState existing.
 func getRigOperationalState(townRoot, rigName string) (state string, source string) {
 	opState, source := rig.GetOpState(townRoot, rigName)

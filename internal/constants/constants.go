@@ -120,8 +120,7 @@ const (
 	// progressing before it's considered a GUPP (Gas Town Universal Propulsion
 	// Principle) violation. GUPP states: if you have work on your hook, you run it.
 	//
-	// Single source of truth — referenced by daemon lifecycle patrol,
-	// TUI feed stuck detection, and web fetcher worker status.
+	// Single source of truth — referenced by the daemon's lifecycle patrol.
 	// Configurable via operational.session.gupp_violation_timeout.
 	GUPPViolationTimeout = 30 * time.Minute
 
