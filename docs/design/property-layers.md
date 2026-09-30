@@ -154,7 +154,7 @@ func shouldAutoRestart(rig *Rig) bool {
 |-----|------|----------|-------------|
 | `status` | string | Override | operational/parked/docked |
 | `auto_restart` | bool | Override | Daemon auto-restart behavior |
-| `max_polecats` | int | Override | Maximum concurrent polecats |
+| `max_polecats` | int | Override | Max concurrent polecats in this rig; `0` = uncapped (town-wide cap: `scheduler.max_polecats`) |
 | `priority_adjustment` | int | **Stack** | Scheduling priority modifier |
 | `maintenance_window` | string | Override | When maintenance allowed |
 | `dnd` | bool | Override | Do not disturb mode |

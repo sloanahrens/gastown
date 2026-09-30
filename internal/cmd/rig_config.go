@@ -63,6 +63,10 @@ key as the number 1 and a boolean key as true. Integer keys (max_polecats,
 priority_adjustment) reject values that are not whole numbers; boolean keys
 (auto_restart, dnd, auto_start_on_up) accept true/false/1/0.
 
+max_polecats caps how many polecats may work in this rig at once, and holds in
+direct dispatch; 0 (the default) leaves the rig uncapped. To cap the whole town
+instead: gt config set scheduler.max_polecats N.
+
 Examples:
   gt rig config set gastown status parked           # Wisp layer
   gt rig config set gastown status docked --global  # Bead layer

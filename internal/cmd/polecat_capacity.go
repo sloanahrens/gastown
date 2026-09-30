@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -31,10 +32,73 @@ type polecatCapacitySnapshot struct {
 	Free            int `json:"free"`
 	ActiveSessions  int `json:"active_sessions"`
 	capacityUsed    int
+
+	// rigUsed and rigReservations break the town totals down by rig so a per-rig
+	// cap is checked from the same scan that answers the town cap (gt-1kbi).
+	// Unexported: accounting detail, not part of the reported snapshot JSON.
+	rigUsed         map[string]int
+	rigReservations map[string]int
 }
 
 func (s polecatCapacitySnapshot) occupied() int {
 	return s.capacityUsed + s.Reservations
+}
+
+// addRigOccupancy scans one rig's polecats into the snapshot and records how
+// many of them belong to that rig, so a per-rig cap reads the same numbers the
+// town total is built from.
+func (s *polecatCapacitySnapshot) addRigOccupancy(townRoot, rigName string, sessions polecatSessionSet) error {
+	usedBefore := s.capacityUsed
+	if err := applyRigOccupancyToCapacitySnapshot(s, townRoot, rigName, sessions); err != nil {
+		return err
+	}
+	s.trackRigUsage(rigName, s.capacityUsed-usedBefore)
+	return nil
+}
+
+// trackRigUsage records that count of the polecats counted so far belong to
+// rigName.
+func (s *polecatCapacitySnapshot) trackRigUsage(rigName string, count int) {
+	if rigName == "" || count == 0 {
+		return
+	}
+	if s.rigUsed == nil {
+		s.rigUsed = make(map[string]int)
+	}
+	s.rigUsed[rigName] += count
+}
+
+// trackReservations records the town's live admission reservations, in total
+// and per rig: a reservation is a slot another sling is already taking, and a
+// rig cap must see the ones aimed at its own rig.
+func (s *polecatCapacitySnapshot) trackReservations(townRoot string) error {
+	reservations, err := readPolecatAdmissionReservations(townRoot)
+	if err != nil {
+		return err
+	}
+	s.Reservations = len(reservations)
+	for _, reservation := range reservations {
+		s.trackRigReservation(reservation.Rig)
+	}
+	return nil
+}
+
+// trackRigReservation records one live admission reservation for rigName.
+func (s *polecatCapacitySnapshot) trackRigReservation(rigName string) {
+	if rigName == "" {
+		return
+	}
+	if s.rigReservations == nil {
+		s.rigReservations = make(map[string]int)
+	}
+	s.rigReservations[rigName]++
+}
+
+// rigOccupied counts the slots one rig holds: polecats there that consume
+// capacity, plus live admission reservations naming that rig, so two poles
+// racing to sling into one capped rig cannot both get in.
+func (s polecatCapacitySnapshot) rigOccupied(rigName string) int {
+	return s.rigUsed[rigName] + s.rigReservations[rigName]
 }
 
 func (s *polecatCapacitySnapshot) addWorking() {
@@ -85,11 +149,28 @@ type polecatCapacityAdmissionError struct {
 	Rig      string
 	Bead     string
 	Reason   string
+	// RigMax is the rig's own max_polecats when that cap is what refused the
+	// admission, and RigUsed how many slots the rig already held. Zero means
+	// the town-wide scheduler.max_polecats cap refused instead.
+	RigMax  int
+	RigUsed int
 }
 
 func (e *polecatCapacityAdmissionError) Error() string {
 	if e == nil {
 		return "polecat admission denied"
+	}
+	if e.RigMax > 0 {
+		return fmt.Sprintf(
+			"polecat admission denied: %s (rig=%s max=%d occupied=%d free=%d). Raise the rig cap with `gt rig config set %s max_polecats N`, or cap the whole town instead with `gt config set scheduler.max_polecats N`; inspect with `gt polecat list %s`",
+			e.Reason,
+			e.Rig,
+			e.RigMax,
+			e.RigUsed,
+			e.RigMax-e.RigUsed,
+			e.Rig,
+			e.Rig,
+		)
 	}
 	if e.Snapshot.Max <= 0 {
 		return fmt.Sprintf("polecat admission denied: %s", e.Reason)
@@ -108,12 +189,20 @@ func (e *polecatCapacityAdmissionError) Error() string {
 	)
 }
 
+// acquirePolecatAdmission takes a capacity reservation for one polecat, or
+// refuses with a polecatCapacityAdmissionError.
+//
+// Two caps can refuse: the town-wide scheduler.max_polecats, and the target
+// rig's own max_polecats (gt-1kbi). Both are read here because this is the one
+// admission chokepoint every sling and spawn path goes through, so a rig cap
+// binds in direct dispatch as well as under a town cap.
 func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*polecatAdmissionHandle, polecatCapacitySnapshot, error) {
 	max, err := configuredSchedulerMaxPolecats(townRoot)
 	if err != nil {
 		return nil, polecatCapacitySnapshot{}, err
 	}
-	if max <= 0 {
+	rigMax := configuredRigMaxPolecats(townRoot, rigName)
+	if max <= 0 && rigMax <= 0 {
 		return &polecatAdmissionHandle{disabled: true}, polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}, nil
 	}
 
@@ -127,16 +216,41 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, polecatCapacitySnapshot{}, err
 	}
 
-	snapshot, err := polecatCapacitySnapshotForTownNoCleanup(townRoot)
-	if err != nil {
-		return nil, polecatCapacitySnapshot{}, err
+	// A town cap needs the whole-town snapshot; a rig cap alone (the direct
+	// dispatch case) only needs that rig counted, so it never pays for a scan
+	// of every rig in the town.
+	snapshot := polecatCapacitySnapshot{Max: max, ActiveSessions: countActivePolecats()}
+	if max > 0 {
+		snapshot, err = polecatCapacitySnapshotForTownNoCleanup(townRoot)
+		if err != nil {
+			return nil, polecatCapacitySnapshot{}, err
+		}
+		if snapshot.Free <= 0 {
+			return nil, snapshot, &polecatCapacityAdmissionError{
+				Snapshot: snapshot,
+				Rig:      rigName,
+				Bead:     beadID,
+				Reason:   "configured scheduler.max_polecats capacity is full",
+			}
+		}
 	}
-	if snapshot.Free <= 0 {
-		return nil, snapshot, &polecatCapacityAdmissionError{
-			Snapshot: snapshot,
-			Rig:      rigName,
-			Bead:     beadID,
-			Reason:   "configured scheduler.max_polecats capacity is full",
+	if rigMax > 0 {
+		rigSnapshot := snapshot
+		if max <= 0 {
+			rigSnapshot, err = polecatRigOccupancySnapshot(townRoot, rigName)
+			if err != nil {
+				return nil, polecatCapacitySnapshot{}, err
+			}
+		}
+		if occupied := rigSnapshot.rigOccupied(rigName); occupied >= rigMax {
+			return nil, snapshot, &polecatCapacityAdmissionError{
+				Snapshot: snapshot,
+				Rig:      rigName,
+				Bead:     beadID,
+				RigMax:   rigMax,
+				RigUsed:  occupied,
+				Reason:   "configured rig max_polecats capacity is full",
+			}
 		}
 	}
 
@@ -145,7 +259,10 @@ func acquirePolecatAdmission(townRoot, rigName, beadID, operation string) (*pole
 		return nil, snapshot, err
 	}
 	snapshot.Reservations++
-	snapshot.Free--
+	snapshot.trackRigReservation(rigName)
+	if snapshot.Max > 0 {
+		snapshot.Free--
+	}
 	return &polecatAdmissionHandle{townRoot: townRoot, id: reservation.ID, path: path}, snapshot, nil
 }
 
@@ -159,6 +276,38 @@ func configuredSchedulerMaxPolecats(townRoot string) (int, error) {
 		schedulerCfg = capacity.DefaultSchedulerConfig()
 	}
 	return schedulerCfg.GetMaxPolecats(), nil
+}
+
+// configuredRigMaxPolecats returns rigName's own concurrency cap, or 0 when the
+// rig has none. The value is the rig's `max_polecats` config key, which the
+// operator sets with `gt rig config set <rig> max_polecats N`; its compiled-in
+// default is 0, so an unset rig is uncapped and only a rig someone deliberately
+// capped is throttled (gt-1kbi).
+//
+// A town or rigs.json that cannot be read counts as "no rig cap" rather than an
+// error. Admission sits on every spawn path, and a rig whose config cannot be
+// resolved must not be unable to start polecats; the town-wide
+// scheduler.max_polecats cap still applies on its own.
+func configuredRigMaxPolecats(townRoot, rigName string) int {
+	if townRoot == "" || rigName == "" {
+		return 0
+	}
+	rigsConfig, err := config.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return 0
+	}
+	entry, ok := rigsConfig.Rigs[rigName]
+	if !ok {
+		return 0
+	}
+	// Built the same way rig.Manager.loadRig builds it (name, path, beads
+	// config), which is the identity `gt rig config show` resolves the three
+	// config layers against.
+	r := &rig.Rig{Name: rigName, Path: filepath.Join(townRoot, rigName), Config: entry.BeadsConfig}
+	if cap := r.GetIntConfig("max_polecats"); cap > 0 {
+		return cap
+	}
+	return 0
 }
 
 func polecatCapacitySnapshotForTown(townRoot string) (polecatCapacitySnapshot, error) {
@@ -190,51 +339,19 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		return snapshot, fmt.Errorf("loading rigs config for polecat capacity: %w", err)
 	}
 
-	tmuxClient := tmux.NewTmux()
-	sessionNames, err := tmuxClient.ListSessions()
-	if err != nil {
-		return snapshot, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
-	}
-	sessions := newPolecatSessionSet(sessionNames)
-	for rigName := range rigsConfig.Rigs {
-		rigPath := filepath.Join(townRoot, rigName)
-		if _, err := os.Stat(rigPath); err != nil {
-			if !os.IsNotExist(err) {
-				return snapshot, fmt.Errorf("stat rig path for %s capacity: %w", rigName, err)
-			}
-			continue
-		}
-		polecatNames, err := listPolecatDirectoryNames(rigPath)
-		if err != nil {
-			return snapshot, fmt.Errorf("listing polecat dirs for %s capacity: %w", rigName, err)
-		}
-		if len(polecatNames) == 0 {
-			continue
-		}
-
-		rigBeads := beads.New(rigPath)
-		agents, err := rigBeads.ListAgentBeads()
-		if err != nil {
-			return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
-		}
-		prefix := beads.GetPrefixForRig(townRoot, rigName)
-		agentBeadID := func(name string) string { return beads.PolecatBeadIDWithPrefix(prefix, rigName, name) }
-		activeWork, err := listActivePolecatWorkByName(rigBeads, rigName, polecatHookBeads(polecatNames, agentBeadID, agents))
-		if err != nil {
-			return snapshot, fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
-		}
-		for _, name := range polecatNames {
-			issue := agents[agentBeadID(name)]
-			fields := parsePolecatAgentFields(issue)
-			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, activeWork[name], sessions)
-		}
-	}
-
-	reservations, err := readPolecatAdmissionReservations(townRoot)
+	sessions, err := currentPolecatSessions()
 	if err != nil {
 		return snapshot, err
 	}
-	snapshot.Reservations = len(reservations)
+	for rigName := range rigsConfig.Rigs {
+		if err := snapshot.addRigOccupancy(townRoot, rigName, sessions); err != nil {
+			return snapshot, err
+		}
+	}
+
+	if err := snapshot.trackReservations(townRoot); err != nil {
+		return snapshot, err
+	}
 	if max > 0 {
 		snapshot.Free = max - snapshot.occupied()
 		if snapshot.Free < 0 {
@@ -242,6 +359,72 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		}
 	}
 	return snapshot, nil
+}
+
+// applyRigOccupancyToCapacitySnapshot adds one rig's polecats to snapshot, the
+// same accounting the town-wide scan applies to every rig. It is also the whole
+// scan for a single capped rig in direct dispatch (gt-1kbi), so it must not
+// depend on any town-level state beyond townRoot.
+func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, townRoot, rigName string, sessions polecatSessionSet) error {
+	rigPath := filepath.Join(townRoot, rigName)
+	if _, err := os.Stat(rigPath); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("stat rig path for %s capacity: %w", rigName, err)
+		}
+		return nil
+	}
+	polecatNames, err := listPolecatDirectoryNames(rigPath)
+	if err != nil {
+		return fmt.Errorf("listing polecat dirs for %s capacity: %w", rigName, err)
+	}
+	if len(polecatNames) == 0 {
+		return nil
+	}
+
+	rigBeads := beads.New(rigPath)
+	agents, err := rigBeads.ListAgentBeads()
+	if err != nil {
+		return fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
+	}
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
+	agentBeadID := func(name string) string { return beads.PolecatBeadIDWithPrefix(prefix, rigName, name) }
+	activeWork, err := listActivePolecatWorkByName(rigBeads, rigName, polecatHookBeads(polecatNames, agentBeadID, agents))
+	if err != nil {
+		return fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
+	}
+	for _, name := range polecatNames {
+		issue := agents[agentBeadID(name)]
+		fields := parsePolecatAgentFields(issue)
+		applyAgentFieldsToCapacitySnapshot(snapshot, rigName, name, fields, activeWork[name], sessions)
+	}
+	return nil
+}
+
+// polecatRigOccupancySnapshot counts the slots one rig holds on its own, for a
+// rig that carries a max_polecats cap while the town runs without a scheduler
+// cap (direct dispatch). It is the same accounting the town snapshot does,
+// scoped to one rig so direct mode pays for one rig's worth of scanning.
+func polecatRigOccupancySnapshot(townRoot, rigName string) (polecatCapacitySnapshot, error) {
+	snapshot := polecatCapacitySnapshot{}
+	sessions, err := currentPolecatSessions()
+	if err != nil {
+		return snapshot, err
+	}
+	if err := snapshot.addRigOccupancy(townRoot, rigName, sessions); err != nil {
+		return snapshot, err
+	}
+	if err := snapshot.trackReservations(townRoot); err != nil {
+		return snapshot, err
+	}
+	return snapshot, nil
+}
+
+func currentPolecatSessions() (polecatSessionSet, error) {
+	sessionNames, err := tmux.NewTmux().ListSessions()
+	if err != nil {
+		return nil, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
+	}
+	return newPolecatSessionSet(sessionNames), nil
 }
 
 func listPolecatDirectoryNames(rigPath string) ([]string, error) {
