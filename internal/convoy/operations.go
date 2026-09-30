@@ -60,7 +60,7 @@ func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, 
 	}
 
 	// Find convoys tracking this issue
-	convoyIDs := getTrackingConvoys(ctx, store, issueID, logger)
+	convoyIDs := getTrackingConvoys(ctx, store, townRoot, issueID, logger)
 	if len(convoyIDs) == 0 {
 		return nil
 	}
@@ -97,20 +97,31 @@ func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, 
 }
 
 // getTrackingConvoys returns convoy IDs that track the given issue.
-// Uses SDK GetDependentsWithMetadata filtered by type "tracks".
-func getTrackingConvoys(ctx context.Context, store beadsdk.Storage, issueID string, logger func(format string, args ...interface{})) []string {
-	dependents, err := store.GetDependentsWithMetadata(ctx, issueID)
-	if err != nil {
-		if logger != nil {
-			logger("Convoy: getTrackingConvoys(%s) store error: %v", issueID, err)
-		}
-		return nil
+// Uses SDK GetDependentsWithMetadata filtered by type "tracks". A rig bead is
+// tracked from hq as external:<prefix>:<id> (gt convoy's trackingDependsOnID),
+// and the store matches the target exactly, so an issue that routes to a rig
+// is looked up in that form as well as bare (gt-3y3rl).
+func getTrackingConvoys(ctx context.Context, store beadsdk.Storage, townRoot, issueID string, logger func(format string, args ...interface{})) []string {
+	targets := []string{issueID}
+	if rigForIssue(townRoot, issueID) != "" {
+		targets = append(targets, fmt.Sprintf("external:%s:%s", strings.TrimSuffix(beads.ExtractPrefix(issueID), "-"), issueID))
 	}
 
 	convoyIDs := make([]string, 0)
-	for _, d := range dependents {
-		if string(d.DependencyType) == "tracks" {
-			convoyIDs = append(convoyIDs, d.ID)
+	seen := make(map[string]bool)
+	for _, target := range targets {
+		dependents, err := store.GetDependentsWithMetadata(ctx, target)
+		if err != nil {
+			if logger != nil {
+				logger("Convoy: getTrackingConvoys(%s) store error: %v", target, err)
+			}
+			return nil
+		}
+		for _, d := range dependents {
+			if string(d.DependencyType) == "tracks" && !seen[d.ID] {
+				seen[d.ID] = true
+				convoyIDs = append(convoyIDs, d.ID)
+			}
 		}
 	}
 	return convoyIDs
@@ -700,15 +711,17 @@ func fetchCrossRigBeadStatus(townRoot string, ids []string) map[string]*beadsdk.
 }
 
 // FireCrossRigDepNotifications checks if any issues in other rigs were unblocked
-// by the closure of closedIssueID. For each affected rig, sends a nudge to that
-// rig's witness so it can react to the resolved dependency.
+// by the closure of closedIssueID and logs the first one found in each affected
+// rig. Logging is all it does: the rig witness it used to nudge is gone
+// (bbc95aa1), and an unblocked issue needs no signal, since bd reports it ready
+// once its blocker closes and dispatch reads readiness.
 //
 // Cross-rig deps are stored in the dependent issue's store as "external:<prefix>:<id>".
 // To find them, this function queries each rig store using the external-wrapped form
 // of the closed issue ID.
 //
-// This is best-effort: failures are silently logged. The closed issue's own store
-// is skipped (same-rig deps don't need cross-rig notification).
+// It is best-effort: a store that fails its lookup is skipped, as is the closed
+// issue's own store (same-rig deps are not cross-rig unblocks).
 func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot string, stores map[string]beadsdk.Storage, logger func(format string, args ...interface{})) {
 	if logger == nil {
 		logger = func(format string, args ...interface{}) {}
@@ -769,16 +782,7 @@ func FireCrossRigDepNotifications(ctx context.Context, closedIssueID, townRoot s
 			}
 			notifiedRigs[depRig] = true
 
-			depTitle := dep.Title
-			logger("CrossRig: %s closed, unblocking %s (%s) — nudging %s/witness", closedIssueID, depID, depRig, depRig)
-
-			msg := fmt.Sprintf("Dependency resolved: %s — External dependency %s has closed. Unblocked: %s (%s). This issue may now proceed.",
-				closedIssueID, closedIssueID, depID, depTitle)
-			nudgeCmd := exec.Command("gt", "nudge", depRig+"/witness", "-m", msg)
-			nudgeCmd.Dir = townRoot
-			if err := nudgeCmd.Run(); err != nil {
-				logger("CrossRig: nudge %s/witness failed: %v", depRig, err)
-			}
+			logger("CrossRig: %s closed, unblocking %s (%s, rig %s)", closedIssueID, depID, dep.Title, depRig)
 		}
 	}
 }

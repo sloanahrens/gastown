@@ -2,8 +2,6 @@ package doctor
 
 import (
 	"fmt"
-	"os/exec"
-	"strings"
 )
 
 // TownRootBranchCheck verifies that the town root directory is on the main branch.
@@ -30,9 +28,7 @@ func NewTownRootBranchCheck() *TownRootBranchCheck {
 // Run checks if the town root is on the main branch.
 func (c *TownRootBranchCheck) Run(ctx *CheckContext) *CheckResult {
 	// Get current branch
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = ctx.TownRoot
-	out, err := cmd.Output()
+	branch, err := ctx.git(ctx.TownRoot).CurrentBranch()
 	if err != nil {
 		// Could not determine the current branch (not a git repo, or some
 		// other git failure) — we did not verify the branch is main.
@@ -44,7 +40,9 @@ func (c *TownRootBranchCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	branch := strings.TrimSpace(string(out))
+	if branch == "HEAD" {
+		branch = "" // detached
+	}
 	c.currentBranch = branch
 
 	// Empty branch means detached HEAD
@@ -93,25 +91,20 @@ func (c *TownRootBranchCheck) Fix(ctx *CheckContext) error {
 	}
 
 	// Check for uncommitted changes that would block checkout
-	cmd := exec.Command("git", "status", "--porcelain")
-	cmd.Dir = ctx.TownRoot
-	out, err := cmd.Output()
+	g := ctx.git(ctx.TownRoot)
+	status, err := g.Status()
 	if err != nil {
 		return fmt.Errorf("failed to check git status: %w", err)
 	}
 
-	if strings.TrimSpace(string(out)) != "" {
+	if !status.Clean {
 		return fmt.Errorf("cannot switch to main: uncommitted changes in town root (stash or commit first)")
 	}
 
 	// Switch to main
-	cmd = exec.Command("git", "checkout", "main")
-	cmd.Dir = ctx.TownRoot
-	if err := cmd.Run(); err != nil {
+	if err := g.Checkout("main"); err != nil {
 		// Try master if main doesn't exist
-		cmd = exec.Command("git", "checkout", "master")
-		cmd.Dir = ctx.TownRoot
-		if err := cmd.Run(); err != nil {
+		if err := g.Checkout("master"); err != nil {
 			return fmt.Errorf("failed to checkout main: %w", err)
 		}
 	}

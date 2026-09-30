@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
@@ -104,17 +106,25 @@ const HeartbeatKeepAliveInterval = SessionHeartbeatStaleThreshold / 6
 // The first renewal is written synchronously, so the session is fresh from the
 // instant the stage starts rather than one interval later.
 func StartExitingHeartbeatKeepAlive(townRoot, sessionName, context, bead string) func() {
-	return startHeartbeatKeepAlive(townRoot, sessionName, context, bead, HeartbeatKeepAliveInterval)
+	return startHeartbeatKeepAlive(clockwork.NewRealClock(), townRoot, sessionName, context, bead, HeartbeatKeepAliveInterval)
 }
 
-// startHeartbeatKeepAlive is StartExitingHeartbeatKeepAlive with an injectable
-// interval, so tests can observe renewal without waiting out the real one.
-func startHeartbeatKeepAlive(townRoot, sessionName, context, bead string, interval time.Duration) func() {
+// startHeartbeatKeepAlive is StartExitingHeartbeatKeepAlive on clk with an
+// injectable interval, so tests can drive renewal without waiting out the
+// real one.
+func startHeartbeatKeepAlive(clk clockwork.Clock, townRoot, sessionName, context, bead string, interval time.Duration) func() {
 	if townRoot == "" || sessionName == "" {
 		return func() {}
 	}
+	return keepRenewing(clk, interval, func() {
+		touchSessionHeartbeat(townRoot, sessionName, clk.Now(), HeartbeatExiting, context, bead)
+	})
+}
 
-	TouchSessionHeartbeatWithState(townRoot, sessionName, HeartbeatExiting, context, bead)
+// keepRenewing calls renew once, synchronously, then once per interval of clk
+// until the returned stop is called.
+func keepRenewing(clk clockwork.Clock, interval time.Duration, renew func()) func() {
+	renew()
 
 	done := make(chan struct{})
 	exited := make(chan struct{})
@@ -123,14 +133,14 @@ func startHeartbeatKeepAlive(townRoot, sessionName, context, bead string, interv
 		// closed last, after the ticker is stopped, so a stop that waits on it
 		// is waiting on a goroutine that can no longer renew the heartbeat.
 		defer close(exited)
-		ticker := time.NewTicker(interval)
+		ticker := clk.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-done:
 				return
-			case <-ticker.C:
-				TouchSessionHeartbeatWithState(townRoot, sessionName, HeartbeatExiting, context, bead)
+			case <-ticker.Chan():
+				renew()
 			}
 		}
 	}()
@@ -165,13 +175,18 @@ func TouchSessionHeartbeat(townRoot, sessionName string) {
 // Used by gt done (state="exiting") and gt heartbeat (state="stuck"). See gt-3vr5.
 // This is best-effort: errors are silently ignored.
 func TouchSessionHeartbeatWithState(townRoot, sessionName string, state HeartbeatState, context, bead string) {
+	touchSessionHeartbeat(townRoot, sessionName, time.Now(), state, context, bead)
+}
+
+// touchSessionHeartbeat is TouchSessionHeartbeatWithState stamped with now.
+func touchSessionHeartbeat(townRoot, sessionName string, now time.Time, state HeartbeatState, context, bead string) {
 	dir := heartbeatsDir(townRoot)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
 	}
 
 	hb := SessionHeartbeat{
-		Timestamp: time.Now().UTC(),
+		Timestamp: now.UTC(),
 		State:     state,
 		Context:   context,
 		Bead:      bead,

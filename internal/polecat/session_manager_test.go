@@ -17,16 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
 
-func setupTestRegistryForSession(t *testing.T) {
-	t.Helper()
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-}
-
 // setupSessionBranchTestRepo is a repo on main with one commit whose origin
 // is itself, with origin/main at that commit, in a new world.
 func setupSessionBranchTestRepo(t *testing.T) (string, gitRepo, *world) {
@@ -51,8 +41,7 @@ func strandCanonicalBaseRef(t *testing.T, w *world, workDir string) {
 }
 
 func TestSessionName(t *testing.T) {
-	setupTestRegistryForSession(t)
-
+	t.Parallel()
 	r := &rig.Rig{
 		Name:     "gastown",
 		Polecats: []string{"Toast"},
@@ -856,47 +845,47 @@ func TestModeABeaconVerificationCondition(t *testing.T) {
 }
 
 func TestValidateSessionName(t *testing.T) {
-	// Register prefixes so validateSessionName can resolve them correctly.
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("gm", "gastown_manager")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	t.Parallel()
 
 	tests := []struct {
 		name        string
 		sessionName string
+		rigPrefix   string
 		rigName     string
 		wantErr     bool
 	}{
 		{
 			name:        "valid themed name",
 			sessionName: "gm-furiosa",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     false,
 		},
 		{
 			name:        "valid overflow name (new format)",
 			sessionName: "gm-51",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     false,
 		},
 		{
 			name:        "malformed double-prefix (bug)",
 			sessionName: "gm-gastown_manager-51",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     true,
 		},
 		{
 			name:        "malformed double-prefix gastown",
 			sessionName: "gt-gastown-142",
+			rigPrefix:   "gt",
 			rigName:     "gastown",
 			wantErr:     true,
 		},
 		{
 			name:        "different rig (can't validate)",
 			sessionName: "gt-other-rig-name",
+			rigPrefix:   "gm",
 			rigName:     "gastown_manager",
 			wantErr:     false,
 		},
@@ -904,7 +893,7 @@ func TestValidateSessionName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSessionName(tt.sessionName, tt.rigName)
+			err := validateSessionName(tt.sessionName, tt.rigPrefix, tt.rigName)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateSessionName() error = %v, wantErr %v", err, tt.wantErr)
 			}

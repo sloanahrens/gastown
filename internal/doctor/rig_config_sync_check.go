@@ -28,6 +28,20 @@ type RigConfigSyncCheck struct {
 	missingExportCfg []string         // Rigs missing export.auto=false in config.yaml
 	dbNameMismatches []dbMismatch     // Dolt database name doesn't match prefix
 	dbCheckErrors    []string         // Rigs whose Dolt DB status could not be verified
+
+	// listDatabases lists the databases the town's Dolt serves; nil is
+	// doltserver.ListDatabases.
+	listDatabases func(townRoot string) ([]string, error)
+	// environ is the environment bd runs under before the check points it at
+	// a rig; nil is os.Environ.
+	environ func() []string
+}
+
+func (c *RigConfigSyncCheck) env() []string {
+	if c.environ != nil {
+		return c.environ()
+	}
+	return os.Environ()
 }
 
 type prefixMismatch struct {
@@ -85,7 +99,6 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	c.dbNameMismatches = nil
 	c.dbCheckErrors = nil
 	var details []string
-	townDB := readDoltDatabase(filepath.Join(ctx.TownRoot, ".beads"))
 
 	for rigName, entry := range rigsConfig.Rigs {
 		rigPath := filepath.Join(ctx.TownRoot, rigName)
@@ -194,10 +207,6 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			// trading_scripts) don't collide and bd can always locate the right
 			// database without extra config.
 			//
-			// Exception: deacon shares the town-wide beads DB after the HQ storage
-			// migration. Keep that invariant aligned with UnregisteredBeadsDirsCheck
-			// instead of rewriting deacon back to a separate database.
-			//
 			// Exception: some rigs' Dolt data physically lives in a PREFIX-named
 			// directory (e.g. .dolt-data/bd, .dolt-data/gt) from a directory rename
 			// where the rig-name DB no longer exists on the server. Mirror the
@@ -207,15 +216,11 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			// a false mismatch and --fix reverts metadata to the non-existent rig-name
 			// DB. (gt-5hd2)
 			expectedDBName := rigName
-			if rigName == "deacon" && townDB != "" {
-				expectedDBName = townDB
-			} else {
-				doltDataDir := filepath.Join(ctx.TownRoot, ".dolt-data")
-				if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
-					if prefix := config.GetRigPrefix(ctx.TownRoot, rigName); prefix != "" {
-						if _, err := os.Stat(filepath.Join(doltDataDir, prefix)); err == nil {
-							expectedDBName = prefix
-						}
+			doltDataDir := filepath.Join(ctx.TownRoot, ".dolt-data")
+			if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
+				if prefix := config.GetRigPrefix(ctx.TownRoot, rigName); prefix != "" {
+					if _, err := os.Stat(filepath.Join(doltDataDir, prefix)); err == nil {
+						expectedDBName = prefix
 					}
 				}
 			}
@@ -435,7 +440,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		// Run bd init against the rig-name database, not the prefix-derived default.
 		doltCfg := doltserver.DefaultConfig(ctx.TownRoot)
 		destroyToken := fmt.Sprintf("DESTROY-%s", entry.BeadsConfig.Prefix)
-		cmdEnv := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
+		cmdEnv := append(stripEnvPrefixes(c.env(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
 			"BEADS_DIR="+beadsDir,
 			"BEADS_DOLT_SERVER_DATABASE="+rigName,
 		)
@@ -527,7 +532,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		rigPath := filepath.Join(ctx.TownRoot, info.rigName)
 		beadsDir := doltserver.FindRigBeadsDir(ctx.TownRoot, info.rigName)
 
-		bd := beads.NewWithBeadsDir(rigPath, beadsDir)
+		bd := ctx.beadsWithDir(rigPath, beadsDir)
 		fields := &beads.RigFields{
 			Repo:   info.gitURL,
 			Prefix: info.prefix,
@@ -546,7 +551,11 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 // status is unknown, not that the database is missing.
 func (c *RigConfigSyncCheck) doltDatabaseExists(ctx *CheckContext, dbName string) (bool, error) {
 	// Use the doltserver package to list databases
-	databases, err := doltserver.ListDatabases(ctx.TownRoot)
+	list := c.listDatabases
+	if list == nil {
+		list = doltserver.ListDatabases
+	}
+	databases, err := list(ctx.TownRoot)
 	if err != nil {
 		return false, err
 	}
@@ -561,7 +570,7 @@ func (c *RigConfigSyncCheck) doltDatabaseExists(ctx *CheckContext, dbName string
 
 // rigBeadExists checks if a rig identity bead exists.
 func (c *RigConfigSyncCheck) rigBeadExists(ctx *CheckContext, rigBeadID, rigPath, beadsDir string) bool {
-	cmdEnv := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR="), "BEADS_DIR="+beadsDir)
+	cmdEnv := append(stripEnvPrefixes(c.env(), "BEADS_DIR="), "BEADS_DIR="+beadsDir)
 	issue, err := ctx.bd(rigPath, cmdEnv).Show(rigBeadID)
 	return err == nil && issue != nil && issue.ID == rigBeadID
 }

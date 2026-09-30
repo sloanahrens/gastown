@@ -23,20 +23,6 @@ func TestLoadBuiltinRoleDefinition(t *testing.T) {
 			wantPreSync: false,
 		},
 		{
-			name:        "deacon",
-			role:        "deacon",
-			wantScope:   "town",
-			wantPattern: "hq-deacon",
-			wantPreSync: false,
-		},
-		{
-			name:        "witness",
-			role:        "witness",
-			wantScope:   "rig",
-			wantPattern: "{prefix}-witness",
-			wantPreSync: false,
-		},
-		{
 			name:        "polecat",
 			role:        "polecat",
 			wantScope:   "rig",
@@ -110,15 +96,13 @@ func TestLoadRoleDefinition_UnknownRole(t *testing.T) {
 
 func TestAllRoles(t *testing.T) {
 	roles := AllRoles()
-	if len(roles) != 6 {
-		t.Errorf("AllRoles() returned %d roles, want 6", len(roles))
+	if len(roles) != 4 {
+		t.Errorf("AllRoles() returned %d roles, want 4", len(roles))
 	}
 
 	expected := map[string]bool{
 		"mayor":   true,
-		"deacon":  true,
 		"dog":     true,
-		"witness": true,
 		"polecat": true,
 		"crew":    true,
 	}
@@ -132,8 +116,8 @@ func TestAllRoles(t *testing.T) {
 
 func TestTownRoles(t *testing.T) {
 	roles := TownRoles()
-	if len(roles) != 3 {
-		t.Errorf("TownRoles() returned %d roles, want 3", len(roles))
+	if len(roles) != 2 {
+		t.Errorf("TownRoles() returned %d roles, want 2", len(roles))
 	}
 
 	for _, r := range roles {
@@ -149,8 +133,8 @@ func TestTownRoles(t *testing.T) {
 
 func TestRigRoles(t *testing.T) {
 	roles := RigRoles()
-	if len(roles) != 3 {
-		t.Errorf("RigRoles() returned %d roles, want 3", len(roles))
+	if len(roles) != 2 {
+		t.Errorf("RigRoles() returned %d roles, want 2", len(roles))
 	}
 
 	for _, r := range roles {
@@ -266,11 +250,11 @@ func TestLoadRoleDefinition_InvalidRigOverride(t *testing.T) {
 	}
 
 	// Write invalid TOML at rig level
-	if err := os.WriteFile(rolesDir+"/witness.toml", []byte("bad = [toml"), 0o644); err != nil {
+	if err := os.WriteFile(rolesDir+"/polecat.toml", []byte("bad = [toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := LoadRoleDefinition(townRoot, rigPath, "witness")
+	_, err := LoadRoleDefinition(townRoot, rigPath, "polecat")
 	if err == nil {
 		t.Fatal("expected error for invalid TOML rig override, got nil")
 	}

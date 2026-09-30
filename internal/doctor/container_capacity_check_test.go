@@ -7,11 +7,10 @@ import (
 )
 
 func TestContainerCapacityCheck_SmallVMWarns(t *testing.T) {
-	orig := dockerInfoCPUMem
-	defer func() { dockerInfoCPUMem = orig }()
-	dockerInfoCPUMem = func() (int, int64, error) { return 24, 8211824640, nil } // Docker Desktop at 8092 MiB
+	t.Parallel()
+	info := func() (int, int64, error) { return 24, 8211824640, nil } // Docker Desktop at 8092 MiB
 
-	result := NewContainerCapacityCheck().Run(&CheckContext{})
+	result := capacityCheck(info).Run(&CheckContext{})
 
 	if result.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning for an ~8 GiB VM", result.Status)
@@ -28,20 +27,17 @@ func TestContainerCapacityCheck_SmallVMWarns(t *testing.T) {
 }
 
 func TestContainerCapacityCheck_LargeVMIsOK(t *testing.T) {
-	orig := dockerInfoCPUMem
-	defer func() { dockerInfoCPUMem = orig }()
+	t.Parallel()
 	// A 16384 MiB setting reports ~3% under; it must not warn.
-	dockerInfoCPUMem = func() (int, int64, error) { return 24, 16_600_000_000, nil }
+	info := func() (int, int64, error) { return 24, 16_600_000_000, nil }
 
-	if got := NewContainerCapacityCheck().Run(&CheckContext{}).Status; got != StatusOK {
+	if got := capacityCheck(info).Run(&CheckContext{}).Status; got != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK for a 16 GiB setting", got)
 	}
 }
 
 func TestContainerCapacityCheck_Boundary(t *testing.T) {
-	orig := dockerInfoCPUMem
-	defer func() { dockerInfoCPUMem = orig }()
-
+	t.Parallel()
 	cases := []struct {
 		name     string
 		memBytes int64
@@ -52,8 +48,9 @@ func TestContainerCapacityCheck_Boundary(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dockerInfoCPUMem = func() (int, int64, error) { return 24, tc.memBytes, nil }
-			if got := NewContainerCapacityCheck().Run(&CheckContext{}).Status; got != tc.want {
+			t.Parallel()
+			info := func() (int, int64, error) { return 24, tc.memBytes, nil }
+			if got := capacityCheck(info).Run(&CheckContext{}).Status; got != tc.want {
 				t.Fatalf("Status = %v, want %v for memBytes=%d", got, tc.want, tc.memBytes)
 			}
 		})
@@ -61,15 +58,13 @@ func TestContainerCapacityCheck_Boundary(t *testing.T) {
 }
 
 func TestContainerCapacityCheck_DockerUnavailableIsSkipped(t *testing.T) {
-	orig := dockerInfoCPUMem
-	defer func() { dockerInfoCPUMem = orig }()
+	t.Parallel()
 
-	dockerInfoCPUMem = func() (int, int64, error) {
+	info := func() (int, int64, error) {
 		return 0, 0, errors.New("docker: command not found")
 	}
 
-	check := NewContainerCapacityCheck()
-	result := check.Run(&CheckContext{})
+	result := capacityCheck(info).Run(&CheckContext{})
 
 	if result.Status != StatusSkipped {
 		t.Fatalf("Status = %v, want StatusSkipped (couldn't measure, not a clean pass)", result.Status)
@@ -80,4 +75,11 @@ func TestContainerCapacityCheck_DockerUnavailableIsSkipped(t *testing.T) {
 	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "docker: command not found") {
 		t.Errorf("Details = %v, want the underlying error", result.Details)
 	}
+}
+
+// capacityCheck is a ContainerCapacityCheck measuring the VM with info.
+func capacityCheck(info func() (int, int64, error)) *ContainerCapacityCheck {
+	c := NewContainerCapacityCheck()
+	c.dockerInfo = info
+	return c
 }

@@ -214,9 +214,6 @@ func newTestManager(r *rig.Rig, w *world, tm sessionProbe, bd *fakeBd) *Manager 
 	}
 	m := newManager(r, w.repo(r.Path), tm, run)
 	m.gits = w.opener()
-	// rig.EnsureLocalExcludePatterns runs git itself, so the test writes its
-	// patterns into the world's exclude file directly.
-	m.ensureExcludes = func(worktreePath string) error { return writeLocalExcludes(w, worktreePath) }
 	// util.CheckDiskSpace runs diskutil on macOS; the disk is never full.
 	m.diskSpace = func(string) (util.DiskSpaceLevel, string, error) { return util.DiskSpaceOK, "", nil }
 	return m
@@ -311,23 +308,4 @@ func (f *fakeBd) recorded() []beads.BDCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]beads.BDCall(nil), f.calls...)
-}
-
-// localExcludePatterns mirrors rig.gasTownLocalExcludePatterns: what
-// rig.EnsureLocalExcludePatterns writes into a worktree's info/exclude.
-var localExcludePatterns = []string{
-	".runtime/", ".claude/", ".opencode/", ".logs/", "__pycache__/", "state.json",
-	"CLAUDE.md", "CLAUDE.local.md", "GEMINI.md", ".beads/",
-}
-
-// writeLocalExcludes is rig.EnsureLocalExcludePatterns for a checkout in w.
-func writeLocalExcludes(w *world, worktreePath string) error {
-	path, err := w.ExcludePath(worktreePath)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(strings.Join(localExcludePatterns, "\n")+"\n"), 0o644)
 }

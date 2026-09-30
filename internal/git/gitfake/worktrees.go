@@ -30,8 +30,19 @@ func worktreeGitDir(r *repo, path string) string {
 	return filepath.Join(gitDirOf(r), "worktrees", filepath.Base(path))
 }
 
+// layoutRepo writes the repository's git directory with the HEAD file git
+// keeps there, which consumers that inspect a git directory without git
+// look for. The file is written once; the model, not the file, holds HEAD.
 func layoutRepo(r *repo) error {
-	return os.MkdirAll(gitDirOf(r), 0o755)
+	dir := gitDirOf(r)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	head := filepath.Join(dir, "HEAD")
+	if _, err := os.Stat(head); err == nil {
+		return nil
+	}
+	return os.WriteFile(head, []byte("ref: "+r.head+"\n"), 0o644) //nolint:gosec // G306: git writes HEAD world-readable
 }
 
 func layoutWorktree(r *repo, path string) error {

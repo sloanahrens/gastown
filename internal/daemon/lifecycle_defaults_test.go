@@ -296,9 +296,9 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 		Type:    "daemon-patrol-config",
 		Version: 1,
 		Patrols: &PatrolsConfig{
-			Deacon:     &PatrolConfig{Enabled: true, Interval: "5m", Agent: "deacon"},
+			Deacon:     json.RawMessage(`{"enabled":true,"interval":"5m","agent":"deacon"}`),
 			Refinery:   &PatrolConfig{Enabled: true, Interval: "5m", Agent: "refinery"},
-			Witness:    &PatrolConfig{Enabled: true, Interval: "5m", Agent: "witness"},
+			Witness:    json.RawMessage(`{"enabled":true,"interval":"5m","agent":"witness"}`),
 			DoltBackup: &DoltBackupConfig{Enabled: false},
 		},
 	}
@@ -319,14 +319,14 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 	json.Unmarshal(data, &config)
 
 	// Core patrols preserved
-	if config.Patrols.Deacon == nil || !config.Patrols.Deacon.Enabled {
-		t.Error("expected deacon to remain enabled")
+	if !retiredKeyKept(config.Patrols.Deacon, "deacon") {
+		t.Errorf("retired deacon key not kept verbatim: %s", config.Patrols.Deacon)
 	}
 	if config.Patrols.Refinery == nil || !config.Patrols.Refinery.Enabled {
 		t.Error("expected refinery to remain enabled")
 	}
-	if config.Patrols.Witness == nil || !config.Patrols.Witness.Enabled {
-		t.Error("expected witness to remain enabled")
+	if !retiredKeyKept(config.Patrols.Witness, "witness") {
+		t.Errorf("retired witness key not kept verbatim: %s", config.Patrols.Witness)
 	}
 
 	// Explicitly disabled dolt_backup preserved (user intent)
@@ -387,4 +387,15 @@ func TestEnsureLifecycleConfigFile_AlreadyComplete(t *testing.T) {
 	if !info1.ModTime().Equal(info2.ModTime()) {
 		t.Error("expected file to not be rewritten when already complete")
 	}
+}
+
+// retiredKeyKept reports whether raw still holds the retired patrol entry the
+// production fixture wrote for agent. The rewrite may re-indent the value, so
+// it is compared decoded.
+func retiredKeyKept(raw json.RawMessage, agent string) bool {
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		return false
+	}
+	return got["agent"] == agent && got["enabled"] == true && got["interval"] == "5m"
 }

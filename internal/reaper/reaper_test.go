@@ -19,6 +19,7 @@ import (
 )
 
 func TestValidateDBName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		wantErr bool
@@ -42,6 +43,7 @@ func TestValidateDBName(t *testing.T) {
 }
 
 func TestDefaultDatabases(t *testing.T) {
+	t.Parallel()
 	if len(DefaultDatabases) == 0 {
 		t.Error("DefaultDatabases should not be empty")
 	}
@@ -53,6 +55,7 @@ func TestDefaultDatabases(t *testing.T) {
 }
 
 func TestDogReaperFormulaAlertThresholdMatchesDefault(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../formula/formulas/mol-dog-reaper.formula.toml")
 	if err != nil {
 		t.Fatalf("read mol-dog-reaper formula: %v", err)
@@ -69,17 +72,8 @@ func TestDogReaperFormulaAlertThresholdMatchesDefault(t *testing.T) {
 	}
 }
 
-func TestFormatJSON(t *testing.T) {
-	result := FormatJSON(map[string]int{"count": 42})
-	if result == "" {
-		t.Error("FormatJSON should not return empty string")
-	}
-	if result[0] != '{' {
-		t.Errorf("FormatJSON should return JSON object, got %q", result[:10])
-	}
-}
-
 func TestParentExcludeJoin(t *testing.T) {
+	t.Parallel()
 	joinClause, whereCondition := parentExcludeJoin("testdb")
 
 	// JOIN clause should reference the correct database.
@@ -120,6 +114,7 @@ func TestParentExcludeJoin(t *testing.T) {
 }
 
 func TestMRProtectedJoin(t *testing.T) {
+	t.Parallel()
 	joinClause, whereCondition := mrProtectedJoin(time.Hour, time.Now().UTC().Add(-time.Hour))
 
 	if !contains(joinClause, "wisp_labels") {
@@ -137,6 +132,7 @@ func TestMRProtectedJoin(t *testing.T) {
 }
 
 func TestWispExcludeClause(t *testing.T) {
+	t.Parallel()
 	if clause, args := wispExcludeClause(nil); clause != "" || args != nil {
 		t.Errorf("wispExcludeClause(nil) = (%q, %v), want (\"\", nil)", clause, args)
 	}
@@ -151,6 +147,7 @@ func TestWispExcludeClause(t *testing.T) {
 }
 
 func TestAgentReferenceFieldPatterns(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		pattern     *regexp.Regexp
@@ -177,6 +174,7 @@ func TestAgentReferenceFieldPatterns(t *testing.T) {
 }
 
 func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
+	t.Parallel()
 	sourcePath := "reaper.go"
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -232,6 +230,7 @@ func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
 // issue_type=task with gt:agent, and patrol molecules are issue_type=molecule
 // with no labels at all.
 func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
+	t.Parallel()
 	clause := staleIssueEligibilityClause("`hq`.")
 
 	for _, want := range []struct {
@@ -277,6 +276,7 @@ func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
 // a soft error, not a stop. The refusal arrives with the set the threshold would
 // take in the result, and the command exits 0.
 func TestAutoCloseSoftRefusalBelowFloor(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a", "hq-b")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -339,6 +339,7 @@ func TestAutoCloseSoftRefusalBelowFloor(t *testing.T) {
 // the operator a number smaller than the sweep they are contemplating and hide
 // the blast radius that makes the refusal worth reading (gt-ecpj).
 func TestAutoCloseBelowFloorReportsTheThresholdsSet(t *testing.T) {
+	t.Parallel()
 	// hq-aged has been stale for 60d and is in the set at any threshold;
 	// hq-recent has been stale for an hour, so only the below-floor threshold
 	// reaches it.
@@ -385,6 +386,7 @@ func TestAutoCloseBelowFloorReportsTheThresholdsSet(t *testing.T) {
 // floored", letting the sweep fall through to the write path and close at the
 // floor.
 func TestAutoCloseBelowFloorOfZeroIsRefused(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -413,6 +415,7 @@ func TestAutoCloseBelowFloorOfZeroIsRefused(t *testing.T) {
 // a count at the floor would be a different, smaller set, and the two numbers
 // could not be compared (gt-ecpj).
 func TestScanStaleCountIsAtTheThresholdAskedFor(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-aged")
 	state.addStaleIssueAged("hq-recent", time.Hour)
 	db := openFakeReaperDB(t, state)
@@ -454,6 +457,7 @@ func TestScanStaleCountIsAtTheThresholdAskedFor(t *testing.T) {
 // TestAutoCloseForceLiftsTheFloor is the lift side of the same brake: --force
 // lets a below-floor threshold sweep at the value asked for, with no refusal.
 func TestAutoCloseForceLiftsTheFloor(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -473,6 +477,7 @@ func TestAutoCloseForceLiftsTheFloor(t *testing.T) {
 // TestAutoCloseMaxPerRunDefaults guards the cap's default: a zero value means
 // "use the package default", never "unlimited".
 func TestAutoCloseMaxPerRunDefaults(t *testing.T) {
+	t.Parallel()
 	if DefaultAutoCloseMaxPerRun <= 0 {
 		t.Fatalf("DefaultAutoCloseMaxPerRun = %d, want positive", DefaultAutoCloseMaxPerRun)
 	}
@@ -492,6 +497,7 @@ func TestAutoCloseMaxPerRunDefaults(t *testing.T) {
 // A live sweep that was shown no preview now refuses and closes nothing,
 // whatever order the caller used.
 func TestAutoCloseLiveRefusesWithoutPreview(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a", "hq-b")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -521,6 +527,7 @@ func TestAutoCloseLiveRefusesWithoutPreview(t *testing.T) {
 // dry run's hash is what authorizes the write, so the ordinary pair — dry run,
 // then live carrying that hash — closes exactly the set the dry run showed.
 func TestAutoCloseLiveClosesThePreviewedSet(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a", "hq-b")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -562,6 +569,7 @@ func TestAutoCloseLiveClosesThePreviewedSet(t *testing.T) {
 // candidate that appeared after the preview refuses the whole run rather than
 // riding along with the previewed ones.
 func TestAutoClosePreviewHashBindsTheExactSet(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a", "hq-b")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -595,6 +603,7 @@ func TestAutoClosePreviewHashBindsTheExactSet(t *testing.T) {
 // write for a preview to authorize, so the guard stays out of the way — the same
 // shape as the formula's "0 candidates, skip the live run".
 func TestAutoCloseEmptyCandidateSetNeedsNoPreview(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState()
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -612,6 +621,7 @@ func TestAutoCloseEmptyCandidateSetNeedsNoPreview(t *testing.T) {
 // for every auto-close brake, this one included. It stays reserved for an
 // operator who has already read the candidate list.
 func TestAutoCloseForceLiftsThePreviewRequirement(t *testing.T) {
+	t.Parallel()
 	state := newStaleIssueState("hq-a")
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
@@ -632,6 +642,7 @@ func TestAutoCloseForceLiftsThePreviewRequirement(t *testing.T) {
 // order cannot matter) and distinct for every way the set can differ — a hash
 // that collided would let a live run close something the preview never named.
 func TestPreviewHashFingerprintsTheSet(t *testing.T) {
+	t.Parallel()
 	age := MinStaleIssueAge
 	base := PreviewHash("hq", age, []string{"hq-a", "hq-b"})
 	if base == "" {
@@ -659,6 +670,7 @@ func TestPreviewHashFingerprintsTheSet(t *testing.T) {
 // half of gt-39bu: the formula has to hand the dry run's preview hash to the
 // live run, because the live run refuses without it.
 func TestDogReaperFormulaBindsTheLiveAutoCloseToItsPreview(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../formula/formulas/mol-dog-reaper.formula.toml")
 	if err != nil {
 		t.Fatalf("read mol-dog-reaper formula: %v", err)
@@ -681,6 +693,7 @@ func TestDogReaperFormulaBindsTheLiveAutoCloseToItsPreview(t *testing.T) {
 // dbName was passed as a Sprintf arg but the format string didn't use it, causing
 // positional shift: "FROM wisps w gt WHERE..." instead of "FROM wisps w LEFT JOIN...".
 func TestReapQueryNoDatabaseNameInjection(t *testing.T) {
+	t.Parallel()
 	// Reproduce the exact Sprintf call from Reap() to verify no dbName injection.
 	dbName := "gt"
 	parentJoin, parentWhere := parentExcludeJoin(dbName)
@@ -705,6 +718,7 @@ func TestReapQueryNoDatabaseNameInjection(t *testing.T) {
 // TestPurgeDigestQueryNoDatabaseNameInjection verifies that the purge digest
 // query interpolates only the live-reference exclusion clause, never dbName.
 func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
+	t.Parallel()
 	// Mirrors purgeClosedWisps: the exclusion is parameterized, so the literal
 	// query text carries no database name and no bead id.
 	referencedClause, _ := wispExcludeClause(map[string]bool{"gt-wisp-miky": true})
@@ -721,6 +735,7 @@ func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
 // TestPurgeBatchQueryNoDatabaseNameInjection verifies that the purge
 // candidate SELECT interpolates only the exclusion clause, never dbName.
 func TestPurgeBatchQueryNoDatabaseNameInjection(t *testing.T) {
+	t.Parallel()
 	// Mirrors purgeClosedWisps — only the parameterized exclusion is
 	// interpolated.
 	referencedClause, _ := wispExcludeClause(map[string]bool{"gt-wisp-miky": true})
@@ -764,6 +779,7 @@ func sourceBetween(t *testing.T, source, startMarker, endMarker string) string {
 // where the wisp reaper was closing agent beads (hq-mayor, hq-deacon, witness, refinery,
 // etc.) after 24 hours, causing doctor to report them as missing.
 func TestReapExcludesAgentBeads(t *testing.T) {
+	t.Parallel()
 	// Verify that the WHERE clause in Reap() excludes issue_type='agent'
 	// by checking the source code pattern.
 	// This is a compile-time guard — if the exclusion is removed, this test
@@ -785,6 +801,7 @@ func TestReapExcludesAgentBeads(t *testing.T) {
 // predicate as Reap() for stale open wisps. If Scan counts agent beads but Reap
 // excludes them, the operator sees scan>0 and reap=0 for the same cutoff.
 func TestScanExcludesAgentBeads(t *testing.T) {
+	t.Parallel()
 	sourcePath := "reaper.go"
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -808,6 +825,7 @@ func TestScanExcludesAgentBeads(t *testing.T) {
 // closed-molecule scan sees them. What survives is the sibling `blocks` chain
 // between the steps, and Scan raises an anomaly from it (gt-ogvp6).
 func TestScanFlagsStepsOrphanedByADeletedMolecule(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	recent := now.Add(-time.Hour)
 	state := &fakeReaperState{
@@ -855,6 +873,7 @@ func TestScanFlagsStepsOrphanedByADeletedMolecule(t *testing.T) {
 }
 
 func TestClosedMoleculeStepReapBehavior(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	state := &fakeReaperState{
 		wisps: map[string]*fakeWisp{
@@ -964,6 +983,7 @@ func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 // be sufficient on its own to reap an MR wisp, its tracking cleanup wisp, or
 // anything a live agent still references as active_mr.
 func TestReapExcludesLiveMergeQueueWisps(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-48 * time.Hour)
 	state := &fakeReaperState{
@@ -1018,6 +1038,7 @@ func TestReapExcludesLiveMergeQueueWisps(t *testing.T) {
 // here are closed and far past purge-age — only the live reference spares them,
 // and it lapses with the agent (the nuked bead's reference does not).
 func TestPurgeExcludesLiveAgentReferencedWisps(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-30 * 24 * time.Hour)
 	state := &fakeReaperState{
@@ -1072,6 +1093,7 @@ func TestPurgeExcludesLiveAgentReferencedWisps(t *testing.T) {
 // agent beads here carry the shape production stores, not the shape the old query
 // expected.
 func TestAgentReferencesResolvedFromIssuesTable(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-48 * time.Hour)
 	state := &fakeReaperState{
@@ -1125,6 +1147,7 @@ func TestAgentReferencesResolvedFromIssuesTable(t *testing.T) {
 // issues table and one from a migrated agent bead in wisps, so both halves of the
 // lookup are exercised.
 func TestPurgeSparesAgentReferencedWispsFromIssuesTable(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-30 * 24 * time.Hour)
 	state := &fakeReaperState{
@@ -1885,6 +1908,7 @@ func assertOpsContainInOrder(t *testing.T, ops []string, want ...string) {
 // the state, so the reaper reads that timestamp — not createdAt — as the
 // protection anchor.
 func TestMRProtectionTTLFreshLabelSetStaysProtected(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-48 * time.Hour)
 	freshLabelSet := now.Add(-2 * time.Hour) // within the 24h TTL
@@ -1918,6 +1942,7 @@ func TestMRProtectionTTLFreshLabelSetStaysProtected(t *testing.T) {
 // reapable (gt-apam): the protection window is bounded, so a lost MERGED signal
 // no longer leaves the wisp immortal.
 func TestMRProtectionTTLExpiredLabelSetBecomesReapable(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-48 * time.Hour)
 	expiredLabelSet := now.Add(-30 * time.Hour) // beyond the 24h TTL
@@ -1958,6 +1983,7 @@ func TestMRProtectionTTLExpiredLabelSetBecomesReapable(t *testing.T) {
 // pre-TTL behavior for wisps created before the witness started recording
 // anchors, while still bounding their protection window.
 func TestMRProtectionTTLZeroLabelSetFallsBackToCreatedAt(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	old := now.Add(-48 * time.Hour)
 	recent := now.Add(-2 * time.Hour)

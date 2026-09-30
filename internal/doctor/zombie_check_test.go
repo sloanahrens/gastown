@@ -89,39 +89,38 @@ func TestZombieSessionCheck_ListSessionsErrorIsSkipped(t *testing.T) {
 
 func TestZombieSessionCheck_SkipsCrewSessions(t *testing.T) {
 	t.Parallel()
-	// Verify that crew sessions are not marked as zombies
-	check := NewZombieSessionCheck()
+	// A crew session with no Claude is human-managed, not a zombie; a dead
+	// witness beside it is.
+	lister := &fakeZombieLister{sessions: []string{"gt-crew-joe", "gt-witness"}}
+	check := NewZombieSessionCheckWithLister(lister)
 
-	// Run the check - crew sessions should be skipped
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-	result := check.Run(ctx)
+	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
 
-	// If there are zombies, ensure no crew sessions are in the list
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning for the dead witness: %s", result.Status, result.Message)
+	}
 	for _, detail := range result.Details {
-		if isCrewSession(detail) {
+		if strings.Contains(detail, "crew") {
 			t.Errorf("crew session should not be in zombie list: %s", detail)
 		}
+	}
+	if len(check.zombieSessions) != 1 || check.zombieSessions[0] != "gt-witness" {
+		t.Errorf("zombies = %v, want only gt-witness", check.zombieSessions)
 	}
 }
 
 func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 	t.Parallel()
-	// Verify that Fix() never kills crew sessions
-	check := NewZombieSessionCheck()
+	// Fix never kills a crew session, even one Run wrongly listed.
+	lister := &fakeZombieLister{}
+	check := NewZombieSessionCheckWithLister(lister)
+	check.zombieSessions = []string{"gt-crew-joe", "gt-witness"}
 
-	// Manually set zombies including a crew session (simulating a bug)
-	check.zombieSessions = []string{
-		"gt-gastown-crew-joe", // Should be skipped
-		"gt-gastown-witness",  // Would be killed (if real)
+	_ = check.Fix(&CheckContext{TownRoot: t.TempDir()})
+
+	if len(lister.killed) != 1 || lister.killed[0] != "gt-witness" {
+		t.Fatalf("killed = %v, want only gt-witness (never the crew session)", lister.killed)
 	}
-
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	// Fix should skip crew sessions due to safeguard
-	// (We can't fully test this without mocking tmux, but the safeguard is in place)
-	_ = check.Fix(ctx)
-
-	// The test passes if no panic occurred and crew sessions are protected by the safeguard
 }
 
 // TestZombieSessionCheck_LivenessErrorIsNotAZombie is gt-fcxe9.1: a liveness
@@ -130,22 +129,22 @@ func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{
-		sessions: []string{"hq-deacon", "hq-boot"},
-		alive:    map[string]bool{"hq-boot": false},
-		aliveErr: map[string]error{"hq-deacon": errors.New("tmux show-environment: timed out")},
+		sessions: []string{"hq-mayor", "hq-dog-alpha"},
+		alive:    map[string]bool{"hq-dog-alpha": false},
+		aliveErr: map[string]error{"hq-mayor": errors.New("tmux show-environment: timed out")},
 	}
 	check := NewZombieSessionCheckWithLister(lister)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 
 	result := check.Run(ctx)
 	for _, d := range result.Details {
-		if strings.Contains(d, "Zombie: hq-deacon") {
+		if strings.Contains(d, "Zombie: hq-mayor") {
 			t.Fatalf("session with an unknown liveness answer listed as zombie: %v", result.Details)
 		}
 	}
 	foundUnknown := false
 	for _, d := range result.Details {
-		if strings.Contains(d, "hq-deacon") && strings.Contains(strings.ToLower(d), "unknown") {
+		if strings.Contains(d, "hq-mayor") && strings.Contains(strings.ToLower(d), "unknown") {
 			foundUnknown = true
 		}
 	}
@@ -157,7 +156,7 @@ func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 		t.Fatalf("Fix: %v", err)
 	}
 	for _, k := range lister.killed {
-		if k == "hq-deacon" {
+		if k == "hq-mayor" {
 			t.Fatal("Fix killed a session whose liveness query failed")
 		}
 	}
@@ -168,13 +167,13 @@ func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 func TestZombieSessionCheck_FixRecheckErrorSkipsKill(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{
-		sessions: []string{"hq-deacon"},
-		alive:    map[string]bool{"hq-deacon": false},
+		sessions: []string{"hq-mayor"},
+		alive:    map[string]bool{"hq-mayor": false},
 	}
 	check := NewZombieSessionCheckWithLister(lister)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 	_ = check.Run(ctx)
-	lister.aliveErr = map[string]error{"hq-deacon": errors.New("tmux: server busy")}
+	lister.aliveErr = map[string]error{"hq-mayor": errors.New("tmux: server busy")}
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}

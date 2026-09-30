@@ -11,6 +11,10 @@ import (
 // storage backend (dolt sql-server).
 type DoltBinaryCheck struct {
 	BaseCheck
+
+	// probe finds dolt and classifies its version. Nil is deps.CheckDolt;
+	// tests answer with a status.
+	probe func() (deps.DoltStatus, string, string)
 }
 
 // NewDoltBinaryCheck creates a new dolt binary availability check.
@@ -26,7 +30,11 @@ func NewDoltBinaryCheck() *DoltBinaryCheck {
 
 // Run checks if dolt is available in PATH and reports its version status.
 func (c *DoltBinaryCheck) Run(ctx *CheckContext) *CheckResult {
-	status, version, detail := deps.CheckDolt()
+	probe := c.probe
+	if probe == nil {
+		probe = deps.CheckDolt
+	}
+	status, version, detail := probe()
 
 	switch status {
 	case deps.DoltOK:
@@ -38,8 +46,8 @@ func (c *DoltBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 
 	case deps.DoltNotFound:
 		return &CheckResult{
-			Name:   c.Name(),
-			Status: StatusError,
+			Name:    c.Name(),
+			Status:  StatusError,
 			Message: "dolt not found in PATH",
 			Details: []string{
 				"Dolt is required for the beads storage backend",
@@ -49,8 +57,8 @@ func (c *DoltBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 
 	case deps.DoltTooOld:
 		return &CheckResult{
-			Name:   c.Name(),
-			Status: StatusError,
+			Name:    c.Name(),
+			Status:  StatusError,
 			Message: fmt.Sprintf("dolt %s is too old (minimum: %s)", version, deps.MinDoltVersion),
 			Details: []string{
 				fmt.Sprintf("Installed version %s does not meet the minimum requirement of %s", version, deps.MinDoltVersion),
@@ -60,8 +68,8 @@ func (c *DoltBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 
 	case deps.DoltExecFailed:
 		return &CheckResult{
-			Name:   c.Name(),
-			Status: StatusError,
+			Name:    c.Name(),
+			Status:  StatusError,
 			Message: fmt.Sprintf("dolt found but 'dolt version' failed: %s", detail),
 			Details: []string{
 				"The dolt binary exists but could not report its version",
@@ -71,8 +79,8 @@ func (c *DoltBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 
 	case deps.DoltUnknown:
 		return &CheckResult{
-			Name:   c.Name(),
-			Status: StatusWarning,
+			Name:    c.Name(),
+			Status:  StatusWarning,
 			Message: fmt.Sprintf("dolt found but version could not be parsed: %s", detail),
 			FixHint: fmt.Sprintf("Reinstall dolt: %s", deps.DoltInstallURL),
 		}

@@ -8,7 +8,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -144,7 +143,6 @@ type slingDeps struct {
 
 	// Reassignment away from a previous holder.
 	requester          func() string
-	notifyWitness      func(townRoot string, msg *mail.Message) (wait func(), err error)
 	clearReassigned    func(townRoot, assignee string)
 	unhook             func(townRoot, beadID string) error
 	recordReassignment func(townRoot, beadID, from, to, requester string)
@@ -251,7 +249,6 @@ func realSlingDeps() *slingDeps {
 		wakeRig:         wakeRigAgents,
 
 		requester:          reassignRequester,
-		notifyWitness:      sendWitnessShutdown,
 		clearReassigned:    clearReassignedPolecatState,
 		unhook:             unhookFromPreviousOwner,
 		recordReassignment: recordReassignment,
@@ -338,13 +335,6 @@ func setBDAutoCommitOff() (restore func()) {
 			_ = os.Setenv("BD_DOLT_AUTO_COMMIT", prev)
 		}
 	}
-}
-
-// sendWitnessShutdown mails msg; wait blocks until its notifications are
-// delivered.
-func sendWitnessShutdown(townRoot string, msg *mail.Message) (wait func(), err error) {
-	router := mail.NewRouter(townRoot)
-	return router.WaitPendingNotifications, router.Send(msg)
 }
 
 // unhookFromPreviousOwner sets a force-reassigned bead back to open with no

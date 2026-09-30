@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/estop"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -64,18 +63,16 @@ func runStatusLine(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
 
 	// Get session environment
-	var rigName, polecat, crew, issue, role string
+	var polecat, crew, issue, role string
 
 	if statusLineSession != "" {
 		// Non-fatal: missing env vars are handled gracefully below
-		rigName, _ = t.GetEnvironment(statusLineSession, "GT_RIG")
 		polecat, _ = t.GetEnvironment(statusLineSession, "GT_POLECAT")
 		crew, _ = t.GetEnvironment(statusLineSession, "GT_CREW")
 		issue, _ = t.GetEnvironment(statusLineSession, "GT_ISSUE")
 		role, _ = t.GetEnvironment(statusLineSession, "GT_ROLE")
 	} else {
 		// Fallback to process environment
-		rigName = os.Getenv("GT_RIG")
 		polecat = os.Getenv("GT_POLECAT")
 		crew = os.Getenv("GT_CREW")
 		issue = os.Getenv("GT_ISSUE")
@@ -84,21 +81,10 @@ func runStatusLine(cmd *cobra.Command, args []string) error {
 
 	// Get session names for comparison
 	mayorSession := getMayorSessionName()
-	deaconSession := getDeaconSessionName()
 
 	// Determine identity and output based on role
 	if role == "mayor" || statusLineSession == mayorSession {
 		return runMayorStatusLine(t)
-	}
-
-	// Deacon status line
-	if role == "deacon" || statusLineSession == deaconSession {
-		return runDeaconStatusLine(t)
-	}
-
-	// Witness status line (session naming: gt-<rig>-witness)
-	if role == "witness" || strings.HasSuffix(statusLineSession, "-witness") {
-		return runWitnessStatusLine(t, rigName)
 	}
 
 	// Crew/Polecat status line
@@ -164,8 +150,8 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 	// Track per-rig status for LED indicators and sorting
 	type rigStatus struct {
-		hasWitness bool
-		opState    string // "OPERATIONAL", "PARKED", or "DOCKED"
+		running bool   // any of the rig's agents has a session
+		opState string // "OPERATIONAL", "PARKED", or "DOCKED"
 	}
 	rigStatuses := make(map[string]*rigStatus)
 
@@ -174,49 +160,18 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		rigStatuses[rigName] = &rigStatus{}
 	}
 
-	// Track per-agent-type health (working/zombie counts)
-	type agentHealth struct {
-		total   int
-		working int
-	}
-	healthByType := map[AgentType]*agentHealth{
-		AgentWitness: {},
-	}
-
-	// Track deacon presence (just icon, no count)
-	hasDeacon := false
-
-	// Single pass: track rig status AND agent health
 	for _, s := range sessions {
 		agent := categorizeSession(s)
 		if agent == nil {
 			continue
 		}
-
-		// Track rig-level status (witness/refinery presence)
+		// A rig reads as running while any of its agents has a session.
 		// Polecats are not tracked in tmux - they're a GC concern, not a display concern
 		if agent.Rig != "" && registeredRigs[agent.Rig] {
 			if rigStatuses[agent.Rig] == nil {
 				rigStatuses[agent.Rig] = &rigStatus{}
 			}
-			switch agent.Type {
-			case AgentWitness:
-				rigStatuses[agent.Rig].hasWitness = true
-			}
-		}
-
-		// Track agent health (skip Mayor and Crew)
-		if health := healthByType[agent.Type]; health != nil {
-			health.total++
-			// Detect working state via ✻ symbol
-			if isSessionWorking(t, s) {
-				health.working++
-			}
-		}
-
-		// Track deacon presence (just the icon, no count)
-		if agent.Type == AgentDeacon {
-			hasDeacon = true
+			rigStatuses[agent.Rig].running = true
 		}
 	}
 
@@ -228,30 +183,6 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 	// Build status
 	var parts []string
-
-	// Add per-agent-type health in consistent order
-	// Format: "1/3 👁️" = 1 working out of 3 total
-	// Only show agent types that have sessions
-	// Note: Polecats excluded - idle state is misleading noise
-	// Deacon gets just an icon (no count) - shown separately below
-	agentOrder := []AgentType{AgentWitness}
-	var agentParts []string
-	for _, agentType := range agentOrder {
-		health := healthByType[agentType]
-		if health.total == 0 {
-			continue
-		}
-		icon := AgentTypeIcons[agentType]
-		agentParts = append(agentParts, fmt.Sprintf("%d/%d %s", health.working, health.total, icon))
-	}
-	if len(agentParts) > 0 {
-		parts = append(parts, strings.Join(agentParts, " "))
-	}
-
-	// Add deacon icon if running (just presence, no count)
-	if hasDeacon {
-		parts = append(parts, AgentTypeIcons[AgentDeacon])
-	}
 
 	// Build rig status display with LED indicators (see GetRigLED for definitions)
 
@@ -272,8 +203,8 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 	// Sort by: 1) running state, 2) operational state, 3) alphabetical
 	sort.Slice(rigs, func(i, j int) bool {
-		isRunningI := rigs[i].status.hasWitness
-		isRunningJ := rigs[j].status.hasWitness
+		isRunningI := rigs[i].status.running
+		isRunningJ := rigs[j].status.running
 
 		// Primary sort: running rigs before non-running rigs
 		if isRunningI != isRunningJ {
@@ -296,7 +227,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 	var rigParts []string
 	var lastGroup string
 	for _, rig := range rigs {
-		isRunning := rig.status.hasWitness
+		isRunning := rig.status.running
 		var currentGroup string
 		if isRunning {
 			currentGroup = "running"
@@ -311,7 +242,7 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 		lastGroup = currentGroup
 
 		status := rig.status
-		led := GetRigLED(status.hasWitness, status.opState)
+		led := GetRigLED(status.running, status.opState)
 
 		// All icons get 1 space, Park gets 2
 		space := " "
@@ -330,97 +261,6 @@ func runMayorStatusLine(t *tmux.Tmux) error {
 
 	if len(rigParts) > 0 {
 		parts = append(parts, strings.Join(rigParts, " "))
-	}
-
-	fmt.Print(strings.Join(parts, " | ") + " |")
-	return nil
-}
-
-// runDeaconStatusLine outputs status for the deacon session.
-// Shows: active rigs, polecat count, hook or mail preview
-func runDeaconStatusLine(t *tmux.Tmux) error {
-	// Count active rigs and polecats
-	sessions, err := t.ListSessions()
-	if err != nil {
-		return nil // Silent fail
-	}
-
-	// Get town root from deacon pane's working directory. Config files only; no beads.
-	var townRoot string
-	deaconSession := getDeaconSessionName()
-	paneDir, err := t.GetPaneWorkDir(deaconSession)
-	if err == nil && paneDir != "" {
-		townRoot, _ = workspace.Find(paneDir)
-	}
-
-	// Load registered rigs to validate against
-	registeredRigs := make(map[string]bool)
-	if townRoot != "" {
-		rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-		if rigsConfig, err := config.LoadRigsConfig(rigsConfigPath); err == nil {
-			for rigName := range rigsConfig.Rigs {
-				registeredRigs[rigName] = true
-			}
-		}
-	}
-
-	rigs := make(map[string]bool)
-	for _, s := range sessions {
-		agent := categorizeSession(s)
-		if agent == nil {
-			continue
-		}
-		// Only count registered rigs
-		if agent.Rig != "" && registeredRigs[agent.Rig] {
-			rigs[agent.Rig] = true
-		}
-	}
-	rigCount := len(rigs)
-
-	// Build status
-	// Note: Polecats excluded - their sessions are ephemeral and idle detection is a GC concern
-	var parts []string
-	parts = append(parts, fmt.Sprintf("%d rigs", rigCount))
-
-	fmt.Print(strings.Join(parts, " | ") + " |")
-	return nil
-}
-
-// runWitnessStatusLine outputs status for a witness session.
-// Shows: crew count, hook or mail preview
-// Note: Polecats excluded - their sessions are ephemeral and idle detection is a GC concern
-func runWitnessStatusLine(t *tmux.Tmux, rigName string) error {
-	if rigName == "" {
-		// Try to extract from session name: <prefix>-witness
-		if identity, err := session.ParseSessionName(statusLineSession); err == nil && identity.Role == session.RoleWitness {
-			rigName = identity.Rig
-		}
-	}
-
-	// Count crew in this rig (crew are persistent, worth tracking)
-	sessions, err := t.ListSessions()
-	if err != nil {
-		return nil // Silent fail
-	}
-
-	crewCount := 0
-	for _, s := range sessions {
-		agent := categorizeSession(s)
-		if agent == nil {
-			continue
-		}
-		if agent.Rig == rigName && agent.Type == AgentCrew {
-			crewCount++
-		}
-	}
-
-	// Build status
-	var parts []string
-	if crewCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d crew", crewCount))
-	}
-	if len(parts) == 0 {
-		parts = append(parts, "patrol")
 	}
 
 	fmt.Print(strings.Join(parts, " | ") + " |")

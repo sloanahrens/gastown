@@ -82,9 +82,8 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 	// Get list of valid rigs
 	validRigs := c.getValidRigs(ctx.TownRoot)
 
-	// Get session names for mayor/deacon
+	// Get session name for mayor
 	mayorSession := session.MayorSessionName()
-	deaconSession := session.DeaconSessionName()
 
 	// Check each session
 	var orphans []string
@@ -100,7 +99,7 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		if c.isValidSession(sess, validRigs, mayorSession, deaconSession) {
+		if c.isValidSession(sess, validRigs, mayorSession) {
 			validCount++
 		} else {
 			orphans = append(orphans, sess)
@@ -206,26 +205,13 @@ func (c *OrphanSessionCheck) getValidRigs(townRoot string) []string {
 // isValidSession checks if a session name matches expected Gas Town patterns.
 // Valid patterns:
 //   - hq-mayor (headquarters mayor session)
-//   - hq-deacon (headquarters deacon session)
-//   - gt-boot (boot watchdog session)
-//   - gt-<rig>-witness
-//   - gt-<rig>-refinery
-//   - gt-<rig>-<polecat> (where polecat is any name)
+//   - <prefix>-crew-<name>
+//   - <prefix>-<polecat> (where polecat is any name)
 //
 // Note: We can't verify polecat names without reading state, so we're permissive.
-func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, mayorSession, deaconSession string) bool {
+func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, mayorSession string) bool {
 	// Mayor session is always valid (dynamic name based on town)
 	if mayorSession != "" && sess == mayorSession {
-		return true
-	}
-
-	// Deacon session is always valid (dynamic name based on town)
-	if deaconSession != "" && sess == deaconSession {
-		return true
-	}
-
-	// Boot watchdog session is always valid
-	if sess == session.BootSessionName() {
 		return true
 	}
 
@@ -270,14 +256,8 @@ func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, may
 		return false
 	}
 
-	// witness, refinery, crew, and polecat are all valid roles
-	switch identity.Role {
-	case session.RoleWitness, session.RoleCrew, session.RolePolecat:
-		return true
-	}
-
-	// Any other role is assumed valid if the rig exists
-	// We can't easily verify without reading state, so accept it
+	// Crew and polecat sessions are valid, and any other role is assumed
+	// valid if the rig exists: we can't easily verify without reading state.
 	return true
 }
 
@@ -288,7 +268,31 @@ func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, may
 // distinguish user sessions from orphaned Gas Town processes.
 type OrphanProcessCheck struct {
 	BaseCheck
+
+	// procs reads tmux's process ids and the process table; nil is the
+	// machine's (ps and tmux).
+	procs processSource
 }
+
+// processSource is what OrphanProcessCheck reads from the machine.
+type processSource interface {
+	// tmuxPIDs returns the tmux server processes and the shells in tmux panes.
+	tmuxPIDs() (map[int]bool, error)
+	// processTable returns ps -eo pid,ppid,args.
+	processTable() ([]byte, error)
+	// parentPID returns pid's parent.
+	parentPID(pid int) (int, error)
+}
+
+func (c *OrphanProcessCheck) source() processSource {
+	if c.procs != nil {
+		return c.procs
+	}
+	return machineProcesses{}
+}
+
+// machineProcesses reads processes with ps and tmux.
+type machineProcesses struct{}
 
 // NewOrphanProcessCheck creates a new orphan process check.
 func NewOrphanProcessCheck() *OrphanProcessCheck {
@@ -304,7 +308,7 @@ func NewOrphanProcessCheck() *OrphanProcessCheck {
 // Run checks for runtime processes running outside tmux.
 func (c *OrphanProcessCheck) Run(ctx *CheckContext) *CheckResult {
 	// Get list of tmux session PIDs
-	tmuxPIDs, err := c.getTmuxSessionPIDs()
+	tmuxPIDs, err := c.source().tmuxPIDs()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -374,8 +378,8 @@ type processInfo struct {
 	cmd  string
 }
 
-// getTmuxSessionPIDs returns PIDs of all tmux server processes and pane shell PIDs.
-func (c *OrphanProcessCheck) getTmuxSessionPIDs() (map[int]bool, error) { //nolint:unparam // error return kept for future use
+// tmuxPIDs returns PIDs of all tmux server processes and pane shell PIDs.
+func (machineProcesses) tmuxPIDs() (map[int]bool, error) { //nolint:unparam // error return kept for future use
 	// Get tmux server PID and all pane PIDs
 	pids := make(map[int]bool)
 
@@ -416,6 +420,22 @@ func (c *OrphanProcessCheck) getTmuxSessionPIDs() (map[int]bool, error) { //noli
 	return pids, nil
 }
 
+func (machineProcesses) processTable() ([]byte, error) {
+	return exec.Command("ps", "-eo", "pid,ppid,args").Output()
+}
+
+func (machineProcesses) parentPID(pid int) (int, error) {
+	out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "ppid=").Output() //nolint:gosec // G204: PID is numeric from internal state
+	if err != nil {
+		return 0, err
+	}
+	var ppid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &ppid); err != nil {
+		return 0, err
+	}
+	return ppid, nil
+}
+
 // argvHasFlag reports whether argv (full command line) contains a standalone flag token.
 func argvHasFlag(args, flag string) bool {
 	for _, tok := range strings.Fields(args) {
@@ -453,7 +473,7 @@ func (c *OrphanProcessCheck) findRuntimeProcesses() ([]processInfo, error) {
 	var procs []processInfo
 
 	// Use ps with args to get full command line (needed to check for Gas Town signature)
-	out, err := exec.Command("ps", "-eo", "pid,ppid,args").Output()
+	out, err := c.source().processTable()
 	if err != nil {
 		return nil, err
 	}
@@ -511,13 +531,8 @@ func (c *OrphanProcessCheck) isOrphanProcess(proc processInfo, tmuxPIDs map[int]
 		}
 
 		// Get parent's parent
-		out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", currentPPID), "-o", "ppid=").Output() //nolint:gosec // G204: PID is numeric from internal state
+		nextPPID, err := c.source().parentPID(currentPPID)
 		if err != nil {
-			break
-		}
-
-		var nextPPID int
-		if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &nextPPID); err != nil {
 			break
 		}
 		currentPPID = nextPPID

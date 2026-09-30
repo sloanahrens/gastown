@@ -132,8 +132,8 @@ func TestExecuteSlingSuccess(t *testing.T) {
 	}
 }
 
-// TestExecuteSlingForceStealsFromALivePolecat: the old polecat's witness is
-// told to shut it down and its agent state is cleared before the new spawn.
+// TestExecuteSlingForceStealsFromALivePolecat: the old polecat's agent state
+// is cleared before the new spawn.
 func TestExecuteSlingForceStealsFromALivePolecat(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
@@ -143,12 +143,10 @@ func TestExecuteSlingForceStealsFromALivePolecat(t *testing.T) {
 	if _, err := h.run.executeSling(p); err != nil {
 		t.Fatalf("executeSling: %v", err)
 	}
-	// The dispatch waits for the mail's delivery before it spawns.
-	h.wantCalls("mail", "mail gastown/witness LIFECYCLE:Shutdown Nux", "mail delivered gastown/witness")
 	h.wantCalls("clear reassigned", "clear reassigned gastown/polecats/Nux")
 	h.wantCalls("reassign", "reassign gt-abc123 gastown/polecats/Nux -> gastown/polecats/Toast")
-	if log := strings.Join(h.log(), "\n"); strings.Index(log, "mail delivered") > strings.Index(log, "spawn gastown") {
-		t.Errorf("spawned before the shutdown mail was delivered:\n%s", log)
+	if log := strings.Join(h.log(), "\n"); strings.Index(log, "clear reassigned") > strings.Index(log, "spawn gastown") {
+		t.Errorf("spawned before the old holder was cleared:\n%s", log)
 	}
 }
 

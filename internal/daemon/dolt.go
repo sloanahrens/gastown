@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -742,7 +741,6 @@ Action needed: Investigate and fix the root cause, then restart the daemon or th
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port)
 
-	townRoot := m.townRoot
 	logger := m.logger
 	n := m.notify()
 
@@ -754,9 +752,6 @@ Action needed: Investigate and fix the root cause, then restart the daemon or th
 		} else {
 			logger("Sent escalation mail to mayor about Dolt server crash-loop")
 		}
-
-		// Also notify all witnesses so they can react to degraded Dolt state
-		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 
@@ -781,13 +776,11 @@ Check the log file for crash details. If crashes recur, the daemon will escalate
 		m.config.Host, m.config.Port,
 		m.config.MaxRestartsInWindow, m.config.RestartWindow)
 
-	townRoot := m.townRoot
 	logger := m.logger
 	n := m.notify()
 
 	go func() {
 		sendDoltAlertMail(n, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 
@@ -812,13 +805,11 @@ This may indicate high load, connection exhaustion, or internal server errors.`,
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port)
 
-	townRoot := m.townRoot
 	logger := m.logger
 	n := m.notify()
 
 	go func() {
 		sendDoltAlertMail(n, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 
@@ -834,30 +825,7 @@ func sendDoltAlertMail(n notify.Notifier, recipient, subject, body string, logge
 	}
 }
 
-// sendDoltAlertToWitnesses sends a Dolt alert to all rig witnesses.
-// Discovers rigs from mayor/rigs.json and sends to each <rig>/witness.
-func sendDoltAlertToWitnesses(n notify.Notifier, townRoot, subject, body string, logger func(format string, v ...interface{})) {
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	data, err := os.ReadFile(rigsPath)
-	if err != nil {
-		return // No rigs.json, nothing to notify
-	}
-
-	var parsed struct {
-		Rigs map[string]interface{} `json:"rigs"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return
-	}
-
-	for rigName := range parsed.Rigs {
-		recipient := rigName + "/witness"
-		sendDoltAlertMail(n, recipient, subject, body, logger)
-	}
-}
-
 // unhealthySignalFile returns the path to the DOLT_UNHEALTHY signal file.
-// Witness patrols can check for this file to detect degraded Dolt state.
 // Production (port 3307) uses the canonical name; other ports get a suffix
 // so multiple instances don't clobber each other's signal files.
 func (m *DoltServerManager) unhealthySignalFile() string {
@@ -868,7 +836,7 @@ func (m *DoltServerManager) unhealthySignalFile() string {
 }
 
 // writeUnhealthySignal writes the DOLT_UNHEALTHY signal file.
-// This file signals to witness patrols that the Dolt server is degraded.
+// This file signals to agents and tools that the Dolt server is degraded.
 // It returns true only for the first write in an active incident. Existing
 // signal files are preserved so repeated health ticks do not reset the
 // incident timestamp or re-trigger diagnostics.
@@ -1633,13 +1601,11 @@ concurrent polecat count or staggering write-heavy operations.`,
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port)
 
-	townRoot := m.townRoot
 	logger := m.logger
 	n := m.notify()
 
 	go func() {
 		sendDoltAlertMail(n, "mayor/", subject, body, logger)
-		sendDoltAlertToWitnesses(n, townRoot, subject, body, logger)
 	}()
 }
 

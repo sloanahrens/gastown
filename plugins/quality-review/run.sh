@@ -534,12 +534,11 @@ while IFS=$'\t' read -r rig worker mean reviews fa_rate majors rejects trend mrs
   fi
 
   # The breach mail is the durable half of the alert: it has to survive the
-  # session that would act on it, which a nudge does not. It goes to the deacon
-  # rather than the prose plugin's mayor/ because this plugin is dispatched by
-  # the deacon's patrol and the keyed escalation already routes to the mayor
-  # (settings/escalation.json) — two addresses for one condition is how a
-  # breach gets acknowledged twice and acted on once.
-  gt mail send deacon/ -s "Quality BREACH: $worker" --stdin <<BODY || log "  WARN: breach mail failed for $rig/$worker"
+  # session that would act on it, which a nudge does not, and it carries the
+  # numbers the keyed escalation does not. It goes to the mayor, who also
+  # receives the keyed escalation (settings/escalation.json); it went to the
+  # deacon until that role was deleted (gt-4k3fj.6.1).
+  gt mail send mayor/ -s "Quality BREACH: $worker" --stdin <<BODY || log "  WARN: breach mail failed for $rig/$worker"
 Worker: $worker
 Rig: $rig
 Mean score: $mean (BREACH below $WARN_SCORE)

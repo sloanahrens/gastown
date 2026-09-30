@@ -3034,10 +3034,6 @@ func formatActorIdentity(roleInfo RoleInfo) string {
 		return fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
 	case RolePolecat:
 		return fmt.Sprintf("%s/%s", roleInfo.Rig, roleInfo.Polecat)
-	case RoleWitness:
-		return fmt.Sprintf("%s/witness", roleInfo.Rig)
-	case RoleDeacon:
-		return constants.RoleDeacon
 	default:
 		return string(roleInfo.Role)
 	}

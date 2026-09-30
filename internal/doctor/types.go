@@ -7,18 +7,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/ui"
 )
 
 // Category constants for grouping checks
 const (
-	CategoryCore          = "Core"
+	CategoryCore           = "Core"
 	CategoryInfrastructure = "Infrastructure"
-	CategoryRig           = "Rig"
-	CategoryPatrol        = "Patrol"
-	CategoryConfig        = "Configuration"
-	CategoryCleanup       = "Cleanup"
-	CategoryHooks         = "Hooks"
+	CategoryRig            = "Rig"
+	CategoryPatrol         = "Patrol"
+	CategoryConfig         = "Configuration"
+	CategoryCleanup        = "Cleanup"
+	CategoryHooks          = "Hooks"
 )
 
 // CategoryOrder defines the display order for categories
@@ -81,6 +82,15 @@ type CheckContext struct {
 	// openRepair opens the bd client fixers write repairs through. Nil
 	// means the real bd CLI (see repair); tests record the calls.
 	openRepair bdRepairOpener
+
+	// bdRun answers the bd calls of the beads clients checks open with
+	// beadsAt, beadsRigLocal and beadsWithDir. Nil is the bd on PATH; tests
+	// answer in process.
+	bdRun beads.BDRunner
+
+	// openGit opens the git checks inspect and repair repositories through.
+	// Nil means the real git (git.NewGitWithDir); tests set gitfake.
+	openGit repoOpener
 }
 
 // RigPath returns the full path to the rig directory.

@@ -185,12 +185,6 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 		if err := h.sling(slingBead, holder); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
-		// The shutdown mail's delivery is awaited when the command ends,
-		// not before the hook.
-		h.wantCalls("mail", "mail gastown/witness LIFECYCLE:Shutdown Nux", "mail delivered gastown/witness")
-		if log := strings.Join(h.log(), "\n"); strings.Index(log, "mail delivered") < strings.Index(log, "hook gt-abc123") {
-			t.Errorf("waited for the mail before the hook:\n%s", log)
-		}
 		h.wantCalls("clear reassigned", "clear reassigned "+holder)
 		h.wantCalls("unhook", "unhook "+slingBead)
 		h.wantCalls("hook", "hook gt-abc123 "+holder)

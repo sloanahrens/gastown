@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,16 +8,16 @@ import (
 )
 
 func TestAgentBeadsShadowCheck_ReportsTownDuplicates(t *testing.T) {
+	t.Parallel()
 	tmpDir := setupTownDuplicateFixture(t)
-	writeTownDuplicateBdScript(t, tmpDir, filepath.Join(tmpDir, "bd.log"))
 
 	check := NewAgentBeadsShadowCheck()
-	result := check.Run(&CheckContext{TownRoot: tmpDir})
+	result := check.Run(townDuplicateBD().ctx(tmpDir, ""))
 
 	if result.Status != StatusWarning {
 		t.Fatalf("status = %v, want warning; message: %s", result.Status, result.Message)
 	}
-	for _, want := range []string{"gs-gastown-witness", "gs-gastown-refinery"} {
+	for _, want := range []string{"gs-gastown-crew-alice"} {
 		found := false
 		for _, d := range result.Details {
 			if strings.HasPrefix(d, want) {

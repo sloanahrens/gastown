@@ -39,35 +39,27 @@ func writeSDK(t *testing.T, dir string, stubs map[string]string) {
 	}
 }
 
-// stubResolveSDK points the check at an SDK path and source for the test's
-// duration, on a host the check treats as macOS whatever the test runs on.
-func stubResolveSDK(t *testing.T, path, source string, err error) {
-	t.Helper()
-	stubSDKCheckGOOS(t, "darwin")
-	orig := resolveSDK
-	t.Cleanup(func() { resolveSDK = orig })
-	resolveSDK = func() (string, string, error) { return path, source, err }
-}
-
-func stubSDKCheckGOOS(t *testing.T, goos string) {
-	t.Helper()
-	orig := sdkCheckGOOS
-	t.Cleanup(func() { sdkCheckGOOS = orig })
-	sdkCheckGOOS = goos
+// sdkCheckAt is a MacOSSDKCheck on a host it treats as macOS whatever the
+// test runs on, resolving the SDK to path from source (or failing with err).
+func sdkCheckAt(path, source string, err error) *MacOSSDKCheck {
+	c := NewMacOSSDKCheck()
+	c.goos = "darwin"
+	c.resolve = func() (string, string, error) { return path, source, err }
+	return c
 }
 
 // TestMacOSSDKCheck_NotApplicableOffMacOS pins the other branch: off macOS the
 // check reports OK without resolving an SDK at all.
 func TestMacOSSDKCheck_NotApplicableOffMacOS(t *testing.T) {
-	stubSDKCheckGOOS(t, "linux")
-	orig := resolveSDK
-	t.Cleanup(func() { resolveSDK = orig })
-	resolveSDK = func() (string, string, error) {
+	t.Parallel()
+	check := NewMacOSSDKCheck()
+	check.goos = "linux"
+	check.resolve = func() (string, string, error) {
 		t.Error("resolveSDK called off macOS")
 		return "", "", errors.New("unreachable")
 	}
 
-	result := NewMacOSSDKCheck().Run(&CheckContext{})
+	result := check.Run(&CheckContext{})
 
 	if result.Status != StatusOK || !strings.Contains(result.Message, "not applicable") {
 		t.Fatalf("result = %v %q, want OK and not applicable", result.Status, result.Message)
@@ -75,14 +67,15 @@ func TestMacOSSDKCheck_NotApplicableOffMacOS(t *testing.T) {
 }
 
 func TestMacOSSDKCheck_MalformedStubFails(t *testing.T) {
+	t.Parallel()
 	sdk := t.TempDir()
 	writeSDK(t, sdk, map[string]string{
 		"libresolv.tbd": malformedStub,
 		"libz.tbd":      wellFormedStub, // a good stub beside a bad one must not mask it
 	})
-	stubResolveSDK(t, sdk, "SDKROOT", nil)
+	check := sdkCheckAt(sdk, "SDKROOT", nil)
 
-	result := NewMacOSSDKCheck().Run(&CheckContext{})
+	result := check.Run(&CheckContext{})
 
 	if result.Status != StatusError {
 		t.Fatalf("Status = %v, want StatusError for a stub declaring arm64e.x1", result.Status)
@@ -103,11 +96,12 @@ func TestMacOSSDKCheck_MalformedStubFails(t *testing.T) {
 }
 
 func TestMacOSSDKCheck_WellFormedStubsAreOK(t *testing.T) {
+	t.Parallel()
 	sdk := t.TempDir()
 	writeSDK(t, sdk, map[string]string{"libresolv.tbd": wellFormedStub, "libSystem.tbd": wellFormedStub})
-	stubResolveSDK(t, sdk, "SDKROOT", nil)
+	check := sdkCheckAt(sdk, "SDKROOT", nil)
 
-	result := NewMacOSSDKCheck().Run(&CheckContext{})
+	result := check.Run(&CheckContext{})
 
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK; details: %v", result.Status, result.Details)
@@ -118,11 +112,12 @@ func TestMacOSSDKCheck_WellFormedStubsAreOK(t *testing.T) {
 }
 
 func TestMacOSSDKCheck_MissingSDKErrors(t *testing.T) {
+	t.Parallel()
 	// A stale SDKROOT outlives the SDK it names: renaming the offending SDK
 	// leaves every build pointed at a deleted path.
-	stubResolveSDK(t, filepath.Join(t.TempDir(), "MacOSX27.0.sdk"), "SDKROOT", nil)
+	check := sdkCheckAt(filepath.Join(t.TempDir(), "MacOSX27.0.sdk"), "SDKROOT", nil)
 
-	result := NewMacOSSDKCheck().Run(&CheckContext{})
+	result := check.Run(&CheckContext{})
 
 	if result.Status != StatusError {
 		t.Fatalf("Status = %v, want StatusError for a missing SDK", result.Status)
@@ -136,9 +131,10 @@ func TestMacOSSDKCheck_MissingSDKErrors(t *testing.T) {
 }
 
 func TestMacOSSDKCheck_UnresolvableIsSkipped(t *testing.T) {
-	stubResolveSDK(t, "", "", errors.New("xcrun: command not found"))
+	t.Parallel()
+	check := sdkCheckAt("", "", errors.New("xcrun: command not found"))
 
-	result := NewMacOSSDKCheck().Run(&CheckContext{})
+	result := check.Run(&CheckContext{})
 
 	if result.Status != StatusSkipped {
 		t.Fatalf("Status = %v, want StatusSkipped (couldn't measure, not a clean pass)", result.Status)
@@ -152,10 +148,11 @@ func TestMacOSSDKCheck_UnresolvableIsSkipped(t *testing.T) {
 }
 
 func TestMacOSSDKCheck_NoStubsIsSkipped(t *testing.T) {
+	t.Parallel()
 	// An SDK with no stub tree was not judged, so it must not pass as clean.
-	stubResolveSDK(t, t.TempDir(), "xcrun", nil)
+	check := sdkCheckAt(t.TempDir(), "xcrun", nil)
 
-	result := NewMacOSSDKCheck().Run(&CheckContext{})
+	result := check.Run(&CheckContext{})
 
 	if result.Status != StatusSkipped {
 		t.Fatalf("Status = %v, want StatusSkipped when nothing was read", result.Status)
@@ -166,15 +163,16 @@ func TestMacOSSDKCheck_NoStubsIsSkipped(t *testing.T) {
 }
 
 func TestMacOSSDKCheck_ReportsAtMostMaxStubs(t *testing.T) {
+	t.Parallel()
 	sdk := t.TempDir()
 	stubs := map[string]string{}
 	for _, name := range []string{"a.tbd", "b.tbd", "c.tbd", "d.tbd", "e.tbd", "f.tbd", "g.tbd"} {
 		stubs[name] = malformedStub
 	}
 	writeSDK(t, sdk, stubs)
-	stubResolveSDK(t, sdk, "SDKROOT", nil)
+	check := sdkCheckAt(sdk, "SDKROOT", nil)
 
-	result := NewMacOSSDKCheck().Run(&CheckContext{})
+	result := check.Run(&CheckContext{})
 
 	if result.Status != StatusError {
 		t.Fatalf("Status = %v, want StatusError", result.Status)

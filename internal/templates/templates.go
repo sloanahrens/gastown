@@ -58,22 +58,20 @@ type Templates struct {
 
 // RoleData contains information for rendering role contexts.
 type RoleData struct {
-	Role            string   // mayor, witness, polecat, crew, deacon
-	RigName         string   // e.g., "greenplace"
-	TownRoot        string   // e.g., "/Users/steve/ai"
-	TownName        string   // e.g., "ai" - the town identifier for session names
-	WorkDir         string   // current working directory
-	DefaultBranch   string   // default branch for merges (e.g., "main", "develop")
-	IsForkRig       bool     // true when rig config has upstream_url
-	UpstreamURL     string   // redacted upstream URL for display only
-	Polecat         string   // polecat name (for polecat role)
-	Polecats        []string // list of polecats (for witness role)
-	DogName         string   // dog name (for dog role)
-	BeadsDir        string   // BEADS_DIR path
-	IssuePrefix     string   // beads issue prefix
-	MayorSession    string   // e.g., "gt-ai-mayor" - dynamic mayor session name
-	DeaconSession   string   // e.g., "gt-ai-deacon" - dynamic deacon session name
-	PatrolStepCount int      // resolved step count of mol-deacon-patrol, 0 if unresolved (deacon role only)
+	Role          string   // mayor, polecat, crew, dog
+	RigName       string   // e.g., "greenplace"
+	TownRoot      string   // e.g., "/Users/steve/ai"
+	TownName      string   // e.g., "ai" - the town identifier for session names
+	WorkDir       string   // current working directory
+	DefaultBranch string   // default branch for merges (e.g., "main", "develop")
+	IsForkRig     bool     // true when rig config has upstream_url
+	UpstreamURL   string   // redacted upstream URL for display only
+	Polecat       string   // polecat name (for polecat role)
+	Polecats      []string // list of polecats (for witness role)
+	DogName       string   // dog name (for dog role)
+	BeadsDir      string   // BEADS_DIR path
+	IssuePrefix   string   // beads issue prefix
+	MayorSession  string   // e.g., "gt-ai-mayor" - dynamic mayor session name
 }
 
 // SpawnData contains information for spawn assignment messages.
@@ -184,49 +182,12 @@ func (t *Templates) RenderMessage(name string, data interface{}) (string, error)
 
 // RoleNames returns the list of available role templates.
 func (t *Templates) RoleNames() []string {
-	return []string{"mayor", "witness", "polecat", "crew", "deacon", "boot"}
+	return []string{"mayor", "polecat", "crew", "dog"}
 }
 
 // MessageNames returns the list of available message templates.
 func (t *Templates) MessageNames() []string {
 	return []string{"spawn", "nudge", "escalation", "handoff"}
-}
-
-// CreateMayorCLAUDEmd creates the Mayor's CLAUDE.md file at the specified directory.
-// This is used by both gt install and gt doctor --fix.
-//
-// Returns (created bool, error) - created is false if file already exists.
-// Existing files are preserved to respect user customizations.
-func CreateMayorCLAUDEmd(mayorDir, townRoot, townName, mayorSession, deaconSession string) (bool, error) {
-	claudePath := filepath.Join(mayorDir, "CLAUDE.md")
-
-	// Check if file already exists - preserve user customizations
-	if _, err := os.Stat(claudePath); err == nil {
-		return false, nil // File exists, preserve it
-	} else if !os.IsNotExist(err) {
-		return false, err // Unexpected error
-	}
-
-	tmpl, err := New()
-	if err != nil {
-		return false, err
-	}
-
-	data := RoleData{
-		Role:          "mayor",
-		TownRoot:      townRoot,
-		TownName:      townName,
-		WorkDir:       mayorDir,
-		MayorSession:  mayorSession,
-		DeaconSession: deaconSession,
-	}
-
-	content, err := tmpl.RenderRole("mayor", data)
-	if err != nil {
-		return false, err
-	}
-
-	return true, os.WriteFile(claudePath, []byte(content), 0644)
 }
 
 // PolecatLifecycleMarker is a unique string present in the polecat CLAUDE.md
@@ -529,7 +490,11 @@ func renderSystemdUnit(data SupervisorData) (string, error) {
 // LaunchdPlistPath returns the path where the launchd plist is (or would be)
 // installed on macOS.
 func LaunchdPlistPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	return realHost.launchdPlistPath()
+}
+
+func (h supervisorHost) launchdPlistPath() (string, error) {
+	homeDir, err := h.homeDir()
 	if err != nil {
 		return "", fmt.Errorf("finding home directory: %w", err)
 	}
@@ -539,9 +504,13 @@ func LaunchdPlistPath() (string, error) {
 // SystemdUnitPath returns the path where the systemd user unit is (or would
 // be) installed on Linux.
 func SystemdUnitPath() (string, error) {
-	dataHome := os.Getenv("XDG_DATA_HOME")
+	return realHost.systemdUnitPath()
+}
+
+func (h supervisorHost) systemdUnitPath() (string, error) {
+	dataHome := h.getenv("XDG_DATA_HOME")
 	if dataHome == "" {
-		homeDir, err := os.UserHomeDir()
+		homeDir, err := h.homeDir()
 		if err != nil {
 			return "", fmt.Errorf("finding home directory: %w", err)
 		}
@@ -557,7 +526,11 @@ func SystemdUnitPath() (string, error) {
 // This is the file-presence reading; SupervisorStatusLine is the one that
 // says what the job is doing (gt-sq9e).
 func SupervisorStatus() string {
-	path, kind := SupervisorFilePath()
+	return realHost.status()
+}
+
+func (h supervisorHost) status() string {
+	path, kind := h.filePath()
 	if path == "" || kind == "" {
 		return "none"
 	}

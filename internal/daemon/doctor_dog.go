@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -264,28 +263,6 @@ func (d *Daemon) runDoctorDog() {
 	}
 
 	d.logger.Printf("doctor_dog: poured %s → %s", constants.MolDogDoctor, mol.rootID)
-}
-
-// runDeaconSelfProbe runs one evaluate-then-send cycle of the deacon
-// self-probe on the doctor-dog cadence (glossary "Self-probe"): judge
-// whether the previous probe was acked within budget, advance the
-// consecutive-error counter and escalate to the mayor after
-// deaconSelfProbeErrorThreshold in a row, then send the next probe into the
-// deacon's real inbox. Code-driven, like cleanupOrphanedDoltServers — the
-// judgment itself needs no agent, only the escalation on repeated failure
-// does, and that's handled by `gt escalate` under the hood.
-//
-// Gated on deacon.IsPaused first (fail closed on an unreadable pause state):
-// a paused deacon legitimately will not ack, and evaluating anyway would
-// raise a false alarm on the first operator pause.
-func (d *Daemon) runDeaconSelfProbe() {
-	townRoot := d.config.TownRoot
-	mailbox := mail.NewMailboxFromAddress(constants.RoleDeacon, townRoot)
-	sender := mail.NewRouterWithTownRoot(townRoot, townRoot)
-
-	if err := runDeaconSelfProbeCycle(townRoot, mailbox, sender, d.escalateAlert, d.clearAlerts); err != nil {
-		d.logger.Printf("doctor_dog: deacon self-probe send failed (non-fatal): %v", err)
-	}
 }
 
 // cleanupOrphanedDoltServers reaps orphaned test 'dolt sql-server' processes:

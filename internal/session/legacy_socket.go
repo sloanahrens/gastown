@@ -14,85 +14,79 @@ type legacySocketTmux interface {
 	KillSessionWithProcesses(name string) error
 }
 
-// Test hooks; nil in production.
-var (
-	legacyTmuxForTest   func(socket string) legacySocketTmux
-	legacySocketForTest func() string
-)
-
-func getDefaultSocket() string {
-	if legacySocketForTest != nil {
-		return legacySocketForTest()
-	}
-	return tmux.GetDefaultSocket()
+// legacySockets is what legacy socket cleanup reads: the socket this process
+// uses, a tmux on another socket, and the rig prefixes that mark a session as
+// Gas Town's. Tests build one with fakes; production uses defaultLegacySockets.
+type legacySockets struct {
+	current  string
+	open     func(socket string) legacySocketTmux
+	prefixes *PrefixRegistry
 }
 
-func newLegacyTmux(socket string) legacySocketTmux {
-	if legacyTmuxForTest != nil {
-		return legacyTmuxForTest(socket)
+func defaultLegacySockets() legacySockets {
+	return legacySockets{
+		current:  tmux.GetDefaultSocket(),
+		open:     func(socket string) legacySocketTmux { return tmux.NewTmuxWithSocket(socket) },
+		prefixes: DefaultRegistry(),
 	}
-	return tmux.NewTmuxWithSocket(socket)
 }
 
 // CleanupLegacyDefaultSocket removes Gas Town sessions left on the "default"
 // tmux socket by old binaries. Returns the number of sessions cleaned.
 func CleanupLegacyDefaultSocket() int {
-	currentSocket := getDefaultSocket()
-	if currentSocket == "" || currentSocket == "default" {
-		return 0 // Already on the default socket, nothing to clean up.
-	}
-
-	legacyTmux := newLegacyTmux("default")
-	return cleanupLegacySessions(legacyTmux)
+	return defaultLegacySockets().cleanupDefault()
 }
 
 // CountLegacyDefaultSocketSessions counts Gas Town sessions on the "default"
 // tmux socket for dry-run output.
 func CountLegacyDefaultSocketSessions() int {
-	currentSocket := getDefaultSocket()
-	if currentSocket == "" || currentSocket == "default" {
-		return 0
-	}
-
-	legacyTmux := newLegacyTmux("default")
-	sessions, err := legacyTmux.ListSessions()
-	if err != nil {
-		return 0
-	}
-
-	var count int
-	for _, sess := range sessions {
-		if isLegacyCleanupSession(sess) {
-			count++
-		}
-	}
-	return count
+	return defaultLegacySockets().countDefault()
 }
 
 // CleanupLegacyBaseSocket removes Gas Town sessions left on the old
 // basename-only tmux socket by binaries from before path-hashed socket names
 // were introduced. Returns the number of sessions cleaned.
 func CleanupLegacyBaseSocket(townRoot string) int {
-	currentSocket := getDefaultSocket()
-	legacySocket := LegacySocketName(townRoot)
-	if currentSocket == legacySocket {
-		return 0 // Same socket, no migration needed.
-	}
-
-	legacyTmux := newLegacyTmux(legacySocket)
-	return cleanupLegacySessions(legacyTmux)
+	return defaultLegacySockets().cleanupBase(townRoot)
 }
 
 // CountLegacyBaseSocketSessions counts Gas Town sessions on the old
 // basename-only tmux socket for dry-run output.
 func CountLegacyBaseSocketSessions(townRoot string) int {
-	currentSocket := getDefaultSocket()
-	legacySocket := LegacySocketName(townRoot)
-	if currentSocket == legacySocket {
+	return defaultLegacySockets().countBase(townRoot)
+}
+
+func (l legacySockets) cleanupDefault() int {
+	if l.current == "" || l.current == "default" {
+		return 0 // Already on the default socket, nothing to clean up.
+	}
+	return l.cleanup(l.open("default"))
+}
+
+func (l legacySockets) countDefault() int {
+	if l.current == "" || l.current == "default" {
 		return 0
 	}
+	return l.count(l.open("default"))
+}
 
-	legacyTmux := newLegacyTmux(legacySocket)
+func (l legacySockets) cleanupBase(townRoot string) int {
+	legacySocket := LegacySocketName(townRoot)
+	if l.current == legacySocket {
+		return 0 // Same socket, no migration needed.
+	}
+	return l.cleanup(l.open(legacySocket))
+}
+
+func (l legacySockets) countBase(townRoot string) int {
+	legacySocket := LegacySocketName(townRoot)
+	if l.current == legacySocket {
+		return 0
+	}
+	return l.count(l.open(legacySocket))
+}
+
+func (l legacySockets) count(legacyTmux legacySocketTmux) int {
 	sessions, err := legacyTmux.ListSessions()
 	if err != nil {
 		return 0
@@ -100,21 +94,21 @@ func CountLegacyBaseSocketSessions(townRoot string) int {
 
 	var count int
 	for _, sess := range sessions {
-		if isLegacyCleanupSession(sess) {
+		if l.isCleanupSession(sess) {
 			count++
 		}
 	}
 	return count
 }
 
-func cleanupLegacySessions(legacyTmux legacySocketTmux) int {
+func (l legacySockets) cleanup(legacyTmux legacySocketTmux) int {
 	var cleaned int
 	for range 3 {
 		sessions, err := legacyTmux.ListSessions()
 		if err != nil {
 			return cleaned // No server on legacy socket.
 		}
-		targets := legacyCleanupTargets(sessions)
+		targets := l.cleanupTargets(sessions)
 		if len(targets) == 0 {
 			return cleaned
 		}
@@ -127,10 +121,10 @@ func cleanupLegacySessions(legacyTmux legacySocketTmux) int {
 	return cleaned
 }
 
-func legacyCleanupTargets(sessions []string) []string {
+func (l legacySockets) cleanupTargets(sessions []string) []string {
 	targets := make([]string, 0, len(sessions))
 	for _, sess := range sessions {
-		if isLegacyCleanupSession(sess) {
+		if l.isCleanupSession(sess) {
 			targets = append(targets, sess)
 		}
 	}
@@ -159,7 +153,7 @@ func legacyCleanupPriority(sess string) int {
 	return 5
 }
 
-func isLegacyCleanupSession(sess string) bool {
+func (l legacySockets) isCleanupSession(sess string) bool {
 	switch sess {
 	case MayorSessionName(), DeaconSessionName(), BootSessionName():
 		return true
@@ -167,7 +161,7 @@ func isLegacyCleanupSession(sess string) bool {
 	if strings.HasPrefix(sess, HQPrefix+"dog-") && strings.TrimPrefix(sess, HQPrefix+"dog-") != "" {
 		return true
 	}
-	if DefaultRegistry().HasPrefix(sess) {
+	if l.prefixes.HasPrefix(sess) {
 		return true
 	}
 	for _, p := range LegacyPrefixes {

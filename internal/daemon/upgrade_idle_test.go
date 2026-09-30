@@ -35,10 +35,8 @@ func TestIsIdleForUpgrade(t *testing.T) {
 			d.scripts.finish("rebuild-gt")
 		}, true},
 		{"compactor dog running", func(_ *testing.T, d *Daemon) { d.compactorDogRunning = true }, false},
-		{"boot triage in flight", func(_ *testing.T, d *Daemon) { d.bootTriageInFlight.Store(true) }, false},
 		{"scheduled slings running", func(_ *testing.T, d *Daemon) { d.scheduledSlingsRunning.Store(true) }, false},
 		{"mayor dispatch running", func(_ *testing.T, d *Daemon) { d.mayorDispatchRunning.Store(true) }, false},
-		{"patrol watchdog running", func(_ *testing.T, d *Daemon) { d.patrolWatchdogRunning.Store(true) }, false},
 		{"main branch test mid-run", func(_ *testing.T, d *Daemon) { d.mainBranchTestRunning.Store(true) }, false},
 		{"main branch test waiting for a slot", func(_ *testing.T, d *Daemon) {
 			d.mainBranchTestRunning.Store(true)

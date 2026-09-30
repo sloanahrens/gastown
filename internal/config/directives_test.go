@@ -220,10 +220,10 @@ func TestScanDirectiveFiles(t *testing.T) {
 		write(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
 		write(t, filepath.Join(townRoot, "directives", "mayor.md"), "mayor policy")
 		write(t, filepath.Join(townRoot, "directives", SharedDirectiveName+".md"), "shared policy")
-		write(t, filepath.Join(townRoot, "myrig", "directives", "witness.md"), "rig witness")
+		write(t, filepath.Join(townRoot, "myrig", "directives", "polecat.md"), "rig polecat")
 		write(t, filepath.Join(townRoot, "myrig", "directives", "host-hygiene.md"), "host rules")
 		write(t, filepath.Join(townRoot, "myrig", "directives", "testing.md"), "test rules")
-		write(t, filepath.Join(townRoot, "myrig", "directives", "witness.md.bak"), "backup")
+		write(t, filepath.Join(townRoot, "myrig", "directives", "polecat.md.bak"), "backup")
 		return townRoot
 	}
 

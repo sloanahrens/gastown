@@ -107,7 +107,10 @@ func TestUnregisteredBeadsDirs_IgnoresSystemDirs(t *testing.T) {
 	}
 }
 
-func TestUnregisteredBeadsDirs_DeaconMismatch(t *testing.T) {
+// TestUnregisteredBeadsDirs_LeftoverDeaconBeadsIgnored verifies that a
+// leftover deacon/.beads from the retired deacon role is not reported, even
+// when it points at a database other than the town's.
+func TestUnregisteredBeadsDirs_LeftoverDeaconBeadsIgnored(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
@@ -116,31 +119,8 @@ func TestUnregisteredBeadsDirs_DeaconMismatch(t *testing.T) {
 	// Town beads uses "hq"
 	writeBeadsMetadata(t, tmpDir, "hq")
 
-	// Deacon uses a different database
+	// Leftover deacon beads config uses a different database
 	writeBeadsMetadata(t, filepath.Join(tmpDir, "deacon"), "beads_deacon")
-
-	check := NewUnregisteredBeadsDirsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	if result.Status != StatusWarning {
-		t.Errorf("expected StatusWarning, got %v: %s", result.Status, result.Message)
-	}
-
-	if len(result.Details) != 1 {
-		t.Fatalf("expected 1 detail, got %d", len(result.Details))
-	}
-}
-
-func TestUnregisteredBeadsDirs_DeaconMatchesOK(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	setupRigsJSON(t, tmpDir, nil)
-
-	// Town and deacon both use "hq"
-	writeBeadsMetadata(t, tmpDir, "hq")
-	writeBeadsMetadata(t, filepath.Join(tmpDir, "deacon"), "hq")
 
 	check := NewUnregisteredBeadsDirsCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}

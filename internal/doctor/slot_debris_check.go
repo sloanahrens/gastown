@@ -17,6 +17,17 @@ import (
 // disagree.
 type SlotDebrisCheck struct {
 	FixableCheck
+
+	// gate is the container gate whose debris is reaped; nil is
+	// slot.NewGate(), the host's docker.
+	gate *slot.Gate
+}
+
+func (c *SlotDebrisCheck) reap(townRoot string, opts slot.ReapOptions) (slot.ReapReport, error) {
+	if c.gate != nil {
+		return c.gate.Reap(townRoot, opts)
+	}
+	return slot.Reap(townRoot, opts)
 }
 
 // NewSlotDebrisCheck creates a new container-gate debris check.
@@ -36,7 +47,7 @@ func NewSlotDebrisCheck() *SlotDebrisCheck {
 // listing is StatusSkipped, never a clean pass: the check could not see the
 // containers, which is not the same as there being none.
 func (c *SlotDebrisCheck) Run(ctx *CheckContext) *CheckResult {
-	report, err := slot.Reap(ctx.TownRoot, slot.ReapOptions{DryRun: true})
+	report, err := c.reap(ctx.TownRoot, slot.ReapOptions{DryRun: true})
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -80,7 +91,7 @@ func (c *SlotDebrisCheck) Run(ctx *CheckContext) *CheckResult {
 // listing Run cached: between the two calls a suite may have started, and
 // removing a container whose suite is now live would break it.
 func (c *SlotDebrisCheck) Fix(ctx *CheckContext) error {
-	report, err := slot.Reap(ctx.TownRoot, slot.ReapOptions{})
+	report, err := c.reap(ctx.TownRoot, slot.ReapOptions{})
 	if err != nil {
 		return fmt.Errorf("reaping gate debris: %w", err)
 	}

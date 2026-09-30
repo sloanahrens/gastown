@@ -5,10 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 func TestTouchAndReadSessionHeartbeat(t *testing.T) {
@@ -343,19 +346,20 @@ func writeHeartbeat(t *testing.T, townRoot, sessionName string, hb SessionHeartb
 // witness's 3m stale threshold, the daemon idle-reaper's 15m) sees a dead agent
 // and kills a healthy polecat mid-submit.
 //
-// The three assertions are deliberately count/content, not mere absence: the
-// renewal must actually happen, must keep happening, and must stop happening on
-// stop. Dropping the ticker (keeping only the first write) fails the second;
+// The assertions are count/content, not mere absence: the renewal must
+// actually happen, must keep happening on every tick, and must stop happening
+// on stop. Dropping the ticker (keeping only the first write) fails the second;
 // dropping the stop path fails the third.
 func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	sessionName := "myr-mycat"
-	interval := 20 * time.Millisecond
+	const interval = 30 * time.Second
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
 
 	// Seed the heartbeat exactly as gt done leaves it after its long gate
 	// start: state=exiting, already past every consumer's stale threshold.
-	seeded := time.Now().UTC().Add(-19 * time.Minute)
+	seeded := clk.Now().Add(-19 * time.Minute)
 	writeHeartbeat(t, townRoot, sessionName, SessionHeartbeat{
 		Timestamp: seeded,
 		State:     HeartbeatExiting,
@@ -363,7 +367,7 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 		Bead:      "gt-azmw",
 	})
 
-	stop := startHeartbeatKeepAlive(townRoot, sessionName, "gt done", "gt-azmw", interval)
+	stop := startHeartbeatKeepAlive(clk, townRoot, sessionName, "gt done", "gt-azmw", interval)
 	defer stop()
 
 	// 1. The first renewal is synchronous, so the stage starts fresh.
@@ -371,8 +375,8 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 	if first == nil {
 		t.Fatal("expected a heartbeat after starting the keep-alive")
 	}
-	if !first.Timestamp.After(seeded) {
-		t.Fatalf("keep-alive did not renew the seeded heartbeat: %v is not after %v", first.Timestamp, seeded)
+	if !first.Timestamp.Equal(clk.Now()) {
+		t.Fatalf("keep-alive did not renew the seeded heartbeat: got %v, want %v (seeded %v)", first.Timestamp, clk.Now(), seeded)
 	}
 	// Content, not just freshness: a renewal that downgrades the state (or
 	// drops the bead) would let the witness's exiting-check miss it and fall
@@ -381,85 +385,98 @@ func TestStartHeartbeatKeepAlive_RenewsExitingUntilStopped(t *testing.T) {
 		t.Fatalf("renewal changed the heartbeat's meaning: state=%q context=%q bead=%q", first.State, first.Context, first.Bead)
 	}
 
-	// 2. The stage outlives one write: the ticker must keep advancing it.
-	// Poll rather than sleep a fixed span so a loaded machine delays the test
-	// instead of failing it; a missing ticker still fails on the deadline.
-	renewed := false
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if hb := ReadSessionHeartbeat(townRoot, sessionName); hb != nil && hb.Timestamp.After(first.Timestamp) {
-			renewed = true
-			break
+	// 2. The stage outlives one write: every tick advances it. Stop is a
+	// barrier, so once it returns the last tick's write has landed.
+	for i := 1; i <= 3; i++ {
+		if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(interval)
+		clk.Advance(interval)
 	}
-	if !renewed {
-		t.Fatalf("keep-alive renewed the heartbeat once and then stopped; a %v interval must renew repeatedly while the stage runs", interval)
+	if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+		t.Fatal(err)
 	}
-
-	// 3. Stop ends the renewal. Wait well past the interval so a live ticker
-	// would have written again many times over. This only holds because stop
-	// is a barrier and not a mere signal — see
-	// TestStartHeartbeatKeepAlive_StopIsABarrier for the property itself.
 	stop()
 	stop() // idempotent — a second call must not panic or re-arm anything
 	frozen := ReadSessionHeartbeat(townRoot, sessionName)
 	if frozen == nil {
 		t.Fatal("expected the heartbeat to survive stop")
 	}
-	time.Sleep(10 * interval)
-	after := ReadSessionHeartbeat(townRoot, sessionName)
-	if after == nil {
-		t.Fatal("expected the heartbeat to survive stop")
+	if want := first.Timestamp.Add(3 * interval); !frozen.Timestamp.Equal(want) {
+		t.Fatalf("after three ticks the heartbeat reads %v, want %v: the keep-alive must renew on every tick", frozen.Timestamp, want)
 	}
-	if !after.Timestamp.Equal(frozen.Timestamp) {
-		t.Fatalf("keep-alive kept renewing after stop: %v -> %v", frozen.Timestamp, after.Timestamp)
+
+	// 3. Stop ends the renewal: ticks after it write nothing.
+	clk.Advance(10 * interval)
+	after := ReadSessionHeartbeat(townRoot, sessionName)
+	if after == nil || !after.Timestamp.Equal(frozen.Timestamp) {
+		t.Fatalf("keep-alive kept renewing after stop: %v -> %v", frozen.Timestamp, after)
 	}
 }
 
-// TestStartHeartbeatKeepAlive_StopIsABarrier pins the invariant the assertion
-// above depends on: once stop returns, the heartbeat can never be renewed
-// again. That is not free — closing the done channel only *signals* the
-// goroutine, and a tick already taken out of the ticker but still inside
-// TouchSessionHeartbeatWithState (mkdir, marshal, write) runs to completion
-// regardless, landing a renewal after stop returned. A caller that samples the
-// file immediately after stop then reads the pre-write value as its baseline
-// and the in-flight write as a fresh renewal — the "kept renewing after stop"
-// failure in gt-nyh8, which only surfaced under host load because that is what
-// makes the write straddle the read.
+// TestKeepRenewing_StopIsABarrier pins the invariant the test above depends
+// on: once stop returns, renew can never run again. That is not free — closing
+// the done channel only *signals* the goroutine, and a tick already taken out
+// of the ticker but still inside the write (mkdir, marshal, write) runs to
+// completion regardless, landing a renewal after stop returned (the "kept
+// renewing after stop" failure in gt-nyh8, which only surfaced under host
+// load because that is what makes the write straddle the read).
 //
-// The interval is deliberately shorter than the write loop and the loop
-// deliberately re-races stop against it many times: a signal-only stop leaves
-// a write in flight on a good fraction of iterations, so the barrier property
-// is asserted against the race repeatedly instead of hoping to catch it once.
-// Like its sibling above, this is a bound, not a tolerance — it does not sleep
-// past the race, it makes the race unable to happen.
-func TestStartHeartbeatKeepAlive_StopIsABarrier(t *testing.T) {
+// Here the write is held open deliberately: a tick starts renew, renew blocks,
+// and stop is called while it is in flight. The barrier holds only if stop
+// returns after renew does; a signal-only stop returns while renew is still
+// blocked.
+func TestKeepRenewing_StopIsABarrier(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	sessionName := "myr-barrier"
-	const interval = 250 * time.Microsecond
+	const interval = time.Second
 
-	for i := 0; i < 200; i++ {
-		stop := startHeartbeatKeepAlive(townRoot, sessionName, "gt done", "gt-azmw", interval)
-		// Let a few ticks land, so stop is likely called with the goroutine
-		// inside its write path rather than parked in the select.
-		time.Sleep(time.Millisecond)
-		stop()
+	for i := 0; i < 50; i++ {
+		clk := clockwork.NewFakeClockAt(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
+		var mu sync.Mutex
+		var events []string
+		record := func(e string) {
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+		}
+		calls := 0
+		inFlight := make(chan struct{})
+		release := make(chan struct{})
+		stop := keepRenewing(clk, interval, func() {
+			calls++
+			if calls == 1 {
+				return // the synchronous first renewal
+			}
+			close(inFlight)
+			<-release
+			record("renewed")
+		})
 
-		frozen := ReadSessionHeartbeat(townRoot, sessionName)
-		if frozen == nil {
-			t.Fatalf("iteration %d: expected a heartbeat after starting the keep-alive", i)
+		if err := clk.BlockUntilContext(t.Context(), 1); err != nil {
+			t.Fatal(err)
 		}
-		// Far longer than the write itself, so any write that was in flight
-		// when stop returned has landed by the time we look.
-		time.Sleep(5 * time.Millisecond)
-		after := ReadSessionHeartbeat(townRoot, sessionName)
-		if after == nil {
-			t.Fatalf("iteration %d: expected the heartbeat to survive stop", i)
+		clk.Advance(interval)
+		<-inFlight
+
+		stopped := make(chan struct{})
+		go func() {
+			stop()
+			record("stopped")
+			close(stopped)
+		}()
+		// Give stop the chance to run first: a signal-only stop returns here
+		// without waiting on the held write.
+		for j := 0; j < 100; j++ {
+			runtime.Gosched()
 		}
-		if !after.Timestamp.Equal(frozen.Timestamp) {
-			t.Fatalf("iteration %d: stop returned with a renewal still in flight: %v -> %v", i, frozen.Timestamp, after.Timestamp)
+		close(release)
+		<-stopped
+
+		mu.Lock()
+		got := strings.Join(events, ",")
+		mu.Unlock()
+		if got != "renewed,stopped" {
+			t.Fatalf("iteration %d: events = %s; stop returned with a renewal still in flight", i, got)
 		}
 	}
 }

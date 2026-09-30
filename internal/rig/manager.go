@@ -113,9 +113,9 @@ type RigConfig struct {
 	// end up with commands that are never read back (gt-me9t).
 	MergeQueue *config.MergeQueueConfig `json:"merge_queue,omitempty"`
 
-	// Witness controls the witness session's lifetime (claude-8w7):
-	// witness.cycle_session_at_idle_cap and its cycle bounds.
-	Witness *config.WitnessSessionConfig `json:"witness,omitempty"`
+	// Witness is retired with the witness role (gt-4k3fj.6.1): nothing reads
+	// it; it is kept verbatim so a rewrite does not drop operator data.
+	Witness json.RawMessage `json:"witness,omitempty"`
 
 	// Persistent polecat pool configuration.
 	// PolecatPoolSize is the number of persistent polecats to create with pool init.
@@ -257,12 +257,6 @@ func (m *Manager) loadRig(name string, entry config.RigEntry) (*Rig, error) {
 		}
 	}
 
-	// Check for witness (witnesses don't have clones, just the witness directory)
-	witnessPath := filepath.Join(rigPath, "witness")
-	if info, err := os.Stat(witnessPath); err == nil && info.IsDir() {
-		rig.HasWitness = true
-	}
-
 	// Check for mayor clone
 	mayorPath := filepath.Join(rigPath, "mayor", "rig")
 	if _, err := os.Stat(mayorPath); err == nil {
@@ -324,7 +318,6 @@ func (m *Manager) resolveLocalRepo(path, gitURL string) (string, string) {
 //	├── config.json            # Rig configuration
 //	├── .beads/                # Rig-level issue tracking
 //	├── mayor/rig/             # Mayor's working clone
-//	├── witness/               # Witness agent (no clone)
 //	├── polecats/              # Worker directories (empty)
 //	└── crew/<crew>/           # Default human workspace
 func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
@@ -775,21 +768,13 @@ gt crew add <name>    # Creates crew/<name>/ with a git clone
 ## Crew vs Polecats
 
 - **Crew**: Persistent, user-managed workspaces (never auto-garbage-collected)
-- **Polecats**: Transient, witness-managed workers (cleaned up after work completes)
+- **Polecats**: Transient workers (cleaned up after work completes)
 
 Use crew for your own workspace. Polecats are for batch work dispatch.
 `
 	if err := os.WriteFile(readmePath, []byte(readmeContent), 0644); err != nil {
 		return nil, fmt.Errorf("creating crew README: %w", err)
 	}
-	// Create witness directory (no clone needed)
-	witnessPath := filepath.Join(rigPath, "witness")
-	if err := os.MkdirAll(witnessPath, 0755); err != nil {
-		return nil, fmt.Errorf("creating witness dir: %w", err)
-	}
-	// NOTE: Witness hooks are installed by witness/manager.go:Start() via EnsureSettingsForRole.
-	// No need to create patrol hooks here — agents self-install at startup.
-
 	// Create polecats directory with agent settings scaffold.
 	// Settings are passed to the agent via --settings flag (Claude) or installed
 	// in workDir (other agents). Scaffolding here ensures the settings file exists
@@ -827,9 +812,8 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 		fmt.Printf("  %s Could not scaffold polecat commands: %v\n", "!", err)
 	}
 
-	// Register route in town-level routes.jsonl BEFORE creating agent beads.
-	// initAgentBeads calls ResolveRoutingTarget which needs the route to exist.
-	// Without this, agent bead creation logs "no route found" warnings (#1424).
+	// Register the route in town-level routes.jsonl before any bead is
+	// created under the new prefix: routing needs it to exist (#1424).
 	if opts.BeadsPrefix != "" {
 		routePath := opts.Name
 		mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
@@ -856,19 +840,6 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// by loadRigCommandVars (repo defaults → local overrides → --var flags).
 	// Seeding at rig-add time would fork the config, silently shadowing
 	// any future repo-side updates.
-
-	// Create rig-level agent beads (witness) in rig beads.
-	// Town-level agents (mayor, deacon) are created by gt install in town beads.
-	if err := m.initAgentBeads(rigPath, opts.Name, opts.BeadsPrefix); err != nil {
-		// Non-fatal: log warning but continue
-		fmt.Fprintf(os.Stderr, "  Warning: Could not create agent beads: %v\n", err)
-	}
-
-	// Seed patrol molecules for this rig
-	if err := m.seedPatrolMolecules(rigPath); err != nil {
-		// Non-fatal: log warning but continue
-		fmt.Fprintf(os.Stderr, "  Warning: Could not seed patrol molecules: %v\n", err)
-	}
 
 	// Create plugin directories
 	if err := m.createPluginDirectories(rigPath); err != nil {
@@ -1115,20 +1086,6 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 		mq.Editorial = &defaulted
 	}
 	return mq
-}
-
-// ResolveWitnessSessionConfig returns the witness block of the rig root
-// config.json, or nil when the rig has none or the file cannot be read (the
-// feature is then off).
-func ResolveWitnessSessionConfig(townRoot, rigName string) *config.WitnessSessionConfig {
-	if townRoot == "" || rigName == "" {
-		return nil
-	}
-	rigCfg, err := LoadRigConfig(filepath.Join(townRoot, rigName))
-	if err != nil || rigCfg == nil {
-		return nil
-	}
-	return rigCfg.Witness
 }
 
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates
@@ -1398,67 +1355,6 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	// bd's routing walks up to find town root (via mayor/town.json) and uses
 	// town-level routes.jsonl for prefix-based routing. Rig-level routes.jsonl
 	// would prevent this walk-up and break cross-rig routing.
-
-	return nil
-}
-
-// initAgentBeads creates rig-level agent beads for the Witness.
-// These agents use the rig's beads prefix and are stored in rig beads.
-//
-// Town-level agents (Mayor, Deacon) are created by gt install in town beads.
-// Role beads are also created by gt install with hq- prefix.
-//
-// Rig-level agents (Witness) are created here in rig beads with rig prefix.
-// Format: <prefix>-<rig>-<role> (e.g., pi-pixelforge-witness)
-//
-// Agent beads track lifecycle state for ZFC compliance (gt-h3hak, gt-pinkq).
-func (m *Manager) initAgentBeads(rigPath, rigName, prefix string) error {
-	// Rig-level agents go in rig beads with rig prefix (per docs/architecture.md).
-	// Town-level agents (Mayor, Deacon) are created by gt install in town beads.
-	// Use ResolveBeadsDir to follow redirect files for tracked beads.
-	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
-	bd := m.beadsFor(rigPath, rigBeadsDir)
-
-	// Define rig-level agents to create
-	type agentDef struct {
-		id       string
-		roleType string
-		rig      string
-		desc     string
-	}
-
-	// Create rig-specific agents using rig prefix in rig beads.
-	// Format: <prefix>-<rig>-<role> (e.g., pi-pixelforge-witness)
-	agents := []agentDef{
-		{
-			id:       beads.WitnessBeadIDWithPrefix(prefix, rigName),
-			roleType: "witness",
-			rig:      rigName,
-			desc:     fmt.Sprintf("Witness for %s - monitors polecat health and progress.", rigName),
-		},
-	}
-
-	// Note: Mayor and Deacon are now created by gt install in town beads.
-
-	for _, agent := range agents {
-		// Check if already exists
-		if _, err := bd.Show(agent.id); err == nil {
-			continue // Already exists
-		}
-
-		// Note: RoleBead field removed - role definitions are now config-based
-		fields := &beads.AgentFields{
-			RoleType:   agent.roleType,
-			Rig:        agent.rig,
-			AgentState: "idle",
-			HookBead:   "",
-		}
-
-		if _, err := bd.CreateAgentBead(agent.id, agent.desc, fields); err != nil {
-			return fmt.Errorf("creating %s: %w", agent.id, err)
-		}
-		fmt.Printf("   ✓ Created agent bead: %s\n", agent.id)
-	}
 
 	return nil
 }
@@ -2002,57 +1898,6 @@ func (m *Manager) ListRigNames() []string {
 		names = append(names, name)
 	}
 	return names
-}
-
-// seedPatrolMolecules creates patrol molecule prototypes in the rig's beads database.
-// These molecules define the work loops for the Deacon and Witness roles.
-func (m *Manager) seedPatrolMolecules(rigPath string) error {
-	// Use bd command to seed molecules (more reliable than internal API)
-	if _, _, err := m.runBD(rigPath, nil, "mol", "seed", "--patrol"); err != nil {
-		// Fallback: bd mol seed might not support --patrol yet
-		// Try creating them individually via bd create
-		return m.seedPatrolMoleculesManually(rigPath)
-	}
-	return nil
-}
-
-// seedPatrolMoleculesManually creates patrol molecules using bd create commands.
-func (m *Manager) seedPatrolMoleculesManually(rigPath string) error {
-	// Patrol molecule definitions for seeding
-	patrolMols := []struct {
-		title string
-		desc  string
-	}{
-		{
-			title: "Deacon Patrol",
-			desc:  "Mayor's daemon patrol loop for handling callbacks, health checks, and cleanup.",
-		},
-		{
-			title: "Witness Patrol",
-			desc:  "Per-rig worker monitor patrol loop with progressive nudging.",
-		},
-	}
-
-	for _, mol := range patrolMols {
-		// Check if already exists by title
-		output, _, _ := m.runBD(rigPath, nil, "list", "--type=molecule", "--json")
-		if strings.Contains(string(output), mol.title) {
-			continue // Already exists
-		}
-
-		// Create the molecule
-		if _, _, err := m.runBD(rigPath, nil,
-			"create",
-			"--type=molecule",
-			"--title="+mol.title,
-			"--description="+mol.desc,
-			"--priority=2",
-		); err != nil {
-			// Non-fatal, continue with others
-			continue
-		}
-	}
-	return nil
 }
 
 // createPluginDirectories creates plugin directories at town and rig levels.

@@ -1,32 +1,20 @@
 package doctor
 
 import (
+	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
-// seedUpstream creates an on-disk upstream bare repo with one commit on main,
+// seedUpstream creates an upstream bare repo in gf with one commit on main,
 // so a re-clone from config.json has something to clone.
-func seedUpstream(t *testing.T, tmpDir string) string {
+func seedUpstream(t *testing.T, gf *gitfake.Fake, tmpDir string) string {
 	t.Helper()
-	upstream := filepath.Join(tmpDir, "upstream.git")
-	work := filepath.Join(tmpDir, "work")
-	for _, args := range [][]string{
-		{"init", "--bare", upstream},
-		{"init", "-b", "main", work},
-		{"-C", work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"},
-		{"-C", work, "remote", "add", "origin", upstream},
-		{"-C", work, "push", "origin", "main"},
-	} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	return upstream
+	return fakeRemote(t, gf, filepath.Join(tmpDir, "upstream.git"), nil)
 }
 
 // objectCount counts loose object files under a bare repo's objects dir, the
@@ -50,37 +38,40 @@ func quarantined(t *testing.T, rigDir string) []string {
 	return matches
 }
 
+// brokenGit is git that cannot run at all.
+type brokenGit struct{ Repo }
+
+var errGitBroken = errors.New("xcrun: error: invalid active developer path")
+
+func (brokenGit) GitDir() (string, error)          { return "", errGitBroken }
+func (brokenGit) IsBareRepository() (bool, error)  { return false, errGitBroken }
+func (brokenGit) RemoteURL(string) (string, error) { return "", errGitBroken }
+func (brokenGit) GetPushURL(string) (string, error) {
+	return "", errGitBroken
+}
+
 // gt-fcxe9.1: when git itself cannot run (CLT update, fork exhaustion, a codesign
 // kill), rev-parse fails on a perfectly good repo. That is UNKNOWN, not
 // corrupt: Run reports it and Fix must leave .repo.git and its objects alone.
 func TestBareRepoExistsCheck_GitFailureIsNotCorruption(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("git shim is POSIX-only")
-	}
+	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
-	upstream := seedUpstream(t, tmpDir)
-	bareRepo := initBareRepoWithRemote(t, rigDir, upstream)
+	upstream := seedUpstream(t, gf, tmpDir)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, upstream)
 	writeConfigJSON(t, rigDir, upstream, "")
-	if out, err := exec.Command("git", "-C", bareRepo, "fetch", "origin", "main:main").CombinedOutput(); err != nil {
-		t.Fatalf("fetch: %v\n%s", err, out)
-	}
+	storeObjects(t, bareRepo)
 	before := objectCount(t, bareRepo)
 	if before == 0 {
 		t.Fatal("fixture: bare repo has no objects")
 	}
 
-	// Every git invocation from here on fails the way a broken shim does.
-	shimDir := t.TempDir()
-	shim := "#!/bin/sh\necho 'xcrun: error: invalid active developer path' >&2\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(shim), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	// Every git invocation from here on fails the way a broken toolchain does.
 	check := NewBareRepoExistsCheck()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx.openGit = func(gitDir, workDir string) Repo { return brokenGit{gf.OpenWithDir(gitDir, workDir).(Repo)} }
 	result := check.Run(ctx)
 	if result.Status == StatusOK {
 		t.Fatalf("Run = OK although git could not verify the repo: %s", result.Message)
@@ -103,21 +94,20 @@ func TestBareRepoExistsCheck_GitFailureIsNotCorruption(t *testing.T) {
 // commits. Fix must refuse, name the worktree, and leave the objects.
 func TestBareRepoExistsCheck_FixRefusesCorruptRepoWithRegisteredWorktree(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
-	upstream := seedUpstream(t, tmpDir)
-	bareRepo := initBareRepoWithRemote(t, rigDir, upstream)
+	upstream := seedUpstream(t, gf, tmpDir)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, upstream)
 	writeConfigJSON(t, rigDir, upstream, "")
-	if out, err := exec.Command("git", "-C", bareRepo, "fetch", "origin", "main:main").CombinedOutput(); err != nil {
-		t.Fatalf("fetch: %v\n%s", err, out)
-	}
+	storeObjects(t, bareRepo)
 	setupWorktreeRef(t, rigDir, bareRepo)
 	corruptBareRepo(t, bareRepo)
 	before := objectCount(t, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 	if result := check.Run(ctx); result.Status != StatusError {
 		t.Fatalf("expected StatusError, got %v: %s", result.Status, result.Message)
 	}
@@ -125,7 +115,7 @@ func TestBareRepoExistsCheck_FixRefusesCorruptRepoWithRegisteredWorktree(t *test
 	if err == nil {
 		t.Fatal("Fix removed a corrupt .repo.git that a worktree still references")
 	}
-	if !strings.Contains(err.Error(), filepath.Join("refinery", "rig")) {
+	if !strings.Contains(err.Error(), filepath.Join("polecats", "nux")) {
 		t.Errorf("refusal %q does not name the referencing worktree", err)
 	}
 	if got := objectCount(t, bareRepo); got != before || before == 0 {
@@ -137,11 +127,12 @@ func TestBareRepoExistsCheck_FixRefusesCorruptRepoWithRegisteredWorktree(t *test
 // origin tracking ref may be the only copy of that branch. Fix must refuse.
 func TestBareRepoExistsCheck_FixRefusesCorruptRepoWithUnpushedRef(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
-	upstream := seedUpstream(t, tmpDir)
-	bareRepo := initBareRepoWithRemote(t, rigDir, upstream)
+	upstream := seedUpstream(t, gf, tmpDir)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, upstream)
 	writeConfigJSON(t, rigDir, upstream, "")
 	corruptBareRepo(t, bareRepo)
 	ref := filepath.Join(bareRepo, "refs", "heads", "polecat", "work")
@@ -153,7 +144,7 @@ func TestBareRepoExistsCheck_FixRefusesCorruptRepoWithUnpushedRef(t *testing.T) 
 	}
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 	if result := check.Run(ctx); result.Status != StatusError {
 		t.Fatalf("expected StatusError, got %v: %s", result.Status, result.Message)
 	}
@@ -173,27 +164,26 @@ func TestBareRepoExistsCheck_FixRefusesCorruptRepoWithUnpushedRef(t *testing.T) 
 // repo is re-cloned. The old objects survive in the quarantine directory.
 func TestBareRepoExistsCheck_FixQuarantinesUnneededCorruptRepo(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
-	upstream := seedUpstream(t, tmpDir)
-	bareRepo := initBareRepoWithRemote(t, rigDir, upstream)
+	upstream := seedUpstream(t, gf, tmpDir)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, upstream)
 	writeConfigJSON(t, rigDir, upstream, "")
-	if out, err := exec.Command("git", "-C", bareRepo, "fetch", "origin", "main:main").CombinedOutput(); err != nil {
-		t.Fatalf("fetch: %v\n%s", err, out)
-	}
+	storeObjects(t, bareRepo)
 	corruptBareRepo(t, bareRepo)
 	before := objectCount(t, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 	if result := check.Run(ctx); result.Status != StatusError {
 		t.Fatalf("expected StatusError, got %v: %s", result.Status, result.Message)
 	}
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
-	if err := bareRepoHealth(bareRepo); err != nil {
+	if err := bareRepoHealth(ctx, bareRepo); err != nil {
 		t.Fatalf("re-cloned repo unhealthy: %v", err)
 	}
 	q := quarantined(t, rigDir)

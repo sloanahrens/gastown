@@ -4133,3 +4133,43 @@ func TestFeedFirstReady_BacksOffAfterStartupFailure(t *testing.T) {
 		t.Errorf("once the record is cleared gt-issue1 should feed: %q", data)
 	}
 }
+
+// A close in a rig store finds the hq convoy tracking it. gt convoy stores a
+// cross-rig tracks edge as external:<prefix>:<id> (trackingDependsOnID), and
+// the store answers dependents of that exact target only, so a lookup by the
+// bare id alone missed every rig bead a convoy tracks (gt-3y3rl).
+func TestPollEvents_RigCloseFindsConvoyTrackingItExternally(t *testing.T) {
+	t.Parallel()
+	townRoot := convoyTestTown(t, `{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n")
+	hq, hqCleanup := newMemStore(t)
+	defer hqCleanup()
+	rig, rigCleanup := newMemStore(t)
+	defer rigCleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := hq.CreateIssue(ctx, &beadsdk.Issue{ID: "hq-cv-ext", Title: "convoy", Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}, "test"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := hq.AddDependency(ctx, &beadsdk.Dependency{IssueID: "hq-cv-ext", DependsOnID: "external:gt:gt-ext1", Type: "tracks", CreatedAt: now, CreatedBy: "test"}, "test"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	mustCreateClosed(t, rig, "gt-ext1")
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	var checked []string
+	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
+	m.checkConvoyFn = func(_ context.Context, convoyID string) error {
+		checked = append(checked, convoyID)
+		return nil
+	}
+	startCursorsAtZero(m)
+	m.pollStoresSnapshot(m.stores)
+
+	if len(checked) != 1 || checked[0] != "hq-cv-ext" {
+		t.Errorf("convoys checked = %v, want [hq-cv-ext]; logs:\n%s", checked, strings.Join(logged, "\n"))
+	}
+}

@@ -25,10 +25,10 @@ func TestRoleMismatchTownRootIsNeutral(t *testing.T) {
 		wantMismatch bool
 	}{
 		{"town root with GT_ROLE=mayor", townRoot, "mayor", RoleMayor, "env", false},
-		{"town root with GT_ROLE=deacon", townRoot, "deacon", RoleDeacon, "env", false},
+		{"town root with GT_ROLE=dog", townRoot, "dog", RoleDog, "env", false},
 		{"mayor dir with GT_ROLE=mayor", filepath.Join(townRoot, "mayor"), "mayor", RoleMayor, "env", false},
 		// Control: a cwd that does detect a role still flags a disagreeing env.
-		{"mayor dir with GT_ROLE=deacon", filepath.Join(townRoot, "mayor"), "deacon", RoleDeacon, "env", true},
+		{"mayor dir with GT_ROLE=dog", filepath.Join(townRoot, "mayor"), "dog", RoleDog, "env", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

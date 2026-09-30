@@ -4,15 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestNew(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -23,6 +21,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestRenderRole_Mayor(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -35,7 +34,6 @@ func TestRenderRole_Mayor(t *testing.T) {
 		WorkDir:       "/test/town",
 		DefaultBranch: "main",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	}
 
 	output, err := tmpl.RenderRole("mayor", data)
@@ -56,6 +54,7 @@ func TestRenderRole_Mayor(t *testing.T) {
 }
 
 func TestRenderRole_Polecat(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -70,7 +69,6 @@ func TestRenderRole_Polecat(t *testing.T) {
 		DefaultBranch: "main",
 		Polecat:       "TestCat",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	}
 
 	output, err := tmpl.RenderRole("polecat", data)
@@ -91,6 +89,7 @@ func TestRenderRole_Polecat(t *testing.T) {
 }
 
 func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -107,7 +106,6 @@ func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
 		UpstreamURL:   "https://example.com/upstream/repo.git",
 		Polecat:       "TestCat",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -126,6 +124,7 @@ func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
 }
 
 func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -142,7 +141,6 @@ func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
 		UpstreamURL:   "https://example.com/upstream/repo.git",
 		Polecat:       "alex",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -160,108 +158,8 @@ func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
 	}
 }
 
-func TestRenderRole_Deacon(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := RoleData{
-		Role:          "deacon",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	}
-
-	output, err := tmpl.RenderRole("deacon", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	// Check for key content
-	if !strings.Contains(output, "Deacon Context") {
-		t.Error("output missing 'Deacon Context'")
-	}
-	if !strings.Contains(output, "/test/town") {
-		t.Error("output missing town root")
-	}
-	if !strings.Contains(output, "Patrol Executor") {
-		t.Error("output missing role description")
-	}
-	if !strings.Contains(output, "Startup Protocol: Propulsion") {
-		t.Error("output missing startup protocol section")
-	}
-	if !strings.Contains(output, constants.MolDeaconPatrol) {
-		t.Error("output missing patrol molecule reference")
-	}
-}
-
-// TestRenderRole_Witness_NoCycleBasedStop pins the fix for gt-oabl: the witness
-// patrol loop must have exactly one exit (context HIGH from context-check). The
-// template used to tell the witness to hand off after 15 patrol loops or after
-// any "extraordinary action", which is read on every cycle from a
-// hand-maintained state.json counter that no code ever bounded — the om witness
-// obeyed it at patrol_count 610 and sat at the prompt, abandoning the rig.
-//
-// The formula (mol-witness-patrol, step loop-or-exit) says the opposite — loop
-// unless context is HIGH — so a reintroduced stop rule here is a real
-// regression, not a style question. The deacon template deliberately keeps its
-// own counter block (it hands off every cycle by design); this guard is
-// witness-only.
-func TestRenderRole_Witness_NoCycleBasedStop(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := RoleData{
-		Role:          "witness",
-		RigName:       "testrig",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town/testrig/witness",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	}
-
-	output, err := tmpl.RenderRole("witness", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	if !strings.Contains(output, "Witness Context") {
-		t.Error("output missing 'Witness Context'")
-	}
-
-	// No cycle-count stop, and no "extraordinary action" stop.
-	for _, banned := range []string{
-		"15 patrol loops",
-		"patrol_count >= 15",
-		"extraordinary_action",
-		"Extraordinary actions",
-	} {
-		if strings.Contains(output, banned) {
-			t.Errorf("witness template still carries a stop trigger: %q", banned)
-		}
-	}
-
-	// The loop must be stated as mandatory, and the single exit named.
-	for _, required := range []string{
-		"Never end your turn",
-		"exactly one exit",
-		constants.MolWitnessPatrol,
-	} {
-		if !strings.Contains(output, required) {
-			t.Errorf("witness template missing loop mandate %q", required)
-		}
-	}
-}
-
 func TestRenderMessage_Spawn(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -292,6 +190,7 @@ func TestRenderMessage_Spawn(t *testing.T) {
 }
 
 func TestRenderMessage_Nudge(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -321,6 +220,7 @@ func TestRenderMessage_Nudge(t *testing.T) {
 }
 
 func TestRenderRole_Dog(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -334,7 +234,6 @@ func TestRenderRole_Dog(t *testing.T) {
 		WorkDir:       "/test/town/deacon/dogs/Fido",
 		DefaultBranch: "main",
 		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
 	}
 
 	output, err := tmpl.RenderRole("dog", data)
@@ -362,6 +261,7 @@ func TestRenderRole_Dog(t *testing.T) {
 // it counted. The reference must show the pair, dry run first, and must not
 // offer the live command on its own.
 func TestRenderRole_DogReaperAutoCloseShowsTheGuardedPair(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -386,6 +286,7 @@ func TestRenderRole_DogReaperAutoCloseShowsTheGuardedPair(t *testing.T) {
 // TestRenderRole_Dog_NoHardcodedGtPath verifies the dog template uses {{ .TownRoot }}
 // and does not contain hardcoded ~/gt paths.
 func TestRenderRole_Dog_NoHardcodedGtPath(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -401,7 +302,6 @@ func TestRenderRole_Dog_NoHardcodedGtPath(t *testing.T) {
 		WorkDir:       customTownRoot + "/deacon/dogs/Rover",
 		DefaultBranch: "main",
 		MayorSession:  "gt-instance-mayor",
-		DeaconSession: "gt-instance-deacon",
 	}
 
 	output, err := tmpl.RenderRole("dog", data)
@@ -430,6 +330,7 @@ func TestRenderRole_Dog_NoHardcodedGtPath(t *testing.T) {
 // This is a regression test for instances running outside ~/gt
 // (e.g., test instances at a custom path).
 func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -448,7 +349,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2 + "/myrig/polecats/TestCat",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -457,18 +358,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				Role: "mayor", TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2,
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
-			},
-		},
-		{
-			role: "witness",
-			data: RoleData{
-				Role: "witness", RigName: "myrig",
-				TownRoot: customTownRoot2, TownName: "instance",
-				WorkDir:       customTownRoot2 + "/myrig/witness",
-				DefaultBranch: "main",
-				Polecats:      []string{"Cat1", "Cat2"},
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -478,16 +368,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2 + "/myrig/crew/TestCrew",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
-			},
-		},
-		{
-			role: "deacon",
-			data: RoleData{
-				Role: "deacon", TownRoot: customTownRoot2, TownName: "instance",
-				WorkDir:       customTownRoot2,
-				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		// dog tested separately in TestRenderRole_Dog_NoHardcodedGtPath
@@ -519,6 +400,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 // (be-6mk) — the correct pattern is to cd into the target rig's beads
 // directory first, then run a bare `bd create`.
 func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -537,7 +419,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/myrig/polecats/TestCat",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -546,7 +428,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				Role: "mayor", TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3,
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -556,16 +438,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/myrig/crew/TestCrew",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
-			},
-		},
-		{
-			role: "deacon",
-			data: RoleData{
-				Role: "deacon", TownRoot: customTownRoot3, TownName: "instance",
-				WorkDir:       customTownRoot3,
-				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -575,7 +448,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/deacon/dogs/Rover",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor", DeaconSession: "gt-instance-deacon",
+				MayorSession:  "gt-instance-mayor",
 			},
 		},
 	}
@@ -603,6 +476,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 // TestRenderRole_TownRootInOutput verifies that the actual TownRoot value
 // appears in the rendered output for roles that reference it in path instructions.
 func TestRenderRole_TownRootInOutput(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -620,7 +494,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 				Role: "polecat", RigName: "myrig", Polecat: "Sparky",
 				TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot + "/myrig/polecats/Sparky", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
+				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 		{
@@ -628,16 +502,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 			data: RoleData{
 				Role: "mayor", TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot, DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
-			},
-		},
-		{
-			role: "witness",
-			data: RoleData{
-				Role: "witness", RigName: "myrig",
-				TownRoot: customRoot, TownName: "my-instance",
-				WorkDir: customRoot + "/myrig/witness", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
+				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 		{
@@ -646,15 +511,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 				Role: "crew", RigName: "myrig", Polecat: "Sparky",
 				TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot + "/myrig/crew/Sparky", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
-			},
-		},
-		{
-			role: "deacon",
-			data: RoleData{
-				Role: "deacon", TownRoot: customRoot, TownName: "my-instance",
-				WorkDir: customRoot, DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor", DeaconSession: "gt-my-instance-deacon",
+				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 	}
@@ -676,6 +533,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 // uses the actual town root, not a hardcoded ~/gt path.
 // Regression test: agents were following hardcoded ~/gt even in test instances.
 func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -687,7 +545,7 @@ func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
 		Role: "polecat", RigName: "rig1", Polecat: "Worker",
 		TownRoot: customRoot, TownName: "gastown-ci",
 		WorkDir: customRoot + "/rig1/polecats/Worker", DefaultBranch: "main",
-		MayorSession: "gt-gastown-ci-mayor", DeaconSession: "gt-gastown-ci-deacon",
+		MayorSession: "gt-gastown-ci-mayor",
 	}
 
 	output, err := tmpl.RenderRole("polecat", data)
@@ -710,6 +568,7 @@ func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
 // (e.g. from settings/daemon.env) are rendered into the plist's
 // EnvironmentVariables dict alongside GT_TOWN_ROOT.
 func TestRenderLaunchdPlist_EnvironmentVariables(t *testing.T) {
+	t.Parallel()
 	data := SupervisorData{
 		GTPath:   "/usr/local/bin/gt",
 		TownRoot: "/test/town",
@@ -742,6 +601,7 @@ func TestRenderLaunchdPlist_EnvironmentVariables(t *testing.T) {
 // are rendered into the systemd unit as Environment= directives alongside
 // GT_TOWN_ROOT.
 func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
+	t.Parallel()
 	data := SupervisorData{
 		GTPath:   "/usr/local/bin/gt",
 		TownRoot: "/test/town",
@@ -771,6 +631,7 @@ func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
 // TestRenderLaunchdPlist_NoExtraEnv verifies the plist still renders cleanly
 // with a nil Env map (the common case before settings/daemon.env exists).
 func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
+	t.Parallel()
 	output, err := renderLaunchdPlist(SupervisorData{
 		GTPath:   "/usr/local/bin/gt",
 		TownRoot: "/test/town",
@@ -788,6 +649,7 @@ func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
 // caller opts in) omits the key entirely rather than writing <integer>0</integer>,
 // which would make launchd SIGKILL the daemon almost immediately on restart.
 func TestRenderLaunchdPlist_ExitTimeOut(t *testing.T) {
+	t.Parallel()
 	output, err := renderLaunchdPlist(SupervisorData{
 		GTPath:             "/usr/local/bin/gt",
 		TownRoot:           "/test/town",
@@ -839,6 +701,7 @@ func renderedPlist(t *testing.T, town string, exitTimeout time.Duration) string 
 // this binary's rendering of this town in every other respect, so the repair
 // is to rewrite it with the key.
 func TestSupervisorFileRepair_AddsAMissingExitTimeOut(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := writeInstalledPlist(t, town, renderedPlist(t, town, 0))
 
@@ -860,6 +723,7 @@ func TestSupervisorFileRepair_AddsAMissingExitTimeOut(t *testing.T) {
 // A plist that has the key but at an older budget is the same repair: the
 // value is compiled into the binary, so it follows the binary, not the file.
 func TestSupervisorFileRepair_UpdatesAChangedExitTimeOut(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := writeInstalledPlist(t, town, renderedPlist(t, town, 20*time.Second))
 
@@ -878,6 +742,7 @@ func TestSupervisorFileRepair_UpdatesAChangedExitTimeOut(t *testing.T) {
 // A file this binary would write unchanged needs no repair, and the caller
 // must be able to tell that from a repair it declined to make.
 func TestSupervisorFileRepair_CurrentFileIsNoRepair(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := writeInstalledPlist(t, town, renderedPlist(t, town, 55*time.Second))
 
@@ -895,6 +760,7 @@ func TestSupervisorFileRepair_CurrentFileIsNoRepair(t *testing.T) {
 // a launchd job at whichever gt happens to be running is a reconfiguration, and
 // not this function's to make.
 func TestSupervisorFileRepair_LeavesAFileThatDiffersInMore(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	other, err := renderLaunchdPlist(SupervisorData{
 		GTPath:             "/opt/other/bin/gt",
@@ -917,6 +783,7 @@ func TestSupervisorFileRepair_LeavesAFileThatDiffersInMore(t *testing.T) {
 
 // A plist serving another town is not this town's to rewrite.
 func TestSupervisorFileRepair_AnotherTownsFileIsNotTouched(t *testing.T) {
+	t.Parallel()
 	other := t.TempDir()
 	path := writeInstalledPlist(t, other, renderedPlist(t, other, 0))
 
@@ -932,6 +799,7 @@ func TestSupervisorFileRepair_AnotherTownsFileIsNotTouched(t *testing.T) {
 // The systemd unit renders nothing from the binary's own constants, so a
 // binary upgrade leaves nothing in it to repair.
 func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	unit, ok, err := SupervisorFileContent("systemd", town, 0)
 	if err != nil || !ok {
@@ -955,6 +823,7 @@ func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
 // including the empty kind a host with no supported supervisor reports —
 // rather than erroring on it, since that is an ordinary host.
 func TestSupervisorFileContent_UnknownKind(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"", "upstart", "launchd "} {
 		content, ok, err := SupervisorFileContent(kind, t.TempDir(), time.Second)
 		if err != nil {
@@ -966,79 +835,59 @@ func TestSupervisorFileContent_UnknownKind(t *testing.T) {
 	}
 }
 
-// TestSupervisorStatus_None verifies SupervisorStatus reports "none" when
-// no plist/unit file is present.
-func TestSupervisorStatus_None(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-
-	if got := SupervisorStatus(); got != "none" {
-		t.Errorf("SupervisorStatus() = %q, want %q", got, "none")
+// TestSupervisorStatus reports the kind of the supervisor file this host
+// would use when it is installed, and "none" when it is not.
+func TestSupervisorStatus(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		goos, want string
+		pathSuffix string
+	}{
+		{"darwin", "launchd", filepath.Join("Library", "LaunchAgents", "com.gastown.daemon.plist")},
+		{"linux", "systemd", filepath.Join("data", "systemd", "user", "gastown-daemon.service")},
+	} {
+		t.Run(tt.goos, func(t *testing.T) {
+			t.Parallel()
+			h := fakeHost(t, tt.goos)
+			if got := h.status(); got != "none" {
+				t.Errorf("status() with no file = %q, want none", got)
+			}
+			path, _ := h.filePath()
+			if !strings.HasSuffix(path, tt.pathSuffix) {
+				t.Errorf("filePath() = %q, want it to end in %q", path, tt.pathSuffix)
+			}
+			writeFileAt(t, path, "<plist/>")
+			if got := h.status(); got != tt.want {
+				t.Errorf("status() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
-// TestSupervisorStatus_Launchd verifies SupervisorStatus reports "launchd"
-// on macOS when the plist file is present.
-func TestSupervisorStatus_Launchd(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("launchd is macOS-only")
-	}
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	plistPath, err := LaunchdPlistPath()
+// Without XDG_DATA_HOME the systemd unit lives under ~/.local/share.
+func TestSystemdUnitPath_DefaultsUnderHome(t *testing.T) {
+	t.Parallel()
+	h := fakeHost(t, "linux")
+	h.getenv = func(string) string { return "" }
+	home, _ := h.homeDir()
+	got, err := h.systemdUnitPath()
 	if err != nil {
-		t.Fatalf("LaunchdPlistPath() error = %v", err)
+		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	if got := SupervisorStatus(); got != "launchd" {
-		t.Errorf("SupervisorStatus() = %q, want %q", got, "launchd")
-	}
-}
-
-// TestSupervisorStatus_Systemd verifies SupervisorStatus reports "systemd"
-// on Linux when the unit file is present.
-func TestSupervisorStatus_Systemd(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("systemd is Linux-only")
-	}
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-
-	unitPath, err := SystemdUnitPath()
-	if err != nil {
-		t.Fatalf("SystemdUnitPath() error = %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(unitPath, []byte("[Unit]"), 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	if got := SupervisorStatus(); got != "systemd" {
-		t.Errorf("SupervisorStatus() = %q, want %q", got, "systemd")
+	if want := filepath.Join(home, ".local", "share", "systemd", "user", "gastown-daemon.service"); got != want {
+		t.Errorf("systemdUnitPath() = %q, want %q", got, want)
 	}
 }
 
 func TestRoleNames(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
 	names := tmpl.RoleNames()
-	expected := []string{"mayor", "witness", "polecat", "crew", "deacon", "boot"}
+	expected := []string{"mayor", "polecat", "crew", "dog"}
 
 	if len(names) != len(expected) {
 		t.Errorf("RoleNames() = %v, want %v", names, expected)
@@ -1051,39 +900,8 @@ func TestRoleNames(t *testing.T) {
 	}
 }
 
-func TestRenderRole_BootUsesNudgeNotRawTmux(t *testing.T) {
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	output, err := tmpl.RenderRole("boot", RoleData{
-		Role:          "boot",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town/deacon/dogs/boot",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-		DeaconSession: "gt-town-deacon",
-	})
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	if !strings.Contains(output, `gt nudge --mode=immediate deacon "Boot wake: check your inbox"`) {
-		t.Fatalf("boot template missing immediate nudge wake guidance:\n%s", output)
-	}
-	if !strings.Contains(output, "Boot hooks block it") {
-		t.Fatalf("boot template missing raw tmux block rationale:\n%s", output)
-	}
-	for _, forbidden := range []string{"Escape +", "tmux send-keys -t"} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("boot template contains forbidden raw tmux guidance %q:\n%s", forbidden, output)
-		}
-	}
-}
-
 func TestCreatePolecatCLAUDEmd(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	created, err := CreatePolecatCLAUDEmd(dir, "greenplace", "furiosa")
@@ -1129,6 +947,7 @@ func TestCreatePolecatCLAUDEmd(t *testing.T) {
 }
 
 func TestCreatePolecatCLAUDEmd_WritesToLocalWhenTrackedExists(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Write a CLAUDE.md with the exact town-root template content that gets
@@ -1177,6 +996,7 @@ func TestCreatePolecatCLAUDEmd_WritesToLocalWhenTrackedExists(t *testing.T) {
 }
 
 func TestCreatePolecatCLAUDEmd_SkipsWhenAlreadyProvisioned(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// First call — creates the file
@@ -1214,6 +1034,7 @@ func TestCreatePolecatCLAUDEmd_SkipsWhenAlreadyProvisioned(t *testing.T) {
 // This is better than the old append-to-CLAUDE.md approach because git reset --hard
 // no longer loses the lifecycle instructions.
 func TestCreatePolecatCLAUDEmd_ReusePath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "CLAUDE.md")
 	claudeLocalPath := filepath.Join(dir, "CLAUDE.local.md")
@@ -1278,6 +1099,7 @@ func TestCreatePolecatCLAUDEmd_ReusePath(t *testing.T) {
 // TestCreatePolecatCLAUDEmd_GitCleanRemovesLocal simulates git clean -f removing
 // the untracked CLAUDE.local.md. On re-provision, the function must recreate it.
 func TestCreatePolecatCLAUDEmd_GitCleanRemovesLocal(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "CLAUDE.md")
 	claudeLocalPath := filepath.Join(dir, "CLAUDE.local.md")
@@ -1321,6 +1143,7 @@ func TestCreatePolecatCLAUDEmd_GitCleanRemovesLocal(t *testing.T) {
 // TestCreatePolecatCLAUDEmd_GitCleanScenario simulates git clean -f removing
 // an untracked CLAUDE.md (repo without tracked CLAUDE.md), then re-provisioning.
 func TestCreatePolecatCLAUDEmd_GitCleanScenario(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "CLAUDE.md")
 
@@ -1355,6 +1178,7 @@ func TestCreatePolecatCLAUDEmd_GitCleanScenario(t *testing.T) {
 }
 
 func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if _, err := CreatePolecatCLAUDEmd(dir, "gastown", "agate"); err != nil {
 		t.Fatalf("CreatePolecatCLAUDEmd: %v", err)
@@ -1383,6 +1207,7 @@ func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
 // mol-polecat-work formula, and the /done body; the dangerous-command guard is
 // what enforces it.
 func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
+	t.Parallel()
 	// The calm-wait sentence, character-for-character: a polecat that reads
 	// the wait as a hang closes its bead mid-`gt done` (overseer hq-wisp-6q5ib).
 	const calmWait = "`gt done` runs the local gate itself (lint, build and the tests of the packages your branch changed; " +
@@ -1420,7 +1245,7 @@ func renderPolecatForTest(t *testing.T) string {
 		Role: "polecat", RigName: "myrig", Polecat: "TestCat",
 		TownRoot: "/test/town", TownName: "town",
 		WorkDir:      "/test/town/myrig/polecats/TestCat",
-		MayorSession: "gt-town-mayor", DeaconSession: "gt-town-deacon",
+		MayorSession: "gt-town-mayor",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -1433,14 +1258,15 @@ func renderPolecatForTest(t *testing.T) string {
 // tool use]" is a nudge-delivery artifact, not an operator stop. Mayor and
 // crew are left out: a human may really be at those panes.
 func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	const marker = "An interrupt is a delivery artifact"
 	for role, want := range map[string]bool{
-		"witness": true, "deacon": true, "polecat": true,
-		"mayor": false, "crew": false,
+		"polecat": true,
+		"mayor":   false, "crew": false,
 	} {
 		data := RoleData{Role: role, RigName: "gastown", TownRoot: "/t", TownName: "t", Polecat: "p", DefaultBranch: "main"}
 		out, err := tmpl.RenderRole(role, data)

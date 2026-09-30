@@ -153,9 +153,9 @@ Parse the JSON output and check these fields:
 At or past `REBUILD_GT_INSTALL_THRESHOLD` commits behind (default 1), install
 at the first quiet moment: a merged commit that is not in force is a live
 defect, not a rounding error (gt-oqbw, gt-ww20, gt-rbfj). Under the threshold
-(strictly fewer commits behind than it), defer. The refinery's post-merge hook
-(`scripts/install-after-merge.sh`) installs most merges within a minute of
-landing; this plugin is the backstop for merges that bypass it.
+(strictly fewer commits behind than it), defer. Whoever lands normally runs
+`make install` right after; this plugin is the backstop for landings nobody
+installed.
 
 An unknown `commits_behind` here is treated as *at* the threshold, not under
 it — install rather than defer. Reading "unknown" as "0 behind" left a
@@ -179,7 +179,7 @@ If either check fails, skip the rebuild and record a wisp.
 ## Sync with origin/main
 
 The rig checkout has no self-serve pull otherwise: without this step the
-build uses whatever commit a human last checked out, and `make safe-install`
+build uses whatever commit a human last checked out, and `make install-local`
 fails its `check-up-to-date` gate against `origin/main` until a human pulls
 manually.
 
@@ -196,7 +196,7 @@ record a skip wisp with reason "local main diverged from origin/main" —
 
 The fetch and fast-forward are writes to `mayor/rig`, so they run under
 `install-gt.sh`'s flock (`daemon/install-gt.lock`, claude-7fc) and cannot move
-the tree under a build the post-merge hook is running. The plugin waits up to
+the tree under a build a `make install` is running. The plugin waits up to
 `REBUILD_GT_LOCK_WAIT` seconds (default 30); a lock still busy means an
 install is running now, so the run defers (exit 3). The lock is released
 before `install-gt.sh` runs, which takes it again itself, waiting
@@ -230,7 +230,7 @@ is down runs no suite to compete with.
 
 Run the rig's own `scripts/install-gt.sh --sha <HEAD> --source rebuild-gt`
 (plus `--slot-role gastown/rebuild-gt` past the starvation threshold), the
-same install path the refinery's post-merge hook uses. Under one flock it
+same install path `make install` runs. Under one flock it
 builds, installs atomically (`scripts/install-binary.sh`, gt-0het), keeps the
 previous binary as `gt.prev`, and verifies the commit in force as this plugin
 used to — the short commit the binary reports resolves to a full hash inside

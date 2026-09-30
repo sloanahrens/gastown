@@ -30,8 +30,6 @@ type PatrolsConfig struct {
 	// daemon.json files, which the kernel decodes strictly, still load.
 	// Deprecated: remove "patrols.refinery" from mayor/daemon.json.
 	Refinery *PatrolConfig `json:"refinery,omitempty"`
-	Witness  *PatrolConfig `json:"witness,omitempty"`
-	Deacon   *PatrolConfig `json:"deacon,omitempty"`
 	// Mayor gates the daemon's ensure-mayor supervision: {"enabled": false} stops
 	// the daemon from restarting a missing Mayor session (default on).
 	Mayor                *PatrolConfig               `json:"mayor,omitempty"`
@@ -54,11 +52,6 @@ type PatrolsConfig struct {
 	// per run; the open bead is the double-dispatch guard (gt-nj23).
 	ScheduledSlings *ScheduledSlingsConfig `json:"scheduled_slings,omitempty"`
 
-	// PatrolWatchdog flags a patrol role (witness, deacon, refinery) whose
-	// session is alive but whose last COMPLETED patrol cycle is older than
-	// N x its cadence — awake but not patrolling (gt-4z3b7).
-	PatrolWatchdog *PatrolWatchdogConfig `json:"patrol_watchdog,omitempty"`
-
 	// LandingWorker lands work beads labeled gt:ready-to-land, one worker per
 	// rig (ADR 0004, gt-v4ssj.2). Opt-in: absent or enabled=false never lands.
 	LandingWorker *LandingWorkerConfig `json:"landing_worker,omitempty"`
@@ -77,6 +70,17 @@ type PatrolsConfig struct {
 	// Delete the keys from daemon.json by hand.
 	QuotaDog    json.RawMessage `json:"quota_dog,omitempty"`
 	QuotaResume json.RawMessage `json:"quota_resume,omitempty"`
+
+	// Witness, Deacon and PatrolWatchdog are retired: the witness and deacon
+	// roles and the watchdog over their patrols were deleted when the
+	// patrol_scan tick replaced them (gt-4k3fj.6.1, ADR 0005), and nothing
+	// reads these keys. They are declared so a daemon.json that still
+	// carries them decodes under strict decoding, and kept verbatim so a
+	// rewrite does not drop operator data. Delete the keys from daemon.json
+	// by hand.
+	Witness        json.RawMessage `json:"witness,omitempty"`
+	Deacon         json.RawMessage `json:"deacon,omitempty"`
+	PatrolWatchdog json.RawMessage `json:"patrol_watchdog,omitempty"`
 }
 
 // DoltServerConfig holds configuration for the Dolt SQL server.
@@ -506,29 +510,6 @@ type ScheduledSlingEntry struct {
 	Vars        map[string]string `json:"vars,omitempty"`
 }
 
-// PatrolWatchdogConfig holds configuration for the patrol_watchdog patrol.
-type PatrolWatchdogConfig struct {
-	// Enabled controls whether the patrol runs. Defaults to true (see
-	// IsPatrolEnabled) — an explicit false is required to turn it off.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often the watchdog checks, as a string (e.g. "10m").
-	IntervalStr string `json:"interval,omitempty"`
-
-	// CadenceStr is the expected time between a role's completed patrol
-	// cycles, as a string (e.g. "10m"). Applied uniformly to every role;
-	// per-role overrides can be added later if cadences diverge.
-	CadenceStr string `json:"cadence,omitempty"`
-
-	// Multiplier is how many cadences of silence are tolerated before a role
-	// is considered stale. Zero means "use the default" (3).
-	Multiplier int `json:"multiplier,omitempty"`
-
-	// Nudge controls whether a stale-but-alive role is also sent a "resume
-	// patrol" nudge in addition to being escalated. Defaults to true.
-	Nudge *bool `json:"nudge,omitempty"`
-}
-
 // LandingWorkerConfig holds configuration for the landing_worker patrol.
 type LandingWorkerConfig struct {
 	// Enabled turns the workers on. Defaults to false: the overseer enables
@@ -571,17 +552,13 @@ type LandingWorkerConfig struct {
 	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
 }
 
-// RolePatrol returns the patrol entry for a role-shaped patrol ("witness",
-// "deacon", "handler"), or nil when the entry or the name is absent.
+// RolePatrol returns the patrol entry for a role-shaped patrol ("handler"),
+// or nil when the entry or the name is absent.
 func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
 	if p == nil {
 		return nil
 	}
 	switch name {
-	case "witness":
-		return p.Witness
-	case "deacon":
-		return p.Deacon
 	case "handler":
 		return p.Handler
 	}
@@ -589,7 +566,8 @@ func (p *PatrolsConfig) RolePatrol(name string) *PatrolConfig {
 }
 
 // Count returns how many patrol entries daemon.json declares, not counting
-// the retired keys (dolt_remotes, quota_dog, quota_resume).
+// the retired keys (dolt_remotes, quota_dog, quota_resume, witness, deacon,
+// patrol_watchdog).
 func (p *PatrolsConfig) Count() int {
 	if p == nil {
 		return 0

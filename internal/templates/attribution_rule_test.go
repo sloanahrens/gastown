@@ -19,7 +19,7 @@ func TestPolecatTemplatesForbidAIAttribution(t *testing.T) {
 	role, err := tmpl.RenderRole("polecat", RoleData{
 		Role: "polecat", RigName: "myrig", TownRoot: "/test/town", TownName: "town",
 		WorkDir: "/test/town/myrig/polecats/TestCat", DefaultBranch: "main", Polecat: "TestCat",
-		MayorSession: "gt-town-mayor", DeaconSession: "gt-town-deacon",
+		MayorSession: "gt-town-mayor",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)

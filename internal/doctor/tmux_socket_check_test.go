@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/session"
 )
 
 // mockSocketLister implements socketSessionLister for testing.
@@ -28,21 +26,10 @@ func (m *mockSocketLister) KillSessionWithProcesses(name string) error {
 	return m.killErr
 }
 
-// setupSocketTestRegistry registers the "ga" prefix so session.IsKnownSession
-// recognises "ga-*" names, and returns a cleanup function.
-func setupSocketTestRegistry(t *testing.T) {
-	t.Helper()
-	oldRegistry := session.DefaultRegistry()
-	t.Cleanup(func() { session.SetDefaultRegistry(oldRegistry) })
-	r := session.NewPrefixRegistry()
-	r.Register("ga", "gastown")
-	session.SetDefaultRegistry(r)
-}
-
 // --- Run() tests ---
 
 func TestSocketSplitBrainCheck_EmptySocket(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -60,7 +47,7 @@ func TestSocketSplitBrainCheck_EmptySocket(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_DefaultSocket(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -78,7 +65,7 @@ func TestSocketSplitBrainCheck_DefaultSocket(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_NoTownServer(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
@@ -98,12 +85,12 @@ func TestSocketSplitBrainCheck_NoTownServer(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_NoDefaultServer(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
 	check.socketForTest = "gt-abc123"
-	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-witness"}}
+	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
 	check.defaultListerForTest = &mockSocketLister{listErr: fmt.Errorf("no server running")}
 
 	ctx := &CheckContext{TownRoot: t.TempDir()}
@@ -118,12 +105,12 @@ func TestSocketSplitBrainCheck_NoDefaultServer(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_NoDuplicates(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
 	check.socketForTest = "gt-abc123"
-	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-witness"}}
+	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
 	check.defaultListerForTest = &mockSocketLister{sessions: []string{"personal-stuff"}}
 
 	ctx := &CheckContext{TownRoot: t.TempDir()}
@@ -138,13 +125,13 @@ func TestSocketSplitBrainCheck_NoDuplicates(t *testing.T) {
 }
 
 func TestSocketSplitBrainCheck_DetectsDuplicates(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
 	check.socketForTest = "gt-abc123"
-	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-witness"}}
-	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-witness"}}
+	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
+	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
 
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 	result := check.Run(ctx)
@@ -157,24 +144,24 @@ func TestSocketSplitBrainCheck_DetectsDuplicates(t *testing.T) {
 	}
 	found := false
 	for _, d := range result.Details {
-		if strings.Contains(d, "DUPLICATE") && strings.Contains(d, "ga-witness") {
+		if strings.Contains(d, "DUPLICATE") && strings.Contains(d, "ga-crew-max") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected DUPLICATE detail for ga-witness, got: %v", result.Details)
+		t.Errorf("expected DUPLICATE detail for ga-crew-max, got: %v", result.Details)
 	}
 }
 
 func TestSocketSplitBrainCheck_DetectsOrphans(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
 	check.socketForTest = "gt-abc123"
 	check.townListerForTest = &mockSocketLister{sessions: []string{}}
-	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-refinery"}}
+	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-nux"}}
 
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 	result := check.Run(ctx)
@@ -184,24 +171,24 @@ func TestSocketSplitBrainCheck_DetectsOrphans(t *testing.T) {
 	}
 	found := false
 	for _, d := range result.Details {
-		if strings.Contains(d, "ORPHAN") && strings.Contains(d, "ga-refinery") {
+		if strings.Contains(d, "ORPHAN") && strings.Contains(d, "ga-nux") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected ORPHAN detail for ga-refinery, got: %v", result.Details)
+		t.Errorf("expected ORPHAN detail for ga-nux, got: %v", result.Details)
 	}
 }
 
 func TestSocketSplitBrainCheck_MixedWithNonGastown(t *testing.T) {
-	setupSocketTestRegistry(t)
+	t.Parallel()
 
 	check := NewSocketSplitBrainCheck()
 	check.useSocketForTest = true
 	check.socketForTest = "gt-abc123"
 	check.townListerForTest = &mockSocketLister{sessions: []string{}}
-	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-witness", "personal-stuff"}}
+	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max", "personal-stuff"}}
 
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 	result := check.Run(ctx)
@@ -210,10 +197,10 @@ func TestSocketSplitBrainCheck_MixedWithNonGastown(t *testing.T) {
 		t.Fatalf("expected Error, got %v: %s", result.Status, result.Message)
 	}
 
-	// ga-witness should be flagged as orphan
+	// ga-crew-max should be flagged as orphan
 	hasGaWitness := false
 	for _, d := range result.Details {
-		if strings.Contains(d, "ga-witness") {
+		if strings.Contains(d, "ga-crew-max") {
 			hasGaWitness = true
 		}
 		if strings.Contains(d, "personal-stuff") {
@@ -221,7 +208,7 @@ func TestSocketSplitBrainCheck_MixedWithNonGastown(t *testing.T) {
 		}
 	}
 	if !hasGaWitness {
-		t.Errorf("expected ga-witness in details, got: %v", result.Details)
+		t.Errorf("expected ga-crew-max in details, got: %v", result.Details)
 	}
 
 	// Only 1 stale session (personal-stuff is ignored)
@@ -250,7 +237,7 @@ func TestSocketSplitBrainCheck_Fix_NoStale(t *testing.T) {
 func TestSocketSplitBrainCheck_Fix_KillsStale(t *testing.T) {
 	t.Parallel()
 	check := NewSocketSplitBrainCheck()
-	check.staleSessions = []string{"ga-refinery", "ga-witness"}
+	check.staleSessions = []string{"ga-nux", "ga-crew-max"}
 
 	mock := &mockSocketLister{}
 	check.defaultListerForTest = mock
@@ -264,7 +251,7 @@ func TestSocketSplitBrainCheck_Fix_KillsStale(t *testing.T) {
 		t.Fatalf("expected 2 kills, got %d: %v", len(mock.killed), mock.killed)
 	}
 	// staleSessions is sorted, so kills should be in order
-	if mock.killed[0] != "ga-refinery" || mock.killed[1] != "ga-witness" {
+	if mock.killed[0] != "ga-nux" || mock.killed[1] != "ga-crew-max" {
 		t.Errorf("unexpected kill order: %v", mock.killed)
 	}
 }

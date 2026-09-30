@@ -9,7 +9,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -261,39 +260,13 @@ func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 
-	// Send LIFECYCLE:Shutdown to the witness when force-stealing a bead from a
-	// live polecat. Without this, the old polecat becomes a zombie — still running
-	// but unaware it lost its hook. Mirrors the same logic in runSling (sling.go).
+	// Clear the outgoing polecat's state when force-stealing a bead from it.
+	// Mirrors the same logic in runSling (sling.go).
 	if (info.Status == "hooked" || info.Status == "in_progress") && params.Force && info.Assignee != "" {
 		assigneeParts := strings.Split(info.Assignee, "/")
 		if len(assigneeParts) >= 3 && assigneeParts[1] == "polecats" {
-			oldRigName := assigneeParts[0]
-			oldPolecatName := assigneeParts[2]
-			if townRoot != "" {
-				callerCtx := params.CallerContext
-				if callerCtx == "" {
-					callerCtx = "sling"
-				}
-				shutdownMsg := &mail.Message{
-					From:     callerCtx,
-					To:       fmt.Sprintf("%s/witness", oldRigName),
-					Subject:  fmt.Sprintf("LIFECYCLE:Shutdown %s", oldPolecatName),
-					Body:     fmt.Sprintf("Reason: work_reassigned\nRequestedBy: %s\nBead: %s\nNewAssignee: %s", callerCtx, params.BeadID, params.RigName),
-					Type:     mail.TypeTask,
-					Priority: mail.PriorityHigh,
-				}
-				wait, err := d.notifyWitness(townRoot, shutdownMsg)
-				if err != nil {
-					fmt.Fprintf(d.out, "  %s Could not send shutdown to witness: %v\n", style.Dim.Render("Warning:"), err)
-				} else {
-					fmt.Fprintf(d.out, "  %s Sent LIFECYCLE:Shutdown to %s/witness for %s\n", style.Bold.Render("→"), oldRigName, oldPolecatName)
-				}
-				wait()
-			}
-
 			// gt-skwt: clear the outgoing polecat's agent-bead state now,
-			// synchronously — don't rely on the shutdown mail alone (see
-			// clearReassignedPolecatState).
+			// synchronously (see clearReassignedPolecatState).
 			d.clearReassigned(townRoot, info.Assignee)
 		}
 	}

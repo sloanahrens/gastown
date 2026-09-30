@@ -71,10 +71,6 @@ func spawnRoleContext(role, townRoot, rigPath, agentName string) (RoleContext, e
 	switch role {
 	case constants.RoleMayor:
 		r = RoleMayor
-	case constants.RoleDeacon:
-		r = RoleDeacon
-	case constants.RoleWitness:
-		r = RoleWitness
 	case constants.RolePolecat:
 		r = RolePolecat
 	case constants.RoleCrew:
@@ -85,10 +81,6 @@ func spawnRoleContext(role, townRoot, rigPath, agentName string) (RoleContext, e
 		return RoleContext{}, fmt.Errorf("%w: %q", errNoSystemPromptForRole, role)
 	}
 	switch r {
-	case RoleWitness:
-		if rigName == "" {
-			return RoleContext{}, fmt.Errorf("%s needs a rig path", role)
-		}
 	case RolePolecat, RoleCrew:
 		if rigName == "" || agentName == "" {
 			return RoleContext{}, fmt.Errorf("%s needs a rig path and an agent name", role)

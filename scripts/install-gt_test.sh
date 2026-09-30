@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for scripts/install-gt.sh: the one install path shared by the
-# post-merge hook and rebuild-gt (claude-7fc). A stub make on PATH "installs" by
+# Tests for scripts/install-gt.sh: the one install path (`make install`,
+# rebuild-gt; claude-7fc, gt-z0l3s). A stub make on PATH "installs" by
 # writing a stub gt that reports a chosen commit; the stub gt answers
 # stale/version/sync/escalate/slot and logs what it was asked.
 set -euo pipefail
@@ -79,7 +79,7 @@ for a in "$@"; do
 done
 case "$target" in
   build) [ -e "$T_WORLD/fail_build" ] && { echo "build failed" >&2; exit 2; }; exit 0 ;;
-  safe-install)
+  install-local)
     if [ -e "$T_WORLD/already_at_head" ]; then echo "Binary is already at HEAD, nothing to do"; exit 1; fi
     [ -e "$T_WORLD/fail_install" ] && exit 2
     c=$(cat "$T_WORLD/new_commit" 2>/dev/null || git rev-parse --short HEAD)
@@ -127,7 +127,7 @@ echo "=== install-gt.sh tests ==="
 # install, smoke, sync, marker, receipt, RESULT line. ---
 T=$(make_world)
 C2_FULL=$(git -C "$T/origin.git" rev-parse main)
-rc=$(run_install "$T" --sha "$C2_FULL" --source post-merge)
+rc=$(run_install "$T" --sha "$C2_FULL" --source manual)
 [ "$rc" = "0" ] && pass "happy: exit 0" || fail "happy: exit $rc: $(cat "$T/run.out")"
 [ "$(reported "$T")" = "$(cat "$T/c2")" ] && pass "happy: c2 in force" || fail "happy: in force is $(reported "$T")"
 grep -q "C=\"$(cat "$T/c1")\"" "$T/bin/gt.prev" && pass "happy: gt.prev is the c1 binary" || fail "happy: gt.prev missing or wrong"
@@ -136,7 +136,7 @@ python3 -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
 assert m["commit"] == sys.argv[2], m
-assert m["source"] == "post-merge", m
+assert m["source"] == "manual", m
 assert m["repo"] == sys.argv[3], m
 assert m["requested_at"].endswith("Z"), m
 ' "$T/daemon/restart-pending.json" "$C2_FULL" "$T/rig" && pass "happy: marker shape" || fail "happy: marker wrong: $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
@@ -145,12 +145,12 @@ assert m["requested_at"].endswith("Z"), m
 [ "$(last_receipt "$T" merged_at)" != "None" ] && pass "happy: receipt has merged_at" || fail "happy: no merged_at"
 grep -q "sync formula" "$T/gt.log" && grep -q "sync plugin" "$T/gt.log" && pass "happy: syncs ran" || fail "happy: syncs missing: $(cat "$T/gt.log" 2>/dev/null)"
 [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT installed $C2_FULL $(git -C "$T/rig" rev-parse HEAD~1) -" ] && pass "happy: RESULT line" || fail "happy: RESULT line: $(tail -1 "$T/run.out")"
-grep -q "make SKIP_UPDATE_CHECK=1 INSTALL_DIR=$T/bin safe-install" "$T/make.log" && pass "happy: safe-install into INSTALL_GT_BIN_DIR" || fail "happy: make.log $(cat "$T/make.log")"
+grep -q "make SKIP_UPDATE_CHECK=1 INSTALL_DIR=$T/bin install-local" "$T/make.log" && pass "happy: install-local into INSTALL_GT_BIN_DIR" || fail "happy: make.log $(cat "$T/make.log")"
 
 # --- Case 2: already installed -> no-op: no make, no marker, noop receipt ---
 T=$(make_world)
 install_stub "$T" "$(cat "$T/c2")"
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "0" ] && [ ! -e "$T/make.log" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
   && pass "noop (same): exit 0, no build, no marker" || fail "noop (same): rc=$rc $(cat "$T/run.out")"
 [ "$(last_receipt "$T" event)" = "noop" ] && pass "noop (same): noop receipt" || fail "noop (same): receipt $(last_receipt "$T" event)"
@@ -165,7 +165,7 @@ rc=$(run_install "$T" --sha "$(cat "$T/c1")" --source rebuild-gt)
 # previous binary, HIGH escalation, no marker. ---
 T=$(make_world)
 echo deadbee > "$T/new_commit"
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "1" ] && pass "smoke unverifiable: exit 1" || fail "smoke unverifiable: rc=$rc $(cat "$T/run.out")"
 [ "$(reported "$T")" = "$(cat "$T/c1")" ] && pass "smoke unverifiable: c1 restored" || fail "smoke unverifiable: in force $(reported "$T")"
 grep -q "escalate .*cannot verify what came into force.*--fingerprint install-gt:smoke-failed" "$T/gt.log" \
@@ -180,14 +180,14 @@ cat "$T/c1" > "$T/new_commit"
 # A c1 stub would be byte-identical to the installed one, and the rollback
 # only fires when the file changed; the not-take stub differs by a comment.
 python3 -c 'import sys; p=sys.argv[1]; s=open(p).read().replace("C=\"__COMMIT__\"", "# not-take\nC=\"__COMMIT__\"", 1); open(p,"w").write(s)' "$T/gt.tmpl"
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "1" ] && grep -q "escalate .*the install did not take" "$T/gt.log" \
   && pass "did not take: exit 1, escalated" || fail "did not take: rc=$rc $(cat "$T/gt.log" 2>/dev/null)"
 
 # --- Case 6: new binary cannot answer 'stale --json' -> rollback ---
 T=$(make_world)
 touch "$T/broken_$(cat "$T/c2")"
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "1" ] && [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
   && pass "stale unparseable: rolled back" || fail "stale unparseable: rc=$rc"
 
@@ -200,7 +200,7 @@ grep -q -- "--fingerprint install-gt:build-failed" "$T/gt.log" && pass "build fa
 [ ! -e "$T/daemon/restart-pending.json" ] && [ "$(last_receipt "$T" event)" = "failed" ] \
   && pass "build fails: no marker, failed receipt" || fail "build fails: marker or receipt wrong"
 
-# --- Case 8: installed commit unreadable and safe-install says "already at
+# --- Case 8: installed commit unreadable and install-local says "already at
 # HEAD" -> no-op, not a failure ---
 T=$(make_world)
 install_stub "$T" ""
@@ -213,7 +213,7 @@ T=$(make_world)
 perl -e 'use Fcntl qw(:flock); open(my $f, ">>", $ARGV[0]) or die; flock($f, LOCK_EX) or die; sleep 20' "$T/daemon/install-gt.lock" &
 HOLDER=$!
 sleep 1
-rc=$(LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(LOCK_WAIT=1 run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 kill "$HOLDER" 2>/dev/null || true
 [ "$rc" = "3" ] && [ ! -e "$T/make.log" ] && pass "lock busy: exit 3, no build" || fail "lock busy: rc=$rc $(cat "$T/run.out")"
 [ "$(last_receipt "$T" reason)" = "lock-busy" ] && pass "lock busy: receipt reason" || fail "lock busy: reason $(last_receipt "$T" reason)"
@@ -226,23 +226,23 @@ echo base > "$T/rig/local.txt"; git -C "$T/rig" add local.txt
 git -C "$T/rig" -c user.email=t@t -c user.name=t commit -q -m local-tracked
 git -C "$T/rig" push -q origin HEAD:refs/heads/side-seed
 echo dirty >> "$T/rig/local.txt"
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "2" ] && [ ! -e "$T/make.log" ] && [ "$(last_receipt "$T" reason)" = "dirty" ] \
   && pass "refused dirty" || fail "refused dirty: rc=$rc $(cat "$T/run.out")"
 ! grep -q "escalate" "$T/gt.log" 2>/dev/null && pass "refused dirty: not escalated here" || fail "refused dirty: escalated"
 
 T=$(make_world)
 git -C "$T/rig" checkout -q -b side
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "2" ] && [ "$(last_receipt "$T" reason)" = "wrong-branch" ] && pass "refused wrong branch" || fail "refused wrong branch: rc=$rc"
 
 T=$(make_world)
 git -C "$T/rig" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local-only
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "2" ] && [ "$(last_receipt "$T" reason)" = "diverged" ] && pass "refused diverged" || fail "refused diverged: rc=$rc $(cat "$T/run.out")"
 
 T=$(make_world)
-rc=$(run_install "$T" --sha 0123456789abcdef0123456789abcdef01234567 --source post-merge)
+rc=$(run_install "$T" --sha 0123456789abcdef0123456789abcdef01234567 --source manual)
 [ "$rc" = "2" ] && [ "$(last_receipt "$T" reason)" = "unknown-commit" ] && pass "refused unknown commit" || fail "refused unknown commit: rc=$rc"
 
 # --- Case 11: --slot-role builds inside 'gt slot run'; a slot never acquired is busy ---
@@ -260,7 +260,7 @@ rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt --slot-role gas
 T=$(make_world)
 echo deadbee > "$T/new_commit"
 touch "$T/lockout_deadbee"
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 chmod u+w "$T/bin"
 [ "$rc" = "1" ] && grep -q -- "-s critical .*--fingerprint install-gt:rollback-failed" "$T/gt.log" \
   && pass "rollback fails: CRITICAL" || fail "rollback fails: rc=$rc $(cat "$T/gt.log" 2>/dev/null)"
@@ -269,14 +269,58 @@ chmod u+w "$T/bin"
 # on a path that never reaches DAEMON_DIR (fix round 1: these used to be a
 # bare `exit 1` with no RESULT line at all). ---
 T=$(make_world)
-rc=$(run_install "$T" --source post-merge)
+rc=$(run_install "$T" --sha "")
 [ "$rc" = "1" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed - - unexpected" ] \
-  && pass "bad args (missing --sha): exit 1, RESULT line" || fail "bad args (missing --sha): rc=$rc $(cat "$T/run.out")"
+  && pass "bad args (empty --sha): exit 1, RESULT line" || fail "bad args (empty --sha): rc=$rc $(cat "$T/run.out")"
 
 T=$(make_world)
 rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source bogus)
 [ "$rc" = "1" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed $(cat "$T/c2") - unexpected" ] \
   && pass "bad args (bad --source): exit 1, RESULT line" || fail "bad args (bad --source): rc=$rc $(cat "$T/run.out")"
+
+# --- Case 13b: no arguments (make install) -> installs origin/main as
+# source "manual" (gt-z0l3s). ---
+T=$(make_world)
+C2_FULL=$(git -C "$T/origin.git" rev-parse main)
+rc=$(run_install "$T")
+[ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+  && pass "no args: origin/main in force" || fail "no args: rc=$rc in force $(reported "$T"): $(cat "$T/run.out")"
+[ "$(last_receipt "$T" source)" = "manual" ] && [ "$(last_receipt "$T" commit)" = "$C2_FULL" ] \
+  && pass "no args: manual receipt for origin/main" || fail "no args: receipt $(tail -1 "$T/daemon/install-receipts.jsonl" 2>/dev/null)"
+
+T=$(make_world)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+[ "$rc" = "1" ] && [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
+  && pass "retired source post-merge: refused as a bad argument" || fail "retired source post-merge: rc=$rc"
+
+# --- Case 13c: without GT_TOWN_ROOT or dir overrides, the town is the
+# outermost directory holding mayor/town.json above the script, and with no
+# town at all it fails with the RESULT line and names install-local. ---
+# run_located T SCRIPTS_DIR ARGS... -> exit code; runs a copy of the script
+# from SCRIPTS_DIR with no town env; output in $T/run.out.
+run_located() {
+  local t="$1" dir="$2" rc=0; shift 2
+  mkdir -p "$dir/lib"
+  cp "$INSTALLER" "$dir/install-gt.sh"
+  cp "$SCRIPT_DIR/lib/install-gt-lib.sh" "$dir/lib/"
+  ( unset GT_TOWN_ROOT INSTALL_GT_DAEMON_DIR INSTALL_GT_RIG_DIR
+    export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_LOCK_WAIT=5 \
+      PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
+    bash "$dir/install-gt.sh" "$@" ) > "$t/run.out" 2>&1 || rc=$?
+  echo "$rc"
+}
+T=$(make_world)
+mkdir -p "$T/town/mayor" "$T/town/gastown/mayor" "$T/town/gastown/crew/x"
+echo '{}' > "$T/town/mayor/town.json"
+ln -s "$T/rig" "$T/town/gastown/mayor/rig"
+rc=$(run_located "$T" "$T/town/gastown/crew/x/scripts")
+[ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] && [ -f "$T/town/daemon/restart-pending.json" ] \
+  && pass "town found above the script: installed, marker in <town>/daemon" || fail "town found above the script: rc=$rc $(cat "$T/run.out")"
+
+T=$(make_world)
+rc=$(run_located "$T" "$T/notown/scripts")
+[ "$rc" = "1" ] && grep -q "install-local" "$T/run.out" && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed origin/main - unexpected" ] \
+  && pass "no town: exit 1, names install-local, RESULT line" || fail "no town: rc=$rc $(cat "$T/run.out")"
 
 # --- Case 14: perl itself dies before it ever reaches exec (the lock path is
 # a pre-existing directory, so 'open >>' fails) -> its die() exit code (not
@@ -285,7 +329,7 @@ rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source bogus)
 # exercises perl's own failure, not a bash-level permission error. ---
 T=$(make_world)
 mkdir -p "$T/daemon/install-gt.lock"
-rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "1" ] && [ "$(tail -1 "$T/run.out")" = "install-gt: RESULT failed $(cat "$T/c2") - unexpected" ] \
   && pass "lock file unopenable: mapped to exit 1 with a RESULT line" || fail "lock file unopenable: rc=$rc $(cat "$T/run.out")"
 
@@ -296,7 +340,7 @@ rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
 T=$(make_world)
 C2_FULL=$(git -C "$T/origin.git" rev-parse main)
 mkdir -p "$T/daemon/restart-pending.json"
-rc=$(run_install "$T" --sha "$C2_FULL" --source post-merge)
+rc=$(run_install "$T" --sha "$C2_FULL" --source manual)
 [ "$rc" = "1" ] && pass "marker-write fails: exit 1" || fail "marker-write fails: rc=$rc $(cat "$T/run.out")"
 [ "$(reported "$T")" = "$(cat "$T/c2")" ] && pass "marker-write fails: binary stays installed" || fail "marker-write fails: in force $(reported "$T")"
 [ "$(last_receipt "$T" event)" = "failed" ] && [ "$(last_receipt "$T" reason)" = "marker-write" ] \
@@ -317,7 +361,7 @@ exec "$REAL_GIT" "\$@"
 GIT
 chmod +x "$T/stubs/git"
 C2_FULL=$(git -C "$T/origin.git" rev-parse main)
-rc=$(run_install "$T" --sha "$C2_FULL" --source post-merge)
+rc=$(run_install "$T" --sha "$C2_FULL" --source manual)
 [ "$rc" = "0" ] && pass "no auto gc: exit 0" || fail "no auto gc: exit $rc: $(cat "$T/run.out")"
 for sub in fetch merge; do
   line=$(grep -a " $sub " "$T/git.log" | head -1 || true)
@@ -352,7 +396,7 @@ if immutable_supported; then
   touch "$T/simulate_immutable_replace"
   echo deadbee > "$T/new_commit"
   chflags uchg "$T/bin/gt" 2>/dev/null || chattr +i "$T/bin/gt" 2>/dev/null || true
-  rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source post-merge)
+  rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
   [ "$rc" = "1" ] && grep -q "escalate .*cannot verify what came into force.*--fingerprint install-gt:smoke-failed" "$T/gt.log" \
     && grep -q -- "-s high" "$T/gt.log" \
     && pass "immutable binary: rollback recovers (HIGH smoke-failed, not CRITICAL rollback-failed)" \

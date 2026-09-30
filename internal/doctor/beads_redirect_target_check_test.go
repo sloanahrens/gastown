@@ -1,9 +1,9 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -150,7 +150,10 @@ func TestBeadsRedirectTargetCheck_PolecatBrokenTarget(t *testing.T) {
 	}
 }
 
-func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
+// TestBeadsRedirectTargetCheck_LeftoverRefineryIgnored verifies that a leftover
+// refinery/rig clone from the retired refinery role is not checked, even when
+// its redirect is broken.
+func TestBeadsRedirectTargetCheck_LeftoverRefineryIgnored(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
@@ -162,7 +165,7 @@ func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create refinery with redirect to non-existent target
+	// Create leftover refinery with redirect to non-existent target
 	if err := os.MkdirAll(refineryBeadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -174,8 +177,8 @@ func TestBeadsRedirectTargetCheck_RefineryBrokenTarget(t *testing.T) {
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
-	if result.Status != StatusWarning {
-		t.Errorf("Expected StatusWarning for refinery broken target, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusOK {
+		t.Errorf("Expected StatusOK for leftover refinery clone, got %v: %s", result.Status, result.Message)
 	}
 }
 
@@ -519,12 +522,6 @@ func TestExtractRigName(t *testing.T) {
 			want:         "myrig",
 		},
 		{
-			name:         "refinery path",
-			townRoot:     "/town",
-			worktreePath: "/town/myrig/refinery/rig",
-			want:         "myrig",
-		},
-		{
 			name:         "polecat path",
 			townRoot:     "/town",
 			worktreePath: "/town/myrig/polecats/polecat1",
@@ -632,33 +629,22 @@ func TestBeadsRedirectTargetCheck_FixWithMissingConfigYaml(t *testing.T) {
 
 func TestBeadsRedirectTargetCheck_FixMetadataRepairFails(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not enforce POSIX directory write bits for this chmod-based failure path")
-	}
-
-	// Target directory exists but metadata repair can't fix it (no metadata.json,
-	// and the directory is writable so EnsureConfigYAML succeeds but with empty
-	// fallback prefix — the important thing is the fallback path works).
+	// The target directory exists but metadata repair fails (config.yaml can't
+	// be written), and no canonical beads location exists to redirect to.
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "myrig")
 	rigBeadsDir := filepath.Join(rigDir, ".beads")
 	crewDir := filepath.Join(rigDir, "crew", "worker1")
 	crewBeadsDir := filepath.Join(crewDir, ".beads")
 
-	// Create rig beads dir that is not writable (so config.yaml creation fails)
 	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(rigDir, ".git"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Make beads dir read-only so EnsureConfigYAMLFromMetadataIfMissing fails
-	if err := os.Chmod(rigBeadsDir, 0555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(rigBeadsDir, 0755) })
 
-	// Create crew with redirect to the unwritable beads dir
+	// Create crew with redirect to the rig beads dir
 	if err := os.MkdirAll(crewBeadsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -667,6 +653,7 @@ func TestBeadsRedirectTargetCheck_FixMetadataRepairFails(t *testing.T) {
 	}
 
 	check := NewBeadsRedirectTargetCheck()
+	check.ensureConfig = func(string, string) error { return errors.New("permission denied") }
 	ctx := &CheckContext{TownRoot: townRoot}
 
 	// Run should detect "no beads setup"
@@ -675,8 +662,8 @@ func TestBeadsRedirectTargetCheck_FixMetadataRepairFails(t *testing.T) {
 		t.Fatalf("Expected StatusWarning, got %v: %s", result.Status, result.Message)
 	}
 
-	// Fix should fail because: metadata repair fails (read-only dir) and
-	// no canonical beads with dolt/redirect/config.yaml exists
+	// Fix should fail because: metadata repair fails and no canonical beads
+	// with dolt/redirect/config.yaml exists
 	err := check.Fix(ctx)
 	if err == nil {
 		t.Error("Expected Fix to fail when metadata repair fails and no canonical beads exists")

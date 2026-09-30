@@ -35,6 +35,7 @@ func writeTestrigRigsJSON(t *testing.T, townRoot string) {
 }
 
 func TestBeadsRedirectCheck_FixInitBeadsUsesCanonicalDatabase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -43,15 +44,19 @@ func TestBeadsRedirectCheck_FixInitBeadsUsesCanonicalDatabase(t *testing.T) {
 	}
 	writeTestrigRigsJSON(t, tmpDir)
 
-	// Stale ambient targets the fix must replace, not inherit.
-	t.Setenv("BEADS_DIR", filepath.Join(tmpDir, "wrong", ".beads"))
-	t.Setenv("BEADS_DB", filepath.Join(tmpDir, "wrong.db"))
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong_db")
-
 	bd := newFakeBD()
 	ctx := bd.ctx(tmpDir)
 	ctx.RigName = rigName
-	if err := NewBeadsRedirectCheck().Fix(ctx); err != nil {
+	check := NewBeadsRedirectCheck()
+	// Stale ambient targets the fix must replace, not inherit.
+	check.environ = func() []string {
+		return []string{
+			"BEADS_DIR=" + filepath.Join(tmpDir, "wrong", ".beads"),
+			"BEADS_DB=" + filepath.Join(tmpDir, "wrong.db"),
+			"BEADS_DOLT_SERVER_DATABASE=wrong_db",
+		}
+	}
+	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
 

@@ -15,7 +15,7 @@
 #   GT_CONTEXT_BUDGET_SOFT_GATE=0.85           — Soft gate threshold (default: 0.85)
 #   GT_CONTEXT_BUDGET_HARD_GATE=0.92           — Hard gate threshold (default: 0.92)
 #   GT_CONTEXT_BUDGET_MAX_TOKENS=200000        — Max context tokens (default: 200000)
-#   GT_CONTEXT_BUDGET_HARD_GATE_ROLES=mayor,deacon,witness,refinery
+#   GT_CONTEXT_BUDGET_HARD_GATE_ROLES=mayor
 #                                              — Comma-separated roles that get blocked
 #                                                at hard gate (default shown above)
 #
@@ -48,7 +48,7 @@ WARN="${GT_CONTEXT_BUDGET_WARN:-0.75}"
 SOFT_GATE="${GT_CONTEXT_BUDGET_SOFT_GATE:-0.85}"
 HARD_GATE="${GT_CONTEXT_BUDGET_HARD_GATE:-0.92}"
 MAX_TOKENS="${GT_CONTEXT_BUDGET_MAX_TOKENS:-200000}"
-HARD_GATE_ROLES="${GT_CONTEXT_BUDGET_HARD_GATE_ROLES:-mayor,deacon,witness,refinery}"
+HARD_GATE_ROLES="${GT_CONTEXT_BUDGET_HARD_GATE_ROLES:-mayor}"
 
 # ── Threshold ordering validation ───────────────────────────────────────────
 # If thresholds are inverted (e.g., WARN=0.95, HARD_GATE=0.70), reset to defaults.
@@ -116,9 +116,6 @@ ROLE="${GT_ROLE:-}"
 [[ -z "$ROLE" ]] && [[ -n "${GT_POLECAT:-}" ]]   && ROLE="polecat"
 [[ -z "$ROLE" ]] && [[ -n "${GT_CREW:-}" ]]       && ROLE="crew"
 [[ -z "$ROLE" ]] && [[ -n "${GT_MAYOR:-}" ]]      && ROLE="mayor"
-[[ -z "$ROLE" ]] && [[ -n "${GT_DEACON:-}" ]]     && ROLE="deacon"
-[[ -z "$ROLE" ]] && [[ -n "${GT_WITNESS:-}" ]]    && ROLE="witness"
-[[ -z "$ROLE" ]] && [[ -n "${GT_REFINERY:-}" ]]   && ROLE="refinery"
 ROLE=$(echo "$ROLE" | tr '[:upper:]' '[:lower:]')
 
 # Check if this role is hard-gated

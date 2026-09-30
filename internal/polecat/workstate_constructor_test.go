@@ -38,7 +38,6 @@ func TestNoWorkstateInputLiteralsOutsideConstructor(t *testing.T) {
 	packages := []string{
 		"internal/polecat",
 		"internal/cmd",
-		"internal/witness",
 	}
 
 	var violations []string

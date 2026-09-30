@@ -3,9 +3,7 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -68,7 +66,7 @@ func (c *BeadsExposureCheck) Run(ctx *CheckContext) *CheckResult {
 	seen := map[string]bool{}
 
 	for _, rigPath := range rigs {
-		for _, clonePath := range findBeadsClones(rigPath) {
+		for _, clonePath := range findRigClones(rigPath) {
 			if seen[clonePath] {
 				continue
 			}
@@ -77,7 +75,7 @@ func (c *BeadsExposureCheck) Run(ctx *CheckContext) *CheckResult {
 				continue // nothing to protect yet in this clone
 			}
 			checked++
-			switch c.probeClone(clonePath) {
+			switch c.probeClone(ctx, clonePath) {
 			case probeExposed:
 				c.exposedClones = append(c.exposedClones, clonePath)
 			case probeUnresolved:
@@ -131,10 +129,10 @@ func (c *BeadsExposureCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// probeClone runs the injected probe, or the real git probe when none is set.
-func (c *BeadsExposureCheck) probeClone(clonePath string) probeResult {
+// probeClone runs the injected probe, or the git probe when none is set.
+func (c *BeadsExposureCheck) probeClone(ctx *CheckContext, clonePath string) probeResult {
 	if c.probe == nil {
-		return beadsUntrackedAndUnignored(clonePath)
+		return beadsUntrackedAndUnignored(ctx.git(clonePath))
 	}
 	return c.probe(clonePath)
 }
@@ -151,7 +149,7 @@ func relToTown(ctx *CheckContext, clonePath string) string {
 // Fix adds .beads/ to the local git exclude file for each exposed clone.
 func (c *BeadsExposureCheck) Fix(ctx *CheckContext) error {
 	for _, clonePath := range c.exposedClones {
-		if err := rig.EnsureLocalExcludePatterns(clonePath); err != nil {
+		if err := rig.EnsureLocalExcludePatternsIn(clonePath, ctx.git(clonePath)); err != nil {
 			return fmt.Errorf("protecting .beads/ in %s: %w", clonePath, err)
 		}
 	}
@@ -168,43 +166,24 @@ const (
 	probeUnresolved                    // git failed to answer at all — unknown
 )
 
-// beadsUntrackedAndUnignored reports the exposure state of .beads/ in
-// clonePath. Scoping the status query to the .beads pathspec means every "??"
-// line in the output — whether the whole directory or individual files
-// inside it — is a real exposure; a tracked or ignored .beads/ produces no
-// such lines regardless of which mechanism (tracked exception, .gitignore,
-// or info/exclude) is doing the protecting.
+// beadsUntrackedAndUnignored reports the exposure state of .beads/ in the
+// clone g opens. Scoping the status query to the .beads pathspec means every
+// untracked path it reports — whether the whole directory or individual
+// files inside it — is a real exposure; a tracked or ignored .beads/
+// produces none regardless of which mechanism (tracked exception,
+// .gitignore, or info/exclude) is doing the protecting.
 //
 // A git failure (corrupt .git, safe.directory refusal, git missing) returns
 // probeUnresolved, never probeProtected: a credential-exposure check whose
 // purpose is catching exposure must not report a pass on evidence it could
 // not actually gather (gt-whvu).
-func beadsUntrackedAndUnignored(clonePath string) probeResult {
-	cmd := exec.Command("git", "-C", clonePath, "status", "--porcelain", "--ignored", "--", ".beads")
-	out, err := cmd.Output()
+func beadsUntrackedAndUnignored(g Repo) probeResult {
+	untracked, err := g.UntrackedPaths(".beads")
 	if err != nil {
 		return probeUnresolved
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "??") {
-			return probeExposed
-		}
+	if len(untracked) > 0 {
+		return probeExposed
 	}
 	return probeProtected
-}
-
-// findBeadsClones returns the clones in a rig that hold a .beads/ directory:
-// the standard clones (mayor, refinery, crew, polecats) plus the witness
-// agent's clone. witnessDir (internal/witness) prefers witness/rig/ for
-// legacy witness clones and falls back to witness/ itself; either layout can
-// hold a .beads/ (worktree-local or redirect-provisioned), so both are
-// enumerated. findRigClones is deliberately left as-is — it is shared with
-// the hooks-path check, and both paths are deduped by Run.
-func findBeadsClones(rigPath string) []string {
-	clones := findRigClones(rigPath)
-	clones = append(clones,
-		filepath.Join(rigPath, "witness", "rig"),
-		filepath.Join(rigPath, "witness"),
-	)
-	return clones
 }

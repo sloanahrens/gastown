@@ -348,7 +348,7 @@ func (d *Daemon) workingPolecats() ([]string, error) {
 		}
 		for _, name := range polecats {
 			hb := polecat.ReadSessionHeartbeat(d.config.TownRoot,
-				session.PolecatSessionName(session.PrefixFor(rigName), name))
+				session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), name))
 			if hb == nil || hb.EffectiveState() != polecat.HeartbeatWorking {
 				continue
 			}

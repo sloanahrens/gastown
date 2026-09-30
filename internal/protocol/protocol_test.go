@@ -1,16 +1,12 @@
 package protocol
 
 import (
-	"bytes"
-	"errors"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/mail"
 )
 
 func TestParseMessageType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected MessageType
@@ -40,6 +36,7 @@ func TestParseMessageType(t *testing.T) {
 }
 
 func TestExtractPolecat(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected string
@@ -64,6 +61,7 @@ func TestExtractPolecat(t *testing.T) {
 }
 
 func TestIsProtocolMessage(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected bool
@@ -89,6 +87,7 @@ func TestIsProtocolMessage(t *testing.T) {
 }
 
 func TestParseMergeReadyPayload(t *testing.T) {
+	t.Parallel()
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
 Polecat: nux
@@ -115,6 +114,7 @@ Verified: clean git state`
 }
 
 func TestParseMessageType_ConvoyNeedsFeeding(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		subject  string
 		expected MessageType
@@ -135,6 +135,7 @@ func TestParseMessageType_ConvoyNeedsFeeding(t *testing.T) {
 }
 
 func TestParseConvoyNeedsFeedingPayload(t *testing.T) {
+	t.Parallel()
 	ts := time.Now().Format(time.RFC3339)
 	body := "ConvoyID: hq-cv123\nSourceIssue: gt-abc\nRig: gastown\nMerged-At: " + ts
 
@@ -155,6 +156,7 @@ func TestParseConvoyNeedsFeedingPayload(t *testing.T) {
 }
 
 func TestParseConvoyNeedsFeedingPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -178,6 +180,7 @@ func TestParseConvoyNeedsFeedingPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseMergeReadyPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -203,6 +206,7 @@ func TestParseMergeReadyPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseMergedPayload(t *testing.T) {
+	t.Parallel()
 	ts := time.Now().Format(time.RFC3339)
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
@@ -229,6 +233,7 @@ Merge-Commit: abc123`
 }
 
 func TestParseMergedPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -252,6 +257,7 @@ func TestParseMergedPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseMergeFailedPayload(t *testing.T) {
+	t.Parallel()
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
 Polecat: nux
@@ -277,6 +283,7 @@ Error: Test failed`
 }
 
 func TestParseMergeFailedPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	payload, err := ParseMergeFailedPayload("")
 	if err == nil {
 		t.Errorf("expected error for empty body, got payload: %+v", payload)
@@ -287,6 +294,7 @@ func TestParseMergeFailedPayload_InvalidInput(t *testing.T) {
 }
 
 func TestParseReworkRequestPayload(t *testing.T) {
+	t.Parallel()
 	body := `Branch: polecat/nux/gt-abc
 Issue: gt-abc
 Polecat: nux
@@ -311,6 +319,7 @@ Conflict-Files: file1.go, file2.go`
 }
 
 func TestParseReworkRequestPayload_InvalidInput(t *testing.T) {
+	t.Parallel()
 	payload, err := ParseReworkRequestPayload("")
 	if err == nil {
 		t.Errorf("expected error for empty body, got payload: %+v", payload)
@@ -318,231 +327,4 @@ func TestParseReworkRequestPayload_InvalidInput(t *testing.T) {
 	if payload != nil {
 		t.Errorf("expected nil payload on error, got: %+v", payload)
 	}
-}
-
-func TestHandlerRegistry(t *testing.T) {
-	registry := NewHandlerRegistry()
-
-	handled := false
-	registry.Register(TypeMergeReady, func(msg *mail.Message) error {
-		handled = true
-		return nil
-	})
-
-	msg := &mail.Message{Subject: "MERGE_READY nux"}
-
-	if !registry.CanHandle(msg) {
-		t.Error("Registry should be able to handle MERGE_READY message")
-	}
-
-	if err := registry.Handle(msg); err != nil {
-		t.Errorf("Handle returned error: %v", err)
-	}
-
-	if !handled {
-		t.Error("Handler was not called")
-	}
-
-	// Test unregistered message type
-	unknownMsg := &mail.Message{Subject: "UNKNOWN message"}
-	if registry.CanHandle(unknownMsg) {
-		t.Error("Registry should not handle unknown message type")
-	}
-}
-
-func TestProcessProtocolMessage(t *testing.T) {
-	registry := NewHandlerRegistry()
-
-	handled := false
-	registry.Register(TypeMergeReady, func(msg *mail.Message) error {
-		handled = true
-		return nil
-	})
-
-	// Test 1: Non-protocol message returns (false, nil)
-	nonProto := &mail.Message{Subject: "Hello world"}
-	isProto, err := registry.ProcessProtocolMessage(nonProto)
-	if isProto || err != nil {
-		t.Errorf("Non-protocol message: got (%v, %v), want (false, nil)", isProto, err)
-	}
-
-	// Test 2: Recognized protocol message with handler returns (true, nil)
-	readyMsg := &mail.Message{Subject: "MERGE_READY nux"}
-	isProto, err = registry.ProcessProtocolMessage(readyMsg)
-	if !isProto || err != nil {
-		t.Errorf("Handled protocol message: got (%v, %v), want (true, nil)", isProto, err)
-	}
-	if !handled {
-		t.Error("Handler was not called for MERGE_READY")
-	}
-
-	// Test 3: Recognized protocol message WITHOUT handler returns (true, ErrNoHandler)
-	// MERGED is a valid protocol type but no handler is registered for it
-	misrouted := &mail.Message{Subject: "MERGED nux"}
-	isProto, err = registry.ProcessProtocolMessage(misrouted)
-	if !isProto {
-		t.Error("Recognized protocol message should return isProtocol=true even without handler")
-	}
-	if !errors.Is(err, ErrNoHandler) {
-		t.Errorf("Unhandled protocol message: got error %v, want ErrNoHandler", err)
-	}
-}
-
-func TestWrapWitnessHandlers(t *testing.T) {
-	handler := &mockWitnessHandler{}
-	registry := WrapWitnessHandlers(handler)
-
-	// Test MERGED
-	mergedMsg := &mail.Message{
-		Subject: "MERGED nux",
-		Body:    "Branch: polecat/nux\nIssue: gt-abc\nPolecat: nux\nRig: gastown\nTarget: main",
-	}
-	if err := registry.Handle(mergedMsg); err != nil {
-		t.Errorf("HandleMerged error: %v", err)
-	}
-	if !handler.mergedCalled {
-		t.Error("HandleMerged was not called")
-	}
-
-	// Test MERGE_FAILED
-	failedMsg := &mail.Message{
-		Subject: "MERGE_FAILED nux",
-		Body:    "Branch: polecat/nux\nIssue: gt-abc\nPolecat: nux\nRig: gastown\nTarget: main\nFailure-Type: tests\nError: failed",
-	}
-	if err := registry.Handle(failedMsg); err != nil {
-		t.Errorf("HandleMergeFailed error: %v", err)
-	}
-	if !handler.failedCalled {
-		t.Error("HandleMergeFailed was not called")
-	}
-
-	// Test REWORK_REQUEST
-	reworkMsg := &mail.Message{
-		Subject: "REWORK_REQUEST nux",
-		Body:    "Branch: polecat/nux\nIssue: gt-abc\nPolecat: nux\nRig: gastown\nTarget: main",
-	}
-	if err := registry.Handle(reworkMsg); err != nil {
-		t.Errorf("HandleReworkRequest error: %v", err)
-	}
-	if !handler.reworkCalled {
-		t.Error("HandleReworkRequest was not called")
-	}
-}
-
-func TestWrapWitnessHandlers_InvalidPayload(t *testing.T) {
-	handler := &mockWitnessHandler{}
-	registry := WrapWitnessHandlers(handler)
-
-	// Empty body should produce parse error for all message types
-	tests := []struct {
-		name    string
-		subject string
-	}{
-		{"MERGED empty body", "MERGED nux"},
-		{"MERGE_FAILED empty body", "MERGE_FAILED nux"},
-		{"REWORK_REQUEST empty body", "REWORK_REQUEST nux"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msg := &mail.Message{Subject: tt.subject, Body: ""}
-			err := registry.Handle(msg)
-			if err == nil {
-				t.Errorf("expected error for %s with empty body", tt.subject)
-			}
-		})
-	}
-
-	// Handlers should NOT have been called
-	if handler.mergedCalled || handler.failedCalled || handler.reworkCalled {
-		t.Error("handlers should not be called when parse fails")
-	}
-}
-
-func TestDefaultWitnessHandler(t *testing.T) {
-	// Prevent GT_TOWN_ROOT / GT_ROOT from pointing NewRouter at production beads.
-	// Without this, synthetic mail ("Work merged successfully", "Merge failed: tests",
-	// "Rebase required") is delivered to live polecats during test runs (gt-gbu nux report).
-	t.Setenv("GT_TOWN_ROOT", "")
-	t.Setenv("GT_ROOT", "")
-	tmpDir := t.TempDir()
-	// Prevent detectTownRoot from finding the real town via GT_TOWN_ROOT/GT_ROOT.
-	// Without this, NewRouter falls back to the production beads and delivers
-	// synthetic protocol messages to the live mail system during test runs.
-	t.Setenv("GT_TOWN_ROOT", tmpDir)
-	t.Setenv("GT_ROOT", tmpDir)
-	handler := NewWitnessHandler("gastown", tmpDir)
-	handler.Router = mail.NewRouterWithTownRoot(tmpDir, "")
-
-	// Capture output
-	var buf bytes.Buffer
-	handler.SetOutput(&buf)
-
-	// Test HandleMerged — delivery fails (no .beads in tmpDir); we only verify output.
-	mergedPayload := &MergedPayload{
-		Branch:       "polecat/nux/gt-abc",
-		Issue:        "gt-abc",
-		Polecat:      "nux",
-		Rig:          "gastown",
-		TargetBranch: "main",
-		MergeCommit:  "abc123",
-	}
-	_ = handler.HandleMerged(mergedPayload) // delivery error expected in sandboxed test
-	if !strings.Contains(buf.String(), "MERGED received") {
-		t.Errorf("Output missing expected text: %s", buf.String())
-	}
-
-	// Test HandleMergeFailed
-	buf.Reset()
-	failedPayload := &MergeFailedPayload{
-		Branch:       "polecat/nux/gt-abc",
-		Issue:        "gt-abc",
-		Polecat:      "nux",
-		Rig:          "gastown",
-		TargetBranch: "main",
-		FailureType:  "tests",
-		Error:        "Test failed",
-	}
-	_ = handler.HandleMergeFailed(failedPayload)
-	if !strings.Contains(buf.String(), "MERGE_FAILED received") {
-		t.Errorf("Output missing expected text: %s", buf.String())
-	}
-
-	// Test HandleReworkRequest
-	buf.Reset()
-	reworkPayload := &ReworkRequestPayload{
-		Branch:        "polecat/nux/gt-abc",
-		Issue:         "gt-abc",
-		Polecat:       "nux",
-		Rig:           "gastown",
-		TargetBranch:  "main",
-		ConflictFiles: []string{"file1.go"},
-	}
-	_ = handler.HandleReworkRequest(reworkPayload)
-	if !strings.Contains(buf.String(), "REWORK_REQUEST received") {
-		t.Errorf("Output missing expected text: %s", buf.String())
-	}
-}
-
-// Mock handlers for testing
-
-type mockWitnessHandler struct {
-	mergedCalled bool
-	failedCalled bool
-	reworkCalled bool
-}
-
-func (m *mockWitnessHandler) HandleMerged(payload *MergedPayload) error {
-	m.mergedCalled = true
-	return nil
-}
-
-func (m *mockWitnessHandler) HandleMergeFailed(payload *MergeFailedPayload) error {
-	m.failedCalled = true
-	return nil
-}
-
-func (m *mockWitnessHandler) HandleReworkRequest(payload *ReworkRequestPayload) error {
-	m.reworkCalled = true
-	return nil
 }

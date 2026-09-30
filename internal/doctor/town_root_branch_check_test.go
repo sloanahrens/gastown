@@ -2,33 +2,18 @@ package doctor
 
 import (
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
-)
 
-func runTownRootBranchGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-}
+	"github.com/steveyegge/gastown/internal/git/gitfake"
+)
 
 func TestTownRootBranchCheck_NotAGitRepo(t *testing.T) {
 	t.Parallel()
-	// A non-git directory means "git branch --show-current" fails — this
-	// is a could-not-ask condition, not a verified "on main" state.
-	tmpDir := t.TempDir()
-	ctx := &CheckContext{TownRoot: tmpDir}
-
-	check := NewTownRootBranchCheck()
-	result := check.Run(ctx)
+	// A non-git directory means the branch cannot be read — this is a
+	// could-not-ask condition, not a verified "on main" state.
+	result := NewTownRootBranchCheck().Run(withGit(&CheckContext{TownRoot: t.TempDir()}, gitfake.New()))
 
 	if result.Status != StatusSkipped {
 		t.Errorf("expected StatusSkipped for non-git dir, got %v: %s", result.Status, result.Message)
@@ -41,33 +26,62 @@ func TestTownRootBranchCheck_NotAGitRepo(t *testing.T) {
 	}
 }
 
+// townRootOn is a town root clone checked out on branch (main needs nothing).
+func townRootOn(t *testing.T, branch string) (*gitfake.Fake, *CheckContext) {
+	t.Helper()
+	f := gitfake.New()
+	town := filepath.Join(t.TempDir(), "town")
+	fakeClone(t, f, town)
+	if branch != "main" {
+		if err := f.OpenBranchRepo(town).CheckoutNewBranch(branch, "HEAD"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return f, withGit(&CheckContext{TownRoot: town}, f)
+}
+
 func TestTownRootBranchCheck_OnMain(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-	runTownRootBranchGit(t, tmpDir, "init", "-q", "-b", "main")
-	runTownRootBranchGit(t, tmpDir, "commit", "-q", "--allow-empty", "-m", "seed")
-
-	ctx := &CheckContext{TownRoot: tmpDir}
-	check := NewTownRootBranchCheck()
-	result := check.Run(ctx)
-
-	if result.Status != StatusOK {
+	_, ctx := townRootOn(t, "main")
+	if result := NewTownRootBranchCheck().Run(ctx); result.Status != StatusOK {
 		t.Errorf("expected StatusOK on main branch, got %v: %s", result.Status, result.Message)
 	}
 }
 
 func TestTownRootBranchCheck_WrongBranch(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-	runTownRootBranchGit(t, tmpDir, "init", "-q", "-b", "main")
-	runTownRootBranchGit(t, tmpDir, "commit", "-q", "--allow-empty", "-m", "seed")
-	runTownRootBranchGit(t, tmpDir, "checkout", "-q", "-b", "some-feature")
-
-	ctx := &CheckContext{TownRoot: tmpDir}
+	f, ctx := townRootOn(t, "some-feature")
 	check := NewTownRootBranchCheck()
-	result := check.Run(ctx)
+	if result := check.Run(ctx); result.Status != StatusError || !strings.Contains(result.Message, "some-feature") {
+		t.Fatalf("expected StatusError naming the branch, got %v: %s", result.Status, result.Message)
+	}
 
-	if result.Status != StatusError {
-		t.Errorf("expected StatusError on wrong branch, got %v: %s", result.Status, result.Message)
+	// Fix refuses while the town root has uncommitted changes, then switches.
+	dirty := filepath.Join(ctx.TownRoot, "scratch.txt")
+	if err := os.WriteFile(dirty, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Fix(ctx); err == nil || !strings.Contains(err.Error(), "uncommitted changes") {
+		t.Errorf("Fix with a dirty town root = %v, want a refusal", err)
+	}
+	if err := os.Remove(dirty); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if b, _ := f.OpenBranchRepo(ctx.TownRoot).CurrentBranch(); b != "main" {
+		t.Errorf("after Fix the town root is on %q, want main", b)
+	}
+}
+
+func TestTownRootBranchCheck_DetachedHead(t *testing.T) {
+	t.Parallel()
+	f, ctx := townRootOn(t, "main")
+	if err := f.OpenBranchRepo(ctx.TownRoot).CheckoutDetachForce("HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	if result := NewTownRootBranchCheck().Run(ctx); result.Status != StatusWarning || !strings.Contains(result.Message, "detached") {
+		t.Errorf("expected a detached-HEAD warning, got %v: %s", result.Status, result.Message)
 	}
 }

@@ -6,6 +6,7 @@
 # gitfree_test.go.
 internal/crew
 internal/daemon
+internal/doctor
 internal/doltserver
 internal/formula
 internal/git
@@ -13,6 +14,11 @@ internal/git/gitfake
 internal/land
 internal/mail
 internal/polecat
+internal/protocol
+internal/reaper
 internal/rig
+internal/runtime
+internal/scheduler/capacity
+internal/templates
 internal/testutil
 internal/util

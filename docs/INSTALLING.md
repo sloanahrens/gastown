@@ -134,8 +134,10 @@ Homebrew installs the runtime dependencies declared by the core formula. The
 source instead, install `dolt` and ICU4C first, install `bd` with Go, and ensure both
 `~/.local/bin` and `$GOPATH/bin` (usually `~/go/bin`) appear before older
 install locations. On macOS, do not install `gt` with `go install`:
-unsigned binaries may be killed by the OS. Clone the repository and use `make`
-instead.
+unsigned binaries may be killed by the OS. Clone the repository and use
+`make install-local` instead: it builds the checkout and swaps the binary into
+`~/.local/bin` atomically. It is for this first install only; once a town
+exists, update with `make install` (see [Updating](#updating)).
 
 ```bash
 brew install dolt icu4c
@@ -143,7 +145,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 git clone https://github.com/steveyegge/gastown.git
 cd gastown
-make install
+make install-local
 ```
 
 ### Step 2: Create Your Workspace
@@ -391,14 +393,25 @@ gt version
 gt doctor --fix            # Fix any post-update issues
 ```
 
-If you installed from source, update the checkout and rebuild with `make` rather
-than installing `gt` with `go install` on macOS:
+If you installed from source and a town is running, `make install` is the one
+way to update `gt`, whether you are a human, a crew session or an automation.
+Run it from any gastown clone in the town, with no arguments. It runs
+`scripts/install-gt.sh`, which installs the latest `origin/main`. `SHA=<ref>`
+picks another merged commit. The script works under a lock. It fast-forwards
+`<town>/gastown/mayor/rig`, builds there, and swaps the binary atomically. A
+smoke check follows, and if it fails the script rolls back to `gt.prev`. It
+then syncs formulas and plugins; plugin sync leaves runtime-only plugin edits
+untouched. Finally it writes `daemon/restart-pending.json`, and the daemon
+restarts itself once idle. It never kills the daemon. Exit codes: 0 installed
+or already current, 1 failed and rolled back, 2 refused (mayor/rig dirty,
+diverged or not forward), 3 busy (retry). The `rebuild-gt` plugin calls the same
+script hourly as a backstop. Do not copy binaries by hand, run `go install`, or
+use `make install-local` in a town: none of them restarts the daemon or rolls
+back.
 
 ```bash
-git pull --ff-only
-make install
-command -v gt              # Should be ~/.local/bin/gt
-gt version
+make install               # from any gastown clone in the town
+gt version                 # the installed commit
 gt doctor --fix
 ```
 

@@ -23,7 +23,7 @@ func TestHookSingletonFixReportsSurvivingDuplicates(t *testing.T) {
 		}
 		ids = append(ids, is.ID)
 	}
-	other := "gastown/witness"
+	other := "gastown/crew/joe"
 	if err := bd.Update(ids[2], beads.UpdateOptions{Assignee: &other}); err != nil {
 		t.Fatal(err)
 	}

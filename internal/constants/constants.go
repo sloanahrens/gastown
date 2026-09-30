@@ -301,13 +301,6 @@ const (
 	RoleDog = "dog"
 )
 
-// DeaconSelfProbeSubjectPrefix marks a mail message as a doctor-dog
-// self-probe (see internal/daemon.SendDeaconSelfProbe). Defined here rather
-// than in internal/daemon so internal/mail can also recognize probes (for
-// unread-count purposes) without an import cycle through internal/daemon,
-// which already depends on internal/mail.
-const DeaconSelfProbeSubjectPrefix = "DEACON_SELF_PROBE"
-
 // Role emojis - centralized for easy customization.
 // These match the Gas Town visual identity (see ~/Desktop/Gas Town/ prompts).
 const (
@@ -330,16 +323,9 @@ const (
 	EmojiBoot = "🐾"
 )
 
-// Molecule formula names for patrol and dog workflows.
-// These are used as formula identifiers in `bd mol wisp <name>` commands
-// and to match active patrol wisps by title prefix.
+// Molecule formula names for dog and convoy workflows.
+// These are used as formula identifiers in `bd mol wisp <name>` commands.
 const (
-	// MolDeaconPatrol is the deacon patrol formula name.
-	MolDeaconPatrol = "mol-deacon-patrol"
-
-	// MolWitnessPatrol is the witness patrol formula name.
-	MolWitnessPatrol = "mol-witness-patrol"
-
 	// MolDogReaper is the wisp reaper dog formula name.
 	MolDogReaper = "mol-dog-reaper"
 
@@ -367,11 +353,6 @@ const (
 	// MolConvoyCleanup is the convoy cleanup formula name.
 	MolConvoyCleanup = "mol-convoy-cleanup"
 )
-
-// PatrolFormulas returns the list of patrol formula names.
-func PatrolFormulas() []string {
-	return []string{MolDeaconPatrol, MolWitnessPatrol}
-}
 
 // SupportedShells lists shell binaries that Gas Town can detect and work with.
 // Used to identify if a tmux pane is at a shell prompt vs running a command.

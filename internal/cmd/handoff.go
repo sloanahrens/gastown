@@ -15,7 +15,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
@@ -36,8 +35,8 @@ var handoffCmd = &cobra.Command{
 
 This is the canonical way to end any agent session. It handles all roles:
 
-  - Mayor, Crew, Witness, Refinery, Deacon: Respawns with fresh Claude instance
-  - Polecats: Calls 'gt done --status DEFERRED' (Witness handles lifecycle)
+  - Mayor, Crew: Respawns with fresh Claude instance
+  - Polecats: Calls 'gt done --status DEFERRED'
 
 When run without arguments, hands off the current session.
 When given a bead ID (gt-xxx, hq-xxx), hooks that work first, then restarts.
@@ -570,11 +569,11 @@ func getCurrentTmuxSession() (string, error) {
 
 // resolveRoleToSession converts a role name or path to a tmux session name.
 // Accepts:
-//   - Role shortcuts: "crew", "witness", "refinery", "mayor", "deacon"
-//   - Full paths: "<rig>/crew/<name>", "<rig>/witness", "<rig>/refinery"
+//   - Role shortcuts: "crew", "mayor"
+//   - Full paths: "<rig>/crew/<name>"
 //   - Direct session names (passed through)
 //
-// For role shortcuts that need context (crew, witness, refinery), it auto-detects from environment.
+// For role shortcuts that need context (crew), it auto-detects from environment.
 func resolveRoleToSession(role string) (string, error) {
 	// First, check if it's a path format (contains /)
 	if strings.Contains(role, "/") {
@@ -584,9 +583,6 @@ func resolveRoleToSession(role string) (string, error) {
 	switch strings.ToLower(role) {
 	case constants.RoleMayor, "may":
 		return getMayorSessionName(), nil
-
-	case constants.RoleDeacon, "dea":
-		return getDeaconSessionName(), nil
 
 	case constants.RoleCrew:
 		// Try to get rig and crew name from environment or cwd
@@ -605,13 +601,6 @@ func resolveRoleToSession(role string) (string, error) {
 		}
 		return session.CrewSessionName(session.PrefixFor(rig), crewName), nil
 
-	case constants.RoleWitness, "wit":
-		rig := os.Getenv("GT_RIG")
-		if rig == "" {
-			return "", fmt.Errorf("cannot determine rig - set GT_RIG or run from rig context")
-		}
-		return session.WitnessSessionName(session.PrefixFor(rig)), nil
-
 	default:
 		// Assume it's a direct session name (e.g., gt-gastown-crew-max)
 		return role, nil
@@ -621,8 +610,6 @@ func resolveRoleToSession(role string) (string, error) {
 // resolvePathToSession converts a path like "<rig>/crew/<name>" to a session name.
 // Supported formats:
 //   - <rig>/crew/<name> -> gt-<rig>-crew-<name>
-//   - <rig>/witness -> gt-<rig>-witness
-//   - <rig>/refinery -> gt-<rig>-refinery
 //   - <rig>/polecats/<name> -> gt-<rig>-<name> (explicit polecat)
 //   - <rig>/<name> -> gt-<rig>-<name> (polecat shorthand, if name isn't a known role)
 func resolvePathToSession(path string) (string, error) {
@@ -655,8 +642,6 @@ func resolvePathToSession(path string) (string, error) {
 
 		// Check for known roles first
 		switch secondLower {
-		case constants.RoleWitness:
-			return session.WitnessSessionName(session.PrefixFor(rig)), nil
 		case constants.RoleCrew:
 			// Just "<rig>/crew" without a name - need more info
 			return "", fmt.Errorf("crew path requires name: %s/crew/<name>", rig)
@@ -679,7 +664,7 @@ func resolvePathToSession(path string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("cannot parse path '%s' - expected <rig>/<polecat>, <rig>/crew/<name>, <rig>/witness, or <rig>/refinery", path)
+	return "", fmt.Errorf("cannot parse path '%s' - expected <rig>/<polecat> or <rig>/crew/<name>", path)
 }
 
 // claudeEnvVars lists the Claude-related environment variables to propagate
@@ -825,17 +810,6 @@ func buildRestartCommandWithOpts(sessionName string, opts buildRestartCommandOpt
 		} else {
 			beacon = "Your account was rotated to avoid a rate limit. Continue your previous task."
 		}
-	} else if isPatrolRole(simpleRole) {
-		// Patrol roles (refinery, witness, deacon) must re-enter their patrol
-		// loop on handoff, not "wait for instructions." Without this, idle
-		// patrol agents cycle through handoff→prime→no-work→handoff burning
-		// CPU and tokens indefinitely. The patrol instruction ensures they
-		// reach the await-event idle state in their burn-or-loop step.
-		beacon = session.BuildStartupPrompt(session.BeaconConfig{
-			Recipient: identity.BeaconAddress(),
-			Sender:    "self",
-			Topic:     "patrol",
-		}, "Run `"+cli.Name()+" prime --hook` and begin patrol.")
 	} else {
 		beacon = session.FormatStartupBeacon(session.BeaconConfig{
 			Recipient: identity.BeaconAddress(),
@@ -1153,23 +1127,11 @@ func updateSessionEnvForHandoff(t *tmux.Tmux, sessionName string) {
 func sessionWorkDir(sessionName, townRoot string) (string, error) {
 	// Get session names for comparison
 	mayorSession := getMayorSessionName()
-	deaconSession := getDeaconSessionName()
-
-	bootSession := session.BootSessionName()
-
 	switch {
 	case sessionName == mayorSession:
 		// Mayor runs from ~/gt/mayor/, not town root.
 		// Tools use workspace.FindFromCwd() which walks UP to find town root.
 		return townRoot + "/mayor", nil
-
-	case sessionName == bootSession:
-		// Boot watchdog runs from ~/gt/deacon/dogs/boot/, not ~/gt/deacon/.
-		// Boot is ephemeral (fresh each daemon tick) with its own CLAUDE.md.
-		return townRoot + "/deacon/dogs/boot", nil
-
-	case sessionName == deaconSession:
-		return townRoot + "/deacon", nil
 
 	case strings.Contains(sessionName, "-crew-"):
 		// gt-<rig>-crew-<name> -> <townRoot>/<rig>/crew/<name>
@@ -1188,12 +1150,8 @@ func sessionWorkDir(sessionName, townRoot string) (string, error) {
 		switch identity.Role {
 		case session.RoleMayor:
 			return townRoot + "/mayor", nil
-		case session.RoleDeacon:
-			return townRoot + "/deacon", nil
 		case session.RoleOverseer:
 			return townRoot + "/deacon", nil
-		case session.RoleWitness:
-			return fmt.Sprintf("%s/%s/witness", townRoot, identity.Rig), nil
 		case session.RolePolecat:
 			return fmt.Sprintf("%s/%s/polecats/%s", townRoot, identity.Rig, identity.Name), nil
 		case session.RoleDog:
@@ -1914,15 +1872,4 @@ func tmuxSessionForPane(pane string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// isPatrolRole returns true if the role runs a patrol loop (refinery, witness, deacon).
-// Patrol roles must re-enter their patrol molecule on handoff rather than
-// "waiting for instructions," which leads to idle CPU burn.
-func isPatrolRole(role string) bool {
-	switch role {
-	case "witness", "deacon":
-		return true
-	}
-	return false
 }

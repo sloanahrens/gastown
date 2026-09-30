@@ -3152,27 +3152,6 @@ func isValidSubmoduleReference(run runFunc, repoPath string) bool {
 	return strings.TrimSpace(out) != "true"
 }
 
-// IsSparseCheckoutConfigured checks if sparse checkout is enabled for a given repo/worktree.
-// This is used by doctor to detect legacy sparse checkout configurations that should be removed.
-func IsSparseCheckoutConfigured(repoPath string) bool {
-	output, _, err := realRun(gitCall{args: []string{"-C", repoPath, "config", "core.sparseCheckout"}})
-	return err == nil && strings.TrimSpace(output) == "true"
-}
-
-// RemoveSparseCheckout disables sparse checkout for a repo/worktree and restores all files.
-// This is used by doctor to clean up legacy sparse checkout configurations.
-func RemoveSparseCheckout(repoPath string) error {
-	if err := EnsureSafeMutationWorkDir(repoPath); err != nil {
-		return err
-	}
-
-	// Use git sparse-checkout disable which properly restores hidden files
-	if _, stderr, err := realRun(gitCall{args: []string{"-C", repoPath, "sparse-checkout", "disable"}}); err != nil {
-		return fmt.Errorf("disabling sparse checkout: %s", strings.TrimSpace(stderr))
-	}
-	return nil
-}
-
 // WorktreeRemove removes a worktree.
 func (g *Git) WorktreeRemove(path string, force bool) error {
 	args := []string{"worktree", "remove", path}

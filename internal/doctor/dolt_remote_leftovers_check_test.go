@@ -250,16 +250,15 @@ func TestDoltRemoteLeftovers_AbsoluteRouteIsReported(t *testing.T) {
 // reported, not read as clean.
 func TestDoltRemoteLeftovers_UnstattableDoltDirWarns(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
 	town, doltDir, _ := leftoversTown(t)
-	dbDir := filepath.Dir(doltDir)
-	if err := os.Chmod(dbDir, 0o000); err != nil { // stat of dbDir/.dolt now fails with EACCES
-		t.Fatal(err)
+	check := NewDoltRemoteLeftoversCheck()
+	check.stat = func(path string) (os.FileInfo, error) {
+		if path == doltDir {
+			return nil, &os.PathError{Op: "stat", Path: path, Err: os.ErrPermission}
+		}
+		return os.Stat(path)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dbDir, 0o755) })
-	res := runLeftovers(t, town)
+	res := check.Run(&CheckContext{TownRoot: town})
 	if res.Status != StatusWarning || !strings.Contains(strings.Join(res.Details, "\n"), "cannot examine") {
 		t.Fatalf("status = %v details %v, want a Warning saying the database could not be examined", res.Status, res.Details)
 	}

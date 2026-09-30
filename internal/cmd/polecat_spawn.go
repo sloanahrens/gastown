@@ -21,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/witness"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -627,11 +626,11 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// to its respawn limit with only one polecat ever attached (gt-4lbz).
 	recordRespawn := func() {
 		if opts.HookBead != "" && !opts.Force {
-			witness.RecordBeadRespawn(townRoot, opts.HookBead)
+			polecat.RecordBeadRespawn(townRoot, opts.HookBead)
 		}
 	}
 	if opts.HookBead != "" && !opts.Force {
-		if witness.ShouldBlockRespawn(townRoot, opts.HookBead) {
+		if polecat.ShouldBlockRespawn(townRoot, opts.HookBead) {
 			maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
 			return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
 				"This bead keeps failing — investigate before re-dispatching.\n"+

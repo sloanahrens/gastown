@@ -28,6 +28,17 @@ type HooksSyncCheck struct {
 	FixableCheck
 	outOfSync         []hooks.Target   // Claude targets
 	templateOutOfSync []templateTarget // Non-Claude template-based targets
+
+	// computeExpected is the hooks config a Claude target should carry; nil
+	// is hooks.ComputeExpected, which reads the base and overrides under ~/.gt.
+	computeExpected func(target string) (*hooks.HooksConfig, error)
+}
+
+func (c *HooksSyncCheck) expectedFor(target string) (*hooks.HooksConfig, error) {
+	if c.computeExpected != nil {
+		return c.computeExpected(target)
+	}
+	return hooks.ComputeExpected(target)
 }
 
 // NewHooksSyncCheck creates a new hooks sync validation check.
@@ -65,7 +76,7 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	for _, target := range targets {
 		totalTargets++
 
-		expected, err := hooks.ComputeExpected(target.Key)
+		expected, err := c.expectedFor(target.Key)
 		if err != nil {
 			details = append(details, fmt.Sprintf("%s: error computing expected: %v", target.DisplayKey(), err))
 			continue
@@ -235,7 +246,7 @@ func (c *HooksSyncCheck) Fix(ctx *CheckContext) error {
 
 	// Fix Claude targets via merge system.
 	for _, target := range c.outOfSync {
-		expected, err := hooks.ComputeExpected(target.Key)
+		expected, err := c.expectedFor(target.Key)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", target.DisplayKey(), err))
 			continue

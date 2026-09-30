@@ -18,9 +18,7 @@ func newSpawnRenderTown(t *testing.T, rigName, polecat string) (town, rigPath st
 	rigPath = filepath.Join(town, rigName)
 	for _, d := range []string{
 		filepath.Join(rigPath, "polecats", polecat, rigName),
-		filepath.Join(rigPath, "witness"),
 		filepath.Join(town, "mayor"),
-		filepath.Join(town, "deacon"),
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -80,9 +78,7 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 	}{
 		{"polecat", "nux", RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: filepath.Join(rigPath, "polecats", "nux", "myrig")}},
 		{"crew", "sloan", RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "sloan", TownRoot: town, WorkDir: filepath.Join(rigPath, "crew", "sloan")}},
-		{"witness", "", RoleContext{Role: RoleWitness, Rig: "myrig", TownRoot: town, WorkDir: filepath.Join(rigPath, "witness")}},
 		{"mayor", "", RoleContext{Role: RoleMayor, TownRoot: town, WorkDir: filepath.Join(town, "mayor")}},
-		{"deacon", "", RoleContext{Role: RoleDeacon, TownRoot: town, WorkDir: filepath.Join(town, "deacon")}},
 		// gt prime inside a dog session derives the dog from its kennel cwd
 		// (roleContextFromDir) and never sets Rig.
 		{"dog", "alpha", RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}},
@@ -117,9 +113,7 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 	}{
 		{"polecat", "nux", filepath.Join(rigPath, "polecats", "nux", "myrig")},
 		{"crew", "sloan", filepath.Join(rigPath, "crew", "sloan")},
-		{"witness", "", filepath.Join(rigPath, "witness")},
 		{"mayor", "", filepath.Join(town, "mayor")},
-		{"deacon", "", filepath.Join(town, "deacon")},
 		{"dog", "alpha", filepath.Join(town, "deacon", "dogs", "alpha")},
 	}
 	for _, tc := range cases {
@@ -155,6 +149,7 @@ func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 		{"boot", "", ""},
 		{"polecat", rigPath, ""},
 		{"witness", "", ""},
+		{"deacon", "", ""},
 		{"nonsense", rigPath, "x"},
 	} {
 		if _, err := spawnRoleContext(tc.role, town, tc.rig, tc.agent); err == nil {

@@ -174,7 +174,7 @@ func (c *RigRoutesJSONLCheck) findRigDirectories(townRoot string) []string {
 				continue // .beads doesn't exist
 			}
 			// Skip if this dir's .beads resolves to the town root .beads
-			// (e.g. deacon uses a symlinked .beads dir pointing to town beads)
+			// (e.g. a symlinked .beads dir pointing to town beads)
 			if townBeadsErr == nil && os.SameFile(townBeadsInfo, beadsDirInfo) {
 				continue
 			}

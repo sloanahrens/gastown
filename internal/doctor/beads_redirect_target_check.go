@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// BeadsRedirectTargetCheck validates that .beads/redirect files in crew/polecat/refinery
+// BeadsRedirectTargetCheck validates that .beads/redirect files in crew/polecat
 // worktrees point to targets that actually exist and have a working beads setup.
 //
 // This catches setup issues when cloning to a new machine where redirects might
@@ -18,6 +18,9 @@ import (
 type BeadsRedirectTargetCheck struct {
 	FixableCheck
 	brokenTargets []brokenTarget // Cached for Fix
+	// ensureConfig writes config.yaml from metadata.json when it is missing;
+	// nil is beads.EnsureConfigYAMLFromMetadataIfMissing.
+	ensureConfig func(beadsDir, rigName string) error
 }
 
 // brokenTarget represents a redirect whose target is missing or broken.
@@ -174,7 +177,11 @@ func (c *BeadsRedirectTargetCheck) Fix(ctx *CheckContext) error {
 		// written (e.g., due to a crash or interrupted setup).
 		if strings.Contains(bt.reason, "no beads setup") && dirExists(bt.resolvedPath) {
 			rigName := extractRigName(ctx.TownRoot, bt.worktreePath)
-			if err := beads.EnsureConfigYAMLFromMetadataIfMissing(bt.resolvedPath, rigName); err != nil {
+			ensure := c.ensureConfig
+			if ensure == nil {
+				ensure = beads.EnsureConfigYAMLFromMetadataIfMissing
+			}
+			if err := ensure(bt.resolvedPath, rigName); err != nil {
 				log.Printf("[doctor] beads-redirect-target: could not create config.yaml from metadata in %s: %v", bt.resolvedPath, err)
 			} else if hasBeadsSetup(bt.resolvedPath) {
 				continue // Fixed — config.yaml created successfully
@@ -227,7 +234,7 @@ func (c *BeadsRedirectTargetCheck) Fix(ctx *CheckContext) error {
 }
 
 // extractRigName derives the rig name from a worktree path within a town.
-// For example, "/town/myrig/refinery/rig" returns "myrig".
+// For example, "/town/myrig/crew/max" returns "myrig".
 func extractRigName(townRoot, worktreePath string) string {
 	relPath, err := filepath.Rel(townRoot, worktreePath)
 	if err != nil {

@@ -83,12 +83,6 @@ func resolveSelfTarget() (agentID string, pane string, hookRoot string, err erro
 	switch roleInfo.Role {
 	case RoleMayor:
 		agentID = "mayor/"
-	case RoleDeacon:
-		agentID = "deacon/"
-	case RoleBoot:
-		agentID = "deacon/boot"
-	case RoleWitness:
-		agentID = fmt.Sprintf("%s/witness", roleInfo.Rig)
 	case RolePolecat:
 		agentID = fmt.Sprintf("%s/polecats/%s", roleInfo.Rig, roleInfo.Polecat)
 	case RoleCrew:
