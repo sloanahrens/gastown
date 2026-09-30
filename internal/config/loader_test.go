@@ -2662,7 +2662,7 @@ func TestDaemonPatrolConfigRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "mayor", "daemon.json")
 
 	original := NewDaemonPatrolConfig()
-	original.Patrols["custom"] = PatrolConfig{
+	original.Patrols.Handler = &PatrolConfig{
 		Enabled:  true,
 		Interval: "10m",
 		Agent:    "custom-agent",
@@ -2686,10 +2686,10 @@ func TestDaemonPatrolConfigRoundTrip(t *testing.T) {
 	if loaded.Heartbeat == nil || !loaded.Heartbeat.Enabled {
 		t.Error("Heartbeat not preserved")
 	}
-	if len(loaded.Patrols) != 4 {
-		t.Errorf("Patrols count = %d, want 4", len(loaded.Patrols))
+	if loaded.Patrols.Count() != 4 {
+		t.Errorf("Patrols count = %d, want 4", loaded.Patrols.Count())
 	}
-	if custom, ok := loaded.Patrols["custom"]; !ok || custom.Agent != "custom-agent" {
+	if custom := loaded.Patrols.RolePatrol("handler"); custom == nil || custom.Agent != "custom-agent" {
 		t.Error("custom patrol not preserved")
 	}
 }
@@ -2793,8 +2793,8 @@ func TestEnsureDaemonPatrolConfig(t *testing.T) {
 		if loaded.Type != "daemon-patrol-config" {
 			t.Errorf("Type = %q, want 'daemon-patrol-config'", loaded.Type)
 		}
-		if len(loaded.Patrols) != 3 {
-			t.Errorf("Patrols count = %d, want 3 (deacon, witness, refinery)", len(loaded.Patrols))
+		if loaded.Patrols.Count() != 3 {
+			t.Errorf("Patrols count = %d, want 3 (deacon, witness, refinery)", loaded.Patrols.Count())
 		}
 	})
 
@@ -2805,8 +2805,8 @@ func TestEnsureDaemonPatrolConfig(t *testing.T) {
 		existing := &DaemonPatrolConfig{
 			Type:    "daemon-patrol-config",
 			Version: 1,
-			Patrols: map[string]PatrolConfig{
-				"custom-only": {Enabled: true, Agent: "custom"},
+			Patrols: &PatrolsConfig{
+				Handler: &PatrolConfig{Enabled: true, Agent: "custom"},
 			},
 		}
 		if err := SaveDaemonPatrolConfig(path, existing); err != nil {
@@ -2822,10 +2822,10 @@ func TestEnsureDaemonPatrolConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 		}
-		if len(loaded.Patrols) != 1 {
-			t.Errorf("Patrols count = %d, want 1 (should preserve existing)", len(loaded.Patrols))
+		if loaded.Patrols.Count() != 1 {
+			t.Errorf("Patrols count = %d, want 1 (should preserve existing)", loaded.Patrols.Count())
 		}
-		if _, ok := loaded.Patrols["custom-only"]; !ok {
+		if loaded.Patrols.RolePatrol("handler") == nil {
 			t.Error("existing custom patrol was overwritten")
 		}
 	})
@@ -2851,13 +2851,13 @@ func TestNewDaemonPatrolConfig(t *testing.T) {
 	if cfg.Heartbeat.Interval != "3m" {
 		t.Errorf("Heartbeat.Interval = %q, want '3m'", cfg.Heartbeat.Interval)
 	}
-	if len(cfg.Patrols) != 3 {
-		t.Errorf("Patrols count = %d, want 3", len(cfg.Patrols))
+	if cfg.Patrols.Count() != 3 {
+		t.Errorf("Patrols count = %d, want 3", cfg.Patrols.Count())
 	}
 
 	for _, name := range []string{"deacon", "witness", "refinery"} {
-		patrol, ok := cfg.Patrols[name]
-		if !ok {
+		patrol := cfg.Patrols.RolePatrol(name)
+		if patrol == nil {
 			t.Errorf("missing %s patrol", name)
 			continue
 		}
@@ -2906,18 +2906,18 @@ func TestAddRigToDaemonPatrols(t *testing.T) {
 			t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 		}
 
-		witness := cfg.Patrols["witness"]
+		witness := derefPatrol(cfg.Patrols.RolePatrol("witness"))
 		if len(witness.Rigs) != 2 || witness.Rigs[0] != "gastown" || witness.Rigs[1] != "newrig" {
 			t.Errorf("witness rigs = %v, want [gastown newrig]", witness.Rigs)
 		}
 
-		refinery := cfg.Patrols["refinery"]
+		refinery := derefPatrol(cfg.Patrols.RolePatrol("refinery"))
 		if len(refinery.Rigs) != 2 || refinery.Rigs[0] != "gastown" || refinery.Rigs[1] != "newrig" {
 			t.Errorf("refinery rigs = %v, want [gastown newrig]", refinery.Rigs)
 		}
 
 		// Deacon should be untouched
-		deacon := cfg.Patrols["deacon"]
+		deacon := derefPatrol(cfg.Patrols.RolePatrol("deacon"))
 		if len(deacon.Rigs) != 0 {
 			t.Errorf("deacon rigs = %v, want empty", deacon.Rigs)
 		}
@@ -2952,7 +2952,7 @@ func TestAddRigToDaemonPatrols(t *testing.T) {
 			t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 		}
 
-		witness := cfg.Patrols["witness"]
+		witness := derefPatrol(cfg.Patrols.RolePatrol("witness"))
 		if len(witness.Rigs) != 2 {
 			t.Errorf("witness rigs = %v, want [gastown beads] (no duplicate)", witness.Rigs)
 		}
@@ -3081,12 +3081,12 @@ func TestRemoveRigFromDaemonPatrols(t *testing.T) {
 			t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 		}
 
-		witness := cfg.Patrols["witness"]
+		witness := derefPatrol(cfg.Patrols.RolePatrol("witness"))
 		if len(witness.Rigs) != 2 || witness.Rigs[0] != "gastown" || witness.Rigs[1] != "myrig" {
 			t.Errorf("witness rigs = %v, want [gastown myrig]", witness.Rigs)
 		}
 
-		refinery := cfg.Patrols["refinery"]
+		refinery := derefPatrol(cfg.Patrols.RolePatrol("refinery"))
 		if len(refinery.Rigs) != 2 || refinery.Rigs[0] != "gastown" || refinery.Rigs[1] != "myrig" {
 			t.Errorf("refinery rigs = %v, want [gastown myrig]", refinery.Rigs)
 		}
@@ -3121,7 +3121,7 @@ func TestRemoveRigFromDaemonPatrols(t *testing.T) {
 			t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 		}
 
-		witness := cfg.Patrols["witness"]
+		witness := derefPatrol(cfg.Patrols.RolePatrol("witness"))
 		if len(witness.Rigs) != 1 || witness.Rigs[0] != "gastown" {
 			t.Errorf("witness rigs = %v, want [gastown]", witness.Rigs)
 		}
@@ -3240,12 +3240,12 @@ func TestRemoveRigFromDaemonPatrols(t *testing.T) {
 			t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 		}
 
-		witness := cfg.Patrols["witness"]
+		witness := derefPatrol(cfg.Patrols.RolePatrol("witness"))
 		if len(witness.Rigs) != 1 || witness.Rigs[0] != "gastown" {
 			t.Errorf("witness rigs = %v, want [gastown]", witness.Rigs)
 		}
 
-		refinery := cfg.Patrols["refinery"]
+		refinery := derefPatrol(cfg.Patrols.RolePatrol("refinery"))
 		if len(refinery.Rigs) != 1 || refinery.Rigs[0] != "gastown" {
 			t.Errorf("refinery rigs = %v, want [gastown]", refinery.Rigs)
 		}
@@ -6820,4 +6820,12 @@ func TestMergeSettingsCommand_PostMergeCommandRigRootOnly(t *testing.T) {
 	if got.PostMergeCommand != "" || got.PostMergeTimeout != "" {
 		t.Fatalf("overlay-only tier set post-merge settings: command=%q timeout=%q", got.PostMergeCommand, got.PostMergeTimeout)
 	}
+}
+
+// derefPatrol reads a possibly absent patrol entry as a value.
+func derefPatrol(p *PatrolConfig) PatrolConfig {
+	if p == nil {
+		return PatrolConfig{}
+	}
+	return *p
 }
