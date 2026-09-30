@@ -46,7 +46,7 @@ func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check town-level beads
 	townBeadsDir := filepath.Join(ctx.TownRoot, ".beads")
-	townInvalid := c.checkBeadsDir(townBeadsDir, "town")
+	townInvalid := c.checkBeadsDir(ctx, townBeadsDir, "town")
 	for _, inv := range townInvalid {
 		details = append(details, c.formatInvalid(inv))
 	}
@@ -56,7 +56,7 @@ func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 	rigDirs := c.findRigBeadsDirs(ctx.TownRoot)
 	for _, rigDir := range rigDirs {
 		rigName := filepath.Base(filepath.Dir(rigDir))
-		rigInvalid := c.checkBeadsDir(rigDir, rigName)
+		rigInvalid := c.checkBeadsDir(ctx, rigDir, rigName)
 		for _, inv := range rigInvalid {
 			details = append(details, c.formatInvalid(inv))
 		}
@@ -81,10 +81,10 @@ func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // checkBeadsDir checks all pinned beads in a directory for invalid attachments.
-func (c *HookAttachmentValidCheck) checkBeadsDir(beadsDir, _ string) []invalidAttachment { // location unused but kept for future diagnostic output
+func (c *HookAttachmentValidCheck) checkBeadsDir(ctx *CheckContext, beadsDir, _ string) []invalidAttachment { // location unused but kept for future diagnostic output
 	var invalid []invalidAttachment
 
-	b := beads.New(filepath.Dir(beadsDir))
+	b := ctx.beadsAt(filepath.Dir(beadsDir))
 
 	// List all pinned beads
 	pinnedBeads, err := b.List(beads.ListOptions{
@@ -173,7 +173,7 @@ func (c *HookAttachmentValidCheck) Fix(ctx *CheckContext) error {
 	var errors []string
 
 	for _, inv := range c.invalidAttachments {
-		b := beads.New(filepath.Dir(inv.pinnedBeadDir))
+		b := ctx.beadsAt(filepath.Dir(inv.pinnedBeadDir))
 
 		_, err := b.DetachMolecule(inv.pinnedBeadID)
 		if err != nil {
@@ -225,7 +225,7 @@ func (c *HookSingletonCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check town-level beads
 	townBeadsDir := filepath.Join(ctx.TownRoot, ".beads")
-	townDups := c.checkBeadsDir(townBeadsDir)
+	townDups := c.checkBeadsDir(ctx, townBeadsDir)
 	for _, dup := range townDups {
 		details = append(details, c.formatDuplicate(dup))
 	}
@@ -235,7 +235,7 @@ func (c *HookSingletonCheck) Run(ctx *CheckContext) *CheckResult {
 	attachCheck := &HookAttachmentValidCheck{}
 	rigDirs := attachCheck.findRigBeadsDirs(ctx.TownRoot)
 	for _, rigDir := range rigDirs {
-		rigDups := c.checkBeadsDir(rigDir)
+		rigDups := c.checkBeadsDir(ctx, rigDir)
 		for _, dup := range rigDups {
 			details = append(details, c.formatDuplicate(dup))
 		}
@@ -265,10 +265,10 @@ func (c *HookSingletonCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // checkBeadsDir checks for duplicate handoff beads in a directory.
-func (c *HookSingletonCheck) checkBeadsDir(beadsDir string) []duplicateHandoff {
+func (c *HookSingletonCheck) checkBeadsDir(ctx *CheckContext, beadsDir string) []duplicateHandoff {
 	var duplicates []duplicateHandoff
 
-	b := beads.New(filepath.Dir(beadsDir))
+	b := ctx.beadsAt(filepath.Dir(beadsDir))
 
 	// List all pinned beads
 	pinnedBeads, err := b.List(beads.ListOptions{
@@ -316,7 +316,7 @@ func (c *HookSingletonCheck) Fix(ctx *CheckContext) error {
 		if c.closer != nil {
 			b = c.closer(dup.beadsDir)
 		} else {
-			b = beads.New(filepath.Dir(dup.beadsDir))
+			b = ctx.beadsAt(filepath.Dir(dup.beadsDir))
 		}
 
 		// Close all but the first bead (keep the oldest/first one)
@@ -369,7 +369,7 @@ func (c *OrphanedAttachmentsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check town-level beads
 	townBeadsDir := filepath.Join(ctx.TownRoot, ".beads")
-	townOrphans := c.checkBeadsDir(townBeadsDir, ctx.TownRoot)
+	townOrphans := c.checkBeadsDir(ctx, townBeadsDir, ctx.TownRoot)
 	for _, orph := range townOrphans {
 		details = append(details, c.formatOrphan(orph))
 	}
@@ -379,7 +379,7 @@ func (c *OrphanedAttachmentsCheck) Run(ctx *CheckContext) *CheckResult {
 	attachCheck := &HookAttachmentValidCheck{}
 	rigDirs := attachCheck.findRigBeadsDirs(ctx.TownRoot)
 	for _, rigDir := range rigDirs {
-		rigOrphans := c.checkBeadsDir(rigDir, ctx.TownRoot)
+		rigOrphans := c.checkBeadsDir(ctx, rigDir, ctx.TownRoot)
 		for _, orph := range rigOrphans {
 			details = append(details, c.formatOrphan(orph))
 		}
@@ -404,10 +404,10 @@ func (c *OrphanedAttachmentsCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // checkBeadsDir checks for orphaned handoff beads in a directory.
-func (c *OrphanedAttachmentsCheck) checkBeadsDir(beadsDir, townRoot string) []orphanedHandoff {
+func (c *OrphanedAttachmentsCheck) checkBeadsDir(ctx *CheckContext, beadsDir, townRoot string) []orphanedHandoff {
 	var orphans []orphanedHandoff
 
-	b := beads.New(filepath.Dir(beadsDir))
+	b := ctx.beadsAt(filepath.Dir(beadsDir))
 
 	// List all pinned beads
 	pinnedBeads, err := b.List(beads.ListOptions{

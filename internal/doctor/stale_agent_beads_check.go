@@ -90,7 +90,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			defer wg.Done()
 
 			rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-			bd := beads.New(rigBeadsPath)
+			bd := ctx.beadsAt(rigBeadsPath)
 			rigName := info.name
 
 			// Get actual crew workers on disk
@@ -160,7 +160,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// any route in routes.jsonl. These accumulate when a rig is removed via
 	// gt rig remove but its agent beads in the town database are not cleaned up.
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townBd := beads.New(townBeadsPath)
+	townBd := ctx.beadsAt(townBeadsPath)
 	if townAgents, err := townBd.ListAgentBeads(); err == nil {
 		for id, issue := range townAgents {
 			// Skip closed/non-active beads
@@ -314,7 +314,7 @@ func (c *StaleAgentBeadsCheck) Fix(ctx *CheckContext) error {
 
 	// Town beads client as fallback for orphan beads from deregistered rigs
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townBd := beads.New(townBeadsPath)
+	townBd := ctx.beadsAt(townBeadsPath)
 
 	// Close each stale bead
 	closedStatus := "closed"
@@ -324,7 +324,7 @@ func (c *StaleAgentBeadsCheck) Fix(ctx *CheckContext) error {
 		var bd *beads.Beads
 		for prefix, path := range prefixToPath {
 			if strings.HasPrefix(beadID, prefix+"-") {
-				bd = beads.New(path)
+				bd = ctx.beadsAt(path)
 				break
 			}
 		}

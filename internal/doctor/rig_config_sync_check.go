@@ -527,7 +527,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		rigPath := filepath.Join(ctx.TownRoot, info.rigName)
 		beadsDir := doltserver.FindRigBeadsDir(ctx.TownRoot, info.rigName)
 
-		bd := beads.NewWithBeadsDir(rigPath, beadsDir)
+		bd := ctx.beadsWithDir(rigPath, beadsDir)
 		fields := &beads.RigFields{
 			Repo:   info.gitURL,
 			Prefix: info.prefix,
