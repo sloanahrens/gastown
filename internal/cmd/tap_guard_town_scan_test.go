@@ -576,3 +576,198 @@ func TestScanRootPathWithoutHome(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchesUnboundedScanImplicitRoot covers the walker's implied root
+// (gt-3e6wa): a recursive scan that names no path walks the directory it runs
+// in, so one invocation is bounded inside a polecat worktree and a town-tree
+// walk from the rig root one level up. The boundary cases carry equal weight —
+// a scan that names a root is judged on that root wherever the session sits,
+// and a cd before the scan moves the walk root with it.
+func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+	worktree := filepath.Join(rig, "polecats", "lapis", "gastown")
+	settings := filepath.Join(rig, "settings")
+	other := t.TempDir()
+	repoGit := filepath.Join(rig, ".repo.git")
+
+	tests := []struct {
+		name     string
+		cwd      string
+		command  string
+		blocked  bool
+		reasonIn string
+	}{
+		// Blocked — no path argument, so the walk is cwd: from a rig root
+		// that is every worktree of the rig at once, and from the town root
+		// every rig, bare repo and worktree in the town.
+		{"grep from the rig root", rig, "grep -rn TODO", true, "cwd is a rig root"},
+		{"grep -R from the rig root", rig, "grep -R TODO", true, "cwd is a rig root"},
+		{"rg from the rig root", rig, "rg TODO", true, "cwd is a rig root"},
+		{"rg --files from the rig root", rig, "rg --files", true, "cwd is a rig root"},
+		{"ag from the rig root", rig, "ag TODO", true, "cwd is a rig root"},
+		{"fd from the rig root", rig, "fd bar", true, "cwd is a rig root"},
+		{"ls -R from the rig root", rig, "ls -R", true, "cwd is a rig root"},
+		{"ls -laR from the rig root", rig, "ls -laR", true, "cwd is a rig root"},
+		{"du from the rig root", rig, "du -sh", true, "cwd is a rig root"},
+		{"find from the rig root", rig, "find -name x", true, "cwd is a rig root"},
+		{"find with no arguments", rig, "find", true, "cwd is a rig root"},
+		{"bfs from the rig root", rig, "bfs -name x", true, "cwd is a rig root"},
+		{"the pattern arrives from a flag, leaving no path", rig, "grep -rn -e TODO", true, "cwd is a rig root"},
+		{"grep from the rig's polecats", filepath.Join(rig, "polecats"), "grep -rn TODO", true, "cwd is a rig's worktree dir"},
+		{"grep from the town root", town, "grep -rn TODO", true, "cwd is the town root"},
+		{"grep from a town-level directory", filepath.Join(town, "mayor"), "grep -rn TODO", true, "cwd is a rig root"},
+		{"grep from a bare repo", repoGit, "grep -rn TODO", true, "cwd is a .repo.git bare repo"},
+
+		// Blocked — the root is spelled, and spelled as the working
+		// directory: the same walk, judged by the same rule.
+		{"grep rooted at the rig root by dot", rig, "grep -rn TODO .", true, "rooted at"},
+		{"find rooted at the rig root by dot", rig, "find . -name x", true, "rooted at"},
+
+		// Allowed — the same commands inside one worktree, which is the
+		// subtree below the town the walk is meant to reach.
+		{"grep in a worktree", worktree, "grep -rn TODO", false, ""},
+		{"rg in a worktree", worktree, "rg TODO", false, ""},
+		{"ls -R in a worktree", worktree, "ls -R", false, ""},
+		{"du in a worktree", worktree, "du -sh", false, ""},
+		{"find in a worktree", worktree, "find -name x", false, ""},
+		{"grep in a rig directory with no checkouts", settings, "grep -rn TODO", false, ""},
+		{"grep outside the town", other, "grep -rn TODO", false, ""},
+
+		// Allowed — naming one root bounds the walk, wherever the session
+		// sits. Without this the rule would block scans of any directory
+		// from a town-tree cwd, which is a worse bug than the one it fixes.
+		{"grep over a bounded path from the rig root", rig, "grep -rn TODO " + other, false, ""},
+		{"grep over one worktree from the rig root", rig, "grep -rn TODO " + worktree, false, ""},
+		{"du over a bounded path from the rig root", rig, "du -sh " + other, false, ""},
+		{"ls -R over a bounded path from the rig root", rig, "ls -R " + other, false, ""},
+		{"find over a bounded path from the rig root", rig, "find " + other + " -name x", false, ""},
+		{"fd over a bounded path from the rig root", rig, "fd bar " + other, false, ""},
+
+		// A cd before the scan moves the walk root with it — the shapes that
+		// made the resolution cwd-aware rather than cwd-always.
+		{"cd out of the town bounds the scan", rig, "cd " + other + " && grep -rn TODO", false, ""},
+		{"cd into one worktree bounds the scan", rig, "cd " + worktree + " && grep -rn TODO", false, ""},
+		{"cd into the town root walks the town", worktree, "cd " + town + " && grep -rn TODO", true, "cwd is the town root"},
+		{"cd into the rig root walks the rig", worktree, "cd " + rig + " ; grep -rn TODO", true, "cwd is a rig root"},
+		{"cd into a bounded path, then a path argument", rig, "cd " + other + " && grep -rn TODO " + worktree, false, ""},
+
+		// A cd this guard cannot follow leaves the walk root unknown, and an
+		// unknown root is not a hazard: guessing one would block a bounded
+		// scan on the strength of a directory the shell may never enter.
+		{"cd - has no known target", rig, "cd - && grep -rn TODO", false, ""},
+		{"cd to an unseen variable", rig, "cd $GT_NO_SUCH_DIR && grep -rn TODO", false, ""},
+		{"cd to a directory that does not exist", rig, "cd " + filepath.Join(other, "nope") + " && grep -rn TODO", false, ""},
+
+		// A cd in a pipeline or background job runs in a subshell of its own,
+		// so the scan after it keeps the directory the shell already had.
+		{"cd in a pipeline does not move the walk root", rig, "cd " + other + " | grep -rn TODO", true, "cwd is a rig root"},
+
+		// Blocked — the working directory is the home directory, the root the
+		// shell's own "~" names.
+		{"grep from the home directory", home, "grep -rn TODO", true, "cwd is the home directory"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(tt.cwd)
+			reason, alternative := matchesUnboundedScan(shellTokenize(tt.command), town)
+			got := reason != ""
+			if got != tt.blocked {
+				t.Errorf("matchesUnboundedScan(%q) from %s blocked=%v (reason=%q), want %v",
+					tt.command, tt.cwd, got, reason, tt.blocked)
+			}
+			if tt.blocked && alternative == "" {
+				t.Errorf("matchesUnboundedScan(%q) blocked but returned no alternative text", tt.command)
+			}
+			if tt.reasonIn != "" && !strings.Contains(reason, tt.reasonIn) {
+				t.Errorf("matchesUnboundedScan(%q) reason=%q, want it to contain %q", tt.command, reason, tt.reasonIn)
+			}
+		})
+	}
+}
+
+// TestUnboundedScanImplicitRootNamesTheWalk pins the block an implied root
+// prints: the reason names the tree the walk hit, and the alternative carries
+// the working directory it started from — an agent whose command spells no
+// path has nothing else to correct.
+func TestUnboundedScanImplicitRootNamesTheWalk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+	t.Chdir(rig)
+
+	reason, alternative := matchesUnboundedScan(shellTokenize("grep -rn TODO"), town)
+	if want := "Unbounded scan (grep, cwd is a rig root)"; reason != want {
+		t.Errorf("reason = %q, want %q", reason, want)
+	}
+	if !strings.Contains(alternative, "named no path") || !strings.Contains(alternative, rig) {
+		t.Errorf("alternative = %q, want it to name the no-path walk and the working directory %s", alternative, rig)
+	}
+}
+
+// TestUnboundedScanImplicitRootNoTown pins that the implied root is inert
+// outside a town: with no town context the walk root is judged by the
+// filesystem and home rules alone, exactly as an explicit root always was.
+func TestUnboundedScanImplicitRootNoTown(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+
+	t.Chdir(rig)
+	if reason, _ := matchesUnboundedScan(shellTokenize("grep -rn TODO"), ""); reason != "" {
+		t.Errorf("implicit root blocked inside a rig with no town context: %q", reason)
+	}
+
+	t.Chdir(home)
+	reason, alternative := matchesUnboundedScan(shellTokenize("ls -R"), "")
+	if !strings.Contains(reason, "the home directory") {
+		t.Errorf("implicit root from the home directory = %q, want the home directory rule", reason)
+	}
+	if alternative == "" {
+		t.Error("blocked with no alternative text")
+	}
+}
+
+// TestScanRootHazard pins the label each rule contributes to a block: the one
+// piece of the banner an implied root cannot spell for itself, since the
+// argument it would print is the working directory rather than a token in the
+// command.
+func TestScanRootHazard(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	town := makeFakeTown(t, filepath.Join(home, "gt"))
+	rig := filepath.Join(town, fakeRigName)
+
+	tests := []struct {
+		name  string
+		token string
+		root  string
+		want  string
+	}{
+		{"a denylisted spelling names itself", "/", "", "/"},
+		{"a denylisted absolute root names itself", "/opt", "", "/opt"},
+		{"the home directory names the spelling it arrived as", "/Users/me", home, "the home directory /Users/me"},
+		{"an expanded home path is the home directory", home, home, "the home directory " + home},
+		{"a town-tree root names the shape of the tree instead", rig, rig, "a rig root"},
+		{"the town root", town, town, "the town root"},
+		{"a bounded root has no label", rig, filepath.Join(rig, "mayor", "rig"), ""},
+		{"an unresolvable root has no label", "TODO", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			label, suggestion := scanRootHazard(tt.token, tt.root, town)
+			if label != tt.want {
+				t.Errorf("scanRootHazard(%q, %q, town) label = %q, want %q", tt.token, tt.root, label, tt.want)
+			}
+			if (suggestion != "") != (tt.want != "") {
+				t.Errorf("scanRootHazard(%q, %q, town) suggestion = %q, want it empty only for a bounded root",
+					tt.token, tt.root, suggestion)
+			}
+		})
+	}
+}

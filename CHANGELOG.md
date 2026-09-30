@@ -125,11 +125,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, at the pattern slot too, as is every other argument: `rg -e TODO
   <town>` is still blocked, `rg -e TODO polecats` from a rig root is still
   blocked, and a bare word anywhere but the pattern slot is still a path. A
-  scan with no path argument keeps its old reading (it walks cwd; gt-3e6wa).
+  scan with no path argument is judged on the working directory it walks
+  (gt-3e6wa).
   A value-taking option's argument is judged as a scan root like any other,
   so a grammar that is wrong about an option re-blocks rather than spares;
   the values that would be a path the scan walks are all listed (fd's
   `--search-path`, `-C`, `--base-directory`).
+
+- **A recursive scan that names no path is judged on the directory it runs in**
+  (gt-3e6wa) — the unbounded-scan rule judged only the arguments an invocation
+  spelled out, so `grep -rn TODO`, `rg foo`, `fd bar`, `ls -R`, `du -sh` and
+  `find -name x` run from a rig root walked that whole rig unblocked: the
+  town-tree rule's hazard with the root implied instead of written, and the
+  worst place for it, since a rig root holds every worktree the rig has. A scan
+  that names no path now resolves the directory it walks and puts it through
+  the same three rules (the filesystem denylist, the home directory, the town
+  tree), so the block names the tree the walk hit and the alternative names the
+  working directory it started from. The resolution follows a `cd` in an
+  earlier segment of the same line — `cd /tmp && grep -rn TODO` walks /tmp —
+  while a cd in a pipeline, a background job or before `||` runs in a subshell
+  of its own and leaves the root where it was; a cd it cannot resolve (`cd -`,
+  an unseen variable, a directory that does not exist yet) leaves the root
+  unknown, which blocks nothing. Naming a path still bounds the walk from any
+  cwd, and `find`/`bfs` paths are read from before the expression that follows
+  them, so `find /var/log -name x` names a root where `find -name x` does not.
 
 - **Boot is no longer killed and respawned on every daemon heartbeat**
   (gt-w28o) — with `boot_mode: agent`, the daemon spawned Boot on each
