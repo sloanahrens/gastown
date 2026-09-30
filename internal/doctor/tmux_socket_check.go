@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -98,7 +97,7 @@ func (c *SocketSplitBrainCheck) Run(ctx *CheckContext) *CheckResult {
 	var orphans []string
 
 	for _, s := range defaultSessions {
-		if !session.IsKnownSession(s) {
+		if !ctx.prefixes().IsKnownSession(s) {
 			continue // Not a Gas Town session
 		}
 		if townSet[s] {

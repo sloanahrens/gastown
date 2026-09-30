@@ -109,7 +109,7 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Filter to Gas Town sessions only (known rig prefixes and hq-*)
 	var gtSessions []string
 	for _, sess := range sessions {
-		if session.IsKnownSession(sess) {
+		if ctx.prefixes().IsKnownSession(sess) {
 			gtSessions = append(gtSessions, sess)
 		}
 	}
@@ -128,7 +128,7 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 	checkedCount := 0
 
 	for _, sess := range gtSessions {
-		identity, err := session.ParseSessionName(sess)
+		identity, err := session.ParseSessionNameWithRegistry(sess, ctx.prefixes())
 		if err != nil {
 			// Skip unparseable sessions
 			continue
@@ -233,10 +233,10 @@ func (c *EnvVarsCheck) Fix(ctx *CheckContext) error {
 	}
 
 	for _, sess := range sessions {
-		if !session.IsKnownSession(sess) {
+		if !ctx.prefixes().IsKnownSession(sess) {
 			continue
 		}
-		identity, err := session.ParseSessionName(sess)
+		identity, err := session.ParseSessionNameWithRegistry(sess, ctx.prefixes())
 		if err != nil || !envCheckedRoles[identity.Role] {
 			continue
 		}

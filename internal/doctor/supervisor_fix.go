@@ -3,6 +3,7 @@ package doctor
 import (
 	"fmt"
 
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
@@ -20,10 +21,10 @@ func fixSupervisor(townRoot string, k supervisor.Killer) *supervisor.Supervisor 
 // parked seat or an e-stop refuses. A name that does not parse to a seat is
 // refused: it may belong to a parked seat under a prefix the registry does
 // not know, and a stray kill would skip that seat's hold.
-func killSessionForFix(townRoot string, k supervisor.Killer, sess, reason string) error {
-	seat, err := supervisor.SeatForSession(sess)
+func killSessionForFix(ctx *CheckContext, k supervisor.Killer, sess, reason string) error {
+	seat, err := session.ParseSessionNameWithRegistry(sess, ctx.prefixes())
 	if err != nil {
 		return fmt.Errorf("not killing %s: it does not name a known seat (%v)", sess, err)
 	}
-	return fixSupervisor(townRoot, k).Kill(seat, reason, doctorActor)
+	return fixSupervisor(ctx.TownRoot, k).Kill(*seat, reason, doctorActor)
 }

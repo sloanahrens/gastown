@@ -59,7 +59,7 @@ func TestZombieSessionCheck_Run_NoSessions(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{sessions: []string{}}
 	check := NewZombieSessionCheckWithLister(lister)
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 
 	result := check.Run(ctx)
 
@@ -72,7 +72,7 @@ func TestZombieSessionCheck_ListSessionsErrorIsSkipped(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{listErr: errors.New("no server running")}
 	check := NewZombieSessionCheckWithLister(lister)
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 
 	result := check.Run(ctx)
 
@@ -94,7 +94,7 @@ func TestZombieSessionCheck_SkipsCrewSessions(t *testing.T) {
 	lister := &fakeZombieLister{sessions: []string{"gt-crew-joe", "gt-witness"}}
 	check := NewZombieSessionCheckWithLister(lister)
 
-	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
+	result := check.Run(&CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()})
 
 	if result.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning for the dead witness: %s", result.Status, result.Message)
@@ -116,7 +116,7 @@ func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 	check := NewZombieSessionCheckWithLister(lister)
 	check.zombieSessions = []string{"gt-crew-joe", "gt-witness"}
 
-	_ = check.Fix(&CheckContext{TownRoot: t.TempDir()})
+	_ = check.Fix(&CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()})
 
 	if len(lister.killed) != 1 || lister.killed[0] != "gt-witness" {
 		t.Fatalf("killed = %v, want only gt-witness (never the crew session)", lister.killed)
@@ -134,7 +134,7 @@ func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 		aliveErr: map[string]error{"hq-mayor": errors.New("tmux show-environment: timed out")},
 	}
 	check := NewZombieSessionCheckWithLister(lister)
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 
 	result := check.Run(ctx)
 	for _, d := range result.Details {
@@ -171,7 +171,7 @@ func TestZombieSessionCheck_FixRecheckErrorSkipsKill(t *testing.T) {
 		alive:    map[string]bool{"hq-mayor": false},
 	}
 	check := NewZombieSessionCheckWithLister(lister)
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	_ = check.Run(ctx)
 	lister.aliveErr = map[string]error{"hq-mayor": errors.New("tmux: server busy")}
 	if err := check.Fix(ctx); err != nil {

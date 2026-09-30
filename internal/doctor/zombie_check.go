@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -82,13 +81,13 @@ func (c *ZombieSessionCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		// Only check Gas Town sessions
-		if !session.IsKnownSession(sess) {
+		if !ctx.prefixes().IsKnownSession(sess) {
 			continue
 		}
 
 		// Skip crew sessions - they are human-managed and may intentionally
 		// have no Claude running (e.g., between work assignments)
-		if isCrewSession(sess) {
+		if isCrewSession(ctx.prefixes(), sess) {
 			continue
 		}
 
@@ -160,7 +159,7 @@ func (c *ZombieSessionCheck) Fix(ctx *CheckContext) error {
 
 	for _, sess := range c.zombieSessions {
 		// SAFEGUARD: Never auto-kill crew sessions (double-check)
-		if isCrewSession(sess) {
+		if isCrewSession(ctx.prefixes(), sess) {
 			continue
 		}
 
@@ -179,7 +178,7 @@ func (c *ZombieSessionCheck) Fix(ctx *CheckContext) error {
 
 		// Through the supervisor: a parked seat or an e-stop refuses, and the
 		// kill is logged with its actor (gt-4k3fj.3).
-		if err := killSessionForFix(ctx.TownRoot, t, sess, "zombie cleanup"); err != nil {
+		if err := killSessionForFix(ctx, t, sess, "zombie cleanup"); err != nil {
 			lastErr = err
 		}
 	}

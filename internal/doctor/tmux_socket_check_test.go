@@ -35,7 +35,7 @@ func TestSocketSplitBrainCheck_EmptySocket(t *testing.T) {
 	check.useSocketForTest = true
 	check.socketForTest = ""
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -53,7 +53,7 @@ func TestSocketSplitBrainCheck_DefaultSocket(t *testing.T) {
 	check.useSocketForTest = true
 	check.socketForTest = "default"
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -73,7 +73,7 @@ func TestSocketSplitBrainCheck_NoTownServer(t *testing.T) {
 	check.townListerForTest = &mockSocketLister{listErr: fmt.Errorf("no server running")}
 	check.defaultListerForTest = &mockSocketLister{sessions: []string{}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusSkipped {
@@ -93,7 +93,7 @@ func TestSocketSplitBrainCheck_NoDefaultServer(t *testing.T) {
 	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
 	check.defaultListerForTest = &mockSocketLister{listErr: fmt.Errorf("no server running")}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusSkipped {
@@ -113,7 +113,7 @@ func TestSocketSplitBrainCheck_NoDuplicates(t *testing.T) {
 	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
 	check.defaultListerForTest = &mockSocketLister{sessions: []string{"personal-stuff"}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -133,7 +133,7 @@ func TestSocketSplitBrainCheck_DetectsDuplicates(t *testing.T) {
 	check.townListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
 	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max"}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusError {
@@ -163,7 +163,7 @@ func TestSocketSplitBrainCheck_DetectsOrphans(t *testing.T) {
 	check.townListerForTest = &mockSocketLister{sessions: []string{}}
 	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-nux"}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusError {
@@ -190,7 +190,7 @@ func TestSocketSplitBrainCheck_MixedWithNonGastown(t *testing.T) {
 	check.townListerForTest = &mockSocketLister{sessions: []string{}}
 	check.defaultListerForTest = &mockSocketLister{sessions: []string{"ga-crew-max", "personal-stuff"}}
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	result := check.Run(ctx)
 
 	if result.Status != StatusError {
@@ -225,7 +225,7 @@ func TestSocketSplitBrainCheck_Fix_NoStale(t *testing.T) {
 	mock := &mockSocketLister{}
 	check.defaultListerForTest = mock
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix() returned error: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestSocketSplitBrainCheck_Fix_KillsStale(t *testing.T) {
 	mock := &mockSocketLister{}
 	check.defaultListerForTest = mock
 
-	ctx := &CheckContext{TownRoot: t.TempDir()}
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: testPrefixRegistry()}
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix() returned error: %v", err)
 	}

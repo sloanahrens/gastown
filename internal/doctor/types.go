@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/ui"
 )
 
@@ -91,6 +92,20 @@ type CheckContext struct {
 	// openGit opens the git checks inspect and repair repositories through.
 	// Nil means the real git (git.NewGitWithDir); tests set gitfake.
 	openGit repoOpener
+
+	// sessionPrefixes maps session name prefixes to rigs for the checks
+	// that recognize and parse Gas Town session names. Nil means
+	// session.DefaultRegistry(); tests set their own.
+	sessionPrefixes *session.PrefixRegistry
+}
+
+// prefixes returns the session prefix registry checks resolve session names
+// through.
+func (ctx *CheckContext) prefixes() *session.PrefixRegistry {
+	if ctx.sessionPrefixes != nil {
+		return ctx.sessionPrefixes
+	}
+	return session.DefaultRegistry()
 }
 
 // RigPath returns the full path to the rig directory.

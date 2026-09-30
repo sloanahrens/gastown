@@ -95,11 +95,11 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		// Only check sessions that parse as Gas Town sessions
-		if _, err := session.ParseSessionName(sess); err != nil {
+		if _, err := session.ParseSessionNameWithRegistry(sess, ctx.prefixes()); err != nil {
 			continue
 		}
 
-		if c.isValidSession(sess, validRigs, mayorSession) {
+		if c.isValidSession(ctx.prefixes(), sess, validRigs, mayorSession) {
 			validCount++
 		} else {
 			orphans = append(orphans, sess)
@@ -150,7 +150,7 @@ func (c *OrphanSessionCheck) Fix(ctx *CheckContext) error {
 	for _, sess := range c.orphanSessions {
 		// SAFEGUARD: Never auto-kill crew sessions.
 		// Crew workers are human-managed and require explicit action.
-		if isCrewSession(sess) {
+		if isCrewSession(ctx.prefixes(), sess) {
 			continue
 		}
 		// Log pre-death event for crash investigation (before killing)
@@ -166,8 +166,8 @@ func (c *OrphanSessionCheck) Fix(ctx *CheckContext) error {
 
 // isCrewSession returns true if the session name matches the crew pattern.
 // Crew sessions are gt-<rig>-crew-<name> and are protected from auto-cleanup.
-func isCrewSession(sess string) bool {
-	identity, err := session.ParseSessionName(sess)
+func isCrewSession(reg *session.PrefixRegistry, sess string) bool {
+	identity, err := session.ParseSessionNameWithRegistry(sess, reg)
 	if err != nil {
 		return false
 	}
@@ -209,14 +209,14 @@ func (c *OrphanSessionCheck) getValidRigs(townRoot string) []string {
 //   - <prefix>-<polecat> (where polecat is any name)
 //
 // Note: We can't verify polecat names without reading state, so we're permissive.
-func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, mayorSession string) bool {
+func (c *OrphanSessionCheck) isValidSession(reg *session.PrefixRegistry, sess string, validRigs []string, mayorSession string) bool {
 	// Mayor session is always valid (dynamic name based on town)
 	if mayorSession != "" && sess == mayorSession {
 		return true
 	}
 
 	// For rig-specific sessions, extract rig name using canonical parser
-	identity, err := session.ParseSessionName(sess)
+	identity, err := session.ParseSessionNameWithRegistry(sess, reg)
 	if err != nil {
 		return false
 	}
@@ -244,7 +244,7 @@ func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, may
 		// Try alternate rig interpretations: check if any valid rig
 		// matches the parsed prefix (via the registry)
 		for _, r := range validRigs {
-			if session.PrefixFor(r) == identity.Prefix {
+			if reg.PrefixForRig(r) == identity.Prefix {
 				rigFound = true
 				break
 			}
