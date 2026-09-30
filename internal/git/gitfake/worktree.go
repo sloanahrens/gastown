@@ -23,6 +23,11 @@ type WorkTree interface {
 	GetUpstreamURL() (string, error)
 	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
 
+	// Pushing and preservation (push.go).
+	Push(remote, refspec string, force bool) error
+	StashCount() (int, error)
+	CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStatus, error)
+
 	git.RevertReader
 }
 

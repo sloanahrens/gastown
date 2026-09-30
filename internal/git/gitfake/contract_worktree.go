@@ -300,4 +300,76 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 			t.Errorf("CurrentBranch detached = %q, %v; want HEAD", branch, err)
 		}
 	})
+
+	t.Run("Push updates the remote and the tracking ref, and refuses a non-fast-forward", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone).(WorkTree)
+		repo := fx.env.Open(fx.clone)
+		writeFiles(t, fx.clone, map[string]string{"a.txt": "local\n"})
+		if err := g.Add("-A"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Commit("local"); err != nil {
+			t.Fatal(err)
+		}
+		local, _ := repo.Rev("HEAD")
+		if err := g.Push("origin", "main:side", false); err != nil {
+			t.Fatalf("Push main:side: %v", err)
+		}
+		if tip, err := repo.PushRemoteBranchTip("origin", "side"); err != nil || tip != local {
+			t.Errorf("origin side = %q, %v; want %s", tip, err, local)
+		}
+		if id, err := repo.Rev("origin/side"); err != nil || id != local {
+			t.Errorf("origin/side tracking ref = %q, %v; want %s", id, err, local)
+		}
+		fx.env.Commit(t, fx.origin, "main", "diverge", map[string]string{"z.txt": "z\n"})
+		if err := g.Push("origin", "main", false); err == nil {
+			t.Error("a non-fast-forward push succeeded")
+		}
+		if err := g.Push("origin", "main", true); err != nil {
+			t.Errorf("forced push: %v", err)
+		}
+		if tip, _ := repo.PushRemoteBranchTip("origin", "main"); tip != local {
+			t.Errorf("origin main after the forced push = %s; want %s", tip, local)
+		}
+		if err := g.Push("origin", "no-such-branch", false); err == nil {
+			t.Error("pushing a missing branch succeeded")
+		}
+		if err := repo.ConfigurePushURL("origin", filepath.Join(fx.root, "missing.git")); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Push("origin", "main:elsewhere", false); err == nil {
+			t.Error("a push to a missing push URL succeeded")
+		}
+	})
+
+	t.Run("CheckUncommittedWorkLocalFailClosed reports dirt, stashes and unpushed commits", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone).(WorkTree)
+		st, err := g.CheckUncommittedWorkLocalFailClosed()
+		if err != nil || st.HasUncommittedChanges || st.StashCount != 0 || st.UnpushedCommits != 0 {
+			t.Fatalf("fresh clone = %+v, %v; want clean, nothing unpushed", st, err)
+		}
+		if n, err := g.StashCount(); err != nil || n != 0 {
+			t.Errorf("StashCount = %d, %v", n, err)
+		}
+		writeFiles(t, fx.clone, map[string]string{"a.txt": "committed\n"})
+		if err := g.Add("a.txt"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Commit("local"); err != nil {
+			t.Fatal(err)
+		}
+		writeFiles(t, fx.clone, map[string]string{"dirty.txt": "d\n"})
+		st, err = g.CheckUncommittedWorkLocalFailClosed()
+		if err != nil || !st.HasUncommittedChanges || !reflect.DeepEqual(st.UntrackedFiles, []string{"dirty.txt"}) || st.UnpushedCommits != 1 {
+			t.Errorf("after a local commit and a new file = %+v, %v; want dirty.txt untracked and 1 unpushed", st, err)
+		}
+		if err := g.Push("origin", "main", false); err != nil {
+			t.Fatal(err)
+		}
+		if st, err := g.CheckUncommittedWorkLocalFailClosed(); err != nil || st.UnpushedCommits != 0 {
+			t.Errorf("after pushing = %+v, %v; want nothing unpushed", st, err)
+		}
+	})
 }
