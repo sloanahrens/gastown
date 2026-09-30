@@ -96,9 +96,13 @@ func init() {
 }
 
 func runRigSettingsShow(cmd *cobra.Command, args []string) error {
+	return rigSettingsShow(cwdRigCmdEnv(), args)
+}
+
+func rigSettingsShow(e rigCmdEnv, args []string) error {
 	rigName := args[0]
 
-	_, r, err := getRig(rigName)
+	_, r, err := e.findRig(rigName)
 	if err != nil {
 		return err
 	}
@@ -107,8 +111,8 @@ func runRigSettingsShow(cmd *cobra.Command, args []string) error {
 	settings, err := config.LoadRigSettings(settingsPath)
 	if err != nil {
 		if errors.Is(err, config.ErrNotFound) {
-			fmt.Printf("No settings file found at %s\n", settingsPath)
-			fmt.Printf("Use 'gt rig settings set' to create one.\n")
+			fmt.Fprintf(e.out, "No settings file found at %s\n", settingsPath)
+			fmt.Fprintf(e.out, "Use 'gt rig settings set' to create one.\n")
 			return nil
 		}
 		return fmt.Errorf("loading settings: %w", err)
@@ -120,16 +124,20 @@ func runRigSettingsShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("formatting settings: %w", err)
 	}
 
-	fmt.Println(string(data))
+	fmt.Fprintln(e.out, string(data))
 	return nil
 }
 
 func runRigSettingsSet(cmd *cobra.Command, args []string) error {
+	return rigSettingsSet(cwdRigCmdEnv(), args)
+}
+
+func rigSettingsSet(e rigCmdEnv, args []string) error {
 	rigName := args[0]
 	keyPath := args[1]
 	valueStr := args[2]
 
-	_, r, err := getRig(rigName)
+	_, r, err := e.findRig(rigName)
 	if err != nil {
 		return err
 	}
@@ -160,16 +168,20 @@ func runRigSettingsSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving settings: %w", err)
 	}
 
-	fmt.Printf("%s Set %s=%v in settings for rig %s\n",
+	fmt.Fprintf(e.out, "%s Set %s=%v in settings for rig %s\n",
 		style.Success.Render("✓"), keyPath, formatValueForDisplay(value), rigName)
 	return nil
 }
 
 func runRigSettingsUnset(cmd *cobra.Command, args []string) error {
+	return rigSettingsUnset(cwdRigCmdEnv(), args)
+}
+
+func rigSettingsUnset(e rigCmdEnv, args []string) error {
 	rigName := args[0]
 	keyPath := args[1]
 
-	_, r, err := getRig(rigName)
+	_, r, err := e.findRig(rigName)
 	if err != nil {
 		return err
 	}
@@ -195,7 +207,7 @@ func runRigSettingsUnset(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving settings: %w", err)
 	}
 
-	fmt.Printf("%s Unset %s from settings for rig %s\n",
+	fmt.Fprintf(e.out, "%s Unset %s from settings for rig %s\n",
 		style.Success.Render("✓"), keyPath, rigName)
 	return nil
 }

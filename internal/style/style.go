@@ -59,6 +59,11 @@ func PrintWarning(format string, args ...interface{}) {
 	fprintWarning(os.Stderr, format, args...)
 }
 
+// FprintWarning is PrintWarning writing to w.
+func FprintWarning(w io.Writer, format string, args ...interface{}) {
+	fprintWarning(w, format, args...)
+}
+
 // fprintWarning is PrintWarning writing to w.
 func fprintWarning(w io.Writer, format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)

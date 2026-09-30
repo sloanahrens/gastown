@@ -22,6 +22,7 @@ import (
 func TestIntegrationRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *testing.T) {
 	stubRemotePolecatBranchOpenPR(t)
 	townRoot, rigName := setupTestRigForSettings(t)
+	t.Chdir(townRoot)
 	localDir := filepath.Join(townRoot, rigName, "mayor", "rig")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
 	repoGit := git.NewGit(localDir)
@@ -50,6 +51,7 @@ func TestIntegrationRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *
 // would say the opposite of what happened.
 func TestIntegrationRunPolecatPruneReportsRemoteBranchKeptForOpenPR(t *testing.T) {
 	townRoot, rigName := setupTestRigForSettings(t)
+	t.Chdir(townRoot)
 	localDir := filepath.Join(townRoot, rigName, "mayor", "rig")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
 	repoGit := git.NewGit(localDir)
