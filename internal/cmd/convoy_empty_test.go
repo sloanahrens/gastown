@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 )
 
 // mockBdForConvoyTest creates a fake bd binary tailored for convoy empty-check
@@ -354,11 +356,11 @@ esac
 
 	// Both beads are blocked by gt-blocker1, as the blocker check reports.
 	blockedByBlocker1 := func(string) (blockCheck, func(), error) {
-		return func(id string) string {
+		return func(id string) convoyops.Block {
 			if strings.HasPrefix(id, "gt-busy") {
-				return "blocks gt-blocker1 (open)"
+				return convoyops.Block{Reason: "blocks gt-blocker1 (open)"}
 			}
-			return ""
+			return convoyops.Block{}
 		}, func() {}, nil
 	}
 	stranded, err := findStrandedConvoysWith(townRoot, blockedByBlocker1)

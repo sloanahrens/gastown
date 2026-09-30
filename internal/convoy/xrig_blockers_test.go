@@ -293,6 +293,43 @@ func TestBlockReason_HomeRigStoreUnavailableBlocks(t *testing.T) {
 	}
 }
 
+// TestBlockOf_NamesTheFailSafeHold (gt-gg7w9): the hold a caller escalates is
+// told apart from an open blocker, and from each other, by Cause and BlockerID,
+// not by matching the reason text.
+func TestBlockOf_NamesTheFailSafeHold(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	open := newXrigTown(t, beadsdk.StatusOpen)
+	if b := BlockOf(ctx, open.hq, "gt-work", open.resolver(true)); b.Reason == "" || b.Held() || b.Cause != BlockOpen {
+		t.Errorf("open blocker: got %+v, want a reason that is not a fail-safe hold", b)
+	}
+
+	closed := newXrigTown(t, beadsdk.StatusClosed)
+	if b := BlockOf(ctx, closed.hq, "gt-work", closed.resolver(true)); b != (Block{}) {
+		t.Errorf("closed blocker: got %+v, want no block", b)
+	}
+
+	dangling := newXrigTown(t, beadsdk.StatusClosed)
+	delete(dangling.oag.issues, "oag-x")
+	if b := BlockOf(ctx, dangling.hq, "gt-work", dangling.resolver(true)); b.Cause != BlockUnresolved || b.BlockerID != "oag-x" || !b.Held() {
+		t.Errorf("dangling edge: got %+v, want unresolved oag-x", b)
+	}
+
+	down := newXrigTown(t, beadsdk.StatusClosed)
+	down.oag.readErr = errors.New("dolt: query timeout")
+	if b := BlockOf(ctx, down.hq, "gt-work", down.resolver(true)); b.Cause != BlockUnreadable || b.BlockerID != "oag-x" || !b.Held() {
+		t.Errorf("rig store down: got %+v, want unreadable oag-x", b)
+	}
+
+	// The bead's own store failing names no blocker: there is none to name yet.
+	noHome := newXrigTown(t, beadsdk.StatusClosed)
+	gone := NewStoreResolver(noHome.townRoot, map[string]beadsdk.Storage{"hq": noHome.hq, "oag": noHome.oag})
+	if b := BlockOf(ctx, noHome.hq, "gt-sib", gone); b.Cause != BlockUnreadable || b.BlockerID != "" {
+		t.Errorf("home store unavailable: got %+v, want unreadable with no blocker id", b)
+	}
+}
+
 // TestStoreResolver_CachesFailedOpen (review minor 5): a rig that failed to
 // open is not re-opened for every lookup within one resolver's life.
 func TestStoreResolver_CachesFailedOpen(t *testing.T) {

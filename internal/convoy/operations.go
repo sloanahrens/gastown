@@ -223,6 +223,52 @@ func isIssueBlocked(ctx context.Context, store beadsdk.Storage, issueID string, 
 // store is the caller's town store. It answers for hq when the resolver holds
 // no hq store.
 func BlockReason(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) string {
+	return BlockOf(ctx, store, issueID, resolver).Reason
+}
+
+// BlockCause says why a bead is held when the hold is a failure to know rather
+// than a blocker that is simply still open.
+type BlockCause string
+
+const (
+	// BlockOpen is the ordinary hold: a blocker was read and is not closed.
+	BlockOpen BlockCause = ""
+
+	// BlockUnresolved is a blocker that no store has: a dangling external edge.
+	// Nothing in beads removes one when its target is hard-deleted, because
+	// external edges have no foreign key, so it holds the bead until an
+	// operator drops the edge.
+	BlockUnresolved BlockCause = "unresolved"
+
+	// BlockUnreadable is a store that would not answer: the bead's own, or the
+	// one that owns a blocker. It clears by itself when the store comes back.
+	BlockUnreadable BlockCause = "unreadable"
+)
+
+// Block is BlockReason's verdict with the parts a caller can act on.
+type Block struct {
+	// Reason is the BlockReason text; "" when nothing blocks the bead.
+	Reason string
+
+	// Cause is BlockOpen for an open blocker, and otherwise says which
+	// fail-safe hold this is.
+	Cause BlockCause
+
+	// BlockerID names the blocker behind an unresolved or unreadable hold. It
+	// is "" when the read that failed was the bead's own, which has no blocker
+	// to name yet.
+	BlockerID string
+}
+
+// Held reports whether the verdict is a fail-safe hold, which says nothing
+// about the blockers themselves, rather than an open blocker or no block.
+func (b Block) Held() bool {
+	return b.Cause == BlockUnresolved || b.Cause == BlockUnreadable
+}
+
+// BlockOf is BlockReason with the hold's cause and blocker id alongside the
+// reason, for a caller that escalates a fail-safe hold.
+func BlockOf(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) Block {
 	storeFor := func(name string) (beadsdk.Storage, error) {
 		if resolver == nil {
 			return store, nil
@@ -242,20 +288,20 @@ func BlockReason(ctx context.Context, store beadsdk.Storage, issueID string, res
 		name := resolver.storeForID(issueID)
 		var err error
 		if home, err = storeFor(name); err != nil {
-			return fmt.Sprintf("store of rig %s unavailable (%s)", name, util.FirstLine(err.Error()))
+			return Block{Reason: fmt.Sprintf("store of rig %s unavailable (%s)", name, util.FirstLine(err.Error())), Cause: BlockUnreadable}
 		}
 	}
 	if home == nil {
-		return ""
+		return Block{}
 	}
 
 	reader, ok := home.(dependencyRecordReader)
 	if !ok {
-		return fmt.Sprintf("store %T cannot read raw dependency records, so cross-rig blockers are unknown", home)
+		return Block{Reason: fmt.Sprintf("store %T cannot read raw dependency records, so cross-rig blockers are unknown", home), Cause: BlockUnreadable}
 	}
 	records, err := reader.GetDependencyRecords(ctx, issueID)
 	if err != nil {
-		return "dependency records unreadable (" + util.FirstLine(err.Error()) + ")"
+		return Block{Reason: "dependency records unreadable (" + util.FirstLine(err.Error()) + ")", Cause: BlockUnreadable}
 	}
 
 	type blocker struct{ id, depType string }
@@ -268,7 +314,7 @@ func BlockReason(ctx context.Context, store beadsdk.Storage, issueID string, res
 		blockers = append(blockers, blocker{id: extractIssueID(d.DependsOnID), depType: depType})
 	}
 	if len(blockers) == 0 {
-		return ""
+		return Block{}
 	}
 
 	found := make(map[string]*beadsdk.Issue, len(blockers))
@@ -334,23 +380,23 @@ func BlockReason(ctx context.Context, store beadsdk.Storage, issueID string, res
 		iss := found[b.id]
 		if iss == nil {
 			if msg := readErr[b.id]; msg != "" {
-				return fmt.Sprintf("%s blocker %s unreadable (%s)", b.depType, b.id, msg)
+				return Block{Reason: fmt.Sprintf("%s blocker %s unreadable (%s)", b.depType, b.id, msg), Cause: BlockUnreadable, BlockerID: b.id}
 			}
-			return fmt.Sprintf("%s blocker %s unresolved in any rig", b.depType, b.id)
+			return Block{Reason: fmt.Sprintf("%s blocker %s unresolved in any rig", b.depType, b.id), Cause: BlockUnresolved, BlockerID: b.id}
 		}
 		switch status := string(iss.Status); status {
 		case "tombstone":
 			continue
 		case "closed":
 			if b.depType == "merge-blocks" && !strings.HasPrefix(iss.CloseReason, "Merged in ") {
-				return fmt.Sprintf("merge-blocks %s closed without a merge", b.id)
+				return Block{Reason: fmt.Sprintf("merge-blocks %s closed without a merge", b.id)}
 			}
 			continue
 		default:
-			return fmt.Sprintf("%s %s (%s)", b.depType, b.id, status)
+			return Block{Reason: fmt.Sprintf("%s %s (%s)", b.depType, b.id, status)}
 		}
 	}
-	return ""
+	return Block{}
 }
 
 // feedNextReadyIssue finds the next ready issue in a convoy and dispatches it

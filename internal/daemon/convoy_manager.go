@@ -109,13 +109,16 @@ type storeRecoveryState struct {
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
 type strandedConvoyInfo struct {
-	ID           string    `json:"id"`
-	Title        string    `json:"title"`
-	TrackedCount int       `json:"tracked_count"`
-	ReadyCount   int       `json:"ready_count"`
-	ReadyIssues  []string  `json:"ready_issues"`
-	CreatedAt    time.Time `json:"created_at"`
-	BaseBranch   string    `json:"base_branch,omitempty"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	TrackedCount int      `json:"tracked_count"`
+	ReadyCount   int      `json:"ready_count"`
+	ReadyIssues  []string `json:"ready_issues"`
+	// Held lists the beads the scan kept back on a blocker it could not
+	// resolve or read; see trackBlockedHolds (gt-gg7w9).
+	Held       []strandedHold `json:"held,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	BaseBranch string         `json:"base_branch,omitempty"`
 	// Agent is the runtime agent requested when the convoy's beads were slung
 	// (--agent). Re-feeding must use it: without it the daemon re-dispatches
 	// with the rig default, silently overriding the routing decision that put
@@ -223,6 +226,10 @@ type ConvoyManager struct {
 	// and the Dolt recovery callback. Without this, concurrent scans can spawn
 	// duplicate convoy checks for the same stranded convoy.
 	scanMu sync.Mutex
+
+	// blockedHolds tracks, per bead, how long the stranded scan has held it on
+	// a blocker it cannot resolve or read. Protected by scanMu.
+	blockedHolds map[string]*blockedHold
 
 	// pollGate lets a scheduled_maintenance gc pause this manager's Dolt
 	// reads: the event poll tick and the stranded scan take the read side
@@ -959,6 +966,8 @@ func (m *ConvoyManager) scan() {
 			m.checkConvoyCompletion(c.ID)
 		}
 	}
+
+	m.trackBlockedHolds(stranded, time.Now())
 }
 
 // findStranded runs `gt convoy stranded --json` and parses the output.
