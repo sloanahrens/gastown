@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gt done` submits only; `internal/land` lands on the merged tree** (gt-v4ssj.3,
+  gt-v4ssj.9, ADR 0004) — `gt done` fetches, rebases onto the target, squashes
+  auto-save commits, runs the local gate (`make lint`, `go build ./...`, the unit
+  tier of `make test`), pushes the branch under a lease, and marks the work bead
+  ready to land (label `gt:ready-to-land` plus a `READY TO LAND` notes block). It
+  creates no MR bead and has no landing modes or bypass flags: `--pre-verified`,
+  `--skip-tests`, `--skip-verify`, `--priority`, `--resume`, the `local` and
+  `no_merge` modes and the default test-verify gate are gone. Every failure exits
+  non-zero before the Witness hears anything and keeps the session: 10 push
+  failed, 11 push unverified, 12 ready mark failed, 13 no-code close failed,
+  14 rebase conflict, 15 local gate failed. `land.Lander.Land` merges the
+  declared head into a throwaway worktree of the target, gates the merged tree
+  while om reviews the same range, pushes with `--force-with-lease`, reads the
+  tip back, and records the landing in `<town>/.runtime/landings/<rig>.jsonl`, a
+  `LANDING RECORD` notes block and the close reason (`landed_commit`,
+  `patch_id`). The daemon worker that calls it is gt-v4ssj.2.
+
 - **bd startup handshake** (gt-7iwy0.1) — `gt up`, `gt start`, `gt daemon
   start|run|restart`, `gt sling` and the start/restart verbs of every agent
   role refuse to run unless the `bd` on PATH is a beads fork build whose JSON

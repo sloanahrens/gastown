@@ -364,7 +364,7 @@ func (l *Lander) addWorktree(g *git.Git, base string) (string, func(), error) {
 
 // mergeWork merges the declared head into the worktree at base: --no-ff, or
 // a squash when the range still holds auto-save commits so none reach the
-// target (the refinery's stackMerge behaviour).
+// target (the refinery's stackMerge behavior).
 func mergeWork(wt *git.Git, dir string, w Work, base string) (string, *Rejection, error) {
 	msg := fmt.Sprintf("land: %s (%s) onto %s (%s)\n\nWork: %s", w.Branch, shortSHA(w.Head), w.Target, shortSHA(base), w.BeadID)
 	hasAutoSave, err := checkpoint.HasAutoSaveCommits(dir, base, w.Head)

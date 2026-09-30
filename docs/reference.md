@@ -162,39 +162,19 @@ Town-level role defaults live in `mayor/config.json` under:
 
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 
-**Container opt-in and the container-gate slot (`gt done`'s gate).** Container-backed
-tests are opt-in (`GT_TEST_DOCKER=1`, see `internal/testutil`), and a run that can start
-one must hold the town-wide container-gate slot. `gt done`'s default test-verify gate
-therefore runs the rig's `test_command` with the opt-in written **off** — the whole suite
-runs, its container-backed tests skip, and the gate takes no slot, so a submission never
-queues behind the daemon's main-branch patrol or the refinery's batch gate (gt-wx53).
-The Docker suite then runs once per submission in the refinery's gate, which does hold a
-slot. A rig that wants its container suite verified at `gt done` too asks for it in its
-own command (`test_command: "GT_TEST_DOCKER=1 make test"`), and the gate honours that and
-takes a slot for it. The gate applies that value to the run itself rather than leaving it
-to inheritance, so the slot decision and the environment the suite reads are one fact
-(gt-0hbm); the session's own exported value is deliberately not an input, because
-`make test` defaults the variable to 1 and reading it would queue the gate behind a slot
-its own tree already holds. The gate's value only wins if the rig's recipe reads the
-variable rather than hardcoding it — gastown's `make test` defaults it
-(`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) for exactly this reason, and
-`TestMakefileHandsTheContainerOptInToTheSuite` pins that recipe.
+**Container opt-in and the container-gate slot.** Container-backed tests are opt-in
+(`GT_TEST_DOCKER=1`, see `internal/testutil`), and a run that can start one must hold the
+town-wide container-gate slot. `gt done`'s local gate (`land.RigGate`, the unit tier) runs
+`make lint`, `go build ./...` and `make test` with `GT_TEST_DOCKER=0`, so the container-backed
+tests skip and the gate takes no slot (gt-wx53). The Docker suite runs once per landing, on the
+merged tree, in the landing worker's gate, which holds a slot (ADR 0004). gastown's `make test`
+defaults the variable (`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) rather than hardcoding it, so a
+caller's `0` wins; `TestMakefileHandsTheContainerOptInToTheSuite` pins that recipe.
 
-That command text is a proxy for the thing the rule is about — a container
-starting — so a slot-free gate run is watched while it runs: a container that
-appears with no slot holder owning it is the run's, and the gate fails on it
-instead of letting a suite that ignored its own opt-out run beside the rest of
-the town (gt-0ss4). The gate's log records what the watch saw, so a slot-free
-run that started nothing says so.
-
-Run `gt done` **once**, then leave it alone. Its gate waits for the slot before
-it runs the container suites, printing a `still waiting for the container-gate
-slot …` line every couple of minutes while it does; a quiet pane between those
-lines is the ordinary case, not a hang. It gives up with a slot-acquire timeout
-once the cap (`merge_queue.test_verify_slot_timeout`, 60m by default) expires.
-On a slot-cap or run-budget failure the sanctioned move is a bead comment with
-the error and the verify-log path, then `gt escalate -s medium` asking the mayor
-for a one-shot `--skip-tests` ruling — not a second invocation.
+Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
+names what failed (exit codes 10-15, `gt done --help`) and the session stays up; fix what it
+names and run `gt done` once more. A failure you believe your change did not cause goes in a
+bead comment, then `gt escalate -s medium`. No flag skips the gate.
 
 Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
 polling loop holds the gate every other agent is queued behind, one pass at a

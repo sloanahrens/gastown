@@ -45,7 +45,7 @@ var Commands = []Command{
 		AgentFields: map[string][]Field{
 			"claude": {
 				{"allowed-tools", "Bash(gt done:*), Bash(git status:*), Bash(git log:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(bd close:*)"},
-				{"argument-hint", "[--status COMPLETED|ESCALATED|DEFERRED] [--pre-verified]"},
+				{"argument-hint", "[--status COMPLETED|ESCALATED|DEFERRED] [--target <branch>]"},
 			},
 		},
 	},

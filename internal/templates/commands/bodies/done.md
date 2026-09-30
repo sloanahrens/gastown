@@ -1,6 +1,6 @@
-# Done — Submit Work to Merge Queue
+# Done — Submit Work for Landing
 
-Signal that your work is complete and ready for the merge queue.
+Signal that your work is complete and submit your branch for landing.
 
 Arguments: $ARGUMENTS
 
@@ -29,9 +29,9 @@ gt done $ARGUMENTS
 
 **Common usage:**
 - `gt done` — Submit completed work (default: --status COMPLETED)
-- `gt done --pre-verified` — **(refinery/mayor only; polecats: do NOT use)**
-- `gt done --status ESCALATED` — Signal blocker, skip MR
-- `gt done --status DEFERRED` — Pause work, skip MR
+- `gt done --target <branch>` — Submit against a branch other than the rig default
+- `gt done --status ESCALATED` — Signal blocker, submit nothing
+- `gt done --status DEFERRED` — Pause work, submit nothing
 
 **If the bead has nothing to implement** (already fixed, can't reproduce):
 ```bash
@@ -41,18 +41,17 @@ gt done
 
 ## While it runs
 
-**`gt done` waits for the container-gate slot before it runs the container suites, printing a `still waiting for the container-gate slot …` line every couple of minutes while it does. That is normal. Do not interrupt it, do not close the bead, do not retry. It gives up with a slot-acquire timeout once the cap expires.**
+**`gt done` runs the local gate itself (lint, build and the unit tier of the tests; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.**
 
-**Never poll the slot, and never script a retry around `gt done`.** A polling
-loop holds the container-gate slot every other agent is queued behind, one pass
-at a time, and the dangerous-command guard refuses the loop shape. If it fails
-on the test-verify slot cap or the run budget: do NOT retry; add a bead comment
-with the error and the verify-log path, then `gt escalate -s medium` asking the
-mayor for a one-shot `--skip-tests` ruling, and wait. `--pre-verified` is not
-that path: it is refinery/mayor only and re-runs the whole gate set under the
-same slot cap.
+**Never script a retry around `gt done`.** The dangerous-command guard refuses
+the loop shape. If it exits non-zero it names what failed (exit codes 10-15,
+`gt done --help`) and your session stays up: fix it, commit, and run `gt done`
+once more. If you believe a gate failure is not caused by your change, add a
+bead comment with the error, then `gt escalate -s medium`, and wait.
+No flag skips the gate.
 
 Before you run `gt slot run`, read the container-gate rule in `docs/reference.md`.
 
-This command pushes your branch, submits an MR to the merge queue, and exits the
-polecat session after durable handoff. The Refinery/Witness handle merge and cleanup.
+This command rebases your branch, runs the local gate, pushes the branch, marks
+the bead ready to land and exits the polecat session. The daemon's landing
+worker gates the merged tree and lands it (ADR 0004).

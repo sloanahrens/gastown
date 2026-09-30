@@ -39,13 +39,16 @@ type rejectedAttempt struct {
 	branch  string
 	mrID    string
 	summary string
+	// head is the rejected tip when the rejection names it (Land's Head:
+	// line, ADR 0004); it is the content to compare, with no MR to look up.
+	head string
 }
 
 // rejectedAttemptsFromNotes returns the rejections recorded in a bead's notes.
-// An attempt without an MR id is dropped: the MR is what says which content
-// was rejected, so an attempt that does not name one cannot be checked against.
-// Only the first Branch:/MR: line in a block is read — the block runs to the
-// next marker, so later appended prose belongs to no rejection.
+// An attempt that names neither a rejected Head: nor an MR id is dropped:
+// one of them is what says which content was rejected. Only the first
+// Branch:/MR:/Head: line in a block is read — the block runs to the next
+// marker, so later appended prose belongs to no rejection.
 func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
 	if !strings.Contains(notes, refinery.MergeRejectionNoteMarker) {
 		return nil
@@ -67,13 +70,19 @@ func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
 				a.branch = strings.TrimPrefix(value, "refs/heads/")
 			case a.mrID == "" && strings.EqualFold(strings.TrimSpace(key), "mr"):
 				a.mrID = value
+			case a.head == "" && strings.EqualFold(strings.TrimSpace(key), "head"):
+				a.head = value
 			}
 		}
-		// One MR is one attempt, however many times its rejection was
-		// recorded: the second record adds a line to the refusal and a Dolt
-		// read, not evidence.
-		if a.mrID != "" && !seen[a.mrID] {
-			seen[a.mrID] = true
+		// One MR (or one rejected head) is one attempt, however many times its
+		// rejection was recorded: the second record adds a line to the refusal
+		// and a Dolt read, not evidence.
+		key := a.mrID
+		if a.head != "" {
+			key = a.head
+		}
+		if key != "" && !seen[key] {
+			seen[key] = true
 			out = append(out, a)
 		}
 	}
@@ -109,7 +118,10 @@ func reportUnchangedSinceRejection(g rejectedReworkGit, notes, issueID, target s
 
 	var unchanged []unchangedRejection
 	for _, a := range attempts {
-		sha, ok := tipOf(a.mrID)
+		sha, ok := a.head, a.head != ""
+		if !ok {
+			sha, ok = tipOf(a.mrID)
+		}
 		if !ok || strings.TrimSpace(sha) == "" {
 			continue
 		}

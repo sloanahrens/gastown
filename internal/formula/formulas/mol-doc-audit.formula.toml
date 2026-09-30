@@ -454,10 +454,9 @@ Empty commands mean "not configured" — skip silently.
 **3. If a gate fails after rebase:** fix the issue, commit, and re-run from
 step 1.
 
-**4. Submit with plain `gt done` (next step). Do NOT use `--pre-verified`:**
-it re-runs the full gate set including the container suite under a slot
-cap, disables the auto-rebase, and the refinery's gate is the authority
-either way.
+**4. Submit with plain `gt done` (next step).** It rebases onto
+{{base_branch}} again, runs the local gate and pushes. No flag skips the gate,
+and the landing worker gates the merged tree again before anything lands.
 
 **5. Confirm the branch contains only YOUR files:**
 ```bash
@@ -485,11 +484,14 @@ description = """
 Submit your work and clean up. You cease to exist after this step.
 
 **Self-Cleaning Model:**
-Once you run `gt done`, you're gone. The command:
-1. Pushes your branch to origin
-2. Creates an MR bead in the merge queue
-3. Nukes your sandbox (worktree removal)
-4. Exits your session immediately
+Once `gt done` succeeds, you're gone. The command:
+1. Rebases your branch onto origin/{{base_branch}} and squashes auto-save commits
+2. Runs the local gate (lint, build, the unit tier of the tests)
+3. Pushes your branch and marks {{issue}} ready to land
+4. Exits your session
+
+If any stage fails, `gt done` exits non-zero, names what failed, and your
+session stays up: fix it, commit, and run `gt done` once more.
 
 **Pre-flight: Verify you have actual work to submit (HARD GATE):**
 ```bash
@@ -500,12 +502,12 @@ This MUST show at least 1 commit. If it shows nothing, do NOT run `gt done`.
 
 **While gt done runs — do not touch it (gt-7dxw):**
 
-Run `gt done` once and leave it waiting: it takes the container-gate slot itself and is bounded. Never poll the slot or script a retry around it (gt-7dxw). Before you run `gt done` or `gt slot run`, read the container-gate rule in `docs/reference.md` — never-retry, the escalation path at the cap, and the wrapped form for a container suite you must run yourself.
+Run `gt done` once and let it finish: it runs the local gate itself and needs no container slot. Never script a retry around gt done (gt-7dxw). If it exits non-zero, fix what it names, commit, and run it once more. Before you run `gt slot run`, read the container-gate rule in `docs/reference.md` — never-retry, and the wrapped form for a container suite you must run yourself.
 
 **Run gt done:**
 ```bash
-# For code tasks (gt done lints and tests your changed non-container packages,
-# then submits; the refinery runs the Docker suite once):
+# For code tasks (gt done rebases, runs the local gate, pushes and marks the
+# bead ready; the landing worker runs the Docker suite on the merged tree):
 gt done --target {{base_branch}}
 
 # For report-only tasks (no commits — audits, reviews, research):
@@ -514,25 +516,25 @@ gt done --status DEFERRED
 
 You should see output like:
 ```
-✓ Work submitted to merge queue
-  MR ID: gt-xxxxx
-  Source: polecat/<name>
+✓ Local gate passed: pass (lint exit 0 …, build exit 0 …, test exit 0 …)
+✓ Branch pushed to origin
+✓ Submitted for landing
+  Branch: polecat/<name>/<bead> @ <sha>
   Target: {{base_branch}}
-  Issue: {{issue}}
-✓ Sandbox nuked
-✓ Session exiting
+  Issue:  {{issue}}
+✓ Polecat session retiring after durable handoff
 ```
 
 **What happens next (not your concern):**
-- Refinery batches MRs and runs gates on the merged stack
-- If green: all MRs in the batch merge to {{base_branch}} at once
-- If red: Refinery bisects to isolate the culprit, merges the good ones
-- Refinery fixes failures itself (inline or via helper polecats)
-- Refinery closes your issue after successful merge
+- The daemon's landing worker merges your branch onto {{base_branch}} in a
+  throwaway worktree and gates the merged tree while om reviews it
+- If green and approved: it lands and closes {{issue}} with the landed commit
+- If not: it writes a MERGE REJECTION note on {{issue}} and the bead is
+  dispatched again for rework
 
 You are NOT involved in any of that. You're gone. Done means gone.
 
-**Exit criteria:** Work submitted, sandbox nuked, session exited."""
+**Exit criteria:** Work submitted for landing, session exited."""
 
 [vars]
 [vars.issue]
