@@ -105,22 +105,29 @@ func CheckDiskSpace(path string) (DiskSpaceLevel, string, error) {
 	if err != nil {
 		return DiskSpaceOK, "", err
 	}
+	level, msg := diskSpaceLevel(info)
+	return level, msg, nil
+}
 
+// apfsSpaceFunc reports an APFS container's free and total bytes for the
+// volume mounted at mountPoint.
+type apfsSpaceFunc func(mountPoint string) (free, total uint64, err error)
+
+// diskSpaceLevel is CheckDiskSpace's verdict on measured space.
+func diskSpaceLevel(info *DiskSpaceInfo) (DiskSpaceLevel, string) {
 	availMB := info.AvailableMB()
 
 	if availMB < DiskSpaceMinimumMB || info.UsedPercent >= DiskSpaceCriticalPercent {
 		return DiskSpaceCritical,
 			fmt.Sprintf("CRITICAL: only %s free (%.1f%% used) — disk space exhausted, operations blocked",
-				info.AvailableHuman(), info.UsedPercent),
-			nil
+				info.AvailableHuman(), info.UsedPercent)
 	}
 
 	if availMB < DiskSpaceWarningMB {
 		return DiskSpaceWarning,
 			fmt.Sprintf("WARNING: only %s free (%.1f%% used) — disk space low, reduce workload",
-				info.AvailableHuman(), info.UsedPercent),
-			nil
+				info.AvailableHuman(), info.UsedPercent)
 	}
 
-	return DiskSpaceOK, "", nil
+	return DiskSpaceOK, ""
 }

@@ -179,11 +179,16 @@ func classifyDoltOrphan(e doltProcEntry) (DoltOrphanServer, bool) {
 // still sees since it isn't sandboxed, has nothing to match against and is
 // misclassified as an orphan (gt-l7za1).
 func townServerPIDs(townRoot string) map[int]bool {
+	return townServerPIDsWith(townRoot, workspace.ForbiddenTownRoot())
+}
+
+// townServerPIDs with the live town the environment forbids passed in.
+func townServerPIDsWith(townRoot, forbidden string) map[int]bool {
 	pids := make(map[int]bool, 2)
 	if pid := townDoltServerPID(townRoot); pid != 0 {
 		pids[pid] = true
 	}
-	if forbidden := workspace.ForbiddenTownRoot(); forbidden != "" && forbidden != townRoot {
+	if forbidden != "" && forbidden != townRoot {
 		if pid := townDoltServerPID(forbidden); pid != 0 {
 			pids[pid] = true
 		}
@@ -268,8 +273,8 @@ func ReapOrphanDoltServers(orphans []DoltOrphanServer) []DoltOrphanReapResult {
 // currently referenced by a live dolt sql-server's --config path (town
 // server included — it is never itself under a test temp dir, but excluding
 // it isn't necessary since the prefix match already scopes this).
-func liveDoltConfigDirs() (map[string]bool, error) {
-	entries, err := doltPSSnapshot()
+func liveDoltConfigDirs(snapshot func() ([]doltProcEntry, error)) (map[string]bool, error) {
+	entries, err := snapshot()
 	if err != nil {
 		return nil, err
 	}
@@ -306,13 +311,18 @@ func liveDoltConfigDirs() (map[string]bool, error) {
 // doltOrphanMinAge, is never returned. Read-only: callers decide whether to
 // remove what's returned.
 func FindStaleBeadsTestTempDirs() ([]string, error) {
-	tmpDir := os.TempDir()
+	return findStaleBeadsTestTempDirs(os.TempDir(), doltPSSnapshot)
+}
+
+// findStaleBeadsTestTempDirs is FindStaleBeadsTestTempDirs over tmpDir, with
+// the process table read by snapshot.
+func findStaleBeadsTestTempDirs(tmpDir string, snapshot func() ([]doltProcEntry, error)) ([]string, error) {
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
 		return nil, fmt.Errorf("reading temp dir: %w", err)
 	}
 
-	liveDirs, err := liveDoltConfigDirs()
+	liveDirs, err := liveDoltConfigDirs(snapshot)
 	if err != nil {
 		return nil, err
 	}

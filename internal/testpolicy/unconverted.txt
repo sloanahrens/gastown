@@ -4,7 +4,6 @@ internal/beads
 internal/cmd
 internal/config
 internal/convoy
-internal/crew
 internal/daemon
 internal/deacon
 internal/doctor
@@ -22,5 +21,4 @@ internal/scheduler/capacity
 internal/session
 internal/telemetry
 internal/templates
-internal/util
 internal/witness

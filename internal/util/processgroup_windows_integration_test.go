@@ -1,4 +1,4 @@
-//go:build windows
+//go:build integration && windows
 
 package util
 
@@ -22,7 +22,7 @@ import (
 // for that is taskkillNotFound. Everything KillProcessGroup returns nil for
 // rests on this status being the one it is (gt-7hx0), so the test reads it off
 // a real taskkill rather than trusting the constant.
-func TestKillProcessGroup_AlreadyGoneIsSuccess(t *testing.T) {
+func TestIntegrationKillProcessGroup_AlreadyGoneIsSuccess(t *testing.T) {
 	cmd := startInGroup(t, "cmd.exe", "/c", "exit", "0")
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("cmd.Wait() on a process that exits 0: %v", err)
@@ -39,7 +39,7 @@ func TestKillProcessGroup_AlreadyGoneIsSuccess(t *testing.T) {
 // reported: a walk that fails for a reason other than "already gone" leaves
 // the tree unaccounted for, so it must reach the caller as an error, and the
 // root it could not reach must not be left running behind that error.
-func TestKillProcessGroup_SurfacesAFailedTreeWalk(t *testing.T) {
+func TestIntegrationKillProcessGroup_SurfacesAFailedTreeWalk(t *testing.T) {
 	stubTaskkillTree(t, exitError(t, 1))
 
 	cmd := startInGroup(t, "ping.exe", "-n", "60", "127.0.0.1")
@@ -58,7 +58,7 @@ func TestKillProcessGroup_SurfacesAFailedTreeWalk(t *testing.T) {
 // without an exit status at all, which is the second shape the old code
 // swallowed: no taskkill on PATH is a tree nothing reached, not a tree that
 // was already down.
-func TestKillProcessGroup_TaskkillMissingIsAFailure(t *testing.T) {
+func TestIntegrationKillProcessGroup_TaskkillMissingIsAFailure(t *testing.T) {
 	cmd := startInGroup(t, "ping.exe", "-n", "60", "127.0.0.1")
 	t.Setenv("PATH", t.TempDir())
 
@@ -74,7 +74,7 @@ func TestKillProcessGroup_TaskkillMissingIsAFailure(t *testing.T) {
 // exec.CommandContext's default cancel — does not reach. The command here has
 // the gate's shape cut to two levels: powershell that starts ping and waits on
 // it.
-func TestKillProcessGroup_TakesTheGrandchild(t *testing.T) {
+func TestIntegrationKillProcessGroup_TakesTheGrandchild(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
 	cmd := startInGroup(t, powershellPath(t), powershellTreeArgs(pidFile)...)
 	grandchild := waitForPID(t, pidFile)
@@ -91,7 +91,7 @@ func TestKillProcessGroup_TakesTheGrandchild(t *testing.T) {
 // the town depends on: a context canceled on a command configured with
 // SetProcessGroup must reach the grandchild, not just the shell, and must
 // report the cancellation rather than the walk that did not confirm it.
-func TestSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
+func TestIntegrationSetProcessGroup_CancelTakesTheGrandchild(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

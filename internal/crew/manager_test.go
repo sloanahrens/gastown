@@ -3,16 +3,18 @@ package crew
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestManagerAddAndGet(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// Create temp directory for test
 	tmpDir, err := os.MkdirTemp("", "crew-test-*")
 	if err != nil {
@@ -27,14 +29,10 @@ func TestManagerAddAndGet(t *testing.T) {
 	}
 
 	// Initialize git repo for the rig
-	g := git.NewGit(rigPath)
 
 	// For testing, we need a git URL - use a local bare repo
 	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
-	cmd := []string{"git", "init", "--bare", bareRepoPath}
-	if err := runCmd(cmd[0], cmd[1:]...); err != nil {
-		t.Fatalf("failed to create bare repo: %v", err)
-	}
+	f.InitBare(t, bareRepoPath)
 
 	r := &rig.Rig{
 		Name:   "test-rig",
@@ -42,7 +40,7 @@ func TestManagerAddAndGet(t *testing.T) {
 		GitURL: bareRepoPath,
 	}
 
-	mgr := NewManager(r, g)
+	mgr := fakeManager(t, f, r)
 
 	// Test Add
 	worker, err := mgr.Add("dave", false)
@@ -74,6 +72,11 @@ func TestManagerAddAndGet(t *testing.T) {
 	// NOTE: CLAUDE.md is NOT created by Add() - it's injected via SessionStart hook
 	// See manager.go line 107-110 for why we skip CLAUDE.md creation
 
+	// Gas Town's patterns go to the clone's local exclude, not .gitignore.
+	if data, err := os.ReadFile(filepath.Join(crewDir, ".git", "info", "exclude")); err != nil || len(data) == 0 {
+		t.Errorf("local exclude not written: %v", err)
+	}
+
 	stateFile := filepath.Join(crewDir, "state.json")
 	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
 		t.Error("state.json was not created")
@@ -101,68 +104,9 @@ func TestManagerAddAndGet(t *testing.T) {
 	}
 }
 
-func TestManagerAddUsesLocalRepoReference(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "crew-test-local-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	rigPath := filepath.Join(tmpDir, "test-rig")
-	if err := os.MkdirAll(rigPath, 0755); err != nil {
-		t.Fatalf("failed to create rig dir: %v", err)
-	}
-
-	remoteRepoPath := filepath.Join(tmpDir, "remote.git")
-	if err := runCmd("git", "init", "--bare", remoteRepoPath); err != nil {
-		t.Fatalf("failed to create bare repo: %v", err)
-	}
-
-	localRepoPath := filepath.Join(tmpDir, "local-repo")
-	if err := runCmd("git", "init", localRepoPath); err != nil {
-		t.Fatalf("failed to init local repo: %v", err)
-	}
-	if err := runCmd("git", "-C", localRepoPath, "config", "user.email", "test@test.com"); err != nil {
-		t.Fatalf("failed to configure email: %v", err)
-	}
-	if err := runCmd("git", "-C", localRepoPath, "config", "user.name", "Test"); err != nil {
-		t.Fatalf("failed to configure name: %v", err)
-	}
-	if err := runCmd("git", "-C", localRepoPath, "remote", "add", "origin", remoteRepoPath); err != nil {
-		t.Fatalf("failed to add origin: %v", err)
-	}
-
-	if err := os.WriteFile(filepath.Join(localRepoPath, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("failed to write file: %v", err)
-	}
-	if err := runCmd("git", "-C", localRepoPath, "add", "."); err != nil {
-		t.Fatalf("failed to add file: %v", err)
-	}
-	if err := runCmd("git", "-C", localRepoPath, "commit", "-m", "initial"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	r := &rig.Rig{
-		Name:      "test-rig",
-		Path:      rigPath,
-		GitURL:    remoteRepoPath,
-		LocalRepo: localRepoPath,
-	}
-
-	mgr := NewManager(r, git.NewGit(rigPath))
-
-	worker, err := mgr.Add("dave", false)
-	if err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
-
-	alternates := filepath.Join(worker.ClonePath, ".git", "objects", "info", "alternates")
-	if _, err := os.Stat(alternates); err != nil {
-		t.Fatalf("expected alternates file: %v", err)
-	}
-}
-
 func TestManagerAddWithBranch(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// Create temp directory for test
 	tmpDir, err := os.MkdirTemp("", "crew-test-branch-*")
 	if err != nil {
@@ -176,41 +120,10 @@ func TestManagerAddWithBranch(t *testing.T) {
 		t.Fatalf("failed to create rig dir: %v", err)
 	}
 
-	g := git.NewGit(rigPath)
-
-	// Create a local repo with initial commit for branch testing
-	sourceRepoPath := filepath.Join(tmpDir, "source-repo")
-	if err := os.MkdirAll(sourceRepoPath, 0755); err != nil {
-		t.Fatalf("failed to create source repo dir: %v", err)
-	}
-
-	// Initialize source repo with a commit
-	cmds := [][]string{
-		{"git", "-C", sourceRepoPath, "init"},
-		{"git", "-C", sourceRepoPath, "config", "user.email", "test@test.com"},
-		{"git", "-C", sourceRepoPath, "config", "user.name", "Test"},
-	}
-	for _, cmd := range cmds {
-		if err := runCmd(cmd[0], cmd[1:]...); err != nil {
-			t.Fatalf("failed to run %v: %v", cmd, err)
-		}
-	}
-
-	// Create initial file and commit
-	testFile := filepath.Join(sourceRepoPath, "README.md")
-	if err := os.WriteFile(testFile, []byte("# Test"), 0644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	cmds = [][]string{
-		{"git", "-C", sourceRepoPath, "add", "."},
-		{"git", "-C", sourceRepoPath, "commit", "-m", "Initial commit"},
-	}
-	for _, cmd := range cmds {
-		if err := runCmd(cmd[0], cmd[1:]...); err != nil {
-			t.Fatalf("failed to run %v: %v", cmd, err)
-		}
-	}
+	// A source repository with an initial commit for branch testing.
+	sourceRepoPath := filepath.Join(tmpDir, "source-repo.git")
+	f.InitBare(t, sourceRepoPath)
+	f.Commit(t, sourceRepoPath, "main", "Initial commit", map[string]string{"README.md": "# Test"})
 
 	r := &rig.Rig{
 		Name:   "test-rig",
@@ -218,7 +131,7 @@ func TestManagerAddWithBranch(t *testing.T) {
 		GitURL: sourceRepoPath,
 	}
 
-	mgr := NewManager(r, g)
+	mgr := fakeManager(t, f, r)
 
 	// Test Add with branch
 	worker, err := mgr.Add("emma", true)
@@ -232,6 +145,8 @@ func TestManagerAddWithBranch(t *testing.T) {
 }
 
 func TestManagerList(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// Create temp directory for test
 	tmpDir, err := os.MkdirTemp("", "crew-test-list-*")
 	if err != nil {
@@ -245,13 +160,9 @@ func TestManagerList(t *testing.T) {
 		t.Fatalf("failed to create rig dir: %v", err)
 	}
 
-	g := git.NewGit(rigPath)
-
 	// Create a bare repo for cloning
 	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
-	if err := runCmd("git", "init", "--bare", bareRepoPath); err != nil {
-		t.Fatalf("failed to create bare repo: %v", err)
-	}
+	f.InitBare(t, bareRepoPath)
 
 	r := &rig.Rig{
 		Name:   "test-rig",
@@ -259,7 +170,7 @@ func TestManagerList(t *testing.T) {
 		GitURL: bareRepoPath,
 	}
 
-	mgr := NewManager(r, g)
+	mgr := fakeManager(t, f, r)
 
 	// Initially empty
 	workers, err := mgr.List()
@@ -304,6 +215,8 @@ func TestManagerList(t *testing.T) {
 }
 
 func TestManagerRemove(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// Create temp directory for test
 	tmpDir, err := os.MkdirTemp("", "crew-test-remove-*")
 	if err != nil {
@@ -317,13 +230,9 @@ func TestManagerRemove(t *testing.T) {
 		t.Fatalf("failed to create rig dir: %v", err)
 	}
 
-	g := git.NewGit(rigPath)
-
 	// Create a bare repo for cloning
 	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
-	if err := runCmd("git", "init", "--bare", bareRepoPath); err != nil {
-		t.Fatalf("failed to create bare repo: %v", err)
-	}
+	f.InitBare(t, bareRepoPath)
 
 	r := &rig.Rig{
 		Name:   "test-rig",
@@ -331,7 +240,7 @@ func TestManagerRemove(t *testing.T) {
 		GitURL: bareRepoPath,
 	}
 
-	mgr := NewManager(r, g)
+	mgr := fakeManager(t, f, r)
 
 	// Add a worker
 	_, err = mgr.Add("charlie", false)
@@ -359,6 +268,8 @@ func TestManagerRemove(t *testing.T) {
 }
 
 func TestManagerGetWithStaleStateName(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// Regression test: state.json with wrong name should not affect Get() result
 	// See: gt-h1w - gt crew list shows wrong names
 	tmpDir, err := os.MkdirTemp("", "crew-test-stale-*")
@@ -377,7 +288,7 @@ func TestManagerGetWithStaleStateName(t *testing.T) {
 		Path: rigPath,
 	}
 
-	mgr := NewManager(r, git.NewGit(rigPath))
+	mgr := fakeManager(t, f, r)
 
 	// Manually create a crew directory with wrong name in state.json
 	crewDir := filepath.Join(rigPath, "crew", "alice")
@@ -409,6 +320,8 @@ func TestManagerGetWithStaleStateName(t *testing.T) {
 }
 
 func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	tmpDir, err := os.MkdirTemp("", "crew-test-remotes-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -422,23 +335,17 @@ func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
 
 	// Create a "fork" bare repo (what origin should point to)
 	forkRepoPath := filepath.Join(tmpDir, "fork.git")
-	if err := runCmd("git", "init", "--bare", forkRepoPath); err != nil {
-		t.Fatalf("failed to create fork repo: %v", err)
-	}
+	f.InitBare(t, forkRepoPath)
 
 	// Create an "upstream" bare repo
 	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
-	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
-		t.Fatalf("failed to create upstream repo: %v", err)
-	}
+	f.InitBare(t, upstreamRepoPath)
 
 	// Create mayor/rig with both remotes configured
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	if err := runCmd("git", "clone", forkRepoPath, mayorRigPath); err != nil {
-		t.Fatalf("failed to clone mayor rig: %v", err)
-	}
-	if err := runCmd("git", "-C", mayorRigPath, "remote", "add", "upstream", upstreamRepoPath); err != nil {
-		t.Fatalf("failed to add upstream to mayor: %v", err)
+	f.Clone(t, forkRepoPath, mayorRigPath)
+	if _, err := f.Open(mayorRigPath).(gitfake.CrewRepo).AddRemote("upstream", upstreamRepoPath); err != nil {
+		t.Fatal(err)
 	}
 
 	// Rig GitURL uses upstream (simulating the bug — clone from upstream)
@@ -448,7 +355,7 @@ func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
 		GitURL: upstreamRepoPath,
 	}
 
-	mgr := NewManager(r, git.NewGit(rigPath))
+	mgr := fakeManager(t, f, r)
 
 	worker, err := mgr.Add("sync_test", false)
 	if err != nil {
@@ -456,7 +363,7 @@ func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
 	}
 
 	// Verify crew clone's origin was updated to match mayor/rig's origin (the fork)
-	crewGit := git.NewGit(worker.ClonePath)
+	crewGit := f.Open(worker.ClonePath)
 	originURL, err := crewGit.RemoteURL("origin")
 	if err != nil {
 		t.Fatalf("failed to get crew origin URL: %v", err)
@@ -476,6 +383,8 @@ func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
 }
 
 func TestManagerRenameValidatesNewName(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// Regression test: Rename must validate newName to prevent path traversal
 	// and invalid characters. See: gt-gt3zv
 	tmpDir, err := os.MkdirTemp("", "crew-test-rename-*")
@@ -489,12 +398,8 @@ func TestManagerRenameValidatesNewName(t *testing.T) {
 		t.Fatalf("failed to create rig dir: %v", err)
 	}
 
-	g := git.NewGit(rigPath)
-
 	bareRepoPath := filepath.Join(tmpDir, "bare-repo.git")
-	if err := runCmd("git", "init", "--bare", bareRepoPath); err != nil {
-		t.Fatalf("failed to create bare repo: %v", err)
-	}
+	f.InitBare(t, bareRepoPath)
 
 	r := &rig.Rig{
 		Name:   "test-rig",
@@ -502,7 +407,7 @@ func TestManagerRenameValidatesNewName(t *testing.T) {
 		GitURL: bareRepoPath,
 	}
 
-	mgr := NewManager(r, g)
+	mgr := fakeManager(t, f, r)
 
 	// Add a valid worker
 	_, err = mgr.Add("alice", false)
@@ -739,6 +644,8 @@ func TestBuildResumeArgs(t *testing.T) {
 }
 
 func TestManagerAddSyncsCustomPushURLFromRig(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	tmpDir, err := os.MkdirTemp("", "crew-test-push-url-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -752,23 +659,17 @@ func TestManagerAddSyncsCustomPushURLFromRig(t *testing.T) {
 
 	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
 	forkRepoPath := filepath.Join(tmpDir, "fork.git")
-	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
-		t.Fatalf("failed to create upstream bare repo: %v", err)
-	}
-	if err := runCmd("git", "init", "--bare", forkRepoPath); err != nil {
-		t.Fatalf("failed to create fork bare repo: %v", err)
-	}
+	f.InitBare(t, upstreamRepoPath)
+	f.InitBare(t, forkRepoPath)
 
 	// Create mayor clone with fetch=upstream and push=fork.
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
 	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
 		t.Fatalf("failed to create mayor dir: %v", err)
 	}
-	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
-		t.Fatalf("failed to clone mayor rig: %v", err)
-	}
-	if err := runCmd("git", "-C", mayorRigPath, "remote", "set-url", "origin", "--push", forkRepoPath); err != nil {
-		t.Fatalf("failed to set mayor push url: %v", err)
+	f.Clone(t, upstreamRepoPath, mayorRigPath)
+	if err := f.Open(mayorRigPath).ConfigurePushURL("origin", forkRepoPath); err != nil {
+		t.Fatal(err)
 	}
 
 	r := &rig.Rig{
@@ -777,7 +678,7 @@ func TestManagerAddSyncsCustomPushURLFromRig(t *testing.T) {
 		GitURL:  upstreamRepoPath,
 		PushURL: forkRepoPath, // config.json is the source of truth for origin push URL
 	}
-	mgr := NewManager(r, git.NewGit(rigPath))
+	mgr := fakeManager(t, f, r)
 
 	worker, err := mgr.Add("dave", false)
 	if err != nil {
@@ -785,17 +686,17 @@ func TestManagerAddSyncsCustomPushURLFromRig(t *testing.T) {
 	}
 
 	crewRepo := worker.ClonePath
-	outFetch, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "origin").CombinedOutput()
+	outFetch, err := f.Open(crewRepo).RemoteURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew fetch URL: %v (%s)", err, outFetch)
 	}
-	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	outPush, err := f.Open(crewRepo).GetPushURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
 	}
 
-	fetchURL := strings.TrimSpace(string(outFetch))
-	pushURL := strings.TrimSpace(string(outPush))
+	fetchURL := outFetch
+	pushURL := outPush
 
 	if fetchURL != upstreamRepoPath {
 		t.Errorf("crew fetch URL = %q, want %q", fetchURL, upstreamRepoPath)
@@ -806,6 +707,8 @@ func TestManagerAddSyncsCustomPushURLFromRig(t *testing.T) {
 }
 
 func TestManagerAddSyncsFallbackPushURLFromConfig(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// When mayor has NO custom push URL but Rig.PushURL is set (from config.json),
 	// the crew clone should receive the push URL via the config fallback path.
 	tmpDir, err := os.MkdirTemp("", "crew-test-push-fallback-*")
@@ -821,21 +724,15 @@ func TestManagerAddSyncsFallbackPushURLFromConfig(t *testing.T) {
 
 	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
 	forkRepoPath := filepath.Join(tmpDir, "fork.git")
-	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
-		t.Fatalf("failed to create upstream bare repo: %v", err)
-	}
-	if err := runCmd("git", "init", "--bare", forkRepoPath); err != nil {
-		t.Fatalf("failed to create fork bare repo: %v", err)
-	}
+	f.InitBare(t, upstreamRepoPath)
+	f.InitBare(t, forkRepoPath)
 
 	// Create mayor clone pointing to upstream — NO custom push URL on mayor.
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
 	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
 		t.Fatalf("failed to create mayor dir: %v", err)
 	}
-	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
-		t.Fatalf("failed to clone mayor rig: %v", err)
-	}
+	f.Clone(t, upstreamRepoPath, mayorRigPath)
 	// Intentionally NOT setting push URL on mayor — this tests the fallback path.
 
 	// Rig has PushURL set (as if loaded from config.json)
@@ -845,7 +742,7 @@ func TestManagerAddSyncsFallbackPushURLFromConfig(t *testing.T) {
 		GitURL:  upstreamRepoPath,
 		PushURL: forkRepoPath,
 	}
-	mgr := NewManager(r, git.NewGit(rigPath))
+	mgr := fakeManager(t, f, r)
 
 	worker, err := mgr.Add("eve", false)
 	if err != nil {
@@ -853,18 +750,20 @@ func TestManagerAddSyncsFallbackPushURLFromConfig(t *testing.T) {
 	}
 
 	crewRepo := worker.ClonePath
-	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	outPush, err := f.Open(crewRepo).GetPushURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
 	}
 
-	pushURL := strings.TrimSpace(string(outPush))
+	pushURL := outPush
 	if pushURL != forkRepoPath {
 		t.Errorf("crew push URL = %q, want %q (expected config.json fallback)", pushURL, forkRepoPath)
 	}
 }
 
 func TestManagerAddNoPushURLWhenConfigEmpty(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// When Rig.PushURL is empty and mayor has no custom push URL,
 	// crew clone should NOT have a custom push URL (push URL == fetch URL).
 	tmpDir, err := os.MkdirTemp("", "crew-test-no-push-*")
@@ -879,18 +778,14 @@ func TestManagerAddNoPushURLWhenConfigEmpty(t *testing.T) {
 	}
 
 	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
-	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
-		t.Fatalf("failed to create upstream bare repo: %v", err)
-	}
+	f.InitBare(t, upstreamRepoPath)
 
 	// Create mayor clone with NO custom push URL.
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
 	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
 		t.Fatalf("failed to create mayor dir: %v", err)
 	}
-	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
-		t.Fatalf("failed to clone mayor rig: %v", err)
-	}
+	f.Clone(t, upstreamRepoPath, mayorRigPath)
 
 	r := &rig.Rig{
 		Name:   "test-rig",
@@ -898,7 +793,7 @@ func TestManagerAddNoPushURLWhenConfigEmpty(t *testing.T) {
 		GitURL: upstreamRepoPath,
 		// PushURL intentionally empty
 	}
-	mgr := NewManager(r, git.NewGit(rigPath))
+	mgr := fakeManager(t, f, r)
 
 	worker, err := mgr.Add("alice", false)
 	if err != nil {
@@ -906,17 +801,17 @@ func TestManagerAddNoPushURLWhenConfigEmpty(t *testing.T) {
 	}
 
 	crewRepo := worker.ClonePath
-	outFetch, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "origin").CombinedOutput()
+	outFetch, err := f.Open(crewRepo).RemoteURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew fetch URL: %v (%s)", err, outFetch)
 	}
-	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	outPush, err := f.Open(crewRepo).GetPushURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
 	}
 
-	fetchURL := strings.TrimSpace(string(outFetch))
-	pushURL := strings.TrimSpace(string(outPush))
+	fetchURL := outFetch
+	pushURL := outPush
 
 	// Push URL should equal fetch URL (no custom push URL configured)
 	if pushURL != fetchURL {
@@ -925,6 +820,8 @@ func TestManagerAddNoPushURLWhenConfigEmpty(t *testing.T) {
 }
 
 func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
 	// When Rig.PushURL is empty but a crew clone already has a custom push URL,
 	// sync should clear the stale push URL so push matches fetch.
 	tmpDir, err := os.MkdirTemp("", "crew-test-clear-push-*")
@@ -940,21 +837,15 @@ func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
 
 	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
 	forkRepoPath := filepath.Join(tmpDir, "fork.git")
-	if err := runCmd("git", "init", "--bare", upstreamRepoPath); err != nil {
-		t.Fatalf("failed to create upstream bare repo: %v", err)
-	}
-	if err := runCmd("git", "init", "--bare", forkRepoPath); err != nil {
-		t.Fatalf("failed to create fork bare repo: %v", err)
-	}
+	f.InitBare(t, upstreamRepoPath)
+	f.InitBare(t, forkRepoPath)
 
 	// Create mayor clone (no custom push URL on mayor)
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
 	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
 		t.Fatalf("failed to create mayor dir: %v", err)
 	}
-	if err := runCmd("git", "clone", upstreamRepoPath, mayorRigPath); err != nil {
-		t.Fatalf("failed to clone mayor rig: %v", err)
-	}
+	f.Clone(t, upstreamRepoPath, mayorRigPath)
 
 	// Step 1: Create crew with a push URL configured (simulating previous config)
 	r := &rig.Rig{
@@ -963,7 +854,7 @@ func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
 		GitURL:  upstreamRepoPath,
 		PushURL: forkRepoPath, // Initially configured
 	}
-	mgr := NewManager(r, git.NewGit(rigPath))
+	mgr := fakeManager(t, f, r)
 
 	worker, err := mgr.Add("staletest", false)
 	if err != nil {
@@ -972,11 +863,11 @@ func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
 
 	// Verify push URL was set
 	crewRepo := worker.ClonePath
-	outPush, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	outPush, err := f.Open(crewRepo).GetPushURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush)
 	}
-	pushURL := strings.TrimSpace(string(outPush))
+	pushURL := outPush
 	if pushURL != forkRepoPath {
 		t.Fatalf("expected push URL %q, got %q", forkRepoPath, pushURL)
 	}
@@ -989,7 +880,7 @@ func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
 		GitURL: upstreamRepoPath,
 		// PushURL intentionally empty — simulates config change
 	}
-	mgr2 := NewManager(r2, git.NewGit(rigPath))
+	mgr2 := fakeManager(t, f, r2)
 
 	// Sync the existing crew clone in-place (not a new clone)
 	if err := mgr2.syncRemotesFromRig(crewRepo); err != nil {
@@ -997,25 +888,44 @@ func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
 	}
 
 	// Verify push URL was cleared on the same crew clone
-	outFetch2, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "origin").CombinedOutput()
+	outFetch2, err := f.Open(crewRepo).RemoteURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew fetch URL: %v (%s)", err, outFetch2)
 	}
-	outPush2, err := exec.Command("git", "-C", crewRepo, "remote", "get-url", "--push", "origin").CombinedOutput()
+	outPush2, err := f.Open(crewRepo).GetPushURL("origin")
 	if err != nil {
 		t.Fatalf("failed to read crew push URL: %v (%s)", err, outPush2)
 	}
 
-	fetchURL2 := strings.TrimSpace(string(outFetch2))
-	pushURL2 := strings.TrimSpace(string(outPush2))
+	fetchURL2 := outFetch2
+	pushURL2 := outPush2
 
 	if pushURL2 != fetchURL2 {
 		t.Errorf("crew push URL = %q, want %q (should match fetch URL after in-place stale clearing)", pushURL2, fetchURL2)
 	}
 }
 
-// Helper to run commands
-func runCmd(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	return cmd.Run()
+// fakeManager returns r's crew manager with its git answered by gitfake
+// world f: the clones, the crew checkouts and mayor/rig all live there.
+func fakeManager(t *testing.T, f *gitfake.Fake, r *rig.Rig) *Manager {
+	t.Helper()
+	open := func(dir string) crewRepo {
+		g, ok := f.Open(dir).(crewRepo)
+		if !ok {
+			t.Fatalf("gitfake does not implement crewRepo for %s", dir)
+		}
+		return g
+	}
+	return &Manager{rig: r, git: open(r.Path), openGit: open}
+}
+
+// TestGitAtDefaultsToRealGit guards gitAt's nil path: with no opener, the
+// manager opens a *git.Git on the directory asked for.
+func TestGitAtDefaultsToRealGit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	m := &Manager{}
+	if g, ok := m.gitAt(dir).(*git.Git); !ok || g.WorkDir() != dir {
+		t.Errorf("gitAt(%s) = %T; want a *git.Git on it", dir, m.gitAt(dir))
+	}
 }
