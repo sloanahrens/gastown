@@ -500,9 +500,9 @@ func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 		t.Fatal("mol-idea-to-plan conflates design output ID with PRD review ID")
 	}
 	for _, want := range []string{
-		"--set problem=\"{{problem}}\"",
-		"--set context=\"See .prd-reviews/{{review_id}}/prd-draft.md. {{context}}\"",
-		"--set context=\"PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. {{context}}\"",
+		"--set problem=\"$PROBLEM\"",
+		"--set context=\"See .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT\"",
+		"--set context=\"PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT\"",
 		".designs/<design-review-id>/design-doc.md",
 	} {
 		if !strings.Contains(ideaText, want) {
