@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -56,6 +58,40 @@ func landingWorkerLandTimeout(config *DaemonPatrolConfig) time.Duration {
 		}
 	}
 	return landworker.DefaultLandTimeout
+}
+
+const defaultPostLandTimeout = 60 * time.Minute
+
+func landingWorkerDuration(s string, def time.Duration) time.Duration {
+	if s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// landingReviewEnabled is true unless the config explicitly sets
+// review:false: the om review runs on every landing by default.
+func landingReviewEnabled(config *DaemonPatrolConfig) bool {
+	c := landingWorkerConfig(config)
+	return c == nil || c.Review == nil || *c.Review
+}
+
+// resolveOMPath is the configured om, else om on PATH, else
+// $HOME/go/bin/om (where `go install` puts it; the daemon's launchd PATH
+// often lacks it).
+func resolveOMPath(configured string, lookPath func(string) (string, error), home string) string {
+	if configured = strings.TrimSpace(configured); configured != "" {
+		return configured
+	}
+	if p, err := lookPath("om"); err == nil {
+		return p
+	}
+	if home != "" {
+		return filepath.Join(home, "go", "bin", "om")
+	}
+	return "om"
 }
 
 // landingWorkerRigs is the configured rig allowlist within known.
@@ -176,13 +212,26 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	bd := landworker.RetryBeads{Inner: beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))}
 	out := landingLogWriter{logf: d.logger.Printf}
-	omPath := ""
-	if c := landingWorkerConfig(d.patrolConfig); c != nil {
-		omPath = c.OMPath
+	cfg := landingWorkerConfig(d.patrolConfig)
+	if cfg == nil {
+		cfg = &LandingWorkerConfig{}
 	}
 	gtPath := d.gtPath
 	if gtPath == "" {
 		gtPath = "gt"
+	}
+	var reviewer land.Reviewer = land.SkipReviewer{}
+	if landingReviewEnabled(d.patrolConfig) {
+		home, _ := os.UserHomeDir()
+		omPath := resolveOMPath(cfg.OMPath, exec.LookPath, home)
+		if _, err := os.Stat(omPath); err != nil && filepath.IsAbs(omPath) {
+			d.logger.Printf("landing_worker: %s: WARNING om not found at %s (%v); landings will record om_verdict error:<reason> until it is", rigName, omPath, err)
+		}
+		d.logger.Printf("landing_worker: %s: om review on (%s)", rigName, omPath)
+		reviewer = land.OMReviewer{Path: omPath, OutDir: filepath.Join(townRoot, ".runtime", "landing-om", rigName),
+			Timeout: landingWorkerDuration(cfg.OMTimeoutStr, land.DefaultOMTimeout)}
+	} else {
+		d.logger.Printf("landing_worker: %s: om review OFF (patrols.landing_worker.review=false); landings record om_verdict skipped", rigName)
 	}
 	lander := &land.Lander{
 		Repo:     repo,
@@ -191,11 +240,20 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Gate: landingGatePolicy(rigName, rigLandGate{
 			townRoot: townRoot, rig: rigName, gtPath: gtPath, logRoot: d.landingLogRoot(rigName),
 		}),
-		Reviewer:    land.OMReviewer{Path: omPath, OutDir: filepath.Join(townRoot, ".runtime", "landing-om", rigName)},
-		Beads:       bd,
-		Landings:    landings,
-		Out:         out,
-		RangeChecks: []land.RangeCheck{land.AttributionCheck},
+		Reviewer:         reviewer,
+		Beads:            bd,
+		Landings:         landings,
+		Out:              out,
+		RangeChecks:      []land.RangeCheck{land.AttributionCheck},
+		ReviewErrorLands: true,
+	}
+	postLand := &landworker.PostLandRunner{
+		Rig:     rigName,
+		Command: func() string { return rigPostLandCommand(rigPath) },
+		Run:     postLandRun(repo, filepath.Join(townRoot, ".runtime", "landing-work", rigName), d.landingLogRoot(rigName), gtPath, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout)),
+		Beads:   bd,
+		Logf:    d.logger.Printf,
+		// OnRed: red-main ownership (bisect, revert, file) is gt-v4ssj.4.
 	}
 	return &landworker.Worker{
 		Rig:         rigName,
@@ -203,6 +261,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Remote:      gitRemote{g: git.NewGit(repo), remote: "origin"},
 		Lander:      lander,
 		Landings:    landings,
+		PostLand:    postLand,
 		LandTimeout: landingWorkerLandTimeout(d.patrolConfig),
 		Logf:        d.logger.Printf,
 		ClearIntent: func(w land.Work) error {
@@ -227,6 +286,55 @@ func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
 	// dir is <work root>/land-XXXX/wt: one log directory per landing.
 	cg.LogDir = filepath.Join(g.logRoot, filepath.Base(filepath.Dir(dir)))
 	return cg.Run(ctx, dir)
+}
+
+// rigPostLandCommand is merge_queue.post_land_command from the rig's own
+// settings/config.json only: the repo-committed tier is merged content and
+// must not choose a command the daemon runs.
+func rigPostLandCommand(rigPath string) string {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil || settings == nil || settings.MergeQueue == nil {
+		return ""
+	}
+	return strings.TrimSpace(settings.MergeQueue.PostLandCommand)
+}
+
+// postLandRun runs the post-landing command in a throwaway worktree of repo
+// at the landed commit, under the container slot, bounded by timeout.
+func postLandRun(repo, workRoot, logRoot, gtPath, rigName string, timeout time.Duration) func(context.Context, string, landworker.PostLand) landworker.PostLandResult {
+	return func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult {
+		if err := os.MkdirAll(workRoot, 0o700); err != nil {
+			return landworker.PostLandResult{ExitCode: -1, Err: err}
+		}
+		parent, err := os.MkdirTemp(workRoot, "post-*")
+		if err != nil {
+			return landworker.PostLandResult{ExitCode: -1, Err: err}
+		}
+		defer func() { _ = os.RemoveAll(parent) }()
+		g := git.NewGit(repo)
+		dir := filepath.Join(parent, "wt")
+		if err := g.WorktreeAddDetached(dir, pl.Commit); err != nil {
+			return landworker.PostLandResult{ExitCode: -1, Err: fmt.Errorf("worktree at %s: %w", pl.Commit, err)}
+		}
+		defer func() {
+			_ = g.WorktreeRemove(dir, true)
+			_ = g.WorktreePrune()
+		}()
+		// Named "test" so WithSlot holds the container slot around it.
+		cg := land.WithSlot(land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}, gtPath, rigName+"/post-land")
+		cg.LogDir = filepath.Join(logRoot, filepath.Base(parent))
+		rctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		res := cg.Run(rctx, dir)
+		if res.Err != nil || len(res.Steps) == 0 {
+			if res.Err == nil {
+				res.Err = fmt.Errorf("post-land command produced no result")
+			}
+			return landworker.PostLandResult{ExitCode: -1, Err: res.Err}
+		}
+		step := res.Steps[len(res.Steps)-1]
+		return landworker.PostLandResult{ExitCode: step.ExitCode, Tail: step.Tail}
+	}
 }
 
 // gitRemote answers the worker's questions about origin from the rig's
@@ -277,7 +385,7 @@ func pruneLandingLogs(root string, now time.Time) {
 		return
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), "land-") {
+		if !e.IsDir() || (!strings.HasPrefix(e.Name(), "land-") && !strings.HasPrefix(e.Name(), "post-")) {
 			continue
 		}
 		info, err := e.Info()

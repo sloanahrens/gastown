@@ -82,6 +82,9 @@ type Worker struct {
 	// ClearIntent returns the author polecat's seat from submitted to stop
 	// once the worker has finished with its bead. nil skips it.
 	ClearIntent func(w land.Work) error
+	// PostLand, when set, runs the rig's post-landing command after each
+	// new landing (never after a record repair).
+	PostLand PostLandTrigger
 	// LandTimeout bounds one landing (gate included); 0 means
 	// DefaultLandTimeout.
 	LandTimeout time.Duration
@@ -397,12 +400,18 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		}
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
 		w.clearIntent(work)
+		if !wasRepair {
+			w.triggerPostLand(ctx, work, res)
+		}
 	case outRecordIncomplete:
 		// Landed: the push was read back. Only the record is unfinished.
 		w.pendingRepair[work.BeadID] = work
 		rep.Landed++
 		w.logf("%s: %v; the next pass finishes the record", work.BeadID, err)
 		w.clearIntent(work)
+		if !wasRepair {
+			w.triggerPostLand(ctx, work, res)
+		}
 	case outRejectedRework:
 		var rej *land.Rejection
 		errors.As(err, &rej)
@@ -414,7 +423,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			return
 		}
 		delete(w.state, work.BeadID)
-		msg := fmt.Sprintf("Landing rejected (%s): %s. Back to the polecat as rework: %s.", rej.Kind, land.NoteField(rej.Reason), ReworkComment)
+		msg := reworkMessage(rej)
 		if cerr := w.Beads.AddComment(work.BeadID, msg); cerr != nil {
 			w.logf("%s: adding the rework comment: %v", work.BeadID, cerr)
 		}
@@ -448,6 +457,35 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	default:
 		w.infraFailure(work.BeadID, "landing", err, rep)
 	}
+}
+
+// maxCommentFindings bounds the om findings one rework comment lists.
+const maxCommentFindings = 15
+
+// reworkMessage is the comment a rework rejection leaves on the work bead.
+// An om rejection carries om's verdict text and findings in the same
+// comment: one comment on the work bead, never a bead per finding.
+func reworkMessage(rej *land.Rejection) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Landing rejected (%s): %s. Back to the polecat as rework: %s.", rej.Kind, land.NoteField(rej.Reason), ReworkComment)
+	if rej.Kind == land.RejectReview {
+		fmt.Fprintf(&b, "\n\nom verdict: request_changes, score %.2f", rej.ReviewScore)
+		if s := strings.TrimSpace(rej.ReviewSummary); s != "" {
+			fmt.Fprintf(&b, "\n%s", s)
+		}
+	}
+	for i, f := range rej.Findings {
+		if i == maxCommentFindings {
+			fmt.Fprintf(&b, "\n- ... and %d more (see the MERGE REJECTION block in the notes)", len(rej.Findings)-i)
+			break
+		}
+		loc := f.Path
+		if f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", f.Path, f.Line)
+		}
+		fmt.Fprintf(&b, "\n- [%s] %s %s", land.NoteField(f.Severity), land.NoteField(loc), land.NoteField(f.Title))
+	}
+	return b.String()
 }
 
 // infraFailure backs a bead off exponentially after a failure that says
@@ -485,6 +523,13 @@ func (w *Worker) announce(id, key, msg string) {
 		return
 	}
 	st.announced = key
+}
+
+func (w *Worker) triggerPostLand(ctx context.Context, work land.Work, res land.Result) {
+	if w.PostLand == nil || res.LandedCommit == "" {
+		return
+	}
+	w.PostLand.Trigger(ctx, PostLand{BeadID: work.BeadID, Commit: res.LandedCommit, Target: work.Target})
 }
 
 func (w *Worker) clearIntent(work land.Work) {

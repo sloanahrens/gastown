@@ -159,3 +159,86 @@ func TestPruneLandingLogs(t *testing.T) {
 		t.Fatal("fresh log dir removed")
 	}
 }
+
+func TestLandingReviewOnByDefault(t *testing.T) {
+	t.Parallel()
+	if !landingReviewEnabled(nil) || !landingReviewEnabled(&DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{Enabled: true}}}) {
+		t.Fatal("om review must be on unless explicitly disabled")
+	}
+	off := false
+	if landingReviewEnabled(&DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{Review: &off}}}) {
+		t.Fatal("review:false did not disable the review")
+	}
+}
+
+func TestResolveOMPath(t *testing.T) {
+	t.Parallel()
+	missing := func(string) (string, error) { return "", os.ErrNotExist }
+	onPath := func(string) (string, error) { return "/usr/local/bin/om", nil }
+	if got := resolveOMPath("/opt/om", onPath, "/Users/x"); got != "/opt/om" {
+		t.Errorf("configured: %s", got)
+	}
+	if got := resolveOMPath("", onPath, "/Users/x"); got != "/usr/local/bin/om" {
+		t.Errorf("on PATH: %s", got)
+	}
+	if got := resolveOMPath("", missing, "/Users/x"); got != "/Users/x/go/bin/om" {
+		t.Errorf("fallback: %s", got)
+	}
+}
+
+func TestRigPostLandCommandReadsRigSettingsOnly(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	if got := rigPostLandCommand(rigPath); got != "" {
+		t.Fatalf("no settings: %q", got)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"rig-settings","version":1,"merge_queue":{"gate":"make gate","post_land_command":"make test-slow"}}`
+	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := rigPostLandCommand(rigPath); got != "make test-slow" {
+		t.Fatalf("post_land_command = %q", got)
+	}
+}
+
+// TestPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot runs the real
+// post-land runner against a real repository, with a stub gt whose "slot
+// run" only strips its own arguments.
+func TestPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	lwGit(t, root, "init", "-q", "-b", "main", repo)
+	if err := os.WriteFile(filepath.Join(repo, "marker"), []byte("landed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lwGit(t, repo, "add", ".")
+	lwGit(t, repo, "commit", "-q", "-m", "landed")
+	commit := lwGit(t, repo, "rev-parse", "HEAD")
+	stub := filepath.Join(root, "gt")
+	slotLog := filepath.Join(root, "slot.log")
+	script := "#!/bin/sh\necho \"$@\" >> " + slotLog + "\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := postLandRun(repo, filepath.Join(root, "work"), filepath.Join(root, "logs"), stub, "gastown", time.Minute)
+
+	res := run(context.Background(), "cat marker && echo slow tier failed && exit 3", landworker.PostLand{BeadID: "gt-a", Commit: commit})
+	if res.Err != nil || res.ExitCode != 3 || !strings.Contains(res.Tail, "landed") || !strings.Contains(res.Tail, "slow tier failed") {
+		t.Fatalf("red run: %+v", res)
+	}
+	res = run(context.Background(), "test -f marker", landworker.PostLand{BeadID: "gt-a", Commit: commit})
+	if res.Err != nil || res.ExitCode != 0 {
+		t.Fatalf("green run: %+v", res)
+	}
+	data, err := os.ReadFile(slotLog)
+	if err != nil || strings.Count(string(data), "slot run --role gastown/post-land --") != 2 {
+		t.Fatalf("slot wrapper calls: %q %v", data, err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(root, "work")); len(entries) != 0 {
+		t.Fatalf("worktrees left behind: %v", entries)
+	}
+}

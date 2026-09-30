@@ -473,9 +473,23 @@ type LandingWorkerConfig struct {
 	// Rigs limits the workers to these rigs. Empty means every known rig.
 	Rigs []string `json:"rigs,omitempty"`
 
-	// OMPath is the om binary the review runs; empty means "om" on the
-	// daemon's PATH.
+	// Review runs the om editorial review on every landing. Nil or true
+	// means on; only an explicit false turns it off (the landing then records
+	// om_verdict "skipped").
+	Review *bool `json:"review,omitempty"`
+
+	// OMPath is the om binary. Empty means "om" on the daemon's PATH, else
+	// $HOME/go/bin/om.
 	OMPath string `json:"om_path,omitempty"`
+
+	// OMTimeoutStr bounds one om review (e.g. "20m"). Default 20m. An om
+	// that times out does not block the landing: it lands with
+	// om_verdict "error:<reason>".
+	OMTimeoutStr string `json:"om_timeout,omitempty"`
+
+	// PostLandTimeoutStr bounds one run of the rig's
+	// merge_queue.post_land_command (e.g. "60m"). Default 60m.
+	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("witness",

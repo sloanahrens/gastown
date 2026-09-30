@@ -375,7 +375,8 @@ func realRun(ctx context.Context, dir string, env, argv []string, out io.Writer)
 	return -1, err
 }
 
-// mergeEnv is base with every key in extra replaced, never duplicated.
+// mergeEnv is base with every key in extra replaced, never duplicated. An
+// entry in extra with no "=" unsets that key instead.
 // Readers resolve duplicate keys differently (Go takes the last, some libc
 // getenv the first), so a gate's GT_TEST_DOCKER=0 beside an inherited =1 could
 // start containers with no slot held (gt-0hbm).
@@ -392,5 +393,10 @@ func mergeEnv(base, extra []string) []string {
 			out = append(out, kv)
 		}
 	}
-	return append(out, extra...)
+	for _, kv := range extra {
+		if strings.Contains(kv, "=") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

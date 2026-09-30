@@ -499,3 +499,24 @@ func TestPassStartupLeavesAReopenedLandedBead(t *testing.T) {
 		t.Fatalf("startup repair touched %+v; a reopened bead and another route's record are not the worker's", h.lander.calls)
 	}
 }
+
+func TestPassOMRejectionCommentCarriesTheVerdict(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Rework: true, Reason: "om requested changes (score 0.41, 2 finding(s))",
+			ReviewScore: 0.41, ReviewSummary: "Retry loop drops the last error.",
+			Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}
+	}
+	h.w.Pass(context.Background())
+	cs := h.comments(t, "gt-abc")
+	if len(cs) != 1 {
+		t.Fatalf("comments %q; want exactly one on the work bead", cs)
+	}
+	for _, want := range []string{ReworkComment, "score 0.41", "Retry loop drops the last error.", "[major] a.go:9 error dropped", "[minor] b.go naming"} {
+		if !strings.Contains(cs[0], want) {
+			t.Errorf("comment lacks %q:\n%s", want, cs[0])
+		}
+	}
+}
