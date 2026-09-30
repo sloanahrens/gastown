@@ -184,6 +184,15 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = h.ReapOwnedTestServers(townRoot) })
+	// dolt init needs an identity; the harness's HOME is a fresh sandbox.
+	for _, kv := range [][2]string{{"user.name", "Test"}, {"user.email", "test@example.com"}} {
+		if _, err := h.doltConfigMissing(kv[0]); err != nil {
+			t.Fatalf("probing dolt %s: %v", kv[0], err)
+		}
+		if err := h.setDoltGlobalConfig(kv[0], kv[1]); err != nil {
+			t.Fatalf("setting dolt %s in the sandbox HOME: %v", kv[0], err)
+		}
+	}
 
 	_, created, err := h.InitRig(townRoot, "testrig")
 	if err != nil {
