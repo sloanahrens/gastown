@@ -11,7 +11,7 @@ Three Makefile targets are the test tiers, and `make test` runs all three in ord
 | `make gate` | `make lint`, then `go build ./...`, then the fast tier: the budget runner over every package not in `internal/testpolicy/slow.txt`, warning about any package over `testpolicy.FastTierMaxWall` of wall time; prints its wall at the end | never | before every landing |
 | `make presubmit` | `make lint`, then `go build ./...`, then `go test` of only the packages the branch changed against `origin/main` (`internal/land/cmd/changedpkgs`); no drift guard, no budget runner | never | `gt done`, before it pushes: the cheap first look, not a substitute for `make gate`, which the landing worker runs on the merged tree (gt-ssyxd) |
 | `make test-slow` | the packages in `internal/testpolicy/slow.txt`, then the shell tests in `scripts/test-makefile.sh` (`make test-makefile` runs those alone) | never | after each landing: the landing worker runs it as the rig's `merge_queue.post_land_command`; until that hook is enabled, the overseer runs it after landings |
-| `make test-integration` | `go test -tags integration -run '^TestIntegration' ./...`, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the daemon's `main_branch_test` patrol daily, and the nightly workflow |
+| `make test-integration` | `go test -tags integration ./...` with no name filter, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the daemon's `main_branch_test` patrol daily, and the nightly workflow |
 
 Exit codes, for every target:
 - 0 means green.
@@ -25,6 +25,15 @@ Both the gate and `tier-check` still fail closed on output they cannot read (no 
 
 `make gate` never starts a container and never takes the container-gate slot. Its recipe writes `GT_TEST_DOCKER=0` itself, so an inherited value cannot turn containers on. Do not wrap it in `gt slot run`. `make test-integration` writes `GT_TEST_DOCKER=1` and does start containers, so it runs under `gt slot run`.
 
+The integration tier runs every test in an integration-tagged file; the tag selects the tier, and the name does not. No `-run` name filter, because a filter admits only the names it matches and the tag never says which those are: a file tagged with a second tag, or naming its tests something else, is skipped silently — `-run '^TestIntegration'` left ~120 of them running nowhere (gt-ik4a1.2).
+
+A test in this tier that cannot pass gets one of two answers, never a filter:
+
+- **delete it**, naming it and the reason in the commit that deletes it, as the triage rules below require; or
+- **skip it in place**, with the blocker named — a bead id and the evidence — so the missing coverage is visible in the run.
+
+`scripts/makefile-gate_test.sh` pins the no-filter rule and exercises it on the recipe this target carried before gt-ik4a1.2.
+
 A package whose unit-tier test files call a container entry point is Docker-backed. The entry points are the `testutil` Dolt helpers, `WithDolt`, `DockerTestsEnabled` and `beads.RunTestContainerInit`. In `make gate` those tests skip, and `make test-integration` runs them. `TestDockerTier` in `internal/testpolicy` keeps `docker.txt` exact:
 - it fails on a Docker-backed package that is not listed;
 - it fails on a listed package that no longer calls an entry point.
@@ -36,7 +45,7 @@ A package whose unit-tier test files call a container entry point is Docker-back
 | tier | what runs | build tag | test names | command |
 |---|---|---|---|---|
 | unit | in-process only: fakes, fake clock, `t.TempDir`, `git` (not in a package listed in `gitfree.txt`) | none | `TestX` | `make gate` |
-| integration | real tmux, Docker, bd, Dolt, the gt binary, real processes | `//go:build integration` | `TestIntegrationX` | `make test-integration` |
+| integration | real tmux, Docker, bd, Dolt, the gt binary, real processes | `//go:build integration` | any name: the build tag selects the tier (`TestIntegrationX` is the convention for converted packages) | `make test-integration` |
 
 - `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. It is a measurement, not a gate. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
 
@@ -408,7 +417,7 @@ Common sources of flakes, and their fixes:
 ```bash
 go test -count=1 -cover ./internal/<pkg>/                    # unit coverage
 make test-timing PKGS=./internal/<pkg>/...                   # unit tier, taxed pane: target 5 s or less
-go test -tags integration -run '^TestIntegration' -count=1 ./internal/<pkg>/...   # target 60 s or less
+go test -tags integration -count=1 ./internal/<pkg>/...   # target 60 s or less
 ```
 
 A package that meets every rule leaves `unconverted.txt` even if it still uses more than the converted-package budget (10 s of user CPU in the budget runner that `make gate` runs; see [The time budget](#the-time-budget)). In that case, list it in `internal/testpolicy/overbudget.txt` as `<package> <bead-id>`, where the bead tracks getting it under budget, and raise `maxOverBudget` to match. The budget runner does not fail a package on that list. Instead it prints the package's user CPU, system and wall time, and its bead, under "over budget (tracked)" on every run. TestPolicy rejects these entries:

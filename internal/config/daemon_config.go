@@ -29,9 +29,12 @@ type PatrolsConfig struct {
 	// landing worker replaced it. It stays in the schema only so existing
 	// daemon.json files, which the kernel decodes strictly, still load.
 	// Deprecated: remove "patrols.refinery" from mayor/daemon.json.
-	Refinery             *PatrolConfig               `json:"refinery,omitempty"`
-	Witness              *PatrolConfig               `json:"witness,omitempty"`
-	Deacon               *PatrolConfig               `json:"deacon,omitempty"`
+	Refinery *PatrolConfig `json:"refinery,omitempty"`
+	Witness  *PatrolConfig `json:"witness,omitempty"`
+	Deacon   *PatrolConfig `json:"deacon,omitempty"`
+	// Mayor gates the daemon's ensure-mayor supervision: {"enabled": false} stops
+	// the daemon from restarting a missing Mayor session (default on).
+	Mayor                *PatrolConfig               `json:"mayor,omitempty"`
 	Handler              *PatrolConfig               `json:"handler,omitempty"`
 	DoltServer           *DoltServerConfig           `json:"dolt_server,omitempty"`
 	DoltBackup           *DoltBackupConfig           `json:"dolt_backup,omitempty"`
