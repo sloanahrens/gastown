@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -52,9 +51,8 @@ func (c *HooksPathAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			totalClones++
 
-			cmd := exec.Command("git", "-C", clonePath, "config", "--get", "core.hooksPath")
-			output, err := cmd.Output()
-			if err != nil || strings.TrimSpace(string(output)) != ".githooks" {
+			hooksPath, err := ctx.git(clonePath).ConfigGet("core.hooksPath")
+			if err != nil || strings.TrimSpace(hooksPath) != ".githooks" {
 				c.unconfiguredClones = append(c.unconfiguredClones, clonePath)
 			}
 		}
@@ -89,8 +87,7 @@ func (c *HooksPathAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 // Fix configures core.hooksPath for all unconfigured clones.
 func (c *HooksPathAllRigsCheck) Fix(ctx *CheckContext) error {
 	for _, clonePath := range c.unconfiguredClones {
-		cmd := exec.Command("git", "-C", clonePath, "config", "core.hooksPath", ".githooks")
-		if err := cmd.Run(); err != nil {
+		if err := ctx.git(clonePath).ConfigSet("core.hooksPath", ".githooks"); err != nil {
 			return fmt.Errorf("failed to configure hooks for %s: %w", clonePath, err)
 		}
 	}

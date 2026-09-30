@@ -12,7 +12,7 @@ import (
 // PathRepo is BranchRepo plus what internal/doctor's checks call: the remote
 // list and removal, a rebasing pull, a detached checkout, bare-repository
 // and path-state queries, working-tree status and disabling a sparse
-// checkout. *git.Git satisfies it, and RunPathContract pins the fake to it.
+// checkout, and a bare clone. *git.Git satisfies it, and RunPathContract pins the fake to it.
 type PathRepo interface {
 	BranchRepo
 
@@ -29,6 +29,7 @@ type PathRepo interface {
 	PathChanged(path string) (bool, error)
 	UntrackedPaths(pathspec string) ([]string, error)
 	DisableSparseCheckout() error
+	CloneBareWithBranch(url, dest, branch string) error
 }
 
 var (
@@ -197,6 +198,24 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 		if _, err := openPathRepo(env, t.TempDir()).IsTracked("a.txt"); err == nil {
 			t.Error("IsTracked outside a repository succeeded")
+		}
+	})
+
+	t.Run("a bare repository's directory holds HEAD, made or cloned", func(t *testing.T) {
+		env := newEnv(t)
+		fx := newFixture(t, env)
+		if _, err := os.Stat(filepath.Join(fx.origin, "HEAD")); err != nil {
+			t.Errorf("origin HEAD: %v", err)
+		}
+		dest := filepath.Join(fx.root, "copy.git")
+		if err := openPathRepo(env, fx.clone).CloneBareWithBranch(fx.origin, dest, ""); err != nil {
+			t.Fatalf("CloneBareWithBranch: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dest, "HEAD")); err != nil {
+			t.Errorf("cloned HEAD: %v", err)
+		}
+		if isBare, err := env.OpenWithDir(dest, "").(PathRepo).IsBareRepository(); err != nil || !isBare {
+			t.Errorf("IsBareRepository(clone) = %v, %v", isBare, err)
 		}
 	})
 

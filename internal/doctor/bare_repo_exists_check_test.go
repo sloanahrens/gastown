@@ -3,12 +3,11 @@ package doctor
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 func TestBareRepoExistsCheck_Name(t *testing.T) {
@@ -24,8 +23,9 @@ func TestBareRepoExistsCheck_Name(t *testing.T) {
 
 func TestBareRepoExistsCheck_NoRig(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: t.TempDir(), RigName: ""}
+	ctx := withGit(&CheckContext{TownRoot: t.TempDir(), RigName: ""}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
@@ -35,16 +35,17 @@ func TestBareRepoExistsCheck_NoRig(t *testing.T) {
 
 func TestBareRepoExistsCheck_BareRepoExists(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Create a real bare repo so the structural health check passes.
-	bareRepo := initBareRepoWithRemote(t, rigDir, "https://github.com/example/repo.git")
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
 	setupWorktreeRef(t, rigDir, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
@@ -54,6 +55,7 @@ func TestBareRepoExistsCheck_BareRepoExists(t *testing.T) {
 
 func TestBareRepoExistsCheck_NoBareRepoNoWorktrees(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -65,7 +67,7 @@ func TestBareRepoExistsCheck_NoBareRepoNoWorktrees(t *testing.T) {
 	}
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
@@ -75,6 +77,7 @@ func TestBareRepoExistsCheck_NoBareRepoNoWorktrees(t *testing.T) {
 
 func TestBareRepoExistsCheck_MissingBareRepo(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -91,7 +94,7 @@ func TestBareRepoExistsCheck_MissingBareRepo(t *testing.T) {
 	}
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusError {
@@ -107,6 +110,7 @@ func TestBareRepoExistsCheck_MissingBareRepo(t *testing.T) {
 
 func TestBareRepoExistsCheck_MultipleWorktreesMissing(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -134,7 +138,7 @@ func TestBareRepoExistsCheck_MultipleWorktreesMissing(t *testing.T) {
 	}
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusError {
@@ -147,6 +151,7 @@ func TestBareRepoExistsCheck_MultipleWorktreesMissing(t *testing.T) {
 
 func TestBareRepoExistsCheck_RelativeGitdir(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -164,7 +169,7 @@ func TestBareRepoExistsCheck_RelativeGitdir(t *testing.T) {
 	}
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusError {
@@ -174,6 +179,7 @@ func TestBareRepoExistsCheck_RelativeGitdir(t *testing.T) {
 
 func TestBareRepoExistsCheck_NonRepoGitWorktree(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -190,7 +196,7 @@ func TestBareRepoExistsCheck_NonRepoGitWorktree(t *testing.T) {
 	}
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	// Worktree doesn't reference .repo.git, so this should pass
 	result := check.Run(ctx)
@@ -199,20 +205,42 @@ func TestBareRepoExistsCheck_NonRepoGitWorktree(t *testing.T) {
 	}
 }
 
-// initBareRepoWithRemote creates a real git bare repo with an origin remote.
-// Returns the bare repo path.
-func initBareRepoWithRemote(t *testing.T, rigDir, fetchURL string) string {
+// initBareRepoWithRemote makes rigDir/.repo.git a bare repository in gf with
+// an origin remote and the refspec git remote add configures. On disk it is
+// laid out as git lays one out (HEAD, refs/, objects/), since the checks
+// inspect those files without git. Returns the bare repo path.
+func initBareRepoWithRemote(t *testing.T, gf *gitfake.Fake, rigDir, fetchURL string) string {
 	t.Helper()
 	bareRepo := filepath.Join(rigDir, ".repo.git")
-	cmd := exec.Command("git", "init", "--bare", bareRepo)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init --bare failed: %v\n%s", err, out)
+	gf.InitBare(t, bareRepo)
+	gf.AddRemote(t, bareRepo, "origin", fetchURL)
+	if err := bareGit(gf, bareRepo).ConfigSet("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		t.Fatal(err)
 	}
-	cmd = exec.Command("git", "-C", bareRepo, "remote", "add", "origin", fetchURL)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add failed: %v\n%s", err, out)
+	for _, dir := range []string{"refs/heads", "refs/tags", "objects"} {
+		if err := os.MkdirAll(filepath.Join(bareRepo, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return bareRepo
+}
+
+// bareGit opens the bare repository at dir in gf, as the checks do.
+func bareGit(gf *gitfake.Fake, dir string) Repo { return gf.OpenWithDir(dir, "").(Repo) }
+
+// storeObjects writes loose object files into the bare repository at dir:
+// the data that removing a repository would destroy.
+func storeObjects(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range []string{"3b/18e512dba79e4c8300dd08aeb37f8e728b8dad", "e6/9de29bb2d1d6434b8b29ae775ad8c2e48c5391"} {
+		path := filepath.Join(dir, "objects", filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // setupWorktreeRef creates a refinery/rig directory with a .git file pointing to .repo.git.
@@ -247,17 +275,17 @@ func writeConfigJSON(t *testing.T, rigDir, gitURL, pushURL string) {
 
 func TestBareRepoExistsCheck_PushURLMismatch(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	fetchURL := "https://github.com/example/repo.git"
-	bareRepo := initBareRepoWithRemote(t, rigDir, fetchURL)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, fetchURL)
 
 	// Set a push URL on the bare repo that differs from config
-	cmd := exec.Command("git", "-C", bareRepo, "remote", "set-url", "--push", "origin", "https://github.com/user/wrong-fork.git")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set-url --push failed: %v\n%s", err, out)
+	if err := bareGit(gf, bareRepo).ConfigurePushURL("origin", "https://github.com/user/wrong-fork.git"); err != nil {
+		t.Fatalf("set-url --push failed: %v", err)
 	}
 
 	// Config says the push URL should be something else
@@ -265,7 +293,7 @@ func TestBareRepoExistsCheck_PushURLMismatch(t *testing.T) {
 	setupWorktreeRef(t, rigDir, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -278,17 +306,17 @@ func TestBareRepoExistsCheck_PushURLMismatch(t *testing.T) {
 
 func TestBareRepoExistsCheck_LegacyConfigIgnoresPushURL(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	fetchURL := "https://github.com/example/repo.git"
-	bareRepo := initBareRepoWithRemote(t, rigDir, fetchURL)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, fetchURL)
 
 	// Set a push URL on the bare repo (may be from a pre-push_url-feature setup)
-	cmd := exec.Command("git", "-C", bareRepo, "remote", "set-url", "--push", "origin", "https://github.com/user/old-fork.git")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set-url --push failed: %v\n%s", err, out)
+	if err := bareGit(gf, bareRepo).ConfigurePushURL("origin", "https://github.com/user/old-fork.git"); err != nil {
+		t.Fatalf("set-url --push failed: %v", err)
 	}
 
 	// Config has NO push_url — legacy config that predates the push_url feature.
@@ -297,7 +325,7 @@ func TestBareRepoExistsCheck_LegacyConfigIgnoresPushURL(t *testing.T) {
 	setupWorktreeRef(t, rigDir, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
@@ -307,25 +335,25 @@ func TestBareRepoExistsCheck_LegacyConfigIgnoresPushURL(t *testing.T) {
 
 func TestBareRepoExistsCheck_PushURLMatchesConfig(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	fetchURL := "https://github.com/example/repo.git"
 	pushURL := "https://github.com/user/fork.git"
-	bareRepo := initBareRepoWithRemote(t, rigDir, fetchURL)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, fetchURL)
 
 	// Set push URL matching config
-	cmd := exec.Command("git", "-C", bareRepo, "remote", "set-url", "--push", "origin", pushURL)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set-url --push failed: %v\n%s", err, out)
+	if err := bareGit(gf, bareRepo).ConfigurePushURL("origin", pushURL); err != nil {
+		t.Fatalf("set-url --push failed: %v", err)
 	}
 
 	writeConfigJSON(t, rigDir, fetchURL, pushURL)
 	setupWorktreeRef(t, rigDir, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
@@ -335,25 +363,25 @@ func TestBareRepoExistsCheck_PushURLMatchesConfig(t *testing.T) {
 
 func TestBareRepoExistsCheck_FixPushURLMismatch(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	fetchURL := "https://github.com/example/repo.git"
 	correctPushURL := "https://github.com/user/correct-fork.git"
-	bareRepo := initBareRepoWithRemote(t, rigDir, fetchURL)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, fetchURL)
 
 	// Set wrong push URL
-	cmd := exec.Command("git", "-C", bareRepo, "remote", "set-url", "--push", "origin", "https://github.com/user/wrong-fork.git")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set-url --push failed: %v\n%s", err, out)
+	if err := bareGit(gf, bareRepo).ConfigurePushURL("origin", "https://github.com/user/wrong-fork.git"); err != nil {
+		t.Fatalf("set-url --push failed: %v", err)
 	}
 
 	writeConfigJSON(t, rigDir, fetchURL, correctPushURL)
 	setupWorktreeRef(t, rigDir, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	// Run should detect mismatch
 	result := check.Run(ctx)
@@ -385,16 +413,17 @@ func corruptBareRepo(t *testing.T, bareRepo string) {
 
 func TestBareRepoExistsCheck_CorruptBareRepoDetected(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	bareRepo := initBareRepoWithRemote(t, rigDir, "https://github.com/example/repo.git")
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
 	setupWorktreeRef(t, rigDir, bareRepo)
 	corruptBareRepo(t, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusError {
@@ -411,43 +440,23 @@ func TestBareRepoExistsCheck_CorruptBareRepoDetected(t *testing.T) {
 
 func TestBareRepoExistsCheck_FixCorruptBareRepoReclones(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	// Stand up an upstream bare repo on disk to clone from.
-	upstream := filepath.Join(tmpDir, "upstream.git")
-	if out, err := exec.Command("git", "init", "--bare", upstream).CombinedOutput(); err != nil {
-		t.Fatalf("git init upstream failed: %v\n%s", err, out)
-	}
-	// Seed upstream with a commit so clone has a default branch.
-	work := filepath.Join(tmpDir, "work")
-	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
-		t.Fatalf("git init work failed: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(work, "README"), []byte("hi"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{
-		{"-C", work, "-c", "user.email=t@t", "-c", "user.name=t", "add", "README"},
-		{"-C", work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"},
-		{"-C", work, "remote", "add", "origin", upstream},
-		{"-C", work, "push", "origin", "main"},
-	} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
-	}
+	// An upstream with a commit on main, so the clone has a default branch.
+	upstream := fakeRemote(t, gf, filepath.Join(tmpDir, "upstream.git"), map[string]string{"README": "hi"})
 
 	// Set up the rig with a corrupt .repo.git pointing at our upstream. No
 	// worktree references it: a referenced corrupt repo is refused, see
 	// TestBareRepoExistsCheck_FixRefusesCorruptRepoWithRegisteredWorktree.
-	bareRepo := initBareRepoWithRemote(t, rigDir, upstream)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, upstream)
 	writeConfigJSON(t, rigDir, upstream, "")
 	corruptBareRepo(t, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusError {
@@ -458,8 +467,15 @@ func TestBareRepoExistsCheck_FixCorruptBareRepoReclones(t *testing.T) {
 	}
 
 	// The bare repo must be re-cloned and pass the structural health check.
-	if err := bareRepoHealth(bareRepo); err != nil {
+	if err := bareRepoHealth(ctx, bareRepo); err != nil {
 		t.Fatalf("bare repo still unhealthy after Fix: %v", err)
+	}
+	g := bareGit(gf, bareRepo)
+	if ok, _ := g.RefExists("refs/heads/main"); !ok {
+		t.Error("re-cloned repo has no main")
+	}
+	if refspec, _ := g.ConfigGet("remote.origin.fetch"); refspec != "+refs/heads/*:refs/remotes/origin/*" {
+		t.Errorf("re-cloned refspec = %q", refspec)
 	}
 	// Re-running the check should now return OK.
 	check2 := NewBareRepoExistsCheck()
@@ -470,15 +486,16 @@ func TestBareRepoExistsCheck_FixCorruptBareRepoReclones(t *testing.T) {
 
 func TestBareRepoRefspecCheck_CorruptBareRepoErrors(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	bareRepo := initBareRepoWithRemote(t, rigDir, "https://github.com/example/repo.git")
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
 	corruptBareRepo(t, bareRepo)
 
 	check := NewBareRepoRefspecCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 	if result.Status != StatusError {
@@ -488,15 +505,16 @@ func TestBareRepoRefspecCheck_CorruptBareRepoErrors(t *testing.T) {
 
 func TestBareRepoRefspecCheck_FixRefusesCorrupt(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	bareRepo := initBareRepoWithRemote(t, rigDir, "https://github.com/example/repo.git")
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
 	corruptBareRepo(t, bareRepo)
 
 	check := NewBareRepoRefspecCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	if err := check.Fix(ctx); err == nil {
 		t.Fatal("expected Fix to refuse writing config to a corrupt bare repo, got nil error")
@@ -509,16 +527,17 @@ func TestBareRepoRefspecCheck_FixRefusesCorrupt(t *testing.T) {
 
 func TestBareRepoExistsCheck_FixSkipsRepairedBetweenRunAndFix(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	bareRepo := initBareRepoWithRemote(t, rigDir, "https://github.com/example/repo.git")
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
 	setupWorktreeRef(t, rigDir, bareRepo)
 	corruptBareRepo(t, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 	if result := check.Run(ctx); result.Status != StatusError {
 		t.Fatalf("expected StatusError, got %v: %s", result.Status, result.Message)
 	}
@@ -528,9 +547,7 @@ func TestBareRepoExistsCheck_FixSkipsRepairedBetweenRunAndFix(t *testing.T) {
 	if err := os.RemoveAll(bareRepo); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("git", "init", "--bare", bareRepo).CombinedOutput(); err != nil {
-		t.Fatalf("re-init: %v\n%s", err, out)
-	}
+	gf.InitBare(t, bareRepo)
 	// Capture the new HEAD inode/mtime to verify Fix doesn't touch it.
 	infoBefore, err := os.Stat(filepath.Join(bareRepo, "HEAD"))
 	if err != nil {
@@ -552,31 +569,30 @@ func TestBareRepoExistsCheck_FixSkipsRepairedBetweenRunAndFix(t *testing.T) {
 
 func TestBareRepoHealth_RejectsNonBareRepo(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-	work := filepath.Join(tmpDir, "work")
-	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
+	gf := gitfake.New()
+	work := filepath.Join(t.TempDir(), "work")
+	gf.InitRepo(t, work)
 	// Point bareRepoHealth at the .git directory of a non-bare repo.
-	if err := bareRepoHealth(filepath.Join(work, ".git")); err == nil {
+	if err := bareRepoHealth(withGit(&CheckContext{}, gf), filepath.Join(work, ".git")); err == nil {
 		t.Error("expected bareRepoHealth to reject non-bare .git directory")
 	}
 }
 
 func TestBareRepoRefspecCheck_HealthyRepoStillFixes(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
-	bareRepo := initBareRepoWithRemote(t, rigDir, "https://github.com/example/repo.git")
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
 	// Strip the refspec so Fix has work to do.
-	if out, err := exec.Command("git", "-C", bareRepo, "config", "--unset", "remote.origin.fetch").CombinedOutput(); err != nil {
-		t.Fatalf("unset refspec failed: %v\n%s", err, out)
+	if err := bareGit(gf, bareRepo).ConfigSet("remote.origin.fetch", ""); err != nil {
+		t.Fatalf("unset refspec failed: %v", err)
 	}
 
 	check := NewBareRepoRefspecCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	if result := check.Run(ctx); result.Status != StatusError {
 		t.Fatalf("expected StatusError when refspec missing, got %v: %s", result.Status, result.Message)
@@ -591,18 +607,18 @@ func TestBareRepoRefspecCheck_HealthyRepoStillFixes(t *testing.T) {
 
 func TestBareRepoExistsCheck_FixPreservesLegacyPushURL(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	fetchURL := "https://github.com/example/repo.git"
 	legacyPushURL := "https://github.com/user/old-fork.git"
-	bareRepo := initBareRepoWithRemote(t, rigDir, fetchURL)
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, fetchURL)
 
 	// Set a push URL (from a pre-push_url-feature setup)
-	cmd := exec.Command("git", "-C", bareRepo, "remote", "set-url", "--push", "origin", legacyPushURL)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set-url --push failed: %v\n%s", err, out)
+	if err := bareGit(gf, bareRepo).ConfigurePushURL("origin", legacyPushURL); err != nil {
+		t.Fatalf("set-url --push failed: %v", err)
 	}
 
 	// Config has no push_url — legacy config
@@ -610,7 +626,7 @@ func TestBareRepoExistsCheck_FixPreservesLegacyPushURL(t *testing.T) {
 	setupWorktreeRef(t, rigDir, bareRepo)
 
 	check := NewBareRepoExistsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	// Run should NOT flag a mismatch for legacy configs
 	result := check.Run(ctx)
@@ -619,8 +635,7 @@ func TestBareRepoExistsCheck_FixPreservesLegacyPushURL(t *testing.T) {
 	}
 
 	// Verify the push URL is preserved (not cleared)
-	bareGit := git.NewGitWithDir(bareRepo, "")
-	actualPush, err := bareGit.GetPushURL("origin")
+	actualPush, err := bareGit(gf, bareRepo).GetPushURL("origin")
 	if err != nil {
 		t.Fatalf("GetPushURL failed: %v", err)
 	}
