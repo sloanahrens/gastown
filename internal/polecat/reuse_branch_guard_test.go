@@ -120,6 +120,9 @@ func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 	runGit(t, mayorRig, "update-ref", "refs/heads/"+heldBranch, mainSHA)
 	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, mainSHA)
 	runGit(t, beta.ClonePath, "checkout", heldBranch)
+	// Uncommitted edits make beta live work. A clean idle holder is released
+	// instead of refused (gt-l9td).
+	dirtyWorktree(t, beta.ClonePath)
 
 	alphaBefore := gitProbeOutput(t, alpha.ClonePath, "symbolic-ref", "--short", "HEAD")
 
@@ -165,6 +168,7 @@ func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
 	runGit(t, mayorRig, "update-ref", "refs/heads/"+heldBranch, mainSHA)
 	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, mainSHA)
 	runGit(t, alpha.ClonePath, "checkout", heldBranch)
+	dirtyWorktree(t, alpha.ClonePath)
 
 	_, err := mgr.AddWithOptions("beta", AddOptions{HookBead: "gt-next", ResumeBranch: heldBranch})
 	if err == nil {
