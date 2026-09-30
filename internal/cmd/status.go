@@ -196,7 +196,7 @@ type StatusSum struct {
 // resolveAgentDisplay inspects the actual running process in the tmux session
 // to determine what runtime and model are being used. Falls back to config
 // when the session isn't running.
-func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
+func resolveAgentDisplay(townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
 	// Map legacy role names to config role names
 	configRole := role
 	switch role {
@@ -968,14 +968,14 @@ func gatherStatus() (TownStatus, error) {
 	// Enrich agents with runtime info — inspect actual running processes
 	for i := range status.Agents {
 		a := &status.Agents[i]
-		alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
+		alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
 		a.AgentAlias = alias
 		a.AgentInfo = info
 	}
 	for i := range status.Rigs {
 		for j := range status.Rigs[i].Agents {
 			a := &status.Rigs[i].Agents[j]
-			alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
+			alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
 			a.AgentAlias = alias
 			a.AgentInfo = info
 		}
