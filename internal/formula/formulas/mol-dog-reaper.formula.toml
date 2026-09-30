@@ -4,7 +4,7 @@ Reap stale wisps and close stale issues across all Dolt databases.
 The daemon's wisp_reaper patrol is the executor: it runs the sweep inline
 (wisp_reaper.go) and pours this molecule only as the cycle's receipt, closing
 or failing each step as it goes. No agent runs it. The same SQL operations are
-exposed as `gt reaper` subcommands, and the step bodies below double as the
+exposed as `gt reaper scan`/`reap`/`purge`/`auto-close`, and the step bodies below double as the
 runbook for an operator running them by hand. The daemon's sweep covers scan,
 reap, purge and auto-close; it does not run `gt convoy check`, so the
 convoy-check step is for a hand run.
