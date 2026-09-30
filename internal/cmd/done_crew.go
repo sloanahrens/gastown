@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -22,11 +23,14 @@ import (
 // shape the landing worker reads (land.ParseReadyNote and the worker's
 // submission-comment pattern).
 
-// doneIsCrewRun reports whether this gt done is a crew submission: no
-// polecat identity anywhere in the environment, and BD_ACTOR and GT_ROLE,
-// when set, name a crew member. Every other identity takes the polecat path
-// unchanged, including its refusals.
-func doneIsCrewRun(getenv func(string) string) bool {
+// doneIsCrewRun reports whether this gt done is a crew submission. Crew is
+// detected positively: GT_ROLE or BD_ACTOR names a crew member, or cwd lies
+// under <rig>/crew/<name>. Any polecat trace (BD_ACTOR, GT_POLECAT, or a cwd
+// under <rig>/polecats/<name>) rules crew out, so a polecat that lost its
+// env takes the polecat path and fails there loudly instead of submitting as
+// crew (gt-avwp2). Every other identity takes the polecat path unchanged,
+// including its refusals.
+func doneIsCrewRun(getenv func(string) string, cwd string) bool {
 	actor := strings.TrimSpace(getenv("BD_ACTOR"))
 	if isPolecatActor(actor) || strings.TrimSpace(getenv("GT_POLECAT")) != "" {
 		return false
@@ -34,11 +38,34 @@ func doneIsCrewRun(getenv func(string) string) bool {
 	if actor != "" && !isCrewActor(actor) {
 		return false
 	}
+	pathRole := worktreePathRole(cwd)
+	if pathRole == RolePolecat {
+		return false
+	}
 	if role := strings.TrimSpace(getenv("GT_ROLE")); role != "" {
 		parsed, _, _ := parseRoleString(role)
 		return parsed == RoleCrew
 	}
-	return true
+	return actor != "" || pathRole == RoleCrew
+}
+
+// worktreePathRole is RoleCrew or RolePolecat when cwd lies under
+// <rig>/crew/<name> or <rig>/polecats/<name>, judged by the path's shape
+// alone, and "" otherwise. The innermost match wins.
+func worktreePathRole(cwd string) Role {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(cwd)), "/")
+	for i := len(parts) - 2; i >= 1; i-- {
+		if parts[i-1] == "" || parts[i+1] == "" {
+			continue
+		}
+		switch parts[i] {
+		case constants.RoleCrew:
+			return RoleCrew
+		case "polecats":
+			return RolePolecat
+		}
+	}
+	return ""
 }
 
 // isCrewActor reports whether actor has the crew shape <rig>/crew/<name>.

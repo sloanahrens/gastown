@@ -58,7 +58,8 @@ For COMPLETED, gt done:
 
 A polecat cannot skip the gate, and gt done never lands directly.
 
-Crew (BD_ACTOR <rig>/crew/<name>, or no polecat identity at all) submit a
+Crew (GT_ROLE or BD_ACTOR <rig>/crew/<name>, or run from a <rig>/crew/<name>
+worktree with no polecat identity) submit a
 branch they already pushed: gt done checks origin/<branch> is at HEAD, runs
 make presubmit (skipped with --pre-verified), then comments "Submitted for
 landing: <branch> @ <sha> onto <target>", appends the READY TO LAND block and
@@ -917,7 +918,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	if exitType != ExitCompleted && exitType != ExitEscalated && exitType != ExitDeferred {
 		return fmt.Errorf("invalid exit status '%s': must be COMPLETED, ESCALATED, or DEFERRED", doneStatus)
 	}
-	if doneIsCrewRun(os.Getenv) {
+	if doneIsCrewRun(os.Getenv, doneCwd()) {
 		return runDoneCrew(exitType, os.Getenv)
 	}
 	if actor != "" && !isPolecatActor(actor) {
