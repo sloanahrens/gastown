@@ -69,7 +69,7 @@ func TestRunDefaultTestVerification_Lint(t *testing.T) {
 		if _, statErr := os.Stat(marker); statErr != nil {
 			t.Errorf("lint command did not run: %v", statErr)
 		}
-		if !result.ran || !result.success || len(result.packages) != 1 {
+		if !result.ran || !result.success {
 			t.Errorf("tests did not run after lint: %+v", result)
 		}
 		if acquired {

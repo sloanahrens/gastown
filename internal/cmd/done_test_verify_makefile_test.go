@@ -10,68 +10,69 @@ import (
 )
 
 // makefileOptInAssignment is the opt-in assignment a suite recipe carries, e.g.
-// GT_TEST_DOCKER=${GT_TEST_DOCKER:-1}. The value is one token in every form
-// this Makefile uses, and the token is what the behavioral half of the test
-// below re-executes in a real shell.
+// GT_TEST_DOCKER=0. The value is one token in every form this Makefile uses,
+// and the token is what the behavioral half of the test below re-executes in
+// a real shell.
 var makefileOptInAssignment = regexp.MustCompile(`GT_TEST_DOCKER=(\S+)`)
 
 // TestMakefileHandsTheContainerOptInToTheSuite pins the Makefile link that
-// gt done's slot-free path rests on (gt-wx53, gt-0ss4).
+// gt done's slot-free path rests on (gt-wx53, gt-0ss4), in its D9 form
+// (gt-ik4a1.1).
 //
 // The gate decides it can run a rig's suite WITHOUT the town-wide
 // container-gate slot because the rig's command does not ask for containers,
-// and it writes GT_TEST_DOCKER=0 into that run's environment. That decision is
-// only safe while the rig's own recipe hands that inherited value on to
-// `go test`: gastown's `make test` defaults the variable to 1, so a recipe
-// that hardcoded the opt-in — `GT_TEST_DOCKER=1 go test ./...` — would make the
-// gate's =0 a no-op, and every slot-free gate run would start the container
-// suite beside whatever the rest of the town is doing on the shared Docker VM,
-// silently. The same change would also break the refinery's gate, which
-// relies on the default being 1.
+// and it writes GT_TEST_DOCKER=0 into that run's environment. gastown's
+// command is `make gate`, whose recipe writes the opt-in off itself, so the
+// unit tier never starts a container whoever runs it: an inherited =1 must
+// not reach the suite either. `make test-integration` is the other half: it
+// writes the opt-in on, so the Docker-backed packages' container tests run
+// there, and an inherited =0 must not skip them.
 //
-// So the property is behavioral, not textual: with an inherited
-// GT_TEST_DOCKER=0 the recipe must hand 0 to the command it prefixes, and with
-// none inherited it must hand 1. Both halves are read out of the recipe line
-// the Makefile actually has, run through sh.
+// So the property is behavioral, not textual: each suite line's assignment,
+// run through sh with the opposite value inherited, must hand the suite the
+// target's own value.
 func TestMakefileHandsTheContainerOptInToTheSuite(t *testing.T) {
 	t.Parallel()
 	recipes := makefileRecipes(t, readRepoMakefile(t))
-	for _, target := range []string{"test", "test-changed"} {
-		lines := recipes[target]
+	for _, tc := range []struct {
+		target, want, inherited string
+	}{
+		{"gate", "0", "1"},
+		{"test-integration", "1", "0"},
+	} {
+		lines := recipes[tc.target]
 		if len(lines) == 0 {
-			t.Fatalf("no recipe for the %s target — this test cannot pin a property of a target it cannot find", target)
+			t.Fatalf("no recipe for the %s target — this test cannot pin a property of a target it cannot find", tc.target)
 		}
 		suiteLines := 0
 		for _, line := range lines {
-			// The test target's recipe runs `go test` through the budget
-			// wrapper (internal/testpolicy/cmd/budget), which execs `go
-			// test -json` inheriting the process environment unchanged --
-			// so GT_TEST_DOCKER still reaches the suite one level deeper.
-			if !strings.Contains(line, "go test") && !strings.Contains(line, "testpolicy/cmd/budget") {
+			if trimmed := strings.TrimLeft(line, "@-+ "); strings.HasPrefix(trimmed, "#") {
+				continue // a recipe comment, not a command
+			}
+			// The gate's recipe runs `go test` through the budget wrapper
+			// (internal/testpolicy/cmd/budget), which execs `go test -json`
+			// inheriting the process environment unchanged; the integration
+			// recipe runs $(INTEGRATION_GO_TEST), go test by default.
+			if !strings.Contains(line, "go test") && !strings.Contains(line, "testpolicy/cmd/budget") && !strings.Contains(line, "$(INTEGRATION_GO_TEST)") {
 				continue
 			}
 			suiteLines++
 			assignment := makefileOptInAssignment.FindStringSubmatch(line)
 			if assignment == nil {
-				t.Errorf("%s runs go test without deciding the container opt-in, so an inherited %s cannot reach it:\n\t%s", target, dockerTestsEnv, line)
+				t.Errorf("%s runs go test without deciding the container opt-in, so an inherited %s decides it:\n\t%s", tc.target, dockerTestsEnv, line)
 				continue
 			}
-			if !strings.Contains(assignment[1], "$") {
-				t.Errorf("%s hardcodes the container opt-in (%s=%s). An inherited %s=0 then cannot turn it off, so every slot-free `gt done` gate run starts the container suite outside the slot (gt-0ss4). Default it from the environment instead:\n\t%s",
-					target, dockerTestsEnv, assignment[1], dockerTestsEnv, line)
-				continue
+			if got := optInReachingTheSuite(t, assignment[1], tc.inherited); got != tc.want {
+				t.Errorf("%s with an inherited %s=%s hands %s=%s to the suite, want %s:\n\t%s",
+					tc.target, dockerTestsEnv, tc.inherited, dockerTestsEnv, got, tc.want, line)
 			}
-			if got := optInReachingTheSuite(t, assignment[1], "0"); got != "0" {
-				t.Errorf("%s with an inherited %s=0 hands %s=%s to the suite, want 0 — the slot-free gate path is running the container suite after writing the opt-in off:\n\t%s",
-					target, dockerTestsEnv, dockerTestsEnv, got, line)
-			}
-			if got := optInReachingTheSuite(t, assignment[1], ""); got != "1" {
-				t.Errorf("%s with no inherited %s hands %s=%s to the suite, want 1 (the refinery's gate and the daemon's main-branch patrol pass no value and rely on the default):\n\t%s",
-					target, dockerTestsEnv, dockerTestsEnv, got, line)
+			if got := optInReachingTheSuite(t, assignment[1], ""); got != tc.want {
+				t.Errorf("%s with no inherited %s hands %s=%s to the suite, want %s:\n\t%s",
+					tc.target, dockerTestsEnv, dockerTestsEnv, got, tc.want, line)
 			}
 		}
 		if suiteLines == 0 {
-			t.Errorf("the %s target runs no go test, so this test pinned nothing — if the recipe moved, move this test with it", target)
+			t.Errorf("the %s target runs no go test, so this test pinned nothing — if the recipe moved, move this test with it", tc.target)
 		}
 	}
 }
@@ -79,8 +80,8 @@ func TestMakefileHandsTheContainerOptInToTheSuite(t *testing.T) {
 // optInReachingTheSuite runs the recipe's own assignment in a real shell and
 // returns the value the command it prefixes would see.
 //
-// make escapes a dollar as `$$`, so the loop above sees ${GT_TEST_DOCKER:-1}
-// as $${GT_TEST_DOCKER:-1} and this undoes exactly that escape before handing
+// make escapes a dollar as `$$`, so a recipe that read the environment would
+// show $${GT_TEST_DOCKER:-1}; this undoes exactly that escape before handing
 // the text to sh — the same two characters make strips before the recipe runs.
 func optInReachingTheSuite(t *testing.T, assignmentRHS, inherited string) string {
 	t.Helper()

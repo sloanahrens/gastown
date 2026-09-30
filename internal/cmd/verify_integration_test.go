@@ -51,17 +51,16 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		}
 	})
 
-	t.Run("no changed go files: skips cleanly, does not block", func(t *testing.T) {
+	t.Run("a docs-only change still runs the whole suite", func(t *testing.T) {
 		t.Parallel()
 		vg := newTestVerifyGate()
 		townRoot := t.TempDir()
-		dir, base := initVerifyTestGoRepo(t)
+		dir, _ := initVerifyTestGoRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("docs\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		runGitIn(t, dir, "add", ".")
 		runGitIn(t, dir, "commit", "-q", "-m", "docs only")
-		_ = base
 
 		g := git.NewGit(dir)
 		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
@@ -69,12 +68,12 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runDefaultTestVerification: %v", err)
 		}
-		if result.ran {
-			t.Error("ran = true, want false for a docs-only change")
+		if !result.ran || !result.success {
+			t.Errorf("result = %+v, want the suite run and passed: one gate definition runs on every branch (D9)", result)
 		}
 	})
 
-	t.Run("passing changed-package test: succeeds, scoped to the changed package", func(t *testing.T) {
+	t.Run("passing suite: succeeds, scope full, no package list", func(t *testing.T) {
 		t.Parallel()
 		vg := newTestVerifyGate()
 		townRoot := t.TempDir()
@@ -97,20 +96,19 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		if result.scope != "full" {
 			t.Errorf("scope = %q, want %q", result.scope, "full")
 		}
-		if len(result.packages) != 1 || !strings.HasSuffix(result.packages[0], "/pkga") {
-			t.Errorf("packages = %v, want exactly one entry ending in /pkga", result.packages)
+		if len(result.packages) != 0 {
+			t.Errorf("packages = %v, want none: the gate resolves no changed-package list (D9)", result.packages)
 		}
 		if result.logSHA256 == "" {
 			t.Error("logSHA256 is empty on success")
 		}
 	})
 
-	// This subtest and the broken-importers one go through
-	// runDefaultTestVerification itself, not a test gate: they are the
-	// wiring guard that gt done's entry point runs the real shell (a gate
-	// whose suite runner did nothing would pass this failing test) and the
-	// real whole-module build.
-	t.Run("failing changed-package test: refuses with the failure in the error", func(t *testing.T) {
+	// This subtest goes through runDefaultTestVerification itself, not a
+	// test gate: it is the wiring guard that gt done's entry point runs the
+	// real shell (a gate whose suite runner did nothing would pass this
+	// failing test).
+	t.Run("failing test: refuses with the failure in the error", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
 		dir, _ := initVerifyTestGoRepo(t)
@@ -130,166 +128,6 @@ func TestRunDefaultTestVerification(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "TestBroken") && !strings.Contains(err.Error(), "this new test was never actually run") {
 			t.Errorf("error does not surface the failing test output: %v", err)
-		}
-	})
-
-	t.Run("whole-package deletion that still compiles: verified by go build, not a false refusal", func(t *testing.T) {
-		t.Parallel()
-		vg := newTestVerifyGate()
-		townRoot := t.TempDir()
-		dir, _ := initVerifyTestGoRepo(t)
-		deletePkgb(t, dir)
-
-		g := git.NewGit(dir)
-		suite, suiteRan := suiteMarker(dir)
-		mq := &config.MergeQueueConfig{TestCommand: suite}
-		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/delete-role")
-		assertSuiteRan(t, suiteRan)
-		if err != nil {
-			t.Fatalf("runDefaultTestVerification: a clean whole-package deletion must not refuse (gt-ytjh): %v", err)
-		}
-		if !result.ran || !result.success {
-			t.Fatalf("result = %+v, want ran=true success=true", result)
-		}
-		if len(result.packages) != 1 || result.packages[0] != "." {
-			t.Errorf("packages = %v, want [.] (the whole-module build stands in for the deleted package)", result.packages)
-		}
-	})
-
-	// The still-refusing half of gt-ytjh. The success path above deletes a
-	// package nothing imports; this one deletes a package the module root
-	// imports. The changed .go files resolve to nothing — the root package that
-	// needs the deleted one is not itself in the diff — so the whole-module
-	// build is the only thing that can see the breakage, and the gate must
-	// refuse. It runs the real goBuildWholeModule, so it also pins that the
-	// build happens in the worktree under test: the host module builds, and a
-	// build of it could not produce this refusal.
-	t.Run("whole-package deletion with broken importers: refuses with the compiler output", func(t *testing.T) {
-		t.Parallel()
-		townRoot := t.TempDir()
-		dir, _ := initVerifyTestGoRepo(t)
-		if err := os.WriteFile(filepath.Join(dir, "root.go"), []byte("package main\n\nimport _ \"example.test/pkgb\"\n\nfunc main() {}\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "root imports pkgb")
-		// Fold the importer into the base so the deletion is the whole diff.
-		base := strings.TrimSpace(runGitOut(t, dir, "rev-parse", "HEAD"))
-		runGitIn(t, dir, "update-ref", "refs/remotes/origin/main", base)
-		deletePkgb(t, dir)
-
-		g := git.NewGit(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := runDefaultTestVerification(g, dir, "main", "main", mq, townRoot, "test/delete-broken-role")
-		if err == nil {
-			t.Fatalf("runDefaultTestVerification: a deletion its importer still needs must refuse, got result=%+v", result)
-		}
-		if !strings.Contains(err.Error(), "unbuildable") {
-			t.Errorf("error does not report the deletion refusal: %v", err)
-		}
-		if !strings.Contains(err.Error(), "example.test/pkgb") {
-			t.Errorf("error does not surface the compiler's own output: %v", err)
-		}
-	})
-
-	// A nested module is not this module's to refuse and not this module's to
-	// build with `./...`, so the gate builds it where it lives. Both halves run
-	// the real go build: with a clean nested module the gate proceeds and says
-	// in the log which directory it could not scope, and with one that does not
-	// compile it refuses — `go list` resolves a package without typechecking
-	// it, so only the build can see that.
-	t.Run("nested-module change: builds that module and proceeds", func(t *testing.T) {
-		t.Parallel()
-		vg := newTestVerifyGate()
-		townRoot := t.TempDir()
-		dir, _ := initVerifyTestGoRepo(t)
-		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
-
-		g := git.NewGit(dir)
-		suite, suiteRan := suiteMarker(dir)
-		mq := &config.MergeQueueConfig{TestCommand: suite}
-		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/nested-module-role")
-		assertSuiteRan(t, suiteRan)
-		if err != nil {
-			t.Fatalf("runDefaultTestVerification: a change inside a nested module must not refuse: %v", err)
-		}
-		if !result.ran || !result.success {
-			t.Fatalf("result = %+v, want ran=true success=true", result)
-		}
-		if len(result.packages) != 1 || result.packages[0] != "." {
-			t.Errorf("packages = %v, want [.] — no package of this module can be scoped to the change", result.packages)
-		}
-		logBytes, readErr := os.ReadFile(result.logPath)
-		if readErr != nil {
-			t.Fatalf("reading verify log: %v", readErr)
-		}
-		logText := string(logBytes)
-		for _, want := range []string{"not scoped:", "plugins/example-sub", "example.test/plugin"} {
-			if !strings.Contains(logText, want) {
-				t.Errorf("verify log is missing %q, so the directory the gate could not scope is invisible:\n%s", want, logText)
-			}
-		}
-	})
-
-	t.Run("nested-module change that does not compile: refuses with the compiler output", func(t *testing.T) {
-		t.Parallel()
-		vg := newTestVerifyGate()
-		townRoot := t.TempDir()
-		dir, _ := initVerifyTestGoRepo(t)
-		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
-		// A type error, which `go list` inside the nested module still resolves
-		// (it does not typecheck) and this module's `go list` never reaches.
-		if err := os.WriteFile(filepath.Join(dir, "plugins", "example-sub", "nested.go"), []byte("package nestedmod\n\nfunc V() int { return \"not an int\" }\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "break the nested module")
-
-		g := git.NewGit(dir)
-		mq := &config.MergeQueueConfig{TestCommand: "go test ./..."}
-		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/nested-module-broken-role")
-		if err == nil {
-			t.Fatalf("runDefaultTestVerification: a nested module that does not build must refuse, got result=%+v", result)
-		}
-		if !strings.Contains(err.Error(), "plugins/example-sub") {
-			t.Errorf("the refusal does not name the nested module: %v", err)
-		}
-		if !strings.Contains(err.Error(), "cannot use") {
-			t.Errorf("the refusal does not surface the compiler's own output: %v", err)
-		}
-	})
-
-	// The -o branch of the whole-module build is what makes a single-binary
-	// module verifiable at all. With pkgb gone, cmd/ is the module's only
-	// package and its only main, so `go build ./...` names the executable after
-	// that directory and refuses to write it over the directory itself ("build
-	// output \"cmd\" already exists and is a directory"). Running the real
-	// build here, this subtest fails on the plain form.
-	t.Run("deletion in a single-binary module: the build links to a temp dir and the deletion verifies", func(t *testing.T) {
-		t.Parallel()
-		vg := newTestVerifyGate()
-		townRoot := t.TempDir()
-		dir := initSingleBinaryGoRepo(t)
-		deletePkgb(t, dir)
-
-		g := git.NewGit(dir)
-		suite, suiteRan := suiteMarker(dir)
-		mq := &config.MergeQueueConfig{TestCommand: suite}
-		result, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/single-binary-role")
-		assertSuiteRan(t, suiteRan)
-		if err != nil {
-			t.Fatalf("runDefaultTestVerification: %v", err)
-		}
-		if !result.ran || !result.success {
-			t.Fatalf("result = %+v, want ran=true success=true", result)
-		}
-		if len(result.packages) != 1 || result.packages[0] != "." {
-			t.Errorf("packages = %v, want [.] — the whole-module build stands in for the deleted package", result.packages)
-		}
-		// The executable went to the gate's temp dir, so cmd/ is still the
-		// directory it was rather than the file the plain build would name.
-		if fi, statErr := os.Stat(filepath.Join(dir, "cmd")); statErr != nil || !fi.IsDir() {
-			t.Errorf("cmd/ is no longer a directory (err=%v): the whole-module build wrote its output into the worktree", statErr)
 		}
 	})
 
@@ -331,32 +169,6 @@ func TestRunDefaultTestVerification(t *testing.T) {
 			t.Errorf("full test_command did not run: got=%q err=%v", got, readErr)
 		}
 	})
-}
-
-// initSingleBinaryGoRepo builds a Go module whose packages are a main package
-// at cmd/ and one library package at pkgb/, so that deleting pkgb leaves cmd/
-// as the module's only package: the layout in which `go build ./...` names its
-// executable after cmd/ and will not write it over the directory.
-func initSingleBinaryGoRepo(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	runGitIn(t, dir, "init", "-q", "-b", "main")
-	runGitIn(t, dir, "config", "user.email", "test@example.com")
-	runGitIn(t, dir, "config", "user.name", "Test")
-	writeFile(t, filepath.Join(dir, "go.mod"), "module example.test\n\ngo 1.21\n")
-	if err := os.MkdirAll(filepath.Join(dir, "cmd"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(dir, "cmd", "main.go"), "package main\n\nfunc main() {}\n")
-	if err := os.MkdirAll(filepath.Join(dir, "pkgb"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(dir, "pkgb", "b.go"), "package pkgb\n\nfunc Double(a int) int { return a * 2 }\n")
-	runGitIn(t, dir, "add", ".")
-	runGitIn(t, dir, "commit", "-q", "-m", "base")
-	base := strings.TrimSpace(runGitOut(t, dir, "rev-parse", "HEAD"))
-	runGitIn(t, dir, "update-ref", "refs/remotes/origin/main", base)
-	return dir
 }
 
 // TestRunDefaultTestVerificationBudgets drives the gate with a fake slot and
@@ -422,8 +234,7 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 			t.Error("the gate took the town-wide container-gate slot for a container-free command (gt-wx53)")
 		}
 
-		// gt-btw1: the command is the rig's own hermetic test_command, not a
-		// derived go test over the changed packages.
+		// gt-btw1: the command is the rig's own hermetic test_command.
 		if calls[0].script != "GOFLAGS=-p=6 make test" {
 			t.Errorf("script = %q, want the rig's full test_command", calls[0].script)
 		}
@@ -455,9 +266,6 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 		}
 		if result.scope != "full" {
 			t.Errorf("scope = %q, want %q", result.scope, "full")
-		}
-		if len(result.packages) != 2 {
-			t.Errorf("packages = %v, want both changed packages recorded for the MR bead", result.packages)
 		}
 
 		// The resolve-before-you-run header is the artifact gt-pnkd's victims
@@ -529,35 +337,6 @@ func TestRunDefaultTestVerificationBudgets(t *testing.T) {
 			if !strings.Contains(string(logBytes), want) {
 				t.Errorf("verify log is missing %q:\n%s", want, logBytes)
 			}
-		}
-	})
-
-	t.Run("test_verify_command replaces the full test_command and fills {packages}", func(t *testing.T) {
-		t.Parallel()
-		vg := newTestVerifyGate()
-		townRoot := t.TempDir()
-		dir := newRepoWithTwoChangedPackages(t)
-		var script string
-		stubVerifyGate(t, vg,
-			func(_ string, _ string, _ time.Duration) (func(), error) { return func() {}, nil },
-			func(_ context.Context, _ string, s string, _ []string, _ *os.File) error {
-				script = s
-				return nil
-			})
-
-		mq := &config.MergeQueueConfig{
-			TestCommand:       "GOFLAGS=-p=6 make test",
-			TestVerifyCommand: "make test-changed PKGS='{packages}'",
-		}
-		g := git.NewGit(dir)
-		if _, err := vg.run(g, dir, "main", "main", mq, townRoot, "test/override-role"); err != nil {
-			t.Fatalf("runDefaultTestVerification: %v", err)
-		}
-		if strings.Contains(script, "{packages}") {
-			t.Errorf("script = %q, want the placeholder substituted", script)
-		}
-		if !strings.Contains(script, "pkga") || !strings.Contains(script, "pkgb") {
-			t.Errorf("script = %q, want the resolved packages", script)
 		}
 	})
 
@@ -710,239 +489,6 @@ func waitForVerifyLogLine(logPath, want string) error {
 	}
 }
 
-func TestChangedGoPackages(t *testing.T) {
-	t.Parallel()
-	t.Run("no go files changed reports changedGoFiles=false", func(t *testing.T) {
-		t.Parallel()
-		dir, base := initVerifyTestGoRepo(t)
-		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("docs\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "docs only")
-
-		g := git.NewGit(dir)
-		got, err := changedGoPackages(g, dir, base)
-		if err != nil {
-			t.Fatalf("changedGoPackages: %v", err)
-		}
-		if got.changedGoFiles {
-			t.Error("changedGoFiles = true, want false for a docs-only change")
-		}
-		if len(got.packages) != 0 {
-			t.Errorf("packages = %v, want empty", got.packages)
-		}
-	})
-
-	t.Run("resolves only the changed package, not the whole repo", func(t *testing.T) {
-		t.Parallel()
-		dir, base := initVerifyTestGoRepo(t)
-		if err := os.WriteFile(filepath.Join(dir, "pkga", "a.go"), []byte("package pkga\n\nfunc Add(a, b int) int { return a + b + 0 }\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "touch pkga")
-
-		g := git.NewGit(dir)
-		got, err := changedGoPackages(g, dir, base)
-		if err != nil {
-			t.Fatalf("changedGoPackages: %v", err)
-		}
-		if !got.changedGoFiles {
-			t.Fatal("changedGoFiles = false, want true")
-		}
-		if len(got.packages) != 1 || !strings.HasSuffix(got.packages[0], "/pkga") {
-			t.Errorf("packages = %v, want exactly one entry ending in /pkga", got.packages)
-		}
-		if len(got.deletedDirs) != 0 || len(got.unresolvable) != 0 {
-			t.Errorf("deletedDirs = %v, unresolvable = %v, want both empty for a modification to an existing package", got.deletedDirs, got.unresolvable)
-		}
-	})
-
-	t.Run("deleted-only directory is dropped, not an error", func(t *testing.T) {
-		t.Parallel()
-		dir, base := initVerifyTestGoRepo(t)
-		if err := os.Remove(filepath.Join(dir, "pkgb", "b.go")); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Remove(filepath.Join(dir, "pkgb", "b_test.go")); err != nil {
-			t.Fatal(err)
-		}
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "delete pkgb")
-
-		g := git.NewGit(dir)
-		got, err := changedGoPackages(g, dir, base)
-		if err != nil {
-			t.Fatalf("changedGoPackages: %v", err)
-		}
-		if !got.changedGoFiles {
-			t.Fatal("changedGoFiles = false, want true (deletion still touches .go paths)")
-		}
-		if len(got.packages) != 0 {
-			t.Errorf("packages = %v, want empty — pkgb no longer exists as a package", got.packages)
-		}
-		if len(got.deletedDirs) != 1 || got.deletedDirs[0] != "pkgb" {
-			t.Errorf("deletedDirs = %v, want exactly [pkgb] — the directory is gone, so an empty package list is the deletion talking", got.deletedDirs)
-		}
-		if len(got.unresolvable) != 0 {
-			t.Errorf("unresolvable = %v, want empty — nothing is left in pkgb to fail to resolve", got.unresolvable)
-		}
-	})
-
-	// A directory the repo's module does not contain is not a broken change:
-	// it is another module's file, and resolving it there is what tells the two
-	// apart. Refusing every root-unresolvable directory locked out every change
-	// to a nested module (plugins/dolt-snapshots in this repo).
-	t.Run("a nested module's directory resolves within its own module", func(t *testing.T) {
-		t.Parallel()
-		dir, base := initVerifyTestGoRepo(t)
-		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
-
-		g := git.NewGit(dir)
-		got, err := changedGoPackages(g, dir, base)
-		if err != nil {
-			t.Fatalf("changedGoPackages: %v", err)
-		}
-		if !got.changedGoFiles {
-			t.Fatal("changedGoFiles = false, want true")
-		}
-		if len(got.packages) != 0 {
-			t.Errorf("packages = %v, want empty — the nested module's files are not packages of this module", got.packages)
-		}
-		if len(got.nestedModules) != 1 {
-			t.Fatalf("nestedModules = %v, want exactly one entry", got.nestedModules)
-		}
-		nested := got.nestedModules[0]
-		if nested.dir != "plugins/example-sub" || nested.moduleRoot != "plugins/example-sub" || nested.importPath != "example.test/plugin" {
-			t.Errorf("nested = %+v, want the dir, its own module root, and the import path that module gives it", nested)
-		}
-		if len(got.unresolvable) != 0 || len(got.deletedDirs) != 0 {
-			t.Errorf("unresolvable = %v, deletedDirs = %v, want both empty: nothing here is broken or gone", got.unresolvable, got.deletedDirs)
-		}
-	})
-
-	// Deleting a package inside a nested module is not a deletion of THIS
-	// module's, and the difference decides which build verifies it: the
-	// whole-module build is the gate's stand-in for a deletion, and this
-	// module's `go build ./...` never reaches a nested one (gt-h8cr). A gate
-	// that reads the deletion as this module's verifies it with a build that
-	// cannot contain anything the branch changed.
-	t.Run("a package deleted inside a nested module belongs to that module", func(t *testing.T) {
-		t.Parallel()
-		dir, _ := initVerifyTestGoRepo(t)
-		addNestedModule(t, dir, "plugins/example-sub", "example.test/plugin")
-		addNestedModulePackage(t, dir, "plugins/example-sub/inner")
-		base := strings.TrimSpace(runGitOut(t, dir, "rev-parse", "HEAD"))
-		deleteDir(t, dir, "plugins/example-sub/inner")
-
-		g := git.NewGit(dir)
-		got, err := changedGoPackages(g, dir, base)
-		if err != nil {
-			t.Fatalf("changedGoPackages: %v", err)
-		}
-		if !got.changedGoFiles {
-			t.Fatal("changedGoFiles = false, want true (deletion still touches .go paths)")
-		}
-		if len(got.deletedDirs) != 0 {
-			t.Errorf("deletedDirs = %v, want empty — this module never owned that package, so its build cannot verify the deletion", got.deletedDirs)
-		}
-		if len(got.packages) != 0 {
-			t.Errorf("packages = %v, want empty — the nested module's packages are not packages of this module", got.packages)
-		}
-		if len(got.nestedModules) != 1 {
-			t.Fatalf("nestedModules = %v, want exactly one entry", got.nestedModules)
-		}
-		nested := got.nestedModules[0]
-		if nested.dir != "plugins/example-sub/inner" || nested.moduleRoot != "plugins/example-sub" {
-			t.Errorf("nested = %+v, want the deleted directory and the module that owned it", nested)
-		}
-		if !nested.deleted {
-			t.Errorf("nested = %+v, want deleted=true — the directory is gone, and a reader has to be able to tell that from a changed file", nested)
-		}
-		if nested.importPath != "" {
-			t.Errorf("importPath = %q, want empty — there is no package left in the directory to name", nested.importPath)
-		}
-		if len(got.unresolvable) != 0 {
-			t.Errorf("unresolvable = %v, want empty — nothing here is an unbuildable file", got.unresolvable)
-		}
-	})
-
-	// Failing closed inside a nested module: a directory the owning module will
-	// not make a package of either leaves nothing anywhere to build or test, so
-	// the classification must not become a way to skip a broken file.
-	t.Run("a directory that resolves to nothing in its own nested module stays unresolvable", func(t *testing.T) {
-		t.Parallel()
-		dir, base := initVerifyTestGoRepo(t)
-		// The nested module's only .go file is one its build constraints
-		// exclude, so the module that owns it resolves no package for the
-		// directory either.
-		if err := os.MkdirAll(filepath.Join(dir, "sub", "inner"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		writeFile(t, filepath.Join(dir, "sub", "go.mod"), "module example.test/sub\n\ngo 1.21\n")
-		writeFile(t, filepath.Join(dir, "sub", "inner", "x.go"), "//go:build never\n\npackage inner\n\nfunc X() {}\n")
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "add a nested module whose only file is excluded")
-
-		g := git.NewGit(dir)
-		got, err := changedGoPackages(g, dir, base)
-		if err != nil {
-			t.Fatalf("changedGoPackages: %v", err)
-		}
-		if len(got.nestedModules) != 0 {
-			t.Errorf("nestedModules = %v, want empty — the module that owns sub/inner resolves no package for it", got.nestedModules)
-		}
-		if len(got.unresolvable) != 1 || got.unresolvable[0].dir != "sub/inner" {
-			t.Fatalf("unresolvable = %v, want exactly one entry for sub/inner", got.unresolvable)
-		}
-		// The refusal quotes the owning module's attempt, not this module's:
-		// this module was never going to name a file of another module.
-		if got.unresolvable[0].listErr == nil || !strings.Contains(got.unresolvable[0].listErr.Error(), "nested module sub") {
-			t.Errorf("listErr = %v, want the nested module's own refusal quoted", got.unresolvable[0].listErr)
-		}
-	})
-
-	// A .go file that is still in the worktree but that go list will not
-	// resolve is NOT a deletion, and must not be reported as one: a whole-module
-	// build has nothing to build for a directory its constraints exclude, so
-	// treating the empty package list as a deletion would wave the change
-	// through unverified.
-	t.Run("a .go file excluded by build constraints is unresolvable, not deleted", func(t *testing.T) {
-		t.Parallel()
-		dir, base := initVerifyTestGoRepo(t)
-		if err := os.MkdirAll(filepath.Join(dir, "pkgexcluded"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "pkgexcluded", "x.go"), []byte("//go:build never\n\npackage pkgexcluded\n\nfunc X() {}\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runGitIn(t, dir, "add", ".")
-		runGitIn(t, dir, "commit", "-q", "-m", "add a build-constraint-excluded package")
-
-		g := git.NewGit(dir)
-		got, err := changedGoPackages(g, dir, base)
-		if err != nil {
-			t.Fatalf("changedGoPackages: %v", err)
-		}
-		if !got.changedGoFiles {
-			t.Fatal("changedGoFiles = false, want true")
-		}
-		if len(got.packages) != 0 {
-			t.Errorf("packages = %v, want empty — go list cannot resolve the directory", got.packages)
-		}
-		if len(got.deletedDirs) != 0 {
-			t.Errorf("deletedDirs = %v, want empty — x.go is still in the worktree", got.deletedDirs)
-		}
-		if len(got.unresolvable) != 1 || got.unresolvable[0].dir != "pkgexcluded" {
-			t.Fatalf("unresolvable = %v, want exactly one entry for pkgexcluded", got.unresolvable)
-		}
-		if got.unresolvable[0].listErr == nil || !strings.Contains(got.unresolvable[0].listErr.Error(), "build constraints exclude") {
-			t.Errorf("listErr = %v, want the go list failure naming the excluded build constraints", got.unresolvable[0].listErr)
-		}
-	})
-}
-
 // TestRunDefaultTestVerification_SlotOnlyForContainerRuns covers gt-wx53: gt
 // done runs the rig's full hermetic test_command (gt-btw1), but it takes the
 // town-wide container-gate slot only when that command can actually start a
@@ -984,9 +530,6 @@ func TestRunDefaultTestVerification_SlotOnlyForContainerRuns(t *testing.T) {
 		}
 		if !result.ran || !result.success {
 			t.Fatalf("result = %+v, want ran=true success=true", result)
-		}
-		if len(result.packages) != 2 {
-			t.Errorf("packages = %v, want both changed packages recorded for the MR bead", result.packages)
 		}
 		if result.slotUsed || acquired {
 			t.Errorf("slotUsed=%v acquired=%v, want false/false: the rig's command never asked for containers", result.slotUsed, acquired)
