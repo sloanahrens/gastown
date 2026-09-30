@@ -63,6 +63,7 @@ func chdirTempTown(t *testing.T) string {
 }
 
 func TestCleanupSpawnedPolecatWorkRespectsProvenance(t *testing.T) {
+	t.Parallel()
 	const agent = "gastown/polecats/Toast"
 	cases := []struct {
 		name         string
@@ -79,11 +80,12 @@ func TestCleanupSpawnedPolecatWorkRespectsProvenance(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			chdirTempTown(t)
+			t.Parallel()
 			rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-abc": {"hooked", agent}}}
-			sb := installRollbackFakes(t, rel)
+			f := newRollbackFixture(t, nil, rel)
+			sb := f.sb
 
-			cleanupSpawnedPolecatWork(&SpawnedPolecatInfo{
+			f.r.cleanupSpawned(&SpawnedPolecatInfo{
 				RigName: "gastown", PolecatName: "Toast", Branch: "polecat/Toast/gt-abc",
 				FreshSpawn: tc.fresh, BranchCreated: tc.created,
 			}, "gastown", "gt-abc", "", "")
@@ -108,6 +110,7 @@ func TestCleanupSpawnedPolecatWorkRespectsProvenance(t *testing.T) {
 // hands the bead back to its pre-sling holder instead of releasing it to a
 // fresh re-dispatch from main; an unknown answer does the same.
 func TestCleanupSpawnedPolecatWorkRestoresOriginalHoldWhenWorkSurvives(t *testing.T) {
+	t.Parallel()
 	const toast = "gastown/polecats/Toast"
 	const pearl = "gastown/polecats/pearl"
 	for _, tc := range []struct {
@@ -129,13 +132,13 @@ func TestCleanupSpawnedPolecatWorkRestoresOriginalHoldWhenWorkSurvives(t *testin
 			wantStatus: "open", wantRelease: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			chdirTempTown(t)
+			t.Parallel()
 			rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-abc": {"hooked", toast}}}
-			installRollbackFakes(t, rel)
-			survivingWorkForBeadFn = func(string, string) (string, error) { return tc.branch, tc.err }
+			f := newRollbackFixture(t, nil, rel)
+			f.r.survivingWork = func(string, string) (string, error) { return tc.branch, tc.err }
 
 			info := &SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true, originalHold: tc.orig}
-			cleanupSpawnedPolecatWork(info, "gastown", "gt-abc", "", "")
+			f.r.cleanupSpawned(info, "gastown", "gt-abc", "", "")
 
 			got := rel.beads["gt-abc"]
 			if got[0] != tc.wantStatus || got[1] != tc.wantHolder {
@@ -149,11 +152,11 @@ func TestCleanupSpawnedPolecatWorkRestoresOriginalHoldWhenWorkSurvives(t *testin
 }
 
 func TestCleanupSpawnedPolecatWorkNeverUnhooksAnotherAssignee(t *testing.T) {
-	chdirTempTown(t)
+	t.Parallel()
 	rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-abc": {"hooked", "gastown/polecats/granite"}}}
-	installRollbackFakes(t, rel)
+	f := newRollbackFixture(t, nil, rel)
 
-	cleanupSpawnedPolecatWork(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true},
+	f.r.cleanupSpawned(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true},
 		"gastown", "gt-abc", "", "")
 	if len(rel.released) != 0 {
 		t.Fatalf("released a bead hooked to someone else: %v", rel.released)
@@ -163,11 +166,11 @@ func TestCleanupSpawnedPolecatWorkNeverUnhooksAnotherAssignee(t *testing.T) {
 // The zero value is the safe one: an info built without provenance keeps the
 // sandbox and the branch.
 func TestCleanupSpawnedPolecatWorkZeroProvenanceKeepsEverything(t *testing.T) {
-	chdirTempTown(t)
-	rel := &fakeWorkReleaser{beads: map[string][2]string{}}
-	sb := installRollbackFakes(t, rel)
+	t.Parallel()
+	f := newRollbackFixture(t, nil, nil)
+	sb := f.sb
 
-	cleanupSpawnedPolecat(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", Branch: "feature/x"}, "gastown", "")
+	f.r.cleanupSpawned(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", Branch: "feature/x"}, "gastown", "", "", "")
 	if len(sb.removed) != 0 || len(sb.branches) != 0 {
 		t.Fatalf("zero-provenance cleanup destroyed %v / %v", sb.removed, sb.branches)
 	}

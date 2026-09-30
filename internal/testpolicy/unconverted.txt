@@ -19,7 +19,6 @@ internal/plugin
 internal/polecat
 internal/protocol
 internal/reaper
-internal/rig
 internal/runtime
 internal/scheduler/capacity
 internal/session

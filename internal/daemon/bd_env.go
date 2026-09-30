@@ -20,12 +20,17 @@ import (
 // the authoritative "off" value, because glibc getenv() returns the first
 // matching entry — a stale "on" earlier in the slice would otherwise win.
 func bdReadOnlyEnv() []string {
-	return beads.BuildReadOnlyRoutingBDEnv(os.Environ(), "")
+	return bdReadOnlyRoutingEnvFrom(os.Environ(), "")
 }
 
 func bdReadOnlyRoutingEnv(townRoot string) []string {
+	return bdReadOnlyRoutingEnvFrom(os.Environ(), townRoot)
+}
+
+// bdReadOnlyRoutingEnvFrom is bdReadOnlyRoutingEnv over base instead of the
+// daemon's own environment.
+func bdReadOnlyRoutingEnvFrom(base []string, townRoot string) []string {
 	fallback := ""
-	base := os.Environ()
 	if townRoot != "" {
 		fallback = filepath.Join(townRoot, ".beads")
 		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
@@ -44,7 +49,12 @@ func bdMutationRoutingEnv(townRoot string) []string {
 }
 
 func bdReadOnlyPinnedEnv(beadsDir string) []string {
-	base := os.Environ()
+	return bdReadOnlyPinnedEnvFrom(os.Environ(), beadsDir)
+}
+
+// bdReadOnlyPinnedEnvFrom is bdReadOnlyPinnedEnv over base instead of the
+// daemon's own environment.
+func bdReadOnlyPinnedEnvFrom(base []string, beadsDir string) []string {
 	if townRoot := beads.FindTownRoot(filepath.Dir(beads.ResolveBeadsDir(beadsDir))); townRoot != "" {
 		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
 	}

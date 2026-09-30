@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -102,16 +101,14 @@ func (d *Daemon) runSpecDispatchCommand() ([]byte, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "dispatch", "--json") //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+	stdout, stderr, err := d.runCmd(cmd)
+	if err != nil {
+		if msg := strings.TrimSpace(string(stderr)); msg != "" {
 			return nil, fmt.Errorf("%w: %s", err, lastLine(msg))
 		}
 		return nil, err
 	}
-	return stdout.Bytes(), nil
+	return stdout, nil
 }
 
 // formatSpecDispatchReport renders a tick's JSON as log lines. The sling path

@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // runBatchSling handles slinging multiple beads to a rig.
@@ -280,60 +279,7 @@ func openSpawnedPolecatSandbox(townRoot, rigName string) (spawnedPolecatSandbox,
 //     candidate for deletion, and deletePolecatBranch still keeps it when its
 //     tip is not on a remote. A resumed branch is never deleted.
 func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, rigName, beadID, hookWorkDir, convoyID string) {
-	// The spawn's seat claim goes with the spawn: no session will ever exist
-	// for this polecat, so the seat it reserved must not stay reserved. This is
-	// the one path every caller-side failure after a spawn comes through —
-	// returning before the cleanup below, which is best-effort and gives up
-	// early when the workspace or rig cannot be read (gt-t8q5).
-	releasePoolSeatClaim()
-
-	if spawnInfo == nil {
-		return
-	}
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return
-	}
-
-	// Give the work back first: the sandbox removal below resets a fresh
-	// polecat's agent bead, and a kept sandbox needs its slot reset here.
-	// Work that survives on a branch goes back to its pre-sling holder rather
-	// than being released (the shared work-survival rule).
-	rel := newPolecatWorkReleaserFn(townRoot, hookWorkDir)
-	if restoreOriginalHoldIfWorkSurvives(rel, townRoot, spawnInfo.AgentID(), beadID, spawnInfo.originalHold) {
-		beadID = ""
-	}
-	releasePolecatWork(rel, spawnInfo.AgentID(), beadID, !spawnInfo.FreshSpawn)
-
-	if spawnInfo.FreshSpawn {
-		if sandbox, err := openSpawnedPolecatSandboxFn(townRoot, rigName); err != nil {
-			fmt.Printf("  %s Could not open rig %s to clean up polecat %s: %v\n",
-				style.Dim.Render("Warning:"), rigName, spawnInfo.PolecatName, err)
-		} else {
-			if err := sandbox.RemovePolecat(spawnInfo.PolecatName); err != nil {
-				fmt.Printf("  %s Could not clean up orphaned polecat %s: %v\n",
-					style.Dim.Render("Warning:"), spawnInfo.PolecatName, err)
-			} else {
-				fmt.Printf("  %s Cleaned up orphaned polecat %s\n",
-					style.Dim.Render("○"), spawnInfo.PolecatName)
-			}
-			if spawnInfo.Branch != "" && spawnInfo.BranchCreated {
-				sandbox.DeleteBranch(spawnInfo.Branch)
-			}
-		}
-	} else {
-		fmt.Printf("  %s Kept reused polecat %s (sandbox predates this sling)\n",
-			style.Dim.Render("○"), spawnInfo.PolecatName)
-	}
-	if spawnInfo.Branch != "" && !spawnInfo.BranchCreated {
-		fmt.Printf("  %s Kept branch %s (not created by this sling)\n",
-			style.Dim.Render("○"), spawnInfo.Branch)
-	}
-
-	// Close the auto-convoy if one was created
-	if convoyID != "" {
-		closeConvoy(convoyID, "Sling rollback - hook failed")
-	}
+	realSlingRollback().cleanupSpawned(spawnInfo, rigName, beadID, hookWorkDir, convoyID)
 }
 
 // allBeadIDs returns true if every arg looks like a bead ID (syntactic check).
@@ -464,16 +410,5 @@ func deletePolecatBranch(branchName string, repoGit *git.Git, hasPendingMR bool)
 // closeConvoy closes a convoy with the given reason.
 // It is a best-effort operation that logs warnings on failure.
 func closeConvoy(convoyID, reason string) {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		fmt.Printf("  %s Could not find workspace to close convoy %s: %v\n", style.Dim.Render("Warning:"), convoyID, err)
-		return
-	}
-	townBeads := filepath.Join(townRoot, ".beads")
-	closeArgs := []string{"close", convoyID, "-r", reason}
-	if err := BdCmd(closeArgs...).Dir(townBeads).WithAutoCommit().Run(); err != nil {
-		fmt.Printf("  %s Could not close convoy %s: %v\n", style.Dim.Render("Warning:"), convoyID, err)
-	} else {
-		fmt.Printf("  %s Closed convoy %s\n", style.Dim.Render("○"), convoyID)
-	}
+	realSlingRollback().closeConvoy(convoyID, reason)
 }

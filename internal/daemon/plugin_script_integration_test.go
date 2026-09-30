@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build integration && !windows
 
 package daemon
 
@@ -12,13 +12,14 @@ import (
 	"time"
 )
 
-// Split out of plugin_script_test.go: the kill probe is syscall.Kill, which
-// does not exist on Windows, and the scripts are sh. In the shared file it
-// broke `go vet ./...` on the Windows runner.
+// The kill probe is syscall.Kill, which does not exist on Windows, and the
+// script is real bash: the process-group kill is process semantics no fake
+// can show. TestRunPluginScript_TimeoutIsReportedAsTimeout pins the verdict
+// in the unit tier.
 
 // A timeout must kill the whole process tree, not just bash: the child the
 // script backgrounds has to be gone too (gt-6t43 is the orphan shape).
-func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
+func TestIntegrationRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 	t.Parallel()
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	p := scriptPlugin(t, "slow", "sleep 60 &\necho $! > "+pidFile+"\nwait\n")
@@ -43,7 +44,7 @@ func TestRunPluginScript_TimeoutKillsProcessGroup(t *testing.T) {
 		}
 	}()
 	start := time.Now()
-	res := runPluginScript(deadline, p, "/town", time.Hour)
+	res := runPluginScript(deadline, nil, daemonScriptEnv(), p, "/town", time.Hour)
 	if time.Since(start) > 30*time.Second {
 		t.Fatalf("timeout did not bound the run: %s", time.Since(start))
 	}

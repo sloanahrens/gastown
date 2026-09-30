@@ -114,154 +114,6 @@ func TestBuildReport(t *testing.T) {
 	}
 }
 
-func TestListReportWispsIncludesInfrastructure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	binDir := t.TempDir()
-	argsLog := filepath.Join(t.TempDir(), "bd-args.log")
-	bdScript := `#!/bin/sh
-printf '%s\n' "$*" >> "$BD_ARGS_LOG"
-case "$*" in
-  *list*)
-    printf '[{"id":"hq-wisp-patrol","title":"mol-deacon-patrol","status":"hooked","issue_type":"molecule","ephemeral":true,"wisp_type":"patrol"}]\n'
-    ;;
-  *)
-    printf 'bd test stub\n'
-    ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_ARGS_LOG", argsLog)
-	beads.ResetBdAllowStaleCacheForTest()
-	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
-
-	wisps, err := listReportWisps(beads.New(t.TempDir()))
-	if err != nil {
-		t.Fatalf("listReportWisps: %v", err)
-	}
-	if len(wisps) != 1 || wisps[0].ID != "hq-wisp-patrol" {
-		t.Fatalf("wisps = %#v, want patrol infrastructure wisp", wisps)
-	}
-
-	args, err := os.ReadFile(argsLog)
-	if err != nil {
-		t.Fatalf("read bd args: %v", err)
-	}
-	if !strings.Contains(string(args), "--include-infra") {
-		t.Fatalf("bd args = %q, want --include-infra", string(args))
-	}
-}
-
-func TestQueryCompactionReportsReadsPayloadField(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	binDir := t.TempDir()
-	bdScript := `#!/bin/sh
-printf '%s\n' '[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"{\"date\":\"2026-07-12\",\"categories\":{\"Patrols\":{\"active\":2}}}"}]'
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	reports, err := queryCompactionReports("2026-07-05", "2026-07-12")
-	if err != nil {
-		t.Fatalf("queryCompactionReports: %v", err)
-	}
-	if len(reports) != 1 {
-		t.Fatalf("len(reports) = %d, want 1", len(reports))
-	}
-	if got := reports[0].Categories["Patrols"].Active; got != 2 {
-		t.Fatalf("Patrols.Active = %d, want 2", got)
-	}
-}
-
-func TestQueryCompactionReportsIncludesClosedEvents(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	binDir := t.TempDir()
-	argsLog := filepath.Join(t.TempDir(), "bd-args.log")
-	bdScript := `#!/bin/sh
-printf '%s\n' "$*" > "$BD_ARGS_LOG"
-printf '%s\n' '[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"{\"date\":\"2026-07-12\",\"categories\":{}}"}]'
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BD_ARGS_LOG", argsLog)
-
-	reports, err := queryCompactionReports("2026-07-05", "2026-07-12")
-	if err != nil {
-		t.Fatalf("queryCompactionReports: %v", err)
-	}
-	if len(reports) != 1 {
-		t.Fatalf("len(reports) = %d, want 1 closed event", len(reports))
-	}
-	args, err := os.ReadFile(argsLog)
-	if err != nil {
-		t.Fatalf("read bd args: %v", err)
-	}
-	if !strings.Contains(string(args), "--status=all") {
-		t.Fatalf("bd args = %q, want --status=all", string(args))
-	}
-}
-
-func TestQueryCompactionReportsDeduplicatesReportDates(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	binDir := t.TempDir()
-	bdScript := `#!/bin/sh
-printf '%s\n' '[{"id":"hq-old","title":"Compaction Report 2026-07-08","created_at":"2026-07-08T00:00:00Z","payload":"{\"date\":\"2026-07-08\",\"categories\":{\"Patrols\":{\"active\":1}}}"},{"id":"hq-new","title":"Compaction Report 2026-07-08","created_at":"2026-07-08T01:00:00Z","payload":"{\"date\":\"2026-07-08\",\"categories\":{\"Patrols\":{\"active\":2}}}"}]'
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	reports, err := queryCompactionReports("2026-07-05", "2026-07-12")
-	if err != nil {
-		t.Fatalf("queryCompactionReports: %v", err)
-	}
-	if len(reports) != 1 {
-		t.Fatalf("len(reports) = %d, want 1 unique report date", len(reports))
-	}
-	if got := reports[0].Categories["Patrols"].Active; got != 2 {
-		t.Fatalf("Patrols.Active = %d, want first/latest report value 2", got)
-	}
-}
-
-func TestQueryCompactionReportsRejectsMatchingEventsWithoutUsablePayload(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	binDir := t.TempDir()
-	bdScript := `#!/bin/sh
-printf '%s\n' '[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"not-json"}]'
-`
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	_, err := queryCompactionReports("2026-07-05", "2026-07-12")
-	if err == nil || !strings.Contains(err.Error(), "no usable payload") {
-		t.Fatalf("error = %v, want no usable payload diagnostic", err)
-	}
-}
-
 func TestDetectAnomalies(t *testing.T) {
 	t.Parallel()
 	t.Run("high heartbeat volume", func(t *testing.T) {
@@ -600,63 +452,6 @@ esac
 	return argsLog
 }
 
-func TestFindExistingWeeklyRollupFindsClosedRollup(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	weeklyRollupIdempotencyBdStub(t, "hq-roll",
-		"Weekly Compaction Rollup 2026-09-01 to 2026-09-08")
-
-	id, err := findExistingWeeklyRollup("2026-09-01", "2026-09-08")
-	if err != nil {
-		t.Fatalf("findExistingWeeklyRollup: %v", err)
-	}
-	if id != "hq-roll" {
-		t.Fatalf("id = %q, want %q (closed rollup bead must be visible to the idempotency check)", id, "hq-roll")
-	}
-}
-
-func TestFindExistingWeeklyRollupMatchesOverlappingLaterWindow(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	// A rollup already sent for (now-7d, now). A re-run one day later
-	// computes a shifted rolling window — (now-6d, now+1d) relative to the
-	// original — which overlaps the prior window but has a different exact
-	// title. This must still be treated as a duplicate (gt-sqk).
-	weeklyRollupIdempotencyBdStub(t, "hq-roll",
-		"Weekly Compaction Rollup 2026-09-01 to 2026-09-08")
-
-	id, err := findExistingWeeklyRollup("2026-09-02", "2026-09-09")
-	if err != nil {
-		t.Fatalf("findExistingWeeklyRollup: %v", err)
-	}
-	if id != "hq-roll" {
-		t.Fatalf("id = %q, want %q (a re-run one day later must still detect the overlapping prior rollup)", id, "hq-roll")
-	}
-}
-
-func TestFindExistingWeeklyRollupIgnoresNonOverlappingWindow(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script command stubs not supported on Windows")
-	}
-
-	// A rollup sent for the prior week should NOT block a rollup for a
-	// window that doesn't overlap it at all.
-	weeklyRollupIdempotencyBdStub(t, "hq-roll",
-		"Weekly Compaction Rollup 2026-09-01 to 2026-09-08")
-
-	id, err := findExistingWeeklyRollup("2026-09-16", "2026-09-23")
-	if err != nil {
-		t.Fatalf("findExistingWeeklyRollup: %v", err)
-	}
-	if id != "" {
-		t.Fatalf("id = %q, want empty (non-overlapping window must not be treated as already sent)", id)
-	}
-}
-
 func TestRunWeeklyRollupSkipsWhenAlreadySentSameDay(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script command stubs not supported on Windows")
@@ -870,5 +665,100 @@ func assertNoMailSent(t *testing.T, mailLog string) {
 	}
 	if len(data) > 0 {
 		t.Fatalf("mail was sent unexpectedly: %s", string(data))
+	}
+}
+
+// listingBD is an in-process bd whose list calls answer out; every call's
+// arguments are logged.
+func listingBD(out string) *inprocBD {
+	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		if cmd == "list" {
+			return bdOut(out)
+		}
+		return bdAnswer{stderr: "unexpected bd command: " + cmd, code: 1}
+	}}
+}
+
+func TestListReportWispsIncludesInfrastructure(t *testing.T) {
+	t.Parallel()
+	bd := listingBD(`[{"id":"hq-wisp-patrol","title":"mol-deacon-patrol","status":"hooked","issue_type":"molecule","ephemeral":true,"wisp_type":"patrol"}]`)
+	wisps, err := listReportWisps(beads.NewWithBeadsDirAndRunner(t.TempDir(), "", bd.run))
+	if err != nil {
+		t.Fatalf("listReportWisps: %v", err)
+	}
+	if len(wisps) != 1 || wisps[0].ID != "hq-wisp-patrol" {
+		t.Fatalf("wisps = %#v, want patrol infrastructure wisp", wisps)
+	}
+	if !strings.Contains(bd.log(), "--include-infra") {
+		t.Fatalf("bd args = %q, want --include-infra", bd.log())
+	}
+}
+
+func TestQueryCompactionReportsReadsPayloadField(t *testing.T) {
+	t.Parallel()
+	bd := listingBD(`[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"{\"date\":\"2026-07-12\",\"categories\":{\"Patrols\":{\"active\":2}}}"}]`)
+	reports, err := queryCompactionReportsVia(bd.run, "2026-07-05", "2026-07-12")
+	if err != nil {
+		t.Fatalf("queryCompactionReports: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Categories["Patrols"].Active != 2 {
+		t.Fatalf("reports = %+v, want one with Patrols.Active 2", reports)
+	}
+}
+
+func TestQueryCompactionReportsIncludesClosedEvents(t *testing.T) {
+	t.Parallel()
+	bd := listingBD(`[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"{\"date\":\"2026-07-12\",\"categories\":{}}"}]`)
+	reports, err := queryCompactionReportsVia(bd.run, "2026-07-05", "2026-07-12")
+	if err != nil || len(reports) != 1 {
+		t.Fatalf("reports = %v, err %v; want 1 closed event", reports, err)
+	}
+	if !strings.Contains(bd.log(), "--status=all") {
+		t.Fatalf("bd args = %q, want --status=all", bd.log())
+	}
+}
+
+func TestQueryCompactionReportsDeduplicatesReportDates(t *testing.T) {
+	t.Parallel()
+	bd := listingBD(`[{"id":"hq-old","title":"Compaction Report 2026-07-08","created_at":"2026-07-08T00:00:00Z","payload":"{\"date\":\"2026-07-08\",\"categories\":{\"Patrols\":{\"active\":1}}}"},{"id":"hq-new","title":"Compaction Report 2026-07-08","created_at":"2026-07-08T01:00:00Z","payload":"{\"date\":\"2026-07-08\",\"categories\":{\"Patrols\":{\"active\":2}}}"}]`)
+	reports, err := queryCompactionReportsVia(bd.run, "2026-07-05", "2026-07-12")
+	if err != nil {
+		t.Fatalf("queryCompactionReports: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Categories["Patrols"].Active != 2 {
+		t.Fatalf("reports = %+v, want one report per date with the latest value 2", reports)
+	}
+}
+
+func TestQueryCompactionReportsRejectsMatchingEventsWithoutUsablePayload(t *testing.T) {
+	t.Parallel()
+	bd := listingBD(`[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"not-json"}]`)
+	if _, err := queryCompactionReportsVia(bd.run, "2026-07-05", "2026-07-12"); err == nil || !strings.Contains(err.Error(), "no usable payload") {
+		t.Fatalf("error = %v, want no usable payload diagnostic", err)
+	}
+}
+
+// TestFindExistingWeeklyRollup: the idempotency check sees closed rollup
+// beads (gt-9t9), treats an overlapping later window as already sent
+// (gt-sqk), and lets a non-overlapping window through.
+func TestFindExistingWeeklyRollup(t *testing.T) {
+	t.Parallel()
+	closedRollup := `[{"id":"hq-roll","title":"Weekly Compaction Rollup 2026-09-01 to 2026-09-08","status":"closed"}]`
+	bd := &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		if cmd == "list" && (argsMention(args, "--status=closed") || argsMention(args, "--status=all")) {
+			return bdOut(closedRollup)
+		}
+		return bdOut("[]")
+	}}
+	for _, tc := range []struct{ start, end, want string }{
+		{"2026-09-01", "2026-09-08", "hq-roll"},
+		{"2026-09-02", "2026-09-09", "hq-roll"},
+		{"2026-09-16", "2026-09-23", ""},
+	} {
+		id, err := findExistingWeeklyRollupVia(bd.run, tc.start, tc.end)
+		if err != nil || id != tc.want {
+			t.Errorf("window %s..%s: id %q err %v, want %q", tc.start, tc.end, id, err, tc.want)
+		}
 	}
 }

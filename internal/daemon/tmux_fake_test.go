@@ -29,7 +29,8 @@ type fakeTmux struct {
 	aliveErr    map[string]error                // per session: IsAgentAliveChecked fails with this
 	stalls      map[string][]tmux.ComposerStall // per session, consumed in order; the last repeats
 	stallErr    map[string]error
-	calls       []string // daemon-only calls, "<method> <session>", in order
+	clocks      []*tmux.PendingInputClock // the pending clock each stall probe was handed
+	calls       []string                  // daemon-only calls, "<method> <session>", in order
 }
 
 // newFakeTmux returns an empty fake whose waits and creation times run on clk.
@@ -151,10 +152,11 @@ func (f *fakeTmux) GetPaneID(session string) (string, error) {
 
 // DetectComposerStallTracked replays the stalls set for session, in order,
 // repeating the last one.
-func (f *fakeTmux) DetectComposerStallTracked(session string, _ time.Duration, _ *tmux.PendingInputClock) (tmux.ComposerStall, error) {
+func (f *fakeTmux) DetectComposerStallTracked(session string, _ time.Duration, clock *tmux.PendingInputClock) (tmux.ComposerStall, error) {
 	f.record("DetectComposerStallTracked", session)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.clocks = append(f.clocks, clock)
 	if err := f.stallErr[session]; err != nil {
 		return tmux.ComposerStall{}, err
 	}
@@ -169,9 +171,38 @@ func (f *fakeTmux) DetectComposerStallTracked(session string, _ time.Duration, _
 	return s, nil
 }
 
-func (f *fakeTmux) SubmitPendingInput(target string, _ bool) error {
-	f.record("SubmitPendingInput", target)
+// SubmitPendingInput records the submit and which keystroke it would send:
+// "SubmitPendingInput queued <target>" for input in the queue (ctrl+x ctrl+s),
+// "SubmitPendingInput typed <target>" for input typed into the composer.
+func (f *fakeTmux) SubmitPendingInput(target string, queued bool) error {
+	how := "typed"
+	if queued {
+		how = "queued"
+	}
+	f.record("SubmitPendingInput "+how, target)
 	return nil
+}
+
+// setStalls makes DetectComposerStallTracked answer session with stalls, in
+// order, repeating the last one.
+func (f *fakeTmux) setStalls(session string, stalls ...tmux.ComposerStall) {
+	f.mu.Lock()
+	f.stalls[session] = stalls
+	f.mu.Unlock()
+}
+
+// setStallErr makes DetectComposerStallTracked fail for session.
+func (f *fakeTmux) setStallErr(session string, err error) {
+	f.mu.Lock()
+	f.stallErr[session] = err
+	f.mu.Unlock()
+}
+
+// stallClocks returns the pending clock each stall probe was handed.
+func (f *fakeTmux) stallClocks() []*tmux.PendingInputClock {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*tmux.PendingInputClock(nil), f.clocks...)
 }
 
 // EnsureSessionFreshWithCommandAndEnv replaces any existing session, as the

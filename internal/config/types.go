@@ -567,6 +567,10 @@ type PatrolConfig struct {
 	Interval string   `json:"interval,omitempty"` // e.g., "5m"
 	Agent    string   `json:"agent,omitempty"`    // agent that runs this patrol
 	Rigs     []string `json:"rigs,omitempty"`     // rigs this patrol manages (empty = all)
+	// DisabledRigs names rigs this patrol must not run in, even when Rigs is
+	// empty. For the witness it is the per-rig off switch: the daemon neither
+	// starts nor keeps a witness session there (ADR 0005).
+	DisabledRigs []string `json:"disabled_rigs,omitempty"`
 }
 
 // CurrentDaemonPatrolConfigVersion is the current schema version for DaemonPatrolConfig.
@@ -1443,6 +1447,14 @@ type MergeQueueConfig struct {
 
 	// TestCommand is the command to run for tests.
 	TestCommand string `json:"test_command,omitempty"`
+
+	// PresubmitCommand is the command gt done runs on the rebased branch
+	// before pushing (gt-ssyxd). Empty means `make presubmit` when a Go
+	// repo's Makefile has that target: lint, build and the tests of the
+	// changed packages only. With no such target gt done falls back to
+	// `make gate` or the lint/build/test commands. The landing worker's own
+	// gate on the merged tree (Gate) is unaffected.
+	PresubmitCommand string `json:"presubmit_command,omitempty"`
 
 	// Gate is the one command the landing worker runs on the merged tree
 	// (land.LandGate, ADR 0004). Exit 0 lands; anything else rejects. Empty

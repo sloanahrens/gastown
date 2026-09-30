@@ -62,8 +62,7 @@ func (d *Daemon) handleDogs() {
 	opCfg := d.loadOperationalConfig().GetDaemonConfig()
 
 	mgr := dog.NewManager(d.config.TownRoot, rigsConfig)
-	t := tmux.NewTmux()
-	sm := dog.NewSessionManager(t, d.config.TownRoot, mgr)
+	sm := d.dogSessions(mgr)
 
 	d.cleanupStuckDogs(mgr, sm)
 	d.detectStaleWorkingDogs(mgr, sm, opCfg)
@@ -83,8 +82,7 @@ func (d *Daemon) handleDogsCleanupOnly() {
 	opCfg := d.loadOperationalConfig().GetDaemonConfig()
 
 	mgr := dog.NewManager(d.config.TownRoot, rigsConfig)
-	t := tmux.NewTmux()
-	sm := dog.NewSessionManager(t, d.config.TownRoot, mgr)
+	sm := d.dogSessions(mgr)
 
 	d.cleanupStuckDogs(mgr, sm)
 	d.detectStaleWorkingDogs(mgr, sm, opCfg)
@@ -496,6 +494,12 @@ type hookedFormulaResult struct {
 // per idle dog on every dispatch tick, so without that env every poll opens
 // a fresh connection attempting a no-op auto-commit (gh#3596).
 func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	return dogHasHookedFormulaWithIDRun(nil, townRoot, beadsDir, dogName)
+}
+
+// dogHasHookedFormulaWithIDRun is dogHasHookedFormulaWithID with its bd run
+// through run (nil runs bd for real).
+func dogHasHookedFormulaWithIDRun(run cmdRunFunc, townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 	agentID := fmt.Sprintf("deacon/dogs/%s", dogName)
 	queryExpr := fmt.Sprintf("ephemeral=true AND status=%s AND assignee=%s",
 		strconv.Quote(beads.StatusHooked), strconv.Quote(agentID))
@@ -510,17 +514,15 @@ func dogHasHookedFormulaWithID(townRoot, beadsDir, dogName string) (hookedFormul
 	// release a bd whose descendants hold the stdout pipe open — and this call
 	// runs on every dispatch tick.
 	util.SetProcessGroup(cmd.Cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+	stdout, stderr, err := bdRunWith(run, cmd)
+	if err != nil {
+		if errMsg := strings.TrimSpace(string(stderr)); errMsg != "" {
 			return hookedFormulaResult{}, fmt.Errorf("%w: %s", err, errMsg)
 		}
 		return hookedFormulaResult{}, err
 	}
 
-	out := bytes.TrimSpace(stdout.Bytes())
+	out := bytes.TrimSpace(stdout)
 	if len(out) == 0 || (out[0] != '[' && out[0] != '{') {
 		return hookedFormulaResult{}, nil
 	}

@@ -78,9 +78,12 @@ func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 			return fmt.Errorf("stopping the old mayor session: %w", err)
 		}
 		return mgr.Start("")
+	case session.RolePolecat:
+		// Only the patrol_scan tick restarts polecats from the daemon
+		// (gt-4k3fj.6); in a rig it does not cover, the witness still does.
+		return d.restartPolecatSession(seat)
 	default:
-		// Polecats are restarted by the witness patrol scan until the
-		// witness becomes a daemon tick (gt-4k3fj.6); dogs by their handler.
+		// Dogs are restarted by their handler.
 		return fmt.Errorf("%w: %s", errNoDaemonStarter, seat.SessionName())
 	}
 }

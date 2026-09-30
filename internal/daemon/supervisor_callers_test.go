@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dog"
@@ -24,53 +27,69 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// workBD is a fake bd that answers only work-bead queries: `list
-// --status=<s>` prints <dir>/list-<s>.json (default []), `show <id>` prints
-// <dir>/show-<id>.json (default: not found). Every call is appended to
-// <dir>/calls.log, so a test can assert which reads were made.
+// workBD is an in-process bd that answers only work-bead queries: `list
+// --status=<s>` prints the content set as "list-<s>.json" (default []),
+// `show <id>` prints "show-<id>.json" (default: [] and exit 1, not found).
+// Anything else exits 1. Every call is recorded, so a test can assert which
+// reads were made. Wire it with d.execCmd = bd.run.
 type workBD struct {
-	dir  string
-	path string
+	*fakeCLI
+
+	mu    sync.Mutex
+	files map[string]string
 }
 
 func newWorkBD(t *testing.T) *workBD {
 	t.Helper()
-	dir := t.TempDir()
-	script := `#!/bin/sh
-echo "$*" >> "` + dir + `/calls.log"
-case "$1" in
-  list)
-    for a in "$@"; do
-      case "$a" in --status=*) s="${a#--status=}";; esac
-    done
-    f="` + dir + `/list-$s.json"
-    if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
-    ;;
-  show)
-    f="` + dir + `/show-$2.json"
-    if [ -f "$f" ]; then cat "$f"; else echo '[]'; exit 1; fi
-    ;;
-  *) exit 1;;
-esac
-`
-	path := filepath.Join(dir, "bd")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	b := &workBD{files: map[string]string{}}
+	b.fakeCLI = newFakeCLI(b.answer)
+	return b
+}
+
+func (b *workBD) answer(args []string) cliReply {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(args) == 0 {
+		return cliReply{code: 1}
 	}
-	return &workBD{dir: dir, path: path}
+	switch args[0] {
+	case "list":
+		s := ""
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a, "--status="); ok {
+				s = v
+			}
+		}
+		if out, ok := b.files["list-"+s+".json"]; ok {
+			return cliReply{stdout: out}
+		}
+		return cliReply{stdout: "[]\n"}
+	case "show":
+		if len(args) > 1 {
+			if out, ok := b.files["show-"+args[1]+".json"]; ok {
+				return cliReply{stdout: out}
+			}
+		}
+		return cliReply{stdout: "[]\n", code: 1}
+	}
+	return cliReply{code: 1}
 }
 
 func (b *workBD) set(t *testing.T, name, content string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(b.dir, name), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.files[name] = content
 }
 
+// calls returns every recorded argv, one space-joined call per line.
 func (b *workBD) calls(t *testing.T) string {
 	t.Helper()
-	data, _ := os.ReadFile(filepath.Join(b.dir, "calls.log"))
-	return string(data)
+	var sb strings.Builder
+	for _, c := range b.recorded() {
+		sb.WriteString(strings.Join(c.args, " ") + "\n")
+	}
+	return sb.String()
 }
 
 // registerMyr maps rig "myr" to prefix "myr" for the test's duration.
@@ -93,23 +112,29 @@ func writePolecatHeartbeat(t *testing.T, townRoot string, state polecat.Heartbea
 	}
 }
 
-func reaperDaemon(t *testing.T, bdPath string) (*Daemon, *strings.Builder) {
+// reaperDaemon returns a daemon over a stale bash polecat session whose bd
+// calls bd answers. A nil bd leaves the daemon without a bd at all.
+func reaperDaemon(t *testing.T, bd *workBD) (*Daemon, *strings.Builder) {
 	t.Helper()
 	var logBuf strings.Builder
-	return &Daemon{
+	d := &Daemon{
 		config:   &Config{TownRoot: t.TempDir()},
 		logger:   log.New(&logBuf, "", 0),
 		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
 		notifier: notifyfake.New(),
-		bdPath:   bdPath,
-	}, &logBuf
+	}
+	if bd != nil {
+		d.bdPath = "bd"
+		d.execCmd = bd.run
+	}
+	return d, &logBuf
 }
 
 // G1-08: the idle reaper honors the pause marker; before the supervisor it
 // was the one scanner that did not.
 func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
 	registerMyr(t)
-	d, logBuf := reaperDaemon(t, "")
+	d, logBuf := reaperDaemon(t, nil)
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatIdle, time.Hour)
 	if err := agentpause.Pause(d.config.TownRoot, "myr", "polecat", "mycat", "inspecting the pane", "human", ""); err != nil {
 		t.Fatal(err)
@@ -128,7 +153,7 @@ func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
 // G1-07: a per-rig e-stop stops the reaper too.
 func TestReapIdlePolecat_HonorsARigEstop(t *testing.T) {
 	registerMyr(t)
-	d, logBuf := reaperDaemon(t, "")
+	d, logBuf := reaperDaemon(t, nil)
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatIdle, time.Hour)
 	if err := estop.ActivateRig(d.config.TownRoot, "myr", estop.TriggerManual, "drill"); err != nil {
 		t.Fatal(err)
@@ -146,7 +171,7 @@ func TestReapIdlePolecat_HonorsARigEstop(t *testing.T) {
 func TestReapIdlePolecat_NeverReadsAgentBeads(t *testing.T) {
 	registerMyr(t)
 	bd := newWorkBD(t)
-	d, logBuf := reaperDaemon(t, bd.path)
+	d, logBuf := reaperDaemon(t, bd)
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatWorking, time.Hour)
 
 	d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
@@ -170,7 +195,7 @@ func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 	old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+old+`"}]`)
 	bd.set(t, "show-gt-work1.json", `[{"id":"gt-work1","status":"hooked"}]`)
-	d, logBuf := reaperDaemon(t, bd.path)
+	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -190,7 +215,7 @@ func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 	bd := newWorkBD(t)
 	recent := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
 	bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+recent+`"}]`)
-	d, logBuf := reaperDaemon(t, bd.path)
+	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 
 	d.checkPolecatHealth("myr", "mycat")
@@ -204,7 +229,7 @@ func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
 	bd := newWorkBD(t)
 	bd.set(t, "show-gt-intended.json", `[{"id":"gt-intended","status":"in_progress"}]`)
-	d, logBuf := reaperDaemon(t, bd.path)
+	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 	if _, err := intent.Update(d.config.TownRoot, intent.Seat{Rig: "myr", Role: "polecat", Name: "mycat"}, func(r *intent.Record) error {
 		r.WorkBead = "gt-intended"
@@ -360,15 +385,11 @@ func registerRigs(t *testing.T, rigs ...string) {
 
 // unknownTmuxDaemon returns a daemon whose tmux cannot answer, whose restart
 // executor records instead of starting anything, and whose town has an
-// operational rig "testrig" with a pending refinery event (a fake bd on PATH
-// answers the rig-bead read). Serial: it sets PATH.
+// operational rig "testrig" (its rig bead reads open, with no status label).
 func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
 	t.Helper()
 	town := t.TempDir()
 	writeDaemonTownFile(t, town, "testrig/config.json", `{"beads":{"prefix":"gt"}}`)
-	binDir := t.TempDir()
-	writeDaemonNoSafetyStopMockBD(t, binDir, filepath.Join(binDir, "bd.log"))
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	tm := newFakeTmux(newFixedClock())
 	tm.mu.Lock()
@@ -379,6 +400,12 @@ func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
 	d := &Daemon{
 		config: DefaultConfig(town), logger: log.New(&buf, "", 0), tmux: tm,
 		restartSeatFn: func(seat supervisor.Seat) error { restarts = append(restarts, seat.SessionName()); return nil },
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
+			if id != "gt-rig-testrig" {
+				return nil, fmt.Errorf("no issue found matching %q", id)
+			}
+			return &beads.Issue{ID: id, Title: "Rig", Type: "task", Status: "open"}, nil
+		},
 	}
 	return d, &buf, &restarts
 }
@@ -386,11 +413,13 @@ func unknownTmuxDaemon(t *testing.T) (*Daemon, *strings.Builder, *[]string) {
 // Unknown is never acted on (G1-09): a tmux that cannot answer starts no
 // witness or mayor.
 func TestEnsurePaths_UnknownStartsNothing(t *testing.T) {
+	t.Parallel()
 	for name, ensure := range map[string]func(*Daemon){
 		"witness": func(d *Daemon) { d.ensureWitnessRunning("testrig") },
 		"mayor":   func(d *Daemon) { d.ensureMayorRunning() },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			d, buf, restarts := unknownTmuxDaemon(t)
 			ensure(d)
 			if len(*restarts) != 0 {
@@ -428,6 +457,7 @@ func TestEnsureDeaconRunning_UnreadableIntentStartsNothing(t *testing.T) {
 // Witnesses are never restarted for a stall (serial killer bug): an idle
 // witness produces no output while it waits for work.
 func TestEnsureWitnessRunning_StalledIsNotRestarted(t *testing.T) {
+	t.Parallel()
 	d, buf, restarts := unknownTmuxDaemon(t)
 	tm := d.tmux.(*fakeTmux)
 	tm.mu.Lock()

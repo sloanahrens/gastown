@@ -24,7 +24,7 @@ import (
 // embedded Storage, so a test that strays past it fails loudly.
 //
 // It copies the Dolt store's observable behavior where the manager depends
-// on it (TestMemStoreMatchesBeadsStore pins each point against a
+// on it (TestIntegrationMemStoreMatchesBeadsStore pins each point against a
 // real store):
 //   - CreateIssue records "created", CloseIssue "closed", and UpdateIssue with
 //     a status "closed" / "reopened" (from closed) / "status_changed", as
@@ -591,7 +591,7 @@ func observeStore(t *testing.T, store beadsdk.Storage) storeObservation {
 }
 
 // TestMemStoreContract pins what memStore does, so the convoy tests built on
-// it know the store they run against. TestMemStoreMatchesBeadsStore checks
+// it know the store they run against. TestIntegrationMemStoreMatchesBeadsStore checks
 // the same observation against a real beads store.
 func TestMemStoreContract(t *testing.T) {
 	t.Parallel()
@@ -646,22 +646,5 @@ func TestMemStoreContract(t *testing.T) {
 	}
 	if got, want := eventSummary(events), "gt-s3:created gt-s2:created gt-s1:created gt-s4:created"; got != want {
 		t.Errorf("event order = %q, want %q (same second newest first, seconds oldest first)", got, want)
-	}
-}
-
-// TestMemStoreMatchesBeadsStore runs observeStore against a real beads store
-// on the package's Dolt container and against memStore, and requires the
-// same observation: the differential check behind every convoy test that
-// runs on memStore instead of Dolt.
-func TestMemStoreMatchesBeadsStore(t *testing.T) {
-	t.Parallel()
-	takeStoreSlot(t)
-	real, cleanup := setupTestStore(t)
-	defer cleanup()
-	mem, memCleanup := newMemStore(t)
-	defer memCleanup()
-
-	if got, want := observeStore(t, real), observeStore(t, mem); !reflect.DeepEqual(got, want) {
-		t.Errorf("memStore diverges from the beads store:\n beads   %+v\n memStore %+v", got, want)
 	}
 }

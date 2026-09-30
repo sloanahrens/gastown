@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -179,18 +178,15 @@ func (d *Daemon) readDispatchCheck() (*dispatchCheckResult, error) {
 	cmd := exec.CommandContext(ctx, d.gtPath, "daemon", "dispatch-check", "--json") //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+	stdout, stderr, err := d.runCmd(cmd)
+	if err != nil {
+		if msg := strings.TrimSpace(string(stderr)); msg != "" {
 			return nil, fmt.Errorf("%w: %s", err, msg)
 		}
 		return nil, err
 	}
 
-	return parseDispatchCheck(stdout.Bytes())
+	return parseDispatchCheck(stdout)
 }
 
 // parseDispatchCheck reads the check's JSON, and refuses an output that carries

@@ -11,8 +11,8 @@ import (
 // the wait as a hang and bd-closed its bead mid-`gt done` (overseer
 // hq-wisp-6q5ib). Since D2 (ADR 0004) gt done runs only the unit tier and
 // needs no container slot, so there is no slot wait to describe.
-const polecatFormulaDoneWaitVerbatim = "gt done runs the local gate itself (lint, build and the unit tier " +
-	"of the tests; no container slot), which can take several minutes. That is normal. Do not interrupt it " +
+const polecatFormulaDoneWaitVerbatim = "gt done runs the local gate itself (lint, build and the tests of the packages your " +
+	"branch changed; no container slot), which can take several minutes. That is normal. Do not interrupt it " +
 	"and do not close the bead."
 
 // TestPolecatFormulasCarryTheSlotLoopRule guards the three polecat workflows

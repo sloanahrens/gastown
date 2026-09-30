@@ -163,7 +163,6 @@ Then handle callbacks from agents.
 
 Check the Mayor's inbox for messages from:
 - Witnesses reporting polecat status
-- Refineries reporting merge results
 - Polecats requesting help or escalation
 - External triggers (webhooks, timers)
 
@@ -182,7 +181,7 @@ gt mail archive <message-id>
 ```
 
 **LIFECYCLE messages**:
-Polecats reporting completion, refineries reporting merge results.
+Polecats reporting completion.
 Archive after processing:
 ```bash
 gt mail archive <message-id>
@@ -200,15 +199,6 @@ gt mail archive <message-id>
 ```
 Dogs return to idle automatically. The report is informational - no action needed
 unless the dog reports errors that require escalation.
-
-**CONVOY_NEEDS_FEEDING messages** (from Refinery):
-The daemon's ConvoyManager handles convoy feeding (event-driven, 5s poll).
-Simply archive these messages — no deacon action needed.
-```bash
-# For each CONVOY_NEEDS_FEEDING message:
-gt mail read <id>
-gt mail archive <message-id>
-```
 
 **RECOVERED_BEAD messages** (from Witness):
 When a Witness detects a dead polecat with abandoned work, it resets the bead
@@ -660,10 +650,10 @@ gt deacon heartbeat "mid-cycle checkpoint"
 
 [[steps]]
 id = "health-scan"
-title = "Check Witness and Refinery health"
+title = "Check Witness health"
 needs = ["heartbeat-mid"]
 description = """
-Check Witness and Refinery health for each rig.
+Check Witness health for each rig.
 
 **IMPORTANT: Skip DOCKED/PARKED rigs**
 Before checking any rig, verify its operational state:
@@ -1274,7 +1264,7 @@ needs = ["compact-report"]
 description = """
 **DAILY DIGEST** - Aggregate yesterday's patrol cycle digests.
 
-Patrol cycles (Deacon, Witness, Refinery) create ephemeral per-cycle digests
+Patrol cycles (Deacon, Witness) create ephemeral per-cycle digests
 to avoid JSONL pollution. This step aggregates them into a single permanent
 "Patrol Report YYYY-MM-DD" bead for audit purposes.
 

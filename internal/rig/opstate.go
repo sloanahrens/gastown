@@ -56,6 +56,12 @@ const (
 // Merge Queue panels share, so a rig cannot read as parked on the CLI and
 // active on the page that is supposed to warn about it.
 func GetOpState(townRoot, rigName string) (OpState, string) {
+	return getOpState(townRoot, rigName, nil)
+}
+
+// getOpState is GetOpState with the identity bead read through run (nil:
+// the bd on PATH).
+func getOpState(townRoot, rigName string, run beads.BDRunner) (OpState, string) {
 	wispConfig := wisp.NewConfig(townRoot, rigName)
 	if status := wispConfig.GetString(RigStatusKey); status != "" {
 		switch strings.ToLower(status) {
@@ -80,7 +86,7 @@ func GetOpState(townRoot, rigName string) (OpState, string) {
 		return OpStateOperational, OpStateSourceDefault
 	}
 
-	bd := beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))
+	bd := beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), run)
 	rigBead, err := bd.Show(beads.RigBeadIDWithPrefix(prefix, rigName))
 	if err != nil {
 		// No readable identity bead: either the rig never got one, or bd could

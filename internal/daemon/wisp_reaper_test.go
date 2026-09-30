@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -207,21 +206,14 @@ func TestWispReaperAutoCloseKnob(t *testing.T) {
 // the sweep had moved to the inline fallback, so the cause went unnoticed.
 func TestDispatchReaperDogReportsFailureCause(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mock")
-	}
-
-	binDir := t.TempDir()
-	fakeGT := filepath.Join(binDir, "gt")
-	script := "#!/bin/sh\necho 'sling: no available dogs in deacon/dogs' >&2\nexit 1\n"
-	if err := os.WriteFile(fakeGT, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
-	}
-
+	gt := newFakeCLI(func([]string) cliReply {
+		return cliReply{stderr: "sling: no available dogs in deacon/dogs\n", code: 1}
+	})
 	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		gtPath: fakeGT,
-		logger: log.New(io.Discard, "", 0),
+		config:  &Config{TownRoot: t.TempDir()},
+		gtPath:  "gt",
+		logger:  log.New(io.Discard, "", 0),
+		execCmd: gt.run,
 	}
 	err := d.dispatchReaperDog(map[string]string{"max_age": "1h"})
 	if err == nil {
@@ -234,32 +226,22 @@ func TestDispatchReaperDogReportsFailureCause(t *testing.T) {
 
 func TestDispatchReaperDogUsesDogPoolSling(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix shell script mock")
-	}
-
 	townRoot := t.TempDir()
-	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "gt-args.log")
-	fakeGT := filepath.Join(binDir, "gt")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", logPath)
-	if err := os.WriteFile(fakeGT, []byte(script), 0755); err != nil {
-		t.Fatalf("write fake gt: %v", err)
-	}
-
+	gt := newFakeCLI(nil)
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
-		gtPath: fakeGT,
+		config:  &Config{TownRoot: townRoot},
+		gtPath:  "gt",
+		execCmd: gt.run,
 	}
 	if err := d.dispatchReaperDog(map[string]string{"max_age": "1h"}); err != nil {
 		t.Fatalf("dispatchReaperDog() error = %v", err)
 	}
 
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read gt args log: %v", err)
+	calls := gt.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("gt calls = %+v, want one sling", calls)
 	}
-	args := strings.Split(strings.TrimSpace(string(data)), "\n")
+	args := calls[0].args
 	wantPrefix := []string{"sling", constants.MolDogReaper, "deacon/dogs"}
 	if len(args) < len(wantPrefix) {
 		t.Fatalf("gt args = %v, want prefix %v", args, wantPrefix)
@@ -268,6 +250,9 @@ func TestDispatchReaperDogUsesDogPoolSling(t *testing.T) {
 		if args[i] != want {
 			t.Fatalf("gt arg %d = %q, want %q (all args: %v)", i, args[i], want, args)
 		}
+	}
+	if calls[0].dir != townRoot {
+		t.Errorf("gt sling ran in %q, want the town root %q", calls[0].dir, townRoot)
 	}
 }
 
@@ -422,10 +407,10 @@ func TestSummarizeCommandOutputKeepsTheErrorLine(t *testing.T) {
 	}
 }
 
-func TestDoltServerHostIgnoresStaleBeadsHost(t *testing.T) {
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
-
+// With no server, no GT_DOLT_HOST (the hermetic harness scrubs GT_* and
+// BEADS_*) and no town config, the host is the local default.
+func TestDoltServerHostDefaultsToLocalhost(t *testing.T) {
+	t.Parallel()
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
 	if got := d.doltServerHost(); got != "127.0.0.1" {
 		t.Fatalf("doltServerHost() = %q, want default localhost", got)
@@ -433,9 +418,7 @@ func TestDoltServerHostIgnoresStaleBeadsHost(t *testing.T) {
 }
 
 func TestDoltServerHostUsesConfiguredTownHost(t *testing.T) {
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	t.Parallel()
 	townRoot := t.TempDir()
 	doltDataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(doltDataDir, 0755); err != nil {

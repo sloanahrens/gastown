@@ -55,41 +55,52 @@ func TestRunMechanicalBootTriage_InFlightGuardAndCooldownStamp(t *testing.T) {
 	}
 }
 
-// mechanicalTriageStub points bootTriageExecutable at a `gt` stub that records
-// its argv, and returns the log it writes.
-func mechanicalTriageStub(t *testing.T) string {
-	t.Helper()
-	stub := filepath.Join(t.TempDir(), "gt")
-	argvLog := filepath.Join(t.TempDir(), "argv.log")
-	if err := os.WriteFile(stub, []byte("#!/bin/bash\necho \"$@\" >> "+argvLog+"\necho 'Triage complete: nothing'\n"), 0o755); err != nil {
-		t.Fatalf("write gt stub: %v", err)
-	}
-	orig := bootTriageExecutable
-	bootTriageExecutable = func() (string, error) { return stub, nil }
-	t.Cleanup(func() { bootTriageExecutable = orig })
-	return argvLog
+// mechanicalTriageGt points d's mechanical triage at a fake `gt` and returns
+// a channel that receives each `boot triage` call it answers, as `gt boot
+// triage` answers when there is nothing to do.
+func mechanicalTriageGt(d *Daemon) <-chan cliCall {
+	triaged := make(chan cliCall, 1)
+	d.bootTriageExeFn = func() (string, error) { return "/opt/gt/bin/gt", nil }
+	d.execCmd = newFakeCLIFor(func(c cliCall) cliReply {
+		if c.name == "gt" && strings.Join(c.args, " ") == "boot triage" {
+			select {
+			case triaged <- c:
+			default:
+			}
+			return cliReply{stdout: "Triage complete: nothing\n"}
+		}
+		return cliReply{stderr: "unexpected call\n", code: 1}
+	}).run
+	return triaged
 }
 
-// awaitTriageArgv waits for the async mechanical triage to record itself.
-func awaitTriageArgv(t *testing.T, argvLog string) {
+// awaitTriage waits for the async mechanical triage to run `gt boot triage`
+// and checks it ran as Boot, from the deacon directory.
+func awaitTriage(t *testing.T, townRoot string, triaged <-chan cliCall) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if b, _ := os.ReadFile(argvLog); strings.Contains(string(b), "boot triage") {
-			return
+	select {
+	case c := <-triaged:
+		if want := filepath.Join(townRoot, "deacon"); c.dir != want {
+			t.Errorf("boot triage ran in %q, want %q", c.dir, want)
 		}
-		time.Sleep(20 * time.Millisecond)
+		if got := c.getenv("GT_ROLE"); got != "deacon/boot" {
+			t.Errorf("boot triage ran with GT_ROLE=%q, want deacon/boot", got)
+		}
+		if got := c.getenv("GT_TOWN_ROOT"); got != townRoot {
+			t.Errorf("boot triage ran with GT_TOWN_ROOT=%q, want %q", got, townRoot)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("mechanical triage did not run `gt boot triage`")
 	}
-	b, _ := os.ReadFile(argvLog)
-	t.Fatalf("mechanical triage did not run `gt boot triage`; argv log: %q", string(b))
 }
 
 // Default (mechanical) mode end to end: ensureBootRunning runs the stub
 // `gt boot triage` instead of opening a tmux session, and stamps the cooldown.
 // The stub records its argv so we know what would have run.
 func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
+	t.Parallel()
 	townRoot, d, spawner := bootTestTown(t)
-	argvLog := mechanicalTriageStub(t)
+	triaged := mechanicalTriageGt(d)
 	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +108,7 @@ func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
 	d.ctx = context.Background()
 	d.ensureBootRunning()
 
-	awaitTriageArgv(t, argvLog)
+	awaitTriage(t, townRoot, triaged)
 	if d.bootLastSpawned.IsZero() {
 		t.Error("cooldown stamp not set by mechanical triage")
 	}
@@ -111,8 +122,9 @@ func TestEnsureBootRunning_MechanicalRunsTriageNoTmux(t *testing.T) {
 // cadence, and a Deacon that dies then waits twice as long to be noticed
 // (gt-w28o).
 func TestEnsureBootRunning_MechanicalIgnoresSpawnCooldown(t *testing.T) {
+	t.Parallel()
 	townRoot, d, _ := bootTestTown(t)
-	argvLog := mechanicalTriageStub(t)
+	triaged := mechanicalTriageGt(d)
 	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -122,18 +134,21 @@ func TestEnsureBootRunning_MechanicalIgnoresSpawnCooldown(t *testing.T) {
 
 	d.ensureBootRunning()
 
-	awaitTriageArgv(t, argvLog)
+	awaitTriage(t, townRoot, triaged)
 }
 
 // Under go test the executable is the test binary; the mechanical path must
 // refuse to exec it (that would re-run the suite recursively).
 func TestRunMechanicalBootTriage_RefusesTestBinary(t *testing.T) {
-	orig := bootTriageExecutable
-	bootTriageExecutable = func() (string, error) { return "/tmp/daemon.test", nil }
-	t.Cleanup(func() { bootTriageExecutable = orig })
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), ctx: context.Background()}
+	t.Parallel()
+	gt := newFakeCLI(nil)
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), ctx: context.Background(),
+		bootTriageExeFn: func() (string, error) { return "/tmp/daemon.test", nil }, execCmd: gt.run}
 	d.runMechanicalBootTriage()
 	if d.bootTriageInFlight.Load() {
 		t.Error("in-flight flag left set after refusing a test binary")
+	}
+	if calls := gt.recorded(); len(calls) != 0 {
+		t.Errorf("the test binary was run: %+v", calls)
 	}
 }

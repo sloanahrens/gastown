@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -35,118 +37,6 @@ func TestExtractRoleFromIdentity(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("extractRoleFromIdentity(%q) = %q, want %q", tc.target, got, tc.want)
 		}
-	}
-}
-
-// TestSquashJitterInvalidDuration verifies that an invalid --jitter value
-// returns a parse error immediately (before any workspace operations).
-func TestSquashJitterInvalidDuration(t *testing.T) {
-	prev := moleculeJitter
-	t.Cleanup(func() { moleculeJitter = prev })
-
-	moleculeJitter = "bogus"
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-
-	err := runMoleculeSquash(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for invalid jitter duration, got nil")
-	}
-	if !strings.Contains(err.Error(), "invalid --jitter duration") {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-// TestSquashJitterNegativeDuration verifies that a negative --jitter value
-// is rejected with a clear error rather than silently skipped.
-func TestSquashJitterNegativeDuration(t *testing.T) {
-	prev := moleculeJitter
-	t.Cleanup(func() { moleculeJitter = prev })
-
-	moleculeJitter = "-5s"
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-
-	err := runMoleculeSquash(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for negative jitter duration, got nil")
-	}
-	if !strings.Contains(err.Error(), "non-negative") {
-		t.Errorf("expected non-negative error, got: %v", err)
-	}
-}
-
-// TestSquashJitterZeroDuration verifies that --jitter 0s proceeds without
-// sleeping (the jitterMax > 0 guard skips the sleep block).
-// This tests the parse path only — the command will fail at workspace lookup
-// since we run from a temp directory outside any gastown workspace.
-func TestSquashJitterZeroDuration(t *testing.T) {
-	prev := moleculeJitter
-	t.Cleanup(func() { moleculeJitter = prev })
-
-	// Run from a temp dir so workspace.FindFromCwd() fails
-	tmpDir := t.TempDir()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	moleculeJitter = "0s"
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-
-	err = runMoleculeSquash(cmd, nil)
-	// Should fail at workspace lookup, NOT at jitter parsing
-	if err == nil {
-		t.Fatal("expected workspace error, got nil")
-	}
-	if strings.Contains(err.Error(), "jitter") {
-		t.Errorf("jitter 0s should be accepted, but got jitter error: %v", err)
-	}
-}
-
-// TestSquashJitterContextCancellation verifies that the jitter sleep respects
-// context cancellation and returns promptly instead of blocking.
-func TestSquashJitterContextCancellation(t *testing.T) {
-	prev := moleculeJitter
-	t.Cleanup(func() { moleculeJitter = prev })
-
-	// Run from a temp dir so workspace.FindFromCwd() fails
-	tmpDir := t.TempDir()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	// Use a long jitter so the sleep would block if cancellation didn't work
-	moleculeJitter = "10m"
-	cmd := &cobra.Command{}
-
-	// Create a pre-cancelled context
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	cmd.SetContext(ctx)
-
-	start := time.Now()
-	err = runMoleculeSquash(cmd, nil)
-	elapsed := time.Since(start)
-
-	// Should return quickly (the workspace lookup might fail first on some systems,
-	// but if it reaches the jitter block, cancellation should fire immediately)
-	if elapsed > 5*time.Second {
-		t.Errorf("jitter sleep should have been cancelled, but took %v", elapsed)
-	}
-	// Accept either context error or workspace error (depends on execution order)
-	if err == nil {
-		t.Fatal("expected error, got nil")
 	}
 }
 
@@ -533,360 +423,6 @@ exit /b 0
 	}
 }
 
-// TestBurnClosesWispRoot verifies that runMoleculeBurn closes the wisp root
-// via ForceCloseWithReason after detaching. Without this, patrol molecule roots
-// stay in "hooked" status indefinitely (issue #1828).
-func TestBurnClosesWispRoot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script bd stub not supported on Windows")
-	}
-
-	townRoot := t.TempDir()
-
-	// Workspace marker: mayor/ directory (SecondaryMarker)
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-
-	// .beads directory (for findLocalBeadsDir and lockBead)
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(filepath.Join(beadsDir, "locks"), 0755); err != nil {
-		t.Fatalf("mkdir .beads/locks: %v", err)
-	}
-
-	// Stub bd binary
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	closesLog := filepath.Join(townRoot, "closes.log")
-	// The handoff bead has attached_molecule: gt-wisp-mol1
-	bdScript := fmt.Sprintf(`#!/bin/sh
-# Strip --allow-stale
-while [ "$1" = "--allow-stale" ]; do shift; done
-cmd="$1"; shift
-case "$cmd" in
-  list)
-    # FindHandoffBead: list --json --status=pinned --limit=0
-    if echo "$*" | grep -q "status=pinned"; then
-      echo '[{"id":"gt-handoff-1","title":"witness Handoff","status":"pinned","description":"attached_molecule: gt-wisp-mol1"}]'
-    else
-      # closeDescendants: list --json --parent=... --status=all
-      echo '[]'
-    fi
-    ;;
-  show)
-    # DetachMoleculeWithAudit calls Show twice
-    echo '[{"id":"gt-handoff-1","title":"witness Handoff","status":"pinned","description":"attached_molecule: gt-wisp-mol1"}]'
-    ;;
-  update)
-    exit 0
-    ;;
-  close)
-    # Log every close call
-    echo "$*" >> "%s"
-    ;;
-esac
-exit 0
-`, closesLog)
-
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "witness")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("GT_RIG", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("BEADS_DIR", "")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	// Save and restore global flag state
-	prevJSON := moleculeJSON
-	t.Cleanup(func() { moleculeJSON = prevJSON })
-	moleculeJSON = false
-
-	err = runMoleculeBurn(nil, []string{"witness"})
-	if err != nil {
-		t.Fatalf("runMoleculeBurn: %v", err)
-	}
-
-	// Verify that bd close was called with the molecule root ID
-	closesBytes, err := os.ReadFile(closesLog)
-	if err != nil {
-		t.Fatalf("no close calls logged (closes.log not found): bd close was never called")
-	}
-	closes := string(closesBytes)
-	if !strings.Contains(closes, "gt-wisp-mol1") {
-		t.Errorf("molecule root gt-wisp-mol1 was NOT closed.\n"+
-			"ForceCloseWithReason should be called after DetachMoleculeWithAudit.\n"+
-			"Close calls: %s", closes)
-	}
-}
-
-// TestSquashClosesWispRoot verifies that runMoleculeSquash closes the wisp root
-// via ForceCloseWithReason after detaching. Without this, patrol molecule roots
-// stay in "hooked" status indefinitely (issue #1828).
-func TestSquashClosesWispRoot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script bd stub not supported on Windows")
-	}
-
-	townRoot := t.TempDir()
-
-	// Workspace marker
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-
-	// .beads directory
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(filepath.Join(beadsDir, "locks"), 0755); err != nil {
-		t.Fatalf("mkdir .beads/locks: %v", err)
-	}
-
-	// Stub bd binary
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	closesLog := filepath.Join(townRoot, "closes.log")
-	bdScript := fmt.Sprintf(`#!/bin/sh
-while [ "$1" = "--allow-stale" ]; do shift; done
-cmd="$1"; shift
-case "$cmd" in
-  list)
-    if echo "$*" | grep -q "status=pinned"; then
-      echo '[{"id":"gt-handoff-1","title":"refinery Handoff","status":"pinned","description":"attached_molecule: gt-wisp-patrol1"}]'
-    else
-      echo '[]'
-    fi
-    ;;
-  show)
-    echo '[{"id":"gt-handoff-1","title":"refinery Handoff","status":"pinned","description":"attached_molecule: gt-wisp-patrol1"}]'
-    ;;
-  update)
-    exit 0
-    ;;
-  create)
-    # Digest creation
-    echo '{"id":"gt-digest-1","title":"Digest"}'
-    ;;
-  close)
-    echo "$*" >> "%s"
-    ;;
-esac
-exit 0
-`, closesLog)
-
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "refinery")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("GT_RIG", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("BEADS_DIR", "")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	// Save and restore global flag state
-	prevJSON := moleculeJSON
-	prevJitter := moleculeJitter
-	prevNoDigest := moleculeNoDigest
-	prevSummary := moleculeSummary
-	t.Cleanup(func() {
-		moleculeJSON = prevJSON
-		moleculeJitter = prevJitter
-		moleculeNoDigest = prevNoDigest
-		moleculeSummary = prevSummary
-	})
-	moleculeJSON = false
-	moleculeJitter = ""
-	moleculeNoDigest = true // skip digest to simplify mock
-	moleculeSummary = ""
-
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-
-	err = runMoleculeSquash(cmd, []string{"refinery"})
-	if err != nil {
-		t.Fatalf("runMoleculeSquash: %v", err)
-	}
-
-	// Verify that bd close was called with the molecule root ID
-	closesBytes, err := os.ReadFile(closesLog)
-	if err != nil {
-		t.Fatalf("no close calls logged (closes.log not found): bd close was never called")
-	}
-	closes := string(closesBytes)
-	if !strings.Contains(closes, "gt-wisp-patrol1") {
-		t.Errorf("molecule root gt-wisp-patrol1 was NOT closed.\n"+
-			"ForceCloseWithReason should be called after DetachMoleculeWithAudit.\n"+
-			"Close calls: %s", closes)
-	}
-}
-
-// TestSquashClosesDescendantsAndRoot verifies the full close order:
-// descendants are closed first, then the root molecule itself.
-func TestSquashClosesDescendantsAndRoot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script bd stub not supported on Windows")
-	}
-
-	townRoot := t.TempDir()
-
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
-		t.Fatalf("mkdir mayor: %v", err)
-	}
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(filepath.Join(beadsDir, "locks"), 0755); err != nil {
-		t.Fatalf("mkdir .beads/locks: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	closesLog := filepath.Join(townRoot, "closes.log")
-	// Mock returns 2 children for the molecule, one open and one closed
-	bdScript := fmt.Sprintf(`#!/bin/sh
-while [ "$1" = "--allow-stale" ]; do shift; done
-cmd="$1"; shift
-case "$cmd" in
-  list)
-    if echo "$*" | grep -q "status=pinned"; then
-      echo '[{"id":"gt-handoff-1","title":"witness Handoff","status":"pinned","description":"attached_molecule: gt-wisp-mol2"}]'
-    elif echo "$*" | grep -q "parent=gt-wisp-mol2"; then
-      echo '[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"closed"}]'
-    elif echo "$*" | grep -q "parent=gt-step"; then
-      echo '[]'
-    else
-      echo '[]'
-    fi
-    ;;
-  show)
-    beadID="$1"
-    if echo "$*" | grep -q -- "--children"; then
-      case "$beadID" in
-        gt-wisp-mol2)
-          echo '{"gt-wisp-mol2":[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"closed"}]}'
-          ;;
-        *)
-          echo '{"'"$beadID"'":[]}'
-          ;;
-      esac
-    else
-      echo '[{"id":"gt-handoff-1","title":"witness Handoff","status":"pinned","description":"attached_molecule: gt-wisp-mol2"}]'
-    fi
-    ;;
-  update)
-    exit 0
-    ;;
-  close)
-    echo "$*" >> "%s"
-    ;;
-esac
-exit 0
-`, closesLog)
-
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(EnvGTRole, "witness")
-	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
-	t.Setenv("GT_RIG", "")
-	t.Setenv("TMUX_PANE", "")
-	t.Setenv("BEADS_DIR", "")
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	prevJSON := moleculeJSON
-	t.Cleanup(func() { moleculeJSON = prevJSON })
-	moleculeJSON = false
-
-	err = runMoleculeBurn(nil, []string{"witness"})
-	if err != nil {
-		t.Fatalf("runMoleculeBurn: %v", err)
-	}
-
-	closesBytes, err := os.ReadFile(closesLog)
-	if err != nil {
-		t.Fatalf("no close calls logged: %v", err)
-	}
-	closes := string(closesBytes)
-	closeLines := strings.Split(strings.TrimSpace(closes), "\n")
-
-	// Verify: gt-step-1 is closed (open child), gt-step-2 is NOT closed (already closed)
-	foundStep1 := false
-	foundRoot := false
-	for _, line := range closeLines {
-		if strings.Contains(line, "gt-step-1") {
-			foundStep1 = true
-		}
-		if strings.Contains(line, "gt-wisp-mol2") {
-			foundRoot = true
-		}
-	}
-
-	if !foundStep1 {
-		t.Errorf("open child gt-step-1 was NOT closed.\nClose calls:\n%s", closes)
-	}
-	if !foundRoot {
-		t.Errorf("molecule root gt-wisp-mol2 was NOT closed.\nClose calls:\n%s", closes)
-	}
-
-	// Verify root is closed AFTER children (root should appear in a later close call)
-	step1Idx := -1
-	rootIdx := -1
-	for i, line := range closeLines {
-		if strings.Contains(line, "gt-step-1") {
-			step1Idx = i
-		}
-		if strings.Contains(line, "gt-wisp-mol2") {
-			rootIdx = i
-		}
-	}
-	if step1Idx >= 0 && rootIdx >= 0 && rootIdx < step1Idx {
-		t.Errorf("root was closed BEFORE children (root line %d, child line %d).\n"+
-			"Expected: descendants first, then root.\nClose calls:\n%s",
-			rootIdx, step1Idx, closes)
-	}
-}
-
 // TestDoneClosesAttachedMolecule verifies that gt done closes both the hooked
 // bead AND its attached molecule (wisp).
 //
@@ -1073,5 +609,175 @@ exit /b 0
 	if !foundBase {
 		t.Errorf("hooked bead gt-abc123 was NOT closed\n"+
 			"Beads closed: %v", closeLines)
+	}
+}
+
+// testMoleculeEnv is gt mol burn/squash in townRoot, whose local beads
+// workspace is the town, with bd answered by bd and flags at their defaults.
+func testMoleculeEnv(townRoot string, bd *inprocBD) moleculeLifecycleEnv {
+	return moleculeLifecycleEnv{
+		getwd:        func() (string, error) { return townRoot, nil },
+		findTown:     func() (string, error) { return townRoot, nil },
+		getenv:       envMap(nil),
+		beadsWorkDir: func() (string, error) { return townRoot, nil },
+		bd:           bd.run,
+		out:          io.Discard,
+		errOut:       io.Discard,
+		noDigest:     true, // the digest path is not what these tests pin
+	}
+}
+
+// handoffMoleculeBD is an in-process bd holding one pinned handoff bead with
+// molecule attached; children maps a parent to its --children answer. Every
+// close is logged as "close <args>".
+func handoffMoleculeBD(handoffTitle, molecule string, children map[string]string) *inprocBD {
+	handoff := `[{"id":"gt-handoff-1","title":"` + handoffTitle + `","status":"pinned","description":"attached_molecule: ` + molecule + `"}]`
+	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		switch cmd {
+		case "list":
+			if argsMention(args, "status=pinned") {
+				return bdOut(handoff)
+			}
+			for parent, kids := range children {
+				if argsMention(args, "parent="+parent) {
+					return bdOut(kids)
+				}
+			}
+			return bdOut("[]")
+		case "show":
+			if argsMention(args, "--children") {
+				if kids, ok := children[args[0]]; ok {
+					return bdOut(`{"` + args[0] + `":` + kids + `}`)
+				}
+				return bdOut(`{"` + args[0] + `":[]}`)
+			}
+			return bdOut(handoff)
+		case "create":
+			return bdOut(`{"id":"gt-digest-1","title":"Digest"}`)
+		case "close":
+			f.logLine("close " + strings.Join(args, " "))
+		}
+		return bdOut("")
+	}}
+}
+
+// closeLines is the bd close calls, in order.
+func closeLines(bd *inprocBD) []string {
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(bd.log()), "\n") {
+		if strings.HasPrefix(l, "close ") {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func squashCmd(ctx context.Context) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	return cmd
+}
+
+// TestSquashJitterRejectsBadDurations: an invalid or negative --jitter fails
+// before any workspace lookup, with a message naming the problem.
+func TestSquashJitterRejectsBadDurations(t *testing.T) {
+	t.Parallel()
+	for jitter, want := range map[string]string{"bogus": "invalid --jitter duration", "-5s": "non-negative"} {
+		e := testMoleculeEnv(t.TempDir(), handoffMoleculeBD("x", "y", nil))
+		e.jitter = jitter
+		e.findTown = func() (string, error) { t.Error("workspace looked up before the jitter was validated"); return "", nil }
+		err := moleculeSquash(squashCmd(context.Background()), e, nil)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("--jitter %s: err = %v, want %q", jitter, err, want)
+		}
+	}
+}
+
+// TestSquashJitterZeroDuration: --jitter 0s is accepted, and the run goes on
+// to the workspace lookup, which fails here.
+func TestSquashJitterZeroDuration(t *testing.T) {
+	t.Parallel()
+	e := testMoleculeEnv(t.TempDir(), handoffMoleculeBD("x", "y", nil))
+	e.jitter = "0s"
+	e.findTown = func() (string, error) { return "", errors.New("not in a Gas Town workspace") }
+	err := moleculeSquash(squashCmd(context.Background()), e, nil)
+	if err == nil || strings.Contains(err.Error(), "jitter") {
+		t.Fatalf("err = %v, want the workspace error, not a jitter error", err)
+	}
+}
+
+// TestSquashJitterContextCancellation: the jitter sleep, once reached,
+// returns as soon as the command's context is done instead of blocking.
+func TestSquashJitterContextCancellation(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	e := testMoleculeEnv(townRoot, handoffMoleculeBD("refinery Handoff", "gt-wisp-patrol1", nil))
+	e.jitter = "10m" // the sleep would block if cancellation didn't work
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := moleculeSquash(squashCmd(ctx), e, []string{"refinery"})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("jitter sleep should have been cancelled, but took %v", elapsed)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the context's cancellation", err)
+	}
+}
+
+// TestBurnClosesWispRoot: burn detaches the molecule and then closes its
+// root, or the wisp root stays hooked forever (#1828).
+func TestBurnClosesWispRoot(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	bd := handoffMoleculeBD("witness Handoff", "gt-wisp-mol1", nil)
+	if err := moleculeBurn(nil, testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
+		t.Fatalf("burn: %v", err)
+	}
+	if closes := strings.Join(closeLines(bd), "\n"); !strings.Contains(closes, "gt-wisp-mol1") {
+		t.Errorf("molecule root gt-wisp-mol1 was not closed; close calls:\n%s", closes)
+	}
+}
+
+// TestSquashClosesWispRoot: squash closes the molecule root after detaching,
+// as burn does (#1828).
+func TestSquashClosesWispRoot(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	bd := handoffMoleculeBD("refinery Handoff", "gt-wisp-patrol1", nil)
+	if err := moleculeSquash(squashCmd(context.Background()), testMoleculeEnv(townRoot, bd), []string{"refinery"}); err != nil {
+		t.Fatalf("squash: %v", err)
+	}
+	if closes := strings.Join(closeLines(bd), "\n"); !strings.Contains(closes, "gt-wisp-patrol1") {
+		t.Errorf("molecule root gt-wisp-patrol1 was not closed; close calls:\n%s", closes)
+	}
+}
+
+// TestSquashClosesDescendantsAndRoot: the open step is closed, the closed one
+// is left alone, and the root is closed after its children.
+func TestSquashClosesDescendantsAndRoot(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	bd := handoffMoleculeBD("witness Handoff", "gt-wisp-mol2", map[string]string{
+		"gt-wisp-mol2": `[{"id":"gt-step-1","title":"Step 1","status":"open"},{"id":"gt-step-2","title":"Step 2","status":"closed"}]`,
+	})
+	if err := moleculeBurn(nil, testMoleculeEnv(townRoot, bd), []string{"witness"}); err != nil {
+		t.Fatalf("burn: %v", err)
+	}
+	lines := closeLines(bd)
+	step1, root := -1, -1
+	for i, l := range lines {
+		if strings.Contains(l, "gt-step-1") && step1 < 0 {
+			step1 = i
+		}
+		if strings.Contains(l, "gt-wisp-mol2") {
+			root = i
+		}
+		if strings.Contains(l, "gt-step-2") {
+			t.Errorf("the already-closed gt-step-2 was closed again: %s", l)
+		}
+	}
+	if step1 < 0 || root < 0 || root < step1 {
+		t.Fatalf("close order: step-1 at %d, root at %d, want both with the root last; close calls:\n%s", step1, root, strings.Join(lines, "\n"))
 	}
 }

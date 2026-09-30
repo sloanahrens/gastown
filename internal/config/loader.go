@@ -337,6 +337,9 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.TestCommand != "" {
 			result.TestCommand = local.TestCommand
 		}
+		if local.PresubmitCommand != "" {
+			result.PresubmitCommand = local.PresubmitCommand
+		}
 		// gt done's default test-verify gate budgets and command override
 		// (gt-pnkd): same non-empty-wins rule as the five *_command fields
 		// above.

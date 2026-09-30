@@ -11,7 +11,9 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,12 +25,14 @@ import (
 )
 
 func TestGitChildEnv_ForwardsExisting(t *testing.T) {
-	t.Setenv("HOME", "/tmp/fake-home")
-	t.Setenv("USER", "fakeuser")
-	t.Setenv("LOGNAME", "fakeuser")
-	t.Setenv("SSH_AUTH_SOCK", "/tmp/fake-agent.sock")
+	t.Parallel()
+	base := []string{"HOME=/tmp/fake-home", "USER=fakeuser", "LOGNAME=fakeuser", "SSH_AUTH_SOCK=/tmp/fake-agent.sock"}
+	noLookup := func() (*user.User, error) {
+		t.Error("identity looked up although HOME, USER and LOGNAME were all set")
+		return nil, errors.New("unexpected lookup")
+	}
 
-	got := envMap(gitChildEnv())
+	got := envMap(gitChildEnvFrom(base, noLookup))
 	if got["HOME"] != "/tmp/fake-home" {
 		t.Errorf("HOME: got %q, want /tmp/fake-home", got["HOME"])
 	}
@@ -44,28 +48,45 @@ func TestGitChildEnv_ForwardsExisting(t *testing.T) {
 }
 
 func TestGitChildEnv_RecoversMissingIdentity(t *testing.T) {
-	// Simulate a daemon child that lost USER/LOGNAME (the gh#zt1w failure mode).
-	// HOME stays set so user.Current() succeeds without needing getpwuid.
-	t.Setenv("HOME", "/tmp/fake-home")
-	// Unset, not empty: gitChildEnv treats "USER=" as present. t.Setenv
-	// first so the originals come back when the test ends; a bare
-	// os.Unsetenv left the rest of the run without USER and LOGNAME.
-	for _, k := range []string{"USER", "LOGNAME"} {
-		t.Setenv(k, "")
-		if err := os.Unsetenv(k); err != nil {
-			t.Fatalf("unset %s: %v", k, err)
-		}
+	t.Parallel()
+	// A daemon child that lost USER/LOGNAME (the gh#zt1w failure mode). An
+	// empty "USER=" counts as present, so the keys are absent, not empty.
+	base := []string{"HOME=/tmp/fake-home", "PATH=/usr/bin"}
+	current := func() (*user.User, error) {
+		return &user.User{Username: "recovered", HomeDir: "/home/recovered"}, nil
 	}
 
-	got := envMap(gitChildEnv())
-	if got["USER"] == "" {
-		t.Error("USER should have been recovered, got empty")
+	got := envMap(gitChildEnvFrom(base, current))
+	if got["USER"] != "recovered" || got["LOGNAME"] != "recovered" {
+		t.Errorf("USER/LOGNAME = %q/%q, want both recovered from the user lookup", got["USER"], got["LOGNAME"])
 	}
-	if got["LOGNAME"] == "" {
-		t.Error("LOGNAME should have been recovered, got empty")
+	if got["HOME"] != "/tmp/fake-home" {
+		t.Errorf("HOME = %q, want the inherited /tmp/fake-home kept over the lookup's", got["HOME"])
 	}
-	if got["USER"] != got["LOGNAME"] {
-		t.Errorf("USER (%q) should match LOGNAME (%q)", got["USER"], got["LOGNAME"])
+	if got["PATH"] != "/usr/bin" {
+		t.Errorf("PATH = %q, want the rest of the environment passed through", got["PATH"])
+	}
+}
+
+func TestGitChildEnv_LookupFailureLeavesEnvUnchanged(t *testing.T) {
+	t.Parallel()
+	base := []string{"PATH=/usr/bin"}
+	got := gitChildEnvFrom(base, func() (*user.User, error) { return nil, errors.New("no user exists for uid 501") })
+	if !slices.Equal(got, base) {
+		t.Errorf("env = %v, want %v unchanged when the lookup fails", got, base)
+	}
+}
+
+// TestGitChildEnv_StartsFromTheProcessEnvironment is the wiring guard for
+// gitChildEnvFrom: the wrapper must build on the daemon's own environment.
+func TestGitChildEnv_StartsFromTheProcessEnvironment(t *testing.T) {
+	t.Parallel()
+	path, ok := os.LookupEnv("PATH")
+	if !ok {
+		t.Fatal("PATH is unset in the test process; the guard has nothing to look for")
+	}
+	if got := envMap(gitChildEnv())["PATH"]; got != path {
+		t.Errorf("gitChildEnv PATH = %q, want the process's %q", got, path)
 	}
 }
 
