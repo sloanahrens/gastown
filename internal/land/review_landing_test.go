@@ -53,7 +53,9 @@ func TestLandOMRequestChangesIsReworkWithSummary(t *testing.T) {
 func TestLandOMExecutionErrorLandsWithErrorVerdict(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	f.review.fn = func(string) (Verdict, error) { return Verdict{}, errors.New("om review did not run: exec: \"om\": not found") }
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{}, errors.New("om review did not run: exec: \"om\": not found")
+	}
 	l := f.lander()
 	l.ReviewErrorLands = true
 	res, err := l.Land(context.Background(), f.work)
