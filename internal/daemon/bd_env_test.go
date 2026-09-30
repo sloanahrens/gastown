@@ -3,34 +3,31 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
-// TestBdReadOnlyEnv verifies that bdReadOnlyEnv returns an environment slice
-// containing exactly one BD_DOLT_AUTO_COMMIT=off entry, regardless of any
-// pre-existing BD_DOLT_AUTO_COMMIT in the parent process env.
+// TestBdReadOnlyEnv verifies that the read-only env holds exactly one
+// BD_DOLT_AUTO_COMMIT=off entry, whatever BD_DOLT_AUTO_COMMIT the daemon's
+// environment carried.
 func TestBdReadOnlyEnv(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name    string
-		preset  string
-		setting bool
+		name string
+		base []string
 	}{
-		{name: "unset parent", setting: false},
-		{name: "parent has off", preset: "off", setting: true},
-		{name: "parent has on", preset: "on", setting: true},
-		{name: "parent has stale value", preset: "batched", setting: true},
+		{name: "unset parent"},
+		{name: "parent has empty", base: []string{"BD_DOLT_AUTO_COMMIT="}},
+		{name: "parent has off", base: []string{"BD_DOLT_AUTO_COMMIT=off"}},
+		{name: "parent has on", base: []string{"BD_DOLT_AUTO_COMMIT=on"}},
+		{name: "parent has stale value", base: []string{"BD_DOLT_AUTO_COMMIT=batched"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.setting {
-				t.Setenv("BD_DOLT_AUTO_COMMIT", tc.preset)
-			} else {
-				t.Setenv("BD_DOLT_AUTO_COMMIT", "")
-			}
-
-			env := bdReadOnlyEnv()
+			t.Parallel()
+			env := bdReadOnlyRoutingEnvFrom(tc.base, "")
 
 			assertSingleEnvValue(t, env, "BD_DOLT_AUTO_COMMIT", "off")
 			assertSingleEnvValue(t, env, "BD_READONLY", "true")
@@ -39,6 +36,7 @@ func TestBdReadOnlyEnv(t *testing.T) {
 }
 
 func TestBdReadOnlyPinnedEnvUsesSelectedBeadsDir(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -47,15 +45,17 @@ func TestBdReadOnlyPinnedEnvUsesSelectedBeadsDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BEADS_DIR", "/wrong")
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "hq")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
-	t.Setenv("GT_DOLT_DATA", filepath.Join(t.TempDir(), "wrong-data"))
-	t.Setenv("BD_DOLT_AUTO_COMMIT", "on")
+	base := []string{
+		"BEADS_DIR=/wrong",
+		"BEADS_DOLT_SERVER_DATABASE=hq",
+		"BEADS_DOLT_SERVER_PORT=9999",
+		"GT_DOLT_HOST=",
+		"GT_DOLT_PORT=",
+		"GT_DOLT_DATA=" + filepath.Join(t.TempDir(), "wrong-data"),
+		"BD_DOLT_AUTO_COMMIT=on",
+	}
 
-	env := bdReadOnlyPinnedEnv(beadsDir)
+	env := bdReadOnlyPinnedEnvFrom(base, beadsDir)
 	assertSingleEnvValue(t, env, "BEADS_DIR", beadsDir)
 	assertSingleEnvValue(t, env, "BEADS_DOLT_SERVER_DATABASE", "rigdb")
 	assertSingleEnvValue(t, env, "BEADS_DOLT_SERVER_PORT", "4407")
@@ -68,6 +68,7 @@ func TestBdReadOnlyPinnedEnvUsesSelectedBeadsDir(t *testing.T) {
 }
 
 func TestBdReadOnlyRoutingEnvDoesNotPinDatabase(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -77,13 +78,15 @@ func TestBdReadOnlyRoutingEnvDoesNotPinDatabase(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BEADS_DIR", "/wrong")
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong")
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
-	t.Setenv("GT_DOLT_DATA", filepath.Join(t.TempDir(), "wrong-data"))
+	base := []string{
+		"BEADS_DIR=/wrong",
+		"BEADS_DOLT_SERVER_DATABASE=wrong",
+		"GT_DOLT_HOST=",
+		"GT_DOLT_PORT=",
+		"GT_DOLT_DATA=" + filepath.Join(t.TempDir(), "wrong-data"),
+	}
 
-	env := bdReadOnlyRoutingEnv(townRoot)
+	env := bdReadOnlyRoutingEnvFrom(base, townRoot)
 	assertEnvAbsent(t, env, "BEADS_DIR")
 	assertEnvAbsent(t, env, "BEADS_DOLT_SERVER_DATABASE")
 	assertSingleEnvValue(t, env, "BEADS_DOLT_SERVER_PORT", "4407")
@@ -91,6 +94,27 @@ func TestBdReadOnlyRoutingEnvDoesNotPinDatabase(t *testing.T) {
 	assertSingleEnvValue(t, env, "BD_READONLY", "true")
 	assertEnvAbsent(t, env, "BEADS_DOLT_DATA_DIR")
 	assertEnvAbsent(t, env, "GT_DOLT_DATA")
+}
+
+// TestBdEnvWrappersStartFromTheProcessEnvironment is the wiring guard for the
+// ...From twins above: each wrapper must build on the daemon's own
+// environment, so a variable every process has (PATH) comes through.
+func TestBdEnvWrappersStartFromTheProcessEnvironment(t *testing.T) {
+	t.Parallel()
+	path, ok := os.LookupEnv("PATH")
+	if !ok {
+		t.Fatal("PATH is unset in the test process; the guard has nothing to look for")
+	}
+	for name, env := range map[string][]string{
+		"bdReadOnlyEnv":        bdReadOnlyEnv(),
+		"bdReadOnlyRoutingEnv": bdReadOnlyRoutingEnv(t.TempDir()),
+		"bdMutationRoutingEnv": bdMutationRoutingEnv(t.TempDir()),
+		"bdReadOnlyPinnedEnv":  bdReadOnlyPinnedEnv(filepath.Join(t.TempDir(), ".beads")),
+	} {
+		if !slices.Contains(env, "PATH="+path) {
+			t.Errorf("%s does not carry the process PATH: it must start from os.Environ()", name)
+		}
+	}
 }
 
 func assertSingleEnvValue(t *testing.T, env []string, key, want string) {
