@@ -71,6 +71,7 @@ Use cases:
   • Taking a break (stop token consumption)
   • Clean shutdown before system maintenance
   • Resetting the town to a clean state`,
+	Args: cobra.NoArgs,
 	RunE: runDown,
 }
 

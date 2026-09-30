@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -304,32 +304,15 @@ func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
 	}
 }
 
-// boardStorage is a minimal beadsdk.Storage that serves a fixed ready board,
-// applying the SDK's own limit semantics: a LIMIT is applied only when
-// Limit > 0, so a caller that sends no Limit gets the whole board. The
-// embedded interface covers the methods this test never reaches.
-type boardStorage struct {
-	beadsdk.Storage
-	board []*beadsdk.Issue
-}
-
-func (s *boardStorage) GetReadyWork(_ context.Context, filter beadsdk.WorkFilter) ([]*beadsdk.Issue, error) {
-	result := s.board
-	if filter.Limit > 0 && len(result) > filter.Limit {
-		result = result[:filter.Limit]
-	}
-	return result, nil
-}
-
 // TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit is the gt-59o9
 // regression test at the patrol's own seam. The board this check counts held
 // 373 ready beads on 2026-09-21; a count capped at bd's default of 100 is
 // exactly the under-report that left the mayor asleep with work to dispatch,
 // so the assertion is on the whole 373 rather than on anything smaller.
 //
-// It drives readyIssuesUnlimited itself, through the store opener the daemon
-// uses, so the guarantee is asserted on the function the patrol calls rather
-// than on a helper beneath it.
+// It drives readyIssuesUnlimited through the bd client the patrol uses, with
+// a runner standing in for bd: the read is one machine-mode bd ready --limit
+// 0 (gt-7iwy0.2), not the in-process store it replaced.
 func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 	rigPath := t.TempDir()
 	beadsDir := filepath.Join(rigPath, ".beads")
@@ -337,20 +320,29 @@ func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 	writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
 	mkdirTestDir(t, filepath.Join(beadsDir, "dolt"))
 
-	board := make([]*beadsdk.Issue, 373)
-	for i := range board {
-		board[i] = &beadsdk.Issue{
-			ID:     fmt.Sprintf("gt-board-%d", i),
-			Title:  fmt.Sprintf("ready bead %d", i),
-			Status: beadsdk.StatusOpen,
-		}
+	items := make([]string, 373)
+	for i := range items {
+		items[i] = fmt.Sprintf(`{"id":"gt-board-%d","title":"ready bead %d","status":"open","priority":2,"issue_type":"task"}`, i, i)
 	}
+	envelope := `{"schema_version":1,"contract_version":1,"data":[` + strings.Join(items, ",") +
+		`],"pagination":{"returned":373,"truncated":false},"error":null}`
 
-	prev := openDispatchReadyStore
-	openDispatchReadyStore = func(*beads.Beads, context.Context) (beadsdk.Storage, func(), error) {
-		return &boardStorage{board: board}, func() {}, nil
+	var mu sync.Mutex
+	var calls []beads.BDCall
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		mu.Lock()
+		calls = append(calls, c)
+		mu.Unlock()
+		if len(c.Args) > 0 && c.Args[0] == "ready" {
+			return []byte(envelope), nil, nil
+		}
+		return nil, nil, nil
 	}
-	t.Cleanup(func() { openDispatchReadyStore = prev })
+	prev := readyBoardFor
+	readyBoardFor = func(rigPath string) readyBoard {
+		return beads.NewWithBeadsDirAndRunner(rigPath, beads.ResolveBeadsDir(rigPath), run)
+	}
+	t.Cleanup(func() { readyBoardFor = prev })
 
 	issues, err := readyIssuesUnlimited(rigPath)
 	if err != nil {
@@ -361,6 +353,25 @@ func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
 	}
 	if issues[0].ID != "gt-board-0" {
 		t.Errorf("first issue = %q, want gt-board-0 (the board read whole, in order)", issues[0].ID)
+	}
+	var ready *beads.BDCall
+	for i := range calls {
+		if len(calls[i].Args) > 0 && calls[i].Args[0] == "ready" {
+			ready = &calls[i]
+		}
+	}
+	if ready == nil {
+		t.Fatalf("no bd ready call; calls = %v", calls)
+	}
+	if argv := strings.Join(ready.Args, " "); !strings.Contains(argv, "--limit 0") {
+		t.Errorf("bd ready argv %q lacks --limit 0", argv)
+	}
+	machine := false
+	for _, kv := range ready.Env {
+		machine = machine || kv == "BD_MACHINE=1"
+	}
+	if !machine {
+		t.Error("bd ready ran without BD_MACHINE=1")
 	}
 }
 

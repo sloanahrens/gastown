@@ -151,6 +151,13 @@ func CheckBDHandshake(ctx context.Context, bdPath string, run BDRunner) (*BDHand
 	return hs, nil
 }
 
+// ReadDBSchemaLevel is readDBSchemaLevel for callers that check a database
+// other than the one the handshake reads, such as the daemon's per-store
+// compatibility check.
+func ReadDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
+	return readDBSchemaLevel(ctx, run)
+}
+
 // readDBSchemaLevel asks bd for the highest applied migration. It runs in
 // machine mode so a database ahead of bd fails with bd's typed schema_skew
 // exit rather than prose.

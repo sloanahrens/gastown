@@ -129,6 +129,7 @@ Use --restore to also start:
 
 Running 'gt up' multiple times is safe - it only starts services that
 aren't already running.`,
+	Args: cobra.NoArgs,
 	RunE: runUp,
 }
 

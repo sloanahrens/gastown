@@ -3,6 +3,7 @@ package doltserver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -2396,7 +2397,7 @@ func TestIsDoltRetryableError_CatalogRace(t *testing.T) {
 	// After CREATE DATABASE, the Dolt server may not immediately make the
 	// database visible in its in-memory catalog. Subsequent USE queries
 	// fail with "Unknown database '<name>'". This must be retryable so that
-	// doltSQLWithRetry and doltSQLScriptWithRetry handle the race gracefully.
+	// doltSQLScriptWithRetry handles the race gracefully.
 	catalogErrors := []string{
 		"Unknown database 'myrig'",
 		"Unknown database 'wl_commons'",
@@ -3074,8 +3075,7 @@ func TestHealthMetrics_ReadOnlyField(t *testing.T) {
 
 func TestIsDoltRetryableError_IncludesReadOnly(t *testing.T) {
 	// Verify that read-only errors are recognized as retryable.
-	// This is critical for the recovery path: doltSQLWithRetry must
-	// retry on read-only before escalating to doltSQLWithRecovery.
+	// doltSQLScriptWithRetry must retry on read-only before giving up.
 	tests := []struct {
 		msg  string
 		want bool
@@ -5265,5 +5265,65 @@ func TestHealthMetrics_CommitFreshnessFields(t *testing.T) {
 	metrics := GetHealthMetrics(townRoot)
 	if metrics.LastCommitAge < 0 {
 		t.Errorf("LastCommitAge = %v, want >= 0", metrics.LastCommitAge)
+	}
+}
+
+// An issue_prefix bd already reports is not written again, and the store is
+// never opened for it (gt-7iwy0.2): the read goes through bd, and the one
+// library write left is for the seed bd has no verb for.
+func TestEnsureRigIssuePrefix_ReadsThroughBDAndSkipsMatchingPrefix(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := []byte(`{"prefix":"tr-","path":"testrig/mayor/rig"}` + "\n")
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), routes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevRead, prevOpen := readRigIssuePrefix, writeRigIssuePrefixViaStore
+	t.Cleanup(func() { readRigIssuePrefix, writeRigIssuePrefixViaStore = prevRead, prevOpen })
+	var reads []string
+	var writes []string
+	current := "tr"
+	readRigIssuePrefix = func(_, beadsDir string) (string, error) {
+		reads = append(reads, beadsDir)
+		return current, nil
+	}
+	writeRigIssuePrefixViaStore = func(_, _, database, prefix string) error {
+		writes = append(writes, database+"="+prefix)
+		return nil
+	}
+
+	if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
+		t.Fatalf("EnsureRigIssuePrefix: %v", err)
+	}
+	if len(reads) != 1 || len(writes) != 0 {
+		t.Fatalf("matching prefix: reads %q writes %q, want one bd read and no write", reads, writes)
+	}
+	if err := SetRigIssuePrefix(townRoot, reads[0], "testrig", "tr"); err != nil || len(writes) != 0 {
+		t.Fatalf("SetRigIssuePrefix with a matching prefix = %v, writes %q; want nil and no write", err, writes)
+	}
+
+	// Unset, stale, or unreadable: the configured prefix is written, as it
+	// was before the bd read existed.
+	for _, tc := range []struct {
+		name    string
+		current string
+		readErr error
+	}{
+		{"unset", "", nil},
+		{"stale", "old", nil},
+		{"read fails", "", errors.New("bd config get: exit status 25")},
+	} {
+		writes = nil
+		current = tc.current
+		readRigIssuePrefix = func(_, beadsDir string) (string, error) { return current, tc.readErr }
+		if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
+			t.Fatalf("%s: EnsureRigIssuePrefix: %v", tc.name, err)
+		}
+		if len(writes) != 1 || writes[0] != "testrig=tr" {
+			t.Fatalf("%s: writes %q, want testrig=tr", tc.name, writes)
+		}
 	}
 }

@@ -1,14 +1,10 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
-	"time"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
@@ -17,16 +13,47 @@ var (
 	removeTrackingRelationFn = removeTrackingRelation
 )
 
+// trackingDeps is the part of beads.Client that writes tracks edges.
+type trackingDeps interface {
+	AddTypedDependency(issue, dependsOn, depType string) error
+	RemoveDependency(issue, dependsOn string) error
+}
+
+// townTrackingDeps returns the bd client for the town database, where
+// convoys (hq-cv-*) and their tracks edges live.
+func townTrackingDeps(townRoot string) (trackingDeps, error) {
+	resolved := beads.ResolveBeadsDir(townRoot)
+	if resolved == "" {
+		return nil, fmt.Errorf("resolving town beads dir")
+	}
+	return beads.NewWithBeadsDir(townRoot, resolved), nil
+}
+
 func addTrackingRelation(townRoot, trackerID, issueID string) error {
 	// Refuse here rather than in each caller: this is the one place a tracks
 	// edge is written, and an edge to a non-ID target can never be resolved
-	// (gt-gsky).
+	// (gt-gsky). The refusal comes before the client, so it needs no town.
 	if !isTrackingTargetID(issueID) {
 		return fmt.Errorf("refusing to record a tracks edge to %q: not a bead ID", issueID)
 	}
+	deps, err := townTrackingDeps(townRoot)
+	if err != nil {
+		return err
+	}
+	return addTrackingRelationWith(deps, townRoot, trackerID, issueID)
+}
 
-	if err := mutateTrackingRelationViaStore(townRoot, trackerID, issueID, true); err != nil {
-		return fallbackTrackingRelation(townRoot, trackerID, issueID, true, err)
+// addTrackingRelationWith writes trackerID --tracks--> issueID through bd
+// (bd dep add --type=tracks); a cross-rig target is stored as
+// external:<rig>:<id>. It is the only write path: the in-process store call
+// it replaced wrote through the v1.0.5 library (gt-7iwy0.2).
+func addTrackingRelationWith(deps trackingDeps, townRoot, trackerID, issueID string) error {
+	if !isTrackingTargetID(issueID) {
+		return fmt.Errorf("refusing to record a tracks edge to %q: not a bead ID", issueID)
+	}
+	targetID := trackingDependsOnID(townRoot, issueID)
+	if err := deps.AddTypedDependency(trackerID, targetID, "tracks"); err != nil {
+		return fmt.Errorf("recording %s tracks %s: %w", trackerID, targetID, err)
 	}
 	return nil
 }
@@ -35,61 +62,20 @@ func addTrackingRelation(townRoot, trackerID, issueID string) error {
 // addTrackingRelation: edges recorded before that gate existed point at targets
 // that are not bead IDs, and removal is the only way to clean one up (gt-gsky).
 func removeTrackingRelation(townRoot, trackerID, issueID string) error {
-	if err := mutateTrackingRelationViaStore(townRoot, trackerID, issueID, false); err != nil {
-		return fallbackTrackingRelation(townRoot, trackerID, issueID, false, err)
-	}
-	return nil
-}
-
-func mutateTrackingRelationViaStore(townRoot, trackerID, issueID string, add bool) error {
-	resolvedBeads := beads.ResolveBeadsDir(townRoot)
-	if resolvedBeads == "" {
-		return fmt.Errorf("resolving town beads dir")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	b := beads.NewWithBeadsDir(townRoot, resolvedBeads)
-	store, cleanup, err := b.OpenStore(ctx)
+	deps, err := townTrackingDeps(townRoot)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
-
-	targetID := trackingDependsOnID(townRoot, issueID)
-	actor := os.Getenv("BD_ACTOR")
-	if actor == "" {
-		actor = detectSender()
-	}
-
-	if add {
-		dep := &beadsdk.Dependency{
-			IssueID:     trackerID,
-			DependsOnID: targetID,
-			Type:        beadsdk.DependencyType("tracks"),
-		}
-		return store.AddDependency(ctx, dep, actor)
-	}
-
-	return store.RemoveDependency(ctx, trackerID, targetID, actor)
+	return removeTrackingRelationWith(deps, townRoot, trackerID, issueID)
 }
 
-func fallbackTrackingRelation(townRoot, trackerID, issueID string, add bool, storeErr error) error {
+// removeTrackingRelationWith removes the edge through bd dep remove, which
+// takes no --type: a (tracker, target) pair holds one edge.
+func removeTrackingRelationWith(deps trackingDeps, townRoot, trackerID, issueID string) error {
 	targetID := trackingDependsOnID(townRoot, issueID)
-	args := []string{"dep", "add", trackerID, targetID, "--type=tracks"}
-	if !add {
-		args = []string{"dep", "remove", trackerID, targetID, "--type=tracks"}
+	if err := deps.RemoveDependency(trackerID, targetID); err != nil {
+		return fmt.Errorf("removing %s tracks %s: %w", trackerID, targetID, err)
 	}
-
-	if out, err := BdCmd(args...).Dir(townRoot).WithAutoCommit().StripBeadsDir().CombinedOutput(); err != nil {
-		output := strings.TrimSpace(string(out))
-		if output == "" {
-			return fmt.Errorf("tracking relation via store failed: %w; fallback bd path failed: %w", storeErr, err)
-		}
-		return fmt.Errorf("tracking relation via store failed: %w; fallback bd path failed: %w; output: %s", storeErr, err, output)
-	}
-
 	return nil
 }
 

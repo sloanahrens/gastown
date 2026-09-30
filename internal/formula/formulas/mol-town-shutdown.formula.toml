@@ -17,38 +17,8 @@ type = "workflow"
 version = 2
 
 [[steps]]
-id = "preflight-check"
-title = "Preflight safety check"
-description = """
-Scan for conditions that might make shutdown inadvisable.
-
-```bash
-gt shutdown preflight
-```
-
-This checks for:
-- **Uncommitted changes**: Polecats with dirty git status
-- **Unpushed commits**: Work that hasn't reached remote
-- **Active merges**: Refinery mid-merge (could corrupt state)
-- **Pending CI**: PRs waiting on GitHub Actions
-
-Output is a report with warnings/blockers:
-
-| Severity | Condition | Action |
-|----------|-----------|--------|
-| BLOCKER | Active merge in progress | Abort shutdown |
-| WARNING | Uncommitted polecat changes | List affected polecats |
-| WARNING | Unpushed commits | List repos needing push |
-| INFO | Pending CI runs | Note for awareness |
-
-If blockers exist, STOP and resolve them first.
-If only warnings, decide whether to proceed (work will be preserved).
-"""
-
-[[steps]]
 id = "stop-sessions"
 title = "Stop Claude sessions (preserve sandboxes)"
-needs = ["preflight-check"]
 description = """
 Kill Claude processes but leave polecat sandboxes intact.
 

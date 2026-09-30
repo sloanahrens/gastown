@@ -1,9 +1,11 @@
 // Package reaper provides wisp and issue cleanup operations for Dolt databases.
 //
 // These functions are the "callable helper functions" for the Dog-driven
-// mol-dog-reaper formula. They execute SQL operations but do not make
-// eligibility decisions — the Dog (or daemon orchestrator) decides what
-// to reap, purge, and auto-close based on the formula.
+// mol-dog-reaper formula. They select candidates with read-only SQL and
+// write only through a bd Writer (bd close, bd delete), never with DML, so bd
+// keeps is_blocked, the events journal and its own commits (gt-fcxe9.12).
+// They do not make eligibility decisions — the Dog (or daemon orchestrator)
+// decides what to reap, purge, and auto-close based on the formula.
 package reaper
 
 import (
@@ -34,10 +36,9 @@ var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // installations and their presence in the fallback caused phantom DB errors.
 var DefaultDatabases = []string{"hq"}
 
-// isNothingToCommit returns true if the error is a Dolt "nothing to commit" error.
-func isNothingToCommit(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "nothing to commit")
-}
+// StaleAutoCloseReason is the close reason AutoClose hands bd, the same
+// text the reaper's SQL used to write into close_reason.
+const StaleAutoCloseReason = "stale:auto-closed by reaper"
 
 // isTableNotFound returns true if the error indicates a missing table.
 // This happens when beads stores its data on a separate Dolt instance from
@@ -343,8 +344,10 @@ const openWispStatusWhere = "w.status IN ('open', 'hooked', 'in_progress')"
 // cleanupWispProtectedJoin is the half of mrProtectedJoin that protects
 // cleanup wisps tracking an outstanding MR: labels cleanup +
 // state:merge-requested. The protection lapses maxProtection after the state
-// was last set — wisp_events row (event_type='label_set') when one exists,
-// the wisp's created_at otherwise — so a wisp whose MERGED signal never
+// was last set — the wisp_events row bd journals when it adds the label
+// (event_type='label_added', comment 'Added label: state:merge-requested'),
+// or a legacy witness-written label_set row, when one exists; the wisp's
+// created_at otherwise — so a wisp whose MERGED signal never
 // arrived becomes reapable instead of immortal (gt-apam). The caller supplies
 // the cutoff; the clause renders it as a literal so the TTL is one bind per
 // query, not one per protected wisp.
@@ -362,7 +365,8 @@ func cleanupWispProtectedJoin(maxProtection time.Duration, cutoff time.Time) (jo
 	LEFT JOIN (
 		SELECT issue_id, MAX(created_at) AS last_requested_at
 		FROM wisp_events
-		WHERE event_type = 'label_set' AND old_value = 'state:merge-requested'
+		WHERE (event_type = 'label_set' AND old_value = 'state:merge-requested')
+		   OR (event_type = 'label_added' AND comment = 'Added label: state:merge-requested')
 		GROUP BY issue_id
 	) mr_requested ON mr_requested.issue_id = w.id
 	LEFT JOIN (
@@ -417,7 +421,7 @@ var agentStateFieldPattern = regexp.MustCompile(`(?m)^agent_state:\s*(\S+)\s*$`)
 // they can occupy. Identity is the 'gt:agent' label: agent beads are created as
 // issue_type='task' (internal/beads/beads_agent.go), so a type of 'agent' matches
 // none of them, and their durable home is the issues table — wisps holds copies
-// the migration in internal/doltserver/wisps_migrate.go made. Reading the type
+// the retired gt dolt migrate-wisps command made. Reading the type
 // from wisps alone matched zero rows in every rig database, leaving the
 // reference protection below disarmed (gt-l6y9).
 const (
@@ -519,12 +523,6 @@ func closedMoleculeStepJoin(alias string) string {
 
 func closedMoleculeStepExcludeJoin(alias string) string {
 	return fmt.Sprintf("LEFT JOIN (%s) %s ON %s.issue_id = w.id", closedMoleculeStepSubquery, alias, alias)
-}
-
-type sqlRunner interface {
-	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
-	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
-	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
 }
 
 // HasReaperSchema checks whether the database has the tables required for reaper
@@ -688,8 +686,12 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 }
 
 // Reap closes stale wisps in a database whose parent molecule is already closed.
-// UPDATEs are batched to avoid holding a write lock for extended periods on large tables.
-func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapResult, error) {
+// Candidates are selected with read-only SQL on db; every close goes through
+// w (bd close --force), which may be nil only for a dry run.
+func Reap(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ReapResult, error) {
+	if !dryRun && w == nil {
+		return nil, ErrNoWriter
+	}
 	// Use a longer timeout to accommodate batched processing across large tables.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -762,142 +764,101 @@ func Reap(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ReapRe
 		return result, nil
 	}
 
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("pin connection: %w", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return nil, fmt.Errorf("disable autocommit: %w", err)
-	}
-	sqlCommitted := false
-	defer func() {
-		if !sqlCommitted {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-		_, _ = conn.ExecContext(context.Background(), "SET @@autocommit = 1")
-	}()
-
 	moleculeStepIDQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s WHERE %s AND w.issue_type != 'agent' LIMIT %d",
-		moleculeStepJoin, openWispStatusWhere, DefaultBatchSize)
-	moleculeStepsClosed, err := closeWispsInBatches(ctx, conn, moleculeStepIDQuery, nil, "closed molecule steps")
-	if err != nil {
-		return nil, err
-	}
+		"SELECT w.id FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
+		moleculeStepJoin, openWispStatusWhere)
+	// The phases run in order and stop at the first failure, as the single
+	// transaction they replace did: each later SELECT assumes the earlier
+	// phases' closes landed, and a failed phase's ids would otherwise be
+	// re-selected by the next one under a different reason.
+	moleculeStepsClosed, err := closeWispsSelected(ctx, db, w, moleculeStepIDQuery, nil,
+		"reaper: parent molecule closed", "closed molecule steps")
 	result.MoleculeStepsClosed = moleculeStepsClosed
+	if err != nil {
+		return result, err
+	}
 
 	// Close wisps whose parent molecule record was purged (absent parent).
 	// These are molecule step-wisps that the reaper should reap but the closedMoleculeStep
 	// subquery misses because INNER JOIN wisps pm requires the parent row to exist.
 	// Uses the same pattern as Scan's danglingQuery: both wisp and issue parents must be absent.
 	absentParentIDQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s WHERE %s LIMIT %d",
-		absentParentJoin, absentParentWhere, DefaultBatchSize)
-	absentParentClosed, err := closeWispsInBatches(ctx, conn, absentParentIDQuery, nil, "absent-parent molecule steps")
+		"SELECT w.id FROM wisps w %s WHERE %s",
+		absentParentJoin, absentParentWhere)
+	absentParentClosed, err := closeWispsSelected(ctx, db, w, absentParentIDQuery, nil,
+		"reaper: parent molecule purged", "absent-parent molecule steps")
+	result.AbsentParentClosed = absentParentClosed
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 
-	// Batch UPDATE: select IDs in chunks, update each chunk.
-	// This avoids holding a write lock on the entire table for minutes.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s %s %s WHERE %s LIMIT %d",
-		parentJoin, moleculeStepExcludeJoin, mrJoin, whereClause, DefaultBatchSize)
-
-	totalReaped, err := closeWispsInBatches(ctx, conn, idQuery, whereArgs, "stale wisps")
-	if err != nil {
-		return nil, err
-	}
-
+		"SELECT w.id FROM wisps w %s %s %s WHERE %s",
+		parentJoin, moleculeStepExcludeJoin, mrJoin, whereClause)
+	totalReaped, err := closeWispsSelected(ctx, db, w, idQuery, whereArgs,
+		fmt.Sprintf("reaper: stale wisp past max-age %s", maxAge), "stale wisps")
 	result.Reaped = totalReaped
-	totalClosed := totalReaped + moleculeStepsClosed + absentParentClosed
-
-	if totalClosed > 0 {
-		// Flush the SQL transaction to the Dolt working set before DOLT_COMMIT.
-		// With autocommit=0, UPDATE changes are in the SQL transaction buffer,
-		// not the Dolt working set. DOLT_COMMIT operates on the working set,
-		// so without this COMMIT it sees "nothing to commit".
-		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-			return result, fmt.Errorf("sql commit: %w", err)
-		}
-		sqlCommitted = true
-		commitMsg := fmt.Sprintf("reaper: close %d wisps in %s", totalClosed, dbName)
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// "nothing to commit" is expected when the reaper reverts dirty working
-			// set changes back to match HEAD. The wisps were set to "open" in the
-			// server's in-memory working set without being committed; closing them
-			// makes the working set match HEAD again, so DOLT_COMMIT sees no diff.
-			if !isNothingToCommit(err) {
-				return result, fmt.Errorf("dolt commit: %w", err)
-			}
-		}
+	if err != nil {
+		return result, err
 	}
 
 	openQuery := "SELECT COUNT(*) FROM wisps WHERE status IN ('open', 'hooked', 'in_progress')"
-	if err := conn.QueryRowContext(ctx, openQuery).Scan(&result.OpenRemain); err != nil {
+	if err := db.QueryRowContext(ctx, openQuery).Scan(&result.OpenRemain); err != nil {
 		return result, fmt.Errorf("count open: %w", err)
 	}
-
 	return result, nil
 }
 
-func closeWispsInBatches(ctx context.Context, runner sqlRunner, idQuery string, queryArgs []interface{}, description string) (int, error) {
-	total := 0
-	for {
-		rows, err := runner.QueryContext(ctx, idQuery, queryArgs...)
-		if err != nil {
-			return total, fmt.Errorf("select %s batch: %w", description, err)
-		}
-
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return total, fmt.Errorf("scan %s id: %w", description, err)
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return total, fmt.Errorf("read %s ids: %w", description, err)
-		}
-		rows.Close()
-
-		if len(ids) == 0 {
-			return total, nil
-		}
-
-		placeholders := make([]string, len(ids))
-		args := make([]interface{}, len(ids))
-		for i, id := range ids {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		inClause := strings.Join(placeholders, ",")
-
-		updateQuery := fmt.Sprintf(
-			"UPDATE wisps SET status='closed', closed_at=NOW() WHERE id IN (%s) AND status IN ('open', 'hooked', 'in_progress') AND issue_type != 'agent'",
-			inClause)
-		sqlResult, err := runner.ExecContext(ctx, updateQuery, args...)
-		if err != nil {
-			return total, fmt.Errorf("close %s batch: %w", description, err)
-		}
-
-		affected, _ := sqlResult.RowsAffected()
-		total += int(affected)
+// closeWispsSelected force-closes, through w, every wisp idQuery selects. The
+// SELECT runs once; ids are closed in chunks. Force matches what the reaper
+// always did: a stale wisp is closed whether or not it has open children.
+// Unlike the UPDATE this replaced, nothing re-checks status at write time, so
+// a wisp pinned or closed in the moment between SELECT and close is closed
+// anyway; every query still excludes agent wisps, whose type never changes.
+func closeWispsSelected(ctx context.Context, db *sql.DB, w Writer, idQuery string, queryArgs []interface{}, reason, description string) (int, error) {
+	ids, err := selectIDs(ctx, db, idQuery, queryArgs...)
+	if err != nil {
+		return 0, fmt.Errorf("select %s: %w", description, err)
 	}
+	closed, err := closeInChunks(ids, func(chunk ...string) error {
+		return w.ForceCloseWithReason(reason, chunk...)
+	})
+	if err != nil {
+		return closed, fmt.Errorf("close %s: %w", description, err)
+	}
+	return closed, nil
 }
 
-// Purge deletes old closed wisps and mail from a database.
-func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
+// selectIDs runs a read-only query whose single column is an issue id.
+func selectIDs(ctx context.Context, db *sql.DB, query string, args ...interface{}) ([]string, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// Purge deletes old closed wisps and mail from a database. Candidates are
+// selected with read-only SQL on db; every delete goes through w
+// (bd delete --force), which may be nil only for a dry run.
+func Purge(db *sql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
+	if !dryRun && w == nil {
+		return nil, ErrNoWriter
+	}
 	result := &PurgeResult{Database: dbName, DryRun: dryRun}
 
 	// Purge closed wisps.
-	purged, anomalies, err := purgeClosedWisps(db, dbName, purgeAge, dryRun)
+	purged, anomalies, err := purgeClosedWisps(db, w, purgeAge, dryRun)
 	if err != nil {
 		return nil, fmt.Errorf("purge wisps: %w", err)
 	}
@@ -905,7 +866,7 @@ func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dry
 	result.Anomalies = append(result.Anomalies, anomalies...)
 
 	// Purge old mail.
-	mailPurged, err := purgeOldMail(db, dbName, mailDeleteAge, dryRun)
+	mailPurged, err := purgeOldMail(db, w, dbName, mailDeleteAge, dryRun)
 	if err != nil {
 		return result, fmt.Errorf("purge mail: %w", err)
 	}
@@ -914,7 +875,7 @@ func Purge(db *sql.DB, dbName string, purgeAge, mailDeleteAge time.Duration, dry
 	return result, nil
 }
 
-func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
+func purgeClosedWisps(db *sql.DB, w Writer, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -963,47 +924,22 @@ func purgeClosedWisps(db *sql.DB, dbName string, purgeAge time.Duration, dryRun 
 		return digestTotal, anomalies, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return 0, nil, fmt.Errorf("disable autocommit: %w", err)
-	}
-	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-	}()
-
-	// Batch delete — status+age filter, plus the live-reference exclusion above.
+	// Status+age filter, plus the live-reference exclusion above.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s LIMIT %d",
-		referencedClause, DefaultBatchSize)
-	auxTables := []string{"wisp_labels", "wisp_comments", "wisp_events", "wisp_dependencies"}
-
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, deleteCutoff, "wisps", auxTables, referencedArgs...)
+		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s",
+		referencedClause) //nolint:gosec // G201: referencedClause is a parameterized NOT IN clause, never a value
+	ids, err := selectIDs(ctx, db, idQuery, digestArgs...)
 	if err != nil {
-		return totalDeleted, anomalies, err
+		return 0, anomalies, fmt.Errorf("select closed wisps: %w", err)
 	}
-
-	if totalDeleted > 0 {
-		// Flush SQL transaction to working set before DOLT_COMMIT.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-			anomalies = append(anomalies, Anomaly{
-				Type:    "sql_commit_failed",
-				Message: fmt.Sprintf("sql commit after purge failed: %v", err),
-			})
-			return totalDeleted, anomalies, nil
-		}
-		commitMsg := fmt.Sprintf("reaper: purge %d closed wisps from %s", totalDeleted, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// Non-fatal — log but continue.
-			anomalies = append(anomalies, Anomaly{
-				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after purge failed: %v", err),
-			})
-		}
+	totalDeleted, err := deleteInChunks(w, ids)
+	if err != nil {
+		return totalDeleted, anomalies, fmt.Errorf("delete closed wisps: %w", err)
 	}
-
 	return totalDeleted, anomalies, nil
 }
 
-func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, error) {
+func purgeOldMail(db *sql.DB, w Writer, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -1027,34 +963,17 @@ func purgeOldMail(db *sql.DB, dbName string, mailDeleteAge time.Duration, dryRun
 		return count, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return 0, fmt.Errorf("disable autocommit: %w", err)
-	}
-	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-	}()
-
 	idQuery := fmt.Sprintf(
-		"SELECT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message' LIMIT %d",
-		dbName, dbName, DefaultBatchSize)
-	auxTables := []string{"labels", "comments", "events", "dependencies"}
-
-	totalDeleted, err := batchDeleteRows(ctx, db, idQuery, mailCutoff, "issues", auxTables)
+		"SELECT DISTINCT i.id FROM `%s`.issues i INNER JOIN `%s`.labels l ON i.id = l.issue_id WHERE i.status = 'closed' AND i.closed_at < ? AND l.label = 'gt:message'",
+		dbName, dbName)
+	ids, err := selectIDs(ctx, db, idQuery, mailCutoff)
 	if err != nil {
-		return totalDeleted, err
+		return 0, fmt.Errorf("select mail: %w", err)
 	}
-
-	if totalDeleted > 0 {
-		// Flush SQL transaction to working set before DOLT_COMMIT.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-			return totalDeleted, fmt.Errorf("sql commit: %w", err)
-		}
-		commitMsg := fmt.Sprintf("reaper: purge %d old mail from %s", totalDeleted, dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('--allow-empty', '-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// Non-fatal.
-		}
+	totalDeleted, err := deleteInChunks(w, ids)
+	if err != nil {
+		return totalDeleted, fmt.Errorf("delete mail: %w", err)
 	}
-
 	return totalDeleted, nil
 }
 
@@ -1130,7 +1049,7 @@ func staleIssueEligibilityClause(dbQualifier string) string {
 // threshold would take alongside ErrStaleAgeTooLow, so the caller gets the
 // operator notice without the cycle halting on exit status. All three are
 // lifted by opts.Force.
-func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResult, error) {
+func AutoClose(db *sql.DB, w Writer, dbName string, opts AutoCloseOptions) (*AutoCloseResult, error) {
 	// A below-floor threshold refuses, and the refusal is the whole output:
 	// nothing is closed, so what the caller has to act on is how much the
 	// threshold would have taken. opts.StaleAge is left as asked for — the
@@ -1237,123 +1156,20 @@ func AutoClose(db *sql.DB, dbName string, opts AutoCloseOptions) (*AutoCloseResu
 			ErrTooManyCloses, len(ids), dbName, maxCloses)
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return nil, fmt.Errorf("disable autocommit: %w", err)
+	if w == nil {
+		return result, ErrNoWriter
 	}
-	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-	}()
-
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
+	// bd close without --force: the eligibility clause already excludes
+	// issues with an open blocker or dependent, and bd refusing one anyway is
+	// a disagreement to report, not to override on a durable issue.
+	closed, err := closeInChunks(ids, func(chunk ...string) error {
+		return w.CloseWithReason(StaleAutoCloseReason, chunk...)
+	})
+	result.Closed = closed
+	if err != nil {
+		return result, fmt.Errorf("auto-close: %w", err)
 	}
-	updateQuery := fmt.Sprintf(
-		"UPDATE `%s`.issues SET status = 'closed', closed_at = NOW(), close_reason = 'stale:auto-closed by reaper' WHERE id IN (%s)",
-		dbName, strings.Join(placeholders, ","))
-	if _, err := db.ExecContext(ctx, updateQuery, args...); err != nil {
-		return nil, fmt.Errorf("auto-close: %w", err)
-	}
-
-	result.Closed = len(ids)
-
-	if len(ids) > 0 {
-		// Flush SQL transaction to working set before DOLT_COMMIT.
-		if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type:    "sql_commit_failed",
-				Message: fmt.Sprintf("sql commit after auto-close failed: %v", err),
-			})
-			return result, nil
-		}
-		commitMsg := fmt.Sprintf("reaper: auto-close %d stale issues in %s", len(ids), dbName)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-			// "nothing to commit" is expected when the updated tables are dolt_ignored.
-			if !isNothingToCommit(err) {
-				result.Anomalies = append(result.Anomalies, Anomaly{
-					Type:    "dolt_commit_failed",
-					Message: fmt.Sprintf("dolt commit after auto-close failed: %v", err),
-				})
-			}
-		}
-	}
-
 	return result, nil
-}
-
-// batchDeleteRows deletes rows from a primary table and its auxiliary tables in batches.
-// extraArgs bind the query's remaining placeholders after the age cutoff.
-func batchDeleteRows(ctx context.Context, db *sql.DB, idQuery string, cutoffArg time.Time, primaryTable string, auxTables []string, extraArgs ...interface{}) (int, error) {
-	queryArgs := append([]interface{}{cutoffArg}, extraArgs...)
-	totalDeleted := 0
-	for {
-		idRows, err := db.QueryContext(ctx, idQuery, queryArgs...)
-		if err != nil {
-			return totalDeleted, fmt.Errorf("select batch: %w", err)
-		}
-
-		var ids []string
-		for idRows.Next() {
-			var id string
-			if err := idRows.Scan(&id); err != nil {
-				idRows.Close()
-				return totalDeleted, fmt.Errorf("scan id: %w", err)
-			}
-			ids = append(ids, id)
-		}
-		idRows.Close()
-
-		if len(ids) == 0 {
-			break
-		}
-
-		placeholders := make([]string, len(ids))
-		args := make([]interface{}, len(ids))
-		for i, id := range ids {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		inClause := "(" + strings.Join(placeholders, ",") + ")"
-
-		for _, tbl := range auxTables {
-			delAux := fmt.Sprintf("DELETE FROM `%s` WHERE issue_id IN %s", tbl, inClause) //nolint:gosec // G201: tbl is internal
-			if _, err := db.ExecContext(ctx, delAux, args...); err != nil {
-				// Non-fatal: log and continue.
-			}
-		}
-
-		// Clean up typed reverse dependency references to prevent dangling parent refs.
-		var reverseDeletes []string
-		switch primaryTable {
-		case "wisps":
-			reverseDeletes = []string{
-				fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN %s", inClause),
-				fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN %s", inClause),
-			}
-		case "issues":
-			reverseDeletes = []string{
-				fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_issue_id IN %s", inClause),
-				fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_issue_id IN %s", inClause),
-			}
-		}
-		for _, delReverse := range reverseDeletes {
-			if _, err := db.ExecContext(ctx, delReverse, args...); err != nil {
-				// Non-fatal.
-			}
-		}
-
-		delPrimary := fmt.Sprintf("DELETE FROM `%s` WHERE id IN %s", primaryTable, inClause) //nolint:gosec // G201: primaryTable is internal
-		sqlResult, err := db.ExecContext(ctx, delPrimary, args...)
-		if err != nil {
-			return totalDeleted, fmt.Errorf("delete %s batch: %w", primaryTable, err)
-		}
-		affected, _ := sqlResult.RowsAffected()
-		totalDeleted += int(affected)
-	}
-
-	return totalDeleted, nil
 }
 
 // ClosePluginReceiptResult holds the results of closing plugin run receipts.
@@ -1369,7 +1185,7 @@ type ClosePluginReceiptResult struct {
 // plugins; they should be closed shortly after creation since they exist only
 // for audit/cooldown-gate purposes. The standard AutoClose path requires 7 days
 // of staleness, which lets plugin receipts accumulate into the hundreds.
-func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
+func ClosePluginReceipts(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
 	defer cancel()
 
@@ -1407,45 +1223,7 @@ func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun
 		return result, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return nil, fmt.Errorf("disable autocommit: %w", err)
-	}
-	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-	}()
-
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	updateQuery := fmt.Sprintf(
-		"UPDATE `%s`.issues SET status = 'closed', closed_at = NOW() WHERE id IN (%s)",
-		dbName, strings.Join(placeholders, ","))
-	if _, err := db.ExecContext(ctx, updateQuery, args...); err != nil {
-		return nil, fmt.Errorf("close plugin receipts: %w", err)
-	}
-
-	// Flush and commit.
-	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-		result.Anomalies = append(result.Anomalies, Anomaly{
-			Type:    "sql_commit_failed",
-			Message: fmt.Sprintf("sql commit after plugin receipt close failed: %v", err),
-		})
-		return result, nil
-	}
-	commitMsg := fmt.Sprintf("reaper: close %d plugin receipts in %s", len(ids), dbName)
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-		if !isNothingToCommit(err) {
-			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after plugin receipt close failed: %v", err),
-			})
-		}
-	}
-
-	return result, nil
+	return closeSelected(w, result, ids, "reaper: plugin receipt past max-age", "plugin receipts")
 }
 
 // ClosePluginDispatches closes open dispatch mail beads created by the daemon
@@ -1453,7 +1231,7 @@ func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun
 // + "from:daemon" with a title prefix "Plugin:" and are never closed after the
 // dog completes. Without this, they accumulate at ~288/day (one per 5-minute
 // stuck-agent-dog run) and are only caught by AutoClose after 7 days.
-func ClosePluginDispatches(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
+func ClosePluginDispatches(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
 	defer cancel()
 
@@ -1495,44 +1273,22 @@ func ClosePluginDispatches(db *sql.DB, dbName string, maxAge time.Duration, dryR
 		return result, nil
 	}
 
-	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
-		return nil, fmt.Errorf("disable autocommit: %w", err)
-	}
-	defer func() {
-		_, _ = db.ExecContext(context.Background(), "SET @@autocommit = 1")
-	}()
+	return closeSelected(w, result, ids, "reaper: plugin dispatch past max-age", "plugin dispatches")
+}
 
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
+// closeSelected closes the plugin beads a sweep selected through w and
+// records how many bd actually closed.
+func closeSelected(w Writer, result *ClosePluginReceiptResult, ids []string, reason, description string) (*ClosePluginReceiptResult, error) {
+	if w == nil {
+		return result, ErrNoWriter
 	}
-	updateQuery := fmt.Sprintf(
-		"UPDATE `%s`.issues SET status = 'closed', closed_at = NOW() WHERE id IN (%s)",
-		dbName, strings.Join(placeholders, ","))
-	if _, err := db.ExecContext(ctx, updateQuery, args...); err != nil {
-		return nil, fmt.Errorf("close plugin dispatches: %w", err)
+	closed, err := closeInChunks(ids, func(chunk ...string) error {
+		return w.CloseWithReason(reason, chunk...)
+	})
+	result.Closed = closed
+	if err != nil {
+		return result, fmt.Errorf("close %s: %w", description, err)
 	}
-
-	// Flush and commit.
-	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-		result.Anomalies = append(result.Anomalies, Anomaly{
-			Type:    "sql_commit_failed",
-			Message: fmt.Sprintf("sql commit after plugin dispatch close failed: %v", err),
-		})
-		return result, nil
-	}
-	commitMsg := fmt.Sprintf("reaper: close %d plugin dispatches in %s", len(ids), dbName)
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
-		if !isNothingToCommit(err) {
-			result.Anomalies = append(result.Anomalies, Anomaly{
-				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after plugin dispatch close failed: %v", err),
-			})
-		}
-	}
-
 	return result, nil
 }
 

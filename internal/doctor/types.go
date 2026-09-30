@@ -77,6 +77,10 @@ type CheckContext struct {
 	// openBD opens the bd client checks run maintenance commands through.
 	// Nil means the real bd CLI (see bd); tests set a beadsfake.
 	openBD bdOpener
+
+	// openRepair opens the bd client fixers write repairs through. Nil
+	// means the real bd CLI (see repair); tests record the calls.
+	openRepair bdRepairOpener
 }
 
 // RigPath returns the full path to the rig directory.

@@ -138,37 +138,18 @@ func (c *CheckMisclassifiedWisps) findMisplacedEphemeralsDolt(ctx *CheckContext,
 	return found, 0
 }
 
-// Fix migrates misplaced ephemeral beads from the issues table to the wisps table.
-//
-// Pattern follows wisps_migrate.go (INSERT IGNORE) + NullAssigneeCheck (bd sql + commit).
+// Fix moves each misplaced ephemeral bead from the issues table to the wisps
+// table through bd (bd update --ephemeral), which carries its labels,
+// comments, events and dependencies and journals the move (gt-fcxe9.12).
+// A failed move does not stop the others.
 func (c *CheckMisclassifiedWisps) Fix(ctx *CheckContext) error {
-	if len(c.misclassified) == 0 {
-		return nil
-	}
-
-	// Group by rig for batch operations.
-	rigBatches := make(map[string][]misclassifiedWisp)
+	var errs []string
 	for _, w := range c.misclassified {
 		workDir := resolveMisclassifiedWispWorkDir(ctx.TownRoot, w)
-		rigBatches[workDir] = append(rigBatches[workDir], w)
-	}
-
-	var errs []string
-
-	for workDir, batch := range rigBatches {
-		rigName := batch[0].rigName
-
-		ids := make([]string, len(batch))
-		for i, w := range batch {
-			ids[i] = "'" + strings.ReplaceAll(w.id, "'", "''") + "'"
-		}
-		idList := strings.Join(ids, ", ")
-
-		if err := c.purgeRigBatch(ctx, workDir, rigName, idList); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", rigName, err))
+		if err := ctx.repair(workDir).DemoteToWisp(w.id); err != nil {
+			errs = append(errs, fmt.Sprintf("%s/%s: %v", w.rigName, w.id, err))
 		}
 	}
-
 	if len(errs) > 0 {
 		return fmt.Errorf("partial fix: %s", strings.Join(errs, "; "))
 	}
@@ -189,107 +170,4 @@ func resolveMisclassifiedWispWorkDir(townRoot string, w misclassifiedWisp) strin
 	}
 
 	return filepath.Join(townRoot, w.rigName)
-}
-
-// purgeRigBatch migrates a batch of ephemeral beads from issues to wisps:
-// 1. Check wisps table exists (fall back to noop if not — ephemeral flag is already set)
-// 2. INSERT IGNORE into wisps
-// 3. Copy auxiliary data (labels, comments, events, deps)
-// 4. DELETE from issues + auxiliary tables
-// 5. Commit to Dolt history
-func (c *CheckMisclassifiedWisps) purgeRigBatch(ctx *CheckContext, workDir, rigName, idList string) error {
-	hasWisps := bdTableExistsDoctor(ctx, workDir, "wisps")
-	if !hasWisps {
-		// No wisps table — nothing to migrate to. The ephemeral flag is already
-		// set on these beads, so they'll be handled by normal cleanup paths.
-		return nil
-	}
-
-	// Step 1: Migrate issues to wisps table (INSERT IGNORE skips duplicates).
-	migrateQuery := fmt.Sprintf(
-		"INSERT IGNORE INTO wisps (id, title, description, status, issue_type, agent_state, role_type, rig, hook_bead, role_bead, created_at, updated_at, created_by, owner, assignee, priority, ephemeral, wisp_type, mol_type, metadata) "+
-			"SELECT id, title, description, status, issue_type, agent_state, role_type, rig, hook_bead, role_bead, created_at, updated_at, created_by, owner, assignee, priority, 1, wisp_type, mol_type, metadata FROM issues WHERE id IN (%s)",
-		idList)
-	if err := execBdSQLWrite(ctx, workDir, migrateQuery); err != nil {
-		return fmt.Errorf("migrate to wisps: %w", err)
-	}
-
-	// Step 2: Copy auxiliary data to wisp_* tables.
-	auxCopies := []struct {
-		table string
-		query string
-	}{
-		{
-			table: "wisp_labels",
-			query: fmt.Sprintf("INSERT IGNORE INTO wisp_labels (issue_id, label) SELECT l.issue_id, l.label FROM labels l WHERE l.issue_id IN (%s)", idList),
-		},
-		{
-			table: "wisp_comments",
-			query: fmt.Sprintf("INSERT IGNORE INTO wisp_comments (issue_id, author, text, created_at) SELECT c.issue_id, c.author, c.text, c.created_at FROM comments c WHERE c.issue_id IN (%s)", idList),
-		},
-		{
-			table: "wisp_events",
-			query: fmt.Sprintf("INSERT IGNORE INTO wisp_events (issue_id, event_type, actor, old_value, new_value, comment, created_at) SELECT e.issue_id, e.event_type, e.actor, e.old_value, e.new_value, e.comment, e.created_at FROM events e WHERE e.issue_id IN (%s)", idList),
-		},
-		{
-			table: "wisp_dependencies",
-			query: fmt.Sprintf("INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id) SELECT d.issue_id, CASE WHEN target_wisp.id IS NULL THEN d.depends_on_issue_id ELSE NULL END, CASE WHEN target_wisp.id IS NOT NULL THEN d.depends_on_issue_id ELSE d.depends_on_wisp_id END, d.depends_on_external, d.type, d.created_at, d.created_by, d.metadata, d.thread_id FROM dependencies d LEFT JOIN wisps target_wisp ON target_wisp.id = d.depends_on_issue_id WHERE d.issue_id IN (%s)", idList),
-		},
-	}
-	copyErrors := map[string]error{}
-	for _, aux := range auxCopies {
-		if !bdTableExistsDoctor(ctx, workDir, aux.table) {
-			if aux.table == "wisp_dependencies" && bdTableExistsDoctor(ctx, workDir, "dependencies") {
-				copyErrors[aux.table] = fmt.Errorf("target table missing")
-			}
-			continue
-		}
-		if err := execBdSQLWrite(ctx, workDir, aux.query); err != nil {
-			copyErrors[aux.table] = err
-		}
-	}
-	if err := copyErrors["wisp_dependencies"]; err != nil {
-		return fmt.Errorf("copying wisp_dependencies: %w", err)
-	}
-	if bdTableExistsDoctor(ctx, workDir, "wisp_dependencies") {
-		if err := execBdSQLWrite(ctx, workDir, fmt.Sprintf("UPDATE wisp_dependencies SET depends_on_wisp_id = depends_on_issue_id, depends_on_issue_id = NULL WHERE depends_on_issue_id IN (%s)", idList)); err != nil {
-			return fmt.Errorf("retargeting incoming wisp_dependencies: %w", err)
-		}
-	}
-	if bdTableExistsDoctor(ctx, workDir, "dependencies") {
-		if err := execBdSQLWrite(ctx, workDir, fmt.Sprintf("UPDATE dependencies SET depends_on_wisp_id = depends_on_issue_id, depends_on_issue_id = NULL WHERE depends_on_issue_id IN (%s)", idList)); err != nil {
-			return fmt.Errorf("retargeting incoming dependencies: %w", err)
-		}
-	}
-
-	// Step 3: Delete from auxiliary tables first (referential integrity).
-	auxDeletes := []string{
-		fmt.Sprintf("DELETE FROM labels WHERE issue_id IN (%s)", idList),
-		fmt.Sprintf("DELETE FROM comments WHERE issue_id IN (%s)", idList),
-		fmt.Sprintf("DELETE FROM events WHERE issue_id IN (%s)", idList),
-		fmt.Sprintf("DELETE FROM dependencies WHERE issue_id IN (%s)", idList),
-	}
-	for _, q := range auxDeletes {
-		_ = execBdSQLWrite(ctx, workDir, q) // Best-effort: table may not exist
-	}
-
-	// Step 4: Delete from issues table.
-	deleteQuery := fmt.Sprintf("DELETE FROM issues WHERE id IN (%s)", idList)
-	if err := execBdSQLWrite(ctx, workDir, deleteQuery); err != nil {
-		return fmt.Errorf("delete from issues: %w", err)
-	}
-
-	// Step 5: Commit to Dolt history.
-	commitMsg := "fix: migrate misplaced ephemeral beads to wisps table (gt doctor)"
-	if err := doltserver.CommitServerWorkingSet(ctx.TownRoot, rigName, commitMsg); err != nil {
-		_ = err // Non-fatal
-	}
-
-	return nil
-}
-
-// bdTableExistsDoctor checks if a table exists by attempting to query it.
-// Doctor-local wrapper (wisps_migrate.go has its own unexported copy).
-func bdTableExistsDoctor(ctx *CheckContext, workDir, tableName string) bool {
-	return ctx.bd(workDir, nil).TableExists(tableName)
 }

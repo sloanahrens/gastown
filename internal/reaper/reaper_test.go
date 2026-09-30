@@ -188,8 +188,7 @@ func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
 	}
 
 	scanBody := sourceBetween(t, source, "func Scan(", "func Reap(")
-	autoCloseBody := sourceBetween(t, source, "func AutoClose(", "// batchDeleteRows")
-	batchDeleteBody := sourceBetween(t, source, "func batchDeleteRows(", "// ClosePluginReceiptResult")
+	autoCloseBody := sourceBetween(t, source, "func AutoClose(", "// ClosePluginReceiptResult")
 	schemaBody := sourceBetween(t, source, "func HasReaperSchema(", "func tableExists(")
 	eligibilityBody := sourceBetween(t, source, "func staleIssueEligibilityClause(", "// AutoClose closes issues")
 
@@ -223,18 +222,6 @@ func TestReaperQueriesUseTypedDependencyColumns(t *testing.T) {
 
 	if !strings.Contains(scanBody, "wd.depends_on_wisp_id IS NOT NULL OR wd.depends_on_issue_id IS NOT NULL") {
 		t.Fatal("Scan dangling-parent anomaly should ignore external-only dependency rows")
-	}
-	if !strings.Contains(batchDeleteBody, "DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN %s") {
-		t.Fatal("batchDeleteRows should clean reverse wisp dependency references")
-	}
-	if !strings.Contains(batchDeleteBody, "DELETE FROM dependencies WHERE depends_on_wisp_id IN %s") {
-		t.Fatal("batchDeleteRows should clean reverse issue dependency references to wisps")
-	}
-	if !strings.Contains(batchDeleteBody, "DELETE FROM wisp_dependencies WHERE depends_on_issue_id IN %s") {
-		t.Fatal("batchDeleteRows should clean reverse wisp parent references to issues")
-	}
-	if !strings.Contains(batchDeleteBody, "DELETE FROM dependencies WHERE depends_on_issue_id IN %s") {
-		t.Fatal("batchDeleteRows should clean reverse issue dependency references")
 	}
 }
 
@@ -297,11 +284,11 @@ func TestAutoCloseSoftRefusalBelowFloor(t *testing.T) {
 		// Both candidates have been stale for 60d, so they are in the set at
 		// this threshold and at the floor alike: this preview is what the live
 		// run carries either way.
-		preview, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: age, DryRun: true})
+		preview, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: age, DryRun: true})
 		if err != nil {
 			t.Fatalf("dry run at %s: %v", age, err)
 		}
-		result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: age, PreviewHash: preview.PreviewHash})
+		result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: age, PreviewHash: preview.PreviewHash})
 		if !errors.Is(err, ErrStaleAgeTooLow) {
 			t.Errorf("AutoClose(StaleAge=%s) error = %v, want ErrStaleAgeTooLow", age, err)
 		}
@@ -331,11 +318,11 @@ func TestAutoCloseSoftRefusalBelowFloor(t *testing.T) {
 
 	// The floor itself is allowed — it is the explicit lower bound — and Force
 	// lifts it. Neither carries a floor refusal.
-	_, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	_, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
 	if err != nil {
 		t.Fatalf("dry run at the floor: %v", err)
 	}
-	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
 	if err != nil {
 		t.Fatalf("forced dry run: %v", err)
 	}
@@ -359,7 +346,7 @@ func TestAutoCloseBelowFloorReportsTheThresholdsSet(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	atFloor, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	atFloor, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
 	if err != nil {
 		t.Fatalf("dry run at the floor: %v", err)
 	}
@@ -367,7 +354,7 @@ func TestAutoCloseBelowFloorReportsTheThresholdsSet(t *testing.T) {
 		t.Fatalf("dry run at the floor counted %d candidates, want 1 — the test needs the floor set to be the smaller one", atFloor.Closed)
 	}
 
-	refused, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour})
+	refused, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: time.Hour})
 	if !errors.Is(err, ErrStaleAgeTooLow) {
 		t.Fatalf("AutoClose(StaleAge=1h) error = %v, want ErrStaleAgeTooLow", err)
 	}
@@ -401,7 +388,7 @@ func TestAutoCloseBelowFloorOfZeroIsRefused(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: 0})
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: 0})
 	if !errors.Is(err, ErrStaleAgeTooLow) {
 		t.Fatalf("AutoClose(StaleAge=0) error = %v, want ErrStaleAgeTooLow", err)
 	}
@@ -470,7 +457,7 @@ func TestAutoCloseForceLiftsTheFloor(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: time.Hour, Force: true, DryRun: true})
 	if err != nil {
 		t.Fatalf("forced below-floor dry run: %v", err)
 	}
@@ -508,7 +495,7 @@ func TestAutoCloseLiveRefusesWithoutPreview(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge})
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge})
 	if !errors.Is(err, ErrPreviewRequired) {
 		t.Fatalf("live AutoClose with no preview: error = %v, want ErrPreviewRequired", err)
 	}
@@ -537,7 +524,7 @@ func TestAutoCloseLiveClosesThePreviewedSet(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	preview, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	preview, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
 	if err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
@@ -548,7 +535,7 @@ func TestAutoCloseLiveClosesThePreviewedSet(t *testing.T) {
 		t.Fatal("dry run returned no preview hash, so the live run has nothing to authorize with")
 	}
 
-	result, err := AutoClose(db, "hq", AutoCloseOptions{
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{
 		StaleAge:    MinStaleIssueAge,
 		PreviewHash: preview.PreviewHash,
 	})
@@ -578,7 +565,7 @@ func TestAutoClosePreviewHashBindsTheExactSet(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	preview, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	preview, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
 	if err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
@@ -586,7 +573,7 @@ func TestAutoClosePreviewHashBindsTheExactSet(t *testing.T) {
 	// hq-c crosses the stale-age threshold between the preview and the live run.
 	state.addStaleIssue("hq-c")
 
-	result, err := AutoClose(db, "hq", AutoCloseOptions{
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{
 		StaleAge:    MinStaleIssueAge,
 		PreviewHash: preview.PreviewHash,
 	})
@@ -611,7 +598,7 @@ func TestAutoCloseEmptyCandidateSetNeedsNoPreview(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge})
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge})
 	if err != nil {
 		t.Fatalf("empty sweep error = %v, want nil", err)
 	}
@@ -628,7 +615,7 @@ func TestAutoCloseForceLiftsThePreviewRequirement(t *testing.T) {
 	db := openFakeReaperDB(t, state)
 	t.Cleanup(func() { _ = db.Close() })
 
-	result, err := AutoClose(db, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, Force: true})
+	result, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, Force: true})
 	if err != nil {
 		t.Fatalf("forced live sweep: %v", err)
 	}
@@ -701,8 +688,8 @@ func TestReapQueryNoDatabaseNameInjection(t *testing.T) {
 
 	// This is the fixed query — dbName is NOT in the Sprintf args.
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s WHERE %s LIMIT %d",
-		parentJoin, whereClause, DefaultBatchSize)
+		"SELECT w.id FROM wisps w %s WHERE %s",
+		parentJoin, whereClause)
 
 	// The query must NOT contain the literal database name as a bare token.
 	// Before the fix, "gt" appeared between "wisps w" and "WHERE".
@@ -711,28 +698,6 @@ func TestReapQueryNoDatabaseNameInjection(t *testing.T) {
 	}
 	if !strings.Contains(idQuery, "LEFT JOIN") {
 		t.Errorf("Reap idQuery should contain LEFT JOIN from parentExcludeJoin, got: %s", idQuery)
-	}
-	if !strings.Contains(idQuery, fmt.Sprintf("LIMIT %d", DefaultBatchSize)) {
-		t.Errorf("Reap idQuery should end with LIMIT %d, got: %s", DefaultBatchSize, idQuery)
-	}
-}
-
-// TestReapUpdateQueryNoDatabaseNameInjection verifies that the UPDATE query in
-// Reap() does not inject dbName where the IN clause should go.
-func TestReapUpdateQueryNoDatabaseNameInjection(t *testing.T) {
-	dbName := "gt"
-	inClause := "?,?,?"
-
-	// This is the fixed query — only inClause in the Sprintf args.
-	updateQuery := fmt.Sprintf(
-		"UPDATE wisps SET status='closed', closed_at=NOW() WHERE id IN (%s)",
-		inClause)
-
-	if strings.Contains(updateQuery, dbName) {
-		t.Errorf("Reap updateQuery contains injected database name %q: %s", dbName, updateQuery)
-	}
-	if !strings.Contains(updateQuery, "IN (?,?,?)") {
-		t.Errorf("Reap updateQuery should contain parameterized IN clause, got: %s", updateQuery)
 	}
 }
 
@@ -752,52 +717,18 @@ func TestPurgeDigestQueryNoDatabaseNameInjection(t *testing.T) {
 	}
 }
 
-// TestPurgeBatchQueryNoDatabaseNameInjection verifies that the purge batch
-// SELECT query uses DefaultBatchSize as the LIMIT, not dbName.
+// TestPurgeBatchQueryNoDatabaseNameInjection verifies that the purge
+// candidate SELECT interpolates only the exclusion clause, never dbName.
 func TestPurgeBatchQueryNoDatabaseNameInjection(t *testing.T) {
-	// Mirrors purgeClosedWisps — only the parameterized exclusion and
-	// DefaultBatchSize are interpolated.
+	// Mirrors purgeClosedWisps — only the parameterized exclusion is
+	// interpolated.
 	referencedClause, _ := wispExcludeClause(map[string]bool{"gt-wisp-miky": true})
 	idQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s LIMIT %d",
-		referencedClause, DefaultBatchSize)
+		"SELECT w.id FROM wisps w WHERE w.status = 'closed' AND w.closed_at < ?%s",
+		referencedClause)
 
 	if strings.Contains(idQuery, "gt") {
 		t.Errorf("purge idQuery contains injected database name: %s", idQuery)
-	}
-	expected := fmt.Sprintf("LIMIT %d", DefaultBatchSize)
-	if !strings.Contains(idQuery, expected) {
-		t.Errorf("purge idQuery should contain %s, got: %s", expected, idQuery)
-	}
-}
-
-// TestIsNothingToCommit verifies that "nothing to commit" errors are recognized
-// correctly. This prevents false-positive dolt_commit_failed anomalies when the
-// reaper operates on dolt_ignored tables (wisps, wisp_*), where Dolt has nothing
-// to version after a successful SQL DELETE.
-func TestIsNothingToCommit(t *testing.T) {
-	cases := []struct {
-		msg  string
-		want bool
-	}{
-		{"nothing to commit", true},
-		{"NOTHING TO COMMIT", true},
-		{"Error 1105 (HY000): nothing to commit", true},
-		{"no changes to commit", false}, // must also contain "commit" — see isNothingToCommit
-		{"no changes", false},
-		{"connection refused", false},
-		{"table not found: wisps", false},
-		{"", false},
-	}
-	for _, c := range cases {
-		var err error
-		if c.msg != "" {
-			err = fmt.Errorf("%s", c.msg)
-		}
-		got := isNothingToCommit(err)
-		if got != c.want {
-			t.Errorf("isNothingToCommit(%q) = %v, want %v", c.msg, got, c.want)
-		}
 	}
 }
 
@@ -916,7 +847,7 @@ func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 	}
 
 	beforeDryRun := state.statuses()
-	dryRun, err := Reap(db, "testdb", maxAge, true)
+	dryRun, err := Reap(db, state.writer(), "testdb", maxAge, true)
 	if err != nil {
 		t.Fatalf("dry-run Reap: %v", err)
 	}
@@ -934,7 +865,7 @@ func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 	}
 
 	preRealOps := state.opCounts()
-	realRun, err := Reap(db, "testdb", maxAge, false)
+	realRun, err := Reap(db, state.writer(), "testdb", maxAge, false)
 	if err != nil {
 		t.Fatalf("real Reap: %v", err)
 	}
@@ -958,23 +889,18 @@ func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 			t.Fatalf("%s status = %q, want open", id, got)
 		}
 	}
-	realOps := state.opsSince(preRealOps)
-	if len(realOps) != 1 {
-		t.Fatalf("real Reap used %d connections, want 1: %#v", len(realOps), realOps)
+	// Every write went to bd: the fake driver saw only reads, and the
+	// writer saw the four closes as force-closes with reaper reasons.
+	for _, ops := range state.opsSince(preRealOps) {
+		for _, op := range ops {
+			if strings.HasPrefix(op, "EXEC ") {
+				t.Errorf("real Reap wrote SQL: %s", op)
+			}
+		}
 	}
-	for connID, ops := range realOps {
-		assertOpsContainInOrder(t, ops,
-			"EXEC SET @@autocommit = 0",
-			"QUERY SELECT w.id FROM wisps w INNER JOIN",
-			"EXEC UPDATE wisps SET status='closed'",
-			"QUERY SELECT w.id FROM wisps w LEFT JOIN",
-			"EXEC UPDATE wisps SET status='closed'",
-			"EXEC COMMIT",
-			"EXEC CALL DOLT_COMMIT",
-			"QUERY SELECT COUNT(*) FROM wisps WHERE status IN",
-			"EXEC SET @@autocommit = 1",
-		)
-		t.Logf("real Reap used pinned connection %d", connID)
+	w := state.writer()
+	if got := idsOf(w.callsOf("force-close")); !reflect.DeepEqual(got, []string{"stale-orphan", "step-closed-mol-old", "step-closed-mol-recent", "step-non-molecule-parent"}) {
+		t.Errorf("force-closed %v", got)
 	}
 }
 
@@ -1017,7 +943,7 @@ func TestReapExcludesLiveMergeQueueWisps(t *testing.T) {
 		t.Fatalf("Scan ReapCandidates = %d, want 3", scan.ReapCandidates)
 	}
 
-	if _, err := Reap(db, "testdb", maxAge, false); err != nil {
+	if _, err := Reap(db, state.writer(), "testdb", maxAge, false); err != nil {
 		t.Fatalf("real Reap: %v", err)
 	}
 
@@ -1064,7 +990,7 @@ func TestPurgeExcludesLiveAgentReferencedWisps(t *testing.T) {
 		t.Fatalf("Scan PurgeCandidates = %d, want 2 (referenced-by-nuked and unreferenced)", scan.PurgeCandidates)
 	}
 
-	purge, err := Purge(db, "testdb", purgeAge, 7*24*time.Hour, false)
+	purge, err := Purge(db, state.writer(), "testdb", purgeAge, 7*24*time.Hour, false)
 	if err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
@@ -1125,7 +1051,7 @@ func TestAgentReferencesResolvedFromIssuesTable(t *testing.T) {
 		t.Fatalf("Scan ReapCandidates = %d, want 3 (nuked-target, stale-orphan, unreferenced)", scan.ReapCandidates)
 	}
 
-	if _, err := Reap(db, "testdb", maxAge, false); err != nil {
+	if _, err := Reap(db, state.writer(), "testdb", maxAge, false); err != nil {
 		t.Fatalf("real Reap: %v", err)
 	}
 	for _, id := range []string{"active-mr-target", "hook-bead-target"} {
@@ -1174,7 +1100,7 @@ func TestPurgeSparesAgentReferencedWispsFromIssuesTable(t *testing.T) {
 		t.Fatalf("Scan PurgeCandidates = %d, want 1 (unreferenced)", scan.PurgeCandidates)
 	}
 
-	purge, err := Purge(db, "testdb", purgeAge, 7*24*time.Hour, false)
+	purge, err := Purge(db, state.writer(), "testdb", purgeAge, 7*24*time.Hour, false)
 	if err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
@@ -1256,6 +1182,7 @@ type fakeReaperState struct {
 	deps        []fakeDep
 	nextConn    int
 	ops         map[int][]string
+	w           *fakeReaperWriter
 }
 
 // staleIssueCandidatesLocked mirrors the sweep's SELECT: still-open issues whose
@@ -1677,50 +1604,17 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 	}
 }
 
-func (c *fakeReaperConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+// ExecContext refuses every statement: the reaper selects with SQL and writes
+// only through its bd Writer (gt-fcxe9.12). Any Exec reaching the fake is a
+// raw write against a bd table, the bypass of is_blocked and the events
+// journal B5-06 names.
+func (c *fakeReaperConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	normalized := normalizeSQL(query)
 	c.state.mu.Lock()
-	defer c.state.mu.Unlock()
 	c.state.record(c.id, "EXEC "+normalized)
-
-	switch {
-	case strings.HasPrefix(normalized, "UPDATE wisps SET status='closed'"):
-		affected := int64(0)
-		for _, arg := range args {
-			id, _ := arg.Value.(string)
-			if w := c.state.wisps[id]; w != nil && isOpenWispStatus(w.status) {
-				w.status = "closed"
-				affected++
-			}
-		}
-		return fakeReaperResult(affected), nil
-	case strings.Contains(normalized, ".issues SET status = 'closed'"):
-		// The auto-close sweep's UPDATE. Its bind args are the issue ids the
-		// sweep decided to close.
-		affected := int64(0)
-		for _, arg := range args {
-			id, _ := arg.Value.(string)
-			if issue := c.state.staleIssues[id]; issue != nil && issue.status == "open" {
-				issue.status = "closed"
-				affected++
-			}
-		}
-		return fakeReaperResult(affected), nil
-	case strings.HasPrefix(normalized, "DELETE FROM `wisps` WHERE id IN"):
-		affected := int64(0)
-		for _, arg := range args {
-			id, _ := arg.Value.(string)
-			if w := c.state.wisps[id]; w != nil {
-				delete(c.state.wisps, id)
-				affected++
-			}
-		}
-		return fakeReaperResult(affected), nil
-	case normalized == "SET @@autocommit = 0" || normalized == "SET @@autocommit = 1" || normalized == "ROLLBACK" || normalized == "COMMIT" || strings.HasPrefix(normalized, "CALL DOLT_COMMIT"):
-		return fakeReaperResult(0), nil
-	default:
-		return nil, fmt.Errorf("unexpected exec: %s", normalized)
-	}
+	c.state.mu.Unlock()
+	c.t.Errorf("reaper wrote SQL (every write must go through bd): %s", normalized)
+	return nil, fmt.Errorf("reaper wrote SQL: %s", normalized)
 }
 
 type fakeReaperTx struct{}
@@ -1968,7 +1862,7 @@ func TestMRProtectionTTLExpiredLabelSetBecomesReapable(t *testing.T) {
 	}
 
 	// And Reap actually closes it.
-	if _, err := Reap(db, "testdb", maxAge, false); err != nil {
+	if _, err := Reap(db, state.writer(), "testdb", maxAge, false); err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
 	if got := state.status("expired-cleanup"); got != "closed" {

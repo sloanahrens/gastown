@@ -1,10 +1,12 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -15,9 +17,10 @@ import (
 // bd's deserialization fails silently on a NULL assignee, so the steps remain
 // stuck in_progress indefinitely and block molecule progress.
 //
-// Detection uses bd sql --csv (raw SQL passthrough, not affected by bd's ORM).
-// Fix resets status to open + clears assignee so the step can be re-dispatched,
-// then issues a Dolt commit to record the repair in history.
+// Detection uses bd sql --csv (a read-only raw SQL passthrough, not affected
+// by bd's ORM). Fix resets each affected bead to open with no assignee through
+// bd update in machine mode, so the step can be re-dispatched and bd records
+// the repair (gt-fcxe9.12).
 type NullAssigneeCheck struct {
 	FixableCheck
 	affected []nullAssigneeRow
@@ -44,8 +47,6 @@ func NewNullAssigneeCheck() *NullAssigneeCheck {
 }
 
 const nullAssigneeSelectQuery = `SELECT id, title, updated_at FROM issues WHERE status = 'in_progress' AND (assignee IS NULL OR assignee = '') ORDER BY updated_at ASC`
-
-const nullAssigneeFixQuery = `UPDATE issues SET status = 'open', assignee = '' WHERE status = 'in_progress' AND (assignee IS NULL OR assignee = '')`
 
 // Run queries each rig database for in_progress beads with NULL/empty assignee.
 func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
@@ -102,38 +103,22 @@ func (c *NullAssigneeCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// Fix resets all affected beads to open (clears assignee) via direct SQL,
-// then commits the repair to Dolt history.
+// Fix resets each affected bead to open with no assignee through bd, in the
+// database it was found in. Only the ids Run found are touched, and a failed
+// repair does not stop the others.
 func (c *NullAssigneeCheck) Fix(ctx *CheckContext) error {
-	if len(c.affected) == 0 {
-		return nil
-	}
-
-	// Collect unique databases that have affected beads.
-	affected := make(map[string]bool)
-	for _, row := range c.affected {
-		affected[row.RigDB] = true
-	}
-
 	var errs []string
-	for db := range affected {
-		rigDir := filepath.Join(ctx.TownRoot, db)
-
-		// Reset beads via direct SQL (bypasses bd ORM which fails on NULL assignee).
-		if err := execBdSQLWrite(ctx, rigDir, nullAssigneeFixQuery); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: update failed: %v", db, err))
+	for _, row := range c.affected {
+		rigDir := filepath.Join(ctx.TownRoot, row.RigDB)
+		err := ctx.repair(rigDir).ReopenUnassigned(row.ID)
+		if errors.Is(err, beads.ErrGuardNotHeld) {
+			// Claimed or moved on since Run found it: no longer ours to repair.
 			continue
 		}
-
-		// Commit the repair to Dolt history (non-fatal: repair is effective even
-		// without a version commit, but the commit gives audit visibility).
-		commitMsg := "fix: reset in_progress beads with null assignee (gt doctor)"
-		if err := doltserver.CommitServerWorkingSet(ctx.TownRoot, db, commitMsg); err != nil {
-			// Non-fatal: data is already fixed, commit is best-effort.
-			_ = err
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s/%s: %v", row.RigDB, row.ID, err))
 		}
 	}
-
 	if len(errs) > 0 {
 		return fmt.Errorf("partial fix: %s", strings.Join(errs, "; "))
 	}
@@ -163,14 +148,6 @@ func queryNullAssigneeBeads(ctx *CheckContext, rigDir string) ([]nullAssigneeRow
 		})
 	}
 	return rows, nil
-}
-
-// execBdSQLWrite executes a SQL write statement via bd sql.
-func execBdSQLWrite(ctx *CheckContext, rigDir, query string) error {
-	if _, err := ctx.bd(rigDir, nil).SQL(query); err != nil {
-		return fmt.Errorf("%s: %w", bdOutput(err), bdCause(err))
-	}
-	return nil
 }
 
 // shortenTitle truncates a title with ellipsis if it exceeds n runes.

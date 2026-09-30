@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
@@ -150,7 +152,7 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 	}
 
 	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Should have logged the close detection
@@ -1414,38 +1416,252 @@ exit 0
 	}
 }
 
-func TestPollEvents_GetAllEventsSinceError(t *testing.T) {
+func TestPollEvents_JournalReadError(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup()
+	store.eventsErr = errors.New("bd events tail: store_unavailable")
 
 	var logged []string
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	townRoot := t.TempDir()
-	m := NewConvoyManager(townRoot, logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-
-	// Cancel the manager's context so GetAllEventsSince receives a cancelled context
-	m.cancel()
-
-	// pollEvents should not panic when store returns error
-	m.pollStoresSnapshot(m.stores)
-
-	// Verify the error was logged with retry message
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	if !m.pollStoresSnapshot(m.stores) {
+		t.Error("a failed journal read did not report an error")
+	}
+	if !m.recoveryMode.Load() {
+		t.Error("a failed journal read did not set recovery mode")
+	}
 	found := false
 	for _, s := range logged {
-		if strings.Contains(s, "event poll error") {
-			found = true
-			break
-		}
+		found = found || strings.Contains(s, "event poll error")
 	}
 	if !found {
 		t.Errorf("expected 'event poll error' in logs, got: %v", logged)
+	}
+	if _, ok := m.eventCursors.Load("hq"); ok {
+		t.Error("a failed read advanced the cursor")
+	}
+}
+
+// A cursor bd has pruned past resumes at the oldest retained record, logs
+// the gap, and sets recovery mode so the stranded scan catches what fell in
+// it (gt-7iwy0.2).
+func TestPollEvents_TruncatedJournalResumesAtFloor(t *testing.T) {
+	t.Parallel()
+	store, cleanup := newMemStore(t)
+	defer cleanup()
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("gt-trunc-%d", i)
+		mustCreateClosed(t, store, id)
+	}
+	// Records 1-4 are pruned; the cursor at 2 lies below the floor.
+	store.journalFloor = 5
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	startCursorsAtZero(m)
+	m.eventCursors.Store("hq", int64(2))
+	if m.pollStoresSnapshot(m.stores) {
+		t.Errorf("a pruned cursor is a gap to log, not a poll failure; logs: %v", logged)
+	}
+	if !m.recoveryMode.Load() {
+		t.Error("a pruned cursor did not set recovery mode")
+	}
+	if v, _ := m.eventCursors.Load("hq"); v != int64(6) {
+		t.Errorf("cursor = %v, want 6 (the journal head)", v)
+	}
+	var gap, closes []string
+	for _, s := range logged {
+		if strings.Contains(s, "pruned") {
+			gap = append(gap, s)
+		}
+		if strings.Contains(s, "close detected") {
+			closes = append(closes, s)
+		}
+	}
+	if len(gap) != 1 {
+		t.Errorf("gap log lines = %q, want one", gap)
+	}
+	// Records 5 and 6 are gt-trunc-3's create and close.
+	if len(closes) != 1 || !strings.Contains(closes[0], "gt-trunc-3") {
+		t.Errorf("close detections = %q, want only gt-trunc-3", closes)
+	}
+}
+
+// A poll reads the journal page by page until bd says nothing follows.
+func TestPollEvents_PagesThroughJournal(t *testing.T) {
+	t.Parallel()
+	store, cleanup := newMemStore(t)
+	defer cleanup()
+	n := eventPageSize + 5
+	for i := 0; i < n/2+1; i++ {
+		mustCreateClosed(t, store, fmt.Sprintf("gt-page-%d", i))
+	}
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	startCursorsAtZero(m)
+	m.pollStoresSnapshot(m.stores)
+	closes := 0
+	for _, s := range logged {
+		if strings.Contains(s, "close detected") {
+			closes++
+		}
+	}
+	if closes != n/2+1 {
+		t.Errorf("close detections = %d, want %d across pages", closes, n/2+1)
+	}
+	if store.tailCalls() < 2 {
+		t.Errorf("tail calls = %d, want more than one page", store.tailCalls())
+	}
+}
+
+// The warm-up cycle moves every cursor to the head without acting on
+// history, and a later update to an already-closed issue (notes, labels) is
+// not a second close.
+func TestPollEvents_WarmupAndUpdateOnClosedIssue(t *testing.T) {
+	t.Parallel()
+	store, cleanup := newMemStore(t)
+	defer cleanup()
+	mustCreateClosed(t, store, "gt-history")
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m.pollStoresSnapshot(m.stores)
+	for _, s := range logged {
+		if strings.Contains(s, "close detected") {
+			t.Fatalf("warm-up acted on history: %v", logged)
+		}
+	}
+	if v, _ := m.eventCursors.Load("hq"); v != int64(2) {
+		t.Errorf("cursor after warm-up = %v, want 2", v)
+	}
+
+	mustCreateClosed(t, store, "gt-live")
+	ctx := context.Background()
+	if err := store.UpdateIssue(ctx, "gt-live", map[string]interface{}{"notes": "after close"}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	logged = nil
+	m.pollStoresSnapshot(m.stores)
+	closes := 0
+	for _, s := range logged {
+		if strings.Contains(s, "close detected") && strings.Contains(s, "gt-live") {
+			closes++
+		}
+	}
+	if closes != 1 {
+		t.Errorf("close detections for gt-live = %d, want 1 (the notes update is not a second close): %v", closes, logged)
+	}
+}
+
+// startCursorsAtZero marks every store as read from the start of its
+// journal, so the next poll processes the whole journal instead of warming
+// the store up.
+func startCursorsAtZero(m *ConvoyManager) {
+	for name := range m.stores {
+		m.eventCursors.Store(name, int64(0))
+	}
+}
+
+// A store whose first read fails is still warmed up by its next successful
+// read, not replayed: warm-up is per store, keyed on the missing cursor.
+func TestPollEvents_FailedFirstReadStillWarmsUp(t *testing.T) {
+	t.Parallel()
+	hq, hqCleanup := newMemStore(t)
+	defer hqCleanup()
+	rig, rigCleanup := newMemStore(t)
+	defer rigCleanup()
+	mustCreateClosed(t, rig, "gt-old-close")
+	rig.eventsErr = errors.New("bd events tail: store_unavailable")
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
+	m.pollStoresSnapshot(m.stores)
+	if _, ok := m.eventCursors.Load("gastown"); ok {
+		t.Fatal("a failed first read recorded a cursor")
+	}
+	rig.eventsErr = nil
+	m.pollStoresSnapshot(m.stores)
+	for _, s := range logged {
+		if strings.Contains(s, "close detected") {
+			t.Fatalf("the store's first successful read replayed history: %v", logged)
+		}
+	}
+	if v, _ := m.eventCursors.Load("gastown"); v != int64(2) {
+		t.Errorf("cursor = %v, want 2 (warmed to the head)", v)
+	}
+}
+
+// A truncation window that would not move the cursor forward skips to the
+// head instead of refusing the same cursor on every poll.
+func TestPollEvents_TruncationWithoutProgressSkipsToHead(t *testing.T) {
+	t.Parallel()
+	store, cleanup := newMemStore(t)
+	defer cleanup()
+	mustCreateClosed(t, store, "gt-a")
+	mustCreateClosed(t, store, "gt-b")
+	store.truncateAlways = &beads.EventsTruncatedError{Floor: 2, Head: 4}
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m.eventCursors.Store("hq", int64(3))
+	store.truncateOnce = true
+	if m.pollStoresSnapshot(m.stores) {
+		t.Errorf("poll reported an error; logs: %v", logged)
+	}
+	if v, _ := m.eventCursors.Load("hq"); v != int64(4) {
+		t.Errorf("cursor = %v, want 4 (the head)", v)
+	}
+}
+
+// A truncation met while warming a store up does not record a cursor before
+// the warm-up reaches the head, so a failure after it is warmed up again
+// rather than processed.
+func TestPollEvents_TruncationDuringWarmupRecordsNoEarlyCursor(t *testing.T) {
+	t.Parallel()
+	store, cleanup := newMemStore(t)
+	defer cleanup()
+	for i := 0; i < 3; i++ {
+		mustCreateClosed(t, store, fmt.Sprintf("gt-w-%d", i))
+	}
+	store.truncateAlways = &beads.EventsTruncatedError{Floor: 3, Head: 6}
+	store.truncateOnce = true
+	store.failAfterTruncate = errors.New("bd events tail: store_unavailable")
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m.pollStoresSnapshot(m.stores)
+	if v, ok := m.eventCursors.Load("hq"); ok {
+		t.Errorf("warm-up cut short recorded cursor %v", v)
+	}
+}
+
+func mustCreateClosed(t *testing.T, store *memStore, id string) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.CreateIssue(ctx, &beadsdk.Issue{ID: id, Title: id, Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}, "test"); err != nil {
+		t.Fatalf("CreateIssue(%s): %v", id, err)
+	}
+	if err := store.CloseIssue(ctx, id, "done", "test", ""); err != nil {
+		t.Fatalf("CloseIssue(%s): %v", id, err)
 	}
 }
 
@@ -2538,7 +2754,7 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// The close event from the rig store should be detected
@@ -2602,7 +2818,7 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Both close events should be detected
@@ -2681,7 +2897,8 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, isParked)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
+	m.eventCursors.Delete("shippercrm") // parked: never read, so never given a cursor
 	m.pollStoresSnapshot(m.stores)
 
 	// Active rig's close event should be detected
@@ -2699,11 +2916,11 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 	// Note: the parked store's events may still be visible through other stores
 	// if they share the same underlying Dolt server (test infrastructure detail).
 	// What matters is that the "shippercrm" store key is never polled.
-	if _, hasHW := m.lastEventIDs.Load("shippercrm"); hasHW {
+	if _, hasHW := m.eventCursors.Load("shippercrm"); hasHW {
 		t.Errorf("parked rig (shippercrm) should not have been polled, but has a high-water mark")
 	}
 	// Active rig should have been polled
-	if _, hasHW := m.lastEventIDs.Load("gastown"); !hasHW {
+	if _, hasHW := m.eventCursors.Load("gastown"); !hasHW {
 		t.Errorf("active rig (gastown) should have been polled, but has no high-water mark")
 	}
 }
@@ -2740,7 +2957,7 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, alwaysParked)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	found := false
@@ -2789,7 +3006,7 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
 
 	// First poll: should detect our close event
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	closeCount := 0
@@ -2844,7 +3061,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	firstCloseCount := 0
@@ -2937,7 +3154,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute,
 		map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	closeCount := 0
@@ -2991,7 +3208,7 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 		"gastown": rigStore,
 	}
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Should see exactly 1 close detection for our issue, not 2
@@ -3123,7 +3340,7 @@ exit 0
 	}
 
 	m := NewConvoyManager(townRoot, logger, filepath.Join(binDir, "gt"), 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Only check for close events involving OUR issue — other tests may have
@@ -3171,7 +3388,7 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-	m.seeded.Store(true)
+	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
 	// Should log the nil hq warning
@@ -3428,84 +3645,6 @@ func TestDoltRecoveryCallback_NilSafe(t *testing.T) {
 	dsm.mu.Lock()
 	dsm.clearUnhealthySignal()
 	dsm.mu.Unlock()
-}
-
-// infNaNStorage is a minimal Storage stub whose GetAllEventsSince always
-// returns the given error. All other methods panic (they should not be called).
-type infNaNStorage struct {
-	beadsdk.Storage // embedded to satisfy unimplemented methods
-	err             error
-}
-
-func (s *infNaNStorage) GetAllEventsSince(_ context.Context, _ time.Time) ([]*beadsdk.Event, error) {
-	return nil, s.err
-}
-
-// TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil verifies that when
-// GetAllEventsSince returns a "+Inf is not a valid value for double" error
-// (corrupt Dolt row), pollStore advances the high-water mark to now and
-// returns nil (no error, no recovery mode).
-func TestPollStore_InfNaNError_AdvancesHWMAndReturnsNil(t *testing.T) {
-	t.Parallel()
-	for _, errMsg := range []string{
-		"Error 1366 (HY000): error: +Inf is not a valid value for double",
-		"Error 1366 (HY000): error: -Inf is not a valid value for double",
-		"Error 1366 (HY000): error: NaN is not a valid value for double",
-		// Dolt wraps values in single quotes in actual error messages
-		"Error 1366 (HY000): error: '+Inf' is not a valid value for 'double'",
-		"Error 1366 (HY000): error: '-Inf' is not a valid value for 'double'",
-		"Error 1366 (HY000): error: 'NaN' is not a valid value for 'double'",
-		// Wrapped in beads SDK error context (actual observed format)
-		"failed to get events since 0: Error 1366 (HY000): error: '+Inf' is not a valid value for 'double'",
-	} {
-		t.Run(errMsg[:20], func(t *testing.T) {
-			stub := &infNaNStorage{err: fmt.Errorf("%s", errMsg)}
-			stores := map[string]beadsdk.Storage{"hq": stub}
-
-			var logged []string
-			logger := func(format string, args ...interface{}) {
-				logged = append(logged, fmt.Sprintf(format, args...))
-			}
-
-			before := time.Now()
-			m := NewConvoyManager(t.TempDir(), logger, "gt", 10*time.Minute, stores, nil, nil)
-
-			hadError := m.pollStoresSnapshot(m.stores)
-			after := time.Now()
-
-			// pollStoresSnapshot should report no error (corrupt row is handled)
-			if hadError {
-				t.Errorf("expected no error for inf/nan store, got hadError=true; logs: %v", logged)
-			}
-
-			// recoveryMode must NOT be set (we recovered inline)
-			if m.recoveryMode.Load() {
-				t.Errorf("recoveryMode should not be set for inf/nan error; logs: %v", logged)
-			}
-
-			// High-water mark for "hq" should have been advanced to approximately now
-			v, ok := m.lastEventIDs.Load("hq")
-			if !ok {
-				t.Fatal("expected HWM to be stored for hq")
-			}
-			hwm := v.(time.Time)
-			if hwm.Before(before) || hwm.After(after.Add(time.Second)) {
-				t.Errorf("HWM %v not in expected range [%v, %v]", hwm, before, after)
-			}
-
-			// Should have logged a message about the skip
-			foundMsg := false
-			for _, s := range logged {
-				if strings.Contains(s, "+Inf/NaN row detected") {
-					foundMsg = true
-					break
-				}
-			}
-			if !foundMsg {
-				t.Errorf("expected HWM-advance log message, got: %v", logged)
-			}
-		})
-	}
 }
 
 // feedTestRig sets up the minimal town fixture feedFirstReady needs: a routes

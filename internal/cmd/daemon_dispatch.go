@@ -1,17 +1,14 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -47,9 +44,6 @@ const (
 	// Everything below is backlog, and a nudge that leads with backlog is a
 	// nudge the mayor learns to ignore.
 	maxDispatchPriority = 2
-
-	// dispatchStoreTimeout bounds one rig's in-process ready query.
-	dispatchStoreTimeout = 30 * time.Second
 )
 
 // dispatchSeats is the town's polecat-seat picture: how many polecats could be
@@ -442,23 +436,25 @@ func countActionableReady(rigPath string) (ready, urgent int, err error) {
 	return ready, urgent, nil
 }
 
-// openDispatchReadyStore opens the in-process store readyIssuesUnlimited reads
-// the board through. It is a var so tests can drive the patrol's board read
-// against a store holding more than a page of ready work without a live Dolt.
-var openDispatchReadyStore = func(b *beads.Beads, ctx context.Context) (beadsdk.Storage, func(), error) {
-	return b.OpenStore(ctx)
+// readyBoard reads a rig's whole ready board.
+type readyBoard interface {
+	ReadyAll() ([]*beads.Issue, error)
+}
+
+// readyBoardFor returns the bd client readyIssuesUnlimited reads a rig's
+// board through. It is a var so tests can serve a board of more than a page
+// without a live bd.
+var readyBoardFor = func(rigPath string) readyBoard {
+	return beads.New(rigPath)
 }
 
 // readyIssuesUnlimited returns every ready issue in the rig.
 //
-// It goes through the in-process store rather than beads.Beads.Ready()'s
-// subprocess branch, which inherits bd's default limit of 100: the board this
-// check counts was 373 beads the day it was found reading as 100, and the count
-// is the whole point of the check (gt-59o9).
-//
-// That store branch is unbounded, so there is no cap for this caller to unwrap;
-// see storeReadyWithFilter for why. TestReadyWorkFilterCarriesNoLimit pins the
-// invariant — a Limit reintroduced there restores the silent under-report.
+// It reads through ReadyAll: one machine-mode bd ready --limit 0 whose
+// envelope reports whether bd cut the page, rather than Ready(), which
+// inherits bd's default limit of 100. The board this check counts was 373
+// beads the day it was found reading as 100, and the count is the whole point
+// of the check (gt-59o9). A truncated answer is an error, never a count.
 //
 // A rig with no beads database returns no issues: it is a rig that has never
 // been initialized, not a read failure.
@@ -466,19 +462,11 @@ func readyIssuesUnlimited(rigPath string) ([]*beads.Issue, error) {
 	if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
 		return nil, nil
 	}
-
-	b := beads.New(rigPath)
-	ctx, cancel := context.WithTimeout(context.Background(), dispatchStoreTimeout)
-	defer cancel()
-
-	store, cleanup, err := openDispatchReadyStore(b, ctx)
+	issues, err := readyBoardFor(rigPath).ReadyAll()
 	if err != nil {
-		return nil, fmt.Errorf("opening beads store for %s: %w", rigPath, err)
+		return nil, fmt.Errorf("reading the ready board for %s: %w", rigPath, err)
 	}
-	defer cleanup()
-
-	b.SetStore(store)
-	return b.Ready()
+	return issues, nil
 }
 
 // hasBeadsDatabase reports whether a resolved beads directory holds a database
