@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -193,14 +194,17 @@ func TestIsPatrolActive(t *testing.T) {
 	}
 }
 
-// The dolt_remotes patrol is gone (ADR 0002): the config schema has no key
-// for it, so nothing can switch a Dolt remote push back on from daemon.json.
-func TestPatrolsConfig_HasNoDoltRemotesKey(t *testing.T) {
+// The dolt_remotes patrol is gone (ADR 0002). Strict decoding keeps the
+// key only as opaque retired data (json.RawMessage), so it has no patrol
+// type, no Enabled switch, and nothing can turn a Dolt remote push back on
+// from daemon.json (gt-y3pgh.1).
+func TestPatrolsConfig_DoltRemotesKeyIsOpaqueRetiredData(t *testing.T) {
 	t.Parallel()
 	typ := reflect.TypeOf(PatrolsConfig{})
 	for i := 0; i < typ.NumField(); i++ {
-		if tag := typ.Field(i).Tag.Get("json"); strings.HasPrefix(tag, "dolt_remotes") {
-			t.Fatalf("PatrolsConfig.%s still maps dolt_remotes", typ.Field(i).Name)
+		f := typ.Field(i)
+		if tag := f.Tag.Get("json"); strings.HasPrefix(tag, "dolt_remotes") && f.Type != reflect.TypeOf(json.RawMessage(nil)) {
+			t.Fatalf("PatrolsConfig.%s maps dolt_remotes to %s, want json.RawMessage", f.Name, f.Type)
 		}
 	}
 }

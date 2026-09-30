@@ -415,7 +415,7 @@ func TestTownMergeQueueSnapshot_RoundsThroughBDPool(t *testing.T) {
 	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
 		t.Fatalf("make mayor dir: %v", err)
 	}
-	rigsJSON := `{"rigs":{"test-rig":{"name":"test-rig","path":"test-rig"}}}`
+	rigsJSON := `{"version":1,"rigs":{"test-rig":{"git_url":"https://example.com/test-rig.git","added_at":"2026-01-01T00:00:00Z"}}}`
 	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0o644); err != nil {
 		t.Fatalf("write rigs.json: %v", err)
 	}
