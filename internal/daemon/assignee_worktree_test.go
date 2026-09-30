@@ -7,6 +7,7 @@ import (
 )
 
 func TestAssigneeToWorktreePath_InvalidFormats(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	tests := []struct {
@@ -35,6 +36,7 @@ func TestAssigneeToWorktreePath_InvalidFormats(t *testing.T) {
 }
 
 func TestAssigneeToWorktreePath_NewStructure(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 
@@ -55,6 +57,7 @@ func TestAssigneeToWorktreePath_NewStructure(t *testing.T) {
 }
 
 func TestAssigneeToWorktreePath_OldStructure(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 
@@ -75,6 +78,7 @@ func TestAssigneeToWorktreePath_OldStructure(t *testing.T) {
 }
 
 func TestAssigneeToWorktreePath_CrewWorker(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "testrig"
 
@@ -94,6 +98,7 @@ func TestAssigneeToWorktreePath_CrewWorker(t *testing.T) {
 }
 
 func TestAssigneeToWorktreePath_NoWorktree(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Directory exists but no .git -> not a worktree

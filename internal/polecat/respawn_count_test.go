@@ -10,6 +10,7 @@ import (
 )
 
 func TestRecordBeadRespawn_Increments(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// Create the witness subdirectory so the state file path is valid.
 	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
@@ -28,6 +29,7 @@ func TestRecordBeadRespawn_Increments(t *testing.T) {
 }
 
 func TestShouldBlockRespawn_Threshold(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
 		t.Fatal(err)
@@ -49,6 +51,7 @@ func TestShouldBlockRespawn_Threshold(t *testing.T) {
 }
 
 func TestResetBeadRespawnCount(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
 		t.Fatal(err)
@@ -73,6 +76,7 @@ func TestResetBeadRespawnCount(t *testing.T) {
 }
 
 func TestRecordBeadRespawn_ConcurrentSafe(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
 		t.Fatal(err)
@@ -102,6 +106,7 @@ func TestRecordBeadRespawn_ConcurrentSafe(t *testing.T) {
 }
 
 func TestShouldBlockRespawn_UnknownBead(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
 		t.Fatal(err)
