@@ -199,10 +199,7 @@ func detailSuffix(d string) string {
 func (s *Supervisor) refuse(l ActionLine, kind error, detail string) error {
 	l.Outcome, l.Detail = outcomeRefused, detail
 	s.record(l)
-	if detail == "" {
-		return fmt.Errorf("%w: %w", ErrRefused, kind)
-	}
-	return fmt.Errorf("%w: %w: %s", ErrRefused, kind, detail)
+	return refusal(kind, detail)
 }
 
 // guard runs the checks both verbs share: a readable, unheld intent record
@@ -217,41 +214,94 @@ func (s *Supervisor) guard(seat Seat, l ActionLine) error {
 		if rec.Frozen {
 			kind = ErrFrozen
 		}
-		return s.refuse(l, kind, rec.HoldReason())
+		return s.refuseSeat(seat, l, kind, rec.HoldReason())
 	}
 	if on, err := estop.ActiveFor(s.o.TownRoot, seat.Rig); on {
 		detail := "e-stop sentinel present"
 		if err != nil {
 			detail = err.Error()
 		}
-		return s.refuse(l, ErrEstop, detail)
+		return s.refuseSeat(seat, l, ErrEstop, detail)
 	}
 	return nil
 }
 
+// errRepeat aborts the intent update of a refusal already on record.
+var errRepeat = errors.New("repeat refusal")
+
+// refuseSeat refuses an action on a seat whose record is readable. The
+// refusal is always logged; it is written to the action log and to the
+// seat's last_action only when it differs from the last refusal on record
+// (verb, actor, detail) or that one is older than the budget window, so a
+// caller asking every heartbeat for a parked seat leaves one line per window.
+func (s *Supervisor) refuseSeat(seat Seat, l ActionLine, kind error, detail string) error {
+	now := s.o.Now().UTC()
+	_, err := intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
+		if la := r.LastAction; la != nil && la.Verb == l.Verb && la.Outcome == outcomeRefused &&
+			la.Actor == l.Actor && la.Detail == detail && now.Sub(la.At) < s.o.Window {
+			return errRepeat
+		}
+		r.LastAction = &intent.Action{Verb: l.Verb, Reason: l.Reason, Actor: l.Actor, Outcome: outcomeRefused, Detail: detail, At: now}
+		return nil
+	})
+	if errors.Is(err, errRepeat) {
+		s.o.Logf("supervisor: %s %s by %s: refused again (%s)", l.Verb, l.Session, l.Actor, detail)
+		return refusal(kind, detail)
+	}
+	return s.refuse(l, kind, detail)
+}
+
+// refusal builds the error every refusal returns.
+func refusal(kind error, detail string) error {
+	if detail == "" {
+		return fmt.Errorf("%w: %w", ErrRefused, kind)
+	}
+	return fmt.Errorf("%w: %w: %s", ErrRefused, kind, detail)
+}
+
 // Kill ends the seat's session and records desired=stop. It is refused when
-// the seat is held or e-stopped. Killing a seat with no session succeeds.
+// the seat is held or e-stopped. The hold is checked again under the seat's
+// lock, and the session is killed while that lock is held, so a pause (which
+// takes the same lock) cannot land between the check and the kill. Killing a
+// seat with no session succeeds.
 func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
 	name := seat.SessionName()
 	l := ActionLine{Verb: "kill", Seat: IntentSeat(seat).String(), Session: name, Reason: reason, Actor: actor}
 	if err := s.guard(seat, l); err != nil {
 		return err
 	}
-	if err := s.o.Tmux.KillSessionWithProcesses(name); err != nil {
-		l.Outcome, l.Detail = outcomeFailed, err.Error()
-		s.record(l)
-		return fmt.Errorf("killing %s: %w", name, err)
-	}
 	now := s.o.Now().UTC()
+	var held string
+	var killed bool
+	var killErr error
 	rec, err := intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
-		if !r.Held() {
-			r.Desired = intent.DesiredStop
+		if r.Held() {
+			held = r.HoldReason()
+			return errHeld
 		}
+		if killErr = s.o.Tmux.KillSessionWithProcesses(name); killErr != nil {
+			return killErr
+		}
+		killed = true
+		r.Desired = intent.DesiredStop
 		r.Progress = nil
 		r.Actor, r.UpdatedAt = actor, now
 		r.LastAction = &intent.Action{Verb: "kill", Reason: reason, Actor: actor, Outcome: outcomeDone, At: now}
 		return nil
 	})
+	switch {
+	case errors.Is(err, errHeld):
+		return s.refuseSeat(seat, l, ErrPaused, held)
+	case killErr != nil:
+		l.Outcome, l.Detail = outcomeFailed, killErr.Error()
+		s.record(l)
+		return fmt.Errorf("killing %s: %w", name, killErr)
+	case !killed:
+		// The seat's lock could not be taken: nothing was killed.
+		l.Outcome, l.Detail = outcomeFailed, err.Error()
+		s.record(l)
+		return fmt.Errorf("killing %s: %w", name, err)
+	}
 	l.Outcome = outcomeDone
 	if err != nil {
 		l.Detail = "session killed; intent record not updated: " + err.Error()
@@ -299,7 +349,7 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 			r.Reason = fmt.Sprintf("restart budget exhausted: %d restarts in %s (last: %s)", len(r.Restarts), s.o.Window, reason)
 			r.PausedBy = "supervisor"
 			r.PausedAt = now
-			r.LastAction = &intent.Action{Verb: "restart", Reason: reason, Actor: actor, Outcome: outcomeRefused, At: now}
+			r.LastAction = &intent.Action{Verb: "restart", Reason: reason, Actor: actor, Outcome: outcomeRefused, Detail: r.Reason, At: now}
 			return nil
 		}
 		r.Restarts = append(r.Restarts, now)
@@ -311,7 +361,7 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 	})
 	switch {
 	case errors.Is(err, errHeld):
-		return s.refuse(l, ErrPaused, held)
+		return s.refuseSeat(seat, l, ErrPaused, held)
 	case err != nil:
 		// The budget cannot be counted, so the restart cannot be allowed.
 		return s.refuse(l, ErrIntentUnreadable, err.Error())

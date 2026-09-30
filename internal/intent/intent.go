@@ -118,11 +118,13 @@ type Progress struct {
 
 // Action records the last supervisor action on the seat.
 type Action struct {
-	Verb    string    `json:"verb"`
-	Reason  string    `json:"reason,omitempty"`
-	Actor   string    `json:"actor,omitempty"`
-	Outcome string    `json:"outcome,omitempty"`
-	At      time.Time `json:"at"`
+	Verb    string `json:"verb"`
+	Reason  string `json:"reason,omitempty"`
+	Actor   string `json:"actor,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
+	// Detail explains a refusal or failure.
+	Detail string    `json:"detail,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // Record is the per-seat intent record.

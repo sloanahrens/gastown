@@ -417,3 +417,66 @@ func TestDeclinedRestartIsNotCharged(t *testing.T) {
 		t.Fatalf("record after declined restarts = %+v, want no budget spent", rec)
 	}
 }
+
+// A caller that keeps asking for a refused action (the daemon, every
+// heartbeat, for a parked dead witness) writes one action-log line per
+// window, not one per tick. The logger still sees every refusal.
+func TestRepeatedRefusalIsLoggedOncePerWindow(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.pause(t)
+	for i := 0; i < 5; i++ {
+		_ = h.sup().Restart(flint, "witness dead", "daemon/ensure-witness")
+		h.now = h.now.Add(3 * time.Minute)
+	}
+	if n := len(h.actions(t)); n != 1 {
+		t.Fatalf("action lines after 5 identical refusals = %d, want 1", n)
+	}
+	h.now = h.now.Add(time.Hour)
+	_ = h.sup().Restart(flint, "witness dead", "daemon/ensure-witness")
+	if n := len(h.actions(t)); n != 2 {
+		t.Fatalf("action lines after the window = %d, want 2", n)
+	}
+	// A different actor is a different request and is logged.
+	_ = h.sup().Restart(flint, "witness dead", "gt doctor --fix")
+	if n := len(h.actions(t)); n != 3 {
+		t.Fatalf("action lines after another actor asked = %d, want 3", n)
+	}
+}
+
+// Kill re-checks the hold under the seat's lock, the same lock a pause takes,
+// so a pause cannot land between the check and the kill.
+func TestKillChecksTheHoldUnderTheSeatLock(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	var heldDuringKill bool
+	k := killerFunc(func(name string) error {
+		// The seat lock is held: a pause started now must wait for the kill.
+		done := make(chan struct{})
+		go func() {
+			_, _ = intent.Update(h.town, IntentSeat(flint), func(r *intent.Record) error {
+				r.Desired = intent.DesiredPark
+				return nil
+			})
+			close(done)
+		}()
+		select {
+		case <-done:
+			heldDuringKill = false
+		case <-time.After(200 * time.Millisecond):
+			heldDuringKill = true
+		}
+		return nil
+	})
+	s := New(Options{TownRoot: h.town, Tmux: k, Now: func() time.Time { return h.now }})
+	if err := s.Kill(flint, "idle", "daemon"); err != nil {
+		t.Fatal(err)
+	}
+	if !heldDuringKill {
+		t.Fatal("a pause completed while Kill was killing: the hold check is not under the seat lock")
+	}
+}
+
+type killerFunc func(name string) error
+
+func (f killerFunc) KillSessionWithProcesses(name string) error { return f(name) }
