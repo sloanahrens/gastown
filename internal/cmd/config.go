@@ -4,6 +4,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -121,7 +122,11 @@ Examples:
 }
 
 func runConfigCostTier(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwd()
+	return configCostTier(cwdConfigCmdEnv(), args)
+}
+
+func configCostTier(e configCmdEnv, args []string) error {
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -136,13 +141,13 @@ func runConfigCostTier(cmd *cobra.Command, args []string) error {
 		// Show current tier and role assignments
 		current := config.GetCurrentTier(townSettings)
 		if current == "" {
-			fmt.Println("Cost tier: " + style.Bold.Render("custom") + " (manual role_agents configuration)")
+			fmt.Fprintln(e.out, "Cost tier: "+style.Bold.Render("custom")+" (manual role_agents configuration)")
 		} else {
 			tier := config.CostTier(current)
-			fmt.Printf("Cost tier: %s\n", style.Bold.Render(current))
-			fmt.Printf("  %s\n\n", config.TierDescription(tier))
-			fmt.Println("Role assignments:")
-			fmt.Println(config.FormatTierRoleTable(tier))
+			fmt.Fprintf(e.out, "Cost tier: %s\n", style.Bold.Render(current))
+			fmt.Fprintf(e.out, "  %s\n\n", config.TierDescription(tier))
+			fmt.Fprintln(e.out, "Role assignments:")
+			fmt.Fprintln(e.out, config.FormatTierRoleTable(tier))
 		}
 		return nil
 	}
@@ -158,7 +163,7 @@ func runConfigCostTier(cmd *cobra.Command, args []string) error {
 	// Warn if overwriting custom role_agents
 	currentTier := config.GetCurrentTier(townSettings)
 	if currentTier == "" && len(townSettings.RoleAgents) > 0 {
-		fmt.Println("Warning: overwriting custom role_agents configuration")
+		fmt.Fprintln(e.out, "Warning: overwriting custom role_agents configuration")
 	}
 
 	if err := config.ApplyCostTier(townSettings, tier); err != nil {
@@ -169,10 +174,10 @@ func runConfigCostTier(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving town settings: %w", err)
 	}
 
-	fmt.Printf("Cost tier set to %s\n", style.Bold.Render(tierName))
-	fmt.Printf("  %s\n\n", config.TierDescription(tier))
-	fmt.Println("Role assignments:")
-	fmt.Println(config.FormatTierRoleTable(tier))
+	fmt.Fprintf(e.out, "Cost tier set to %s\n", style.Bold.Render(tierName))
+	fmt.Fprintf(e.out, "  %s\n\n", config.TierDescription(tier))
+	fmt.Fprintln(e.out, "Role assignments:")
+	fmt.Fprintln(e.out, config.FormatTierRoleTable(tier))
 	return nil
 }
 
@@ -239,7 +244,16 @@ type AgentListItem struct {
 }
 
 func runConfigAgentList(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwd()
+	e := cwdConfigCmdEnv()
+	e.agentListJSON = false
+	if cmd != nil {
+		e.agentListJSON, _ = cmd.Flags().GetBool("json")
+	}
+	return configAgentList(e, args)
+}
+
+func configAgentList(e configCmdEnv, args []string) error {
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -299,22 +313,21 @@ func runConfigAgentList(cmd *cobra.Command, args []string) error {
 		return items[i].Name < items[j].Name
 	})
 
-	jsonOutput, _ := cmd.Flags().GetBool("json")
-	if jsonOutput {
-		enc := json.NewEncoder(os.Stdout)
+	if e.agentListJSON {
+		enc := json.NewEncoder(e.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(items)
 	}
 
 	// Text output
-	fmt.Printf("%s\n\n", style.Bold.Render("Available Agents"))
+	fmt.Fprintf(e.out, "%s\n\n", style.Bold.Render("Available Agents"))
 	for _, item := range items {
 		typeLabel := style.Dim.Render("[" + item.Type + "]")
-		fmt.Printf("  %s %s %s", style.Bold.Render(item.Name), typeLabel, item.Command)
+		fmt.Fprintf(e.out, "  %s %s %s", style.Bold.Render(item.Name), typeLabel, item.Command)
 		if item.Args != "" {
-			fmt.Printf(" %s", item.Args)
+			fmt.Fprintf(e.out, " %s", item.Args)
 		}
-		fmt.Println()
+		fmt.Fprintln(e.out)
 	}
 
 	// Show default
@@ -322,15 +335,19 @@ func runConfigAgentList(cmd *cobra.Command, args []string) error {
 	if defaultAgent == "" {
 		defaultAgent = "claude"
 	}
-	fmt.Printf("\nDefault: %s\n", style.Bold.Render(defaultAgent))
+	fmt.Fprintf(e.out, "\nDefault: %s\n", style.Bold.Render(defaultAgent))
 
 	return nil
 }
 
 func runConfigAgentGet(cmd *cobra.Command, args []string) error {
+	return configAgentGet(cwdConfigCmdEnv(), args)
+}
+
+func configAgentGet(e configCmdEnv, args []string) error {
 	name := args[0]
 
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -396,10 +413,14 @@ func displayAgentConfig(name string, runtime *config.RuntimeConfig, preset *conf
 }
 
 func runConfigAgentSet(cmd *cobra.Command, args []string) error {
+	return configAgentSet(cwdConfigCmdEnv(), args)
+}
+
+func configAgentSet(e configCmdEnv, args []string) error {
 	name := args[0]
 	commandLine := args[1]
 
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -426,7 +447,7 @@ func runConfigAgentSet(cmd *cobra.Command, args []string) error {
 
 	// Determine the provider: use --provider flag if given, otherwise infer
 	// from the command binary name if it matches a known preset.
-	provider := configAgentSetProvider
+	provider := e.agentSetProvider
 	if provider == "" {
 		cmdBase := parts[0]
 		if idx := strings.LastIndexByte(cmdBase, '/'); idx >= 0 {
@@ -449,13 +470,13 @@ func runConfigAgentSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving town settings: %w", err)
 	}
 
-	fmt.Printf("Agent '%s' set to: %s\n", style.Bold.Render(name), commandLine)
+	fmt.Fprintf(e.out, "Agent '%s' set to: %s\n", style.Bold.Render(name), commandLine)
 
 	// Check if this overrides a built-in
 	builtInAgents := registry.Names()
 	for _, builtin := range builtInAgents {
 		if name == builtin {
-			fmt.Printf("\n%s\n", style.Dim.Render("(overriding built-in '"+builtin+"' preset)"))
+			fmt.Fprintf(e.out, "\n%s\n", style.Dim.Render("(overriding built-in '"+builtin+"' preset)"))
 			break
 		}
 	}
@@ -464,9 +485,13 @@ func runConfigAgentSet(cmd *cobra.Command, args []string) error {
 }
 
 func runConfigAgentRemove(cmd *cobra.Command, args []string) error {
+	return configAgentRemove(cwdConfigCmdEnv(), args)
+}
+
+func configAgentRemove(e configCmdEnv, args []string) error {
 	name := args[0]
 
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -499,12 +524,16 @@ func runConfigAgentRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving town settings: %w", err)
 	}
 
-	fmt.Printf("Removed custom agent '%s'\n", style.Bold.Render(name))
+	fmt.Fprintf(e.out, "Removed custom agent '%s'\n", style.Bold.Render(name))
 	return nil
 }
 
 func runConfigDefaultAgent(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwd()
+	return configDefaultAgent(cwdConfigCmdEnv(), args)
+}
+
+func configDefaultAgent(e configCmdEnv, args []string) error {
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -528,7 +557,7 @@ func runConfigDefaultAgent(cmd *cobra.Command, args []string) error {
 		if defaultAgent == "" {
 			defaultAgent = "claude"
 		}
-		fmt.Printf("Default agent: %s\n", style.Bold.Render(defaultAgent))
+		fmt.Fprintf(e.out, "Default agent: %s\n", style.Bold.Render(defaultAgent))
 		return nil
 	}
 
@@ -562,12 +591,16 @@ func runConfigDefaultAgent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving town settings: %w", err)
 	}
 
-	fmt.Printf("Default agent set to '%s'\n", style.Bold.Render(name))
+	fmt.Fprintf(e.out, "Default agent set to '%s'\n", style.Bold.Render(name))
 	return nil
 }
 
 func runConfigAgentEmailDomain(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwd()
+	return configAgentEmailDomain(cwdConfigCmdEnv(), args)
+}
+
+func configAgentEmailDomain(e configCmdEnv, args []string) error {
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -585,8 +618,8 @@ func runConfigAgentEmailDomain(cmd *cobra.Command, args []string) error {
 		if domain == "" {
 			domain = DefaultAgentEmailDomain
 		}
-		fmt.Printf("Agent email domain: %s\n", style.Bold.Render(domain))
-		fmt.Printf("\nExample: gastown/crew/jack → gastown.crew.jack@%s\n", domain)
+		fmt.Fprintf(e.out, "Agent email domain: %s\n", style.Bold.Render(domain))
+		fmt.Fprintf(e.out, "\nExample: gastown/crew/jack → gastown.crew.jack@%s\n", domain)
 		return nil
 	}
 
@@ -609,8 +642,8 @@ func runConfigAgentEmailDomain(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving town settings: %w", err)
 	}
 
-	fmt.Printf("Agent email domain set to '%s'\n", style.Bold.Render(domain))
-	fmt.Printf("\nExample: gastown/crew/jack → gastown.crew.jack@%s\n", domain)
+	fmt.Fprintf(e.out, "Agent email domain set to '%s'\n", style.Bold.Render(domain))
+	fmt.Fprintf(e.out, "\nExample: gastown/crew/jack → gastown.crew.jack@%s\n", domain)
 	return nil
 }
 
@@ -724,10 +757,14 @@ Examples:
 }
 
 func runConfigSet(cmd *cobra.Command, args []string) error {
+	return configSet(cwdConfigCmdEnv(), args)
+}
+
+func configSet(e configCmdEnv, args []string) error {
 	key := args[0]
 	value := args[1]
 
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -829,8 +866,8 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		if err := daemon.SavePatrolConfig(townRoot, patrolCfg); err != nil {
 			return fmt.Errorf("saving daemon.json: %w", err)
 		}
-		fmt.Printf("Set GT_DOLT_PORT = %s in mayor/daemon.json\n", style.Bold.Render(value))
-		fmt.Printf("  %s\n", style.Dim.Render("Restart the daemon for the change to take effect: gt daemon restart"))
+		fmt.Fprintf(e.out, "Set GT_DOLT_PORT = %s in mayor/daemon.json\n", style.Bold.Render(value))
+		fmt.Fprintf(e.out, "  %s\n", style.Dim.Render("Restart the daemon for the change to take effect: gt daemon restart"))
 		return nil
 
 	default:
@@ -844,14 +881,18 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving town settings: %w", err)
 	}
 
-	fmt.Printf("Set %s = %s\n", style.Bold.Render(key), value)
+	fmt.Fprintf(e.out, "Set %s = %s\n", style.Bold.Render(key), value)
 	return nil
 }
 
 func runConfigGet(cmd *cobra.Command, args []string) error {
+	return configGet(cwdConfigCmdEnv(), args)
+}
+
+func configGet(e configCmdEnv, args []string) error {
 	key := args[0]
 
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := e.findTown()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
@@ -913,7 +954,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 
 	case "maintenance.window", "maintenance.interval", "maintenance.threshold", "maintenance.mode",
 		"maintenance.gc_min_bytes", "maintenance.gc_growth_ratio":
-		return getMaintenanceConfig(townRoot, key)
+		return getMaintenanceConfig(e.out, townRoot, key)
 
 	case "dolt.port":
 		patrolCfg, err := daemon.ReadPatrolConfig(townRoot)
@@ -922,11 +963,11 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		}
 		if patrolCfg != nil {
 			if v, ok := patrolCfg.Env["GT_DOLT_PORT"]; ok {
-				fmt.Println(v)
+				fmt.Fprintln(e.out, v)
 				return nil
 			}
 		}
-		fmt.Println("3307") // DefaultPort
+		fmt.Fprintln(e.out, "3307") // DefaultPort
 		return nil
 
 	default:
@@ -936,7 +977,7 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  maintenance.interval\n  maintenance.threshold\n  maintenance.mode\n  maintenance.gc_min_bytes\n  maintenance.gc_growth_ratio\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*", key)
 	}
 
-	fmt.Println(value)
+	fmt.Fprintln(e.out, value)
 	return nil
 }
 
@@ -1046,7 +1087,7 @@ func setMaintenanceConfig(townRoot, key, value string) error {
 }
 
 // getMaintenanceConfig gets a maintenance.* key from daemon.json (patrol config).
-func getMaintenanceConfig(townRoot, key string) error {
+func getMaintenanceConfig(out io.Writer, townRoot, key string) error {
 	patrolConfig, err := daemon.ReadPatrolConfig(townRoot)
 	if err != nil {
 		return err
@@ -1107,7 +1148,7 @@ func getMaintenanceConfig(townRoot, key string) error {
 		value = strconv.FormatFloat(r, 'g', -1, 64)
 	}
 
-	fmt.Println(value)
+	fmt.Fprintln(out, value)
 	return nil
 }
 
@@ -1420,4 +1461,28 @@ config values such as the default AI model or provider.`,
 
 	// Register with root
 	rootCmd.AddCommand(configCmd)
+}
+
+// configCmdEnv is where a gt config command finds its town and writes its
+// report, with the flags it reads. The cobra entry points use the cwd's town,
+// stdout and the parsed flags (agentListJSON is the invoking command's
+// --json); tests give a town and a buffer, so they need
+// no chdir and no flag-global writes.
+type configCmdEnv struct {
+	findTown         func() (string, error)
+	out              io.Writer
+	agentListJSON    bool
+	agentSetProvider string
+}
+
+func cwdConfigCmdEnv() configCmdEnv {
+	return configCmdEnv{
+		findTown:         workspace.FindFromCwd,
+		out:              os.Stdout,
+		agentSetProvider: configAgentSetProvider,
+	}
+}
+
+func townConfigCmdEnv(townRoot string, out io.Writer) configCmdEnv {
+	return configCmdEnv{findTown: func() (string, error) { return townRoot, nil }, out: out}
 }
