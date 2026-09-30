@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,6 +162,9 @@ type Hermetic struct {
 
 	cfg  hermeticConfig
 	snap *townSnapshot
+	// refusedGitLog is where WithoutGit's refusing git records calls; ""
+	// without WithoutGit.
+	refusedGitLog string
 }
 
 type hermeticConfig struct {
@@ -184,9 +188,11 @@ func WithDolt() HermeticOption {
 // WithoutGit puts a git on PATH that refuses to run, ahead of the real one.
 // A package listed in internal/testpolicy/gitfree.txt passes it from its
 // unit-tier TestMain, so a git process started anywhere in that tier, even
-// from production code, fails the test that started it instead of running
-// (docs/testing.md, "Seams for external tools"). The integration tier's
-// TestMain does not pass it.
+// from production code, fails instead of running (docs/testing.md, "Seams
+// for external tools"). The refusing git also records the call, and Finish
+// fails the run when any call was recorded: production code that tolerates
+// a git failure would otherwise swallow the refusal and let the test pass.
+// The integration tier's TestMain does not pass it.
 func WithoutGit() HermeticOption {
 	return func(c *hermeticConfig) { c.noGit = true }
 }
@@ -194,20 +200,80 @@ func WithoutGit() HermeticOption {
 // noGitMessage is what the refusing git writes to stderr.
 const noGitMessage = "git: this package's unit tier runs no git (internal/testpolicy/gitfree.txt); use gitfake or canned output, or move the test to the integration tier"
 
-// installRefusingGit writes a git that prints noGitMessage and exits 1 into
-// dir, and puts dir first on PATH.
-func installRefusingGit(dir string) error {
+// refusedGitLog is the file in the refusing git's directory that records
+// each refused call.
+const refusedGitLog = "refused.log"
+
+// installRefusingGit writes the refusing git into dir and puts dir first on
+// PATH. It returns the refused-call log's path, or "" where no refusing git
+// is installed (Windows).
+func installRefusingGit(dir string) (string, error) {
 	if runtime.GOOS == "windows" {
-		return nil
+		return "", nil
 	}
+	log, err := writeRefusingGit(dir)
+	if err != nil {
+		return "", err
+	}
+	return log, os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// writeRefusingGit writes a git into dir that appends its working directory
+// and arguments to dir/refused.log, prints noGitMessage and exits 1, and
+// returns the log's path.
+func writeRefusingGit(dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("creating refusing-git dir: %w", err)
+		return "", fmt.Errorf("creating refusing-git dir: %w", err)
 	}
-	script := "#!/bin/sh\necho \"" + noGitMessage + "\" >&2\nexit 1\n"
+	log := filepath.Join(dir, refusedGitLog)
+	script := "#!/bin/sh\n" +
+		"printf '%s\\tgit %s\\n' \"$PWD\" \"$*\" >> " + shellQuote(log) + "\n" +
+		"echo \"" + noGitMessage + "\" >&2\n" +
+		"exit 1\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil { //nolint:gosec // G306: the refusing git must be executable
-		return fmt.Errorf("writing refusing git: %w", err)
+		return "", fmt.Errorf("writing refusing git: %w", err)
 	}
-	return os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log, nil
+}
+
+// shellQuote quotes s as one single-quoted sh word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// failOnRefusedGit reports every call the refusing git recorded in log to w
+// and returns code, forced to 1 from 0, when there was any. A missing log means no
+// call was refused; an unreadable one fails the run, since it cannot show
+// there was none.
+func failOnRefusedGit(code int, log string, w io.Writer) int {
+	if log == "" {
+		return code
+	}
+	data, err := os.ReadFile(log)
+	if errors.Is(err, os.ErrNotExist) {
+		return code
+	}
+	if err != nil {
+		fmt.Fprintf(w, "\nHERMETIC TRIPWIRE: cannot read the refusing git's log %s: %v\n", log, err)
+		return 1
+	}
+	if len(data) == 0 {
+		return code
+	}
+	calls := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	fmt.Fprintf(w, "\n%s\n", strings.Repeat("=", 72))
+	fmt.Fprintf(w, "HERMETIC TRIPWIRE: the unit tier started git %d time(s) under WithoutGit\n", len(calls))
+	for _, c := range calls {
+		fmt.Fprintf(w, "  - %s\n", c)
+	}
+	fmt.Fprintf(w, "The refusal fails the run even when the code under test tolerated the git\n")
+	fmt.Fprintf(w, "error. Answer git through a fake (gitfake, canned output) or move the test\n")
+	fmt.Fprintf(w, "to the integration tier (docs/testing.md, \"Seams for external tools\").\n")
+	fmt.Fprintf(w, "%s\n", strings.Repeat("=", 72))
+	if code == 0 {
+		code = 1
+	}
+	return code
 }
 
 // HermeticMain is the standard TestMain body:
@@ -359,9 +425,11 @@ func StartHermetic(opts ...HermeticOption) (*Hermetic, error) {
 	}
 
 	if h.cfg.noGit {
-		if err := installRefusingGit(filepath.Join(sandbox, "nogit")); err != nil {
+		log, err := installRefusingGit(filepath.Join(sandbox, "nogit"))
+		if err != nil {
 			return nil, err
 		}
+		h.refusedGitLog = log
 	}
 
 	h.TmuxSocket = isolateTmuxSocket()
@@ -435,6 +503,8 @@ func (h *Hermetic) Finish(code int) int {
 			code = 1
 		}
 	}
+	// Read before the sandbox that holds it is removed.
+	code = failOnRefusedGit(code, h.refusedGitLog, os.Stderr)
 	if h.SandboxDir != "" {
 		_ = os.RemoveAll(h.SandboxDir)
 	}

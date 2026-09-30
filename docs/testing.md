@@ -318,7 +318,7 @@ The per-package argv fakes that predate `gitfake` (`internal/version/fakegit_tes
 
 The `no-subprocess` rule lets a unit test run git, because most packages still do. A converted package gives up that exemption by adding its line to `internal/testpolicy/gitfree.txt`. `TestGitFree` then holds it to the `no-git` rule:
 - Its unit-tier tests may not call `exec.Command("git", ...)`, or build a real wrapper with `git.NewGit` or `git.NewGitWithDir` (unqualified `NewGit` inside `internal/git`).
-- Its unit-tier `TestMain` passes `testutil.WithoutGit()`. That option puts a git that refuses to run first on `PATH`, so git reached through production code fails the test that reached it. The static rule cannot see that path.
+- Its unit-tier `TestMain` passes `testutil.WithoutGit()`. That option puts a git that refuses to run first on `PATH`, for git reached through production code, which the static rule cannot see. The refusing git exits 1 and records the call, and `HermeticMain` fails the run when any call was recorded, listing each one's directory and arguments under `HERMETIC TRIPWIRE`. So a refused call fails the run even when the code under test tolerated the git error and every test passed (gt-et9zp).
 
 `go test -tags integration` compiles both tiers together, and the integration tier needs real git, so such a package has two TestMains, one per tier:
 
