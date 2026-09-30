@@ -189,6 +189,10 @@ type Finding struct {
 	Path     string `json:"path,omitempty"`
 	Line     int    `json:"line,omitempty"`
 	Title    string `json:"title,omitempty"`
+	// Detail is the finding's body text, the argument behind Title. Omitted
+	// when empty, so a note written before this field existed round-trips
+	// unchanged.
+	Detail string `json:"detail,omitempty"`
 }
 
 // reviewMarkerSuffix is the role tail gt slot status, the dashboard's Gate
