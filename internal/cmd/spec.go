@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -576,9 +577,9 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 	}
 }
 
-// specCandidates reads every operational rig's ready board and keeps the
-// eligible spec beads, ordered across rigs. A rig whose board cannot be read
-// is reported and skipped; the rest still dispatch.
+// specCandidates reads every operational rig's ready spec features and keeps
+// the eligible ones, ordered across rigs. A rig whose board cannot be read is
+// reported and skipped; the rest still dispatch.
 func specCandidates(townRoot string) ([]specCandidate, []string) {
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -595,13 +596,23 @@ func specCandidates(townRoot string) ([]specCandidate, []string) {
 		if parked, _ := IsRigParkedOrDocked(townRoot, name); parked {
 			continue
 		}
-		issues, err := readyIssuesUnlimited(rigPath)
+		if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
+			continue
+		}
+		issues, err := specReadyBoard(rigPath)
 		if err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 		for _, issue := range issues {
 			s := specFromIssue(issue)
+			// The query filtered on label spec server-side, and bd ready
+			// --json does not always serialize labels, so the label is known
+			// even when absent from the row. The full bead is re-read before
+			// any decision.
+			if !s.HasLabel(specdispatch.SpecLabel) {
+				s.Labels = append(s.Labels, specdispatch.SpecLabel)
+			}
 			if ok, _ := specdispatch.Eligible(s); !ok {
 				continue
 			}
@@ -618,6 +629,58 @@ func specCandidates(townRoot string) ([]specCandidate, []string) {
 		out = append(out, specCandidate{Spec: s, Rig: rigOf[s.ID]})
 	}
 	return out, errs
+}
+
+// specReadyArgs is the ready query: unassigned spec features, with the
+// dispatcher's exclusions and the town's non-dispatchable families filtered
+// server-side, unlimited.
+func specReadyArgs() []string {
+	exclude := append(append([]string(nil), constants.NonDispatchableBeadLabels...), specdispatch.ExcludedLabels()...)
+	return []string{
+		"ready", "--json",
+		"--label", specdispatch.SpecLabel,
+		"--type", specdispatch.SpecType,
+		"--unassigned",
+		"--exclude-label", strings.Join(exclude, ","),
+		"--limit", "0",
+	}
+}
+
+// specReadyBoard runs the ready query in one rig. A var so tests can serve a
+// board without a live bd.
+var specReadyBoard = func(rigPath string) ([]*beads.Issue, error) {
+	out, err := runBdJSONAllowStale(rigPath, specReadyArgs()...)
+	if err != nil {
+		return nil, err
+	}
+	return parseSpecReady(out)
+}
+
+// parseSpecReady accepts a bare JSON array or an envelope with an "issues"
+// array; empty output is an empty board.
+func parseSpecReady(out []byte) ([]*beads.Issue, error) {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	var issues []*beads.Issue
+	if strings.HasPrefix(trimmed, "[") {
+		if err := json.Unmarshal([]byte(trimmed), &issues); err != nil {
+			return nil, fmt.Errorf("parsing bd ready: %w", err)
+		}
+		return issues, nil
+	}
+	var env struct {
+		Issues []*beads.Issue `json:"issues"`
+		Data   []*beads.Issue `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+		return nil, fmt.Errorf("parsing bd ready: %w", err)
+	}
+	if env.Issues != nil {
+		return env.Issues, nil
+	}
+	return env.Data, nil
 }
 
 // annotateSpecOnce adds text as a comment unless the bead already carries a

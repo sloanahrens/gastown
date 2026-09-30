@@ -443,3 +443,21 @@ func TestHasCommentWithPrefix(t *testing.T) {
 		t.Error("different note kind matched")
 	}
 }
+
+func TestSpecReadyQueryAndParse(t *testing.T) {
+	args := strings.Join(specReadyArgs(), " ")
+	for _, want := range []string{"ready --json", "--label spec", "--type feature", "--unassigned", "--limit 0", "needs-human", "gt:ready-to-land", "spec-dispatch-failed"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("ready args %q missing %q", args, want)
+		}
+	}
+	for _, in := range []string{`[{"id":"gt-a","issue_type":"feature","status":"open"}]`, `{"issues":[{"id":"gt-a","issue_type":"feature","status":"open"}]}`} {
+		got, err := parseSpecReady([]byte(in))
+		if err != nil || len(got) != 1 || got[0].ID != "gt-a" {
+			t.Errorf("parseSpecReady(%s) = %v, %v", in, got, err)
+		}
+	}
+	if got, err := parseSpecReady([]byte("")); err != nil || got != nil {
+		t.Errorf("empty = %v %v", got, err)
+	}
+}

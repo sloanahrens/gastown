@@ -85,6 +85,9 @@ const HostSafetyPrompt = "HOST SAFETY (spec dispatcher): this spec touches insta
 // Labels that keep a bead away from the dispatcher whatever its lint says.
 var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-mayor-review", DispatchFailedLabel}
 
+// ExcludedLabels returns the labels that keep a bead from the dispatcher.
+func ExcludedLabels() []string { return append([]string(nil), excludedLabels...) }
+
 // Eligible reports whether a ready bead is the dispatcher's to consider, and
 // why not when it is not. It is the candidate filter: status open, unassigned,
 // label spec, type feature, and none of the excluded labels or a deferred
