@@ -39,7 +39,7 @@ This guard blocks operations that could cause irreversible damage:
   - git reset <remote-tracking-ref>  (--soft/--mixed/--hard/implicit: resetting
     onto origin/main etc. reverts everything merged since the checkout was cut
     and, for the tree-carrying modes, destroys uncommitted work — see gt-63sz)
-  - git clean with a force flag: -f, -fd, -fdx
+  - git clean with a force flag: -f, -fd, -fdx, --force
   - drop table/database
   - truncate table
   - find/bfs/fd/rg/grep -r/du/ls -R rooted at /, ~, $HOME, /Users, /System,
@@ -79,23 +79,6 @@ Exit codes:
 
 func init() {
 	tapGuardCmd.AddCommand(tapGuardDangerousCmd)
-}
-
-// dangerousPattern defines a pattern to match and its human-readable reason.
-// All substrings must appear in the command (simple containment check).
-// For patterns that need smarter matching (rm -rf, git push --force),
-// use the dedicated match functions instead.
-type dangerousPattern struct {
-	contains []string
-	reason   string
-}
-
-// fragmentPatterns use simple containment matching (all substrings must appear).
-var fragmentPatterns = []dangerousPattern{
-	{[]string{"git", "reset", "--hard"}, "Hard reset discards all uncommitted changes irreversibly"},
-	{[]string{"drop", "table"}, "database table destruction"},
-	{[]string{"drop", "database"}, "database destruction"},
-	{[]string{"truncate", "table"}, "database table truncation"},
 }
 
 // safeForceFlags are git push flags that look like --force but are safe.
@@ -233,11 +216,11 @@ func evaluateDangerousCommand(command string, depth int, townRoot string) (reaso
 		return r, alt
 	}
 
-	// Check simple fragment patterns
-	for _, pattern := range fragmentPatterns {
-		if matchesAllFragments(lowerTokens, pattern.contains) {
-			return pattern.reason, ""
-		}
+	if r := matchesGitResetHard(tokens); r != "" {
+		return r, ""
+	}
+	if r := matchesDDLDestruction(tokens); r != "" {
+		return r, ""
 	}
 
 	if depth >= maxDangerousNestDepth {
@@ -1517,7 +1500,22 @@ func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
 	return "", ""
 }
 
-const gitCleanReason = "git clean -f deletes untracked files irreversibly"
+// hasForceFlag reports whether args carry git's force flag in either
+// spelling: the long form "--force", or a short option with 'f' bundled in
+// ("-f", "-fd", "-fdx"). The short match is case-sensitive through
+// hasShortFlagLetter (-F is not -f); the long form is an exact token
+// comparison, so an unrelated long flag that merely starts with the same
+// letters ("--force-with-lease") is not read as one.
+func hasForceFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--force" {
+			return true
+		}
+	}
+	return hasShortFlagLetter(args, 'f')
+}
+
+const gitCleanReason = "git clean -f/--force deletes untracked files irreversibly"
 
 // matchesGitClean blocks a `git clean` invocation that carries a force flag.
 //
@@ -1532,8 +1530,9 @@ const gitCleanReason = "git clean -f deletes untracked files irreversibly"
 //
 // tokens must be original-case, shell-aware tokens (see shellTokenize): the
 // command and subcommand are compared case-insensitively, while the force flag
-// is matched case-sensitively, so an unrelated "-x" or a long-form flag of
-// another subcommand is not read as one.
+// is matched case-sensitively, and in both its spellings — -f/-fd/-fdx or
+// --force (hasForceFlag) — so an unrelated "-x" is not read as one and a
+// long flag of another subcommand is not read as the long form.
 func matchesGitClean(tokens []string) string {
 	for _, segment := range splitShellSegments(tokens) {
 		for i, tok := range segment {
@@ -1545,8 +1544,92 @@ func matchesGitClean(tokens []string) string {
 			if sub < 0 || !strings.EqualFold(rest[sub], "clean") {
 				continue
 			}
-			if hasShortFlagLetter(rest[sub+1:], 'f') {
+			if hasForceFlag(rest[sub+1:]) {
 				return gitCleanReason
+			}
+		}
+	}
+	return ""
+}
+
+const gitResetHardReason = "Hard reset discards all uncommitted changes irreversibly"
+
+// matchesGitResetHard blocks a `git reset` invocation carrying --hard.
+//
+// Structured like matchesGitClean, and for the same reason (gt-24lz6): the
+// words are one invocation — "git" running, "reset" as its subcommand,
+// "--hard" among that invocation's own arguments — not three fragments free
+// to land anywhere in the token list. Containment matched them wherever they
+// appeared, so a compound line that happened to spell "git", "reset" and
+// "--hard" in three different segments was rejected as a hard reset.
+//
+// matchesDangerousGitReset runs first and reports the more specific
+// reset-onto-a-remote-ref reason, so "git reset --hard origin/main" still
+// names the remote-tracking hazard rather than this one.
+//
+// tokens must be original-case, shell-aware tokens (see shellTokenize): the
+// command and subcommand are compared case-insensitively and the flag
+// case-sensitively, as in matchesGitClean.
+func matchesGitResetHard(tokens []string) string {
+	for _, segment := range splitShellSegments(tokens) {
+		for i, tok := range segment {
+			if !strings.EqualFold(filepath.Base(tok), "git") || !inCommandPosition(segment, i) {
+				continue
+			}
+			rest := segment[i+1:]
+			sub := gitSubcommandIndex(rest)
+			if sub < 0 || !strings.EqualFold(rest[sub], "reset") {
+				continue
+			}
+			for _, arg := range rest[sub+1:] {
+				if arg == "--hard" {
+					return gitResetHardReason
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// ddlDestructionPatterns are the destructive SQL verb/object pairs the guard
+// blocks, with the reason to report for each. Matching is case-insensitive —
+// SQL is — so "DROP TABLE users" is the same statement as "drop table users".
+var ddlDestructionPatterns = []struct {
+	verb   string
+	object string
+	reason string
+}{
+	{"drop", "table", "database table destruction"},
+	{"drop", "database", "database destruction"},
+	{"truncate", "table", "database table truncation"},
+}
+
+// matchesDDLDestruction blocks a destructive DDL statement: "drop table",
+// "drop database" or "truncate table".
+//
+// The verb and its object must be adjacent within one shell segment, with the
+// verb in command position — the same one-invocation reading as
+// matchesGitClean (gt-24lz6). Containment asked only that the two words appear
+// somewhere in the token list, so a compound line with "drop" in one segment
+// and an unrelated "table" in another was rejected as SQL destruction.
+//
+// inCommandPosition keeps a text-only mention out: `echo drop table users`
+// prints words, it drops nothing. A quoted SQL payload stays opaque for the
+// same reason (TestQuotedSQLStaysOpaque), while the fail-closed reading still
+// blocks an object reached through a non-text command
+// (`mysql -e drop table users`).
+//
+// tokens must be original-case, shell-aware tokens (see shellTokenize).
+func matchesDDLDestruction(tokens []string) string {
+	for _, segment := range splitShellSegments(tokens) {
+		for i, tok := range segment {
+			if i+1 >= len(segment) || !inCommandPosition(segment, i) {
+				continue
+			}
+			for _, p := range ddlDestructionPatterns {
+				if strings.EqualFold(tok, p.verb) && strings.EqualFold(segment[i+1], p.object) {
+					return p.reason
+				}
 			}
 		}
 	}
