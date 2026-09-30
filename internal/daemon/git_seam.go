@@ -16,6 +16,16 @@ type daemonGit interface {
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
+
+	// Staging, for the checkpoint dog.
+	Status() (*git.GitStatus, error)
+	Add(pathspecs ...string) error
+	ResetFiles(pathspecs ...string) error
+	StagedChanges() ([]git.StagedChange, error)
+	WriteTree() (string, error)
+	Commit(message string) error
+	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
+	git.RevertReader
 }
 
 var _ daemonGit = (*git.Git)(nil)
