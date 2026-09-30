@@ -58,12 +58,6 @@ func GetIntegrationBranchField(description string) string {
 	return getMetadataField(description, "integration_branch")
 }
 
-// GetBaseBranchField extracts the base_branch field from an epic's description.
-// Returns empty string if the field is not found.
-func GetBaseBranchField(description string) string {
-	return getMetadataField(description, "base_branch")
-}
-
 // getMetadataField extracts a key: value field from a description string.
 // The key match is case-insensitive.
 func getMetadataField(description, key string) string {
@@ -84,47 +78,6 @@ func getMetadataField(description, key string) string {
 		}
 	}
 	return ""
-}
-
-// AddIntegrationBranchField adds or updates the integration_branch field in a description.
-func AddIntegrationBranchField(description, branchName string) string {
-	return addMetadataField(description, "integration_branch", branchName)
-}
-
-// AddBaseBranchField adds or updates the base_branch field in a description.
-func AddBaseBranchField(description, baseBranch string) string {
-	return addMetadataField(description, "base_branch", baseBranch)
-}
-
-// addMetadataField adds or updates a key: value field in a description.
-func addMetadataField(description, key, value string) string {
-	fieldLine := key + ": " + value
-
-	if description == "" {
-		return fieldLine
-	}
-
-	lowerKey := strings.ToLower(key) + ":"
-
-	lines := strings.Split(description, "\n")
-	var newLines []string
-	found := false
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(trimmed), lowerKey) {
-			newLines = append(newLines, fieldLine)
-			found = true
-		} else {
-			newLines = append(newLines, line)
-		}
-	}
-
-	if !found {
-		newLines = append([]string{fieldLine}, newLines...)
-	}
-
-	return strings.Join(newLines, "\n")
 }
 
 // BuildIntegrationBranchName expands an integration branch template with variables.

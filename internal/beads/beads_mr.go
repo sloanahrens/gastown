@@ -19,47 +19,6 @@ func (b *Beads) FindMRForBranchAny(branch string) (*Issue, error) {
 	return b.findMRForBranch(branch, false)
 }
 
-// FindMRForBranchAndSHA searches for an open merge-request bead matching both
-// the branch name AND the commit SHA. This is the correct dedup key: two MRs
-// from the same branch but with different commit SHAs are distinct submissions
-// (e.g., polecat fixed a gate failure and re-pushed). See GH#3032.
-//
-// Returns nil if no MR matches both branch and SHA. Callers should create a
-// new MR in that case and supersede old MRs for the same source issue.
-func (b *Beads) FindMRForBranchAndSHA(branch, commitSHA string) (*Issue, error) {
-	issues, err := b.ListMergeRequests(ListOptions{
-		Status: "all",
-		Label:  "gt:merge-request",
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	branchPrefix := "branch: " + branch + "\n"
-	for _, issue := range issues {
-		if issue.Status == "closed" {
-			continue
-		}
-		if !strings.HasPrefix(issue.Description, branchPrefix) {
-			continue
-		}
-		// Branch matches — check commit SHA.
-		// If the MR has no commit_sha field (legacy), fall back to branch-only
-		// match for backward compatibility.
-		fields := ParseMRFields(issue)
-		if fields != nil && fields.CommitSHA != "" && commitSHA != "" {
-			if fields.CommitSHA != commitSHA {
-				// Same branch but different SHA — this is a stale MR.
-				// Don't return it; caller will create a new MR and supersede.
-				continue
-			}
-		}
-		return issue, nil
-	}
-
-	return nil, nil
-}
-
 // findMRForBranch searches the wisps table (Dolt) for a merge-request
 // bead matching the given branch.
 // Uses status=all which includes all issue statuses with full descriptions.
@@ -159,36 +118,4 @@ func (b *Beads) FindOpenMRsForIssue(issueID string) ([]*Issue, error) {
 func MatchesMRSourceIssue(description, issueID string) bool {
 	needle := "source_issue: " + issueID + "\n"
 	return strings.Contains(description, needle)
-}
-
-// NonTerminalMRsForIssue returns every merge-request bead whose source_issue
-// matches issueID and whose status is not terminal (closed/tombstone) —
-// unlike FindOpenMRsForIssue, this also catches an MR the refinery has
-// already claimed: status transitions open -> in_progress the moment the
-// refinery picks one up (internal/refinery/types.go:183), and a
-// status=="open" filter would miss it.
-//
-// This is the fallback the gt-6hmz close-time invariant's exit (b) uses when
-// pendingMRID is empty — i.e. active_mr was never recorded on the agent
-// bead — rather than treating "unknown" the same as "no MR exists" (gt-h8ld).
-func (b *Beads) NonTerminalMRsForIssue(issueID string) ([]*Issue, error) {
-	issues, err := b.ListMergeRequests(ListOptions{
-		Status: "all",
-		Label:  "gt:merge-request",
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var matches []*Issue
-	for _, issue := range issues {
-		if !MatchesMRSourceIssue(issue.Description, issueID) {
-			continue
-		}
-		if IssueStatus(issue.Status).IsTerminal() {
-			continue
-		}
-		matches = append(matches, issue)
-	}
-	return matches, nil
 }

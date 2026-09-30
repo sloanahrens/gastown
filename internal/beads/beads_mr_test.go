@@ -195,8 +195,8 @@ func TestIssueDepUnmarshalDependencyTypeTakesPrecedenceOverType(t *testing.T) {
 	if got := HasUnresolvedBlockers(issue); !got {
 		t.Fatal("canonical blocks dependency should still block")
 	}
-	if got := FirstUnresolvedBlockerID(issue); got != "gt-canonical-blocks" {
-		t.Fatalf("FirstUnresolvedBlockerID() = %q, want gt-canonical-blocks", got)
+	if got := firstUnresolvedBlockerID(issue); got != "gt-canonical-blocks" {
+		t.Fatalf("firstUnresolvedBlockerID() = %q, want gt-canonical-blocks", got)
 	}
 }
 
@@ -279,11 +279,11 @@ func TestHasUnresolvedBlockersFallsBackToListFields(t *testing.T) {
 	if !HasUnresolvedBlockers(&Issue{DependencyCount: 1}) {
 		t.Fatal("DependencyCount fallback should fail closed when detailed dependencies are absent")
 	}
-	if got := FirstUnresolvedBlockerID(&Issue{DependencyCount: 1}); got != "" {
-		t.Fatalf("FirstUnresolvedBlockerID() = %q, want empty when only count is available", got)
+	if got := firstUnresolvedBlockerID(&Issue{DependencyCount: 1}); got != "" {
+		t.Fatalf("firstUnresolvedBlockerID() = %q, want empty when only count is available", got)
 	}
-	if got := FirstUnresolvedBlockerID(&Issue{BlockedBy: []string{"external:gt:gt-blocker"}}); got != "gt-blocker" {
-		t.Fatalf("FirstUnresolvedBlockerID() = %q, want gt-blocker", got)
+	if got := firstUnresolvedBlockerID(&Issue{BlockedBy: []string{"external:gt:gt-blocker"}}); got != "gt-blocker" {
+		t.Fatalf("firstUnresolvedBlockerID() = %q, want gt-blocker", got)
 	}
 	if HasUnresolvedBlockers(&Issue{Dependencies: []IssueDep{{ID: "gt-closed", Status: "closed", DependencyType: "blocks"}}, BlockedByCount: 1}) {
 		t.Fatal("detailed closed dependency should override stale list blocker count")
@@ -312,8 +312,8 @@ func TestListMergeRequestsHydratesWispMRBlockers(t *testing.T) {
 	if !HasUnresolvedBlockers(issue) {
 		t.Fatalf("hydrated MR should be blocked: %#v", issue)
 	}
-	if got := FirstUnresolvedBlockerID(issue); got != "gt-blocker" {
-		t.Fatalf("FirstUnresolvedBlockerID() = %q, want gt-blocker", got)
+	if got := firstUnresolvedBlockerID(issue); got != "gt-blocker" {
+		t.Fatalf("firstUnresolvedBlockerID() = %q, want gt-blocker", got)
 	}
 	if issue.BlockedByCount != 1 {
 		t.Fatalf("BlockedByCount = %d, want 1", issue.BlockedByCount)
@@ -611,4 +611,14 @@ func TestListAgentBeadsFromWispsUsesPreloadedCache(t *testing.T) {
 	if _, ok := agents["gt-wisp-mr"]; ok {
 		t.Fatalf("ListAgentBeadsFromWisps() should not include the merge-request wisp: %#v", agents)
 	}
+}
+
+// firstUnresolvedBlockerID is the first id unresolvedBlockingDependencyIDs
+// reports, or "" when only a blocker count is available.
+func firstUnresolvedBlockerID(issue *Issue) string {
+	ids, _ := unresolvedBlockingDependencyIDs(issue)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
 }
