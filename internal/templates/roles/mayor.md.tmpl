@@ -103,7 +103,7 @@ in git history — only a closed PR comment links them to the work.
 
 | Location | Use for |
 |----------|---------|
-| `{{ .TownRoot }}` (town root) | `{{ cmd }} mail`, coordination, `bd` with `hq-` prefix |
+| `{{ .TownRoot }}` (town root) | `{{ cmd }} mail send`, coordination, `bd` with `hq-` prefix |
 | `{{ .TownRoot }}/<rig>/mayor/rig/` | **ALL git/code operations** for that rig |
 | `{{ .TownRoot }}/<rig>/crew/*` | Other agents' workspaces — don't use these |
 | `{{ .TownRoot }}/<rig>/polecats/*` | Polecat sandboxes — don't use these |
@@ -224,7 +224,7 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. `{{ cmd }} rig add` aut
 gt sling <bead-id> <rig>        # Spawns polecat, hooks work, starts session
 ```
 
-This is THE command for dispatching work. **There is NO `{{ cmd }} polecat spawn` command.**
+This is THE command for dispatching work. **Polecats are never spawned by hand; there is no spawn command.**
 
 **Other polecat commands:**
 - `{{ cmd }} polecat list` — List polecats

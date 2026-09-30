@@ -52,10 +52,11 @@ func TestCommandTokensResolve(t *testing.T) {
 	}
 	// A scanner that goes blind on one kind of file would pass silently, so
 	// each source must still yield a floor of invocations. The floors sit near
-	// half of the 2026-09-29 counts (formulas 772, templates 332, plugins 234,
-	// go 153, hooks 17, role configs 3); lower one only when files that call
-	// gt/bd were really removed.
-	floors := map[string]int{"formulas": 350, "templates": 150, "plugins": 100, "go": 70, "hooks": 8, "roles": 2}
+	// half of the 2026-09-29 counts (formulas 772, templates 583, plugins 234,
+	// go 153, hooks 17, role configs 3; templates jumped from 332 once
+	// {{ cmd }} counted as gt); lower one only when files that call gt/bd were
+	// really removed.
+	floors := map[string]int{"formulas": 350, "templates": 290, "plugins": 100, "go": 70, "hooks": 8, "roles": 2}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

@@ -95,6 +95,30 @@ func TestScanMarkdown(t *testing.T) {
 	)
 }
 
+// The role templates name the gt binary through the {{ cmd }} function, in any
+// spacing or trim form, both in prose spans and in fenced shell.
+func TestScanCmdTemplateIsGt(t *testing.T) {
+	t.Parallel()
+	text := strings.Join([]string{
+		"Run `{{ cmd }} remember` now.",            // 1
+		"Or `{{cmd}} worktree add`.",               // 2
+		"Or `{{- cmd -}} nosuchcmd`.",              // 3
+		"```bash",                                  // 4
+		"{{ cmd }} mail send {{ .RigName }}/w",     // 5
+		"x=$({{  cmd  }} rig list)",                // 6
+		"```",                                      // 7
+		"The {{ cmd }} binary is prose.",           // 8
+		"A `{{ .Cmd }} nope` is not the function.", // 9
+	}, "\n")
+	assertRefs(t, ScanMarkdown("t.md", text),
+		"1:gt remember",
+		"2:gt worktree add",
+		"3:gt nosuchcmd",
+		"5:gt mail send",
+		"6:gt rig list",
+	)
+}
+
 func TestScanJS(t *testing.T) {
 	t.Parallel()
 	text := strings.Join([]string{

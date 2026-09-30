@@ -33,6 +33,12 @@ func (r Ref) Token() string { return strings.TrimSpace(r.Bin + " " + strings.Joi
 // out ~/gt/... paths and gt-abc bead ids.
 var invocation = regexp.MustCompile("(?:^|[\\s;&|(`$'\"{])(gt|bd)[ \\t]+")
 
+// cmdTemplate matches the role templates' binary-name function in any spacing
+// or trim form: {{ cmd }}, {{cmd}}, {{- cmd -}}. The template renders it to
+// the gt binary's name, so a line naming a command through it is a gt
+// invocation. (bd has no template function; it is always written literally.)
+var cmdTemplate = regexp.MustCompile(`\{\{-?\s*cmd\s*-?\}\}`)
+
 // cmdWord is a token that can be a command word. Flags, placeholders,
 // variables, quoted strings and paths all stop word collection.
 var cmdWord = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -61,6 +67,7 @@ func commandWords(rest string) []string {
 // (log "Installing gt from ..."), unless a shell operator puts it in command
 // position ("... && gt prime").
 func scanShellLine(file string, line int, text string) []Ref {
+	text = cmdTemplate.ReplaceAllString(text, "gt")
 	trimmed := strings.TrimSpace(text)
 	if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
 		// In a comment, gt/bd counts only where an instruction would put it:
@@ -168,6 +175,7 @@ type markdown struct{ inFence bool }
 var inlineCode = regexp.MustCompile("`([^`]+)`")
 
 func (m *markdown) line(file string, n int, text string) []Ref {
+	text = cmdTemplate.ReplaceAllString(text, "gt")
 	trimmed := strings.TrimSpace(text)
 	if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
 		m.inFence = !m.inFence
