@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,31 +60,21 @@ func setupTestRigForConfig(t *testing.T) (string, string) {
 		t.Fatalf("save rig config: %v", err)
 	}
 
-	oldCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("get cwd: %v", err)
-	}
-	if err := os.Chdir(townRoot); err != nil {
-		t.Fatalf("chdir to town root: %v", err)
-	}
-	t.Cleanup(func() { os.Chdir(oldCwd) })
-
 	return townRoot, rigName
 }
 
 func TestRigConfigSet_WispLayerWarning(t *testing.T) {
+	t.Parallel()
 	t.Run("warns about ephemeral when writing to wisp layer", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
 
-		rigConfigSetGlobal = false
-		rigConfigSetBlock = false
 
-		stderrOut := captureStderr(t, func() {
-			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "max_polecats", "5"})
-			if err != nil {
-				t.Fatalf("runRigConfigSet: %v", err)
-			}
-		})
+		var stderr bytes.Buffer
+		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "max_polecats", "5"}, false, false)
+		if err != nil {
+			t.Fatalf("runRigConfigSet: %v", err)
+		}
+		stderrOut := stderr.String()
 
 		if !strings.Contains(stderrOut, "ephemeral") {
 			t.Errorf("expected ephemeral warning on stderr, got: %q", stderrOut)
@@ -100,17 +92,15 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 	})
 
 	t.Run("warns for string values in wisp layer", func(t *testing.T) {
-		_, rigName := setupTestRigForConfig(t)
+		townRoot, rigName := setupTestRigForConfig(t)
 
-		rigConfigSetGlobal = false
-		rigConfigSetBlock = false
 
-		stderrOut := captureStderr(t, func() {
-			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "default_formula", "mol-custom"})
-			if err != nil {
-				t.Fatalf("runRigConfigSet: %v", err)
-			}
-		})
+		var stderr bytes.Buffer
+		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "default_formula", "mol-custom"}, false, false)
+		if err != nil {
+			t.Fatalf("runRigConfigSet: %v", err)
+		}
+		stderrOut := stderr.String()
 
 		if !strings.Contains(stderrOut, "ephemeral") {
 			t.Errorf("expected ephemeral warning on stderr for string value, got: %q", stderrOut)
@@ -118,17 +108,15 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 	})
 
 	t.Run("warns for boolean values in wisp layer", func(t *testing.T) {
-		_, rigName := setupTestRigForConfig(t)
+		townRoot, rigName := setupTestRigForConfig(t)
 
-		rigConfigSetGlobal = false
-		rigConfigSetBlock = false
 
-		stderrOut := captureStderr(t, func() {
-			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "auto_restart", "false"})
-			if err != nil {
-				t.Fatalf("runRigConfigSet: %v", err)
-			}
-		})
+		var stderr bytes.Buffer
+		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "auto_restart", "false"}, false, false)
+		if err != nil {
+			t.Fatalf("runRigConfigSet: %v", err)
+		}
+		stderrOut := stderr.String()
 
 		if !strings.Contains(stderrOut, "ephemeral") {
 			t.Errorf("expected ephemeral warning on stderr for boolean value, got: %q", stderrOut)
@@ -136,18 +124,15 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 	})
 
 	t.Run("no ephemeral warning when using --block flag", func(t *testing.T) {
-		_, rigName := setupTestRigForConfig(t)
+		townRoot, rigName := setupTestRigForConfig(t)
 
-		rigConfigSetGlobal = false
-		rigConfigSetBlock = true
-		t.Cleanup(func() { rigConfigSetBlock = false })
 
-		stderrOut := captureStderr(t, func() {
-			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, "auto_restart"})
-			if err != nil {
-				t.Fatalf("runRigConfigSet with --block: %v", err)
-			}
-		})
+		var stderr bytes.Buffer
+		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "auto_restart"}, false, true)
+		if err != nil {
+			t.Fatalf("runRigConfigSet with --block: %v", err)
+		}
+		stderrOut := stderr.String()
 
 		// --block also writes to wisp but has different UX semantics; no ephemeral warning expected
 		if strings.Contains(stderrOut, "ephemeral") {
@@ -174,14 +159,7 @@ func showRow(t *testing.T, out, key string) string {
 func setWispValue(t *testing.T, townRoot, rigName, key, value string) interface{} {
 	t.Helper()
 
-	rigConfigSetGlobal = false
-	rigConfigSetBlock = false
-	t.Cleanup(func() {
-		rigConfigSetGlobal = false
-		rigConfigSetBlock = false
-	})
-
-	if err := runRigConfigSet(rigConfigSetCmd, []string{rigName, key, value}); err != nil {
+	if err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, key, value}, false, false); err != nil {
 		t.Fatalf("runRigConfigSet %s=%s: %v", key, value, err)
 	}
 
@@ -194,6 +172,7 @@ func setWispValue(t *testing.T, townRoot, rigName, key, value string) interface{
 // bool back as 0, so a cap of exactly one was impossible to express and showed up
 // in `gt rig config show` as "true".
 func TestRigConfigSet_IntegerKeyStoresNumber(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		key     string
 		value   string
@@ -226,6 +205,7 @@ func TestRigConfigSet_IntegerKeyStoresNumber(t *testing.T) {
 // boolean keys must keep accepting 1/0 as spellings of true/false, and must never
 // be stored as numbers, which the daemon's auto_restart check would ignore.
 func TestRigConfigSet_BoolKeyStoresBool(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		key      string
 		value    string
@@ -261,10 +241,11 @@ func TestRigConfigSet_BoolKeyStoresBool(t *testing.T) {
 // restart", so the stored value has to read false through rig.CoerceBool rather
 // than being ignored by a `val.(bool)` type assertion.
 func TestRigConfigSet_AutoRestartZeroDisablesRestart(t *testing.T) {
+	t.Parallel()
 	townRoot, rigName := setupTestRigForConfig(t)
 	setWispValue(t, townRoot, rigName, "auto_restart", "0")
 
-	_, r, err := getRig(rigName)
+	_, r, err := getRigIn(townRoot, rigName)
 	if err != nil {
 		t.Fatalf("getRig: %v", err)
 	}
@@ -282,6 +263,7 @@ func TestRigConfigSet_AutoRestartZeroDisablesRestart(t *testing.T) {
 // be interpreted as the key's type is rejected at write time instead of being
 // stored in a form the key's readers silently treat as zero.
 func TestRigConfigSet_RejectsWrongTypeForKnownKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		key    string
 		value  string
@@ -296,10 +278,8 @@ func TestRigConfigSet_RejectsWrongTypeForKnownKey(t *testing.T) {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
 			townRoot, rigName := setupTestRigForConfig(t)
 
-			rigConfigSetGlobal = false
-			rigConfigSetBlock = false
-
-			err := runRigConfigSet(rigConfigSetCmd, []string{rigName, tc.key, tc.value})
+	
+			err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, tc.key, tc.value}, false, false)
 			if err == nil {
 				t.Fatalf("expected %s=%q to be rejected", tc.key, tc.value)
 			}
@@ -316,6 +296,7 @@ func TestRigConfigSet_RejectsWrongTypeForKnownKey(t *testing.T) {
 // TestRigConfigSet_UnknownKeyGuesses checks that keys with no declared type still
 // accept numbers and strings; only declared keys get strict parsing.
 func TestRigConfigSet_UnknownKeyGuesses(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		value string
 		want  interface{}
@@ -339,15 +320,16 @@ func TestRigConfigSet_UnknownKeyGuesses(t *testing.T) {
 // must display as 1, including for a legacy wisp file that already holds the bool
 // the old inference wrote.
 func TestRigConfigShow_DisplaysTypedValue(t *testing.T) {
+	t.Parallel()
 	t.Run("set through the CLI", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
 		setWispValue(t, townRoot, rigName, "max_polecats", "1")
 
-		out := captureStdout(t, func() {
-			if err := runRigConfigShow(rigConfigShowCmd, []string{rigName}); err != nil {
-				t.Fatalf("runRigConfigShow: %v", err)
-			}
-		})
+		var stdout bytes.Buffer
+		if err := rigConfigShow(townRigCmdEnv(townRoot, &stdout, io.Discard), []string{rigName}, false); err != nil {
+			t.Fatalf("rigConfigShow: %v", err)
+		}
+		out := stdout.String()
 
 		if got := showRow(t, out, "max_polecats"); got != "1" {
 			t.Errorf("show displayed max_polecats as %q, want \"1\"", got)
@@ -367,11 +349,11 @@ func TestRigConfigShow_DisplaysTypedValue(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		out := captureStdout(t, func() {
-			if err := runRigConfigShow(rigConfigShowCmd, []string{rigName}); err != nil {
-				t.Fatalf("runRigConfigShow: %v", err)
-			}
-		})
+		var stdout bytes.Buffer
+		if err := rigConfigShow(townRigCmdEnv(townRoot, &stdout, io.Discard), []string{rigName}, false); err != nil {
+			t.Fatalf("rigConfigShow: %v", err)
+		}
+		out := stdout.String()
 
 		if got := showRow(t, out, "max_polecats"); got != "1" {
 			t.Errorf("show displayed a legacy max_polecats=true as %q, want \"1\"", got)

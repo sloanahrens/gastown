@@ -1,0 +1,242 @@
+//go:build integration
+
+package cmd
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// getGitState against real repositories: branch-scoped stashes, upstream
+// and pushed-branch preservation, runtime artifacts and index skew. The
+// verdict logic is unit-tested against a fake in polecat_git_state_test.go.
+
+func TestIntegrationGetGitStateDistinguishesSharedStashes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	worktree := filepath.Join(dir, "other")
+
+	// A real polecat clone always has an origin remote with its branch
+	// pushed. Without one, BranchPreservationStatus has no comparison ref to
+	// resolve at all and (correctly, post-gt-14a) reports the unpushed-commit
+	// check as failed rather than silently assuming clean — set up a remote
+	// here so this fixture matches production and the test stays focused on
+	// shared-vs-branch stash counting.
+	remote := filepath.Join(dir, "remote.git")
+	runGitCmd(t, "", "init", "--bare", remote)
+	runGitCmd(t, "", "init", repo)
+	runGitCmd(t, repo, "config", "user.email", "test@example.com")
+	runGitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(repo, "file.txt"), "base\n")
+	runGitCmd(t, repo, "add", "file.txt")
+	runGitCmd(t, repo, "commit", "-m", "base")
+	runGitCmd(t, repo, "branch", "-M", "main")
+	runGitCmd(t, repo, "remote", "add", "origin", remote)
+	runGitCmd(t, repo, "push", "-u", "origin", "main")
+	runGitCmd(t, repo, "checkout", "-b", "other")
+	runGitCmd(t, repo, "push", "-u", "origin", "other")
+	runGitCmd(t, repo, "checkout", "main")
+	runGitCmd(t, repo, "worktree", "add", worktree, "other")
+
+	writeTestFile(t, filepath.Join(repo, "file.txt"), "base\nmain change\n")
+	runGitCmd(t, repo, "stash", "push", "-m", "main-only")
+
+	state, err := getGitState(worktree)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if state.StashCount != 0 {
+		t.Fatalf("branch stash count = %d, want 0 for sibling branch stash", state.StashCount)
+	}
+	if state.SharedStashCount != 1 {
+		t.Fatalf("shared stash count = %d, want 1", state.SharedStashCount)
+	}
+	if !state.Clean {
+		t.Fatal("sibling branch stash must not make this worktree dirty")
+	}
+
+	writeTestFile(t, filepath.Join(worktree, "file.txt"), "base\nworktree change\n")
+	runGitCmd(t, worktree, "stash", "push", "-m", "worktree-only")
+
+	state, err = getGitState(worktree)
+	if err != nil {
+		t.Fatalf("getGitState after worktree stash: %v", err)
+	}
+	if state.StashCount != 1 {
+		t.Fatalf("branch stash count = %d, want 1 for current branch stash", state.StashCount)
+	}
+	if state.SharedStashCount != 1 {
+		t.Fatalf("shared stash count = %d, want 1 sibling stash", state.SharedStashCount)
+	}
+	if state.Clean {
+		t.Fatal("current branch stash must still mark this worktree dirty")
+	}
+}
+
+func TestIntegrationGetGitStateUsesUpstreamInsteadOfOriginMain(t *testing.T) {
+	t.Parallel()
+	repo := setupGitStateRemoteRepo(t)
+
+	runGitCmd(t, repo, "switch", "integration/test")
+	writeTestFile(t, filepath.Join(repo, "integration.txt"), "integration\n")
+	runGitCmd(t, repo, "add", "integration.txt")
+	runGitCmd(t, repo, "commit", "-m", "integration")
+	runGitCmd(t, repo, "push", "origin", "integration/test")
+	runGitCmd(t, repo, "switch", "-c", "polecat/test")
+	runGitCmd(t, repo, "branch", "--set-upstream-to=origin/integration/test")
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if !state.Clean {
+		t.Fatalf("branch matching its integration upstream should be clean: %+v", state)
+	}
+	if state.UnpushedCommits != 0 {
+		t.Fatalf("UnpushedCommits = %d, want 0", state.UnpushedCommits)
+	}
+}
+
+func TestIntegrationGetGitStateCountsAheadOfUpstream(t *testing.T) {
+	t.Parallel()
+	repo := setupGitStateRemoteRepo(t)
+	runGitCmd(t, repo, "switch", "-c", "polecat/test")
+	runGitCmd(t, repo, "branch", "--set-upstream-to=origin/integration/test")
+	writeTestFile(t, filepath.Join(repo, "feature.txt"), "feature\n")
+	runGitCmd(t, repo, "add", "feature.txt")
+	runGitCmd(t, repo, "commit", "-m", "feature")
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if state.Clean {
+		t.Fatal("local commit ahead of upstream should make git state dirty")
+	}
+	if state.UnpushedCommits != 1 {
+		t.Fatalf("UnpushedCommits = %d, want 1", state.UnpushedCommits)
+	}
+}
+
+func TestIntegrationGetGitStateTreatsPushedSourceBranchAsClean(t *testing.T) {
+	t.Parallel()
+	repo := setupGitStateRemoteRepo(t)
+	runGitCmd(t, repo, "switch", "-c", "polecat/pushed")
+	writeTestFile(t, filepath.Join(repo, "pushed.txt"), "pushed\n")
+	runGitCmd(t, repo, "add", "pushed.txt")
+	runGitCmd(t, repo, "commit", "-m", "pushed")
+	runGitCmd(t, repo, "push", "-u", "origin", "polecat/pushed")
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if !state.Clean {
+		t.Fatalf("fully pushed source branch should not be classified as unpushed: %+v", state)
+	}
+	if state.UnpushedCommits != 0 {
+		t.Fatalf("UnpushedCommits = %d, want 0", state.UnpushedCommits)
+	}
+}
+
+// TestGetGitStateFailsClosedWhenPreservationCheckIsUnresolvable is a
+// regression test for gt-14a: a repo with a local commit and no remote at
+// all cannot prove there are zero unpushed commits — BranchPreservationStatus
+// has no comparison ref to check against. Before this fix,
+// getGitStateWithTargets silently swallowed that error and left the worktree
+// looking clean (UnpushedCommits stayed 0, Clean stayed true), which is
+// exactly the gitSafe-implies-clean promotion gt-7kr removed from the
+// decision layer but that survived in this CLI-only git-state builder.
+func TestIntegrationGetGitStateFailsClosedWhenPreservationCheckIsUnresolvable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	runGitCmd(t, "", "init", repo)
+	runGitCmd(t, repo, "config", "user.email", "test@example.com")
+	runGitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(repo, "file.txt"), "base\n")
+	runGitCmd(t, repo, "add", "file.txt")
+	runGitCmd(t, repo, "commit", "-m", "base")
+	// Deliberately no remote, no upstream, no targets: nothing for
+	// BranchPreservationStatus to compare against.
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if state.Clean {
+		t.Fatalf("unresolvable preservation check must not be reported as clean: %+v", state)
+	}
+	if !state.PreservationCheckFailed {
+		t.Fatalf("PreservationCheckFailed = false, want true when the unpushed-commit check cannot be resolved: %+v", state)
+	}
+}
+
+func TestIntegrationGetGitStateIgnoresOpenCodeRuntimeArtifacts(t *testing.T) {
+	t.Parallel()
+	repo := setupGitStateRemoteRepo(t)
+	runGitCmd(t, repo, "switch", "-c", "polecat/opencode-runtime")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".opencode", "plugins"), 0755); err != nil {
+		t.Fatalf("mkdir opencode plugins: %v", err)
+	}
+	writeTestFile(t, filepath.Join(repo, ".opencode", "plugins", "gastown.js"), "// generated\n")
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if !state.Clean {
+		t.Fatalf("OpenCode runtime artifact should not dirty recovery state: %+v", state)
+	}
+	if len(state.UncommittedFiles) != 0 {
+		t.Fatalf("UncommittedFiles = %v, want none for runtime-only artifact", state.UncommittedFiles)
+	}
+
+	writeTestFile(t, filepath.Join(repo, "real.go"), "package real\n")
+	state, err = getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState with real file: %v", err)
+	}
+	if state.Clean {
+		t.Fatal("real source dirt should still block recovery")
+	}
+	if len(state.UncommittedFiles) != 1 || state.UncommittedFiles[0] != "real.go" {
+		t.Fatalf("UncommittedFiles = %v, want only real.go", state.UncommittedFiles)
+	}
+}
+
+// TestGetGitStateDoesNotRelaxIndexSkewForNukeSafety is the gt-ui2x scope-fix
+// regression test. getGitStateWithTargets feeds check-recovery, the pre-nuke
+// safety gate (checkPolecatSafety), and `gt polecat git-state`'s "safe to
+// kill" verdict — destructive/near-destructive consumers, not the reuse
+// gate. The index-skew relaxation that lets the reuse gate ignore a
+// shared-.repo.git checkout's stale staged index (see
+// git.UncommittedWorkStatus.CleanExcludingRuntimeAndIndexSkew) must stay
+// scoped to reuse only: this path must still call staged-only content dirty,
+// even when that content is already known on origin's default branch.
+func TestIntegrationGetGitStateDoesNotRelaxIndexSkewForNukeSafety(t *testing.T) {
+	t.Parallel()
+	repo := setupGitStateRemoteRepo(t)
+	runGitCmd(t, repo, "switch", "-c", "polecat/skew")
+
+	writeTestFile(t, filepath.Join(repo, "README.md"), "base\nv2\n")
+	runGitCmd(t, repo, "commit", "-am", "v2")
+	runGitCmd(t, repo, "push", "-u", "origin", "polecat/skew")
+	// Move the branch ref back one commit WITHOUT touching the index or
+	// worktree — the checkout-skew shape: HEAD regresses while the index and
+	// working tree still hold content origin already has.
+	runGitCmd(t, repo, "reset", "--soft", "HEAD~1")
+
+	state, err := getGitState(repo)
+	if err != nil {
+		t.Fatalf("getGitState: %v", err)
+	}
+	if state.Clean {
+		t.Fatalf("index skew must still be reported dirty for nuke/check-recovery safety: %+v", state)
+	}
+	if len(state.UncommittedFiles) != 1 || state.UncommittedFiles[0] != "README.md" {
+		t.Fatalf("UncommittedFiles = %v, want [README.md]", state.UncommittedFiles)
+	}
+}

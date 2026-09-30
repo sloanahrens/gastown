@@ -109,9 +109,13 @@ func init() {
 }
 
 func runRigConfigShow(cmd *cobra.Command, args []string) error {
+	return rigConfigShow(cwdRigCmdEnv(), args, rigConfigShowLayers)
+}
+
+func rigConfigShow(e rigCmdEnv, args []string, layers bool) error {
 	rigName := args[0]
 
-	townRoot, r, err := getRig(rigName)
+	townRoot, r, err := e.findRig(rigName)
 	if err != nil {
 		return err
 	}
@@ -119,10 +123,10 @@ func runRigConfigShow(cmd *cobra.Command, args []string) error {
 	// Collect all known keys
 	allKeys := getConfigKeys(townRoot, r)
 
-	if rigConfigShowLayers {
+	if layers {
 		// Show with sources
-		fmt.Printf("%-25s %-15s %s\n", "Key", "Value", "Source")
-		fmt.Printf("%-25s %-15s %s\n", "---", "-----", "------")
+		fmt.Fprintf(e.out, "%-25s %-15s %s\n", "Key", "Value", "Source")
+		fmt.Fprintf(e.out, "%-25s %-15s %s\n", "---", "-----", "------")
 		for _, key := range allKeys {
 			result := r.GetConfigWithSource(key)
 			valueStr := formatValue(key, result.Value)
@@ -130,12 +134,12 @@ func runRigConfigShow(cmd *cobra.Command, args []string) error {
 			if result.Source == rig.SourceBlocked {
 				valueStr = "(blocked)"
 			}
-			fmt.Printf("%-25s %-15s %s\n", key, valueStr, sourceStr)
+			fmt.Fprintf(e.out, "%-25s %-15s %s\n", key, valueStr, sourceStr)
 		}
 	} else {
 		// Show only effective values
-		fmt.Printf("%-25s %s\n", "Key", "Value")
-		fmt.Printf("%-25s %s\n", "---", "-----")
+		fmt.Fprintf(e.out, "%-25s %s\n", "Key", "Value")
+		fmt.Fprintf(e.out, "%-25s %s\n", "---", "-----")
 		for _, key := range allKeys {
 			result := r.GetConfigWithSource(key)
 			if result.Source == rig.SourceNone {
@@ -145,7 +149,7 @@ func runRigConfigShow(cmd *cobra.Command, args []string) error {
 			if result.Source == rig.SourceBlocked {
 				valueStr = "(blocked)"
 			}
-			fmt.Printf("%-25s %s\n", key, valueStr)
+			fmt.Fprintf(e.out, "%-25s %s\n", key, valueStr)
 		}
 	}
 
@@ -153,11 +157,15 @@ func runRigConfigShow(cmd *cobra.Command, args []string) error {
 }
 
 func runRigConfigSet(cmd *cobra.Command, args []string) error {
+	return rigConfigSet(cwdRigCmdEnv(), args, rigConfigSetGlobal, rigConfigSetBlock)
+}
+
+func rigConfigSet(e rigCmdEnv, args []string, global, block bool) error {
 	rigName := args[0]
 	key := args[1]
 
 	// Validate: --block requires no value, otherwise value is required
-	if rigConfigSetBlock {
+	if block {
 		if len(args) > 2 {
 			return fmt.Errorf("--block does not take a value")
 		}
@@ -167,18 +175,18 @@ func runRigConfigSet(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	townRoot, r, err := getRig(rigName)
+	townRoot, r, err := e.findRig(rigName)
 	if err != nil {
 		return err
 	}
 
-	if rigConfigSetBlock {
+	if block {
 		// Block inheritance via wisp layer
 		wispCfg := wisp.NewConfig(townRoot, r.Name)
 		if err := wispCfg.Block(key); err != nil {
 			return fmt.Errorf("blocking %s: %w", key, err)
 		}
-		fmt.Printf("%s Blocked %s for rig %s\n", style.Success.Render("✓"), key, rigName)
+		fmt.Fprintf(e.out, "%s Blocked %s for rig %s\n", style.Success.Render("✓"), key, rigName)
 		return nil
 	}
 
@@ -193,30 +201,34 @@ func runRigConfigSet(cmd *cobra.Command, args []string) error {
 	// as 1, so every reader sees the same value the key's type implies.
 	stored := formatValue(key, typedValue)
 
-	if rigConfigSetGlobal {
+	if global {
 		// Set in bead layer (rig identity bead labels)
 		if err := setBeadLabel(townRoot, r, key, stored); err != nil {
 			return fmt.Errorf("setting bead label: %w", err)
 		}
-		fmt.Printf("%s Set %s=%s in bead layer for rig %s\n", style.Success.Render("✓"), key, stored, rigName)
+		fmt.Fprintf(e.out, "%s Set %s=%s in bead layer for rig %s\n", style.Success.Render("✓"), key, stored, rigName)
 	} else {
 		// Set in wisp layer
 		wispCfg := wisp.NewConfig(townRoot, r.Name)
 		if err := wispCfg.Set(key, typedValue); err != nil {
 			return fmt.Errorf("setting %s: %w", key, err)
 		}
-		fmt.Printf("%s Set %s=%s in wisp layer for rig %s\n", style.Success.Render("✓"), key, stored, rigName)
-		style.PrintWarning("this value is ephemeral and will not survive a rig reset — use --global to persist")
+		fmt.Fprintf(e.out, "%s Set %s=%s in wisp layer for rig %s\n", style.Success.Render("✓"), key, stored, rigName)
+		style.FprintWarning(e.errOut, "this value is ephemeral and will not survive a rig reset — use --global to persist")
 	}
 
 	return nil
 }
 
 func runRigConfigUnset(cmd *cobra.Command, args []string) error {
+	return rigConfigUnset(cwdRigCmdEnv(), args)
+}
+
+func rigConfigUnset(e rigCmdEnv, args []string) error {
 	rigName := args[0]
 	key := args[1]
 
-	townRoot, r, err := getRig(rigName)
+	townRoot, r, err := e.findRig(rigName)
 	if err != nil {
 		return err
 	}
@@ -226,7 +238,7 @@ func runRigConfigUnset(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unsetting %s: %w", key, err)
 	}
 
-	fmt.Printf("%s Unset %s from wisp layer for rig %s\n", style.Success.Render("✓"), key, rigName)
+	fmt.Fprintf(e.out, "%s Unset %s from wisp layer for rig %s\n", style.Success.Render("✓"), key, rigName)
 	return nil
 }
 

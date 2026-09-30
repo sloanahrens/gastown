@@ -196,7 +196,7 @@ func patchIDAgainst(g rejectedReworkGit, target, sha string) (string, error) {
 
 // rejectedTipFromMR resolves the tip an MR bead was submitted with, which is
 // the content that MR's gate judged (beads.MRFields.CommitSHA).
-func rejectedTipFromMR(bd *beads.Beads, mrID string) (string, bool) {
+func rejectedTipFromMR(bd beads.Client, mrID string) (string, bool) {
 	if bd == nil {
 		return "", false
 	}
