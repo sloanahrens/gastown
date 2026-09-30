@@ -39,12 +39,18 @@ func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
 
 // SyncPluginsWithOptions is SyncPlugins with explicit options.
 func SyncPluginsWithOptions(sourceDir, targetDir string, opts SyncOptions) (*SyncResult, error) {
+	return syncPlugins(sourceDir, targetDir, opts, sourceHistory)
+}
+
+// syncPlugins is SyncPluginsWithOptions reading the source's blob history
+// through history, which unit tests script instead of running git.
+func syncPlugins(sourceDir, targetDir string, opts SyncOptions, history func(sourceDir string) (blobHistory, string)) (*SyncResult, error) {
 	result := &SyncResult{}
 	clean := opts.Clean
 	var hist blobHistory
 	var prefix string
 	if !opts.Force {
-		hist, prefix = sourceHistory(sourceDir)
+		hist, prefix = history(sourceDir)
 	}
 	// guard reports whether dstPluginDir may be replaced or removed; when it
 	// may not, it records the runtime edits in result.Protected.
