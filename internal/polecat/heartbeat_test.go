@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -532,5 +534,61 @@ func TestReadSessionHeartbeat_V2AllStates(t *testing.T) {
 				t.Errorf("bead = %q, want %q", read.Bead, "gt-test-bead")
 			}
 		})
+	}
+}
+
+// TestTouchSessionHeartbeat_ReaderNeverSeesTornWrite pins the write as atomic
+// (gt-sle0). ReadSessionHeartbeat returns nil on a parse error, and the
+// witness reads a nil heartbeat as "no agent-reported state" and falls through
+// to the legacy done-intent timeout, so a torn read restarts a polecat that is
+// mid gt done. A truncate-then-write lets a reader see an empty or partial
+// file; the payload is large enough that the write window is milliseconds
+// rather than microseconds, so the reader hits it on nearly every run.
+func TestTouchSessionHeartbeat_ReaderNeverSeesTornWrite(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const session = "gt-test-torn"
+	bigContext := strings.Repeat("x", 4<<20)
+
+	TouchSessionHeartbeatWithState(townRoot, session, HeartbeatExiting, bigContext, "gt-abc")
+	if ReadSessionHeartbeat(townRoot, session) == nil {
+		t.Fatal("seed heartbeat unreadable")
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				TouchSessionHeartbeatWithState(townRoot, session, HeartbeatExiting, bigContext, "gt-abc")
+			}
+		}
+	}()
+
+	torn := 0
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if ReadSessionHeartbeat(townRoot, session) == nil {
+			torn++
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	if torn > 0 {
+		t.Errorf("reader saw %d unreadable heartbeats while the file was being rewritten; the write must be temp-file + rename", torn)
+	}
+
+	entries, err := os.ReadDir(heartbeatsDir(townRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("heartbeats dir has %d entries after writes, want just the heartbeat (no leftover temp files)", len(entries))
 	}
 }
