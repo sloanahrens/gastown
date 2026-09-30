@@ -87,6 +87,16 @@ func TestHookBeadHeld(t *testing.T) {
 			want: "MAYOR DESIGN DECISION",
 		},
 		{
+			name: "submitted for landing (gt-obbx2): gt done's label holds",
+			body: `[{"status":"hooked","labels":["d4","gt:ready-to-land"]}]`,
+			want: "submitted for landing",
+		},
+		{
+			name: "an operator hold is named before the landing label",
+			body: `[{"status":"hooked","labels":["gt:ready-to-land","needs-mayor-review"]}]`,
+			want: "label needs-mayor-review",
+		},
+		{
 			name: "prose that merely mentions the wording does not hold",
 			body: `[{"status":"open","notes":"the bead quoted 'do not redispatch' back at the operator"}]`,
 		},
@@ -161,6 +171,14 @@ func TestHeldHookSkip(t *testing.T) {
 			name: "hooked work held by status",
 			snap: &agentBeadSnapshot{AgentState: "working", HookBead: "gt-abc"},
 			body: `[{"status":"deferred"}]`,
+			want: true,
+		},
+		{
+			// The amber and obsidian incidents (gt-obbx2): gt done submitted
+			// the branch, the session exited, the hook still held the bead.
+			name: "hooked work submitted for landing is not a dead polecat",
+			snap: &agentBeadSnapshot{AgentState: "working", HookBead: "gt-abc"},
+			body: `[{"status":"hooked","labels":["gt:ready-to-land"]}]`,
 			want: true,
 		},
 		{

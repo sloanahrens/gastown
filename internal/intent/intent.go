@@ -52,6 +52,12 @@ const (
 	// DesiredPark: the operator parked the seat. Nothing kills or restarts
 	// it until it is resumed.
 	DesiredPark Desired = "park"
+	// DesiredSubmitted: the seat's work is on origin waiting for the landing
+	// worker and its session ended on purpose (gt done). Nothing restarts it:
+	// a new session would find finished work and re-run the gate on it. It is
+	// not a hold, so Kill still works and cleanup after the landing is
+	// unaffected. Dispatching new work to the seat clears it (ClearSubmitted).
+	DesiredSubmitted Desired = "submitted"
 )
 
 // Seat names one agent seat. Rig is empty for town-level seats (mayor,
@@ -180,6 +186,47 @@ func (r Record) HoldReason() string {
 		return kind
 	}
 	return kind + ": " + r.Reason
+}
+
+// Submitted reports whether the seat's work is submitted for landing, so its
+// dead session is not a crash and must not be restarted.
+func (r Record) Submitted() bool {
+	return r.Desired == DesiredSubmitted
+}
+
+// MarkSubmitted records that the seat's work bead was submitted for landing.
+// A hold is left alone: an operator park or a freeze still wins.
+func MarkSubmitted(townRoot string, s Seat, workBead, actor string, now time.Time) error {
+	_, err := Update(townRoot, s, func(r *Record) error {
+		if r.Held() {
+			return nil
+		}
+		r.Desired = DesiredSubmitted
+		r.WorkBead = workBead
+		r.Progress = nil
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		return nil
+	})
+	return err
+}
+
+// ClearSubmitted returns a submitted seat to run when new work is dispatched
+// to it. A seat in any other state is left as it is.
+func ClearSubmitted(townRoot string, s Seat, actor string, now time.Time) error {
+	rec, err := Read(townRoot, s)
+	if err != nil || !rec.Submitted() {
+		return err
+	}
+	_, err = Update(townRoot, s, func(r *Record) error {
+		if !r.Submitted() {
+			return nil
+		}
+		r.Desired = DesiredRun
+		r.WorkBead = ""
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		return nil
+	})
+	return err
 }
 
 // RestartsSince counts restarts at or after since.

@@ -4,6 +4,9 @@
 //
 //   - the seat's hold: an operator park or a supervisor freeze in the seat's
 //     intent record (internal/intent) refuses both verbs;
+//   - submitted work: a seat whose intent record says desired=submitted (gt
+//     done handed its branch to the landing worker) refuses Restart, since a
+//     new session would only find finished work; Kill still works;
 //   - e-stop: the town sentinel or the seat's rig sentinel refuses both
 //     (running sessions finish; only an explicit kill-all may bypass it);
 //   - shutdown: a `gt down` in progress refuses Restart;
@@ -52,6 +55,7 @@ var ErrRefused = errors.New("supervisor refused")
 var (
 	ErrPaused           = errors.New("seat is parked")
 	ErrFrozen           = errors.New("seat is frozen")
+	ErrSubmitted        = errors.New("work is submitted for landing")
 	ErrEstop            = errors.New("e-stop is active")
 	ErrShutdown         = errors.New("shutdown in progress")
 	ErrBudgetExhausted  = errors.New("restart budget exhausted")
@@ -330,6 +334,10 @@ func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
 // errHeld aborts an intent update that found the seat held after the guard.
 var errHeld = errors.New("held")
 
+// errSubmitted aborts a restart's intent update that found the seat's work
+// submitted for landing.
+var errSubmitted = errors.New("submitted")
+
 // Restart replaces the seat's session through the configured executor,
 // within the seat's restart budget. The attempt is counted before it runs,
 // so a restart that fails still spends budget: a seat whose agent dies at
@@ -351,11 +359,18 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 
 	now := s.o.Now().UTC()
 	var exhausted bool
-	var held string
+	var held, submitted string
 	rec, err := intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
 		if r.Held() {
 			held = r.HoldReason()
 			return errHeld
+		}
+		if r.Submitted() {
+			submitted = "desired=submitted"
+			if r.WorkBead != "" {
+				submitted += ": " + r.WorkBead
+			}
+			return errSubmitted
 		}
 		r.Restarts = pruneBefore(r.Restarts, now.Add(-s.o.Window))
 		r.Actor, r.UpdatedAt = actor, now
@@ -378,6 +393,8 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 	switch {
 	case errors.Is(err, errHeld):
 		return s.refuseHeldUnderLock(seat, l, held)
+	case errors.Is(err, errSubmitted):
+		return s.refuseSeat(seat, l, ErrSubmitted, submitted)
 	case err != nil:
 		// The budget cannot be counted, so the restart cannot be allowed.
 		return s.refuse(l, ErrIntentUnreadable, err.Error())

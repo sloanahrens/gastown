@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	"github.com/steveyegge/gastown/internal/feed"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -3237,6 +3239,15 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		return
 	}
 
+	// gt done recorded desired=submitted: the branch is on origin for the
+	// landing worker and the session ended on purpose. The hook still holds
+	// the bead until it lands, which would read as a crash (gt-obbx2).
+	if rec.Submitted() {
+		d.logger.Printf("Skipping crash detection for %s/%s: work %s is submitted for landing",
+			rigName, polecatName, rec.WorkBead)
+		return
+	}
+
 	// Build the expected tmux session name
 	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 
@@ -3276,8 +3287,18 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 
 	// Finished work: gt done closes the work bead before the session stops,
 	// so a dead session holding closed work completed normally.
-	if d.isBeadClosed(hookBead) {
+	closed, submitted := d.beadFinished(hookBead)
+	if closed {
 		d.logger.Printf("Skipping crash detection for %s/%s: hook_bead %s is already closed (work completed normally)",
+			rigName, polecatName, hookBead)
+		return
+	}
+	// Submitted work: gt done pushed the branch and labeled the bead
+	// gt:ready-to-land; the hook stays on it until the landing worker lands
+	// it. This is the label half of the intent-record check above, for a seat
+	// whose record was never written (gt-obbx2).
+	if submitted {
+		d.logger.Printf("Skipping crash detection for %s/%s: hook_bead %s is submitted for landing",
 			rigName, polecatName, hookBead)
 		return
 	}
@@ -3366,27 +3387,32 @@ func (d *Daemon) emitMassDeathEvent() {
 	d.recentDeaths = nil
 }
 
-// isBeadClosed checks if a bead's status is "closed" by querying bd show --json.
-// Returns true if the bead exists and has status "closed", false otherwise.
-// On any error (bead not found, bd failure), returns false to err on the side
-// of crash detection rather than silently suppressing alerts.
-func (d *Daemon) isBeadClosed(beadID string) bool {
+// beadFinished reads a bead with bd show --json and reports whether its work
+// is over for crash detection: closed (status "closed"), or submitted for
+// landing (label gt:ready-to-land, not closed). On any error (bead not found,
+// bd failure) both are false, erring toward crash detection rather than
+// silently suppressing alerts.
+func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
 	setSysProcAttr(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
-		return false
+		return false, false
 	}
 
 	var issues []struct {
-		Status string `json:"status"`
+		Status string   `json:"status"`
+		Labels []string `json:"labels"`
 	}
 	if err := json.Unmarshal(output, &issues); err != nil || len(issues) == 0 {
-		return false
+		return false, false
 	}
 
-	return issues[0].Status == "closed"
+	if issues[0].Status == "closed" {
+		return true, false
+	}
+	return false, slices.Contains(issues[0].Labels, land.LabelReadyToLand)
 }
 
 // hasAssignedOpenWork checks if any work bead is assigned to the given polecat

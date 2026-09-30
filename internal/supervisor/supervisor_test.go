@@ -197,6 +197,60 @@ func TestShutdownRefusesRestartNotKill(t *testing.T) {
 	}
 }
 
+// gt-obbx2: gt done marks the seat submitted. A restart would raise a session
+// on finished work, so it is refused and spends no budget; Kill still works so
+// cleanup after the landing is unaffected; new work ends the state.
+func TestSubmittedSeatRefusesRestartNotKill(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	if err := intent.MarkSubmitted(h.town, IntentSeat(flint), "gt-abc", "gt done", h.now); err != nil {
+		t.Fatal(err)
+	}
+	s := h.sup()
+
+	err := s.Restart(flint, "dead agent", "witness")
+	if !errors.Is(err, ErrRefused) || !errors.Is(err, ErrSubmitted) {
+		t.Fatalf("Restart on a submitted seat = %v, want ErrSubmitted", err)
+	}
+	if !strings.Contains(err.Error(), "gt-abc") {
+		t.Errorf("refusal %q does not name the submitted bead", err)
+	}
+	if len(h.restarts) != 0 {
+		t.Fatalf("a submitted seat was restarted: %v", h.restarts)
+	}
+	if rec, _ := intent.Read(h.town, IntentSeat(flint)); len(rec.Restarts) != 0 || !rec.Submitted() {
+		t.Fatalf("record = %+v, want submitted with no restart charged", rec)
+	}
+
+	if err := s.Kill(flint, "cleanup after landing", "witness"); err != nil {
+		t.Fatalf("Kill on a submitted seat = %v, want allowed", err)
+	}
+
+	// Kill records desired=stop, which is what an idle seat looks like: the
+	// next dispatch restarts it normally.
+	if err := s.Restart(flint, "dispatch", "gt sling"); err != nil {
+		t.Fatalf("Restart after the seat stopped = %v, want allowed", err)
+	}
+}
+
+func TestClearSubmittedLetsARestartThrough(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	seat := IntentSeat(flint)
+	if err := intent.MarkSubmitted(h.town, seat, "gt-abc", "gt done", h.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := intent.ClearSubmitted(h.town, seat, "gt sling", h.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.sup().Restart(flint, "dead agent", "witness"); err != nil {
+		t.Fatalf("Restart after new work cleared the submitted state = %v", err)
+	}
+	if len(h.restarts) != 1 {
+		t.Fatalf("restarts = %v, want one", h.restarts)
+	}
+}
+
 func TestFourthRestartInAnHourFreezesTheSeat(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

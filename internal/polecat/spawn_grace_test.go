@@ -120,11 +120,33 @@ func TestSpawnGrace(t *testing.T) {
 
 func TestSessionDownState(t *testing.T) {
 	t.Parallel()
-	if got := sessionDownState(true); got != StateSpawning {
+	if got := sessionDownState(true, nil); got != StateSpawning {
 		t.Errorf("sessionDownState(true) = %q, want %q", got, StateSpawning)
 	}
-	if got := sessionDownState(false); got != StateStalled {
+	if got := sessionDownState(false, nil); got != StateStalled {
 		t.Errorf("sessionDownState(false) = %q, want %q", got, StateStalled)
+	}
+}
+
+// A dead session whose hooked bead is gt:ready-to-land is a polecat that
+// finished (gt done ended the session), never a stall, and outranks the spawn
+// grace (gt-obbx2).
+func TestSessionDownState_SubmittedWork(t *testing.T) {
+	t.Parallel()
+	submitted := &beads.Issue{ID: "gt-x", Status: "hooked", Labels: []string{"d4", "gt:ready-to-land"}}
+	plain := &beads.Issue{ID: "gt-y", Status: "hooked", Labels: []string{"d4"}}
+	closed := &beads.Issue{ID: "gt-z", Status: "closed", Labels: []string{"gt:ready-to-land"}}
+
+	for _, spawning := range []bool{false, true} {
+		if got := sessionDownState(spawning, submitted); got != StateSubmitted {
+			t.Errorf("sessionDownState(%v, ready-to-land) = %q, want %q", spawning, got, StateSubmitted)
+		}
+	}
+	if got := sessionDownState(false, plain); got != StateStalled {
+		t.Errorf("sessionDownState(false, unlabeled) = %q, want %q", got, StateStalled)
+	}
+	if got := sessionDownState(false, closed); got != StateStalled {
+		t.Errorf("a closed bead is landed, not submitted: got %q, want %q", got, StateStalled)
 	}
 }
 

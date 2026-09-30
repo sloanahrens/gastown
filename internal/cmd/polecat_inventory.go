@@ -159,6 +159,10 @@ type polecatActiveWorkEvidence struct {
 	CountsTowardCapacity bool
 	Blocker              string
 	AssignedIssue        string
+	// Submitted: the assigned issue is gt:ready-to-land. gt done ended the
+	// session on purpose, so a dead session is state submitted, not stalled
+	// (gt-obbx2).
+	Submitted bool
 }
 
 func newPolecatSessionSet(sessionNames []string) polecatSessionSet {
@@ -305,6 +309,8 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 			switch {
 			case running:
 				item.State = polecat.StateWorking
+			case activeWorkEvidence.Submitted:
+				item.State = polecat.StateSubmitted
 			case spawning:
 				// Dispatched seconds ago and not up yet: a session that is
 				// still booting, not a stall to restart (gt-yteq).
@@ -780,6 +786,7 @@ func assessPolecatAssignedIssueWork(issue *beads.Issue) polecatActiveWorkEvidenc
 		CountsTowardCapacity: requiresRestart,
 		Blocker:              fmt.Sprintf("assigned_work=%s status=%s", issue.ID, issue.Status),
 		AssignedIssue:        issue.ID,
+		Submitted:            polecat.IsSubmittedWork(issue),
 	}
 }
 

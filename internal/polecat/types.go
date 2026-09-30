@@ -65,6 +65,14 @@ const (
 	// Unlike "stuck" (polecat self-reports), stalled is detected externally.
 	StateStalled State = "stalled"
 
+	// StateSubmitted means gt done pushed the polecat's branch and labeled its
+	// hooked bead gt:ready-to-land, and the landing worker has not landed it
+	// yet. The session is gone on purpose and the hook still holds the bead
+	// until the landing, so "work assigned + no session" is the evidence for
+	// it too, but it is not a stall: nothing needs restarting, and a restart
+	// would raise a session on finished work (gt-obbx2).
+	StateSubmitted State = "submitted"
+
 	// StateSpawning means the polecat was dispatched but has not come up yet:
 	// the agent bead still says agent_state=spawning and was written inside the
 	// spawn grace window (config.WitnessThresholds.HeartbeatStartupGrace,

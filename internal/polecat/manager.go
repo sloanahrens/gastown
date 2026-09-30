@@ -3275,7 +3275,7 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	if hookedErr == nil && hookedIssue != nil {
 		state := StateWorking
 		if sessionDead {
-			state = sessionDownState(spawning)
+			state = sessionDownState(spawning, hookedIssue)
 		}
 		return &Polecat{
 			Name:      name,
@@ -3295,7 +3295,7 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 			isCurrentHookedIssueForAssignee(hookIssue, assignee) {
 			state := StateWorking
 			if sessionDead {
-				state = sessionDownState(spawning)
+				state = sessionDownState(spawning, hookIssue)
 			}
 			return &Polecat{
 				Name:      name,
@@ -3316,7 +3316,7 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 		// Avoid synthesizing working with no issue when we cannot verify active work.
 		state := StateWorking
 		if sessionDead {
-			state = sessionDownState(spawning)
+			state = sessionDownState(spawning, nil)
 		} else if sessionRunning {
 			state = StateReviewNeeded
 		}
@@ -3349,7 +3349,7 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	if issueID != "" {
 		state = StateWorking
 		if sessionDead {
-			state = sessionDownState(spawning)
+			state = sessionDownState(spawning, issue)
 		}
 	} else if agentState == StateIdle && sessionRunning && !sessionStale && !m.getCleanupStatusFromBead(name, batch).IsSafe() {
 		state = StateReviewNeeded
