@@ -252,7 +252,7 @@ gt convoy create "Feature X" gt-abc12 gt-def34
 gt sling gt-abc12 myproject
 gt sling gt-def34 myproject
 
-# Monitor on dashboard
+# Watch convoy progress
 gt convoy list
 
 # Attach to any agent session

@@ -16,7 +16,7 @@ The Docker tooling lives at the repository root.
 | `Dockerfile.e2e` | Image used by CI for integration tests. The e2e image is Alpine-based, more minimal than the production image, and runs `go test` rather than a long-lived service. |
 | `.dockerignore` | Build-context exclusions. The ignore list keeps `.git`, `.beads`, Compose env files, Dolt state, agent state directories, and build artifacts out of the image. |
 
-CI workflows under `.github/workflows/` use `Dockerfile.e2e` for e2e jobs and pull `dolthub/dolt-sql-server` images for tests that need a Dolt server outside a full Gas Town environment. Application code detects whether it is running inside the sandbox container by reading one environment variable: `IS_SANDBOX`. The compose file sets `IS_SANDBOX=1`, and `internal/cmd/dashboard.go:50` reads it to decide the dashboard's default bind address.
+CI workflows under `.github/workflows/` use `Dockerfile.e2e` for e2e jobs and pull `dolthub/dolt-sql-server` images for tests that need a Dolt server outside a full Gas Town environment.
 
 ## Quick start
 
@@ -26,7 +26,6 @@ The runtime image requires one host directory. Set the identity variables too so
 export GIT_USER="<your name>"
 export GIT_EMAIL="<your email>"
 export FOLDER="/path/to/empty/dir"   # becomes /gt inside the container
-export DASHBOARD_PORT=8080            # optional, host port for the dashboard
 
 mkdir -p "$FOLDER"
 docker compose build
@@ -95,8 +94,6 @@ CMD ["sleep", "infinity"]
 | `GIT_USER` | `TestUser` | The entrypoint sets `git config --global user.name` and `dolt config --global user.name` from this variable. Set this explicitly for real work so commits do not use the default test identity. |
 | `GIT_EMAIL` | `test@example.com` | The entrypoint sets `user.email` for git and dolt from this variable. The entrypoint also enables `credential.helper store` so subsequent git pushes can persist credentials. Set this explicitly for real work. |
 | `FOLDER` | (unset, **required**) | `FOLDER` is the host path bind-mounted to `/gt` inside the container. The directory must exist before `docker compose up`, and must be empty or already a Gas Town HQ — the entrypoint runs `gt install /gt --git` against the bind-mounted directory on first start, which converts whatever is there into an HQ. |
-| `DASHBOARD_PORT` | `8080` | `DASHBOARD_PORT` is the host port mapped to the container's port 8080 (the `gt dashboard` web UI). |
-| `IS_SANDBOX` | `1` (set by compose) | `internal/cmd/dashboard.go` reads `IS_SANDBOX`. When set, `gt dashboard` binds to `0.0.0.0` instead of `127.0.0.1` so the host port forward can reach the server. Leave the variable alone for normal use. |
 
 The recommended way to set `GIT_USER`, `GIT_EMAIL`, and `FOLDER` is a `.env` file in the same directory as `docker-compose.yml`. Compose reads the `.env` file automatically on every invocation. Values in the `.env` file persist across terminals and reboots. `.dockerignore` excludes `.env` from image builds, but do not commit it if you add sensitive local values.
 
@@ -104,7 +101,6 @@ The recommended way to set `GIT_USER`, `GIT_EMAIL`, and `FOLDER` is a `.env` fil
 GIT_USER=Your Name
 GIT_EMAIL=you@example.com
 FOLDER=/path/to/empty/dir
-DASHBOARD_PORT=8080
 ```
 
 Inline `export` statements work for one-off invocations but expire when the shell exits.
@@ -147,16 +143,7 @@ cap_add:
 
 ### Networking
 
-A single port forward exposes the dashboard.
-
-```yaml
-ports:
-  - "${DASHBOARD_PORT:-8080}:8080"
-```
-
-In sandbox mode the dashboard binds to `0.0.0.0` inside the container so Docker can forward it to the host. Treat the forwarded port as local-only/trusted-network access, not a public service. If the host is shared or reachable from untrusted networks, bind the published port to localhost (`127.0.0.1:${DASHBOARD_PORT:-8080}:8080`) or firewall it.
-
-No other ports leave the container. Dolt runs on port 3307 inside the container's network namespace, but Dolt is unreachable from the host. The unreachability is intentional: the container is meant to be a self-contained Gas Town environment.
+No ports leave the container. Dolt runs on port 3307 inside the container's network namespace, but Dolt is unreachable from the host. The unreachability is intentional: the container is meant to be a self-contained Gas Town environment.
 
 ## Workspace bootstrap (docker-entrypoint.sh)
 

@@ -250,7 +250,6 @@ gt mayor attach
 export GIT_USER="<your name>"
 export GIT_EMAIL="<your email>"
 export FOLDER="/path/to/empty/dir"   # empty directory or existing Gas Town HQ
-export DASHBOARD_PORT=8080           # optional, host port for the dashboard
 
 mkdir -p "$FOLDER"
 docker compose build              # only needed on first run or after code changes
@@ -269,7 +268,7 @@ gh auth login                     # optional: required for private GitHub rigs
 gt mayor attach
 ```
 
-The dashboard port is exposed from the container to the host. Treat it as a trusted local-network surface, and do not point `FOLDER` at a host workspace that a native `gt` install is using at the same time.
+Do not point `FOLDER` at a host workspace that a native `gt` install is using at the same time.
 
 ## Quick Start Guide
 
@@ -582,27 +581,6 @@ Press `p` in `gt feed` (or start with `gt feed --problems`) to toggle the proble
 
 **Intervention keys** (in problems view): `n` to nudge the selected agent, `h` to handoff (refresh context).
 
-## Dashboard
-
-Gas Town includes a web dashboard for monitoring your workspace. The dashboard
-must be run from inside a Gas Town workspace (HQ) directory.
-
-```bash
-# Start dashboard (default port 8080)
-gt dashboard
-
-# Start on a custom port
-gt dashboard --port 3000
-
-# Start and automatically open in browser
-gt dashboard --open
-```
-
-The dashboard gives you a single-page overview of everything happening in your
-workspace: agents, convoys, hooks, queues, issues, and escalations. It
-auto-refreshes via htmx and includes a command palette for running gt commands
-directly from the browser.
-
 ## Monitoring & Health
 
 Gas Town uses a three-tier watchdog chain to keep agents healthy at scale:
@@ -756,7 +734,6 @@ gt completion fish > ~/.config/fish/completions/gt.fish
 - **Leverage hooks for persistence** - Your work won't disappear
 - **Create formulas for repeated tasks** - Save time with Beads recipes
 - **Use `gt feed` for live monitoring** - Watch agent activity and catch stuck agents early
-- **Monitor the dashboard** - Get real-time visibility in the browser
 - **Let the Mayor orchestrate** - It knows how to manage agents
 
 ## Design Documentation
