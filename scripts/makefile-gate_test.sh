@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Tests for the Makefile's gate contract (docs/testing.md, "The gate"):
-# `make gate` and `make test-integration` are the only test entry points,
-# the gate runs lint, build and the unit tier in that order, it never starts a
-# container or takes the container-gate slot, and the integration tier runs
-# every Docker-backed package listed in internal/testpolicy/docker.txt.
+# `make gate`, `make test-slow` and `make test-integration` are the test
+# tiers (`make test` only chains them), the gate runs lint, build and the fast
+# tier in that order, skipping the packages in internal/testpolicy/slow.txt
+# that test-slow runs (gt-z862q), neither starts a container or takes the
+# container-gate slot, and the integration tier runs every Docker-backed
+# package listed in internal/testpolicy/docker.txt.
 #
 # The recipe shape is read through `make -n`, which prints recipes without
 # running them. That only holds while no gate recipe line references $(MAKE):
 # make runs such a line even under -n. The first case checks that too. The
 # failure paths are then driven for real, with stub go and golangci-lint on
-# PATH and a stub shell-test script (GATE_SHELL_TESTS), so every red branch
-# is seen to exit non-zero.
+# PATH and a stub shell-test script (SHELL_TESTS), so every red branch is
+# seen to exit non-zero.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,10 +34,10 @@ else
   fail "make -n gate exits 0" "$out"
 fi
 
-if grep -q -E '^gate:' "$ROOT/Makefile" && grep -q -E '^test-integration:' "$ROOT/Makefile" && ! awk '/^(gate|test-integration):/{f=1;next} /^[^\t]/{f=0} f' "$ROOT/Makefile" | grep -q -F '$(MAKE)'; then
-  pass "gate and test-integration recipes do not recurse through \$(MAKE), so -n runs nothing"
+if grep -q -E '^gate:' "$ROOT/Makefile" && grep -q -E '^test-slow:' "$ROOT/Makefile" && grep -q -E '^test-integration:' "$ROOT/Makefile" && ! awk '/^(gate|test-slow|test-integration|test):/{f=1;next} /^[^\t]/{f=0} f' "$ROOT/Makefile" | grep -q -F '$(MAKE)'; then
+  pass "gate, test-slow, test-integration and test recipes do not recurse through \$(MAKE), so -n runs nothing"
 else
-  fail "gate and test-integration recipes do not recurse through \$(MAKE), so -n runs nothing"
+  fail "gate, test-slow, test-integration and test recipes do not recurse through \$(MAKE), so -n runs nothing"
 fi
 
 lint=$(line_of "$out" "golangci-lint run")
@@ -47,10 +49,20 @@ if [[ -n "$lint" && -n "$build" && -n "$unit" && "$lint" -lt "$build" && "$build
 else
   fail "gate runs lint, then go build ./..., then the budget runner (lines: lint=$lint build=$build unit=$unit)" "$out"
 fi
-if [[ -n "$shell" ]]; then
-  pass "gate runs the shell tests (scripts/test-makefile.sh) as part of the unit tier"
+if [[ -z "$shell" ]]; then
+  pass "gate leaves the shell tests (scripts/test-makefile.sh) to the slow tier"
 else
-  fail "gate runs the shell tests (scripts/test-makefile.sh) as part of the unit tier" "$out"
+  fail "gate leaves the shell tests (scripts/test-makefile.sh) to the slow tier" "$out"
+fi
+if grep -q -F 'cmd/budget -fast-tier -slow internal/testpolicy/slow.txt --' <<<"$out"; then
+  pass "gate runs the fast tier: skips slow.txt, fails a package over testpolicy.FastTierMaxWall"
+else
+  fail "gate runs the fast tier: skips slow.txt, fails a package over testpolicy.FastTierMaxWall" "$out"
+fi
+if grep -q -E 'gate: PASSED in \$\{wall\}s wall' <<<"$out"; then
+  pass "gate prints its wall time"
+else
+  fail "gate prints its wall time" "$out"
 fi
 
 if grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' <<<"$out" && ! dry lint | grep -q -F -- '--allow-serial-runners'; then
@@ -75,14 +87,16 @@ if grep -q -E 'GT_TEST_DOCKER=[^0]' <<<"$out"; then
 else
   pass "gate never turns the container opt-in on or defaults it"
 fi
-# An inherited opt-in must not change what the gate runs.
-if [[ "$(GT_TEST_DOCKER=1 dry gate | grep -v -E '^(go: |Warning: )')" == "$(dry gate | grep -v -E '^(go: |Warning: )')" ]]; then
+# An inherited opt-in must not change what the gate runs. The gate's start
+# time, baked into the recipe when make parses it, is masked.
+gate_shape() { dry gate | grep -v -E '^(go: |Warning: )' | sed -E 's/date \+%s\) - [0-9]+/date +%s) - START/'; }
+if [[ "$(GT_TEST_DOCKER=1 gate_shape)" == "$(gate_shape)" ]]; then
   pass "an inherited GT_TEST_DOCKER=1 does not change the gate"
 else
   fail "an inherited GT_TEST_DOCKER=1 does not change the gate"
 fi
 
-if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F 'cmd/budget -- -timeout 20m ./...' <<<"$out"; then
+if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- 'slow.txt -- -timeout 20m ./...' <<<"$out"; then
   pass "gate carries one -timeout, on the budget runner (the one gate definition)"
 else
   fail "gate carries one -timeout, on the budget runner (the one gate definition)" "$(grep -n -E -- '-timeout' <<<"$out")"
@@ -91,13 +105,18 @@ fi
 echo "deleted entry points"
 # Read from the Makefile, never through make -n: a deleted target's old recipe
 # recursed through $(MAKE), which make runs even under -n.
-for t in test test-changed; do
+for t in test-changed; do
   if grep -q -E "^$t:" "$ROOT/Makefile" || grep -q -E "^\.PHONY:.* $t( |$)" "$ROOT/Makefile"; then
     fail "make $t is gone"
   else
     pass "make $t is gone"
   fi
 done
+if [[ "$(grep -E '^test:' "$ROOT/Makefile")" == "test: gate test-slow test-integration" ]] && ! awk '/^test:/{f=1;next} /^[^\t]/{f=0} f' "$ROOT/Makefile" | grep -q .; then
+  pass "make test only chains gate, test-slow and test-integration, with no recipe of its own"
+else
+  fail "make test only chains gate, test-slow and test-integration, with no recipe of its own" "$(grep -A3 -E '^test:' "$ROOT/Makefile")"
+fi
 if grep -q -E '(^|[^A-Za-z_])PKGS *\?=' "$ROOT/Makefile"; then
   fail "no PKGS default for a changed-package gate"
 else
@@ -107,6 +126,26 @@ if grep -q -F 'GT_TEST_DOCKER:-' "$ROOT/Makefile"; then
   fail "no recipe defaults the container opt-in from the environment" "$(grep -n -F 'GT_TEST_DOCKER:-' "$ROOT/Makefile")"
 else
   pass "no recipe defaults the container opt-in from the environment"
+fi
+
+echo "test-slow"
+if sout=$(dry test-slow); then
+  pass "make -n test-slow exits 0"
+else
+  fail "make -n test-slow exits 0" "$sout"
+fi
+missing=""
+while IFS= read -r pkg; do
+  pkg="${pkg%%#*}"
+  pkg="$(echo "$pkg" | awk '{print $1}')"
+  [[ -z "$pkg" ]] && continue
+  grep -q -E "\./$pkg( |$)" <<<"$sout" || missing="$missing $pkg"
+  grep -q -E "\./$pkg( |$)" <<<"$out" && missing="$missing (gate runs $pkg)"
+done <"$ROOT/internal/testpolicy/slow.txt"
+if [[ -z "$missing" ]] && grep -q -F 'GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./internal/' <<<"$sout" && grep -q -F 'GT_TEST_DOCKER=0 bash scripts/test-makefile.sh' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
+  pass "test-slow runs every slow.txt package and the shell tests, containers off, no slot"
+else
+  fail "test-slow runs every slow.txt package and the shell tests, containers off, no slot;$missing" "$sout"
 fi
 
 echo "test-integration"
@@ -148,6 +187,12 @@ mkdir -p "$TMP/bin"
 cat >"$TMP/bin/go" <<'STUB'
 #!/usr/bin/env bash
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
+if [[ "$1" == run && -n "${STUB_GO_INTERRUPT:-}" ]]; then
+  # Signal the recipe shell (the parent), then wait to be killed.
+  kill -TERM "$PPID"
+  sleep 20
+  echo "go run survived the interrupt" >>"$STUB_LOG"
+fi
 [[ "$1" == "${STUB_GO_FAIL:-}" ]] && exit 1
 exit 0
 STUB
@@ -177,15 +222,15 @@ run_gate() {
   : >"$TMP/calls"
   local rc=0
   env "$@" STUB_LOG="$TMP/calls" GT_TEST_DOCKER=1 PATH="$TMP/bin:$PATH" \
-    make -C "$ROOT" --no-print-directory "${flags[@]}" gate GATE_SHELL_TESTS="$TMP/shell-tests.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+    make -C "$ROOT" --no-print-directory "${flags[@]}" "${TARGET:-gate}" SHELL_TESTS="$TMP/shell-tests.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
   echo "$rc"
 }
 
 rc=$(run_gate)
-if [[ "$rc" == 0 ]] && grep -q -F 'gate: PASSED' "$TMP/err" && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
-  pass "green stubs: exit 0, lint waited on the lock, both unit halves ran, the suite saw GT_TEST_DOCKER=0 despite an inherited 1"
+if [[ "$rc" == 0 ]] && grep -q -E 'gate: PASSED in [0-9]+s wall' "$TMP/err" && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && ! grep -q -x 'shell-tests' "$TMP/calls" && grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' "$TMP/calls"; then
+  pass "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1"
 else
-  fail "green stubs: exit 0, lint waited on the lock, both unit halves ran, the suite saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "green stubs: exit 0 with the wall printed, lint waited on the lock, only the Go suite ran, and it saw GT_TEST_DOCKER=0 despite an inherited 1 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 rc=$(run_gate -o docs-lint -- STUB_LINT_FAIL=1)
@@ -209,28 +254,36 @@ else
   fail "Go suite fails: non-zero, names the Go half (rc=$rc)" "$(cat "$TMP/err")"
 fi
 
-rc=$(run_gate -o lint -- STUB_SHELL_FAIL=1)
-if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at unit tier (shell tests' "$TMP/err" && ! grep -q -F 'gate: PASSED' "$TMP/err"; then
-  pass "shell tests fail: non-zero, names the shell half"
-else
-  fail "shell tests fail: non-zero, names the shell half (rc=$rc)" "$(cat "$TMP/err")"
-fi
-
-# An interrupted gate stops both halves and exits red. The stub shell half
+# An interrupted gate stops the Go suite and exits red. The stub go run
 # signals the recipe shell (its parent) and then waits to be killed; a trap
 # that did not fire would let it finish and the gate would pass.
-cat >"$TMP/interrupt.sh" <<'STUB'
-kill -TERM "$PPID"
-sleep 20
-echo "shell-tests survived the interrupt" >>"$STUB_LOG"
-STUB
-rc=0
-env STUB_LOG="$TMP/calls" PATH="$TMP/bin:$PATH" make -C "$ROOT" --no-print-directory -o lint gate GATE_SHELL_TESTS="$TMP/interrupt.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+rc=$(run_gate -o lint -- STUB_GO_INTERRUPT=1)
 sleep 1
 if [[ "$rc" != 0 ]] && ! grep -q -F 'gate: PASSED' "$TMP/err" && ! grep -q -F 'survived' "$TMP/calls"; then
-  pass "interrupted gate: non-zero, and the trap stopped the running half"
+  pass "interrupted gate: non-zero, and the trap stopped the running suite"
 else
-  fail "interrupted gate: non-zero, and the trap stopped the running half (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+  fail "interrupted gate: non-zero, and the trap stopped the running suite (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+rc=$(TARGET=test-slow run_gate)
+if [[ "$rc" == 0 ]] && grep -q -x 'go run GT_TEST_DOCKER=0' "$TMP/calls" && grep -q -x 'shell-tests' "$TMP/calls" && grep -q -E 'test-slow: PASSED in [0-9]+s wall' "$TMP/err"; then
+  pass "test-slow green stubs: exit 0, the Go suite and the shell tests ran with GT_TEST_DOCKER=0"
+else
+  fail "test-slow green stubs: exit 0, the Go suite and the shell tests ran with GT_TEST_DOCKER=0 (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+rc=$(TARGET=test-slow run_gate -- STUB_GO_FAIL=run)
+if [[ "$rc" != 0 ]] && grep -q -F 'test-slow: FAILED at Go suite' "$TMP/err" && grep -q -x 'shell-tests' "$TMP/calls"; then
+  pass "test-slow Go suite fails: non-zero, names it, the shell tests still run"
+else
+  fail "test-slow Go suite fails: non-zero, names it, the shell tests still run (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+rc=$(TARGET=test-slow run_gate -- STUB_SHELL_FAIL=1)
+if [[ "$rc" != 0 ]] && grep -q -F 'test-slow: FAILED at shell tests' "$TMP/err"; then
+  pass "test-slow shell tests fail: non-zero, names the shell tests"
+else
+  fail "test-slow shell tests fail: non-zero, names the shell tests (rc=$rc)" "$(cat "$TMP/err")"
 fi
 
 rc=0
