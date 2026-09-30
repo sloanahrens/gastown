@@ -8,10 +8,13 @@ import (
 	"testing"
 )
 
-// TestIntegrationCrossPlatformBuild verifies that the codebase compiles for all supported
-// platforms. This catches cases where platform-specific code (using build tags
-// like //go:build !windows) is called from platform-agnostic code without
-// providing stubs for all platforms.
+// TestIntegrationCrossPlatformBuild verifies that the codebase compiles for every
+// platform the tree still carries an implementation for. It catches a helper behind
+// a build tag (//go:build darwin, //go:build !windows) that untagged code calls with
+// no counterpart for the other platforms, which a host build never sees.
+//
+// A platform belongs in this list only while such counterparts exist. Windows is
+// absent because its port was deleted (gt-638go.6) and it has none.
 //
 // It runs the go tool, so it lives in the integration tier.
 func TestIntegrationCrossPlatformBuild(t *testing.T) {
@@ -24,7 +27,6 @@ func TestIntegrationCrossPlatformBuild(t *testing.T) {
 		{"linux", "arm64", "0"},
 		{"darwin", "amd64", "0"},
 		{"darwin", "arm64", "0"},
-		{"windows", "amd64", "0"},
 		{"freebsd", "amd64", "0"},
 	}
 
