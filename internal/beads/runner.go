@@ -144,6 +144,16 @@ func NewPlain(dir string, env []string) *Beads {
 	return b
 }
 
+// NewPlainWithRunner is NewPlain whose bd calls go to run. A nil run is the
+// real bd, exactly NewPlain.
+func NewPlainWithRunner(dir string, env []string, run BDRunner) *Beads {
+	b := NewPlain(dir, env)
+	if run != nil {
+		b.exec = runnerExec(run)
+	}
+	return b
+}
+
 // WithTimeout returns a copy of a plain wrapper whose bd calls are killed
 // after d. It panics on a wrapper not built by NewPlain.
 func (b *Beads) WithTimeout(d time.Duration) *Beads {

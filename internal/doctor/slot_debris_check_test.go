@@ -17,37 +17,52 @@ func dockerPSLine(id, image, name string, created time.Time, labels string) stri
 		id, image, name, created.Format("2006-01-02 15:04:05 -0700 MST"), labels)
 }
 
-// stubSlotContainers points the gate's docker listing at fixed lines and
-// records removals instead of reaching the host's docker.
-func stubSlotContainers(t *testing.T, lines ...string) *[]string {
-	t.Helper()
-	restoreLister := slot.SetContainerListerForTest(func() ([]string, error) { return lines, nil })
-	t.Cleanup(restoreLister)
+// fakeContainers is a docker that lists fixed lines and records removals
+// (or fails them with removeErr) instead of reaching the host's docker.
+type fakeContainers struct {
+	lines     []string
+	listErr   error
+	removeErr error
+	removed   []string
+}
 
-	var removed []string
-	restoreRemover := slot.SetContainerRemoverForTest(func(id string) error {
-		removed = append(removed, id)
-		return nil
-	})
-	t.Cleanup(restoreRemover)
-	return &removed
+func (f *fakeContainers) List() ([]string, error) { return f.lines, f.listErr }
+
+func (f *fakeContainers) Remove(id string) error {
+	if f.removeErr != nil {
+		return f.removeErr
+	}
+	f.removed = append(f.removed, id)
+	return nil
+}
+
+func (f *fakeContainers) Info() (slot.VMInfo, error) { return slot.VMInfo{}, nil }
+
+// debrisCheck is a SlotDebrisCheck whose gate sees docker as rt.
+func debrisCheck(rt *fakeContainers) *SlotDebrisCheck {
+	c := NewSlotDebrisCheck()
+	c.gate = slot.NewGate(slot.WithRuntime(rt))
+	return c
 }
 
 func TestSlotDebrisCheck_HealthyWhenNothingIsStale(t *testing.T) {
-	stubSlotContainers(t, dockerPSLine("live-id", "dolt/dolt-sql-server:2.2.0", "running-suite",
-		time.Now().Add(-time.Minute), ""))
+	t.Parallel()
+	rt := &fakeContainers{lines: []string{dockerPSLine("live-id", "dolt/dolt-sql-server:2.2.0", "running-suite",
+		time.Now().Add(-time.Minute), "")}}
 
-	result := NewSlotDebrisCheck().Run(&CheckContext{TownRoot: t.TempDir()})
+	result := debrisCheck(rt).Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK for a young container: %s", result.Status, result.Message)
 	}
 }
 
 func TestSlotDebrisCheck_WarnsOnOrphanAndFixReapsIt(t *testing.T) {
-	removed := stubSlotContainers(t, dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.2.0", "wizardly_goldberg",
-		time.Now().Add(-5*time.Hour), ""))
+	t.Parallel()
+	rt := &fakeContainers{lines: []string{dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.2.0", "wizardly_goldberg",
+		time.Now().Add(-5*time.Hour), "")}}
+	removed := &rt.removed
 
-	check := NewSlotDebrisCheck()
+	check := debrisCheck(rt)
 	ctx := &CheckContext{TownRoot: t.TempDir()}
 
 	result := check.Run(ctx)
@@ -76,12 +91,10 @@ func TestSlotDebrisCheck_WarnsOnOrphanAndFixReapsIt(t *testing.T) {
 }
 
 func TestSlotDebrisCheck_UnlistableContainersIsSkippedNotOK(t *testing.T) {
-	restore := slot.SetContainerListerForTest(func() ([]string, error) {
-		return nil, errors.New("Cannot connect to the Docker daemon")
-	})
-	t.Cleanup(restore)
+	t.Parallel()
+	rt := &fakeContainers{listErr: errors.New("Cannot connect to the Docker daemon")}
 
-	result := NewSlotDebrisCheck().Run(&CheckContext{TownRoot: t.TempDir()})
+	result := debrisCheck(rt).Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusSkipped {
 		t.Fatalf("Status = %v, want StatusSkipped when the containers cannot be listed: %s", result.Status, result.Message)
 	}
@@ -91,17 +104,14 @@ func TestSlotDebrisCheck_UnlistableContainersIsSkippedNotOK(t *testing.T) {
 }
 
 func TestSlotDebrisCheck_FixReportsRemovalFailures(t *testing.T) {
-	restoreLister := slot.SetContainerListerForTest(func() ([]string, error) {
-		return []string{dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.2.0", "wizardly_goldberg",
-			time.Now().Add(-5*time.Hour), "")}, nil
-	})
-	t.Cleanup(restoreLister)
-	restoreRemover := slot.SetContainerRemoverForTest(func(string) error {
-		return errors.New("Error response from daemon: No such container")
-	})
-	t.Cleanup(restoreRemover)
+	t.Parallel()
+	rt := &fakeContainers{
+		lines: []string{dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.2.0", "wizardly_goldberg",
+			time.Now().Add(-5*time.Hour), "")},
+		removeErr: errors.New("Error response from daemon: No such container"),
+	}
 
-	err := NewSlotDebrisCheck().Fix(&CheckContext{TownRoot: t.TempDir()})
+	err := debrisCheck(rt).Fix(&CheckContext{TownRoot: t.TempDir()})
 	if err == nil {
 		t.Fatal("Fix returned no error while docker refused the removal")
 	}

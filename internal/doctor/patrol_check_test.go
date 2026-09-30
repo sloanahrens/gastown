@@ -306,7 +306,7 @@ func TestPatrolPluginDriftCheck_SourceNotFound_ReturnsWarningNotOK(t *testing.T)
 }
 
 func TestPatrolPluginDriftCheck_DriftedPlugin_WarningNamesFile(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
@@ -334,7 +334,7 @@ func TestPatrolPluginDriftCheck_DriftedPlugin_WarningNamesFile(t *testing.T) {
 }
 
 func TestPatrolPluginDriftCheck_InSync_ReturnsOK(t *testing.T) {
-	t.Chdir(t.TempDir())
+	t.Parallel()
 
 	townRoot := t.TempDir()
 	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")

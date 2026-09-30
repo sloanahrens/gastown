@@ -1,42 +1,24 @@
 package doctor
 
 import (
+	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// tempGitRepo initializes a throwaway git repo with a committed root file at
-// dir.
-func tempGitRepo(t *testing.T, dir string) {
+// tempGitRepo makes a repository at dir in gf with a committed root file.
+func tempGitRepo(t *testing.T, gf *gitfake.Fake, dir string) {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skipf("git not available: %v", err)
-	}
-	mustGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("creating repo dir: %v", err)
-	}
+	gf.InitRepo(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "root.txt"), []byte("root\n"), 0o644); err != nil {
 		t.Fatalf("writing seed file: %v", err)
 	}
-	mustGit("init", "-q")
-	mustGit("add", "root.txt")
-	mustGit("commit", "-q", "-m", "init")
+	gf.CommitWorktree(t, dir, "init")
 }
 
 // newExposureTown lays out a minimal town root with one rig and three clones
@@ -126,16 +108,16 @@ func TestBeadsExposureCheck_ExposedClone(t *testing.T) {
 	}
 
 	// Fix must target exactly the exposed clone and write its exclude file,
-	// which needs a real repository to resolve.
-	if out, err := exec.Command("git", "-C", clonePaths["mayor"], "init", "-q").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
+	// which needs a repository to resolve.
+	gf := gitfake.New()
+	gf.InitRepo(t, clonePaths["mayor"])
+	ctx := withGit(&CheckContext{TownRoot: town}, gf)
 	check := exposureCheck(probes)
-	check.Run(&CheckContext{TownRoot: town})
+	check.Run(ctx)
 	if len(check.exposedClones) != 1 || check.exposedClones[0] != clonePaths["mayor"] {
 		t.Fatalf("exposedClones = %v, want [%s]", check.exposedClones, clonePaths["mayor"])
 	}
-	if err := check.Fix(&CheckContext{TownRoot: town}); err != nil {
+	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
 	exclude, err := os.ReadFile(filepath.Join(clonePaths["mayor"], ".git", "info", "exclude"))
@@ -148,26 +130,27 @@ func TestBeadsExposureCheck_ExposedClone(t *testing.T) {
 }
 
 // TestBeadsExposureCheck_ProbesWithGitByDefault is the wiring guard for the
-// probe seam: a check built by NewBeadsExposureCheck asks git, so a real
-// clone with an untracked .beads/ is reported exposed.
+// probe seam: a check built by NewBeadsExposureCheck asks git, so a clone
+// with an untracked .beads/ is reported exposed.
 func TestBeadsExposureCheck_ProbesWithGitByDefault(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	town := t.TempDir()
 	rigPath := filepath.Join(town, "testrig")
 	if err := os.MkdirAll(filepath.Join(rigPath, "crew"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	clone := filepath.Join(rigPath, "mayor", "rig")
-	tempGitRepo(t, clone)
+	tempGitRepo(t, gf, clone)
 	if err := os.MkdirAll(filepath.Join(clone, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(clone, ".beads", "marker"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result := NewBeadsExposureCheck().Run(&CheckContext{TownRoot: town})
+	result := NewBeadsExposureCheck().Run(withGit(&CheckContext{TownRoot: town}, gf))
 	if result.Status != StatusWarning || !strings.Contains(result.Message, "1 clone(s)") {
-		t.Fatalf("real untracked .beads/: got %v (%s), want a warning for 1 clone", result.Status, result.Message)
+		t.Fatalf("untracked .beads/: got %v (%s), want a warning for 1 clone", result.Status, result.Message)
 	}
 }
 
@@ -256,48 +239,52 @@ func TestBeadsExposureCheck_FixSkipsUnresolved(t *testing.T) {
 	}
 }
 
-// TestBeadsExposureProbe_FailingGit is a real-git regression guard for the
+// failingStatus is a clone whose status query fails.
+type failingStatus struct{ Repo }
+
+func (failingStatus) UntrackedPaths(string) ([]string, error) {
+	return nil, errors.New("fatal: bad object refs/heads/main")
+}
+
+// TestBeadsExposureProbe_FailingGit is the regression guard for the
 // fail-closed change: a repo whose git status fails must come back
 // probeUnresolved, never probeProtected.
 func TestBeadsExposureProbe_FailingGit(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	dir := t.TempDir()
-	tempGitRepo(t, dir)
-	// Corrupt the refs index so `git status` errors out.
-	if err := os.WriteFile(filepath.Join(dir, ".git", "packed-refs"), []byte("garbage\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := beadsUntrackedAndUnignored(dir); got != probeUnresolved {
-		t.Errorf("corrupt repo: got %v, want probeUnresolved", got)
+	tempGitRepo(t, gf, dir)
+	if got := beadsUntrackedAndUnignored(failingStatus{gf.OpenBranchRepo(dir).(Repo)}); got != probeUnresolved {
+		t.Errorf("failing status: got %v, want probeUnresolved", got)
 	}
 	// No git repo at all (no .git) also fails the status call.
-	empty := t.TempDir()
-	if got := beadsUntrackedAndUnignored(empty); got != probeUnresolved {
+	if got := beadsUntrackedAndUnignored(gf.OpenBranchRepo(t.TempDir()).(Repo)); got != probeUnresolved {
 		t.Errorf("non-repo dir: got %v, want probeUnresolved", got)
 	}
 }
 
-// TestBeadsExposureProbe_RealGit exercises detection against live git: an
-// untracked .beads/ is exposed; the same .beads/ protected by info/exclude is
-// not. A marker file makes the untracked directory non-empty so git status
-// reports it.
-func TestBeadsExposureProbe_RealGit(t *testing.T) {
+// TestBeadsExposureProbe_UntrackedThenExcluded: an untracked .beads/ is
+// exposed; the same .beads/ protected by info/exclude is not. A marker file
+// makes the untracked directory non-empty so git status reports it.
+func TestBeadsExposureProbe_UntrackedThenExcluded(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	dir := t.TempDir()
-	tempGitRepo(t, dir)
+	tempGitRepo(t, gf, dir)
+	g := gf.OpenBranchRepo(dir).(Repo)
 	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "marker"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := beadsUntrackedAndUnignored(dir); got != probeExposed {
+	if got := beadsUntrackedAndUnignored(g); got != probeExposed {
 		t.Fatalf("untracked .beads: got %v, want probeExposed", got)
 	}
-	if err := rig.EnsureLocalExcludePatterns(dir); err != nil {
+	if err := rig.EnsureLocalExcludePatternsIn(dir, g); err != nil {
 		t.Fatalf("EnsureLocalExcludePatterns: %v", err)
 	}
-	if got := beadsUntrackedAndUnignored(dir); got != probeProtected {
+	if got := beadsUntrackedAndUnignored(g); got != probeProtected {
 		t.Errorf("exclude-protected .beads: got %v, want probeProtected", got)
 	}
 }

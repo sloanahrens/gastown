@@ -6,6 +6,7 @@
 # gitfree_test.go.
 internal/crew
 internal/daemon
+internal/doctor
 internal/doltserver
 internal/formula
 internal/git

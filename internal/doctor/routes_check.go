@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,18 @@ func determineRigBeadsPath(townRoot, rigName string) string {
 // and all routes point to valid locations.
 type RoutesCheck struct {
 	FixableCheck
+
+	// stderr receives Fix's warnings about routes it leaves alone; nil is
+	// os.Stderr.
+	stderr io.Writer
+}
+
+func (c *RoutesCheck) warnf(format string, args ...any) {
+	w := c.stderr
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, format, args...)
 }
 
 // NewRoutesCheck creates a new routes configuration check.
@@ -378,7 +391,7 @@ func (c *RoutesCheck) Fix(ctx *CheckContext) error {
 
 		// Skip duplicate prefixes to avoid non-deterministic rewrites
 		if prefixCount[prefix] > 1 {
-			fmt.Fprintf(os.Stderr, "Warning: skipping route fix for duplicate prefix %s (%d rigs share it)\n",
+			c.warnf("Warning: skipping route fix for duplicate prefix %s (%d rigs share it)\n",
 				prefix, prefixCount[prefix])
 			continue
 		}
@@ -395,7 +408,7 @@ func (c *RoutesCheck) Fix(ctx *CheckContext) error {
 					routes[idx].Path = rigRoutePath
 					modified = true
 				} else {
-					fmt.Fprintf(os.Stderr, "Warning: cannot rewrite route %s -> %s to %s (canonical path has no .beads directory)\n",
+					c.warnf("Warning: cannot rewrite route %s -> %s to %s (canonical path has no .beads directory)\n",
 						prefix, routes[idx].Path, rigRoutePath)
 				}
 			}

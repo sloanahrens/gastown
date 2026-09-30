@@ -26,6 +26,10 @@ import (
 // its remotes, so it works whether or not the server is up.
 type DoltRemoteLeftoversCheck struct {
 	BaseCheck
+
+	// stat examines a database's .dolt and git-remote-cache directories; nil
+	// is os.Stat.
+	stat func(path string) (os.FileInfo, error)
 }
 
 // NewDoltRemoteLeftoversCheck creates the Dolt remote leftovers check.
@@ -50,7 +54,11 @@ func (c *DoltRemoteLeftoversCheck) Run(ctx *CheckContext) *CheckResult {
 	var details []string
 
 	dataDir := doltserver.DefaultConfig(ctx.TownRoot).DataDir
-	details = append(details, scanDoltDataDirForRemotes(dataDir)...)
+	stat := c.stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	details = append(details, scanDoltDataDirForRemotes(dataDir, stat)...)
 	details = append(details, scanBeadsConfigsForSyncRemote(ctx.TownRoot)...)
 
 	if len(details) == 0 {
@@ -73,7 +81,7 @@ func (c *DoltRemoteLeftoversCheck) Run(ctx *CheckContext) *CheckResult {
 // remote in its repo_state.json or a git-remote-cache directory. A missing
 // data directory means no databases. A file it cannot read or parse is
 // reported, never read as "no remote".
-func scanDoltDataDirForRemotes(dataDir string) []string {
+func scanDoltDataDirForRemotes(dataDir string, stat func(string) (os.FileInfo, error)) []string {
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -89,7 +97,7 @@ func scanDoltDataDirForRemotes(dataDir string) []string {
 		}
 		db := entry.Name()
 		doltDir := filepath.Join(dataDir, db, ".dolt")
-		if _, err := os.Stat(doltDir); err != nil {
+		if _, err := stat(doltDir); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue // not a Dolt database
 			}
@@ -106,7 +114,7 @@ func scanDoltDataDirForRemotes(dataDir string) []string {
 		}
 
 		cache := filepath.Join(doltDir, "git-remote-cache")
-		switch info, err := os.Stat(cache); {
+		switch info, err := stat(cache); {
 		case err == nil && info.IsDir():
 			details = append(details, fmt.Sprintf("%s: %s exists", db, cache))
 		case err != nil && !errors.Is(err, os.ErrNotExist):

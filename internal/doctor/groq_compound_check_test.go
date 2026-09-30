@@ -92,13 +92,14 @@ func TestGroqCompoundCheck_Run_SkipWhenNotConfigured(t *testing.T) {
 }
 
 func TestGroqCompoundCheck_Run_WarnWhenNoAPIKey(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
 	settings.DefaultAgent = string(config.AgentGroqCompound)
 	writeTownSettings(t, tmp, settings)
 
-	t.Setenv("GROQ_API_KEY", "")
 	c := NewGroqCompoundCheck()
+	c.lookupEnv = func(string) (string, bool) { return "", false }
 	res := c.Run(&CheckContext{TownRoot: tmp})
 	if res.Status != StatusWarning {
 		t.Errorf("Run status = %v, want Warning when GROQ_API_KEY missing", res.Status)

@@ -15,8 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
-var verifyExpectedDatabasesAtConfig = doltserver.VerifyExpectedDatabasesAtConfig
-
 type serverModeRig struct {
 	name     string
 	database string
@@ -257,6 +255,33 @@ func loadRigNames(rigsPath string) map[string]struct{} {
 // instead of connecting to the centralized server.
 type DoltServerReachableCheck struct {
 	BaseCheck
+
+	// lookupEnv reads the GT_DOLT_* variables the server config honors; nil
+	// is the process environment.
+	lookupEnv func(key string) (string, bool)
+	// dial reports whether a TCP connection to addr succeeds; nil dials.
+	dial func(addr string) error
+	// verify reports which expected databases the server at cfg serves;
+	// nil is doltserver.VerifyExpectedDatabasesAtConfig.
+	verify func(cfg *doltserver.Config, expected []string) (present, missing []string, err error)
+}
+
+func (c *DoltServerReachableCheck) dialAddr(addr string) error {
+	if c.dial != nil {
+		return c.dial(addr)
+	}
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+func (c *DoltServerReachableCheck) verifyDatabases(cfg *doltserver.Config, expected []string) ([]string, []string, error) {
+	if c.verify != nil {
+		return c.verify(cfg, expected)
+	}
+	return doltserver.VerifyExpectedDatabasesAtConfig(cfg, expected)
 }
 
 // NewDoltServerReachableCheck creates a check for split-brain risk detection.
@@ -291,8 +316,7 @@ func (c *DoltServerReachableCheck) Run(ctx *CheckContext) *CheckResult {
 	unreachableRigs := 0
 	for addr, rigs := range rigsByAddr {
 		totalRigs += len(rigs)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err != nil {
+		if err := c.dialAddr(addr); err != nil {
 			unreachable = append(unreachable, addr)
 			unreachableRigs += len(rigs)
 			var rigNames []string
@@ -301,15 +325,14 @@ func (c *DoltServerReachableCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			details = append(details, fmt.Sprintf("Server %s unreachable (rigs: %s)", addr, strings.Join(rigNames, ", ")))
 		} else {
-			_ = conn.Close()
-			cfg := doltserver.DefaultConfig(ctx.TownRoot)
+			cfg := doltserver.DefaultConfigWithEnv(ctx.TownRoot, c.lookupEnv)
 			cfg.Host = hostForAddr(addr)
 			cfg.Port = portForAddr(addr)
 			var expected []string
 			for _, rig := range rigs {
 				expected = append(expected, rig.database)
 			}
-			_, missing, verifyErr := verifyExpectedDatabasesAtConfig(cfg, expected)
+			_, missing, verifyErr := c.verifyDatabases(cfg, expected)
 			if verifyErr != nil {
 				fixHint := "Check the configured Dolt server and verify the expected rig databases are being served"
 				if isLocalDoltAddr(addr) {
@@ -483,7 +506,7 @@ func (c *DoltServerReachableCheck) getServerAddr(beadsDir string, townRoot strin
 		// precedence over GT_DOLT_PORT env var, which takes precedence over
 		// daemon.json, which falls back to DefaultPort (3307). This ensures
 		// the doctor probes the same port that the server actually uses.
-		port = doltserver.DefaultConfig(townRoot).Port
+		port = doltserver.DefaultConfigWithEnv(townRoot, c.lookupEnv).Port
 	}
 	if port == 0 {
 		port = doltserver.DefaultPort
@@ -497,6 +520,10 @@ func (c *DoltServerReachableCheck) getServerAddr(beadsDir string, townRoot strin
 type DoltOrphanedDatabaseCheck struct {
 	FixableCheck
 	orphanNames []string // Cached during Run for use in Fix
+
+	// removeDatabase removes one database from the town's Dolt; nil is
+	// doltserver.RemoveDatabase, which asks whether the server is running.
+	removeDatabase func(townRoot, name string, force bool) error
 }
 
 // NewDoltOrphanedDatabaseCheck creates a new orphaned database check.
@@ -553,8 +580,12 @@ func (c *DoltOrphanedDatabaseCheck) Run(ctx *CheckContext) *CheckResult {
 
 // Fix removes orphaned databases.
 func (c *DoltOrphanedDatabaseCheck) Fix(ctx *CheckContext) error {
+	remove := c.removeDatabase
+	if remove == nil {
+		remove = doltserver.RemoveDatabase
+	}
 	for _, name := range c.orphanNames {
-		if err := doltserver.RemoveDatabase(ctx.TownRoot, name, true); err != nil {
+		if err := remove(ctx.TownRoot, name, true); err != nil {
 			return fmt.Errorf("removing orphaned database %s: %w", name, err)
 		}
 	}

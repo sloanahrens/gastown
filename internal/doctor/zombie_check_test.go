@@ -89,39 +89,38 @@ func TestZombieSessionCheck_ListSessionsErrorIsSkipped(t *testing.T) {
 
 func TestZombieSessionCheck_SkipsCrewSessions(t *testing.T) {
 	t.Parallel()
-	// Verify that crew sessions are not marked as zombies
-	check := NewZombieSessionCheck()
+	// A crew session with no Claude is human-managed, not a zombie; a dead
+	// witness beside it is.
+	lister := &fakeZombieLister{sessions: []string{"gt-crew-joe", "gt-witness"}}
+	check := NewZombieSessionCheckWithLister(lister)
 
-	// Run the check - crew sessions should be skipped
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-	result := check.Run(ctx)
+	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
 
-	// If there are zombies, ensure no crew sessions are in the list
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning for the dead witness: %s", result.Status, result.Message)
+	}
 	for _, detail := range result.Details {
-		if isCrewSession(detail) {
+		if strings.Contains(detail, "crew") {
 			t.Errorf("crew session should not be in zombie list: %s", detail)
 		}
+	}
+	if len(check.zombieSessions) != 1 || check.zombieSessions[0] != "gt-witness" {
+		t.Errorf("zombies = %v, want only gt-witness", check.zombieSessions)
 	}
 }
 
 func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 	t.Parallel()
-	// Verify that Fix() never kills crew sessions
-	check := NewZombieSessionCheck()
+	// Fix never kills a crew session, even one Run wrongly listed.
+	lister := &fakeZombieLister{}
+	check := NewZombieSessionCheckWithLister(lister)
+	check.zombieSessions = []string{"gt-crew-joe", "gt-witness"}
 
-	// Manually set zombies including a crew session (simulating a bug)
-	check.zombieSessions = []string{
-		"gt-gastown-crew-joe", // Should be skipped
-		"gt-gastown-nux",      // Would be killed (if real)
+	_ = check.Fix(&CheckContext{TownRoot: t.TempDir()})
+
+	if len(lister.killed) != 1 || lister.killed[0] != "gt-witness" {
+		t.Fatalf("killed = %v, want only gt-witness (never the crew session)", lister.killed)
 	}
-
-	ctx := &CheckContext{TownRoot: t.TempDir()}
-
-	// Fix should skip crew sessions due to safeguard
-	// (We can't fully test this without mocking tmux, but the safeguard is in place)
-	_ = check.Fix(ctx)
-
-	// The test passes if no panic occurred and crew sessions are protected by the safeguard
 }
 
 // TestZombieSessionCheck_LivenessErrorIsNotAZombie is gt-fcxe9.1: a liveness

@@ -1518,16 +1518,15 @@ type MergeQueueConfig struct {
 	// rigs that never configure it keep upstream (pre-gate) behavior.
 	Editorial *EditorialConfig `json:"editorial,omitempty"`
 
-	// PostMergeCommand runs after every landed merge (single MR, or once per
-	// batch) in <rig>/refinery/rig, with GT_MERGED_SHA, GT_RIG, GT_TOWN_ROOT
-	// and GT_MR_IDS set. Best-effort: a failure or timeout escalates and never
-	// fails the merge. Honored only from the rig-root config.json:
-	// MergeSettingsCommand deliberately does not overlay it from the repo or
-	// local tiers, so merged repo content cannot choose the command.
+	// PostMergeCommand is inert: its runner went with the refinery, and
+	// nothing reads it (gt-z0l3s). It stays only because the live gastown
+	// rig config still carries post_merge_command and rig configs decode
+	// strictly; drop the key from <town>/gastown/config.json first, then this
+	// field and PostMergeTimeout. Installing is `make install`
+	// (scripts/install-gt.sh).
 	PostMergeCommand string `json:"post_merge_command,omitempty"`
 
-	// PostMergeTimeout bounds PostMergeCommand (e.g. "20m"). Empty defaults to
-	// DefaultPostMergeTimeout. Rig-root tier only, like PostMergeCommand.
+	// PostMergeTimeout is inert, like PostMergeCommand.
 	PostMergeTimeout string `json:"post_merge_timeout,omitempty"`
 
 	// PostLandCommand runs once per landing, after the push and the record,

@@ -15,6 +15,10 @@ import (
 // measured at 99% CPU while host idle read 88%).
 type ContainerCapacityCheck struct {
 	BaseCheck
+
+	// dockerInfo reports the Docker VM's CPUs and memory; nil is
+	// dockerInfoCPUMem. Tests answer with a size.
+	dockerInfo func() (ncpu int, memBytes int64, err error)
 }
 
 // NewContainerCapacityCheck creates a new container capacity check.
@@ -28,10 +32,9 @@ func NewContainerCapacityCheck() *ContainerCapacityCheck {
 	}
 }
 
-// dockerInfoCPUMem lets tests substitute a fake docker CLI response. It reads
-// the VM's bound through the container gate's runtime, the one place that
-// talks to the docker CLI.
-var dockerInfoCPUMem = func() (ncpu int, memBytes int64, err error) {
+// dockerInfoCPUMem reads the VM's bound through the container gate's runtime,
+// the one place that talks to the docker CLI.
+func dockerInfoCPUMem() (ncpu int, memBytes int64, err error) {
 	info, err := slot.DockerRuntime().Info()
 	if err != nil {
 		return 0, 0, err
@@ -50,7 +53,11 @@ const minContainerVMMemBytes int64 = 15 << 30
 // way it could not measure the VM's capacity, so it reports StatusSkipped
 // rather than claiming a clean result it never actually observed.
 func (c *ContainerCapacityCheck) Run(_ *CheckContext) *CheckResult {
-	ncpu, memBytes, err := dockerInfoCPUMem()
+	dockerInfo := c.dockerInfo
+	if dockerInfo == nil {
+		dockerInfo = dockerInfoCPUMem
+	}
+	ncpu, memBytes, err := dockerInfo()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),

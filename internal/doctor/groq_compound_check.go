@@ -10,11 +10,21 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-
 // GroqCompoundCheck probes the groq-compound agent for JSON output compliance.
 // It is skipped when groq-compound is not configured in any role.
 type GroqCompoundCheck struct {
 	BaseCheck
+
+	// lookupEnv reads GROQ_API_KEY; nil is the process environment.
+	lookupEnv func(key string) (string, bool)
+}
+
+func (c *GroqCompoundCheck) getenv(key string) string {
+	if c.lookupEnv != nil {
+		v, _ := c.lookupEnv(key)
+		return v
+	}
+	return os.Getenv(key)
 }
 
 // NewGroqCompoundCheck creates a new groq-compound JSON probe check.
@@ -40,7 +50,7 @@ func (c *GroqCompoundCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Skip if GROQ_API_KEY is not set.
-	if os.Getenv("GROQ_API_KEY") == "" {
+	if c.getenv("GROQ_API_KEY") == "" {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
@@ -90,7 +100,7 @@ func (c *GroqCompoundCheck) Run(ctx *CheckContext) *CheckResult {
 
 // invokeGroqCompound calls the claude binary with Groq routing and returns stdout.
 func (c *GroqCompoundCheck) invokeGroqCompound(prompt string) ([]byte, error) {
-	groqAPIKey := os.Getenv("GROQ_API_KEY")
+	groqAPIKey := c.getenv("GROQ_API_KEY")
 	env := append(os.Environ(),
 		"ANTHROPIC_BASE_URL=https://api.groq.com/openai/v1",
 		"ANTHROPIC_MODEL=compound-beta",

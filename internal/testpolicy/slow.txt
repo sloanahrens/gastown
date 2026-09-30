@@ -3,5 +3,4 @@
 internal/cmd 301s # tests exec git (52 sites), bd (39) and tmux; 31 tmux.New
 internal/beads 88s # bd subprocess, git repos and a Dolt container port; D1 rewrites the package
 internal/dog 82s # tests exec git (16 sites), hermetic harness
-internal/doctor 64s # tests exec git (38 sites), 20 NewTmux
 internal/testpolicy 38s # budget-tool integration checks spawn go test subprocesses; false-rejected a landing under load (gt-xo7vg)

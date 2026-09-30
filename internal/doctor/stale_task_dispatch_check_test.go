@@ -9,8 +9,8 @@ import (
 )
 
 func TestStaleTaskDispatchCheck_Clean(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
 	// Create a mayor settings.json without task-dispatch
 	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
@@ -43,8 +43,8 @@ func TestStaleTaskDispatchCheck_Clean(t *testing.T) {
 }
 
 func TestStaleTaskDispatchCheck_Stale(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
 	// Create a mayor settings.json WITH stale task-dispatch
 	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
@@ -84,8 +84,8 @@ func TestStaleTaskDispatchCheck_Stale(t *testing.T) {
 }
 
 func TestStaleTaskDispatchCheck_Fix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
 
 	// Create a mayor settings.json WITH stale task-dispatch
 	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
@@ -110,6 +110,7 @@ func TestStaleTaskDispatchCheck_Fix(t *testing.T) {
 	}
 
 	check := NewStaleTaskDispatchCheck()
+	check.computeExpected = func(string) (*hooks.HooksConfig, error) { return hooks.DefaultBase(), nil }
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	// Run to detect
@@ -144,26 +145,8 @@ func TestStaleTaskDispatchCheck_Fix(t *testing.T) {
 // converges even when an on-disk hooks-override re-injects the task-dispatch
 // command via ComputeExpected.
 func TestStaleTaskDispatchCheck_FixConvergesWithOverride(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	// Create an on-disk mayor override that contains task-dispatch
-	overrideDir := filepath.Join(tmpDir, ".gt", "hooks-overrides")
-	if err := os.MkdirAll(overrideDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	override := `{
-  "PreToolUse": [
-    {
-      "matcher": "Task",
-      "hooks": [{"type": "command", "command": "gt tap guard task-dispatch"}]
-    }
-  ]
-}
-`
-	if err := os.WriteFile(filepath.Join(overrideDir, "mayor.json"), []byte(override), 0644); err != nil {
-		t.Fatal(err)
-	}
 
 	// Create a mayor settings.json WITH stale task-dispatch
 	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
@@ -188,6 +171,12 @@ func TestStaleTaskDispatchCheck_FixConvergesWithOverride(t *testing.T) {
 	}
 
 	check := NewStaleTaskDispatchCheck()
+	// A mayor hooks-override that re-injects task-dispatch.
+	check.computeExpected = func(string) (*hooks.HooksConfig, error) {
+		return &hooks.HooksConfig{PreToolUse: []hooks.HookEntry{
+			{Matcher: "Task", Hooks: []hooks.Hook{{Type: "command", Command: "gt tap guard task-dispatch"}}},
+		}}, nil
+	}
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	// Run to detect

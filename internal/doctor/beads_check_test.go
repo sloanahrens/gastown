@@ -500,6 +500,7 @@ func TestDatabasePrefixCheck_DetectsMismatchForOwnDB(t *testing.T) {
 }
 
 func TestDatabasePrefixCheck_UsesMetadataDatabaseEnv(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	townBeads := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(townBeads, 0755); err != nil {
@@ -518,15 +519,15 @@ func TestDatabasePrefixCheck_UsesMetadataDatabaseEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Stale ambient targets the check must replace, not inherit.
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "stale")
-	t.Setenv("BEADS_DIR", filepath.Join(tmpDir, "wrong", ".beads"))
-
 	bd := newFakeBD()
 	if err := bd.db(rigPath).ConfigSet("issue_prefix", "gt"); err != nil {
 		t.Fatal(err)
 	}
 	check := NewDatabasePrefixCheck()
+	// Stale ambient targets the check must replace, not inherit.
+	check.environ = func() []string {
+		return []string{"BEADS_DOLT_SERVER_DATABASE=stale", "BEADS_DIR=" + filepath.Join(tmpDir, "wrong", ".beads")}
+	}
 	result := check.Run(bd.ctx(tmpDir))
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK with metadata-selected database, got %v: %s details=%v", result.Status, result.Message, result.Details)
@@ -549,6 +550,7 @@ func TestDatabasePrefixCheck_UsesMetadataDatabaseEnv(t *testing.T) {
 // owns env scoping now that Fix no longer shells out to bd — bd 1.2+ refuses
 // `bd config set issue_prefix` (gt-8po).
 func TestDatabasePrefixCheck_FixUsesMetadataDatabase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "gastown", "mayor", "rig")
 	beadsDir := filepath.Join(rigPath, ".beads")
@@ -558,9 +560,6 @@ func TestDatabasePrefixCheck_FixUsesMetadataDatabase(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_mode":"server","dolt_database":"gastown"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "stale")
-	t.Setenv("BEADS_DIR", filepath.Join(tmpDir, "wrong", ".beads"))
-
 	var gotDatabase, gotBeadsDir string
 	check := NewDatabasePrefixCheck()
 	check.mismatches = []databasePrefixMismatch{{rigPath: "gastown/mayor/rig", routesPrefix: "gt", dbPrefix: "hq"}}
@@ -574,10 +573,10 @@ func TestDatabasePrefixCheck_FixUsesMetadataDatabase(t *testing.T) {
 	}
 
 	if gotDatabase != "gastown" {
-		t.Fatalf("database = %q, want %q (from metadata.json, not env %q)", gotDatabase, "gastown", "stale")
+		t.Fatalf("database = %q, want %q (from metadata.json)", gotDatabase, "gastown")
 	}
 	if gotBeadsDir != beadsDir {
-		t.Fatalf("beadsDir = %q, want %q (not ambient BEADS_DIR)", gotBeadsDir, beadsDir)
+		t.Fatalf("beadsDir = %q, want %q", gotBeadsDir, beadsDir)
 	}
 }
 
@@ -698,6 +697,7 @@ func TestDatabasePrefixCheck_MixedOwnAndRedirect(t *testing.T) {
 // bd 1.2+ refuses `bd config set issue_prefix`, and legacy databases with
 // issue_prefix unset block every bd create in that rig; gt-8po).
 func TestDatabasePrefixCheck_FixUsesStoreSetter(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// The beads rig on upgraded towns: DB named "beads", route prefix "be".
@@ -753,6 +753,7 @@ func TestDatabasePrefixCheck_FixUsesStoreSetter(t *testing.T) {
 // name falls back to the rig path's first component when metadata.json is
 // absent.
 func TestDatabasePrefixCheck_FixFallsBackToRigNameDatabase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigBeads := filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads")
 	if err := os.MkdirAll(rigBeads, 0755); err != nil {

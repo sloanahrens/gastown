@@ -28,7 +28,7 @@ func TestHookAttachmentValidCheck_NoBeadsDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	check := NewHookAttachmentValidCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	result := check.Run(ctx)
 
@@ -47,7 +47,7 @@ func TestHookAttachmentValidCheck_EmptyBeadsDir(t *testing.T) {
 	}
 
 	check := NewHookAttachmentValidCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	result := check.Run(ctx)
 
@@ -151,7 +151,7 @@ func TestHookSingletonCheck_NoBeadsDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	check := NewHookSingletonCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	result := check.Run(ctx)
 
@@ -170,7 +170,7 @@ func TestHookSingletonCheck_EmptyBeadsDir(t *testing.T) {
 	}
 
 	check := NewHookSingletonCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	result := check.Run(ctx)
 
@@ -237,7 +237,7 @@ func TestOrphanedAttachmentsCheck_NoBeadsDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	check := NewOrphanedAttachmentsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	result := check.Run(ctx)
 

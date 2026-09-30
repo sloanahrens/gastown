@@ -34,7 +34,7 @@ func TestStaleAgentBeadsCheck_NoRoutes(t *testing.T) {
 
 	// No .beads dir at all — LoadRoutes returns empty, so check returns OK (no rigs)
 	check := NewStaleAgentBeadsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	result := check.Run(ctx)
 
@@ -58,7 +58,7 @@ func TestStaleAgentBeadsCheck_NoRigs(t *testing.T) {
 	}
 
 	check := NewStaleAgentBeadsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	result := check.Run(ctx)
 
@@ -96,7 +96,7 @@ func TestStaleAgentBeadsCheck_CrewOnDisk(t *testing.T) {
 	}
 
 	check := NewStaleAgentBeadsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	// Without a running bd daemon, List() will fail gracefully
 	// The check should handle this and not crash
@@ -131,7 +131,7 @@ func TestStaleAgentBeadsCheck_Phase2_NoTownBeadsDir(t *testing.T) {
 	}
 
 	check := NewStaleAgentBeadsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	// Should not crash — Phase 2 ListAgentBeads will fail without Dolt
 	result := check.Run(ctx)
@@ -172,7 +172,7 @@ func TestStaleAgentBeadsCheck_KnownPrefixTracking(t *testing.T) {
 	}
 
 	check := NewStaleAgentBeadsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	// Run should complete without crash — verifies knownPrefixes includes
 	// both town-level ("hq", "hq-cv") and rig-level ("gt", "bd") prefixes
@@ -344,7 +344,7 @@ func TestStaleAgentBeadsCheck_FixFallbackToTownBeads(t *testing.T) {
 	}
 
 	check := NewStaleAgentBeadsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := noBD(tmpDir)
 
 	// Fix should not crash even when Run() reports no stale beads
 	err := check.Fix(ctx)

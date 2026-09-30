@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -39,10 +38,8 @@ func NewForeignRemoteCheck() *ForeignRemoteCheck {
 func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 	c.foreignRemotes = nil
 
-	// List all remotes
-	cmd := exec.Command("git", "remote")
-	cmd.Dir = ctx.TownRoot
-	out, err := cmd.Output()
+	g := ctx.git(ctx.TownRoot)
+	remotes, err := g.Remotes()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -52,7 +49,6 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	remotes := strings.Fields(strings.TrimSpace(string(out)))
 	if len(remotes) <= 1 {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -68,30 +64,22 @@ func (c *ForeignRemoteCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		// Get remote URL for reporting
-		urlCmd := exec.Command("git", "remote", "get-url", remote)
-		urlCmd.Dir = ctx.TownRoot
-		urlOut, _ := urlCmd.Output()
-		url := strings.TrimSpace(string(urlOut))
+		url, _ := g.RemoteURL(remote)
+		url = strings.TrimSpace(url)
 
 		// Check if remote has a main/master branch we can compare
 		refName := remote + "/main"
-		refCmd := exec.Command("git", "rev-parse", "--verify", refName)
-		refCmd.Dir = ctx.TownRoot
-		if err := refCmd.Run(); err != nil {
+		if ok, _ := g.RefExists(refName); !ok {
 			// Try master
 			refName = remote + "/master"
-			refCmd = exec.Command("git", "rev-parse", "--verify", refName)
-			refCmd.Dir = ctx.TownRoot
-			if err := refCmd.Run(); err != nil {
+			if ok, _ := g.RefExists(refName); !ok {
 				// No main or master branch — can't verify, skip
 				continue
 			}
 		}
 
 		// Check for shared ancestry with origin/main
-		mergeBaseCmd := exec.Command("git", "merge-base", "origin/main", refName)
-		mergeBaseCmd.Dir = ctx.TownRoot
-		if err := mergeBaseCmd.Run(); err != nil {
+		if _, err := g.MergeBase("origin/main", refName); err != nil {
 			// No common ancestor — this is a foreign remote
 			c.foreignRemotes = append(c.foreignRemotes, foreignRemote{
 				name: remote,
@@ -137,11 +125,10 @@ func (c *ForeignRemoteCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
+	g := ctx.git(ctx.TownRoot)
 	var errs []string
 	for _, fr := range c.foreignRemotes {
-		cmd := exec.Command("git", "remote", "remove", fr.name)
-		cmd.Dir = ctx.TownRoot
-		if err := cmd.Run(); err != nil {
+		if err := g.RemoveRemote(fr.name); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", fr.name, err))
 		}
 	}

@@ -115,12 +115,12 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Agent lookups (gt agents resolve --rig) hard-require rig-local agent
 	// beads, so a town-level duplicate must not satisfy a rig check (gt-abj).
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townScope := loadAgentBeadScope(beads.NewRigLocal(townBeadsPath))
+	townScope := loadAgentBeadScope(ctx.beadsRigLocal(townBeadsPath))
 
 	rigScopes := make(map[string]agentBeadScope) // key: prefix
 	for prefix, info := range prefixToRig {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
-		rigScopes[prefix] = loadAgentBeadScope(beads.NewRigLocal(rigBeadsPath))
+		rigScopes[prefix] = loadAgentBeadScope(ctx.beadsRigLocal(rigBeadsPath))
 	}
 
 	// checkAgentBead verifies an agent bead exists in the database it is
@@ -233,7 +233,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	// (the historical bug: a routed wrapper re-targeted the town DB, the
 	// create succeeded as an upsert there, and fixed nothing — gt-8po).
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
-	townBd := beads.NewRigLocal(townBeadsPath)
+	townBd := ctx.beadsRigLocal(townBeadsPath)
 
 	// Pre-load known agent bead IDs for the town database (from both issues
 	// and wisps tables) so existence checks don't need per-bead Show() calls
@@ -350,7 +350,7 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
 		// NewRigLocal: the create MUST land in this rig's database (see the
 		// townBd comment above); a routed wrapper would re-target the town DB.
-		bd := beads.NewRigLocal(rigBeadsPath)
+		bd := ctx.beadsRigLocal(rigBeadsPath)
 		rigName := info.name
 		rigScope := loadAgentBeadScope(bd)
 

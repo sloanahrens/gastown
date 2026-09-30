@@ -25,6 +25,7 @@ func TestDefaultRunnerIsRealBD(t *testing.T) {
 		"NewWithBeadsDir":     NewWithBeadsDir(t.TempDir(), t.TempDir()),
 		"NewRigLocal":         NewRigLocal(t.TempDir()),
 		"NewPlain":            NewPlain(t.TempDir(), nil),
+		"NewPlainWithRunner":  NewPlainWithRunner(t.TempDir(), nil, nil),
 	} {
 		if got := reflect.ValueOf(b.runner()).Pointer(); got != real {
 			t.Errorf("%s: default runner is not runBDProcess", name)
@@ -351,5 +352,24 @@ func TestNewWithBeadsDirAndRunner(t *testing.T) {
 	}
 	if show.Dir == "" || !containsEnvPrefix(show.Env, "BEADS_DIR=") {
 		t.Errorf("show call lost its dir or BEADS_DIR: dir=%q env=%v", show.Dir, show.Env)
+	}
+}
+
+// TestPlainWithRunnerAnswersInProcess: a plain wrapper given a runner sends
+// it exactly the call NewPlain would run.
+func TestPlainWithRunnerAnswersInProcess(t *testing.T) {
+	t.Parallel()
+	var got BDCall
+	dir := t.TempDir()
+	b := NewPlainWithRunner(dir, []string{"ONLY=this"}, func(_ context.Context, c BDCall) ([]byte, []byte, error) {
+		got = c
+		return []byte("v\n"), nil, nil
+	})
+	out, err := b.run("config", "get", "k")
+	if err != nil || strings.TrimSpace(string(out)) != "v" {
+		t.Fatalf("run = %q, %v", out, err)
+	}
+	if got.Dir != dir || strings.Join(got.Args, " ") != "config get k" || !reflect.DeepEqual(got.Env, []string{"ONLY=this", "BD_MACHINE=1"}) {
+		t.Errorf("call = %+v", got)
 	}
 }

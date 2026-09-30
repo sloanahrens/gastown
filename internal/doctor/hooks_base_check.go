@@ -11,6 +11,30 @@ import (
 // drift when gt's default hook configuration changes after initial setup.
 type HooksBaseCheck struct {
 	FixableCheck
+
+	// store is where hooks-base.json lives; nil is the hooks package's ~/.gt.
+	store hooksBaseStore
+}
+
+// hooksBaseStore reads and writes the base hooks config.
+type hooksBaseStore interface {
+	LoadBase() (*hooks.HooksConfig, error)
+	SaveBase(cfg *hooks.HooksConfig) error
+	BasePath() string
+}
+
+// gtHooksBase is the base config under ~/.gt (or $GT_HOME/.gt).
+type gtHooksBase struct{}
+
+func (gtHooksBase) LoadBase() (*hooks.HooksConfig, error) { return hooks.LoadBase() }
+func (gtHooksBase) SaveBase(cfg *hooks.HooksConfig) error { return hooks.SaveBase(cfg) }
+func (gtHooksBase) BasePath() string                      { return hooks.BasePath() }
+
+func (c *HooksBaseCheck) base() hooksBaseStore {
+	if c.store != nil {
+		return c.store
+	}
+	return gtHooksBase{}
 }
 
 // NewHooksBaseCheck creates a new hooks base config check.
@@ -28,11 +52,12 @@ func NewHooksBaseCheck() *HooksBaseCheck {
 
 // Run checks whether hooks-base.json exists.
 func (c *HooksBaseCheck) Run(ctx *CheckContext) *CheckResult {
-	if _, err := hooks.LoadBase(); err == nil {
+	store := c.base()
+	if _, err := store.LoadBase(); err == nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("hooks-base.json present at %s", hooks.BasePath()),
+			Message: fmt.Sprintf("hooks-base.json present at %s", store.BasePath()),
 		}
 	}
 
@@ -41,7 +66,7 @@ func (c *HooksBaseCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: "hooks-base.json is missing — gt hooks diff cannot detect drift",
 		Details: []string{
-			fmt.Sprintf("Expected at: %s", hooks.BasePath()),
+			fmt.Sprintf("Expected at: %s", store.BasePath()),
 			"Without this file, hooks sync works but drift detection is unavailable.",
 		},
 		FixHint: "Run 'gt doctor --fix hooks-base-missing' or 'gt hooks base --show' to create it",
@@ -50,14 +75,15 @@ func (c *HooksBaseCheck) Run(ctx *CheckContext) *CheckResult {
 
 // Fix creates hooks-base.json from current defaults.
 func (c *HooksBaseCheck) Fix(ctx *CheckContext) error {
-	if _, err := hooks.LoadBase(); err == nil {
+	store := c.base()
+	if _, err := store.LoadBase(); err == nil {
 		return nil // already exists
 	}
 	base := hooks.DefaultBase()
-	if err := hooks.SaveBase(base); err != nil {
+	if err := store.SaveBase(base); err != nil {
 		return fmt.Errorf("creating hooks-base.json: %w", err)
 	}
-	fmt.Printf("  Created hooks-base.json at %s\n", hooks.BasePath())
+	fmt.Printf("  Created hooks-base.json at %s\n", store.BasePath())
 	return nil
 }
 

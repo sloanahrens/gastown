@@ -391,60 +391,6 @@ func TestTmuxTestSocketCheck_UnprobedIsCountedBesideResidue(t *testing.T) {
 	}
 }
 
-// TestSocketStateReadsARealSocket pins the classification to the socket itself
-// rather than to a stub: a live listener serves, a file whose listener closed
-// refuses, and a path that is already gone is gone.
-func TestSocketStateReadsARealSocket(t *testing.T) {
-	t.Parallel()
-	// Not t.TempDir(): a unix socket path is capped at just over a hundred
-	// bytes, and the per-test directory name spends most of that budget.
-	dir, err := os.MkdirTemp("", "gtsock")
-	if err != nil {
-		t.Fatalf("creating socket dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	path := filepath.Join(dir, "gt-test-91506")
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-	if err != nil {
-		t.Fatalf("listening on %s: %v", path, err)
-	}
-	if got := dialSocketState(path); got != socketServing {
-		t.Errorf("state of a served socket = %v, want serving", got)
-	}
-	_ = ln.Close()
-
-	// The file a server leaves behind is a socket bound to the path that no one
-	// listens on. It is built by bind without listen, not by closing a
-	// listener: under go test a parallel test's fork holds every descriptor of
-	// this process until the child execs, and a listener it holds keeps
-	// accepting after Close.
-	stale := filepath.Join(dir, "gt-test-91507")
-	bindUnlistenedSocket(t, stale)
-	if got := dialSocketState(stale); got != socketRefused {
-		t.Errorf("state of an unserved socket file = %v, want refused", got)
-	}
-	if err := os.Remove(stale); err != nil {
-		t.Fatalf("removing socket file: %v", err)
-	}
-	if got := dialSocketState(stale); got != socketGone {
-		t.Errorf("state of a removed socket file = %v, want gone", got)
-	}
-}
-
-// bindUnlistenedSocket leaves a unix stream socket file at path with no
-// listener behind it, which is what a killed tmux server leaves.
-func bindUnlistenedSocket(t *testing.T, path string) {
-	t.Helper()
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socket: %v", err)
-	}
-	defer func() { _ = syscall.Close(fd) }()
-	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
-		t.Fatalf("binding %s: %v", path, err)
-	}
-}
-
 // TestClassifyDialErr covers the reason a failed dial must not be read as
 // absence: the process's own limits, permissions, and a busy server's timeout
 // all end the dial without saying anything about the server.

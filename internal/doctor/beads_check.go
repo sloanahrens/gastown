@@ -292,11 +292,20 @@ type dbPrefixGetter interface {
 }
 
 // realDBPrefixGetter asks bd for the database's issue_prefix ("" when unset).
-type realDBPrefixGetter struct{ ctx *CheckContext }
+// environ is the environment bd inherits before the rig's targets replace
+// BEADS_*; nil is the process environment.
+type realDBPrefixGetter struct {
+	ctx     *CheckContext
+	environ func() []string
+}
 
 func (r *realDBPrefixGetter) GetDBPrefix(rigPath string) (string, error) {
 	beadsDir := beads.ResolveBeadsDir(rigPath)
-	env := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="), beadsCommandEnv(beadsDir)...)
+	environ := r.environ
+	if environ == nil {
+		environ = os.Environ
+	}
+	env := append(stripEnvPrefixes(environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="), beadsCommandEnv(beadsDir)...)
 	return r.ctx.bd(rigPath, env).ConfigGet("issue_prefix")
 }
 
@@ -320,6 +329,8 @@ type DatabasePrefixCheck struct {
 	// prefixSetter persists issue_prefix for a rig database. Defaults to
 	// doltserver.SetRigIssuePrefix; injectable for tests.
 	prefixSetter func(townRoot, beadsDir, database, prefix string) error
+	// environ is the environment bd inherits; nil is the process's.
+	environ func() []string
 }
 
 type databasePrefixMismatch struct {
@@ -406,7 +417,7 @@ func (c *DatabasePrefixCheck) Run(ctx *CheckContext) *CheckResult {
 
 	getter := c.prefixGetter
 	if getter == nil {
-		getter = &realDBPrefixGetter{ctx: ctx}
+		getter = &realDBPrefixGetter{ctx: ctx, environ: c.environ}
 	}
 
 	// Resolve the town root's canonical beads directory so we can detect
