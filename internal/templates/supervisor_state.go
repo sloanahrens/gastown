@@ -70,6 +70,30 @@ func SupervisorJobState(kind string) SupervisorState {
 	return SupervisorState{Kind: kind, LastExit: -1}
 }
 
+// SupervisorJobMissing reports whether a supervisor is provisioned for the
+// town at townRoot (its file is installed and names that town) while the
+// service manager does not know the job — the state a daemon is left in when
+// its job was unloaded and never loaded again (gt-4k3fj.11), where nothing
+// will restart it if it dies. kind is the supervisor's kind when missing is
+// true. A job whose state could not be read is not reported missing: an
+// unreadable probe is not evidence either way. read may be nil.
+func SupervisorJobMissing(townRoot string, read SupervisorReader) (kind string, missing bool) {
+	path, kind := SupervisorFilePath()
+	if kind == "" {
+		return "", false
+	}
+	if isFor, err := SupervisorFileIsFor(path, townRoot); err != nil || !isFor {
+		return "", false
+	}
+	if read == nil {
+		read = SupervisorJobState
+	}
+	if st := read(kind); st.Err == nil && !st.Loaded {
+		return kind, true
+	}
+	return "", false
+}
+
 // SupervisorStatusLine renders the "Supervised:" value for the daemon holding
 // lockPID (0 when none does) in the town at townRoot: "none" where no
 // supervisor serves this town, otherwise the kind, with a parenthetical

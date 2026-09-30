@@ -223,16 +223,69 @@ func reconcileSupervisorJob(townRoot string, daemonPID int) (note string, err er
 // daemon unsupervised between the two commands, the window restartDaemon
 // exists to avoid (gt-sq9e), and spending it is worth it only when the job
 // definition actually changed — at most once per binary upgrade.
+//
+// Because the unload leaves nothing to bring the daemon back, it is never
+// allowed to be the last thing this does (gt-4k3fj.11: launchd removed the
+// job during a `gt up` and nothing loaded it again). launchd finishes removing
+// a job after bootout has returned, and a bootstrap that lands in that window
+// fails; so the job is confirmed gone first and the load is retried. An unload
+// that reports failure is checked against the job's live state too, because
+// launchd reports errors for a job it did remove.
 func (s *daemonSupervisor) startFromFile() error {
 	// Unload only a job the manager knows: bootout on a job that is not there
 	// fails, and startFromFile is also reached from start, where "not loaded"
 	// (the state `gt daemon stop` leaves) is ordinary.
 	if st := supervisorStateFor(s.name); st.Err == nil && st.Loaded {
 		if err := supervisorRun(s.stop); err != nil {
-			return fmt.Errorf("unloading the %s job to load its rewritten file: %w", s.name, err)
+			// Only a job that is still loaded means the unload did not
+			// happen, and then that job is still supervising the daemon.
+			if st := supervisorStateFor(s.name); st.Err != nil || st.Loaded {
+				return fmt.Errorf("unloading the %s job to load its rewritten file: %w", s.name, err)
+			}
+		}
+		s.waitUnloaded()
+	}
+	return s.loadJob()
+}
+
+// waitUnloaded polls until the service manager no longer knows the job, for
+// up to handStopConfirmBudget. It does not fail on timeout: the load that
+// follows retries, and is the one that reports a job that would not go.
+func (s *daemonSupervisor) waitUnloaded() {
+	for range handStopConfirmAttempts {
+		if st := supervisorStateFor(s.name); st.Err == nil && !st.Loaded {
+			return
+		}
+		time.Sleep(daemonPollInterval)
+	}
+}
+
+// supervisorLoadAttempts is how many times loadJob tries to bootstrap the job;
+// supervisorLoadRetryInterval separates the tries, and is a seam so tests need
+// not wait it out.
+const supervisorLoadAttempts = 6
+
+var supervisorLoadRetryInterval = time.Second
+
+// loadJob bootstraps the job, retrying a failed attempt, and returns nil once
+// the manager knows the job — including when another caller (a concurrent
+// gt up) loaded it between attempts. It is the half of an unload-and-load
+// that must not be given up on early: a failure here leaves the town with no
+// loaded job and no daemon.
+func (s *daemonSupervisor) loadJob() error {
+	var err error
+	for attempt := range supervisorLoadAttempts {
+		if attempt > 0 {
+			time.Sleep(supervisorLoadRetryInterval)
+		}
+		if err = supervisorRun(s.bootstrap); err == nil {
+			return nil
+		}
+		if st := supervisorStateFor(s.name); st.Err == nil && st.Loaded {
+			return nil
 		}
 	}
-	return supervisorRun(s.bootstrap)
+	return fmt.Errorf("loading the %s job failed %d times, so the daemon has no supervisor: %w", s.name, supervisorLoadAttempts, err)
 }
 
 // startDaemon starts the daemon for townRoot: through the provisioned
@@ -406,6 +459,17 @@ func restartDaemon(townRoot string) (via string, pid int, err error) {
 		runErr = sup.startFromFile()
 	} else {
 		runErr = supervisorRun(sup.start)
+		if runErr != nil {
+			// kickstart reaches only a job the manager knows. The daemon that
+			// is up is then running outside its supervisor (the job was
+			// unloaded and never loaded again, gt-4k3fj.11), and the job
+			// cannot be loaded beside it: the loaded job would respawn
+			// against the lock the hand-run daemon holds (gt-3jrm). So it
+			// goes, and the job comes up in its place.
+			if st := supervisorStateFor(sup.name); st.Err == nil && !st.Loaded {
+				runErr = replaceUnsupervisedDaemon(townRoot, sup)
+			}
+		}
 	}
 	if runErr != nil {
 		// The command may have failed after the job came up; a live daemon
@@ -420,6 +484,18 @@ func restartDaemon(townRoot string) (via string, pid int, err error) {
 		return sup.name, 0, fmt.Errorf("daemon did not come back under %s: %w", sup.name, err)
 	}
 	return sup.name, pid, nil
+}
+
+// replaceUnsupervisedDaemon stops the daemon holding daemon.lock outside its
+// supervisor and loads the job, which starts the daemon under it.
+func replaceUnsupervisedDaemon(townRoot string, sup *daemonSupervisor) error {
+	if err := stopDaemonDirect(townRoot); err != nil {
+		return fmt.Errorf("stopping the daemon running outside %s: %w", sup.name, err)
+	}
+	if err := waitForDaemonGone(townRoot); err != nil {
+		return err
+	}
+	return sup.loadJob()
 }
 
 // daemonStartupMargin is how long waitForRestart allows the INCOMING daemon
