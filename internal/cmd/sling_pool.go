@@ -232,6 +232,13 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 	// applying the seat count and then the stagger. want names the branch for
 	// the reason line.
 	seat := func(want string) (string, string, bool) {
+		// A refusal for a bead an explicit label routed to this seat names the
+		// label: a caller who never asked for the local seat would otherwise
+		// read "local full" as pool pressure rather than the label's doing.
+		cause := ""
+		if strings.HasPrefix(want, "label ") {
+			cause = ", " + want
+		}
 		switch {
 		case pool.MaxLocal <= 0:
 			// The local seat is closed: max_local 0 in a configured pool reads
@@ -240,17 +247,17 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 			// would spawn on the very seat the operator just emptied, which is
 			// how a max_local 0 town kept growing local polecats.
 			if overflowFull {
-				return refuse(fmt.Sprintf("no local seats (max_local %d)", pool.MaxLocal))
+				return refuse(fmt.Sprintf("no local seats (max_local %d)", pool.MaxLocal) + cause)
 			}
 			return pool.OverflowAgent, fmt.Sprintf("pool: no local seats (max_local %d) -> %s", pool.MaxLocal, overflow), false
 		case local >= pool.MaxLocal:
 			if overflowFull {
-				return refuse("local full")
+				return refuse("local full" + cause)
 			}
 			return pool.OverflowAgent, fmt.Sprintf("pool: local full (%d/%d) -> %s", local, pool.MaxLocal, overflow), false
 		case tooSoon:
 			if overflowFull {
-				return refuse("stagger " + now.Sub(newest).Round(time.Second).String() + " since last local spawn")
+				return refuse("stagger " + now.Sub(newest).Round(time.Second).String() + " since last local spawn" + cause)
 			}
 			return pool.OverflowAgent, fmt.Sprintf("pool: stagger %s since last local spawn -> %s", now.Sub(newest).Round(time.Second), overflow), false
 		}
@@ -285,11 +292,23 @@ func choosePoolAgent(pool *config.PolecatPool, bead poolBead, requested string, 
 
 	// 1. Explicit routing wins over everything below, including a spent local
 	//    attempt: an operator who labeled the bead has already decided.
+	//    The label outranks --agent, and the line says so: a request the label
+	//    overrode, or a refusal it caused, names the label, so a caller is not
+	//    left debugging a pool-capacity problem that is really the label.
+	var label string
 	switch {
 	case bead.hasLabel(routeLocalLabel):
-		return seat("label " + routeLocalLabel)
+		label = routeLocalLabel
+		agent, reason, refused = seat("label " + label)
 	case bead.hasLabel(routeFlashLabel):
-		return overflowFor("label " + routeFlashLabel)
+		label = routeFlashLabel
+		agent, reason, refused = overflowFor("label " + label)
+	}
+	if label != "" {
+		if requested != "" && agent != requested {
+			reason += fmt.Sprintf(" (label %s outranks requested %s)", label, requested)
+		}
+		return agent, reason, refused
 	}
 	// 2. An agent the pool does not own is not the pool's to admit, and the
 	//    request stands untouched (gt-4lbz). It runs before rule 3 because
