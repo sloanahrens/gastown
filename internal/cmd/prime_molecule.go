@@ -173,6 +173,13 @@ func resolveFormulaForRendering(formulaName, townRoot, rigName string, vars []st
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not parse formula %s: %w", formulaName, err)
 	}
+	// A formula that extends another or expands a step carries only its delta;
+	// resolve it so the checklist lists every step the agent must run.
+	if len(f.Extends) > 0 || f.Compose != nil {
+		if f, err = formula.Resolve(f, formulaSearchPaths(townRoot, rigName)); err != nil {
+			return nil, nil, fmt.Errorf("could not resolve formula %s: %w", formulaName, err)
+		}
+	}
 	applyFormulaOverlays(f, formulaName, townRoot, rigName)
 	return f, buildFormulaVarMap(f, vars), nil
 }

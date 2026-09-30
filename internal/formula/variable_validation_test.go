@@ -250,6 +250,15 @@ func TestAllEmbeddedFormulas_VariableValidation(t *testing.T) {
 			// Skip formulas that don't parse (may have other issues)
 			continue
 		}
+		// An expansion's variables belong to the workflow that expands it,
+		// and a child inherits its parent's, so check the resolved workflow.
+		if f.Type == TypeExpansion {
+			continue
+		}
+		if f, err = Resolve(f, nil); err != nil {
+			t.Errorf("Resolve %s: %v", entry.Name(), err)
+			continue
+		}
 
 		if err := f.ValidateTemplateVariables(); err != nil {
 			failures = append(failures, entry.Name()+": "+err.Error())

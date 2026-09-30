@@ -24,6 +24,22 @@ func threeStepFormula() *formula.Formula {
 	}
 }
 
+// TestResolveFormulaForRendering_ResolvesExtends guards gt-g7yy6: a formula
+// that extends another lists the inherited steps too, not only its own delta.
+func TestResolveFormulaForRendering_ResolvesExtends(t *testing.T) {
+	t.Parallel()
+	f, _, err := resolveFormulaForRendering("mol-doc-audit", "", "", nil)
+	if err != nil {
+		t.Fatalf("resolveFormulaForRendering: %v", err)
+	}
+	if len(f.Steps) != 8 {
+		t.Fatalf("rendered %d steps, want 8", len(f.Steps))
+	}
+	if f.Steps[0].ID != "load-context" || f.Steps[2].ID != "audit" {
+		t.Errorf("steps start %q, %q, %q; want load-context, branch-setup, audit", f.Steps[0].ID, f.Steps[1].ID, f.Steps[2].ID)
+	}
+}
+
 func TestRenderFormulaChecklist_TitlesForAllStepsBodyForOne(t *testing.T) {
 	t.Parallel()
 	vars := map[string]string{"issue": "gt-abc"}

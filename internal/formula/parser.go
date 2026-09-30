@@ -144,6 +144,11 @@ func (f *Formula) validateWorkflow() error {
 		seen[step.ID] = true
 	}
 
+	// A child's needs may name inherited steps; Resolve validates the merged formula.
+	if len(f.Extends) > 0 {
+		return nil
+	}
+
 	// Validate step needs references
 	for _, step := range f.Steps {
 		for _, need := range step.Needs {
@@ -509,6 +514,7 @@ func (f *Formula) GetAspect(id string) *Aspect {
 //
 // Parent formulas named in extends are loaded from the embedded formula FS first,
 // then from any additional searchPaths (in order). searchPaths may be nil.
+// A child step whose ID matches an inherited step overrides it in place.
 //
 // Cycles in extends chains are detected and reported as errors.
 func Resolve(formula *Formula, searchPaths []string) (*Formula, error) {
@@ -584,8 +590,9 @@ func resolveChain(formula *Formula, searchPaths []string, chain []string) (*Form
 	}
 	// Union child's own allowlist entries with inherited ones (gt-9iv).
 	merged.CommandAllowlist = mergeAllowlist(merged.CommandAllowlist, formula.CommandAllowlist)
-	// Append child's own steps after parent steps.
-	merged.Steps = append(merged.Steps, formula.Steps...)
+	// A child step replaces the parent step with its ID in place; new IDs are
+	// appended. Same rule as bd's formula resolver, which cooks these formulas.
+	merged.Steps = mergeSteps(merged.Steps, formula.Steps)
 	// Child description takes priority.
 	if formula.Description != "" {
 		merged.Description = formula.Description
@@ -607,6 +614,25 @@ func resolveChain(formula *Formula, searchPaths []string, chain []string) (*Form
 		return nil, err
 	}
 	return merged, nil
+}
+
+// mergeSteps overlays child on parent: a child step whose ID matches a parent
+// step replaces it at the parent's position, and the rest are appended.
+func mergeSteps(parent, child []Step) []Step {
+	merged := append([]Step(nil), parent...)
+	index := make(map[string]int, len(merged))
+	for i, s := range merged {
+		index[s.ID] = i
+	}
+	for _, s := range child {
+		if i, ok := index[s.ID]; ok {
+			merged[i] = s
+			continue
+		}
+		index[s.ID] = len(merged)
+		merged = append(merged, s)
+	}
+	return merged
 }
 
 // loadFormulaByName loads a formula by name: embedded FS first, then searchPaths.

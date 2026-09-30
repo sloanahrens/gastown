@@ -1,0 +1,54 @@
+description = "mol-doc-audit's work step: audit one lint-chosen slice against docs/writing-for-agents.md. Expands mol-polecat-work's implement step."
+formula = "doc-audit-slice"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "audit"
+title = "Audit the slice against docs/writing-for-agents.md"
+description = """
+**1. Compute the slice. The script chooses; you do not.**
+```bash
+bash scripts/docs-lint.sh --slice {{slice_docs}} {{slice_go}} | tee /tmp/doc-audit-slice.txt
+bash scripts/docs-lint.sh --words   # record as WORDS_BEFORE
+bd update {{issue}} --notes "slice: $(tr '\\n' ' ' < /tmp/doc-audit-slice.txt)"
+```
+
+**2. Read the standard.** Open docs/writing-for-agents.md and keep the rule ids
+R1-R13 in front of you. They are the checklist.
+
+**3. For every file in the slice, apply every rule.**
+- A `.md` or `.toml` file: read the whole file. For each rule, ask whether any
+  line fails it. Edit in place. Deleting is the usual fix (R3, R4, R5, R13);
+  a pointer replaces a duplicate (R2). For sprawl (R6), split or move only
+  between files the slice names: a split into a new file, or a move into a file
+  outside the slice, is a proposal for step 5 and never an edit.
+- A `.go` file: comments only. Every doc comment on an exported identifier
+  states the contract in one sentence (R10); every inline comment says why
+  (R9); history collapses to one bead citation (R11). Never touch code.
+- A historical doc (first line `> Status:`): check the header only. If a
+  commit or bead it names is on main or closed, write a deletion proposal for
+  step 5 with the evidence (`git log --oneline -1 <sha>`, `bd show <id>`).
+  Do not delete it.
+- A claim you cannot verify against the code or the environment: leave it
+  and record it as a proposal.
+
+**4. Commit per file** (the commit-changes step tells you how). The message
+names the rule ids applied: `docs: R3 R5 on docs/reference.md ({{issue}})`.
+
+**5. Post the run comment on your bead. This is the audit's output.**
+```bash
+bd comments add {{issue}} "$(cat <<'EOF'
+doc-audit run
+files: <one per line, with the rule ids applied or 'clean'>
+findings per rule: R1=<n> R2=<n> ... R13=<n>
+words agent-facing: before=<WORDS_BEFORE> after=<docs-lint.sh --words now>
+proposals:
+- <deletion | out-of-slice rot | R6 split | rule to sharpen>: <path or rule> — <evidence>
+EOF
+)"
+```
+
+**Done when:** every file in /tmp/doc-audit-slice.txt has a commit, a `clean`
+line, or a proposal line naming it, and the comment is posted.
+"""
