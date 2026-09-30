@@ -9,6 +9,7 @@ import (
 )
 
 func TestMatchPattern(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		pattern string
 		address string
@@ -48,6 +49,7 @@ func TestMatchPattern(t *testing.T) {
 }
 
 func TestAgentBeadIDToAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		id   string
 		want string
@@ -95,6 +97,7 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 }
 
 func TestResolverValidateAgentAddressDogGuards(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "deacon", "dogs", "fido"), 0755); err != nil {
 		t.Fatalf("creating dog dir: %v", err)
@@ -130,6 +133,7 @@ func TestResolverValidateAgentAddressDogGuards(t *testing.T) {
 }
 
 func TestResolverResolve_DirectAddresses(t *testing.T) {
+	t.Parallel()
 	resolver := NewResolver(nil, "")
 
 	tests := []struct {
@@ -169,6 +173,7 @@ func TestResolverResolve_DirectAddresses(t *testing.T) {
 }
 
 func TestResolverResolve_AtPatterns(t *testing.T) {
+	t.Parallel()
 	// Without beads, @patterns are passed through for existing router
 	resolver := NewResolver(nil, "")
 
@@ -199,6 +204,7 @@ func TestResolverResolve_AtPatterns(t *testing.T) {
 }
 
 func TestResolverResolve_UnknownName(t *testing.T) {
+	t.Parallel()
 	resolver := NewResolver(nil, "")
 
 	// A bare name without prefix should fail if not found
@@ -214,6 +220,7 @@ func TestResolverResolve_UnknownName(t *testing.T) {
 // Now it calls resolveWithVisited to thread the visited map through all paths.
 
 func TestExpandGroupMembersWithVisited_CycleDetection(t *testing.T) {
+	t.Parallel()
 	resolver := NewResolver(nil, "")
 
 	t.Run("direct self-cycle is detected", func(t *testing.T) {
@@ -289,6 +296,7 @@ func TestExpandGroupMembersWithVisited_CycleDetection(t *testing.T) {
 }
 
 func TestResolveMemberWithVisited_ThreadsVisitedMap(t *testing.T) {
+	t.Parallel()
 	resolver := NewResolver(nil, "")
 
 	t.Run("at-pattern member uses shared visited map", func(t *testing.T) {
@@ -325,6 +333,7 @@ func TestResolveMemberWithVisited_ThreadsVisitedMap(t *testing.T) {
 }
 
 func TestResolveWithVisited_ThreadsCycleDetection(t *testing.T) {
+	t.Parallel()
 	resolver := NewResolver(nil, "")
 
 	t.Run("group prefix threads visited", func(t *testing.T) {

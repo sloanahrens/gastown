@@ -154,9 +154,13 @@ func (d *Daemon) patrolScanTimerGates(h *patrolScanHost, rigs []string) {
 			d.logger.Printf("patrol_scan: %s: timer gate check failed: %v", where, err)
 			continue
 		}
-		if line := lastLine(string(out)); line != "" {
-			d.logger.Printf("patrol_scan: %s: timer gates: %s", where, line)
+		// bd prints a JSON null before its no-gates notice ("nullNo open gates of
+		// type 'timer' found."); a tick that resolved nothing is not worth a line.
+		line := strings.TrimPrefix(lastLine(string(out)), "null")
+		if line == "" || strings.HasPrefix(line, "No open gates") {
+			continue
 		}
+		d.logger.Printf("patrol_scan: %s: timer gates: %s", where, line)
 	}
 }
 

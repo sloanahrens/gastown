@@ -146,10 +146,37 @@ func validateCrewName(name string) error {
 	return nil
 }
 
+// crewRepo is the git surface the crew manager drives: *git.Git in
+// production, internal/git/gitfake in tests.
+type crewRepo interface {
+	Clone(url, dest string) error
+	CloneWithReference(url, dest, reference string) error
+	CloneBranch(url, dest, branch string) error
+	CloneBranchWithReference(url, dest, branch, reference string) error
+	Remotes() ([]string, error)
+	RemoteURL(remote string) (string, error)
+	AddRemote(name, url string) (string, error)
+	SetRemoteURL(name, url string) (string, error)
+	GetPushURL(remote string) (string, error)
+	ConfigurePushURL(remote, pushURL string) error
+	ClearPushURL(remote string) error
+	CreateBranch(name string) error
+	Checkout(ref string) error
+	HasUncommittedChanges() (bool, error)
+	Pull(remote, branch string) error
+	CommonDir() (string, error)
+}
+
+var _ crewRepo = (*git.Git)(nil)
+
 // Manager handles crew worker lifecycle.
 type Manager struct {
 	rig *rig.Rig
-	git *git.Git
+	git crewRepo
+
+	// openGit opens the repository at a directory (a crew clone, mayor/rig);
+	// nil opens a *git.Git. Tests hand it a gitfake world.
+	openGit func(dir string) crewRepo
 }
 
 // NewManager creates a new crew manager.
@@ -158,6 +185,14 @@ func NewManager(r *rig.Rig, g *git.Git) *Manager {
 		rig: r,
 		git: g,
 	}
+}
+
+// gitAt opens the repository at dir through openGit, or as a *git.Git.
+func (m *Manager) gitAt(dir string) crewRepo {
+	if m.openGit != nil {
+		return m.openGit(dir)
+	}
+	return git.NewGit(dir)
 }
 
 // crewDir returns the directory for a crew worker.
@@ -268,7 +303,7 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 		style.PrintWarning("could not sync remotes from rig: %v", err)
 	}
 
-	crewGit := git.NewGit(crewPath)
+	crewGit := m.gitAt(crewPath)
 	branchName := defaultBranch
 
 	// Optionally create a working branch
@@ -323,7 +358,7 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 	// file rather than the tracked .gitignore, so the worktree stays clean
 	// (a tracked-.gitignore edit shows up as a permanent unstaged change that
 	// blocks `git rebase`).
-	if err := rig.EnsureLocalExcludePatterns(crewPath); err != nil {
+	if err := rig.EnsureLocalExcludePatternsIn(crewPath, m.gitAt(crewPath)); err != nil {
 		// Non-fatal - log warning but continue
 		style.PrintWarning("could not update local git excludes: %v", err)
 	}
@@ -375,8 +410,8 @@ func (m *Manager) syncRemotesFromRig(crewPath string) error {
 		return fmt.Errorf("mayor/rig not found at %s", rigRepoPath)
 	}
 
-	rigGit := git.NewGit(rigRepoPath)
-	crewGit := git.NewGit(crewPath)
+	rigGit := m.gitAt(rigRepoPath)
+	crewGit := m.gitAt(crewPath)
 
 	remotes, err := rigGit.Remotes()
 	if err != nil {
@@ -475,7 +510,7 @@ func (m *Manager) Remove(name string, force bool) error {
 	crewPath := m.crewDir(name)
 
 	if !force {
-		crewGit := git.NewGit(crewPath)
+		crewGit := m.gitAt(crewPath)
 		hasChanges, err := crewGit.HasUncommittedChanges()
 		if err == nil && hasChanges {
 			return ErrHasChanges
@@ -652,7 +687,7 @@ func (m *Manager) Pristine(name string) (*PristineResult, error) {
 	}
 
 	crewPath := m.crewDir(name)
-	crewGit := git.NewGit(crewPath)
+	crewGit := m.gitAt(crewPath)
 
 	result := &PristineResult{
 		Name: name,

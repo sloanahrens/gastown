@@ -4,13 +4,11 @@ internal/beads
 internal/cmd
 internal/config
 internal/convoy
-internal/crew
 internal/deacon
 internal/doctor
 internal/dog
 internal/feed
 internal/hooks
-internal/mail
 internal/mayor
 internal/nudge
 internal/plugin
