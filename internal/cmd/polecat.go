@@ -1366,12 +1366,26 @@ func getGitState(worktreePath string) (*GitState, error) {
 }
 
 func getGitStateWithTargets(worktreePath string, targets []string) (*GitState, error) {
+	return gitStateOf(git.NewGit(worktreePath), targets)
+}
+
+// gitStateReader is what gitStateOf reads from a worktree.
+type gitStateReader interface {
+	CheckUncommittedWork() (*git.UncommittedWorkStatus, error)
+	CurrentBranch() (string, error)
+	BranchPreservationStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
+	StashCountAll() (int, error)
+}
+
+var _ gitStateReader = (*git.Git)(nil)
+
+// gitStateOf is getGitStateWithTargets on a given worktree reader.
+func gitStateOf(worktreeGit gitStateReader, targets []string) (*GitState, error) {
 	state := &GitState{
 		Clean:            true,
 		UncommittedFiles: []string{},
 	}
 
-	worktreeGit := git.NewGit(worktreePath)
 	workStatus, err := worktreeGit.CheckUncommittedWork()
 	if err != nil {
 		return nil, fmt.Errorf("git status: %w", err)

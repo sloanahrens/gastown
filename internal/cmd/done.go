@@ -1612,7 +1612,13 @@ func reportDone(r *doneRun, exitType string, sub doneSubmission) error {
 // and HEAD, and pushes each submodule's new commit to its remote before the
 // parent repo push. This prevents the parent's submodule pointer from
 // referencing commits that don't exist on the submodule's remote (gt-dzs).
-func pushSubmoduleChanges(g *git.Git, baseRef string) {
+// submodulePusher is what pushSubmoduleChanges needs from the worktree.
+type submodulePusher interface {
+	SubmoduleChanges(base, head string) ([]git.SubmoduleChange, error)
+	PushSubmoduleCommit(path, sha, remote string) error
+}
+
+func pushSubmoduleChanges(g submodulePusher, baseRef string) {
 	subChanges, err := g.SubmoduleChanges(baseRef, "HEAD")
 	if err != nil {
 		// Non-fatal: repos without submodules return nil, nil.
