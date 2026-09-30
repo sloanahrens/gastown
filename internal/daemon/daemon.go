@@ -153,6 +153,13 @@ type Daemon struct {
 	// findDogFn overrides dog selection in tests; nil uses the real pack.
 	findDogFn func() *dog.Dog
 
+	// reaperSlingFn replaces the `gt sling` subprocess behind the wisp_reaper's
+	// dog dispatch, and reaperSlingWaitFn replaces its retry backoff, so tests
+	// drive the dispatch retry without a gt binary or real sleeps. Nil runs the
+	// real command and really sleeps (see runReaperSling, waitReaperDispatch).
+	reaperSlingFn     func(args []string) ([]byte, error)
+	reaperSlingWaitFn func(time.Duration)
+
 	// bootTriageInFlight is set while a mechanical `gt boot triage` runs.
 	bootTriageInFlight atomic.Bool
 
