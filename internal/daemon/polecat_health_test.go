@@ -182,11 +182,10 @@ func TestCheckPolecatHealth_NoActiveWorkIsNotACrash(t *testing.T) {
 	}
 }
 
-// TestCheckPolecatHealth_NotifiesWitnessOnCrash verifies that when a polecat
-// crash is detected, the daemon sends a notification to the witness via
-// `gt mail send` with a CRASHED_POLECAT subject. Restart is deferred to the
-// stuck-agent-dog plugin for context-aware recovery.
-func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
+// TestCheckPolecatHealth_CrashSendsNoMail verifies that a detected polecat
+// crash is logged and left to patrol_scan: no CRASHED_POLECAT mail goes out,
+// because the witness that read it is gone (gt-4k3fj.6.1).
+func TestCheckPolecatHealth_CrashSendsNoMail(t *testing.T) {
 	t.Parallel()
 	bd := hookedWorkBD(t, "gt-xyz", time.Hour)
 
@@ -208,17 +207,11 @@ func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
 	if !strings.Contains(got, "CRASH DETECTED") {
 		t.Fatalf("expected CRASH DETECTED, got: %q", got)
 	}
-
-	// The witness is told by mail with a CRASHED_POLECAT subject.
-	mails := notes.Mails()
-	if len(mails) != 1 {
-		t.Fatalf("expected one mail to the witness, got: %+v", notes.Calls())
+	if !strings.Contains(got, "patrol_scan does not cover rig myr") {
+		t.Errorf("expected the uncovered-rig log line, got: %q", got)
 	}
-	if mails[0].To != "myr/witness" {
-		t.Errorf("mail to %q, want the witness address myr/witness", mails[0].To)
-	}
-	if !strings.Contains(mails[0].Subject, "CRASHED_POLECAT") {
-		t.Errorf("expected CRASHED_POLECAT in mail subject, got: %q", mails[0].Subject)
+	if calls := notes.Calls(); len(calls) != 0 {
+		t.Errorf("a crash sent notifications: %+v", calls)
 	}
 }
 

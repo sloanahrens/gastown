@@ -15,8 +15,8 @@ func TestAgentStartResult_Fields(t *testing.T) {
 		detail: "hq-mayor",
 	}
 
-	if result.name != "Witness (gastown)" {
-		t.Errorf("name = %q, want %q", result.name, "Witness (gastown)")
+	if result.name != "Mayor" {
+		t.Errorf("name = %q, want %q", result.name, "Mayor")
 	}
 	if !result.ok {
 		t.Error("ok should be true")

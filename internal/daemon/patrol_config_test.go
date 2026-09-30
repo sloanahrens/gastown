@@ -25,6 +25,7 @@ func TestLoadPatrolConfig(t *testing.T) {
 		"type": "daemon-patrol-config",
 		"version": 1,
 		"patrols": {
+			"mayor": {"enabled": false},
 			"witness": {"enabled": false}
 		}
 	}`
@@ -39,11 +40,11 @@ func TestLoadPatrolConfig(t *testing.T) {
 	}
 
 	// Test enabled flags
-	if IsPatrolEnabled(config, "witness") {
-		t.Error("expected witness to be disabled")
+	if IsPatrolEnabled(config, "mayor") {
+		t.Error("expected mayor to be disabled")
 	}
-	if !IsPatrolEnabled(config, "deacon") {
-		t.Error("expected deacon to be enabled (default)")
+	if !IsPatrolEnabled(config, "handler") {
+		t.Error("expected handler to be enabled (default)")
 	}
 }
 

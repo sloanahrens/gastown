@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -320,13 +319,13 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 	json.Unmarshal(data, &config)
 
 	// Core patrols preserved
-	if !strings.Contains(string(config.Patrols.Deacon), `"agent":"deacon"`) {
+	if !retiredKeyKept(config.Patrols.Deacon, "deacon") {
 		t.Errorf("retired deacon key not kept verbatim: %s", config.Patrols.Deacon)
 	}
 	if config.Patrols.Refinery == nil || !config.Patrols.Refinery.Enabled {
 		t.Error("expected refinery to remain enabled")
 	}
-	if !strings.Contains(string(config.Patrols.Witness), `"agent":"witness"`) {
+	if !retiredKeyKept(config.Patrols.Witness, "witness") {
 		t.Errorf("retired witness key not kept verbatim: %s", config.Patrols.Witness)
 	}
 
@@ -388,4 +387,15 @@ func TestEnsureLifecycleConfigFile_AlreadyComplete(t *testing.T) {
 	if !info1.ModTime().Equal(info2.ModTime()) {
 		t.Error("expected file to not be rewritten when already complete")
 	}
+}
+
+// retiredKeyKept reports whether raw still holds the retired patrol entry the
+// production fixture wrote for agent. The rewrite may re-indent the value, so
+// it is compared decoded.
+func retiredKeyKept(raw json.RawMessage, agent string) bool {
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		return false
+	}
+	return got["agent"] == agent && got["enabled"] == true && got["interval"] == "5m"
 }
