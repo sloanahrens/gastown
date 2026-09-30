@@ -113,7 +113,8 @@ func (b *Beads) EventsTail(since int64, limit int) (*EventsPage, error) // on Ad
 
 **Consumes:** `beads.EventsPage`, `EventRecord`, `EventsTruncatedError`.
 
-- [ ] `var newEventJournal = func(townRoot, name string) eventJournal` (bd for `beadsDirForStore(townRoot, name)`); test init swaps it to read the memstore's journal by name.
+- [x] `var newEventJournal = func(townRoot, name string, store beadsdk.Storage) (eventJournal, error)` (bd pinned to `doltserver.FindRigBeadsDir(townRoot, name)`; the store argument is unused in production and lets the test init read each memStore's own journal, since parallel tests reuse the same store names).
+- [x] Warm-up is per store: a store with no cursor is read to the head without processing, and its cursor is recorded only when that read completes (om review).
 - [ ] memStore appends a journal record per mutation; poll tests move to it; new failing tests: truncated resumes at floor-1, logs the gap and sets recovery mode; a poll pages until More is false; the warm-up cycle advances cursors without processing; an update on an already-closed issue does not re-fire.
 - [ ] Replace `lastEventIDs` time marks with seq cursors; delete `eventPollLookback`, `processedLifecycleEvents`, `isInfNaNError`, `isCloseEvent`/`isReopenEvent` over `beadsdk.Event`.
 - [ ] Commit `refactor(daemon): poll convoy closes from the bd events journal`.
@@ -126,13 +127,13 @@ func (b *Beads) EventsTail(since int64, limit int) (*EventsPage, error) // on Ad
 - [ ] `checkBeadsStoreCompatibility` takes store names, reads through `storeProbeFor(townRoot, name)`; delete `readStoreSchemaLevel`, `probeStoreEventSchema`, `probeEventTable`.
 - [ ] Commit `refactor(daemon): check store schema and journal through bd`.
 
-### Task 7: rig issue_prefix through bd
+### Task 7: rig issue_prefix read through bd
 
 **Files:** `internal/doltserver/doltserver.go` + test.
 
-- [ ] Failing tests with a fake prefix client: equal prefix makes no write; config-get failure on a schema-less DB runs `init --prefix p --database rig --server --server-port N`; an unset prefix on an initialized DB is refused naming the missing bd verb; SetRigIssuePrefix on a stale prefix runs `rename-prefix p` only after a sample row shows no other prefix, and refuses when a row carries another.
-- [ ] Delete `openRigStoreFromConfig` and its env mutex; drop the `beadssdk` import; add the file to the guard.
-- [ ] Commit `refactor(doltserver): seed issue_prefix through bd init and rename-prefix`.
+- [x] Failing test with `readRigIssuePrefix` / `writeRigIssuePrefixViaStore` swapped: a prefix bd already reports makes no write (EnsureRigIssuePrefix and SetRigIssuePrefix); unset, stale and unreadable each write the configured prefix, as main does.
+- [x] `seedRigIssuePrefix` reads through `bd config get issue_prefix` and writes through the library only when the value differs. bd has no verb for the write (Execution notes), so `openRigStoreFromConfig` stays, fenced in `writeRigIssuePrefixViaStore`, and doltserver.go is not on the library-free guard.
+- [x] Commit `refactor(doltserver): read rig issue_prefix through bd before any store write`.
 
 ### Task 8: measure and gate
 
