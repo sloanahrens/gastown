@@ -9,5 +9,4 @@ internal/beads
 internal/convoy
 internal/daemon
 internal/mail
-internal/polecat
 internal/testutil
