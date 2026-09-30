@@ -55,17 +55,6 @@ func createValidSettings(t *testing.T, path string) {
 					},
 				},
 			},
-			"Stop": []any{
-				map[string]any{
-					"matcher": "**",
-					"hooks": []any{
-						map[string]any{
-							"type":    "command",
-							"command": "gt costs record --session $CLAUDE_SESSION_ID",
-						},
-					},
-				},
-			},
 		},
 	}
 
@@ -88,8 +77,14 @@ func createValidSettings(t *testing.T, path string) {
 // internal/hooks/config.go DefaultOverrides()["polecats"].
 func createValidPolecatSettings(t *testing.T, path string) {
 	t.Helper()
+	writeSettings(t, path, polecatSettings())
+}
 
-	settings := map[string]any{
+// polecatSettings is the canonical polecat settings content, before writing.
+// Callers that need a variant (a missing Stop hook, say) mutate the returned
+// map first.
+func polecatSettings() map[string]any {
+	return map[string]any{
 		"enabledPlugins": []string{"plugin1"},
 		"hooks": map[string]any{
 			"SessionStart": []any{
@@ -116,7 +111,11 @@ func createValidPolecatSettings(t *testing.T, path string) {
 			},
 		},
 	}
+}
 
+// writeSettings marshals settings to path, creating parent directories.
+func writeSettings(t *testing.T, path string, settings map[string]any) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -147,17 +146,6 @@ func createStaleSettings(t *testing.T, path string, missingElements ...string) {
 					},
 				},
 			},
-			"Stop": []any{
-				map[string]any{
-					"matcher": "**",
-					"hooks": []any{
-						map[string]any{
-							"type":    "command",
-							"command": "gt costs record --session $CLAUDE_SESSION_ID",
-						},
-					},
-				},
-			},
 		},
 	}
 
@@ -182,9 +170,6 @@ func createStaleSettings(t *testing.T, path string, missingElements ...string) {
 				}
 			}
 			hookObj["hooks"] = filtered
-		case "Stop":
-			hooks := settings["hooks"].(map[string]any)
-			delete(hooks, "Stop")
 		}
 	}
 
@@ -322,11 +307,11 @@ func TestClaudeSettingsCheck_ValidPolecatSettings(t *testing.T) {
 }
 
 // TestClaudeSettingsCheck_PolecatStopHookRecognized is the regression test for
-// #3648: doctor's claude-settings check used to expect `costs record` in the
-// Stop hook for *all* roles, but the polecat hooks template installs
-// `gt tap polecat-stop-check`. Result: doctor reported polecat settings as
-// stale, --fix deleted them, the daemon recreated the same file, and the
-// check never converged. The fix recognizes role-specific Stop patterns.
+// #3648: doctor's claude-settings check used to expect one Stop hook for *all*
+// roles, but the polecat hooks template installs `gt tap polecat-stop-check`.
+// Result: doctor reported polecat settings as stale, --fix deleted them, the
+// daemon recreated the same file, and the check never converged. The fix
+// recognizes role-specific Stop patterns; only polecats require one.
 func TestClaudeSettingsCheck_PolecatStopHookRecognized(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -345,14 +330,13 @@ func TestClaudeSettingsCheck_PolecatStopHookRecognized(t *testing.T) {
 			result.Status, result.Message, result.Details)
 	}
 
-	// Witness role should still expect `costs record` — verify the role-aware
-	// pattern didn't break the canonical case.
+	// A role with no required Stop hook must pass with none.
 	witnessSettings := filepath.Join(tmpDir, rigName, "witness", ".claude", "settings.json")
-	createValidSettings(t, witnessSettings) // uses `gt costs record`
+	createValidSettings(t, witnessSettings)
 
 	result = check.Run(ctx)
 	if result.Status != StatusOK {
-		t.Fatalf("witness settings with `gt costs record` should still pass; got %v: %s\nDetails: %v",
+		t.Fatalf("witness settings with no Stop hook should pass; got %v: %s\nDetails: %v",
 			result.Status, result.Message, result.Details)
 	}
 }
@@ -369,12 +353,12 @@ func TestExpectedStopPattern(t *testing.T) {
 	}{
 		{"polecat", "polecat-stop-check"},
 		{"polecats", "polecat-stop-check"}, // both singular and plural in use
-		{"witness", "costs record"},
-		{"refinery", "costs record"},
-		{"crew", "costs record"},
-		{"mayor", "costs record"},
-		{"deacon", "costs record"},
-		{"", "costs record"},
+		{"witness", ""},
+		{"refinery", ""},
+		{"crew", ""},
+		{"mayor", ""},
+		{"deacon", ""},
+		{"", ""},
 	}
 	for _, c := range cases {
 		got := expectedStopPattern(c.role)
@@ -455,9 +439,12 @@ func TestClaudeSettingsCheck_MissingStopHook(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create mayor settings.json missing Stop hook (content validation)
-	mayorSettings := filepath.Join(tmpDir, "mayor", ".claude", "settings.json")
-	createStaleSettings(t, mayorSettings, "Stop")
+	// A polecat settings.json without its Stop hook is stale; no other role
+	// requires one.
+	pcSettings := filepath.Join(tmpDir, "testrig", "polecats", ".claude", "settings.json")
+	settings := polecatSettings()
+	delete(settings["hooks"].(map[string]any), "Stop")
+	writeSettings(t, pcSettings, settings)
 
 	check := NewClaudeSettingsCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}

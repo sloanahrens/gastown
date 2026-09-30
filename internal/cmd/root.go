@@ -58,11 +58,9 @@ var beadsExemptCommands = map[string]bool{
 	"hook":          true,
 	"prime":         true,
 	"nudge":         true,
-	"seance":        true,
 	"doctor":        true,
 	"dolt":          true,
 	"handoff":       true,
-	"costs":         true,
 	"feed":          true,
 	"rig":           true,
 	"scheduler":     true,
@@ -74,7 +72,6 @@ var beadsExemptCommands = map[string]bool{
 	"thaw":          true, // Thaw must work when Dolt is down
 	"signal":        true, // Hook signal handlers must be fast, handle beads internally
 	"metrics":       true, // Metrics reads local JSONL, no beads needed
-	"krc":           true, // KRC doesn't require beads
 	"run-migration": true, // Migration orchestrator handles its own beads checks
 	"health":        true, // Health check doesn't require beads
 	"upgrade":       true, // Post-install migration orchestrator

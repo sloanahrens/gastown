@@ -232,3 +232,18 @@ func warnIfNotDefaultBranch(dir, roleName, rigPath string) {
 		defaultBranch)
 	fmt.Printf("  Use --reset to switch to %s, or continue at your own risk.\n\n", defaultBranch)
 }
+
+// formatBytes renders a byte count with a binary unit suffix, for the dolt
+// and health views that report file and database sizes.
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}

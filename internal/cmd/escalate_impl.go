@@ -401,7 +401,7 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 	// The escalation's routed mail notification(s) share its thread but are
 	// separate beads (see mail.Router.buildLabels) — closing the escalation
 	// wisp doesn't close them. Left open, they accumulate as phantom P1/P2s
-	// on the dashboard and pollute `bd ready`. Close them too, best-effort.
+	// and pollute `bd ready`. Close them too, best-effort.
 	closedDeliveries, err := closeEscalationDeliveryBeads(bd, escalationID, closedBy)
 	if err != nil {
 		style.PrintWarning("failed to close escalation delivery bead(s): %v", err)
@@ -424,8 +424,7 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 
 // closeEscalationDeliveryBeads closes the open mail-delivery beads routed for
 // an escalation (identified by thread:<escalationID>), so they don't linger
-// as phantom open escalations on the dashboard or in `bd ready`. Returns the
-// number closed.
+// as phantom open escalations in `bd ready`. Returns the number closed.
 func closeEscalationDeliveryBeads(bd *beads.Beads, escalationID, closedBy string) (int, error) {
 	out, err := bd.Run("list", "--label=gt:message", "--label=thread:"+escalationID, "--status=open", "--include-infra", "--limit=0", "--json")
 	if err != nil {

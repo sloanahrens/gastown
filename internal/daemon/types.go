@@ -121,7 +121,6 @@ type (
 	CheckpointDogConfig        = agentconfig.CheckpointDogConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
 	MainBranchTestConfig       = agentconfig.MainBranchTestConfig
-	QuotaDogConfig             = agentconfig.QuotaDogConfig
 	MayorDispatchConfig        = agentconfig.MayorDispatchConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
@@ -238,24 +237,8 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.LandingWorker.Enabled
 	}
-	if patrol == "quota_dog" {
-		if config == nil || config.Patrols == nil || config.Patrols.QuotaDog == nil {
-			return false
-		}
-		return config.Patrols.QuotaDog.Enabled
-	}
-	// quota_resume defaults ON (unlike quota_dog above): the session-limit
-	// resume nudge must work on a town with no account pool configured, so
-	// it can't be gated behind the same opt-in-only default as rotation
-	// (gt-749e). An explicit config entry can still disable it.
-	if patrol == "quota_resume" {
-		if config == nil || config.Patrols == nil || config.Patrols.QuotaResume == nil {
-			return true
-		}
-		return config.Patrols.QuotaResume.Enabled
-	}
-	// mayor_dispatch defaults ON for the same reason quota_resume does: the
-	// failure it exists for is silence. The mayor is event-driven, so a "no
+	// mayor_dispatch defaults ON because the failure it exists for is
+	// silence. The mayor is event-driven, so a "no
 	// dispatch" decision opens no slot and wakes it again — on 2026-09-21 the
 	// town sat idle 5.5h with 362 ready beads, and no config entry in
 	// mayor/daemon.json was needed to make that happen. A patrol that has to be

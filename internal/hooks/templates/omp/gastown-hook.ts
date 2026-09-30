@@ -8,7 +8,6 @@
 //   before_agent_start  → inject captured context + check mail every prompt
 //   session.compacting  → inject compaction recovery instructions
 //   tool_call           → gt tap guard pr-workflow (on git push/pr create)
-//   session_shutdown    → gt costs record
 //
 // Loaded via: omp --hook gastown-hook.ts
 
@@ -122,15 +121,6 @@ export default function (pi) {
           console.error("[gastown] gt tap guard failed:", e.message);
         }
       }
-    }
-  });
-
-  // Shutdown — record API costs.
-  pi.on("session_shutdown", async (event, ctx) => {
-    try {
-      await pi.exec("gt", ["costs", "record"]);
-    } catch (e) {
-      console.error("[gastown] gt costs record failed:", e.message);
     }
   });
 }

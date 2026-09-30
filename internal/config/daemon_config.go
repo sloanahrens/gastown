@@ -42,8 +42,6 @@ type PatrolsConfig struct {
 	CheckpointDog        *CheckpointDogConfig        `json:"checkpoint_dog,omitempty"`
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
 	MainBranchTest       *MainBranchTestConfig       `json:"main_branch_test,omitempty"`
-	QuotaDog             *QuotaDogConfig             `json:"quota_dog,omitempty"`
-	QuotaResume          *QuotaDogConfig             `json:"quota_resume,omitempty"`
 	MayorDispatch        *MayorDispatchConfig        `json:"mayor_dispatch,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
@@ -365,15 +363,6 @@ type MainBranchTestConfig struct {
 	IntegrationTimeoutStr string `json:"integration_timeout,omitempty"`
 }
 
-// QuotaDogConfig holds configuration for the quota_dog patrol.
-type QuotaDogConfig struct {
-	// Enabled controls whether the quota dog runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to run, as a string (e.g., "5m").
-	IntervalStr string `json:"interval,omitempty"`
-}
-
 // MayorDispatchConfig holds configuration for the mayor_dispatch patrol.
 type MayorDispatchConfig struct {
 	// Enabled controls whether the patrol runs.
@@ -476,9 +465,8 @@ type RestartTrackerConfig struct {
 	// PauseBackoff is the fixed delay applied when an agent is paused due
 	// to a transient external limit (e.g., Claude usage-limit reached)
 	// rather than a true crash. Does not escalate and does not count toward
-	// the crash-loop fault budget. Default 60s — long enough for the
-	// quota_dog patrol to rotate accounts (5m cadence), short enough to
-	// recover quickly when the limit resets.
+	// the crash-loop fault budget. Default 60s: long enough to damp the
+	// retry loop, short enough to recover quickly when the limit resets.
 	PauseBackoff time.Duration `json:"pause_backoff,omitempty"`
 
 	// CrashLoopRecoveryWindow is how long an agent's heartbeat must be

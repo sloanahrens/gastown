@@ -16,10 +16,10 @@ import (
 type PrintOptions struct {
 	Limit  int
 	Follow bool
-	Since  string // duration string like "5m", "1h"
-	Mol    string // molecule/issue ID prefix filter
-	Type   string // event type filter
-	Rig    string // rig name filter (matches event's Rig field)
+	Since  string          // duration string like "5m", "1h"
+	Mol    string          // molecule/issue ID prefix filter
+	Type   string          // event type filter
+	Rig    string          // rig name filter (matches event's Rig field)
 	Ctx    context.Context // optional: controls follow-mode lifecycle; nil uses signal.NotifyContext
 }
 

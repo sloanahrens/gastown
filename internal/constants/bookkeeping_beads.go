@@ -2,8 +2,8 @@ package constants
 
 // Bead families that record town runtime rather than work a polecat can take
 // from them. One list shared by every consumer that asks the same question
-// (the Ready panel, the dashboard Work panel, the sling backpressure guard,
-// the dispatch patrol): the families are defined once here, and a consumer
+// (`gt ready`, the sling backpressure guard, the dispatch patrol): the
+// families are defined once here, and a consumer
 // that needs one of the two halves can ask for it — the durable issue types
 // and labels for bd filters and client-side checks — without keeping its own
 // drifting copy (gt-b9wq: the callers asked the same question and drifted

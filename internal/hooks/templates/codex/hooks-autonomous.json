@@ -10,17 +10,6 @@
           }
         ]
       }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} costs record >/dev/null 2>&1 &"
-          }
-        ]
-      }
     ]
   }
 }

@@ -20,10 +20,9 @@ const tailAnchorDepth = 8
 // Tail follows a line-oriented file by path, not by file descriptor.
 //
 // A plain tail keeps reading the descriptor it opened. When the file is
-// replaced (tmp + rename, as the KRC pruner does on every daemon start and
-// hourly) the descriptor keeps pointing at the old inode, which no writer ever
-// touches again, so the tail goes deaf. That was the 19:42 "missed events"
-// incident (claude-9jq).
+// replaced (tmp + rename) the descriptor keeps pointing at the old inode,
+// which no writer ever touches again, so the tail goes deaf. That was the
+// 19:42 "missed events" incident (claude-9jq).
 //
 // Poll detects two kinds of rotation:
 //   - replacement: the path now names a different file (os.SameFile compares

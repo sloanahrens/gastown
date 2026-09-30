@@ -163,8 +163,9 @@ const (
 
 	// DefaultWaitTimeoutSec is how long Dolt keeps an idle session alive before
 	// closing it. Dolt's MySQL-compat default is 28800s (8 hours). Under Gas
-	// Town load (mayor + deacon + witness + refinery + N polecats + dashboard
-	// polling), short-lived `bd` processes leak connections faster than the
+	// Town load (mayor + deacon + witness + refinery + N polecats, each polling
+	// through short-lived `bd` processes), those processes leak connections
+	// faster than the
 	// default timeout reclaims them, leading to a death spiral at the 1000-
 	// connection cap. 30s is aggressive but matches the documented workaround
 	// in gh-3623 and is far longer than any healthy bd query takes.

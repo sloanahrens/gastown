@@ -61,17 +61,6 @@
           }
         ]
       }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "{{GT_BIN}} costs record &"
-          }
-        ]
-      }
     ]
   }
 }

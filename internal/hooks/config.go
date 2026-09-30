@@ -1229,17 +1229,6 @@ func DefaultBase() *HooksConfig {
 				},
 			},
 		},
-		Stop: []HookEntry{
-			{
-				Matcher: "",
-				Hooks: []Hook{
-					{
-						Type:    "command",
-						Command: gtCommand("gt costs record &"),
-					},
-				},
-			},
-		},
 	}
 }
 

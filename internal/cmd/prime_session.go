@@ -286,8 +286,8 @@ func shouldEmitSessionStart(sessionID string) bool {
 	return isRuntimeHookInvocation()
 }
 
-// emitSessionEvent emits a session_start event for seance discovery.
-// The event is written to ~/gt/.events.jsonl and can be queried via gt seance.
+// emitSessionEvent emits a session_start event. The event is written to
+// ~/gt/.events.jsonl and is the record of when each session started.
 // Session ID resolution order: GT_SESSION_ID, CLAUDE_SESSION_ID, persisted file, fallback.
 func emitSessionEvent(ctx RoleContext) {
 	if ctx.Role == RoleUnknown {
@@ -368,9 +368,8 @@ func sessionStartCaller() string {
 	return "unknown"
 }
 
-// outputSessionMetadata prints a structured metadata line for seance discovery.
+// outputSessionMetadata prints the session's identity line.
 // Format: [GAS TOWN] role:<role> pid:<pid> session:<session_id>
-// This enables gt seance to discover sessions from gt prime output.
 func outputSessionMetadata(ctx RoleContext) {
 	if ctx.Role == RoleUnknown {
 		return

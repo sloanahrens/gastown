@@ -14,13 +14,6 @@
         "bash": "{{GT_BIN}} mail check --inject",
         "timeoutSec": 10
       }
-    ],
-    "sessionEnd": [
-      {
-        "type": "command",
-        "bash": "{{GT_BIN}} costs record &",
-        "timeoutSec": 10
-      }
     ]
   }
 }

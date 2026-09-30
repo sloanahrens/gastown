@@ -90,12 +90,6 @@ type TownSettings struct {
 	// Default: "gastown.local"
 	AgentEmailDomain string `json:"agent_email_domain,omitempty"`
 
-	// WebTimeouts configures command execution timeouts for the web dashboard.
-	WebTimeouts *WebTimeoutsConfig `json:"web_timeouts,omitempty"`
-
-	// WorkerStatus configures activity-age thresholds for worker status classification.
-	WorkerStatus *WorkerStatusConfig `json:"worker_status,omitempty"`
-
 	// FeedCurator configures event deduplication and aggregation windows.
 	FeedCurator *FeedCuratorConfig `json:"feed_curator,omitempty"`
 
@@ -145,60 +139,6 @@ func NewTownSettings() *TownSettings {
 		DefaultAgent: "claude",
 		Agents:       make(map[string]*RuntimeConfig),
 		RoleAgents:   make(map[string]string),
-	}
-}
-
-// WebTimeoutsConfig configures command execution timeouts for the web dashboard.
-type WebTimeoutsConfig struct {
-	// CmdTimeout is the timeout for bd (beads) commands. Default: "15s".
-	CmdTimeout string `json:"cmd_timeout,omitempty"`
-	// GhCmdTimeout is the timeout for GitHub API commands. Default: "10s".
-	GhCmdTimeout string `json:"gh_cmd_timeout,omitempty"`
-	// TmuxCmdTimeout is the timeout for tmux queries. Default: "2s".
-	TmuxCmdTimeout string `json:"tmux_cmd_timeout,omitempty"`
-	// FetchTimeout is the maximum time for all dashboard data fetches. Default: "8s".
-	FetchTimeout string `json:"fetch_timeout,omitempty"`
-	// DefaultRunTimeout is the default timeout for /api/run commands. Default: "30s".
-	DefaultRunTimeout string `json:"default_run_timeout,omitempty"`
-	// MaxRunTimeout is the maximum allowed timeout for /api/run commands. Default: "120s".
-	MaxRunTimeout string `json:"max_run_timeout,omitempty"`
-}
-
-// DefaultWebTimeoutsConfig returns a WebTimeoutsConfig with sensible defaults.
-func DefaultWebTimeoutsConfig() *WebTimeoutsConfig {
-	return &WebTimeoutsConfig{
-		CmdTimeout:        "15s",
-		GhCmdTimeout:      "10s",
-		TmuxCmdTimeout:    "2s",
-		FetchTimeout:      "8s",
-		DefaultRunTimeout: "30s",
-		MaxRunTimeout:     "120s",
-	}
-}
-
-// WorkerStatusConfig configures activity-age thresholds for worker status classification.
-type WorkerStatusConfig struct {
-	// StaleThreshold is the activity age after which a worker is considered "stale".
-	// Default: "5m".
-	StaleThreshold string `json:"stale_threshold,omitempty"`
-	// StuckThreshold is the activity age after which a worker is considered "stuck".
-	// Default: "30m".
-	StuckThreshold string `json:"stuck_threshold,omitempty"`
-	// HeartbeatFreshThreshold is the max age for a Deacon heartbeat to be considered fresh.
-	// Default: "5m".
-	HeartbeatFreshThreshold string `json:"heartbeat_fresh_threshold,omitempty"`
-	// MayorActiveThreshold is the max session inactivity for the Mayor to be considered active.
-	// Default: "5m".
-	MayorActiveThreshold string `json:"mayor_active_threshold,omitempty"`
-}
-
-// DefaultWorkerStatusConfig returns a WorkerStatusConfig with sensible defaults.
-func DefaultWorkerStatusConfig() *WorkerStatusConfig {
-	return &WorkerStatusConfig{
-		StaleThreshold:          "5m",
-		StuckThreshold:          "30m",
-		HeartbeatFreshThreshold: "5m",
-		MayorActiveThreshold:    "5m",
 	}
 }
 
@@ -1977,49 +1917,6 @@ func DefaultAccountsConfigDir() (string, error) {
 	}
 	return home + "/.claude-accounts", nil
 }
-
-// QuotaState represents the quota management state (mayor/quota.json).
-// Tracks which accounts are rate-limited and when they were last rotated.
-type QuotaState struct {
-	Version  int                          `json:"version"`  // schema version
-	Accounts map[string]AccountQuotaState `json:"accounts"` // handle -> quota state
-
-	// ActiveSwaps tracks keychain swap mappings from quota rotation.
-	// Key: target config dir (where the swapped token was written)
-	// Value: source account handle (whose token was swapped in)
-	//
-	// When a session is rotated, its config dir's keychain entry gets
-	// overwritten with the source account's token. If the source account
-	// later re-authenticates, the fresh token goes to the source's own
-	// keychain entry — not the target's. SyncSwappedTokens uses this map
-	// to propagate fresh tokens to all target keychain entries.
-	ActiveSwaps map[string]string `json:"active_swaps,omitempty"` // targetConfigDir -> sourceAccountHandle
-}
-
-// AccountQuotaStatus is the rate-limit status of an account.
-type AccountQuotaStatus string
-
-const (
-	// QuotaStatusAvailable means the account is not rate-limited.
-	QuotaStatusAvailable AccountQuotaStatus = "available"
-
-	// QuotaStatusLimited means the account has been detected as rate-limited.
-	QuotaStatusLimited AccountQuotaStatus = "limited"
-
-	// QuotaStatusCooldown means the account was limited and is in cooldown.
-	QuotaStatusCooldown AccountQuotaStatus = "cooldown"
-)
-
-// AccountQuotaState tracks the quota status of a single account.
-type AccountQuotaState struct {
-	Status    AccountQuotaStatus `json:"status"`               // current status
-	LimitedAt string             `json:"limited_at,omitempty"` // RFC3339 when limit was detected
-	ResetsAt  string             `json:"resets_at,omitempty"`  // Human-readable reset time from provider (e.g. "7pm (America/Los_Angeles)")
-	LastUsed  string             `json:"last_used,omitempty"`  // RFC3339 when account was last assigned to a session
-}
-
-// CurrentQuotaVersion is the current schema version for QuotaState.
-const CurrentQuotaVersion = 1
 
 // MessagingConfig represents the messaging configuration (config/messaging.json).
 // This defines mailing lists, work queues, and announcement channels.

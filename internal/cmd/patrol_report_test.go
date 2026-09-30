@@ -18,8 +18,8 @@ func TestRunPatrolReportForRejectsNonPatrolRole(t *testing.T) {
 
 // TestBuildStepAuditBareIDsRejected: a bare step id (no ":STATUS") must fail
 // the CLI audit instead of being silently recorded as SKIP (gt-gvo8m). A deacon
-// that ran a full 28/28 patrol but passed bare ids must not produce a ledger
-// entry reading "0/28".
+// that ran a full 27/27 patrol but passed bare ids must not produce a ledger
+// entry reading "0/27".
 func TestBuildStepAuditBareIDsRejected(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
@@ -56,10 +56,10 @@ func TestBuildStepAuditValidInputsUnchanged(t *testing.T) {
 		}
 	}
 	// Every reported step is SKIP/OK except the three reported; the deacon
-	// formula has 28 steps, so a step the agent did not mention defaults to
+	// formula has 27 steps, so a step the agent did not mention defaults to
 	// SKIP and the OK count is exactly 2.
-	if !contains(audit, "(2/28)") {
-		t.Errorf("audit OK count = %s; want (2/28)", audit)
+	if !contains(audit, "(2/27)") {
+		t.Errorf("audit OK count = %s; want (2/27)", audit)
 	}
 	if contains(audit, "heartbeat SKIP") {
 		t.Errorf("reported OK step read as SKIP: %s", audit)
@@ -111,7 +111,7 @@ func TestBuildStepAuditEmptyFlagUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStepAudit returned error for empty flag: %v", err)
 	}
-	if !contains(audit, "NOT REPORTED (?/28)") {
-		t.Errorf("empty flag should read NOT REPORTED (?/28): %s", audit)
+	if !contains(audit, "NOT REPORTED (?/27)") {
+		t.Errorf("empty flag should read NOT REPORTED (?/27): %s", audit)
 	}
 }

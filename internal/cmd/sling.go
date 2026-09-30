@@ -37,7 +37,7 @@ This is THE command for assigning work in Gas Town. It handles:
   - Auto-spawning polecats when target is a rig
   - Dispatching to dogs (Deacon's helper workers)
   - Formula instantiation and wisp creation
-  - Auto-convoy creation for dashboard visibility
+  - Auto-convoy creation so the work is tracked
 
 Auto-Convoy:
   When slinging a single issue (not a formula), sling automatically creates
@@ -97,7 +97,7 @@ Stdin Mode (for shell-quoting-safe multi-line content):
 
 Formula Slinging:
   gt sling mol-release mayor/           # Cook + wisp + attach + nudge
-  gt sling towers-of-hanoi --var disks=3
+  gt sling code-review --var pr=42
 
 Formula-on-Bead (--on flag):
   gt sling mol-review --on gt-abc       # Apply formula to existing work
@@ -964,7 +964,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Auto-convoy: check if issue is already tracked by a convoy
-	// If not, create one for dashboard visibility (unless --no-convoy is set)
+	// If not, create one so the work is tracked (unless --no-convoy is set)
 	if !slingNoConvoy && formulaName == "" {
 		if slingDryRun {
 			fmt.Printf("Would create convoy 'Work: %s' if needed\n", info.Title)

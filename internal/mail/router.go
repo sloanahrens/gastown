@@ -1652,9 +1652,9 @@ type MailSummary struct {
 // This replaces the previous per-address pattern of calling
 // GetMailbox(address).List(), which shells out 2-3 bd subprocesses per
 // address on its own. gt status --json used that pattern once per agent
-// identity in the town; with an SSE dashboard client connected, that poll
-// runs every 2s, so a town with ~40 identities fanned out to ~150-180 bd
-// processes per tick. See gt-978i.
+// identity in the town, and a polling status client ran it every 2s, so a
+// town with ~40 identities fanned out to ~150-180 bd processes per tick.
+// See gt-978i.
 func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary, error) {
 	summaries := make(map[string]MailSummary, len(addresses))
 	if len(addresses) == 0 {

@@ -498,12 +498,11 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 // checkSettings compares a settings file against the expected template.
 // Returns a list of what's missing. Stop-hook expectations are role-specific
 // to match the canonical hook templates in internal/hooks/config.go (#3648):
-//
-//   - polecat → `gt tap polecat-stop-check` (idle-polecat catcher)
-//   - everyone else → `gt costs record` (autonomous cost accounting)
+// only polecats require one (`gt tap polecat-stop-check`, the idle-polecat
+// catcher).
 //
 // Without this, doctor never converged for polecats: hooks sync wrote
-// polecat-stop-check, doctor demanded costs record, fix deleted the file,
+// polecat-stop-check, doctor demanded a different hook, fix deleted the file,
 // the daemon recreated the same polecat-stop-check file, repeat forever.
 func (c *ClaudeSettingsCheck) checkSettings(path, agentType string) []string {
 	var missing []string
@@ -540,24 +539,27 @@ func (c *ClaudeSettingsCheck) checkSettings(path, agentType string) []string {
 		missing = append(missing, "SessionStart hook (prime --hook)")
 	}
 
-	// Check Stop hook against the expected pattern for this role.
-	expected := expectedStopPattern(agentType)
-	if !c.hookHasPattern(hooks, "Stop", expected) {
-		missing = append(missing, fmt.Sprintf("Stop hook (%s)", expected))
+	// Check Stop hook against the expected pattern for this role. A role with
+	// no required Stop hook (everyone but polecats) skips the check.
+	if expected := expectedStopPattern(agentType); expected != "" {
+		if !c.hookHasPattern(hooks, "Stop", expected) {
+			missing = append(missing, fmt.Sprintf("Stop hook (%s)", expected))
+		}
 	}
 
 	return missing
 }
 
 // expectedStopPattern returns the substring that should appear in the role's
-// Stop hook command. Mirrors the templates in internal/hooks/config.go's
-// DefaultOverrides — when those change, this must change too.
+// Stop hook command, or "" when the role requires none. Mirrors the templates
+// in internal/hooks/config.go's DefaultOverrides — when those change, this
+// must change too.
 func expectedStopPattern(agentType string) string {
 	switch agentType {
 	case "polecat", "polecats":
 		return "polecat-stop-check"
 	default:
-		return "costs record"
+		return ""
 	}
 }
 

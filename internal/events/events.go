@@ -47,7 +47,7 @@ const (
 	TypeBoot    = "boot"
 	TypeHalt    = "halt"
 
-	// Session events (for seance discovery)
+	// Session lifecycle events
 	TypeSessionStart = "session_start"
 	TypeSessionEnd   = "session_end"
 

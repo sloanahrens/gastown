@@ -314,7 +314,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	parts := primeParts{
 		session: func() string {
-			explain(true, "Session metadata: always included for seance discovery")
+			explain(true, "Session metadata: always included")
 			return captureOutput(func() { outputSessionMetadata(ctx) })
 		},
 		patrol: func() string {
@@ -427,7 +427,7 @@ func runPrimeCompactResume(ctx RoleContext) error {
 	}
 	fmt.Print(primePatrolSection(status))
 
-	// Session metadata for seance
+	// Session identity line
 	outputSessionMetadata(ctx)
 
 	fmt.Println("\n---")
@@ -652,7 +652,7 @@ func setupPrimeSession(ctx RoleContext, roleInfo RoleInfo) error {
 	// records its start once, and only a runtime hook invocation records one.
 	// A bare gt prime (e.g. an agent reading another agent's context) must not
 	// emit — that would log a spurious event with the target agent's persisted
-	// session_id, which pollutes the event stream and confuses gt seance.
+	// session_id, which pollutes the event stream.
 	if primeHookMode {
 		emitSessionEvent(ctx)
 	}

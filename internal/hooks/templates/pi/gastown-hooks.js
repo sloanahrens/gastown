@@ -6,7 +6,6 @@
 //   session_start       → gt prime --hook (capture context)
 //   before_agent_start  → inject captured context + check mail every prompt
 //   tool_call           → gt tap guard pr-workflow (on git push/pr create)
-//   session_shutdown    → gt costs record
 //
 // Enhancement over upstream: mail is checked on every prompt (throttled to
 // 30s) via before_agent_start, matching Claude's UserPromptSubmit behavior.
@@ -107,15 +106,6 @@ export default (pi) => {
           console.error("[gastown] gt tap guard failed:", e.message);
         }
       }
-    }
-  });
-
-  // Stop equivalent — record API costs
-  pi.on("session_shutdown", async (event, context) => {
-    try {
-      await pi.exec("gt", ["costs", "record"]);
-    } catch (e) {
-      console.error("[gastown] gt costs record failed:", e.message);
     }
   });
 };

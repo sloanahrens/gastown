@@ -99,9 +99,8 @@ func (c *Curator) Start() error {
 		eventsPath := filepath.Join(c.townRoot, events.EventsFile)
 
 		// Tail from the end, creating the file if needed. The tail follows
-		// the path: the KRC pruner replaces the file (tmp + rename), and a
-		// descriptor-bound reader went deaf until the next daemon restart
-		// (claude-9jq).
+		// the path: a replacement (tmp + rename) leaves a descriptor-bound
+		// reader deaf until the next daemon restart (claude-9jq).
 		tail, err := events.OpenTail(eventsPath)
 		if err != nil {
 			c.startErr = fmt.Errorf("opening events file: %w", err)
