@@ -8,20 +8,13 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// tmuxRenamer is the minimal tmux interface needed by Fix().
-// Allows injecting a mock in tests without depending on a live tmux.
-type tmuxRenamer interface {
-	HasSession(name string) (bool, error)
-	RenameSession(from, to string) error
-}
-
 // MalformedSessionNameCheck detects Gas Town tmux sessions whose names use the
-// legacy naming scheme (e.g., "gt-whatsapp_automation-witness") rather than the
-// current short-prefix format (e.g., "wa-witness").
+// legacy naming scheme (e.g., "gt-whatsapp_automation-crew-max") rather than the
+// current short-prefix format (e.g., "wa-crew-max").
 //
 // Detection uses explicit legacy-name matching rather than a parse round-trip.
-// Round-trip detection cannot catch legacy names: "gt-whatsapp_automation-witness"
-// parses as a polecat named "whatsapp_automation-witness" and round-trips to the
+// Round-trip detection cannot catch legacy names: "gt-whatsapp_automation-crew-max"
+// parses as a polecat named "whatsapp_automation-crew-max" and round-trips to the
 // same string — no mismatch is ever reported.
 //
 // Instead, we scan sessions for the pattern:
@@ -29,31 +22,29 @@ type tmuxRenamer interface {
 //	{any_prefix}-{registered_rig_name}-{role_suffix}
 //
 // where {registered_rig_name} is a known rig (e.g., "whatsapp_automation") and
-// {role_suffix} is a valid Gas Town role ("witness", "refinery", "crew-{name}").
+// {role_suffix} is a crew role ("crew-{name}").
 // The canonical name is then: {rig_short_prefix}-{role_suffix}.
+//
+// The check only reports: crew sessions may be attached, so they must be
+// renamed manually.
 type MalformedSessionNameCheck struct {
-	FixableCheck
+	BaseCheck
 	sessionListerForTest SessionLister // Injectable for testing; nil uses real tmux
 	registryForTest      *session.PrefixRegistry
-	tmuxForTest          tmuxRenamer // Injectable for Fix() testing; nil uses real tmux
-	malformed            []sessionRename // Cached during Run for use in Fix
 }
 
 type sessionRename struct {
 	oldName string
 	newName string
-	isCrew  bool // crew sessions require manual rename
 }
 
 // NewMalformedSessionNameCheck creates a new malformed session name check.
 func NewMalformedSessionNameCheck() *MalformedSessionNameCheck {
 	return &MalformedSessionNameCheck{
-		FixableCheck: FixableCheck{
-			BaseCheck: BaseCheck{
-				CheckName:        "session-name-format",
-				CheckDescription: "Detect sessions with outdated Gas Town naming format",
-				CheckCategory:    CategoryCleanup,
-			},
+		BaseCheck: BaseCheck{
+			CheckName:        "session-name-format",
+			CheckDescription: "Detect sessions with outdated Gas Town naming format",
+			CheckCategory:    CategoryCleanup,
 		},
 	}
 }
@@ -81,7 +72,6 @@ func (c *MalformedSessionNameCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	malformed := detectLegacySessionNames(sessions, reg)
-	c.malformed = malformed
 
 	if len(malformed) == 0 {
 		return &CheckResult{
@@ -91,29 +81,9 @@ func (c *MalformedSessionNameCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Separate auto-fixable from crew (manual-only).
-	var autoFixable, needsManual []sessionRename
-	for _, r := range malformed {
-		if r.isCrew {
-			needsManual = append(needsManual, r)
-		} else {
-			autoFixable = append(autoFixable, r)
-		}
-	}
-
 	var details []string
-	for _, r := range autoFixable {
-		details = append(details, fmt.Sprintf("Outdated: %s → should be %s", r.oldName, r.newName))
-	}
-	for _, r := range needsManual {
+	for _, r := range malformed {
 		details = append(details, fmt.Sprintf("Outdated: %s → should be %s (crew session — manual rename required)", r.oldName, r.newName))
-	}
-
-	fixHint := "Run 'gt doctor --fix' to rename sessions to current format"
-	if len(autoFixable) == 0 && len(needsManual) > 0 {
-		fixHint = "Crew sessions must be renamed manually: tmux rename-session -t OLD NEW"
-	} else if len(needsManual) > 0 {
-		fixHint = "Run 'gt doctor --fix' for patrol sessions; crew sessions must be renamed manually"
 	}
 
 	return &CheckResult{
@@ -121,64 +91,9 @@ func (c *MalformedSessionNameCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("Found %d session(s) with outdated naming format", len(malformed)),
 		Details: details,
-		FixHint: fixHint,
+		FixHint: "Crew sessions must be renamed manually: tmux rename-session -t OLD NEW",
 	}
 }
-
-// Fix renames auto-fixable legacy sessions to their canonical names.
-// Crew sessions are silently skipped — Run already told the user they need
-// manual intervention, so Fix does not mislead them into thinking --fix works.
-func (c *MalformedSessionNameCheck) Fix(ctx *CheckContext) error {
-	if len(c.malformed) == 0 {
-		return nil
-	}
-
-	var t tmuxRenamer
-	if c.tmuxForTest != nil {
-		t = c.tmuxForTest
-	} else {
-		t = tmux.NewTmux()
-	}
-	var lastErr error
-
-	for _, r := range c.malformed {
-		if r.isCrew {
-			// Crew sessions require manual rename; skip without error.
-			continue
-		}
-
-		// TOCTOU guard: a prior check (e.g., zombie-sessions) may have already
-		// killed the source session between Run() and Fix().
-		sourceExists, err := t.HasSession(r.oldName)
-		if err != nil {
-			lastErr = fmt.Errorf("check source session %s: %w", r.oldName, err)
-			continue
-		}
-		if !sourceExists {
-			continue
-		}
-
-		// Skip if target name is already in use (collision).
-		targetExists, err := t.HasSession(r.newName)
-		if err != nil {
-			lastErr = fmt.Errorf("check target session %s: %w", r.newName, err)
-			continue
-		}
-		if targetExists {
-			continue
-		}
-
-		if err := t.RenameSession(r.oldName, r.newName); err != nil {
-			lastErr = fmt.Errorf("rename %s → %s: %w", r.oldName, r.newName, err)
-		}
-	}
-
-	return lastErr
-}
-
-// knownRoleSuffixes are the simple role keywords that appear at the end of a
-// Gas Town session name (after the rig prefix).
-var knownRoleSuffixes = []string{"witness", "refinery"}
 
 // detectLegacySessionNames scans sessions for the legacy
 //
@@ -219,12 +134,12 @@ func detectLegacySessionNames(sessions []string, reg *session.PrefixRegistry) []
 
 // matchLegacyName checks whether sess matches the old
 //
-//	{known_prefix}-{rig_name}-{role_suffix}  or  {known_prefix}-{rig_name}-crew-{name}
+//	{known_prefix}-{rig_name}-crew-{name}
 //
 // pattern for any known rig, and returns the canonical rename if so.
 // The prefix before the rig name must be a known Gastown prefix to avoid
-// false-positives on non-Gastown sessions (e.g., "my-niflheim-witness")
-// and polecat sessions whose names embed rig names (e.g., "gt-fix-gastown-witness").
+// false-positives on non-Gastown sessions (e.g., "my-niflheim-crew-max")
+// and polecat sessions whose names embed rig names (e.g., "gt-fix-gastown-crew-max").
 func matchLegacyName(sess string, rigs map[string]string, knownPrefixes map[string]bool) (sessionRename, bool) {
 	for rigName, shortPrefix := range rigs {
 		// Look for "-{rigName}-" anywhere in the session name.
@@ -258,24 +173,15 @@ func matchLegacyName(sess string, rigs map[string]string, knownPrefixes map[stri
 			continue
 		}
 
-		canonical := shortPrefix + "-" + roleSuffix
-		isCrew := strings.HasPrefix(roleSuffix, "crew-")
-
 		return sessionRename{
 			oldName: sess,
-			newName: canonical,
-			isCrew:  isCrew,
+			newName: shortPrefix + "-" + roleSuffix,
 		}, true
 	}
 	return sessionRename{}, false
 }
 
-// isValidRoleSuffix returns true if suffix is a known Gas Town role identifier.
+// isValidRoleSuffix returns true if suffix is a crew role identifier ("crew-{name}").
 func isValidRoleSuffix(suffix string) bool {
-	for _, role := range knownRoleSuffixes {
-		if suffix == role {
-			return true
-		}
-	}
 	return strings.HasPrefix(suffix, "crew-") && len(suffix) > len("crew-")
 }

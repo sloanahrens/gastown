@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// TestutilSymlinkCheck verifies that crew and refinery/rig internal/testutil/
+// TestutilSymlinkCheck verifies that crew internal/testutil/
 // directories are symlinks to the canonical mayor/rig/internal/testutil/.
 // This prevents identical-copies drift across rig clones.
 type TestutilSymlinkCheck struct {
@@ -39,7 +39,7 @@ func canonicalTestutilPath(rigPath string) string {
 	return filepath.Join(rigPath, "mayor", "rig", "internal", "testutil")
 }
 
-// Run checks if crew and refinery/rig internal/testutil are proper symlinks.
+// Run checks if crew internal/testutil dirs are proper symlinks.
 func (c *TestutilSymlinkCheck) Run(ctx *CheckContext) *CheckResult {
 	rigPath := ctx.RigPath()
 	if rigPath == "" {
@@ -86,18 +86,11 @@ func (c *TestutilSymlinkCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Check refinery/rig/internal/testutil
-	refineryTestutil := filepath.Join(rigPath, "refinery", "rig", "internal", "testutil")
-	if _, err := os.Stat(filepath.Join(rigPath, "refinery", "rig")); err == nil {
-		c.checkSymlink(refineryTestutil, canonicalResolved, "refinery/rig")
-		checked++
-	}
-
 	if checked == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: "No crew or refinery clones to check",
+			Message: "No crew clones to check",
 		}
 	}
 

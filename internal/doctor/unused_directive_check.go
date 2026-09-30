@@ -10,8 +10,8 @@ import (
 // config.LoadRoleDirective never renders them.
 //
 // The check embeds BaseCheck and so cannot be auto-fixed: Fix would have to
-// delete files the operator wrote, and a misnamed keeper (refiner.md holding
-// the refinery's policy) is indistinguishable from junk. The reported hint
+// delete files the operator wrote, and a misnamed keeper (polecats.md holding
+// the polecat policy) is indistinguishable from junk. The reported hint
 // sends the operator to a rename instead.
 type UnusedDirectiveCheck struct {
 	BaseCheck

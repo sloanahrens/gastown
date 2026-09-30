@@ -152,9 +152,6 @@ func TestRunPrimeExternalTools_MemoryIsMayorAndCrewOnly(t *testing.T) {
 		{RoleMayor, true},
 		{RoleCrew, true},
 		{RolePolecat, false},
-		{RoleWitness, false},
-		{RoleDeacon, false},
-		{RoleBoot, false},
 	} {
 		t.Run(string(tc.role), func(t *testing.T) {
 			t.Parallel()
@@ -291,34 +288,6 @@ func TestRunPrimeExternalTools_BoundsSlowMailCheck(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "remembered") {
 		t.Fatalf("a slow mail check must not suppress the memory section: %q", out.String())
-	}
-}
-
-// TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles pins that a patrol
-// role's prime runs no external tool: mail is withheld by
-// shouldSkipStartupMailInject and memories by shouldRenderMemories. The bd
-// assertion is the half that catches the memory gate landing without its tests
-// (gt-o51s) — these roles have no other reason to shell out at all.
-func TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles(t *testing.T) {
-	t.Parallel()
-	for _, role := range []Role{RoleWitness, RoleDeacon, RoleBoot} {
-		t.Run(string(role), func(t *testing.T) {
-			t.Parallel()
-			f := &fakePrimeRunner{answers: map[string]string{
-				primeKVListCall:    `{}`,
-				primeMailCheckCall: "MAIL OUTPUT\n",
-			}}
-			p, _, out := newFakePrimeTools(f)
-
-			p.externalTools(RoleContext{Role: role}, t.TempDir())
-
-			if calls := f.callLines(); len(calls) != 0 {
-				t.Fatalf("patrol role %s ran external tools: %q", role, calls)
-			}
-			if out.Len() != 0 {
-				t.Fatalf("patrol role %s printed output: %q", role, out.String())
-			}
-		})
 	}
 }
 

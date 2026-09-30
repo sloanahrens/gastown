@@ -51,7 +51,7 @@ func TestDoltServerPatrolCheck_DownPatrolDisabled(t *testing.T) {
 	// Point at a port with no listener → Dolt unreachable.
 	t.Setenv("GT_DOLT_PORT", "1")
 	// No dolt_server key in daemon.json → patrol not enabled.
-	writeDaemonConfig(t, townRoot, `{"refinery":{"enabled":true}}`)
+	writeDaemonConfig(t, townRoot, `{"doctor_dog":{"enabled":true}}`)
 
 	check := NewDoltServerPatrolCheck()
 	result := check.Run(&CheckContext{TownRoot: townRoot})

@@ -78,7 +78,7 @@ func TestRigAdoptBeadsCandidateDetection(t *testing.T) {
 func TestRigAdoptFallbackInitNeeded(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
+		name         string
 		hasDotBeads  bool
 		hasPrefix    bool
 		wantFallback bool

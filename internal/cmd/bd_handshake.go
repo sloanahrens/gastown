@@ -27,18 +27,10 @@ var bdHandshakeGatedCommands = map[string]bool{
 	"gt daemon run":      true,
 	"gt daemon restart":  true,
 	"gt sling":           true,
-	"gt boot spawn":      true,
 	"gt crew start":      true,
 	"gt crew restart":    true,
-	"gt deacon start":    true,
-	"gt deacon restart":  true,
 	"gt mayor start":     true,
 	"gt mayor restart":   true,
-	"gt witness start":   true,
-	"gt witness restart": true,
-	"gt rig start":       true,
-	"gt rig restart":     true,
-	"gt rig boot":        true,
 	"gt session start":   true,
 	"gt session restart": true,
 	"gt scheduler run":   true,
@@ -57,9 +49,7 @@ var bdHandshakeTownVerbs = map[string]bool{
 // bdHandshakeNotTownRunning are start/run-named commands that start no agent
 // session, daemon or polecat, with the reason each is exempt.
 var bdHandshakeNotTownRunning = map[string]string{
-	"gt boot":             "command group; its spawn verb is gated",
 	"gt agent resume":     "clears a pause flag; starts no session",
-	"gt deacon resume":    "clears a pause flag; starts no session",
 	"gt scheduler resume": "clears a pause flag; dispatch goes through gt sling (gated)",
 	"gt plugin run":       "runs one plugin gate; starts no agent session",
 	"gt reaper run":       "closes stale beads through bd; starts nothing",

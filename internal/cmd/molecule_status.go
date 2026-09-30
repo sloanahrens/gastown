@@ -68,13 +68,6 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 	switch role {
 	case RoleMayor:
 		return beads.MayorBeadIDTown()
-	case RoleDeacon:
-		return beads.DeaconBeadIDTown()
-	case RoleWitness:
-		if len(parts) >= 1 {
-			return beads.WitnessBeadIDWithPrefix(getPrefix(parts[0]), parts[0])
-		}
-		return ""
 	case RolePolecat:
 		// Handle both 2-part (rig/name) and 3-part (rig/polecats/name) formats
 		if len(parts) == 3 && parts[1] == "polecats" {
@@ -89,9 +82,6 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 			return beads.CrewBeadIDWithPrefix(getPrefix(parts[0]), parts[0], parts[2])
 		}
 		return ""
-	case RoleBoot:
-		// Boot is a deacon dog — uses town-level dog bead ID
-		return beads.DogBeadIDTown("boot")
 	default:
 		return ""
 	}
@@ -515,12 +505,6 @@ func buildAgentIdentity(ctx RoleContext) string {
 	switch ctx.Role {
 	case RoleMayor:
 		return "mayor/"
-	case RoleDeacon:
-		return "deacon/"
-	case RoleBoot:
-		return "deacon/boot"
-	case RoleWitness:
-		return ctx.Rig + "/witness"
 	case RolePolecat:
 		return ctx.Rig + "/polecats/" + ctx.Polecat
 	case RoleCrew:

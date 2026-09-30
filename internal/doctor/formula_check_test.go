@@ -56,7 +56,7 @@ func TestFormulaCheck_Run_Missing(t *testing.T) {
 
 	// Delete a formula
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	formulaPath := filepath.Join(formulasDir, "mol-deacon-patrol.formula.toml")
+	formulaPath := filepath.Join(formulasDir, "mol-dog-doctor.formula.toml")
 	if err := os.Remove(formulaPath); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestFormulaCheck_Fix(t *testing.T) {
 
 	// Delete a formula
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	formulaPath := filepath.Join(formulasDir, "mol-deacon-patrol.formula.toml")
+	formulaPath := filepath.Join(formulasDir, "mol-dog-doctor.formula.toml")
 	if err := os.Remove(formulaPath); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestFormulaCheck_Run_HandEditedIsAWarning(t *testing.T) {
 	}
 
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	edited := "mol-witness-patrol.formula.toml"
+	edited := "mol-polecat-work.formula.toml"
 	editedPath := filepath.Join(formulasDir, edited)
 	if err := os.WriteFile(editedPath, []byte("# hand-edited\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestFormulaCheck_Run_HandEditedIsAWarning(t *testing.T) {
 	}
 }
 
-// stageStaleCopy writes a town-tier copy of mol-witness-patrol that keeps its
+// stageStaleCopy writes a town-tier copy of mol-polecat-work that keeps its
 // version and grows by staleBytes, then records it as installed so the copy
 // reads as "outdated" rather than hand-edited. Callers that want the
 // hand-edited reading pass recordAsInstalled=false.
@@ -179,7 +179,7 @@ func stageStaleCopy(t *testing.T, tmpDir string, staleBytes []byte, recordAsInst
 	t.Helper()
 
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	name := "mol-witness-patrol.formula.toml"
+	name := "mol-polecat-work.formula.toml"
 	path := filepath.Join(formulasDir, name)
 
 	embedded, err := os.ReadFile(path)
@@ -245,7 +245,7 @@ func TestFormulaCheck_Run_SameVersionDivergenceNamesBothSizes(t *testing.T) {
 	if result.Status != StatusWarning {
 		t.Fatalf("Status = %v, want %v", result.Status, StatusWarning)
 	}
-	detail := detailFor(result, "mol-witness-patrol.formula.toml")
+	detail := detailFor(result, "mol-polecat-work.formula.toml")
 	if detail == "" {
 		t.Fatalf("Details do not name the stale copy: %v", result.Details)
 	}
@@ -277,7 +277,7 @@ func TestFormulaCheck_Run_OutdatedAtSameVersionNamesBothSizes(t *testing.T) {
 	if result.Status != StatusWarning {
 		t.Fatalf("Status = %v, want %v", result.Status, StatusWarning)
 	}
-	detail := detailFor(result, "mol-witness-patrol.formula.toml")
+	detail := detailFor(result, "mol-polecat-work.formula.toml")
 	if !strings.Contains(detail, "update available") {
 		t.Fatalf("detail = %q, want the outdated reading", detail)
 	}
@@ -296,7 +296,7 @@ func TestFormulaCheck_Run_BumpedVersionOverrideOmitsSizes(t *testing.T) {
 		t.Fatalf("ProvisionFormulas() error: %v", err)
 	}
 
-	path := filepath.Join(tmpDir, ".beads", "formulas", "mol-witness-patrol.formula.toml")
+	path := filepath.Join(tmpDir, ".beads", "formulas", "mol-polecat-work.formula.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestFormulaCheck_Run_BumpedVersionOverrideOmitsSizes(t *testing.T) {
 
 	result := NewFormulaCheck().Run(&CheckContext{TownRoot: tmpDir})
 
-	if detail := detailFor(result, "mol-witness-patrol.formula.toml"); strings.Contains(detail, "same version as embedded") {
+	if detail := detailFor(result, "mol-polecat-work.formula.toml"); strings.Contains(detail, "same version as embedded") {
 		t.Errorf("detail = %q, want no same-version clause for a bumped copy", detail)
 	}
 }

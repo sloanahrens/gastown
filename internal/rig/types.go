@@ -37,9 +37,6 @@ type Rig struct {
 	// Crew workers are user-managed persistent workspaces.
 	Crew []string `json:"crew,omitempty"`
 
-	// HasWitness indicates if the rig has a witness agent.
-	HasWitness bool `json:"has_witness"`
-
 	// HasMayor indicates if the rig has a mayor clone.
 	HasMayor bool `json:"has_mayor"`
 
@@ -51,11 +48,9 @@ type Rig struct {
 }
 
 // AgentDirs are the standard agent directories in a rig.
-// Note: witness doesn't have a /rig subdirectory (no clone needed).
 var AgentDirs = []string{
 	"polecats",
 	"crew",
-	"witness",
 	"mayor/rig",
 }
 
@@ -64,7 +59,6 @@ type RigSummary struct {
 	Name         string `json:"name"`
 	PolecatCount int    `json:"polecat_count"`
 	CrewCount    int    `json:"crew_count"`
-	HasWitness   bool   `json:"has_witness"`
 }
 
 // Summary returns a RigSummary for this rig.
@@ -73,7 +67,6 @@ func (r *Rig) Summary() RigSummary {
 		Name:         r.Name,
 		PolecatCount: len(r.Polecats),
 		CrewCount:    len(r.Crew),
-		HasWitness:   r.HasWitness,
 	}
 }
 

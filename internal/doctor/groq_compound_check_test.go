@@ -59,7 +59,7 @@ func TestGroqCompoundConfigured_RoleAgent(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
-	settings.RoleAgents["refinery"] = string(config.AgentGroqCompound)
+	settings.RoleAgents["polecat"] = string(config.AgentGroqCompound)
 	writeTownSettings(t, tmp, settings)
 
 	c := NewGroqCompoundCheck()
@@ -72,7 +72,7 @@ func TestGroqCompoundConfigured_NoMatch(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
-	settings.RoleAgents["refinery"] = "claude"
+	settings.RoleAgents["polecat"] = "claude"
 	writeTownSettings(t, tmp, settings)
 
 	c := NewGroqCompoundCheck()

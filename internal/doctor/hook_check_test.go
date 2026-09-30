@@ -197,10 +197,10 @@ func TestHookSingletonCheck_FormatDuplicate(t *testing.T) {
 		},
 		{
 			dup: duplicateHandoff{
-				title:   "Witness Handoff",
+				title:   "gastown/crew/joe Handoff",
 				beadIDs: []string{"gt-1", "gt-2", "gt-3"},
 			},
-			expected: `"Witness Handoff" has 3 beads: gt-1, gt-2, gt-3`,
+			expected: `"gastown/crew/joe Handoff" has 3 beads: gt-1, gt-2, gt-3`,
 		},
 	}
 
@@ -299,11 +299,6 @@ func TestOrphanedAttachmentsCheck_AgentExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	witnessDir := filepath.Join(tmpDir, "gastown", "witness")
-	if err := os.MkdirAll(witnessDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	check := NewOrphanedAttachmentsCheck()
 
 	tests := []struct {
@@ -314,12 +309,10 @@ func TestOrphanedAttachmentsCheck_AgentExists(t *testing.T) {
 		{"gastown/nux", true},
 		{"gastown/crew/joe", true},
 		{"mayor", true},
-		{"gastown-witness", true},
 
 		// Non-existent agents
 		{"gastown/deleted", false},
 		{"gastown/crew/gone", false},
-		{"otherrig-witness", false},
 	}
 
 	for _, tt := range tests {

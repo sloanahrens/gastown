@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -462,43 +461,6 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 
 	if calls := bd.argvs(); len(calls) != 2 {
 		t.Fatalf("bd sql calls = %d, want 2 (one issues, one wisps) regardless of address count; calls:\n%s", len(calls), strings.Join(calls, "\n"))
-	}
-}
-
-// TestRouterBatchMailSummariesExcludesDeaconSelfProbes is a regression test
-// for gt-ecqx0: DEACON_SELF_PROBE wisps (see daemon.SendDeaconSelfProbe) are
-// a mechanical supervision signal, not mail a human or agent should see in
-// their unread count, and were previously counted like any other unread
-// wisp — inflating `gt status` with "ghost" unreads the deacon had no way
-// to clear (they're filtered out of `gt mail inbox` by the same prefix, so
-// there was nothing to read/ack).
-func TestRouterBatchMailSummariesExcludesDeaconSelfProbes(t *testing.T) {
-	t.Parallel()
-	bd := &bdScript{answer: func(c beads.BDCall) (string, string, int) {
-		if c.Args[0] != "sql" {
-			return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
-		}
-		query := c.Args[2]
-		if strings.Contains(query, "FROM wisps") && strings.Contains(query, "'gastown/max'") {
-			return `[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-probe","title":"` + constants.DeaconSelfProbeSubjectPrefix + ` nonce-abc","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0}]`, "", 0
-		}
-		return "[]\n", "", 0
-	}}
-
-	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir())
-	r.bd = bd.run
-	summaries, err := r.BatchMailSummaries([]string{"gastown/max"})
-	if err != nil {
-		t.Fatalf("BatchMailSummaries: %v", err)
-	}
-
-	// Only wisp-direct should count; wisp-probe (a DEACON_SELF_PROBE) must
-	// be excluded even though it matches assignee and is unread.
-	if got := summaries["gastown/max"].UnreadCount; got != 1 {
-		t.Errorf("gastown/max UnreadCount = %d, want 1 (probe must be excluded)", got)
-	}
-	if got := summaries["gastown/max"].FirstSubject; got != "Wisp direct" {
-		t.Errorf("gastown/max FirstSubject = %q, want %q", got, "Wisp direct")
 	}
 }
 

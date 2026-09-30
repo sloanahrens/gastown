@@ -86,9 +86,6 @@ func TestDiscoverRigs(t *testing.T) {
 	if slices.Contains(rig.Polecats, ".claude") {
 		t.Errorf("expected polecats/.claude to be ignored, got %v", rig.Polecats)
 	}
-	if !rig.HasWitness {
-		t.Error("expected HasWitness = true")
-	}
 }
 
 func TestDiscoverRigs_SortedByName(t *testing.T) {
@@ -361,9 +358,8 @@ func TestListRigNames(t *testing.T) {
 func TestRigSummary(t *testing.T) {
 	t.Parallel()
 	rig := &Rig{
-		Name:       "test",
-		Polecats:   []string{"a", "b", "c"},
-		HasWitness: true,
+		Name:     "test",
+		Polecats: []string{"a", "b", "c"},
 	}
 
 	summary := rig.Summary()
@@ -373,9 +369,6 @@ func TestRigSummary(t *testing.T) {
 	}
 	if summary.PolecatCount != 3 {
 		t.Errorf("PolecatCount = %d, want 3", summary.PolecatCount)
-	}
-	if !summary.HasWitness {
-		t.Error("expected HasWitness = true")
 	}
 }
 
@@ -767,40 +760,6 @@ func rigEnvMap(env []string) map[string]string {
 		}
 	}
 	return out
-}
-
-func TestInitAgentBeadsUsesRigBeadsDir(t *testing.T) {
-	t.Parallel()
-	// Rig-level agent beads (witness, refinery) are stored in rig beads.
-	// Town-level agents (mayor, deacon) are created by gt install in town beads.
-	// This test verifies that rig agent beads are created in the rig directory,
-	// using the resolved rig beads directory for BEADS_DIR.
-	townRoot := t.TempDir()
-	rigPath := filepath.Join(townRoot, "testrip")
-	rigBeadsDir := filepath.Join(rigPath, ".beads")
-	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
-		t.Fatalf("mkdir rig beads dir: %v", err)
-	}
-	// Types already configured: CreateAgentBead's EnsureCustomTypes runs bd
-	// outside the seam otherwise.
-	if err := os.WriteFile(filepath.Join(rigBeadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	manager, _, bd := testManager(townRoot, nil)
-	if err := manager.initAgentBeads(rigPath, "demo", "gt"); err != nil {
-		t.Fatalf("initAgentBeads: %v", err)
-	}
-
-	creates := bd.withVerb("create")
-	if len(creates) != 1 || flagValue(creates[0].Args, "id") != "gt-demo-witness" {
-		t.Fatalf("bd create calls = %v, want one for gt-demo-witness", bd.argvs())
-	}
-	for _, c := range bd.recorded() {
-		if dir, _ := envValue(c.Env, "BEADS_DIR"); dir != rigBeadsDir {
-			t.Errorf("bd %s: BEADS_DIR = %q, want %q", strings.Join(c.Args, " "), dir, rigBeadsDir)
-		}
-	}
 }
 
 func TestIsValidBeadsPrefix(t *testing.T) {

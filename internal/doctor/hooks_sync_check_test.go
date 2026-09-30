@@ -37,8 +37,8 @@ func scaffoldWorkspace(t *testing.T, roleAgents map[string]string) string {
 
 	townRoot := filepath.Join(tmpDir, "town")
 
-	// Required workspace structure
-	for _, dir := range []string{"mayor", "deacon"} {
+	// Required workspace structure (deacon/dogs is the dog kennel)
+	for _, dir := range []string{"mayor", filepath.Join("deacon", "dogs")} {
 		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +137,7 @@ func TestHooksSyncCheck_ClaudeTargetInSync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Sync ALL Claude targets (mayor, deacon, crew worktree)
+	// Sync ALL Claude targets (mayor, crew worktree)
 	syncAllClaudeTargets(t, townRoot)
 	writePassingSyncReport(t, townRoot)
 
@@ -372,7 +372,7 @@ func TestHooksSyncCheck_PolecatNestedWorktree_InSync(t *testing.T) {
 func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 	townRoot := scaffoldWorkspace(t, nil)
 
-	// Sync all Claude targets first (creates in-sync settings for mayor, deacon)
+	// Sync all Claude targets first (creates in-sync settings for mayor)
 	syncAllClaudeTargets(t, townRoot)
 
 	// THEN overwrite mayor's settings with stale hooks but a custom editorMode

@@ -65,12 +65,12 @@ func TestOutputRoleDirectives(t *testing.T) {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "witness.md"), []byte("Watch closely."), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "crew.md"), []byte("Watch closely."), 0644); err != nil {
 			t.Fatal(err)
 		}
 
 		ctx := RoleContext{
-			Role:     RoleWitness,
+			Role:     RoleCrew,
 			TownRoot: townRoot,
 			Rig:      "myrig",
 		}
@@ -179,24 +179,6 @@ func TestOutputRoleDirectives(t *testing.T) {
 			t.Errorf("expected directive content, got: %s", out)
 		}
 	})
-}
-
-func TestOutputCommandQuickReferenceBootBlocksRawTmux(t *testing.T) {
-	output := captureStdout(t, func() {
-		outputCommandQuickReference(RoleContext{Role: RoleBoot})
-	})
-
-	for _, want := range []string{
-		"gt nudge deacon",
-		"blocked; can stage unsubmitted input",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("Boot quick reference missing %q:\n%s", want, output)
-		}
-	}
-	if strings.Contains(output, "tmux send-keys~~ (unreliable)") {
-		t.Fatalf("Boot quick reference still calls raw tmux merely unreliable:\n%s", output)
-	}
 }
 
 func TestOutputRoleDirectives_WarnsAboutUnusedFiles(t *testing.T) {

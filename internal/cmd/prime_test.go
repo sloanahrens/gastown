@@ -57,23 +57,6 @@ func writeTestRoutes(t *testing.T, townRoot string, routes []beads.Route) {
 	}
 }
 
-func TestRenderFormulaStepsFull_DeaconIncludesHeartbeatCommand(t *testing.T) {
-	t.Parallel()
-	out, err := renderFormulaStepsFull(constants.MolDeaconPatrol, t.TempDir(), "")
-	if err != nil {
-		t.Fatalf("renderFormulaStepsFull: %v", err)
-	}
-	for _, want := range []string{
-		"### Step 1: Refresh heartbeat",
-		"gt deacon heartbeat \"starting patrol cycle\"",
-		"This MUST run before any other step.",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("rendered deacon patrol missing %q:\n%s", want, out)
-		}
-	}
-}
-
 func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -93,23 +76,6 @@ func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 				TownRoot: townRoot,
 			},
 			want: "hq-mayor",
-		},
-		{
-			name: "deacon",
-			ctx: RoleContext{
-				Role:     RoleDeacon,
-				TownRoot: townRoot,
-			},
-			want: "hq-deacon",
-		},
-		{
-			name: "witness",
-			ctx: RoleContext{
-				Role:     RoleWitness,
-				Rig:      "beads",
-				TownRoot: townRoot,
-			},
-			want: "bd-beads-witness",
 		},
 		{
 			name: "polecat",
@@ -976,37 +942,6 @@ func TestCompactResumeReminder_NonPolecatNoGtDone(t *testing.T) {
 	}
 }
 
-func TestEnsureBeadsRedirect_WitnessCreatesRedirect(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	rigRoot := filepath.Join(townRoot, "testrig")
-	witnessDir := filepath.Join(rigRoot, "witness")
-	mayorBeadsDir := filepath.Join(rigRoot, "mayor", "rig", ".beads")
-	if err := os.MkdirAll(witnessDir, 0755); err != nil {
-		t.Fatalf("mkdir witness dir: %v", err)
-	}
-	if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
-		t.Fatalf("mkdir mayor beads dir: %v", err)
-	}
-
-	ctx := RoleContext{
-		Role:     RoleWitness,
-		WorkDir:  witnessDir,
-		TownRoot: townRoot,
-	}
-
-	ensureBeadsRedirect(ctx)
-
-	redirectPath := filepath.Join(witnessDir, ".beads", "redirect")
-	content, err := os.ReadFile(redirectPath)
-	if err != nil {
-		t.Fatalf("read redirect: %v", err)
-	}
-	if got, want := string(content), "../mayor/rig/.beads\n"; got != want {
-		t.Fatalf("redirect content = %q, want %q", got, want)
-	}
-}
-
 func TestEnsureBeadsRedirect_RepairsExistingRedirectChain(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -1275,39 +1210,6 @@ func TestErrHookUnresolvable_IsErrors(t *testing.T) {
 	}
 }
 
-// TestShouldSkipStartupMailInject is a pure unit test of the patrol-role
-// skip decision, deliberately independent of subprocess spawning so it
-// can never flake under host contention (gt-0nk):
-// TestRunPrimeExternalTools_SkipsMailCheckForPatrolRoles exercises the same
-// decision through a full subprocess-based harness, which is a much better
-// integration check but ties pass/fail to a fixed spawn-timeout deadline —
-// this test proves the actual routing logic deterministically.
-func TestShouldSkipStartupMailInject(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		role string
-		want bool
-	}{
-		{string(RoleWitness), true},
-		{string(RoleDeacon), true},
-		{string(RoleBoot), true},
-		{string(RolePolecat), false},
-		{string(RoleCrew), false},
-		{string(RoleMayor), false},
-		{string(RoleDog), false},
-		{string(RoleUnknown), false},
-		{"", false},
-		{"WITNESS", true}, // role comparison is case-insensitive
-	}
-	for _, tt := range tests {
-		t.Run(tt.role, func(t *testing.T) {
-			if got := shouldSkipStartupMailInject(tt.role); got != tt.want {
-				t.Errorf("shouldSkipStartupMailInject(%q) = %v, want %v", tt.role, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestShouldRenderMemories is the pure unit half of the memory role gate
 // (gt-o51s, plan Task 8 C3), for the same reason TestShouldSkipStartupMailInject
 // is the pure half of the mail gate: the subprocess-based tests that exercise
@@ -1323,9 +1225,6 @@ func TestShouldRenderMemories(t *testing.T) {
 		{string(RoleMayor), true},
 		{string(RoleCrew), true},
 		{string(RolePolecat), false},
-		{string(RoleWitness), false},
-		{string(RoleDeacon), false},
-		{string(RoleBoot), false},
 		{string(RoleDog), false},
 		{string(RoleUnknown), false},
 		{"", false},

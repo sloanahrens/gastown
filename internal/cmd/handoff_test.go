@@ -75,21 +75,9 @@ func TestSessionWorkDir(t *testing.T) {
 			wantErr:     false,
 		},
 		{
-			name:        "deacon runs from deacon subdirectory",
-			sessionName: "hq-deacon",
-			wantDir:     townRoot + "/deacon",
-			wantErr:     false,
-		},
-		{
 			name:        "crew runs from crew subdirectory",
 			sessionName: "gt-crew-holden",
 			wantDir:     townRoot + "/gastown/crew/holden",
-			wantErr:     false,
-		},
-		{
-			name:        "witness runs from witness directory",
-			sessionName: "gt-witness",
-			wantDir:     townRoot + "/gastown/witness",
 			wantErr:     false,
 		},
 	}
@@ -129,7 +117,7 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 		_ = os.Setenv("GT_ROOT", origRoot)
 	})
 	rigPath := filepath.Join(townRoot, "gastown")
-	witnessDir := filepath.Join(rigPath, "witness")
+	crewDir := filepath.Join(rigPath, "crew", "holden")
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
@@ -137,8 +125,8 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
 		t.Fatalf("write town.json: %v", err)
 	}
-	if err := os.MkdirAll(witnessDir, 0755); err != nil {
-		t.Fatalf("mkdir witness dir: %v", err)
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
 	}
 
 	townSettings := config.NewTownSettings()
@@ -150,7 +138,7 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 		},
 	}
 	townSettings.RoleAgents = map[string]string{
-		"witness": "claude-sonnet",
+		"crew": "claude-sonnet",
 	}
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -168,17 +156,17 @@ func TestBuildRestartCommand_UsesRoleAgentsWhenNoAgentOverride(t *testing.T) {
 	if err := os.Setenv("GT_ROOT", ""); err != nil {
 		t.Fatalf("Setenv GT_ROOT: %v", err)
 	}
-	if err := os.Chdir(witnessDir); err != nil {
-		t.Fatalf("chdir witness dir: %v", err)
+	if err := os.Chdir(crewDir); err != nil {
+		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, err := buildRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
 
 	if !strings.Contains(cmd, "--model sonnet") {
-		t.Errorf("expected role_agents witness model flag in restart command, got: %q", cmd)
+		t.Errorf("expected role_agents crew model flag in restart command, got: %q", cmd)
 	}
 }
 
@@ -203,7 +191,7 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 		_ = os.Setenv("GT_ROOT", origRoot)
 	})
 	rigPath := filepath.Join(townRoot, "gastown")
-	witnessDir := filepath.Join(rigPath, "witness")
+	crewDir := filepath.Join(rigPath, "crew", "holden")
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
@@ -211,8 +199,8 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
 		t.Fatalf("write town.json: %v", err)
 	}
-	if err := os.MkdirAll(witnessDir, 0755); err != nil {
-		t.Fatalf("mkdir witness dir: %v", err)
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
 	}
 
 	townSettings := config.NewTownSettings()
@@ -238,11 +226,11 @@ func TestBuildRestartCommand_MergesAgentPresetEnv(t *testing.T) {
 	_ = os.Setenv("GT_AGENT", "claude-proxy")
 	_ = os.Setenv("GT_TOWN_ROOT", "")
 	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(witnessDir); err != nil {
-		t.Fatalf("chdir witness dir: %v", err)
+	if err := os.Chdir(crewDir); err != nil {
+		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, err := buildRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -278,15 +266,15 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "gastown")
-	witnessDir := filepath.Join(rigPath, "witness")
+	crewDir := filepath.Join(rigPath, "crew", "holden")
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
 		t.Fatalf("write town.json: %v", err)
 	}
-	if err := os.MkdirAll(witnessDir, 0755); err != nil {
-		t.Fatalf("mkdir witness dir: %v", err)
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
 	}
 
 	townSettings := config.NewTownSettings()
@@ -316,11 +304,11 @@ func TestBuildRestartCommand_ClearsBDTargetSelectors(t *testing.T) {
 	_ = os.Setenv("GT_AGENT", "target-cleaner")
 	_ = os.Setenv("GT_TOWN_ROOT", "")
 	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(witnessDir); err != nil {
-		t.Fatalf("chdir witness dir: %v", err)
+	if err := os.Chdir(crewDir); err != nil {
+		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, err := buildRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -1093,7 +1081,7 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 		_ = os.Setenv("GT_ROOT", origRoot)
 	})
 	rigPath := filepath.Join(townRoot, "gastown")
-	witnessDir := filepath.Join(rigPath, "witness")
+	crewDir := filepath.Join(rigPath, "crew", "holden")
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
@@ -1101,14 +1089,17 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
 		t.Fatalf("write town.json: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(witnessDir, ".claude"), 0755); err != nil {
-		t.Fatalf("mkdir witness dir: %v", err)
+	if err := os.MkdirAll(filepath.Join(crewDir, ".claude"), 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
 	}
-	promptPath := config.SystemPromptFilePath("witness", townRoot, rigPath, "")
+	promptPath := config.SystemPromptFilePath("crew", townRoot, rigPath, "holden")
 	if promptPath == "" {
-		t.Fatal("SystemPromptFilePath returned empty for witness")
+		t.Fatal("SystemPromptFilePath returned empty for crew")
 	}
-	if err := os.WriteFile(promptPath, []byte("# witness\n"), 0644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(promptPath), 0755); err != nil {
+		t.Fatalf("mkdir system prompt dir: %v", err)
+	}
+	if err := os.WriteFile(promptPath, []byte("# crew\n"), 0644); err != nil {
 		t.Fatalf("write system prompt: %v", err)
 	}
 	// buildRestartCommand detects the town root from the resolved cwd, so on
@@ -1131,7 +1122,7 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	// identifiable as such by its provenance marker: a bare GT_AGENT that this
 	// process did not set via --agent is treated as a stale snapshot of
 	// role_agents and re-resolved (gt-di8p).
-	townSettings.RoleAgents = map[string]string{"witness": "claude-proxy-role"}
+	townSettings.RoleAgents = map[string]string{"crew": "claude-proxy-role"}
 	townSettings.Agents["claude-proxy-role"] = &config.RuntimeConfig{
 		Command: "claude",
 		Args:    []string{"--model", "role-model"},
@@ -1147,11 +1138,11 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	_ = os.Setenv("GT_AGENT_OVERRIDE", "1")
 	_ = os.Setenv("GT_TOWN_ROOT", "")
 	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(witnessDir); err != nil {
-		t.Fatalf("chdir witness dir: %v", err)
+	if err := os.Chdir(crewDir); err != nil {
+		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	cmd, err := buildRestartCommand("gt-witness")
+	cmd, err := buildRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand: %v", err)
 	}
@@ -1168,7 +1159,7 @@ func TestBuildRestartCommand_AgentOverrideCarriesRoleSystemPromptFile(t *testing
 	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL=") {
 		t.Errorf("agent preset env dropped alongside the flag\ncmd: %s", cmd)
 	}
-	// The role's own --settings flag must ride the same path: the witness
+	// The role's own --settings flag must ride the same path: the crew
 	// settings dir differs from its working dir only when hooks live above
 	// the worktree, which is not the case here, so we only assert the
 	// command still targets the override agent.
@@ -1276,7 +1267,7 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 		_ = os.Setenv("GT_ROOT", origRoot)
 	})
 	rigPath := filepath.Join(townRoot, "gastown")
-	witnessDir := filepath.Join(rigPath, "witness")
+	crewDir := filepath.Join(rigPath, "crew", "holden")
 
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
@@ -1284,8 +1275,8 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
 		t.Fatalf("write town.json: %v", err)
 	}
-	if err := os.MkdirAll(witnessDir, 0755); err != nil {
-		t.Fatalf("mkdir witness dir: %v", err)
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
+		t.Fatalf("mkdir crew dir: %v", err)
 	}
 
 	townSettings := config.NewTownSettings()
@@ -1308,24 +1299,24 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 	writeRigRoleAgents := func(agent string) {
 		t.Helper()
 		rigSettings := config.NewRigSettings()
-		rigSettings.RoleAgents = map[string]string{"witness": agent}
+		rigSettings.RoleAgents = map[string]string{"crew": agent}
 		if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), rigSettings); err != nil {
 			t.Fatalf("SaveRigSettings: %v", err)
 		}
 	}
 	writeRigRoleAgents("claude-opus")
 
-	// The session was spawned while role_agents.witness was claude-opus, so
+	// The session was spawned while role_agents.crew was claude-opus, so
 	// that is the GT_AGENT its environment carries.
 	_ = os.Setenv("GT_AGENT", "claude-opus")
 	_ = os.Setenv("GT_AGENT_OVERRIDE", "")
 	_ = os.Setenv("GT_TOWN_ROOT", "")
 	_ = os.Setenv("GT_ROOT", "")
-	if err := os.Chdir(witnessDir); err != nil {
-		t.Fatalf("chdir witness dir: %v", err)
+	if err := os.Chdir(crewDir); err != nil {
+		t.Fatalf("chdir crew dir: %v", err)
 	}
 
-	spawned, err := buildRestartCommand("gt-witness")
+	spawned, err := buildRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand before the config change: %v", err)
 	}
@@ -1337,7 +1328,7 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 	// session still carries the old GT_AGENT.
 	writeRigRoleAgents("claude-opus-cycle")
 
-	handoff, err := buildRestartCommand("gt-witness")
+	handoff, err := buildRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand after the config change: %v", err)
 	}
@@ -1358,7 +1349,7 @@ func TestBuildRestartCommand_RoleAgentsChangeTakesEffectOnHandoff(t *testing.T) 
 	_ = os.Setenv("GT_AGENT", "claude-opus")
 	_ = os.Setenv("GT_AGENT_OVERRIDE", "1")
 
-	overridden, err := buildRestartCommand("gt-witness")
+	overridden, err := buildRestartCommand("gt-crew-holden")
 	if err != nil {
 		t.Fatalf("buildRestartCommand with an explicit override: %v", err)
 	}

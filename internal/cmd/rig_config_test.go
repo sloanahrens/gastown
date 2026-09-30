@@ -68,7 +68,6 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 	t.Run("warns about ephemeral when writing to wisp layer", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
 
-
 		var stderr bytes.Buffer
 		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "max_polecats", "5"}, false, false)
 		if err != nil {
@@ -94,7 +93,6 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 	t.Run("warns for string values in wisp layer", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
 
-
 		var stderr bytes.Buffer
 		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "default_formula", "mol-custom"}, false, false)
 		if err != nil {
@@ -110,7 +108,6 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 	t.Run("warns for boolean values in wisp layer", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
 
-
 		var stderr bytes.Buffer
 		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "auto_restart", "false"}, false, false)
 		if err != nil {
@@ -125,7 +122,6 @@ func TestRigConfigSet_WispLayerWarning(t *testing.T) {
 
 	t.Run("no ephemeral warning when using --block flag", func(t *testing.T) {
 		townRoot, rigName := setupTestRigForConfig(t)
-
 
 		var stderr bytes.Buffer
 		err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, &stderr), []string{rigName, "auto_restart"}, false, true)
@@ -278,7 +274,6 @@ func TestRigConfigSet_RejectsWrongTypeForKnownKey(t *testing.T) {
 		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
 			townRoot, rigName := setupTestRigForConfig(t)
 
-	
 			err := rigConfigSet(townRigCmdEnv(townRoot, io.Discard, io.Discard), []string{rigName, tc.key, tc.value}, false, false)
 			if err == nil {
 				t.Fatalf("expected %s=%q to be rejected", tc.key, tc.value)

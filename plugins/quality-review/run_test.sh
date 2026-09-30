@@ -265,7 +265,8 @@ JSON
     "5 notes: receipt names the worker and breach counts"
 
   # BREACH alerts: a durable mail plus a keyed escalation, and only for beta.
-  assert_file_contains "$TEST_STATE/mail.log" "Quality BREACH: beta" "5 notes: beta breach mailed to the deacon"
+  assert_file_contains "$TEST_STATE/mail.log" "Quality BREACH: beta" "5 notes: beta breach mailed to the mayor"
+  assert_file_contains "$TEST_STATE/mail.log" "mail send mayor/" "5 notes: breach mail addressed to the mayor"
   assert_file_contains "$TEST_STATE/mail.log" "Mean score: 0.325" "5 notes: breach mail carries the numbers"
   assert_file_not_contains "$TEST_STATE/mail.log" "alpha" "5 notes: no alert for a non-breaching worker"
   assert_file_contains "$TEST_STATE/escalations.log" "--fingerprint quality-review:breach:beta-rig/beta" \

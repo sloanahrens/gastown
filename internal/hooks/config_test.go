@@ -162,18 +162,13 @@ func TestValidTarget(t *testing.T) {
 		valid  bool
 	}{
 		{"crew", true},
-		{"witness", true},
-		{"refinery", true},
 		{"polecats", true},
 		{"polecat", true},
 		{"mayor", true},
-		{"deacon", true},
 		{"rig", false},
 		{"gastown/rig", false},
 		{"gastown/crew", true},
-		{"beads/witness", true},
 		{"sky/polecats", true},
-		{"wyvern/refinery", true},
 		{"", false},
 		{"invalid", false},
 		{"gastown/invalid", false},
@@ -227,7 +222,6 @@ func TestGetApplicableOverrides(t *testing.T) {
 		{"mayor", []string{"mayor"}},
 		{"crew", []string{"crew"}},
 		{"gastown/crew", []string{"crew", "gastown/crew"}},
-		{"beads/witness", []string{"witness", "beads/witness"}},
 	}
 
 	for _, tt := range tests {
@@ -580,57 +574,18 @@ func TestComputeExpectedNoBase(t *testing.T) {
 		t.Error("expected crew to inherit SessionStart from DefaultBase")
 	}
 
-	// Witness should get DefaultBase + built-in patrol-loop guard (gt-e47hxn,
-	// gt-qqfy). Post gt-5ihs/gt-vx2mm, every PreToolUse shell-command guard
-	// shares the bare shellExecutingToolMatcher tool-name matcher — Claude
-	// Code's matcher only ever matches the tool name. patrol-loop
-	// self-filters on tool_input.command (gt-qqfy), so it needs no If —
-	// witness must have exactly one PreToolUse entry (matcher
-	// shellExecutingToolMatcher) whose Hooks accumulate the base guards
-	// (pr-workflow, dangerous-command, container-suite) AND witness's own
-	// ungated patrol-loop hook.
-	witness, err := ComputeExpected("witness")
+	// The mayor has no PreToolUse override of its own: it must still carry
+	// the ungated base guards from DefaultBase. dangerous-command comes from
+	// DefaultBase, so an override that replaced rather than unioned its Bash
+	// entry would silently drop it (gt-8ki9).
+	mayor, err := ComputeExpected("mayor")
 	if err != nil {
-		t.Fatalf("ComputeExpected(witness) failed: %v", err)
+		t.Fatalf("ComputeExpected(mayor) failed: %v", err)
 	}
-	requireUngatedGuardCommand(t, "witness", witness, "tap guard patrol-loop")
-	requireUngatedGuardCommand(t, "witness", witness, "tap guard pr-workflow")
-	// dangerous-command carries the witness-never-pushes rule
-	// (matchesWitnessGitPush, gt-v89d). It comes from DefaultBase, not a
-	// witness-specific override, so a future edit to the witness override
-	// that replaced rather than unioned its Bash entry — or dropped
-	// dangerous-command from DefaultBase — would silently disable that rule
-	// while every test above kept passing (gt-8ki9: an om review found the
-	// guard missing with no test catching it).
-	requireUngatedGuardCommand(t, "witness", witness, "tap guard dangerous-command")
-	if len(witness.SessionStart) != len(defaultBase.SessionStart) {
-		t.Error("expected witness to inherit SessionStart from DefaultBase")
-	}
-
-	// Deacon should get DefaultBase + the same ungated patrol-loop guard;
-	// the guard itself applies the anti-batch-loop checks (for/seq, while
-	// true, while :) only when it detects the deacon role (gt-qqfy).
-	deacon, err := ComputeExpected("deacon")
-	if err != nil {
-		t.Fatalf("ComputeExpected(deacon) failed: %v", err)
-	}
-	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard patrol-loop")
-	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard pr-workflow")
-	requireUngatedGuardCommand(t, "deacon", deacon, "tap guard dangerous-command")
-	if len(deacon.SessionStart) != len(defaultBase.SessionStart) {
-		t.Error("expected deacon to inherit SessionStart from DefaultBase")
-	}
-
-	// Refinery should get DefaultBase + built-in patrol-loop guard (same as witness)
-	refinery, err := ComputeExpected("refinery")
-	if err != nil {
-		t.Fatalf("ComputeExpected(refinery) failed: %v", err)
-	}
-	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard patrol-loop")
-	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard pr-workflow")
-	requireUngatedGuardCommand(t, "refinery", refinery, "tap guard dangerous-command")
-	if len(refinery.SessionStart) != len(defaultBase.SessionStart) {
-		t.Error("expected refinery to inherit SessionStart from DefaultBase")
+	requireUngatedGuardCommand(t, "mayor", mayor, "tap guard pr-workflow")
+	requireUngatedGuardCommand(t, "mayor", mayor, "tap guard dangerous-command")
+	if len(mayor.SessionStart) != len(defaultBase.SessionStart) {
+		t.Error("expected mayor to inherit SessionStart from DefaultBase")
 	}
 }
 
@@ -698,50 +653,6 @@ func requireUngatedGuardCommand(t *testing.T, label string, cfg *HooksConfig, co
 		}
 	}
 	t.Errorf("%s: missing ungated (If=\"\") PreToolUse hook with Command containing %q under matcher %q, got: %+v", label, commandSubstring, shellExecutingToolMatcher, entry.Hooks)
-}
-
-// TestComputeExpectedWitnessRigSpecific verifies patrol-formula-guard propagates
-// to rig-specific witness targets (e.g., sky/witness) via the witness role default.
-func TestComputeExpectedWitnessRigSpecific(t *testing.T) {
-	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
-
-	// No on-disk overrides — all witnesses should still get patrol-formula-guard
-	// from the built-in DefaultOverrides for "witness".
-	skyWitness, err := ComputeExpected("sky/witness")
-	if err != nil {
-		t.Fatalf("ComputeExpected(sky/witness) failed: %v", err)
-	}
-
-	// Should have the ungated patrol-loop guard (self-filters, no If —
-	// gt-qqfy) from DefaultOverrides["witness"], accumulated under the bare
-	// shellExecutingToolMatcher entry.
-	requireUngatedGuardCommand(t, "sky/witness", skyWitness, "tap guard patrol-loop")
-
-	// Should also inherit base hooks (pr-workflow-guard, etc.)
-	if len(skyWitness.SessionStart) == 0 {
-		t.Error("sky/witness should inherit SessionStart from DefaultBase")
-	}
-	if len(skyWitness.UserPromptSubmit) != 0 {
-		t.Error("sky/witness should disable UserPromptSubmit mail-check from DefaultBase")
-	}
-}
-
-func TestComputeExpectedPatrolRolesDisableUserPromptMailCheck(t *testing.T) {
-	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
-
-	for _, target := range []string{"witness", "refinery", "deacon", "boot", "sky/witness", "sky/refinery"} {
-		t.Run(target, func(t *testing.T) {
-			cfg, err := ComputeExpected(target)
-			if err != nil {
-				t.Fatalf("ComputeExpected(%s): %v", target, err)
-			}
-			if len(cfg.UserPromptSubmit) != 0 {
-				t.Fatalf("%s should disable UserPromptSubmit mail-check, got %+v", target, cfg.UserPromptSubmit)
-			}
-		})
-	}
 }
 
 func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
@@ -1020,58 +931,6 @@ func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
 	}
 }
 
-func TestComputeExpectedBootBlocksRawTmuxSendKeys(t *testing.T) {
-	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
-
-	boot, err := ComputeExpected("boot")
-	if err != nil {
-		t.Fatalf("ComputeExpected(boot): %v", err)
-	}
-
-	// Post gt-5ihs/gt-3mp1 the guard lives under the bare shellExecutingToolMatcher
-	// tool-name matcher (Claude Code's matcher only ever matches the tool name) and
-	// carries no If: it is the self-filtering boot-sendkeys guard, which
-	// reads tool_input.command off stdin and blocks only a real tmux
-	// send-keys invocation. An If-gated inline echo+exit-2 here is what
-	// blocked every unrelated boot command (gt-3mp1).
-	entry, ok := findPreToolUse(boot, shellExecutingToolMatcher)
-	if !ok {
-		t.Fatal("boot missing bare Bash PreToolUse entry")
-	}
-	var command string
-	for _, h := range entry.Hooks {
-		if strings.Contains(h.Command, "tap guard boot-sendkeys") {
-			command = h.Command
-		}
-	}
-	if command == "" {
-		t.Fatal("boot missing the raw tmux send-keys guard (gt tap guard boot-sendkeys)")
-	}
-	for _, want := range []string{"boot-sendkeys"} {
-		if !strings.Contains(command, want) {
-			t.Fatalf("boot raw tmux guard command missing %q: %s", want, command)
-		}
-	}
-	if len(boot.UserPromptSubmit) != 0 {
-		t.Fatalf("boot should still disable UserPromptSubmit mail-check, got %+v", boot.UserPromptSubmit)
-	}
-
-	mayor, err := ComputeExpected("mayor")
-	if err != nil {
-		t.Fatalf("ComputeExpected(mayor): %v", err)
-	}
-	mayorEntry, ok := findPreToolUse(mayor, shellExecutingToolMatcher)
-	if !ok {
-		t.Fatal("mayor should still have the base Bash guard entry")
-	}
-	for _, h := range mayorEntry.Hooks {
-		if strings.Contains(h.Command, "boot-sendkeys") {
-			t.Fatal("mayor must not receive Boot's raw tmux send-keys guard")
-		}
-	}
-}
-
 func findPreToolUse(cfg *HooksConfig, matcher string) (HookEntry, bool) {
 	for _, entry := range cfg.PreToolUse {
 		if entry.Matcher == matcher {
@@ -1304,8 +1163,8 @@ func TestDiscoverTargets(t *testing.T) {
 		t.Fatalf("DiscoverTargets failed: %v", err)
 	}
 
-	if len(targets) < 4 {
-		t.Errorf("expected at least 4 targets, got %d", len(targets))
+	if len(targets) != 2 {
+		t.Errorf("expected 2 targets, got %d", len(targets))
 		for _, tgt := range targets {
 			t.Logf("  target: %s (key=%s)", tgt.DisplayKey(), tgt.Key)
 		}
@@ -1316,9 +1175,16 @@ func TestDiscoverTargets(t *testing.T) {
 		found[tgt.DisplayKey()] = true
 	}
 
-	for _, expected := range []string{"mayor", "deacon", "testrig/crew", "testrig/witness"} {
+	for _, expected := range []string{"mayor", "testrig/crew"} {
 		if !found[expected] {
 			t.Errorf("expected target %q not found", expected)
+		}
+	}
+	// A town may still hold the deleted roles' directories: they are not
+	// settings targets (gt-4k3fj.6.1).
+	for _, retired := range []string{"deacon", "testrig/witness"} {
+		if found[retired] {
+			t.Errorf("retired role directory %q discovered as a target", retired)
 		}
 	}
 }
@@ -1346,11 +1212,13 @@ func TestDiscoverTargets_RoleNames(t *testing.T) {
 
 	expected := map[string]string{
 		"mayor":         "mayor",
-		"deacon":        "deacon",
 		"rig1/crew":     "crew",
 		"rig1/polecats": "polecat",
-		"rig1/witness":  "witness",
-		"rig1/refinery": "refinery",
+	}
+	for _, retired := range []string{"deacon", "rig1/witness", "rig1/refinery"} {
+		if _, ok := roleByKey[retired]; ok {
+			t.Errorf("retired role directory %q discovered as a target", retired)
+		}
 	}
 
 	for key, wantRole := range expected {
@@ -1391,35 +1259,6 @@ func TestDiscoverTargets_ReturnsOnlyClaude(t *testing.T) {
 		if tgt.Provider == "gemini" {
 			t.Errorf("DiscoverTargets should not return gemini targets, got: %s", tgt.DisplayKey())
 		}
-	}
-}
-
-func TestDiscoverTargets_BootIncluded(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "boot"), 0755)
-
-	targets, err := DiscoverTargets(tmpDir)
-	if err != nil {
-		t.Fatalf("DiscoverTargets failed: %v", err)
-	}
-
-	found := false
-	for _, tgt := range targets {
-		if tgt.Key == "boot" {
-			found = true
-			wantPath := filepath.Join(tmpDir, "deacon", "dogs", "boot", ".claude", "settings.json")
-			if tgt.Path != wantPath {
-				t.Errorf("boot target Path = %q, want %q", tgt.Path, wantPath)
-			}
-			if tgt.Role != "boot" {
-				t.Errorf("boot target Role = %q, want %q", tgt.Role, "boot")
-			}
-		}
-	}
-	if !found {
-		t.Error("expected boot target when deacon/dogs/boot/ exists, not found")
 	}
 }
 
@@ -1501,11 +1340,8 @@ func TestDiscoverRoleLocations(t *testing.T) {
 		rig, role string
 	}{
 		{"", "mayor"},
-		{"", "deacon"},
 		{"rig1", "crew"},
 		{"rig1", "polecat"},
-		{"rig1", "witness"},
-		{"rig1", "refinery"},
 	}
 
 	for _, e := range expected {
@@ -1633,7 +1469,6 @@ func TestTargetDisplayKey(t *testing.T) {
 	}{
 		{Target{Key: "mayor", Role: "mayor"}, "mayor"},
 		{Target{Key: "gastown/crew", Rig: "gastown", Role: "crew"}, "gastown/crew"},
-		{Target{Key: "beads/witness", Rig: "beads", Role: "witness"}, "beads/witness"},
 	}
 
 	for _, tt := range tests {
@@ -1848,6 +1683,13 @@ func TestRunsRetiredGTSubcommand(t *testing.T) {
 		"gt costs record &":                     true,
 		"/Users/x/.local/bin/gt costs record &": true,
 		"gt mq list":                            true,
+		"gt deacon heartbeat":                   true,
+		"gt witness status":                     true,
+		"gt patrol report":                      true,
+		"gt tap guard patrol-loop":              true,
+		"gt tap guard boot-sendkeys":            true,
+		"gt tap guard dangerous-command":        false,
+		"gt tap":                                false,
 		"gt prime --hook":                       false,
 		"gt":                                    false,
 		"echo gt costs":                         false,

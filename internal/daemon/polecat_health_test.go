@@ -17,7 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // TestCheckPolecatHealth_DetectsCrashedPolecat verifies that checkPolecatHealth
@@ -183,11 +182,10 @@ func TestCheckPolecatHealth_NoActiveWorkIsNotACrash(t *testing.T) {
 	}
 }
 
-// TestCheckPolecatHealth_NotifiesWitnessOnCrash verifies that when a polecat
-// crash is detected, the daemon sends a notification to the witness via
-// `gt mail send` with a CRASHED_POLECAT subject. Restart is deferred to the
-// stuck-agent-dog plugin for context-aware recovery.
-func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
+// TestCheckPolecatHealth_CrashSendsNoMail verifies that a detected polecat
+// crash is logged and left to patrol_scan: no CRASHED_POLECAT mail goes out,
+// because the witness that read it is gone (gt-4k3fj.6.1).
+func TestCheckPolecatHealth_CrashSendsNoMail(t *testing.T) {
 	t.Parallel()
 	bd := hookedWorkBD(t, "gt-xyz", time.Hour)
 
@@ -209,17 +207,11 @@ func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
 	if !strings.Contains(got, "CRASH DETECTED") {
 		t.Fatalf("expected CRASH DETECTED, got: %q", got)
 	}
-
-	// The witness is told by mail with a CRASHED_POLECAT subject.
-	mails := notes.Mails()
-	if len(mails) != 1 {
-		t.Fatalf("expected one mail to the witness, got: %+v", notes.Calls())
+	if !strings.Contains(got, "patrol_scan does not cover rig myr") {
+		t.Errorf("expected the uncovered-rig log line, got: %q", got)
 	}
-	if mails[0].To != "myr/witness" {
-		t.Errorf("mail to %q, want the witness address myr/witness", mails[0].To)
-	}
-	if !strings.Contains(mails[0].Subject, "CRASHED_POLECAT") {
-		t.Errorf("expected CRASHED_POLECAT in mail subject, got: %q", mails[0].Subject)
+	if calls := notes.Calls(); len(calls) != 0 {
+		t.Errorf("a crash sent notifications: %+v", calls)
 	}
 }
 
@@ -583,51 +575,6 @@ func TestReapIdlePolecat_UnknownLivenessIsNotDead(t *testing.T) {
 	}
 	if alive, _ := d.tmux.HasSession("myr-mycat"); !alive {
 		t.Fatal("session was killed on an unknown liveness answer")
-	}
-}
-
-// gt-fcxe9.1: the patrol watchdog passes a dead session outright, so an
-// unknown liveness answer must read as alive (judge by receipts) and be logged.
-func TestPatrolWatchdogSessionAlive_UnknownReadsAliveAndLogs(t *testing.T) {
-	t.Parallel()
-	tm := polecatSessionTmux("bash", time.Now().Add(-time.Hour))
-	tm.setAliveErr("myr-mycat", fmt.Errorf("tmux show-environment: timed out"))
-	var logBuf strings.Builder
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&logBuf, "", 0), tmux: tm}
-
-	if !d.patrolWatchdogSessionAlive(patrolWatchdogTarget{Session: "myr-mycat"}) {
-		t.Fatal("unknown liveness read as dead: the watchdog would pass the patrol without judging it")
-	}
-	if !strings.Contains(logBuf.String(), "liveness unknown") {
-		t.Fatalf("unknown liveness not logged: %q", logBuf.String())
-	}
-	// A confirmed dead agent (bare shell, no error) still reads as dead.
-	tm.setAliveErr("myr-mycat", nil)
-	if d.patrolWatchdogSessionAlive(patrolWatchdogTarget{Session: "myr-mycat"}) {
-		t.Fatal("a bare shell read as a live agent")
-	}
-}
-
-// gt-jv0k3: a session that does not exist is not the "unanswerable read" of
-// the test above — tmux answers it with ErrSessionNotFound, so the reader
-// reports it dead. Reading it as alive escalated a role that was gone as
-// "awake but NOT patrolling" and then nudged a nonexistent session.
-func TestPatrolWatchdogSessionAlive_MissingSessionReadsDead(t *testing.T) {
-	t.Parallel()
-	tm := polecatSessionTmux("bash", time.Now().Add(-time.Hour))
-	tm.setAliveErr("myr-mycat", fmt.Errorf("tmux show-environment: %w", tmux.ErrSessionNotFound))
-	var logBuf strings.Builder
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&logBuf, "", 0), tmux: tm}
-
-	if d.patrolWatchdogSessionAlive(patrolWatchdogTarget{Session: "myr-mycat"}) {
-		t.Fatal("a session that does not exist read as a live agent: the watchdog " +
-			"would escalate it as awake-but-not-patrolling")
-	}
-	if strings.Contains(logBuf.String(), "liveness unknown") {
-		t.Fatalf("a missing session logged as an unanswerable read: %q", logBuf.String())
-	}
-	if !strings.Contains(logBuf.String(), "has no session") {
-		t.Fatalf("missing session not logged: %q", logBuf.String())
 	}
 }
 

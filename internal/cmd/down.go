@@ -56,11 +56,7 @@ Shutdown levels (progressively more aggressive):
 
 Infrastructure agents stopped:
   • Crew       - Per-rig crew member sessions
-  • Refineries - Per-rig work processors
-  • Witnesses  - Per-rig polecat managers
   • Mayor      - Global work coordinator
-  • Boot       - Deacon's watchdog
-  • Deacon     - Health orchestrator
   • Daemon     - Go background process
   • Dolt       - Shared SQL database server
 
@@ -178,27 +174,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Phase 2: Stop witnesses
-	for _, rigName := range rigs {
-		sessionName := session.WitnessSessionName(session.PrefixFor(rigName))
-		if downDryRun {
-			if running, _ := t.HasSession(sessionName); running {
-				printDownStatus(fmt.Sprintf("Witness (%s)", rigName), true, "would stop")
-			}
-			continue
-		}
-		wasRunning, err := stopSession(t, sessionName)
-		if err != nil {
-			printDownStatus(fmt.Sprintf("Witness (%s)", rigName), false, err.Error())
-			allOK = false
-		} else if wasRunning {
-			printDownStatus(fmt.Sprintf("Witness (%s)", rigName), true, "stopped")
-		} else {
-			printDownStatus(fmt.Sprintf("Witness (%s)", rigName), true, "not running")
-		}
-	}
-
-	// Phase 3: Stop town-level sessions (Mayor, Boot, Deacon)
+	// Phase 3: Stop town-level sessions (the Mayor)
 	for _, ts := range session.TownSessions() {
 		if downDryRun {
 			if running, _ := t.HasSession(ts.SessionID); running {
@@ -425,11 +401,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 
 	if allOK {
 		fmt.Printf("%s All services stopped\n", style.Bold.Render("✓"))
-		stoppedServices := []string{"dolt", "daemon", "deacon", "boot", "mayor"}
-		for _, rigName := range rigs {
-			stoppedServices = append(stoppedServices, fmt.Sprintf("%s/refinery", rigName))
-			stoppedServices = append(stoppedServices, fmt.Sprintf("%s/witness", rigName))
-		}
+		stoppedServices := []string{"dolt", "daemon", "mayor"}
 		if crewStopped > 0 {
 			stoppedServices = append(stoppedServices, "crew")
 		}
