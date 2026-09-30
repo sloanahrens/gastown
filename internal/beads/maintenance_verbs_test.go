@@ -28,7 +28,7 @@ func TestMaintenanceVerbsRunOneMachineModeBdCall(t *testing.T) {
 	}{
 		{"DeleteIssues", func(b *Beads) error { return b.DeleteIssues("gt-a", "gt-b") }, []string{"delete", "gt-a", "gt-b", "--force"}},
 		{"DemoteToWisp", func(b *Beads) error { return b.DemoteToWisp("gt-a") }, []string{"update", "gt-a", "--ephemeral"}},
-		{"ReopenUnassigned", func(b *Beads) error { return b.ReopenUnassigned("gt-a") }, []string{"update", "gt-a", "--status=open", "--assignee="}},
+		{"ReopenUnassigned", func(b *Beads) error { return b.ReopenUnassigned("gt-a") }, []string{"update", "gt-a", "--status=open", "--assignee=", "--if-status=in_progress", "--if-assignee="}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

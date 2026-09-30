@@ -813,6 +813,9 @@ func Reap(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool
 // closeWispsSelected force-closes, through w, every wisp idQuery selects. The
 // SELECT runs once; ids are closed in chunks. Force matches what the reaper
 // always did: a stale wisp is closed whether or not it has open children.
+// Unlike the UPDATE this replaced, nothing re-checks status at write time, so
+// a wisp pinned or closed in the moment between SELECT and close is closed
+// anyway; every query still excludes agent wisps, whose type never changes.
 func closeWispsSelected(ctx context.Context, db *sql.DB, w Writer, idQuery string, queryArgs []interface{}, reason, description string) (int, error) {
 	ids, err := selectIDs(ctx, db, idQuery, queryArgs...)
 	if err != nil {

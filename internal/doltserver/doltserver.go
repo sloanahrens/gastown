@@ -2799,7 +2799,7 @@ func InitRig(townRoot, rigName string) (serverWasRunning bool, created bool, err
 		// CREATE DATABASE returns before the catalog is fully updated, so
 		// subsequent USE/query operations can fail with "Unknown database".
 		// Non-fatal: the database was created, so we log a warning and continue
-		// to EnsureMetadata. The retry wrapper (doltSQLScriptWithRetry) will handle
+		// to EnsureMetadata. The retry wrapper (doltSQLScriptWithRetry) handles
 		// any residual catalog propagation delays in subsequent operations.
 		if err := waitForCatalog(townRoot, rigName); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: catalog visibility wait timed out (will retry on use): %v\n", err)
@@ -4746,10 +4746,10 @@ func doltSQLScript(townRoot, script string) error {
 	return nil
 }
 
-// doltSQLScriptWithRetry executes a SQL script with exponential backoff on transient errors.
-// Callers must ensure scripts are idempotent, as partial execution may have occurred
-// before the retry. Retries on isDoltRetryableError, with fewer retries and a
-// shorter backoff since multi-statement scripts are more expensive.
+// doltSQLScriptWithRetry executes a SQL script, retrying with exponential
+// backoff while isDoltRetryableError holds. Callers must make scripts
+// idempotent, since a failed attempt may have run part of the script.
+// Retries are few and short because multi-statement scripts are expensive.
 func doltSQLScriptWithRetry(townRoot, script string) error {
 	const maxRetries = 3
 	const baseBackoff = 500 * time.Millisecond

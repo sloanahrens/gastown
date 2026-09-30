@@ -1,10 +1,12 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -108,7 +110,12 @@ func (c *NullAssigneeCheck) Fix(ctx *CheckContext) error {
 	var errs []string
 	for _, row := range c.affected {
 		rigDir := filepath.Join(ctx.TownRoot, row.RigDB)
-		if err := ctx.repair(rigDir).ReopenUnassigned(row.ID); err != nil {
+		err := ctx.repair(rigDir).ReopenUnassigned(row.ID)
+		if errors.Is(err, beads.ErrGuardNotHeld) {
+			// Claimed or moved on since Run found it: no longer ours to repair.
+			continue
+		}
+		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s/%s: %v", row.RigDB, row.ID, err))
 		}
 	}

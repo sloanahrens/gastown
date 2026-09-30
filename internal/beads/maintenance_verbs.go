@@ -30,8 +30,11 @@ func (b *Beads) DemoteToWisp(id string) error {
 }
 
 // ReopenUnassigned returns an issue to open with no assignee. It repairs an
-// in_progress row whose assignee is NULL or empty, which no claim holds.
+// in_progress row whose assignee is NULL or empty, which no claim holds. bd
+// applies it only while the row is still in_progress and unassigned
+// (--if-status, --if-assignee): a bead claimed since it was found is left
+// alone, and the error wraps ErrGuardNotHeld.
 func (b *Beads) ReopenUnassigned(id string) error {
-	_, err := b.runMachine("update", id, "--status=open", "--assignee=")
+	_, err := b.runMachine("update", id, "--status=open", "--assignee=", "--if-status=in_progress", "--if-assignee=")
 	return err
 }
