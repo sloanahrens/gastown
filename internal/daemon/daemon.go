@@ -101,6 +101,11 @@ type Daemon struct {
 	// (see hostLoad); nil measures the real host.
 	hostLoadFn func() hostLoad
 
+	// countCommitsFn replaces the dolt_log count scheduled_maintenance reads
+	// per database (compactorCountCommits), so tests drive the mode decision
+	// without a Dolt server. Nil queries the server.
+	countCommitsFn func(dbName string) (int, error)
+
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
 	// instead of each paying a bd subprocess - which, on a CPU-starved host,

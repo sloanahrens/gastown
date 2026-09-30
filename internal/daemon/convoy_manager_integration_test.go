@@ -16,12 +16,12 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 )
 
-// TestConvoyManager_FullLifecycle starts a real ConvoyManager with a real beads
+// TestIntegrationConvoyManager_FullLifecycle starts a real ConvoyManager with a real beads
 // store and mock gt, lets both goroutines tick (event poll + stranded scan),
 // verifies log output, then stops and verifies clean shutdown.
 //
 // Exercises: S-08 (start guard), S-09 (context cancellation), S-10 (resolved paths).
-func TestConvoyManager_FullLifecycle(t *testing.T) {
+func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
@@ -151,7 +151,7 @@ exit 0
 	}
 }
 
-// TestConvoyManager_LoggingFlow verifies the end-to-end log chain when a close
+// TestIntegrationConvoyManager_LoggingFlow verifies the end-to-end log chain when a close
 // event triggers convoy tracking lookups and feeding decisions. This exercises
 // both ConvoyManager event detection and CheckConvoysForIssue operations
 // flowing through the same logger.
@@ -162,7 +162,7 @@ exit 0
 //  3. "Convoy: checking convoy <convoy>"
 //  4. "Convoy: convoy <convoy>: feeding next ready issue <issue2> to <rig>"
 //     OR "Convoy: convoy <convoy>: no ready issues to feed"
-func TestConvoyManager_LoggingFlow(t *testing.T) {
+func TestIntegrationConvoyManager_LoggingFlow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
@@ -316,9 +316,9 @@ exit 0
 	}
 }
 
-// TestConvoyManager_LoggingFlow_NoReadyIssues verifies the log chain when
+// TestIntegrationConvoyManager_LoggingFlow_NoReadyIssues verifies the log chain when
 // all tracked issues are closed and there's nothing to feed.
-func TestConvoyManager_LoggingFlow_NoReadyIssues(t *testing.T) {
+func TestIntegrationConvoyManager_LoggingFlow_NoReadyIssues(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
@@ -418,11 +418,11 @@ exit 0
 	}
 }
 
-// TestConvoyManager_MultipleTrackingConvoys verifies that when a single issue
+// TestIntegrationConvoyManager_MultipleTrackingConvoys verifies that when a single issue
 // is tracked by two different convoys, closing the issue triggers convoy checks
 // for BOTH. This exercises the getTrackingConvoys path returning >1 result and
 // the CheckConvoysForIssue loop iterating all tracking convoys.
-func TestConvoyManager_MultipleTrackingConvoys(t *testing.T) {
+func TestIntegrationConvoyManager_MultipleTrackingConvoys(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
@@ -543,11 +543,11 @@ exit 0
 	}
 }
 
-// TestConvoyManager_ParkedRig_SkipsFeedOnEventPoll verifies that the event poll
+// TestIntegrationConvoyManager_ParkedRig_SkipsFeedOnEventPoll verifies that the event poll
 // path (CheckConvoysForIssue → feedNextReadyIssue) skips dispatching issues to
 // parked rigs. The convoy is detected and checked, but the ready issue is not
 // slung because the target rig is parked.
-func TestConvoyManager_ParkedRig_SkipsFeedOnEventPoll(t *testing.T) {
+func TestIntegrationConvoyManager_ParkedRig_SkipsFeedOnEventPoll(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
@@ -685,11 +685,11 @@ func assertLogContains(t *testing.T, logs []string, substrings ...string) {
 	t.Errorf("no log line contains all of %v; logs:\n%s", substrings, strings.Join(logs, "\n"))
 }
 
-// TestConvoyManager_ShutdownKillsHangingSubprocess verifies that Stop()
+// TestIntegrationConvoyManager_ShutdownKillsHangingSubprocess verifies that Stop()
 // completes within bounded time even when a gt subprocess is hanging.
 // This is the critical S-09 test: without CommandContext + process group kill,
 // the wg.Wait() in Stop() would block indefinitely.
-func TestConvoyManager_ShutdownKillsHangingSubprocess(t *testing.T) {
+func TestIntegrationConvoyManager_ShutdownKillsHangingSubprocess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}

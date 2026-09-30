@@ -405,7 +405,7 @@ func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 
 	// ExecContext, as internal/cmd/maintain.go runs CALL dolt_gc(): the
 	// procedure reports failure as a SQL error, and its status row carries
-	// nothing more. TestDoltGCFullAgainstRealServer runs this on a server.
+	// nothing more. TestIntegrationDoltGCFullAgainstRealServer runs this on a server.
 	if _, err := conn.ExecContext(ctx, "CALL dolt_gc('--full')"); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("dolt_gc --full: timeout: %w", err)
