@@ -126,16 +126,22 @@ var refRehearsalBranchNames = map[string]bool{
 // within a single line. Claude Code evaluates Bash permission rules
 // per sub-command, so its "if" glob can fire on a later segment of a
 // compound command (cd x && gh pr create ...) — this guard must inspect
-// each ;/&&/||/| segment independently rather than only the start of the
+// each ;/&/&&/||/| segment independently rather than only the start of the
 // whole line, or a leading unrelated segment lets a real PR-workflow
 // command later on the line slip through (gt-wisp-52y4). An unquoted
 // newline separates commands the same way and arrives here as ";" — see
 // spaceOutShellOperators (gt-3j8u).
+//
+// A background & belongs here with the others: it runs the following command
+// just as ; does, so leaving it out let a text-only command in front of it
+// speak for the real command behind — "echo hi & git clean -f" was judged a
+// single echo call and the clean ran unchecked (gt-wwwht).
 var shellCommandSeparators = map[string]bool{
 	"&&": true,
 	"||": true,
 	";":  true,
 	"|":  true,
+	"&":  true,
 }
 
 // maxPRWorkflowNestDepth bounds the shell-fed-heredoc recursion in

@@ -552,20 +552,24 @@ func shellTokenize(command string) []string {
 	return tokens
 }
 
-// spaceOutShellOperators pads the command-chaining operators ;, &, &&, |,
-// and || with spaces wherever they appear outside quotes, so shlex splits
-// them into their own tokens even when glued directly to an adjacent word
-// with no whitespace ("rm -rf /;echo done" has no space around ';').
-// Without this, shlex — a generic word-splitter with no notion of shell
+// spaceOutShellOperators pads the command-chaining operators ;, &&, |, ||,
+// and a background & with spaces wherever they appear outside quotes, so
+// shlex splits them into their own tokens even when glued directly to an
+// adjacent word with no whitespace ("rm -rf /;echo done" has no space around
+// ';'). Without this, shlex — a generic word-splitter with no notion of shell
 // control operators — folds the operator into whichever word touches it
 // ("done;rm" as one token), hiding "rm" from every exact-token matcher
 // (gt-mkrj). A doubled "&&" or "||" is emitted as a single spaced-out token
 // rather than two adjacent single-character ones, so a matcher keyed on the
 // whole operator (e.g. matchesPRWorkflowCommand's shellCommandSeparators)
 // sees it as one token instead of two "&" or "|" tokens that never equal
-// "&&"/"||" (gt-pjeh). Characters inside single/double quotes, or escaped
-// with a backslash outside quotes, are left untouched so quoted content (a
-// sed script containing '|', a jq filter) stays exactly as opaque as it was
+// "&&"/"||" (gt-pjeh). An '&' touching a '>' is a redirection (2>&1, &>file)
+// rather than a background operator, so it is left glued to the redirect;
+// padding it would both split one redirection into three tokens and, now that
+// '&' separates segments, cut a command's own arguments off from it
+// (gt-wwwht). Characters inside single/double quotes, or escaped with a
+// backslash outside quotes, are left untouched so quoted content (a sed
+// script containing '|', a jq filter) stays exactly as opaque as it was
 // before this pass.
 //
 // An unquoted newline is a command separator too — the shell ends the
@@ -684,7 +688,13 @@ func spaceOutShellOperators(command string) string {
 		case r == '\n':
 			b.WriteString(" ; ")
 		case r == ';', r == '&', r == '|':
-			if (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r {
+			if r == '&' && ((i > 0 && runes[i-1] == '>') || (i+1 < len(runes) && runes[i+1] == '>')) {
+				// A '&' touching a '>' on either side is a redirection
+				// (2>&1, &>file), not a background operator. Left glued it
+				// stays one token, so the '&' tokens that reach the matchers
+				// are all real segment boundaries (gt-wwwht).
+				emit(r)
+			} else if (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r {
 				b.WriteRune(' ')
 				b.WriteRune(r)
 				b.WriteRune(r)
