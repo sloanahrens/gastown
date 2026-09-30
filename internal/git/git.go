@@ -3850,7 +3850,7 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 			result = candidate
 		}
 	}
-	if judged {
+	if judged || result.ComparisonBase != "" {
 		return result, nil
 	}
 	if lastErr != nil {
