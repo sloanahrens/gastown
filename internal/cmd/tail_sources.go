@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,10 +11,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/landings"
 )
 
@@ -37,6 +40,26 @@ func (o *tailOnce) clear() { o.last = "" }
 type tailJournal interface {
 	EventsTail(since int64, limit int) (*beads.EventsPage, error)
 	ConfigGet(key string) (string, error)
+}
+
+// tailBDJournal is the production tailJournal: the journal through
+// beads.EventsTail, and the events-journal key read with gt's own
+// BD_EVENTS_JOURNAL=1 override cleared, so the answer is the store's config
+// (as the daemon's startup check reads it), not gt's environment.
+type tailBDJournal struct {
+	*beads.Beads
+	dir string
+	run deps.BDRunner
+}
+
+func (j *tailBDJournal) ConfigGet(key string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), beads.ResolveSubprocessTimeout())
+	defer cancel()
+	stdout, stderr, err := j.run(ctx, []string{"BEADS_DIR=" + j.dir, "BD_EVENTS_JOURNAL=", "BD_MACHINE=1"}, "config", "get", key, "--json")
+	if err != nil {
+		return "", fmt.Errorf("bd config get %s: %w (%s)", key, err, strings.TrimSpace(string(stderr)))
+	}
+	return beads.ParseConfigGetJSON(stdout)
 }
 
 // tailEventsPageSize bounds one bd events tail read.
@@ -81,7 +104,7 @@ func (s *eventsSource) Poll() []tailLine {
 		switch {
 		case err != nil:
 			out = append(out, s.line(now, "cannot read events-journal config (%v): the journal may hold only mutations made through gt", err))
-		case strings.TrimSpace(v) != "true":
+		case !journalOn(v):
 			out = append(out, s.line(now, "journal off in config (events-journal=%s): only mutations made through gt are journaled", strings.TrimSpace(v)))
 		}
 	}
@@ -139,6 +162,12 @@ func (s *eventsSource) Poll() []tailLine {
 			return out
 		}
 	}
+}
+
+// journalOn reads an events-journal value as bd's config does: a boolean.
+func journalOn(v string) bool {
+	on, err := strconv.ParseBool(strings.TrimSpace(v))
+	return err == nil && on
 }
 
 // parseJournalTS reads a journal record's ts. bd writes RFC3339 in UTC; the

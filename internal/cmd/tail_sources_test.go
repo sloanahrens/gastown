@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"compress/gzip"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -329,5 +331,39 @@ func TestDaemonSource_CorruptBackupIsOneLineAndTheLogStillReads(t *testing.T) {
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestTailBDJournal_ConfigGetReadsTheStoreConfigNotGtsOverride(t *testing.T) {
+	var gotEnv, gotArgs []string
+	j := &tailBDJournal{dir: "/town/gastown/mayor/rig/.beads", run: func(_ context.Context, env []string, args ...string) ([]byte, []byte, error) {
+		gotEnv, gotArgs = env, args
+		return []byte(`{"key":"events-journal","location":"config.yaml","value":"false"}`), nil, nil
+	}}
+	v, err := j.ConfigGet("events-journal")
+	if err != nil || v != "false" {
+		t.Fatalf("ConfigGet = %q, %v", v, err)
+	}
+	if want := []string{"config", "get", "events-journal", "--json"}; !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("argv = %v", gotArgs)
+	}
+	if want := []string{"BEADS_DIR=/town/gastown/mayor/rig/.beads", "BD_EVENTS_JOURNAL=", "BD_MACHINE=1"}; !reflect.DeepEqual(gotEnv, want) {
+		t.Fatalf("env = %v", gotEnv)
+	}
+
+	j.run = func(context.Context, []string, ...string) ([]byte, []byte, error) {
+		return nil, []byte("database not found\n"), errors.New("exit status 1")
+	}
+	if _, err := j.ConfigGet("events-journal"); err == nil || !strings.Contains(err.Error(), "database not found") {
+		t.Fatalf("failure = %v", err)
+	}
+}
+
+func TestEventsSource_TruthyConfigIsOn(t *testing.T) {
+	for _, v := range []string{"true", "1", "TRUE"} {
+		j := &fakeTailJournal{config: v}
+		if got := (&eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}).Poll(); len(got) != 0 {
+			t.Errorf("events-journal=%s printed %q", v, texts(got))
+		}
 	}
 }

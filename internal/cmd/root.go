@@ -79,6 +79,7 @@ var beadsExemptCommands = map[string]bool{
 	"health":        true, // Health check doesn't require beads
 	"upgrade":       true, // Post-install migration orchestrator
 	"heartbeat":     true, // Heartbeat state update — must be fast and dependency-free
+	"tail":          true, // Read-only stream; reports an unreachable bd per rig and continues
 }
 
 // Commands exempt from the town root branch warning.
