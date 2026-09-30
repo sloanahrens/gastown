@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 // The fixtures below are transcribed from the beads named in gt-mcq — the two
@@ -608,13 +612,15 @@ exit 0
 	t.Setenv("BD_DUPE_CLOSED_FILE", closedPath)
 }
 
-// TestConvoyAndEpicDispatchRunDuplicateCheck is the gt-skk7 wiring test. Both
-// manual schedulers set SkipDuplicateCheck on what is actually the bead's FIRST
-// dispatch — the operator's 'gt sling <convoy|epic>', with no earlier checked
-// sling — so the check never ran on those paths at all. A convoy or epic is in
-// fact the shape the check exists for: a batch of beads dispatched together are
-// the same-defect pair that no title dedupe sees (gt-mcq).
-func TestConvoyAndEpicDispatchRunDuplicateCheck(t *testing.T) {
+// TestScheduledDispatchesRunDuplicateCheck is the gt-skk7 / gt-eisp2 wiring
+// test. Every scheduler used to set SkipDuplicateCheck on what is actually the
+// bead's FIRST dispatch, so the check never ran on those paths at all. The
+// operator's 'gt sling <convoy|epic>' has no earlier checked sling; neither
+// does 'gt sling --deferred', whose runSling returns into scheduleBead before
+// the check and reaches the capacity dispatcher unchecked. A batch of beads
+// dispatched together are the same-defect pair that no title dedupe sees
+// (gt-mcq).
+func TestScheduledDispatchesRunDuplicateCheck(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
 	}
@@ -630,19 +636,52 @@ func TestConvoyAndEpicDispatchRunDuplicateCheck(t *testing.T) {
 	convoyOpts := convoyScheduleOpts{Formula: "mol-polecat-work", NoBoot: true}
 	epicOpts := epicScheduleOpts{Formula: "mol-polecat-work", NoBoot: true}
 
+	epicChild := epicDispatchCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"}
+
 	paths := []struct {
-		name   string
-		params func() SlingParams
+		name string
+		// run dispatches gt-3vr as the path does; force does the same with
+		// --force, and is nil for a path that has none to pass (a queued
+		// context does not carry one).
+		run   func() (*SlingResult, error)
+		force func() (*SlingResult, error)
+		// discardsResult marks a path whose wrapper returns no SlingResult on error.
+		discardsResult bool
 	}{
 		{
-			name:   "gt sling <convoy> -> runConvoySlingByID",
-			params: func() SlingParams { return convoySlingParams(job, convoyOpts, townRoot) },
+			name: "gt sling <convoy> -> runConvoySlingByID",
+			run:  func() (*SlingResult, error) { return executeSling(convoySlingParams(job, convoyOpts, townRoot)) },
+			force: func() (*SlingResult, error) {
+				params := convoySlingParams(job, convoyOpts, townRoot)
+				params.Force = true
+				return executeSling(params)
+			},
 		},
 		{
 			name: "gt sling <epic> -> runEpicSlingByID",
-			params: func() SlingParams {
-				child := epicDispatchCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"}
-				return epicSlingParams(child, "mol-polecat-work", epicOpts, townRoot)
+			run: func() (*SlingResult, error) {
+				return executeSling(epicSlingParams(epicChild, "mol-polecat-work", epicOpts, townRoot))
+			},
+			force: func() (*SlingResult, error) {
+				params := epicSlingParams(epicChild, "mol-polecat-work", epicOpts, townRoot)
+				params.Force = true
+				return executeSling(params)
+			},
+		},
+		{
+			name:           "gt sling --deferred -> dispatchSingleBead",
+			discardsResult: true,
+			run: func() (*SlingResult, error) {
+				return dispatchSingleBead(capacity.PendingBead{
+					ID:         "gt-sc-3vr",
+					WorkBeadID: "gt-3vr",
+					TargetRig:  "gastown",
+					Context: &capacity.SlingContextFields{
+						WorkBeadID: "gt-3vr",
+						TargetRig:  "gastown",
+						Formula:    "mol-polecat-work",
+					},
+				}, townRoot, "test")
 			},
 		},
 	}
@@ -652,11 +691,11 @@ func TestConvoyAndEpicDispatchRunDuplicateCheck(t *testing.T) {
 			resetDuplicatePoolCache()
 			t.Cleanup(resetDuplicatePoolCache)
 
-			result, err := executeSling(path.params())
+			result, err := path.run()
 			if err == nil {
 				t.Fatal("expected a refusal: gt-3vr names the test gt-rl0 already owns")
 			}
-			if result == nil || result.ErrMsg != errSlingDuplicateContent.Error() {
+			if !path.discardsResult && (result == nil || result.ErrMsg != errSlingDuplicateContent.Error()) {
 				t.Errorf("expected ErrMsg=%q, got %+v", errSlingDuplicateContent.Error(), result)
 			}
 			for _, want := range []string{"TestHermeticHarnessEnforced", "gt-rl0", "--force"} {
@@ -669,12 +708,24 @@ func TestConvoyAndEpicDispatchRunDuplicateCheck(t *testing.T) {
 			// it must reach the check through their own params. Past the check
 			// the dispatch fails for want of a real rig; only the refusal
 			// matters here.
-			forced := path.params()
-			forced.Force = true
-			if _, err := executeSling(forced); err != nil && strings.Contains(err.Error(), "TestHermeticHarnessEnforced") {
+			if path.force == nil {
+				return
+			}
+			if _, err := path.force(); err != nil && strings.Contains(err.Error(), "TestHermeticHarnessEnforced") {
 				t.Fatalf("--force must bypass the duplicate check: %v", err)
 			}
 		})
+	}
+}
+
+// TestCapacityDispatchDuplicateRefusalIsAFailure pins the gt-eisp2 ruling: a
+// duplicate refusal at the capacity dispatcher counts toward the context's
+// circuit breaker instead of leaving it queued. It stays true until the
+// overlapping bead closes, so a silent deferral would stall the bead.
+func TestCapacityDispatchDuplicateRefusalIsAFailure(t *testing.T) {
+	refusal := fmt.Errorf("sling failed: %w", errors.New("refusing to sling gt-3vr: duplicate content of gt-rl0 (use --force)"))
+	if why, deferred := capacityDispatchDeferral(refusal); deferred {
+		t.Fatalf("a duplicate refusal must not be deferred (%q)", why)
 	}
 }
 

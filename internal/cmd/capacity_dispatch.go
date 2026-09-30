@@ -709,6 +709,14 @@ func readySlingContextsFromAssessments(assessments []scheduledContextAssessment)
 // it never counts toward the circuit breaker. Capacity admission refusals and
 // sling's surviving-work refusal (a dead holder's work survives or cannot be
 // verified, gt-vm5g4) are deferrals; everything else is a failure.
+//
+// A content-duplicate refusal (gt-mcq) is deliberately a failure. It does not
+// clear until the overlapping bead closes, so deferring it would leave the
+// context queued and silent for the 72h lookback. As a failure it is recorded
+// with the refusal text, and after maxDispatchFailures the context closes as
+// circuit-broken: the operator's signal to close the overlapping bead or
+// re-sling with --force (gt-eisp2). The breaker is per context, so one refused
+// bead does not stop the dispatcher.
 func capacityDispatchDeferral(err error) (why string, deferred bool) {
 	var admissionErr *polecatCapacityAdmissionError
 	switch {
@@ -721,6 +729,8 @@ func capacityDispatchDeferral(err error) (why string, deferred bool) {
 }
 
 // dispatchSingleBead dispatches one scheduled bead via executeSling.
+// A queued bead is a first dispatch: runSling returns into scheduleBead before
+// its content duplicate check, so the check runs here (gt-eisp2).
 // Context fields are already parsed (from PendingBead.Context).
 // Returns the SlingResult (including PolecatName) on success.
 func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResult, error) {
@@ -758,9 +768,6 @@ func dispatchSingleBead(b capacity.PendingBead, townRoot, _ string) (*SlingResul
 		NoBoot:           true,
 		TownRoot:         townRoot,
 		BeadsDir:         targetBeadsDir,
-
-		// Queue replay of work the mayor already slung; see SlingParams.
-		SkipDuplicateCheck: true,
 	}
 
 	fmt.Printf("  Dispatching %s → %s...\n", b.WorkBeadID, b.TargetRig)
