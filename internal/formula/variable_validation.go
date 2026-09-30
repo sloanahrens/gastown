@@ -90,8 +90,7 @@ func (f *Formula) ValidateTemplateVariables() error {
 //
 // Only {{name}} counts. A bare {name} substitution or an unbraced mention is not
 // a placeholder and is not reported, so a var can be declared required and still
-// not appear here (mol-shutdown-dance's {target}; mol-polecat-conflict-resolve's
-// prose-only original_mr).
+// not appear here (mol-polecat-conflict-resolve's prose-only original_mr).
 func (f *Formula) UsedTemplateVariables() []string {
 	// Collect all text that might contain variables
 	var allText strings.Builder

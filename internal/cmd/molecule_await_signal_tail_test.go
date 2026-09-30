@@ -218,9 +218,9 @@ func TestWaitForEventsFile_DrainsBacklogOfOtherRigs(t *testing.T) {
 }
 
 // TestWaitForEventsFile_WakesAfterRenameRotation reproduces the 19:42 incident
-// (claude-9jq): the KRC pruner renamed a rewritten events file over the path
+// (claude-9jq): a rotator renamed a rewritten events file over the path
 // mid-wait and the waiter, still reading the old inode, slept to its timeout.
-// A line written to the new file must wake it, and the history the pruner
+// A line written to the new file must wake it, and the history the rotator
 // retained must not.
 func TestWaitForEventsFile_WakesAfterRenameRotation(t *testing.T) {
 	t.Parallel()

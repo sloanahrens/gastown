@@ -47,69 +47,6 @@ func TestParseDurationOrDefault(t *testing.T) {
 
 // --- Default*Config functions ---
 
-func TestDefaultWebTimeoutsConfig(t *testing.T) {
-	t.Parallel()
-	cfg := DefaultWebTimeoutsConfig()
-
-	if cfg == nil {
-		t.Fatal("DefaultWebTimeoutsConfig() returned nil")
-	}
-
-	tests := []struct {
-		name     string
-		field    string
-		fallback time.Duration
-		want     time.Duration
-	}{
-		{"CmdTimeout", cfg.CmdTimeout, 0, 15 * time.Second},
-		{"GhCmdTimeout", cfg.GhCmdTimeout, 0, 10 * time.Second},
-		{"TmuxCmdTimeout", cfg.TmuxCmdTimeout, 0, 2 * time.Second},
-		{"FetchTimeout", cfg.FetchTimeout, 0, 8 * time.Second},
-		{"DefaultRunTimeout", cfg.DefaultRunTimeout, 0, 30 * time.Second},
-		{"MaxRunTimeout", cfg.MaxRunTimeout, 0, 120 * time.Second},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ParseDurationOrDefault(tt.field, tt.fallback)
-			if got != tt.want {
-				t.Errorf("default %s: ParseDurationOrDefault(%q, %v) = %v, want %v",
-					tt.name, tt.field, tt.fallback, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDefaultWorkerStatusConfig(t *testing.T) {
-	t.Parallel()
-	cfg := DefaultWorkerStatusConfig()
-
-	if cfg == nil {
-		t.Fatal("DefaultWorkerStatusConfig() returned nil")
-	}
-
-	stale := ParseDurationOrDefault(cfg.StaleThreshold, 0)
-	if stale != 5*time.Minute {
-		t.Errorf("StaleThreshold = %v, want 5m", stale)
-	}
-	stuck := ParseDurationOrDefault(cfg.StuckThreshold, 0)
-	if stuck != 30*time.Minute {
-		t.Errorf("StuckThreshold = %v, want 30m", stuck)
-	}
-	// stale < stuck invariant
-	if stale >= stuck {
-		t.Errorf("StaleThreshold (%v) must be < StuckThreshold (%v)", stale, stuck)
-	}
-	hbFresh := ParseDurationOrDefault(cfg.HeartbeatFreshThreshold, 0)
-	if hbFresh != 5*time.Minute {
-		t.Errorf("HeartbeatFreshThreshold = %v, want 5m", hbFresh)
-	}
-	mayorActive := ParseDurationOrDefault(cfg.MayorActiveThreshold, 0)
-	if mayorActive != 5*time.Minute {
-		t.Errorf("MayorActiveThreshold = %v, want 5m", mayorActive)
-	}
-}
-
 func TestDefaultFeedCuratorConfig(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultFeedCuratorConfig()
@@ -132,56 +69,6 @@ func TestDefaultFeedCuratorConfig(t *testing.T) {
 }
 
 // --- JSON serialization round-trips ---
-
-func TestWebTimeoutsConfig_JSONRoundTrip(t *testing.T) {
-	t.Parallel()
-	original := &WebTimeoutsConfig{
-		CmdTimeout:        "20s",
-		GhCmdTimeout:      "15s",
-		TmuxCmdTimeout:    "3s",
-		FetchTimeout:      "12s",
-		DefaultRunTimeout: "45s",
-		MaxRunTimeout:     "90s",
-	}
-
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	var loaded WebTimeoutsConfig
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-
-	if loaded != *original {
-		t.Errorf("round-trip mismatch:\ngot  %+v\nwant %+v", loaded, *original)
-	}
-}
-
-func TestWorkerStatusConfig_JSONRoundTrip(t *testing.T) {
-	t.Parallel()
-	original := &WorkerStatusConfig{
-		StaleThreshold:          "10m",
-		StuckThreshold:          "1h",
-		HeartbeatFreshThreshold: "3m",
-		MayorActiveThreshold:    "8m",
-	}
-
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-
-	var loaded WorkerStatusConfig
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-
-	if loaded != *original {
-		t.Errorf("round-trip mismatch:\ngot  %+v\nwant %+v", loaded, *original)
-	}
-}
 
 func TestFeedCuratorConfig_JSONRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -295,13 +182,7 @@ func TestTownSettings_WithoutNewFields_LoadsDefaults(t *testing.T) {
 		t.Fatalf("LoadOrCreateTownSettings: %v", err)
 	}
 
-	// All new fields should be nil (omitempty means absent in JSON → nil pointer)
-	if ts.WebTimeouts != nil {
-		t.Errorf("WebTimeouts should be nil for legacy config, got %+v", ts.WebTimeouts)
-	}
-	if ts.WorkerStatus != nil {
-		t.Errorf("WorkerStatus should be nil for legacy config, got %+v", ts.WorkerStatus)
-	}
+	// Fields absent from the JSON should be nil (omitempty → nil pointer)
 	if ts.FeedCurator != nil {
 		t.Errorf("FeedCurator should be nil for legacy config, got %+v", ts.FeedCurator)
 	}
@@ -319,20 +200,6 @@ func TestTownSettings_WithNewFields_RoundTrip(t *testing.T) {
 	settingsPath := filepath.Join(tmpDir, "config.json")
 
 	original := NewTownSettings()
-	original.WebTimeouts = &WebTimeoutsConfig{
-		CmdTimeout:        "20s",
-		GhCmdTimeout:      "15s",
-		TmuxCmdTimeout:    "3s",
-		FetchTimeout:      "12s",
-		DefaultRunTimeout: "45s",
-		MaxRunTimeout:     "2m",
-	}
-	original.WorkerStatus = &WorkerStatusConfig{
-		StaleThreshold:          "10m",
-		StuckThreshold:          "1h",
-		HeartbeatFreshThreshold: "3m",
-		MayorActiveThreshold:    "8m",
-	}
 	original.FeedCurator = &FeedCuratorConfig{
 		DoneDedupeWindow:     "20s",
 		SlingAggregateWindow: "1m",
@@ -346,46 +213,6 @@ func TestTownSettings_WithNewFields_RoundTrip(t *testing.T) {
 	loaded, err := LoadOrCreateTownSettings(settingsPath)
 	if err != nil {
 		t.Fatalf("LoadOrCreateTownSettings: %v", err)
-	}
-
-	// Verify WebTimeouts
-	if loaded.WebTimeouts == nil {
-		t.Fatal("WebTimeouts is nil after round-trip")
-	}
-	if loaded.WebTimeouts.CmdTimeout != "20s" {
-		t.Errorf("CmdTimeout = %q, want %q", loaded.WebTimeouts.CmdTimeout, "20s")
-	}
-	if loaded.WebTimeouts.GhCmdTimeout != "15s" {
-		t.Errorf("GhCmdTimeout = %q, want %q", loaded.WebTimeouts.GhCmdTimeout, "15s")
-	}
-	if loaded.WebTimeouts.TmuxCmdTimeout != "3s" {
-		t.Errorf("TmuxCmdTimeout = %q, want %q", loaded.WebTimeouts.TmuxCmdTimeout, "3s")
-	}
-	if loaded.WebTimeouts.FetchTimeout != "12s" {
-		t.Errorf("FetchTimeout = %q, want %q", loaded.WebTimeouts.FetchTimeout, "12s")
-	}
-	if loaded.WebTimeouts.DefaultRunTimeout != "45s" {
-		t.Errorf("DefaultRunTimeout = %q, want %q", loaded.WebTimeouts.DefaultRunTimeout, "45s")
-	}
-	if loaded.WebTimeouts.MaxRunTimeout != "2m" {
-		t.Errorf("MaxRunTimeout = %q, want %q", loaded.WebTimeouts.MaxRunTimeout, "2m")
-	}
-
-	// Verify WorkerStatus
-	if loaded.WorkerStatus == nil {
-		t.Fatal("WorkerStatus is nil after round-trip")
-	}
-	if loaded.WorkerStatus.StaleThreshold != "10m" {
-		t.Errorf("StaleThreshold = %q, want %q", loaded.WorkerStatus.StaleThreshold, "10m")
-	}
-	if loaded.WorkerStatus.StuckThreshold != "1h" {
-		t.Errorf("StuckThreshold = %q, want %q", loaded.WorkerStatus.StuckThreshold, "1h")
-	}
-	if loaded.WorkerStatus.HeartbeatFreshThreshold != "3m" {
-		t.Errorf("HeartbeatFreshThreshold = %q, want %q", loaded.WorkerStatus.HeartbeatFreshThreshold, "3m")
-	}
-	if loaded.WorkerStatus.MayorActiveThreshold != "8m" {
-		t.Errorf("MayorActiveThreshold = %q, want %q", loaded.WorkerStatus.MayorActiveThreshold, "8m")
 	}
 
 	// Verify FeedCurator
@@ -405,12 +232,12 @@ func TestTownSettings_WithNewFields_RoundTrip(t *testing.T) {
 
 func TestTownSettings_PartialNewFields(t *testing.T) {
 	t.Parallel()
-	// Only some new fields are set; others should remain nil.
+	// Only some fields are set; the rest should remain nil.
 	settingsJSON := `{
 		"type": "town-settings",
 		"version": 1,
-		"web_timeouts": {
-			"cmd_timeout": "25s"
+		"feed_curator": {
+			"done_dedupe_window": "25s"
 		}
 	}`
 
@@ -425,29 +252,21 @@ func TestTownSettings_PartialNewFields(t *testing.T) {
 		t.Fatalf("LoadOrCreateTownSettings: %v", err)
 	}
 
-	// WebTimeouts present with partial fields
-	if ts.WebTimeouts == nil {
-		t.Fatal("WebTimeouts should not be nil")
+	// FeedCurator present with partial fields
+	if ts.FeedCurator == nil {
+		t.Fatal("FeedCurator should not be nil")
 	}
-	if ts.WebTimeouts.CmdTimeout != "25s" {
-		t.Errorf("CmdTimeout = %q, want %q", ts.WebTimeouts.CmdTimeout, "25s")
+	if ts.FeedCurator.DoneDedupeWindow != "25s" {
+		t.Errorf("DoneDedupeWindow = %q, want %q", ts.FeedCurator.DoneDedupeWindow, "25s")
 	}
 	// Unset fields within the struct should be zero-value (empty string)
-	if ts.WebTimeouts.GhCmdTimeout != "" {
-		t.Errorf("GhCmdTimeout = %q, want empty", ts.WebTimeouts.GhCmdTimeout)
+	if ts.FeedCurator.SlingAggregateWindow != "" {
+		t.Errorf("SlingAggregateWindow = %q, want empty", ts.FeedCurator.SlingAggregateWindow)
 	}
 	// ParseDurationOrDefault should apply fallback for empty fields
-	ghTimeout := ParseDurationOrDefault(ts.WebTimeouts.GhCmdTimeout, 10*time.Second)
-	if ghTimeout != 10*time.Second {
-		t.Errorf("ParseDurationOrDefault for empty GhCmdTimeout = %v, want 10s", ghTimeout)
-	}
-
-	// Other config sections should remain nil
-	if ts.WorkerStatus != nil {
-		t.Errorf("WorkerStatus should be nil, got %+v", ts.WorkerStatus)
-	}
-	if ts.FeedCurator != nil {
-		t.Errorf("FeedCurator should be nil, got %+v", ts.FeedCurator)
+	agg := ParseDurationOrDefault(ts.FeedCurator.SlingAggregateWindow, 30*time.Second)
+	if agg != 30*time.Second {
+		t.Errorf("ParseDurationOrDefault for empty SlingAggregateWindow = %v, want 30s", agg)
 	}
 }
 
@@ -469,12 +288,6 @@ func TestTownSettings_MissingFile_ReturnsDefaults(t *testing.T) {
 		t.Errorf("Version = %d, want %d", ts.Version, CurrentTownSettingsVersion)
 	}
 	// New config sections should be nil (NewTownSettings doesn't set them)
-	if ts.WebTimeouts != nil {
-		t.Errorf("WebTimeouts should be nil for defaults")
-	}
-	if ts.WorkerStatus != nil {
-		t.Errorf("WorkerStatus should be nil for defaults")
-	}
 	if ts.FeedCurator != nil {
 		t.Errorf("FeedCurator should be nil for defaults")
 	}
@@ -492,7 +305,7 @@ func TestTownSettings_OmitemptyNilFields(t *testing.T) {
 	}
 
 	jsonStr := string(data)
-	for _, key := range []string{"web_timeouts", "worker_status", "feed_curator"} {
+	for _, key := range []string{"feed_curator"} {
 		if strings.Contains(jsonStr, key) {
 			t.Errorf("JSON should not contain %q when field is nil, got:\n%s", key, jsonStr)
 		}
@@ -504,7 +317,7 @@ func TestTownSettings_OmitemptyEmptyDurations(t *testing.T) {
 	// When config struct is set but all duration fields are empty,
 	// omitempty on the string fields means they should be absent from JSON.
 	ts := NewTownSettings()
-	ts.WebTimeouts = &WebTimeoutsConfig{} // all zero values
+	ts.FeedCurator = &FeedCuratorConfig{} // all zero values
 
 	data, err := json.MarshalIndent(ts, "", "  ")
 	if err != nil {
@@ -512,12 +325,12 @@ func TestTownSettings_OmitemptyEmptyDurations(t *testing.T) {
 	}
 
 	jsonStr := string(data)
-	// The "web_timeouts" key SHOULD appear (pointer is non-nil)
-	if !strings.Contains(jsonStr, "web_timeouts") {
-		t.Error("JSON should contain web_timeouts when struct is non-nil")
+	// The "feed_curator" key SHOULD appear (pointer is non-nil)
+	if !strings.Contains(jsonStr, "feed_curator") {
+		t.Error("JSON should contain feed_curator when struct is non-nil")
 	}
 	// But individual empty string fields should be omitted
-	for _, key := range []string{"cmd_timeout", "gh_cmd_timeout", "tmux_cmd_timeout"} {
+	for _, key := range []string{"done_dedupe_window", "sling_aggregate_window"} {
 		if strings.Contains(jsonStr, key) {
 			t.Errorf("JSON should not contain %q when field is empty string, got:\n%s", key, jsonStr)
 		}
@@ -580,45 +393,6 @@ func TestTownSettings_DisabledPatrols_OmitemptyWhenNil(t *testing.T) {
 	}
 	if strings.Contains(string(data), "disabled_patrols") {
 		t.Error("JSON should not contain disabled_patrols when nil")
-	}
-}
-
-// --- Edge cases for config values ---
-
-func TestParseDurationOrDefault_AllWebTimeoutDefaults(t *testing.T) {
-	t.Parallel()
-	// Verify that an empty WebTimeoutsConfig (all fields "") falls back to
-	// the same values as DefaultWebTimeoutsConfig when parsed.
-	empty := &WebTimeoutsConfig{}
-	defaults := DefaultWebTimeoutsConfig()
-
-	pairs := []struct {
-		name     string
-		empty    string
-		dflt     string
-		fallback time.Duration
-	}{
-		{"CmdTimeout", empty.CmdTimeout, defaults.CmdTimeout, 15 * time.Second},
-		{"GhCmdTimeout", empty.GhCmdTimeout, defaults.GhCmdTimeout, 10 * time.Second},
-		{"TmuxCmdTimeout", empty.TmuxCmdTimeout, defaults.TmuxCmdTimeout, 2 * time.Second},
-		{"FetchTimeout", empty.FetchTimeout, defaults.FetchTimeout, 8 * time.Second},
-		{"DefaultRunTimeout", empty.DefaultRunTimeout, defaults.DefaultRunTimeout, 30 * time.Second},
-		{"MaxRunTimeout", empty.MaxRunTimeout, defaults.MaxRunTimeout, 120 * time.Second},
-	}
-
-	for _, p := range pairs {
-		t.Run(p.name, func(t *testing.T) {
-			// Empty field should produce fallback
-			got := ParseDurationOrDefault(p.empty, p.fallback)
-			if got != p.fallback {
-				t.Errorf("empty %s: got %v, want %v", p.name, got, p.fallback)
-			}
-			// Default field should produce same value as fallback
-			got = ParseDurationOrDefault(p.dflt, 0)
-			if got != p.fallback {
-				t.Errorf("default %s: got %v, want %v", p.name, got, p.fallback)
-			}
-		})
 	}
 }
 

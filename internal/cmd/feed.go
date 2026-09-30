@@ -5,11 +5,9 @@ import (
 	"os"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/feed"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/tui/feed"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/term"
 )
@@ -24,7 +22,6 @@ var (
 	feedNoFollow bool
 	feedWindow   bool
 	feedPlain    bool
-	feedProblems bool
 )
 
 func init() {
@@ -38,8 +35,7 @@ func init() {
 	feedCmd.Flags().StringVar(&feedType, "type", "", "Filter by event type (create, update, delete, comment)")
 	feedCmd.Flags().StringVar(&feedRig, "rig", "", "Filter events by rig name")
 	feedCmd.Flags().BoolVarP(&feedWindow, "window", "w", false, "Open in dedicated tmux window (creates 'feed' window)")
-	feedCmd.Flags().BoolVar(&feedPlain, "plain", false, "Use plain text output (reads .events.jsonl) instead of TUI")
-	feedCmd.Flags().BoolVarP(&feedProblems, "problems", "p", false, "Start in problems view (shows stuck agents)")
+	feedCmd.Flags().BoolVar(&feedPlain, "plain", false, "Accepted for compatibility; output is always plain text")
 }
 
 var feedCmd = &cobra.Command{
@@ -48,28 +44,10 @@ var feedCmd = &cobra.Command{
 	Short:   "Show real-time activity feed of gt events",
 	Long: `Display a real-time feed of issue changes and agent activity.
 
-By default, launches an interactive TUI dashboard with:
-  - Agent tree (top): Shows all agents organized by role with latest activity
-  - Convoy panel (middle): Shows in-progress and recently landed convoys
-  - Event stream (bottom): Chronological feed you can scroll through
-  - Vim-style navigation: j/k to scroll, tab to switch panels, 1/2/3 for panels, q to quit
-
-Problems View (--problems/-p):
-  A problem-first view that surfaces agents needing attention:
-  - Detects stuck agents via structured beads data (hook state, timestamps)
-  - Shows GUPP violations (hooked work + 30m no progress)
-  - Keyboard actions: Enter=attach, n=nudge, h=handoff
-  - Press 'p' to toggle between activity and problems view
-
-The feed combines multiple event sources:
-  - GT events: Agent activity like patrol, sling, handoff (from .events.jsonl)
-  - Convoy status: In-progress and recently-landed convoys (refreshes every 10s)
-
-Use --plain for simple text output (reads .events.jsonl directly).
-
-Tmux Integration:
-  Use --window to open the feed in a dedicated tmux window named 'feed'.
-  This creates a persistent window you can cycle to with C-b n/p.
+Events come from the town's .events.jsonl and are printed as plain text, one
+line per event. Use --follow to stream new events as they arrive; a non-TTY
+stdout (an agent or a pipe) does not follow unless --follow is explicit, so a
+caller never blocks on a stream that never ends.
 
 Event symbols:
   +  created/bonded    - New issue or molecule created
@@ -82,13 +60,6 @@ Event symbols:
   🎯  sling            - Work was slung to worker
   🤝  handoff          - Session handed off
 
-Agent state symbols (problems view):
-  🔥  GUPP violation   - Hooked work + 30m no progress (critical)
-  ⚠   STALLED          - Hooked work + 15m no progress
-  ●   Working          - Actively producing output
-  ○   Idle             - No hooked work
-  💀  Zombie           - Dead/crashed session
-
 MQ (Merge Queue) event symbols:
   ⚙  merge_started   - Refinery began processing an MR
   ✓  merged          - MR successfully merged (green)
@@ -96,13 +67,10 @@ MQ (Merge Queue) event symbols:
   ⊘  merge_skipped   - MR skipped (already merged, etc.)
 
 Examples:
-  gt feed                       # Launch TUI dashboard
-  gt feed --problems            # Start in problems view
-  gt feed -p                    # Short flag for problems view
-  gt feed --plain               # Plain text output (.events.jsonl)
-  gt feed --window              # Open in dedicated tmux window
   gt feed --since 1h            # Events from last hour
-  gt feed --rig greenplace      # Use gastown rig's beads`,
+  gt feed --follow              # Stream new events
+  gt feed --rig greenplace      # Filter to one rig
+  gt feed --window              # Open in dedicated tmux window`,
 	RunE: runFeed,
 }
 
@@ -113,48 +81,16 @@ func runFeed(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace (run from ~/gt or a rig directory)")
 	}
 
-	// Build feed arguments for window mode
-	bdArgs := buildFeedArgs()
-
 	// Handle --window mode: --rig is forwarded as a CLI flag via buildFeedArgs
 	if feedWindow {
 		workDir, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("getting current directory: %w", err)
 		}
-		return runFeedInWindow(workDir, bdArgs)
+		return runFeedInWindow(workDir, buildFeedArgs())
 	}
 
-	// Use TUI by default if running in a terminal and not --plain
-	useTUI := !feedPlain && term.IsTerminal(int(os.Stdout.Fd()))
-
-	if useTUI {
-		// TUI mode: resolve --rig to a beads directory for the MQ event source
-		workDir, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("getting current directory: %w", err)
-		}
-		if feedRig != "" {
-			candidates := []string{
-				fmt.Sprintf("%s/%s/mayor/rig", townRoot, feedRig),
-				fmt.Sprintf("%s/%s", townRoot, feedRig),
-			}
-			found := false
-			for _, candidate := range candidates {
-				if _, err := os.Stat(candidate + "/.beads"); err == nil {
-					workDir = candidate
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("rig '%s' not found or has no .beads directory", feedRig)
-			}
-		}
-		return runFeedTUI(workDir, feedProblems)
-	}
-
-	// Plain mode: --rig is a pure event filter via PrintOptions.Rig
+	// --rig is a pure event filter via PrintOptions.Rig
 	return runFeedDirect(townRoot)
 }
 
@@ -168,7 +104,7 @@ func buildFeedArgs() []string {
 		shouldFollow = true
 	}
 
-	// Auto-disable follow when stdout is not a TTY (e.g. agents, pipes),
+	// Auto-disable follow when stdout is not a TTY (e.g., agents, pipes),
 	// unless the user explicitly passed --follow. This prevents agents
 	// from blocking on a streaming feed that never terminates.
 	if !term.IsTerminal(int(os.Stdout.Fd())) && !feedFollow {
@@ -228,58 +164,6 @@ func runFeedDirect(townRoot string) error {
 	return feed.PrintGtEvents(townRoot, opts)
 }
 
-// runFeedTUI runs the interactive TUI feed.
-func runFeedTUI(workDir string, problemsView bool) error {
-	// Must be in a Gas Town workspace
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	var sources []feed.EventSource
-
-	// Create MQ event source (optional - don't fail if not available)
-	mqSource, err := feed.NewMQEventSourceFromWorkDir(workDir)
-	if err == nil {
-		sources = append(sources, mqSource)
-	}
-
-	// Create GT events source (optional - don't fail if not available)
-	gtSource, err := feed.NewGtEventsSource(townRoot)
-	if err == nil {
-		sources = append(sources, gtSource)
-	}
-
-	if len(sources) == 0 {
-		return fmt.Errorf("no event sources available (check that .events.jsonl exists in %s)", townRoot)
-	}
-
-	// Combine all sources
-	multiSource := feed.NewMultiSource(sources...)
-	defer func() { _ = multiSource.Close() }()
-
-	// Create beads instance for agent health detection
-	bd := beads.New(townRoot)
-
-	// Create model and connect event source
-	var m *feed.Model
-	if problemsView {
-		m = feed.NewModelWithProblemsView(bd)
-	} else {
-		m = feed.NewModel(bd)
-	}
-	m.SetEventChannel(multiSource.Events())
-	m.SetTownRoot(townRoot)
-
-	// Run the TUI
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("running TUI: %w", err)
-	}
-
-	return nil
-}
-
 // runFeedInWindow opens the feed in a dedicated tmux window.
 func runFeedInWindow(workDir string, bdArgs []string) error {
 	// Check if we're in tmux
@@ -307,7 +191,7 @@ func runFeedInWindow(workDir string, bdArgs []string) error {
 	if err != nil {
 		gtPath = "gt"
 	}
-	feedWindowCmd := fmt.Sprintf("cd \"%s\" && \"%s\" feed --plain --follow", workDir, gtPath)
+	feedWindowCmd := fmt.Sprintf("cd \"%s\" && \"%s\" feed --follow", workDir, gtPath)
 	if len(bdArgs) > 0 {
 		var filteredArgs []string
 		for _, arg := range bdArgs {
@@ -316,7 +200,7 @@ func runFeedInWindow(workDir string, bdArgs []string) error {
 			}
 		}
 		if len(filteredArgs) > 0 {
-			feedWindowCmd = fmt.Sprintf("cd \"%s\" && \"%s\" feed --plain --follow %s", workDir, gtPath, strings.Join(filteredArgs, " "))
+			feedWindowCmd = fmt.Sprintf("cd \"%s\" && \"%s\" feed --follow %s", workDir, gtPath, strings.Join(filteredArgs, " "))
 		}
 	}
 

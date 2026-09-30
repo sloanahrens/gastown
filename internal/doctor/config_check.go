@@ -275,7 +275,7 @@ func (c *SettingsCheck) findRigs(townRoot string) []string {
 
 // SessionHookCheck verifies settings.json files use proper session_id passthrough.
 // Valid options: session-start.sh wrapper OR 'gt prime --hook'.
-// Without proper config, gt seance cannot discover sessions.
+// Without the passthrough, a session's events carry no session id.
 type SessionHookCheck struct {
 	FixableCheck
 	filesToFix []string // Cached during Run for use in Fix

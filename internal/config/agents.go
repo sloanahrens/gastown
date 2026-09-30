@@ -101,7 +101,6 @@ type AgentPresetInfo struct {
 	SupportsHooks bool `json:"supports_hooks,omitempty"`
 
 	// SupportsForkSession indicates if --fork-session is available.
-	// Used by the seance command for session forking.
 	SupportsForkSession bool `json:"supports_fork_session,omitempty"`
 
 	// NonInteractive contains settings for non-interactive mode.

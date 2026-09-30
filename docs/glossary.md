@@ -83,9 +83,6 @@ Real-time messaging between agents with `gt nudge`. Nudges allow immediate commu
 ### Handoff
 Agent session refresh via `/handoff`. When context gets full or an agent needs a fresh start, handoff transfers work state to a new session.
 
-### Seance
-Communicating with previous sessions via `gt seance`. Allows agents to query their predecessors for context and decisions from earlier work.
-
 ### Patrol
 Ephemeral loop maintaining system heartbeat. Patrol agents (Deacon, Witness) continuously cycle through health checks and trigger actions as needed.
 

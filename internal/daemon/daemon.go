@@ -67,7 +67,6 @@ type Daemon struct {
 	convoyManager *ConvoyManager
 	beadsStores   map[string]beadsdk.Storage
 	doltServer    *DoltServerManager
-	krcPruner     *KRCPruner
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
@@ -839,19 +838,6 @@ func (d *Daemon) Run() (err error) {
 		})
 	}
 
-	// Start KRC pruner for automatic ephemeral data cleanup
-	krcPruner, err := NewKRCPruner(d.config.TownRoot, d.logger.Printf)
-	if err != nil {
-		d.logger.Printf("Warning: failed to create KRC pruner: %v", err)
-	} else {
-		d.krcPruner = krcPruner
-		if err := d.krcPruner.Start(); err != nil {
-			d.logger.Printf("Warning: failed to start KRC pruner: %v", err)
-		} else {
-			d.logger.Println("KRC pruner started")
-		}
-	}
-
 	// Start dedicated Dolt health check ticker if Dolt server is configured.
 	// This runs at a much higher frequency (default 30s) than the general
 	// heartbeat (3 min) so Dolt crashes are detected quickly.
@@ -1019,32 +1005,6 @@ func (d *Daemon) Run() (err error) {
 		scheduledSlingsChan = scheduledSlingsTicker.C
 		defer scheduledSlingsTicker.Stop()
 		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrolConfig.Patrols.ScheduledSlings.Entries))
-	}
-
-	// Start quota dog ticker if configured.
-	// Scans for rate-limited sessions and automatically rotates credentials.
-	var quotaDogTicker *time.Ticker
-	var quotaDogChan <-chan time.Time
-	if d.isPatrolActive("quota_dog") {
-		interval := quotaDogInterval(d.patrolConfig)
-		quotaDogTicker = time.NewTicker(interval)
-		quotaDogChan = quotaDogTicker.C
-		defer quotaDogTicker.Stop()
-		d.logger.Printf("Quota dog ticker started (interval %v)", interval)
-	}
-
-	// Start quota resume ticker if configured. This runs independently of
-	// quota_dog and the account pool — it nudges sessions whose own
-	// session-limit reset has passed even on a town with < 2 accounts
-	// configured, where quota_dog's rotation path can't run at all (gt-749e).
-	var quotaResumeTicker *time.Ticker
-	var quotaResumeChan <-chan time.Time
-	if d.isPatrolActive("quota_resume") {
-		interval := quotaResumeInterval(d.patrolConfig)
-		quotaResumeTicker = time.NewTicker(interval)
-		quotaResumeChan = quotaResumeTicker.C
-		defer quotaResumeTicker.Stop()
-		d.logger.Printf("Quota resume ticker started (interval %v)", interval)
 	}
 
 	// Start the idle-seat dispatch check ticker if configured. The mayor is
@@ -1219,21 +1179,6 @@ func (d *Daemon) Run() (err error) {
 			// decides due-ness, so a coarse tick is sufficient (gt-nj23).
 			if !d.isShutdownInProgress() {
 				d.triggerScheduledSlings()
-			}
-
-		case <-quotaDogChan:
-			// Quota dog — scans for rate-limited sessions and automatically
-			// rotates credentials to available accounts via keychain swap.
-			if !d.isShutdownInProgress() {
-				d.runQuotaDog()
-			}
-
-		case <-quotaResumeChan:
-			// Quota resume — nudges sessions whose own session-limit reset
-			// has passed, independent of quota_dog / the account pool
-			// (gt-749e).
-			if !d.isShutdownInProgress() {
-				d.runQuotaResume()
 			}
 
 		case <-mayorDispatchChan:
@@ -2193,10 +2138,10 @@ func (d *Daemon) checkDeaconHeartbeat() {
 func (d *Daemon) restartStuckDeacon(sessionName, reason string) {
 	// Distinguish a usage-limit pause from a true stall. If Claude is sitting
 	// at a rate-limit prompt its progress stops, looking identical to a
-	// stall, but a restart won't help (the new session hits the same limit)
-	// and would spend the restart budget. quota_dog rotates accounts.
+	// stall, but a restart won't help: the new session hits the same limit
+	// and would spend the restart budget.
 	if pane, err := d.tmux.CapturePane(sessionName, 30); err == nil && IsClaudeUsageLimit(pane) {
-		d.logger.Printf("Deacon paused — Claude usage-limit detected, not restarting (quota_dog will rotate accounts). Reason: %s", reason)
+		d.logger.Printf("Deacon paused — Claude usage-limit detected, not restarting. Reason: %s", reason)
 		return
 	}
 
@@ -2785,12 +2730,6 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 		d.logger.Println("Convoy manager stopped")
 	}
 	d.beadsStores = nil
-
-	// Stop KRC pruner
-	if d.krcPruner != nil {
-		d.krcPruner.Stop()
-		d.logger.Println("KRC pruner stopped")
-	}
 
 	// Stop Dolt server if we're managing it. An upgrade restart leaves Dolt
 	// running: the server is detached and the next daemon adopts it via

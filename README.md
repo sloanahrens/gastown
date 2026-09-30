@@ -103,15 +103,6 @@ Severity-routed issue escalation. Agents that hit blockers escalate via `gt esca
 
 Config-driven capacity governor for polecat dispatch. Prevents API rate limit exhaustion by batching dispatch under configurable concurrency limits. Default is direct dispatch; set `scheduler.max_polecats` to enable deferred dispatch with the daemon. See [Scheduler](docs/design/scheduler.md).
 
-### Seance 👻
-
-Session discovery and continuation. Discovers previous agent sessions via `.events.jsonl` logs, enabling agents to query their predecessors for context and decisions from earlier work.
-
-```bash
-gt seance                       # List discoverable predecessor sessions
-gt seance --talk <id> -p "What did you find?"  # One-shot question
-```
-
 > **New to Gas Town?** See the [Glossary](docs/glossary.md) for a complete guide to terminology and concepts.
 
 ## Installation
@@ -250,7 +241,6 @@ gt mayor attach
 export GIT_USER="<your name>"
 export GIT_EMAIL="<your email>"
 export FOLDER="/path/to/empty/dir"   # empty directory or existing Gas Town HQ
-export DASHBOARD_PORT=8080           # optional, host port for the dashboard
 
 mkdir -p "$FOLDER"
 docker compose build              # only needed on first run or after code changes
@@ -269,7 +259,7 @@ gh auth login                     # optional: required for private GitHub rigs
 gt mayor attach
 ```
 
-The dashboard port is exposed from the container to the host. Treat it as a trusted local-network surface, and do not point `FOLDER` at a host workspace that a native `gt` install is using at the same time.
+Do not point `FOLDER` at a host workspace that a native `gt` install is using at the same time.
 
 ## Quick Start Guide
 
@@ -495,8 +485,8 @@ gt sling <bead-id> <rig> --agent cursor   # Override runtime for this sling/spaw
 gt mayor attach             # Start Mayor session
 gt mayor start --agent auggie           # Run Mayor with a specific agent alias
 gt prime                    # Context recovery (run inside existing session)
-gt feed                     # Real-time activity feed (TUI)
-gt feed --problems          # Start in problems view (stuck agent detection)
+gt feed                     # Real-time activity feed
+gt feed --since 1h          # Events from the last hour
 ```
 
 **Built-in agent presets**: `claude`, `gemini`, `codex`, `kiro`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`, `pi`, `omp`
@@ -531,8 +521,7 @@ gt config default-agent claude-glm
 gt escalate -s HIGH "description"  # Escalate a blocker
 gt escalate list               # List open escalations
 gt scheduler status            # Show scheduler state
-gt seance                      # Discover previous sessions
-gt seance --talk <id>          # Query a predecessor session
+gt session list                # List agent sessions
 ```
 
 ### Beads Integration
@@ -550,58 +539,15 @@ Gas Town includes built-in formulas for common workflows. See `internal/formula/
 
 ## Activity Feed
 
-`gt feed` launches an interactive terminal dashboard for monitoring all agent activity in real-time. It combines beads activity, agent events, and merge queue updates into a three-panel TUI:
-
-- **Agent Tree** - Hierarchical view of all agents grouped by rig and role
-- **Convoy Panel** - In-progress and recently-landed convoys
-- **Event Stream** - Chronological feed of creates, completions, slings, nudges, and more
+`gt feed` prints the town's event stream (`~/gt/.events.jsonl`) as plain text, one line per event: creates, completions, slings, nudges, merges, and patrol activity.
 
 ```bash
-gt feed                      # Launch TUI dashboard
-gt feed --problems           # Start in problems view
-gt feed --plain              # Plain text output (no TUI)
-gt feed --window             # Open in dedicated tmux window
+gt feed                      # Recent events (follows when stdout is a terminal)
 gt feed --since 1h           # Events from last hour
+gt feed --follow             # Stream new events
+gt feed --rig greenplace     # Filter to one rig
+gt feed --window             # Open in dedicated tmux window
 ```
-
-**Navigation:** `j`/`k` to scroll, `Tab` to switch panels, `1`/`2`/`3` to jump to a panel, `?` for help, `q` to quit.
-
-### Problems View
-
-At scale (20-50+ agents), spotting stuck agents in the activity stream becomes difficult. The problems view surfaces agents needing human intervention by analyzing structured beads data.
-
-Press `p` in `gt feed` (or start with `gt feed --problems`) to toggle the problems view, which groups agents by health state:
-
-| State | Condition |
-|-------|-----------|
-| **GUPP Violation** | Hooked work with no progress for an extended period |
-| **Stalled** | Hooked work with reduced progress |
-| **Zombie** | Dead tmux session |
-| **Working** | Active, progressing normally |
-| **Idle** | No hooked work |
-
-**Intervention keys** (in problems view): `n` to nudge the selected agent, `h` to handoff (refresh context).
-
-## Dashboard
-
-Gas Town includes a web dashboard for monitoring your workspace. The dashboard
-must be run from inside a Gas Town workspace (HQ) directory.
-
-```bash
-# Start dashboard (default port 8080)
-gt dashboard
-
-# Start on a custom port
-gt dashboard --port 3000
-
-# Start and automatically open in browser
-gt dashboard --open
-```
-
-The dashboard gives you a single-page overview of everything happening in your
-workspace: agents, convoys, hooks, queues, issues, and escalations. It
-auto-refreshes via htmx and includes a command palette for running gt commands
-directly from the browser.
 
 ## Monitoring & Health
 
@@ -658,18 +604,6 @@ gt scheduler resume                      # Resume dispatch
 ```
 
 Default mode (`max_polecats = -1`) dispatches immediately via `gt sling`. When a limit is set, the daemon dispatches incrementally, respecting capacity. See [Scheduler design](docs/design/scheduler.md).
-
-## Seance
-
-Discover and query previous agent sessions:
-
-```bash
-gt seance                              # List discoverable predecessor sessions
-gt seance --talk <id>                  # Full context conversation with predecessor
-gt seance --talk <id> -p "Question?"   # One-shot question to predecessor
-```
-
-Seance discovers sessions via `.events.jsonl` logs, enabling agents to recover context and decisions from earlier work without re-reading entire codebases.
 
 ## Telemetry (OpenTelemetry)
 
@@ -756,7 +690,6 @@ gt completion fish > ~/.config/fish/completions/gt.fish
 - **Leverage hooks for persistence** - Your work won't disappear
 - **Create formulas for repeated tasks** - Save time with Beads recipes
 - **Use `gt feed` for live monitoring** - Watch agent activity and catch stuck agents early
-- **Monitor the dashboard** - Get real-time visibility in the browser
 - **Let the Mayor orchestrate** - It knows how to manage agents
 
 ## Design Documentation

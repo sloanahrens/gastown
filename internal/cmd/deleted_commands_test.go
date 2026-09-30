@@ -63,6 +63,13 @@ var deletedCommands = [][]string{
 	{"dolt", "rebase"},
 	{"dolt", "rollback"},
 	{"dolt", "recover"},
+	{"dashboard"},
+	{"krc"},
+	{"quota"},
+	{"account"},
+	{"costs"},
+	{"seance"},
+	{"mountain"},
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the

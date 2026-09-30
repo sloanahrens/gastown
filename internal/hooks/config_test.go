@@ -52,9 +52,6 @@ func TestLoadSaveBase(t *testing.T) {
 	if len(loaded.UserPromptSubmit) != 1 {
 		t.Errorf("expected 1 UserPromptSubmit hook, got %d", len(loaded.UserPromptSubmit))
 	}
-	if len(loaded.Stop) != 1 {
-		t.Errorf("expected 1 Stop hook, got %d", len(loaded.Stop))
-	}
 }
 
 func TestLoadSaveOverride(t *testing.T) {
@@ -259,9 +256,6 @@ func TestDefaultBase(t *testing.T) {
 	}
 	if len(cfg.UserPromptSubmit) == 0 {
 		t.Error("DefaultBase should have UserPromptSubmit hooks")
-	}
-	if len(cfg.Stop) == 0 {
-		t.Error("DefaultBase should have Stop hooks")
 	}
 
 	found := false
@@ -478,7 +472,7 @@ func TestComputeExpectedBackfillsSessionStart(t *testing.T) {
 	// It has Stop, PreCompact, UserPromptSubmit but no SessionStart.
 	staleBase := &HooksConfig{
 		Stop: []HookEntry{
-			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt costs record"}}},
+			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt status"}}},
 		},
 		PreCompact: []HookEntry{
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt prime --hook"}}},
@@ -519,7 +513,7 @@ func TestComputeExpectedBackfillsSessionStart(t *testing.T) {
 		// On-disk Stop should be preserved (not overwritten by DefaultBase)
 		if len(expected.Stop) == 0 {
 			t.Errorf("%s: on-disk Stop should be preserved", target)
-		} else if expected.Stop[0].Hooks[0].Command != "gt costs record" {
+		} else if expected.Stop[0].Hooks[0].Command != "gt status" {
 			t.Errorf("%s: on-disk Stop should take precedence, got %q", target, expected.Stop[0].Hooks[0].Command)
 		}
 	}

@@ -35,8 +35,8 @@ const otelShutdownBudget = 5 * time.Second
 // ShutdownBudget is the real wall-clock ceiling on Daemon.shutdown(): the sum
 // of its two bounded steps in the order they run — the Dolt SQL server's own
 // graceful-stop wait (doltServerStopBudget) before it SIGKILLs, then the OTel
-// flush. Everything else in shutdown (stopping the curator, convoy manager,
-// KRC pruner) is in-process and returns immediately. Shutdown no longer
+// flush. Everything else in shutdown (stopping the curator, convoy manager)
+// is in-process and returns immediately. Shutdown no longer
 // pushes Dolt remotes (ADR 0002), so there is no third step.
 //
 // This is the actual value a daemon restart must plan around — not an

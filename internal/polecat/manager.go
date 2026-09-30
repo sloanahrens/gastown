@@ -2138,7 +2138,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// createAgentBeadWithRetry sets agent_state in the description only.
 	// The column stays stale (e.g., "idle" from previous gt done) until
 	// StartSession sets it to "working". Without this, the column and
-	// description diverge, causing dashboards to show incorrect state.
+	// description diverge, and readers of either see incorrect state.
 	// Agent beads live in town DB — bypass prefix routing.
 	if err := m.agentBeads().UpdateAgentState(agentID, "spawning"); err != nil {
 		style.PrintWarning("could not sync agent_state column to spawning: %v", err)

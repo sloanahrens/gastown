@@ -8,10 +8,10 @@ import (
 )
 
 // TestLifecycleVerbsRejectPositionalArgs is gt-fcxe9.14: runShutdown ignored
-// its positional args, so mol-town-shutdown's "gt shutdown preflight" was a
-// real shutdown behind a confirmation prompt. The town lifecycle verbs take
-// no positional args; a stray word must fail cobra's Args check, which runs
-// before RunE and so before any prompt or stop.
+// its positional args, so a typo after a lifecycle verb ran a real shutdown
+// behind a confirmation prompt. The town lifecycle verbs take no positional
+// args; a stray word must fail cobra's Args check, which runs before RunE and
+// so before any prompt or stop.
 func TestLifecycleVerbsRejectPositionalArgs(t *testing.T) {
 	t.Parallel()
 	for _, c := range []*cobra.Command{shutdownCmd, downCmd, upCmd, thawCmd, maintainCmd} {

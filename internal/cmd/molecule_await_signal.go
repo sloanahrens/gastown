@@ -496,11 +496,11 @@ func waitForActivitySignal(ctx context.Context, townRoot, rig string) (*AwaitSig
 // continues; only a relevant line ends it. This replaces the former
 // bd activity --follow subprocess approach.
 //
-// The tail follows the path, not the descriptor: the daemon's KRC pruner
-// replaces the file (tmp + rename) on start and hourly, and a waiter still
-// reading the old inode used to sleep through every event to its timeout
-// (claude-9jq). events.Tail reopens the new file and resumes after the last
-// line already seen, so retained history is not replayed.
+// The tail follows the path, not the descriptor: a rotation that replaces the
+// file (tmp + rename) leaves a waiter still reading the old inode, so it used
+// to sleep through every event to its timeout (claude-9jq). events.Tail
+// reopens the new file and resumes after the last line already seen, so
+// retained history is not replayed.
 func waitForEventsFile(ctx context.Context, eventsPath, rig string) (*AwaitSignalResult, error) {
 	tail, err := events.OpenTail(eventsPath)
 	if err != nil {

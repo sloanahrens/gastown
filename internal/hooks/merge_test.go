@@ -46,7 +46,7 @@ func TestMergeHooksRoleOverride(t *testing.T) {
 			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt prime"}}},
 		},
 		Stop: []HookEntry{
-			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt costs record"}}},
+			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt status"}}},
 		},
 	}
 
@@ -126,7 +126,7 @@ func TestMergeHooksDifferentMatcherAppends(t *testing.T) {
 func TestMergeHooksEmptyHooksDisables(t *testing.T) {
 	base := &HooksConfig{
 		Stop: []HookEntry{
-			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt costs record"}}},
+			{Matcher: "", Hooks: []Hook{{Type: "command", Command: "gt status"}}},
 		},
 	}
 
