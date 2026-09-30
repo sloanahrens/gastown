@@ -2863,9 +2863,6 @@ func EnsureRigIssuePrefix(townRoot, rigName string, serverMode bool) error {
 		return fmt.Errorf("ensuring metadata.json: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	if !serverMode {
 		if err := Start(townRoot); err != nil {
 			return fmt.Errorf("starting temporary Dolt server: %w", err)
@@ -2877,7 +2874,43 @@ func EnsureRigIssuePrefix(townRoot, rigName string, serverMode bool) error {
 		}()
 	}
 
-	store, err := openRigStoreFromConfig(ctx, townRoot, beadsDir, rigName)
+	return seedRigIssuePrefix(townRoot, beadsDir, rigName, prefix)
+}
+
+// seedRigIssuePrefix makes the database's issue_prefix prefix. It reads the
+// value through bd first, and a database that already carries it is left
+// alone without opening a store (the idempotent path gt install takes for
+// every existing rig). A bd read also creates the schema of an empty
+// database at bd's level, so the library write below never births one.
+//
+// The write itself stays on the library: bd has no verb that sets
+// issue_prefix on an existing database. bd config set refuses the key, bd
+// rename-prefix fails when no prefix is set, and bd init and bd bootstrap
+// refuse or ignore a workspace whose metadata.json exists (gt-7iwy0.2; the
+// beads-side verb gt-7iwy0.3 needs is an issue_prefix set for a database
+// whose prefix is unset or stale).
+func seedRigIssuePrefix(townRoot, beadsDir, database, prefix string) error {
+	if current, err := readRigIssuePrefix(townRoot, beadsDir); err == nil && current == prefix {
+		return nil
+	}
+	return writeRigIssuePrefixViaStore(townRoot, beadsDir, database, prefix)
+}
+
+// readRigIssuePrefix returns the database's issue_prefix as bd reports it
+// ("" when unset): bd config get issue_prefix, the underscore key, which bd
+// answers from the database rather than config.yaml. Tests replace it.
+var readRigIssuePrefix = func(townRoot, beadsDir string) (string, error) {
+	return beads.NewWithBeadsDir(townRoot, beadsDir).ConfigGet("issue_prefix")
+}
+
+// writeRigIssuePrefixViaStore sets issue_prefix through the in-process
+// library store, the one write bd cannot make (see seedRigIssuePrefix).
+// Tests replace it.
+var writeRigIssuePrefixViaStore = func(townRoot, beadsDir, database, prefix string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	store, err := openRigStoreFromConfig(ctx, townRoot, beadsDir, database)
 	if err != nil {
 		return fmt.Errorf("opening beads database: %w", err)
 	}
@@ -2896,22 +2929,11 @@ func EnsureRigIssuePrefix(townRoot, rigName string, serverMode bool) error {
 //
 // bd 1.2+ refuses `bd config set issue_prefix` ("use bd rename-prefix"), but
 // legacy databases created before issue_prefix was mandatory have it unset
-// entirely, which blocks every `bd create` in that rig. The SDK store path is
-// the supported way to seed it (same as EnsureRigIssuePrefix at init time).
+// entirely, which blocks every `bd create` in that rig. seedRigIssuePrefix
+// reads through bd and writes through the library store only when the value
+// differs (same as EnsureRigIssuePrefix at init time).
 func SetRigIssuePrefix(townRoot, beadsDir, database, prefix string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	store, err := openRigStoreFromConfig(ctx, townRoot, beadsDir, database)
-	if err != nil {
-		return fmt.Errorf("opening beads database: %w", err)
-	}
-	defer func() { _ = store.Close() }()
-
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		return fmt.Errorf("setting issue_prefix: %w", err)
-	}
-	return nil
+	return seedRigIssuePrefix(townRoot, beadsDir, database, prefix)
 }
 
 var beadsOpenEnvMu sync.Mutex

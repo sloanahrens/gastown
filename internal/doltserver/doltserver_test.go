@@ -5267,3 +5267,49 @@ func TestHealthMetrics_CommitFreshnessFields(t *testing.T) {
 		t.Errorf("LastCommitAge = %v, want >= 0", metrics.LastCommitAge)
 	}
 }
+
+// An issue_prefix bd already reports is not written again, and the store is
+// never opened for it (gt-7iwy0.2): the read goes through bd, and the one
+// library write left is for the seed bd has no verb for.
+func TestEnsureRigIssuePrefix_ReadsThroughBDAndSkipsMatchingPrefix(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := []byte(`{"prefix":"tr-","path":"testrig/mayor/rig"}` + "\n")
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), routes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevRead, prevOpen := readRigIssuePrefix, writeRigIssuePrefixViaStore
+	t.Cleanup(func() { readRigIssuePrefix, writeRigIssuePrefixViaStore = prevRead, prevOpen })
+	var reads []string
+	var writes []string
+	current := "tr"
+	readRigIssuePrefix = func(_, beadsDir string) (string, error) {
+		reads = append(reads, beadsDir)
+		return current, nil
+	}
+	writeRigIssuePrefixViaStore = func(_, _, database, prefix string) error {
+		writes = append(writes, database+"="+prefix)
+		return nil
+	}
+
+	if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
+		t.Fatalf("EnsureRigIssuePrefix: %v", err)
+	}
+	if len(reads) != 1 || len(writes) != 0 {
+		t.Fatalf("matching prefix: reads %q writes %q, want one bd read and no write", reads, writes)
+	}
+	if err := SetRigIssuePrefix(townRoot, reads[0], "testrig", "tr"); err != nil || len(writes) != 0 {
+		t.Fatalf("SetRigIssuePrefix with a matching prefix = %v, writes %q; want nil and no write", err, writes)
+	}
+
+	current = ""
+	if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
+		t.Fatalf("EnsureRigIssuePrefix (unset): %v", err)
+	}
+	if len(writes) != 1 || writes[0] != "testrig=tr" {
+		t.Fatalf("unset prefix: writes %q, want testrig=tr", writes)
+	}
+}
