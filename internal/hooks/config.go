@@ -1154,8 +1154,9 @@ func DefaultBase() *HooksConfig {
 		// hook fires on unrelated commands. Every guard is instead
 		// self-filtering: it reads tool_input.command off stdin and inspects
 		// the actual command text (tap_guard_pr_workflow.go,
-		// tap_guard_dangerous.go, tap_guard_container_suite.go). One bare-Bash
-		// entry per guard covers every pattern the guard recognizes.
+		// tap_guard_dangerous.go, tap_guard_container_suite.go). One
+		// shellExecutingToolMatcher entry per guard covers every pattern the
+		// guard recognizes.
 		//
 		// pr-workflow is self-filtering and covers gh pr create / git
 		// checkout -b / git switch -c in one handler, so it is ONE entry —
