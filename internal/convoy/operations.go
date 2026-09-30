@@ -60,7 +60,7 @@ func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, 
 	}
 
 	// Find convoys tracking this issue
-	convoyIDs := getTrackingConvoys(ctx, store, issueID, logger)
+	convoyIDs := getTrackingConvoys(ctx, store, townRoot, issueID, logger)
 	if len(convoyIDs) == 0 {
 		return nil
 	}
@@ -97,20 +97,31 @@ func CheckConvoysForIssue(ctx context.Context, store beadsdk.Storage, townRoot, 
 }
 
 // getTrackingConvoys returns convoy IDs that track the given issue.
-// Uses SDK GetDependentsWithMetadata filtered by type "tracks".
-func getTrackingConvoys(ctx context.Context, store beadsdk.Storage, issueID string, logger func(format string, args ...interface{})) []string {
-	dependents, err := store.GetDependentsWithMetadata(ctx, issueID)
-	if err != nil {
-		if logger != nil {
-			logger("Convoy: getTrackingConvoys(%s) store error: %v", issueID, err)
-		}
-		return nil
+// Uses SDK GetDependentsWithMetadata filtered by type "tracks". A rig bead is
+// tracked from hq as external:<prefix>:<id> (gt convoy's trackingDependsOnID),
+// and the store matches the target exactly, so an issue that routes to a rig
+// is looked up in that form as well as bare (gt-3y3rl).
+func getTrackingConvoys(ctx context.Context, store beadsdk.Storage, townRoot, issueID string, logger func(format string, args ...interface{})) []string {
+	targets := []string{issueID}
+	if rigForIssue(townRoot, issueID) != "" {
+		targets = append(targets, fmt.Sprintf("external:%s:%s", strings.TrimSuffix(beads.ExtractPrefix(issueID), "-"), issueID))
 	}
 
 	convoyIDs := make([]string, 0)
-	for _, d := range dependents {
-		if string(d.DependencyType) == "tracks" {
-			convoyIDs = append(convoyIDs, d.ID)
+	seen := make(map[string]bool)
+	for _, target := range targets {
+		dependents, err := store.GetDependentsWithMetadata(ctx, target)
+		if err != nil {
+			if logger != nil {
+				logger("Convoy: getTrackingConvoys(%s) store error: %v", target, err)
+			}
+			return nil
+		}
+		for _, d := range dependents {
+			if string(d.DependencyType) == "tracks" && !seen[d.ID] {
+				seen[d.ID] = true
+				convoyIDs = append(convoyIDs, d.ID)
+			}
 		}
 	}
 	return convoyIDs
