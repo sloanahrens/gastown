@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -38,6 +40,20 @@ const (
 	// beads — every agent, dog, and patrol-molecule bead in the town. Auto-close
 	// is for work that was abandoned, and abandonment does not look like a week.
 	defaultStaleIssueAge = 30 * 24 * time.Hour
+
+	// reaperDispatchMaxAttempts bounds the retry of a single dog dispatch. Only a
+	// dispatch that provably committed nothing is retried (reaperDispatchRetryable),
+	// so three attempts cannot pin three wisps.
+	reaperDispatchMaxAttempts = 3
+
+	// reaperDispatchRetryDelay is the base backoff before a retry, multiplied by
+	// the attempt number. It targets contention that clears in seconds.
+	reaperDispatchRetryDelay = 2 * time.Second
+
+	// maxSummarizedOutputLen caps one subprocess's output in a log line. The
+	// daemon writes one unrotated log file, so one chatty failure must not be
+	// able to fill it.
+	maxSummarizedOutputLen = 2000
 )
 
 // wispReaperInterval returns the configured interval, or the default (1h).
@@ -247,41 +263,138 @@ func (d *Daemon) reapWisps() {
 	d.logger.Printf("wisp_reaper: dispatched to Dog for formula-driven execution")
 }
 
-// dispatchReaperDog dispatches the mol-dog-reaper formula to a Dog via gt sling.
-func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
-	args := []string{"sling", constants.MolDogReaper, "deacon/dogs"}
-	for k, v := range vars {
-		args = append(args, "--var", fmt.Sprintf("%s=%s", k, v))
+// SlingDogArgs returns the argv `gt sling` is exec'd with to hand a formula to
+// the dog pool, with vars sorted so the argv is reproducible.
+//
+// Exported for the command tree's own package to parse: a dispatch that stops
+// parsing does not fail loudly, it degrades to the inline scan, so a flag
+// deleted from the CLI (D7, 388d0320) costs the Dog-driven reaper with no
+// symptom but a log line (gt-4k3fj.10).
+func SlingDogArgs(formula string, vars map[string]string) []string {
+	args := []string{"sling", formula, "deacon/dogs"}
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
 	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--var", k+"="+vars[k])
+	}
+	return args
+}
 
+// dispatchReaperDog dispatches the mol-dog-reaper formula to a Dog via gt sling.
+//
+// A dispatch that loses a Dolt race is retried rather than handed straight to
+// the inline fallback, which runs with auto-close disarmed. The daemon fires
+// this while its backup and jsonl sweeps are saturating the same server, so the
+// loss is recurring rather than exceptional (gt-4k3fj.10).
+func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
+	args := SlingDogArgs(constants.MolDogReaper, vars)
+	var lastErr error
+	for attempt := 1; attempt <= reaperDispatchMaxAttempts; attempt++ {
+		out, err := d.runReaperSling(args)
+		if err == nil {
+			return nil
+		}
+		// Capture output so a failure reports WHY it failed, not just that it did.
+		lastErr = fmt.Errorf("gt sling: %w: %s", err, summarizeCommandOutput(out))
+		if !reaperDispatchRetryable(string(out)) || attempt == reaperDispatchMaxAttempts {
+			break
+		}
+		delay := time.Duration(attempt) * reaperDispatchRetryDelay
+		d.logger.Printf("wisp_reaper: Dog dispatch attempt %d/%d lost to transient Dolt contention (%s); retrying in %s",
+			attempt, reaperDispatchMaxAttempts, summarizeCommandOutput(out), delay)
+		d.waitReaperDispatch(delay)
+	}
+	return lastErr
+}
+
+// reaperDispatchRetryable reports whether a failed dispatch is safe to repeat.
+//
+// A dispatch pins a wisp to a dog, so a repeat is safe only when the failure
+// provably committed nothing: the wisp-creating transaction aborted (Dolt 40001
+// serialization failure), was refused, or never got past an open circuit
+// breaker. Every marker is gated on "creating wisp", which is the error prefix
+// `gt sling` puts on a failed `bd mol wisp` (sling_formula.go). A transient
+// failure on any later step — parsing the wisp id, hooking it, starting the dog
+// — means the wisp exists, and re-running the command would create a second one,
+// orphaned. Renaming that prefix costs the retry and nothing else.
+//
+// A timeout, "unreachable" and a reset connection stay out even so: each can
+// mean the request landed and only the answer was lost, and repeating one would
+// set a second sweep racing the first, which is worse than the inline fallback
+// the retry avoids.
+//
+// The cause is read from the command's output rather than the exec error,
+// because os/exec reduces every non-zero exit to "exit status 1".
+func reaperDispatchRetryable(output string) bool {
+	if !strings.Contains(output, "creating wisp") {
+		return false
+	}
+	for _, marker := range []string{
+		"circuit breaker is open",
+		"connection refused",
+		"serialization failure", // Dolt 40001: aborted and rolled back
+	} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// runReaperSling execs the dispatch command. Tests replace reaperSlingFn to
+// drive the retry path without a gt binary.
+func (d *Daemon) runReaperSling(args []string) ([]byte, error) {
+	if d.reaperSlingFn != nil {
+		return d.reaperSlingFn(args)
+	}
 	cmd := exec.Command(d.gtPath, args...) //nolint:gosec // G204: d.gtPath resolved at daemon init via LookPath
 	cmd.Dir = d.config.TownRoot
 	// gt sling performs writes, so use mutation routing env: it preserves PATH
 	// while stripping stale bd target selectors and derived Beads endpoint aliases.
 	cmd.Env = bdMutationRoutingEnv(d.config.TownRoot)
 	util.SetDetachedProcessGroup(cmd)
-	// Capture output so a failure reports WHY it failed, not just that it did.
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gt sling: %w: %s", err, summarizeCommandOutput(out))
-	}
-	return nil
+	return cmd.CombinedOutput()
 }
 
-// summarizeCommandOutput renders subprocess output for a single log line.
-// Commands here are chatty (sling prints progress), so the tail is what
-// carries the failure; the cap keeps one bad cycle from filling the log.
+// waitReaperDispatch sleeps before retrying a dispatch. Tests replace the fn so
+// the retry path costs no wall-clock time.
+func (d *Daemon) waitReaperDispatch(delay time.Duration) {
+	if d.reaperSlingWaitFn != nil {
+		d.reaperSlingWaitFn(delay)
+		return
+	}
+	time.Sleep(delay)
+}
+
+// summarizeCommandOutput renders subprocess output for a single log line, capped
+// at both ends. Cobra prints the cause first ("Error: <cause>") and a ~3KB usage
+// dump after it, so a tail-only cap keeps the usage dump and discards the one
+// line that says what happened — the misdiagnosis gt-4k3fj.10 records. Nothing
+// parses this; it goes to the log as-is.
 func summarizeCommandOutput(out []byte) string {
-	const maxLen = 2000
+	const elision = " …[elided]… "
 	s := strings.TrimSpace(string(out))
 	if s == "" {
 		return "(no output)"
 	}
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > maxLen {
-		s = s[len(s)-maxLen:]
+	if len(s) <= maxSummarizedOutputLen {
+		return s
 	}
-	return s
+	// Cut on rune boundaries: gt's own progress output carries multi-byte marks
+	// (✓, 🎯), and a log line that splits one is mojibake.
+	head := (maxSummarizedOutputLen - len(elision)) / 2
+	for head > 0 && !utf8.RuneStart(s[head]) {
+		head--
+	}
+	tail := len(s) - (maxSummarizedOutputLen - len(elision) - head)
+	for tail < len(s) && !utf8.RuneStart(s[tail]) {
+		tail++
+	}
+	return s[:head] + elision + s[tail:]
 }
 
 // reaperWriterFor resolves the bd writer a live reaper run writes through;
