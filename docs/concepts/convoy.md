@@ -221,8 +221,8 @@ Even "swarm of one" gets convoy visibility.
 ## Dispatch holds
 
 A convoy feeds its next ready bead to the rig's default agent. When a bead needs
-a different hand — a specific runtime, the mayor's ruling, or nothing at all
-until something else lands — record the decision on the bead itself. Both
+a different hand — a specific runtime, the mayor's ruling, a person, or nothing
+at all until something else lands — record the decision on the bead itself. Both
 feeders read the bead's record before slinging, skip a held bead, and log the
 marker that held it.
 
@@ -230,15 +230,34 @@ A hold parks the work wherever an automatic path finds it, not only at dispatch:
 the witness reads the same markers before restarting a polecat whose hooked bead
 carries one, so a session it would otherwise raise against held work stays down
 (gt-n38c6). Comment-recorded holds are the one exception there — the witness
-reads a bead through `bd show --json`, which omits comments.
+reads a bead through `bd show --json`, which omits comments. `gt sling` itself
+reads the operator and label holds before it spends a polecat seat, so a bead
+the operator owns is refused however the sling was asked for (gt-21pl0).
 
 | Marker, as written | Field the feeder reads it from |
 |--------------------|-------------------------------|
 | `deferred`, `pinned` | status |
+| `operator` | label |
+| a person's handle (`sloan`, `Sloan Ahrens`, `overseer`) | assignee |
 | `needs-sonnet`, `needs-mayor-review` | label |
 | `MAYOR DESIGN DECISION`, `do not redispatch` | notes, design, or a comment |
 | `HOLD RELEASED` | a comment, to lift an earlier comment hold |
 | `MERGE REJECTION` | notes, written by the refinery when it rejects a branch |
+
+The `operator` label and a human assignee are the operator reservation: work
+the person means to do by hand. An agent address is always slash-qualified
+(`gastown/polecats/onyx`, `gastown/crew/sloan`, `mayor/`, `deacon/dogs/boot`),
+so any other assignee is a person. Every automatic path skips it: the convoy
+feeders and the deacon's redispatch through the hold rule above, the
+idle-seat (`seat-refill`) and dispatch-check nudges that would otherwise ask
+the mayor to sling it, and `gt sling` itself, which refuses one before it
+spends a polecat seat. `gt sling --force` is the way to hand the work to an
+agent anyway.
+
+On 2026-09-25 a convoy feeder re-slung gt-nj23.9 to a fresh polecat two minutes
+after the mayor had un-slung it and assigned it to the operator, undoing the
+reversal (gt-21pl0). Release the reservation the same way as any other field
+hold: remove the label, or assign the bead to an agent.
 
 A merge rejection holds the bead for the convoy feeders only. The refinery
 reopens a rejected bead as open and unassigned, which is exactly what the

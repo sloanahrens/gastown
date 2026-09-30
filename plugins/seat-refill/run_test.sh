@@ -476,6 +476,33 @@ assert_eq "$(jq -r '.episodes.local.last_nudge' "$GT_SEAT_REFILL_STATE")" "0" \
   "nudge bound fired: unconfirmed delivery is not recorded as sent"
 rm -f "$TEST_STATE/timeout_expires"
 
+# --- Case 19: the operator label is not fillable work ---------------------
+# A bead the operator reserved is theirs to do by hand. Asking the mayor to
+# sling it is what put gt-nj23.9 back on a polecat after the operator had taken
+# it (gt-21pl0), so the label keeps it off the candidate list entirely — however
+# the label was typed, since a label is written by hand.
+setup_case
+write_polecats "$LIVE_NONE"
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-op","title":"Hand-run audit","status":"open","priority":1,"issue_type":"task","labels":["Operator"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 16000000
+run_plugin 16000300
+assert_eq "$(nudges)" "0" \
+  "operator label: an empty seat with only operator work stays silent"
+
+# An ordinary label is not the reservation: the same seat fires on it.
+cat > "$TEST_STATE/ready/gastown.json" <<'JSON'
+{"sources":[{"name":"gastown","issues":[
+  {"id":"gt-plain","title":"Ordinary work","status":"open","priority":1,"issue_type":"task","labels":["run-blocker"]}
+]}],"summary":{},"town_root":"/town"}
+JSON
+run_plugin 16000600
+assert_eq "$(nudges)" "1" \
+  "operator label: another label does not reserve the bead"
+
 echo ""
 if [ "$FAIL" -gt 0 ]; then
   printf '=== %d passed, %d FAILED ===\n' "$PASS" "$FAIL"

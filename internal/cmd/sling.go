@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -650,6 +651,18 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Use --force to override when intentionally re-activating deferred work.
 	if isDeferredBead(info) && !slingForce {
 		return fmt.Errorf("refusing to sling deferred bead %s: %q\nDeferred work should not consume polecat slots. Use --force to override", beadID, info.Title)
+	}
+
+	// Guard against slinging a bead the human operator owns (gt-21pl0): one
+	// labeled `operator`, or assigned to a person rather than to an agent
+	// address. Dispatching one spends a polecat seat on work no agent can
+	// finish, and silently reverses the operator's own assignment — a convoy
+	// feeder re-slung gt-nj23.9 to a fresh polecat minutes after the mayor had
+	// un-slung it and assigned it to the operator. The marker makes an
+	// automatic dispatcher read this as a deferral rather than a failure.
+	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee); reason != "" && !slingForce {
+		return fmt.Errorf("%s %s is the operator's work (%s)\nAn agent does not take it. Use --force to sling it to one anyway",
+			dispatch.SlingRefusalMarker, beadID, reason)
 	}
 
 	originalStatus := info.Status

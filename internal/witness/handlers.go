@@ -3248,10 +3248,11 @@ func holdBeadReason(bd *BdCli, workDir, beadID string) (string, error) {
 		return "", err
 	}
 	var issues []struct {
-		Status string   `json:"status"`
-		Labels []string `json:"labels"`
-		Design string   `json:"design"`
-		Notes  string   `json:"notes"`
+		Status   string   `json:"status"`
+		Labels   []string `json:"labels"`
+		Assignee string   `json:"assignee"`
+		Design   string   `json:"design"`
+		Notes    string   `json:"notes"`
 	}
 	if err := json.Unmarshal([]byte(output), &issues); err != nil {
 		return "", fmt.Errorf("reading bead %s: %w", beadID, err)
@@ -3259,7 +3260,7 @@ func holdBeadReason(bd *BdCli, workDir, beadID string) (string, error) {
 	if len(issues) == 0 {
 		return "", nil // valid response, no results — reaped/deleted
 	}
-	return convoy.DispatchHoldFields(issues[0].Status, issues[0].Labels, issues[0].Design, issues[0].Notes), nil
+	return convoy.DispatchHoldFields(issues[0].Status, issues[0].Labels, issues[0].Assignee, issues[0].Design, issues[0].Notes), nil
 }
 
 // hookBeadHeld reports whether the work a hook bead carries is held, and the

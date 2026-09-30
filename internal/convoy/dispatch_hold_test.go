@@ -188,15 +188,83 @@ func TestDispatchHoldFields_MatchesTheIssueRule(t *testing.T) {
 			name:  "wording only mentioned",
 			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Notes: "a review note quoting 'do not redispatch'"},
 		},
+		{
+			name:  "operator label",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"operator"}},
+		},
+		{
+			name:  "operator label, however typed",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"Operator"}},
+		},
+		{
+			name:  "human assignee",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Assignee: "sloan"},
+		},
+		{
+			name:  "agent assignee",
+			issue: beadsdk.Issue{Status: beadsdk.StatusOpen, Assignee: "gastown/polecats/onyx"},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fromIssue := dispatchHoldInFields(&tc.issue)
-			fromFields := DispatchHoldFields(string(tc.issue.Status), tc.issue.Labels, tc.issue.Design, tc.issue.Notes)
+			fromFields := DispatchHoldFields(string(tc.issue.Status), tc.issue.Labels, tc.issue.Assignee, tc.issue.Design, tc.issue.Notes)
 			if fromIssue != fromFields {
 				t.Errorf("rule drift: dispatchHoldInFields = %q, DispatchHoldFields = %q", fromIssue, fromFields)
 			}
 		})
+	}
+}
+
+// TestFeedHold_OperatorReservation pins gt-21pl0: a convoy feeder must not
+// re-sling a bead the human operator owns, whether the operator marked it with
+// the label or took it by assigning it to themselves.
+func TestFeedHold_OperatorReservation(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
+		"gt-op":         {ID: "gt-op", Status: beadsdk.StatusOpen, Labels: []string{"operator"}, Assignee: "sloan"},
+		"gt-labelled":   {ID: "gt-labelled", Status: beadsdk.StatusOpen, Labels: []string{"operator"}},
+		"gt-human":      {ID: "gt-human", Status: beadsdk.StatusOpen, Assignee: "Sloan Ahrens"},
+		"gt-overseer":   {ID: "gt-overseer", Status: beadsdk.StatusOpen, Assignee: "overseer"},
+		"gt-agent":      {ID: "gt-agent", Status: beadsdk.StatusOpen, Assignee: "gastown/polecats/onyx"},
+		"gt-crew":       {ID: "gt-crew", Status: beadsdk.StatusOpen, Assignee: "gastown/crew/sloan"},
+		"gt-unassigned": {ID: "gt-unassigned", Status: beadsdk.StatusOpen},
+	}}
+
+	held := []struct{ id, want string }{
+		{"gt-op", "label operator"},
+		{"gt-labelled", "label operator"},
+		{"gt-human", `assignee Sloan Ahrens is not an agent address`},
+		{"gt-overseer", "assignee overseer is not an agent address"},
+	}
+	for _, tc := range held {
+		hold := FeedHold(ctx, store, tc.id, nil)
+		if hold.Reason != tc.want {
+			t.Errorf("%s: hold = %q, want %q", tc.id, hold.Reason, tc.want)
+		}
+		if hold.MergeRejection || hold.Unreadable {
+			t.Errorf("%s: want a plain reservation hold, got %+v", tc.id, hold)
+		}
+	}
+
+	// An agent holding the bead is ordinary work in flight, and so is an
+	// unassigned bead: neither is the operator's.
+	for _, id := range []string{"gt-agent", "gt-crew", "gt-unassigned"} {
+		if hold := FeedHold(ctx, store, id, nil); hold != (Hold{}) {
+			t.Errorf("%s: want no hold, got %+v", id, hold)
+		}
+	}
+}
+
+// TestDispatchHoldReason_OperatorReservation pins the deacon's half: its
+// RECOVERED_BEAD redispatch gates on DispatchHoldReason, and operator work is
+// not the deacon's to redispatch either.
+func TestDispatchHoldReason_OperatorReservation(t *testing.T) {
+	store := &fakeHoldStorage{issues: map[string]*beadsdk.Issue{
+		"gt-op": {ID: "gt-op", Status: beadsdk.StatusOpen, Assignee: "sloan"},
+	}}
+	if reason := DispatchHoldReason(context.Background(), store, "gt-op", nil); reason == "" {
+		t.Error("deacon path must hold operator work, got no hold")
 	}
 }

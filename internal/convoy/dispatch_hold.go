@@ -22,6 +22,10 @@ import (
 // dispatchHoldLabels are the routing decisions recorded as labels: needs-sonnet
 // wants a specific runtime, needs-mayor-review wants the mayor's eyes before
 // any work starts. Matched case-insensitively, since a label is typed by hand.
+// The operator reservation (dispatch.OperatorReservation) is the third decision
+// a label records, and the one that also reaches through the assignee; it is
+// applied in DispatchHoldFields rather than listed here so gt sling reads the
+// same rule before it spends a polecat seat.
 var dispatchHoldLabels = []string{"needs-sonnet", "needs-mayor-review"}
 
 // dispatchHoldStatuses are the statuses beads calls CategoryFrozen, "excluded
@@ -127,7 +131,7 @@ func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolv
 
 // dispatchHoldInFields applies the hold rule to the fields GetIssue returns.
 func dispatchHoldInFields(issue *beadsdk.Issue) string {
-	return DispatchHoldFields(string(issue.Status), issue.Labels, issue.Design, issue.Notes)
+	return DispatchHoldFields(string(issue.Status), issue.Labels, issue.Assignee, issue.Design, issue.Notes)
 }
 
 // DispatchHoldFields reports the hold a bead's own fields assert, or "" when
@@ -140,11 +144,17 @@ func dispatchHoldInFields(issue *beadsdk.Issue) string {
 // this: bd show --json omits them, which makes such a caller narrower than
 // readHold and never wider. status is a plain string so that JSON-reading
 // caller needs no SDK type; dispatchHoldInFields does the one conversion.
-func DispatchHoldFields(status string, labels []string, design, notes string) string {
+func DispatchHoldFields(status string, labels []string, assignee, design, notes string) string {
 	for _, held := range dispatchHoldStatuses {
 		if status == string(held) {
 			return "status " + status
 		}
+	}
+	// The operator reservation is checked before the routing labels: a bead the
+	// operator owns is not the town's to route anywhere, and its reason is the
+	// one an operator reading the log needs named (gt-21pl0).
+	if reason := dispatch.OperatorReservation(labels, assignee); reason != "" {
+		return reason
 	}
 	for _, label := range labels {
 		for _, held := range dispatchHoldLabels {

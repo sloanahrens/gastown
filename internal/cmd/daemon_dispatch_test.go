@@ -164,6 +164,18 @@ func TestIsActionableReadyBead(t *testing.T) {
 			&beads.Issue{ID: "gt-9", Title: "agent-ish", Priority: 2, Labels: []string{" GT:AGENT "}},
 			false,
 		},
+		{
+			// The operator's own work is not dispatchable: nudge the mayor
+			// about it and the sling refuses (gt-21pl0).
+			"operator-reserved bead",
+			&beads.Issue{ID: "gt-10", Title: "Hand-run audit", Priority: 1, Labels: []string{"operator"}},
+			false,
+		},
+		{
+			"another label on the same bead shape",
+			&beads.Issue{ID: "gt-11", Title: "Ordinary work", Priority: 1, Labels: []string{"run-blocker"}},
+			true,
+		},
 	}
 
 	for _, tc := range cases {
