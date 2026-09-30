@@ -57,10 +57,8 @@ daemon threshold isn't a disk signal either, so those candidates defer too —
 otherwise a gc-mode town with the threshold raised to 20000 (this town's
 setting) re-escalates every DB from 500 to 20000 each 30-minute cycle (gt-124a6).
 
-Nothing reads the judgment steps below automatically. When `run.sh` exits
-nonzero (Dolt unreachable, no databases), the daemon logs the failure and raises
-`gt escalate` under the fingerprint `plugin:compactor-dog:failed` with the
-output tail; the next good run closes it. Use these steps to investigate.
+Nothing runs the judgment steps below; a nonzero `run.sh` exit (Dolt
+unreachable, no databases) is escalated (see Record Result).
 
 **First, check the maintenance mode.** The judgment table in Step 6 depends
 on it:
