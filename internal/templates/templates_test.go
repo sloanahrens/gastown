@@ -1496,20 +1496,19 @@ func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
 func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
 	// The calm-wait sentence, character-for-character: a polecat that reads
 	// the wait as a hang closes its bead mid-`gt done` (overseer hq-wisp-6q5ib).
-	const calmWait = "`gt done` waits for the container-gate slot before it runs the container suites, " +
-		"printing a `still waiting for the container-gate slot …` line every couple of minutes while " +
-		"it does. That is normal. Do not interrupt it, do not close the bead, do not retry. It gives " +
-		"up with a slot-acquire timeout once the cap expires."
+	const calmWait = "`gt done` runs the local gate itself (lint, build and the unit tier of the tests; " +
+		"no container slot), which can take several minutes. That is normal. Do not interrupt it " +
+		"and do not close the bead."
 
 	rendered := renderPolecatForTest(t)
 	if !strings.Contains(rendered, calmWait) {
-		t.Errorf("rendered polecat prime output lacks the slot-wait sentence")
+		t.Errorf("rendered polecat prime output lacks the gt done wait sentence")
 	}
 
 	for _, want := range []string{
-		"Never poll the slot, and never script a retry around `gt done`",
+		"Never script a retry around `gt done`",
 		"`gt escalate -s medium`",
-		"--skip-tests",
+		"No flag skips the gate.",
 		"Do not run container suites yourself. Run the non-container packages, then",
 		// The explanation lives once, in the home the prime points at (R2).
 		"read the container-gate rule in `docs/reference.md`",

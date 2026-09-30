@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/refinery/editorial"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -207,44 +208,31 @@ func rejectionAttempt(mr *MergeRequest, rec *RejectionRecord) int {
 	return mr.RetryCount + 1
 }
 
-// noteField collapses a free-text note field onto one line. Titles, paths, and
-// the reject reason are model- or agent-supplied, and a newline in one of them
-// injects whole lines into the notes: a forged finding line, a "MERGE
-// REJECTION (attempt" marker that inflates the attempt count, or a receipt
-// line `gt deacon redispatch` reads back (gt-s4f6).
+// noteField collapses a free-text note field onto one line; it moved to
+// land.NoteField with the rejection-note format (gt-v4ssj.9).
 func noteField(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return land.NoteField(s)
 }
 
+// formatMergeRejectionNote renders req's MERGE REJECTION block. The format
+// moved to land.FormatRejectionNote, which Land() writes too, so both writers
+// produce byte-identical blocks until the refinery is deleted (gt-v4ssj.6).
 func formatMergeRejectionNote(req deadWorkerRecoveryRequest) string {
-	attempt := req.AttemptNumber
-	if attempt < 1 {
-		attempt = 1
+	n := land.RejectionNote{
+		Attempt: req.AttemptNumber,
+		Kind:    req.FailureType,
+		Reason:  req.ErrorMsg,
+		Branch:  req.Branch,
+		Target:  req.Target,
+		MR:      req.MRID,
 	}
-	// The class stands in the header only when the caller classified it, so an
-	// unclassified rejection reads as one instead of naming a subsystem that
-	// had nothing to do with it (gt-1jig).
-	header := fmt.Sprintf("%s (attempt %d): ", MergeRejectionNoteMarker, attempt)
-	if class := noteField(req.FailureType); class != "" {
-		header += class + " - "
-	}
-	note := header + noteField(req.ErrorMsg) +
-		fmt.Sprintf("\nBranch: %s\nTarget: %s\nMR: %s", req.Branch, req.Target, req.MRID)
 	for _, f := range req.Findings {
-		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s",
-			noteField(f.ID), noteField(f.Severity), noteField(f.Path), f.Line, noteField(f.Title))
+		n.Findings = append(n.Findings, land.Finding{ID: f.ID, Severity: f.Severity, Path: f.Path, Line: f.Line, Title: f.Title})
 	}
-	// Score/Unresolved are the machine-readable receipt `gt deacon
-	// redispatch` greps back out (deacon.ParseEditorialReceiptFromNotes) to
-	// run RedispatchEditorial's convergence rule. Only written when this
-	// rejection actually carries an om verdict.
 	if req.Receipt != nil {
-		note += fmt.Sprintf("\nScore: %.4f", req.Receipt.Score)
-		if len(req.Receipt.Unresolved) > 0 {
-			note += fmt.Sprintf("\nUnresolved: %s", strings.Join(req.Receipt.Unresolved, ","))
-		}
+		n.Receipt = &land.Receipt{Score: req.Receipt.Score, Unresolved: req.Receipt.Unresolved}
 	}
-	return note
+	return land.FormatRejectionNote(n)
 }
 
 // appendRejectionNote adds note to a source bead's notes unless an identical

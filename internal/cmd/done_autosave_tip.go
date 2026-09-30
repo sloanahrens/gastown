@@ -18,18 +18,6 @@ func autoSaveTipFixCommand(tip checkpoint.AutoSaveTip) string {
 	return fmt.Sprintf("git reset --soft HEAD~%d && git commit --amend --no-edit", tip.Trailing)
 }
 
-// autoSaveTipGate refuses a branch whose tip is a machine-generated commit and
-// that gt done cannot rewrite, because origin already has it. It returns nil
-// when the branch may be submitted — either because the tip is real work, or
-// because the squash step below folds it away first (gt-iki6).
-func autoSaveTipGate(tip checkpoint.AutoSaveTip, branch, pushedReason string) error {
-	if !tip.AutoSave || pushedReason == "" {
-		return nil
-	}
-	return autoSaveTipRefusalError(tip, branch,
-		fmt.Sprintf("origin already has this branch (%s), so squashing it here would need a force-push.", pushedReason))
-}
-
 // autoSaveTipRefusalError refuses a branch whose tip is a machine-generated
 // commit, naming why the squash could not clear it and the command that does
 // (gt-iki6). Quietly submitting such a branch is what put f0a00f6 — a
@@ -41,17 +29,6 @@ func autoSaveTipRefusalError(tip checkpoint.AutoSaveTip, branch, why string) err
 		"then re-run gt done:\n\n"+
 		"  %s\n",
 		branch, tip.Subject, why, tip.Trailing, autoSaveTipFixCommand(tip))
-}
-
-// autoSaveTipUninspectableError refuses a branch whose tip could not be read at
-// all. The check must not fail open: this runs only when origin already has the
-// branch, so an unread tip could be a machine-generated one that gt done then
-// could not rewrite (gt-iki6).
-func autoSaveTipUninspectableError(branch, pushedReason string, cause error) error {
-	return fmt.Errorf("refusing to submit branch %s: could not read its tip commit (%v), and origin already has the branch (%s), so a machine-generated tip could not be rewritten.\n"+
-		"Check the branch, fold any machine-generated tip into the commit beneath it, then re-run gt done:\n\n"+
-		"  git log --oneline\n",
-		branch, cause, pushedReason)
 }
 
 // autoSaveSquashResetError names the state a squash that failed partway leaves

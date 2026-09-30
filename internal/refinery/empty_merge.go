@@ -2,9 +2,8 @@ package refinery
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // This file refuses to gate or land an MR whose merge into its target changes
@@ -26,35 +25,9 @@ import (
 // stacked, so an empty member left in the stack is the same bug on another
 // path.
 
-const (
-	// emptyMergeScanLimit bounds how many of the branch's own commits the
-	// refusal inspects. The commit that lost the payload is always one of the
-	// most recent that remove content, so a window from the tip is enough.
-	emptyMergeScanLimit = 20
-
-	// emptyMergeReportLimit caps how many commits the refusal lists before it
-	// counts the rest.
-	emptyMergeReportLimit = 8
-)
-
-// emptyMerge is one refusal's evidence.
-type emptyMerge struct {
-	// Target is the branch being merged into, for the message.
-	Target string
-	// Base is the ref the branch's own commits are measured against. It must
-	// be one the merge has not moved: after the local merge, refs/heads/target
-	// contains the merge commit and reachability from it hides the branch's
-	// whole history (gt-j5cc).
-	Base string
-	// Head is the submitted branch head, whose commits are blamed.
-	Head string
-	// Stage says where the check ran, which is what separates a branch that
-	// was already empty when submitted from a merge that turned out to be
-	// empty.
-	Stage string
-	// Comparison names the two refs found to hold identical trees.
-	Comparison string
-}
+// emptyMerge is one refusal's evidence; the type and its reason text moved
+// to land, which refuses empty merges too (gt-v4ssj.9).
+type emptyMerge = land.EmptyMerge
 
 // checkSubmittedHeadAddsChange refuses mr when merging head into target would
 // leave target's tree as it is.
@@ -129,42 +102,7 @@ func (e *Engineer) refuseEmptyMerge(mr *MRInfo, ev emptyMerge) ProcessResult {
 	return mergeIneligibleResult("%s", reason)
 }
 
-// emptyMergeReason builds the refusal text. Its first line stands alone,
-// because that is the part a close reason or a log line keeps.
+// emptyMergeReason builds the refusal text (moved to land.EmptyMergeReason).
 func (e *Engineer) emptyMergeReason(ev emptyMerge) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "empty merge (%s): %s, so this MR changes nothing in %s",
-		ev.Stage, ev.Comparison, ev.Target)
-
-	commits, err := e.git.CommitLineStatsInRange(ev.Base+".."+ev.Head, emptyMergeScanLimit)
-	if err != nil {
-		fmt.Fprintf(&b, " (the branch's own commits could not be read: %v)", err)
-		return b.String()
-	}
-	if len(commits) == 0 {
-		fmt.Fprintf(&b, "; the branch has no commits %s does not already have", ev.Base)
-		return b.String()
-	}
-
-	b.WriteString("; the branch's own commits, newest first:")
-	var loser git.CommitLineStats
-	for i, c := range commits {
-		if i == emptyMergeReportLimit {
-			fmt.Fprintf(&b, "\n  ... and %d more", len(commits)-emptyMergeReportLimit)
-			break
-		}
-		fmt.Fprintf(&b, "\n  %s %s (+%d -%d)", shortSHA(c.Commit), c.Subject, c.Added, c.Removed)
-		if c.Added == 0 && c.Removed > loser.Removed {
-			loser = c
-		}
-	}
-	// A commit that only removes lines is the shape the incident had, where one
-	// commit deleted the branch's whole payload. Naming the largest one is a
-	// lead to check, not a verdict: a branch that legitimately only deletes
-	// files reaches here too, and reads the same way.
-	if loser.Commit != "" {
-		fmt.Fprintf(&b, "\n%s removes %d lines and adds none — check it first",
-			shortSHA(loser.Commit), loser.Removed)
-	}
-	return b.String()
+	return land.EmptyMergeReason(e.git, ev)
 }

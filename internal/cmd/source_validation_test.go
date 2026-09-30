@@ -174,7 +174,6 @@ func TestRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) {
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	doneSkipTests = true
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
 	if err := runDone(nil, nil); err != nil {
 		t.Fatalf("runDone: %v", err)
@@ -182,19 +181,21 @@ func TestRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) {
 
 	log := readSubmitSourceBDLog(t, logPath)
 	assertBDLogContains(t, log, ownerBeadsDir, "show bd-source --json")
-	assertBDLogContains(t, log, currentBeadsDir, "create --json")
-	assertBDLogContains(t, log, ownerBeadsDir, "comments add bd-source")
-	assertBDLogContains(t, log, currentBeadsDir, "show gt-mr --json")
+	assertBDLogContains(t, log, ownerBeadsDir, "update bd-source --append-notes READY TO LAND")
+	assertBDLogContains(t, log, ownerBeadsDir, "update bd-source --add-label=gt:ready-to-land")
+	if strings.Contains(log, "gt:merge-request") {
+		t.Fatalf("gt done created an MR wisp:\n%s", log)
+	}
 	assertBDLogNotContains(t, log, currentBeadsDir, "show bd-source --json")
+	assertBDLogNotContains(t, log, currentBeadsDir, "update bd-source")
 }
 
 // TestRunDoneReworkBranchRecordsActualWorkerNotBranchName covers gt-fl0n: a
 // --branch rework reuses the ORIGINAL polecat's branch name (here
 // "malachite"), but the polecat actually running `gt done` is a different
-// one ("refuge", set via env). The MR bead's worker field must record the
-// actual submitter so the refinery routes FIX_NEEDED (and dead-worker
-// recovery) to whoever holds the issue now, never to the name embedded in
-// the reused branch.
+// one ("refuge", set via env). The READY TO LAND note's Worker must record the
+// actual submitter so a rejection reaches whoever holds the issue now, never
+// the name embedded in the reused branch.
 func TestRunDoneReworkBranchRecordsActualWorkerNotBranchName(t *testing.T) {
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 	setupRoutedSubmitCommandTown(t, workDir)
@@ -213,18 +214,17 @@ func TestRunDoneReworkBranchRecordsActualWorkerNotBranchName(t *testing.T) {
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	doneSkipTests = true
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
 	if err := runDone(nil, nil); err != nil {
 		t.Fatalf("runDone: %v", err)
 	}
 
 	log := readSubmitSourceBDLog(t, logPath)
-	if !strings.Contains(log, "worker: refuge") {
-		t.Fatalf("bd create log missing worker: refuge (actual submitter):\n%s", log)
+	if !strings.Contains(log, "Worker: refuge") {
+		t.Fatalf("ready note missing Worker: refuge (actual submitter):\n%s", log)
 	}
-	if strings.Contains(log, "worker: malachite") {
-		t.Fatalf("bd create log recorded worker: malachite from the reused branch name instead of the actual submitter:\n%s", log)
+	if strings.Contains(log, "Worker: malachite") {
+		t.Fatalf("ready note recorded Worker: malachite from the reused branch name instead of the actual submitter:\n%s", log)
 	}
 }
 
@@ -390,13 +390,27 @@ if [ "$1" = "version" ]; then
   exit 0
 fi
 printf '%%s\t%%s\n' "$BEADS_DIR" "$*" >> %q
+if [ "$1" = "update" ]; then
+  if [ -n "$GT_TEST_BD_UPDATE_FAILS" ]; then
+    echo "Error: database not found: gastown" >&2
+    exit 1
+  fi
+  case "$*" in *--add-label=gt:ready-to-land*) : > %q.ready ;; esac
+  exit 0
+fi
+if [ "$1" = "show" ] && [ "$2" = "gt-gastown-polecat-refuge" ]; then
+  echo '[{"id":"gt-gastown-polecat-refuge","title":"Polecat refuge","status":"open","issue_type":"agent","labels":["gt:agent","done-intent:COMPLETED:1738972800"]}]'
+  exit 0
+fi
+labels='[]'
+if [ -e %q.ready ]; then labels='["gt:ready-to-land"]'; fi
 if [ "$1" = "show" ] && [ "$2" = "bd-source" ]; then
   if [ "$BEADS_DIR" = %q ]; then
-    echo '[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task","description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
+    echo '[{"id":"bd-source","title":"current mirror","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
     exit 0
   fi
   if [ "$BEADS_DIR" = %q ]; then
-    echo '[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task","description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
+    echo '[{"id":"bd-source","title":"owner source","status":"open","priority":1,"issue_type":"task","labels":'"$labels"',"description":"convoy_id: hq-cv-test\\nmerge_strategy: mr"}]'
     exit 0
   fi
   echo "Issue not found in $BEADS_DIR" >&2
@@ -434,7 +448,7 @@ if [ "$1" = "close" ]; then
 fi
 echo "unexpected bd command: $*" >&2
 exit 1
-`, logPath, currentBeadsDir, ownerBeadsDir)
+`, logPath, logPath, logPath, currentBeadsDir, ownerBeadsDir)
 	path := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write bd recorder: %v", err)
@@ -488,23 +502,17 @@ func resetMqSubmitFlagsForTest(t *testing.T) {
 func resetDoneFlagsForTest(t *testing.T) {
 	t.Helper()
 	oldIssue, oldStatus, oldCleanupStatus, oldTarget := doneIssue, doneStatus, doneCleanupStatus, doneTarget
-	oldPriority := donePriority
-	oldResume, oldPreVerified, oldSkipTests := doneResume, donePreVerified, doneSkipTests
 	oldUpdateAgentStateOnDoneFn := updateAgentStateOnDoneFn
 	doneIssue = ""
-	donePriority = -1
 	doneStatus = ExitCompleted
 	doneCleanupStatus = ""
-	doneResume = false
-	donePreVerified = false
 	doneTarget = ""
-	doneSkipTests = false
 	t.Cleanup(func() {
 		doneIssue, doneStatus, doneCleanupStatus, doneTarget = oldIssue, oldStatus, oldCleanupStatus, oldTarget
-		donePriority = oldPriority
-		doneResume, donePreVerified, doneSkipTests = oldResume, oldPreVerified, oldSkipTests
 		updateAgentStateOnDoneFn = oldUpdateAgentStateOnDoneFn
 	})
+	// No test runs the rig's real gate; a test that cares replaces this.
+	useDoneGate(t, passingDoneGate())
 }
 
 // runDoneForExitCode runs gt done as a polecat in the routed test town with
@@ -531,7 +539,6 @@ func runDoneForExitCode(t *testing.T, branchSetup func(t *testing.T, workDir str
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	doneSkipTests = true
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
 	return runDone(nil, nil)
 }
@@ -591,44 +598,6 @@ func TestRunDoneExitsCloseFailedOnNoMRClose(t *testing.T) {
 		runGitForMQSubmitTest(t, workDir, "reset", "--hard", "main")
 	})
 	assertDoneExitCode(t, err, doneExitCloseFailed, "could not close issue bd-source")
-}
-
-// TestRunDoneExitsNonZeroWhenMRCreateFails: the branch is pushed but bd
-// could not create the MR bead. gt done used to print a warning, notify the
-// witness and exit 0, so no caller could tell dropped work from landed work
-// (G5-01).
-func TestRunDoneExitsNonZeroWhenMRCreateFails(t *testing.T) {
-	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
-	setupRoutedSubmitCommandTown(t, workDir)
-	setupRoutedSubmitGitRepo(t, workDir, false)
-	installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
-	resetDoneFlagsForTest(t)
-	townRoot := routedSourceTestTownRoot(workDir)
-	t.Setenv("GT_TEST_NUDGE_LOG", filepath.Join(t.TempDir(), "nudge.log"))
-	t.Setenv("GT_TOWN_ROOT", townRoot)
-	t.Setenv("GT_ROOT", townRoot)
-	t.Setenv("GT_ROLE", "gastown/polecats/refuge")
-	t.Setenv("GT_RIG", "gastown")
-	t.Setenv("GT_POLECAT", "refuge")
-	t.Setenv("BD_ACTOR", "gastown/polecats/refuge")
-	t.Setenv("GT_TEST_BD_CREATE_FAILS", "1")
-	t.Chdir(workDir)
-
-	doneIssue = "bd-source"
-	doneCleanupStatus = "unpushed"
-	doneSkipTests = true
-	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
-	err := runDone(nil, nil)
-	if err == nil {
-		t.Fatal("runDone returned nil after MR bead creation failed")
-	}
-	var coded *ExitCodeError
-	if !errors.As(err, &coded) || coded.Code != doneExitMRFailed {
-		t.Fatalf("runDone error = %T %v, want *ExitCodeError with code %d", err, err, doneExitMRFailed)
-	}
-	if !strings.Contains(err.Error(), "MR bead creation failed") {
-		t.Errorf("error %q does not say what failed", err)
-	}
 }
 
 // TestRunDoneClassifiesOnTheLastPushAttempt: the first push fails, the retry

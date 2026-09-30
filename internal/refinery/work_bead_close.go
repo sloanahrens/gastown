@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 type mergedWorkBeadCloseRequest struct {
@@ -142,16 +143,8 @@ func MergedWorkBeadCloseBlockReason(issue *beads.Issue) string {
 	return refineryMergedWorkBeadCloseBlockReason(issue)
 }
 
+// refineryMergedWorkBeadCloseBlockReason moved to land.CloseBlockReason,
+// which Land() checks before landing (gt-v4ssj.9).
 func refineryMergedWorkBeadCloseBlockReason(issue *beads.Issue) string {
-	if fields := beads.ParseAttachmentFields(issue); fields != nil {
-		switch {
-		case fields.NoMerge:
-			return "no_merge"
-		case fields.ReviewOnly:
-			return "review_only"
-		case strings.EqualFold(strings.TrimSpace(fields.MergeStrategy), "local"):
-			return "merge_strategy:local"
-		}
-	}
-	return ""
+	return land.CloseBlockReason(issue)
 }
