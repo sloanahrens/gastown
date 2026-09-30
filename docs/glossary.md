@@ -29,12 +29,6 @@ Chief-of-staff agent responsible for initiating Convoys, coordinating work distr
 ### Deacon
 Daemon beacon running continuous Patrol cycles. The Deacon ensures worker activity, monitors system health, and triggers recovery when agents become unresponsive. Think of the Deacon as the system's watchdog.
 
-### Dogs
-The Deacon's crew of maintenance agents handling background tasks like cleanup, health checks, and system maintenance.
-
-### Boot (the Dog)
-A special Dog that checks the Deacon every 5 minutes, ensuring the watchdog itself is still watching. This creates a chain of accountability.
-
 ## Rig-Level Roles
 
 ### Polecat

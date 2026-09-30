@@ -190,16 +190,6 @@ func TestSessionNameToAddress(t *testing.T) {
 			expected:    "gastown/alpha",
 		},
 		{
-			name:        "dog",
-			sessionName: "hq-dog-alpha",
-			expected:    "deacon/dogs/alpha",
-		},
-		{
-			name:        "hyphenated dog",
-			sessionName: "hq-dog-my-dog",
-			expected:    "deacon/dogs/my-dog",
-		},
-		{
 			name:        "unrecognized format",
 			sessionName: "plaintext",
 			expected:    "",

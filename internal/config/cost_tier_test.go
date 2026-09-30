@@ -1,10 +1,7 @@
 package config
 
 import (
-	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestValidCostTiers(t *testing.T) {
@@ -48,7 +45,7 @@ func TestIsValidTier(t *testing.T) {
 func TestCostTierRoleAgents(t *testing.T) {
 	t.Parallel()
 
-	t.Run("standard maps roles to defaults, boot/dog to haiku", func(t *testing.T) {
+	t.Run("standard maps roles to defaults, boot to haiku", func(t *testing.T) {
 		t.Parallel()
 		ra := CostTierRoleAgents(TierStandard)
 		if ra == nil {
@@ -64,7 +61,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			"polecat": "",
 			"crew":    "",
 			"boot":    "claude-haiku",
-			"dog":     "claude-haiku",
 		}
 		for role, want := range expected {
 			if val, ok := ra[role]; !ok {
@@ -88,7 +84,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			"polecat": "", // use default (opus)
 			"crew":    "", // use default (opus)
 			"boot":    "claude-haiku",
-			"dog":     "claude-haiku",
 		}
 		for role, want := range expected {
 			if got := ra[role]; got != want {
@@ -110,7 +105,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			"polecat": "claude-sonnet",
 			"crew":    "claude-sonnet",
 			"boot":    "claude-haiku",
-			"dog":     "claude-haiku",
 		}
 		for role, want := range expected {
 			if got := ra[role]; got != want {
@@ -132,7 +126,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			"polecat": "groq-compound",
 			"crew":    "",
 			"boot":    "groq-compound",
-			"dog":     "groq-compound",
 		}
 		for role, want := range expected {
 			if got := ra[role]; got != want {
@@ -305,8 +298,8 @@ func TestApplyCostTier(t *testing.T) {
 				t.Errorf("RoleAgents[%q] = %q, want deleted (standard tier)", role, val)
 			}
 		}
-		// boot and dog should be set to claude-haiku even on standard tier
-		for _, role := range []string{"boot", "dog"} {
+		// boot should be set to claude-haiku even on standard tier
+		for _, role := range []string{"boot"} {
 			if val := settings.RoleAgents[role]; val != "claude-haiku" {
 				t.Errorf("RoleAgents[%q] = %q, want %q (standard tier)", role, val, "claude-haiku")
 			}
@@ -356,7 +349,6 @@ func TestGetCurrentTier(t *testing.T) {
 		settings.CostTier = "standard"
 		settings.RoleAgents = map[string]string{
 			"boot": "claude-haiku",
-			"dog":  "claude-haiku",
 		}
 		if got := GetCurrentTier(settings); got != "standard" {
 			t.Errorf("GetCurrentTier = %q, want %q", got, "standard")
@@ -419,7 +411,6 @@ func TestGetCurrentTier(t *testing.T) {
 			"witness":  "claude-sonnet",
 			"refinery": "claude-sonnet",
 			"boot":     "claude-haiku",
-			"dog":      "claude-haiku",
 		}
 		if got := GetCurrentTier(settings); got != "economy" {
 			t.Errorf("GetCurrentTier = %q, want %q (inferred)", got, "economy")
@@ -430,12 +421,12 @@ func TestGetCurrentTier(t *testing.T) {
 func TestTierRolesMatch(t *testing.T) {
 	t.Parallel()
 
-	t.Run("empty actual does not match standard tier (boot/dog need haiku)", func(t *testing.T) {
+	t.Run("empty actual does not match standard tier (boot needs haiku)", func(t *testing.T) {
 		t.Parallel()
 		actual := map[string]string{}
 		expected := CostTierRoleAgents(TierStandard)
 		if tierRolesMatch(actual, expected) {
-			t.Error("empty map should not match standard tier (boot/dog require claude-haiku)")
+			t.Error("empty map should not match standard tier (boot requires claude-haiku)")
 		}
 	})
 
@@ -443,7 +434,7 @@ func TestTierRolesMatch(t *testing.T) {
 		t.Parallel()
 		expected := CostTierRoleAgents(TierStandard)
 		if tierRolesMatch(nil, expected) {
-			t.Error("nil map should not match standard tier (boot/dog require claude-haiku)")
+			t.Error("nil map should not match standard tier (boot requires claude-haiku)")
 		}
 	})
 
@@ -451,7 +442,6 @@ func TestTierRolesMatch(t *testing.T) {
 		t.Parallel()
 		actual := map[string]string{
 			"boot": "claude-haiku",
-			"dog":  "claude-haiku",
 		}
 		expected := CostTierRoleAgents(TierStandard)
 		if !tierRolesMatch(actual, expected) {
@@ -467,7 +457,6 @@ func TestTierRolesMatch(t *testing.T) {
 			"witness":  "claude-sonnet",
 			"refinery": "claude-sonnet",
 			"boot":     "claude-haiku",
-			"dog":      "claude-haiku",
 		}
 		expected := CostTierRoleAgents(TierEconomy)
 		if !tierRolesMatch(actual, expected) {
@@ -480,7 +469,6 @@ func TestTierRolesMatch(t *testing.T) {
 		// Actual has standard tier assignments plus a custom non-tier entry
 		actual := map[string]string{
 			"boot":        "claude-haiku",
-			"dog":         "claude-haiku",
 			"custom-role": "custom-agent",
 		}
 		expected := CostTierRoleAgents(TierStandard)
@@ -542,88 +530,6 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 	})
 }
 
-// TestApplyCostTier_DogMappingReachesResolution verifies that a cost tier's
-// role_agents["dog"] entry actually reaches the resolved RuntimeConfig.
-//
-// Regression: the dog role returned the built-in Haiku preset before tier
-// resolution ran whenever the tier's entry was Claude-provider, so
-// custom-groq-* tiers silently left dogs on local Haiku.
-func TestApplyCostTier_DogMappingReachesResolution(t *testing.T) {
-	// Not t.Parallel: the groq subtests call t.Setenv, which is incompatible
-	// with a parallel ancestor (gt-wisp-jsm).
-	cases := []struct {
-		tier  CostTier
-		model string
-	}{
-		{TierStandard, "haiku"},
-		{TierEconomy, "haiku"},
-		{TierBudget, "haiku"},
-		{TierCustomGroqOpus, "groq"},
-		{TierCustomGroqSonnet, "groq"},
-	}
-
-	for _, tc := range cases {
-		// t.Setenv (groq subtests) forbids t.Parallel on the subtests, so the
-		// cases run sequentially (gt-wisp-jsm).
-		t.Run(string(tc.tier), func(t *testing.T) {
-			// The groq-compound tier's agent stores a ${GROQ_API_KEY} reference;
-			// set it so the plain-path guard treats the reference as satisfiable
-			// and the test reaches its command-shape assertions (gt-wisp-jsm).
-			if tc.model == "groq" {
-				t.Setenv("GROQ_API_KEY", "gsk_test_dog_key")
-			}
-			townRoot := t.TempDir()
-			settings := NewTownSettings()
-			if err := ApplyCostTier(settings, tc.tier); err != nil {
-				t.Fatalf("ApplyCostTier(%s): %v", tc.tier, err)
-			}
-			if err := SaveTownSettings(TownSettingsPath(townRoot), settings); err != nil {
-				t.Fatalf("SaveTownSettings: %v", err)
-			}
-
-			// Discriminator: local Haiku runs `--model haiku`; groq-compound
-			// runs the plain claude binary but redirects the SDK at Groq via
-			// ANTHROPIC_BASE_URL.
-			assert := func(cmd string) {
-				t.Helper()
-				switch tc.model {
-				case "haiku":
-					if !strings.Contains(cmd, "--model haiku") {
-						t.Errorf("tier %s: dog resolved to %q, want --model haiku", tc.tier, cmd)
-					}
-				case "groq":
-					if strings.Contains(cmd, "--model haiku") {
-						t.Errorf("tier %s: dog resolved to %q, want the groq-compound preset", tc.tier, cmd)
-					}
-					// Compare on the URL alone: the startup command shell-quotes
-					// the whole NAME=value pair, so the "=" is not adjacent.
-					if !strings.Contains(cmd, "https://api.groq.com/openai/v1") {
-						t.Errorf("tier %s: dog resolved to %q, want the groq-compound base URL", tc.tier, cmd)
-					}
-				}
-			}
-
-			// Direct resolver: BuildCommand() carries args only; env rides on rc.Env.
-			rc := ResolveRoleAgentConfig(constants.RoleDog, townRoot, "")
-			if rc == nil {
-				t.Fatal("ResolveRoleAgentConfig returned nil for dog")
-			}
-			if tc.model == "haiku" {
-				assert(rc.BuildCommand())
-			} else if got := rc.Env["ANTHROPIC_BASE_URL"]; !strings.Contains(got, "api.groq.com") {
-				t.Errorf("tier %s: dog ANTHROPIC_BASE_URL = %q, want the groq-compound endpoint", tc.tier, got)
-			}
-
-			// Integration: the spawned command must carry the mapping too.
-			dogCmd, err := BuildAgentStartupCommand(constants.RoleDog, "", townRoot, "", "")
-			if err != nil {
-				t.Fatalf("BuildAgentStartupCommand returned an error; the cost tier must set a known dog env: %v", err)
-			}
-			assert(dogCmd)
-		})
-	}
-}
-
 func TestTierDescription(t *testing.T) {
 	t.Parallel()
 	for _, tier := range ValidCostTiers() {
@@ -647,7 +553,7 @@ func TestFormatTierRoleTable(t *testing.T) {
 			t.Error("FormatTierRoleTable returned empty for economy tier")
 		}
 		// Should contain all roles
-		for _, role := range []string{"mayor", "deacon", "witness", "polecat", "crew", "boot", "dog"} {
+		for _, role := range []string{"mayor", "deacon", "witness", "polecat", "crew", "boot"} {
 			if !contains(output, role) {
 				t.Errorf("output missing role %q", role)
 			}
@@ -705,7 +611,7 @@ func TestCostTierRoleEffort(t *testing.T) {
 			}
 		}
 		// Patrol roles should be low
-		for _, role := range []string{"deacon", "witness", "boot", "dog"} {
+		for _, role := range []string{"deacon", "witness", "boot"} {
 			if re[role] != "low" {
 				t.Errorf("economy tier role_effort[%s] = %q, want %q", role, re[role], "low")
 			}
@@ -729,7 +635,7 @@ func TestCostTierRoleEffort(t *testing.T) {
 				t.Errorf("budget tier role_effort[%s] = %q, want %q", role, re[role], "medium")
 			}
 		}
-		for _, role := range []string{"mayor", "deacon", "witness", "boot", "dog"} {
+		for _, role := range []string{"mayor", "deacon", "witness", "boot"} {
 			if re[role] != "low" {
 				t.Errorf("budget tier role_effort[%s] = %q, want %q", role, re[role], "low")
 			}
@@ -784,7 +690,7 @@ func TestApplyCostTier_SetsRoleEffort(t *testing.T) {
 			}
 		}
 		// Patrol roles should have low
-		for _, role := range []string{"deacon", "witness", "boot", "dog"} {
+		for _, role := range []string{"deacon", "witness", "boot"} {
 			if settings.RoleEffort[role] != "low" {
 				t.Errorf("RoleEffort[%s] = %q, want %q", role, settings.RoleEffort[role], "low")
 			}

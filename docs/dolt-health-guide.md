@@ -56,7 +56,7 @@ mismatch.
 ## Field Notes
 
 - **Trigger command**: the exact command or agent action that exposed the issue.
-- **Concurrent GT processes**: active mayor, witness, refinery, polecat, dog, or
+- **Concurrent GT processes**: active mayor, refinery, polecat, crew, or
   test processes that may share Dolt.
 - **Dolt pid/status**: server PID, health, latency, and port state from
   `gt dolt status` or `gt dolt dump`.

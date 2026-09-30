@@ -14,8 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/dog"
-	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -45,16 +44,16 @@ func TestRunsAsScript(t *testing.T) {
 	}
 	p.HasRunScript = false
 	if runsAsScript(p) {
-		t.Error("script type without run.sh must stay on the dog path")
+		t.Error("script type without run.sh must not run as a script")
 	}
 	p.HasRunScript = true
 	p.Execution.Type = plugin.ExecTypeAgent
 	if runsAsScript(p) {
-		t.Error("agent type must stay on the dog path")
+		t.Error("agent type must not run as a script")
 	}
 	p.Execution = nil
 	if runsAsScript(p) {
-		t.Error("no [execution] block defaults to the dog path")
+		t.Error("no [execution] block must not run as a script")
 	}
 	if runsAsScript(nil) {
 		t.Error("nil plugin")
@@ -112,7 +111,8 @@ func TestRunPluginScript_SuccessCapturesOutputAndEnv(t *testing.T) {
 
 // A script runs outside any tmux session, so a bare `tmux` in it asks the
 // default server. The daemon hands over the town socket it resolved at start;
-// without it stuck-agent-dog reads a live Deacon as crashed (claude-l5w).
+// without it a plugin that asks tmux about an agent reads the wrong server
+// (claude-l5w).
 func TestRunPluginScript_ExportsTownTmuxSocket(t *testing.T) {
 	t.Parallel()
 	ambient := []string{"GT_TMUX_SOCKET=stale-ambient"}
@@ -208,92 +208,96 @@ func TestTail(t *testing.T) {
 	}
 }
 
-// completeScriptRun: success records success and does not call the dog;
-// failure records failure AND dispatches; a record error never suppresses
-// the dispatch.
+// completeScriptRun: success records success and reports the good run;
+// failure records failure AND escalates; a record error never suppresses
+// the escalation.
 func TestCompleteScriptRun(t *testing.T) {
 	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
 	var recs []plugin.PluginRunRecord
-	dispatched := 0
+	escalated, good := 0, 0
 	hooks := scriptRunHooks{
 		record:    func(r plugin.PluginRunRecord) error { recs = append(recs, r); return nil },
-		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		onFailure: func(*plugin.Plugin, scriptResult) { escalated++ },
+		onSuccess: func(*plugin.Plugin) { good++ },
 		logf:      func(string, ...any) {},
 	}
 	completeScriptRun(p, scriptResult{exitCode: 0, output: "fine"}, hooks)
-	if len(recs) != 1 || recs[0].Result != plugin.ResultSuccess || dispatched != 0 {
-		t.Fatalf("success: recs=%+v dispatched=%d", recs, dispatched)
+	if len(recs) != 1 || recs[0].Result != plugin.ResultSuccess || escalated != 0 || good != 1 {
+		t.Fatalf("success: recs=%+v escalated=%d good=%d", recs, escalated, good)
 	}
 	if recs[0].RigName != "gastown" || !strings.Contains(recs[0].Title, "(script)") || !strings.Contains(recs[0].Body, "fine") {
 		t.Errorf("record fields: %+v", recs[0])
 	}
 	completeScriptRun(p, scriptResult{exitCode: 2, output: "boom"}, hooks)
-	if len(recs) != 2 || recs[1].Result != plugin.ResultFailure || dispatched != 1 {
-		t.Fatalf("failure: recs=%d last=%+v dispatched=%d", len(recs), recs[len(recs)-1], dispatched)
+	if len(recs) != 2 || recs[1].Result != plugin.ResultFailure || escalated != 1 {
+		t.Fatalf("failure: recs=%d last=%+v escalated=%d", len(recs), recs[len(recs)-1], escalated)
 	}
 	hooks.record = func(plugin.PluginRunRecord) error { return errors.New("bd down") }
 	completeScriptRun(p, scriptResult{timedOut: true, exitCode: -1}, hooks)
-	if dispatched != 2 {
-		t.Error("a failed record must not suppress the failure dispatch")
+	if escalated != 2 {
+		t.Error("a failed record must not suppress the failure escalation")
+	}
+	if good != 1 {
+		t.Errorf("failures must not report a good run: good=%d", good)
 	}
 }
 
 // A run that exits 0 but prints the skip marker records a skipped receipt:
 // the plugin ran, found nothing to do, and the history should say so instead
 // of a green check (gt-chqi is the bug class where these no-ops serialized
-// as success). Skipped is not a failure: no dog is dispatched, but a record
+// as success). Skipped is not a failure: nothing is escalated, but a record
 // IS written — that is what satisfies the cooldown gate.
-func TestCompleteScriptRun_SkippedRecordsSkippedNoDog(t *testing.T) {
+func TestCompleteScriptRun_SkippedRecordsSkippedNoEscalation(t *testing.T) {
 	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
 	var recs []plugin.PluginRunRecord
-	dispatched := 0
+	escalated := 0
 	hooks := scriptRunHooks{
 		record:    func(r plugin.PluginRunRecord) error { recs = append(recs, r); return nil },
-		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		onFailure: func(*plugin.Plugin, scriptResult) { escalated++ },
 		logf:      func(string, ...any) {},
 	}
 	completeScriptRun(p, scriptResult{exitCode: 0, output: "nothing to do\n[plugin-result skipped]\n"}, hooks)
-	if len(recs) != 1 || recs[0].Result != plugin.ResultSkipped || dispatched != 0 {
-		t.Fatalf("skipped: recs=%+v dispatched=%d", recs, dispatched)
+	if len(recs) != 1 || recs[0].Result != plugin.ResultSkipped || escalated != 0 {
+		t.Fatalf("skipped: recs=%+v escalated=%d", recs, escalated)
 	}
 	// A plain exit 0 with no marker is a success: the marker is the only
 	// thing that makes the receipt say "did nothing".
 	completeScriptRun(p, scriptResult{exitCode: 0, output: "did the work"}, hooks)
-	if len(recs) != 2 || recs[1].Result != plugin.ResultSuccess || dispatched != 0 {
-		t.Fatalf("unmarked exit 0 must be success: recs=%+v dispatched=%d", recs, dispatched)
+	if len(recs) != 2 || recs[1].Result != plugin.ResultSuccess || escalated != 0 {
+		t.Fatalf("unmarked exit 0 must be success: recs=%+v escalated=%d", recs, escalated)
 	}
 	// A marker on a FAILED run says nothing — exit code 2 is a failure
 	// either way, and the marker must not demote it.
 	completeScriptRun(p, scriptResult{exitCode: 2, output: "boom [plugin-result skipped]"}, hooks)
-	if len(recs) != 3 || recs[2].Result != plugin.ResultFailure || dispatched != 1 {
-		t.Fatalf("marker on a failed run must still be a failure: recs=%+v dispatched=%d", recs, dispatched)
+	if len(recs) != 3 || recs[2].Result != plugin.ResultFailure || escalated != 1 {
+		t.Fatalf("marker on a failed run must still be a failure: recs=%+v escalated=%d", recs, escalated)
 	}
 }
 
-// A deferral (exit 3) writes no record and touches no dog. The record is what
-// satisfies a cooldown gate, so writing one for a run that accomplished
+// A deferral (exit 3) writes no record and escalates nothing. The record is
+// what satisfies a cooldown gate, so writing one for a run that accomplished
 // nothing is what starves a plugin whose window opens and closes on its own
-// (gt-oqbw) — and a deferral is not a failure, so there is nothing for a dog
-// to do either.
+// (gt-oqbw) — and a deferral is not a failure, so there is nothing to
+// escalate either.
 func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
 	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p", Execution: &plugin.Execution{AllowDeferredExit: true}}
 	recs := 0
-	dispatched := 0
+	escalated := 0
 	var logs []string
 	hooks := scriptRunHooks{
 		record:    func(plugin.PluginRunRecord) error { recs++; return nil },
-		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		onFailure: func(*plugin.Plugin, scriptResult) { escalated++ },
 		logf:      func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
 	}
 	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "gate busy"}, hooks)
 	if recs != 0 {
 		t.Errorf("a deferral must write no run record (wrote %d)", recs)
 	}
-	if dispatched != 0 {
-		t.Error("a deferral must not hand off to a dog")
+	if escalated != 0 {
+		t.Error("a deferral must not escalate")
 	}
 	if len(logs) != 1 || !strings.Contains(logs[0], "deferred") || !strings.Contains(logs[0], "next heartbeat") {
 		t.Errorf("deferral must be logged as a retry: %v", logs)
@@ -307,15 +311,15 @@ func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
 	} {
 		completeScriptRun(p, res, hooks)
 	}
-	if recs != 2 || dispatched != 2 {
-		t.Errorf("timed-out/never-started runs must be recorded as failures: recs=%d dispatched=%d", recs, dispatched)
+	if recs != 2 || escalated != 2 {
+		t.Errorf("timed-out/never-started runs must be recorded as failures: recs=%d escalated=%d", recs, escalated)
 	}
 }
 
 // Exit 3 only means deferral for a plugin whose plugin.md opts in with
 // [execution] allow_deferred_exit = true. Without the opt-in — the default,
 // and every script plugin except rebuild-gt at the time of writing — exit 3
-// is an ordinary failure: recorded and dispatched to a dog like any other
+// is an ordinary failure: recorded and escalated like any other
 // nonzero exit. This is what keeps one plugin's private exit-code contract
 // from silently swallowing a real failure in an unrelated plugin that
 // happens to exit 3 (gt-oqbw).
@@ -323,87 +327,26 @@ func TestCompleteScriptRun_DeferralRequiresOptIn(t *testing.T) {
 	t.Parallel()
 	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p"}
 	var recs []plugin.PluginRunRecord
-	dispatched := 0
+	escalated := 0
 	hooks := scriptRunHooks{
 		record:    func(r plugin.PluginRunRecord) error { recs = append(recs, r); return nil },
-		onFailure: func(*plugin.Plugin, scriptResult) { dispatched++ },
+		onFailure: func(*plugin.Plugin, scriptResult) { escalated++ },
 		logf:      func(string, ...any) {},
 	}
 	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "boom"}, hooks)
-	if len(recs) != 1 || recs[0].Result != plugin.ResultFailure || dispatched != 1 {
-		t.Fatalf("exit 3 without opt-in must be an ordinary failure: recs=%+v dispatched=%d", recs, dispatched)
+	if len(recs) != 1 || recs[0].Result != plugin.ResultFailure || escalated != 1 {
+		t.Fatalf("exit 3 without opt-in must be an ordinary failure: recs=%+v escalated=%d", recs, escalated)
 	}
 
 	p.Execution = &plugin.Execution{AllowDeferredExit: false}
 	completeScriptRun(p, scriptResult{exitCode: scriptExitDeferred, output: "boom"}, hooks)
-	if len(recs) != 2 || recs[1].Result != plugin.ResultFailure || dispatched != 2 {
-		t.Fatalf("exit 3 with allow_deferred_exit=false must still be an ordinary failure: recs=%+v dispatched=%d", recs, dispatched)
+	if len(recs) != 2 || recs[1].Result != plugin.ResultFailure || escalated != 2 {
+		t.Fatalf("exit 3 with allow_deferred_exit=false must still be an ordinary failure: recs=%+v escalated=%d", recs, escalated)
 	}
 }
 
-// Fakes for the dispatch seam. Each guards its record with a mutex: the
-// daemon calls them from the script's goroutine while the test reads them.
-type fakeMgr struct {
-	mu                sync.Mutex
-	assigned, cleared []string
-}
-
-func (m *fakeMgr) AssignWork(name, _ string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.assigned = append(m.assigned, name)
-	return nil
-}
-
-func (m *fakeMgr) ClearWork(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.cleared = append(m.cleared, name)
-	return nil
-}
-
-func (m *fakeMgr) assignedNames() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]string(nil), m.assigned...)
-}
-
-type fakeSM struct {
-	mu      sync.Mutex
-	started []string
-}
-
-func (s *fakeSM) Start(name string, _ dog.SessionStartOptions) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.started = append(s.started, name)
-	return nil
-}
-
-func (s *fakeSM) startedNames() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.started...)
-}
-
-type fakeRouter struct {
-	mu   sync.Mutex
-	sent []*mail.Message
-}
-
-func (r *fakeRouter) Send(m *mail.Message) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sent = append(r.sent, m)
-	return nil
-}
-
-func (r *fakeRouter) sentMessages() []*mail.Message {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]*mail.Message(nil), r.sent...)
-}
-
+// fakeRecorder is a runRecorder. It guards its records with a mutex: the
+// daemon calls it from the script's goroutine while the test reads it.
 type fakeRecorder struct {
 	mu   sync.Mutex
 	recs []plugin.PluginRunRecord
@@ -423,55 +366,78 @@ func (r *fakeRecorder) records() []plugin.PluginRunRecord {
 }
 
 // End to end through the daemon: a failing script plugin is recorded as a
-// failure and handed to a dog whose mail carries the exit status and output
-// under the "Direct run failed" heading; a succeeding one touches no dog.
-func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
+// failure and escalated under its own fingerprint with the exit status and
+// output; its next good run closes that escalation; a plugin that never
+// failed escalates and clears nothing (gt-ckunw).
+func TestStartScriptPlugin_FailureEscalatesAndRecoveryClears(t *testing.T) {
 	t.Parallel()
-	mgr, sm, router, rec := &fakeMgr{}, &fakeSM{}, &fakeRouter{}, &fakeRecorder{}
+	rec := &fakeRecorder{}
 	logs := &lockedBuffer{}
 	release := make(chan struct{})
+	failing := true
+	var mu sync.Mutex
 	bash := newFakeCLIFor(func(c cliCall) cliReply {
 		switch filepath.Base(c.dir) {
-		case "failing":
-			return cliReply{stderr: "the disk is full\n", code: 7}
+		case "flaky":
+			mu.Lock()
+			defer mu.Unlock()
+			if failing {
+				return cliReply{stderr: "the disk is full\n", code: 7}
+			}
 		case "slow":
 			<-release
 		}
 		return cliReply{}
 	})
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(logs, "", 0), ctx: context.Background(), execCmd: bash.run}
-	d.findDogFn = func() *dog.Dog { return &dog.Dog{Name: "alpha"} }
+	notes := notifyfake.New()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(logs, "", 0), ctx: context.Background(), execCmd: bash.run, notifier: notes}
 
-	bad := scriptPlugin(t, "failing", "exit 7\n")
-	d.startScriptPlugin(bad, mgr, sm, router, rec)
+	flaky := scriptPlugin(t, "flaky", "exit 7\n")
+	d.startScriptPlugin(flaky, rec)
 	d.scripts.wait()
 	if recs := rec.records(); recs[0].Result != plugin.ResultFailure {
 		t.Errorf("record = %+v", recs[0])
 	}
-	sent := router.sentMessages()
-	if len(sent) != 1 || !strings.Contains(sent[0].Body, "Direct run failed") ||
-		!strings.Contains(sent[0].Body, "exit 7") || !strings.Contains(sent[0].Body, "the disk is full") {
-		t.Errorf("failure mail: %+v", sent)
+	esc := notes.Escalations()
+	if len(esc) != 1 {
+		t.Fatalf("escalations = %+v, want one", esc)
 	}
-	if assigned, started := mgr.assignedNames(), sm.startedNames(); assigned[0] != "alpha" || started[0] != "alpha" {
-		t.Errorf("dog wiring: assigned=%v started=%v", assigned, started)
+	if e := esc[0].Escalation; e.Fingerprint != pluginFailureAlertKey("flaky") ||
+		!strings.Contains(e.Reason, "exit 7") || !strings.Contains(e.Reason, "the disk is full") {
+		t.Errorf("failure escalation: %+v", e)
 	}
-	if _, err := os.Stat(scriptLogPath(d.config.TownRoot, "failing")); err != nil {
+	if !strings.Contains(logs.String(), "script plugin flaky FAILED (exit 7") {
+		t.Errorf("failure not logged:\n%s", logs.String())
+	}
+	if _, err := os.Stat(scriptLogPath(d.config.TownRoot, "flaky")); err != nil {
 		t.Errorf("run log not written: %v", err)
 	}
 
-	good := scriptPlugin(t, "passing", "exit 0\n")
-	d.startScriptPlugin(good, mgr, sm, router, rec)
+	mu.Lock()
+	failing = false
+	mu.Unlock()
+	d.startScriptPlugin(flaky, rec)
 	d.scripts.wait()
-	if recs := rec.records(); recs[1].Result != plugin.ResultSuccess || len(sm.startedNames()) != 1 || len(router.sentMessages()) != 1 {
-		t.Errorf("success must not touch a dog: recs=%+v started=%v sent=%d", recs, sm.startedNames(), len(router.sentMessages()))
+	clears := notes.Clears()
+	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{pluginFailureAlertKey("flaky")}) {
+		t.Errorf("recovery must clear the plugin's escalation: %+v", clears)
+	}
+	if open := notes.OpenEscalations(pluginFailureAlertKey("flaky")); len(open) != 0 {
+		t.Errorf("escalation still open after recovery: %+v", open)
+	}
+
+	good := scriptPlugin(t, "passing", "exit 0\n")
+	d.startScriptPlugin(good, rec)
+	d.scripts.wait()
+	if recs := rec.records(); recs[2].Result != plugin.ResultSuccess || len(notes.Escalations()) != 1 || len(notes.Clears()) != 1 {
+		t.Errorf("a plugin that never failed must not escalate or clear: recs=%+v calls=%+v", recs, notes.Calls())
 	}
 
 	// A second start while the first still runs is a no-op. The script holds
 	// until the test releases it, so the second start certainly overlaps.
 	slow := scriptPlugin(t, "slow", "exit 0\n")
-	d.startScriptPlugin(slow, mgr, sm, router, rec)
-	d.startScriptPlugin(slow, mgr, sm, router, rec)
+	d.startScriptPlugin(slow, rec)
+	d.startScriptPlugin(slow, rec)
 	if !strings.Contains(logs.String(), "script plugin slow still running, skipping") {
 		t.Errorf("the overlapping start was not refused:\n%s", logs.String())
 	}
@@ -480,7 +446,7 @@ func TestStartScriptPlugin_FailureHandsOffToDog(t *testing.T) {
 	if n := d.scripts.runningCount(); n != 0 {
 		t.Errorf("%d script plugins still marked running after they finished", n)
 	}
-	if n := len(rec.records()); n != 3 {
-		t.Errorf("in-flight guard failed: %d records for two overlapping starts, want 3", n)
+	if n := len(rec.records()); n != 4 {
+		t.Errorf("in-flight guard failed: %d records for two overlapping starts, want 4", n)
 	}
 }

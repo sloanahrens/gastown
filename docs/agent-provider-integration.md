@@ -433,8 +433,8 @@ These are optional capabilities that enable advanced orchestration features.
 
 ### Non-interactive mode
 
-Used by Gas Town's formula system (automated workflows) and dogs (infrastructure
-helpers) for headless execution. Configure via the `non_interactive` preset field:
+Used by Gas Town's formula system (automated workflows) for headless
+execution. Configure via the `non_interactive` preset field:
 
 ```json
 {
@@ -755,7 +755,7 @@ Add to your preset:
 }
 ```
 
-This enables your agent for formula execution and dog tasks.
+This enables your agent for formula execution.
 
 ---
 

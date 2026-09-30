@@ -43,16 +43,16 @@ func ValidateTarget(target string) error {
 				"  <rig>/crew/<name>      crew worker\n"+
 				"  <rig>/witness          rig witness\n"+
 				"  <rig>/refinery         rig refinery\n"+
-				"  deacon/dogs            dog pool\n"+
 				"  mayor                  town mayor",
 				target, i)
 		}
 	}
 
-	// Dog targets are valid at any depth (deacon/dogs, deacon/dogs/<name>).
-	// Deacon sub-path validation is handled downstream by IsDogTarget/resolveTarget.
+	// deacon/dogs was the LLM dog pool; the deacon and its dogs were retired
+	// (gt-4k3fj.6.1, gt-ckunw).
 	if strings.ToLower(parts[0]) == "deacon" {
-		return nil
+		return fmt.Errorf("invalid target %q: the deacon and its dog pool were retired\n"+
+			"Sling to a rig to spawn a polecat instead", target)
 	}
 
 	// Mayor has no sub-agents.

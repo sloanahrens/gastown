@@ -58,7 +58,7 @@ type Templates struct {
 
 // RoleData contains information for rendering role contexts.
 type RoleData struct {
-	Role          string   // mayor, polecat, crew, dog
+	Role          string   // mayor, polecat, crew
 	RigName       string   // e.g., "greenplace"
 	TownRoot      string   // e.g., "/Users/steve/ai"
 	TownName      string   // e.g., "ai" - the town identifier for session names
@@ -68,7 +68,6 @@ type RoleData struct {
 	UpstreamURL   string   // redacted upstream URL for display only
 	Polecat       string   // polecat name (for polecat role)
 	Polecats      []string // list of polecats (for witness role)
-	DogName       string   // dog name (for dog role)
 	BeadsDir      string   // BEADS_DIR path
 	IssuePrefix   string   // beads issue prefix
 	MayorSession  string   // e.g., "gt-ai-mayor" - dynamic mayor session name
@@ -182,7 +181,7 @@ func (t *Templates) RenderMessage(name string, data interface{}) (string, error)
 
 // RoleNames returns the list of available role templates.
 func (t *Templates) RoleNames() []string {
-	return []string{"mayor", "polecat", "crew", "dog"}
+	return []string{"mayor", "polecat", "crew"}
 }
 
 // MessageNames returns the list of available message templates.

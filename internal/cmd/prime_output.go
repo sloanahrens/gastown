@@ -40,8 +40,6 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 		roleName = constants.RolePolecat
 	case RoleCrew:
 		roleName = constants.RoleCrew
-	case RoleDog:
-		roleName = "dog"
 	default:
 		// Unknown role - caller uses fallback
 		return "", nil
@@ -63,7 +61,6 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 		IsForkRig:     isForkRig,
 		UpstreamURL:   upstreamURL,
 		Polecat:       ctx.Polecat,
-		DogName:       ctx.Polecat, // ctx.Polecat holds the dog name for RoleDog
 		MayorSession:  session.MayorSessionName(),
 	}
 
@@ -491,22 +488,6 @@ func outputStartupDirective(ctx RoleContext) {
 		fmt.Println("   - If no attachment → **STOP and wait for input**. Do NOT run")
 		fmt.Println("     any more commands. Do NOT poll mail. Do NOT check status.")
 		fmt.Println("     Sit idle at your prompt — a nudge or user message will arrive.")
-	case RoleDog:
-		fmt.Println()
-		fmt.Println("---")
-		fmt.Println()
-		fmt.Println("**STARTUP PROTOCOL**: You are a dog with NO WORK on your hook.")
-		fmt.Println()
-		fmt.Println("This likely means dispatch had a timing race (hook write not yet propagated).")
-		fmt.Println("Before going idle, try to recover work:")
-		fmt.Println()
-		fmt.Println("1. Check mail: `" + cli.Name() + " mail inbox` — dispatcher may have sent instructions")
-		fmt.Println("2. If mail has work → execute it")
-		fmt.Println("3. If no mail → check ready queue: `bd ready`")
-		fmt.Println("4. If ready queue has work → claim top bead: `bd update <id> --claim`")
-		fmt.Println("5. If nothing available → run `" + cli.Name() + " done` and exit")
-		fmt.Println()
-		fmt.Println("DO NOT sit idle waiting. Recover or terminate. (GH#2748)")
 	}
 }
 

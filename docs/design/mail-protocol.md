@@ -401,7 +401,6 @@ message?" If yes -> mail. If no -> nudge.
 | **Witness** | Protocol msgs only | MERGE_READY, RECOVERED_BEAD, RECOVERY_NEEDED, escalations to Mayor | Polecat health checks, status pings, nudge-and-observe |
 | **Refinery** | Protocol msgs only | MERGED, MERGE_FAILED, REWORK_REQUEST | Status updates to Witness |
 | **Deacon** | Escalations only | Escalations to Mayor, HANDOFF to self | TIMER callbacks, HEALTH_CHECK, lifecycle pokes |
-| **Dogs** | Zero | Never (results go to event beads or logs) | Report completion to Deacon via nudge |
 | **Mayor** | Strategic only | Cross-rig coordination, HANDOFF to self | Instructions to Deacon/Witness |
 
 ### Why This Matters (The Commit Graph)
@@ -413,9 +412,6 @@ normal operations:
 - Rebase can remove them, but prevention is always cheaper than cleanup
 
 ### Anti-Patterns
-
-**DOG_DONE as mail** -- Dogs should not mail their completion status. Use
-`gt nudge deacon/ "DOG_DONE: plugin-name success"` instead.
 
 **Duplicate escalations** -- Witnesses sending 2+ mails about the same issue
 minutes apart. Check inbox before sending: if you already sent about this topic,

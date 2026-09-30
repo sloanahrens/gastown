@@ -1,12 +1,9 @@
 package daemon
 
 import (
-	"reflect"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // Wiring guards: each test below leaves one seam nil and proves the
@@ -26,20 +23,5 @@ func TestGitSeamsDefaultToRealGit(t *testing.T) {
 	m := &ConvoyManager{}
 	if g, ok := m.gitAt(dir).(*git.Git); !ok || g.WorkDir() != dir {
 		t.Errorf("ConvoyManager.gitAt(%s) = %T; want a *git.Git on it", dir, m.gitAt(dir))
-	}
-}
-
-// TestDogSessionsDefaultsToTheRealSessionManager guards dogSessions' nil path:
-// the handler drives a *dog.SessionManager on the town's tmux, for this town
-// and this dog manager, not a stand-in.
-func TestDogSessionsDefaultsToTheRealSessionManager(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	mgr := dog.NewManager(townRoot, nil)
-	d := &Daemon{config: &Config{TownRoot: townRoot}}
-	got := d.dogSessions(mgr)
-	want := dog.NewSessionManager(tmux.NewTmux(), townRoot, mgr)
-	if !reflect.DeepEqual(got, dogSessions(want)) {
-		t.Fatalf("dogSessions() = %#v, want %#v when no test seam is set", got, want)
 	}
 }

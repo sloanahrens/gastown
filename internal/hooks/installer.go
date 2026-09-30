@@ -38,7 +38,7 @@ var templateFS embed.FS
 //   - role: the Gas Town role (e.g., "polecat", "crew", "witness").
 //   - hooksDir/hooksFile: from the preset's HooksDir and HooksSettingsFile.
 //   - command: the agent's command (e.g., "claude", "ollama"). Used to gate the
-//     boot/dog/polecat settings-sync path, which must not apply to non-Claude agents.
+//     boot/polecat settings-sync path, which must not apply to non-Claude agents.
 //
 // Template resolution:
 //   - Role-aware agents (have both autonomous and interactive templates):
@@ -49,7 +49,7 @@ var templateFS embed.FS
 // The install directory is settingsDir for agents that support --settings (useSettingsDir=true),
 // or workDir for all others.
 //
-// For boot/dog/polecat on Claude, install goes through the JSON merge path
+// For boot/polecat on Claude, install goes through the JSON merge path
 // (SyncManagedClaudeSettings) and fails closed: an unparseable hooks-base.json,
 // hooks-override file, or existing settings.json aborts the install with an
 // error naming the file, rather than silently falling back to a template that
@@ -60,11 +60,11 @@ func InstallForRole(provider, settingsDir, workDir, role, hooksDir, hooksFile, c
 	}
 
 	targetPath := installTargetPath(settingsDir, workDir, hooksDir, hooksFile, useSettingsDir)
-	// Boot, dog, and polecat kennels are managed through the JSON merge path
+	// Boot and polecat settings are managed through the JSON merge path
 	// so their role overrides are kept in sync rather than frozen at first
 	// install; the needsUpgrade heuristic below has no way to detect a hook
 	// type added in code (gt-8stz REOPENED).
-	if (provider == "claude" || command == "claude") && (role == "boot" || role == "dog" || role == "polecat") && isSettingsFile(hooksFile) {
+	if (provider == "claude" || command == "claude") && (role == "boot" || role == "polecat") && isSettingsFile(hooksFile) {
 		// DefaultOverrides keys the polecat entry "polecats" (plural); role is
 		// singular everywhere else. ComputeExpected resolves Key literally, so
 		// this must be normalized or the merge silently drops the override.

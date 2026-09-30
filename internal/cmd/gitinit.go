@@ -66,7 +66,7 @@ beads_hq/
 # Polecats - worker worktrees
 **/polecats/
 
-# Deacon dogs - patrol worker worktrees
+# Retired dog kennels (gt-ckunw), still ignored in older towns
 **/deacon/dogs/
 
 # Mayor rig clones

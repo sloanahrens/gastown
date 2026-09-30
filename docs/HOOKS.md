@@ -49,21 +49,10 @@ Each rig generates settings in shared parent directories (not per-worktree):
 | Target | Path | Override Key |
 |--------|------|--------------|
 | Crew (shared) | `<rig>/crew/.claude/settings.json` | `<rig>/crew` |
-| Witness | `<rig>/witness/.claude/settings.json` | `<rig>/witness` |
-| Refinery | `<rig>/refinery/.claude/settings.json` | `<rig>/refinery` |
 | Polecats (shared) | `<rig>/polecats/.claude/settings.json` | `<rig>/polecats` |
 
-Town-level targets:
+Town-level target:
 - `mayor/.claude/settings.json` (key: `mayor`)
-- `deacon/.claude/settings.json` (key: `deacon`)
-- `deacon/dogs/boot/.claude/settings.json` (key: `boot`, when the boot dir exists)
-- `deacon/dogs/<name>/.claude/settings.json` (key: `dog`, one per kennel with a
-  `.dog.json`; all dogs share the `dog` override key)
-
-The `dog` override adds a PreToolUse guard on every shell command
-(`gt tap guard formula-allowlist`, gt-9iv): when the dog's assigned formula
-declares a `command_allowlist` in its TOML, commands outside that list (plus a
-built-in lifecycle baseline) are blocked before they run.
 
 The `polecats` override adds the polecat-paths guard (`gt tap guard
 polecat-paths`, gt-hmaf) on the `Bash|Monitor` and
@@ -76,7 +65,7 @@ when they name a town path outside it, its polecat directory, or its rig's
 agents, is denied to every write (gt-tnts5). Reads stay allowed anywhere; an
 unresolvable target is blocked.
 
-The `polecats` and `dog` overrides deny permission prompts nobody can answer
+The `polecats` override denies permission prompts nobody can answer
 (`gt tap guard permission-request`, gt-8stz); attended roles carry no entry.
 They deny the question tool too (`gt tap guard question-tool`, gt-163k8, matcher
 `AskUserQuestion`): it parks the session while it reads as running — a polecat
@@ -301,19 +290,19 @@ Example base (bare matcher — unions):
 }
 ```
 
-Override for dog:
+Override for polecats:
 ```json
 {
   "PreToolUse": [
     { "matcher": "Bash|Monitor", "hooks": [
-      { "type": "command", "command": "gt tap guard formula-allowlist" }
+      { "type": "command", "command": "gt tap guard polecat-paths" }
     ] }
   ]
 }
 ```
 
-Result: dog sessions get **both** `dangerous-command` and
-`formula-allowlist` on the same `"Bash|Monitor"` matcher — not just the
+Result: polecat sessions get **both** `dangerous-command` and
+`polecat-paths` on the same `"Bash|Monitor"` matcher — not just the
 override's hook. To disable a single one of several bare-matcher guards, there
 is currently no per-hook removal: an override entry with an empty hooks list
 removes the *entire* matcher's hooks from every layer, not just the

@@ -246,7 +246,7 @@ the operator owns is refused however the sling was asked for (gt-21pl0).
 
 The `operator` label and a human assignee are the operator reservation: work
 the person means to do by hand. An agent address is always slash-qualified
-(`gastown/polecats/onyx`, `gastown/crew/sloan`, `mayor/`, `deacon/dogs/boot`),
+(`gastown/polecats/onyx`, `gastown/crew/sloan`, `mayor/`),
 so any other assignee is a person. Every automatic path skips it: the convoy
 feeders and the deacon's redispatch through the hold rule above, the
 idle-seat (`seat-refill`) and dispatch-check nudges that would otherwise ask

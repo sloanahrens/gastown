@@ -79,7 +79,6 @@ var containerSuitePackages = []string{
 	"internal/daemon",
 	"internal/deps",
 	"internal/doctor",
-	"internal/dog",
 	"internal/doltserver",
 	"internal/git",
 	"internal/health",

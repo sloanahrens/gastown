@@ -8,8 +8,8 @@
 // truth every scanner reads), then mirrors agent_state=paused onto the agent
 // bead for display, and freezes the session's process group.
 //
-// Every scanner that can resurrect a session (witness zombie detection /
-// patrol scan, the polecat staleness assessor, the stuck-agent dog)
+// Every scanner that can resurrect a session (patrol scan, the polecat
+// staleness assessor)
 // consults the pause marker and reports "do not touch" instead of
 // restarting. gt status shows PAUSED with the reason.
 package cmd
@@ -49,8 +49,8 @@ build.`,
 var agentPauseCmd = &cobra.Command{
 	Use:   "pause <rig>/<name>",
 	Short: "Pause a polecat: write a pause marker, sync agent_state=paused, and freeze the session",
-	Long: `Pause a polecat so no scanner (witness, patrol scan, stuck-agent dog,
-polecat staleness) will restart or nuke it.
+	Long: `Pause a polecat so no scanner (patrol scan, polecat staleness) will
+restart or nuke it.
 
 Writes a durable pause marker, syncs the agent bead to
 agent_state=paused, and freezes the tmux session's process group
@@ -99,9 +99,8 @@ type agentAddr struct {
 
 // pauseGatedRoles lists the roles at least one scanner actually consults the
 // pause marker for: the witness zombie/stall paths (DetectZombiePolecats,
-// DetectStalledPolecats, RestartPolecatSession) and the stuck-agent dog's
-// polecat loop all gate on agentpause.PauseGate, and all of them only ever
-// act on polecats. Witness, refinery, mayor, deacon, and crew restarts run
+// DetectStalledPolecats, RestartPolecatSession) gate on agentpause.PauseGate,
+// and all of them only ever act on polecats. Witness, refinery, mayor, deacon, and crew restarts run
 // through code that never reads this marker, so a pause written for them
 // would look like it worked and would not (gt-ahik, om kgx0).
 var pauseGatedRoles = map[session.Role]bool{
@@ -265,7 +264,7 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  Marker: %s\n", agentpause.FilePath(townRoot, target.Rig, role, name))
 	fmt.Println()
-	fmt.Println("Witness, patrol scan, and the stuck-agent dog will not touch it.")
+	fmt.Println("Patrol scan and the polecat staleness checks will not touch it.")
 	fmt.Printf("Resume with: %s\n", style.Dim.Render("gt agent resume "+display))
 	return nil
 }

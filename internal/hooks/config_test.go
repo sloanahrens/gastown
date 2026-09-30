@@ -655,68 +655,6 @@ func requireUngatedGuardCommand(t *testing.T, label string, cfg *HooksConfig, co
 	t.Errorf("%s: missing ungated (If=\"\") PreToolUse hook with Command containing %q under matcher %q, got: %+v", label, commandSubstring, shellExecutingToolMatcher, entry.Hooks)
 }
 
-func TestComputeExpectedDogGetsFormulaAllowlistGuard(t *testing.T) {
-	tmpDir := t.TempDir()
-	setTestHome(t, tmpDir)
-
-	dog, err := ComputeExpected("dog")
-	if err != nil {
-		t.Fatalf("ComputeExpected(dog): %v", err)
-	}
-
-	// Post gt-5ihs, dog's formula-allowlist guard and the base's pr-workflow
-	// / dangerous-command guards all share the bare shellExecutingToolMatcher
-	// matcher — Claude Code's matcher only ever matches the tool name — and
-	// accumulate as
-	// separate Hooks rather than one replacing the other (merge.go's
-	// unionHooks). formula-allowlist has no If (it self-filters, like
-	// dangerous-command), so it must appear among the hooks with an empty If.
-	entry, ok := findPreToolUse(dog, shellExecutingToolMatcher)
-	if !ok {
-		t.Fatal("dog missing PreToolUse guard on bare Bash matcher")
-	}
-	hasAllowlist := false
-	for _, h := range entry.Hooks {
-		if strings.Contains(h.Command, "tap guard formula-allowlist") && h.If == "" {
-			hasAllowlist = true
-		}
-	}
-	if !hasAllowlist {
-		t.Fatalf("dog Bash guard should include formula-allowlist (no If), got: %+v", entry.Hooks)
-	}
-	if len(dog.UserPromptSubmit) != 0 {
-		t.Fatalf("dog should disable UserPromptSubmit mail-check, got %+v", dog.UserPromptSubmit)
-	}
-	// Base guards must still apply alongside the allowlist guard.
-	requireUngatedGuardCommand(t, "dog", dog, "tap guard pr-workflow")
-	hasDangerousCommand := false
-	for _, h := range entry.Hooks {
-		if strings.Contains(h.Command, "tap guard dangerous-command") && h.If == "" {
-			hasDangerousCommand = true
-		}
-	}
-	if !hasDangerousCommand {
-		t.Fatal("dog should inherit dangerous-command guard from DefaultBase")
-	}
-
-	// Other roles must not receive the dog guard. Mayor still has its own
-	// bare shellExecutingToolMatcher entry (base's pr-workflow/dangerous-command
-	// guards), but it must not contain formula-allowlist.
-	mayorCfg, err := ComputeExpected("mayor")
-	if err != nil {
-		t.Fatalf("ComputeExpected(mayor): %v", err)
-	}
-	mayorEntry, ok := findPreToolUse(mayorCfg, shellExecutingToolMatcher)
-	if !ok {
-		t.Fatal("mayor should still have the base Bash guard entry")
-	}
-	for _, h := range mayorEntry.Hooks {
-		if strings.Contains(h.Command, "tap guard formula-allowlist") {
-			t.Fatal("mayor must not receive the dog formula-allowlist guard")
-		}
-	}
-}
-
 // TestComputeExpectedPolecatsGetPolecatPathsGuard pins the gt-hmaf wiring: the
 // polecats role must receive the polecat-paths guard on both the Bash matcher
 // and the file-writing tool matcher, alongside — not instead of — the guards it
@@ -794,7 +732,7 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	}
 
 	// Other roles must not receive the guard — it is a polecat-only boundary.
-	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "dog"} {
+	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon"} {
 		cfg, err := ComputeExpected(target)
 		if err != nil {
 			t.Fatalf("ComputeExpected(%s): %v", target, err)
@@ -812,8 +750,8 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 }
 
 // TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles pins the
-// gt-163k8 wiring: the interactive question tool is denied for the two roles
-// that run with nobody at the pane, and for nothing else. The guard removes a
+// gt-163k8 wiring: the interactive question tool is denied for the role
+// that runs with nobody at the pane, and for nothing else. The guard removes a
 // polecat's only interactive channel, so a wiring regression that let it reach
 // crew, witness or mayor would silently take a person's question dialog away —
 // and one that dropped it from the unattended roles would restore the 4h26m
@@ -826,7 +764,7 @@ func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T)
 		guardCommand = "tap guard question-tool"
 		matcher      = "AskUserQuestion"
 	)
-	for _, target := range []string{"gastown/polecats", "dog"} {
+	for _, target := range []string{"gastown/polecats"} {
 		cfg, err := ComputeExpected(target)
 		if err != nil {
 			t.Fatalf("ComputeExpected(%s): %v", target, err)
@@ -914,7 +852,7 @@ func TestPreToolUseGuardsCoverMonitorTool(t *testing.T) {
 
 	// End-to-end: every role's fully computed config must expose its
 	// self-filtering guards under shellExecutingToolMatcher.
-	for _, target := range []string{"mayor", "deacon", "crew", "witness", "refinery", "gastown/polecats", "dog", "boot"} {
+	for _, target := range []string{"mayor", "deacon", "crew", "witness", "refinery", "gastown/polecats", "boot"} {
 		cfg, err := ComputeExpected(target)
 		if err != nil {
 			t.Fatalf("ComputeExpected(%s): %v", target, err)
@@ -981,7 +919,7 @@ func TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings(t *testin
 	setTestHome(t, tmpDir)
 
 	const guardCommand = "tap guard permission-request"
-	for _, target := range []string{"gastown/polecats", "dog"} {
+	for _, target := range []string{"gastown/polecats"} {
 		cfg, err := ComputeExpected(target)
 		if err != nil {
 			t.Fatalf("ComputeExpected(%s): %v", target, err)
@@ -1259,39 +1197,6 @@ func TestDiscoverTargets_ReturnsOnlyClaude(t *testing.T) {
 		if tgt.Provider == "gemini" {
 			t.Errorf("DiscoverTargets should not return gemini targets, got: %s", tgt.DisplayKey())
 		}
-	}
-}
-
-func TestDiscoverTargets_DogKennelsIncluded(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "boot"), 0755)
-	// alpha is a real kennel (has .dog.json); scratch is not.
-	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "alpha"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "deacon", "dogs", "alpha", ".dog.json"), []byte(`{"name":"alpha","state":"idle"}`), 0644)
-	os.MkdirAll(filepath.Join(tmpDir, "deacon", "dogs", "scratch"), 0755)
-
-	targets, err := DiscoverTargets(tmpDir)
-	if err != nil {
-		t.Fatalf("DiscoverTargets failed: %v", err)
-	}
-
-	var dogTargets []Target
-	for _, tgt := range targets {
-		if tgt.Key == "dog" {
-			dogTargets = append(dogTargets, tgt)
-		}
-	}
-	if len(dogTargets) != 1 {
-		t.Fatalf("expected exactly 1 dog target (alpha), got %d: %+v", len(dogTargets), dogTargets)
-	}
-	wantPath := filepath.Join(tmpDir, "deacon", "dogs", "alpha", ".claude", "settings.json")
-	if dogTargets[0].Path != wantPath {
-		t.Errorf("dog target Path = %q, want %q", dogTargets[0].Path, wantPath)
-	}
-	if dogTargets[0].Role != "dog" {
-		t.Errorf("dog target Role = %q, want %q", dogTargets[0].Role, "dog")
 	}
 }
 
@@ -1622,7 +1527,7 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
-	for _, target := range []string{"mayor", "crew", "witness", "refinery", "deacon", "polecats", "dog", "boot", "gastown/crew", "gastown/witness"} {
+	for _, target := range []string{"mayor", "crew", "witness", "refinery", "deacon", "polecats", "boot", "gastown/crew", "gastown/witness"} {
 		expected, err := ComputeExpected(target)
 		if err != nil {
 			t.Fatalf("ComputeExpected(%s) failed: %v", target, err)

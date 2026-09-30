@@ -277,6 +277,9 @@ pipeline that mountains build on.
 
 **Design doc:** [mountain-eater.md](mountain-eater.md)
 
+> Not built. The Witness, Deacon and dog roles this milestone relied on have
+> been retired, so the Layer 1-2 components below would need a new executor.
+
 **What ships:**
 
 | Component | Description |

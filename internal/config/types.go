@@ -101,7 +101,8 @@ type TownSettings struct {
 	Convoy *ConvoyConfig `json:"convoy,omitempty"`
 
 	// RoleEffort maps role names to effort levels for per-role effort configuration.
-	// Keys are role names: "mayor", "deacon", "witness", "refinery", "polecat", "crew", "boot", "dog".
+	// Keys are role names: "mayor", "polecat", "crew". Keys for retired roles
+	// ("deacon", "witness", "refinery", "boot", "dog") are accepted and ignored.
 	// Values are effort levels: "low", "medium", "high", "max".
 	// Allows cost/speed optimization by using lower effort for simpler roles.
 	// Managed by cost-tier presets alongside RoleAgents.
@@ -302,15 +303,17 @@ type DaemonThresholds struct {
 	// MassDeathThreshold is session deaths within window to trigger alert (default 3).
 	MassDeathThreshold *int `json:"mass_death_threshold,omitempty"`
 
-	// DogIdleSessionTimeout is how long a dog can be idle with tmux before kill (default "1h").
-	DogIdleSessionTimeout string `json:"dog_idle_session_timeout,omitempty"`
-
-	// DogIdleRemoveTimeout is how long a dog can be idle before removal (default "4h").
-	DogIdleRemoveTimeout string `json:"dog_idle_remove_timeout,omitempty"`
+	// DogIdleSessionTimeout, DogIdleRemoveTimeout, StaleWorkingTimeout and
+	// MaxDogPoolSize are retired with the dog pack (gt-ckunw): nothing reads
+	// them. They are declared so a config that still carries them decodes.
+	DogIdleSessionTimeout json.RawMessage `json:"dog_idle_session_timeout,omitempty"`
+	DogIdleRemoveTimeout  json.RawMessage `json:"dog_idle_remove_timeout,omitempty"`
+	StaleWorkingTimeout   json.RawMessage `json:"stale_working_timeout,omitempty"`
+	MaxDogPoolSize        json.RawMessage `json:"max_dog_pool_size,omitempty"`
 
 	// PolecatIdleSessionTimeout is how long a polecat can be idle before its session
-	// is killed to prevent API slot burn (default "15m"). Polecats are ephemeral workers;
-	// unlike dogs, they should not persist when idle.
+	// is killed to prevent API slot burn (default "15m"). Polecats are ephemeral workers
+	// and should not persist when idle.
 	PolecatIdleSessionTimeout string `json:"polecat_idle_session_timeout,omitempty"`
 
 	// PolecatSelfTerminate controls whether polecats kill their own session after
@@ -320,13 +323,6 @@ type DaemonThresholds struct {
 	// issues at scale. Worktree reuse is preserved — ReuseIdlePolecat creates
 	// a fresh branch on the existing worktree.
 	PolecatSelfTerminate *bool `json:"polecat_self_terminate,omitempty"`
-
-	// StaleWorkingTimeout is how long a dog in state=working with no activity
-	// before considered stuck (default "2h").
-	StaleWorkingTimeout string `json:"stale_working_timeout,omitempty"`
-
-	// MaxDogPoolSize is target dog pool size (default 4).
-	MaxDogPoolSize *int `json:"max_dog_pool_size,omitempty"`
 
 	// MaxLifecycleMessageAge is max age of lifecycle mail before discard (default "6h").
 	MaxLifecycleMessageAge string `json:"max_lifecycle_message_age,omitempty"`

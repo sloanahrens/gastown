@@ -1225,7 +1225,6 @@ func TestShouldRenderMemories(t *testing.T) {
 		{string(RoleMayor), true},
 		{string(RoleCrew), true},
 		{string(RolePolecat), false},
-		{string(RoleDog), false},
 		{string(RoleUnknown), false},
 		{"", false},
 		{"MAYOR", true}, // role comparison is case-insensitive

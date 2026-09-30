@@ -14,7 +14,7 @@ log() { echo "[gitignore-reconcile] $*"; }
 # A broken or empty rig list is the exact condition the plugin is meant to
 # guard against (gt-chqi): exiting 0 here serializes as a success receipt and
 # a 12-hour cooldown on top of nothing, so the failure is invisible. Exit
-# nonzero instead — the daemon records it and dispatches a dog.
+# nonzero instead — the daemon records it and raises an escalation.
 RIG_JSON=$(gt rig list --json 2>/dev/null) || {
   log "FAIL: could not get rig list (gt rig list --json)"
   gt plugin record-run --plugin gitignore-reconcile --result failure \

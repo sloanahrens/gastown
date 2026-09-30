@@ -1,19 +1,19 @@
 description = """
 Feed stranded convoys by dispatching ready work to available polecats.
 
-Dogs execute this formula when the Deacon detects a stranded convoy. A convoy
+The agent running this formula feeds one stranded convoy. A convoy
 is stranded when it has ready issues (open, unblocked, no assignee) but no
 workers are processing them.
 
-## Dog Contract
+## Contract
 
-This is infrastructure work. You:
+This is infrastructure work. The agent running this formula:
 1. Receive convoy ID via variable
 2. Load convoy and find ready issues
 3. Check idle polecat capacity across rigs
 4. Dispatch min(ready_issues, idle_polecats) using gt sling
 5. Report actions taken
-6. Return to kennel
+6. Signals completion
 
 ## Variables
 
@@ -23,13 +23,12 @@ This is infrastructure work. You:
 
 ## Single Pass Design
 
-Dog doesn't babysit or wait for completion. The workflow is:
+The run doesn't babysit or wait for completion. The workflow is:
 1. Find ready issues in convoy
 2. Dispatch each to an available polecat
 3. Exit immediately
 
-If convoy is still stranded next Deacon patrol cycle, another dog will be
-dispatched. This keeps the system stateless and batch-oriented.
+If the convoy is still stranded afterwards, a later run feeds it again. This keeps the system stateless and batch-oriented.
 
 ## Failure Modes
 
@@ -263,27 +262,15 @@ Not required - the dispatch tracking handles visibility.
 
 [[steps]]
 id = "return-to-kennel"
-title = "Signal completion and return to kennel"
+title = "Signal completion"
 needs = ["report-results"]
 description = """
-Signal work complete and return to available pool.
+Signal work complete.
 
-**1. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE $(hostname)" -m "Task: convoy-feed
-Convoy: {{convoy}}
-Ready: {{ready_count}}
-Dispatched: {{dispatch_count}}
-Status: COMPLETE
+Close this step with a one-line summary (convoy {{convoy}}: dispatched {{dispatch_count}} of {{ready_count}} ready). The closed molecule is the
+record of the run.
 
-Ready for next assignment."
-```
-
-**2. Return to kennel:**
-Dog returns to available state in the pool. Deacon will assign next work
-or retire the dog if pool is oversized.
-
-**Exit criteria:** Deacon notified, dog ready for next work or retirement."""
+**Exit criteria:** Completion recorded."""
 
 [vars]
 [vars.convoy]

@@ -1,13 +1,16 @@
 description = """
 Reap stale wisps and close stale issues across all Dolt databases.
 
-The Reaper Dog executes this formula to clean up wisp and issue tables.
-SQL operations are exposed as gt reaper subcommands — the Dog calls
-these commands, inspects results, and uses judgment for anomalies.
+The daemon's wisp_reaper patrol is the executor: it runs the sweep inline
+(wisp_reaper.go) and pours this molecule only as the cycle's receipt, closing
+or failing each step as it goes. No agent runs it. The same SQL operations are
+exposed as `gt reaper scan`/`reap`/`purge`/`auto-close`, and the step bodies below double as the
+runbook for an operator running them by hand. The daemon's sweep covers scan,
+reap, purge and auto-close; it does not run `gt convoy check`, so the
+convoy-check step is for a hand run.
 
-## Dog Contract
+## What a cycle does
 
-This is infrastructure cleanup work:
 1. Scan all production databases for candidates
 2. Reap (close) wisps past max_age whose parent is closed/missing, plus step-wisps whose parent molecule is already closed
 3. Purge (delete) closed wisps past purge_age + old closed mail
@@ -26,7 +29,7 @@ This is infrastructure cleanup work:
 | purge_age | config | Max closed wisp age before purging (default 7d) |
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
-| auto_close | config | If "false", SKIP the auto-close step entirely (default: run it) |
+| auto_close | config | If "false", SKIP the auto-close step entirely. The daemon's sweep auto-closes only when daemon.json sets `patrols.wisp_reaper.auto_close=true` |
 | alert_threshold | config | Open wisp count that triggers escalation (default 3000) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
@@ -51,8 +54,9 @@ bead by label or id pattern, and have no active dependencies. On top of that:
   radius `--force` would authorize.
 - It REFUSES a run whose candidate count exceeds `--max-closes` (default 20 per
   database). Nothing is closed on a refusal.
-- daemon.json `patrols.wisp_reaper.auto_close=false` disarms the step. Do not
-  pass `--force`.
+- The daemon's sweep auto-closes only when daemon.json sets
+  `patrols.wisp_reaper.auto_close=true`; unset or `false` leaves it off, and
+  `false` also disarms a hand run. Do not pass `--force`.
 - It REFUSES a live run that does not carry the preview hash of the set it is
   about to close (`--preview=<hash>`, gt-39bu). The live command refuses on its
   own, so the writing stays behind the counting whatever order the two commands
@@ -61,14 +65,13 @@ bead by label or id pattern, and have no active dependencies. On top of that:
   the candidate count before running it for real. If the count is a surprise,
   stop and escalate — do not run it live "to see".
 
-## Scope Boundary (gt-61x, enforced at runtime since gt-9iv)
+## Scope Boundary (gt-61x)
 
 This formula's writes are limited to wisp/issue/mail ROWS via the gt reaper
 subcommands and `gt convoy check` listed in the steps. The command_allowlist
-declared below is ENFORCED by the dog session's formula-allowlist guard:
-shell commands outside the allowlist (plus the standard dog lifecycle
-baseline) are blocked before they run. Database-level operations
-are OUT OF SCOPE for this formula:
+declared below records that scope; no runtime guard enforces it now that no
+agent session runs the formula. Database-level operations are OUT OF SCOPE
+for this formula:
 
 - NEVER run `gt dolt cleanup` (with or without --force)
 - NEVER drop, remove, or delete database directories by any means
@@ -83,7 +86,7 @@ excluded from cleanup regardless.
 
 ## Anomaly Detection
 
-The Dog should watch for and flag:
+A run (the daemon's, or a hand run) should watch for and flag:
 - Dangling parent references (wisps referencing purged parents)
 - Sudden spikes in reap candidates (suggests a wisp lifecycle problem)
 - Open wisp counts exceeding alert_threshold
@@ -96,10 +99,9 @@ NOT anomalies (do NOT escalate these):
 formula = "mol-dog-reaper"
 version = 7
 
-# Enforced command allowlist (gt-9iv): dog sessions executing this formula may
-# only run these commands, plus the built-in dog lifecycle baseline
-# (gt hook/prime/dog done/nudge/escalate, bd basics, read-only utilities).
-# See the Scope Boundary section above; escalate instead of working around it.
+# Declared command allowlist (gt-9iv): the commands this formula's scope covers.
+# It was enforced on the agent sessions that used to run the formula; nothing
+# enforces it now. See the Scope Boundary section above.
 command_allowlist = [
 	"gt reaper",
 	"gt convoy check",
@@ -251,7 +253,7 @@ run rather than reaching for `--force`.
   was closed. That is a designed stop, not a bug to work around.
 - A "below the floor" notice (gt-ecpj) is a soft error: the command closed
   nothing, reported the set the mis-set threshold would take, and exited 0.
-  Report it in the dog report — a threshold that mis-sat below 7d is a config
+  Report it in the cycle report — a threshold that mis-sat below 7d is a config
   fix, and the cycle continues.
 
 {{#if dry_run}}**Dry run is set** — step 2 performs no writes.{{/if}}
@@ -295,11 +297,13 @@ id = "report"
 title = "Report findings and return to kennel"
 needs = ["convoy-check"]
 description = """
-Generate summary and signal completion.
+Generate the cycle summary. The daemon logs these counts in one summary line
+and closes this step; a hand run reports them the same way. (The step title is
+historical; it is kept because the daemon matches poured steps by title.)
 
 **1. Generate report:**
 ```markdown
-## Reaper Dog Report
+## Reaper Report
 
 **Databases scanned**: (count)
 **Wisps reaped**: (total closed stale open wisps)

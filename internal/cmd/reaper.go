@@ -45,8 +45,8 @@ func parseReaperAge(flag, value string) (time.Duration, error) {
 
 // reaperAutoCloseDisarmed reports whether daemon.json disarms the wisp_reaper
 // auto-close step, and where that config lives for the message. Checked here as
-// well as in the daemon so a Dog that ignores the formula instruction still
-// cannot sweep: the disarm has to hold on every path that reaches the write.
+// well as in the daemon so a hand-run sweep cannot auto-close either: the
+// disarm has to hold on every path that reaches the write.
 func reaperAutoCloseDisarmed() (bool, string) {
 	townRoot, err := findTownRoot()
 	if err != nil {
@@ -186,14 +186,14 @@ func waitBeforeReaperDatabase(index int) error {
 var reaperCmd = &cobra.Command{
 	Use:     "reaper",
 	GroupID: GroupServices,
-	Short:   "Wisp and issue cleanup operations (Dog-callable helpers)",
+	Short:   "Wisp and issue cleanup operations",
 	Long: `Execute wisp reaper operations against Dolt databases.
 
-These subcommands are the callable helper functions for the mol-dog-reaper
-formula. They execute SQL operations but leave eligibility decisions to the
-Dog agent or daemon orchestrator.
+The daemon's wisp_reaper patrol runs the same cycle in-process; these
+subcommands run its steps by hand. They execute SQL operations but leave
+eligibility decisions to the caller.
 
-When run by a Dog:
+Examples:
   gt reaper scan --db=gastown                          # Discover candidates
   gt reaper reap --db=gastown                          # Close stale wisps
   gt reaper purge --db=gastown                         # Delete old closed wisps + mail
@@ -227,7 +227,7 @@ When --db is provided, scans a single database. When omitted, auto-discovers
 all databases on the Dolt server and scans each one, printing a summary.
 
 Returns counts and anomaly detection results without modifying any data.
-The Dog uses this to understand the state before deciding what to reap.`,
+Use this to understand the state before deciding what to reap.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		maxAge, err := parseReaperAge("--max-age", reaperMaxAge)
 		if err != nil {
@@ -674,8 +674,8 @@ var reaperRunCmd = &cobra.Command{
 	Short: "Run full reaper cycle across all databases",
 	Long: `Execute a full reaper cycle: scan → reap → purge → auto-close → report.
 
-This is the inline fallback for when Dog dispatch is unavailable.
-Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
+The daemon's wisp_reaper patrol runs this cycle in-process; this command runs
+it by hand.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		databases := reaperDatabaseNames()
 

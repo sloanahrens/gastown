@@ -430,7 +430,7 @@ ready_bug gastown
 run_plugin 13000000
 touch "$TEST_STATE/nudge_fails"
 run_plugin 13000300
-assert_eq "$EXIT" "1" "failed nudge: exits nonzero so the daemon hands it to a dog"
+assert_eq "$EXIT" "1" "failed nudge: exits nonzero so the daemon escalates it"
 assert_eq "$(jq -r '.episodes.local.last_nudge' "$GT_SEAT_REFILL_STATE")" "0" \
   "failed nudge: the episode does not record a nudge that never landed"
 rm -f "$TEST_STATE/nudge_fails"

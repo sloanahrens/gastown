@@ -27,7 +27,7 @@ formula execution (ZFC) because:
 The daemon pours this molecule, executes the Go code, and closes/fails each step
 for observability.
 
-## Dog Contract
+## What the daemon does
 
 The daemon:
 1. Runs `gt daemon dispatch-check --json`, which measures free polecat seats

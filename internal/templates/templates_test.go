@@ -219,112 +219,6 @@ func TestRenderMessage_Nudge(t *testing.T) {
 	}
 }
 
-func TestRenderRole_Dog(t *testing.T) {
-	t.Parallel()
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	data := RoleData{
-		Role:          "dog",
-		DogName:       "Fido",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town/deacon/dogs/Fido",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-	}
-
-	output, err := tmpl.RenderRole("dog", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	// Check for key content
-	if !strings.Contains(output, "Dog Context") {
-		t.Error("output missing 'Dog Context'")
-	}
-	if !strings.Contains(output, "Fido") {
-		t.Error("output missing dog name")
-	}
-	if !strings.Contains(output, "/test/town") {
-		t.Error("output missing town root")
-	}
-}
-
-// TestRenderRole_DogReaperAutoCloseShowsTheGuardedPair guards the instruction
-// half of gt-39bu. A dog reads two sources: the formula's step text, and this
-// role reference. The reference used to advertise the bare live command
-// (`gt reaper auto-close --db=<name> --json`) while the formula asked for a dry
-// run first — the 2026-09-20 reaper followed the unguarded one and closed before
-// it counted. The reference must show the pair, dry run first, and must not
-// offer the live command on its own.
-func TestRenderRole_DogReaperAutoCloseShowsTheGuardedPair(t *testing.T) {
-	t.Parallel()
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	output, err := tmpl.RenderRole("dog", RoleData{Role: "dog", DogName: "reaper", TownRoot: "/test/town", TownName: "town"})
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	if !strings.Contains(output, "gt reaper auto-close --db=<name> --dry-run --json") {
-		t.Error("dog reaper reference must show the dry run")
-	}
-	if !strings.Contains(output, "gt reaper auto-close --db=<name> --preview=<hash> --json") {
-		t.Error("dog reaper reference must show the live run carrying the dry run's preview hash")
-	}
-	if strings.Contains(output, "gt reaper auto-close --db=<name> --json") {
-		t.Error("dog reaper reference offers the live auto-close with no preview: that is the unguarded form gt-39bu came from")
-	}
-}
-
-// TestRenderRole_Dog_NoHardcodedGtPath verifies the dog template uses {{ .TownRoot }}
-// and does not contain hardcoded ~/gt paths.
-func TestRenderRole_Dog_NoHardcodedGtPath(t *testing.T) {
-	t.Parallel()
-	tmpl, err := New()
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	const customTownRoot = "/custom/test/instance"
-
-	data := RoleData{
-		Role:          "dog",
-		DogName:       "Rover",
-		TownRoot:      customTownRoot,
-		TownName:      "instance",
-		WorkDir:       customTownRoot + "/deacon/dogs/Rover",
-		DefaultBranch: "main",
-		MayorSession:  "gt-instance-mayor",
-	}
-
-	output, err := tmpl.RenderRole("dog", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	if strings.Contains(output, "~/gt") {
-		var offending []string
-		for i, line := range strings.Split(output, "\n") {
-			if strings.Contains(line, "~/gt") {
-				offending = append(offending, fmt.Sprintf("  line %d: %s", i+1, strings.TrimSpace(line)))
-			}
-		}
-		t.Errorf("rendered dog template still contains hardcoded ~/gt (TownRoot=%q):\n%s",
-			customTownRoot, strings.Join(offending, "\n"))
-	}
-
-	if !strings.Contains(output, customTownRoot) {
-		t.Errorf("rendered dog template does not contain TownRoot %q — paths may be hardcoded", customTownRoot)
-	}
-}
-
 // TestRenderRole_NoHardcodedGtPath verifies that no role template renders
 // a literal "~/gt" path — all path references must use {{ .TownRoot }}.
 // This is a regression test for instances running outside ~/gt
@@ -371,8 +265,6 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				MayorSession:  "gt-instance-mayor",
 			},
 		},
-		// dog tested separately in TestRenderRole_Dog_NoHardcodedGtPath
-		// (requires DogName field)
 	}
 
 	for _, tc := range roles {
@@ -437,16 +329,6 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				Role: "crew", RigName: "myrig", Polecat: "TestCrew",
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/myrig/crew/TestCrew",
-				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor",
-			},
-		},
-		{
-			role: "dog",
-			data: RoleData{
-				Role: "dog", DogName: "Rover",
-				TownRoot: customTownRoot3, TownName: "instance",
-				WorkDir:       customTownRoot3 + "/deacon/dogs/Rover",
 				DefaultBranch: "main",
 				MayorSession:  "gt-instance-mayor",
 			},
@@ -887,7 +769,7 @@ func TestRoleNames(t *testing.T) {
 	}
 
 	names := tmpl.RoleNames()
-	expected := []string{"mayor", "polecat", "crew", "dog"}
+	expected := []string{"mayor", "polecat", "crew"}
 
 	if len(names) != len(expected) {
 		t.Errorf("RoleNames() = %v, want %v", names, expected)

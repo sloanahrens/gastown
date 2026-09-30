@@ -1,21 +1,22 @@
 description = """
 Sync Dolt database backups to local and offsite storage.
 
-The Backup Dog runs `dolt backup sync` for each production database, then
-rsyncs the local backup directory to iCloud Drive for offsite replication.
+The daemon's dolt_backup job runs `dolt backup sync` for each production
+database, then rsyncs the local backup directory to iCloud Drive for offsite
+replication. The job (dolt_backup.go) is the executor; this molecule is poured
+only as its receipt, and the job closes or fails each step as it goes. No agent
+runs it.
 
 Current behavior (from dolt_backup.go):
 - Discovers databases with backup remotes configured
 - Runs `dolt backup sync <name>-backup` per database
 - Rsyncs .dolt-backup/ to iCloud Drive
 
-## Dog Contract
+## What the job does
 
-This is infrastructure work. You:
-1. Sync each production database to its backup remote
-2. Rsync local backups to offsite (iCloud Drive)
-3. Report results to Deacon
-4. Return to kennel
+1. Syncs each production database to its backup remote
+2. Rsyncs local backups to offsite (iCloud Drive)
+3. Logs the results and closes the receipt
 
 ## Variables
 
@@ -88,39 +89,14 @@ id = "report"
 title = "Report findings and return to kennel"
 needs = ["offsite"]
 description = """
-Generate summary and signal completion.
+Record the cycle's outcome.
 
-**1. Generate report:**
-```markdown
-## Backup Dog Report
+The daemon logs how many databases synced, the offsite status, and any
+per-database failures, then closes this step. The closed molecule is the
+cycle's receipt. (The step title is historical; it is kept because the daemon
+matches poured steps by title.)
 
-**Databases synced**: {{synced_count}}/{{total_count}}
-**Offsite sync**: {{offsite_status}}
-
-### Per Database
-{{#each db}}
-- {{name}}: {{status}} ({{duration}})
-{{/each}}
-
-### Failures
-{{#if failures}}
-{{#each failures}}
-- {{name}}: {{error}}
-{{/each}}
-{{else}}
-None
-{{/if}}
-```
-
-**2. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE: backup" -m "Task: dolt-backup
-Synced: {{synced_count}}/{{total_count}}
-Offsite: {{offsite_status}}
-Status: COMPLETE"
-```
-
-**Exit criteria:** Report sent, dog returned to kennel."""
+**Exit criteria:** Results logged, receipt closed."""
 
 [vars]
 [vars.databases]

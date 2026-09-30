@@ -4,21 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -174,236 +170,26 @@ func TestWispReaperAutoCloseKnob(t *testing.T) {
 	if WispReaperAutoCloseDisarmed(unset) {
 		t.Error("unset auto_close should not be disarmed")
 	}
-	if !wispReaperAutoCloseEnabled(unset, false) {
-		t.Error("unset auto_close should leave the dog path enabled")
-	}
-	// The inline fallback runs because Dog dispatch FAILED. Turning a dispatch
-	// error into a sweep of the durable issue tracker is the gt-2qzr failure,
-	// so it needs an explicit opt-in.
-	if wispReaperAutoCloseEnabled(unset, true) {
-		t.Error("unset auto_close should leave the inline fallback disarmed")
+	// A sweep of the durable issue tracker nobody asked for is the gt-2qzr
+	// failure, so auto-close needs an explicit opt-in.
+	if wispReaperAutoCloseEnabled(unset) {
+		t.Error("unset auto_close should leave auto-close off")
 	}
 
 	armed := &DaemonPatrolConfig{Patrols: &PatrolsConfig{WispReaper: &WispReaperConfig{AutoClose: &yes}}}
 	if WispReaperAutoCloseDisarmed(armed) {
 		t.Error("auto_close=true should not be disarmed")
 	}
-	if !wispReaperAutoCloseEnabled(armed, false) || !wispReaperAutoCloseEnabled(armed, true) {
-		t.Error("auto_close=true should enable both paths")
+	if !wispReaperAutoCloseEnabled(armed) {
+		t.Error("auto_close=true should enable auto-close")
 	}
 
 	disarmed := &DaemonPatrolConfig{Patrols: &PatrolsConfig{WispReaper: &WispReaperConfig{AutoClose: &no}}}
 	if !WispReaperAutoCloseDisarmed(disarmed) {
 		t.Error("auto_close=false should be disarmed")
 	}
-	if wispReaperAutoCloseEnabled(disarmed, false) || wispReaperAutoCloseEnabled(disarmed, true) {
-		t.Error("auto_close=false should disarm both paths")
-	}
-}
-
-// TestDispatchReaperDogReportsFailureCause covers the diagnostics gap from
-// gt-2qzr: the log recorded only "exit status 1", which said nothing about why
-// the sweep had moved to the inline fallback, so the cause went unnoticed.
-func TestDispatchReaperDogReportsFailureCause(t *testing.T) {
-	t.Parallel()
-	gt := newFakeCLI(func([]string) cliReply {
-		return cliReply{stderr: "sling: no available dogs in deacon/dogs\n", code: 1}
-	})
-	d := &Daemon{
-		config:  &Config{TownRoot: t.TempDir()},
-		gtPath:  "gt",
-		logger:  log.New(io.Discard, "", 0),
-		execCmd: gt.run,
-	}
-	err := d.dispatchReaperDog(map[string]string{"max_age": "1h"})
-	if err == nil {
-		t.Fatal("dispatchReaperDog() error = nil, want failure")
-	}
-	if !strings.Contains(err.Error(), "no available dogs") {
-		t.Errorf("dispatchReaperDog() error = %q, want it to carry the command's stderr", err)
-	}
-}
-
-func TestDispatchReaperDogUsesDogPoolSling(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	gt := newFakeCLI(nil)
-	d := &Daemon{
-		config:  &Config{TownRoot: townRoot},
-		gtPath:  "gt",
-		execCmd: gt.run,
-	}
-	if err := d.dispatchReaperDog(map[string]string{"max_age": "1h"}); err != nil {
-		t.Fatalf("dispatchReaperDog() error = %v", err)
-	}
-
-	calls := gt.recorded()
-	if len(calls) != 1 {
-		t.Fatalf("gt calls = %+v, want one sling", calls)
-	}
-	args := calls[0].args
-	wantPrefix := []string{"sling", constants.MolDogReaper, "deacon/dogs"}
-	if len(args) < len(wantPrefix) {
-		t.Fatalf("gt args = %v, want prefix %v", args, wantPrefix)
-	}
-	for i, want := range wantPrefix {
-		if args[i] != want {
-			t.Fatalf("gt arg %d = %q, want %q (all args: %v)", i, args[i], want, args)
-		}
-	}
-	if calls[0].dir != townRoot {
-		t.Errorf("gt sling ran in %q, want the town root %q", calls[0].dir, townRoot)
-	}
-}
-
-// TestSlingDogArgsIsDeterministicAndComplete covers the argv the CLI test
-// round-trips through the real command tree: map iteration order must not leak
-// into the argv, and no --var may go missing.
-func TestSlingDogArgsIsDeterministicAndComplete(t *testing.T) {
-	t.Parallel()
-	vars := map[string]string{
-		"max_age":         "24h0m0s",
-		"purge_age":       "168h0m0s",
-		"dry_run":         "true",
-		"alert_threshold": "5",
-	}
-	first := SlingDogArgs(constants.MolDogReaper, vars)
-	for i := 0; i < 20; i++ {
-		if got := SlingDogArgs(constants.MolDogReaper, vars); !slices.Equal(got, first) {
-			t.Fatalf("SlingDogArgs is not deterministic:\n got %v\nwant %v", got, first)
-		}
-	}
-	want := []string{
-		"sling", constants.MolDogReaper, "deacon/dogs",
-		"--var", "alert_threshold=5",
-		"--var", "dry_run=true",
-		"--var", "max_age=24h0m0s",
-		"--var", "purge_age=168h0m0s",
-	}
-	if !slices.Equal(first, want) {
-		t.Errorf("SlingDogArgs = %v, want %v", first, want)
-	}
-}
-
-// TestDispatchReaperDogRetriesTransientContention covers gt-4k3fj.10: a dispatch
-// whose wisp-creating commit loses a Dolt race must retry, not drop to the
-// inline scan that runs with auto-close disarmed.
-func TestDispatchReaperDogRetriesTransientContention(t *testing.T) {
-	t.Parallel()
-	var calls int
-	var waits []time.Duration
-	d := &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(io.Discard, "", 0),
-		reaperSlingFn: func([]string) ([]byte, error) {
-			calls++
-			if calls <= 2 {
-				return []byte("Error: creating wisp: sql commit (regular): Error 1213 (40001): " +
-						"serialization failure: this transaction conflicts with a committed transaction " +
-						"from another client, try restarting transaction.\nUsage:\n  gt sling ..."),
-					errors.New("exit status 1")
-			}
-			return []byte("✓ Wisp created: hq-wisp-abc123"), nil
-		},
-		reaperSlingWaitFn: func(delay time.Duration) { waits = append(waits, delay) },
-	}
-
-	if err := d.dispatchReaperDog(map[string]string{"max_age": "1h"}); err != nil {
-		t.Fatalf("dispatchReaperDog() = %v, want the retry to arrive at a successful dispatch", err)
-	}
-	if calls != 3 {
-		t.Errorf("sling attempts = %d, want 3 (two contended, one clean)", calls)
-	}
-	want := []time.Duration{reaperDispatchRetryDelay, 2 * reaperDispatchRetryDelay}
-	if !slices.Equal(waits, want) {
-		t.Errorf("retry backoff waits = %v, want %v", waits, want)
-	}
-}
-
-// TestDispatchReaperDogDoesNotRetryAnAmbiguousFailure is the other half of the
-// retry's contract: a failure that may already have pinned a wisp to a dog is
-// not repeated, because a second dispatch would set a second sweep racing the
-// first.
-func TestDispatchReaperDogDoesNotRetryAnAmbiguousFailure(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name   string
-		output string
-	}{
-		{"dog pool exhausted", "sling: no available dogs in deacon/dogs"},
-		{"unreachable", "Error: creating wisp: dial tcp: connection to dolt unreachable"},
-		{"timeout", "Error: creating wisp: sql: context deadline exceeded"},
-		// The wisp exists by this step, so a repeat would orphan a second one.
-		{"transient after the wisp was created",
-			"Error: attaching to hook: sql commit (regular): Error 1213 (40001): serialization failure"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var calls int
-			var waits []time.Duration
-			d := &Daemon{
-				config: &Config{TownRoot: t.TempDir()},
-				logger: log.New(io.Discard, "", 0),
-				reaperSlingFn: func([]string) ([]byte, error) {
-					calls++
-					return []byte(tc.output), errors.New("exit status 1")
-				},
-				reaperSlingWaitFn: func(delay time.Duration) { waits = append(waits, delay) },
-			}
-
-			err := d.dispatchReaperDog(map[string]string{"max_age": "1h"})
-			if err == nil {
-				t.Fatal("dispatchReaperDog() = nil, want the failure reported")
-			}
-			if calls != 1 {
-				t.Errorf("sling attempts = %d, want 1 — %q must not be retried", calls, tc.name)
-			}
-			if len(waits) != 0 {
-				t.Errorf("backoff waits = %v, want none", waits)
-			}
-			if !strings.Contains(err.Error(), strings.TrimPrefix(tc.output, "Error: ")) {
-				t.Errorf("dispatchReaperDog() error = %q, want it to carry the command's output", err)
-			}
-		})
-	}
-}
-
-// TestSummarizeCommandOutputKeepsTheErrorLine pins the diagnostic that made
-// gt-4k3fj.10 unreadable: a tail-only cap keeps cobra's usage dump and discards
-// the "Error: <cause>" line printed before it.
-func TestSummarizeCommandOutputKeepsTheErrorLine(t *testing.T) {
-	t.Parallel()
-	const cause = "Error: creating wisp: sql commit (regular): Error 1213 (40001): serialization failure"
-	// Faithful in shape to a real dump: the cause leads, ~3KB of flags follow.
-	usage := strings.Repeat("      --some-flag string      A long help string for a flag.  ", 60)
-
-	got := summarizeCommandOutput([]byte(cause + "\nUsage:\n  gt sling <bead-or-formula> [target] [flags]\n\nFlags:\n" + usage))
-	if !strings.Contains(got, "serialization failure") {
-		t.Errorf("summarized output dropped the cause: %q", got)
-	}
-	if !strings.Contains(got, "Flags:") {
-		t.Errorf("summarized output dropped the tail: %q", got)
-	}
-	if len(got) > maxSummarizedOutputLen {
-		t.Errorf("summarized output = %d chars, want at most %d", len(got), maxSummarizedOutputLen)
-	}
-
-	if got := summarizeCommandOutput(nil); got != "(no output)" {
-		t.Errorf("summarizeCommandOutput(nil) = %q, want (no output)", got)
-	}
-	if got := summarizeCommandOutput([]byte("  short  and\nchatty  ")); got != "short and chatty" {
-		t.Errorf("summarizeCommandOutput collapsed to %q, want the single-line form", got)
-	}
-
-	// gt's own progress output carries multi-byte marks, and a cap that cuts
-	// through one leaves mojibake in the log.
-	multibyte := cause + strings.Repeat(" ✓  🎯 slice 日志", 300)
-	got = summarizeCommandOutput([]byte(multibyte))
-	if !utf8.ValidString(got) {
-		t.Errorf("summarizeCommandOutput split a rune: %q", got)
-	}
-	if len(got) > maxSummarizedOutputLen {
-		t.Errorf("summarized multibyte output = %d bytes, want at most %d", len(got), maxSummarizedOutputLen)
+	if wispReaperAutoCloseEnabled(disarmed) {
+		t.Error("auto_close=false should disarm auto-close")
 	}
 }
 

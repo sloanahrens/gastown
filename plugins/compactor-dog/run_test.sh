@@ -12,7 +12,7 @@ RUN_LOG_DIRS=""
 RUN_LOG_DIR=""
 # run.sh refuses to start while its lock exists, and the default lock is one
 # path for the whole host. Each test run takes a lock of its own, so two
-# concurrent runs (two gates, or a gate beside the live dog) do not refuse
+# concurrent runs (two gates, or a gate beside the daemon's run) do not refuse
 # each other. The dir is cleaned with the run log dirs.
 COMPACTOR_LOCK_DIR=$(mktemp -d)
 RUN_LOG_DIRS="$COMPACTOR_LOCK_DIR"
@@ -45,7 +45,7 @@ validate_hash() {
 
 # Verify our copy matches run.sh (guard against drift).
 # Extract the regex from each file's validate_hash function with POSIX sed:
-# grep -oP is GNU-only and fails on macOS/BSD grep, which is where the dog runs.
+# grep -oP is GNU-only and fails on macOS/BSD grep, which is where the daemon runs it.
 extract_hash_regex() {
   sed -n '/^validate_hash/,/^}/p' "$1" | sed -n 's/.*=~ \(.*\) \]\];.*/\1/p'
 }

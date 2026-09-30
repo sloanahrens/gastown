@@ -79,9 +79,6 @@ func TestRenderSystemPromptFileForSpawn_AllRolesMatchInSessionPrime(t *testing.T
 		{"polecat", "nux", RoleContext{Role: RolePolecat, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: filepath.Join(rigPath, "polecats", "nux", "myrig")}},
 		{"crew", "sloan", RoleContext{Role: RoleCrew, Rig: "myrig", Polecat: "sloan", TownRoot: town, WorkDir: filepath.Join(rigPath, "crew", "sloan")}},
 		{"mayor", "", RoleContext{Role: RoleMayor, TownRoot: town, WorkDir: filepath.Join(town, "mayor")}},
-		// gt prime inside a dog session derives the dog from its kennel cwd
-		// (roleContextFromDir) and never sets Rig.
-		{"dog", "alpha", RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}},
 	}
 	for _, tc := range cases {
 		path := config.SystemPromptFilePath(tc.role, town, rigPath, tc.agent)
@@ -114,7 +111,6 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 		{"polecat", "nux", filepath.Join(rigPath, "polecats", "nux", "myrig")},
 		{"crew", "sloan", filepath.Join(rigPath, "crew", "sloan")},
 		{"mayor", "", filepath.Join(town, "mayor")},
-		{"dog", "alpha", filepath.Join(town, "deacon", "dogs", "alpha")},
 	}
 	for _, tc := range cases {
 		ctx, err := spawnRoleContext(tc.role, town, rigPath, tc.agent)
@@ -145,7 +141,7 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	for _, tc := range []struct{ role, rig, agent string }{
-		{"dog", "", ""}, // no kennel name, no file
+		{"dog", "", "alpha"}, // retired role (gt-ckunw)
 		{"boot", "", ""},
 		{"polecat", rigPath, ""},
 		{"witness", "", ""},
@@ -156,7 +152,7 @@ func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 			t.Errorf("%+v: expected an error", tc)
 		}
 	}
-	if err := renderSystemPromptFileForSpawn("dog", town, "", "alpha", ""); !errors.Is(err, errNoSystemPromptForRole) {
+	if err := renderSystemPromptFileForSpawn("mayor", town, "", "", ""); !errors.Is(err, errNoSystemPromptForRole) {
 		t.Fatalf("empty path must report no system prompt for the role, got %v", err)
 	}
 }
@@ -197,56 +193,5 @@ func TestResolveRoleAgentConfig_FirstPolecatSpawnCarriesSystemPromptFlag(t *test
 	}
 	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
 		t.Fatalf("file must have been rendered at resolve time: %v", err)
-	}
-}
-
-// The dog shape of gt-t30p (gt-h7e5): the dog role template is ~8.5 KB, so a
-// dog session that prints it in the hook pushes the prime past Claude Code's
-// 10,000-character hook budget and gets truncated to a preview. This walks the
-// real spawn path — AgentEnv (GT_DOG_NAME) → role config → renderer → command —
-// and requires the flag on the FIRST spawn, before any file exists.
-func TestBuildStartupCommand_FirstDogSpawnCarriesSystemPromptFlag(t *testing.T) {
-	town, _ := newSpawnRenderTown(t, "myrig", "nux")
-	path := config.SystemPromptFilePath("dog", town, "", "alpha")
-	if path == "" {
-		t.Fatal("dog must have a per-agent system prompt path")
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("precondition: file must not exist yet (%v)", err)
-	}
-
-	cmd, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
-		Role:      "dog",
-		AgentName: "alpha",
-		TownRoot:  town,
-		Prompt:    "check your hook",
-	}, "", "check your hook", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(cmd, "GT_DOG_NAME=alpha") {
-		t.Fatalf("dog command must carry its name (the only handle on its kennel):\n%s", cmd)
-	}
-	if !strings.Contains(cmd, "--append-system-prompt-file") {
-		t.Fatalf("first dog spawn must carry the system prompt flag:\n%s", cmd)
-	}
-	if !strings.Contains(cmd, config.EnvSystemPromptFile+"=") || !strings.Contains(cmd, path) {
-		t.Fatalf("dog command must export %s=%s:\n%s", config.EnvSystemPromptFile, path, cmd)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil || len(got) == 0 {
-		t.Fatalf("file must have been rendered at spawn time: %v", err)
-	}
-	if !strings.Contains(string(got), "alpha") {
-		t.Fatalf("rendered dog text does not name the dog:\n%.200s", got)
-	}
-
-	// The file is load-bearing, not decorative (gt-mbuf): prime omits the dog's
-	// role text from the hook only while GT_SYSTEM_PROMPT_FILE points at a
-	// written file, and that text plus the dynamic sections is well over the
-	// hook budget, so losing it hands the dog a 2 KB preview of its own work.
-	t.Setenv(config.EnvSystemPromptFile, path)
-	if !primeStaticTextDelivered() {
-		t.Fatal("prime does not read back the file the first spawn wrote, so it reprints the dog role text into the hook")
 	}
 }

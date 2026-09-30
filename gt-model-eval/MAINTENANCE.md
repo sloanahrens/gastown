@@ -2,6 +2,12 @@
 
 This eval framework is a **snapshot** of Gas Town patrol protocols. When patrol formulas, role definitions, or infrastructure change, these tests must be updated to stay aligned.
 
+> **Status:** historical snapshot. The deacon, witness and dog agent roles
+> these suites exercise have since been retired from Gas Town (no deacon,
+> witness or dog sessions run, and `gt dog` no longer exists); their test files
+> are kept as a record of the protocols they measured. Only the refinery suites
+> describe a role that still runs.
+
 ## What to Update When
 
 ### Action verbs change
@@ -99,9 +105,9 @@ Eval action names are **abstractions** of the actual CLI commands. This is inten
 
 | Eval Action | Actual CLI Command | Context |
 |-------------|-------------------|---------|
-| `spawn-dog` | `gt dog add` | Deacon dog pool maintenance |
-| `retire-dog` | `gt dog remove` | Deacon dog pool maintenance |
-| `force-clear` | `gt dog clear --force` | Deacon dog health check |
+| `spawn-dog` | `gt dog add` (removed) | Deacon dog pool maintenance (retired) |
+| `retire-dog` | `gt dog remove` (removed) | Deacon dog pool maintenance (retired) |
+| `force-clear` | `gt dog clear --force` (removed) | Deacon dog health check (retired) |
 | `file-warrant` | `bd create --type=warrant ...` | Deacon zombie detection |
 | `create-cleanup-wisp` | `bd create --type=wisp ...` | Deacon/witness cleanup |
 

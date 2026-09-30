@@ -283,8 +283,8 @@ A convoy is "stranded" when:
   - Has tracked issues but none are ready (stuck — waiting on dependencies/workers), OR
   - Has 0 tracked issues (empty — needs auto-close via convoy check)
 
-Use this to detect convoys that need feeding or cleanup. The Deacon patrol
-runs this periodically and dispatches dogs to feed stranded convoys.
+Use this to detect convoys that need feeding or cleanup. The daemon's convoy
+manager runs the same scan and feeds ready issues to their rigs.
 
 Examples:
   gt convoy stranded              # Show stranded convoys
@@ -925,9 +925,9 @@ func runConvoyStranded(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(feedable) > 0 {
-		fmt.Println("To feed stranded convoys, run:")
+		fmt.Println("The daemon's convoy manager feeds these; to dispatch a ready issue now, run:")
 		for _, s := range feedable {
-			fmt.Printf("  gt sling mol-convoy-feed deacon/dogs --var convoy=%s\n", s.ID)
+			fmt.Printf("  gt sling <ready-issue> <rig>   # convoy %s\n", s.ID)
 		}
 	}
 	if len(needsAttention) > 0 {
@@ -948,9 +948,6 @@ func runConvoyStranded(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  gt convoy check %s\n", s.ID)
 		}
 	}
-	fmt.Println()
-	fmt.Println(style.Dim.Render("  Note: Pool dispatch auto-creates dogs if pool is under capacity."))
-
 	return nil
 }
 

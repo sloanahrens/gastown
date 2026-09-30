@@ -16,7 +16,7 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 		"refinery": "", // role removed (gt-v4ssj.6)
 		"mayor":    "/town/mayor/.claude/system-prompt.md",
 		"deacon":   "/town/deacon/.claude/system-prompt.md",
-		"dog":      "", // per agent: needs a name, see below
+		"dog":      "", // role retired (gt-ckunw)
 		"boot":     "",
 	}
 	for role, want := range cases {
@@ -27,14 +27,8 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 	if got := SystemPromptFilePath("witness", town, "", ""); got != "" {
 		t.Errorf("rig-scoped role without rigPath must return empty, got %q", got)
 	}
-	// The dog template interpolates the dog's name and kennel, so each dog gets
-	// its own file inside its own kennel (gt-h7e5).
-	if got, want := SystemPromptFilePath("dog", town, rig, "alpha"),
-		"/town/deacon/dogs/alpha/.claude/system-prompt-alpha.md"; got != want {
-		t.Errorf("SystemPromptFilePath(dog, alpha) = %q, want %q", got, want)
-	}
-	if got := SystemPromptFilePath("dog", "", "", "alpha"); got != "" {
-		t.Errorf("dog without a town root must return empty, got %q", got)
+	if got := SystemPromptFilePath("dog", town, rig, "alpha"); got != "" {
+		t.Errorf("the retired dog role must have no system prompt file, got %q", got)
 	}
 }
 
@@ -491,7 +485,7 @@ func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
 	calls := 0
 	withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { calls++; return nil })
 
-	// A dog without a name has no per-agent file (and no kennel to put it in).
+	// The retired dog role has no file.
 	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "dog", town, "", "")
 	// Boot has no system prompt file at all.
 	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "boot", town, "", "")

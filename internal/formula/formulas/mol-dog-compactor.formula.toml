@@ -8,7 +8,7 @@ IS the storage cost — deleting rows without compaction leaves ghost commits
 forever. Compacting that history is a commit-graph rewrite followed by a
 force-push, so it is destructive and irreversible.
 
-This dog does NOT compact. It monitors and escalates:
+The compactor_dog job does NOT compact. It monitors and escalates:
 
 1. It counts commits per production database.
 2. Databases at or above the threshold are escalated as "compaction
@@ -19,7 +19,7 @@ This dog does NOT compact. It monitors and escalates:
 
 The daemon patrol used to auto-flatten (and force-push) any database over the
 threshold, with no agent or operator judgment in the loop. That is the same
-failure mode that gt-e14c fixed in the agent plugin: an unattended path that
+failure mode that gt-e14c fixed in the plugin: an unattended path that
 rewrites the commit graph and force-pushes the result to remotes. The daemon
 now matches the plugin's shape — monitor and escalate — and the only
 destructive entry point is the operator-invoked
@@ -27,7 +27,7 @@ destructive entry point is the operator-invoked
 
 ## Threshold reconciliation with the plugin
 
-The agent-facing plugin (plugins/compactor-dog/plugin.md) escalates at >500
+The compactor-dog script plugin (plugins/compactor-dog/plugin.md) escalates at >500
 commits and hard-escalates at >1000. The daemon's default threshold is 2000
 (daemon.json: patrols.compactor_dog.threshold). They are not inconsistent:
 both paths escalate, and they differ because they run on different cadences
@@ -42,7 +42,7 @@ output. The 2000 default is the buffer against that loop.
 ## ZFC Exemption
 
 This formula is used for **observability tracking only** — the Go code in
-compactor_dog.go is the executor. The dog is exempt from agent-driven formula
+compactor_dog.go is the executor. The job is exempt from agent-driven formula
 execution (ZFC) because:
 
 1. Operations require SQL connections via database/sql (agents lack SQL access)
@@ -53,9 +53,9 @@ The daemon pours this molecule, executes the Go code, and closes/fails each
 step for observability. This IS the hybrid approach: formula defines observable
 structure, imperative Go is the executor.
 
-## Dog Contract
+## What the daemon does
 
-This is infrastructure work. The daemon:
+The daemon:
 1. Inspects all production databases for commit count
 2. Escalates for databases at or above the threshold
 3. Reports findings
@@ -69,7 +69,7 @@ after compaction, and compaction no longer happens here.
 Reaper (deletes rows) → Compactor (flattens history) → Doctor (runs gc)
 
 The compactor step in that pipeline is now operator-invoked, not a daemon
-patrol. When this dog escalates, a human runs:
+patrol. When this job escalates, a human runs:
 
 ```bash
 bash plugins/compactor-dog/run.sh --compact
@@ -78,7 +78,7 @@ bash plugins/compactor-dog/run.sh --compact
 ## Safety
 
 Monitoring is read-only — it counts commits and files escalations. No
-irreversible action is taken by this dog under any threshold or error path.
+irreversible action is taken by this job under any threshold or error path.
 JSONL backups and Dolt filesystem backups provide recovery points for the
 operator-invoked compaction that follows."""
 formula = "mol-dog-compactor"
@@ -148,13 +148,14 @@ Generate summary of the monitoring cycle.
 This step closes unconditionally, including on a cycle with inspection
 failures — the failures are already recorded on the step that hit them, and
 the summary of a partial cycle is still the summary. This matches the other
-dogs (see wisp_reaper.go).
+daemon jobs (see wisp_reaper.go). (The step title is historical; it is kept
+because the daemon matches poured steps by title.)
 
-**Exit criteria:** Report logged, dog returned to kennel."""
+**Exit criteria:** Report logged, receipt closed."""
 
 [vars]
 [vars.commit_threshold]
-description = "Commit count at or above which the dog escalates (default 2000; must stay well above the plugin's 500/1000 escalation lines to avoid a feedback loop)"
+description = "Commit count at or above which the job escalates (default 2000; must stay well above the plugin's 500/1000 escalation lines to avoid a feedback loop)"
 default = "2000"
 
 [vars.databases]

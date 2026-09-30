@@ -199,7 +199,7 @@ func isCommandOrAncestorExempt(cmd *cobra.Command, exemptions map[string]bool) b
 }
 
 // isDoneCommand reports whether cmd is the top-level `gt done` command.
-// It must not match subcommands that merely share the name — `gt dog done`,
+// It must not match subcommands that merely share the name —
 // `gt mol step done` — or they would trip the polecat-only
 // worktree guard and skip telemetry init (gt-lt7).
 func isDoneCommand(cmd *cobra.Command) bool {
@@ -253,10 +253,10 @@ func touchPolecatHeartbeat() {
 		return
 	}
 
-	// Only polecats, crew, and dogs need heartbeats — they're the ones checked
-	// by isSessionProcessDead for stale session detection.
+	// Only polecats and crew need heartbeats — they're the ones checked by
+	// isSessionProcessDead for stale session detection.
 	role := os.Getenv("GT_ROLE")
-	if !strings.Contains(role, "polecat") && !strings.Contains(role, "crew") && !strings.Contains(role, "dog") {
+	if !strings.Contains(role, "polecat") && !strings.Contains(role, "crew") {
 		return
 	}
 

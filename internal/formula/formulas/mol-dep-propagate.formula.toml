@@ -1,7 +1,7 @@
 description = """
 Propagate cross-rig dependency resolution.
 
-Dogs work through molecules (poured from this formula) when dependencies resolve across rig boundaries.
+This formula runs when a dependency resolves across rig boundaries.
 When an issue in one rig closes, dependent issues in other rigs may unblock.
 This formula handles:
 - Finding cross-rig dependents
@@ -9,14 +9,14 @@ This formula handles:
 - Updating blocked status
 - Triggering work dispatch if appropriate
 
-## Dog Contract
+## Contract
 
-This is infrastructure work. You:
+This is infrastructure work. The agent running this formula:
 1. Receive closed issue ID via hook_bead
 2. Find all cross-rig dependents (issues in other rigs blocked by this)
 3. Notify affected Witnesses
 4. Optionally trigger dispatch if issues are now ready
-5. Return to kennel
+5. Signals completion
 
 ## Variables
 
@@ -24,10 +24,10 @@ This is infrastructure work. You:
 |----------|--------|-------------|
 | resolved_issue | hook_bead | The issue that just closed |
 
-## Why Dogs?
+## Rig access
 
-Cross-rig work requires multi-rig worktrees. Dogs have these, polecats don't.
-The Deacon detects the closure, but the propagation needs rig access."""
+Cross-rig work needs access to every affected rig, so the agent running this
+formula must be able to reach each dependent's rig."""
 formula = "mol-dep-propagate"
 version = 1
 
@@ -81,7 +81,7 @@ Update the blocked status for cross-rig dependents.
 **1. For each cross-rig dependent:**
 ```bash
 # Navigate to the rig containing the dependent issue
-# Dogs have multi-rig worktrees for this
+# (the runner needs access to each affected rig)
 
 bd show <dependent-id>
 # Check if this was the only blocker
@@ -181,30 +181,15 @@ handle their own dispatch decisions.
 
 [[steps]]
 id = "return-to-kennel"
-title = "Signal completion and return to kennel"
+title = "Signal completion"
 needs = ["trigger-dispatch"]
 description = """
-Signal work complete and return to available pool.
+Signal work complete.
 
-**1. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE $(hostname)" -m "Task: dep-propagate
-Resolved: {{resolved_issue}}
-Cross-rig dependents: {{dependent_count}}
-Witnesses notified: {{witness_list}}
-Status: COMPLETE
+Close this step with a one-line summary ({{resolved_issue}}: {{dependent_count}} cross-rig dependents, notified {{witness_list}}). The closed molecule is the
+record of the run.
 
-Ready for next assignment."
-```
-
-**2. Update activity feed:**
-The propagation creates implicit feed entries (dependency updates).
-No explicit entry needed.
-
-**3. Return to kennel:**
-Dog returns to available state in the pool.
-
-**Exit criteria:** Deacon notified, dog ready for next work or retirement."""
+**Exit criteria:** Completion recorded."""
 
 [vars]
 [vars.resolved_issue]

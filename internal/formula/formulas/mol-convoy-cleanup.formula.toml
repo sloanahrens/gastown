@@ -1,21 +1,21 @@
 description = """
 Archive completed convoys and notify overseer.
 
-Dogs work through molecules (poured from this formula) when convoys complete. The Deacon detects completed
-convoys (all tracked issues closed) and slings this work to a dog for:
+This formula runs when a convoy completes (all tracked issues closed). The
+agent running it handles:
 - Generating convoy summary
 - Archiving convoy state
 - Notifying the overseer (Mayor)
 - Updating activity feed
 
-## Dog Contract
+## Contract
 
-This is infrastructure work. You:
+This is infrastructure work. The agent running this formula:
 1. Receive convoy ID via hook_bead
 2. Generate summary of completed work
 3. Archive to appropriate location
 4. Notify stakeholders
-5. Return to kennel
+5. Signals completion
 
 ## Variables
 
@@ -27,7 +27,7 @@ This is infrastructure work. You:
 
 | Situation | Action |
 |-----------|--------|
-| Convoy not found | Exit with error, notify Deacon |
+| Convoy not found | Exit with error, escalate |
 | Archive location full | Create space, retry, or escalate |
 | Mail send fails | Retry once, then proceed anyway |"""
 formula = "mol-convoy-cleanup"
@@ -52,7 +52,7 @@ bd show {{convoy}}          # Full convoy details
 
 **2. Verify convoy is complete:**
 - Status should be 'closed' or all tracked issues closed
-- If convoy is still open, exit - Deacon dispatched too early
+- If convoy is still open, exit - it was dispatched too early
 
 ```bash
 bd show {{convoy}}
@@ -171,30 +171,15 @@ gt feed --since 5m
 
 [[steps]]
 id = "return-to-kennel"
-title = "Signal completion and return to kennel"
+title = "Signal completion"
 needs = ["notify-overseer"]
 description = """
-Signal work complete and return to available pool.
+Signal work complete.
 
-**1. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE $(hostname)" -m "Task: convoy-cleanup
-Convoy: {{convoy}}
-Status: COMPLETE
-Duration: {{work_duration}}
+Close this step with a one-line summary (convoy {{convoy}} archived in {{work_duration}}). The closed molecule is the
+record of the run.
 
-Ready for next assignment."
-```
-
-**2. Clean workspace:**
-- No convoy-specific state to clean
-- Workspace should already be clean
-
-**3. Return to kennel:**
-Dog returns to available state in the pool. Deacon will assign next work
-or retire the dog if pool is oversized.
-
-**Exit criteria:** Deacon notified, dog ready for next work or retirement."""
+**Exit criteria:** Completion recorded."""
 
 [vars]
 [vars.convoy]
@@ -218,5 +203,5 @@ description = "Number of issues in the convoy (computed during execution)"
 default = ""
 
 [vars.work_duration]
-description = "Duration of this dog's work (computed during execution)"
+description = "Duration of this run (computed during execution)"
 default = ""

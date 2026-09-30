@@ -1,7 +1,7 @@
 description = """
 Probe Dolt server health and inspect resource conditions.
 
-The Doctor Dog performs comprehensive health checks on the Dolt SQL server:
+The daemon's doctor_dog job performs health checks on the Dolt SQL server:
 connectivity, latency, connection count, disk usage, database count (orphan
 detection), and backup freshness.
 
@@ -19,13 +19,12 @@ pours this molecule only when one of them finds something (claude-l5w). The
 findings are in {{findings}}; start from them. The reap-debris step has
 already run in the daemon, so a finding there means a removal failed.
 
-## Dog Contract
+## Executor and receipt
 
-This is infrastructure work. You:
-1. Probe Dolt server connectivity and latency
-2. Inspect resource conditions (connections, disk, orphans)
-3. Report findings to Deacon
-4. Return to kennel
+The doctor_dog job (doctor_dog.go) is the executor. This molecule is not run
+by any agent: it is the receipt of a cycle that found something, carrying the
+findings and measurements below. The steps describe the checks the job makes;
+an operator following up on the findings can rerun them by hand.
 
 ## Variables
 
@@ -37,7 +36,7 @@ This is infrastructure work. You:
 
 ## Safety
 
-All checks are read-only. The Doctor Dog never modifies data.
+All checks are read-only. The doctor_dog job never modifies data.
 It only observes and reports."""
 formula = "mol-dog-doctor"
 version = 1
@@ -165,57 +164,16 @@ id = "report"
 title = "Report findings and return to kennel"
 needs = ["inspect"]
 description = """
-Generate health report and signal completion.
+Record the cycle's findings.
 
-**1. Generate report:**
-```markdown
-## Doctor Dog Report
+The daemon logs the findings ({{findings}}) with the latency, connection and
+orphan measurements it took, and the molecule stays as the receipt of this
+cycle. A critical condition (server unreachable or badly degraded) is a case
+for `gt escalate -s CRITICAL "Dolt: <condition>"`; orphan databases are
+removed with `gt dolt cleanup`. (The step title is historical; it is kept
+because the daemon matches poured steps by title.)
 
-**Daemon findings**: {{findings}}
-
-**Server**: {{server_status}} (latency: {{latency}})
-**Connections**: {{conn_count}}/{{conn_max}} ({{conn_pct}}%)
-**Disk usage**: {{disk_usage}}
-**Orphan databases**: {{orphan_count}}
-**Backup freshness**: {{backup_status}}
-
-### Warnings
-{{#if warnings}}
-{{#each warnings}}
-- {{category}}: {{message}}
-{{/each}}
-{{else}}
-None — server is healthy.
-{{/if}}
-
-### Orphan Databases
-{{#if orphans}}
-{{#each orphans}}
-- {{name}}
-{{/each}}
-Run `gt dolt cleanup` to remove.
-{{else}}
-None detected.
-{{/if}}
-```
-
-**2. Escalate if critical:**
-```bash
-# If server unreachable or critically degraded
-gt escalate -s CRITICAL "Dolt: <condition>"
-```
-
-**3. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE: doctor" -m "Task: dolt-doctor
-Server: {{server_status}}
-Latency: {{latency}}
-Connections: {{conn_count}}/{{conn_max}}
-Orphans: {{orphan_count}}
-Status: COMPLETE"
-```
-
-**Exit criteria:** Report sent, dog returned to kennel."""
+**Exit criteria:** Findings recorded on the receipt."""
 
 [vars]
 [vars.findings]

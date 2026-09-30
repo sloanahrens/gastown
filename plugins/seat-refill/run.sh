@@ -26,8 +26,8 @@ SKIP_MARKER='[plugin-result skipped]'
 
 log() { printf '[seat-refill] %s\n' "$*"; }
 
-# A failure here is not silence-worthy: the daemon records it and hands the
-# output to a dog, which is the only moment an agent has something to decide.
+# A failure here is not silence-worthy: the daemon records it and raises
+# `gt escalate` with the output tail, so a person sees it.
 fail() {
   printf '[seat-refill] FAIL: %s\n' "$*" >&2
   exit 1

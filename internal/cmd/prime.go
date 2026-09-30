@@ -57,7 +57,6 @@ const (
 	RoleMayor   Role = "mayor"
 	RolePolecat Role = "polecat"
 	RoleCrew    Role = "crew"
-	RoleDog     Role = "dog"
 	RoleUnknown Role = "unknown"
 )
 
@@ -70,7 +69,7 @@ const (
 func AllRoles() []Role {
 	return []Role{
 		RoleMayor,
-		RolePolecat, RoleCrew, RoleDog, RoleUnknown,
+		RolePolecat, RoleCrew, RoleUnknown,
 	}
 }
 
@@ -341,7 +340,7 @@ func ensureRoleWorktreeIntegrity(cwd, townRoot string, role Role) error {
 
 func roleRequiresWorktreeIntegrity(role Role) bool {
 	switch role {
-	case RolePolecat, RoleCrew, RoleDog:
+	case RolePolecat, RoleCrew:
 		return true
 	default:
 		return false
@@ -569,8 +568,6 @@ func repairSessionEnv(ctx RoleContext, roleInfo RoleInfo) {
 	case RoleCrew:
 		agentName = roleInfo.Polecat // RoleInfo.Polecat holds crew member name too
 	case RolePolecat:
-		agentName = roleInfo.Polecat
-	case RoleDog:
 		agentName = roleInfo.Polecat
 	}
 
@@ -867,7 +864,7 @@ func hasWorkflowAttachment(attachment *beads.AttachmentFields) bool {
 // MUST distinguish this from "no work" to avoid silently closing beads. (GH#2638)
 func findAgentWork(ctx RoleContext) (*beads.Issue, error) {
 	maxAttempts := 1
-	if (ctx.Role == RolePolecat || ctx.Role == RoleCrew || ctx.Role == RoleDog) && !isCompactResume() {
+	if (ctx.Role == RolePolecat || ctx.Role == RoleCrew) && !isCompactResume() {
 		maxAttempts = 5
 	}
 	return findAgentWorkWithAttempts(ctx, maxAttempts)
