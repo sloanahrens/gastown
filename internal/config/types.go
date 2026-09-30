@@ -187,17 +187,15 @@ type OperationalConfig struct {
 	// and kept verbatim across rewrites.
 	Deacon json.RawMessage `json:"deacon,omitempty"`
 
-	// Polecat configures polecat session thresholds.
-	Polecat *PolecatThresholds `json:"polecat,omitempty"`
-
-	// Dolt configures Dolt server operation thresholds.
-	Dolt *DoltThresholds `json:"dolt,omitempty"`
+	// Polecat, Dolt and Web have no reader (gt-e2kxa): the code uses its own
+	// constants. They are declared so a settings file that still carries
+	// them decodes, and kept verbatim across rewrites.
+	Polecat json.RawMessage `json:"polecat,omitempty"`
+	Dolt    json.RawMessage `json:"dolt,omitempty"`
+	Web     json.RawMessage `json:"web,omitempty"`
 
 	// Mail configures mail system thresholds.
 	Mail *MailThresholds `json:"mail,omitempty"`
-
-	// Web configures web API thresholds.
-	Web *WebThresholds `json:"web,omitempty"`
 
 	// Recovery configures stalled-polecat recovery thresholds. The key is
 	// still "witness": the retired witness role owned these knobs, and the
@@ -234,53 +232,26 @@ type ContainerGateThresholds struct {
 
 // SessionThresholds configures session management timeouts.
 type SessionThresholds struct {
-	// ClaudeStartTimeout is how long to wait for Claude to start (default "60s").
-	ClaudeStartTimeout string `json:"claude_start_timeout,omitempty"`
-
-	// ShellReadyTimeout is how long to wait for shell prompt after command (default "5s").
-	ShellReadyTimeout string `json:"shell_ready_timeout,omitempty"`
-
-	// GracefulShutdownTimeout is wait after Ctrl-C before force-kill (default "3s").
-	GracefulShutdownTimeout string `json:"graceful_shutdown_timeout,omitempty"`
-
-	// BdCommandTimeout is timeout for bd CLI command execution (default "30s").
-	BdCommandTimeout string `json:"bd_command_timeout,omitempty"`
-
-	// BdSubprocessTimeout is timeout for bd subprocess calls in TUI (default "5s").
-	BdSubprocessTimeout string `json:"bd_subprocess_timeout,omitempty"`
-
-	// GUPPViolationTimeout is how long an agent can have hooked work
-	// without progressing before GUPP violation (default "30m").
-	GUPPViolationTimeout string `json:"gupp_violation_timeout,omitempty"`
-
-	// HungSessionThreshold is how long a tmux session can be inactive
-	// before considered hung (default "30m").
-	HungSessionThreshold string `json:"hung_session_threshold,omitempty"`
-
 	// StartupNudgeVerifyDelay is wait after startup nudge before checking (default "5s").
 	StartupNudgeVerifyDelay string `json:"startup_nudge_verify_delay,omitempty"`
 
 	// StartupNudgeMaxRetries is max retries for startup nudge (default 3).
 	StartupNudgeMaxRetries *int `json:"startup_nudge_max_retries,omitempty"`
+
+	// The keys below have no reader (gt-e2kxa): the code uses the
+	// internal/constants values. They are declared so a settings file that
+	// still carries them decodes.
+	ClaudeStartTimeout      string `json:"claude_start_timeout,omitempty"`
+	ShellReadyTimeout       string `json:"shell_ready_timeout,omitempty"`
+	GracefulShutdownTimeout string `json:"graceful_shutdown_timeout,omitempty"`
+	BdCommandTimeout        string `json:"bd_command_timeout,omitempty"`
+	BdSubprocessTimeout     string `json:"bd_subprocess_timeout,omitempty"`
+	GUPPViolationTimeout    string `json:"gupp_violation_timeout,omitempty"`
+	HungSessionThreshold    string `json:"hung_session_threshold,omitempty"`
 }
 
 // NudgeThresholds configures nudge queue and delivery timeouts.
 type NudgeThresholds struct {
-	// ReadyTimeout is how long NudgeSession waits for pane to accept input (default "10s").
-	ReadyTimeout string `json:"ready_timeout,omitempty"`
-
-	// RetryInterval is base interval between send-keys retry attempts (default "500ms").
-	RetryInterval string `json:"retry_interval,omitempty"`
-
-	// LockTimeout is how long to hold the nudge lock (default "30s").
-	LockTimeout string `json:"lock_timeout,omitempty"`
-
-	// NormalTTL is time-to-live for normal-priority nudges (default "30m").
-	NormalTTL string `json:"normal_ttl,omitempty"`
-
-	// UrgentTTL is time-to-live for urgent-priority nudges (default "2h").
-	UrgentTTL string `json:"urgent_ttl,omitempty"`
-
 	// MaxQueueDepth is max pending nudges per session (default 50).
 	MaxQueueDepth *int `json:"max_queue_depth,omitempty"`
 
@@ -297,16 +268,19 @@ type NudgeThresholds struct {
 	// eligible for delivery again (default "30s"). Spaces out retries so a
 	// persistently failing injection cannot re-inject at the poll interval.
 	RequeueBackoff string `json:"requeue_backoff,omitempty"`
+
+	// The keys below have no reader (gt-e2kxa): the code uses the
+	// internal/constants and internal/nudge values. They are declared so a
+	// settings file that still carries them decodes.
+	ReadyTimeout  string `json:"ready_timeout,omitempty"`
+	RetryInterval string `json:"retry_interval,omitempty"`
+	LockTimeout   string `json:"lock_timeout,omitempty"`
+	NormalTTL     string `json:"normal_ttl,omitempty"`
+	UrgentTTL     string `json:"urgent_ttl,omitempty"`
 }
 
 // DaemonThresholds configures daemon lifecycle and patrol thresholds.
 type DaemonThresholds struct {
-	// MassDeathWindow is time window for detecting mass session death (default "30s").
-	MassDeathWindow string `json:"mass_death_window,omitempty"`
-
-	// MassDeathThreshold is session deaths within window to trigger alert (default 3).
-	MassDeathThreshold *int `json:"mass_death_threshold,omitempty"`
-
 	// DogIdleSessionTimeout, DogIdleRemoveTimeout, StaleWorkingTimeout and
 	// MaxDogPoolSize are retired with the dog pack (gt-ckunw): nothing reads
 	// them. They are declared so a config that still carries them decodes.
@@ -328,16 +302,6 @@ type DaemonThresholds struct {
 	// a fresh branch on the existing worktree.
 	PolecatSelfTerminate *bool `json:"polecat_self_terminate,omitempty"`
 
-	// MaxLifecycleMessageAge is max age of lifecycle mail before discard (default "6h").
-	MaxLifecycleMessageAge string `json:"max_lifecycle_message_age,omitempty"`
-
-	// SyncFailureEscalationThreshold is consecutive git pull failures before
-	// logging escalates from WARN to ERROR (default 3).
-	SyncFailureEscalationThreshold *int `json:"sync_failure_escalation_threshold,omitempty"`
-
-	// DoctorMolCooldown is min interval between mol-dog-doctor molecules (default "5m").
-	DoctorMolCooldown string `json:"doctor_mol_cooldown,omitempty"`
-
 	// RecoveryHeartbeatInterval is the fixed interval for recovery-focused daemon heartbeat (default "3m").
 	RecoveryHeartbeatInterval string `json:"recovery_heartbeat_interval,omitempty"`
 
@@ -349,6 +313,15 @@ type DaemonThresholds struct {
 	BootIdleSuppression string `json:"boot_idle_suppression,omitempty"`
 	BootMode            string `json:"boot_mode,omitempty"`
 	DeaconGracePeriod   string `json:"deacon_grace_period,omitempty"`
+
+	// The keys below have no reader (gt-e2kxa): the daemon uses its own
+	// constants. They are declared so a settings file that still carries
+	// them decodes.
+	MassDeathWindow                string `json:"mass_death_window,omitempty"`
+	MassDeathThreshold             *int   `json:"mass_death_threshold,omitempty"`
+	MaxLifecycleMessageAge         string `json:"max_lifecycle_message_age,omitempty"`
+	SyncFailureEscalationThreshold *int   `json:"sync_failure_escalation_threshold,omitempty"`
+	DoctorMolCooldown              string `json:"doctor_mol_cooldown,omitempty"`
 
 	// PressureCPUThreshold is the per-core load average above which new
 	// non-infrastructure spawns are deferred. Disabled by default (0).
@@ -365,72 +338,19 @@ type DaemonThresholds struct {
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
 }
 
-// PolecatThresholds configures polecat session and retry thresholds.
-type PolecatThresholds struct {
-	// HeartbeatStaleThreshold is age at which polecat heartbeat is stale (default "3m").
-	HeartbeatStaleThreshold string `json:"heartbeat_stale_threshold,omitempty"`
-
-	// DoltMaxRetries is max retries for Dolt operations (default 10).
-	DoltMaxRetries *int `json:"dolt_max_retries,omitempty"`
-
-	// DoltBaseBackoff is base backoff for Dolt retry loop (default "500ms").
-	DoltBaseBackoff string `json:"dolt_base_backoff,omitempty"`
-
-	// DoltBackoffMax is cap for Dolt retry backoff (default "30s").
-	DoltBackoffMax string `json:"dolt_backoff_max,omitempty"`
-
-	// PendingMaxAge is max age for .pending reservation marker (default "5m").
-	PendingMaxAge string `json:"pending_max_age,omitempty"`
-
-	// NamepoolSize is number of name slots in pool (default 50).
-	NamepoolSize *int `json:"namepool_size,omitempty"`
-}
-
-// DoltThresholds configures Dolt server operation thresholds.
-type DoltThresholds struct {
-	// HealthCheckInterval is how often Dolt health check fires (default "30s").
-	HealthCheckInterval string `json:"health_check_interval,omitempty"`
-
-	// CmdTimeout is timeout for individual dolt CLI commands (default "15s").
-	CmdTimeout string `json:"cmd_timeout,omitempty"`
-
-	// MaxConnections is max concurrent connections (default 1000).
-	MaxConnections *int `json:"max_connections,omitempty"`
-
-	// SlowQueryThreshold is duration above which a query is flagged slow (default "1s").
-	SlowQueryThreshold string `json:"slow_query_threshold,omitempty"`
-}
-
 // MailThresholds configures mail system thresholds.
 type MailThresholds struct {
-	// IdleNotifyTimeout is how long to wait for idle notify (default "3s").
-	IdleNotifyTimeout string `json:"idle_notify_timeout,omitempty"`
-
-	// BdReadTimeout is timeout for bd read operations (default "60s").
-	BdReadTimeout string `json:"bd_read_timeout,omitempty"`
-
-	// BdWriteTimeout is timeout for bd write operations (default "60s").
-	BdWriteTimeout string `json:"bd_write_timeout,omitempty"`
-
-	// MaxConcurrentAckOps is max concurrent mail acknowledge operations (default 8).
-	MaxConcurrentAckOps *int `json:"max_concurrent_ack_ops,omitempty"`
-
 	// ReplyReminderDelay is how long after mail delivery to nudge the recipient
 	// to reply via gt mail send rather than in chat (default "30s").
 	// Set to "0s" to disable reply reminders entirely.
 	ReplyReminderDelay string `json:"reply_reminder_delay,omitempty"`
-}
 
-// WebThresholds configures web API thresholds.
-type WebThresholds struct {
-	// MaxConcurrentCommands is max concurrent gt subprocesses via web API (default 12).
-	MaxConcurrentCommands *int `json:"max_concurrent_commands,omitempty"`
-
-	// MaxSubjectLen is max subject length for mail API (default 500).
-	MaxSubjectLen *int `json:"max_subject_len,omitempty"`
-
-	// MaxBodyLen is max body length for mail API (default 100000).
-	MaxBodyLen *int `json:"max_body_len,omitempty"`
+	// The keys below have no reader (gt-e2kxa). They are declared so a
+	// settings file that still carries them decodes.
+	IdleNotifyTimeout   string `json:"idle_notify_timeout,omitempty"`
+	BdReadTimeout       string `json:"bd_read_timeout,omitempty"`
+	BdWriteTimeout      string `json:"bd_write_timeout,omitempty"`
+	MaxConcurrentAckOps *int   `json:"max_concurrent_ack_ops,omitempty"`
 }
 
 // RecoveryThresholds configures stalled-polecat recovery thresholds.

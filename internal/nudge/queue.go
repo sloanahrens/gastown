@@ -34,9 +34,9 @@ const (
 	PriorityUrgent = "urgent"
 )
 
-// Operational limits and defaults.
-// These are compiled-in fallbacks. Configurable via operational.nudge
-// in settings/config.json (ZFC pattern).
+// Operational limits and defaults. The TTLs are fixed; MaxQueueDepth and
+// staleClaimThreshold are overridable via operational.nudge in
+// settings/config.json.
 const (
 	// DefaultNormalTTL is the time-to-live for normal-priority nudges.
 	DefaultNormalTTL = 30 * time.Minute
