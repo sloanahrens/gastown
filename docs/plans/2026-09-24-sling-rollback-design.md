@@ -1,4 +1,4 @@
-> Status: design approved (2026-09-24), implemented in claude-i1m MR-G1.
+> Status: historical (2026-09). Merged in: gt-7evi4, gt-vm5g4. Not maintained.
 
 # Sling rollback and nuke restore the polecat-to-bead binding
 
