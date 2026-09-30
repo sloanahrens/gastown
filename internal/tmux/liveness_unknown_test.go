@@ -70,22 +70,26 @@ func TestZombieStatus_CountsAsRunning(t *testing.T) {
 	}
 }
 
-// TestIsAgentAliveChecked_MissingSessionIsNotFound pins the other half of
-// gt-fcxe9.1 (gt-jv0k3): the rule above covers a query that could not be
-// answered, not a session that is gone. A reader has to be able to tell the
-// two apart, so the missing case reaches it as ErrSessionNotFound. The fake
-// server here answers with tmux 3.7c's own wording — show-environment says
-// "no such session" — and TestIntegrationFakeServerMatchesTmux replays it
-// against real tmux.
-func TestIsAgentAliveChecked_MissingSessionIsNotFound(t *testing.T) {
+// TestIsAgentAliveChecked_SessionVanishingMidQueryIsNotFound pins the part of
+// gt-jv0k3 that survives gt-7jblf. A session tmux denies up front reads dead,
+// (false, nil) — TestIsAgentAliveChecked_MissingSessionIsDead — so the only way
+// to reach show-environment for a missing session is to lose it between
+// has-session and the environment read. tmux 3.7c words that miss "no such
+// session", and it has to reach the caller as ErrSessionNotFound rather than
+// an unclassified error, so a reader can tell a gone session from a query that
+// failed (the patrol watchdog does). TestWrapError pins the wording and
+// TestIntegrationFakeServerMatchesTmux replays it against real tmux.
+func TestIsAgentAliveChecked_SessionVanishingMidQueryIsNotFound(t *testing.T) {
 	t.Parallel()
-	tm, _ := newFakeServer().tmux(nil)
+	s := newScripted(bySub(map[string]reply{
+		"show-environment": fail("no such session: gt-gone"),
+	}))
 
-	alive, err := tm.IsAgentAliveChecked("gt-gone")
+	alive, err := unitTmux(s, nil).IsAgentAliveChecked("gt-gone")
 	if alive {
-		t.Fatal("a session that does not exist reported a live agent")
+		t.Fatal("a session that vanished mid-query reported a live agent")
 	}
 	if !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("IsAgentAliveChecked on a missing session = %v, want ErrSessionNotFound", err)
+		t.Fatalf("IsAgentAliveChecked on a vanished session = %v, want ErrSessionNotFound", err)
 	}
 }
