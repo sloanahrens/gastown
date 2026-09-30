@@ -57,60 +57,6 @@ const ShutdownBudget = doltServerStopBudget + otelShutdownBudget
 // within 30s instead of up to 3 minutes.
 const DefaultDoltHealthCheckInterval = 30 * time.Second
 
-// DoltServerConfig holds configuration for the Dolt SQL server.
-type DoltServerConfig struct {
-	// Enabled controls whether the daemon manages a Dolt server.
-	Enabled bool `json:"enabled"`
-
-	// External indicates the server is externally managed (daemon monitors only).
-	External bool `json:"external,omitempty"`
-
-	// Port is the MySQL protocol port (default 3306).
-	Port int `json:"port,omitempty"`
-
-	// Host is the bind/connect address (default 127.0.0.1).
-	Host string `json:"host,omitempty"`
-
-	// User is the MySQL user name (default root).
-	User string `json:"user,omitempty"`
-
-	// Password is the MySQL password. Empty means no password.
-	Password string `json:"password,omitempty"`
-
-	// DataDir is the directory containing Dolt databases.
-	// Each subdirectory becomes a database.
-	DataDir string `json:"data_dir,omitempty"`
-
-	// LogFile is the path to the Dolt server log file.
-	LogFile string `json:"log_file,omitempty"`
-
-	// AutoRestart controls whether to restart on crash.
-	AutoRestart bool `json:"auto_restart,omitempty"`
-
-	// RestartDelay is the initial delay before restarting after crash (default 5s).
-	RestartDelay time.Duration `json:"restart_delay,omitempty"`
-
-	// MaxRestartDelay is the maximum backoff delay (default 5min).
-	MaxRestartDelay time.Duration `json:"max_restart_delay,omitempty"`
-
-	// MaxRestartsInWindow is the maximum number of restarts allowed within
-	// RestartWindow before escalating instead of retrying (default 5).
-	MaxRestartsInWindow int `json:"max_restarts_in_window,omitempty"`
-
-	// RestartWindow is the time window for counting restarts (default 10min).
-	RestartWindow time.Duration `json:"restart_window,omitempty"`
-
-	// HealthyResetInterval is how long the server must stay healthy before
-	// the backoff counter resets (default 5min).
-	HealthyResetInterval time.Duration `json:"healthy_reset_interval,omitempty"`
-
-	// HealthCheckInterval is how often to run the Dolt health check,
-	// independent of the general daemon heartbeat. This enables fast
-	// detection of Dolt server crashes without changing the overall
-	// heartbeat frequency. Default 30s.
-	HealthCheckInterval time.Duration `json:"health_check_interval,omitempty"`
-}
-
 // DefaultDoltServerConfig returns sensible defaults for Dolt server config.
 func DefaultDoltServerConfig(townRoot string) *DoltServerConfig {
 	return &DoltServerConfig{

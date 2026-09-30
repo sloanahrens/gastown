@@ -13,7 +13,7 @@ import (
 func TestScheduledSlingEntry_Validate(t *testing.T) {
 	t.Parallel()
 	good := ScheduledSlingEntry{Name: "doc-audit", Rig: "gastown", Formula: "mol-doc-audit", IntervalStr: "168h"}
-	if err := good.validate(); err != nil {
+	if err := scheduledSlingValidate(good); err != nil {
 		t.Fatalf("valid entry rejected: %v", err)
 	}
 	cases := map[string]ScheduledSlingEntry{
@@ -26,17 +26,17 @@ func TestScheduledSlingEntry_Validate(t *testing.T) {
 		"zero interval": {Name: "a", Rig: "gastown", Formula: "f", IntervalStr: "0s"},
 	}
 	for name, e := range cases {
-		if err := e.validate(); err == nil {
+		if err := scheduledSlingValidate(e); err == nil {
 			t.Errorf("%s: expected an error", name)
 		}
 	}
-	if got := good.label(); got != "scheduled:doc-audit" {
+	if got := scheduledSlingLabel(good); got != "scheduled:doc-audit" {
 		t.Errorf("label = %q", got)
 	}
-	if got := good.priority(); got != 3 {
+	if got := scheduledSlingPriority(good); got != 3 {
 		t.Errorf("default priority = %d, want 3", got)
 	}
-	if got := good.interval(); got != 168*time.Hour {
+	if got := scheduledSlingInterval(good); got != 168*time.Hour {
 		t.Errorf("interval = %v", got)
 	}
 }
@@ -297,7 +297,7 @@ func TestRunScheduledSlingEntry_ClosesBeadWhenSlingFails(t *testing.T) {
 	if !strings.HasPrefix(f.closedWhy[0], scheduledSlingFailureMarker) {
 		t.Errorf("close reason %q must carry the failure marker", f.closedWhy[0])
 	}
-	if got := decideScheduledSling(f.beads, docAuditEntry.interval(), time.Now()); got != scheduledDispatch {
+	if got := decideScheduledSling(f.beads, scheduledSlingInterval(docAuditEntry), time.Now()); got != scheduledDispatch {
 		t.Errorf("the next tick after a failed sling = %v, want dispatch", got)
 	}
 }
@@ -401,7 +401,7 @@ exit 0
 		t.Fatal(err)
 	}
 	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: filepath.Join(stubDir, "bd"), gtPath: "gt"}
-	got, err := r.listBeads(context.Background(), "gastown", docAuditEntry.label())
+	got, err := r.listBeads(context.Background(), "gastown", scheduledSlingLabel(docAuditEntry))
 	if err != nil {
 		t.Fatalf("listBeads: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestExecScheduledSlingRunnerListBeadsRejectsProse(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: filepath.Join(stubDir, "bd"), gtPath: "gt"}
-	got, err := r.listBeads(context.Background(), "gastown", docAuditEntry.label())
+	got, err := r.listBeads(context.Background(), "gastown", scheduledSlingLabel(docAuditEntry))
 	if err == nil {
 		t.Fatalf("listBeads on prose = %v, nil; want an error", got)
 	}

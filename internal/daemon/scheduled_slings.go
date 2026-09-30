@@ -18,30 +18,11 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
-// ScheduledSlingsConfig is the opt-in scheduled_slings patrol: each entry is a
-// formula slung onto a rig on an interval, one bead per run (gt-nj23).
-type ScheduledSlingsConfig struct {
-	Enabled bool                  `json:"enabled"`
-	Entries []ScheduledSlingEntry `json:"entries,omitempty"`
-}
-
-// ScheduledSlingEntry is one scheduled formula. Name is the schedule's
-// identity: runs are found by the label "scheduled:<name>".
-type ScheduledSlingEntry struct {
-	Name        string            `json:"name"`
-	Rig         string            `json:"rig"`
-	Formula     string            `json:"formula"`
-	Agent       string            `json:"agent,omitempty"`
-	IntervalStr string            `json:"interval"`
-	Priority    int               `json:"priority,omitempty"`
-	Vars        map[string]string `json:"vars,omitempty"`
-}
-
 const defaultScheduledSlingPriority = 3
 
 var scheduledSlingNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
-func (e ScheduledSlingEntry) validate() error {
+func scheduledSlingValidate(e ScheduledSlingEntry) error {
 	if !scheduledSlingNameRe.MatchString(e.Name) {
 		return fmt.Errorf("scheduled_slings: name %q must match %s", e.Name, scheduledSlingNameRe)
 	}
@@ -55,14 +36,14 @@ func (e ScheduledSlingEntry) validate() error {
 	return nil
 }
 
-func (e ScheduledSlingEntry) interval() time.Duration {
+func scheduledSlingInterval(e ScheduledSlingEntry) time.Duration {
 	d, _ := time.ParseDuration(e.IntervalStr)
 	return d
 }
 
-func (e ScheduledSlingEntry) label() string { return "scheduled:" + e.Name }
+func scheduledSlingLabel(e ScheduledSlingEntry) string { return "scheduled:" + e.Name }
 
-func (e ScheduledSlingEntry) priority() int {
+func scheduledSlingPriority(e ScheduledSlingEntry) int {
 	if e.Priority == 0 {
 		return defaultScheduledSlingPriority
 	}
@@ -334,7 +315,7 @@ func (d *Daemon) runScheduledSlings() {
 	}
 	now := time.Now()
 	for _, e := range cfg.Entries {
-		if err := e.validate(); err != nil {
+		if err := scheduledSlingValidate(e); err != nil {
 			d.logger.Printf("scheduled_slings: %v (entry skipped)", err)
 			continue
 		}
@@ -365,18 +346,18 @@ func (d *Daemon) runScheduledSlings() {
 // runScheduledSlingEntry evaluates one entry and dispatches when due.
 func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEntry, now time.Time) error {
 	r := d.scheduledRunner()
-	beadsForLabel, err := r.listBeads(ctx, e.Rig, e.label())
+	beadsForLabel, err := r.listBeads(ctx, e.Rig, scheduledSlingLabel(e))
 	if err != nil {
 		return err
 	}
-	action := decideScheduledSling(beadsForLabel, e.interval(), now)
+	action := decideScheduledSling(beadsForLabel, scheduledSlingInterval(e), now)
 	if action != scheduledDispatch {
 		d.logger.Printf("scheduled_slings: %s: %s", e.Name, action)
 		return nil
 	}
 	title := fmt.Sprintf("%s %s", e.Name, now.UTC().Format("2006-01-02"))
-	desc := fmt.Sprintf("Scheduled run of formula %s on rig %s, created by the daemon's scheduled_slings patrol. Label %s is the run's identity; while this bead is open no second run is dispatched.", e.Formula, e.Rig, e.label())
-	id, err := r.createBead(ctx, e.Rig, title, e.label(), desc, e.priority())
+	desc := fmt.Sprintf("Scheduled run of formula %s on rig %s, created by the daemon's scheduled_slings patrol. Label %s is the run's identity; while this bead is open no second run is dispatched.", e.Formula, e.Rig, scheduledSlingLabel(e))
+	id, err := r.createBead(ctx, e.Rig, title, scheduledSlingLabel(e), desc, scheduledSlingPriority(e))
 	if err != nil {
 		return err
 	}

@@ -38,60 +38,6 @@ const (
 	maintenanceTailLines = 5
 )
 
-// ScheduledMaintenanceConfig holds configuration for the scheduled_maintenance patrol.
-// User opts in via:
-//
-//	gt config set maintenance.window 03:00
-//	gt config set maintenance.interval daily
-//
-// The daemon checks commit counts per DB during the window and then acts on
-// the Mode: "monitor" (the default) escalates with the counts, "flatten" runs
-// `gt maintain --force` when any DB exceeds the threshold. "gc" ignores commit
-// counts and gc's each database whose on-disk size crossed the size trigger
-// (GCMinBytes, GCGrowthRatio), history kept.
-type ScheduledMaintenanceConfig struct {
-	// Enabled controls whether scheduled maintenance runs.
-	Enabled bool `json:"enabled"`
-
-	// Window is the time of day to start maintenance (e.g., "03:00").
-	// Uses 24-hour format HH:MM in local time.
-	Window string `json:"window,omitempty"`
-
-	// Interval controls how often maintenance runs.
-	// Supported values: "daily", "weekly", "monthly", or a Go duration (e.g., "48h").
-	// Default: "daily".
-	Interval string `json:"interval,omitempty"`
-
-	// Threshold is the minimum commit count before maintenance triggers.
-	// Default: 1000.
-	Threshold *int `json:"threshold,omitempty"`
-
-	// Mode selects what happens to a database at or above the threshold.
-	// MaintenanceModeMonitor (the default) escalates with the counts and
-	// rewrites nothing; MaintenanceModeFlatten runs `gt maintain --force`.
-	// Only the trimmed string "flatten" arms the destructive path — see
-	// maintenanceMode. MaintenanceModeGC ("gc") runs a history-preserving
-	// CALL dolt_gc('--full') per database on a size trigger instead of the
-	// commit threshold; see maintenance_gc.go.
-	//
-	// Compatibility: a binary built before gc mode existed reads "gc" as
-	// monitor (its resolver matches only "flatten"), so rolling back after
-	// setting mode=gc degrades to escalate-only, never to a flatten.
-	Mode string `json:"mode,omitempty"`
-
-	// GCMinBytes is gc mode's size floor: a database smaller than this on
-	// disk is never gc'd by the patrol. Default 256MiB (DefaultGCMinBytes);
-	// a non-positive value is replaced by the default with a warning.
-	GCMinBytes *int64 `json:"gc_min_bytes,omitempty"`
-
-	// GCGrowthRatio is gc mode's growth trigger: a database at or above
-	// GCMinBytes is gc'd when its size is at least this multiple of the size
-	// recorded right after its last patrol gc (daemon/maintenance_state.json),
-	// or when no such record exists. Default 2.0; a value below 1, NaN or
-	// Inf is replaced by the default with a warning.
-	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
-}
-
 // maintenanceCheckInterval returns the configured check interval, or the default (5m).
 func maintenanceCheckInterval(config *DaemonPatrolConfig) time.Duration {
 	// The check interval is not user-configurable — it's internal.

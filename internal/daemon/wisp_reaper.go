@@ -40,26 +40,6 @@ const (
 	defaultStaleIssueAge = 30 * 24 * time.Hour
 )
 
-// WispReaperConfig holds configuration for the wisp_reaper patrol.
-type WispReaperConfig struct {
-	Enabled      bool     `json:"enabled"`
-	DryRun       bool     `json:"dry_run,omitempty"`
-	IntervalStr  string   `json:"interval,omitempty"`
-	MaxAgeStr    string   `json:"max_age,omitempty"`
-	DeleteAgeStr string   `json:"delete_age,omitempty"`
-	Databases    []string `json:"databases,omitempty"`
-
-	// StaleIssueAgeStr overrides how long an issue may sit untouched before
-	// auto-close (e.g. "720h" or "30d"). Empty means defaultStaleIssueAge.
-	StaleIssueAgeStr string `json:"stale_issue_age,omitempty"`
-
-	// AutoClose disarms ONLY the stale-issue auto-close step, leaving reap and
-	// purge running — the point of a dedicated knob (gt-2qzr), since dry_run
-	// pauses the whole patrol. nil means unset: the dog path keeps its default
-	// behavior while the inline fallback stays disarmed.
-	AutoClose *bool `json:"auto_close,omitempty"`
-}
-
 // wispReaperInterval returns the configured interval, or the default (1h).
 func wispReaperInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.WispReaper != nil {

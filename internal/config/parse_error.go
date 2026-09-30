@@ -80,10 +80,3 @@ func CheckJSONFileParses(path string, v any) error {
 	}
 	return DecodeJSONFile(path, data, v)
 }
-
-// RegisterDaemonPatrolConfigCheck is a no-op kept until internal/daemon
-// stops calling it: the daemon.json schema now lives in this package and the
-// one writer decodes it strictly before every write.
-//
-// Deprecated: nothing needs to register a check.
-func RegisterDaemonPatrolConfigCheck(func(path string) error) {}

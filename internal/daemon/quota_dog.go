@@ -18,15 +18,6 @@ const (
 	defaultQuotaResumeInterval = 5 * time.Minute
 )
 
-// QuotaDogConfig holds configuration for the quota_dog patrol.
-type QuotaDogConfig struct {
-	// Enabled controls whether the quota dog runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to run, as a string (e.g., "5m").
-	IntervalStr string `json:"interval,omitempty"`
-}
-
 // quotaDogInterval returns the configured interval, or the default (5m).
 func quotaDogInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.QuotaDog != nil {
