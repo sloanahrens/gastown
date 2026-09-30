@@ -46,9 +46,11 @@ For COMPLETED, gt done:
 2. Squashes auto-save and checkpoint commits into one descriptive commit,
    and strips Co-Authored-By trailers and AI attribution lines from every
    commit message (a subject line that is itself one is refused)
-3. Runs the local gate on the rebased tree: make lint, go build ./...,
-   and the unit tier of make test (a rig without go.mod runs its
-   lint_command, build_command and test_command)
+3. Runs the local gate on the rebased tree: make presubmit (lint, go build
+   ./..., and go test of the packages the branch changed), or the rig's
+   presubmit_command. The landing worker runs the full make gate on the
+   merged tree. A rig without go.mod runs its lint_command, build_command
+   and test_command
 4. Pushes the branch under a lease and reads the tip back
 5. Marks the work bead ready to land (label gt:ready-to-land and a
    READY TO LAND notes block naming branch, head and target)
@@ -155,8 +157,9 @@ var updateAgentStateOnDoneFn = updateAgentStateOnDone
 
 // doneLocalGate is gt done's pre-submit gate: the same land.Gate seam Land()
 // runs on the merged tree, here in its unit tier (no container slot) on the
-// rebased branch. D9's `make gate` replaces the steps, not the seam. Tests
-// replace this variable.
+// rebased branch. It is `make presubmit`, the changed packages only, because
+// the landing worker runs the full `make gate` on the merged tree (gt-ssyxd).
+// Tests replace this variable.
 var doneLocalGate = func(townRoot, rigName, dir string) (land.Gate, error) {
 	g, err := land.RigGate(dir, rig.ResolveMergeQueueConfig(townRoot, rigName), true)
 	if err != nil {

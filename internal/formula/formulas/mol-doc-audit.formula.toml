@@ -486,7 +486,7 @@ Submit your work and clean up. You cease to exist after this step.
 **Self-Cleaning Model:**
 Once `gt done` succeeds, you're gone. The command:
 1. Rebases your branch onto origin/{{base_branch}} and squashes auto-save commits
-2. Runs the local gate (lint, build, the unit tier of the tests)
+2. Runs the local gate (lint, build, the tests of the packages your branch changed)
 3. Pushes your branch and marks {{issue}} ready to land
 4. Exits your session
 

@@ -57,7 +57,7 @@ Do NOT:
 **Your session should NEVER end without running `{{ cmd }} done`.** If `{{ cmd }} done` fails,
 escalate to Witness — but you must attempt it.
 
-**`{{ cmd }} done` runs the local gate itself (lint, build and the unit tier of the tests; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.**
+**`{{ cmd }} done` runs the local gate itself (lint, build and the tests of the packages your branch changed; no container slot), which can take several minutes. That is normal. Do not interrupt it and do not close the bead.**
 
 **Never script a retry around `{{ cmd }} done`** — no `for`/`while`/`until`
 loop, no watcher, no generated retry script; the dangerous-command guard refuses

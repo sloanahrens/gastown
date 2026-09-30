@@ -146,6 +146,7 @@ Town-level role defaults live in `mayor/config.json` under:
 | `typecheck_command` | `string` | `""` | Type check command (e.g., `tsc --noEmit`) |
 | `lint_command` | `string` | `""` | Lint command (e.g., `eslint .`) |
 | `test_command` | `string` | `""` | Test command to run. Empty = skip. `gt done`'s default test-verify gate inherits any leading `VAR=value` assignments from it, and writes the container opt-in off for the run unless the command turns `GT_TEST_DOCKER=1` on itself (gt-wx53) — see below. |
+| `presubmit_command` | `string` | `""` | What `gt done` runs on the rebased branch before it pushes. Empty = `make presubmit` when a Go repo's Makefile has that target (lint, build, and the tests of the changed packages only), else `make gate`. The landing worker still runs the full `make gate` on the merged tree. A command that turns `GT_TEST_DOCKER=1` on is refused, as for `test_command`. |
 | `test_verify_run_timeout` | `string` | `""` | Wall-clock budget for `gt done`'s default test-verify gate once the container-gate slot is held. Empty uses the 30m floor (the gate runs the rig's full hermetic `test_command`, so there is no changed-package count to scale by). Slot wait is never counted against it. |
 | `test_verify_slot_timeout` | `string` | `"60m"` | How long `gt done`'s default test-verify gate waits for the container-gate slot. Exceeding it is reported as slot contention, not a test failure. Only applies when the gate takes a slot at all (see below). |
 | `test_verify_command` | `string` | `""` | Not read: the land path runs `merge_queue.gate`, else `make gate` (see [Testing](testing.md), "The gate"). No gate scopes itself to changed packages. |
@@ -165,8 +166,9 @@ See [Integration Branches](concepts/integration-branches.md) for integration bra
 **Container opt-in and the container-gate slot (`gt done`'s gate).** Container-backed
 tests are opt-in (`GT_TEST_DOCKER=1`, see `internal/testutil`), and a run that can start
 one must hold the town-wide container-gate slot. `gt done`'s default test-verify gate
-runs the rig's `test_command` with the opt-in written **off**, so it takes no slot. For
-gastown that command is `make gate`, whose recipe writes `GT_TEST_DOCKER=0` itself: the
+runs the rig's `presubmit_command` (for gastown, `make presubmit`) with the opt-in written **off**,
+so it takes no slot. `make presubmit` tests only the changed packages; the landing worker runs
+the full `make gate` on the merged tree. Both recipes write `GT_TEST_DOCKER=0` themselves: the
 unit tier never starts a container, whoever runs it. The container suites run post-merge
 in `make test-integration`, and the gate's slow tier in `make test-slow` (see [Testing](testing.md), "The gate"). A rig that wants its
 container suite verified at `gt done` asks for it in its own command
