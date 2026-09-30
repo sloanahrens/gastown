@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -117,7 +120,6 @@ func TestBdSerializationFailure(t *testing.T) {
 		{name: "sqlstate 40001 text alone", cause: "sql commit: serialization failure", want: true},
 		{name: "restart advice alone", cause: "commit write tx: try restarting transaction", want: true},
 		{name: "empty cause", cause: "", want: false},
-		{name: "timeout may have committed", cause: "bd mol ... timed out after 30s", want: false},
 		{name: "connection refused is not contention", cause: "connection refused", want: false},
 		{name: "circuit breaker is not contention", cause: "circuit breaker is open", want: false},
 		{name: "a permanent bd answer", cause: "missing required vars: feature", want: false},
@@ -126,6 +128,33 @@ func TestBdSerializationFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := bdSerializationFailure(tc.cause); got != tc.want {
 				t.Fatalf("bdSerializationFailure(%q) = %v, want %v", tc.cause, got, tc.want)
+			}
+		})
+	}
+}
+
+// The retry verdict adds the one exclusion the cause alone cannot express: an
+// attempt killed at bd's own deadline is a wedge, not contention, so its cause
+// text is never read (matchesTransientMarkers makes the same call).
+func TestBdContentionRetryable(t *testing.T) {
+	abort := "Error 1213 (40001): serialization failure: try restarting transaction"
+	tests := []struct {
+		name  string
+		err   error
+		cause string
+		want  bool
+	}{
+		{name: "contention abort", err: errors.New("exit status 1"), cause: abort, want: true},
+		{name: "deadline kills the retry", err: context.DeadlineExceeded, cause: abort, want: false},
+		{name: "wrapped deadline kills the retry", err: fmt.Errorf("bd mol timed out after 30s: %w", context.DeadlineExceeded), cause: abort, want: false},
+		{name: "the wrapper's own timeout text", err: errors.New("bd mol ... (5 args) timed out after 30s"), cause: abort, want: false},
+		{name: "no cause to read", err: errors.New("exit status 1"), cause: "", want: false},
+		{name: "no error at all", err: nil, cause: abort, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bdContentionRetryable(tc.err, tc.cause); got != tc.want {
+				t.Fatalf("bdContentionRetryable(%v, %q) = %v, want %v", tc.err, tc.cause, got, tc.want)
 			}
 		})
 	}

@@ -1185,7 +1185,7 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 		} else {
 			lastErr = fmt.Errorf("%w (args: %s)", err, strings.Join(bondArgs, " "))
 		}
-		if !bdSerializationFailure(cause) || attempt == bdContentionAttempts {
+		if !bdContentionRetryable(err, cause) || attempt == bdContentionAttempts {
 			break
 		}
 

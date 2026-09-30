@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"time"
 )
@@ -19,6 +21,25 @@ const (
 // hookBeadWithRetryFn provides for the hook path.
 var bdContentionSleep = time.Sleep
 
+// bdContentionRetryable reports whether a failed bd write should be attempted
+// again: Dolt aborted it for contention (which rolled the transaction back, so
+// nothing was written) and no deadline killed the attempt.
+//
+// The deadline exclusion is the one the container retry loop shares
+// (matchesTransientMarkers, internal/beads/bd_container_retry.go): a subprocess
+// killed at its own deadline had the whole budget and still said nothing, which
+// is a wedge, not contention, and repeating it multiplies the wait for a failure
+// that will repeat.
+func bdContentionRetryable(err error, cause string) bool {
+	if err == nil || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if strings.Contains(err.Error(), "timed out after") {
+		return false
+	}
+	return bdSerializationFailure(cause)
+}
+
 // bdSerializationFailure reports whether cause — the text bd reported for a
 // failed write — is a Dolt serialization failure, SQLSTATE 40001.
 //
@@ -29,12 +50,12 @@ var bdContentionSleep = time.Sleep
 // spells that one condition: the MySQL error code, the SQLSTATE text, and the
 // restart advice it appends.
 //
-// Everything else stays out, on purpose. A timeout, an unreachable server and a
-// reset connection can each mean the write landed and only the answer was lost,
-// and repeating one of those strands a second wisp that nothing will ever close
-// — the flood closeRemainingSteps exists to prevent (gt-ye21). A refused
-// connection or an open circuit breaker is not a competing writer either: the
-// town has a different problem, and a retry loop would only delay the report.
+// Everything else stays out, on purpose. A lost answer — a timeout, an
+// unreachable server, a reset connection — can mean the write landed and only
+// the reply was lost, and repeating one of those strands a second wisp that
+// nothing will ever close (gt-ye21). A refused connection or an open circuit
+// breaker is not a competing writer either: the town has a different problem,
+// and a retry loop would only delay the report.
 func bdSerializationFailure(cause string) bool {
 	if cause == "" {
 		return false
