@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,12 +22,20 @@ type PrintOptions struct {
 	Type   string          // event type filter
 	Rig    string          // rig name filter (matches event's Rig field)
 	Ctx    context.Context // optional: controls follow-mode lifecycle; nil uses signal.NotifyContext
+	Out    io.Writer       // optional: where events are printed; nil means os.Stdout
+
+	// tick paces follow-mode polls; nil means every 200ms. Tests drive it.
+	tick <-chan time.Time
 }
 
 // PrintGtEvents reads .events.jsonl and prints events to stdout.
 // When opts.Follow is true, it tails the file for new events after printing
 // the initial batch, polling every 200ms. Canceled via opts.Ctx or SIGINT.
 func PrintGtEvents(townRoot string, opts PrintOptions) error {
+	out := opts.Out
+	if out == nil {
+		out = os.Stdout
+	}
 	eventsPath := filepath.Join(townRoot, ".events.jsonl")
 	file, err := os.Open(eventsPath)
 	if err != nil {
@@ -77,12 +86,12 @@ func PrintGtEvents(townRoot string, opts PrintOptions) error {
 	}
 
 	if len(events) == 0 && !opts.Follow {
-		fmt.Println("No events found in .events.jsonl")
+		fmt.Fprintln(out, "No events found in .events.jsonl")
 		return nil
 	}
 
 	for _, event := range events {
-		printEvent(event)
+		printEvent(out, event)
 	}
 
 	if !opts.Follow {
@@ -100,21 +109,25 @@ func PrintGtEvents(townRoot string, opts PrintOptions) error {
 		defer stop()
 	}
 
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
+	tick := opts.tick
+	if tick == nil {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
+		case <-tick:
 			s := bufio.NewScanner(file)
 			s.Buffer(make([]byte, 1024*1024), 1024*1024)
 			for s.Scan() {
 				line := s.Text()
 				if event := parseGtEventLine(line); event != nil {
 					if matchesFilters(event, sinceTime, opts.Mol, opts.Type, opts.Rig) {
-						printEvent(*event)
+						printEvent(out, *event)
 					}
 				}
 			}
@@ -139,15 +152,15 @@ func matchesFilters(event *Event, sinceTime time.Time, mol, eventType, rig strin
 	return true
 }
 
-// printEvent formats and prints a single event line.
-func printEvent(event Event) {
+// printEvent formats and prints a single event line to out.
+func printEvent(out io.Writer, event Event) {
 	symbol := typeSymbol(event.Type)
 	ts := event.Time.Local().Format("15:04:05")
 	actor := event.Actor
 	if actor == "" {
 		actor = "system"
 	}
-	fmt.Printf("[%s] %s %-25s %s\n", ts, symbol, actor, event.Message)
+	fmt.Fprintf(out, "[%s] %s %-25s %s\n", ts, symbol, actor, event.Message)
 }
 
 func typeSymbol(eventType string) string {

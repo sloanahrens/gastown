@@ -47,8 +47,8 @@ type Curator struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
-	startOnce sync.Once // prevents concurrent Start() calls from spawning multiple goroutines
-	startErr  error     // result of the one-shot Start; visible to all callers via sync.Once happens-before
+	startOnce       sync.Once // prevents concurrent Start() calls from spawning multiple goroutines
+	startErr        error     // result of the one-shot Start; visible to all callers via sync.Once happens-before
 
 	// feedMu guards in-process access to the feed file. The flock in
 	// readRecentFeedEvents/writeFeedEvent coordinates across processes;
@@ -59,6 +59,9 @@ type Curator struct {
 	doneDedupeWindow     time.Duration
 	slingAggregateWindow time.Duration
 	minAggregateCount    int
+
+	// openTail opens the events file for Start; events.OpenTail outside tests.
+	openTail func(path string) (*events.Tail, error)
 }
 
 // NewCurator creates a new feed curator.
@@ -89,6 +92,7 @@ func NewCurator(townRoot string) *Curator {
 		doneDedupeWindow:     config.ParseDurationOrDefault(cfg.DoneDedupeWindow, 10*time.Second),
 		slingAggregateWindow: config.ParseDurationOrDefault(cfg.SlingAggregateWindow, 30*time.Second),
 		minAggregateCount:    minAgg,
+		openTail:             events.OpenTail,
 	}
 }
 
@@ -101,7 +105,7 @@ func (c *Curator) Start() error {
 		// Tail from the end, creating the file if needed. The tail follows
 		// the path: a replacement (tmp + rename) leaves a descriptor-bound
 		// reader deaf until the next daemon restart (claude-9jq).
-		tail, err := events.OpenTail(eventsPath)
+		tail, err := c.openTail(eventsPath)
 		if err != nil {
 			c.startErr = fmt.Errorf("opening events file: %w", err)
 			return
@@ -134,16 +138,20 @@ func (c *Curator) run(tail *events.Tail) {
 			return
 
 		case <-ticker.C:
-			// Poll returns every complete line appended so far and holds a
-			// partial line until its newline arrives.
-			lines, err := tail.Poll()
-			for _, line := range lines {
-				c.processLine(line)
-			}
-			if err != nil {
-				log.Printf("warning: reading events file: %v", err)
-			}
+			c.poll(tail)
 		}
+	}
+}
+
+// poll curates every complete line appended to the events file since the
+// last poll. Poll holds a partial line until its newline arrives.
+func (c *Curator) poll(tail *events.Tail) {
+	lines, err := tail.Poll()
+	for _, line := range lines {
+		c.processLine(line)
+	}
+	if err != nil {
+		log.Printf("warning: reading events file: %v", err)
 	}
 }
 

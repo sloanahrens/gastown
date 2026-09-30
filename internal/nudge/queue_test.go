@@ -12,26 +12,28 @@ import (
 )
 
 func TestEnqueueAndDrain(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	session := "gt-gastown-crew-sean"
+	base := time.Now()
 	n1 := QueuedNudge{
-		Sender:   "mayor",
-		Message:  "Check your hook",
-		Priority: PriorityNormal,
+		Sender:    "mayor",
+		Message:   "Check your hook",
+		Priority:  PriorityNormal,
+		Timestamp: base,
 	}
 	n2 := QueuedNudge{
-		Sender:   "gastown/witness",
-		Message:  "Polecat alpha is stuck",
-		Priority: PriorityUrgent,
+		Sender:    "gastown/witness",
+		Message:   "Polecat alpha is stuck",
+		Priority:  PriorityUrgent,
+		Timestamp: base.Add(time.Millisecond),
 	}
 
 	// Enqueue two nudges
 	if err := Enqueue(townRoot, session, n1); err != nil {
 		t.Fatalf("Enqueue n1: %v", err)
 	}
-	// Small delay to ensure different timestamps
-	time.Sleep(time.Millisecond)
 	if err := Enqueue(townRoot, session, n2); err != nil {
 		t.Fatalf("Enqueue n2: %v", err)
 	}
@@ -73,6 +75,7 @@ func TestEnqueueAndDrain(t *testing.T) {
 }
 
 func TestDrainEmptyQueue(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	nudges, err := Drain(townRoot, "nonexistent-session")
@@ -85,6 +88,7 @@ func TestDrainEmptyQueue(t *testing.T) {
 }
 
 func TestDrainSkipsMalformed(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test"
 
@@ -130,6 +134,7 @@ func TestDrainSkipsMalformed(t *testing.T) {
 }
 
 func TestFormatForInjection_Normal(t *testing.T) {
+	t.Parallel()
 	nudges := []QueuedNudge{
 		{Sender: "mayor", Message: "Check status", Priority: PriorityNormal},
 	}
@@ -150,6 +155,7 @@ func TestFormatForInjection_Normal(t *testing.T) {
 }
 
 func TestFormatForInjection_Urgent(t *testing.T) {
+	t.Parallel()
 	nudges := []QueuedNudge{
 		{Sender: "witness", Message: "Polecat stuck", Priority: PriorityUrgent},
 		{Sender: "mayor", Message: "FYI", Priority: PriorityNormal},
@@ -168,6 +174,7 @@ func TestFormatForInjection_Urgent(t *testing.T) {
 }
 
 func TestFormatForInjection_Empty(t *testing.T) {
+	t.Parallel()
 	output := FormatForInjection(nil)
 	if output != "" {
 		t.Errorf("FormatForInjection(nil) = %q, want empty", output)
@@ -175,6 +182,7 @@ func TestFormatForInjection_Empty(t *testing.T) {
 }
 
 func TestPendingNonexistentDir(t *testing.T) {
+	t.Parallel()
 	count, err := Pending("/nonexistent/path", "session")
 	if err != nil {
 		t.Fatalf("Pending on nonexistent dir should not error: %v", err)
@@ -185,6 +193,7 @@ func TestPendingNonexistentDir(t *testing.T) {
 }
 
 func TestEnqueueDefaults(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-defaults"
 
@@ -221,6 +230,7 @@ func TestEnqueueDefaults(t *testing.T) {
 }
 
 func TestEnqueueUrgentTTL(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-urgent-ttl"
 
@@ -248,6 +258,7 @@ func TestEnqueueUrgentTTL(t *testing.T) {
 }
 
 func TestEnqueueCustomExpiry(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-custom-expiry"
 
@@ -275,6 +286,7 @@ func TestEnqueueCustomExpiry(t *testing.T) {
 }
 
 func TestDrainSkipsExpired(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-expired"
 
@@ -290,7 +302,6 @@ func TestDrainSkipsExpired(t *testing.T) {
 	}
 
 	// Enqueue a fresh nudge
-	time.Sleep(time.Millisecond)
 	fresh := QueuedNudge{
 		Sender:  "new-sender",
 		Message: "fresh message",
@@ -334,6 +345,7 @@ func TestDrainSkipsExpired(t *testing.T) {
 }
 
 func TestEnqueueQueueDepthLimit(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-depth"
 
@@ -387,6 +399,7 @@ func TestEnqueueQueueDepthLimit(t *testing.T) {
 // their own TTL. Enqueue must not treat that as a permanently full queue —
 // it should prune the stale entries before rejecting a new one.
 func TestEnqueuePrunesExpiredWhenFull(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-expired-full"
 
@@ -423,6 +436,7 @@ func TestEnqueuePrunesExpiredWhenFull(t *testing.T) {
 // the depth cap toothless: a queue full of still-live nudges must keep
 // rejecting new ones, same as before gt-9le0e.
 func TestEnqueueStillRejectsWhenFullOfLiveNudges(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-live-full"
 
@@ -443,6 +457,7 @@ func TestEnqueueStillRejectsWhenFullOfLiveNudges(t *testing.T) {
 }
 
 func TestDrainSweepsOrphanedClaims(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-orphans"
 
@@ -519,6 +534,7 @@ func TestDrainSweepsOrphanedClaims(t *testing.T) {
 }
 
 func TestConcurrentEnqueueNoDuplicateLoss(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-concurrent"
 
@@ -571,6 +587,7 @@ func TestConcurrentEnqueueNoDuplicateLoss(t *testing.T) {
 // TestDrainSkipsDeferredNudge verifies that a nudge with a future DeliverAfter
 // is not returned by Drain and remains in the queue.
 func TestDrainSkipsDeferredNudge(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-deferred"
 
@@ -604,6 +621,7 @@ func TestDrainSkipsDeferredNudge(t *testing.T) {
 // TestDrainDeliversDeferredNudgeWhenReady verifies that a nudge with a past
 // DeliverAfter is delivered normally.
 func TestDrainDeliversDeferredNudgeWhenReady(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-deferred-ready"
 
@@ -631,27 +649,28 @@ func TestDrainDeliversDeferredNudgeWhenReady(t *testing.T) {
 // TestDrainMixedDeferredAndReady verifies that only ready nudges are returned
 // when a mix of deferred and immediately-deliverable nudges are queued.
 func TestDrainMixedDeferredAndReady(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-mixed-deferred"
 
 	// Enqueue: immediate, then deferred, then immediate (interleaved order).
-	n1 := QueuedNudge{Sender: "mayor", Message: "immediate-1"}
+	base := time.Now()
+	n1 := QueuedNudge{Sender: "mayor", Message: "immediate-1", Timestamp: base}
 	if err := Enqueue(townRoot, session, n1); err != nil {
 		t.Fatalf("Enqueue n1: %v", err)
 	}
-	time.Sleep(time.Millisecond)
 
 	deferred := QueuedNudge{
 		Sender:       "system",
 		Message:      "deferred",
-		DeliverAfter: time.Now().Add(60 * time.Second),
+		Timestamp:    base.Add(time.Millisecond),
+		DeliverAfter: base.Add(60 * time.Second),
 	}
 	if err := Enqueue(townRoot, session, deferred); err != nil {
 		t.Fatalf("Enqueue deferred: %v", err)
 	}
-	time.Sleep(time.Millisecond)
 
-	n2 := QueuedNudge{Sender: "witness", Message: "immediate-2"}
+	n2 := QueuedNudge{Sender: "witness", Message: "immediate-2", Timestamp: base.Add(2 * time.Millisecond)}
 	if err := Enqueue(townRoot, session, n2); err != nil {
 		t.Fatalf("Enqueue n2: %v", err)
 	}
@@ -681,6 +700,7 @@ func TestDrainMixedDeferredAndReady(t *testing.T) {
 }
 
 func TestRemoveKindByThread(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-remove"
 
@@ -689,11 +709,12 @@ func TestRemoveKindByThread(t *testing.T) {
 	removeB := QueuedNudge{Sender: "system", Message: "remove-b", Kind: "reply-reminder", ThreadID: "thread-1"}
 	otherThread := QueuedNudge{Sender: "system", Message: "other-thread", Kind: "reply-reminder", ThreadID: "thread-2"}
 
-	for _, n := range []QueuedNudge{keep, removeA, removeB, otherThread} {
+	base := time.Now()
+	for i, n := range []QueuedNudge{keep, removeA, removeB, otherThread} {
+		n.Timestamp = base.Add(time.Duration(i) * time.Millisecond)
 		if err := Enqueue(townRoot, session, n); err != nil {
 			t.Fatalf("Enqueue(%q): %v", n.Message, err)
 		}
-		time.Sleep(time.Millisecond)
 	}
 
 	removed, err := RemoveKindByThread(townRoot, session, "reply-reminder", "thread-1")
@@ -732,6 +753,7 @@ func TestRemoveKindByThread(t *testing.T) {
 // transition is driven by the same DeliverAfter field Drain reads — no
 // wall-clock race in either direction (gt-v25y).
 func TestDeferredNudgeDeliveredAfterDelay(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-deferred-sequence"
 
@@ -786,6 +808,7 @@ func TestDeferredNudgeDeliveredAfterDelay(t *testing.T) {
 // TestZeroDeliverAfterIsImmediate verifies that a zero DeliverAfter (unset)
 // is treated as immediately deliverable (not deferred).
 func TestZeroDeliverAfterIsImmediate(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-zero-deliver-after"
 
@@ -808,20 +831,22 @@ func TestZeroDeliverAfterIsImmediate(t *testing.T) {
 }
 
 func TestConcurrentDrainNoDoubleDeli(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-drain-race"
 
 	// Enqueue 10 nudges
 	const count = 10
+	base := time.Now()
 	for i := 0; i < count; i++ {
 		n := QueuedNudge{
-			Sender:  "sender",
-			Message: strings.Repeat("m", i+1),
+			Sender:    "sender",
+			Message:   strings.Repeat("m", i+1),
+			Timestamp: base.Add(time.Duration(i) * time.Millisecond),
 		}
 		if err := Enqueue(townRoot, session, n); err != nil {
 			t.Fatalf("Enqueue %d: %v", i, err)
 		}
-		time.Sleep(time.Millisecond) // ensure ordering
 	}
 
 	// Race 5 concurrent Drains — total nudges collected should equal count.
@@ -855,7 +880,6 @@ func TestConcurrentDrainNoDoubleDeli(t *testing.T) {
 	// with a straggler sweep so the test validates no-loss, not one-shot
 	// completeness.
 	for retries := 0; retries < 3 && total < count; retries++ {
-		time.Sleep(50 * time.Millisecond)
 		stragglers, err := Drain(townRoot, session)
 		if err != nil {
 			t.Fatalf("straggler Drain: %v", err)
@@ -932,6 +956,7 @@ func setDeliverAfter(t *testing.T, townRoot, session string, when time.Time) {
 // loop: after a failed injection the nudge must be preserved but must NOT be
 // immediately eligible again, or the next poll tick re-injects it.
 func TestRequeueDefersRetryUntilBackoffElapses(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-requeue-backoff"
 
@@ -993,6 +1018,7 @@ func TestRequeueDefersRetryUntilBackoffElapses(t *testing.T) {
 // re-injected forever — the reported incident delivered one nudge 139 times in
 // 12 minutes, ending only when it expired.
 func TestRequeueDropsNudgeAfterMaxAttempts(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-requeue-cap"
 	maxAttempts := nudgeConfig(townRoot).MaxDeliveryAttemptsV()
@@ -1089,25 +1115,21 @@ func entryNames(entries []os.DirEntry) []string {
 	return names
 }
 
-// observeExpiries installs a collector for the package-level expiry handler and
-// returns it, restoring the previous handler when the test ends. ExpiryObserver
-// is a package global, so the tests that use it must not call t.Parallel.
-func observeExpiries(t *testing.T) *[]ExpiryEvent {
-	t.Helper()
+// observeExpiries returns an observer to pass to drain or requeue and the
+// events it collects.
+func observeExpiries() (func(ExpiryEvent), *[]ExpiryEvent) {
 	got := &[]ExpiryEvent{}
-	prev := ExpiryObserver
-	ExpiryObserver = func(ev ExpiryEvent) { *got = append(*got, ev) }
-	t.Cleanup(func() { ExpiryObserver = prev })
-	return got
+	return func(ev ExpiryEvent) { *got = append(*got, ev) }, got
 }
 
 // TestDrainReportsExpiredNudge is the reported failure: a nudge sitting in the
 // queue past ExpiresAt used to be deleted with no error anywhere, so the
 // message vanished and nothing said so (gt-oexm).
 func TestDrainReportsExpiredNudge(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-expiry-reported"
-	got := observeExpiries(t)
+	observe, got := observeExpiries()
 
 	expiredAt := time.Now().Add(-time.Minute)
 	if err := Enqueue(townRoot, session, QueuedNudge{
@@ -1120,7 +1142,7 @@ func TestDrainReportsExpiredNudge(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	nudges, err := Drain(townRoot, session)
+	nudges, err := drain(townRoot, session, observe)
 	if err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
@@ -1179,12 +1201,9 @@ func TestDrainReportsExpiredNudge(t *testing.T) {
 // runs without the command layer's handler: the trace must still be written, so
 // an expiry is never silent even when nothing can mail it (gt-oexm).
 func TestExpiredNudgeKeptWhenNoObserverRegistered(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-expiry-no-observer"
-
-	prev := ExpiryObserver
-	ExpiryObserver = nil
-	t.Cleanup(func() { ExpiryObserver = prev })
 
 	if err := Enqueue(townRoot, session, QueuedNudge{
 		Sender:    "deacon",
@@ -1194,7 +1213,7 @@ func TestExpiredNudgeKeptWhenNoObserverRegistered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	if _, err := Drain(townRoot, session); err != nil {
+	if _, err := drain(townRoot, session, nil); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 
@@ -1211,16 +1230,17 @@ func TestExpiredNudgeKeptWhenNoObserverRegistered(t *testing.T) {
 // expired nudge in silence: a failed injection that requeues past the TTL
 // (gt-oexm).
 func TestRequeueReportsExpiredNudge(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-requeue-expired"
-	got := observeExpiries(t)
+	observe, got := observeExpiries()
 
-	if err := Requeue(townRoot, session, []QueuedNudge{{
+	if err := requeue(townRoot, session, []QueuedNudge{{
 		Sender:    "witness",
 		Message:   "gt-abc needs a decision",
 		Timestamp: time.Now().Add(-time.Hour),
 		ExpiresAt: time.Now().Add(-time.Second),
-	}}); err != nil {
+	}}, observe); err != nil {
 		t.Fatalf("Requeue: %v", err)
 	}
 
@@ -1245,6 +1265,7 @@ func TestRequeueReportsExpiredNudge(t *testing.T) {
 // TestExpiredTracesPrunedAfterRetention keeps the expired/ directory from
 // growing for the life of a session.
 func TestExpiredTracesPrunedAfterRetention(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-test-expiry-prune"
 	dir := filepath.Join(queueDir(townRoot, session), expiredDirName)

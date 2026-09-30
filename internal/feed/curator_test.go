@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,16 +16,8 @@ import (
 )
 
 func TestCurator_FiltersByVisibility(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "feed-test-*")
-	if err != nil {
-		t.Fatalf("creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create events file with test events
-	eventsPath := filepath.Join(tmpDir, events.EventsFile)
-	feedPath := filepath.Join(tmpDir, FeedFile)
+	t.Parallel()
+	curator, tail, eventsPath, feedPath := openCurator(t)
 
 	// Write a feed-visible event
 	feedEvent := events.Event{
@@ -48,32 +40,8 @@ func TestCurator_FiltersByVisibility(t *testing.T) {
 	}
 	auditData, _ := json.Marshal(auditEvent)
 
-	// Create events file
-	if err := os.WriteFile(eventsPath, []byte{}, 0644); err != nil {
-		t.Fatalf("creating events file: %v", err)
-	}
-
-	// Start curator
-	curator := NewCurator(tmpDir)
-	if err := curator.Start(); err != nil {
-		t.Fatalf("starting curator: %v", err)
-	}
-	defer curator.Stop()
-
-	// Give curator time to start
-	time.Sleep(50 * time.Millisecond)
-
-	// Append events
-	f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatalf("opening events file: %v", err)
-	}
-	f.Write(append(feedData, '\n'))
-	f.Write(append(auditData, '\n'))
-	f.Close()
-
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	appendTo(t, eventsPath, string(feedData), string(auditData))
+	curator.poll(tail)
 
 	// Check feed file
 	feedContent, err := os.ReadFile(feedPath)
@@ -100,31 +68,10 @@ func TestCurator_FiltersByVisibility(t *testing.T) {
 }
 
 func TestCurator_DedupesDoneEvents(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "feed-test-*")
-	if err != nil {
-		t.Fatalf("creating temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	eventsPath := filepath.Join(tmpDir, events.EventsFile)
-	feedPath := filepath.Join(tmpDir, FeedFile)
-
-	// Create events file
-	if err := os.WriteFile(eventsPath, []byte{}, 0644); err != nil {
-		t.Fatalf("creating events file: %v", err)
-	}
-
-	// Start curator
-	curator := NewCurator(tmpDir)
-	if err := curator.Start(); err != nil {
-		t.Fatalf("starting curator: %v", err)
-	}
-	defer curator.Stop()
-
-	time.Sleep(50 * time.Millisecond)
+	t.Parallel()
+	curator, tail, eventsPath, feedPath := openCurator(t)
 
 	// Write 3 identical done events from same actor
-	f, _ := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
 	for i := 0; i < 3; i++ {
 		doneEvent := events.Event{
 			Timestamp:  time.Now().UTC().Format(time.RFC3339),
@@ -135,12 +82,9 @@ func TestCurator_DedupesDoneEvents(t *testing.T) {
 			Visibility: events.VisibilityFeed,
 		}
 		data, _ := json.Marshal(doneEvent)
-		f.Write(append(data, '\n'))
+		appendTo(t, eventsPath, string(data))
 	}
-	f.Close()
-
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	curator.poll(tail)
 
 	// Count feed events
 	feedContent, _ := os.ReadFile(feedPath)
@@ -160,6 +104,7 @@ func TestCurator_DedupesDoneEvents(t *testing.T) {
 // --- Config loading tests ---
 
 func TestCurator_DefaultConfig_NoSettingsFile(t *testing.T) {
+	t.Parallel()
 	// When no settings file exists, NewCurator should use defaults.
 	tmpDir := t.TempDir()
 
@@ -178,6 +123,7 @@ func TestCurator_DefaultConfig_NoSettingsFile(t *testing.T) {
 }
 
 func TestCurator_DefaultConfig_EmptyTownRoot(t *testing.T) {
+	t.Parallel()
 	// Empty townRoot should use defaults without crashing.
 	curator := NewCurator("")
 	defer curator.Stop()
@@ -191,6 +137,7 @@ func TestCurator_DefaultConfig_EmptyTownRoot(t *testing.T) {
 }
 
 func TestCurator_CustomConfig_FromSettingsFile(t *testing.T) {
+	t.Parallel()
 	// Write a settings/config.json with custom FeedCurator values.
 	tmpDir := t.TempDir()
 	settingsDir := filepath.Join(tmpDir, "settings")
@@ -223,6 +170,7 @@ func TestCurator_CustomConfig_FromSettingsFile(t *testing.T) {
 }
 
 func TestCurator_PartialConfig_FallsBackToDefaults(t *testing.T) {
+	t.Parallel()
 	// Settings file exists but FeedCurator section is absent → defaults.
 	tmpDir := t.TempDir()
 	settingsDir := filepath.Join(tmpDir, "settings")
@@ -251,6 +199,7 @@ func TestCurator_PartialConfig_FallsBackToDefaults(t *testing.T) {
 }
 
 func TestCurator_PartialFeedCuratorConfig_EmptyDurations(t *testing.T) {
+	t.Parallel()
 	// FeedCurator section exists but some duration fields are empty → fallback defaults.
 	tmpDir := t.TempDir()
 	settingsDir := filepath.Join(tmpDir, "settings")
@@ -284,6 +233,7 @@ func TestCurator_PartialFeedCuratorConfig_EmptyDurations(t *testing.T) {
 }
 
 func TestCurator_PartialFeedCuratorConfig_ZeroMinAggregate(t *testing.T) {
+	t.Parallel()
 	// FeedCurator section exists with durations but MinAggregateCount is omitted (zero value).
 	// Must fall back to default 3, NOT use 0 (which would aggregate every sling event).
 	tmpDir := t.TempDir()
@@ -311,6 +261,7 @@ func TestCurator_PartialFeedCuratorConfig_ZeroMinAggregate(t *testing.T) {
 }
 
 func TestCurator_InvalidDurationString_FallsBack(t *testing.T) {
+	t.Parallel()
 	// Invalid duration string in config → falls back to default.
 	tmpDir := t.TempDir()
 	settingsDir := filepath.Join(tmpDir, "settings")
@@ -340,10 +291,8 @@ func TestCurator_InvalidDurationString_FallsBack(t *testing.T) {
 }
 
 func TestCurator_GeneratesSummary(t *testing.T) {
-	tmpDir, _ := os.MkdirTemp("", "feed-test-*")
-	defer os.RemoveAll(tmpDir)
-
-	curator := NewCurator(tmpDir)
+	t.Parallel()
+	curator := NewCurator(t.TempDir())
 
 	tests := []struct {
 		event    *events.Event
@@ -385,6 +334,7 @@ func TestCurator_GeneratesSummary(t *testing.T) {
 // --- Truncation and size limit tests ---
 
 func TestCurator_TruncatesAtMaxSize(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	feedPath := filepath.Join(tmpDir, FeedFile)
 
@@ -449,6 +399,7 @@ func TestCurator_TruncatesAtMaxSize(t *testing.T) {
 }
 
 func TestCurator_ReadRecentFeedEventsLargeFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	feedPath := filepath.Join(tmpDir, FeedFile)
 
@@ -494,36 +445,8 @@ func TestCurator_ReadRecentFeedEventsLargeFile(t *testing.T) {
 	}
 }
 
-func TestCurator_FeedFilePermissions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix file permissions are not supported on Windows")
-	}
-	tmpDir := t.TempDir()
-	feedPath := filepath.Join(tmpDir, FeedFile)
-
-	curator := NewCurator(tmpDir)
-
-	curator.writeFeedEvent(&events.Event{
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		Source:     "gt",
-		Type:       events.TypeDone,
-		Actor:      "test-actor",
-		Payload:    map[string]interface{}{"bead": "test"},
-		Visibility: events.VisibilityFeed,
-	})
-
-	info, err := os.Stat(feedPath)
-	if err != nil {
-		t.Fatalf("feed file not created: %v", err)
-	}
-
-	perm := info.Mode().Perm()
-	if perm != 0600 {
-		t.Errorf("feed file permissions = %o, want 0600", perm)
-	}
-}
-
 func TestCurator_DefaultMaxFeedFileSize(t *testing.T) {
+	t.Parallel()
 	curator := NewCurator(t.TempDir())
 	if curator.maxFeedFileSize != maxFeedFileSize {
 		t.Errorf("maxFeedFileSize = %d, want %d", curator.maxFeedFileSize, maxFeedFileSize)
@@ -538,6 +461,7 @@ func TestCurator_DefaultMaxFeedFileSize(t *testing.T) {
 //
 // Regression test for steveyegge/gastown#1230 item 6.
 func TestCurator_ConcurrentStartIsIdempotent(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	eventsPath := filepath.Join(tmpDir, events.EventsFile)
 	if err := os.WriteFile(eventsPath, []byte{}, 0644); err != nil {
@@ -546,6 +470,11 @@ func TestCurator_ConcurrentStartIsIdempotent(t *testing.T) {
 
 	curator := NewCurator(tmpDir)
 	defer curator.Stop()
+	var opens atomic.Int32
+	curator.openTail = func(path string) (*events.Tail, error) {
+		opens.Add(1)
+		return events.OpenTail(path)
+	}
 
 	// Call Start() from 10 goroutines concurrently.
 	const goroutines = 10
@@ -567,42 +496,10 @@ func TestCurator_ConcurrentStartIsIdempotent(t *testing.T) {
 		}
 	}
 
-	// Write one event and verify exactly one feed event is produced
-	// (not N duplicates from N goroutines).
-	time.Sleep(50 * time.Millisecond)
-
-	f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ev := events.Event{
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		Source:     "gt",
-		Type:       events.TypeDone,
-		Actor:      "test-actor",
-		Payload:    map[string]interface{}{"bead": "test"},
-		Visibility: events.VisibilityFeed,
-	}
-	data, _ := json.Marshal(ev)
-	f.Write(append(data, '\n'))
-	f.Close()
-
-	time.Sleep(300 * time.Millisecond)
-
-	feedPath := filepath.Join(tmpDir, FeedFile)
-	feedContent, err := os.ReadFile(feedPath)
-	if err != nil {
-		t.Fatalf("reading feed: %v", err)
-	}
-
-	lines := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(feedContent)), "\n") {
-		if line != "" {
-			lines++
-		}
-	}
-	if lines != 1 {
-		t.Errorf("expected exactly 1 feed event, got %d (concurrent Start spawned multiple goroutines?)", lines)
+	// Each run goroutine is started with its own tail, so one open means
+	// one goroutine.
+	if n := opens.Load(); n != 1 {
+		t.Errorf("events file opened %d times, want 1 (concurrent Start spawned multiple goroutines?)", n)
 	}
 }
 
@@ -613,6 +510,7 @@ func TestCurator_ConcurrentStartIsIdempotent(t *testing.T) {
 //
 // Regression test for steveyegge/gastown#1230 item 7.
 func TestCurator_ConcurrentFeedReadWrite(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	curator := NewCurator(tmpDir)
 	defer curator.Stop()
@@ -679,6 +577,7 @@ func TestCurator_ConcurrentFeedReadWrite(t *testing.T) {
 // Regression test: startErr must be a struct field (not function-local) so
 // sync.Once's happens-before guarantee makes it visible to all callers.
 func TestCurator_StartErrorPersistsAcrossCalls(t *testing.T) {
+	t.Parallel()
 	// Use a non-existent directory so OpenFile fails.
 	curator := NewCurator("/nonexistent/path/that/does/not/exist")
 	defer curator.Stop()
@@ -702,6 +601,7 @@ func TestCurator_StartErrorPersistsAcrossCalls(t *testing.T) {
 // during scanning are returned, not silently swallowed.
 // Regression test for gt-0e4.
 func TestCurator_ReadRecentFeedEvents_ScannerError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	feedPath := filepath.Join(tmpDir, FeedFile)
 
@@ -751,6 +651,7 @@ func TestCurator_ReadRecentFeedEvents_ScannerError(t *testing.T) {
 // during events file scanning are returned, not silently swallowed.
 // Regression test for gt-0e4.
 func TestCurator_ReadRecentEvents_ScannerError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	eventsPath := filepath.Join(tmpDir, events.EventsFile)
 

@@ -3,9 +3,7 @@
 internal/beads
 internal/cmd
 internal/config
-internal/feed
 internal/hooks
 internal/mayor
-internal/nudge
 internal/plugin
 internal/telemetry
