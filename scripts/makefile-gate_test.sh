@@ -54,10 +54,10 @@ if [[ -z "$shell" ]]; then
 else
   fail "gate leaves the shell tests (scripts/test-makefile.sh) to the slow tier" "$out"
 fi
-if grep -q -F 'cmd/budget -skip internal/testpolicy/slow.txt -max-wall 15s --' <<<"$out"; then
-  pass "gate skips the slow tier's packages and fails a fast-tier package over 15 s of wall"
+if grep -q -F 'cmd/budget -fast-tier -slow internal/testpolicy/slow.txt --' <<<"$out"; then
+  pass "gate runs the fast tier: skips slow.txt, fails a package over testpolicy.FastTierMaxWall"
 else
-  fail "gate skips the slow tier's packages and fails a fast-tier package over 15 s of wall" "$out"
+  fail "gate runs the fast tier: skips slow.txt, fails a package over testpolicy.FastTierMaxWall" "$out"
 fi
 if grep -q -E 'gate: PASSED in \$\{wall\}s wall' <<<"$out"; then
   pass "gate prints its wall time"
@@ -96,7 +96,7 @@ else
   fail "an inherited GT_TEST_DOCKER=1 does not change the gate"
 fi
 
-if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- '-max-wall 15s -- -timeout 20m ./...' <<<"$out"; then
+if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- 'slow.txt -- -timeout 20m ./...' <<<"$out"; then
   pass "gate carries one -timeout, on the budget runner (the one gate definition)"
 else
   fail "gate carries one -timeout, on the budget runner (the one gate definition)" "$(grep -n -E -- '-timeout' <<<"$out")"

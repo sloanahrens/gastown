@@ -1,12 +1,5 @@
-# The slow tier (gt-z862q, internal/testpolicy/tier.go): Go packages that
-# `make gate` skips and `make test-slow` runs after landing. One per line:
-# "<package> <measured wall> # <why it is slow>". The walls are from `make gate`
-# on main 2026-09-30 09:08 (89 packages, 699 s wall, load average ~100); these
-# 22 packages took >= 30 s each and ~2000 s of the 2139 s package-wall sum.
-# They spawn git, bd, tmux or dolt subprocesses (system CPU 10-20x user):
-# integration tests in the unit tier. The gate fails any other package that
-# takes over 15 s; fix that test, or list the package here with its measured
-# wall and why. Leaving this list: make the package fast, then delete its line.
+# The slow tier, which make gate skips and make test-slow runs (gt-z862q; internal/testpolicy/tier.go).
+# "<package> <measured wall> # <why>"; a package's wall must be at least testpolicy.FastTierMaxWall.
 internal/cmd 301s # tests exec git (52 sites), bd (39) and tmux; 31 tmux.New
 internal/refinery 212s # real git repos and a Dolt container port; D2 replaces the package
 internal/refinery/editorial 167s # tests exec git (29 sites) over real repos; D2 replaces the package

@@ -58,8 +58,8 @@ func run() int {
 	budget := flag.Duration("budget", 10*time.Second, "per-package user CPU limit for converted packages (the test binary and the processes it waited for)")
 	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget; they run through plain go test, with its result cache")
 	overList := flag.String("overbudget", "internal/testpolicy/overbudget.txt", "converted packages exempt from the budget while a bead tracks their overrun; their times are reported on every run")
-	skipList := flag.String("skip", "", "slow-tier list (internal/testpolicy/slow.txt): packages left out of this run; `make test-slow` runs them")
-	maxWall := flag.Duration("max-wall", 0, "fail any package that ran (not cached) for longer than this wall time; 0 turns the check off")
+	fastTier := flag.Bool("fast-tier", false, "run the fast tier (make gate): leave out the packages in -slow, and fail any package that ran longer than testpolicy.FastTierMaxWall of wall time")
+	slowList := flag.String("slow", "internal/testpolicy/slow.txt", "the slow tier's packages, which -fast-tier leaves out; `make test-slow` runs them")
 	flag.Parse()
 
 	exempt, err := testpolicy.ReadList(*list)
@@ -84,8 +84,8 @@ func run() int {
 	if err != nil {
 		return fail(err)
 	}
-	if *skipList != "" {
-		slow, err := testpolicy.ReadSlowList(*skipList)
+	if *fastTier {
+		slow, err := testpolicy.ReadSlowList(*slowList)
 		if err != nil {
 			return fail(err)
 		}
@@ -101,12 +101,13 @@ func run() int {
 		return append(append(append([]string{}, before...), p...), after...)
 	}
 
-	// Both halves print plain go test text; a copy of it feeds the wall
-	// check (-max-wall) after the run.
+	// Both halves print plain go test text; a copy of its package summary
+	// lines feeds the fast tier's wall check after the run.
 	var summary bytes.Buffer
+	probe := &summaryLines{w: &summary}
 	out := io.Writer(os.Stdout)
-	if *maxWall > 0 {
-		out = io.MultiWriter(os.Stdout, &summaryLines{w: &summary})
+	if *fastTier {
+		out = io.MultiWriter(os.Stdout, probe)
 	}
 
 	var res testpolicy.BudgetResult
@@ -158,27 +159,44 @@ func run() int {
 	if code == 0 && len(res.Over) > 0 {
 		code = 1
 	}
-	if *maxWall > 0 && !interrupted(code) {
-		walls, err := testpolicy.ParsePackageWalls(&summary, module)
-		if err != nil {
-			return fail(fmt.Errorf("reading package wall times: %w", err))
-		}
-		for _, o := range testpolicy.WallOverruns(walls, *maxWall) {
-			fmt.Fprintf(os.Stderr, "TIER: %s took %s of wall time, over the fast tier's %s: make its tests faster, or move it to the slow tier by adding \"%s <measured wall> # <why>\" to %s\n",
-				o.Package, o.Wall.Round(100*time.Millisecond), *maxWall, o.Package, slowListName(*skipList))
-			if code == 0 {
-				code = 1
-			}
+	if *fastTier && !interrupted(code) {
+		if c := checkFastTier(probe, &summary, len(judged)+len(cached), *slowList); code == 0 {
+			code = c
 		}
 	}
 	return code
 }
 
-func slowListName(path string) string {
-	if path == "" {
-		return "internal/testpolicy/slow.txt"
+// checkFastTier reads the package summary lines the probe kept and returns 1
+// when a package ran longer than testpolicy.FastTierMaxWall, naming it. It
+// fails closed: a run whose output yields no wall time and no cached
+// package, or a summary line it cannot read, fails too, because silence
+// there would read as every package being fast.
+func checkFastTier(probe *summaryLines, summary io.Reader, ran int, slowList string) int {
+	if err := probe.Flush(); err != nil {
+		fmt.Fprintln(os.Stderr, "TIER: reading package summaries:", err)
+		return 1
 	}
-	return path
+	sum, err := testpolicy.ParsePackageWalls(summary, module)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TIER: reading package wall times:", err)
+		return 1
+	}
+	code := 0
+	for _, line := range sum.Unparsed {
+		fmt.Fprintf(os.Stderr, "TIER: cannot read the wall time in go test's summary line %q; the fast-tier check fails closed\n", line)
+		code = 1
+	}
+	if ran > 0 && len(sum.Walls) == 0 && sum.Cached == 0 {
+		fmt.Fprintf(os.Stderr, "TIER: %d packages ran but the wall-time probe parsed no package summary line (ok/FAIL <package> <time>); has go test's output format changed? The fast-tier check fails closed\n", ran)
+		code = 1
+	}
+	for _, o := range testpolicy.WallOverruns(sum.Walls, testpolicy.FastTierMaxWall) {
+		fmt.Fprintf(os.Stderr, "TIER: %s took %s of wall time, over the fast tier's %s: make its tests faster, or move it to the slow tier by adding \"%s <measured wall> # <why>\" to %s\n",
+			o.Package, o.Wall.Round(100*time.Millisecond), testpolicy.FastTierMaxWall, o.Package, slowList)
+		code = 1
+	}
+	return code
 }
 
 // withoutSlow is pkgs (import paths) minus the slow-tier packages, which are
@@ -198,30 +216,64 @@ func withoutSlow(pkgs []string, slow []testpolicy.SlowEntry) []string {
 	return kept
 }
 
+// maxSummaryLine bounds the partial line summaryLines holds. A package
+// summary line is an import path and a time, far shorter; a longer line is
+// test output and is dropped unread.
+const maxSummaryLine = 64 * 1024
+
 // summaryLines keeps only the package summary lines ("ok", "FAIL") of the go
 // test text written to it, so a failing package's full output is not held
-// twice in memory.
+// twice in memory. Flush passes on a last line that had no newline.
 type summaryLines struct {
 	w       io.Writer
 	partial []byte
+	// skipping is set while the rest of an over-long line is dropped.
+	skipping bool
 }
 
 func (s *summaryLines) Write(p []byte) (int, error) {
-	s.partial = append(s.partial, p...)
-	for {
-		i := bytes.IndexByte(s.partial, '\n')
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
+			if !s.skipping {
+				s.partial = append(s.partial, p...)
+				if len(s.partial) > maxSummaryLine {
+					s.partial, s.skipping = s.partial[:0], true
+				}
+			}
 			break
 		}
-		line := s.partial[:i+1]
-		if bytes.HasPrefix(line, []byte("ok ")) || bytes.HasPrefix(line, []byte("FAIL\t")) {
-			if _, err := s.w.Write(line); err != nil {
+		if s.skipping || len(s.partial)+i+1 > maxSummaryLine {
+			s.skipping = false
+		} else {
+			s.partial = append(s.partial, p[:i+1]...)
+			if err := s.emit(); err != nil {
 				return 0, err
 			}
 		}
-		s.partial = s.partial[i+1:]
+		s.partial = s.partial[:0]
+		p = p[i+1:]
 	}
-	return len(p), nil
+	return n, nil
+}
+
+// Flush passes on a final line that ended without a newline.
+func (s *summaryLines) Flush() error {
+	defer func() { s.partial, s.skipping = s.partial[:0], false }()
+	if s.skipping || len(s.partial) == 0 {
+		return nil
+	}
+	s.partial = append(s.partial, '\n')
+	return s.emit()
+}
+
+func (s *summaryLines) emit() error {
+	if bytes.HasPrefix(s.partial, []byte("ok ")) || bytes.HasPrefix(s.partial, []byte("FAIL\t")) {
+		_, err := s.w.Write(s.partial)
+		return err
+	}
+	return nil
 }
 
 // module is the main module's path; package names in unconverted.txt and

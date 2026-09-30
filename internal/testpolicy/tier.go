@@ -18,9 +18,12 @@ import (
 // fast-tier package whose wall time exceeds FastTierMaxWall, so the boundary
 // cannot drift silently.
 
-// FastTierMaxWall is the most wall time one fast-tier package may take in
-// `make gate` before the gate fails it.
-const FastTierMaxWall = 15 * time.Second
+// FastTierMaxWall is the one definition of the tier boundary: the most wall
+// time one fast-tier package may take in `make gate` before the gate fails
+// it, and the cut-off for slow.txt (every listed package measured at least
+// this much). The budget runner's -fast-tier flag reads it; nothing else
+// restates the number.
+const FastTierMaxWall = 30 * time.Second
 
 // SlowEntry is one line of slow.txt.
 type SlowEntry struct {
@@ -75,14 +78,25 @@ type PackageWall struct {
 	Wall    time.Duration
 }
 
+// WallSummary is what ParsePackageWalls found in go test's output.
+type WallSummary struct {
+	// Walls are the packages that ran, with their wall times.
+	Walls []PackageWall
+	// Cached counts the packages served from the result cache: they ran
+	// nothing, so they have no wall time.
+	Cached int
+	// Unparsed are summary lines of this module's packages whose time could
+	// not be read. The caller must not treat them as fast.
+	Unparsed []string
+}
+
 // ParsePackageWalls reads plain `go test` output and returns the wall time of
 // every package that ran, from its "ok" or "FAIL" summary line
-// ("ok  \t<import path>\t1.234s", optionally followed by coverage). Packages
-// served from the result cache ("(cached)") ran nothing and are left out, as
-// are lines that are not package summaries. Package names are relative to
-// module.
-func ParsePackageWalls(r io.Reader, module string) ([]PackageWall, error) {
-	var walls []PackageWall
+// ("ok  \t<import path>\t1.234s", optionally followed by
+// " [no tests to run]" or a coverage field). Lines that are not package
+// summaries of module are ignored. Package names are relative to module.
+func ParsePackageWalls(r io.Reader, module string) (WallSummary, error) {
+	var sum WallSummary
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for sc.Scan() {
@@ -94,18 +108,27 @@ func ParsePackageWalls(r io.Reader, module string) ([]PackageWall, error) {
 		if status != "ok" && status != "FAIL" {
 			continue
 		}
-		wall, err := time.ParseDuration(strings.TrimSpace(fields[2]))
-		if err != nil {
-			continue
-		}
 		pkg := strings.TrimSpace(fields[1])
 		if pkg != module && !strings.HasPrefix(pkg, module+"/") {
 			continue
 		}
 		pkg = strings.TrimPrefix(strings.TrimPrefix(pkg, module), "/")
-		walls = append(walls, PackageWall{Package: pkg, Wall: wall})
+		timeField := strings.Fields(fields[2])
+		switch {
+		case len(timeField) > 0 && timeField[0] == "(cached)":
+			sum.Cached++
+		case len(timeField) > 0:
+			wall, err := time.ParseDuration(timeField[0])
+			if err != nil {
+				sum.Unparsed = append(sum.Unparsed, sc.Text())
+				continue
+			}
+			sum.Walls = append(sum.Walls, PackageWall{Package: pkg, Wall: wall})
+		default:
+			sum.Unparsed = append(sum.Unparsed, sc.Text())
+		}
 	}
-	return walls, sc.Err()
+	return sum, sc.Err()
 }
 
 // WallOverruns returns the packages in walls that took longer than limit,

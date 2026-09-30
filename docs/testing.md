@@ -8,8 +8,8 @@ Three Makefile targets are the test tiers, and `make test` runs all three in ord
 
 | target | runs | Docker | when |
 |---|---|---|---|
-| `make gate` | `make lint`, then `go build ./...`, then the fast tier: the budget runner over every package not in `internal/testpolicy/slow.txt`, failing any package over 15 s of wall time; prints its wall at the end | never | before every landing |
-| `make test-slow` | the packages in `internal/testpolicy/slow.txt`, then the shell tests in `scripts/test-makefile.sh` | never | after landing |
+| `make gate` | `make lint`, then `go build ./...`, then the fast tier: the budget runner over every package not in `internal/testpolicy/slow.txt`, failing any package over `testpolicy.FastTierMaxWall` of wall time; prints its wall at the end | never | before every landing |
+| `make test-slow` | the packages in `internal/testpolicy/slow.txt`, then the shell tests in `scripts/test-makefile.sh` (`make test-makefile` runs those alone) | never | after each landing: the landing worker runs it as the rig's `merge_queue.post_land_command`; until that hook is enabled, the overseer runs it after landings |
 | `make test-integration` | `go test -tags integration -run '^TestIntegration' ./...`, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the daemon's `main_branch_test` patrol daily, and the nightly workflow |
 
 Exit codes, for every target:
@@ -18,7 +18,7 @@ Exit codes, for every target:
 
 Decide on the exit code only, never on the output. For a human reading the log, a lint failure ends with make's error line for the `lint` target, and a later stage ends with a `gate: FAILED at <stage>` line on stderr.
 
-A package in the fast tier that takes more than 15 s of wall time fails `make gate` with a `TIER:` line naming it: make its tests faster, or add it to `internal/testpolicy/slow.txt` as `<package> <measured wall> # <why>` (gt-z862q).
+A package in the fast tier that takes more than `testpolicy.FastTierMaxWall` of wall time fails `make gate` with a `TIER:` line naming it: make its tests faster, or add it to `internal/testpolicy/slow.txt` as `<package> <measured wall> # <why>` (gt-z862q).
 
 `make gate` never starts a container and never takes the container-gate slot. Its recipe writes `GT_TEST_DOCKER=0` itself, so an inherited value cannot turn containers on. Do not wrap it in `gt slot run`. `make test-integration` writes `GT_TEST_DOCKER=1` and does start containers, so it runs under `gt slot run`.
 

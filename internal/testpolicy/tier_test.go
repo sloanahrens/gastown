@@ -26,17 +26,24 @@ func TestParsePackageWalls(t *testing.T) {
 		"ok  \tgithub.com/steveyegge/gastown/internal/git\t43.268s\tcoverage: 71.2% of statements",
 		"ok  \tgithub.com/other/module/pkg\t99s",
 		"ok  \tgithub.com/steveyegge/gastown\t0.5s",
+		"ok  \tgithub.com/steveyegge/gastown/internal/quiet\t0.2s [no tests to run]",
+		"ok  \tgithub.com/steveyegge/gastown/internal/odd\tsoon",
 	}, "\n") + "\n"
 
 	got, err := ParsePackageWalls(strings.NewReader(out), tierModule)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []PackageWall{
-		{"internal/slot", 3768 * time.Millisecond},
-		{"internal/plugin", 19159 * time.Millisecond},
-		{"internal/git", 43268 * time.Millisecond},
-		{"", 500 * time.Millisecond},
+	want := WallSummary{
+		Walls: []PackageWall{
+			{"internal/slot", 3768 * time.Millisecond},
+			{"internal/plugin", 19159 * time.Millisecond},
+			{"internal/git", 43268 * time.Millisecond},
+			{"", 500 * time.Millisecond},
+			{"internal/quiet", 200 * time.Millisecond},
+		},
+		Cached:   1,
+		Unparsed: []string{"ok  \tgithub.com/steveyegge/gastown/internal/odd\tsoon"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ParsePackageWalls =\n%v\nwant\n%v", got, want)
@@ -49,10 +56,10 @@ func TestWallOverruns(t *testing.T) {
 	walls := []PackageWall{
 		{"a", 2 * time.Second},
 		{"b", 16 * time.Second},
-		{"c", FastTierMaxWall},
+		{"c", 15 * time.Second},
 		{"d", 40 * time.Second},
 	}
-	got := WallOverruns(walls, FastTierMaxWall)
+	got := WallOverruns(walls, 15*time.Second)
 	want := []PackageWall{{"d", 40 * time.Second}, {"b", 16 * time.Second}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("WallOverruns = %v, want %v", got, want)
@@ -104,6 +111,11 @@ func TestSlowListNamesPackages(t *testing.T) {
 	}
 	root := filepath.Join("..", "..")
 	for _, e := range entries {
+		// The list's cut-off and the gate's limit are one number: a package
+		// measured under FastTierMaxWall belongs in the fast tier.
+		if e.Wall < FastTierMaxWall {
+			t.Errorf("slow.txt:%d: %s measured %s, under the tier boundary FastTierMaxWall (%s): it belongs in the fast tier", e.Line, e.Package, e.Wall, FastTierMaxWall)
+		}
 		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(e.Package), "*.go"))
 		if err != nil {
 			t.Fatal(err)

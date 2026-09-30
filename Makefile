@@ -7,16 +7,20 @@
 #   make gate              the landing gate: lint, then `go build ./...`, then
 #                          the fast tier: the budget runner over every package
 #                          NOT in internal/testpolicy/slow.txt, failing any
-#                          package that takes over $(FAST_TIER_MAX_WALL) of wall
+#                          package over testpolicy.FastTierMaxWall of wall
 #                          time (gt-z862q). Prints its wall time at the end.
 #                          Never starts a container and never takes the
 #                          container-gate slot: the recipe writes
 #                          GT_TEST_DOCKER=0 itself, so an inherited value cannot
 #                          turn containers on. Do not wrap it in `gt slot run`.
-#   make test-slow         the slow tier, after landing: the packages in
+#   make test-slow         the slow tier, after each landing: the packages in
 #                          internal/testpolicy/slow.txt, then the shell tests
-#                          (scripts/test-makefile.sh), with GT_TEST_DOCKER=0.
-#                          No containers, no slot.
+#                          (scripts/test-makefile.sh, which `make
+#                          test-makefile` also runs alone), with
+#                          GT_TEST_DOCKER=0. No containers, no slot. The
+#                          landing worker runs it as the rig's
+#                          merge_queue.post_land_command; until that hook is
+#                          enabled, the overseer runs it after landings.
 #   make test-integration  the integration tier: -tags integration over ./...,
 #                          then every package in internal/testpolicy/docker.txt
 #                          whole, with GT_TEST_DOCKER=1. It starts containers,
@@ -255,10 +259,9 @@ SHELL_TESTS ?= scripts/test-makefile.sh
 
 # The tier boundary (gt-z862q). slow.txt names the packages the gate skips and
 # test-slow runs; the gate fails any other package that runs longer than
-# FAST_TIER_MAX_WALL (keep it equal to testpolicy.FastTierMaxWall).
+# testpolicy.FastTierMaxWall, the one definition of the limit.
 SLOW_LIST := internal/testpolicy/slow.txt
 SLOW_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' $(SLOW_LIST) | awk 'NF{print $$1}'))
-FAST_TIER_MAX_WALL := 15s
 
 # The gate's lint waits its turn on golangci-lint's module lock instead of
 # exiting in 5s: the gate is judged by its exit code alone, so a contended
@@ -275,7 +278,7 @@ gate: lint
 	@# -o into a temp dir: `go build ./...` over a module with one main
 	@# package writes that binary into the module's directory.
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
-	@# The fast tier: every package not in $(SLOW_LIST). -max-wall fails a
+	@# The fast tier: every package not in $(SLOW_LIST). -fast-tier fails a
 	@# package that ran longer than the fast tier allows, naming it, so the
 	@# boundary cannot drift (gt-z862q). The budget runner measures converted
 	@# packages through its CPU-measuring -exec wrapper, which bypasses the
@@ -287,7 +290,7 @@ gate: lint
 	@# TERM (bash defers traps until a foreground child exits); the trap finds
 	@# it as this shell's child (pgrep -P) and stops it before its children.
 	@trap 'for p in $$(pgrep -P $$$$); do k=$$(pgrep -P $$p); kill $$p 2>/dev/null; [ -n "$$k" ] && kill $$k 2>/dev/null; done; exit 130' INT TERM; \
-	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -skip $(SLOW_LIST) -max-wall $(FAST_TIER_MAX_WALL) -- -timeout 20m ./... & gt=$$!; \
+	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -fast-tier -slow $(SLOW_LIST) -- -timeout 20m ./... & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
 	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \

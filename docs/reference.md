@@ -168,7 +168,7 @@ one must hold the town-wide container-gate slot. `gt done`'s default test-verify
 runs the rig's `test_command` with the opt-in written **off**, so it takes no slot. For
 gastown that command is `make gate`, whose recipe writes `GT_TEST_DOCKER=0` itself: the
 unit tier never starts a container, whoever runs it. The container suites run post-merge
-in `make test-integration`, and the slow packages the gate skips run post-merge in `make test-slow` (see [Testing](testing.md), "The gate"). A rig that wants its
+in `make test-integration`, and the gate's slow tier in `make test-slow` (see [Testing](testing.md), "The gate"). A rig that wants its
 container suite verified at `gt done` asks for it in its own command
 (`test_command: "GT_TEST_DOCKER=1 make <target>"`), and the gate honours that and takes a
 slot for it. The session's own exported value is deliberately not an input: the slot
