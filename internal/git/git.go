@@ -104,6 +104,26 @@ func (g *Git) GitDir() (string, error) {
 	return g.run("rev-parse", "--absolute-git-dir")
 }
 
+// CommonDir returns the absolute path of the git directory workDir's
+// repository shares with all its worktrees: a bare repository itself, or the
+// main checkout's .git. Its info/exclude is the one git reads in every
+// worktree; a linked worktree's GitDir is not. Like a mutation, it refuses a
+// workDir whose repository discovery lands on the town root, so a caller
+// about to write there cannot be walked up into it (EnsureSafeMutationWorkDir).
+func (g *Git) CommonDir() (string, error) {
+	if err := ensureSafeMutationWorkDir(g.runner(), g.workDir); err != nil {
+		return "", err
+	}
+	dir, err := g.run("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	if dir == "" {
+		return "", fmt.Errorf("empty git common dir for %s", g.workDir)
+	}
+	return dir, nil
+}
+
 // TopLevel returns the root of the git worktree containing the working
 // directory, or an error when there is none.
 //

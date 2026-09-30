@@ -90,6 +90,10 @@ func (e *realEnv) Clone(t testing.TB, src, dest string) {
 
 func (e *realEnv) Open(dir string) gitfake.Repo { return git.NewGit(dir) }
 
+func (e *realEnv) OpenWithDir(gitDir, workDir string) gitfake.Repo {
+	return git.NewGitWithDir(gitDir, workDir)
+}
+
 func TestIntegrationGitfakeRepoContract(t *testing.T) {
 	gitfake.RunRepoContract(t, func(t *testing.T) gitfake.Env { return &realEnv{} })
 }

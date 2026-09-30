@@ -1,6 +1,7 @@
 package gitfake
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,8 +26,11 @@ type Env interface {
 	// with src as origin.
 	Clone(t testing.TB, src, dest string)
 	// Open returns the implementation under test for the repository or
-	// worktree at dir.
+	// worktree at dir, as git.NewGit(dir).
 	Open(dir string) Repo
+	// OpenWithDir is Open for git.NewGitWithDir(gitDir, workDir), the way
+	// a bare repository is opened.
+	OpenWithDir(gitDir, workDir string) Repo
 }
 
 var _ Env = (*Fake)(nil)
@@ -72,6 +76,15 @@ func (fx *fixture) worktree(t *testing.T, rev string) (string, Repo) {
 		t.Fatalf("WorktreeAddDetached: %v", err)
 	}
 	return dir, fx.env.Open(dir)
+}
+
+// sameDir reports whether a and b name the same directory, symlinks
+// resolved (a temporary directory can sit behind one).
+func sameDir(t *testing.T, a, b string) bool {
+	t.Helper()
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
 }
 
 func readFile(t *testing.T, path string) string {
@@ -426,6 +439,241 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		fx.env.Clone(t, fx.origin, fresh)
 		if id, err := fx.env.Open(fresh).Rev("origin/main"); err != nil || id != merged {
 			t.Errorf("fresh clone origin/main = %q, %v; want %s", id, err, merged)
+		}
+	})
+	t.Run("a bare clone takes the remote HEAD branch alone, or the branch named", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		town := fx.env.Open(fx.root) // clones run from outside any repository
+		bare := filepath.Join(fx.root, "bare.git")
+		if err := town.CloneBareWithBranch(fx.origin, bare, ""); err != nil {
+			t.Fatalf("CloneBareWithBranch: %v", err)
+		}
+		g := fx.env.OpenWithDir(bare, "")
+		if got := g.DefaultBranch(); got != "main" {
+			t.Errorf("DefaultBranch = %q, want the remote HEAD's main", got)
+		}
+		for ref, want := range map[string]bool{
+			"refs/heads/main": true, "refs/remotes/origin/main": true, "origin/main": true,
+			"refs/heads/" + fixtureBranch: false, "origin/" + fixtureBranch: false,
+		} {
+			if got, err := g.RefExists(ref); err != nil || got != want {
+				t.Errorf("RefExists(%s) = %v, %v; want %v (a single-branch clone)", ref, got, err, want)
+			}
+		}
+		if empty, err := g.IsEmpty(); err != nil || empty {
+			t.Errorf("IsEmpty = %v, %v", empty, err)
+		}
+		if url, err := g.RemoteURL("origin"); err != nil || url != fx.origin {
+			t.Errorf("RemoteURL(origin) = %q, %v; want %s", url, err, fx.origin)
+		}
+		variants := []func(dest string) error{
+			func(dest string) error { return town.CloneBareWithBranch(fx.origin, dest, fixtureBranch) },
+			func(dest string) error {
+				return town.CloneBareWithReferenceAndBranch(fx.origin, dest, bare, fixtureBranch)
+			},
+			func(dest string) error {
+				return town.CloneBarePartialWithBranch(fx.origin, dest, "blob:none", fixtureBranch)
+			},
+			func(dest string) error {
+				return town.CloneBarePartialWithReferenceAndBranch(fx.origin, dest, "blob:none", bare, fixtureBranch)
+			},
+		}
+		for i, clone := range variants {
+			dest := filepath.Join(fx.root, fmt.Sprintf("bare-%d.git", i))
+			if err := clone(dest); err != nil {
+				t.Fatalf("variant %d: %v", i, err)
+			}
+			g := fx.env.OpenWithDir(dest, "")
+			if got := g.DefaultBranch(); got != fixtureBranch {
+				t.Errorf("variant %d: DefaultBranch = %q, want %s", i, got, fixtureBranch)
+			}
+			if id, err := g.Rev("origin/" + fixtureBranch); err != nil || id != fx.head {
+				t.Errorf("variant %d: origin/%s = %q, %v; want %s", i, fixtureBranch, id, err, fx.head)
+			}
+		}
+		if err := town.CloneBareWithBranch(fx.origin, filepath.Join(fx.root, "gone.git"), "gone"); err == nil {
+			t.Error("cloning a missing branch succeeded")
+		}
+	})
+
+	t.Run("an empty remote clones empty, and has no branch to name", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		town := fx.env.Open(fx.root)
+		empty := filepath.Join(fx.root, "empty.git")
+		fx.env.InitBare(t, empty)
+		if has, err := town.RemoteHasRefs(empty); err != nil || has {
+			t.Errorf("RemoteHasRefs(empty) = %v, %v", has, err)
+		}
+		if has, err := town.RemoteHasRefs(fx.origin); err != nil || !has {
+			t.Errorf("RemoteHasRefs(origin) = %v, %v", has, err)
+		}
+		if _, err := town.RemoteHasRefs(filepath.Join(fx.root, "nowhere.git")); err == nil {
+			t.Error("RemoteHasRefs of a missing repository succeeded")
+		}
+		dest := filepath.Join(fx.root, "empty-clone.git")
+		if err := town.CloneBareWithBranch(empty, dest, ""); err != nil {
+			t.Fatalf("cloning an empty repository: %v", err)
+		}
+		if isEmpty, err := fx.env.OpenWithDir(dest, "").IsEmpty(); err != nil || !isEmpty {
+			t.Errorf("IsEmpty of the clone = %v, %v", isEmpty, err)
+		}
+		if err := town.CloneBareWithBranch(empty, filepath.Join(fx.root, "empty-main.git"), "main"); err == nil {
+			t.Error("bare-cloning main from an empty repository succeeded")
+		}
+		if err := town.CloneBranch(empty, filepath.Join(fx.root, "empty-main"), "main"); err == nil {
+			t.Error("cloning main from an empty repository succeeded")
+		}
+	})
+
+	t.Run("a branch clone checks the branch out", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		town := fx.env.Open(fx.root)
+		variants := []func(dest string) error{
+			func(dest string) error { return town.CloneBranch(fx.origin, dest, fixtureBranch) },
+			func(dest string) error {
+				return town.CloneBranchWithReference(fx.origin, dest, fixtureBranch, fx.origin)
+			},
+			func(dest string) error { return town.CloneBranchPartial(fx.origin, dest, fixtureBranch, "blob:none") },
+			func(dest string) error {
+				return town.CloneBranchPartialWithReference(fx.origin, dest, fixtureBranch, "blob:none", fx.origin)
+			},
+		}
+		for i, clone := range variants {
+			dest := filepath.Join(fx.root, fmt.Sprintf("checkout-%d", i))
+			if err := clone(dest); err != nil {
+				t.Fatalf("variant %d: %v", i, err)
+			}
+			g := fx.env.Open(dest)
+			if id, err := g.Rev("HEAD"); err != nil || id != fx.head {
+				t.Errorf("variant %d: HEAD = %q, %v; want %s", i, id, err, fx.head)
+			}
+			if got := g.DefaultBranch(); got != fixtureBranch {
+				t.Errorf("variant %d: DefaultBranch = %q", i, got)
+			}
+			if got := readFile(t, filepath.Join(dest, "b.txt")); got != "work\n" {
+				t.Errorf("variant %d: b.txt = %q", i, got)
+			}
+			if !g.IsRepo() {
+				t.Errorf("variant %d: IsRepo = false", i)
+			}
+		}
+		if err := town.CloneBranch(fx.origin, filepath.Join(fx.root, "gone"), "gone"); err == nil {
+			t.Error("cloning a missing branch succeeded")
+		}
+		outside := fx.env.Open(t.TempDir())
+		if outside.IsRepo() {
+			t.Error("IsRepo outside a repository")
+		}
+		if got := outside.DefaultBranch(); got != "main" {
+			t.Errorf("DefaultBranch outside a repository = %q, want the main fallback", got)
+		}
+	})
+
+	t.Run("push URLs and the upstream remote", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		bare := filepath.Join(fx.root, "bare.git")
+		if err := fx.env.Open(fx.root).CloneBareWithBranch(fx.origin, bare, ""); err != nil {
+			t.Fatal(err)
+		}
+		fork := filepath.Join(fx.root, "fork.git")
+		for name, g := range map[string]Repo{"clone": fx.env.Open(fx.clone), "bare": fx.env.OpenWithDir(bare, "")} {
+			if url, err := g.GetPushURL("origin"); err != nil || url != fx.origin {
+				t.Errorf("%s: push URL before one is set = %q, %v; want the fetch URL", name, url, err)
+			}
+			if err := g.ConfigurePushURL("origin", fork); err != nil {
+				t.Fatalf("%s: ConfigurePushURL: %v", name, err)
+			}
+			if url, err := g.GetPushURL("origin"); err != nil || url != fork {
+				t.Errorf("%s: push URL = %q, %v; want %s", name, url, err, fork)
+			}
+			if url, err := g.RemoteURL("origin"); err != nil || url != fx.origin {
+				t.Errorf("%s: fetch URL after a push URL = %q, %v", name, url, err)
+			}
+			for i := 0; i < 2; i++ { // clearing an unset push URL succeeds
+				if err := g.ClearPushURL("origin"); err != nil {
+					t.Errorf("%s: ClearPushURL #%d: %v", name, i, err)
+				}
+			}
+			if url, _ := g.GetPushURL("origin"); url != fx.origin {
+				t.Errorf("%s: push URL after clearing = %q", name, url)
+			}
+			if err := g.ConfigurePushURL("nope", fork); err == nil {
+				t.Errorf("%s: ConfigurePushURL on a missing remote succeeded", name)
+			}
+			for _, get := range []func(string) (string, error){g.RemoteURL, g.GetPushURL} {
+				if _, err := get("nope"); err == nil {
+					t.Errorf("%s: a missing remote has a URL", name)
+				}
+			}
+			for _, up := range []string{filepath.Join(fx.root, "up.git"), filepath.Join(fx.root, "up2.git")} {
+				if err := g.AddUpstreamRemote(up); err != nil {
+					t.Fatalf("%s: AddUpstreamRemote(%s): %v", name, up, err)
+				}
+				if url, err := g.RemoteURL("upstream"); err != nil || url != up {
+					t.Errorf("%s: upstream = %q, %v; want %s", name, url, err, up)
+				}
+			}
+		}
+	})
+
+	t.Run("a bare clone fetches a branch and adds worktrees on branches", func(t *testing.T) {
+		fx := newFixture(t, newEnv(t))
+		bare := filepath.Join(fx.root, "bare.git")
+		if err := fx.env.Open(fx.root).CloneBareWithBranch(fx.origin, bare, ""); err != nil {
+			t.Fatal(err)
+		}
+		b := fx.env.OpenWithDir(bare, "")
+		if err := b.FetchBranchShallow("origin", fixtureBranch); err != nil {
+			t.Fatalf("FetchBranchShallow: %v", err)
+		}
+		for _, ref := range []string{"origin/" + fixtureBranch, "refs/remotes/origin/" + fixtureBranch} {
+			if ok, err := b.RefExists(ref); err != nil || !ok {
+				t.Errorf("RefExists(%s) after the fetch = %v, %v", ref, ok, err)
+			}
+		}
+		if err := b.FetchBranchShallow("origin", "gone"); err == nil {
+			t.Error("fetching a missing branch succeeded")
+		}
+		wtDir := filepath.Join(fx.root, "wt-main")
+		if err := b.WorktreeAddExisting(wtDir, "main"); err != nil {
+			t.Fatalf("WorktreeAddExisting: %v", err)
+		}
+		wt := fx.env.Open(wtDir)
+		if id, err := wt.Rev("HEAD"); err != nil || id != fx.base {
+			t.Errorf("worktree HEAD = %q, %v; want %s", id, err, fx.base)
+		}
+		if got := wt.DefaultBranch(); got != "main" {
+			t.Errorf("worktree DefaultBranch = %q; it is on main, not detached", got)
+		}
+		if got := readFile(t, filepath.Join(wtDir, "a.txt")); got != "one\ntwo\nthree\n" {
+			t.Errorf("a.txt = %q", got)
+		}
+		if err := wt.ConfigureHooksPath(); err != nil {
+			t.Errorf("ConfigureHooksPath without .githooks: %v", err)
+		}
+		if err := b.WorktreeAddExisting(filepath.Join(fx.root, "wt-again"), "main"); err == nil {
+			t.Error("adding a second worktree on main succeeded")
+		}
+		if err := b.WorktreeAddExisting(filepath.Join(fx.root, "wt-none"), "nope"); err == nil {
+			t.Error("adding a worktree on a missing branch succeeded")
+		}
+
+		_, linked := fx.worktree(t, fx.base)
+		for _, c := range []struct {
+			name string
+			g    Repo
+			want string
+		}{
+			{"bare", b, bare}, {"bare's worktree", wt, bare},
+			{"clone", fx.env.Open(fx.clone), filepath.Join(fx.clone, ".git")},
+			{"clone's linked worktree", linked, filepath.Join(fx.clone, ".git")},
+		} {
+			if dir, err := c.g.CommonDir(); err != nil || !sameDir(t, dir, c.want) {
+				t.Errorf("%s: CommonDir = %q, %v; want %s", c.name, dir, err, c.want)
+			}
+		}
+		if _, err := fx.env.Open(t.TempDir()).CommonDir(); err == nil {
+			t.Error("CommonDir outside a repository succeeded")
 		}
 	})
 }
