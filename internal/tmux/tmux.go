@@ -338,8 +338,14 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 	if strings.Contains(stderr, "duplicate session") {
 		return ErrSessionExists
 	}
+	// tmux names a missing target differently per subcommand family: the
+	// session-environment commands (set-environment, show-environment) say
+	// "no such session", while has-session and kill-session say "can't find
+	// session". Matching only the second left a gone session
+	// indistinguishable from a failed query (gt-jv0k3).
 	if strings.Contains(stderr, "session not found") ||
-		strings.Contains(stderr, "can't find session") {
+		strings.Contains(stderr, "can't find session") ||
+		strings.Contains(stderr, "no such session") {
 		return ErrSessionNotFound
 	}
 
