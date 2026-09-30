@@ -132,7 +132,7 @@ else
   fail "test-integration runs every package in internal/testpolicy/docker.txt; missing:$missing" "$iout"
 fi
 
-if grep -q -F 'plugins/dolt-snapshots' <<<"$out" && grep -q -F '(cd "$m" && go build ./...)' <<<"$out"; then
+if grep -q -F 'plugins/dolt-snapshots' <<<"$out" && grep -q -F '(cd "$m" && go build -o "$out/" ./...)' <<<"$out"; then
   pass "gate builds every nested module in its own directory"
 else
   fail "gate builds every nested module in its own directory" "$out"

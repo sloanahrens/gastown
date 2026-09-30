@@ -256,7 +256,9 @@ GATE_SHELL_TESTS ?= scripts/test-makefile.sh
 gate: lint
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
-	@for m in $(NESTED_MODULES); do (cd "$$m" && go build ./...) || { echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done
+	@# -o into a temp dir: `go build ./...` over a module with one main
+	@# package writes that binary into the module's directory.
+	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
 	@# The unit tier. The shell tests run beside the Go suite (gt-22hdp.60);
 	@# their output is held and printed after it, and either failing fails the
 	@# gate. Both halves run in the background so the trap fires at once on
