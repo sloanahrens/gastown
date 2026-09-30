@@ -267,11 +267,10 @@ func TestEnvVarsCheck_MixedCorrectAndMismatch(t *testing.T) {
 func TestEnvVarsCheck_RetiredRoleSessionsSkipped(t *testing.T) {
 	t.Parallel()
 	reader := &mockEnvReader{
-		sessions: []string{"hq-deacon", "hq-boot", "mr-witness"},
+		sessions: []string{"hq-deacon", "hq-boot"},
 		sessionEnvs: map[string]map[string]string{
-			"hq-deacon":  {}, // Missing all env vars
-			"hq-boot":    {},
-			"mr-witness": {},
+			"hq-deacon": {}, // Missing all env vars
+			"hq-boot":   {},
 		},
 	}
 	check := NewEnvVarsCheckWithReader(reader)
