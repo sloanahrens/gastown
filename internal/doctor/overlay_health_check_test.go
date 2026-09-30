@@ -78,6 +78,48 @@ description = "This won't match anything"
 	assert.NotEmpty(t, result.FixHint)
 }
 
+// TestOverlayHealthCheck_InheritedStep guards gt-0z1lt: mol-doc-audit carries
+// only its delta, so load-context (inherited from mol-polecat-work) and audit
+// (from its doc-audit-slice expansion) are not in its file. Overlays apply to
+// the resolved formula, so both are valid targets, and --fix must not delete
+// the overlay. implement is replaced by the expansion, so it is stale.
+func TestOverlayHealthCheck_InheritedStep(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	setupRigsJSON(t, tmpDir, []string{"testrig"})
+
+	overlayDir := filepath.Join(tmpDir, "formula-overlays")
+	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
+	require.NotContains(t, getEmbeddedFormulaStepIDs(t, "mol-doc-audit"), "load-context",
+		"test premise: load-context is inherited, not in mol-doc-audit's own file")
+
+	content := `[[step-overrides]]
+step_id = "load-context"
+mode = "append"
+description = "Extra context"
+
+[[step-overrides]]
+step_id = "audit"
+mode = "append"
+description = "Extra audit rule"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-doc-audit.toml"), []byte(content), 0o644))
+
+	check := NewOverlayHealthCheck()
+	result := check.Run(&CheckContext{TownRoot: tmpDir})
+	assert.Equal(t, StatusOK, result.Status, "details: %v", result.Details)
+
+	stale := `[[step-overrides]]
+step_id = "implement"
+mode = "skip"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(overlayDir, "mol-doc-audit.toml"), []byte(stale), 0o644))
+	result = check.Run(&CheckContext{TownRoot: tmpDir})
+	assert.Equal(t, StatusWarning, result.Status)
+	require.NotEmpty(t, result.Details)
+	assert.Contains(t, result.Details[0], "implement")
+}
+
 func TestOverlayHealthCheck_MalformedTOML(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

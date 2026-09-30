@@ -164,24 +164,43 @@ func renderFormulaRootAndStepsFull(formulaName, townRoot, rigName string, extraV
 }
 
 func resolveFormulaForRendering(formulaName, townRoot, rigName string, vars []string) (*formula.Formula, map[string]string, error) {
+	_, f, err := loadResolvedFormula(formulaName, townRoot, rigName)
+	if err != nil {
+		return nil, nil, err
+	}
+	applyFormulaOverlays(f, formulaName, townRoot, rigName)
+	return f, buildFormulaVarMap(f, vars), nil
+}
+
+// loadResolvedFormula loads formulaName through the three tiers (rig > town >
+// embedded) and returns it as written (raw) and resolved. A formula that
+// extends another or expands a step carries only its delta; resolved lists
+// every step the agent must run. Without extends or compose the two are the
+// same formula.
+func loadResolvedFormula(formulaName, townRoot, rigName string) (raw, resolved *formula.Formula, err error) {
 	content, err := formula.ResolveFormulaContent(formulaName, townRoot, rigName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not load formula %s: %w", formulaName, err)
 	}
 
-	f, err := formula.Parse(content)
+	raw, err = formula.Parse(content)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not parse formula %s: %w", formulaName, err)
 	}
-	// A formula that extends another or expands a step carries only its delta;
-	// resolve it so the checklist lists every step the agent must run.
-	if len(f.Extends) > 0 || f.Compose != nil {
-		if f, err = formula.Resolve(f, formulaSearchPaths(townRoot, rigName)); err != nil {
-			return nil, nil, fmt.Errorf("could not resolve formula %s: %w", formulaName, err)
-		}
+	if !formulaComposes(raw) {
+		return raw, raw, nil
 	}
-	applyFormulaOverlays(f, formulaName, townRoot, rigName)
-	return f, buildFormulaVarMap(f, vars), nil
+	resolved, err = formula.Resolve(raw, formulaSearchPaths(townRoot, rigName))
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not resolve formula %s: %w", formulaName, err)
+	}
+	return raw, resolved, nil
+}
+
+// formulaComposes reports whether f extends another formula or expands a
+// step, i.e. whether f as written is only a delta.
+func formulaComposes(f *formula.Formula) bool {
+	return len(f.Extends) > 0 || f.Compose != nil
 }
 
 func firstFormulaVars(extraVars [][]string) []string {

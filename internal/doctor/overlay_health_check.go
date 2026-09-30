@@ -12,7 +12,7 @@ import (
 
 // OverlayHealthCheck verifies that formula overlay files reference valid step IDs.
 // It scans overlay files at both town-level and rig-level, loads the referenced
-// formula from the embedded binary, and checks that every step_id in the overlay
+// formula from the embedded binary, resolves its extends and compose, and checks that every step_id in the overlay
 // matches a real step in the formula. Fix mode removes stale step-override entries.
 type OverlayHealthCheck struct {
 	FixableCheck
@@ -207,8 +207,13 @@ func scanOverlayDir(dir string) []overlayFile {
 		}
 
 		f, err := formula.Parse(embeddedContent)
+		if err == nil {
+			// Overlays apply to the resolved formula (gt prime resolves before
+			// applying them), so an overlay may target an inherited step.
+			f, err = formula.Resolve(f, nil)
+		}
 		if err != nil {
-			// Embedded formula can't be parsed — skip validation.
+			// Embedded formula can't be parsed or resolved — skip validation.
 			results = append(results, of)
 			continue
 		}
