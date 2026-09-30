@@ -3824,7 +3824,12 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 		return result, errNoComparisonRefs
 	}
 
+	// The first judged candidate is the verdict when none preserves HEAD. Test a
+	// flag, not result.ComparisonBase: the exact-branch arm above names its base
+	// before judging, and a set name skipped this assignment, so work ahead of
+	// its pushed branch reported no unpreserved commits (gt-70m1).
 	var lastErr error
+	judged := false
 	for _, ref := range candidates {
 		candidate, err := g.preservationAgainstRef(ref)
 		if err != nil {
@@ -3837,11 +3842,15 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 		if candidate.Preserved {
 			return candidate, nil
 		}
-		if result.ComparisonBase == "" {
+		if !judged {
+			judged = true
+			if result.ComparisonBase != "" {
+				candidate.ComparisonBase = result.ComparisonBase
+			}
 			result = candidate
 		}
 	}
-	if result.ComparisonBase != "" {
+	if judged {
 		return result, nil
 	}
 	if lastErr != nil {

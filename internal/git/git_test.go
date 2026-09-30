@@ -4444,6 +4444,48 @@ func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
 	}
 }
 
+// A branch pushed and then extended locally has work origin lacks. The exact
+// remote branch is the only evidence, and it does not hold HEAD, so the commit
+// must count as unpreserved (gt-70m1).
+func TestBranchPreservationStatusCountsWorkAheadOfExactRemoteBranch(t *testing.T) {
+	t.Parallel()
+	localDir, _, _ := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/pushed-then-extended"
+
+	runGit(t, localDir, "checkout", "-b", branch)
+	commitFile := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(localDir, name), []byte(name+"\n"), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		runGit(t, localDir, "add", name)
+		runGit(t, localDir, "commit", "-m", name)
+	}
+	commitFile("pushed.txt")
+	runGit(t, localDir, "push", "origin", branch)
+
+	status, err := g.BranchPreservationStatus(branch, "origin", nil)
+	if err != nil {
+		t.Fatalf("BranchPreservationStatus: %v", err)
+	}
+	if !status.Preserved || status.UnpreservedPatchCount != 0 {
+		t.Fatalf("pushed branch = %+v, want preserved", status)
+	}
+
+	commitFile("local-only.txt")
+	status, err = g.BranchPreservationStatus(branch, "origin", nil)
+	if err != nil {
+		t.Fatalf("BranchPreservationStatus after local commit: %v", err)
+	}
+	if status.Preserved || status.UnpreservedPatchCount != 1 {
+		t.Fatalf("branch ahead of its remote = %+v, want 1 unpreserved commit", status)
+	}
+	if status.ComparisonBase != "origin/"+branch {
+		t.Errorf("ComparisonBase = %q, want origin/%s", status.ComparisonBase, branch)
+	}
+}
+
 // foreignPolecatUpstreamRepo builds the gt-y6w8y state: origin/main has moved
 // past origin/polecat/shale/x, and a local polecat/quartz/x branch (never
 // pushed) is configured to track that other polecat's branch. HEAD sits on

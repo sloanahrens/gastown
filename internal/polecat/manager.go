@@ -921,7 +921,7 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 	if opts.ResumeBranch != "" {
 		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
 		// worktree directly to it.
-		if err := m.claimBranch(repoGit, opts.ResumeBranch); err != nil {
+		if err := m.claimBranch(repoGit, opts.ResumeBranch, opts.HookBead); err != nil {
 			cleanupOnError()
 			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
@@ -1132,7 +1132,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 	if opts.ResumeBranch != "" {
 		// Resume an existing branch (gh#3602): fetch its latest tip, then attach the
 		// worktree directly to it.
-		if err := m.claimBranch(repoGit, opts.ResumeBranch); err != nil {
+		if err := m.claimBranch(repoGit, opts.ResumeBranch, opts.HookBead); err != nil {
 			cleanupOnError()
 			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
@@ -1784,7 +1784,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		// the named branch instead of creating a fresh polecat/<name>/<bead>+<ts>.
 		// The worktree being repaired is exempt — it holds the branch now and is
 		// removed once the temp worktree is up (gt-0kk2).
-		if err := m.claimBranch(repoGit, opts.ResumeBranch, oldClonePath); err != nil {
+		if err := m.claimBranch(repoGit, opts.ResumeBranch, opts.HookBead, oldClonePath); err != nil {
 			return nil, fmt.Errorf("repairing polecat %s: %w", name, err)
 		}
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
@@ -2058,7 +2058,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	}
 
 	// gt-0kk2: this worktree must not end up on a branch another worktree holds.
-	if err := m.claimBranch(polecatGit, branchName, clonePath); err != nil {
+	if err := m.claimBranch(polecatGit, branchName, opts.HookBead, clonePath); err != nil {
 		return nil, fmt.Errorf("refusing to reuse %s: %w\n"+
 			"That polecat is working on the branch — resume it there, or reap it if it is dead; "+
 			"to start this bead elsewhere anyway, dispatch it on a fresh branch (omit --branch)",
@@ -2214,31 +2214,34 @@ func (e *branchHeldError) Error() string {
 
 func (e *branchHeldError) Unwrap() error { return ErrBranchHeld }
 
-// claimBranch is heldByOtherWorktree for a resume: when the holder is an idle,
-// unreaped polecat whose reuse gate reads as reusable, its checkout of the
-// branch is released instead of refused. That gate has already established the
-// holder has no dirty tree and no commit on the branch that is not preserved on
-// origin or an MR target, so the holder's checkout guards nothing and the
-// branch ref survives its detach. Any other holder, or any doubt about this
-// one, still refuses (gt-l9td).
-func (m *Manager) claimBranch(g *git.Git, branch string, exempt ...string) error {
+// claimBranch is heldByOtherWorktree for a resume of bead's branch: when the
+// holder is an unreaped polecat of this rig with nothing to lose, its checkout
+// of the branch is released instead of refused. Two holders qualify: an idle one
+// whose reuse gate reads as reusable, and a stalled one (session dead, work
+// still hooked) that holds this same bead. Either way a live git probe has
+// established the holder has no dirty tree and no commit on the branch that is
+// not preserved on origin or an MR target, so the holder's checkout guards
+// nothing and the branch ref survives its detach. Any other holder, or any
+// doubt about this one, still refuses (gt-l9td, gt-70m1).
+func (m *Manager) claimBranch(g *git.Git, branch, bead string, exempt ...string) error {
 	err := heldByOtherWorktree(g, branch, exempt...)
 	var held *branchHeldError
 	if !errors.As(err, &held) {
 		return err
 	}
-	if releaseErr := m.releaseIdleHolder(held.holder); releaseErr != nil {
+	if releaseErr := m.releaseHolder(held.holder, branch, bead); releaseErr != nil {
 		return fmt.Errorf("%w\n(holder not released: %v)", err, releaseErr)
 	}
 	return heldByOtherWorktree(g, branch, exempt...)
 }
 
-// releaseIdleHolder detaches HEAD in the worktree at holderPath, provided it is
-// a polecat of this rig that is idle, sessionless and reusable. It takes the
-// holder's lock without waiting: a holder being reused or reaped right now is
-// not idle, and waiting on it while the caller holds its own lock could
-// deadlock two polecats resuming each other's branches.
-func (m *Manager) releaseIdleHolder(holderPath string) error {
+// releaseHolder detaches HEAD in the worktree at holderPath, provided it is a
+// polecat of this rig that is sessionless and either idle and reusable, or
+// stalled on bead itself. It takes the holder's lock without waiting: a holder
+// being reused or reaped right now is not releasable, and waiting on it while
+// the caller holds its own lock could deadlock two polecats resuming each
+// other's branches.
+func (m *Manager) releaseHolder(holderPath, branch, bead string) error {
 	name := m.polecatNameForWorktree(holderPath)
 	if name == "" {
 		return fmt.Errorf("%s is not a polecat worktree of this rig", holderPath)
@@ -2262,8 +2265,8 @@ func (m *Manager) releaseIdleHolder(holderPath string) error {
 	if err != nil {
 		return fmt.Errorf("reading polecat %s: %w", name, err)
 	}
-	if current.State != StateIdle {
-		return fmt.Errorf("polecat %s is %s, not idle", name, current.State)
+	if current.State != StateIdle && current.State != StateStalled {
+		return fmt.Errorf("polecat %s is %s, not idle or stalled", name, current.State)
 	}
 	if m.tmux != nil {
 		sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
@@ -2275,11 +2278,44 @@ func (m *Manager) releaseIdleHolder(holderPath string) error {
 			return fmt.Errorf("polecat %s still has a session", name)
 		}
 	}
-	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
+	if current.State == StateStalled {
+		if err := m.stalledHolderReleasable(name, current, branch, bead); err != nil {
+			return err
+		}
+	} else if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
 		return fmt.Errorf("polecat %s is not reusable: %s", name, decision.Reason)
 	}
 	if err := git.NewGit(holderPath).CheckoutDetachForce("HEAD"); err != nil {
 		return fmt.Errorf("detaching polecat %s: %w", name, err)
+	}
+	return nil
+}
+
+// stalledHolderReleasable says whether a stalled polecat's checkout of branch
+// may be released for the sling of bead (gt-70m1). It keys on the whole
+// (rig, polecat, bead, branch) tuple: the polecat is this rig's, found from the
+// worktree that holds the branch and not from a name, and the work it still has
+// hooked must be bead itself, so a stalled polecat on other work is never
+// disturbed. What it has on disk is then read live, as for an idle holder. The
+// lifecycle and hook checks that make a stalled polecat unreusable are skipped:
+// the resume takes over exactly that work.
+func (m *Manager) stalledHolderReleasable(name string, current *Polecat, branch, bead string) error {
+	if bead == "" || current.Issue != bead {
+		return fmt.Errorf("polecat %s is stalled on %q, not %q", name, current.Issue, bead)
+	}
+	if current.Branch != branch {
+		return fmt.Errorf("polecat %s is on %q, not %q", name, current.Branch, branch)
+	}
+	in := m.workstateInputForPolecat(name, StateStalled, current.Issue)
+	switch {
+	case in.GitCheckFailed:
+		return fmt.Errorf("polecat %s: cannot read its git state", name)
+	case in.GitDirty:
+		return fmt.Errorf("polecat %s has uncommitted changes", name)
+	case in.StashCount > 0:
+		return fmt.Errorf("polecat %s has stashed work", name)
+	case in.UnpushedCommits > 0:
+		return fmt.Errorf("polecat %s has commits not preserved on origin", name)
 	}
 	return nil
 }
