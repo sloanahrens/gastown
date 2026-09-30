@@ -97,42 +97,6 @@ func bdLog(t *testing.T, path string) string {
 	return string(data)
 }
 
-// gt-fcxe9.7: the polecat's agent bead lives only in the rig database. The daemon
-// used to pin its read to the town database, get "not found", and return
-// silently, so a crashed polecat with hooked work raised nothing.
-func TestCheckPolecatHealth_ReadsRigLocalAgentBead(t *testing.T) {
-	townRoot, _ := routedTown(t)
-	bdPath, logPath := writeBeadsDirHonoringBD(t, true, "gt-work1", "")
-	var logBuf strings.Builder
-	d := newCanonicalDBDaemon(t, townRoot, bdPath, &logBuf)
-
-	d.checkPolecatHealth("myr", "mycat")
-
-	if !strings.Contains(logBuf.String(), "CRASH DETECTED") {
-		t.Fatalf("no CRASH DETECTED for a dead polecat whose agent bead is rig-local\nlog: %s\nbd calls:\n%s",
-			logBuf.String(), bdLog(t, logPath))
-	}
-}
-
-// gt-fcxe9.7: an agent bead that cannot be read is UNKNOWN, logged as such, never
-// a silent return.
-func TestCheckPolecatHealth_AgentBeadNotFoundIsLoggedUnknown(t *testing.T) {
-	townRoot, _ := routedTown(t)
-	bdPath, _ := writeBeadsDirHonoringBD(t, false, "", "")
-	var logBuf strings.Builder
-	d := newCanonicalDBDaemon(t, townRoot, bdPath, &logBuf)
-
-	d.checkPolecatHealth("myr", "mycat")
-
-	got := logBuf.String()
-	if !strings.Contains(got, "UNKNOWN") || !strings.Contains(got, "gt-myr-polecat-mycat") {
-		t.Fatalf("agent-bead miss was not logged as UNKNOWN naming the bead: %q", got)
-	}
-	if strings.Contains(got, "CRASH DETECTED") {
-		t.Fatalf("acted on an unreadable agent bead: %q", got)
-	}
-}
-
 // hook_bead has not been written since hq-l6mm5 (updateAgentHookBead is a
 // no-op); the work bead's status+assignee is authoritative. A dead polecat
 // with hooked work assigned must still raise a crash.

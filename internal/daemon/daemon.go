@@ -22,7 +22,6 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/jonboulle/clockwork"
 	beadsdk "github.com/steveyegge/beads"
-	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/boot"
 	"github.com/steveyegge/gastown/internal/channelevents"
@@ -37,12 +36,15 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/feed"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
@@ -180,6 +182,11 @@ type Daemon struct {
 
 	// Restart tracking with exponential backoff to prevent crash loops
 	restartTracker *RestartTracker
+
+	// supervisor holds the only Kill and Restart the daemon uses (see
+	// sup()); tests may set it, otherwise it is built on first use.
+	supOnce    sync.Once
+	supervisor *supervisor.Supervisor
 
 	// telemetry exports metrics and logs to VictoriaMetrics / VictoriaLogs.
 	// Nil when telemetry is disabled (GT_OTEL_METRICS_URL / GT_OTEL_LOGS_URL not set).
@@ -3520,14 +3527,16 @@ func listPolecatWorktrees(polecatsDir string) ([]string, error) {
 // checkPolecatHealth checks a single polecat's session health.
 // If the polecat has work-on-hook but the tmux session is dead, it's restarted.
 func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
-	// A polecat the operator parked — gt agent pause, or the deliberate stop
-	// gt session stop records (gt-fojqs) — has a dead session on purpose.
-	// The marker is the choke point every scanner honors (gt-ahik); without
-	// this gate the crash signature below raises CRASH DETECTED and a
-	// session_death event for a stop the operator asked for.
-	if paused, st, _ := agentpause.PauseGate(d.config.TownRoot, rigName, constants.RolePolecat, polecatName); paused {
+	// The seat's intent record says whether it is held and, when a writer
+	// set it, what work it holds. It is read before tmux and never from
+	// Dolt, and an unreadable record is a hold (fail closed). A polecat the
+	// operator parked — gt agent pause, or the deliberate stop gt session
+	// stop records (gt-fojqs) — has a dead session on purpose.
+	seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat))
+	if err != nil || rec.Held() {
 		d.logger.Printf("Skipping crash detection for %s/%s: agent is parked (%s)",
-			rigName, polecatName, agentpause.Reason(st))
+			rigName, polecatName, rec.HoldReason())
 		return
 	}
 
@@ -3546,89 +3555,43 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		return
 	}
 
-	// Session is dead. Check if the polecat has work-on-hook.
-	prefix := beads.GetPrefixForRig(d.config.TownRoot, rigName)
-	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-	info, err := d.getAgentBeadInfo(agentBeadID)
-	if err != nil {
-		// Not found or unreadable is UNKNOWN, not "not registered": say so,
-		// so a crash detector running blind is visible in the log (gt-fcxe9.7).
-		d.logger.Printf("UNKNOWN: crash detection for %s/%s skipped: session %s is dead but agent bead %s could not be read: %v",
-			rigName, polecatName, sessionName, agentBeadID, err)
-		return
-	}
-
-	// Find the hooked work. The agent bead's hook_bead slot has not been
-	// written since hq-l6mm5 (updateAgentHookBead is a no-op); the work
-	// bead's status+assignee is authoritative. Use the slot only when a
-	// legacy row still carries it.
-	hookBead := info.HookBead
+	// Session is dead. Find the seat's work: the intent record's work_bead
+	// when a writer set it, otherwise the work bead assigned to the polecat
+	// with status hooked or in_progress. Agent beads are display mirrors and
+	// are not read here (gt-4k3fj.1, G1-01).
+	hookBead := rec.WorkBead
+	var workUpdated time.Time
 	if hookBead == "" {
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-		work, werr := d.assignedActiveWorkBead(rigName, assignee)
+		work, updated, werr := d.assignedActiveWorkBead(rigName, assignee)
 		if werr != nil {
 			d.logger.Printf("UNKNOWN: crash detection for %s/%s skipped: session %s is dead and assigned work could not be read: %v",
 				rigName, polecatName, sessionName, werr)
 			return
 		}
 		if work == "" {
-			// No hooked work - this polecat is orphaned (should have self-nuked).
-			// Self-cleaning model: polecats nuke themselves on completion.
-			// An orphan with a dead session doesn't need restart - it needs cleanup.
-			// Let the Witness handle orphan detection/cleanup during patrol.
+			// No hooked work: a finished or idle polecat whose session ended
+			// is not a crash.
 			return
 		}
-		hookBead = work
+		hookBead, workUpdated = work, updated
 	}
 
-	// Terminal state guard: skip polecats in intentional shutdown states.
-	// agent_state='done' means normal completion; agent_state='nuked' means forced shutdown.
-	// Their sessions being dead is expected, not a crash. Without this check,
-	// the dead session + open hook_bead combination can fire false CRASHED_POLECAT
-	// alerts during the race window before the hook_bead is closed.
-	// This check is pure in-memory (info.State is already populated), so it runs before
-	// the more expensive isBeadClosed subprocess call.
-	agentState := beads.AgentState(info.State)
-	if agentState == beads.AgentStateDone || agentState == beads.AgentStateNuked {
-		d.logger.Printf("Skipping crash detection for %s/%s: agent_state=%s (intentional shutdown, not a crash)",
-			rigName, polecatName, info.State)
-		return
-	}
-
-	// Stale hook guard: skip polecats whose hook_bead is already closed.
-	// When a polecat completes work normally (gt done), the hook_bead gets closed
-	// but may not be cleared from the agent bead before the session stops.
-	// Without this check, every heartbeat cycle fires a false CRASHED_POLECAT alert
-	// for the dead session + non-empty hook_bead combination.
+	// Finished work: gt done closes the work bead before the session stops,
+	// so a dead session holding closed work completed normally.
 	if d.isBeadClosed(hookBead) {
 		d.logger.Printf("Skipping crash detection for %s/%s: hook_bead %s is already closed (work completed normally)",
 			rigName, polecatName, hookBead)
 		return
 	}
 
-	// Spawning guard: skip polecats being actively started by gt sling.
-	// agent_state='spawning' means the polecat bead was created (with hook_bead
-	// set atomically) but the tmux session hasn't been launched yet. Restarting
-	// here would create a second Claude process alongside the one gt sling is
-	// about to start, causing the double-spawn bug (issue #1752).
-	//
-	// Time-bound: only skip if the bead was updated recently (within 5 minutes).
-	// If gt sling crashed during spawn, the polecat would be stuck in 'spawning'
-	// indefinitely. The Witness patrol also catches spawning-as-zombie, but a
-	// time-bound here makes the daemon self-sufficient for this edge case.
-	if beads.AgentState(info.State) == beads.AgentStateSpawning {
-		if updatedAt, err := time.Parse(time.RFC3339, info.LastUpdate); err == nil {
-			if time.Since(updatedAt) < 5*time.Minute {
-				d.logger.Printf("Skipping restart for %s/%s: agent_state=spawning (gt sling in progress, updated %s ago)",
-					rigName, polecatName, time.Since(updatedAt).Round(time.Second))
-				return
-			}
-			d.logger.Printf("Spawning guard expired for %s/%s: agent_state=spawning but last updated %s ago (>5m), proceeding with crash detection",
-				rigName, polecatName, time.Since(updatedAt).Round(time.Second))
-		} else {
-			// Can't parse timestamp — be safe, skip restart during spawning
-			d.logger.Printf("Skipping restart for %s/%s: agent_state=spawning (gt sling in progress, unparseable updated_at)",
-				rigName, polecatName)
+	// Spawn grace: gt sling hooks the work bead before the tmux session
+	// exists, so a bead hooked moments ago with no session yet is a polecat
+	// starting up. Reporting it would double-spawn (issue #1752).
+	if !workUpdated.IsZero() {
+		if age := time.Since(workUpdated); age < polecatSpawnGrace {
+			d.logger.Printf("Skipping crash detection for %s/%s: work %s hooked %s ago, polecat may be spawning",
+				rigName, polecatName, hookBead, age.Round(time.Second))
 			return
 		}
 	}
@@ -3757,12 +3720,13 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 	return false
 }
 
-// assignedActiveWorkBead returns the ID of a work bead assigned to the polecat
-// with status hooked or in_progress, read from the rig's database the way
-// hasAssignedOpenWork does, or "" when there is none. A bead found by any
-// query is returned; otherwise any failed query makes the answer unknown
-// (an error), since the failed status may be the one holding the work.
-func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error) {
+// assignedActiveWorkBead returns the ID and updated_at of a work bead
+// assigned to the polecat with status hooked or in_progress, read from the
+// rig's database the way hasAssignedOpenWork does, or "" when there is none.
+// A bead found by any query is returned; otherwise any failed query makes the
+// answer unknown (an error), since the failed status may be the one holding
+// the work. An updated_at that does not parse is returned as zero.
+func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, time.Time, error) {
 	rigDir := beads.GetRigDirForName(d.config.TownRoot, rigName)
 	var lastErr error
 	for _, status := range []string{"hooked", "in_progress"} {
@@ -3778,7 +3742,8 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error
 			continue
 		}
 		var issues []struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			UpdatedAt string `json:"updated_at"`
 		}
 		if err := json.Unmarshal(output, &issues); err != nil {
 			lastErr = fmt.Errorf("parsing bd list --status=%s output: %w", status, err)
@@ -3786,12 +3751,17 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error
 		}
 		for _, issue := range issues {
 			if issue.ID != "" {
-				return issue.ID, nil
+				updated, _ := time.Parse(time.RFC3339, issue.UpdatedAt)
+				return issue.ID, updated, nil
 			}
 		}
 	}
-	return "", lastErr
+	return "", time.Time{}, lastErr
 }
+
+// polecatSpawnGrace is how long after its work bead was hooked a polecat
+// with no session is taken to be starting up rather than crashed.
+const polecatSpawnGrace = 5 * time.Minute
 
 // notifyWitnessOfCrashedPolecat notifies the witness when a polecat crash is detected.
 // The stuck-agent-dog plugin handles context-aware restart decisions.
@@ -3885,80 +3855,43 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 		return
 	}
 
-	// Heartbeat says "working" but is stale — check if polecat actually has hooked work.
-	// If agent_state=idle in beads and no hook_bead, the polecat finished gt done
-	// and is sitting idle (heartbeat wasn't updated to "idle" because persistentPreRun
-	// resets to "working" on every gt sub-command during gt done).
+	// Heartbeat says "working" but is stale. persistentPreRun resets it to
+	// "working" on every gt sub-command, so a polecat that finished gt done
+	// can look like this. It is idle only if no work bead is assigned to it
+	// (the authoritative work record; agent beads are display mirrors and are
+	// not read, gt-4k3fj.1) and its agent process is confirmed gone (a failed
+	// gt sling rollback can clear the hook while the agent is still working,
+	// GH#3342).
 	if state == polecat.HeartbeatWorking {
-		prefix := beads.GetPrefixForRig(d.config.TownRoot, rigName)
-		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-		info, err := d.getAgentBeadInfo(agentBeadID)
-		if err != nil {
-			// Agent bead lookup failed — use the authoritative work bead assignee
-			// to determine whether the polecat has real work before reaping.
-			// Bead infrastructure failures (Dolt issues, version mismatches) cause
-			// spurious lookup errors while the polecat is actively working (GH#3342).
-			assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-			if d.hasAssignedOpenWork(rigName, assignee) {
-				return
-			}
-			// No assigned work and agent not running — safe to reap.
-			// Use 3x threshold (not 2x) to avoid killing polecats during transient
-			// infrastructure degradation when the agent process is alive but not
-			// detectable (e.g. long thinking sessions, slow process inspection).
-			// A failed liveness query is unknown, not dead: it never earns
-			// the shorter 2x threshold (gt-fcxe9.1).
-			alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName)
-			confirmedDead := aliveErr == nil && !alive
-			if staleDuration >= timeout*3 || confirmedDead && staleDuration >= timeout*2 {
-				d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-bead-lookup-failed")
-			}
-			return
-		}
-
-		// If polecat has hooked work that is still open, it might be stuck (not idle).
-		// Don't reap — let checkPolecatSessionHealth handle stuck polecats.
-		// But if the hook_bead is closed, the work is done and this is just an idle
-		// polecat with a stale hook reference — safe to reap.
-		if info.HookBead != "" && !d.isBeadClosed(info.HookBead) {
-			return
-		}
-
-		// Fallback: agent bead hook_bead may be stale (updateAgentHookBead is a
-		// no-op since the sling code declared work bead assignee as authoritative).
-		// Before killing, check if any work bead is assigned to this polecat with
-		// a non-terminal status. This prevents the reaper from killing polecats
-		// whose agent bead hook_bead points to a closed bead from a previous swarm
-		// while the polecat is actively working on a newly-slung bead.
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		if d.hasAssignedOpenWork(rigName, assignee) {
 			return
 		}
-
-		// No hooked work + stale heartbeat — but check if the agent process
-		// is still actively running before reaping. A failed gt sling rollback
-		// can clear the hook while the agent is still working (GH#3342).
-		// A failed liveness query is unknown: leave the session alone (gt-fcxe9.1).
-		if alive, aliveErr := d.tmux.IsAgentAliveChecked(sessionName); aliveErr != nil {
-			d.logger.Printf("Not reaping %s/%s: agent liveness unknown (%v)", rigName, polecatName, aliveErr)
+		seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+		res := d.assessSeat(seat, liveness.Input{Session: sessionName})
+		switch res.Verdict {
+		case liveness.Unknown:
+			// Never acted on (gt-fcxe9.1).
+			d.logger.Printf("Not reaping %s/%s: agent liveness unknown (%v)", rigName, polecatName, res.Err)
 			return
-		} else if alive {
-			return
+		case liveness.Dead:
+			d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-no-hook")
 		}
-		d.killIdlePolecat(rigName, polecatName, sessionName, staleDuration, timeout, "working-no-hook")
 	}
 }
 
-// killIdlePolecat terminates an idle polecat session and cleans up.
+// killIdlePolecat terminates an idle polecat session through the supervisor,
+// which refuses it for a paused or e-stopped seat (G1-07, G1-08), and cleans
+// up after it.
 func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleDuration, timeout time.Duration, reason string) {
-	d.logger.Printf("Reaping idle polecat %s/%s (state=%s, idle %v, threshold %v)",
-		rigName, polecatName, reason, idleDuration.Truncate(time.Second), timeout)
-
-	// Kill the tmux session (and all descendant processes)
-	if err := d.tmux.KillSessionWithProcesses(sessionName); err != nil {
-		d.logger.Printf("Warning: failed to kill idle polecat session %s: %v", sessionName, err)
+	seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+	why := fmt.Sprintf("idle-reap: %s, idle %v (threshold %v)", reason, idleDuration.Truncate(time.Second), timeout)
+	if err := d.sup().Kill(seat, why, "daemon/idle-reaper"); err != nil {
+		d.logRefusal(fmt.Sprintf("Not reaping idle polecat %s/%s", rigName, polecatName), err)
 		return
 	}
+	d.logger.Printf("Reaping idle polecat %s/%s (state=%s, idle %v, threshold %v)",
+		rigName, polecatName, reason, idleDuration.Truncate(time.Second), timeout)
 
 	// Clean up heartbeat file
 	polecat.RemoveSessionHeartbeat(d.config.TownRoot, sessionName)
@@ -3967,9 +3900,7 @@ func (d *Daemon) killIdlePolecat(rigName, polecatName, sessionName string, idleD
 
 	// Emit feed event so the activity feed shows the reap
 	_ = events.LogFeedTo(d.config.TownRoot, events.TypeSessionDeath, fmt.Sprintf("%s/%s", rigName, polecatName),
-		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
-			fmt.Sprintf("idle-reap: %s, idle %v (threshold %v)", reason, idleDuration.Truncate(time.Second), timeout),
-			"daemon"))
+		events.SessionDeathPayload(sessionName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName), why, "daemon"))
 }
 
 // cleanupOrphanedProcesses kills orphaned claude subagent processes.
