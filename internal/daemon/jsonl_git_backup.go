@@ -1131,17 +1131,24 @@ func (d *Daemon) escalateAlertErr(key, source, message string) error {
 // key. A blanket "cycle was fine, close everything" would close alerts whose
 // conditions were never actually re-checked on this pass.
 func (d *Daemon) clearAlerts(reason string, keys ...string) {
+	_ = d.clearAlertsErr(reason, keys...)
+}
+
+// clearAlertsErr is clearAlerts for a caller that skips its next clear once
+// this one lands, and so must learn when it did not.
+func (d *Daemon) clearAlertsErr(reason string, keys ...string) error {
 	if len(keys) == 0 {
-		return
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
 	defer cancel()
 	if err := d.notify().ClearEscalations(ctx, reason, keys...); err != nil {
 		d.logger.Printf("clearAlerts(%s): %v", strings.Join(keys, ","), err)
-		return
+		return err
 	}
 	d.logger.Printf("clearAlerts(%s): %s", strings.Join(keys, ","), reason)
+	return nil
 }
 
 // spikeThreshold returns the configured spike threshold or the default (20%).

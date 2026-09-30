@@ -41,14 +41,16 @@ func TestConvoyDispatchPathsCarryRecordedAgent(t *testing.T) {
 		{
 			name: "deferred: gt sling <convoy> -> scheduleBead",
 			dispatchAgent: func(description string) string {
-				jobs := planConvoyDispatch([]convoyCandidate{candidate}, description, townRoot)
+				record := convoyRecord{ID: "gt-abc", Description: description}
+				jobs := planConvoyDispatch([]convoyCandidate{candidate}, record, townRoot)
 				return convoyScheduleOptionsFor(opts, jobs[0].agent).Agent
 			},
 		},
 		{
 			name: "immediate: gt sling <convoy> -> executeSling",
 			dispatchAgent: func(description string) string {
-				jobs := planConvoyDispatch([]convoyCandidate{candidate}, description, townRoot)
+				record := convoyRecord{ID: "gt-abc", Description: description}
+				jobs := planConvoyDispatch([]convoyCandidate{candidate}, record, townRoot)
 				return jobs[0].agent
 			},
 		},
@@ -81,8 +83,9 @@ func TestConvoyDispatchPlanPerCandidateAgent(t *testing.T) {
 		{ID: "gt-def", Title: "Second", RigName: "beads"},
 	}
 	description := "Auto-created convoy\n\nmerge: mr\nagent: deepseek-flash\n"
+	record := convoyRecord{ID: "gt-abc", Description: description}
 
-	jobs := planConvoyDispatch(candidates, description, townRoot)
+	jobs := planConvoyDispatch(candidates, record, townRoot)
 	if len(jobs) != len(candidates) {
 		t.Fatalf("planConvoyDispatch returned %d jobs, want %d", len(jobs), len(candidates))
 	}
@@ -99,28 +102,40 @@ func TestConvoyDispatchPlanPerCandidateAgent(t *testing.T) {
 	}
 }
 
-// TestConvoyDescriptionByID_UnreadableConvoy pins the failure mode of the
-// convoy lookup behind planConvoyDispatch: a convoy whose description cannot be
-// read must degrade to the gt-sling-decides path, not to a wrong agent.
-func TestConvoyDescriptionByID_UnreadableConvoy(t *testing.T) {
+// TestConvoyRecordByID_UnreadableConvoy pins the failure mode of the convoy
+// lookup behind planConvoyDispatch: a convoy whose description cannot be read
+// must degrade to the gt-sling-decides path, not to a wrong agent — and it must
+// say the read failed. A convoy whose record never loaded is not a convoy that
+// recorded no agent, and the log is the only place that difference is visible
+// (gt-d7hwr).
+func TestConvoyRecordByID_UnreadableConvoy(t *testing.T) {
 	// No bd on PATH and no workspace: the lookup fails rather than inventing a
 	// convoy.
 	t.Setenv("PATH", t.TempDir())
 
-	if got := convoyDescriptionByID("gt-nosuchconvoy"); got != "" {
-		t.Errorf("convoyDescriptionByID() = %q, want empty when the convoy cannot be read", got)
+	record := convoyRecordByID("gt-nosuchconvoy")
+	if record.Description != "" {
+		t.Errorf("convoyRecordByID() description = %q, want empty when the convoy cannot be read", record.Description)
+	}
+	if record.Err == nil {
+		t.Fatal("convoyRecordByID() must carry the failed read, not swallow it into an empty description")
 	}
 
-	// An empty description carries no agent, so the dispatch falls through to
-	// gt sling's own resolution.
+	// An unreadable description carries no agent, so the dispatch falls through
+	// to gt sling's own resolution.
 	jobs := planConvoyDispatch(
 		[]convoyCandidate{{ID: "gt-abc", RigName: "gastown"}},
-		"", t.TempDir(),
+		record, t.TempDir(),
 	)
 	if len(jobs) != 1 || jobs[0].agent != "" {
 		t.Fatalf("unreadable convoy should leave the agent choice to gt sling, got %+v", jobs)
 	}
-	if !strings.Contains(jobs[0].agentDesc, "no --agent recorded on convoy") {
-		t.Errorf("description %q should explain why the default is used", jobs[0].agentDesc)
+	// The log line must not report the readable-convoy default: "no --agent
+	// recorded" asserts the record was read and held no agent.
+	if strings.Contains(jobs[0].agentDesc, "no --agent recorded") {
+		t.Errorf("description %q claims the convoy recorded no agent, but its record never loaded", jobs[0].agentDesc)
+	}
+	if !strings.Contains(jobs[0].agentDesc, "could not be read") {
+		t.Errorf("description %q should name the failed convoy read", jobs[0].agentDesc)
 	}
 }

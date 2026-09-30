@@ -209,6 +209,37 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 	})
 }
 
+// A rig with no repo to protect is a definite "nothing survives", not an
+// unknown: only the latter keeps a bead hooked.
+func TestVerdictFromClassifiesTheAnswer(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
+	for _, tc := range []struct {
+		name         string
+		branch       string
+		err          error
+		wantSurvives string
+		wantUnknown  bool
+	}{
+		{name: "a branch survives", branch: branch, wantSurvives: branch},
+		{name: "nothing survives"},
+		{name: "an unreachable origin is unknown", err: errors.New("origin unreachable"), wantUnknown: true},
+		{name: "no repo to protect is nothing survives", err: ErrNoRigRepo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := VerdictFrom(tc.branch, tc.err)
+			if v.SurvivesOn() != tc.wantSurvives || v.Unknown() != tc.wantUnknown {
+				t.Fatalf("VerdictFrom(%q, %v) = %+v, want survives=%q unknown=%v",
+					tc.branch, tc.err, v, tc.wantSurvives, tc.wantUnknown)
+			}
+			if want := tc.wantSurvives == "" && !tc.wantUnknown; v.NothingToProtect() != want {
+				t.Fatalf("NothingToProtect() = %v, want %v", v.NothingToProtect(), want)
+			}
+		})
+	}
+}
+
 func assertSurvivor(t *testing.T, rigRoot, want string) {
 	t.Helper()
 	got, err := SurvivingWorkForIssue(rigRoot, survivalIssue)
@@ -260,14 +291,9 @@ func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
 			bd := newWorkBeadBd()
 
 			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil, bd)
-			mgr.unassignWorkBeads("basalt")
+			mgr.unassignWorkBeads("basalt", nil)
 
-			var releases []string
-			for _, line := range bd.argvs() {
-				if strings.Contains(line, "--status=open") {
-					releases = append(releases, line)
-				}
-			}
+			releases := guardedReleases(bd)
 			if !tc.wantRelease {
 				if len(releases) != 0 {
 					t.Fatalf("surviving work was released: %v", releases)
@@ -276,6 +302,57 @@ func TestUnassignWorkBeadsKeepsSurvivingWork(t *testing.T) {
 			}
 			if len(releases) != 1 || !strings.Contains(releases[0], "--if-assignee=gastown/polecats/basalt") {
 				t.Fatalf("want one guarded release, got %v", releases)
+			}
+		})
+	}
+}
+
+// guardedReleases returns the guarded release writes the manager made, one per
+// bead it returned to open.
+func guardedReleases(bd *fakeBd) []string {
+	var releases []string
+	for _, line := range bd.argvs() {
+		if strings.Contains(line, "--status=open") {
+			releases = append(releases, line)
+		}
+	}
+	return releases
+}
+
+// Removal replays the verdict its caller already reached for a bead instead of
+// asking the survival predicate a second time, which can answer differently and
+// release work that is on a branch (gt-kud90). Each case judges the bead the
+// opposite way from what the rig's own git state would say, so a re-ask is
+// visible as the wrong outcome.
+func TestUnassignWorkBeadsReplaysJudgedVerdict(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/basalt/gt-elvf4+mu5wzd6q"
+	for _, tc := range []struct {
+		name       string
+		seedBranch bool // the rig repo really does carry surviving work
+		judged     SurvivalVerdict
+		wantHold   bool
+	}{
+		{name: "judged surviving, rig has no branch: keeps the hook", judged: VerdictFrom(branch, nil), wantHold: true},
+		{name: "judged nothing survives, rig has a branch: releases", seedBranch: true, judged: VerdictFrom("", nil)},
+		{name: "judged unknown, rig has no branch: keeps the hook",
+			judged: VerdictFrom("", errors.New("origin unreachable")), wantHold: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSurvivalFixture(t)
+			if tc.seedBranch {
+				f.branchWithWork(t, branch, "work.txt")
+				f.push(t, branch)
+			}
+			bd := newWorkBeadBd()
+
+			mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, git.NewGit(f.rigRoot), nil, bd)
+			mgr.unassignWorkBeads("basalt", map[string]SurvivalVerdict{survivalIssue: tc.judged})
+
+			held := len(guardedReleases(bd)) == 0
+			if held != tc.wantHold {
+				t.Fatalf("released = %v, want held = %v (guarded releases: %v)", !held, tc.wantHold, guardedReleases(bd))
 			}
 		})
 	}

@@ -15,6 +15,34 @@ import (
 // clone, so there is no git state to judge surviving work from.
 var ErrNoRigRepo = errors.New("rig has no git repo (neither .repo.git nor mayor/rig)")
 
+// SurvivalVerdict is one answer from the surviving-work predicate: the branch
+// carrying work found on no base branch, or why that could not be determined.
+type SurvivalVerdict struct {
+	Branch string
+	Err    error
+}
+
+// VerdictFrom classifies a (branch, err) pair from a survival predicate; a rig
+// with no repo to protect is a definite "nothing survives", not an unknown.
+func VerdictFrom(branch string, err error) SurvivalVerdict {
+	if err != nil && !errors.Is(err, ErrNoRigRepo) {
+		return SurvivalVerdict{Err: err}
+	}
+	return SurvivalVerdict{Branch: branch}
+}
+
+// SurvivesOn returns the branch carrying unmerged work, or "" when none does.
+func (v SurvivalVerdict) SurvivesOn() string { return v.Branch }
+
+// Unknown reports that survival could not be determined, which callers must
+// treat as "keep the hook": releasing on a failed query hands preserved work to
+// a fresh polecat starting from main.
+func (v SurvivalVerdict) Unknown() bool { return v.Err != nil }
+
+// NothingToProtect reports a definite "no work survives", the only verdict
+// that lets a caller release the bead.
+func (v SurvivalVerdict) NothingToProtect() bool { return v.Branch == "" && v.Err == nil }
+
 // WorkSurvival is the one "does this bead's polecat work survive?" predicate
 // (gt-vm5g4, gt-7evi4). Every path that releases a hooked bead — nuke, polecat
 // removal, sling rollback, the witness orphan reset, sling's re-sling guard —
