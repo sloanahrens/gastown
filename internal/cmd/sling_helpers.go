@@ -1158,6 +1158,11 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 		WithAutoCommit().
 		Output()
 	if err != nil {
+		// bd --json reports its failure as {"error": ...} on stdout, so the
+		// cause is in bondOut; err alone is only "exit status 1".
+		if cause := bdJSONErrorMessage(bondOut); cause != "" {
+			return "", fmt.Errorf("%w: %s (args: %s)", err, cause, strings.Join(bondArgs, " "))
+		}
 		return "", fmt.Errorf("%w (args: %s)", err, strings.Join(bondArgs, " "))
 	}
 
@@ -1166,6 +1171,18 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 		return "", fmt.Errorf("direct bond output missing spawned root id (output: %s)", trimJSONForError(bondOut))
 	}
 	return rootID, nil
+}
+
+// bdJSONErrorMessage returns the "error" field of a bd --json failure payload,
+// the trimmed raw output when it has another shape, or "" when bd printed nothing.
+func bdJSONErrorMessage(out []byte) string {
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(out, &payload) == nil && payload.Error != "" {
+		return payload.Error
+	}
+	return trimJSONForError(out)
 }
 
 // parseBondSpawnRootID extracts the spawned molecule root from bd mol bond JSON.

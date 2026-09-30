@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -1004,5 +1005,77 @@ exit /b 0
 	}
 	if !strings.Contains(err.Error(), "missing spawned root id") {
 		t.Fatalf("error message should mention missing spawned root id: %v", err)
+	}
+}
+
+// A bead title reaches bd as one argv element, never through a shell: the
+// metacharacters arrive byte-for-byte (gt-4k3fj.12).
+func TestBondFormulaDirectPassesShellMetacharactersVerbatim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("argv-recording stub is a POSIX shell script")
+	}
+	townRoot := t.TempDir()
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	argvPath := filepath.Join(townRoot, "argv.log")
+	bdScript := `#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "${BD_ARGV}"; done
+echo '{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}'
+`
+	_ = writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("BD_ARGV", argvPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	title := `a; b (c) "d" $e $(touch pwned) ` + "`touch pwned`"
+	vars, err := formulaVarsForBead("mol-polecat-work", "gt-x", title, townRoot, nil)
+	if err != nil {
+		t.Fatalf("formulaVarsForBead: %v", err)
+	}
+	rootID, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, vars)
+	if err != nil {
+		t.Fatalf("bondFormulaDirect: %v", err)
+	}
+	if rootID != "gt-mol-direct" {
+		t.Fatalf("rootID = %q, want gt-mol-direct", rootID)
+	}
+
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read argv log: %v", err)
+	}
+	if want := "feature=" + title + "\n"; !strings.Contains(string(argv), want) {
+		t.Fatalf("bd argv lost the title as one element; want line %q in:\n%s", want, argv)
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, "pwned")); err == nil {
+		t.Fatal("title was interpreted by a shell: pwned file exists")
+	}
+}
+
+// bd --json prints its failure to stdout; the bond error must carry that cause,
+// not just "exit status 1" (gt-4k3fj.12).
+func TestBondFormulaDirectErrorCarriesBdJSONCause(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub prints JSON from a POSIX shell script")
+	}
+	townRoot := t.TempDir()
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	bdScript := `#!/bin/sh
+echo '{"error":"creating wisp: sql commit (regular): Error 1213 (40001): serialization failure","schema_version":1}'
+exit 1
+`
+	_ = writeBDStub(t, binDir, bdScript, "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
+	if err == nil {
+		t.Fatal("bondFormulaDirect succeeded, want failure")
+	}
+	if !strings.Contains(err.Error(), "Error 1213 (40001): serialization failure") {
+		t.Fatalf("error hides bd's cause: %v", err)
 	}
 }
