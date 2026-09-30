@@ -104,6 +104,14 @@ type Daemon struct {
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
 
+	// openGitFn opens the git repository at a directory (see gitAt); nil
+	// opens a *git.Git. Tests hand it a gitfake world.
+	openGitFn func(dir string) daemonGit
+
+	// buildCommitFn replaces the daemon's own build commit (see buildCommit)
+	// in tests; nil reads the version package's.
+	buildCommitFn func() string
+
 	// dogSessionsFn builds the dog session surface the handler drives over a
 	// dog manager; nil builds a *dog.SessionManager on the town's tmux (see
 	// dogSessions).
