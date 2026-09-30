@@ -78,6 +78,8 @@ func TestPool_HeldSlotNamesTheWaitOnce(t *testing.T) {
 	timeout := 3 * tg.pollInterval
 	if _, err, _ := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/amber", timeout, pool) }); err == nil {
 		t.Fatal("AcquirePool was granted a slot while the only slot was held")
+	} else if !strings.Contains(err.Error(), "token held by gastown/refinery") {
+		t.Errorf("timeout error = %q, want the holder the caller queued behind (gt-18zj)", err)
 	}
 
 	out := tg.probe
@@ -416,5 +418,58 @@ func TestPool_NormalizedAndCandidates(t *testing.T) {
 		if IsGateRole(role) != want {
 			t.Errorf("IsGateRole(%q) = %v, want %v", role, !want, want)
 		}
+	}
+}
+
+// TestTimeoutError_NamesTheCause covers gt-18zj: the failure a caller gets back
+// after exhausting its cap carries the wait's cause, and a wait that nothing
+// ever blocked still reads as one sentence.
+func TestTimeoutError_NamesTheCause(t *testing.T) {
+	t.Parallel()
+	const bare = "timed out after 30s waiting for container-gate slot"
+	cases := []struct {
+		name string
+		info waitInfo
+		want string
+	}{
+		{
+			"holder",
+			waitInfo{Reason: WaitReasonTokenHeld, Holder: &Owner{Role: "gastown/polecats/mica", PID: 62965}},
+			"token held by gastown/polecats/mica pid 62965",
+		},
+		{
+			"unwrapped suite",
+			waitInfo{Reason: WaitReasonUnwrappedContainers, Containers: []string{"dolt/dolt-sql-server:2.2.0 stuck-suite"}},
+			"unwrapped container suite: dolt/dolt-sql-server:2.2.0 stuck-suite",
+		},
+		{
+			"wedged docker probe",
+			waitInfo{Reason: WaitReasonDaemonUnreachable, DockerErr: "docker ps did not respond within 5s"},
+			"docker probe inconclusive: docker ps did not respond within 5s",
+		},
+		{
+			"running gate",
+			waitInfo{Reason: WaitReasonGateRunning, Holder: &Owner{Role: "gastown/refinery", PID: 42, Slot: 0}},
+			"gate running: gastown/refinery pid 42 holds gate-reserved slot 0",
+		},
+		{"no blocker", waitInfo{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := timeoutError(30*time.Second, c.info).Error()
+			if !strings.Contains(got, bare) {
+				t.Fatalf("timeoutError = %q, want it to contain %q", got, bare)
+			}
+			if c.want == "" {
+				if got != bare {
+					t.Errorf("timeoutError with no blocker = %q, want %q with no dangling cause", got, bare)
+				}
+				return
+			}
+			if !strings.Contains(got, c.want) {
+				t.Errorf("timeoutError = %q, want it to contain %q", got, c.want)
+			}
+		})
 	}
 }

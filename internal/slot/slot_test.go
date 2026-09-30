@@ -292,9 +292,15 @@ func TestAcquire_DoesNotProceedOnWedgedDockerDaemon(t *testing.T) {
 		t.Fatalf("Acquire returned after %s, before its %s timeout — it treated the wedged-daemon error as a green light instead of waiting", elapsed, timeout)
 	}
 
-	// gt-a8kx: the error Acquire finally returns names the timeout and nothing
-	// else, and the caller's budget can be an hour (runMQBatchRun), so the
-	// reason for the wait has to be on the record — once, not once per poll.
+	// gt-18zj: the timeout error carries the probe failure the wait was
+	// attributed to, so the failure alone says why the slot never came free.
+	if !strings.Contains(err.Error(), probeErr.Error()) {
+		t.Errorf("timeout error = %q, want the inconclusive probe that blocked the wait", err)
+	}
+
+	// gt-a8kx: the caller's budget can be an hour (runMQBatchRun), so the
+	// reason for the wait has to be on the record as soon as it blocks — once,
+	// not once per poll.
 	got := tg.probe.String()
 	if n := strings.Count(got, "docker ps check inconclusive"); n != 1 {
 		t.Fatalf("inconclusive-probe diagnostic printed %d time(s), want exactly 1: %q", n, got)
@@ -496,6 +502,11 @@ func TestAcquire_TimesOutWhileUnwrappedContainersPersist(t *testing.T) {
 	}
 	if elapsed < timeout {
 		t.Fatalf("Acquire returned after %s, before its %s timeout elapsed", elapsed, timeout)
+	}
+	// The failure names the suite it queued behind, so its first reader does
+	// not have to run `gt slot status` to learn what held the slot (gt-18zj).
+	if !strings.Contains(err.Error(), "dolt/dolt-sql-server:2.2.0 stuck-suite") {
+		t.Errorf("timeout error = %q, want the unwrapped suite it waited behind", err)
 	}
 
 	// Giving up is recorded (gt-dc81): a caller that times out behind an
