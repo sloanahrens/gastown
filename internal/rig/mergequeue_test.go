@@ -14,6 +14,7 @@ import (
 // call ResolveMergeQueueConfig, so this test guards the single resolver both
 // depend on (gt-k4sy).
 func TestResolveMergeQueueConfig_Precedence(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	repoRoot := filepath.Join(rigDir, "mayor", "rig")
@@ -86,6 +87,7 @@ func TestResolveMergeQueueConfig_Precedence(t *testing.T) {
 // did before the rig-root floor was introduced — proving the floor is
 // additive, not a silent precedence inversion.
 func TestResolveMergeQueueConfig_RigRootAbsent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	repoRoot := filepath.Join(rigDir, "mayor", "rig")
@@ -130,6 +132,7 @@ func TestResolveMergeQueueConfig_RigRootAbsent(t *testing.T) {
 // back with its other fields defaulted (scripts/om-gate.sh, max_attempts=5,
 // review_parallelism=3).
 func TestResolveMergeQueueConfig_Editorial(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
 	repoRoot := filepath.Join(rigDir, "mayor", "rig")
@@ -186,6 +189,7 @@ func TestResolveMergeQueueConfig_Editorial(t *testing.T) {
 // and no-config-anywhere cases return nil, matching HasAnyGateCommand's
 // nil-safety.
 func TestResolveMergeQueueConfig_NoConfig(t *testing.T) {
+	t.Parallel()
 	if got := ResolveMergeQueueConfig("", "gastown"); got != nil {
 		t.Errorf("ResolveMergeQueueConfig(empty townRoot) = %+v, want nil", got)
 	}
