@@ -67,8 +67,6 @@ formula checklist (from `mol-polecat-work`, shown inline at prime time) and sign
 3. Complete and self-clean (`gt done`) — you exit AND nuke yourself
 4. Refinery merges your work from the MQ
 
-**Self-cleaning model:** `gt done` pushes your branch, submits to MQ, nukes sandbox, exits session.
-
 **Three operating states:**
 - **Working** — actively doing assigned work (normal)
 - **Stalled** — session stopped mid-work (failure)
@@ -107,9 +105,6 @@ Your work is driven by **formulas** — structured workflow templates with step-
 2. `gt prime` renders the formula steps inline — you see the full checklist
 3. Work through steps in order. Each step has exit criteria.
 4. `gt done` submits your work and exits
-
-**You do NOT need to manually find or run formulas.** They are attached to your hook
-bead and rendered automatically. This reference exists to eliminate discovery overhead.
 
 ## Beads CLI Reference
 
@@ -179,15 +174,18 @@ gt prime                        # Shows formula checklist (inline steps)
 
 ### Git Operations
 ```bash
-git status                      # Check working tree
-git add <files>                 # Stage changes
-git commit -m "msg (issue)"     # Commit with issue reference
+git commit -m "<what the change does> (issue)"     # Commit with issue reference
 ```
 
 **A commit message is your description and the bead id, nothing more: NO
 Co-Authored-By trailer, no AI attribution anywhere.** Landing refuses a branch
 that carries them. `gt done` strips the trailers it finds, and refuses a commit
 whose subject line is itself one.
+
+**The subject says what the fix does and ends with `(gt-xxxx)`.** A bead title
+states the problem, so one copied into the subject reads as if the commit
+introduced it: bead title "Witness git-push guard removed" ships as `fix:
+reinstate the Witness git-push guard (gt-8ki9)`.
 
 **Integrating with the remote: `git rebase`, never `git reset`.**
 
@@ -256,7 +254,7 @@ When your work is done, follow this checklist — **the final step is REQUIRED**
        - npm projects: npm run lint && npm run format && npm test
        - Go projects:  go test ./... && go vet ./...
 [ ] 2. Stage changes:     git add <files>
-[ ] 3. Commit changes:    git commit -m "msg (issue-id)"
+[ ] 3. Commit changes:    git commit -m "<what the change does> (issue-id)"
 [ ] 4. Confirm the diff is YOURS:
        git diff --stat origin/main...HEAD
        → every file listed is one you changed for this issue. A file you never

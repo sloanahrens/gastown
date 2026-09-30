@@ -223,10 +223,14 @@ product is lost when the session ends.
 ```bash
 # After each logical unit of work:
 git add <files>
-git commit -m "<type>: <description> ({{issue}})"
+git commit -m "<type>: <what the change does> ({{issue}})"
 ```
 
 Commit types: feat, fix, refactor, test, docs, chore
+
+**The subject says what the change does and ends with `({{issue}})`, never a
+copy of the bead title — the title states the problem, so a subject pasted from
+it reads as if the commit introduced that problem (gt-hphli).**
 
 **Discovered work:**
 If you find bugs or improvements outside your scope:
@@ -367,7 +371,7 @@ git status
 
 **2. If there are ANY uncommitted changes, commit them now:**
 ```bash
-git add -A && git commit -m "<type>: <descriptive message> ({{issue}})"
+git add -A && git commit -m "<type>: <what the change does> ({{issue}})"
 ```
 
 **3. If working tree is already clean, that's fine — but you MUST still have commits (step 4).**
