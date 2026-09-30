@@ -193,7 +193,7 @@ func TestInitSubmodules(t *testing.T) {
 	t.Run("no .gitmodules asks git nothing", func(t *testing.T) {
 		t.Parallel()
 		s := newScripted(nil)
-		if err := initSubmodules(s.run, t.TempDir(), nil); err != nil || len(s.sent()) != 0 {
+		if err := initSubmodules(s.run, t.TempDir()); err != nil || len(s.sent()) != 0 {
 			t.Fatalf("initSubmodules = %v, calls %q", err, s.sent())
 		}
 	})
@@ -204,7 +204,7 @@ func TestInitSubmodules(t *testing.T) {
 		s := newScripted(map[string]reply{
 			"-C " + dir + " ls-files --error-unmatch .gitmodules": fail(1, "error: pathspec '.gitmodules' did not match any file(s) known to git\n"),
 		})
-		if err := initSubmodules(s.run, dir, nil); err != nil {
+		if err := initSubmodules(s.run, dir); err != nil {
 			t.Fatal(err)
 		}
 		s.noUnscripted(t)
@@ -212,7 +212,7 @@ func TestInitSubmodules(t *testing.T) {
 			t.Fatal("hasTrackedGitmodules = true for an untracked file")
 		}
 	})
-	t.Run("tracked .gitmodules updates with the reference and env", func(t *testing.T) {
+	t.Run("tracked .gitmodules updates with the reference", func(t *testing.T) {
 		t.Parallel()
 		dir, ref := t.TempDir(), t.TempDir()
 		writeGitmodules(t, dir)
@@ -224,13 +224,12 @@ func TestInitSubmodules(t *testing.T) {
 			"-C " + dir + " rev-parse --show-toplevel":            ok(dir + "\n"),
 			update: ok(""),
 		})
-		env := []string{"GIT_CONFIG_COUNT=1"}
-		if err := initSubmodules(s.run, dir, env, ref); err != nil {
+		if err := initSubmodules(s.run, dir, ref); err != nil {
 			t.Fatal(err)
 		}
 		s.noUnscripted(t)
-		if c, _ := s.sentCall(update); !reflect.DeepEqual(c.env, env) {
-			t.Fatalf("update env = %q", c.env)
+		if !s.hasSent(update) {
+			t.Fatalf("calls %q lack %q", s.sent(), update)
 		}
 	})
 	t.Run("failure reports git's stderr", func(t *testing.T) {
@@ -242,7 +241,7 @@ func TestInitSubmodules(t *testing.T) {
 			"-C " + dir + " rev-parse --show-toplevel":            ok(dir + "\n"),
 			"-C " + dir + " submodule update --init --recursive":  fail(128, "fatal: transport 'file' not allowed\n"),
 		})
-		err := initSubmodules(s.run, dir, nil)
+		err := initSubmodules(s.run, dir)
 		if err == nil || err.Error() != "initializing submodules: fatal: transport 'file' not allowed" {
 			t.Fatalf("initSubmodules = %v", err)
 		}

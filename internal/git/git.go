@@ -782,7 +782,7 @@ func (g *Git) cloneInternal(url, dest string, opts cloneOptions) error {
 		return err
 	}
 	// Initialize submodules if present
-	return initSubmodules(run, dest, nil)
+	return initSubmodules(run, dest)
 }
 
 // Clone clones a repository to the destination.
@@ -3001,7 +3001,7 @@ func (g *Git) WorktreeAdd(path, branch string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, nil, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddFromRef creates a new worktree at the given path with a new branch
@@ -3016,7 +3016,7 @@ func (g *Git) WorktreeAddFromRef(path, branch, startPoint string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, nil, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddDetached creates a new worktree at the given path with a detached HEAD.
@@ -3028,7 +3028,7 @@ func (g *Git) WorktreeAddDetached(path, ref string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, nil, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddExisting creates a new worktree at the given path for an existing branch.
@@ -3040,7 +3040,7 @@ func (g *Git) WorktreeAddExisting(path, branch string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, nil, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // WorktreeAddExistingForce creates a new worktree even if the branch is already checked out elsewhere.
@@ -3049,7 +3049,7 @@ func (g *Git) WorktreeAddExistingForce(path, branch string) error {
 	if _, err := g.run("worktree", "add", "--force", path, branch); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, nil, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
 // submoduleReferencePath returns the mayor/rig path to use as --reference
@@ -4587,14 +4587,13 @@ type SubmoduleChange struct {
 // to share git objects from a local clone instead of fetching from remote.
 // This makes submodule init near-instant for large submodules (e.g. 655MB gitlabhq).
 func InitSubmodules(repoPath string, referencePath ...string) error {
-	return initSubmodules(realRun, repoPath, nil, referencePath...)
+	return initSubmodules(realRun, repoPath, referencePath...)
 }
 
-// initSubmodules is InitSubmodules with extra environment for the git
-// process. Tests pass GIT_CONFIG_* here to allow the file:// transport that
-// a local submodule remote needs, which git refuses by default for
-// submodule clones.
-func initSubmodules(run runFunc, repoPath string, extraEnv []string, referencePath ...string) error {
+// initSubmodules is InitSubmodules through run. The integration test's
+// runner adds GIT_CONFIG_* to allow the file:// transport that a local
+// submodule remote needs, which git refuses by default for submodule clones.
+func initSubmodules(run runFunc, repoPath string, referencePath ...string) error {
 	if !hasTrackedGitmodules(run, repoPath) {
 		return nil
 	}
@@ -4612,7 +4611,7 @@ func initSubmodules(run runFunc, repoPath string, extraEnv []string, referencePa
 		}
 	}
 
-	if _, stderr, err := run(gitCall{args: args, env: extraEnv}); err != nil {
+	if _, stderr, err := run(gitCall{args: args}); err != nil {
 		return fmt.Errorf("initializing submodules: %s", strings.TrimSpace(stderr))
 	}
 	return nil

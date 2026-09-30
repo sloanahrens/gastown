@@ -515,7 +515,7 @@ func TestIntegrationInitSubmodules_WithSubmodules(t *testing.T) {
 
 	// The exported wrapper adds no git config, so git's default refusal of
 	// the file:// transport for submodule clones must stand. This guards
-	// that InitSubmodules passes no extra environment to initSubmodules.
+	// that InitSubmodules sends git no extra environment.
 	err := InitSubmodules(cloneDest)
 	if err == nil || !strings.Contains(err.Error(), "transport 'file' not allowed") {
 		t.Fatalf("InitSubmodules with the default protocol policy = %v, want a refused file transport", err)
@@ -523,7 +523,11 @@ func TestIntegrationInitSubmodules_WithSubmodules(t *testing.T) {
 
 	// initSubmodules with file:// allowed should populate it.
 	allowFile := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.file.allow", "GIT_CONFIG_VALUE_0=always"}
-	if err := initSubmodules(realRun, cloneDest, allowFile); err != nil {
+	allowFileRun := func(c gitCall) (string, string, error) {
+		c.env = append(c.env, allowFile...)
+		return realRun(c)
+	}
+	if err := initSubmodules(allowFileRun, cloneDest); err != nil {
 		t.Fatalf("InitSubmodules: %v", err)
 	}
 
