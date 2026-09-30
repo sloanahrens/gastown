@@ -7,7 +7,6 @@ internal/dog 82s # tests exec git (16 sites), hermetic harness
 internal/daemon 81s # real git (jsonl backup, checkpoint, dead-holder and main-branch worktrees, 26 initGitRepo); tmux, Dolt, gt and bd are faked
 internal/polecat 77s # tests exec git (44 sites), 21 tmux.New, Dolt container
 internal/testutil 71s # the harnesses themselves: git, tmux, hermetic town
-internal/formula 67s # tests exec bash and git
 internal/crew 66s # tests exec git over real clones
 internal/doctor 64s # tests exec git (38 sites), 20 NewTmux
 internal/util 45s # real tmux and process helpers
