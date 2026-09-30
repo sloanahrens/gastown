@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -399,6 +400,11 @@ var (
 	// fetchDuplicatePoolFn is the pool reader, swappable in tests.
 	fetchDuplicatePoolFn = fetchDuplicatePool
 
+	// duplicateEnrichmentWarnFn reports a failed design/notes enrichment of
+	// the pool, swappable in tests. The pool is cached for duplicatePoolTTL,
+	// so this fires once per fetch, not once per sling.
+	duplicateEnrichmentWarnFn = warnDuplicateEnrichmentFailed
+
 	duplicatePoolMu    sync.Mutex
 	duplicatePoolCache = map[string]*duplicatePoolEntry{}
 )
@@ -491,9 +497,13 @@ func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter tim
 	// carry those fields (gt-hgvu). A failed enrichment degrades to
 	// list-only refs rather than failing the whole pool fetch: the same
 	// bd-hiccup-is-not-a-duplicate contract fetchDuplicatePool already holds.
+	// The degrade is reported, though: a pool without design/notes text is
+	// blind to exactly the overlap this check was extended to catch, and the
+	// operator must be able to tell that apart from "no duplicates found".
 	fullText, ftErr := fetchDuplicateFullText(beadsDir, ids)
 	if ftErr != nil {
 		fullText = nil
+		duplicateEnrichmentWarnFn(beadsDir, ftErr)
 	}
 
 	candidates := make([]duplicateCandidate, 0, len(rows))
@@ -512,6 +522,14 @@ func listDuplicateCandidates(beadsDir string, statuses []string, closedAfter tim
 		})
 	}
 	return candidates, nil
+}
+
+// warnDuplicateEnrichmentFailed tells the operator the duplicate check is
+// running on list-only text. It writes to stderr so it cannot corrupt a
+// caller's stdout report.
+func warnDuplicateEnrichmentFailed(beadsDir string, err error) {
+	fmt.Fprintf(os.Stderr, "%s duplicate check degraded for %s: design/notes enrichment failed, comparing title/description only: %v\n",
+		style.Dim.Render("Warning:"), beadsDir, err)
 }
 
 // duplicateFullText holds the design and notes text bd show returns for one
