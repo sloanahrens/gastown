@@ -1263,8 +1263,12 @@ type strandedConvoyInfo struct {
 	TrackedCount int      `json:"tracked_count"`
 	ReadyCount   int      `json:"ready_count"`
 	ReadyIssues  []string `json:"ready_issues"`
-	CreatedAt    string   `json:"created_at,omitempty"`
-	BaseBranch   string   `json:"base_branch,omitempty"`
+	// Held lists the otherwise-ready beads the scan kept back because a
+	// blocker could not be resolved or read, not because one is open. The
+	// daemon escalates a hold that lasts (gt-gg7w9).
+	Held       []strandedHold `json:"held,omitempty"`
+	CreatedAt  string         `json:"created_at,omitempty"`
+	BaseBranch string         `json:"base_branch,omitempty"`
 	// Agent is the runtime agent requested when the convoy's beads were slung
 	// (--agent). Feeders must re-dispatch with it instead of the rig default,
 	// so a failed sling cannot silently re-route the bead (gt-yg24).
@@ -1279,6 +1283,18 @@ type strandedConvoyInfo struct {
 	// cadence; the system-managed stranded scan (daemon's feedFirstReady)
 	// must not auto-feed them (gt-qw4u).
 	Owned bool `json:"owned,omitempty"`
+}
+
+// strandedHold is one bead held on a fail-safe verdict from
+// convoyops.BlockOf. The daemon reads it from `gt convoy stranded --json`.
+type strandedHold struct {
+	Issue string `json:"issue"`
+	// Blocker is "" when the failed read was the bead's own.
+	Blocker string `json:"blocker,omitempty"`
+	// Cause is "unresolved" (no store has the blocker) or "unreadable" (a
+	// store would not answer).
+	Cause  string `json:"cause"`
+	Reason string `json:"reason"`
 }
 
 // readyIssueInfo holds info about a ready (stranded) issue.
@@ -1413,8 +1429,8 @@ func openStrandedBlockCheckWith(townRoot string, openStore func(beadsDir string)
 		}
 		return openStore(beadsDir)
 	})
-	check := func(issueID string) string {
-		return convoyops.BlockReason(ctx, townStore, issueID, resolver)
+	check := func(issueID string) convoyops.Block {
+		return convoyops.BlockOf(ctx, townStore, issueID, resolver)
 	}
 	return check, func() {
 		_ = resolver.Close()
@@ -1422,9 +1438,9 @@ func openStrandedBlockCheckWith(townRoot string, openStore func(beadsDir string)
 	}, nil
 }
 
-// blockCheck returns why a bead's dependencies keep it from dispatch, or ""
-// when none does.
-type blockCheck func(issueID string) string
+// blockCheck returns why a bead's dependencies keep it from dispatch; the zero
+// Block when none does.
+type blockCheck func(issueID string) convoyops.Block
 
 // findStrandedConvoysWith is findStrandedConvoys with the blocker check's
 // opener supplied. openCheck runs at most once, and only when some convoy has
@@ -1491,6 +1507,7 @@ func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (
 		scheduledSet := areScheduledForTown(townBeads, trackedIDs)
 
 		var readyIssues []string
+		var held []strandedHold
 		for _, t := range tracked {
 			if isReadyIssue(t, scheduledSet) {
 				if !isSlingableBead(townBeads, t.ID) {
@@ -1510,9 +1527,20 @@ func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (
 					}
 					check, release = opened, releaseOpened
 				}
-				if reason := check(t.ID); reason != "" {
+				if block := check(t.ID); block.Reason != "" {
 					// stderr: stdout is the daemon's JSON (#2142).
-					fmt.Fprintf(os.Stderr, "convoy %s: %s not ready: blocked (%s)\n", convoy.ID, t.ID, reason)
+					fmt.Fprintf(os.Stderr, "convoy %s: %s not ready: blocked (%s)\n", convoy.ID, t.ID, block.Reason)
+					// A fail-safe hold is named in the JSON too: the daemon
+					// drops a successful run's stderr, and this is what it
+					// escalates from (gt-gg7w9).
+					if block.Held() {
+						held = append(held, strandedHold{
+							Issue:   t.ID,
+							Blocker: block.BlockerID,
+							Cause:   string(block.Cause),
+							Reason:  block.Reason,
+						})
+					}
 					continue
 				}
 				readyIssues = append(readyIssues, t.ID)
@@ -1526,6 +1554,7 @@ func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (
 				TrackedCount: len(tracked),
 				ReadyCount:   len(readyIssues),
 				ReadyIssues:  readyIssues,
+				Held:         held,
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
 				Agent:        convoyAgent,
@@ -1541,6 +1570,7 @@ func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (
 				TrackedCount: len(tracked),
 				ReadyCount:   0,
 				ReadyIssues:  []string{},
+				Held:         held,
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
 				Agent:        convoyAgent,

@@ -105,8 +105,8 @@ exit 0
 func storeBlockCheck(stores map[string]beadsdk.Storage) func(string) (blockCheck, func(), error) {
 	return func(townRoot string) (blockCheck, func(), error) {
 		resolver := convoyops.NewStoreResolver(townRoot, stores)
-		return func(id string) string {
-			return convoyops.BlockReason(context.Background(), stores["hq"], id, resolver)
+		return func(id string) convoyops.Block {
+			return convoyops.BlockOf(context.Background(), stores["hq"], id, resolver)
 		}, func() {}, nil
 	}
 }
@@ -114,7 +114,7 @@ func storeBlockCheck(stores map[string]beadsdk.Storage) func(string) (blockCheck
 // noBlockers is a blocker check that finds nothing, for scans about something
 // other than dependencies.
 func noBlockers(string) (blockCheck, func(), error) {
-	return func(string) string { return "" }, func() {}, nil
+	return func(string) convoyops.Block { return convoyops.Block{} }, func() {}, nil
 }
 
 // TestFindStrandedConvoys_CrossRigBlockerNotReady is gt-j02xy on the daemon's
@@ -157,6 +157,59 @@ func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
 	}
 }
 
+// TestFindStrandedConvoys_ReportsFailSafeHolds (gt-gg7w9): a bead held because
+// its blocker is gone from every rig, or its rig's store will not answer, is
+// named in the scan's JSON so the daemon can escalate it. A bead held by an
+// open blocker is not: that hold is the tracker working, not a fault.
+func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setup     func(oag *xrigStrandedStore)
+		withOag   bool
+		wantCause string
+	}{
+		{"open blocker", func(*xrigStrandedStore) {}, true, ""},
+		{"dangling blocker", func(oag *xrigStrandedStore) { delete(oag.issues, "oag-x") }, true, "unresolved"},
+		{"blocker rig unreachable", func(*xrigStrandedStore) {}, false, "unreadable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			townRoot := strandedXrigTown(t)
+			gastown := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
+				"gt-work": {ID: "gt-work", Status: beadsdk.StatusOpen},
+				"gt-sib":  {ID: "gt-sib", Status: beadsdk.StatusOpen},
+			}, deps: []*beadsdk.Dependency{
+				{IssueID: "gt-work", DependsOnID: "external:oag:oag-x", Type: "blocks"},
+			}}
+			oag := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
+				"oag-x": {ID: "oag-x", Status: beadsdk.StatusOpen},
+			}}
+			tc.setup(oag)
+			stores := map[string]beadsdk.Storage{"hq": &xrigStrandedStore{}, "gastown": gastown}
+			if tc.withOag {
+				stores["oag"] = oag
+			}
+
+			stranded, err := findStrandedConvoysWith(townRoot, storeBlockCheck(stores))
+			if err != nil {
+				t.Fatalf("findStrandedConvoysWith: %v", err)
+			}
+			if len(stranded) != 1 {
+				t.Fatalf("want 1 stranded convoy, got %+v", stranded)
+			}
+			held := stranded[0].Held
+			if tc.wantCause == "" {
+				if len(held) != 0 {
+					t.Errorf("an open blocker is not a fail-safe hold, got %+v", held)
+				}
+				return
+			}
+			if len(held) != 1 || held[0].Issue != "gt-work" || held[0].Blocker != "oag-x" || held[0].Cause != tc.wantCause || held[0].Reason == "" {
+				t.Errorf("Held = %+v, want gt-work held on oag-x, %s", held, tc.wantCause)
+			}
+		})
+	}
+}
+
 // TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates: a scan with no
 // otherwise-ready bead opens no store.
 func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
@@ -164,7 +217,7 @@ func TestFindStrandedConvoys_BlockCheckOpensOnlyWithCandidates(t *testing.T) {
 	opened := 0
 	open := func(string) (blockCheck, func(), error) {
 		opened++
-		return func(string) string { return "" }, func() {}, nil
+		return func(string) convoyops.Block { return convoyops.Block{} }, func() {}, nil
 	}
 	if _, err := findStrandedConvoysWith(townBeads, open); err != nil {
 		t.Fatalf("findStrandedConvoysWith: %v", err)
