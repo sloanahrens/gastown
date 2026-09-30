@@ -30,6 +30,11 @@ func TestExtractCommand(t *testing.T) {
 	}
 }
 
+// TestMatchesAllFragments pins the containment helper itself. The guard's own
+// git/SQL rules no longer use it — they are positional matchers now (gt-24lz6)
+// — but matchesPackageInstall still matches its packageManagerPatterns through
+// it, so the helper's semantics (token-exact fragments, the bundled short-flag
+// form) stay under test here.
 func TestMatchesAllFragments(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -174,6 +179,11 @@ func TestMatchesGitClean(t *testing.T) {
 		{"git clean -xdf", "git clean -xdf", true},
 		{"force flag before a dry-run flag", "git clean -f -n", true},
 		{"git clean -n -f", "git clean -n -f", true},
+		{"long force flag", "git clean --force", true},
+		{"long force flag before -d", "git clean --force -d", true},
+		{"long force flag after -d", "git clean -d --force", true},
+		{"long force flag with a dry-run flag", "git clean -n --force", true},
+		{"long force flag behind a shell operator", "cd /tmp && git clean --force", true},
 		{"glued to a shell operator", "cd /tmp && git clean -fdx", true},
 		{"backgrounded behind a text-only command", "echo hi & git clean -f", true},
 		{"glued to a background operator", "echo hi &git clean -fdx", true},
@@ -190,6 +200,7 @@ func TestMatchesGitClean(t *testing.T) {
 		{"dry run of a directory clean", "git clean -nd", false},
 		{"ignored files only", "git clean -X", false},
 		{"bare git clean", "git clean", false},
+		{"long flag that merely shares the prefix", "git clean --force-with-lease", false},
 
 		// Allowed — the words are present but no git clean runs.
 		{"clean spelled in an echo argument", `echo "clean"`, false},
@@ -240,6 +251,142 @@ func TestGitCleanMentionOnACompoundLineIsAllowed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (%q), want allowed", tt.command, reason)
+			}
+		})
+	}
+}
+
+// TestMatchesGitResetHard pins the positional reading of `git reset --hard`
+// (gt-24lz6): the flag belongs to the reset invocation, not to the token list,
+// so the words landing in separate segments is not a hard reset.
+func TestMatchesGitResetHard(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Blocked — a real hard reset.
+		{"git reset --hard", "git reset --hard", true},
+		{"hard reset of HEAD~1", "git reset --hard HEAD~1", true},
+		{"hard reset onto a remote ref", "git reset --hard origin/main", true},
+		{"glued to a shell operator", "cd /repo && git reset --hard", true},
+		{"behind git's -C option", "git -C /tmp/repo reset --hard", true},
+		{"absolute path to git", "/usr/bin/git reset --hard", true},
+		{"behind a launcher", "time git reset --hard", true},
+		{"handed to xargs", "find . -name '*.go' | xargs git reset --hard", true},
+
+		// Allowed — no hard reset runs.
+		{"soft reset", "git reset --soft HEAD~1", false},
+		{"bare reset", "git reset", false},
+		{"hard flag on a later git subcommand", `git commit -m "--hard"`, false},
+		{"reset in one segment, --hard in another", "git log --oneline; grep -n reset CHANGELOG.md; grep -n -- --hard CHANGELOG.md", false},
+		{"behind a text-only command", "echo git reset --hard", false},
+		{"behind an unquoted gt mail argument", "gt mail send x -s note -m never git reset --hard", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesGitResetHard(shellTokenize(tt.command))
+			if blocked := got != ""; blocked != tt.blocked {
+				t.Errorf("matchesGitResetHard(%q) blocked=%v (%q), want %v", tt.command, blocked, got, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestMatchesDDLDestruction pins the positional reading of the DDL block
+// (gt-24lz6): the verb and its object must sit adjacent in one segment, with
+// the verb in command position.
+func TestMatchesDDLDestruction(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Blocked — a real statement.
+		{"drop table", "drop table users", true},
+		{"uppercase DROP TABLE", "DROP TABLE users", true},
+		{"mixed case drop Table", "drop Table users", true},
+		{"drop database", "drop database mydb", true},
+		{"truncate table", "truncate table logs", true},
+		{"after a non-text command", "mysql -e drop table users", true},
+		{"glued to a shell operator", "cd /tmp && truncate table logs", true},
+		{"in a later segment", "echo preparing; drop database mydb", true},
+
+		// Allowed — the words appear, but not as one statement.
+		{"drop and table in different segments", "grep -n drop docs/notes.md; grep -n table docs/schema.md", false},
+		{"truncate and table in different segments", "grep -n truncate notes.md; grep -n table schema.md", false},
+		{"object before the verb", "table drop users", false},
+		{"drop with an unrelated object", "drop index idx_users", false},
+		{"behind a text-only command", "echo drop table users", false},
+		{"behind a text-only command, uppercase", "echo DROP TABLE users", false},
+		{"behind a text-only command, truncate", "grep -n truncate table docs/schema.md", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesDDLDestruction(shellTokenize(tt.command))
+			if blocked := got != ""; blocked != tt.blocked {
+				t.Errorf("matchesDDLDestruction(%q) blocked=%v (%q), want %v", tt.command, blocked, got, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestGitResetAndDDLMentionsOnCompoundLinesAreAllowed pins gt-24lz6 end to
+// end: the two containment matchers that outlived gt-775d rejected ordinary
+// work whose segments happened to spell the fragments between them. Each
+// case below was blocked before the positional rewrite.
+func TestGitResetAndDDLMentionsOnCompoundLinesAreAllowed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			"git, reset and --hard supplied by three segments",
+			"git log --oneline; grep -n reset CHANGELOG.md; grep -n -- --hard CHANGELOG.md",
+		},
+		{
+			"drop and table supplied by two segments",
+			"grep -n drop docs/notes.md; grep -n table docs/schema.md",
+		},
+		{
+			"truncate and table supplied by two segments",
+			"grep -n truncate docs/notes.md; grep -n table docs/schema.md",
+		},
+		{
+			"drop table as a text-only argument",
+			"echo drop table users",
+		},
+		{
+			"git reset --hard as a text-only argument",
+			"echo git reset --hard",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, ""); reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (%q), want allowed", tt.command, reason)
+			}
+		})
+	}
+}
+
+// TestGitCleanLongForceFlagReachesGuard pins the other half of gt-24lz6: the
+// long spelling of the force flag walked straight past the guard, which
+// blocked only -f/-fd/-fdx. Every command here is a real untracked-file wipe.
+func TestGitCleanLongForceFlagReachesGuard(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"git clean --force",
+		"git clean --force -d",
+		"git clean -d --force",
+		"cd /tmp && git clean --force",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(command, 0, ""); reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — --force is -f", command)
 			}
 		})
 	}
@@ -759,10 +906,11 @@ func TestGtMkrjRegressions(t *testing.T) {
 			if reason, _ := matchesUnboundedScan(tokens, ""); reason != "" {
 				t.Fatalf("matchesUnboundedScan false-fired: %q", reason)
 			}
-			for _, p := range fragmentPatterns {
-				if matchesAllFragments(lower, p.contains) {
-					t.Fatalf("fragmentPatterns false-fired: %q", p.reason)
-				}
+			if reason := matchesGitResetHard(tokens); reason != "" {
+				t.Fatalf("matchesGitResetHard false-fired: %q", reason)
+			}
+			if reason := matchesDDLDestruction(tokens); reason != "" {
+				t.Fatalf("matchesDDLDestruction false-fired: %q", reason)
 			}
 		})
 	}
@@ -1148,6 +1296,7 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"git reset --soft onto origin/main", "git reset --soft origin/main", true},
 		{"git clean -f", "git clean -f", true},
 		{"git clean -fd", "git clean -fd", true},
+		{"git clean --force", "git clean --force", true},
 		{"drop table", "DROP TABLE users", true},
 
 		// Allowed
@@ -1160,6 +1309,9 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"pip install (venv)", "pip install requests", false},
 		{"npm install (local)", "npm install express", false},
 		{"normal command", "ls -la", false},
+		{"drop and table in separate segments", "grep -n drop a.md; grep -n table b.md", false},
+		{"drop table behind a text-only command", "echo drop table users", false},
+		{"git reset --hard behind a text-only command", "echo git reset --hard", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1177,13 +1329,10 @@ func TestDangerousGuard_Integration(t *testing.T) {
 				blocked = true
 			} else if matchesGitClean(shellTokenize(tt.command)) != "" {
 				blocked = true
-			} else {
-				for _, p := range fragmentPatterns {
-					if matchesAllFragments(lower, p.contains) {
-						blocked = true
-						break
-					}
-				}
+			} else if matchesGitResetHard(shellTokenize(tt.command)) != "" {
+				blocked = true
+			} else if matchesDDLDestruction(shellTokenize(tt.command)) != "" {
+				blocked = true
 			}
 			if blocked != tt.blocked {
 				t.Errorf("command %q: blocked=%v, want %v", tt.command, blocked, tt.blocked)
