@@ -162,15 +162,17 @@ Town-level role defaults live in `mayor/config.json` under:
 
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 
-**Container opt-in and the container-gate slot.** Container-backed tests are opt-in
-(`GT_TEST_DOCKER=1`, see `internal/testutil`), and a run that can start one must hold the
-town-wide container-gate slot. `gt done`'s local gate (`land.RigGate`, the unit tier) runs
-`make lint`, `go build ./...` and `make test` with `GT_TEST_DOCKER=0`, so the container-backed
-tests skip and the gate takes no slot (gt-wx53). The Docker suite runs once per landing, on the
-merged tree, in the landing worker's gate, which holds a slot (ADR 0004; the worker is gt-v4ssj.2). A rig whose
-`test_command` opts into containers (`GT_TEST_DOCKER=1`) is refused by the unit tier. gastown's `make test`
-defaults the variable (`GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1}`) rather than hardcoding it, so a
-caller's `0` wins; `TestMakefileHandsTheContainerOptInToTheSuite` pins that recipe.
+**Container opt-in and the container-gate slot (`gt done`'s gate).** Container-backed
+tests are opt-in (`GT_TEST_DOCKER=1`, see `internal/testutil`), and a run that can start
+one must hold the town-wide container-gate slot. `gt done`'s default test-verify gate
+runs the rig's `test_command` with the opt-in written **off**, so it takes no slot. For
+gastown that command is `make gate`, whose recipe writes `GT_TEST_DOCKER=0` itself: the
+unit tier never starts a container, whoever runs it. The container suites run post-merge
+in `make test-integration` (see [Testing](testing.md), "The gate"). A rig that wants its
+container suite verified at `gt done` asks for it in its own command
+(`test_command: "GT_TEST_DOCKER=1 make <target>"`), and the gate honours that and takes a
+slot for it. The session's own exported value is deliberately not an input: the slot
+decision and the environment the suite reads are one fact (gt-0hbm).
 
 Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
 names what failed (exit codes 10-16, `gt done --help`) and the session stays up; fix what it

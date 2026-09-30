@@ -1,4 +1,26 @@
-.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-changed test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree
+.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate test-integration lint-tools
+
+# The gate (docs/testing.md, "The gate"). Two targets are the only test entry
+# points, and every caller runs them verbatim: CI, gt done, the land path and
+# a human at a shell.
+#
+#   make gate              lint, then `go build ./...`, then the unit tier: the
+#                          budget runner over ./... beside the shell tests
+#                          (scripts/test-makefile.sh). Never starts a container
+#                          and never takes the container-gate slot: the recipe
+#                          writes GT_TEST_DOCKER=0 itself, so an inherited value
+#                          cannot turn containers on. Do not wrap it in
+#                          `gt slot run`.
+#   make test-integration  the integration tier: -tags integration over ./...,
+#                          then every package in internal/testpolicy/docker.txt
+#                          whole, with GT_TEST_DOCKER=1. It starts containers,
+#                          so run it under `gt slot run`.
+#
+# Exit codes, for both: 0 means green. Anything else means red: make exits 2
+# when a recipe fails, and 130 when interrupted. Decide on the exit code only,
+# never on the output. For a human reading the log: a lint failure ends with
+# make's own error line for the lint target, and a later stage ends with a
+# `gate: FAILED at <stage>` line on stderr.
 
 BINARY := gt
 BUILD_DIR := .
@@ -57,8 +79,7 @@ lint-tools:
 lint: docs-lint
 	@golangci-lint version >/dev/null 2>&1 || { echo "golangci-lint missing: run 'make lint-tools'"; exit 1; }
 	@echo "lint: golangci-lint run --timeout=5m (a contended lint exits in 5s naming the module lock; the gate and gt done wait it out and retry)"
-	golangci-lint run --timeout=5m || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
-	@echo "lint: repo guards (replace directives, tracked issues.jsonl; carried over from upstream CI)"
+	golangci-lint run --timeout=5m $(LINT_RUNNER_FLAGS) || { echo "lint failed; if the error is 'can't load config', run 'make lint-tools'"; exit 1; }
 	bash scripts/repo-guards.sh
 	@echo "lint: guardlint (fail-open guard check, gt-udrrw)"
 	go test ./internal/guardlint/... -run TestNoNewFailOpenGuards -v
@@ -215,66 +236,69 @@ check-version-tag:
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
 
-test:
-	# -timeout 20m: the 10m default is a per-package budget and internal/cmd
-	# and internal/refinery legitimately run 500-600s under contention, so
-	# every gate against them flapped on the budget rather than a hung test
-	# (gt-g8kr). gt-fo3h shrank those packages instead of leaning on the
-	# budget: both ran their tests serially, so their wall clock was the sum
-	# of their tests' runtimes; they now parallelize (651s -> 264s and
-	# 429s -> 126s, back to back at matched load). The budget stays where
-	# gt-g8kr put it — it still has to absorb a loaded host, and a budget
-	# tightened against an idle host is not a hang detector.
-	# GT_TEST_DOCKER=1: container-backed tests are opt-in (internal/testutil
-	# DockerTestsEnv); the gate is where they run, under the refinery's slot.
-	# Defaulted rather than hardcoded, so an inherited GT_TEST_DOCKER=0 wins:
-	# gt done's default gate runs this same recipe with the opt-in off
-	# and therefore needs no container-gate slot (gt-wx53), while the refinery
-	# gate and the daemon's main-branch patrol pass no value and still get the
-	# container suite. A hardcoded =1 here is invisible to every caller that
-	# tries to turn containers off (a recipe assignment beats the child env),
-	# so the gate stayed welded to the town-wide slot.
-	# The budget runner measures converted packages through its CPU-measuring
-	# -exec wrapper, which bypasses the test result cache, and runs the
-	# packages in unconverted.txt afterwards without the wrapper, so those
-	# stay "(cached)" on an unchanged tree (gt-22hdp.53).
-	# The shell-script tests (test-makefile, ~130s one after another) run
-	# beside the Go suite instead of before it; their output is held and
-	# printed after it, and either failing fails the target (gt-22hdp.60).
-	# Both halves run in the background so the trap fires at once on INT or
-	# TERM (bash defers traps until a foreground child exits): it stops both,
-	# with their children, and removes the log. The shell suites use only stub
-	# tmux/dolt/gt in mktemp dirs, so they share no state with the Go suite.
+# Modules nested in this repository (plugins/*/go.mod). The root module's
+# `go build ./...` does not reach them, so the gate builds each in its own
+# directory.
+NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins -name go.mod -not -path '*/testdata/*' 2>/dev/null | LC_ALL=C sort))
+
+# The shell half of the unit tier. A make variable only so
+# scripts/makefile-gate_test.sh can drive the gate's failure paths with a stub.
+GATE_SHELL_TESTS ?= scripts/test-makefile.sh
+
+# The gate's lint waits its turn on golangci-lint's module lock instead of
+# exiting in 5s: the gate is judged by its exit code alone, so a contended
+# lint must not read as red. Plain `make lint` keeps the fast exit that gt
+# done's and the refinery's retry policy reads (internal/lintlock, gt-kqwu).
+# A target-specific variable, so it reaches the lint prerequisite.
+gate: LINT_RUNNER_FLAGS := --allow-serial-runners
+gate: lint
+	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
+	@go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
+	@# -o into a temp dir: `go build ./...` over a module with one main
+	@# package writes that binary into the module's directory.
+	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do (cd "$$m" && go build -o "$$out/" ./...) || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@# The unit tier. The shell tests run beside the Go suite (gt-22hdp.60);
+	@# their output is held and printed after it, and either failing fails the
+	@# gate. Both halves run in the background so the trap fires at once on
+	@# INT or TERM (bash defers traps until a foreground child exits): it stops
+	@# both, with their children, and removes the log. The shell suites use
+	@# only stub tmux/dolt/gt in mktemp dirs, so they share no state with the
+	@# Go suite. The budget runner measures converted packages through its
+	@# CPU-measuring -exec wrapper, which bypasses the test result cache, and
+	@# runs the packages in unconverted.txt afterwards with the cache
+	@# (gt-22hdp.53). -timeout 20m is the per-package hang detector: go's
+	@# 10m default is below what internal/cmd, internal/refinery and
+	@# internal/refinery/editorial take on a loaded host (measured on this
+	@# branch: 320-607 s each across three runs; a run at the 10m default
+	@# timed all three out with no test older than 11 s). It drops to the
+	@# default once D2 deletes refinery and D7 shrinks cmd.
+	@echo "gate: unit tier (budget runner beside $(GATE_SHELL_TESTS))" >&2
 	@log=$$(mktemp -t gt-test-makefile); \
-	$(MAKE) --no-print-directory test-makefile >"$$log" 2>&1 & mk=$$!; \
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./... & gt=$$!; \
+	bash $(GATE_SHELL_TESTS) >"$$log" 2>&1 & mk=$$!; \
+	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./... & gt=$$!; \
 	trap 'pkill -TERM -P $$mk 2>/dev/null; pkill -TERM -P $$gt 2>/dev/null; kill $$mk $$gt 2>/dev/null; rm -f "$$log"; exit 130' INT TERM; \
 	wait $$gt; go_rc=$$?; \
 	wait $$mk; mk_rc=$$?; \
-	echo "=== test-makefile (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \
-	if [ $$mk_rc -ne 0 ]; then echo "test-makefile failed (exit $$mk_rc)" >&2; fi; \
-	[ $$go_rc -eq 0 ] && [ $$mk_rc -eq 0 ]
+	echo "=== shell tests (ran beside the Go suite) ==="; cat "$$log"; rm -f "$$log"; \
+	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc)" >&2; fi; \
+	if [ $$mk_rc -ne 0 ]; then echo "gate: FAILED at unit tier (shell tests, exit $$mk_rc)" >&2; fi; \
+	[ $$go_rc -eq 0 ] && [ $$mk_rc -eq 0 ] && echo "gate: PASSED" >&2
 
-# test-changed runs the same hermetic suite as `test` over a caller-supplied
-# package list, for `gt done`'s pre-verify gate (merge_queue.test_verify_command
-# with the {packages} token). The refinery's gate still runs `test` over the
-# whole module, so nothing reaches main without a full run; this exists so four
-# polecats do not each run the entire suite beside that gate. Measured
-# 2026-09-22: one suite alone is 244s, four concurrently are 683s each — the
-# contention, not the suite, is what made gates slow.
-#
-# PKGS defaults to the whole module so a bare `make test-changed` is never
-# narrower than `make test` by accident.
-PKGS ?= ./...
-test-changed: test-makefile
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -timeout 20m $(PKGS)
+# The Docker-backed packages (internal/testpolicy/docker.txt, kept exact by
+# TestDockerTier). Their container tests skip in the gate and run here.
+DOCKER_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' internal/testpolicy/docker.txt))
 
-# test-integration runs only the //go:build integration tier (real tmux, bd,
-# Dolt, gt binary; tests named TestIntegration*). The daemon's
-# main_branch_test patrol runs it on the gastown rig once a day.
-# Docker-backed suites still need `gt slot run` around the call.
+# test-integration runs the //go:build integration tier (real tmux, bd, Dolt,
+# the gt binary; tests named TestIntegration*) and then the Docker-backed
+# packages whole. The daemon's main_branch_test patrol runs it on the gastown
+# rig once a day. INTEGRATION_GO_TEST swaps the runner so CI can collect JUnit
+# output from this one definition of the tier, e.g.
+#   make test-integration INTEGRATION_GO_TEST="gotestsum --junitfile j.xml --"
+INTEGRATION_GO_TEST ?= go test
 test-integration:
-	GT_TEST_DOCKER=$${GT_TEST_DOCKER:-1} go test -tags integration -run '^TestIntegration' -timeout 20m ./...
+	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
+	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' -timeout 20m ./...
+	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
 # macOS does not exempt from its first-run scan of new executables. It is the

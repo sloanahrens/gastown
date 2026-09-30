@@ -2,17 +2,37 @@
 
 Before you write or convert a test in this repository, read this page. It covers the rules that `internal/testpolicy` enforces, the seams that let unit tests avoid real processes and real time, and the procedure for converting a package. The worked examples come from the two packages converted first: `internal/tmux` and `internal/slot`. The design behind the rules is in [the test-rewrite design](plans/2026-09-27-test-rewrite-design.md).
 
+## The gate
+
+Two Makefile targets are the only test entry points. CI, `gt done`, the land path and a human at a shell all run them verbatim. The Makefile header states the same contract.
+
+| target | runs | Docker | when |
+|---|---|---|---|
+| `make gate` | `make lint`, then `go build ./...`, then the unit tier: the budget runner over `./...` beside the shell tests in `scripts/test-makefile.sh` | never | before every landing |
+| `make test-integration` | `go test -tags integration -run '^TestIntegration' ./...`, then every package in `internal/testpolicy/docker.txt` whole | yes, under `gt slot run` | post-merge: the daemon's `main_branch_test` patrol daily, and the nightly workflow |
+
+Exit codes, for both targets:
+- 0 means green.
+- Anything else means red. make exits 2 when a recipe fails and 130 when it is interrupted.
+
+Decide on the exit code only, never on the output. For a human reading the log, a lint failure ends with make's error line for the `lint` target, and a later stage ends with a `gate: FAILED at <stage>` line on stderr.
+
+`make gate` never starts a container and never takes the container-gate slot. Its recipe writes `GT_TEST_DOCKER=0` itself, so an inherited value cannot turn containers on. Do not wrap it in `gt slot run`. `make test-integration` writes `GT_TEST_DOCKER=1` and does start containers, so it runs under `gt slot run`.
+
+A package whose unit-tier test files call a container entry point is Docker-backed. The entry points are the `testutil` Dolt helpers, `WithDolt`, `DockerTestsEnabled` and `beads.RunTestContainerInit`. In `make gate` those tests skip, and `make test-integration` runs them. `TestDockerTier` in `internal/testpolicy` keeps `docker.txt` exact:
+- it fails on a Docker-backed package that is not listed;
+- it fails on a listed package that no longer calls an entry point.
+
+`scripts/makefile-gate_test.sh` pins the contract through a dry run of make (its `-n` flag): the stage order, no `gt slot run`, the opt-in written off, the deleted targets gone, and every `docker.txt` package in the integration tier.
+
 ## Two tiers
 
 | tier | what runs | build tag | test names | command |
 |---|---|---|---|---|
-| unit | in-process only: fakes, fake clock, `t.TempDir`, `git` | none | `TestX` | `make test` |
+| unit | in-process only: fakes, fake clock, `t.TempDir`, `git` | none | `TestX` | `make gate` |
 | integration | real tmux, Docker, bd, Dolt, the gt binary, real processes | `//go:build integration` | `TestIntegrationX` | `make test-integration` |
 
-- `make test` runs the unit tier through the budget runner (`internal/testpolicy/cmd/budget`).
-- `make test-integration` runs `go test -tags integration -run '^TestIntegration' ./...`. Tests that need Docker still need a `gt slot run` around the call.
-- The refinery gate runs only `make test`. The integration tier runs in two other places: the CI integration job on every push, and the daemon's `main_branch_test` patrol, which runs `make test-integration` on main once a day under its slot hold and escalates a red run (knobs `integration_interval`, default 24h, and `integration_timeout`, default 30m).
-- `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
+- `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. It is a measurement, not a gate. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
 
 ### The time budget
 
@@ -22,9 +42,9 @@ The budget ignores wall time and system time because both depend on the host. Me
 - `internal/testpolicy` used 1.8-2.1 s of user CPU in every run. Alone it took 4.5-5.2 s of wall. In a full `go test ./...` it took 13.2 s, and a gate at load 30 failed on it with every test passing.
 - `internal/git` used 13.7-15.5 s of user CPU in every run. Its system time ranged from 34 s to 303 s. Parallel fork and exec contend inside the kernel, and macOS charges that contention as system time to the process that waits. For the same reason, `internal/slot`'s system time went from 1.6 s to 11.1 s while its user time stayed at 0.1-0.2 s.
 
-Wall time is still reported. Over-budget and tracked packages print it, and so does every judged package whose wall time is over 10 s while its user CPU is not, under "over 10s of wall time (reported only)". A test's work can happen outside the process tree the budget measures, such as in a daemon it started or a server it waited on, and that work shows up only in wall time. `-timeout 20m` remains the hang detector. The static rules catch slowness that uses no CPU: `no-sleep` for sleeps and timers, and `no-network` for dials with deadlines.
+Wall time is still reported. Over-budget and tracked packages print it, and so does every judged package whose wall time is over 10 s while its user CPU is not, under "over 10s of wall time (reported only)". A test's work can happen outside the process tree the budget measures, such as in a daemon it started or a server it waited on, and that work shows up only in wall time. `-timeout 20m` in `make gate` remains the hang detector. go's 10-minute default is below what `internal/cmd`, `internal/refinery` and `internal/refinery/editorial` take on a loaded host. The static rules catch slowness that uses no CPU: `no-sleep` for sleeps and timers, and `no-network` for dials with deadlines.
 
-`-exec` turns off go test's result cache for `make test`, because a cached package runs no binary and there would be nothing to measure. A converted package that passes without a CPU measurement fails the run with a "CPU time was not recorded" line. So does a package in `overbudget.txt`. The runner never treats a missing measurement as under budget.
+`-exec` turns off go test's result cache for the converted packages in `make gate`, because a cached package runs no binary and there would be nothing to measure. A converted package that passes without a CPU measurement fails the run with a "CPU time was not recorded" line. So does a package in `overbudget.txt`. The runner never treats a missing measurement as under budget.
 
 The wrapper passes the test binary's result through. A binary killed by a signal kills the wrapper with the same signal where it can (SIGKILL, SIGTERM, SIGINT and SIGHUP), so go test still prints `signal: killed`. For any other signal, the wrapper prints "test binary killed by <signal>" and exits 128+N. The wrapper forwards SIGINT, SIGTERM and SIGQUIT to the binary. When `-timeout` runs out, go test sends SIGQUIT to the wrapper, waits its WaitDelay, and then SIGKILLs the wrapper, not the binary. A test binary that ignores or survives SIGQUIT is therefore orphaned and keeps running after go test gives up on it. A Go test binary does not do this: it dies on SIGQUIT and on its own `-test.timeout` first.
 
@@ -350,7 +370,7 @@ make test-timing PKGS=./internal/<pkg>/...                   # unit tier, taxed 
 go test -tags integration -run '^TestIntegration' -count=1 ./internal/<pkg>/...   # target 60 s or less
 ```
 
-A package that meets every rule leaves `unconverted.txt` even if it still uses more than the converted-package budget (10 s of user CPU in `make test`'s budget runner; see [The time budget](#the-time-budget)). In that case, list it in `internal/testpolicy/overbudget.txt` as `<package> <bead-id>`, where the bead tracks getting it under budget, and raise `maxOverBudget` to match. The budget runner does not fail a package on that list. Instead it prints the package's user CPU, system and wall time, and its bead, under "over budget (tracked)" on every run. TestPolicy rejects these entries:
+A package that meets every rule leaves `unconverted.txt` even if it still uses more than the converted-package budget (10 s of user CPU in the budget runner that `make gate` runs; see [The time budget](#the-time-budget)). In that case, list it in `internal/testpolicy/overbudget.txt` as `<package> <bead-id>`, where the bead tracks getting it under budget, and raise `maxOverBudget` to match. The budget runner does not fail a package on that list. Instead it prints the package's user CPU, system and wall time, and its bead, under "over budget (tracked)" on every run. TestPolicy rejects these entries:
 - one with a missing or malformed bead id;
 - one for a package that breaks a rule;
 - one for a package also in `unconverted.txt`;
