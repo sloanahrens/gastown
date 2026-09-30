@@ -182,3 +182,30 @@ func TestCheckFastTier_Verdicts(t *testing.T) {
 		}
 	}
 }
+
+// TestReportOver checks that a CPU overrun fails only an enforced run, says
+// so when it is reported only, and that a missing measurement always fails.
+func TestReportOver(t *testing.T) {
+	t.Parallel()
+	cpu := testpolicy.Overrun{Package: "internal/a", CPU: testpolicy.CPUTime{User: 11 * time.Second}}
+	unmeasured := testpolicy.Overrun{Package: "internal/b", Unmeasured: true}
+	for _, tc := range []struct {
+		name    string
+		over    []testpolicy.Overrun
+		enforce bool
+		fails   bool
+		line    string
+	}{
+		{"enforced", []testpolicy.Overrun{cpu}, true, true, "BUDGET: internal/a used 11s user CPU"},
+		{"loaded host", []testpolicy.Overrun{cpu}, false, false, "BUDGET (reported only, load 30.0 >= 16 CPUs; GATE_STRICT_BUDGET=1 enforces): internal/a"},
+		{"unmeasured on loaded host", []testpolicy.Overrun{unmeasured}, false, true, "BUDGET: internal/b passed but its CPU time was not recorded"},
+	} {
+		var out bytes.Buffer
+		if got := reportOver(&out, tc.over, 10*time.Second, tc.enforce, "load 30.0 >= 16 CPUs"); got != tc.fails {
+			t.Errorf("%s: reportOver = %v, want %v", tc.name, got, tc.fails)
+		}
+		if !strings.Contains(out.String(), tc.line) {
+			t.Errorf("%s: output %q, want it to contain %q", tc.name, out.String(), tc.line)
+		}
+	}
+}
