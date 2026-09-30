@@ -1040,3 +1040,152 @@ func TestRunDaemonStatus_ExitCodeReportsRunning(t *testing.T) {
 		t.Errorf("status with a running daemon: err = %v, want nil", err)
 	}
 }
+
+// scriptedJob stubs the supervisor commands against a job that is loaded until
+// its stop runs and loaded again by a bootstrap that succeeds. bootoutErr is
+// returned by the stop (which still unloads the job, as launchd does when it
+// reports failure for a job it removed); bootstrapFails is how many
+// bootstraps fail before one takes.
+type scriptedJob struct {
+	loaded         bool
+	bootoutErr     error
+	bootstrapFails int
+	bootstraps     int
+}
+
+func stubScriptedJob(t *testing.T, calls *supervisorCalls, job *scriptedJob) {
+	t.Helper()
+	prevInterval := supervisorLoadRetryInterval
+	t.Cleanup(func() { supervisorLoadRetryInterval = prevInterval })
+	supervisorLoadRetryInterval = time.Nanosecond
+	supervisorRun = func(a []string) error {
+		calls.argv = append(calls.argv, append([]string{}, a...))
+		switch a[1] {
+		case "bootout":
+			job.loaded = false
+			return job.bootoutErr
+		case "bootstrap":
+			job.bootstraps++
+			if job.bootstraps <= job.bootstrapFails {
+				return errors.New("Bootstrap failed: 5: Input/output error")
+			}
+			job.loaded = true
+		case "kickstart":
+			if !job.loaded {
+				return errors.New("Could not find service")
+			}
+		}
+		return nil
+	}
+	supervisorStateFor = func(kind string) templates.SupervisorState {
+		return templates.SupervisorState{Kind: kind, Loaded: job.loaded, LastExit: -1}
+	}
+}
+
+func provisionedLaunchd(t *testing.T) *daemonSupervisor {
+	t.Helper()
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	sup, err := detectDaemonSupervisor(town)
+	if err != nil || sup == nil {
+		t.Fatalf("detectDaemonSupervisor = (%v, %v), want a launchd supervisor", sup, err)
+	}
+	return sup
+}
+
+// launchd finishes removing a job after bootout returns, and a bootstrap that
+// lands in that window fails. The job has to end up loaded anyway: a reload
+// that gives up after one try leaves the town with no job and no daemon
+// (gt-4k3fj.11).
+func TestStartFromFile_RetriesABootstrapThatLosesTheRaceWithTheUnload(t *testing.T) {
+	sup := provisionedLaunchd(t)
+	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootstrapFails: 3}
+	stubScriptedJob(t, calls, job)
+
+	if err := sup.startFromFile(); err != nil {
+		t.Fatalf("startFromFile: %v", err)
+	}
+	if !job.loaded {
+		t.Error("the job was left unloaded")
+	}
+	if len(calls.argv) != 5 { // bootout, then three failed bootstraps and the one that took
+		t.Errorf("supervisor commands = %v, want a bootout then 4 bootstraps", calls.argv)
+	}
+}
+
+// A bootout that reports failure for a job launchd did remove must not end
+// the reload: the job is gone, so the load still has to happen.
+func TestStartFromFile_LoadsAfterABootoutThatFailedButUnloaded(t *testing.T) {
+	sup := provisionedLaunchd(t)
+	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootoutErr: errors.New("Boot-out failed: 5: Input/output error")}
+	stubScriptedJob(t, calls, job)
+
+	if err := sup.startFromFile(); err != nil {
+		t.Fatalf("startFromFile: %v", err)
+	}
+	if !job.loaded || job.bootstraps != 1 {
+		t.Errorf("loaded=%v bootstraps=%d, want the job loaded by one bootstrap", job.loaded, job.bootstraps)
+	}
+}
+
+// A bootout that failed and left the job loaded changed nothing: the job is
+// still supervising, so this is an error and not a bootstrap beside it.
+func TestStartFromFile_BootoutThatLeavesTheJobLoadedIsAnErrorWithoutABootstrap(t *testing.T) {
+	sup := provisionedLaunchd(t)
+	calls := &supervisorCalls{}
+	stubScriptedJob(t, calls, &scriptedJob{})
+	supervisorRun = func(a []string) error {
+		calls.argv = append(calls.argv, a)
+		return errors.New("boom")
+	}
+	supervisorStateFor = func(kind string) templates.SupervisorState {
+		return templates.SupervisorState{Kind: kind, Loaded: true, LastExit: -1}
+	}
+
+	if err := sup.startFromFile(); err == nil {
+		t.Fatal("startFromFile succeeded although the unload failed and the job is still loaded")
+	}
+	if len(calls.argv) != 1 {
+		t.Errorf("supervisor commands = %v, want only the failed bootout", calls.argv)
+	}
+}
+
+// When no bootstrap takes, the error says the daemon has no supervisor rather
+// than reporting a start that failed.
+func TestStartFromFile_GivesUpLoudlyWhenTheJobWillNotLoad(t *testing.T) {
+	sup := provisionedLaunchd(t)
+	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootstrapFails: 1 << 30}
+	stubScriptedJob(t, calls, job)
+
+	err := sup.startFromFile()
+	if err == nil || !strings.Contains(err.Error(), "no supervisor") {
+		t.Fatalf("startFromFile = %v, want an error naming the missing supervisor", err)
+	}
+	if job.bootstraps != supervisorLoadAttempts {
+		t.Errorf("bootstraps = %d, want %d", job.bootstraps, supervisorLoadAttempts)
+	}
+}
+
+// A daemon running outside a job the manager does not know is replaced by the
+// job, not kickstarted (which fails) and not left beside a job loaded next to
+// it (gt-4k3fj.11, gt-3jrm).
+func TestRestartDaemon_LoadsAJobTheManagerLostAndReplacesTheDaemonBesideIt(t *testing.T) {
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	// The lock: the hand-run daemon, then free, then the job's daemon.
+	calls := stubRestart(t, "darwin", plist, 1111, 0, 4242)
+	job := &scriptedJob{}
+	stubScriptedJob(t, calls, job)
+
+	via, pid, err := restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if via != "launchd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	}
+	if !calls.stopped || !job.loaded {
+		t.Errorf("stopped=%v loaded=%v, want the old daemon stopped and the job loaded", calls.stopped, job.loaded)
+	}
+}
