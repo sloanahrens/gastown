@@ -90,8 +90,6 @@ var containerSuitePackages = []string{
 	"internal/protocol",
 	"internal/rig",
 	"internal/testutil",
-	"internal/tui/convoy",
-	"internal/tui/feed",
 	"internal/witness",
 }
 

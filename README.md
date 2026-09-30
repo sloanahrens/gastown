@@ -494,8 +494,8 @@ gt sling <bead-id> <rig> --agent cursor   # Override runtime for this sling/spaw
 gt mayor attach             # Start Mayor session
 gt mayor start --agent auggie           # Run Mayor with a specific agent alias
 gt prime                    # Context recovery (run inside existing session)
-gt feed                     # Real-time activity feed (TUI)
-gt feed --problems          # Start in problems view (stuck agent detection)
+gt feed                     # Real-time activity feed
+gt feed --since 1h          # Events from the last hour
 ```
 
 **Built-in agent presets**: `claude`, `gemini`, `codex`, `kiro`, `cursor`, `auggie`, `amp`, `opencode`, `copilot`, `pi`, `omp`
@@ -530,8 +530,7 @@ gt config default-agent claude-glm
 gt escalate -s HIGH "description"  # Escalate a blocker
 gt escalate list               # List open escalations
 gt scheduler status            # Show scheduler state
-gt seance                      # Discover previous sessions
-gt seance --talk <id>          # Query a predecessor session
+gt session list                # List agent sessions
 ```
 
 ### Beads Integration
@@ -549,37 +548,15 @@ Gas Town includes built-in formulas for common workflows. See `internal/formula/
 
 ## Activity Feed
 
-`gt feed` launches an interactive terminal dashboard for monitoring all agent activity in real-time. It combines beads activity, agent events, and merge queue updates into a three-panel TUI:
-
-- **Agent Tree** - Hierarchical view of all agents grouped by rig and role
-- **Convoy Panel** - In-progress and recently-landed convoys
-- **Event Stream** - Chronological feed of creates, completions, slings, nudges, and more
+`gt feed` prints the town's event stream (`~/gt/.events.jsonl`) as plain text, one line per event: creates, completions, slings, nudges, merges, and patrol activity.
 
 ```bash
-gt feed                      # Launch TUI dashboard
-gt feed --problems           # Start in problems view
-gt feed --plain              # Plain text output (no TUI)
-gt feed --window             # Open in dedicated tmux window
+gt feed                      # Recent events (follows when stdout is a terminal)
 gt feed --since 1h           # Events from last hour
+gt feed --follow             # Stream new events
+gt feed --rig greenplace     # Filter to one rig
+gt feed --window             # Open in dedicated tmux window
 ```
-
-**Navigation:** `j`/`k` to scroll, `Tab` to switch panels, `1`/`2`/`3` to jump to a panel, `?` for help, `q` to quit.
-
-### Problems View
-
-At scale (20-50+ agents), spotting stuck agents in the activity stream becomes difficult. The problems view surfaces agents needing human intervention by analyzing structured beads data.
-
-Press `p` in `gt feed` (or start with `gt feed --problems`) to toggle the problems view, which groups agents by health state:
-
-| State | Condition |
-|-------|-----------|
-| **GUPP Violation** | Hooked work with no progress for an extended period |
-| **Stalled** | Hooked work with reduced progress |
-| **Zombie** | Dead tmux session |
-| **Working** | Active, progressing normally |
-| **Idle** | No hooked work |
-
-**Intervention keys** (in problems view): `n` to nudge the selected agent, `h` to handoff (refresh context).
 
 ## Monitoring & Health
 

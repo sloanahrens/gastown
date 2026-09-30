@@ -29,6 +29,5 @@ internal/session
 internal/telemetry
 internal/templates
 internal/testutil
-internal/tui/feed
 internal/util
 internal/witness

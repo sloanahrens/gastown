@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -30,7 +29,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/tui/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -90,7 +88,6 @@ var (
 	convoyListStatus   string
 	convoyListAll      bool
 	convoyListTree     bool
-	convoyInteractive  bool
 	convoyStrandedJSON bool
 	convoyCloseReason  string
 	convoyCloseNotify  string
@@ -179,9 +176,6 @@ var convoyCmd = &cobra.Command{
 	GroupID: GroupWork,
 	Short:   "Track batches of work across rigs",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if convoyInteractive {
-			return runConvoyTUI()
-		}
 		return requireSubcommand(cmd, args)
 	},
 	Long: `Manage convoys - the primary unit for tracking batched work.
@@ -373,9 +367,6 @@ func init() {
 	convoyListCmd.Flags().StringVar(&convoyListStatus, "status", "", "Filter by status (open, closed)")
 	convoyListCmd.Flags().BoolVar(&convoyListAll, "all", false, "Show all convoys (open and closed)")
 	convoyListCmd.Flags().BoolVar(&convoyListTree, "tree", false, "Show convoy + child status tree")
-
-	// Interactive TUI flag (on parent command)
-	convoyCmd.Flags().BoolVarP(&convoyInteractive, "interactive", "i", false, "Interactive tree view")
 
 	// Check flags
 	convoyCheckCmd.Flags().BoolVar(&convoyCheckDryRun, "dry-run", false, "Preview what would close without acting")
@@ -2822,19 +2813,6 @@ func formatWorkerAge(d time.Duration) string {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
-}
-
-// runConvoyTUI launches the interactive convoy TUI.
-func runConvoyTUI() error {
-	townBeads, err := getTownBeadsDir()
-	if err != nil {
-		return err
-	}
-
-	m := convoy.New(townBeads)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err = p.Run()
-	return err
 }
 
 // resolveConvoyNumber converts a numeric shortcut (1, 2, 3...) to a convoy ID.
