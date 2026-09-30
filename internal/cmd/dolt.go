@@ -272,25 +272,6 @@ formula's backup step (migration-backup-YYYYMMDD-HHMMSS/).`,
 	RunE: runDoltRollback,
 }
 
-var doltMigrateWispsCmd = &cobra.Command{
-	Use:   "migrate-wisps",
-	Short: "Migrate agent beads from issues to wisps table",
-	Long: `Create the wisps table infrastructure and migrate existing agent beads.
-
-This command:
-1. Creates the wisps table (dolt_ignored, same schema as issues)
-2. Creates auxiliary tables (wisp_labels, wisp_comments, wisp_events, wisp_dependencies)
-3. Copies agent beads (issue_type='agent') from issues to wisps
-4. Copies associated labels, comments, events, and dependencies
-5. Closes the originals in the issues table
-
-Idempotent — safe to run multiple times. Use --dry-run to preview.
-
-After migration, 'bd mol wisp list' will work and agent lifecycle
-(spawn, sling, work, done, nuke, respawn) uses the wisps table.`,
-	RunE: runDoltMigrateWisps,
-}
-
 var (
 	doltLogLines            int
 	doltLogFollow           bool
@@ -299,10 +280,8 @@ var (
 	doltCleanupForce        bool
 	doltCleanupAuthorizedBy string
 
-	doltMigrateWispsDry bool
-	doltMigrateWispsDB  string
-	doltRollbackDry     bool
-	doltRollbackList    bool
+	doltRollbackDry  bool
+	doltRollbackList bool
 )
 
 func init() {
@@ -322,7 +301,6 @@ func init() {
 	doltCmd.AddCommand(doltRecoverCmd)
 	doltCmd.AddCommand(doltCleanupCmd)
 	doltCmd.AddCommand(doltRollbackCmd)
-	doltCmd.AddCommand(doltMigrateWispsCmd)
 
 	doltKillImpostersCmd.Flags().BoolVar(&doltKillImpostersDry, "dry-run", false, "Preview without killing")
 
@@ -336,9 +314,6 @@ func init() {
 
 	doltRollbackCmd.Flags().BoolVar(&doltRollbackDry, "dry-run", false, "Show what would be restored without making changes")
 	doltRollbackCmd.Flags().BoolVar(&doltRollbackList, "list", false, "List available backups and exit")
-
-	doltMigrateWispsCmd.Flags().BoolVar(&doltMigrateWispsDry, "dry-run", false, "Preview what would be migrated without making changes")
-	doltMigrateWispsCmd.Flags().StringVar(&doltMigrateWispsDB, "db", "", "Target database (default: auto-detect from rig)")
 
 	rootCmd.AddCommand(doltCmd)
 }
@@ -1754,88 +1729,6 @@ func printBackupContents(backupPath, townRoot string) {
 			fmt.Printf("  Would restore: %s\n", style.Dim.Render(dst))
 			fmt.Printf("    From: %s\n", style.Dim.Render(beadsDir))
 		}
-	}
-}
-
-func runDoltMigrateWisps(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
-	}
-
-	// Determine which rigs to migrate
-	if doltMigrateWispsDB != "" {
-		// Migrate a specific rig
-		rigDir := filepath.Join(townRoot, doltMigrateWispsDB)
-		if _, err := os.Stat(rigDir); os.IsNotExist(err) {
-			return fmt.Errorf("rig directory not found: %s", rigDir)
-		}
-		fmt.Printf("%s Migrating: %s\n", style.Bold.Render("→"), doltMigrateWispsDB)
-		result, err := doltserver.MigrateAgentBeadsToWisps(townRoot, rigDir, doltMigrateWispsDry)
-		if err != nil {
-			return err
-		}
-		printMigrateWispsResult(result)
-		return nil
-	}
-
-	// Auto-detect: migrate all rigs that have beads databases
-	databases, err := doltserver.ListDatabases(townRoot)
-	if err != nil {
-		return fmt.Errorf("listing databases: %w", err)
-	}
-
-	for _, db := range databases {
-		// Skip non-rig databases
-		if db == "wl_commons" || testdb.IsTestDatabaseName(db) {
-			continue
-		}
-		// Find the rig directory for this database.
-		// The "hq" database lives at the town root itself, not townRoot/hq.
-		rigDir := filepath.Join(townRoot, db)
-		if db == "hq" {
-			rigDir = townRoot
-		} else if _, err := os.Stat(rigDir); os.IsNotExist(err) {
-			continue // Not a rig directory
-		}
-		fmt.Printf("\n%s Migrating: %s\n", style.Bold.Render("→"), db)
-		result, err := doltserver.MigrateAgentBeadsToWisps(townRoot, rigDir, doltMigrateWispsDry)
-		if err != nil {
-			fmt.Printf("  %s %s: %v\n", style.Bold.Render("✗"), db, err)
-			continue
-		}
-		printMigrateWispsResult(result)
-	}
-	return nil
-}
-
-func printMigrateWispsResult(result *doltserver.MigrateWispsResult) {
-	if result.WispsTableCreated {
-		fmt.Printf("  %s Created wisps table\n", style.Bold.Render("✓"))
-	}
-	for _, t := range result.AuxTablesCreated {
-		fmt.Printf("  %s Created %s\n", style.Bold.Render("✓"), t)
-	}
-	if result.AgentsCopied > 0 {
-		fmt.Printf("  %s Copied %d agent beads to wisps\n", style.Bold.Render("✓"), result.AgentsCopied)
-	}
-	if result.LabelsCopied > 0 {
-		fmt.Printf("  %s Copied %d labels\n", style.Bold.Render("✓"), result.LabelsCopied)
-	}
-	if result.CommentsCopied > 0 {
-		fmt.Printf("  %s Copied %d comments\n", style.Bold.Render("✓"), result.CommentsCopied)
-	}
-	if result.EventsCopied > 0 {
-		fmt.Printf("  %s Copied %d events\n", style.Bold.Render("✓"), result.EventsCopied)
-	}
-	if result.DepsCopied > 0 {
-		fmt.Printf("  %s Copied %d dependencies\n", style.Bold.Render("✓"), result.DepsCopied)
-	}
-	if result.AgentsClosed > 0 {
-		fmt.Printf("  %s Closed %d original agent beads\n", style.Bold.Render("✓"), result.AgentsClosed)
-	}
-	if result.AgentsCopied == 0 && len(result.AuxTablesCreated) == 0 && !result.WispsTableCreated {
-		fmt.Printf("  %s Already migrated (no changes needed)\n", style.Bold.Render("✓"))
 	}
 }
 

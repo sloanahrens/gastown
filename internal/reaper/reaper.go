@@ -421,7 +421,7 @@ var agentStateFieldPattern = regexp.MustCompile(`(?m)^agent_state:\s*(\S+)\s*$`)
 // they can occupy. Identity is the 'gt:agent' label: agent beads are created as
 // issue_type='task' (internal/beads/beads_agent.go), so a type of 'agent' matches
 // none of them, and their durable home is the issues table — wisps holds copies
-// the migration in internal/doltserver/wisps_migrate.go made. Reading the type
+// the retired gt dolt migrate-wisps command made. Reading the type
 // from wisps alone matched zero rows in every rig database, leaving the
 // reference protection below disarmed (gt-l6y9).
 const (
