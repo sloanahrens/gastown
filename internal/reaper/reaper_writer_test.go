@@ -288,3 +288,98 @@ func TestCloseInChunksSplitsBatches(t *testing.T) {
 		t.Errorf("chunk sizes %v", sizes)
 	}
 }
+
+// TestReapStopsAtTheFirstFailedPhase: a refused molecule-step close stops
+// the run before the absent-parent and stale phases select, so no id is
+// re-selected under another reason and the counts cover only what closed.
+func TestReapStopsAtTheFirstFailedPhase(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"mol-closed":  {id: "mol-closed", status: "closed", issueType: "molecule", createdAt: now},
+			"step-a":      {id: "step-a", status: "open", issueType: "task", createdAt: old},
+			"step-b":      {id: "step-b", status: "open", issueType: "task", createdAt: old},
+			"stale-other": {id: "stale-other", status: "open", issueType: "task", createdAt: old},
+		},
+		deps: []fakeDep{
+			{issueID: "step-a", dependsOnID: "mol-closed", depType: "parent-child"},
+			{issueID: "step-b", dependsOnID: "mol-closed", depType: "parent-child"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+	w := state.writer()
+	w.refuse = map[string]bool{"step-b": true}
+
+	res, err := Reap(db, w, "testdb", 24*time.Hour, false)
+	if !errors.Is(err, beads.ErrCloseRefused) {
+		t.Fatalf("Reap error = %v, want the step refusal", err)
+	}
+	if res.MoleculeStepsClosed != 1 || res.Reaped != 0 {
+		t.Errorf("MoleculeStepsClosed=%d Reaped=%d, want 1 and 0", res.MoleculeStepsClosed, res.Reaped)
+	}
+	if got := idsOf(w.callsOf("force-close")); !reflect.DeepEqual(got, []string{"step-a", "step-b"}) {
+		t.Errorf("force-close batches named %v, want only the step phase's [step-a step-b]", got)
+	}
+	if got := state.status("stale-other"); got != "open" {
+		t.Errorf("stale-other = %q after a failed first phase, want open (later phases must not run)", got)
+	}
+}
+
+// TestReapNeverClosesAnAgentWispInAnyPhase: every candidate query excludes
+// issue_type='agent', including the absent-parent one, so bd close --force
+// is never handed an agent bead.
+func TestReapNeverClosesAnAgentWispInAnyPhase(t *testing.T) {
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"agent-orphan": {id: "agent-orphan", status: "open", issueType: "agent", createdAt: old},
+			"task-orphan":  {id: "task-orphan", status: "open", issueType: "task", createdAt: old},
+		},
+		deps: []fakeDep{
+			{issueID: "agent-orphan", dependsOnID: "purged-mol", depType: "parent-child"},
+			{issueID: "task-orphan", dependsOnID: "purged-mol", depType: "parent-child"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+	w := state.writer()
+
+	if _, err := Reap(db, w, "testdb", 24*time.Hour, false); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	for _, id := range idsOf(w.callsOf("force-close")) {
+		if id == "agent-orphan" {
+			t.Fatal("Reap force-closed an agent wisp")
+		}
+	}
+	if got := state.status("task-orphan"); got != "closed" {
+		t.Errorf("task-orphan = %q, want closed (absent parent)", got)
+	}
+}
+
+// TestAutoCloseReportsBdRefusalWithAnAccurateCount: plain bd close may refuse
+// an issue the old UPDATE would have closed. The refusal is returned, and
+// Closed counts only what bd closed.
+func TestAutoCloseReportsBdRefusalWithAnAccurateCount(t *testing.T) {
+	state := newStaleIssueState("hq-a", "hq-b", "hq-c")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+	w := state.writer()
+	w.refuse = map[string]bool{"hq-b": true}
+
+	res, err := AutoClose(db, w, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, Force: true})
+	if !errors.Is(err, beads.ErrCloseRefused) {
+		t.Fatalf("AutoClose error = %v, want bd's refusal", err)
+	}
+	if res == nil || res.Closed != 2 {
+		t.Fatalf("AutoClose result = %+v, want Closed 2", res)
+	}
+	statuses := state.staleIssueStatuses()
+	if statuses["hq-b"] != "open" || statuses["hq-a"] != "closed" || statuses["hq-c"] != "closed" {
+		t.Errorf("statuses = %v", statuses)
+	}
+}

@@ -4748,8 +4748,8 @@ func doltSQLScript(townRoot, script string) error {
 
 // doltSQLScriptWithRetry executes a SQL script with exponential backoff on transient errors.
 // Callers must ensure scripts are idempotent, as partial execution may have occurred
-// before the retry. Retries on isDoltRetryableError, with fewer retries and
-// fewer retries and shorter backoff since multi-statement scripts are more expensive.
+// before the retry. Retries on isDoltRetryableError, with fewer retries and a
+// shorter backoff since multi-statement scripts are more expensive.
 func doltSQLScriptWithRetry(townRoot, script string) error {
 	const maxRetries = 3
 	const baseBackoff = 500 * time.Millisecond

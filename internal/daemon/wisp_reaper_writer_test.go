@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"database/sql/driver"
+	"errors"
 	"log"
 	"reflect"
 	"strings"
@@ -86,5 +87,34 @@ func TestReaperWriterDryRunNeedsNoBd(t *testing.T) {
 	}
 	if _, err := d.reaperWriter("no_such_db", false); err == nil {
 		t.Error("live reaperWriter for an unmapped database returned no error")
+	}
+}
+
+// TestAutoCloseDBLiveUnmappedDatabaseIsAnError: when no beads dir names the
+// swept database there is no bd to write through; with candidates to close,
+// the sweep for that database fails (the step reports it) and nothing is
+// written. Not parallel: it swaps reaperWriterFor.
+func TestAutoCloseDBLiveUnmappedDatabaseIsAnError(t *testing.T) {
+	db, fake := openReaperSweepFake(t, [][]driver.Value{
+		{"orphan-a", "abandoned", time.Now().UTC().Add(-60 * 24 * time.Hour)},
+	})
+	t.Cleanup(func() { _ = db.Close() })
+	orig := reaperWriterFor
+	reaperWriterFor = func(string, string) (reaper.Writer, error) {
+		return nil, errors.New("no beads directory names database \"orphan_db\"")
+	}
+	t.Cleanup(func() { reaperWriterFor = orig })
+
+	var buf strings.Builder
+	d := &Daemon{logger: log.New(&buf, "", 0), config: &Config{TownRoot: "/town"}}
+	closed, err := d.autoCloseDB(db, "orphan_db", reaper.MinStaleIssueAge, false)
+	if err == nil || !strings.Contains(err.Error(), "orphan_db") {
+		t.Errorf("autoCloseDB error = %v, want one naming the unmapped database", err)
+	}
+	if closed != 0 {
+		t.Errorf("closed = %d, want 0", closed)
+	}
+	if writes := fake.recordedWrites(); len(writes) != 0 {
+		t.Errorf("wrote SQL: %v", writes)
 	}
 }

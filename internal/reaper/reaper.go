@@ -767,9 +767,16 @@ func Reap(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool
 	moleculeStepIDQuery := fmt.Sprintf(
 		"SELECT w.id FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
 		moleculeStepJoin, openWispStatusWhere)
-	moleculeStepsClosed, stepErr := closeWispsSelected(ctx, db, w, moleculeStepIDQuery, nil,
+	// The phases run in order and stop at the first failure, as the single
+	// transaction they replace did: each later SELECT assumes the earlier
+	// phases' closes landed, and a failed phase's ids would otherwise be
+	// re-selected by the next one under a different reason.
+	moleculeStepsClosed, err := closeWispsSelected(ctx, db, w, moleculeStepIDQuery, nil,
 		"reaper: parent molecule closed", "closed molecule steps")
 	result.MoleculeStepsClosed = moleculeStepsClosed
+	if err != nil {
+		return result, err
+	}
 
 	// Close wisps whose parent molecule record was purged (absent parent).
 	// These are molecule step-wisps that the reaper should reap but the closedMoleculeStep
@@ -778,24 +785,29 @@ func Reap(db *sql.DB, w Writer, dbName string, maxAge time.Duration, dryRun bool
 	absentParentIDQuery := fmt.Sprintf(
 		"SELECT w.id FROM wisps w %s WHERE %s",
 		absentParentJoin, absentParentWhere)
-	absentParentClosed, absentErr := closeWispsSelected(ctx, db, w, absentParentIDQuery, nil,
+	absentParentClosed, err := closeWispsSelected(ctx, db, w, absentParentIDQuery, nil,
 		"reaper: parent molecule purged", "absent-parent molecule steps")
 	result.AbsentParentClosed = absentParentClosed
+	if err != nil {
+		return result, err
+	}
 
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
 	idQuery := fmt.Sprintf(
 		"SELECT w.id FROM wisps w %s %s %s WHERE %s",
 		parentJoin, moleculeStepExcludeJoin, mrJoin, whereClause)
-	totalReaped, staleErr := closeWispsSelected(ctx, db, w, idQuery, whereArgs,
+	totalReaped, err := closeWispsSelected(ctx, db, w, idQuery, whereArgs,
 		fmt.Sprintf("reaper: stale wisp past max-age %s", maxAge), "stale wisps")
 	result.Reaped = totalReaped
+	if err != nil {
+		return result, err
+	}
 
 	openQuery := "SELECT COUNT(*) FROM wisps WHERE status IN ('open', 'hooked', 'in_progress')"
 	if err := db.QueryRowContext(ctx, openQuery).Scan(&result.OpenRemain); err != nil {
-		return result, errors.Join(stepErr, absentErr, staleErr, fmt.Errorf("count open: %w", err))
+		return result, fmt.Errorf("count open: %w", err)
 	}
-
-	return result, errors.Join(stepErr, absentErr, staleErr)
+	return result, nil
 }
 
 // closeWispsSelected force-closes, through w, every wisp idQuery selects. The
