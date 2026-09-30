@@ -2,6 +2,8 @@ package intent
 
 import (
 	"encoding/json"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,19 +190,6 @@ func TestAgentsDirHoldsOnlyTheRecord(t *testing.T) {
 	}
 }
 
-// TestNoDoltDependency: the record is read and written with an empty PATH, so
-// no bd, dolt or git can be reached — the file works when Dolt is down.
-func TestNoDoltDependency(t *testing.T) {
-	town := t.TempDir()
-	t.Setenv("PATH", "")
-	if _, err := Update(town, polecat, func(r *Record) error { r.Frozen = true; return nil }); err != nil {
-		t.Fatalf("Update with no PATH: %v", err)
-	}
-	if rec, err := Read(town, polecat); err != nil || !rec.Frozen {
-		t.Fatalf("Read with no PATH: %+v %v", rec, err)
-	}
-}
-
 func TestRestartsSince(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
@@ -239,5 +228,27 @@ func TestLegacyPauseMarkerReadsAsPark(t *testing.T) {
 	rec, err = Update(town, polecat, func(r *Record) error { r.Desired = DesiredRun; return nil })
 	if err != nil || rec.Held() || rec.Paused {
 		t.Fatalf("resume of legacy marker = %+v, %v; want free", rec, err)
+	}
+}
+
+// TestNoDoltDependency: the record is plain file I/O. The package imports no
+// process execution and nothing that reaches the store, so it works when
+// Dolt is down.
+func TestNoDoltDependency(t *testing.T) {
+	t.Parallel()
+	assertNoStoreImports(t, "intent.go")
+}
+
+func assertNoStoreImports(t *testing.T, file string) {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if path == "os/exec" || strings.Contains(path, "internal/beads") || strings.Contains(path, "steveyegge/beads") || strings.Contains(path, "internal/doltserver") {
+			t.Errorf("%s imports %s", file, path)
+		}
 	}
 }

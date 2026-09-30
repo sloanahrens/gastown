@@ -208,6 +208,7 @@ func TestDeactivateNonExistent(t *testing.T) {
 }
 
 func TestActiveForIsFailClosed(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	if on, err := ActiveFor(town, "gastown"); on || err != nil {
 		t.Fatalf("no sentinel: (%v, %v), want (false, nil)", on, err)
@@ -231,20 +232,13 @@ func TestActiveForIsFailClosed(t *testing.T) {
 		t.Fatal("town sentinel: want active for town-level seats")
 	}
 
-	// A stat that fails for any reason but absence is an e-stop.
-	blocked := t.TempDir()
-	locked := filepath.Join(blocked, "town")
-	if err := os.MkdirAll(locked, 0o755); err != nil {
+	// A stat that fails for any reason but absence is an e-stop: a town root
+	// that is a regular file makes every sentinel path unstatable (ENOTDIR).
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	if os.Getuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
-	if on, err := ActiveFor(locked, "gastown"); !on || err == nil {
+	if on, err := ActiveFor(notADir, "gastown"); !on || err == nil {
 		t.Fatalf("unstatable sentinel: (%v, %v), want (true, error)", on, err)
 	}
 }

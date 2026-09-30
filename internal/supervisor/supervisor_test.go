@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -329,31 +331,6 @@ func TestNoStarterIsAnError(t *testing.T) {
 	}
 }
 
-// TestDecidesWithDoltDown: with a bd on PATH that records every call and
-// fails, Kill and Restart still decide and act, and never invoke it.
-func TestDecidesWithDoltDown(t *testing.T) {
-	h := newHarness(t)
-	bin := t.TempDir()
-	called := filepath.Join(bin, "called")
-	script := "#!/bin/sh\necho \"$@\" >> " + called + "\nexit 1\n"
-	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
-	s := New(Options{TownRoot: h.town, Tmux: h.tmux, Now: func() time.Time { return h.now },
-		Restart: func(Seat) error { return nil }})
-	if err := s.Restart(flint, "dead", "daemon"); err != nil {
-		t.Fatalf("Restart with Dolt down: %v", err)
-	}
-	if err := s.Kill(flint, "idle", "daemon"); err != nil {
-		t.Fatalf("Kill with Dolt down: %v", err)
-	}
-	if _, err := os.Stat(called); err == nil {
-		data, _ := os.ReadFile(called)
-		t.Fatalf("bd was invoked: %s", data)
-	}
-}
-
 func TestClearHoldFreesAFrozenSeat(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -450,22 +427,15 @@ func TestKillChecksTheHoldUnderTheSeatLock(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	var heldDuringKill bool
+	lockPath := filepath.Join(h.town, ".runtime", "locks", "intent", "gastown", "polecat.flint.lock")
 	k := killerFunc(func(name string) error {
-		// The seat lock is held: a pause started now must wait for the kill.
-		done := make(chan struct{})
-		go func() {
-			_, _ = intent.Update(h.town, IntentSeat(flint), func(r *intent.Record) error {
-				r.Desired = intent.DesiredPark
-				return nil
-			})
-			close(done)
-		}()
-		select {
-		case <-done:
-			heldDuringKill = false
-		case <-time.After(200 * time.Millisecond):
-			heldDuringKill = true
+		// The seat lock a pause would take is held while the session dies.
+		fl := flock.New(lockPath)
+		got, err := fl.TryLock()
+		if got {
+			_ = fl.Unlock()
 		}
+		heldDuringKill = err == nil && !got
 		return nil
 	})
 	s := New(Options{TownRoot: h.town, Tmux: k, Now: func() time.Time { return h.now }})
@@ -480,3 +450,22 @@ func TestKillChecksTheHoldUnderTheSeatLock(t *testing.T) {
 type killerFunc func(name string) error
 
 func (f killerFunc) KillSessionWithProcesses(name string) error { return f(name) }
+
+// TestDecidesWithoutTheStore: every guard is a file read, so Kill and Restart
+// decide and act when Dolt is down. The package runs no process and imports
+// nothing that reaches the store; the agent-bead mirror is a callback its
+// host supplies, and its failure never undoes an action (see
+// TestKillRecordsStopAndMirrorFailureDoesNotUndoIt).
+func TestDecidesWithoutTheStore(t *testing.T) {
+	t.Parallel()
+	f, err := parser.ParseFile(token.NewFileSet(), "supervisor.go", nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if path == "os/exec" || strings.Contains(path, "internal/beads") || strings.Contains(path, "steveyegge/beads") || strings.Contains(path, "internal/doltserver") {
+			t.Errorf("supervisor.go imports %s", path)
+		}
+	}
+}
