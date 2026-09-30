@@ -34,7 +34,6 @@ type tmuxOps interface {
 	GetPaneID(session string) (string, error)
 	ConfigureGasTownSession(session string, theme *tmux.Theme, rig, worker, role string) error
 	WaitForCommand(session string, excludeCommands []string, timeout time.Duration) error
-	SetAutoRespawnHook(session string) error
 	AcceptStartupDialogs(session string) error
 	AcceptWorkspaceTrustDialog(session string) error
 	AcceptBypassPermissionsWarning(session string) error
@@ -124,8 +123,6 @@ func (m *Manager) Start(agentOverride string) error {
 		}
 
 		// Session exists but agent is dead. Kill and recreate uniformly.
-		// The auto-respawn hook (SetAutoRespawnHook) handles clean exits at the
-		// tmux level — Go doesn't need to distinguish dead pane vs zombie shell.
 		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 		m.stopNudgePoller(sessionID)
 		if err := t.KillSessionWithProcesses(sessionID); err != nil {
@@ -184,10 +181,9 @@ func (m *Manager) Start(agentOverride string) error {
 		return fmt.Errorf("creating tmux session: %w", err)
 	}
 
-	// PATCH-010: Set remain-on-exit IMMEDIATELY after session creation.
-	// This ensures the pane stays if Claude exits before hooks are fully set.
-	// The pane will show "[Exited]" status but remain available for respawn.
-	_ = t.SetRemainOnExit(sessionID, true)
+	// No remain-on-exit: it only served the tmux auto-respawn hook, which is
+	// gone (gt-4k3fj.3). When Claude exits the session ends, and the daemon's
+	// supervisor restarts the Deacon within its budget.
 
 	// Record agent's pane_id for ZFC-compliant liveness checks (gt-qmsx).
 	if paneID, err := t.GetPaneID(sessionID); err == nil {
@@ -208,16 +204,6 @@ func (m *Manager) Start(agentOverride string) error {
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
 	if realTmux, ok := t.(*tmux.Tmux); ok {
 		_ = session.TrackSessionPID(m.townRoot, sessionID, realTmux)
-	}
-
-	// PATCH-010: Set auto-respawn hook for Deacon resilience.
-	// When Claude exits (for any reason), tmux will automatically respawn it.
-	// This prevents the crash loop where daemon repeatedly restarts Deacon.
-	// Note: SetAutoRespawnHook calls SetRemainOnExit again (harmless, already set above).
-	if err := t.SetAutoRespawnHook(sessionID); err != nil {
-		// Non-fatal: Deacon still works, just won't auto-respawn on crash
-		// Daemon will still restart it, but with a delay
-		fmt.Printf("warning: failed to set auto-respawn hook for deacon: %v\n", err)
 	}
 
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear.

@@ -179,8 +179,9 @@ or `POST /telemetry` with rate limit event
   zombie grace period, role config, theme, pane-died hook
 - `internal/dog/session_manager.go` — `Start()` (line ~85): dog session via
   unified `session.StartSession()`
-- `internal/tmux/tmux.go` — `NewSessionWithCommand()`: single-command session creation,
-  `SetAutoRespawnHook()` (line ~3126): pane-died auto-respawn with 3s debounce
+- `internal/tmux/tmux.go` — `NewSessionWithCommand()`: single-command session creation
+  (the pane-died auto-respawn hook was deleted in gt-4k3fj.3; the daemon's
+  supervisor restarts dead sessions)
 - `internal/tmux/tmux.go` — `KillSessionWithProcesses()` (line ~499): 8-step teardown
   (process group → tree walk → SIGTERM → 2s grace → SIGKILL → pane → session)
 

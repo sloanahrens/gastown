@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -137,7 +138,14 @@ func (c *OrphanSessionCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	t := tmux.NewTmux()
+	// Orphans belong to no seat, so they go through KillStray: a town e-stop
+	// refuses, and every kill is logged with its actor (gt-4k3fj.3). A test
+	// lister that can kill is the killer.
+	var killer supervisor.Killer = tmux.NewTmux()
+	if k, ok := c.sessionLister.(supervisor.Killer); ok {
+		killer = k
+	}
+	sup := fixSupervisor(ctx.TownRoot, killer)
 	var lastErr error
 
 	for _, sess := range c.orphanSessions {
@@ -149,8 +157,7 @@ func (c *OrphanSessionCheck) Fix(ctx *CheckContext) error {
 		// Log pre-death event for crash investigation (before killing)
 		_ = events.LogFeed(events.TypeSessionDeath, sess,
 			events.SessionDeathPayload(sess, "unknown", "orphan cleanup", "gt doctor"))
-		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-		if err := t.KillSessionWithProcesses(sess); err != nil {
+		if err := sup.KillStray(sess, "orphan session (no known rig)", doctorActor); err != nil {
 			lastErr = err
 		}
 	}

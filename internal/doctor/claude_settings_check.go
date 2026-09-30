@@ -797,9 +797,12 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 				sf.agentType == "deacon" || sf.agentType == "mayor" {
 				running, _ := t.HasSession(sf.sessionName)
 				if running {
-					// Cycle the agent by killing and letting gt up restart it.
-					// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-					_ = t.KillSessionWithProcesses(sf.sessionName)
+					// Cycle the agent by killing it through the supervisor and
+					// letting the daemon restart it. A refusal (parked seat,
+					// e-stop) is reported rather than dropped.
+					if err := killSessionForFix(ctx.TownRoot, t, sf.sessionName, "restart to apply recreated settings"); err != nil {
+						errors = append(errors, fmt.Sprintf("not restarting %s: %v", sf.sessionName, err))
+					}
 				}
 			}
 		}

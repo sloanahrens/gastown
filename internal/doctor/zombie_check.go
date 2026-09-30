@@ -177,8 +177,9 @@ func (c *ZombieSessionCheck) Fix(ctx *CheckContext) error {
 		_ = events.LogFeed(events.TypeSessionDeath, sess,
 			events.SessionDeathPayload(sess, "unknown", "zombie cleanup", "gt doctor"))
 
-		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-		if err := t.KillSessionWithProcesses(sess); err != nil {
+		// Through the supervisor: a parked seat or an e-stop refuses, and the
+		// kill is logged with its actor (gt-4k3fj.3).
+		if err := killSessionForFix(ctx.TownRoot, t, sess, "zombie cleanup"); err != nil {
 			lastErr = err
 		}
 	}

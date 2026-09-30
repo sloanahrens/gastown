@@ -16,6 +16,7 @@ type sessionTmux interface {
 	KillSession(name string) error
 	KillSessionWithProcesses(name string) error
 	IsAgentAliveChecked(session string) (bool, error)
+	PaneDead(session string) (bool, error)
 	CheckSessionHealth(session string, maxInactivity time.Duration) tmux.ZombieStatus
 	IsAvailable() bool
 	GetSessionCreatedTime(name string) (time.Time, error)
