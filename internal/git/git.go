@@ -1943,21 +1943,26 @@ func isUnmergedPorcelainStatus(code string) bool {
 }
 
 // skipWorktreeFiles returns a set of file paths that have the skip-worktree
-// bit set (sparse-checkout hidden files). Uses `git ls-files -v` and filters
-// for lines starting with 'S' (uppercase = skip-worktree). Non-fatal: returns
+// bit set (sparse-checkout hidden files). Uses `git ls-files -v -z` and filters
+// for entries starting with 'S' (uppercase = skip-worktree). Non-fatal: returns
 // empty map on error so callers degrade gracefully.
+//
+// The keys are real filenames. Without -z, ls-files C-quotes a path with a
+// quote, backslash or non-ASCII byte, while Status() looks each porcelain path
+// up after unquoting it (unquoteGitPath) — a quoted key would never match.
+// -z emits paths verbatim, NUL-terminated, so nothing needs unquoting here.
 func (g *Git) skipWorktreeFiles() map[string]bool {
-	out, err := g.run("ls-files", "-v")
+	out, err := g.runOutput("ls-files", "-v", "-z")
 	if err != nil || out == "" {
 		return nil
 	}
 	result := make(map[string]bool)
-	for _, line := range strings.Split(out, "\n") {
+	for _, entry := range strings.Split(out, "\x00") {
 		// Format: "<flag> <path>" where flag is uppercase letter for skip-worktree
-		if len(line) < 3 || line[0] != 'S' {
+		if len(entry) < 3 || entry[0] != 'S' {
 			continue
 		}
-		result[line[2:]] = true
+		result[entry[2:]] = true
 	}
 	return result
 }
