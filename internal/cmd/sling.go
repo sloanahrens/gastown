@@ -1504,6 +1504,12 @@ func sweepStaleSlingFlocks(dir string) {
 // indefinite blocking if a sling gets stuck.
 // See: https://github.com/steveyegge/gastown/issues/3114
 func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
+	return tryAcquireSlingAssigneeLockWith(townRoot, targetAgent, time.Sleep)
+}
+
+// tryAcquireSlingAssigneeLockWith is tryAcquireSlingAssigneeLock with the
+// wait between attempts explicit.
+func tryAcquireSlingAssigneeLockWith(townRoot, targetAgent string, sleep func(time.Duration)) (func(), error) {
 	lockDir := filepath.Join(townRoot, ".runtime", "locks", "sling")
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating sling lock dir: %w", err)
@@ -1527,7 +1533,7 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 			return nil, fmt.Errorf("acquiring assignee sling lock for %s: %w", targetAgent, err)
 		}
 		if attempt < maxAttempts {
-			time.Sleep(time.Duration(retryInterval) * time.Millisecond)
+			sleep(time.Duration(retryInterval) * time.Millisecond)
 		}
 	}
 
