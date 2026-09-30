@@ -990,9 +990,12 @@ func (m *DoltServerManager) startLocked() error {
 		return fmt.Errorf("starting dolt sql-server: %w", err)
 	}
 
-	// Don't wait for it - it's a long-running server
+	// Don't wait for it - it's a long-running server. exited closes when the
+	// child is reaped, so startup can tell "still binding" from "died".
+	exited := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
+		close(exited)
 		if closeErr := logFile.Close(); closeErr != nil {
 			m.logger("Warning: failed to close dolt log file: %v", closeErr)
 		}
@@ -1008,8 +1011,19 @@ func (m *DoltServerManager) startLocked() error {
 
 	m.logger("Started Dolt SQL server (PID %d) on %s:%d", cmd.Process.Pid, m.config.Host, m.config.Port)
 
-	// Wait a moment for server to initialize
-	time.Sleep(500 * time.Millisecond)
+	// Wait a moment for server to initialize. A dolt that cannot bind exits
+	// here, so wake early on exit instead of sleeping through it.
+	select {
+	case <-exited:
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// The port probe below cannot tell our server from a foreign process
+	// holding the port (gt-4cu7u), so establish that the process we started
+	// is the one that owns it before trusting the probe.
+	if err := m.verifyStartedLocked(cmd.Process, exited); err != nil {
+		return err
+	}
 
 	// Verify it started successfully
 	if err := m.checkHealthLocked(); err != nil {
@@ -1017,6 +1031,43 @@ func (m *DoltServerManager) startLocked() error {
 	}
 
 	return nil
+}
+
+// portListenerPIDFn returns the PID listening on port, or 0 when the port is
+// free or the listener cannot be identified. A var so tests can stand in.
+var portListenerPIDFn = func(port int) int {
+	pid, _ := doltserver.PortHolder(port)
+	return pid
+}
+
+// verifyStartedLocked confirms the dolt process startLocked just spawned is
+// still alive and is not displaced by a different listener on the configured
+// port. Either failure means the start did not take: a foreign holder (e.g.
+// Docker) makes dolt fail to bind, yet answers the health probe. On failure
+// it drops the tracked process and pid file (both name a server that does not
+// exist) and returns an error so restartWithBackoff counts the attempt.
+// An unidentifiable listener passes: the check fails only on proof.
+// Must be called with m.mu held.
+func (m *DoltServerManager) verifyStartedLocked(proc *os.Process, exited <-chan struct{}) error {
+	var failure error
+	select {
+	case <-exited:
+		failure = fmt.Errorf("dolt sql-server (PID %d) exited during startup; port %d is likely held by another process",
+			proc.Pid, m.config.Port)
+	default:
+		if holder := portListenerPIDFn(m.config.Port); holder > 0 && holder != proc.Pid {
+			// os.Process refuses to signal a reaped child, so PID reuse is no risk.
+			_ = sendKillSignal(proc)
+			failure = fmt.Errorf("port %d is held by PID %d, not the dolt sql-server we started (PID %d)",
+				m.config.Port, holder, proc.Pid)
+		}
+	}
+	if failure == nil {
+		return nil
+	}
+	m.process = nil
+	_ = os.Remove(m.pidFile())
+	return failure
 }
 
 // Stop stops the Dolt SQL server.
