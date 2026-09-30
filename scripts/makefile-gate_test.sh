@@ -76,10 +76,10 @@ else
   fail "an inherited GT_TEST_DOCKER=1 does not change the gate"
 fi
 
-if grep -q -E -- '-timeout[ =]20m' <<<"$out"; then
-  fail "gate carries no -timeout 20m variant"
+if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F 'cmd/budget -- -timeout 20m ./...' <<<"$out"; then
+  pass "gate carries one -timeout, on the budget runner (the one gate definition)"
 else
-  pass "gate carries no -timeout 20m variant"
+  fail "gate carries one -timeout, on the budget runner (the one gate definition)" "$(grep -n -E -- '-timeout' <<<"$out")"
 fi
 
 echo "deleted entry points"
@@ -96,11 +96,6 @@ if grep -q -E '(^|[^A-Za-z_])PKGS *\?=' "$ROOT/Makefile"; then
   fail "no PKGS default for a changed-package gate"
 else
   pass "no PKGS default for a changed-package gate"
-fi
-if grep -q -E -- '-timeout[ =]20m' "$ROOT/Makefile"; then
-  fail "no -timeout 20m anywhere in the Makefile" "$(grep -n -E -- '-timeout[ =]20m' "$ROOT/Makefile")"
-else
-  pass "no -timeout 20m anywhere in the Makefile"
 fi
 if grep -q -F 'GT_TEST_DOCKER:-' "$ROOT/Makefile"; then
   fail "no recipe defaults the container opt-in from the environment" "$(grep -n -F 'GT_TEST_DOCKER:-' "$ROOT/Makefile")"

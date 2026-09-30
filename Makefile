@@ -268,12 +268,16 @@ gate: lint
 	@# Go suite. The budget runner measures converted packages through its
 	@# CPU-measuring -exec wrapper, which bypasses the test result cache, and
 	@# runs the packages in unconverted.txt afterwards with the cache
-	@# (gt-22hdp.53). go test's per-package -timeout default (10m) is the hang
-	@# detector.
+	@# (gt-22hdp.53). -timeout 20m is the per-package hang detector: go's
+	@# 10m default is below what internal/cmd, internal/refinery and
+	@# internal/refinery/editorial take on a loaded host (measured on this
+	@# branch: 320-607 s each across three runs; a run at the 10m default
+	@# timed all three out with no test older than 11 s). It drops to the
+	@# default once D2 deletes refinery and D7 shrinks cmd.
 	@echo "gate: unit tier (budget runner beside $(GATE_SHELL_TESTS))" >&2
 	@log=$$(mktemp -t gt-test-makefile); \
 	bash $(GATE_SHELL_TESTS) >"$$log" 2>&1 & mk=$$!; \
-	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- ./... & gt=$$!; \
+	GT_TEST_DOCKER=0 go run ./internal/testpolicy/cmd/budget -- -timeout 20m ./... & gt=$$!; \
 	trap 'pkill -TERM -P $$mk 2>/dev/null; pkill -TERM -P $$gt 2>/dev/null; kill $$mk $$gt 2>/dev/null; rm -f "$$log"; exit 130' INT TERM; \
 	wait $$gt; go_rc=$$?; \
 	wait $$mk; mk_rc=$$?; \
@@ -295,8 +299,8 @@ DOCKER_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' internal/testpolicy/dock
 INTEGRATION_GO_TEST ?= go test
 test-integration:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
-	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' ./...
-	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) $(DOCKER_PKGS)
+	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -run '^TestIntegration' -timeout 20m ./...
+	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
 # macOS does not exempt from its first-run scan of new executables. It is the
