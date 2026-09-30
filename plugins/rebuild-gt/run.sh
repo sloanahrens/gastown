@@ -9,12 +9,12 @@
 # session it spawns keep executing the binary at their install path, so a
 # stale binary leaves merged fixes inert for as long as detection goes
 # unrepaired (gt-oqbw). So this plugin installs — through scripts/install-gt.sh,
-# the same locked path the refinery's post-merge hook uses (claude-7fc) — and
+# the same locked path `make install` runs (claude-7fc, gt-z0l3s) — and
 # leaves the daemon restart to the daemon: install-gt.sh writes
 # restart-pending.json and the daemon exits for launchd at its idle point, so
-# no install kills in-flight plugins. It is the backstop: the post-merge hook
-# installs most merges first, and this plugin also escalates when the daemon
-# has not come into force (rebuild-gt:daemon-not-in-force).
+# no install kills in-flight plugins. It is the backstop for landings nobody
+# installed by hand, and it also escalates when the daemon has not come into
+# force (rebuild-gt:daemon-not-in-force).
 #
 # Exit codes are this script's contract with the daemon (plugin.md sets
 # [execution] allow_deferred_exit = true, without which the daemon reads exit
@@ -300,11 +300,10 @@ fi
 # worktree being dirty or on the wrong branch.
 MAX_COMMITS_BEHIND=${REBUILD_GT_MAX_COMMITS_BEHIND:-20}
 # A merged commit that is not in force is a live defect, not a rounding error
-# (gt-oqbw, gt-ww20, gt-rbfj): one commit behind is due. The post-merge hook
-# (scripts/install-after-merge.sh) normally installs first; this plugin is the
-# backstop for merges that bypass it (direct pushes, orphan-path merges, a
-# failed hook), so waiting for a batch of commits only lengthens the inert
-# window (claude-7fc).
+# (gt-oqbw, gt-ww20, gt-rbfj): one commit behind is due. Whoever lands
+# normally runs `make install` right after; this plugin is the backstop for
+# landings nobody installed, so waiting for a batch of commits only lengthens
+# the inert window (claude-7fc).
 THRESHOLD=${REBUILD_GT_INSTALL_THRESHOLD:-1}
 
 # DUE is read from this same unconditional staleness call, before any bail
@@ -471,7 +470,7 @@ if [ "$BRANCH" != "main" ]; then
 fi
 
 # RIG_ROOT has no self-serve pull otherwise: without this, the build uses
-# whatever commit a human last checked out, and 'make safe-install' fails its
+# whatever commit a human last checked out, and 'make install-local' fails its
 # check-up-to-date gate against origin/main on every run until a human pulls
 # (gt-4g1m). ff-only only: a real divergence must never be reset --hard away.
 #
@@ -484,7 +483,7 @@ fi
 #
 # The sync is a write to mayor/rig, and every write to mayor/rig happens under
 # install-gt.sh's flock (claude-7fc), so it cannot move the tree under a build
-# the post-merge hook is running. The lock is released right after the sync,
+# a `make install` is running. The lock is released right after the sync,
 # before install-gt.sh runs and takes it again itself. A lock that stays busy
 # means an install is running right now: defer to the next heartbeat, as
 # install-gt's own exit 3 does.
@@ -743,7 +742,7 @@ log "Installing gt from $RIG_ROOT ($BEHIND commits behind) through scripts/insta
 # installs, verifies (rolling back on a failed smoke check), syncs formulas and
 # plugins, and writes the restart-pending marker; the daemon restarts itself at
 # its idle point, so nothing here kills in-flight plugins — this one included.
-# It runs under the install lock, which the post-merge hook takes too, so the two
+# It runs under the install lock, which `make install` takes too, so the two
 # can never build into one output. What it builds is RIG_ROOT's HEAD, which the
 # sync above fast-forwarded to origin/main (SKIP_UPDATE_CHECK stays inside it,
 # gt-9jax).
@@ -767,7 +766,7 @@ fi
 # to the plugin log until it finished, and read as hung (gt-kox0).
 INSTALL_LOG=$(mktemp)
 set +e
-# INSTALL_GT_LOCK_WAIT: a post-merge install holding the lock means one is
+# INSTALL_GT_LOCK_WAIT: another install holding the lock means one is
 # running right now; wait a minute, not install-gt's default 5, then defer
 # (exit 3). Waiting longer only keeps this plugin running, which keeps the
 # daemon non-idle and delays its upgrade restart.

@@ -1,4 +1,4 @@
-.PHONY: build install safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check presubmit
+.PHONY: build install install-local safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check presubmit
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -143,8 +143,7 @@ endif
 	@$(MAKE) --no-print-directory check-no-downgrade
 
 # check-no-downgrade: refuse a build whose commit is not a descendant of the
-# installed binary's. Shared by install and safe-install (install had no such
-# guard before gt-o848l).
+# installed binary's (gt-o848l). Run by install-local through check-forward-only.
 check-no-downgrade:
 ifndef SKIP_FORWARD_CHECK
 	@BINARY_COMMIT=$$($(INSTALL_DIR)/$(BINARY) version --verbose 2>/dev/null | grep -o '@[a-f0-9]*' | head -1 | tr -d '@'); \
@@ -169,53 +168,24 @@ check-install-path:
 		echo '  export PATH="$(INSTALL_DIR):$$PATH"'; \
 	fi
 
-install: check-up-to-date check-no-downgrade build
-	@# Atomic replace (temp + rename). Do NOT go back to `rm -f` then `cp`:
-	# that leaves the live path missing or holding a partial binary, and
-	# exec'ing a partial Go binary is SIGKILLed on macOS (gt-0het).
-	@bash $(CURDIR)/scripts/install-binary.sh $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR) $(BINARY)
-	@# Nuke any stale go-install binaries that shadow the canonical location
-	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY); do \
-		if [ -f "$$bad" ]; then \
-			echo "Removing stale $$bad (use make install, not go install)"; \
-			rm -f "$$bad"; \
-		fi; \
-	done
-	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
-	@$(MAKE) --no-print-directory check-install-path
-	@# Restart only a running daemon: `gt daemon status` exits non-zero when
-	@# it is not running (gt-o848l), so a deliberately stopped town stays
-	@# stopped. It used to exit 0 either way, and this step started a stopped
-	@# daemon mid-shutdown.
-	@# Restart daemon so it picks up the new binary: a stale daemon is a
-	@# recurring source of bugs (wrong session prefixes, etc.). Through the
-	@# supervisor ('gt daemon restart' = launchctl kickstart -k), never
-	@# stop-then-start: gt daemon stop unloads the launchd job, so the daemon
-	@# is unsupervised until the start lands and stays down if that start
-	@# fails (gt-sq9e).
-	@if $(INSTALL_DIR)/$(BINARY) daemon status >/dev/null 2>&1; then \
-		echo "Restarting daemon to pick up new binary..."; \
-		$(INSTALL_DIR)/$(BINARY) daemon restart && \
-			echo "Daemon restarted." || \
-			echo "Warning: daemon restart failed (start manually with: gt daemon restart)"; \
-	fi
-	@# Sync plugins from build repo to town runtime directories.
-	@# Prevents drift when plugin fixes merge but runtime dirs are stale.
-	@# Fail-open by design: a stale runtime copy must not fail an install.
-	@# But NOT silent — a failed sync is reported, so the drift is visible
-	@# instead of hidden behind a success line. `plugin sync` resolves the
-	@# town root from the CWD, so it fails outright when this checkout lives
-	@# outside the town root (LocalRepo override).
-	@$(INSTALL_DIR)/$(BINARY) plugin sync --source $(CURDIR)/plugins || \
-		echo "Warning: plugin sync failed — plugins under <town_root>/plugins may be stale (see plugins/README.md)"
+# install: THE way to install gt into a town (gt-z0l3s). Runs
+# scripts/install-gt.sh, which installs origin/main (SHA=<ref> picks another
+# merged commit) from <town>/gastown/mayor/rig whichever clone you run it in:
+# lock, fast-forward, build, atomic swap, smoke check with rollback, formula
+# and plugin sync, then daemon/restart-pending.json — the daemon restarts
+# itself once idle. It never kickstarts the daemon. Exit codes 0 installed or
+# already current, 1 failed (rolled back), 2 refused, 3 busy (retry later).
+install:
+	@bash $(CURDIR)/scripts/install-gt.sh $(if $(SHA),--sha $(SHA))
 
-# safe-install: Replace binary WITHOUT restarting daemon or killing sessions.
-# Use this for automated rebuilds (e.g., rebuild-gt plugin). Sessions pick up
-# the new binary on their next natural cycle/handoff.
-safe-install: check-up-to-date check-forward-only build
-	@# Atomic replace, shared with `install`. The temp file is created with a
-	@# unique name in the destination directory, so concurrent installs cannot
-	@# interleave into one another's copy (gt-0het).
+# install-local: build THIS checkout and swap it into $(INSTALL_DIR). No daemon
+# restart, no plugin sync, no lock. For a machine with no town yet (README,
+# docs/INSTALLING.md); in a town it is install-gt.sh's build step, not a way
+# to deploy — use make install.
+install-local: check-up-to-date check-forward-only build
+	@# Atomic replace (temp + rename). Do NOT go back to `rm -f` then `cp`:
+	@# that leaves the live path missing or holding a partial binary, and
+	@# exec'ing a partial Go binary is SIGKILLed on macOS (gt-0het).
 	@bash $(CURDIR)/scripts/install-binary.sh $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR) $(BINARY)
 	@# Nuke any stale go-install binaries that shadow the canonical location
 	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY); do \
@@ -226,7 +196,11 @@ safe-install: check-up-to-date check-forward-only build
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY) (daemon NOT restarted)"
 	@$(MAKE) --no-print-directory check-install-path
-	@echo "Sessions will pick up new binary on next cycle."
+
+# safe-install: old name of install-local, kept only because an install-gt.sh
+# copy older than gt-z0l3s (a mayor/rig checkout not yet fast-forwarded past
+# it) still asks for it after fast-forwarding. Not a way to deploy.
+safe-install: install-local
 
 # check-version-tag: Verify that if HEAD is tagged vX.Y.Z, the Version constant
 # in internal/cmd/version.go equals X.Y.Z. No-op when HEAD is untagged, so it is
@@ -390,8 +364,6 @@ test-makefile:
 	bash -n scripts/install-gt.sh
 	bash -n scripts/lib/install-gt-lib.sh
 	bash scripts/install-gt_test.sh
-	bash -n scripts/install-after-merge.sh
-	bash scripts/install-after-merge_test.sh
 	bash -n plugins/dolt-log-rotate/run.sh
 	bash -n plugins/dolt-log-rotate/run_test.sh
 	bash plugins/dolt-log-rotate/run_test.sh

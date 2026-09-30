@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
-# install-gt.sh — build, install and verify gt at one commit. The single
-# install path, shared by the refinery's post-merge hook
-# (scripts/install-after-merge.sh) and the rebuild-gt plugin, so there is one
-# build under one lock and not two builds racing into one output (claude-7fc;
-# design: docs/plans/2026-09-23-install-gt-after-merge-design.md).
+# install-gt.sh — THE way to install gt into a running town (gt-z0l3s). Run it
+# with no arguments (or `make install`) from any gastown clone: it installs
+# origin/main. The rebuild-gt plugin calls it with --source rebuild-gt; a
+# landing's post_land_command may call it with --source post-land. There is
+# one build under one lock, never two builds racing into one output
+# (claude-7fc; design: docs/plans/2026-09-23-install-gt-after-merge-design.md).
+#
+#   install-gt.sh [--sha REF] [--source manual|rebuild-gt|post-land]
+#                 [--slot-role ROLE] [--slot-timeout SECONDS]
+#
+# --sha defaults to origin/main, resolved after this script's own fetch.
+# It always builds in <town>/gastown/mayor/rig (fast-forwarded to the target),
+# whichever clone it is run from. The town is GT_TOWN_ROOT, or else the
+# outermost directory holding mayor/town.json above this script.
 #
 # Exit codes — callers map these, so change them only together with
-# internal/cmd (post-merge hook) and plugins/rebuild-gt/run.sh:
+# plugins/rebuild-gt/run.sh:
 #   0  installed, or nothing to do (the binary already contains the commit)
 #   1  failed: build/install failed, or the smoke check failed (rolled back)
 #   2  refused: mayor/rig dirty, off main, diverged, not forward, unknown commit
@@ -51,7 +60,7 @@ on_exit() {
 trap on_exit EXIT
 
 ORIG_ARGS=("$@")
-SHA="" SOURCE="" SLOT_ROLE="" SLOT_TIMEOUT=600
+SHA="origin/main" SOURCE="manual" SLOT_ROLE="" SLOT_TIMEOUT=600
 while [ $# -gt 0 ]; do
   case "$1" in
     --sha) SHA="${2:-}"; shift 2 ;;
@@ -61,13 +70,23 @@ while [ $# -gt 0 ]; do
     *) echo "install-gt: unknown argument: $1" >&2; exit 1 ;;
   esac
 done
-case "$SOURCE" in post-merge|rebuild-gt) ;; *) echo "install-gt: --source must be post-merge or rebuild-gt" >&2; exit 1 ;; esac
-[ -n "$SHA" ] || { echo "install-gt: --sha is required" >&2; exit 1; }
+case "$SOURCE" in manual|rebuild-gt|post-land) ;; *) echo "install-gt: --source must be manual, rebuild-gt or post-land" >&2; exit 1 ;; esac
+[ -n "$SHA" ] || { echo "install-gt: --sha needs a commit" >&2; exit 1; }
 
-TOWN_ROOT="${GT_TOWN_ROOT:-}"
+# town_root_above DIR — the outermost ancestor of DIR holding mayor/town.json
+# (outermost, as internal/workspace does: a rig can carry its own mayor/).
+town_root_above() {
+  local d="$1" found=""
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    [ -f "$d/mayor/town.json" ] && found="$d"
+    d=$(dirname "$d")
+  done
+  echo "$found"
+}
+TOWN_ROOT="${GT_TOWN_ROOT:-$(town_root_above "$SCRIPT_DIR")}"
 BIN_DIR="${INSTALL_GT_BIN_DIR:-$HOME/.local/bin}"
-DAEMON_DIR="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT:?install-gt: GT_TOWN_ROOT or INSTALL_GT_DAEMON_DIR must be set}/daemon}"
-RIG_DIR="${INSTALL_GT_RIG_DIR:-${TOWN_ROOT:?install-gt: GT_TOWN_ROOT or INSTALL_GT_RIG_DIR must be set}/gastown/mayor/rig}"
+DAEMON_DIR="${INSTALL_GT_DAEMON_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/daemon}"
+RIG_DIR="${INSTALL_GT_RIG_DIR:-${TOWN_ROOT:?install-gt: no town found (set GT_TOWN_ROOT); on a machine with no town yet use make install-local}/gastown/mayor/rig}"
 LOCK_WAIT="${INSTALL_GT_LOCK_WAIT:-300}"
 GT="$BIN_DIR/gt"
 START=$(date +%s)
@@ -113,7 +132,7 @@ if [ -z "${INSTALL_GT_LOCKED:-}" ]; then
     }
     unlink($marker);
     exec @cmd or die "install-gt: exec failed: $!\n";
-  ' "$DAEMON_DIR/install-gt.lock" "$LOCK_WAIT" "$MARKER" bash "$SCRIPT_PATH" "${ORIG_ARGS[@]}" || rc=$?
+  ' "$DAEMON_DIR/install-gt.lock" "$LOCK_WAIT" "$MARKER" bash "$SCRIPT_PATH" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"} || rc=$?
   if [ "$rc" = "75" ]; then
     rm -f "$MARKER"
     log "Another install held the lock for ${LOCK_WAIT}s; not installing $SHA."
@@ -275,7 +294,7 @@ fi
 [ "$BUILD_RC" = "0" ] || fail_install build-failed "make build failed for $EXPECTED" medium install-gt:build-failed failed
 
 INSTALL_RC=0
-INSTALL_OUT=$( (cd "$RIG_DIR" && make SKIP_UPDATE_CHECK=1 INSTALL_DIR="$BIN_DIR" safe-install) 2>&1 ) || INSTALL_RC=$?
+INSTALL_OUT=$( (cd "$RIG_DIR" && make SKIP_UPDATE_CHECK=1 INSTALL_DIR="$BIN_DIR" install-local) 2>&1 ) || INSTALL_RC=$?
 echo "$INSTALL_OUT"
 if [ "$INSTALL_RC" != "0" ]; then
   # check-forward-only exits 1 when the binary is already at HEAD — reachable
@@ -285,7 +304,7 @@ if [ "$INSTALL_RC" != "0" ]; then
     result_line noop "$EXPECTED" "$PREV" already-installed
     exit 0
   fi
-  fail_install build-failed "make safe-install failed for $EXPECTED" medium install-gt:build-failed failed
+  fail_install build-failed "make install-local failed for $EXPECTED" medium install-gt:build-failed failed
 fi
 
 # --- Smoke: the gt the town will execute is the commit built --------------------------

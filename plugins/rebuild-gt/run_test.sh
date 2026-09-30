@@ -48,10 +48,10 @@ make_town() {
   git -C "$town/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -m installer
   git -C "$town/gastown/mayor/rig" push -q origin main
   # Fake make targets: build drops a marker so the test can see the branch
-  # taken; safe-install no-ops the way the real one's atomic replace would
+  # taken; install-local no-ops the way the real one's atomic replace would
   # inside a stub world. '@' suppresses Make's echo of the recipe line, so
   # build.marker stays the sole observable of a build.
-  printf 'build:\n\t@touch "$(GT_TEST_TOWN)/build.marker"\nsafe-install:\n\t@true\n' > "$town/gastown/mayor/rig/Makefile"
+  printf 'build:\n\t@touch "$(GT_TEST_TOWN)/build.marker"\ninstall-local:\n\t@true\n' > "$town/gastown/mayor/rig/Makefile"
   git -C "$town/gastown/mayor/rig" add Makefile
   git -C "$town/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -m makefile
   git -C "$town/gastown/mayor/rig" push -q origin main
@@ -438,7 +438,7 @@ fi
 # --- Case 12: a failed build exits non-zero and records a failure (proves the
 # rc capture: with set -e swallowing it this assertion could never run) ---
 T=$(make_town)
-printf 'build:\n\tfalse\nsafe-install:\n\t@true\n' > "$T/gastown/mayor/rig/Makefile"
+printf 'build:\n\tfalse\ninstall-local:\n\t@true\n' > "$T/gastown/mayor/rig/Makefile"
 git -C "$T/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -am "break build"
 git -C "$T/gastown/mayor/rig" push -q origin main
 rc=$(run_plugin "$T")
@@ -618,7 +618,7 @@ else
 fi
 # exit 1 (failed, recorded and escalated): Case 12's broken build.
 T=$(make_town)
-printf 'build:\n\tfalse\nsafe-install:\n\t@true\n' > "$T/gastown/mayor/rig/Makefile"
+printf 'build:\n\tfalse\ninstall-local:\n\t@true\n' > "$T/gastown/mayor/rig/Makefile"
 git -C "$T/gastown/mayor/rig" -c user.email=t@t -c user.name=t commit -q -am "break build"
 git -C "$T/gastown/mayor/rig" push -q origin main
 rc=$(run_plugin "$T")
@@ -896,13 +896,13 @@ fi
 # --- gt-9jax: a merge lands on origin/main while 'make ... build' is
 # running. The run already fast-forwarded RIG_ROOT to origin/main before the
 # build started, so the build compiles the right tree either way; what fails
-# is 'make safe-install', whose real check-up-to-date target does its OWN
+# is 'make install-local', whose real check-up-to-date target does its OWN
 # fetch-and-compare against the now-moved origin/main. SKIP_UPDATE_CHECK=1
-# (passed to both 'make build' and 'make safe-install') is what makes
+# (passed to both 'make build' and 'make install-local') is what makes
 # check-up-to-date a no-op, which is the actual fix — not a Makefile change.
 #
 # The fake Makefile below reproduces check-up-to-date's real shape (an
-# ifndef SKIP_UPDATE_CHECK-gated fetch-and-compare on safe-install), and its
+# ifndef SKIP_UPDATE_CHECK-gated fetch-and-compare on install-local), and its
 # 'build' recipe pushes a second commit to origin from another clone before
 # touching build.marker — a deterministic stand-in for a merge landing
 # during the (in production, minutes-long) build. RIG_ROOT's own checkout
@@ -925,7 +925,7 @@ endif
 build:
 	@bash "$(GT_TEST_TOWN)/land-merge.sh"
 	@touch "$(GT_TEST_TOWN)/build.marker"
-safe-install: check-up-to-date
+install-local: check-up-to-date
 	@true
 MK
 git -C "$RIG" -c user.email=t@t -c user.name=t add Makefile
@@ -949,7 +949,7 @@ else
   fail "merge lands mid-build: rc=$rc log=$(cat "$T/gt.log" 2>/dev/null) out=$(cat "$T/run.out")"
 fi
 # The same fixture against run.sh as it stood before this fix (no
-# SKIP_UPDATE_CHECK passed to safe-install) is the regression this guards:
+# SKIP_UPDATE_CHECK passed to install-local) is the regression this guards:
 # check-up-to-date's live fetch sees the moved origin/main and fails a build
 # that was otherwise correct. Confirmed by hand against origin/main's run.sh
 # (see the commit message for both runs) rather than re-run here, so this

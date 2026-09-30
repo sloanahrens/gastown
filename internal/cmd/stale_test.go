@@ -73,7 +73,7 @@ func TestOutputStaleText(t *testing.T) {
 			want: []string{
 				"Binary is stale",
 				"Build ref (carry/ops): def456789012",
-				"Safe to rebuild: run 'make build && make install'",
+				"Safe to rebuild: run 'make install'",
 			},
 			notWant: []string{
 				"commits behind",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for scripts/install-binary.sh, the atomic binary install shared by the
-# Makefile's install and safe-install targets (gt-0het).
+# Makefile's install-local target (gt-0het).
 #
 # The defect being guarded: replacing the live binary with `rm -f` + `cp` leaves
 # the installed path missing or partial for the duration of the copy, and
@@ -249,7 +249,7 @@ else
 fi
 
 refs="$(grep -c 'scripts/install-binary.sh' "$REPO_ROOT/Makefile")"
-assert_eq "install and safe-install both use install-binary.sh" "2" "$refs"
+assert_eq "install-local uses install-binary.sh" "1" "$refs"
 
 echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
