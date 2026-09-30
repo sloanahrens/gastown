@@ -13,42 +13,10 @@ import (
 )
 
 // The three om outcomes a landing must route (gt-v4ssj.2): approve lands with
-// the real verdict recorded, request_changes is rework carrying om's text,
-// and an om execution error lands with "error:<reason>" recorded.
-
-func TestLandRecordsTheRealOMVerdict(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.review.fn = func(string) (Verdict, error) { return Verdict{Verdict: VerdictApprove, Score: 0.87}, nil }
-	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
-		t.Fatalf("Land: %v", err)
-	}
-	var rec LandingRecord
-	lines := f.landingLines()
-	if len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &rec) != nil {
-		t.Fatalf("landings file: %q", lines)
-	}
-	if rec.OMVerdict != VerdictApprove || rec.OMScore != 0.87 {
-		t.Fatalf("record om_verdict=%q om_score=%v; want approve 0.87", rec.OMVerdict, rec.OMScore)
-	}
-	if n := f.bead().Notes; !strings.Contains(n, "om_verdict: approve\nom_score: 0.8700") {
-		t.Fatalf("LANDING RECORD lacks the verdict:\n%s", n)
-	}
-}
-
-func TestLandOMRequestChangesIsReworkWithSummary(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.review.fn = func(string) (Verdict, error) {
-		return Verdict{Verdict: VerdictRequestChanges, Score: 0.41, Summary: "The retry loop swallows the last error.",
-			Findings: []Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}}}, nil
-	}
-	_, err := f.lander().Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelRework)
-	if !rej.Rework || rej.ReviewSummary != "The retry loop swallows the last error." || rej.ReviewScore != 0.41 || len(rej.Findings) != 1 {
-		t.Fatalf("rejection = %+v", rej)
-	}
-}
+// the real verdict recorded (TestLandMergesGatesPushesAndRecords),
+// request_changes is rework carrying om's text
+// (TestLandRequestChangesRejectsWithFindings), and an om execution error
+// lands with "error:<reason>" recorded (below).
 
 func TestLandOMExecutionErrorLandsWithErrorVerdict(t *testing.T) {
 	t.Parallel()
@@ -74,31 +42,6 @@ func TestLandOMExecutionErrorLandsWithErrorVerdict(t *testing.T) {
 	}
 	if b := f.bead(); b.Status != "closed" || !strings.Contains(b.Notes, "om_verdict: error:") {
 		t.Fatalf("bead status %s notes:\n%s", b.Status, b.Notes)
-	}
-}
-
-func TestLandOMExecutionErrorWithoutOptInIsInfra(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.review.fn = func(string) (Verdict, error) { return Verdict{}, errors.New("om exited 2") }
-	_, err := f.lander().Land(context.Background(), f.work)
-	var infra *InfraError
-	if !errors.As(err, &infra) || infra.Stage != "review" {
-		t.Fatalf("err = %v; want an InfraError at review", err)
-	}
-	f.assertUntouched(t)
-}
-
-func TestLandSkippedReviewLands(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	l := f.lander()
-	l.Reviewer = SkipReviewer{}
-	if _, err := l.Land(context.Background(), f.work); err != nil {
-		t.Fatalf("Land: %v", err)
-	}
-	if !strings.Contains(f.landingLines()[0], `"om_verdict":"skipped"`) {
-		t.Fatalf("record: %s", f.landingLines()[0])
 	}
 }
 

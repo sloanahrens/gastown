@@ -63,11 +63,16 @@ func TestLandAllowsProductMention(t *testing.T) {
 	f.amendBranch("fix: Claude Code hooks fire on every Bash call")
 	l := f.lander()
 	l.RangeChecks = []RangeCheck{AttributionCheck}
+	// The same landing also proves a disabled review lands as "skipped".
+	l.Reviewer = SkipReviewer{}
 	res, err := l.Land(context.Background(), f.work)
 	if err != nil {
 		t.Fatalf("Land: %v", err)
 	}
 	if got := f.originMain(); got != res.LandedCommit {
 		t.Errorf("origin/main = %s, want %s", got, res.LandedCommit)
+	}
+	if lines := f.landingLines(); len(lines) != 1 || !strings.Contains(lines[0], `"om_verdict":"skipped"`) {
+		t.Errorf("landing record: %q", lines)
 	}
 }
