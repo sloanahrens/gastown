@@ -386,6 +386,13 @@ func DefaultConfig(townRoot string) *Config {
 	return std.DefaultConfig(townRoot)
 }
 
+// DefaultConfigWithEnv is DefaultConfig reading the GT_DOLT_* variables
+// through lookupEnv instead of the process environment. A nil lookupEnv is
+// the process environment, exactly DefaultConfig.
+func DefaultConfigWithEnv(townRoot string, lookupEnv func(key string) (string, bool)) *Config {
+	return (&host{lookupEnv: lookupEnv}).DefaultConfig(townRoot)
+}
+
 // readDaemonEnvVar reads a single key=value variable from a simple env file.
 // Handles blank lines and # comments; returns "" if not found or on error.
 func readDaemonEnvVar(path, key string) string {

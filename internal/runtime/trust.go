@@ -26,16 +26,29 @@ import (
 // accounts.json. The session may read a different one — see
 // resolveTrustConfigDir. Non-claude runtimes are a no-op.
 func EnsureWorkspaceTrust(workDir, configDir string, rc *config.RuntimeConfig) error {
+	return ensureWorkspaceTrust(workDir, configDir, rc, processEnv)
+}
+
+// trustEnv is the process state trust seeding reads: the environment and the
+// home directory. Tests pass their own instead of mutating the process's.
+type trustEnv struct {
+	getenv  func(string) string
+	homeDir func() (string, error)
+}
+
+var processEnv = trustEnv{getenv: os.Getenv, homeDir: os.UserHomeDir}
+
+func ensureWorkspaceTrust(workDir, configDir string, rc *config.RuntimeConfig, env trustEnv) error {
 	if workDir == "" || !isClaudeRuntime(rc) {
 		return nil
 	}
 
-	dir, err := resolveTrustConfigDir(configDir, rc)
+	dir, err := resolveTrustConfigDir(configDir, rc, env)
 	if err != nil {
 		return err
 	}
 
-	path, err := claudeConfigJSONPath(dir)
+	path, err := claudeConfigJSONPath(dir, env)
 	if err != nil {
 		return err
 	}
@@ -139,7 +152,7 @@ func isClaudeRuntime(rc *config.RuntimeConfig) bool {
 // A preset value that cannot be resolved is an error, not a fall-through: the
 // spawn refuses that reference anyway, and the fallback file is one the session
 // never reads.
-func resolveTrustConfigDir(configDir string, rc *config.RuntimeConfig) (string, error) {
+func resolveTrustConfigDir(configDir string, rc *config.RuntimeConfig, env trustEnv) (string, error) {
 	if rc != nil {
 		if raw := rc.Env["CLAUDE_CONFIG_DIR"]; strings.TrimSpace(raw) != "" {
 			// Expanded, not trimmed: the path seeded must be the one the
@@ -158,21 +171,21 @@ func resolveTrustConfigDir(configDir string, rc *config.RuntimeConfig) (string, 
 	// No explicit override anywhere: the spawned session inherits the
 	// environment, so a globally-set CLAUDE_CONFIG_DIR redirects where claude
 	// reads its config.
-	return os.Getenv("CLAUDE_CONFIG_DIR"), nil
+	return env.getenv("CLAUDE_CONFIG_DIR"), nil
 }
 
 // claudeConfigJSONPath returns the .claude.json location for the given config
 // dir override, defaulting to the user's home directory.
-func claudeConfigJSONPath(configDir string) (string, error) {
+func claudeConfigJSONPath(configDir string, env trustEnv) (string, error) {
 	dir := configDir
 	if dir == "" {
-		home, err := os.UserHomeDir()
+		home, err := env.homeDir()
 		if err != nil {
 			return "", fmt.Errorf("resolving home dir: %w", err)
 		}
 		dir = home
 	} else if dir == "~" || strings.HasPrefix(dir, "~/") {
-		home, err := os.UserHomeDir()
+		home, err := env.homeDir()
 		if err != nil {
 			return "", fmt.Errorf("resolving home dir: %w", err)
 		}

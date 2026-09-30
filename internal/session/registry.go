@@ -120,8 +120,6 @@ func SetDefaultRegistry(r *PrefixRegistry) {
 // Should be called early in the process lifecycle.
 // Safe to call multiple times; later calls replace earlier data.
 func InitRegistry(townRoot string) error {
-	var errs []error
-
 	// Determine the tmux socket name from GT_TMUX_SOCKET env var:
 	//   unset / "default" / "auto" → per-town socket derived from town directory path
 	//   any other value            → use that name as-is
@@ -132,11 +130,23 @@ func InitRegistry(townRoot string) error {
 	}
 	tmux.SetDefaultSocket(socket)
 
+	r, err := LoadRegistry(townRoot)
+	if r != nil {
+		SetDefaultRegistry(r)
+	}
+	return err
+}
+
+// LoadRegistry builds the town's prefix registry from rigs.json and checks
+// settings/agents.json, changing no process state. The registry is nil when
+// rigs.json cannot be read; the two loads fail independently.
+func LoadRegistry(townRoot string) (*PrefixRegistry, error) {
+	var errs []error
+
 	r, err := BuildPrefixRegistryFromTown(townRoot)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("prefix registry: %w", err))
-	} else {
-		SetDefaultRegistry(r)
+		r = nil
 	}
 
 	// Report a malformed settings/agents.json early. Nothing is kept: agents
@@ -147,7 +157,7 @@ func InitRegistry(townRoot string) error {
 		errs = append(errs, fmt.Errorf("agent registry: %w", err))
 	}
 
-	return errors.Join(errs...)
+	return r, errors.Join(errs...)
 }
 
 // sanitizeRe matches non-alphanumeric, non-hyphen characters.
@@ -302,10 +312,13 @@ func (r *PrefixRegistry) HasPrefix(sess string) bool {
 // IsKnownSession returns true if the session name belongs to Gas Town.
 // Checks for HQ prefix and registered rig prefixes from the default registry.
 func IsKnownSession(sess string) bool {
-	if strings.HasPrefix(sess, HQPrefix) {
-		return true
-	}
-	return DefaultRegistry().HasPrefix(sess)
+	return DefaultRegistry().IsKnownSession(sess)
+}
+
+// IsKnownSession returns true if the session name has the HQ prefix or one of
+// r's rig prefixes.
+func (r *PrefixRegistry) IsKnownSession(sess string) bool {
+	return strings.HasPrefix(sess, HQPrefix) || r.HasPrefix(sess)
 }
 
 // matchPrefix finds the prefix in a session name suffix using the registry.

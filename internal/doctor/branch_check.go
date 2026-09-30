@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -49,7 +48,7 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	// Gather info about each clone
 	var infos []cloneInfo
 	for _, path := range clones {
-		info, err := c.getCloneInfo(path)
+		info, err := c.getCloneInfo(ctx, path)
 		if err != nil {
 			continue // Skip problematic clones
 		}
@@ -186,41 +185,23 @@ func (c *CloneDivergenceCheck) isGitRepo(path string) bool {
 }
 
 // getCloneInfo gathers information about a clone.
-func (c *CloneDivergenceCheck) getCloneInfo(path string) (cloneInfo, error) {
+func (c *CloneDivergenceCheck) getCloneInfo(ctx *CheckContext, path string) (cloneInfo, error) {
 	info := cloneInfo{path: path}
+	g := ctx.git(path)
 
-	// Get current branch
-	cmd := exec.Command("git", "branch", "--show-current")
-	cmd.Dir = path
-	out, err := cmd.Output()
+	branch, err := currentBranch(g)
 	if err != nil {
 		return info, err
 	}
-	info.branch = strings.TrimSpace(string(out))
+	info.branch = branch
 
-	// Get HEAD SHA
-	cmd = exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = path
-	out, err = cmd.Output()
-	if err != nil {
+	if info.headSHA, err = g.Rev("HEAD"); err != nil {
 		return info, err
 	}
-	info.headSHA = strings.TrimSpace(string(out))
 
-	// Count commits behind origin/main (uses existing refs, may be stale)
-	cmd = exec.Command("git", "rev-list", "--count", "HEAD..origin/main")
-	cmd.Dir = path
-	out, err = cmd.Output()
-	if err != nil {
-		// origin/main might not exist, treat as 0 behind
-		info.behindBy = 0
-		return info, nil
-	}
-
-	var behind int
-	_, _ = fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &behind)
-	info.behindBy = behind
-
+	// Count commits behind origin/main (uses existing refs, may be stale);
+	// origin/main might not exist, which counts as 0 behind.
+	info.behindBy, _ = g.CountCommitsBehind("origin/main")
 	return info, nil
 }
 

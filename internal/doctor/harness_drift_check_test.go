@@ -57,8 +57,8 @@ func TestHarnessDriftCheck_Matches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content := "#!/bin/bash\necho hi\n"
-	if err := os.WriteFile(filepath.Join(scriptsDir, "om-gate.sh"), []byte(content), 0755); err != nil {
+	content := "echo hi\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "om-gate.sh"), []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
 	writeManifest(t, rigPath, map[string]string{"scripts/om-gate.sh": sha256Hex(content)})
@@ -81,12 +81,12 @@ func TestHarnessDriftCheck_HandEditDetected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deployed := "#!/bin/bash\necho hi\n"
+	deployed := "echo hi\n"
 	writeManifest(t, rigPath, map[string]string{"scripts/om-gate.sh": sha256Hex(deployed)})
 
 	// Hand edit: file on disk differs from what the manifest recorded.
 	handEdited := deployed + "# oops, a manual tweak\n"
-	if err := os.WriteFile(filepath.Join(scriptsDir, "om-gate.sh"), []byte(handEdited), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(scriptsDir, "om-gate.sh"), []byte(handEdited), 0644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -14,57 +14,24 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// skipStoreAndJournalCannotShareADatabase skips a test that drives a real
-// ConvoyManager over a real store and asserts on the closes it reads from that
-// store's journal.
-//
-// The manager's journal is bd's (bd events tail, gt-7iwy0.2), and the store
-// these tests can open is the beadsdk v1.0.5 one (testutil.OpenTestStore). No
-// database serves both under the town's bd 1.2.2, as observed under gt slot
-// run on 2026-09-30:
-//
-//   - the pool's SDK-migrated database has no bd_events_journal table, so
-//     bd events tail fails with "table not found: bd_events_journal";
-//   - a bd-initialized database has the journal, but the v1.0.5 store cannot
-//     write to it: CreateIssue fails recording its event ("Field 'id' doesn't
-//     have a default value"), and bd list fails on the same schema with
-//     "table \"i\" does not have column \"row_lock\"".
-//
-// What they pin is covered, and running, in the fast tier: convoy_manager_test.go
-// drives the same paths over memStore, and TestMemStoreMatchesBeadsStore pins
-// that store's observable behavior against a real Dolt store. These tests come
-// back when the store library tracks the bd CLI's schema (gt-idv8s).
-func skipStoreAndJournalCannotShareADatabase(t *testing.T) {
-	t.Helper()
-	t.Skip("needs a store and a bd events journal on one database; the v1.0.5 store and bd 1.2.2 disagree on the schema (gt-idv8s). Covered in the fast tier by convoy_manager_test.go + TestMemStoreMatchesBeadsStore")
-}
-
-// TestIntegrationConvoyManager_FullLifecycle starts a real ConvoyManager with a real beads
-// store and mock gt, lets both goroutines tick (event poll + stranded scan),
-// verifies log output, then stops and verifies clean shutdown.
+// TestIntegrationConvoyManager_FullLifecycle starts a real ConvoyManager over a
+// bd-initialized hq (setupJournaledTown) with faked scan seams, lets both
+// goroutines tick (event poll + stranded scan), verifies log output, then stops
+// and verifies clean shutdown.
 //
 // Exercises: S-08 (start guard), S-09 (context cancellation), S-10 (resolved paths).
 func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
-	skipStoreAndJournalCannotShareADatabase(t)
-
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx := context.Background()
+	townRoot, bd, store := setupJournaledTown(t)
 
 	// The stranded scan returns one empty convoy and the completion check logs
 	// the convoy it was asked to check.
 	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
 	checkLogPath := filepath.Join(binDir, "check.log")
 	strandedJSON := `[{"id":"cv-test1","title":"Test Convoy","ready_count":0,"ready_issues":[]}]`
 
@@ -95,21 +62,11 @@ func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	time.Sleep(6 * time.Second)
 
 	// Create and close an issue AFTER seeding so the next poll detects it.
-	now := time.Now().UTC()
-	issue := &beadsdk.Issue{
-		ID:        "gt-integ1",
-		Title:     "Integration Test Issue",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+	if _, err := bd.CreateWithID("hq-integ1", beads.CreateOptions{Title: "Integration Test Issue", Priority: 2}); err != nil {
+		t.Fatalf("create hq-integ1: %v", err)
 	}
-	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-		t.Fatalf("CreateIssue: %v", err)
-	}
-	if err := store.CloseIssue(ctx, issue.ID, "done", "test", ""); err != nil {
-		t.Fatalf("CloseIssue: %v", err)
+	if err := bd.CloseWithReason("done", "hq-integ1"); err != nil {
+		t.Fatalf("close hq-integ1: %v", err)
 	}
 
 	// Wait for the next event poll tick to detect the close event (~5s).
@@ -138,7 +95,7 @@ func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	foundScan := false
 	foundDoubleStart := false
 	for _, s := range logSnapshot {
-		if strings.Contains(s, "close detected") && strings.Contains(s, "gt-integ1") {
+		if strings.Contains(s, "close detected") && strings.Contains(s, "hq-integ1") {
 			foundClose = true
 		}
 		if strings.Contains(s, "auto-closing") || strings.Contains(s, "convoy check") {
@@ -150,7 +107,7 @@ func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	}
 
 	if !foundClose {
-		t.Errorf("event poll did not detect close event for gt-integ1; logs:\n%s", strings.Join(logSnapshot, "\n"))
+		t.Errorf("event poll did not detect close event for hq-integ1; logs:\n%s", strings.Join(logSnapshot, "\n"))
 	}
 	if !foundScan {
 		t.Errorf("stranded scan did not process the empty convoy; logs:\n%s", strings.Join(logSnapshot, "\n"))
@@ -180,88 +137,37 @@ func TestIntegrationConvoyManager_LoggingFlow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows (process groups)")
 	}
-	skipStoreAndJournalCannotShareADatabase(t)
+	// The real topology: the convoy in hq, its tasks in rig gt's own
+	// database, each tracks edge stored as external:<prefix>:<id> the way gt
+	// convoy writes it (addTrackingRelationWith).
+	townRoot, hq, hqStore := setupJournaledTown(t)
+	rig, rigStore := addJournaledRig(t, townRoot, "gt", "gt")
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	// Create convoy
-	convoy := &beadsdk.Issue{
-		ID:        "hq-cv-logtest",
-		Title:     "Logging Test Convoy",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+	// Closing task1 is the event; task2 (open, unassigned) is what the
+	// continuation feed dispatches.
+	const convoyID, task1, task2 = "hq-cv-logtest", "gt-logtask1", "gt-logtask2"
+	if _, err := hq.CreateWithID(convoyID, beads.CreateOptions{Title: "Logging Test Convoy", Priority: 2}); err != nil {
+		t.Fatalf("create %s: %v", convoyID, err)
 	}
-	if err := store.CreateIssue(ctx, convoy, "test"); err != nil {
-		t.Fatalf("CreateIssue convoy: %v", err)
-	}
-
-	// Create tracked issue 1 (will be closed to trigger event)
-	task1 := &beadsdk.Issue{
-		ID:        "gt-logtask1",
-		Title:     "Task 1 (close me)",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := store.CreateIssue(ctx, task1, "test"); err != nil {
-		t.Fatalf("CreateIssue task1: %v", err)
-	}
-
-	// Create tracked issue 2 (stays open, should be fed)
-	task2 := &beadsdk.Issue{
-		ID:        "gt-logtask2",
-		Title:     "Task 2 (ready to feed)",
-		Status:    beadsdk.StatusOpen,
-		Priority:  3,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := store.CreateIssue(ctx, task2, "test"); err != nil {
-		t.Fatalf("CreateIssue task2: %v", err)
-	}
-
-	// Add tracks dependencies: convoy tracks both tasks
-	for _, taskID := range []string{task1.ID, task2.ID} {
-		dep := &beadsdk.Dependency{
-			IssueID:     convoy.ID,
-			DependsOnID: taskID,
-			Type:        beadsdk.DependencyType("tracks"),
-			CreatedAt:   now,
-			CreatedBy:   "test",
+	for _, c := range []struct {
+		id, title string
+		priority  int
+	}{
+		{task1, "Task 1 (close me)", 2},
+		{task2, "Task 2 (ready to feed)", 3},
+	} {
+		if _, err := rig.CreateWithID(c.id, beads.CreateOptions{Title: c.title, Priority: c.priority}); err != nil {
+			t.Fatalf("create %s: %v", c.id, err)
 		}
-		if err := store.AddDependency(ctx, dep, "test"); err != nil {
-			t.Fatalf("AddDependency %s: %v", taskID, err)
+		if err := hq.AddTypedDependency(convoyID, "external:gt:"+c.id, "tracks"); err != nil {
+			t.Fatalf("track %s: %v", c.id, err)
 		}
 	}
-
-	// Close task1 to generate a close event
-	if err := store.CloseIssue(ctx, task1.ID, "done", "test", ""); err != nil {
-		t.Fatalf("CloseIssue: %v", err)
+	if err := rig.CloseWithReason("done", task1); err != nil {
+		t.Fatalf("close %s: %v", task1, err)
 	}
 
-	// Set up mock gt and routes
 	binDir := t.TempDir()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	// routes.jsonl: "gt-" prefix maps to rig "gt"
-	routes := `{"prefix":"gt-","path":"gt/.beads"}` + "\n"
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
 	slingLogPath := filepath.Join(binDir, "sling.log")
 	gtScript := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "sling" ]; then
@@ -286,7 +192,7 @@ exit 0
 	}
 
 	// Start manager with short scan interval; event poll is 5s (fixed).
-	stores := map[string]beadsdk.Storage{"hq": store}
+	stores := map[string]beadsdk.Storage{"hq": hqStore, "gt": rigStore}
 	m := NewConvoyManager(townRoot, logger, gtPath, 1*time.Hour, stores, nil, nil)
 	m.installScanFakes("[]", "")
 	// Start the cursor at zero so the poll processes events instead of warming up.
@@ -301,13 +207,13 @@ exit 0
 
 	// Verify the complete log chain.
 	// 1. ConvoyManager detects the close event
-	assertLogContains(t, snapshot, "close detected", task1.ID)
+	assertLogContains(t, snapshot, "close detected", task1)
 	// 2. CheckConvoysForIssue reports convoy tracking
-	assertLogContains(t, snapshot, "tracked by", convoy.ID)
+	assertLogContains(t, snapshot, "tracked by", convoyID)
 	// 3. CheckConvoysForIssue runs convoy check
-	assertLogContains(t, snapshot, "checking convoy", convoy.ID)
+	assertLogContains(t, snapshot, "checking convoy", convoyID)
 	// 4. CheckConvoysForIssue feeds next ready issue (task2 is open+unassigned)
-	assertLogContains(t, snapshot, "feeding next ready issue", task2.ID)
+	assertLogContains(t, snapshot, "feeding next ready issue", task2)
 
 	// Verify no format string errors (e.g., %!s(MISSING), %!(EXTRA)
 	for _, line := range snapshot {
@@ -319,9 +225,9 @@ exit 0
 	// Verify sling was actually called for task2
 	data, err := os.ReadFile(slingLogPath)
 	if err != nil {
-		t.Errorf("sling was never called (expected dispatch of %s): %v", task2.ID, err)
-	} else if !strings.Contains(string(data), task2.ID) {
-		t.Errorf("sling log does not contain %s: %q", task2.ID, string(data))
+		t.Errorf("sling was never called (expected dispatch of %s): %v", task2, err)
+	} else if !strings.Contains(string(data), task2) {
+		t.Errorf("sling log does not contain %s: %q", task2, string(data))
 	}
 }
 

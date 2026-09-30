@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -285,10 +284,8 @@ func (c *CrewWorktreeCheck) Fix(ctx *CheckContext) error {
 	for _, wt := range c.staleWorktrees {
 		// Use git worktree remove to properly clean up
 		mayorRigPath := filepath.Join(ctx.TownRoot, wt.rigName, "mayor", "rig")
-		removeCmd := exec.Command("git", "worktree", "remove", "--force", wt.path)
-		removeCmd.Dir = mayorRigPath
-		if output, err := removeCmd.CombinedOutput(); err != nil {
-			lastErr = fmt.Errorf("%s/crew/%s: %v (%s)", wt.rigName, wt.name, err, strings.TrimSpace(string(output)))
+		if err := ctx.git(mayorRigPath).WorktreeRemove(wt.path, true); err != nil {
+			lastErr = fmt.Errorf("%s/crew/%s: %v (%s)", wt.rigName, wt.name, err, gitOutput(err))
 		}
 	}
 

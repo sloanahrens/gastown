@@ -32,6 +32,7 @@ The bead has been reset to open with no assignee.
 Please re-dispatch to an available polecat.`
 
 func TestLooksLikeProtocolPayload(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string

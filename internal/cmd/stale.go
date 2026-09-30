@@ -149,7 +149,7 @@ func outputStaleText(output StaleOutput) error {
 			fmt.Printf("  %s source worktree is not on a build branch (compared against %s)\n", style.Warning.Render("⚠"), output.CompareRef)
 		}
 		if output.SafeToRebuild {
-			fmt.Printf("\n  Safe to rebuild: run 'make build && make install'\n")
+			fmt.Printf("\n  Safe to rebuild: run 'make install'\n")
 		} else {
 			fmt.Printf("\n  %s NOT safe for automated rebuild (forward=%v, build_branch=%v)\n",
 				style.Error.Render("✗"), output.Forward, output.OnMainBranch)

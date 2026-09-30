@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestNew(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -21,6 +21,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestRenderRole_Mayor(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -53,6 +54,7 @@ func TestRenderRole_Mayor(t *testing.T) {
 }
 
 func TestRenderRole_Polecat(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -87,6 +89,7 @@ func TestRenderRole_Polecat(t *testing.T) {
 }
 
 func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -121,6 +124,7 @@ func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
 }
 
 func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -155,6 +159,7 @@ func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
 }
 
 func TestRenderMessage_Spawn(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -185,6 +190,7 @@ func TestRenderMessage_Spawn(t *testing.T) {
 }
 
 func TestRenderMessage_Nudge(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -218,6 +224,7 @@ func TestRenderMessage_Nudge(t *testing.T) {
 // This is a regression test for instances running outside ~/gt
 // (e.g., test instances at a custom path).
 func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -285,6 +292,7 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 // (be-6mk) — the correct pattern is to cd into the target rig's beads
 // directory first, then run a bare `bd create`.
 func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -350,6 +358,7 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 // TestRenderRole_TownRootInOutput verifies that the actual TownRoot value
 // appears in the rendered output for roles that reference it in path instructions.
 func TestRenderRole_TownRootInOutput(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -406,6 +415,7 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 // uses the actual town root, not a hardcoded ~/gt path.
 // Regression test: agents were following hardcoded ~/gt even in test instances.
 func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -440,6 +450,7 @@ func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
 // (e.g. from settings/daemon.env) are rendered into the plist's
 // EnvironmentVariables dict alongside GT_TOWN_ROOT.
 func TestRenderLaunchdPlist_EnvironmentVariables(t *testing.T) {
+	t.Parallel()
 	data := SupervisorData{
 		GTPath:   "/usr/local/bin/gt",
 		TownRoot: "/test/town",
@@ -472,6 +483,7 @@ func TestRenderLaunchdPlist_EnvironmentVariables(t *testing.T) {
 // are rendered into the systemd unit as Environment= directives alongside
 // GT_TOWN_ROOT.
 func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
+	t.Parallel()
 	data := SupervisorData{
 		GTPath:   "/usr/local/bin/gt",
 		TownRoot: "/test/town",
@@ -501,6 +513,7 @@ func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
 // TestRenderLaunchdPlist_NoExtraEnv verifies the plist still renders cleanly
 // with a nil Env map (the common case before settings/daemon.env exists).
 func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
+	t.Parallel()
 	output, err := renderLaunchdPlist(SupervisorData{
 		GTPath:   "/usr/local/bin/gt",
 		TownRoot: "/test/town",
@@ -518,6 +531,7 @@ func TestRenderLaunchdPlist_NoExtraEnv(t *testing.T) {
 // caller opts in) omits the key entirely rather than writing <integer>0</integer>,
 // which would make launchd SIGKILL the daemon almost immediately on restart.
 func TestRenderLaunchdPlist_ExitTimeOut(t *testing.T) {
+	t.Parallel()
 	output, err := renderLaunchdPlist(SupervisorData{
 		GTPath:             "/usr/local/bin/gt",
 		TownRoot:           "/test/town",
@@ -569,6 +583,7 @@ func renderedPlist(t *testing.T, town string, exitTimeout time.Duration) string 
 // this binary's rendering of this town in every other respect, so the repair
 // is to rewrite it with the key.
 func TestSupervisorFileRepair_AddsAMissingExitTimeOut(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := writeInstalledPlist(t, town, renderedPlist(t, town, 0))
 
@@ -590,6 +605,7 @@ func TestSupervisorFileRepair_AddsAMissingExitTimeOut(t *testing.T) {
 // A plist that has the key but at an older budget is the same repair: the
 // value is compiled into the binary, so it follows the binary, not the file.
 func TestSupervisorFileRepair_UpdatesAChangedExitTimeOut(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := writeInstalledPlist(t, town, renderedPlist(t, town, 20*time.Second))
 
@@ -608,6 +624,7 @@ func TestSupervisorFileRepair_UpdatesAChangedExitTimeOut(t *testing.T) {
 // A file this binary would write unchanged needs no repair, and the caller
 // must be able to tell that from a repair it declined to make.
 func TestSupervisorFileRepair_CurrentFileIsNoRepair(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	path := writeInstalledPlist(t, town, renderedPlist(t, town, 55*time.Second))
 
@@ -625,6 +642,7 @@ func TestSupervisorFileRepair_CurrentFileIsNoRepair(t *testing.T) {
 // a launchd job at whichever gt happens to be running is a reconfiguration, and
 // not this function's to make.
 func TestSupervisorFileRepair_LeavesAFileThatDiffersInMore(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	other, err := renderLaunchdPlist(SupervisorData{
 		GTPath:             "/opt/other/bin/gt",
@@ -647,6 +665,7 @@ func TestSupervisorFileRepair_LeavesAFileThatDiffersInMore(t *testing.T) {
 
 // A plist serving another town is not this town's to rewrite.
 func TestSupervisorFileRepair_AnotherTownsFileIsNotTouched(t *testing.T) {
+	t.Parallel()
 	other := t.TempDir()
 	path := writeInstalledPlist(t, other, renderedPlist(t, other, 0))
 
@@ -662,6 +681,7 @@ func TestSupervisorFileRepair_AnotherTownsFileIsNotTouched(t *testing.T) {
 // The systemd unit renders nothing from the binary's own constants, so a
 // binary upgrade leaves nothing in it to repair.
 func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	unit, ok, err := SupervisorFileContent("systemd", town, 0)
 	if err != nil || !ok {
@@ -685,6 +705,7 @@ func TestSupervisorFileRepair_SystemdIsNeverRepaired(t *testing.T) {
 // including the empty kind a host with no supported supervisor reports —
 // rather than erroring on it, since that is an ordinary host.
 func TestSupervisorFileContent_UnknownKind(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"", "upstart", "launchd "} {
 		content, ok, err := SupervisorFileContent(kind, t.TempDir(), time.Second)
 		if err != nil {
@@ -696,72 +717,52 @@ func TestSupervisorFileContent_UnknownKind(t *testing.T) {
 	}
 }
 
-// TestSupervisorStatus_None verifies SupervisorStatus reports "none" when
-// no plist/unit file is present.
-func TestSupervisorStatus_None(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-
-	if got := SupervisorStatus(); got != "none" {
-		t.Errorf("SupervisorStatus() = %q, want %q", got, "none")
+// TestSupervisorStatus reports the kind of the supervisor file this host
+// would use when it is installed, and "none" when it is not.
+func TestSupervisorStatus(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		goos, want string
+		pathSuffix string
+	}{
+		{"darwin", "launchd", filepath.Join("Library", "LaunchAgents", "com.gastown.daemon.plist")},
+		{"linux", "systemd", filepath.Join("data", "systemd", "user", "gastown-daemon.service")},
+	} {
+		t.Run(tt.goos, func(t *testing.T) {
+			t.Parallel()
+			h := fakeHost(t, tt.goos)
+			if got := h.status(); got != "none" {
+				t.Errorf("status() with no file = %q, want none", got)
+			}
+			path, _ := h.filePath()
+			if !strings.HasSuffix(path, tt.pathSuffix) {
+				t.Errorf("filePath() = %q, want it to end in %q", path, tt.pathSuffix)
+			}
+			writeFileAt(t, path, "<plist/>")
+			if got := h.status(); got != tt.want {
+				t.Errorf("status() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
-// TestSupervisorStatus_Launchd verifies SupervisorStatus reports "launchd"
-// on macOS when the plist file is present.
-func TestSupervisorStatus_Launchd(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("launchd is macOS-only")
-	}
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	plistPath, err := LaunchdPlistPath()
+// Without XDG_DATA_HOME the systemd unit lives under ~/.local/share.
+func TestSystemdUnitPath_DefaultsUnderHome(t *testing.T) {
+	t.Parallel()
+	h := fakeHost(t, "linux")
+	h.getenv = func(string) string { return "" }
+	home, _ := h.homeDir()
+	got, err := h.systemdUnitPath()
 	if err != nil {
-		t.Fatalf("LaunchdPlistPath() error = %v", err)
+		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	if got := SupervisorStatus(); got != "launchd" {
-		t.Errorf("SupervisorStatus() = %q, want %q", got, "launchd")
-	}
-}
-
-// TestSupervisorStatus_Systemd verifies SupervisorStatus reports "systemd"
-// on Linux when the unit file is present.
-func TestSupervisorStatus_Systemd(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("systemd is Linux-only")
-	}
-
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
-
-	unitPath, err := SystemdUnitPath()
-	if err != nil {
-		t.Fatalf("SystemdUnitPath() error = %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.WriteFile(unitPath, []byte("[Unit]"), 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	if got := SupervisorStatus(); got != "systemd" {
-		t.Errorf("SupervisorStatus() = %q, want %q", got, "systemd")
+	if want := filepath.Join(home, ".local", "share", "systemd", "user", "gastown-daemon.service"); got != want {
+		t.Errorf("systemdUnitPath() = %q, want %q", got, want)
 	}
 }
 
 func TestRoleNames(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -782,6 +783,7 @@ func TestRoleNames(t *testing.T) {
 }
 
 func TestCreatePolecatCLAUDEmd(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	created, err := CreatePolecatCLAUDEmd(dir, "greenplace", "furiosa")
@@ -827,6 +829,7 @@ func TestCreatePolecatCLAUDEmd(t *testing.T) {
 }
 
 func TestCreatePolecatCLAUDEmd_WritesToLocalWhenTrackedExists(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// Write a CLAUDE.md with the exact town-root template content that gets
@@ -875,6 +878,7 @@ func TestCreatePolecatCLAUDEmd_WritesToLocalWhenTrackedExists(t *testing.T) {
 }
 
 func TestCreatePolecatCLAUDEmd_SkipsWhenAlreadyProvisioned(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// First call — creates the file
@@ -912,6 +916,7 @@ func TestCreatePolecatCLAUDEmd_SkipsWhenAlreadyProvisioned(t *testing.T) {
 // This is better than the old append-to-CLAUDE.md approach because git reset --hard
 // no longer loses the lifecycle instructions.
 func TestCreatePolecatCLAUDEmd_ReusePath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "CLAUDE.md")
 	claudeLocalPath := filepath.Join(dir, "CLAUDE.local.md")
@@ -976,6 +981,7 @@ func TestCreatePolecatCLAUDEmd_ReusePath(t *testing.T) {
 // TestCreatePolecatCLAUDEmd_GitCleanRemovesLocal simulates git clean -f removing
 // the untracked CLAUDE.local.md. On re-provision, the function must recreate it.
 func TestCreatePolecatCLAUDEmd_GitCleanRemovesLocal(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "CLAUDE.md")
 	claudeLocalPath := filepath.Join(dir, "CLAUDE.local.md")
@@ -1019,6 +1025,7 @@ func TestCreatePolecatCLAUDEmd_GitCleanRemovesLocal(t *testing.T) {
 // TestCreatePolecatCLAUDEmd_GitCleanScenario simulates git clean -f removing
 // an untracked CLAUDE.md (repo without tracked CLAUDE.md), then re-provisioning.
 func TestCreatePolecatCLAUDEmd_GitCleanScenario(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "CLAUDE.md")
 
@@ -1053,6 +1060,7 @@ func TestCreatePolecatCLAUDEmd_GitCleanScenario(t *testing.T) {
 }
 
 func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if _, err := CreatePolecatCLAUDEmd(dir, "gastown", "agate"); err != nil {
 		t.Fatalf("CreatePolecatCLAUDEmd: %v", err)
@@ -1081,6 +1089,7 @@ func TestPolecatCLAUDEmd_PointsAtWritingForAgents(t *testing.T) {
 // mol-polecat-work formula, and the /done body; the dangerous-command guard is
 // what enforces it.
 func TestPolecatGuidanceForbidsSlotPollingLoops(t *testing.T) {
+	t.Parallel()
 	// The calm-wait sentence, character-for-character: a polecat that reads
 	// the wait as a hang closes its bead mid-`gt done` (overseer hq-wisp-6q5ib).
 	const calmWait = "`gt done` runs the local gate itself (lint, build and the tests of the packages your branch changed; " +
@@ -1131,6 +1140,7 @@ func renderPolecatForTest(t *testing.T) string {
 // tool use]" is a nudge-delivery artifact, not an operator stop. Mayor and
 // crew are left out: a human may really be at those panes.
 func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
+	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatal(err)

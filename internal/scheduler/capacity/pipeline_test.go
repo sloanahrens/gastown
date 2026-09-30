@@ -6,6 +6,7 @@ import (
 )
 
 func TestPlanDispatch(t *testing.T) {
+	t.Parallel()
 	beads := func(n int) []PendingBead {
 		result := make([]PendingBead, n)
 		for i := range result {
@@ -54,6 +55,7 @@ func TestPlanDispatch(t *testing.T) {
 }
 
 func TestFilterCircuitBroken(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		failures    []int // dispatch_failures per bead (-1 = nil context)
@@ -91,6 +93,7 @@ func TestFilterCircuitBroken(t *testing.T) {
 }
 
 func TestAllReady(t *testing.T) {
+	t.Parallel()
 	beads := []PendingBead{
 		{ID: "a"},
 		{ID: "b"},
@@ -103,6 +106,7 @@ func TestAllReady(t *testing.T) {
 }
 
 func TestBlockerAware(t *testing.T) {
+	t.Parallel()
 	beads := []PendingBead{
 		{ID: "ctx-a", WorkBeadID: "a"},
 		{ID: "ctx-b", WorkBeadID: "b"},
@@ -123,6 +127,7 @@ func TestBlockerAware(t *testing.T) {
 }
 
 func TestBlockerAware_EmptySet(t *testing.T) {
+	t.Parallel()
 	beads := []PendingBead{{ID: "a", WorkBeadID: "wa"}, {ID: "b", WorkBeadID: "wb"}}
 	readyIDs := map[string]bool{}
 	filter := BlockerAware(readyIDs)
@@ -133,6 +138,7 @@ func TestBlockerAware_EmptySet(t *testing.T) {
 }
 
 func TestCircuitBreakerPolicy(t *testing.T) {
+	t.Parallel()
 	policy := CircuitBreakerPolicy(3)
 
 	tests := []struct {
@@ -154,6 +160,7 @@ func TestCircuitBreakerPolicy(t *testing.T) {
 }
 
 func TestNoRetryPolicy(t *testing.T) {
+	t.Parallel()
 	policy := NoRetryPolicy()
 	for _, failures := range []int{0, 1, 5} {
 		if got := policy(failures); got != FailureQuarantine {
@@ -163,6 +170,7 @@ func TestNoRetryPolicy(t *testing.T) {
 }
 
 func TestReconstructFromContext(t *testing.T) {
+	t.Parallel()
 	ctx := &SlingContextFields{
 		WorkBeadID:  "bead-123",
 		TargetRig:   "prod-rig",
@@ -223,6 +231,7 @@ func TestReconstructFromContext(t *testing.T) {
 }
 
 func TestReconstructFromContext_EmptyVars(t *testing.T) {
+	t.Parallel()
 	ctx := &SlingContextFields{
 		WorkBeadID: "bead-1",
 		TargetRig:  "rig1",
@@ -234,6 +243,7 @@ func TestReconstructFromContext_EmptyVars(t *testing.T) {
 }
 
 func TestIsMessagingBead(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		labels []string
@@ -259,6 +269,7 @@ func TestIsMessagingBead(t *testing.T) {
 }
 
 func TestFilterMessagingBeads(t *testing.T) {
+	t.Parallel()
 	beads := []PendingBead{
 		{ID: "ctx-1", WorkBeadID: "gt-1", Labels: []string{"area/dog"}},
 		{ID: "ctx-2", WorkBeadID: "hq-1", Labels: []string{"gt:message"}},
@@ -281,6 +292,7 @@ func TestFilterMessagingBeads(t *testing.T) {
 }
 
 func TestPlanDispatch_FiltersMessagingBeads(t *testing.T) {
+	t.Parallel()
 	// Mix 3 messaging-labeled beads and 2 plain work beads. PlanDispatch must
 	// keep only the 2 plain beads; Skipped must reflect the 3 messaging skips.
 	candidates := []PendingBead{
@@ -308,6 +320,7 @@ func TestPlanDispatch_FiltersMessagingBeads(t *testing.T) {
 }
 
 func TestPlanDispatch_OnlyMessagingBeads(t *testing.T) {
+	t.Parallel()
 	candidates := []PendingBead{
 		{ID: "ctx-1", WorkBeadID: "hq-1", Labels: []string{"gt:message"}},
 		{ID: "ctx-2", WorkBeadID: "hq-2", Labels: []string{"gt:handoff"}},
@@ -325,6 +338,7 @@ func TestPlanDispatch_OnlyMessagingBeads(t *testing.T) {
 }
 
 func TestSplitVars(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string

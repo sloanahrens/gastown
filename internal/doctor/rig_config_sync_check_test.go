@@ -1,10 +1,10 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +13,7 @@ import (
 )
 
 func TestRigConfigSyncCheck_MissingConfig(t *testing.T) {
+	t.Parallel()
 	// Create temp town root
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -57,6 +58,7 @@ func TestRigConfigSyncCheck_MissingConfig(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_FixCreatesConfig(t *testing.T) {
+	t.Parallel()
 	// Create temp town root
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -115,6 +117,7 @@ func TestRigConfigSyncCheck_FixCreatesConfig(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_AllConfigsPresent(t *testing.T) {
+	t.Parallel()
 	// Create temp town root
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -370,9 +373,7 @@ func TestRigConfigSyncCheck_FixCreatesMissingRootMetadata(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_DoltListErrorDoesNotMeanMissingDB(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake dolt stub is shell-specific")
-	}
+	t.Parallel()
 
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -414,15 +415,9 @@ func TestRigConfigSyncCheck_DoltListErrorDoesNotMeanMissingDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte("#!/usr/bin/env bash\necho unreachable >&2\nexit 1\n"), 0755); err != nil {
-		t.Fatalf("write fake dolt: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GT_DOLT_HOST", "192.0.2.1")
-
 	ctx := &CheckContext{TownRoot: tmpDir}
 	check := NewRigConfigSyncCheck()
+	check.listDatabases = func(string) ([]string, error) { return nil, errors.New("unreachable") }
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
 		t.Fatalf("expected StatusWarning, got %v: %s", result.Status, result.Message)
@@ -436,7 +431,7 @@ func TestRigConfigSyncCheck_DoltListErrorDoesNotMeanMissingDB(t *testing.T) {
 }
 
 func TestRigConfigSyncCheck_FixMissingDoltDBUsesCanonicalDatabase(t *testing.T) {
-
+	t.Parallel()
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -459,13 +454,18 @@ func TestRigConfigSyncCheck_FixMissingDoltDBUsesCanonicalDatabase(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	t.Setenv("BEADS_DIR", filepath.Join(tmpDir, "wrong", ".beads"))
-	t.Setenv("BEADS_DB", filepath.Join(tmpDir, "wrong.db"))
-	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong_db")
-
 	bd := newFakeBD()
 	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
+	check.listDatabases = func(string) ([]string, error) { return nil, nil }
+	// The caller's environment points bd at the wrong database.
+	check.environ = func() []string {
+		return []string{
+			"BEADS_DIR=" + filepath.Join(tmpDir, "wrong", ".beads"),
+			"BEADS_DB=" + filepath.Join(tmpDir, "wrong.db"),
+			"BEADS_DOLT_SERVER_DATABASE=wrong_db",
+		}
+	}
 	check.missingDoltDB = []string{"testrig"}
 
 	if err := check.Fix(ctx); err != nil {

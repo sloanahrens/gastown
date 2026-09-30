@@ -2,13 +2,11 @@ package doctor
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
-	"github.com/steveyegge/gastown/internal/git"
 )
 
 // RigIsGitRepoCheck verifies the rig has a valid mayor/rig git clone.
@@ -70,8 +67,7 @@ func (c *RigIsGitRepoCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Verify git status works
-	cmd := exec.Command("git", "-C", mayorRigPath, "status", "--porcelain")
-	if err := cmd.Run(); err != nil {
+	if _, err := ctx.git(mayorRigPath).Status(); err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
@@ -317,9 +313,8 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		// Check core.hooksPath
-		cmd := exec.Command("git", "-C", clonePath, "config", "--get", "core.hooksPath")
-		output, err := cmd.Output()
-		if err != nil || strings.TrimSpace(string(output)) != ".githooks" {
+		hooksPath, err := ctx.git(clonePath).ConfigGet("core.hooksPath")
+		if err != nil || strings.TrimSpace(hooksPath) != ".githooks" {
 			// Get relative path for cleaner output
 			relPath, _ := filepath.Rel(rigPath, clonePath)
 			if relPath == "" {
@@ -359,8 +354,7 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 // Fix configures core.hooksPath for all unconfigured clones.
 func (c *HooksPathConfiguredCheck) Fix(ctx *CheckContext) error {
 	for _, clonePath := range c.unconfiguredClones {
-		cmd := exec.Command("git", "-C", clonePath, "config", "core.hooksPath", ".githooks")
-		if err := cmd.Run(); err != nil {
+		if err := ctx.git(clonePath).ConfigSet("core.hooksPath", ".githooks"); err != nil {
 			return fmt.Errorf("failed to configure hooks for %s: %w", clonePath, err)
 		}
 	}
@@ -528,22 +522,19 @@ func (c *PolecatClonesValidCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		// Verify git status works and check for uncommitted changes
-		cmd := exec.Command("git", "-C", polecatPath, "status", "--porcelain")
-		output, err := cmd.Output()
+		g := ctx.git(polecatPath)
+		status, err := g.Status()
 		if err != nil {
 			issues = append(issues, fmt.Sprintf("%s: git status failed", polecatName))
 			continue
 		}
 
-		if len(output) > 0 {
+		if !status.Clean {
 			warnings = append(warnings, fmt.Sprintf("%s: has uncommitted changes", polecatName))
 		}
 
 		// Check if on a polecat branch
-		cmd = exec.Command("git", "-C", polecatPath, "branch", "--show-current")
-		branchOutput, err := cmd.Output()
-		if err == nil {
-			branch := strings.TrimSpace(string(branchOutput))
+		if branch, err := currentBranch(g); err == nil {
 			if !strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
 				warnings = append(warnings, fmt.Sprintf("%s: on branch '%s' (expected %s*)", polecatName, branch, constants.BranchPolecatPrefix))
 			}
@@ -658,6 +649,10 @@ func (c *BeadsConfigValidCheck) Fix(ctx *CheckContext) error {
 // a redirect file pointing to that location.
 type BeadsRedirectCheck struct {
 	FixableCheck
+
+	// environ is the environment bd init inherits before the rig's targets
+	// replace BEADS_*; nil is the process environment.
+	environ func() []string
 }
 
 // NewBeadsRedirectCheck creates a new beads redirect check.
@@ -811,7 +806,11 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		// Run bd init with the configured prefix (Dolt is the only backend since bd v0.51.0).
 		// Gas Town rigs use Dolt server mode via the shared town Dolt sql-server.
 		doltCfg := doltserver.DefaultConfig(ctx.TownRoot)
-		bdEnv := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
+		environ := c.environ
+		if environ == nil {
+			environ = os.Environ
+		}
+		bdEnv := append(stripEnvPrefixes(environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
 			"BEADS_DIR="+rigBeadsDir,
 			"BEADS_DOLT_SERVER_DATABASE="+ctx.RigName,
 		)
@@ -894,35 +893,22 @@ const (
 )
 
 // classifyBareRepo reports the state of .repo.git and, when not healthy, why.
-func classifyBareRepo(bareRepoPath string) (bareRepoState, error) {
+func classifyBareRepo(ctx *CheckContext, bareRepoPath string) (bareRepoState, error) {
 	if _, err := os.Stat(filepath.Join(bareRepoPath, "HEAD")); err != nil {
 		if os.IsNotExist(err) {
 			return bareRepoCorrupt, fmt.Errorf("HEAD missing: %w", err)
 		}
 		return bareRepoUnverified, fmt.Errorf("cannot stat HEAD: %w", err)
 	}
-	cmd := exec.Command("git", "-C", bareRepoPath, "rev-parse", "--git-dir")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return bareRepoUnverified, fmt.Errorf("git rev-parse --git-dir failed: %s", msg)
+	g := ctx.git(bareRepoPath)
+	if _, err := g.GitDir(); err != nil {
+		return bareRepoUnverified, fmt.Errorf("git rev-parse --git-dir failed: %s", gitOutput(err))
 	}
-	stderr.Reset()
-	bareCmd := exec.Command("git", "-C", bareRepoPath, "rev-parse", "--is-bare-repository")
-	bareCmd.Stderr = &stderr
-	out, err := bareCmd.Output()
+	isBare, err := g.IsBareRepository()
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return bareRepoUnverified, fmt.Errorf("git rev-parse --is-bare-repository failed: %s", msg)
+		return bareRepoUnverified, fmt.Errorf("git rev-parse --is-bare-repository failed: %s", gitOutput(err))
 	}
-	if strings.TrimSpace(string(out)) != "true" {
+	if !isBare {
 		return bareRepoUnverified, fmt.Errorf(".repo.git is not a bare repository")
 	}
 	return bareRepoHealthy, nil
@@ -934,8 +920,8 @@ func classifyBareRepo(bareRepoPath string) (bareRepoState, error) {
 // and also rejects a non-bare repo masquerading as .repo.git (which would let
 // refspec repair write into a working tree's git dir). Callers that might
 // remove the repo use classifyBareRepo, which separates corrupt from unknown.
-func bareRepoHealth(bareRepoPath string) error {
-	_, err := classifyBareRepo(bareRepoPath)
+func bareRepoHealth(ctx *CheckContext, bareRepoPath string) error {
+	_, err := classifyBareRepo(ctx, bareRepoPath)
 	return err
 }
 
@@ -982,7 +968,7 @@ func (c *BareRepoRefspecCheck) Run(ctx *CheckContext) *CheckResult {
 	// Before checking refspec, verify the bare repo is fundamentally usable.
 	// Without this guard, a partial-shell .repo.git (objects/ + worktrees/ only)
 	// will pass after Fix auto-creates a config file, masking the real corruption.
-	if healthErr := bareRepoHealth(bareRepoPath); healthErr != nil {
+	if healthErr := bareRepoHealth(ctx, bareRepoPath); healthErr != nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
@@ -996,9 +982,9 @@ func (c *BareRepoRefspecCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Check the refspec
-	cmd := exec.Command("git", "-C", bareRepoPath, "config", "--get", "remote.origin.fetch")
-	out, err := cmd.Output()
-	if err != nil {
+	refspec, _ := ctx.git(bareRepoPath).ConfigGet("remote.origin.fetch")
+	refspec = strings.TrimSpace(refspec)
+	if refspec == "" {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
@@ -1011,7 +997,6 @@ func (c *BareRepoRefspecCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	refspec := strings.TrimSpace(string(out))
 	expectedRefspec := "+refs/heads/*:refs/remotes/origin/*"
 	if refspec != expectedRefspec {
 		return &CheckResult{
@@ -1047,15 +1032,12 @@ func (c *BareRepoRefspecCheck) Fix(ctx *CheckContext) error {
 	// Refuse to write config into a structurally broken bare repo. `git config`
 	// auto-creates .repo.git/config, which would make subsequent BareRepoRefspecCheck
 	// runs return OK and hide the real corruption from operators.
-	if healthErr := bareRepoHealth(bareRepoPath); healthErr != nil {
+	if healthErr := bareRepoHealth(ctx, bareRepoPath); healthErr != nil {
 		return fmt.Errorf("refusing to set refspec: bare repo is structurally broken (%s); run bare-repo-exists fix to re-clone", healthErr)
 	}
 
-	cmd := exec.Command("git", "-C", bareRepoPath, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("setting refspec: %s", strings.TrimSpace(stderr.String()))
+	if err := ctx.git(bareRepoPath).ConfigSet("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return fmt.Errorf("setting refspec: %s", gitOutput(err))
 	}
 	return nil
 }
@@ -1138,8 +1120,7 @@ func (c *DefaultBranchExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	ref := fmt.Sprintf("refs/remotes/origin/%s", cfg.DefaultBranch)
-	cmd := exec.Command("git", "-C", bareRepoPath, "rev-parse", "--verify", ref)
-	if err := cmd.Run(); err != nil {
+	if ok, _ := ctx.git(bareRepoPath).RefExists(ref); !ok {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
@@ -1224,8 +1205,7 @@ func (c *DefaultBranchAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		ref := fmt.Sprintf("refs/remotes/origin/%s", cfg.DefaultBranch)
-		cmd := exec.Command("git", "-C", bareRepoPath, "rev-parse", "--verify", ref)
-		if err := cmd.Run(); err != nil {
+		if ok, _ := ctx.git(bareRepoPath).RefExists(ref); !ok {
 			errors = append(errors, fmt.Sprintf("%s: default_branch %q not found on remote", entry.Name(), cfg.DefaultBranch))
 		}
 	}
@@ -1350,7 +1330,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	// with "fatal: not a git repository" and is the recurring corruption mode this
 	// check exists to catch. Detect it here as a hard error so --fix triggers re-clone.
 	if _, err := os.Stat(bareRepoPath); err == nil {
-		state, healthErr := classifyBareRepo(bareRepoPath)
+		state, healthErr := classifyBareRepo(ctx, bareRepoPath)
 		if state == bareRepoUnverified {
 			c.bareRepoUnverified = true
 			return &CheckResult{
@@ -1435,7 +1415,7 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 			} else {
 				cfgPushURL := strings.TrimSpace(cfg.PushURL)
 				// Get actual push and fetch URLs from .repo.git using git wrapper
-				bareGit := git.NewGitWithDir(bareRepoPath, "")
+				bareGit := ctx.gitWithDir(bareRepoPath, "")
 				actualPush, pushErr := bareGit.GetPushURL("origin")
 				actualFetch, fetchErr := bareGit.RemoteURL("origin")
 				if pushErr != nil || fetchErr != nil {
@@ -1581,7 +1561,7 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 	//   3. Rename to .repo.git.corrupt-<unix-nanos>, keeping every object.
 	if c.bareRepoCorrupt {
 		if _, err := os.Stat(bareRepoPath); err == nil {
-			state, _ := classifyBareRepo(bareRepoPath)
+			state, _ := classifyBareRepo(ctx, bareRepoPath)
 			switch state {
 			case bareRepoHealthy:
 				// Repaired between Run and Fix — drop the corrupt flag and skip.
@@ -1619,7 +1599,7 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 				return fmt.Errorf("cannot parse config.json to fix push URL: %w", jsonErr)
 			}
 			cfgPushURL := strings.TrimSpace(cfg.PushURL)
-			bareGit := git.NewGitWithDir(bareRepoPath, "")
+			bareGit := ctx.gitWithDir(bareRepoPath, "")
 			if cfgPushURL != "" {
 				if err := bareGit.ConfigurePushURL("origin", cfgPushURL); err != nil {
 					return fmt.Errorf("updating push URL on .repo.git: %w", err)
@@ -1659,30 +1639,22 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 		}
 
 		// Clone bare repo (shallow, single-branch for efficiency on repos with many branches)
-		cmd := exec.Command("git", "clone", "--bare", "--single-branch", "--depth", "1", cfg.GitURL, bareRepoPath)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("cloning bare repo: %s", strings.TrimSpace(stderr.String()))
+		// (git clone --bare --single-branch --depth 1: the remote's HEAD branch)
+		if err := ctx.git(rigPath).CloneBareWithBranch(cfg.GitURL, bareRepoPath, ""); err != nil {
+			return fmt.Errorf("cloning bare repo: %s", gitOutput(err))
 		}
 
 		// Configure refspec so worktrees can fetch origin/* refs.
 		// Skip full fetch — the shallow single-branch clone already has the default branch.
-		stderr.Reset()
-		configCmd := exec.Command("git", "-C", bareRepoPath, "config",
-			"remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
-		configCmd.Stderr = &stderr
-		if err := configCmd.Run(); err != nil {
-			return fmt.Errorf("configuring refspec: %s", strings.TrimSpace(stderr.String()))
+		bareGit := ctx.git(bareRepoPath)
+		if err := bareGit.ConfigSet("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+			return fmt.Errorf("configuring refspec: %s", gitOutput(err))
 		}
 
 		// Restore push URL if configured (for read-only upstream repos)
 		if cfg.PushURL != "" {
-			stderr.Reset()
-			pushURLCmd := exec.Command("git", "-C", bareRepoPath, "remote", "set-url", "--push", "origin", cfg.PushURL)
-			pushURLCmd.Stderr = &stderr
-			if err := pushURLCmd.Run(); err != nil {
-				return fmt.Errorf("configuring push URL: %s", strings.TrimSpace(stderr.String()))
+			if err := bareGit.ConfigurePushURL("origin", cfg.PushURL); err != nil {
+				return fmt.Errorf("configuring push URL: %s", gitOutput(err))
 			}
 		}
 	}

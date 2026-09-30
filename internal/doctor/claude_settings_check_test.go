@@ -3,10 +3,11 @@ package doctor
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 func TestNewClaudeSettingsCheck(t *testing.T) {
@@ -24,10 +25,11 @@ func TestNewClaudeSettingsCheck(t *testing.T) {
 
 func TestClaudeSettingsCheck_NoSettingsFiles(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -189,6 +191,7 @@ func createStaleSettings(t *testing.T, path string, missingElements ...string) {
 
 func TestClaudeSettingsCheck_ValidMayorSettings(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create valid mayor settings at correct location (mayor/.claude/settings.json)
@@ -197,7 +200,7 @@ func TestClaudeSettingsCheck_ValidMayorSettings(t *testing.T) {
 	createValidSettings(t, mayorSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -208,6 +211,7 @@ func TestClaudeSettingsCheck_ValidMayorSettings(t *testing.T) {
 
 func TestClaudeSettingsCheck_LeftoverDeaconSettingsIgnored(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Leftover settings from the retired deacon role, including a stale
@@ -217,7 +221,7 @@ func TestClaudeSettingsCheck_LeftoverDeaconSettingsIgnored(t *testing.T) {
 	createValidSettings(t, filepath.Join(tmpDir, "deacon", ".claude", "settings.local.json"))
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -231,6 +235,7 @@ func TestClaudeSettingsCheck_LeftoverDeaconSettingsIgnored(t *testing.T) {
 
 func TestClaudeSettingsCheck_LeftoverWitnessRefineryDirsIgnored(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -244,7 +249,7 @@ func TestClaudeSettingsCheck_LeftoverWitnessRefineryDirsIgnored(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -258,6 +263,7 @@ func TestClaudeSettingsCheck_LeftoverWitnessRefineryDirsIgnored(t *testing.T) {
 
 func TestClaudeSettingsCheck_ValidCrewSettings(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -267,7 +273,7 @@ func TestClaudeSettingsCheck_ValidCrewSettings(t *testing.T) {
 	createValidSettings(t, crewSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -278,6 +284,7 @@ func TestClaudeSettingsCheck_ValidCrewSettings(t *testing.T) {
 
 func TestClaudeSettingsCheck_ValidPolecatSettings(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -289,7 +296,7 @@ func TestClaudeSettingsCheck_ValidPolecatSettings(t *testing.T) {
 	createValidPolecatSettings(t, pcSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -306,6 +313,7 @@ func TestClaudeSettingsCheck_ValidPolecatSettings(t *testing.T) {
 // recognizes role-specific Stop patterns; only polecats require one.
 func TestClaudeSettingsCheck_PolecatStopHookRecognized(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -313,7 +321,7 @@ func TestClaudeSettingsCheck_PolecatStopHookRecognized(t *testing.T) {
 	createValidPolecatSettings(t, pcSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -359,6 +367,7 @@ func TestExpectedStopPattern(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingEnabledPlugins(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create mayor settings.json missing enabledPlugins (content validation)
@@ -366,7 +375,7 @@ func TestClaudeSettingsCheck_MissingEnabledPlugins(t *testing.T) {
 	createStaleSettings(t, mayorSettings, "enabledPlugins")
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -380,6 +389,7 @@ func TestClaudeSettingsCheck_MissingEnabledPlugins(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingHooks(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create mayor settings.json missing hooks entirely (content validation)
@@ -387,7 +397,7 @@ func TestClaudeSettingsCheck_MissingHooks(t *testing.T) {
 	createStaleSettings(t, mayorSettings, "hooks")
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -398,6 +408,7 @@ func TestClaudeSettingsCheck_MissingHooks(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingSessionStartPrime(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create mayor settings.json missing gt prime in SessionStart (content validation)
@@ -405,7 +416,7 @@ func TestClaudeSettingsCheck_MissingSessionStartPrime(t *testing.T) {
 	createStaleSettings(t, mayorSettings, "PATH")
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -426,6 +437,7 @@ func TestClaudeSettingsCheck_MissingSessionStartPrime(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingStopHook(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// A polecat settings.json without its Stop hook is stale; no other role
@@ -436,7 +448,7 @@ func TestClaudeSettingsCheck_MissingStopHook(t *testing.T) {
 	writeSettings(t, pcSettings, settings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -457,6 +469,7 @@ func TestClaudeSettingsCheck_MissingStopHook(t *testing.T) {
 
 func TestClaudeSettingsCheck_WrongLocationCrewParent(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -466,7 +479,7 @@ func TestClaudeSettingsCheck_WrongLocationCrewParent(t *testing.T) {
 	createValidSettings(t, wrongSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -487,6 +500,7 @@ func TestClaudeSettingsCheck_WrongLocationCrewParent(t *testing.T) {
 
 func TestClaudeSettingsCheck_MultipleStaleFiles(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -504,7 +518,7 @@ func TestClaudeSettingsCheck_MultipleStaleFiles(t *testing.T) {
 	createValidSettings(t, polecatWrong) // Valid content but stale filename
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -520,6 +534,7 @@ func TestClaudeSettingsCheck_MultipleStaleFiles(t *testing.T) {
 
 func TestClaudeSettingsCheck_InvalidJSON(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create invalid JSON file (settings.json for content validation)
@@ -532,7 +547,7 @@ func TestClaudeSettingsCheck_InvalidJSON(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -553,6 +568,7 @@ func TestClaudeSettingsCheck_InvalidJSON(t *testing.T) {
 
 func TestClaudeSettingsCheck_FixDeletesStaleFile(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create stale settings.local.json at mayor (old filename, now stale)
@@ -560,7 +576,7 @@ func TestClaudeSettingsCheck_FixDeletesStaleFile(t *testing.T) {
 	createValidSettings(t, staleSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	// Run to detect - should find stale file AND missing settings.json
 	result := check.Run(ctx)
@@ -588,6 +604,7 @@ func TestClaudeSettingsCheck_FixDeletesStaleFile(t *testing.T) {
 
 func TestClaudeSettingsCheck_SkipsNonRigDirectories(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create directories that should be skipped as rigs
@@ -604,7 +621,7 @@ func TestClaudeSettingsCheck_SkipsNonRigDirectories(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	_ = check.Run(ctx)
 
@@ -617,6 +634,7 @@ func TestClaudeSettingsCheck_SkipsNonRigDirectories(t *testing.T) {
 
 func TestClaudeSettingsCheck_MixedValidAndStale(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -633,7 +651,7 @@ func TestClaudeSettingsCheck_MixedValidAndStale(t *testing.T) {
 	createValidPolecatSettings(t, pcSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -651,6 +669,7 @@ func TestClaudeSettingsCheck_MixedValidAndStale(t *testing.T) {
 
 func TestClaudeSettingsCheck_WrongLocationCrew(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -660,7 +679,7 @@ func TestClaudeSettingsCheck_WrongLocationCrew(t *testing.T) {
 	createValidSettings(t, wrongSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -681,6 +700,7 @@ func TestClaudeSettingsCheck_WrongLocationCrew(t *testing.T) {
 
 func TestClaudeSettingsCheck_WrongLocationPolecat(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -690,7 +710,7 @@ func TestClaudeSettingsCheck_WrongLocationPolecat(t *testing.T) {
 	createValidSettings(t, wrongSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -709,47 +729,25 @@ func TestClaudeSettingsCheck_WrongLocationPolecat(t *testing.T) {
 	}
 }
 
-// initTestGitRepo initializes a git repo in the given directory for settings tests.
-func initTestGitRepo(t *testing.T, dir string) {
+// initTestGitRepo makes an empty repository at dir in the gitfake world gf.
+func initTestGitRepo(t *testing.T, gf *gitfake.Fake, dir string) {
 	t.Helper()
-	cmds := [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test User"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git command %v failed: %v\n%s", args, err, out)
-		}
-	}
+	gf.InitRepo(t, dir)
 }
 
-// gitAddAndCommit adds and commits a file.
-func gitAddAndCommit(t *testing.T, repoDir, filePath string) {
+// gitAddAndCommit commits the repository at repoDir as it is on disk, which
+// in these tests holds just filePath.
+func gitAddAndCommit(t *testing.T, gf *gitfake.Fake, repoDir, filePath string) {
 	t.Helper()
-	// Get relative path from repo root
-	relPath, err := filepath.Rel(repoDir, filePath)
-	if err != nil {
+	if _, err := filepath.Rel(repoDir, filePath); err != nil {
 		t.Fatal(err)
 	}
-
-	cmds := [][]string{
-		{"git", "add", relPath},
-		{"git", "commit", "-m", "Add file"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = repoDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git command %v failed: %v\n%s", args, err, out)
-		}
-	}
+	gf.CommitWorktree(t, repoDir, "Add file")
 }
 
 func TestClaudeSettingsCheck_GitStatusUntracked(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -758,14 +756,14 @@ func TestClaudeSettingsCheck_GitStatusUntracked(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	initTestGitRepo(t, rigDir)
+	initTestGitRepo(t, gf, rigDir)
 
 	// Create an untracked settings file (not git added)
 	wrongSettings := filepath.Join(rigDir, ".claude", "settings.json")
 	createValidSettings(t, wrongSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -787,6 +785,7 @@ func TestClaudeSettingsCheck_GitStatusUntracked(t *testing.T) {
 
 func TestClaudeSettingsCheck_GitStatusTrackedClean(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -795,15 +794,15 @@ func TestClaudeSettingsCheck_GitStatusTrackedClean(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	initTestGitRepo(t, rigDir)
+	initTestGitRepo(t, gf, rigDir)
 
 	// Create settings and commit it (tracked, clean)
 	trackedSettings := filepath.Join(rigDir, ".claude", "settings.json")
 	createValidSettings(t, trackedSettings)
-	gitAddAndCommit(t, rigDir, trackedSettings)
+	gitAddAndCommit(t, gf, rigDir, trackedSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -819,6 +818,7 @@ func TestClaudeSettingsCheck_GitStatusTrackedClean(t *testing.T) {
 
 func TestClaudeSettingsCheck_GitStatusTrackedModified(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -827,12 +827,12 @@ func TestClaudeSettingsCheck_GitStatusTrackedModified(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	initTestGitRepo(t, rigDir)
+	initTestGitRepo(t, gf, rigDir)
 
 	// Create settings and commit it
 	trackedSettings := filepath.Join(rigDir, ".claude", "settings.json")
 	createValidSettings(t, trackedSettings)
-	gitAddAndCommit(t, rigDir, trackedSettings)
+	gitAddAndCommit(t, gf, rigDir, trackedSettings)
 
 	// Modify the file after commit
 	if err := os.WriteFile(trackedSettings, []byte(`{"modified": true}`), 0644); err != nil {
@@ -840,7 +840,7 @@ func TestClaudeSettingsCheck_GitStatusTrackedModified(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -855,6 +855,7 @@ func TestClaudeSettingsCheck_GitStatusTrackedModified(t *testing.T) {
 
 func TestClaudeSettingsCheck_FixPreservesModifiedFiles(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -863,12 +864,12 @@ func TestClaudeSettingsCheck_FixPreservesModifiedFiles(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	initTestGitRepo(t, rigDir)
+	initTestGitRepo(t, gf, rigDir)
 
 	// Create settings and commit it
 	trackedSettings := filepath.Join(rigDir, ".claude", "settings.json")
 	createValidSettings(t, trackedSettings)
-	gitAddAndCommit(t, rigDir, trackedSettings)
+	gitAddAndCommit(t, gf, rigDir, trackedSettings)
 
 	// Modify the file after commit
 	if err := os.WriteFile(trackedSettings, []byte(`{"modified": true}`), 0644); err != nil {
@@ -876,7 +877,7 @@ func TestClaudeSettingsCheck_FixPreservesModifiedFiles(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	// Run to detect and fix
 	_ = check.Run(ctx)
@@ -892,6 +893,7 @@ func TestClaudeSettingsCheck_FixPreservesModifiedFiles(t *testing.T) {
 
 func TestClaudeSettingsCheck_FixDeletesUntrackedFiles(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -900,14 +902,14 @@ func TestClaudeSettingsCheck_FixDeletesUntrackedFiles(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	initTestGitRepo(t, rigDir)
+	initTestGitRepo(t, gf, rigDir)
 
 	// Create an untracked settings file (not git added)
 	wrongSettings := filepath.Join(rigDir, ".claude", "settings.json")
 	createValidSettings(t, wrongSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	// Run to detect
 	result := check.Run(ctx)
@@ -928,6 +930,7 @@ func TestClaudeSettingsCheck_FixDeletesUntrackedFiles(t *testing.T) {
 
 func TestClaudeSettingsCheck_FixPreservesTrackedCleanFiles(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -936,15 +939,15 @@ func TestClaudeSettingsCheck_FixPreservesTrackedCleanFiles(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	initTestGitRepo(t, rigDir)
+	initTestGitRepo(t, gf, rigDir)
 
 	// Create settings and commit it (tracked, clean) — customer's project config
 	trackedSettings := filepath.Join(rigDir, ".claude", "settings.json")
 	createValidSettings(t, trackedSettings)
-	gitAddAndCommit(t, rigDir, trackedSettings)
+	gitAddAndCommit(t, gf, rigDir, trackedSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	// Run to detect
 	_ = check.Run(ctx)
@@ -962,6 +965,7 @@ func TestClaudeSettingsCheck_FixPreservesTrackedCleanFiles(t *testing.T) {
 
 func TestClaudeSettingsCheck_RigRootSettingsFlagged(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -975,7 +979,7 @@ func TestClaudeSettingsCheck_RigRootSettingsFlagged(t *testing.T) {
 	createValidSettings(t, rigRootSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 	if result.Status == StatusOK {
@@ -998,6 +1002,7 @@ func TestClaudeSettingsCheck_RigRootSettingsFlagged(t *testing.T) {
 
 func TestClaudeSettingsCheck_RigRootSettingsFixDeletes(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1011,7 +1016,7 @@ func TestClaudeSettingsCheck_RigRootSettingsFixDeletes(t *testing.T) {
 	createValidSettings(t, rigRootSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 	if result.Status == StatusOK {
@@ -1036,17 +1041,18 @@ func TestClaudeSettingsCheck_RigRootSettingsFixDeletes(t *testing.T) {
 
 func TestClaudeSettingsCheck_GitIgnoredFilesNotFlagged(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Initialize git repo at town root
-	initTestGitRepo(t, tmpDir)
+	initTestGitRepo(t, gf, tmpDir)
 
 	// Create .gitignore with CLAUDE.md
 	gitignorePath := filepath.Join(tmpDir, ".gitignore")
 	if err := os.WriteFile(gitignorePath, []byte("CLAUDE.md\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	gitAddAndCommit(t, tmpDir, gitignorePath)
+	gitAddAndCommit(t, gf, tmpDir, gitignorePath)
 
 	// Create CLAUDE.md at town root (wrong location but gitignored)
 	claudeMdPath := filepath.Join(tmpDir, "CLAUDE.md")
@@ -1055,7 +1061,7 @@ func TestClaudeSettingsCheck_GitIgnoredFilesNotFlagged(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1068,6 +1074,7 @@ func TestClaudeSettingsCheck_GitIgnoredFilesNotFlagged(t *testing.T) {
 
 func TestClaudeSettingsCheck_TownRootSettingsWarnsInsteadOfKilling(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create mayor directory (needed for fix to recreate settings there)
@@ -1096,7 +1103,7 @@ func TestClaudeSettingsCheck_TownRootSettingsWarnsInsteadOfKilling(t *testing.T)
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	// Run to detect
 	result := check.Run(ctx)
@@ -1139,6 +1146,7 @@ func TestClaudeSettingsCheck_TownRootSettingsWarnsInsteadOfKilling(t *testing.T)
 
 func TestClaudeSettingsCheck_MissingSettingsDetails(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1149,7 +1157,7 @@ func TestClaudeSettingsCheck_MissingSettingsDetails(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1195,6 +1203,7 @@ func TestClaudeSettingsCheck_MissingSettingsDetails(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingCrewSettings(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1205,7 +1214,7 @@ func TestClaudeSettingsCheck_MissingCrewSettings(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1227,6 +1236,7 @@ func TestClaudeSettingsCheck_MissingCrewSettings(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingPolecatSettings(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1237,7 +1247,7 @@ func TestClaudeSettingsCheck_MissingPolecatSettings(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1259,6 +1269,7 @@ func TestClaudeSettingsCheck_MissingPolecatSettings(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1274,7 +1285,7 @@ func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1302,6 +1313,7 @@ func TestClaudeSettingsCheck_MissingMultipleAgentSettings(t *testing.T) {
 
 func TestClaudeSettingsCheck_MixedMissingAndStale(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1320,7 +1332,7 @@ func TestClaudeSettingsCheck_MixedMissingAndStale(t *testing.T) {
 	createValidSettings(t, mayorStaleSettings)
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1356,6 +1368,7 @@ func TestClaudeSettingsCheck_MixedMissingAndStale(t *testing.T) {
 
 func TestClaudeSettingsCheck_MissingFileOnlyMessage(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1366,7 +1379,7 @@ func TestClaudeSettingsCheck_MissingFileOnlyMessage(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1387,6 +1400,7 @@ func TestClaudeSettingsCheck_MissingFileOnlyMessage(t *testing.T) {
 
 func TestClaudeSettingsCheck_NoMissingFileWhenDirNotExists(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1398,7 +1412,7 @@ func TestClaudeSettingsCheck_NoMissingFileWhenDirNotExists(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	result := check.Run(ctx)
 
@@ -1410,6 +1424,7 @@ func TestClaudeSettingsCheck_NoMissingFileWhenDirNotExists(t *testing.T) {
 
 func TestClaudeSettingsCheck_FixDoesNotDeleteMissingFiles(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 
@@ -1420,7 +1435,7 @@ func TestClaudeSettingsCheck_FixDoesNotDeleteMissingFiles(t *testing.T) {
 	}
 
 	check := NewClaudeSettingsCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir}, gf)
 
 	// Run to detect
 	result := check.Run(ctx)

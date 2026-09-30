@@ -27,6 +27,12 @@ import (
 // be made with evidence.
 type DoltServerPatrolCheck struct {
 	BaseCheck
+
+	// lookupEnv reads the GT_DOLT_* variables the server config honors; nil
+	// is the process environment.
+	lookupEnv func(key string) (string, bool)
+	// dial reports whether a TCP connection to addr succeeds; nil dials.
+	dial func(addr string) error
 }
 
 // NewDoltServerPatrolCheck creates a check that surfaces the Dolt-down +
@@ -102,8 +108,12 @@ func (c *DoltServerPatrolCheck) Run(ctx *CheckContext) *CheckResult {
 // isDoltReachable reports whether the local Dolt SQL server is accepting
 // connections on its configured port.
 func (c *DoltServerPatrolCheck) isDoltReachable(townRoot string) bool {
-	cfg := doltserver.DefaultConfig(townRoot)
-	conn, err := net.DialTimeout("tcp", doltServerAddr(cfg.Host, cfg.Port), 2*time.Second)
+	cfg := doltserver.DefaultConfigWithEnv(townRoot, c.lookupEnv)
+	addr := doltServerAddr(cfg.Host, cfg.Port)
+	if c.dial != nil {
+		return c.dial(addr) == nil
+	}
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return false
 	}

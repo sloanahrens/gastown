@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-deploy-source.sh — refuse to install a gt built from unmerged code.
 #
-# Precondition of the Makefile's install and safe-install targets (gt-o848l).
+# Precondition of the Makefile's install-local target (gt-o848l).
 # The installed gt is what the daemon and every town session execute, so the
 # only code that may reach it is code already merged to main.
 #

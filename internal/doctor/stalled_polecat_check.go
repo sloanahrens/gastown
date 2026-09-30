@@ -38,7 +38,7 @@ type StalledPolecatCheck struct {
 	stalledPolecats []stalledPolecatInfo // Cached during Run for use in Fix
 
 	sessionCheckerForTest polecatSessionChecker             // nil → real tmux
-	gitForTest            func(clonePath string) polecatGit // nil → real git.NewGit
+	gitForTest            func(clonePath string) polecatGit // nil → ctx.git
 	beadStatus            func(townRoot, beadID string) (string, bool)
 }
 
@@ -63,11 +63,11 @@ type polecatGit interface {
 // gitFor returns the git accessor for a clone path, honoring the test override.
 // Run and Fix must resolve it the same way: Fix re-judges what Run judged, so a
 // test override that applied to one and not the other would test nothing.
-func (c *StalledPolecatCheck) gitFor(clonePath string) polecatGit {
+func (c *StalledPolecatCheck) gitFor(ctx *CheckContext, clonePath string) polecatGit {
 	if c.gitForTest != nil {
 		return c.gitForTest(clonePath)
 	}
-	return git.NewGit(clonePath)
+	return ctx.git(clonePath)
 }
 
 type stalledPolecatInfo struct {
@@ -139,7 +139,7 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 				continue
 			}
 
-			pg := c.gitFor(clonePath)
+			pg := c.gitFor(ctx, clonePath)
 			branch, brErr := pg.CurrentBranch()
 			if brErr != nil {
 				unknown = append(unknown, fmt.Sprintf("%s: could not determine current branch: %v", id, brErr))
@@ -300,7 +300,7 @@ func (c *StalledPolecatCheck) Fix(ctx *CheckContext) error {
 
 	var lastErr error
 	for _, s := range c.stalledPolecats {
-		g := c.gitFor(s.clonePath)
+		g := c.gitFor(ctx, s.clonePath)
 		if c.branchSupersededByTerminalBead(ctx.TownRoot, s.branch) || c.branchLandedOnDefault(g, s.branch) {
 			continue
 		}

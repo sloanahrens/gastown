@@ -4,8 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/steveyegge/gastown/internal/git"
+	"strings"
 )
 
 // SparseCheckoutCheck detects legacy sparse checkout configurations that should be removed.
@@ -60,7 +59,7 @@ func (c *SparseCheckoutCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check all rigs for legacy sparse checkout
 	for _, rigPath := range rigPaths {
-		c.checkRig(rigPath)
+		c.checkRig(ctx, rigPath)
 	}
 
 	if len(c.affectedRepos) == 0 {
@@ -119,7 +118,7 @@ func (c *SparseCheckoutCheck) discoverRigPaths(townRoot string) []string {
 }
 
 // checkRig checks all worktree repos within a single rig for legacy sparse checkout.
-func (c *SparseCheckoutCheck) checkRig(rigPath string) {
+func (c *SparseCheckoutCheck) checkRig(ctx *CheckContext, rigPath string) {
 	repoPaths := []string{
 		filepath.Join(rigPath, "mayor", "rig"),
 	}
@@ -160,7 +159,7 @@ func (c *SparseCheckoutCheck) checkRig(rigPath string) {
 		}
 
 		// Check if sparse checkout is configured (legacy configuration to remove)
-		if git.IsSparseCheckoutConfigured(repoPath) {
+		if v, err := ctx.git(repoPath).ConfigGet("core.sparseCheckout"); err == nil && strings.TrimSpace(v) == "true" {
 			c.affectedRepos = append(c.affectedRepos, repoPath)
 		}
 	}
@@ -169,7 +168,7 @@ func (c *SparseCheckoutCheck) checkRig(rigPath string) {
 // Fix removes sparse checkout configuration from affected repos.
 func (c *SparseCheckoutCheck) Fix(ctx *CheckContext) error {
 	for _, repoPath := range c.affectedRepos {
-		if err := git.RemoveSparseCheckout(repoPath); err != nil {
+		if err := ctx.git(repoPath).DisableSparseCheckout(); err != nil {
 			relPath, _ := filepath.Rel(c.townRoot, repoPath)
 			return fmt.Errorf("failed to remove sparse checkout for %s: %w", relPath, err)
 		}

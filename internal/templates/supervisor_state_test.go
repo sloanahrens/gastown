@@ -84,9 +84,10 @@ func TestParseSystemctlShow_NotLoaded(t *testing.T) {
 // failure: launchctl exits 113 with this message when the label is not in the
 // user's gui domain, which is where a booted-out job stays.
 func TestSupervisorJobState_UnknownLaunchdJobIsNotAnError(t *testing.T) {
-	stubSupervisorProbe(t, "Bad request.\nCould not find service \"com.gastown.daemon\" in domain for user gui: 501\n", errors.New("exit status 113"))
+	t.Parallel()
+	h := probeAnswers(fakeHost(t, "darwin"), "Bad request.\nCould not find service \"com.gastown.daemon\" in domain for user gui: 501\n", errors.New("exit status 113"))
 
-	st := SupervisorJobState("launchd")
+	st := h.jobState("launchd")
 	if st.Loaded || st.Err != nil {
 		t.Errorf("SupervisorJobState(launchd) = %+v, want Loaded=false and no error", st)
 	}
@@ -98,9 +99,10 @@ func TestSupervisorJobState_UnknownLaunchdJobIsNotAnError(t *testing.T) {
 // A probe that fails for any other reason must not read as "no supervisor
 // job": that would be the same lie in the other direction.
 func TestSupervisorJobState_ProbeFailureIsAnError(t *testing.T) {
-	stubSupervisorProbe(t, "", errors.New("exec: \"launchctl\": executable file not found in $PATH"))
+	t.Parallel()
+	h := probeAnswers(fakeHost(t, "darwin"), "", errors.New("exec: \"launchctl\": executable file not found in $PATH"))
 
-	st := SupervisorJobState("launchd")
+	st := h.jobState("launchd")
 	if st.Err == nil || st.Loaded {
 		t.Errorf("SupervisorJobState(launchd) = %+v, want an error and Loaded=false", st)
 	}
@@ -152,85 +154,103 @@ func TestStatusLine(t *testing.T) {
 // installed for another town leaves this town unsupervised, whatever the job
 // named in it is doing.
 func TestSupervisorStatusLine(t *testing.T) {
-	town := t.TempDir()
-	other := t.TempDir()
-	alive := SupervisorState{Kind: "", Loaded: true, PID: 64604, Runs: 53, LastExit: 0}
-	read := func(kind string) SupervisorState {
-		alive.Kind = kind
-		return alive
+	t.Parallel()
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			other := t.TempDir()
+			read := func(kind string) SupervisorState {
+				return SupervisorState{Kind: kind, Loaded: true, PID: 64604, Runs: 53, LastExit: 0}
+			}
+
+			t.Run("served by this town's supervisor", func(t *testing.T) {
+				t.Parallel()
+				h := fakeHost(t, goos)
+				_, kind := writeSupervisorFile(t, h, town)
+				if got := h.statusLine(town, 64604, read); got != kind {
+					t.Errorf("statusLine = %q, want the bare kind %q for the daemon the job runs", got, kind)
+				}
+			})
+
+			t.Run("file of another town", func(t *testing.T) {
+				t.Parallel()
+				h := fakeHost(t, goos)
+				writeSupervisorFile(t, h, other)
+				if got := h.statusLine(town, 64604, read); got != "none" {
+					t.Errorf("statusLine = %q, want %q for a file naming another town", got, "none")
+				}
+			})
+
+			t.Run("no file", func(t *testing.T) {
+				t.Parallel()
+				if got := fakeHost(t, goos).statusLine(town, 64604, read); got != "none" {
+					t.Errorf("statusLine = %q, want %q with no file installed", got, "none")
+				}
+			})
+
+			t.Run("file does not name a town", func(t *testing.T) {
+				t.Parallel()
+				h := fakeHost(t, goos)
+				path, kind := h.filePath()
+				writeFileAt(t, path, "<plist/>")
+				got := h.statusLine(town, 64604, read)
+				if !strings.HasPrefix(got, kind+" (unverified - ") {
+					t.Errorf("statusLine = %q, want %q", got, kind+" (unverified - ...)")
+				}
+			})
+		})
 	}
-
-	t.Run("served by this town's supervisor", func(t *testing.T) {
-		writeHostSupervisorFile(t, town)
-		if got := SupervisorStatusLine(town, 64604, read); got == "none" || strings.Contains(got, "DETACHED") {
-			t.Errorf("SupervisorStatusLine = %q, want the bare kind for the daemon the job runs", got)
-		}
-	})
-
-	t.Run("file of another town", func(t *testing.T) {
-		writeHostSupervisorFile(t, other)
-		if got := SupervisorStatusLine(town, 64604, read); got != "none" {
-			t.Errorf("SupervisorStatusLine = %q, want %q for a file naming another town", got, "none")
-		}
-	})
-
-	t.Run("no file", func(t *testing.T) {
-		isolateHome(t)
-		if got := SupervisorStatusLine(town, 64604, read); got != "none" {
-			t.Errorf("SupervisorStatusLine = %q, want %q with no file installed", got, "none")
-		}
-	})
-
-	t.Run("file does not name a town", func(t *testing.T) {
-		path, kind := hostSupervisorPath(t)
-		if path == "" {
-			t.Skip("no supervisor on this host")
-		}
-		writeFileAt(t, path, "<plist/>")
-		got := SupervisorStatusLine(town, 64604, read)
-		if !strings.HasPrefix(got, kind+" (unverified - ") {
-			t.Errorf("SupervisorStatusLine = %q, want %q", got, kind+" (unverified - ...)")
-		}
-	})
 }
 
-// hostSupervisorPath resolves the supervisor file this host would use inside a
-// throwaway HOME / XDG_DATA_HOME, and fails if the path did not land there.
-// The resolved path is a real per-user one, so a test that writes at whatever
-// comes back must first have moved HOME into its own temp dir — writing at the
-// host's own clobbers the operator's provisioning.
-func hostSupervisorPath(t *testing.T) (path, kind string) {
+// A host with no supported supervisor has no file to read and no job.
+func TestSupervisorStatusLine_UnsupportedHost(t *testing.T) {
+	t.Parallel()
+	h := fakeHost(t, "windows")
+	if path, kind := h.filePath(); path != "" || kind != "" {
+		t.Errorf("filePath() = (%q, %q), want none on an unsupported host", path, kind)
+	}
+	if got := h.statusLine(t.TempDir(), 0, nil); got != "none" {
+		t.Errorf("statusLine = %q, want none", got)
+	}
+}
+
+// fakeHost is a host running goos whose HOME and XDG_DATA_HOME are fresh
+// temp dirs and whose service manager must not be probed.
+func fakeHost(t *testing.T, goos string) supervisorHost {
 	t.Helper()
 	home := t.TempDir()
 	dataHome := filepath.Join(home, "data")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	path, kind = SupervisorFilePath()
-	if path == "" {
-		return "", ""
+	return supervisorHost{
+		goos: goos,
+		getenv: func(k string) string {
+			if k == "XDG_DATA_HOME" {
+				return dataHome
+			}
+			return ""
+		},
+		homeDir: func() (string, error) { return home, nil },
+		probe: func(argv []string) (string, error) {
+			t.Errorf("unexpected probe %v", argv)
+			return "", errors.New("unexpected probe")
+		},
 	}
-	if !strings.HasPrefix(path, home) && !strings.HasPrefix(path, dataHome) {
-		t.Fatalf("supervisor file %s is outside the isolated HOME %s / XDG_DATA_HOME %s", path, home, dataHome)
-	}
-	return path, kind
 }
 
-// isolateHome points HOME / XDG_DATA_HOME at throwaway directories without
-// resolving anything.
-func isolateHome(t *testing.T) {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+// probeAnswers returns h with a service manager that answers every probe with
+// a canned run.
+func probeAnswers(h supervisorHost, out string, err error) supervisorHost {
+	h.probe = func([]string) (string, error) { return out, err }
+	return h
 }
 
-// writeHostSupervisorFile installs the plist / unit this host would use, in
-// an isolated HOME, naming town as its WorkingDirectory.
-func writeHostSupervisorFile(t *testing.T, town string) {
+// writeSupervisorFile installs the plist / unit h would use, naming town as
+// its WorkingDirectory, and returns its path and kind.
+func writeSupervisorFile(t *testing.T, h supervisorHost, town string) (path, kind string) {
 	t.Helper()
-	path, kind := hostSupervisorPath(t)
+	path, kind = h.filePath()
 	if path == "" {
-		t.Skip("no supervisor on this host")
+		t.Fatalf("host %s has no supervisor file", h.goos)
 	}
 	var body string
 	if kind == "launchd" {
@@ -239,6 +259,7 @@ func writeHostSupervisorFile(t *testing.T, town string) {
 		body = "[Service]\nWorkingDirectory=" + town + "\n"
 	}
 	writeFileAt(t, path, body)
+	return path, kind
 }
 
 func writeFileAt(t *testing.T, path, body string) {
@@ -249,12 +270,4 @@ func writeFileAt(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// stubSupervisorProbe answers the next probe with a canned service-manager run.
-func stubSupervisorProbe(t *testing.T, out string, err error) {
-	t.Helper()
-	prev := supervisorProbeRun
-	t.Cleanup(func() { supervisorProbeRun = prev })
-	supervisorProbeRun = func(argv []string) (string, error) { return out, err }
 }

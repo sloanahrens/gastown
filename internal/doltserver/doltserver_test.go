@@ -4177,6 +4177,19 @@ func TestDefaultConfig_EnvVarOverrides(t *testing.T) {
 	}
 }
 
+// DefaultConfigWithEnv reads the variables it is given, not the process's.
+func TestDefaultConfigWithEnv(t *testing.T) {
+	t.Parallel()
+	env := map[string]string{"GT_DOLT_PORT": "13306", "GT_DOLT_USER": "myuser"}
+	config := DefaultConfigWithEnv(t.TempDir(), func(k string) (string, bool) { v, ok := env[k]; return v, ok })
+	if config.Port != 13306 || config.User != "myuser" {
+		t.Errorf("Port, User = %d, %q; want 13306, myuser", config.Port, config.User)
+	}
+	if got := DefaultConfigWithEnv(t.TempDir(), func(string) (string, bool) { return "", false }).Port; got != DefaultPort {
+		t.Errorf("Port with no GT_DOLT_PORT = %d, want %d", got, DefaultPort)
+	}
+}
+
 func TestDefaultConfig_EnvVarPartialOverride(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()

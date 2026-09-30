@@ -134,7 +134,7 @@ Homebrew installs `gt`, `bd`, and `dolt` together.
 brew install gastown
 ```
 
-Avoid `go install` on macOS. The unsigned binary it produces gets killed by Gatekeeper. To build from source, install Dolt and ICU4C with Homebrew, install `bd` with Go, then build and install `gt` with `make install`. Put `$HOME/.local/bin` and `$HOME/go/bin` ahead of any stale binary locations on your `PATH` so the freshly installed `gt` and `bd` take precedence.
+Avoid `go install` on macOS. The unsigned binary it produces gets killed by Gatekeeper. To build from source, install Dolt and ICU4C with Homebrew, install `bd` with Go, then build and install `gt` with `make install-local`. Once your town is running, update `gt` with `make install` (see [docs/INSTALLING.md](docs/INSTALLING.md#updating)). Put `$HOME/.local/bin` and `$HOME/go/bin` ahead of any stale binary locations on your `PATH` so the freshly installed `gt` and `bd` take precedence.
 
 ```bash
 brew install dolt icu4c
@@ -142,7 +142,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 git clone https://github.com/steveyegge/gastown.git
 cd gastown
-make install
+make install-local
 ```
 
 #### Install gt on Linux

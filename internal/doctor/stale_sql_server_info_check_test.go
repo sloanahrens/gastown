@@ -1,17 +1,30 @@
 package doctor
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
+
+// sqlServerInfoCheck is a StaleSQLServerInfoCheck on a machine where only the
+// given PIDs are running.
+func sqlServerInfoCheck(live ...int) *StaleSQLServerInfoCheck {
+	c := NewStaleSQLServerInfoCheck()
+	c.alive = func(pid int) bool {
+		for _, p := range live {
+			if p == pid {
+				return true
+			}
+		}
+		return false
+	}
+	return c
+}
 
 func TestStaleSQLServerInfoCheck_NoFiles(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	check := NewStaleSQLServerInfoCheck()
+	check := sqlServerInfoCheck(4242)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	result := check.Run(ctx)
@@ -22,9 +35,6 @@ func TestStaleSQLServerInfoCheck_NoFiles(t *testing.T) {
 
 func TestStaleSQLServerInfoCheck_DetectsStaleFile(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix process signals")
-	}
 
 	tmpDir := t.TempDir()
 
@@ -34,13 +44,13 @@ func TestStaleSQLServerInfoCheck_DetectsStaleFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Use PID 999999999 which is almost certainly not running
+	// The PID it names is not running.
 	infoPath := filepath.Join(doltDir, "sql-server.info")
 	if err := os.WriteFile(infoPath, []byte("999999999:3307:some-uuid"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	check := NewStaleSQLServerInfoCheck()
+	check := sqlServerInfoCheck(4242)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	result := check.Run(ctx)
@@ -54,9 +64,6 @@ func TestStaleSQLServerInfoCheck_DetectsStaleFile(t *testing.T) {
 
 func TestStaleSQLServerInfoCheck_FixIsNoOp(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix process signals")
-	}
 
 	tmpDir := t.TempDir()
 
@@ -72,7 +79,7 @@ func TestStaleSQLServerInfoCheck_FixIsNoOp(t *testing.T) {
 		}
 	}
 
-	check := NewStaleSQLServerInfoCheck()
+	check := sqlServerInfoCheck(4242)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	// Run to detect
@@ -99,25 +106,22 @@ func TestStaleSQLServerInfoCheck_FixIsNoOp(t *testing.T) {
 
 func TestStaleSQLServerInfoCheck_SkipsLiveProcess(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("test uses Unix process signals")
-	}
 
 	tmpDir := t.TempDir()
 
-	// Create a sql-server.info with our own PID (definitely alive)
+	// Create a sql-server.info naming a live PID
 	doltDir := filepath.Join(tmpDir, "myrig", ".beads", "dolt", ".dolt")
 	if err := os.MkdirAll(doltDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	infoPath := filepath.Join(doltDir, "sql-server.info")
-	content := fmt.Sprintf("%d:3307:some-uuid", os.Getpid())
+	content := "4242:3307:some-uuid"
 	if err := os.WriteFile(infoPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	check := NewStaleSQLServerInfoCheck()
+	check := sqlServerInfoCheck(4242)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	result := check.Run(ctx)
@@ -140,7 +144,7 @@ func TestStaleSQLServerInfoCheck_EmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := NewStaleSQLServerInfoCheck()
+	check := sqlServerInfoCheck(4242)
 	ctx := &CheckContext{TownRoot: tmpDir}
 
 	result := check.Run(ctx)

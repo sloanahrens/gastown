@@ -26,6 +26,15 @@ func readTrustConfig(t *testing.T, path string) map[string]any {
 	return cfg
 }
 
+// fakeTrustEnv is a process environment holding only vars, with home as the
+// home directory.
+func fakeTrustEnv(home string, vars map[string]string) trustEnv {
+	return trustEnv{
+		getenv:  func(k string) string { return vars[k] },
+		homeDir: func() (string, error) { return home, nil },
+	}
+}
+
 func trustAccepted(t *testing.T, cfg map[string]any, dir string) bool {
 	t.Helper()
 	projects, ok := cfg["projects"].(map[string]any)
@@ -41,6 +50,7 @@ func trustAccepted(t *testing.T, cfg map[string]any, dir string) bool {
 }
 
 func TestEnsureWorkspaceTrust_CreatesMissingConfig(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 
@@ -55,6 +65,7 @@ func TestEnsureWorkspaceTrust_CreatesMissingConfig(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_PreservesExistingConfig(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 	path := filepath.Join(configDir, ".claude.json")
@@ -95,6 +106,7 @@ func TestEnsureWorkspaceTrust_PreservesExistingConfig(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_PreservesExistingProjectFields(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 	path := filepath.Join(configDir, ".claude.json")
@@ -119,6 +131,7 @@ func TestEnsureWorkspaceTrust_PreservesExistingProjectFields(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_NoRewriteWhenAlreadyTrusted(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := configDir // real dir with no symlink alias in the temp tree
 	path := filepath.Join(configDir, ".claude.json")
@@ -156,11 +169,12 @@ func TestEnsureWorkspaceTrust_NoRewriteWhenAlreadyTrusted(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_SeedsSymlinkResolvedPath(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	realDir := t.TempDir()
 	linkDir := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(realDir, linkDir); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		t.Fatalf("symlink: %v", err)
 	}
 
 	if err := EnsureWorkspaceTrust(linkDir, configDir, claudeRC()); err != nil {
@@ -181,6 +195,7 @@ func TestEnsureWorkspaceTrust_SeedsSymlinkResolvedPath(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_NonClaudeRuntimeIsNoop(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 
@@ -201,6 +216,7 @@ func TestEnsureWorkspaceTrust_NonClaudeRuntimeIsNoop(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_ClaudePathVariants(t *testing.T) {
+	t.Parallel()
 	for _, cmd := range []string{
 		"claude",
 		"/Users/x/.claude/local/claude",
@@ -220,9 +236,9 @@ func TestEnsureWorkspaceTrust_ClaudePathVariants(t *testing.T) {
 // after the caller's, so it wins — trust has to follow it there, or the entry
 // lands in a file the session never reads (gt-3vfs).
 func TestEnsureWorkspaceTrust_PresetEnvConfigDirWins(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	env := fakeTrustEnv(home, nil)
 
 	presetDir := t.TempDir()
 	workDir := t.TempDir()
@@ -231,7 +247,7 @@ func TestEnsureWorkspaceTrust_PresetEnvConfigDirWins(t *testing.T) {
 		Env:     map[string]string{"CLAUDE_CONFIG_DIR": presetDir},
 	}
 
-	if err := EnsureWorkspaceTrust(workDir, "", rc); err != nil {
+	if err := ensureWorkspaceTrust(workDir, "", rc, env); err != nil {
 		t.Fatalf("EnsureWorkspaceTrust: %v", err)
 	}
 
@@ -249,18 +265,19 @@ func TestEnsureWorkspaceTrust_PresetEnvConfigDirWins(t *testing.T) {
 // CLAUDE_CONFIG_DIR. Seed the winner only — writing into another account's
 // config is the cross-contamination the config dir isolates against (gt-3vfs).
 func TestEnsureWorkspaceTrust_PresetEnvConfigDirBeatsCallerAndProcessEnv(t *testing.T) {
+	t.Parallel()
 	presetDir := t.TempDir()
 	callerDir := t.TempDir()
 	processDir := t.TempDir()
 	workDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", processDir)
+	env := fakeTrustEnv(t.TempDir(), map[string]string{"CLAUDE_CONFIG_DIR": processDir})
 
 	rc := &config.RuntimeConfig{
 		Command: "claude",
 		Env:     map[string]string{"CLAUDE_CONFIG_DIR": presetDir},
 	}
 
-	if err := EnsureWorkspaceTrust(workDir, callerDir, rc); err != nil {
+	if err := ensureWorkspaceTrust(workDir, callerDir, rc, env); err != nil {
 		t.Fatalf("EnsureWorkspaceTrust: %v", err)
 	}
 
@@ -277,12 +294,13 @@ func TestEnsureWorkspaceTrust_PresetEnvConfigDirBeatsCallerAndProcessEnv(t *test
 // Precedence without a preset override: the caller's config dir wins over the
 // gt process environment, which wins over the ~/.claude.json default.
 func TestEnsureWorkspaceTrust_CallerConfigDirBeatsProcessEnv(t *testing.T) {
+	t.Parallel()
 	callerDir := t.TempDir()
 	processDir := t.TempDir()
 	workDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", processDir)
+	env := fakeTrustEnv(t.TempDir(), map[string]string{"CLAUDE_CONFIG_DIR": processDir})
 
-	if err := EnsureWorkspaceTrust(workDir, callerDir, claudeRC()); err != nil {
+	if err := ensureWorkspaceTrust(workDir, callerDir, claudeRC(), env); err != nil {
 		t.Fatalf("EnsureWorkspaceTrust: %v", err)
 	}
 
@@ -299,7 +317,8 @@ func TestEnsureWorkspaceTrust_CallerConfigDirBeatsProcessEnv(t *testing.T) {
 // anyway, and silently falling back to ~/.claude.json would seed trust into a
 // file the session never reads (gt-3vfs).
 func TestEnsureWorkspaceTrust_UnresolvablePresetConfigDirErrors(t *testing.T) {
-	t.Setenv("GT_TRUST_TEST_UNSET", "")
+	t.Parallel()
+	// GT_TRUST_TEST_UNSET is never set: the hermetic harness scrubs GT_*.
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 	rc := &config.RuntimeConfig{
@@ -321,6 +340,7 @@ func TestEnsureWorkspaceTrust_UnresolvablePresetConfigDirErrors(t *testing.T) {
 // trust seeding must agree instead of gating on the literal basename "claude"
 // (gt-zbty).
 func TestEnsureWorkspaceTrust_NonClaudeCommandWithClaudeProviderIsSeeded(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 
@@ -341,6 +361,7 @@ func TestEnsureWorkspaceTrust_NonClaudeCommandWithClaudeProviderIsSeeded(t *test
 // A wrapper command with no Claude provider is a genuinely different runtime
 // (e.g. a codex shim): no trust entry, matching config.IsResolvedAgentClaude.
 func TestEnsureWorkspaceTrust_WrappedNonClaudeCommandIsNoop(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 
@@ -358,6 +379,7 @@ func TestEnsureWorkspaceTrust_WrappedNonClaudeCommandIsNoop(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_CorruptConfigErrors(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 	path := filepath.Join(configDir, ".claude.json")
@@ -380,6 +402,7 @@ func TestEnsureWorkspaceTrust_CorruptConfigErrors(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_EmptyWorkDirIsNoop(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	if err := EnsureWorkspaceTrust("", configDir, claudeRC()); err != nil {
 		t.Fatalf("EnsureWorkspaceTrust: %v", err)
@@ -390,6 +413,7 @@ func TestEnsureWorkspaceTrust_EmptyWorkDirIsNoop(t *testing.T) {
 }
 
 func TestEnsureWorkspaceTrust_PreservesFileMode(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 	path := filepath.Join(configDir, ".claude.json")
@@ -411,6 +435,7 @@ func TestEnsureWorkspaceTrust_PreservesFileMode(t *testing.T) {
 }
 
 func TestSeedWorkspaceTrust_SeedsNeverTrustedPath(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 
@@ -423,6 +448,7 @@ func TestSeedWorkspaceTrust_SeedsNeverTrustedPath(t *testing.T) {
 }
 
 func TestSeedWorkspaceTrust_SwallowsErrors(t *testing.T) {
+	t.Parallel()
 	configDir := t.TempDir()
 	workDir := t.TempDir()
 	path := filepath.Join(configDir, ".claude.json")

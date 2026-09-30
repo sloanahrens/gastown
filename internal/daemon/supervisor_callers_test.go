@@ -109,6 +109,8 @@ func reaperDaemon(t *testing.T, bd *workBD) (*Daemon, *strings.Builder) {
 		logger:   log.New(&logBuf, "", 0),
 		tmux:     polecatSessionTmux("bash", time.Now().Add(-time.Hour)),
 		notifier: notifyfake.New(),
+		// The reaper names the seat's session from the registry.
+		prefixRegistryFn: myrPrefixes,
 	}
 	if bd != nil {
 		d.bdPath = "bd"
@@ -119,10 +121,8 @@ func reaperDaemon(t *testing.T, bd *workBD) (*Daemon, *strings.Builder) {
 
 // G1-08: the idle reaper honors the pause marker; before the supervisor it
 // was the one scanner that did not.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 	d, logBuf := reaperDaemon(t, nil)
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatIdle, time.Hour)
 	if err := agentpause.Pause(d.config.TownRoot, "myr", "polecat", "mycat", "inspecting the pane", "human", ""); err != nil {
@@ -140,10 +140,8 @@ func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
 }
 
 // G1-07: a per-rig e-stop stops the reaper too.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_HonorsARigEstop(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 	d, logBuf := reaperDaemon(t, nil)
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatIdle, time.Hour)
 	if err := estop.ActivateRig(d.config.TownRoot, "myr", estop.TriggerManual, "drill"); err != nil {
@@ -159,10 +157,8 @@ func TestReapIdlePolecat_HonorsARigEstop(t *testing.T) {
 
 // G1-01: the reaper decides from the work bead and the pane, never from an
 // agent bead.
-//
-//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_NeverReadsAgentBeads(t *testing.T) {
-	registerMyr(t)
+	t.Parallel()
 	bd := newWorkBD(t)
 	d, logBuf := reaperDaemon(t, bd)
 	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatWorking, time.Hour)
@@ -243,16 +239,15 @@ func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
 
 // The patrol-disabled sweep kills through the supervisor: a paused witness
 // stays, an unpaused one goes, and the kill is logged with its actor.
-//
-//testpolicy:allow parallel — kills through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestKillRetiredPatrolSessions_HonorsPauseAndLogsActor(t *testing.T) {
-	registerRigs(t, "aa", "bb")
+	t.Parallel()
 	tm := newFakeTmux(newFixedClock())
 	tm.addSession("aa-witness", "claude", time.Now())
 	tm.addSession("bb-witness", "claude", time.Now())
 	tm.addSession("hq-deacon", "claude", time.Now())
 	tm.addSession("hq-boot", "claude", time.Now())
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm, rigPool: newRigWorkerPool(1, 10*time.Second, nil), ctx: context.Background()}
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm, rigPool: newRigWorkerPool(1, 10*time.Second, nil), ctx: context.Background(),
+		prefixRegistryFn: rigPrefixes("aa", "bb")}
 	writeKnownRigs(t, d.config.TownRoot, "aa", "bb")
 	if err := agentpause.Pause(d.config.TownRoot, "aa", "witness", "", "debugging", "human", ""); err != nil {
 		t.Fatal(err)
@@ -355,27 +350,16 @@ func writeKnownRigs(t *testing.T, townRoot string, rigs ...string) {
 	}
 }
 
-// registerMyr maps rig "myr" to prefix "myr" in the process-wide registry for
-// the test's duration. A test that calls it must not run in parallel.
-func registerMyr(t *testing.T) {
-	t.Helper()
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-}
+// myrPrefixes maps rig "myr" to prefix "myr"; a daemon's prefixRegistryFn.
+func myrPrefixes() *session.PrefixRegistry { return rigPrefixes("myr")() }
 
-// registerRigs maps each rig to a prefix equal to its name for the test.
-func registerRigs(t *testing.T, rigs ...string) {
-	t.Helper()
-	old := session.DefaultRegistry()
+// rigPrefixes maps each rig to a prefix equal to its name.
+func rigPrefixes(rigs ...string) func() *session.PrefixRegistry {
 	reg := session.NewPrefixRegistry()
 	for _, r := range rigs {
 		reg.Register(r, r)
 	}
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	return func() *session.PrefixRegistry { return reg }
 }
 
 // unknownTmuxDaemon returns a daemon whose tmux cannot answer, whose restart

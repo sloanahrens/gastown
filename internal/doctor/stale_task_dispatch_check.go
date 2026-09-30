@@ -16,6 +16,10 @@ import (
 type StaleTaskDispatchCheck struct {
 	FixableCheck
 	staleTargets []hooks.Target
+
+	// computeExpected is the hooks config Fix regenerates a target from; nil
+	// is hooks.ComputeExpected, which reads the base and overrides under ~/.gt.
+	computeExpected func(target string) (*hooks.HooksConfig, error)
 }
 
 // NewStaleTaskDispatchCheck creates a check for stale task-dispatch hook references.
@@ -126,9 +130,13 @@ func (c *StaleTaskDispatchCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
+	computeExpected := c.computeExpected
+	if computeExpected == nil {
+		computeExpected = hooks.ComputeExpected
+	}
 	var errs []string
 	for _, target := range c.staleTargets {
-		expected, err := hooks.ComputeExpected(target.Key)
+		expected, err := computeExpected(target.Key)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", target.DisplayKey(), err))
 			continue

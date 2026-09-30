@@ -30,13 +30,13 @@ type bdCLI interface {
 // process environment).
 type bdOpener func(dir string, env []string) bdCLI
 
-// bd returns the bd client for dir and env: the real bd CLI, unless the
-// context carries an opener.
+// bd returns the bd client for dir and env: the real bd CLI (or ctx's bd
+// runner), unless the context carries an opener.
 func (ctx *CheckContext) bd(dir string, env []string) bdCLI {
 	if ctx != nil && ctx.openBD != nil {
 		return ctx.openBD(dir, env)
 	}
-	return beads.NewPlain(dir, env)
+	return beads.NewPlainWithRunner(dir, env, ctx.bdRunner())
 }
 
 // bdInstalled reports whether checks can run bd: an injected client always
@@ -77,4 +77,26 @@ func bdCause(err error) error {
 // when Env is nil: the process environment plus PWD=dir.
 func environWithPWD(dir string) []string {
 	return (&exec.Cmd{Dir: dir}).Environ()
+}
+
+// beadsAt is beads.New(workDir) whose bd calls go through ctx's runner.
+func (ctx *CheckContext) beadsAt(workDir string) *beads.Beads {
+	return beads.NewWithBeadsDirAndRunner(workDir, "", ctx.bdRunner())
+}
+
+// beadsWithDir is beads.NewWithBeadsDir through ctx's runner.
+func (ctx *CheckContext) beadsWithDir(workDir, beadsDir string) *beads.Beads {
+	return beads.NewWithBeadsDirAndRunner(workDir, beadsDir, ctx.bdRunner())
+}
+
+// beadsRigLocal is beads.NewRigLocal through ctx's runner.
+func (ctx *CheckContext) beadsRigLocal(dir string) *beads.Beads {
+	return beads.NewRigLocalWithRunner(dir, ctx.bdRunner())
+}
+
+func (ctx *CheckContext) bdRunner() beads.BDRunner {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.bdRun
 }

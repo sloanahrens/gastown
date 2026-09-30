@@ -2,7 +2,6 @@ package gitfake
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -46,9 +45,14 @@ func (h *handle) clone(url, dest, branch string, bare bool) error {
 		r.refs[head] = id
 		r.refs["refs/remotes/origin/"+strings.TrimPrefix(head, "refs/heads/")] = id
 	}
-	write := func() error { return os.MkdirAll(dest, 0o755) }
+	write := func() error { return layoutRepo(r) }
 	if !bare {
-		write = func() error { return materializeCheckout(dest, h.f.treeOf(r.refs[head])) }
+		write = func() error {
+			if err := materializeCheckout(dest, h.f.treeOf(r.refs[head])); err != nil {
+				return err
+			}
+			return layoutRepo(r)
+		}
 	}
 	if err := write(); err != nil {
 		return gitErr(128, "fatal: "+err.Error(), args...)

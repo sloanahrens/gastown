@@ -73,14 +73,14 @@ An edit made directly under `<town_root>/plugins` is a draft, not a change: the
 next `gt plugin sync` overwrites it. Land the edit here first. A gate edited
 there is a silent park (gt-o1z7).
 
-Two paths push this directory to the runtime copy, and neither is a guarantee
+Two callers of one script push this directory to the runtime copy, and neither is a guarantee
 that the runtime copy is current:
 
-- `make install` runs `gt plugin sync --source $(CURDIR)/plugins` (Makefile:158).
-  The step is fail-open: a failed sync does not fail the install. It is no
-  longer silent — the failure is reported on stdout rather than discarded.
-- The `rebuild-gt` plugin runs the same sync after every successful rebuild and
-  logs a failure as "non-fatal".
+- `make install` (`scripts/install-gt.sh`) runs `gt plugin sync` from
+  `<town>/gastown/mayor/rig` after every successful install. The step is
+  fail-open: a failed sync does not fail the install, and it is logged as
+  "non-fatal" rather than discarded.
+- The `rebuild-gt` plugin runs the same script, so the same sync.
 
 `gt plugin sync` resolves the town root from the CWD, so both paths fail
 outright when this checkout lives outside the town root (a `LocalRepo`

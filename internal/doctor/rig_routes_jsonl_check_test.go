@@ -3,7 +3,6 @@ package doctor
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -210,9 +209,6 @@ func TestRigRoutesJSONLCheck_FindRigDirectories(t *testing.T) {
 	})
 
 	t.Run("excludes dirs whose .beads symlinks to town root .beads", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("symlink creation requires elevated privileges on Windows")
-		}
 		tmpDir := t.TempDir()
 
 		// Create town-level .beads

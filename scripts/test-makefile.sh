@@ -13,8 +13,6 @@ bash scripts/check-deploy-source_test.sh
 bash -n scripts/install-gt.sh
 bash -n scripts/lib/install-gt-lib.sh
 bash scripts/install-gt_test.sh
-bash -n scripts/install-after-merge.sh
-bash scripts/install-after-merge_test.sh
 bash -n plugins/dolt-log-rotate/run.sh
 bash -n plugins/dolt-log-rotate/run_test.sh
 bash plugins/dolt-log-rotate/run_test.sh

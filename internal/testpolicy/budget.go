@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -173,4 +175,57 @@ func WatchBudgetTracked(r io.Reader, w io.Writer, budget time.Duration, exempt m
 		}
 	}
 	return res, sc.Err()
+}
+
+// StrictBudgetEnv, set to 1, makes the budget runner fail a CPU overrun
+// whatever the host load (EnforceBudget).
+const StrictBudgetEnv = "GATE_STRICT_BUDGET"
+
+// EnforceBudget reports whether a run's user-CPU overruns fail it, and why.
+// User CPU depends on load far less than wall time, but not on nothing: an
+// oversubscribed host shares cores and caches, so a package can cross the
+// budget beside six other gates and not alone (gt-ik4a1.1). The budget is
+// enforced when the 1-minute load average at the start of the run is below
+// ncpu, or when strict (GATE_STRICT_BUDGET=1) is set; otherwise the overruns
+// are reported and the run passes. A load that could not be read is not
+// evidence of a quiet host, so it reports too.
+func EnforceBudget(load1 float64, loadKnown bool, ncpu int, strict bool) (bool, string) {
+	switch {
+	case strict:
+		return true, StrictBudgetEnv + "=1"
+	case !loadKnown:
+		return false, "host load unknown"
+	case load1 < float64(ncpu):
+		return true, fmt.Sprintf("load %.1f < %d CPUs", load1, ncpu)
+	default:
+		return false, fmt.Sprintf("load %.1f >= %d CPUs", load1, ncpu)
+	}
+}
+
+// BudgetFails reports whether the overruns fail the run. A package that
+// passed without a CPU measurement always fails, because host load has
+// nothing to do with a missing measurement; a CPU overrun fails only when
+// enforce is set.
+func BudgetFails(over []Overrun, enforce bool) bool {
+	for _, o := range over {
+		if o.Unmeasured || enforce {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseLoad1 reads the 1-minute load average from Linux's /proc/loadavg
+// ("1.23 4.56 7.89 2/345 6789") or macOS's `sysctl -n vm.loadavg`
+// ("{ 1.23 4.56 7.89 }").
+func ParseLoad1(s string) (float64, error) {
+	fields := strings.Fields(strings.Trim(strings.TrimSpace(s), "{}"))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("no load average in %q", s)
+	}
+	v, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("load average %q: %w", s, err)
+	}
+	return v, nil
 }

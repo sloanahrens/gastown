@@ -28,5 +28,5 @@ func (ctx *CheckContext) repair(dir string) bdRepairer {
 	if ctx != nil && ctx.openRepair != nil {
 		return ctx.openRepair(dir)
 	}
-	return beads.NewRigLocal(dir)
+	return ctx.beadsRigLocal(dir)
 }

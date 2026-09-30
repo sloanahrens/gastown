@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -31,6 +30,9 @@ const (
 type ClaudeSettingsCheck struct {
 	FixableCheck
 	staleSettings []staleSettingsInfo
+
+	// git opens git in a directory; Run sets it from its CheckContext.
+	git func(dir string) Repo
 }
 
 type staleSettingsInfo struct {
@@ -60,6 +62,7 @@ func NewClaudeSettingsCheck() *ClaudeSettingsCheck {
 // Run checks all Claude settings files for staleness or missing settings.json.
 func (c *ClaudeSettingsCheck) Run(ctx *CheckContext) *CheckResult {
 	c.staleSettings = nil
+	c.git = ctx.git
 
 	var details []string
 	var hasModifiedFiles bool
@@ -270,9 +273,9 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 			crewCorrectSettings := filepath.Join(crewDir, ".claude", "settings.json")
 			if fileExists(crewCorrectSettings) {
 				files = append(files, staleSettingsInfo{
-					path:        crewCorrectSettings,
-					agentType:   "crew",
-					rigName:     rigName,
+					path:      crewCorrectSettings,
+					agentType: "crew",
+					rigName:   rigName,
 				})
 			} else {
 				files = append(files, staleSettingsInfo{
@@ -326,9 +329,9 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettings
 			polecatCorrectSettings := filepath.Join(polecatsDir, ".claude", "settings.json")
 			if fileExists(polecatCorrectSettings) {
 				files = append(files, staleSettingsInfo{
-					path:        polecatCorrectSettings,
-					agentType:   "polecat",
-					rigName:     rigName,
+					path:      polecatCorrectSettings,
+					agentType: "polecat",
+					rigName:   rigName,
 				})
 			} else {
 				files = append(files, staleSettingsInfo{
@@ -487,41 +490,34 @@ func expectedStopPattern(agentType string) string {
 func (c *ClaudeSettingsCheck) getGitFileStatus(filePath string) gitFileStatus {
 	dir := filepath.Dir(filePath)
 	fileName := filepath.Base(filePath)
+	open := c.git
+	if open == nil {
+		open = (*CheckContext)(nil).git
+	}
+	g := open(dir)
 
 	// Check if we're in a git repo
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-dir")
-	if err := cmd.Run(); err != nil {
+	if !g.IsRepo() {
 		return gitStatusUnknown
 	}
 
 	// Check if file is tracked
-	cmd = exec.Command("git", "-C", dir, "ls-files", fileName)
-	output, err := cmd.Output()
+	tracked, err := g.IsTracked(fileName)
 	if err != nil {
 		return gitStatusUnknown
 	}
 
-	if len(strings.TrimSpace(string(output))) == 0 {
+	if !tracked {
 		// File is not tracked - check if it's gitignored
-		cmd = exec.Command("git", "-C", dir, "check-ignore", "-q", fileName)
-		if err := cmd.Run(); err == nil {
-			// Exit code 0 means file is ignored
+		if ignored, err := g.IsIgnored(fileName); err == nil && ignored {
 			return gitStatusIgnored
 		}
 		// File is not tracked and not ignored
 		return gitStatusUntracked
 	}
 
-	// File is tracked - check if modified
-	cmd = exec.Command("git", "-C", dir, "diff", "--quiet", fileName)
-	if err := cmd.Run(); err != nil {
-		// Non-zero exit means file has changes
-		return gitStatusTrackedModified
-	}
-
-	// Also check for staged changes
-	cmd = exec.Command("git", "-C", dir, "diff", "--cached", "--quiet", fileName)
-	if err := cmd.Run(); err != nil {
+	// File is tracked - check for unstaged or staged changes
+	if changed, err := g.PathChanged(fileName); err != nil || changed {
 		return gitStatusTrackedModified
 	}
 

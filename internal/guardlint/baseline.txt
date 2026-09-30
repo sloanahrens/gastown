@@ -43,6 +43,8 @@ internal/git/git.go:*Git.IsAncestor
 internal/git/git.go:*Git.IsEmpty
 # deliberate narrowing: only git's "ref missing" answers are false; every other failure is returned
 internal/git/git.go:*Git.RefExists
+# narrowed on purpose: git diff --quiet exits 1 exactly when the path differs, which is the answer "changed", not a failure; any other failure is returned.
+internal/git/paths.go:*Git.PathChanged
 # deliberate exit-status narrowing: git exits 1 for "no such ref"; every other failure is returned
 internal/git/git.go:*Git.RemoteTrackingBranchExists
 # deliberate EWOULDBLOCK narrowing: contention is (nil, false, nil); every other failure is returned. FlockTryAcquireStable names contention with ErrFlockHeld

@@ -40,7 +40,7 @@ func (c *AgentBeadsShadowCheck) Run(ctx *CheckContext) *CheckResult {
 		return res
 	}
 
-	townAgents, err := beads.NewRigLocal(townBeadsDir).ListAgentBeads()
+	townAgents, err := ctx.beadsRigLocal(townBeadsDir).ListAgentBeads()
 	if err != nil {
 		res.Status = StatusWarning
 		res.Message = "Could not list town agent beads: " + err.Error()
@@ -56,7 +56,7 @@ func (c *AgentBeadsShadowCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 		rigDir := ctx.TownRoot + "/" + route.Path
-		rigAgents, rigErr := beads.NewRigLocal(rigDir).ListAgentBeads()
+		rigAgents, rigErr := ctx.beadsRigLocal(rigDir).ListAgentBeads()
 		for id, townIssue := range townAgents {
 			if !strings.HasPrefix(id, route.Prefix) {
 				continue

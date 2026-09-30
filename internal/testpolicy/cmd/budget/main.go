@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -81,6 +82,15 @@ func run() int {
 	root, err := moduleRoot()
 	if err != nil {
 		return fail(err)
+	}
+	// The load is read before go test adds its own, so it measures what
+	// the run competes with.
+	load1, loadErr := hostLoad1()
+	enforce, why := testpolicy.EnforceBudget(load1, loadErr == nil, runtime.NumCPU(), os.Getenv(testpolicy.StrictBudgetEnv) == "1")
+	if enforce {
+		fmt.Fprintf(os.Stderr, "budget: user-CPU budget enforced (%s)\n", why)
+	} else {
+		fmt.Fprintf(os.Stderr, "budget: user-CPU budget reported only (%s); %s=1 enforces it\n", why, testpolicy.StrictBudgetEnv)
 	}
 
 	before, patterns, after := testpolicy.SplitTestArgs(flag.Args())
@@ -149,18 +159,7 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "  %s used %s (%s)\n", r.Package, usage(r.CPU, r.Unmeasured, r.Elapsed), r.Bead)
 		}
 	}
-	for _, o := range res.Over {
-		if o.Unmeasured {
-			fmt.Fprintf(os.Stderr, "BUDGET: %s passed but its CPU time was not recorded (wall %s); the budget cannot judge it\n", o.Package, o.Elapsed.Round(time.Millisecond))
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "BUDGET: %s used %s (limit %s user CPU); slowest:", o.Package, usage(o.CPU, false, o.Elapsed), *budget)
-		for _, t := range o.Slowest {
-			fmt.Fprintf(os.Stderr, " %s %s", t.Name, t.Elapsed.Round(time.Millisecond))
-		}
-		fmt.Fprintln(os.Stderr)
-	}
-	if code == 0 && len(res.Over) > 0 {
+	if reportOver(os.Stderr, res.Over, *budget, enforce, why) && code == 0 {
 		code = 1
 	}
 	if *fastTier && !interrupted(code) {
@@ -169,6 +168,28 @@ func run() int {
 		}
 	}
 	return code
+}
+
+// reportOver writes a BUDGET: line for each overrun to w and reports
+// whether they fail the run (testpolicy.BudgetFails). When the budget is not
+// enforced, a CPU overrun's line says it is reported only, and why.
+func reportOver(w io.Writer, over []testpolicy.Overrun, budget time.Duration, enforce bool, why string) bool {
+	label := "BUDGET:"
+	if !enforce {
+		label = fmt.Sprintf("BUDGET (reported only, %s; %s=1 enforces):", why, testpolicy.StrictBudgetEnv)
+	}
+	for _, o := range over {
+		if o.Unmeasured {
+			fmt.Fprintf(w, "BUDGET: %s passed but its CPU time was not recorded (wall %s); the budget cannot judge it\n", o.Package, o.Elapsed.Round(time.Millisecond))
+			continue
+		}
+		fmt.Fprintf(w, "%s %s used %s (limit %s user CPU); slowest:", label, o.Package, usage(o.CPU, false, o.Elapsed), budget)
+		for _, t := range o.Slowest {
+			fmt.Fprintf(w, " %s %s", t.Name, t.Elapsed.Round(time.Millisecond))
+		}
+		fmt.Fprintln(w)
+	}
+	return testpolicy.BudgetFails(over, enforce)
 }
 
 // checkFastTier reads the package summary lines the probe kept. A package

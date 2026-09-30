@@ -20,6 +20,9 @@ type CheckMisclassifiedWisps struct {
 	FixableCheck
 	misclassified     []misclassifiedWisp
 	misclassifiedRigs map[string]int // rig -> count
+	// listDatabases lists the databases the town's Dolt server serves; nil
+	// is doltserver.ListDatabases.
+	listDatabases func(townRoot string) ([]string, error)
 }
 
 type misclassifiedWisp struct {
@@ -52,7 +55,11 @@ func (c *CheckMisclassifiedWisps) Run(ctx *CheckContext) *CheckResult {
 	c.misclassifiedRigs = make(map[string]int)
 
 	// Try Dolt-first detection via ListDatabases (matches NullAssigneeCheck pattern).
-	databases, dbErr := doltserver.ListDatabases(ctx.TownRoot)
+	listDatabases := c.listDatabases
+	if listDatabases == nil {
+		listDatabases = doltserver.ListDatabases
+	}
+	databases, dbErr := listDatabases(ctx.TownRoot)
 	useDolt := dbErr == nil && len(databases) > 0
 
 	var details []string

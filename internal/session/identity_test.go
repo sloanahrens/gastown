@@ -17,11 +17,8 @@ func testRegistry() *PrefixRegistry {
 }
 
 func TestParseSessionName(t *testing.T) {
+	t.Parallel()
 	reg := testRegistry()
-	// Also set as default for ParseSessionName (no-registry variant)
-	old := DefaultRegistry()
-	SetDefaultRegistry(reg)
-	defer func() { SetDefaultRegistry(old) }()
 
 	tests := []struct {
 		name       string
@@ -193,7 +190,7 @@ func TestParseSessionName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseSessionName(tt.session)
+			got, err := ParseSessionNameWithRegistry(tt.session, reg)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseSessionName(%q) error = %v, wantErr %v", tt.session, err, tt.wantErr)
 				return
@@ -218,6 +215,7 @@ func TestParseSessionName(t *testing.T) {
 }
 
 func TestAgentIdentity_SessionName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		identity AgentIdentity
@@ -270,6 +268,7 @@ func TestAgentIdentity_SessionName(t *testing.T) {
 }
 
 func TestAgentIdentity_Address(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		identity AgentIdentity
@@ -312,10 +311,8 @@ func TestAgentIdentity_Address(t *testing.T) {
 }
 
 func TestParseSessionName_RoundTrip(t *testing.T) {
+	t.Parallel()
 	reg := testRegistry()
-	old := DefaultRegistry()
-	SetDefaultRegistry(reg)
-	defer func() { SetDefaultRegistry(old) }()
 
 	// Test that parsing then reconstructing gives the same result
 	sessions := []string{
@@ -333,7 +330,7 @@ func TestParseSessionName_RoundTrip(t *testing.T) {
 
 	for _, sess := range sessions {
 		t.Run(sess, func(t *testing.T) {
-			identity, err := ParseSessionName(sess)
+			identity, err := ParseSessionNameWithRegistry(sess, reg)
 			if err != nil {
 				t.Fatalf("ParseSessionName(%q) error = %v", sess, err)
 			}
@@ -345,6 +342,7 @@ func TestParseSessionName_RoundTrip(t *testing.T) {
 }
 
 func TestParseAddress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		address string
@@ -415,6 +413,7 @@ func TestParseAddress(t *testing.T) {
 }
 
 func TestPrefixRegistry(t *testing.T) {
+	t.Parallel()
 	r := NewPrefixRegistry()
 	r.Register("gt", "gastown")
 	r.Register("bd", "beads")

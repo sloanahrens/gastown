@@ -2,10 +2,11 @@ package doctor
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 func TestNewSparseCheckoutCheck(t *testing.T) {
@@ -23,10 +24,11 @@ func TestNewSparseCheckoutCheck(t *testing.T) {
 
 func TestSparseCheckoutCheck_NoRigSpecified(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: ""}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: ""}, gf)
 
 	result := check.Run(ctx)
 
@@ -38,6 +40,7 @@ func TestSparseCheckoutCheck_NoRigSpecified(t *testing.T) {
 
 func TestSparseCheckoutCheck_TownWideMode(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 
 	// Create two rigs with config.json so discoverRigPaths finds them
@@ -46,22 +49,22 @@ func TestSparseCheckoutCheck_TownWideMode(t *testing.T) {
 
 	// rig1: mayor/rig with legacy sparse checkout
 	mayorRig1 := filepath.Join(rig1Dir, "mayor", "rig")
-	initGitRepo(t, mayorRig1)
-	configureLegacySparseCheckout(t, mayorRig1)
+	initGitRepo(t, gf, mayorRig1)
+	configureLegacySparseCheckout(t, gf, mayorRig1)
 	if err := os.WriteFile(filepath.Join(rig1Dir, "config.json"), []byte(`{}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// rig2: mayor/rig with legacy sparse checkout
 	mayorRig2 := filepath.Join(rig2Dir, "mayor", "rig")
-	initGitRepo(t, mayorRig2)
-	configureLegacySparseCheckout(t, mayorRig2)
+	initGitRepo(t, gf, mayorRig2)
+	configureLegacySparseCheckout(t, gf, mayorRig2)
 	if err := os.WriteFile(filepath.Join(rig2Dir, "config.json"), []byte(`{}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: ""} // no --rig flag
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: ""}, gf) // no --rig flag
 
 	result := check.Run(ctx)
 
@@ -78,6 +81,7 @@ func TestSparseCheckoutCheck_TownWideMode(t *testing.T) {
 
 func TestSparseCheckoutCheck_NoGitRepos(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -86,7 +90,7 @@ func TestSparseCheckoutCheck_NoGitRepos(t *testing.T) {
 	}
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
@@ -96,89 +100,37 @@ func TestSparseCheckoutCheck_NoGitRepos(t *testing.T) {
 	}
 }
 
-// initGitRepo creates a minimal git repo with an initial commit.
-// initGitRepo makes path a repo holding one commit of README.md. The repo is
-// built once per test binary and copied.
-func initGitRepo(t *testing.T, path string) {
+// initGitRepo makes path a repo in gf holding one commit of README.md.
+func initGitRepo(t *testing.T, gf *gitfake.Fake, path string) {
 	t.Helper()
-	cachedGitTree(t, "sparse initGitRepo", path, func(dir string) { buildInitGitRepo(t, dir) })
-}
-
-func buildInitGitRepo(t *testing.T, path string) {
-	t.Helper()
-	if err := os.MkdirAll(path, 0755); err != nil {
+	gf.InitRepo(t, path)
+	if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("# Test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// git init
-	cmd := exec.Command("git", "init")
-	cmd.Dir = path
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init failed: %v\n%s", err, out)
-	}
-
-	// Configure user for commits
-	cmd = exec.Command("git", "config", "user.email", "test@test.com")
-	cmd.Dir = path
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git config email failed: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "config", "user.name", "Test")
-	cmd.Dir = path
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git config name failed: %v\n%s", err, out)
-	}
-
-	// Create initial commit
-	readmePath := filepath.Join(path, "README.md")
-	if err := os.WriteFile(readmePath, []byte("# Test\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	cmd = exec.Command("git", "add", "README.md")
-	cmd.Dir = path
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git add failed: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
-	cmd.Dir = path
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git commit failed: %v\n%s", err, out)
-	}
+	gf.CommitWorktree(t, path, "Initial commit")
 }
 
 // configureLegacySparseCheckout sets up legacy sparse checkout that should be removed.
-func configureLegacySparseCheckout(t *testing.T, repoPath string) {
+func configureLegacySparseCheckout(t *testing.T, gf *gitfake.Fake, repoPath string) {
 	t.Helper()
-
-	// Enable sparse checkout
-	cmd := exec.Command("git", "config", "core.sparseCheckout", "true")
-	cmd.Dir = repoPath
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git config failed: %v\n%s", err, out)
-	}
-
-	// Write sparse-checkout file
-	sparseFile := filepath.Join(repoPath, ".git", "info", "sparse-checkout")
-	if err := os.MkdirAll(filepath.Dir(sparseFile), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(sparseFile, []byte("/*\n!/.claude/\n!/CLAUDE.md\n"), 0644); err != nil {
-		t.Fatal(err)
+	if err := gf.OpenBranchRepo(repoPath).(Repo).ConfigSet("core.sparseCheckout", "true"); err != nil {
+		t.Fatalf("enabling sparse checkout: %v", err)
 	}
 }
 
 func TestSparseCheckoutCheck_NoSparseCheckout(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Create mayor/rig as a git repo without sparse checkout
 	mayorRig := filepath.Join(rigDir, "mayor", "rig")
-	initGitRepo(t, mayorRig)
+	initGitRepo(t, gf, mayorRig)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
@@ -190,17 +142,18 @@ func TestSparseCheckoutCheck_NoSparseCheckout(t *testing.T) {
 
 func TestSparseCheckoutCheck_LegacySparseCheckoutDetected(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Create mayor/rig with legacy sparse checkout
 	mayorRig := filepath.Join(rigDir, "mayor", "rig")
-	initGitRepo(t, mayorRig)
-	configureLegacySparseCheckout(t, mayorRig)
+	initGitRepo(t, gf, mayorRig)
+	configureLegacySparseCheckout(t, gf, mayorRig)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
@@ -217,26 +170,27 @@ func TestSparseCheckoutCheck_LegacySparseCheckoutDetected(t *testing.T) {
 
 func TestSparseCheckoutCheck_MultipleReposWithLegacySparseCheckout(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Create multiple git repos with legacy sparse checkout
 	mayorRig := filepath.Join(rigDir, "mayor", "rig")
-	initGitRepo(t, mayorRig)
-	configureLegacySparseCheckout(t, mayorRig)
+	initGitRepo(t, gf, mayorRig)
+	configureLegacySparseCheckout(t, gf, mayorRig)
 
 	crewAgent := filepath.Join(rigDir, "crew", "agent1")
-	initGitRepo(t, crewAgent)
-	configureLegacySparseCheckout(t, crewAgent)
+	initGitRepo(t, gf, crewAgent)
+	configureLegacySparseCheckout(t, gf, crewAgent)
 
 	// Polecat worktrees use nested layout: polecats/<name>/<rigname>/
 	polecat := filepath.Join(rigDir, "polecats", "pc1", "testrig")
-	initGitRepo(t, polecat)
-	configureLegacySparseCheckout(t, polecat)
+	initGitRepo(t, gf, polecat)
+	configureLegacySparseCheckout(t, gf, polecat)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
@@ -253,21 +207,22 @@ func TestSparseCheckoutCheck_MultipleReposWithLegacySparseCheckout(t *testing.T)
 
 func TestSparseCheckoutCheck_MixedRepos(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Create mayor/rig with legacy sparse checkout
 	mayorRig := filepath.Join(rigDir, "mayor", "rig")
-	initGitRepo(t, mayorRig)
-	configureLegacySparseCheckout(t, mayorRig)
+	initGitRepo(t, gf, mayorRig)
+	configureLegacySparseCheckout(t, gf, mayorRig)
 
 	// Create crew/agent1 WITHOUT sparse checkout (clean)
 	crewAgent := filepath.Join(rigDir, "crew", "agent1")
-	initGitRepo(t, crewAgent)
+	initGitRepo(t, gf, crewAgent)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
@@ -284,17 +239,18 @@ func TestSparseCheckoutCheck_MixedRepos(t *testing.T) {
 
 func TestSparseCheckoutCheck_PolecatNestedWorktree(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Polecat worktrees use nested layout: polecats/<name>/<rigname>/
 	polecatWorktree := filepath.Join(rigDir, "polecats", "pc1", rigName)
-	initGitRepo(t, polecatWorktree)
-	configureLegacySparseCheckout(t, polecatWorktree)
+	initGitRepo(t, gf, polecatWorktree)
+	configureLegacySparseCheckout(t, gf, polecatWorktree)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
@@ -311,17 +267,18 @@ func TestSparseCheckoutCheck_PolecatNestedWorktree(t *testing.T) {
 
 func TestSparseCheckoutCheck_PolecatLegacyFlatLayout(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Legacy flat layout: polecats/<name>/ is the worktree directly
 	polecatFlat := filepath.Join(rigDir, "polecats", "pc1")
-	initGitRepo(t, polecatFlat)
-	configureLegacySparseCheckout(t, polecatFlat)
+	initGitRepo(t, gf, polecatFlat)
+	configureLegacySparseCheckout(t, gf, polecatFlat)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
@@ -335,21 +292,22 @@ func TestSparseCheckoutCheck_PolecatLegacyFlatLayout(t *testing.T) {
 
 func TestSparseCheckoutCheck_Fix(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Create git repos with legacy sparse checkout
 	mayorRig := filepath.Join(rigDir, "mayor", "rig")
-	initGitRepo(t, mayorRig)
-	configureLegacySparseCheckout(t, mayorRig)
+	initGitRepo(t, gf, mayorRig)
+	configureLegacySparseCheckout(t, gf, mayorRig)
 
 	crewAgent := filepath.Join(rigDir, "crew", "agent1")
-	initGitRepo(t, crewAgent)
-	configureLegacySparseCheckout(t, crewAgent)
+	initGitRepo(t, gf, crewAgent)
+	configureLegacySparseCheckout(t, gf, crewAgent)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	// Verify fix is needed
 	result := check.Run(ctx)
@@ -363,18 +321,10 @@ func TestSparseCheckoutCheck_Fix(t *testing.T) {
 	}
 
 	// Verify sparse checkout is now disabled
-	cmd := exec.Command("git", "config", "core.sparseCheckout")
-	cmd.Dir = mayorRig
-	output, _ := cmd.Output()
-	if strings.TrimSpace(string(output)) == "true" {
-		t.Error("expected sparse checkout to be disabled for mayor/rig")
-	}
-
-	cmd = exec.Command("git", "config", "core.sparseCheckout")
-	cmd.Dir = crewAgent
-	output, _ = cmd.Output()
-	if strings.TrimSpace(string(output)) == "true" {
-		t.Error("expected sparse checkout to be disabled for crew/agent1")
+	for _, repo := range []string{mayorRig, crewAgent} {
+		if v, _ := gf.OpenBranchRepo(repo).(Repo).ConfigGet("core.sparseCheckout"); v == "true" {
+			t.Errorf("expected sparse checkout to be disabled for %s", repo)
+		}
 	}
 
 	// Verify check now passes
@@ -386,16 +336,17 @@ func TestSparseCheckoutCheck_Fix(t *testing.T) {
 
 func TestSparseCheckoutCheck_FixNoOp(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
 
 	// Create git repo without sparse checkout (already clean)
 	mayorRig := filepath.Join(rigDir, "mayor", "rig")
-	initGitRepo(t, mayorRig)
+	initGitRepo(t, gf, mayorRig)
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	// Run check to populate state
 	result := check.Run(ctx)
@@ -417,6 +368,7 @@ func TestSparseCheckoutCheck_FixNoOp(t *testing.T) {
 
 func TestSparseCheckoutCheck_NonGitDirSkipped(t *testing.T) {
 	t.Parallel()
+	gf := gitfake.New()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
 	rigDir := filepath.Join(tmpDir, rigName)
@@ -430,76 +382,12 @@ func TestSparseCheckoutCheck_NonGitDirSkipped(t *testing.T) {
 	}
 
 	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
 
 	result := check.Run(ctx)
 
 	// Non-git dirs are skipped, so StatusOK
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK when no git repos, got %v", result.Status)
-	}
-}
-
-func TestSparseCheckoutCheck_FixRestoresFiles(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-	rigDir := filepath.Join(tmpDir, rigName)
-
-	// Create git repo
-	mayorRig := filepath.Join(rigDir, "mayor", "rig")
-	initGitRepo(t, mayorRig)
-
-	// Add and commit a .claude/settings.json file
-	claudeDir := filepath.Join(mayorRig, ".claude")
-	if err := os.MkdirAll(claudeDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	settingsFile := filepath.Join(claudeDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"test": true}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("git", "add", ".claude/settings.json")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git add failed: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "commit", "-m", "Add .claude settings")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git commit failed: %v\n%s", err, out)
-	}
-
-	// Configure legacy sparse checkout (this would hide .claude/)
-	configureLegacySparseCheckout(t, mayorRig)
-
-	// Apply sparse checkout to hide the file
-	cmd = exec.Command("git", "read-tree", "-mu", "HEAD")
-	cmd.Dir = mayorRig
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git read-tree failed: %v\n%s", err, out)
-	}
-
-	// Verify .claude is now hidden
-	if _, err := os.Stat(settingsFile); !os.IsNotExist(err) {
-		t.Fatal("expected .claude/settings.json to be hidden by sparse checkout")
-	}
-
-	check := NewSparseCheckoutCheck()
-	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
-
-	// Apply fix
-	result := check.Run(ctx)
-	if result.Status != StatusWarning {
-		t.Fatalf("expected StatusWarning before fix, got %v", result.Status)
-	}
-
-	if err := check.Fix(ctx); err != nil {
-		t.Fatalf("Fix failed: %v", err)
-	}
-
-	// Verify .claude/settings.json is now restored
-	if _, err := os.Stat(settingsFile); os.IsNotExist(err) {
-		t.Error("expected .claude/settings.json to be restored after fix")
 	}
 }

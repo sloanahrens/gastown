@@ -171,26 +171,31 @@ type startupPromptSession interface {
 // It checks GT_SESSION_ID_ENV first, then resolves from the current agent's preset,
 // and falls back to CLAUDE_SESSION_ID for backwards compatibility.
 func SessionIDFromEnv() string {
-	if envName := os.Getenv("GT_SESSION_ID_ENV"); envName != "" {
-		if sessionID := os.Getenv(envName); sessionID != "" {
+	return sessionIDFrom(os.Getenv)
+}
+
+// sessionIDFrom is SessionIDFromEnv reading the environment through getenv.
+func sessionIDFrom(getenv func(string) string) string {
+	if envName := getenv("GT_SESSION_ID_ENV"); envName != "" {
+		if sessionID := getenv(envName); sessionID != "" {
 			return sessionID
 		}
 	}
 	// Use the current agent's session ID env var from its preset
-	if agentName := os.Getenv("GT_AGENT"); agentName != "" {
-		townRoot := os.Getenv("GT_ROOT")
+	if agentName := getenv("GT_AGENT"); agentName != "" {
+		townRoot := getenv("GT_ROOT")
 		rigPath := ""
-		if rig := os.Getenv("GT_RIG"); rig != "" && townRoot != "" {
+		if rig := getenv("GT_RIG"); rig != "" && townRoot != "" {
 			rigPath = filepath.Join(townRoot, rig)
 		}
 		if preset, ok := config.ResolveAgentPreset(agentName, townRoot, rigPath); ok && preset.SessionIDEnv != "" {
-			if sessionID := os.Getenv(preset.SessionIDEnv); sessionID != "" {
+			if sessionID := getenv(preset.SessionIDEnv); sessionID != "" {
 				return sessionID
 			}
 		}
 	}
 	// Backwards-compatible fallback for sessions without GT_AGENT
-	return os.Getenv("CLAUDE_SESSION_ID")
+	return getenv("CLAUDE_SESSION_ID")
 }
 
 // StartupFallbackCommands returns commands that approximate Claude hooks when hooks are unavailable.

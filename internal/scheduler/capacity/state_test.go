@@ -8,6 +8,7 @@ import (
 )
 
 func TestLoadState_MissingFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	state, err := LoadState(tmpDir)
@@ -29,6 +30,7 @@ func TestLoadState_MissingFile(t *testing.T) {
 }
 
 func TestSaveAndLoadState_RoundTrip(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	original := &SchedulerState{
@@ -66,6 +68,7 @@ func TestSaveAndLoadState_RoundTrip(t *testing.T) {
 }
 
 func TestSetPaused(t *testing.T) {
+	t.Parallel()
 	state := &SchedulerState{}
 
 	before := time.Now().UTC()
@@ -89,6 +92,7 @@ func TestSetPaused(t *testing.T) {
 }
 
 func TestSetResumed(t *testing.T) {
+	t.Parallel()
 	state := &SchedulerState{
 		Paused:   true,
 		PausedBy: "admin",
@@ -109,6 +113,7 @@ func TestSetResumed(t *testing.T) {
 }
 
 func TestRecordDispatch(t *testing.T) {
+	t.Parallel()
 	state := &SchedulerState{}
 
 	before := time.Now().UTC()
@@ -129,6 +134,7 @@ func TestRecordDispatch(t *testing.T) {
 }
 
 func TestSaveState_CreatesRuntimeDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	runtimeDir := filepath.Join(tmpDir, ".runtime")
 
@@ -159,6 +165,7 @@ func TestSaveState_CreatesRuntimeDir(t *testing.T) {
 }
 
 func TestLoadState_LegacyFallback(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	runtimeDir := filepath.Join(tmpDir, ".runtime")
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
