@@ -197,8 +197,20 @@ func (w *Worker) queueRecentRepairs() {
 		return
 	}
 	for _, rec := range recs {
+		// Only the worker's own landings, and only while the bead still
+		// waits on them: a bead a human reopened after its landing record
+		// was written is theirs, not a record to finish.
+		if rec.Route != "" && rec.Route != "daemon" {
+			continue
+		}
 		issue, err := w.Beads.Show(rec.BeadID)
 		if err != nil || issue == nil || beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
+			continue
+		}
+		if hasLandingRecord(issue.Notes, rec.LandedCommit) && !beads.HasLabel(issue, land.LabelReadyToLand) {
+			continue
+		}
+		if resubmittedAfter(issue.Notes, rec.LandedCommit) {
 			continue
 		}
 		on, err := w.Remote.Contains(rec.Target, rec.LandedCommit)
@@ -233,7 +245,7 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	if rec, found, err := w.Landings.LatestForBead(issue.ID); err != nil {
 		w.infraFailure(issue.ID, "reading the landings file", err, rep)
 		return
-	} else if found {
+	} else if found && !resubmittedAfter(issue.Notes, rec.LandedCommit) {
 		on, err := w.Remote.Contains(rec.Target, rec.LandedCommit)
 		if err != nil {
 			w.infraFailure(issue.ID, "checking a recorded landing", err, rep)
@@ -263,6 +275,20 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	}
 	work.Head = tip
 	w.landOne(ctx, work, rep)
+}
+
+// hasLandingRecord reports whether notes carry the LANDING RECORD block for
+// landedCommit.
+func hasLandingRecord(notes, landedCommit string) bool {
+	return landedCommit != "" && strings.Contains(notes, land.LandingNoteMarker+"\nlanded_commit: "+landedCommit)
+}
+
+// resubmittedAfter reports whether a READY TO LAND block follows the LANDING
+// RECORD block for landedCommit: the bead landed once, was reopened, and
+// carries new work, which lands normally rather than as a repair.
+func resubmittedAfter(notes, landedCommit string) bool {
+	rec := strings.LastIndex(notes, land.LandingNoteMarker+"\nlanded_commit: "+landedCommit)
+	return rec >= 0 && strings.LastIndex(notes, land.ReadyNoteMarker+"\n") > rec
 }
 
 // submittedRE matches gt done's submission comment:

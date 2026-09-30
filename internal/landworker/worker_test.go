@@ -450,3 +450,31 @@ func TestPolecatFromAssignee(t *testing.T) {
 		}
 	}
 }
+
+func TestPassResubmissionAfterALandingLandsNormally(t *testing.T) {
+	h := newHarness(t)
+	rec := land.LandingRecord{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: "oldhead", Target: "main", LandedCommit: "l1", Route: "daemon"}
+	notes := rec.NoteBlock() + "\n" + land.FormatReadyNote(land.Work{Branch: branch, Head: noteHead, Target: "main", Worker: "opal"})
+	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal",
+		Labels: []string{land.LabelReadyToLand}, Notes: notes})
+	h.files.recs = []land.LandingRecord{rec}
+	h.remote.contains["l1"] = true
+	rep := h.w.Pass(context.Background())
+	if rep.Landed != 1 || len(h.lander.calls) != 1 || h.lander.calls[0].Head != tipHead {
+		t.Fatalf("report %v calls %+v; the new submission must land from its tip, not repair the old landing", rep, h.lander.calls)
+	}
+}
+
+func TestPassStartupLeavesAReopenedLandedBead(t *testing.T) {
+	h := newHarness(t)
+	rec := land.LandingRecord{BeadID: "gt-old", Rig: "gastown", Branch: "b", Head: "h", Target: "main", LandedCommit: "l1", Route: "daemon"}
+	// Recorded and label removed, then a human reopened it.
+	h.bd.Seed(beads.Issue{ID: "gt-old", Title: "done", Status: "open", Type: "task", Notes: rec.NoteBlock()})
+	h.files.recs = []land.LandingRecord{rec, {BeadID: "gt-manual", Branch: "b", Head: "h", Target: "main", LandedCommit: "l2", Route: "overseer-manual"}}
+	h.bd.Seed(beads.Issue{ID: "gt-manual", Title: "m", Status: "open", Type: "task"})
+	h.remote.contains["l1"], h.remote.contains["l2"] = true, true
+	h.w.Pass(context.Background())
+	if len(h.lander.calls) != 0 {
+		t.Fatalf("startup repair touched %+v; a reopened bead and another route's record are not the worker's", h.lander.calls)
+	}
+}

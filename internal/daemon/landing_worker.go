@@ -244,9 +244,11 @@ func (r gitRemote) Contains(target, commit string) (bool, error) {
 	if err := r.g.FetchRefspecWithTimeout(r.remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", target, r.remote, target), landingRemoteFetchTimeout); err != nil {
 		return false, err
 	}
-	if _, err := r.g.Rev(commit + "^{commit}"); err != nil {
-		// Not in the repository after fetching the target: not on it.
-		return false, nil
+	// A commit the repository lacks after fetching the target is not on it;
+	// any other failure to read it is an error, never a "no".
+	exists, err := r.g.RefExists(commit + "^{commit}")
+	if err != nil || !exists {
+		return false, err
 	}
 	return r.g.IsAncestor(commit, r.remote+"/"+target)
 }
