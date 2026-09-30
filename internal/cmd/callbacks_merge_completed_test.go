@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -64,5 +65,44 @@ func TestHandleMergeCompletedRespectsCloseBlocks(t *testing.T) {
 		if !strings.Contains(action, reason) {
 			t.Errorf("%s: action %q, want it to name %q", field, action, reason)
 		}
+	}
+}
+
+// showFailsClient is a beads.Client whose Show fails, and which records
+// whether anything tried to close an issue.
+type showFailsClient struct {
+	beads.Client
+	showErr error
+	closed  []string
+}
+
+func (c *showFailsClient) Show(string) (*beads.Issue, error) { return nil, c.showErr }
+
+func (c *showFailsClient) CloseWithReason(_ string, ids ...string) error {
+	c.closed = append(c.closed, ids...)
+	return nil
+}
+
+// TestHandleMergeCompletedLeavesIssueOpenWhenShowFails: the no_merge,
+// review_only and local guard reads the source issue. When that read errors
+// the guard cannot run, so the issue must stay open instead of being closed
+// unchecked.
+func TestHandleMergeCompletedLeavesIssueOpenWhenShowFails(t *testing.T) {
+	t.Parallel()
+	bd := &showFailsClient{Client: beadsfake.New(), showErr: errors.New("dolt unavailable")}
+	msg := &mail.Message{
+		Subject: "Merge Request Completed: polecat/nux/gt-src",
+		Body:    "MR: gt-mr1\nSource: gt-src\nCommit: abc123\n",
+	}
+
+	action, err := handleMergeCompletedWith(bd, t.TempDir(), msg, false)
+	if err != nil {
+		t.Fatalf("handleMergeCompletedWith: %v", err)
+	}
+	if len(bd.closed) != 0 {
+		t.Errorf("closed %v after a failed Show, want nothing closed", bd.closed)
+	}
+	if !strings.Contains(action, "not closing gt-src") || !strings.Contains(action, "dolt unavailable") {
+		t.Errorf("action = %q, want it to say gt-src was not closed and why", action)
 	}
 }
