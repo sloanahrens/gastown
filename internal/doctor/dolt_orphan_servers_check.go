@@ -15,6 +15,13 @@ type DoltOrphanServersCheck struct {
 	FixableCheck
 	orphans   []util.DoltOrphanServer
 	staleDirs []string
+
+	// findOrphans lists the dolt sql-server processes that are not the
+	// town's own; nil is util.FindOrphanDoltServers (reads the process table).
+	findOrphans func(townRoot string) ([]util.DoltOrphanServer, error)
+	// findStaleDirs lists the stale beads-bd-tests-* temp dirs; nil is
+	// util.FindStaleBeadsTestTempDirs.
+	findStaleDirs func() ([]string, error)
 }
 
 // NewDoltOrphanServersCheck creates a new dolt-orphan-servers check.
@@ -36,7 +43,15 @@ func (c *DoltOrphanServersCheck) Run(ctx *CheckContext) *CheckResult {
 	c.orphans = nil
 	c.staleDirs = nil
 
-	orphans, err := util.FindOrphanDoltServers(ctx.TownRoot)
+	findOrphans, findStaleDirs := c.findOrphans, c.findStaleDirs
+	if findOrphans == nil {
+		findOrphans = util.FindOrphanDoltServers
+	}
+	if findStaleDirs == nil {
+		findStaleDirs = util.FindStaleBeadsTestTempDirs
+	}
+
+	orphans, err := findOrphans(ctx.TownRoot)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -49,7 +64,7 @@ func (c *DoltOrphanServersCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Best-effort — a temp-dir read failure shouldn't block reporting orphan
 	// processes, which is the higher-value half of this check.
-	if staleDirs, err := util.FindStaleBeadsTestTempDirs(); err == nil {
+	if staleDirs, err := findStaleDirs(); err == nil {
 		c.staleDirs = staleDirs
 	}
 

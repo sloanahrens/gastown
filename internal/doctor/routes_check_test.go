@@ -410,6 +410,7 @@ func TestDetermineRigBeadsPath_Containment(t *testing.T) {
 }
 
 func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {
+	t.Parallel()
 	// Helper to set up a town with a legacy rig whose route points to the rig root
 	// instead of the canonical mayor/rig path.
 	setupLegacyRig := func(t *testing.T) (tmpDir string) {
@@ -572,24 +573,11 @@ func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {
 		check := NewRoutesCheck()
 		ctx := &CheckContext{TownRoot: tmpDir}
 
-		// Capture stderr to verify the warning message
-		oldStderr := os.Stderr
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		os.Stderr = w
+		var stderrBuf bytes.Buffer
+		check.stderr = &stderrBuf
 
 		if err := check.Fix(ctx); err != nil {
-			os.Stderr = oldStderr
 			t.Fatalf("Fix failed: %v", err)
-		}
-
-		w.Close()
-		os.Stderr = oldStderr
-		var stderrBuf bytes.Buffer
-		if _, err := stderrBuf.ReadFrom(r); err != nil {
-			t.Fatal(err)
 		}
 		stderrOutput := stderrBuf.String()
 
@@ -608,7 +596,6 @@ func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {
 		}
 	})
 }
-
 
 func TestRoutesCheck_CorruptedRoutesJsonl(t *testing.T) {
 	t.Parallel()

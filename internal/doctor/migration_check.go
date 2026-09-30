@@ -520,6 +520,10 @@ func (c *DoltServerReachableCheck) getServerAddr(beadsDir string, townRoot strin
 type DoltOrphanedDatabaseCheck struct {
 	FixableCheck
 	orphanNames []string // Cached during Run for use in Fix
+
+	// removeDatabase removes one database from the town's Dolt; nil is
+	// doltserver.RemoveDatabase, which asks whether the server is running.
+	removeDatabase func(townRoot, name string, force bool) error
 }
 
 // NewDoltOrphanedDatabaseCheck creates a new orphaned database check.
@@ -576,8 +580,12 @@ func (c *DoltOrphanedDatabaseCheck) Run(ctx *CheckContext) *CheckResult {
 
 // Fix removes orphaned databases.
 func (c *DoltOrphanedDatabaseCheck) Fix(ctx *CheckContext) error {
+	remove := c.removeDatabase
+	if remove == nil {
+		remove = doltserver.RemoveDatabase
+	}
 	for _, name := range c.orphanNames {
-		if err := doltserver.RemoveDatabase(ctx.TownRoot, name, true); err != nil {
+		if err := remove(ctx.TownRoot, name, true); err != nil {
 			return fmt.Errorf("removing orphaned database %s: %w", name, err)
 		}
 	}

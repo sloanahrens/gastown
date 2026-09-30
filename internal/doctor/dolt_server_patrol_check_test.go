@@ -1,23 +1,29 @@
 package doctor
 
 import (
-	"net"
+	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 	"testing"
 )
 
-// startTestListener opens a TCP listener on a free localhost port and returns
-// the port number. Used to simulate a reachable Dolt server.
-func startTestListener(t *testing.T) int {
+// patrolCheck is a DoltServerPatrolCheck with an empty environment whose
+// dial reaches the Dolt server only when up is true.
+func patrolCheck(t *testing.T, up bool) *DoltServerPatrolCheck {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	c := NewDoltServerPatrolCheck()
+	c.lookupEnv = func(string) (string, bool) { return "", false }
+	c.dial = func(addr string) error {
+		if !strings.HasSuffix(addr, ":3307") {
+			t.Errorf("dialed %q, want the default port 3307", addr)
+		}
+		if up {
+			return nil
+		}
+		return errors.New("connection refused")
 	}
-	t.Cleanup(func() { _ = l.Close() })
-	return l.Addr().(*net.TCPAddr).Port
+	return c
 }
 
 // writeDaemonConfig writes a mayor/daemon.json with the given patrols JSON body.
@@ -34,11 +40,9 @@ func writeDaemonConfig(t *testing.T, townRoot, patrolsJSON string) {
 }
 
 func TestDoltServerPatrolCheck_DoltUp(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	port := startTestListener(t)
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
-
-	check := NewDoltServerPatrolCheck()
+	check := patrolCheck(t, true)
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 
 	if result.Status != StatusOK {
@@ -47,13 +51,12 @@ func TestDoltServerPatrolCheck_DoltUp(t *testing.T) {
 }
 
 func TestDoltServerPatrolCheck_DownPatrolDisabled(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	// Point at a port with no listener → Dolt unreachable.
-	t.Setenv("GT_DOLT_PORT", "1")
 	// No dolt_server key in daemon.json → patrol not enabled.
 	writeDaemonConfig(t, townRoot, `{"refinery":{"enabled":true}}`)
 
-	check := NewDoltServerPatrolCheck()
+	check := patrolCheck(t, false) // Dolt unreachable
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 
 	if result.Status != StatusWarning {
@@ -65,12 +68,12 @@ func TestDoltServerPatrolCheck_DownPatrolDisabled(t *testing.T) {
 }
 
 func TestDoltServerPatrolCheck_DownPatrolEnabled(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "1")
 	// dolt_server patrol present and enabled → daemon will detect/recover.
 	writeDaemonConfig(t, townRoot, `{"dolt_server":{"enabled":true}}`)
 
-	check := NewDoltServerPatrolCheck()
+	check := patrolCheck(t, false) // Dolt unreachable
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 
 	if result.Status != StatusOK {
@@ -79,11 +82,11 @@ func TestDoltServerPatrolCheck_DownPatrolEnabled(t *testing.T) {
 }
 
 func TestDoltServerPatrolCheck_DownNoConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "1")
 	// No mayor/daemon.json at all → patrol not enabled.
 
-	check := NewDoltServerPatrolCheck()
+	check := patrolCheck(t, false) // Dolt unreachable
 	result := check.Run(&CheckContext{TownRoot: townRoot})
 
 	if result.Status != StatusWarning {

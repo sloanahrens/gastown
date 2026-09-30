@@ -6,7 +6,6 @@ internal/config
 internal/convoy
 internal/daemon
 internal/deacon
-internal/doctor
 internal/dog
 internal/feed
 internal/hooks

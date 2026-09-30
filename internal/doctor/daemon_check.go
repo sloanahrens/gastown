@@ -15,6 +15,39 @@ import (
 // DaemonCheck verifies the daemon is running.
 type DaemonCheck struct {
 	FixableCheck
+
+	// supervisor answers what the host's service manager is doing with the
+	// daemon's job; nil is hostSupervisor, which reads the plist / unit file
+	// and asks launchctl / systemctl.
+	supervisor daemonSupervisor
+}
+
+// daemonSupervisor is what DaemonCheck needs from the host's supervisor.
+type daemonSupervisor interface {
+	// JobMissing reports whether a job is provisioned for the town while the
+	// service manager does not know it, and its kind.
+	JobMissing(townRoot string) (kind string, missing bool)
+	// StatusLine renders the "Supervised:" value for the daemon holding
+	// lockPID (0 when none does).
+	StatusLine(townRoot string, lockPID int) string
+}
+
+// hostSupervisor is the real machine's supervisor.
+type hostSupervisor struct{}
+
+func (hostSupervisor) JobMissing(townRoot string) (string, bool) {
+	return templates.SupervisorJobMissing(townRoot, templates.SupervisorJobState)
+}
+
+func (hostSupervisor) StatusLine(townRoot string, lockPID int) string {
+	return templates.SupervisorStatusLine(townRoot, lockPID, templates.SupervisorJobState)
+}
+
+func (c *DaemonCheck) sup() daemonSupervisor {
+	if c.supervisor != nil {
+		return c.supervisor
+	}
+	return hostSupervisor{}
 }
 
 // NewDaemonCheck creates a new daemon check.
@@ -29,10 +62,6 @@ func NewDaemonCheck() *DaemonCheck {
 		},
 	}
 }
-
-// daemonJobState reads the supervisor job's live state; a seam so tests need
-// not ask the host's service manager.
-var daemonJobState templates.SupervisorReader = templates.SupervisorJobState
 
 func pidIfRunning(running bool, pid int) int {
 	if running {
@@ -57,7 +86,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 	// whether or not a daemon is up: nothing restarts the daemon if it dies,
 	// and a hand-started one beside the job is the crash loop gt-3jrm closed
 	// (gt-4k3fj.11).
-	if kind, missing := templates.SupervisorJobMissing(ctx.TownRoot, daemonJobState); missing {
+	if kind, missing := c.sup().JobMissing(ctx.TownRoot); missing {
 		msg := "Daemon supervisor job is not loaded (" + kind + ")"
 		if running {
 			msg += "; daemon PID " + strconv.Itoa(pid) + " is unsupervised"
@@ -68,7 +97,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: msg,
-			Details: []string{"Supervised: " + templates.SupervisorStatusLine(ctx.TownRoot, pidIfRunning(running, pid), daemonJobState)},
+			Details: []string{"Supervised: " + c.sup().StatusLine(ctx.TownRoot, pidIfRunning(running, pid))},
 			FixHint: "Run 'gt doctor --fix' (loads the job through gt daemon start/restart)",
 		}
 	}
@@ -84,7 +113,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 				details = append(details, "Heartbeats: "+strconv.FormatInt(state.HeartbeatCount, 10))
 			}
 		}
-		details = append(details, "Supervised: "+templates.SupervisorStatusLine(ctx.TownRoot, pid, templates.SupervisorJobState))
+		details = append(details, "Supervised: "+c.sup().StatusLine(ctx.TownRoot, pid))
 
 		return &CheckResult{
 			Name:    c.Name(),
@@ -98,7 +127,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusWarning,
 		Message: "Daemon is not running",
-		Details: []string{"Supervised: " + templates.SupervisorStatusLine(ctx.TownRoot, 0, templates.SupervisorJobState)},
+		Details: []string{"Supervised: " + c.sup().StatusLine(ctx.TownRoot, 0)},
 		FixHint: "Run 'gt daemon start' or 'gt doctor --fix'",
 	}
 }
@@ -119,7 +148,7 @@ func (c *DaemonCheck) Fix(ctx *CheckContext) error {
 	// by gt daemon start / restart — a hand spawn beside a job that is not
 	// loaded leaves the daemon unsupervised (gt-4k3fj.11). Restart is the
 	// one that also replaces a daemon already up outside the job.
-	if _, missing := templates.SupervisorJobMissing(ctx.TownRoot, daemonJobState); missing {
+	if _, missing := c.sup().JobMissing(ctx.TownRoot); missing {
 		verb := "start"
 		if running, _, err := daemon.IsRunning(ctx.TownRoot); err == nil && running {
 			verb = "restart"

@@ -757,6 +757,10 @@ func (c *BeadsConfigValidCheck) Fix(ctx *CheckContext) error {
 // a redirect file pointing to that location.
 type BeadsRedirectCheck struct {
 	FixableCheck
+
+	// environ is the environment bd init inherits before the rig's targets
+	// replace BEADS_*; nil is the process environment.
+	environ func() []string
 }
 
 // NewBeadsRedirectCheck creates a new beads redirect check.
@@ -910,7 +914,11 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		// Run bd init with the configured prefix (Dolt is the only backend since bd v0.51.0).
 		// Gas Town rigs use Dolt server mode via the shared town Dolt sql-server.
 		doltCfg := doltserver.DefaultConfig(ctx.TownRoot)
-		bdEnv := append(stripEnvPrefixes(os.Environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
+		environ := c.environ
+		if environ == nil {
+			environ = os.Environ
+		}
+		bdEnv := append(stripEnvPrefixes(environ(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
 			"BEADS_DIR="+rigBeadsDir,
 			"BEADS_DOLT_SERVER_DATABASE="+ctx.RigName,
 		)

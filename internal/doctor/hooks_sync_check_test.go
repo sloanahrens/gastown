@@ -16,25 +16,6 @@ import (
 func scaffoldWorkspace(t *testing.T, roleAgents map[string]string) string {
 	t.Helper()
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-
-	// Put dummy binaries for non-Claude role agents on PATH so agent
-	// resolution doesn't fall back to claude when the binary is missing.
-	if len(roleAgents) > 0 {
-		binDir := filepath.Join(tmpDir, "bin")
-		if err := os.MkdirAll(binDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		for _, agent := range roleAgents {
-			if agent != "" && agent != "claude" {
-				if err := os.WriteFile(filepath.Join(binDir, agent), []byte("#!/bin/sh\n"), 0755); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
-
 	townRoot := filepath.Join(tmpDir, "town")
 
 	// Required workspace structure
@@ -62,17 +43,25 @@ func scaffoldWorkspace(t *testing.T, roleAgents map[string]string) string {
 		t.Fatal(err)
 	}
 
-	// Base hooks config (required for Claude targets)
-	base := &hooks.HooksConfig{
-		SessionStart: []hooks.HookEntry{
-			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo test"}}},
-		},
-	}
-	if err := hooks.SaveBase(base); err != nil {
-		t.Fatalf("SaveBase: %v", err)
-	}
-
 	return townRoot
+}
+
+// testExpectedHooks stands in for hooks.ComputeExpected, which reads the base
+// and overrides under ~/.gt: every target gets its own session-start command,
+// so a target synced for another would read as out of sync.
+func testExpectedHooks(target string) (*hooks.HooksConfig, error) {
+	return &hooks.HooksConfig{
+		SessionStart: []hooks.HookEntry{
+			{Matcher: "", Hooks: []hooks.Hook{{Type: "command", Command: "echo " + target}}},
+		},
+	}, nil
+}
+
+// newTestHooksSyncCheck is a HooksSyncCheck expecting testExpectedHooks.
+func newTestHooksSyncCheck() *HooksSyncCheck {
+	c := NewHooksSyncCheck()
+	c.computeExpected = testExpectedHooks
+	return c
 }
 
 // syncAllClaudeTargets creates in-sync .claude/settings.json for every
@@ -88,7 +77,7 @@ func syncAllClaudeTargets(t *testing.T, townRoot string) {
 		if target.Provider != "" && target.Provider != "claude" {
 			continue
 		}
-		expected, err := hooks.ComputeExpected(target.Key)
+		expected, err := testExpectedHooks(target.Key)
 		if err != nil {
 			t.Fatalf("ComputeExpected(%s): %v", target.Key, err)
 		}
@@ -129,6 +118,7 @@ func writePassingSyncReport(t *testing.T, townRoot string) {
 }
 
 func TestHooksSyncCheck_ClaudeTargetInSync(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, nil)
 
 	// Create a rig with a crew worktree
@@ -141,7 +131,7 @@ func TestHooksSyncCheck_ClaudeTargetInSync(t *testing.T) {
 	syncAllClaudeTargets(t, townRoot)
 	writePassingSyncReport(t, townRoot)
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -154,6 +144,7 @@ func TestHooksSyncCheck_ClaudeTargetInSync(t *testing.T) {
 }
 
 func TestHooksSyncCheck_ClaudeTargetMissingPromptDefaults(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, nil)
 	syncAllClaudeTargets(t, townRoot)
 
@@ -178,7 +169,7 @@ func TestHooksSyncCheck_ClaudeTargetMissingPromptDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 	if result.Status != StatusWarning {
@@ -188,7 +179,7 @@ func TestHooksSyncCheck_ClaudeTargetMissingPromptDefaults(t *testing.T) {
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
-	check = NewHooksSyncCheck()
+	check = newTestHooksSyncCheck()
 	result = check.Run(ctx)
 	// Fix() mechanically repairs the settings file directly — it doesn't run
 	// 'gt hooks sync's canary live-fire pair, so no sync report exists yet.
@@ -206,6 +197,7 @@ func TestHooksSyncCheck_ClaudeTargetMissingPromptDefaults(t *testing.T) {
 }
 
 func TestHooksSyncCheck_TemplateAgent_InSync(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, map[string]string{"crew": "opencode"})
 
 	// Create a crew worktree
@@ -231,7 +223,7 @@ func TestHooksSyncCheck_TemplateAgent_InSync(t *testing.T) {
 	}
 	writePassingSyncReport(t, townRoot)
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -244,6 +236,7 @@ func TestHooksSyncCheck_TemplateAgent_InSync(t *testing.T) {
 }
 
 func TestHooksSyncCheck_TemplateAgent_OutOfSync(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, map[string]string{"crew": "opencode"})
 
 	// Create a crew worktree with stale content
@@ -259,7 +252,7 @@ func TestHooksSyncCheck_TemplateAgent_OutOfSync(t *testing.T) {
 	// Sync Claude targets so any Warning comes from the template agent
 	syncAllClaudeTargets(t, townRoot)
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -269,6 +262,7 @@ func TestHooksSyncCheck_TemplateAgent_OutOfSync(t *testing.T) {
 }
 
 func TestHooksSyncCheck_TemplateAgent_Missing(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, map[string]string{"crew": "opencode"})
 
 	// Create a crew worktree but DON'T install the plugin
@@ -280,7 +274,7 @@ func TestHooksSyncCheck_TemplateAgent_Missing(t *testing.T) {
 	// Sync Claude targets
 	syncAllClaudeTargets(t, townRoot)
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -290,6 +284,7 @@ func TestHooksSyncCheck_TemplateAgent_Missing(t *testing.T) {
 }
 
 func TestHooksSyncCheck_Fix_TemplateAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, map[string]string{"crew": "opencode"})
 
 	// Create a crew worktree with stale content
@@ -305,7 +300,7 @@ func TestHooksSyncCheck_Fix_TemplateAgent(t *testing.T) {
 	// Sync Claude targets
 	syncAllClaudeTargets(t, townRoot)
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 
 	// Run to detect out-of-sync
@@ -335,6 +330,7 @@ func TestHooksSyncCheck_Fix_TemplateAgent(t *testing.T) {
 }
 
 func TestHooksSyncCheck_PolecatNestedWorktree_InSync(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, map[string]string{"polecat": "opencode"})
 
 	worktree := filepath.Join(townRoot, "myrig", "polecats", "fury", "gastown")
@@ -357,7 +353,7 @@ func TestHooksSyncCheck_PolecatNestedWorktree_InSync(t *testing.T) {
 	}
 	writePassingSyncReport(t, townRoot)
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -370,6 +366,7 @@ func TestHooksSyncCheck_PolecatNestedWorktree_InSync(t *testing.T) {
 }
 
 func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, nil)
 
 	// Sync all Claude targets first (creates in-sync settings for mayor, deacon)
@@ -393,7 +390,7 @@ func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 
 	// Run to detect out-of-sync
@@ -423,11 +420,12 @@ func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 // they encode were ever live-fire verified. Without sync-report.json, the
 // check must report StatusSkipped, never StatusOK.
 func TestHooksSyncCheck_NoSyncReport_Skipped(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, nil)
 	syncAllClaudeTargets(t, townRoot)
 	// Deliberately no writePassingSyncReport call.
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 
@@ -443,6 +441,7 @@ func TestHooksSyncCheck_NoSyncReport_Skipped(t *testing.T) {
 // but unverified sync report (the canary's live-fire pair did not pass) is
 // reported as a warning naming the pair result, not a silent pass.
 func TestHooksSyncCheck_SyncReportCanaryFailed_Warning(t *testing.T) {
+	t.Parallel()
 	townRoot := scaffoldWorkspace(t, nil)
 	syncAllClaudeTargets(t, townRoot)
 
@@ -460,7 +459,7 @@ func TestHooksSyncCheck_SyncReportCanaryFailed_Warning(t *testing.T) {
 		t.Fatalf("WriteSyncReport: %v", err)
 	}
 
-	check := NewHooksSyncCheck()
+	check := newTestHooksSyncCheck()
 	ctx := &CheckContext{TownRoot: townRoot}
 	result := check.Run(ctx)
 

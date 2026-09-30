@@ -12,43 +12,42 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
+// fakeSupervisor answers DaemonCheck's supervisor questions in process.
+type fakeSupervisor struct {
+	kind    string // the provisioned job's kind; "" when none is
+	missing bool   // the service manager does not know the job
+}
+
+func (f fakeSupervisor) JobMissing(string) (string, bool) {
+	if f.kind == "" || !f.missing {
+		return "", false
+	}
+	return f.kind, true
+}
+
+func (f fakeSupervisor) StatusLine(_ string, lockPID int) string {
+	if f.kind == "" {
+		return "none"
+	}
+	return templates.SupervisorState{Kind: f.kind, Loaded: !f.missing, LastExit: -1}.StatusLine(lockPID)
+}
+
 // A provisioned supervisor job the service manager does not know is an error
 // even when a daemon is up: nothing restarts that daemon if it dies
 // (gt-4k3fj.11).
 func TestDaemonCheck_Run_FailsWhenTheProvisionedJobIsNotLoaded(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 
-	path, kind := templates.SupervisorFilePath()
-	if kind == "" {
-		t.Skip("no supervisor on this host")
-	}
-	body := "<key>WorkingDirectory</key>\n<string>" + townRoot + "</string>"
-	if kind == "systemd" {
-		body = "WorkingDirectory=" + townRoot + "\n"
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	prev := daemonJobState
-	t.Cleanup(func() { daemonJobState = prev })
-	daemonJobState = func(k string) templates.SupervisorState {
-		return templates.SupervisorState{Kind: k, LastExit: -1} // not loaded
-	}
-	result := NewDaemonCheck().Run(&CheckContext{TownRoot: townRoot})
+	check := NewDaemonCheck()
+	check.supervisor = fakeSupervisor{kind: "launchd", missing: true}
+	result := check.Run(&CheckContext{TownRoot: townRoot})
 	if result.Status != StatusError || !strings.Contains(result.Message, "not loaded") {
 		t.Errorf("Run() = (%v, %q), want an error naming the unloaded job", result.Status, result.Message)
 	}
 
-	daemonJobState = func(k string) templates.SupervisorState {
-		return templates.SupervisorState{Kind: k, Loaded: true, LastExit: -1}
-	}
-	if result := NewDaemonCheck().Run(&CheckContext{TownRoot: townRoot}); strings.Contains(result.Message, "not loaded") {
+	check.supervisor = fakeSupervisor{kind: "launchd"}
+	if result := check.Run(&CheckContext{TownRoot: townRoot}); strings.Contains(result.Message, "not loaded") {
 		t.Errorf("Run() = %q for a loaded job, want no unloaded-job failure", result.Message)
 	}
 }
@@ -57,15 +56,10 @@ func TestDaemonCheck_Run_FailsWhenTheProvisionedJobIsNotLoaded(t *testing.T) {
 // details include a "Supervised: <value>" line, matching what
 // 'gt daemon status' reports, whether or not the daemon is running.
 func TestDaemonCheck_Run_SurfacesSupervisedStatus(t *testing.T) {
-	townRoot := t.TempDir()
-
-	// Isolate HOME/XDG_DATA_HOME so SupervisorStatus() sees no plist/unit and
-	// this test is deterministic regardless of the host machine's state.
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
-
+	t.Parallel()
 	check := NewDaemonCheck()
-	result := check.Run(&CheckContext{TownRoot: townRoot})
+	check.supervisor = fakeSupervisor{}
+	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
 
 	found := false
 	for _, d := range result.Details {
@@ -85,9 +79,8 @@ func TestDaemonCheck_Run_SurfacesSupervisedStatus(t *testing.T) {
 // decimal count. string(rune(n)) printed the code point instead — 65 as "A" —
 // so a healthy run surfaced a glyph where the count belongs (gt-abbr).
 func TestDaemonCheck_Run_HeartbeatsAreDecimal(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 
 	// IsRunning reports a daemon only while the lock is held, so the test
 	// plays the daemon and holds it (gt-utuk).
@@ -110,13 +103,9 @@ func TestDaemonCheck_Run_HeartbeatsAreDecimal(t *testing.T) {
 		t.Fatalf("SaveState: %v", err)
 	}
 
-	prev := daemonJobState
-	t.Cleanup(func() { daemonJobState = prev })
-	daemonJobState = func(k string) templates.SupervisorState {
-		return templates.SupervisorState{Kind: k, Loaded: true, LastExit: -1}
-	}
-
-	result := NewDaemonCheck().Run(&CheckContext{TownRoot: townRoot})
+	check := NewDaemonCheck()
+	check.supervisor = fakeSupervisor{kind: "launchd"}
+	result := check.Run(&CheckContext{TownRoot: townRoot})
 	if result.Status != StatusOK {
 		t.Fatalf("Run() status = %v (%s), want StatusOK", result.Status, result.Message)
 	}

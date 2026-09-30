@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -351,6 +352,7 @@ func writeServerMetadata(t *testing.T, beadsDir, database, host string, port int
 }
 
 func TestDoltOrphanedDatabaseCheck_NoOrphans(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	setupDoltDB(t, townRoot, "hq")
@@ -370,6 +372,7 @@ func TestDoltOrphanedDatabaseCheck_NoOrphans(t *testing.T) {
 }
 
 func TestDoltOrphanedDatabaseCheck_DetectsOrphans(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	setupDoltDB(t, townRoot, "hq")
@@ -399,6 +402,7 @@ func TestDoltOrphanedDatabaseCheck_DetectsOrphans(t *testing.T) {
 }
 
 func TestDoltOrphanedDatabaseCheck_Fix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	setupDoltDB(t, townRoot, "hq")
@@ -420,27 +424,26 @@ func TestDoltOrphanedDatabaseCheck_Fix(t *testing.T) {
 		t.Fatalf("expected 2 cached orphan names, got %d", len(check.orphanNames))
 	}
 
-	// Fix should remove the orphans
+	// Fix should remove exactly the orphans, forced, and never hq
+	var removed []string
+	check.removeDatabase = func(root, name string, force bool) error {
+		if root != townRoot || !force {
+			t.Errorf("removeDatabase(%q, %q, %v), want this town and force", root, name, force)
+		}
+		removed = append(removed, name)
+		return nil
+	}
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
-
-	// Verify orphans are gone
-	for _, name := range []string{"orphan1", "orphan2"} {
-		path := filepath.Join(townRoot, ".dolt-data", name)
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("expected %s to be removed after Fix", name)
-		}
-	}
-
-	// Verify referenced database still exists
-	hqPath := filepath.Join(townRoot, ".dolt-data", "hq")
-	if _, err := os.Stat(hqPath); err != nil {
-		t.Errorf("expected hq database to survive Fix, but got error: %v", err)
+	sort.Strings(removed)
+	if strings.Join(removed, ",") != "orphan1,orphan2" {
+		t.Errorf("removed %v, want [orphan1 orphan2]", removed)
 	}
 }
 
 func TestDoltOrphanedDatabaseCheck_NoDoltData(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	check := NewDoltOrphanedDatabaseCheck()

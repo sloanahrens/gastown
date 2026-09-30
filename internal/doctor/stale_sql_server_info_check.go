@@ -17,6 +17,10 @@ import (
 type StaleSQLServerInfoCheck struct {
 	FixableCheck
 	staleFiles []string
+
+	// alive reports whether pid is a running process; nil probes it with
+	// signal 0.
+	alive func(pid int) bool
 }
 
 // NewStaleSQLServerInfoCheck creates a new stale sql-server.info check.
@@ -136,15 +140,17 @@ func (c *StaleSQLServerInfoCheck) isStale(path string) bool {
 		return true // Corrupt or invalid PID
 	}
 
-	// Check if the process is alive using signal 0 (no-op probe)
+	if c.alive != nil {
+		return !c.alive(pid)
+	}
+	return !signalZeroAlive(pid)
+}
+
+// signalZeroAlive reports whether pid is alive using signal 0 (no-op probe).
+func signalZeroAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return true
+		return false
 	}
-
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return true // Process is dead
-	}
-
-	return false // Process is alive, not stale
+	return proc.Signal(syscall.Signal(0)) == nil
 }
