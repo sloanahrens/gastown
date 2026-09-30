@@ -47,6 +47,9 @@ func TestPolecatPathGuardLnSymlinkText(t *testing.T) {
 		{"relative text into the town, link dir is an existing directory", "ln -s " + dirText + " " + tmp, true},
 		{"relative text into the town via -t", "ln -s -t " + tmp + " " + dirText, true},
 		{"relative text into the town via --target-directory=", "ln --symbolic --target-directory=" + tmp + " " + dirText, true},
+		{"abbreviated --symbolic", "ln --sym " + deepText + " " + filepath.Join(deepLinkDir, "dl"), true},
+		{"abbreviated --target-directory=", "ln -s --target-dir=" + tmp + " " + dirText, true},
+		{"abbreviated --target-directory, value as next word", "ln -s --t " + tmp + " " + dirText, true},
 		{"relative text inside the worktree", "ln -s " + ownText + " " + filepath.Join(p.worktree, "sub", "link"), false},
 		{"relative text into scratch", "ln -s ../x " + filepath.Join(tmp, "L", "link"), false},
 	}
@@ -100,6 +103,23 @@ func TestParseLnArgs(t *testing.T) {
 		{"--suffix .bak -s a b", true, false, "", "a", "b"},
 		{"-sr a b", true, true, "", "a", "b"},
 		{"-s -- -a b", true, false, "", "-a", "b"},
+		// getopt_long accepts any unambiguous prefix of a long option.
+		{"--sym a b", true, false, "", "a", "b"},
+		{"--symb --forc a b", true, false, "", "a", "b"},
+		{"--rel --sym a b", true, true, "", "a", "b"},
+		{"--target-dir=dir -s a", true, false, "dir", "a", ""},
+		{"--target=dir -s a", true, false, "dir", "a", ""},
+		{"--t dir -s a", true, false, "dir", "a", ""},
+		{"-s --suf .bak a b", true, false, "", "a", "b"},
+		{"-s --su=.bak a b", true, false, "", "a", "b"},
+		// An ambiguous or unknown spelling makes ln exit before creating a link.
+		{"--s a b", false, false, "", "a", "b"},
+		{"--n a b", false, false, "", "a", "b"},
+		{"--bogus a b", false, false, "", "a", "b"},
+		// --backup takes its value with "=" only, so the next word is an operand.
+		{"--backup -s a b", true, false, "", "a", "b"},
+		{"--b=numbered -s a b", true, false, "", "a", "b"},
+		{"--no-target-directory -s a b", true, false, "", "a", "b"},
 	}
 	for _, tc := range cases {
 		got := parseLnArgs(strings.Fields(tc.args))
