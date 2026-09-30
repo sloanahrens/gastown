@@ -40,11 +40,11 @@ func TestEverySessionStartCallsTheGate(t *testing.T) {
 		"internal/refinery/manager.go":        "func (m *Manager) start(",
 		"internal/deacon/manager.go":          "func (m *Manager) Start(",
 		"internal/mayor/manager.go":           "func (m *Manager) Start(",
-		// Session creators outside the role managers (gt-fcxe9.10): the
-		// daemon's lifecycle restart and the deacon command's own starter
-		// build a tmux session directly.
-		"internal/daemon/lifecycle.go": "func (d *Daemon) restartSession(",
-		"internal/cmd/deacon.go":       "func startDeaconSession(",
+		// A session creator outside the role managers (gt-fcxe9.10): the
+		// deacon command's own starter builds a tmux session directly. (The
+		// daemon's lifecycle restart went with the lifecycle mail intake,
+		// gt-4k3fj.3; the daemon now restarts through the role managers.)
+		"internal/cmd/deacon.go": "func startDeaconSession(",
 	} {
 		data, err := os.ReadFile(filepath.Join(root, file))
 		if err != nil {

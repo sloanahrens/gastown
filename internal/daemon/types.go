@@ -441,28 +441,3 @@ func (d *Daemon) isPatrolActive(patrol string) bool {
 	return IsPatrolEnabled(d.patrolConfig, patrol)
 }
 
-// LifecycleAction represents a lifecycle request action.
-type LifecycleAction string
-
-const (
-	// ActionCycle restarts the session with handoff.
-	ActionCycle LifecycleAction = "cycle"
-
-	// ActionRestart does a fresh restart without handoff.
-	ActionRestart LifecycleAction = "restart"
-
-	// ActionShutdown terminates without restart.
-	ActionShutdown LifecycleAction = "shutdown"
-)
-
-// LifecycleRequest represents a request from an agent to the daemon.
-type LifecycleRequest struct {
-	// From is the agent requesting the action (e.g., "mayor/", "gastown/witness").
-	From string `json:"from"`
-
-	// Action is what lifecycle action to perform.
-	Action LifecycleAction `json:"action"`
-
-	// Timestamp is when the request was made.
-	Timestamp time.Time `json:"timestamp"`
-}

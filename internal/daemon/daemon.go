@@ -91,11 +91,6 @@ type Daemon struct {
 	// Note: Only accessed from heartbeat loop goroutine - no sync needed.
 	deaconCycle deaconCycleTracker
 
-	// syncFailures tracks consecutive git pull failures per workdir.
-	// Used to escalate logging from WARN to ERROR after repeated failures.
-	// Only accessed from heartbeat loop goroutine - no sync needed.
-	syncFailures map[string]int
-
 	// PATCH-006: Resolved binary paths to avoid PATH issues in subprocesses.
 	gtPath string
 	bdPath string
@@ -1124,9 +1119,10 @@ func (d *Daemon) Run() (err error) {
 
 		case sig := <-sigChan:
 			if isLifecycleSignal(sig) {
-				// Lifecycle signal: immediate lifecycle processing (from gt handoff)
-				d.logger.Println("Received lifecycle signal, processing lifecycle requests immediately")
-				d.processLifecycleRequests()
+				// SIGUSR1 used to trigger the lifecycle mail intake, which is
+				// gone (gt-4k3fj.3: lifecycle goes through the supervisor).
+				// It is still caught so a stray one cannot end the daemon.
+				d.logger.Println("Received SIGUSR1: ignored (the lifecycle mail intake was removed)")
 			} else if isReloadRestartSignal(sig) {
 				// Reload restart tracker from disk (from 'gt daemon clear-backoff')
 				d.logger.Println("Received reload-restart signal, reloading restart tracker from disk")
@@ -1416,16 +1412,10 @@ func (d *Daemon) heartbeatWork(state *State) {
 		d.logger.Printf("Handler patrol disabled in config, skipping")
 	}
 
-	// 7. Process lifecycle requests
-	d.processLifecycleRequests()
-
-	// 9. (Removed) Stale agent check - violated "discover, don't track"
-
-	// 10. Check for GUPP violations (agents with work-on-hook not progressing)
-	d.checkGUPPViolations()
-
-	// 11. Check for orphaned work (assigned to dead agents)
-	d.checkOrphanedWork()
+	// 7-11. (Removed) The lifecycle mail intake, the GUPP and orphaned-work
+	// mail checks: lifecycle goes through the supervisor, and a seat's work
+	// comes from its intent record and work beads, not agent beads
+	// (gt-4k3fj.3, G1-11, G1-12).
 
 	// 12. Check polecat session health (proactive crash detection)
 	// This validates tmux sessions are still alive for polecats with work-on-hook
@@ -3127,11 +3117,6 @@ func (d *Daemon) showRigBead(rigPath, rigBeadID string) (*beads.Issue, error) {
 // false instead of being ignored by a `val.(bool)` assertion.
 func autoRestartDisabled(val interface{}) bool {
 	return val != nil && !rig.CoerceBool(val)
-}
-
-// processLifecycleRequests checks for and processes lifecycle requests.
-func (d *Daemon) processLifecycleRequests() {
-	d.ProcessLifecycleRequests()
 }
 
 // shutdown performs graceful shutdown.

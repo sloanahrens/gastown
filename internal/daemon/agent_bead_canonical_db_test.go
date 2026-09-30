@@ -115,22 +115,6 @@ func TestCheckPolecatHealth_EmptyHookSlotUsesAssignedWork(t *testing.T) {
 	}
 }
 
-// gt-fcxe9.7: the orphaned-work scan lists agent beads from the rig database, so a
-// rig-local polecat with hooked work and a dead session is found.
-func TestCheckRigOrphanedWork_ListsRigLocalAgentBeads(t *testing.T) {
-	townRoot, _ := routedTown(t)
-	bdPath, logPath := writeBeadsDirHonoringBD(t, true, "gt-work3", "")
-	var logBuf strings.Builder
-	d := newCanonicalDBDaemon(t, townRoot, bdPath, &logBuf)
-
-	d.checkRigOrphanedWork("myr")
-
-	if !strings.Contains(logBuf.String(), "Orphaned work detected") {
-		t.Fatalf("orphaned-work scan missed a rig-local agent bead\nlog: %s\nbd calls:\n%s",
-			logBuf.String(), bdLog(t, logPath))
-	}
-}
-
 // writeScriptBD writes a fake bd from a shell body and returns its path.
 func writeScriptBD(t *testing.T, body string) string {
 	t.Helper()
@@ -162,30 +146,5 @@ func TestCheckPolecatHealth_AssignedWorkReadFailureIsUnknown(t *testing.T) {
 	}
 	if strings.Contains(got, "CRASH DETECTED") {
 		t.Fatalf("acted on an unknown assigned-work answer: %q", got)
-	}
-}
-
-// The orphaned-work TOCTOU re-read of hook_bead failing is unknown, logged,
-// and not acted on; it is never read as "hook cleared" silently.
-func TestCheckRigOrphanedWork_ReReadFailureIsLoggedUnknown(t *testing.T) {
-	townRoot, _ := routedTown(t)
-	agentJSON := `[{"id":"gt-myr-polecat-mycat","issue_type":"agent","labels":["gt:agent"],"description":"agent_state: working","hook_bead":"gt-work4","agent_state":"working"}]`
-	bdPath := writeScriptBD(t, ""+
-		"case \"$*\" in *gt:agent*) echo '"+agentJSON+"'; exit 0;; esac\n"+
-		"if [ \"$1\" = show ]; then echo 'Error: connection refused' >&2; exit 1; fi\n"+
-		"echo '[]'\n")
-	var logBuf strings.Builder
-	rec := notifyfake.New()
-	d := newCanonicalDBDaemon(t, townRoot, bdPath, &logBuf)
-	d.notifier = rec
-
-	d.checkRigOrphanedWork("myr")
-
-	got := logBuf.String()
-	if !strings.Contains(got, "re-read failed") {
-		t.Fatalf("hook re-read failure was not logged: %q", got)
-	}
-	if strings.Contains(got, "Orphaned work detected") {
-		t.Fatalf("acted on an unknown re-read: %q", got)
 	}
 }

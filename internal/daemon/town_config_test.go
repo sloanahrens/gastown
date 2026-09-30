@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/bdgate"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -145,20 +144,4 @@ func TestConfigSaveDaemonPatrolConfigTypeChecksAgainstTheDaemonType(t *testing.T
 		t.Fatalf("config.SaveDaemonPatrolConfig over a type-broken daemon.json = %v, want ErrUnparseable", err)
 	}
 	requireUnchanged(t, path, typeBroken)
-}
-
-// TestRestartSessionRefusesWhenTheStartupGateRefuses: the daemon's lifecycle
-// restart builds a tmux session directly, so it must ask the startup gate
-// first and surface the refusal before touching anything else.
-//
-//testpolicy:allow parallel — sets the package-wide bdgate check.
-func TestRestartSessionRefusesWhenTheStartupGateRefuses(t *testing.T) {
-	refusal := &config.ParseError{Path: "/town/settings/config.json", Offset: 3, Line: 1, Column: 3, Err: errors.New("invalid character")}
-	bdgate.Set(func() error { return refusal })
-	t.Cleanup(func() { bdgate.Set(nil) })
-	d := &Daemon{} // any field access past the gate would panic
-	err := d.restartSession("gt-witness", "gastown/witness")
-	if !errors.Is(err, config.ErrUnparseable) || !strings.Contains(err.Error(), "gastown/witness") {
-		t.Fatalf("restartSession with a refusing gate = %v, want the refusal naming the identity", err)
-	}
 }
