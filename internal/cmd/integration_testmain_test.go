@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil"
@@ -19,9 +20,11 @@ import (
 // when the container is terminated — preventing orphan accumulation in the
 // shared production Dolt data dir.
 func TestMain(m *testing.M) {
-	// Force sequential test execution to avoid bd file locks on Windows.
-	_ = flag.Set("test.parallel", "1")
 	flag.Parse()
+	if runtime.GOOS == "windows" {
+		// Concurrent bd processes collide on file locks on Windows.
+		_ = flag.Set("test.parallel", "1")
+	}
 
 	h, err := testutil.StartHermetic(testutil.WithDolt())
 	if err != nil {
