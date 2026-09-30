@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -47,4 +49,62 @@ func TestLiveTownFilesDecodeStrictly(t *testing.T) {
 			t.Errorf("live %s: %v", tc.file, err)
 		}
 	}
+}
+
+// TestLiveTownFilesRoundTripThroughTheWriter: the writer decodes into the
+// schema type and re-marshals it. For every live file that must lose
+// nothing: the rewritten file decodes to the same JSON tree as the original.
+func TestLiveTownFilesRoundTripThroughTheWriter(t *testing.T) {
+	t.Parallel()
+	roundTrip := map[string]func(src, dst string) error{
+		"mayor/town.json":          func(s, d string) error { return copyThenUpdate[TownConfig](t, s, d) },
+		"mayor/rigs.json":          func(s, d string) error { return copyThenUpdate[RigsConfig](t, s, d) },
+		"mayor/daemon.json":        func(s, d string) error { return copyThenUpdate[DaemonPatrolConfig](t, s, d) },
+		"mayor/overseer.json":      func(s, d string) error { return copyThenUpdate[OverseerConfig](t, s, d) },
+		"settings/config.json":     func(s, d string) error { return copyThenUpdate[TownSettings](t, s, d) },
+		"settings/escalation.json": func(s, d string) error { return copyThenUpdate[EscalationConfig](t, s, d) },
+		"rigs/gastown/config.json": func(s, d string) error { return copyThenUpdate[RigConfig](t, s, d) },
+		"rigs/gastown/settings/config.json": func(s, d string) error {
+			return copyThenUpdate[RigSettings](t, s, d)
+		},
+	}
+	for file, rt := range roundTrip {
+		src := filepath.Join(liveTown, file)
+		dst := filepath.Join(t.TempDir(), filepath.Base(file))
+		if err := rt(src, dst); err != nil {
+			t.Errorf("%s: %v", file, err)
+			continue
+		}
+		before, after := jsonTree(t, src), jsonTree(t, dst)
+		if !reflect.DeepEqual(before, after) {
+			b, _ := json.Marshal(before)
+			a, _ := json.Marshal(after)
+			t.Errorf("%s changed on rewrite:\nbefore %s\nafter  %s", file, b, a)
+		}
+	}
+}
+
+func copyThenUpdate[T any](t *testing.T, src, dst string) error {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return err
+	}
+	return UpdateConfigJSON(dst, 0o600, func(*T, bool) error { return nil })
+}
+
+func jsonTree(t *testing.T, path string) any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatal(err)
+	}
+	return v
 }

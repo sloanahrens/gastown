@@ -133,3 +133,44 @@ func TestSaveTownSettingsCreatesThePrivateMode(t *testing.T) {
 		t.Fatalf("new settings file mode = %v (%v), want 0600", fi.Mode().Perm(), err)
 	}
 }
+
+// TestUpdateConfigJSONWritesOnlyWhatChanged: a rewrite must not write a
+// struct's zero value for a key the file leaves out. The refinery reads
+// merge_queue.enabled as a pointer, so "enabled": false where the key was
+// absent would switch the merge queue off.
+func TestUpdateConfigJSONWritesOnlyWhatChanged(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{"type":"rig","version":1,"name":"r","git_url":"x","created_at":"2026-01-01T00:00:00Z","merge_queue":{"test_command":"make test","batch_min_age":"5m"}}`)
+	err := UpdateConfigJSON(path, 0o600, func(c *RigConfig, _ bool) error {
+		c.DefaultBranch = "main"
+		c.MergeQueue.TestCommand = "make test-fast"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := jsonTree(t, path).(map[string]any)
+	mq := got["merge_queue"].(map[string]any)
+	if _, ok := mq["enabled"]; ok {
+		t.Errorf("rewrite added merge_queue.enabled: %v", mq)
+	}
+	if mq["test_command"] != "make test-fast" || mq["batch_min_age"] != "5m" || got["default_branch"] != "main" {
+		t.Errorf("changes not applied or untouched values lost: %v", got)
+	}
+	if _, ok := got["beads"]; ok {
+		t.Errorf("rewrite added an absent object: %v", got)
+	}
+}
+
+func TestUpdateConfigJSONRemovesWhatTheCallerCleared(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, `{"type":"rig","version":1,"name":"r","git_url":"x","created_at":"2026-01-01T00:00:00Z","default_branch":"dev"}`)
+	if err := UpdateConfigJSON(path, 0o600, func(c *RigConfig, _ bool) error { c.DefaultBranch = ""; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := jsonTree(t, path).(map[string]any)["default_branch"]; ok {
+		t.Error("a cleared omitempty field stayed in the file")
+	}
+}

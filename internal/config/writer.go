@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 )
 
 // The one writer for town config files (gt-y3pgh.1, D5). Every write:
@@ -19,6 +21,10 @@ import (
 //   - writes a temp file in the same directory, fsyncs it, renames it over
 //     the target and fsyncs the directory, so readers see the old file or
 //     the new one and never a torn one;
+//   - changes only what the caller changed: the difference between the
+//     decoded file and the caller's value is applied onto the file's own
+//     JSON, so an absent key stays absent (a struct's zero value is not
+//     written for it) and an untouched value keeps its exact form;
 //   - keeps an existing file's mode; perm applies only to a new file.
 
 // WriteConfigJSON replaces path with v. It refuses when an existing file
@@ -63,14 +69,89 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 		return fmt.Errorf("reading %s before writing: %w", path, err)
 	}
 
+	base, err := jsonValue(&cur)
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", path, err)
+	}
 	if err := mutate(&cur, exists); err != nil {
 		return err
 	}
-	out, err := json.MarshalIndent(&cur, "", "  ")
+	next, err := jsonValue(&cur)
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", path, err)
+	}
+	result := next
+	if exists {
+		orig, err := decodeTree(data)
+		if err != nil {
+			return fmt.Errorf("reading %s before writing: %w", path, err)
+		}
+		result = applyChanges(orig, base, next)
+	}
+	out, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", path, err)
 	}
 	return replaceFile(path, append(out, '\n'), mode)
+}
+
+// jsonValue is v's JSON form as a generic tree.
+func jsonValue(v any) (any, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return decodeTree(data)
+}
+
+// decodeTree decodes JSON into maps, slices and json.Number, so numbers
+// keep their exact text.
+func decodeTree(data []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// applyChanges returns orig with the changes from base to next applied:
+// keys whose value did not change keep orig's form (or stay absent), keys
+// that changed take next's value (recursing into objects), keys next added
+// are added and keys next dropped are removed.
+func applyChanges(orig, base, next any) any {
+	if reflect.DeepEqual(base, next) {
+		return orig
+	}
+	bm, bok := base.(map[string]any)
+	nm, nok := next.(map[string]any)
+	if !bok || !nok {
+		return next
+	}
+	om, ook := orig.(map[string]any)
+	if !ook {
+		om = map[string]any{}
+	}
+	out := make(map[string]any, len(om))
+	for k, v := range om {
+		out[k] = v
+	}
+	for k, nv := range nm {
+		bv, inBase := bm[k]
+		switch {
+		case !inBase:
+			out[k] = nv
+		case !reflect.DeepEqual(bv, nv):
+			out[k] = applyChanges(om[k], bv, nv)
+		}
+	}
+	for k := range bm {
+		if _, inNext := nm[k]; !inNext {
+			delete(out, k)
+		}
+	}
+	return out
 }
 
 // replaceFile writes data to path atomically and durably.
