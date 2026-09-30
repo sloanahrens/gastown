@@ -184,6 +184,11 @@ git add <files>                 # Stage changes
 git commit -m "msg (issue)"     # Commit with issue reference
 ```
 
+**A commit message is your description and the bead id, nothing more: NO
+Co-Authored-By trailer, no AI attribution anywhere.** Landing refuses a branch
+that carries them. `gt done` strips the trailers it finds, and refuses a commit
+whose subject line is itself one.
+
 **Integrating with the remote: `git rebase`, never `git reset`.**
 
 To catch up with the latest main:
@@ -209,13 +214,6 @@ git diff --stat origin/main...HEAD    # must list only files YOU changed
 ```bash
 gt mail inbox                   # Check for messages
 gt mail send <addr> -s "Subject" -m "Body"
-```
-
-### Beads
-```bash
-bd show <id>                    # View issue details
-bd close <id> --reason "..."    # Close issue when done
-bd create --title "..."         # File discovered work (don't fix it yourself)
 ```
 
 ## ⚡ Commonly Confused Commands

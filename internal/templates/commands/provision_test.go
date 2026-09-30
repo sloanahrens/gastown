@@ -239,3 +239,17 @@ func TestProvisionForUnknownAgent(t *testing.T) {
 		t.Error("BuildCommand with no body = nil error")
 	}
 }
+
+// The /done body is read while the polecat writes its last commit; it must
+// carry the no-attribution rule (gt-v4ssj.10).
+func TestDoneBodyForbidsAIAttribution(t *testing.T) {
+	t.Parallel()
+	body, err := bodiesFS.ReadFile("bodies/done.md")
+	if err != nil {
+		t.Fatalf("reading the embedded done body: %v", err)
+	}
+	const want = "NO\nCo-Authored-By trailer, no AI attribution anywhere."
+	if !strings.Contains(string(body), want) {
+		t.Errorf("the /done body lacks %q", want)
+	}
+}

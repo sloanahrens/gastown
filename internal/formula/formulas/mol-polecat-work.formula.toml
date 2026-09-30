@@ -291,6 +291,9 @@ git commit -m "<type>: <description> ({{issue}})"
 
 Commit types: feat, fix, refactor, test, docs, chore
 
+A commit message is the description and the bead id, nothing more: NO
+Co-Authored-By trailer, no AI attribution anywhere.
+
 **Discovered work:**
 If you find bugs or improvements outside your scope:
 ```bash
