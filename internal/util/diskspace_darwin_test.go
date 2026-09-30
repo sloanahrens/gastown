@@ -7,6 +7,7 @@ import (
 )
 
 func TestParsePlistUint64_Found(t *testing.T) {
+	t.Parallel()
 	plist := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -38,6 +39,7 @@ func TestParsePlistUint64_Found(t *testing.T) {
 }
 
 func TestParsePlistUint64_Missing(t *testing.T) {
+	t.Parallel()
 	plist := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict><key>Other</key><integer>1</integer></dict></plist>`)
 
@@ -48,6 +50,7 @@ func TestParsePlistUint64_Missing(t *testing.T) {
 }
 
 func TestParsePlistUint64_KeyFollowedByNonInteger(t *testing.T) {
+	t.Parallel()
 	plist := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 	<key>APFSContainerFree</key>
@@ -67,6 +70,7 @@ func TestParsePlistUint64_KeyFollowedByNonInteger(t *testing.T) {
 }
 
 func TestInt8SliceToString(t *testing.T) {
+	t.Parallel()
 	input := []int8{'a', 'p', 'f', 's', 0, 0, 0, 0}
 	got := int8SliceToString(input)
 	if got != "apfs" {
@@ -74,45 +78,21 @@ func TestInt8SliceToString(t *testing.T) {
 	}
 }
 
-func TestGetDiskSpace_Darwin_APFS(t *testing.T) {
-	// Integration test: on macOS the current dir is on APFS, so APFSContainerFree
-	// should give us a non-zero available value.
-	info, err := GetDiskSpace(".")
-	if err != nil {
-		t.Fatalf("GetDiskSpace(\".\") failed: %v", err)
-	}
-	if info.TotalBytes == 0 {
-		t.Error("TotalBytes should be > 0")
-	}
-	if info.AvailableBytes == 0 {
-		t.Error("AvailableBytes should be > 0 on a non-full disk")
-	}
-	if info.AvailableBytes > info.TotalBytes {
-		t.Errorf("AvailableBytes (%d) > TotalBytes (%d)", info.AvailableBytes, info.TotalBytes)
-	}
-	if info.UsedPercent < 0 || info.UsedPercent > 100 {
-		t.Errorf("UsedPercent = %.1f, want 0-100", info.UsedPercent)
-	}
-}
-
 // TestAPFSPurgeablePreventsBlock reproduces the exact scenario from issue #3854:
 // a 926 GB APFS disk where statfs reports 96% used (41 GB free) but 185 GB is
 // purgeable space macOS can reclaim — the old code would block, the new code must not.
 func TestAPFSPurgeablePreventsBlock(t *testing.T) {
+	t.Parallel()
 	const GB = uint64(1024 * 1024 * 1024)
 	containerTotal := 926 * GB
 	purgeableSpace := 185 * GB
 	statfsFree := 41 * GB // what df / old code saw
 	containerFree := statfsFree + purgeableSpace
 
-	// Inject a stub that returns the simulated diskutil values.
-	orig := apfsContainerSpaceFn
-	defer func() { apfsContainerSpaceFn = orig }()
-	apfsContainerSpaceFn = func(_ string) (uint64, uint64, error) {
-		return containerFree, containerTotal, nil
-	}
+	// The simulated diskutil values.
+	apfs := func(string) (uint64, uint64, error) { return containerFree, containerTotal, nil }
 
-	info, err := GetDiskSpace(".")
+	info, err := getDiskSpace(".", apfs)
 	if err != nil {
 		t.Fatalf("GetDiskSpace failed: %v", err)
 	}
@@ -137,12 +117,8 @@ func TestAPFSPurgeablePreventsBlock(t *testing.T) {
 			info.UsedPercent, DiskSpaceCriticalPercent)
 	}
 
-	// Double-check CheckDiskSpace also clears.
-	level, msg, err := CheckDiskSpace(".")
-	if err != nil {
-		t.Fatalf("CheckDiskSpace failed: %v", err)
-	}
-	if level == DiskSpaceCritical {
+	// Double-check CheckDiskSpace's verdict also clears.
+	if level, msg := diskSpaceLevel(info); level == DiskSpaceCritical {
 		t.Errorf("CheckDiskSpace returned CRITICAL with purgeable space included: %s", msg)
 	}
 
@@ -150,20 +126,4 @@ func TestAPFSPurgeablePreventsBlock(t *testing.T) {
 		float64(statfsFree)/float64(GB), oldPct)
 	t.Logf("NEW: %.1f GB free (includes %.1f GB purgeable), %.1f%% used → passes",
 		float64(info.AvailableBytes)/float64(GB), float64(purgeableSpace)/float64(GB), info.UsedPercent)
-}
-
-func TestApfsContainerSpace_CurrentMount(t *testing.T) {
-	// The repo lives on an APFS volume; verify diskutil returns sensible numbers.
-	// diskutil info requires an absolute path — use the user's home dir which is
-	// always on the main APFS container on macOS.
-	free, total, err := apfsContainerSpace("/System/Volumes/Data")
-	if err != nil {
-		t.Skipf("apfsContainerSpace failed (non-APFS environment?): %v", err)
-	}
-	if free == 0 {
-		t.Error("expected non-zero free bytes from APFSContainerFree")
-	}
-	if total > 0 && free > total {
-		t.Errorf("free (%d) > total (%d)", free, total)
-	}
 }

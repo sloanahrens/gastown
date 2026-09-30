@@ -290,6 +290,10 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		if config.Patrols.Deacon != nil {
 			return config.Patrols.Deacon.Enabled
 		}
+	case constants.RoleMayor:
+		if config.Patrols.Mayor != nil {
+			return config.Patrols.Mayor.Enabled
+		}
 	case "handler":
 		if config.Patrols.Handler != nil {
 			return config.Patrols.Handler.Enabled

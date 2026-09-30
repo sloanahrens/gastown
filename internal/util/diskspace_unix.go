@@ -9,6 +9,12 @@ import (
 
 // GetDiskSpace returns filesystem space information for the given path.
 func GetDiskSpace(path string) (*DiskSpaceInfo, error) {
+	return getDiskSpace(path, nil)
+}
+
+// getDiskSpace is GetDiskSpace; only darwin consults the APFS container
+// query, so it is ignored here.
+func getDiskSpace(path string, _ apfsSpaceFunc) (*DiskSpaceInfo, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return nil, fmt.Errorf("statfs %s: %w", path, err)

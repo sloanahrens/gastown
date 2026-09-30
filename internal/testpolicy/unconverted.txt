@@ -22,5 +22,4 @@ internal/scheduler/capacity
 internal/session
 internal/telemetry
 internal/templates
-internal/util
 internal/witness

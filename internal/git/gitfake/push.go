@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
@@ -134,4 +135,9 @@ func (h *handle) CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStat
 		}
 	}
 	return status, nil
+}
+
+// PushWithTimeout is Push; the fake takes no time.
+func (h *handle) PushWithTimeout(remote, refspec string, force bool, _ time.Duration) error {
+	return h.Push(remote, refspec, force)
 }

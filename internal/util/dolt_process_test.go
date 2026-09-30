@@ -3,6 +3,7 @@ package util
 import "testing"
 
 func TestIsDoltSQLServerArgsSlice(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
