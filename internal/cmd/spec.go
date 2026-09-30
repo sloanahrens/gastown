@@ -104,11 +104,14 @@ never taken. Each candidate is linted (see gt spec lint):
   - needs planning: label needs-planning added, one comment, never dispatched
   - clean: slung onto a seat of its class within the budget
 
-Seat classes: hooked = Claude-backed agents that get the town's settings and
-guard hooks; hookless = every other agent (deepseek, local). A spec that
-mentions install, uninstall, ~/.local/bin, INSTALL_DIR, make install,
-dolt cleanup or rm -rf only goes to a hooked seat, and its sling args tell the
-polecat to test install paths in a temporary INSTALL_DIR.
+Seat classes key on the agent's provider in settings/config.json: hooked =
+provider claude (managed settings and guard hooks); hookless = any other
+provider. Every spec takes a hooked seat unless it carries the label host-safe
+and names no host-touching command or path (install, uninstall, make install,
+INSTALL_DIR, ~/.local/bin, dolt cleanup, rm -r/-rf/-fr, shred, dd, chmod -R,
+redirects into /etc or ~/., shell rc files). A host-safe spec that names one is
+forced hooked and annotated once. Every dispatch's sling args tell the polecat
+to test install paths in a temporary INSTALL_DIR.
 
 Budget comes from polecat_pool in settings/config.json (overflow_agent,
 max_overflow, min_spawn_gap) and patrols.spec_dispatch in mayor/daemon.json
@@ -222,10 +225,11 @@ type specCandidate struct {
 	Rig  string
 }
 
-// specRoster is the live polecat picture the budget is built from.
+// specRoster is the live polecat picture the budget is built from: live
+// polecats (and in-flight seat claims) per agent, and the newest spawn.
 type specRoster struct {
-	Hooked, Hookless int
-	Newest           time.Time
+	Live   map[string]int
+	Newest time.Time
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -267,8 +271,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		return report
 	}
 	budget := env.Budget
-	budget.HookedLive, budget.HooklessLive, budget.NewestSpawn = roster.Hooked, roster.Hookless, roster.Newest
-	report.Roster = fmt.Sprintf("hooked %d/%d, hookless %d/%d", budget.HookedLive, budget.HookedCap, budget.HooklessLive, budget.HooklessCap)
+	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
+	budget.SetLive(roster.Live)
+	budget.NewestSpawn = roster.Newest
+	report.Roster = budget.Picture()
 
 	candidates, errs := env.Candidates()
 	report.Errors = append(report.Errors, errs...)
@@ -329,6 +335,13 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		budget.Now = env.Now()
 		seat := specdispatch.ChooseSeat(full, budget)
+		if seat.OverrodeHostSafe && !env.DryRun {
+			key := fmt.Sprintf("%s%s: %s label overridden", specDispatchNotePrefix, id, specdispatch.HostSafeLabel)
+			text := fmt.Sprintf("%s: it mentions %q, so it only runs on a hooked (provider=claude) seat", key, seat.HostSafety)
+			if err := env.Annotate(id, key, text); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+			}
+		}
 		if seat.Skip {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: no seat: %s", id, seat.Reason)})
 			continue
@@ -337,7 +350,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		if env.DryRun {
 			entry.Line = fmt.Sprintf("%s: would sling to %s on %s (%s)", id, c.Rig, seat.Agent, seat.Reason)
 			report.Dispatched = append(report.Dispatched, entry)
-			bumpSpecBudget(&budget, seat.Class, budget.Now)
+			budget.Bump(seat.Agent, budget.Now)
 			continue
 		}
 
@@ -380,18 +393,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			entry.Line += fmt.Sprintf(" after %d attempts", attempts)
 		}
 		report.Dispatched = append(report.Dispatched, entry)
-		bumpSpecBudget(&budget, seat.Class, budget.Now)
+		budget.Bump(seat.Agent, budget.Now)
 	}
 	return report
-}
-
-func bumpSpecBudget(b *specdispatch.Budget, class specdispatch.Class, now time.Time) {
-	if class == specdispatch.ClassHooked {
-		b.HookedLive++
-	} else {
-		b.HooklessLive++
-	}
-	b.NewestSpawn = now
 }
 
 func isSpecSlingRefusal(err error) bool {
@@ -413,62 +417,86 @@ func firstErrLine(err error) string {
 	return s
 }
 
-// specBudgetFromConfig builds the class budget from polecat_pool and
-// patrols.spec_dispatch.
+// specBudgetFromConfig builds the seat list from polecat_pool and
+// patrols.spec_dispatch. Each seat is one agent with its own cap, classed by
+// its provider:
+//
+//   - the pool's overflow_agent, capped at max_overflow (default 2 when unset)
+//   - hookless_agent, capped at max_hookless (default 2), when configured
+//   - hooked_agent (default claude-sonnet), capped at max_hooked (default 2);
+//     dropped when it is not provider=claude, since it is the guarded seat
+//
+// Order is the list above, with hooked_agent first under prefer_hooked. An
+// agent named twice keeps its first seat.
 func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig) specdispatch.Budget {
-	b := specdispatch.Budget{HookedAgent: defaultSpecHookedAgent, HookedCap: defaultSpecMaxHooked, HooklessCap: defaultSpecMaxHookless}
-	if sd != nil {
-		if sd.HookedAgent != "" {
-			b.HookedAgent = sd.HookedAgent
-		}
-		switch {
-		case sd.MaxHooked < 0:
-			b.HookedCap = 0
-		case sd.MaxHooked > 0:
-			b.HookedCap = sd.MaxHooked
-		}
-		if sd.MaxHookless > 0 {
-			b.HooklessCap = sd.MaxHookless
-		}
-		b.HooklessAgent = sd.HooklessAgent
-		b.PreferHooked = sd.PreferHooked
-	}
-	if ts != nil && ts.PolecatPool != nil {
-		pool := ts.PolecatPool
-		if b.HooklessAgent == "" {
-			b.HooklessAgent = pool.OverflowAgent
-		}
-		if pool.MaxOverflow > 0 {
-			b.HooklessCap = pool.MaxOverflow
-		}
-		b.MinSpawnGap = pool.MinSpawnGapD()
-	}
-	if ts != nil && b.HooklessAgent == "" {
-		b.HooklessAgent = ts.RoleAgents["polecat"]
-	}
-	// A hookless agent that is actually Claude-backed is a hooked seat by the
-	// classifier's rule; never let the two class names disagree with it.
 	var agents map[string]*config.RuntimeConfig
 	if ts != nil {
 		agents = ts.Agents
 	}
-	if b.HooklessAgent != "" && specdispatch.ClassifyAgent(b.HooklessAgent, agents) == specdispatch.ClassHooked {
-		b.HooklessAgent = ""
+	class := func(agent string) specdispatch.Class { return specdispatch.ClassifyAgent(agent, agents) }
+
+	hookedAgent, hookedCap := defaultSpecHookedAgent, defaultSpecMaxHooked
+	hooklessAgent, hooklessCap := "", defaultSpecMaxHookless
+	prefer := false
+	if sd != nil {
+		if sd.HookedAgent != "" {
+			hookedAgent = sd.HookedAgent
+		}
+		switch {
+		case sd.MaxHooked < 0:
+			hookedCap = 0
+		case sd.MaxHooked > 0:
+			hookedCap = sd.MaxHooked
+		}
+		hooklessAgent = sd.HooklessAgent
+		if sd.MaxHookless > 0 {
+			hooklessCap = sd.MaxHookless
+		}
+		prefer = sd.PreferHooked
 	}
-	if b.HookedAgent != "" && specdispatch.ClassifyAgent(b.HookedAgent, agents) != specdispatch.ClassHooked {
-		b.HookedAgent = ""
+
+	var b specdispatch.Budget
+	var overflow *specdispatch.Seat
+	if ts != nil && ts.PolecatPool != nil && ts.PolecatPool.OverflowAgent != "" {
+		pool := ts.PolecatPool
+		capacity := pool.MaxOverflow
+		if capacity <= 0 {
+			capacity = defaultSpecMaxHookless
+		}
+		overflow = &specdispatch.Seat{Agent: pool.OverflowAgent, Class: class(pool.OverflowAgent), Cap: capacity}
+	}
+	if ts != nil && ts.PolecatPool != nil {
+		b.MinSpawnGap = ts.PolecatPool.MinSpawnGapD()
+	}
+	var hooked *specdispatch.Seat
+	if hookedAgent != "" && class(hookedAgent) == specdispatch.ClassHooked {
+		hooked = &specdispatch.Seat{Agent: hookedAgent, Class: specdispatch.ClassHooked, Cap: hookedCap}
+	}
+	var hookless *specdispatch.Seat
+	if hooklessAgent != "" {
+		hookless = &specdispatch.Seat{Agent: hooklessAgent, Class: class(hooklessAgent), Cap: hooklessCap}
+	}
+	order := []*specdispatch.Seat{overflow, hookless, hooked}
+	if prefer {
+		order = []*specdispatch.Seat{hooked, overflow, hookless}
+	}
+	seen := map[string]bool{}
+	for _, seat := range order {
+		if seat == nil || seen[seat.Agent] {
+			continue
+		}
+		seen[seat.Agent] = true
+		b.Seats = append(b.Seats, *seat)
 	}
 	return b
 }
 
-// specRosterFrom counts live polecats (and in-flight seat claims) by class.
+// specRosterFrom counts live polecats (and in-flight seat claims) per agent.
 // An empty GT_AGENT runs the polecat role default.
 func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster {
-	var r specRoster
-	var agents map[string]*config.RuntimeConfig
+	r := specRoster{Live: map[string]int{}}
 	roleDefault := ""
 	if ts != nil {
-		agents = ts.Agents
 		roleDefault = ts.RoleAgents["polecat"]
 	}
 	for _, s := range sessions {
@@ -476,11 +504,7 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 		if agent == "" {
 			agent = roleDefault
 		}
-		if specdispatch.ClassifyAgent(agent, agents) == specdispatch.ClassHooked {
-			r.Hooked++
-		} else {
-			r.Hookless++
-		}
+		r.Live[agent]++
 		if s.created.After(r.Newest) {
 			r.Newest = s.created
 		}
@@ -709,6 +733,28 @@ func hasCommentWithPrefix(comments []beads.Comment, key string) bool {
 	return false
 }
 
+// specSlingParams is the sling a spec dispatch makes. The agent is explicit
+// and outranks route:* labels; there is no auto-convoy, so a failed dispatch
+// leaves the bead unassigned for the next tick rather than handing it to a
+// convoy re-feed loop; and every dispatch carries the host-safety instruction,
+// because the term scan is defense in depth and can miss.
+func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, seat specdispatch.SeatChoice) SlingParams {
+	return SlingParams{
+		BeadID:           c.Spec.ID,
+		RigName:          c.Rig,
+		FormulaName:      formula,
+		Agent:            seat.Agent,
+		AgentBeatsRoute:  true,
+		Args:             specdispatch.HostSafetyPrompt,
+		FormulaFailFatal: true,
+		NoConvoy:         true,
+		CallerContext:    specDispatchCallerLabel,
+		NoBoot:           true,
+		TownRoot:         townRoot,
+		BeadsDir:         beadsDir,
+	}
+}
+
 // slingSpec dispatches one clean spec through the shared rig-dispatch path.
 // The agent is explicit, so it wins over the bead's route:* labels in the
 // pool; the pool still enforces its own caps and may refuse.
@@ -717,24 +763,7 @@ func slingSpec(townRoot string, c specCandidate, seat specdispatch.SeatChoice) (
 	if !ok {
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
 	}
-	params := SlingParams{
-		BeadID:           c.Spec.ID,
-		RigName:          c.Rig,
-		FormulaName:      resolveFormula("", false, townRoot, c.Rig),
-		Agent:            seat.Agent,
-		AgentBeatsRoute:  true,
-		FormulaFailFatal: true,
-		// No auto-convoy: a failed dispatch must leave the bead unassigned for
-		// the next tick, not hand it to a convoy re-feed loop.
-		NoConvoy:      true,
-		CallerContext: specDispatchCallerLabel,
-		NoBoot:        true,
-		TownRoot:      townRoot,
-		BeadsDir:      targetBeadsDir,
-	}
-	if seat.HostSafety != "" {
-		params.Args = specdispatch.HostSafetyPrompt
-	}
+	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, seat)
 	result, err := executeSling(params)
 	if err != nil {
 		return "", err

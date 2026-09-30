@@ -107,10 +107,11 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		Sleep:    func(time.Duration) { f.sleeps++ },
 		Now:      func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) },
 		Template: specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
-		Budget: specdispatch.Budget{
-			HookedAgent: "claude-sonnet", HookedCap: 2,
-			HooklessAgent: "deepseek-flash", HooklessCap: 2,
-		},
+		Budget: specdispatch.Budget{Seats: []specdispatch.Seat{
+			{Agent: "deepseek-flash", Class: specdispatch.ClassHooked, Cap: 2},
+			{Agent: "local-coder", Class: specdispatch.ClassHookless, Cap: 2},
+			{Agent: "claude-sonnet", Class: specdispatch.ClassHooked, Cap: 2},
+		}},
 		PerTick: 1,
 	}
 }
@@ -130,8 +131,8 @@ func TestSpecDispatchSlingsInDeterministicOrder(t *testing.T) {
 	if len(r.Dispatched) != 3 {
 		t.Fatalf("report = %+v", r)
 	}
-	// Hookless first, then the hookless cap (2) is reached and the third
-	// spec takes a hooked seat.
+	// The first seat until its cap (2), then the next hooked seat; the
+	// hookless seat in between is skipped for specs without host-safe.
 	if f.slingSeats[0].Agent != "deepseek-flash" || f.slingSeats[1].Agent != "deepseek-flash" || f.slingSeats[2].Agent != "claude-sonnet" {
 		t.Errorf("seats = %+v", f.slingSeats)
 	}
@@ -185,37 +186,80 @@ func TestSpecDispatchRoutesPlanningWithoutSpawning(t *testing.T) {
 	}
 }
 
-func TestSpecDispatchHostSafetyOnlyHooked(t *testing.T) {
-	risky := cleanSpec("gt-risky", 1, "2026-09-29T10:00:00Z")
-	risky.Description += "\n\nThe uninstall path removes ~/.local/bin/gt."
-	risky.Labels = append(risky.Labels, "route:flash")
+func TestSpecDispatchHostSafety(t *testing.T) {
+	full := map[string]int{"deepseek-flash": 2, "claude-sonnet": 2}
 
-	f := newFakeSpecTown(risky)
-	runSpecDispatchCycle(f.env())
-	if len(f.slung) != 1 || f.slingSeats[0].Agent != "claude-sonnet" || f.slingSeats[0].HostSafety == "" {
-		t.Fatalf("host-safety spec seat = %+v", f.slingSeats)
-	}
-
-	// Hooked seats full: skipped, never placed on the free hookless seat.
-	f = newFakeSpecTown(risky)
-	f.roster = specRoster{Hooked: 2}
+	// No host-safe label: hooked seats only, so a free hookless seat is not
+	// taken and the spec waits without an annotation.
+	plain := cleanSpec("gt-plain", 1, "2026-09-29T10:00:00Z")
+	f := newFakeSpecTown(plain)
+	f.roster = specRoster{Live: full}
 	r := runSpecDispatchCycle(f.env())
-	if len(f.slung) != 0 || len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "needs a hooked seat") {
-		t.Fatalf("slung %v skipped %+v", f.slung, r.Skipped)
+	if len(f.slung) != 0 || len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "hooked seats only") || len(f.notes) != 0 {
+		t.Fatalf("slung %v skipped %+v notes %v", f.slung, r.Skipped, f.notes)
 	}
-	if len(f.notes["gt-risky"]) != 0 {
-		t.Errorf("a capacity skip must not annotate: %v", f.notes)
+
+	// "installer docs" is not an install: dispatched on a hooked seat, no note.
+	docs := cleanSpec("gt-docs", 1, "2026-09-29T10:00:00Z")
+	docs.Title = "Write the installer docs"
+	f = newFakeSpecTown(docs)
+	runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slingSeats[0].Class != specdispatch.ClassHooked || len(f.notes) != 0 {
+		t.Fatalf("installer docs: slung %v seats %+v notes %v", f.slung, f.slingSeats, f.notes)
+	}
+
+	// host-safe label and no risky terms: the hookless seat is allowed.
+	safe := cleanSpec("gt-safe", 1, "2026-09-29T10:00:00Z")
+	safe.Labels = append(safe.Labels, specdispatch.HostSafeLabel)
+	f = newFakeSpecTown(safe)
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 2}}
+	runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slingSeats[0].Agent != "local-coder" || f.slingSeats[0].Class != specdispatch.ClassHookless {
+		t.Fatalf("host-safe: seats %+v", f.slingSeats)
+	}
+
+	// host-safe label but "rm -fr" in the text: forced hooked, annotated once.
+	risky := cleanSpec("gt-risky", 1, "2026-09-29T10:00:00Z")
+	risky.Labels = append(risky.Labels, specdispatch.HostSafeLabel, "route:flash")
+	risky.Description += "\n\nClean up with rm -fr build/ first."
+	f = newFakeSpecTown(risky)
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 2}}
+	runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slingSeats[0].Agent != "claude-sonnet" || !f.slingSeats[0].OverrodeHostSafe {
+		t.Fatalf("risky host-safe: seats %+v", f.slingSeats)
+	}
+	if n := len(f.notes["gt-risky"]); n != 1 || !strings.Contains(f.notes["gt-risky"][0], "host-safe label overridden") {
+		t.Fatalf("override notes = %v", f.notes["gt-risky"])
+	}
+
+	// Hooked seats full: the forced spec waits, never taking the hookless
+	// seat, and the override is still noted only once across ticks.
+	f = newFakeSpecTown(risky)
+	f.roster = specRoster{Live: full}
+	runSpecDispatchCycle(f.env())
+	r = runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 || !strings.Contains(r.Skipped[0].Line, "hooked seats only") || len(f.notes["gt-risky"]) != 1 {
+		t.Fatalf("slung %v skipped %+v notes %v", f.slung, r.Skipped, f.notes)
+	}
+}
+
+func TestSpecSlingParams(t *testing.T) {
+	c := specCandidate{Spec: cleanSpec("gt-a", 1, ""), Rig: "gastown"}
+	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, specdispatch.SeatChoice{Agent: "claude-sonnet"})
+	if p.Agent != "claude-sonnet" || !p.AgentBeatsRoute || !p.NoConvoy || !p.NoBoot || !p.FormulaFailFatal ||
+		p.RigName != "gastown" || p.FormulaName != "mol-polecat-work" || !strings.Contains(p.Args, "temporary INSTALL_DIR") {
+		t.Fatalf("params = %+v", p)
 	}
 }
 
 func TestSpecDispatchRespectsCapsAndRoster(t *testing.T) {
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-	f.roster = specRoster{Hooked: 2, Hookless: 2}
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 2, "local-coder": 2, "claude-sonnet": 2}}
 	r := runSpecDispatchCycle(f.env())
-	if len(f.slung) != 0 || !strings.Contains(r.Skipped[0].Line, "seats full: hooked 2/2, hookless 2/2") {
+	if len(f.slung) != 0 || !strings.Contains(r.Skipped[0].Line, "all full") {
 		t.Fatalf("slung %v skipped %+v", f.slung, r.Skipped)
 	}
-	if r.Roster != "hooked 2/2, hookless 2/2" {
+	if r.Roster != "deepseek-flash 2/2 hooked, local-coder 2/2 hookless, claude-sonnet 2/2 hooked" {
 		t.Errorf("roster = %q", r.Roster)
 	}
 
@@ -325,43 +369,46 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 	ts.Agents = map[string]*config.RuntimeConfig{
 		"claude-sonnet":  {Provider: "claude", Command: "claude"},
 		"deepseek-flash": {Provider: "claude", Command: "claude", Env: map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"}},
+		"local-coder":    {Provider: "openai", Command: "claude"},
 	}
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
 	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", OverflowAgent: "deepseek-flash", MaxOverflow: 3, MinSpawnGap: "4m"}
 
 	b := specBudgetFromConfig(ts, nil)
-	if b.HookedAgent != "claude-sonnet" || b.HookedCap != 2 || b.HooklessAgent != "deepseek-flash" || b.HooklessCap != 3 || b.MinSpawnGap != 4*time.Minute {
-		t.Fatalf("defaults = %+v", b)
+	if got := b.Picture(); got != "deepseek-flash 0/3 hooked, claude-sonnet 0/2 hooked" || b.MinSpawnGap != 4*time.Minute {
+		t.Fatalf("defaults = %q gap %v", got, b.MinSpawnGap)
 	}
-	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: -1, MaxHookless: 9, PreferHooked: true})
-	if b.HookedCap != 0 || b.HooklessCap != 3 || !b.PreferHooked {
-		t.Fatalf("pool max_overflow must win over max_hookless, max_hooked<0 closes: %+v", b)
+	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: 1, HooklessAgent: "local-coder", MaxHookless: 1, PreferHooked: true})
+	if got := b.Picture(); got != "claude-sonnet 0/1 hooked, deepseek-flash 0/3 hooked, local-coder 0/1 hookless" {
+		t.Fatalf("configured = %q", got)
 	}
-	// An agent configured into the wrong class is dropped rather than obeyed.
-	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{HookedAgent: "deepseek-flash", HooklessAgent: "claude-sonnet"})
-	if b.HookedAgent != "" || b.HooklessAgent != "" {
-		t.Fatalf("misclassified agents kept: %+v", b)
+	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: -1})
+	if got := b.Picture(); got != "deepseek-flash 0/3 hooked, claude-sonnet 0/0 hooked" {
+		t.Fatalf("max_hooked<0 must close the seat: %q", got)
 	}
-	ts.PolecatPool = nil
-	if b := specBudgetFromConfig(ts, nil); b.HooklessAgent != "deepseek-flash" || b.HooklessCap != 2 {
-		t.Fatalf("no pool: %+v", b)
+	// A hooked_agent that is not provider=claude is dropped, not obeyed.
+	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{HookedAgent: "local-coder"})
+	if got := b.Picture(); got != "deepseek-flash 0/3 hooked" {
+		t.Fatalf("non-claude hooked_agent kept: %q", got)
+	}
+	// max_overflow unset caps the overflow seat at the default, never uncapped.
+	ts.PolecatPool.MaxOverflow = 0
+	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/2 hooked, claude-sonnet 0/2 hooked" {
+		t.Fatalf("uncapped overflow = %q", got)
 	}
 }
 
-func TestSpecRosterCountsByClass(t *testing.T) {
+func TestSpecRosterCountsByAgent(t *testing.T) {
 	ts := config.NewTownSettings()
-	ts.Agents = map[string]*config.RuntimeConfig{
-		"deepseek-flash": {Provider: "claude", Env: map[string]string{"ANTHROPIC_BASE_URL": "x"}},
-	}
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
 	now := time.Now()
 	r := specRosterFrom([]poolSession{
 		{name: "a", agent: "claude-sonnet", created: now.Add(-time.Hour)},
 		{name: "b", agent: "deepseek-flash", created: now.Add(-2 * time.Hour)},
-		{name: "c", agent: "", created: now.Add(-time.Minute)}, // role default: hookless
+		{name: "c", agent: "", created: now.Add(-time.Minute)}, // role default
 		{name: "pool-claim/x", agent: "deepseek-flash", created: now.Add(-30 * time.Second)},
 	}, ts)
-	if r.Hooked != 1 || r.Hookless != 3 || !r.Newest.Equal(now.Add(-30*time.Second)) {
+	if r.Live["claude-sonnet"] != 1 || r.Live["deepseek-flash"] != 3 || !r.Newest.Equal(now.Add(-30*time.Second)) {
 		t.Fatalf("roster = %+v", r)
 	}
 }

@@ -10,24 +10,30 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-func TestClassifyAgent(t *testing.T) {
+func TestClassifyAgentKeysOnProvider(t *testing.T) {
 	agents := map[string]*config.RuntimeConfig{
-		"claude-sonnet":  {Provider: "claude", Command: "claude"},
-		"deepseek-flash": {Provider: "claude", Command: "claude", Env: map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"}},
-		"local-coder":    {Provider: "claude", Command: "claude", Env: map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:8080"}},
-		"codex":          {Provider: "codex", Command: "codex"},
-		"bare-claude":    {Command: "claude"},
+		"claude-sonnet":   {Provider: "claude", Command: "claude"},
+		"deepseek-flash":  {Provider: "claude", Command: "claude", Env: map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"}},
+		"local-coder":     {Provider: "openai", Command: "claude"},
+		"deepseek-dog":    {Provider: "deepseek", Command: "claude"},
+		"codex":           {Provider: "codex", Command: "codex"},
+		"bare-claude":     {Command: "claude"},
+		"bare-other":      {Command: "aider"},
+		"claude-imposter": {Provider: "gemini", Command: "gemini"},
 	}
 	cases := map[string]Class{
-		"claude-sonnet":  ClassHooked,
-		"deepseek-flash": ClassHookless,
-		"local-coder":    ClassHookless,
-		"codex":          ClassHookless,
-		"bare-claude":    ClassHooked,
-		"claude-opus":    ClassHooked, // built-in preset, not in the table
-		"claude":         ClassHooked,
-		"gemini":         ClassHookless,
-		"":               ClassHookless,
+		"claude-sonnet":   ClassHooked,
+		"deepseek-flash":  ClassHooked, // provider claude: same hooks, whatever the backend
+		"local-coder":     ClassHookless,
+		"deepseek-dog":    ClassHookless,
+		"codex":           ClassHookless,
+		"bare-claude":     ClassHooked,
+		"bare-other":      ClassHookless,
+		"claude-imposter": ClassHookless, // the name never decides
+		"claude":          ClassHooked,   // built-in preset
+		"claude-opus":     ClassHookless, // not in the table, not a preset: fail closed
+		"gemini":          ClassHookless,
+		"":                ClassHookless,
 	}
 	for name, want := range cases {
 		if got := ClassifyAgent(name, agents); got != want {
@@ -38,22 +44,51 @@ func TestClassifyAgent(t *testing.T) {
 
 func TestHostSafetyTerm(t *testing.T) {
 	cases := []struct {
-		edit func(*Spec)
+		text string
 		want string
 	}{
-		{func(s *Spec) {}, ""},
-		{func(s *Spec) { s.Title = "Fix gt uninstall" }, "install"},
-		{func(s *Spec) { s.Description += "\nrun make install" }, "install"},
-		{func(s *Spec) { s.Notes = "writes to ~/.local/bin/gt" }, "~/.local/bin"},
-		{func(s *Spec) { s.Description += "\nhonor INSTALL_DIR" }, "install"},
-		{func(s *Spec) { s.Design = "then gt dolt cleanup" }, "dolt cleanup"},
-		{func(s *Spec) { s.Acceptance = "- [ ] rm -rf the cache" }, "rm -rf"},
+		{"", ""},
+		{"Write the installer docs and an installation guide", ""},
+		{"Fix gt uninstall", "uninstall"},
+		{"then run `make install` locally", "make install"},
+		{"writes to ~/.local/bin/gt", ".local/bin"},
+		{"honor INSTALL_DIR when set", "install_dir"},
+		{"then gt dolt cleanup", "dolt cleanup"},
+		{"rm -rf the cache", "rm -r"},
+		{"rm -fr build/", "rm -r"},
+		{"rm -Rf build/", "rm -r"},
+		{"rm --recursive x", "rm -r"},
+		{"rm -f one-file", ""},
+		{"shred the key", "shred"},
+		{"use dd to copy", "dd"},
+		{"chmod -R 755 .", "chmod -R"},
+		{"chown -R me .", "chown -R"},
+		{"echo x > /etc/hosts", "> host path"},
+		{"echo x >/etc/hosts", "> host path"},
+		{"echo alias >> ~/.zshrc", ">> host path"},
+		{"echo alias >>~/.zshrc", ">> host path"},
+		{"append to .bashrc", ".bashrc"},
+		{"Terms like reinstalling matter", "reinstalling"},
+		{"a directory named firm-rf", ""},
 	}
-	for i, tc := range cases {
+	for _, tc := range cases {
 		s := goodSpec()
-		tc.edit(&s)
+		s.Description += "\n" + tc.text
 		if got := HostSafetyTerm(s); got != tc.want {
-			t.Errorf("case %d: HostSafetyTerm = %q, want %q", i, got, tc.want)
+			t.Errorf("HostSafetyTerm(%q) = %q, want %q", tc.text, got, tc.want)
+		}
+	}
+	// Every text field is read.
+	for _, edit := range []func(*Spec){
+		func(s *Spec) { s.Title = "uninstall" },
+		func(s *Spec) { s.Notes = "uninstall" },
+		func(s *Spec) { s.Design = "uninstall" },
+		func(s *Spec) { s.Acceptance = "- [ ] uninstall" },
+	} {
+		s := goodSpec()
+		edit(&s)
+		if HostSafetyTerm(s) == "" {
+			t.Errorf("field not scanned: %+v", s)
 		}
 	}
 }
@@ -105,51 +140,75 @@ func TestOrderIsPriorityThenCreatedThenID(t *testing.T) {
 
 func baseBudget() Budget {
 	return Budget{
-		HookedAgent: "claude-sonnet", HookedCap: 2,
-		HooklessAgent: "deepseek-flash", HooklessCap: 2,
+		Seats: []Seat{
+			{Agent: "deepseek-flash", Class: ClassHooked, Cap: 2},
+			{Agent: "local-coder", Class: ClassHookless, Cap: 2},
+			{Agent: "claude-sonnet", Class: ClassHooked, Cap: 2},
+		},
 		Now: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC),
 	}
 }
 
-func TestChooseSeatClassesAndCaps(t *testing.T) {
+func hostSafe(s *Spec) { s.Labels = append(s.Labels, HostSafeLabel) }
+
+func TestChooseSeatFailsClosed(t *testing.T) {
 	cases := []struct {
-		name   string
-		edit   func(*Budget)
-		spec   func(*Spec)
-		agent  string
-		skip   bool
-		reason string
+		name     string
+		live     map[string]int
+		edit     func(*Budget)
+		spec     func(*Spec)
+		agent    string
+		skip     bool
+		overrode bool
+		reason   string
 	}{
-		{"hookless first by default", func(b *Budget) {}, nil, "deepseek-flash", false, "hookless seat 1/2"},
-		{"prefer hooked", func(b *Budget) { b.PreferHooked = true }, nil, "claude-sonnet", false, "hooked seat 1/2"},
-		{"hookless full falls to hooked", func(b *Budget) { b.HooklessLive = 2 }, nil, "claude-sonnet", false, "hooked seat 1/2"},
-		{"hooked full falls to hookless", func(b *Budget) { b.PreferHooked = true; b.HookedLive = 2 }, nil, "deepseek-flash", false, "hookless seat 1/2"},
-		{"everything full", func(b *Budget) { b.HooklessLive = 2; b.HookedLive = 2 }, nil, "", true, "seats full: hooked 2/2, hookless 2/2"},
-		{"over cap counts as full", func(b *Budget) { b.HooklessLive = 4; b.HookedLive = 3 }, nil, "", true, "seats full"},
-		{"hookless cap zero", func(b *Budget) { b.HooklessCap = 0; b.HookedLive = 2 }, nil, "", true, "seats full"},
-		{"no hookless agent", func(b *Budget) { b.HooklessAgent = "" }, nil, "claude-sonnet", false, "hooked"},
-		{"min spawn gap", func(b *Budget) { b.MinSpawnGap = 4 * time.Minute; b.NewestSpawn = b.Now.Add(-time.Minute) }, nil, "", true, "min_spawn_gap"},
-		{"gap elapsed", func(b *Budget) { b.MinSpawnGap = 4 * time.Minute; b.NewestSpawn = b.Now.Add(-5 * time.Minute) }, nil, "deepseek-flash", false, ""},
-		{"host safety goes hooked", func(b *Budget) {}, func(s *Spec) { s.Title = "uninstall gt" }, "claude-sonnet", false, "host-safety"},
-		{"host safety never hookless", func(b *Budget) { b.HookedLive = 2 }, func(s *Spec) { s.Title = "uninstall gt" }, "", true, "needs a hooked seat: 2/2"},
-		{"host safety hooked cap zero", func(b *Budget) { b.HookedCap = 0 }, func(s *Spec) { s.Notes = "rm -rf ~/.local/bin" }, "", true, "needs a hooked seat"},
+		{name: "default spec takes the first hooked seat", agent: "deepseek-flash", reason: "no host-safe label"},
+		{name: "default spec skips a free hookless seat", live: map[string]int{"deepseek-flash": 2}, agent: "claude-sonnet"},
+		{name: "default spec waits when hooked seats are full", live: map[string]int{"deepseek-flash": 2, "claude-sonnet": 2}, skip: true, reason: "hooked seats only"},
+		{name: "installer docs still dispatches hooked", spec: func(s *Spec) { s.Title = "Write the installer docs" }, agent: "deepseek-flash"},
+		{name: "host-safe spec may use the hookless seat", spec: hostSafe, live: map[string]int{"deepseek-flash": 2}, agent: "local-coder", reason: "host-safe"},
+		{name: "host-safe spec in order takes first free", spec: hostSafe, agent: "deepseek-flash"},
+		{name: "host-safe with rm -fr is forced hooked", live: map[string]int{"deepseek-flash": 2},
+			spec: func(s *Spec) { hostSafe(s); s.Description += "\nrm -fr build" }, agent: "claude-sonnet", overrode: true, reason: "label overridden"},
+		{name: "host-safe with rm -fr never goes hookless", live: map[string]int{"deepseek-flash": 2, "claude-sonnet": 2},
+			spec: func(s *Spec) { hostSafe(s); s.Description += "\nrm -fr build" }, skip: true, overrode: true},
+		{name: "over cap counts as full", live: map[string]int{"deepseek-flash": 5, "local-coder": 3, "claude-sonnet": 9}, spec: hostSafe, skip: true, reason: "seats full"},
+		{name: "cap zero is closed", edit: func(b *Budget) { b.Seats[0].Cap = 0 }, agent: "claude-sonnet"},
+		{name: "min spawn gap", edit: func(b *Budget) { b.MinSpawnGap = 4 * time.Minute; b.NewestSpawn = b.Now.Add(-time.Minute) }, skip: true, reason: "min_spawn_gap"},
+		{name: "gap elapsed", edit: func(b *Budget) { b.MinSpawnGap = 4 * time.Minute; b.NewestSpawn = b.Now.Add(-5 * time.Minute) }, agent: "deepseek-flash"},
+		{name: "no seats", edit: func(b *Budget) { b.Seats = nil }, skip: true, reason: "no seats"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := baseBudget()
-			tc.edit(&b)
+			b.SetLive(tc.live)
+			if tc.edit != nil {
+				tc.edit(&b)
+			}
 			s := goodSpec()
 			if tc.spec != nil {
 				tc.spec(&s)
 			}
 			got := ChooseSeat(s, b)
-			if got.Skip != tc.skip || got.Agent != tc.agent || !strings.Contains(got.Reason, tc.reason) {
-				t.Fatalf("ChooseSeat = %+v, want agent %q skip %v reason ~%q", got, tc.agent, tc.skip, tc.reason)
+			if got.Skip != tc.skip || got.Agent != tc.agent || got.OverrodeHostSafe != tc.overrode || !strings.Contains(got.Reason, tc.reason) {
+				t.Fatalf("ChooseSeat = %+v, want agent %q skip %v overrode %v reason ~%q", got, tc.agent, tc.skip, tc.overrode, tc.reason)
 			}
-			if !got.Skip && got.Class == ClassHookless && HostSafetyTerm(s) != "" {
-				t.Fatal("host-safety spec placed on a hookless seat")
+			if !got.Skip && got.Class == ClassHookless && (!s.HasLabel(HostSafeLabel) || HostSafetyTerm(s) != "") {
+				t.Fatal("a spec without a clean host-safe label reached a hookless seat")
 			}
 		})
+	}
+}
+
+func TestBudgetBumpAndPicture(t *testing.T) {
+	b := baseBudget()
+	b.SetLive(map[string]int{"claude-sonnet": 1})
+	b.Bump("claude-sonnet", b.Now)
+	if b.Seats[2].Live != 2 || !b.NewestSpawn.Equal(b.Now) {
+		t.Fatalf("bump: %+v", b)
+	}
+	if got := b.Picture(); got != "deepseek-flash 0/2 hooked, local-coder 0/2 hookless, claude-sonnet 2/2 hooked" {
+		t.Errorf("picture = %q", got)
 	}
 }
 

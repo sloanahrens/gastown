@@ -384,24 +384,31 @@ type SpecDispatchConfig struct {
 	// IntervalStr is the tick cadence (default "60s").
 	IntervalStr string `json:"interval,omitempty"`
 
-	// HookedAgent is the agent a hooked (Claude-backed, guarded) seat runs.
-	// Default "claude-sonnet".
+	// Seats are per agent, each with its own cap, and classed by the agent's
+	// provider: provider=claude is hooked (managed settings and guards), any
+	// other provider is hookless. A spec uses hooked seats only, unless it
+	// carries label host-safe and names no host-touching command or path.
+
+	// HookedAgent is a provider=claude agent seat the dispatcher may use
+	// beside the pool's overflow_agent. Default "claude-sonnet"; ignored when
+	// its provider is not claude.
 	HookedAgent string `json:"hooked_agent,omitempty"`
 
-	// MaxHooked caps live hooked polecats (default 2). Zero means default;
-	// a negative value closes the hooked class.
+	// MaxHooked caps live polecats on HookedAgent (default 2). Zero means
+	// default; a negative value closes the seat.
 	MaxHooked int `json:"max_hooked,omitempty"`
 
-	// HooklessAgent is the agent a hookless seat runs. Default: the
-	// polecat_pool overflow_agent.
+	// HooklessAgent is an optional extra seat, typically a non-claude
+	// provider. Only host-safe specs use a hookless seat.
 	HooklessAgent string `json:"hookless_agent,omitempty"`
 
-	// MaxHookless caps live hookless polecats when polecat_pool.max_overflow
-	// is unset (default 2). polecat_pool.max_overflow wins when set.
+	// MaxHookless caps live polecats on HooklessAgent (default 2). The pool's
+	// overflow_agent seat is capped by polecat_pool.max_overflow instead
+	// (default 2 when unset).
 	MaxHookless int `json:"max_hookless,omitempty"`
 
-	// PreferHooked tries the hooked seat before the hookless one for specs
-	// that may take either. Default false (hookless first).
+	// PreferHooked puts the HookedAgent seat first. Default: the pool's
+	// overflow_agent first, then HooklessAgent, then HookedAgent.
 	PreferHooked bool `json:"prefer_hooked,omitempty"`
 
 	// MaxPerTick bounds slings per tick (default 1).
