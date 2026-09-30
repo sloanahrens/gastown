@@ -32,8 +32,8 @@ import (
 //     running on every Bash tool call should not depend on — and which is
 //     missing or stale often enough to matter (the live-fire probe for this
 //     bead ran against a town with no rigs.json at all);
-//   - a rig's aggregate directories — polecats/, crew/, refinery/,
-//     witness/, mayor/. One level deeper, but each holds *many* checkouts
+//   - a rig's aggregate directories — polecats/, crew/, witness/,
+//     mayor/. One level deeper, but each holds *many* checkouts
 //     rather than one, so scanning "the rig's polecats/" walks every polecat
 //     worktree on the host: the town-root hazard at a smaller scale.
 //
@@ -51,7 +51,7 @@ import (
 // aggregate directory) reaches this guard without a second list to keep in
 // sync.
 //
-// A rig's deeper clone directories — mayor/rig, refinery/rig, and a single
+// A rig's deeper clone directories — mayor/rig and a single
 // polecats/<name>/<repo> — are each one repository and stay scannable.
 func rigAggregateDirs() map[string]bool {
 	dirs := make(map[string]bool, len(rig.AgentDirs))

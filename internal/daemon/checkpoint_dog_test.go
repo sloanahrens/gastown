@@ -5,9 +5,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	gtgit "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 func TestCheckpointDogInterval_Default(t *testing.T) {
@@ -220,94 +225,157 @@ func TestIsGitWorktree(t *testing.T) {
 	}
 }
 
+// checkpointClone gives d a gitfake world holding a checkout at a fresh
+// directory whose one commit on main holds files (its origin is a bare repo
+// beside it), and returns the checkout, the world and the checkout's git.
+func checkpointClone(t *testing.T, d *Daemon, files map[string]string) (string, *gitfake.Fake, gitfake.WorkTree) {
+	t.Helper()
+	f := useGitfake(t, d)
+	dir := t.TempDir()
+	origin, workDir := filepath.Join(dir, "origin.git"), filepath.Join(dir, "polecat")
+	f.InitBare(t, origin)
+	f.Commit(t, origin, "main", "initial", files)
+	f.Clone(t, origin, workDir)
+	return workDir, f, f.Open(workDir).(gitfake.WorkTree)
+}
+
+// writeWorkFiles writes files (slash paths to content) into a checkout.
+func writeWorkFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for p, content := range files {
+		path := filepath.Join(dir, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func headOf(t *testing.T, g gitfake.WorkTree) string {
+	t.Helper()
+	head, err := g.(gitfake.Repo).Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev(HEAD): %v", err)
+	}
+	return head
+}
+
+// changedSince lists the files whose content differs between commit before
+// and HEAD, sorted.
+func changedSince(t *testing.T, g gitfake.WorkTree, before string) []string {
+	t.Helper()
+	old, err := g.TreeFileBlobs(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := g.TreeFileBlobs("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for p, b := range cur {
+		if old[p] != b {
+			paths = append(paths, p)
+		}
+	}
+	for p := range old {
+		if _, ok := cur[p]; !ok {
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// wantNothingStaged fails when the index differs from HEAD.
+func wantNothingStaged(t *testing.T, g gitfake.WorkTree) {
+	t.Helper()
+	if staged, err := g.StagedChanges(); err != nil || len(staged) != 0 {
+		t.Fatalf("staged after the checkpoint = %v, %v; want nothing", staged, err)
+	}
+}
+
+func worktreeStatus(t *testing.T, g gitfake.WorkTree) *gtgit.GitStatus {
+	t.Helper()
+	st, err := g.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
 func TestCheckpointWorktreeExcludesNestedRuntimeArtifacts(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	mustRunGit(t, workDir, "init")
-	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
-	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
-
-	if err := os.MkdirAll(filepath.Join(workDir, "src"), 0o755); err != nil {
-		t.Fatalf("setup src: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(workDir, "web", ".beads"), 0o755); err != nil {
-		t.Fatalf("setup nested runtime dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "src", "app.go"), []byte("package main\n"), 0o644); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("before\n"), 0o644); err != nil {
-		t.Fatalf("write runtime file: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "src/app.go", "web/.beads/redirect")
-	mustRunGit(t, workDir, "commit", "-m", "initial")
-
-	if err := os.WriteFile(filepath.Join(workDir, "src", "app.go"), []byte("package main\n// checkpoint me\n"), 0o644); err != nil {
-		t.Fatalf("modify source: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("after\n"), 0o644); err != nil {
-		t.Fatalf("modify runtime file: %v", err)
-	}
-
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"src/app.go": "package main\n", "web/.beads/redirect": "before\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{"src/app.go": "package main\n// checkpoint me\n", "web/.beads/redirect": "after\n"})
+
 	if !d.checkpointWorktree(workDir, "rig", "polecat") {
 		t.Fatal("checkpointWorktree did not create a checkpoint commit")
 	}
-
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "src/app.go" {
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"src/app.go"}) {
 		t.Fatalf("checkpoint commit changed %q, want only src/app.go", got)
 	}
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--cached", "--name-only")); got != "" {
-		t.Fatalf("runtime artifact remained staged: %q", got)
-	}
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--", "web/.beads/redirect")); got == "" {
-		t.Fatal("nested runtime artifact change was committed or lost; want it left unstaged in worktree")
+	wantNothingStaged(t, g)
+	if st := worktreeStatus(t, g); !slices.Contains(st.Modified, "web/.beads/redirect") {
+		t.Fatalf("status %+v: nested runtime artifact change was committed or lost; want it left unstaged in worktree", st)
 	}
 }
 
 func TestCheckpointWorktreeSkipsRuntimeOnlyNestedArtifacts(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	mustRunGit(t, workDir, "init")
-	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
-	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
-
-	if err := os.MkdirAll(filepath.Join(workDir, "web", ".beads"), 0o755); err != nil {
-		t.Fatalf("setup nested runtime dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("before\n"), 0o644); err != nil {
-		t.Fatalf("write runtime file: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "web/.beads/redirect")
-	mustRunGit(t, workDir, "commit", "-m", "initial")
-	before := mustRunGit(t, workDir, "rev-parse", "HEAD")
-
-	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("after\n"), 0o644); err != nil {
-		t.Fatalf("modify runtime file: %v", err)
-	}
-
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"web/.beads/redirect": "before\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{"web/.beads/redirect": "after\n"})
+
 	if d.checkpointWorktree(workDir, "rig", "polecat") {
 		t.Fatal("checkpointWorktree created a checkpoint for runtime-only changes")
 	}
-	if after := mustRunGit(t, workDir, "rev-parse", "HEAD"); after != before {
+	if after := headOf(t, g); after != before {
 		t.Fatalf("checkpointWorktree advanced HEAD to %s, want %s", after, before)
 	}
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--cached", "--name-only")); got != "" {
-		t.Fatalf("runtime artifact remained staged: %q", got)
-	}
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--", "web/.beads/redirect")); got == "" {
+	wantNothingStaged(t, g)
+	if st := worktreeStatus(t, g); !slices.Contains(st.Modified, "web/.beads/redirect") {
 		t.Fatal("nested runtime artifact change was lost; want it left unstaged in worktree")
 	}
 }
 
-func mustRunGit(t *testing.T, workDir string, args ...string) string {
-	t.Helper()
-	out, err := runGitCmd(workDir, args...)
-	if err != nil {
-		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+// A worktree with nothing to checkpoint makes no commit.
+func TestCheckpointWorktreeSkipsACleanWorktree(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"a.go": "package a\n"})
+	before := headOf(t, g)
+	if d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree checkpointed a clean worktree")
 	}
-	return out
+	if after := headOf(t, g); after != before {
+		t.Fatalf("HEAD moved to %s", after)
+	}
+}
+
+// A deleted tracked file is never committed as a deletion (gt-pvx): the
+// checkpoint keeps the file and records the rest of the work.
+func TestCheckpointWorktreeNeverCommitsADeletion(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"keep.go": "package a\n", "work.go": "package a\n"})
+	before := headOf(t, g)
+	if err := os.Remove(filepath.Join(workDir, "keep.go")); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkFiles(t, workDir, map[string]string{"work.go": "package a\n// wip\n"})
+
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not checkpoint the real work")
+	}
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"work.go"}) {
+		t.Fatalf("checkpoint commit changed %q, want only work.go (never the deletion of keep.go)", got)
+	}
 }
 
 // checkpointAlertRecorder stands in for the daemon's checkpointRevertAlert,
@@ -326,56 +394,41 @@ func (r *checkpointAlertRecorder) alert(key, source, message string) {
 }
 
 // newCheckpointRevertScenario reproduces the shared-worktree-reuse shape from
-// gt-2bp8: a bare "origin", a seed checkout that stands in for main, and a
-// polecat checkout on its own branch that has already fast-forwarded through
-// another polecat's merge — so origin/main and the branch's own ancestry both
-// show keep.txt at its post-merge content ("keep\nmain touch\n"). Returns the
-// polecat checkout's path; the caller decides what to do to its working tree
-// from there.
-func newCheckpointRevertScenario(t *testing.T) string {
+// gt-2bp8: an "origin" standing in for main, and a polecat checkout on its own
+// branch that has already merged another polecat's work from main — so
+// origin/main and the branch's own ancestry both show keep.txt at its
+// post-merge content ("keep\nmain touch\n"). It wires d's git to the world
+// and returns the polecat checkout's path and git; the caller decides what to
+// do to its working tree from there.
+func newCheckpointRevertScenario(t *testing.T, d *Daemon) (string, gitfake.WorkTree) {
 	t.Helper()
+	f := useGitfake(t, d)
 	dir := t.TempDir()
-	remote := filepath.Join(dir, "origin.git")
-	seed := filepath.Join(dir, "seed")
-	polecat := filepath.Join(dir, "polecat")
+	origin, polecat := filepath.Join(dir, "origin.git"), filepath.Join(dir, "polecat")
+	const branch = "polecat/turquoise/gt-test"
 
-	mustRunGit(t, "", "init", "--bare", remote)
-	// Point the bare repo's HEAD at main explicitly: git init's default branch
-	// name is host-configurable, and the clones below check out whatever HEAD
-	// names.
-	mustRunGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
-
-	mustRunGit(t, "", "clone", remote, seed)
-	mustRunGit(t, seed, "config", "user.email", "seed@example.com")
-	mustRunGit(t, seed, "config", "user.name", "Seed")
-	if err := os.WriteFile(filepath.Join(seed, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
-		t.Fatalf("write keep.txt: %v", err)
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "base", map[string]string{"keep.txt": "keep\n"})
+	// The polecat worktree is cut here, at the base commit, on its own branch.
+	f.SetRef(t, origin, "refs/heads/"+branch, base)
+	if err := f.Open(dir).CloneBranch(origin, polecat, branch); err != nil {
+		t.Fatal(err)
 	}
-	mustRunGit(t, seed, "add", "-A")
-	mustRunGit(t, seed, "commit", "-m", "base")
-	mustRunGit(t, seed, "push", "origin", "main")
-
-	// The polecat worktree is cut here, at the base commit.
-	mustRunGit(t, "", "clone", remote, polecat)
-	mustRunGit(t, polecat, "config", "user.email", "polecat@example.com")
-	mustRunGit(t, polecat, "config", "user.name", "Polecat")
-	mustRunGit(t, polecat, "switch", "-c", "polecat/turquoise/gt-test")
 
 	// A different polecat's work merges into main while this worktree sits at
 	// the base commit — the gt-wprt/gt-rv8h merges from the incident report.
-	if err := os.WriteFile(filepath.Join(seed, "keep.txt"), []byte("keep\nmain touch\n"), 0o644); err != nil {
-		t.Fatalf("advance keep.txt: %v", err)
-	}
-	mustRunGit(t, seed, "add", "-A")
-	mustRunGit(t, seed, "commit", "-m", "merged: other polecat's work")
-	mustRunGit(t, seed, "push", "origin", "main")
+	f.Commit(t, origin, "main", "merged: other polecat's work", map[string]string{"keep.txt": "keep\nmain touch\n"})
 
 	// The reused worktree picks up the merge, so its own ancestry already
 	// contains it — exactly what a shared-worktree reset leaves behind.
-	mustRunGit(t, polecat, "fetch", "origin")
-	mustRunGit(t, polecat, "merge", "--ff-only", "origin/main")
-
-	return polecat
+	g := f.Open(polecat)
+	if err := g.FetchRefspecWithTimeout("origin", "+refs/heads/main:refs/remotes/origin/main", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.MergeNoFF("origin/main", "merge main"); err != nil {
+		t.Fatal(err)
+	}
+	return polecat, g.(gitfake.WorkTree)
 }
 
 // TestCheckpointWorktreeRefusesRevertOfMergedWork reproduces gt-2bp8: a
@@ -386,40 +439,34 @@ func newCheckpointRevertScenario(t *testing.T) string {
 // rather than bake the stale content into the branch as a "real" change.
 func TestCheckpointWorktreeRefusesRevertOfMergedWork(t *testing.T) {
 	t.Parallel()
-	polecat := newCheckpointRevertScenario(t)
-
-	// The bug: working-tree pollution reintroduces the PRE-merge content for a
-	// file this session never meant to touch.
-	if err := os.WriteFile(filepath.Join(polecat, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
-		t.Fatalf("pollute keep.txt: %v", err)
-	}
-	// Real work, staged alongside the pollution — the checkpoint must be able
-	// to refuse the revert without the presence of genuine WIP work fooling it
-	// into committing anyway.
-	if err := os.WriteFile(filepath.Join(polecat, "wip.txt"), []byte("real work in progress\n"), 0o644); err != nil {
-		t.Fatalf("write wip.txt: %v", err)
-	}
-
-	beforeHead := mustRunGit(t, polecat, "rev-parse", "HEAD")
-
 	alerts := &checkpointAlertRecorder{}
 	d := &Daemon{
 		logger:                log.New(io.Discard, "", 0),
 		checkpointRevertAlert: alerts.alert,
 	}
+	polecat, g := newCheckpointRevertScenario(t, d)
+
+	// The bug: working-tree pollution reintroduces the PRE-merge content for a
+	// file this session never meant to touch, beside real work — the
+	// checkpoint must be able to refuse the revert without the presence of
+	// genuine WIP work fooling it into committing anyway.
+	writeWorkFiles(t, polecat, map[string]string{"keep.txt": "keep\n", "wip.txt": "real work in progress\n"})
+	beforeHead := headOf(t, g)
+
 	if d.checkpointWorktree(polecat, "rig", "polecat") {
 		t.Fatal("checkpointWorktree created a checkpoint that reverts already-merged work")
 	}
-
-	if afterHead := mustRunGit(t, polecat, "rev-parse", "HEAD"); afterHead != beforeHead {
+	if afterHead := headOf(t, g); afterHead != beforeHead {
 		t.Fatalf("checkpointWorktree advanced HEAD to %s, want unchanged %s", afterHead, beforeHead)
 	}
-
 	if len(alerts.calls) != 1 {
 		t.Fatalf("expected exactly one revert-guard escalation, got %d: %+v", len(alerts.calls), alerts.calls)
 	}
 	if !strings.Contains(alerts.calls[0].message, "keep.txt") {
 		t.Errorf("escalation message missing the reverted path keep.txt: %s", alerts.calls[0].message)
+	}
+	if alerts.calls[0].key != "checkpoint_dog:revert-guard:rig/polecat" {
+		t.Errorf("escalation key = %q", alerts.calls[0].key)
 	}
 }
 
@@ -430,24 +477,22 @@ func TestCheckpointWorktreeRefusesRevertOfMergedWork(t *testing.T) {
 // resolvable and ahead of the worktree's starting point.
 func TestCheckpointWorktreeAllowsLegitimateWorkAgainstMergedTarget(t *testing.T) {
 	t.Parallel()
-	polecat := newCheckpointRevertScenario(t)
-
-	if err := os.WriteFile(filepath.Join(polecat, "wip.txt"), []byte("real work in progress\n"), 0o644); err != nil {
-		t.Fatalf("write wip.txt: %v", err)
-	}
-
 	alerts := &checkpointAlertRecorder{}
 	d := &Daemon{
 		logger:                log.New(io.Discard, "", 0),
 		checkpointRevertAlert: alerts.alert,
 	}
+	polecat, g := newCheckpointRevertScenario(t, d)
+	before := headOf(t, g)
+	writeWorkFiles(t, polecat, map[string]string{"wip.txt": "real work in progress\n"})
+
 	if !d.checkpointWorktree(polecat, "rig", "polecat") {
 		t.Fatal("checkpointWorktree refused a checkpoint that does not revert any merged work")
 	}
 	if len(alerts.calls) != 0 {
 		t.Errorf("expected no revert-guard escalation for legitimate work, got %+v", alerts.calls)
 	}
-	if got := strings.TrimSpace(mustRunGit(t, polecat, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "wip.txt" {
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"wip.txt"}) {
 		t.Errorf("checkpoint commit changed %q, want only wip.txt", got)
 	}
 }
@@ -459,23 +504,7 @@ func TestCheckpointWorktreeAllowsLegitimateWorkAgainstMergedTarget(t *testing.T)
 // reads.
 func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	remote := filepath.Join(dir, "origin.git")
-	workDir := filepath.Join(dir, "polecat")
-
-	mustRunGit(t, "", "init", "--bare", remote)
-	mustRunGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/trunk")
-	mustRunGit(t, "", "clone", remote, workDir)
-	mustRunGit(t, workDir, "config", "user.email", "polecat@example.com")
-	mustRunGit(t, workDir, "config", "user.name", "Polecat")
-	if err := os.WriteFile(filepath.Join(workDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write base.txt: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "-A")
-	mustRunGit(t, workDir, "commit", "-m", "base")
-	mustRunGit(t, workDir, "push", "origin", "HEAD:trunk")
-
-	townRoot := filepath.Join(dir, "town")
+	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "rig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatalf("mkdir rig path: %v", err)
@@ -483,11 +512,9 @@ func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"default_branch":"trunk"}`), 0o644); err != nil {
 		t.Fatalf("write rig config.json: %v", err)
 	}
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+	workDir, _, _ := checkpointClone(t, d, map[string]string{"base.txt": "base\n"})
 
-	d := &Daemon{
-		logger: log.New(io.Discard, "", 0),
-		config: &Config{TownRoot: townRoot},
-	}
 	if got, want := d.checkpointRevertTarget(workDir, "rig"), "origin/trunk"; got != want {
 		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
 	}
@@ -501,33 +528,7 @@ func TestCheckpointRevertTarget_UsesRigConfigDefaultBranch(t *testing.T) {
 // instead, and the daemon's guard must agree.
 func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	originRemote := filepath.Join(dir, "origin.git")
-	upstreamRemote := filepath.Join(dir, "upstream.git")
-	workDir := filepath.Join(dir, "polecat")
-
-	// origin and upstream are distinct bare repos at distinct paths — origin
-	// stands in for the fork, upstream for the shared canonical repo. Only a
-	// URL difference between them makes ForkBackedRemote true.
-	mustRunGit(t, "", "init", "--bare", originRemote)
-	mustRunGit(t, "", "init", "--bare", upstreamRemote)
-
-	mustRunGit(t, "", "init", workDir)
-	mustRunGit(t, workDir, "config", "user.email", "polecat@example.com")
-	mustRunGit(t, workDir, "config", "user.name", "Polecat")
-	mustRunGit(t, workDir, "checkout", "-b", "main")
-	if err := os.WriteFile(filepath.Join(workDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write base.txt: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "-A")
-	mustRunGit(t, workDir, "commit", "-m", "base")
-	mustRunGit(t, workDir, "remote", "add", "origin", originRemote)
-	mustRunGit(t, workDir, "remote", "add", "upstream", upstreamRemote)
-	mustRunGit(t, workDir, "push", "origin", "HEAD:main")
-	mustRunGit(t, workDir, "push", "upstream", "HEAD:main")
-	mustRunGit(t, workDir, "fetch", "upstream")
-
-	townRoot := filepath.Join(dir, "town")
+	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "rig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatalf("mkdir rig path: %v", err)
@@ -535,11 +536,16 @@ func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"default_branch":"main"}`), 0o644); err != nil {
 		t.Fatalf("write rig config.json: %v", err)
 	}
-
-	d := &Daemon{
-		logger: log.New(io.Discard, "", 0),
-		config: &Config{TownRoot: townRoot},
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+	workDir, f, _ := checkpointClone(t, d, map[string]string{"base.txt": "base\n"})
+	// origin stands in for the fork, upstream for the shared canonical repo at
+	// a distinct path: only a URL difference makes the rig fork-backed.
+	upstream := filepath.Join(t.TempDir(), "upstream.git")
+	f.InitBare(t, upstream)
+	if err := f.Open(workDir).AddUpstreamRemote(upstream); err != nil {
+		t.Fatal(err)
 	}
+
 	if got, want := d.checkpointRevertTarget(workDir, "rig"), "upstream/main"; got != want {
 		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
 	}
@@ -551,9 +557,9 @@ func TestCheckpointRevertTarget_ForkBackedRigUsesUpstream(t *testing.T) {
 // falls back to origin/main rather than erroring.
 func TestCheckpointRevertTarget_NoRigConfigFallsBackToMain(t *testing.T) {
 	t.Parallel()
-	polecat := newCheckpointRevertScenario(t)
-
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	polecat, _ := newCheckpointRevertScenario(t, d)
+
 	if got, want := d.checkpointRevertTarget(polecat, "rig"), "origin/main"; got != want {
 		t.Errorf("checkpointRevertTarget() = %q, want %q", got, want)
 	}
@@ -568,45 +574,27 @@ func TestCheckpointRevertTarget_NoRigConfigFallsBackToMain(t *testing.T) {
 // real work and leave the throwaway file untracked where the polecat left it.
 func TestCheckpointWorktreeExcludesThrowawayFiles(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	mustRunGit(t, workDir, "init")
-	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
-	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
-
-	if err := os.MkdirAll(filepath.Join(workDir, "internal", "util"), 0o755); err != nil {
-		t.Fatalf("setup dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "client.go"), []byte("package util\n"), 0o644); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "-A")
-	mustRunGit(t, workDir, "commit", "-m", "initial")
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"internal/util/client.go": "package util\n"})
+	before := headOf(t, g)
 
 	// Real work in progress, alongside the throwaway diagnostic file.
-	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "client.go"), []byte("package util\n\n// real work\n"), 0o644); err != nil {
-		t.Fatalf("modify source: %v", err)
-	}
-	throwaway := filepath.Join(workDir, "internal", "util", "zz_livecheck_test.go")
-	if err := os.WriteFile(throwaway, []byte("package util\n"), 0o644); err != nil {
-		t.Fatalf("write throwaway: %v", err)
-	}
+	writeWorkFiles(t, workDir, map[string]string{
+		"internal/util/client.go":            "package util\n\n// real work\n",
+		"internal/util/zz_livecheck_test.go": "package util\n",
+	})
 
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 	if !d.checkpointWorktree(workDir, "rig", "polecat") {
 		t.Fatal("checkpointWorktree did not create a checkpoint commit")
 	}
-
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "internal/util/client.go" {
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"internal/util/client.go"}) {
 		t.Fatalf("checkpoint commit changed %q, want only internal/util/client.go", got)
 	}
-	if tracked := strings.TrimSpace(mustRunGit(t, workDir, "ls-files", "--", "internal/util/zz_livecheck_test.go")); tracked != "" {
-		t.Fatalf("throwaway file reached the branch: %q", tracked)
-	}
-	if _, err := os.Stat(throwaway); err != nil {
+	if _, err := os.Stat(filepath.Join(workDir, "internal", "util", "zz_livecheck_test.go")); err != nil {
 		t.Fatalf("throwaway file was removed from the worktree: %v", err)
 	}
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "status", "--porcelain", "--", "internal/util/zz_livecheck_test.go")); got != "?? internal/util/zz_livecheck_test.go" {
-		t.Fatalf("throwaway file status = %q, want it left untracked", got)
+	if st := worktreeStatus(t, g); !slices.Equal(st.Untracked, []string{"internal/util/zz_livecheck_test.go"}) {
+		t.Fatalf("untracked = %q, want the throwaway file left untracked", st.Untracked)
 	}
 }
 
@@ -615,77 +603,55 @@ func TestCheckpointWorktreeExcludesThrowawayFiles(t *testing.T) {
 // nothing to protect and must not create a commit for it.
 func TestCheckpointWorktreeSkipsThrowawayOnlyChanges(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	mustRunGit(t, workDir, "init")
-	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
-	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
-
-	if err := os.MkdirAll(filepath.Join(workDir, "internal", "util"), 0o755); err != nil {
-		t.Fatalf("setup dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "client.go"), []byte("package util\n"), 0o644); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "-A")
-	mustRunGit(t, workDir, "commit", "-m", "initial")
-	before := mustRunGit(t, workDir, "rev-parse", "HEAD")
-
-	if err := os.WriteFile(filepath.Join(workDir, "internal", "util", "zz_livecheck_test.go"), []byte("package util\n"), 0o644); err != nil {
-		t.Fatalf("write throwaway: %v", err)
-	}
-
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"internal/util/client.go": "package util\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{"internal/util/zz_livecheck_test.go": "package util\n"})
+
 	if d.checkpointWorktree(workDir, "rig", "polecat") {
 		t.Fatal("checkpointWorktree created a checkpoint for a throwaway file")
 	}
-	if after := mustRunGit(t, workDir, "rev-parse", "HEAD"); after != before {
+	if after := headOf(t, g); after != before {
 		t.Fatalf("checkpointWorktree advanced HEAD to %s, want %s", after, before)
 	}
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "status", "--porcelain", "--", "internal/util/zz_livecheck_test.go")); got != "?? internal/util/zz_livecheck_test.go" {
-		t.Fatalf("throwaway file status = %q, want it left untracked", got)
+	if st := worktreeStatus(t, g); !slices.Equal(st.Untracked, []string{"internal/util/zz_livecheck_test.go"}) {
+		t.Fatalf("untracked = %q, want the throwaway file left untracked", st.Untracked)
 	}
 }
 
 // TestCheckpointWorktreeExcludesThrowawayThatLooksLikeARename reproduces the
 // fail-open in the throwaway filter: `git add -A` stages a tracked file that was
 // renamed to a throwaway name as a delete plus an add, and git's rename
-// detection reports that pair as a single R entry, which --diff-filter=A does
-// not list. The scratch name reached the checkpoint commit and, through gt
-// done's tree squash, the target.
+// detection reports that pair as a single R entry, which a filter on additions
+// does not list. The scratch name reached the checkpoint commit and, through
+// gt done's tree squash, the target.
 func TestCheckpointWorktreeExcludesThrowawayThatLooksLikeARename(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	mustRunGit(t, workDir, "init")
-	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
-	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
-
-	if err := os.WriteFile(filepath.Join(workDir, "helper.go"), []byte("package main\n\nfunc helper() {}\n"), 0o644); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "client.go"), []byte("package main\n"), 0o644); err != nil {
-		t.Fatalf("write source: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "-A")
-	mustRunGit(t, workDir, "commit", "-m", "initial")
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{
+		"helper.go": "package main\n\nfunc helper() {}\n",
+		"client.go": "package main\n",
+	})
+	before := headOf(t, g)
 
 	// Real work, plus a tracked file moved to a scratch name.
-	if err := os.WriteFile(filepath.Join(workDir, "client.go"), []byte("package main\n\n// real work\n"), 0o644); err != nil {
-		t.Fatalf("modify source: %v", err)
-	}
+	writeWorkFiles(t, workDir, map[string]string{"client.go": "package main\n\n// real work\n"})
 	if err := os.Rename(filepath.Join(workDir, "helper.go"), filepath.Join(workDir, "helper_tmp.go")); err != nil {
 		t.Fatalf("rename to throwaway: %v", err)
 	}
 
-	d := &Daemon{logger: log.New(io.Discard, "", 0)}
 	if !d.checkpointWorktree(workDir, "rig", "polecat") {
 		t.Fatal("checkpointWorktree did not create a checkpoint commit")
 	}
-
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "client.go" {
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"client.go"}) {
 		t.Fatalf("checkpoint commit changed %q, want only client.go", got)
 	}
-	if tracked := strings.TrimSpace(mustRunGit(t, workDir, "ls-files", "--", "helper_tmp.go")); tracked != "" {
-		t.Fatalf("throwaway file reached the branch: %q", tracked)
+	blobs, err := g.TreeFileBlobs("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, tracked := blobs["helper_tmp.go"]; tracked {
+		t.Fatal("throwaway file reached the branch")
 	}
 }
 
@@ -696,26 +662,15 @@ func TestCheckpointWorktreeExcludesThrowawayThatLooksLikeARename(t *testing.T) {
 // the file is called.
 func TestCheckpointWorktreeCheckpointsTrackedFileMatchingTheRule(t *testing.T) {
 	t.Parallel()
-	workDir := t.TempDir()
-	mustRunGit(t, workDir, "init")
-	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
-	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
-
-	if err := os.WriteFile(filepath.Join(workDir, "zz_fixture_test.go"), []byte("package main\n"), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-	mustRunGit(t, workDir, "add", "-A")
-	mustRunGit(t, workDir, "commit", "-m", "initial")
-
-	if err := os.WriteFile(filepath.Join(workDir, "zz_fixture_test.go"), []byte("package main\n\n// real work\n"), 0o644); err != nil {
-		t.Fatalf("modify fixture: %v", err)
-	}
-
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"zz_fixture_test.go": "package main\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{"zz_fixture_test.go": "package main\n\n// real work\n"})
+
 	if !d.checkpointWorktree(workDir, "rig", "polecat") {
 		t.Fatal("checkpointWorktree refused a modification to a tracked file")
 	}
-	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "zz_fixture_test.go" {
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"zz_fixture_test.go"}) {
 		t.Fatalf("checkpoint commit changed %q, want zz_fixture_test.go", got)
 	}
 }

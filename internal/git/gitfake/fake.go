@@ -80,6 +80,7 @@ type Fake struct {
 	objects map[string]*commit
 	repos   map[string]*repo
 	seq     int
+	wt      worktreeState // staging and trees (index.go)
 }
 
 // New returns an empty world.
