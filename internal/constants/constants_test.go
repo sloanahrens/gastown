@@ -211,15 +211,6 @@ func TestMayorAccountsPath(t *testing.T) {
 	}
 }
 
-func TestMayorQuotaPath(t *testing.T) {
-	t.Parallel()
-	got := MayorQuotaPath("/town")
-	expect := "/town/mayor/quota.json"
-	if got != expect {
-		t.Errorf("MayorQuotaPath = %q, want %q", got, expect)
-	}
-}
-
 // TestTestSocketName pins the shape the doctor's tmux-test-socket check reads:
 // the owning pid is the trailing field, and the name is unique per call.
 func TestTestSocketName(t *testing.T) {

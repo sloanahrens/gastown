@@ -61,7 +61,6 @@ var bdHandshakeNotTownRunning = map[string]string{
 	"gt agent resume":     "clears a pause flag; starts no session",
 	"gt deacon resume":    "clears a pause flag; starts no session",
 	"gt mountain resume":  "re-enables wave dispatch, which goes through gt sling (gated)",
-	"gt quota resume":     "nudges existing sessions",
 	"gt scheduler resume": "clears a pause flag; dispatch goes through gt sling (gated)",
 	"gt plugin run":       "runs one plugin gate; starts no agent session",
 	"gt reaper run":       "closes stale beads through bd; starts nothing",

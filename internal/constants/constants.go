@@ -185,9 +185,6 @@ const (
 	// (gt-058d)
 	FileLastHandoffTS = "last_handoff_ts"
 
-	// FileQuotaJSON is the quota state file in mayor/.
-	FileQuotaJSON = "quota.json"
-
 	// FileSessionID holds the runtime session ID a SessionStart hook resolved,
 	// so later `gt prime` runs in the same worktree reuse it instead of minting
 	// a new one. Lives in .runtime/.
@@ -502,11 +499,6 @@ func RigSettingsPath(rigPath string) string {
 // MayorAccountsPath returns the path to mayor/accounts.json within a town root.
 func MayorAccountsPath(townRoot string) string {
 	return townRoot + "/" + DirMayor + "/" + FileAccountsJSON
-}
-
-// MayorQuotaPath returns the path to mayor/quota.json within a town root.
-func MayorQuotaPath(townRoot string) string {
-	return townRoot + "/" + DirMayor + "/" + FileQuotaJSON
 }
 
 // DefaultRateLimitPatterns are the default patterns that indicate a session

@@ -30,8 +30,7 @@ import (
 // polecat_pool's own accounting (sling_pool.go) and the merge-queue depth rule
 // (sling_backpressure.go) are both in this package, and internal/cmd imports
 // internal/daemon, so the dependency cannot run the other way. The daemon
-// shells out to `gt daemon dispatch-check --json`, the way quota_resume shells
-// out to `gt quota resume` (gt-749e).
+// shells out to `gt daemon dispatch-check --json`.
 
 const (
 	// defaultDispatchReadyMRCeiling is the merge-queue depth above which the
