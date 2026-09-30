@@ -7,16 +7,18 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // NotificationSlot tracks a pending notification for deduplication.
 // Only the latest notification per slot matters - earlier ones are replaced.
 type NotificationSlot struct {
-	Slot      string    `json:"slot"`
-	Session   string    `json:"session"`
-	Message   string    `json:"message"`
-	SentAt    time.Time `json:"sent_at"`
-	Consumed  bool      `json:"consumed"`
+	Slot       string    `json:"slot"`
+	Session    string    `json:"session"`
+	Message    string    `json:"message"`
+	SentAt     time.Time `json:"sent_at"`
+	Consumed   bool      `json:"consumed"`
 	ConsumedAt time.Time `json:"consumed_at,omitempty"`
 }
 
@@ -28,8 +30,17 @@ type NotificationSlot struct {
 // All exported methods are safe for concurrent use.
 type NotificationManager struct {
 	mu       sync.Mutex
-	stateDir string        // Directory for slot state files
-	maxAge   time.Duration // Max age before considering a slot stale
+	stateDir string          // Directory for slot state files
+	maxAge   time.Duration   // Max age before considering a slot stale
+	clock    clockwork.Clock // stamps and ages slots; nil is the real clock
+}
+
+// clk is the manager's clock: clock when a test set one, else the real clock.
+func (m *NotificationManager) clk() clockwork.Clock {
+	if m.clock != nil {
+		return m.clock
+	}
+	return clockwork.NewRealClock()
 }
 
 // NewNotificationManager creates a new notification manager.
@@ -106,7 +117,7 @@ func (m *NotificationManager) shouldSendLocked(session, slot string) (bool, erro
 	}
 
 	// Check if stale
-	if time.Since(ns.SentAt) > m.maxAge {
+	if m.clk().Since(ns.SentAt) > m.maxAge {
 		return true, nil // Stale, allow new send
 	}
 
@@ -131,7 +142,7 @@ func (m *NotificationManager) recordSendLocked(session, slot, message string) er
 		Slot:     slot,
 		Session:  session,
 		Message:  message,
-		SentAt:   time.Now(),
+		SentAt:   m.clk().Now(),
 		Consumed: false,
 	}
 
@@ -176,7 +187,7 @@ func (m *NotificationManager) MarkConsumed(session, slot string) error {
 	}
 
 	ns.Consumed = true
-	ns.ConsumedAt = time.Now()
+	ns.ConsumedAt = m.clk().Now()
 
 	data, err := json.Marshal(ns)
 	if err != nil {
@@ -212,7 +223,7 @@ func (m *NotificationManager) MarkSessionActive(session string) error {
 
 		if !ns.Consumed {
 			ns.Consumed = true
-			ns.ConsumedAt = time.Now()
+			ns.ConsumedAt = m.clk().Now()
 			if data, err := json.Marshal(&ns); err == nil {
 				_ = os.WriteFile(path, data, 0644) // non-fatal: state file update
 			}
@@ -252,7 +263,7 @@ func (m *NotificationManager) ClearStaleSlots() error {
 			continue
 		}
 
-		if time.Since(info.ModTime()) > m.maxAge {
+		if m.clk().Since(info.ModTime()) > m.maxAge {
 			_ = os.Remove(path) // best-effort cleanup
 		}
 	}

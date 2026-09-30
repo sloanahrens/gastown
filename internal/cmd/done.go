@@ -56,7 +56,14 @@ For COMPLETED, gt done:
    READY TO LAND notes block naming branch, head and target)
 6. Notifies the Witness and retires the session
 
-There is no way to skip the gate or to land directly.
+A polecat cannot skip the gate, and gt done never lands directly.
+
+Crew (BD_ACTOR <rig>/crew/<name>, or no polecat identity at all) submit a
+branch they already pushed: gt done checks origin/<branch> is at HEAD, runs
+make presubmit (skipped with --pre-verified), then comments "Submitted for
+landing: <branch> @ <sha> onto <target>", appends the READY TO LAND block and
+adds gt:ready-to-land. The bead comes from --bead, else from the branch name.
+BD_ACTOR falls back to git user.name. Crew runs signal no Witness.
 
 Exit statuses:
   COMPLETED      - Work done, branch submitted for landing (default)
@@ -78,7 +85,8 @@ Examples:
   gt done --target feat/my-branch      # Explicit target branch
   gt done --issue gt-abc               # Explicit issue ID
   gt done --status ESCALATED           # Signal blocker, submit nothing
-  gt done --status DEFERRED            # Pause work, submit nothing`,
+  gt done --status DEFERRED            # Pause work, submit nothing
+  gt done --bead gt-abc                # Crew: submit the pushed branch for gt-abc`,
 	RunE:         runDone,
 	SilenceUsage: true, // Don't print usage on operational errors (confuses agents)
 }
@@ -91,6 +99,10 @@ var (
 	doneAllowReverts  bool
 
 	doneAllowThrowawayPaths bool
+
+	// doneBead and donePreVerified are crew submission flags (gt-3e7tk).
+	doneBead        string
+	donePreVerified bool
 )
 
 // Valid exit types for gt done
@@ -857,6 +869,8 @@ func init() {
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit target branch (overrides the bead's base_branch and the rig default)")
 	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
+	doneCmd.Flags().StringVar(&doneBead, "bead", "", "Crew: the work bead to submit (default: parse from the branch name)")
+	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Crew only: skip the local presubmit gate (the landing worker still gates the merged tree)")
 
 	rootCmd.AddCommand(doneCmd)
 }
@@ -894,15 +908,26 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 	// Crew, deacons, witnesses etc. don't use gt done - they persist across tasks.
 	// Polecat sessions end with gt done — the session is cleaned up, but the
 	// polecat's persistent identity (agent bead, CV chain) survives across assignments.
+	// Crew submit their pushed branch for landing (gt-3e7tk); every other
+	// identity is a polecat or refused below.
 	actor := os.Getenv("BD_ACTOR")
-	if actor != "" && !isPolecatActor(actor) {
-		return fmt.Errorf("gt done is for polecats only (you are %s)\nPolecat sessions end with gt done — the session is cleaned up, but identity persists.\nOther roles persist across tasks and don't use gt done.", actor)
-	}
 
 	// Validate exit status
 	exitType := strings.ToUpper(doneStatus)
 	if exitType != ExitCompleted && exitType != ExitEscalated && exitType != ExitDeferred {
 		return fmt.Errorf("invalid exit status '%s': must be COMPLETED, ESCALATED, or DEFERRED", doneStatus)
+	}
+	if doneIsCrewRun(os.Getenv) {
+		return runDoneCrew(exitType, os.Getenv)
+	}
+	if actor != "" && !isPolecatActor(actor) {
+		return fmt.Errorf("gt done is for polecats and crew only (you are %s)\nPolecat sessions end with gt done — the session is cleaned up, but identity persists.\nCrew submit a pushed branch with gt done --bead <id>. Other roles don't use gt done.", actor)
+	}
+	if donePreVerified {
+		return fmt.Errorf("--pre-verified is for crew submissions; a polecat's gt done always runs the local gate")
+	}
+	if doneBead != "" && doneIssue == "" {
+		doneIssue = doneBead
 	}
 
 	worktree, err := resolveDonePolecatWorktree()

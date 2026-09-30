@@ -97,17 +97,14 @@ func TestEnsureRunningStartsDeadServerEvenWhileSuppressed(t *testing.T) {
 }
 
 func TestDoltRestartHeldForGC(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	withGCFakes(t)
+	f := withGCFakes(t, d)
 
-	// The escalation sink blocks until released, as a slow gt escalate would.
-	escalated := make(chan string, 4)
-	unblock := make(chan struct{})
-	maintenanceEscalateFn = func(_ *Daemon, source, message string) {
-		<-unblock
-		escalated <- source + "|" + message
-	}
-	defer close(unblock)
+	// Hold dispatched work instead of running it, as a slow gt escalate on
+	// its own goroutine would: the restart decision must not wait on it.
+	var dispatched []func()
+	d.maint.dispatch = func(fn func()) { dispatched = append(dispatched, fn) }
 
 	if d.doltRestartHeldForGC() {
 		t.Error("held with no gc cycle running")
@@ -120,40 +117,45 @@ func TestDoltRestartHeldForGC(t *testing.T) {
 	if !d.doltRestartHeldForGC() {
 		t.Error("not held while a gc call is in flight and under its timeout")
 	}
+	if len(dispatched) != 0 {
+		t.Fatalf("escalated %d time(s) for a gc call within its timeout", len(dispatched))
+	}
 
-	// Past timeout + grace: release the restart promptly even though the
-	// escalation blocks, and escalate exactly once per call.
+	// Past timeout + grace: release the restart, and escalate exactly once
+	// per call, off the calling goroutine.
 	d.maintenanceGCCallStartedAt.Store(time.Now().Add(-(maintenanceGCTimeout + maintenanceGCRestartGrace + time.Minute)).UnixNano())
-	returned := make(chan bool, 2)
-	go func() {
-		returned <- d.doltRestartHeldForGC()
-		returned <- d.doltRestartHeldForGC()
-	}()
 	for i := 0; i < 2; i++ {
-		select {
-		case held := <-returned:
-			if held {
-				t.Error("still held for a gc call past its timeout")
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("doltRestartHeldForGC blocked on the escalation (it runs under the Dolt manager lock)")
+		if d.doltRestartHeldForGC() {
+			t.Error("still held for a gc call past its timeout")
 		}
 	}
+	if len(dispatched) != 1 {
+		t.Fatalf("dispatched %d escalation(s) for one overdue call, want 1", len(dispatched))
+	}
+	if len(f.escalations) != 0 {
+		t.Fatal("the escalation ran on the calling goroutine instead of being dispatched")
+	}
+	dispatched[0]()
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "past its") {
+		t.Errorf("overdue escalation = %q", f.escalations)
+	}
+}
 
-	unblock <- struct{}{}
-	select {
-	case msg := <-escalated:
-		if !strings.Contains(msg, "past its") {
-			t.Errorf("overdue escalation = %q", msg)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("overdue escalation never sent")
-	}
-	select {
-	case msg := <-escalated:
-		t.Errorf("second escalation for the same call: %q", msg)
-	case <-time.After(100 * time.Millisecond):
-	}
+// The overdue escalation's production dispatch runs it off the calling
+// goroutine: the wiring guard for maintenance's dispatch default.
+func TestMaintenanceDispatchDefaultsToAGoroutine(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	hold := make(chan struct{})
+	ran := make(chan struct{})
+	d.maintenance().dispatch(func() {
+		<-hold
+		close(ran)
+	})
+	// Reaching here means dispatch did not run fn inline, where it would
+	// have blocked on hold forever.
+	close(hold)
+	<-ran
 }
 
 func TestDoctorDogSkipsWhileGCHoldsLock(t *testing.T) {
@@ -176,8 +178,9 @@ func TestDoctorDogSkipsWhileGCHoldsLock(t *testing.T) {
 // --- the Dolt-task lock ---------------------------------------------------------
 
 func TestGCDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib}
 
 	release, ok := d.tryDoltTask("dolt_backup")
@@ -202,12 +205,13 @@ func TestGCDefersWhileDaemonDoltTaskHoldsLock(t *testing.T) {
 }
 
 func TestDaemonDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
+	t.Parallel()
 	d, logs := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib}
 
 	var taskRan []bool
-	maintenanceGCExecFn = func(_ context.Context, d *Daemon, db string) error {
+	d.maint.gcExec = func(_ context.Context, d *Daemon, db string) error {
 		f.gcCalls = append(f.gcCalls, db)
 		for _, name := range []string{"dolt_backup", "wisp_reaper", "jsonl_git_backup", "compactor_dog"} {
 			release, ok := d.tryDoltTask(name)
@@ -271,16 +275,9 @@ func TestWrappedDoltTasksSkipWhileGCHoldsLock(t *testing.T) {
 // a gc holding the write side, the cycle neither runs nor records a run, and
 // it runs on the next check once the gc is done.
 func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
-	origCycle := compactorDogCycleFn
-	t.Cleanup(func() { compactorDogCycleFn = origCycle })
+	t.Parallel()
 	var mu sync.Mutex
 	cycles := 0
-	compactorDogCycleFn = func(*Daemon) bool {
-		mu.Lock()
-		cycles++
-		mu.Unlock()
-		return true
-	}
 	count := func() int {
 		mu.Lock()
 		defer mu.Unlock()
@@ -289,6 +286,12 @@ func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
 
 	var logs bytes.Buffer
 	d := compactorDogTestDaemon(t.TempDir(), &logs)
+	d.compactorDogCycleFn = func() bool {
+		mu.Lock()
+		cycles++
+		mu.Unlock()
+		return true
+	}
 	d.doltMaintMu.Lock()
 	d.triggerCompactorDog()
 	awaitCompactorDogIdle(t, d)
@@ -315,13 +318,10 @@ func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
 }
 
 // syncDoltBackups skips before pouring its molecule or touching the data dir
-// while a gc holds the write side. macOS only: the backup patrol returns
-// before the guard on every other OS.
+// while a gc holds the write side. The backup patrol runs only on macOS; on
+// every other OS it returns before the guard, which the test asserts instead.
 func TestDoltBackupSkipsWhileGCHoldsLock(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS != "darwin" {
-		t.Skip("dolt_backup runs only on darwin")
-	}
 	d, logs := gcTestDaemon(t)
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		DoltBackup: &DoltBackupConfig{Enabled: true},
@@ -335,8 +335,8 @@ func TestDoltBackupSkipsWhileGCHoldsLock(t *testing.T) {
 	d.syncDoltBackups()
 	d.doltMaintMu.Unlock()
 
-	if !strings.Contains(logs.String(), "dolt_backup: skipped: gc in flight") {
-		t.Errorf("skip not logged:\n%s", logs.String())
+	if skipped := strings.Contains(logs.String(), "dolt_backup: skipped: gc in flight"); skipped != (runtime.GOOS == "darwin") {
+		t.Errorf("skip logged = %v on %s, want it exactly on darwin:\n%s", skipped, runtime.GOOS, logs.String())
 	}
 	if len(bdCalls) != 0 {
 		t.Errorf("dolt_backup poured its molecule while a gc held the lock: %v", bdCalls)
@@ -347,8 +347,9 @@ func TestDoltBackupSkipsWhileGCHoldsLock(t *testing.T) {
 }
 
 func TestGCPausesConvoyAroundEachDatabase(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib}
 
 	d.maintenanceGCCycle([]string{"hq", "gt"}, "/unused", testGCPolicy)
@@ -357,7 +358,7 @@ func TestGCPausesConvoyAroundEachDatabase(t *testing.T) {
 	}
 
 	d, _ = gcTestDaemon(t) // fresh state: no baseline for hq
-	f2 := withGCFakes(t)
+	f2 := withGCFakes(t, d)
 	f2.sizes = map[string]int64{"hq": 300 * mib}
 	f2.pauseFails = true
 	res := d.maintenanceGCCycle([]string{"hq"}, "/unused", testGCPolicy)
@@ -429,11 +430,11 @@ func TestConvoyManagerPauseNotStarvedByBackToBackTicks(t *testing.T) {
 					once = true
 					close(started)
 				}
-				time.Sleep(20 * time.Millisecond) // the tick's Dolt reads
+				runtime.Gosched() // the tick's Dolt reads
 				m.pollGate.RUnlock()
 				continue // the next tick is already due
 			}
-			time.Sleep(time.Millisecond)
+			runtime.Gosched()
 		}
 	}()
 	<-started
@@ -478,8 +479,9 @@ func TestDiscoverMaintenanceDatabases(t *testing.T) {
 }
 
 func TestScheduledMaintenanceGCUsesDiscoveryNotCompactorList(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib, "gt": 600 * mib}
 	// The compactor list names only hq; discovery finds both.
 	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
@@ -491,10 +493,11 @@ func TestScheduledMaintenanceGCUsesDiscoveryNotCompactorList(t *testing.T) {
 }
 
 func TestScheduledMaintenanceGCSkipsExternalServer(t *testing.T) {
+	t.Parallel()
 	d, logs := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 300 * mib}
-	maintenanceGCExternalFn = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
 	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)
 
 	d.runScheduledMaintenance()
@@ -563,8 +566,9 @@ func TestDeferredWindowThresholds(t *testing.T) {
 }
 
 func TestDeferredWindowStreakEscalates(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	base := time.Date(2026, 9, 26, 4, 0, 0, 0, time.Local)
 	pending := []gcCandidate{{name: "gt", size: 900 * mib}}
 
@@ -608,8 +612,9 @@ func TestDeferredWindowStreakEscalates(t *testing.T) {
 }
 
 func TestScheduledMaintenanceGCRecordsDeferralAndCompletionResets(t *testing.T) {
+	t.Parallel()
 	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t)
+	f := withGCFakes(t, d)
 	f.sizes = map[string]int64{"hq": 631 * mib}
 	f.quietUntil = 0 // busy
 	d.patrolConfig = gcModeConfig([]string{"hq"}, MaintenanceModeGC)

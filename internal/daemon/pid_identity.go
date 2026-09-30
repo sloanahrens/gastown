@@ -17,21 +17,20 @@ import (
 // container port). Before signaling such a PID we check its command line is
 // the process we mean to stop, and refuse otherwise (gt-p7zy0).
 
-// processArgsFn reads a live process's argv (nil if unreadable). A var so
-// tests can present any command line; production uses ps(1) via
-// doltserver.ProcessArgs, the one ps reader for identity checks. Command-line
-// matching here is a safety gate before a signal, not state inference; see
-// doltserver.ProcessArgs for why it survives the gt-utuk ZFC cleanup.
-var processArgsFn = doltserver.ProcessArgs
+// processInfo reads a live process's argv (nil if unreadable) and working
+// directory ("" if unreadable). hostProcesses is ps(1) via doltserver, the
+// one ps reader for identity checks; tests present any command line.
+// Command-line matching here is a safety gate before a signal, not state
+// inference; see doltserver.ProcessArgs for why it survives the gt-utuk ZFC
+// cleanup.
+type processInfo struct {
+	args func(pid int) []string
+	cwd  func(pid int) string
+}
 
-// processCWDFn reads a live process's working directory ("" if unreadable).
-// A var for the same reason as processArgsFn.
-var processCWDFn = doltserver.ProcessCWD
-
-// verifyDoltSQLServerFn proves a PID is a dolt sql-server serving townRoot
-// before the Dolt manager signals it. A var for the same reason as
-// processArgsFn.
-var verifyDoltSQLServerFn = doltserver.VerifyTownDoltSQLServerPID
+func hostProcesses() processInfo {
+	return processInfo{args: doltserver.ProcessArgs, cwd: doltserver.ProcessCWD}
+}
 
 // isGTDaemonArgs reports whether argv is `gt daemon run`, the only way the
 // daemon is launched (spawnDaemonProcess, the launchd plist, doctor's fix).
@@ -53,23 +52,29 @@ func isGTDaemonArgs(args []string) bool {
 // On Windows there is no ps(1); the daemon.lock flock is the guard there, as
 // it was before this check existed.
 func verifyGTDaemonPID(townRoot string, pid int) error {
+	return verifyGTDaemonPIDOn(runtime.GOOS, hostProcesses(), townRoot, pid)
+}
+
+// verifyGTDaemonPIDOn is verifyGTDaemonPID on the platform goos, reading
+// processes through procs.
+func verifyGTDaemonPIDOn(goos string, procs processInfo, townRoot string, pid int) error {
 	if pid <= 0 {
 		return fmt.Errorf("invalid PID %d", pid)
 	}
 	if pid == os.Getpid() {
 		return fmt.Errorf("PID %d is this process", pid)
 	}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		return nil
 	}
-	args := processArgsFn(pid)
+	args := procs.args(pid)
 	if len(args) == 0 {
 		return fmt.Errorf("cannot verify PID %d is the gt daemon: command line unreadable", pid)
 	}
 	if !isGTDaemonArgs(args) {
 		return fmt.Errorf("PID %d is not the gt daemon (command: %q)", pid, strings.Join(args, " "))
 	}
-	cwd := processCWDFn(pid)
+	cwd := procs.cwd(pid)
 	if cwd == "" {
 		return fmt.Errorf("cannot verify PID %d is this town's gt daemon: working directory unreadable", pid)
 	}

@@ -42,6 +42,11 @@ bisection, the merge slot, and `refs/notes/om` are deleted in the cutover commit
 per-rig flag. Direct-merge convoys and integration landing, which never landed anything, go
 first.
 
+Amendment, 2026-09-30 (gt-3e7tk): crew sessions submit through `gt done` too. A crew branch is
+pushed by its author, so the crew path only reads the tip back, runs the presubmit gate and
+marks the bead ready to land. `--pre-verified` skips that local gate for crew only; the
+merged-tree gate in `Land()` is never skipped, and a polecat's `gt done` still has no bypass.
+
 ## Considered options
 
 - **The author process lands its own work.** Rejected: the push identity and the verdict record

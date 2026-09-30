@@ -23,8 +23,8 @@ import (
 // stop path at processes the test itself spawned: an unrelated `sleep` (must
 // survive) or this test binary re-executed as `gt daemon run` / `dolt
 // sql-server` (must be signaled). The identity decisions themselves are
-// unit-tested in pid_identity_test.go on the processArgsFn/processCWDFn and
-// verifyDoltSQLServerFn seams.
+// unit-tested in pid_identity_test.go on verifyGTDaemonPIDOn's processInfo and
+// the Dolt manager's verifyDoltFn seams.
 
 // ownedChild is a process this test started. wait reports how it ended.
 type ownedChild struct {
@@ -196,4 +196,15 @@ func TestIntegrationDoltStopSignalsVerifiedDoltServer(t *testing.T) {
 // townDoltConfig is the --config path Gas Town starts townRoot's dolt with.
 func townDoltConfig(townRoot string) string {
 	return filepath.Join(doltserver.DefaultConfig(townRoot).DataDir, "config.yaml")
+}
+
+// signalTargetHelperEnv makes this test binary, re-executed by the tests
+// above, a signal target (see TestMain).
+const signalTargetHelperEnv = "GT_DAEMON_TEST_SIGNAL_TARGET"
+
+// runSignalTargetHelper is the helper process body: wait to be signaled,
+// and exit on its own after a minute so a failed test cannot leak it.
+func runSignalTargetHelper() {
+	time.Sleep(time.Minute)
+	os.Exit(0)
 }

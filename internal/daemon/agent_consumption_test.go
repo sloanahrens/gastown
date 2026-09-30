@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -45,6 +46,7 @@ func newConsumptionTestDaemon(t *testing.T, agent runningAgent, stalls ...tmux.C
 	return &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		tmux:   tm,
+		clock:  newFixedClock(),
 		logger: log.New(io.Discard, "", 0),
 	}, tm
 }
@@ -70,13 +72,13 @@ func submits(tm *fakeTmux) []string {
 	return out
 }
 
-// withNoConsumptionRecheckDelay removes the settle time between the flush and
-// the re-probe. Package state, so callers must not run in parallel.
-func withNoConsumptionRecheckDelay(t *testing.T) {
+// probe runs d's consumption probe on agent, moving d's fake clock past the
+// settle time the probe waits after a flush.
+func probe(t *testing.T, d *Daemon, agent runningAgent, escalate func(source, message string)) {
 	t.Helper()
-	original := consumptionRecheckDelay
-	consumptionRecheckDelay = 0
-	t.Cleanup(func() { consumptionRecheckDelay = original })
+	runOnClock(t, d.clock.(*clockwork.FakeClock), consumptionRecheckDelay, func() {
+		d.probeInputConsumption(agent, escalate)
+	})
 }
 
 func testRefineryAgent() runningAgent {
@@ -91,12 +93,12 @@ func testWitnessAgent() runningAgent {
 // flushed and then left alone: no escalation, and the flush must use the
 // keystroke that matches the pending state (ctrl+x ctrl+s for queued input).
 func TestProbeInputConsumptionRecoversWedgedSession(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, tm := newConsumptionTestDaemon(t, agent, wedgedStall, recoveredStall)
 
 	var escalations []string
-	d.probeInputConsumption(agent, func(source, message string) {
+	probe(t, d, agent, func(source, message string) {
 		escalations = append(escalations, source+": "+message)
 	})
 
@@ -111,13 +113,13 @@ func TestProbeInputConsumptionRecoversWedgedSession(t *testing.T) {
 // Input typed into the composer (not queued) is flushed with the typed-input
 // keystroke: the probe passes the verdict's Queued through.
 func TestProbeInputConsumptionSubmitsTypedInputAsTyped(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	typed := wedgedStall
 	typed.Queued = false
 	d, tm := newConsumptionTestDaemon(t, agent, typed, recoveredStall)
 
-	d.probeInputConsumption(agent, nil)
+	probe(t, d, agent, nil)
 
 	if got, want := submits(tm), []string{"SubmitPendingInput typed " + agent.Session}; !slices.Equal(got, want) {
 		t.Errorf("submits = %v, want %v", got, want)
@@ -128,7 +130,7 @@ func TestProbeInputConsumptionSubmitsTypedInputAsTyped(t *testing.T) {
 // patrol cannot fix with a keystroke. It must escalate, and it must escalate
 // exactly once per interval — the heartbeat runs every few minutes.
 func TestProbeInputConsumptionEscalatesOncePerInterval(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, _ := newConsumptionTestDaemon(t, agent, wedgedStall)
 
@@ -137,9 +139,9 @@ func TestProbeInputConsumptionEscalatesOncePerInterval(t *testing.T) {
 		escalations = append(escalations, source+": "+message)
 	}
 
-	d.probeInputConsumption(agent, escalate)
-	d.probeInputConsumption(agent, escalate)
-	d.probeInputConsumption(agent, escalate)
+	probe(t, d, agent, escalate)
+	probe(t, d, agent, escalate)
+	probe(t, d, agent, escalate)
 
 	if len(escalations) != 1 {
 		t.Fatalf("escalated %d times across three heartbeats, want 1: %v", len(escalations), escalations)
@@ -155,11 +157,11 @@ func TestProbeInputConsumptionEscalatesOncePerInterval(t *testing.T) {
 // blocked for killing every healthy session ~5 minutes after startup, so pin
 // that the session survives an unrecoverable stall.
 func TestProbeInputConsumptionNeverKills(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, tm := newConsumptionTestDaemon(t, agent, wedgedStall)
 
-	d.probeInputConsumption(agent, func(string, string) {})
+	probe(t, d, agent, func(string, string) {})
 
 	if has, _ := tm.HasSession(agent.Session); !has {
 		t.Errorf("the probe killed %s", agent.Session)
@@ -171,12 +173,12 @@ func TestProbeInputConsumptionNeverKills(t *testing.T) {
 // agents that are legitimately idle: every other role writes a heartbeat, and
 // an idle refinery legitimately produces no pane output between MRs.
 func TestProbeInputConsumptionIgnoresHealthySession(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, tm := newConsumptionTestDaemon(t, agent, recoveredStall)
 
 	var escalations []string
-	d.probeInputConsumption(agent, func(source, message string) {
+	probe(t, d, agent, func(source, message string) {
 		escalations = append(escalations, source)
 	})
 
@@ -190,13 +192,13 @@ func TestProbeInputConsumptionIgnoresHealthySession(t *testing.T) {
 
 // An unreadable pane says nothing about the session, so it must not escalate.
 func TestProbeInputConsumptionSilentWhenPaneUnreadable(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testWitnessAgent()
 	d, tm := newConsumptionTestDaemon(t, agent)
 	tm.setStallErr(agent.Session, errors.New("tmux capture-pane: no server running"))
 
 	var escalations []string
-	d.probeInputConsumption(agent, func(source, message string) {
+	probe(t, d, agent, func(source, message string) {
 		escalations = append(escalations, source)
 	})
 
@@ -263,7 +265,7 @@ func TestProbeRunningRolesTargetTheRigSessions(t *testing.T) {
 }
 
 func TestConsumptionEscalatorRateLimits(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	now := time.Now()
 	e := &consumptionEscalator{}
 
@@ -290,12 +292,12 @@ func TestConsumptionEscalatorRateLimits(t *testing.T) {
 // so every probe — the first and the re-probe after the flush — must get the
 // town's clock, and it must be the same clock each time.
 func TestProbeInputConsumptionHandsTheDetectorThePendingClock(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, tm := newConsumptionTestDaemon(t, agent, wedgedStall, recoveredStall)
 
-	d.probeInputConsumption(agent, nil)
-	d.probeInputConsumption(agent, nil)
+	probe(t, d, agent, nil)
+	probe(t, d, agent, nil)
 
 	clocks := tm.stallClocks()
 	if len(clocks) != 3 {
@@ -316,7 +318,7 @@ func TestProbeInputConsumptionHandsTheDetectorThePendingClock(t *testing.T) {
 // 2026-09-22, leaving a 17-minute stall indistinguishable in the log from a
 // healthy session — the "left silent" half of the defect (gt-afa7).
 func TestProbeInputConsumptionReportsInputWaitingBelowTheThreshold(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	waiting := tmux.ComposerStall{
 		State:          tmux.ComposerPending,
@@ -329,7 +331,7 @@ func TestProbeInputConsumptionReportsInputWaitingBelowTheThreshold(t *testing.T)
 	d, tm, buf := newConsumptionTestDaemonWithLog(t, agent, waiting)
 
 	var escalations []string
-	d.probeInputConsumption(agent, func(source, message string) {
+	probe(t, d, agent, func(source, message string) {
 		escalations = append(escalations, source)
 	})
 
@@ -356,13 +358,13 @@ func TestProbeInputConsumptionReportsInputWaitingBelowTheThreshold(t *testing.T)
 // daemon cannot act on what it cannot see, and escalating would fire forever on
 // any agent whose TUI the probe cannot parse.
 func TestProbeInputConsumptionReportsUnclassifiablePane(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, tm, buf := newConsumptionTestDaemonWithLog(t, agent)
 	tm.setStallErr(agent.Session, tmux.ErrComposerUnobservable)
 
 	var escalations []string
-	d.probeInputConsumption(agent, func(source, message string) {
+	probe(t, d, agent, func(source, message string) {
 		escalations = append(escalations, source)
 	})
 
@@ -382,13 +384,13 @@ func TestProbeInputConsumptionReportsUnclassifiablePane(t *testing.T) {
 // agent buries the lines that matter, so it is reported on a cooldown: the
 // first occurrence always logs, repeats do not (gt-afa7).
 func TestProbeInputConsumptionRateLimitsTheUnclassifiableLog(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, tm, buf := newConsumptionTestDaemonWithLog(t, agent)
 	tm.setStallErr(agent.Session, tmux.ErrComposerUnobservable)
 
 	for i := 0; i < 3; i++ {
-		d.probeInputConsumption(agent, nil)
+		probe(t, d, agent, nil)
 	}
 
 	if got := strings.Count(buf.String(), "could not classify"); got != 1 {
@@ -401,11 +403,11 @@ func TestProbeInputConsumptionRateLimitsTheUnclassifiableLog(t *testing.T) {
 // detector's evidence, which carries the timing on every branch, and says what
 // it did about it (gt-afa7).
 func TestProbeInputConsumptionLogsHowLongThePaneWasSilent(t *testing.T) {
-	withNoConsumptionRecheckDelay(t)
+	t.Parallel()
 	agent := testRefineryAgent()
 	d, _, buf := newConsumptionTestDaemonWithLog(t, agent, wedgedStall, recoveredStall)
 
-	d.probeInputConsumption(agent, nil)
+	probe(t, d, agent, nil)
 
 	said := buf.String()
 	if !strings.Contains(said, wedgedStall.Evidence) {

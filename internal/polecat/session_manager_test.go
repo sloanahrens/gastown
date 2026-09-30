@@ -17,16 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
 
-func setupTestRegistryForSession(t *testing.T) {
-	t.Helper()
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("bd", "beads")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-}
-
 // setupSessionBranchTestRepo is a repo on main with one commit whose origin
 // is itself, with origin/main at that commit, in a new world.
 func setupSessionBranchTestRepo(t *testing.T) (string, gitRepo, *world) {
@@ -51,8 +41,7 @@ func strandCanonicalBaseRef(t *testing.T, w *world, workDir string) {
 }
 
 func TestSessionName(t *testing.T) {
-	setupTestRegistryForSession(t)
-
+	t.Parallel()
 	r := &rig.Rig{
 		Name:     "gastown",
 		Polecats: []string{"Toast"},
@@ -856,13 +845,8 @@ func TestModeABeaconVerificationCondition(t *testing.T) {
 }
 
 func TestValidateSessionName(t *testing.T) {
-	// Register prefixes so validateSessionName can resolve them correctly.
-	reg := session.NewPrefixRegistry()
-	reg.Register("gt", "gastown")
-	reg.Register("gm", "gastown_manager")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	t.Parallel()
+	// TestMain registers gt and gm, so validateSessionName can resolve them.
 
 	tests := []struct {
 		name        string

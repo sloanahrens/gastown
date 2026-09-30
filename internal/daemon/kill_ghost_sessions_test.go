@@ -20,9 +20,9 @@ type ghostTestEnv struct {
 	added  []string
 }
 
-// setupGhostTest returns a Daemon over an empty fake tmux in a fresh town.
-// The tests swap the process-wide session registry, so they run serially.
-func setupGhostTest(t *testing.T) *ghostTestEnv {
+// setupGhostTest returns a Daemon over an empty fake tmux in a fresh town,
+// reading the prefix registry reg.
+func setupGhostTest(t *testing.T, reg *session.PrefixRegistry) *ghostTestEnv {
 	t.Helper()
 	tm := newFakeTmux(newFixedClock())
 	var logBuf strings.Builder
@@ -31,9 +31,7 @@ func setupGhostTest(t *testing.T) *ghostTestEnv {
 		logger: log.New(&logBuf, "", 0),
 		tmux:   tm,
 	}
-
-	// Clean registry state after test.
-	t.Cleanup(func() { session.SetDefaultRegistry(session.NewPrefixRegistry()) })
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
 
 	return &ghostTestEnv{daemon: d, logBuf: &logBuf, tm: tm}
 }
@@ -77,10 +75,10 @@ func (e *ghostTestEnv) kills() []string {
 }
 
 func TestKillDefaultPrefixGhosts_EmptyRegistry(t *testing.T) {
-	env := setupGhostTest(t)
+	t.Parallel()
 
 	// Empty registry → allRigs is empty → bail immediately.
-	session.SetDefaultRegistry(session.NewPrefixRegistry())
+	env := setupGhostTest(t, session.NewPrefixRegistry())
 	// A ghost-shaped session exists, so an early return is what spares it.
 	env.addSessions(t, "gt-witness")
 
@@ -96,12 +94,12 @@ func TestKillDefaultPrefixGhosts_EmptyRegistry(t *testing.T) {
 }
 
 func TestKillDefaultPrefixGhosts_GTIsLegitimate(t *testing.T) {
-	env := setupGhostTest(t)
+	t.Parallel()
 
 	// Register gastown with "gt" prefix — makes gt-* sessions legitimate.
 	reg := session.NewPrefixRegistry()
 	reg.Register("gt", "gastown")
-	session.SetDefaultRegistry(reg)
+	env := setupGhostTest(t, reg)
 
 	// Even if gt-witness exists, it should NOT be killed.
 	env.addSessions(t, "gt-witness")
@@ -118,12 +116,12 @@ func TestKillDefaultPrefixGhosts_GTIsLegitimate(t *testing.T) {
 }
 
 func TestKillDefaultPrefixGhosts_KillsGhostPatrolSessions(t *testing.T) {
-	env := setupGhostTest(t)
+	t.Parallel()
 
 	// Register a rig with non-gt prefix. No rig owns "gt".
 	reg := session.NewPrefixRegistry()
 	reg.Register("ti", "titanium")
-	session.SetDefaultRegistry(reg)
+	env := setupGhostTest(t, reg)
 
 	// Ghost sessions exist with default "gt" prefix.
 	env.addSessions(t, "gt-witness")
@@ -144,12 +142,12 @@ func TestKillDefaultPrefixGhosts_KillsGhostPatrolSessions(t *testing.T) {
 }
 
 func TestKillDefaultPrefixGhosts_NoKillWhenGhostsAbsent(t *testing.T) {
-	env := setupGhostTest(t)
+	t.Parallel()
 
 	// Non-gt registry but no ghost sessions exist.
 	reg := session.NewPrefixRegistry()
 	reg.Register("ti", "titanium")
-	session.SetDefaultRegistry(reg)
+	env := setupGhostTest(t, reg)
 
 	// No sessions file entries — nothing exists.
 
@@ -162,12 +160,12 @@ func TestKillDefaultPrefixGhosts_NoKillWhenGhostsAbsent(t *testing.T) {
 }
 
 func TestKillDefaultPrefixGhosts_PolecatDuplicate_Killed(t *testing.T) {
-	env := setupGhostTest(t)
+	t.Parallel()
 
 	// Register rig with non-gt prefix.
 	reg := session.NewPrefixRegistry()
 	reg.Register("ti", "titanium")
-	session.SetDefaultRegistry(reg)
+	env := setupGhostTest(t, reg)
 
 	// Set up rigs.json and polecat directory.
 	writeRigsJSON(t, env.daemon.config.TownRoot, []string{"titanium"})
@@ -196,12 +194,12 @@ func TestKillDefaultPrefixGhosts_PolecatDuplicate_Killed(t *testing.T) {
 }
 
 func TestKillDefaultPrefixGhosts_PolecatSolo_NotKilled(t *testing.T) {
-	env := setupGhostTest(t)
+	t.Parallel()
 
 	// Register rig with non-gt prefix.
 	reg := session.NewPrefixRegistry()
 	reg.Register("ti", "titanium")
-	session.SetDefaultRegistry(reg)
+	env := setupGhostTest(t, reg)
 
 	// Set up rigs.json and polecat directory.
 	writeRigsJSON(t, env.daemon.config.TownRoot, []string{"titanium"})
@@ -227,13 +225,13 @@ func TestKillDefaultPrefixGhosts_PolecatSolo_NotKilled(t *testing.T) {
 }
 
 func TestKillDefaultPrefixGhosts_PolecatSkippedWhenRigUsesDefaultPrefix(t *testing.T) {
-	env := setupGhostTest(t)
+	t.Parallel()
 
 	// If any rig uses "gt", gtIsLegitimate is true and the whole function bails.
 	reg := session.NewPrefixRegistry()
 	reg.Register("gt", "gastown")
 	reg.Register("ti", "titanium")
-	session.SetDefaultRegistry(reg)
+	env := setupGhostTest(t, reg)
 
 	writeRigsJSON(t, env.daemon.config.TownRoot, []string{"gastown", "titanium"})
 	if err := os.MkdirAll(filepath.Join(env.daemon.config.TownRoot, "gastown", "polecats", "alice"), 0o755); err != nil {

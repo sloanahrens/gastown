@@ -160,16 +160,9 @@ func (s *memStore) tailCalls() int {
 	return s.tails
 }
 
-// The convoy manager reads a store's journal through bd; in this package's
-// tests the stores are memStores, which carry their own journal.
-func init() {
-	newEventJournal = func(townRoot, name string, store beadsdk.Storage) (eventJournal, error) {
-		if j, ok := store.(eventJournal); ok {
-			return j, nil
-		}
-		return nil, fmt.Errorf("test store %s (%T) has no events journal", name, store)
-	}
-}
+// memStore carries its own events journal, which the convoy manager reads in
+// place of bd's (newEventJournal).
+var _ eventJournal = (*memStore)(nil)
 
 func (s *memStore) CreateIssue(_ context.Context, issue *beadsdk.Issue, actor string) error {
 	s.mu.Lock()

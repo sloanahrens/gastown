@@ -26,7 +26,7 @@ func TestIntegrationScheduledMaintenanceMonitorNeverFlattens(t *testing.T) {
 	mustExec(t, conn, "CALL DOLT_COMMIT('-m','probe','--author','gt-test <gt-test@localhost>')")
 	_ = conn.Close()
 
-	escalations, execs := withMaintenanceSeams(t)
+	escalations, execs := withMaintenanceSeams(t, d)
 	runMaintenanceNow(t, d, dbName, MaintenanceModeMonitor)
 
 	if *execs != 0 {

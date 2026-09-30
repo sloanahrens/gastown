@@ -81,12 +81,6 @@ func (d *Daemon) provenNotAncestor(repo, ancestor, descendant string) bool {
 	return known && !ok
 }
 
-// upgradeEscalateFn raises an upgrade-restart alert; a test seam. The real
-// escalation retries for minutes under load, so it runs off the heartbeat.
-var upgradeEscalateFn = func(d *Daemon, key, msg string) {
-	go d.escalateAlert(key, "upgrade-restart", msg)
-}
-
 // mergedAt returns the committer time of commit in repo as UTC RFC3339 (the
 // shell writer's format), or "" when git cannot answer.
 func (d *Daemon) mergedAt(repo, commit string) string {
@@ -286,7 +280,7 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 		if !d.upgradeWaitEscalated {
 			d.upgradeWaitEscalated = true
 			d.logger.Printf("upgrade-restart: restarted from %s for %s but now running %s; not restarting again", m.AttemptedFrom, m.Commit, own)
-			upgradeEscalateFn(d, "daemon:restart-pending-no-effect",
+			d.seams.escalateUpgrade(d, "daemon:restart-pending-no-effect",
 				fmt.Sprintf("Daemon restarted for upgrade to %s (from %s) but is running %s, which is not provably newer. The installed binary is probably not the marker's commit. Not restarting again.",
 					m.Commit, m.AttemptedFrom, own))
 		}
@@ -297,7 +291,7 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	if !d.isIdleForUpgrade() {
 		if !d.upgradeWaitEscalated && now.Sub(d.upgradeWaitSince) >= upgradeStuckAfter {
 			d.upgradeWaitEscalated = true
-			upgradeEscalateFn(d, "daemon:restart-pending-stuck",
+			d.seams.escalateUpgrade(d, "daemon:restart-pending-stuck",
 				fmt.Sprintf("Restart for upgrade to %s has waited %s for an idle daemon (running %s). Still waiting.",
 					m.Commit, now.Sub(d.upgradeWaitSince).Round(time.Minute), own))
 		}

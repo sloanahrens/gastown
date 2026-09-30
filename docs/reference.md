@@ -179,7 +179,18 @@ decision and the environment the suite reads are one fact (gt-0hbm).
 Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
 names what failed (exit codes 10-16, `gt done --help`) and the session stays up; fix what it
 names and run `gt done` once more. A failure you believe your change did not cause goes in a
-bead comment, then `gt escalate -s medium`. No flag skips the gate.
+bead comment, then `gt escalate -s medium`. No flag skips a polecat's gate.
+
+**Crew submission (gt-3e7tk).** A crew session submits with the same command. Commit on a
+crew branch, push it (`git push origin HEAD:<branch>`), then run `gt done --bead <id>`.
+The bead comes from `--bead`, else from a branch name carrying a routed bead id;
+`crew/<user>/<slug>` usually carries none, so pass `--bead`. `gt done` refuses unless
+`origin/<branch>` is at HEAD and HEAD is ahead of the target, runs `make presubmit`
+(skip it with `--pre-verified` when you already ran it), then writes the comment
+`Submitted for landing: <branch> @ <sha> onto <target>`, the READY TO LAND block and the
+`gt:ready-to-land` label. It pushes nothing, rebases nothing and signals no Witness.
+`BD_ACTOR` falls back to `git config user.name`. A polecat's `gt done` refuses
+`--pre-verified`.
 
 Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
 polling loop holds the gate every other agent is queued behind, one pass at a
