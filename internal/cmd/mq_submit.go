@@ -68,6 +68,76 @@ func parseBranchName(branch string) branchInfo {
 	return info
 }
 
+// crewBranchPrefix is the namespace a crew member's branches live under:
+// `gt crew add --branch` cuts crew/<name>, and a crew session's own topic
+// branches extend it (crew/<name>/<topic>).
+const crewBranchPrefix = "crew/"
+
+// crewWorkerFromBranch returns the crew member a crew branch belongs to, or
+// "" for any other branch. The crew namespace has no suffix grammar to
+// decode, unlike polecat.ParseBranchName, so the first path segment after
+// the prefix is the whole identity.
+func crewWorkerFromBranch(branch string) string {
+	rest, ok := strings.CutPrefix(branch, crewBranchPrefix)
+	if !ok {
+		return ""
+	}
+	name, _, _ := strings.Cut(rest, "/")
+	return name
+}
+
+// sessionSubmitter names the agent session running this submit: GT_POLECAT
+// when isPolecatSession agrees, else GT_CREW. Empty outside an agent session
+// (an operator at a shell, a script), which is what submitWorker's later
+// tiers are for.
+func sessionSubmitter() string {
+	if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" && isPolecatSession() {
+		return polecatName
+	}
+	return os.Getenv("GT_CREW")
+}
+
+// submitterFromAssignee reads the submitter off the source issue's assignee —
+// the bead's own record of who owns the work, and the last evidence left
+// when nothing else names an identity. Only this rig's agent addresses
+// count: a cross-rig assignee names someone who never touched this branch,
+// and "" is the honest answer when nothing names the submitter — the
+// quality-review plugin's unattributable-window guard exists to fail on
+// exactly that rather than swallow a guess (gt-arqw3).
+func submitterFromAssignee(assignee, rigName string) string {
+	parts := strings.Split(strings.TrimSpace(assignee), "/")
+	if len(parts) != 3 || rigName == "" || parts[0] != rigName {
+		return ""
+	}
+	if parts[1] != "polecats" && parts[1] != "crew" {
+		return ""
+	}
+	return parts[2]
+}
+
+// submitWorker resolves the identity recorded as an MR's submitter: the
+// grouping key every per-worker consumer of a review reads, and the value the
+// om editorial gate copies onto the verdict note in refs/notes/om, where the
+// quality-review plugin groups a window by rig/worker. A submit path that
+// names no polecat still has to name a submitter, or every review it produces
+// is unattributable and the plugin fails the whole window (gt-arqw3).
+//
+// In decreasing order of trust: the session that ran the submit (gt-fl0n —
+// the branch misnames the submitter when --branch reuses another polecat's
+// branch), then the branch itself, then the source bead's assignee.
+func submitWorker(branch, branchWorker, sessionWorker, assignee, rigName string) string {
+	if sessionWorker != "" {
+		return sessionWorker
+	}
+	if branchWorker != "" {
+		return branchWorker
+	}
+	if crew := crewWorkerFromBranch(branch); crew != "" {
+		return crew
+	}
+	return submitterFromAssignee(assignee, rigName)
+}
+
 func runMqSubmit(cmd *cobra.Command, args []string) error {
 	// Find workspace
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -91,13 +161,7 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	// root, not the polecat's worktree. Reconstruct actual path.
 	if cwd == townRoot {
 		// Gate polecat cwd switch on GT_ROLE: coordinators may have stale GT_POLECAT.
-		isPolecat := false
-		if role := os.Getenv("GT_ROLE"); role != "" {
-			parsedRole, _, _ := parseRoleString(role)
-			isPolecat = parsedRole == RolePolecat
-		} else {
-			isPolecat = os.Getenv("GT_POLECAT") != ""
-		}
+		isPolecat := isPolecatSession()
 		if polecatName := os.Getenv("GT_POLECAT"); polecatName != "" && rigName != "" && isPolecat {
 			polecatClone := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
 			if _, err := os.Stat(polecatClone); err == nil {
@@ -163,6 +227,16 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	}
 	sourceBD := sourceInfo.BD
 	sourceIssue := sourceInfo.Issue
+
+	// submitter is what the review trail attributes this MR to, written to the
+	// MR bead beside worker: worker names the polecat whose branch this is and
+	// gates the polecat-only actions below, while submitter names whoever filed
+	// it for review and is the field the om verdict note groups by (gt-arqw3).
+	assignee := ""
+	if sourceIssue != nil {
+		assignee = sourceIssue.Assignee
+	}
+	submitter := submitWorker(branch, info.Worker, sessionSubmitter(), assignee, rigName)
 
 	// Determine target branch
 	// Priority: explicit --epic > formula_vars base_branch > integration branch auto-detect > rig default.
@@ -250,6 +324,9 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	if worker != "" {
 		description += fmt.Sprintf("\nworker: %s", worker)
 	}
+	if submitter != "" {
+		description += fmt.Sprintf("\nsubmitter: %s", submitter)
+	}
 
 	// Verify before either an idempotent success or a new MR registration.
 	// Refinery's later branch check is local-ref based, so missing/stale pushes
@@ -336,10 +413,14 @@ func runMqSubmit(cmd *cobra.Command, args []string) error {
 	if worker != "" {
 		fmt.Printf("  Worker: %s\n", worker)
 	}
+	if submitter != "" && submitter != worker {
+		fmt.Printf("  Submitter: %s\n", submitter)
+	}
 	fmt.Printf("  Priority: P%d\n", priority)
 
-	// Auto-cleanup for polecats: if this is a polecat branch and cleanup not disabled,
-	// send lifecycle request and wait for termination
+	// Auto-cleanup retires a polecat session, so it keys on worker — the
+	// polecat whose branch this is — and never on submitter, which may name a
+	// crew member or an operator with no session to retire.
 	if worker != "" && !mqSubmitNoCleanup {
 		fmt.Println()
 		fmt.Printf("%s Auto-cleanup: polecat work submitted\n", style.Bold.Render("✓"))

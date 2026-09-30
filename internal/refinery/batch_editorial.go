@@ -123,7 +123,7 @@ func (e *Engineer) reviewBatchCandidates(ctx context.Context, candidates []*MRIn
 				RigDir:        e.rig.Path,
 				RepoDir:       e.workDir,
 				MRID:          mr.ID,
-				Worker:        mr.Worker,
+				Worker:        mr.Submitter,
 				Rig:           e.rig.Name,
 				Target:        target,
 				Branch:        mr.Branch,

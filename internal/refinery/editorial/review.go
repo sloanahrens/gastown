@@ -43,7 +43,13 @@ type ReviewRequest struct {
 	// checks run against.
 	RepoDir string
 
-	MRID   string
+	MRID string
+	// Worker is the identity the verdict is attributed to: the MR's
+	// Submitter, which is a polecat name on polecat work and a crew member's
+	// (or other submitting session's) name elsewhere. It is written to the
+	// note as worker, the field the quality-review plugin groups a window
+	// by, so it must be populated on every submit path — not only the
+	// polecat one (gt-arqw3).
 	Worker string
 	Rig    string
 	Target string // target branch, e.g. "main"

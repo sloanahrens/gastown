@@ -229,7 +229,8 @@ type MRInfo struct {
 	Branch          string     // Source branch (e.g., "polecat/nux")
 	Target          string     // Target branch (e.g., "main")
 	SourceIssue     string     // The work item being merged
-	Worker          string     // Who did the work
+	Worker          string     // The polecat whose branch this is, "" when no polecat cut it
+	Submitter       string     // Who filed this MR for review; the identity a verdict is attributed to (gt-arqw3)
 	Rig             string     // Which rig
 	Title           string     // MR title
 	Priority        int        // Priority (lower = higher priority)
@@ -3176,6 +3177,7 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 		Target:                fields.Target,
 		SourceIssue:           fields.SourceIssue,
 		Worker:                fields.Worker,
+		Submitter:             fields.Attribution(),
 		Rig:                   fields.Rig,
 		Title:                 issue.Title,
 		Priority:              issue.Priority,

@@ -637,7 +637,8 @@ type MRFields struct {
 	Branch      string // Source branch name (e.g., "polecat/Nux/gt-xyz")
 	Target      string // Target branch (e.g., "main" or "integration/gt-epic")
 	SourceIssue string // The work item being merged (e.g., "gt-xyz")
-	Worker      string // Who did the work
+	Worker      string // The polecat whose branch this is, or "" when no polecat cut it
+	Submitter   string // Who filed this MR for review; see Attribution (gt-arqw3)
 	Rig         string // Which rig
 	CommitSHA   string // HEAD commit SHA at submission time (GH#3032: dedup key)
 	// CommitSHAInferred marks commit_sha as recovered at close time rather than
@@ -723,6 +724,9 @@ func ParseMRFields(issue *Issue) *MRFields {
 		case "worker":
 			fields.Worker = value
 			hasFields = true
+		case "submitter":
+			fields.Submitter = value
+			hasFields = true
 		case "rig":
 			fields.Rig = value
 			hasFields = true
@@ -798,6 +802,26 @@ func ParseMRFields(issue *Issue) *MRFields {
 	return fields
 }
 
+// Attribution returns the identity a per-worker consumer of this MR groups
+// by: Submitter, or Worker for an MR written before Submitter existed.
+//
+// Attribution is the field a review copies onto its verdict note, and the
+// field a per-worker trend reader groups by. It is the polecat's own name on
+// polecat work and the submitting session's identity elsewhere (crew, a
+// hand-cut topic branch) because those submit paths have no polecat to name —
+// while Worker stays polecat-only, since retirement, dead-worker recovery and
+// the agent-bead lookup all act on a session a non-polecat identity has not
+// got (gt-arqw3). A review that reads Worker instead leaves every such MR
+// unattributable.
+func (f *MRFields) Attribution() string {
+	if f.Submitter != "" {
+		return f.Submitter
+	}
+	// Every MR written before Submitter existed carries only Worker, and on
+	// polecat work the two name the same identity.
+	return f.Worker
+}
+
 // parseIntField parses an integer from a string, returning 0 on error.
 func parseIntField(s string) (int, error) {
 	var n int
@@ -825,6 +849,9 @@ func FormatMRFields(fields *MRFields) string {
 	}
 	if fields.Worker != "" {
 		lines = append(lines, "worker: "+fields.Worker)
+	}
+	if fields.Submitter != "" {
+		lines = append(lines, "submitter: "+fields.Submitter)
 	}
 	if fields.Rig != "" {
 		lines = append(lines, "rig: "+fields.Rig)
@@ -904,6 +931,7 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 		"source-issue":            true,
 		"sourceissue":             true,
 		"worker":                  true,
+		"submitter":               true,
 		"rig":                     true,
 		"commit_sha":              true,
 		"commit-sha":              true,
