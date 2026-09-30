@@ -16,15 +16,13 @@
 #   <tier>:<pkg>             skip the package in that tier, e.g.
 #                            integration:./internal/cmd
 #   <tier>:<pkg>:<regexp>    run it with go test -skip <regexp>
-# It defaults to the reds filed under gt-6ox58; set it empty to run everything.
+# It defaults to empty: every tier is green (gt-6ox58).
 # TIER_SWEEP_TIMEOUT is the per-package go test timeout (default 10m).
 # TIER_SWEEP_LOGDIR holds one log per run (default: a new temp dir).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
-# gt-z56xs.3: the internal/cmd integration tier fails its rig-add and run-done
-# tests and hangs behind TestSchedulerSlingContextIdempotency (gt-6ox58.1).
-: "${TIER_SWEEP_SKIP=integration:./internal/cmd}"
+: "${TIER_SWEEP_SKIP=}"
 : "${TIER_SWEEP_TIMEOUT:=10m}"
 : "${TIER_SWEEP_LOGDIR:=$(mktemp -d "${TMPDIR:-/tmp}/tier-sweep.XXXXXX")}"
 mkdir -p "$TIER_SWEEP_LOGDIR"
