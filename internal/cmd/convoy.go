@@ -428,6 +428,11 @@ func runBdJSONWithAutoCommit(dir string, args ...string) ([]byte, error) {
 }
 
 func runBdJSONWithOptions(dir string, allowStale, autoCommit bool, args ...string) ([]byte, error) {
+	return runBdJSONVia(nil, dir, allowStale, autoCommit, args...)
+}
+
+// runBdJSONVia is runBdJSONWithOptions answered by run (nil: bd on PATH).
+func runBdJSONVia(run beads.BDRunner, dir string, allowStale, autoCommit bool, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	bdc := BdCmd(args...).Dir(dir).StripBeadsDir().Stderr(&stderr)
 	if allowStale {
@@ -435,6 +440,16 @@ func runBdJSONWithOptions(dir string, allowStale, autoCommit bool, args ...strin
 	}
 	if autoCommit {
 		bdc.WithAutoCommit()
+	}
+	if run != nil {
+		out, err := bdc.Via(run).Output()
+		if err != nil {
+			if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+				return nil, fmt.Errorf("bd %s: %s", args[0], errMsg)
+			}
+			return nil, fmt.Errorf("bd %s: %w", args[0], err)
+		}
+		return out, nil
 	}
 	cmd := bdc.Build()
 	cmd.Dir = dir
@@ -1590,9 +1605,10 @@ func findStrandedConvoysWith(townBeads string, openCheck func(townRoot string) (
 // ready (gt-t08jn): anything else — blocked, deferred, pinned, a custom status
 // — is work the tracker says is not ready, assigned or not. An issue is ready
 // if it is not scheduled, and:
-// - status = "open" AND (no assignee OR assignee session is dead)
-// - OR status = "in_progress"/"hooked" AND (no assignee OR assignee session is
-//   dead) — an orphaned molecule, whose recovery is a re-dispatch
+//   - status = "open" AND (no assignee OR assignee session is dead)
+//   - OR status = "in_progress"/"hooked" AND (no assignee OR assignee session is
+//     dead) — an orphaned molecule, whose recovery is a re-dispatch
+//
 // scheduledSet is a pre-computed set of bead IDs with open sling contexts (from areScheduled).
 func isReadyIssue(t trackedIssueInfo, scheduledSet map[string]bool) bool {
 	status := beads.IssueStatus(strings.TrimSpace(t.Status))
