@@ -3761,36 +3761,60 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 		if convoy.IssueType != "convoy" && !refineryHasLabel(convoy.Labels, "gt:convoy") {
 			continue
 		}
-		// Get tracked issues for this convoy via bd dep list
-		depArgs := beads.MaybePrependAllowStaleWithEnv(townReadEnv, []string{"dep", "list", convoy.ID, "--direction=down", "--type=tracks", "--json"})
+		// Read the convoy's stored tracks edges. The one-ID form joins each edge
+		// to an issue row in this database, so it drops every cross-rig target —
+		// every town convoy's rig bead, written as "external:<prefix>:<id>" —
+		// and answers "no tracked issues" for a convoy that has one (gt-dcvvp).
+		// Naming the convoy twice selects the raw edge records instead.
+		depArgs := beads.MaybePrependAllowStaleWithEnv(townReadEnv, []string{"dep", "list", convoy.ID, convoy.ID, "--direction=down", "--type=tracks", "--json"})
 		depCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyPinned, depArgs...)
 		var depOut bytes.Buffer
 		depCmd.Stdout = &depOut
 
 		if err := depCmd.Run(); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: cannot read tracked issues of convoy %s: %v\n", convoy.ID, err)
 			continue
 		}
 
 		var deps []struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
+			DependsOnID string `json:"depends_on_id"`
+			Type        string `json:"type"`
 		}
 		if err := json.Unmarshal(depOut.Bytes(), &deps); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: cannot parse tracked issues of convoy %s: %v\n", convoy.ID, err)
 			continue
 		}
 
-		// Refresh statuses from home rigs (cross-rig lookup)
-		allClosed := true
+		// Only tracks edges are tracked issues, filtered here as well as on the
+		// bd call so another type's edge cannot stand in for one.
+		tracked := make([]string, 0, len(deps))
 		for _, dep := range deps {
+			if dep.Type != "tracks" {
+				continue
+			}
 			// Unwrap external:prefix:id format
-			depID := dep.ID
+			depID := dep.DependsOnID
 			if strings.HasPrefix(depID, "external:") {
 				parts := strings.SplitN(depID, ":", 3)
 				if len(parts) == 3 {
 					depID = parts[2]
 				}
 			}
+			tracked = append(tracked, depID)
+		}
 
+		// A convoy that tracks nothing is not a completed convoy. It is one
+		// whose edges are missing, and closing it records finished work that is
+		// not finished — the false completion that fed the ledger a convoy at
+		// 0/1 with its issue still open. Leave it for review instead (gt-dcvvp).
+		if len(tracked) == 0 {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Convoy %s tracks no issues; leaving it open for review\n", convoy.ID)
+			continue
+		}
+
+		// Refresh statuses from home rigs (cross-rig lookup)
+		allClosed := true
+		for _, depID := range tracked {
 			// Get fresh status from home rig via bd show with routing
 			showArgs := beads.MaybePrependAllowStaleWithEnv(routingReadEnv, []string{"show", depID, "--json"})
 			showCmd := beads.Command(townRoot, townBeads, beads.ReadOnlyRouting, showArgs...)
@@ -3821,13 +3845,9 @@ func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []c
 			continue
 		}
 
-		// All tracked issues are complete - close the convoy
-		reason := "All tracked issues completed"
-		if len(deps) == 0 {
-			reason = "Empty convoy — auto-closed as definitionally complete"
-		}
-
-		closeArgs := beads.MaybePrependAllowStaleWithEnv(townMutationEnv, []string{"close", convoy.ID, "-r", reason})
+		// All tracked issues are complete - close the convoy. There is one
+		// reason and it states the thing that was verified.
+		closeArgs := beads.MaybePrependAllowStaleWithEnv(townMutationEnv, []string{"close", convoy.ID, "-r", "All tracked issues completed"})
 		closeCmd := beads.Command(townBeads, townBeads, beads.MutationPinned, closeArgs...)
 
 		if err := closeCmd.Run(); err != nil {

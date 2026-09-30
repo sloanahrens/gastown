@@ -1539,9 +1539,9 @@ case "$*" in
 	assert_town_read_env
 	    echo '[{"id":"hq-cv-l9","title":"Cross-rig convoy","status":"open","description":"","issue_type":"convoy"}]'
     ;;
-  "--allow-stale dep list hq-cv-l9 --direction=down --type=tracks --json"|"dep list hq-cv-l9 --direction=down --type=tracks --json")
+  "--allow-stale dep list hq-cv-l9 hq-cv-l9 --direction=down --type=tracks --json"|"dep list hq-cv-l9 hq-cv-l9 --direction=down --type=tracks --json")
     assert_town_read_env
-    echo '[{"id":"external:l9:l9-123","status":"closed"}]'
+    echo '[{"issue_id":"hq-cv-l9","depends_on_id":"external:l9:l9-123","type":"tracks"}]'
     ;;
   "--allow-stale show l9-123 --json"|"show l9-123 --json")
     assert_routing_read_env
@@ -1581,6 +1581,180 @@ esac
 	}
 	if closed[0].ID != "hq-cv-l9" {
 		t.Fatalf("closed convoy ID = %q, want hq-cv-l9", closed[0].ID)
+	}
+}
+
+// fakeConvoyBD answers the calls checkAndCloseCompletedConvoys makes for a
+// single open convoy: the open-convoy list, the convoy's raw tracks edges, each
+// tracked bead's status, and the close. Every close it is asked to run is
+// appended, reason and all, to a log whose path it returns.
+func fakeConvoyBD(t *testing.T, convoyID, edgesJSON string, statuses map[string]string) (townRoot, townBeads, closeLog string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows - shell stubs")
+	}
+
+	townRoot = t.TempDir()
+	townBeads = filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "l9"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var showCases strings.Builder
+	for id, status := range statuses {
+		fmt.Fprintf(&showCases, `  "show %s --json")
+    echo '[{"status":"%s"}]'
+    ;;
+`, id, status)
+	}
+
+	closeLog = filepath.Join(t.TempDir(), "closes")
+	script := fmt.Sprintf(`#!/bin/sh
+# --allow-stale is prepended by the caller when the bd on PATH advertises it.
+if [ "$1" = "--allow-stale" ]; then shift; fi
+case "$*" in
+  "list --status=open --json --limit=0 --flat")
+    echo '[{"id":%q,"title":"convoy","status":"open","description":"","issue_type":"convoy"}]'
+    ;;
+  "dep list %s %s --direction=down --type=tracks --json")
+    echo %q
+    ;;
+%s  "close %s -r "*)
+    printf '%%s\n' "$*" >> %q
+    ;;
+  "show "*)
+    # Completion notification: a convoy with no description carries no
+    # notification addresses, so nothing is sent.
+    echo '[{"status":"open","description":""}]'
+    ;;
+  "update "*)
+    exit 0
+    ;;
+  *)
+    echo "unexpected bd args: $*" >&2
+    exit 1
+    ;;
+esac
+`, convoyID, convoyID, convoyID, edgesJSON, showCases.String(), convoyID, closeLog)
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	return townRoot, townBeads, closeLog
+}
+
+// closeLogLines returns the closes a fakeConvoyBD stub was asked to run.
+func closeLogLines(t *testing.T, closeLog string) []string {
+	t.Helper()
+	data, err := os.ReadFile(closeLog)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read close log: %v", err)
+	}
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func runConvoyEngineerCheck(t *testing.T, townRoot, townBeads string) ([]convoyInfo, string) {
+	t.Helper()
+	e := NewEngineer(&rig.Rig{Name: "l9", Path: filepath.Join(townRoot, "l9")})
+	var buf bytes.Buffer
+	e.SetOutput(&buf)
+	closed := e.checkAndCloseCompletedConvoys(townRoot, townBeads)
+	return closed, buf.String()
+}
+
+// TestCheckAndCloseCompletedConvoys_TrackedNothingStaysOpen is the gt-dcvvp
+// regression: a convoy whose tracks edges read empty was closed as
+// "definitionally complete", so a convoy at 0/1 with its issue still open was
+// recorded complete. Empty is not completion.
+func TestCheckAndCloseCompletedConvoys_TrackedNothingStaysOpen(t *testing.T) {
+	townRoot, townBeads, closeLog := fakeConvoyBD(t, "hq-cv-empty", "[]", nil)
+
+	closed, out := runConvoyEngineerCheck(t, townRoot, townBeads)
+
+	if len(closed) != 0 {
+		t.Fatalf("closed %d convoys, want 0: %v", len(closed), closed)
+	}
+	if !strings.Contains(out, "tracks no issues") {
+		t.Fatalf("output = %q, want the empty-tracked refusal", out)
+	}
+	if lines := closeLogLines(t, closeLog); len(lines) != 0 {
+		t.Fatalf("unexpected close calls: %v", lines)
+	}
+}
+
+// TestCheckAndCloseCompletedConvoys_CrossRigOpenTargetStaysOpen covers the read
+// that made the tracked set look empty in the first place: the convoy tracks a
+// bead in another rig (external:<prefix>:<id>) and that bead is still open.
+func TestCheckAndCloseCompletedConvoys_CrossRigOpenTargetStaysOpen(t *testing.T) {
+	edges := `[{"issue_id":"hq-cv-x","depends_on_id":"external:l9:l9-123","type":"tracks"}]`
+	townRoot, townBeads, closeLog := fakeConvoyBD(t, "hq-cv-x", edges, map[string]string{"l9-123": "hooked"})
+
+	closed, out := runConvoyEngineerCheck(t, townRoot, townBeads)
+
+	if len(closed) != 0 {
+		t.Fatalf("closed %d convoys, want 0: %v", len(closed), closed)
+	}
+	if strings.Contains(out, "Cannot read") || strings.Contains(out, "cannot read") {
+		t.Fatalf("the tracked edge was not read at all: %q", out)
+	}
+	if lines := closeLogLines(t, closeLog); len(lines) != 0 {
+		t.Fatalf("unexpected close calls: %v", lines)
+	}
+}
+
+// TestCheckAndCloseCompletedConvoys_CrossRigClosedTargetCloses is the other half:
+// resolving the cross-rig edge is what lets a genuinely finished convoy close,
+// and it closes as "All tracked issues completed" — never as "empty".
+func TestCheckAndCloseCompletedConvoys_CrossRigClosedTargetCloses(t *testing.T) {
+	edges := `[{"issue_id":"hq-cv-x","depends_on_id":"external:l9:l9-123","type":"tracks"}]`
+	townRoot, townBeads, closeLog := fakeConvoyBD(t, "hq-cv-x", edges, map[string]string{"l9-123": "closed"})
+
+	closed, _ := runConvoyEngineerCheck(t, townRoot, townBeads)
+
+	if len(closed) != 1 || closed[0].ID != "hq-cv-x" {
+		t.Fatalf("closed = %v, want the single convoy hq-cv-x", closed)
+	}
+	lines := closeLogLines(t, closeLog)
+	if len(lines) != 1 {
+		t.Fatalf("close calls = %v, want exactly one", lines)
+	}
+	if !strings.HasSuffix(lines[0], "All tracked issues completed") {
+		t.Fatalf("close reason = %q, want it to end with %q", lines[0], "All tracked issues completed")
+	}
+}
+
+// TestCheckAndCloseCompletedConvoys_NonTracksEdgeDoesNotCountTracking pins the
+// type filter the raw-edge read does not apply for us: an edge of another type
+// must not be read as a tracked issue that closed.
+func TestCheckAndCloseCompletedConvoys_NonTracksEdgeDoesNotCountTracking(t *testing.T) {
+	edges := `[{"issue_id":"hq-cv-x","depends_on_id":"l9-123","type":"parent-child"}]`
+	townRoot, townBeads, closeLog := fakeConvoyBD(t, "hq-cv-x", edges, map[string]string{"l9-123": "closed"})
+
+	closed, out := runConvoyEngineerCheck(t, townRoot, townBeads)
+
+	if len(closed) != 0 {
+		t.Fatalf("closed %d convoys, want 0: %v", len(closed), closed)
+	}
+	if !strings.Contains(out, "tracks no issues") {
+		t.Fatalf("output = %q, want the empty-tracked refusal", out)
+	}
+	if lines := closeLogLines(t, closeLog); len(lines) != 0 {
+		t.Fatalf("unexpected close calls: %v", lines)
 	}
 }
 
