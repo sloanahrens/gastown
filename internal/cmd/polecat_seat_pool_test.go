@@ -284,6 +284,94 @@ func TestBuildAllRigSeatsRunsEveryRigExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestBuildAllRigSeatsOverlapsRigsUpToThePoolSize is the regression test for the
+// pool itself (gt-92zx). The order and exactly-once tests above pass just as
+// well for a serial loop, and a serial loop is the very thing the pool
+// replaced: `--all` paid every rig's Dolt round trips one after another and
+// timed out on a many-rig town. So this asserts the mechanism, not a duration
+// (a timing bound flakes on a loaded host): the first builds block at a
+// rendezvous until as many builds as the pool has workers are in flight
+// together. A serial implementation never gets there and fails at the timeout
+// instead of hanging; an unbounded one is caught by the peak-in-flight check.
+func TestBuildAllRigSeatsOverlapsRigsUpToThePoolSize(t *testing.T) {
+	t.Parallel()
+	workers := polecatSeatPoolSize()
+	rigs := make([]*rig.Rig, workers*3)
+	for i := range rigs {
+		rigs[i] = &rig.Rig{Name: "rig"}
+	}
+
+	var (
+		mu       sync.Mutex
+		inFlight int
+		peak     int
+		arrived  int
+		stalled  bool
+	)
+	allArrived := make(chan struct{})
+
+	buildAllRigSeats(rigs, func(r *rig.Rig) []polecatSeat {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		arrived++
+		if arrived == workers {
+			close(allArrived)
+		}
+		alreadyStalled := stalled
+		mu.Unlock()
+
+		// Once one build has timed out the verdict is in; later builds skip
+		// the wait so a serial pool fails in seconds, not minutes.
+		if !alreadyStalled {
+			select {
+			case <-allArrived:
+			case <-time.After(5 * time.Second):
+				mu.Lock()
+				stalled = true
+				mu.Unlock()
+			}
+		}
+		// Hold the slot briefly so any worker beyond the bound would overlap
+		// with the others and show up in peak.
+		time.Sleep(2 * time.Millisecond)
+
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return nil
+	})
+
+	if stalled {
+		t.Fatalf("fewer than %d rigs were ever built at once: the pool is not overlapping rigs (serial fallback?)", workers)
+	}
+	if peak != workers {
+		t.Fatalf("peak concurrent rig builds = %d, want exactly the pool size %d (bounded, and fully used)", peak, workers)
+	}
+}
+
+// TestBuildAllRigSeatsSingleRigRunsInline: one rig has nothing to overlap with,
+// so the pool must hand back its one slot without needing a second worker, and
+// no rigs must build nothing.
+func TestBuildAllRigSeatsSingleRigRunsInline(t *testing.T) {
+	t.Parallel()
+	rigSeats := buildAllRigSeats([]*rig.Rig{{Name: "gastown"}}, func(r *rig.Rig) []polecatSeat {
+		return []polecatSeat{{rigName: r.Name, name: "seat"}}
+	})
+	if len(rigSeats) != 1 || len(rigSeats[0]) != 1 || rigSeats[0][0].rigName != "gastown" {
+		t.Fatalf("single-rig result = %+v, want one slot holding gastown's seat", rigSeats)
+	}
+	got := buildAllRigSeats(nil, func(*rig.Rig) []polecatSeat {
+		t.Error("build called with no rigs")
+		return nil
+	})
+	if len(got) != 0 {
+		t.Fatalf("no rigs produced %d slots, want 0", len(got))
+	}
+}
+
 // TestPolecatSeatPoolSizeIsBounded: the pool exists to keep a large town from
 // forking hundreds of git processes at once, so the bound has to hold on every
 // host. Too small and a 47-seat listing serializes again; unbounded and the
