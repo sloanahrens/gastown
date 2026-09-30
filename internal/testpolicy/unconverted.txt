@@ -5,7 +5,6 @@ internal/cmd
 internal/config
 internal/convoy
 internal/crew
-internal/daemon
 internal/deacon
 internal/doctor
 internal/dog
