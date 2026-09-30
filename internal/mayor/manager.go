@@ -180,7 +180,6 @@ func (m *Manager) StartTMUX(agentOverride string) error {
 		Theme:         theme,
 		WaitForAgent:  true,
 		WaitFatal:     true,
-		AutoRespawn:   true,
 		AcceptBypass:  true,
 	})
 	if err != nil {
