@@ -18,6 +18,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -4837,5 +4838,60 @@ func TestResolveDeadHolderWork_ClearRunsOncePerAlertKey(t *testing.T) {
 	scan()
 	if got := count(issueKey); got != 4 {
 		t.Errorf("issue key cleared %d times after a re-raise, want 4", got)
+	}
+}
+
+// TestFeedFirstReady_BacksOffAfterStartupFailure guards gt-wacl: a bead whose
+// last sling failed at session start is left open and unassigned, and the scan
+// used to re-sling it on its next tick. It must rest until its backoff window
+// passes, and only that bead rests.
+func TestFeedFirstReady_BacksOffAfterStartupFailure(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	townRoot, gtPath, slingLogPath, logged := feedTestRig(t)
+	m := NewConvoyManager(townRoot, func(format string, args ...interface{}) {
+		*logged = append(*logged, fmt.Sprintf(format, args...))
+	}, gtPath, 10*time.Minute, nil, nil, nil)
+	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
+
+	if err := dispatch.RecordStartupFailure(townRoot, "gt-issue1", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := strandedConvoyInfo{
+		ID:          "hq-cv-backoff1",
+		ReadyCount:  2,
+		ReadyIssues: []string{"gt-issue1", "gt-issue2"},
+	}
+	m.feedFirstReady(c)
+
+	data, err := os.ReadFile(slingLogPath)
+	if err != nil {
+		t.Fatalf("read sling log: %v", err)
+	}
+	if strings.Contains(string(data), "sling gt-issue1 ") {
+		t.Errorf("gt-issue1 is resting after a startup failure but was re-slung: %q", data)
+	}
+	if !strings.Contains(string(data), "sling gt-issue2 ") {
+		t.Errorf("the other ready bead should still feed: %q", data)
+	}
+	skipped := false
+	for _, s := range *logged {
+		if strings.Contains(s, "gt-issue1 not dispatched") && strings.Contains(s, "startup blocked: trust dialog") {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Errorf("the skip should be logged with the recorded reason, got: %v", *logged)
+	}
+
+	dispatch.ClearStartupFailure(townRoot, "gt-issue1")
+	m.feedFirstReady(strandedConvoyInfo{ID: c.ID, ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
+	data, _ = os.ReadFile(slingLogPath)
+	if !strings.Contains(string(data), "sling gt-issue1 ") {
+		t.Errorf("once the record is cleared gt-issue1 should feed: %q", data)
 	}
 }

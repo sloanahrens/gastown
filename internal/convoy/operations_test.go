@@ -12,6 +12,7 @@ import (
 
 	beadsdk "github.com/steveyegge/beads"
 	beadsRouting "github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
 func TestExtractIssueID(t *testing.T) {
@@ -2367,5 +2368,82 @@ func TestFeedNextReadyIssue_PassesRecordedFormula(t *testing.T) {
 				t.Errorf("gt stub called with %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestFeedNextReadyIssue_BacksOffAfterStartupFailure guards gt-wacl: the
+// event-driven feeder must not re-sling a bead whose last sling failed at
+// session start; it moves on to the next ready bead instead, and feeds the
+// resting one again once its record is cleared.
+func TestFeedNextReadyIssue_BacksOffAfterStartupFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows")
+	}
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	convoy := &beadsdk.Issue{
+		ID: "test-convoy1", Title: "Test Convoy", Status: beadsdk.StatusOpen,
+		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	}
+	issues := []*beadsdk.Issue{convoy}
+	for _, id := range []string{"test-ready1", "test-ready2"} {
+		issues = append(issues, &beadsdk.Issue{
+			ID: id, Title: id, Status: beadsdk.StatusOpen,
+			Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	for _, iss := range issues {
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+		}
+		if iss.ID == convoy.ID {
+			continue
+		}
+		dep := &beadsdk.Dependency{
+			IssueID: convoy.ID, DependsOnID: iss.ID,
+			Type: beadsdk.DependencyType("tracks"), CreatedAt: now, CreatedBy: "test",
+		}
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency: %v", err)
+		}
+	}
+
+	townRoot := setupTownRoot(t)
+	gtPath, logPath := makeGTStub(t, 0)
+	logger, msgs := makeLogger()
+
+	if err := dispatch.RecordStartupFailure(townRoot, "test-ready1", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("gt stub was not called (no log file): %v", err)
+	}
+	if got := strings.TrimSpace(string(logData)); got != "sling test-ready2 testrig --no-boot" {
+		t.Errorf("gt stub called with %q, want the next ready bead past the resting one", got)
+	}
+	skipped := false
+	for _, m := range *msgs {
+		if strings.Contains(m, "test-ready1 not dispatched") && strings.Contains(m, "startup blocked: trust dialog") {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Errorf("the skip should be logged with the recorded reason, got: %v", *msgs)
+	}
+
+	dispatch.ClearStartupFailure(townRoot, "test-ready1")
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	logData, _ = os.ReadFile(logPath)
+	if got := strings.TrimSpace(string(logData)); got != "sling test-ready1 testrig --no-boot" {
+		t.Errorf("after the record cleared gt stub called with %q, want test-ready1", got)
 	}
 }
