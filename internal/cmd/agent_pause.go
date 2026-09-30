@@ -108,24 +108,16 @@ var pauseGatedRoles = map[session.Role]bool{
 }
 
 // checkPauseGated refuses a pause target that no scanner honors, rather
-// than writing a marker that silently does nothing. deacon has its own,
-// separate pause command (`gt deacon pause`) predating this one — the
-// "paused" bead state it writes still shows in `gt status` — and this
-// command is not a substitute for it.
+// than writing a marker that silently does nothing.
 func checkPauseGated(role session.Role) error {
 	if pauseGatedRoles[role] {
 		return nil
 	}
-	hint := ""
-	if role == session.RoleDeacon {
-		hint = " use `gt deacon pause` / `gt deacon resume` instead"
-	}
-	return fmt.Errorf("gt agent pause does not support role %q: no scanner consults its pause marker for this role%s", role, hint)
+	return fmt.Errorf("gt agent pause does not support role %q: no scanner consults its pause marker for this role", role)
 }
 
 // parseAgentAddr parses an address for gt agent pause/resume.
-// Accepts <rig>/<name> (polecat), <rig>/witness, <rig>/refinery,
-// mayor, and deacon.
+// Accepts <rig>/<name> (polecat), <rig>/crew/<name> and mayor.
 func parseAgentAddr(address string) (*agentAddr, error) {
 	id, err := session.ParseAddress(address)
 	if err != nil {
@@ -140,20 +132,15 @@ func parseAgentAddr(address string) (*agentAddr, error) {
 	switch id.Role {
 	case session.RoleMayor:
 		addr.BeadID = beads.MayorBeadIDTown()
-	case session.RoleDeacon:
-		addr.BeadID = beads.DeaconBeadIDTown()
 	default:
 		addr.BeadID = beads.AgentBeadIDWithPrefix(session.PrefixFor(id.Rig), id.Rig, role, name)
 	}
 	return addr, nil
 }
 
-// roleAndName returns the agent-bead role and name for this target
-// (singleton roles — witness, refinery — have an empty name).
+// roleAndName returns the agent-bead role and name for this target.
 func (a *agentAddr) roleAndName() (string, string) {
 	switch a.Role {
-	case session.RoleWitness:
-		return constants.RoleWitness, ""
 	case session.RoleCrew:
 		return constants.RoleCrew, a.Name
 	case session.RolePolecat:

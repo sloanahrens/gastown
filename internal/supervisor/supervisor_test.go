@@ -421,12 +421,12 @@ func TestKillStrayKillsAndLogs(t *testing.T) {
 
 func TestSeatForSession(t *testing.T) {
 	t.Parallel()
-	seat, err := SeatForSession("hq-deacon")
-	if err != nil || seat.Role != "deacon" || seat.SessionName() != "hq-deacon" {
-		t.Fatalf("SeatForSession(hq-deacon) = %+v, %v", seat, err)
+	seat, err := SeatForSession("hq-mayor")
+	if err != nil || seat.Role != "mayor" || seat.SessionName() != "hq-mayor" {
+		t.Fatalf("SeatForSession(hq-mayor) = %+v, %v", seat, err)
 	}
-	if IntentSeat(SeatFor("", "deacon", "boot")).Path("/t") != "/t/.runtime/agents/deacon.boot.json" {
-		t.Fatalf("boot seat path = %s", IntentSeat(SeatFor("", "deacon", "boot")).Path("/t"))
+	if IntentSeat(SeatFor("", "crew", "max")).Path("/t") != "/t/.runtime/agents/crew.max.json" {
+		t.Fatalf("named seat path = %s", IntentSeat(SeatFor("", "crew", "max")).Path("/t"))
 	}
 }
 

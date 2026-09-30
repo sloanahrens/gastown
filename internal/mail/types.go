@@ -545,7 +545,6 @@ func ParseMessageType(s string) MessageType {
 // Liberal normalization (Postel's Law - be liberal in what you accept):
 //   - "overseer" → "overseer" (human operator, no trailing slash)
 //   - "mayor" or "mayor/" → "mayor/" (town-level, trailing slash)
-//   - "deacon" or "deacon/" → "deacon/" (town-level, trailing slash)
 //   - "gastown/polecats/Toast" → "gastown/Toast" (crew/polecats normalized)
 //   - "gastown/crew/max" → "gastown/max" (crew/polecats normalized)
 //   - "gastown/Toast" → "gastown/Toast" (already canonical)
@@ -556,25 +555,16 @@ func normalizeAddress(s string) string {
 		return "overseer"
 	}
 
-	// Town-level agents: mayor and deacon keep trailing slash
+	// The town-level mayor keeps a trailing slash
 	if s == "mayor" || s == "mayor/" {
 		return "mayor/"
 	}
-	if s == "deacon" || s == "deacon/" {
-		return "deacon/"
-	}
 
-	// Resolve rig-scoped town-level roles to their canonical form (gt-te23).
-	// "gastown/mayor" → "mayor/", "gastown/deacon" → "deacon/"
-	// Mayor and deacon are town-level singletons, not rig-level agents.
+	// Resolve the rig-scoped mayor to its canonical form (gt-te23):
+	// "gastown/mayor" → "mayor/". The mayor is a town-level singleton.
 	parts := strings.Split(s, "/")
-	if len(parts) == 2 {
-		switch parts[1] {
-		case "mayor":
-			return "mayor/"
-		case "deacon":
-			return "deacon/"
-		}
+	if len(parts) == 2 && parts[1] == "mayor" {
+		return "mayor/"
 	}
 
 	// Normalize crew/, polecat/, and polecats/ to canonical form:
@@ -594,8 +584,6 @@ func normalizeAddress(s string) string {
 //   - "overseer" → "overseer" (human operator, no trailing slash)
 //   - "mayor/" → "mayor/"
 //   - "mayor" → "mayor/"
-//   - "deacon/" → "deacon/"
-//   - "deacon" → "deacon/"
 //   - "gastown/polecats/Toast" → "gastown/Toast" (normalized)
 //   - "gastown/crew/max" → "gastown/max" (normalized)
 //   - "gastown/Toast" → "gastown/Toast" (already canonical)
@@ -603,7 +591,7 @@ func normalizeAddress(s string) string {
 //   - "gastown/" → "gastown" (rig broadcast)
 func AddressToIdentity(address string) string {
 	// Trim trailing slash for rig-level addresses before normalization.
-	// normalizeAddress handles mayor/ and deacon/ correctly even after trimming.
+	// normalizeAddress handles mayor/ correctly even after trimming.
 	if len(address) > 0 && address[len(address)-1] == '/' {
 		address = address[:len(address)-1]
 	}
@@ -615,7 +603,6 @@ func AddressToIdentity(address string) string {
 // Examples:
 //   - "overseer" → "overseer" (human operator)
 //   - "mayor/" → "mayor/"
-//   - "deacon/" → "deacon/"
 //   - "gastown/polecats/Toast" → "gastown/Toast" (normalized)
 //   - "gastown/crew/max" → "gastown/max" (normalized)
 //   - "gastown/Toast" → "gastown/Toast" (already canonical)

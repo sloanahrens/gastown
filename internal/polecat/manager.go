@@ -276,7 +276,7 @@ func newManager(r *rig.Rig, g gitRepo, t sessionProbe, bd beads.BDRunner) *Manag
 	// Spawn grace, resolved once: the window the Witness uses before it will
 	// call a starting session stalled (gt-yteq). Reading it here keeps state
 	// derivation from re-reading town settings per polecat in List().
-	spawnGraceWindow := config.LoadOperationalConfig(townRoot).GetWitnessConfig().HeartbeatStartupGraceD()
+	spawnGraceWindow := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().HeartbeatStartupGraceD()
 
 	return &Manager{
 		rig:              r,

@@ -134,15 +134,15 @@ func cycleToSession(direction int, sessionOverride, clientOverride string) error
 	return nil
 }
 
-// parseRigOpsSession extracts the rig name if this is a witness, refinery, or
-// polecat session. Returns empty string if not a rig ops session.
+// parseRigOpsSession extracts the rig name if this is a polecat session.
+// Returns empty string if not a rig ops session.
 func parseRigOpsSession(sess string) string {
 	identity, err := sessionpkg.ParseSessionName(sess)
 	if err != nil {
 		return ""
 	}
 	switch identity.Role {
-	case sessionpkg.RoleWitness, sessionpkg.RolePolecat:
+	case sessionpkg.RolePolecat:
 		return identity.Rig
 	}
 	return ""

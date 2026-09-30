@@ -97,7 +97,8 @@ func detectRigFromPath(townRoot, absPath string) string {
 	candidateRig := parts[0]
 
 	switch candidateRig {
-	case constants.RoleMayor, constants.RoleDeacon, ".beads", ".claude", ".git", "plugins":
+	// deacon/ is the retired deacon's directory; it holds no rig.
+	case constants.RoleMayor, "deacon", ".beads", ".claude", ".git", "plugins":
 		return ""
 	}
 

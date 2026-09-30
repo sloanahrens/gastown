@@ -12,10 +12,10 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 	town := "/town"
 	rig := "/town/myrig"
 	cases := map[string]string{
-		"witness":  "/town/myrig/witness/.claude/system-prompt.md",
+		"witness":  "", // role retired (gt-4k3fj.6.1)
 		"refinery": "", // role removed (gt-v4ssj.6)
 		"mayor":    "/town/mayor/.claude/system-prompt.md",
-		"deacon":   "/town/deacon/.claude/system-prompt.md",
+		"deacon":   "", // role retired (gt-4k3fj.6.1)
 		"dog":      "", // role retired (gt-ckunw)
 		"boot":     "",
 	}
@@ -24,7 +24,7 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 			t.Errorf("SystemPromptFilePath(%s) = %q, want %q", role, got, want)
 		}
 	}
-	if got := SystemPromptFilePath("witness", town, "", ""); got != "" {
+	if got := SystemPromptFilePath("crew", town, "", "max"); got != "" {
 		t.Errorf("rig-scoped role without rigPath must return empty, got %q", got)
 	}
 	if got := SystemPromptFilePath("dog", town, rig, "alpha"); got != "" {
@@ -114,7 +114,7 @@ func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T)
 	if err := SaveRigSettings(filepath.Join(rig, "settings", "config.json"), NewRigSettings()); err != nil {
 		t.Fatal(err)
 	}
-	path := SystemPromptFilePath("witness", town, rig, "")
+	path := SystemPromptFilePath("mayor", town, rig, "")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T)
 		t.Fatal(err)
 	}
 
-	rc := ResolveRoleAgentConfig("witness", town, rig)
+	rc := ResolveRoleAgentConfig("mayor", town, rig)
 	found := false
 	for _, a := range rc.Args {
 		if a == path {
@@ -174,7 +174,6 @@ func TestSystemPromptFilePath_PerAgentForPolecatAndCrew(t *testing.T) {
 		{"crew", "sloan", "/town/myrig/crew/.claude/system-prompt-sloan.md"},
 		{"polecat", "", ""}, // the template bakes in the agent's name; no shared file
 		{"crew", "", ""},
-		{"witness", "ignored", "/town/myrig/witness/.claude/system-prompt.md"},
 		{"mayor", "", "/town/mayor/.claude/system-prompt.md"},
 	}
 	for _, c := range cases {
@@ -259,33 +258,33 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 		t.Errorf("env %s = %q, want %q", EnvSystemPromptFile, rc.Env[EnvSystemPromptFile], polecatPath)
 	}
 
-	// Deacon: town-level role, empty rigPath, no agent name.
-	deaconPath := SystemPromptFilePath("deacon", townRoot, "", "")
-	if err := os.MkdirAll(filepath.Dir(deaconPath), 0755); err != nil {
+	// Mayor: town-level role, empty rigPath, no agent name.
+	mayorPath := SystemPromptFilePath("mayor", townRoot, "", "")
+	if err := os.MkdirAll(filepath.Dir(mayorPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(deaconPath, []byte("# deacon\n"), 0644); err != nil {
+	if err := os.WriteFile(mayorPath, []byte("# mayor\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	rc, err = ResolveRoleAgentConfigWithOverride("deacon", townRoot, "", "deepseek-flash", "")
+	rc, err = ResolveRoleAgentConfigWithOverride("mayor", townRoot, "", "deepseek-flash", "")
 	if err != nil {
-		t.Fatalf("resolve deacon: %v", err)
+		t.Fatalf("resolve mayor: %v", err)
 	}
-	if !containsArgPair(rc.Args, "--append-system-prompt-file", deaconPath) {
-		t.Errorf("deacon override config lacks the flag: %v", rc.Args)
+	if !containsArgPair(rc.Args, "--append-system-prompt-file", mayorPath) {
+		t.Errorf("mayor override config lacks the flag: %v", rc.Args)
 	}
 
 	// Missing file: unchanged config, no error.
-	rc, err = ResolveRoleAgentConfigWithOverride("witness", townRoot, rigPath, "deepseek-flash", "")
+	rc, err = ResolveRoleAgentConfigWithOverride("crew", townRoot, rigPath, "deepseek-flash", "max")
 	if err != nil {
-		t.Fatalf("resolve witness: %v", err)
+		t.Fatalf("resolve crew: %v", err)
 	}
 	if containsArg(rc.Args, "--append-system-prompt-file") {
-		t.Errorf("witness has no file yet but got the flag: %v", rc.Args)
+		t.Errorf("crew has no file yet but got the flag: %v", rc.Args)
 	}
 
 	// Unknown agent: error, like ResolveAgentConfigWithOverride.
-	if _, err := ResolveRoleAgentConfigWithOverride("deacon", townRoot, "", "no-such-agent", ""); err == nil {
+	if _, err := ResolveRoleAgentConfigWithOverride("mayor", townRoot, "", "no-such-agent", ""); err == nil {
 		t.Error("expected an error for an unknown agent override")
 	}
 
@@ -325,29 +324,29 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 
 	// Empty override: falls back to role_agents and still carries the flags
 	// exactly once (ResolveRoleAgentConfig already applies them).
-	ts.RoleAgents = map[string]string{"witness": "deepseek-flash"}
+	ts.RoleAgents = map[string]string{"crew": "deepseek-flash"}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), ts); err != nil {
 		t.Fatal(err)
 	}
-	witnessPath := SystemPromptFilePath("witness", townRoot, rigPath, "")
-	if err := os.MkdirAll(filepath.Dir(witnessPath), 0755); err != nil {
+	maxPath := SystemPromptFilePath("crew", townRoot, rigPath, "max")
+	if err := os.MkdirAll(filepath.Dir(maxPath), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(witnessPath, []byte("# witness\n"), 0644); err != nil {
+	if err := os.WriteFile(maxPath, []byte("# crew\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	rc, err = ResolveRoleAgentConfigWithOverride("witness", townRoot, rigPath, "", "")
+	rc, err = ResolveRoleAgentConfigWithOverride("crew", townRoot, rigPath, "", "max")
 	if err != nil {
-		t.Fatalf("resolve witness without override: %v", err)
+		t.Fatalf("resolve crew without override: %v", err)
 	}
 	if !containsArg(rc.Args, "deepseek-flash") {
 		t.Errorf("empty override did not fall back to role_agents: %v", rc.Args)
 	}
 	if n := countArg(rc.Args, "--append-system-prompt-file"); n != 1 {
-		t.Errorf("witness flag count %d, want 1: %v", n, rc.Args)
+		t.Errorf("crew flag count %d, want 1: %v", n, rc.Args)
 	}
 	if n := countArg(rc.Args, "--settings"); n != 1 {
-		t.Errorf("witness --settings count %d, want 1: %v", n, rc.Args)
+		t.Errorf("crew --settings count %d, want 1: %v", n, rc.Args)
 	}
 }
 

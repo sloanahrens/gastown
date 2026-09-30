@@ -43,7 +43,7 @@ var bdHandshakeGatedCommands = map[string]bool{
 // cannot silently skip the gate (TestBDHandshakeClassifiesEveryTownVerb).
 var bdHandshakeTownVerbs = map[string]bool{
 	"up": true, "start": true, "restart": true, "run": true, "spawn": true,
-	"sling": true, "boot": true, "resume": true,
+	"sling": true, "resume": true,
 }
 
 // bdHandshakeNotTownRunning are start/run-named commands that start no agent

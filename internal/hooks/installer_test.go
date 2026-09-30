@@ -10,16 +10,15 @@ import (
 )
 
 func TestInstallForRole_RoleAware(t *testing.T) {
-	// Claude has autonomous/interactive variants. "polecat" is exercised
-	// separately (TestInstallForRole_PolecatClaudeSettingsUseManagedHooks):
-	// it now routes through the JSON merge path like boot/dog, not the
-	// static template compared here (gt-8stz).
+	// Claude's only autonomous role, "polecat", is exercised separately
+	// (TestInstallForRole_PolecatClaudeSettingsUseManagedHooks): it routes
+	// through the JSON merge path, not the static template compared here
+	// (gt-8stz).
 	tests := []struct {
 		name     string
 		role     string
 		wantFile string // expected template used
 	}{
-		{"autonomous witness", "witness", "settings-autonomous.json"},
 		{"interactive crew", "crew", "settings-interactive.json"},
 		{"interactive mayor", "mayor", "settings-interactive.json"},
 	}
@@ -755,7 +754,7 @@ func TestSyncForRole_JSONWhitespaceInsensitive(t *testing.T) {
 func TestSyncForRole_GeminiWithGTBinSubstitution(t *testing.T) {
 	dir := t.TempDir()
 
-	result, err := SyncForRole("gemini", dir, dir, "witness", ".gemini", "settings.json", "gemini", false)
+	result, err := SyncForRole("gemini", dir, dir, "polecat", ".gemini", "settings.json", "gemini", false)
 	if err != nil {
 		t.Fatalf("SyncForRole: %v", err)
 	}
@@ -874,9 +873,9 @@ func TestInstallForRole_CursorRoleAware(t *testing.T) {
 
 func TestInstallForRole_GeminiRoleAware(t *testing.T) {
 	dir := t.TempDir()
-	err := InstallForRole("gemini", dir, dir, "witness", ".gemini", "settings.json", "gemini", false)
+	err := InstallForRole("gemini", dir, dir, "polecat", ".gemini", "settings.json", "gemini", false)
 	if err != nil {
-		t.Fatalf("InstallForRole(gemini, witness): %v", err)
+		t.Fatalf("InstallForRole(gemini, polecat): %v", err)
 	}
 
 	got, _ := os.ReadFile(filepath.Join(dir, ".gemini", "settings.json"))
@@ -958,7 +957,7 @@ func TestInstallForRole_CopilotRoleAware(t *testing.T) {
 
 func TestComputeExpectedTemplate_Gemini(t *testing.T) {
 	// Autonomous role should get settings-autonomous.json template
-	content, err := ComputeExpectedTemplate("gemini", "settings.json", "witness")
+	content, err := ComputeExpectedTemplate("gemini", "settings.json", "polecat")
 	if err != nil {
 		t.Fatalf("ComputeExpectedTemplate: %v", err)
 	}

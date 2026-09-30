@@ -23,8 +23,6 @@ type AgentType int
 
 const (
 	AgentMayor AgentType = iota
-	AgentDeacon
-	AgentWitness
 	AgentCrew
 	AgentPolecat
 	AgentPersonal // Non-GT session (user's terminal session)
@@ -43,8 +41,6 @@ type AgentSession struct {
 // AgentTypeColors maps agent types to tmux color codes.
 var AgentTypeColors = map[AgentType]string{
 	AgentMayor:    "#[fg=red,bold]",
-	AgentDeacon:   "#[fg=yellow,bold]",
-	AgentWitness:  "#[fg=cyan]",
 	AgentCrew:     "#[fg=green]",
 	AgentPolecat:  "#[fg=white,dim]",
 	AgentPersonal: "#[fg=magenta]",
@@ -53,17 +49,14 @@ var AgentTypeColors = map[AgentType]string{
 
 // rigTypeOrder defines the display order of rig-level agent types.
 var rigTypeOrder = map[AgentType]int{
-	AgentWitness: 0,
-	AgentCrew:    1,
-	AgentPolecat: 2,
+	AgentCrew:    0,
+	AgentPolecat: 1,
 }
 
 // AgentTypeIcons maps agent types to display icons.
 // Uses centralized emojis from constants package.
 var AgentTypeIcons = map[AgentType]string{
 	AgentMayor:   constants.EmojiMayor,
-	AgentDeacon:  constants.EmojiDeacon,
-	AgentWitness: constants.EmojiWitness,
 	AgentCrew:    constants.EmojiCrew,
 	AgentPolecat: constants.EmojiPolecat,
 }
@@ -158,10 +151,6 @@ func categorizeSession(name string) *AgentSession {
 	switch identity.Role {
 	case session.RoleMayor:
 		sess.Type = AgentMayor
-	case session.RoleDeacon:
-		sess.Type = AgentDeacon
-	case session.RoleWitness:
-		sess.Type = AgentWitness
 	case session.RoleCrew:
 		sess.Type = AgentCrew
 	case session.RolePolecat:
@@ -311,14 +300,10 @@ func filterAndSortSessions(sessionNames []string, includePolecats bool) []*Agent
 		if agent.Type == AgentPolecat && !includePolecats {
 			continue
 		}
-		// Skip boot sessions (utility session, not a user-facing agent)
-		if agent.Name == session.BootSessionName() {
-			continue
-		}
 		agents = append(agents, agent)
 	}
 
-	// Sort: mayor, deacon first, then by rig, then by type
+	// Sort: mayor first, then by rig, then by type
 	sort.Slice(agents, func(i, j int) bool {
 		a, b := agents[i], agents[j]
 
@@ -329,19 +314,12 @@ func filterAndSortSessions(sessionNames []string, includePolecats bool) []*Agent
 		if b.Type == AgentMayor {
 			return false
 		}
-		if a.Type == AgentDeacon {
-			return true
-		}
-		if b.Type == AgentDeacon {
-			return false
-		}
-
 		// Then by rig name
 		if a.Rig != b.Rig {
 			return a.Rig < b.Rig
 		}
 
-		// Within rig: refinery, witness, crew, polecat
+		// Within rig: crew, polecat
 		if rigTypeOrder[a.Type] != rigTypeOrder[b.Type] {
 			return rigTypeOrder[a.Type] < rigTypeOrder[b.Type]
 		}
@@ -381,10 +359,6 @@ func (a *AgentSession) displayLabel() string {
 	switch a.Type {
 	case AgentMayor:
 		return fmt.Sprintf("%s%s Mayor#[default]", color, icon)
-	case AgentDeacon:
-		return fmt.Sprintf("%s%s Deacon#[default]", color, icon)
-	case AgentWitness:
-		return fmt.Sprintf("%s%s %s/witness#[default]", color, icon, a.Rig)
 	case AgentCrew:
 		return fmt.Sprintf("%s%s %s/crew/%s#[default]", color, icon, a.Rig, a.AgentName)
 	case AgentPolecat:
@@ -503,13 +477,13 @@ func runAgents(cmd *cobra.Command, args []string) error {
 				"", "")
 		}
 
-		// Rig sub-headers (non-selectable). Mayor/deacon are town-level
-		// and appear before any rig header.
+		// Rig sub-headers (non-selectable). The mayor is town-level and
+		// appears before any rig header.
 		var currentRig string
 		for _, agent := range group.Sessions {
 			if agent.Type != AgentPersonal && agent.Type != AgentTest &&
 				agent.Rig != "" && agent.Rig != currentRig &&
-				agent.Type != AgentMayor && agent.Type != AgentDeacon {
+				agent.Type != AgentMayor {
 				menuArgs = append(menuArgs,
 					fmt.Sprintf("-#[fg=white,dim]   %s", agent.Rig), "", "")
 				currentRig = agent.Rig
@@ -564,10 +538,6 @@ func runAgentsList(cmd *cobra.Command, args []string) error {
 		switch agent.Type {
 		case AgentMayor:
 			fmt.Printf("  %s Mayor\n", icon)
-		case AgentDeacon:
-			fmt.Printf("  %s Deacon\n", icon)
-		case AgentWitness:
-			fmt.Printf("  %s witness\n", icon)
 		case AgentCrew:
 			fmt.Printf("  %s crew/%s\n", icon, agent.AgentName)
 		case AgentPolecat:
@@ -770,8 +740,6 @@ func guessSessionFromWorkerDir(workerDir, townRoot string) string {
 		return session.CrewSessionName(session.PrefixFor(rig), workerName)
 	case "polecats":
 		return session.PolecatSessionName(session.PrefixFor(rig), workerName)
-	case constants.RoleWitness:
-		return session.WitnessSessionName(session.PrefixFor(rig))
 	}
 
 	return ""

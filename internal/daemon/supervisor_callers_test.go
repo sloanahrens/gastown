@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -234,38 +233,6 @@ func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
 
 	if !strings.Contains(logBuf.String(), "gt-intended") {
 		t.Fatalf("crash detection ignored the intent record's work bead: %s", logBuf)
-	}
-}
-
-// The patrol-disabled sweep kills through the supervisor: a paused witness
-// stays, an unpaused one goes, and the kill is logged with its actor.
-func TestKillRetiredPatrolSessions_HonorsPauseAndLogsActor(t *testing.T) {
-	t.Parallel()
-	tm := newFakeTmux(newFixedClock())
-	tm.addSession("aa-witness", "claude", time.Now())
-	tm.addSession("bb-witness", "claude", time.Now())
-	tm.addSession("hq-deacon", "claude", time.Now())
-	tm.addSession("hq-boot", "claude", time.Now())
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm, rigPool: newRigWorkerPool(1, 10*time.Second, nil), ctx: context.Background(),
-		prefixRegistryFn: rigPrefixes("aa", "bb")}
-	writeKnownRigs(t, d.config.TownRoot, "aa", "bb")
-	if err := agentpause.Pause(d.config.TownRoot, "aa", "witness", "", "debugging", "human", ""); err != nil {
-		t.Fatal(err)
-	}
-
-	d.killRetiredPatrolSessions()
-
-	if has, _ := tm.HasSession("aa-witness"); !has {
-		t.Error("a paused witness was killed by the retired-role sweep")
-	}
-	for _, name := range []string{"bb-witness", "hq-deacon", "hq-boot"} {
-		if has, _ := tm.HasSession(name); has {
-			t.Errorf("%s survived the retired-role sweep", name)
-		}
-	}
-	lines, _ := os.ReadFile(supervisor.ActionLogPath(d.config.TownRoot))
-	if !strings.Contains(string(lines), `"actor":"daemon/retired-role"`) {
-		t.Errorf("sweep kills missing from the action log: %s", lines)
 	}
 }
 

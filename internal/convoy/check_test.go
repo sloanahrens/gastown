@@ -4,53 +4,45 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// twoConvoyBdStub answers bd for a town with two open convoys: hq-cv-done
+// twoConvoyBd answers bd for a town with two open convoys: hq-cv-done
 // tracks one closed issue, hq-cv-open tracks one open issue.
-const twoConvoyBdStub = `
-case "$*" in
-  "--allow-stale version")
-    exit 0
-    ;;
-  *list*--label=gt:convoy*)
-    echo '[{"id":"hq-cv-done","title":"Done","status":"open","issue_type":"convoy","labels":["gt:convoy"]},{"id":"hq-cv-open","title":"Open","status":"open","issue_type":"convoy","labels":["gt:convoy"]}]'
-    ;;
-  *list*)
-    echo '[]'
-    ;;
-  *sql*"issue_id = 'hq-cv-done'"*)
-    echo '[{"depends_on_id":"hq-done"}]'
-    ;;
-  *sql*"issue_id = 'hq-cv-open'"*)
-    echo '[{"depends_on_id":"hq-open"}]'
-    ;;
-  *show*hq-done*)
-    echo '[{"id":"hq-done","title":"Done issue","status":"closed","issue_type":"task"}]'
-    ;;
-  *show*hq-open*)
-    echo '[{"id":"hq-open","title":"Open issue","status":"open","issue_type":"task"}]'
-    ;;
-  *)
-    echo "unexpected bd args: $*" >&2
-    exit 1
-    ;;
-esac
-`
+func twoConvoyBd() *bdScript {
+	return &bdScript{answer: func(c beads.BDCall) (string, string, int) {
+		line := strings.Join(c.Args, " ")
+		switch {
+		case line == "--allow-stale version":
+			return "", "", 0
+		case strings.Contains(line, "list") && strings.Contains(line, "--label=gt:convoy"):
+			return `[{"id":"hq-cv-done","title":"Done","status":"open","issue_type":"convoy","labels":["gt:convoy"]},{"id":"hq-cv-open","title":"Open","status":"open","issue_type":"convoy","labels":["gt:convoy"]}]`, "", 0
+		case strings.Contains(line, "list"):
+			return "[]", "", 0
+		case strings.Contains(line, "sql") && strings.Contains(line, "issue_id = 'hq-cv-done'"):
+			return `[{"depends_on_id":"hq-done"}]`, "", 0
+		case strings.Contains(line, "sql") && strings.Contains(line, "issue_id = 'hq-cv-open'"):
+			return `[{"depends_on_id":"hq-open"}]`, "", 0
+		case strings.Contains(line, "show") && strings.Contains(line, "hq-done"):
+			return `[{"id":"hq-done","title":"Done issue","status":"closed","issue_type":"task"}]`, "", 0
+		case strings.Contains(line, "show") && strings.Contains(line, "hq-open"):
+			return `[{"id":"hq-open","title":"Open issue","status":"open","issue_type":"task"}]`, "", 0
+		}
+		return "", "unexpected bd args: " + line, 1
+	}}
+}
 
 func TestCheckAll_DryRunNamesOnlyTheCompleteConvoy(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
-	townRoot, townBeads, _ := makeExternalTrackingTownWorkspace(t)
-	chdirExternalTrackingTest(t, townRoot)
-	writeExternalTrackingBdStub(t, twoConvoyBdStub)
+	t.Parallel()
+	_, townBeads, _ := makeExternalTrackingTownWorkspace(t)
+	town := testTown(townBeads, twoConvoyBd(), &gtScript{})
 
 	var out bytes.Buffer
-	closed, err := Town{Root: townBeads, Out: &out}.CheckAll(context.Background(), true)
+	town.Out = &out
+	closed, err := town.CheckAll(context.Background(), true)
 	if err != nil {
 		t.Fatalf("CheckAll: %v", err)
 	}
@@ -63,16 +55,13 @@ func TestCheckAll_DryRunNamesOnlyTheCompleteConvoy(t *testing.T) {
 }
 
 func TestCheckAll_CancelledContextStopsBeforeTheFirstConvoy(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows - shell stubs")
-	}
-	townRoot, townBeads, _ := makeExternalTrackingTownWorkspace(t)
-	chdirExternalTrackingTest(t, townRoot)
-	writeExternalTrackingBdStub(t, twoConvoyBdStub)
+	t.Parallel()
+	_, townBeads, _ := makeExternalTrackingTownWorkspace(t)
+	town := testTown(townBeads, twoConvoyBd(), &gtScript{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	closed, err := Town{Root: townBeads}.CheckAll(ctx, true)
+	closed, err := town.CheckAll(ctx, true)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("CheckAll on a cancelled context: err = %v, want context.Canceled", err)
 	}
@@ -82,11 +71,12 @@ func TestCheckAll_CancelledContextStopsBeforeTheFirstConvoy(t *testing.T) {
 }
 
 func TestChecker_CancelledContextRunsNoCheck(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	// The town does not exist: a check that ran would fail with "not found",
 	// not with the context's error.
-	err := Town{Root: t.TempDir()}.Checker()(ctx, "hq-cv-x")
+	err := testTown(t.TempDir(), &bdScript{}, &gtScript{}).Checker()(ctx, "hq-cv-x")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Checker on a cancelled context: err = %v, want context.Canceled", err)
 	}

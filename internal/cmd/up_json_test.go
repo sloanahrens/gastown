@@ -13,7 +13,7 @@ func TestBuildUpSummary(t *testing.T) {
 	t.Parallel()
 	services := []ServiceStatus{
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
-		{Name: "Deacon", Type: constants.RoleDeacon, OK: true, Detail: "gt-deacon"},
+		{Name: "Dolt", Type: "dolt", OK: true, Detail: "started (port 3306)"},
 		{Name: "Mayor", Type: constants.RoleMayor, OK: false, Detail: "failed"},
 	}
 
@@ -34,7 +34,7 @@ func TestEmitUpJSON_Success(t *testing.T) {
 	services := []ServiceStatus{
 		{Name: "Dolt", Type: "dolt", OK: true, Detail: "started (port 3306)"},
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
-		{Name: "Deacon", Type: constants.RoleDeacon, OK: true, Detail: "gt-deacon"},
+		{Name: "Mayor", Type: constants.RoleMayor, OK: true, Detail: "hq-mayor"},
 	}
 
 	var buf bytes.Buffer

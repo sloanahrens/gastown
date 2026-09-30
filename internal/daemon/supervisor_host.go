@@ -106,11 +106,6 @@ func (d *Daemon) agentBeadIDForSeat(seat supervisor.Seat) string {
 	switch seat.Role {
 	case session.RoleMayor:
 		return beads.MayorBeadIDTown()
-	case session.RoleDeacon:
-		if seat.Name != "" {
-			return ""
-		}
-		return beads.DeaconBeadIDTown()
 	}
 	if seat.Rig == "" {
 		return ""

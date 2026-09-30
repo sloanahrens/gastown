@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -21,8 +22,23 @@ type Town struct {
 	Out io.Writer
 	// Warn receives warnings; nil discards them.
 	Warn io.Writer
-	// Run answers the town's bd calls in process; nil is the bd on PATH.
+
+	// Run answers the town's bd calls in process; nil runs the bd on PATH.
 	Run beads.BDRunner
+	// gtRun runs the town's gt notice children; nil runs the gt on PATH.
+	gtRun gtRunner
+}
+
+// gtRunner runs gt with args from dir with exactly env (nil inherits the
+// process environment).
+type gtRunner func(dir string, env []string, args ...string) error
+
+// runGT runs the gt on PATH.
+func runGT(dir string, env []string, args ...string) error {
+	cmd := exec.Command("gt", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd.Run()
 }
 
 // StdTown is a Town whose output goes to the terminal: what the CLI uses.
@@ -49,7 +65,7 @@ func (t Town) bd(args ...string) *beads.BdCmd {
 	if t.Env != nil {
 		c.WithEnv(t.Env)
 	}
-	return c.Stderr(t.warnWriter()).Via(t.Run)
+	return c.Via(t.Run).Stderr(t.warnWriter())
 }
 
 func (t Town) outWriter() io.Writer {

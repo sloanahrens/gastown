@@ -20,8 +20,6 @@ func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
 
 	for _, role := range []session.Role{
 		session.RoleMayor,
-		session.RoleDeacon,
-		session.RoleWitness,
 		session.RoleCrew,
 	} {
 		t.Run(string(role), func(t *testing.T) {
@@ -36,23 +34,10 @@ func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
 	}
 }
 
-// TestCheckPauseGatedDeaconHintsAtExistingCommand: deacon has its own,
-// separate pause command that predates this one — the refusal should point
-// there rather than leaving the operator to guess.
-func TestCheckPauseGatedDeaconHintsAtExistingCommand(t *testing.T) {
-	t.Parallel()
-	err := checkPauseGated(session.RoleDeacon)
-	if err == nil {
-		t.Fatal("checkPauseGated(deacon) = nil, want a refusal")
-	}
-	if !strings.Contains(err.Error(), "gt deacon pause") {
-		t.Errorf("error %q does not point to `gt deacon pause`", err)
-	}
-}
-
 // agentPauseAddresses are the forms an operator can hand to `gt agent
 // pause`/`resume`: polecat as either the two-segment shorthand or the
-// mail-style form, the rig singletons, crew, and the town-level agents.
+// mail-style form, retired rig role names (now polecat names), crew, and the
+// town-level mayor.
 var agentPauseAddresses = []string{
 	"gastown/flint",
 	"gastown/polecats/flint",
@@ -61,8 +46,6 @@ var agentPauseAddresses = []string{
 	"gastown/crew/opal",
 	"mayor",
 	"mayor/",
-	"deacon",
-	"deacon/",
 }
 
 // TestPauseTargetCoordinatesMatchStatus pins the two address parsers together:

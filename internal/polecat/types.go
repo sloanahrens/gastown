@@ -75,7 +75,7 @@ const (
 
 	// StateSpawning means the polecat was dispatched but has not come up yet:
 	// the agent bead still says agent_state=spawning and was written inside the
-	// spawn grace window (config.WitnessThresholds.HeartbeatStartupGrace,
+	// spawn grace window (config.RecoveryThresholds.HeartbeatStartupGrace,
 	// default 5m), while no tmux session is live yet. Without it, "work
 	// assigned + no session" read as stalled within seconds of dispatch, and
 	// the restart paths chased sessions that were still booting (gt-yteq).

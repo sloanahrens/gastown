@@ -2,7 +2,6 @@ package config
 
 import (
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -52,32 +51,12 @@ const (
 	DefaultDoctorMolCooldown              = 5 * time.Minute
 	DefaultRecoveryHeartbeatInterval      = 3 * time.Minute
 
-	DefaultBootIdleSuppression = 15 * time.Minute
-
-	// DefaultBootTurnBudget is how long a live Boot session may keep working
-	// before the daemon treats it as wedged and reaps it (gt-w28o).
-	DefaultBootTurnBudget    = 10 * time.Minute
-	DefaultDeaconGracePeriod = 5 * time.Minute
-
 	// Pressure check defaults — fully opt-in. All zero = disabled.
 	// Configure in settings/config.json under operational.daemon to enable.
 	// Example: {"pressure_cpu_threshold": 3.0, "pressure_mem_threshold_gb": 0.5}
 	DefaultPressureCPUThreshold   = 0.0
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
-)
-
-// Deacon defaults.
-const (
-	DefaultDeaconPingTimeout             = 30 * time.Second
-	DefaultDeaconConsecutiveFailures     = 3
-	DefaultDeaconCooldown                = 5 * time.Minute
-	DefaultDeaconHeartbeatStaleThreshold = 5 * time.Minute
-	DefaultDeaconHeartbeatVeryStale      = 20 * time.Minute
-	DefaultMaxRedispatches               = 3
-	DefaultRedispatchCooldown            = 5 * time.Minute
-	DefaultMaxFeedsPerCycle              = 3
-	DefaultFeedCooldown                  = 10 * time.Minute
 )
 
 // Polecat defaults.
@@ -114,24 +93,10 @@ const (
 	DefaultWebMaxBodyLen        = 100_000
 )
 
-// Witness defaults.
+// Polecat recovery defaults.
 const (
-	DefaultWitnessStartupStallThreshold  = 90 * time.Second
-	DefaultWitnessStartupActivityGrace   = 60 * time.Second
-	DefaultWitnessMaxBeadRespawns        = 3
-	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
-	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
-	DefaultWitnessHeartbeatStartupGrace  = 5 * time.Minute
-	// DefaultWitnessComposerStallFrozenFor is the threshold both composer-stall
-	// clocks are measured against: how long a session must produce no pane
-	// output while holding unsubmitted composer input, or how long that input
-	// must be observed waiting unattended, before the witness treats it as
-	// stalled. It matches the interim threshold the operators applied by hand
-	// during the 2026-09-18 refinery stalls (gt-hkhu, gt-afa7).
-	DefaultWitnessComposerStallFrozenFor = 5 * time.Minute
-	// DefaultWitnessDoneIntentMaxAge is how old a done-intent on a dead session
-	// can be and still count as a crashed exit worth restarting (gt-jv7v).
-	DefaultWitnessDoneIntentMaxAge = 24 * time.Hour
+	DefaultRecoveryMaxBeadRespawns       = 3
+	DefaultRecoveryHeartbeatStartupGrace = 5 * time.Minute
 )
 
 // Container-gate pool defaults (gt-yihz).
@@ -441,58 +406,6 @@ func (d *DaemonThresholds) RecoveryHeartbeatIntervalD() time.Duration {
 	return DefaultRecoveryHeartbeatInterval
 }
 
-// BootSpawnCooldownD returns the configured Boot spawn cooldown, defaulting to
-// two recovery heartbeats. The gate that reads it fires on a heartbeat, so a
-// cooldown shorter than one heartbeat skips no tick and respawns Boot every
-// tick, paying a fresh prefill each time (gt-w28o).
-func (d *DaemonThresholds) BootSpawnCooldownD() time.Duration {
-	if d == nil {
-		return 2 * DefaultRecoveryHeartbeatInterval
-	}
-	return ParseDurationOrDefault(d.BootSpawnCooldown, 2*d.RecoveryHeartbeatIntervalD())
-}
-
-// Boot triage modes (DaemonThresholds.BootMode).
-const (
-	BootModeMechanical = "mechanical"
-	BootModeAgent      = "agent"
-)
-
-// BootModeValue returns the configured boot mode, defaulting to mechanical.
-// Unknown values fall back to mechanical: the cheaper path is also the one
-// that cannot misbehave for want of a model.
-func (d *DaemonThresholds) BootModeValue() string {
-	if d != nil && strings.EqualFold(strings.TrimSpace(d.BootMode), BootModeAgent) {
-		return BootModeAgent
-	}
-	return BootModeMechanical
-}
-
-// BootTurnBudgetD returns the configured or default Boot turn budget.
-func (d *DaemonThresholds) BootTurnBudgetD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.BootTurnBudget, DefaultBootTurnBudget)
-	}
-	return DefaultBootTurnBudget
-}
-
-// BootIdleSuppressionD returns the configured or default boot idle suppression duration.
-// When Boot's last action was "nothing" (deacon healthy), spawns are suppressed for this long.
-func (d *DaemonThresholds) BootIdleSuppressionD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.BootIdleSuppression, DefaultBootIdleSuppression)
-	}
-	return DefaultBootIdleSuppression
-}
-
-// DeaconGracePeriodD returns the configured or default deacon grace period.
-func (d *DaemonThresholds) DeaconGracePeriodD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.DeaconGracePeriod, DefaultDeaconGracePeriod)
-	}
-	return DefaultDeaconGracePeriod
-}
-
 // PressureCPUThresholdV returns the configured or default CPU pressure threshold (load per core).
 func (d *DaemonThresholds) PressureCPUThresholdV() float64 {
 	if d != nil && d.PressureCPUThreshold != nil {
@@ -515,88 +428,6 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 		return *d.PressureMaxSessions
 	}
 	return DefaultPressureMaxSessions
-}
-
-// --- Deacon accessors ---
-
-// GetDeaconConfig returns the deacon thresholds, never nil.
-func (c *OperationalConfig) GetDeaconConfig() *DeaconThresholds {
-	if c != nil && c.Deacon != nil {
-		return c.Deacon
-	}
-	return &DeaconThresholds{}
-}
-
-// PingTimeoutD returns the configured or default deacon ping timeout.
-func (d *DeaconThresholds) PingTimeoutD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.PingTimeout, DefaultDeaconPingTimeout)
-	}
-	return DefaultDeaconPingTimeout
-}
-
-// ConsecutiveFailuresV returns the configured or default consecutive failures.
-func (d *DeaconThresholds) ConsecutiveFailuresV() int {
-	if d != nil && d.ConsecutiveFailures != nil {
-		return *d.ConsecutiveFailures
-	}
-	return DefaultDeaconConsecutiveFailures
-}
-
-// CooldownD returns the configured or default deacon cooldown.
-func (d *DeaconThresholds) CooldownD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.Cooldown, DefaultDeaconCooldown)
-	}
-	return DefaultDeaconCooldown
-}
-
-// HeartbeatStaleThresholdD returns the configured or default heartbeat stale threshold.
-func (d *DeaconThresholds) HeartbeatStaleThresholdD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.HeartbeatStaleThreshold, DefaultDeaconHeartbeatStaleThreshold)
-	}
-	return DefaultDeaconHeartbeatStaleThreshold
-}
-
-// HeartbeatVeryStaleThresholdD returns the configured or default heartbeat very stale threshold.
-func (d *DeaconThresholds) HeartbeatVeryStaleThresholdD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.HeartbeatVeryStaleThreshold, DefaultDeaconHeartbeatVeryStale)
-	}
-	return DefaultDeaconHeartbeatVeryStale
-}
-
-// MaxRedispatchesV returns the configured or default max redispatches.
-func (d *DeaconThresholds) MaxRedispatchesV() int {
-	if d != nil && d.MaxRedispatches != nil {
-		return *d.MaxRedispatches
-	}
-	return DefaultMaxRedispatches
-}
-
-// RedispatchCooldownD returns the configured or default redispatch cooldown.
-func (d *DeaconThresholds) RedispatchCooldownD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.RedispatchCooldown, DefaultRedispatchCooldown)
-	}
-	return DefaultRedispatchCooldown
-}
-
-// MaxFeedsPerCycleV returns the configured or default max feeds per cycle.
-func (d *DeaconThresholds) MaxFeedsPerCycleV() int {
-	if d != nil && d.MaxFeedsPerCycle != nil {
-		return *d.MaxFeedsPerCycle
-	}
-	return DefaultMaxFeedsPerCycle
-}
-
-// FeedCooldownD returns the configured or default feed cooldown.
-func (d *DeaconThresholds) FeedCooldownD() time.Duration {
-	if d != nil {
-		return ParseDurationOrDefault(d.FeedCooldown, DefaultFeedCooldown)
-	}
-	return DefaultFeedCooldown
 }
 
 // --- Polecat accessors ---
@@ -784,81 +615,30 @@ func (w *WebThresholds) MaxBodyLenV() int {
 	return DefaultWebMaxBodyLen
 }
 
-// --- Witness accessors ---
+// --- Polecat recovery accessors ---
 
-// GetWitnessConfig returns the witness thresholds, never nil.
-func (c *OperationalConfig) GetWitnessConfig() *WitnessThresholds {
-	if c != nil && c.Witness != nil {
-		return c.Witness
+// GetRecoveryConfig returns the polecat recovery thresholds, never nil.
+func (c *OperationalConfig) GetRecoveryConfig() *RecoveryThresholds {
+	if c != nil && c.Recovery != nil {
+		return c.Recovery
 	}
-	return &WitnessThresholds{}
-}
-
-// StartupStallThresholdD returns the configured or default startup stall threshold.
-func (wt *WitnessThresholds) StartupStallThresholdD() time.Duration {
-	if wt != nil {
-		return ParseDurationOrDefault(wt.StartupStallThreshold, DefaultWitnessStartupStallThreshold)
-	}
-	return DefaultWitnessStartupStallThreshold
-}
-
-// StartupActivityGraceD returns the configured or default startup activity grace.
-func (wt *WitnessThresholds) StartupActivityGraceD() time.Duration {
-	if wt != nil {
-		return ParseDurationOrDefault(wt.StartupActivityGrace, DefaultWitnessStartupActivityGrace)
-	}
-	return DefaultWitnessStartupActivityGrace
-}
-
-// ComposerStallFrozenForD returns the configured or default window a session
-// must produce no output, or hold unsubmitted composer input unattended, before
-// the witness treats it as stalled. Both stall clocks use this one threshold
-// (gt-hkhu, gt-afa7).
-func (wt *WitnessThresholds) ComposerStallFrozenForD() time.Duration {
-	if wt != nil {
-		return ParseDurationOrDefault(wt.ComposerStallFrozenFor, DefaultWitnessComposerStallFrozenFor)
-	}
-	return DefaultWitnessComposerStallFrozenFor
+	return &RecoveryThresholds{}
 }
 
 // MaxBeadRespawnsV returns the configured or default max bead respawns.
-func (wt *WitnessThresholds) MaxBeadRespawnsV() int {
-	if wt != nil && wt.MaxBeadRespawns != nil {
-		return *wt.MaxBeadRespawns
+func (rt *RecoveryThresholds) MaxBeadRespawnsV() int {
+	if rt != nil && rt.MaxBeadRespawns != nil {
+		return *rt.MaxBeadRespawns
 	}
-	return DefaultWitnessMaxBeadRespawns
-}
-
-// DoneIntentStuckTimeoutD returns the configured or default done-intent stuck timeout.
-func (wt *WitnessThresholds) DoneIntentStuckTimeoutD() time.Duration {
-	if wt != nil {
-		return ParseDurationOrDefault(wt.DoneIntentStuckTimeout, DefaultWitnessDoneIntentStuckTimeout)
-	}
-	return DefaultWitnessDoneIntentStuckTimeout
-}
-
-// DoneIntentRecentGraceD returns the configured or default done-intent recent grace.
-func (wt *WitnessThresholds) DoneIntentRecentGraceD() time.Duration {
-	if wt != nil {
-		return ParseDurationOrDefault(wt.DoneIntentRecentGrace, DefaultWitnessDoneIntentRecentGrace)
-	}
-	return DefaultWitnessDoneIntentRecentGrace
-}
-
-// DoneIntentMaxAgeD returns the configured or default done-intent max age.
-func (wt *WitnessThresholds) DoneIntentMaxAgeD() time.Duration {
-	if wt != nil {
-		return ParseDurationOrDefault(wt.DoneIntentMaxAge, DefaultWitnessDoneIntentMaxAge)
-	}
-	return DefaultWitnessDoneIntentMaxAge
+	return DefaultRecoveryMaxBeadRespawns
 }
 
 // HeartbeatStartupGraceD returns the configured or default heartbeat startup grace period.
 // A live polecat with assigned work but no heartbeat file older than this is flagged
 // for review as possibly stuck at startup (e.g., auth 401). (gt-uk7)
-func (wt *WitnessThresholds) HeartbeatStartupGraceD() time.Duration {
-	if wt != nil {
-		return ParseDurationOrDefault(wt.HeartbeatStartupGrace, DefaultWitnessHeartbeatStartupGrace)
+func (rt *RecoveryThresholds) HeartbeatStartupGraceD() time.Duration {
+	if rt != nil {
+		return ParseDurationOrDefault(rt.HeartbeatStartupGrace, DefaultRecoveryHeartbeatStartupGrace)
 	}
-	return DefaultWitnessHeartbeatStartupGrace
+	return DefaultRecoveryHeartbeatStartupGrace
 }

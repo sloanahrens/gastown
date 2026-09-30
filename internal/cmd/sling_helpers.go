@@ -920,9 +920,6 @@ func agentIDToBeadID(agentID, townRoot string) string {
 	if agentID == "mayor" {
 		return beads.MayorBeadIDTown()
 	}
-	if agentID == "deacon" {
-		return beads.DeaconBeadIDTown()
-	}
 
 	// Parse path-style agent IDs
 	parts := strings.Split(agentID, "/")
@@ -934,8 +931,6 @@ func agentIDToBeadID(agentID, townRoot string) string {
 	prefix := beads.GetPrefixForRig(townRoot, rig)
 
 	switch {
-	case len(parts) == 2 && parts[1] == "witness":
-		return beads.WitnessBeadIDWithPrefix(prefix, rig)
 	case len(parts) == 3 && parts[1] == "crew":
 		return beads.CrewBeadIDWithPrefix(prefix, rig, parts[2])
 	case len(parts) == 3 && parts[1] == "polecats":

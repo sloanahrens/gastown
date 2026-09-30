@@ -3,7 +3,6 @@
 internal/beads
 internal/cmd
 internal/config
-internal/convoy
 internal/feed
 internal/hooks
 internal/mayor

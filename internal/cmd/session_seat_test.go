@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // setupSessionSeatTown writes a minimal town whose "gastown" rig owns the named
@@ -70,17 +69,15 @@ func setupSessionSeatTown(t *testing.T, polecats ...string) string {
 	return townRoot
 }
 
-func TestResolveSessionSeatAcceptsPolecatsAndRigRoles(t *testing.T) {
+func TestResolveSessionSeatAcceptsPolecats(t *testing.T) {
 	setupSessionSeatTown(t, "amber", "onyx")
 
 	tests := []struct {
 		address  string
 		wantName string
-		wantRole string
 	}{
-		{"gastown/amber", "amber", constants.RolePolecat},
-		{"gastown/onyx", "onyx", constants.RolePolecat},
-		{"gastown/witness", "witness", constants.RoleWitness},
+		{"gastown/amber", "amber"},
+		{"gastown/onyx", "onyx"},
 	}
 
 	for _, tt := range tests {
@@ -89,9 +86,9 @@ func TestResolveSessionSeatAcceptsPolecatsAndRigRoles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveSessionSeat(%q) = %v, want a seat", tt.address, err)
 			}
-			if seat.Rig != "gastown" || seat.Name != tt.wantName || seat.Role != tt.wantRole {
-				t.Errorf("resolveSessionSeat(%q) = {%s %s %s}, want {gastown %s %s}",
-					tt.address, seat.Rig, seat.Name, seat.Role, tt.wantName, tt.wantRole)
+			if seat.Rig != "gastown" || seat.Name != tt.wantName {
+				t.Errorf("resolveSessionSeat(%q) = {%s %s}, want {gastown %s}",
+					tt.address, seat.Rig, seat.Name, tt.wantName)
 			}
 			if seat.Mgr == nil {
 				t.Errorf("resolveSessionSeat(%q) returned a seat with no session manager", tt.address)
@@ -177,43 +174,6 @@ func TestSessionVerbsAgreeOnAnUnknownPolecat(t *testing.T) {
 			if err.Error() != first {
 				t.Errorf("gt session %s answered %q, but an earlier verb answered %q; one address, one answer",
 					verb.name, err, first)
-			}
-		})
-	}
-}
-
-// TestSessionStartAndRestartRefuseRigRoles covers the other identity the
-// resolver knows: a rig role exists, but only its own command can start it,
-// because the polecat path builds a polecat session.
-func TestSessionStartAndRestartRefuseRigRoles(t *testing.T) {
-	setupSessionSeatTown(t, "amber")
-
-	for _, verb := range []struct {
-		name string
-		run  func(*cobra.Command, []string) error
-	}{
-		{"start", runSessionStart},
-		{"restart", runSessionRestart},
-	} {
-		t.Run(verb.name, func(t *testing.T) {
-			var err error
-			stdout, _ := captureStdio(t, func() {
-				err = verb.run(nil, []string{"gastown/witness"})
-			})
-
-			if err == nil {
-				t.Fatalf("gt session %s gastown/witness = success, want a refusal", verb.name)
-			}
-			if !strings.Contains(err.Error(), "not a polecat") {
-				t.Errorf("error = %q, want it to say the role is not a polecat", err)
-			}
-			if !strings.Contains(err.Error(), "gt witness start gastown") {
-				t.Errorf("error = %q, want it to name the command that does start the witness", err)
-			}
-			// The refusal precedes the "Starting session for …" line, so no
-			// caller can read a start that did not happen.
-			if stdout != "" {
-				t.Errorf("gt session %s printed %q for a role, want nothing", verb.name, stdout)
 			}
 		})
 	}

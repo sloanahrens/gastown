@@ -141,7 +141,7 @@ func (r *Resolver) validateAgentAddress(address string) error {
 
 	// Well-known town-level singletons always valid
 	switch normalized {
-	case constants.RoleMayor + "/", constants.RoleMayor, constants.RoleDeacon + "/", constants.RoleDeacon, "overseer":
+	case constants.RoleMayor + "/", constants.RoleMayor, "overseer":
 		return nil
 	}
 	validDogAddress := false
@@ -154,14 +154,6 @@ func (r *Resolver) validateAgentAddress(address string) error {
 	parts := strings.SplitN(normalized, "/", 3)
 	if len(parts) < 2 || parts[1] == "" {
 		return fmt.Errorf("%w: %s", ErrUnknownRecipient, address)
-	}
-
-	// Well-known rig-level singletons (rig/witness, rig/refinery)
-	if len(parts) == 2 {
-		switch parts[1] {
-		case constants.RoleWitness:
-			return nil
-		}
 	}
 
 	// Check agent beads if available
@@ -182,7 +174,7 @@ func (r *Resolver) validateAgentAddress(address string) error {
 		switch len(parts) {
 		case 2:
 			rig, name := parts[0], parts[1]
-			// Singleton role: rig/name (e.g., gastown/witness)
+			// Singleton role: rig/name (e.g., gastown/refinery)
 			if dirExistsAt(filepath.Join(r.townRoot, rig, name)) {
 				return nil
 			}
@@ -471,7 +463,6 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 // AgentBeadIDToAddress converts an agent bead ID to a mail address.
 // Handles both gt- (rig agents) and hq- (town agents) prefixes:
 //   - hq-mayor → mayor/
-//   - hq-deacon → deacon/
 //   - gt-gastown-crew-max → gastown/crew/max
 func AgentBeadIDToAddress(id string) string {
 	if addr := dogAddressFromAgentBeadID(id); addr != "" {
@@ -504,10 +495,6 @@ func AgentBeadIDToAddress(id string) string {
 	// Scan from right for known role markers
 	for i := len(parts) - 1; i >= 1; i-- {
 		switch parts[i] {
-		case constants.RoleWitness:
-			// Singleton role: rig is everything before the role
-			rig := strings.Join(parts[:i], "-")
-			return rig + "/" + parts[i]
 		case constants.RoleCrew, constants.RolePolecat:
 			// Named role: rig/role/name
 			rig := strings.Join(parts[:i], "-")

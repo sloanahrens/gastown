@@ -15,14 +15,14 @@ func TestAddressToIdentity(t *testing.T) {
 		// Town-level agents keep trailing slash
 		{"mayor", "mayor/"},
 		{"mayor/", "mayor/"},
-		{"deacon", "deacon/"},
-		{"deacon/", "deacon/"},
+		{"deacon", "deacon"}, // deacon role retired (gt-4k3fj.6.1)
+		{"deacon/", "deacon"},
 
 		// Rig-scoped town-level roles resolve to canonical form (gt-te23)
 		{"gastown/mayor", "mayor/"},
-		{"gastown/deacon", "deacon/"},
+		{"gastown/deacon", "gastown/deacon"},
 		{"laser/mayor", "mayor/"},
-		{"laser/deacon", "deacon/"},
+		{"laser/deacon", "laser/deacon"},
 
 		// Rig-level agents: crew/ and polecats/ normalized to canonical form
 		{"gastown/polecats/Toast", "gastown/Toast"},
@@ -55,7 +55,7 @@ func TestIdentityToAddress(t *testing.T) {
 		// Town-level agents
 		{"mayor", "mayor/"},
 		{"mayor/", "mayor/"},
-		{"deacon", "deacon/"},
+		{"deacon", "deacon"}, // deacon role retired (gt-4k3fj.6.1)
 		{"deacon/", "deacon/"},
 
 		// Rig-level agents: crew/ and polecats/ normalized

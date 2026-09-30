@@ -72,7 +72,7 @@ type TownSettings struct {
 	// Keys are role names: "mayor", "deacon", "witness", "refinery", "polecat", "crew".
 	// Values are agent names (built-in presets or custom agents defined in Agents).
 	// This allows cost optimization by using different models for different roles.
-	// Example: {"mayor": "claude-opus", "witness": "claude-haiku", "polecat": "claude-sonnet"}
+	// Example: {"mayor": "claude-opus", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
 	// PolecatPool, when set, lets `gt sling` choose a polecat's agent from a
@@ -182,8 +182,10 @@ type OperationalConfig struct {
 	// Daemon configures daemon lifecycle thresholds.
 	Daemon *DaemonThresholds `json:"daemon,omitempty"`
 
-	// Deacon configures deacon health-check thresholds.
-	Deacon *DeaconThresholds `json:"deacon,omitempty"`
+	// Deacon is retired with the deacon role (gt-4k3fj.6.1): nothing reads
+	// it; it is declared so a settings file that still carries it decodes,
+	// and kept verbatim across rewrites.
+	Deacon json.RawMessage `json:"deacon,omitempty"`
 
 	// Polecat configures polecat session thresholds.
 	Polecat *PolecatThresholds `json:"polecat,omitempty"`
@@ -197,8 +199,10 @@ type OperationalConfig struct {
 	// Web configures web API thresholds.
 	Web *WebThresholds `json:"web,omitempty"`
 
-	// Witness configures witness patrol thresholds.
-	Witness *WitnessThresholds `json:"witness,omitempty"`
+	// Recovery configures stalled-polecat recovery thresholds. The key is
+	// still "witness": the retired witness role owned these knobs, and the
+	// live settings/config.json carries them under that name.
+	Recovery *RecoveryThresholds `json:"witness,omitempty"`
 
 	// ContainerGate sizes the town-level container-suite gate pool
 	// (internal/slot): how many Docker-backed suites may run at once on the
@@ -337,27 +341,14 @@ type DaemonThresholds struct {
 	// RecoveryHeartbeatInterval is the fixed interval for recovery-focused daemon heartbeat (default "3m").
 	RecoveryHeartbeatInterval string `json:"recovery_heartbeat_interval,omitempty"`
 
-	// BootSpawnCooldown is how long a Boot agent spawn suppresses the next one
-	// (default: two recovery heartbeats). It gates no in-process triage, which
-	// pays no prefill.
-	BootSpawnCooldown string `json:"boot_spawn_cooldown,omitempty"`
-
-	// BootTurnBudget is how long a live Boot session may keep working before the
-	// daemon reaps it as wedged (default "10m").
-	BootTurnBudget string `json:"boot_turn_budget,omitempty"`
-
-	// BootIdleSuppression is how long to suppress Boot spawns after Boot reported "nothing"
-	// (deacon was healthy). Prevents burning API calls when deacon is running fine (default "15m").
+	// The boot and deacon keys are retired with those roles (gt-4k3fj.6.1):
+	// nothing reads them; they are declared so a settings file that still
+	// carries them decodes.
+	BootSpawnCooldown   string `json:"boot_spawn_cooldown,omitempty"`
+	BootTurnBudget      string `json:"boot_turn_budget,omitempty"`
 	BootIdleSuppression string `json:"boot_idle_suppression,omitempty"`
-
-	// BootMode selects how Boot triage runs: "mechanical" (default) runs
-	// `gt boot triage` as a subprocess on the daemon's own heartbeat with no
-	// model involved; "agent" spawns the Boot Claude session as before. The
-	// agent added nothing over the mechanical triage in practice (gt-fo2k).
-	BootMode string `json:"boot_mode,omitempty"`
-
-	// DeaconGracePeriod is time to wait after starting Deacon before checking heartbeat (default "5m").
-	DeaconGracePeriod string `json:"deacon_grace_period,omitempty"`
+	BootMode            string `json:"boot_mode,omitempty"`
+	DeaconGracePeriod   string `json:"deacon_grace_period,omitempty"`
 
 	// PressureCPUThreshold is the per-core load average above which new
 	// non-infrastructure spawns are deferred. Disabled by default (0).
@@ -372,36 +363,6 @@ type DaemonThresholds struct {
 	// PressureMaxSessions is the maximum number of concurrent agent tmux
 	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
-}
-
-// DeaconThresholds configures deacon health-check and dispatch thresholds.
-type DeaconThresholds struct {
-	// PingTimeout is how long to wait for HEALTH_CHECK nudge response (default "30s").
-	PingTimeout string `json:"ping_timeout,omitempty"`
-
-	// ConsecutiveFailures is health check failures before force-kill (default 3).
-	ConsecutiveFailures *int `json:"consecutive_failures,omitempty"`
-
-	// Cooldown is minimum time between force-kills of same agent (default "5m").
-	Cooldown string `json:"cooldown,omitempty"`
-
-	// HeartbeatStaleThreshold is age at which deacon heartbeat is stale (default "5m").
-	HeartbeatStaleThreshold string `json:"heartbeat_stale_threshold,omitempty"`
-
-	// HeartbeatVeryStaleThreshold is age at which heartbeat is very stale (default "15m").
-	HeartbeatVeryStaleThreshold string `json:"heartbeat_very_stale_threshold,omitempty"`
-
-	// MaxRedispatches is max times a bead can be re-dispatched before escalating (default 3).
-	MaxRedispatches *int `json:"max_redispatches,omitempty"`
-
-	// RedispatchCooldown is min time between re-dispatches of same bead (default "5m").
-	RedispatchCooldown string `json:"redispatch_cooldown,omitempty"`
-
-	// MaxFeedsPerCycle is max stranded convoys to feed per invocation (default 3).
-	MaxFeedsPerCycle *int `json:"max_feeds_per_cycle,omitempty"`
-
-	// FeedCooldown is min time between feeding same convoy (default "10m").
-	FeedCooldown string `json:"feed_cooldown,omitempty"`
 }
 
 // PolecatThresholds configures polecat session and retry thresholds.
@@ -472,52 +433,25 @@ type WebThresholds struct {
 	MaxBodyLen *int `json:"max_body_len,omitempty"`
 }
 
-// WitnessThresholds configures witness patrol detection thresholds.
-type WitnessThresholds struct {
-	// StartupStallThreshold is the minimum session age before a session with no
-	// recent activity is considered stalled at startup (default "90s").
-	StartupStallThreshold string `json:"startup_stall_threshold,omitempty"`
-
-	// StartupActivityGrace is the max time since last activity before a session
-	// old enough to be past startup is considered stalled (default "60s").
-	StartupActivityGrace string `json:"startup_activity_grace,omitempty"`
-
+// RecoveryThresholds configures stalled-polecat recovery thresholds.
+type RecoveryThresholds struct {
 	// MaxBeadRespawns is the threshold above which a bead respawn is blocked
 	// and escalated to mayor instead of re-dispatched (default 3).
 	MaxBeadRespawns *int `json:"max_bead_respawns,omitempty"`
 
-	// DoneIntentStuckTimeout is how long a done-intent can be active before the
-	// session is considered stuck and restarted (default "60s").
-	DoneIntentStuckTimeout string `json:"done_intent_stuck_timeout,omitempty"`
-
-	// DoneIntentRecentGrace is how recently a done-intent must have been created
-	// to be considered still in progress (default "30s").
-	DoneIntentRecentGrace string `json:"done_intent_recent_grace,omitempty"`
-
-	// DoneIntentMaxAge is the age past which a done-intent on a dead session is
-	// residue rather than a crashed exit worth restarting (default "24h").
-	DoneIntentMaxAge string `json:"done_intent_max_age,omitempty"`
-
-	// HeartbeatStartupGrace is how long after session creation the witness waits
-	// before flagging a live polecat with assigned work but no heartbeat file as
-	// possibly stuck at startup (e.g., auth 401 blocking initialization, default "5m").
-	// The witness exposes the signal; patrol formula decides whether to escalate.
+	// HeartbeatStartupGrace is how long after session creation a live polecat
+	// with assigned work but no heartbeat file counts as possibly stuck at
+	// startup (e.g., auth 401 blocking initialization, default "5m").
 	HeartbeatStartupGrace string `json:"heartbeat_startup_grace,omitempty"`
 
-	// ComposerStallFrozenFor is the threshold BOTH composer-stall clocks are
-	// measured against (default "5m"): how long a session must produce no pane
-	// output while holding unsubmitted composer input, or how long that input
-	// must be observed waiting unattended, before the session counts as
-	// stalled. There is deliberately no second knob — an operator tuning stall
-	// detection has one number to reason about.
-	//
-	// It is the guard that separates a genuinely wedged agent from a working or
-	// idle-await one carrying a queued nudge. Note that the input's age alone
-	// is not evidence: a run may only trip it once several samples spanning a
-	// minimum window agree and the pane's transcript region has been unchanged
-	// throughout, so an agent that did any work in the window restarts the
-	// clock instead of tripping it (gt-hkhu, gt-afa7). See
-	// tmux.DetectComposerStallTracked.
+	// The keys below belonged to the retired witness patrol (gt-4k3fj.6.1):
+	// nothing reads them; they are declared so a settings file that still
+	// carries them decodes.
+	StartupStallThreshold  string `json:"startup_stall_threshold,omitempty"`
+	StartupActivityGrace   string `json:"startup_activity_grace,omitempty"`
+	DoneIntentStuckTimeout string `json:"done_intent_stuck_timeout,omitempty"`
+	DoneIntentRecentGrace  string `json:"done_intent_recent_grace,omitempty"`
+	DoneIntentMaxAge       string `json:"done_intent_max_age,omitempty"`
 	ComposerStallFrozenFor string `json:"composer_stall_frozen_for,omitempty"`
 }
 
@@ -693,7 +627,7 @@ type RigSettings struct {
 	// Keys are role names: "witness", "refinery", "polecat", "crew".
 	// Values are agent names (built-in presets or custom agents).
 	// Overrides TownSettings.RoleAgents for this specific rig.
-	// Example: {"witness": "claude-haiku", "polecat": "claude-sonnet"}
+	// Example: {"crew": "claude-haiku", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
 	// WorkerAgents maps individual crew worker names to agent aliases.
@@ -1514,17 +1448,6 @@ type MergeQueueConfig struct {
 	// rigs that never configure it keep upstream (pre-gate) behavior.
 	Editorial *EditorialConfig `json:"editorial,omitempty"`
 
-	// PostMergeCommand is inert: its runner went with the refinery, and
-	// nothing reads it (gt-z0l3s). It stays only because the live gastown
-	// rig config still carries post_merge_command and rig configs decode
-	// strictly; drop the key from <town>/gastown/config.json first, then this
-	// field and PostMergeTimeout. Installing is `make install`
-	// (scripts/install-gt.sh).
-	PostMergeCommand string `json:"post_merge_command,omitempty"`
-
-	// PostMergeTimeout is inert, like PostMergeCommand.
-	PostMergeTimeout string `json:"post_merge_timeout,omitempty"`
-
 	// PostLandCommand runs once per landing, after the push and the record,
 	// in a throwaway worktree at the landed commit (the slow test tier, e.g.
 	// "make test-slow"). The landing worker runs it asynchronously, one at a
@@ -1707,23 +1630,6 @@ func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {
 		return 0
 	}
 	return c.MaxReadyForDispatch
-}
-
-// DefaultPostMergeTimeout covers the install script's 5m lock wait plus a
-// cold-cache build, well under the refinery shell tool's 45m ceiling.
-const DefaultPostMergeTimeout = 20 * time.Minute
-
-// GetPostMergeTimeout returns the post-merge command timeout. Nil-safe; an
-// empty, unparsable or non-positive value yields DefaultPostMergeTimeout.
-func (c *MergeQueueConfig) GetPostMergeTimeout() time.Duration {
-	if c == nil || c.PostMergeTimeout == "" {
-		return DefaultPostMergeTimeout
-	}
-	d, err := time.ParseDuration(c.PostMergeTimeout)
-	if err != nil || d <= 0 {
-		return DefaultPostMergeTimeout
-	}
-	return d
 }
 
 // HasAnyGateCommand reports whether at least one of the five gate commands

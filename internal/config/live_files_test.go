@@ -10,9 +10,10 @@ import (
 
 // liveTown holds scrubbed copies of the operator town's config files as they
 // stood on 2026-09-29 (tokens, emails, usernames and home paths replaced), less
-// the patrols.quota_resume key gt-638go.2 deleted from the schema: the live
-// ~/gt/mayor/daemon.json must lose that key before a binary carrying the
-// deletion is installed, or the startup gate refuses the town.
+// the patrols.quota_resume key gt-638go.2 deleted from the schema and the
+// merge_queue.post_merge_command/post_merge_timeout keys gt-6zf1o deleted: a
+// live file must lose such a key before a binary carrying the deletion is
+// installed, or the startup gate refuses the town.
 // Strict decoding must accept every key they carry: a kernel that refused the
 // live town would stop it the moment it shipped.
 const liveTown = "testdata/livetown"

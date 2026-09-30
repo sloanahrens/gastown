@@ -6,42 +6,10 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
-	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// setupTestStore opens a real beads database in a temp dir for integration tests.
-// Fails the test if the store cannot be opened: a skip would hide lost coverage.
-// Caller must run the returned cleanup when done.
-func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
-	t.Helper()
-
-	t.Setenv("BEADS_TEST_MODE", "1")
-
-	ctx := context.Background()
-	// Fails, never skips, on an open error: a skipped store test is lost
-	// coverage with no red signal.
-	store := testutil.OpenTestStore(t, ctx)
-
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("SetConfig issue_prefix: %v", err)
-	}
-
-	cleanup := func() {
-		_ = store.Close()
-	}
-	return store, cleanup
-}
-
-func TestSetupTestStore_OpensStore(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	if store == nil {
-		t.Fatal("setupTestStore returned nil store")
-	}
-}
-
 func TestGetTrackingConvoys_FiltersByTracksType(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -130,6 +98,7 @@ func TestGetTrackingConvoys_FiltersByTracksType(t *testing.T) {
 }
 
 func TestIsConvoyClosed_ReturnsCorrectStatus(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
