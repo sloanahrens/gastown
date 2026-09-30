@@ -801,6 +801,58 @@ func TestScanExcludesAgentBeads(t *testing.T) {
 	}
 }
 
+// TestScanFlagsStepsOrphanedByADeletedMolecule: `bd mol wisp gc --closed
+// --force` deletes a closed molecule root and drops the parent edges of the
+// steps still open under it, so neither the dangling-parent scan nor the
+// closed-molecule scan sees them. What survives is the sibling `blocks` chain
+// between the steps, and Scan raises an anomaly from it (gt-ogvp6).
+func TestScanFlagsStepsOrphanedByADeletedMolecule(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			// Deleted molecule's steps: parent edges gone, blocks chain left.
+			"orphan-s2": {id: "orphan-s2", status: "open", issueType: "task", createdAt: recent},
+			"orphan-s3": {id: "orphan-s3", status: "open", issueType: "task", createdAt: recent},
+			// A live molecule: every step still has its parent edge.
+			"live-mol": {id: "live-mol", status: "open", issueType: "molecule", createdAt: recent},
+			"live-s1":  {id: "live-s1", status: "open", issueType: "task", createdAt: recent},
+			"live-s2":  {id: "live-s2", status: "open", issueType: "task", createdAt: recent},
+			// A standalone task carries no edges at all.
+			"standalone": {id: "standalone", status: "open", issueType: "task", createdAt: recent},
+			// An already closed orphan is no longer a leak.
+			"closed-orphan": {id: "closed-orphan", status: "closed", issueType: "task", createdAt: recent, closedAt: recent},
+		},
+		deps: []fakeDep{
+			{issueID: "orphan-s3", dependsOnID: "orphan-s2", depType: "blocks"},
+			{issueID: "live-s1", dependsOnID: "live-mol", depType: "parent-child"},
+			{issueID: "live-s2", dependsOnID: "live-mol", depType: "parent-child"},
+			{issueID: "live-s2", dependsOnID: "live-s1", depType: "blocks"},
+			{issueID: "closed-orphan", dependsOnID: "orphan-s2", depType: "blocks"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	scan, err := Scan(db, "testdb", 24*time.Hour, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	var got *Anomaly
+	for i := range scan.Anomalies {
+		if scan.Anomalies[i].Type == "orphaned_step_wisps" {
+			got = &scan.Anomalies[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("Scan anomalies = %+v, want an orphaned_step_wisps anomaly", scan.Anomalies)
+	}
+	if got.Count != 1 {
+		t.Errorf("orphaned_step_wisps count = %d, want 1 (orphan-s3, the one open step still holding a sibling edge)", got.Count)
+	}
+}
+
 func TestClosedMoleculeStepReapBehavior(t *testing.T) {
 	now := time.Now().UTC()
 	state := &fakeReaperState{
@@ -1275,6 +1327,33 @@ func (s *fakeReaperState) purgeCandidatesLocked(cutoff time.Time, excluded map[s
 	return ids
 }
 
+// orphanedStepCountLocked mirrors Scan's orphaned-step query: open non-agent
+// wisps that wait on another wisp through a blocks edge and hang from no parent.
+func (s *fakeReaperState) orphanedStepCountLocked() int {
+	count := 0
+	for id, w := range s.wisps {
+		if !isOpenWispStatus(w.status) || w.issueType == "agent" {
+			continue
+		}
+		blocked, parented := false, false
+		for _, dep := range s.deps {
+			if dep.issueID != id {
+				continue
+			}
+			switch dep.depType {
+			case "parent-child":
+				parented = true
+			case "blocks":
+				blocked = blocked || s.wisps[dep.dependsOnID] != nil
+			}
+		}
+		if blocked && !parented {
+			count++
+		}
+	}
+	return count
+}
+
 // wispTypeCountsLocked groups the same purge candidates by wisp_type, the shape
 // the digest query returns.
 func (s *fakeReaperState) wispTypeCountsLocked(cutoff time.Time, excluded map[string]bool) map[string]int {
@@ -1545,6 +1624,8 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 	c.state.record(c.id, "QUERY "+normalized)
 
 	switch {
+	case strings.Contains(normalized, "SELECT COUNT(DISTINCT w.id) FROM wisps w") && strings.Contains(normalized, "sib.type = 'blocks'"):
+		return fakeCountRows(c.state.orphanedStepCountLocked()), nil
 	case strings.Contains(normalized, "SELECT description FROM wisps WHERE"):
 		return fakeDescriptionRows(c.state.agentDescriptionsLocked(strings.Contains(normalized, "gt:agent"))), nil
 	case strings.Contains(normalized, "SELECT description FROM issues WHERE"):
@@ -1885,13 +1966,13 @@ func TestMRProtectionTTLZeroLabelSetFallsBackToCreatedAt(t *testing.T) {
 			"old-no-anchor": {
 				id: "old-no-anchor", status: "open", issueType: "task",
 				createdAt: old,
-				labels: []string{"cleanup", "state:merge-requested"},
+				labels:    []string{"cleanup", "state:merge-requested"},
 			},
 			// 2h old, no labelSetAt → anchor = createdAt = 2h ago → fresh
 			"recent-no-anchor": {
 				id: "recent-no-anchor", status: "open", issueType: "task",
 				createdAt: recent,
-				labels: []string{"cleanup", "state:merge-requested"},
+				labels:    []string{"cleanup", "state:merge-requested"},
 			},
 		},
 		ops: map[int][]string{},

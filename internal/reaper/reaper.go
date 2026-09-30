@@ -682,6 +682,25 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 		result.AbsentParentCandidates = danglingCount
 	}
 
+	// Anomaly detection: open steps whose molecule was deleted. A delete drops
+	// the steps' parent edges, so the dangling scan above cannot see them; the
+	// blocks edges between sibling steps survive. Warn only: nothing here is
+	// closed, so a standalone chained wisp costs a false alarm, not a lost one
+	// (gt-ogvp6).
+	orphanedQuery := fmt.Sprintf(`
+		SELECT COUNT(DISTINCT w.id) FROM wisps w
+		INNER JOIN wisp_dependencies sib ON sib.issue_id = w.id AND sib.type = 'blocks' AND sib.depends_on_wisp_id IS NOT NULL
+		LEFT JOIN wisp_dependencies pc ON pc.issue_id = w.id AND pc.type = 'parent-child'
+		WHERE pc.issue_id IS NULL AND w.issue_type != 'agent' AND %s`, openWispStatusWhere)
+	var orphanedCount int
+	if err := db.QueryRowContext(ctx, orphanedQuery).Scan(&orphanedCount); err == nil && orphanedCount > 0 {
+		result.Anomalies = append(result.Anomalies, Anomaly{
+			Type:    "orphaned_step_wisps",
+			Message: fmt.Sprintf("%d open wisp(s) wait on sibling steps but hang from no molecule; a molecule was deleted under them", orphanedCount),
+			Count:   orphanedCount,
+		})
+	}
+
 	return result, nil
 }
 

@@ -3763,23 +3763,85 @@ func getAttachedMoleculeID(bd *BdCli, workDir, beadID string) string {
 }
 
 // closeMoleculeWithDescendants closes a molecule and all its descendant step
-// issues using the bd CLI. Returns the total number of issues closed.
+// issues using the bd CLI, and returns the number of issues closed. The root
+// stays open while any step does.
 func closeMoleculeWithDescendants(bd *BdCli, workDir, moleculeID string) (int, error) {
 	// Recursively close descendants first (bottom-up)
 	closed, descErr := closeDescendantsViaCLI(bd, workDir, moleculeID)
+	if descErr != nil {
+		// The owning polecat is gone, so a step bd refuses protects nothing:
+		// force it. A closed root over an open step is deleted by the next
+		// `bd mol wisp gc --closed --force`, which drops the step's parent
+		// edge and leaves it open under no molecule (gt-ogvp6).
+		forced, forceErr := forceCloseOpenDescendantsViaCLI(bd, workDir, moleculeID)
+		closed += forced
+		if forceErr != nil {
+			return closed, fmt.Errorf("leaving molecule %s open: %w", moleculeID, errors.Join(forceErr, descErr))
+		}
+	}
 
 	// Close the molecule itself
 	reason := "Orphaned mol-polecat-work — owning polecat no longer exists (issue #1381)"
 	if err := bd.Run(workDir, "close", moleculeID, "-r", reason); err != nil {
-		closeErr := fmt.Errorf("closing molecule %s: %w", moleculeID, err)
-		if descErr != nil {
-			return closed, fmt.Errorf("%w; also: %v", closeErr, descErr)
-		}
-		return closed, closeErr
+		return closed, fmt.Errorf("closing molecule %s: %w", moleculeID, err)
 	}
 	closed++
 
-	return closed, descErr
+	return closed, nil
+}
+
+// forceCloseOpenDescendantsViaCLI force-closes every descendant of parentID
+// that is still open and returns how many closed. A step left open is named
+// in a *beads.PartialCloseError.
+func forceCloseOpenDescendantsViaCLI(bd *BdCli, workDir, parentID string) (int, error) {
+	open, err := openDescendantIDsViaCLI(bd, workDir, parentID)
+	if err != nil || len(open) == 0 {
+		return 0, err
+	}
+	args := append([]string{"close"}, open...)
+	args = append(args, "-r", "Orphaned mol-polecat-work step — owning polecat no longer exists", "--force")
+	runErr := bd.Run(workDir, args...)
+	// bd 1.2 skips a refused step and can still exit 0, so the re-read decides.
+	verifyErr := verifyClosedViaCLI(bd, workDir, open)
+	if verifyErr == nil {
+		return len(open), nil
+	}
+	var pe *beads.PartialCloseError
+	if errors.As(verifyErr, &pe) {
+		return len(pe.Closed), errors.Join(verifyErr, runErr)
+	}
+	return 0, errors.Join(verifyErr, runErr)
+}
+
+// openDescendantIDsViaCLI lists the descendants of parentID that are not
+// closed, grandchildren first.
+func openDescendantIDsViaCLI(bd *BdCli, workDir, parentID string) ([]string, error) {
+	output, err := bd.Exec(workDir, "list", "--parent="+parentID, "--json")
+	if err != nil {
+		return nil, fmt.Errorf("listing children of %s: %w", parentID, err)
+	}
+	if output == "" {
+		return nil, nil
+	}
+	var children []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(output), &children); err != nil {
+		return nil, fmt.Errorf("parsing children of %s: %w", parentID, err)
+	}
+	var open []string
+	for _, child := range children {
+		below, err := openDescendantIDsViaCLI(bd, workDir, child.ID)
+		if err != nil {
+			return nil, err
+		}
+		open = append(open, below...)
+		if child.Status != "closed" {
+			open = append(open, child.ID)
+		}
+	}
+	return open, nil
 }
 
 // closeViaCLIUntilNoProgress closes ids as orphaned steps, retrying the
