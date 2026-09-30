@@ -219,4 +219,13 @@ func TestBDStoreProbe_ReadsThroughPinnedBD(t *testing.T) {
 	if err != nil {
 		t.Errorf("a pruned journal refused startup: %v", err)
 	}
+	// A truncation whose window holds no records is not a readable journal.
+	for _, w := range []*beads.EventsTruncatedError{{Floor: 0, Head: 0}, {Floor: 50, Head: 10}} {
+		bad := fakeStoreProbe{level: 66, journal: "true", tailErr: w}
+		err := checkBeadsStoreCompatibility(context.Background(), dir, []string{"hq"}, 66,
+			probesFor(map[string]*fakeStoreProbe{"hq": &bad}), nil)
+		if err == nil || !strings.Contains(err.Error(), "events journal probe failed") {
+			t.Errorf("truncation window %+v = %v, want a refusal", w, err)
+		}
+	}
 }
