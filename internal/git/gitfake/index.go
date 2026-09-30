@@ -28,6 +28,7 @@ import (
 type worktreeState struct {
 	indexes map[*worktree]*index
 	trees   map[string]map[string]string // tree id to its tree
+	config  map[*repo]map[string]string  // repository config (backup.go)
 }
 
 type index struct {
