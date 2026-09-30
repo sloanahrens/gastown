@@ -11,7 +11,11 @@
 //     line-level merge would combine the edits.
 //   - Commit ids are unique per commit made, not content hashes, and log
 //     order is the order commits were made (git's is commit date).
-//   - Push URLs, the town-root guard and hooks are not modeled.
+//   - The town-root guard and hooks are not modeled.
+//   - A repository is the directory it was made at: a subdirectory of a
+//     checkout is not one. A clone of a remote whose HEAD names a missing
+//     branch, or that holds only tags, is not modeled.
+//   - Clone filters, references and depth are accepted and ignored.
 package gitfake
 
 import (
@@ -46,6 +50,7 @@ type repo struct {
 	refs      map[string]string
 	head      string // a full ref name, or a commit id when detached
 	remotes   map[string]string
+	pushURLs  map[string]string // remote to push URL, where one is set
 	has       map[string]bool
 	main      *worktree
 	worktrees map[string]*worktree
@@ -160,16 +165,30 @@ func (f *Fake) Clone(t testing.TB, src, dest string) {
 		r.refs[s.head] = id
 	}
 	f.repos[dest] = r
-	if err := materialize(dest, f.treeOf(r.refs[r.head])); err != nil {
+	if err := materializeCheckout(dest, f.treeOf(r.refs[r.head])); err != nil {
 		t.Fatalf("gitfake: Clone: %v", err)
 	}
 }
 
 // Open returns the implementation of Repo for the repository or worktree at
-// dir. Every call on a directory that is neither fails the way git does
-// outside a repository.
+// dir, as git.NewGit(dir) does. Every call on a directory that is neither
+// fails the way git does outside a repository.
 func (f *Fake) Open(dir string) Repo {
 	return &handle{f: f, dir: clean(dir)}
+}
+
+// OpenWithDir is Open for git.NewGitWithDir(gitDir, workDir): the repository
+// at gitDir (a bare repository, or a checkout's .git) when it is set, else
+// workDir.
+func (f *Fake) OpenWithDir(gitDir, workDir string) Repo {
+	if gitDir == "" {
+		return f.Open(workDir)
+	}
+	gitDir = clean(gitDir)
+	if filepath.Base(gitDir) == ".git" {
+		gitDir = filepath.Dir(gitDir)
+	}
+	return &handle{f: f, dir: gitDir}
 }
 
 // Parents returns the parents of commit id, or nil when it has none or is
@@ -385,6 +404,15 @@ func materialize(dir string, tree map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// materializeCheckout writes a new checkout at dir: its .git directory (held
+// empty; the model is in memory) and tree.
+func materializeCheckout(dir string, tree map[string]string) error {
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		return err
+	}
+	return materialize(dir, tree)
 }
 
 // lineDiff returns the lines removed from a and added in b by a minimal edit

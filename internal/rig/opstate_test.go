@@ -1,10 +1,12 @@
 package rig
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
 
@@ -13,6 +15,7 @@ import (
 // populated beads database and is exercised where it can be stubbed; here the
 // point is that the local layer answers first and alone.
 func TestGetOpState_ReadsWispLayer(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		status    string
@@ -37,7 +40,7 @@ func TestGetOpState_ReadsWispLayer(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			state, source := GetOpState(townRoot, "testrig")
+			state, source := getOpState(townRoot, "testrig", noRigBead)
 			if state != tt.wantState {
 				t.Errorf("GetOpState() state = %q, want %q", state, tt.wantState)
 			}
@@ -53,12 +56,13 @@ func TestGetOpState_ReadsWispLayer(t *testing.T) {
 // absent bead as "parked" would put a dead marker on a working rig, and the
 // dashboard's whole use for this value is deciding what to mark.
 func TestGetOpState_UnparkedRigIsOperational(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	state, source := GetOpState(townRoot, "testrig")
+	state, source := getOpState(townRoot, "testrig", noRigBead)
 	if state != OpStateOperational {
 		t.Errorf("GetOpState() state = %q, want %q", state, OpStateOperational)
 	}
@@ -71,6 +75,7 @@ func TestGetOpState_UnparkedRigIsOperational(t *testing.T) {
 // wisp layer reports "" for a key it has never been given, which must fall
 // through rather than match an empty status.
 func TestGetOpState_UnsetWispKeyIsNotParked(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
 		t.Fatal(err)
@@ -80,7 +85,7 @@ func TestGetOpState_UnsetWispKeyIsNotParked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if state, _ := GetOpState(townRoot, "testrig"); state != OpStateOperational {
+	if state, _ := getOpState(townRoot, "testrig", noRigBead); state != OpStateOperational {
 		t.Errorf("GetOpState() state = %q, want %q", state, OpStateOperational)
 	}
 }
@@ -89,6 +94,7 @@ func TestGetOpState_UnsetWispKeyIsNotParked(t *testing.T) {
 // rig that takes no work, and nothing at all otherwise — a badge reading
 // "operational" on every healthy rig would train the eye to skip it.
 func TestOpState_Label(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		state OpState
 		want  string
@@ -101,5 +107,51 @@ func TestOpState_Label(t *testing.T) {
 		if got := tt.state.Label(); got != tt.want {
 			t.Errorf("%q.Label() = %q, want %q", tt.state, got, tt.want)
 		}
+	}
+}
+
+// TestGetOpState_ReadsIdentityBeadLabel covers the fallback under the wisp
+// layer: with no wisp entry, a status label on the rig identity bead parks or
+// docks the rig, read through bd.
+func TestGetOpState_ReadsIdentityBeadLabel(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		label     string
+		wantState OpState
+	}{
+		{"status:parked", OpStateParked},
+		{"status:docked", OpStateDocked},
+		{"priority:high", OpStateOperational},
+	} {
+		t.Run(tt.label, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			rigPath := filepath.Join(townRoot, "testrig")
+			if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"type":"rig","name":"testrig","beads":{"prefix":"tr"}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var shown []string
+			run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+				if bdVerb(c.Args) != "show" {
+					return nil, nil, nil
+				}
+				shown = append(shown, c.Args[1])
+				return []byte(`[{"id":"tr-rig-testrig","title":"testrig","status":"open","labels":["` + tt.label + `"]}]`), nil, nil
+			}
+
+			state, source := getOpState(townRoot, "testrig", run)
+			if state != tt.wantState {
+				t.Errorf("state = %q, want %q", state, tt.wantState)
+			}
+			if tt.wantState != OpStateOperational && source != OpStateSourceGlobal {
+				t.Errorf("source = %q, want %q", source, OpStateSourceGlobal)
+			}
+			if len(shown) != 1 || shown[0] != "tr-rig-testrig" {
+				t.Errorf("bd show calls = %v, want one read of tr-rig-testrig", shown)
+			}
+		})
 	}
 }

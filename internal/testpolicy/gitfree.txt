@@ -7,3 +7,4 @@
 internal/git
 internal/git/gitfake
 internal/land
+internal/rig

@@ -97,6 +97,24 @@ func TestNestedWorkDirResolvingToTownRootGitIsBlocked(t *testing.T) {
 	}
 }
 
+// CommonDir of a directory that is no repository of its own, inside the town
+// root, would resolve the town root's .git, and a caller writing its
+// info/exclude would pollute the town repository (gt-cqy8). It refuses.
+func TestCommonDirRefusesTownRootWalkUp(t *testing.T) {
+	t.Parallel()
+	root := townRoot(t)
+	ghost := filepath.Join(root, "gastown", "polecats", "ghost")
+	if err := os.MkdirAll(ghost, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := inTownRoot(newScripted(nil), ghost, root)
+	dir, err := (&Git{workDir: ghost, exec: s.run}).CommonDir()
+	requireUnsafe(t, err)
+	if dir != "" || len(s.sent()) != 1 {
+		t.Fatalf("CommonDir = %q, calls %q; want a refusal after the top-level probe alone", dir, s.sent())
+	}
+}
+
 // A mutation in an ordinary repository goes through.
 func TestMutationOutsideTownRootIsAllowed(t *testing.T) {
 	t.Parallel()

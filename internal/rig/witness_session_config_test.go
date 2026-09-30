@@ -18,6 +18,7 @@ func writeRigRootConfig(t *testing.T, townRoot, body string) {
 }
 
 func TestResolveWitnessSessionConfig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if cfg := ResolveWitnessSessionConfig(townRoot, "gastown"); cfg != nil {
 		t.Fatalf("no config.json = %+v, want nil (off)", cfg)
