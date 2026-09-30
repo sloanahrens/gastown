@@ -153,14 +153,14 @@ func RunNotifierContract(t *testing.T, newImpl func(t *testing.T) Subject) {
 	t.Run("mail options set the sender", func(t *testing.T) {
 		t.Parallel()
 		s := newImpl(t)
-		err := s.Notifier.MailSend(t.Context(), "gastown/witness", "relayed", "relayed body",
+		err := s.Notifier.MailSend(t.Context(), "mayor/", "relayed", "relayed body",
 			notify.From("convoy/contract"), notify.NoNotify())
 		if err != nil {
 			t.Fatalf("MailSend: %v", err)
 		}
-		got := s.Observer.Inbox("gastown/witness")
+		got := s.Observer.Inbox("mayor/")
 		if len(got) != 1 || got[0].From != "convoy/contract" || got[0].Subject != "relayed" {
-			t.Fatalf("gastown/witness inbox = %+v, want one message from convoy/contract", got)
+			t.Fatalf("mayor/ inbox = %+v, want one message from convoy/contract", got)
 		}
 	})
 
