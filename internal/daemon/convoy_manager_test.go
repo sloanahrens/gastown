@@ -646,7 +646,7 @@ func TestRetryMissingStores_BacksOffEscalatesAndClears(t *testing.T) {
 		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
 	m.SetAlertHooks(
 		func(key, source, msg string) { raised = append(raised, firing{key, source, msg}) },
-		func(reason string, keys ...string) { cleared = append(cleared, keys...) },
+		func(reason string, keys ...string) error { cleared = append(cleared, keys...); return nil },
 	)
 
 	start := time.Now()
@@ -719,7 +719,7 @@ func TestRetryMissingStores_RigStoreMissingDoesNotEscalate(t *testing.T) {
 		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
 	m.SetAlertHooks(
 		func(key, source, msg string) { raised = append(raised, key) },
-		func(reason string, keys ...string) {},
+		func(reason string, keys ...string) error { return nil },
 	)
 
 	start := time.Now()
@@ -4766,4 +4766,76 @@ exit 0
 		t.Errorf("expected no dispatch when the record cannot be read, got sling: %q", string(data))
 	}
 	assertLogged(t, logged, "gt-unreadable", "not dispatched: record unreadable")
+}
+
+// A dead-holder issue whose alert is already clear costs no `gt escalate
+// clear` subprocess on later scans, and a raise or a failed clear re-arms the
+// clear (gt-iesba).
+func TestResolveDeadHolderWork_ClearRunsOncePerAlertKey(t *testing.T) {
+	t.Parallel()
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", time.Hour,
+		map[string]beadsdk.Storage{}, nil, nil)
+	m.listOriginBranchesFn = func(string) ([]string, error) { return nil, nil }
+
+	var stateErr error
+	m.deadHolderWorktreeStateFn = func(_, _, _ string) (deadHolderWorktreeState, error) {
+		return deadHolderWorktreeState{}, stateErr
+	}
+
+	var cleared []string
+	var clearErr error
+	m.SetAlertHooks(
+		func(key, source, msg string) {},
+		func(reason string, keys ...string) error {
+			cleared = append(cleared, keys...)
+			return clearErr
+		},
+	)
+
+	issueKey := deadHolderAlertKey("gt", "gt-issue1")
+	originKey := deadHolderOriginAlertKey("gt")
+	count := func(key string) int {
+		n := 0
+		for _, k := range cleared {
+			if k == key {
+				n++
+			}
+		}
+		return n
+	}
+	scan := func() {
+		m.resetOriginBranches()
+		m.resolveDeadHolderWork("gt", "gt/polecats/basalt", "gt-issue1")
+	}
+
+	// A failed clear is retried on the next scan.
+	clearErr = fmt.Errorf("escalate timed out")
+	scan()
+	scan()
+	if got := count(issueKey); got != 2 {
+		t.Fatalf("failed clear ran %d times over 2 scans, want 2 (retried)", got)
+	}
+
+	// Once a clear lands, later scans skip it.
+	clearErr = nil
+	scan()
+	scan()
+	scan()
+	if got := count(issueKey); got != 3 {
+		t.Errorf("issue key cleared %d times over 5 scans, want 3 (2 failed + 1 landed)", got)
+	}
+	if got := count(originKey); got != 3 {
+		t.Errorf("origin key cleared %d times over 5 scans, want 3 (2 failed + 1 landed)", got)
+	}
+
+	// Raising the alert re-arms the clear for the next resolution.
+	stateErr = fmt.Errorf("git status failed")
+	scan()
+	stateErr = nil
+	scan()
+	scan()
+	if got := count(issueKey); got != 4 {
+		t.Errorf("issue key cleared %d times after a re-raise, want 4", got)
+	}
 }
