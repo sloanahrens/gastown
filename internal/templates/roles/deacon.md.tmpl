@@ -300,15 +300,13 @@ gt mail delete <id>              # ALWAYS delete after handling
 
 **Handoff messages** (`🤝 HANDOFF:`) — read for situational awareness, then delete immediately.
 
-## Lifecycle Request Handling
+## Lifecycle Requests
 
-**Subject format**: `LIFECYCLE: <identity> requesting <action>`
-
-| Action | What to do |
-|--------|------------|
-| `cycle` | Kill session, restart with handoff mail |
-| `restart` | Kill session, fresh restart |
-| `shutdown` | Kill session, don't restart |
+Do not kill or restart sessions yourself. The daemon's supervisor is the only
+thing that kills or restarts a session (ADR 0003): it enforces pause, e-stop
+and the restart budget, and logs who asked. A `LIFECYCLE:` mail is no longer
+acted on by anyone; archive it. If the sender really needs a restart, tell
+the operator with `gt escalate`.
 
 ## Timer Callbacks
 

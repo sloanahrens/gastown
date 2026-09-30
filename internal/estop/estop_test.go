@@ -206,3 +206,39 @@ func TestDeactivateNonExistent(t *testing.T) {
 		t.Fatalf("Deactivate non-existent: %v", err)
 	}
 }
+
+func TestActiveForIsFailClosed(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if on, err := ActiveFor(town, "gastown"); on || err != nil {
+		t.Fatalf("no sentinel: (%v, %v), want (false, nil)", on, err)
+	}
+	if err := ActivateRig(town, "gastown", TriggerManual, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := ActiveFor(town, "gastown"); !on {
+		t.Fatal("rig sentinel: want active")
+	}
+	if on, _ := ActiveFor(town, "other"); on {
+		t.Fatal("another rig's sentinel must not stop this rig")
+	}
+	if on, _ := ActiveFor(town, ""); on {
+		t.Fatal("a rig sentinel must not stop town-level seats")
+	}
+	if err := Activate(town, TriggerManual, "y"); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := ActiveFor(town, ""); !on {
+		t.Fatal("town sentinel: want active for town-level seats")
+	}
+
+	// A stat that fails for any reason but absence is an e-stop: a town root
+	// that is a regular file makes every sentinel path unstatable (ENOTDIR).
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := ActiveFor(notADir, "gastown"); !on || err == nil {
+		t.Fatalf("unstatable sentinel: (%v, %v), want (true, error)", on, err)
+	}
+}

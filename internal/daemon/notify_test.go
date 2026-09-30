@@ -58,17 +58,13 @@ func TestNotifyWitnessMailsGoToTheRigWitness(t *testing.T) {
 	t.Parallel()
 	d, rec := daemonWithRecorder(t)
 
-	d.notifyWitnessOfGUPP("gastown", "gastown/polecats/onyx", "gt-hook1", 42*time.Minute)
-	d.notifyWitnessOfOrphanedWork("gastown", "gastown/polecats/jade", "gt-hook2")
 	d.notifyWitnessOfCrashedPolecat("gastown", "ruby", "gt-hook3")
 
 	mails := rec.Mails()
-	if len(mails) != 3 {
-		t.Fatalf("mails = %+v, want 3", mails)
+	if len(mails) != 1 {
+		t.Fatalf("mails = %+v, want 1", mails)
 	}
 	wantSubjects := []string{
-		"GUPP_VIOLATION: gastown/polecats/onyx stuck for 42m0s",
-		"ORPHANED_WORK: gastown/polecats/jade has hooked work but is dead",
 		"CRASHED_POLECAT: gastown/ruby detected",
 	}
 	for i, m := range mails {

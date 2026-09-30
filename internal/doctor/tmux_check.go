@@ -122,8 +122,8 @@ func (c *LinkedPaneCheck) Fix(ctx *CheckContext) error {
 	var lastErr error
 
 	for _, session := range c.linkedSessions {
-		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-		if err := t.KillSessionWithProcesses(session); err != nil {
+		// Through the supervisor, so a parked seat or an e-stop refuses.
+		if err := killSessionForFix(ctx.TownRoot, t, session, "linked pane crosstalk"); err != nil {
 			lastErr = err
 		}
 	}

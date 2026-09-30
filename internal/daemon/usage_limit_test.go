@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"testing"
-	"time"
 )
 
 func TestIsClaudeUsageLimit(t *testing.T) {
@@ -86,75 +85,5 @@ func TestIsClaudeUsageLimit(t *testing.T) {
 				t.Fatalf("IsClaudeUsageLimit(%q) = %v, want %v", tc.input, got, tc.expect)
 			}
 		})
-	}
-}
-
-func TestRestartTracker_RecordPause_DoesNotEscalate(t *testing.T) {
-	t.Parallel()
-	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{
-		InitialBackoff:    30 * time.Second,
-		MaxBackoff:        10 * time.Minute,
-		BackoffMultiplier: 2.0,
-		CrashLoopWindow:   15 * time.Minute,
-		CrashLoopCount:    3,
-		StabilityPeriod:   30 * time.Minute,
-		PauseBackoff:      45 * time.Second,
-	})
-
-	const id = "deacon"
-
-	// Many pauses in a row should not escalate or trigger crash loop.
-	for i := 0; i < 10; i++ {
-		rt.RecordPause(id)
-	}
-
-	if rt.IsInCrashLoop(id) {
-		t.Fatalf("RecordPause should never trigger crash-loop, but did after 10 calls")
-	}
-
-	info := rt.state.Agents[id]
-	if info == nil {
-		t.Fatalf("agent state missing after RecordPause")
-	}
-	if info.RestartCount != 0 {
-		t.Errorf("RecordPause must not increment RestartCount, got %d", info.RestartCount)
-	}
-	if !info.CrashLoopSince.IsZero() {
-		t.Errorf("RecordPause must not set CrashLoopSince, got %v", info.CrashLoopSince)
-	}
-
-	remaining := rt.GetBackoffRemaining(id)
-	if remaining <= 0 || remaining > 45*time.Second {
-		t.Errorf("expected pause backoff ~45s, got %v", remaining)
-	}
-	if rt.CanRestart(id) {
-		t.Errorf("CanRestart should be false during pause backoff window")
-	}
-}
-
-func TestRestartTracker_RecordRestart_StillEscalates(t *testing.T) {
-	t.Parallel()
-	// Regression guard: confirm true-crash path is unaffected.
-	rt := NewRestartTracker(t.TempDir(), RestartTrackerConfig{
-		InitialBackoff:    30 * time.Second,
-		MaxBackoff:        10 * time.Minute,
-		BackoffMultiplier: 2.0,
-		CrashLoopWindow:   15 * time.Minute,
-		CrashLoopCount:    3,
-		StabilityPeriod:   30 * time.Minute,
-		PauseBackoff:      60 * time.Second,
-	})
-
-	const id = "deacon"
-	for i := 0; i < 3; i++ {
-		rt.RecordRestart(id)
-	}
-
-	if !rt.IsInCrashLoop(id) {
-		t.Fatalf("RecordRestart should trigger crash-loop after CrashLoopCount restarts")
-	}
-	info := rt.state.Agents[id]
-	if info.RestartCount != 3 {
-		t.Errorf("expected RestartCount=3, got %d", info.RestartCount)
 	}
 }

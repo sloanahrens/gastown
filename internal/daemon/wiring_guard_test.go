@@ -75,7 +75,9 @@ func TestEnsureDeaconRunning_StartsThroughTheManager(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"echo \"$*\" >> '" + tmuxLog + "'\n" +
 		"case \"$*\" in\n" +
-		"  *has-session*) exit 1;;\n" +
+		// A missing session answers the way tmux does; a bare exit 1
+		// would be an unknown answer, which starts nothing.
+		"  *has-session*) echo \"can't find session: hq-deacon\" >&2; exit 1;;\n" +
 		"  *new-session*) echo 'create refused by test' >&2; exit 1;;\n" +
 		"esac\n" +
 		"exit 0\n"
@@ -98,8 +100,5 @@ func TestEnsureDeaconRunning_StartsThroughTheManager(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "Error starting Deacon") {
 		t.Errorf("the manager's refused create must be logged as a failed start, got:\n%s", logs.String())
-	}
-	if !d.deaconLastStarted.IsZero() {
-		t.Error("a failed start must not stamp deaconLastStarted")
 	}
 }

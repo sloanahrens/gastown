@@ -88,75 +88,6 @@ func TestCleanupLegacySocketSessionsRunsOnce(t *testing.T) {
 	}
 }
 
-func TestSyncWorkspaceRefusesTownRootWorkDir(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	cmd := exec.Command("git", "init")
-	cmd.Dir = townRoot
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	for _, args := range [][]string{{"config", "user.email", "test@test.com"}, {"config", "user.name", "Test User"}} {
-		cmd = exec.Command("git", args...)
-		cmd.Dir = townRoot
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "README.md"), []byte("# Town\n"), 0644); err != nil {
-		t.Fatalf("write README: %v", err)
-	}
-	cmd = exec.Command("git", "add", "README.md")
-	cmd.Dir = townRoot
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git add: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "commit", "-m", "initial")
-	cmd.Dir = townRoot
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git commit: %v\n%s", err, out)
-	}
-
-	writeDaemonTownFile(t, townRoot, "mayor/town.json", `{"name":"test-town"}\n`)
-	writeDaemonTownFile(t, townRoot, "mayor/rigs.json", `{"rigs":[]}\n`)
-	writeDaemonTownFile(t, townRoot, ".dolt-data/gastown/.dolt/noms/manifest", "manifest\n")
-	writeDaemonTownFile(t, townRoot, ".runtime/sentinel", "runtime\n")
-	writeDaemonTownFile(t, townRoot, ".beads/metadata.json", `{"prefix":"hq"}\n`)
-	writeDaemonTownFile(t, townRoot, "daemon/daemon.pid", "12345\n")
-	writeDaemonTownFile(t, townRoot, "user-work.txt", "user work\n")
-
-	headBefore := daemonGitOutput(t, townRoot, "rev-parse", "HEAD")
-	filesBefore := snapshotDaemonTownFiles(t, townRoot)
-	var logBuf bytes.Buffer
-	d := &Daemon{
-		config: DefaultConfig(townRoot),
-		logger: log.New(&logBuf, "", 0),
-	}
-	d.syncWorkspace(townRoot)
-
-	if !strings.Contains(logBuf.String(), "refusing daemon git sync") {
-		t.Fatalf("log = %q, want refusal", logBuf.String())
-	}
-	if got := daemonGitOutput(t, townRoot, "rev-parse", "HEAD"); got != headBefore {
-		t.Fatalf("HEAD changed: got %s, want %s", got, headBefore)
-	}
-	assertDaemonTownFilesPreserved(t, townRoot, filesBefore)
-
-	nestedRig := filepath.Join(townRoot, "gastown")
-	if err := os.MkdirAll(nestedRig, 0755); err != nil {
-		t.Fatalf("mkdir nested rig: %v", err)
-	}
-	logBuf.Reset()
-	d.syncWorkspace(nestedRig)
-	if !strings.Contains(logBuf.String(), "refusing daemon git sync") {
-		t.Fatalf("nested log = %q, want refusal", logBuf.String())
-	}
-	if got := daemonGitOutput(t, townRoot, "rev-parse", "HEAD"); got != headBefore {
-		t.Fatalf("HEAD changed after nested sync: got %s, want %s", got, headBefore)
-	}
-	assertDaemonTownFilesPreserved(t, townRoot, filesBefore)
-}
-
 func TestEnsureRefineryRunningSafetyStoppedDoesNotSpawn(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock bd/tmux scripts use POSIX shell")
@@ -294,8 +225,12 @@ func writeDaemonSafetyStopMockTmux(t *testing.T, binDir, logPath string) {
 	t.Helper()
 	script := `#!/bin/sh
 printf 'tmux %s\n' "$*" >> "` + logPath + `"
-case "$1" in
-  has-session)
+# tmux.run prepends -u and -L <socket>, so match anywhere in the argv. A
+# missing session answers the way tmux does, so it reads as absent rather
+# than as a failed query.
+case "$*" in
+  *has-session*)
+    echo "can't find session" >&2
     exit 1
     ;;
   *)
@@ -580,46 +515,6 @@ func TestListPolecatWorktrees_SkipsHiddenDirs(t *testing.T) {
 
 // NOTE: TestIsWitnessSession removed - isWitnessSession function was deleted
 // as part of ZFC cleanup. Witness poking is now Deacon's responsibility.
-
-func TestLifecycleAction_Constants(t *testing.T) {
-	t.Parallel()
-	// Verify constants have expected string values
-	if ActionCycle != "cycle" {
-		t.Errorf("expected ActionCycle='cycle', got %q", ActionCycle)
-	}
-	if ActionRestart != "restart" {
-		t.Errorf("expected ActionRestart='restart', got %q", ActionRestart)
-	}
-	if ActionShutdown != "shutdown" {
-		t.Errorf("expected ActionShutdown='shutdown', got %q", ActionShutdown)
-	}
-}
-
-func TestLifecycleRequest_Serialization(t *testing.T) {
-	t.Parallel()
-	request := &LifecycleRequest{
-		From:      "mayor",
-		Action:    ActionCycle,
-		Timestamp: time.Now().Truncate(time.Second),
-	}
-
-	data, err := json.Marshal(request)
-	if err != nil {
-		t.Fatalf("Marshal error: %v", err)
-	}
-
-	var loaded LifecycleRequest
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		t.Fatalf("Unmarshal error: %v", err)
-	}
-
-	if loaded.From != request.From {
-		t.Errorf("From mismatch: got %q, want %q", loaded.From, request.From)
-	}
-	if loaded.Action != request.Action {
-		t.Errorf("Action mismatch: got %q, want %q", loaded.Action, request.Action)
-	}
-}
 
 func TestIsShutdownInProgress_NoLockFile(t *testing.T) {
 	t.Parallel()

@@ -16,11 +16,14 @@ func TestKillSplitBrainSessionUsesInjectedRunner(t *testing.T) {
 	}
 }
 
-// TestKillSplitBrainSessionKillsStaleDefaultSession: a same-named session on
-// the default socket is killed there.
+// TestKillSplitBrainSessionKillsStaleDefaultSession: a same-named town
+// session (it carries GT_ROLE) on the default socket is killed there.
 func TestKillSplitBrainSessionKillsStaleDefaultSession(t *testing.T) {
 	t.Parallel()
-	s := newScripted(bySub(map[string]reply{"display-message": ok("")}))
+	s := newScripted(bySub(map[string]reply{
+		"display-message":  ok(""),
+		"show-environment": ok("GT_ROLE=gastown/witness"),
+	}))
 	unitTmux(s, nil).killSplitBrainSession("gt-x")
 
 	kills := s.find("kill-session")

@@ -1,10 +1,12 @@
 package witness
 
 import (
+	"context"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -187,4 +189,36 @@ func (h *handlers) sleep(d time.Duration) {
 		return
 	}
 	time.Sleep(d)
+}
+
+// supervisor returns the lifecycle supervisor the witness's restarts and
+// nuke kills go through (gt-4k3fj.3). The patrol scan still runs in its own
+// process until the witness becomes a daemon tick (gt-4k3fj.6); the
+// supervisor's guards are files, so they hold here as in the daemon.
+func (h *handlers) supervisor(townRoot, workDir string) *supervisor.Supervisor {
+	return supervisor.New(supervisor.Options{
+		TownRoot: townRoot,
+		Tmux:     nukeKiller{h},
+		Restart: func(seat supervisor.Seat) error {
+			return h.restartSessionExec(workDir, seat.Rig+"/"+seat.Name)
+		},
+		Escalate: func(seat supervisor.Seat, line string) {
+			key := "restart-budget:" + supervisor.IntentSeat(seat).String()
+			_ = h.notify(townRoot).Escalate(context.Background(), notify.Escalation{
+				Severity:    "HIGH",
+				Description: "restart budget exhausted: " + supervisor.IntentSeat(seat).String(),
+				Reason:      line,
+				Fingerprint: key,
+			})
+		},
+	})
+}
+
+// nukeKiller is the supervisor's session killer for witness hosts: the nuke
+// executor (graceful Ctrl-C, then kill), faked by tests.
+type nukeKiller struct{ h *handlers }
+
+func (k nukeKiller) KillSessionWithProcesses(name string) error {
+	k.h.nukeKillSessionExec(name)
+	return nil
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1340,43 +1341,29 @@ func RestartPolecatSession(workDir, rigName, polecatName string) error {
 }
 
 func (h *handlers) restartPolecatSession(workDir, rigName, polecatName string) error {
-	// Pause gate (gt-ahik): see pauseGateSkip's doc for why. This is a
-	// second, cheap check behind that choke point — a read of one file, no
-	// Dolt, no config lookup — safe for any future caller that reaches this
-	// function directly. Fails CLOSED, same as pauseGateSkip (gt-wisp-6ajo):
-	// the error branch below skips the restart rather than proceeding on an
-	// unreadable marker.
-	townRoot := workDirToTownRoot(workDir)
-	paused, st, perr := agentpause.PauseGate(townRoot, rigName, constants.RolePolecat, polecatName)
-	switch {
-	case perr != nil:
-		log.Printf("warning: pause gate check for %s/%s failed (%v); skipping restart (fail closed)",
-			rigName, polecatName, perr)
-		return nil
-	case paused:
-		actor := ""
-		if st != nil {
-			actor = st.PausedBy
-		}
-		log.Printf("info: skip restart of %s/%s: agent is paused (%s, %s)",
-			rigName, polecatName, agentpause.Reason(st), actor)
-		return nil
-	}
-
-	// Hold gate (gt-n38c6): the second gate behind heldHookSkip, repeated here
-	// for the same reason the pause gate above is — a caller reaching this
-	// function directly must not raise a session against work an operator's
-	// hold parked. It costs a bd read, which is why heldHookSkip is what keeps
-	// it off the patrol's hot path; here it is paid only when a restart was
-	// already going to happen. Fails CLOSED, as readHookHold does.
+	// Hold gate (gt-n38c6): a caller reaching this function directly must not
+	// raise a session against work an operator's hold parked. It costs a bd
+	// read, which is why heldHookSkip is what keeps it off the patrol's hot
+	// path; here it is paid only when a restart was already going to happen.
+	// Fails CLOSED, as readHookHold does.
 	if reason, held := h.hookHoldReason(DefaultBdCli(), workDir, rigName, polecatName); held {
 		log.Printf("info: skip restart of %s/%s: hooked work is held (%s)",
 			rigName, polecatName, reason)
 		return nil
 	}
 
-	address := fmt.Sprintf("%s/%s", rigName, polecatName)
-	if err := h.restartSessionExec(workDir, address); err != nil {
+	// The restart itself goes through the supervisor (gt-4k3fj.3), which
+	// refuses a paused or frozen seat (gt-ahik, fail closed on an unreadable
+	// marker), a town or rig e-stop, and a fourth restart in an hour (G1-15),
+	// and logs the actor. A refusal is not a restart failure: it is logged
+	// and the patrol moves on.
+	townRoot := workDirToTownRoot(workDir)
+	seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+	if err := h.supervisor(townRoot, workDir).Restart(seat, "witness zombie/stall detection", restartRequestedBy); err != nil {
+		if errors.Is(err, supervisor.ErrRefused) {
+			log.Printf("info: skip restart of %s/%s: %v", rigName, polecatName, err)
+			return nil
+		}
 		return fmt.Errorf("session restart failed: %w", err)
 	}
 	return nil
@@ -1476,12 +1463,19 @@ func (h *handlers) nukePolecatImpl(bd *BdCli, workDir, rigName, polecatName stri
 		return fmt.Errorf("refusing to nuke %s/%s: MR pending in refinery (%s)", rigName, polecatName, pendingMRBlocker(bd, workDir, rigName, polecatName, agentBeadID))
 	}
 
-	// CRITICAL: Kill the tmux session FIRST and unconditionally.
-	// We do this explicitly here because gt polecat nuke may fail to kill the
-	// session due to rig loading issues or race conditions with IsRunning checks.
-	// See: gt-g9ft5 - sessions were piling up because nuke wasn't killing them.
-	sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
-	h.nukeKillSessionExec(sessionName)
+	return h.nukeSessionThenWorktree(workDir, rigName, polecatName)
+}
+
+// nukeSessionThenWorktree is the destructive half of a nuke. The session is
+// killed FIRST, because gt polecat nuke may fail to kill it due to rig
+// loading issues or races with IsRunning checks (gt-g9ft5: sessions were
+// piling up). The kill goes through the supervisor, and a refusal (paused
+// seat, e-stop) stops the nuke before the worktree is touched.
+func (h *handlers) nukeSessionThenWorktree(workDir, rigName, polecatName string) error {
+	seat := supervisor.SeatFor(rigName, constants.RolePolecat, polecatName)
+	if err := h.supervisor(workDirToTownRoot(workDir), workDir).Kill(seat, "nuke", "witness"); err != nil {
+		return fmt.Errorf("refusing to nuke %s/%s: %w", rigName, polecatName, err)
+	}
 
 	// Now run gt polecat nuke to clean up worktree, branch, and beads
 	address := fmt.Sprintf("%s/%s", rigName, polecatName)
