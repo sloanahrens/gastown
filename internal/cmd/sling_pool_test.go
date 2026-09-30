@@ -135,6 +135,41 @@ func TestChoosePoolAgent(t *testing.T) {
 	}
 }
 
+// An explicit route:* label outranks --agent (gt-4lbz), so the line has to say
+// the label did it: 'gt sling <bead> --agent claude-sonnet' on a route:local
+// bead was refused as "local full" with no word about the label (gt-sisll).
+func TestChoosePoolAgentRouteLabelNamedInRefusalAndOverride(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
+	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 1}
+	full := []poolSession{
+		{name: "gt-a", agent: "local-coder-polecat", created: now.Add(-time.Hour)},
+		{name: "gt-b", agent: "deepseek-flash", created: now.Add(-30 * time.Minute)},
+	}
+	local := poolBead{Type: "task", Labels: []string{routeLocalLabel}}
+	_, reason, refused := choosePoolAgent(pool, local, "claude-sonnet", full, now)
+	want := "pool: overflow full (1/1) -> no seat (local full, label route:local) (label route:local outranks requested claude-sonnet)"
+	if !refused || reason != want {
+		t.Errorf("reason = %q refused=%v, want %q refused", reason, refused, want)
+	}
+	// No request, no override note: the refusal still names the label.
+	_, reason, refused = choosePoolAgent(pool, local, "", full, now)
+	if want := "pool: overflow full (1/1) -> no seat (local full, label route:local)"; !refused || reason != want {
+		t.Errorf("reason = %q refused=%v, want %q refused", reason, refused, want)
+	}
+	// A request the label agrees with needs no note.
+	_, reason, _ = choosePoolAgent(pool, local, "local-coder-polecat", nil, now)
+	if want := "pool: local seat 1/1 -> local-coder-polecat (label route:local)"; reason != want {
+		t.Errorf("reason = %q, want %q", reason, want)
+	}
+	// route:flash overriding a request names itself too.
+	flash := poolBead{Type: "task", Labels: []string{routeFlashLabel}}
+	_, reason, _ = choosePoolAgent(pool, flash, "claude-sonnet", nil, now)
+	if want := "pool: overflow -> deepseek-flash (label route:flash) (label route:flash outranks requested claude-sonnet)"; reason != want {
+		t.Errorf("reason = %q, want %q", reason, want)
+	}
+}
+
 // A bead carrying route:flash still has to name its agent when the pool is
 // full: the label, not the seat count, is why it went where it went.
 func TestChoosePoolAgentRouteLabelVsFullPool(t *testing.T) {
