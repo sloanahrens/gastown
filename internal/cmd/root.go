@@ -117,7 +117,7 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	initCLITheme()
 
 	// gt done can autosave and push; prove ownership before shared pre-run writes.
-	if doneNeedsPolecatWorktree(cmd, os.Getenv) {
+	if doneNeedsPolecatWorktree(cmd, os.Getenv, doneCwd()) {
 		if _, err := resolveDonePolecatWorktree(); err != nil {
 			return err
 		}
@@ -210,9 +210,18 @@ func isDoneCommand(cmd *cobra.Command) bool {
 // doneNeedsPolecatWorktree reports whether cmd is a polecat's gt done, which
 // must prove it runs in the assigned polecat worktree before pre-run writes.
 // A crew submission has no polecat worktree and neither autosaves nor
-// pushes; runDoneCrew checks its own worktree (gt-3e7tk).
-func doneNeedsPolecatWorktree(cmd *cobra.Command, getenv func(string) string) bool {
-	return isDoneCommand(cmd) && !doneIsCrewRun(getenv)
+// pushes; runDoneCrew checks its own worktree (gt-3e7tk). Crew must be
+// detected positively (gt-avwp2): a polecat that lost its env hits the
+// guard and fails there.
+func doneNeedsPolecatWorktree(cmd *cobra.Command, getenv func(string) string, cwd string) bool {
+	return isDoneCommand(cmd) && !doneIsCrewRun(getenv, cwd)
+}
+
+// doneCwd is the process cwd, or "" when it is unavailable (the polecat
+// guard then reports the missing directory).
+func doneCwd() string {
+	cwd, _ := os.Getwd()
+	return cwd
 }
 
 // initCLITheme initializes the CLI color theme based on settings and environment.
