@@ -33,36 +33,6 @@ func (h *handle) InitRepo(branch string) error {
 	return nil
 }
 
-// ConfigSet sets a repository config value.
-func (h *handle) ConfigSet(key, value string) error {
-	h.f.mu.Lock()
-	defer h.f.mu.Unlock()
-	r, _, err := h.locate("config", key, value)
-	if err != nil {
-		return err
-	}
-	if h.f.wt.config == nil {
-		h.f.wt.config = map[*repo]map[string]string{}
-	}
-	if h.f.wt.config[r] == nil {
-		h.f.wt.config[r] = map[string]string{}
-	}
-	h.f.wt.config[r][key] = value
-	return nil
-}
-
-// ConfigGet returns a config value ConfigSet set, or "" when it is unset or
-// the directory is no repository, as git.Git.ConfigGet reports both.
-func (h *handle) ConfigGet(key string) (string, error) {
-	h.f.mu.Lock()
-	defer h.f.mu.Unlock()
-	r, _, err := h.locate("config", "--get", key)
-	if err != nil {
-		return "", nil
-	}
-	return h.f.wt.config[r][key], nil
-}
-
 // CommitWithAuthor is Commit; the fake records no authors.
 func (h *handle) CommitWithAuthor(message, _ string) error {
 	return h.Commit(message)

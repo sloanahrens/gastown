@@ -2090,6 +2090,12 @@ func (g *Git) ConfigGet(key string) (string, error) {
 	return out, nil
 }
 
+// ConfigSet sets a git config key in the repository's local config.
+func (g *Git) ConfigSet(key, value string) error {
+	_, err := g.run("config", key, value)
+	return err
+}
+
 // Merge merges the given branch into the current branch.
 func (g *Git) Merge(branch string) error {
 	_, err := g.run("merge", branch)
@@ -4070,12 +4076,23 @@ type UncommittedWorkStatus struct {
 // is computed lazily on first call and memoized — a caller that never asks
 // (gt done and the other CheckUncommittedWork consumers) never pays for it,
 // and a reuse-gate caller that asks more than once only pays once (gt-8q0s).
-func (s *UncommittedWorkStatus) IndexSkewFiles(g *Git) []string {
+func (s *UncommittedWorkStatus) IndexSkewFiles(g IndexSkewClassifier) []string {
 	if !s.indexSkewComputed {
-		s.indexSkewFiles = g.classifyIndexSkew(s.StagedOnly)
+		s.indexSkewFiles = g.ClassifyIndexSkew(s.StagedOnly)
 		s.indexSkewComputed = true
 	}
 	return s.indexSkewFiles
+}
+
+// IndexSkewClassifier classifies staged-only paths as checkout skew.
+// *Git is one; a consumer's fake can be another.
+type IndexSkewClassifier interface {
+	ClassifyIndexSkew(paths []string) []string
+}
+
+// ClassifyIndexSkew is classifyIndexSkew, for IndexSkewClassifier.
+func (g *Git) ClassifyIndexSkew(paths []string) []string {
+	return g.classifyIndexSkew(paths)
 }
 
 // Clean returns true if there is no uncommitted work.
@@ -4192,7 +4209,7 @@ func (s *UncommittedWorkStatus) NonRuntimePaths() []string {
 // IndexSkewFiles) also removed. Used to size the diagnostic message when
 // CleanExcludingRuntimeAndIndexSkew reports dirt, so the reported count
 // reflects only the files actually blocking reuse.
-func (s *UncommittedWorkStatus) NonRuntimeNonSkewPaths(g *Git) []string {
+func (s *UncommittedWorkStatus) NonRuntimeNonSkewPaths(g IndexSkewClassifier) []string {
 	skewFiles := s.IndexSkewFiles(g)
 	skew := make(map[string]bool, len(skewFiles))
 	for _, f := range skewFiles {
@@ -4244,7 +4261,7 @@ func (s *UncommittedWorkStatus) CleanExcludingRuntime() bool {
 // unsaved work (gt-ui2x). gt done and every other uncommitted-work consumer
 // keep using CleanExcludingRuntime unchanged, so this relaxation is scoped to
 // reuse eligibility only.
-func (s *UncommittedWorkStatus) CleanExcludingRuntimeAndIndexSkew(g *Git) bool {
+func (s *UncommittedWorkStatus) CleanExcludingRuntimeAndIndexSkew(g IndexSkewClassifier) bool {
 	if len(s.UnmergedFiles) > 0 {
 		return false
 	}

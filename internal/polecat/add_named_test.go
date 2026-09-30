@@ -16,7 +16,7 @@ import (
 // asks the allocator for a name there.
 func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	mgr, _, _, _ := canonicalRig(t)
 
 	// The name the pool would hand out next.
 	next, err := mgr.AllocateName()
@@ -75,7 +75,7 @@ func TestAddNamedWithOptions_ReservesNameBeforeCreating(t *testing.T) {
 
 func TestAddNamedWithOptions_RefusesExistingAndInvalidNames(t *testing.T) {
 	t.Parallel()
-	mgr, _ := setupCanonicalBranchManagerTest(t)
+	mgr, _, _, _ := canonicalRig(t)
 	if _, err := mgr.AddNamedWithOptions("toast", AddOptions{}); err != nil {
 		t.Fatalf("AddNamedWithOptions(toast): %v", err)
 	}

@@ -14,12 +14,6 @@ func (g *Git) InitRepo(branch string) error {
 	return err
 }
 
-// ConfigSet sets a repository config value (git config <key> <value>).
-func (g *Git) ConfigSet(key, value string) error {
-	_, err := g.run("config", key, value)
-	return err
-}
-
 // CommitWithAuthor commits the index with author as the commit's author
 // ("Name <email>").
 func (g *Git) CommitWithAuthor(message, author string) error {

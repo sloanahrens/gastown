@@ -28,7 +28,6 @@ import (
 type worktreeState struct {
 	indexes map[*worktree]*index
 	trees   map[string]map[string]string // tree id to its tree
-	config  map[*repo]map[string]string  // repository config (backup.go)
 }
 
 type index struct {
@@ -229,7 +228,7 @@ func (h *handle) Status() (*git.GitStatus, error) {
 	if err != nil {
 		return nil, gitErr(128, "fatal: "+err.Error(), "status")
 	}
-	rules := ignoreRules(disk)
+	rules := checkoutRules(wt.path, disk)
 	unmerged := map[string]bool{}
 	if wt.merge != nil {
 		for _, p := range wt.merge.conflicts {
@@ -337,7 +336,7 @@ func (h *handle) Add(pathspecs ...string) error {
 	if err != nil {
 		return gitErr(128, "fatal: "+err.Error(), args...)
 	}
-	rules := ignoreRules(disk)
+	rules := checkoutRules(wt.path, disk)
 	for _, spec := range specs {
 		matched := false
 		for p, content := range disk {

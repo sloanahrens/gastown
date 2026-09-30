@@ -4,20 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	gtruntime "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
 
@@ -31,79 +27,27 @@ func setupTestRegistryForSession(t *testing.T) {
 	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 }
 
-func requireTmux(t *testing.T) {
+// setupSessionBranchTestRepo is a repo on main with one commit whose origin
+// is itself, with origin/main at that commit, in a new world.
+func setupSessionBranchTestRepo(t *testing.T) (string, gitRepo, *world) {
 	t.Helper()
-
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux not supported on Windows")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-}
-
-func setupSessionBranchTestRepo(t *testing.T) (string, *git.Git) {
-	t.Helper()
-
+	w := newWorld()
 	workDir := t.TempDir()
-	cmd := exec.Command("git", "init", "-b", "main")
-	cmd.Dir = workDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	repoGit := git.NewGit(workDir)
-	if err := os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write README.md: %v", err)
-	}
-	if err := repoGit.Add("README.md"); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if err := repoGit.Commit("Initial commit"); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
-
-	cmd = exec.Command("git", "remote", "add", "origin", workDir)
-	cmd.Dir = workDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %v\n%s", err, out)
-	}
-	cmd = exec.Command("git", "update-ref", "refs/remotes/origin/main", "HEAD")
-	cmd.Dir = workDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git update-ref: %v\n%s", err, out)
-	}
-
-	return workDir, repoGit
-}
-
-// runTestGit runs one git command in workDir, failing the test on a non-zero
-// exit.
-func runTestGit(t *testing.T, workDir string, args ...string) {
-	t.Helper()
-
-	cmd := exec.Command("git", args...)
-	cmd.Dir = workDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-}
-
-// dropOriginRemote removes the test repo's origin. The helper's origin is the
-// repo itself, so `git fetch origin` republishes every local branch as
-// origin/<branch> — it cannot model a working tree that diverged from a remote
-// it no longer reaches.
-func dropOriginRemote(t *testing.T, workDir string) {
-	t.Helper()
-	runTestGit(t, workDir, "remote", "remove", "origin")
+	w.InitRepo(t, workDir)
+	head := w.Commit(t, workDir, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, workDir)
+	w.AddRemote(t, workDir, "origin", workDir)
+	w.SetRef(t, workDir, "refs/remotes/origin/main", head)
+	return workDir, w.repo(workDir), w
 }
 
 // strandCanonicalBaseRef makes origin/<default> unresolvable in the test repo,
-// standing in for a worktree that never fetched the canonical base.
-func strandCanonicalBaseRef(t *testing.T, workDir string) {
+// standing in for a worktree that never fetched the canonical base. The
+// origin goes too: the helper's origin is the repo itself, so a fetch would
+// republish every local branch as origin/<branch>.
+func strandCanonicalBaseRef(t *testing.T, w *world, workDir string) {
 	t.Helper()
-	dropOriginRemote(t, workDir)
-	runTestGit(t, workDir, "update-ref", "-d", "refs/remotes/origin/main")
+	w.RemoveRemote(t, workDir, "origin")
 }
 
 func TestSessionName(t *testing.T) {
@@ -113,7 +57,7 @@ func TestSessionName(t *testing.T) {
 		Name:     "gastown",
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	name := m.SessionName("Toast")
 	if name != "gt-Toast" {
@@ -168,7 +112,7 @@ func TestSessionManagerPolecatDir(t *testing.T) {
 		Path:     "/home/user/ai/gastown",
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	dir := m.polecatDir("Toast")
 	expected := "/home/user/ai/gastown/polecats/Toast"
@@ -192,7 +136,7 @@ func TestHasPolecat(t *testing.T) {
 		Path:     root,
 		Polecats: []string{"Toast", "Cheedo"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	if !m.hasPolecat("Toast") {
 		t.Error("expected hasPolecat(Toast) = true")
@@ -221,7 +165,7 @@ func TestStartPolecatNotFound(t *testing.T) {
 		Name:     "gastown",
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	err := m.Start("Unknown", SessionStartOptions{})
 	if err == nil {
@@ -230,13 +174,13 @@ func TestStartPolecatNotFound(t *testing.T) {
 }
 
 func TestIsRunningNoSession(t *testing.T) {
-	requireTmux(t)
+	t.Parallel()
 
 	r := &rig.Rig{
 		Name:     "gastown",
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	running, err := m.IsRunning("Toast")
 	if err != nil {
@@ -248,21 +192,13 @@ func TestIsRunningNoSession(t *testing.T) {
 }
 
 func TestSessionManagerListEmpty(t *testing.T) {
-	requireTmux(t)
-
-	// Register a unique prefix so List() won't match real sessions.
-	// Without this, PrefixFor returns "gt" (default) and matches running gastown sessions.
-	reg := session.NewPrefixRegistry()
-	reg.Register("xz", "test-rig-unlikely-name")
-	old := session.DefaultRegistry()
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+	t.Parallel()
 
 	r := &rig.Rig{
 		Name:     "test-rig-unlikely-name",
 		Polecats: []string{},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	infos, err := m.List()
 	if err != nil {
@@ -274,13 +210,13 @@ func TestSessionManagerListEmpty(t *testing.T) {
 }
 
 func TestStopNotFound(t *testing.T) {
-	requireTmux(t)
+	t.Parallel()
 
 	r := &rig.Rig{
 		Name:     "test-rig",
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	err := m.Stop("Toast", false)
 	if err != ErrSessionNotFound {
@@ -289,13 +225,13 @@ func TestStopNotFound(t *testing.T) {
 }
 
 func TestCaptureNotFound(t *testing.T) {
-	requireTmux(t)
+	t.Parallel()
 
 	r := &rig.Rig{
 		Name:     "test-rig",
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	_, err := m.Capture("Toast", 50)
 	if err != ErrSessionNotFound {
@@ -304,13 +240,13 @@ func TestCaptureNotFound(t *testing.T) {
 }
 
 func TestInjectNotFound(t *testing.T) {
-	requireTmux(t)
+	t.Parallel()
 
 	r := &rig.Rig{
 		Name:     "test-rig",
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	err := m.Inject("Toast", "hello")
 	if err != ErrSessionNotFound {
@@ -420,7 +356,7 @@ func TestPolecatStartInjectsFallbackEnvVars(t *testing.T) {
 
 func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
 	t.Parallel()
-	workDir, repoGit := setupSessionBranchTestRepo(t)
+	workDir, repoGit, w := setupSessionBranchTestRepo(t)
 
 	baseSHA, err := repoGit.Rev("origin/main")
 	if err != nil {
@@ -429,21 +365,9 @@ func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
 	if err := repoGit.CheckoutNewBranch("polecat/toast-old", "main"); err != nil {
 		t.Fatalf("checkout stale polecat branch: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workDir, "stale.txt"), []byte("stale\n"), 0644); err != nil {
-		t.Fatalf("write stale.txt: %v", err)
-	}
-	if err := repoGit.Add("stale.txt"); err != nil {
-		t.Fatalf("git add stale.txt: %v", err)
-	}
-	if err := repoGit.Commit("stale local polecat commit"); err != nil {
-		t.Fatalf("git commit stale.txt: %v", err)
-	}
-	staleSHA, err := repoGit.Rev("HEAD")
-	if err != nil {
-		t.Fatalf("resolve stale HEAD: %v", err)
-	}
+	staleSHA := w.writeAndCommit(t, workDir, "stale local polecat commit", map[string]string{"stale.txt": "stale\n"})
 
-	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
+	sm := newTestSessionManager(&rig.Rig{Name: "gastown", Path: workDir})
 	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
 	if err != nil {
 		t.Fatalf("ensureCanonicalSessionBranch: %v", err)
@@ -471,14 +395,14 @@ func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
 
 func TestEnsureCanonicalSessionBranch_KeepsCurrentIssueBranch(t *testing.T) {
 	t.Parallel()
-	workDir, repoGit := setupSessionBranchTestRepo(t)
+	workDir, repoGit, _ := setupSessionBranchTestRepo(t)
 
 	currentBranch := "polecat/toast/gt-9qb@seed"
 	if err := repoGit.CheckoutNewBranch(currentBranch, "main"); err != nil {
 		t.Fatalf("checkout current issue branch: %v", err)
 	}
 
-	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
+	sm := newTestSessionManager(&rig.Rig{Name: "gastown", Path: workDir})
 	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
 	if err != nil {
 		t.Fatalf("ensureCanonicalSessionBranch: %v", err)
@@ -494,10 +418,10 @@ func TestEnsureCanonicalSessionBranch_KeepsCurrentIssueBranch(t *testing.T) {
 // start on the base branch with nothing reported anywhere.
 func TestEnsureCanonicalSessionBranch_MissingBaseRefFailsOnBaseBranch(t *testing.T) {
 	t.Parallel()
-	workDir, repoGit := setupSessionBranchTestRepo(t)
-	strandCanonicalBaseRef(t, workDir)
+	workDir, repoGit, w := setupSessionBranchTestRepo(t)
+	strandCanonicalBaseRef(t, w, workDir)
 
-	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
+	sm := newTestSessionManager(&rig.Rig{Name: "gastown", Path: workDir})
 	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
 	if !errors.Is(err, ErrBaseBranchRepair) {
 		t.Fatalf("err = %v, want ErrBaseBranchRepair", err)
@@ -514,7 +438,7 @@ func TestEnsureCanonicalSessionBranch_MissingBaseRefFailsOnBaseBranch(t *testing
 // behind (lapis's "WIP: checkpoint (auto)" on local main, gt-ns8t).
 func TestEnsureCanonicalSessionBranch_CheckoutRefusedFailsOnBaseBranch(t *testing.T) {
 	t.Parallel()
-	workDir, repoGit := setupSessionBranchTestRepo(t)
+	workDir, repoGit, w := setupSessionBranchTestRepo(t)
 	baseSHA, err := repoGit.Rev("origin/main")
 	if err != nil {
 		t.Fatalf("resolve origin/main: %v", err)
@@ -522,15 +446,7 @@ func TestEnsureCanonicalSessionBranch_CheckoutRefusedFailsOnBaseBranch(t *testin
 
 	// Local main diverges from origin/main, then leaves an uncommitted edit to
 	// the diverging file: `git checkout -b <new> origin/main` must overwrite it.
-	if err := os.WriteFile(filepath.Join(workDir, "local.txt"), []byte("diverged\n"), 0644); err != nil {
-		t.Fatalf("write local.txt: %v", err)
-	}
-	if err := repoGit.Add("local.txt"); err != nil {
-		t.Fatalf("git add local.txt: %v", err)
-	}
-	if err := repoGit.Commit("local main commit"); err != nil {
-		t.Fatalf("git commit local.txt: %v", err)
-	}
+	w.writeAndCommit(t, workDir, "local main commit", map[string]string{"local.txt": "diverged\n"})
 	if err := os.WriteFile(filepath.Join(workDir, "local.txt"), []byte("uncommitted\n"), 0644); err != nil {
 		t.Fatalf("edit local.txt: %v", err)
 	}
@@ -538,10 +454,10 @@ func TestEnsureCanonicalSessionBranch_CheckoutRefusedFailsOnBaseBranch(t *testin
 	// Pin origin/main to the pre-divergence base and cut the remote, so the
 	// repair still resolves its start point but the switch has to overwrite the
 	// dirty file.
-	dropOriginRemote(t, workDir)
-	runTestGit(t, workDir, "update-ref", "refs/remotes/origin/main", baseSHA)
+	w.RemoveRemote(t, workDir, "origin")
+	w.SetRef(t, workDir, "refs/remotes/origin/main", baseSHA)
 
-	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
+	sm := newTestSessionManager(&rig.Rig{Name: "gastown", Path: workDir})
 	branch, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
 	if !errors.Is(err, ErrBaseBranchRepair) {
 		t.Fatalf("err = %v, want ErrBaseBranchRepair", err)
@@ -563,10 +479,10 @@ func TestEnsureCanonicalSessionBranch_RecordsRepairFailure(t *testing.T) {
 		t.Fatalf("mkdir rig path: %v", err)
 	}
 
-	workDir, repoGit := setupSessionBranchTestRepo(t)
-	strandCanonicalBaseRef(t, workDir)
+	workDir, repoGit, w := setupSessionBranchTestRepo(t)
+	strandCanonicalBaseRef(t, w, workDir)
 
-	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: rigPath})
+	sm := newTestSessionManager(&rig.Rig{Name: "gastown", Path: rigPath})
 	if _, err := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"}); err == nil {
 		t.Fatal("ensureCanonicalSessionBranch returned no error, want ErrBaseBranchRepair")
 	}
@@ -635,7 +551,7 @@ func TestSessionManager_resolveBeadsDir(t *testing.T) {
 		Name: "gastown",
 		Path: rigPath,
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	polecatWorkDir := filepath.Join(rigPath, "polecats", "Toast")
 
@@ -1010,7 +926,7 @@ func TestPolecatSlot(t *testing.T) {
 		Path:     rigPath,
 		Polecats: []string{},
 	}
-	sm := NewSessionManager(tmux.NewTmux(), r)
+	sm := newTestSessionManager(r)
 
 	// No polecats — should return 0
 	if slot := sm.polecatSlot("alpha"); slot != 0 {
@@ -1212,7 +1128,7 @@ func TestEnsureRuntimeWorkspace_SeedsTrustForNeverTrustedWorktree(t *testing.T) 
 		Path:     rigPath,
 		Polecats: []string{"Toast"},
 	}
-	m := NewSessionManager(tmux.NewTmux(), r)
+	m := newTestSessionManager(r)
 
 	rc := &config.RuntimeConfig{Command: "claude"}
 	if err := m.ensureRuntimeWorkspace(workDir, configDir, rc); err != nil {
