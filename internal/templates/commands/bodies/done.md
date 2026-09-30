@@ -19,6 +19,10 @@ git add <files>
 git commit -m "<type>: <description>"
 ```
 
+A commit message is your description and the bead id, nothing more: NO
+Co-Authored-By trailer, no AI attribution anywhere. `gt done` strips the
+trailers it finds and refuses a commit whose subject line is itself one.
+
 ## Execute
 
 Run `gt done` with any provided arguments:

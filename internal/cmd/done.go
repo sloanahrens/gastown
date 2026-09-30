@@ -42,7 +42,9 @@ daemon's landing worker does that (ADR 0004).
 For COMPLETED, gt done:
 1. Fetches origin and rebases the branch onto the target (default: the rig's
    default branch; --target or the bead's base_branch override it)
-2. Squashes auto-save and checkpoint commits into one descriptive commit
+2. Squashes auto-save and checkpoint commits into one descriptive commit,
+   and strips Co-Authored-By trailers and AI attribution lines from every
+   commit message (a subject line that is itself one is refused)
 3. Runs the local gate on the rebased tree: make lint, go build ./...,
    and the unit tier of make test (a rig without go.mod runs its
    lint_command, build_command and test_command)
@@ -1236,6 +1238,11 @@ func submitForLanding(r *doneRun) (doneSubmission, error) {
 	}
 
 	if err := squashAutoSaveBeforeSubmit(r.g, r.cwd, r.branch, baseRef, sub.sourceIssue, r.issueID); err != nil {
+		return sub, err
+	}
+	// Strip AI attribution trailers from the commit messages (gt-v4ssj.10).
+	// After the squash, so the messages checked are the ones that will land.
+	if err := stripAttributionTrailers(r.g, baseRef); err != nil {
 		return sub, err
 	}
 	// Strip Gas Town overlay from CLAUDE.md / CLAUDE.local.md (gt-p35).

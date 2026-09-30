@@ -476,6 +476,11 @@ git status              # Must be clean (no uncommitted changes)
 git log --oneline -3    # Verify your commits are present
 ```
 
+**A commit message is your description and the bead id, nothing more: NO
+Co-Authored-By trailer, no AI attribution anywhere.** Landing refuses a branch
+that carries them. `{{ cmd }} done` strips the trailers it finds, and refuses a
+commit whose subject line is itself one.
+
 **Title check before submit.** If the work disproved or changed your bead's
 title, amend it before running `{{ cmd }} done` — the submit step of
 `mol-polecat-work` carries the pre-flight and its exit criterion.
