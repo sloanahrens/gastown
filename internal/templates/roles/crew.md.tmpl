@@ -269,7 +269,8 @@ gh pr create --base {{ .DefaultBranch }} --head <fork-owner>:<branch>
 
 If you have direct push access to the repo (you're a maintainer):
 - **NEVER create GitHub PRs** — push directly to main instead
-- Crew workers: push directly to main
+- Crew workers: push directly to main, or push a branch and submit it with one
+  command: `{{ cmd }} done --bead <id>` (the landing worker gates and lands it)
 - Polecats: use `{{ cmd }} done` → the landing worker lands on main
 
 PRs are for external contributors submitting to repos they don't own.
