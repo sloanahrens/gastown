@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -106,7 +105,9 @@ type storeRecoveryState struct {
 	loggedAt time.Time
 }
 
-// strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
+// strandedConvoyInfo is one convoy of the stranded scan (convoy.StrandedConvoy
+// with created_at parsed). Its JSON tags are what tests decode a scan fixture
+// from.
 type strandedConvoyInfo struct {
 	ID           string   `json:"id"`
 	Title        string   `json:"title"`
@@ -146,6 +147,10 @@ type ConvoyManager struct {
 	// behind the dead-holder checks in tests; nil runs the real ones.
 	listOriginBranchesFn      func(rigRoot string) ([]string, error)
 	deadHolderWorktreeStateFn func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error)
+
+	// openGitFn opens a dead holder's worktree for the state read and the
+	// preserve push; nil opens a *git.Git. Tests hand it a gitfake world.
+	openGitFn func(dir string) deadHolderGit
 
 	townRoot     string
 	scanInterval time.Duration
@@ -219,11 +224,16 @@ type ConvoyManager struct {
 	// supplies one to drive the closed-convoy guard without a Dolt server.
 	convoyStatus func(convoyID string) (string, bool)
 
+	// findStrandedFn and checkConvoyFn replace the stranded scan and the
+	// completion check in tests; nil runs the real ones from internal/convoy.
+	findStrandedFn func(ctx context.Context) ([]strandedConvoyInfo, error)
+	checkConvoyFn  convoy.Checker
+
+	// gtPath is the gt binary the feeder runs for gt sling.
 	gtPath string
 
-	// execCmd runs the manager's gt subprocesses (stranded scan, sling,
-	// convoy check); nil runs them for real. Tests set it to answer them in
-	// process.
+	// execCmd runs the manager's gt sling subprocess; nil runs it for real.
+	// Tests set it to answer it in process.
 	execCmd cmdRunFunc
 
 	// started guards against double-call of Start() which would spawn duplicate goroutines.
@@ -871,7 +881,7 @@ func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRec
 
 		m.logger("Convoy: close detected: %s (from %s)", issueID, name)
 		resolver := convoy.NewStoreResolver(m.townRoot, stores)
-		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.isRigParked, resolver)
+		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.gtPath, m.checkConvoy, m.isRigParked, resolver)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
 	}
 	return true
@@ -982,21 +992,46 @@ func (m *ConvoyManager) scan() {
 	m.trackBlockedHolds(stranded, time.Now())
 }
 
-// findStranded runs `gt convoy stranded --json` and parses the output.
+// findStranded runs the stranded scan: convoys with ready work and no
+// workers, or empty convoys that need cleanup.
 func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
-	stdout, stderr, err := m.runGt(bdReadOnlyRoutingEnv(m.townRoot), "convoy", "stranded", "--json")
+	if m.findStrandedFn != nil {
+		return m.findStrandedFn(m.ctx)
+	}
+	town := convoy.Town{Root: m.townRoot, Env: bdReadOnlyRoutingEnv(m.townRoot)}
+	found, err := town.FindStranded(m.ctx)
 	if err != nil {
-		return nil, fmt.Errorf("%s", util.FirstLine(string(stderr)))
+		return nil, err
 	}
+	return strandedFromConvoy(found), nil
+}
 
-	var stranded []strandedConvoyInfo
-	if err := json.Unmarshal(stdout, &stranded); err != nil {
-		// Include first line of raw output for debugging (e.g., non-JSON warnings on stdout)
-		raw := util.FirstLine(string(stdout))
-		return nil, fmt.Errorf("parsing stranded JSON: %w (raw: %q)", err, raw)
+// strandedFromConvoy converts the scan's result, parsing created_at. A
+// created_at that does not parse reads as zero, which the empty-convoy grace
+// period treats as unknown age.
+func strandedFromConvoy(found []convoy.StrandedConvoy) []strandedConvoyInfo {
+	out := make([]strandedConvoyInfo, 0, len(found))
+	for _, c := range found {
+		info := strandedConvoyInfo{
+			ID:           c.ID,
+			Title:        c.Title,
+			TrackedCount: c.TrackedCount,
+			ReadyCount:   c.ReadyCount,
+			ReadyIssues:  c.ReadyIssues,
+			BaseBranch:   c.BaseBranch,
+			Agent:        c.Agent,
+			Formula:      c.Formula,
+			Owned:        c.Owned,
+		}
+		if created, err := time.Parse(time.RFC3339, c.CreatedAt); err == nil {
+			info.CreatedAt = created
+		}
+		for _, h := range c.Held {
+			info.Held = append(info.Held, strandedHold(h))
+		}
+		out = append(out, info)
 	}
-
-	return stranded, nil
+	return out
 }
 
 // feedFirstReady iterates through all ready issues in a stranded convoy and
@@ -1373,7 +1408,27 @@ func (m *ConvoyManager) deadHolderWorktreeState(townRoot, assignee, issueID stri
 	if m.deadHolderWorktreeStateFn != nil {
 		return m.deadHolderWorktreeStateFn(townRoot, assignee, issueID)
 	}
-	return defaultDeadHolderWorktreeState(townRoot, assignee, issueID)
+	return m.defaultDeadHolderWorktreeState(townRoot, assignee, issueID)
+}
+
+// deadHolderGit is the git surface dead-holder recovery reads and pushes
+// through: *git.Git in production, gitfake in tests.
+type deadHolderGit interface {
+	CurrentBranch() (string, error)
+	CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStatus, error)
+	Rev(ref string) (string, error)
+	Push(remote, refspec string, force bool) error
+	VerifyPushedCommit(remote, branch, commit string) error
+}
+
+var _ deadHolderGit = (*git.Git)(nil)
+
+// gitAt opens the repository at dir through openGitFn, or as a *git.Git.
+func (m *ConvoyManager) gitAt(dir string) deadHolderGit {
+	if m.openGitFn != nil {
+		return m.openGitFn(dir)
+	}
+	return git.NewGit(dir)
 }
 
 // defaultDeadHolderWorktreeState inspects the assignee's worktree directly,
@@ -1382,13 +1437,13 @@ func (m *ConvoyManager) deadHolderWorktreeState(townRoot, assignee, issueID stri
 // returns an error only when a worktree that should hold issueID's work could
 // not be read, which the caller must treat as "state undetermined" rather
 // than "clean" (gt-utt4).
-func defaultDeadHolderWorktreeState(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
+func (m *ConvoyManager) defaultDeadHolderWorktreeState(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
 	path := deacon.AssigneeWorktreePath(townRoot, assignee)
 	if path == "" {
 		return deadHolderWorktreeState{}, nil
 	}
 
-	g := git.NewGit(path)
+	g := m.gitAt(path)
 	branch, err := g.CurrentBranch()
 	if err != nil {
 		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: %w", err)
@@ -1488,7 +1543,7 @@ func (m *ConvoyManager) resolveDeadHolderWork(rig, assignee, issueID string) (fe
 
 	// Clean of real dirt with commits that never reached origin: safe to
 	// publish, since this only pushes what the holder already committed.
-	if err := preserveWorktreeBranch(git.NewGit(state.WorktreePath), state.Branch); err != nil {
+	if err := preserveWorktreeBranch(m.gitAt(state.WorktreePath), state.Branch); err != nil {
 		msg := fmt.Sprintf("%s: pushing %s's unpushed work on %s failed (%s), not re-slinging blind — resolve by hand, then reopen",
 			issueID, assignee, state.Branch, util.FirstLine(err.Error()))
 		m.raiseDeadHolderAlert(issueKey, msg)
@@ -1568,7 +1623,7 @@ func (m *ConvoyManager) claimAlertOnceThisScan(key string) bool {
 // rejected push (remote branch moved on), publish under a
 // <branch>-<sha7> side ref instead — that name cannot conflict, so a
 // rejection there means the remote itself is unusable.
-func preserveWorktreeBranch(g *git.Git, branch string) error {
+func preserveWorktreeBranch(g deadHolderGit, branch string) error {
 	tip, err := g.Rev("refs/heads/" + branch)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", branch, err)
@@ -1598,21 +1653,30 @@ func deadHolderRefSuffixSHA(sha string) string {
 	return sha
 }
 
-// checkConvoyCompletion runs gt convoy check to auto-close a convoy whose
-// tracked issues may all be closed. This handles the case where the event poll
-// missed the close events (e.g., daemon restart, Dolt latency).
+// checkConvoy runs the completion check on one convoy, closing it when every
+// tracked issue is resolved.
+func (m *ConvoyManager) checkConvoy(ctx context.Context, convoyID string) error {
+	if m.checkConvoyFn != nil {
+		return m.checkConvoyFn(ctx, convoyID)
+	}
+	return convoy.Town{Root: m.townRoot, Env: bdMutationRoutingEnv(m.townRoot)}.Checker()(ctx, convoyID)
+}
+
+// checkConvoyCompletion checks a convoy whose tracked issues may all be
+// closed. This handles the case where the event poll missed the close events
+// (e.g., daemon restart, Dolt latency).
 func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
-	if _, stderr, err := m.runGt(bdMutationRoutingEnv(m.townRoot), "convoy", "check", convoyID); err != nil {
-		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(string(stderr)))
+	if err := m.checkConvoy(m.ctx, convoyID); err != nil {
+		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(err.Error()))
 	}
 }
 
-// closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.
+// closeEmptyConvoy auto-closes an empty convoy through the completion check.
 func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	m.logger("Convoy %s: auto-closing (empty)", convoyID)
 
-	if _, stderr, err := m.runGt(bdMutationRoutingEnv(m.townRoot), "convoy", "check", convoyID); err != nil {
-		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(string(stderr)))
+	if err := m.checkConvoy(m.ctx, convoyID); err != nil {
+		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(err.Error()))
 	}
 }
 

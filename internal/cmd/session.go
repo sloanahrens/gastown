@@ -914,7 +914,7 @@ func tmuxSessionForAddress(addr string) string {
 	if _, known := session.DefaultRegistry().AllRigs()[parts[0]]; !known {
 		return ""
 	}
-	resolved, _ := assigneeToSessionName(addr)
+	resolved, _ := session.AssigneeSessionName(addr)
 	return resolved
 }
 

@@ -1,14 +1,13 @@
-package cmd
+package convoy
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
-
-	convoyops "github.com/steveyegge/gastown/internal/convoy"
 )
 
 // mockBdForConvoyTest creates a fake bd binary tailored for convoy empty-check
@@ -94,7 +93,7 @@ func TestCheckSingleConvoy_EmptyConvoyDoesNotAutoClose(t *testing.T) {
 	// means "could not resolve", not "all done". (GH#hq-439)
 	_, townBeads, closeLogPath := mockBdForConvoyTest(t, "hq-empty1", "Empty test convoy")
 
-	err := checkSingleConvoy(townBeads, "hq-empty1", false)
+	err := StdTown(townBeads).CheckOne("hq-empty1", false)
 	if err != nil {
 		t.Fatalf("checkSingleConvoy() error: %v", err)
 	}
@@ -109,7 +108,7 @@ func TestCheckSingleConvoy_EmptyConvoyDoesNotAutoClose(t *testing.T) {
 func TestCheckSingleConvoy_EmptyConvoyDryRun(t *testing.T) {
 	_, townBeads, closeLogPath := mockBdForConvoyTest(t, "hq-empty2", "Dry run convoy")
 
-	err := checkSingleConvoy(townBeads, "hq-empty2", true)
+	err := StdTown(townBeads).CheckOne("hq-empty2", true)
 	if err != nil {
 		t.Fatalf("checkSingleConvoy() dry-run error: %v", err)
 	}
@@ -124,7 +123,7 @@ func TestCheckSingleConvoy_EmptyConvoyDryRun(t *testing.T) {
 func TestFindStrandedConvoys_EmptyConvoyFlagged(t *testing.T) {
 	_, townBeads, _ := mockBdForConvoyTest(t, "hq-empty3", "Stranded empty convoy")
 
-	stranded, err := findStrandedConvoysWith(townBeads, noBlockers)
+	stranded, err := StdTown(townBeads).findStrandedWith(context.Background(), noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -234,7 +233,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Pass townRoot (not .beads) — matches getTownBeadsDir() which returns the workspace root.
-	stranded, err := findStrandedConvoysWith(townRoot, noBlockers)
+	stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), noBlockers)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}
@@ -244,7 +243,7 @@ esac
 	}
 
 	// Build a map for easier assertions
-	byID := map[string]strandedConvoyInfo{}
+	byID := map[string]StrandedConvoy{}
 	for _, s := range stranded {
 		byID[s.ID] = s
 	}
@@ -356,14 +355,14 @@ esac
 
 	// Both beads are blocked by gt-blocker1, as the blocker check reports.
 	blockedByBlocker1 := func(string) (blockCheck, func(), error) {
-		return func(id string) convoyops.Block {
+		return func(id string) Block {
 			if strings.HasPrefix(id, "gt-busy") {
-				return convoyops.Block{Reason: "blocks gt-blocker1 (open)"}
+				return Block{Reason: "blocks gt-blocker1 (open)"}
 			}
-			return convoyops.Block{}
+			return Block{}
 		}, func() {}, nil
 	}
-	stranded, err := findStrandedConvoysWith(townRoot, blockedByBlocker1)
+	stranded, err := StdTown(townRoot).findStrandedWith(context.Background(), blockedByBlocker1)
 	if err != nil {
 		t.Fatalf("findStrandedConvoys() error: %v", err)
 	}

@@ -9,7 +9,6 @@ internal/daemon
 internal/deacon
 internal/doctor
 internal/dog
-internal/doltserver
 internal/feed
 internal/formula
 internal/hooks

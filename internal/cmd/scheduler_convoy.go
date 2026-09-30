@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -170,7 +171,7 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 	}
 
 	townBeads := filepath.Join(townRoot, ".beads")
-	tracked, err := getTrackedIssues(townBeads, convoyID)
+	tracked, err := convoyops.StdTown(townBeads).TrackedIssues(convoyID)
 	if err != nil {
 		return fmt.Errorf("getting tracked issues: %w", err)
 	}
@@ -299,7 +300,7 @@ func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 	}
 
 	townBeads := filepath.Join(townRoot, ".beads")
-	tracked, err := getTrackedIssues(townBeads, convoyID)
+	tracked, err := convoyops.StdTown(townBeads).TrackedIssues(convoyID)
 	if err != nil {
 		return fmt.Errorf("getting tracked issues: %w", err)
 	}

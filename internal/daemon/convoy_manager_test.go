@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 // scanTestOpts configures the mockGtForScanTest helper.
@@ -82,8 +83,66 @@ func convoyTestTown(t *testing.T, routes string) string {
 func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeCLI, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
 	m := NewConvoyManager(townRoot, logger, "gt", scanInterval, stores, openStores, isRigParked)
 	m.execCmd = gt.run
+	answerScanThrough(m, gt)
 	return m
 }
+
+// answerScanThrough routes m's stranded scan and completion check through gt,
+// as `gt convoy stranded --json` and `gt convoy check <id>` calls. The manager
+// runs both in process (gt-638go.4); this keeps these tests' fake gt, its
+// recorded calls and its replies driving them as they drove the subprocesses.
+func answerScanThrough(m *ConvoyManager, gt *fakeCLI) {
+	m.findStrandedFn = func(ctx context.Context) ([]strandedConvoyInfo, error) {
+		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "stranded", "--json")
+		cmd.Dir = m.townRoot
+		stdout, stderr, err := gt.run(cmd)
+		if err != nil {
+			return nil, fmt.Errorf("convoy stranded: %s", strings.TrimSpace(string(stderr)))
+		}
+		var stranded []strandedConvoyInfo
+		if err := json.Unmarshal(stdout, &stranded); err != nil {
+			return nil, fmt.Errorf("parsing stranded JSON: %w", err)
+		}
+		return stranded, nil
+	}
+	m.checkConvoyFn = func(ctx context.Context, convoyID string) error {
+		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "check", convoyID)
+		cmd.Dir = m.townRoot
+		if _, stderr, err := gt.run(cmd); err != nil {
+			return fmt.Errorf("convoy check %s: %s", convoyID, strings.TrimSpace(string(stderr)))
+		}
+		return nil
+	}
+}
+
+// installScanFakes replaces m's stranded scan with one that returns
+// strandedJSON, and its completion check with one that appends
+// "convoy check <id>" to checkLogPath (or does nothing when it is empty).
+func (m *ConvoyManager) installScanFakes(strandedJSON, checkLogPath string) {
+	m.findStrandedFn = func(context.Context) ([]strandedConvoyInfo, error) {
+		var stranded []strandedConvoyInfo
+		if err := json.Unmarshal([]byte(strandedJSON), &stranded); err != nil {
+			return nil, err
+		}
+		return stranded, nil
+	}
+	m.checkConvoyFn = func(_ context.Context, convoyID string) error {
+		if checkLogPath == "" {
+			return nil
+		}
+		f, err := os.OpenFile(checkLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = fmt.Fprintf(f, "convoy check %s\n", convoyID)
+		return err
+	}
+}
+
+// noStranded is a stranded scan that finds nothing, so a manager that runs
+// its scan loop touches no town.
+func noStranded(context.Context) ([]strandedConvoyInfo, error) { return nil, nil }
 
 // argvLog renders gt's recorded calls whose argv starts with prefix, one
 // space-joined argv per line — the call log the shell stubs these tests once
@@ -780,30 +839,6 @@ func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 	}
 }
 
-func TestStrandedConvoyInfo_JSONParsing(t *testing.T) {
-	t.Parallel()
-	jsonStr := `[{"id":"hq-cv1","title":"My Convoy","ready_count":2,"ready_issues":["gt-a","gt-b"],"base_branch":"main","agent":"deepseek-flash"}]`
-	var result []strandedConvoyInfo
-	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(result) != 1 {
-		t.Fatalf("expected 1 convoy, got %d", len(result))
-	}
-	c := result[0]
-	if c.ID != "hq-cv1" || c.Title != "My Convoy" || c.ReadyCount != 2 {
-		t.Errorf("unexpected convoy: %+v", c)
-	}
-	if len(c.ReadyIssues) != 2 || c.ReadyIssues[0] != "gt-a" || c.ReadyIssues[1] != "gt-b" {
-		t.Errorf("unexpected ready_issues: %v", c.ReadyIssues)
-	}
-	// The agent recorded by `gt convoy stranded --json` must survive decoding:
-	// dropping it here is how the feeder lost the sling-time --agent (gt-yg24).
-	if c.Agent != "deepseek-flash" {
-		t.Errorf("Agent = %q, want %q", c.Agent, "deepseek-flash")
-	}
-}
-
 func TestFeedFirstReady_MultipleReadyIssues_DispatchesOnlyFirst(t *testing.T) {
 	t.Parallel()
 
@@ -1049,42 +1084,6 @@ func TestFeedFirstReady_UnknownPrefix_Skips(t *testing.T) {
 	}
 	if !skipLogged {
 		t.Errorf("expected skip log for unknown prefix issue zz-issue1, got: %v", logged)
-	}
-}
-
-func TestFindStranded_GtFailure_ReturnsError(t *testing.T) {
-	t.Parallel()
-
-	townRoot := t.TempDir()
-
-	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stderr: "something went wrong\n", code: 1}}))
-
-	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "something went wrong") {
-		t.Errorf("expected error to contain stderr message, got: %v", err)
-	}
-}
-
-func TestFindStranded_InvalidJSON_ReturnsError(t *testing.T) {
-	t.Parallel()
-
-	townRoot := t.TempDir()
-
-	gtf := newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "this is not valid JSON at all\n"}}))
-
-	m := newFakeGtManager(townRoot, func(string, ...interface{}) {}, gtf, 10*time.Minute, nil, nil, nil)
-
-	result, err := m.findStranded()
-	if err == nil {
-		t.Fatalf("expected error from findStranded, got nil with result: %v", result)
-	}
-	if !strings.Contains(err.Error(), "parsing stranded JSON") {
-		t.Errorf("expected error to mention 'parsing stranded JSON', got: %v", err)
 	}
 }
 
@@ -3257,48 +3256,33 @@ func TestOriginBranches_CachesPerScan(t *testing.T) {
 // trace on origin at all, so the old code fed a fresh polecat from main and
 // silently discarded it.
 
-// runDeadHolderGit runs a git command in dir, failing the test on error.
-// GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM isolate it from the host's global and
-// system git config — a signing key, hooksPath, or init.defaultBranch set on
-// the developer's machine must not change whether these commits/pushes
-// succeed.
-func runDeadHolderGit(t *testing.T, dir string, args ...string) string {
+// newDeadHolderWorktree makes, in gitfake world f, an "origin" bare repo
+// holding branch at an initial commit, and a worktree cloned from it on that
+// branch — the layout assigneeToWorktreePath resolves for assignee
+// "<rig>/polecats/<name>". The branch is on origin as cloned; a test that
+// wants unpushed work commits on top of it in the worktree. Returns the
+// worktree path and the bare repo path.
+func newDeadHolderWorktree(t *testing.T, f *gitfake.Fake, townRoot, rig, name, branch string) (worktreePath, originPath string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
+	originPath = filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, originPath)
+	f.Commit(t, originPath, branch, "initial", map[string]string{"README": "r\n"})
+	worktreePath = filepath.Join(townRoot, rig, "polecats", name, rig)
+	if err := f.Open(filepath.Dir(worktreePath)).CloneBranch(originPath, worktreePath, branch); err != nil {
+		t.Fatalf("clone dead holder worktree: %v", err)
 	}
-	return strings.TrimSpace(string(out))
+	return worktreePath, originPath
 }
 
-// newDeadHolderWorktree creates a bare "origin" remote and a worktree cloned
-// from it, checked out on the given generated polecat branch — the layout
-// assigneeToWorktreePath resolves for assignee "<rig>/polecats/<name>".
-// Returns the worktree path and the bare repo path.
-func newDeadHolderWorktree(t *testing.T, townRoot, rig, name, branch string) (worktreePath, originPath string) {
-	t.Helper()
-
-	originPath = filepath.Join(t.TempDir(), "origin.git")
-	if err := os.MkdirAll(originPath, 0755); err != nil {
-		t.Fatalf("mkdir origin: %v", err)
+// deadHolderOpener opens dead holders' worktrees in gitfake world f.
+func deadHolderOpener(t *testing.T, f *gitfake.Fake) func(dir string) deadHolderGit {
+	return func(dir string) deadHolderGit {
+		g, ok := f.Open(dir).(deadHolderGit)
+		if !ok {
+			t.Fatalf("gitfake does not implement deadHolderGit for %s", dir)
+		}
+		return g
 	}
-	runDeadHolderGit(t, originPath, "init", "--bare")
-
-	worktreePath = filepath.Join(townRoot, rig, "polecats", name, rig)
-	if err := os.MkdirAll(worktreePath, 0755); err != nil {
-		t.Fatalf("mkdir worktree: %v", err)
-	}
-	runDeadHolderGit(t, worktreePath, "init")
-	runDeadHolderGit(t, worktreePath, "config", "user.email", "test@test.com")
-	runDeadHolderGit(t, worktreePath, "config", "user.name", "Test")
-	runDeadHolderGit(t, worktreePath, "remote", "add", "origin", originPath)
-	runDeadHolderGit(t, worktreePath, "checkout", "-b", branch)
-	runDeadHolderGit(t, worktreePath, "commit", "--allow-empty", "-m", "initial")
-
-	return worktreePath, originPath
 }
 
 func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
@@ -3330,8 +3314,10 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 
 	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue1+abc123"
-	worktreePath, originPath := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
-	localTip := runDeadHolderGit(t, worktreePath, "rev-parse", "HEAD")
+	f := gitfake.New()
+	worktreePath, originPath := newDeadHolderWorktree(t, f, townRoot, "gt", "basalt", branch)
+	// Work the holder committed but never pushed.
+	localTip := f.Commit(t, worktreePath, branch, "local work", nil)
 
 	// The rig-level shared-repo listing (survivingBranchFor's source) has
 	// nothing — the branch was never pushed, so it cannot appear there.
@@ -3341,6 +3327,7 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
+	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -3363,7 +3350,7 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 		t.Errorf("expected no escalation for a successful preserve, got: %v", escalated)
 	}
 
-	remoteTip := runDeadHolderGit(t, originPath, "rev-parse", branch)
+	remoteTip := f.Ref(originPath, "refs/heads/"+branch)
 	if remoteTip != localTip {
 		t.Errorf("expected %s pushed to origin at %s, got %s", branch, localTip, remoteTip)
 	}
@@ -3398,10 +3385,8 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 
 	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue2+xyz789"
-	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
-	// Push the commit so UnpushedCommits is 0 — isolates the assertion to
-	// uncommitted work, which can never be safely auto-preserved by pushing.
-	runDeadHolderGit(t, worktreePath, "push", "origin", branch)
+	f := gitfake.New()
+	worktreePath, _ := newDeadHolderWorktree(t, f, townRoot, "gt", "basalt", branch)
 	if err := os.WriteFile(filepath.Join(worktreePath, "dirty.txt"), []byte("uncommitted"), 0644); err != nil {
 		t.Fatalf("write dirty file: %v", err)
 	}
@@ -3411,6 +3396,7 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
+	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -3696,13 +3682,15 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	// branch — the seat was reused for other work since gt-issue7's holder
 	// died. Nothing here is attributable to gt-issue7.
 	otherBranch := "polecat/basalt/gt-other9+zzz999"
-	newDeadHolderWorktree(t, townRoot, "gt", "basalt", otherBranch)
+	f := gitfake.New()
+	newDeadHolderWorktree(t, f, townRoot, "gt", "basalt", otherBranch)
 
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
+	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -3744,11 +3732,8 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 
 	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue8+dirt111"
-	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
-	// Push the commit so UnpushedCommits is 0 — the only thing left in the
-	// tree is tool-managed runtime state, which gt done and the deacon's
-	// stale-hook scan already tolerate (85257aacc9b9).
-	runDeadHolderGit(t, worktreePath, "push", "origin", branch)
+	f := gitfake.New()
+	worktreePath, _ := newDeadHolderWorktree(t, f, townRoot, "gt", "basalt", branch)
 	if err := os.MkdirAll(filepath.Join(worktreePath, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
@@ -3761,6 +3746,7 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
+	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)
@@ -3809,17 +3795,22 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 
 	townRoot, gtf, logged := feedTestRig(t)
 	branch := "polecat/basalt/gt-issue9+push000"
-	worktreePath, _ := newDeadHolderWorktree(t, townRoot, "gt", "basalt", branch)
+	f := gitfake.New()
+	worktreePath, _ := newDeadHolderWorktree(t, f, townRoot, "gt", "basalt", branch)
 	// Point origin at a path with no repository, so both the primary push
 	// and the <branch>-<sha7> fallback push fail — exercising the "resolve
 	// by hand" escalation preserveWorktreeBranch raises when neither lands.
-	runDeadHolderGit(t, worktreePath, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+	f.Commit(t, worktreePath, branch, "local work", nil) // unpushed, so a preserve is attempted
+	if err := f.Open(worktreePath).ConfigurePushURL("origin", filepath.Join(t.TempDir(), "does-not-exist")); err != nil {
+		t.Fatal(err)
+	}
 
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
 	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
+	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
 	}, nil)

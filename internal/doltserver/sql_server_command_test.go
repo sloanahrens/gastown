@@ -1,16 +1,16 @@
 package doltserver
 
 import (
-	"os"
 	"runtime"
 	"strings"
 	"testing"
 )
 
+// The managed server command runs dolt sql-server on the managed config from
+// the data directory, its environment through doltSQLServerEnv (whose
+// defaults and overrides are pinned below): each runtime key exactly once.
 func TestNewSQLServerCommandAddsRuntimeDefaults(t *testing.T) {
-	unsetEnv(t, "GOMEMLIMIT")
-	unsetEnv(t, "GOGC")
-
+	t.Parallel()
 	dataDir := t.TempDir()
 	configPath := dataDir + "/config.yaml"
 	cmd := NewSQLServerCommand("dolt", dataDir, configPath)
@@ -28,11 +28,10 @@ func TestNewSQLServerCommandAddsRuntimeDefaults(t *testing.T) {
 		}
 	}
 
-	if got := envValue(cmd.Env, "GOMEMLIMIT"); got != defaultDoltSQLServerGoMemLimit {
-		t.Fatalf("GOMEMLIMIT = %q, want %q", got, defaultDoltSQLServerGoMemLimit)
-	}
-	if got := envValue(cmd.Env, "GOGC"); got != defaultDoltSQLServerGOGC {
-		t.Fatalf("GOGC = %q, want %q", got, defaultDoltSQLServerGOGC)
+	for _, key := range []string{"GOMEMLIMIT", "GOGC"} {
+		if got := envKeyCount(cmd.Env, key); got != 1 {
+			t.Fatalf("%s set %d times, want once", key, got)
+		}
 	}
 	if runtime.GOOS != "windows" {
 		if got := envValue(cmd.Env, "PWD"); got != dataDir {
@@ -42,6 +41,7 @@ func TestNewSQLServerCommandAddsRuntimeDefaults(t *testing.T) {
 }
 
 func TestDoltSQLServerEnvPreservesRuntimeOverrides(t *testing.T) {
+	t.Parallel()
 	env := doltSQLServerEnv([]string{"GOMEMLIMIT=24GiB", "GOGC=100"})
 
 	if got := envValue(env, "GOMEMLIMIT"); got != "24GiB" {
@@ -59,6 +59,7 @@ func TestDoltSQLServerEnvPreservesRuntimeOverrides(t *testing.T) {
 }
 
 func TestDoltSQLServerEnvTreatsEmptyAndOffAsOverrides(t *testing.T) {
+	t.Parallel()
 	env := doltSQLServerEnv([]string{"GOMEMLIMIT=off", "GOGC="})
 
 	if got := envValue(env, "GOMEMLIMIT"); got != "off" {
@@ -73,6 +74,7 @@ func TestDoltSQLServerEnvTreatsEmptyAndOffAsOverrides(t *testing.T) {
 }
 
 func TestDoltSQLServerEnvPreservesWindowsCaseInsensitiveRuntimeOverrides(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		env  []string
@@ -107,6 +109,7 @@ func TestDoltSQLServerEnvPreservesWindowsCaseInsensitiveRuntimeOverrides(t *test
 }
 
 func TestDoltSQLServerEnvKeepsPOSIXRuntimeKeysCaseSensitive(t *testing.T) {
+	t.Parallel()
 	env := doltSQLServerEnvForGOOS([]string{"gomemlimit=24GiB", "GoGc=100"}, "linux")
 
 	if got := envValue(env, "GOMEMLIMIT"); got != defaultDoltSQLServerGoMemLimit {
@@ -121,21 +124,6 @@ func TestDoltSQLServerEnvKeepsPOSIXRuntimeKeysCaseSensitive(t *testing.T) {
 	if got := envValue(env, "GoGc"); got != "100" {
 		t.Fatalf("GoGc = %q, want preserved mixed-case value", got)
 	}
-}
-
-func unsetEnv(t *testing.T, key string) {
-	t.Helper()
-	old, ok := os.LookupEnv(key)
-	if err := os.Unsetenv(key); err != nil {
-		t.Fatalf("unset %s: %v", key, err)
-	}
-	t.Cleanup(func() {
-		if ok {
-			_ = os.Setenv(key, old)
-		} else {
-			_ = os.Unsetenv(key)
-		}
-	})
 }
 
 func envValue(env []string, key string) string {

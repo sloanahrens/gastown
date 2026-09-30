@@ -8,6 +8,7 @@ import (
 )
 
 func TestFindBackups_Empty(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	backups, err := FindBackups(townRoot)
@@ -20,6 +21,7 @@ func TestFindBackups_Empty(t *testing.T) {
 }
 
 func TestFindBackups_SortedNewestFirst(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create backups in non-chronological order
@@ -50,6 +52,7 @@ func TestFindBackups_SortedNewestFirst(t *testing.T) {
 }
 
 func TestFindBackups_LoadsMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	dir := filepath.Join(townRoot, "migration-backup-20260207-143022")
@@ -82,6 +85,7 @@ func TestFindBackups_LoadsMetadata(t *testing.T) {
 }
 
 func TestFindBackups_IgnoresNonBackupDirs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create some non-backup directories
@@ -105,6 +109,7 @@ func TestFindBackups_IgnoresNonBackupDirs(t *testing.T) {
 }
 
 func TestRestoreFromBackup_FormulaStyle(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create the backup in formula style: town-beads/ and <rigname>-beads/
@@ -190,6 +195,7 @@ func TestRestoreFromBackup_FormulaStyle(t *testing.T) {
 }
 
 func TestRestoreFromBackup_TestBackupStyle(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create the backup in test-backup style: rigs/<rigname>/.beads
@@ -237,6 +243,7 @@ func TestRestoreFromBackup_TestBackupStyle(t *testing.T) {
 }
 
 func TestRestoreFromBackup_NoBackup(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	_, err := RestoreFromBackup(townRoot, filepath.Join(townRoot, "nonexistent"))
@@ -246,6 +253,7 @@ func TestRestoreFromBackup_NoBackup(t *testing.T) {
 }
 
 func TestRestoreFromBackup_CreatesMissingParentDirs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create backup with a rig that doesn't exist yet in town
@@ -276,6 +284,7 @@ func TestRestoreFromBackup_CreatesMissingParentDirs(t *testing.T) {
 }
 
 func TestCopyDir(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	dst := filepath.Join(t.TempDir(), "dst")
 

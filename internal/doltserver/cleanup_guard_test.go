@@ -8,6 +8,7 @@ import (
 )
 
 func TestHoldsFromIssues(t *testing.T) {
+	t.Parallel()
 	issues := []*beads.Issue{
 		nil, // must not panic
 		{ID: "hq-1", Title: "no holds here", Labels: []string{"gt:task", "urgent"}},
@@ -34,6 +35,7 @@ func TestHoldsFromIssues(t *testing.T) {
 }
 
 func TestHoldFor(t *testing.T) {
+	t.Parallel()
 	specific := []DatabaseHold{
 		{BeadID: "hq-2", DB: "forkrig"},
 		{BeadID: "hq-5", DB: "alpha"},
@@ -60,6 +62,7 @@ func TestHoldFor(t *testing.T) {
 }
 
 func TestValidateForceAuthorization(t *testing.T) {
+	t.Parallel()
 	valid := func() *beads.Issue {
 		return &beads.Issue{
 			ID:        "hq-auth1",

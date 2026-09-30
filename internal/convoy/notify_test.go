@@ -1,4 +1,4 @@
-package cmd
+package convoy
 
 import (
 	"os"
@@ -85,8 +85,8 @@ exit 0
 		t.Fatalf("save town settings: %v", err)
 	}
 
-	notifyConvoyCompletion(townRoot, "hq-cv-dup", "Duplicate Guard")
-	notifyConvoyCompletion(townRoot, "hq-cv-dup", "Duplicate Guard")
+	StdTown(townRoot).NotifyCompletion("hq-cv-dup", "Duplicate Guard")
+	StdTown(townRoot).NotifyCompletion("hq-cv-dup", "Duplicate Guard")
 
 	data, err := os.ReadFile(mailLogPath)
 	if err != nil {
@@ -187,7 +187,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	closed, err := closeConvoyIfComplete(townRoot, "hq-cv-done", "Done Convoy", []trackedIssueInfo{
+	closed, err := StdTown(townRoot).closeIfComplete("hq-cv-done", "Done Convoy", []TrackedIssue{
 		{ID: "gt-done", Status: "closed"},
 	}, false)
 	if err != nil {
@@ -272,7 +272,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	notifyConvoyCompletion(townRoot, "hq-cv-export-fail", "Export Failure")
+	StdTown(townRoot).NotifyCompletion("hq-cv-export-fail", "Export Failure")
 
 	data, err := os.ReadFile(orderPath)
 	if err != nil {
@@ -357,7 +357,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	closed, err := closeConvoyIfComplete(townRoot, "hq-cv-close-export-fail", "Close Export Failure", []trackedIssueInfo{
+	closed, err := StdTown(townRoot).closeIfComplete("hq-cv-close-export-fail", "Close Export Failure", []TrackedIssue{
 		{ID: "gt-done", Status: "closed"},
 	}, false)
 	if err == nil {
@@ -366,7 +366,7 @@ exit 0
 	if closed {
 		t.Fatal("closeConvoyIfComplete returned closed=true after close JSONL export failure")
 	}
-	if err := persistAndNotifyConvoyCompletion(townRoot, "hq-cv-close-export-fail", "Close Export Failure"); err != nil {
+	if err := StdTown(townRoot).PersistAndNotify("hq-cv-close-export-fail", "Close Export Failure"); err != nil {
 		t.Fatalf("persistAndNotifyConvoyCompletion returned error: %v", err)
 	}
 
@@ -407,7 +407,7 @@ exit 0
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	sendCloseNotification("gastown/crew/alice", "hq-cv-close", "Close Guard", "done")
+	Town{Root: t.TempDir()}.NotifyClosed("gastown/crew/alice", "hq-cv-close", "Close Guard", "done")
 
 	data, err := os.ReadFile(mailLogPath)
 	if err != nil {

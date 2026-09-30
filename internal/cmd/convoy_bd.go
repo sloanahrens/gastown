@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -23,7 +24,7 @@ type bdShowResult struct {
 }
 
 func runBdJSONForBead(beadID string, args ...string) ([]byte, error) {
-	return runBdJSON(resolveBeadDir(beadID), args...)
+	return beads.RunBdJSON(resolveBeadDir(beadID), args...)
 }
 
 // bdShow runs `bd show <id> --json` and returns the parsed bead info.
@@ -90,7 +91,7 @@ func bdListChildrenViaDeps(parentID string) ([]bdShowResult, error) {
 
 	// Production data stores parent-child as a typed dependency target where
 	// issue_id=parent. "down" returns target rows for the epic's children.
-	childIDs, err := bdDepListRawIDs(beadsDir, parentID, "down", "parent-child")
+	childIDs, err := convoy.DepListRawIDs(beadsDir, parentID, "down", "parent-child")
 	if err != nil {
 		return nil, nil // best-effort — caller still gets the empty primary result
 	}

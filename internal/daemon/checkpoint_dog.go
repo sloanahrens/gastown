@@ -1,10 +1,8 @@
 package daemon
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,7 +12,6 @@ import (
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
@@ -169,18 +166,20 @@ func (d *Daemon) checkpointRigPolecats(rigName string) (int, int) {
 // checkpointWorktree creates a WIP checkpoint commit for a single worktree.
 // Returns true if a checkpoint was created.
 func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
+	g := d.gitAt(workDir)
+
 	// Check git status (exclude runtime dirs from consideration)
-	statusOut, err := runGitCmd(workDir, "status", "--porcelain")
+	status, err := g.Status()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git status failed in %s/%s: %v", rigName, polecatName, err)
 		return false
 	}
-	if strings.TrimSpace(statusOut) == "" {
+	if status.Clean {
 		return false // Clean worktree
 	}
 
 	// Stage everything
-	if _, err := runGitCmd(workDir, "add", "-A"); err != nil {
+	if err := g.Add("-A"); err != nil {
 		d.logger.Printf("checkpoint_dog: git add -A failed in %s/%s: %v", rigName, polecatName, err)
 		return false
 	}
@@ -188,13 +187,13 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	// Unstage runtime/ephemeral artifacts using the same centralized policy as
 	// gt done. Scanning staged paths catches tracked nested runtime dirs that
 	// git add -A can restage despite ignore rules.
-	stagedOut, err := runGitCmdRaw(workDir, "diff", "--cached", "--name-only", "-z")
+	staged, err := g.StagedChanges()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
 		return false
 	}
-	for _, pathspec := range gtgit.RuntimeArtifactPathspecs(splitNullSeparatedPaths(stagedOut)) {
-		if _, err := runGitCmd(workDir, "reset", "HEAD", "--", pathspec); err != nil {
+	for _, pathspec := range gtgit.RuntimeArtifactPathspecs(stagedPaths(staged, 0)) {
+		if err := g.ResetFiles(pathspec); err != nil {
 			d.logger.Printf("checkpoint_dog: git reset runtime artifact %q failed in %s/%s: %v", pathspec, rigName, polecatName, err)
 			return false
 		}
@@ -211,16 +210,16 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	// polecat that meant to keep one now has no checkpoint for it, and only the
 	// log says why.
 	//
-	// --no-renames: `add -A` stages a tracked file moved to a scratch name as a
-	// delete plus an add, and rename detection folds that pair into one R entry
-	// that --diff-filter=A does not list.
-	addedOut, err := runGitCmdRaw(workDir, "diff", "--cached", "--name-only", "--no-renames", "--diff-filter=A", "-z")
+	// StagedChanges runs without rename detection: `add -A` stages a tracked
+	// file moved to a scratch name as a delete plus an add, and a rename entry
+	// would hide the add.
+	staged, err = g.StagedChanges()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached --diff-filter=A failed in %s/%s: %v", rigName, polecatName, err)
 		return false
 	}
-	for _, path := range checkpoint.ThrowawayPaths(splitNullSeparatedPaths(addedOut)) {
-		if _, err := runGitCmd(workDir, "reset", "HEAD", "--", path); err != nil {
+	for _, path := range checkpoint.ThrowawayPaths(stagedPaths(staged, 'A')) {
+		if err := g.ResetFiles(path); err != nil {
 			d.logger.Printf("checkpoint_dog: git reset throwaway path %q failed in %s/%s: %v", path, rigName, polecatName, err)
 			return false
 		}
@@ -231,20 +230,14 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	// (additions + modifications), never commit deletions of tracked files.
 	// This prevents the bug where a polecat's working tree has a missing
 	// tracked file and the checkpoint commits the deletion (gt-pvx fix).
-	if delOut, err := runGitCmd(workDir, "diff", "--cached", "--name-only", "--diff-filter=D"); err == nil {
-		if dels := strings.TrimSpace(delOut); dels != "" {
-			for _, f := range strings.Split(dels, "\n") {
-				if f != "" {
-					_, _ = runGitCmd(workDir, "reset", "HEAD", "--", f)
-				}
-			}
+	if staged, err := g.StagedChanges(); err == nil {
+		for _, f := range stagedPaths(staged, 'D') {
+			_ = g.ResetFiles(f)
 		}
 	}
 
 	// Check if anything is staged after exclusions
-	diffOut, err := runGitCmd(workDir, "diff", "--cached", "--quiet")
-	if err == nil && strings.TrimSpace(diffOut) == "" {
-		// --quiet exits 0 if no diff → nothing staged
+	if staged, err := g.StagedChanges(); err == nil && len(staged) == 0 {
 		return false
 	}
 
@@ -261,13 +254,25 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	}
 
 	// Commit the checkpoint
-	if _, err := runGitCmd(workDir, "commit", "-m", "WIP: checkpoint (auto)"); err != nil {
+	if err := g.Commit("WIP: checkpoint (auto)"); err != nil {
 		d.logger.Printf("checkpoint_dog: git commit failed in %s/%s: %v", rigName, polecatName, err)
 		return false
 	}
 
 	d.logger.Printf("checkpoint_dog: created WIP checkpoint in %s/%s", rigName, polecatName)
 	return true
+}
+
+// stagedPaths returns the paths of staged changes with the given status, or
+// of all of them when status is 0.
+func stagedPaths(changes []gtgit.StagedChange, status byte) []string {
+	var paths []string
+	for _, c := range changes {
+		if status == 0 || c.Status == status {
+			paths = append(paths, c.Path)
+		}
+	}
+	return paths
 }
 
 // checkpointRevertTargetDefault is the branch name assumed when the rig's
@@ -291,7 +296,7 @@ func (d *Daemon) checkpointRevertTarget(workDir, rigName string) string {
 			defaultBranch = rigCfg.DefaultBranch
 		}
 	}
-	return gtgit.NewGit(workDir).CleanDefaultBranchBaseRef("origin", defaultBranch)
+	return d.gitAt(workDir).CleanDefaultBranchBaseRef("origin", defaultBranch)
 }
 
 // checkpointRevertGuard reports whether the currently staged index would, if
@@ -311,16 +316,17 @@ func (d *Daemon) checkpointRevertTarget(workDir, rigName string) string {
 // not run must not read as a check that passed.
 func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (blocked bool, reason string) {
 	target := d.checkpointRevertTarget(workDir, rigName)
-	if _, err := runGitCmd(workDir, "rev-parse", "--verify", "--quiet", target); err != nil {
+	g := d.gitAt(workDir)
+	if _, err := g.Rev(target); err != nil {
 		return false, ""
 	}
 
-	pendingTree, err := runGitCmd(workDir, "write-tree")
+	pendingTree, err := g.WriteTree()
 	if err != nil {
 		return true, fmt.Sprintf("could not inspect the pending checkpoint tree (git write-tree failed): %v", err)
 	}
 
-	report, err := gtgit.DetectRevertedMerges(gtgit.NewGit(workDir), target, pendingTree)
+	report, err := gtgit.DetectRevertedMerges(g, target, pendingTree)
 	if err != nil {
 		return true, fmt.Sprintf("could not verify the pending checkpoint against %s: %v", target, err)
 	}
@@ -379,48 +385,4 @@ func resolveCheckpointWorkDir(polecatsDir, polecatName, rigName string) string {
 		return flat
 	}
 	return ""
-}
-
-// runGitCmd executes a git command in the given directory and returns stdout.
-func runGitCmd(workDir string, args ...string) (string, error) {
-	out, err := runGitCmdRaw(workDir, args...)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
-}
-
-func runGitCmdRaw(workDir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = workDir
-	util.SetDetachedProcessGroup(cmd)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return "", fmt.Errorf("%s: %s", err, errMsg)
-		}
-		return "", err
-	}
-
-	return stdout.String(), nil
-}
-
-func splitNullSeparatedPaths(out string) []string {
-	if out == "" {
-		return nil
-	}
-	parts := strings.Split(out, "\x00")
-	paths := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" {
-			paths = append(paths, part)
-		}
-	}
-	return paths
 }

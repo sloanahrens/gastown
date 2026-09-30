@@ -260,13 +260,13 @@ func collectExistingMoleculeDepsVia(run beads.BDRunner, beadID, townRoot string)
 	if beadID == "" {
 		return nil, nil
 	}
-	if !isValidBeadID(beadID) {
+	if !beads.IsValidBeadID(beadID) {
 		return nil, fmt.Errorf("invalid bead ID: %q", beadID)
 	}
 
 	dir := resolveBeadDirFromTownRoot(townRoot, beadID)
 	query := fmt.Sprintf(`SELECT DISTINCT wisp_dependencies.issue_id FROM wisp_dependencies JOIN wisps ON wisps.id = wisp_dependencies.issue_id WHERE wisps.issue_type = 'molecule' AND wisps.status NOT IN ('closed', 'tombstone') AND wisp_dependencies.type IN ('blocks', 'conditional-blocks', 'parent-child') AND (wisp_dependencies.depends_on_issue_id = '%[1]s' OR wisp_dependencies.depends_on_wisp_id = '%[1]s' OR wisp_dependencies.depends_on_external = '%[1]s' OR %[2]s)`, beadID, sqlExternalDepTargetClause(beadID))
-	out, err := runBdJSONVia(run, dir, false, false, "sql", query, "--json")
+	out, err := beads.RunBdJSONWith(beads.BdJSONOptions{Run: run}, dir, "sql", query, "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -1395,7 +1395,7 @@ var isHookedAgentDeadFn = isHookedAgentDead
 // Returns true if the session is confirmed dead. Returns false if alive or if we
 // can't determine liveness (conservative: don't auto-force on uncertainty).
 func isHookedAgentDead(assignee string) bool {
-	sessionName, _ := assigneeToSessionName(assignee)
+	sessionName, _ := session.AssigneeSessionName(assignee)
 	if sessionName == "" {
 		return false // Unknown format, can't determine
 	}

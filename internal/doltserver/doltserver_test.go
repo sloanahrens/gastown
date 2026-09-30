@@ -5,15 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 // =============================================================================
 
 func TestFormatBytes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input int64
 		want  string
@@ -47,6 +47,7 @@ func TestFormatBytes(t *testing.T) {
 }
 
 func TestDirSize(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create some files with known sizes
@@ -68,6 +69,7 @@ func TestDirSize(t *testing.T) {
 }
 
 func TestDirSize_EmptyDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	size := dirSize(tmpDir)
 	if size != 0 {
@@ -76,6 +78,7 @@ func TestDirSize_EmptyDir(t *testing.T) {
 }
 
 func TestDirSize_NonexistentDir(t *testing.T) {
+	t.Parallel()
 	size := dirSize("/nonexistent/path/that/does/not/exist")
 	if size != 0 {
 		t.Errorf("dirSize of nonexistent dir = %d, want 0", size)
@@ -83,6 +86,7 @@ func TestDirSize_NonexistentDir(t *testing.T) {
 }
 
 func TestGetDoltFlagFromArgs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -131,6 +135,7 @@ func TestGetDoltFlagFromArgs(t *testing.T) {
 }
 
 func TestReadSQLServerInfo(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	infoDir := filepath.Join(dataDir, ".dolt")
 	if err := os.MkdirAll(infoDir, 0755); err != nil {
@@ -160,6 +165,7 @@ func TestReadSQLServerInfo(t *testing.T) {
 }
 
 func TestReadSQLServerInfoRejectsMalformedContent(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 	infoDir := filepath.Join(dataDir, ".dolt")
 	if err := os.MkdirAll(infoDir, 0755); err != nil {
@@ -175,6 +181,7 @@ func TestReadSQLServerInfoRejectsMalformedContent(t *testing.T) {
 }
 
 func TestDoltProcessMatchesTownPaths(t *testing.T) {
+	t.Parallel()
 	expectedDir := "/town/.dolt-data"
 
 	tests := []struct {
@@ -245,6 +252,7 @@ func TestDoltProcessMatchesTownPaths(t *testing.T) {
 }
 
 func TestContainsPathBoundary(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		line string
@@ -271,6 +279,7 @@ func TestContainsPathBoundary(t *testing.T) {
 }
 
 func TestFindIdleMonitorProcessesFromPS(t *testing.T) {
+	t.Parallel()
 	const townRoot = "/tmp/gt"
 	const port = 3307
 	pidLines := []struct {
@@ -306,6 +315,7 @@ func TestFindIdleMonitorProcessesFromPS(t *testing.T) {
 }
 
 func TestFindOwnedDoltTestServerCandidatesFromPS(t *testing.T) {
+	t.Parallel()
 	townRoot := "/tmp/gt"
 	dataDir := "/tmp/gt/.dolt-data"
 	output := strings.Join([]string{
@@ -331,53 +341,62 @@ func TestFindOwnedDoltTestServerCandidatesFromPS(t *testing.T) {
 }
 
 func TestReapOwnedTestServersRefusesNonTempRoot(t *testing.T) {
-	if _, err := ReapOwnedTestServers(string(filepath.Separator)); err == nil {
+	t.Parallel()
+	h := newFakeHost().host()
+	if _, err := h.ReapOwnedTestServers(string(filepath.Separator)); err == nil {
 		t.Fatal("expected non-temp root to be rejected")
 	}
 }
 
 func TestReapOwnedTestServersIgnoresNonDoltPID(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
-	config := DefaultConfig(townRoot)
-	if err := os.MkdirAll(filepath.Dir(config.PidFile), 0755); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestReapOwnedTestServersHelperProcess$")
-	cmd.Env = append(os.Environ(), "GT_DOLT_REAP_HELPER=1")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start helper process: %v", err)
-	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-		}
-	})
-	if err := os.WriteFile(config.PidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0644); err != nil {
-		t.Fatal(err)
-	}
+	child := f.spawn(fakeProc{args: []string{"sleep", "60"}, cwd: townRoot})
+	writePIDFile(t, h, townRoot, child)
 
-	stopped, err := ReapOwnedTestServers(townRoot)
+	stopped, err := h.ReapOwnedTestServers(townRoot)
 	if err != nil {
 		t.Fatalf("ReapOwnedTestServers: %v", err)
 	}
 	if stopped != 0 {
 		t.Fatalf("stopped = %d, want 0", stopped)
 	}
-	if !processIsAlive(cmd.Process.Pid) {
-		t.Fatalf("non-Dolt child process %d was killed", cmd.Process.Pid)
+	if sigs := f.signalsTo(child); len(sigs) != 0 {
+		t.Fatalf("non-Dolt child process was signaled: %v", sigs)
 	}
 }
 
-func TestReapOwnedTestServersHelperProcess(t *testing.T) {
-	if os.Getenv("GT_DOLT_REAP_HELPER") != "1" {
-		return
+// A dolt sql-server of the town, found by pid file or by its argv naming
+// the town, is terminated; one of another town is not.
+func TestReapOwnedTestServersTerminatesOwnedDolt(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
+	townRoot := t.TempDir() // under os.TempDir as given, which the reaper insists on
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	byPIDFile := f.doltServer(townRoot, 0)
+	writePIDFile(t, h, townRoot, byPIDFile)
+	byArgv := f.spawn(fakeProc{args: []string{"dolt", "sql-server", "--data-dir", dataDir}})
+	foreign := f.doltServer(t.TempDir(), 0)
+
+	stopped, err := h.ReapOwnedTestServers(townRoot)
+	if err != nil || stopped != 2 {
+		t.Fatalf("ReapOwnedTestServers = %d, %v; want 2 stopped", stopped, err)
 	}
-	time.Sleep(30 * time.Second)
-	os.Exit(0)
+	for _, pid := range []int{byPIDFile, byArgv} {
+		if sigs := f.signalsTo(pid); len(sigs) != 1 || sigs[0] != syscall.SIGTERM {
+			t.Errorf("owned dolt %d got %v, want one SIGTERM", pid, sigs)
+		}
+	}
+	if sigs := f.signalsTo(foreign); len(sigs) != 0 {
+		t.Errorf("another town's dolt was signaled: %v", sigs)
+	}
 }
 
 func TestDoltProcessOwnerPathFromEvidence(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		actualDataDir    string
@@ -424,6 +443,8 @@ func TestDoltProcessOwnerPathFromEvidence(t *testing.T) {
 }
 
 func TestGetHealthMetrics_NoServer(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create .dolt-data dir with some content
@@ -435,7 +456,7 @@ func TestGetHealthMetrics_NoServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	metrics := GetHealthMetrics(townRoot)
+	metrics := h.GetHealthMetrics(townRoot)
 
 	// Connections and latency depend on whether a local Dolt server is running.
 	// With no server, both are 0. With a server, dolt auto-detects it.
@@ -463,9 +484,11 @@ func TestGetHealthMetrics_NoServer(t *testing.T) {
 }
 
 func TestGetHealthMetrics_EmptyDataDir(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
-	metrics := GetHealthMetrics(townRoot)
+	metrics := h.GetHealthMetrics(townRoot)
 
 	if metrics.DiskUsageBytes != 0 {
 		t.Errorf("DiskUsageBytes = %d, want 0 (no data dir)", metrics.DiskUsageBytes)
@@ -476,6 +499,8 @@ func TestGetHealthMetrics_EmptyDataDir(t *testing.T) {
 }
 
 func TestFindMigratableDatabases_FollowsRedirect(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Setup: simulate a town with a rig that uses a redirect
 	townRoot := t.TempDir()
 
@@ -505,7 +530,7 @@ func TestFindMigratableDatabases_FollowsRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 
 	// Should find the rig database via redirect
 	found := false
@@ -525,6 +550,8 @@ func TestFindMigratableDatabases_FollowsRedirect(t *testing.T) {
 }
 
 func TestFindMigratableDatabases_NoRedirect(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Setup: rig with direct .beads/dolt/beads_testrig (no redirect)
 	townRoot := t.TempDir()
 
@@ -539,7 +566,7 @@ func TestFindMigratableDatabases_NoRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 
 	found := false
 	for _, m := range migrations {
@@ -558,6 +585,7 @@ func TestFindMigratableDatabases_NoRedirect(t *testing.T) {
 }
 
 func TestFindLocalDoltDB(t *testing.T) {
+	t.Parallel()
 	t.Run("no dolt directory", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		result := findLocalDoltDB(beadsDir)
@@ -625,20 +653,8 @@ func TestFindLocalDoltDB(t *testing.T) {
 			}
 		}
 
-		// Capture stderr to verify warning is emitted
-		origStderr := os.Stderr
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		os.Stderr = w
-
-		result := findLocalDoltDB(beadsDir)
-
-		w.Close()
 		var buf bytes.Buffer
-		io.Copy(&buf, r)
-		os.Stderr = origStderr
+		result := findLocalDoltDBWarning(beadsDir, &buf)
 
 		// Should fail closed on ambiguity — return empty string
 		if result != "" {
@@ -674,6 +690,8 @@ func TestFindLocalDoltDB(t *testing.T) {
 }
 
 func TestEnsureMetadata_HQ(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create .beads directory
@@ -688,7 +706,7 @@ func TestEnsureMetadata_HQ(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("EnsureMetadata failed: %v", err)
 	}
 
@@ -718,6 +736,8 @@ func TestEnsureMetadata_HQ(t *testing.T) {
 }
 
 func TestEnsureMetadata_Rig(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create rig with mayor/rig/.beads
@@ -726,7 +746,7 @@ func TestEnsureMetadata_Rig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, "myrig"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "myrig"); err != nil {
 		t.Fatalf("EnsureMetadata failed: %v", err)
 	}
 
@@ -749,6 +769,8 @@ func TestEnsureMetadata_Rig(t *testing.T) {
 }
 
 func TestEnsureMetadata_Idempotent(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -757,10 +779,10 @@ func TestEnsureMetadata_Idempotent(t *testing.T) {
 	}
 
 	// Run twice
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("first EnsureMetadata failed: %v", err)
 	}
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("second EnsureMetadata failed: %v", err)
 	}
 
@@ -780,6 +802,8 @@ func TestEnsureMetadata_Idempotent(t *testing.T) {
 }
 
 func TestEnsureAllMetadata(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create two databases in .dolt-data
@@ -795,7 +819,7 @@ func TestEnsureAllMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, errs := EnsureAllMetadata(townRoot)
+	updated, errs := h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Errorf("unexpected errors: %v", errs)
 	}
@@ -805,6 +829,7 @@ func TestEnsureAllMetadata(t *testing.T) {
 }
 
 func TestFindRigBeadsDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Test empty rigName returns empty string
@@ -871,6 +896,7 @@ func TestFindRigBeadsDir(t *testing.T) {
 }
 
 func TestFindOrCreateRigBeadsDir(t *testing.T) {
+	t.Parallel()
 	t.Run("empty rigName returns error", func(t *testing.T) {
 		townRoot := t.TempDir()
 		_, err := FindOrCreateRigBeadsDir(townRoot, "")
@@ -1054,6 +1080,8 @@ func TestFindOrCreateRigBeadsDir(t *testing.T) {
 }
 
 func TestMoveDir_SameFilesystem(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	tmpDir := t.TempDir()
 
 	src := filepath.Join(tmpDir, "src")
@@ -1070,7 +1098,7 @@ func TestMoveDir_SameFilesystem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := moveDir(src, dest); err != nil {
+	if err := h.moveDir(src, dest); err != nil {
 		t.Fatalf("moveDir failed: %v", err)
 	}
 
@@ -1098,6 +1126,8 @@ func TestMoveDir_SameFilesystem(t *testing.T) {
 }
 
 func TestMigrateRigFromBeads(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create source database
@@ -1116,7 +1146,7 @@ func TestMigrateRigFromBeads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := MigrateRigFromBeads(townRoot, rigName, sourcePath); err != nil {
+	if err := h.MigrateRigFromBeads(townRoot, rigName, sourcePath); err != nil {
 		t.Fatalf("MigrateRigFromBeads failed: %v", err)
 	}
 
@@ -1142,6 +1172,8 @@ func TestMigrateRigFromBeads(t *testing.T) {
 }
 
 func TestMigrateRigFromBeads_AlreadyExists(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	rigName := "existing"
@@ -1156,13 +1188,14 @@ func TestMigrateRigFromBeads_AlreadyExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := MigrateRigFromBeads(townRoot, rigName, sourcePath)
+	err := h.MigrateRigFromBeads(townRoot, rigName, sourcePath)
 	if err == nil {
 		t.Fatal("expected error for already-existing target, got nil")
 	}
 }
 
 func TestHasServerModeMetadata_NoMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create empty workspace
@@ -1180,6 +1213,7 @@ func TestHasServerModeMetadata_NoMetadata(t *testing.T) {
 }
 
 func TestHasServerModeMetadata_WithServerMode(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create town beads with server mode
@@ -1217,6 +1251,7 @@ func TestHasServerModeMetadata_WithServerMode(t *testing.T) {
 }
 
 func TestHasServerModeMetadata_MixedModes(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Town beads with server mode
@@ -1257,13 +1292,15 @@ func TestHasServerModeMetadata_MixedModes(t *testing.T) {
 }
 
 func TestCheckServerReachable_NoServer(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// CheckServerReachable should fail when no server is listening
 	// Using default port 3307 - if a real server is running, skip
-	err := CheckServerReachable(townRoot)
+	err := h.CheckServerReachable(townRoot)
 	if err == nil {
-		t.Skip("A server is actually running on port 3307, cannot test unreachable case")
+		t.Fatal("CheckServerReachable succeeded with no server")
 	}
 	if err != nil && !contains(err.Error(), "not reachable") {
 		t.Errorf("expected 'not reachable' in error, got: %v", err)
@@ -1284,6 +1321,8 @@ func searchSubstr(s, substr string) bool {
 }
 
 func TestFindMigratableDatabases_SkipsAlreadyMigrated(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	rigName := "already"
@@ -1299,7 +1338,7 @@ func TestFindMigratableDatabases_SkipsAlreadyMigrated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 
 	for _, m := range migrations {
 		if m.RigName == rigName {
@@ -1316,6 +1355,8 @@ func TestFindMigratableDatabases_SkipsAlreadyMigrated(t *testing.T) {
 // some rigs but not others (simulating a crash), resuming migration completes
 // all remaining rigs without corrupting already-migrated ones.
 func TestMidMigrationCrashRecovery_PartialMigration(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create 3 rigs with source databases
@@ -1338,7 +1379,7 @@ func TestMidMigrationCrashRecovery_PartialMigration(t *testing.T) {
 	}
 
 	// Phase 1: Migrate only the first rig (simulating crash after rig 1)
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 	if len(migrations) != 3 {
 		t.Fatalf("expected 3 migratable databases, got %d", len(migrations))
 	}
@@ -1346,7 +1387,7 @@ func TestMidMigrationCrashRecovery_PartialMigration(t *testing.T) {
 	// Migrate only rig-alpha
 	for _, m := range migrations {
 		if m.RigName == "rig-alpha" {
-			if err := MigrateRigFromBeads(townRoot, m.RigName, m.SourcePath); err != nil {
+			if err := h.MigrateRigFromBeads(townRoot, m.RigName, m.SourcePath); err != nil {
 				t.Fatalf("migrating %s: %v", m.RigName, err)
 			}
 			break
@@ -1364,7 +1405,7 @@ func TestMidMigrationCrashRecovery_PartialMigration(t *testing.T) {
 	}
 
 	// Phase 2: Resume migration (find remaining databases)
-	remaining := FindMigratableDatabases(townRoot)
+	remaining := h.FindMigratableDatabases(townRoot)
 	if len(remaining) != 2 {
 		t.Fatalf("expected 2 remaining migratable databases after partial migration, got %d", len(remaining))
 	}
@@ -1378,7 +1419,7 @@ func TestMidMigrationCrashRecovery_PartialMigration(t *testing.T) {
 
 	// Migrate the rest
 	for _, m := range remaining {
-		if err := MigrateRigFromBeads(townRoot, m.RigName, m.SourcePath); err != nil {
+		if err := h.MigrateRigFromBeads(townRoot, m.RigName, m.SourcePath); err != nil {
 			t.Fatalf("migrating %s on resume: %v", m.RigName, err)
 		}
 	}
@@ -1397,7 +1438,7 @@ func TestMidMigrationCrashRecovery_PartialMigration(t *testing.T) {
 	}
 
 	// No more migratable databases should remain
-	final := FindMigratableDatabases(townRoot)
+	final := h.FindMigratableDatabases(townRoot)
 	if len(final) != 0 {
 		t.Errorf("expected 0 migratable databases after full migration, got %d", len(final))
 	}
@@ -1407,6 +1448,8 @@ func TestMidMigrationCrashRecovery_PartialMigration(t *testing.T) {
 // happened after the move but before metadata update, the system recognizes
 // the rig as already migrated (target exists, source gone).
 func TestMidMigrationCrashRecovery_SourceGoneTargetExists(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	rigName := "crashed-rig"
@@ -1419,7 +1462,7 @@ func TestMidMigrationCrashRecovery_SourceGoneTargetExists(t *testing.T) {
 
 	// Source does NOT exist (was already moved)
 	// FindMigratableDatabases should not list this rig
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 	for _, m := range migrations {
 		if m.RigName == rigName {
 			t.Error("should not attempt to re-migrate a rig whose target already exists")
@@ -1432,7 +1475,7 @@ func TestMidMigrationCrashRecovery_SourceGoneTargetExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, rigName); err != nil {
+	if err := h.EnsureMetadata(townRoot, rigName); err != nil {
 		t.Fatalf("EnsureMetadata for crashed rig: %v", err)
 	}
 
@@ -1457,6 +1500,8 @@ func TestMidMigrationCrashRecovery_SourceGoneTargetExists(t *testing.T) {
 // TestConcurrentMetadataAccess tests that concurrent EnsureMetadata calls
 // for different rigs don't interfere with each other.
 func TestConcurrentMetadataAccess(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	rigs := []string{"rig-a", "rig-b", "rig-c", "rig-d", "rig-e"}
@@ -1474,7 +1519,7 @@ func TestConcurrentMetadataAccess(t *testing.T) {
 		wg.Add(1)
 		go func(idx int, rigName string) {
 			defer wg.Done()
-			errs[idx] = EnsureMetadata(townRoot, rigName)
+			errs[idx] = h.EnsureMetadata(townRoot, rigName)
 		}(i, rig)
 	}
 
@@ -1510,6 +1555,8 @@ func TestConcurrentMetadataAccess(t *testing.T) {
 // targeting the SAME metadata.json file don't corrupt data. This exercises
 // the file locking added to prevent read-modify-write races.
 func TestConcurrentMetadataSameFile(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// All goroutines will target the same rig (and thus the same metadata.json)
@@ -1539,7 +1586,7 @@ func TestConcurrentMetadataSameFile(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = EnsureMetadata(townRoot, rigName)
+			errs[idx] = h.EnsureMetadata(townRoot, rigName)
 		}(i)
 	}
 
@@ -1591,6 +1638,8 @@ func TestConcurrentMetadataSameFile(t *testing.T) {
 // TestConcurrentFindMigratableDatabases tests that FindMigratableDatabases
 // can be called concurrently (simulating gt status during migration).
 func TestConcurrentFindMigratableDatabases(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create a rig with source database
@@ -1612,7 +1661,7 @@ func TestConcurrentFindMigratableDatabases(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx] = FindMigratableDatabases(townRoot)
+			results[idx] = h.FindMigratableDatabases(townRoot)
 		}(i)
 	}
 
@@ -1630,6 +1679,8 @@ func TestConcurrentFindMigratableDatabases(t *testing.T) {
 // consistent results even while a migration is in progress (the source is
 // being moved and the target is appearing).
 func TestConcurrentMigrateAndFind(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create multiple rigs
@@ -1664,7 +1715,7 @@ func TestConcurrentMigrateAndFind(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-				migrations := FindMigratableDatabases(townRoot)
+				migrations := h.FindMigratableDatabases(townRoot)
 				// Should never panic or return corrupt data
 				// Count should be between 0 and 3
 				if len(migrations) > 3 {
@@ -1682,7 +1733,7 @@ func TestConcurrentMigrateAndFind(t *testing.T) {
 		go func(rigName string) {
 			defer wg.Done()
 			sourcePath := filepath.Join(townRoot, rigName, ".beads", "dolt", "beads_"+rigName)
-			_ = MigrateRigFromBeads(townRoot, rigName, sourcePath)
+			_ = h.MigrateRigFromBeads(townRoot, rigName, sourcePath)
 		}(rig)
 	}
 
@@ -1697,7 +1748,7 @@ func TestConcurrentMigrateAndFind(t *testing.T) {
 	// handles open (from FindMigratableDatabases reading the same dirs), so some
 	// migrations may not complete. This is acceptable — the real application uses
 	// file locks to serialize access.
-	final := FindMigratableDatabases(townRoot)
+	final := h.FindMigratableDatabases(townRoot)
 	if runtime.GOOS == "windows" {
 		if len(final) > 3 {
 			t.Errorf("expected at most 3 migratable databases on Windows, got %d", len(final))
@@ -1714,6 +1765,8 @@ func TestConcurrentMigrateAndFind(t *testing.T) {
 // TestEnsureMetadata_RepairsCorruptJSON tests that EnsureMetadata can handle
 // a corrupted metadata.json file and overwrite it with correct data.
 func TestEnsureMetadata_RepairsCorruptJSON(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -1728,7 +1781,7 @@ func TestEnsureMetadata_RepairsCorruptJSON(t *testing.T) {
 	}
 
 	// EnsureMetadata should succeed (overwrites corrupt data)
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("EnsureMetadata failed on corrupt file: %v", err)
 	}
 
@@ -1752,6 +1805,8 @@ func TestEnsureMetadata_RepairsCorruptJSON(t *testing.T) {
 // TestEnsureMetadata_RepairsEmptyFile tests that an empty metadata.json
 // gets properly populated.
 func TestEnsureMetadata_RepairsEmptyFile(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -1765,7 +1820,7 @@ func TestEnsureMetadata_RepairsEmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("EnsureMetadata failed on empty file: %v", err)
 	}
 
@@ -1785,6 +1840,8 @@ func TestEnsureMetadata_RepairsEmptyFile(t *testing.T) {
 // TestEnsureMetadata_RepairsWrongBackend tests that metadata.json with
 // backend=sqlite gets corrected to dolt.
 func TestEnsureMetadata_RepairsWrongBackend(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -1804,7 +1861,7 @@ func TestEnsureMetadata_RepairsWrongBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("EnsureMetadata failed: %v", err)
 	}
 
@@ -1830,6 +1887,8 @@ func TestEnsureMetadata_RepairsWrongBackend(t *testing.T) {
 // TestEnsureMetadata_RepairsMissingDoltFields tests that metadata.json
 // with backend=dolt but missing dolt_mode/dolt_database gets repaired.
 func TestEnsureMetadata_RepairsMissingDoltFields(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, "myrig", "mayor", "rig", ".beads")
@@ -1848,7 +1907,7 @@ func TestEnsureMetadata_RepairsMissingDoltFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, "myrig"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "myrig"); err != nil {
 		t.Fatalf("EnsureMetadata failed: %v", err)
 	}
 
@@ -1873,9 +1932,12 @@ func TestEnsureMetadata_RepairsMissingDoltFields(t *testing.T) {
 // correct port from DefaultConfig. This is the root cause of "connection
 // refused" errors reported by community users after gt dolt fix-metadata.
 func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	// GT_DOLT_PORT would override the DefaultPort fallback this case expects;
 	// the hermetic harness poisons it, so clear it.
-	t.Setenv("GT_DOLT_PORT", "")
+	f.setenv("GT_DOLT_PORT", "")
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -1898,7 +1960,7 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("EnsureMetadata failed: %v", err)
 	}
 
@@ -1926,6 +1988,8 @@ func TestEnsureMetadata_RepairsStalePort(t *testing.T) {
 // (e.g., "beads_gt" instead of "gastown"). This is the primary fix for the
 // PROJECT IDENTITY MISMATCH bug (gas-tc4).
 func TestEnsureMetadata_RepairsWrongDoltDatabase(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	beadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
@@ -1948,7 +2012,7 @@ func TestEnsureMetadata_RepairsWrongDoltDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureMetadata(townRoot, "gastown"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "gastown"); err != nil {
 		t.Fatalf("EnsureMetadata failed: %v", err)
 	}
 
@@ -1970,6 +2034,8 @@ func TestEnsureMetadata_RepairsWrongDoltDatabase(t *testing.T) {
 // TestEnsureAllMetadata_RepairsAllCorrupt tests that EnsureAllMetadata
 // repairs metadata for all known databases, even if some are corrupt.
 func TestEnsureAllMetadata_RepairsAllCorrupt(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create two databases in .dolt-data
@@ -1994,7 +2060,7 @@ func TestEnsureAllMetadata_RepairsAllCorrupt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, errs := EnsureAllMetadata(townRoot)
+	updated, errs := h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Errorf("unexpected errors: %v", errs)
 	}
@@ -2031,6 +2097,8 @@ func TestEnsureAllMetadata_RepairsAllCorrupt(t *testing.T) {
 // TestMigrateRigFromBeads_IdempotentDetection tests that running migration
 // twice for the same rig: first succeeds, second correctly reports already done.
 func TestMigrateRigFromBeads_IdempotentDetection(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	rigName := "idem-rig"
@@ -2047,7 +2115,7 @@ func TestMigrateRigFromBeads_IdempotentDetection(t *testing.T) {
 	}
 
 	// First migration succeeds
-	if err := MigrateRigFromBeads(townRoot, rigName, sourcePath); err != nil {
+	if err := h.MigrateRigFromBeads(townRoot, rigName, sourcePath); err != nil {
 		t.Fatalf("first migration failed: %v", err)
 	}
 
@@ -2061,7 +2129,7 @@ func TestMigrateRigFromBeads_IdempotentDetection(t *testing.T) {
 	}
 
 	// Second call: source is gone, target exists → should error
-	err = MigrateRigFromBeads(townRoot, rigName, sourcePath)
+	err = h.MigrateRigFromBeads(townRoot, rigName, sourcePath)
 	if err == nil {
 		t.Fatal("expected error on second migration attempt, got nil")
 	}
@@ -2083,8 +2151,10 @@ func TestMigrateRigFromBeads_IdempotentDetection(t *testing.T) {
 // =============================================================================
 
 func TestDefaultConfig_MaxConnections(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 
 	if config.MaxConnections != DefaultMaxConnections {
 		t.Errorf("MaxConnections = %d, want %d", config.MaxConnections, DefaultMaxConnections)
@@ -2095,6 +2165,8 @@ func TestDefaultConfig_MaxConnections(t *testing.T) {
 }
 
 func TestHasConnectionCapacity_ZeroMax(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// When MaxConnections is 0, the function should use Dolt default (1000).
 	// Since we can't connect to a real server in unit tests, we just verify
 	// the function doesn't panic and returns an error (no server).
@@ -2107,9 +2179,9 @@ func TestHasConnectionCapacity_ZeroMax(t *testing.T) {
 	}
 
 	// HasConnectionCapacity should return false (fail closed) when query fails (gt-lfc0d)
-	hasCapacity, _, err := HasConnectionCapacity(townRoot)
+	hasCapacity, _, err := h.HasConnectionCapacity(townRoot)
 	if err == nil {
-		t.Skip("Dolt server is actually running, cannot test offline case")
+		t.Fatal("HasConnectionCapacity succeeded with no server")
 	}
 	if hasCapacity {
 		t.Error("expected fail-closed false when server is unreachable")
@@ -2117,6 +2189,8 @@ func TestHasConnectionCapacity_ZeroMax(t *testing.T) {
 }
 
 func TestFindAndMigrateAll_Idempotent(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create 2 rigs with valid noms/manifest so ListDatabases recognizes them post-migration
@@ -2139,18 +2213,18 @@ func TestFindAndMigrateAll_Idempotent(t *testing.T) {
 	}
 
 	// First pass: find and migrate all
-	pass1 := FindMigratableDatabases(townRoot)
+	pass1 := h.FindMigratableDatabases(townRoot)
 	if len(pass1) != 2 {
 		t.Fatalf("pass 1: expected 2 migratable, got %d", len(pass1))
 	}
 	for _, m := range pass1 {
-		if err := MigrateRigFromBeads(townRoot, m.RigName, m.SourcePath); err != nil {
+		if err := h.MigrateRigFromBeads(townRoot, m.RigName, m.SourcePath); err != nil {
 			t.Fatalf("pass 1: migrating %s: %v", m.RigName, err)
 		}
 	}
 
 	// Update metadata (as gt dolt migrate does)
-	updated1, errs1 := EnsureAllMetadata(townRoot)
+	updated1, errs1 := h.EnsureAllMetadata(townRoot)
 	if len(errs1) > 0 {
 		t.Errorf("pass 1 metadata errors: %v", errs1)
 	}
@@ -2159,12 +2233,12 @@ func TestFindAndMigrateAll_Idempotent(t *testing.T) {
 	}
 
 	// Second pass: find should return empty, metadata update should be harmless
-	pass2 := FindMigratableDatabases(townRoot)
+	pass2 := h.FindMigratableDatabases(townRoot)
 	if len(pass2) != 0 {
 		t.Errorf("pass 2: expected 0 migratable, got %d", len(pass2))
 	}
 
-	updated2, errs2 := EnsureAllMetadata(townRoot)
+	updated2, errs2 := h.EnsureAllMetadata(townRoot)
 	if len(errs2) > 0 {
 		t.Errorf("pass 2 metadata errors: %v", errs2)
 	}
@@ -2204,6 +2278,7 @@ func TestFindAndMigrateAll_Idempotent(t *testing.T) {
 // =============================================================================
 
 func TestRestoreFromBackup_BackupIsFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	filePath := filepath.Join(townRoot, "not-a-dir")
@@ -2218,6 +2293,7 @@ func TestRestoreFromBackup_BackupIsFile(t *testing.T) {
 }
 
 func TestRestoreFromBackup_EmptyBackup(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	backupDir := filepath.Join(townRoot, "migration-backup-20240115-143022")
@@ -2242,9 +2318,11 @@ func TestRestoreFromBackup_EmptyBackup(t *testing.T) {
 // =============================================================================
 
 func TestEnsureMetadata_CreatesBeadsDir(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
-	if err := EnsureMetadata(townRoot, "hq"); err != nil {
+	if err := h.EnsureMetadata(townRoot, "hq"); err != nil {
 		t.Fatalf("EnsureMetadata failed: %v", err)
 	}
 
@@ -2266,17 +2344,21 @@ func TestEnsureMetadata_CreatesBeadsDir(t *testing.T) {
 // =============================================================================
 
 func TestInitRig_EmptyName(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	_, _, err := InitRig(townRoot, "")
+	_, _, err := h.InitRig(townRoot, "")
 	if err == nil {
 		t.Fatal("expected error for empty rig name")
 	}
 }
 
 func TestInitRig_InvalidCharacters(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	for _, name := range []string{"my rig", "rig/name", "rig.name", "rig@name"} {
-		_, _, err := InitRig(townRoot, name)
+		_, _, err := h.InitRig(townRoot, name)
 		if err == nil {
 			t.Errorf("expected error for invalid rig name %q", name)
 		}
@@ -2284,6 +2366,7 @@ func TestInitRig_InvalidCharacters(t *testing.T) {
 }
 
 func TestIssuePrefixForRigInit_PrefersRoutes(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -2300,6 +2383,7 @@ func TestIssuePrefixForRigInit_PrefersRoutes(t *testing.T) {
 }
 
 func TestIssuePrefixForRigInit_PrefersRigsConfigBeforeFallback(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
@@ -2316,6 +2400,7 @@ func TestIssuePrefixForRigInit_PrefersRigsConfigBeforeFallback(t *testing.T) {
 }
 
 func TestIssuePrefixForRigInit_FallsBackToRigName(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	if got := issuePrefixForRigInit(townRoot, "newrig"); got != "newrig" {
@@ -2323,21 +2408,21 @@ func TestIssuePrefixForRigInit_FallsBackToRigName(t *testing.T) {
 	}
 }
 
+// With no server running, InitRig makes the database with dolt init, starts
+// a temporary server to seed issue_prefix through, and stops it again.
 func TestInitRigSeedsIssuePrefixEmbedded(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt binary not available")
+	t.Parallel()
+	f := newFakeHost().townPort(4550).on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
+	f.onStart = func(pid int, _ *exec.Cmd) { f.listenOn(pid, 4550) } // the server comes up on its port
+	h := f.host()
+	var writes []string
+	h.readIssuePrefix = func(string, string) (string, error) { return "", nil }
+	h.writeIssuePrefix = func(_, _, database, prefix string) error {
+		writes = append(writes, database+"="+prefix)
+		return nil
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("free port: %v", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("close free port listener: %v", err)
-	}
-	t.Setenv("GT_DOLT_PORT", strconv.Itoa(port))
 
-	townRoot := t.TempDir()
+	townRoot := testTown(t)
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -2347,25 +2432,23 @@ func TestInitRigSeedsIssuePrefixEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, created, err := InitRig(townRoot, "testrig")
-	if err != nil {
-		if strings.Contains(err.Error(), "initializing Dolt database") {
-			t.Skipf("dolt init unavailable in test environment: %v", err)
+	running, created, err := h.InitRig(townRoot, "testrig")
+	if err != nil || running || !created {
+		t.Fatalf("InitRig = %v, %v, %v; want a new database on a stopped server", running, created, err)
+	}
+	if got := f.ranMatching("dolt init"); len(got) != 1 {
+		t.Errorf("dolt init calls = %q, want one", got)
+	}
+	if len(f.started) != 1 || !slices.Equal(f.started[0].Args[1:2], []string{"sql-server"}) {
+		t.Fatalf("started = %d processes, want the temporary sql-server", len(f.started))
+	}
+	if len(writes) != 1 || writes[0] != "testrig=tr" {
+		t.Errorf("issue_prefix writes = %q, want testrig=tr", writes)
+	}
+	for pid, p := range f.procs {
+		if p.alive {
+			t.Errorf("the temporary server (PID %d) was left running", pid)
 		}
-		t.Fatalf("InitRig: %v", err)
-	}
-	if !created {
-		t.Fatal("InitRig created = false, want true")
-	}
-
-	cmd := exec.Command("dolt", "sql", "-q", "SELECT value FROM config WHERE `key` = 'issue_prefix'")
-	cmd.Dir = RigDatabaseDir(townRoot, "testrig")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("query issue_prefix: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "tr") {
-		t.Fatalf("issue_prefix query missing tr:\n%s", out)
 	}
 }
 
@@ -2374,6 +2457,7 @@ func TestInitRigSeedsIssuePrefixEmbedded(t *testing.T) {
 // =============================================================================
 
 func TestIsDoltRetryableError_CatalogRace(t *testing.T) {
+	t.Parallel()
 	// After CREATE DATABASE, the Dolt server may not immediately make the
 	// database visible in its in-memory catalog. Subsequent USE queries
 	// fail with "Unknown database '<name>'". This must be retryable so that
@@ -2392,6 +2476,8 @@ func TestIsDoltRetryableError_CatalogRace(t *testing.T) {
 }
 
 func TestWaitForCatalog_NoServer(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// When no Dolt server is reachable, waitForCatalog should fail.
 	// Use port 13399 (unlikely to be in use) to ensure no server responds.
 	townRoot := t.TempDir()
@@ -2405,7 +2491,7 @@ func TestWaitForCatalog_NoServer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte(configContent), 0644); err != nil {
 		t.Fatal(err)
 	}
-	err := waitForCatalog(townRoot, "testdb")
+	err := h.waitForCatalog(townRoot, "testdb")
 	if err == nil {
 		t.Fatal("expected error when no server is running")
 	}
@@ -2420,12 +2506,14 @@ func TestWaitForCatalog_NoServer(t *testing.T) {
 // =============================================================================
 
 func TestListDatabases_EmptyDataDir(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	databases, err := ListDatabases(townRoot)
+	databases, err := h.ListDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("ListDatabases failed: %v", err)
 	}
@@ -2435,8 +2523,10 @@ func TestListDatabases_EmptyDataDir(t *testing.T) {
 }
 
 func TestListDatabases_NoDataDir(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	databases, err := ListDatabases(townRoot)
+	databases, err := h.ListDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("ListDatabases failed: %v", err)
 	}
@@ -2446,6 +2536,8 @@ func TestListDatabases_NoDataDir(t *testing.T) {
 }
 
 func TestListDatabases_MixedContent(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -2458,7 +2550,7 @@ func TestListDatabases_MixedContent(t *testing.T) {
 	}
 	setupDoltDB(t, dataDir, "myrig")
 
-	databases, err := ListDatabases(townRoot)
+	databases, err := h.ListDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("ListDatabases failed: %v", err)
 	}
@@ -2472,31 +2564,40 @@ func TestListDatabases_MixedContent(t *testing.T) {
 // =============================================================================
 
 func TestGetConnectionString(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	// GT_DOLT_PORT would override the DefaultPort fallback this case expects;
 	// the hermetic harness poisons it, so clear it.
-	t.Setenv("GT_DOLT_PORT", "")
+	f.setenv("GT_DOLT_PORT", "")
 	townRoot := t.TempDir()
-	s := GetConnectionString(townRoot)
+	s := h.GetConnectionString(townRoot)
 	if s != "root@tcp(127.0.0.1:3307)/" {
 		t.Errorf("got %q, want root@tcp(127.0.0.1:3307)/", s)
 	}
 }
 
 func TestGetConnectionStringForRig(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	// GT_DOLT_PORT would override the DefaultPort fallback this case expects;
 	// the hermetic harness poisons it, so clear it.
-	t.Setenv("GT_DOLT_PORT", "")
+	f.setenv("GT_DOLT_PORT", "")
 	townRoot := t.TempDir()
-	s := GetConnectionStringForRig(townRoot, "hq")
+	s := h.GetConnectionStringForRig(townRoot, "hq")
 	if s != "root@tcp(127.0.0.1:3307)/hq" {
 		t.Errorf("got %q, want root@tcp(127.0.0.1:3307)/hq", s)
 	}
 }
 
 func TestGetConnectionString_MasksPassword(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_PASSWORD", "supersecret")
-	s := GetConnectionString(townRoot)
+	f.setenv("GT_DOLT_PASSWORD", "supersecret")
+	s := h.GetConnectionString(townRoot)
 	if strings.Contains(s, "supersecret") {
 		t.Errorf("connection string should not contain raw password, got %q", s)
 	}
@@ -2510,6 +2611,7 @@ func TestGetConnectionString_MasksPassword(t *testing.T) {
 // =============================================================================
 
 func TestSaveAndLoadState(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "daemon"), 0755); err != nil {
 		t.Fatal(err)
@@ -2543,6 +2645,7 @@ func TestSaveAndLoadState(t *testing.T) {
 }
 
 func TestLoadState_NoFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	state, err := LoadState(townRoot)
 	if err != nil {
@@ -2557,6 +2660,7 @@ func TestLoadState_NoFile(t *testing.T) {
 }
 
 func TestLoadState_CorruptJSON(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	stateFile := StateFile(townRoot)
 	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
@@ -2573,8 +2677,10 @@ func TestLoadState_CorruptJSON(t *testing.T) {
 }
 
 func TestRefreshPIDStateFromLiveInfo(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 	if err := os.MkdirAll(filepath.Dir(config.PidFile), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -2585,7 +2691,7 @@ func TestRefreshPIDStateFromLiveInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := refreshPIDStateFromLiveInfo(townRoot, config, 12345)
+	changed, err := h.refreshPIDStateFromLiveInfo(townRoot, config, 12345)
 	if err != nil {
 		t.Fatalf("refreshPIDStateFromLiveInfo: %v", err)
 	}
@@ -2610,9 +2716,11 @@ func TestRefreshPIDStateFromLiveInfo(t *testing.T) {
 }
 
 func TestRefreshPIDStateFromLiveInfoInvalidPIDNoop(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	config := DefaultConfig(townRoot)
-	changed, err := refreshPIDStateFromLiveInfo(townRoot, config, 0)
+	config := h.DefaultConfig(townRoot)
+	changed, err := h.refreshPIDStateFromLiveInfo(townRoot, config, 0)
 	if err != nil {
 		t.Fatalf("refreshPIDStateFromLiveInfo: %v", err)
 	}
@@ -2629,6 +2737,7 @@ func TestRefreshPIDStateFromLiveInfoInvalidPIDNoop(t *testing.T) {
 // =============================================================================
 
 func TestRollbackRoundTrip(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	rigName := "roundtrip"
@@ -2688,6 +2797,8 @@ func TestRollbackRoundTrip(t *testing.T) {
 // =============================================================================
 
 func TestFindMigratableDatabases_SpacesInPath(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := filepath.Join(t.TempDir(), "my town root")
 	if err := os.MkdirAll(townRoot, 0755); err != nil {
 		t.Fatal(err)
@@ -2699,7 +2810,7 @@ func TestFindMigratableDatabases_SpacesInPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 	found := false
 	for _, m := range migrations {
 		if m.RigName == rigName {
@@ -2712,21 +2823,25 @@ func TestFindMigratableDatabases_SpacesInPath(t *testing.T) {
 }
 
 func TestFindMigratableDatabases_EmptyTownRoot(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 	if len(migrations) != 0 {
 		t.Errorf("expected 0 migrations, got %d", len(migrations))
 	}
 }
 
 func TestFindMigratableDatabases_TownBeads(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	hqSource := filepath.Join(townRoot, ".beads", "dolt", "beads_hq", ".dolt")
 	if err := os.MkdirAll(hqSource, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 	found := false
 	for _, m := range migrations {
 		if m.RigName == "hq" {
@@ -2739,13 +2854,15 @@ func TestFindMigratableDatabases_TownBeads(t *testing.T) {
 }
 
 func TestFindMigratableDatabases_SkipsDotDirs(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	hiddenDolt := filepath.Join(townRoot, ".hidden-rig", ".beads", "dolt", "beads_hidden", ".dolt")
 	if err := os.MkdirAll(hiddenDolt, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	migrations := FindMigratableDatabases(townRoot)
+	migrations := h.FindMigratableDatabases(townRoot)
 	for _, m := range migrations {
 		if m.RigName == ".hidden-rig" {
 			t.Error("should skip dot-directories")
@@ -2754,8 +2871,10 @@ func TestFindMigratableDatabases_SkipsDotDirs(t *testing.T) {
 }
 
 func TestMoveDir_SourceNotExists(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	tmpDir := t.TempDir()
-	err := moveDir(filepath.Join(tmpDir, "nonexistent"), filepath.Join(tmpDir, "dest"))
+	err := h.moveDir(filepath.Join(tmpDir, "nonexistent"), filepath.Join(tmpDir, "dest"))
 	if err == nil {
 		t.Fatal("expected error for nonexistent source")
 	}
@@ -2770,29 +2889,35 @@ func TestMoveDir_SourceNotExists(t *testing.T) {
 // =============================================================================
 
 func TestDatabaseExists_True(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	doltDir := filepath.Join(townRoot, ".dolt-data", "myrig", ".dolt")
 	if err := os.MkdirAll(doltDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if !DatabaseExists(townRoot, "myrig") {
+	if !h.DatabaseExists(townRoot, "myrig") {
 		t.Error("expected database to exist")
 	}
 }
 
 func TestDatabaseExists_False(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if DatabaseExists(townRoot, "nonexistent") {
+	if h.DatabaseExists(townRoot, "nonexistent") {
 		t.Error("expected database to not exist")
 	}
 }
 
 func TestDatabaseExists_NoDataDir(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	if DatabaseExists(townRoot, "anything") {
+	if h.DatabaseExists(townRoot, "anything") {
 		t.Error("expected false when .dolt-data doesn't exist")
 	}
 }
@@ -2802,6 +2927,8 @@ func TestDatabaseExists_NoDataDir(t *testing.T) {
 // =============================================================================
 
 func TestFindBrokenWorkspaces_HealthyWorkspace(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Point the test at a port nothing listens on so IsRunning returns false
@@ -2838,13 +2965,15 @@ func TestFindBrokenWorkspaces_HealthyWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	broken, _ := FindBrokenWorkspaces(townRoot)
+	broken, _ := h.FindBrokenWorkspaces(townRoot)
 	if len(broken) != 0 {
 		t.Errorf("expected 0 broken workspaces, got %d: %+v", len(broken), broken)
 	}
 }
 
 func TestFindBrokenWorkspaces_MissingDatabase(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Metadata says dolt, but database does NOT exist
@@ -2869,7 +2998,7 @@ func TestFindBrokenWorkspaces_MissingDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	broken, _ := FindBrokenWorkspaces(townRoot)
+	broken, _ := h.FindBrokenWorkspaces(townRoot)
 	if len(broken) != 1 {
 		t.Fatalf("expected 1 broken workspace, got %d", len(broken))
 	}
@@ -2885,6 +3014,8 @@ func TestFindBrokenWorkspaces_MissingDatabase(t *testing.T) {
 }
 
 func TestFindBrokenWorkspaces_WithLocalData(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Rig metadata says dolt, database missing, but local data exists
@@ -2915,7 +3046,7 @@ func TestFindBrokenWorkspaces_WithLocalData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	broken, _ := FindBrokenWorkspaces(townRoot)
+	broken, _ := h.FindBrokenWorkspaces(townRoot)
 	if len(broken) != 1 {
 		t.Fatalf("expected 1 broken workspace, got %d", len(broken))
 	}
@@ -2928,6 +3059,8 @@ func TestFindBrokenWorkspaces_WithLocalData(t *testing.T) {
 }
 
 func TestFindBrokenWorkspaces_SqliteNotBroken(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Workspace configured for SQLite, not Dolt — should not appear as broken
@@ -2947,13 +3080,15 @@ func TestFindBrokenWorkspaces_SqliteNotBroken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	broken, _ := FindBrokenWorkspaces(townRoot)
+	broken, _ := h.FindBrokenWorkspaces(townRoot)
 	if len(broken) != 0 {
 		t.Errorf("expected 0 broken workspaces for sqlite backend, got %d", len(broken))
 	}
 }
 
 func TestFindBrokenWorkspaces_MultipleRigs(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Isolate from real Dolt server on default port
@@ -2998,7 +3133,7 @@ func TestFindBrokenWorkspaces_MultipleRigs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	broken, _ := FindBrokenWorkspaces(townRoot)
+	broken, _ := h.FindBrokenWorkspaces(townRoot)
 	if len(broken) != 1 {
 		t.Fatalf("expected 1 broken workspace (rig-a only), got %d", len(broken))
 	}
@@ -3012,6 +3147,7 @@ func TestFindBrokenWorkspaces_MultipleRigs(t *testing.T) {
 // =============================================================================
 
 func TestIsReadOnlyError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		msg  string
 		want bool
@@ -3037,6 +3173,8 @@ func TestIsReadOnlyError(t *testing.T) {
 }
 
 func TestHealthMetrics_ReadOnlyField(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Verify that the ReadOnly field is properly included in HealthMetrics.
 	// We can't test actual read-only detection without a running Dolt server,
 	// but we can verify the field is populated.
@@ -3045,7 +3183,7 @@ func TestHealthMetrics_ReadOnlyField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	metrics := GetHealthMetrics(townRoot)
+	metrics := h.GetHealthMetrics(townRoot)
 
 	// Without a running server, ReadOnly should be false (can't probe)
 	if metrics.ReadOnly {
@@ -3054,6 +3192,7 @@ func TestHealthMetrics_ReadOnlyField(t *testing.T) {
 }
 
 func TestIsDoltRetryableError_IncludesReadOnly(t *testing.T) {
+	t.Parallel()
 	// Verify that read-only errors are recognized as retryable.
 	// doltSQLScriptWithRetry must retry on read-only before giving up.
 	tests := []struct {
@@ -3084,12 +3223,14 @@ func TestIsDoltRetryableError_IncludesReadOnly(t *testing.T) {
 // read as "writable" (gt-udrrw, gt-bfale). RecoverReadOnly still treats this
 // one Unknown as its documented no-op.
 func TestCheckReadOnly_NoDatabaseIsUnknownNotWritable(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	got := CheckReadOnly(townRoot)
+	got := h.CheckReadOnly(townRoot)
 	if !got.IsUnknown() {
 		t.Fatalf("CheckReadOnly with no database = %v, want Unknown", got)
 	}
@@ -3104,12 +3245,14 @@ func TestCheckReadOnly_NoDatabaseIsUnknownNotWritable(t *testing.T) {
 // TestVerifyServerDataDir_NoServerIsUnknown pins that a server that is not
 // running cannot be called legitimate or an imposter: the check did not run.
 func TestVerifyServerDataDir_NoServerIsUnknown(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	got := VerifyServerDataDir(townRoot)
+	got := h.VerifyServerDataDir(townRoot)
 	if !got.IsUnknown() {
 		t.Fatalf("VerifyServerDataDir with no server = %v, want Unknown", got)
 	}
@@ -3119,6 +3262,8 @@ func TestVerifyServerDataDir_NoServerIsUnknown(t *testing.T) {
 }
 
 func TestRecoverReadOnly_NoServer(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// When no server is running, CheckReadOnly returns false (can't probe),
 	// so RecoverReadOnly should be a no-op.
 	townRoot := t.TempDir()
@@ -3126,7 +3271,7 @@ func TestRecoverReadOnly_NoServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := RecoverReadOnly(townRoot)
+	err := h.RecoverReadOnly(townRoot)
 	// Should succeed (no-op) since no server means no read-only state detectable
 	if err != nil {
 		t.Errorf("RecoverReadOnly with no server: got error %v, want nil", err)
@@ -3138,17 +3283,17 @@ func TestRecoverReadOnly_NoServer(t *testing.T) {
 // =============================================================================
 
 func TestDoltSQLScriptWithRetry_ImmediateSuccess(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// doltSQLScriptWithRetry calls doltSQLScript which needs a valid townRoot
 	// with .dolt-data dir and a dolt binary. Since we can't run dolt in CI,
 	// we verify the retry logic by checking that non-retryable errors return
 	// immediately without sleeping (i.e., isDoltRetryableError integration).
 	//
 	// A non-retryable error (e.g., syntax error) should return on first attempt.
-	err := doltSQLScriptWithRetry(t.TempDir(), "INVALID SQL;")
+	err := h.doltSQLScriptWithRetry(t.TempDir(), "INVALID SQL;")
 	if err == nil {
-		// If dolt isn't installed, the exec itself fails — that's fine,
-		// the point is it doesn't retry/hang.
-		t.Skip("dolt binary available and accepted invalid SQL somehow")
+		t.Fatal("doltSQLScriptWithRetry succeeded with no dolt answering")
 	}
 	// Verify the error is not wrapped with "after N retries" since exec failures
 	// (dolt not found / not a dolt data dir) are not retryable.
@@ -3158,6 +3303,7 @@ func TestDoltSQLScriptWithRetry_ImmediateSuccess(t *testing.T) {
 }
 
 func TestDoltSQLScriptWithRetry_NonRetryableError(t *testing.T) {
+	t.Parallel()
 	// Verify that isDoltRetryableError correctly classifies errors.
 	// Non-retryable errors should fail fast without retry.
 	nonRetryable := []string{
@@ -3193,6 +3339,7 @@ func TestDoltSQLScriptWithRetry_NonRetryableError(t *testing.T) {
 // =============================================================================
 
 func TestParseShowDatabases_JSON(t *testing.T) {
+	t.Parallel()
 	input := `{"rows":[{"Database":"hq"},{"Database":"gastown"},{"Database":"information_schema"},{"Database":"mysql"},{"Database":"dolt_cluster"}]}`
 	got, err := parseShowDatabases([]byte(input))
 	if err != nil {
@@ -3218,6 +3365,7 @@ func TestParseShowDatabases_JSON(t *testing.T) {
 }
 
 func TestParseShowDatabases_JSONEmpty(t *testing.T) {
+	t.Parallel()
 	input := `{"rows":[]}`
 	got, err := parseShowDatabases([]byte(input))
 	if err != nil {
@@ -3229,6 +3377,7 @@ func TestParseShowDatabases_JSONEmpty(t *testing.T) {
 }
 
 func TestParseShowDatabases_JSONEmptyDatabase(t *testing.T) {
+	t.Parallel()
 	// Rows with empty Database field should be filtered.
 	input := `{"rows":[{"Database":"hq"},{"Database":""}]}`
 	got, err := parseShowDatabases([]byte(input))
@@ -3244,6 +3393,7 @@ func TestParseShowDatabases_JSONEmptyDatabase(t *testing.T) {
 }
 
 func TestParseShowDatabases_UnexpectedJSONSchema(t *testing.T) {
+	t.Parallel()
 	// Valid JSON missing the expected "rows" key should return a parse error
 	// rather than silently returning zero databases (which would be
 	// misinterpreted as "all databases are missing" in the migration path).
@@ -3258,6 +3408,7 @@ func TestParseShowDatabases_UnexpectedJSONSchema(t *testing.T) {
 }
 
 func TestParseShowDatabases_BrokenJSON(t *testing.T) {
+	t.Parallel()
 	// Corrupt JSON that starts with { should return an error.
 	input := `{"rows": invalid json}`
 	_, err := parseShowDatabases([]byte(input))
@@ -3270,6 +3421,7 @@ func TestParseShowDatabases_BrokenJSON(t *testing.T) {
 }
 
 func TestParseShowDatabases_LineFallback(t *testing.T) {
+	t.Parallel()
 	// Non-JSON table-formatted output: all lines start with + or |,
 	// so the line parser filters them all out. Since the output is
 	// non-empty but yields zero databases, the parser returns an error
@@ -3292,6 +3444,7 @@ func TestParseShowDatabases_LineFallback(t *testing.T) {
 }
 
 func TestParseShowDatabases_PlainText(t *testing.T) {
+	t.Parallel()
 	// Plain-text output (no JSON, no table formatting).
 	input := "hq\ngastown\ninformation_schema\nmysql\ndolt_cluster\n"
 	got, err := parseShowDatabases([]byte(input))
@@ -3311,6 +3464,7 @@ func TestParseShowDatabases_PlainText(t *testing.T) {
 }
 
 func TestIsSystemDatabase(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want bool
@@ -3333,6 +3487,7 @@ func TestIsSystemDatabase(t *testing.T) {
 }
 
 func TestFindMissingDatabases_NoneServed(t *testing.T) {
+	t.Parallel()
 	served := []string{}
 	fs := []string{"hq", "gastown"}
 	missing := findMissingDatabases(served, fs)
@@ -3342,6 +3497,7 @@ func TestFindMissingDatabases_NoneServed(t *testing.T) {
 }
 
 func TestFindMissingDatabases_AllServed(t *testing.T) {
+	t.Parallel()
 	served := []string{"hq", "gastown", "beads"}
 	fs := []string{"hq", "gastown"}
 	missing := findMissingDatabases(served, fs)
@@ -3351,6 +3507,7 @@ func TestFindMissingDatabases_AllServed(t *testing.T) {
 }
 
 func TestFindMissingDatabases_PartialMissing(t *testing.T) {
+	t.Parallel()
 	served := []string{"hq"}
 	fs := []string{"hq", "gastown", "beads"}
 	missing := findMissingDatabases(served, fs)
@@ -3367,6 +3524,7 @@ func TestFindMissingDatabases_PartialMissing(t *testing.T) {
 }
 
 func TestFindMissingDatabases_BothEmpty(t *testing.T) {
+	t.Parallel()
 	missing := findMissingDatabases(nil, nil)
 	if len(missing) != 0 {
 		t.Errorf("expected 0 missing, got %d: %v", len(missing), missing)
@@ -3374,16 +3532,17 @@ func TestFindMissingDatabases_BothEmpty(t *testing.T) {
 }
 
 func TestVerifyDatabases_NoServer(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// VerifyDatabases should return an error when no server is running
 	// or when the data directory doesn't exist. If a real server happens
 	// to be on port 3307, the TCP check will pass but dolt sql will fail
 	// due to missing data dir — either way, we expect an error.
-	served, _, err := VerifyDatabases(townRoot)
+	served, _, err := h.VerifyDatabases(townRoot)
 	if err == nil {
-		// Server is running AND somehow succeeded — skip.
-		t.Skip("A server is running and dolt sql succeeded against temp dir")
+		t.Fatal("VerifyDatabases succeeded with no server")
 	}
 	if served != nil {
 		t.Errorf("expected nil served on error, got %v", served)
@@ -3462,6 +3621,8 @@ func setupRigMetadata(t *testing.T, townRoot, rigName, doltDatabase string) {
 }
 
 func TestFindOrphanedDatabases_NoOrphans(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -3474,7 +3635,7 @@ func TestFindOrphanedDatabases_NoOrphans(t *testing.T) {
 	setupRigMetadata(t, townRoot, "hq", "hq")
 	setupRigMetadata(t, townRoot, "gastown", "gastown")
 
-	orphans, err := FindOrphanedDatabases(townRoot)
+	orphans, err := h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases: %v", err)
 	}
@@ -3484,6 +3645,8 @@ func TestFindOrphanedDatabases_NoOrphans(t *testing.T) {
 }
 
 func TestFindOrphanedDatabases_DetectsOrphans(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -3499,7 +3662,7 @@ func TestFindOrphanedDatabases_DetectsOrphans(t *testing.T) {
 	setupRigMetadata(t, townRoot, "hq", "hq")
 	setupRigMetadata(t, townRoot, "wyvern", "wyvern")
 
-	orphans, err := FindOrphanedDatabases(townRoot)
+	orphans, err := h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases: %v", err)
 	}
@@ -3515,6 +3678,8 @@ func TestFindOrphanedDatabases_DetectsOrphans(t *testing.T) {
 }
 
 func TestFindOrphanedDatabases_ProtectsBeadsGlobal(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -3525,7 +3690,7 @@ func TestFindOrphanedDatabases_ProtectsBeadsGlobal(t *testing.T) {
 	setupRigsJSON(t, townRoot, []string{})
 	setupRigMetadata(t, townRoot, "hq", "hq")
 
-	orphans, err := FindOrphanedDatabases(townRoot)
+	orphans, err := h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases: %v", err)
 	}
@@ -3538,6 +3703,8 @@ func TestFindOrphanedDatabases_ProtectsBeadsGlobal(t *testing.T) {
 }
 
 func TestFindOrphanedDatabases_MultipleOrphans(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -3552,7 +3719,7 @@ func TestFindOrphanedDatabases_MultipleOrphans(t *testing.T) {
 	setupRigsJSON(t, townRoot, []string{"gastown"})
 	setupRigMetadata(t, townRoot, "gastown", "gastown")
 
-	orphans, err := FindOrphanedDatabases(townRoot)
+	orphans, err := h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases: %v", err)
 	}
@@ -3572,10 +3739,12 @@ func TestFindOrphanedDatabases_MultipleOrphans(t *testing.T) {
 }
 
 func TestFindOrphanedDatabases_EmptyDataDir(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	// No .dolt-data directory at all
 
-	orphans, err := FindOrphanedDatabases(townRoot)
+	orphans, err := h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases: %v", err)
 	}
@@ -3585,6 +3754,8 @@ func TestFindOrphanedDatabases_EmptyDataDir(t *testing.T) {
 }
 
 func TestFindOrphanedDatabases_IgnoresNonDoltDirs(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -3599,7 +3770,7 @@ func TestFindOrphanedDatabases_IgnoresNonDoltDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orphans, err := FindOrphanedDatabases(townRoot)
+	orphans, err := h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases: %v", err)
 	}
@@ -3609,6 +3780,7 @@ func TestFindOrphanedDatabases_IgnoresNonDoltDirs(t *testing.T) {
 }
 
 func TestCollectReferencedDatabases_HQOnly(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Only HQ metadata, no rigs
@@ -3625,6 +3797,7 @@ func TestCollectReferencedDatabases_HQOnly(t *testing.T) {
 }
 
 func TestCollectReferencedDatabases_MultipleRigs(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{"gastown", "beads", "wyvern"})
@@ -3645,6 +3818,7 @@ func TestCollectReferencedDatabases_MultipleRigs(t *testing.T) {
 }
 
 func TestCollectReferencedDatabases_CustomDatabaseName(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Rig name differs from dolt_database name
@@ -3661,6 +3835,7 @@ func TestCollectReferencedDatabases_CustomDatabaseName(t *testing.T) {
 }
 
 func TestCollectReferencedDatabases_NoMetadata(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	setupRigsJSON(t, townRoot, []string{"gastown"})
 	// No metadata.json for gastown — should not crash
@@ -3672,6 +3847,7 @@ func TestCollectReferencedDatabases_NoMetadata(t *testing.T) {
 }
 
 func TestCollectReferencedDatabases_NoRigsJSON(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// No mayor/rigs.json at all — should only check HQ
 	setupRigMetadata(t, townRoot, "hq", "hq")
@@ -3686,6 +3862,8 @@ func TestCollectReferencedDatabases_NoRigsJSON(t *testing.T) {
 }
 
 func TestRemoveDatabase_RemovesDirectory(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -3698,7 +3876,7 @@ func TestRemoveDatabase_RemovesDirectory(t *testing.T) {
 		t.Fatalf("setup failed: orphan_db should exist: %v", err)
 	}
 
-	err := RemoveDatabase(townRoot, "orphan_db", true)
+	err := h.RemoveDatabase(townRoot, "orphan_db", true)
 	if err != nil {
 		t.Fatalf("RemoveDatabase: %v", err)
 	}
@@ -3710,13 +3888,15 @@ func TestRemoveDatabase_RemovesDirectory(t *testing.T) {
 }
 
 func TestRemoveDatabase_ErrorOnMissing(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	err := RemoveDatabase(townRoot, "nonexistent", true)
+	err := h.RemoveDatabase(townRoot, "nonexistent", true)
 	if err == nil {
 		t.Error("expected error for nonexistent database")
 	}
@@ -3726,11 +3906,13 @@ func TestRemoveDatabase_ErrorOnMissing(t *testing.T) {
 }
 
 func TestRemoveDatabase_RefusesProtectedSharedServerDatabase(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	dbPath := setupDoltDB(t, dataDir, "beads_global")
 
-	err := RemoveDatabase(townRoot, "beads_global", true)
+	err := h.RemoveDatabase(townRoot, "beads_global", true)
 	if err == nil {
 		t.Fatal("expected error for protected shared-server database")
 	}
@@ -3743,6 +3925,8 @@ func TestRemoveDatabase_RefusesProtectedSharedServerDatabase(t *testing.T) {
 }
 
 func TestListDatabases_OnlyIncludesDoltDirs(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -3759,7 +3943,7 @@ func TestListDatabases_OnlyIncludesDoltDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dbs, err := ListDatabases(townRoot)
+	dbs, err := h.ListDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("ListDatabases: %v", err)
 	}
@@ -3777,24 +3961,30 @@ func TestListDatabases_OnlyIncludesDoltDirs(t *testing.T) {
 }
 
 func TestDatabaseExists_TrueForExisting(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	setupDoltDB(t, dataDir, "mydb")
 
-	if !DatabaseExists(townRoot, "mydb") {
+	if !h.DatabaseExists(townRoot, "mydb") {
 		t.Error("expected DatabaseExists to return true for existing database")
 	}
 }
 
 func TestDatabaseExists_FalseForMissing(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
-	if DatabaseExists(townRoot, "noexist") {
+	if h.DatabaseExists(townRoot, "noexist") {
 		t.Error("expected DatabaseExists to return false for missing database")
 	}
 }
 
 func TestFindOrphanedDatabases_EndToEnd(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Simulates the exact scenario from the bug report:
 	// .dolt-data/ contains beads_wy/ (old) and wyvern/ (new).
 	// Only wyvern is referenced. beads_wy should be detected as orphaned.
@@ -3810,7 +4000,7 @@ func TestFindOrphanedDatabases_EndToEnd(t *testing.T) {
 	setupRigMetadata(t, townRoot, "wyvern", "wyvern")
 
 	// Step 1: Detect orphans
-	orphans, err := FindOrphanedDatabases(townRoot)
+	orphans, err := h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases: %v", err)
 	}
@@ -3822,12 +4012,12 @@ func TestFindOrphanedDatabases_EndToEnd(t *testing.T) {
 	}
 
 	// Step 2: Remove the orphan
-	if err := RemoveDatabase(townRoot, "beads_wy", true); err != nil {
+	if err := h.RemoveDatabase(townRoot, "beads_wy", true); err != nil {
 		t.Fatalf("RemoveDatabase: %v", err)
 	}
 
 	// Step 3: Verify no more orphans
-	orphans, err = FindOrphanedDatabases(townRoot)
+	orphans, err = h.FindOrphanedDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("FindOrphanedDatabases after cleanup: %v", err)
 	}
@@ -3841,6 +4031,7 @@ func TestFindOrphanedDatabases_EndToEnd(t *testing.T) {
 // =============================================================================
 
 func TestIsRemote(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		host string
 		want bool
@@ -3870,6 +4061,7 @@ func TestIsRemote(t *testing.T) {
 }
 
 func TestSQLArgs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		host string
@@ -3916,6 +4108,7 @@ func TestSQLArgs(t *testing.T) {
 }
 
 func TestUserDSN(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		user     string
 		password string
@@ -3936,6 +4129,7 @@ func TestUserDSN(t *testing.T) {
 }
 
 func TestHostPort(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		host string
 		port int
@@ -3957,14 +4151,17 @@ func TestHostPort(t *testing.T) {
 }
 
 func TestDefaultConfig_EnvVarOverrides(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
 
-	t.Setenv("GT_DOLT_HOST", "10.0.0.5")
-	t.Setenv("GT_DOLT_PORT", "13306")
-	t.Setenv("GT_DOLT_USER", "myuser")
-	t.Setenv("GT_DOLT_PASSWORD", "mypass")
+	f.setenv("GT_DOLT_HOST", "10.0.0.5")
+	f.setenv("GT_DOLT_PORT", "13306")
+	f.setenv("GT_DOLT_USER", "myuser")
+	f.setenv("GT_DOLT_PASSWORD", "mypass")
 
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 
 	if config.Host != "10.0.0.5" {
 		t.Errorf("Host = %q, want %q", config.Host, "10.0.0.5")
@@ -3981,13 +4178,16 @@ func TestDefaultConfig_EnvVarOverrides(t *testing.T) {
 }
 
 func TestDefaultConfig_EnvVarPartialOverride(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
 
 	// Only override host, rest should keep defaults
-	t.Setenv("GT_DOLT_HOST", "remote.host")
-	t.Setenv("GT_DOLT_PORT", "")
+	f.setenv("GT_DOLT_HOST", "remote.host")
+	f.setenv("GT_DOLT_PORT", "")
 
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 
 	if config.Host != "remote.host" {
 		t.Errorf("Host = %q, want %q", config.Host, "remote.host")
@@ -4004,21 +4204,27 @@ func TestDefaultConfig_EnvVarPartialOverride(t *testing.T) {
 }
 
 func TestDefaultConfig_InvalidPortIgnored(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
 
-	t.Setenv("GT_DOLT_PORT", "not-a-number")
+	f.setenv("GT_DOLT_PORT", "not-a-number")
 
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 	if config.Port != DefaultPort {
 		t.Errorf("Port = %d, want default %d when env var is invalid", config.Port, DefaultPort)
 	}
 }
 
 func TestDefaultConfig_ConfigYAMLBeatsDaemonJSON(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
-	t.Setenv("GT_DOLT_HOST", "")
-	t.Setenv("GT_DOLT_PORT", "")
+	f.setenv("GT_DOLT_IGNORE_CONFIG", "")
+	f.setenv("GT_DOLT_HOST", "")
+	f.setenv("GT_DOLT_PORT", "")
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		t.Fatal(err)
@@ -4034,7 +4240,7 @@ func TestDefaultConfig_ConfigYAMLBeatsDaemonJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 	if config.Host != "127.0.0.2" {
 		t.Errorf("Host = %q, want config.yaml host 127.0.0.2", config.Host)
 	}
@@ -4044,8 +4250,11 @@ func TestDefaultConfig_ConfigYAMLBeatsDaemonJSON(t *testing.T) {
 }
 
 func TestDefaultConfig_DaemonJSONFallbackWithoutConfigOrEnv(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "")
+	f.setenv("GT_DOLT_PORT", "")
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(mayorDir, 0755); err != nil {
 		t.Fatal(err)
@@ -4054,13 +4263,16 @@ func TestDefaultConfig_DaemonJSONFallbackWithoutConfigOrEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 	if config.Port != 5507 {
 		t.Errorf("Port = %d, want daemon.json port 5507", config.Port)
 	}
 }
 
 func TestDefaultConfig_IgnoreConfigUsesEnvPort(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -4069,23 +4281,23 @@ func TestDefaultConfig_IgnoreConfigUsesEnvPort(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  port: 4407\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_DOLT_IGNORE_CONFIG", "1")
-	t.Setenv("GT_DOLT_PORT", "5507")
+	f.setenv("GT_DOLT_IGNORE_CONFIG", "1")
+	f.setenv("GT_DOLT_PORT", "5507")
 
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 	if config.Port != 5507 {
 		t.Errorf("Port = %d, want env port 5507 when config ignored", config.Port)
 	}
 }
 
 func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
 	townRoot := t.TempDir()
-	t.Setenv("GT_DOLT_PORT", "")
-	unsetEnv(t, "GT_DOLT_STATS_ENABLED")
-	unsetEnv(t, "GT_DOLT_EVENT_SCHEDULER")
-	unsetEnv(t, "GT_DOLT_AUTO_GC")
+	f.setenv("GT_DOLT_PORT", "")
 
-	config := DefaultConfig(townRoot)
+	config := h.DefaultConfig(townRoot)
 	if config.EventScheduler != "OFF" {
 		t.Errorf("EventScheduler = %q, want OFF", config.EventScheduler)
 	}
@@ -4096,10 +4308,10 @@ func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
 		t.Errorf("AutoGC = %q, want on", config.AutoGC)
 	}
 
-	t.Setenv("GT_DOLT_STATS_ENABLED", "omit")
-	t.Setenv("GT_DOLT_EVENT_SCHEDULER", "omit")
-	t.Setenv("GT_DOLT_AUTO_GC", "off")
-	config = DefaultConfig(townRoot)
+	f.setenv("GT_DOLT_STATS_ENABLED", "omit")
+	f.setenv("GT_DOLT_EVENT_SCHEDULER", "omit")
+	f.setenv("GT_DOLT_AUTO_GC", "off")
+	config = h.DefaultConfig(townRoot)
 	if config.DoltStatsEnabled != "omit" {
 		t.Errorf("DoltStatsEnabled = %q, want omit", config.DoltStatsEnabled)
 	}
@@ -4112,6 +4324,8 @@ func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
 }
 
 func TestBuildDoltSQLCmd_Local(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	config := &Config{
 		Host:    "",
 		Port:    3307,
@@ -4120,7 +4334,7 @@ func TestBuildDoltSQLCmd_Local(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	cmd := buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
+	cmd := h.buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
 
 	// Should set Dir for local
 	if cmd.Dir != "/tmp/dolt-data" {
@@ -4151,6 +4365,8 @@ func TestBuildDoltSQLCmd_Local(t *testing.T) {
 }
 
 func TestBuildDoltSQLCmd_Remote(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	config := &Config{
 		Host:     "10.0.0.5",
 		Port:     3307,
@@ -4160,7 +4376,7 @@ func TestBuildDoltSQLCmd_Remote(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	cmd := buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
+	cmd := h.buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
 
 	// Dir is always set to DataDir — even for remote connections (GH#2537)
 	// to prevent dolt from auto-creating .doltcfg/privileges.db in $CWD.
@@ -4190,6 +4406,8 @@ func TestBuildDoltSQLCmd_Remote(t *testing.T) {
 }
 
 func TestBuildDoltSQLCmd_RemoteNoPassword(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	config := &Config{
 		Host:    "10.0.0.5",
 		Port:    3307,
@@ -4198,7 +4416,7 @@ func TestBuildDoltSQLCmd_RemoteNoPassword(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	cmd := buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
+	cmd := h.buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
 
 	// Should still have empty DOLT_CLI_PASSWORD in env to suppress prompts.
 	for _, env := range cmd.Env {
@@ -4214,146 +4432,80 @@ func TestBuildDoltSQLCmd_RemoteNoPassword(t *testing.T) {
 // =============================================================================
 
 func TestWaitForReady_NoServerConfigured(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// When no server mode metadata exists, WaitForReady should return nil
 	// immediately (nothing to wait for).
 	townRoot := t.TempDir()
 
-	err := WaitForReady(townRoot, 1*time.Second)
+	err := h.WaitForReady(townRoot, 1*time.Second)
 	if err != nil {
 		t.Errorf("WaitForReady should succeed when no server configured, got: %v", err)
 	}
 }
 
 func TestWaitForReady_ServerAlreadyListening(t *testing.T) {
-	// Start a TCP listener, then verify WaitForReady succeeds quickly.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to start listener: %v", err)
-	}
-	defer listener.Close()
+	t.Parallel()
+	f := newFakeHost().townPort(4540)
+	f.reachable["127.0.0.1:4540"] = true
 
-	// Extract the port from the listener
-	port := listener.Addr().(*net.TCPAddr).Port
-
-	// Create a town root with server mode metadata pointing to this port
-	townRoot := t.TempDir()
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	metadata := fmt.Sprintf(`{"backend":"dolt","dolt_mode":"server","port":%d}`, port)
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Override port via env var so DefaultConfig picks it up
-	t.Setenv("GT_DOLT_PORT", fmt.Sprintf("%d", port))
-
-	start := time.Now()
-	err = WaitForReady(townRoot, 5*time.Second)
-	elapsed := time.Since(start)
-
-	if err != nil {
+	if err := f.host().WaitForReady(serverModeTown(t), 5*time.Second); err != nil {
 		t.Errorf("WaitForReady should succeed when server is listening, got: %v", err)
 	}
-	if elapsed > 2*time.Second {
-		t.Errorf("WaitForReady took %v, should complete quickly when server is ready", elapsed)
+	if f.slept != 0 {
+		t.Errorf("WaitForReady slept %v with the server already up", f.slept)
 	}
 }
 
+// serverModeTown makes a town whose town beads use Dolt server mode, so
+// WaitForReady has a server to wait for.
+func serverModeTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+// When server mode is configured but nothing is listening, WaitForReady
+// returns an error once the timeout has passed, not before.
 func TestWaitForReady_TimeoutWhenNoServer(t *testing.T) {
-	// When server mode is configured but nothing is listening, WaitForReady
-	// should return an error after timeout.
+	t.Parallel()
+	f := newFakeHost().townPort(4541)
 
-	// Find a free port, then immediately close to guarantee nothing is listening.
-	tmpListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to find free port: %v", err)
+	err := f.host().WaitForReady(serverModeTown(t), 500*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "not ready at 127.0.0.1:4541 after 500ms") {
+		t.Errorf("WaitForReady = %v, want a not-ready error naming the address and timeout", err)
 	}
-	port := tmpListener.Addr().(*net.TCPAddr).Port
-	tmpListener.Close()
-
-	townRoot := t.TempDir()
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	metadata := fmt.Sprintf(`{"backend":"dolt","dolt_mode":"server","port":%d}`, port)
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GT_DOLT_PORT", fmt.Sprintf("%d", port))
-
-	start := time.Now()
-	err = WaitForReady(townRoot, 500*time.Millisecond)
-	elapsed := time.Since(start)
-
-	if err == nil {
-		t.Error("WaitForReady should return error when server not reachable within timeout")
-	}
-	if elapsed < 400*time.Millisecond {
-		t.Errorf("WaitForReady returned too quickly (%v), should wait at least close to timeout", elapsed)
-	}
-	if elapsed > 3*time.Second {
-		t.Errorf("WaitForReady took %v, should not exceed timeout by much", elapsed)
+	if f.slept < 400*time.Millisecond || f.slept > 500*time.Millisecond {
+		t.Errorf("WaitForReady waited %v, want close to the 500ms timeout and not past it", f.slept)
 	}
 }
 
+// A server that comes up mid-wait is found on the next poll: the backoff
+// starts at 100ms and doubles to a 500ms cap.
 func TestWaitForReady_ServerBecomesReady(t *testing.T) {
-	// Simulate the race: start WaitForReady, then start a listener after a delay.
-	// WaitForReady should eventually succeed.
+	t.Parallel()
+	f := newFakeHost().townPort(4542)
+	f.reachableFrom["127.0.0.1:4542"] = fakeEpoch.Add(300 * time.Millisecond)
 
-	// Find a free port first
-	tmpListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to find free port: %v", err)
-	}
-	port := tmpListener.Addr().(*net.TCPAddr).Port
-	tmpListener.Close() // Free the port
-
-	townRoot := t.TempDir()
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	metadata := fmt.Sprintf(`{"backend":"dolt","dolt_mode":"server","port":%d}`, port)
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GT_DOLT_PORT", fmt.Sprintf("%d", port))
-
-	// Start the listener after 300ms delay. Use a done channel to
-	// synchronize goroutine lifetime with test lifecycle. (review finding #3)
-	done := make(chan struct{})
-	t.Cleanup(func() { close(done) })
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
-			return // Port may be taken (TOCTOU), test will timeout
-		}
-		defer listener.Close()
-		<-done
-	}()
-
-	start := time.Now()
-	err = WaitForReady(townRoot, 5*time.Second)
-	elapsed := time.Since(start)
-
-	if err != nil {
+	if err := f.host().WaitForReady(serverModeTown(t), 5*time.Second); err != nil {
 		t.Errorf("WaitForReady should succeed after server starts, got: %v", err)
 	}
-	// Should take at least 300ms (delay before server starts) but not too long
-	if elapsed < 200*time.Millisecond {
-		t.Errorf("WaitForReady completed too quickly (%v), server shouldn't be ready yet", elapsed)
-	}
-	if elapsed > 3*time.Second {
-		t.Errorf("WaitForReady took too long (%v), should succeed shortly after server starts", elapsed)
+	// 100ms + 200ms reaches the 300ms start; the next poll finds it.
+	if f.slept != 300*time.Millisecond {
+		t.Errorf("WaitForReady waited %v, want 300ms (100ms then 200ms)", f.slept)
 	}
 }
 
 func TestInvalidateDBCache(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Ensure InvalidateDBCache clears cached data so subsequent calls re-query.
 	InvalidateDBCache()
 
@@ -4362,7 +4514,7 @@ func TestInvalidateDBCache(t *testing.T) {
 	setupDoltDB(t, dataDir, "cachetestdb")
 
 	// First call populates.
-	dbs1, err := ListDatabases(townRoot)
+	dbs1, err := h.ListDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("first ListDatabases: %v", err)
 	}
@@ -4374,7 +4526,7 @@ func TestInvalidateDBCache(t *testing.T) {
 	setupDoltDB(t, dataDir, "cachetestdb2")
 
 	// Without invalidation, local path re-scans filesystem (no caching for local).
-	dbs2, err := ListDatabases(townRoot)
+	dbs2, err := h.ListDatabases(townRoot)
 	if err != nil {
 		t.Fatalf("second ListDatabases: %v", err)
 	}
@@ -4384,6 +4536,8 @@ func TestInvalidateDBCache(t *testing.T) {
 }
 
 func TestDBCache_ReturnsCopy(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Verify that callers get a defensive copy, not the cached slice.
 	InvalidateDBCache()
 
@@ -4391,12 +4545,12 @@ func TestDBCache_ReturnsCopy(t *testing.T) {
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	setupDoltDB(t, dataDir, "copytest")
 
-	dbs1, _ := ListDatabases(townRoot)
+	dbs1, _ := h.ListDatabases(townRoot)
 	if len(dbs1) > 0 {
 		dbs1[0] = "MUTATED"
 	}
 
-	dbs2, _ := ListDatabases(townRoot)
+	dbs2, _ := h.ListDatabases(townRoot)
 	for _, db := range dbs2 {
 		if db == "MUTATED" {
 			t.Fatal("ListDatabases returned shared slice — callers can corrupt the cache")
@@ -4405,12 +4559,14 @@ func TestDBCache_ReturnsCopy(t *testing.T) {
 }
 
 func TestCollectDatabaseOwners_HQOnly(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	setupRigMetadata(t, townRoot, "hq", "hq")
 	setupRigsJSON(t, townRoot, []string{})
 
-	owners := CollectDatabaseOwners(townRoot)
+	owners := h.CollectDatabaseOwners(townRoot)
 	if owners["hq"] != "town beads" {
 		t.Errorf("expected 'hq' owner to be 'town beads', got %q", owners["hq"])
 	}
@@ -4420,6 +4576,8 @@ func TestCollectDatabaseOwners_HQOnly(t *testing.T) {
 }
 
 func TestCollectDatabaseOwners_MultipleRigs(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{"gastown", "beads"})
@@ -4427,7 +4585,7 @@ func TestCollectDatabaseOwners_MultipleRigs(t *testing.T) {
 	setupRigMetadata(t, townRoot, "gastown", "gt")
 	setupRigMetadata(t, townRoot, "beads", "beads")
 
-	owners := CollectDatabaseOwners(townRoot)
+	owners := h.CollectDatabaseOwners(townRoot)
 	if owners["hq"] != "town beads" {
 		t.Errorf("expected 'hq' owner 'town beads', got %q", owners["hq"])
 	}
@@ -4443,13 +4601,15 @@ func TestCollectDatabaseOwners_MultipleRigs(t *testing.T) {
 }
 
 func TestCollectDatabaseOwners_CustomDatabaseName(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Rig name differs from dolt_database name (like gastown → gt)
 	setupRigsJSON(t, townRoot, []string{"myrig"})
 	setupRigMetadata(t, townRoot, "myrig", "custom_db")
 
-	owners := CollectDatabaseOwners(townRoot)
+	owners := h.CollectDatabaseOwners(townRoot)
 	if owners["custom_db"] != "myrig rig beads" {
 		t.Errorf("expected 'custom_db' owner 'myrig rig beads', got %q", owners["custom_db"])
 	}
@@ -4459,12 +4619,14 @@ func TestCollectDatabaseOwners_CustomDatabaseName(t *testing.T) {
 }
 
 func TestCollectDatabaseOwners_UnknownDB(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{})
 	setupRigMetadata(t, townRoot, "hq", "hq")
 
-	owners := CollectDatabaseOwners(townRoot)
+	owners := h.CollectDatabaseOwners(townRoot)
 	if _, exists := owners["unknown_db"]; exists {
 		t.Error("unknown_db should not have an owner")
 	}
@@ -4477,6 +4639,8 @@ func TestCollectDatabaseOwners_UnknownDB(t *testing.T) {
 // orphan-detection skip alone wasn't enough; CollectDatabaseOwners has to
 // know about the same registry.
 func TestCollectDatabaseOwners_ProtectedSharedServerDatabaseLabeled(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{})
@@ -4485,13 +4649,13 @@ func TestCollectDatabaseOwners_ProtectedSharedServerDatabaseLabeled(t *testing.T
 	// Create a beads_global database directory on disk (no rig metadata
 	// references it — that's the whole reason it would otherwise look like
 	// an orphan).
-	dataDir := DefaultConfig(townRoot).DataDir
+	dataDir := h.DefaultConfig(townRoot).DataDir
 	beadsGlobalPath := filepath.Join(dataDir, "beads_global", ".dolt")
 	if err := os.MkdirAll(beadsGlobalPath, 0o755); err != nil {
 		t.Fatalf("mkdir beads_global: %v", err)
 	}
 
-	owners := CollectDatabaseOwners(townRoot)
+	owners := h.CollectDatabaseOwners(townRoot)
 	label, ok := owners["beads_global"]
 	if !ok {
 		t.Fatalf("expected beads_global to have an owner label, got owners=%v", owners)
@@ -4507,13 +4671,15 @@ func TestCollectDatabaseOwners_ProtectedSharedServerDatabaseLabeled(t *testing.T
 // that doesn't exist on the filesystem, which would be its own kind of
 // confusion.
 func TestCollectDatabaseOwners_ProtectedDatabaseNotPhantom(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	setupRigsJSON(t, townRoot, []string{})
 	setupRigMetadata(t, townRoot, "hq", "hq")
 
 	// Intentionally do NOT create beads_global on disk.
-	owners := CollectDatabaseOwners(townRoot)
+	owners := h.CollectDatabaseOwners(townRoot)
 	if _, exists := owners["beads_global"]; exists {
 		t.Errorf("beads_global should not be in owners when absent from disk, got %q", owners["beads_global"])
 	}
@@ -4524,6 +4690,7 @@ func TestCollectDatabaseOwners_ProtectedDatabaseNotPhantom(t *testing.T) {
 // =============================================================================
 
 func TestWriteServerConfig_Defaults(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -4627,6 +4794,7 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 // AutoGC="off" emits auto_gc_behavior {enable:false, archive_level:0} so auto_gc can
 // be disabled at runtime without a source revert+rebuild (hq-excy9g escape hatch).
 func TestWriteServerConfig_AutoGCDisabled(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -4668,6 +4836,7 @@ func TestWriteServerConfig_AutoGCDisabled(t *testing.T) {
 }
 
 func TestWriteServerConfig_NoHost(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -4687,6 +4856,7 @@ func TestWriteServerConfig_NoHost(t *testing.T) {
 }
 
 func TestWriteServerConfig_WithHost(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -4706,6 +4876,7 @@ func TestWriteServerConfig_WithHost(t *testing.T) {
 }
 
 func TestWriteServerConfig_ZeroTimeoutsOmitted(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -4730,6 +4901,7 @@ func TestWriteServerConfig_ZeroTimeoutsOmitted(t *testing.T) {
 }
 
 func TestWriteServerConfig_StatsAndSchedulerCanBeOmitted(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -4757,6 +4929,7 @@ func TestWriteServerConfig_StatsAndSchedulerCanBeOmitted(t *testing.T) {
 }
 
 func TestWriteServerConfig_Overwrites(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 
@@ -4781,6 +4954,7 @@ func TestWriteServerConfig_Overwrites(t *testing.T) {
 
 // TestBuildDatabaseToRigMap tests the database name to rig name mapping.
 func TestBuildDatabaseToRigMap(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -4834,6 +5008,8 @@ func TestBuildDatabaseToRigMap(t *testing.T) {
 // were incorrectly used as rig names, creating stub directories at /gt/bd/, /gt/gt/, /gt/sw/
 // instead of the correct /gt/beads/, /gt/gastown/, /gt/sallaWork/.
 func TestEnsureAllMetadata_UsesRigNames(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create databases in .dolt-data with prefix names (as Dolt server does)
@@ -4864,7 +5040,7 @@ func TestEnsureAllMetadata_UsesRigNames(t *testing.T) {
 	}
 
 	// Run EnsureAllMetadata
-	updated, errs := EnsureAllMetadata(townRoot)
+	updated, errs := h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Errorf("unexpected errors: %v", errs)
 	}
@@ -4905,6 +5081,8 @@ func TestEnsureAllMetadata_UsesRigNames(t *testing.T) {
 // TestEnsureAllMetadata_FallbackToDbName tests that EnsureAllMetadata falls back
 // to using the database name as rig name when no route is found.
 func TestEnsureAllMetadata_FallbackToDbName(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
 	// Create database
@@ -4925,7 +5103,7 @@ func TestEnsureAllMetadata_FallbackToDbName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, errs := EnsureAllMetadata(townRoot)
+	updated, errs := h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Errorf("unexpected errors: %v", errs)
 	}
@@ -4945,6 +5123,8 @@ func TestEnsureAllMetadata_FallbackToDbName(t *testing.T) {
 // conflicting routes.jsonl/rigs.json entries), EnsureAllMetadata does not
 // oscillate the dolt_database value on repeated calls. (gas-ar0)
 func TestEnsureAllMetadata_NoOscillation(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -4974,7 +5154,7 @@ func TestEnsureAllMetadata_NoOscillation(t *testing.T) {
 	}
 
 	// First call: no existing metadata.json — whichever candidate wins is fine
-	_, errs := EnsureAllMetadata(townRoot)
+	_, errs := h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Fatalf("first EnsureAllMetadata errors: %v", errs)
 	}
@@ -5000,7 +5180,7 @@ func TestEnsureAllMetadata_NoOscillation(t *testing.T) {
 	}
 
 	// Second call: must produce the same value (no oscillation)
-	_, errs = EnsureAllMetadata(townRoot)
+	_, errs = h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Fatalf("second EnsureAllMetadata errors: %v", errs)
 	}
@@ -5010,7 +5190,7 @@ func TestEnsureAllMetadata_NoOscillation(t *testing.T) {
 	}
 
 	// Third call: still no change
-	_, errs = EnsureAllMetadata(townRoot)
+	_, errs = h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Fatalf("third EnsureAllMetadata errors: %v", errs)
 	}
@@ -5026,6 +5206,8 @@ func TestEnsureAllMetadata_NoOscillation(t *testing.T) {
 // corrects metadata.json to the canonical name instead of preserving the stale
 // alias. (gt-ddb)
 func TestEnsureAllMetadata_CanonicalPrefixWinsOverStaleAlias(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -5055,7 +5237,7 @@ func TestEnsureAllMetadata_CanonicalPrefixWinsOverStaleAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, errs := EnsureAllMetadata(townRoot)
+	_, errs := h.EnsureAllMetadata(townRoot)
 	if len(errs) > 0 {
 		t.Fatalf("EnsureAllMetadata errors: %v", errs)
 	}
@@ -5074,27 +5256,40 @@ func TestEnsureAllMetadata_CanonicalPrefixWinsOverStaleAlias(t *testing.T) {
 }
 
 func TestCleanStaleSocket_RemovesStaleFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix sockets not applicable on Windows")
-	}
-
-	// Create a regular file pretending to be a stale socket
+	t.Parallel()
 	socketPath := filepath.Join(t.TempDir(), "mysql.sock")
 	if err := os.WriteFile(socketPath, []byte{}, 0600); err != nil {
 		t.Fatal(err)
 	}
+	// lsof exits 1: no process holds it, so it is stale.
+	newFakeHost().on("lsof "+socketPath, fakeReply{code: 1}).host().cleanStaleSocket(socketPath)
 
-	cleanStaleSocket(socketPath)
-
-	// lsof will report exit code 1 (no process holds it) → file should be removed
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
 		t.Error("stale socket file should have been removed")
 	}
 }
 
+// A socket some process holds open (lsof exits 0), or one lsof could not
+// check (any other failure), is left alone.
+func TestCleanStaleSocket_KeepsHeldOrUncheckedSocket(t *testing.T) {
+	t.Parallel()
+	for _, reply := range []fakeReply{{stdout: "dolt 123 me 5u unix\n"}, {code: 127}} {
+		socketPath := filepath.Join(t.TempDir(), "mysql.sock")
+		if err := os.WriteFile(socketPath, []byte{}, 0600); err != nil {
+			t.Fatal(err)
+		}
+		newFakeHost().on("lsof "+socketPath, reply).host().cleanStaleSocket(socketPath)
+		if _, err := os.Stat(socketPath); err != nil {
+			t.Errorf("lsof reply %+v: socket removed: %v", reply, err)
+		}
+	}
+}
+
 func TestCleanStaleSocket_NoopWhenMissing(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Should not panic or error when socket doesn't exist
-	cleanStaleSocket(filepath.Join(t.TempDir(), "nonexistent.sock"))
+	h.cleanStaleSocket(filepath.Join(t.TempDir(), "nonexistent.sock"))
 }
 
 // =============================================================================
@@ -5102,6 +5297,7 @@ func TestCleanStaleSocket_NoopWhenMissing(t *testing.T) {
 // =============================================================================
 
 func TestCountDoltDatabases(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Non-existent directory returns 1 (safe default).
@@ -5138,12 +5334,8 @@ func TestCountDoltDatabases(t *testing.T) {
 // refuses to delete databases with >1MB of data when the server is offline
 // and --force is not set. (gt-xvh)
 func TestRemoveDatabase_RefusesLargeDBWhenServerDown(t *testing.T) {
-	// Skip if a real Dolt server is running on the default port — IsRunning
-	// would detect it and take the SQL-check path instead of the size-check path.
-	if conn, err := net.DialTimeout("tcp", "127.0.0.1:3307", time.Second); err == nil {
-		conn.Close()
-		t.Skip("skipping: real Dolt server running on port 3307 would bypass size check")
-	}
+	t.Parallel()
+	h := newFakeHost().host()
 
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
@@ -5157,7 +5349,7 @@ func TestRemoveDatabase_RefusesLargeDBWhenServerDown(t *testing.T) {
 	}
 
 	// Server is not running (no PID file, no process)
-	err := RemoveDatabase(townRoot, "big_db", false)
+	err := h.RemoveDatabase(townRoot, "big_db", false)
 	if err == nil {
 		t.Fatal("expected error when removing large database with server offline")
 	}
@@ -5174,12 +5366,14 @@ func TestRemoveDatabase_RefusesLargeDBWhenServerDown(t *testing.T) {
 // TestRemoveDatabase_AllowsSmallDBWhenServerDown verifies that small databases
 // (<1MB) can be removed even when the server is offline. (gt-xvh)
 func TestRemoveDatabase_AllowsSmallDBWhenServerDown(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 	setupDoltDB(t, dataDir, "small_orphan")
 
 	// Small database (<1MB) — manifest file is only a few bytes from setupDoltDB
-	err := RemoveDatabase(townRoot, "small_orphan", true)
+	err := h.RemoveDatabase(townRoot, "small_orphan", true)
 	if err != nil {
 		t.Fatalf("RemoveDatabase with force: %v", err)
 	}
@@ -5192,6 +5386,7 @@ func TestRemoveDatabase_AllowsSmallDBWhenServerDown(t *testing.T) {
 // TestQuarantine_MovesInsteadOfDeleting verifies that the quarantine logic
 // moves corrupted database dirs to .quarantine/ instead of deleting them. (gt-xvh)
 func TestQuarantine_MovesInsteadOfDeleting(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	dataDir := filepath.Join(townRoot, ".dolt-data")
 
@@ -5250,6 +5445,8 @@ func TestQuarantine_MovesInsteadOfDeleting(t *testing.T) {
 }
 
 func TestGetLastCommitAge_NoServer(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// With no server running, GetLastCommitAge should return an error,
 	// not panic or hang.
 	townRoot := t.TempDir()
@@ -5257,7 +5454,7 @@ func TestGetLastCommitAge_NoServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err := GetLastCommitAge(townRoot)
+	_, _, err := h.GetLastCommitAge(townRoot)
 	if err == nil {
 		// May succeed if a local Dolt is running; either outcome is valid.
 		return
@@ -5266,22 +5463,26 @@ func TestGetLastCommitAge_NoServer(t *testing.T) {
 }
 
 func TestGetLastCommitAge_NoDatabases(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 
-	_, _, err := GetLastCommitAge(townRoot)
+	_, _, err := h.GetLastCommitAge(townRoot)
 	if err == nil {
 		t.Error("expected error with no databases, got nil")
 	}
 }
 
 func TestHealthMetrics_CommitFreshnessFields(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	// Verify the new fields exist and are zero-valued when probe fails.
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	metrics := GetHealthMetrics(townRoot)
+	metrics := h.GetHealthMetrics(townRoot)
 	if metrics.LastCommitAge < 0 {
 		t.Errorf("LastCommitAge = %v, want >= 0", metrics.LastCommitAge)
 	}
@@ -5291,6 +5492,8 @@ func TestHealthMetrics_CommitFreshnessFields(t *testing.T) {
 // never opened for it (gt-7iwy0.2): the read goes through bd, and the one
 // library write left is for the seed bd has no verb for.
 func TestEnsureRigIssuePrefix_ReadsThroughBDAndSkipsMatchingPrefix(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5300,27 +5503,26 @@ func TestEnsureRigIssuePrefix_ReadsThroughBDAndSkipsMatchingPrefix(t *testing.T)
 		t.Fatal(err)
 	}
 
-	prevRead, prevOpen := readRigIssuePrefix, writeRigIssuePrefixViaStore
-	t.Cleanup(func() { readRigIssuePrefix, writeRigIssuePrefixViaStore = prevRead, prevOpen })
 	var reads []string
 	var writes []string
 	current := "tr"
-	readRigIssuePrefix = func(_, beadsDir string) (string, error) {
+	var readErr error
+	h.readIssuePrefix = func(_, beadsDir string) (string, error) {
 		reads = append(reads, beadsDir)
-		return current, nil
+		return current, readErr
 	}
-	writeRigIssuePrefixViaStore = func(_, _, database, prefix string) error {
+	h.writeIssuePrefix = func(_, _, database, prefix string) error {
 		writes = append(writes, database+"="+prefix)
 		return nil
 	}
 
-	if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
+	if err := h.EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
 		t.Fatalf("EnsureRigIssuePrefix: %v", err)
 	}
 	if len(reads) != 1 || len(writes) != 0 {
 		t.Fatalf("matching prefix: reads %q writes %q, want one bd read and no write", reads, writes)
 	}
-	if err := SetRigIssuePrefix(townRoot, reads[0], "testrig", "tr"); err != nil || len(writes) != 0 {
+	if err := h.SetRigIssuePrefix(townRoot, reads[0], "testrig", "tr"); err != nil || len(writes) != 0 {
 		t.Fatalf("SetRigIssuePrefix with a matching prefix = %v, writes %q; want nil and no write", err, writes)
 	}
 
@@ -5336,9 +5538,8 @@ func TestEnsureRigIssuePrefix_ReadsThroughBDAndSkipsMatchingPrefix(t *testing.T)
 		{"read fails", "", errors.New("bd config get: exit status 25")},
 	} {
 		writes = nil
-		current = tc.current
-		readRigIssuePrefix = func(_, beadsDir string) (string, error) { return current, tc.readErr }
-		if err := EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
+		current, readErr = tc.current, tc.readErr
+		if err := h.EnsureRigIssuePrefix(townRoot, "testrig", true); err != nil {
 			t.Fatalf("%s: EnsureRigIssuePrefix: %v", tc.name, err)
 		}
 		if len(writes) != 1 || writes[0] != "testrig=tr" {

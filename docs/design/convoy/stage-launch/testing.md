@@ -191,7 +191,7 @@ These test DAG walking and wave computation against a real beads store.
 | DS-06 | isIssueBlocked integration: blocked task not in Wave 1 | US-004 | -- | I-4 | P1 |
 | DS-07 | Event-driven path skips staged_ready convoy (`CheckConvoysForIssue` → `feedNextReadyIssue`) | US-007 | -- | I-7 | P0 |
 | DS-08 | Event-driven path skips staged_warnings convoy | US-007 | -- | I-7 | P0 |
-| DS-09 | Stranded scan path excludes staged convoys (`findStrandedConvoys` queries `--status=open`) | US-007 | -- | I-7 | P0 |
+| DS-09 | Stranded scan path excludes staged convoys (`Town.FindStranded` queries `--status=open`) | US-007 | -- | I-7 | P0 |
 | DS-10 | Daemon feeds convoy after status transitions from staged_ready to open | US-008 | -- | I-7 | P1 |
 
 ### Snapshot tests (package `cmd`)
