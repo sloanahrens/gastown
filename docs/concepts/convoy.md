@@ -275,9 +275,11 @@ the start of a line; every other field is replaced in place.
 
 A record the feeder cannot read holds the bead too — an unknown hold is not a
 licence to dispatch, and the read failure is logged with the reason. The one
-exception is a rig whose store never opened: that is a town-level gap the store
-alert already reports, and the feeder still dispatches there, as it does for a
-bead with no record to read.
+exception is a rig whose store never opened: that is a gap in the store, not an
+answer from it, and the town-level store alert already reports it — so the
+feeder dispatches there rather than hold the bead on a condition that says
+nothing about the bead. A bead whose own store holds no record for it is the
+other case, and that one holds.
 
 ## Cross-Rig Tracking
 

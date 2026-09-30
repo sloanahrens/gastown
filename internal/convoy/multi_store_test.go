@@ -174,3 +174,55 @@ func TestStoreResolver_StoreForID_ExternalFormat(t *testing.T) {
 		t.Errorf("storeForID(external:ds:ds-abc) = %q, want %q", storeName, "dashboard")
 	}
 }
+
+// TestStoreResolver_OwningStoreOrGap pins gt-2ppfg at the resolver: a nil
+// store means two different things, and only one of them is "the caller's own
+// store owns this bead". A rig the resolver cannot produce is a gap; hq, an
+// unroutable id, and a resolver held by nobody are not, so the caller reads
+// its own store as it always has.
+func TestStoreResolver_OwningStoreOrGap(t *testing.T) {
+	townRoot := setupTownRoot(t)
+	townStore := &fakeHoldStorage{}
+	rigStore := &fakeHoldStorage{}
+
+	tests := []struct {
+		name      string
+		withHQ    bool
+		withRig   bool
+		nilResolv bool
+		issue     string
+		wantStore beadsdk.Storage
+		wantGap   bool
+	}{
+		{name: "no resolver", nilResolv: true, issue: "test-rigbead"},
+		{name: "rig store missing", withHQ: true, issue: "test-rigbead", wantGap: true},
+		{name: "rig store open", withHQ: true, withRig: true, issue: "test-rigbead", wantStore: rigStore},
+		{name: "prefix routes nowhere", withHQ: true, issue: "noroute"},
+		{name: "hq store held", withHQ: true, issue: "hq-abc", wantStore: townStore},
+		{name: "hq store absent", issue: "hq-abc"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stores := map[string]beadsdk.Storage{}
+			if tc.withHQ {
+				stores["hq"] = townStore
+			}
+			if tc.withRig {
+				stores["testrig"] = rigStore
+			}
+			var resolver *StoreResolver
+			if !tc.nilResolv {
+				resolver = NewStoreResolver(townRoot, stores)
+			}
+
+			store, gap := resolver.owningStoreOrGap(tc.issue)
+			if gap != tc.wantGap {
+				t.Errorf("owningStoreOrGap(%q) gap = %v, want %v", tc.issue, gap, tc.wantGap)
+			}
+			if store != tc.wantStore {
+				t.Errorf("owningStoreOrGap(%q) store = %v, want %v", tc.issue, store, tc.wantStore)
+			}
+		})
+	}
+}

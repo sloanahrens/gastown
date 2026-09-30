@@ -77,7 +77,8 @@ type Hold struct {
 // the merge-rejection marker, so a sibling's close event cannot re-sling a
 // bead the refinery rejected (gt-ghyfx). Like DispatchHoldReason it fails
 // closed on a record it cannot read, and reports no hold when there is no
-// store to read from at all.
+// store to read from at all — a record whose rig has no store open included,
+// which the town store would otherwise answer "no record" for (gt-2ppfg).
 func FeedHold(ctx context.Context, store beadsdk.Storage, issueID string, resolver *StoreResolver) Hold {
 	return readHold(ctx, store, issueID, resolver, true)
 }
@@ -92,7 +93,17 @@ func readHold(ctx context.Context, store beadsdk.Storage, issueID string, resolv
 	// a rig bead to its own store, which is where its record lives.
 	owner := store
 	if resolver != nil {
-		if resolved := resolver.owningStore(issueID); resolved != nil {
+		resolved, gap := resolver.owningStoreOrGap(issueID)
+		if gap {
+			// The rig that holds this bead's record has no store open, so the
+			// caller's town store would answer "no record" about a bead that
+			// has one. That is a gap in the store, not an answer from it, and
+			// the town-level store alert already owns it — holding the bead
+			// for it would stall every convoy feeding a rig that is down
+			// (gt-2ppfg).
+			return Hold{}
+		}
+		if resolved != nil {
 			owner = resolved
 		}
 	}

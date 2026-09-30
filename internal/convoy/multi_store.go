@@ -95,8 +95,27 @@ func (r *StoreResolver) storeNamed(name string) beadsdk.Storage {
 // owningStore returns the store holding id, opening it on demand when this
 // resolver was built to, or nil when no store for id is reachable.
 func (r *StoreResolver) owningStore(id string) beadsdk.Storage {
-	store, _ := r.storeByName(r.storeForID(id))
+	store, _ := r.owningStoreOrGap(id)
 	return store
+}
+
+// owningStoreOrGap returns the store holding id, opening it on demand when
+// this resolver was built to, and reports whether the route named a rig store
+// it could not produce. A caller holding only the town store reads a nil as
+// "the town store owns it", which for a rig bead answers "no record" about a
+// bead whose record is in the rig; the gap is the fact that caller acts on
+// instead (gt-2ppfg). hq is never a gap — the caller's own store holds its
+// record — and neither is an id whose prefix routes nowhere.
+func (r *StoreResolver) owningStoreOrGap(id string) (beadsdk.Storage, bool) {
+	if r == nil {
+		return nil, false
+	}
+	name := r.storeForID(id)
+	if name == "" {
+		return nil, false
+	}
+	store, _ := r.storeByName(name)
+	return store, store == nil && name != "hq"
 }
 
 // storeByName returns the store named name ("hq" or a rig name), opening it
