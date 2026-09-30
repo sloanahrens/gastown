@@ -59,6 +59,9 @@ type memStore struct {
 	// EventsTail, which then clears truncateOnce.
 	truncateAlways *beads.EventsTruncatedError
 	truncateOnce   bool
+	// failAfterTruncate is returned by every EventsTail after the scripted
+	// truncation has been served.
+	failAfterTruncate error
 }
 
 var _ beadsdk.Storage = (*memStore)(nil)
@@ -123,6 +126,9 @@ func (s *memStore) EventsTail(since int64, limit int) (*beads.EventsPage, error)
 	s.tails++
 	if s.eventsErr != nil {
 		return nil, s.eventsErr
+	}
+	if !s.truncateOnce && s.truncateAlways != nil && s.failAfterTruncate != nil {
+		return nil, s.failAfterTruncate
 	}
 	if s.truncateOnce && s.truncateAlways != nil {
 		s.truncateOnce = false

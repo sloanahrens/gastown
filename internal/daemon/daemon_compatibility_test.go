@@ -153,7 +153,7 @@ func TestParseConfigGetValue(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{
 		`{"schema_version":1,"contract_version":1,"data":{"key":"events-journal","location":"config.yaml","value":"false"},"pagination":null,"error":null}`: "false",
-		`{"key":"events-journal","location":"env var","value":"true"}`:                                                                                       "true",
+		`{"key":"events-journal","location":"env var","value":"true"}`:                                                                                      "true",
 	} {
 		if got, err := parseConfigGetValue([]byte(in)); err != nil || got != want {
 			t.Errorf("parseConfigGetValue(%s) = %q, %v; want %q", in, got, err, want)

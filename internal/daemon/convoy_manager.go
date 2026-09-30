@@ -765,7 +765,9 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 						name, since, trunc.Floor, trunc.Head, resume)
 					m.recoveryMode.Store(true)
 					since = resume
-					m.eventCursors.Store(name, since)
+					if !warmup {
+						m.eventCursors.Store(name, since)
+					}
 					continue
 				}
 			}

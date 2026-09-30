@@ -1762,8 +1762,10 @@ func checkSingleBeadsStoreCompatibility(ctx context.Context, townRoot, name stri
 		reasons = append(reasons, p)
 	}
 	if _, err := probe.EventsTail(0, 1); err != nil {
+		// A journal pruned below seq 1 is readable; bd says so with a
+		// window that holds records. Anything else is a failed probe.
 		var trunc *beads.EventsTruncatedError
-		if !errors.As(err, &trunc) {
+		if !errors.As(err, &trunc) || trunc.Floor <= 0 || trunc.Head < trunc.Floor {
 			reasons = append(reasons, fmt.Sprintf("events journal probe failed: %v", err))
 		}
 	}

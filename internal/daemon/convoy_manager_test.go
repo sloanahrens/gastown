@@ -1632,6 +1632,27 @@ func TestPollEvents_TruncationWithoutProgressSkipsToHead(t *testing.T) {
 	}
 }
 
+// A truncation met while warming a store up does not record a cursor before
+// the warm-up reaches the head, so a failure after it is warmed up again
+// rather than processed.
+func TestPollEvents_TruncationDuringWarmupRecordsNoEarlyCursor(t *testing.T) {
+	t.Parallel()
+	store, cleanup := newMemStore(t)
+	defer cleanup()
+	for i := 0; i < 3; i++ {
+		mustCreateClosed(t, store, fmt.Sprintf("gt-w-%d", i))
+	}
+	store.truncateAlways = &beads.EventsTruncatedError{Floor: 3, Head: 6}
+	store.truncateOnce = true
+	store.failAfterTruncate = errors.New("bd events tail: store_unavailable")
+
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, "gt", 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m.pollStoresSnapshot(m.stores)
+	if v, ok := m.eventCursors.Load("hq"); ok {
+		t.Errorf("warm-up cut short recorded cursor %v", v)
+	}
+}
+
 func mustCreateClosed(t *testing.T, store *memStore, id string) {
 	t.Helper()
 	ctx := context.Background()
