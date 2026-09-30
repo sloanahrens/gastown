@@ -54,6 +54,9 @@ func runBudgetArgs(t *testing.T, budget string, unconverted []string, args ...st
 	cmd := exec.Command("go", append([]string{"run", "./internal/testpolicy/cmd/budget",
 		"-budget", budget, "-unconverted", listFile, "-overbudget", empty, "--"}, args...)...)
 	cmd.Dir = root
+	// These tests assert enforcement; since a86498f7 the budget is report-only
+	// when load >= ncpu, so force it on to keep the verdict load-independent.
+	cmd.Env = append(os.Environ(), "GATE_STRICT_BUDGET=1")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
