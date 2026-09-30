@@ -82,7 +82,12 @@ func (m *ConvoyManager) trackBlockedHolds(stranded []strandedConvoyInfo, now tim
 			continue
 		}
 		if streak.escalated && m.clearEscalation != nil {
-			m.clearEscalation("convoy feed no longer holds the bead", blockedHoldAlertKey(id))
+			if err := m.clearEscalation("convoy feed no longer holds the bead", blockedHoldAlertKey(id)); err != nil {
+				// Keep the streak so the next scan retries the clear instead of
+				// leaving a stale escalation open with nobody left to close it.
+				m.logger("Convoy: failed to clear blocked-hold escalation for %s: %v", id, err)
+				continue
+			}
 		}
 		delete(m.blockedHolds, id)
 	}
