@@ -405,7 +405,7 @@ func TestDaemon_StopsManagerAndScanner(t *testing.T) {
 	}
 
 	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, "gt", 1*time.Hour, nil, nil, nil)
-	manager.execCmd = newFakeCLI(cliBySub(map[string]cliReply{"convoy stranded": {stdout: "[]\n"}})).run
+	manager.findStrandedFn = noStranded
 	if err := manager.Start(); err != nil {
 		t.Fatalf("manager Start: %v", err)
 	}

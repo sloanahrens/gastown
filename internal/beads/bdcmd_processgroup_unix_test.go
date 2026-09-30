@@ -1,6 +1,6 @@
 //go:build !windows
 
-package cmd
+package beads
 
 import (
 	"bufio"
@@ -19,10 +19,10 @@ import (
 )
 
 // TestBdCmd_ContextEndKillsTheWholeGroupWithinItsGrace pins the two bounds
-// bdCmd's commands inherit from util.SetProcessGroup's Cancel since gt-6t43: a
+// BdCmd's commands inherit from util.SetProcessGroup's Cancel since gt-6t43: a
 // group that will not take SIGTERM holds the call for ProcessGroupKillGrace
 // past the deadline before the escalation ends it, and the escalation reaches
-// a child of the group rather than the shell bdCmd started.
+// a child of the group rather than the shell BdCmd started.
 // TestBdCmd_RunTimesOut could not tell either from an immediate SIGKILL: its
 // stub dies the moment it is signalled, whether or not the grace was there.
 //
@@ -48,7 +48,7 @@ func TestBdCmd_ContextEndKillsTheWholeGroupWithinItsGrace(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cmd := BdCmd("list").buildContextCommand(ctx)
+	cmd := NewBdCmd("list").buildContextCommand(ctx)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestBdCmd_ContextEndKillsTheWholeGroupWithinItsGrace(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if elapsed < grace {
-		t.Errorf("the call returned %s after its context ended, before the %s grace bdCmd inherits: the group was killed without being signalled first",
+		t.Errorf("the call returned %s after its context ended, before the %s grace BdCmd inherits: the group was killed without being signalled first",
 			elapsed.Round(time.Millisecond), grace)
 	}
 	if elapsed > 10*time.Second {

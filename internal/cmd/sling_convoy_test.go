@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	convoyops "github.com/steveyegge/gastown/internal/convoy"
 )
 
 // TestConvoyTracksBeadExactMatch verifies that convoyTracksBead finds a bead
@@ -147,12 +149,12 @@ echo '[{"depends_on_id":"gt-other1"},{"depends_on_id":"external:gt-abc:gt-abc123
 // invalid bead IDs to prevent SQL injection.
 func TestBdDepListRawIDsValidation(t *testing.T) {
 	t.Parallel()
-	_, err := bdDepListRawIDs("/tmp", "'; DROP TABLE deps; --", "down", "tracks")
+	_, err := convoyops.DepListRawIDs("/tmp", "'; DROP TABLE deps; --", "down", "tracks")
 	if err == nil {
 		t.Error("bdDepListRawIDs should reject SQL injection attempts")
 	}
 
-	_, err = bdDepListRawIDs("/tmp", "valid-id", "down", "'; DROP TABLE deps; --")
+	_, err = convoyops.DepListRawIDs("/tmp", "valid-id", "down", "'; DROP TABLE deps; --")
 	if err == nil {
 		t.Error("bdDepListRawIDs should reject SQL injection in depType")
 	}
@@ -190,7 +192,7 @@ printf '[{"depends_on_id":"external:ag:ag-95s.1"}]\n'
 		t.Fatal(err)
 	}
 
-	ids, err := bdDepListRawIDs(workDir, "hq-cv-test", "down", "tracks")
+	ids, err := convoyops.DepListRawIDs(workDir, "hq-cv-test", "down", "tracks")
 	if err != nil {
 		t.Fatalf("bdDepListRawIDs: %v", err)
 	}

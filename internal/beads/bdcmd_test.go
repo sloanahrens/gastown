@@ -1,10 +1,11 @@
-package cmd
+package beads
 
 import (
 	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,15 +17,15 @@ func TestBdCmd_Build(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		setup    func() *bdCmd
+		setup    func() *BdCmd
 		wantArgs []string
 		wantDir  string
 		wantEnv  map[string]string
 	}{
 		{
 			name: "basic command with defaults",
-			setup: func() *bdCmd {
-				return BdCmd("show", "test-id", "--json")
+			setup: func() *BdCmd {
+				return NewBdCmd("show", "test-id", "--json")
 			},
 			wantArgs: []string{"bd", "show", "test-id", "--json"},
 			wantDir:  "",
@@ -32,8 +33,8 @@ func TestBdCmd_Build(t *testing.T) {
 		},
 		{
 			name: "with directory",
-			setup: func() *bdCmd {
-				return BdCmd("list").Dir("/some/path")
+			setup: func() *BdCmd {
+				return NewBdCmd("list").Dir("/some/path")
 			},
 			wantArgs: []string{"bd", "list"},
 			wantDir:  "/some/path",
@@ -43,8 +44,8 @@ func TestBdCmd_Build(t *testing.T) {
 		},
 		{
 			name: "with auto commit",
-			setup: func() *bdCmd {
-				return BdCmd("update", "id").WithAutoCommit()
+			setup: func() *BdCmd {
+				return NewBdCmd("update", "id").WithAutoCommit()
 			},
 			wantArgs: []string{"bd", "update", "id"},
 			wantEnv: map[string]string{
@@ -53,8 +54,8 @@ func TestBdCmd_Build(t *testing.T) {
 		},
 		{
 			name: "with GT_ROOT",
-			setup: func() *bdCmd {
-				return BdCmd("cook", "formula").WithGTRoot("/town/root")
+			setup: func() *BdCmd {
+				return NewBdCmd("cook", "formula").WithGTRoot("/town/root")
 			},
 			wantArgs: []string{"bd", "cook", "formula"},
 			wantEnv: map[string]string{
@@ -63,8 +64,8 @@ func TestBdCmd_Build(t *testing.T) {
 		},
 		{
 			name: "chained configuration",
-			setup: func() *bdCmd {
-				return BdCmd("mol", "wisp", "formula").
+			setup: func() *BdCmd {
+				return NewBdCmd("mol", "wisp", "formula").
 					Dir("/work/dir").
 					WithAutoCommit().
 					WithGTRoot("/town/root")
@@ -116,7 +117,7 @@ func TestBdCmd_Stderr(t *testing.T) {
 	t.Parallel()
 	var stderrBuf bytes.Buffer
 
-	bdc := BdCmd("show", "nonexistent-id").
+	bdc := NewBdCmd("show", "nonexistent-id").
 		Stderr(&stderrBuf)
 
 	cmd := bdc.Build()
@@ -140,7 +141,7 @@ echo stdin:%stdin%
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	out, err := BdCmd("update", "gt-wisp-test", "--body-file=-").
+	out, err := NewBdCmd("update", "gt-wisp-test", "--body-file=-").
 		Stdin(strings.NewReader("line one\nline two")).
 		Output()
 	if err != nil {
@@ -157,7 +158,7 @@ echo stdin:%stdin%
 
 func TestBdCmd_DefaultStderr(t *testing.T) {
 	t.Parallel()
-	bdc := BdCmd("list")
+	bdc := NewBdCmd("list")
 	cmd := bdc.Build()
 
 	// Verify default stderr is os.Stderr
@@ -174,7 +175,7 @@ func TestBdCmd_Output(t *testing.T) {
 		t.Skip("bd not installed, skipping integration test: " + err.Error())
 	}
 
-	bdc := BdCmd("--version")
+	bdc := NewBdCmd("--version")
 	out, err := bdc.Output()
 
 	// Should not error and should produce output
@@ -194,7 +195,7 @@ func TestBdCmd_Run(t *testing.T) {
 		t.Skip("bd not installed, skipping integration test: " + err.Error())
 	}
 
-	bdc := BdCmd("--version")
+	bdc := NewBdCmd("--version")
 	err := bdc.Run()
 
 	// Should not error
@@ -212,7 +213,7 @@ timeout /t 5 /nobreak >NUL
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	b := BdCmd("list")
+	b := NewBdCmd("list")
 	b.timeout = 50 * time.Millisecond
 	start := time.Now()
 	err := b.Run()
@@ -232,7 +233,7 @@ timeout /t 5 /nobreak >NUL
 }
 
 // TestResolveBdCmdTimeout pins the GT_BD_TIMEOUT_SEC override that
-// TestBdCmd_RunTimesOut shortcuts through bdCmd.timeout, and that a command
+// TestBdCmd_RunTimesOut shortcuts through BdCmd.timeout, and that a command
 // with no override of its own uses it.
 func TestResolveBdCmdTimeout(t *testing.T) {
 	t.Setenv("GT_BD_TIMEOUT_SEC", "")
@@ -247,7 +248,7 @@ func TestResolveBdCmdTimeout(t *testing.T) {
 	if got := resolveBdCmdTimeout(); got != 7*time.Second {
 		t.Errorf("GT_BD_TIMEOUT_SEC=7: timeout = %v, want 7s", got)
 	}
-	if got := BdCmd("list").deadline(); got != 7*time.Second {
+	if got := NewBdCmd("list").deadline(); got != 7*time.Second {
 		t.Errorf("a command with no override of its own: deadline = %v, want the env's 7s", got)
 	}
 }
@@ -263,7 +264,7 @@ echo stderr:%* 1>&2
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	out, err := BdCmd("show", "id").CombinedOutput()
+	out, err := NewBdCmd("show", "id").CombinedOutput()
 	if err != nil {
 		t.Fatalf("CombinedOutput: %v", err)
 	}
@@ -279,7 +280,7 @@ echo stderr:%* 1>&2
 func TestBdCmd_Chaining(t *testing.T) {
 	t.Parallel()
 	// Test that all builder methods return the receiver for chaining
-	bdc := BdCmd("test")
+	bdc := NewBdCmd("test")
 
 	// Each method should return the same pointer for fluent chaining
 	if bdc.WithAutoCommit() != bdc {
@@ -320,7 +321,7 @@ func parseEnv(env []string) map[string]string {
 }
 
 // ===================================================================
-// Corner case tests for bdCmd environment handling
+// Corner case tests for BdCmd environment handling
 // ===================================================================
 
 func TestBdCmd_WithAutoCommit_OverridesParentOff(t *testing.T) {
@@ -331,7 +332,7 @@ func TestBdCmd_WithAutoCommit_OverridesParentOff(t *testing.T) {
 	// "off" entry would shadow the appended "on".
 	baseEnv := []string{"PATH=/usr/bin", "BD_DOLT_AUTO_COMMIT=off", "BD_READONLY=true", "HOME=/home/user"}
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"show", "id"},
 		env:    baseEnv,
 		stderr: os.Stderr,
@@ -366,7 +367,7 @@ func TestBdCmd_MultipleAutoCommit_DedupRemovesOld(t *testing.T) {
 	// This ensures glibc getenv() (first-match-wins) returns the correct value.
 	baseEnv := []string{"BD_DOLT_AUTO_COMMIT=off"}
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"show", "id"},
 		env:    baseEnv,
 		stderr: os.Stderr,
@@ -405,7 +406,7 @@ func TestBdCmd_EmptyGTRoot_Skipped(t *testing.T) {
 	t.Parallel()
 	// Test that empty GT_ROOT is not added to env.
 	// Use a clean env to avoid inheriting GT_ROOT from the test runner.
-	bdc := BdCmd("show", "id").
+	bdc := NewBdCmd("show", "id").
 		WithGTRoot("")
 	bdc.env = filterEnv(bdc.env, "GT_ROOT")
 
@@ -439,7 +440,7 @@ func TestBdCmd_AllCombinations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bdc := &bdCmd{
+			bdc := &BdCmd{
 				args:   []string{"show", "id"},
 				env:    append([]string{}, baseEnv...), // Copy to avoid mutation
 				stderr: os.Stderr,
@@ -481,7 +482,7 @@ func TestBdCmd_ConcurrentBuild(t *testing.T) {
 	t.Parallel()
 	// Test that concurrent Build() calls are safe
 	// Each Build() gets a snapshot via os.Environ(), so they should be independent
-	bdc := BdCmd("show", "id")
+	bdc := NewBdCmd("show", "id")
 
 	done := make(chan bool, 2)
 
@@ -514,7 +515,7 @@ func TestBdCmd_EnvImmutability(t *testing.T) {
 	baseEnv := []string{"PATH=/usr/bin", "HOME=/home/user"}
 	originalLen := len(baseEnv)
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"show", "id"},
 		env:    baseEnv,
 		stderr: os.Stderr,
@@ -534,7 +535,7 @@ func TestBdCmd_EnvImmutability(t *testing.T) {
 func TestBdCmd_WithBeadsDir_SetsEnv(t *testing.T) {
 	t.Parallel()
 	// WithBeadsDir should set BEADS_DIR in the environment
-	bdc := BdCmd("show", "id").
+	bdc := NewBdCmd("show", "id").
 		WithBeadsDir("/town/rig/mayor/rig/.beads")
 	cmd := bdc.Build()
 	envMap := parseEnv(cmd.Env)
@@ -550,7 +551,7 @@ func TestBdCmd_DirPinsResolvedBeadsDir(t *testing.T) {
 	// discovery cannot select HQ or an inherited rig database.
 	baseEnv := []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads", "HOME=/home/user"}
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"mol", "wisp", "mol-polecat-work"},
 		env:    baseEnv,
 		stderr: os.Stderr,
@@ -586,7 +587,7 @@ func TestBdCmd_DirPinsMetadataDatabaseOverInheritedDefault(t *testing.T) {
 		t.Fatalf("write metadata: %v", err)
 	}
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args: []string{"show", "gt-abc", "--json"},
 		env: []string{
 			"PATH=/usr/bin",
@@ -637,7 +638,7 @@ func TestBdCmd_WithBeadsDirFollowsRedirectBeforeMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args: []string{"show", "gt-abc", "--json"},
 		env: []string{
 			"PATH=/usr/bin",
@@ -671,7 +672,7 @@ func TestBdCmd_WithBeadsDir_OverridesInherited(t *testing.T) {
 	// bd could write to the wrong database (HQ instead of rig).
 	baseEnv := []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads", "HOME=/home/user"}
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"mol", "wisp", "create", "proto-id"},
 		env:    baseEnv,
 		stderr: os.Stderr,
@@ -719,7 +720,7 @@ func TestBdCmd_WithBeadsDir_OverridesInheritedDoltTarget(t *testing.T) {
 		"BD_DB=/wrong.db",
 	}
 
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"show", "bds-abc", "--json"},
 		env:    baseEnv,
 		stderr: os.Stderr,
@@ -752,7 +753,7 @@ func TestBdCmd_WithBeadsDir_OverridesInheritedDoltTarget(t *testing.T) {
 func TestBdCmd_EmptyBeadsDir_Skipped(t *testing.T) {
 	t.Parallel()
 	// Empty WithBeadsDir should not add BEADS_DIR to env
-	bdc := BdCmd("show", "id").
+	bdc := NewBdCmd("show", "id").
 		WithBeadsDir("")
 	bdc.env = filterEnv(bdc.env, "BEADS_DIR")
 	cmd := bdc.Build()
@@ -766,7 +767,7 @@ func TestBdCmd_EmptyBeadsDir_Skipped(t *testing.T) {
 
 func TestBdCmd_DefaultStripsTargetEnvAndSuppressesSideEffects(t *testing.T) {
 	t.Parallel()
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args: []string{"version"},
 		env: []string{
 			"PATH=/usr/bin",
@@ -792,7 +793,7 @@ func TestBdCmd_DefaultStripsTargetEnvAndSuppressesSideEffects(t *testing.T) {
 func TestBdCmd_WithBeadsDir_Chaining(t *testing.T) {
 	t.Parallel()
 	// WithBeadsDir should return receiver for chaining
-	bdc := BdCmd("test")
+	bdc := NewBdCmd("test")
 	if bdc.WithBeadsDir("/test") != bdc {
 		t.Error("WithBeadsDir() should return receiver for chaining")
 	}
@@ -802,7 +803,7 @@ func TestBdCmd_StripBeadsDir_RemovesInherited(t *testing.T) {
 	t.Parallel()
 	// StripBeadsDir should remove inherited BEADS_DIR from the environment.
 	// Dir() still pins BEADS_DIR to the resolved target database.
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"show", "myproject-abc", "--json"},
 		env:    []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads", "HOME=/home/user"},
 		stderr: os.Stderr,
@@ -824,7 +825,7 @@ func TestBdCmd_StripBeadsDir_NoOpWhenAbsent(t *testing.T) {
 	t.Parallel()
 	// StripBeadsDir should be harmless when BEADS_DIR is not set; Dir() still
 	// pins the target database.
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args:   []string{"show", "hq-abc"},
 		env:    []string{"PATH=/usr/bin", "HOME=/home/user"},
 		stderr: os.Stderr,
@@ -849,7 +850,7 @@ func TestBdCmd_WithRoutingDoesNotPinBeadsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	workDir := filepath.Dir(beadsDir)
-	bdc := &bdCmd{
+	bdc := &BdCmd{
 		args: []string{"show", "gt-abc", "--json"},
 		env: []string{
 			"PATH=/usr/bin",
@@ -893,15 +894,15 @@ func TestBdCmd_UsesCentralReadMutationModes(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		setup          func() *bdCmd
+		setup          func() *BdCmd
 		wantPinned     bool
 		wantReadOnly   bool
 		wantAutoCommit string
 	}{
 		{
 			name: "read pinned via Dir",
-			setup: func() *bdCmd {
-				return (&bdCmd{args: []string{"show", "gt-abc"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).Dir(rigDir)
+			setup: func() *BdCmd {
+				return (&BdCmd{args: []string{"show", "gt-abc"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).Dir(rigDir)
 			},
 			wantPinned:     true,
 			wantReadOnly:   true,
@@ -909,24 +910,24 @@ func TestBdCmd_UsesCentralReadMutationModes(t *testing.T) {
 		},
 		{
 			name: "mutation pinned via WithBeadsDir",
-			setup: func() *bdCmd {
-				return (&bdCmd{args: []string{"update", "gt-abc", "--status=open"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).WithBeadsDir(beadsDir)
+			setup: func() *BdCmd {
+				return (&BdCmd{args: []string{"update", "gt-abc", "--status=open"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).WithBeadsDir(beadsDir)
 			},
 			wantPinned:     true,
 			wantAutoCommit: "on",
 		},
 		{
 			name: "read routing",
-			setup: func() *bdCmd {
-				return (&bdCmd{args: []string{"message", "thread", "hq-msg"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).Dir(rigDir).WithRouting()
+			setup: func() *BdCmd {
+				return (&BdCmd{args: []string{"message", "thread", "hq-msg"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).Dir(rigDir).WithRouting()
 			},
 			wantReadOnly:   true,
 			wantAutoCommit: "off",
 		},
 		{
 			name: "auto commit forces mutation for read args",
-			setup: func() *bdCmd {
-				return (&bdCmd{args: []string{"show", "gt-abc"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).Dir(rigDir).WithAutoCommit()
+			setup: func() *BdCmd {
+				return (&BdCmd{args: []string{"show", "gt-abc"}, env: append([]string{}, baseEnv...), stderr: os.Stderr}).Dir(rigDir).WithAutoCommit()
 			},
 			wantPinned:     true,
 			wantAutoCommit: "on",
@@ -968,7 +969,7 @@ func TestBdCmd_UsesCentralReadMutationModes(t *testing.T) {
 
 func TestBdCmd_StripBeadsDir_Chaining(t *testing.T) {
 	t.Parallel()
-	bdc := BdCmd("test")
+	bdc := NewBdCmd("test")
 	if bdc.StripBeadsDir() != bdc {
 		t.Error("StripBeadsDir() should return receiver for chaining")
 	}
@@ -984,4 +985,23 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// writeBDStub writes a fake bd into binDir and returns its path.
+func writeBDStub(t *testing.T, binDir string, unixScript string, windowsScript string) string {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(binDir, "bd.cmd")
+		if err := os.WriteFile(path, []byte(windowsScript), 0644); err != nil {
+			t.Fatalf("write bd stub: %v", err)
+		}
+		return path
+	}
+
+	path := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(path, []byte(unixScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	return path
 }
