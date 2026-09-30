@@ -325,6 +325,7 @@ func TestClearSubmittedWithoutRecordWritesNothing(t *testing.T) {
 }
 
 func TestClearLandedStopsTheSubmittedSeat(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	if err := MarkSubmitted(town, polecat, "gt-abc", "gt done", now); err != nil {
@@ -352,6 +353,7 @@ func TestClearLandedStopsTheSubmittedSeat(t *testing.T) {
 }
 
 func TestClearLandedLeavesAParkedSeat(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	if _, err := Update(town, polecat, func(r *Record) error { r.Desired = DesiredPark; return nil }); err != nil {

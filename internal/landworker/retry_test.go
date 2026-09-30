@@ -25,6 +25,7 @@ func (f *flakyBeads) AppendNotes(id, note string) error {
 }
 
 func TestRetryBeadsRetriesSerializationFailures(t *testing.T) {
+	t.Parallel()
 	fake := beadsfake.New(beadsfake.WithPrefix("gt"))
 	fake.Seed(beads.Issue{ID: "gt-a", Title: "a", Type: "task"})
 	inner := &flakyBeads{Beads: fake, fails: 2, err: errors.New("bd update: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction")}
@@ -44,6 +45,7 @@ func TestRetryBeadsRetriesSerializationFailures(t *testing.T) {
 }
 
 func TestRetryBeadsGivesUpAfterTries(t *testing.T) {
+	t.Parallel()
 	inner := &flakyBeads{Beads: beadsfake.New(), fails: 99, err: errors.New("Error 1213: serialization failure")}
 	r := RetryBeads{Inner: inner, Tries: 3, Sleep: func(time.Duration) {}}
 	if err := r.AppendNotes("gt-a", "n"); err == nil || inner.calls != 3 {
@@ -52,6 +54,7 @@ func TestRetryBeadsGivesUpAfterTries(t *testing.T) {
 }
 
 func TestRetryBeadsDoesNotRetryOtherErrors(t *testing.T) {
+	t.Parallel()
 	inner := &flakyBeads{Beads: beadsfake.New(), fails: 99, err: errors.New("issue not found")}
 	r := RetryBeads{Inner: inner, Sleep: func(time.Duration) { t.Fatal("slept on a non-retryable error") }}
 	if err := r.AppendNotes("gt-a", "n"); err == nil || inner.calls != 1 {
@@ -60,6 +63,7 @@ func TestRetryBeadsDoesNotRetryOtherErrors(t *testing.T) {
 }
 
 func TestRetryDelayBounds(t *testing.T) {
+	t.Parallel()
 	for attempt := 0; attempt < 10; attempt++ {
 		for i := 0; i < 50; i++ {
 			if d := retryDelay(attempt); d < 100*time.Millisecond || d > 2*time.Second {

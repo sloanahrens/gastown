@@ -129,6 +129,7 @@ func (h *harness) comments(t *testing.T, id string) []string {
 }
 
 func TestPassLandsTheBranchTipNotThePinnedHead(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	rep := h.w.Pass(context.Background())
@@ -145,6 +146,7 @@ func TestPassLandsTheBranchTipNotThePinnedHead(t *testing.T) {
 }
 
 func TestPassMissingBranchAnnotatesOnceAndKeepsLabel(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.remote.tips = map[string]string{}
@@ -174,6 +176,7 @@ func TestPassMissingBranchAnnotatesOnceAndKeepsLabel(t *testing.T) {
 }
 
 func TestPassReworkRejectionCommentsAndClearsIntent(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
@@ -193,6 +196,7 @@ func TestPassReworkRejectionCommentsAndClearsIntent(t *testing.T) {
 }
 
 func TestPassHumanRejectionLeavesNoReworkComment(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
@@ -205,6 +209,7 @@ func TestPassHumanRejectionLeavesNoReworkComment(t *testing.T) {
 }
 
 func TestPassRejectionWithRecordErrorBacksOff(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
@@ -221,6 +226,7 @@ func TestPassRejectionWithRecordErrorBacksOff(t *testing.T) {
 }
 
 func TestPassRecordErrorIsRepairedNextPassWithTheSameWork(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(n int, w land.Work) (land.Result, error) {
@@ -254,6 +260,7 @@ func TestPassRecordErrorIsRepairedNextPassWithTheSameWork(t *testing.T) {
 }
 
 func TestPassRecordedLandingOnTargetIsRepairedNotRelanded(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: "a932cb5a", Target: "main", LandedCommit: "6db29a35"}}
@@ -272,6 +279,7 @@ func TestPassRecordedLandingOnTargetIsRepairedNotRelanded(t *testing.T) {
 }
 
 func TestPassStaleRecordOffTargetLandsNormally(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Branch: branch, Head: "old", Target: "main", LandedCommit: "rewound"}}
@@ -282,6 +290,7 @@ func TestPassStaleRecordOffTargetLandsNormally(t *testing.T) {
 }
 
 func TestPassStartupRepairsOpenBeadsFromTheLandingsFile(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.bd.Seed(beads.Issue{ID: "gt-old", Title: "done", Status: "in_progress", Type: "task", Assignee: "gastown/polecats/ruby"})
 	h.bd.Seed(beads.Issue{ID: "gt-closed", Title: "done", Status: "closed", Type: "task"})
@@ -297,6 +306,7 @@ func TestPassStartupRepairsOpenBeadsFromTheLandingsFile(t *testing.T) {
 }
 
 func TestPassInfraFailureBacksOffAndAnnouncesOnce(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
@@ -320,6 +330,7 @@ func TestPassInfraFailureBacksOffAndAnnouncesOnce(t *testing.T) {
 }
 
 func TestPassRaceRetriesNextPassWithoutBackoff(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(n int, _ land.Work) (land.Result, error) {
@@ -336,6 +347,7 @@ func TestPassRaceRetriesNextPassWithoutBackoff(t *testing.T) {
 }
 
 func TestPassReadBackBacksOffAndAnnounces(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
@@ -353,6 +365,7 @@ func TestPassReadBackBacksOffAndAnnounces(t *testing.T) {
 }
 
 func TestPassFallsBackToTheSubmissionComment(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal", Labels: []string{land.LabelReadyToLand}})
 	if err := h.bd.AddComment("gt-abc", "Submitted for landing: polecat/opal/old @ 0123abcd onto main (attempt 1)"); err != nil {
@@ -368,6 +381,7 @@ func TestPassFallsBackToTheSubmissionComment(t *testing.T) {
 }
 
 func TestPassWithNoLandingRequestWaitsForHuman(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "hooked", Type: "task", Labels: []string{land.LabelReadyToLand}})
 	rep := h.w.Pass(context.Background())
@@ -377,6 +391,7 @@ func TestPassWithNoLandingRequestWaitsForHuman(t *testing.T) {
 }
 
 func TestPassSkipsClosedAndUnlabeled(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.bd.Seed(beads.Issue{ID: "gt-x", Title: "x", Status: "open", Type: "task"})
 	h.seedReady(t, "gt-abc")
@@ -390,6 +405,7 @@ func TestPassSkipsClosedAndUnlabeled(t *testing.T) {
 }
 
 func TestPassStopsWhenContextIsDone(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -401,6 +417,7 @@ func TestPassStopsWhenContextIsDone(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
+	t.Parallel()
 	bg := context.Background()
 	cancelled, cancel := context.WithCancel(bg)
 	cancel()
@@ -428,6 +445,7 @@ func TestClassify(t *testing.T) {
 }
 
 func TestSortOldestFirst(t *testing.T) {
+	t.Parallel()
 	is := []*beads.Issue{
 		{ID: "gt-c", UpdatedAt: "2026-09-30T12:00:00Z"},
 		{ID: "gt-b", UpdatedAt: "2026-09-30T10:00:00Z"},
@@ -444,6 +462,7 @@ func TestSortOldestFirst(t *testing.T) {
 }
 
 func TestPolecatFromAssignee(t *testing.T) {
+	t.Parallel()
 	for in, want := range map[string]string{"gastown/polecats/opal": "opal", "gastown/crew/sloan": "", "": "", "opal": ""} {
 		if got := polecatFromAssignee(in); got != want {
 			t.Errorf("polecatFromAssignee(%q) = %q, want %q", in, got, want)
@@ -452,6 +471,7 @@ func TestPolecatFromAssignee(t *testing.T) {
 }
 
 func TestPassResubmissionAfterALandingLandsNormally(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	rec := land.LandingRecord{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: "oldhead", Target: "main", LandedCommit: "l1", Route: "daemon"}
 	notes := rec.NoteBlock() + "\n" + land.FormatReadyNote(land.Work{Branch: branch, Head: noteHead, Target: "main", Worker: "opal"})
@@ -466,6 +486,7 @@ func TestPassResubmissionAfterALandingLandsNormally(t *testing.T) {
 }
 
 func TestPassStartupLeavesAReopenedLandedBead(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	rec := land.LandingRecord{BeadID: "gt-old", Rig: "gastown", Branch: "b", Head: "h", Target: "main", LandedCommit: "l1", Route: "daemon"}
 	// Recorded and label removed, then a human reopened it.
