@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -47,7 +48,7 @@ type handlers struct {
 	nukePolecatWorktreeFn func(workDir, address string) error
 	// verifyCommitOnMainFn reports whether a polecat's commit is on the
 	// default branch.
-	verifyCommitOnMainFn func(workDir, rigName, polecatName string) (bool, error)
+	verifyCommitOnMainFn func(workDir, rigName, polecatName string) guard.Result
 	// verifyBranchAlreadyMergedFn reports whether a polecat's branch work has
 	// landed, squash merges included.
 	verifyBranchAlreadyMergedFn func(workDir, rigName, polecatName, hookBead string) (bool, error)
@@ -141,7 +142,7 @@ func (h *handlers) nukePolecatWorktreeExec(workDir, address string) error {
 	return defaultNukePolecatWorktree(workDir, address)
 }
 
-func (h *handlers) verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
+func (h *handlers) verifyCommitOnMain(workDir, rigName, polecatName string) guard.Result {
 	if h.verifyCommitOnMainFn != nil {
 		return h.verifyCommitOnMainFn(workDir, rigName, polecatName)
 	}
