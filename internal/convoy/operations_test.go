@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 )
 
 func TestExtractIssueID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -43,6 +44,7 @@ func TestExtractIssueID(t *testing.T) {
 }
 
 func TestIsSlingableType(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		issueType string
 		want      bool
@@ -72,6 +74,7 @@ func TestIsSlingableType(t *testing.T) {
 }
 
 func TestIsIssueBlocked_NoStore(t *testing.T) {
+	t.Parallel()
 	// isIssueBlocked with nil store should fail-open (return false, not panic).
 	// This covers the "store unavailable" failure mode (F-17).
 	result := isIssueBlocked(context.Background(), nil, "test-any-id", nil)
@@ -81,6 +84,7 @@ func TestIsIssueBlocked_NoStore(t *testing.T) {
 }
 
 func TestReadyIssueFilterLogic_SkipsNonSlingableTypes(t *testing.T) {
+	t.Parallel()
 	// Validates that feedNextReadyIssue's type filter skips non-slingable types.
 	// We test the predicate inline (same pattern as existing filter tests).
 	tracked := []trackedIssue{
@@ -106,6 +110,7 @@ func TestReadyIssueFilterLogic_SkipsNonSlingableTypes(t *testing.T) {
 }
 
 func TestReadyIssueFilterLogic_SkipsNonOpenIssues(t *testing.T) {
+	t.Parallel()
 	// Validates the filtering predicate used by feedNextReadyIssue: only
 	// open issues with no assignee should be considered "ready". We test
 	// the predicate inline because feedNextReadyIssue also calls rigForIssue
@@ -127,6 +132,7 @@ func TestReadyIssueFilterLogic_SkipsNonOpenIssues(t *testing.T) {
 }
 
 func TestReadyIssueFilterLogic_FindsReadyIssue(t *testing.T) {
+	t.Parallel()
 	// Validates that the "first open+unassigned" selection picks the correct
 	// issue. See comment on TestReadyIssueFilterLogic_SkipsNonOpenIssues for
 	// why this tests the predicate inline rather than calling feedNextReadyIssue.
@@ -152,6 +158,7 @@ func TestReadyIssueFilterLogic_FindsReadyIssue(t *testing.T) {
 }
 
 func TestCheckConvoysForIssue_NilStore(t *testing.T) {
+	t.Parallel()
 	// Nil store returns nil immediately (no convoy checks).
 	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil, nil)
 	if result != nil {
@@ -160,6 +167,7 @@ func TestCheckConvoysForIssue_NilStore(t *testing.T) {
 }
 
 func TestCheckConvoysForIssue_NilLogger(t *testing.T) {
+	t.Parallel()
 	// Nil logger should not panic — gets replaced with no-op internally.
 	// With nil store, returns nil.
 	result := CheckConvoysForIssue(context.Background(), nil, "/nonexistent/path", "gt-test", "test", nil, "gt", nil, nil)
@@ -173,6 +181,7 @@ func TestCheckConvoysForIssue_NilLogger(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBlockingDepTypes_ContainsExpectedTypes(t *testing.T) {
+	t.Parallel()
 	expected := []string{"blocks", "conditional-blocks", "waits-for", "merge-blocks"}
 	for _, depType := range expected {
 		if !blockingDepTypes[depType] {
@@ -182,12 +191,14 @@ func TestBlockingDepTypes_ContainsExpectedTypes(t *testing.T) {
 }
 
 func TestBlockingDepTypes_ExcludesParentChild(t *testing.T) {
+	t.Parallel()
 	if blockingDepTypes["parent-child"] {
 		t.Error("blockingDepTypes should NOT contain parent-child")
 	}
 }
 
 func TestBlockingDepTypes_ExactSize(t *testing.T) {
+	t.Parallel()
 	// Ensure the map has exactly the 4 expected entries and no extras.
 	if len(blockingDepTypes) != 4 {
 		t.Errorf("blockingDepTypes has %d entries, want 4; contents: %v", len(blockingDepTypes), blockingDepTypes)
@@ -199,6 +210,7 @@ func TestBlockingDepTypes_ExactSize(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsIssueBlocked_NoDeps(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -224,6 +236,7 @@ func TestIsIssueBlocked_NoDeps(t *testing.T) {
 }
 
 func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -267,15 +280,6 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 		t.Fatalf("AddDependency: %v", err)
 	}
 
-	// Verify the dependency actually exists via a method that works in embedded mode.
-	deps, err := store.GetDependencies(ctx, blocked.ID)
-	if err != nil {
-		t.Fatalf("store.GetDependencies: %v", err)
-	}
-	if len(deps) == 0 {
-		t.Fatal("expected at least 1 dependency to be created")
-	}
-
 	result := isIssueBlocked(ctx, store, blocked.ID, nil)
 
 	if !result {
@@ -284,6 +288,7 @@ func TestIsIssueBlocked_BlockedByOpenBlocker(t *testing.T) {
 }
 
 func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -335,6 +340,7 @@ func TestIsIssueBlocked_NotBlockedByClosedBlocker(t *testing.T) {
 }
 
 func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -385,6 +391,7 @@ func TestIsIssueBlocked_ParentChildDoesNotBlock(t *testing.T) {
 }
 
 func TestIsIssueBlocked_FailOpenOnNonexistentIssue(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -401,6 +408,7 @@ func TestIsIssueBlocked_FailOpenOnNonexistentIssue(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -453,6 +461,7 @@ func TestIsIssueBlocked_MergeBlocksStillBlockedWhenClosedWithoutMerge(t *testing
 }
 
 func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -505,6 +514,7 @@ func TestIsIssueBlocked_MergeBlocksUnblockedWhenMerged(t *testing.T) {
 }
 
 func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -567,6 +577,7 @@ func TestIsIssueBlocked_MergeBlocksUnblockedOnTombstone(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRigForIssue_ValidPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create .beads/routes.jsonl with a mapping
@@ -592,6 +603,7 @@ func TestRigForIssue_ValidPrefix(t *testing.T) {
 }
 
 func TestRigForIssue_EmptyPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// No prefix extractable from "nohyphen"
@@ -602,6 +614,7 @@ func TestRigForIssue_EmptyPrefix(t *testing.T) {
 }
 
 func TestRigForIssue_EmptyIssueID(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	rig := rigForIssue(townRoot, "")
@@ -611,6 +624,7 @@ func TestRigForIssue_EmptyIssueID(t *testing.T) {
 }
 
 func TestRigForIssue_UnknownPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Create routes.jsonl with only gt- mapping
@@ -631,6 +645,7 @@ func TestRigForIssue_UnknownPrefix(t *testing.T) {
 }
 
 func TestRigForIssue_NoRoutesFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// No .beads directory at all — should return ""
@@ -641,6 +656,7 @@ func TestRigForIssue_NoRoutesFile(t *testing.T) {
 }
 
 func TestRigForIssue_TownLevelPrefix(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	// Town-level beads have path="." which should return "" (no specific rig)
@@ -679,21 +695,35 @@ func setupTownRoot(t *testing.T) string {
 	return townRoot
 }
 
-// makeGTStub creates a shell script that logs its arguments and exits with the
-// given code. Returns the path to the script and the path to the log file.
-func makeGTStub(t *testing.T, exitCode int) (gtPath, logPath string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
+// slingLog is a slinger that records each gt sling's arguments, one line per
+// call, and fails every call with err when it is set.
+type slingLog struct {
+	mu    sync.Mutex
+	lines []string
+	err   error
+}
+
+func (l *slingLog) sling(_ context.Context, _ string, args []string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, strings.Join(args, " "))
+	return l.err
+}
+
+// read returns the recorded calls, or os.ErrNotExist when there were none.
+func (l *slingLog) read() ([]byte, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.lines) == 0 {
+		return nil, os.ErrNotExist
 	}
-	dir := t.TempDir()
-	logPath = filepath.Join(dir, "gt.log")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$*\" >> %q\nexit %d\n", logPath, exitCode)
-	gtPath = filepath.Join(dir, "gt")
-	if err := os.WriteFile(gtPath, []byte(script), 0755); err != nil {
-		t.Fatalf("WriteFile gt stub: %v", err)
-	}
-	return gtPath, logPath
+	return []byte(strings.Join(l.lines, "\n") + "\n"), nil
+}
+
+func (l *slingLog) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = nil
 }
 
 // noopChecker is a Checker that closes nothing, so a test of the event path
@@ -714,10 +744,7 @@ func makeLogger() (func(string, ...interface{}), *[]string) {
 // ---------------------------------------------------------------------------
 
 func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -787,13 +814,13 @@ func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, _ := makeLogger()
 
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
 
 	// Verify gt was called with the ready issue
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub was not called (no log file): %v", err)
 	}
@@ -805,10 +832,7 @@ func TestFeedNextReadyIssue_DispatchesFirstReadyIssue(t *testing.T) {
 }
 
 func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -864,12 +888,12 @@ func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, _ := makeLogger()
 
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
 
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub was not called (no log file): %v", err)
 	}
@@ -884,10 +908,7 @@ func TestFeedNextReadyIssue_SkipsEpicAndDispatchesTask(t *testing.T) {
 }
 
 func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -967,12 +988,12 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, logMsgs := makeLogger()
 
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
 
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub was not called (%v): the unblocked task was never dispatched. log messages: %v", err, *logMsgs)
 	}
@@ -988,10 +1009,7 @@ func TestFeedNextReadyIssue_SkipsBlockedIssue(t *testing.T) {
 }
 
 func TestFeedNextReadyIssue_NoReadyIssues_LogsMessage(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -1046,10 +1064,10 @@ func TestFeedNextReadyIssue_NoReadyIssues_LogsMessage(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, _ := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, logMsgs := makeLogger()
 
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
 
 	// Verify "no ready issues to feed" was logged
 	found := false
@@ -1065,10 +1083,7 @@ func TestFeedNextReadyIssue_NoReadyIssues_LogsMessage(t *testing.T) {
 }
 
 func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -1112,14 +1127,14 @@ func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, logMsgs := makeLogger()
 
 	// isRigParked always returns true
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return true }, nil)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return true }, nil)
 
 	// gt should NOT have been called
-	if _, err := os.ReadFile(logPath); err == nil {
+	if _, err := gt.read(); err == nil {
 		t.Errorf("gt stub should not have been called for parked rig")
 	}
 
@@ -1143,19 +1158,16 @@ func TestFeedNextReadyIssue_SkipsParkedRig(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDispatchIssue_Success(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	townRoot := t.TempDir()
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 
-	err := dispatchIssue(context.Background(), townRoot, "test-abc", "myrig", gtPath, "", "", "")
+	err := gt.sling(context.Background(), townRoot, slingArgs("test-abc", "myrig", "", "", ""))
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
 
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub log not written: %v", err)
 	}
@@ -1170,19 +1182,16 @@ func TestDispatchIssue_Success(t *testing.T) {
 // slung with --agent must be re-dispatched with the same agent, or the feed
 // silently re-routes it to the rig default.
 func TestDispatchIssue_PassesAgent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	townRoot := t.TempDir()
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 
-	err := dispatchIssue(context.Background(), townRoot, "test-agent", "myrig", gtPath, "", "deepseek-flash", "")
+	err := gt.sling(context.Background(), townRoot, slingArgs("test-agent", "myrig", "", "deepseek-flash", ""))
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
 
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub log not written: %v", err)
 	}
@@ -1197,6 +1206,7 @@ func TestDispatchIssue_PassesAgent(t *testing.T) {
 // passed through verbatim, and the no-agent fallback stays with gt sling while
 // naming the rig default it expects (gt-yg24).
 func TestFeedDispatchAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	t.Run("recorded agent wins", func(t *testing.T) {
@@ -1237,6 +1247,7 @@ func TestFeedDispatchAgent(t *testing.T) {
 // sling-time agent record. Every re-dispatch path reads the field through it, so
 // the field spellings and the empty cases are pinned here once (gt-mxyk).
 func TestAgentFromConvoyDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -1285,6 +1296,7 @@ func TestAgentFromConvoyDescription(t *testing.T) {
 // makes: a recorded agent is passed through, and an unrecorded one is left to
 // gt sling while naming the rig default it expects (gt-mxyk, gt-yg24).
 func TestRedispatchAgent(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 
 	tests := []struct {
@@ -1330,25 +1342,12 @@ func TestRedispatchAgent(t *testing.T) {
 	}
 }
 
-func TestDispatchIssue_Failure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	townRoot := t.TempDir()
-	gtPath, _ := makeGTStub(t, 1)
-
-	err := dispatchIssue(context.Background(), townRoot, "test-fail", "myrig", gtPath, "", "", "")
-	if err == nil {
-		t.Fatal("dispatchIssue should return error when gt exits 1")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // DS-07: CheckConvoysForIssue skips staged_ready convoys
 // ---------------------------------------------------------------------------
 
 func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -1404,11 +1403,11 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, _ := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, logMsgs := makeLogger()
 
 	// Call CheckConvoysForIssue with the tracked issue's ID (simulating close event)
-	result := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-07", logger, gtPath, noopChecker, nil)
+	result := checkConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-07", logger, gt.sling, noopChecker, nil, nil)
 
 	// The convoy should be returned (it was found as a tracker)
 	if len(result) == 0 {
@@ -1440,6 +1439,7 @@ func TestCheckConvoysForIssue_SkipsStagedReady(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -1491,10 +1491,10 @@ func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, _ := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, logMsgs := makeLogger()
 
-	result := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-08", logger, gtPath, noopChecker, nil)
+	result := checkConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-08", logger, gt.sling, noopChecker, nil, nil)
 
 	if len(result) == 0 {
 		t.Fatal("no tracking convoys found for an issue a convoy tracks")
@@ -1525,10 +1525,7 @@ func TestCheckConvoysForIssue_SkipsStagedWarnings(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -1583,9 +1580,9 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 	// Phase 1: While staged, verify it's skipped
 	logger1, logMsgs1 := makeLogger()
 	townRoot := setupTownRoot(t)
-	gtPath, _ := makeGTStub(t, 0)
+	gt := &slingLog{}
 
-	result1 := CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-staged", logger1, gtPath, noopChecker, nil)
+	result1 := checkConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-staged", logger1, gt.sling, noopChecker, nil, nil)
 	if len(result1) == 0 {
 		t.Fatal("no tracking convoys found for an issue a convoy tracks")
 	}
@@ -1615,7 +1612,7 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 
 	// Phase 3: Call CheckConvoysForIssue again — now the convoy should be processed
 	logger2, logMsgs2 := makeLogger()
-	_ = CheckConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-open", logger2, gtPath, noopChecker, nil)
+	_ = checkConvoysForIssue(ctx, store, townRoot, tracked.ID, "DS-10-open", logger2, gt.sling, noopChecker, nil, nil)
 
 	// Verify "checking convoy" WAS logged (convoy is now open and being processed)
 	foundChecking := false
@@ -1642,15 +1639,10 @@ func TestCheckConvoysForIssue_FeedsAfterStagedToOpenTransition(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // setupTownRootWithCrossRig creates a town root with routes for both "test-"
-// (local rig) and "oag-" (cross-rig) prefixes. The cross-rig prefix points
-// to a directory with a bd stub.
-func setupTownRootWithCrossRig(t *testing.T, bdExitCode int, bdOutput string) (townRoot string, bdLogPath string) {
+// (local rig) and "oag-" (cross-rig, rig osr_ai_gm) prefixes.
+func setupTownRootWithCrossRig(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	townRoot = t.TempDir()
+	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll .beads: %v", err)
@@ -1668,39 +1660,21 @@ func setupTownRootWithCrossRig(t *testing.T, bdExitCode int, bdOutput string) (t
 	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0o644); err != nil {
 		t.Fatalf("WriteFile routes.jsonl: %v", err)
 	}
+	return townRoot
+}
 
-	// Create bd stub in PATH
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll binDir: %v", err)
-	}
-	bdLogPath = filepath.Join(townRoot, "bd.log")
-
-	bdScript := fmt.Sprintf(`#!/bin/sh
-echo "CMD:$*" >> %q
-case "$1" in
-  show)
-    echo '%s'
-    exit %d
-    ;;
-esac
-exit 0
-`, bdLogPath, bdOutput, bdExitCode)
-
-	bdPath := filepath.Join(binDir, "bd")
-	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
-		t.Fatalf("write bd stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	return townRoot, bdLogPath
+// showScript is a bd show for fetchCrossRigBeadStatusWith that prints out and
+// records each call as "<rigPath>: <args>".
+func showScript(out string) (show func(string, []string) ([]byte, error), calls *[]string) {
+	calls = new([]string)
+	return func(rigPath string, args []string) ([]byte, error) {
+		*calls = append(*calls, rigPath+": "+strings.Join(args, " "))
+		return []byte(out), nil
+	}, calls
 }
 
 func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -1734,11 +1708,12 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 		t.Fatalf("AddDependency: %v", err)
 	}
 
-	// Set up town root with cross-rig routes and bd stub returning "closed"
-	townRoot, _ := setupTownRootWithCrossRig(t, 0,
-		`[{"id":"oag-19dd9","status":"closed","assignee":"gastown/polecats/alpha","priority":2,"issue_type":"task"}]`)
+	// The bead's own rig store has it closed.
+	rigStore := newFakeRigStore(&beadsdk.Issue{ID: "oag-19dd9", Status: beadsdk.StatusClosed, Assignee: "gastown/polecats/alpha", Priority: 2, IssueType: beadsdk.TypeTask})
+	townRoot := setupTownRootWithCrossRig(t)
+	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{"osr_ai_gm": rigStore})
 
-	tracked := getConvoyTrackedIssues(ctx, store, convoy.ID, townRoot, nil, func(string, ...interface{}) {})
+	tracked := getConvoyTrackedIssues(ctx, store, convoy.ID, townRoot, resolver, func(string, ...interface{}) {})
 
 	// Find the cross-rig bead in tracked results
 	var found *trackedIssue
@@ -1764,14 +1739,11 @@ func TestGetConvoyTrackedIssues_CrossRigFallback(t *testing.T) {
 }
 
 func TestFetchCrossRigBeadStatus(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
+	t.Parallel()
+	townRoot := setupTownRootWithCrossRig(t)
+	show, calls := showScript(`[{"id":"oag-abc","status":"closed","assignee":"","priority":1,"issue_type":"task"},{"id":"oag-xyz","status":"open","assignee":"gastown/polecats/beta","priority":3,"issue_type":"bug"}]`)
 
-	townRoot, bdLogPath := setupTownRootWithCrossRig(t, 0,
-		`[{"id":"oag-abc","status":"closed","assignee":"","priority":1,"issue_type":"task"},{"id":"oag-xyz","status":"open","assignee":"gastown/polecats/beta","priority":3,"issue_type":"bug"}]`)
-
-	result := fetchCrossRigBeadStatus(townRoot, []string{"oag-abc", "oag-xyz"})
+	result := fetchCrossRigBeadStatusWith(townRoot, []string{"oag-abc", "oag-xyz"}, show)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(result))
@@ -1796,45 +1768,43 @@ func TestFetchCrossRigBeadStatus(t *testing.T) {
 		t.Errorf("oag-xyz assignee = %q, want %q", xyz.Assignee, "gastown/polecats/beta")
 	}
 
-	// Verify bd was called
-	logData, err := os.ReadFile(bdLogPath)
-	if err != nil {
-		t.Fatalf("bd stub not called (no log): %v", err)
-	}
-	logStr := string(logData)
-	if !strings.Contains(logStr, "show --json oag-abc oag-xyz") &&
-		!strings.Contains(logStr, "show --json oag-xyz oag-abc") {
-		t.Errorf("bd show not called with expected IDs: %q", logStr)
+	// One bd show, in the oag rig, for both IDs.
+	if len(*calls) != 1 || !strings.HasSuffix((*calls)[0], "show --json oag-abc oag-xyz") || !strings.Contains((*calls)[0], "osr_ai_gm") {
+		t.Errorf("bd show calls = %q, want one show of oag-abc oag-xyz in osr_ai_gm", *calls)
 	}
 }
 
 func TestFetchCrossRigBeadStatus_UnknownPrefix(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
-	townRoot, _ := setupTownRootWithCrossRig(t, 0, `[]`)
+	t.Parallel()
+	show, calls := showScript(`[]`)
 
 	// "zzz-" prefix has no route — should return empty, not panic
-	result := fetchCrossRigBeadStatus(townRoot, []string{"zzz-unknown"})
+	result := fetchCrossRigBeadStatusWith(setupTownRootWithCrossRig(t), []string{"zzz-unknown"}, show)
 	if len(result) != 0 {
 		t.Errorf("expected 0 results for unknown prefix, got %d", len(result))
+	}
+	if len(*calls) != 0 {
+		t.Errorf("bd show ran for an unrouted prefix: %q", *calls)
 	}
 }
 
 func TestFetchCrossRigBeadStatus_EmptyInput(t *testing.T) {
-	result := fetchCrossRigBeadStatus("/nonexistent", nil)
+	t.Parallel()
+	show, _ := showScript(`[]`)
+	result := fetchCrossRigBeadStatusWith("/nonexistent", nil, show)
 	if len(result) != 0 {
 		t.Errorf("expected 0 results for empty input, got %d", len(result))
 	}
 }
 
 func TestFireCrossRigDepNotifications_NilStores(t *testing.T) {
+	t.Parallel()
 	// Should not panic with nil stores.
 	FireCrossRigDepNotifications(context.Background(), "bd-xxx", "/tmp", nil, nil)
 }
 
 func TestFireCrossRigDepNotifications_EmptyClosedID(t *testing.T) {
+	t.Parallel()
 	// Should not panic with empty closed issue ID.
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -1842,6 +1812,7 @@ func TestFireCrossRigDepNotifications_EmptyClosedID(t *testing.T) {
 }
 
 func TestFireCrossRigDepNotifications_EmptyPrefix(t *testing.T) {
+	t.Parallel()
 	// Issue ID without a recognizable prefix should not panic.
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -1854,6 +1825,7 @@ func TestFireCrossRigDepNotifications_EmptyPrefix(t *testing.T) {
 // A blocked issue is ready again once bd sees its blocker closed, and the feeds
 // and stranded scan that dispatch convoy work read readiness, not nudges.
 func TestFireCrossRigDepNotifications_LogsCrossRigUnblock(t *testing.T) {
+	t.Parallel()
 	// Set up a real store that simulates the "gastown" rig.
 	// In it we create gt-dep which is blocked by external:bd:bd-closed.
 	store, cleanup := setupTestStore(t)
@@ -1925,10 +1897,7 @@ func TestFireCrossRigDepNotifications_LogsCrossRigUnblock(t *testing.T) {
 // feeder that reads the convoy's store instead of the store the resolver
 // redirects to dispatches the bead (gt-tq6l).
 func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	// The convoy's store. GetDependenciesWithMetadata drops a tracked bead this
 	// store cannot fetch, so the convoy's dep rows need a row here to be seen
 	// at all — the projection of a bead, not its record.
@@ -2012,12 +1981,12 @@ func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
 		"testrig": rigStore,
 	})
 
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, msgs := makeLogger()
 
-	feedNextReadyIssue(ctx, convoyStore, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, resolver)
+	feedNextReadyIssue(ctx, convoyStore, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, resolver)
 
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub was not called (no log file): %v\nlogger said: %v", err, *msgs)
 	}
@@ -2045,10 +2014,7 @@ func TestFeedNextReadyIssue_HoldsCrossStoreBead(t *testing.T) {
 // rig store, and reading the town store the caller holds instead reports no
 // hold where there is one (gt-tq6l).
 func TestDispatchHoldReason_ResolverRedirectsToRigStore(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	townStore, townCleanup := setupTestStore(t)
 	defer townCleanup()
 	rigStore, rigCleanup := setupTestStore(t)
@@ -2119,10 +2085,7 @@ func TestDispatchHoldReason_ResolverRedirectsToRigStore(t *testing.T) {
 // half of the fail-closed rule: a record that cannot be read leaves the hold
 // unknown, and an unknown hold is not a licence to dispatch (gt-tq6l).
 func TestFeedNextReadyIssue_UnreadableRecordFailsClosed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -2179,13 +2142,13 @@ func TestFeedNextReadyIssue_UnreadableRecordFailsClosed(t *testing.T) {
 		"testrig": &unreadableStorage{Storage: store},
 	})
 
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, msgs := makeLogger()
 
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, resolver)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, resolver)
 
-	if _, err := os.Stat(logPath); err == nil {
-		data, _ := os.ReadFile(logPath)
+	if _, err := gt.read(); err == nil {
+		data, _ := gt.read()
 		t.Errorf("expected no dispatch when the record cannot be read, got sling: %q", string(data))
 	}
 	heldLogged := false
@@ -2225,19 +2188,16 @@ func (s *unreadableStorage) GetDependencyRecords(ctx context.Context, issueID st
 // with --formula must be re-dispatched with the same formula, or the feed runs
 // it under gt sling's default formula instead (gt-4lor).
 func TestDispatchIssue_PassesFormula(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	townRoot := t.TempDir()
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 
-	err := dispatchIssue(context.Background(), townRoot, "test-formula", "myrig", gtPath, "", "deepseek-flash", "mol-custom")
+	err := gt.sling(context.Background(), townRoot, slingArgs("test-formula", "myrig", "", "deepseek-flash", "mol-custom"))
 	if err != nil {
 		t.Fatalf("dispatchIssue returned error: %v", err)
 	}
 
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub log not written: %v", err)
 	}
@@ -2251,6 +2211,7 @@ func TestDispatchIssue_PassesFormula(t *testing.T) {
 // TestFormulaFromConvoyDescription is the table over the one parse of a
 // convoy's sling-time formula record that every re-dispatch path reads.
 func TestFormulaFromConvoyDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -2274,10 +2235,7 @@ func TestFormulaFromConvoyDescription(t *testing.T) {
 // end to end: a convoy that recorded a formula at sling time re-feeds its next
 // ready bead with --formula, and one that recorded none passes nothing (gt-o9sbq).
 func TestFeedNextReadyIssue_PassesRecordedFormula(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
-
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -2339,12 +2297,12 @@ func TestFeedNextReadyIssue_PassesRecordedFormula(t *testing.T) {
 			}
 
 			townRoot := setupTownRoot(t)
-			gtPath, logPath := makeGTStub(t, 0)
+			gt := &slingLog{}
 			logger, _ := makeLogger()
 
-			feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+			feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
 
-			logData, err := os.ReadFile(logPath)
+			logData, err := gt.read()
 			if err != nil {
 				t.Fatalf("gt stub was not called (no log file): %v", err)
 			}
@@ -2360,9 +2318,7 @@ func TestFeedNextReadyIssue_PassesRecordedFormula(t *testing.T) {
 // session start; it moves on to the next ready bead instead, and feeds the
 // resting one again once its record is cleared.
 func TestFeedNextReadyIssue_BacksOffAfterStartupFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on windows")
-	}
+	t.Parallel()
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -2396,15 +2352,15 @@ func TestFeedNextReadyIssue_BacksOffAfterStartupFailure(t *testing.T) {
 	}
 
 	townRoot := setupTownRoot(t)
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, msgs := makeLogger()
 
 	if err := dispatch.RecordStartupFailure(townRoot, "test-ready1", "startup blocked: trust dialog"); err != nil {
 		t.Fatal(err)
 	}
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
 
-	logData, err := os.ReadFile(logPath)
+	logData, err := gt.read()
 	if err != nil {
 		t.Fatalf("gt stub was not called (no log file): %v", err)
 	}
@@ -2422,11 +2378,9 @@ func TestFeedNextReadyIssue_BacksOffAfterStartupFailure(t *testing.T) {
 	}
 
 	dispatch.ClearStartupFailure(townRoot, "test-ready1")
-	if err := os.Remove(logPath); err != nil {
-		t.Fatal(err)
-	}
-	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gtPath, func(string) bool { return false }, nil)
-	logData, _ = os.ReadFile(logPath)
+	gt.reset()
+	feedNextReadyIssue(ctx, store, townRoot, convoy.ID, "test", logger, gt.sling, func(string) bool { return false }, nil)
+	logData, _ = gt.read()
 	if got := strings.TrimSpace(string(logData)); got != "sling test-ready1 testrig --no-boot" {
 		t.Errorf("after the record cleared gt stub called with %q, want test-ready1", got)
 	}

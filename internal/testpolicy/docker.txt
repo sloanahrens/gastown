@@ -6,5 +6,4 @@
 # their container tests skip there; `make test-integration` runs each of them
 # whole with GT_TEST_DOCKER=1. TestDockerTier keeps this list exact.
 internal/beads
-internal/convoy
 internal/testutil

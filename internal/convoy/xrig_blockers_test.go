@@ -158,10 +158,10 @@ func (x *xrigTown) resolver(withOag bool) *StoreResolver {
 // slung and what was logged.
 func (x *xrigTown) feed(t *testing.T, resolver *StoreResolver) (slung string, logged []string) {
 	t.Helper()
-	gtPath, logPath := makeGTStub(t, 0)
+	gt := &slingLog{}
 	logger, msgs := makeLogger()
-	feedNextReadyIssue(context.Background(), x.hq, x.townRoot, "hq-cv1", "test", logger, gtPath, func(string) bool { return false }, resolver)
-	data, err := os.ReadFile(logPath)
+	feedNextReadyIssue(context.Background(), x.hq, x.townRoot, "hq-cv1", "test", logger, gt.sling, func(string) bool { return false }, resolver)
+	data, err := gt.read()
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("reading gt stub log: %v", err)
 	}

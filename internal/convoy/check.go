@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -200,15 +199,21 @@ func mailArgs(addr, subject, body, convoyID string) []string {
 	return []string{"mail", "send", addr, "-s", subject, "-m", body, "--from", notifyFrom(convoyID), "--no-notify"}
 }
 
-// gtCommand builds a gt child for a notice. Mail and nudge delivery are still
-// gt commands; they move to library calls with the mail and nudge extraction.
-func (t Town) gtCommand(args ...string) *exec.Cmd {
-	cmd := exec.Command("gt", args...)
-	cmd.Dir = t.rootDir()
-	if t.Env != nil {
-		cmd.Env = t.Env
+// gt runs a gt child for a notice from the town root. Mail and nudge delivery
+// are still gt commands; they move to library calls with the mail and nudge
+// extraction.
+func (t Town) gt(args ...string) error {
+	return t.gtWithEnv(t.Env, args...)
+}
+
+// gtWithEnv is gt with the child environment env (nil inherits the process
+// environment).
+func (t Town) gtWithEnv(env []string, args ...string) error {
+	run := t.gtRun
+	if run == nil {
+		run = runGT
 	}
-	return cmd
+	return run(t.rootDir(), env, args...)
 }
 
 // nudgeEnv is the child environment for a nudge, sent as the convoy.
@@ -226,7 +231,7 @@ func (t Town) NotifyClosed(addr, convoyID, title, reason string) {
 	subject := fmt.Sprintf("🚚 Convoy closed: %s", title)
 	body := fmt.Sprintf("Convoy %s has been closed.\n\nReason: %s", convoyID, reason)
 
-	if err := t.gtCommand(mailArgs(addr, subject, body, convoyID)...).Run(); err != nil {
+	if err := t.gt(mailArgs(addr, subject, body, convoyID)...); err != nil {
 		t.warnf("couldn't send notification: %v", err)
 	} else {
 		t.printf("  Notified: %s\n", addr)
@@ -288,7 +293,7 @@ func (t Town) NotifyCompletion(convoyID, title string) {
 			fmt.Sprintf("🚚 Convoy landed: %s", title),
 			fmt.Sprintf("Convoy %s has completed.\n\nAll tracked issues are now closed.", convoyID),
 			convoyID)
-		if err := t.gtCommand(args...).Run(); err != nil {
+		if err := t.gt(args...); err != nil {
 			t.warnf("could not notify %s: %v", addr, err)
 		}
 	}
@@ -296,9 +301,7 @@ func (t Town) NotifyCompletion(convoyID, title string) {
 	// Send nudge notifications to nudge watchers.
 	for _, addr := range fields.NudgeNotificationAddresses() {
 		nudgeMsg := fmt.Sprintf("🚚 Convoy landed: %s — Convoy %s has completed. All tracked issues are now closed.", title, convoyID)
-		nudgeCmd := t.gtCommand("nudge", addr, "-m", nudgeMsg)
-		nudgeCmd.Env = t.nudgeEnv(convoyID)
-		if err := nudgeCmd.Run(); err != nil {
+		if err := t.gtWithEnv(t.nudgeEnv(convoyID), "nudge", addr, "-m", nudgeMsg); err != nil {
 			t.warnf("could not nudge %s: %v", addr, err)
 		}
 	}
@@ -306,7 +309,7 @@ func (t Town) NotifyCompletion(convoyID, title string) {
 	// Always notify mayor/ for strategic visibility, unless already notified above.
 	if !notifiedAddrs["mayor/"] {
 		args := mailArgs("mayor/", fmt.Sprintf("Convoy complete: %s", title), mayorBody, convoyID)
-		if err := t.gtCommand(args...).Run(); err != nil {
+		if err := t.gt(args...); err != nil {
 			t.warnf("could not notify mayor/ of convoy completion: %v", err)
 		}
 	}
@@ -335,9 +338,7 @@ func (t Town) notifyMayorSession(convoyID, title string) {
 	}
 
 	nudgeMsg := fmt.Sprintf("🚚 Convoy landed: %s — Convoy %s has completed. All tracked issues are now closed.", title, convoyID)
-	nudgeCmd := t.gtCommand("nudge", "mayor", "-m", nudgeMsg)
-	nudgeCmd.Env = t.nudgeEnv(convoyID)
-	if err := nudgeCmd.Run(); err != nil {
+	if err := t.gtWithEnv(t.nudgeEnv(convoyID), "nudge", "mayor", "-m", nudgeMsg); err != nil {
 		t.warnf("could not nudge Mayor session: %v", err)
 	}
 }
