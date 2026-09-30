@@ -105,7 +105,7 @@ func (s *gtScript) recorded() []gtCall {
 func testTown(root string, bd *bdScript, gt *gtScript) Town {
 	t := Town{Root: root}
 	if bd != nil {
-		t.bdRun = bd.run
+		t.Run = bd.run
 	}
 	if gt != nil {
 		t.gtRun = gt.run

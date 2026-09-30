@@ -1,4 +1,4 @@
-.PHONY: build install install-local safe-install check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check presubmit
+.PHONY: build install install-local check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate tier-check presubmit
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -196,11 +196,6 @@ install-local: check-up-to-date check-forward-only build
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY) (daemon NOT restarted)"
 	@$(MAKE) --no-print-directory check-install-path
-
-# safe-install: old name of install-local, kept only because an install-gt.sh
-# copy older than gt-z0l3s (a mayor/rig checkout not yet fast-forwarded past
-# it) still asks for it after fast-forwarding. Not a way to deploy.
-safe-install: install-local
 
 # check-version-tag: Verify that if HEAD is tagged vX.Y.Z, the Version constant
 # in internal/cmd/version.go equals X.Y.Z. No-op when HEAD is untagged, so it is

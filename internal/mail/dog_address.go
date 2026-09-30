@@ -7,7 +7,9 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 )
 
-const dogAddressPrefix = constants.RoleDeacon + "/dogs/"
+// dogAddressPrefix is the mail namespace the retired LLM dogs used; their
+// mailboxes may still hold messages.
+const dogAddressPrefix = "deacon/dogs/"
 
 // DogAddress returns the canonical mail address for a named dog.
 func DogAddress(name string) string {
@@ -59,5 +61,5 @@ func isSafeDogName(name string) bool {
 
 func isReservedTownSubpath(address string) bool {
 	return strings.HasPrefix(address, constants.RoleMayor+"/") ||
-		strings.HasPrefix(address, constants.RoleDeacon+"/")
+		strings.HasPrefix(address, "deacon/")
 }

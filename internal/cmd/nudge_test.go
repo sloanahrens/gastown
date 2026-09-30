@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -60,13 +59,10 @@ func TestResolveNudgePattern(t *testing.T) {
 	// Create test agent sessions (using rig prefixes)
 	agents := []*AgentSession{
 		{Name: "hq-mayor", Type: AgentMayor},
-		{Name: "hq-deacon", Type: AgentDeacon},
-		{Name: "gt-witness", Type: AgentWitness, Rig: "gastown"},
 		{Name: "gt-crew-max", Type: AgentCrew, Rig: "gastown", AgentName: "max"},
 		{Name: "gt-crew-jack", Type: AgentCrew, Rig: "gastown", AgentName: "jack"},
 		{Name: "gt-alpha", Type: AgentPolecat, Rig: "gastown", AgentName: "alpha"},
 		{Name: "gt-beta", Type: AgentPolecat, Rig: "gastown", AgentName: "beta"},
-		{Name: "bd-witness", Type: AgentWitness, Rig: "beads"},
 		{Name: "bd-gamma", Type: AgentPolecat, Rig: "beads", AgentName: "gamma"},
 	}
 
@@ -79,21 +75,6 @@ func TestResolveNudgePattern(t *testing.T) {
 			name:     "mayor special case",
 			pattern:  "mayor",
 			expected: []string{"hq-mayor"},
-		},
-		{
-			name:     "deacon special case",
-			pattern:  "deacon",
-			expected: []string{"hq-deacon"},
-		},
-		{
-			name:     "specific witness",
-			pattern:  "gastown/witness",
-			expected: []string{"gt-witness"},
-		},
-		{
-			name:     "all witnesses",
-			pattern:  "*/witness",
-			expected: []string{"gt-witness", "bd-witness"},
 		},
 		{
 			name:     "all polecats in rig",
@@ -168,11 +149,6 @@ func TestSessionNameToAddress(t *testing.T) {
 			name:        "mayor",
 			sessionName: "hq-mayor",
 			expected:    "mayor",
-		},
-		{
-			name:        "deacon",
-			sessionName: "hq-deacon",
-			expected:    "deacon",
 		},
 		{
 			name:        "witness",
@@ -524,42 +500,6 @@ func TestNudgeTrailingSlashNormalization(t *testing.T) {
 				t.Errorf("trailing-slash target %q was rejected as invalid address: %v", target, err)
 			}
 		})
-	}
-}
-
-func TestNudgeDogTargetRoutesToDogSession(t *testing.T) {
-	origMode := nudgeModeFlag
-	origPriority := nudgePriorityFlag
-	origMessage := nudgeMessageFlag
-	origStdin := nudgeStdinFlag
-	origForce := nudgeForceFlag
-	defer func() {
-		nudgeModeFlag = origMode
-		nudgePriorityFlag = origPriority
-		nudgeMessageFlag = origMessage
-		nudgeStdinFlag = origStdin
-		nudgeForceFlag = origForce
-	}()
-
-	logPath := filepath.Join(t.TempDir(), "nudge.log")
-	t.Setenv("GT_TEST_NUDGE_LOG", logPath)
-
-	nudgeModeFlag = NudgeModeImmediate
-	nudgePriorityFlag = nudge.PriorityNormal
-	nudgeMessageFlag = "hello dog"
-	nudgeStdinFlag = false
-	nudgeForceFlag = true
-
-	if err := runNudge(nudgeCmd, []string{"deacon/dogs/fido"}); err != nil {
-		t.Fatalf("runNudge dog target returned error: %v", err)
-	}
-
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("reading nudge log: %v", err)
-	}
-	if got, want := string(data), "nudge:hq-dog-fido:"; !strings.Contains(got, want) {
-		t.Fatalf("nudge log = %q, want containing %q", got, want)
 	}
 }
 

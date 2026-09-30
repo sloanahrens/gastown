@@ -271,7 +271,7 @@ func (r *Router) buildLabels(msg *Message) []string {
 // isTownLevelAddress returns true if the address is for a town-level agent or the overseer.
 func isTownLevelAddress(address string) bool {
 	addr := strings.TrimSuffix(address, "/")
-	return addr == constants.RoleMayor || addr == constants.RoleDeacon || addr == "overseer"
+	return addr == constants.RoleMayor || addr == "overseer"
 }
 
 // isGroupAddress returns true if the address is a @group address.
@@ -324,12 +324,8 @@ func parseGroupAddress(address string) *ParsedGroup {
 		return &ParsedGroup{Type: GroupTypeOverseer, Original: address}
 	case "town":
 		return &ParsedGroup{Type: GroupTypeTown, Original: address}
-	case "witnesses":
-		return &ParsedGroup{Type: GroupTypeRole, RoleType: constants.RoleWitness, Original: address}
 	case "dogs":
 		return &ParsedGroup{Type: GroupTypeRole, RoleType: "dog", Original: address}
-	case "deacons":
-		return &ParsedGroup{Type: GroupTypeRole, RoleType: constants.RoleDeacon, Original: address}
 	}
 
 	// Parse patterns with slashes: @rig/<name>, @crew/<rig>, @polecats/<rig>
@@ -388,9 +384,6 @@ func agentBeadToAddress(bead *agentBead) string {
 		if id == "hq-mayor" {
 			return "mayor/"
 		}
-		if id == "hq-deacon" {
-			return "deacon/"
-		}
 
 		// For other hq- agents, fall back to description parsing
 		return parseAgentAddressFromDescription(bead.Description)
@@ -411,17 +404,13 @@ func agentBeadToAddress(bead *agentBead) string {
 	parts := strings.Split(rest, "-")
 
 	if len(parts) == 1 {
-		// Town-level: gt-mayor, gt-deacon
+		// Town-level: gt-mayor
 		return parts[0] + "/"
 	}
 
 	// Scan from right for known role markers
 	for i := len(parts) - 1; i >= 1; i-- {
 		switch parts[i] {
-		case constants.RoleWitness:
-			// Singleton role: rig is everything before the role
-			rig := strings.Join(parts[:i], "-")
-			return rig + "/" + parts[i]
 		case constants.RoleCrew, constants.RolePolecat:
 			// Named role: rig is before role, name is after (skip role in address)
 			rig := strings.Join(parts[:i], "-")
@@ -446,7 +435,6 @@ func agentBeadToAddress(bead *agentBead) string {
 // parseRigAgentAddress extracts address from a rig-prefixed agent bead.
 // ID format: <prefix>-<rig>-<role>[-<name>]
 // Examples:
-//   - ppf-pyspark_pipeline_framework-witness → pyspark_pipeline_framework/witness
 //   - ppf-pyspark_pipeline_framework-polecat-Toast → pyspark_pipeline_framework/Toast
 //   - bd-beads-crew-beavis → beads/beavis
 func parseRigAgentAddress(bead *agentBead) string {
@@ -464,13 +452,8 @@ func parseRigAgentAddress(bead *agentBead) string {
 	if rig == "" || rig == "null" || roleType == "" || roleType == "null" {
 		// Fallback: parse from bead ID by scanning for known role markers.
 		// ID format: <prefix>-<rig>-<role>[-<name>]
-		// Known rig-level roles: crew, polecat, witness, refinery
+		// Known rig-level roles: crew, polecat
 		return parseRigAgentAddressFromID(bead.ID)
-	}
-
-	// For singleton roles (witness), address is rig/role
-	if roleType == constants.RoleWitness {
-		return rig + "/" + roleType
 	}
 
 	// For named roles (crew, polecat), extract name from ID
@@ -493,15 +476,10 @@ func parseRigAgentAddress(bead *agentBead) string {
 // when the description metadata is missing. Scans for known role markers in the ID
 // to determine the rig name and agent name.
 //
-// ID format: <prefix>-<rig>-<role>[-<name>]
+// ID format: <prefix>-<rig>-<role>-<name>
 //
-// Singleton roles (witness, refinery) must NOT have a name segment — IDs like
-// "bd-beads-witness-extra" are malformed and return "".
-//
-// Keep role lists in sync with beads.RigLevelRoles and beads.NamedRoles.
+// Keep the role list in sync with beads.NamedRoles.
 func parseRigAgentAddressFromID(id string) string {
-	// Singleton roles: no name segment allowed
-	singletonRoles := []string{constants.RoleWitness}
 	// Named roles: require a name segment
 	namedRoles := []string{constants.RoleCrew, constants.RolePolecat}
 
@@ -527,34 +505,6 @@ func parseRigAgentAddressFromID(id string) string {
 			}
 			// crew/polecat without a name — malformed, skip
 			continue
-		}
-	}
-
-	for _, role := range singletonRoles {
-		// Singleton roles match only at end of ID: <prefix>-<rig>-<role>
-		// Reject if a name segment follows (e.g. -witness-extra is malformed).
-		marker := "-" + role + "-"
-		if strings.Contains(id, marker) {
-			// Has a name segment after the role — malformed singleton
-			continue
-		}
-
-		suffix := "-" + role
-		if strings.HasSuffix(id, suffix) {
-			// Find rig between first hyphen and the suffix
-			firstHyphen := strings.Index(id, "-")
-			if firstHyphen < 0 {
-				continue
-			}
-			suffixStart := len(id) - len(suffix)
-			if firstHyphen >= suffixStart {
-				continue
-			}
-			rig := id[firstHyphen+1 : suffixStart]
-			if rig == "" {
-				continue
-			}
-			return rig + "/" + role
 		}
 	}
 
@@ -967,22 +917,11 @@ func (r *Router) validateRecipient(identity string) error {
 
 	// Well-known town-level singletons always valid
 	switch identity {
-	case "mayor", "mayor/", "deacon", "deacon/":
+	case "mayor", "mayor/":
 		return nil
 	}
 	if _, ok := DogAddressName(identity); !ok && isReservedTownSubpath(identity) {
 		return fmt.Errorf("no agent found")
-	}
-
-	// Well-known rig-level singletons (rig/witness, rig/refinery) always
-	// valid — these agents are ephemeral and may not have an active session,
-	// but mail queues for the next session that starts.
-	parts := strings.SplitN(identity, "/", 3)
-	if len(parts) == 2 {
-		switch parts[1] {
-		case "witness":
-			return nil
-		}
 	}
 
 	// Query agents from town-level beads
@@ -1048,12 +987,12 @@ func (r *Router) validateAgentWorkspace(identity string) bool {
 
 	switch len(parts) {
 	case 1:
-		// Town-level singleton: "mayor", "deacon"
+		// Town-level singleton: "mayor"
 		name := strings.TrimSuffix(parts[0], "/")
 		return dirExists(filepath.Join(r.townRoot, name))
 	case 2:
 		rig, name := parts[0], parts[1]
-		// Singleton role: gastown/witness, gastown/refinery
+		// Singleton role: gastown/refinery
 		if dirExists(filepath.Join(r.townRoot, rig, name)) {
 			return true
 		}
@@ -2021,7 +1960,7 @@ func senderCanReceiveReply(from string) bool {
 
 	identity := AddressToIdentity(from)
 	switch identity {
-	case "overseer", "mayor/", "deacon/":
+	case "overseer", "mayor/":
 		return true
 	}
 	if identity == "" || strings.HasPrefix(identity, "@") || strings.ContainsAny(identity, ":@") {
@@ -2034,7 +1973,7 @@ func senderCanReceiveReply(from string) bool {
 		if !validReplyAddressPart(parts[0]) || !validReplyAddressPart(parts[1]) {
 			return false
 		}
-		if parts[0] == constants.RoleMayor || parts[0] == constants.RoleDeacon {
+		if parts[0] == constants.RoleMayor || parts[0] == "deacon" {
 			return false
 		}
 		switch parts[1] {
@@ -2044,7 +1983,7 @@ func senderCanReceiveReply(from string) bool {
 			return true
 		}
 	case 3:
-		return parts[0] == constants.RoleDeacon && parts[1] == "dogs" && validReplyAddressPart(parts[2])
+		return parts[0] == "deacon" && parts[1] == "dogs" && validReplyAddressPart(parts[2])
 	default:
 		return false
 	}
@@ -2111,8 +2050,6 @@ func addressToAgentBeadID(address string) string {
 	switch address {
 	case constants.RoleMayor, constants.RoleMayor + "/":
 		return session.MayorSessionName()
-	case constants.RoleDeacon, constants.RoleDeacon + "/":
-		return session.DeaconSessionName()
 	}
 	if isReservedTownSubpath(address) {
 		return ""
@@ -2129,8 +2066,6 @@ func addressToAgentBeadID(address string) string {
 	rigPrefix := session.PrefixFor(rig)
 
 	switch {
-	case target == constants.RoleWitness:
-		return session.WitnessSessionName(rigPrefix)
 	case strings.HasPrefix(target, "crew/"):
 		crewName := strings.TrimPrefix(target, "crew/")
 		return session.CrewSessionName(rigPrefix, crewName)
@@ -2166,10 +2101,6 @@ func AddressToSessionIDs(address string) []string {
 		return []string{session.MayorSessionName()}
 	}
 
-	// Deacon address: "deacon/" or "deacon"
-	if address == constants.RoleDeacon || address == constants.RoleDeacon+"/" {
-		return []string{session.DeaconSessionName()}
-	}
 	if isReservedTownSubpath(address) {
 		return nil
 	}
@@ -2197,11 +2128,6 @@ func AddressToSessionIDs(address string) []string {
 	if strings.HasPrefix(target, "polecats/") {
 		polecatName := strings.TrimPrefix(target, "polecats/")
 		return []string{session.PolecatSessionName(rigPrefix, polecatName)}
-	}
-
-	// Special cases that don't need crew variant
-	if target == constants.RoleWitness {
-		return []string{session.WitnessSessionName(rigPrefix)}
 	}
 
 	// For normalized addresses like "gastown/holden", try both:

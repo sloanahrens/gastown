@@ -377,7 +377,7 @@ func isAgentTarget(s string) bool {
 
 	// Known role names
 	switch s {
-	case constants.RoleMayor, constants.RoleDeacon, constants.RoleWitness, constants.RoleCrew:
+	case constants.RoleMayor, constants.RoleCrew:
 		return true
 	}
 

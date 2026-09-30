@@ -1021,53 +1021,6 @@ func TestRigAddRejectsInvalidNames(t *testing.T) {
 	}
 }
 
-// TestRigAddCreatesAgentBeads verifies that gt rig add creates
-// the witness agent bead via the manager's initAgentBeads.
-func TestRigAddCreatesAgentBeads(t *testing.T) {
-	requireIsolatedDoltServer(t)
-	townRoot := setupTestTown(t)
-	bridgeDoltPidToTown(t, townRoot)
-	gitURL := createTestGitRepo(t, "agentbeadtest")
-
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil {
-		t.Fatalf("load rigs.json: %v", err)
-	}
-
-	g := git.NewGit(townRoot)
-	mgr := rig.NewManager(townRoot, rigsConfig, g)
-
-	// AddRig internally calls initAgentBeads which creates the witness bead
-	newRig, err := mgr.AddRig(rig.AddRigOptions{
-		Name:        "agentbeadtest",
-		GitURL:      gitURL,
-		BeadsPrefix: "ab",
-	})
-	if err != nil {
-		t.Fatalf("AddRig: %v", err)
-	}
-
-	// Expected bead IDs that initAgentBeads should create.
-	// The refinery agent bead is gone with the refinery (gt-v4ssj.6): the
-	// daemon's landing worker replaced it, and nothing creates that bead.
-	witnessID := beads.WitnessBeadIDWithPrefix(newRig.Config.Prefix, "agentbeadtest")
-
-	expectedIDs := []struct {
-		id   string
-		desc string
-	}{
-		{witnessID, "witness agent bead"},
-	}
-
-	rigBeads := beads.NewWithBeadsDir(newRig.Path, beads.ResolveBeadsDir(newRig.Path))
-	for _, expected := range expectedIDs {
-		if _, err := rigBeads.Show(expected.id); err != nil {
-			t.Errorf("expected %s (%s) to exist: %v", expected.id, expected.desc, err)
-		}
-	}
-}
-
 // TestAgentBeadIDs verifies the agent bead ID generation functions.
 func TestAgentBeadIDs(t *testing.T) {
 	tests := []struct {
@@ -1075,11 +1028,6 @@ func TestAgentBeadIDs(t *testing.T) {
 		fn       func() string
 		expected string
 	}{
-		{
-			"WitnessBeadIDWithPrefix",
-			func() string { return beads.WitnessBeadIDWithPrefix("ab", "myrig") },
-			"ab-myrig-witness",
-		},
 		{
 			"RigBeadIDWithPrefix",
 			func() string { return beads.RigBeadIDWithPrefix("ab", "myrig") },

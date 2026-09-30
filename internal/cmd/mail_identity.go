@@ -117,8 +117,6 @@ func detectSenderFromRole(role string) string {
 	switch role {
 	case constants.RoleMayor:
 		return "mayor/"
-	case constants.RoleDeacon:
-		return "deacon/"
 	case constants.RolePolecat:
 		polecat := os.Getenv("GT_POLECAT")
 		if rig != "" && polecat != "" {
@@ -132,11 +130,6 @@ func detectSenderFromRole(role string) string {
 			return fmt.Sprintf("%s/crew/%s", rig, crew)
 		}
 		// Fallback to cwd detection for crew
-		return detectSenderFromCwd()
-	case constants.RoleWitness:
-		if rig != "" {
-			return fmt.Sprintf("%s/witness", rig)
-		}
 		return detectSenderFromCwd()
 	case "dog":
 		dogName := os.Getenv("GT_DOG_NAME")
@@ -257,12 +250,6 @@ func identityFromAgentFile(parsed agentIdentityFile) string {
 	switch role {
 	case constants.RoleMayor:
 		return "mayor/"
-	case constants.RoleDeacon:
-		return "deacon/"
-	case constants.RoleWitness:
-		if rig != "" {
-			return fmt.Sprintf("%s/witness", rig)
-		}
 	case constants.RoleCrew:
 		if rig != "" && name != "" {
 			return fmt.Sprintf("%s/crew/%s", rig, name)

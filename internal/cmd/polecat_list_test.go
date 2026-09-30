@@ -293,8 +293,8 @@ func TestPolecatSpawnGraceWindowFallsBack(t *testing.T) {
 	if got <= 0 {
 		t.Fatalf("polecatSpawnGraceWindow(\"\") = %s, want the compiled-in default", got)
 	}
-	if got != config.DefaultWitnessHeartbeatStartupGrace {
-		t.Fatalf("polecatSpawnGraceWindow(\"\") = %s, want %s", got, config.DefaultWitnessHeartbeatStartupGrace)
+	if got != config.DefaultRecoveryHeartbeatStartupGrace {
+		t.Fatalf("polecatSpawnGraceWindow(\"\") = %s, want %s", got, config.DefaultRecoveryHeartbeatStartupGrace)
 	}
 }
 

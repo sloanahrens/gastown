@@ -696,12 +696,12 @@ func TestAgentMarkerTriple(t *testing.T) {
 	}{
 		{"gastown/flint", "gastown", constants.RolePolecat, "flint", true},
 		{"gastown/polecats/flint", "gastown", constants.RolePolecat, "flint", true},
-		{"gastown/witness", "gastown", constants.RoleWitness, "", true},
+		{"gastown/witness", "gastown", constants.RolePolecat, "witness", true}, // witness role retired
 		{"gastown/crew/opal", "gastown", constants.RoleCrew, "opal", true},
 		{"mayor/", "", constants.RoleMayor, "", true},
-		{"deacon/", "", constants.RoleDeacon, "", true},
 		// Not addressable agents: no marker, no reason to look.
 		{"overseer", "", "", "", false},
+		{"deacon/", "", "", "", false}, // deacon role retired (gt-4k3fj.6.1)
 		{"", "", "", "", false},
 	}
 

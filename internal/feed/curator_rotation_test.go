@@ -42,9 +42,10 @@ func appendTo(t *testing.T, path string, lines ...string) {
 	}
 }
 
-// startCurator starts a curator on a fresh town whose events file holds
-// history, and waits until the curator is tailing it.
-func startCurator(t *testing.T, history ...string) (eventsPath, feedPath string) {
+// openCurator returns a curator on a fresh town whose events file holds
+// history, with the events file opened the way Start opens it. Tests call
+// c.poll(tail) where the running curator would tick.
+func openCurator(t *testing.T, history ...string) (c *Curator, tail *events.Tail, eventsPath, feedPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	eventsPath = filepath.Join(dir, events.EventsFile)
@@ -52,27 +53,21 @@ func startCurator(t *testing.T, history ...string) (eventsPath, feedPath string)
 	if len(history) > 0 {
 		appendTo(t, eventsPath, history...)
 	}
-	c := NewCurator(dir)
-	if err := c.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+	c = NewCurator(dir)
+	tail, err := c.openTail(eventsPath)
+	if err != nil {
+		t.Fatalf("opening events tail: %v", err)
 	}
-	t.Cleanup(c.Stop)
-	time.Sleep(100 * time.Millisecond)
-	return eventsPath, feedPath
+	t.Cleanup(func() { _ = tail.Close() })
+	return c, tail, eventsPath, feedPath
 }
 
-// waitForFeedActor waits until the feed file mentions actor.
-func waitForFeedActor(t *testing.T, feedPath, actor string) {
+func assertFeedHas(t *testing.T, feedPath, actor string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(feedPath); err == nil && strings.Contains(string(data), `"actor":"`+actor+`"`) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 	data, _ := os.ReadFile(feedPath)
-	t.Fatalf("feed never received actor %q; feed:\n%s", actor, data)
+	if !strings.Contains(string(data), `"actor":"`+actor+`"`) {
+		t.Fatalf("feed never received actor %q; feed:\n%s", actor, data)
+	}
 }
 
 func assertFeedLacks(t *testing.T, feedPath string, actors ...string) {
@@ -89,10 +84,11 @@ func assertFeedLacks(t *testing.T, feedPath string, actors ...string) {
 // the curator kept reading the old inode and stopped curating the feed until
 // the next daemon restart.
 func TestCurator_FollowsRenameRotation(t *testing.T) {
+	t.Parallel()
 	// Build each line once: feedLine stamps time.Now() to the second, and a
 	// rebuilt copy straddling a second boundary would not match the anchor.
 	kept := feedLine(t, "kept")
-	eventsPath, feedPath := startCurator(t, feedLine(t, "expired"), kept)
+	c, tail, eventsPath, feedPath := openCurator(t, feedLine(t, "expired"), kept)
 
 	tmp := eventsPath + ".tmp"
 	if err := os.WriteFile(tmp, []byte(kept+"\n"), 0o644); err != nil {
@@ -101,30 +97,34 @@ func TestCurator_FollowsRenameRotation(t *testing.T) {
 	if err := os.Rename(tmp, eventsPath); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(250 * time.Millisecond) // let a poll see the bare rotation
+	c.poll(tail) // a poll sees the bare rotation
 	appendTo(t, eventsPath, feedLine(t, "after-rotation"))
+	c.poll(tail)
 
-	waitForFeedActor(t, feedPath, "after-rotation")
+	assertFeedHas(t, feedPath, "after-rotation")
 	assertFeedLacks(t, feedPath, "expired", "kept")
 }
 
 func TestCurator_FollowsTruncateInPlace(t *testing.T) {
-	eventsPath, feedPath := startCurator(t, feedLine(t, "old1"), feedLine(t, "old2"), feedLine(t, "old3"))
+	t.Parallel()
+	c, tail, eventsPath, feedPath := openCurator(t, feedLine(t, "old1"), feedLine(t, "old2"), feedLine(t, "old3"))
 
 	if err := os.Truncate(eventsPath, 0); err != nil {
 		t.Fatal(err)
 	}
 	appendTo(t, eventsPath, feedLine(t, "after-truncate"))
+	c.poll(tail)
 
-	waitForFeedActor(t, feedPath, "after-truncate")
+	assertFeedHas(t, feedPath, "after-truncate")
 	assertFeedLacks(t, feedPath, "old1", "old2", "old3")
 }
 
 // A writer that opened the file before the rename can land a line in the old
 // inode; the curator drains it before switching, then follows the new file.
 func TestCurator_LateWriteToOldFileAfterRename(t *testing.T) {
+	t.Parallel()
 	history := feedLine(t, "history") // built once; see TestCurator_FollowsRenameRotation
-	eventsPath, feedPath := startCurator(t, history)
+	c, tail, eventsPath, feedPath := openCurator(t, history)
 
 	oldWriter, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -143,7 +143,9 @@ func TestCurator_LateWriteToOldFileAfterRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendTo(t, eventsPath, feedLine(t, "new-inode"))
+	c.poll(tail)
 
-	waitForFeedActor(t, feedPath, "new-inode")
+	assertFeedHas(t, feedPath, "new-inode")
+	assertFeedHas(t, feedPath, "late-old-inode")
 	assertFeedLacks(t, feedPath, "history")
 }

@@ -4,285 +4,137 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// TestInstantiateFormulaOnBead verifies the helper function works correctly.
-// This tests the formula-on-bead pattern used by issue #288.
-func TestInstantiateFormulaOnBead(t *testing.T) {
+// formulaTown is a temp town whose routes.jsonl maps each prefix to a path.
+// InstantiateFormulaOnBead reads the routes to pick the bead's rig; nothing
+// reads the cwd.
+func formulaTown(t *testing.T, routes ...string) string {
+	t.Helper()
 	townRoot := t.TempDir()
-
-	// Minimal workspace marker
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Create routes.jsonl
 	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
-	rigDir := filepath.Join(townRoot, "gastown", "mayor", "rig")
-	if err := os.MkdirAll(rigDir, 0755); err != nil {
-		t.Fatalf("mkdir rigDir: %v", err)
-	}
-	routes := strings.Join([]string{
-		`{"prefix":"gt-","path":"gastown/mayor/rig"}`,
-		`{"prefix":"hq-","path":"."}`,
-		"",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(strings.Join(routes, "\n")+"\n"), 0644); err != nil {
 		t.Fatalf("write routes.jsonl: %v", err)
 	}
+	return townRoot
+}
 
-	// Create stub bd that logs all commands
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
+// formulaBDFake answers formula bd calls in process: mol bond prints bondOut,
+// every other call succeeds silently, and each call is logged as
+// "<cmd> <args...>".
+func formulaBDFake(bondOut string) *inprocBD {
+	return &inprocBD{answer: func(f *inprocBD, cmd string, args []string) bdAnswer {
+		f.logLine(cmd + " " + strings.Join(args, " "))
+		if cmd == "mol" && len(args) > 0 && args[0] == "bond" {
+			return bdOut(bondOut)
+		}
+		return bdOut("")
+	}}
+}
+
+// formulaBDVia is a formulaBD over run whose contention backoff does not wait.
+func formulaBDVia(run beads.BDRunner) formulaBD {
+	return formulaBD{run: run, sleep: noSleep}
+}
+
+// logLineWith returns the first logged line containing needle, or "".
+func logLineWith(log, needle string) string {
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
 	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-set -e
-echo "CMD:$*" >> "${BD_LOG}"
-cmd="$1"
-shift || true
-case "$cmd" in
-  show)
-    echo '[{"title":"Fix bug ABC","status":"open","assignee":"","description":""}]'
-    ;;
-  formula)
-    echo '{"name":"mol-polecat-work"}'
-    ;;
-  cook)
-    ;;
-  mol)
-    sub="$1"
-    shift || true
-    case "$sub" in
-      wisp)
-        echo 'legacy mol wisp should not be called' >&2
-        exit 1
-        ;;
-      bond)
-        echo '{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-288"}}'
-        ;;
-    esac
-    ;;
-  update)
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo CMD:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-if "%cmd%"=="show" (
-  echo [{^"title^":^"Fix bug ABC^",^"status^":^"open^",^"assignee^":^"^",^"description^":^"^"}]
-  exit /b 0
-)
-if "%cmd%"=="formula" (
-  echo {^"name^":^"mol-polecat-work^"}
-  exit /b 0
-)
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo legacy mol wisp should not be called 1>&2
-    exit /b 1
-  )
-  if "%sub%"=="bond" (
-    echo {^"result_id^":^"gt-abc123^",^"id_mapping^":{^"mol-polecat-work^":^"gt-wisp-288^"}}
-    exit /b 0
-  )
-)
-if "%cmd%"=="update" exit /b 0
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
+	return ""
+}
 
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+// TestInstantiateFormulaOnBead verifies the formula-on-bead pattern used by
+// issue #288: cook the formula, then bond it straight onto the bead with the
+// caller's extra vars, never through the legacy mol wisp.
+func TestInstantiateFormulaOnBead(t *testing.T) {
+	t.Parallel()
+	townRoot := formulaTown(t, `{"prefix":"gt-","path":"gastown/mayor/rig"}`, `{"prefix":"hq-","path":"."}`)
+	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-288"}}`)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	// Test the helper function directly
 	extraVars := []string{"branch=polecat/furiosa/gt-abc123"}
-	result, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", "gt-abc123", "Test Bug Fix", "", townRoot, false, extraVars)
+	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "Test Bug Fix", "", townRoot, false, extraVars)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead failed: %v", err)
 	}
+	if result.WispRootID != "gt-wisp-288" {
+		t.Errorf("WispRootID = %q, want gt-wisp-288", result.WispRootID)
+	}
+	if result.BeadToHook != "gt-abc123" {
+		t.Errorf("BeadToHook = %q, want the base bead gt-abc123", result.BeadToHook)
+	}
 
-	if result.WispRootID == "" {
-		t.Error("WispRootID should not be empty")
+	log := bd.log()
+	if !bd.logged("cook mol-polecat-work") {
+		t.Errorf("cook command not found in log:\n%s", log)
 	}
-	if result.BeadToHook == "" {
-		t.Error("BeadToHook should not be empty")
+	if strings.Contains(log, "mol wisp") {
+		t.Errorf("legacy mol wisp command should not be called:\n%s", log)
 	}
-
-	// Verify commands were logged
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
+	if !strings.Contains(log, "--var branch=polecat/furiosa/gt-abc123") {
+		t.Errorf("extra vars not passed to bond command:\n%s", log)
 	}
-	logContent := string(logBytes)
-
-	if !strings.Contains(logContent, "cook mol-polecat-work") {
-		t.Errorf("cook command not found in log:\n%s", logContent)
-	}
-	if strings.Contains(logContent, "mol wisp") {
-		t.Errorf("legacy mol wisp command should not be called:\n%s", logContent)
-	}
-	if !strings.Contains(logContent, "--var branch=polecat/furiosa/gt-abc123") {
-		t.Errorf("extra vars not passed to bond command:\n%s", logContent)
-	}
-	if !strings.Contains(logContent, "mol bond mol-polecat-work gt-abc123 --json --ephemeral") {
-		t.Errorf("direct mol bond command not found in log:\n%s", logContent)
+	if !strings.Contains(log, "mol bond mol-polecat-work gt-abc123 --json --ephemeral") {
+		t.Errorf("direct mol bond command not found in log:\n%s", log)
 	}
 }
 
-// TestInstantiateFormulaOnBeadSkipCook verifies the skipCook optimization.
+// TestInstantiateFormulaOnBeadSkipCook verifies the skipCook optimization: a
+// batch cooks once, so each bead only bonds.
 func TestInstantiateFormulaOnBeadSkipCook(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
+	bd := formulaBDFake(`{"result_id":"gt-test","id_mapping":{"mol-polecat-work":"gt-wisp-skip"}}`)
 
-	// Minimal workspace marker
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// Create routes.jsonl
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	routes := `{"prefix":"gt-","path":"."}`
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
-		t.Fatalf("write routes.jsonl: %v", err)
-	}
-
-	// Create stub bd
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-echo "CMD:$*" >> "${BD_LOG}"
-cmd="$1"; shift || true
-case "$cmd" in
-  mol)
-    sub="$1"; shift || true
-    case "$sub" in
-      wisp) echo 'legacy mol wisp should not be called' >&2; exit 1;;
-      bond) echo '{"result_id":"gt-test","id_mapping":{"mol-polecat-work":"gt-wisp-skip"}}';;
-    esac;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo CMD:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo legacy mol wisp should not be called 1>&2
-    exit /b 1
-  )
-  if "%sub%"=="bond" (
-    echo {^"result_id^":^"gt-test^",^"id_mapping^":{^"mol-polecat-work^":^"gt-wisp-skip^"}}
-    exit /b 0
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	_ = os.Chdir(townRoot)
-
-	// Test with skipCook=true
-	_, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", "gt-test", "Test", "", townRoot, true, nil)
-	if err != nil {
+	if _, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-test", "Test", "", townRoot, true, nil); err != nil {
 		t.Fatalf("InstantiateFormulaOnBead failed: %v", err)
 	}
 
-	logBytes, _ := os.ReadFile(logPath)
-	logContent := string(logBytes)
-
-	// Verify cook was NOT called when skipCook=true
-	if strings.Contains(logContent, "cook") {
-		t.Errorf("cook should be skipped when skipCook=true, but was called:\n%s", logContent)
+	log := bd.log()
+	if strings.Contains(log, "cook") {
+		t.Errorf("cook should be skipped when skipCook=true, but was called:\n%s", log)
 	}
-
-	// Verify direct bond was still called without the legacy wisp path.
-	if strings.Contains(logContent, "mol wisp") {
+	if strings.Contains(log, "mol wisp") {
 		t.Errorf("mol wisp should not be called")
 	}
-	if !strings.Contains(logContent, "mol bond mol-polecat-work gt-test --json --ephemeral") {
-		t.Errorf("mol bond should still be called")
+	if !strings.Contains(log, "mol bond mol-polecat-work gt-test --json --ephemeral") {
+		t.Errorf("mol bond should still be called:\n%s", log)
 	}
 }
 
-// TestCookFormula verifies the CookFormula helper.
+// TestCookFormula verifies the CookFormula helper cooks the named formula in
+// the work dir with auto-commit on.
 func TestCookFormula(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
+	var got beads.BDCall
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		got = c
+		return nil, nil, nil
 	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-echo "CMD:$*" >> "${BD_LOG}"
-exit 0
-`
-	bdScriptWindows := `@echo off
-echo CMD:%*>>"%BD_LOG%"
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
 
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	err := CookFormula("mol-polecat-work", townRoot, townRoot)
-	if err != nil {
+	if err := formulaBDVia(run).cook("mol-polecat-work", townRoot, townRoot); err != nil {
 		t.Fatalf("CookFormula failed: %v", err)
 	}
-
-	logBytes, _ := os.ReadFile(logPath)
-	if !strings.Contains(string(logBytes), "cook mol-polecat-work") {
-		t.Errorf("cook command not found in log")
+	if strings.Join(got.Args, " ") != "cook mol-polecat-work" {
+		t.Errorf("bd argv = %q, want cook mol-polecat-work", got.Args)
 	}
-}
-
-// TestSlingHookRawBeadFlag verifies --hook-raw-bead flag exists.
-func TestSlingHookRawBeadFlag(t *testing.T) {
-	// Verify the flag variable exists and works
-	prevValue := slingHookRawBead
-	t.Cleanup(func() { slingHookRawBead = prevValue })
-
-	slingHookRawBead = true
-	if !slingHookRawBead {
-		t.Error("slingHookRawBead flag should be true")
+	if got.Dir != townRoot {
+		t.Errorf("bd cwd = %q, want %q", got.Dir, townRoot)
 	}
-
-	slingHookRawBead = false
-	if slingHookRawBead {
-		t.Error("slingHookRawBead flag should be false")
+	env := envSlice(got.Env)
+	if env["BD_DOLT_AUTO_COMMIT"] != "on" || env["GT_ROOT"] != townRoot {
+		t.Errorf("cook env BD_DOLT_AUTO_COMMIT=%q GT_ROOT=%q, want on and %q", env["BD_DOLT_AUTO_COMMIT"], env["GT_ROOT"], townRoot)
 	}
 }
 
@@ -348,187 +200,36 @@ func TestAutoApplyLogic(t *testing.T) {
 
 // TestFormulaOnBeadPassesVariables verifies that feature and issue variables are passed.
 func TestFormulaOnBeadPassesVariables(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
+	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-var"}}`)
 
-	// Minimal workspace
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(`{"prefix":"gt-","path":"."}`), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-	bdScript := `#!/bin/sh
-echo "CMD:$*" >> "${BD_LOG}"
-cmd="$1"; shift || true
-case "$cmd" in
-  cook) exit 0;;
-  mol)
-    sub="$1"; shift || true
-    case "$sub" in
-      wisp) echo 'legacy mol wisp should not be called' >&2; exit 1;;
-      bond) echo '{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-wisp-var"}}';;
-    esac;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo CMD:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo legacy mol wisp should not be called 1>&2
-    exit /b 1
-  )
-  if "%sub%"=="bond" (
-    echo {^"result_id^":^"gt-abc123^",^"id_mapping^":{^"mol-polecat-work^":^"gt-wisp-var^"}}
-    exit /b 0
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	_ = os.Chdir(townRoot)
-
-	_, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil)
-	if err != nil {
+	if _, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil); err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
 
-	logBytes, _ := os.ReadFile(logPath)
-	logContent := string(logBytes)
-
-	// Find direct mol bond line
-	var bondLine string
-	for _, line := range strings.Split(logContent, "\n") {
-		if strings.Contains(line, "mol bond") {
-			bondLine = line
-			break
-		}
-	}
-
+	bondLine := logLineWith(bd.log(), "mol bond")
 	if bondLine == "" {
-		t.Fatalf("mol bond command not found:\n%s", logContent)
+		t.Fatalf("mol bond command not found:\n%s", bd.log())
 	}
-
 	if !strings.Contains(bondLine, "feature=My Cool Feature") {
 		t.Errorf("mol bond missing feature variable:\n%s", bondLine)
 	}
-
 	if !strings.Contains(bondLine, "issue=gt-abc123") {
 		t.Errorf("mol bond missing issue variable:\n%s", bondLine)
 	}
 }
 
+// TestInstantiateFormulaOnBead_DirectBondParsesIDMapping: the direct bond
+// returns the base bead as result_id and the spawned molecule root under
+// id_mapping keyed by the formula name; the root comes from the mapping, and
+// every variable the formula declares a default for is passed to bd.
 func TestInstantiateFormulaOnBead_DirectBondParsesIDMapping(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
+	bd := formulaBDFake(`{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-mol-fallback"}}`)
 
-	// Minimal workspace
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(`{"prefix":"gt-","path":"."}`), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-
-	// Direct bond returns the base bead as result_id and the spawned molecule root
-	// under id_mapping keyed by the original formula name.
-	bdScript := `#!/bin/sh
-set -e
-echo "CMD:$*" >> "${BD_LOG}"
-cmd="$1"; shift || true
-case "$cmd" in
-  cook)
-    exit 0
-    ;;
-  mol)
-    sub="$1"; shift || true
-    case "$sub" in
-      wisp)
-        echo '{"new_epic_id":"gt-wisp-missing"}'
-        exit 0
-        ;;
-      bond)
-        left="$1"; shift || true
-        if [ "$left" = "gt-wisp-missing" ]; then
-          echo "Error: 'gt-wisp-missing' not found (not an issue ID or formula name)" >&2
-          exit 1
-        fi
-        if [ "$left" = "mol-polecat-work" ]; then
-          echo '{"result_id":"gt-abc123","id_mapping":{"mol-polecat-work":"gt-mol-fallback"}}'
-          exit 0
-        fi
-        echo "Error: unexpected bond target: $left" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo CMD:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-set "left=%3"
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo {^"new_epic_id^":^"gt-wisp-missing^"}
-    exit /b 0
-  )
-  if "%sub%"=="bond" (
-    if "%left%"=="gt-wisp-missing" (
-      echo Error: 'gt-wisp-missing' not found - not an issue ID or formula name 1>&2
-      exit /b 1
-    )
-    if "%left%"=="mol-polecat-work" (
-      echo {^"result_id^":^"gt-abc123^",^"id_mapping^":{^"mol-polecat-work^":^"gt-mol-fallback^"}}
-      exit /b 0
-    )
-    echo Error: unexpected bond target: %left% 1>&2
-    exit /b 1
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	_ = os.Chdir(townRoot)
-
-	result, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil)
+	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "My Cool Feature", "", townRoot, false, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -539,29 +240,19 @@ exit /b 0
 		t.Fatalf("BeadToHook = %q, want %q", result.BeadToHook, "gt-abc123")
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
+	log := bd.log()
+	if strings.Contains(log, "mol wisp") {
+		t.Fatalf("legacy mol wisp should not be called:\n%s", log)
 	}
-	logContent := string(logBytes)
-	if strings.Contains(logContent, "mol wisp") {
-		t.Fatalf("legacy mol wisp should not be called:\n%s", logContent)
-	}
-	var directBondLine string
-	for _, line := range strings.Split(logContent, "\n") {
-		if strings.Contains(line, "mol bond mol-polecat-work gt-abc123 --json --ephemeral") {
-			directBondLine = line
-			break
-		}
-	}
+	directBondLine := logLineWith(log, "mol bond mol-polecat-work gt-abc123 --json --ephemeral")
 	if directBondLine == "" {
-		t.Fatalf("missing direct bond in log:\n%s", logContent)
+		t.Fatalf("missing direct bond in log:\n%s", log)
 	}
 	if !containsVarArg(directBondLine, "feature", "My Cool Feature") {
-		t.Fatalf("direct bond missing feature variable:\n%s", logContent)
+		t.Fatalf("direct bond missing feature variable:\n%s", log)
 	}
 	if !containsVarArg(directBondLine, "issue", "gt-abc123") {
-		t.Fatalf("direct bond missing issue variable:\n%s", logContent)
+		t.Fatalf("direct bond missing issue variable:\n%s", log)
 	}
 	for _, required := range []struct {
 		key   string
@@ -575,12 +266,16 @@ exit /b 0
 		{"build_command", ""},
 	} {
 		if !containsVarArg(directBondLine, required.key, required.value) {
-			t.Fatalf("direct bond missing required variable %q:\n%s", required.key, logContent)
+			t.Fatalf("direct bond missing required variable %q:\n%s", required.key, log)
 		}
 	}
 }
 
+// TestBondFormulaDirectPinsTargetBeadsDir: the bond runs in the formula work
+// dir but writes to the database the bead's prefix routes to, so a polecat
+// worktree's own .beads cannot capture the wisp.
 func TestBondFormulaDirectPinsTargetBeadsDir(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		beadID       string
@@ -602,194 +297,51 @@ func TestBondFormulaDirectPinsTargetBeadsDir(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			townRoot, err := filepath.EvalSymlinks(t.TempDir())
-			if err != nil {
-				t.Fatalf("EvalSymlinks: %v", err)
-			}
-			townBeadsDir := filepath.Join(townRoot, ".beads")
+			t.Parallel()
+			townRoot := formulaTown(t, `{"prefix":"gt-","path":"gastown/mayor/rig"}`, `{"prefix":"hq-","path":"."}`)
 			rigBeadsDir := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
 			formulaWorkDir := filepath.Join(townRoot, "polecats", "radrat", "gastown")
-
-			for _, dir := range []string{townBeadsDir, rigBeadsDir, filepath.Join(formulaWorkDir, ".beads")} {
+			for _, dir := range []string{rigBeadsDir, filepath.Join(formulaWorkDir, ".beads")} {
 				if err := os.MkdirAll(dir, 0755); err != nil {
 					t.Fatalf("mkdir %s: %v", dir, err)
 				}
 			}
-			routes := strings.Join([]string{
-				`{"prefix":"gt-","path":"gastown/mayor/rig"}`,
-				`{"prefix":"hq-","path":"."}`,
-				"",
-			}, "\n")
-			if err := os.WriteFile(filepath.Join(townBeadsDir, "routes.jsonl"), []byte(routes), 0644); err != nil {
-				t.Fatalf("write routes: %v", err)
-			}
 
-			binDir := filepath.Join(townRoot, "bin")
-			if err := os.MkdirAll(binDir, 0755); err != nil {
-				t.Fatalf("mkdir binDir: %v", err)
+			var got beads.BDCall
+			run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+				got = c
+				return []byte(`{"result_id":"` + tc.beadID + `","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}`), nil, nil
 			}
-			logPath := filepath.Join(townRoot, "bd.log")
-			bdScript := `#!/bin/sh
-set -e
-printf 'ENV:%s|%s|%s|%s|%s\n' "$(pwd)" "${BEADS_DIR:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_DOLT_DATA_DIR:-}" "$*" >> "${BD_LOG}"
-cmd="$1"; shift || true
-case "$cmd" in
-  mol)
-    sub="$1"; shift || true
-    case "$sub" in
-      bond)
-        echo '{"result_id":"'"$2"'","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}'
-        exit 0
-        ;;
-    esac
-    ;;
-esac
-exit 1
-`
-			bdScriptWindows := `@echo off
-setlocal enableextensions
-echo ENV:%CD%^|%BEADS_DIR%^|%BEADS_DOLT_SERVER_DATABASE%^|%BEADS_DOLT_DATA_DIR%^|%*>>"%BD_LOG%"
-if "%1"=="mol" (
-  if "%2"=="bond" (
-    echo {^"result_id^":^"%4^",^"id_mapping^":{^"mol-polecat-work^":^"gt-mol-direct^"}}
-    exit /b 0
-  )
-)
-exit /b 1
-`
-			_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-			t.Setenv("BD_LOG", logPath)
-			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("BEADS_DIR", filepath.Join(formulaWorkDir, ".beads"))
-			t.Setenv("BEADS_DOLT_SERVER_DATABASE", "stale")
-			wrongDataDir := filepath.Join(townRoot, "wrong-data")
-			t.Setenv("BEADS_DOLT_DATA_DIR", wrongDataDir)
-			t.Setenv("BEADS_DB", "stale")
-			t.Setenv("BD_DB", "stale")
 
 			bondVars, err := formulaVarsForBead("mol-polecat-work", tc.beadID, "Test", townRoot, nil)
 			if err != nil {
 				t.Fatalf("formulaVarsForBead: %v", err)
 			}
-			rootID, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", tc.beadID, formulaWorkDir, townRoot, bondVars)
+			rootID, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", tc.beadID, formulaWorkDir, townRoot, bondVars)
 			if err != nil {
 				t.Fatalf("bondFormulaDirect: %v", err)
 			}
 			if rootID != "gt-mol-direct" {
 				t.Fatalf("rootID = %q, want gt-mol-direct", rootID)
 			}
-
-			logBytes, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatalf("read log: %v", err)
+			if got.Dir != formulaWorkDir {
+				t.Fatalf("bd cwd = %q, want formula work dir %q", got.Dir, formulaWorkDir)
 			}
-			line := strings.TrimSpace(string(logBytes))
-			parts := strings.SplitN(line, "|", 5)
-			if len(parts) != 5 || !strings.HasPrefix(parts[0], "ENV:") {
-				t.Fatalf("malformed bd log %q", line)
-			}
-			gotCWD := strings.TrimPrefix(parts[0], "ENV:")
-			if gotCWD != formulaWorkDir {
-				t.Fatalf("bd cwd = %q, want formula work dir %q (log %q)", gotCWD, formulaWorkDir, line)
-			}
-			if got, want := parts[1], tc.wantBeadsDir(townRoot); got != want {
-				t.Fatalf("BEADS_DIR = %q, want %q (log %q)", got, want, line)
-			}
-			if parts[2] != "" {
-				t.Fatalf("BEADS_DOLT_SERVER_DATABASE leaked as %q (log %q)", parts[2], line)
-			}
-			if parts[3] == wrongDataDir {
-				t.Fatalf("stale BEADS_DOLT_DATA_DIR leaked as %q (log %q)", parts[3], line)
+			if got, want := envSlice(got.Env)["BEADS_DIR"], tc.wantBeadsDir(townRoot); got != want {
+				t.Fatalf("BEADS_DIR = %q, want %q", got, want)
 			}
 		})
 	}
 }
 
+// TestInstantiateFormulaOnBead_DirectBondHandlesNonGTIDs: the direct bond
+// accepts the spawned root bd returns even when its prefix is not gt-.
 func TestInstantiateFormulaOnBead_DirectBondHandlesNonGTIDs(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	townRoot := formulaTown(t, `{"prefix":"oag-","path":"."}`)
+	bd := formulaBDFake(`{"result_id":"oag-npeat","id_mapping":{"mol-polecat-work":"oag-wisp-wisp-rsia"}}`)
 
-	// Minimal workspace
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(`{"prefix":"oag-","path":"."}`), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-
-	// Direct bond should accept the spawned root returned by bd, even when its
-	// prefix is not gt-.
-	bdScript := `#!/bin/sh
-set -e
-echo "CMD:$*" >> "${BD_LOG}"
-cmd="$1"; shift || true
-case "$cmd" in
-  cook)
-    exit 0
-    ;;
-	  mol)
-		sub="$1"; shift || true
-		case "$sub" in
-		  wisp)
-			echo 'legacy mol wisp should not be called' >&2
-			exit 1
-			;;
-		  bond)
-			left="$1"; shift || true
-			if [ "$left" = "mol-polecat-work" ]; then
-			  echo '{"result_id":"oag-npeat","id_mapping":{"mol-polecat-work":"oag-wisp-wisp-rsia"}}'
-			  exit 0
-			fi
-        echo "Error: unexpected bond target: $left" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo CMD:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-set "left=%3"
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo legacy mol wisp should not be called 1>&2
-    exit /b 1
-  )
-  if "%sub%"=="bond" (
-    if "%left%"=="mol-polecat-work" (
-      echo {^"result_id^":^"oag-npeat^",^"id_mapping^":{^"mol-polecat-work^":^"oag-wisp-wisp-rsia^"}}
-      exit /b 0
-    )
-    echo Error: unexpected bond target: %left% 1>&2
-    exit /b 1
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	_ = os.Chdir(townRoot)
-
-	result, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", "oag-npeat", "Fix formula bug", "", townRoot, false, nil)
+	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "oag-npeat", "Fix formula bug", "", townRoot, false, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -800,106 +352,23 @@ exit /b 0
 		t.Fatalf("BeadToHook = %q, want %q", result.BeadToHook, "oag-npeat")
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
+	log := bd.log()
+	if strings.Contains(log, "mol wisp") {
+		t.Fatalf("legacy mol wisp should not have been called:\n%s", log)
 	}
-	logContent := string(logBytes)
-	if strings.Contains(logContent, "mol wisp") {
-		t.Fatalf("legacy mol wisp should not have been called:\n%s", logContent)
-	}
-	if !strings.Contains(logContent, "mol bond mol-polecat-work oag-npeat --json --ephemeral") {
-		t.Fatalf("direct bond should have been called with formula and bead:\n%s", logContent)
+	if !strings.Contains(log, "mol bond mol-polecat-work oag-npeat --json --ephemeral") {
+		t.Fatalf("direct bond should have been called with formula and bead:\n%s", log)
 	}
 }
 
+// TestInstantiateFormulaOnBead_DirectBondCreatesNoOrphanCleanup: the direct
+// path creates no intermediate wisp, so it has nothing to close afterwards.
 func TestInstantiateFormulaOnBead_DirectBondCreatesNoOrphanCleanup(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
+	bd := formulaBDFake(`{"result_id":"gt-test","id_mapping":{"mol-polecat-work":"gt-wisp-clean"}}`)
 
-	// Minimal workspace
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(`{"prefix":"gt-","path":"."}`), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-
-	// The direct path should not create an intermediate wisp that needs orphan cleanup.
-	bdScript := `#!/bin/sh
-set -e
-echo "CMD:$*" >> "${BD_LOG}"
-cmd="$1"; shift || true
-case "$cmd" in
-  cook)
-    exit 0
-    ;;
-  mol)
-    sub="$1"; shift || true
-		case "$sub" in
-		  wisp)
-			echo 'legacy mol wisp should not be called' >&2
-			exit 1
-			;;
-		  bond)
-			left="$1"; shift || true
-			if [ "$left" = "mol-polecat-work" ]; then
-			  echo '{"result_id":"gt-test","id_mapping":{"mol-polecat-work":"gt-wisp-clean"}}'
-          exit 0
-        fi
-        echo "Error: unexpected bond target: $left" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-  close)
-    exit 0
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo CMD:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-set "left=%3"
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo legacy mol wisp should not be called 1>&2
-    exit /b 1
-  )
-  if "%sub%"=="bond" (
-    if "%left%"=="mol-polecat-work" (
-      echo {^"result_id^":^"gt-test^",^"id_mapping^":{^"mol-polecat-work^":^"gt-wisp-clean^"}}
-      exit /b 0
-    )
-    echo Error: unexpected bond target: %left% 1>&2
-    exit /b 1
-  )
-)
-if "%cmd%"=="close" exit /b 0
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	_ = os.Chdir(townRoot)
-
-	result, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", "gt-test", "Test cleanup", "", townRoot, false, nil)
+	result, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-test", "Test cleanup", "", townRoot, false, nil)
 	if err != nil {
 		t.Fatalf("InstantiateFormulaOnBead: %v", err)
 	}
@@ -907,101 +376,22 @@ exit /b 0
 		t.Fatalf("WispRootID = %q, want %q", result.WispRootID, "gt-wisp-clean")
 	}
 
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	logContent := string(logBytes)
-	if strings.Contains(logContent, "mol wisp") || strings.Contains(logContent, "close") {
-		t.Fatalf("direct bond should not create or clean an orphaned wisp:\n%s", logContent)
+	log := bd.log()
+	if strings.Contains(log, "mol wisp") || strings.Contains(log, "close") {
+		t.Fatalf("direct bond should not create or clean an orphaned wisp:\n%s", log)
 	}
 }
 
+// TestInstantiateFormulaOnBead_DirectBondParseFailure: a bond that exits 0
+// but prints no parsable root is an error, not a hook with no molecule.
 func TestInstantiateFormulaOnBead_DirectBondParseFailure(t *testing.T) {
-	townRoot := t.TempDir()
+	t.Parallel()
+	townRoot := formulaTown(t, `{"prefix":"gt-","path":"."}`)
+	bd := formulaBDFake("NOT-JSON-GARBAGE")
 
-	// Minimal workspace
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(`{"prefix":"gt-","path":"."}`), 0644); err != nil {
-		t.Fatalf("write routes: %v", err)
-	}
-
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
-	}
-	logPath := filepath.Join(townRoot, "bd.log")
-
-	// Direct bond exits 0 but returns non-JSON garbage.
-	bdScript := `#!/bin/sh
-set -e
-echo "CMD:$*" >> "${BD_LOG}"
-cmd="$1"; shift || true
-case "$cmd" in
-  cook)
-    exit 0
-    ;;
-  mol)
-    sub="$1"; shift || true
-		case "$sub" in
-		  wisp)
-			echo 'legacy mol wisp should not be called' >&2
-			exit 1
-			;;
-		  bond)
-			left="$1"; shift || true
-			if [ "$left" = "mol-polecat-work" ]; then
-			  echo 'NOT-JSON-GARBAGE'
-			  exit 0
-        fi
-        echo "Error: bond failed" >&2
-        exit 1
-        ;;
-    esac
-    ;;
-esac
-exit 0
-`
-	bdScriptWindows := `@echo off
-setlocal enableextensions
-echo CMD:%*>>"%BD_LOG%"
-set "cmd=%1"
-set "sub=%2"
-set "left=%3"
-if "%cmd%"=="cook" exit /b 0
-if "%cmd%"=="mol" (
-  if "%sub%"=="wisp" (
-    echo legacy mol wisp should not be called 1>&2
-    exit /b 1
-  )
-  if "%sub%"=="bond" (
-    if "%left%"=="mol-polecat-work" (
-      echo NOT-JSON-GARBAGE
-      exit /b 0
-    )
-    echo Error: bond failed 1>&2
-    exit /b 1
-  )
-)
-exit /b 0
-`
-	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
-
-	t.Setenv("BD_LOG", logPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	_ = os.Chdir(townRoot)
-
-	_, err := InstantiateFormulaOnBead(context.Background(), "mol-polecat-work", "gt-abc123", "My Feature", "", townRoot, false, nil)
+	_, err := formulaBDVia(bd.run).instantiate(context.Background(), "mol-polecat-work", "gt-abc123", "My Feature", "", townRoot, false, nil)
 	if err == nil {
-		t.Fatal("expected error when bond returns non-JSON and fallback fails, got nil")
+		t.Fatal("expected error when bond returns non-JSON, got nil")
 	}
 	if !strings.Contains(err.Error(), "missing spawned root id") {
 		t.Fatalf("error message should mention missing spawned root id: %v", err)
@@ -1011,46 +401,33 @@ exit /b 0
 // A bead title reaches bd as one argv element, never through a shell: the
 // metacharacters arrive byte-for-byte (gt-4k3fj.12).
 func TestBondFormulaDirectPassesShellMetacharactersVerbatim(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("argv-recording stub is a POSIX shell script")
-	}
+	t.Parallel()
 	townRoot := t.TempDir()
-	binDir := filepath.Join(townRoot, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatalf("mkdir binDir: %v", err)
+	var args []string
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		args = c.Args
+		return []byte(`{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}`), nil, nil
 	}
-	argvPath := filepath.Join(townRoot, "argv.log")
-	bdScript := `#!/bin/sh
-for a in "$@"; do printf '%s\n' "$a" >> "${BD_ARGV}"; done
-echo '{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}'
-`
-	_ = writeBDStub(t, binDir, bdScript, "")
-	t.Setenv("BD_ARGV", argvPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	title := `a; b (c) "d" $e $(touch pwned) ` + "`touch pwned`"
 	vars, err := formulaVarsForBead("mol-polecat-work", "gt-x", title, townRoot, nil)
 	if err != nil {
 		t.Fatalf("formulaVarsForBead: %v", err)
 	}
-	rootID, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, vars)
+	rootID, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, vars)
 	if err != nil {
 		t.Fatalf("bondFormulaDirect: %v", err)
 	}
 	if rootID != "gt-mol-direct" {
 		t.Fatalf("rootID = %q, want gt-mol-direct", rootID)
 	}
-
-	argv, err := os.ReadFile(argvPath)
-	if err != nil {
-		t.Fatalf("read argv log: %v", err)
+	want := "feature=" + title
+	for i, a := range args {
+		if a == want && i > 0 && args[i-1] == "--var" {
+			return
+		}
 	}
-	if want := "feature=" + title + "\n"; !strings.Contains(string(argv), want) {
-		t.Fatalf("bd argv lost the title as one element; want line %q in:\n%s", want, argv)
-	}
-	if _, err := os.Stat(filepath.Join(townRoot, "pwned")); err == nil {
-		t.Fatal("title was interpreted by a shell: pwned file exists")
-	}
+	t.Fatalf("bd argv lost the title as one element; want --var %q in %q", want, args)
 }
 
 // bd --json prints its failure to stdout; the bond error must carry that cause,
@@ -1058,23 +435,27 @@ echo '{"result_id":"gt-x","id_mapping":{"mol-polecat-work":"gt-mol-direct"}}'
 // so this also pins the retry's cap: exhaustion reports the cause, having made
 // exactly bdContentionAttempts attempts rather than looping.
 func TestBondFormulaDirectErrorCarriesBdJSONCause(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("stub prints JSON from a POSIX shell script")
+	t.Parallel()
+	var mu sync.Mutex
+	attempts := 0
+	run := func(_ context.Context, c beads.BDCall) ([]byte, []byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(c.Args) > 1 && c.Args[0] == "mol" && c.Args[1] == "bond" {
+			attempts++
+		}
+		return []byte(`{"error":"creating wisp: sql commit (regular): Error 1213 (40001): serialization failure","schema_version":1}`), nil, inprocBDExit(1)
 	}
-	townRoot, logPath := setUpContentionStub(t, `#!/bin/sh
-echo "CMD:$*" >> "${BD_LOG}"
-echo '{"error":"creating wisp: sql commit (regular): Error 1213 (40001): serialization failure","schema_version":1}'
-exit 1
-`)
 
-	_, err := bondFormulaDirect("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
+	townRoot := t.TempDir()
+	_, err := formulaBDVia(run).bond("mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
 	if err == nil {
 		t.Fatal("bondFormulaDirect succeeded, want failure")
 	}
 	if !strings.Contains(err.Error(), "Error 1213 (40001): serialization failure") {
 		t.Fatalf("error hides bd's cause: %v", err)
 	}
-	if got := countStubAttempts(t, logPath, "CMD:mol bond"); got != bdContentionAttempts {
-		t.Fatalf("bond attempts = %d, want the cap %d", got, bdContentionAttempts)
+	if attempts != bdContentionAttempts {
+		t.Fatalf("bond attempts = %d, want the cap %d", attempts, bdContentionAttempts)
 	}
 }

@@ -252,16 +252,6 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 		return fmt.Errorf("%w: max_ready_for_dispatch must be non-negative", ErrMissingField)
 	}
 
-	if c.PostMergeTimeout != "" {
-		dur, err := time.ParseDuration(c.PostMergeTimeout)
-		if err != nil {
-			return fmt.Errorf("invalid post_merge_timeout: %w", err)
-		}
-		if dur <= 0 {
-			return fmt.Errorf("post_merge_timeout must be positive, got %v", dur)
-		}
-	}
-
 	return nil
 }
 
@@ -1340,10 +1330,10 @@ func withRoleSettingsFlag(reg *AgentRegistry, rc *RuntimeConfig, role, rigPath s
 
 // RoleSettingsDir returns the shared settings directory for roles whose session
 // working directory differs from their settings location. Returns empty for
-// roles where settings and session directory are the same (mayor, deacon).
+// roles where settings and session directory are the same (mayor).
 func RoleSettingsDir(role, rigPath string) string {
 	switch role {
-	case constants.RoleCrew, constants.RoleWitness:
+	case constants.RoleCrew:
 		return filepath.Join(rigPath, role)
 	case constants.RolePolecat:
 		return filepath.Join(rigPath, "polecats")

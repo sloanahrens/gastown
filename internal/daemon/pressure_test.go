@@ -12,11 +12,12 @@ func TestIsAgentSession(t *testing.T) {
 		want bool
 	}{
 		{"hq-mayor", true},
-		{"rig-witness", true},
+		{"rig-crew-max", true},
 		{"rig-refinery", false}, // refinery role removed (gt-v4ssj.6)
+		{"rig-witness", false},  // witness, deacon and boot roles retired (gt-4k3fj.6.1)
 		{"rig-polecat-abc", true},
-		{"hq-deacon", true},
-		{"hq-boot", true},
+		{"hq-deacon", false},
+		{"hq-boot", false},
 		{"rig-dog-fido", true},
 		{"my-personal-session", false},
 		{"", false},
@@ -33,7 +34,7 @@ func TestIsAgentSession(t *testing.T) {
 func TestCountAgentSessionsCountsAgentsOnTheDaemonTmux(t *testing.T) {
 	t.Parallel()
 	tm := newFakeTmux(newFixedClock())
-	for _, name := range []string{"hq-mayor", "rig-witness", "rig-polecat-abc", "my-personal-session"} {
+	for _, name := range []string{"hq-mayor", "rig-crew-max", "rig-polecat-abc", "my-personal-session"} {
 		tm.addSession(name, "claude", time.Time{})
 	}
 	d := &Daemon{tmux: tm}

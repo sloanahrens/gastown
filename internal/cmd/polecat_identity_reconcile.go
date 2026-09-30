@@ -34,11 +34,10 @@ Run it one ID at a time from an operator session; never from a patrol.
 
 The positional argument accepts:
   <rig>/<name>        polecat worker (backward compat default)
-  <rig>/witness       rig-level witness singleton
   <rig>/refinery      rig-level refinery singleton
   <rig>/crew/<name>   named crew worker
 
-Use --id to pass a raw agent bead ID directly (e.g. gt-gastown-witness),
+Use --id to pass a raw agent bead ID directly (e.g. gt-gastown-refinery),
 bypassing <rig>/<name> parsing entirely — needed for legacy IDs the builder
 above cannot reconstruct.
 
@@ -68,16 +67,15 @@ row, so its fields must never be merged in by severity or recency (gt-1361).`,
 func init() {
 	polecatIdentityReconcileCmd.Flags().BoolVar(&polecatIdentityReconcileApply, "apply", false, "perform the merge, archive and delete (default is dry-run)")
 	polecatIdentityReconcileCmd.Flags().BoolVar(&polecatIdentityReconcileDeleteOnly, "delete-only", false, "skip the merge step; archive + delete + verify only")
-	polecatIdentityReconcileCmd.Flags().StringVar(&polecatIdentityReconcileID, "id", "", "raw agent bead ID to reconcile, bypassing <rig>/<name> parsing (e.g. gt-gastown-witness)")
+	polecatIdentityReconcileCmd.Flags().StringVar(&polecatIdentityReconcileID, "id", "", "raw agent bead ID to reconcile, bypassing <rig>/<name> parsing (e.g. gt-gastown-refinery)")
 	polecatIdentityCmd.AddCommand(polecatIdentityReconcileCmd)
 }
 
 // resolveReconcileID builds the agent bead ID to reconcile from either the
 // --id override or the <rig>/<name> positional argument.
 //
-// <rig>/<name> defaults to a polecat worker name for backward compatibility;
-// "witness" and "refinery" resolve to the rig-level singleton instead, and
-// "crew/<name>" resolves to a named crew worker. Legacy IDs that don't fit
+// <rig>/<name> defaults to a polecat worker name for backward compatibility,
+// and "crew/<name>" resolves to a named crew worker. Legacy IDs that don't fit
 // this shape (e.g. a collapsed prefix==rig singleton) must use --id.
 func resolveReconcileID(townRoot, rawID, arg string) (string, error) {
 	if rawID != "" {
@@ -97,19 +95,14 @@ func resolveReconcileID(townRoot, rawID, arg string) (string, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rig)
 	switch len(parts) {
 	case 2:
-		switch parts[1] {
-		case constants.RoleWitness:
-			return beads.WitnessBeadIDWithPrefix(prefix, rig), nil
-		default:
-			return beads.PolecatBeadIDWithPrefix(prefix, rig, parts[1]), nil
-		}
+		return beads.PolecatBeadIDWithPrefix(prefix, rig, parts[1]), nil
 	case 3:
 		if parts[1] != constants.RoleCrew || parts[2] == "" {
-			return "", fmt.Errorf("expected <rig>/<name>, <rig>/witness, <rig>/refinery, or <rig>/crew/<name>, got %q", arg)
+			return "", fmt.Errorf("expected <rig>/<name>, <rig>/refinery, or <rig>/crew/<name>, got %q", arg)
 		}
 		return beads.CrewBeadIDWithPrefix(prefix, rig, parts[2]), nil
 	default:
-		return "", fmt.Errorf("expected <rig>/<name>, <rig>/witness, <rig>/refinery, or <rig>/crew/<name>, got %q", arg)
+		return "", fmt.Errorf("expected <rig>/<name>, <rig>/refinery, or <rig>/crew/<name>, got %q", arg)
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 // otherwise call that polecat stalled within seconds of dispatch, and the
 // restart paths would chase a session that is still booting (gt-yteq). The
 // window is the Witness's own startup grace
-// (config.WitnessThresholds.HeartbeatStartupGrace, default 5m), so list,
+// (config.RecoveryThresholds.HeartbeatStartupGrace, default 5m), so list,
 // capacity, manager and witness agree on when spawning ends.
 //
 // Only an explicit spawning state earns the grace. A bead that already says

@@ -33,12 +33,6 @@ func ResolveSessionTheme(townRoot, rigName, role, crewMember string) *Theme {
 	case constants.RoleMayor:
 		theme := MayorTheme()
 		return &theme
-	case constants.RoleDeacon:
-		theme := DeaconTheme()
-		return &theme
-	case "dog":
-		theme := DogTheme()
-		return &theme
 	default:
 		if rigName == "" {
 			return nil
@@ -165,8 +159,6 @@ func normalizeThemeRole(role string) string {
 	switch role {
 	case "coordinator":
 		return constants.RoleMayor
-	case "health-check":
-		return constants.RoleDeacon
 	default:
 		return role
 	}

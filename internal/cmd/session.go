@@ -310,14 +310,11 @@ func getSessionManager(rigName string) (*polecat.SessionManager, *rig.Rig, error
 	return polecatMgr, r, nil
 }
 
-// sessionSeat is a resolved `gt session` address: the <rig>/<name> the caller
-// named, the kind of seat it is, and the session manager that serves its rig.
+// sessionSeat is a resolved `gt session` address: the <rig>/<name> polecat
+// the caller named and the session manager that serves its rig.
 type sessionSeat struct {
 	Rig  string
 	Name string
-	// Role is constants.RolePolecat or RoleWitness — what <name>
-	// is in that rig.
-	Role string
 	Mgr  *polecat.SessionManager
 }
 
@@ -329,13 +326,10 @@ type sessionSeat struct {
 // gastown/<gone>` printed "State: ○ stopped" and exited 0 for a polecat whose
 // directory was gone, while `gt session start` refused that same address as
 // not found and `gt session restart` reported "Session restarted" for it
-// (gt-pud2g). A witness recovering a stalled polecat reads that success line
+// (gt-pud2g). A caller recovering a stalled polecat reads that success line
 // and moves on, leaving the polecat with no session and nobody watching it.
 //
-// The seats are the rig's polecats — its polecats/ directories, the same
-// source the witness zombie detector walks — plus the rig's single-instance
-// roles, which own sessions named after themselves (gt-witness, gt-refinery)
-// and are addressed the same way.
+// The seats are the rig's polecats: its polecats/ directories.
 func resolveSessionSeat(args []string) (sessionSeat, error) {
 	rigName, name, err := parseAddress(args[0])
 	if err != nil {
@@ -347,9 +341,8 @@ func resolveSessionSeat(args []string) (sessionSeat, error) {
 		return sessionSeat{}, err
 	}
 
-	seat := sessionSeat{Rig: rigName, Name: name, Role: sessionRoleForName(name), Mgr: mgr}
-	if seat.Role != constants.RolePolecat || mgr.HasPolecat(name) {
-		return seat, nil
+	if mgr.HasPolecat(name) {
+		return sessionSeat{Rig: rigName, Name: name, Mgr: mgr}, nil
 	}
 
 	suggestions := suggest.FindSimilar(name, r.Polecats, 3)
@@ -357,36 +350,9 @@ func resolveSessionSeat(args []string) (sessionSeat, error) {
 	return sessionSeat{}, errors.New(suggest.FormatSuggestion("Polecat", name, suggestions, hint))
 }
 
-// sessionRoleForName classifies the <name> of a `gt session` address. A name
-// that is not one of the rig's roles is a polecat name: polecats are per-rig
-// directories rather than fixed roles, so they cannot be recognized by name
-// alone and are checked against the rig instead (resolveSessionSeat).
-func sessionRoleForName(name string) string {
-	switch name {
-	case constants.RoleWitness:
-		return name
-	default:
-		return constants.RolePolecat
-	}
-}
-
-// requirePolecat refuses a seat that is not a polecat. Only a polecat has a
-// sandbox to start a session in: a rig role is started by its own command,
-// which builds a role session rather than a polecat one.
-func (s sessionSeat) requirePolecat() error {
-	if s.Role == constants.RolePolecat {
-		return nil
-	}
-	return fmt.Errorf("%s is the rig's %s role, not a polecat; start it with: gt %s start %s",
-		s.Name, s.Role, s.Role, s.Rig)
-}
-
 func runSessionStart(cmd *cobra.Command, args []string) error {
 	seat, err := resolveSessionSeat(args)
 	if err != nil {
-		return err
-	}
-	if err := seat.requirePolecat(); err != nil {
 		return err
 	}
 	rigName, polecatName := seat.Rig, seat.Name
@@ -714,9 +680,6 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	// session for …" line that reads as a restart in progress (gt-pud2g).
 	seat, err := resolveSessionSeat(args)
 	if err != nil {
-		return err
-	}
-	if err := seat.requirePolecat(); err != nil {
 		return err
 	}
 	rigName, polecatName := seat.Rig, seat.Name

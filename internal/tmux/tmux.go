@@ -4455,13 +4455,10 @@ func (t *Tmux) ApplyWindowStyle(session string, ws *WindowStyle) error {
 var roleIcons = map[string]string{
 	// Standard role names (from constants)
 	constants.RoleMayor:   constants.EmojiMayor,
-	constants.RoleDeacon:  constants.EmojiDeacon,
-	constants.RoleWitness: constants.EmojiWitness,
 	constants.RoleCrew:    constants.EmojiCrew,
 	constants.RolePolecat: constants.EmojiPolecat,
 	// Legacy names (for backwards compatibility)
-	"coordinator":  constants.EmojiMayor,
-	"health-check": constants.EmojiDeacon,
+	"coordinator": constants.EmojiMayor,
 }
 
 // SetStatusFormat configures the left side of the status bar.

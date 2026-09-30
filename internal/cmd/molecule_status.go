@@ -24,9 +24,6 @@ import (
 // Town-level agents use hq- prefix; rig-level agents use rig's prefix.
 // Examples:
 //   - "mayor" -> "hq-mayor"
-//   - "deacon" -> "hq-deacon"
-//   - "gastown/witness" -> "gt-gastown-witness"
-//   - "gastown/refinery" -> "gt-gastown-refinery"
 //   - "gastown/nux" (polecat) -> "gt-gastown-polecat-nux"
 //   - "gastown/crew/max" -> "gt-gastown-crew-max"
 //
@@ -45,12 +42,6 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 		switch {
 		case identity == "mayor":
 			return beads.MayorBeadIDTown()
-		case identity == "deacon":
-			return beads.DeaconBeadIDTown()
-		case identity == "deacon-boot":
-			return beads.DogBeadIDTown("boot")
-		case len(parts) == 2 && parts[1] == "witness":
-			return beads.WitnessBeadIDWithPrefix(getPrefix(parts[0]), parts[0])
 		case len(parts) == 2:
 			// Assume rig/name is a polecat
 			return beads.PolecatBeadIDWithPrefix(getPrefix(parts[0]), parts[0], parts[1])
@@ -1111,13 +1102,11 @@ func outputMoleculeCurrent(info MoleculeCurrentInfo) error {
 }
 
 // isTownLevelRole returns true if the agent ID is a town-level role.
-// Town-level roles (Mayor, Deacon) operate from the town root and may have
-// pinned beads in any rig's beads directory.
+// The mayor operates from the town root and may have pinned beads in any
+// rig's beads directory.
 // Accepts both "mayor" and "mayor/" formats for compatibility.
 func isTownLevelRole(agentID string) bool {
-	return agentID == "mayor" || agentID == "mayor/" ||
-		agentID == "deacon" || agentID == "deacon/" ||
-		agentID == "deacon/boot" || agentID == "deacon-boot"
+	return agentID == "mayor" || agentID == "mayor/"
 }
 
 // extractMailSender extracts the sender from mail bead labels.

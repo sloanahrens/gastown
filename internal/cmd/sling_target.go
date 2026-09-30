@@ -57,16 +57,13 @@ func sessionToAgentID(sessionName string) string {
 
 // canonicalAssigneeAddress returns the address used for bead assignees and
 // hook-status queries. This matches the form emitted by resolveSelfTarget and
-// buildAgentIdentity: town-level agents (mayor, deacon) get a trailing slash.
-// session.AgentIdentity.Address() returns the bare name for those roles, which
+// buildAgentIdentity: the town-level mayor gets a trailing slash.
+// session.AgentIdentity.Address() returns the bare name for that role, which
 // causes the read/write mismatch in GH#3699.
 func canonicalAssigneeAddress(identity *session.AgentIdentity) string {
 	addr := identity.Address()
-	switch identity.Role {
-	case session.RoleMayor, session.RoleDeacon:
-		if !strings.HasSuffix(addr, "/") {
-			return addr + "/"
-		}
+	if identity.Role == session.RoleMayor && !strings.HasSuffix(addr, "/") {
+		return addr + "/"
 	}
 	return addr
 }
@@ -130,15 +127,21 @@ type ResolvedTarget struct {
 	IsSelfSling       bool
 }
 
-// resolveTarget resolves a target specification to agent, pane, and working directory.
+// resolveTarget resolves a target specification with the running gt's
+// collaborators.
+func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, error) {
+	return realSlingDeps().resolveSlingTarget(target, opts)
+}
+
+// resolveSlingTarget resolves a target specification to agent, pane, and working directory.
 // Handles: "." or empty (self), rig targets (auto-spawn polecat),
 // existing agents (with dead polecat fallback).
-func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, error) {
+func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, error) {
 	result := &ResolvedTarget{}
 
 	// Empty target or "." = self-sling
 	if target == "" || target == "." {
-		agentID, pane, workDir, err := resolveSelfTarget()
+		agentID, pane, workDir, err := d.resolveSelf()
 		if err != nil {
 			if target == "." {
 				return nil, fmt.Errorf("resolving self for '.' target: %w", err)
@@ -153,14 +156,14 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 	}
 
 	// Rig target (auto-spawn polecat)
-	if rigName, isRig := IsRigName(target); isRig {
+	if rigName, isRig := d.isRigName(target); isRig {
 		// Check if rig is parked or docked before dispatching (gt-4owfd.1, gt-11y)
 		townRoot := opts.TownRoot
 		if townRoot == "" {
-			townRoot, _ = workspace.FindFromCwd()
+			townRoot = d.cwdTown()
 		}
 		if townRoot != "" {
-			if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
+			if blocked, reason := d.rigParked(townRoot, rigName); blocked {
 				undoCmd := "gt rig unpark"
 				if reason == "docked" {
 					undoCmd = "gt rig undock"
@@ -170,33 +173,33 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		}
 
 		if opts.BeadID != "" && !opts.Force {
-			if err := checkCrossRigGuard(opts.BeadID, rigName+"/polecats/_", opts.TownRoot); err != nil {
+			if err := d.crossRigGuard(opts.BeadID, rigName+"/polecats/_", opts.TownRoot); err != nil {
 				return nil, err
 			}
 		}
 		if opts.BeadID != "" {
-			if err := verifyBeadExistsInTargetRigDatabase(opts.BeadID, rigName, opts.TownRoot); err != nil {
+			if err := d.verifyInTargetRig(opts.BeadID, rigName, opts.TownRoot); err != nil {
 				return nil, err
 			}
 		}
 		if opts.DryRun {
-			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
+			fmt.Fprintf(d.out, "Would spawn fresh polecat in rig '%s'\n", rigName)
 			// peek, not resolve: a dry run prints the route it would take
 			// but must not attach local-attempt:1 to the bead. A refusal is
 			// printed as the refusal a live sling would raise, since that is
 			// the route it would take. The pool is asked whatever --agent says,
 			// so the preview matches the live sling (gt-4lbz).
-			_, reason, poolErr := peekPolecatPoolAgent(opts.TownRoot, opts.HookBead, opts.Agent)
+			_, reason, poolErr := d.peekPool(opts.TownRoot, opts.HookBead, opts.Agent)
 			if poolErr != nil {
-				fmt.Printf("  %s\n", poolErr)
+				fmt.Fprintf(d.out, "  %s\n", poolErr)
 			} else if reason != "" {
-				fmt.Printf("  %s\n", reason)
+				fmt.Fprintf(d.out, "  %s\n", reason)
 			}
 			result.Agent = fmt.Sprintf("%s/polecats/<new>", rigName)
 			result.Pane = "<new-pane>"
 			return result, nil
 		}
-		fmt.Printf("Target is rig '%s', spawning fresh polecat...\n", rigName)
+		fmt.Fprintf(d.out, "Target is rig '%s', spawning fresh polecat...\n", rigName)
 		spawnOpts := SlingSpawnOptions{
 			TownRoot:      opts.TownRoot,
 			Force:         opts.Force,
@@ -208,7 +211,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			ResumeBranch:  opts.ResumeBranch,
 			SkipAdmission: opts.SkipPolecatAdmission,
 		}
-		spawnInfo, err := spawnPolecatForSling(rigName, spawnOpts)
+		spawnInfo, err := d.spawnPolecat(rigName, spawnOpts)
 		if err != nil {
 			return nil, fmt.Errorf("spawning polecat: %w", err)
 		}
@@ -217,24 +220,24 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		result.WorkDir = spawnInfo.ClonePath
 		result.HookSetAtomically = opts.HookBead != ""
 		if !opts.NoBoot {
-			wakeRigAgents(rigName)
+			d.wakeRig(rigName)
 		}
 		return result, nil
 	}
 
 	// Existing agent (with dead polecat fallback).
-	// Uses resolveTargetAgentFn seam — crew, mayor, and all existing agents
+	// Uses the resolveAgent collaborator — crew, mayor, and all existing agents
 	// resolve here, getting their pane for nudge delivery (gt-in7b).
-	agentID, pane, workDir, err := resolveTargetAgentFn(target)
+	agentID, pane, workDir, err := d.resolveAgent(target)
 	if err != nil {
-		if rigName, ok := missingPolecatTargetRig(target, opts.Create, opts.TownRoot); ok {
+		if rigName, ok := missingPolecatTargetRigWith(target, opts.Create, opts.TownRoot, d.crewExists); ok {
 			if opts.BeadID != "" && !opts.Force {
-				if err := checkCrossRigGuard(opts.BeadID, rigName+"/polecats/_", opts.TownRoot); err != nil {
+				if err := d.crossRigGuard(opts.BeadID, rigName+"/polecats/_", opts.TownRoot); err != nil {
 					return nil, err
 				}
 			}
 			if opts.BeadID != "" {
-				if err := verifyBeadExistsInTargetRigDatabase(opts.BeadID, rigName, opts.TownRoot); err != nil {
+				if err := d.verifyInTargetRig(opts.BeadID, rigName, opts.TownRoot); err != nil {
 					return nil, err
 				}
 			}
@@ -249,12 +252,12 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 				// (gt-hw2gj). The rig branch above guards the same way. The
 				// name is fixed here, so no pool peek is needed to print the
 				// route.
-				fmt.Printf("Would reuse/create named polecat %s/%s\n", rigName, polecatName)
+				fmt.Fprintf(d.out, "Would reuse/create named polecat %s/%s\n", rigName, polecatName)
 				result.Agent = fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 				result.Pane = "<named-pane>"
 				return result, nil
 			}
-			fmt.Printf("Target polecat %s/%s has no active session; using that polecat (reuse, or create with --create)...\n", rigName, polecatName)
+			fmt.Fprintf(d.out, "Target polecat %s/%s has no active session; using that polecat (reuse, or create with --create)...\n", rigName, polecatName)
 			spawnOpts := SlingSpawnOptions{
 				Name:          polecatName,
 				TownRoot:      opts.TownRoot,
@@ -267,7 +270,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 				ResumeBranch:  opts.ResumeBranch,
 				SkipAdmission: opts.SkipPolecatAdmission,
 			}
-			spawnInfo, spawnErr := spawnPolecatForSling(rigName, spawnOpts)
+			spawnInfo, spawnErr := d.spawnPolecat(rigName, spawnOpts)
 			if spawnErr != nil {
 				// The named refusal already names the polecat.
 				return nil, fmt.Errorf("spawning polecat: %w", spawnErr)
@@ -277,7 +280,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			result.WorkDir = spawnInfo.ClonePath
 			result.HookSetAtomically = opts.HookBead != ""
 			if !opts.NoBoot {
-				wakeRigAgents(rigName)
+				d.wakeRig(rigName)
 			}
 			return result, nil
 		}
@@ -287,7 +290,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		parts := strings.Split(agentID, "/")
 		if len(parts) >= 3 && parts[1] == "polecats" {
 			rigName := parts[0]
-			if err := verifyBeadExistsInTargetRigDatabase(opts.BeadID, rigName, opts.TownRoot); err != nil {
+			if err := d.verifyInTargetRig(opts.BeadID, rigName, opts.TownRoot); err != nil {
 				return nil, err
 			}
 		}
@@ -298,7 +301,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 	// Detect self-sling by pane: a named target (e.g. "deacon") that resolves to
 	// the caller's own tmux pane should not inject the ack prompt — the caller is
 	// already running and knows about the hook (GH#3839).
-	if pane != "" && pane == os.Getenv("TMUX_PANE") {
+	if pane != "" && pane == d.getenv("TMUX_PANE") {
 		result.IsSelfSling = true
 	}
 	return result, nil
@@ -328,6 +331,12 @@ func missingPolecatTargetName(target string) (string, error) {
 }
 
 func missingPolecatTargetRig(target string, allowShorthand bool, townRoot string) (string, bool) {
+	return missingPolecatTargetRigWith(target, allowShorthand, townRoot, crewDirExists)
+}
+
+// missingPolecatTargetRigWith is missingPolecatTargetRig asking crewExists
+// whether a <rig>/<name> shorthand names a crew member rather than a polecat.
+func missingPolecatTargetRigWith(target string, allowShorthand bool, townRoot string, crewExists func(townRoot, rigName, name string) bool) (string, bool) {
 	if isPolecatTarget(target) {
 		parts := strings.Split(target, "/")
 		return parts[0], true
@@ -339,13 +348,27 @@ func missingPolecatTargetRig(target string, allowShorthand bool, townRoot string
 	if len(parts) != 2 || knownRoles[strings.ToLower(parts[1])] {
 		return "", false
 	}
+	if crewExists(townRoot, parts[0], parts[1]) {
+		return "", false
+	}
+	return parts[0], true
+}
+
+// crewDirExists reports whether rigName has a crew member called name in the
+// town (the cwd's town when townRoot is empty).
+func crewDirExists(townRoot, rigName, name string) bool {
 	if townRoot == "" {
 		townRoot = detectTownRootFromCwd()
 	}
-	if townRoot != "" {
-		if info, err := os.Stat(filepath.Join(townRoot, parts[0], "crew", parts[1])); err == nil && info.IsDir() {
-			return "", false
-		}
+	if townRoot == "" {
+		return false
 	}
-	return parts[0], true
+	info, err := os.Stat(filepath.Join(townRoot, rigName, "crew", name))
+	return err == nil && info.IsDir()
+}
+
+// townFromCwd is the cwd's town root, or "" outside a town.
+func townFromCwd() string {
+	townRoot, _ := workspace.FindFromCwd()
+	return townRoot
 }

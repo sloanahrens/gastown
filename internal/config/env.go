@@ -93,7 +93,7 @@ type AgentEnvConfig struct {
 	// Added as gt.topic to OTEL_RESOURCE_ATTRIBUTES for filtering by work type.
 	Topic string
 
-	// SessionName is the tmux session name for this agent (e.g., "hq-mayor", "gt-witness").
+	// SessionName is the tmux session name for this agent (e.g., "hq-mayor", "gt-crew-max").
 	// Added as gt.session to OTEL_RESOURCE_ATTRIBUTES so all Claude logs from a
 	// single GT session can be correlated, and as GT_SESSION env var.
 	SessionName string
@@ -112,22 +112,6 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		env["GT_ROLE"] = constants.RoleMayor
 		env["BD_ACTOR"] = constants.RoleMayor
 		env["GIT_AUTHOR_NAME"] = constants.RoleMayor
-
-	case constants.RoleDeacon:
-		env["GT_ROLE"] = constants.RoleDeacon
-		env["BD_ACTOR"] = constants.RoleDeacon
-		env["GIT_AUTHOR_NAME"] = constants.RoleDeacon
-
-	case "boot":
-		env["GT_ROLE"] = "deacon/boot"
-		env["BD_ACTOR"] = "deacon-boot"
-		env["GIT_AUTHOR_NAME"] = "boot"
-
-	case constants.RoleWitness:
-		env["GT_ROLE"] = fmt.Sprintf("%s/witness", cfg.Rig)
-		env["GT_RIG"] = cfg.Rig
-		env["BD_ACTOR"] = fmt.Sprintf("%s/witness", cfg.Rig)
-		env["GIT_AUTHOR_NAME"] = fmt.Sprintf("%s/witness", cfg.Rig)
 
 	case constants.RolePolecat:
 		env["GT_ROLE"] = fmt.Sprintf("%s/polecats/%s", cfg.Rig, cfg.AgentName)

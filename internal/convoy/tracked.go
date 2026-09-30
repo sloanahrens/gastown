@@ -411,7 +411,7 @@ func (t Town) issueClient() *beads.Beads {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved
 	}
-	return beads.NewWithBeadsDirAndRunner(root, "", t.bdRun)
+	return beads.NewWithBeadsDirAndRunner(root, "", t.Run)
 }
 
 func issueDetailsWithClient(client *beads.Beads, issueID string) *IssueDetails {

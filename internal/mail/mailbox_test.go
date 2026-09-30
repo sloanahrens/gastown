@@ -470,14 +470,14 @@ func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
 		}
 		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
 	}}
-	m := NewMailboxWithBeadsDir("deacon/", t.TempDir(), t.TempDir())
+	m := NewMailboxWithBeadsDir("mayor/", t.TempDir(), t.TempDir())
 	m.bd = bd.run
 	if err := m.closeInDir("hq-wisp-xv525", t.TempDir()); err != nil {
 		t.Fatalf("closeInDir: %v", err)
 	}
 
-	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "--actor=deacon/") {
-		t.Fatalf("bd close missing --actor=deacon/ matching assignee identity; calls:\n%s", log)
+	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "--actor=mayor/") {
+		t.Fatalf("bd close missing --actor=mayor/ matching assignee identity; calls:\n%s", log)
 	}
 }
 

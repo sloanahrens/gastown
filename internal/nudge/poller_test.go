@@ -2,17 +2,14 @@ package nudge
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 func TestPollerPidFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-gastown-crew-bear"
 
@@ -24,6 +21,7 @@ func TestPollerPidFile(t *testing.T) {
 }
 
 func TestPollerPidFile_SlashSanitized(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "some/session"
 
@@ -36,6 +34,7 @@ func TestPollerPidFile_SlashSanitized(t *testing.T) {
 }
 
 func TestPollerAlive_NoPidFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	_, alive := pollerAlive(townRoot, "nonexistent-session")
 	if alive {
@@ -44,6 +43,7 @@ func TestPollerAlive_NoPidFile(t *testing.T) {
 }
 
 func TestPollerAlive_StalePid(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-gastown-crew-test"
 
@@ -70,6 +70,7 @@ func TestPollerAlive_StalePid(t *testing.T) {
 }
 
 func TestPollerAlive_CorruptPidFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-gastown-crew-test"
 
@@ -89,6 +90,7 @@ func TestPollerAlive_CorruptPidFile(t *testing.T) {
 }
 
 func TestStopPoller_NoPidFile(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	// Should be a no-op, no error.
 	if err := StopPoller(townRoot, "nonexistent"); err != nil {
@@ -97,6 +99,7 @@ func TestStopPoller_NoPidFile(t *testing.T) {
 }
 
 func TestStopPoller_StalePid(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-gastown-crew-test"
 
@@ -121,6 +124,7 @@ func TestStopPoller_StalePid(t *testing.T) {
 }
 
 func TestPollerAlive_LiveProcess(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	session := "gt-gastown-crew-test"
 
@@ -145,9 +149,7 @@ func TestPollerAlive_LiveProcess(t *testing.T) {
 }
 
 func TestBuildPollerCommand_UsesDetachedProcessGroup(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("process group management is not supported on Windows")
-	}
+	t.Parallel()
 	townRoot := t.TempDir()
 	cmd := buildPollerCommand("/tmp/fake-gt", townRoot, "gt-gastown-crew-bear")
 
@@ -171,32 +173,17 @@ func TestBuildPollerCommand_UsesDetachedProcessGroup(t *testing.T) {
 	}
 }
 
-func TestSetProcessGroup_InstallsCancelHook(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("SetProcessGroup is a no-op on Windows")
-	}
-	cmd := exec.Command("true")
-	util.SetProcessGroup(cmd)
-
-	if cmd.Cancel == nil {
-		t.Fatal("SetProcessGroup() should install a cancel hook")
-	}
-}
-
 // Under `go test` os.Executable() is the test binary. Exec'ing it as the
 // nudge-poller runs the whole suite again, detached, and every StartPoller
 // site inside that run spawns another — the same recursion the daemon's
 // boot-triage guard exists for (gt-0mbw found it through a fake tmux that
 // made a Deacon look alive). StartPoller must refuse before Start.
 func TestStartPoller_RefusesTestBinary(t *testing.T) {
-	prev := pollerExecutable
-	t.Cleanup(func() { pollerExecutable = prev })
-
+	t.Parallel()
 	for _, name := range []string{"daemon.test", "daemon.test.exe"} {
 		exe := filepath.Join(t.TempDir(), name)
-		pollerExecutable = func() (string, error) { return exe, nil }
 		townRoot := t.TempDir()
-		_, err := StartPoller(townRoot, "gt-deacon")
+		_, err := startPoller(townRoot, "gt-deacon", func() (string, error) { return exe, nil })
 		if err == nil || !strings.Contains(err.Error(), "test binary") {
 			t.Fatalf("StartPoller with %s: err=%v, want a refusal naming the test binary", name, err)
 		}
