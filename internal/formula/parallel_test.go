@@ -5,6 +5,7 @@ import (
 )
 
 func TestParallelReadySteps(t *testing.T) {
+	t.Parallel()
 	// Parse the witness patrol formula
 	f, err := ParseFile("formulas/mol-witness-patrol.formula.toml")
 	if err != nil {

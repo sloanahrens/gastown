@@ -21,6 +21,7 @@ const polecatFormulaDoneWaitVerbatim = "gt done runs the local gate itself (lint
 // carry the no-retry-loop rule; only the default carries it in full, and the
 // variants point to docs/reference.md (gt-7dxw review, R2).
 func TestPolecatFormulasCarryTheSlotLoopRule(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{
 		"mol-polecat-work",
 		"mol-polecat-work-monorepo",
@@ -61,6 +62,7 @@ func TestPolecatFormulasCarryTheSlotLoopRule(t *testing.T) {
 // The failure rule must name the escalation path and must not offer a way
 // around the gate: gt done has no bypass flag (ADR 0004).
 func TestPolecatSlotLoopGuidanceDoesNotOfferPreVerified(t *testing.T) {
+	t.Parallel()
 	raw, err := GetEmbeddedFormulaContent("mol-polecat-work")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)

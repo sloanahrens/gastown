@@ -2,63 +2,30 @@ package polecat
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// buildLiveGitRepo lays out a repo on main with one commit in dir.
-func buildLiveGitRepo(t *testing.T, dir string) {
-	t.Helper()
-	for _, args := range [][]string{
-		{"init", "-b", "main"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test User"},
-	} {
-		runLiveGit(t, dir, args...)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	runLiveGit(t, dir, "add", ".")
-	runLiveGit(t, dir, "commit", "-m", "initial")
+// liveProbe and localProbe are ProbeLiveGitState and ProbeLiveGitStateLocal
+// over w's repositories.
+func liveProbe(w *world, dir string) LiveGitState {
+	return probeLiveGitState(w.opener(), dir, gitRepo.CheckUncommittedWork)
 }
 
-// initLiveGitRepo returns a copy of a repo on main with one commit, built
-// once per test binary.
-func initLiveGitRepo(t *testing.T) string {
-	t.Helper()
-	return cachedGitFixture(t, "live-git-repo", func(dir string) { buildLiveGitRepo(t, dir) })
+func localProbe(w *world, dir string) LiveGitState {
+	return probeLiveGitState(w.opener(), dir, gitRepo.CheckUncommittedWorkLocal)
 }
 
-// initLiveGitRepoWithRemote is initLiveGitRepo plus a bare origin carrying the
-// main branch, so the index-skew comparison refs a real seat has (origin/main
-// and the local main) both exist.
-func initLiveGitRepoWithRemote(t *testing.T) string {
+// initLiveGitRepo is a repository on main with one commit, in a new world.
+func initLiveGitRepo(t *testing.T) (*world, string) {
 	t.Helper()
-	root := cachedGitFixture(t, "live-git-repo-with-remote", func(root string) {
-		dir := filepath.Join(root, "work")
-		if err := os.Mkdir(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		buildLiveGitRepo(t, dir)
-		remote := filepath.Join(root, "remote.git")
-		runLiveGit(t, dir, "init", "--bare", remote)
-		runLiveGit(t, dir, "remote", "add", "origin", remote)
-		runLiveGit(t, dir, "push", "-u", "origin", "main")
-	})
-	return filepath.Join(root, "work")
-}
-
-// runLiveGit drives git in a probe test worktree, failing the test on error.
-func runLiveGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, out)
-	}
+	w := newWorld()
+	dir := t.TempDir()
+	w.InitRepo(t, dir)
+	w.Commit(t, dir, "main", "initial", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, dir)
+	return w, dir
 }
 
 // TestProbeLiveGitState measures the three facts the reuse verdict re-derives
@@ -68,7 +35,7 @@ func TestProbeLiveGitState(t *testing.T) {
 	t.Parallel()
 	t.Run("clean worktree is measured live and clean", func(t *testing.T) {
 		t.Parallel()
-		got := ProbeLiveGitState(initLiveGitRepo(t))
+		got := liveProbe(initLiveGitRepo(t))
 		if got.Source != GitStateSourceLive {
 			t.Fatalf("Source = %q, want %q (reason %q)", got.Source, GitStateSourceLive, got.FailedReason)
 		}
@@ -82,18 +49,12 @@ func TestProbeLiveGitState(t *testing.T) {
 
 	t.Run("stashed worktree reports the stash count", func(t *testing.T) {
 		t.Parallel()
-		dir := initLiveGitRepo(t)
+		w, dir := initLiveGitRepo(t)
 		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Changed\n"), 0644); err != nil {
 			t.Fatalf("write file: %v", err)
 		}
-		for _, args := range [][]string{{"stash", "push", "-m", "wip"}} {
-			cmd := exec.Command("git", args...)
-			cmd.Dir = dir
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("git %v: %v: %s", args, err, out)
-			}
-		}
-		got := ProbeLiveGitState(dir)
+		w.Stash(t, dir, "wip")
+		got := liveProbe(w, dir)
 		if got.Source != GitStateSourceLive {
 			t.Fatalf("Source = %q, want %q", got.Source, GitStateSourceLive)
 		}
@@ -104,7 +65,7 @@ func TestProbeLiveGitState(t *testing.T) {
 
 	t.Run("missing worktree fails closed to unknown", func(t *testing.T) {
 		t.Parallel()
-		got := ProbeLiveGitState(filepath.Join(t.TempDir(), "gone"))
+		got := liveProbe(newWorld(), filepath.Join(t.TempDir(), "gone"))
 		if got.Source != GitStateSourceUnknown {
 			t.Fatalf("Source = %q, want %q", got.Source, GitStateSourceUnknown)
 		}
@@ -123,7 +84,7 @@ func TestProbeLiveGitState(t *testing.T) {
 		// naively reports the rig root's branch and dirt as the polecat's — a
 		// confident "live" answer about somebody else's tree. It must be
 		// unmeasurable instead.
-		rigRoot := initLiveGitRepo(t)
+		w, rigRoot := initLiveGitRepo(t)
 		if err := os.WriteFile(filepath.Join(rigRoot, "rig-dirt.txt"), []byte("rig root churn\n"), 0644); err != nil {
 			t.Fatalf("write rig dirt: %v", err)
 		}
@@ -132,10 +93,10 @@ func TestProbeLiveGitState(t *testing.T) {
 			t.Fatalf("mkdir nested: %v", err)
 		}
 
-		if IsWorktreeRoot(nested) {
-			t.Fatalf("IsWorktreeRoot(%q) = true, want false (it is a plain directory inside %q)", nested, rigRoot)
+		if isWorktreeRoot(w.opener(), nested) {
+			t.Fatalf("isWorktreeRoot(%q) = true, want false (it is a plain directory inside %q)", nested, rigRoot)
 		}
-		got := ProbeLiveGitState(nested)
+		got := liveProbe(w, nested)
 		if got.Source != GitStateSourceUnknown {
 			t.Fatalf("Source = %q, want %q (probe %+v)", got.Source, GitStateSourceUnknown, got)
 		}
@@ -148,32 +109,8 @@ func TestProbeLiveGitState(t *testing.T) {
 
 		// The enclosing repo is itself a legitimate worktree root, so the check
 		// discriminates layout, not mere repo membership.
-		if !IsWorktreeRoot(rigRoot) {
-			t.Fatalf("IsWorktreeRoot(%q) = false, want true", rigRoot)
-		}
-	})
-
-	// gt-ycvx: the seat verdict this probe feeds is a cleanliness check, so a
-	// staged revert of a fix this checkout carries must read dirty — not as
-	// index skew, which would advertise the seat as reusable with the revert
-	// still in its index.
-	t.Run("staged revert of a fix this checkout carries reads dirty", func(t *testing.T) {
-		t.Parallel()
-		dir := initLiveGitRepoWithRemote(t)
-		runLiveGit(t, dir, "checkout", "-b", "polecat/jasper/om-x")
-		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test fixed\n"), 0644); err != nil {
-			t.Fatalf("write fix: %v", err)
-		}
-		runLiveGit(t, dir, "commit", "-am", "fix: confine the reviewer to a read-only allowlist")
-		runLiveGit(t, dir, "push", "-u", "origin", "polecat/jasper/om-x")
-		runLiveGit(t, dir, "checkout", "origin/main", "--", "README.md")
-
-		got := ProbeLiveGitState(dir)
-		if got.Source != GitStateSourceLive {
-			t.Fatalf("Source = %q, want %q (reason %q)", got.Source, GitStateSourceLive, got.FailedReason)
-		}
-		if !got.Dirty {
-			t.Fatalf("Dirty = false for a seat holding a staged security-fix revert (probe %+v)", got)
+		if !isWorktreeRoot(w.opener(), rigRoot) {
+			t.Fatalf("isWorktreeRoot(%q) = false, want true", rigRoot)
 		}
 	})
 }

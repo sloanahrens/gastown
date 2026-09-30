@@ -14,6 +14,7 @@ import (
 //
 // See: PR #1052 (original fix), gt-tjm9q (regression report)
 func TestPatrolFormulasHaveBackoffLogic(t *testing.T) {
+	t.Parallel()
 	// Patrol formulas that must have backoff logic.
 	// The loopStepID is the step that contains the await-signal logic;
 	// witness/deacon use "loop-or-exit".
@@ -75,6 +76,7 @@ func TestPatrolFormulasHaveBackoffLogic(t *testing.T) {
 //
 // Regression test: replaces TestPatrolFormulasHaveSquashCycle (steveyegge/gastown#1371).
 func TestPatrolFormulasHaveReportCycle(t *testing.T) {
+	t.Parallel()
 	type patrolFormula struct {
 		name       string
 		loopStepID string
@@ -126,6 +128,7 @@ func TestPatrolFormulasHaveReportCycle(t *testing.T) {
 //
 // Regression test for steveyegge/gastown#1712.
 func TestPatrolFormulasHaveWispGC(t *testing.T) {
+	t.Parallel()
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-deacon-patrol.formula.toml",
@@ -177,6 +180,7 @@ func TestPatrolFormulasHaveWispGC(t *testing.T) {
 // patrol cycle, so cooldown gates (which query closed receipts) never saw a
 // prior run and read permanently open.
 func TestPatrolFormulasProtectPluginRunReceiptsFromClosedWispGC(t *testing.T) {
+	t.Parallel()
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 		"mol-deacon-patrol.formula.toml",
@@ -219,6 +223,7 @@ func TestPatrolFormulasProtectPluginRunReceiptsFromClosedWispGC(t *testing.T) {
 //
 // Regression test for hq-3pp.
 func TestDeaconPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
+	t.Parallel()
 	content, err := formulasFS.ReadFile("formulas/mol-deacon-patrol.formula.toml")
 	if err != nil {
 		t.Fatalf("reading deacon patrol formula: %v", err)
@@ -258,6 +263,7 @@ func TestDeaconPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
 // context-exit respawn that skipped `gt patrol report`), breaking the
 // report -> next-cycle chain (observed: hq-wisp-vkx / hq-wisp-essh6).
 func TestWitnessPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
+	t.Parallel()
 	content, err := formulasFS.ReadFile("formulas/mol-witness-patrol.formula.toml")
 	if err != nil {
 		t.Fatalf("reading witness patrol formula: %v", err)
@@ -296,6 +302,7 @@ func TestWitnessPatrolDoesNotRunAgeBasedWispGC(t *testing.T) {
 //
 // Regression test for hq-9xs.
 func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
+	t.Parallel()
 	patrolFormulas := []string{
 		"mol-witness-patrol.formula.toml",
 	}
@@ -368,6 +375,7 @@ func TestPatrolFormulasUseDynamicBeadResolution(t *testing.T) {
 // (HeartbeatVeryStaleThreshold = 20m) causes the daemon to consider the Deacon
 // stuck and kill it, even though the Deacon is actively executing steps.
 func TestDeaconPatrolHasHeartbeatSteps(t *testing.T) {
+	t.Parallel()
 	content, err := formulasFS.ReadFile("formulas/mol-deacon-patrol.formula.toml")
 	if err != nil {
 		t.Fatalf("reading deacon patrol formula: %v", err)

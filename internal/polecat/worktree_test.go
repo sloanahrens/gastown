@@ -12,7 +12,7 @@ func TestVerifyWorktreeExistsStructuralFailures(t *testing.T) {
 	tmp := t.TempDir()
 
 	t.Run("missing directory", func(t *testing.T) {
-		err := VerifyWorktreeExists(filepath.Join(tmp, "missing"))
+		err := verifyWorktreeExists(newWorld().opener(), filepath.Join(tmp, "missing"))
 		if !IsStructuralWorktreeError(err) {
 			t.Fatalf("VerifyWorktreeExists missing dir structural = false, err=%v", err)
 		}
@@ -26,7 +26,7 @@ func TestVerifyWorktreeExistsStructuralFailures(t *testing.T) {
 		if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		err := VerifyWorktreeExists(path)
+		err := verifyWorktreeExists(newWorld().opener(), path)
 		if !IsStructuralWorktreeError(err) {
 			t.Fatalf("VerifyWorktreeExists file path structural = false, err=%v", err)
 		}
@@ -37,7 +37,7 @@ func TestVerifyWorktreeExistsStructuralFailures(t *testing.T) {
 		if err := os.Mkdir(path, 0755); err != nil {
 			t.Fatal(err)
 		}
-		err := VerifyWorktreeExists(path)
+		err := verifyWorktreeExists(newWorld().opener(), path)
 		if !IsStructuralWorktreeError(err) {
 			t.Fatalf("VerifyWorktreeExists missing .git structural = false, err=%v", err)
 		}
@@ -51,7 +51,7 @@ func TestVerifyWorktreeExistsStructuralFailures(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(path, ".git"), []byte("gitdir: missing-gitdir\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		err := VerifyWorktreeExists(path)
+		err := verifyWorktreeExists(newWorld().opener(), path)
 		if !IsStructuralWorktreeError(err) {
 			t.Fatalf("VerifyWorktreeExists broken gitdir structural = false, err=%v", err)
 		}
@@ -65,7 +65,7 @@ func TestVerifyWorktreeExistsStructuralFailures(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(path, ".git"), []byte("not a gitdir"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		err := VerifyWorktreeExists(path)
+		err := verifyWorktreeExists(newWorld().opener(), path)
 		if err == nil {
 			t.Fatal("VerifyWorktreeExists invalid git content returned nil")
 		}

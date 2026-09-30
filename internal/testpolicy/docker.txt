@@ -8,5 +8,4 @@
 internal/beads
 internal/convoy
 internal/mail
-internal/polecat
 internal/testutil

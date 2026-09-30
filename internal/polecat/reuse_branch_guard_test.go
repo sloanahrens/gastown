@@ -3,12 +3,9 @@ package polecat
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/git"
 )
 
 // gt-0kk2: no polecat reuse may move a branch it does not own.
@@ -17,26 +14,26 @@ import (
 // the branch the worktree was holding must still name its own commit after reuse.
 func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	mgr, mayorRig, _, added, w := canonicalWithPolecats(t, false, "alpha")
 	alpha := added["alpha"]
 
-	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+	mainSHA := w.rev(t, mayorRig, "origin/main")
 
 	// alpha's worktree starts out holding another polecat's branch, the state the
 	// gt-9ed0 session woke up in. Its tip is already on origin (and at the tip of
 	// main, so the reuse gate still reads the slot as reusable — the reset
 	// happened inside a reuse that the gate had cleared).
 	heldBranch := "polecat/quartz/gt-9ed0+mudclpwf"
-	runGit(t, mayorRig, "update-ref", "refs/heads/"+heldBranch, mainSHA)
-	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, mainSHA)
-	runGit(t, alpha.ClonePath, "checkout", heldBranch)
+	w.SetRef(t, mayorRig, "refs/heads/"+heldBranch, mainSHA)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+heldBranch, mainSHA)
+	w.switchTo(t, alpha.ClonePath, heldBranch)
 
-	heldBefore := gitProbeOutput(t, alpha.ClonePath, "rev-parse", "refs/heads/"+heldBranch)
+	heldBefore := w.rev(t, alpha.ClonePath, "refs/heads/"+heldBranch)
 
 	// The resume target: a different bead's branch, one commit ahead of main.
 	resumeBranch := "polecat/jasper/gt-bagu+mudcl5gv"
-	resumeSHA := branchAtNewCommit(t, mayorRig, resumeBranch, mainSHA, "bagu work (gt-bagu)")
-	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+resumeBranch, resumeSHA)
+	resumeSHA := w.branchAtNewCommit(t, mayorRig, resumeBranch, mainSHA, "bagu work (gt-bagu)")
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+resumeBranch, resumeSHA)
 
 	reused, err := mgr.ReuseIdlePolecat("alpha", AddOptions{
 		HookBead:     "gt-next",
@@ -46,7 +43,7 @@ func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 		t.Fatalf("ReuseIdlePolecat: %v", err)
 	}
 
-	heldAfter := gitProbeOutput(t, reused.ClonePath, "rev-parse", "refs/heads/"+heldBranch)
+	heldAfter := w.rev(t, reused.ClonePath, "refs/heads/"+heldBranch)
 	if heldAfter != heldBefore {
 		t.Errorf("refs/heads/%s moved from %s to %s during reuse — a polecat must never move the branch it merely holds",
 			heldBranch, heldBefore, heldAfter)
@@ -55,14 +52,14 @@ func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 	if reused.Branch != resumeBranch {
 		t.Errorf("reused branch = %q, want %q", reused.Branch, resumeBranch)
 	}
-	if head := gitProbeOutput(t, reused.ClonePath, "symbolic-ref", "--short", "HEAD"); head != resumeBranch {
+	if head := w.branch(t, reused.ClonePath); head != resumeBranch {
 		t.Errorf("HEAD = %q, want %q", head, resumeBranch)
 	}
-	if tip := gitProbeOutput(t, reused.ClonePath, "rev-parse", "HEAD"); tip != resumeSHA {
+	if tip := w.rev(t, reused.ClonePath, "HEAD"); tip != resumeSHA {
 		t.Errorf("HEAD = %s, want the resume branch's origin tip %s", tip, resumeSHA)
 	}
-	if status := gitProbeOutput(t, reused.ClonePath, "status", "--porcelain"); status != "" {
-		t.Errorf("reused worktree is dirty:\n%s", status)
+	if w.dirty(t, reused.ClonePath) {
+		t.Errorf("reused worktree is dirty")
 	}
 }
 
@@ -71,23 +68,23 @@ func TestReuseIdlePolecat_CrossedSwap_LeavesHeldBranchRefAlone(t *testing.T) {
 // holding must not follow it there.
 func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	mgr, mayorRig, _, added, w := canonicalWithPolecats(t, false, "alpha")
 	alpha := added["alpha"]
 
-	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+	mainSHA := w.rev(t, mayorRig, "origin/main")
 
 	// alpha's worktree holds another bead's branch, one commit ahead of main so a
 	// reset to origin/main would be visible in the ref.
 	heldBranch := "polecat/pearl/gt-mjll+mud9574c"
-	heldSHA := branchAtNewCommit(t, mayorRig, heldBranch, mainSHA, "pearl work (gt-mjll)")
-	runGit(t, alpha.ClonePath, "checkout", heldBranch)
+	heldSHA := w.branchAtNewCommit(t, mayorRig, heldBranch, mainSHA, "pearl work (gt-mjll)")
+	w.switchTo(t, alpha.ClonePath, heldBranch)
 
 	reused, err := mgr.ReuseIdlePolecat("alpha", AddOptions{HookBead: "gt-next"})
 	if err != nil {
 		t.Fatalf("ReuseIdlePolecat: %v", err)
 	}
 
-	heldAfter := gitProbeOutput(t, reused.ClonePath, "rev-parse", "refs/heads/"+heldBranch)
+	heldAfter := w.rev(t, reused.ClonePath, "refs/heads/"+heldBranch)
 	if heldAfter != heldSHA {
 		t.Errorf("refs/heads/%s moved from %s to %s during a fresh sling — the reuse must not rewrite the branch it merely held",
 			heldBranch, heldSHA, heldAfter)
@@ -95,7 +92,7 @@ func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
 	if reused.Branch == heldBranch {
 		t.Errorf("fresh sling reused branch %q instead of creating one", heldBranch)
 	}
-	if tip := gitProbeOutput(t, reused.ClonePath, "rev-parse", "HEAD"); tip != mainSHA {
+	if tip := w.rev(t, reused.ClonePath, "HEAD"); tip != mainSHA {
 		t.Errorf("HEAD = %s, want the fresh branch at origin/main %s", tip, mainSHA)
 	}
 }
@@ -105,26 +102,26 @@ func TestReuseIdlePolecat_FreshSling_LeavesHeldBranchRefAlone(t *testing.T) {
 // worktree, reuse must refuse loudly and leave both worktrees untouched.
 func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	mgr, mayorRig, _, added, w := canonicalWithPolecats(t, false, "alpha")
 	alpha := added["alpha"]
 	beta, err := mgr.AddWithOptions("beta", AddOptions{})
 	if err != nil {
 		t.Fatalf("AddWithOptions(beta): %v", err)
 	}
 
-	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+	mainSHA := w.rev(t, mayorRig, "origin/main")
 
 	// The branch beta is live on. Resuming it in alpha would put two worktrees on
 	// one ref, which is how the crossed state that stranded gt-9ed0 was built.
 	heldBranch := "polecat/alpha/gt-x+aaa"
-	runGit(t, mayorRig, "update-ref", "refs/heads/"+heldBranch, mainSHA)
-	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, mainSHA)
-	runGit(t, beta.ClonePath, "checkout", heldBranch)
+	w.SetRef(t, mayorRig, "refs/heads/"+heldBranch, mainSHA)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+heldBranch, mainSHA)
+	w.switchTo(t, beta.ClonePath, heldBranch)
 	// Uncommitted edits make beta live work. A clean idle holder is released
 	// instead of refused (gt-l9td).
 	dirtyWorktree(t, beta.ClonePath)
 
-	alphaBefore := gitProbeOutput(t, alpha.ClonePath, "symbolic-ref", "--short", "HEAD")
+	alphaBefore := w.branch(t, alpha.ClonePath)
 
 	_, err = mgr.ReuseIdlePolecat("alpha", AddOptions{
 		HookBead:     "gt-next",
@@ -144,13 +141,13 @@ func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 	}
 
 	// Refusing must be inert: alpha keeps the branch it had, and neither ref moved.
-	if alphaAfter := gitProbeOutput(t, alpha.ClonePath, "symbolic-ref", "--short", "HEAD"); alphaAfter != alphaBefore {
+	if alphaAfter := w.branch(t, alpha.ClonePath); alphaAfter != alphaBefore {
 		t.Errorf("alpha's checked-out branch changed from %q to %q on a refused reuse", alphaBefore, alphaAfter)
 	}
-	if betaHead := gitProbeOutput(t, beta.ClonePath, "symbolic-ref", "--short", "HEAD"); betaHead != heldBranch {
+	if betaHead := w.branch(t, beta.ClonePath); betaHead != heldBranch {
 		t.Errorf("beta's checked-out branch = %q, want %q", betaHead, heldBranch)
 	}
-	if tip := gitProbeOutput(t, beta.ClonePath, "rev-parse", "refs/heads/"+heldBranch); tip != mainSHA {
+	if tip := w.rev(t, beta.ClonePath, "refs/heads/"+heldBranch); tip != mainSHA {
 		t.Errorf("refs/heads/%s moved to %s on a refused reuse, want %s", heldBranch, tip, mainSHA)
 	}
 }
@@ -160,14 +157,14 @@ func TestReuseIdlePolecat_RefusesBranchHeldByAnotherWorktree(t *testing.T) {
 // with `worktree add --force`, which git permits and so needs the same check.
 func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig, _, added := setupCanonicalWithPolecats(t, false, "alpha")
+	mgr, mayorRig, _, added, w := canonicalWithPolecats(t, false, "alpha")
 	alpha := added["alpha"]
 
-	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+	mainSHA := w.rev(t, mayorRig, "origin/main")
 	heldBranch := "polecat/alpha/gt-x+aaa"
-	runGit(t, mayorRig, "update-ref", "refs/heads/"+heldBranch, mainSHA)
-	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+heldBranch, mainSHA)
-	runGit(t, alpha.ClonePath, "checkout", heldBranch)
+	w.SetRef(t, mayorRig, "refs/heads/"+heldBranch, mainSHA)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+heldBranch, mainSHA)
+	w.switchTo(t, alpha.ClonePath, heldBranch)
 	dirtyWorktree(t, alpha.ClonePath)
 
 	_, err := mgr.AddWithOptions("beta", AddOptions{HookBead: "gt-next", ResumeBranch: heldBranch})
@@ -182,7 +179,7 @@ func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
 	if mgr.exists("beta") {
 		t.Error("refused AddWithOptions left beta behind")
 	}
-	if head := gitProbeOutput(t, alpha.ClonePath, "symbolic-ref", "--short", "HEAD"); head != heldBranch {
+	if head := w.branch(t, alpha.ClonePath); head != heldBranch {
 		t.Errorf("alpha's checked-out branch = %q, want %q", head, heldBranch)
 	}
 }
@@ -190,12 +187,11 @@ func TestAddWithOptions_RefusesResumeBranchHeldByAnotherWorktree(t *testing.T) {
 // TestHeldByOtherWorktree_FailsClosedOnUnreadableList pins the failure path: a
 // worktree list that cannot be read must refuse, not report the branch free.
 func TestHeldByOtherWorktree_FailsClosedOnUnreadableList(t *testing.T) {
+	t.Parallel()
 	notARepo := t.TempDir()
-	// Keep the probe out of any repo an enclosing TMPDIR might be inside.
-	t.Setenv("GIT_CEILING_DIRECTORIES", notARepo)
 	branch := "polecat/other/gt-x+aaa"
 
-	err := heldByOtherWorktree(git.NewGit(notARepo), branch)
+	err := heldByOtherWorktree(newWorld().repo(notARepo), branch)
 	if err == nil {
 		t.Fatal("unreadable worktree list reported the branch as free; want a refusal")
 	}
@@ -213,21 +209,20 @@ func TestHeldByOtherWorktree_FailsClosedOnUnreadableList(t *testing.T) {
 // pruned the stale entry by hand.
 func TestReuseIdlePolecat_IgnoresPrunableHolder(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig := setupCanonicalBranchManagerTest(t)
-	mainSHA := gitProbeOutput(t, mayorRig, "rev-parse", "origin/main")
+	mgr, mayorRig, _, w := canonicalRig(t)
+	mainSHA := w.rev(t, mayorRig, "origin/main")
 
 	// The holder: a worktree deleted without being pruned, left on the branch.
 	deadPath := filepath.Join(t.TempDir(), "stale-worktree")
 	resumeBranch := "polecat/jasper/gt-bagu+mudcl5gv"
-	resumeSHA := branchAtNewCommit(t, mayorRig, resumeBranch, mainSHA, "bagu work (gt-bagu)")
-	runGit(t, mayorRig, "update-ref", "refs/remotes/origin/"+resumeBranch, resumeSHA)
-	runGit(t, mayorRig, "worktree", "add", "--detach", deadPath, mainSHA)
-	runGit(t, deadPath, "checkout", resumeBranch)
+	resumeSHA := w.branchAtNewCommit(t, mayorRig, resumeBranch, mainSHA, "bagu work (gt-bagu)")
+	w.SetRef(t, mayorRig, "refs/remotes/origin/"+resumeBranch, resumeSHA)
+	if err := w.OpenBranchRepo(mayorRig).WorktreeAddDetached(deadPath, mainSHA); err != nil {
+		t.Fatal(err)
+	}
+	w.switchTo(t, deadPath, resumeBranch)
 	if err := os.RemoveAll(deadPath); err != nil {
 		t.Fatalf("removing the holder's directory: %v", err)
-	}
-	if listed := gitProbeOutput(t, mayorRig, "worktree", "list", "--porcelain"); !strings.Contains(listed, "prunable") {
-		t.Fatalf("holder is not prunable, so this test no longer covers a stale registration:\n%s", listed)
 	}
 
 	alpha, err := mgr.AddWithOptions("alpha", AddOptions{})
@@ -242,28 +237,21 @@ func TestReuseIdlePolecat_IgnoresPrunableHolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReuseIdlePolecat refused a branch whose only holder is a deleted worktree: %v", err)
 	}
-	if tip := gitProbeOutput(t, reused.ClonePath, "rev-parse", "HEAD"); tip != resumeSHA {
+	if tip := w.rev(t, reused.ClonePath, "HEAD"); tip != resumeSHA {
 		t.Errorf("HEAD = %s, want the resume branch's origin tip %s (worktree %s)", tip, resumeSHA, alpha.ClonePath)
 	}
 	// The stale registration is pruned, not just ignored: git 2.50 refuses the
 	// checkout above while it exists, and 2.42 does not, so this is the
 	// assertion that holds the fix on either version (gt-22hdp.39).
-	if listed := gitProbeOutput(t, mayorRig, "worktree", "list", "--porcelain"); strings.Contains(listed, deadPath) {
-		t.Errorf("the deleted holder is still registered:\n%s", listed)
+	list, err := w.repo(mayorRig).WorktreeList()
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// branchAtNewCommit creates branch at a fresh commit parented on ref, without
-// touching any working tree.
-func branchAtNewCommit(t *testing.T, repo, branch, parent, message string) string {
-	t.Helper()
-
-	tree := gitProbeOutput(t, repo, "rev-parse", parent+"^{tree}")
-	sha := gitProbeOutput(t, repo,
-		"-c", "user.name=test", "-c", "user.email=test@example.com",
-		"commit-tree", tree, "-p", parent, "-m", message)
-	runGit(t, repo, "update-ref", "refs/heads/"+branch, sha)
-	return sha
+	for _, wt := range list {
+		if wt.Path == deadPath {
+			t.Errorf("the deleted holder is still registered: %+v", list)
+		}
+	}
 }
 
 // holderFromRefusal pulls the holding worktree path out of a refusal message.
@@ -280,22 +268,4 @@ func holderFromRefusal(t *testing.T, message string) string {
 		holder = holder[:nl]
 	}
 	return holder
-}
-
-func gitProbeOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
-		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
-	}
-	return strings.TrimSpace(string(out))
 }

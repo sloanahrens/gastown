@@ -9,7 +9,7 @@ import (
 // minGitFree is the number of entries gitfree.txt holds. The list only
 // grows: converting a package onto gitfake adds its line AND raises this, in
 // the same change.
-const minGitFree = 6
+const minGitFree = 8
 
 func TestGitFreeFindingsFixtures(t *testing.T) {
 	t.Parallel()

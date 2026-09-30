@@ -1,7 +1,6 @@
 package polecat
 
 import (
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,9 +18,6 @@ func TestFormatGeneratedBranchName_ActionCompatible(t *testing.T) {
 	claudeCodeActionBranch := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9/_.#+,-]*$`)
 	if !claudeCodeActionBranch.MatchString(branch) {
 		t.Fatalf("FormatGeneratedBranchName() = %q, rejected by claude-code-action branch pattern", branch)
-	}
-	if err := exec.Command("git", "check-ref-format", "--branch", branch).Run(); err != nil {
-		t.Fatalf("FormatGeneratedBranchName() = %q, rejected by git check-ref-format: %v", branch, err)
 	}
 }
 

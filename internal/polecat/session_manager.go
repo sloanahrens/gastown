@@ -19,7 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -68,16 +67,46 @@ var (
 
 // SessionManager handles polecat session lifecycle.
 type SessionManager struct {
-	tmux *tmux.Tmux
+	tmux sessionTmux
 	rig  *rig.Rig
+	// gits opens git on the polecat's worktree; its zero value opens
+	// *git.Git.
+	gits gitOpener
 }
+
+// sessionTmux is the tmux surface a SessionManager drives. *tmux.Tmux
+// provides it; tests pass tmuxfake with the few calls it lacks added.
+type sessionTmux interface {
+	startupNudgeTmux
+	sessionProbe
+	NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error
+	ListSessions() ([]string, error)
+	GetSessionInfo(name string) (*tmux.SessionInfo, error)
+	GetPaneID(session string) (string, error)
+	SetEnvironment(session, key, value string) error
+	GetEnvironment(session, key string) (string, error)
+	ConfigureGasTownSession(session string, theme *tmux.Theme, rig, worker, role string) error
+	SetPaneDiedHook(session, agentID string) error
+	WaitForCommand(session string, excludeCommands []string, timeout time.Duration) error
+	WaitForRuntimeReady(session string, rc *config.RuntimeConfig, timeout time.Duration) error
+	AcceptStartupDialogs(session string) error
+	CheckStartupBlocked(session string) error
+	CheckSessionHealth(session string, maxInactivity time.Duration) tmux.ZombieStatus
+	SendKeysRaw(session, keys string) error
+	SendKeysDebounced(session, keys string, debounceMs int) error
+	CapturePane(session string, lines int) (string, error)
+	AttachSession(session string) error
+}
+
+var _ sessionTmux = (*tmux.Tmux)(nil)
 
 // NewSessionManager creates a new polecat session manager for a rig.
 func NewSessionManager(t *tmux.Tmux, r *rig.Rig) *SessionManager {
-	return &SessionManager{
-		tmux: t,
-		rig:  r,
+	m := &SessionManager{rig: r}
+	if t != nil {
+		m.tmux = t
 	}
+	return m
 }
 
 // SessionStartOptions configures polecat session startup.
@@ -231,7 +260,7 @@ func parseFreshBranchName(branch string) freshBranchMeta {
 	return freshBranchMeta{polecat: meta.Polecat, issue: meta.Issue, ok: true}
 }
 
-func (m *SessionManager) canonicalSessionStartPoint(g *git.Git) string {
+func (m *SessionManager) canonicalSessionStartPoint(g gitRepo) string {
 	defaultBranch := ""
 	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
@@ -276,7 +305,7 @@ func shouldCreateFreshSessionBranch(currentBranch, issue, canonicalBranch string
 // is still on the base branch. That case is an error rather than a log line
 // because nothing downstream can tell a session that opened on the base
 // branch from a healthy one (gt-ns8t).
-func (m *SessionManager) ensureCanonicalSessionBranch(g *git.Git, polecat string, opts SessionStartOptions) (string, error) {
+func (m *SessionManager) ensureCanonicalSessionBranch(g gitRepo, polecat string, opts SessionStartOptions) (string, error) {
 	townRoot := filepath.Dir(m.rig.Path)
 
 	currentBranch, err := g.CurrentBranch()
@@ -512,7 +541,7 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// these env vars allow branch detection and path resolution without a
 	// working directory.
 	polecatGitBranch := ""
-	if g := git.NewGit(workDir); g != nil {
+	if g := m.gits.Open(workDir); g != nil {
 		branch, err := m.ensureCanonicalSessionBranch(g, polecat, opts)
 		if err != nil {
 			// Before any tmux session exists, so nothing is left to clean up.
@@ -646,8 +675,11 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		go m.verifyStartupNudgeDelivery(sessionID, runtimeConfig, startupNudgeContent)
 	}
 
-	// Legacy fallback for other startup paths (non-fatal)
-	_ = runtime.RunStartupFallback(m.tmux, sessionID, "polecat", runtimeConfig)
+	// Legacy fallback for other startup paths (non-fatal). It and the PID
+	// tracking below need the real tmux; a test's fake tmux skips them.
+	if real, ok := m.tmux.(*tmux.Tmux); ok {
+		_ = runtime.RunStartupFallback(real, sessionID, "polecat", runtimeConfig)
+	}
 
 	// Verify session survived startup - if the command crashed, the session may have died.
 	// Without this check, Start() would return success even if the pane died during initialization.
@@ -678,7 +710,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	}
 
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
-	_ = session.TrackSessionPID(townRoot, sessionID, m.tmux)
+	if real, ok := m.tmux.(*tmux.Tmux); ok {
+		_ = session.TrackSessionPID(townRoot, sessionID, real)
+	}
 
 	// Touch initial heartbeat so liveness detection works from the start (gt-qjtq).
 	// Subsequent touches happen on every gt command via persistentPreRun.
@@ -726,7 +760,9 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	// Try graceful shutdown first
 	if !force {
 		_ = m.tmux.SendKeysRaw(sessionID, "C-c")
-		session.WaitForSessionExit(m.tmux, sessionID, constants.GracefulShutdownTimeout)
+		if real, ok := m.tmux.(*tmux.Tmux); ok {
+			session.WaitForSessionExit(real, sessionID, constants.GracefulShutdownTimeout)
+		}
 	}
 
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.

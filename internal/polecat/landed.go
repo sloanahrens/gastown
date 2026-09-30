@@ -2,8 +2,6 @@ package polecat
 
 import (
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/git"
 )
 
 // LandedEvidence is the git fact "the work this polecat was carrying is already
@@ -43,6 +41,11 @@ type LandedEvidenceProbe func() LandedEvidence
 // LandedEvidence, so a caller that cannot measure this treats the MR as still
 // holding its slot.
 func ProbeWorkLandedOnRef(clonePath, branch, remote string) LandedEvidence {
+	return probeWorkLandedOnRef(gitOpener{}, clonePath, branch, remote)
+}
+
+// probeWorkLandedOnRef is ProbeWorkLandedOnRef with git opened by gits.
+func probeWorkLandedOnRef(gits gitOpener, clonePath, branch, remote string) LandedEvidence {
 	clonePath = strings.TrimSpace(clonePath)
 	branch = strings.TrimSpace(branch)
 	if clonePath == "" || branch == "" || branch == "HEAD" {
@@ -51,7 +54,7 @@ func ProbeWorkLandedOnRef(clonePath, branch, remote string) LandedEvidence {
 	if remote == "" {
 		remote = "origin"
 	}
-	g := git.NewGit(clonePath)
+	g := gits.Open(clonePath)
 	// RemoteDefaultBranch falls back to "main" when it cannot resolve
 	// origin/HEAD; an unresolvable ref then fails the preservation checks
 	// below, which is the fail-closed answer rather than a wrong one.
@@ -84,7 +87,7 @@ func ProbeWorkLandedOnRef(clonePath, branch, remote string) LandedEvidence {
 // "this never carried anything". Reflogs would separate them only by also
 // crediting a branch that committed and then reset back to main, whose work is
 // gone — the fail-open this probe exists to refuse.
-func refCarriesOwnWork(g *git.Git, head, ref string) bool {
+func refCarriesOwnWork(g gitRepo, head, ref string) bool {
 	headSHA, err := g.Rev(head)
 	if err != nil {
 		return false
@@ -110,7 +113,7 @@ func refCarriesOwnWork(g *git.Git, head, ref string) bool {
 // refPreservedBy reports whether head's work is contained in ref: ancestry
 // where possible, merge-tree no-op where the work landed by merge or squash.
 // Any error — an unresolvable ref, a broken worktree — is "not preserved".
-func refPreservedBy(g *git.Git, head, ref string) bool {
+func refPreservedBy(g gitRepo, head, ref string) bool {
 	status, err := g.RefPreservedByRef(head, ref)
 	return err == nil && status.Preserved
 }

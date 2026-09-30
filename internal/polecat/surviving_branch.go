@@ -7,14 +7,21 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/git"
 )
 
 // rigGitRepo returns the git directory holding a rig's shared refs, mirroring
 // Manager.repoBase: the shared bare repo (<rigRoot>/.repo.git) when present,
 // otherwise the legacy <rigRoot>/mayor/rig clone. Returns "" when neither
 // exists, which callers must treat as "cannot determine" (fail open).
+// openRigRepo opens the repo rigGitRepo found: the bare .repo.git by its git
+// directory, mayor/rig as a working directory.
+func openRigRepo(gits gitOpener, root string) gitRepo {
+	if filepath.Base(root) == ".repo.git" {
+		return gits.OpenDir(root, "")
+	}
+	return gits.Open(root)
+}
+
 func rigGitRepo(rigRoot string) string {
 	bare := filepath.Join(rigRoot, ".repo.git")
 	if info, err := os.Stat(bare); err == nil && info.IsDir() {
@@ -33,17 +40,15 @@ func rigGitRepo(rigRoot string) string {
 // each call is an ls-remote, and an unreachable remote costs the full query
 // timeout.
 func ListOriginPolecatBranches(rigRoot string) ([]string, error) {
+	return listOriginPolecatBranches(gitOpener{}, rigRoot)
+}
+
+func listOriginPolecatBranches(gits gitOpener, rigRoot string) ([]string, error) {
 	root := rigGitRepo(rigRoot)
 	if root == "" {
 		return nil, fmt.Errorf("no git repo under %s (neither .repo.git nor mayor/rig)", rigRoot)
 	}
-
-	var g *git.Git
-	if filepath.Base(root) == ".repo.git" {
-		g = git.NewGitWithDir(root, "")
-	} else {
-		g = git.NewGit(root)
-	}
+	g := openRigRepo(gits, root)
 
 	refs, err := g.ListRemoteRefsWithHashes("origin", "refs/heads/polecat/")
 	if err != nil {
@@ -68,11 +73,15 @@ func ListOriginPolecatBranches(rigRoot string) ([]string, error) {
 // spawns a second worker from main on work that already exists (gt-ibt8 saw
 // four polecats on one bead, gt-da2x three).
 func FindSurvivingBranchesForIssue(rigRoot, issueID string) ([]string, error) {
+	return findSurvivingBranchesForIssue(gitOpener{}, rigRoot, issueID)
+}
+
+func findSurvivingBranchesForIssue(gits gitOpener, rigRoot, issueID string) ([]string, error) {
 	if strings.TrimSpace(issueID) == "" {
 		return nil, nil
 	}
 
-	branches, err := ListOriginPolecatBranches(rigRoot)
+	branches, err := listOriginPolecatBranches(gits, rigRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +151,11 @@ func branchRevision(branch, issueID string) string {
 // A non-empty error means the remote could not be queried; callers must fail
 // open on it rather than treating the bead as feedable.
 func SurvivingBranchForIssue(rigRoot, issueID string) (string, error) {
-	branches, err := FindSurvivingBranchesForIssue(rigRoot, issueID)
+	return survivingBranchForIssue(gitOpener{}, rigRoot, issueID)
+}
+
+func survivingBranchForIssue(gits gitOpener, rigRoot, issueID string) (string, error) {
+	branches, err := findSurvivingBranchesForIssue(gits, rigRoot, issueID)
 	if err != nil {
 		return "", err
 	}

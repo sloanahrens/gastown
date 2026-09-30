@@ -604,7 +604,9 @@ func TestEnsureLocalExcludePatterns_LinkedWorktreeUsesCommonDir(t *testing.T) {
 			t.Errorf("common-dir info/exclude missing %s, got:\n%s", p, content)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(worktreePath, ".git")); err == nil {
+	// A linked worktree's .git is a file naming its private git dir, so an
+	// exclude file under it would be a directory where git has none.
+	if _, err := os.Stat(filepath.Join(worktreePath, ".git", "info", "exclude")); err == nil {
 		t.Errorf("patterns were written under the worktree itself")
 	}
 }
