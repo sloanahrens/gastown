@@ -106,9 +106,10 @@ func TestCheckTownConfig(t *testing.T) {
 // TestNewRefusesAnUnparseableTownConfig: the daemon does not start on a
 // config it cannot read, and refuses before touching tmux or the file.
 //
-// this test must not run beside a parallel test that reads the environment.
+// New reaches os.Setenv on its success path, so this test must not run beside
+// a parallel test that reads the environment.
 //
-//testpolicy:allow parallel — New reaches os.Setenv on its success path, so
+//testpolicy:allow parallel — New can write the process environment
 func TestNewRefusesAnUnparseableTownConfig(t *testing.T) {
 	town := t.TempDir()
 	path := writeTownFile(t, town, "mayor/daemon.json", brokenDaemonJSON)
@@ -150,6 +151,8 @@ func TestConfigSaveDaemonPatrolConfigTypeChecksAgainstTheDaemonType(t *testing.T
 // TestNewRefusesAnUnknownDaemonJSONKey: a misspelled patrol key is a
 // refusal naming the key, not a patrol silently left at its default
 // (gt-y3pgh.1, G3-17).
+//
+//testpolicy:allow parallel — New can write the process environment
 func TestNewRefusesAnUnknownDaemonJSONKey(t *testing.T) {
 	town := t.TempDir()
 	const misspelled = `{"type": "daemon-patrol-config", "version": 1, "patrols": {"mayor": {"enabeld": false}}}`

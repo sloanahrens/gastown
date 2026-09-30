@@ -4,7 +4,6 @@ internal/beads
 internal/cmd
 internal/config
 internal/convoy
-internal/daemon
 internal/deacon
 internal/doctor
 internal/dog
@@ -13,7 +12,6 @@ internal/hooks
 internal/mayor
 internal/nudge
 internal/plugin
-internal/polecat
 internal/protocol
 internal/reaper
 internal/runtime

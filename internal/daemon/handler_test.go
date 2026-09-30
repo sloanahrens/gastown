@@ -16,23 +16,6 @@ import (
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
-// testStubWispTree replaces the wisp-tree read for the duration of the test.
-func testStubWispTree(t *testing.T, fn func(townRoot, wispID string) ([]beads.WispStep, error)) {
-	t.Helper()
-	prev := wispTreeFn
-	t.Cleanup(func() { wispTreeFn = prev })
-	wispTreeFn = fn
-}
-
-// testStubCloseStaleWisp replaces the abandoned-wisp close for the duration of
-// the test.
-func testStubCloseStaleWisp(t *testing.T, fn func(townRoot, wispID string, tree []beads.WispStep) (int, error)) {
-	t.Helper()
-	prev := closeStaleWispFn
-	t.Cleanup(func() { closeStaleWispFn = prev })
-	closeStaleWispFn = fn
-}
-
 // testHandlerDaemon creates a minimal Daemon with a logger for handler tests.
 func testHandlerDaemon(t *testing.T, townRoot string) *Daemon {
 	t.Helper()
@@ -508,22 +491,22 @@ func TestDispatchPlugins_SkipsManualGatePlugin(t *testing.T) {
 	}
 }
 func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaWithIDFn
-	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
-	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	var wisps wispOps
+	wisps.hooked = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 		return hookedFormulaResult{}, nil
 	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := handlerDogSessions(d)
 
-	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger, wisps)
 	if got == nil {
 		t.Fatal("findDispatchableDog returned nil; expected an idle dog")
 	}
@@ -547,18 +530,18 @@ func TestFindDispatchableDog_PicksFirstIdleWhenNoSessionsLive(t *testing.T) {
 // The decision logic itself (does a set of hooked beads carry
 // attached_formula metadata) is covered in internal/beads. This test
 // exercises findDispatchableDog's dispatch loop via the
-// dogHasHookedFormulaWithIDFn and wispTreeFn seams so it never shells out to
+// wispOps seams (hooked and tree) so it never shells out to
 // a real bd/Dolt backend.
 func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaWithIDFn
-	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
-	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	var wisps wispOps
+	wisps.hooked = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 		if dogName == "alpha" {
 			return hookedFormulaResult{hasHooked: true, wispID: "wisp-alpha"}, nil
 		}
@@ -569,18 +552,18 @@ func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
 	// which is the point of this test: a hooked dog is skipped, not reaped.
 	// The tree read is stubbed to fail so the test also pins the fail-safe
 	// (an unreadable tree must leave the wisp alone rather than close it).
-	testStubWispTree(t, func(townRoot, wispID string) ([]beads.WispStep, error) {
+	wisps.tree = func(townRoot, wispID string) ([]beads.WispStep, error) {
 		return nil, errors.New("bd unavailable")
-	})
-	testStubCloseStaleWisp(t, func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
+	}
+	wisps.closeStale = func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
 		t.Errorf("closeStaleWisp called for %s; an unreadable tree must not close anything", wispID)
 		return 0, nil
-	})
+	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := handlerDogSessions(d)
 
-	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger, wisps)
 	if got == nil {
 		t.Fatal("findDispatchableDog returned nil; expected bravo to be dispatchable")
 	}
@@ -592,11 +575,12 @@ func TestFindDispatchableDog_SkipsIdleDogWithHookedFormula(t *testing.T) {
 // TestFindDispatchableDog_ClosesStaleWisp covers the gt-da2x recovery path:
 // a dog that went idle while its formula wisp was created BEFORE the idle
 // transition, and whose wisp has zero step progress, is abandoned. The
-// handler must close the wisp (via the closeStaleWispFn seam) and skip the
+// handler must close the wisp (via the wispOps close seam) and skip the
 // dog for THIS tick — with the wisp gone, the dog is dispatchable on the next
 // tick. A healthy wisp (progress made, or created after the dog went idle)
 // must be left alone and the dog skipped.
 func TestFindDispatchableDog_ClosesStaleWisp(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -605,9 +589,8 @@ func TestFindDispatchableDog_ClosesStaleWisp(t *testing.T) {
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now().Add(-10*time.Minute))
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaWithIDFn
-	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
-	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	var wisps wispOps
+	wisps.hooked = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 		if dogName == "alpha" {
 			return hookedFormulaResult{
 				hasHooked:   true,
@@ -619,27 +602,27 @@ func TestFindDispatchableDog_ClosesStaleWisp(t *testing.T) {
 	}
 
 	// Zero progress: every step is still open.
-	testStubWispTree(t, func(townRoot, wispID string) ([]beads.WispStep, error) {
+	wisps.tree = func(townRoot, wispID string) ([]beads.WispStep, error) {
 		return []beads.WispStep{
 			{ID: "wisp-alpha"},
 			{ID: "wisp-alpha.1", Status: "open"},
 			{ID: "wisp-alpha.2", Status: "open"},
 		}, nil
-	})
+	}
 
 	var closedTrees [][]beads.WispStep
-	testStubCloseStaleWisp(t, func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
+	wisps.closeStale = func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
 		if wispID != "wisp-alpha" {
 			t.Errorf("closeStaleWisp wispID = %q, want wisp-alpha", wispID)
 		}
 		closedTrees = append(closedTrees, tree)
 		return len(tree), nil
-	})
+	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := handlerDogSessions(d)
 
-	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger, wisps)
 	if got == nil {
 		t.Fatal("findDispatchableDog returned nil; expected bravo to be dispatchable")
 	}
@@ -659,14 +642,14 @@ func TestFindDispatchableDog_ClosesStaleWisp(t *testing.T) {
 // mid-formula), the wisp is NOT closed — it is left for the reaper/deacon
 // patrol, and the dog is skipped for new plugin dispatch.
 func TestFindDispatchableDog_KeepsProgressedWisp(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now().Add(-10*time.Minute))
 
-	prevHooked := dogHasHookedFormulaWithIDFn
-	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
-	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	var wisps wispOps
+	wisps.hooked = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 		return hookedFormulaResult{
 			hasHooked:   true,
 			wispID:      "wisp-alpha",
@@ -675,24 +658,24 @@ func TestFindDispatchableDog_KeepsProgressedWisp(t *testing.T) {
 	}
 
 	// Mid-formula: the dog started step 1 and bailed.
-	testStubWispTree(t, func(townRoot, wispID string) ([]beads.WispStep, error) {
+	wisps.tree = func(townRoot, wispID string) ([]beads.WispStep, error) {
 		return []beads.WispStep{
 			{ID: "wisp-alpha"},
 			{ID: "wisp-alpha.1", Status: "in_progress"},
 			{ID: "wisp-alpha.2", Status: "open"},
 		}, nil
-	})
+	}
 
 	var closedIDs []string
-	testStubCloseStaleWisp(t, func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
+	wisps.closeStale = func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
 		closedIDs = append(closedIDs, wispID)
 		return len(tree), nil
-	})
+	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := handlerDogSessions(d)
 
-	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger, wisps)
 	if got != nil {
 		t.Errorf("findDispatchableDog = %q, want nil (alpha's progressed wisp must not be closed or dispatched onto)", got.Name)
 	}
@@ -705,55 +688,55 @@ func TestFindDispatchableDog_KeepsProgressedWisp(t *testing.T) {
 // dog in the kennel holds an open hooked formula molecule, findDispatchableDog
 // returns nil rather than falling back to picking one anyway.
 func TestFindDispatchableDog_NilWhenAllDogsHooked(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 	testSetupDogState(t, townRoot, "bravo", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaWithIDFn
-	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
-	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	var wisps wispOps
+	wisps.hooked = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 		return hookedFormulaResult{hasHooked: true, wispID: "wisp-" + dogName}, nil
 	}
 
 	// An empty tree, and no wispCreated, so neither dog's wisp is abandoned.
-	testStubWispTree(t, func(townRoot, wispID string) ([]beads.WispStep, error) {
+	wisps.tree = func(townRoot, wispID string) ([]beads.WispStep, error) {
 		return []beads.WispStep{{ID: wispID}}, nil
-	})
-	testStubCloseStaleWisp(t, func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
+	}
+	wisps.closeStale = func(townRoot, wispID string, tree []beads.WispStep) (int, error) {
 		t.Errorf("closeStaleWisp called for %s; no wisp here is abandoned", wispID)
 		return 0, nil
-	})
+	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := handlerDogSessions(d)
 
-	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger, wisps)
 	if got != nil {
 		t.Errorf("findDispatchableDog = %q, want nil (every dog holds a hooked formula)", got.Name)
 	}
 }
 
 // TestFindDispatchableDog_ErrorFallsBackToDispatchable confirms that a
-// dogHasHookedFormulaWithIDFn error is treated as "not hooked" rather than
+// hooked-formula check error is treated as "not hooked" rather than
 // disqualifying the dog — a flaky hook check must not wedge dispatch.
 func TestFindDispatchableDog_ErrorFallsBackToDispatchable(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
 	testSetupDogState(t, townRoot, "alpha", dog.StateIdle, time.Now())
 
-	prevHooked := dogHasHookedFormulaWithIDFn
-	t.Cleanup(func() { dogHasHookedFormulaWithIDFn = prevHooked })
-	dogHasHookedFormulaWithIDFn = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
+	var wisps wispOps
+	wisps.hooked = func(townRoot, beadsDir, dogName string) (hookedFormulaResult, error) {
 		return hookedFormulaResult{}, fmt.Errorf("simulated bd failure")
 	}
 
 	mgr := dog.NewManager(townRoot, nil)
 	sm := handlerDogSessions(d)
 
-	got := findDispatchableDog(mgr, sm, townRoot, d.logger)
+	got := findDispatchableDog(mgr, sm, townRoot, d.logger, wisps)
 	if got == nil {
 		t.Fatal("findDispatchableDog returned nil; expected alpha to be dispatchable despite the hook-check error")
 	}
@@ -846,7 +829,7 @@ func TestCleanupStuckDogs_SkipsIdleDogs(t *testing.T) {
 
 // --- gt-da2x: coverage of the real read/close bodies -------------------------
 //
-// The tests above stub wispTreeFn/closeStaleWispFn, which is what makes the
+// The tests above stub wispOps' tree and close functions, which is what makes the
 // dispatch loop testable — but a seam that replaces the body leaves the body
 // itself unverified. dogHasHookedFormulaWithID's body runs here on a fakeCLI
 // bd; wispTree and closeStaleWisp run bd inside internal/beads, so their

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
@@ -231,6 +232,9 @@ type ConvoyManager struct {
 	// gtPath is the gt binary the feeder runs for gt sling.
 	gtPath string
 
+	// clock times Pause's wait for in-flight ticks; nil is the real clock.
+	clock clockwork.Clock
+
 	// execCmd runs the manager's gt sling subprocess; nil runs it for real.
 	// Tests set it to answer it in process.
 	execCmd cmdRunFunc
@@ -282,11 +286,14 @@ type eventJournal interface {
 	EventsTail(since int64, limit int) (*beads.EventsPage, error)
 }
 
-// newEventJournal returns the journal reader for the named store: bd pinned
-// to the town's .beads for "hq", or to the rig's canonical beads directory.
-// store is the handle the manager holds for the same name; the bd reader
-// does not use it. Tests replace this.
-var newEventJournal = func(townRoot, name string, _ beadsdk.Storage) (eventJournal, error) {
+// newEventJournal returns the journal reader for the named store: the store
+// itself when it carries its own journal (an in-memory store does; no Dolt
+// store type can, since the page type is this module's), else bd pinned to
+// the town's .beads for "hq", or to the rig's canonical beads directory.
+func newEventJournal(townRoot, name string, store beadsdk.Storage) (eventJournal, error) {
+	if j, ok := store.(eventJournal); ok {
+		return j, nil
+	}
 	dir := doltserver.FindRigBeadsDir(townRoot, name)
 	if dir == "" {
 		return nil, fmt.Errorf("no beads directory for store %q", name)
@@ -710,16 +717,26 @@ func (m *ConvoyManager) tryBeginTick() bool {
 func (m *ConvoyManager) Pause(timeout time.Duration) bool {
 	m.pausing.Store(true)
 	defer m.pausing.Store(false)
-	deadline := time.Now().Add(timeout)
+	clk := m.clk()
+	deadline := clk.Now().Add(timeout)
 	for {
 		if m.pollGate.TryLock() {
 			return true
 		}
-		if !time.Now().Before(deadline) {
+		if !clk.Now().Before(deadline) {
 			return false
 		}
-		time.Sleep(50 * time.Millisecond)
+		clk.Sleep(50 * time.Millisecond)
 	}
+}
+
+// clk is the clock Pause waits on: clock when a test set one, else the real
+// clock.
+func (m *ConvoyManager) clk() clockwork.Clock {
+	if m.clock != nil {
+		return m.clock
+	}
+	return clockwork.NewRealClock()
 }
 
 // Resume undoes a successful Pause.

@@ -270,23 +270,9 @@ func validMaintenanceDBName(db string) error {
 	return nil
 }
 
-// maintenanceDBSizeFn measures a database's on-disk size. Seamed so tests never
-// walk a real .dolt directory.
-var maintenanceDBSizeFn = maintenanceDBSize
-
-// maintenanceGCExecFn runs CALL dolt_gc('--full') on one database. Seamed so
-// tests never reach a Dolt server.
-var maintenanceGCExecFn = func(ctx context.Context, d *Daemon, db string) error {
-	return d.doltGCFull(ctx, db)
-}
-
-// maintenanceQuietFn is the quiet-window guard, re-checked before each
-// database. Seamed for the cycle tests; maintenanceQuiet has its own.
-var maintenanceQuietFn = func(d *Daemon) (bool, string) { return d.maintenanceQuiet() }
-
-// maintenanceSlotHoldersFn lists the roles holding a container-gate slot or an
+// maintenanceSlotHolders lists the roles holding a container-gate slot or an
 // in-flight marker. Locks-only: no docker ps.
-var maintenanceSlotHoldersFn = func(townRoot string) ([]string, error) {
+func maintenanceSlotHolders(townRoot string) ([]string, error) {
 	cg := config.LoadOperationalConfig(townRoot).GetContainerGateConfig()
 	rep, err := slot.StatusPoolLocksOnly(townRoot, slot.PoolFromConfig(cg))
 	if err != nil {
@@ -305,15 +291,6 @@ var maintenanceSlotHoldersFn = func(townRoot string) ([]string, error) {
 	}
 	return holders, nil
 }
-
-// maintenanceWorkingPolecatsFn lists polecats with a fresh "working" heartbeat.
-// An error means some rig's polecats could not be listed.
-var maintenanceWorkingPolecatsFn = func(d *Daemon) ([]string, error) { return d.workingPolecats() }
-
-// maintenanceGCDispatchFn runs a gc cycle off the daemon's select loop: a
-// cycle can hold a --full gc for up to maintenanceGCTimeout per database, and
-// running that inline would freeze the heartbeat (gt-uvxy). Tests run inline.
-var maintenanceGCDispatchFn = func(fn func()) { go fn() }
 
 // --- quiet-window guard -----------------------------------------------------------
 
@@ -334,14 +311,14 @@ func (d *Daemon) maintenanceQuiet() (bool, string) {
 	if d.mainBranchTestRunning.Load() {
 		return false, "main_branch_test running (waiting for or holding a slot)"
 	}
-	holders, err := maintenanceSlotHoldersFn(d.config.TownRoot)
+	holders, err := d.maintenance().slotHolders(d.config.TownRoot)
 	if err != nil {
 		return false, fmt.Sprintf("cannot read slot status: %v", err)
 	}
 	if len(holders) > 0 {
 		return false, "slot held by " + strings.Join(holders, ", ")
 	}
-	working, err := maintenanceWorkingPolecatsFn(d)
+	working, err := d.maintenance().workingPolecats(d)
 	if err != nil {
 		return false, fmt.Sprintf("cannot list polecats: %v", err)
 	}
@@ -464,7 +441,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 
 	var eligible []gcCandidate
 	for _, db := range databases {
-		size, err := maintenanceDBSizeFn(dataDir, db)
+		size, err := d.maintenance().dbSize(dataDir, db)
 		if err != nil {
 			d.logger.Printf("scheduled_maintenance: %s: cannot measure size: %v — skipping", db, err)
 			continue
@@ -501,7 +478,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 	}
 
 	for i, c := range eligible {
-		if quiet, why := maintenanceQuietFn(d); !quiet {
+		if quiet, why := d.maintenance().quiet(d); !quiet {
 			return defer_(i, why)
 		}
 		// Exclusive against the daemon's own Dolt tasks (backups, remote push,
@@ -509,7 +486,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 		if !d.doltMaintMu.TryLock() {
 			return defer_(i, "daemon Dolt task in flight")
 		}
-		resume, paused := maintenanceConvoyPauseFn(d)
+		resume, paused := d.maintenance().convoyPause(d)
 		if !paused {
 			d.doltMaintMu.Unlock()
 			return defer_(i, "convoy poll busy")
@@ -520,7 +497,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 		d.maintenanceGCOverdueEscalated.Store(false)
 		d.maintenanceGCCallStartedAt.Store(start.UnixNano())
 		ctx, cancel := context.WithTimeout(parent, maintenanceGCTimeout)
-		err := maintenanceGCExecFn(ctx, d, c.name)
+		err := d.maintenance().gcExec(ctx, d, c.name)
 		cancel()
 		d.maintenanceGCCallStartedAt.Store(0)
 		resume()
@@ -529,7 +506,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 
 		if err != nil {
 			d.logger.Printf("scheduled_maintenance: gc %s FAILED after %v: %v — stopping this run", c.name, elapsed, err)
-			maintenanceEscalateFn(d, "scheduled_maintenance", fmt.Sprintf(
+			d.maintenance().escalate(d, "scheduled_maintenance", fmt.Sprintf(
 				"scheduled_maintenance: CALL dolt_gc('--full') failed on %s after %v (size before %s): %v\n"+
 					"The gc run stopped; remaining databases were not touched. History is intact "+
 					"(gc mode never flattens). Collect gt dolt status before any Dolt restart.",
@@ -537,7 +514,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string, p mainte
 			return maintenanceGCResult{outcome: gcOutcomeFailed, reason: err.Error()}
 		}
 
-		after, sizeErr := maintenanceDBSizeFn(dataDir, c.name)
+		after, sizeErr := d.maintenance().dbSize(dataDir, c.name)
 		if sizeErr != nil {
 			// No baseline means the next interval treats this database as
 			// never gc'd and, if it is over gc_min_bytes, gc's it again.
@@ -583,7 +560,7 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 	d.logger.Printf("scheduled_maintenance: mode=%s — gc_min_bytes=%s gc_growth_ratio=%v data_dir=%s",
 		MaintenanceModeGC, formatBytes(p.minBytes), p.growthRatio, dataDir)
 
-	maintenanceGCDispatchFn(func() {
+	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
 		res := d.maintenanceGCCycle(databases, dataDir, p)
 		d.logger.Printf("scheduled_maintenance: gc cycle %s", res.outcome)

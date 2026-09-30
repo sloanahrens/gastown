@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"log"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -62,10 +61,6 @@ func TestTriggerDoltBackup_SkipsWhenNotDue(t *testing.T) {
 // fires.
 func TestTriggerDoltBackup_OverdueRunsAndPersists(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS != "darwin" {
-		t.Skip("dolt_backup runs only on darwin")
-	}
-
 	townRoot := t.TempDir()
 	var buf strings.Builder
 	d := &Daemon{
@@ -79,6 +74,7 @@ func TestTriggerDoltBackup_OverdueRunsAndPersists(t *testing.T) {
 		dogPourBdFn: func(args ...string) (string, error) {
 			return "", errors.New("fake bd: unavailable")
 		},
+		goos: "darwin", // the patrol runs only there
 	}
 
 	if _, found, _ := loadPatrolLastRun(townRoot, "dolt_backup"); found {
@@ -86,14 +82,7 @@ func TestTriggerDoltBackup_OverdueRunsAndPersists(t *testing.T) {
 	}
 
 	d.triggerDoltBackup()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for d.doltBackupRunning.Load() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for dolt_backup cycle to finish")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	d.doltBackupCycles.Wait()
 
 	if _, found, err := loadPatrolLastRun(townRoot, "dolt_backup"); err != nil {
 		t.Fatalf("loadPatrolLastRun: %v", err)

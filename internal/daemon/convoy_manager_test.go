@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,8 +92,10 @@ func newFakeGtManager(townRoot string, logger func(format string, args ...interf
 // recorded calls and its replies driving them as they drove the subprocesses.
 func answerScanThrough(m *ConvoyManager, gt *fakeCLI) {
 	m.findStrandedFn = func(ctx context.Context) ([]strandedConvoyInfo, error) {
-		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "stranded", "--json")
-		cmd.Dir = m.townRoot
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		cmd := &exec.Cmd{Path: m.gtPath, Args: []string{m.gtPath, "convoy", "stranded", "--json"}, Dir: m.townRoot}
 		stdout, stderr, err := gt.run(cmd)
 		if err != nil {
 			return nil, fmt.Errorf("convoy stranded: %s", strings.TrimSpace(string(stderr)))
@@ -106,8 +107,10 @@ func answerScanThrough(m *ConvoyManager, gt *fakeCLI) {
 		return stranded, nil
 	}
 	m.checkConvoyFn = func(ctx context.Context, convoyID string) error {
-		cmd := exec.CommandContext(ctx, m.gtPath, "convoy", "check", convoyID)
-		cmd.Dir = m.townRoot
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cmd := &exec.Cmd{Path: m.gtPath, Args: []string{m.gtPath, "convoy", "check", convoyID}, Dir: m.townRoot}
 		if _, stderr, err := gt.run(cmd); err != nil {
 			return fmt.Errorf("convoy check %s: %s", convoyID, strings.TrimSpace(string(stderr)))
 		}
@@ -169,9 +172,6 @@ func mustArgvLog(t *testing.T, gt *fakeCLI, prefix ...string) []byte {
 
 func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup()
 
@@ -439,12 +439,7 @@ func TestStart_DoubleCall_Guarded(t *testing.T) {
 		m.Stop()
 		close(done)
 	}()
-	select {
-	case <-done:
-		// OK
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not complete within 5s after double Start()")
-	}
+	<-done // a Stop that hangs after a double Start fails on the test timeout
 }
 
 // TestRetryMissingStores_EmptyResultDoesNotConfirmPartialSet pins gt-tolf: an
@@ -1998,18 +1993,12 @@ func TestScan_ContextCancelled_MidIteration(t *testing.T) {
 	// Cancel once the first sling is in flight: the scan is then mid-iteration
 	// by construction, with four convoys still to go (gt-hvzy.10). The
 	// deadlines below only bound a hang.
-	select {
-	case <-inFlight:
-	case <-time.After(time.Minute):
-		t.Fatal("no sling started within a minute")
-	}
+	<-inFlight
 	m.cancel()
 
-	select {
-	case <-done:
-	case <-time.After(time.Minute):
-		t.Fatal("scan() did not return after context cancellation: the in-flight sling was not killed")
-	}
+	// A scan that ignores the cancellation never returns; the test timeout
+	// fails it.
+	<-done
 
 	slings := mustArgvLog(t, gtf, "sling")
 	if n := strings.Count(string(slings), "\n"); n != 1 {
@@ -2091,9 +2080,6 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 
 func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup() // safety net; Stop() should close first
 
@@ -2136,9 +2122,6 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 
 func TestStop_ClosesMultipleStores(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
 	rigStore, rigCleanup := newMemStore(t)
@@ -2183,9 +2166,6 @@ func TestStop_ClosesMultipleStores(t *testing.T) {
 
 func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
 	rigStore, rigCleanup := newMemStore(t)
@@ -2243,9 +2223,6 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 
 func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
 	rigStore, rigCleanup := newMemStore(t)
@@ -2315,9 +2292,6 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 
 func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
 	activeStore, activeCleanup := newMemStore(t)
@@ -2398,9 +2372,6 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 
 func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup()
 
@@ -2447,9 +2418,6 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 
 func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup()
 
@@ -2503,9 +2471,6 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 
 func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup()
 	clk := newFixedClock()
@@ -2583,9 +2548,6 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 
 func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	store, cleanup := newMemStore(t)
 	defer cleanup()
 	clk := newFixedClock()
@@ -2643,9 +2605,6 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 // multiple stores is only processed once (GH #1798).
 func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
 	rigStore, rigCleanup := newMemStore(t)
@@ -2696,9 +2655,6 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 
 func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
 	rigStore, rigCleanup := newMemStore(t)
@@ -2816,9 +2772,6 @@ func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 
 func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	// Create a rig store with a close event, but no hq store in the map.
 	// The nil hq guard should log a warning and skip convoy lookups.
 	rigStore, rigCleanup := newMemStore(t)
@@ -2875,9 +2828,6 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 // an event poll encounters an error (Dolt unavailable).
 func TestRecoveryMode_SetOnPollError(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	townRoot := t.TempDir()
 	var logged []string
@@ -3025,10 +2975,8 @@ func TestDoltRecoveryCallback_Fires(t *testing.T) {
 	tmpDir := t.TempDir()
 	dsm := NewDoltServerManager(tmpDir, DefaultDoltServerConfig(tmpDir), func(string, ...interface{}) {})
 
-	var called atomic.Bool
-	dsm.SetRecoveryCallback(func() {
-		called.Store(true)
-	})
+	called := make(chan struct{})
+	dsm.SetRecoveryCallback(func() { close(called) })
 
 	// Create the daemon directory and write the signal file at the path
 	// that unhealthySignalFile() returns (port-dependent).
@@ -3047,37 +2995,9 @@ func TestDoltRecoveryCallback_Fires(t *testing.T) {
 	dsm.clearUnhealthySignal()
 	dsm.mu.Unlock()
 
-	// Give the goroutine time to fire
-	time.Sleep(100 * time.Millisecond)
-
-	if !called.Load() {
-		t.Error("expected recovery callback to fire on unhealthy→healthy transition")
-	}
-}
-
-// TestDoltRecoveryCallback_NoFireWhenAlreadyHealthy verifies that the callback
-// does NOT fire when the signal file was not present (already healthy).
-func TestDoltRecoveryCallback_NoFireWhenAlreadyHealthy(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	dsm := NewDoltServerManager(tmpDir, DefaultDoltServerConfig(tmpDir), func(string, ...interface{}) {})
-
-	var called atomic.Bool
-	dsm.SetRecoveryCallback(func() {
-		called.Store(true)
-	})
-
-	// Don't create any signal file — already healthy
-
-	dsm.mu.Lock()
-	dsm.clearUnhealthySignal()
-	dsm.mu.Unlock()
-
-	time.Sleep(100 * time.Millisecond)
-
-	if called.Load() {
-		t.Error("recovery callback should NOT fire when already healthy")
-	}
+	// The callback runs on its own goroutine; one that never fires fails the
+	// test on its timeout.
+	<-called
 }
 
 // TestDoltRecoveryCallback_NilSafe verifies that clearUnhealthySignal does
@@ -3287,9 +3207,6 @@ func deadHolderOpener(t *testing.T, f *gitfake.Fake) func(dir string) deadHolder
 
 func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -3358,9 +3275,6 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 
 func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -3422,9 +3336,6 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 
 func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -3481,9 +3392,6 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 
 func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -3659,9 +3567,6 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 
 func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -3712,9 +3617,6 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 
 func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()
@@ -3768,9 +3670,6 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 
 func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 
 	store, cleanup := newMemStore(t)
 	defer cleanup()

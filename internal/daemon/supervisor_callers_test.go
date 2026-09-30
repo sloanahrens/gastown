@@ -92,16 +92,6 @@ func (b *workBD) calls(t *testing.T) string {
 	return sb.String()
 }
 
-// registerMyr maps rig "myr" to prefix "myr" for the test's duration.
-func registerMyr(t *testing.T) {
-	t.Helper()
-	old := session.DefaultRegistry()
-	reg := session.NewPrefixRegistry()
-	reg.Register("myr", "myr")
-	session.SetDefaultRegistry(reg)
-	t.Cleanup(func() { session.SetDefaultRegistry(old) })
-}
-
 func writePolecatHeartbeat(t *testing.T, townRoot string, state polecat.HeartbeatState, age time.Duration) {
 	t.Helper()
 	hbPath := filepath.Join(townRoot, ".runtime", "heartbeats", "myr-mycat.json")
@@ -132,6 +122,8 @@ func reaperDaemon(t *testing.T, bd *workBD) (*Daemon, *strings.Builder) {
 
 // G1-08: the idle reaper honors the pause marker; before the supervisor it
 // was the one scanner that did not.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
 	registerMyr(t)
 	d, logBuf := reaperDaemon(t, nil)
@@ -151,6 +143,8 @@ func TestReapIdlePolecat_LeavesAPausedPolecatAlone(t *testing.T) {
 }
 
 // G1-07: a per-rig e-stop stops the reaper too.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_HonorsARigEstop(t *testing.T) {
 	registerMyr(t)
 	d, logBuf := reaperDaemon(t, nil)
@@ -168,6 +162,8 @@ func TestReapIdlePolecat_HonorsARigEstop(t *testing.T) {
 
 // G1-01: the reaper decides from the work bead and the pane, never from an
 // agent bead.
+//
+//testpolicy:allow parallel — reaps through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestReapIdlePolecat_NeverReadsAgentBeads(t *testing.T) {
 	registerMyr(t)
 	bd := newWorkBD(t)
@@ -191,6 +187,7 @@ func TestReapIdlePolecat_NeverReadsAgentBeads(t *testing.T) {
 // G1-01: crash detection finds the work from the work bead's assignee, with
 // no agent-bead read.
 func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
+	t.Parallel()
 	bd := newWorkBD(t)
 	old := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+old+`"}]`)
@@ -212,6 +209,7 @@ func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 // session exists, so a recently updated hooked bead with no session is a
 // polecat starting up (issue #1752), not a crash.
 func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
+	t.Parallel()
 	bd := newWorkBD(t)
 	recent := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
 	bd.set(t, "list-hooked.json", `[{"id":"gt-work1","status":"hooked","updated_at":"`+recent+`"}]`)
@@ -227,6 +225,7 @@ func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 
 // The intent record's work_bead, when a writer set it, is the seat's work.
 func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
+	t.Parallel()
 	bd := newWorkBD(t)
 	bd.set(t, "show-gt-intended.json", `[{"id":"gt-intended","status":"in_progress"}]`)
 	d, logBuf := reaperDaemon(t, bd)
@@ -247,6 +246,8 @@ func TestCheckPolecatHealth_UsesIntentWorkBead(t *testing.T) {
 
 // The patrol-disabled sweep kills through the supervisor: a paused witness
 // stays, an unpaused one goes, and the kill is logged with its actor.
+//
+//testpolicy:allow parallel — kills through session.AgentIdentity, which names the seat's session from the process-wide prefix registry this test sets
 func TestKillRetiredPatrolSessions_HonorsPauseAndLogsActor(t *testing.T) {
 	registerRigs(t, "aa", "bb")
 	tm := newFakeTmux(newFixedClock())
@@ -279,10 +280,13 @@ func TestKillRetiredPatrolSessions_HonorsPauseAndLogsActor(t *testing.T) {
 // Ghost sessions belong to no seat: they go through KillStray, which the
 // town e-stop refuses.
 func TestKillDefaultPrefixGhosts_HonorsTheTownEstop(t *testing.T) {
-	registerRigs(t, "aa")
+	t.Parallel()
+	reg := session.NewPrefixRegistry()
+	reg.Register("aa", "aa")
 	tm := newFakeTmux(newFixedClock())
 	tm.addSession("gt-witness", "claude", time.Now())
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm}
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(&strings.Builder{}, "", 0), tmux: tm,
+		prefixRegistryFn: func() *session.PrefixRegistry { return reg }}
 	_ = estop.Activate(d.config.TownRoot, estop.TriggerManual, "drill")
 
 	d.killDefaultPrefixGhosts()
@@ -305,6 +309,7 @@ func TestKillDefaultPrefixGhosts_HonorsTheTownEstop(t *testing.T) {
 // samples, even across three daemon values, before one restart. A missing
 // session is restarted at once.
 func TestEnsureMayorRunning_PersistedDebounce(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	clk := newFixedClock()
 	tm := newFakeTmux(clk)
@@ -373,6 +378,17 @@ func writeKnownRigs(t *testing.T, townRoot string, rigs ...string) {
 	if err := os.WriteFile(path, []byte(`{"rigs": {`+strings.Join(entries, ", ")+`}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// registerMyr maps rig "myr" to prefix "myr" in the process-wide registry for
+// the test's duration. A test that calls it must not run in parallel.
+func registerMyr(t *testing.T) {
+	t.Helper()
+	old := session.DefaultRegistry()
+	reg := session.NewPrefixRegistry()
+	reg.Register("myr", "myr")
+	session.SetDefaultRegistry(reg)
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 }
 
 // registerRigs maps each rig to a prefix equal to its name for the test.

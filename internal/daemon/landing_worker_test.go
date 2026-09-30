@@ -13,6 +13,7 @@ import (
 )
 
 func TestLandingWorkerConfigDefaults(t *testing.T) {
+	t.Parallel()
 	if IsPatrolEnabled(nil, "landing_worker") {
 		t.Fatal("landing_worker enabled with no config; it must be opt-in")
 	}
@@ -33,6 +34,7 @@ func TestLandingWorkerConfigDefaults(t *testing.T) {
 }
 
 func TestPruneLandingLogs(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	old, fresh := filepath.Join(root, "land-old"), filepath.Join(root, "land-new")
 	for _, d := range []string{old, fresh} {

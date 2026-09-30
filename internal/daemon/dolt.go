@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -155,6 +156,31 @@ type DoltServerManager struct {
 	// queries); nil runs them for real. The sql-server itself is started, not
 	// run to completion, and never goes through it.
 	execCmd cmdRunFunc
+	// clock times the manager's own waits (see clk()); nil is the real clock.
+	clock clockwork.Clock
+	// verifyDoltFn proves a PID is a dolt sql-server serving townRoot before
+	// the manager signals it; nil uses doltserver.VerifyTownDoltSQLServerPID.
+	verifyDoltFn func(townRoot string, pid int) error
+	// portListenerFn names the PID listening on a port (see
+	// portListenerPID); nil asks doltserver.
+	portListenerFn func(port int) int
+}
+
+// clk is the manager's clock: the real one unless a test set another.
+func (m *DoltServerManager) clk() clockwork.Clock {
+	if m.clock == nil {
+		return clockwork.NewRealClock()
+	}
+	return m.clock
+}
+
+// verifyDoltSQLServer proves pid is this town's dolt sql-server (gt-p7zy0,
+// gt-l9s6f) through verifyDoltFn, or doltserver's check.
+func (m *DoltServerManager) verifyDoltSQLServer(pid int) error {
+	if m.verifyDoltFn != nil {
+		return m.verifyDoltFn(m.townRoot, pid)
+	}
+	return doltserver.VerifyTownDoltSQLServerPID(m.townRoot, pid)
 }
 
 // environ is the environment the manager's dolt subprocesses start from.
@@ -221,7 +247,7 @@ func (m *DoltServerManager) doSleep(d time.Duration) {
 		m.sleepFn(d)
 		return
 	}
-	time.Sleep(d)
+	m.clk().Sleep(d)
 }
 
 // pidFile returns the path to the Dolt server PID file.
@@ -536,7 +562,7 @@ func (m *DoltServerManager) EnsureRunning() error {
 				if killErr := m.killImposters(); killErr != nil {
 					m.logger("Warning: failed to kill imposters: %v", killErr)
 				}
-				time.Sleep(500 * time.Millisecond)
+				m.clk().Sleep(500 * time.Millisecond)
 				return m.restartWithBackoff()
 			}
 		}
@@ -1030,9 +1056,13 @@ func (m *DoltServerManager) startLocked() error {
 	return nil
 }
 
-// portListenerPIDFn returns the PID listening on port, or 0 when the port is
-// free or the listener cannot be identified. A var so tests can stand in.
-var portListenerPIDFn = func(port int) int {
+// portListenerPID returns the PID listening on port, or 0 when the port is
+// free or the listener cannot be identified: portListenerFn's answer when a
+// test set one, else doltserver's.
+func (m *DoltServerManager) portListenerPID(port int) int {
+	if m.portListenerFn != nil {
+		return m.portListenerFn(port)
+	}
 	pid, _ := doltserver.PortHolder(port)
 	return pid
 }
@@ -1052,7 +1082,7 @@ func (m *DoltServerManager) verifyStartedLocked(proc *os.Process, exited <-chan 
 		failure = fmt.Errorf("dolt sql-server (PID %d) exited during startup; port %d is likely held by another process",
 			proc.Pid, m.config.Port)
 	default:
-		if holder := portListenerPIDFn(m.config.Port); holder > 0 && holder != proc.Pid {
+		if holder := m.portListenerPID(m.config.Port); holder > 0 && holder != proc.Pid {
 			// os.Process refuses to signal a reaped child, so PID reuse is no risk.
 			_ = sendKillSignal(proc)
 			failure = fmt.Errorf("port %d is held by PID %d, not the dolt sql-server we started (PID %d)",
@@ -1090,7 +1120,7 @@ func (m *DoltServerManager) stopLocked() {
 	// neither says what the PID is. Prove it is a dolt sql-server before
 	// signaling it (gt-p7zy0), and that it serves THIS town: a reused PID
 	// can be another town's dolt (gt-l9s6f).
-	if err := verifyDoltSQLServerFn(m.townRoot, pid); err != nil {
+	if err := m.verifyDoltSQLServer(pid); err != nil {
 		m.logger("Not stopping PID %d: %v", pid, err)
 		m.process = nil
 		// A pid file naming a process that is provably not this town's dolt
@@ -1123,7 +1153,7 @@ func (m *DoltServerManager) stopLocked() {
 				close(done)
 				return
 			}
-			time.Sleep(100 * time.Millisecond)
+			m.clk().Sleep(100 * time.Millisecond)
 		}
 	}()
 
@@ -1136,7 +1166,7 @@ func (m *DoltServerManager) stopLocked() {
 		// dolt fsck to recover.
 		m.logger("Dolt SQL server did not stop gracefully after %s, forcing termination", doltServerStopBudget)
 		// Re-verify: the PID may have exited and been reused during the wait.
-		if err := verifyDoltSQLServerFn(m.townRoot, pid); err != nil {
+		if err := m.verifyDoltSQLServer(pid); err != nil {
 			m.logger("Not force-killing PID %d: %v", pid, err)
 		} else {
 			_ = sendKillSignal(process)
@@ -1604,63 +1634,4 @@ func (m *DoltServerManager) getDoltVersion() (string, error) {
 // concurrent queries to avoid the thundering herd problem (GH#2180).
 func (m *DoltServerManager) listDatabases() ([]string, error) {
 	return doltserver.ListDatabases(m.townRoot)
-}
-
-// CountDoltServers returns the count of running dolt sql-server processes.
-// Uses lsof-based listener discovery instead of pgrep string matching (ZFC fix: gt-fj87).
-func CountDoltServers() int {
-	return len(doltserver.FindAllDoltListeners())
-}
-
-// StopAllDoltServers stops all dolt sql-server processes.
-// Returns (killed, remaining).
-// Uses lsof-based discovery and direct signal delivery instead of pkill -f (ZFC fix: gt-fj87).
-func StopAllDoltServers(force bool) (int, int) {
-	listeners := doltserver.FindAllDoltListeners()
-	if len(listeners) == 0 {
-		return 0, 0
-	}
-
-	// Deduplicate PIDs (one process may listen on multiple ports).
-	seen := make(map[int]bool)
-	var pids []int
-	for _, l := range listeners {
-		if !seen[l.PID] {
-			seen[l.PID] = true
-			pids = append(pids, l.PID)
-		}
-	}
-	before := len(pids)
-
-	for _, pid := range pids {
-		if p, err := os.FindProcess(pid); err == nil {
-			if force {
-				_ = sendKillSignal(p)
-			} else {
-				_ = sendTermSignal(p)
-			}
-		}
-	}
-
-	if !force {
-		time.Sleep(2 * time.Second)
-		// Check if any survived, escalate to kill.
-		remaining := doltserver.FindAllDoltListeners()
-		if len(remaining) > 0 {
-			for _, l := range remaining {
-				if p, err := os.FindProcess(l.PID); err == nil {
-					_ = sendKillSignal(p)
-				}
-			}
-		}
-	}
-
-	time.Sleep(100 * time.Millisecond)
-
-	after := CountDoltServers()
-	killed := before - after
-	if killed < 0 {
-		killed = 0
-	}
-	return killed, after
 }

@@ -22,8 +22,9 @@ import (
 // TestScheduledMaintenanceMonitorNeverFlattens is the load-bearing case: the
 // default mode must escalate with the counts and never run `gt maintain`.
 func TestScheduledMaintenanceMonitorNeverFlattens(t *testing.T) {
+	t.Parallel()
 	d, dbName := maintenanceTestDaemon(t)
-	escalations, execs := withMaintenanceSeams(t)
+	escalations, execs := withMaintenanceSeams(t, d)
 
 	runMaintenanceNow(t, d, dbName, MaintenanceModeMonitor)
 
@@ -50,8 +51,9 @@ func TestScheduledMaintenanceMonitorNeverFlattens(t *testing.T) {
 // TestScheduledMaintenanceMonitorIsTheDefaultMode pins the default end to end:
 // a config that never mentions a mode must still escalate rather than flatten.
 func TestScheduledMaintenanceMonitorIsTheDefaultMode(t *testing.T) {
+	t.Parallel()
 	d, dbName := maintenanceTestDaemon(t)
-	escalations, execs := withMaintenanceSeams(t)
+	escalations, execs := withMaintenanceSeams(t, d)
 
 	runMaintenanceNow(t, d, dbName, "") // empty mode == unset
 
@@ -66,8 +68,9 @@ func TestScheduledMaintenanceMonitorIsTheDefaultMode(t *testing.T) {
 // TestScheduledMaintenanceFlattenModeRunsMaintain covers the opt-in path so
 // that "monitor never flattens" is not passing because flatten is broken.
 func TestScheduledMaintenanceFlattenModeRunsMaintain(t *testing.T) {
+	t.Parallel()
 	d, dbName := maintenanceTestDaemon(t)
-	escalations, execs := withMaintenanceSeams(t)
+	escalations, execs := withMaintenanceSeams(t, d)
 
 	runMaintenanceNow(t, d, dbName, MaintenanceModeFlatten)
 
@@ -84,10 +87,11 @@ func TestScheduledMaintenanceFlattenModeRunsMaintain(t *testing.T) {
 // either mode. Without this, a patrol that escalated unconditionally would
 // still pass the tests above.
 func TestScheduledMaintenanceBelowThresholdIsQuiet(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{MaintenanceModeMonitor, MaintenanceModeFlatten} {
 		t.Run(mode, func(t *testing.T) {
 			d, dbName := maintenanceTestDaemon(t)
-			escalations, execs := withMaintenanceSeams(t)
+			escalations, execs := withMaintenanceSeams(t, d)
 
 			// A threshold no real database can reach.
 			runMaintenanceNow(t, d, dbName, mode, withMaintenanceThreshold(1_000_000))
@@ -168,26 +172,20 @@ func runMaintenanceNow(t *testing.T, d *Daemon, dbName, mode string, opts ...fun
 	d.runScheduledMaintenance()
 }
 
-// withMaintenanceSeams replaces the patrol's two side effects with recorders
+// withMaintenanceSeams replaces d's two patrol side effects with recorders
 // and returns pointers to the recordings: escalations as "<source>|<message>",
 // and a count of gt maintain invocations.
-func withMaintenanceSeams(t *testing.T) (escalations *[]string, execs *int) {
+func withMaintenanceSeams(t *testing.T, d *Daemon) (escalations *[]string, execs *int) {
 	t.Helper()
 
 	var esc []string
 	var n int
-
-	prevEscalate, prevExec := maintenanceEscalateFn, maintenanceExecFn
-	maintenanceEscalateFn = func(_ *Daemon, source, message string) {
+	d.maint.escalate = func(_ *Daemon, source, message string) {
 		esc = append(esc, source+"|"+message)
 	}
-	maintenanceExecFn = func(context.Context, string, string, int) ([]byte, error) {
+	d.maint.exec = func(context.Context, string, string, int) ([]byte, error) {
 		n++
 		return nil, nil
 	}
-	t.Cleanup(func() {
-		maintenanceEscalateFn, maintenanceExecFn = prevEscalate, prevExec
-	})
-
 	return &esc, &n
 }

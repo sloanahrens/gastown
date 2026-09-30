@@ -1399,8 +1399,8 @@ func TestEscalate_FallsBackToFeedOnPermanentFailure(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	eventsFile := filepath.Join(townRoot, ".events.jsonl")
-	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o755); err != nil {
-		t.Fatalf("mkdir daemon: %v", err)
+	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o644); err != nil {
+		t.Fatalf("write daemon: %v", err)
 	}
 
 	// Every escalation fails, as gt does when bd cannot reach its database.
