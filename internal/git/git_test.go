@@ -4403,6 +4403,66 @@ func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
 	}
 }
 
+// foreignPolecatUpstreamRepo builds the gt-y6w8y state: origin/main has moved
+// past origin/polecat/shale/x, and a local polecat/quartz/x branch (never
+// pushed) is configured to track that other polecat's branch. HEAD sits on
+// origin/main's tip.
+func foreignPolecatUpstreamRepo(t *testing.T) string {
+	t.Helper()
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	runGit(t, localDir, "branch", "polecat/shale/x")
+	runGit(t, localDir, "push", "origin", "polecat/shale/x")
+	if err := os.WriteFile(filepath.Join(localDir, "landed.go"), []byte("package landed\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, localDir, "add", "landed.go")
+	runGit(t, localDir, "commit", "-m", "landed on main")
+	runGit(t, localDir, "push", "origin", mainBranch)
+
+	branch := "polecat/quartz/x"
+	runGit(t, localDir, "checkout", "-b", branch)
+	runGit(t, localDir, "config", "branch."+branch+".remote", "origin")
+	runGit(t, localDir, "config", "branch."+branch+".merge", "refs/heads/polecat/shale/x")
+	return localDir
+}
+
+// TestUnpushedCommitsIgnoresForeignPolecatUpstream pins gt-y6w8y: a polecat
+// branch whose upstream names ANOTHER polecat's branch must not be judged
+// against that branch. HEAD is contained in origin/main, so nothing is at risk.
+func TestUnpushedCommitsIgnoresForeignPolecatUpstream(t *testing.T) {
+	t.Parallel()
+	g := NewGit(foreignPolecatUpstreamRepo(t))
+
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits: %v", err)
+	}
+	if unpushed != 0 {
+		t.Fatalf("UnpushedCommits = %d, want 0 for HEAD already contained in origin/main", unpushed)
+	}
+}
+
+// TestUnpushedCommitsForeignPolecatUpstreamStillFailsClosed: ignoring the
+// foreign upstream must not make real unpushed work look safe.
+func TestUnpushedCommitsForeignPolecatUpstreamStillFailsClosed(t *testing.T) {
+	t.Parallel()
+	localDir := foreignPolecatUpstreamRepo(t)
+	g := NewGit(localDir)
+	if err := os.WriteFile(filepath.Join(localDir, "work.go"), []byte("package work\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, localDir, "add", "work.go")
+	runGit(t, localDir, "commit", "-m", "unpushed polecat work")
+
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits: %v", err)
+	}
+	if unpushed == 0 {
+		t.Fatalf("UnpushedCommits = 0, want > 0 for a commit on no remote branch")
+	}
+}
+
 // detachAtPushedBranchTip builds the gt-1bpgm state: a branch pushed to
 // origin, then checked out detached at its own tip, which is how a finished
 // polecat's worktree is left. Returns the tip's sha.

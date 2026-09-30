@@ -3505,7 +3505,8 @@ func (g *Git) StashPop(ref string) error {
 // UnpushedCommits returns the number of commits that are not pushed to the remote.
 // It prefers the exact remote branch when one exists, because polecat branches may
 // track origin/main while pushing work to origin/<current-branch>.
-// Returns 0 if there is no upstream or exact remote branch configured.
+// Returns 0 if there is no upstream or exact remote branch configured. An
+// upstream that names another polecat's branch counts as none (gt-y6w8y).
 //
 // The exact-branch evidence is read from the remote itself (ls-remote). Use
 // UnpushedCommitsLocal when measuring many worktrees in one run — see
@@ -3767,7 +3768,14 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 
 	if upstream, err := g.run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"); err == nil && strings.TrimSpace(upstream) != "" {
 		upstream = strings.TrimSpace(upstream)
-		if includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream) {
+		// Another polecat's branch is no custody of this one's work: it can be
+		// behind main, be deleted, or hold a different line of commits. A
+		// sandbox re-pointed at a same-bead branch inherits exactly that
+		// upstream, and judging against it reported nothing-at-risk work as
+		// has_unpushed (gt-y6w8y). Skip it; the default-branch fallback below
+		// then answers instead.
+		if !isForeignPolecatUpstream(localBranch, remote, upstream) &&
+			(includeExactBranch || !isPolecatSelfUpstream(localBranch, remote, upstream)) {
 			hasEvidence = true
 			candidates = append(candidates, upstream)
 		}
@@ -3817,6 +3825,15 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 
 func isPolecatSelfUpstream(localBranch, remote, upstream string) bool {
 	return strings.HasPrefix(localBranch, "polecat/") && upstream == remote+"/"+localBranch
+}
+
+// isForeignPolecatUpstream reports whether a polecat branch tracks a
+// different polecat's branch on the same remote. Non-polecat upstreams
+// (origin/main, an integration branch) are never foreign.
+func isForeignPolecatUpstream(localBranch, remote, upstream string) bool {
+	return strings.HasPrefix(localBranch, "polecat/") &&
+		strings.HasPrefix(upstream, remote+"/polecat/") &&
+		upstream != remote+"/"+localBranch
 }
 
 func (g *Git) refContainsHead(ref string) (bool, error) {
