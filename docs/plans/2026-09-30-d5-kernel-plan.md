@@ -1,3 +1,5 @@
+> Status: implemented on branch crew/sloan/d5-kernel (2026-09-29), awaiting landing. Tracked in gt-y3pgh.1.
+
 # D5 Config Kernel v1 Implementation Plan (gt-y3pgh.1)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -59,7 +61,7 @@
 **Interfaces:**
 - Produces: `func DecodeJSONFile(path string, data []byte, v any) error` (strict now), `func DecodeYAMLFile(path string, data []byte, v any) error`, `ParseError.Keys []string`.
 
-- [ ] **Step 1: failing tests**
+- [x] **Step 1: failing tests**
 
 ```go
 func TestDecodeJSONFileRejectsUnknownKeysWithPathAndOffset(t *testing.T) {
@@ -75,10 +77,10 @@ func TestDecodeJSONFileRawMessageIsOpaque(t *testing.T) { /* keys under json.Raw
 func TestDecodeYAMLFileRejectsUnknownKeys(t *testing.T) { /* KnownFields; ParseError with Line */ }
 ```
 
-- [ ] **Step 2:** `go test ./internal/config -run 'Decode' ` fails (keys accepted).
-- [ ] **Step 3:** implement: `json.NewDecoder` + `Decode` for syntax/type errors (offset kept); `dec.More()` / second token must be EOF; then walk tokens with a type stack: struct (fields from json tags incl. embedded, matched with `strings.EqualFold` like encoding/json), map (any key, elem type), slice/array (elem), interface/RawMessage/Unmarshaler (skip value with `json.RawMessage` decode). Record `path` and the offset of the key's first byte. `ParseError.Err = fmt.Errorf("unknown key %q (%d unknown in all)", first, n)`, `Offset` of the first.
-- [ ] **Step 4:** run tests plus the stopgap's `parse_error_test.go`; all pass.
-- [ ] **Step 5:** commit `feat(config): strict decoding rejects unknown keys with path and offset (gt-y3pgh.1)`.
+- [x] **Step 2:** `go test ./internal/config -run 'Decode' ` fails (keys accepted).
+- [x] **Step 3:** implement: `json.NewDecoder` + `Decode` for syntax/type errors (offset kept); `dec.More()` / second token must be EOF; then walk tokens with a type stack: struct (fields from json tags incl. embedded, matched with `strings.EqualFold` like encoding/json), map (any key, elem type), slice/array (elem), interface/RawMessage/Unmarshaler (skip value with `json.RawMessage` decode). Record `path` and the offset of the key's first byte. `ParseError.Err = fmt.Errorf("unknown key %q (%d unknown in all)", first, n)`, `Offset` of the first.
+- [x] **Step 4:** run tests plus the stopgap's `parse_error_test.go`; all pass.
+- [x] **Step 5:** commit `feat(config): strict decoding rejects unknown keys with path and offset (gt-y3pgh.1)`.
 
 ### Task 2: One daemon.json schema
 
@@ -87,11 +89,11 @@ func TestDecodeYAMLFileRejectsUnknownKeys(t *testing.T) { /* KnownFields; ParseE
 **Interfaces:**
 - Produces: `config.DaemonPatrolConfig{Type, Version, Heartbeat *PatrolConfig, Patrols *PatrolsConfig, Env map[string]string}`, `config.PatrolsConfig` with every patrol type the daemon declares today (names unchanged: `DoltServerConfig`, `WispReaperConfig`, ... `ScheduledSlingEntry`) plus `DoltRemotes json.RawMessage` (retired key, preserved, never read), `(*PatrolsConfig).Count() int`.
 
-- [ ] **Step 1: failing test** — the live daemon.json fixture (Task 4 copies it; this task inlines its key shape) decodes strictly into `config.DaemonPatrolConfig`; a daemon.json with `patrols.witness.bogus` does not.
-- [ ] **Step 2:** fails to compile (types absent).
-- [ ] **Step 3:** move the struct definitions verbatim; `RestartTrackerConfig.withDefaults` becomes a daemon-side function because methods cannot sit on an alias.
-- [ ] **Step 4:** `go test ./internal/config ./internal/doctor` pass.
-- [ ] **Step 5:** commit `refactor(config): one daemon.json schema, owned by config (G3-19)`.
+- [x] **Step 1: failing test** — the live daemon.json fixture (Task 4 copies it; this task inlines its key shape) decodes strictly into `config.DaemonPatrolConfig`; a daemon.json with `patrols.witness.bogus` does not.
+- [x] **Step 2:** fails to compile (types absent).
+- [x] **Step 3:** move the struct definitions verbatim; `RestartTrackerConfig.withDefaults` becomes a daemon-side function because methods cannot sit on an alias.
+- [x] **Step 4:** `go test ./internal/config ./internal/doctor` pass.
+- [x] **Step 5:** commit `refactor(config): one daemon.json schema, owned by config (G3-19)`.
 
 ### Task 3: Locked atomic writer
 
@@ -109,19 +111,19 @@ func WriteConfigJSON[T any](path string, v *T, perm os.FileMode) error
 func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, exists bool) error) error
 ```
 
-- [ ] **Step 1: failing tests** — refuses over a syntax error, over an unknown key, over a type error (file bytes unchanged); keeps an existing file's mode; 20 concurrent `UpdateConfigJSON` increments of a counter end at 20; the stopgap's `TestSaversNeverReplaceAnUnparseableFile` still passes.
-- [ ] **Step 2:** fails.
-- [ ] **Step 3:** lock `<path>.lock` via `syscall.Flock(LOCK_EX)`; read; strict decode into a fresh `T`; marshal indent + trailing newline; `os.CreateTemp` in the dir, write, `Sync`, chmod (existing mode or perm), rename, fsync dir.
-- [ ] **Step 4:** tests pass, including `-race` on the concurrency test.
-- [ ] **Step 5:** commit `feat(config): one flock-guarded atomic writer for town config files`.
+- [x] **Step 1: failing tests** — refuses over a syntax error, over an unknown key, over a type error (file bytes unchanged); keeps an existing file's mode; 20 concurrent `UpdateConfigJSON` increments of a counter end at 20; the stopgap's `TestSaversNeverReplaceAnUnparseableFile` still passes.
+- [x] **Step 2:** fails.
+- [x] **Step 3:** lock `<path>.lock` via `syscall.Flock(LOCK_EX)`; read; strict decode into a fresh `T`; marshal indent + trailing newline; `os.CreateTemp` in the dir, write, `Sync`, chmod (existing mode or perm), rename, fsync dir.
+- [x] **Step 4:** tests pass, including `-race` on the concurrency test.
+- [x] **Step 5:** commit `feat(config): one flock-guarded atomic writer for town config files`.
 
 ### Task 4: Loaders onto the one parser
 
 **Files:** modify `loader.go` (`LoadTownConfig`, `LoadRigsConfig` (drop the retry: the writer is atomic), `LoadRigConfig`, `LoadRigSettings` (drop the deprecated-key warning: those keys are now unknown-key errors), `LoadMayorConfig`, `LoadDaemonPatrolConfig`, `LoadAccountsConfig`, `LoadMessagingConfig`, `LoadEscalationConfig`), `overseer.go` (`LoadOverseerConfig`), `agents.go` (`overlayFile`), `daemon_env.go` (`LoadDaemonEnv` returns `*ParseError` with line). `LoadRepoSettings` stays lenient: it reads a file committed in someone else's repo, not town config.
 
-- [ ] **Step 1: failing table test** — for each loader: a file with an unknown key returns `*ParseError` naming the path and key; a broken file returns `*ParseError` with line; a missing file keeps its current answer (`ErrNotFound` or defaults).
-- [ ] **Step 2–4:** replace each `json.Unmarshal` with `DecodeJSONFile`; run `go test ./internal/config`.
-- [ ] **Step 5:** commit `refactor(config): every town config loader decodes strictly through one parser`.
+- [x] **Step 1: failing table test** — for each loader: a file with an unknown key returns `*ParseError` naming the path and key; a broken file returns `*ParseError` with line; a missing file keeps its current answer (`ErrNotFound` or defaults).
+- [x] **Step 2–4:** replace each `json.Unmarshal` with `DecodeJSONFile`; run `go test ./internal/config`.
+- [x] **Step 5:** commit `refactor(config): every town config loader decodes strictly through one parser`.
 
 ### Task 5: The kernel
 
@@ -148,25 +150,25 @@ func (t *Town) DoltEndpoint() (DoltEndpoint, bool)
 func (t *Town) Present(file string) bool                 // constants below
 ```
 
-- [ ] **Step 1: failing tests** — `Load(testdata/live)` succeeds and resolves every rig prefix; an unknown rig is `ErrUnknownRig`; a rig without prefix is `ErrNoRigPrefix`; duplicate prefixes fail Load; absent town.json is `ErrNotATown`; each file broken in turn gives one line naming that file; two files broken give two lines; mutating the returned Settings does not change the next call; unknown key in each file fails.
-- [ ] **Step 2:** fails (package absent).
-- [ ] **Step 3:** implement with `config.DecodeJSONFile`/`DecodeYAMLFile`, `config.LoadDaemonEnv`; deep copy via JSON round trip.
-- [ ] **Step 4:** `go test ./internal/townconfig`.
-- [ ] **Step 5:** commit `feat(townconfig): config kernel v1 over the existing town files (gt-y3pgh.1)`.
+- [x] **Step 1: failing tests** — `Load(testdata/live)` succeeds and resolves every rig prefix; an unknown rig is `ErrUnknownRig`; a rig without prefix is `ErrNoRigPrefix`; duplicate prefixes fail Load; absent town.json is `ErrNotATown`; each file broken in turn gives one line naming that file; two files broken give two lines; mutating the returned Settings does not change the next call; unknown key in each file fails.
+- [x] **Step 2:** fails (package absent).
+- [x] **Step 3:** implement with `config.DecodeJSONFile`/`DecodeYAMLFile`, `config.LoadDaemonEnv`; deep copy via JSON round trip.
+- [x] **Step 4:** `go test ./internal/townconfig`.
+- [x] **Step 5:** commit `feat(townconfig): config kernel v1 over the existing town files (gt-y3pgh.1)`.
 
 ### Task 6: Stopgap calls into the kernel (wiring commit, outside internal/config)
 
 **Files:** `internal/daemon/types.go` and each file that defined a daemon.json type (aliases), `internal/daemon/restart_tracker.go` (withDefaults), `internal/daemon/town_config.go` (`CheckTownConfig` → `townconfig.Check`), `ReadPatrolConfig`/`SavePatrolConfig` delegate to config; `internal/cmd/bd_handshake.go` comment; `internal/doctor/town_config_check.go` description names all files.
 
-- [ ] **Step 1:** existing stopgap tests (`internal/daemon`, `internal/cmd` gate tests, `internal/doctor/town_config_check_test.go`) plus a new daemon test: an unknown key in daemon.json refuses daemon start with the key named.
-- [ ] **Step 2–4:** wire; run `go test ./internal/daemon ./internal/cmd ./internal/doctor`.
-- [ ] **Step 5:** commit `refactor(daemon,cmd,doctor): the startup gate and doctor check call the config kernel`.
+- [x] **Step 1:** existing stopgap tests (`internal/daemon`, `internal/cmd` gate tests, `internal/doctor/town_config_check_test.go`) plus a new daemon test: an unknown key in daemon.json refuses daemon start with the key named.
+- [x] **Step 2–4:** wire; run `go test ./internal/daemon ./internal/cmd ./internal/doctor`.
+- [x] **Step 5:** commit `refactor(daemon,cmd,doctor): the startup gate and doctor check call the config kernel`.
 
 ### Task 7: Gates and review
 
-- [ ] `make lint` (exit code), `go build ./...`, `go test` on touched packages and reverse deps, full `make test` under `gt slot run` with wall time.
-- [ ] `om review -base origin/main` from the worktree; fix blockers/majors.
-- [ ] Attribution grep prints nothing; `git push origin crew/sloan/d5-kernel`.
+- [x] `make lint` (exit code), `go build ./...`, `go test` on touched packages and reverse deps, full `make test` under `gt slot run` with wall time.
+- [x] `om review -base origin/main` from the worktree; fix blockers/majors.
+- [x] Attribution grep prints nothing; `git push origin crew/sloan/d5-kernel`.
 
 ## Left for gt-y3pgh.2 and later
 
