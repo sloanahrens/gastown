@@ -15,6 +15,7 @@ import (
 // failed with "unexpected end of JSON input". With atomic write-then-rename,
 // readers must always see either the old complete contents or the new.
 func TestSaveRigsConfig_AtomicAgainstConcurrentReaders(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rigs.json")
 

@@ -1826,6 +1826,7 @@ func TestACPModes(t *testing.T) {
 
 // TestACPModeConstants verifies the ACP mode constants.
 func TestACPModeConstants(t *testing.T) {
+	t.Parallel()
 	if ACPModeNative != "native" {
 		t.Errorf("ACPModeNative = %q, want native", ACPModeNative)
 	}

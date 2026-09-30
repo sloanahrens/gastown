@@ -403,6 +403,7 @@ func TestTownSettings_DisabledPatrols_OmitemptyWhenNil(t *testing.T) {
 // any pre-verification stamp recorded against the old combination, and the
 // hash must not depend on Go's randomized map iteration order.
 func TestCombineGateSetSHA(t *testing.T) {
+	t.Parallel()
 	base := &MergeQueueConfig{TestCommand: "go test ./..."}
 
 	nilGates := CombineGateSetSHA(base, nil)

@@ -6,8 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -810,6 +810,12 @@ func (rc *RuntimeConfig) BuildCommand() string {
 // If prompt is provided, it overrides the config's InitialPrompt.
 // For opencode, uses --prompt flag; for other agents, uses positional argument.
 func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
+	return rc.buildCommandWithPrompt(prompt, os.Stderr)
+}
+
+// buildCommandWithPrompt is BuildCommandWithPrompt writing its dropped-prompt
+// warning to warn.
+func (rc *RuntimeConfig) buildCommandWithPrompt(prompt string, warn io.Writer) string {
 	resolved := normalizeRuntimeConfig(rc)
 	base := resolved.BuildCommand()
 
@@ -826,7 +832,7 @@ func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
 			// with prompt_mode: "none") to create a claude override, inadvertently
 			// suppressing the daemon's startup beacon injection and causing a crash-loop
 			// that looks like a deacon failure. Warn so misconfiguration is self-diagnosing.
-			fmt.Fprintf(os.Stderr, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
+			fmt.Fprintf(warn, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
 		}
 		return base
 	}
@@ -856,6 +862,12 @@ func (rc *RuntimeConfig) BuildCommandWithPrompt(prompt string) string {
 
 // BuildArgsWithPrompt returns the runtime command and args suitable for exec.
 func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
+	return rc.buildArgsWithPrompt(prompt, os.Stderr)
+}
+
+// buildArgsWithPrompt is BuildArgsWithPrompt writing its dropped-prompt
+// warning to warn.
+func (rc *RuntimeConfig) buildArgsWithPrompt(prompt string, warn io.Writer) []string {
 	resolved := normalizeRuntimeConfig(rc)
 	args := append([]string{resolved.Command}, resolved.Args...)
 
@@ -874,7 +886,7 @@ func (rc *RuntimeConfig) BuildArgsWithPrompt(prompt string) []string {
 			args = append(args, p)
 		}
 	} else if p != "" {
-		fmt.Fprintf(os.Stderr, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
+		fmt.Fprintf(warn, "warning: agent %q has prompt_mode: \"none\" — startup prompt dropped (agent may not bootstrap correctly)\n", resolved.Command)
 	}
 
 	return args
@@ -1031,19 +1043,19 @@ func defaultRuntimeCommand(reg *AgentRegistry, provider string) string {
 		cmd := preset.Command
 		// Resolve claude path for Claude preset (handles alias installations)
 		if preset.Name == AgentClaude && cmd == "claude" {
-			return resolveClaudePath()
+			return resolveClaudePath(reg.host())
 		}
 		return cmd
 	}
-	return resolveClaudePath() // fallback for unknown providers
+	return resolveClaudePath(reg.host()) // fallback for unknown providers
 }
 
 // resolveClaudePath finds the claude binary, checking PATH first then common installation locations.
 // This handles the case where claude is installed as an alias (not in PATH) which doesn't work
 // in non-interactive shells spawned by tmux.
-func resolveClaudePath() string {
+func resolveClaudePath(h host) string {
 	// First, try to find claude in PATH
-	if path, err := exec.LookPath("claude"); err == nil {
+	if path, err := h.lookPath("claude"); err == nil {
 		return path
 	}
 

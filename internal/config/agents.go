@@ -228,6 +228,10 @@ type AgentRegistry struct {
 
 	// Agents maps agent names to their configurations.
 	Agents map[string]*AgentPresetInfo `json:"agents"`
+
+	// env is the host this registry resolves agents against; nil is the
+	// running process (see host).
+	env *host
 }
 
 // CurrentAgentRegistryVersion is the current schema version.
@@ -578,7 +582,13 @@ func newBuiltinAgentRegistry() *AgentRegistry {
 // parsed is skipped as a whole and reported in the returned error; the
 // registry is still usable.
 func LoadAgentRegistryFor(townRoot, rigPath string) (*AgentRegistry, error) {
+	return loadAgentRegistryFor(processHost, townRoot, rigPath)
+}
+
+// loadAgentRegistryFor is LoadAgentRegistryFor resolving agents against h.
+func loadAgentRegistryFor(h host, townRoot, rigPath string) (*AgentRegistry, error) {
 	reg := &AgentRegistry{
+		env:     &h,
 		Version: CurrentAgentRegistryVersion,
 		Agents:  make(map[string]*AgentPresetInfo, len(builtinAgentRegistry.Agents)),
 	}
@@ -602,7 +612,12 @@ func LoadAgentRegistryFor(townRoot, rigPath string) (*AgentRegistry, error) {
 // AgentRegistryFor is LoadAgentRegistryFor for callers that resolve agents
 // best-effort: a layer that fails to load is skipped silently.
 func AgentRegistryFor(townRoot, rigPath string) *AgentRegistry {
-	reg, _ := LoadAgentRegistryFor(townRoot, rigPath)
+	return agentRegistryFor(processHost, townRoot, rigPath)
+}
+
+// agentRegistryFor is AgentRegistryFor resolving agents against h.
+func agentRegistryFor(h host, townRoot, rigPath string) *AgentRegistry {
+	reg, _ := loadAgentRegistryFor(h, townRoot, rigPath)
 	return reg
 }
 
@@ -785,7 +800,7 @@ func runtimeConfigFromAgentInfo(reg *AgentRegistry, preset AgentPreset, info *Ag
 	}
 
 	if preset == AgentClaude && rc.Command == "claude" {
-		rc.Command = resolveClaudePath()
+		rc.Command = resolveClaudePath(reg.host())
 	}
 
 	return normalizeRuntimeConfigIn(reg, rc)

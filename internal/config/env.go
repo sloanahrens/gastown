@@ -97,11 +97,25 @@ type AgentEnvConfig struct {
 	// Added as gt.session to OTEL_RESOURCE_ATTRIBUTES so all Claude logs from a
 	// single GT session can be correlated, and as GT_SESSION env var.
 	SessionName string
+
+	// Getenv reads the environment the agent's variables are resolved from
+	// (Dolt endpoint, OTEL URLs, cost tier, passthrough credentials). Nil
+	// reads the process environment.
+	Getenv func(string) string
+}
+
+// getenv returns cfg.Getenv, or os.Getenv when it is nil.
+func (cfg AgentEnvConfig) getenv() func(string) string {
+	if cfg.Getenv != nil {
+		return cfg.Getenv
+	}
+	return os.Getenv
 }
 
 // AgentEnv returns all environment variables for an agent based on the config.
 // This is the single source of truth for agent environment variables.
 func AgentEnv(cfg AgentEnvConfig) map[string]string {
+	getenv := cfg.getenv()
 	env := make(map[string]string)
 
 	// Set role-specific variables
@@ -204,7 +218,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	if cfg.Rig != "" && cfg.TownRoot != "" {
 		rigPath = filepath.Join(cfg.TownRoot, cfg.Rig)
 	}
-	effort := ResolveRoleEffort(cfg.Role, cfg.TownRoot, rigPath)
+	effort := resolveRoleEffort(getenv, cfg.Role, cfg.TownRoot, rigPath)
 	if effort == "" {
 		effort = "high"
 	}
@@ -223,7 +237,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// Reuses the same VictoriaMetrics endpoint as gastown's telemetry so all
 	// metrics (gt + claude) land in the same store.
 	// Opt-in: only active when GT_OTEL_METRICS_URL is explicitly set.
-	if metricsURL := os.Getenv("GT_OTEL_METRICS_URL"); metricsURL != "" {
+	if metricsURL := getenv("GT_OTEL_METRICS_URL"); metricsURL != "" {
 		env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
 		env["OTEL_METRICS_EXPORTER"] = "otlp"
 		env["OTEL_METRIC_EXPORT_INTERVAL"] = "1000"
@@ -235,7 +249,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		// Mirror into bd's own var names so any `bd` call inside the Claude
 		// session emits metrics/logs to the same VictoriaMetrics instance.
 		env["BD_OTEL_METRICS_URL"] = metricsURL
-		if logsURL := os.Getenv("GT_OTEL_LOGS_URL"); logsURL != "" {
+		if logsURL := getenv("GT_OTEL_LOGS_URL"); logsURL != "" {
 			env["BD_OTEL_LOGS_URL"] = logsURL
 			// Claude Code supports OTLP log export; route to the same VictoriaLogs
 			// instance. Uses protobuf (VictoriaLogs rejects JSON).
@@ -290,12 +304,12 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// gt's central server instead of auto-starting rogue per-rig servers.
 	// BEADS_DOLT_* values are output aliases only; they are never authoritative.
 	if cfg.TownRoot != "" {
-		if port := ResolveDoltPort(cfg.TownRoot); port > 0 {
+		if port := ResolveDoltPortWithEnv(cfg.TownRoot, getenv); port > 0 {
 			setDoltPortEnv(env, strconv.Itoa(port))
 		}
 	}
 	if _, ok := env["GT_DOLT_PORT"]; !ok {
-		if v := os.Getenv("GT_DOLT_PORT"); v != "" {
+		if v := getenv("GT_DOLT_PORT"); v != "" {
 			setDoltPortEnv(env, v)
 		}
 	}
@@ -312,7 +326,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 
 	// Propagate Dolt server host. GT/config host is authoritative; stale Beads
 	// aliases from the parent shell are intentionally ignored.
-	if host := ResolveDoltHost(cfg.TownRoot); host != "" {
+	if host := ResolveDoltHostWithEnv(cfg.TownRoot, getenv); host != "" {
 		env["GT_DOLT_HOST"] = host
 		env["BEADS_DOLT_SERVER_HOST"] = host
 	}
@@ -377,7 +391,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		"CLAUDE_CODE_CLIENT_KEY",
 		"CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
 	} {
-		if val := os.Getenv(key); val != "" {
+		if val := getenv(key); val != "" {
 			env[key] = val
 		}
 	}
@@ -457,10 +471,14 @@ func ResolveDoltPortWithEnv(townRoot string, getenv func(string) string) int {
 //  3. mayor/daemon.json env.GT_DOLT_PORT
 //  4. 0 (caller should use its default)
 func ResolveConfiguredDoltPort(townRoot string) int {
-	if _, port, ok := ManagedDoltEndpoint(townRoot); ok {
+	return resolveConfiguredDoltPort(townRoot, os.Getenv)
+}
+
+func resolveConfiguredDoltPort(townRoot string, getenv func(string) string) int {
+	if _, port, ok := managedDoltEndpoint(townRoot, getenv); ok {
 		return port
 	}
-	if port := resolveDoltPortFromEnv(os.Getenv); port > 0 {
+	if port := resolveDoltPortFromEnv(getenv); port > 0 {
 		return port
 	}
 	if port := resolveDoltPortFromDaemonJSON(townRoot); port > 0 {
@@ -479,10 +497,14 @@ func ResolveConfiguredDoltPort(townRoot string) int {
 //  3. mayor/daemon.json env.GT_DOLT_HOST
 //  4. "" (caller should use its default)
 func ResolveConfiguredDoltHost(townRoot string) string {
-	if host, _, ok := ManagedDoltEndpoint(townRoot); ok {
+	return resolveConfiguredDoltHost(townRoot, os.Getenv)
+}
+
+func resolveConfiguredDoltHost(townRoot string, getenv func(string) string) string {
+	if host, _, ok := managedDoltEndpoint(townRoot, getenv); ok {
 		return host
 	}
-	if host := strings.TrimSpace(os.Getenv("GT_DOLT_HOST")); host != "" {
+	if host := strings.TrimSpace(getenv("GT_DOLT_HOST")); host != "" {
 		return host
 	}
 	return resolveDoltHostFromDaemonJSON(townRoot)
@@ -492,7 +514,11 @@ func ResolveConfiguredDoltHost(townRoot string) string {
 // falling back to ambient environment. The boolean reports whether the managed
 // config exists and is not disabled by GT_DOLT_IGNORE_CONFIG.
 func ManagedDoltEndpoint(townRoot string) (host string, port int, ok bool) {
-	if townRoot == "" || os.Getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
+	return managedDoltEndpoint(townRoot, os.Getenv)
+}
+
+func managedDoltEndpoint(townRoot string, getenv func(string) string) (host string, port int, ok bool) {
+	if townRoot == "" || getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
 		return "", 0, false
 	}
 	configPath := filepath.Join(townRoot, ".dolt-data", "config.yaml")
@@ -506,7 +532,11 @@ func ManagedDoltEndpoint(townRoot string) (host string, port int, ok bool) {
 // NormalizeConfiguredDoltEnv strips inherited Dolt endpoint env at target-town
 // boundaries and injects the target town's managed endpoint when present.
 func NormalizeConfiguredDoltEnv(base []string, townRoot string) []string {
-	host, port, ok := ManagedDoltEndpoint(townRoot)
+	return normalizeConfiguredDoltEnv(base, townRoot, os.Getenv)
+}
+
+func normalizeConfiguredDoltEnv(base []string, townRoot string, getenv func(string) string) []string {
+	host, port, ok := managedDoltEndpoint(townRoot, getenv)
 	if !ok {
 		return base
 	}
@@ -525,11 +555,13 @@ func NormalizeConfiguredDoltEnv(base []string, townRoot string) []string {
 func ApplyConfiguredDoltEnv(townRoot string) {
 	normalized := NormalizeConfiguredDoltEnv(os.Environ(), townRoot)
 	for _, key := range []string{"GT_DOLT_HOST", "GT_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		//testpolicy:allow prod-no-setenv — gt up's target-town startup boundary: the servers and agents it spawns inherit this process's environment, which is what this function rewrites
 		_ = os.Unsetenv(key)
 	}
 	for _, entry := range normalized {
 		key, value, ok := strings.Cut(entry, "=")
 		if ok && isDoltEndpointEnvKey(key) {
+			//testpolicy:allow prod-no-setenv — see the Unsetenv above: gt up's children inherit this process's environment
 			os.Setenv(key, value)
 		}
 	}
@@ -746,19 +778,24 @@ func AgentEnvSimple(role, rig, agentName string) map[string]string {
 // an agent resolved out of settings is rejected by both startup-command
 // builders, which check the reference before expanding it (gt-wisp-jsm).
 func ExpandEnvRefs(env map[string]string) map[string]string {
+	return expandEnvRefsIn(env, os.Getenv)
+}
+
+// expandEnvRefsIn is ExpandEnvRefs reading variables through getenv.
+func expandEnvRefsIn(env map[string]string, getenv func(string) string) map[string]string {
 	if len(env) == 0 {
 		return env
 	}
 	expanded := make(map[string]string, len(env))
 	for k, v := range env {
-		expanded[k] = expandEnvRefs(v)
+		expanded[k] = expandEnvRefs(v, getenv)
 	}
 	return expanded
 }
 
-// expandEnvRefs replaces ${VAR} references in s with VAR's process
-// environment value, leaving everything else in place.
-func expandEnvRefs(s string) string {
+// expandEnvRefs replaces ${VAR} references in s with VAR's value from getenv,
+// leaving everything else in place.
+func expandEnvRefs(s string, getenv func(string) string) string {
 	if !strings.Contains(s, "${") {
 		return s
 	}
@@ -767,7 +804,7 @@ func expandEnvRefs(s string) string {
 	for i := 0; i < len(s); {
 		name, end, ok := envRefAt(s, i)
 		if ok {
-			b.WriteString(os.Getenv(name))
+			b.WriteString(getenv(name))
 			i = end
 			continue
 		}
@@ -970,10 +1007,14 @@ func EnvToSlice(env map[string]string) []string {
 //  1. CLAUDE_CONFIG_DIR env var (if set and non-empty)
 //  2. $HOME/.claude (fallback)
 func ClaudeConfigDir() (string, error) {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+	return claudeConfigDir(os.Getenv, os.UserHomeDir)
+}
+
+func claudeConfigDir(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
+	if dir := getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		return dir, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := userHomeDir()
 	if err != nil {
 		return "", err
 	}

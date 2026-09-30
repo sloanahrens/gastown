@@ -221,6 +221,7 @@ func TestBuildStartupCommand_PolecatUsesPerAgentSystemPrompt(t *testing.T) {
 }
 
 func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "gastown")
 	ts := NewTownSettings()
@@ -351,6 +352,7 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 }
 
 func TestResolveRoleAgentConfigWithOverrideNoRoleAddsNoFlags(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "gastown")
 	ts := NewTownSettings()
@@ -401,13 +403,11 @@ func containsArgPair(args []string, flag, value string) bool {
 	return false
 }
 
-// The renderer is a package global, so these tests must not run in parallel
-// with each other or with the tests that rely on it being nil.
-func withSystemPromptRenderer(t *testing.T, fn func(role, townRoot, rigPath, agentName, path string) error) {
-	t.Helper()
-	prev := SystemPromptRenderer
-	SystemPromptRenderer = fn
-	t.Cleanup(func() { SystemPromptRenderer = prev })
+// rendererReg is a registry whose host renders system prompts with fn.
+func rendererReg(fn func(role, townRoot, rigPath, agentName, path string) error) *AgentRegistry {
+	h := fakeHost(nil)
+	h.renderSystemPrompt = fn
+	return agentRegistryFor(h, "", "")
 }
 
 func hasSystemPromptFlag(rc *RuntimeConfig) (string, bool) {
@@ -420,12 +420,13 @@ func hasSystemPromptFlag(rc *RuntimeConfig) (string, bool) {
 }
 
 func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	rig := filepath.Join(town, "myrig")
 	want := SystemPromptFilePath("polecat", town, rig, "nux")
 
 	var calls []string
-	withSystemPromptRenderer(t, func(role, townRoot, rigPath, agentName, path string) error {
+	reg := rendererReg(func(role, townRoot, rigPath, agentName, path string) error {
 		calls = append(calls, role+"|"+townRoot+"|"+rigPath+"|"+agentName+"|"+path)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
@@ -434,7 +435,7 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 	})
 
 	rc := &RuntimeConfig{Command: "claude", Args: []string{"--dangerously-skip-permissions"}}
-	got := withRoleSystemPromptFlag(nil, rc, "polecat", town, rig, "nux")
+	got := withRoleSystemPromptFlag(reg, rc, "polecat", town, rig, "nux")
 
 	if len(calls) != 1 || calls[0] != "polecat|"+town+"|"+rig+"|nux|"+want {
 		t.Fatalf("renderer calls = %v, want one call for the polecat file %s", calls, want)
@@ -447,7 +448,7 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 	}
 
 	// The file now exists: a second resolution must not render again.
-	got = withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
+	got = withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
 	if len(calls) != 1 {
 		t.Fatalf("renderer must not run when the file exists; calls = %v", calls)
 	}
@@ -457,12 +458,13 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 }
 
 func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	rig := filepath.Join(town, "myrig")
 
 	t.Run("error", func(t *testing.T) {
-		withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { return os.ErrPermission })
-		got := withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude", Args: []string{"-x"}}, "polecat", town, rig, "nux")
+		reg := rendererReg(func(_, _, _, _, _ string) error { return os.ErrPermission })
+		got := withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude", Args: []string{"-x"}}, "polecat", town, rig, "nux")
 		if _, ok := hasSystemPromptFlag(got); ok {
 			t.Fatalf("a failing renderer must not add the flag: %v", got.Args)
 		}
@@ -471,8 +473,8 @@ func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testin
 		}
 	})
 	t.Run("wrote nothing", func(t *testing.T) {
-		withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { return nil })
-		got := withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
+		reg := rendererReg(func(_, _, _, _, _ string) error { return nil })
+		got := withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, rig, "nux")
 		if _, ok := hasSystemPromptFlag(got); ok {
 			t.Fatalf("a renderer that produced no file must not add the flag: %v", got.Args)
 		}
@@ -480,18 +482,19 @@ func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testin
 }
 
 func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	calls := 0
-	withSystemPromptRenderer(t, func(_, _, _, _, _ string) error { calls++; return nil })
+	reg := rendererReg(func(_, _, _, _, _ string) error { calls++; return nil })
 
 	// The retired dog role has no file.
-	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "dog", town, "", "")
+	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "dog", town, "", "")
 	// Boot has no system prompt file at all.
-	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "boot", town, "", "")
+	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "boot", town, "", "")
 	// A polecat without a name has no per-agent file.
-	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
+	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
 	// Non-Claude runtimes never get the flag, so nothing to render.
-	withRoleSystemPromptFlag(nil, &RuntimeConfig{Command: "ollama", Args: []string{"run"}}, "polecat", town, filepath.Join(town, "myrig"), "nux")
+	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "ollama", Args: []string{"run"}}, "polecat", town, filepath.Join(town, "myrig"), "nux")
 
 	if calls != 0 {
 		t.Fatalf("renderer ran %d times for roles/runtimes that take no system prompt file", calls)

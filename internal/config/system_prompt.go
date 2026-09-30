@@ -72,10 +72,11 @@ func withRoleSystemPromptFlag(reg *AgentRegistry, rc *RuntimeConfig, role, townR
 		return rc
 	}
 	if !systemPromptFileReady(path) {
-		if SystemPromptRenderer == nil {
+		render := reg.host().systemPromptRenderer()
+		if render == nil {
 			return rc
 		}
-		if err := SystemPromptRenderer(role, townRoot, rigPath, agentName, path); err != nil {
+		if err := render(role, townRoot, rigPath, agentName, path); err != nil {
 			// Degrade loudly: the session still starts (gt prime prints the
 			// static text), but a broken template must not hide here.
 			fmt.Fprintf(os.Stderr, "gt: system prompt for %s not rendered (%v); the first prime will carry it\n", role, err)

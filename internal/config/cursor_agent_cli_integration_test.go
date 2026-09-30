@@ -1,3 +1,5 @@
+//go:build integration
+
 package config
 
 import (
@@ -8,8 +10,8 @@ import (
 	"testing"
 )
 
-// resolveCursorAgentForCLIPTest returns a real cursor-agent binary path. test_main_test.go prepends
-// tiny PATH stubs that shadow the real CLI; we skip those dirs and prefer GT_CURSOR_AGENT_BIN when set.
+// resolveCursorAgentForCLIPTest returns a real cursor-agent binary path,
+// preferring GT_CURSOR_AGENT_BIN when set.
 func resolveCursorAgentForCLIPTest(t *testing.T) (string, []byte) {
 	t.Helper()
 	if p := os.Getenv("GT_CURSOR_AGENT_BIN"); p != "" {
@@ -19,12 +21,8 @@ func resolveCursorAgentForCLIPTest(t *testing.T) (string, []byte) {
 		}
 		return p, out
 	}
-	stubDir := os.Getenv("GT_AGENT_STUB_BIN_DIR")
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
-			continue
-		}
-		if stubDir != "" && dir == stubDir {
 			continue
 		}
 		p := filepath.Join(dir, "cursor-agent")
@@ -43,12 +41,13 @@ func resolveCursorAgentForCLIPTest(t *testing.T) (string, []byte) {
 	return "", nil
 }
 
-// TestCursorAgentCLIPresetMatchesHelp verifies the built-in AgentCursor preset stays aligned with
+// TestIntegrationCursorAgentCLIPresetMatchesHelp verifies the built-in AgentCursor preset stays aligned with
 // the Cursor Agent CLI when `cursor-agent` is installed (curl https://cursor.com/install -fsSL | bash).
-func TestCursorAgentCLIPresetMatchesHelp(t *testing.T) {
+func TestIntegrationCursorAgentCLIPresetMatchesHelp(t *testing.T) {
+	t.Parallel()
 	path, out := resolveCursorAgentForCLIPTest(t)
 	if path == "" {
-		t.Skip("real cursor-agent not found outside test stubs; install Cursor CLI or set GT_CURSOR_AGENT_BIN")
+		t.Skip("real cursor-agent not found; install Cursor CLI or set GT_CURSOR_AGENT_BIN")
 	}
 
 	t.Logf("cursor-agent CLI contract using %s", path)
