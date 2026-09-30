@@ -65,6 +65,24 @@ func getRig(rigName string) (string, *rig.Rig, error) {
 	return townRoot, r, nil
 }
 
+// findCurrentRig resolves the rig the caller is working in: the first path
+// component of cwd under the town root, else GT_RIG (gt run from the town
+// root through a shell alias).
+func findCurrentRig(townRoot string) (string, *rig.Rig, error) {
+	rigName, err := inferRigFromCwd(townRoot)
+	if err != nil || rigName == "" {
+		rigName = os.Getenv("GT_RIG")
+	}
+	if rigName == "" {
+		return "", nil, fmt.Errorf("not inside a rig directory (and GT_RIG not set)")
+	}
+	_, r, err := getRig(rigName)
+	if err != nil {
+		return "", nil, err
+	}
+	return rigName, r, nil
+}
+
 // hasRigBeadLabel checks if a rig's identity bead has a specific label.
 // Returns false if the rig config or bead can't be loaded (safe default).
 func hasRigBeadLabel(townRoot, rigName, label string) bool {
