@@ -132,7 +132,7 @@ func Assess(p Probe, in Input) Result {
 
 	exists, err := p.HasSession(in.Session)
 	if err != nil {
-		return Result{Verdict: Unknown, Reason: "session query failed", Err: err, Sample: in.Prev}
+		return Result{Verdict: Unknown, Reason: "session query failed", Err: err, Sample: copyOf(in.Prev)}
 	}
 	if !exists {
 		return deadResult(in.Prev, now, ReasonNoSession)
@@ -146,7 +146,7 @@ func Assess(p Probe, in Input) Result {
 		if dead, derr := p.PaneDead(in.Session); derr == nil && dead {
 			return deadResult(in.Prev, now, ReasonAgentGone)
 		}
-		return Result{Verdict: Unknown, Reason: "agent process query failed", Err: err, Sample: in.Prev}
+		return Result{Verdict: Unknown, Reason: "agent process query failed", Err: err, Sample: copyOf(in.Prev)}
 	}
 	if !alive {
 		return deadResult(in.Prev, now, ReasonAgentGone)
@@ -175,6 +175,15 @@ func Assess(p Probe, in Input) Result {
 		return Result{Verdict: Stalled, Reason: fmt.Sprintf("no progress for %s", quiet.Round(time.Second)), QuietFor: quiet, Sample: cur}
 	}
 	return Result{Verdict: Alive, Reason: "quiet", QuietFor: quiet, Sample: cur}
+}
+
+// copyOf returns a copy of a sample, so a Result never aliases its input.
+func copyOf(p *intent.Progress) *intent.Progress {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	return &c
 }
 
 // deadResult returns a Dead result whose sample counts consecutive dead

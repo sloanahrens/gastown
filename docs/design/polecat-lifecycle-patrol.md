@@ -573,7 +573,9 @@ SessionManager.Start()
 hooked, the daemon mails the witness `CRASHED_POLECAT:`, and the witness
 patrol scan restarts the session through the supervisor's `Restart`, which
 enforces pause, e-stop and the restart budget (ADR 0003, gt-4k3fj.3). The
-daemon's mail-driven lifecycle intake was removed. Polecat startup is handled end-to-end by the GUPP/beacon
+daemon's mail-driven lifecycle intake was removed.
+
+Polecat startup is handled end-to-end by the GUPP/beacon
 flow (SessionManager → StartupNudge → BuildStartupPrompt → SessionStart hook
 → gt prime).
 

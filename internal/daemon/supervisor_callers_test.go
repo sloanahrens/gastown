@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // workBD is a fake bd that answers only work-bead queries: `list
@@ -423,5 +424,43 @@ func TestEnsureDeaconRunning_UnreadableIntentStartsNothing(t *testing.T) {
 
 	if started || !strings.Contains(buf.String(), "liveness unknown") {
 		t.Fatalf("started=%v with an unreadable intent record\nlog:\n%s", started, buf.String())
+	}
+}
+
+// Witnesses are never restarted for a stall (serial killer bug): an idle
+// witness produces no output while it waits for work.
+func TestEnsureWitnessRunning_StalledIsNotRestarted(t *testing.T) {
+	d, buf, restarts := unknownTmuxDaemon(t)
+	tm := d.tmux.(*fakeTmux)
+	tm.mu.Lock()
+	tm.hasErr = nil
+	tm.mu.Unlock()
+	seat := supervisor.SeatFor("testrig", "witness", "")
+	tm.addSession(seat.SessionName(), "claude", time.Now().Add(-3*time.Hour))
+	seedStalledSample(t, d, seat, tm, 3*time.Hour)
+
+	d.ensureWitnessRunning("testrig")
+
+	if len(*restarts) != 0 {
+		t.Fatalf("a stalled witness was restarted: %v\nlog:\n%s", *restarts, buf)
+	}
+	if !strings.Contains(buf.String(), "already running") {
+		t.Fatalf("stalled witness not treated as running\nlog:\n%s", buf)
+	}
+}
+
+// seedStalledSample records a sample for seat whose evidence has not changed
+// for quiet.
+func seedStalledSample(t *testing.T, d *Daemon, seat supervisor.Seat, tm *fakeTmux, quiet time.Duration) {
+	t.Helper()
+	pane, _ := tm.CapturePane(seat.SessionName(), 200)
+	created, _ := tm.GetSessionCreatedTime(seat.SessionName())
+	now := d.clk().Now()
+	if _, err := intent.Update(d.config.TownRoot, supervisor.IntentSeat(seat), func(r *intent.Record) error {
+		r.Progress = &intent.Progress{SessionCreated: created, PaneHash: tmux.PaneProgressSignature(pane, tmux.DefaultReadyPromptPrefix),
+			SampledAt: now.Add(-time.Minute), ChangedAt: now.Add(-quiet)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

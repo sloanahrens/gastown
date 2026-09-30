@@ -1086,10 +1086,8 @@ func (d *Daemon) Run() (err error) {
 
 		case sig := <-sigChan:
 			if isLifecycleSignal(sig) {
-				// SIGUSR1 used to trigger the lifecycle mail intake, which is
-				// gone (gt-4k3fj.3: lifecycle goes through the supervisor).
-				// It is still caught so a stray one cannot end the daemon.
-				d.logger.Println("Received SIGUSR1: ignored (the lifecycle mail intake was removed)")
+				// Caught so a stray one cannot end the daemon (gt-4k3fj.3).
+				d.logger.Println("Received SIGUSR1: ignored")
 			} else if isReloadRestartSignal(sig) {
 				// 'gt daemon clear-backoff' still sends SIGUSR2. The restart
 				// budget lives in each seat's intent record and is read on
@@ -1375,11 +1373,6 @@ func (d *Daemon) heartbeatWork(state *State) {
 	} else {
 		d.logger.Printf("Handler patrol disabled in config, skipping")
 	}
-
-	// 7-11. (Removed) The lifecycle mail intake, the GUPP and orphaned-work
-	// mail checks: lifecycle goes through the supervisor, and a seat's work
-	// comes from its intent record and work beads, not agent beads
-	// (gt-4k3fj.3, G1-11, G1-12).
 
 	// 12. Check polecat session health (proactive crash detection)
 	// This validates tmux sessions are still alive for polecats with work-on-hook

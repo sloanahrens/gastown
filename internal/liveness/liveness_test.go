@@ -47,8 +47,8 @@ func TestTmuxErrorIsUnknownAndKeepsTheSample(t *testing.T) {
 	if r.Verdict != Unknown || r.Err == nil {
 		t.Fatalf("verdict = %v err = %v, want Unknown with the error", r.Verdict, r.Err)
 	}
-	if r.Sample != prev {
-		t.Fatalf("an Unknown verdict must hand back the previous sample unchanged")
+	if r.Sample == nil || *r.Sample != *prev || r.Sample == prev {
+		t.Fatalf("an Unknown verdict must hand back an unchanged copy of the previous sample")
 	}
 }
 

@@ -226,6 +226,22 @@ func (s *Supervisor) guard(seat Seat, l ActionLine) error {
 	return nil
 }
 
+// refuseHeldUnderLock refuses an action whose hold was found inside the
+// seat's lock, after the guard passed. The record may have become
+// unreadable in between (intent.Update starts such a record as held), which
+// is reported as ErrIntentUnreadable, not as a park.
+func (s *Supervisor) refuseHeldUnderLock(seat Seat, l ActionLine, held string) error {
+	rec, err := intent.Read(s.o.TownRoot, IntentSeat(seat))
+	switch {
+	case err != nil:
+		return s.refuse(l, ErrIntentUnreadable, err.Error())
+	case rec.Frozen:
+		return s.refuseSeat(seat, l, ErrFrozen, held)
+	default:
+		return s.refuseSeat(seat, l, ErrPaused, held)
+	}
+}
+
 // errRepeat aborts the intent update of a refusal already on record.
 var errRepeat = errors.New("repeat refusal")
 
@@ -291,7 +307,7 @@ func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
 	})
 	switch {
 	case errors.Is(err, errHeld):
-		return s.refuseSeat(seat, l, ErrPaused, held)
+		return s.refuseHeldUnderLock(seat, l, held)
 	case killErr != nil:
 		l.Outcome, l.Detail = outcomeFailed, killErr.Error()
 		s.record(l)
@@ -361,7 +377,7 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 	})
 	switch {
 	case errors.Is(err, errHeld):
-		return s.refuseSeat(seat, l, ErrPaused, held)
+		return s.refuseHeldUnderLock(seat, l, held)
 	case err != nil:
 		// The budget cannot be counted, so the restart cannot be allowed.
 		return s.refuse(l, ErrIntentUnreadable, err.Error())

@@ -79,3 +79,16 @@ func TestOrphanSessionCheck_FixHonorsTheTownEstop(t *testing.T) {
 		t.Fatalf("killed %v under a town e-stop", fake.killed)
 	}
 }
+
+// A name that does not parse to a seat is refused, never killed as a stray:
+// it may be a parked seat under a prefix the registry does not know.
+func TestKillSessionForFix_RefusesAnUnparsableName(t *testing.T) {
+	t.Parallel()
+	lister := &fakeZombieLister{}
+	if err := killSessionForFix(t.TempDir(), lister, "not-a-town-session-", "zombie cleanup"); err == nil {
+		t.Fatal("an unparsable session name was not refused")
+	}
+	if len(lister.killed) != 0 {
+		t.Fatalf("killed %v", lister.killed)
+	}
+}
