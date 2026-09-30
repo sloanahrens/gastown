@@ -308,11 +308,8 @@ func runReady(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Surface source errors to the user
+	// Some sources failed: the all-sources case already returned above.
 	if len(failedSources) > 0 {
-		if len(failedSources) == len(sources) {
-			return fmt.Errorf("all sources failed to load: %s", strings.Join(failedSources, ", "))
-		}
 		style.PrintWarning("some sources failed to load: %s (results may be incomplete)", strings.Join(failedSources, ", "))
 	}
 
