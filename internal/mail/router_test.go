@@ -142,8 +142,8 @@ func TestIsTownLevelAddress(t *testing.T) {
 	}{
 		{"mayor", true},
 		{"mayor/", true},
-		{"deacon", true},
-		{"deacon/", true},
+		{"deacon", false}, // deacon role retired (gt-4k3fj.6.1)
+		{"deacon/", false},
 		{"overseer", true},
 		{"gastown/refinery", false},
 		{"gastown/polecats/Toast", false},
@@ -173,8 +173,8 @@ func TestAddressToSessionIDs(t *testing.T) {
 		// Town-level addresses - single session
 		{"mayor", []string{"hq-mayor"}},
 		{"mayor/", []string{"hq-mayor"}},
-		{"deacon", []string{"hq-deacon"}},
-		{"deacon/", []string{"hq-deacon"}},
+		{"deacon", nil}, // deacon role retired (gt-4k3fj.6.1)
+		{"deacon/", nil},
 		{"deacon/dogs/alpha", []string{"hq-dog-alpha"}},
 		{"deacon/dogs/my-dog", []string{"hq-dog-my-dog"}},
 
@@ -182,7 +182,7 @@ func TestAddressToSessionIDs(t *testing.T) {
 		// Refinery role removed (gt-v4ssj.6): no longer a singleton, so it is
 		// ambiguous like any other worker name.
 		{"gastown/refinery", []string{"gt-crew-refinery", "gt-refinery"}},
-		{"beads/witness", []string{"bd-witness"}},
+		{"beads/witness", []string{"bd-crew-witness", "bd-witness"}}, // witness role retired: a plain rig/name
 
 		// Ambiguous addresses - try both crew and polecat variants
 		{"gastown/Toast", []string{"gt-crew-Toast", "gt-Toast"}},
@@ -1042,9 +1042,7 @@ func TestParseGroupAddress(t *testing.T) {
 		{"@town", GroupTypeTown, "", "", false},
 
 		// Role-based patterns (all agents of a role type)
-		{"@witnesses", GroupTypeRole, "witness", "", false},
 		{"@dogs", GroupTypeRole, "dog", "", false},
-		{"@deacons", GroupTypeRole, "deacon", "", false},
 
 		// Rig pattern (all agents in a rig)
 		{"@rig/gastown", GroupTypeRig, "", "gastown", false},
@@ -1164,9 +1162,10 @@ func TestAgentBeadToAddress(t *testing.T) {
 			want: "beads/beavis",
 		},
 		{
+			// Witness role retired (gt-4k3fj.6.1): no longer a known singleton.
 			name: "non-gt prefix no description fallback witness",
 			bead: &agentBead{ID: "bd-beads-witness"},
-			want: "beads/witness",
+			want: "",
 		},
 		{
 			name: "non-gt prefix no description fallback polecat",
@@ -1439,12 +1438,12 @@ func TestAddressToAgentBeadID(t *testing.T) {
 		{
 			name:     "deacon",
 			address:  "deacon/",
-			expected: "hq-deacon",
+			expected: "", // deacon role retired (gt-4k3fj.6.1)
 		},
 		{
 			name:     "deacon without slash",
 			address:  "deacon",
-			expected: "hq-deacon",
+			expected: "",
 		},
 		{
 			name:     "dog",
@@ -2244,11 +2243,11 @@ func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
 			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
 			msg := &Message{
 				From:    from,
-				To:      "gastown/witness",
+				To:      "gastown/crew/bob",
 				Subject: "LIFECYCLE:Shutdown guzzle",
 				Type:    TypeTask,
 			}
-			sessionID := session.WitnessSessionName(session.PrefixFor("gastown"))
+			sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
 
 			r.enqueueReplyReminder(msg, sessionID)
 
@@ -2265,7 +2264,7 @@ func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
 
 func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
 	t.Parallel()
-	for _, from := range []string{"overseer", "mayor/", "deacon/", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust", "deacon/dogs/alpha"} {
+	for _, from := range []string{"overseer", "mayor/", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust", "deacon/dogs/alpha"} {
 		t.Run(from, func(t *testing.T) {
 			townRoot := t.TempDir()
 			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
@@ -2313,6 +2312,8 @@ func TestSenderCanReceiveReply(t *testing.T) {
 		{from: "deaconess", want: false},
 		{from: "mayor/extra", want: false},
 		{from: "deacon/extra", want: false},
+		{from: "deacon", want: false},  // deacon role retired (gt-4k3fj.6.1)
+		{from: "deacon/", want: false}, // deacon role retired (gt-4k3fj.6.1)
 		{from: "gastown/crew/", want: false},
 		{from: "gastown/polecat/", want: false},
 		{from: "gastown/polecats/", want: false},
@@ -2322,8 +2323,6 @@ func TestSenderCanReceiveReply(t *testing.T) {
 		{from: "overseer", want: true},
 		{from: "mayor", want: true},
 		{from: "mayor/", want: true},
-		{from: "deacon", want: true},
-		{from: "deacon/", want: true},
 		{from: "gastown/mayor", want: true},
 		{from: "gastown/deacon", want: true},
 		{from: "gastown/witness", want: true},

@@ -31,6 +31,9 @@ type beadRespawnState struct {
 	LastUpdated time.Time                     `json:"last_updated"`
 }
 
+// beadRespawnStateFile stays under <town>/witness/ although the witness role
+// is retired (gt-4k3fj.6.1): the live counts are there, and moving the file
+// without a migration would reset every bead's respawn budget.
 func beadRespawnStateFile(townRoot string) string {
 	return filepath.Join(townRoot, "witness", "bead-respawn-counts.json")
 }
@@ -76,7 +79,7 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 	if err != nil || townRoot == "" {
 		townRoot = workDir
 	}
-	maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
+	maxRespawns := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
 
 	// Cross-process flock to serialize with other witness instances.
 	unlock, flockErr := lock.FlockAcquire(beadRespawnStateFile(townRoot) + ".flock")

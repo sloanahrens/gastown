@@ -51,10 +51,9 @@ func parsePolecatSessionName(sessionName string) (rigName, polecatName string, o
 		return "", "", false
 	}
 	// Exclude names that are reserved for other session types.
-	// Mayor/deacon use hq- prefix in practice, but gt-<rig>-mayor/deacon
-	// patterns should still be excluded defensively.
-	switch identity.Name {
-	case constants.RoleMayor, constants.RoleDeacon:
+	// The mayor uses the hq- prefix in practice, but a gt-<rig>-mayor
+	// pattern should still be excluded defensively.
+	if identity.Name == constants.RoleMayor {
 		return "", "", false
 	}
 	return identity.Rig, identity.Name, true

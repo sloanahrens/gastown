@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -598,68 +597,11 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Expand role shortcuts to session names
 	// These shortcuts let users type "mayor" instead of "gt-mayor"
-	switch target {
-	case constants.RoleMayor:
+	if target == constants.RoleMayor {
 		target = session.MayorSessionName()
-	case constants.RoleWitness:
-		// These need the current rig
-		roleInfo, err := GetRole()
-		if err != nil {
-			return fmt.Errorf("cannot determine rig for %s shortcut: %w", target, err)
-		}
-		if roleInfo.Rig == "" {
-			return fmt.Errorf("cannot determine rig for %s shortcut (not in a rig context)", target)
-		}
-		target = session.WitnessSessionName(session.PrefixFor(roleInfo.Rig))
 	}
 
-	// Special case: "deacon" target maps to the Deacon session
-	if target == constants.RoleDeacon {
-		deaconSession := session.DeaconSessionName()
-		exists, _ := t.HasSession(deaconSession)
-		if !exists {
-			// Deacon not running - this is not an error, just log and return
-			fmt.Printf("%s Deacon not running, nudge skipped\n", style.Dim.Render("○"))
-			return nil
-		}
-
-		if err := deliverNudge(t, deaconSession, message, sender); err != nil {
-			return fmt.Errorf("nudging deacon: %w", err)
-		}
-
-		fmt.Printf("%s Nudged deacon (%s)\n", style.Bold.Render("✓"), nudgeModeFlag)
-
-		// Log nudge event
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, constants.RoleDeacon, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", constants.RoleDeacon, message))
-		return nil
-	}
-	if dogName, ok := mail.DogAddressName(target); ok {
-		sessionName := session.DogSessionName(dogName)
-		if nudgeModeFlag != NudgeModeImmediate {
-			exists, err := t.HasSession(sessionName)
-			if err != nil {
-				return fmt.Errorf("checking dog session: %w", err)
-			}
-			if !exists {
-				return fmt.Errorf("session %q not found (cannot queue nudge for nonexistent session)", sessionName)
-			}
-		}
-
-		if err := deliverNudge(t, sessionName, message, sender); err != nil {
-			return fmt.Errorf("nudging dog: %w", err)
-		}
-
-		fmt.Printf("%s Nudged %s (%s)\n", style.Bold.Render("✓"), target, nudgeModeFlag)
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			_ = LogNudge(townRoot, target, message)
-		}
-		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
-		return nil
-	}
-	if strings.HasPrefix(target, constants.RoleMayor+"/") || strings.HasPrefix(target, constants.RoleDeacon+"/") {
+	if strings.HasPrefix(target, constants.RoleMayor+"/") || strings.HasPrefix(target, "deacon/") {
 		return fmt.Errorf("invalid town target %q", target)
 	}
 
@@ -866,21 +808,16 @@ func runNudgeChannel(channelName, message, sender string) error {
 
 // resolveNudgePattern resolves a nudge channel pattern to session names.
 // Patterns can be:
-//   - Literal: "gastown/witness" → gt-gastown-witness
+//   - Literal: "gastown/crew/max" → gt-crew-max
 //   - Wildcard: "gastown/polecats/*" → all polecat sessions in gastown
-//   - Role: "*/witness" → all witness sessions
-//   - Special: "mayor", "deacon" → gt-{town}-mayor, gt-{town}-deacon
-//
-// townName is used to generate the correct session names for mayor/deacon.
+//   - Role: "*/crew/*" → all crew sessions
+//   - Special: "mayor" → hq-mayor
 func resolveNudgePattern(pattern string, agents []*AgentSession) []string {
 	var results []string
 
 	// Handle special cases
-	switch pattern {
-	case constants.RoleMayor:
+	if pattern == constants.RoleMayor {
 		return []string{session.MayorSessionName()}
-	case constants.RoleDeacon:
-		return []string{session.DeaconSessionName()}
 	}
 
 	// Parse pattern
@@ -916,10 +853,6 @@ func resolveNudgePattern(pattern string, agents []*AgentSession) []string {
 			}
 			suffix := strings.TrimPrefix(targetPattern, "crew/")
 			if suffix != "*" && suffix != agent.AgentName {
-				continue
-			}
-		} else if targetPattern == constants.RoleWitness {
-			if agent.Type != AgentWitness {
 				continue
 			}
 		} else {
@@ -967,9 +900,7 @@ func shouldNudgeTarget(townRoot, targetAddress string, force bool) (bool, string
 // Examples:
 //   - "gt-gastown-crew-max" -> "gastown/crew/max"
 //   - "gt-gastown-alpha" -> "gastown/alpha"
-//   - "gt-gastown-witness" -> "gastown/witness"
 //   - "hq-mayor" -> "mayor"
-//   - "hq-deacon" -> "deacon"
 func sessionNameToAddress(sessionName string) string {
 	identity, err := session.ParseSessionName(sessionName)
 	if err != nil {
@@ -980,10 +911,6 @@ func sessionNameToAddress(sessionName string) string {
 	switch identity.Role {
 	case session.RoleMayor:
 		return constants.RoleMayor
-	case session.RoleDeacon:
-		return constants.RoleDeacon
-	case session.RoleWitness:
-		return fmt.Sprintf("%s/witness", identity.Rig)
 	case session.RoleCrew:
 		return fmt.Sprintf("%s/crew/%s", identity.Rig, identity.Name)
 	case session.RolePolecat:
@@ -995,24 +922,17 @@ func sessionNameToAddress(sessionName string) string {
 
 // addressToAgentBeadID converts a target address to an agent bead ID.
 // Examples:
-//   - "mayor" -> "gt-{town}-mayor"
-//   - "deacon" -> "gt-{town}-deacon"
-//   - "gastown/witness" -> "gt-gastown-witness"
-//   - "gastown/alpha" -> "gt-gastown-polecat-alpha"
+//   - "mayor" -> "hq-mayor"
+//   - "gastown/alpha" -> "gt-alpha"
 //
 // Returns empty string if the address cannot be converted.
 func addressToAgentBeadID(address string) string {
-	if dogName, ok := mail.DogAddressName(address); ok {
-		return session.DogSessionName(dogName)
-	}
 	// Handle special cases
 	switch address {
 	case constants.RoleMayor, constants.RoleMayor + "/":
 		return session.MayorSessionName()
-	case constants.RoleDeacon, constants.RoleDeacon + "/":
-		return session.DeaconSessionName()
 	}
-	if strings.HasPrefix(address, constants.RoleMayor+"/") || strings.HasPrefix(address, constants.RoleDeacon+"/") {
+	if strings.HasPrefix(address, constants.RoleMayor+"/") || strings.HasPrefix(address, "deacon/") {
 		return ""
 	}
 
@@ -1029,19 +949,14 @@ func addressToAgentBeadID(address string) string {
 	rig := parts[0]
 	role := parts[1]
 
-	switch role {
-	case constants.RoleWitness:
-		return session.WitnessSessionName(session.PrefixFor(rig))
-	default:
-		// Assume polecat
-		if strings.HasPrefix(role, "crew/") {
-			crewName := strings.TrimPrefix(role, "crew/")
-			return session.CrewSessionName(session.PrefixFor(rig), crewName)
-		}
-		if strings.HasPrefix(role, "polecats/") {
-			pcName := strings.TrimPrefix(role, "polecats/")
-			return session.PolecatSessionName(session.PrefixFor(rig), pcName)
-		}
-		return session.PolecatSessionName(session.PrefixFor(rig), role)
+	if strings.HasPrefix(role, "crew/") {
+		crewName := strings.TrimPrefix(role, "crew/")
+		return session.CrewSessionName(session.PrefixFor(rig), crewName)
 	}
+	if strings.HasPrefix(role, "polecats/") {
+		pcName := strings.TrimPrefix(role, "polecats/")
+		return session.PolecatSessionName(session.PrefixFor(rig), pcName)
+	}
+	// Assume polecat
+	return session.PolecatSessionName(session.PrefixFor(rig), role)
 }

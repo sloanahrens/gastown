@@ -135,17 +135,6 @@ func TestAgentIdentityBeaconAddress(t *testing.T) {
 			want: "mayor",
 		},
 		{
-			name: "deacon",
-			id:   AgentIdentity{Role: RoleDeacon},
-			want: "deacon",
-		},
-		{
-			name:    "witness",
-			id:      AgentIdentity{Role: RoleWitness, Rig: "gastown"},
-			want:    "witness (rig: gastown)",
-			wantNot: []string{"gastown/witness"},
-		},
-		{
 			name:    "crew",
 			id:      AgentIdentity{Role: RoleCrew, Rig: "gastown", Name: "max"},
 			want:    "crew max (rig: gastown)",
@@ -178,7 +167,6 @@ func TestBeaconAddressVsAddress(t *testing.T) {
 	// Verify that BeaconAddress produces different (non-path) output
 	// while Address produces the traditional path-like output.
 	ids := []AgentIdentity{
-		{Role: RoleWitness, Rig: "gastown"},
 		{Role: RoleCrew, Rig: "gastown", Name: "max"},
 		{Role: RolePolecat, Rig: "gastown", Name: "Toast"},
 	}
@@ -201,7 +189,7 @@ func TestBeaconAddressVsAddress(t *testing.T) {
 	}
 
 	// Town-level roles should be identical
-	for _, role := range []Role{RoleMayor, RoleDeacon} {
+	for _, role := range []Role{RoleMayor, RoleOverseer} {
 		id := AgentIdentity{Role: role}
 		if id.Address() != id.BeaconAddress() {
 			t.Errorf("For %v: Address()=%q != BeaconAddress()=%q", role, id.Address(), id.BeaconAddress())

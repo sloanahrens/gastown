@@ -24,21 +24,6 @@ func TestAgentEnv_Mayor(t *testing.T) {
 	assertNotSet(t, env, "GT_RIG")
 }
 
-func TestAgentEnv_Witness(t *testing.T) {
-	t.Parallel()
-	env := AgentEnv(AgentEnvConfig{
-		Role:     "witness",
-		Rig:      "myrig",
-		TownRoot: "/town",
-	})
-
-	assertEnv(t, env, "GT_ROLE", "myrig/witness") // compound format
-	assertEnv(t, env, "GT_RIG", "myrig")
-	assertEnv(t, env, "BD_ACTOR", "myrig/witness")
-	assertEnv(t, env, "GIT_AUTHOR_NAME", "myrig/witness")
-	assertEnv(t, env, "GT_ROOT", "/town")
-}
-
 func TestAgentEnv_Polecat(t *testing.T) {
 	t.Parallel()
 	env := AgentEnv(AgentEnvConfig{
@@ -101,34 +86,6 @@ func TestAgentEnv_Crew(t *testing.T) {
 	assertEnv(t, env, "BD_ACTOR", "myrig/crew/emma")
 	assertEnv(t, env, "GIT_AUTHOR_NAME", "emma")
 	assertEnv(t, env, "BEADS_AGENT_NAME", "myrig/emma")
-}
-
-func TestAgentEnv_Deacon(t *testing.T) {
-	t.Parallel()
-	env := AgentEnv(AgentEnvConfig{
-		Role:     "deacon",
-		TownRoot: "/town",
-	})
-
-	assertEnv(t, env, "GT_ROLE", "deacon")
-	assertEnv(t, env, "BD_ACTOR", "deacon")
-	assertEnv(t, env, "GIT_AUTHOR_NAME", "deacon")
-	assertEnv(t, env, "GT_ROOT", "/town")
-	assertNotSet(t, env, "GT_RIG")
-}
-
-func TestAgentEnv_Boot(t *testing.T) {
-	t.Parallel()
-	env := AgentEnv(AgentEnvConfig{
-		Role:     "boot",
-		TownRoot: "/town",
-	})
-
-	assertEnv(t, env, "GT_ROLE", "deacon/boot") // compound format
-	assertEnv(t, env, "BD_ACTOR", "deacon-boot")
-	assertEnv(t, env, "GIT_AUTHOR_NAME", "boot")
-	assertEnv(t, env, "GT_ROOT", "/town")
-	assertNotSet(t, env, "GT_RIG")
 }
 
 // TestIdentityEnvVars_CoversAgentEnvOutput verifies that IdentityEnvVars contains

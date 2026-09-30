@@ -13,40 +13,11 @@ func TestMayorSessionName(t *testing.T) {
 	}
 }
 
-func TestDeaconSessionName(t *testing.T) {
-	// Deacon session name is now fixed (one per machine), uses HQ prefix
-	want := "hq-deacon"
-	got := DeaconSessionName()
-	if got != want {
-		t.Errorf("DeaconSessionName() = %q, want %q", got, want)
-	}
-}
-
 func TestOverseerSessionName(t *testing.T) {
 	want := "hq-overseer"
 	got := OverseerSessionName()
 	if got != want {
 		t.Errorf("OverseerSessionName() = %q, want %q", got, want)
-	}
-}
-
-func TestWitnessSessionName(t *testing.T) {
-	tests := []struct {
-		rigPrefix string
-		want      string
-	}{
-		{"gt", "gt-witness"},
-		{"bd", "bd-witness"},
-		{"hop", "hop-witness"},
-		{"sky", "sky-witness"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.rigPrefix, func(t *testing.T) {
-			got := WitnessSessionName(tt.rigPrefix)
-			if got != tt.want {
-				t.Errorf("WitnessSessionName(%q) = %q, want %q", tt.rigPrefix, got, tt.want)
-			}
-		})
 	}
 }
 

@@ -67,11 +67,12 @@ func TestParsePolecatSessionName(t *testing.T) {
 			wantOk:      false,
 		},
 		{
+			// Witness role retired (gt-4k3fj.6.1): the name is a polecat's.
 			name:        "witness session",
 			sessionName: "gp-witness",
-			wantRig:     "",
-			wantPolecat: "",
-			wantOk:      false,
+			wantRig:     "greenplace",
+			wantPolecat: "witness",
+			wantOk:      true,
 		},
 		{
 			name:        "mayor session",

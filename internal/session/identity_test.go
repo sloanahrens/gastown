@@ -29,25 +29,14 @@ func TestParseSessionName(t *testing.T) {
 		wantPrefix string
 		wantErr    bool
 	}{
-		// Town-level roles (hq-mayor, hq-deacon)
+		// Town-level roles (hq-mayor)
 		{
 			name:     "mayor",
 			session:  "hq-mayor",
 			wantRole: RoleMayor,
 		},
-		{
-			name:     "deacon",
-			session:  "hq-deacon",
-			wantRole: RoleDeacon,
-		},
-		{
-			name:     "boot",
-			session:  "hq-boot",
-			wantRole: RoleDeacon,
-			wantName: "boot",
-		},
 
-		// Rig prefix "hq" collision: hq-witness/hq-<polecat>
+		// Rig prefix "hq" collision: hq-<polecat>
 		// should resolve as rig-level roles when "hq" is a registered prefix.
 		{
 			// Refinery role removed (gt-v4ssj.6): no longer parses as refinery.
@@ -57,13 +46,6 @@ func TestParseSessionName(t *testing.T) {
 			wantRig:    "gastown",
 			wantName:   "refinery",
 			wantPrefix: "gt",
-		},
-		{
-			name:       "hq prefix witness",
-			session:    "hq-witness",
-			wantRole:   RoleWitness,
-			wantRig:    "knjn",
-			wantPrefix: "hq",
 		},
 		{
 			name:       "hq prefix polecat",
@@ -82,27 +64,14 @@ func TestParseSessionName(t *testing.T) {
 			wantPrefix: "hq",
 		},
 
-		// Witness (new format: <prefix>-witness)
 		{
-			name:       "witness gastown",
+			// Witness role retired (gt-4k3fj.6.1): no longer parses as witness.
+			name:       "witness session parses as polecat",
 			session:    "gt-witness",
-			wantRole:   RoleWitness,
+			wantRole:   RolePolecat,
 			wantRig:    "gastown",
+			wantName:   "witness",
 			wantPrefix: "gt",
-		},
-		{
-			name:       "witness beads",
-			session:    "bd-witness",
-			wantRole:   RoleWitness,
-			wantRig:    "beads",
-			wantPrefix: "bd",
-		},
-		{
-			name:       "witness hop",
-			session:    "hop-witness",
-			wantRole:   RoleWitness,
-			wantRig:    "hop",
-			wantPrefix: "hop",
 		},
 
 		// Crew (new format: <prefix>-crew-<name>)
@@ -227,21 +196,6 @@ func TestAgentIdentity_SessionName(t *testing.T) {
 			want:     "hq-mayor",
 		},
 		{
-			name:     "deacon",
-			identity: AgentIdentity{Role: RoleDeacon},
-			want:     "hq-deacon",
-		},
-		{
-			name:     "boot",
-			identity: AgentIdentity{Role: RoleDeacon, Name: "boot"},
-			want:     "hq-boot",
-		},
-		{
-			name:     "witness",
-			identity: AgentIdentity{Role: RoleWitness, Rig: "gastown", Prefix: "gt"},
-			want:     "gt-witness",
-		},
-		{
 			name:     "crew",
 			identity: AgentIdentity{Role: RoleCrew, Rig: "gastown", Name: "max", Prefix: "gt"},
 			want:     "gt-crew-max",
@@ -278,16 +232,6 @@ func TestAgentIdentity_Address(t *testing.T) {
 			name:     "mayor",
 			identity: AgentIdentity{Role: RoleMayor},
 			want:     "mayor",
-		},
-		{
-			name:     "deacon",
-			identity: AgentIdentity{Role: RoleDeacon},
-			want:     "deacon",
-		},
-		{
-			name:     "witness",
-			identity: AgentIdentity{Role: RoleWitness, Rig: "gastown", Prefix: "gt"},
-			want:     "gastown/witness",
 		},
 		{
 			name:     "crew",
@@ -353,16 +297,6 @@ func TestParseAddress(t *testing.T) {
 			name:    "mayor",
 			address: "mayor/",
 			want:    AgentIdentity{Role: RoleMayor},
-		},
-		{
-			name:    "deacon",
-			address: "deacon",
-			want:    AgentIdentity{Role: RoleDeacon},
-		},
-		{
-			name:    "witness",
-			address: "gastown/witness",
-			want:    AgentIdentity{Role: RoleWitness, Rig: "gastown", Prefix: PrefixFor("gastown")},
 		},
 		{
 			// Refinery role removed (gt-v4ssj.6): "<rig>/refinery" is now

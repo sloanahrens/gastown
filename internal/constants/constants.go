@@ -282,20 +282,11 @@ const (
 	// RoleMayor is the mayor agent role.
 	RoleMayor = "mayor"
 
-	// RoleWitness is the witness agent role.
-	RoleWitness = "witness"
-
 	// RolePolecat is the polecat agent role.
 	RolePolecat = "polecat"
 
 	// RoleCrew is the crew agent role.
 	RoleCrew = "crew"
-
-	// RoleDeacon is the deacon agent role.
-	RoleDeacon = "deacon"
-
-	// RoleBoot is the boot watchdog role (modeled as a deacon dog).
-	RoleBoot = "boot"
 )
 
 // Role emojis - centralized for easy customization.
@@ -304,20 +295,11 @@ const (
 	// EmojiMayor is the mayor emoji (fox conductor).
 	EmojiMayor = "🎩"
 
-	// EmojiDeacon is the deacon emoji (wolf in the engine room).
-	EmojiDeacon = "🐺"
-
-	// EmojiWitness is the witness emoji (watchful owl).
-	EmojiWitness = "🦉"
-
 	// EmojiCrew is the crew emoji (established worker).
 	EmojiCrew = "👷"
 
 	// EmojiPolecat is the polecat emoji (transient worker).
 	EmojiPolecat = "😺"
-
-	// EmojiBoot is the boot watchdog emoji (dog).
-	EmojiBoot = "🐾"
 )
 
 // Molecule formula names for the daemon's patrol receipts and convoy

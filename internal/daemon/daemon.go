@@ -1315,12 +1315,6 @@ func (d *Daemon) heartbeatWork(state *State) {
 	// This must happen before beads operations that depend on Dolt.
 	d.ensureDoltServerRunning()
 
-	// 1. Kill leftover witness, deacon and boot sessions. Those roles were
-	// deleted (gt-4k3fj.6.1, ADR 0005): the patrol_scan tick replaced them,
-	// and a session left over from an older binary would keep running a patrol
-	// loop whose commands no longer exist.
-	d.killRetiredPatrolSessions()
-
 	// 6. Ensure Mayor is running (restart if dead); patrols.mayor {"enabled": false}
 	// in mayor/daemon.json turns the supervision off (the town runs without a
 	// resident Mayor while polecats and om cover the work).
@@ -1743,25 +1737,6 @@ func closeBeadsStores(logger *log.Logger, stores map[string]beadsdk.Storage) {
 	}
 }
 
-// killLeftover kills a seat's session, if it has one, through the
-// supervisor. Used where a role must not run (docked rig, disabled patrol,
-// safety stop).
-func (d *Daemon) killLeftover(seat supervisor.Seat, reason, actor string) {
-	name := seat.SessionName()
-	exists, err := d.tmux.HasSession(name)
-	if err != nil {
-		d.logger.Printf("Not killing leftover %s (%s): session query failed: %v", name, reason, err)
-		return
-	}
-	if !exists {
-		return
-	}
-	d.logger.Printf("Killing leftover %s (%s)", name, reason)
-	if err := d.sup().Kill(seat, reason, actor); err != nil {
-		d.logRefusal("Killing leftover "+name, err)
-	}
-}
-
 // logStartOutcome logs a supervisor Restart that did not start a role.
 func (d *Daemon) logStartOutcome(role, rigName string, err error) {
 	switch {
@@ -1804,21 +1779,6 @@ func (d *Daemon) ensureMayorRunning() {
 		return
 	}
 	d.logger.Println("Mayor started successfully")
-}
-
-// killRetiredPatrolSessions kills, through the supervisor, any session left
-// over from the deleted deacon, boot and witness roles (gt-4k3fj.6.1). Such a
-// session was started by an older binary; it would keep running a patrol loop
-// against commands that no longer exist. Nothing starts these seats anymore,
-// so after the first sweep this only costs one tmux has-session per seat.
-func (d *Daemon) killRetiredPatrolSessions() {
-	const reason, actor = "role retired (ADR 0005)", "daemon/retired-role"
-	d.killLeftover(supervisor.SeatFor("", constants.RoleDeacon, ""), reason, actor)
-	d.killLeftover(supervisor.SeatFor("", constants.RoleDeacon, "boot"), reason, actor)
-	d.rigPool.runPerRig(d.ctx, d.getKnownRigs(), func(ctx context.Context, rigName string) error {
-		d.killLeftover(supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RoleWitness, ""), reason, actor)
-		return nil
-	})
 }
 
 // killDefaultPrefixGhosts kills tmux sessions that use the default "gt" prefix

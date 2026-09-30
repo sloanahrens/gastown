@@ -145,43 +145,6 @@ func TestDaemonThresholds_Defaults(t *testing.T) {
 	if got := daemon.RecoveryHeartbeatIntervalD(); got != DefaultRecoveryHeartbeatInterval {
 		t.Errorf("RecoveryHeartbeatInterval: got %v, want %v", got, DefaultRecoveryHeartbeatInterval)
 	}
-	if got := daemon.BootSpawnCooldownD(); got != 2*DefaultRecoveryHeartbeatInterval {
-		t.Errorf("BootSpawnCooldown: got %v, want %v", got, 2*DefaultRecoveryHeartbeatInterval)
-	}
-	if got := daemon.DeaconGracePeriodD(); got != DefaultDeaconGracePeriod {
-		t.Errorf("DeaconGracePeriod: got %v, want %v", got, DefaultDeaconGracePeriod)
-	}
-}
-
-// The spawn gate is only consulted on a heartbeat, so a cooldown at or below
-// one gates nothing and Boot respawns every tick, repaying its prefill. The
-// default derives from the configured heartbeat rather than a constant, so the
-// relation holds when the heartbeat is overridden (gt-w28o).
-func TestBootSpawnCooldownOutlastsHeartbeat(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range []struct {
-		name      string
-		heartbeat string
-	}{
-		{"default heartbeat", ""},
-		{"10m heartbeat", "10m"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			daemon := &DaemonThresholds{RecoveryHeartbeatInterval: tc.heartbeat}
-			heartbeat := daemon.RecoveryHeartbeatIntervalD()
-			if cooldown := daemon.BootSpawnCooldownD(); cooldown <= heartbeat {
-				t.Errorf("BootSpawnCooldownD() = %v, must exceed the heartbeat %v", cooldown, heartbeat)
-			}
-		})
-	}
-
-	if DefaultBootTurnBudget <= 2*DefaultRecoveryHeartbeatInterval {
-		t.Errorf("DefaultBootTurnBudget (%v) must exceed the default cooldown (%v): a turn killed within the cooldown wastes its prefill",
-			DefaultBootTurnBudget, 2*DefaultRecoveryHeartbeatInterval)
-	}
 }
 
 func TestDaemonThresholds_Overrides(t *testing.T) {
@@ -214,38 +177,12 @@ func TestDaemonThresholds_NewFieldOverrides(t *testing.T) {
 	op := &OperationalConfig{
 		Daemon: &DaemonThresholds{
 			RecoveryHeartbeatInterval: "5m",
-			BootSpawnCooldown:         "90s",
-			BootTurnBudget:            "20m",
-			DeaconGracePeriod:         "10m",
 		},
 	}
 
 	daemon := op.GetDaemonConfig()
 	if got := daemon.RecoveryHeartbeatIntervalD(); got != 5*time.Minute {
 		t.Errorf("RecoveryHeartbeatInterval: got %v, want 5m", got)
-	}
-	if got := daemon.BootSpawnCooldownD(); got != 90*time.Second {
-		t.Errorf("BootSpawnCooldown: got %v, want 90s", got)
-	}
-	if got := daemon.BootTurnBudgetD(); got != 20*time.Minute {
-		t.Errorf("BootTurnBudget: got %v, want 20m", got)
-	}
-	if got := daemon.DeaconGracePeriodD(); got != 10*time.Minute {
-		t.Errorf("DeaconGracePeriod: got %v, want 10m", got)
-	}
-}
-
-func TestDeaconThresholds_Defaults(t *testing.T) {
-	t.Parallel()
-
-	op := &OperationalConfig{}
-	deacon := op.GetDeaconConfig()
-
-	if got := deacon.PingTimeoutD(); got != DefaultDeaconPingTimeout {
-		t.Errorf("PingTimeout: got %v, want %v", got, DefaultDeaconPingTimeout)
-	}
-	if got := deacon.ConsecutiveFailuresV(); got != DefaultDeaconConsecutiveFailures {
-		t.Errorf("ConsecutiveFailures: got %v, want %v", got, DefaultDeaconConsecutiveFailures)
 	}
 }
 
@@ -413,65 +350,37 @@ func TestWebThresholds_Overrides(t *testing.T) {
 	}
 }
 
-func TestWitnessThresholds_Defaults(t *testing.T) {
+func TestRecoveryThresholds_Defaults(t *testing.T) {
 	t.Parallel()
 
 	var op *OperationalConfig
-	wit := op.GetWitnessConfig()
+	rec := op.GetRecoveryConfig()
 
-	if got := wit.StartupStallThresholdD(); got != DefaultWitnessStartupStallThreshold {
-		t.Errorf("StartupStallThreshold: got %v, want %v", got, DefaultWitnessStartupStallThreshold)
+	if got := rec.MaxBeadRespawnsV(); got != DefaultRecoveryMaxBeadRespawns {
+		t.Errorf("MaxBeadRespawns: got %v, want %v", got, DefaultRecoveryMaxBeadRespawns)
 	}
-	if got := wit.StartupActivityGraceD(); got != DefaultWitnessStartupActivityGrace {
-		t.Errorf("StartupActivityGrace: got %v, want %v", got, DefaultWitnessStartupActivityGrace)
-	}
-	if got := wit.MaxBeadRespawnsV(); got != DefaultWitnessMaxBeadRespawns {
-		t.Errorf("MaxBeadRespawns: got %v, want %v", got, DefaultWitnessMaxBeadRespawns)
-	}
-	if got := wit.DoneIntentStuckTimeoutD(); got != DefaultWitnessDoneIntentStuckTimeout {
-		t.Errorf("DoneIntentStuckTimeout: got %v, want %v", got, DefaultWitnessDoneIntentStuckTimeout)
-	}
-	if got := wit.DoneIntentRecentGraceD(); got != DefaultWitnessDoneIntentRecentGrace {
-		t.Errorf("DoneIntentRecentGrace: got %v, want %v", got, DefaultWitnessDoneIntentRecentGrace)
-	}
-	if got := wit.DoneIntentMaxAgeD(); got != DefaultWitnessDoneIntentMaxAge {
-		t.Errorf("DoneIntentMaxAge: got %v, want %v", got, DefaultWitnessDoneIntentMaxAge)
+	if got := rec.HeartbeatStartupGraceD(); got != DefaultRecoveryHeartbeatStartupGrace {
+		t.Errorf("HeartbeatStartupGrace: got %v, want %v", got, DefaultRecoveryHeartbeatStartupGrace)
 	}
 }
 
-func TestWitnessThresholds_Overrides(t *testing.T) {
+// The recovery thresholds still live under the retired witness role's key,
+// which the live settings/config.json carries.
+func TestRecoveryThresholds_DecodeFromWitnessKey(t *testing.T) {
 	t.Parallel()
 
-	maxRespawns := 5
-	op := &OperationalConfig{
-		Witness: &WitnessThresholds{
-			StartupStallThreshold:  "2m",
-			StartupActivityGrace:   "45s",
-			MaxBeadRespawns:        &maxRespawns,
-			DoneIntentStuckTimeout: "90s",
-			DoneIntentRecentGrace:  "15s",
-			DoneIntentMaxAge:       "48h",
-		},
+	var op OperationalConfig
+	body := `{"witness":{"max_bead_respawns":5,"heartbeat_startup_grace":"7m","done_intent_stuck_timeout":"90m"}}`
+	if err := json.Unmarshal([]byte(body), &op); err != nil {
+		t.Fatal(err)
 	}
 
-	wit := op.GetWitnessConfig()
-	if got := wit.StartupStallThresholdD(); got != 2*time.Minute {
-		t.Errorf("StartupStallThreshold: got %v, want 2m", got)
-	}
-	if got := wit.StartupActivityGraceD(); got != 45*time.Second {
-		t.Errorf("StartupActivityGrace: got %v, want 45s", got)
-	}
-	if got := wit.MaxBeadRespawnsV(); got != 5 {
+	rec := op.GetRecoveryConfig()
+	if got := rec.MaxBeadRespawnsV(); got != 5 {
 		t.Errorf("MaxBeadRespawns: got %v, want 5", got)
 	}
-	if got := wit.DoneIntentStuckTimeoutD(); got != 90*time.Second {
-		t.Errorf("DoneIntentStuckTimeout: got %v, want 90s", got)
-	}
-	if got := wit.DoneIntentRecentGraceD(); got != 15*time.Second {
-		t.Errorf("DoneIntentRecentGrace: got %v, want 15s", got)
-	}
-	if got := wit.DoneIntentMaxAgeD(); got != 48*time.Hour {
-		t.Errorf("DoneIntentMaxAge: got %v, want 48h", got)
+	if got := rec.HeartbeatStartupGraceD(); got != 7*time.Minute {
+		t.Errorf("HeartbeatStartupGrace: got %v, want 7m", got)
 	}
 }
 

@@ -830,10 +830,10 @@ func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
 
 // isAgentBeadByID detects agent beads by their ID naming convention.
 // Agent bead IDs follow two patterns:
-//   - Full form (prefix != rig): prefix-rig-role[-name] (e.g., gt-gastown-witness)
-//   - Collapsed form (prefix == rig): prefix-role[-name] (e.g., bcc-witness)
+//   - Full form (prefix != rig): prefix-rig-role[-name] (e.g., gt-gastown-crew-max)
+//   - Collapsed form (prefix == rig): prefix-role[-name] (e.g., bcc-crew-max)
 //
-// where role is one of: witness, refinery, crew, polecat, deacon, mayor.
+// where role is one of: crew, polecat, mayor.
 // The collapsed form has only 2 parts for role-only IDs, so we must check
 // from parts[1:] not parts[2:].
 func isAgentBeadByID(id string) bool {
@@ -845,7 +845,7 @@ func isAgentBeadByID(id string) bool {
 	// collapsed-form (role at parts[1]) agent bead IDs.
 	for _, part := range parts[1:] {
 		switch part {
-		case constants.RoleWitness, constants.RoleCrew, constants.RolePolecat, constants.RoleDeacon, constants.RoleMayor:
+		case constants.RoleCrew, constants.RolePolecat, constants.RoleMayor:
 			return true
 		}
 	}

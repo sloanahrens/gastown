@@ -61,9 +61,9 @@ func parseGtEventLine(line string) *Event {
 		}
 	}
 	if rig == "" && ge.Actor != "" {
-		// Extract rig from actor like "gastown/witness"
+		// Extract rig from actor like "gastown/crew/max"
 		parts := strings.Split(ge.Actor, "/")
-		if len(parts) > 0 && parts[0] != constants.RoleMayor && parts[0] != constants.RoleDeacon {
+		if len(parts) > 0 && parts[0] != constants.RoleMayor {
 			rig = parts[0]
 		}
 	}
@@ -74,20 +74,12 @@ func parseGtEventLine(line string) *Event {
 		parts := strings.Split(ge.Actor, "/")
 		if len(parts) >= 2 {
 			role = parts[len(parts)-1]
-			// Check for known roles
-			switch parts[len(parts)-1] {
-			case constants.RoleWitness:
-				role = parts[len(parts)-1]
-			default:
-				// Could be polecat name - check second-to-last part
-				if len(parts) >= 2 {
-					switch parts[len(parts)-2] {
-					case "polecats":
-						role = constants.RolePolecat
-					case constants.RoleCrew:
-						role = constants.RoleCrew
-					}
-				}
+			// Could be a polecat or crew name - check second-to-last part
+			switch parts[len(parts)-2] {
+			case "polecats":
+				role = constants.RolePolecat
+			case constants.RoleCrew:
+				role = constants.RoleCrew
 			}
 		} else if len(parts) == 1 {
 			role = parts[0]

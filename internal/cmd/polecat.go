@@ -499,15 +499,15 @@ func effectivePolecatState(item PolecatListItem, spawning bool) polecat.State {
 
 // polecatSpawnGraceWindow resolves the window a dispatched-but-not-live polecat
 // is read as spawning before it becomes stalled, from the same town thresholds
-// the Witness uses (config.WitnessThresholds.HeartbeatStartupGrace, default
+// the Witness uses (config.RecoveryThresholds.HeartbeatStartupGrace, default
 // 5m), so list and witness agree on when spawning ends. An unreadable town root
 // yields the compiled-in default: the grace only ever delays a stalled verdict,
 // so failing to read the config must not fail it off (gt-yteq).
 func polecatSpawnGraceWindow(townRoot string) time.Duration {
 	if strings.TrimSpace(townRoot) == "" {
-		return config.DefaultWitnessHeartbeatStartupGrace
+		return config.DefaultRecoveryHeartbeatStartupGrace
 	}
-	return config.LoadOperationalConfig(townRoot).GetWitnessConfig().HeartbeatStartupGraceD()
+	return config.LoadOperationalConfig(townRoot).GetRecoveryConfig().HeartbeatStartupGraceD()
 }
 
 // polecatAgentMRDetails renders the agent and merge-request fields for one
@@ -840,7 +840,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing tmux sessions: %w", err)
 	}
 	// Spawn grace: the window the Witness gives a dispatched session before it
-	// would call it stalled (config.WitnessThresholds.HeartbeatStartupGrace,
+	// would call it stalled (config.RecoveryThresholds.HeartbeatStartupGrace,
 	// default 5m). An unreadable town root falls back to the compiled-in
 	// default rather than switching grace off — grace only ever delays the
 	// stalled verdict (gt-yteq). One clock for the whole listing, so every

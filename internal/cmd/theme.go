@@ -169,10 +169,6 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 			theme = tmux.ResolveSessionTheme(townRoot, "", constants.RoleMayor, "")
 			worker = "Mayor"
 			role = constants.RoleMayor
-		case session.RoleDeacon:
-			theme = tmux.ResolveSessionTheme(townRoot, "", constants.RoleDeacon, "")
-			worker = "Deacon"
-			role = constants.RoleDeacon
 		default:
 			rig = identity.Rig
 
@@ -182,16 +178,8 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 			}
 
 			role = string(identity.Role)
-			switch identity.Role {
-			case session.RoleWitness:
-				worker = constants.RoleWitness
-			case session.RoleCrew:
-				worker = identity.Name
-				crewMember = identity.Name
-			default:
-				worker = identity.Name
-				crewMember = identity.Name
-			}
+			worker = identity.Name
+			crewMember = identity.Name
 
 			// Use role-based theme resolution (with per-member override)
 			theme = tmux.ResolveSessionTheme(townRoot, rig, role, crewMember)
@@ -264,9 +252,9 @@ func detectCurrentRig() string {
 	}
 
 	// Extract first path component (rig name)
-	// Patterns: <rig>/..., mayor/..., deacon/...
+	// Patterns: <rig>/..., mayor/...
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) > 0 && parts[0] != "." && parts[0] != constants.RoleMayor && parts[0] != constants.RoleDeacon {
+	if len(parts) > 0 && parts[0] != "." && parts[0] != constants.RoleMayor {
 		return parts[0]
 	}
 

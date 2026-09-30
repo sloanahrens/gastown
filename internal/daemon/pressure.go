@@ -107,16 +107,13 @@ func (d *Daemon) countAgentSessions() int {
 }
 
 // isAgentSession returns true if the tmux session name looks like a Gas Town agent.
-// Agent sessions use prefixed names (e.g., "hq-mayor", "rig-witness", "rig-polecat-foo").
+// Agent sessions use prefixed names (e.g., "hq-mayor", "rig-crew-max", "rig-polecat-foo").
 func isAgentSession(name string) bool {
 	// Agent sessions contain role markers
 	for _, marker := range []string{
 		constants.RoleMayor,
-		constants.RoleWitness,
 		constants.RolePolecat,
-		constants.RoleDeacon,
 		constants.RoleCrew,
-		"boot",
 		"dog",
 	} {
 		if strings.Contains(name, marker) {

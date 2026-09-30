@@ -169,8 +169,8 @@ func TestSessionToAgentID_Fallback(t *testing.T) {
 	}
 }
 
-// TestSessionToAgentID_TownLevel pins down GH#3699: town-level agents (mayor,
-// deacon) must produce a trailing-slash address so writes from gt sling match
+// TestSessionToAgentID_TownLevel pins down GH#3699: the town-level mayor must
+// produce a trailing-slash address so writes from gt sling match
 // the form queried by gt hook / runMoleculeStatus / buildAgentIdentity.
 func TestSessionToAgentID_TownLevel(t *testing.T) {
 	t.Parallel()
@@ -179,7 +179,6 @@ func TestSessionToAgentID_TownLevel(t *testing.T) {
 		want    string
 	}{
 		{"hq-mayor", "mayor/"},
-		{"hq-deacon", "deacon/"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {

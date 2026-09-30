@@ -544,7 +544,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 	}
 	if opts.HookBead != "" && !opts.Force {
 		if polecat.ShouldBlockRespawn(townRoot, opts.HookBead) {
-			maxRespawns := config.LoadOperationalConfig(townRoot).GetWitnessConfig().MaxBeadRespawnsV()
+			maxRespawns := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
 			return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
 				"This bead keeps failing — investigate before re-dispatching.\n"+
 				"Override: gt sling %s %s --force\n"+
@@ -830,7 +830,7 @@ func IsRigName(target string) (string, bool) {
 
 	// Check known non-rig role names
 	switch strings.ToLower(target) {
-	case constants.RoleMayor, "may", constants.RoleDeacon, "dea", constants.RoleCrew, constants.RoleWitness, "wit", "ref":
+	case constants.RoleMayor, "may", constants.RoleCrew, "ref":
 		return "", false
 	}
 

@@ -57,16 +57,13 @@ func sessionToAgentID(sessionName string) string {
 
 // canonicalAssigneeAddress returns the address used for bead assignees and
 // hook-status queries. This matches the form emitted by resolveSelfTarget and
-// buildAgentIdentity: town-level agents (mayor, deacon) get a trailing slash.
-// session.AgentIdentity.Address() returns the bare name for those roles, which
+// buildAgentIdentity: the town-level mayor gets a trailing slash.
+// session.AgentIdentity.Address() returns the bare name for that role, which
 // causes the read/write mismatch in GH#3699.
 func canonicalAssigneeAddress(identity *session.AgentIdentity) string {
 	addr := identity.Address()
-	switch identity.Role {
-	case session.RoleMayor, session.RoleDeacon:
-		if !strings.HasSuffix(addr, "/") {
-			return addr + "/"
-		}
+	if identity.Role == session.RoleMayor && !strings.HasSuffix(addr, "/") {
+		return addr + "/"
 	}
 	return addr
 }
