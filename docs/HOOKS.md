@@ -67,12 +67,13 @@ built-in lifecycle baseline) are blocked before they run.
 
 The `polecats` override adds the polecat-paths guard (`gt tap guard
 polecat-paths`, gt-hmaf) on the `Bash|Monitor` and
-`Edit|Write|MultiEdit|NotebookEdit` matchers: a cross-worktree edit corrupts
-a branch its owner cannot see. File-writing tools are limited to the
-polecat's own worktree (plus temp dirs and the session scratchpad), and
-shell writes — interpreters, `curl -o`, redirections, `cd` and `git -C`
-targets — are blocked when they name a town path outside it, its polecat
-directory, or its rig's `.repo.git`. Reads stay allowed anywhere; an
+`Edit|Write|MultiEdit|NotebookEdit` matchers: a cross-worktree edit corrupts a
+branch its owner cannot see. File-writing tools are limited to the polecat's
+own worktree (plus temp dirs and the session scratchpad), and shell writes —
+interpreters, `curl -o`, redirections, `cd` and `git -C` targets — are blocked
+when they name a town path outside it, its polecat directory, or its rig's
+`.repo.git`. `$HOME/.local/bin`, the `gt`/`bd` install directory shared by all
+agents, is denied to every write (gt-tnts5). Reads stay allowed anywhere; an
 unresolvable target is blocked.
 
 The `polecats` and `dog` overrides deny permission prompts nobody can answer
@@ -203,9 +204,8 @@ Additional hooks exist in settings.json files but are not yet in the registry:
 
 - **bd init guard** (gastown/crew, beads/crew) - blocks `bd init*` inside `.beads/`
 - **mol patrol guards** (gastown roles) - blocks persistent patrol molecules
-- **polecat-paths guard** (polecats) - blocks Edit/Write/MultiEdit/NotebookEdit
-  targets outside the polecat's own worktree, and shell writes into a sibling
-  worktree or the town's mayor/deacon/settings trees (gt-hmaf)
+- **polecat-paths guard** (polecats) - what it blocks: the `polecats` override
+  paragraph above
 - **tmux clear-history** (gastown root) - clears terminal history on session start
 - **SessionStart .beads/ validation** (gastown/crew, beads/crew) - validates CWD
 
