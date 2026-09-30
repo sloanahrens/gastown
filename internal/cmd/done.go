@@ -1982,20 +1982,6 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// the rig-local migration. See beads.ForAgentBead docstring (gt-8we).
 	agentBd := bd.ForAgentBead()
 
-	// Best-effort lookup of the MR this session just submitted (set on the
-	// agent bead's active_mr field earlier in the same gt done invocation —
-	// see UpdateAgentActiveMR). Used below to leave the hooked bead open and
-	// record which MR is outstanding (gt-pqqz) rather than closing it here;
-	// the refinery closes it for real at merge success. Empty when this exit
-	// had no MR (no-merge, escalated, etc.) — those go through a different
-	// close path already.
-	var pendingMRID string
-	if agentIssue, err := agentBd.Show(agentBeadID); err == nil && agentIssue != nil {
-		if fields := beads.ParseAgentFields(agentIssue.Description); fields != nil {
-			pendingMRID = strings.TrimSpace(fields.ActiveMR)
-		}
-	}
-
 	// Find the hooked bead to close. Use issueID directly instead of reading
 	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking).
 	hookedBeadID := issueID
@@ -2096,36 +2082,13 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
-			} else if skipReason := doneCloseTimeInvariantSkipReason(bd, cwd, townRoot, ctx.Rig, hookedBeadID, pendingMRID); skipReason != "" {
-				// gt-6hmz: this routine self-close previously trusted a cached
-				// active_mr field without re-verifying the MR was still open.
-				// Refuse rather than close a bead whose branch carries unmerged
-				// commits with nothing tracking them.
+			} else if skipReason := doneCloseTimeInvariantSkipReason(cwd, townRoot, ctx.Rig, hookedBeadID); skipReason != "" {
+				// gt-6hmz: refuse rather than close a bead whose branch carries
+				// commits the target lacks; only the landing worker closes
+				// work that has code to land.
 				style.PrintWarning("%s", skipReason)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open for witness/mayor review.\n")
 				notifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
-			} else if pendingMRID != "" {
-				// gt-pqqz: the source bead stays open through the merge queue
-				// instead of closing here at MR-submission time. "Closed" now
-				// means "merged" everywhere a human or a dependency check
-				// reads it — the refinery's closeMergedWorkBead
-				// (work_bead_close.go) is what actually closes this bead, at
-				// real merge success, referencing the merge commit. A comment
-				// records the outstanding MR for anyone reading the bead
-				// while it's in flight.
-				//
-				// If the MR is rejected instead, recoverRejectedMRDeadWorker
-				// (dead_worker_recovery.go) reopens the bead for redispatch
-				// once this (transient) polecat's session is confirmed gone —
-				// it already treats a still-open, still-assigned source bead
-				// as one of its cases, gated on tmux session liveness rather
-				// than on close-reason vocabulary.
-				attempt := 1 + strings.Count(hookedBead.Notes, land.MergeRejectionNoteMarker+" (attempt")
-				note := fmt.Sprintf("Submitted to merge queue: %s (attempt %d)", pendingMRID, attempt)
-				if err := hookBd.AddComment(hookedBeadID, note); err != nil {
-					// Non-fatal: warn but continue
-					fmt.Fprintf(os.Stderr, "Warning: couldn't record pending-MR note on %s: %v\n", hookedBeadID, err)
-				}
 			} else if err := hookBd.Close(hookedBeadID); err != nil {
 				// Non-fatal: warn but continue
 				fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)

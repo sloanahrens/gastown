@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -18,8 +17,8 @@ import (
 // (gt-arno), the PreToolUse half of the gt-6hmz close-time invariant.
 //
 // The gap: gt-6hmz made gt done re-verify, at close time, that a bead it is
-// about to close is actually tracked (zero unmerged commits, or a live MR, or
-// an operator supersede:/cancel: reason). But `bd` is an external binary in the
+// about to close carries no unlanded work (zero unmerged commits, or an
+// operator supersede:/cancel: reason). But `bd` is an external binary in the
 // sibling beads repo — every call in this repo shells out (internal/beads/
 // beads.go) — so an agent running `bd close <id>` straight from a Bash tool
 // call bypasses done.go entirely. Nothing inside gt's Go code runs at all.
@@ -49,11 +48,9 @@ import (
 //     — closing a filed bug bead, a molecule step, a convoy, an unrelated
 //     task — is not this guard's business and passes untouched.
 //
-//     The rejected alternative was scoping by the agent bead's hook_bead.
-//     That would block the legitimate conflict-resolution close, where the
-//     hooked bead is the conflict *task* and the branch belongs to a different
-//     source issue (the refinery waits on the task closing to retry the merge;
-//     the branch-name rule exempts it correctly, a hook rule would not).
+//     The rejected alternative was scoping by the agent bead's hook_bead,
+//     which would also judge a hooked task whose branch belongs to a
+//     different source issue.
 //
 //  3. Fail open on anything unresolvable. No command on stdin, no cwd, no town
 //     root, no git context, detached HEAD, or the default branch all mean "the
@@ -90,8 +87,8 @@ var tapGuardBdCloseInvariantCmd = &cobra.Command{
 	Long: `Enforce the gt-6hmz close-time invariant on raw bd close calls (PreToolUse hook).
 
 gt-6hmz made 'gt done' verify, at close time, that a bead it closes is actually
-tracked — its branch has no commits the target lacks, or an open MR tracks it,
-or it carries an explicit supersede:/cancel: reason. A raw 'bd close <id>' from
+unlanded work — its branch has no commits the target lacks, or it carries an
+explicit supersede:/cancel: reason. A raw 'bd close <id>' from
 an agent's Bash call never reaches that code, so this guard evaluates the same
 invariant for the ids such a command would close.
 
@@ -200,19 +197,12 @@ func tapGuardBdCloseInvariant(stdin io.Reader, proc guardProcess) error {
 }
 
 // bdCloseInvariantScope is everything the invariant needs that depends on the
-// session rather than the command: which branch is being judged, what it is
-// judged against, the rig beads client MR beads live in, and the MR this
-// session last submitted.
-//
-// mrTracker is nil when the rig holds no beads database at all — see
-// rigBeadsWorkspaceExists. The predicate skips exit (b) for a nil tracker, so
-// such a session is judged on commits and operator reason alone.
+// session rather than the command: which branch is being judged and what it
+// is judged against.
 type bdCloseInvariantScope struct {
-	branch    string
-	target    string
-	mrTracker closeTimeMRTracker
-	counter   closeTimeCommitCounter
-	pendingMR string
+	branch  string
+	target  string
+	counter closeTimeCommitCounter
 }
 
 // resolveBdCloseInvariantScope gathers the session context for the invariant,
@@ -221,10 +211,6 @@ type bdCloseInvariantScope struct {
 //
 // payloadCwd is the session cwd from the hook payload; os.Getwd is the
 // fallback, for harnesses whose payload omits it.
-//
-// The rig beads client is built from the rig path (not the worktree), matching
-// gt done: MR beads always live in the rig DB, and cwd may be a checkout the
-// rig path cannot be derived from once the worktree is gone.
 func resolveBdCloseInvariantScope(payloadCwd string, proc guardProcess) (bdCloseInvariantScope, bool) {
 	if !isGasTownAgentContextIn(proc.getenv, proc.getwd) {
 		return bdCloseInvariantScope{}, false
@@ -270,69 +256,13 @@ func resolveBdCloseInvariantScope(payloadCwd string, proc guardProcess) (bdClose
 		return bdCloseInvariantScope{}, false
 	}
 
-	scope := bdCloseInvariantScope{branch: branch, target: target, counter: g}
-	rigPath := filepath.Join(townRoot, rigName)
-	if rigBeadsWorkspaceExists(rigPath) {
-		rigBd := beads.New(rigPath)
-		scope.mrTracker = rigBd
-		scope.pendingMR = resolveBdCloseInvariantPendingMR(ctx, ctxErr, rigBd)
-	}
-	return scope, true
-}
-
-// rigBeadsWorkspaceExists reports whether rigPath actually holds a beads
-// database — the precondition for asking bd anything at all.
-//
-// Without it the guard would shell out to bd from a directory that has no
-// database, which answers nothing and (on a host with a shared Dolt server)
-// risks resolving to, or creating, the wrong one. A missing database therefore
-// means "no MR can be looked up here", which the predicate handles as a nil
-// tracker rather than as an error.
-func rigBeadsWorkspaceExists(rigPath string) bool {
-	info, err := os.Stat(beads.ResolveBeadsDir(rigPath))
-	return err == nil && info.IsDir()
-}
-
-// resolveBdCloseInvariantPendingMR returns the MR this session last submitted,
-// read off the agent bead's active_mr field — the same field gt done consults
-// for the identical purpose.
-//
-// This is the field gt-6hmz objected to trusting *unverified*: the exported
-// predicate re-verifies it with a live Show and requires a non-terminal
-// status, so a stale pointer to a closed MR does not count as tracking. Every
-// failure here (no agent bead, unreadable, no active_mr) yields "", which
-// sends exit (b) to its by-issueID fallback instead of disabling it
-// (gt-h8ld) — the field being unreadable isn't evidence no MR exists.
-func resolveBdCloseInvariantPendingMR(ctx RoleContext, ctxErr error, rigBd *beads.Beads) string {
-	if ctxErr != nil {
-		// No resolved role means no agent bead to identify, and ctx is the
-		// zero value getAgentBeadID would read as "unknown role".
-		return ""
-	}
-	agentBeadID := getAgentBeadID(ctx)
-	if agentBeadID == "" {
-		return ""
-	}
-	agentIssue, err := rigBd.ForAgentBead().Show(agentBeadID)
-	if err != nil || agentIssue == nil {
-		return ""
-	}
-	fields := beads.ParseAgentFields(agentIssue.Description)
-	if fields == nil {
-		return ""
-	}
-	return strings.TrimSpace(fields.ActiveMR)
+	return bdCloseInvariantScope{branch: branch, target: target, counter: g}, true
 }
 
 // bdCloseInvariantRefusal evaluates the gt-6hmz invariant for one bead id and
 // returns the refusal message, or "" when the close may proceed.
 func bdCloseInvariantRefusal(scope bdCloseInvariantScope, issueID, closeReason string) string {
-	return closeTimeInvariantSkipReason(
-		scope.mrTracker, scope.counter,
-		issueID, scope.pendingMR,
-		scope.branch, scope.target,
-		closeReason,
-	)
+	return closeTimeInvariantSkipReason(scope.counter, issueID, scope.branch, scope.target, closeReason)
 }
 
 // branchNamesBead reports whether branch embeds issueID as one of its own
@@ -487,8 +417,8 @@ func printBdCloseInvariantBlock(issueID, branch, refusal string) {
 	fmt.Fprintln(os.Stderr, "║                                                                  ║")
 	fmt.Fprintf(os.Stderr, "║  %-63s ║\n", truncateStr(refusal, 63))
 	fmt.Fprintln(os.Stderr, "║                                                                  ║")
-	fmt.Fprintln(os.Stderr, "║  A bead with no commits on this branch closes normally (that    ║")
-	fmt.Fprintln(os.Stderr, "║  is exit (a)); so does one whose MR is still live (exit (b)).   ║")
+	fmt.Fprintln(os.Stderr, "║  A bead with no commits on this branch closes normally; the     ║")
+	fmt.Fprintln(os.Stderr, "║  landing worker closes submitted work when it lands.            ║")
 	fmt.Fprintln(os.Stderr, "║  Otherwise submit with 'gt done', or record an operator reason: ║")
 	fmt.Fprintln(os.Stderr, "║    bd close <id> --reason=\"supersede: <what replaced it>\"        ║")
 	fmt.Fprintln(os.Stderr, "║    bd close <id> --reason=\"cancel: <why it is abandoned>\"       ║")
