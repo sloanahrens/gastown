@@ -75,8 +75,8 @@ func (d *Daemon) heartbeatTick() {
     d.checkDeaconHeartbeat()        // 2. Belt-and-suspenders fallback
     d.ensureWitnessesRunning()      // 3. Witness health (checks tmux directly)
     d.ensureRefineriesRunning()     // 4. Refinery health (checks tmux directly)
-    d.processLifecycleRequests()    // 5. Cycle/restart requests
-    // Agent state derived from tmux, not recorded in beads (gt-zecmc)
+    // Every kill or restart above goes through the supervisor's Kill and
+    // Restart (ADR 0003); the lifecycle mail intake was removed (gt-4k3fj.3).
 }
 ```
 

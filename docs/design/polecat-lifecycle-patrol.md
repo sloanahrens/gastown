@@ -256,8 +256,11 @@ Messages in the polecat lifecycle channel follow the existing witness protocol
 | `MERGED <id>` | Post-merge | Refinery | Nuke polecat sandbox |
 | `MERGE_FAILED <id>` | Merge failure | Refinery | Notify polecat, rework needed |
 | `RECOVERED_BEAD <id>` | Orphan recovery | Witness | Deacon re-dispatches work |
-| `GUPP_VIOLATION: <name>` | Stall detected | Daemon | Witness investigates |
-| `ORPHANED_WORK: <name>` | Dead session + work | Daemon | Witness recovers or nukes |
+
+The daemon no longer sends `GUPP_VIOLATION:` or `ORPHANED_WORK:`
+(gt-4k3fj.3): both read agent beads and repeated every heartbeat. Stalls and
+dead sessions are judged by the one liveness function and acted on by the
+supervisor (ADR 0003).
 
 ### 4.4 Channel Processing
 
@@ -415,9 +418,7 @@ The deacon detects dead witnesses. The witness detects dead polecats.
 ### 6.3 Information Flow Between Patrol Agents
 
 ```
-Daemon ───LIFECYCLE:──────▶ Witness inbox
-Daemon ───GUPP_VIOLATION:─▶ Witness inbox
-Daemon ───ORPHANED_WORK:──▶ Witness inbox
+Daemon ───CRASHED_POLECAT:─▶ Witness inbox
 
 Deacon ◀──heartbeat.json──── Daemon
 Deacon ───nudge────────────▶ Witness (if stale)
@@ -568,10 +569,11 @@ SessionManager.Start()
     └── New session discovers next step via bd mol current
 ```
 
-**Current implementation:** The daemon's `processLifecycleRequests()` handles
-this. When a session dies but the hook is still set, the daemon either sends a
-`LIFECYCLE:` message to the witness or directly restarts the session (depending
-on configuration). Polecat startup is handled end-to-end by the GUPP/beacon
+**Current implementation:** When a polecat's session dies with work still
+hooked, the daemon mails the witness `CRASHED_POLECAT:`, and the witness
+patrol scan restarts the session through the supervisor's `Restart`, which
+enforces pause, e-stop and the restart budget (ADR 0003, gt-4k3fj.3). The
+daemon's mail-driven lifecycle intake was removed. Polecat startup is handled end-to-end by the GUPP/beacon
 flow (SessionManager → StartupNudge → BuildStartupPrompt → SessionStart hook
 → gt prime).
 
