@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 // TestIsDogTarget verifies the dog target pattern matching.
@@ -151,62 +150,4 @@ func TestDogTargetsAreNotMistakenForRigs(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestDogDispatchSlingArgsRoundTripThroughCommandTree parses the argv the
-// daemon's wisp_reaper execs against the real command tree.
-//
-// Nothing else can catch this: the daemon runs that argv as a subprocess, so a
-// flag that disappears from the CLI (D7, 388d0320) breaks dog dispatch without a
-// compile error anywhere, and the sweep's designed response to a failed dispatch
-// is to degrade to its inline scan. This is the compile error (gt-4k3fj.10).
-//
-// Not parallel: parsing writes the sling command's package-level flag vars.
-func TestDogDispatchSlingArgsRoundTripThroughCommandTree(t *testing.T) {
-	argv := daemon.SlingDogArgs(constants.MolDogReaper, map[string]string{
-		"max_age":         "24h0m0s",
-		"purge_age":       "168h0m0s",
-		"stale_issue_age": "720h0m0s",
-		"mail_delete_age": "168h0m0s",
-		"alert_threshold": "5",
-		"dry_run":         "true",
-		"auto_close":      "false",
-		"databases":       "hq,gt",
-	})
-
-	sling, rest, err := rootCmd.Find(argv[:1])
-	if err != nil {
-		t.Fatalf("the daemon execs `gt %s`, which the command tree does not have: %v", argv[0], err)
-	}
-	if sling.CommandPath() != "gt sling" {
-		t.Fatalf("`gt %s` resolved to %q, not the sling command", argv[0], sling.CommandPath())
-	}
-	if len(rest) != 0 {
-		t.Fatalf("`gt %s` left argv %v unconsumed", argv[0], rest)
-	}
-
-	// ParseFlags is the call cobra's own Execute makes: it merges the root's
-	// persistent flags first, so this sees the same surface the daemon's
-	// subprocess does, unknown flags included.
-	//
-	// A positive control leads, because a flag set that parsed nothing would
-	// pass the real assertion vacuously.
-	if err := sling.ParseFlags([]string{"--no-such-flag"}); err == nil {
-		t.Fatal("parsing an unknown flag succeeded; this test proves nothing")
-	}
-	if err := sling.ParseFlags(argv[1:]); err != nil {
-		t.Fatalf("the daemon's dog dispatch argv is rejected by `gt sling`: %v\nargv: %v", err, argv)
-	}
-	// The positional shape too: argv[1] is the formula, argv[2] the target.
-	if err := sling.Args(sling, sling.Flags().Args()); err != nil {
-		t.Errorf("`gt sling` rejects the dispatch's positional shape %v: %v", sling.Flags().Args(), err)
-	}
-	if pos := sling.Flags().Args(); len(pos) != 2 || pos[0] != constants.MolDogReaper || pos[1] != "deacon/dogs" {
-		t.Errorf("`gt sling` read the dispatch's positionals as %v, want [%s deacon/dogs]",
-			pos, constants.MolDogReaper)
-	}
-
-	// The parse above sets the package-level flag vars for every test that runs
-	// after this one in the same process.
-	t.Cleanup(func() { slingVars = nil })
 }

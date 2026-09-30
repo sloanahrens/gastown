@@ -3,7 +3,6 @@ package daemon
 import (
 	"time"
 
-	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -34,23 +33,3 @@ type sessionTmux interface {
 }
 
 var _ sessionTmux = (*tmux.Tmux)(nil)
-
-// dogSessions is the dog session surface the handler drives:
-// *dog.SessionManager in production, a fake over the test's tmux in tests.
-type dogSessions interface {
-	SessionName(dogName string) string
-	IsRunning(dogName string) (bool, error)
-	Start(dogName string, opts dog.SessionStartOptions) error
-	Stop(dogName string, force bool) error
-}
-
-var _ dogSessions = (*dog.SessionManager)(nil)
-
-// dogSessions returns the dog session surface over mgr: dogSessionsFn's when
-// a test set one, else a *dog.SessionManager on the town's tmux.
-func (d *Daemon) dogSessions(mgr *dog.Manager) dogSessions {
-	if d.dogSessionsFn != nil {
-		return d.dogSessionsFn(mgr)
-	}
-	return dog.NewSessionManager(tmux.NewTmux(), d.config.TownRoot, mgr)
-}

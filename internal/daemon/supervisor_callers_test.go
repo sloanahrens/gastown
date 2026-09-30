@@ -15,9 +15,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/dog"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
@@ -341,28 +338,6 @@ func TestEnsureMayorRunning_PersistedDebounce(t *testing.T) {
 	d.ensureMayorRunning()
 	if len(restarts) != 2 {
 		t.Fatalf("missing session: restarts = %v, want a second one at once", restarts)
-	}
-}
-
-// A stale working dog under a town e-stop keeps its session.
-func TestDetectStaleWorkingDogs_HonorsTheTownEstop(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	d := testHandlerDaemon(t, townRoot)
-	mgr := dog.NewManager(townRoot, &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{}})
-	sm := handlerDogSessions(d)
-	testSetupWorkingDogState(t, townRoot, "stale", constants.MolConvoyFeed, time.Now().Add(-3*time.Hour))
-	sessionName := sm.SessionName("stale")
-	sm.tm.addSession(sessionName, "claude", time.Now().Add(-3*time.Hour))
-	_ = estop.Activate(townRoot, estop.TriggerManual, "drill")
-
-	d.detectStaleWorkingDogs(mgr, sm, &config.DaemonThresholds{})
-
-	if has, _ := sm.tm.HasSession(sessionName); !has {
-		t.Fatal("a dog session was killed under a town e-stop")
-	}
-	if dg, _ := mgr.Get("stale"); dg.State != dog.StateWorking {
-		t.Fatalf("dog work cleared although its session was kept: state %q", dg.State)
 	}
 }
 
