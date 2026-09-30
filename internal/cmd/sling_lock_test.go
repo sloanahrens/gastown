@@ -5,9 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestTryAcquireSlingBeadLock_Contention(t *testing.T) {
@@ -42,35 +41,6 @@ func TestTryAcquireSlingBeadLock_Contention(t *testing.T) {
 	release3()
 }
 
-func TestTryAcquireSlingAssigneeLock_Serialization(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
-	t.Parallel()
-
-	townRoot := t.TempDir()
-	agent := "gastown/polecats/testcat"
-
-	// First acquire should succeed immediately.
-	release1, err := tryAcquireSlingAssigneeLock(townRoot, agent)
-	if err != nil {
-		t.Fatalf("first assignee lock acquire failed: %v", err)
-	}
-
-	// Second acquire from the same goroutine (same process) should also succeed
-	// because flock is per-FD, not per-process. But from a concurrent goroutine
-	// holding its own FD, the lock semantics apply at the OS level.
-	// For unit test purposes, verify the lock file is created correctly.
-	release1()
-
-	// Verify lock works after release.
-	release2, err := tryAcquireSlingAssigneeLock(townRoot, agent)
-	if err != nil {
-		t.Fatalf("lock acquire after release failed: %v", err)
-	}
-	release2()
-}
-
 func TestTryAcquireSlingAssigneeLock_DifferentAgents(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("advisory flock is a no-op on Windows")
@@ -93,7 +63,10 @@ func TestTryAcquireSlingAssigneeLock_DifferentAgents(t *testing.T) {
 	defer release2()
 }
 
-func TestTryAcquireSlingAssigneeLock_Contention(t *testing.T) {
+// A held assignee lock is waited for, not refused: the retry sleeps between
+// attempts and takes the lock once the holder lets go. The wait is injected, so
+// the holder's release happens inside the first sleep rather than racing it.
+func TestTryAcquireSlingAssigneeLock_WaitsForTheHolder(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("advisory flock is a no-op on Windows")
 	}
@@ -101,35 +74,53 @@ func TestTryAcquireSlingAssigneeLock_Contention(t *testing.T) {
 
 	townRoot := t.TempDir()
 	agent := "gastown/polecats/racecat"
-
-	// Acquire lock in a goroutine and hold it briefly.
-	var wg sync.WaitGroup
-	lockAcquired := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		release, err := tryAcquireSlingAssigneeLock(townRoot, agent)
-		if err != nil {
-			t.Errorf("goroutine lock acquire failed: %v", err)
-			return
-		}
-		close(lockAcquired)
-		// Hold lock briefly so the main goroutine's retry loop gets exercised.
-		<-lockAcquired // already closed, but semantically signal
-		release()
-	}()
-
-	<-lockAcquired
-
-	// The goroutine released immediately after signaling, so the main goroutine
-	// should be able to acquire the lock (possibly after a brief retry).
-	release2, err := tryAcquireSlingAssigneeLock(townRoot, agent)
+	holder, err := tryAcquireSlingAssigneeLock(townRoot, agent)
 	if err != nil {
-		t.Fatalf("expected lock acquire to succeed after goroutine release: %v", err)
+		t.Fatalf("holder lock acquire failed: %v", err)
 	}
-	release2()
 
-	wg.Wait()
+	var sleeps []time.Duration
+	release, err := tryAcquireSlingAssigneeLockWith(townRoot, agent, func(d time.Duration) {
+		sleeps = append(sleeps, d)
+		holder()
+	})
+	if err != nil {
+		t.Fatalf("the waiter must take the lock once the holder releases: %v", err)
+	}
+	release()
+	if len(sleeps) != 1 || sleeps[0] != 500*time.Millisecond {
+		t.Errorf("sleeps = %v, want one 500ms wait before the retry", sleeps)
+	}
+}
+
+// A holder that never lets go is a stuck sling: the waiter gives up after its
+// bounded retries and says so, rather than blocking the sling forever.
+func TestTryAcquireSlingAssigneeLock_TimesOutOnAStuckHolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("advisory flock is a no-op on Windows")
+	}
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	agent := "gastown/polecats/stuckcat"
+	holder, err := tryAcquireSlingAssigneeLock(townRoot, agent)
+	if err != nil {
+		t.Fatalf("holder lock acquire failed: %v", err)
+	}
+	defer holder()
+
+	sleeps := 0
+	release, err := tryAcquireSlingAssigneeLockWith(townRoot, agent, func(time.Duration) { sleeps++ })
+	if err == nil {
+		release()
+		t.Fatal("a lock held throughout must not be acquired")
+	}
+	if !strings.Contains(err.Error(), "timed out acquiring assignee sling lock for "+agent+" after 10s") {
+		t.Errorf("error = %v, want the timeout named", err)
+	}
+	if sleeps != 19 {
+		t.Errorf("slept %d times, want 19 (a wait between each of 20 attempts)", sleeps)
+	}
 }
 
 func TestTryAcquireSlingAssigneeLock_AgentNameSanitization(t *testing.T) {
@@ -194,41 +185,28 @@ func TestSlingLocks_ReleaseRemovesSentinelFile(t *testing.T) {
 	}
 }
 
-// The unlink on release must not let two slings hold one bead lock: a waiter
-// that opened the file before the unlink has to notice the name is gone and
-// reopen (gt-xtfnq). Hammer acquire/release from many goroutines and fail on
-// any moment two of them hold the lock at once.
-func TestTryAcquireSlingBeadLock_NeverTwoHoldersAcrossRelease(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("advisory flock is a no-op on Windows")
-	}
+// The unlink on release must not let two slings hold one bead lock: the name
+// goes while the flock is still held, so a waiter that opened the file before
+// the unlink finds the name gone and reopens (gt-xtfnq; the reopen itself is
+// pinned in internal/lock). Unlocking first would let a waiter lock the old
+// inode and then lose its name to this unlink.
+func TestUnlinkThenUnlock_RemovesTheNameBeforeTheLockDrops(t *testing.T) {
 	t.Parallel()
 
-	townRoot := t.TempDir()
-	const workers = 8
-	const iterations = 200
-
-	var holders atomic.Int32
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range iterations {
-				release, err := tryAcquireSlingBeadLock(townRoot, "gt-race-unlink")
-				if err != nil {
-					continue // contended: the guard did its job
-				}
-				if n := holders.Add(1); n != 1 {
-					t.Errorf("%d holders of one bead lock at once", n)
-				}
-				runtime.Gosched()
-				holders.Add(-1)
-				release()
-			}
-		}()
+	path := filepath.Join(t.TempDir(), "gt-race-unlink.flock")
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
+	unlocked := false
+	unlinkThenUnlock(path, func() {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("the lock dropped while its name still existed (stat err %v)", err)
+		}
+		unlocked = true
+	})()
+	if !unlocked {
+		t.Error("release never dropped the lock")
+	}
 }
 
 // A sling killed before its release leaves its sentinel behind. The next sling

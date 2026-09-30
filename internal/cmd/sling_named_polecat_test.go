@@ -4,14 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // namedSlingFake is a polecat manager with several polecats on disk. It
@@ -62,22 +59,11 @@ func (f *namedSlingFake) AddNamedWithOptions(name string, opts polecat.AddOption
 	return &polecat.Polecat{Name: name}, nil
 }
 
-// gitWorktreeDir returns a directory verifyWorktreeExists accepts.
-func gitWorktreeDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	return dir
-}
-
-func newNamedSlingFake(t *testing.T) *namedSlingFake {
-	t.Helper()
+func newNamedSlingFake() *namedSlingFake {
 	return &namedSlingFake{
 		polecats: map[string]*polecat.Polecat{
-			"agate":  {Name: "agate", ClonePath: gitWorktreeDir(t), Branch: "polecat/agate/x"},
-			"garnet": {Name: "garnet", ClonePath: gitWorktreeDir(t), Branch: "polecat/garnet/x"},
+			"agate":  {Name: "agate", ClonePath: "/town/rig/polecats/agate/rig", Branch: "polecat/agate/x"},
+			"garnet": {Name: "garnet", ClonePath: "/town/rig/polecats/garnet/rig", Branch: "polecat/garnet/x"},
 		},
 		// The pool would hand out agate: the bug is that it did, for a
 		// sling that named garnet.
@@ -86,10 +72,22 @@ func newNamedSlingFake(t *testing.T) *namedSlingFake {
 	}
 }
 
-func reuseForNamedSling(t *testing.T, fake *namedSlingFake, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+// fakeIdleReuseEnv is the idle-reuse path with no integration branch, a
+// worktree check that passes, and no feed or step timer to write to.
+func fakeIdleReuseEnv() idleReuseEnv {
+	return idleReuseEnv{
+		integrationBranch: func(string) string { return "" },
+		verifyWorktree:    func(string) error { return nil },
+		sessionName:       func(name string) string { return "rig-" + name },
+		defaultBranch:     func() string { return "main" },
+		logSpawn:          func(string, string) {},
+		step:              func(string) {},
+	}
+}
+
+func reuseForNamedSling(t *testing.T, fake idlePolecatReuse, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	t.Helper()
-	return reuseIdlePolecatForSling(fake, tmux.NewTmux(), &rig.Rig{Name: "rig", Path: t.TempDir()},
-		t.TempDir(), "rig", opts, func() {})
+	return reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig", opts, func() {})
 }
 
 func assertOnlyNamedTouched(t *testing.T, fake *namedSlingFake, name string) {
@@ -114,7 +112,7 @@ func assertOnlyNamedTouched(t *testing.T, fake *namedSlingFake, name string) {
 // offered agate first.
 func TestNamedSling_ReusesExactlyTheNamedIdlePolecat(t *testing.T) {
 	t.Parallel()
-	fake := newNamedSlingFake(t)
+	fake := newNamedSlingFake()
 
 	info, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "garnet", HookBead: "gt-0cp3", Create: true})
 	if err != nil {
@@ -144,7 +142,7 @@ func TestNamedSling_RefusesIneligibleNamedPolecat(t *testing.T) {
 		{"local-only work", "unpushed commits"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := newNamedSlingFake(t)
+			fake := newNamedSlingFake()
 			fake.reuseErr["garnet"] = fmt.Errorf("%w: %s", polecat.ErrPolecatNeedsRecovery, tt.reason)
 			if tt.name == "parked" {
 				fake.reuseErr["garnet"] = fmt.Errorf("%w: %w: %s", polecat.ErrPolecatNeedsRecovery, polecat.ErrPolecatParked, tt.reason)
@@ -176,7 +174,7 @@ func TestNamedSling_RefusesIneligibleNamedPolecat(t *testing.T) {
 func TestNamedSling_AbsentPolecat(t *testing.T) {
 	t.Parallel()
 	t.Run("without create refuses", func(t *testing.T) {
-		fake := newNamedSlingFake(t)
+		fake := newNamedSlingFake()
 		info, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "flint", HookBead: "gt-3s52"})
 		if err == nil {
 			t.Fatalf("named sling to a missing polecat without --create succeeded with %+v", info)
@@ -192,7 +190,7 @@ func TestNamedSling_AbsentPolecat(t *testing.T) {
 		assertOnlyNamedTouched(t, fake, "flint")
 	})
 	t.Run("with create defers to creation", func(t *testing.T) {
-		fake := newNamedSlingFake(t)
+		fake := newNamedSlingFake()
 		info, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "flint", HookBead: "gt-3s52", Create: true})
 		if err != nil || info != nil {
 			t.Fatalf("got (%+v, %v); want (nil, nil) so the caller creates flint", info, err)
@@ -208,9 +206,8 @@ func TestNamedSling_AbsentPolecat(t *testing.T) {
 // "absent" — refusing is the only answer that cannot substitute.
 func TestNamedSling_LookupFailureRefuses(t *testing.T) {
 	t.Parallel()
-	fake := &namedSlingLookupErrFake{namedSlingFake: newNamedSlingFake(t)}
-	info, err := reuseIdlePolecatForSling(fake, tmux.NewTmux(), &rig.Rig{Name: "rig", Path: t.TempDir()},
-		t.TempDir(), "rig", SlingSpawnOptions{Name: "garnet", Create: true}, func() {})
+	fake := &namedSlingLookupErrFake{namedSlingFake: newNamedSlingFake()}
+	info, err := reuseForNamedSling(t, fake, SlingSpawnOptions{Name: "garnet", Create: true})
 	if err == nil || info != nil {
 		t.Fatalf("got (%+v, %v); want a refusal", info, err)
 	}
@@ -229,7 +226,7 @@ func (f *namedSlingLookupErrFake) Get(name string) (*polecat.Polecat, error) {
 // named polecat creates it under exactly that name, never a pool name.
 func TestAllocatePolecatForSling_NamedCreatesByThatName(t *testing.T) {
 	t.Parallel()
-	fake := newNamedSlingFake(t)
+	fake := newNamedSlingFake()
 	fake.allocatedAs = "basalt"
 
 	name, err := allocatePolecatForSling(fake, "rig", "flint", polecat.AddOptions{HookBead: "gt-3s52"})
@@ -250,7 +247,7 @@ func TestAllocatePolecatForSling_NamedCreatesByThatName(t *testing.T) {
 // TestAllocatePolecatForSling_UnnamedUsesPool keeps the rig-target path.
 func TestAllocatePolecatForSling_UnnamedUsesPool(t *testing.T) {
 	t.Parallel()
-	fake := newNamedSlingFake(t)
+	fake := newNamedSlingFake()
 	fake.allocatedAs = "basalt"
 
 	name, err := allocatePolecatForSling(fake, "rig", "", polecat.AddOptions{})
@@ -266,7 +263,7 @@ func TestAllocatePolecatForSling_UnnamedUsesPool(t *testing.T) {
 // between the lookup and the create, refuse rather than pick another.
 func TestAllocatePolecatForSling_NamedCreateRaceRefuses(t *testing.T) {
 	t.Parallel()
-	fake := &namedSlingAddErrFake{namedSlingFake: newNamedSlingFake(t)}
+	fake := &namedSlingAddErrFake{namedSlingFake: newNamedSlingFake()}
 	_, err := allocatePolecatForSling(fake, "rig", "flint", polecat.AddOptions{})
 	if !errors.Is(err, polecat.ErrPolecatExists) {
 		t.Fatalf("err = %v; want ErrPolecatExists", err)
@@ -459,7 +456,7 @@ func TestNamedPolecatRefusal_HintPerCause(t *testing.T) {
 // polecat's current work and hands it to the refusal.
 func TestNamedSling_HeldIssueReachesTheHint(t *testing.T) {
 	t.Parallel()
-	fake := newNamedSlingFake(t)
+	fake := newNamedSlingFake()
 	fake.polecats["garnet"].Issue = "gt-0cp3"
 	fake.reuseErr["garnet"] = fmt.Errorf("%w: unpushed commits", polecat.ErrPolecatNeedsRecovery)
 

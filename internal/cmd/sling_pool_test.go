@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -421,10 +419,8 @@ func TestListPolecatSessions(t *testing.T) {
 // spawn at 3/3 with only two live flash sessions because two "done, MR ready"
 // polecats were counted as occupants; this is the fix.
 func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
-	restore := poolPolecatDisposition
-	defer func() { poolPolecatDisposition = restore }()
-
-	poolPolecatDisposition = func(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+	t.Parallel()
+	disposition := func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
 		if polecatName == "diamond" {
 			return polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictPendingMR, ReuseStatus: "idle-pr-open"}, nil
 		}
@@ -437,7 +433,7 @@ func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond", "GT_AGENT": "deepseek-flash"},
 		},
 	}
-	got, err := listPolecatSessions(f, "/town")
+	got, err := listPolecatSessionsWith(f, disposition, poolTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,10 +452,8 @@ func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 // when the polecat's own state cannot be read: an overrun the pool exists to
 // prevent (gt-md4z) is worse than one extra refused sling.
 func TestListPolecatSessionsFailsOpenOnDispositionError(t *testing.T) {
-	restore := poolPolecatDisposition
-	defer func() { poolPolecatDisposition = restore }()
-
-	poolPolecatDisposition = func(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+	t.Parallel()
+	disposition := func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
 		return polecat.WorkstateDisposition{}, errors.New("dolt unreachable")
 	}
 
@@ -468,7 +462,7 @@ func TestListPolecatSessionsFailsOpenOnDispositionError(t *testing.T) {
 			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond", "GT_AGENT": "deepseek-flash"},
 		},
 	}
-	got, err := listPolecatSessions(f, "/town")
+	got, err := listPolecatSessionsWith(f, disposition, poolTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,55 +471,131 @@ func TestListPolecatSessionsFailsOpenOnDispositionError(t *testing.T) {
 	}
 }
 
-// resolvePolecatPoolAgent reads the town settings; no pool -> "", "".
+// ── The pool router on fakes ────────────────────────────────────────────────
+
+// poolTestNow is the fixed clock every pool router test decides at.
+var poolTestNow = time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
+
+// testPoolTown is one town's pool with every collaborator of the decision
+// faked: the settings, the tmux server, the bead lookup and label write, and
+// the seat claim filesystem. Each process() is a fresh `gt sling` against it.
+type testPoolTown struct {
+	pool   *config.PolecatPool
+	lister sessionLister
+	fs     poolSeatFS
+	root   string
+	// lookup answers the bead lookup; by default every bead is a task.
+	lookup func(beadID string) (poolBead, error)
+	addErr error
+	added  []string
+	// dead names the PIDs whose slings are gone; every other PID is alive.
+	dead    map[int]bool
+	lockErr error
+	nextPID int
+}
+
+func newTestPoolTown(pool *config.PolecatPool) *testPoolTown {
+	return &testPoolTown{
+		pool:   pool,
+		lister: &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}},
+		fs:     newFakeSeatFS(),
+		root:   "/town",
+		lookup: func(beadID string) (poolBead, error) { return poolBead{ID: beadID, Type: "task"}, nil },
+		dead:   map[int]bool{},
+	}
+}
+
+// liveSessions puts polecat sessions on the fake tmux server, one per agent
+// given, each created an hour before the test clock.
+func (w *testPoolTown) liveSessions(agents ...string) {
+	f := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
+	for i, agent := range agents {
+		name := fmt.Sprintf("gt-live-%d", i)
+		f.sessions[name] = map[string]string{"GT_ROLE": "gastown/polecats/live" + fmt.Sprint(i), "GT_AGENT": agent}
+		f.created[name] = poolTestNow.Add(-time.Hour)
+	}
+	w.lister = f
+}
+
+// process is a router standing in for one `gt sling` process: its own claim
+// store and PID, the town's shared state.
+func (w *testPoolTown) process() *poolRouter {
+	w.nextPID++
+	clock := func() time.Time { return poolTestNow }
+	return &poolRouter{
+		pool:        func() *config.PolecatPool { return w.pool },
+		sessions:    func() sessionLister { return w.lister },
+		disposition: nil,
+		lookupBead:  func(beadID string) (poolBead, error) { return w.lookup(beadID) },
+		addLabel: func(beadID, label string) error {
+			w.added = append(w.added, beadID+":"+label)
+			return w.addErr
+		},
+		seats: &poolSeatLedger{
+			townRoot: w.root,
+			fs:       w.fs,
+			store:    &poolSeatClaimStore{},
+			lock: func() (func(), error) {
+				if w.lockErr != nil {
+					return nil, w.lockErr
+				}
+				return func() {}, nil
+			},
+			alive: func(pid int) bool { return !w.dead[pid] },
+			pid:   w.nextPID,
+			now:   clock,
+		},
+		now: clock,
+	}
+}
+
+// claims reads the town's claims. Every caller reads a claim set it wrote
+// itself, so a read failure is the test being wrong.
+func (w *testPoolTown) claims(t *testing.T) []poolSeatClaim {
+	t.Helper()
+	claims, err := w.process().seats.read()
+	if err != nil {
+		t.Fatalf("reading seat claims: %v", err)
+	}
+	return claims
+}
+
+// sling decides as a fresh live `gt sling` would, failing the test on an error.
+func (w *testPoolTown) sling(t *testing.T, beadID string) (string, string) {
+	t.Helper()
+	agent, reason, err := w.process().route(beadID, "", true, false)
+	if err != nil {
+		t.Fatalf("slinging %s: %v", beadID, err)
+	}
+	return agent, reason
+}
+
+// resolvePolecatPoolAgent reads the town's pool; no pool -> "", "".
 func TestResolvePolecatPoolAgent(t *testing.T) {
-	townRoot := t.TempDir()
-	ts := config.NewTownSettings()
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
+	t.Parallel()
+	w := newTestPoolTown(nil)
+	r := w.process()
+	if a, rs, err := r.route("", "", true, false); a != "" || rs != "" || err != nil {
+		t.Errorf("no pool: got %q %q %v", a, rs, err)
 	}
-	if a, r, err := resolvePolecatPoolAgent(townRoot, "", ""); a != "" || r != "" || err != nil {
-		t.Errorf("no pool: got %q %q %v", a, r, err)
-	}
-	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash"}
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
-	}
-	orig := newPoolSessionLister
-	t.Cleanup(func() { newPoolSessionLister = orig })
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
-	}
-	if a, _, _ := resolvePolecatPoolAgent(townRoot, "", ""); a != "local-coder-polecat" {
+	w.pool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash"}
+	if a, _, _ := r.route("", "", true, false); a != "local-coder-polecat" {
 		t.Errorf("empty town: got %q", a)
 	}
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"}}, created: map[string]time.Time{"gt-a": time.Now().Add(-time.Hour)}}
-	}
-	if a, _, _ := resolvePolecatPoolAgent(townRoot, "", ""); a != "deepseek-flash" {
+	w.liveSessions("local-coder-polecat")
+	if a, _, _ := r.route("", "", true, false); a != "deepseek-flash" {
 		t.Errorf("full pool: got %q", a)
 	}
-	newPoolSessionLister = func() sessionLister { return &fakeLister{err: errors.New("no server")} }
-	if a, r, err := resolvePolecatPoolAgent(townRoot, "", ""); a != "deepseek-flash" || !strings.Contains(r, "cannot list sessions") || err != nil {
-		t.Errorf("a lister failure is not a full pool, it is an unknown one: got %q %q %v", a, r, err)
+	w.lister = &fakeLister{err: errors.New("no server")}
+	if a, rs, err := r.route("", "", true, false); a != "deepseek-flash" || !strings.Contains(rs, "cannot list sessions") || err != nil {
+		t.Errorf("a lister failure is not a full pool, it is an unknown one: got %q %q %v", a, rs, err)
 	}
 
 	// A capped overflow seat refuses the sling instead of growing (gt-jzr1):
 	// the local seat is taken and the one overflow seat with it.
-	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash", MaxOverflow: 1}
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
-	}
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{
-			sessions: map[string]map[string]string{
-				"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"},
-				"gt-b": {"GT_ROLE": "gastown/polecats/b", "GT_AGENT": "deepseek-flash"},
-			},
-			created: map[string]time.Time{"gt-a": time.Now().Add(-time.Hour), "gt-b": time.Now().Add(-time.Hour)},
-		}
-	}
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "", "")
+	w.pool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash", MaxOverflow: 1}
+	w.liveSessions("local-coder-polecat", "deepseek-flash")
+	agent, reason, err := r.route("", "", true, false)
 	if !errors.Is(err, errPoolBackpressure) {
 		t.Fatalf("capped pool: want a refusal, got %q %q %v", agent, reason, err)
 	}
@@ -543,22 +613,17 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 	// --force for its own safety guards, so a cap --force opens is one those
 	// paths are not held by (gt-4lbz). Capacity is raised in the pool's own
 	// settings, which the caller reads on the next sling.
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
+	if claims := w.claims(t); len(claims) != 0 {
 		t.Errorf("a refused sling must not claim a seat: %v", claims)
 	}
 
 	// A pool with no local seats has none to give: max_local 0 routes the bead
 	// to the overflow seat rather than to the role default, which is the local
 	// seat the operator just closed (gt-4lbz).
-	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 0}
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
-	}
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
-	}
-	if a, r, _ := resolvePolecatPoolAgent(townRoot, "", ""); a != "" || !strings.Contains(r, "max_local") {
-		t.Errorf("misconfigured pool: got %q %q", a, r)
+	w.pool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 0}
+	w.liveSessions()
+	if a, rs, _ := r.route("", "", true, false); a != "" || !strings.Contains(rs, "max_local") {
+		t.Errorf("misconfigured pool: got %q %q", a, rs)
 	}
 }
 
@@ -567,25 +632,12 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 // on, so the bead is queued rather than paid for on the overflow seat — and
 // leaves no seat claimed behind it (gt-x40u).
 func TestResolvePoolAgentRefusesARequestItCannotServe(t *testing.T) {
-	townRoot := t.TempDir()
-	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash", MaxOverflow: 3}
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
-	}
-	origLister, origLookup := newPoolSessionLister, poolBeadLookup
-	t.Cleanup(func() { newPoolSessionLister, poolBeadLookup = origLister, origLookup })
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{
-			sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"}},
-			created:  map[string]time.Time{"gt-a": time.Now().Add(-time.Hour)},
-		}
-	}
-	poolBeadLookup = func(_, beadID string) (poolBead, error) {
-		return poolBead{ID: beadID, Type: "bug"}, nil
-	}
+	t.Parallel()
+	w := newTestPoolTown(&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash", MaxOverflow: 3})
+	w.liveSessions("local-coder-polecat")
+	w.lookup = func(beadID string) (poolBead, error) { return poolBead{ID: beadID, Type: "bug"}, nil }
 
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "local-coder-polecat")
+	agent, reason, err := w.process().route("gt-b", "local-coder-polecat", true, false)
 	if !errors.Is(err, errPoolBackpressure) {
 		t.Fatalf("a requested local seat with the seat taken must refuse: got %q %q %v", agent, reason, err)
 	}
@@ -595,7 +647,7 @@ func TestResolvePoolAgentRefusesARequestItCannotServe(t *testing.T) {
 	if !strings.HasPrefix(err.Error(), "sling refused: ") {
 		t.Errorf("the refusal must carry the deferral marker: %q", err)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
+	if claims := w.claims(t); len(claims) != 0 {
 		t.Errorf("a refused request must not claim a seat: %v", claims)
 	}
 }
@@ -606,29 +658,22 @@ func TestResolvePoolAgentRefusesARequestItCannotServe(t *testing.T) {
 // place (gt-gcrk). The pool must answer nothing here — not a seat, not a
 // refusal, not a claim.
 func TestResolvePoolAgentLeavesANonPoolRequestUntouched(t *testing.T) {
-	townRoot, added := fakePoolTownWithPool(t,
-		&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 1},
-		poolBead{ID: "gt-b", Type: "bug", Labels: []string{localAttemptLabel}}, nil, nil)
-	now := time.Now()
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{
-			sessions: map[string]map[string]string{
-				"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"},
-				"gt-b": {"GT_ROLE": "gastown/polecats/b", "GT_AGENT": "deepseek-flash"},
-			},
-			created: map[string]time.Time{"gt-a": now.Add(-time.Hour), "gt-b": now.Add(-time.Hour)},
-		}
+	t.Parallel()
+	w := newTestPoolTown(&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", MaxOverflow: 1})
+	w.lookup = func(string) (poolBead, error) {
+		return poolBead{ID: "gt-b", Type: "bug", Labels: []string{localAttemptLabel}}, nil
 	}
+	w.liveSessions("local-coder-polecat", "deepseek-flash")
 
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "claude-sonnet")
+	agent, reason, err := w.process().route("gt-b", "claude-sonnet", true, false)
 	if err != nil || agent != "" || reason != "" {
 		t.Fatalf("a non-pool request must pass through untouched: got %q %q %v", agent, reason, err)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
+	if claims := w.claims(t); len(claims) != 0 {
 		t.Errorf("a request the pool does not answer must claim no seat: %v", claims)
 	}
-	if len(*added) != 0 {
-		t.Errorf("a request the pool does not answer must write no label: %v", *added)
+	if len(w.added) != 0 {
+		t.Errorf("a request the pool does not answer must write no label: %v", w.added)
 	}
 }
 
@@ -639,27 +684,30 @@ func TestResolvePoolAgentLeavesANonPoolRequestUntouched(t *testing.T) {
 // request has to stand untouched here exactly as it does with a clean count
 // in TestResolvePoolAgentLeavesANonPoolRequestUntouched above.
 func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnListSessionsFailure(t *testing.T) {
-	townRoot, added := fakePoolTownWithPool(t,
-		&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash"},
-		poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
-	newPoolSessionLister = func() sessionLister { return &fakeLister{err: errors.New("no server")} }
+	t.Parallel()
+	w := newTestPoolTown(&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 1, OverflowAgent: "deepseek-flash"})
+	w.lookup = func(string) (poolBead, error) { return poolBead{ID: "gt-b", Type: "bug"}, nil }
+	w.lister = &fakeLister{err: errors.New("no server")}
 
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "claude-sonnet")
+	agent, reason, err := w.process().route("gt-b", "claude-sonnet", true, false)
 	if err != nil || agent != "" || reason != "" {
 		t.Fatalf("a non-pool request must survive a tmux-listing failure untouched: got %q %q %v", agent, reason, err)
 	}
-	if len(*added) != 0 {
-		t.Errorf("a request the pool does not answer must write no label: %v", *added)
+	if len(w.added) != 0 {
+		t.Errorf("a request the pool does not answer must write no label: %v", w.added)
 	}
 }
 
 // The same requirement against the seat-claim read path (gt-67fj): a claims
 // directory that cannot be read must not override a non-pool --agent either.
 func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnSeatClaimReadFailure(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 3, "", 0)
-	seatFS := injectUnreadableSeatFS(t)
+	t.Parallel()
+	w := newTestPoolTown(racingPool(3, ""))
+	seatFS := newFakeSeatFS()
+	seatFS.readDirErr = errSeatFSUnreadable
+	w.fs = seatFS
 
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-a", "claude-sonnet")
+	agent, reason, err := w.process().route("gt-a", "claude-sonnet", true, false)
 	if err != nil || agent != "" || reason != "" {
 		t.Fatalf("a non-pool request must survive a seat-claim read failure untouched: got %q %q %v", agent, reason, err)
 	}
@@ -668,56 +716,40 @@ func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnSeatClaimReadFailure(t 
 	}
 }
 
-// fakePoolTown wires a town whose pool has three local seats, one taken 10m
-// ago (so a seat is free and the stagger gap has passed), plus recording fakes
-// for the bead lookup and the label write. It returns the town root and a
-// pointer to the recorded label writes.
-func fakePoolTown(t *testing.T, bead poolBead, lookupErr, addErr error) (string, *[]string) {
-	t.Helper()
-	return fakePoolTownWithPool(t, &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, bead, lookupErr, addErr)
+// fakePoolTown is a town whose pool has three local seats, one taken 10m ago
+// (so a seat is free and the stagger gap has passed), whose bead lookup answers
+// bead (or lookupErr) and whose label write fails with addErr.
+func fakePoolTown(bead poolBead, lookupErr, addErr error) *testPoolTown {
+	return fakePoolTownWithPool(&config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash"}, bead, lookupErr, addErr)
 }
 
 // fakePoolTownWithPool is fakePoolTown with the pool under test supplied, for
 // the cases where the knob rather than the routing table is what is on trial.
-func fakePoolTownWithPool(t *testing.T, pool *config.PolecatPool, bead poolBead, lookupErr, addErr error) (string, *[]string) {
-	t.Helper()
-	townRoot := t.TempDir()
-	ts := config.NewTownSettings()
-	ts.PolecatPool = pool
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
+func fakePoolTownWithPool(pool *config.PolecatPool, bead poolBead, lookupErr, addErr error) *testPoolTown {
+	w := newTestPoolTown(pool)
+	w.lister = &fakeLister{
+		sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"}},
+		created:  map[string]time.Time{"gt-a": poolTestNow.Add(-10 * time.Minute)},
 	}
-	origLister, origLookup, origAdd := newPoolSessionLister, poolBeadLookup, poolBeadLabelAdd
-	t.Cleanup(func() { newPoolSessionLister, poolBeadLookup, poolBeadLabelAdd = origLister, origLookup, origAdd })
-
-	now := time.Now()
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{
-			sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": "local-coder-polecat"}},
-			created:  map[string]time.Time{"gt-a": now.Add(-10 * time.Minute)},
-		}
-	}
-	poolBeadLookup = func(_, _ string) (poolBead, error) {
+	w.lookup = func(string) (poolBead, error) {
 		if lookupErr != nil {
 			return poolBead{}, lookupErr
 		}
 		return bead, nil
 	}
-	added := &[]string{}
-	poolBeadLabelAdd = func(_, beadID, label string) error {
-		*added = append(*added, beadID+":"+label)
-		return addErr
-	}
-	return townRoot, added
+	w.addErr = addErr
+	return w
 }
 
 // The idle-seat fill is the one routing branch with a side effect: it attaches
 // local-attempt:1 so the bead cannot take a second local seat. A dry run must
 // report the same route without writing.
 func TestResolvePoolAgentIdleFillLabelsTheBead(t *testing.T) {
-	townRoot, added := fakePoolTown(t, poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
+	t.Parallel()
+	w := fakePoolTown(poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
+	r := w.process()
 
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "")
+	agent, reason, err := r.route("gt-b", "", true, false)
 	if err != nil {
 		t.Fatalf("idle-seat fill must not refuse: %v", err)
 	}
@@ -725,20 +757,20 @@ func TestResolvePoolAgentIdleFillLabelsTheBead(t *testing.T) {
 	if agent != "local-coder-polecat" || reason != want {
 		t.Fatalf("got %q %q, want %q %q", agent, reason, "local-coder-polecat", want)
 	}
-	if len(*added) != 1 || (*added)[0] != "gt-b:"+localAttemptLabel {
-		t.Errorf("label writes = %v, want [gt-b:%s]", *added, localAttemptLabel)
+	if len(w.added) != 1 || w.added[0] != "gt-b:"+localAttemptLabel {
+		t.Errorf("label writes = %v, want [gt-b:%s]", w.added, localAttemptLabel)
 	}
 
-	*added = nil
-	peekAgent, peekReason, err := peekPolecatPoolAgent(townRoot, "gt-b", "")
+	w.added = nil
+	peekAgent, peekReason, err := r.route("gt-b", "", false, false)
 	if err != nil {
 		t.Fatalf("peek must report the same route, not a refusal: %v", err)
 	}
 	if peekAgent != agent || peekReason != reason {
 		t.Errorf("peek = %q %q, want the same route as resolve", peekAgent, peekReason)
 	}
-	if len(*added) != 0 {
-		t.Errorf("a dry run must not label the bead, got %v", *added)
+	if len(w.added) != 0 {
+		t.Errorf("a dry run must not label the bead, got %v", w.added)
 	}
 }
 
@@ -747,41 +779,44 @@ func TestResolvePoolAgentIdleFillLabelsTheBead(t *testing.T) {
 // and this bead never spent one, so labeling it would route the bead to flash
 // forever and retire a label that no longer means what it says (gt-nn7n).
 func TestResolvePoolAgentFillOffLabelsNothing(t *testing.T) {
+	t.Parallel()
 	pool := &config.PolecatPool{LocalAgent: "local-coder-polecat", MaxLocal: 3, MinSpawnGap: "4m", OverflowAgent: "deepseek-flash", IdleFill: boolp(false)}
-	townRoot, added := fakePoolTownWithPool(t, pool, poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
+	w := fakePoolTownWithPool(pool, poolBead{ID: "gt-b", Type: "bug"}, nil, nil)
 
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "")
+	agent, reason, err := w.process().route("gt-b", "", true, false)
 	if err != nil {
 		t.Fatalf("the fill being off must not refuse the sling: %v", err)
 	}
 	if agent != "deepseek-flash" || !strings.Contains(reason, "idle_fill off") {
 		t.Fatalf("got %q %q, want the overflow agent and the knob named", agent, reason)
 	}
-	if len(*added) != 0 {
-		t.Errorf("a bead that never took a local seat must not be labeled: %v", *added)
+	if len(w.added) != 0 {
+		t.Errorf("a bead that never took a local seat must not be labeled: %v", w.added)
 	}
 }
 
 // A bead that did not go to the idle-seat fill branch is never labeled.
 func TestResolvePoolAgentNoLabelForShapedRoute(t *testing.T) {
-	townRoot, added := fakePoolTown(t, poolBead{ID: "gt-b", Type: "task"}, nil, nil)
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "")
+	t.Parallel()
+	w := fakePoolTown(poolBead{ID: "gt-b", Type: "task"}, nil, nil)
+	agent, reason, err := w.process().route("gt-b", "", true, false)
 	if err != nil {
 		t.Fatalf("a task bead with a free seat must not refuse: %v", err)
 	}
 	if agent != "local-coder-polecat" || !strings.HasSuffix(reason, "(type=task)") {
 		t.Fatalf("got %q %q", agent, reason)
 	}
-	if len(*added) != 0 {
-		t.Errorf("a task bead must not get local-attempt:1: %v", *added)
+	if len(w.added) != 0 {
+		t.Errorf("a task bead must not get local-attempt:1: %v", w.added)
 	}
 }
 
 // A bead whose shape could not be read falls back to the seat count, and the
 // reason says why rather than passing the seat-only decision off as a route.
 func TestResolvePoolAgentBeadLookupFailure(t *testing.T) {
-	townRoot, added := fakePoolTown(t, poolBead{}, errors.New("bd: database not found"), nil)
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "")
+	t.Parallel()
+	w := fakePoolTown(poolBead{}, errors.New("bd: database not found"), nil)
+	agent, reason, err := w.process().route("gt-b", "", true, false)
 	if err != nil {
 		t.Fatalf("an unreadable bead must still route: %v", err)
 	}
@@ -791,16 +826,17 @@ func TestResolvePoolAgentBeadLookupFailure(t *testing.T) {
 	if !strings.Contains(reason, "gt-b unreadable") || !strings.Contains(reason, "database not found") {
 		t.Errorf("reason must say the bead was unreadable: %q", reason)
 	}
-	if len(*added) != 0 {
-		t.Errorf("no shape, no fill rule, no label: %v", *added)
+	if len(w.added) != 0 {
+		t.Errorf("no shape, no fill rule, no label: %v", w.added)
 	}
 }
 
 // The label write failing must not swallow the route: the sling still names
 // the agent, and says the label did not land.
 func TestResolvePoolAgentLabelWriteFailure(t *testing.T) {
-	townRoot, _ := fakePoolTown(t, poolBead{ID: "gt-b", Type: "bug"}, nil, errors.New("dolt is down"))
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "")
+	t.Parallel()
+	w := fakePoolTown(poolBead{ID: "gt-b", Type: "bug"}, nil, errors.New("dolt is down"))
+	agent, reason, err := w.process().route("gt-b", "", true, false)
 	if err != nil {
 		t.Fatalf("a failed label write must not refuse the sling: %v", err)
 	}
@@ -812,6 +848,23 @@ func TestResolvePoolAgentLabelWriteFailure(t *testing.T) {
 	}
 }
 
+// A decision lock that cannot be taken still routes, from the live sessions
+// alone, and the reason says the seat was not reserved rather than passing a
+// racy decision off as a reserved one.
+func TestResolvePoolAgentUnreservedWhenTheDecisionLockFails(t *testing.T) {
+	t.Parallel()
+	w := newTestPoolTown(racingPool(2, ""))
+	w.lockErr = errors.New("polecat pool lock busy for 5s")
+
+	agent, reason := w.sling(t, "gt-a")
+	if agent != claimLocal || !strings.Contains(reason, "[seat not reserved: polecat pool lock busy for 5s]") {
+		t.Errorf("got %q (%s), want the local seat with the missing reservation named", agent, reason)
+	}
+	if claims := w.claims(t); len(claims) != 0 {
+		t.Errorf("a decision taken without the lock claims no seat: %v", claims)
+	}
+}
+
 // ── Seat claims (gt-eoi9) ───────────────────────────────────────────────────
 
 const (
@@ -819,66 +872,12 @@ const (
 	claimOverflow = "deepseek-flash"
 )
 
-// mustReadPoolSeatClaims reads the claims for a test. Every caller here reads a
-// directory it wrote itself, so a read failure is the test being wrong, not a
-// claim set to report on the way past.
-func mustReadPoolSeatClaims(t *testing.T, townRoot string) []poolSeatClaim {
-	t.Helper()
-	claims, err := readPoolSeatClaims(townRoot)
-	if err != nil {
-		t.Fatalf("reading seat claims: %v", err)
-	}
-	return claims
-}
-
-// fakeRacingPoolTown wires a town with local seats and, unless a gap is given,
-// no stagger at all — so the seat count alone decides. The tmux server has not
-// heard of any of the slings racing each other, which is the moment the cap
-// used to break.
-func fakeRacingPoolTown(t *testing.T, maxLocal int, minSpawnGap string, liveLocal int) string {
-	t.Helper()
-	townRoot := t.TempDir()
-	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{
-		LocalAgent:    claimLocal,
-		MaxLocal:      maxLocal,
-		MinSpawnGap:   minSpawnGap,
-		OverflowAgent: claimOverflow,
-	}
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
-	}
-	origLister, origLookup := newPoolSessionLister, poolBeadLookup
-	origClaims := processPoolSeatClaims
-	t.Cleanup(func() {
-		newPoolSessionLister, poolBeadLookup = origLister, origLookup
-		processPoolSeatClaims = origClaims
-	})
-
-	sessions := map[string]map[string]string{}
-	created := map[string]time.Time{}
-	for i := 0; i < liveLocal; i++ {
-		name := fmt.Sprintf("gt-live-%d", i)
-		sessions[name] = map[string]string{"GT_ROLE": "gastown/polecats/live", "GT_AGENT": claimLocal}
-		created[name] = time.Now().Add(-time.Hour)
-	}
-	newPoolSessionLister = func() sessionLister { return &fakeLister{sessions: sessions, created: created} }
-	poolBeadLookup = func(_, beadID string) (poolBead, error) {
-		return poolBead{ID: beadID, Type: "task"}, nil
-	}
-	return townRoot
-}
-
-// slingFromAnotherProcess decides as a fresh `gt sling` would: an empty claim
-// store of its own, while the claims other slings wrote are on disk.
-func slingFromAnotherProcess(t *testing.T, townRoot, beadID string) (string, string) {
-	t.Helper()
-	processPoolSeatClaims = &poolSeatClaimStore{}
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, beadID, "")
-	if err != nil {
-		t.Fatalf("slinging %s: %v", beadID, err)
-	}
-	return agent, reason
+// racingPool is a pool with local seats and, unless a gap is given, no stagger
+// at all — so the seat count alone decides. The fake tmux server has not heard
+// of any of the slings racing each other, which is the moment the cap used to
+// break.
+func racingPool(maxLocal int, minSpawnGap string) *config.PolecatPool {
+	return &config.PolecatPool{LocalAgent: claimLocal, MaxLocal: maxLocal, MinSpawnGap: minSpawnGap, OverflowAgent: claimOverflow}
 }
 
 // The gt-eoi9 bug: three slings started in parallel each counted the same live
@@ -886,11 +885,12 @@ func slingFromAnotherProcess(t *testing.T, townRoot, beadID string) (string, str
 // polecats on a two-seat pool (opal, shale and agate all local). The seat claim
 // the first sling leaves behind is what the second counts instead.
 func TestPoolSeatClaimsHoldTheCapForConcurrentSlings(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 2, "", 0)
+	t.Parallel()
+	w := newTestPoolTown(racingPool(2, ""))
 
-	a1, r1 := slingFromAnotherProcess(t, townRoot, "gt-a")
-	a2, r2 := slingFromAnotherProcess(t, townRoot, "gt-b")
-	a3, r3 := slingFromAnotherProcess(t, townRoot, "gt-c")
+	a1, r1 := w.sling(t, "gt-a")
+	a2, r2 := w.sling(t, "gt-b")
+	a3, r3 := w.sling(t, "gt-c")
 
 	if a1 != claimLocal || a2 != claimLocal {
 		t.Fatalf("the two seats go to the first two slings: got %q (%s) and %q (%s)", a1, r1, a2, r2)
@@ -907,12 +907,14 @@ func TestPoolSeatClaimsHoldTheCapForConcurrentSlings(t *testing.T) {
 // overflows even though the pool has room, which is the same prefill guard a
 // second spawn seconds after the first would get from a live session.
 func TestPoolSeatClaimFeedsTheStagger(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 3, "4m", 1)
+	t.Parallel()
+	w := newTestPoolTown(racingPool(3, "4m"))
+	w.liveSessions(claimLocal)
 
-	if a, r := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimLocal {
+	if a, r := w.sling(t, "gt-a"); a != claimLocal {
 		t.Fatalf("one live local, one seat free, gap long past: want local, got %q (%s)", a, r)
 	}
-	a, r := slingFromAnotherProcess(t, townRoot, "gt-b")
+	a, r := w.sling(t, "gt-b")
 	if a != claimOverflow || !strings.Contains(r, "stagger") {
 		t.Errorf("a sling racing the spawn it cannot see yet is a stagger, got %q (%s)", a, r)
 	}
@@ -922,29 +924,26 @@ func TestPoolSeatClaimFeedsTheStagger(t *testing.T) {
 // drops it, and the live session counts instead — one seat either way, never
 // both and never neither.
 func TestPoolSeatClaimIsHandedOverToTheSession(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 2, "", 0)
-	if a, r := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimLocal {
-		t.Fatalf("empty pool: want the local seat, got %q (%s)", a, r)
+	t.Parallel()
+	w := newTestPoolTown(racingPool(2, ""))
+	first := w.process()
+	if a, r, err := first.route("gt-a", "", true, false); err != nil || a != claimLocal {
+		t.Fatalf("empty pool: want the local seat, got %q (%s) %v", a, r, err)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
+	if claims := w.claims(t); len(claims) != 1 {
 		t.Fatalf("a local route must claim a seat, got %d claims", len(claims))
 	}
 
 	// StartSession: the tmux session is now the record of that seat.
-	releasePoolSeatClaim()
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
+	first.seats.store.release()
+	if claims := w.claims(t); len(claims) != 0 {
 		t.Fatalf("StartSession must drop the claim, %d left", len(claims))
 	}
 
 	// A second sling in a fresh process counts the live session, not a phantom
 	// claim: seat 2 of 2, which is what a double-count would call "full".
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{
-			sessions: map[string]map[string]string{"gt-a": {"GT_ROLE": "gastown/polecats/a", "GT_AGENT": claimLocal}},
-			created:  map[string]time.Time{"gt-a": time.Now().Add(-time.Hour)},
-		}
-	}
-	a, r := slingFromAnotherProcess(t, townRoot, "gt-b")
+	w.liveSessions(claimLocal)
+	a, r := w.sling(t, "gt-b")
 	if a != claimLocal || !strings.Contains(r, "local seat 2/2") {
 		t.Errorf("the live session must count as one seat, got %q (%s)", a, r)
 	}
@@ -953,24 +952,24 @@ func TestPoolSeatClaimIsHandedOverToTheSession(t *testing.T) {
 // A dry run reads the claims — so it prints the route a real sling would take —
 // but claims nothing and drops nothing.
 func TestPeekPolecatPoolAgentNeitherClaimsNorDropsSeats(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 2, "", 0)
+	t.Parallel()
+	w := newTestPoolTown(racingPool(2, ""))
 
-	if a, _, _ := peekPolecatPoolAgent(townRoot, "gt-a", ""); a != claimLocal {
+	if a, _, _ := w.process().route("gt-a", "", false, false); a != claimLocal {
 		t.Fatalf("empty pool: the preview route should be the local seat, got %q", a)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 0 {
+	if claims := w.claims(t); len(claims) != 0 {
 		t.Fatalf("a dry run must not claim a seat, got %d claims", len(claims))
 	}
 
-	if a, _ := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimLocal {
+	if a, _ := w.sling(t, "gt-a"); a != claimLocal {
 		t.Fatalf("live sling: want the local seat, got %q", a)
 	}
 	// Seen from another process, that claim is the second seat taken.
-	processPoolSeatClaims = &poolSeatClaimStore{}
-	if _, r, _ := peekPolecatPoolAgent(townRoot, "gt-b", ""); !strings.Contains(r, "local seat 2/2") {
+	if _, r, _ := w.process().route("gt-b", "", false, false); !strings.Contains(r, "local seat 2/2") {
 		t.Errorf("the preview must count the seat another sling claimed: %q", r)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
+	if claims := w.claims(t); len(claims) != 1 {
 		t.Errorf("a dry run must not drop another sling's claim, %d left", len(claims))
 	}
 }
@@ -979,29 +978,33 @@ func TestPeekPolecatPoolAgentNeitherClaimsNorDropsSeats(t *testing.T) {
 // crashed sling must not shadow a seat for the TTL, and a claim held too long
 // by a process that lingers must not shadow one forever.
 func TestPoolSeatClaimCleanupDropsCrashedAndStaleSlingers(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 2, "", 0)
-	crashed, err := publishPoolSeatClaim(townRoot, poolSeatClaim{
-		ID: "crashed-1", PID: reapedPID(t), Agent: claimLocal, CreatedAt: time.Now(),
+	t.Parallel()
+	w := newTestPoolTown(racingPool(2, ""))
+	const crashedPID, livePID = 9001, 9002
+	w.dead[crashedPID] = true
+	seats := w.process().seats
+	crashed, err := seats.publish(poolSeatClaim{
+		ID: "crashed-1", PID: crashedPID, Agent: claimLocal, CreatedAt: poolTestNow,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stale, err := publishPoolSeatClaim(townRoot, poolSeatClaim{
-		ID: "stale-1", PID: os.Getpid(), Agent: claimLocal, CreatedAt: time.Now().Add(-poolSeatClaimTTL - time.Minute),
+	stale, err := seats.publish(poolSeatClaim{
+		ID: "stale-1", PID: livePID, Agent: claimLocal, CreatedAt: poolTestNow.Add(-poolSeatClaimTTL - time.Minute),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	held, err := publishPoolSeatClaim(townRoot, poolSeatClaim{
-		ID: "held-1", PID: os.Getpid(), Agent: claimLocal, CreatedAt: time.Now(),
+	held, err := seats.publish(poolSeatClaim{
+		ID: "held-1", PID: livePID, Agent: claimLocal, CreatedAt: poolTestNow,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	cleanupStalePoolSeatClaims(townRoot, time.Now())
+	seats.cleanupStale()
 
-	got := mustReadPoolSeatClaims(t, townRoot)
+	got := w.claims(t)
 	if len(got) != 1 || got[0].ID != held.ID {
 		t.Fatalf("only the live, fresh claim survives, got %v (crashed=%s stale=%s held=%s)",
 			got, crashed.ID, stale.ID, held.ID)
@@ -1028,27 +1031,6 @@ type fakeSeatFS struct {
 
 func newFakeSeatFS() *fakeSeatFS {
 	return &fakeSeatFS{dirs: map[string]bool{}, files: map[string][]byte{}}
-}
-
-// injectSeatFS puts an in-memory claim filesystem in place for one test.
-func injectSeatFS(t *testing.T) *fakeSeatFS {
-	t.Helper()
-	seatFS := newFakeSeatFS()
-	orig := poolSeatClaimFS
-	poolSeatClaimFS = seatFS
-	t.Cleanup(func() { poolSeatClaimFS = orig })
-	return seatFS
-}
-
-// injectUnreadableSeatFS injects a claim filesystem whose directory reads fail.
-func injectUnreadableSeatFS(t *testing.T) *fakeSeatFS {
-	t.Helper()
-	seatFS := newFakeSeatFS()
-	seatFS.readDirErr = errSeatFSUnreadable
-	orig := poolSeatClaimFS
-	poolSeatClaimFS = seatFS
-	t.Cleanup(func() { poolSeatClaimFS = orig })
-	return seatFS
 }
 
 func (f *fakeSeatFS) log(format string, args ...any) {
@@ -1162,18 +1144,22 @@ func (e fakeSeatDirEntry) Info() (os.FileInfo, error) {
 // The same requirement against a claim path that really cannot be read — a
 // regular file where the directory belongs, the shape an interrupted write or a
 // bad copy leaves behind — so the fail-closed behavior does not rest on the
-// injected filesystem alone. On the fail-open code this test routes the sling
-// to the local seat.
+// in-memory filesystem alone: the real one has to report ENOTDIR as a failure,
+// not as "no claims yet". On the fail-open code this test routes the sling to
+// the local seat.
 func TestPoolSeatClaimReadFailureFailsClosedWhenThePathIsNotADirectory(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 3, "", 0)
-	if err := os.MkdirAll(filepath.Join(townRoot, ".runtime"), 0755); err != nil {
+	t.Parallel()
+	w := newTestPoolTown(racingPool(3, ""))
+	w.root = t.TempDir()
+	w.fs = osPoolSeatFS{}
+	if err := os.MkdirAll(filepath.Join(w.root, ".runtime"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(poolSeatClaimDir(townRoot), []byte("not a directory"), 0644); err != nil {
+	if err := os.WriteFile(poolSeatClaimDir(w.root), []byte("not a directory"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	agent, reason := slingFromAnotherProcess(t, townRoot, "gt-a")
+	agent, reason := w.sling(t, "gt-a")
 	if agent != claimOverflow {
 		t.Errorf("the local seat must not be taken while its claims are unreadable: got %q (%s)", agent, reason)
 	}
@@ -1188,10 +1174,13 @@ func TestPoolSeatClaimReadFailureFailsClosedWhenThePathIsNotADirectory(t *testin
 // Letting the read failure read as "no claims" is the gt-eoi9 race back, with
 // the guard removed by a transient error.
 func TestPoolSeatClaimReadFailureFailsClosedOnTheLocalSeat(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 3, "", 0)
-	seatFS := injectUnreadableSeatFS(t)
+	t.Parallel()
+	w := newTestPoolTown(racingPool(3, ""))
+	seatFS := newFakeSeatFS()
+	seatFS.readDirErr = errSeatFSUnreadable
+	w.fs = seatFS
 
-	agent, reason := slingFromAnotherProcess(t, townRoot, "gt-a")
+	agent, reason := w.sling(t, "gt-a")
 	if agent != claimOverflow {
 		t.Errorf("the local seat must not be taken while its claims are unreadable: got %q (%s)", agent, reason)
 	}
@@ -1204,7 +1193,7 @@ func TestPoolSeatClaimReadFailureFailsClosedOnTheLocalSeat(t *testing.T) {
 
 	// A preview has to print the route a live sling would take, and that sling
 	// would take the fallback.
-	peekAgent, peekReason, err := peekPolecatPoolAgent(townRoot, "gt-b", "")
+	peekAgent, peekReason, err := w.process().route("gt-b", "", false, false)
 	if err != nil || peekAgent != agent || peekReason != reason {
 		t.Errorf("peek = %q %q %v, want the live sling's route %q %q", peekAgent, peekReason, err, agent, reason)
 	}
@@ -1213,18 +1202,36 @@ func TestPoolSeatClaimReadFailureFailsClosedOnTheLocalSeat(t *testing.T) {
 // A claim is released on the spawn paths that fail too. The seat a failed spawn
 // reserved stands for a polecat that never existed, and cleanup leaves it alone
 // for the whole TTL because the process holding it is alive, so every sling in
-// the meantime routes away from a seat nobody is using.
-func TestSpawnPolecatForSlingReleasesTheClaimOfASpawnThatFailed(t *testing.T) {
-	townRoot := fakeRacingPoolTown(t, 3, "", 0)
-	seatFS := injectSeatFS(t)
+// the meantime routes away from a seat nobody is using. A spawn that succeeds
+// hands the claim to its session instead, and keeps it.
+func TestSlingSeatSpawnReleasesTheClaimOfASpawnThatFailed(t *testing.T) {
+	t.Parallel()
+	spawnWith := func(prepareErr error) (*fakeSeatFS, *poolRouter, error) {
+		w := newTestPoolTown(racingPool(3, ""))
+		seatFS := newFakeSeatFS()
+		w.fs = seatFS
+		router := w.process()
+		s := slingSeatSpawn{
+			backpressure: func(string, string, SlingSpawnOptions) error { return nil },
+			resolvePool: func(_, beadID, requested string, explicit bool) (string, string, error) {
+				return router.route(beadID, requested, true, explicit)
+			},
+			releaseSeat: router.seats.store.release,
+			prepare: func(_, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				if prepareErr != nil {
+					return nil, prepareErr
+				}
+				return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
+			},
+		}
+		_, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: "gt-a"})
+		return seatFS, router, err
+	}
 
 	// A rig that does not exist is one of the failures that come after the pool
 	// has already claimed the seat for the spawn.
-	result, err := SpawnPolecatForSling("no-such-rig", SlingSpawnOptions{TownRoot: townRoot})
-	if err == nil {
-		t.Fatalf("spawning into a rig that does not exist must fail, got %+v", result)
-	}
-	if !strings.Contains(err.Error(), "no-such-rig") {
+	seatFS, router, err := spawnWith(errors.New("rig 'no-such-rig' not found"))
+	if err == nil || !strings.Contains(err.Error(), "no-such-rig") {
 		t.Fatalf("the failure names the rig: %v", err)
 	}
 	if !seatFS.wroteClaim() {
@@ -1233,45 +1240,28 @@ func TestSpawnPolecatForSlingReleasesTheClaimOfASpawnThatFailed(t *testing.T) {
 	if files := seatFS.claimFiles(); len(files) != 0 {
 		t.Errorf("a spawn that failed must leave no seat claimed behind it: %v", files)
 	}
-	if own := processPoolSeatClaims.ownID(); own != "" {
+	if own := router.seats.store.ownID(); own != "" {
 		t.Errorf("this process must not still think it holds a claim: %q", own)
+	}
+
+	seatFS, router, err = spawnWith(nil)
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if files := seatFS.claimFiles(); len(files) != 1 || router.seats.store.ownID() == "" {
+		t.Errorf("a spawn that succeeded hands its claim to the session start, got files %v own %q", files, router.seats.store.ownID())
 	}
 }
 
 // ── The overflow cap (gt-jzr1) ──────────────────────────────────────────────
 
-// fakeRacingOverflowTown wires a town whose local seat is taken and whose one
+// racingOverflowTown is a town whose local seat is taken and whose one
 // overflow seat is capped, so every fresh sling is an overflow route racing the
 // others for the last flash seat.
-func fakeRacingOverflowTown(t *testing.T) string {
-	t.Helper()
-	townRoot := t.TempDir()
-	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{
-		LocalAgent:    claimLocal,
-		MaxLocal:      1,
-		OverflowAgent: claimOverflow,
-		MaxOverflow:   1,
-	}
-	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), ts); err != nil {
-		t.Fatal(err)
-	}
-	origLister, origLookup := newPoolSessionLister, poolBeadLookup
-	origClaims := processPoolSeatClaims
-	t.Cleanup(func() {
-		newPoolSessionLister, poolBeadLookup = origLister, origLookup
-		processPoolSeatClaims = origClaims
-	})
-	newPoolSessionLister = func() sessionLister {
-		return &fakeLister{
-			sessions: map[string]map[string]string{"gt-live": {"GT_ROLE": "gastown/polecats/live", "GT_AGENT": claimLocal}},
-			created:  map[string]time.Time{"gt-live": time.Now().Add(-time.Hour)},
-		}
-	}
-	poolBeadLookup = func(_, beadID string) (poolBead, error) {
-		return poolBead{ID: beadID, Type: "task"}, nil
-	}
-	return townRoot
+func racingOverflowTown() *testPoolTown {
+	w := newTestPoolTown(&config.PolecatPool{LocalAgent: claimLocal, MaxLocal: 1, OverflowAgent: claimOverflow, MaxOverflow: 1})
+	w.liveSessions(claimLocal)
+	return w
 }
 
 // The overflow cap holds for the same reason the local cap does (gt-eoi9): the
@@ -1280,26 +1270,26 @@ func fakeRacingOverflowTown(t *testing.T) string {
 // batch reads "overflow 1/1", overflows anyway, and the cap that was given to
 // bound the spend bounds nothing.
 func TestPoolOverflowCapRefusesTheSlingThatOverfillsIt(t *testing.T) {
-	townRoot := fakeRacingOverflowTown(t)
+	t.Parallel()
+	w := racingOverflowTown()
 
-	a1, r1 := slingFromAnotherProcess(t, townRoot, "gt-a")
+	a1, r1 := w.sling(t, "gt-a")
 	if a1 != claimOverflow || !strings.Contains(r1, "local full (1/1) -> "+claimOverflow) {
 		t.Fatalf("the last flash seat goes to the first sling, got %q (%s)", a1, r1)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 || claims[0].Agent != claimOverflow {
+	if claims := w.claims(t); len(claims) != 1 || claims[0].Agent != claimOverflow {
 		t.Fatalf("an overflow route must claim the overflow seat, got %v", claims)
 	}
 
 	// The second sling sees the capped seat taken and refuses.
-	processPoolSeatClaims = &poolSeatClaimStore{}
-	agent, reason, err := resolvePolecatPoolAgent(townRoot, "gt-b", "")
+	agent, reason, err := w.process().route("gt-b", "", true, false)
 	if !errors.Is(err, errPoolBackpressure) {
 		t.Fatalf("the second sling must refuse, not overflow again: got %q (%s) %v", agent, reason, err)
 	}
 	if !strings.Contains(reason, "pool: overflow full (1/1)") {
 		t.Errorf("the refusal must count the capped seat: %q", reason)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
+	if claims := w.claims(t); len(claims) != 1 {
 		t.Errorf("a refused sling claims no seat, got %v", claims)
 	}
 }
@@ -1307,33 +1297,19 @@ func TestPoolOverflowCapRefusesTheSlingThatOverfillsIt(t *testing.T) {
 // A dry run prints the refusal a live sling would raise — that is the route it
 // would take — and still claims nothing.
 func TestPeekPolecatPoolAgentReportsTheOverflowRefusal(t *testing.T) {
-	townRoot := fakeRacingOverflowTown(t)
-	if a, _ := slingFromAnotherProcess(t, townRoot, "gt-a"); a != claimOverflow {
+	t.Parallel()
+	w := racingOverflowTown()
+	if a, _ := w.sling(t, "gt-a"); a != claimOverflow {
 		t.Fatalf("setup: the flash seat should go to the first sling, got %q", a)
 	}
-	processPoolSeatClaims = &poolSeatClaimStore{}
-	_, reason, err := peekPolecatPoolAgent(townRoot, "gt-b", "")
+	_, reason, err := w.process().route("gt-b", "", false, false)
 	if !errors.Is(err, errPoolBackpressure) {
 		t.Fatalf("a preview must report the refusal it would hit: %v", err)
 	}
 	if !strings.Contains(err.Error(), "sling refused: "+reason) {
 		t.Errorf("the refusal carries the pool's own reason line: %q vs %q", err, reason)
 	}
-	if claims := mustReadPoolSeatClaims(t, townRoot); len(claims) != 1 {
+	if claims := w.claims(t); len(claims) != 1 {
 		t.Errorf("a dry run must not claim or drop a seat, got %v", claims)
 	}
-}
-
-// reapedPID returns a PID that is certainly not alive: a child that has exited
-// and been waited for. processAlive reads it as a slinger that is gone.
-func reapedPID(t *testing.T) int {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("reaping a child PID is unix-specific")
-	}
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
-	if err := cmd.Run(); err != nil {
-		t.Skipf("cannot reap a child process: %v", err)
-	}
-	return cmd.Process.Pid
 }
