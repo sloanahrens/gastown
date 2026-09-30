@@ -94,6 +94,62 @@ func resolveOMPath(configured string, lookPath func(string) (string, error), hom
 	return "om"
 }
 
+// landingWorkRoot is the private base directory for one rig's throwaway
+// worktrees: the configured work_root, else $TMPDIR/gt-landing-<uid> (the
+// uid-scoped pattern of the gate's GATE_DIR, gt-22hdp.51), plus the rig. It
+// is never under the town root: internal/git refuses a worktree target there
+// (ErrUnsafeTownRootGitMutation), which failed every landing.
+func landingWorkRoot(configured, townRoot, rigName string) (string, error) {
+	base := strings.TrimSpace(configured)
+	if base == "" {
+		base = filepath.Join(os.TempDir(), fmt.Sprintf("gt-landing-%d", os.Getuid()))
+	}
+	if !filepath.IsAbs(base) {
+		return "", fmt.Errorf("patrols.landing_worker.work_root %q must be an absolute path", base)
+	}
+	root := filepath.Join(base, rigName)
+	if landingPathWithin(root, townRoot) {
+		return "", fmt.Errorf("patrols.landing_worker.work_root %q is under the town root %s; git refuses worktrees there, so set it outside the town (or leave it empty for $TMPDIR/gt-landing-<uid>)", base, townRoot)
+	}
+	return root, nil
+}
+
+// landingPathWithin reports whether path is dir or below it, comparing both the
+// cleaned paths and their symlink-resolved forms (macOS /var -> /private/var).
+func landingPathWithin(path, dir string) bool {
+	within := func(p, d string) bool {
+		rel, err := filepath.Rel(d, p)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	p, d := filepath.Clean(path), filepath.Clean(dir)
+	if within(p, d) {
+		return true
+	}
+	return within(resolveExisting(p), resolveExisting(d))
+}
+
+// resolveExisting resolves symlinks in the longest existing prefix of p.
+func resolveExisting(p string) string {
+	rest := ""
+	for cur := p; ; cur = filepath.Dir(cur) {
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(r, rest)
+		}
+		if parent := filepath.Dir(cur); parent == cur {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+	}
+}
+
+// ensurePrivateDir creates dir 0700 and tightens an existing one.
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o700)
+}
+
 // landingWorkerRigs is the configured rig allowlist within known.
 func landingWorkerRigs(config *DaemonPatrolConfig, known []string) []string {
 	c := landingWorkerConfig(config)
@@ -220,6 +276,16 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if gtPath == "" {
 		gtPath = "gt"
 	}
+	workRoot, err := landingWorkRoot(cfg.WorkRoot, townRoot, rigName)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensurePrivateDir(filepath.Dir(workRoot)); err != nil {
+		return nil, fmt.Errorf("landing work root: %w", err)
+	}
+	if err := ensurePrivateDir(workRoot); err != nil {
+		return nil, fmt.Errorf("landing work root: %w", err)
+	}
 	var reviewer land.Reviewer = land.SkipReviewer{}
 	if landingReviewEnabled(d.patrolConfig) {
 		home, _ := os.UserHomeDir()
@@ -235,7 +301,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	lander := &land.Lander{
 		Repo:     repo,
-		WorkRoot: filepath.Join(townRoot, ".runtime", "landing-work", rigName),
+		WorkRoot: workRoot,
 		Route:    "daemon",
 		Gate: landingGatePolicy(rigName, rigLandGate{
 			townRoot: townRoot, rig: rigName, gtPath: gtPath, logRoot: d.landingLogRoot(rigName),
@@ -250,7 +316,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	postLand := &landworker.PostLandRunner{
 		Rig:     rigName,
 		Command: func() string { return rigPostLandCommand(rigPath) },
-		Run:     postLandRun(repo, filepath.Join(townRoot, ".runtime", "landing-work", rigName), d.landingLogRoot(rigName), gtPath, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout)),
+		Run:     postLandRun(repo, workRoot, d.landingLogRoot(rigName), gtPath, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout)),
 		Beads:   bd,
 		Logf:    d.logger.Printf,
 		// OnRed: red-main ownership (bisect, revert, file) is gt-v4ssj.4.

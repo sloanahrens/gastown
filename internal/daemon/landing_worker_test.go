@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,7 +86,13 @@ func TestLandingWorkerLandsFromTheRigBareRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	gate := &passGate{}
-	lander := &land.Lander{Repo: bare, WorkRoot: filepath.Join(town, ".runtime", "landing-work", "gastown"), Gate: gate, Reviewer: approve{},
+	// The production work root, not a path under the (fake) town.
+	workRoot, err := landingWorkRoot("", town, fmt.Sprintf("e2e-%d", time.Now().UnixNano()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workRoot) })
+	lander := &land.Lander{Repo: bare, WorkRoot: workRoot, Gate: gate, Reviewer: approve{},
 		Beads: bd, Landings: landings, RangeChecks: []land.RangeCheck{land.AttributionCheck}}
 	var cleared []string
 	w := &landworker.Worker{Rig: "gastown", Beads: bd, Remote: gitRemote{g: git.NewGit(bare), remote: "origin"}, Lander: lander, Landings: landings,
@@ -240,5 +247,72 @@ func TestPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Join(root, "work")); len(entries) != 0 {
 		t.Fatalf("worktrees left behind: %v", entries)
+	}
+}
+
+// The landing work root must never be under the town root: internal/git
+// refuses worktree targets there, which failed every landing on 2026-09-30.
+func TestLandingWorkRootIsOutsideTheTownRoot(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	root, err := landingWorkRoot("", town, "gastown")
+	if err != nil {
+		t.Fatalf("default work root: %v", err)
+	}
+	if landingPathWithin(root, town) {
+		t.Fatalf("default work root %s is under the town root %s", root, town)
+	}
+	if filepath.Base(root) != "gastown" || !strings.Contains(root, fmt.Sprintf("gt-landing-%d", os.Getuid())) {
+		t.Fatalf("default work root %s is not uid- and rig-scoped", root)
+	}
+
+	for _, bad := range []string{filepath.Join(town, ".runtime", "landing-work"), town} {
+		if _, err := landingWorkRoot(bad, town, "gastown"); err == nil || !strings.Contains(err.Error(), "under the town root") {
+			t.Errorf("work_root %s: err = %v; want a refusal naming the town root", bad, err)
+		}
+	}
+	if _, err := landingWorkRoot("relative/dir", town, "gastown"); err == nil {
+		t.Error("a relative work_root was accepted")
+	}
+	outside := t.TempDir()
+	if got, err := landingWorkRoot(outside, town, "gastown"); err != nil || got != filepath.Join(outside, "gastown") {
+		t.Errorf("work_root outside the town: %s, %v", got, err)
+	}
+}
+
+// A work root spelled through a symlink into the town root is refused too.
+func TestLandingWorkRootRefusesASymlinkIntoTheTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(town, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := landingWorkRoot(filepath.Join(link, "work"), town, "gastown"); err == nil {
+		t.Fatal("a work_root reaching the town root through a symlink was accepted")
+	}
+}
+
+// The git guard itself accepts a worktree at the default work root.
+func TestLandingWorkRootPassesTheGitGuard(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	lwGit(t, root, "init", "-q", "-b", "main", repo)
+	lwGit(t, repo, "commit", "-q", "--allow-empty", "-m", "c")
+	workRoot, err := landingWorkRoot("", filepath.Join(root, "town"), fmt.Sprintf("guardtest-%d", time.Now().UnixNano()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workRoot) })
+	if err := ensurePrivateDir(workRoot); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(workRoot, "wt")
+	if err := git.NewGit(repo).WorktreeAddDetached(dir, "HEAD"); err != nil {
+		t.Fatalf("worktree at the default work root: %v", err)
+	}
+	if info, err := os.Stat(workRoot); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("work root mode: %v %v", info.Mode(), err)
 	}
 }
