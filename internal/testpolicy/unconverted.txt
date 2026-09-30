@@ -14,7 +14,6 @@ internal/mail
 internal/mayor
 internal/nudge
 internal/plugin
-internal/polecat
 internal/protocol
 internal/reaper
 internal/runtime

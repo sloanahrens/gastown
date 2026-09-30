@@ -15,6 +15,7 @@ type gitRepo interface {
 
 	TopLevel() (string, error)
 	GitDir() (string, error)
+	CommonDir() (string, error)
 	ConfigGet(key string) (string, error)
 	ConfigSet(key, value string) error
 
