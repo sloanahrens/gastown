@@ -41,6 +41,9 @@ type Mailbox struct {
 	path     string // for legacy JSONL mode (crew workers)
 	legacy   bool   // true = use JSONL files, false = use beads
 
+	// bd runs bd for the beads-mode methods; nil is the bd on PATH.
+	bd beads.BDRunner
+
 	// store is an optional in-process beadsdk.Storage. When set, beads-mode
 	// methods bypass the bd subprocess and use the store directly.
 	// Callers are responsible for closing the store.
@@ -213,7 +216,7 @@ func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []str
 		}
 
 		ctx, cancel := bdReadCtx()
-		stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+		stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
 		cancel()
 		if err != nil {
 			return nil, err
@@ -238,7 +241,7 @@ func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) [
 		}
 
 		ctx, cancel := bdReadCtx()
-		stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+		stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
 		cancel()
 		if err != nil {
 			continue
@@ -354,7 +357,7 @@ type wispSQLRow struct {
 func (m *Mailbox) runWispSQL(beadsDir, query string) ([]wispQueryMessage, error) {
 	args := []string{"sql", "--json", query}
 	ctx, cancel := bdReadCtx()
-	stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+	stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
 	cancel()
 	if err != nil {
 		return nil, err // Wisps table may not exist yet.
@@ -462,7 +465,7 @@ type issueBatchRow struct {
 // regardless of len(identities), unlike queryIssueMessagesByAssignee/
 // queryIssueMessagesByCC which issue one bd list call per identity. Used by
 // Router.BatchMailSummaries (see gt-978i).
-func queryIssueMessagesBatch(workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
+func queryIssueMessagesBatch(run beads.BDRunner, workDir, beadsDir string, identities []string) ([]issueBatchRow, error) {
 	if len(identities) == 0 {
 		return nil, nil
 	}
@@ -489,7 +492,7 @@ func queryIssueMessagesBatch(workDir, beadsDir string, identities []string) ([]i
 	args := []string{"sql", "--json", query}
 	ctx, cancel := bdReadCtx()
 	defer cancel()
-	stdout, err := runBdCommand(ctx, args, workDir, beadsDir)
+	stdout, err := runBdCommand(ctx, run, args, workDir, beadsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -594,7 +597,7 @@ func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 
 	ctx, cancel := bdReadCtx()
 	defer cancel()
-	stdout, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+	stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
 	if err != nil {
 		if bdErr, ok := err.(*bdError); ok && (bdErr.ContainsError("not found") || bdErr.ContainsError("no issue found") || bdErr.ContainsError("no issue found")) {
 			return nil, ErrMessageNotFound
@@ -679,7 +682,7 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, beadsDir)
+	_, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
 	telemetry.RecordMailMessage(context.Background(), "read", telemetry.MailMessageInfo{
 		ID: id,
 		To: m.identity,
@@ -747,14 +750,14 @@ func (m *Mailbox) markReadOnlyBeads(id string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, primary)
+	_, err := runBdCommand(ctx, m.bd, args, m.workDir, primary)
 	if err != nil {
 		if isBdNotFound(err) {
 			if primary != m.beadsDir {
 				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
 				ctx2, cancel2 := bdWriteCtx()
 				defer cancel2()
-				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir)
+				_, err2 := runBdCommand(ctx2, m.bd, args, m.workDir, m.beadsDir)
 				if err2 != nil {
 					if isBdNotFound(err2) {
 						return ErrMessageNotFound
@@ -786,7 +789,7 @@ func (m *Mailbox) acknowledgeDeliveryForPrimary(id string) error {
 	if msg == nil || msg.DeliveryState == "" || AddressToIdentity(msg.To) != m.identity {
 		return nil
 	}
-	return AcknowledgeDeliveryBead(m.workDir, m.beadsDir, id, m.identity)
+	return acknowledgeDeliveryBead(m.bd, m.workDir, m.beadsDir, id, m.identity)
 }
 
 func isBdNotFound(err error) bool {
@@ -815,14 +818,14 @@ func (m *Mailbox) markUnreadOnlyBeads(id string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, primary)
+	_, err := runBdCommand(ctx, m.bd, args, m.workDir, primary)
 	if err != nil {
 		if isBdNotFound(err) {
 			if primary != m.beadsDir {
 				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
 				ctx2, cancel2 := bdWriteCtx()
 				defer cancel2()
-				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir)
+				_, err2 := runBdCommand(ctx2, m.bd, args, m.workDir, m.beadsDir)
 				if err2 != nil {
 					if isBdNotFound(err2) {
 						return ErrMessageNotFound
@@ -864,14 +867,14 @@ func (m *Mailbox) markUnreadBeads(id string) error {
 
 	ctx, cancel := bdWriteCtx()
 	defer cancel()
-	_, err := runBdCommand(ctx, args, m.workDir, primary)
+	_, err := runBdCommand(ctx, m.bd, args, m.workDir, primary)
 	if err != nil {
 		if isBdNotFound(err) {
 			if primary != m.beadsDir {
 				// Cross-rig bead IDs (e.g. ne-*) may live in the home DB. See ne-bgr.
 				ctx2, cancel2 := bdWriteCtx()
 				defer cancel2()
-				_, err2 := runBdCommand(ctx2, args, m.workDir, m.beadsDir)
+				_, err2 := runBdCommand(ctx2, m.bd, args, m.workDir, m.beadsDir)
 				if err2 != nil {
 					if isBdNotFound(err2) {
 						return ErrMessageNotFound
@@ -1324,7 +1327,7 @@ func (m *Mailbox) AcknowledgeDeliveries(recipientAddress string, messages []*Mes
 		go func(id string) {
 			defer wg.Done()
 			defer func() { <-sem }() // release
-			if err := AcknowledgeDeliveryBead(m.workDir, m.beadsDir, id, recipientIdentity); err != nil {
+			if err := acknowledgeDeliveryBead(m.bd, m.workDir, m.beadsDir, id, recipientIdentity); err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Sprintf("%s: %v", id, err))
 				mu.Unlock()
@@ -1427,7 +1430,7 @@ func (m *Mailbox) listByThreadBeads(threadID string) ([]*Message, error) {
 
 	ctx, cancel := bdReadCtx()
 	defer cancel()
-	stdout, err := runBdCommand(ctx, args, m.workDir, m.beadsDir, "BD_IDENTITY="+m.identity)
+	stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, m.beadsDir, "BD_IDENTITY="+m.identity)
 	if err != nil {
 		return nil, err
 	}
