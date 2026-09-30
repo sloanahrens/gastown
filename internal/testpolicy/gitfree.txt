@@ -4,6 +4,7 @@
 # testutil.WithoutGit(). This list only grows: converting a package onto
 # gitfake or canned output adds its line and raises minGitFree in
 # gitfree_test.go.
+internal/crew
 internal/doltserver
 internal/formula
 internal/git
