@@ -12,6 +12,11 @@ var deletedCommands = [][]string{
 	{"proxy-subcmds"},
 	{"wl"},
 	{"mayor", "acp"},
+	{"convoy", "land"},
+	{"convoy", "stage"},
+	{"convoy", "launch"},
+	{"convoy", "watch"},
+	{"convoy", "unwatch"},
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the

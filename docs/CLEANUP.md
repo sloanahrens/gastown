@@ -107,7 +107,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | Command | What it does |
 |---------|-------------|
 | `gt convoy close <id>` | Closes a convoy bead |
-| `gt convoy land <id>` | Closes convoy, cleans up polecat worktrees, sends completion notifications |
 
 ## Mail Cleanup
 
