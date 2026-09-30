@@ -12,6 +12,7 @@ import (
 type Repo interface {
 	IsRepo() bool
 	GitDir() (string, error)
+	CommonDir() (string, error)
 	IsBareRepository() (bool, error)
 	CurrentBranch() (string, error)
 	DefaultBranch() string
