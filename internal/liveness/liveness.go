@@ -70,6 +70,9 @@ type Probe interface {
 	IsAgentAliveChecked(session string) (bool, error)
 	CapturePane(session string, lines int) (string, error)
 	GetSessionCreatedTime(name string) (time.Time, error)
+	// PaneDead reports whether the pane exited but was kept; an error is
+	// unknown.
+	PaneDead(session string) (bool, error)
 }
 
 var _ Probe = (*tmux.Tmux)(nil)
@@ -132,14 +135,21 @@ func Assess(p Probe, in Input) Result {
 		return Result{Verdict: Unknown, Reason: "session query failed", Err: err, Sample: in.Prev}
 	}
 	if !exists {
-		return dead(in.Prev, now, ReasonNoSession)
+		return deadResult(in.Prev, now, ReasonNoSession)
 	}
 	alive, err := p.IsAgentAliveChecked(in.Session)
 	if err != nil {
+		// A pane kept after its process exited has no current command, so
+		// the process query cannot answer; tmux's pane_dead can. A dead pane
+		// is a confirmed dead agent, and nothing else revives it now that the
+		// auto-respawn hook is gone.
+		if dead, derr := p.PaneDead(in.Session); derr == nil && dead {
+			return deadResult(in.Prev, now, ReasonAgentGone)
+		}
 		return Result{Verdict: Unknown, Reason: "agent process query failed", Err: err, Sample: in.Prev}
 	}
 	if !alive {
-		return dead(in.Prev, now, ReasonAgentGone)
+		return deadResult(in.Prev, now, ReasonAgentGone)
 	}
 
 	cur := sample(p, in, now)
@@ -167,8 +177,9 @@ func Assess(p Probe, in Input) Result {
 	return Result{Verdict: Alive, Reason: "quiet", QuietFor: quiet, Sample: cur}
 }
 
-// dead returns a Dead result whose sample counts consecutive dead samples.
-func dead(prev *intent.Progress, now time.Time, reason string) Result {
+// deadResult returns a Dead result whose sample counts consecutive dead
+// samples.
+func deadResult(prev *intent.Progress, now time.Time, reason string) Result {
 	s := &intent.Progress{SampledAt: now, DeadSamples: 1}
 	if prev != nil {
 		s.DeadSamples = prev.DeadSamples + 1

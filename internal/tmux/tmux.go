@@ -3793,22 +3793,19 @@ func (t *Tmux) IsAgentAliveChecked(session string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	alive, err := t.IsRuntimeRunningChecked(session, processNames)
-	if err != nil && t.paneDead(session) {
-		// A pane kept after its process exited (remain-on-exit) has no
-		// current command, so the process query cannot answer; tmux can.
-		// A dead pane is a confirmed dead agent, not an unknown one. With
-		// the auto-respawn hook gone (gt-4k3fj.3) nothing else revives it.
-		return false, nil
-	}
-	return alive, err
+	return t.IsRuntimeRunningChecked(session, processNames)
 }
 
-// paneDead reports whether tmux says the session's active pane has exited.
-// Any failure to ask reads as "not known to be dead".
-func (t *Tmux) paneDead(session string) bool {
+// PaneDead reports whether the session's active pane has exited but was
+// kept (remain-on-exit). Such a pane has no current command, so
+// IsAgentAliveChecked cannot answer for it; this can. An error means the
+// question was not answered.
+func (t *Tmux) PaneDead(session string) (bool, error) {
 	out, err := t.run("display-message", "-p", "-t", session, "#{pane_dead}")
-	return err == nil && strings.TrimSpace(out) == "1"
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "1", nil
 }
 
 // resolveSessionProcessNames returns the process names to check for a session.

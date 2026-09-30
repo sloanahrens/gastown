@@ -196,3 +196,8 @@ func (f *fakeTmux) ConfigureGasTownSession(session string, _ *tmux.Theme, _, _, 
 // session tmux cannot date: *tmux.Tmux fails to parse an empty
 // #{session_created}.
 var errNoSessionDate = errors.New(`parsing session created time "": EOF`)
+
+// PaneDead answers false: the fake's panes end with their session.
+func (f *fakeTmux) PaneDead(session string) (bool, error) {
+	return false, nil
+}

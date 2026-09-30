@@ -10,15 +10,16 @@ import (
 
 // probe is a scripted Probe.
 type probe struct {
-	hasErr, aliveErr, paneErr error
-	has, alive                bool
-	pane                      string
-	created                   time.Time
+	hasErr, aliveErr, paneErr, deadErr error
+	has, alive, paneDead               bool
+	pane                               string
+	created                            time.Time
 }
 
 func (p *probe) HasSession(string) (bool, error)          { return p.has, p.hasErr }
 func (p *probe) IsAgentAliveChecked(string) (bool, error) { return p.alive, p.aliveErr }
 func (p *probe) CapturePane(string, int) (string, error)  { return p.pane, p.paneErr }
+func (p *probe) PaneDead(string) (bool, error)            { return p.paneDead, p.deadErr }
 func (p *probe) GetSessionCreatedTime(string) (time.Time, error) {
 	return p.created, nil
 }
@@ -56,6 +57,21 @@ func TestAgentQueryErrorIsUnknown(t *testing.T) {
 	p := &probe{has: true, aliveErr: errors.New("show-environment: timeout")}
 	if r := Assess(p, Input{Session: "s", Now: t0, Transcript: noTranscript}); r.Verdict != Unknown {
 		t.Fatalf("verdict = %v, want Unknown", r.Verdict)
+	}
+}
+
+// A pane kept after its process exited cannot be asked for its command, so
+// the agent query errors; tmux still says the pane is dead, and that is a
+// confirmed Dead. Without this the seat would read Unknown forever.
+func TestDeadPaneIsDeadNotUnknown(t *testing.T) {
+	t.Parallel()
+	p := &probe{has: true, aliveErr: errors.New("empty command for session"), paneDead: true}
+	if r := Assess(p, Input{Session: "s", Now: t0, Transcript: noTranscript}); r.Verdict != Dead || r.Reason != ReasonAgentGone {
+		t.Fatalf("dead pane: %v %q, want Dead %q", r.Verdict, r.Reason, ReasonAgentGone)
+	}
+	p.paneDead, p.deadErr = false, errors.New("server exited")
+	if r := Assess(p, Input{Session: "s", Now: t0, Transcript: noTranscript}); r.Verdict != Unknown {
+		t.Fatalf("pane_dead unanswered: %v, want Unknown", r.Verdict)
 	}
 }
 

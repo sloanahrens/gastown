@@ -30,18 +30,24 @@ func deadPaneServer(dead string) *scripted {
 	})
 }
 
-// A pane whose process exited is a confirmed dead agent. Without the
-// auto-respawn hook nothing revives it, so reading it as unknown would leave
-// the seat alone forever (gt-4k3fj.3, G1-06).
-func TestIsAgentAliveChecked_DeadPaneIsDeadNotUnknown(t *testing.T) {
+// PaneDead answers for a pane kept after its process exited, which
+// IsAgentAliveChecked cannot (no current command): the liveness function
+// uses it to call such a seat Dead instead of Unknown forever.
+func TestPaneDead(t *testing.T) {
 	t.Parallel()
-	alive, err := unitTmux(deadPaneServer("1"), nil).IsAgentAliveChecked("gt-x")
-	if err != nil || alive {
-		t.Fatalf("dead pane: (%v, %v), want (false, nil)", alive, err)
+	for answer, want := range map[string]bool{"1": true, "0": false} {
+		dead, err := unitTmux(deadPaneServer(answer), nil).PaneDead("gt-x")
+		if err != nil || dead != want {
+			t.Errorf("pane_dead=%s: (%v, %v), want (%v, nil)", answer, dead, err, want)
+		}
 	}
-	// The control: a live pane with no answer stays unknown.
-	if _, err := unitTmux(deadPaneServer("0"), nil).IsAgentAliveChecked("gt-x"); err == nil {
-		t.Fatal("an unanswerable query on a live pane must stay an error")
+	// The agent query itself still reports the failure rather than guessing.
+	if _, err := unitTmux(deadPaneServer("1"), nil).IsAgentAliveChecked("gt-x"); err == nil {
+		t.Error("IsAgentAliveChecked on a dead pane must keep its error; PaneDead is the answer")
+	}
+	s := newScripted(bySub(map[string]reply{"display-message": fail("server exited")}))
+	if _, err := unitTmux(s, nil).PaneDead("gt-x"); err == nil {
+		t.Error("a failed pane_dead query must be an error")
 	}
 }
 
