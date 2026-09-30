@@ -10,6 +10,10 @@
 //
 // Single source of truth: the marker file, .runtime/agents/<rig>/
 // <role>.<name>.json — cheap, readable from shell, no Dolt dependency.
+// Since gt-4k3fj.1 that file is the seat's intent record (internal/intent):
+// a pause is desired=park there, and a seat the supervisor froze on an
+// exhausted restart budget reads as paused too. This package is the pause
+// view of that record; it never writes the record's other fields.
 // Every scanner (Go and the stuck-agent dog's shell script alike) reads
 // this file and only this file to decide "is this agent paused".
 //
@@ -26,14 +30,14 @@
 package agentpause
 
 import (
-	"encoding/json"
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 )
 
 // State is the durable pause marker written to the marker file.
@@ -71,11 +75,7 @@ type State struct {
 // Singletons (witness, refinery) have an empty name and produce
 // e.g. <rig>/witness.json.
 func FilePath(townRoot, rig, role, name string) string {
-	base := role
-	if name != "" {
-		base = role + "." + name
-	}
-	return filepath.Join(townRoot, ".runtime", "agents", rig, base+".json")
+	return intent.Seat{Rig: rig, Role: role, Name: name}.Path(townRoot)
 }
 
 // IsPaused checks the file marker only. Returns (false, nil, nil)
@@ -93,96 +93,68 @@ func IsPaused(townRoot, rig, role, name string) (bool, *State, error) {
 // be read or parsed reads as paused, so a guard never mistakes a broken
 // write or a hand-edit for "not paused".
 func readMarker(path string) (bool, *State, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: caller-built trusted path
+	rec, err := intent.ReadPath(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil, nil
-		}
-		return true, &State{Paused: true, Reason: unreadableReason, Address: AddressFromMarkerPath(path)},
-			fmt.Errorf("reading pause marker %q: %w", path, err)
+		return true, &State{Paused: true, Reason: rec.Reason, Address: AddressFromMarkerPath(path)}, err
 	}
-	var st State
-	if err := json.Unmarshal(data, &st); err != nil {
-		return true, &State{Paused: true, Reason: malformedReason, Address: AddressFromMarkerPath(path)},
-			fmt.Errorf("malformed pause marker %q: %w", path, err)
+	if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+		return false, nil, nil
 	}
-	st.Address = AddressFromMarkerPath(path)
-	return st.Paused, &st, nil
+	return rec.Held(), &State{
+		Paused:          rec.Held(),
+		Reason:          rec.Reason,
+		PausedAt:        rec.PausedAt,
+		PausedBy:        rec.PausedBy,
+		PriorAgentState: rec.PriorAgentState,
+		Address:         AddressFromMarkerPath(path),
+	}, nil
 }
 
-// Reasons attached to a marker that could not be read or parsed. They are
-// shown verbatim by gt status and by the scanner logs, so they say what is
-// wrong rather than pretending to be an operator reason.
-const (
-	unreadableReason = "unreadable pause marker (treated as paused)"
-	malformedReason  = "malformed pause marker (treated as paused)"
-)
-
-// Pause writes the pause marker file, overwriting any existing marker.
+// Pause parks the agent: it sets the seat's intent record to desired=park
+// with the operator's reason, keeping every other field (the supervisor's
+// restart budget, the incarnation) as it was.
 //
 // priorAgentState records the agent bead's agent_state at the moment of
 // pause, so `gt agent resume` can restore it rather than blindly writing
 // "idle". Callers that have no bead to consult (or don't care) pass "".
 //
-// The write is atomic: a temp file in the same directory, fsynced, then
-// renamed over the target. A truncated marker reads as paused (fail closed),
-// but it also loses the operator's reason and cannot be told apart from a
-// hand-edit, so no reader should ever see a half-written one.
+// The write is atomic under the record's lock (internal/intent): no reader
+// ever sees a half-written marker. A marker that could not be read is
+// replaced, with the operator's reason.
 func Pause(townRoot, rig, role, name, reason, pausedBy, priorAgentState string) error {
-	path := FilePath(townRoot, rig, role, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(&State{
-		Paused:          true,
-		Reason:          reason,
-		PausedAt:        time.Now().UTC(),
-		PausedBy:        pausedBy,
-		PriorAgentState: priorAgentState,
-	}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(path, append(data, '\n'))
+	_, err := intent.Update(townRoot, intent.Seat{Rig: rig, Role: role, Name: name}, func(r *intent.Record) error {
+		now := time.Now().UTC()
+		r.Desired = intent.DesiredPark
+		r.Reason = reason
+		r.PausedAt = now
+		r.PausedBy = pausedBy
+		r.PriorAgentState = priorAgentState
+		r.Actor = pausedBy
+		r.UpdatedAt = now
+		return nil
+	})
+	return err
 }
 
-// writeFileAtomic writes data to path via a sibling temp file and a rename,
-// so a reader sees either the previous contents or the complete new ones —
-// never a partial write. The temp file is created in the target directory so
-// the rename stays on one filesystem.
-func writeFileAtomic(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() { _ = os.Remove(tmp) }() // no-op once the rename succeeds
-
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Chmod(0o644); err != nil { //nolint:gosec // G302: intended world-readable runtime state
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// Resume removes the pause marker file.
+// Resume clears the hold: desired=run, not frozen, no pause reason. The
+// record itself stays, because it also carries the seat's restart budget
+// and incarnation. Resuming an agent that has no record is a no-op.
 func Resume(townRoot, rig, role, name string) error {
-	err := os.Remove(FilePath(townRoot, rig, role, name))
-	if err != nil && !os.IsNotExist(err) {
-		return err
+	path := FilePath(townRoot, rig, role, name)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	return nil
+	_, err := intent.Update(townRoot, intent.Seat{Rig: rig, Role: role, Name: name}, func(r *intent.Record) error {
+		r.Desired = intent.DesiredRun
+		r.Frozen = false
+		r.Reason = ""
+		r.PausedAt = time.Time{}
+		r.PausedBy = ""
+		r.PriorAgentState = ""
+		r.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	return err
 }
 
 // PausedByState returns the pause state for an agent, or nil when it is not
