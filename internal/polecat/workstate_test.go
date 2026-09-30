@@ -570,3 +570,33 @@ func TestNewWorkstateInputMissingCleanupStatusStillBlocksWithoutLiveProbe(t *tes
 		t.Fatalf("Blockers = %v, want [cleanup_status=<missing>]", d.Blockers)
 	}
 }
+
+func TestWorkstateFactsCanIgnoreStaleCleanupStatusForNuke(t *testing.T) {
+	t.Parallel()
+	safe := WorkstateFacts{CleanupStatus: CleanupUnpushed, HookBeadSafe: true, AssignedBeadTerminal: true}
+	tests := []struct {
+		name    string
+		mutate  func(f *WorkstateFacts)
+		gitSafe bool
+		want    bool
+	}{
+		{"terminal work, safe hook, no MR, safe git", func(*WorkstateFacts) {}, true, true},
+		{"git not safe", func(*WorkstateFacts) {}, false, false},
+		{"hook unsafe", func(f *WorkstateFacts) { f.HookBeadSafe = false }, true, false},
+		{"active MR pending", func(f *WorkstateFacts) { f.ActiveMRBlocker = "active_mr=x status=open" }, true, false},
+		{"no terminal work ref", func(f *WorkstateFacts) { f.AssignedBeadTerminal = false }, true, false},
+		{"hook bead terminal counts as terminal work", func(f *WorkstateFacts) { f.AssignedBeadTerminal, f.HookBeadTerminal = false, true }, true, true},
+		{"active MR source terminal counts as terminal work", func(f *WorkstateFacts) { f.AssignedBeadTerminal, f.ActiveMRSourceTerminal = false, true }, true, true},
+		{"unknown status is never waived", func(f *WorkstateFacts) { f.CleanupStatus = CleanupUnknown }, true, false},
+		{"missing status is never waived", func(f *WorkstateFacts) { f.CleanupStatus = "" }, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := safe
+			tt.mutate(&f)
+			if got := f.CanIgnoreStaleCleanupStatusForNuke(tt.gitSafe); got != tt.want {
+				t.Fatalf("CanIgnoreStaleCleanupStatusForNuke(%v) = %v, want %v", tt.gitSafe, got, tt.want)
+			}
+		})
+	}
+}
