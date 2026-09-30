@@ -162,7 +162,7 @@ func readWorktree(dir string) (map[string]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G122: a test fixture reading its own temp checkout
 		if err != nil {
 			return err
 		}
