@@ -283,7 +283,7 @@ func TestBeadsExposureProbe_UntrackedThenExcluded(t *testing.T) {
 	if got := beadsUntrackedAndUnignored(g); got != probeExposed {
 		t.Fatalf("untracked .beads: got %v, want probeExposed", got)
 	}
-	if err := rig.EnsureLocalExcludePatternsWith(dir, g); err != nil {
+	if err := rig.EnsureLocalExcludePatternsIn(dir, g); err != nil {
 		t.Fatalf("EnsureLocalExcludePatterns: %v", err)
 	}
 	if got := beadsUntrackedAndUnignored(g); got != probeProtected {

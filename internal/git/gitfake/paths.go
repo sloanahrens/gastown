@@ -14,22 +14,6 @@ import (
 // DisableSparseCheckout only records the setting, since the fake does not
 // hide files for a sparse checkout.
 
-// Remotes returns the repository's remote names, sorted as git lists them.
-func (h *handle) Remotes() ([]string, error) {
-	h.f.mu.Lock()
-	defer h.f.mu.Unlock()
-	r, _, err := h.locate("remote")
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for name := range r.remotes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
 // RemoveRemote deletes a remote with its push URL and remote-tracking refs.
 func (h *handle) RemoveRemote(name string) error {
 	h.f.mu.Lock()

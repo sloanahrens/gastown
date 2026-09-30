@@ -149,7 +149,7 @@ func relToTown(ctx *CheckContext, clonePath string) string {
 // Fix adds .beads/ to the local git exclude file for each exposed clone.
 func (c *BeadsExposureCheck) Fix(ctx *CheckContext) error {
 	for _, clonePath := range c.exposedClones {
-		if err := rig.EnsureLocalExcludePatternsWith(clonePath, ctx.git(clonePath)); err != nil {
+		if err := rig.EnsureLocalExcludePatternsIn(clonePath, ctx.git(clonePath)); err != nil {
 			return fmt.Errorf("protecting .beads/ in %s: %w", clonePath, err)
 		}
 	}
