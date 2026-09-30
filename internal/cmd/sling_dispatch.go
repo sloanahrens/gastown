@@ -32,14 +32,17 @@ type SlingParams struct {
 	ResumeBranch string   // --branch / --pr (resume existing PR branch, gh#3602)
 	Account      string   // --account
 	Agent        string   // --agent
-	NoConvoy     bool     // --no-convoy
-	Owned        bool     // --owned
-	NoMerge      bool     // --no-merge
-	Force        bool     // --force
-	HookRawBead  bool     // --hook-raw-bead
-	NoBoot       bool     // --no-boot
-	Mode         string   // --ralph: "" (normal) or "ralph"
-	ReviewOnly   bool     // --review-only: review and report back only, no merge/commit/push
+	// AgentBeatsRoute makes Agent outrank the bead's route:* labels in the
+	// polecat pool (spec dispatcher only; see SlingSpawnOptions).
+	AgentBeatsRoute bool
+	NoConvoy        bool   // --no-convoy
+	Owned           bool   // --owned
+	NoMerge         bool   // --no-merge
+	Force           bool   // --force
+	HookRawBead     bool   // --hook-raw-bead
+	NoBoot          bool   // --no-boot
+	Mode            string // --ralph: "" (normal) or "ralph"
+	ReviewOnly      bool   // --review-only: review and report back only, no merge/commit/push
 
 	// Execution behavior (set by caller, not serialized to queue)
 	SkipCook         bool   // Batch optimization: formula already cooked
@@ -321,13 +324,14 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 
 	// 3. Spawn polecat (via spawnPolecatForSling)
 	spawnOpts := SlingSpawnOptions{
-		TownRoot:     townRoot,
-		Force:        params.Force,
-		Account:      params.Account,
-		HookBead:     params.BeadID,
-		Agent:        params.Agent,
-		BaseBranch:   params.BaseBranch,
-		ResumeBranch: params.ResumeBranch,
+		TownRoot:        townRoot,
+		Force:           params.Force,
+		Account:         params.Account,
+		HookBead:        params.BeadID,
+		Agent:           params.Agent,
+		AgentBeatsRoute: params.AgentBeatsRoute,
+		BaseBranch:      params.BaseBranch,
+		ResumeBranch:    params.ResumeBranch,
 		// Create is always true for rig targets: executeSling only handles
 		// rig-targeted dispatch (batch sling + queue dispatch), where a fresh
 		// polecat must be spawned. The single-sling path (runSling) handles

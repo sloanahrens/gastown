@@ -41,6 +41,7 @@ type PatrolsConfig struct {
 	QuotaDog             *QuotaDogConfig             `json:"quota_dog,omitempty"`
 	QuotaResume          *QuotaDogConfig             `json:"quota_resume,omitempty"`
 	MayorDispatch        *MayorDispatchConfig        `json:"mayor_dispatch,omitempty"`
+	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 
 	// ScheduledSlings dispatches a formula onto a rig on an interval, one bead
@@ -371,6 +372,43 @@ type MayorDispatchConfig struct {
 
 	// IntervalStr is how often to check, as a string (e.g., "30m").
 	IntervalStr string `json:"interval,omitempty"`
+}
+
+// SpecDispatchConfig configures the spec dispatcher ticker (gt-4k3fj.5): a
+// ready, unassigned, spec-labeled feature bead that passes the spec lint is
+// slung onto a polecat seat within the seat-class budget. Off unless enabled.
+type SpecDispatchConfig struct {
+	// Enabled turns the ticker on. Default off.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the tick cadence (default "60s").
+	IntervalStr string `json:"interval,omitempty"`
+
+	// HookedAgent is the agent a hooked (Claude-backed, guarded) seat runs.
+	// Default "claude-sonnet".
+	HookedAgent string `json:"hooked_agent,omitempty"`
+
+	// MaxHooked caps live hooked polecats (default 2). Zero means default;
+	// a negative value closes the hooked class.
+	MaxHooked int `json:"max_hooked,omitempty"`
+
+	// HooklessAgent is the agent a hookless seat runs. Default: the
+	// polecat_pool overflow_agent.
+	HooklessAgent string `json:"hookless_agent,omitempty"`
+
+	// MaxHookless caps live hookless polecats when polecat_pool.max_overflow
+	// is unset (default 2). polecat_pool.max_overflow wins when set.
+	MaxHookless int `json:"max_hookless,omitempty"`
+
+	// PreferHooked tries the hooked seat before the hookless one for specs
+	// that may take either. Default false (hookless first).
+	PreferHooked bool `json:"prefer_hooked,omitempty"`
+
+	// MaxPerTick bounds slings per tick (default 1).
+	MaxPerTick int `json:"max_per_tick,omitempty"`
+
+	// Template overrides the spec template path.
+	Template string `json:"template,omitempty"`
 }
 
 // RestartTrackerConfig holds configurable parameters for restart tracking.
