@@ -18,7 +18,7 @@ func TestIsAgentSession(t *testing.T) {
 		{"rig-polecat-abc", true},
 		{"hq-deacon", false},
 		{"hq-boot", false},
-		{"rig-dog-fido", true},
+		{"hq-dog-fido", false}, // dog role retired (gt-29q6g)
 		{"my-personal-session", false},
 		{"", false},
 	}

@@ -175,8 +175,7 @@ func TestAddressToSessionIDs(t *testing.T) {
 		{"mayor/", []string{"hq-mayor"}},
 		{"deacon", nil}, // deacon role retired (gt-4k3fj.6.1)
 		{"deacon/", nil},
-		{"deacon/dogs/alpha", []string{"hq-dog-alpha"}},
-		{"deacon/dogs/my-dog", []string{"hq-dog-my-dog"}},
+		{"deacon/dogs/alpha", nil}, // dog role retired (gt-29q6g)
 
 		// Rig singletons - single session (no crew/polecat ambiguity)
 		// Refinery role removed (gt-v4ssj.6): no longer a singleton, so it is
@@ -1009,7 +1008,6 @@ func TestIsGroupAddress(t *testing.T) {
 		{"@town", true},
 		{"@witnesses", true},
 		{"@crew/gastown", true},
-		{"@dogs", true},
 		{"@overseer", true},
 		{"@polecats/gastown", true},
 		{"mayor/", false},
@@ -1041,8 +1039,8 @@ func TestParseGroupAddress(t *testing.T) {
 		{"@overseer", GroupTypeOverseer, "", "", false},
 		{"@town", GroupTypeTown, "", "", false},
 
-		// Role-based patterns (all agents of a role type)
-		{"@dogs", GroupTypeRole, "dog", "", false},
+		// The dog role is retired (gt-29q6g)
+		{"@dogs", "", "", "", true},
 
 		// Rig pattern (all agents in a rig)
 		{"@rig/gastown", GroupTypeRig, "", "gastown", false},
@@ -1193,34 +1191,13 @@ func TestAgentBeadToAddress(t *testing.T) {
 			want: "",
 		},
 		{
-			name: "hq-dog with location in description",
+			// The dog role is retired (gt-29q6g); its agent beads outlive it.
+			name: "retired dog bead has no address despite its location",
 			bead: &agentBead{
 				ID:          "hq-dog-alpha",
 				Description: "Dog: alpha\n\nrole_type: dog\nrig: town\nlocation: deacon/dogs/alpha",
 			},
-			want: "deacon/dogs/alpha",
-		},
-		{
-			name: "hq-dog without description returns empty",
-			bead: &agentBead{
-				ID: "hq-dog-bravo",
-			},
-			want: "deacon/dogs/bravo",
-		},
-		{
-			name: "malformed hq-dog returns empty",
-			bead: &agentBead{
-				ID: "hq-dog",
-			},
 			want: "",
-		},
-		{
-			name: "hq-dog with location takes priority over role_type+rig",
-			bead: &agentBead{
-				ID:          "hq-dog-charlie",
-				Description: "Dog: charlie\n\nrole_type: dog\nrig: town\nlocation: deacon/dogs/charlie",
-			},
-			want: "deacon/dogs/charlie",
 		},
 	}
 
@@ -1375,7 +1352,7 @@ func TestExpandAnnounceNoTownRoot(t *testing.T) {
 
 // ============ Recipient Validation Tests ============
 
-func TestValidateAgentWorkspaceDog(t *testing.T) {
+func TestValidateAgentWorkspaceRetiredDogs(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
@@ -1392,7 +1369,7 @@ func TestValidateAgentWorkspaceDog(t *testing.T) {
 		identity string
 		want     bool
 	}{
-		{"dog exists", "deacon/dogs/fido", true},
+		{"kennel dir exists but dogs are retired", "deacon/dogs/fido", false},
 		{"dog not exists", "deacon/dogs/ghost", false},
 		{"dog pool is not mailbox", "deacon/dogs", false},
 		{"empty dog name", "deacon/dogs/", false},
@@ -1446,14 +1423,9 @@ func TestAddressToAgentBeadID(t *testing.T) {
 			expected: "",
 		},
 		{
-			name:     "dog",
+			name:     "retired dog",
 			address:  "deacon/dogs/alpha",
-			expected: "hq-dog-alpha",
-		},
-		{
-			name:     "hyphenated dog",
-			address:  "deacon/dogs/my-dog",
-			expected: "hq-dog-my-dog",
+			expected: "", // dog role retired (gt-29q6g)
 		},
 		{
 			name:     "witness",
@@ -2016,58 +1988,6 @@ func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T)
 	}
 }
 
-func TestNotifyRecipient_DogQueuesDogSessionNotDeacon(t *testing.T) {
-	t.Parallel()
-	fake := newFakeNotifyTmux()
-	fake.noServer = true
-
-	townRoot := t.TempDir()
-	r := &Router{
-		// No agent bead mutes the session: bd has no database.
-		bd:       noBeadsDatabase,
-		workDir:  t.TempDir(),
-		townRoot: townRoot,
-		tmux:     fake,
-	}
-
-	msg := &Message{
-		From:     "mayor/",
-		To:       "deacon/dogs/fido",
-		Subject:  "dog delivery",
-		ThreadID: "thread-dog-delivery",
-	}
-
-	if err := r.notifyRecipient(msg); err != nil {
-		t.Fatalf("notifyRecipient returned error: %v", err)
-	}
-
-	if got := strings.Join(fake.queried, ","); got != "hq-dog-fido" {
-		t.Fatalf("HasSession queried %q, want only the dog session hq-dog-fido", got)
-	}
-	if len(fake.waitedOn) != 0 || len(fake.nudges) != 0 {
-		t.Fatalf("absent dog session was waited on %v / nudged %v, want neither", fake.waitedOn, fake.nudges)
-	}
-
-	dogNudges, err := nudge.Drain(townRoot, "hq-dog-fido")
-	if err != nil {
-		t.Fatalf("Drain(hq-dog-fido): %v", err)
-	}
-	if len(dogNudges) != 1 {
-		t.Fatalf("Drain(hq-dog-fido) returned %d nudges, want 1", len(dogNudges))
-	}
-	if dogNudges[0].ThreadID != msg.ThreadID {
-		t.Fatalf("dog nudge ThreadID = %q, want %q", dogNudges[0].ThreadID, msg.ThreadID)
-	}
-
-	deaconNudges, err := nudge.Drain(townRoot, "hq-deacon")
-	if err != nil {
-		t.Fatalf("Drain(hq-deacon): %v", err)
-	}
-	if len(deaconNudges) != 0 {
-		t.Fatalf("Drain(hq-deacon) returned %d nudges, want 0", len(deaconNudges))
-	}
-}
-
 func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) {
 	t.Parallel()
 	sessionName := "gt-crew-busy-escalation"
@@ -2264,7 +2184,7 @@ func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
 
 func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
 	t.Parallel()
-	for _, from := range []string{"overseer", "mayor/", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust", "deacon/dogs/alpha"} {
+	for _, from := range []string{"overseer", "mayor/", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust"} {
 		t.Run(from, func(t *testing.T) {
 			townRoot := t.TempDir()
 			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
@@ -2320,6 +2240,7 @@ func TestSenderCanReceiveReply(t *testing.T) {
 		{from: "gastown/crew/alice/extra", want: false},
 		{from: "deacon/dogs/", want: false},
 		{from: "deacon/dogs/alpha/extra", want: false},
+		{from: "deacon/dogs/alpha", want: false}, // dog role retired (gt-29q6g)
 		{from: "overseer", want: true},
 		{from: "mayor", want: true},
 		{from: "mayor/", want: true},
@@ -2333,7 +2254,6 @@ func TestSenderCanReceiveReply(t *testing.T) {
 		{from: "gastown/rust", want: true},
 		{from: "gastown/crew/gt-sling", want: true},
 		{from: "gastown/system-bot", want: true},
-		{from: "deacon/dogs/alpha", want: true},
 	}
 
 	for _, tt := range tests {

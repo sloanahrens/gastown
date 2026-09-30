@@ -131,12 +131,6 @@ func detectSenderFromRole(role string) string {
 		}
 		// Fallback to cwd detection for crew
 		return detectSenderFromCwd()
-	case "dog":
-		dogName := os.Getenv("GT_DOG_NAME")
-		if dogName != "" {
-			return fmt.Sprintf("deacon/dogs/%s", dogName)
-		}
-		return detectSenderFromCwd()
 	default:
 		// Unknown role, try cwd detection
 		return detectSenderFromCwd()
@@ -164,15 +158,6 @@ func detectSenderFromCwd() string {
 			polecatPath := strings.Split(parts[1], "/")[0]
 			rigName := filepath.Base(rigPath)
 			return fmt.Sprintf("%s/polecats/%s", rigName, polecatPath)
-		}
-	}
-
-	// If in deacon's dogs directory, extract address (format: deacon/dogs/name)
-	if strings.Contains(cwd, "/deacon/dogs/") {
-		parts := strings.Split(cwd, "/deacon/dogs/")
-		if len(parts) >= 2 {
-			dogName := strings.Split(parts[1], "/")[0]
-			return fmt.Sprintf("deacon/dogs/%s", dogName)
 		}
 	}
 
@@ -257,10 +242,6 @@ func identityFromAgentFile(parsed agentIdentityFile) string {
 	case constants.RolePolecat:
 		if rig != "" && name != "" {
 			return fmt.Sprintf("%s/polecats/%s", rig, name)
-		}
-	case "dog":
-		if name != "" {
-			return fmt.Sprintf("deacon/dogs/%s", name)
 		}
 	}
 
