@@ -1214,6 +1214,12 @@ func normalizeGitRemoteURL(raw string) string {
 // Push pushes to the remote branch with a timeout to prevent indefinite hangs
 // when the remote is unreachable.
 func (g *Git) Push(remote, branch string, force bool) error {
+	return g.PushWithTimeout(remote, branch, force, pushTimeout)
+}
+
+// PushWithTimeout is Push with its deadline given, for a push that can
+// outgrow the default (a large backup pack).
+func (g *Git) PushWithTimeout(remote, branch string, force bool, timeout time.Duration) error {
 	if err := g.RefuseForkBackedDefaultPush(remote, branch, g.RemoteDefaultBranch()); err != nil {
 		return err
 	}
@@ -1221,7 +1227,7 @@ func (g *Git) Push(remote, branch string, force bool) error {
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := g.runWithTimeout(pushTimeout, args...)
+	_, err := g.runWithTimeout(timeout, args...)
 	return err
 }
 

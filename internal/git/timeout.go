@@ -22,23 +22,23 @@ func (e *timeoutError) Error() string {
 
 func (e *timeoutError) Unwrap() error { return ErrTimedOut }
 
-// WithTimeout returns a copy of g whose every call is killed after d,
-// replacing the deadline a method sets for itself (a push's, a fetch's) and
-// bounding the calls that set none. A killed call's error matches
-// ErrTimedOut.
+// WithTimeout returns a copy of g whose calls are killed after d, the
+// receiver left as it was. A method that sets its own deadline (a push's, a
+// fetch's) keeps it; d bounds every call that sets none. Zero is today's
+// behaviour: no deadline. A killed call's error matches ErrTimedOut.
 func (g *Git) WithTimeout(d time.Duration) *Git {
 	c := *g
 	c.timeout = d
 	return &c
 }
 
-// deadline is the timeout a call runs under: the WithTimeout one when set,
-// else the method's own (0 means none).
+// deadline is the timeout a call runs under: the method's own when it sets
+// one, else the WithTimeout default (0 means none).
 func (g *Git) deadline(own time.Duration) time.Duration {
-	if g.timeout > 0 {
-		return g.timeout
+	if own > 0 {
+		return own
 	}
-	return own
+	return g.timeout
 }
 
 // WithEnv returns a copy of g whose every call runs with env added to the

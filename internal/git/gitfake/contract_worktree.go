@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
@@ -326,7 +327,7 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		if err := g.Push("origin", "main", false); err == nil {
 			t.Error("a non-fast-forward push succeeded")
 		}
-		if err := g.Push("origin", "main", true); err != nil {
+		if err := g.PushWithTimeout("origin", "main", true, time.Minute); err != nil {
 			t.Errorf("forced push: %v", err)
 		}
 		if tip, _ := repo.PushRemoteBranchTip("origin", "main"); tip != local {

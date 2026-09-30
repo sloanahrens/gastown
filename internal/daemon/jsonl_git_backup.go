@@ -640,7 +640,7 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	if err != nil || branch == "" {
 		branch = "main" // fallback
 	}
-	if err := d.backupGitAt(gitRepo, gitPushTimeout).Push("origin", branch, false); err != nil {
+	if err := d.backupGitAt(gitRepo, gitCmdTimeout).PushWithTimeout("origin", branch, false, gitPushTimeout); err != nil {
 		return fmt.Errorf("git push: %w", err)
 	}
 	d.logger.Printf("jsonl_git_backup: committed and pushed: %s", msg)

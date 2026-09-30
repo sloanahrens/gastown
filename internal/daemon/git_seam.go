@@ -34,6 +34,7 @@ type daemonGit interface {
 	CurrentBranch() (string, error)
 	CommitWithAuthor(message, author string) error
 	Push(remote, refspec string, force bool) error
+	PushWithTimeout(remote, refspec string, force bool, timeout time.Duration) error
 	PackSize() (string, error)
 	LogAll(max int) ([]git.LogEntry, error)
 }

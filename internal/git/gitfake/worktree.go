@@ -25,6 +25,7 @@ type WorkTree interface {
 
 	// Pushing and preservation (push.go).
 	Push(remote, refspec string, force bool) error
+	PushWithTimeout(remote, refspec string, force bool, timeout time.Duration) error
 	StashCount() (int, error)
 	CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStatus, error)
 
