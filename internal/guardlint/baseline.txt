@@ -19,7 +19,6 @@ internal/cmd/prime.go:ralphLoopPluginInstalledIn
 internal/cmd/prime_payload.go:staticRoleText
 internal/cmd/sling_schedule.go:shouldDeferDispatch
 internal/cmd/up.go:disableCurrentAgentDND
-internal/connection/local.go:*LocalConnection.Exists
 internal/daemon/notification.go:*NotificationManager.SendIfReady
 internal/daemon/notification.go:*NotificationManager.shouldSendLocked
 internal/daemon/patrol_last_run.go:loadPatrolLastRun
