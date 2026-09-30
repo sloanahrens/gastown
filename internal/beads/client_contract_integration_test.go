@@ -29,6 +29,15 @@ func TestIntegrationClientContract(t *testing.T) {
 	// One database per contract: the client cases share theirs (each asserts
 	// only on its own issues), the admin cases run in turn on theirs. Two bd
 	// inits a run instead of one per case.
+	//
+	// bd reads beads.role from git config and, when it is unset, prints a
+	// warning (GH#2950) ahead of the JSON on every create. The isolated
+	// client runs without HOME and a t.TempDir() is no git repo, so set the
+	// role through git's environment config, which the bd subprocesses
+	// inherit. Set here, before the parallel subtests start.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "beads.role")
+	t.Setenv("GIT_CONFIG_VALUE_0", "maintainer")
 	newDB := func(t *testing.T, dir string) *beads.Beads {
 		b := beads.NewIsolatedWithPort(dir, port)
 		if err := b.Init("gt"); err != nil {
