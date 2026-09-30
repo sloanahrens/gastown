@@ -1435,27 +1435,6 @@ func hasExplicitNonClaudeOverride(reg *AgentRegistry, role string, townSettings 
 	return false
 }
 
-// hasExplicitRoleAgent reports whether role_agents[role] is set to a non-empty
-// agent name in either the rig or town settings.
-//
-// Only the role-specific map is consulted — intentionally unlike
-// hasExplicitNonClaudeOverride, which also inspects the global Agent/DefaultAgent
-// fallbacks. A global default is a fallback, not an override of a role, so it
-// must not suppress role defaults such as the dog Haiku preset.
-func hasExplicitRoleAgent(role string, townSettings *TownSettings, rigSettings *RigSettings) bool {
-	if rigSettings != nil && rigSettings.RoleAgents != nil {
-		if agentName, ok := rigSettings.RoleAgents[role]; ok && agentName != "" {
-			return true
-		}
-	}
-	if townSettings != nil && townSettings.RoleAgents != nil {
-		if agentName, ok := townSettings.RoleAgents[role]; ok && agentName != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath string) *RuntimeConfig {
 	// Load rig settings (may be nil for town-level roles like mayor/deacon)
 	var rigSettings *RigSettings
@@ -1471,18 +1450,6 @@ func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath stri
 	townSettings, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot))
 	if err != nil {
 		townSettings = NewTownSettings()
-	}
-
-	// Dogs default to Haiku (cheap infrastructure workers). That is a default,
-	// not a policy: any explicit role_agents.dog wins, including presets that
-	// drive the claude binary (local proxy, cost tier, alternate --model).
-	// Only non-Claude overrides used to be honored, which silently discarded
-	// Claude-provider overrides.
-	if role == "dog" {
-		if !hasExplicitRoleAgent(role, townSettings, rigSettings) {
-			return claudeHaikuPreset()
-		}
-		// Fall through to normal resolution below
 	}
 
 	// Check ephemeral cost tier (GT_COST_TIER env var)
@@ -1997,14 +1964,9 @@ func findTownRootFromCwd() (string, error) {
 // GT_ROLE can be:
 //   - Simple: "mayor", "deacon"
 //   - Compound: "rig/witness", "rig/refinery", "rig/crew/name", "rig/polecats/name"
-//   - Dog address: "deacon/dogs/<name>" (session.AgentIdentity.Address)
 //
 // For compound format, returns the role segment (second part), mapping the
-// plural collection segments to their role: "polecats" → polecat and "dogs" →
-// dog. Without the dog mapping a handoff read its own GT_ROLE as "dogs" and
-// resolved no role config at all — no role_agents.dog, no rendered system
-// prompt file, so the respawned dog dumped its static role text back into the
-// prime hook (gt-h7e5).
+// plural "polecats" segment to its role.
 // For simple format, returns the role as-is.
 func ExtractSimpleRole(gtRole string) string {
 	if gtRole == "" {
@@ -2023,13 +1985,6 @@ func ExtractSimpleRole(gtRole string) string {
 		role := parts[1]
 		if role == "polecats" {
 			return constants.RolePolecat
-		}
-		if role == "dogs" {
-			// "deacon/dogs/boot" is the boot watchdog, its own role.
-			if parts[2] == constants.RoleBoot {
-				return constants.RoleBoot
-			}
-			return constants.RoleDog
 		}
 		return role
 	default:
@@ -2364,14 +2319,11 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 	rc = withRoleSettingsFlag(reg, rc, role, rigPath)
 	// Same for the rendered role system prompt: when the agent's file exists,
 	// Claude gets it via --append-system-prompt-file and gt prime omits the
-	// static role text from its hook output. Polecat, crew and dog files are
-	// per agent, so the name comes from the identity env vars.
+	// static role text from its hook output. Polecat and crew files are per
+	// agent, so the name comes from the identity env vars.
 	agentName := envVars["GT_POLECAT"]
 	if agentName == "" {
 		agentName = envVars["GT_CREW"]
-	}
-	if agentName == "" {
-		agentName = envVars["GT_DOG_NAME"]
 	}
 	rc = withRoleSystemPromptFlag(reg, rc, role, townRoot, rigPath, agentName)
 

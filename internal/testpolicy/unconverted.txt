@@ -5,7 +5,6 @@ internal/cmd
 internal/config
 internal/convoy
 internal/doctor
-internal/dog
 internal/feed
 internal/hooks
 internal/mayor

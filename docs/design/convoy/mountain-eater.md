@@ -1,4 +1,8 @@
 > Status: historical (2026-07). Abandoned: unknown. Not maintained.
+>
+> Layers 1-2 of this design depend on the Witness, the Deacon and its Dog
+> pool, all since retired. `mol-mountain-dog` was never built; nothing
+> described here as a Dog exists today.
 
 # The Mountain-Eater: Autonomous Epic Grinding
 

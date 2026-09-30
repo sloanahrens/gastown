@@ -18,7 +18,7 @@ var defaultRolesFS embed.FS
 // RoleDefinition contains all configuration for a role type.
 // This replaces the role bead system with config files.
 type RoleDefinition struct {
-	// Role is the role identifier (mayor, deacon, witness, polecat, crew, dog).
+	// Role is the role identifier (mayor, polecat, crew).
 	Role string `toml:"role"`
 
 	// Scope is "town" or "rig" - determines where the agent runs.
@@ -113,12 +113,12 @@ func (d Duration) String() string {
 
 // AllRoles returns the list of all known role names.
 func AllRoles() []string {
-	return []string{"mayor", "dog", "polecat", "crew"}
+	return []string{"mayor", "polecat", "crew"}
 }
 
 // TownRoles returns roles that operate at town scope.
 func TownRoles() []string {
-	return []string{"mayor", "dog"}
+	return []string{"mayor"}
 }
 
 // RigRoles returns roles that operate at rig scope.

@@ -57,8 +57,7 @@ func renderSystemPromptFileForSpawn(role, townRoot, rigPath, agentName, path str
 // the session cwd, for an agent that has not started yet. WorkDir follows the
 // directory each role's session is launched in: the polecat worktree
 // (polecats/<name>/<rig>, or the legacy polecats/<name> when the nested clone
-// does not exist), crew/<name>, witness, refinery/rig, mayor, deacon and the
-// dog kennel (deacon/dogs/<name>).
+// does not exist), crew/<name> and mayor.
 func spawnRoleContext(role, townRoot, rigPath, agentName string) (RoleContext, error) {
 	if townRoot == "" {
 		return RoleContext{}, errors.New("town root is required to render a system prompt")
@@ -75,8 +74,6 @@ func spawnRoleContext(role, townRoot, rigPath, agentName string) (RoleContext, e
 		r = RolePolecat
 	case constants.RoleCrew:
 		r = RoleCrew
-	case constants.RoleDog:
-		r = RoleDog
 	default:
 		return RoleContext{}, fmt.Errorf("%w: %q", errNoSystemPromptForRole, role)
 	}
@@ -85,12 +82,6 @@ func spawnRoleContext(role, townRoot, rigPath, agentName string) (RoleContext, e
 		if rigName == "" || agentName == "" {
 			return RoleContext{}, fmt.Errorf("%s needs a rig path and an agent name", role)
 		}
-	case RoleDog:
-		// Dogs are town-level: their identity is the kennel name, not a rig.
-		if agentName == "" {
-			return RoleContext{}, fmt.Errorf("%s needs an agent name", role)
-		}
-		rigName = ""
 	default:
 		rigName = ""
 	}

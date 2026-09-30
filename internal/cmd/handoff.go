@@ -718,12 +718,10 @@ func buildRestartCommand(sessionName string) (string, error) {
 }
 
 // agentNameForRole returns the worker name a role keys its agent config and
-// system-prompt file on. Polecat, crew and dog system-prompt files are per
-// agent; other roles have none and pass "". Without the dog name a dog's
-// respawn lost --append-system-prompt-file and printed its ~8.5 KB static role
-// text into the prime hook (gt-h7e5).
+// system-prompt file on. Polecat and crew system-prompt files are per agent;
+// other roles have none and pass "".
 func agentNameForRole(role, workerName string) string {
-	if role == constants.RolePolecat || role == constants.RoleCrew || role == constants.RoleDog {
+	if role == constants.RolePolecat || role == constants.RoleCrew {
 		return workerName
 	}
 	return ""
@@ -1154,8 +1152,6 @@ func sessionWorkDir(sessionName, townRoot string) (string, error) {
 			return townRoot + "/deacon", nil
 		case session.RolePolecat:
 			return fmt.Sprintf("%s/%s/polecats/%s", townRoot, identity.Rig, identity.Name), nil
-		case session.RoleDog:
-			return fmt.Sprintf("%s/deacon/dogs/%s", townRoot, identity.Name), nil
 		default:
 			return "", fmt.Errorf("unknown session type: %s (role %s, try specifying role explicitly)", sessionName, identity.Role)
 		}

@@ -7,7 +7,7 @@
 # record-run, so the daemon serialized the no-op as a SUCCESS receipt and the
 # cooldown gate rode a full cycle on top of nothing. A health-check plugin that
 # cannot see a single rig repo must FAIL LOUD instead — nonzero exit, a
-# failure record, a dog — while a run that genuinely had nothing to do records
+# failure record, an escalation — while a run that genuinely had nothing to do records
 # a skipped receipt via the daemon marker ([plugin-result skipped]).
 #
 # The stub gt is fixture-driven (same pattern as rebuild-gt/run_test.sh):

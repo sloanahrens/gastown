@@ -509,11 +509,6 @@ func buildAgentIdentity(ctx RoleContext) string {
 		return ctx.Rig + "/polecats/" + ctx.Polecat
 	case RoleCrew:
 		return ctx.Rig + "/crew/" + ctx.Polecat
-	case RoleDog:
-		if ctx.Polecat == "" {
-			return ""
-		}
-		return "deacon/dogs/" + ctx.Polecat
 	default:
 		return ""
 	}

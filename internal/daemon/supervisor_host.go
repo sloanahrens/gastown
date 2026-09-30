@@ -68,8 +68,8 @@ func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 		// (gt-4k3fj.6).
 		return d.restartPolecatSession(seat)
 	default:
-		// Dogs are restarted by their handler; the deacon, boot and
-		// witness roles were deleted (gt-4k3fj.6.1).
+		// The deacon, boot, witness and dog roles were deleted
+		// (gt-4k3fj.6.1, gt-ckunw).
 		return fmt.Errorf("%w: %s", errNoDaemonStarter, seat.SessionName())
 	}
 }
@@ -111,8 +111,6 @@ func (d *Daemon) agentBeadIDForSeat(seat supervisor.Seat) string {
 			return ""
 		}
 		return beads.DeaconBeadIDTown()
-	case session.RoleDog:
-		return beads.DogBeadIDTown(seat.Name)
 	}
 	if seat.Rig == "" {
 		return ""

@@ -52,8 +52,8 @@ func IsValidTier(tier string) bool {
 // These are the only roles that ApplyCostTier modifies — any other custom RoleAgents
 // entries (e.g., user-defined roles or non-Claude agents for non-tier roles) are preserved.
 //
-// "boot" and "dog" are utility roles that should always use the cheapest model.
-var TierManagedRoles = []string{"mayor", "deacon", "witness", "polecat", "crew", "boot", "dog"}
+// "boot" is a utility role that should always use the cheapest model.
+var TierManagedRoles = []string{"mayor", "deacon", "witness", "polecat", "crew", "boot"}
 
 // CostTierRoleAgents returns the role_agents mapping for a given tier.
 // All tiers explicitly map every tier-managed role. Standard tier maps roles
@@ -68,7 +68,6 @@ func CostTierRoleAgents(tier CostTier) map[string]string {
 			"polecat": "",
 			"crew":    "",
 			"boot":    "claude-haiku",
-			"dog":     "claude-haiku",
 		}
 
 	case TierEconomy:
@@ -79,7 +78,6 @@ func CostTierRoleAgents(tier CostTier) map[string]string {
 			"polecat": "",
 			"crew":    "",
 			"boot":    "claude-haiku",
-			"dog":     "claude-haiku",
 		}
 
 	case TierBudget:
@@ -90,12 +88,11 @@ func CostTierRoleAgents(tier CostTier) map[string]string {
 			"polecat": "claude-sonnet",
 			"crew":    "claude-sonnet",
 			"boot":    "claude-haiku",
-			"dog":     "claude-haiku",
 		}
 
 	case TierCustomGroqOpus:
 		// Mayor and crew keep the default (opus) for highest-quality work.
-		// All patrol and utility roles (deacon, witness, polecat, boot, dog) use
+		// All patrol and utility roles (deacon, witness, polecat, boot) use
 		// Groq Compound for fast, low-cost background orchestration.
 		return map[string]string{
 			"mayor":   "", // use default (opus)
@@ -104,12 +101,11 @@ func CostTierRoleAgents(tier CostTier) map[string]string {
 			"polecat": "groq-compound",
 			"crew":    "", // use default (opus)
 			"boot":    "groq-compound",
-			"dog":     "groq-compound",
 		}
 
 	case TierCustomGroqSonnet:
 		// Mayor uses Sonnet for quality-critical work.
-		// All other roles (crew, deacon, witness, polecat, boot, dog) use
+		// All other roles (crew, deacon, witness, polecat, boot) use
 		// Groq Compound for fast, low-cost background orchestration.
 		return map[string]string{
 			"mayor":   "claude-sonnet",
@@ -118,7 +114,6 @@ func CostTierRoleAgents(tier CostTier) map[string]string {
 			"polecat": "groq-compound",
 			"crew":    "groq-compound",
 			"boot":    "groq-compound",
-			"dog":     "groq-compound",
 		}
 
 	default:
@@ -139,7 +134,6 @@ func CostTierRoleEffort(tier CostTier) map[string]string {
 			"polecat": "high",
 			"crew":    "high",
 			"boot":    "high",
-			"dog":     "high",
 		}
 	case TierEconomy:
 		return map[string]string{
@@ -149,7 +143,6 @@ func CostTierRoleEffort(tier CostTier) map[string]string {
 			"polecat": "high",
 			"crew":    "high",
 			"boot":    "low",
-			"dog":     "low",
 		}
 	case TierBudget:
 		return map[string]string{
@@ -159,7 +152,6 @@ func CostTierRoleEffort(tier CostTier) map[string]string {
 			"polecat": "medium",
 			"crew":    "medium",
 			"boot":    "low",
-			"dog":     "low",
 		}
 	default:
 		return nil
@@ -361,7 +353,7 @@ func TierDescription(tier CostTier) string {
 	case TierBudget:
 		return "Patrol roles use Haiku, workers use Sonnet"
 	case TierCustomGroqOpus:
-		return "Mayor/Crew → Claude Opus; Deacon/Witness/Polecat/Boot/Dog → Groq compound-beta"
+		return "Mayor/Crew → Claude Opus; Deacon/Witness/Polecat/Boot → Groq compound-beta"
 	case TierCustomGroqSonnet:
 		return "Mayor → Claude Sonnet; All other roles → Groq compound-beta"
 	default:
@@ -377,7 +369,7 @@ func FormatTierRoleTable(tier CostTier) string {
 	}
 	roleEffort := CostTierRoleEffort(tier)
 
-	roles := []string{"mayor", "deacon", "witness", "polecat", "crew", "boot", "dog"}
+	roles := []string{"mayor", "deacon", "witness", "polecat", "crew", "boot"}
 	var lines []string
 	for _, role := range roles {
 		agent := roleAgents[role]

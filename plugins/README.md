@@ -19,8 +19,12 @@ Each plugin is a directory containing:
 
 The daemon heartbeat is the only scheduler: it reads every plugin's gate on
 each heartbeat and runs the ones whose gate is open — a script-type plugin
-in-process (no dog session below the failure path, gt-fo2k), an agent-type one
-as a dog. No patrol schedules plugins: one the daemon dispatches runs twice if
+(`[execution] type = "script"` with a `run.sh`) in-process, recording a
+plugin-run receipt. A failed run is logged and escalated with `gt escalate`
+under the fingerprint `plugin:<name>:failed`; the plugin's next good run
+(success or skipped) closes it. Nothing runs markdown-instruction ("agent")
+plugins any more: a cooldown plugin without a script `run.sh` is logged as
+skipped every heartbeat. No patrol schedules plugins: one the daemon dispatches runs twice if
 a patrol step also runs it (gt-o1z7).
 
 A `manual` gate parks a plugin off the automatic path, by design: the daemon
@@ -35,14 +39,6 @@ and records the result (`gt plugin record-run`) (gt-o1z7).
 `gt plugin run <name>` still works on them — for a script-type plugin it runs
 `run.sh` directly, for any other type it prints instructions — same as a
 manual gate, minus the cooldown check.
-
-## Agent routing
-
-Before writing a plugin whose job needs a model smarter than the dog default,
-read `docs/design/plugin-system.md` for the optional top-level
-`agent = "<preset>"` key. It runs that plugin's dog session on the named preset
-instead of `role_agents.dog`; omit it and every plugin keeps sharing the role
-default. `gt plugin show <name>` prints the preset a plugin resolves to.
 
 ## Querying your own run receipts
 

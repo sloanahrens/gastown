@@ -841,7 +841,7 @@ func resolveLikeKernel(path string) (string, bool) {
 // kernelPathComponents splits a path into its non-empty components, keeping "."
 // and ".." (they are resolved in order, never cleaned away). It splits on the
 // OS separator only: a backslash is an ordinary filename byte on Unix, which is
-// why dog.go's splitPathComponents is not reused here.
+// why a separator-agnostic split is not used here.
 func kernelPathComponents(path string) []string {
 	parts := strings.Split(path, string(filepath.Separator))
 	out := parts[:0]

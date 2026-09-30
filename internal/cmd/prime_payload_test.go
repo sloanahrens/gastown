@@ -607,21 +607,14 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 	directive := strings.Repeat("Operator directive line that steers this role.\n", 50) // >2,000 chars, capped
 	memories := strings.Repeat("- some-memory-key: first sentence of the memory preview\n", 120)
 
-	workFormula := map[Role]string{RolePolecat: "mol-polecat-work", RoleCrew: "mol-polecat-work", RoleDog: "mol-dog-reaper"}
-	for _, role := range []Role{RolePolecat, RoleCrew, RoleDog, RoleMayor} {
+	workFormula := map[Role]string{RolePolecat: "mol-polecat-work", RoleCrew: "mol-polecat-work"}
+	for _, role := range []Role{RolePolecat, RoleCrew, RoleMayor} {
 		role := role
 		t.Run(string(role), func(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			ctx := RoleContext{Role: role, Rig: "myrig", Polecat: "nux", TownRoot: town, WorkDir: town}
-			if role == RoleDog {
-				// A dog is town-level (no rig) and runs from its own kennel.
-				ctx = RoleContext{Role: RoleDog, Polecat: "alpha", TownRoot: town, WorkDir: filepath.Join(town, "deacon", "dogs", "alpha")}
-				if err := os.MkdirAll(ctx.WorkDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
 			var bead *beads.Issue
 			if f, ok := workFormula[role]; ok {
 				bead = &beads.Issue{ID: "gt-fix1", Title: "A realistic bead title of ordinary length for the fixture",

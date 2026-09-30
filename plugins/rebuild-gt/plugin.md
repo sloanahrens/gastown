@@ -26,7 +26,7 @@ session it spawns run the binary at their install path, so a stale binary
 leaves merged fixes inert until detection catches it (gt-oqbw). This plugin
 installs; it does not just report.
 
-The daemon runs it in-process as a script-type plugin; no dog performs these
+The daemon runs it in-process as a script-type plugin; no agent performs these
 steps.
 
 ## Exit codes
@@ -242,7 +242,7 @@ its `unexpected` trap, `no-rig`, or no RESULT line — is escalated here as
 `gt plugin sync` (non-fatal), then `daemon/restart-pending.json`.
 
 The daemon is **not** restarted here. It reads the marker at each heartbeat
-and exits (code 75, restarted by launchd) at a moment with no plugin, dog or
+and exits (code 75, restarted by launchd) at a moment with no plugin or
 main-branch gate in flight, so an install never kills in-flight work.
 
 ## Daemon in force (backstop)

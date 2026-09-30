@@ -982,8 +982,6 @@ func sessionNameToAddress(sessionName string) string {
 		return constants.RoleMayor
 	case session.RoleDeacon:
 		return constants.RoleDeacon
-	case session.RoleDog:
-		return mail.DogAddress(identity.Name)
 	case session.RoleWitness:
 		return fmt.Sprintf("%s/witness", identity.Rig)
 	case session.RoleCrew:

@@ -28,7 +28,7 @@ These roles manage the Gas Town system itself:
 | Role | Description | Lifecycle |
 |------|-------------|-----------|
 | **Mayor** | Global coordinator at mayor/ | Singleton, persistent |
-| **Deacon** | Background supervisor daemon ([watchdog chain](design/dog-infrastructure.md)) | Singleton, persistent |
+| **Deacon** | Background supervisor daemon | Singleton, persistent |
 | **Witness** | Per-rig polecat lifecycle manager | One per rig, persistent |
 | **Refinery** | Per-rig merge queue processor | One per rig, persistent |
 
@@ -40,7 +40,6 @@ These roles do actual project work:
 |------|-------------|-----------|
 | **Polecat** | Worker with persistent identity, ephemeral sessions | Witness-managed ([details](concepts/polecat-lifecycle.md)) |
 | **Crew** | Persistent worker with own clone | Long-lived, user-managed |
-| **Dog** | Deacon helper for infrastructure tasks | Persistent identity, Deacon-managed |
 
 ## Convoys: Tracking Work
 
@@ -91,24 +90,6 @@ Both do project work, but with key differences:
 - Batch work (tracked via convoys)
 - Parallelizable work
 - Work that benefits from supervision
-
-## Dogs vs Crew
-
-**Dogs are NOT workers**. This is a common misconception.
-
-| Aspect | Dogs | Crew |
-|--------|------|------|
-| **Owner** | Deacon | Human |
-| **Purpose** | Infrastructure tasks | Project work |
-| **Scope** | Narrow, focused utilities | General purpose |
-| **Lifecycle** | Very short (single task) | Long-lived |
-| **Example** | Boot (triages Deacon health) | Joe (fixes bugs, adds features) |
-
-Dogs are the Deacon's helpers for system-level tasks:
-- **Boot**: Triages Deacon health on daemon tick
-- Future dogs might handle: log rotation, health checks, etc.
-
-If you need to do work in another rig, dispatch it there, not to dogs.
 
 ## Cross-Rig Work
 
@@ -169,8 +150,7 @@ capability-based routing.
 
 ## Common Mistakes
 
-1. **Using dogs for user work**: Dogs are Deacon infrastructure. Use crew or polecats.
-2. **Confusing crew with polecats**: Crew is persistent and human-managed. Polecats are transient and Witness-managed.
-3. **Working in wrong directory**: Gas Town uses cwd for identity detection. Stay in your home directory.
-4. **Waiting for confirmation when work is hooked**: The hook IS your assignment. Execute immediately.
-5. **Creating worktrees when dispatch is better**: If work should be owned by the target rig, dispatch it instead.
+1. **Confusing crew with polecats**: Crew is persistent and human-managed. Polecats are transient and Witness-managed.
+2. **Working in wrong directory**: Gas Town uses cwd for identity detection. Stay in your home directory.
+3. **Waiting for confirmation when work is hooked**: The hook IS your assignment. Execute immediately.
+4. **Creating worktrees when dispatch is better**: If work should be owned by the target rig, dispatch it instead.

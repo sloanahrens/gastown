@@ -87,8 +87,6 @@ func resolveSelfTarget() (agentID string, pane string, hookRoot string, err erro
 		agentID = fmt.Sprintf("%s/polecats/%s", roleInfo.Rig, roleInfo.Polecat)
 	case RoleCrew:
 		agentID = fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
-	case RoleDog:
-		agentID = fmt.Sprintf("deacon/dogs/%s", roleInfo.Polecat)
 	default:
 		return "", "", "", fmt.Errorf("cannot determine agent identity (role: %s)", roleInfo.Role)
 	}
@@ -117,7 +115,6 @@ type ResolveTargetOptions struct {
 	HookBead             string // Bead ID to set atomically during polecat spawn (empty = skip)
 	BeadID               string // For cross-rig guard checks (empty = skip guard)
 	TownRoot             string
-	WorkDesc             string // Description for dog dispatch (defaults to HookBead if empty)
 	BaseBranch           string // Override base branch for polecat worktree
 	ResumeBranch         string // Existing branch to resume (e.g. PR head); mutually exclusive with BaseBranch
 	SkipPolecatAdmission bool   // Caller already holds a capacity reservation
@@ -129,13 +126,12 @@ type ResolvedTarget struct {
 	Pane              string
 	WorkDir           string
 	HookSetAtomically bool
-	DelayedDogInfo    *DogDispatchInfo
 	NewPolecatInfo    *SpawnedPolecatInfo
 	IsSelfSling       bool
 }
 
 // resolveTarget resolves a target specification to agent, pane, and working directory.
-// Handles: "." or empty (self), dog targets, rig targets (auto-spawn polecat),
+// Handles: "." or empty (self), rig targets (auto-spawn polecat),
 // existing agents (with dead polecat fallback).
 func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, error) {
 	result := &ResolvedTarget{}
@@ -153,39 +149,6 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 		result.Pane = pane
 		result.WorkDir = workDir
 		result.IsSelfSling = true
-		return result, nil
-	}
-
-	// Dog target
-	if dogName, isDog := IsDogTarget(target); isDog {
-		if opts.DryRun {
-			if dogName == "" {
-				fmt.Printf("Would dispatch to idle dog in kennel\n")
-				result.Agent = "deacon/dogs/<idle>"
-			} else {
-				fmt.Printf("Would dispatch to dog '%s'\n", dogName)
-				result.Agent = fmt.Sprintf("deacon/dogs/%s", dogName)
-			}
-			result.Pane = "<dog-pane>"
-			return result, nil
-		}
-		workDesc := opts.WorkDesc
-		if workDesc == "" {
-			workDesc = opts.HookBead
-		}
-		dispatchOpts := DogDispatchOptions{
-			Create:            opts.Create,
-			WorkDesc:          workDesc,
-			DelaySessionStart: true,
-			AgentOverride:     opts.Agent,
-		}
-		dispatchInfo, err := DispatchToDog(dogName, dispatchOpts)
-		if err != nil {
-			return nil, fmt.Errorf("dispatching to dog: %w", err)
-		}
-		result.Agent = dispatchInfo.AgentID
-		result.DelayedDogInfo = dispatchInfo
-		fmt.Printf("Dispatched to dog %s (session start delayed)\n", dispatchInfo.DogName)
 		return result, nil
 	}
 

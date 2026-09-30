@@ -130,8 +130,8 @@ func TestZombieSessionCheck_FixProtectsCrewSessions(t *testing.T) {
 func TestZombieSessionCheck_LivenessErrorIsNotAZombie(t *testing.T) {
 	t.Parallel()
 	lister := &fakeZombieLister{
-		sessions: []string{"hq-mayor", "hq-dog-alpha"},
-		alive:    map[string]bool{"hq-dog-alpha": false},
+		sessions: []string{"hq-mayor", "hq-overseer"},
+		alive:    map[string]bool{"hq-overseer": false},
 		aliveErr: map[string]error{"hq-mayor": errors.New("tmux show-environment: timed out")},
 	}
 	check := NewZombieSessionCheckWithLister(lister)

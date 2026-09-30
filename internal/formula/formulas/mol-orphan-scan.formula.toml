@@ -1,7 +1,7 @@
 description = """
 Find and reassign orphaned work.
 
-Dogs work through molecules (poured from this formula) to scan for orphaned state:
+This formula scans for orphaned state:
 - Issues marked in_progress with no active polecat
 - Molecules attached but worker gone
 - Merge queue entries with dead owners
@@ -12,15 +12,15 @@ This is a cleanup and recovery formula. Found orphans are either:
 - Reset to open status for next dispatch
 - Escalated if data loss occurred
 
-## Dog Contract
+## Contract
 
-This is infrastructure work. You:
+This is infrastructure work. The agent running this formula:
 1. Receive scan scope via hook_bead (rig or town-wide)
 2. Scan for orphaned state
 3. Classify and triage orphans
 4. Take recovery action
 5. Report findings
-6. Return to kennel
+6. Signals completion
 
 ## Variables
 
@@ -28,10 +28,10 @@ This is infrastructure work. You:
 |----------|--------|-------------|
 | scope | hook_bead | Scan scope: 'town' or specific rig name |
 
-## Why Dogs?
+## Rig access
 
-Orphan scanning requires multi-rig access and may need to interact with
-multiple Witnesses. Dogs have the cross-rig worktrees needed for this."""
+Orphan scanning requires multi-rig access, so the agent running this formula
+must be able to reach every rig in scope."""
 formula = "mol-orphan-scan"
 version = 2
 
@@ -308,26 +308,15 @@ BODY
 
 [[steps]]
 id = "return-to-kennel"
-title = "Signal completion and return to kennel"
+title = "Signal completion"
 needs = ["report-findings"]
 description = """
-Signal work complete and return to available pool.
+Signal work complete.
 
-**1. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE $(hostname)" -m "Task: orphan-scan
-Scope: {{scope}}
-Orphans found: {{total_count}}
-Actions taken: {{action_summary}}
-Status: COMPLETE
+Close this step with a one-line summary (scope {{scope}}: {{total_count}} orphans; {{action_summary}}). The closed molecule is the
+record of the run.
 
-Ready for next assignment."
-```
-
-**2. Return to kennel:**
-Dog returns to available state in the pool.
-
-**Exit criteria:** Deacon notified, dog ready for next work."""
+**Exit criteria:** Completion recorded."""
 
 [vars]
 [vars.scope]

@@ -1,7 +1,7 @@
 description = """
 Export Dolt databases to JSONL and push to git archive.
 
-The JSONL Dog exports each production database's issues table (scrubbed of
+The daemon's jsonl_git_backup job exports each production database's issues table (scrubbed of
 ephemeral data) plus supplemental tables to JSONL files, commits them to a
 git repository, and pushes to origin. This provides a human-readable,
 git-versioned backup of all durable work product.
@@ -13,13 +13,14 @@ Current behavior (from jsonl_git_backup.go):
 - Commits with counts and pushes to git remote
 - Escalates after 3 consecutive push failures
 
-## Dog Contract
+## Executor and receipt
 
-This is infrastructure work. You:
-1. Export each database to JSONL files (with scrub)
-2. Commit and push to git archive
-3. Report results to Deacon
-4. Return to kennel
+The jsonl_git_backup job (jsonl_git_backup.go) is the executor. This molecule
+is poured only as its receipt; the job closes or fails each step as it goes.
+No agent runs it. Each cycle the job:
+1. Exports each database to JSONL files (with scrub)
+2. Commits and pushes to the git archive
+3. Logs the results and closes the receipt
 
 ## Variables
 
@@ -143,41 +144,14 @@ id = "report"
 title = "Report findings and return to kennel"
 needs = ["push"]
 description = """
-Generate summary and signal completion.
+Record the cycle's outcome.
 
-**1. Generate report:**
-```markdown
-## JSONL Dog Report
+The daemon logs how many databases were exported, the record counts, the push
+status and any per-database failures, then closes this step. The closed
+molecule is the cycle's receipt. (The step title is historical; it is kept
+because the daemon matches poured steps by title.)
 
-**Databases exported**: {{exported_count}}/{{total_count}}
-**Total records**: {{record_count}}
-**Git push**: {{push_status}}
-
-### Per Database
-{{#each db}}
-- {{name}}: {{records}} records ({{tables}} tables)
-{{/each}}
-
-### Failures
-{{#if failures}}
-{{#each failures}}
-- {{name}}: {{error}}
-{{/each}}
-{{else}}
-None
-{{/if}}
-```
-
-**2. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE: jsonl" -m "Task: jsonl-git-backup
-Exported: {{exported_count}}/{{total_count}}
-Records: {{record_count}}
-Push: {{push_status}}
-Status: COMPLETE"
-```
-
-**Exit criteria:** Report sent, dog returned to kennel."""
+**Exit criteria:** Results logged, receipt closed."""
 
 [vars]
 [vars.databases]

@@ -1,21 +1,21 @@
 description = """
 Clean stale sessions and garbage collect.
 
-Dogs work through molecules (poured from this formula) to clean up dead sessions, orphaned processes, and
+This formula cleans up dead sessions, orphaned processes, and
 other system cruft. This is the garbage collector for Gas Town's runtime:
 - Dead tmux sessions (no Claude process)
 - Orphaned Claude processes (no tmux parent)
 - Stale wisps past retention
 - Leftover state files
 
-## Dog Contract
+## Contract
 
-This is infrastructure work. You:
+This is infrastructure work. The agent running this formula:
 1. Receive gc scope via hook_bead (aggressive or conservative)
 2. Identify garbage across the system
 3. Safely remove dead state
 4. Report what was cleaned
-5. Return to kennel
+5. Signals completion
 
 ## Variables
 
@@ -224,26 +224,15 @@ BODY
 
 [[steps]]
 id = "return-to-kennel"
-title = "Signal completion and return to kennel"
+title = "Signal completion"
 needs = ["report-gc"]
 description = """
-Signal work complete and return to available pool.
+Signal work complete.
 
-**1. Signal completion to Deacon:**
-```bash
-gt mail send deacon/ -s "DOG_DONE $(hostname)" -m "Task: session-gc
-Mode: {{mode}}
-Items cleaned: {{total_cleaned}}
-Space recovered: {{bytes_freed}}
-Status: COMPLETE
+Close this step with a one-line summary (mode {{mode}}: {{total_cleaned}} items cleaned, {{bytes_freed}} recovered). The closed molecule is the
+record of the run.
 
-Ready for next assignment."
-```
-
-**2. Return to kennel:**
-Dog returns to available state in the pool.
-
-**Exit criteria:** Deacon notified, dog ready for next work."""
+**Exit criteria:** Completion recorded."""
 
 [vars]
 [vars.wisp_type]

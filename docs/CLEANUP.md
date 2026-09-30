@@ -77,15 +77,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt unsling` / `gt unhook` | Removes work from agent's hook, resets bead status to "open" |
 | `gt hook clear` | Alias for unsling |
 
-## Dog (Infrastructure Worker) Cleanup
-
-| Command | What it does |
-|---------|-------------|
-| `gt dog remove <name>` | Removes worktrees and dog directory |
-| `gt dog remove --all` | Removes all dogs |
-| `gt dog clear <name>` | Resets stuck dog to idle state |
-| `gt dog done [name]` | Marks dog as done, clears work field |
-
 ## Convoy Cleanup
 
 | Command | What it does |

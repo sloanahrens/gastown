@@ -16,8 +16,8 @@ maintain patrol.
 1. Park the town, or at least every rig that writes to the database. A
    rebase fails on a concurrent commit, and a flatten is only safe against
    concurrent writes because Dolt merges the in-flight transaction.
-2. Take a backup (`gt dog dispatch --formula mol-dog-backup`, or copy the
-   database directory while the server is stopped).
+2. Take a backup (copy the database directory while the server is stopped;
+   the daemon's `dolt_backup` patrol also keeps a filesystem backup).
 3. Record row counts for every table so you can verify afterwards:
 
    ```sql

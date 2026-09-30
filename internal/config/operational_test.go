@@ -133,11 +133,11 @@ func TestDaemonThresholds_Defaults(t *testing.T) {
 	op := &OperationalConfig{}
 	daemon := op.GetDaemonConfig()
 
-	if got := daemon.DogIdleSessionTimeoutD(); got != DefaultDogIdleSessionTimeout {
-		t.Errorf("DogIdleSessionTimeout: got %v, want %v", got, DefaultDogIdleSessionTimeout)
+	if got := daemon.PolecatIdleSessionTimeoutD(); got != DefaultPolecatIdleSessionTimeout {
+		t.Errorf("PolecatIdleSessionTimeout: got %v, want %v", got, DefaultPolecatIdleSessionTimeout)
 	}
-	if got := daemon.MaxDogPoolSizeV(); got != DefaultMaxDogPoolSize {
-		t.Errorf("MaxDogPoolSize: got %v, want %v", got, DefaultMaxDogPoolSize)
+	if got := daemon.MassDeathThresholdV(); got != DefaultMassDeathThreshold {
+		t.Errorf("MassDeathThreshold: got %v, want %v", got, DefaultMassDeathThreshold)
 	}
 	if got := daemon.MaxLifecycleMessageAgeD(); got != DefaultMaxLifecycleMessageAge {
 		t.Errorf("MaxLifecycleMessageAge: got %v, want %v", got, DefaultMaxLifecycleMessageAge)
@@ -187,24 +187,24 @@ func TestBootSpawnCooldownOutlastsHeartbeat(t *testing.T) {
 func TestDaemonThresholds_Overrides(t *testing.T) {
 	t.Parallel()
 
-	poolSize := 8
+	threshold := 8
 	op := &OperationalConfig{
 		Daemon: &DaemonThresholds{
-			DogIdleSessionTimeout: "2h",
-			MaxDogPoolSize:        &poolSize,
+			PolecatIdleSessionTimeout: "2h",
+			MassDeathThreshold:        &threshold,
 		},
 	}
 
 	daemon := op.GetDaemonConfig()
-	if got := daemon.DogIdleSessionTimeoutD(); got != 2*time.Hour {
-		t.Errorf("DogIdleSessionTimeout: got %v, want 2h", got)
+	if got := daemon.PolecatIdleSessionTimeoutD(); got != 2*time.Hour {
+		t.Errorf("PolecatIdleSessionTimeout: got %v, want 2h", got)
 	}
-	if got := daemon.MaxDogPoolSizeV(); got != 8 {
-		t.Errorf("MaxDogPoolSize: got %v, want 8", got)
+	if got := daemon.MassDeathThresholdV(); got != 8 {
+		t.Errorf("MassDeathThreshold: got %v, want 8", got)
 	}
 	// Non-overridden fields should still return defaults
-	if got := daemon.MassDeathThresholdV(); got != DefaultMassDeathThreshold {
-		t.Errorf("MassDeathThreshold: got %v, want %v (default)", got, DefaultMassDeathThreshold)
+	if got := daemon.MassDeathWindowD(); got != DefaultMassDeathWindow {
+		t.Errorf("MassDeathWindow: got %v, want %v (default)", got, DefaultMassDeathWindow)
 	}
 }
 
@@ -311,7 +311,7 @@ func TestLoadOperationalConfig_WithConfig(t *testing.T) {
 				StartupNudgeMaxRetries: &retries,
 			},
 			Daemon: &DaemonThresholds{
-				DogIdleSessionTimeout: "3h",
+				PolecatIdleSessionTimeout: "3h",
 			},
 		},
 	}
@@ -332,8 +332,8 @@ func TestLoadOperationalConfig_WithConfig(t *testing.T) {
 	if got := op.GetSessionConfig().StartupNudgeMaxRetriesV(); got != 7 {
 		t.Errorf("StartupNudgeMaxRetries: got %v, want 7", got)
 	}
-	if got := op.GetDaemonConfig().DogIdleSessionTimeoutD(); got != 3*time.Hour {
-		t.Errorf("DogIdleSessionTimeout: got %v, want 3h", got)
+	if got := op.GetDaemonConfig().PolecatIdleSessionTimeoutD(); got != 3*time.Hour {
+		t.Errorf("PolecatIdleSessionTimeout: got %v, want 3h", got)
 	}
 	// Non-overridden subsystems should return defaults
 	if got := op.GetNudgeConfig().MaxQueueDepthV(); got != DefaultNudgeMaxQueueDepth {

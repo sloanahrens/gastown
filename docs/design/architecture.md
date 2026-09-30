@@ -39,7 +39,6 @@ the agent's scope.
 | Mayor | Town | `~/gt/.beads/` | `hq-mayor` |
 | Deacon | Town | `~/gt/.beads/` | `hq-deacon` |
 | Boot | Town | `~/gt/.beads/` | `hq-boot` |
-| Dogs | Town | `~/gt/.beads/` | `hq-dog-<name>` |
 | Witness | Rig | `<rig>/.beads/` | `<prefix>-<rig>-witness` |
 | Refinery | Rig | `<rig>/.beads/` | `<prefix>-<rig>-refinery` |
 | Polecats | Rig | `<rig>/.beads/` | `<prefix>-<rig>-polecat-<name>` |
@@ -55,7 +54,6 @@ Role beads are global templates stored in town beads with `hq-` prefix:
 - `hq-refinery-role` - Refinery role definition
 - `hq-polecat-role` - Polecat role definition
 - `hq-crew-role` - Crew role definition
-- `hq-dog-role` - Dog role definition
 
 Each agent bead references its role bead via the `role_bead` field.
 
@@ -68,7 +66,6 @@ Each agent bead references its role bead via the `role_bead` field.
 | **Mayor** | Global coordinator, handles cross-rig communication and escalations | Persistent |
 | **Deacon** | Daemon beacon — receives heartbeats, runs plugins and monitoring | Persistent |
 | **Boot** | Deacon watchdog — spawned by daemon for triage decisions when Deacon is down | Ephemeral |
-| **Dogs** | Long-running workers for cross-rig batch work | Variable |
 
 ### Rig-Level Agents (Per-Project)
 
@@ -96,7 +93,6 @@ Each agent bead references its role bead via the `role_bead` field.
 │   ├── dolt-server.log         Server log
 │   └── dolt.pid                Server PID file
 ├── deacon/                     Deacon workspace
-│   └── dogs/<name>/            Dog worker directories
 ├── mayor/                      Mayor agent home
 │   ├── town.json               Town configuration
 │   ├── rigs.json               Rig registry
@@ -259,7 +255,7 @@ Design bead: gt-0wkk.
 
 ## Data Plane Lifecycle
 
-All beads data flows through a six-stage lifecycle managed by Dogs:
+All beads data flows through a six-stage lifecycle managed by the daemon:
 
 ```
 CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN
@@ -269,8 +265,17 @@ CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN
                          >7-30d  together   to 1 commit
 ```
 
-Stages 1-3 are automated today. Stages 4-6 are being shipped via Dog automation
+Stages 1-3 are automated today. Stages 4-6 run as daemon patrols
 (gt-at0i Reaper DELETE, gt-l8dc Compactor REBASE, gt-emm4 Doctor gc).
+
+These maintenance patrols (`doctor_dog`, `wisp_reaper`, `compactor_dog`,
+`checkpoint_dog`, `jsonl_git_backup`, `dolt_backup`) are imperative Go inside the
+daemon: a ticker fires and the daemon does the work itself, with no agent
+involved. Jobs that pour a `mol-dog-*` molecule pour it only as an observability
+receipt; nothing picks the molecule up. The `_dog` suffix is historical — the
+LLM dog role that once ran such formulas was retired. Reliability-critical
+maintenance stays in the daemon; opportunistic work belongs in a script plugin
+(see [plugin-system.md](plugin-system.md)).
 
 See [dolt-storage.md](dolt-storage.md) for full details.
 

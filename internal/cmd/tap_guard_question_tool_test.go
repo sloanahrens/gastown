@@ -75,26 +75,6 @@ func TestQuestionToolGuardBlocksUnattendedSession(t *testing.T) {
 	}
 }
 
-// TestQuestionToolGuardBlocksDogSession pins the other unattended role. A dog's
-// GT_ROLE is the bare "dog", which the shared unattended-session check resolves
-// through constants.RoleDog.
-func TestQuestionToolGuardBlocksDogSession(t *testing.T) {
-	for _, role := range []string{"dog", "deacon/dogs/alpha"} {
-		t.Run(role, func(t *testing.T) {
-			t.Setenv("GT_ROLE", role)
-			t.Setenv("GT_POLECAT", "")
-
-			err := runQuestionToolGuard(t, questionToolPayload("/home/u/gt/deacon/dogs/alpha"))
-			if err == nil {
-				t.Fatalf("expected the question tool to be blocked for role %q", role)
-			}
-			if code, ok := IsSilentExit(err); !ok || code != 2 {
-				t.Fatalf("expected a silent exit 2 for role %q, got %v", role, err)
-			}
-		})
-	}
-}
-
 // TestQuestionToolGuardKeepsQuestionForInteractiveSession is the other half:
 // a session with a person at the pane keeps the tool, so the guard reports no
 // verdict for every attended role.

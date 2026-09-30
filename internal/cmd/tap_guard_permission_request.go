@@ -115,13 +115,10 @@ func unattendedPromptSession(cwd string) bool {
 }
 
 // unattendedPromptRole reports whether a role name belongs to a session the
-// town leaves alone: a polecat, or a dog. Both are addressed as
-// <scope>/<role>/<name> paths, and a dog's GT_ROLE is the bare "dog".
+// town leaves alone: a polecat, addressed as <rig>/polecats/<name> or by the
+// bare role.
 func unattendedPromptRole(role string) bool {
-	if role == constants.RoleDog || role == constants.RolePolecat {
-		return true
-	}
-	return strings.Contains(role, "/polecats/") || strings.Contains(role, "/dogs/")
+	return role == constants.RolePolecat || strings.Contains(role, "/polecats/")
 }
 
 // isShellTool reports whether a tool carries a shell command in

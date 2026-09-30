@@ -12,7 +12,7 @@ Gas Town uses [Dolt](https://github.com/dolthub/dolt), an open-source
 SQL database with Git-like versioning (Apache 2.0). One Dolt SQL server
 per town serves all databases via MySQL protocol on port 3307. There is
 no embedded mode and no SQLite. JSONL is used only for disaster-recovery
-backups (the JSONL Dog exports scrubbed snapshots every 15 minutes to a
+backups (the JSONL backup patrol exports scrubbed snapshots every 15 minutes to a
 git-backed archive), not as a primary storage format.
 
 The `gt daemon` manages the server lifecycle (auto-start, health checks
@@ -213,7 +213,7 @@ Beads data falls into three planes with different characteristics:
 | **Design** | Epics, RFCs, specs — ideas not yet claimed | Conversational | Until crystallized | DoltHub commons (shared) | **Planned** |
 
 The operational plane lives entirely in the local Dolt server. The ledger
-plane is currently served by the JSONL Dog, which exports scrubbed snapshots
+plane is currently served by the JSONL backup patrol, which exports scrubbed snapshots
 to a git-backed archive every 15 minutes — this is the durable record that
 survives disasters (proven in Clown Show #13).
 
@@ -257,12 +257,12 @@ CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN
 |-------|-------|-----------|-----------|
 | CREATE | Any agent | Continuous | `bd create`, `bd mol wisp create` |
 | CLOSE | Agent or patrol | Per-task | `bd close`, `gt done` |
-| DECAY | Reaper Dog | Daily | `DELETE FROM wisps WHERE status='closed' AND age > 7d` |
-| COMPACT | Compactor Dog (monitor) | Daily | Counts commits, escalates at threshold — does not rewrite history |
+| DECAY | Reaper patrol | Daily | `DELETE FROM wisps WHERE status='closed' AND age > 7d` |
+| COMPACT | Compactor patrol (monitor) | Daily | Counts commits, escalates at threshold — does not rewrite history |
 | FLATTEN | Operator, on that escalation | Manual | `plugins/compactor-dog/run.sh --compact` — `DOLT_RESET --soft` + `DOLT_COMMIT` + force-push |
 
-All six stages are implemented in code. DECAY runs in the Reaper Dog
-(wisp_reaper.go). COMPACT runs in the Compactor Dog (compactor_dog.go), which
+All six stages are implemented in code. DECAY runs in the Reaper patrol
+(wisp_reaper.go). COMPACT runs in the Compactor patrol (compactor_dog.go), which
 monitors and escalates; FLATTEN is the operator-invoked destructive step that
 follows the escalation, and it lives in exactly one place — the plugin's
 `--compact` flag, whose escalation policy is `plugins/compactor-dog/plugin.md`.
@@ -280,13 +280,13 @@ EPHEMERAL (wisps, patrol data)          PERMANENT (issues, molecules, agents)
   → CLOSE (>24h)                          → CLOSE
   → DELETE rows (Reaper)                  → JSONL export (scrubbed)
   → REBASE history (Operator, on          → git push to GitHub
-    Compactor Dog escalation)             → COMPACT/FLATTEN on escalation
+    Compactor patrol escalation)             → COMPACT/FLATTEN on escalation
   → gc unreferenced chunks                  (no downtime)
 ```
 
 **Ephemeral data** (wisps, wisp_events, wisp_labels, wisp_deps) is
 high-volume patrol exhaust. Valuable in real-time, worthless after 24h.
-The Reaper Dog DELETES the rows. History compaction flattens the commits
+The Reaper patrol DELETES the rows. History compaction flattens the commits
 that wrote them out of history. Without both, storage grows without bound.
 
 **Permanent data** (issues, molecules, agents, dependencies, labels) is
@@ -297,7 +297,7 @@ can be rebased into 1. The data survives; the intermediate history doesn't.
 ### History Compaction Operations
 
 **Who compacts.** Compaction rewrites the commit graph and force-pushes the
-result, so it is never unattended. The Compactor Dog patrol counts commits and
+result, so it is never unattended. The Compactor patrol patrol counts commits and
 escalates when a database crosses its threshold; an operator then compacts
 it one of two ways:
 
@@ -408,7 +408,7 @@ An older `gt config set maintenance.*` rewrites daemon.json without the
 `gc_*` keys; the defaults then apply.
 
 `patrols.compactor_dog.threshold` is an escalation line only; the compactor
-dog never compacts. Under gc mode, disk is handled by size, so the commit
+patrol never compacts. Under gc mode, disk is handled by size, so the commit
 threshold only guards history-walking query latency (measurements in the gc
 design doc, Problem). Towns running gc mode set it to 20000 rather than the
 2000 default.
@@ -547,9 +547,9 @@ Reference: https://www.dolthub.com/blog/2023-10-02-scheduled-events/
 - Events can call stored procedures
 - Minimum interval: 30 seconds (Dolt enforces this floor)
 
-**Can scheduled events replace the Compactor Dog?**
+**Can scheduled events replace the Compactor patrol?**
 
-**No.** The Compactor Dog's job is monitoring and escalation, and escalation is
+**No.** The Compactor patrol's job is monitoring and escalation, and escalation is
 the part SQL events cannot provide:
 - Threshold checking (only escalate when commit count exceeds N)
 - Per-database iteration (one patrol covers all DBs)
@@ -563,7 +563,7 @@ no place in the daemon lifecycle.
 - Supplement compaction with explicit `dolt_gc()` scheduling
 - But auto-gc is already ON by default since Dolt 1.75.0, making this redundant
 
-**Recommendation:** Keep the Compactor Dog for monitoring. Auto-gc handles chunk
+**Recommendation:** Keep the Compactor patrol for monitoring. Auto-gc handles chunk
 reclamation. Scheduled events add no value beyond what we already have.
 
 ### Pollution Prevention
@@ -576,20 +576,20 @@ Pollution enters Dolt via four vectors:
 3. **Test artifacts**: Test code creating issues on production server.
    Firewall in store.go refuses test-prefixed CREATE DATABASE on port 3307.
 4. **Zombie processes**: Test dolt-server processes that outlive tests.
-   Doctor Dog kills these. 45 zombies (7GB RAM) found and killed 2026-02-27.
+   Doctor patrol kills these. 45 zombies (7GB RAM) found and killed 2026-02-27.
 
 Prevention is layered:
 - **Prompting**: Agents prefer `gt nudge` over `gt mail send` (zero commits)
 - **Firewall** (store.go): refuses test-prefixed CREATE DATABASE on port 3307
-- **Reaper Dog**: DELETEs closed wisps, auto-closes stale issues
-- **Compactor Dog**: monitors commit growth, escalates when a DB crosses threshold
-- **Doctor Dog**: kills zombie servers, detects orphan DBs, monitors health
-- **JSONL Dog**: scrubs exports, rejects pollution, spike-detects before commit
+- **Reaper patrol**: DELETEs closed wisps, auto-closes stale issues
+- **Compactor patrol**: monitors commit growth, escalates when a DB crosses threshold
+- **Doctor patrol**: kills zombie servers, detects orphan DBs, monitors health
+- **JSONL backup patrol**: scrubs exports, rejects pollution, spike-detects before commit
 
-All Dogs are enabled by default via `EnsureLifecycleDefaults()` in
+All these daemon patrols are enabled by default via `EnsureLifecycleDefaults()` in
 lifecycle_defaults.go. The daemon auto-populates missing patrol entries
 in daemon.json on startup (`gt init` / `gt up`). To disable a specific
-Dog, set `"enabled": false` in its daemon.json section — the auto-populate
+patrol, set `"enabled": false` in its daemon.json section — the auto-populate
 logic preserves explicitly configured entries.
 
 ### Communication Hygiene (Reducing Commit Volume)
@@ -606,7 +606,6 @@ survive the recipient's session death.**
 | Witness | Protocol messages only | Health checks, polecat pokes |
 | Refinery | Protocol messages only | Status to Witness |
 | Deacon | Escalations only | Timer callbacks, health pokes |
-| Dogs | Zero (never mail) | DOG_DONE via nudge to Deacon |
 
 ## Standalone Beads Note
 

@@ -12,7 +12,7 @@ func normalizeAgentID(v string) string {
 //
 // Only matches unambiguous equivalences. Ambiguous shorthand targets
 // (e.g., "rig/name" which could resolve to polecats or crew) and pool
-// targets (e.g., "deacon/dogs" which dispatches to an idle dog) are NOT
+// targets (e.g., a rig name, which spawns a polecat) are NOT
 // matched — these must go through normal resolution to pick the right agent.
 func matchesSlingTarget(target, assignee, selfAgent string) bool {
 	assigneeNorm := normalizeAgentID(assignee)
@@ -41,11 +41,11 @@ func matchesSlingTarget(target, assignee, selfAgent string) bool {
 	}
 
 	// NOTE: Two-segment shorthand targets (e.g., "gastown/alex") and pool
-	// targets (e.g., "deacon/dogs") are intentionally NOT matched here.
+	// targets (e.g., a rig name) are intentionally NOT matched here.
 	// - Shorthand: the real resolver has priority logic (prefers crew when
 	//   crew dir exists) that this pure function cannot replicate.
-	// - Pool: "deacon/dogs" means "dispatch to an idle dog", not "keep the
-	//   current dog". Matching would prevent reassignment to idle workers.
+	// - Pool: a rig name means "spawn or pick a polecat", not "keep the
+	//   current one". Matching would prevent reassignment to idle workers.
 	// Users can use full paths (e.g., "gastown/polecats/toast") for
 	// unambiguous idempotent behavior with these targets.
 

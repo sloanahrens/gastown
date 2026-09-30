@@ -177,8 +177,6 @@ or `POST /telemetry` with rate limit event
   session with zombie kill, worktree, beacon, env injection, pane-died hook
 - `internal/witness/manager.go` — `Start()` (line ~107): witness session with
   zombie grace period, role config, theme, pane-died hook
-- `internal/dog/session_manager.go` — `Start()` (line ~85): dog session via
-  unified `session.StartSession()`
 - `internal/tmux/tmux.go` — `NewSessionWithCommand()`: single-command session creation
   (the pane-died auto-respawn hook was deleted in gt-4k3fj.3; the daemon's
   supervisor restarts dead sessions)
@@ -773,8 +771,6 @@ structured data; no need to scrape terminal
 - `internal/daemon/wisp_reaper.go` — wisp reaper for stale wisp cleanup
 - `internal/witness/handlers.go` — witness patrol with restart-first policy
   (not nuke-first)
-- `internal/dog/health.go` — `HealthChecker.Check()` (line ~46): dog-specific
-  health check using CheckSessionHealth()
 - `internal/witness/spawn_count.go` — spawn storm circuit breaker:
   `ShouldBlockRespawn()` (line ~74), escalates to mayor after threshold
 

@@ -20,7 +20,7 @@ severity = "low"
 
 Ships behind a manual gate. This plugin polls GitHub for open pull requests, so
 a town whose merges land through the Refinery gives it nothing to classify — and
-an auto-dispatched gate then spends a dog session every two hours finding none
+an auto-dispatched gate then spent an agent session every two hours finding none
 (gt-gs7g). A manual gate is never auto-dispatched, which keeps the plugin
 discoverable in `gt plugin list` and off the patrol.
 

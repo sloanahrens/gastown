@@ -592,7 +592,6 @@ func TestInstallDoctorClean(t *testing.T) {
 	// 2. Verify core structure exists
 	t.Run("verify-structure", func(t *testing.T) {
 		assertDirExists(t, filepath.Join(hqPath, "mayor"), "mayor/")
-		assertDirExists(t, filepath.Join(hqPath, "deacon", "dogs"), "deacon/dogs/ (dog kennel)")
 		assertDirExists(t, filepath.Join(hqPath, ".beads"), ".beads/")
 		assertFileExists(t, filepath.Join(hqPath, "mayor", "town.json"), "mayor/town.json")
 		assertFileExists(t, filepath.Join(hqPath, "mayor", "rigs.json"), "mayor/rigs.json")

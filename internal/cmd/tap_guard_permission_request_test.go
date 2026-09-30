@@ -134,7 +134,7 @@ func TestUnattendedPromptSessionPrefersRole(t *testing.T) {
 // the town leaves alone deny, and everything else keeps its prompt.
 func TestUnattendedPromptRole(t *testing.T) {
 	t.Parallel()
-	unattended := []string{"gastown/polecats/obsidian", "polecat", "dog", "deacon/dogs/alpha"}
+	unattended := []string{"gastown/polecats/obsidian", "polecat"}
 	attended := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", "boot", ""}
 	for _, role := range unattended {
 		if !unattendedPromptRole(role) {
