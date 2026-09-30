@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,21 +27,18 @@ func writeOperatorHold(t *testing.T, townRoot string) {
 
 func TestFeedFirstReady_OperatorHold_SlingsNothing(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
 	// A gt that would succeed: only the hold can stop the sling.
-	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, filepath.Join(t.TempDir(), "never-refuse"))
+	townRoot, gt, _ := backpressureFeedRig(t)
 	writeOperatorHold(t, townRoot)
 
 	var logged []string
 	logger := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFeedManager(townRoot, logger, gt)
 
 	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-held", ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
 
-	if data, err := os.ReadFile(slingLogPath); err == nil {
-		t.Errorf("gt invoked during an operator hold: %s", data)
+	if calls := gt.argvs(); len(calls) != 0 {
+		t.Errorf("gt invoked during an operator hold: %q", calls)
 	}
 	found := false
 	for _, l := range logged {
@@ -125,39 +121,22 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// stubGTOnPath puts a `gt` on PATH that logs each invocation and exits 0, for
-// callers that exec "gt" by name rather than through a configured path.
-func stubGTOnPath(t *testing.T) (logPath string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shell stub")
-	}
-	bin := t.TempDir()
-	logPath = filepath.Join(bin, "gt.log")
-	script := "#!/bin/sh\necho \"$*\" >> \"" + logPath + "\"\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(bin, "gt"), []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
-}
-
 // TestDispatchQueuedWork_OperatorHold_SkipsSchedulerRunAndLogsOnce covers
 // heartbeat step 14: `gt scheduler run` slings queued beads (executeSling)
 // and must stand down under the hold, logging once per hold-state change.
 func TestDispatchQueuedWork_OperatorHold_SkipsSchedulerRunAndLogsOnce(t *testing.T) {
-	gtLog := stubGTOnPath(t)
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
+	t.Parallel()
 	townRoot := t.TempDir()
 	writeOperatorHold(t, townRoot)
 	logger, lines := lineLogger()
-	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: logger}
+	gt := newFakeCLI(nil)
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: logger, execCmd: gt.run}
 
 	for i := 0; i < 3; i++ {
 		d.dispatchQueuedWork()
 	}
-	if data, err := os.ReadFile(gtLog); err == nil {
-		t.Fatalf("gt scheduler run invoked during an operator hold: %s", data)
+	if calls := gt.argvs(); len(calls) != 0 {
+		t.Fatalf("gt scheduler run invoked during an operator hold: %q", calls)
 	}
 	if n := countContaining(lines(), "scheduler dispatch", "seat-refill.hold"); n != 1 {
 		t.Errorf("hold logged %d times over 3 ticks, want once; log: %v", n, lines())
@@ -167,9 +146,11 @@ func TestDispatchQueuedWork_OperatorHold_SkipsSchedulerRunAndLogsOnce(t *testing
 		t.Fatal(err)
 	}
 	d.dispatchQueuedWork()
-	data, err := os.ReadFile(gtLog)
-	if err != nil || !strings.Contains(string(data), "scheduler run") {
-		t.Errorf("after the hold lifted, gt scheduler run was not invoked (log %q, err %v)", data, err)
+	calls := gt.recorded()
+	if len(calls) != 1 || calls[0].name != "gt" || strings.Join(calls[0].args, " ") != "scheduler run" {
+		t.Errorf("after the hold lifted, want one gt scheduler run, got %+v", calls)
+	} else if calls[0].dir != townRoot || calls[0].getenv("GT_DAEMON") != "1" {
+		t.Errorf("gt scheduler run ran in %q with GT_DAEMON=%q, want the town root and 1", calls[0].dir, calls[0].getenv("GT_DAEMON"))
 	}
 	if n := countContaining(lines(), "scheduler dispatch", "hold lifted"); n != 1 {
 		t.Errorf("hold lift logged %d times, want once; log: %v", n, lines())
@@ -177,7 +158,7 @@ func TestDispatchQueuedWork_OperatorHold_SkipsSchedulerRunAndLogsOnce(t *testing
 }
 
 func TestRunScheduledSlings_OperatorHold_LogsOncePerStateChange(t *testing.T) {
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
+	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	logger, lines := lineLogger()
@@ -194,7 +175,7 @@ func TestRunScheduledSlings_OperatorHold_LogsOncePerStateChange(t *testing.T) {
 
 // A rig ESTOP holds that rig's scheduled entries and nothing else.
 func TestRunScheduledSlings_RigEstop_SkipsOnlyThatRig(t *testing.T) {
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
+	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
 	omEntry := ScheduledSlingEntry{Name: "om-audit", Rig: "om", Formula: "mol-doc-audit", IntervalStr: "168h"}
 	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry, omEntry}, f)
@@ -213,15 +194,12 @@ func TestRunScheduledSlings_RigEstop_SkipsOnlyThatRig(t *testing.T) {
 }
 
 func TestFeedFirstReady_OperatorHold_LogsOncePerStateChange(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
-	townRoot, gtPath, _ := backpressureFeedRig(t, filepath.Join(t.TempDir(), "never-refuse"))
+	t.Parallel()
+	townRoot, gt, _ := backpressureFeedRig(t)
 	writeOperatorHold(t, townRoot)
 	var logged []string
 	logger := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFeedManager(townRoot, logger, gt)
 
 	for i := 0; i < 3; i++ {
 		m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-held", ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
@@ -232,23 +210,20 @@ func TestFeedFirstReady_OperatorHold_LogsOncePerStateChange(t *testing.T) {
 }
 
 func TestFeedFirstReady_RigEstop_SkipsThatRigsIssue(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows")
-	}
-	t.Setenv("GT_SEAT_REFILL_HOLD", "")
-	townRoot, gtPath, slingLogPath := backpressureFeedRig(t, filepath.Join(t.TempDir(), "never-refuse"))
+	t.Parallel()
+	townRoot, gt, _ := backpressureFeedRig(t)
 	// routes map gt- to rig "gt".
 	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.gt"), []byte("manual\t2026-09-24T00:00:00Z\tt\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	var logged []string
 	logger := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	m := NewConvoyManager(townRoot, logger, gtPath, 10*time.Minute, nil, nil, nil)
+	m := newFeedManager(townRoot, logger, gt)
 
 	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-rig", ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
 
-	if data, err := os.ReadFile(slingLogPath); err == nil {
-		t.Errorf("slung into a rig under ESTOP: %s", data)
+	if calls := gt.argvs(); len(calls) != 0 {
+		t.Errorf("slung into a rig under ESTOP: %q", calls)
 	}
 	if countContaining(logged, "gt-issue1", "ESTOP.gt") == 0 {
 		t.Errorf("no log line naming the rig ESTOP; got %v", logged)

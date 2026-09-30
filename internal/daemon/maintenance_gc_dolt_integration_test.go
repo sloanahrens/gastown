@@ -1,3 +1,5 @@
+//go:build integration
+
 package daemon
 
 import (
@@ -6,13 +8,13 @@ import (
 	"testing"
 )
 
-// TestDoltGCFullAgainstRealServer runs doltGCFull's real SQL — the DSN, the
+// TestIntegrationDoltGCFullAgainstRealServer runs doltGCFull's real SQL — the DSN, the
 // CALL dolt_gc('--full') statement and its result handling — against the
 // package's ephemeral Dolt container. Every other gc test stubs
 // maintenanceGCExecFn, so this is the only test that proves the call works
 // on a server and that history survives it. Skips when the container is
 // unavailable (GT_TEST_DOCKER=0 or no Docker).
-func TestDoltGCFullAgainstRealServer(t *testing.T) {
+func TestIntegrationDoltGCFullAgainstRealServer(t *testing.T) {
 	t.Parallel()
 	d := testDoltServerDaemon(t)
 	dbName := createTestDB(t)

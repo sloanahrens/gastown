@@ -356,7 +356,7 @@ func (d *Daemon) runReaperSling(args []string) ([]byte, error) {
 	// while stripping stale bd target selectors and derived Beads endpoint aliases.
 	cmd.Env = bdMutationRoutingEnv(d.config.TownRoot)
 	util.SetDetachedProcessGroup(cmd)
-	return cmd.CombinedOutput()
+	return d.combinedOutput(cmd)
 }
 
 // waitReaperDispatch sleeps before retrying a dispatch. Tests replace the fn so

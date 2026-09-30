@@ -4,129 +4,46 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// writeFakeTmuxGhost creates a fake tmux that uses environment variables to
-// control which sessions "exist" and logs kill-session calls to TMUX_LOG.
-//
-// Session existence is controlled via env vars: TMUX_HAS_<name> = "1"
-// where <name> has dashes replaced with underscores. For example,
-// TMUX_HAS_gt_witness=1 makes "gt-witness" appear to exist.
-func writeFakeTmuxGhost(t *testing.T, dir string) {
-	t.Helper()
-	script := `#!/usr/bin/env bash
-# Fake tmux for killDefaultPrefixGhosts tests.
-# Session existence controlled by a file listing session names (one per line).
-# Kill commands logged to TMUX_LOG.
-
-# Parse args: find tmux subcommand and -t target.
-cmd=""
-target=""
-skip_next=0
-for arg in "$@"; do
-  if [[ "$skip_next" -eq 1 ]]; then
-    if [[ "$skip_flag" == "-t" ]]; then target="$arg"; fi
-    skip_next=0
-    continue
-  fi
-  case "$arg" in
-    -L|-F) skip_flag="$arg"; skip_next=1 ;;
-    -t)    skip_flag="-t"; skip_next=1 ;;
-    -u)    ;;
-    *)     if [[ -z "$cmd" ]]; then cmd="$arg"; fi ;;
-  esac
-done
-
-# Strip tmux exact-match prefix "=" from target (HasSession passes "=name").
-target="${target#=}"
-
-case "$cmd" in
-  has-session)
-    if [[ -n "${TMUX_SESSIONS_FILE:-}" ]] && grep -qxF "$target" "$TMUX_SESSIONS_FILE" 2>/dev/null; then
-      exit 0
-    fi
-    exit 1
-    ;;
-  kill-session)
-    if [[ -n "${TMUX_LOG:-}" ]]; then
-      echo "kill-session $target" >> "$TMUX_LOG"
-    fi
-    exit 0
-    ;;
-  list-panes)
-    exit 1
-    ;;
-esac
-exit 0
-`
-	path := filepath.Join(dir, "tmux")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
-	}
-}
-
-// ghostTestEnv holds the test environment for killDefaultPrefixGhosts tests.
+// ghostTestEnv holds the test environment for killDefaultPrefixGhosts tests:
+// a Daemon over a fake tmux, and the sessions the test put there.
 type ghostTestEnv struct {
-	daemon       *Daemon
-	logBuf       *strings.Builder
-	tmuxLog      string
-	sessionsFile string
+	daemon *Daemon
+	logBuf *strings.Builder
+	tm     *fakeTmux
+	added  []string
 }
 
-// setupGhostTest creates the common test infrastructure: fake tmux, temp dirs,
-// and a Daemon.
+// setupGhostTest returns a Daemon over an empty fake tmux in a fresh town.
+// The tests swap the process-wide session registry, so they run serially.
 func setupGhostTest(t *testing.T) *ghostTestEnv {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows — fake tmux requires bash")
-	}
-
-	townRoot := t.TempDir()
-	fakeBinDir := t.TempDir()
-	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
-	sessionsFile := filepath.Join(t.TempDir(), "sessions.txt")
-	if err := os.WriteFile(tmuxLog, []byte{}, 0o644); err != nil {
-		t.Fatalf("create tmux log: %v", err)
-	}
-	if err := os.WriteFile(sessionsFile, []byte{}, 0o644); err != nil {
-		t.Fatalf("create sessions file: %v", err)
-	}
-
-	writeFakeTmuxGhost(t, fakeBinDir)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("TMUX_LOG", tmuxLog)
-	t.Setenv("TMUX_SESSIONS_FILE", sessionsFile)
-
+	tm := newFakeTmux(newFixedClock())
 	var logBuf strings.Builder
 	d := &Daemon{
-		config: &Config{TownRoot: townRoot},
+		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(&logBuf, "", 0),
-		tmux:   tmux.NewTmux(),
+		tmux:   tm,
 	}
 
 	// Clean registry state after test.
 	t.Cleanup(func() { session.SetDefaultRegistry(session.NewPrefixRegistry()) })
 
-	return &ghostTestEnv{
-		daemon:       d,
-		logBuf:       &logBuf,
-		tmuxLog:      tmuxLog,
-		sessionsFile: sessionsFile,
-	}
+	return &ghostTestEnv{daemon: d, logBuf: &logBuf, tm: tm}
 }
 
-// addSessions writes session names to the sessions file (one per line).
+// addSessions makes the named sessions exist on the fake tmux.
 func (e *ghostTestEnv) addSessions(t *testing.T, names ...string) {
 	t.Helper()
-	content := strings.Join(names, "\n") + "\n"
-	if err := os.WriteFile(e.sessionsFile, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
+	for _, name := range names {
+		e.tm.addSession(name, "claude", time.Time{})
+		e.added = append(e.added, name)
 	}
 }
 
@@ -147,20 +64,16 @@ func writeRigsJSON(t *testing.T, townRoot string, rigs []string) {
 	}
 }
 
-// readKills returns the session names passed to kill-session from the log.
-func readKills(t *testing.T, tmuxLog string) []string {
-	t.Helper()
-	data, err := os.ReadFile(tmuxLog)
-	if err != nil {
-		t.Fatalf("read tmux log: %v", err)
-	}
-	var kills []string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.HasPrefix(line, "kill-session ") {
-			kills = append(kills, strings.TrimPrefix(line, "kill-session "))
+// kills returns the sessions the test added that are gone: the daemon killed
+// them.
+func (e *ghostTestEnv) kills() []string {
+	var gone []string
+	for _, name := range e.added {
+		if has, _ := e.tm.HasSession(name); !has {
+			gone = append(gone, name)
 		}
 	}
-	return kills
+	return gone
 }
 
 func TestKillDefaultPrefixGhosts_EmptyRegistry(t *testing.T) {
@@ -168,10 +81,12 @@ func TestKillDefaultPrefixGhosts_EmptyRegistry(t *testing.T) {
 
 	// Empty registry → allRigs is empty → bail immediately.
 	session.SetDefaultRegistry(session.NewPrefixRegistry())
+	// A ghost-shaped session exists, so an early return is what spares it.
+	env.addSessions(t, "gt-witness")
 
 	env.daemon.killDefaultPrefixGhosts()
 
-	kills := readKills(t, env.tmuxLog)
+	kills := env.kills()
 	if len(kills) > 0 {
 		t.Errorf("expected no kills with empty registry, got: %v", kills)
 	}
@@ -193,7 +108,7 @@ func TestKillDefaultPrefixGhosts_GTIsLegitimate(t *testing.T) {
 
 	env.daemon.killDefaultPrefixGhosts()
 
-	kills := readKills(t, env.tmuxLog)
+	kills := env.kills()
 	if len(kills) > 0 {
 		t.Errorf("expected no kills when gt is legitimate, got: %v", kills)
 	}
@@ -215,7 +130,7 @@ func TestKillDefaultPrefixGhosts_KillsGhostPatrolSessions(t *testing.T) {
 
 	env.daemon.killDefaultPrefixGhosts()
 
-	kills := readKills(t, env.tmuxLog)
+	kills := env.kills()
 	if len(kills) != 1 {
 		t.Fatalf("expected 1 kill, got %d: %v", len(kills), kills)
 	}
@@ -240,7 +155,7 @@ func TestKillDefaultPrefixGhosts_NoKillWhenGhostsAbsent(t *testing.T) {
 
 	env.daemon.killDefaultPrefixGhosts()
 
-	kills := readKills(t, env.tmuxLog)
+	kills := env.kills()
 	if len(kills) > 0 {
 		t.Errorf("expected no kills when ghost sessions don't exist, got: %v", kills)
 	}
@@ -265,7 +180,7 @@ func TestKillDefaultPrefixGhosts_PolecatDuplicate_Killed(t *testing.T) {
 
 	env.daemon.killDefaultPrefixGhosts()
 
-	kills := readKills(t, env.tmuxLog)
+	kills := env.kills()
 	found := false
 	for _, k := range kills {
 		if k == "gt-furiosa" {
@@ -300,7 +215,7 @@ func TestKillDefaultPrefixGhosts_PolecatSolo_NotKilled(t *testing.T) {
 
 	env.daemon.killDefaultPrefixGhosts()
 
-	kills := readKills(t, env.tmuxLog)
+	kills := env.kills()
 	for _, k := range kills {
 		if k == "gt-furiosa" {
 			t.Error("should NOT kill solo ghost polecat gt-furiosa (may have active work)")
@@ -333,7 +248,7 @@ func TestKillDefaultPrefixGhosts_PolecatSkippedWhenRigUsesDefaultPrefix(t *testi
 	env.daemon.killDefaultPrefixGhosts()
 
 	// gtIsLegitimate should cause early return — nothing killed.
-	kills := readKills(t, env.tmuxLog)
+	kills := env.kills()
 	if len(kills) > 0 {
 		t.Errorf("expected no kills when a rig owns gt prefix, got: %v", kills)
 	}

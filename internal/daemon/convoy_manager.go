@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -221,6 +220,11 @@ type ConvoyManager struct {
 	convoyStatus func(convoyID string) (string, bool)
 
 	gtPath string
+
+	// execCmd runs the manager's gt subprocesses (stranded scan, sling,
+	// convoy check); nil runs them for real. Tests set it to answer them in
+	// process.
+	execCmd cmdRunFunc
 
 	// started guards against double-call of Start() which would spawn duplicate goroutines.
 	started atomic.Bool
@@ -980,22 +984,15 @@ func (m *ConvoyManager) scan() {
 
 // findStranded runs `gt convoy stranded --json` and parses the output.
 func (m *ConvoyManager) findStranded() ([]strandedConvoyInfo, error) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "stranded", "--json")
-	cmd.Dir = m.townRoot
-	cmd.Env = bdReadOnlyRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s", util.FirstLine(stderr.String()))
+	stdout, stderr, err := m.runGt(bdReadOnlyRoutingEnv(m.townRoot), "convoy", "stranded", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("%s", util.FirstLine(string(stderr)))
 	}
 
 	var stranded []strandedConvoyInfo
-	if err := json.Unmarshal(stdout.Bytes(), &stranded); err != nil {
+	if err := json.Unmarshal(stdout, &stranded); err != nil {
 		// Include first line of raw output for debugging (e.g., non-JSON warnings on stdout)
-		raw := util.FirstLine(stdout.String())
+		raw := util.FirstLine(string(stdout))
 		return nil, fmt.Errorf("parsing stranded JSON: %w (raw: %q)", err, raw)
 	}
 
@@ -1161,17 +1158,11 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			slingArgs = append(slingArgs, "--formula="+formula)
 			m.logger("Convoy %s: feeding %s with formula %q recorded on convoy at sling time", c.ID, issueID, formula)
 		}
-		cmd := exec.CommandContext(m.ctx, m.gtPath, slingArgs...)
-		cmd.Dir = m.townRoot
-		cmd.Env = bdMutationRoutingEnv(m.townRoot)
-		util.SetProcessGroup(cmd)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-
-		runErr := cmd.Run()
+		_, stderrBytes, runErr := m.runGt(bdMutationRoutingEnv(m.townRoot), slingArgs...)
+		stderr := string(stderrBytes)
 		// Timing lines ride on stderr in both outcomes (gt-llg8): a failed sling
 		// is the one most worth attributing.
-		for _, l := range slingTimingLines(stderr.String()) {
+		for _, l := range slingTimingLines(stderr) {
 			m.logger("Convoy %s: sling %s: %s", c.ID, issueID, l)
 		}
 		if runErr != nil {
@@ -1185,11 +1176,11 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 			// A surviving-work refusal (the dead holder's work is on a
 			// branch, or cannot be verified; gt-vm5g4) is deferred the same
 			// way: it waits for an operator, it is not a failure.
-			if reason, ok := slingDeferralReason(stderr.String()); ok {
+			if reason, ok := slingDeferralReason(stderr); ok {
 				m.logger("Convoy %s: deferring %s: %s", c.ID, issueID, reason)
 				continue
 			}
-			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, slingErrorLine(stderr.String()))
+			m.logger("Convoy %s: sling %s failed: %s", c.ID, issueID, slingErrorLine(stderr))
 			continue
 		}
 		return // Successfully dispatched one issue
@@ -1611,15 +1602,8 @@ func deadHolderRefSuffixSHA(sha string) string {
 // tracked issues may all be closed. This handles the case where the event poll
 // missed the close events (e.g., daemon restart, Dolt latency).
 func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
-	cmd.Dir = m.townRoot
-	cmd.Env = bdMutationRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(stderr.String()))
+	if _, stderr, err := m.runGt(bdMutationRoutingEnv(m.townRoot), "convoy", "check", convoyID); err != nil {
+		m.logger("Convoy %s: completion check failed: %s", convoyID, util.FirstLine(string(stderr)))
 	}
 }
 
@@ -1627,16 +1611,19 @@ func (m *ConvoyManager) checkConvoyCompletion(convoyID string) {
 func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	m.logger("Convoy %s: auto-closing (empty)", convoyID)
 
-	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
-	cmd.Dir = m.townRoot
-	cmd.Env = bdMutationRoutingEnv(m.townRoot)
-	util.SetProcessGroup(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(stderr.String()))
+	if _, stderr, err := m.runGt(bdMutationRoutingEnv(m.townRoot), "convoy", "check", convoyID); err != nil {
+		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(string(stderr)))
 	}
+}
+
+// runGt runs gt with args in the town root, in its own process group under
+// the manager's context, through execCmd.
+func (m *ConvoyManager) runGt(env []string, args ...string) (stdout, stderr []byte, err error) {
+	cmd := exec.CommandContext(m.ctx, m.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init, args built internally
+	cmd.Dir = m.townRoot
+	cmd.Env = env
+	util.SetProcessGroup(cmd)
+	return runWith(m.execCmd, cmd)
 }
 
 // runStartupSweep runs one convoy check pass after a brief delay to catch

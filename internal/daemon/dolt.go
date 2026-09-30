@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -150,6 +149,21 @@ type DoltServerManager struct {
 	// must not reach it: under the hermetic harness that port is a Docker
 	// container's, held on the host by Docker Desktop (gt-p7zy0).
 	killImpostersFn func() error
+	// environFn replaces os.Environ as the environment the manager's dolt
+	// subprocesses inherit.
+	environFn func() []string
+	// execCmd runs the manager's dolt client commands (health probe, version,
+	// queries); nil runs them for real. The sql-server itself is started, not
+	// run to completion, and never goes through it.
+	execCmd cmdRunFunc
+}
+
+// environ is the environment the manager's dolt subprocesses start from.
+func (m *DoltServerManager) environ() []string {
+	if m.environFn != nil {
+		return m.environFn()
+	}
+	return os.Environ()
 }
 
 // killImposters evicts a non-town Dolt server from the configured port.
@@ -293,11 +307,12 @@ func (m *DoltServerManager) buildDoltSQLCmd(ctx context.Context, args ...string)
 	// Strip any inherited DOLT_CLI_PASSWORD from os.Environ() first so the
 	// single canonical value we append wins unambiguously — duplicate keys in
 	// cmd.Env leak credentials into local checks (tests grep cmd.Env directly).
-	env := filterEnvKey(os.Environ(), "DOLT_CLI_PASSWORD")
+	base := m.environ()
+	env := filterEnvKey(base, "DOLT_CLI_PASSWORD")
 	if m.config.Password != "" {
 		cmd.Env = append(env, "DOLT_CLI_PASSWORD="+m.config.Password)
 	} else if m.isRemote() {
-		if inherited, ok := os.LookupEnv("DOLT_CLI_PASSWORD"); ok {
+		if inherited, ok := lookupEnvIn(base, "DOLT_CLI_PASSWORD"); ok {
 			cmd.Env = append(env, "DOLT_CLI_PASSWORD="+inherited)
 		} else {
 			cmd.Env = append(env, "DOLT_CLI_PASSWORD=")
@@ -307,6 +322,17 @@ func (m *DoltServerManager) buildDoltSQLCmd(ctx context.Context, args ...string)
 	}
 
 	return cmd
+}
+
+// lookupEnvIn is os.LookupEnv over env: the last entry for key wins.
+func lookupEnvIn(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return env[i][len(prefix):], true
+		}
+	}
+	return "", false
 }
 
 // filterEnvKey returns env with all entries matching "<key>=..." removed.
@@ -872,7 +898,8 @@ func IsDoltUnhealthy(townRoot string) bool {
 // daemon's DoltServerConfig. Unlike CLI flags, config.yaml can set
 // read_timeout_millis and write_timeout_millis, which prevents CLOSE_WAIT
 // accumulation when clients disconnect without completing their SQL sessions.
-func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string) error {
+// lookupEnv reads the GT_DOLT_* switches that shape the file.
+func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string, lookupEnv func(string) (string, bool)) error {
 	hostLine := ""
 	if cfg.Host != "" {
 		hostLine = fmt.Sprintf("\n  host: %s", cfg.Host)
@@ -886,7 +913,7 @@ func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string) error {
 		}
 	}
 	systemVariablesBlock := "\nsystem_variables:\n  dolt_stats_enabled: 0\n"
-	if stats, ok := os.LookupEnv("GT_DOLT_STATS_ENABLED"); ok {
+	if stats, ok := lookupEnv("GT_DOLT_STATS_ENABLED"); ok {
 		if strings.EqualFold(stats, "omit") {
 			systemVariablesBlock = ""
 		} else if strings.TrimSpace(stats) != "" {
@@ -897,7 +924,7 @@ func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string) error {
 	// default. GT_DOLT_AUTO_GC=off (or false/0/disabled) disables it at the next
 	// Dolt restart without a source revert+rebuild — the runtime escape hatch.
 	autoGcBlock := "  auto_gc_behavior:\n    enable: true\n    archive_level: 1\n"
-	if v, ok := os.LookupEnv("GT_DOLT_AUTO_GC"); ok {
+	if v, ok := lookupEnv("GT_DOLT_AUTO_GC"); ok {
 		if vv := strings.ToLower(strings.TrimSpace(v)); vv == "off" || vv == "false" || vv == "0" || vv == "disabled" {
 			autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
 		}
@@ -965,7 +992,9 @@ func (m *DoltServerManager) startLocked() error {
 	// use --config instead. This prevents CLOSE_WAIT accumulation that occurs
 	// when Dolt uses its 8-hour default read/write timeouts. (gt-ch5)
 	configPath := filepath.Join(m.config.DataDir, "config.yaml")
-	if err := writeDaemonDoltConfig(m.config, configPath); err != nil {
+	env := m.environ()
+	lookupEnv := func(key string) (string, bool) { return lookupEnvIn(env, key) }
+	if err := writeDaemonDoltConfig(m.config, configPath, lookupEnv); err != nil {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)
 	}
 
@@ -1180,11 +1209,8 @@ func (m *DoltServerManager) checkHealthLocked() error {
 	start := time.Now()
 	cmd := m.buildDoltSQLCmd(ctx, "-q", "SELECT active_branch()")
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("health check failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	if _, stderr, err := runWith(m.execCmd, cmd); err != nil {
+		return fmt.Errorf("health check failed: %w (%s)", err, strings.TrimSpace(string(stderr)))
 	}
 
 	latency := time.Since(start)
@@ -1240,7 +1266,7 @@ func (m *DoltServerManager) checkConnectionCount() string {
 		"-q", "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST",
 	)
 
-	output, err := cmd.Output()
+	output, _, err := runWith(m.execCmd, cmd)
 	if err != nil {
 		return "" // non-fatal
 	}
@@ -1401,7 +1427,7 @@ func (m *DoltServerManager) checkWriteHealthLocked() error {
 	)
 	cmd := m.buildDoltSQLCmd(ctx, "-q", query)
 
-	output, err := cmd.CombinedOutput()
+	output, err := combinedOutputWith(m.execCmd, cmd)
 	if err != nil {
 		errMsg := strings.TrimSpace(string(output))
 		if isReadOnlyError(errMsg) {
@@ -1459,7 +1485,7 @@ func (m *DoltServerManager) checkDatabaseIdentityLocked() error {
 	issueCount := -1
 	query := fmt.Sprintf("SELECT COUNT(*) AS cnt FROM `%s`.`issues`", db)
 	cmd := m.buildDoltSQLCmd(ctx, "-r", "csv", "-q", query)
-	if output, queryErr := cmd.Output(); queryErr == nil {
+	if output, _, queryErr := runWith(m.execCmd, cmd); queryErr == nil {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(lines) >= 2 {
 			if c, err := strconv.Atoi(strings.TrimSpace(lines[len(lines)-1])); err == nil {
@@ -1474,7 +1500,7 @@ func (m *DoltServerManager) checkDatabaseIdentityLocked() error {
 	defer wispCancel()
 	wispQuery := fmt.Sprintf("SELECT COUNT(*) AS cnt FROM `%s`.`wisps`", db)
 	wispCmd := m.buildDoltSQLCmd(wispCtx, "-r", "csv", "-q", wispQuery)
-	if wispOutput, wispErr := wispCmd.Output(); wispErr == nil {
+	if wispOutput, _, wispErr := runWith(m.execCmd, wispCmd); wispErr == nil {
 		wispLines := strings.Split(strings.TrimSpace(string(wispOutput)), "\n")
 		if len(wispLines) >= 2 {
 			if c, err := strconv.Atoi(strings.TrimSpace(wispLines[len(wispLines)-1])); err == nil {
@@ -1593,7 +1619,7 @@ func (m *DoltServerManager) getDoltVersion() (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", "version")
 	setSysProcAttr(cmd)
-	output, err := cmd.Output()
+	output, _, err := runWith(m.execCmd, cmd)
 	if err != nil {
 		return "", err
 	}

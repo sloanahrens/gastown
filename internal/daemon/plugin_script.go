@@ -1,13 +1,13 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -177,20 +177,34 @@ func scriptTimeout(p *plugin.Plugin) time.Duration {
 	return defaultScriptTimeout
 }
 
+// scriptEnv carries what a script run inherits: the daemon's environment and
+// the tmux socket it resolved, read once by the caller so a test can hand in
+// its own.
+type scriptEnv struct {
+	environ    []string
+	tmuxSocket string
+}
+
+// daemonScriptEnv is the scriptEnv of this daemon process.
+func daemonScriptEnv() scriptEnv {
+	return scriptEnv{environ: os.Environ(), tmuxSocket: tmux.GetDefaultSocket()}
+}
+
 // runPluginScript executes <p.Path>/run.sh with cwd = the plugin directory
 // and a process group of its own, so a timeout kills the whole tree rather
 // than the `bash` wrapper alone (gt-6t43 is the orphan this avoids). The
-// environment is the daemon's plus the town identity a dog would have
-// carried: scripts read GT_TOWN_ROOT/GT_ROOT and default their Dolt
-// coordinates from the ambient GT_DOLT_* variables.
-func runPluginScript(ctx context.Context, p *plugin.Plugin, townRoot string, timeout time.Duration) scriptResult {
+// environment is env's plus the town identity a dog would have carried:
+// scripts read GT_TOWN_ROOT/GT_ROOT and default their Dolt coordinates from
+// the ambient GT_DOLT_* variables. The script runs through run (nil runs
+// bash for real).
+func runPluginScript(ctx context.Context, run cmdRunFunc, env scriptEnv, p *plugin.Plugin, townRoot string, timeout time.Duration) scriptResult {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "run.sh") //nolint:gosec // G204: fixed argv, plugin dir from the scanner
 	cmd.Dir = p.Path
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(slices.Clone(env.environ),
 		"GT_ROOT="+townRoot,
 		"GT_TOWN_ROOT="+townRoot,
 		"GT_PLUGIN_NAME="+p.Name,
@@ -201,27 +215,24 @@ func runPluginScript(ctx context.Context, p *plugin.Plugin, townRoot string, tim
 	// A dog runs inside the town's tmux server and reaches it through $TMUX;
 	// the daemon is outside any session, so a bare `tmux` in the script would
 	// ask the default server. Hand over the socket the daemon resolved.
-	if sock := tmux.GetDefaultSocket(); sock != "" {
-		cmd.Env = append(cmd.Env, "GT_TMUX_SOCKET="+sock)
+	if env.tmuxSocket != "" {
+		cmd.Env = append(cmd.Env, "GT_TMUX_SOCKET="+env.tmuxSocket)
 	}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
 	// SetProcessGroup puts the script in its own group AND installs a Cancel
 	// hook that SIGKILLs the negative pid, so a timeout takes bash and every
 	// child it backgrounded; CommandContext alone would signal only bash.
 	util.SetProcessGroup(cmd)
 	cmd.WaitDelay = 5 * time.Second
 
-	err := cmd.Run()
-	res := scriptResult{duration: time.Since(start), output: tail(out.String(), scriptOutputTail)}
+	out, err := combinedOutputWith(run, cmd)
+	res := scriptResult{duration: time.Since(start), output: tail(string(out), scriptOutputTail)}
 	if ctx.Err() == context.DeadlineExceeded {
 		res.timedOut = true
 		res.exitCode = -1
 		return res
 	}
 	if err != nil {
-		var exitErr *exec.ExitError
+		var exitErr interface{ ExitCode() int }
 		if errors.As(err, &exitErr) {
 			res.exitCode = exitErr.ExitCode()
 		} else {
@@ -314,7 +325,7 @@ func (d *Daemon) startScriptPlugin(p *plugin.Plugin, mgr dogManager, sm dogSessi
 	d.logger.Printf("Handler: running script plugin %s directly (timeout %s)", p.Name, timeout)
 	go func() {
 		defer d.scripts.finish(p.Name)
-		res := runPluginScript(d.ctx, p, townRoot, timeout)
+		res := runPluginScript(d.ctx, d.execCmd, daemonScriptEnv(), p, townRoot, timeout)
 		writeScriptLog(townRoot, p.Name, res)
 		completeScriptRun(p, res, scriptRunHooks{
 			record: func(rec plugin.PluginRunRecord) error {

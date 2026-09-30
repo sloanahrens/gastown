@@ -100,6 +100,24 @@ type Daemon struct {
 	// (see hostLoad); nil measures the real host.
 	hostLoadFn func() hostLoad
 
+	// execCmd runs the gt, bd and helper subprocesses the daemon builds (see
+	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
+	execCmd cmdRunFunc
+
+	// dogSessionsFn builds the dog session surface the handler drives over a
+	// dog manager; nil builds a *dog.SessionManager on the town's tmux (see
+	// dogSessions).
+	dogSessionsFn func(mgr *dog.Manager) dogSessions
+
+	// bootTriageExeFn resolves the gt binary mechanical Boot triage runs
+	// (see bootTriageExecutable); nil uses the daemon's own executable.
+	bootTriageExeFn func() (string, error)
+
+	// countCommitsFn replaces the dolt_log count scheduled_maintenance reads
+	// per database (compactorCountCommits), so tests drive the mode decision
+	// without a Dolt server. Nil queries the server.
+	countCommitsFn func(dbName string) (int, error)
+
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
 	// instead of each paying a bd subprocess - which, on a CPU-starved host,
@@ -662,35 +680,57 @@ func New(config *Config) (*Daemon, error) {
 	return d, nil
 }
 
+// envWriter is where the daemon publishes the Dolt endpoint for the
+// subprocesses it starts: the process environment in production (processEnv),
+// a map in tests.
+type envWriter interface {
+	Setenv(key, value string)
+	Unsetenv(key string)
+}
+
+// processEnv writes the daemon's own process environment.
+type processEnv struct{}
+
+func (processEnv) Setenv(key, value string) { _ = os.Setenv(key, value) }
+func (processEnv) Unsetenv(key string)      { _ = os.Unsetenv(key) }
+
 func applyDoltServerConfigEnv(config *DoltServerConfig) {
+	applyDoltServerConfigEnvTo(processEnv{}, config)
+}
+
+func applyDoltServerConfigEnvTo(env envWriter, config *DoltServerConfig) {
 	if config == nil {
 		return
 	}
 	if config.Port > 0 {
 		portStr := strconv.Itoa(config.Port)
-		os.Setenv("GT_DOLT_PORT", portStr)
-		os.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-		os.Setenv("BEADS_DOLT_PORT", portStr)
+		env.Setenv("GT_DOLT_PORT", portStr)
+		env.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
+		env.Setenv("BEADS_DOLT_PORT", portStr)
 	}
 	if config.Host != "" {
-		os.Setenv("GT_DOLT_HOST", config.Host)
-		os.Setenv("BEADS_DOLT_SERVER_HOST", config.Host)
+		env.Setenv("GT_DOLT_HOST", config.Host)
+		env.Setenv("BEADS_DOLT_SERVER_HOST", config.Host)
 	}
 }
 
 func applyConfiguredDoltHostEnv(townRoot string, logf func(format string, v ...interface{})) {
+	applyConfiguredDoltHostEnvTo(processEnv{}, townRoot, logf)
+}
+
+func applyConfiguredDoltHostEnvTo(env envWriter, townRoot string, logf func(format string, v ...interface{})) {
 	if host := agentconfig.ResolveConfiguredDoltHost(townRoot); host != "" {
-		os.Setenv("GT_DOLT_HOST", host)
-		os.Setenv("BEADS_DOLT_SERVER_HOST", host)
+		env.Setenv("GT_DOLT_HOST", host)
+		env.Setenv("BEADS_DOLT_SERVER_HOST", host)
 		if logf != nil {
 			logf("Set BEADS_DOLT_SERVER_HOST=%s from resolved Dolt host", host)
 		}
 		return
 	}
 	if _, _, ok := agentconfig.ManagedDoltEndpoint(townRoot); ok {
-		os.Unsetenv("GT_DOLT_HOST")
+		env.Unsetenv("GT_DOLT_HOST")
 	}
-	os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+	env.Unsetenv("BEADS_DOLT_SERVER_HOST")
 }
 
 func (d *Daemon) cleanupLegacySocketSessions() {
@@ -1892,7 +1932,7 @@ func (d *Daemon) ensureBootRunning() {
 		cmd := exec.Command(idleCheckBin)
 		cmd.Env = append(os.Environ(), fmt.Sprintf("PATH=%s:%s",
 			filepath.Join(d.config.TownRoot, "bin"), os.Getenv("PATH")))
-		if output, err := cmd.CombinedOutput(); err == nil {
+		if output, err := d.combinedOutput(cmd); err == nil {
 			// Exit 0 = idle, use degraded triage (zero tokens)
 			d.runDegradedBootTriage(b)
 			return
@@ -1980,7 +2020,7 @@ func (d *Daemon) runMechanicalBootTriage() {
 	// Stamp the attempt at start, so the daemon's record of Boot's last run
 	// does not depend on the triage finishing.
 	d.bootLastSpawned = time.Now()
-	exe, err := bootTriageExecutable()
+	exe, err := d.bootTriageExecutable()
 	if err != nil {
 		d.bootTriageInFlight.Store(false)
 		d.logger.Printf("Boot: cannot resolve gt binary for mechanical triage: %v; falling back to direct Deacon check", err)
@@ -2003,7 +2043,7 @@ func (d *Daemon) runMechanicalBootTriage() {
 		cmd.Dir = filepath.Join(townRoot, "deacon")
 		cmd.Env = append(os.Environ(), "GT_ROOT="+townRoot, "GT_TOWN_ROOT="+townRoot, "GT_ROLE=deacon/boot", "BD_ACTOR=boot")
 		util.SetProcessGroup(cmd) // its Cancel hook kills the whole group on timeout
-		out, err := cmd.CombinedOutput()
+		out, err := d.combinedOutput(cmd)
 		summary := strings.TrimSpace(string(out))
 		if len(summary) > 400 {
 			summary = summary[len(summary)-400:]
@@ -2017,8 +2057,14 @@ func (d *Daemon) runMechanicalBootTriage() {
 }
 
 // bootTriageExecutable resolves the gt binary that runs `boot triage` in
-// mechanical mode. A variable so tests can point it at a stub.
-var bootTriageExecutable = os.Executable
+// mechanical mode: the daemon's own executable, or bootTriageExeFn's answer
+// when a test set one.
+func (d *Daemon) bootTriageExecutable() (string, error) {
+	if d.bootTriageExeFn != nil {
+		return d.bootTriageExeFn()
+	}
+	return os.Executable()
+}
 
 // bootUsesMechanicalTriage reports whether Boot triage runs in-process
 // (operational.daemon.boot_mode unset or "mechanical") rather than as a
@@ -2204,7 +2250,7 @@ func (d *Daemon) notifySlack(channel, priority, message string) {
 	//nolint:gosec // G204: args are constructed internally
 	cmd := exec.Command(notifyBin, "--channel", channel, "--priority", priority, message)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PATH=%s:%s", filepath.Join(d.config.TownRoot, "bin"), os.Getenv("PATH")))
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := d.combinedOutput(cmd); err != nil {
 		d.logger.Printf("Stuck-agent-dog: gt-notify failed: %v (output: %s)", err, string(output))
 	}
 }
@@ -3308,7 +3354,7 @@ func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
 	cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, bdReadOnlyRoutingEnv(d.config.TownRoot), "show", beadID, "--json")
 	setSysProcAttr(cmd.Cmd)
 
-	output, err := cmd.Output()
+	output, err := d.bdOutput(cmd)
 	if err != nil {
 		return false, false
 	}
@@ -3343,7 +3389,7 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
 		}
 		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
-		output, err := cmd.Output()
+		output, err := d.bdOutput(cmd)
 		if err != nil {
 			continue
 		}
@@ -3371,7 +3417,7 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, time.
 			env = bdReadOnlyPinnedEnv(beads.ResolveBeadsDir(rigDir))
 		}
 		cmd := beads.CommandWithPath(d.bdPath, d.config.TownRoot, env, args...)
-		output, err := cmd.Output()
+		output, err := d.bdOutput(cmd)
 		if err != nil {
 			lastErr = fmt.Errorf("bd list --status=%s: %w", status, err)
 			continue
@@ -3633,7 +3679,7 @@ func (d *Daemon) dispatchQueuedWork() {
 	setSysProcAttr(cmd)
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(d.config.TownRoot, ".beads")), "GT_DAEMON=1")
-	out, err := cmd.CombinedOutput()
+	out, err := d.combinedOutput(cmd)
 	if ctx.Err() == context.DeadlineExceeded {
 		d.logger.Printf("Scheduler dispatch timed out after 5m")
 	} else if err != nil {

@@ -317,7 +317,7 @@ func (d *Daemon) runScheduledMaintenance() {
 	// the escalation should name all of them, not the alphabetically first.
 	var targets []maintenanceTarget
 	for _, dbName := range databases {
-		commitCount, err := d.compactorCountCommits(dbName)
+		commitCount, err := d.maintenanceCountCommits(dbName)
 		if err != nil {
 			d.logger.Printf("scheduled_maintenance: %s: error counting commits: %v", dbName, err)
 			continue
@@ -347,6 +347,15 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 
 	d.lastMaintenanceRun = now
+}
+
+// maintenanceCountCommits counts dbName's commits through countCommitsFn when
+// a test set one, and on the Dolt server otherwise.
+func (d *Daemon) maintenanceCountCommits(dbName string) (int, error) {
+	if d.countCommitsFn != nil {
+		return d.countCommitsFn(dbName)
+	}
+	return d.compactorCountCommits(dbName)
 }
 
 // maintenanceFlatten runs the destructive maintenance path: `gt maintain

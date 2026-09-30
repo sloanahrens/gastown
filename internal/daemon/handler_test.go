@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -315,9 +313,6 @@ func TestReapIdleDogs_SkipsRecentlyActiveDogs(t *testing.T) {
 
 func TestReapIdleDogs_RemovesLongIdleDogsWhenPoolOversized(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows: requires tmux")
-	}
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -384,9 +379,6 @@ func TestReapIdleDogs_DoesNotRemoveWhenPoolAtMaxSize(t *testing.T) {
 
 func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows: requires tmux")
-	}
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -414,9 +406,6 @@ func TestReapIdleDogs_StopsRemovingAtMaxPoolSize(t *testing.T) {
 
 func TestReapIdleDogs_MixedStates(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("skipping on Windows: requires tmux")
-	}
 	townRoot := t.TempDir()
 	d := testHandlerDaemon(t, townRoot)
 
@@ -855,156 +844,13 @@ func TestCleanupStuckDogs_SkipsIdleDogs(t *testing.T) {
 	}
 }
 
-// --- gt-da2x: hermetic coverage of the real read/close bodies ---------------
+// --- gt-da2x: coverage of the real read/close bodies -------------------------
 //
 // The tests above stub wispTreeFn/closeStaleWispFn, which is what makes the
 // dispatch loop testable — but a seam that replaces the body leaves the body
-// itself unverified. These drive the production functions against a fake bd
-// so the code that actually runs in the daemon is what the assertions cover.
-
-// writeFakeBdForHandler installs a mock `bd` in binDir that appends its argv
-// and its bd read/write mode env to logPath before running body. Logging the
-// mode is the point: gt-da2x's first finding was that the wisp reads and
-// closes reintroduced gh#3596 connection churn by running without the daemon's
-// routing env, so the tests assert on the mode rather than trusting it.
-func writeFakeBdForHandler(t *testing.T, binDir, logPath, body string) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd is a shell script; skipping on Windows")
-	}
-	script := "#!/bin/sh\n" +
-		"printf '%s|BD_DOLT_AUTO_COMMIT=%s|BD_READONLY=%s\\n' \"$*\" \"$BD_DOLT_AUTO_COMMIT\" \"$BD_READONLY\" >> \"" + logPath + "\"\n" +
-		body
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatalf("writing fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-// fakeBdCallsForHandler returns the argv and bd mode of each recorded call.
-func fakeBdCallsForHandler(t *testing.T, logPath string) []string {
-	t.Helper()
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		t.Fatalf("reading fake bd log: %v", err)
-	}
-	var calls []string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line != "" {
-			calls = append(calls, line)
-		}
-	}
-	return calls
-}
-
-const fakeWispTreeScriptBody = `if [ "$1" = "show" ]; then
-  case "$2" in
-    wisp-alpha)
-      echo '{"wisp-alpha":[{"id":"wisp-alpha.1","status":"open"},{"id":"wisp-alpha.2","status":"open"}],"schema_version":1}'
-      exit 0
-      ;;
-  esac
-  echo '{"schema_version":1}'
-  exit 0
-fi
-exit 0
-`
-
-// TestWispTree_RealBodyReadsChildrenReadOnly covers wispTree's body: it must
-// find ephemeral wisp steps (via `bd show --children`, which sees the
-// wisp_dependencies table that `bd children` misses) and it must do so with
-// BD_DOLT_AUTO_COMMIT=off. That read runs once per idle dog per dispatch tick;
-// with auto-commit on it opens a connection attempting a no-op commit every
-// time (gh#3596).
-func TestWispTree_RealBodyReadsChildrenReadOnly(t *testing.T) {
-	townRoot := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	writeFakeBdForHandler(t, t.TempDir(), logPath, fakeWispTreeScriptBody)
-
-	tree, err := wispTree(townRoot, "wisp-alpha")
-	if err != nil {
-		t.Fatalf("wispTree: %v", err)
-	}
-	want := []beads.WispStep{
-		{ID: "wisp-alpha"},
-		{ID: "wisp-alpha.1", Status: "open"},
-		{ID: "wisp-alpha.2", Status: "open"},
-	}
-	if len(tree) != len(want) {
-		t.Fatalf("wispTree() = %+v, want %+v", tree, want)
-	}
-	for i := range want {
-		if tree[i] != want[i] {
-			t.Fatalf("wispTree()[%d] = %+v, want %+v", i, tree[i], want[i])
-		}
-	}
-
-	calls := fakeBdCallsForHandler(t, logPath)
-	if len(calls) == 0 {
-		t.Fatal("fake bd was never invoked")
-	}
-	for _, call := range calls {
-		if !strings.HasPrefix(call, "show wisp-alpha") || !strings.Contains(call, "--children --json") {
-			t.Errorf("call = %q, want a `bd show <id> --children --json` read", call)
-		}
-		if !strings.Contains(call, "BD_DOLT_AUTO_COMMIT=off") || !strings.Contains(call, "BD_READONLY=true") {
-			t.Errorf("call = %q, want the daemon's read-only routing env (BD_DOLT_AUTO_COMMIT=off, BD_READONLY=true)", call)
-		}
-	}
-}
-
-// TestCloseStaleWisp_RealBodyClosesDeepestFirstWithMutationEnv covers
-// closeStaleWisp's body: children are closed before the root (a parent closed
-// while its child survives strands the child — gt-7lx3), already-closed steps
-// are skipped, and the write runs with auto-commit on so the closes are not
-// stranded in a daemon subprocess context.
-func TestCloseStaleWisp_RealBodyClosesDeepestFirstWithMutationEnv(t *testing.T) {
-	townRoot := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	writeFakeBdForHandler(t, t.TempDir(), logPath, "if [ \"$1\" = \"close\" ]; then\n  exit 0\nfi\nexit 0\n")
-
-	tree := []beads.WispStep{
-		{ID: "wisp-alpha"},
-		{ID: "wisp-alpha.1", Status: "open"},
-		{ID: "wisp-alpha.2", Status: "closed"},
-		{ID: "wisp-alpha.1.1", Status: "open"},
-	}
-	closed, err := closeStaleWisp(townRoot, "wisp-alpha", tree)
-	if err != nil {
-		t.Fatalf("closeStaleWisp: %v", err)
-	}
-	if closed != 3 {
-		t.Errorf("closeStaleWisp() closed = %d, want 3 (the root and the two open steps)", closed)
-	}
-
-	calls := fakeBdCallsForHandler(t, logPath)
-	want := "close wisp-alpha.1.1 wisp-alpha.1 wisp-alpha --force --reason " + wispAbandonedReason +
-		"|BD_DOLT_AUTO_COMMIT=on|BD_READONLY="
-	if len(calls) != 1 || calls[0] != want {
-		t.Errorf("fake bd calls = %q, want exactly [%q]", calls, want)
-	}
-}
-
-// TestCloseStaleWisp_RealBodySurfacesCloseFailure pins the return path the
-// handler logs on: a failed bd close must not be reported as a successful reap.
-func TestCloseStaleWisp_RealBodySurfacesCloseFailure(t *testing.T) {
-	townRoot := t.TempDir()
-	writeFakeBdForHandler(t, t.TempDir(), filepath.Join(t.TempDir(), "bd.log"), "echo 'dolt unreachable' >&2\nexit 1\n")
-
-	closed, err := closeStaleWisp(townRoot, "wisp-alpha", []beads.WispStep{{ID: "wisp-alpha"}})
-	if err == nil {
-		t.Fatal("closeStaleWisp() error = nil, want an error when bd close fails")
-	}
-	if closed != 0 {
-		t.Errorf("closeStaleWisp() closed = %d, want 0 on failure", closed)
-	}
-	if !strings.Contains(err.Error(), "dolt unreachable") {
-		t.Errorf("closeStaleWisp() error = %v, want it to carry bd's stderr", err)
-	}
-}
+// itself unverified. dogHasHookedFormulaWithID's body runs here on a fakeCLI
+// bd; wispTree and closeStaleWisp run bd inside internal/beads, so their
+// bodies are pinned in handler_bd_integration_test.go.
 
 // TestIsWispStale covers the guard that decides whether to reap a hooked wisp.
 // The timestamp cases are the regression that motivated the shared
@@ -1102,22 +948,12 @@ func TestIsWispStale(t *testing.T) {
 // and pick out the attached-formula wisp (not any hooked bead) so the caller
 // gets an ID it can actually reap.
 func TestDogHasHookedFormulaWithID_RealBody(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "bd.log")
-	// The response goes through a quoted heredoc, not echo: sh's echo
-	// interprets \n, which would turn the JSON escape in the description into
-	// a literal newline and make the payload unparseable.
-	writeFakeBdForHandler(t, t.TempDir(), logPath, `
-if [ "$1" = "query" ]; then
-  cat <<'EOF'
-[{"id":"hq-task","status":"hooked","description":"unrelated"},{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n","created_at":"2026-09-18T11:31:07.289Z"}]
-EOF
-  exit 0
-fi
-echo '[]'
-exit 0
-`)
+	t.Parallel()
+	bd := newFakeCLI(cliBySub(map[string]cliReply{
+		"query": {stdout: `[{"id":"hq-task","status":"hooked","description":"unrelated"},{"id":"hq-wisp-admuv","status":"hooked","description":"attached_formula: mol-dog-reaper\n","created_at":"2026-09-18T11:31:07.289Z"}]`},
+	}))
 
-	result, err := dogHasHookedFormulaWithID(t.TempDir(), t.TempDir(), "alpha")
+	result, err := dogHasHookedFormulaWithIDRun(bd.run, t.TempDir(), t.TempDir(), "alpha")
 	if err != nil {
 		t.Fatalf("dogHasHookedFormulaWithID: %v", err)
 	}
@@ -1131,12 +967,12 @@ exit 0
 		t.Errorf("wispCreated = %q, want the bead's created_at", result.wispCreated)
 	}
 
-	calls := fakeBdCallsForHandler(t, logPath)
-	if len(calls) != 1 {
-		t.Fatalf("fake bd calls = %q, want exactly one query", calls)
+	calls := bd.recorded()
+	if len(calls) != 1 || len(calls[0].args) == 0 || calls[0].args[0] != "query" {
+		t.Fatalf("fake bd calls = %+v, want exactly one query", calls)
 	}
-	if !strings.Contains(calls[0], "BD_DOLT_AUTO_COMMIT=off") || !strings.Contains(calls[0], "BD_READONLY=true") {
-		t.Errorf("call = %q, want the daemon's read-only routing env", calls[0])
+	if got, ro := calls[0].getenv("BD_DOLT_AUTO_COMMIT"), calls[0].getenv("BD_READONLY"); got != "off" || ro != "true" {
+		t.Errorf("query ran with BD_DOLT_AUTO_COMMIT=%q BD_READONLY=%q, want the daemon's read-only routing env (off, true)", got, ro)
 	}
 }
 
@@ -1144,49 +980,16 @@ exit 0
 // hook holds only non-formula work is reported as not hooked, so the caller
 // does not try to reap someone's unrelated hooked bead.
 func TestDogHasHookedFormulaWithID_RealBodyNoFormulaWisp(t *testing.T) {
-	writeFakeBdForHandler(t, t.TempDir(), filepath.Join(t.TempDir(), "bd.log"), `
-if [ "$1" = "query" ]; then
-  echo '[{"id":"hq-task","status":"hooked","description":"unrelated"}]'
-  exit 0
-fi
-echo '[]'
-exit 0
-`)
+	t.Parallel()
+	bd := newFakeCLI(cliBySub(map[string]cliReply{
+		"query": {stdout: `[{"id":"hq-task","status":"hooked","description":"unrelated"}]`},
+	}))
 
-	result, err := dogHasHookedFormulaWithID(t.TempDir(), t.TempDir(), "alpha")
+	result, err := dogHasHookedFormulaWithIDRun(bd.run, t.TempDir(), t.TempDir(), "alpha")
 	if err != nil {
 		t.Fatalf("dogHasHookedFormulaWithID: %v", err)
 	}
 	if result.hasHooked {
 		t.Errorf("hasHooked = true (wispID %q), want false: no bead carried attached_formula", result.wispID)
-	}
-}
-
-// TestWispTreeTimeoutIsBounded guards the context the daemon hands down: a
-// wedged bd (one that never exits) must be bounded by
-// dogHookedFormulaCheckTimeout rather than stalling the dispatch cycle.
-func TestWispTreeTimeoutIsBounded(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake bd is a shell script; skipping on Windows")
-	}
-	binDir := t.TempDir()
-	// A bd that hangs forever: sleep is on PATH and blocks past the timeout.
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nsleep 60\n"), 0o755); err != nil {
-		t.Fatalf("writing hanging fake bd: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	// The bound is what is under test, not the production 5s value: a hung bd
-	// must be killed at the budget, whatever the budget is.
-	const budget = 200 * time.Millisecond
-	start := time.Now()
-	_, err := wispTreeWithin(t.TempDir(), "wisp-x", budget)
-	if err == nil {
-		t.Fatal("wispTreeWithin() error = nil, want a timeout error from a hung bd")
-	}
-	// Generous against load: the hung bd sleeps 60s, so anything short of that
-	// proves the budget, not the child, ended the call.
-	if elapsed := time.Since(start); elapsed > 30*time.Second {
-		t.Errorf("wispTreeWithin() took %v, want it bounded near its %v budget", elapsed, budget)
 	}
 }

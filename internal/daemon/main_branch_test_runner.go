@@ -1265,7 +1265,7 @@ func (d *Daemon) runCommandOnWorktree(ctx context.Context, rigName, commit, work
 
 	startHost := d.hostLoad()
 	start := time.Now()
-	output, err := cmd.CombinedOutput()
+	output, err := d.combinedOutput(cmd)
 	elapsed := time.Since(start)
 	endHost := d.hostLoad()
 	if err == nil {

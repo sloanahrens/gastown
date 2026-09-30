@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // PressureResult holds the outcome of a pressure check.
@@ -93,8 +92,7 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 // countAgentSessions counts active tmux sessions that belong to Gas Town agents.
 // Uses the town's tmux socket so it only counts sessions for this town.
 func (d *Daemon) countAgentSessions() int {
-	t := tmux.NewTmux()
-	sessions, err := t.ListSessions()
+	sessions, err := d.tmux.ListSessions()
 	if err != nil {
 		return 0
 	}
