@@ -53,14 +53,6 @@ func TestBackfillFormulaDefaultVarsRealFormulas(t *testing.T) {
 			},
 		},
 		{
-			// A declared default that is not the empty string.
-			name:    "mol-digest-generate keeps its non-empty default",
-			formula: "mol-digest-generate",
-			wantVars: []string{
-				"feature=t", "issue=gt-abc", "period=daily",
-			},
-		},
-		{
 			// Declares no vars of its own: the defaults come from the parent
 			// through extends, so the backfill has to resolve the chain.
 			name:    "mol-polecat-work-monorepo-tdd inherits its parent's vars",
@@ -74,11 +66,12 @@ func TestBackfillFormulaDefaultVarsRealFormulas(t *testing.T) {
 		{
 			// A required var the formula never interpolates must not be treated
 			// as missing: bd does not demand it, so failing here would block a
-			// bond that works today. (target/reason/warrant_id are {braced} prose
-			// substitution in this formula, not {{placeholders}}.)
-			name:       "mol-shutdown-dance does not demand its un-interpolated required vars",
-			formula:    "mol-shutdown-dance",
-			wantAbsent: []string{"target=", "reason=", "warrant_id="},
+			// bond that works today. (original_mr is prose-only in this formula,
+			// not a {{placeholder}}.)
+			name:       "mol-polecat-conflict-resolve does not demand its un-interpolated required var",
+			formula:    "mol-polecat-conflict-resolve",
+			extraVars:  []string{"task=gt-abc", "branch=main"},
+			wantAbsent: []string{"original_mr="},
 		},
 	}
 

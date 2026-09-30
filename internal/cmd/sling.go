@@ -97,7 +97,7 @@ Stdin Mode (for shell-quoting-safe multi-line content):
 
 Formula Slinging:
   gt sling mol-release mayor/           # Cook + wisp + attach + nudge
-  gt sling towers-of-hanoi --var disks=3
+  gt sling code-review --var pr=42
 
 Formula-on-Bead (--on flag):
   gt sling mol-review --on gt-abc       # Apply formula to existing work
