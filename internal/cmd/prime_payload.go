@@ -347,7 +347,7 @@ var primeContinuationMode bool
 
 // primeStepVars returns the formula vars for `gt prime --step`: the hooked
 // bead's attachment vars when that is the formula being read.
-func primeStepVars(ctx RoleContext, hookedBead *beads.Issue, formulaName string) []string {
+func primeStepVars(hookedBead *beads.Issue, formulaName string) []string {
 	if hookedBead != nil {
 		if att := beads.ParseAttachmentFields(hookedBead); att != nil && att.AttachedFormula == formulaName {
 			return attachmentFormulaVars(att)
@@ -358,7 +358,7 @@ func primeStepVars(ctx RoleContext, hookedBead *beads.Issue, formulaName string)
 
 // primeStepFormulaName resolves which formula `gt prime --step N` reads:
 // an explicit --formula, else the hooked bead's attached formula.
-func primeStepFormulaName(ctx RoleContext, hookedBead *beads.Issue, explicit string) string {
+func primeStepFormulaName(hookedBead *beads.Issue, explicit string) string {
 	if explicit != "" {
 		return explicit
 	}

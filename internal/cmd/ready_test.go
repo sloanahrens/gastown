@@ -82,7 +82,7 @@ func TestGetFormulaNames_NonexistentDir(t *testing.T) {
 func TestFilterFormulaScaffolds(t *testing.T) {
 	t.Parallel()
 	formulaNames := map[string]bool{
-		constants.MolDogReaper:  true,
+		constants.MolDogReaper: true,
 		constants.MolDogDoctor: true,
 	}
 

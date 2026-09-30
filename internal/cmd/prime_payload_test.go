@@ -573,17 +573,16 @@ func TestPrimeStepFormulaName(t *testing.T) {
 	hooked := &beads.Issue{ID: "gt-1", Description: "attached_formula: mol-polecat-work\n"}
 	cases := []struct {
 		name     string
-		ctx      RoleContext
 		bead     *beads.Issue
 		explicit string
 		want     string
 	}{
-		{"explicit wins", RoleContext{Role: RolePolecat}, hooked, "mol-custom", "mol-custom"},
-		{"hooked attachment", RoleContext{Role: RolePolecat}, hooked, "", "mol-polecat-work"},
-		{"nothing", RoleContext{Role: RolePolecat}, nil, "", ""},
+		{"explicit wins", hooked, "mol-custom", "mol-custom"},
+		{"hooked attachment", hooked, "", "mol-polecat-work"},
+		{"nothing", nil, "", ""},
 	}
 	for _, c := range cases {
-		if got := primeStepFormulaName(c.ctx, c.bead, c.explicit); got != c.want {
+		if got := primeStepFormulaName(c.bead, c.explicit); got != c.want {
 			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}
 	}

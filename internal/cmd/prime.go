@@ -284,7 +284,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		handoff:    func() string { return captureOutput(func() { outputHandoffContent(ctx) }) },
 		checkpoint: func() string { return captureOutput(func() { outputCheckpointContext(ctx) }) },
 		memories:   func() string { return captureOutput(func() { runPrimeMemoryInject(ctx, cwd) }) },
-		mail:       func() string { return captureOutput(func() { runPrimeMailInject(ctx, cwd) }) },
+		mail:       func() string { return captureOutput(func() { runPrimeMailInject(cwd) }) },
 		startup: func() string {
 			if primeContinuationMode {
 				return "\n---\n\n**Continue your current task.** Context was compacted; your role text is in the system prompt and the sections above are current.\n"
@@ -313,11 +313,11 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 // performs none of the session side effects of a normal prime.
 func runPrimeStep(ctx RoleContext) error {
 	hookedBead, _ := findAgentWorkWithAttempts(ctx, 1)
-	name := primeStepFormulaName(ctx, hookedBead, primeFormula)
+	name := primeStepFormulaName(hookedBead, primeFormula)
 	if name == "" {
 		return fmt.Errorf("no formula to read: pass --formula <name>")
 	}
-	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, primeStepVars(ctx, hookedBead, name))
+	f, varMap, err := resolveFormulaForRendering(name, ctx.TownRoot, ctx.Rig, primeStepVars(hookedBead, name))
 	if err != nil {
 		return err
 	}
@@ -671,7 +671,7 @@ func runPrimeExternalTools(ctx RoleContext, cwd string) {
 
 func (p primeTools) externalTools(ctx RoleContext, cwd string) {
 	p.memoryInject(ctx, cwd)
-	p.mailInject(ctx, cwd)
+	p.mailInject(cwd)
 }
 
 // runPrimeMemoryInject renders the memory index section (skipped in dry-run and
@@ -692,12 +692,12 @@ func (p primeTools) memoryInject(ctx RoleContext, cwd string) {
 	p.memoryIndex(cwd)
 }
 
-// runPrimeMailInject renders pending mail (skipped in dry-run and for patrol roles).
-func runPrimeMailInject(ctx RoleContext, cwd string) {
-	primeTools{}.mailInject(ctx, cwd)
+// runPrimeMailInject renders pending mail (skipped in dry-run).
+func runPrimeMailInject(cwd string) {
+	primeTools{}.mailInject(cwd)
 }
 
-func (p primeTools) mailInject(ctx RoleContext, cwd string) {
+func (p primeTools) mailInject(cwd string) {
 	if primeDryRun {
 		explain(true, "gt mail check --inject: skipped in dry-run mode")
 		return
