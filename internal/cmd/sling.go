@@ -1440,17 +1440,58 @@ func tryAcquireSlingBeadLock(townRoot, beadID string) (func(), error) {
 		return nil, fmt.Errorf("creating sling lock dir: %w", err)
 	}
 
+	sweepStaleSlingFlocks(lockDir)
+
 	safeBeadID := strings.NewReplacer("/", "_", ":", "_").Replace(beadID)
 	lockPath := filepath.Join(lockDir, safeBeadID+".flock")
-	release, locked, err := lock.FlockTryAcquire(lockPath)
+	unlock, err := lock.FlockTryAcquireStable(lockPath)
+	if errors.Is(err, lock.ErrFlockHeld) {
+		return nil, fmt.Errorf("bead %s is already being slung; retry after the current assignment completes", beadID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("acquiring sling lock for bead %s: %w", beadID, err)
 	}
-	if !locked {
-		return nil, fmt.Errorf("bead %s is already being slung; retry after the current assignment completes", beadID)
-	}
 
-	return release, nil
+	return unlinkThenUnlock(lockPath, unlock), nil
+}
+
+// unlinkThenUnlock wraps a sling lock's unlock so the sentinel file goes with
+// the lock. The flock is the lock and the kernel drops it on exit, but nothing
+// removed the zero-byte file, so one accumulated per bead and per assignee ever
+// slung (gt-10u8). Unlinking while still holding the flock is safe only because
+// every acquirer of these paths uses lock.FlockTryAcquireStable: a waiter whose
+// open landed before this unlink locks the nameless inode, sees it has no name,
+// and reopens rather than share the lock with a fresh file at the same path
+// (gt-xtfnq).
+func unlinkThenUnlock(path string, unlock func()) func() {
+	return func() {
+		_ = os.Remove(path)
+		unlock()
+	}
+}
+
+// sweepStaleSlingFlocks removes the sentinels a sling killed before its release
+// ran left behind, so a crash does not leak the file the release path cleans
+// up. It removes only files it locks itself, with lock.FlockTryAcquireStable,
+// so a live holder is skipped and a concurrent acquirer that already opened the
+// file reopens instead of locking the inode this removes. Best-effort: an entry
+// that cannot be probed is left for the next sling and never blocks this one.
+func sweepStaleSlingFlocks(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".flock") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		unlock, err := lock.FlockTryAcquireStable(path)
+		if err != nil {
+			continue
+		}
+		unlinkThenUnlock(path, unlock)()
+	}
 }
 
 // tryAcquireSlingAssigneeLock acquires a per-assignee file lock to serialize concurrent
@@ -1466,6 +1507,8 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 		return nil, fmt.Errorf("creating sling lock dir: %w", err)
 	}
 
+	sweepStaleSlingFlocks(lockDir)
+
 	safeAgent := strings.NewReplacer("/", "_", ":", "_").Replace(targetAgent)
 	lockPath := filepath.Join(lockDir, "assignee_"+safeAgent+".flock")
 
@@ -1474,12 +1517,12 @@ func tryAcquireSlingAssigneeLock(townRoot, targetAgent string) (func(), error) {
 	const maxAttempts = 20
 	const retryInterval = 500 // milliseconds
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		release, locked, err := lock.FlockTryAcquire(lockPath)
-		if err != nil {
-			return nil, fmt.Errorf("acquiring assignee sling lock for %s: %w", targetAgent, err)
+		unlock, err := lock.FlockTryAcquireStable(lockPath)
+		if err == nil {
+			return unlinkThenUnlock(lockPath, unlock), nil
 		}
-		if locked {
-			return release, nil
+		if !errors.Is(err, lock.ErrFlockHeld) {
+			return nil, fmt.Errorf("acquiring assignee sling lock for %s: %w", targetAgent, err)
 		}
 		if attempt < maxAttempts {
 			time.Sleep(time.Duration(retryInterval) * time.Millisecond)
