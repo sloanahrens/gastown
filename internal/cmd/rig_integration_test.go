@@ -1010,7 +1010,7 @@ func TestRigAddRejectsInvalidNames(t *testing.T) {
 }
 
 // TestRigAddCreatesAgentBeads verifies that gt rig add creates
-// witness and refinery agent beads via the manager's initAgentBeads.
+// the witness agent bead via the manager's initAgentBeads.
 func TestRigAddCreatesAgentBeads(t *testing.T) {
 	requireIsolatedDoltServer(t)
 	townRoot := setupTestTown(t)
@@ -1026,7 +1026,7 @@ func TestRigAddCreatesAgentBeads(t *testing.T) {
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
 
-	// AddRig internally calls initAgentBeads which creates witness and refinery beads
+	// AddRig internally calls initAgentBeads which creates the witness bead
 	newRig, err := mgr.AddRig(rig.AddRigOptions{
 		Name:        "agentbeadtest",
 		GitURL:      gitURL,
@@ -1038,14 +1038,12 @@ func TestRigAddCreatesAgentBeads(t *testing.T) {
 
 	// Expected bead IDs that initAgentBeads should create
 	witnessID := beads.WitnessBeadIDWithPrefix(newRig.Config.Prefix, "agentbeadtest")
-	refineryID := beads.RefineryBeadIDWithPrefix(newRig.Config.Prefix, "agentbeadtest")
 
 	expectedIDs := []struct {
 		id   string
 		desc string
 	}{
 		{witnessID, "witness agent bead"},
-		{refineryID, "refinery agent bead"},
 	}
 
 	rigBeads := beads.NewWithBeadsDir(newRig.Path, beads.ResolveBeadsDir(newRig.Path))
@@ -1067,11 +1065,6 @@ func TestAgentBeadIDs(t *testing.T) {
 			"WitnessBeadIDWithPrefix",
 			func() string { return beads.WitnessBeadIDWithPrefix("ab", "myrig") },
 			"ab-myrig-witness",
-		},
-		{
-			"RefineryBeadIDWithPrefix",
-			func() string { return beads.RefineryBeadIDWithPrefix("ab", "myrig") },
-			"ab-myrig-refinery",
 		},
 		{
 			"RigBeadIDWithPrefix",
