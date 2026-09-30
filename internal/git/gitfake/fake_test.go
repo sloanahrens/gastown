@@ -31,3 +31,8 @@ func TestFakeInspection(t *testing.T) {
 		t.Error("unknown ids and repositories answer nil and empty")
 	}
 }
+
+func TestFakeWorktreeContract(t *testing.T) {
+	t.Parallel()
+	RunWorktreeContract(t, func(t *testing.T) WorktreeEnv { return New() })
+}

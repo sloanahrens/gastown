@@ -49,6 +49,8 @@ type repo struct {
 	has       map[string]bool
 	main      *worktree
 	worktrees map[string]*worktree
+	config    map[string]string // local config; worktrees share it
+	stashes   []stash           // newest first, like git stash list
 }
 
 // worktree is a checkout: its own HEAD (for a repository's main checkout,
@@ -90,6 +92,9 @@ func (f *Fake) InitBare(t testing.TB, dir string) {
 	dir = clean(dir)
 	f.repos[dir] = &repo{path: dir, bare: true, refs: map[string]string{}, head: "refs/heads/main",
 		remotes: map[string]string{}, has: map[string]bool{}, worktrees: map[string]*worktree{}}
+	if err := layoutRepo(f.repos[dir]); err != nil {
+		t.Fatalf("gitfake: InitBare: %v", err)
+	}
 }
 
 // Commit makes a commit in the repository at dir on branch: its parent is
@@ -160,6 +165,10 @@ func (f *Fake) Clone(t testing.TB, src, dest string) {
 		r.refs[s.head] = id
 	}
 	f.repos[dest] = r
+	cloned(r, s)
+	if err := layoutRepo(r); err != nil {
+		t.Fatalf("gitfake: Clone: %v", err)
+	}
 	if err := materialize(dest, f.treeOf(r.refs[r.head])); err != nil {
 		t.Fatalf("gitfake: Clone: %v", err)
 	}
