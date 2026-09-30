@@ -395,8 +395,17 @@ func closeUntilNoProgress(b beads.Client, ids []string) error {
 			if len(closed) == 0 {
 				return err
 			}
-			// The previous pass reported pending as refused.
-			return &beads.PartialCloseError{Closed: closed, NotClosed: pending, Err: errors.Join(beads.ErrCloseRefused, err)}
+			// The previous pass reported pending as refused — but only a
+			// refusal may carry that label. A later pass can also end on a
+			// transient failure (the re-read that checks a batch died), and
+			// closeStepsThenRoot reads errors.Is(err, beads.ErrCloseRefused)
+			// as "leave the root open"; mislabeling that error strands a
+			// molecule whose steps all closed (gt-22hdp.36).
+			cause := err
+			if errors.Is(err, beads.ErrCloseRefused) {
+				cause = errors.Join(beads.ErrCloseRefused, err)
+			}
+			return &beads.PartialCloseError{Closed: closed, NotClosed: pending, Err: cause}
 		}
 		closed = append(closed, pe.Closed...)
 		pending = pe.NotClosed

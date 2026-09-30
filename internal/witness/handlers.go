@@ -3847,9 +3847,17 @@ func forceCloseOpenDescendantsViaCLI(bd *BdCli, workDir, parentID string) (int, 
 	return 0, errors.Join(verifyErr, runErr)
 }
 
-// openDescendantIDsViaCLI lists the descendants of parentID that are not
-// closed, grandchildren first.
-func openDescendantIDsViaCLI(bd *BdCli, workDir, parentID string) ([]string, error) {
+// descendantChildrenViaCLI reads parentID's direct children with
+// `bd list --parent=<id> --json`.
+//
+// Kept over `bd show <id> --children`: this read walks parent-child edges in
+// both dependency tables and the dotted-ID fallback, so it finds the 8 step
+// wisps a bonded `--ephemeral` molecule hangs off its root by parent-child.
+// Neither read finds the wisp root under the molecule's base bead, because
+// `bd mol bond` links those two with a `blocks` edge — which is why
+// `bd list --parent=<base bead>` answers [] (gt-22hdp.36, measured against
+// bd 1.2.2 in TestIntegrationOrphanCleanupClosesBondedEphemeralMolecule).
+func descendantChildrenViaCLI(bd *BdCli, workDir, parentID string) ([]*beads.Issue, error) {
 	output, err := bd.Exec(workDir, "list", "--parent="+parentID, "--json")
 	if err != nil {
 		return nil, fmt.Errorf("listing children of %s: %w", parentID, err)
@@ -3857,12 +3865,19 @@ func openDescendantIDsViaCLI(bd *BdCli, workDir, parentID string) ([]string, err
 	if output == "" {
 		return nil, nil
 	}
-	var children []struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
+	var children []*beads.Issue
 	if err := json.Unmarshal([]byte(output), &children); err != nil {
 		return nil, fmt.Errorf("parsing children of %s: %w", parentID, err)
+	}
+	return children, nil
+}
+
+// openDescendantIDsViaCLI lists the descendants of parentID that are not
+// closed, grandchildren first.
+func openDescendantIDsViaCLI(bd *BdCli, workDir, parentID string) ([]string, error) {
+	children, err := descendantChildrenViaCLI(bd, workDir, parentID)
+	if err != nil {
+		return nil, err
 	}
 	var open []string
 	for _, child := range children {
@@ -3871,7 +3886,7 @@ func openDescendantIDsViaCLI(bd *BdCli, workDir, parentID string) ([]string, err
 			return nil, err
 		}
 		open = append(open, below...)
-		if child.Status != "closed" {
+		if child.Status != string(beads.StatusClosed) {
 			open = append(open, child.ID)
 		}
 	}
@@ -3905,8 +3920,17 @@ func closeViaCLIUntilNoProgress(bd *BdCli, workDir string, ids []string) error {
 			if len(closed) == 0 {
 				return err
 			}
-			// The previous pass reported pending as refused.
-			return &beads.PartialCloseError{Closed: closed, NotClosed: pending, Err: errors.Join(beads.ErrCloseRefused, err)}
+			// The previous pass reported pending as refused — but only a
+			// refusal may carry that label. A later pass can also end on a
+			// transient failure (the re-read that checks a batch died), and
+			// callers branch on errors.Is(err, beads.ErrCloseRefused) to
+			// decide whether to leave a molecule's root open; mislabeling
+			// that error strands a root whose steps all closed (gt-22hdp.36).
+			cause := err
+			if errors.Is(err, beads.ErrCloseRefused) {
+				cause = errors.Join(beads.ErrCloseRefused, err)
+			}
+			return &beads.PartialCloseError{Closed: closed, NotClosed: pending, Err: cause}
 		}
 		closed = append(closed, pe.Closed...)
 		pending = pe.NotClosed
@@ -3950,21 +3974,9 @@ func verifyClosedViaCLI(bd *BdCli, workDir string, ids []string) error {
 // closeDescendantsViaCLI recursively closes descendant issues of a parent
 // using bd CLI commands. Returns count of issues closed and any error.
 func closeDescendantsViaCLI(bd *BdCli, workDir, parentID string) (int, error) {
-	// List children of this parent
-	output, err := bd.Exec(workDir, "list", "--parent="+parentID, "--json")
+	children, err := descendantChildrenViaCLI(bd, workDir, parentID)
 	if err != nil {
-		return 0, fmt.Errorf("listing children of %s: %w", parentID, err)
-	}
-	if output == "" {
-		return 0, nil
-	}
-
-	var children []struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal([]byte(output), &children); err != nil {
-		return 0, fmt.Errorf("parsing children of %s: %w", parentID, err)
+		return 0, err
 	}
 
 	if len(children) == 0 {
@@ -3985,7 +3997,7 @@ func closeDescendantsViaCLI(bd *BdCli, workDir, parentID string) (int, error) {
 	// Close open direct children
 	var idsToClose []string
 	for _, child := range children {
-		if child.Status != "closed" {
+		if child.Status != string(beads.StatusClosed) {
 			idsToClose = append(idsToClose, child.ID)
 		}
 	}
