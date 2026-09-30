@@ -652,7 +652,8 @@ func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Dura
 		fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
 		agents = nil
 	}
-	activeWork, activeWorkErr := listActivePolecatWorkByName(bd, r.Name)
+	hooks := polecatHookBeads(polecatNames, func(name string) string { return polecatBeadIDForRig(r, r.Name, name) }, agents)
+	activeWork, activeWorkErr := listActivePolecatWorkByName(bd, r.Name, hooks)
 	if activeWorkErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to list active polecat work in %s: %v\n", r.Name, activeWorkErr)
 		activeWork = nil

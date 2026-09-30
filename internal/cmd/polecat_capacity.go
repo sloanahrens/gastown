@@ -217,14 +217,14 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 		if err != nil {
 			return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
 		}
-		activeWork, err := listActivePolecatWorkByName(rigBeads, rigName)
+		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		agentBeadID := func(name string) string { return beads.PolecatBeadIDWithPrefix(prefix, rigName, name) }
+		activeWork, err := listActivePolecatWorkByName(rigBeads, rigName, polecatHookBeads(polecatNames, agentBeadID, agents))
 		if err != nil {
 			return snapshot, fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
 		}
-		prefix := beads.GetPrefixForRig(townRoot, rigName)
 		for _, name := range polecatNames {
-			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
-			issue := agents[agentID]
+			issue := agents[agentBeadID(name)]
 			fields := parsePolecatAgentFields(issue)
 			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, activeWork[name], sessions)
 		}
